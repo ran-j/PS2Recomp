@@ -1,0 +1,13 @@
+/bin/
+/intermediate/
+.vs/
+out
+.vscode
+build
+
+*.exe
+*.ilk
+*.exp
+*.log
+*.tlog
+*.ipch
