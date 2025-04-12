@@ -63,7 +63,7 @@ PS2Recomp uses TOML configuration files to specify:
 
 #### Example configuration:
 ```toml
-toml[general]
+[general]
 input = "path/to/game.elf"
 output = "output/"
 single_file_output = false
