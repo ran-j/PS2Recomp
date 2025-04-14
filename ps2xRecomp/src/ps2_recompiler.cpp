@@ -289,7 +289,8 @@ namespace ps2recomp
         std::stringstream ss;
 
         ss << "#include \"ps2_runtime_macros.h\"\n";
-        ss << "#include \"ps2_runtime.h\"\n\n";
+        ss << "#include \"ps2_runtime.h\"\n";
+        ss << "#include \"ps2_recompiled_functions.h\"\n\n"; 
 
         ss << "// STUB FUNCTION: " << function.name << "\n";
         ss << "// Address: 0x" << std::hex << function.start << " - 0x" << function.end << std::dec << "\n";
