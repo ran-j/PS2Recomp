@@ -309,7 +309,7 @@ namespace ps2recomp
                 function.name == "sprintf" || function.name == "snprintf")
             {
                 ss << "    // Format string is in $a0 (r4), args start at $a1 (r5)\n";
-                ss << "    #ifdef PS2_RECOMP_DEBUG\n";
+                ss << "    #ifdef _DEBUG\n";
                 ss << "    printf(\"Stub called: " << function.name << " with format at 0x%08X\\n\", ctx->r[4]);\n";
                 ss << "    #endif\n";
                 ss << "    // Return success (number of characters, but we'll just say 1)\n";
@@ -320,7 +320,7 @@ namespace ps2recomp
             {
                 ss << "    // Memory allocation - Would call the runtime's allocation system\n";
                 ss << "    uint32_t size = ctx->r[4]; // Size is in $a0\n";
-                ss << "    #ifdef PS2_RECOMP_DEBUG\n";
+                ss << "    #ifdef _DEBUG\n";
                 ss << "    printf(\"Stub called: " << function.name << " size=%u\\n\", size);\n";
                 ss << "    #endif\n";
                 ss << "    // In a real implementation, call runtime->allocateMemory(size)\n";
@@ -330,7 +330,7 @@ namespace ps2recomp
             {
                 ss << "    // Free memory - Would call the runtime's free system\n";
                 ss << "    uint32_t ptr = ctx->r[4]; // Pointer is in $a0\n";
-                ss << "    #ifdef PS2_RECOMP_DEBUG\n";
+                ss << "    #ifdef _DEBUG\n";
                 ss << "    printf(\"Stub called: free(0x%08X)\\n\", ptr);\n";
                 ss << "    #endif\n";
                 ss << "    // In a real implementation, call runtime->freeMemory(ptr)\n";
@@ -341,7 +341,7 @@ namespace ps2recomp
                 ss << "    uint32_t dst = ctx->r[4]; // Destination in $a0\n";
                 ss << "    uint32_t src = ctx->r[5]; // Source in $a1\n";
                 ss << "    uint32_t size = ctx->r[6]; // Size in $a2\n";
-                ss << "    #ifdef PS2_RECOMP_DEBUG\n";
+                ss << "    #ifdef _DEBUG\n";
                 ss << "    printf(\"Stub called: " << function.name << "(dst=0x%08X, src=0x%08X, size=%u)\\n\", dst, src, size);\n";
                 ss << "    #endif\n";
                 ss << "    // Only copy if within valid memory range\n";
@@ -356,7 +356,7 @@ namespace ps2recomp
                 ss << "    uint32_t dst = ctx->r[4]; // Destination in $a0\n";
                 ss << "    uint8_t value = (uint8_t)ctx->r[5]; // Value in $a1\n";
                 ss << "    uint32_t size = ctx->r[6]; // Size in $a2\n";
-                ss << "    #ifdef PS2_RECOMP_DEBUG\n";
+                ss << "    #ifdef _DEBUG\n";
                 ss << "    printf(\"Stub called: memset(dst=0x%08X, value=%u, size=%u)\\n\", dst, value, size);\n";
                 ss << "    #endif\n";
                 ss << "    // Only set if within valid memory range\n";
@@ -369,7 +369,7 @@ namespace ps2recomp
             {
                 // Generic stub for unknown functions
                 ss << "    // Default stub implementation\n";
-                ss << "    #ifdef PS2_RECOMP_DEBUG\n";
+                ss << "    #ifdef _DEBUG\n";
                 ss << "    printf(\"Stub function called: " << function.name << " at PC=0x%08X\\n\", ctx->pc);\n";
                 ss << "    #endif\n";
                 ss << "    // Default return value (0)\n";
