@@ -72,17 +72,11 @@ namespace ps2recomp
             size_t processedCount = 0;
             for (auto &function : m_functions)
             {
+                std::cout << "processing function: " << function.name << std::endl;
+
                 if (shouldSkipFunction(function.name))
                 {
                     std::cout << "Skipping function: " << function.name << std::endl;
-                    continue;
-                }
-
-                if (shouldStubFunction(function.name))
-                {
-                    std::cout << "Stubbing function: " << function.name << std::endl;
-                    function.isStub = true;
-                    // TODO: Generate stub implementation
                     continue;
                 }
 
@@ -129,12 +123,15 @@ namespace ps2recomp
     {
         try
         {
+            generateFunctionHeader();
+
             if (m_config.singleFileOutput)
             {
                 std::stringstream combinedOutput;
 
                 combinedOutput << "#include \"ps2_runtime_macros.h\"\n";
-                combinedOutput << "#include \"ps2_runtime.h\"\n\n";
+                combinedOutput << "#include \"ps2_runtime.h\"\n";
+                combinedOutput << "#include \"ps2_recompiled_functions.h\"\n\n";
 
                 for (const auto &function : m_functions)
                 {
@@ -190,6 +187,41 @@ namespace ps2recomp
         catch (const std::exception &e)
         {
             std::cerr << "Error during output generation: " << e.what() << std::endl;
+        }
+    }
+
+    bool PS2Recompiler::generateFunctionHeader()
+    {
+        try
+        {
+            std::stringstream ss;
+ 
+            ss << "#ifndef PS2_RECOMPILED_FUNCTIONS_H\n";
+            ss << "#define PS2_RECOMPILED_FUNCTIONS_H\n\n";
+ 
+            ss << "#include <cstdint>\n\n";
+            ss << "struct R5900Context;\n\n";
+  
+            for (const auto &function : m_functions)
+            {
+                if (function.isRecompiled)
+                {
+                    ss << "void " << function.name << "(uint8_t* rdram, R5900Context* ctx);\n";
+                }
+            }
+
+            ss << "\n#endif // PS2_RECOMPILED_FUNCTIONS_H\n";
+ 
+            fs::path headerPath = fs::path(m_config.outputPath) / "ps2_recompiled_functions.h";
+            writeToFile(headerPath.string(), ss.str());
+
+            std::cout << "Generated function header file: " << headerPath << std::endl;
+            return true;
+        }
+        catch (const std::exception &e)
+        {
+            std::cerr << "Error generating function header: " << e.what() << std::endl;
+            return false;
         }
     }
 

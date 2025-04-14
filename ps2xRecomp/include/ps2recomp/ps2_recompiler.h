@@ -46,6 +46,7 @@ namespace ps2recomp
         bool shouldSkipFunction(const std::string &name) const;
         std::string generateRuntimeHeader();
         std::string generateStubFunction(const Function& function);
+		bool generateFunctionHeader();
         bool writeToFile(const std::string &path, const std::string &content);
         std::filesystem::path getOutputPath(const Function &function) const;
     };
