@@ -391,13 +391,16 @@ namespace ps2recomp
         return ss.str();
     }
 
-    std::string CodeGenerator::generateFunction(const Function &function, const std::vector<Instruction> &instructions)
+    std::string CodeGenerator::generateFunction(const Function &function, const std::vector<Instruction> &instructions, const bool &useHeaders)
     {
         std::stringstream ss;
 
-        ss << "#include \"ps2_runtime_macros.h\"\n";
-        ss << "#include \"ps2_runtime.h\"\n";
-        ss << "#include \"ps2_recompiled_functions.h\"\n\n";
+        if (useHeaders)
+        {
+            ss << "#include \"ps2_runtime_macros.h\"\n";
+            ss << "#include \"ps2_runtime.h\"\n";
+            ss << "#include \"ps2_recompiled_functions.h\"\n\n";
+        }
 
         ss << "// Function: " << function.name << "\n";
         ss << "// Address: 0x" << std::hex << function.start << " - 0x" << function.end << std::dec << "\n";

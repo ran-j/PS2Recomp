@@ -14,7 +14,7 @@ namespace ps2recomp
         CodeGenerator(const std::vector<Symbol> &symbols);
         ~CodeGenerator();
 
-        std::string generateFunction(const Function &function, const std::vector<Instruction> &instructions);
+        std::string generateFunction(const Function &function, const std::vector<Instruction> &instructions, const bool &useHeaders);
         std::string generateMacroHeader();
         std::string handleBranchDelaySlots(const Instruction &branchInst, const Instruction &delaySlot);
 
@@ -24,8 +24,8 @@ namespace ps2recomp
         std::string translateInstruction(const Instruction &inst);
         std::string translateMMIInstruction(const Instruction &inst);
         std::string translateVUInstruction(const Instruction &inst);
-        std::string translateFPUInstruction(const Instruction& inst);
-        std::string translateCOP0Instruction(const Instruction& inst);
+        std::string translateFPUInstruction(const Instruction &inst);
+        std::string translateCOP0Instruction(const Instruction &inst);
 
         std::string generateJumpTableSwitch(const Instruction &inst, uint32_t tableAddress,
                                             const std::vector<JumpTableEntry> &entries);

@@ -123,15 +123,12 @@ namespace ps2recomp
     {
         try
         {
-            generateFunctionHeader();
-
             if (m_config.singleFileOutput)
             {
                 std::stringstream combinedOutput;
 
                 combinedOutput << "#include \"ps2_runtime_macros.h\"\n";
-                combinedOutput << "#include \"ps2_runtime.h\"\n";
-                combinedOutput << "#include \"ps2_recompiled_functions.h\"\n\n";
+                combinedOutput << "#include \"ps2_runtime.h\"\n\n";
 
                 for (const auto &function : m_functions)
                 {
@@ -147,7 +144,7 @@ namespace ps2recomp
                     else
                     {
                         const auto &instructions = m_decodedFunctions[function.start];
-                        std::string code = m_codeGenerator->generateFunction(function, instructions);
+                        std::string code = m_codeGenerator->generateFunction(function, instructions, false);
                         combinedOutput << code << "\n\n";
                     }
                 }
@@ -158,6 +155,7 @@ namespace ps2recomp
             }
             else
             {
+                generateFunctionHeader();
                 for (const auto &function : m_functions)
                 {
                     if (!function.isRecompiled || function.isStub)
@@ -173,7 +171,7 @@ namespace ps2recomp
                     else
                     {
                         const auto &instructions = m_decodedFunctions[function.start];
-                        code = m_codeGenerator->generateFunction(function, instructions);
+                        code = m_codeGenerator->generateFunction(function, instructions, true);
                     }
 
                     fs::path outputPath = getOutputPath(function);
