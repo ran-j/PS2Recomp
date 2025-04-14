@@ -85,8 +85,7 @@ namespace ps2recomp
                     std::cout << "Stubbing function: " << function.name << std::endl;
                     function.isStub = true;
                     function.isRecompiled = true; // we're generating code for it
-
-                    // Generate stub implementation and store it
+ 
                     std::string stubCode = generateStubFunction(function);
                     m_generatedStubs[function.start] = stubCode;
 
@@ -193,13 +192,13 @@ namespace ps2recomp
         try
         {
             std::stringstream ss;
- 
+
             ss << "#ifndef PS2_RECOMPILED_FUNCTIONS_H\n";
             ss << "#define PS2_RECOMPILED_FUNCTIONS_H\n\n";
- 
+
             ss << "#include <cstdint>\n\n";
             ss << "struct R5900Context;\n\n";
-  
+
             for (const auto &function : m_functions)
             {
                 if (function.isRecompiled)
@@ -209,7 +208,7 @@ namespace ps2recomp
             }
 
             ss << "\n#endif // PS2_RECOMPILED_FUNCTIONS_H\n";
- 
+
             fs::path headerPath = fs::path(m_config.outputPath) / "ps2_recompiled_functions.h";
             writeToFile(headerPath.string(), ss.str());
 
@@ -288,7 +287,7 @@ namespace ps2recomp
 
         ss << "#include \"ps2_runtime_macros.h\"\n";
         ss << "#include \"ps2_runtime.h\"\n";
-        ss << "#include \"ps2_recompiled_functions.h\"\n\n"; 
+        ss << "#include \"ps2_recompiled_functions.h\"\n\n";
 
         ss << "// STUB FUNCTION: " << function.name << "\n";
         ss << "// Address: 0x" << std::hex << function.start << " - 0x" << function.end << std::dec << "\n";
@@ -302,80 +301,91 @@ namespace ps2recomp
         }
         else
         {
-            // Default stub implementation based on common functions
-            if (function.name == "printf" || function.name == "fprintf" ||
-                function.name == "sprintf" || function.name == "snprintf")
+            const std::string &name = function.name;
+
+            if (name == "printf" || name == "fprintf" || name == "sprintf" ||
+                name == "snprintf" || name == "vprintf" || name == "vfprintf" ||
+                name == "vsprintf" || name == "vsnprintf")
             {
-                ss << "    // Format string is in $a0 (r4), args start at $a1 (r5)\n";
-                ss << "    #ifdef _DEBUG\n";
-                ss << "    printf(\"Stub called: " << function.name << " with format at 0x%08X\\n\", ctx->r[4]);\n";
-                ss << "    #endif\n";
-                ss << "    // Return success (number of characters, but we'll just say 1)\n";
-                ss << "    ctx->r[2] = 1;\n";
+                ss << generatePrintfStub(name);
             }
-            else if (function.name == "malloc" || function.name == "calloc" ||
-                     function.name == "realloc" || function.name == "memalign")
+            else if (name == "fopen" || name == "fclose" || name == "fread" ||
+                     name == "fwrite" || name == "fseek" || name == "ftell" ||
+                     name == "rewind" || name == "fflush" || name == "ferror" ||
+                     name == "clearerr" || name == "feof" || name == "open" ||
+                     name == "close" || name == "read" || name == "write" ||
+                     name == "lseek" || name == "stat" || name == "fstat")
             {
-                ss << "    // Memory allocation - Would call the runtime's allocation system\n";
-                ss << "    uint32_t size = ctx->r[4]; // Size is in $a0\n";
-                ss << "    #ifdef _DEBUG\n";
-                ss << "    printf(\"Stub called: " << function.name << " size=%u\\n\", size);\n";
-                ss << "    #endif\n";
-                ss << "    // In a real implementation, call runtime->allocateMemory(size)\n";
-                ss << "    ctx->r[2] = 0; // Return NULL for now - replace with actual allocation in real implementation\n";
+                ss << generateFileIOStub(name);
             }
-            else if (function.name == "free")
+            else if (name == "strlen" || name == "strcpy" || name == "strncpy" ||
+                     name == "strcat" || name == "strncat" || name == "strcmp" ||
+                     name == "strncmp" || name == "strchr" || name == "strrchr" ||
+                     name == "strstr" || name == "strtok" || name == "strtok_r")
             {
-                ss << "    // Free memory - Would call the runtime's free system\n";
-                ss << "    uint32_t ptr = ctx->r[4]; // Pointer is in $a0\n";
-                ss << "    #ifdef _DEBUG\n";
-                ss << "    printf(\"Stub called: free(0x%08X)\\n\", ptr);\n";
-                ss << "    #endif\n";
-                ss << "    // In a real implementation, call runtime->freeMemory(ptr)\n";
+                ss << generateStringStub(name);
             }
-            else if (function.name == "memcpy" || function.name == "memmove")
+            else if (name == "sin" || name == "cos" || name == "tan" ||
+                     name == "asin" || name == "acos" || name == "atan" ||
+                     name == "atan2" || name == "sinh" || name == "cosh" ||
+                     name == "tanh" || name == "exp" || name == "log" ||
+                     name == "log10" || name == "pow" || name == "sqrt" ||
+                     name == "ceil" || name == "floor" || name == "fabs" ||
+                     name == "fmod")
             {
-                ss << "    // Memory copy\n";
-                ss << "    uint32_t dst = ctx->r[4]; // Destination in $a0\n";
-                ss << "    uint32_t src = ctx->r[5]; // Source in $a1\n";
-                ss << "    uint32_t size = ctx->r[6]; // Size in $a2\n";
-                ss << "    #ifdef _DEBUG\n";
-                ss << "    printf(\"Stub called: " << function.name << "(dst=0x%08X, src=0x%08X, size=%u)\\n\", dst, src, size);\n";
-                ss << "    #endif\n";
-                ss << "    // Only copy if within valid memory range\n";
-                ss << "    if (dst < 0x2000000 && src < 0x2000000 && dst + size < 0x2000000 && src + size < 0x2000000) {\n";
-                ss << "        memcpy(rdram + dst, rdram + src, size);\n";
-                ss << "    }\n";
-                ss << "    ctx->r[2] = dst; // Return destination pointer\n";
+                ss << generateMathStub(name);
             }
-            else if (function.name == "memset")
+            else if (name == "time" || name == "clock" || name == "difftime" ||
+                     name == "mktime" || name == "localtime" || name == "gmtime" ||
+                     name == "asctime" || name == "ctime" || name == "strftime")
             {
-                ss << "    // Memory set\n";
-                ss << "    uint32_t dst = ctx->r[4]; // Destination in $a0\n";
-                ss << "    uint8_t value = (uint8_t)ctx->r[5]; // Value in $a1\n";
-                ss << "    uint32_t size = ctx->r[6]; // Size in $a2\n";
-                ss << "    #ifdef _DEBUG\n";
-                ss << "    printf(\"Stub called: memset(dst=0x%08X, value=%u, size=%u)\\n\", dst, value, size);\n";
-                ss << "    #endif\n";
-                ss << "    // Only set if within valid memory range\n";
-                ss << "    if (dst < 0x2000000 && dst + size < 0x2000000) {\n";
-                ss << "        memset(rdram + dst, value, size);\n";
-                ss << "    }\n";
-                ss << "    ctx->r[2] = dst; // Return destination pointer\n";
+                ss << generateTimeStub(name);
+            }
+            else if (name == "socket" || name == "bind" || name == "listen" ||
+                     name == "accept" || name == "connect" || name == "send" ||
+                     name == "recv" || name == "sendto" || name == "recvfrom" ||
+                     name == "gethostbyname" || name == "gethostbyaddr")
+            {
+                ss << generateNetworkStub(name);
+            }
+            else if (name == "pthread_create" || name == "pthread_join" ||
+                     name == "pthread_exit" || name == "pthread_mutex_init" ||
+                     name == "pthread_mutex_lock" || name == "pthread_mutex_unlock" ||
+                     name == "pthread_cond_init" || name == "pthread_cond_wait" ||
+                     name == "pthread_cond_signal")
+            {
+                ss << generateThreadStub(name);
             }
             else
             {
-                // Generic stub for unknown functions
-                ss << "    // Default stub implementation\n";
-                ss << "    #ifdef _DEBUG\n";
-                ss << "    printf(\"Stub function called: " << function.name << " at PC=0x%08X\\n\", ctx->pc);\n";
-                ss << "    #endif\n";
-                ss << "    // Default return value (0)\n";
-                ss << "    ctx->r[2] = 0;\n";
+                ss << generateDefaultStub(name);
             }
         }
 
         ss << "}\n";
+
+        return ss.str();
+    }
+
+    std::string PS2Recompiler::generatePrintfStub(const std::string &name)
+    {
+        std::stringstream ss;
+
+        ss << "    // Format string is in $a0 (r4), args start at $a1 (r5)\n";
+        ss << "    #ifdef _DEBUG\n";
+
+        if (name == "fprintf" || name == "vfprintf")
+        {
+            ss << "    printf(\"Stub called: " << name << " with file handle=0x%08X, format at 0x%08X\\n\", ctx->r[4], ctx->r[5]);\n";
+        }
+        else
+        {
+            ss << "    printf(\"Stub called: " << name << " with format at 0x%08X\\n\", ctx->r[4]);\n";
+        }
+
+        ss << "    #endif\n";
+        ss << "    // Return success (number of characters, but we'll just say 1)\n";
+        ss << "    ctx->r[2] = 1;\n";
 
         return ss.str();
     }
@@ -415,5 +425,342 @@ namespace ps2recomp
         outputPath /= safeName + ".cpp";
 
         return outputPath;
+    }
+
+    std::string PS2Recompiler::generateMemoryCopyStub(const std::string &name)
+    {
+        std::stringstream ss;
+
+        ss << "    // Memory copy\n";
+
+        if (name == "bcopy")
+        {
+            ss << "    uint32_t src = ctx->r[4]; // Source in $a0\n";
+            ss << "    uint32_t dst = ctx->r[5]; // Destination in $a1\n";
+        }
+        else
+        {
+            ss << "    uint32_t dst = ctx->r[4]; // Destination in $a0\n";
+            ss << "    uint32_t src = ctx->r[5]; // Source in $a1\n";
+        }
+
+        ss << "    uint32_t size = ctx->r[6]; // Size in $a2\n";
+        ss << "    #ifdef _DEBUG\n";
+        ss << "    printf(\"Stub called: " << name << "(dst=0x%08X, src=0x%08X, size=%u)\\n\", "
+           << (name == "bcopy" ? "dst, src" : "dst, src") << ", size);\n";
+        ss << "    #endif\n";
+        ss << "    // Only copy if within valid memory range\n";
+        ss << "    if (dst < 0x2000000 && src < 0x2000000 && dst + size < 0x2000000 && src + size < 0x2000000) {\n";
+
+        if (name == "memmove")
+        {
+            ss << "        memmove(rdram + dst, rdram + src, size);\n";
+        }
+        else
+        {
+            ss << "        memcpy(rdram + dst, rdram + src, size);\n";
+        }
+
+        ss << "    }\n";
+
+        if (name == "bcopy")
+        {
+            ss << "    // bcopy doesn't return a value\n";
+        }
+        else
+        {
+            ss << "    ctx->r[2] = dst; // Return destination pointer\n";
+        }
+
+        return ss.str();
+    }
+
+    std::string PS2Recompiler::generateFileIOStub(const std::string &name)
+    {
+        std::stringstream ss;
+
+        ss << "    // File I/O operation: " << name << "\n";
+        ss << "    #ifdef _DEBUG\n";
+
+        if (name == "fopen" || name == "open")
+        {
+            ss << "    uint32_t path_ptr = ctx->r[4]; // Path pointer in $a0\n";
+            ss << "    uint32_t mode_ptr = ctx->r[5]; // Mode pointer in $a1\n";
+            ss << "    printf(\"Stub called: " << name << "(path=0x%08X, mode=0x%08X)\\n\", path_ptr, mode_ptr);\n";
+            ss << "    #endif\n";
+            ss << "    // Return a fake file handle\n";
+            ss << "    ctx->r[2] = 0x12345678; // Fake file handle\n";
+        }
+        else if (name == "fclose" || name == "close")
+        {
+            ss << "    uint32_t handle = ctx->r[4]; // File handle in $a0\n";
+            ss << "    printf(\"Stub called: " << name << "(handle=0x%08X)\\n\", handle);\n";
+            ss << "    #endif\n";
+            ss << "    // Return success\n";
+            ss << "    ctx->r[2] = 0;\n";
+        }
+        else if (name == "fread" || name == "read")
+        {
+            ss << "    uint32_t buffer = ctx->r[4]; // Buffer pointer in $a0\n";
+            ss << "    uint32_t size = ctx->r[5]; // Size in $a1\n";
+            ss << "    uint32_t count = ctx->r[6]; // Count in $a2 (for fread)\n";
+            ss << "    uint32_t handle = ctx->r[7]; // File handle in $a3\n";
+            ss << "    printf(\"Stub called: " << name << "(buffer=0x%08X, size=%u, count=%u, handle=0x%08X)\\n\", buffer, size, count, handle);\n";
+            ss << "    #endif\n";
+            ss << "    // Return number of bytes/items read\n";
+            ss << "    ctx->r[2] = " << (name == "fread" ? "count" : "size") << "; // Pretend we read everything\n";
+        }
+        else if (name == "fwrite" || name == "write")
+        {
+            ss << "    uint32_t buffer = ctx->r[4]; // Buffer pointer in $a0\n";
+            ss << "    uint32_t size = ctx->r[5]; // Size in $a1\n";
+            ss << "    uint32_t count = ctx->r[6]; // Count in $a2 (for fwrite)\n";
+            ss << "    uint32_t handle = ctx->r[7]; // File handle in $a3\n";
+            ss << "    printf(\"Stub called: " << name << "(buffer=0x%08X, size=%u, count=%u, handle=0x%08X)\\n\", buffer, size, count, handle);\n";
+            ss << "    #endif\n";
+            ss << "    // Return number of bytes/items written\n";
+            ss << "    ctx->r[2] = " << (name == "fwrite" ? "count" : "size") << "; // Pretend we wrote everything\n";
+        }
+        else
+        {
+            ss << "    printf(\"Stub called: " << name << "()\\n\");\n";
+            ss << "    #endif\n";
+            ss << "    // Return success\n";
+            ss << "    ctx->r[2] = 0;\n";
+        }
+
+        return ss.str();
+    }
+
+    std::string PS2Recompiler::generateStringStub(const std::string &name)
+    {
+        std::stringstream ss;
+
+        ss << "    // String operation: " << name << "\n";
+        ss << "    #ifdef _DEBUG\n";
+
+        if (name == "strlen")
+        {
+            ss << "    uint32_t str_ptr = ctx->r[4]; // String pointer in $a0\n";
+            ss << "    printf(\"Stub called: strlen(str=0x%08X)\\n\", str_ptr);\n";
+            ss << "    #endif\n";
+            ss << "    // If string is in valid memory range, calculate real length\n";
+            ss << "    if (str_ptr < 0x2000000) {\n";
+            ss << "        const char* str = (const char*)(rdram + str_ptr);\n";
+            ss << "        // Safely calculate strlen with bounds checking\n";
+            ss << "        size_t len = 0;\n";
+            ss << "        while (str_ptr + len < 0x2000000 && str[len] != '\\0') {\n";
+            ss << "            len++;\n";
+            ss << "        }\n";
+            ss << "        ctx->r[2] = len;\n";
+            ss << "    } else {\n";
+            ss << "        ctx->r[2] = 0;\n";
+            ss << "    }\n";
+        }
+        else if (name == "strcpy" || name == "strncpy")
+        {
+            ss << "    uint32_t dst_ptr = ctx->r[4]; // Destination pointer in $a0\n";
+            ss << "    uint32_t src_ptr = ctx->r[5]; // Source pointer in $a1\n";
+            if (name == "strncpy")
+            {
+                ss << "    uint32_t max_len = ctx->r[6]; // Max length in $a2\n";
+                ss << "    printf(\"Stub called: strncpy(dst=0x%08X, src=0x%08X, n=%u)\\n\", dst_ptr, src_ptr, max_len);\n";
+            }
+            else
+            {
+                ss << "    printf(\"Stub called: strcpy(dst=0x%08X, src=0x%08X)\\n\", dst_ptr, src_ptr);\n";
+            }
+            ss << "    #endif\n";
+            ss << "    // Return destination pointer\n";
+            ss << "    ctx->r[2] = dst_ptr;\n";
+        }
+        else if (name == "strcmp" || name == "strncmp")
+        {
+            ss << "    uint32_t str1_ptr = ctx->r[4]; // String 1 pointer in $a0\n";
+            ss << "    uint32_t str2_ptr = ctx->r[5]; // String 2 pointer in $a1\n";
+            if (name == "strncmp")
+            {
+                ss << "    uint32_t max_len = ctx->r[6]; // Max length in $a2\n";
+                ss << "    printf(\"Stub called: strncmp(s1=0x%08X, s2=0x%08X, n=%u)\\n\", str1_ptr, str2_ptr, max_len);\n";
+            }
+            else
+            {
+                ss << "    printf(\"Stub called: strcmp(s1=0x%08X, s2=0x%08X)\\n\", str1_ptr, str2_ptr);\n";
+            }
+            ss << "    #endif\n";
+            ss << "    // Return comparison result (0 for equal)\n";
+            ss << "    ctx->r[2] = 0;\n";
+        }
+        else
+        {
+            ss << "    printf(\"Stub called: " << name << "()\\n\");\n";
+            ss << "    #endif\n";
+            ss << "    // Return success\n";
+            ss << "    ctx->r[2] = 0;\n";
+        }
+
+        return ss.str();
+    }
+
+    std::string PS2Recompiler::generateMathStub(const std::string &name)
+    {
+        std::stringstream ss;
+
+        ss << "    // Math operation: " << name << "\n";
+        ss << "    #ifdef _DEBUG\n";
+        ss << "    printf(\"Stub called: " << name << "()\\n\");\n";
+        ss << "    #endif\n";
+
+        if (name == "sin" || name == "cos" || name == "tan" ||
+            name == "asin" || name == "acos" || name == "atan" ||
+            name == "atan2" || name == "sinh" || name == "cosh" ||
+            name == "tanh" || name == "exp" || name == "log" ||
+            name == "log10" || name == "pow" || name == "sqrt" ||
+            name == "ceil" || name == "floor" || name == "fabs" ||
+            name == "fmod")
+        {
+            ss << "    // Simply delegate to host function\n";
+            ss << "    float arg1 = *(float*)&ctx->r[4]; // First argument in $a0\n";
+
+            if (name == "atan2" || name == "pow" || name == "fmod")
+            {
+                ss << "    float arg2 = *(float*)&ctx->r[5]; // Second argument in $a1\n";
+                ss << "    float result = " << name << "f(arg1, arg2);\n";
+            }
+            else
+            {
+                ss << "    float result = " << name << "f(arg1);\n";
+            }
+
+            ss << "    *(float*)&ctx->r[2] = result; // Return result in $v0\n";
+        }
+        else
+        {
+            ss << "    // Return 0.0f as default\n";
+            ss << "    *(float*)&ctx->r[2] = 0.0f;\n";
+        }
+
+        return ss.str();
+    }
+
+    std::string PS2Recompiler::generateTimeStub(const std::string &name)
+    {
+        std::stringstream ss;
+
+        ss << "    // Time operation: " << name << "\n";
+        ss << "    #ifdef _DEBUG\n";
+        ss << "    printf(\"Stub called: " << name << "()\\n\");\n";
+        ss << "    #endif\n";
+
+        if (name == "time")
+        {
+            ss << "    // Return current time value (seconds since epoch)\n";
+            ss << "    ctx->r[2] = (uint32_t)time(NULL);\n";
+        }
+        else if (name == "clock")
+        {
+            ss << "    // Return clock ticks\n";
+            ss << "    ctx->r[2] = (uint32_t)clock();\n";
+        }
+        else
+        {
+            ss << "    // Return success\n";
+            ss << "    ctx->r[2] = 0;\n";
+        }
+
+        return ss.str();
+    }
+
+    // TODO give this more attention
+    std::string PS2Recompiler::generateNetworkStub(const std::string &name)
+    {
+        std::stringstream ss;
+
+        ss << "    // Network operation: " << name << "\n";
+        ss << "    #ifdef _DEBUG\n";
+        ss << "    printf(\"Stub called: " << name << "()\\n\");\n";
+        ss << "    #endif\n";
+
+        if (name == "socket")
+        {
+            ss << "    // Return fake socket descriptor\n";
+            ss << "    ctx->r[2] = 3; // Fake socket fd\n";
+        }
+        else if (name == "bind" || name == "listen" || name == "connect")
+        {
+            ss << "    // Return success\n";
+            ss << "    ctx->r[2] = 0;\n";
+        }
+        else if (name == "accept")
+        {
+            ss << "    // Return fake client socket descriptor\n";
+            ss << "    ctx->r[2] = 4; // Fake client socket fd\n";
+        }
+        else if (name == "send" || name == "sendto")
+        {
+            ss << "    uint32_t size = ctx->r[6]; // Size in $a2\n";
+            ss << "    // Return bytes sent (all of them)\n";
+            ss << "    ctx->r[2] = size;\n";
+        }
+        else if (name == "recv" || name == "recvfrom")
+        {
+            ss << "    // Return 0 (no data)\n";
+            ss << "    ctx->r[2] = 0;\n";
+        }
+        else
+        {
+            ss << "    // Return failure (-1)\n";
+            ss << "    ctx->r[2] = (uint32_t)-1;\n";
+        }
+
+        return ss.str();
+    }
+
+    std::string PS2Recompiler::generateThreadStub(const std::string &name)
+    {
+        std::stringstream ss;
+
+        ss << "    // Thread operation: " << name << "\n";
+        ss << "    #ifdef _DEBUG\n";
+        ss << "    printf(\"Stub called: " << name << "()\\n\");\n";
+        ss << "    #endif\n";
+
+        if (name == "pthread_create")
+        {
+            ss << "    // Return success\n";
+            ss << "    ctx->r[2] = 0;\n";
+            ss << "    // Set thread ID to 1 in the output parameter\n";
+            ss << "    uint32_t thread_id_ptr = ctx->r[4]; // Thread ID pointer in $a0\n";
+            ss << "    if (thread_id_ptr < 0x2000000) {\n";
+            ss << "        *(uint32_t*)(rdram + thread_id_ptr) = 1;\n";
+            ss << "    }\n";
+        }
+        else if (name.find("pthread_mutex_") != std::string::npos ||
+                 name.find("pthread_cond_") != std::string::npos)
+        {
+            ss << "    // Return success\n";
+            ss << "    ctx->r[2] = 0;\n";
+        }
+        else
+        {
+            ss << "    // Return success\n";
+            ss << "    ctx->r[2] = 0;\n";
+        }
+
+        return ss.str();
+    }
+
+    std::string PS2Recompiler::generateDefaultStub(const std::string &name)
+    {
+        std::stringstream ss;
+
+        ss << "    // Default stub implementation\n";
+        ss << "    #ifdef _DEBUG\n";
+        ss << "    printf(\"Stub function called: " << name << " at PC=0x%08X\\n\", ctx->pc);\n";
+        ss << "    #endif\n";
+        ss << "    // Default return value (0)\n";
+        ss << "    ctx->r[2] = 0;\n";
+
+        return ss.str();
     }
 }

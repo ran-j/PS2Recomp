@@ -45,10 +45,21 @@ namespace ps2recomp
         bool shouldStubFunction(const std::string &name) const;
         bool shouldSkipFunction(const std::string &name) const;
         std::string generateRuntimeHeader();
-        std::string generateStubFunction(const Function& function);
-		bool generateFunctionHeader();
+        std::string generateStubFunction(const Function &function);
+        bool generateFunctionHeader();
         bool writeToFile(const std::string &path, const std::string &content);
         std::filesystem::path getOutputPath(const Function &function) const;
+
+    private:
+        std::string generatePrintfStub(const std::string &name);
+        std::string generateMemoryCopyStub(const std::string &name); 
+        std::string generateFileIOStub(const std::string &name);
+        std::string generateStringStub(const std::string &name);
+        std::string generateMathStub(const std::string &name);
+        std::string generateTimeStub(const std::string &name);
+        std::string generateNetworkStub(const std::string &name);
+        std::string generateThreadStub(const std::string &name);
+        std::string generateDefaultStub(const std::string &name);
     };
 
 }
