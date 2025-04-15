@@ -45,8 +45,12 @@ struct R5900Context
     float vu0_q;         // VU0 Q register (quotient)
     float vu0_p;         // VU0 P register
     float vu0_i;
-    float vu0_mac;
-    float vu0_clip;
+    __m128 vu0_r;            // VU0 R register (special purpose register)
+    uint32_t vu0_mac_flags;  // VU0 MAC flags
+    uint32_t vu0_clip_flags; // VU0 clipping flags
+    uint32_t vu0_cmsar0;     // VU0 microprogram start address
+    uint32_t vu0_fbrst;      // VIF/VU reset register
+    float vu0_cf[4];         // VU0 FMAC control floating-point registers
 
     // COP0 System control registers (some critical ones)
     uint32_t cop0_registers[32];

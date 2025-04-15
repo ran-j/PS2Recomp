@@ -70,7 +70,7 @@ namespace ps2recomp
         OPCODE_SDC1 = 0x3D,
         OPCODE_SDC2 = 0x3E,
         OPCODE_SD = 0x3F,
-        OPCODE_LQC2 = 0x36, 
+        OPCODE_LQC2 = 0x36,
         OPCODE_SQC2 = 0x3E
     };
 
@@ -351,10 +351,23 @@ namespace ps2recomp
         COP2_CTC2 = 0x06,  // Move Control To Coprocessor 2
         COP2_BC2 = 0x08,   // Branch On Coprocessor 2 Condition
         COP2_CO = 0x10,    // COProcessor instructions (VU0 macro)
-        COP2_BCF = 0x00,
-        COP2_BCT = 0x01,
+        COP2_BCF = 0x00,   // Branch on VU0 false
+        COP2_BCT = 0x01,   // Branch on VU0 true
+        COP2_BCFL = 0x02,  // Branch on VU0 false likely
+        COP2_BCTL = 0x03,  // Branch on VU0 true likely
+        COP2_BCEF = 0x4,   // Branch on VU0 equal flag false (new)
+        COP2_BCET = 0x5,   // Branch on VU0 equal flag true (new)
+        COP2_BCEFL = 0x6,  // Branch on VU0 equal flag false likely (new)
+        COP2_BCETL = 0x7,  // Branch on VU0 equal flag true likely (new)
         COP2_MFC2 = 0x02,
-        COP2_MTC2 = 0x0A
+        COP2_MTC2 = 0x0A,
+        COP2_BC2F = 0x11,   // Branch on VU0 condition false
+        COP2_VU0OPS = 0x12, // VU0 Special Operations
+        COP2_MTVUCF = 0x13, // Move To VU0 control/flag register
+        COP2_CTCVU = 0x18,  // Control To VU0 with specific functionality
+        COP2_VMTIR = 0x1C,  // Move To VU0 I Register
+        COP2_VCLIP = 0x1E,  // VU0 Clipping operation
+        COP2_VLDQ = 0x1F    // VU0 Load/Store Quad with Decrement
     };
 
     // VU0 macro instruction function codes (subset - there are many more)
@@ -375,7 +388,38 @@ namespace ps2recomp
         VU0_VILWR = 0x15,
         VU0_VISWR = 0x16,
         VU0_VCALLMS = 0x20,
-        VU0_VCALLMSR = 0x21
+        VU0_VCALLMSR = 0x21,
+        VU0_VRGET = 0x3F // Get VU0 R register
+    };
+
+    enum VU0SpecialFormats
+    {
+        VU0_BC2F = 0x11,   // Branch on VU0 condition false
+        VU0_MTVUCF = 0x13, // Move To VU0 control/flag register
+        VU0_CTCVU = 0x18,  // Control To VU0 with specific functionality
+        VU0_VMTIR = 0x1C,  // Move To VU0 I Register
+        VU0_VCLIP = 0x1E,  // VU0 Clipping operation
+        VU0_VLDQ = 0x1F    // VU0 Load/Store Quad with Decrement
+    };
+
+    enum VU0ControlRegisters
+    {
+        VU0_CR_STATUS = 0,  // Status/Control register
+        VU0_CR_MAC = 1,     // MAC flags register
+        VU0_CR_CLIP = 5,    // Clipping flags register
+        VU0_CR_CMSAR0 = 13, // VU0 microprogram start address register
+        VU0_CR_FBRST = 18   // VIF/VU0/VU1 reset register
+    };
+
+    enum VU0OPSFunctions
+    {
+        VU0OPS_QMFC2_NI = 0x00, // Non-incrementing QMFC2
+        VU0OPS_QMFC2_I = 0x01,  // Incrementing QMFC2
+        VU0OPS_QMTC2_NI = 0x02, // Non-incrementing QMTC2
+        VU0OPS_QMTC2_I = 0x03,  // Incrementing QMTC2
+        VU0OPS_VMFIR = 0x04,    // Move From Integer Register
+        VU0OPS_VXITOP = 0x08,   // Execute Interrupt on VU0
+        VU0OPS_VWAITQ = 0x3C    // Wait for Q register operations to complete
     };
 
     // PMFHL functions (sa field)

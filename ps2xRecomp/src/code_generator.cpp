@@ -416,11 +416,7 @@ namespace ps2recomp
 
         ss << "// Function: " << function.name << "\n";
         ss << "// Address: 0x" << std::hex << function.start << " - 0x" << function.end << std::dec << "\n";
-        ss << "void " << function.name << "(uint8_t* rdram, R5900Context* ctx) {\n";
-
-        ss << "    // Local variables\n";
-        ss << "    uint32_t temp;\n";
-        ss << "    uint32_t branch_target;\n\n";
+        ss << "void " << function.name << "(uint8_t* rdram, R5900Context* ctx) {\n\n";
 
         for (size_t i = 0; i < instructions.size(); ++i)
         {
@@ -428,7 +424,6 @@ namespace ps2recomp
 
             ss << "    // 0x" << std::hex << inst.address << ": 0x" << inst.raw << std::dec << "\n";
 
-            // Check if this is a branch or jump with a delay slot
             if (inst.hasDelaySlot && i + 1 < instructions.size())
             {
                 const Instruction &delaySlot = instructions[i + 1];
@@ -561,7 +556,7 @@ namespace ps2recomp
         case OPCODE_LWC1:
             return fmt::format("{{ uint32_t val = READ32(ADD32(ctx->r[{}], 0x{:X})); ctx->f[{}] = *(float*)&val; }}",
                                inst.rs, (int16_t)inst.immediate, inst.rt);
-                               
+
         case OPCODE_LWU:
             return fmt::format("ctx->r[{}] = (uint32_t)READ32(ADD32(ctx->r[{}], 0x{:X}));",
                                inst.rt, inst.rs, (int16_t)inst.immediate);
@@ -1435,12 +1430,24 @@ namespace ps2recomp
                                inst.rt, inst.rd);
 
         case COP2_CFC2:
-            if (inst.rd == 0)
+            switch (inst.rd)
             {
+            case VU0_CR_STATUS:
                 return fmt::format("ctx->r[{}] = ctx->vu0_status;", inst.rt);
-            }
-            else
-            {
+
+            case VU0_CR_MAC:
+                return fmt::format("ctx->r[{}] = ctx->vu0_mac_flags;", inst.rt);
+
+            case VU0_CR_CLIP:
+                return fmt::format("ctx->r[{}] = ctx->vu0_clip_flags;", inst.rt);
+
+            case VU0_CR_CMSAR0:
+                return fmt::format("ctx->r[{}] = ctx->vu0_cmsar0;", inst.rt);
+
+            case VU0_CR_FBRST:
+                return fmt::format("ctx->r[{}] = ctx->vu0_fbrst;", inst.rt);
+
+            default:
                 return fmt::format("// Unhandled CFC2 VU control register: {}", inst.rd);
             }
 
@@ -1460,6 +1467,74 @@ namespace ps2recomp
 
         case COP2_BC2:
             return fmt::format("// VU branch instruction not implemented");
+
+        case COP2_BC2F:
+            switch (inst.rt)
+            {
+            case COP2_BCF: // BC2F - Branch on VU0 false
+                return fmt::format("if ((ctx->vu0_status & 0x1) == 0) {{ /* branch logic handled elsewhere */ }}");
+
+            case COP2_BCT: // BC2T - Branch on VU0 true
+                return fmt::format("if ((ctx->vu0_status & 0x1) != 0) {{ /* branch logic handled elsewhere */ }}");
+
+            case COP2_BCFL: // BC2FL - Branch on VU0 false likely
+                return fmt::format("if ((ctx->vu0_status & 0x1) == 0) {{ /* branch logic handled elsewhere */ }}");
+
+            case COP2_BCTL: // BC2TL - Branch on VU0 true likely
+                return fmt::format("if ((ctx->vu0_status & 0x1) != 0) {{ /* branch logic handled elsewhere */ }}");
+
+            case COP2_BCEF: // BC2EF - Branch on VU0 equal flag false (0x5)
+                return fmt::format("if ((ctx->vu0_status & 0x2) == 0) {{ /* branch logic handled elsewhere */ }}");
+
+            case COP2_BCET: // BC2ET - Branch on VU0 equal flag true (0x6)
+                return fmt::format("if ((ctx->vu0_status & 0x2) != 0) {{ /* branch logic handled elsewhere */ }}");
+
+            case COP2_BCEFL: // BC2EFL - Branch on VU0 equal flag false likely (0x6)
+                return fmt::format("if ((ctx->vu0_status & 0x2) == 0) {{ /* branch logic handled elsewhere */ }}");
+
+            case COP2_BCETL: // BC2ETL - Branch on VU0 equal flag true likely (0x7)
+                return fmt::format("if ((ctx->vu0_status & 0x2) != 0) {{ /* branch logic handled elsewhere */ }}");
+
+            default:
+                return fmt::format("// Unhandled BC2 instruction: rt=0x{:X}", inst.rt);
+            }
+
+        case COP2_MTVUCF:
+            return fmt::format("ctx->vu0_cf[{}] = ctx->r[{}];", inst.rd, inst.rt);
+
+        case COP2_VMTIR:
+            return fmt::format("ctx->vu0_i = (float)ctx->r[{}].m128_i32[0];", inst.rt);
+
+        case COP2_VCLIP: // VU0 Clipping operation (0x1E)
+            return fmt::format("{{ float x = ctx->vu0_vf[{}].m128_f32[0]; "
+                               "float y = ctx->vu0_vf[{}].m128_f32[1]; "
+                               "float z = ctx->vu0_vf[{}].m128_f32[2]; "
+                               "float w = ctx->vu0_vf[{}].m128_f32[3]; "
+                               "// Calculate VU0 clipping flags and store in ctx->vu0_clip_flags \n"
+                               "ctx->vu0_clip_flags = 0; "
+                               "if (w < -x) ctx->vu0_clip_flags |= 0x01; "
+                               "if (w < x) ctx->vu0_clip_flags |= 0x02; "
+                               "if (w < -y) ctx->vu0_clip_flags |= 0x04; "
+                               "if (w < y) ctx->vu0_clip_flags |= 0x08; "
+                               "if (w < -z) ctx->vu0_clip_flags |= 0x10; "
+                               "if (w < z) ctx->vu0_clip_flags |= 0x20; }}",
+                               inst.rt, inst.rt, inst.rt, inst.rt);
+
+        case COP2_VLDQ:
+            if (inst.function & 0x10)
+            {
+                return fmt::format("{{ uint32_t addr = (ctx->r[{}].m128_i32[0] - 16) & 0x3FF; "
+                                   "WRITE128(addr, (__m128i)ctx->vu0_vf[{}]); "
+                                   "ctx->r[{}].m128_i32[0] = addr; }}",
+                                   inst.rs, inst.rt, inst.rs);
+            }
+            else
+            {
+                return fmt::format("{{ uint32_t addr = (ctx->r[{}].m128_i32[0] - 16) & 0x3FF; "
+                                   "ctx->vu0_vf[{}] = (__m128)READ128(addr); "
+                                   "ctx->r[{}].m128_i32[0] = addr; }}",
+                                   inst.rs, inst.rt, inst.rs);
+            }
 
         case COP2_CO:
             switch (inst.function)
@@ -1520,6 +1595,10 @@ namespace ps2recomp
                 return fmt::format("// Calls VU0 microprogram at address {} - not implemented in recompiled code",
                                    inst.immediate);
 
+            case VU0_VRGET: // TODO - Check if this is correct
+                return fmt::format("ctx->vu0_vf[{}] = ctx->vu0_r; // Get VU0 R register",
+                                   inst.rd);
+
             case VU0_VMULQ:
                 return fmt::format("ctx->vu0_vf[{}] = PS2_VMULQ(ctx->vu0_vf[{}], ctx->vu0_q);",
                                    inst.rd, inst.rs);
@@ -1533,10 +1612,75 @@ namespace ps2recomp
                 return fmt::format("ctx->vu0_i = _mm_extract_ps(ctx->vu0_vf[{}], {}) - "
                                    "_mm_extract_ps(ctx->vu0_vf[{}], {});",
                                    inst.rs, inst.rd, inst.rt, inst.rd);
+
             default:
                 return fmt::format("// Unhandled VU0 macro instruction: 0x{:X}", inst.function);
             }
             break;
+
+        case COP2_CTCVU:
+            switch (inst.rd)
+            {
+            case VU0_CR_STATUS:
+                return fmt::format("ctx->vu0_control = ctx->r[{}] & 0xFFFF; // Set VU0 status/control register", inst.rt);
+
+            case VU0_CR_MAC:
+                return fmt::format("ctx->vu0_mac_flags = ctx->r[{}]; // Set VU0 MAC flags register", inst.rt);
+
+            case VU0_CR_CLIP:
+                return fmt::format("ctx->vu0_clip_flags = ctx->r[{}]; // Set VU0 clipping flags register", inst.rt);
+
+            case VU0_CR_CMSAR0:
+                return fmt::format("ctx->vu0_cmsar0 = ctx->r[{}]; // Set VU0 microprogram start address",
+                                   inst.rt);
+
+            case VU0_CR_FBRST:
+                return fmt::format("// VU0 FBRST register - handles VU/VIF resets\n"
+                                   "    // Bit 0: Reset VIF0, Bit 1: Reset VIF1\n"
+                                   "    // Bit 8: Reset VU0, Bit 9: Reset VU1\n"
+                                   "    ctx->vu0_fbrst = ctx->r[{}] & 0x0303;",
+                                   inst.rt);
+
+            default:
+                return fmt::format("// Unhandled CTCVU VU control register: {}", inst.rd);
+            }
+
+        case COP2_VU0OPS:
+            switch (inst.function)
+            {
+            case VU0OPS_QMFC2_NI: // 0x00 - Non-incrementing QMFC2
+                return fmt::format("ctx->r[{}] = (__m128i)ctx->vu0_vf[{}]; // Non-incrementing QMFC2",
+                                   inst.rt, inst.rd);
+
+            case VU0OPS_QMFC2_I: // 0x01 - Incrementing QMFC2
+                return fmt::format("{{ ctx->r[{}] = (__m128i)ctx->vu0_vf[{}]; "
+                                   "ctx->vu0_vf[{}] = (__m128)_mm_setzero_si128(); }} // Incrementing QMFC2",
+                                   inst.rt, inst.rd, inst.rd);
+
+            case VU0OPS_QMTC2_NI: // 0x02 - Non-incrementing QMTC2
+                return fmt::format("ctx->vu0_vf[{}] = (__m128)ctx->r[{}]; // Non-incrementing QMTC2",
+                                   inst.rd, inst.rt);
+
+            case VU0OPS_QMTC2_I: // 0x03 - Incrementing QMTC2
+                return fmt::format("{{ ctx->vu0_vf[{}] = (__m128)ctx->r[{}]; "
+                                   "ctx->r[{}] = _mm_setzero_si128(); }} // Incrementing QMTC2",
+                                   inst.rd, inst.rt, inst.rt);
+
+            case VU0OPS_VMFIR: // 0x04 - Move From Integer Register
+                return fmt::format("{{ int val = ctx->r[{}].m128i_i32[0]; "
+                                   "ctx->vu0_vf[{}] = (__m128)_mm_set1_epi32(val); }}",
+                                   inst.rt, inst.rd);
+
+            case VU0OPS_VXITOP: // 0x08 - Execute Interrupt on VU0
+                return fmt::format("// VXITOP - VU0 Interrupt operation not implemented");
+
+            case VU0OPS_VWAITQ: // 0x3C - Wait for Q register operations to complete TODO check this better
+                return fmt::format("// VWAITQ - Wait for Q register operations to complete\n"
+                                   "    // need proper implementation for this\n");
+
+            default:
+                return fmt::format("// Unhandled VU0OPS function: 0x{:X}", inst.function);
+            }
 
         default:
             return fmt::format("// Unhandled VU instruction format: 0x{:X}", rs);
