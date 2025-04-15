@@ -69,7 +69,9 @@ namespace ps2recomp
         OPCODE_SCD = 0x3C,
         OPCODE_SDC1 = 0x3D,
         OPCODE_SDC2 = 0x3E,
-        OPCODE_SD = 0x3F
+        OPCODE_SD = 0x3F,
+        OPCODE_LQC2 = 0x36, 
+        OPCODE_SQC2 = 0x3E
     };
 
     // SPECIAL function codes

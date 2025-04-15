@@ -462,111 +462,7 @@ namespace ps2recomp
         switch (inst.opcode)
         {
         case OPCODE_SPECIAL:
-            switch (inst.function)
-            {
-            case SPECIAL_SLL:
-                if (inst.rd == 0 && inst.rt == 0 && inst.sa == 0)
-                {
-                    return "// NOP";
-                }
-                return fmt::format("ctx->r[{}] = SLL32(ctx->r[{}], {});",
-                                   inst.rd, inst.rt, inst.sa);
-
-            case SPECIAL_SRL:
-                return fmt::format("ctx->r[{}] = SRL32(ctx->r[{}], {});",
-                                   inst.rd, inst.rt, inst.sa);
-
-            case SPECIAL_SRA:
-                return fmt::format("ctx->r[{}] = SRA32(ctx->r[{}], {});",
-                                   inst.rd, inst.rt, inst.sa);
-
-            case SPECIAL_SLLV:
-                return fmt::format("ctx->r[{}] = SLL32(ctx->r[{}], ctx->r[{}] & 0x1F);",
-                                   inst.rd, inst.rt, inst.rs);
-
-            case SPECIAL_SRLV:
-                return fmt::format("ctx->r[{}] = SRL32(ctx->r[{}], ctx->r[{}] & 0x1F);",
-                                   inst.rd, inst.rt, inst.rs);
-
-            case SPECIAL_SRAV:
-                return fmt::format("ctx->r[{}] = SRA32(ctx->r[{}], ctx->r[{}] & 0x1F);",
-                                   inst.rd, inst.rt, inst.rs);
-
-            case SPECIAL_MFHI:
-                return fmt::format("ctx->r[{}] = ctx->hi;", inst.rd);
-
-            case SPECIAL_MTHI:
-                return fmt::format("ctx->hi = ctx->r[{}];", inst.rs);
-
-            case SPECIAL_MFLO:
-                return fmt::format("ctx->r[{}] = ctx->lo;", inst.rd);
-
-            case SPECIAL_MTLO:
-                return fmt::format("ctx->lo = ctx->r[{}];", inst.rs);
-
-            case SPECIAL_MULT:
-                return fmt::format("{{ int64_t result = (int64_t)(int32_t)ctx->r[{}] * (int64_t)(int32_t)ctx->r[{}]; ctx->lo = (uint32_t)result; ctx->hi = (uint32_t)(result >> 32); }}",
-                                   inst.rs, inst.rt);
-
-            case SPECIAL_MULTU:
-                return fmt::format("{{ uint64_t result = (uint64_t)ctx->r[{}] * (uint64_t)ctx->r[{}]; ctx->lo = (uint32_t)result; ctx->hi = (uint32_t)(result >> 32); }}",
-                                   inst.rs, inst.rt);
-
-            case SPECIAL_DIV:
-                return fmt::format("{{ if (ctx->r[{}] != 0) {{ ctx->lo = (uint32_t)((int32_t)ctx->r[{}] / (int32_t)ctx->r[{}]); ctx->hi = (uint32_t)((int32_t)ctx->r[{}] % (int32_t)ctx->r[{}]); }} }}",
-                                   inst.rt, inst.rs, inst.rt, inst.rs, inst.rt);
-
-            case SPECIAL_DIVU:
-                return fmt::format("{{ if (ctx->r[{}] != 0) {{ ctx->lo = ctx->r[{}] / ctx->r[{}]; ctx->hi = ctx->r[{}] % ctx->r[{}]; }} }}",
-                                   inst.rt, inst.rs, inst.rt, inst.rs, inst.rt);
-
-            case SPECIAL_ADD:
-            case SPECIAL_ADDU:
-                return fmt::format("ctx->r[{}] = ADD32(ctx->r[{}], ctx->r[{}]);",
-                                   inst.rd, inst.rs, inst.rt);
-
-            case SPECIAL_SUB:
-            case SPECIAL_SUBU:
-                return fmt::format("ctx->r[{}] = SUB32(ctx->r[{}], ctx->r[{}]);",
-                                   inst.rd, inst.rs, inst.rt);
-
-            case SPECIAL_AND:
-                return fmt::format("ctx->r[{}] = AND32(ctx->r[{}], ctx->r[{}]);",
-                                   inst.rd, inst.rs, inst.rt);
-
-            case SPECIAL_OR:
-                return fmt::format("ctx->r[{}] = OR32(ctx->r[{}], ctx->r[{}]);",
-                                   inst.rd, inst.rs, inst.rt);
-
-            case SPECIAL_XOR:
-                return fmt::format("ctx->r[{}] = XOR32(ctx->r[{}], ctx->r[{}]);",
-                                   inst.rd, inst.rs, inst.rt);
-
-            case SPECIAL_NOR:
-                return fmt::format("ctx->r[{}] = NOR32(ctx->r[{}], ctx->r[{}]);",
-                                   inst.rd, inst.rs, inst.rt);
-
-            case SPECIAL_SLT:
-                return fmt::format("ctx->r[{}] = SLT32(ctx->r[{}], ctx->r[{}]);",
-                                   inst.rd, inst.rs, inst.rt);
-
-            case SPECIAL_SLTU:
-                return fmt::format("ctx->r[{}] = SLTU32(ctx->r[{}], ctx->r[{}]);",
-                                   inst.rd, inst.rs, inst.rt);
-
-            // PS2-specific instructions
-            case SPECIAL_MOVZ:
-                return fmt::format("if (ctx->r[{}] == 0) ctx->r[{}] = ctx->r[{}];",
-                                   inst.rt, inst.rd, inst.rs);
-
-            case SPECIAL_MOVN:
-                return fmt::format("if (ctx->r[{}] != 0) ctx->r[{}] = ctx->r[{}];",
-                                   inst.rt, inst.rd, inst.rs);
-
-            default:
-                return fmt::format("// Unhandled SPECIAL instruction: 0x{:X}", inst.function);
-            }
-            break;
+            return translateSpecialInstruction(inst);
 
         case OPCODE_ADDI:
         case OPCODE_ADDIU:
@@ -649,6 +545,26 @@ namespace ps2recomp
         case OPCODE_SD:
             return fmt::format("{{ uint64_t val = ((uint64_t)ctx->r[{}].m128i_u32[1] << 32) | ctx->r[{}].m128i_u32[0]; WRITE64(ADD32(ctx->r[{}], 0x{:X}), val); }}",
                                inst.rt, inst.rt, inst.rs, (int16_t)inst.immediate);
+
+        case OPCODE_SWC1:
+            return fmt::format("{{ float val = ctx->f[{}]; WRITE32(ADD32(ctx->r[{}], 0x{:X}), *(uint32_t*)&val); }}",
+                               inst.rt, inst.rs, (int16_t)inst.immediate);
+
+        case OPCODE_LQC2:
+            return fmt::format("ctx->vu0_vf[{}] = (__m128)READ128(ADD32(ctx->r[{}], 0x{:X}));",
+                               inst.rt, inst.rs, (int16_t)inst.immediate);
+
+        case OPCODE_SQC2:
+            return fmt::format("WRITE128(ADD32(ctx->r[{}], 0x{:X}), (__m128i)ctx->vu0_vf[{}]);",
+                               inst.rs, (int16_t)inst.immediate, inst.rt);
+
+        case OPCODE_LWC1:
+            return fmt::format("{{ uint32_t val = READ32(ADD32(ctx->r[{}], 0x{:X})); ctx->f[{}] = *(float*)&val; }}",
+                               inst.rs, (int16_t)inst.immediate, inst.rt);
+                               
+        case OPCODE_LWU:
+            return fmt::format("ctx->r[{}] = (uint32_t)READ32(ADD32(ctx->r[{}], 0x{:X}));",
+                               inst.rt, inst.rs, (int16_t)inst.immediate);
 
         // Special case for R5900
         case OPCODE_CACHE:
