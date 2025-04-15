@@ -22,7 +22,7 @@ Decoding the MIPS R5900 instructions in each function
 Translating those instructions to equivalent C++ code
 Generating a runtime that can execute the recompiled code
 
-The translated code is very literal, with each MIPS instruction mapping to a C++ operation. For example, `addiu $r4, $r4, 0x20 becomes ctx->r4 = ADD32(ctx->r4, 0X20);`.
+The translated code is very literal, with each MIPS instruction mapping to a C++ operation. For example, `addiu $r4, $r4, 0x20` becomes `ctx->r4 = ADD32(ctx->r4, 0X20);`.
 
 ### Requirements
 
