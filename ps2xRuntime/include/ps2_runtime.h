@@ -8,8 +8,17 @@
 #include <functional>
 #include <immintrin.h> // For SSE/AVX instructions
 
-#define PS2_RAM_SIZE 0x2000000     // 32MB
-#define PS2_SCRATCHPAD_SIZE 0x4000 // 16KB
+constexpr uint32_t PS2_RAM_BASE = 0x00000000;
+constexpr uint32_t PS2_RAM_SIZE = 32 * 1024 * 1024; // 32MB
+constexpr uint32_t PS2_SCRATCHPAD_BASE = 0x70000000;
+constexpr uint32_t PS2_SCRATCHPAD_SIZE = 16 * 1024; // 16KB
+constexpr uint32_t PS2_IO_BASE = 0x10000000;
+constexpr uint32_t PS2_IO_SIZE = 0x10000; // 64KB
+constexpr uint32_t PS2_VU0_CODE_BASE = 0x11000000;
+constexpr uint32_t PS2_VU0_DATA_BASE = 0x11004000;
+constexpr uint32_t PS2_VU1_CODE_BASE = 0x11008000;
+constexpr uint32_t PS2_VU1_DATA_BASE = 0x1100C000;
+constexpr uint32_t PS2_GS_BASE = 0x12000000;
 
 // PS2 CPU context (R5900)
 struct R5900Context
@@ -19,9 +28,12 @@ struct R5900Context
 
     // Program Counter Hi/Lo registers (64-bit)
     uint32_t pc;
+    uint64_t insn_count;
     uint32_t hi; // High result register
     uint32_t lo; // Low result register
     uint32_t sa; // Shift amount register
+
+    uint32_t lo1, hi1; // For MULT1/DIV1 instructions
 
     // 128-bit registers for SIMD operations
     __m128i r128[32];
@@ -42,19 +54,81 @@ struct R5900Context
     uint32_t cop0_cause;  // Cause register
     uint32_t cop0_epc;    // Exception PC
     uint32_t cop0_prid;
+    uint32_t cop0_index;
+    uint32_t cop0_random;
+    uint32_t cop0_entrylo0;
+    uint32_t cop0_entrylo1;
+    uint32_t cop0_context;
+    uint32_t cop0_pagemask;
+    uint32_t cop0_wired;
+    uint32_t cop0_badvaddr;
+    uint32_t cop0_count;
+    uint32_t cop0_entryhi;
+    uint32_t cop0_compare;
+    uint32_t cop0_config;
+    uint32_t cop0_badpaddr;
+    uint32_t cop0_debug;
+    uint32_t cop0_perf;
+    uint32_t cop0_taglo;
+    uint32_t cop0_taghi;
+    uint32_t cop0_errorepc;
 
     // FPU registers (COP1)
     float f[32];
     uint32_t fcr0;  // Implementation/revision register
     uint32_t fcr31; // Control/status register
 
-    // Branch delay slot tracking
-    bool in_delay_slot;
-    uint32_t branch_target;
+    R5900Context()
+    {
+        // Zero all registers
+        for (int i = 0; i < 32; i++)
+        {
+            r[i] = _mm_setzero_si128();
+            f[i] = 0.0f;
+            vu0_vf[i] = _mm_setzero_ps();
+        }
 
-    // Function call stack for profiling and debugging
-    uint32_t call_stack[16];
-    int call_stack_depth;
+        pc = 0;
+        insn_count = 0;
+        lo = hi = lo1 = hi1 = 0;
+        sa = 0;
+
+        // Reset COP0 registers
+        cop0_index = 0;
+        cop0_random = 47; // Start at maximum value
+        cop0_entrylo0 = 0;
+        cop0_entrylo1 = 0;
+        cop0_context = 0;
+        cop0_pagemask = 0;
+        cop0_wired = 0;
+        cop0_badvaddr = 0;
+        cop0_count = 0;
+        cop0_entryhi = 0;
+        cop0_compare = 0;
+        cop0_status = 0x400000; // BEV set, ERL clear, kernel mode
+        cop0_cause = 0;
+        cop0_epc = 0;
+        cop0_prid = 0x00002e20; // CPU ID for R5900
+        cop0_config = 0;
+        cop0_badpaddr = 0;
+        cop0_debug = 0;
+        cop0_perf = 0;
+        cop0_taglo = 0;
+        cop0_taghi = 0;
+        cop0_errorepc = 0;
+
+        // Reset COP1/VU0 state
+        fcr31 = 0;
+        vu0_q = 0.0f;
+        vu0_i = 0.0f;
+        vu0_status = 0;
+
+        // Set the FPU registers to predictable but non-zero values
+        for (int i = 0; i < 32; i++)
+        {
+            f[i] = static_cast<float>(i);
+        }
+    }
 };
 
 // PS2 GS (Graphics Synthesizer) registers

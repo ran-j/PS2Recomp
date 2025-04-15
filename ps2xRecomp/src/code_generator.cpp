@@ -386,6 +386,18 @@ namespace ps2recomp
         ss << "#define FPU_C_LE_S(a, b) ((float)(a) <= (float)(b))\n";
         ss << "#define FPU_C_NGT_S(a, b) ((float)(a) <= (float)(b) || isnan((float)(a)) || isnan((float)(b)))\n\n";
 
+        ss << "#define PS2_QFSRV(rs, rt, sa) _mm_or_si128(_mm_srl_epi32(rt, _mm_cvtsi32_si128(sa)), _mm_sll_epi32(rs, _mm_cvtsi32_si128(32 - sa)))\n";
+        ss << "#define PS2_PCPYLD(rs, rt) _mm_unpacklo_epi64(rt, rs)\n";
+        ss << "#define PS2_PEXEH(rs) _mm_shufflelo_epi16(_mm_shufflehi_epi16(rs, _MM_SHUFFLE(2, 3, 0, 1)), _MM_SHUFFLE(2, 3, 0, 1))\n";
+        ss << "#define PS2_PEXEW(rs) _mm_shuffle_epi32(rs, _MM_SHUFFLE(2, 3, 0, 1))\n";
+        ss << "#define PS2_PROT3W(rs) _mm_shuffle_epi32(rs, _MM_SHUFFLE(0, 3, 2, 1))\n";
+
+        ss << "// Additional VU0 operations\n";
+        ss << "#define PS2_VSQRT(x) sqrtf(x)\n";
+        ss << "#define PS2_VRSQRT(x) (1.0f / sqrtf(x))\n";
+        ss << "#define PS2_VCALLMS(addr) // VU0 microprogram calls not supported directly\n";
+        ss << "#define PS2_VCALLMSR(reg) // VU0 microprogram calls not supported directly\n";
+
         ss << "#endif // PS2_RUNTIME_MACROS_H\n";
 
         return ss.str();
@@ -630,6 +642,14 @@ namespace ps2recomp
             return fmt::format("WRITE128(ADD32(ctx->r[{}], 0x{:X}), (__m128i)ctx->r[{}]);",
                                inst.rs, (int16_t)inst.immediate, inst.rt);
 
+        case OPCODE_LD:
+            return fmt::format("{{ uint64_t val = READ64(ADD32(ctx->r[{}], 0x{:X})); ctx->r[{}].m128i_u32[0] = (uint32_t)val; ctx->r[{}].m128i_u32[1] = (uint32_t)(val >> 32); }}",
+                               inst.rs, (int16_t)inst.immediate, inst.rt, inst.rt);
+
+        case OPCODE_SD:
+            return fmt::format("{{ uint64_t val = ((uint64_t)ctx->r[{}].m128i_u32[1] << 32) | ctx->r[{}].m128i_u32[0]; WRITE64(ADD32(ctx->r[{}], 0x{:X}), val); }}",
+                               inst.rt, inst.rt, inst.rs, (int16_t)inst.immediate);
+
         // Special case for R5900
         case OPCODE_CACHE:
             return "// CACHE instruction (ignored)";
@@ -643,8 +663,498 @@ namespace ps2recomp
         case OPCODE_COP0:
             return translateCOP0Instruction(inst);
 
+        // REGIMM special format (opcode=0x01)
+        case OPCODE_REGIMM:
+            switch (inst.rt)
+            {
+            case REGIMM_BLTZ:
+                return fmt::format("// BLTZ r{}, 0x{:X} - Handled by branch logic",
+                                   inst.rs, inst.address + 4 + ((int16_t)inst.immediate << 2));
+
+            case REGIMM_BGEZ:
+                return fmt::format("// BGEZ r{}, 0x{:X} - Handled by branch logic",
+                                   inst.rs, inst.address + 4 + ((int16_t)inst.immediate << 2));
+
+            case REGIMM_BLTZAL:
+                return fmt::format("// BLTZAL r{}, 0x{:X} - Handled by branch logic",
+                                   inst.rs, inst.address + 4 + ((int16_t)inst.immediate << 2));
+
+            case REGIMM_BGEZAL:
+                return fmt::format("// BGEZAL r{}, 0x{:X} - Handled by branch logic",
+                                   inst.rs, inst.address + 4 + ((int16_t)inst.immediate << 2));
+
+            case REGIMM_MTSAB:
+                return fmt::format("ctx->sa = (ctx->r[{}] + 0x{:X}) & 0x0F;",
+                                   inst.rs, inst.immediate);
+
+            case REGIMM_MTSAH:
+                return fmt::format("ctx->sa = ((ctx->r[{}] + 0x{:X}) & 0x07) << 1;",
+                                   inst.rs, inst.immediate);
+
+            case REGIMM_TGEI:
+                return fmt::format("if ((int32_t)ctx->r[{}] >= (int32_t)0x{:X}) {{ /* Trap */ }}",
+                                   inst.rs, (int16_t)inst.immediate);
+
+            case REGIMM_TGEIU:
+                return fmt::format("if (ctx->r[{}] >= (uint32_t)0x{:X}) {{ /* Trap */ }}",
+                                   inst.rs, (uint32_t)(int16_t)inst.immediate);
+
+            case REGIMM_TLTI:
+                return fmt::format("if ((int32_t)ctx->r[{}] < (int32_t)0x{:X}) {{ /* Trap */ }}",
+                                   inst.rs, (int16_t)inst.immediate);
+
+            case REGIMM_TLTIU:
+                return fmt::format("if (ctx->r[{}] < (uint32_t)0x{:X}) {{ /* Trap */ }}",
+                                   inst.rs, (uint32_t)(int16_t)inst.immediate);
+
+            case REGIMM_TEQI:
+                return fmt::format("if ((int32_t)ctx->r[{}] == (int32_t)0x{:X}) {{ /* Trap */ }}",
+                                   inst.rs, (int16_t)inst.immediate);
+
+            case REGIMM_TNEI:
+                return fmt::format("if ((int32_t)ctx->r[{}] != (int32_t)0x{:X}) {{ /* Trap */ }}",
+                                   inst.rs, (int16_t)inst.immediate);
+
+            default:
+                return fmt::format("// Unhandled REGIMM instruction: 0x{:X}", inst.rt);
+            }
+
+        // MIPS-IV special format opcodes
+        case OPCODE_BEQL:
+        case OPCODE_BNEL:
+        case OPCODE_BLEZL:
+        case OPCODE_BGTZL:
+            // Already handled in branch delay slot logic
+            return fmt::format("// Likely branch instruction at 0x{:X} - Handled by branch logic", inst.address);
+
+        case OPCODE_DADDI:
+            return fmt::format("{{ int64_t a = ((int64_t)ctx->r[{}].m128i_i32[1] << 32) | ctx->r[{}].m128i_u32[0]; "
+                               "int64_t res = a + (int64_t)(int16_t)0x{:X}; "
+                               "ctx->r[{}].m128i_u32[0] = (uint32_t)res; ctx->r[{}].m128i_u32[1] = (uint32_t)(res >> 32); }}",
+                               inst.rs, inst.rs, inst.immediate, inst.rt, inst.rt);
+
+        case OPCODE_DADDIU:
+            return fmt::format("{{ uint64_t a = ((uint64_t)ctx->r[{}].m128i_u32[1] << 32) | ctx->r[{}].m128i_u32[0]; "
+                               "uint64_t res = a + (uint64_t)(int16_t)0x{:X}; "
+                               "ctx->r[{}].m128i_u32[0] = (uint32_t)res; ctx->r[{}].m128i_u32[1] = (uint32_t)(res >> 32); }}",
+                               inst.rs, inst.rs, inst.immediate, inst.rt, inst.rt);
+
+        case OPCODE_LDL:
+        case OPCODE_LDR:
+        case OPCODE_SDL:
+        case OPCODE_SDR:
+        case OPCODE_LWL:
+        case OPCODE_LWR:
+        case OPCODE_SWL:
+        case OPCODE_SWR:
+            return fmt::format("// Unaligned load/store instruction 0x{:X} not implemented", inst.opcode);
+
         default:
             return fmt::format("// Unhandled opcode: 0x{:X}", inst.opcode);
+        }
+    }
+
+    std::string CodeGenerator::translateSpecialInstruction(const Instruction &inst)
+    {
+        switch (inst.function)
+        {
+        case SPECIAL_SLL:
+            if (inst.rd == 0 && inst.rt == 0 && inst.sa == 0)
+            {
+                return "// NOP";
+            }
+            return fmt::format("ctx->r[{}] = SLL32(ctx->r[{}], {});",
+                               inst.rd, inst.rt, inst.sa);
+
+        case SPECIAL_SRL:
+            return fmt::format("ctx->r[{}] = SRL32(ctx->r[{}], {});",
+                               inst.rd, inst.rt, inst.sa);
+
+        case SPECIAL_SRA:
+            return fmt::format("ctx->r[{}] = SRA32(ctx->r[{}], {});",
+                               inst.rd, inst.rt, inst.sa);
+
+        case SPECIAL_SLLV:
+            return fmt::format("ctx->r[{}] = SLL32(ctx->r[{}], ctx->r[{}] & 0x1F);",
+                               inst.rd, inst.rt, inst.rs);
+
+        case SPECIAL_SRLV:
+            return fmt::format("ctx->r[{}] = SRL32(ctx->r[{}], ctx->r[{}] & 0x1F);",
+                               inst.rd, inst.rt, inst.rs);
+
+        case SPECIAL_SRAV:
+            return fmt::format("ctx->r[{}] = SRA32(ctx->r[{}], ctx->r[{}] & 0x1F);",
+                               inst.rd, inst.rt, inst.rs);
+
+        case SPECIAL_JR:
+            // Handled by branch delay slots
+            return fmt::format("// JR ${} - Handled by branch logic", inst.rs);
+
+        case SPECIAL_JALR:
+            // Handled by branch delay slots
+            return fmt::format("// JALR ${}, ${} - Handled by branch logic", inst.rd, inst.rs);
+
+        case SPECIAL_SYSCALL:
+            return fmt::format("// SYSCALL 0x{:X}", (inst.raw & 0x03FFFFC0) >> 6);
+
+        case SPECIAL_BREAK:
+            return fmt::format("// BREAK 0x{:X}", (inst.raw & 0x03FFFFC0) >> 6);
+
+        case SPECIAL_SYNC:
+            return translateSYNC(inst);
+
+        case SPECIAL_MFHI:
+            return fmt::format("ctx->r[{}] = ctx->hi;", inst.rd);
+
+        case SPECIAL_MTHI:
+            return fmt::format("ctx->hi = ctx->r[{}];", inst.rs);
+
+        case SPECIAL_MFLO:
+            return fmt::format("ctx->r[{}] = ctx->lo;", inst.rd);
+
+        case SPECIAL_MTLO:
+            return fmt::format("ctx->lo = ctx->r[{}];", inst.rs);
+
+        case SPECIAL_DSLLV:
+            return translateDSLLV(inst);
+
+        case SPECIAL_DSRLV:
+            return translateDSRLV(inst);
+
+        case SPECIAL_DSRAV:
+            return translateDSRAV(inst);
+
+        case SPECIAL_MULT:
+            return fmt::format("{{ int64_t result = (int64_t)(int32_t)ctx->r[{}] * (int64_t)(int32_t)ctx->r[{}]; ctx->lo = (uint32_t)result; ctx->hi = (uint32_t)(result >> 32); }}",
+                               inst.rs, inst.rt);
+
+        case SPECIAL_MULTU:
+            return fmt::format("{{ uint64_t result = (uint64_t)ctx->r[{}] * (uint64_t)ctx->r[{}]; ctx->lo = (uint32_t)result; ctx->hi = (uint32_t)(result >> 32); }}",
+                               inst.rs, inst.rt);
+
+        case SPECIAL_DIV:
+            return fmt::format("{{ if (ctx->r[{}] != 0) {{ ctx->lo = (uint32_t)((int32_t)ctx->r[{}] / (int32_t)ctx->r[{}]); ctx->hi = (uint32_t)((int32_t)ctx->r[{}] % (int32_t)ctx->r[{}]); }} }}",
+                               inst.rt, inst.rs, inst.rt, inst.rs, inst.rt);
+
+        case SPECIAL_DIVU:
+            return fmt::format("{{ if (ctx->r[{}] != 0) {{ ctx->lo = ctx->r[{}] / ctx->r[{}]; ctx->hi = ctx->r[{}] % ctx->r[{}]; }} }}",
+                               inst.rt, inst.rs, inst.rt, inst.rs, inst.rt);
+
+        case SPECIAL_ADD:
+        case SPECIAL_ADDU:
+            return fmt::format("ctx->r[{}] = ADD32(ctx->r[{}], ctx->r[{}]);",
+                               inst.rd, inst.rs, inst.rt);
+
+        case SPECIAL_SUB:
+        case SPECIAL_SUBU:
+            return fmt::format("ctx->r[{}] = SUB32(ctx->r[{}], ctx->r[{}]);",
+                               inst.rd, inst.rs, inst.rt);
+
+        case SPECIAL_AND:
+            return fmt::format("ctx->r[{}] = AND32(ctx->r[{}], ctx->r[{}]);",
+                               inst.rd, inst.rs, inst.rt);
+
+        case SPECIAL_OR:
+            return fmt::format("ctx->r[{}] = OR32(ctx->r[{}], ctx->r[{}]);",
+                               inst.rd, inst.rs, inst.rt);
+
+        case SPECIAL_XOR:
+            return fmt::format("ctx->r[{}] = XOR32(ctx->r[{}], ctx->r[{}]);",
+                               inst.rd, inst.rs, inst.rt);
+
+        case SPECIAL_NOR:
+            return fmt::format("ctx->r[{}] = NOR32(ctx->r[{}], ctx->r[{}]);",
+                               inst.rd, inst.rs, inst.rt);
+
+        case SPECIAL_SLT:
+            return fmt::format("ctx->r[{}] = SLT32(ctx->r[{}], ctx->r[{}]);",
+                               inst.rd, inst.rs, inst.rt);
+
+        case SPECIAL_SLTU:
+            return fmt::format("ctx->r[{}] = SLTU32(ctx->r[{}], ctx->r[{}]);",
+                               inst.rd, inst.rs, inst.rt);
+
+        // PS2-specific instructions
+        case SPECIAL_MOVZ:
+            return fmt::format("if (ctx->r[{}] == 0) ctx->r[{}] = ctx->r[{}];",
+                               inst.rt, inst.rd, inst.rs);
+
+        case SPECIAL_MOVN:
+            return fmt::format("if (ctx->r[{}] != 0) ctx->r[{}] = ctx->r[{}];",
+                               inst.rt, inst.rd, inst.rs);
+
+        case SPECIAL_MFSA:
+            return fmt::format("ctx->r[{}] = ctx->sa;", inst.rd);
+
+        case SPECIAL_MTSA:
+            return fmt::format("ctx->sa = ctx->r[{}] & 0x0F;", inst.rs);
+
+        // Doubleword operations
+        case SPECIAL_DADD:
+            return translateDADD(inst);
+
+        case SPECIAL_DADDU:
+            return translateDADDU(inst);
+
+        case SPECIAL_DSUB:
+            return translateDSUB(inst);
+
+        case SPECIAL_DSUBU:
+            return translateDSUBU(inst);
+
+        case SPECIAL_DSLL:
+            return translateDSLL(inst);
+
+        case SPECIAL_DSRL:
+            return translateDSRL(inst);
+
+        case SPECIAL_DSRA:
+            return translateDSRA(inst);
+
+        case SPECIAL_DSLL32:
+            return translateDSLL32(inst);
+
+        case SPECIAL_DSRL32:
+            return translateDSRL32(inst);
+
+        case SPECIAL_DSRA32:
+            return translateDSRA32(inst);
+
+        // Trap instructions
+        case SPECIAL_TGE:
+            return fmt::format("if ((int32_t)ctx->r[{}] >= (int32_t)ctx->r[{}]) {{ /* Trap */ }}",
+                               inst.rs, inst.rt);
+
+        case SPECIAL_TGEU:
+            return fmt::format("if (ctx->r[{}] >= ctx->r[{}]) {{ /* Trap */ }}",
+                               inst.rs, inst.rt);
+
+        case SPECIAL_TLT:
+            return fmt::format("if ((int32_t)ctx->r[{}] < (int32_t)ctx->r[{}]) {{ /* Trap */ }}",
+                               inst.rs, inst.rt);
+
+        case SPECIAL_TLTU:
+            return fmt::format("if (ctx->r[{}] < ctx->r[{}]) {{ /* Trap */ }}",
+                               inst.rs, inst.rt);
+
+        case SPECIAL_TEQ:
+            return fmt::format("if (ctx->r[{}] == ctx->r[{}]) {{ /* Trap */ }}",
+                               inst.rs, inst.rt);
+
+        case SPECIAL_TNE:
+            return fmt::format("if (ctx->r[{}] != ctx->r[{}]) {{ /* Trap */ }}",
+                               inst.rs, inst.rt);
+
+        default:
+            return fmt::format("// Unhandled SPECIAL instruction: 0x{:X}", inst.function);
+        }
+    }
+
+    std::string CodeGenerator::translateCOP0Instruction(const Instruction &inst)
+    {
+        uint32_t format = inst.rs; // Format field
+        uint32_t rt = inst.rt;     // GPR register
+        uint32_t rd = inst.rd;     // COP0 register
+
+        switch (format)
+        {
+        case COP0_MF: // MFC0 - Move From COP0
+            switch (rd)
+            {
+            case COP0_REG_INDEX:
+                return fmt::format("ctx->r[{}] = ctx->cop0_index;", rt);
+
+            case COP0_REG_RANDOM:
+                return fmt::format("ctx->r[{}] = ctx->cop0_random;", rt);
+
+            case COP0_REG_ENTRYLO0:
+                return fmt::format("ctx->r[{}] = ctx->cop0_entrylo0;", rt);
+
+            case COP0_REG_ENTRYLO1:
+                return fmt::format("ctx->r[{}] = ctx->cop0_entrylo1;", rt);
+
+            case COP0_REG_CONTEXT:
+                return fmt::format("ctx->r[{}] = ctx->cop0_context;", rt);
+
+            case COP0_REG_PAGEMASK:
+                return fmt::format("ctx->r[{}] = ctx->cop0_pagemask;", rt);
+
+            case COP0_REG_WIRED:
+                return fmt::format("ctx->r[{}] = ctx->cop0_wired;", rt);
+
+            case COP0_REG_BADVADDR:
+                return fmt::format("ctx->r[{}] = ctx->cop0_badvaddr;", rt);
+
+            case COP0_REG_COUNT:
+                return fmt::format("ctx->r[{}] = ctx->cop0_count;", rt);
+
+            case COP0_REG_ENTRYHI:
+                return fmt::format("ctx->r[{}] = ctx->cop0_entryhi;", rt);
+
+            case COP0_REG_COMPARE:
+                return fmt::format("ctx->r[{}] = ctx->cop0_compare;", rt);
+
+            case COP0_REG_STATUS:
+                return fmt::format("ctx->r[{}] = ctx->cop0_status;", rt);
+
+            case COP0_REG_CAUSE:
+                return fmt::format("ctx->r[{}] = ctx->cop0_cause;", rt);
+
+            case COP0_REG_EPC:
+                return fmt::format("ctx->r[{}] = ctx->cop0_epc;", rt);
+
+            case COP0_REG_PRID:
+                return fmt::format("ctx->r[{}] = ctx->cop0_prid;", rt);
+
+            case COP0_REG_CONFIG:
+                return fmt::format("ctx->r[{}] = ctx->cop0_config;", rt);
+
+            case COP0_REG_BADPADDR:
+                return fmt::format("ctx->r[{}] = ctx->cop0_badpaddr;", rt);
+
+            case COP0_REG_DEBUG:
+                return fmt::format("ctx->r[{}] = ctx->cop0_debug;", rt);
+
+            case COP0_REG_PERF:
+                return fmt::format("ctx->r[{}] = ctx->cop0_perf;", rt);
+
+            case COP0_REG_TAGLO:
+                return fmt::format("ctx->r[{}] = ctx->cop0_taglo;", rt);
+
+            case COP0_REG_TAGHI:
+                return fmt::format("ctx->r[{}] = ctx->cop0_taghi;", rt);
+
+            case COP0_REG_ERROREPC:
+                return fmt::format("ctx->r[{}] = ctx->cop0_errorepc;", rt);
+
+            default:
+                return fmt::format("ctx->r[{}] = 0; // Unimplemented COP0 register {}", rt, rd);
+            }
+
+        case COP0_MT: // MTC0 - Move To COP0
+            switch (rd)
+            {
+            case COP0_REG_INDEX:
+                return fmt::format("ctx->cop0_index = ctx->r[{}] & 0x3F;", rt); // 6-bit field
+
+            case COP0_REG_RANDOM:
+                return fmt::format("// MTC0 to RANDOM register ignored (read-only)");
+
+            case COP0_REG_ENTRYLO0:
+                return fmt::format("ctx->cop0_entrylo0 = ctx->r[{}] & 0x3FFFFFFF;", rt);
+
+            case COP0_REG_ENTRYLO1:
+                return fmt::format("ctx->cop0_entrylo1 = ctx->r[{}] & 0x3FFFFFFF;", rt);
+
+            case COP0_REG_CONTEXT:
+                return fmt::format("ctx->cop0_context = (ctx->cop0_context & 0x7) | (ctx->r[{}] & ~0x7);", rt);
+
+            case COP0_REG_PAGEMASK:
+                return fmt::format("ctx->cop0_pagemask = ctx->r[{}] & 0x1FFE000;", rt);
+
+            case COP0_REG_WIRED:
+                return fmt::format("ctx->cop0_wired = ctx->r[{}] & 0x3F; ctx->cop0_random = 47;", rt);
+
+            case COP0_REG_BADVADDR:
+                return fmt::format("// MTC0 to BADVADDR register ignored (read-only)");
+
+            case COP0_REG_COUNT:
+                return fmt::format("ctx->cop0_count = ctx->r[{}];", rt);
+
+            case COP0_REG_ENTRYHI:
+                return fmt::format("ctx->cop0_entryhi = ctx->r[{}] & 0xFFFFE0FF;", rt);
+
+            case COP0_REG_COMPARE:
+                return fmt::format("ctx->cop0_compare = ctx->r[{}]; ctx->cop0_cause &= ~0x8000; // Clear timer interrupt", rt);
+
+            case COP0_REG_STATUS:
+                return fmt::format("ctx->cop0_status = ctx->r[{}] & 0xFF57FFFF;", rt);
+
+            case COP0_REG_CAUSE:
+                return fmt::format("ctx->cop0_cause = (ctx->cop0_cause & ~0x300) | (ctx->r[{}] & 0x300);", rt);
+
+            case COP0_REG_EPC:
+                return fmt::format("ctx->cop0_epc = ctx->r[{}];", rt);
+
+            case COP0_REG_PRID:
+                return fmt::format("// MTC0 to PRID register ignored (read-only)");
+
+            case COP0_REG_CONFIG:
+                return fmt::format("ctx->cop0_config = (ctx->cop0_config & ~0x7) | (ctx->r[{}] & 0x7);", rt);
+
+            case COP0_REG_BADPADDR:
+                return fmt::format("// MTC0 to BADPADDR register ignored (read-only)");
+
+            case COP0_REG_DEBUG:
+                return fmt::format("ctx->cop0_debug = ctx->r[{}];", rt);
+
+            case COP0_REG_PERF:
+                return fmt::format("ctx->cop0_perf = ctx->r[{}];", rt);
+
+            case COP0_REG_TAGLO:
+                return fmt::format("ctx->cop0_taglo = ctx->r[{}];", rt);
+
+            case COP0_REG_TAGHI:
+                return fmt::format("ctx->cop0_taghi = ctx->r[{}];", rt);
+
+            case COP0_REG_ERROREPC:
+                return fmt::format("ctx->cop0_errorepc = ctx->r[{}];", rt);
+
+            default:
+                return fmt::format("// MTC0 to register {} ignored", rd);
+            }
+
+        case COP0_CO: // COP0 co-processor operations
+        {
+            uint32_t function = inst.function;
+
+            switch (function)
+            {
+            case COP0_CO_TLBR:
+                return fmt::format("// TLBR instruction - TLB Read\n"
+                    "    // Reads TLB entry specified by Index register\n"
+                    "    // Not fully implemented in recompiled code");
+
+            case COP0_CO_TLBWI:
+                return fmt::format("// TLBWI instruction - TLB Write Indexed\n"
+                    "    // Writes TLB entry specified by Index register\n"
+                    "    // Not fully implemented in recompiled code");
+
+            case COP0_CO_TLBWR:
+                return fmt::format("// TLBWR instruction - TLB Write Random\n"
+                    "    // Writes TLB entry specified by Random register\n"
+                    "    // Not fully implemented in recompiled code");
+
+            case COP0_CO_TLBP:
+                return fmt::format("// TLBP instruction - TLB Probe\n"
+                    "    // Searches TLB for matching entry to EntryHi, sets Index\n"
+                    "    // Not fully implemented in recompiled code");
+
+            case COP0_CO_ERET:
+                return fmt::format("// ERET instruction - Return from Exception\n"
+                    "    if (ctx->cop0_status & 0x4) {{\n"
+                    "        ctx->pc = ctx->cop0_errorepc;\n"
+                    "        ctx->cop0_status &= ~0x4; // Clear ERL\n"
+                    "    }} else {{\n"
+                    "        ctx->pc = ctx->cop0_epc;\n"
+                    "        ctx->cop0_status &= ~0x2; // Clear EXL\n"
+                    "    }}\n"
+                    "    return;");
+
+            case COP0_CO_EI:
+                return translateEI(inst);
+
+            case COP0_CO_DI:
+                return translateDI(inst);
+
+            default:
+                return fmt::format("// Unhandled COP0 CO-OP: 0x{:X}", function);
+            }
+            break;
+        }
+
+        default:
+            return fmt::format("// Unhandled COP0 instruction format: 0x{:X}", format);
         }
     }
 
@@ -846,7 +1356,7 @@ namespace ps2recomp
                                    inst.rd, inst.rs, inst.rt);
 
             case MMI1_QFSRV:
-                return fmt::format("// PS2_QFSRV - Quadword Funnel Shift Right Variable");
+                return translateQFSRV(inst);
 
             default:
                 return fmt::format("// Unhandled MMI1 function: 0x{:X}", inst.sa);
@@ -858,8 +1368,7 @@ namespace ps2recomp
             switch (inst.sa)
             {
             case MMI2_PMADDW:
-                return fmt::format("ctx->r[{}] = PS2_PMADDW(ctx->r[{}], ctx->r[{}]);",
-                                   inst.rd, inst.rs, inst.rt);
+                return translatePMADDW(inst);
 
             case MMI2_PSLLVW:
                 return fmt::format("ctx->r[{}] = PS2_PSLLVW(ctx->r[{}], ctx->r[{}]);",
@@ -885,34 +1394,34 @@ namespace ps2recomp
                 return fmt::format("// PS2_PMULTW - Packed Multiply Word");
 
             case MMI2_PDIVW:
-                return fmt::format("// PS2_PDIVW - Packed Divide Word");
+                return translatePDIVW(inst);
 
             case MMI2_PCPYLD:
-                return fmt::format("// PS2_PCPYLD - Parallel Copy Lower Doubleword");
+                return translatePCPYLD(inst);
 
             case MMI2_PMADDH:
-                return fmt::format("// PS2_PMADDH - Packed Multiply-Add Halfword");
+                return translatePMADDH(inst);
 
             case MMI2_PHMADH:
-                return fmt::format("// PS2_PHMADH - Packed Horizontal Multiply-Add Halfword");
+                return translatePHMADH(inst);
 
             case MMI2_PEXEH:
-                return fmt::format("// PS2_PEXEH - Parallel Exchange Even Halfword");
+                return translatePEXEH(inst);
 
             case MMI2_PREVH:
-                return fmt::format("// PS2_PREVH - Parallel Reverse Halfword");
+                return translatePREVH(inst);
 
             case MMI2_PMULTH:
-                return fmt::format("// PS2_PMULTH - Packed Multiply Halfword");
+                return translatePMULTH(inst);
 
             case MMI2_PDIVBW:
-                return fmt::format("// PS2_PDIVBW - Packed Divide Broadcast Word");
+                return translatePDIVBW(inst);
 
             case MMI2_PEXEW:
-                return fmt::format("// PS2_PEXEW - Parallel Exchange Even Word");
+                return translatePEXEW(inst);
 
             case MMI2_PROT3W:
-                return fmt::format("// PS2_PROT3W - Parallel Rotate 3 Words");
+                return translatePROT3W(inst);
 
             default:
                 return fmt::format("// Unhandled MMI2 function: 0x{:X}", inst.sa);
@@ -949,7 +1458,7 @@ namespace ps2recomp
                 return fmt::format("// PS2_PDIVUW - Packed Divide Unsigned Word");
 
             case MMI3_PCPYUD:
-                return fmt::format("// PS2_PCPYUD - Parallel Copy Upper Doubleword");
+                return translatePCPYUD(inst);
 
             case MMI3_PEXCH:
                 return fmt::format("// PS2_PEXCH - Parallel Exchange Center Halfword");
@@ -1037,7 +1546,6 @@ namespace ps2recomp
             return fmt::format("// VU branch instruction not implemented");
 
         case COP2_CO:
-            // VU0 macro instructions
             switch (inst.function)
             {
             case VU0_VADD:
@@ -1053,13 +1561,62 @@ namespace ps2recomp
                                    inst.rd, inst.rs, inst.rt);
 
             case VU0_VDIV:
-                return fmt::format("ctx->vu0_vf[{}] = PS2_VDIV(ctx->vu0_vf[{}], ctx->vu0_vf[{}]);",
-                                   inst.rd, inst.rs, inst.rt);
+                return fmt::format("{{ float q = 0.0f; "
+                                   "if (ctx->vu0_vf[{}].m128_f32[{}] != 0.0f) {{ "
+                                   "q = ctx->vu0_vf[{}].m128_f32[{}] / ctx->vu0_vf[{}].m128_f32[{}]; }} "
+                                   "ctx->vu0_q = q; }}",
+                                   inst.rt, inst.rd, inst.rs, inst.rd, inst.rt, inst.rd);
+
+            case VU0_VSQRT:
+                return fmt::format("{{ float fsrc = ctx->vu0_vf[{}].m128_f32[{}]; "
+                                   "ctx->vu0_q = sqrtf(fsrc); }}",
+                                   inst.rt, inst.rd);
+
+            case VU0_VRSQRT:
+                return fmt::format("{{ float fsrc = ctx->vu0_vf[{}].m128_f32[{}]; "
+                                   "if (fsrc != 0.0f) {{ ctx->vu0_q = 1.0f / sqrtf(fsrc); }} "
+                                   "else {{ ctx->vu0_q = INFINITY; }} }}",
+                                   inst.rt, inst.rd);
+
+            case VU0_VIADDI:
+                return fmt::format("ctx->vu0_i += {};",
+                                   (int16_t)inst.immediate);
+
+            case VU0_VIAND:
+                return fmt::format("ctx->vu0_i &= _mm_cvtss_f32(_mm_castsi128_ps(_mm_cvtsi32_si128(ctx->vu0_vf[{}].m128_i32[{}])));",
+                                   inst.rt, inst.rd);
+
+            case VU0_VIOR:
+                return fmt::format("ctx->vu0_i |= _mm_cvtss_f32(_mm_castsi128_ps(_mm_cvtsi32_si128(ctx->vu0_vf[{}].m128_i32[{}])));",
+                                   inst.rt, inst.rd);
+
+            case VU0_VILWR:
+                return fmt::format("{{ uint32_t addr = (_mm_extract_epi32(ctx->vu0_vf[{}], {}) + ctx->vu0_i) & 0xFFF; "
+                                   "ctx->vu0_vf[{}].m128_i32[{}] = *(int32_t*)(rdram + addr); }}",
+                                   inst.rt, inst.rd, inst.rt, inst.rd);
+
+            case VU0_VISWR:
+                return fmt::format("{{ uint32_t addr = (_mm_extract_epi32(ctx->vu0_vf[{}], {}) + ctx->vu0_i) & 0xFFF; "
+                                   "*(int32_t*)(rdram + addr) = ctx->vu0_vf[{}].m128_i32[{}]; }}",
+                                   inst.rt, inst.rd, inst.rt, inst.rd);
+
+            case VU0_VCALLMS:
+                return fmt::format("// Calls VU0 microprogram at address {} - not implemented in recompiled code",
+                                   inst.immediate);
 
             case VU0_VMULQ:
                 return fmt::format("ctx->vu0_vf[{}] = PS2_VMULQ(ctx->vu0_vf[{}], ctx->vu0_q);",
                                    inst.rd, inst.rs);
 
+            case VU0_VIADD:
+                return fmt::format("ctx->vu0_i = _mm_extract_ps(ctx->vu0_vf[{}], {}) + "
+                                   "_mm_extract_ps(ctx->vu0_vf[{}], {});",
+                                   inst.rs, inst.rd, inst.rt, inst.rd);
+
+            case VU0_VISUB:
+                return fmt::format("ctx->vu0_i = _mm_extract_ps(ctx->vu0_vf[{}], {}) - "
+                                   "_mm_extract_ps(ctx->vu0_vf[{}], {});",
+                                   inst.rs, inst.rd, inst.rt, inst.rd);
             default:
                 return fmt::format("// Unhandled VU0 macro instruction: 0x{:X}", inst.function);
             }
@@ -1255,82 +1812,290 @@ namespace ps2recomp
         return fmt::format("// Unhandled FPU instruction: format 0x{:X}, function 0x{:X}", rs, function);
     }
 
-    std::string CodeGenerator::translateCOP0Instruction(const Instruction &inst)
+    std::string CodeGenerator::translateQFSRV(const Instruction &inst)
     {
-        uint32_t rs = inst.rs; // Format field
-        uint32_t rt = inst.rt; // GPR register
-        uint32_t rd = inst.rd; // COP0 register
+        return fmt::format("{{ uint32_t shift = ctx->sa & 0x1F; "
+                           "ctx->r[{}] = _mm_or_si128(_mm_srl_epi32(ctx->r[{}], _mm_cvtsi32_si128(shift)), "
+                           "_mm_sll_epi32(ctx->r[{}], _mm_cvtsi32_si128(32 - shift))); }}",
+                           inst.rd, inst.rs, inst.rt);
+    }
 
-        if (rs == COP0_MF)
-        {
-            // MFC0 - Move From COP0
-            switch (rd)
-            {
-            case 12: // Status register
-                return fmt::format("ctx->r[{}] = ctx->cop0_status;", rt);
+    std::string CodeGenerator::translatePCPYLD(const Instruction &inst)
+    {
+        return fmt::format("ctx->r[{}] = _mm_shuffle_epi32(_mm_shuffle_epi32("
+                           "ctx->r[{}], _MM_SHUFFLE(1, 0, 1, 0)), "
+                           "_mm_shuffle_epi32(ctx->r[{}], _MM_SHUFFLE(1, 0, 1, 0)), "
+                           "_MM_SHUFFLE(3, 2, 1, 0));",
+                           inst.rd, inst.rt, inst.rs);
+    }
 
-            case 13: // Cause register
-                return fmt::format("ctx->r[{}] = ctx->cop0_cause;", rt);
+    std::string CodeGenerator::translatePMADDW(const Instruction &inst)
+    {
+        return fmt::format("{{ __m128i product = _mm_mullo_epi32(ctx->r[{}], ctx->r[{}]); "
+                           "__m128i acc = _mm_set_epi32(0, ctx->hi, 0, ctx->lo); "
+                           "__m128i result = _mm_add_epi32(product, acc); "
+                           "ctx->r[{}] = result; "
+                           "ctx->lo = _mm_extract_epi32(result, 0); "
+                           "ctx->hi = _mm_extract_epi32(result, 1); }}",
+                           inst.rs, inst.rt, inst.rd);
+    }
 
-            case 14: // EPC register
-                return fmt::format("ctx->r[{}] = ctx->cop0_epc;", rt);
+    std::string CodeGenerator::translatePEXEH(const Instruction &inst)
+    {
+        return fmt::format("ctx->r[{}] = _mm_shufflelo_epi16(_mm_shufflehi_epi16("
+                           "ctx->r[{}], _MM_SHUFFLE(2, 3, 0, 1)), _MM_SHUFFLE(2, 3, 0, 1));",
+                           inst.rd, inst.rs);
+    }
 
-            default:
-                return fmt::format("ctx->r[{}] = 0; // Unimplemented COP0 register {}", rt, rd);
-            }
-        }
-        else if (rs == COP0_MT)
-        {
-            // MTC0 - Move To COP0
-            switch (rd)
-            {
-            case 12: // Status register
-                return fmt::format("ctx->cop0_status = ctx->r[{}];", rt);
+    std::string CodeGenerator::translatePEXEW(const Instruction &inst)
+    {
+        return fmt::format("ctx->r[{}] = _mm_shuffle_epi32(ctx->r[{}], _MM_SHUFFLE(2, 3, 0, 1));",
+                           inst.rd, inst.rs);
+    }
 
-            case 13: // Cause register
-                return fmt::format("ctx->cop0_cause = ctx->r[{}];", rt);
+    std::string CodeGenerator::translatePROT3W(const Instruction &inst)
+    {
+        return fmt::format("ctx->r[{}] = _mm_shuffle_epi32(ctx->r[{}], _MM_SHUFFLE(0, 3, 2, 1));",
+                           inst.rd, inst.rs);
+    }
 
-            case 14: // EPC register
-                return fmt::format("ctx->cop0_epc = ctx->r[{}];", rt);
+    std::string CodeGenerator::translatePMADDH(const Instruction &inst)
+    {
+        return fmt::format("{{ __m128i product = _mm_mullo_epi16(ctx->r[{}], ctx->r[{}]); "
+                           "// Convert 16-bit products to 32-bit\n"
+                           "__m128i prod_lo = _mm_unpacklo_epi16(product, _mm_srai_epi16(product, 15));\n"
+                           "__m128i prod_hi = _mm_unpackhi_epi16(product, _mm_srai_epi16(product, 15));\n"
+                           "// Add to accumulator\n"
+                           "__m128i acc = _mm_set_epi32(0, ctx->hi, 0, ctx->lo);\n"
+                           "__m128i result = _mm_add_epi32(_mm_add_epi32(prod_lo, prod_hi), acc);\n"
+                           "ctx->r[{}] = result;\n"
+                           "ctx->lo = _mm_extract_epi32(result, 0);\n"
+                           "ctx->hi = _mm_extract_epi32(result, 1); }}",
+                           inst.rs, inst.rt, inst.rd);
+    }
 
-            default:
-                return fmt::format("// MTC0 to register {} ignored", rd);
-            }
-        }
-        else if (rs == COP0_CO)
-        {
-            // COP0 co-processor operations
-            uint32_t function = inst.function;
+    std::string CodeGenerator::translatePHMADH(const Instruction &inst)
+    {
+        return fmt::format("{{ // Multiply horizontally adjacent halfwords\n"
+                           "__m128i rtEven = _mm_shuffle_epi32(ctx->r[{}], _MM_SHUFFLE(2, 0, 2, 0));\n"
+                           "__m128i rtOdd = _mm_shuffle_epi32(ctx->r[{}], _MM_SHUFFLE(3, 1, 3, 1));\n"
+                           "__m128i rsEven = _mm_shuffle_epi32(ctx->r[{}], _MM_SHUFFLE(2, 0, 2, 0));\n"
+                           "__m128i rsOdd = _mm_shuffle_epi32(ctx->r[{}], _MM_SHUFFLE(3, 1, 3, 1));\n"
+                           "__m128i prod1 = _mm_mullo_epi16(rtEven, rsEven);\n"
+                           "__m128i prod2 = _mm_mullo_epi16(rtOdd, rsOdd);\n"
+                           "__m128i sum = _mm_add_epi16(prod1, prod2);\n"
+                           "// Convert to 32-bit and add to accumulator\n"
+                           "__m128i result = _mm_add_epi32(\n"
+                           "    _mm_unpacklo_epi16(sum, _mm_srai_epi16(sum, 15)),\n"
+                           "    _mm_set_epi32(0, ctx->hi, 0, ctx->lo));\n"
+                           "ctx->r[{}] = result;\n"
+                           "ctx->lo = _mm_extract_epi32(result, 0);\n"
+                           "ctx->hi = _mm_extract_epi32(result, 1); }}",
+                           inst.rt, inst.rt, inst.rs, inst.rs, inst.rd);
+    }
 
-            switch (function)
-            {
-            case COP0_CO_ERET:
-                return fmt::format("// ERET instruction - Return from exception\n    ctx->pc = ctx->cop0_epc;\n    return;");
+    std::string CodeGenerator::translatePMULTH(const Instruction &inst)
+    {
+        return fmt::format("{{ __m128i product = _mm_mullo_epi16(ctx->r[{}], ctx->r[{}]);\n"
+                           "__m128i prod_lo = _mm_unpacklo_epi16(product, _mm_srai_epi16(product, 15));\n"
+                           "__m128i prod_hi = _mm_unpackhi_epi16(product, _mm_srai_epi16(product, 15));\n"
+                           "__m128i result = _mm_add_epi32(prod_lo, prod_hi);\n"
+                           "ctx->r[{}] = result;\n"
+                           "ctx->lo = _mm_extract_epi32(result, 0);\n"
+                           "ctx->hi = _mm_extract_epi32(result, 1); }}",
+                           inst.rs, inst.rt, inst.rd);
+    }
 
-            case COP0_CO_TLBR:
-                return fmt::format("// TLBR instruction - TLB Read (ignored)");
+    std::string CodeGenerator::translatePDIVW(const Instruction &inst)
+    {
+        return fmt::format("{{ // Extract 32-bit integers\n"
+                           "int32_t rs0 = _mm_extract_epi32(ctx->r[{}], 0);\n"
+                           "int32_t rs1 = _mm_extract_epi32(ctx->r[{}], 1);\n"
+                           "int32_t rs2 = _mm_extract_epi32(ctx->r[{}], 2);\n"
+                           "int32_t rs3 = _mm_extract_epi32(ctx->r[{}], 3);\n"
+                           "int32_t rt0 = _mm_extract_epi32(ctx->r[{}], 0);\n"
+                           "int32_t rt1 = _mm_extract_epi32(ctx->r[{}], 1);\n"
+                           "int32_t rt2 = _mm_extract_epi32(ctx->r[{}], 2);\n"
+                           "int32_t rt3 = _mm_extract_epi32(ctx->r[{}], 3);\n"
+                           "// Perform division, handling div by zero\n"
+                           "int32_t lo = (rt0 != 0) ? rs0 / rt0 : 0;\n"
+                           "int32_t hi = (rt0 != 0) ? rs0 % rt0 : 0;\n"
+                           "// Store results\n"
+                           "ctx->lo = lo;\n"
+                           "ctx->hi = hi;\n"
+                           "// Create result vector\n"
+                           "ctx->r[{}] = _mm_set_epi32(0, 0, hi, lo); }}",
+                           inst.rs, inst.rs, inst.rs, inst.rs,
+                           inst.rt, inst.rt, inst.rt, inst.rt, inst.rd);
+    }
 
-            case COP0_CO_TLBWI:
-                return fmt::format("// TLBWI instruction - TLB Write Indexed (ignored)");
+    std::string CodeGenerator::translatePDIVBW(const Instruction &inst)
+    {
+        return fmt::format("{{ // Get the first element of rt as the divisor\n"
+                           "int32_t divisor = _mm_extract_epi32(ctx->r[{}], 0);\n"
+                           "// Perform division on all elements of rs if divisor is not zero\n"
+                           "if (divisor != 0) {{\n"
+                           "    int32_t rs0 = _mm_extract_epi32(ctx->r[{}], 0);\n"
+                           "    int32_t rs1 = _mm_extract_epi32(ctx->r[{}], 1);\n"
+                           "    int32_t rs2 = _mm_extract_epi32(ctx->r[{}], 2);\n"
+                           "    int32_t rs3 = _mm_extract_epi32(ctx->r[{}], 3);\n"
+                           "    // Store quotient in lo and remainder in hi\n"
+                           "    ctx->lo = rs0 / divisor;\n"
+                           "    ctx->hi = rs0 % divisor;\n"
+                           "    // Create result vector\n"
+                           "    ctx->r[{}] = _mm_set_epi32(0, 0, ctx->hi, ctx->lo);\n"
+                           "}} }}",
+                           inst.rt, inst.rs, inst.rs, inst.rs, inst.rs, inst.rd);
+    }
 
-            case COP0_CO_TLBWR:
-                return fmt::format("// TLBWR instruction - TLB Write Random (ignored)");
+    std::string CodeGenerator::translatePCPYUD(const Instruction &inst)
+    {
+        return fmt::format("ctx->r[{}] = _mm_unpackhi_epi64(ctx->r[{}], ctx->r[{}]);",
+                           inst.rd, inst.rt, inst.rs);
+    }
 
-            case COP0_CO_TLBP:
-                return fmt::format("// TLBP instruction - TLB Probe (ignored)");
+    std::string CodeGenerator::translatePREVH(const Instruction &inst)
+    {
+        return fmt::format("ctx->r[{}] = _mm_shufflelo_epi16(_mm_shufflehi_epi16("
+                           "ctx->r[{}], _MM_SHUFFLE(2, 3, 0, 1)), _MM_SHUFFLE(2, 3, 0, 1));",
+                           inst.rd, inst.rs);
+    }
 
-            case COP0_CO_EI:
-                return fmt::format("// EI instruction - Enable Interrupts\n    ctx->cop0_status |= 0x1;");
+    std::string CodeGenerator::translateDSLLV(const Instruction &inst)
+    {
+        return fmt::format("{{ uint64_t val = ((uint64_t)ctx->r[{}].m128i_u32[1] << 32) | ctx->r[{}].m128i_u32[0]; "
+                           "val = val << (ctx->r[{}] & 0x3F); "
+                           "ctx->r[{}].m128i_u32[0] = (uint32_t)val; "
+                           "ctx->r[{}].m128i_u32[1] = (uint32_t)(val >> 32); }}",
+                           inst.rt, inst.rt, inst.rs, inst.rd, inst.rd);
+    }
 
-            case COP0_CO_DI:
-                return fmt::format("// DI instruction - Disable Interrupts\n    ctx->cop0_status &= ~0x1;");
+    std::string CodeGenerator::translateDSRLV(const Instruction &inst)
+    {
+        return fmt::format("{{ uint64_t val = ((uint64_t)ctx->r[{}].m128i_u32[1] << 32) | ctx->r[{}].m128i_u32[0]; "
+                           "val = val >> (ctx->r[{}] & 0x3F); "
+                           "ctx->r[{}].m128i_u32[0] = (uint32_t)val; "
+                           "ctx->r[{}].m128i_u32[1] = (uint32_t)(val >> 32); }}",
+                           inst.rt, inst.rt, inst.rs, inst.rd, inst.rd);
+    }
 
-            default:
-                return fmt::format("// Unhandled COP0 CO-OP: 0x{:X}", function);
-            }
-        }
+    std::string CodeGenerator::translateDSRAV(const Instruction &inst)
+    {
+        return fmt::format("{{ int64_t val = ((int64_t)(int32_t)ctx->r[{}].m128i_i32[1] << 32) | (uint32_t)ctx->r[{}].m128i_u32[0]; "
+                           "val = val >> (ctx->r[{}] & 0x3F); "
+                           "ctx->r[{}].m128i_u32[0] = (uint32_t)val; "
+                           "ctx->r[{}].m128i_u32[1] = (uint32_t)(val >> 32); }}",
+                           inst.rt, inst.rt, inst.rs, inst.rd, inst.rd);
+    }
 
-        return fmt::format("// Unhandled COP0 instruction: format 0x{:X}", rs);
+    std::string CodeGenerator::translateDSLL(const Instruction &inst)
+    {
+        return fmt::format("{{ uint64_t val = ((uint64_t)ctx->r[{}].m128i_u32[1] << 32) | ctx->r[{}].m128i_u32[0]; "
+                           "val = val << {}; "
+                           "ctx->r[{}].m128i_u32[0] = (uint32_t)val; "
+                           "ctx->r[{}].m128i_u32[1] = (uint32_t)(val >> 32); }}",
+                           inst.rt, inst.rt, inst.sa, inst.rd, inst.rd);
+    }
+
+    std::string CodeGenerator::translateDSRL(const Instruction &inst)
+    {
+        return fmt::format("{{ uint64_t val = ((uint64_t)ctx->r[{}].m128i_u32[1] << 32) | ctx->r[{}].m128i_u32[0]; "
+                           "val = val >> {}; "
+                           "ctx->r[{}].m128i_u32[0] = (uint32_t)val; "
+                           "ctx->r[{}].m128i_u32[1] = (uint32_t)(val >> 32); }}",
+                           inst.rt, inst.rt, inst.sa, inst.rd, inst.rd);
+    }
+
+    std::string CodeGenerator::translateDSRA(const Instruction &inst)
+    {
+        return fmt::format("{{ int64_t val = ((int64_t)(int32_t)ctx->r[{}].m128i_i32[1] << 32) | (uint32_t)ctx->r[{}].m128i_u32[0]; "
+                           "val = val >> {}; "
+                           "ctx->r[{}].m128i_u32[0] = (uint32_t)val; "
+                           "ctx->r[{}].m128i_u32[1] = (uint32_t)(val >> 32); }}",
+                           inst.rt, inst.rt, inst.sa, inst.rd, inst.rd);
+    }
+
+    std::string CodeGenerator::translateDSLL32(const Instruction &inst)
+    {
+        return fmt::format("{{ uint64_t val = ((uint64_t)ctx->r[{}].m128i_u32[1] << 32) | ctx->r[{}].m128i_u32[0]; "
+                           "val = val << (32 + {}); "
+                           "ctx->r[{}].m128i_u32[0] = (uint32_t)val; "
+                           "ctx->r[{}].m128i_u32[1] = (uint32_t)(val >> 32); }}",
+                           inst.rt, inst.rt, inst.sa, inst.rd, inst.rd);
+    }
+
+    std::string CodeGenerator::translateDSRL32(const Instruction &inst)
+    {
+        return fmt::format("{{ uint64_t val = ((uint64_t)ctx->r[{}].m128i_u32[1] << 32) | ctx->r[{}].m128i_u32[0]; "
+                           "val = val >> (32 + {}); "
+                           "ctx->r[{}].m128i_u32[0] = (uint32_t)val; "
+                           "ctx->r[{}].m128i_u32[1] = 0; }}",
+                           inst.rt, inst.rt, inst.sa, inst.rd, inst.rd);
+    }
+
+    std::string CodeGenerator::translateDSRA32(const Instruction &inst)
+    {
+        return fmt::format("{{ int64_t val = ((int64_t)(int32_t)ctx->r[{}].m128i_i32[1] << 32) | (uint32_t)ctx->r[{}].m128i_u32[0]; "
+                           "val = val >> (32 + {}); "
+                           "ctx->r[{}].m128i_u32[0] = (uint32_t)val; "
+                           "ctx->r[{}].m128i_u32[1] = (val < 0) ? 0xFFFFFFFF : 0; }}",
+                           inst.rt, inst.rt, inst.sa, inst.rd, inst.rd);
+    }
+
+    std::string CodeGenerator::translateDADD(const Instruction &inst)
+    {
+        return fmt::format("{{ int64_t a = ((int64_t)(int32_t)ctx->r[{}].m128i_i32[1] << 32) | (uint32_t)ctx->r[{}].m128i_u32[0]; "
+                           "int64_t b = ((int64_t)(int32_t)ctx->r[{}].m128i_i32[1] << 32) | (uint32_t)ctx->r[{}].m128i_u32[0]; "
+                           "int64_t res = a + b; "
+                           "ctx->r[{}].m128i_u32[0] = (uint32_t)res; "
+                           "ctx->r[{}].m128i_u32[1] = (uint32_t)(res >> 32); }}",
+                           inst.rs, inst.rs, inst.rt, inst.rt, inst.rd, inst.rd);
+    }
+
+    std::string CodeGenerator::translateDADDU(const Instruction &inst)
+    {
+        return fmt::format("{{ uint64_t a = ((uint64_t)ctx->r[{}].m128i_u32[1] << 32) | ctx->r[{}].m128i_u32[0]; "
+                           "uint64_t b = ((uint64_t)ctx->r[{}].m128i_u32[1] << 32) | ctx->r[{}].m128i_u32[0]; "
+                           "uint64_t res = a + b; "
+                           "ctx->r[{}].m128i_u32[0] = (uint32_t)res; "
+                           "ctx->r[{}].m128i_u32[1] = (uint32_t)(res >> 32); }}",
+                           inst.rs, inst.rs, inst.rt, inst.rt, inst.rd, inst.rd);
+    }
+
+    std::string CodeGenerator::translateDSUB(const Instruction &inst)
+    {
+        return fmt::format("{{ int64_t a = ((int64_t)(int32_t)ctx->r[{}].m128i_i32[1] << 32) | (uint32_t)ctx->r[{}].m128i_u32[0]; "
+                           "int64_t b = ((int64_t)(int32_t)ctx->r[{}].m128i_i32[1] << 32) | (uint32_t)ctx->r[{}].m128i_u32[0]; "
+                           "int64_t res = a - b; "
+                           "ctx->r[{}].m128i_u32[0] = (uint32_t)res; "
+                           "ctx->r[{}].m128i_u32[1] = (uint32_t)(res >> 32); }}",
+                           inst.rs, inst.rs, inst.rt, inst.rt, inst.rd, inst.rd);
+    }
+
+    std::string CodeGenerator::translateDSUBU(const Instruction &inst)
+    {
+        return fmt::format("{{ uint64_t a = ((uint64_t)ctx->r[{}].m128i_u32[1] << 32) | ctx->r[{}].m128i_u32[0]; "
+                           "uint64_t b = ((uint64_t)ctx->r[{}].m128i_u32[1] << 32) | ctx->r[{}].m128i_u32[0]; "
+                           "uint64_t res = a - b; "
+                           "ctx->r[{}].m128i_u32[0] = (uint32_t)res; "
+                           "ctx->r[{}].m128i_u32[1] = (uint32_t)(res >> 32); }}",
+                           inst.rs, inst.rs, inst.rt, inst.rt, inst.rd, inst.rd);
+    }
+
+    std::string CodeGenerator::translateSYNC(const Instruction &inst)
+    {
+        return "// SYNC instruction - memory barrier\n"
+               "    // In recompiled code, we don't need explicit memory barriers";
+    }
+
+    std::string CodeGenerator::translateEI(const Instruction &inst)
+    {
+        return "ctx->cop0_status |= 0x1; // Enable interrupts";
+    }
+
+    std::string CodeGenerator::translateDI(const Instruction &inst)
+    {
+        return "ctx->cop0_status &= ~0x1; // Disable interrupts";
     }
 
     std::string CodeGenerator::generateJumpTableSwitch(const Instruction &inst, uint32_t tableAddress,

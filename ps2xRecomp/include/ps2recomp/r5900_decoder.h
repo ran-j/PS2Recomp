@@ -36,14 +36,17 @@ namespace ps2recomp
  
         void decodeSpecial(Instruction &inst) const;
         void decodeRegimm(Instruction &inst) const;
-        void decodeMMI(Instruction &inst) const;
+        
         void decodeCOP0(Instruction& inst) const;
         void decodeCOP1(Instruction &inst) const;
         void decodeCOP2(Instruction &inst) const;
+
+        void decodeMMI(Instruction &inst) const;
         void decodeMMI0(Instruction &inst) const;
         void decodeMMI1(Instruction &inst) const;
         void decodeMMI2(Instruction &inst) const;
         void decodeMMI3(Instruction &inst) const;
+        
         void decodePMFHL(Instruction &inst) const;
     };
 

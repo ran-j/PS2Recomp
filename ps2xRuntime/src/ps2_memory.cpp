@@ -3,18 +3,6 @@
 #include <cstring>
 #include <stdexcept>
 
-constexpr uint32_t PS2_RAM_BASE = 0x00000000;
-constexpr uint32_t PS2_RAM_SIZE = 32 * 1024 * 1024; // 32MB
-constexpr uint32_t PS2_SCRATCHPAD_BASE = 0x70000000;
-constexpr uint32_t PS2_SCRATCHPAD_SIZE = 16 * 1024; // 16KB
-constexpr uint32_t PS2_IO_BASE = 0x10000000;
-constexpr uint32_t PS2_IO_SIZE = 0x10000; // 64KB
-constexpr uint32_t PS2_VU0_CODE_BASE = 0x11000000;
-constexpr uint32_t PS2_VU0_DATA_BASE = 0x11004000;
-constexpr uint32_t PS2_VU1_CODE_BASE = 0x11008000;
-constexpr uint32_t PS2_VU1_DATA_BASE = 0x1100C000;
-constexpr uint32_t PS2_GS_BASE = 0x12000000;
-
 PS2Memory::PS2Memory()
     : m_rdram(nullptr), m_scratchpad(nullptr)
 {

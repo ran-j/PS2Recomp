@@ -280,24 +280,50 @@ namespace ps2recomp
         MMI3_PEXCW = 0x1E,
     };
 
-    // COP0 (System Control) function codes
-    enum Cop0Functions
+    // COP0 (rs field)
+    enum COP0Format
     {
-        COP0_MF = 0x00,
-        COP0_MT = 0x04,
-        COP0_CO = 0x10 // COProcessor commands
+        COP0_MF = 0x00, // Move From COP0
+        COP0_MT = 0x04, // Move To COP0
+        COP0_CO = 0x10  // COP0 operation
     };
 
     // COP0 CO (COProcessor) function codes
     enum Cop0CoFunctions
     {
-        COP0_CO_TLBR = 0x01,
-        COP0_CO_TLBWI = 0x02,
-        COP0_CO_TLBWR = 0x06,
-        COP0_CO_TLBP = 0x08,
-        COP0_CO_ERET = 0x18,
-        COP0_CO_EI = 0x38,
-        COP0_CO_DI = 0x39
+        COP0_CO_TLBR = 0x01,  // TLB Read
+        COP0_CO_TLBWI = 0x02, // TLB Write Indexed
+        COP0_CO_TLBWR = 0x06, // TLB Write Random
+        COP0_CO_TLBP = 0x08,  // TLB Probe
+        COP0_CO_ERET = 0x18,  // Return from Exception
+        COP0_CO_EI = 0x38,    // Enable Interrupts
+        COP0_CO_DI = 0x39     // Disable Interrupts
+    };
+
+    enum COP0Reg
+    {
+        COP0_REG_INDEX = 0,     // Index into TLB array
+        COP0_REG_RANDOM = 1,    // Randomly generated index into TLB array
+        COP0_REG_ENTRYLO0 = 2,  // Low half of TLB entry for even-numbered virtual pages
+        COP0_REG_ENTRYLO1 = 3,  // Low half of TLB entry for odd-numbered virtual pages
+        COP0_REG_CONTEXT = 4,   // TLB miss handler pointer
+        COP0_REG_PAGEMASK = 5,  // TLB page size mask
+        COP0_REG_WIRED = 6,     // Controls which TLB entries are affected by random replacement
+        COP0_REG_BADVADDR = 8,  // Virtual address of most recent address-related exception
+        COP0_REG_COUNT = 9,     // Timer count
+        COP0_REG_ENTRYHI = 10,  // High half of TLB entry
+        COP0_REG_COMPARE = 11,  // Timer compare value
+        COP0_REG_STATUS = 12,   // Processor status and control
+        COP0_REG_CAUSE = 13,    // Cause of last exception
+        COP0_REG_EPC = 14,      // Exception program counter
+        COP0_REG_PRID = 15,     // Processor identification and revision
+        COP0_REG_CONFIG = 16,   // Configuration register
+        COP0_REG_BADPADDR = 23, // Bad physical address
+        COP0_REG_DEBUG = 24,    // Debug register
+        COP0_REG_PERF = 25,     // Performance counter
+        COP0_REG_TAGLO = 28,    // Low bits of cache tag
+        COP0_REG_TAGHI = 29,    // High bits of cache tag
+        COP0_REG_ERROREPC = 30  // Error exception program counter
     };
 
     // COP1 (FPU) function codes
