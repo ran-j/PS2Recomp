@@ -8,6 +8,9 @@
 #include <functional>
 #include <immintrin.h> // For SSE/AVX instructions
 
+#define PS2_RAM_SIZE 0x2000000     // 32MB
+#define PS2_SCRATCHPAD_SIZE 0x4000 // 16KB
+
 // PS2 CPU context (R5900)
 struct R5900Context
 {
@@ -112,6 +115,13 @@ struct DMARegisters
     uint32_t sadr; // Source address
 };
 
+struct JumpTable
+{
+    uint32_t address;              // Base address of the jump table
+    uint32_t baseRegister;         // Register used for index
+    std::vector<uint32_t> targets; // Jump targets
+};
+
 class PS2Memory
 {
 public:
@@ -119,7 +129,7 @@ public:
     ~PS2Memory();
 
     // Initialize memory
-    bool initialize(size_t ramSize = 32 * 1024 * 1024);
+    bool initialize(size_t ramSize = PS2_RAM_SIZE);
 
     // Memory access methods
     uint8_t *getRDRAM() { return m_rdram; }
@@ -142,6 +152,15 @@ public:
     // TLB handling
     uint32_t translateAddress(uint32_t virtualAddress);
 
+    // Hardware register interface
+    bool writeIORegister(uint32_t address, uint32_t value);
+    uint32_t readIORegister(uint32_t address);
+
+    // Track code modifications for self-modifying code
+    void registerCodeRegion(uint32_t start, uint32_t end);
+    bool isCodeModified(uint32_t address, uint32_t size);
+    void clearModifiedFlag(uint32_t address, uint32_t size);
+
 private:
     // Main RAM (32MB)
     uint8_t *m_rdram;
@@ -156,7 +175,6 @@ private:
     std::unordered_map<uint32_t, uint32_t> m_ioRegisters;
 
     // Registers
-    EECoreRegisters ee_regs;
     GSRegisters gs_regs;
     VIFRegisters vif0_regs;
     VIFRegisters vif1_regs;
@@ -172,6 +190,17 @@ private:
     };
 
     std::vector<TLBEntry> m_tlbEntries;
+
+    struct CodeRegion
+    {
+        uint32_t start;
+        uint32_t end;
+        std::vector<bool> modified; // Bitmap of modified 4-byte blocks
+    };
+    std::vector<CodeRegion> m_codeRegions;
+
+    bool isAddressInRegion(uint32_t address, const CodeRegion &region);
+    void markModified(uint32_t address, uint32_t size);
 };
 
 class PS2Runtime
