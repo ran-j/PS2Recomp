@@ -1112,34 +1112,34 @@ namespace ps2recomp
             {
             case COP0_CO_TLBR:
                 return fmt::format("// TLBR instruction - TLB Read\n"
-                    "    // Reads TLB entry specified by Index register\n"
-                    "    // Not fully implemented in recompiled code");
+                                   "    // Reads TLB entry specified by Index register\n"
+                                   "    // Not fully implemented in recompiled code");
 
             case COP0_CO_TLBWI:
                 return fmt::format("// TLBWI instruction - TLB Write Indexed\n"
-                    "    // Writes TLB entry specified by Index register\n"
-                    "    // Not fully implemented in recompiled code");
+                                   "    // Writes TLB entry specified by Index register\n"
+                                   "    // Not fully implemented in recompiled code");
 
             case COP0_CO_TLBWR:
                 return fmt::format("// TLBWR instruction - TLB Write Random\n"
-                    "    // Writes TLB entry specified by Random register\n"
-                    "    // Not fully implemented in recompiled code");
+                                   "    // Writes TLB entry specified by Random register\n"
+                                   "    // Not fully implemented in recompiled code");
 
             case COP0_CO_TLBP:
                 return fmt::format("// TLBP instruction - TLB Probe\n"
-                    "    // Searches TLB for matching entry to EntryHi, sets Index\n"
-                    "    // Not fully implemented in recompiled code");
+                                   "    // Searches TLB for matching entry to EntryHi, sets Index\n"
+                                   "    // Not fully implemented in recompiled code");
 
             case COP0_CO_ERET:
                 return fmt::format("// ERET instruction - Return from Exception\n"
-                    "    if (ctx->cop0_status & 0x4) {{\n"
-                    "        ctx->pc = ctx->cop0_errorepc;\n"
-                    "        ctx->cop0_status &= ~0x4; // Clear ERL\n"
-                    "    }} else {{\n"
-                    "        ctx->pc = ctx->cop0_epc;\n"
-                    "        ctx->cop0_status &= ~0x2; // Clear EXL\n"
-                    "    }}\n"
-                    "    return;");
+                                   "    if (ctx->cop0_status & 0x4) {{\n"
+                                   "        ctx->pc = ctx->cop0_errorepc;\n"
+                                   "        ctx->cop0_status &= ~0x4; // Clear ERL\n"
+                                   "    }} else {{\n"
+                                   "        ctx->pc = ctx->cop0_epc;\n"
+                                   "        ctx->cop0_status &= ~0x2; // Clear EXL\n"
+                                   "    }}\n"
+                                   "    return;");
 
             case COP0_CO_EI:
                 return translateEI(inst);
@@ -1452,22 +1452,22 @@ namespace ps2recomp
                                    inst.rd, inst.rs, inst.rt);
 
             case MMI3_PMULTUW:
-                return fmt::format("// PS2_PMULTUW - Packed Multiply Unsigned Word");
+                return translatePMULTUW(inst);
 
             case MMI3_PDIVUW:
-                return fmt::format("// PS2_PDIVUW - Packed Divide Unsigned Word");
+                return translatePDIVUW(inst);
 
             case MMI3_PCPYUD:
                 return translatePCPYUD(inst);
 
             case MMI3_PEXCH:
-                return fmt::format("// PS2_PEXCH - Parallel Exchange Center Halfword");
+                return translatePEXCH(inst);
 
             case MMI3_PCPYH:
-                return fmt::format("// PS2_PCPYH - Parallel Copy Halfword");
+                return translatePCPYH(inst);
 
             case MMI3_PEXCW:
-                return fmt::format("// PS2_PEXCW - Parallel Exchange Center Word");
+                return translatePEXCW(inst);
 
             default:
                 return fmt::format("// Unhandled MMI3 function: 0x{:X}", inst.sa);
@@ -2096,6 +2096,106 @@ namespace ps2recomp
     std::string CodeGenerator::translateDI(const Instruction &inst)
     {
         return "ctx->cop0_status &= ~0x1; // Disable interrupts";
+    }
+
+    std::string CodeGenerator::translatePMULTUW(const Instruction &inst)
+    {
+        return fmt::format("{{ // Packed multiply of unsigned 32-bit integers\n"
+                           "    __m128i a = ctx->r[{}];\n"
+                           "    __m128i b = ctx->r[{}];\n"
+                           "    // Extract 32-bit integers\n"
+                           "    uint32_t a0 = _mm_extract_epi32(a, 0);\n"
+                           "    uint32_t a1 = _mm_extract_epi32(a, 1);\n"
+                           "    uint32_t a2 = _mm_extract_epi32(a, 2);\n"
+                           "    uint32_t a3 = _mm_extract_epi32(a, 3);\n"
+                           "    uint32_t b0 = _mm_extract_epi32(b, 0);\n"
+                           "    uint32_t b1 = _mm_extract_epi32(b, 1);\n"
+                           "    uint32_t b2 = _mm_extract_epi32(b, 2);\n"
+                           "    uint32_t b3 = _mm_extract_epi32(b, 3);\n"
+                           "    // Compute products\n"
+                           "    uint64_t product0 = (uint64_t)a0 * (uint64_t)b0;\n"
+                           "    uint64_t product1 = (uint64_t)a1 * (uint64_t)b1;\n"
+                           "    uint64_t product2 = (uint64_t)a2 * (uint64_t)b2;\n"
+                           "    uint64_t product3 = (uint64_t)a3 * (uint64_t)b3;\n"
+                           "    // Store results\n"
+                           "    ctx->lo = (uint32_t)product0;\n"
+                           "    ctx->hi = (uint32_t)(product0 >> 32);\n"
+                           "    // Create result vector with the multiplication results\n"
+                           "    ctx->r[{}] = _mm_set_epi32(\n"
+                           "        (uint32_t)product3, (uint32_t)product2,\n"
+                           "        (uint32_t)product1, (uint32_t)product0); }}",
+                           inst.rs, inst.rt, inst.rd);
+    }
+
+    std::string CodeGenerator::translatePDIVUW(const Instruction &inst)
+    {
+        return fmt::format("{{ // Packed division of unsigned 32-bit integers\n"
+                           "    __m128i a = ctx->r[{}];\n"
+                           "    __m128i b = ctx->r[{}];\n"
+                           "    // Extract 32-bit integers\n"
+                           "    uint32_t a0 = _mm_extract_epi32(a, 0);\n"
+                           "    uint32_t b0 = _mm_extract_epi32(b, 0);\n"
+                           "    // PS2 PDIVUW only operates on the first word\n"
+                           "    uint32_t quotient = 0;\n"
+                           "    uint32_t remainder = 0;\n"
+                           "    if (b0 != 0) {{ // Check to avoid division by zero\n"
+                           "        quotient = a0 / b0;\n"
+                           "        remainder = a0 % b0;\n"
+                           "    }}\n"
+                           "    // Store results\n"
+                           "    ctx->lo = quotient;\n"
+                           "    ctx->hi = remainder;\n"
+                           "    // Create result vector with zeros except in lowest word\n"
+                           "    ctx->r[{}] = _mm_set_epi32(0, 0, 0, quotient); }}",
+                           inst.rs, inst.rt, inst.rd);
+    }
+
+    std::string CodeGenerator::translatePEXCH(const Instruction &inst)
+    {
+        return fmt::format("{{ // Parallel Exchange Center Halfword\n"
+                           "    // For each 64-bit half, exchange the middle two 16-bit values\n"
+                           "    // [A3|A2|A1|A0] => [A3|A1|A2|A0] for each 64-bit half\n"
+                           "    __m128i src = ctx->r[{}];\n"
+                           "    // Create a shuffle mask for _mm_shuffle_epi8 that exchanges the center halfwords\n"
+                           "    // For low 64 bits: [0,1, 4,5, 2,3, 6,7] becomes [0,1, 4,5, 6,7, 2,3]\n"
+                           "    // For high 64 bits: [8,9, 12,13, 10,11, 14,15] becomes [8,9, 12,13, 14,15, 10,11]\n"
+                           "    __m128i shuffleMask = _mm_set_epi8(\n"
+                           "        15, 14, 13, 12, 11, 10, 9, 8,    // High 64 bits: keep order\n"
+                           "        7, 6, 3, 2, 5, 4, 1, 0);         // Low 64 bits: swap 2-3 and 6-7\n"
+                           "    __m128i shuffled = _mm_shuffle_epi8(src, shuffleMask);\n"
+                           "    // Now we need to swap the byte pairs within each 64-bit half\n"
+                           "    // Using a 16-bit shuffle for each 64-bit half\n"
+                           "    ctx->r[{}] = _mm_shufflelo_epi16(_mm_shufflehi_epi16(shuffled, \n"
+                           "        _MM_SHUFFLE(3, 1, 2, 0)), _MM_SHUFFLE(3, 1, 2, 0)); }}",
+                           inst.rs, inst.rd);
+    }
+
+    std::string CodeGenerator::translatePCPYH(const Instruction &inst)
+    {
+        return fmt::format("{{ // Parallel Copy Halfword\n"
+                           "    // Copy the lowest 16-bit value in each 64-bit half to all halfwords in that half\n"
+                           "    // [A3|A2|A1|A0] => [A0|A0|A0|A0] for the low 64 bits\n"
+                           "    // [B3|B2|B1|B0] => [B0|B0|B0|B0] for the high 64 bits\n"
+                           "    __m128i src = ctx->r[{}];\n"
+                           "    // Extract the lowest 16-bit value from each 64-bit half\n"
+                           "    uint16_t lowHalf = (uint16_t)_mm_extract_epi16(src, 0);\n"
+                           "    uint16_t highHalf = (uint16_t)_mm_extract_epi16(src, 4);\n"
+                           "    // Create a vector with these values repeated\n"
+                           "    ctx->r[{}] = _mm_set_epi16(\n"
+                           "        highHalf, highHalf, highHalf, highHalf,\n"
+                           "        lowHalf, lowHalf, lowHalf, lowHalf); }}",
+                           inst.rs, inst.rd);
+    }
+
+    std::string CodeGenerator::translatePEXCW(const Instruction &inst)
+    {
+        return fmt::format("{{ // Parallel Exchange Center Word\n"
+                           "    // Exchange the two 32-bit words in each 64-bit half\n"
+                           "    // [A1|A0|B1|B0] => [A0|A1|B0|B1]\n"
+                           "    __m128i src = ctx->r[{}];\n"
+                           "    // Exchange words in each 64-bit half using shuffle\n"
+                           "    ctx->r[{}] = _mm_shuffle_epi32(src, _MM_SHUFFLE(2, 3, 0, 1)); }}",
+                           inst.rs, inst.rd);
     }
 
     std::string CodeGenerator::generateJumpTableSwitch(const Instruction &inst, uint32_t tableAddress,
