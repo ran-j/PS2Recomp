@@ -1595,7 +1595,7 @@ namespace ps2recomp
                 return fmt::format("// Calls VU0 microprogram at address {} - not implemented in recompiled code",
                                    inst.immediate);
 
-            case VU0_VRGET: // TODO - Check if this is correct
+            case VU0_VRGET:
                 return fmt::format("ctx->vu0_vf[{}] = ctx->vu0_r; // Get VU0 R register",
                                    inst.rd);
 

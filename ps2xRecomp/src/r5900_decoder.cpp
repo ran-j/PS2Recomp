@@ -531,22 +531,26 @@ namespace ps2recomp
 
     void R5900Decoder::decodePMFHL(Instruction &inst) const
     {
-        // PMFHL has different variations based on the sa field
         uint32_t saField = inst.sa;
 
         switch (saField)
         {
         case PMFHL_LW:
-        case PMFHL_UW:
-        case PMFHL_SLW:
-        case PMFHL_LH:
-        case PMFHL_SH:
-            // Set the appropriate flag for the PMFHL variation
-            inst.pmfhlVariation = saField;
+            inst.pmfhlVariation = PMFHL_LW;
             break;
-
+        case PMFHL_UW:
+            inst.pmfhlVariation = PMFHL_UW;
+            break;
+        case PMFHL_SLW:
+            inst.pmfhlVariation = PMFHL_SLW;
+            break;
+        case PMFHL_LH:
+            inst.pmfhlVariation = PMFHL_LH;
+            break;
+        case PMFHL_SH:
+            inst.pmfhlVariation = PMFHL_SH;
+            break;
         default:
-            // Unknown PMFHL variation
             inst.pmfhlVariation = 0xFF;
             break;
         }
