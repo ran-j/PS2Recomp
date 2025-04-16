@@ -24,40 +24,29 @@ constexpr uint32_t PS2_GS_BASE = 0x12000000;
 struct R5900Context
 {
     // General Purpose Registers (128-bit)
-    __m128i r[32];
+    __m128i r[32]; // Main registers
 
-    // Program Counter Hi/Lo registers (64-bit)
-    uint32_t pc;
-    uint64_t insn_count;
-    uint32_t hi; // High result register
-    uint32_t lo; // Low result register
-    uint32_t sa; // Shift amount register
-
-    uint32_t lo1, hi1; // For MULT1/DIV1 instructions
-
-    // 128-bit registers for SIMD operations
-    __m128i r128[32];
+    // Control registers
+    uint32_t pc;         // Program counter
+    uint64_t insn_count; // Instruction counter
+    uint32_t hi, lo;     // HI/LO registers for mult/div results
+    uint32_t hi1, lo1;   // Secondary HI/LO registers for MULT1/DIV1
+    uint32_t sa;         // Shift amount register
 
     // VU0 registers (when used in macro mode)
-    __m128 vu0_vf[32];
-    uint16_t vu0_status; // VU0 status/flags
-    float vu0_acc[4];    // VU0 ACC (accumulator)
-    float vu0_q;         // VU0 Q register (quotient)
-    float vu0_p;         // VU0 P register
-    float vu0_i;
-    __m128 vu0_r;            // VU0 R register (special purpose register)
+    __m128 vu0_vf[32];       // VU0 vector registers
+    float vu0_q;             // VU0 Q register (quotient)
+    float vu0_p;             // VU0 P register (EFU result)
+    float vu0_i;             // VU0 I register (integer value)
+    __m128 vu0_r;            // VU0 R register
+    uint16_t vu0_status;     // VU0 status register
     uint32_t vu0_mac_flags;  // VU0 MAC flags
     uint32_t vu0_clip_flags; // VU0 clipping flags
     uint32_t vu0_cmsar0;     // VU0 microprogram start address
     uint32_t vu0_fbrst;      // VIF/VU reset register
     float vu0_cf[4];         // VU0 FMAC control floating-point registers
 
-    // COP0 System control registers (some critical ones)
-    uint32_t cop0_registers[32];
-    uint32_t cop0_status; // Status register
-    uint32_t cop0_cause;  // Cause register
-    uint32_t cop0_epc;    // Exception PC
-    uint32_t cop0_prid;
+    // COP0 System control registers
     uint32_t cop0_index;
     uint32_t cop0_random;
     uint32_t cop0_entrylo0;
@@ -69,6 +58,10 @@ struct R5900Context
     uint32_t cop0_count;
     uint32_t cop0_entryhi;
     uint32_t cop0_compare;
+    uint32_t cop0_status;
+    uint32_t cop0_cause;
+    uint32_t cop0_epc;
+    uint32_t cop0_prid;
     uint32_t cop0_config;
     uint32_t cop0_badpaddr;
     uint32_t cop0_debug;
@@ -79,12 +72,10 @@ struct R5900Context
 
     // FPU registers (COP1)
     float f[32];
-    uint32_t fcr0;  // Implementation/revision register
     uint32_t fcr31; // Control/status register
 
     R5900Context()
     {
-        // Zero all registers
         for (int i = 0; i < 32; i++)
         {
             r[i] = _mm_setzero_si128();
@@ -92,10 +83,26 @@ struct R5900Context
             vu0_vf[i] = _mm_setzero_ps();
         }
 
+        for (int i = 0; i < 4; i++)
+        {
+            vu0_cf[i] = 0.0f;
+        }
+
         pc = 0;
         insn_count = 0;
         lo = hi = lo1 = hi1 = 0;
         sa = 0;
+
+        // Initialize VU0 registers
+        vu0_q = 1.0f; // Q register usually initialized to 1.0
+        vu0_p = 0.0f;
+        vu0_i = 0.0f;
+        vu0_r = _mm_setzero_ps();
+        vu0_status = 0;
+        vu0_mac_flags = 0;
+        vu0_clip_flags = 0;
+        vu0_cmsar0 = 0;
+        vu0_fbrst = 0;
 
         // Reset COP0 registers
         cop0_index = 0;
@@ -121,17 +128,8 @@ struct R5900Context
         cop0_taghi = 0;
         cop0_errorepc = 0;
 
-        // Reset COP1/VU0 state
+        // Reset COP1 state
         fcr31 = 0;
-        vu0_q = 0.0f;
-        vu0_i = 0.0f;
-        vu0_status = 0;
-
-        // Set the FPU registers to predictable but non-zero values
-        for (int i = 0; i < 32; i++)
-        {
-            f[i] = static_cast<float>(i);
-        }
     }
 };
 
