@@ -23,17 +23,42 @@ namespace ps2recomp
         uint32_t immediate; // Immediate value for I-type instructions
         uint32_t target;    // Jump target for J-type instructions
         uint32_t raw;       // Raw instruction value
-        bool isMMI;         // Is MMI instruction (PS2 specific)
-        bool isVU;          // Is VU instruction (PS2 specific)
-        bool isBranch;      // Is branch instruction
-        bool isJump;        // Is jump instruction
-        bool isCall;        // Is function call
-        bool isReturn;      // Is return instruction
-        bool hasDelaySlot;  // Has delay slot
-        bool isMultimedia;  // PS2-specific multimedia operations
-        bool isStore;
-        bool isLoad;
-        uint8_t pmfhlVariation;
+
+        // Instruction type flags
+        bool isMMI;        // Is MMI instruction (PS2 specific)
+        bool isVU;         // Is VU instruction (PS2 specific)
+        bool isBranch;     // Is branch instruction
+        bool isJump;       // Is jump instruction
+        bool isCall;       // Is function call
+        bool isReturn;     // Is return instruction
+        bool hasDelaySlot; // Has delay slot
+        bool isMultimedia; // PS2-specific multimedia operations
+        bool isStore;      // Is store instruction
+        bool isLoad;       // Is load instruction
+
+        // Additional PS2-specific fields
+        uint8_t mmiType;        // 0=MMI0, 1=MMI1, 2=MMI2, 3=MMI3
+        uint8_t mmiFunction;    // Function within MMI type
+        uint8_t pmfhlVariation; // For PMFHL instructions
+        uint8_t vuFunction;     // For VU instructions
+
+        struct
+        {
+            bool isVector;       // Uses vector operations
+            bool usesQReg;       // Uses Q register
+            bool usesPReg;       // Uses P register
+            bool modifiesMAC;    // Modifies MAC flags
+            uint8_t vectorField; // xyzw field mask
+        } vectorInfo;
+
+        struct
+        {
+            bool modifiesGPR;     // Modifies general purpose register
+            bool modifiesFPR;     // Modifies floating point register
+            bool modifiesVFR;     // Modifies vector float register
+            bool modifiesMemory;  // Modifies memory
+            bool modifiesControl; // Modifies control register
+        } modificationInfo;
     };
 
     // Function information

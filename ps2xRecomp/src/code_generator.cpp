@@ -465,6 +465,11 @@ namespace ps2recomp
             {
                 return "// NOP (addiu $zero, ...)";
             }
+            if (inst.modificationInfo.modifiesGPR)
+            {
+                return fmt::format("ctx->r[{}] = ADD32(ctx->r[{}], 0x{:X}); // Modifies GPR",
+                                   inst.rt, inst.rs, (int16_t)inst.immediate);
+            }
             return fmt::format("ctx->r[{}] = ADD32(ctx->r[{}], 0x{:X});",
                                inst.rt, inst.rs, (int16_t)inst.immediate);
 
@@ -526,10 +531,20 @@ namespace ps2recomp
 
         // PS2-specific 128-bit load/store
         case OPCODE_LQ:
+            if (inst.vectorInfo.isVector)
+            {
+                return fmt::format("ctx->r[{}] = (__m128i)READ128(ADD32(ctx->r[{}], 0x{:X})); // Vector load",
+                                   inst.rt, inst.rs, (int16_t)inst.immediate);
+            }
             return fmt::format("ctx->r[{}] = (__m128i)READ128(ADD32(ctx->r[{}], 0x{:X}));",
                                inst.rt, inst.rs, (int16_t)inst.immediate);
 
         case OPCODE_SQ:
+            if (inst.vectorInfo.isVector)
+            {
+                return fmt::format("WRITE128(ADD32(ctx->r[{}], 0x{:X}), (__m128i)ctx->r[{}]); // Vector store",
+                                   inst.rs, (int16_t)inst.immediate, inst.rt);
+            }
             return fmt::format("WRITE128(ADD32(ctx->r[{}], 0x{:X}), (__m128i)ctx->r[{}]);",
                                inst.rs, (int16_t)inst.immediate, inst.rt);
 
@@ -552,6 +567,14 @@ namespace ps2recomp
         case OPCODE_SQC2:
             return fmt::format("WRITE128(ADD32(ctx->r[{}], 0x{:X}), (__m128i)ctx->vu0_vf[{}]);",
                                inst.rs, (int16_t)inst.immediate, inst.rt);
+
+        case OPCODE_J:
+            return fmt::format("// J 0x{:X} - Handled by branch logic",
+                               (inst.address & 0xF0000000) | (inst.target << 2));
+
+        case OPCODE_JAL:
+            return fmt::format("// JAL 0x{:X} - Handled by branch logic",
+                               (inst.address & 0xF0000000) | (inst.target << 2));
 
         case OPCODE_LWC1:
             return fmt::format("{{ uint32_t val = READ32(ADD32(ctx->r[{}], 0x{:X})); ctx->f[{}] = *(float*)&val; }}",
@@ -579,20 +602,17 @@ namespace ps2recomp
             switch (inst.rt)
             {
             case REGIMM_BLTZ:
-                return fmt::format("// BLTZ r{}, 0x{:X} - Handled by branch logic",
-                                   inst.rs, inst.address + 4 + ((int16_t)inst.immediate << 2));
-
             case REGIMM_BGEZ:
-                return fmt::format("// BGEZ r{}, 0x{:X} - Handled by branch logic",
-                                   inst.rs, inst.address + 4 + ((int16_t)inst.immediate << 2));
-
+            case REGIMM_BLTZL:
+            case REGIMM_BGEZL:
             case REGIMM_BLTZAL:
-                return fmt::format("// BLTZAL r{}, 0x{:X} - Handled by branch logic",
-                                   inst.rs, inst.address + 4 + ((int16_t)inst.immediate << 2));
-
             case REGIMM_BGEZAL:
-                return fmt::format("// BGEZAL r{}, 0x{:X} - Handled by branch logic",
-                                   inst.rs, inst.address + 4 + ((int16_t)inst.immediate << 2));
+            case REGIMM_BLTZALL:
+            case REGIMM_BGEZALL:
+            {
+                uint32_t target = inst.address + 4 + ((int16_t)inst.immediate << 2);
+                return fmt::format("// REGIMM branch instruction to 0x{:X} - Handled by branch logic", target);
+            }
 
             case REGIMM_MTSAB:
                 return fmt::format("ctx->sa = (ctx->r[{}] + 0x{:X}) & 0x0F;",
@@ -631,6 +651,10 @@ namespace ps2recomp
             }
 
         // MIPS-IV special format opcodes
+        case OPCODE_BEQ:
+        case OPCODE_BNE:
+        case OPCODE_BLEZ:
+        case OPCODE_BGTZ:
         case OPCODE_BEQL:
         case OPCODE_BNEL:
         case OPCODE_BLEZL:
@@ -1128,6 +1152,15 @@ namespace ps2recomp
             switch (inst.sa)
             {
             case MMI0_PADDW:
+                if (inst.vectorInfo.isVector && inst.vectorInfo.vectorField != 0xF)
+                {
+                    return fmt::format("{{ __m128i mask = _mm_set_epi32({}, {}, {}, {}); ctx->r[{}] = _mm_blendv_epi8(ctx->r[{}], PS2_PADDW(ctx->r[{}], ctx->r[{}]), mask); }}",
+                                       (inst.vectorInfo.vectorField & 0x8) ? 0xFFFFFFFF : 0,
+                                       (inst.vectorInfo.vectorField & 0x4) ? 0xFFFFFFFF : 0,
+                                       (inst.vectorInfo.vectorField & 0x2) ? 0xFFFFFFFF : 0,
+                                       (inst.vectorInfo.vectorField & 0x1) ? 0xFFFFFFFF : 0,
+                                       inst.rd, inst.rd, inst.rs, inst.rt);
+                }
                 return fmt::format("ctx->r[{}] = PS2_PADDW(ctx->r[{}], ctx->r[{}]);",
                                    inst.rd, inst.rs, inst.rt);
 
@@ -1192,7 +1225,8 @@ namespace ps2recomp
                                    inst.rd, inst.rs, inst.rt);
 
             case MMI0_PPACB:
-                return fmt::format("// PS2_PPACB not implemented");
+                return fmt::format("ctx->r[{}] = PS2_PPACB(ctx->r[{}], ctx->r[{}]);",
+                                   inst.rd, inst.rs, inst.rt);
 
             default:
                 return fmt::format("// Unhandled MMI0 function: 0x{:X}", inst.sa);
@@ -1316,6 +1350,36 @@ namespace ps2recomp
             case MMI2_PHMADH:
                 return translatePHMADH(inst);
 
+            case MMI2_PMSUBH:
+                return fmt::format("{{ __m128i product = _mm_mullo_epi16(ctx->r[{}], ctx->r[{}]); "
+                                   "// Convert products to 32-bit\n"
+                                   "__m128i prod_lo = _mm_unpacklo_epi16(product, _mm_srai_epi16(product, 15));\n"
+                                   "__m128i prod_hi = _mm_unpackhi_epi16(product, _mm_srai_epi16(product, 15));\n"
+                                   "// Subtract from accumulator\n"
+                                   "__m128i acc = _mm_set_epi32(0, ctx->hi, 0, ctx->lo);\n"
+                                   "__m128i result = _mm_sub_epi32(acc, _mm_add_epi32(prod_lo, prod_hi));\n"
+                                   "ctx->r[{}] = result;\n"
+                                   "ctx->lo = _mm_extract_epi32(result, 0);\n"
+                                   "ctx->hi = _mm_extract_epi32(result, 1); }}",
+                                   inst.rs, inst.rt, inst.rd);
+
+            case MMI2_PHMSBH:
+                return fmt::format("{{ // Multiply horizontally adjacent halfwords\n"
+                                   "__m128i rtEven = _mm_shuffle_epi32(ctx->r[{}], _MM_SHUFFLE(2, 0, 2, 0));\n"
+                                   "__m128i rtOdd = _mm_shuffle_epi32(ctx->r[{}], _MM_SHUFFLE(3, 1, 3, 1));\n"
+                                   "__m128i rsEven = _mm_shuffle_epi32(ctx->r[{}], _MM_SHUFFLE(2, 0, 2, 0));\n"
+                                   "__m128i rsOdd = _mm_shuffle_epi32(ctx->r[{}], _MM_SHUFFLE(3, 1, 3, 1));\n"
+                                   "__m128i prod1 = _mm_mullo_epi16(rtEven, rsEven);\n"
+                                   "__m128i prod2 = _mm_mullo_epi16(rtOdd, rsOdd);\n"
+                                   "__m128i sum = _mm_add_epi16(prod1, prod2);\n"
+                                   "// Convert to 32-bit and subtract from accumulator\n"
+                                   "__m128i acc = _mm_set_epi32(0, ctx->hi, 0, ctx->lo);\n"
+                                   "__m128i result = _mm_sub_epi32(acc, _mm_unpacklo_epi16(sum, _mm_srai_epi16(sum, 15)));\n"
+                                   "ctx->r[{}] = result;\n"
+                                   "ctx->lo = _mm_extract_epi32(result, 0);\n"
+                                   "ctx->hi = _mm_extract_epi32(result, 1); }}",
+                                   inst.rt, inst.rt, inst.rs, inst.rs, inst.rd);
+
             case MMI2_PEXEH:
                 return translatePEXEH(inst);
 
@@ -1352,7 +1416,11 @@ namespace ps2recomp
                                    inst.rd, inst.rs, inst.rt);
 
             case MMI3_PMADDUW:
-                return fmt::format("// PS2_PMADDUW - Packed Multiply-Add Unsigned Word");
+                return fmt::format("{{ uint64_t result = (uint64_t)(((uint64_t)ctx->hi << 32) | ctx->lo) + "
+                                   "(uint64_t)_mm_extract_epi32(ctx->r[{}], 0) * (uint64_t)_mm_extract_epi32(ctx->r[{}], 0); "
+                                   "ctx->lo = (uint32_t)result; ctx->hi = (uint32_t)(result >> 32); "
+                                   "ctx->r[{}] = _mm_set_epi32(0, 0, ctx->hi, ctx->lo); }}",
+                                   inst.rs, inst.rt, inst.rd);
 
             case MMI3_PSRAVW:
                 return fmt::format("ctx->r[{}] = PS2_PSRAVW(ctx->r[{}], ctx->r[{}]);",
@@ -1379,6 +1447,12 @@ namespace ps2recomp
 
             case MMI3_PEXCW:
                 return translatePEXCW(inst);
+
+            case MMI3_PMTHI:
+                return translatePMTHI(inst);
+
+            case MMI3_PMTLO:
+                return translatePMTLO(inst);
 
             default:
                 return fmt::format("// Unhandled MMI3 function: 0x{:X}", inst.sa);
@@ -2256,6 +2330,16 @@ namespace ps2recomp
                            "    // Exchange words in each 64-bit half using shuffle\n"
                            "    ctx->r[{}] = _mm_shuffle_epi32(src, _MM_SHUFFLE(2, 3, 0, 1)); }}",
                            inst.rs, inst.rd);
+    }
+
+    std::string CodeGenerator::translatePMTHI(const Instruction &inst)
+    {
+        return fmt::format("ctx->hi = _mm_extract_epi32(ctx->r[{}], 0);", inst.rs);
+    }
+
+    std::string CodeGenerator::translatePMTLO(const Instruction &inst)
+    {
+        return fmt::format("ctx->lo = _mm_extract_epi32(ctx->r[{}], 0);", inst.rs);
     }
 
     std::string CodeGenerator::generateJumpTableSwitch(const Instruction &inst, uint32_t tableAddress,

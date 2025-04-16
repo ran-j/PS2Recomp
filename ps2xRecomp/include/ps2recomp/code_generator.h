@@ -47,6 +47,8 @@ namespace ps2recomp
         std::string translatePEXCH(const Instruction &inst);
         std::string translatePCPYH(const Instruction &inst);
         std::string translatePEXCW(const Instruction &inst);
+        std::string translatePMTHI(const Instruction &inst);
+        std::string translatePMTLO(const Instruction &inst);
 
         // SPECIAL instructions
         std::string translateSYNC(const Instruction &inst);

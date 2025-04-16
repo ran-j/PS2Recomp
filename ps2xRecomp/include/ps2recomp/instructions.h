@@ -280,6 +280,8 @@ namespace ps2recomp
         MMI3_PEXCH = 0x1A,
         MMI3_PCPYH = 0x1B,
         MMI3_PEXCW = 0x1E,
+        MMI3_PMTHI = 0x08, // Move To HI register
+        MMI3_PMTLO = 0x09 // Move To LO register
     };
 
     // COP0 (rs field)

@@ -34,6 +34,26 @@ namespace ps2recomp
         inst.isReturn = false;
         inst.hasDelaySlot = false;
         inst.isMultimedia = false;
+        inst.isLoad = false;
+        inst.isStore = false;
+
+        // Initialize the enhanced fields
+        inst.mmiType = 0;
+        inst.mmiFunction = 0;
+        inst.pmfhlVariation = 0;
+        inst.vuFunction = 0;
+
+        inst.vectorInfo.isVector = false;
+        inst.vectorInfo.usesQReg = false;
+        inst.vectorInfo.usesPReg = false;
+        inst.vectorInfo.modifiesMAC = false;
+        inst.vectorInfo.vectorField = 0xF; // All fields (xyzw)
+
+        inst.modificationInfo.modifiesGPR = false;
+        inst.modificationInfo.modifiesFPR = false;
+        inst.modificationInfo.modifiesVFR = false;
+        inst.modificationInfo.modifiesMemory = false;
+        inst.modificationInfo.modifiesControl = false;
 
         switch (inst.opcode)
         {
@@ -86,18 +106,21 @@ namespace ps2recomp
             decodeMMI(inst);
             inst.isMMI = true;
             inst.isMultimedia = true;
+            inst.modificationInfo.modifiesGPR = true;
             break;
 
         case OPCODE_LQ:
             decodeIType(inst);
             inst.isLoad = true;
             inst.isMultimedia = true; // 128-bit load
+            inst.modificationInfo.modifiesGPR = true;
             break;
 
         case OPCODE_SQ:
             decodeIType(inst);
             inst.isStore = true;
             inst.isMultimedia = true; // 128-bit store
+            inst.modificationInfo.modifiesMemory = true;
             break;
 
         case OPCODE_LB:
@@ -462,71 +485,341 @@ namespace ps2recomp
 
     void R5900Decoder::decodeCOP2(Instruction &inst) const
     {
-        // COP2 (VU0 macro mode) instructions
         inst.isVU = true;
         inst.isMultimedia = true;
 
-        uint32_t rs = inst.rs; // The VU0 format field
+        uint32_t rs = inst.rs; // The format field
 
-        if (rs == COP2_MFC2)
+        switch (rs)
         {
-            // Move From COP2 register
+        case COP2_QMFC2: // Move From COP2 (128-bit)
+        case COP2_CFC2:  // Move Control From COP2
+        case COP2_QMTC2: // Move To COP2 (128-bit)
+        case COP2_CTC2:  // Move Control To COP2
+            // Register transfer operations
+            break;
+
+        case COP2_BC2: // Branch on COP2 condition
+        {
+            uint32_t rt = inst.rt; // The condition code
+
+            if (rt == COP2_BCF || rt == COP2_BCT ||
+                rt == COP2_BCFL || rt == COP2_BCTL ||
+                rt == COP2_BCEF || rt == COP2_BCET ||
+                rt == COP2_BCEFL || rt == COP2_BCETL)
+            {
+                inst.isBranch = true;
+                inst.hasDelaySlot = true;
+            }
         }
-        else if (rs == COP2_CFC2)
+        break;
+
+        case COP2_CO: // VU0 vector operations
         {
-            // Move From COP2 Control register
+            uint32_t function = inst.function;
+
+            switch (function)
+            {
+            case VU0_VADD:
+            case VU0_VSUB:
+            case VU0_VMUL:
+                // Basic vector math operations
+                break;
+
+            case VU0_VDIV:
+            case VU0_VSQRT:
+            case VU0_VRSQRT:
+                // Division and square root operations
+                break;
+
+            case VU0_VMULQ:
+                // Multiply by Q register
+                break;
+
+            case VU0_VIADD:
+            case VU0_VISUB:
+            case VU0_VIADDI:
+                // Integer operations
+                break;
+
+            case VU0_VIAND:
+            case VU0_VIOR:
+                // Logical operations
+                break;
+
+            case VU0_VILWR:
+            case VU0_VISWR:
+                // Load/Store operations
+                inst.isLoad = (function == VU0_VILWR);
+                inst.isStore = (function == VU0_VISWR);
+                break;
+
+            case VU0_VCALLMS:
+            case VU0_VCALLMSR:
+                // VU0 microprogram calls
+                inst.isCall = true;
+                break;
+
+            case VU0_VRGET:
+                // Get random number from R register
+                break;
+
+            default:
+                // Other VU0 operations
+                break;
+            }
         }
-        else if (rs == COP2_MTC2)
+        break;
+
+        case COP2_CTCVU:  // Control Transfer to VU0
+        case COP2_MTVUCF: // Move To VU Control/Flag register
+        case COP2_VMTIR:  // Move To VU0 I Register
+            // Special register operations
+            break;
+
+        case COP2_VU0OPS: // Additional VU0 operations
         {
-            // Move To COP2 register
+            uint32_t function = inst.function;
+
+            switch (function)
+            {
+            case VU0OPS_QMFC2_NI: // Non-incrementing QMFC2
+            case VU0OPS_QMFC2_I:  // Incrementing QMFC2
+            case VU0OPS_QMTC2_NI: // Non-incrementing QMTC2
+            case VU0OPS_QMTC2_I:  // Incrementing QMTC2
+                // Extended register transfer operations
+                break;
+
+            case VU0OPS_VMFIR: // Move From Integer Register
+                // Move operations
+                break;
+
+            case VU0OPS_VXITOP: // Execute Interrupt on VU0
+                break;
+
+            case VU0OPS_VWAITQ: // Wait for Q register operations
+                break;
+
+            default:
+                // Unknown VU0OPS
+                break;
+            }
         }
-        else if (rs == COP2_CTC2)
-        {
-            // Move To COP2 Control register
-        }
-        else if (rs == COP2_BCF || rs == COP2_BCT)
-        {
-            // VU0 Branch on Condition
-            inst.isBranch = true;
-            inst.hasDelaySlot = true;
-        }
-        else
-        {
-            // VU0 vector operations
-            // These would need detailed decoding based on function field
+        break;
+
+        default:
+            // Unknown COP2 format
+            break;
         }
     }
 
     void R5900Decoder::decodeMMI0(Instruction &inst) const
     {
-        // Decode MMI0 subfunctions (based on function field)
-        uint32_t subFunction = inst.function & 0x3F;
+        uint32_t sa = inst.sa;
 
-        // The implementation would set appropriate flags or properties based on the specific MMI0 operation
+        switch (sa)
+        {
+        case MMI0_PADDW:
+        case MMI0_PSUBW:
+        case MMI0_PCGTW:
+        case MMI0_PMAXW:
+        case MMI0_PADDH:
+        case MMI0_PSUBH:
+        case MMI0_PCGTH:
+        case MMI0_PMAXH:
+        case MMI0_PADDB:
+        case MMI0_PSUBB:
+        case MMI0_PCGTB:
+            // Arithmetic and comparison operations
+            break;
+
+        case MMI0_PADDSW:
+        case MMI0_PSUBSW:
+        case MMI0_PADDSH:
+        case MMI0_PSUBSH:
+        case MMI0_PADDSB:
+        case MMI0_PSUBSB:
+            // Saturated arithmetic operations
+            break;
+
+        case MMI0_PEXTLW:
+        case MMI0_PPACW:
+        case MMI0_PEXTLH:
+        case MMI0_PPACH:
+        case MMI0_PEXTLB:
+        case MMI0_PPACB:
+        case MMI0_PEXT5:
+        case MMI0_PPAC5:
+            // Data packing/unpacking operations
+            break;
+
+        default:
+            // Unknown MMI0 operation
+            break;
+        }
     }
 
     void R5900Decoder::decodeMMI1(Instruction &inst) const
     {
-        // Decode MMI1 subfunctions (based on function field)
         uint32_t subFunction = inst.function & 0x3F;
 
-        // The implementation would set appropriate flags or properties based on the specific MMI1 operation
+        uint32_t sa = inst.sa;
+
+        switch (sa)
+        {
+        case MMI1_PABSW:
+        case MMI1_PABSH:
+            // Absolute value operations
+            break;
+
+        case MMI1_PCEQW:
+        case MMI1_PCEQH:
+        case MMI1_PCEQB:
+            // Equality comparison operations
+            break;
+
+        case MMI1_PMINW:
+        case MMI1_PMINH:
+            // Minimum value operations
+            break;
+
+        case MMI1_PADDUW:
+        case MMI1_PSUBUW:
+        case MMI1_PEXTUW:
+        case MMI1_PADDUH:
+        case MMI1_PSUBUH:
+        case MMI1_PEXTUH:
+        case MMI1_PADDUB:
+        case MMI1_PSUBUB:
+        case MMI1_PEXTUB:
+            // Unsigned arithmetic and extension operations
+            break;
+
+        case MMI1_QFSRV:
+            // Quadword funnel shift right variable
+            inst.isMultimedia = true;
+            break;
+
+        default:
+            // Unknown MMI1 operation
+            break;
+        }
     }
 
     void R5900Decoder::decodeMMI2(Instruction &inst) const
     {
-        // Decode MMI2 subfunctions (based on function field)
-        uint32_t subFunction = inst.function & 0x3F;
+        uint32_t sa = inst.sa;
 
-        // The implementation would set appropriate flags or properties based on the specific MMI2 operation
+        switch (sa)
+        {
+        case MMI2_PMADDW:
+        case MMI2_PMSUBW:
+        case MMI2_PMADDH:
+        case MMI2_PHMADH:
+        case MMI2_PMSUBH:
+        case MMI2_PHMSBH:
+        case MMI2_PMULTH:
+            // Multiply/multiply-add operations
+            inst.isMultimedia = true;
+            break;
+
+        case MMI2_PSLLVW:
+        case MMI2_PSRLVW:
+            // Variable shift operations
+            break;
+
+        case MMI2_PMFHI:
+        case MMI2_PMFLO:
+            // Move from HI/LO registers
+            break;
+
+        case MMI2_PINTH:
+            // Interleave half words
+            break;
+
+        case MMI2_PMULTW:
+        case MMI2_PDIVW:
+        case MMI2_PDIVBW:
+            // Multiply/divide operations
+            inst.isMultimedia = true;
+            break;
+
+        case MMI2_PCPYLD:
+            // Copy lower doubleword
+            break;
+
+        case MMI2_PAND:
+        case MMI2_PXOR:
+            // Logical operations
+            break;
+
+        case MMI2_PEXEH:
+        case MMI2_PREVH:
+        case MMI2_PEXEW:
+        case MMI2_PROT3W:
+            // Data permutation operations
+            break;
+
+        default:
+            // Unknown MMI2 operation
+            break;
+        }
     }
 
     void R5900Decoder::decodeMMI3(Instruction &inst) const
     {
-        // Decode MMI3 subfunctions (based on function field)
-        uint32_t subFunction = inst.function & 0x3F;
+        uint32_t sa = inst.sa;
 
-        // The implementation would set appropriate flags or properties based on the specific MMI3 operation
+        switch (sa)
+        {
+        case MMI3_PMADDUW:
+            // Unsigned multiply-add
+            inst.isMultimedia = true;
+            break;
+
+        case MMI3_PSRAVW:
+            // Packed shift right arithmetic variable word
+            break;
+
+        case MMI3_PMTHI:
+            inst.mmiFunction = MMI3_PMTHI;
+            inst.modificationInfo.modifiesControl = true; // HI register is modified
+            break;
+
+        case MMI3_PMTLO:
+            inst.mmiFunction = MMI3_PMTLO;
+            inst.modificationInfo.modifiesControl = true; // LO register is modified
+            break;
+
+        case MMI3_PINTEH:
+            // Interleave even halfwords
+            break;
+
+        case MMI3_PMULTUW:
+        case MMI3_PDIVUW:
+            // Unsigned multiply/divide operations
+            inst.isMultimedia = true;
+            break;
+
+        case MMI3_PCPYUD:
+            // Copy upper doubleword
+            break;
+
+        case MMI3_POR:
+        case MMI3_PNOR:
+            // Logical operations
+            break;
+
+        case MMI3_PEXCH:
+        case MMI3_PCPYH:
+        case MMI3_PEXCW:
+            // Data permutation operations
+            break;
+
+        default:
+            // Unknown MMI3 operation
+            break;
+        }
     }
 
     void R5900Decoder::decodePMFHL(Instruction &inst) const
