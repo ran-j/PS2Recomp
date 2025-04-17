@@ -3,6 +3,7 @@
 #include <fmt/format.h>
 #include <sstream>
 #include <algorithm>
+#include <unordered_set>
 
 namespace ps2recomp
 {
@@ -2372,6 +2373,259 @@ namespace ps2recomp
         ss << "    default:\n";
         ss << "        // Unknown jump table target\n";
         ss << "        return;\n";
+        ss << "}\n";
+
+        return ss.str();
+    }
+
+    std::string CodeGenerator::generateFunctionRegistration(const std::vector<Function> &functions,
+                                                            const std::map<uint32_t, std::string> &stubs)
+    {
+        static const std::unordered_map<std::string, std::pair<uint32_t, std::string>> systemCalls = {
+            // Memory management
+            {"FlushCache", {0x0040, "ps2_syscalls::FlushCache"}},
+            {"ResetEE", {0x0042, "ps2_syscalls::ResetEE"}},
+            {"SetMemoryMode", {0x0043, "ps2_syscalls::SetMemoryMode"}},
+
+            // Thread management
+            {"CreateThread", {0x0055, "ps2_syscalls::CreateThread"}},
+            {"DeleteThread", {0x0056, "ps2_syscalls::DeleteThread"}},
+            {"StartThread", {0x0057, "ps2_syscalls::StartThread"}},
+            {"ExitThread", {0x003C, "ps2_syscalls::ExitThread"}},
+            {"ExitDeleteThread", {0x003D, "ps2_syscalls::ExitDeleteThread"}},
+            {"TerminateThread", {0x0058, "ps2_syscalls::TerminateThread"}},
+            {"SuspendThread", {0x0059, "ps2_syscalls::SuspendThread"}},
+            {"ResumeThread", {0x005A, "ps2_syscalls::ResumeThread"}},
+            {"GetThreadId", {0x0047, "ps2_syscalls::GetThreadId"}},
+            {"ReferThreadStatus", {0x005B, "ps2_syscalls::ReferThreadStatus"}},
+            {"SleepThread", {0x005C, "ps2_syscalls::SleepThread"}},
+            {"WakeupThread", {0x005D, "ps2_syscalls::WakeupThread"}},
+            {"iWakeupThread", {0x005E, "ps2_syscalls::iWakeupThread"}},
+            {"ChangeThreadPriority", {0x005F, "ps2_syscalls::ChangeThreadPriority"}},
+            {"RotateThreadReadyQueue", {0x0060, "ps2_syscalls::RotateThreadReadyQueue"}},
+            {"ReleaseWaitThread", {0x0061, "ps2_syscalls::ReleaseWaitThread"}},
+            {"iReleaseWaitThread", {0x0062, "ps2_syscalls::iReleaseWaitThread"}},
+
+            // Semaphores
+            {"CreateSema", {0x0064, "ps2_syscalls::CreateSema"}},
+            {"DeleteSema", {0x0065, "ps2_syscalls::DeleteSema"}},
+            {"SignalSema", {0x0066, "ps2_syscalls::SignalSema"}},
+            {"iSignalSema", {0x0067, "ps2_syscalls::iSignalSema"}},
+            {"WaitSema", {0x0068, "ps2_syscalls::WaitSema"}},
+            {"PollSema", {0x0069, "ps2_syscalls::PollSema"}},
+            {"iPollSema", {0x006A, "ps2_syscalls::iPollSema"}},
+            {"ReferSemaStatus", {0x006B, "ps2_syscalls::ReferSemaStatus"}},
+            {"iReferSemaStatus", {0x006C, "ps2_syscalls::iReferSemaStatus"}},
+
+            // Event flags
+            {"CreateEventFlag", {0x006D, "ps2_syscalls::CreateEventFlag"}},
+            {"DeleteEventFlag", {0x006E, "ps2_syscalls::DeleteEventFlag"}},
+            {"SetEventFlag", {0x006F, "ps2_syscalls::SetEventFlag"}},
+            {"iSetEventFlag", {0x0070, "ps2_syscalls::iSetEventFlag"}},
+            {"ClearEventFlag", {0x0071, "ps2_syscalls::ClearEventFlag"}},
+            {"iClearEventFlag", {0x0072, "ps2_syscalls::iClearEventFlag"}},
+            {"WaitEventFlag", {0x0073, "ps2_syscalls::WaitEventFlag"}},
+            {"PollEventFlag", {0x0074, "ps2_syscalls::PollEventFlag"}},
+            {"iPollEventFlag", {0x0075, "ps2_syscalls::iPollEventFlag"}},
+            {"ReferEventFlagStatus", {0x0076, "ps2_syscalls::ReferEventFlagStatus"}},
+            {"iReferEventFlagStatus", {0x0077, "ps2_syscalls::iReferEventFlagStatus"}},
+
+            // Alarm
+            {"SetAlarm", {0x0078, "ps2_syscalls::SetAlarm"}},
+            {"iSetAlarm", {0x0079, "ps2_syscalls::iSetAlarm"}},
+            {"CancelAlarm", {0x007A, "ps2_syscalls::CancelAlarm"}},
+            {"iCancelAlarm", {0x007B, "ps2_syscalls::iCancelAlarm"}},
+
+            // Intr handlers
+            {"EnableIntc", {0x0080, "ps2_syscalls::EnableIntc"}},
+            {"DisableIntc", {0x0081, "ps2_syscalls::DisableIntc"}},
+            {"EnableDmac", {0x0082, "ps2_syscalls::EnableDmac"}},
+            {"DisableDmac", {0x0083, "ps2_syscalls::DisableDmac"}},
+
+            // RPC and IOP
+            {"SifStopModule", {0x0085, "ps2_syscalls::SifStopModule"}},
+            {"SifLoadModule", {0x0086, "ps2_syscalls::SifLoadModule"}},
+            {"SifInitRpc", {0x00A5, "ps2_syscalls::SifInitRpc"}},
+            {"SifBindRpc", {0x00A6, "ps2_syscalls::SifBindRpc"}},
+            {"SifCallRpc", {0x00A7, "ps2_syscalls::SifCallRpc"}},
+            {"SifRegisterRpc", {0x00A8, "ps2_syscalls::SifRegisterRpc"}},
+            {"SifCheckStatRpc", {0x00A9, "ps2_syscalls::SifCheckStatRpc"}},
+            {"SifSetRpcQueue", {0x00AA, "ps2_syscalls::SifSetRpcQueue"}},
+            {"SifRemoveRpcQueue", {0x00AB, "ps2_syscalls::SifRemoveRpcQueue"}},
+            {"SifRemoveRpc", {0x00AC, "ps2_syscalls::SifRemoveRpc"}},
+
+            // IO system calls
+            {"fioOpen", {0x00B0, "ps2_syscalls::fioOpen"}},
+            {"fioClose", {0x00B1, "ps2_syscalls::fioClose"}},
+            {"fioRead", {0x00B2, "ps2_syscalls::fioRead"}},
+            {"fioWrite", {0x00B3, "ps2_syscalls::fioWrite"}},
+            {"fioLseek", {0x00B4, "ps2_syscalls::fioLseek"}},
+            {"fioMkdir", {0x00B5, "ps2_syscalls::fioMkdir"}},
+            {"fioChdir", {0x00B6, "ps2_syscalls::fioChdir"}},
+            {"fioRmdir", {0x00B7, "ps2_syscalls::fioRmdir"}},
+            {"fioGetstat", {0x00B8, "ps2_syscalls::fioGetstat"}},
+            {"fioRemove", {0x00B9, "ps2_syscalls::fioRemove"}},
+
+            // Graphics
+            {"GsSetCrt", {0x00C0, "ps2_syscalls::GsSetCrt"}},
+            {"GsGetIMR", {0x00C1, "ps2_syscalls::GsGetIMR"}},
+            {"GsPutIMR", {0x00C2, "ps2_syscalls::GsPutIMR"}},
+            {"GsSetVideoMode", {0x00C3, "ps2_syscalls::GsSetVideoMode"}},
+
+            // Miscellaneous
+            {"GetOsdConfigParam", {0x00F0, "ps2_syscalls::GetOsdConfigParam"}},
+            {"SetOsdConfigParam", {0x00F1, "ps2_syscalls::SetOsdConfigParam"}},
+            {"GetRomName", {0x00F2, "ps2_syscalls::GetRomName"}},
+            {"SifLoadElfPart", {0x00F6, "ps2_syscalls::SifLoadElfPart"}},
+            {"sceSifLoadModule", {0x0122, "ps2_syscalls::sceSifLoadModule"}},
+
+            {"TODO", {0x0000, "ps2_syscalls::TODO"}}};
+
+        static const std::unordered_map<std::string, std::string> libraryStubs = {
+            // Memory operations
+            {"malloc", "ps2_stubs::malloc"},
+            {"free", "ps2_stubs::free"},
+            {"calloc", "ps2_stubs::calloc"},
+            {"realloc", "ps2_stubs::realloc"},
+            {"memcpy", "ps2_stubs::memcpy"},
+            {"memset", "ps2_stubs::memset"},
+            {"memmove", "ps2_stubs::memmove"},
+            {"memcmp", "ps2_stubs::memcmp"},
+
+            // String operations
+            {"strcpy", "ps2_stubs::strcpy"},
+            {"strncpy", "ps2_stubs::strncpy"},
+            {"strlen", "ps2_stubs::strlen"},
+            {"strcmp", "ps2_stubs::strcmp"},
+            {"strncmp", "ps2_stubs::strncmp"},
+            {"strcat", "ps2_stubs::strcat"},
+            {"strncat", "ps2_stubs::strncat"},
+            {"strchr", "ps2_stubs::strchr"},
+            {"strrchr", "ps2_stubs::strrchr"},
+            {"strstr", "ps2_stubs::strstr"},
+
+            // I/O operations
+            {"printf", "ps2_stubs::printf"},
+            {"sprintf", "ps2_stubs::sprintf"},
+            {"snprintf", "ps2_stubs::snprintf"},
+            {"puts", "ps2_stubs::puts"},
+            {"fopen", "ps2_stubs::fopen"},
+            {"fclose", "ps2_stubs::fclose"},
+            {"fread", "ps2_stubs::fread"},
+            {"fwrite", "ps2_stubs::fwrite"},
+            {"fprintf", "ps2_stubs::fprintf"},
+            {"fseek", "ps2_stubs::fseek"},
+            {"ftell", "ps2_stubs::ftell"},
+            {"fflush", "ps2_stubs::fflush"},
+
+            // Math functions
+            {"sqrt", "ps2_stubs::sqrt"},
+            {"sin", "ps2_stubs::sin"},
+            {"cos", "ps2_stubs::cos"},
+            {"tan", "ps2_stubs::tan"},
+            {"atan2", "ps2_stubs::atan2"},
+            {"pow", "ps2_stubs::pow"},
+            {"exp", "ps2_stubs::exp"},
+            {"log", "ps2_stubs::log"},
+            {"log10", "ps2_stubs::log10"},
+            {"ceil", "ps2_stubs::ceil"},
+            {"floor", "ps2_stubs::floor"},
+            {"fabs", "ps2_stubs::fabs"},
+
+            {"TODO", "ps2_stubs::TODO"}};
+
+        std::stringstream ss;
+
+        std::unordered_set<uint32_t> registeredAddresses;
+
+        // Begin function
+        ss << "#include \"ps2_runtime.h\"\n";
+        ss << "#include \"ps2_recompiled_functions.h\"\n";
+        ss << "#include \"ps2_stubs.h\"\n\n";
+
+        ss << "// Default handler for unimplemented syscalls/functions\n";
+        ss << "void ps2_syscalls::TODO(uint8_t* rdram, R5900Context* ctx) {\n";
+        ss << "    std::cout << \"Unimplemented syscall/function called at PC=0x\" << std::hex << ctx->pc << std::dec << std::endl;\n";
+        ss << "    ctx->r[2] = 0; // Return 0 by default\n";
+        ss << "}\n\n";
+
+        ss << "void ps2_stubs::TODO(uint8_t* rdram, R5900Context* ctx) {\n";
+        ss << "    std::cout << \"Unimplemented library function called at PC=0x\" << std::hex << ctx->pc << std::dec << std::endl;\n";
+        ss << "    ctx->r[2] = 0; // Return 0 by default\n";
+        ss << "}\n\n";
+
+        // Registration function
+        ss << "void registerAllFunctions(PS2Runtime& runtime) {\n";
+
+        std::vector<std::pair<uint32_t, std::string>> normalFunctions;
+        std::vector<std::pair<uint32_t, std::string>> stubFunctions;
+        std::vector<std::pair<uint32_t, std::string>> systemCallFunctions;
+        std::vector<std::pair<uint32_t, std::string>> libraryFunctions;
+
+        for (const auto &function : functions)
+        {
+            if (!function.isRecompiled)
+                continue;
+
+            bool isSystemCall = systemCalls.find(function.name) != systemCalls.end();
+            bool isLibCall = libraryStubs.find(function.name) != libraryStubs.end();
+
+            if (isSystemCall)
+            {
+                const auto &syscallInfo = systemCalls.at(function.name);
+                systemCallFunctions.push_back({syscallInfo.first, syscallInfo.second});
+                continue;
+            }
+
+            if (isLibCall)
+            {
+                // we need to generate a unique address for each library function because are created at runtime
+                static uint32_t libBaseAddr = 0x00110000;
+                static uint32_t libOffset = 0;
+                uint32_t libAddr = libBaseAddr + (libOffset++ * 4);
+
+                libraryFunctions.push_back({libAddr, libraryStubs.at(function.name)});
+                continue;
+            }
+
+            if (function.isStub)
+            {
+                stubFunctions.push_back({function.start, function.name});
+            }
+            else
+            {
+                normalFunctions.push_back({function.start, function.name});
+            }
+        }
+
+        ss << "    // Register recompiled functions\n";
+        for (const auto &function : normalFunctions)
+        {
+            ss << "    runtime.registerFunction(0x" << std::hex << function.first << std::dec
+               << ", " << function.second << ");\n";
+        }
+
+        ss << "\n    // Register stub functions\n";
+        for (const auto &function : stubFunctions)
+        {
+            ss << "    runtime.registerFunction(0x" << std::hex << function.first << std::dec
+               << ", " << function.second << ");\n";
+        }
+
+        ss << "\n    // Register system call stubs\n";
+        for (const auto &function : systemCallFunctions)
+        {
+            ss << "    runtime.registerFunction(0x" << std::hex << function.first << std::dec
+               << ", " << function.second << ");\n";
+        }
+
+        ss << "\n    // Register library stubs\n";
+        for (const auto &function : libraryFunctions)
+        {
+            ss << "    runtime.registerFunction(0x" << std::hex << function.first << std::dec
+               << ", " << function.second << ");\n";
+        }
+
         ss << "}\n";
 
         return ss.str();

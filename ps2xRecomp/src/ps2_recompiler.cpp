@@ -85,7 +85,7 @@ namespace ps2recomp
                     std::cout << "Stubbing function: " << function.name << std::endl;
                     function.isStub = true;
                     function.isRecompiled = true; // we're generating code for it
- 
+
                     std::string stubCode = generateStubFunction(function);
                     m_generatedStubs[function.start] = stubCode;
 
@@ -150,7 +150,7 @@ namespace ps2recomp
 
                 fs::path outputPath = fs::path(m_config.outputPath) / "recompiled.cpp";
                 writeToFile(outputPath.string(), combinedOutput.str());
-                std::cout << "Wrote combined output to: " << outputPath << std::endl;
+                std::cout << "Wrote recompiled to combined output to: " << outputPath << std::endl;
             }
             else
             {
@@ -180,6 +180,13 @@ namespace ps2recomp
 
                 std::cout << "Wrote individual function files to: " << m_config.outputPath << std::endl;
             }
+
+            std::string registerFunctions = m_codeGenerator->generateFunctionRegistration(
+                m_functions, m_generatedStubs);
+
+            fs::path registerPath = fs::path(m_config.outputPath) / "register_functions.cpp";
+            writeToFile(registerPath.string(), registerFunctions);
+            std::cout << "Generated function registration file: " << registerPath << std::endl;
         }
         catch (const std::exception &e)
         {

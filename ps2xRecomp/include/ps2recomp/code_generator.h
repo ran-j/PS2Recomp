@@ -4,6 +4,7 @@
 #include "ps2recomp/types.h"
 #include <string>
 #include <vector>
+#include <map>
 
 namespace ps2recomp
 {
@@ -15,6 +16,7 @@ namespace ps2recomp
         ~CodeGenerator();
 
         std::string generateFunction(const Function &function, const std::vector<Instruction> &instructions, const bool &useHeaders);
+        std::string generateFunctionRegistration(const std::vector<Function> &functions, const std::map<uint32_t, std::string> &stubs);
         std::string generateMacroHeader();
         std::string handleBranchDelaySlots(const Instruction &branchInst, const Instruction &delaySlot);
 
