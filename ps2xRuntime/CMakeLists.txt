@@ -25,11 +25,18 @@ add_library(ps2_runtime STATIC
     src/ps2_syscalls.cpp
 )
 
+add_executable(ps2EntryRunner
+    src/register_functions.cpp
+    src/main.cpp
+)
+
 target_include_directories(ps2_runtime PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
 target_link_libraries(ps2_runtime PRIVATE raylib)
+target_link_libraries(ps2EntryRunner PRIVATE raylib)
+target_link_libraries(ps2EntryRunner PRIVATE ps2_runtime)
 
 install(TARGETS ps2_runtime
     LIBRARY DESTINATION lib

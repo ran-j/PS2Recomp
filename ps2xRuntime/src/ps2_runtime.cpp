@@ -76,14 +76,7 @@ bool PS2Runtime::initialize()
         return false;
     }
 
-    registerBuiltinStubs();
-
     return true;
-}
-
-void PS2Runtime::registerBuiltinStubs()
-{
-    // TODO
 }
 
 bool PS2Runtime::loadELF(const std::string &elfPath)

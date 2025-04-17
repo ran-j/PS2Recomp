@@ -326,8 +326,6 @@ public:
     void registerFunction(uint32_t address, RecompiledFunction func);
     RecompiledFunction lookupFunction(uint32_t address);
 
-    void registerBuiltinStubs();
-
 private:
     PS2Memory m_memory;
     R5900Context m_cpuContext;
