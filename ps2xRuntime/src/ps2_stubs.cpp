@@ -1,616 +1,442 @@
-
 #include "ps2_stubs.h"
+#include "ps2_runtime.h"
+#include <iostream>
+#include <cstring>
+#include <cstdio>
+#include <cstdlib>
+#include <cmath>
+#include <vector>
+#include <unordered_map>
+#include <filesystem>
 
-
-// Stub implementations for standard library functions
 namespace ps2_stubs
 {
-    // Memory operations
-    void memcpy(uint8_t *rdram, R5900Context *ctx)
+
+    void ps2_stubs::malloc(uint8_t *rdram, R5900Context *ctx)
     {
-        uint32_t dst = ctx->r[4].m128i_u32[0];  // a0 = destination
-        uint32_t src = ctx->r[5].m128i_u32[0];  // a1 = source
-        uint32_t size = ctx->r[6].m128i_u32[0]; // a2 = size
-
-        uint32_t physDst = dst & 0x1FFFFFFF;
-        uint32_t physSrc = src & 0x1FFFFFFF;
-
-        std::memcpy(rdram + physDst, rdram + physSrc, size);
-
-        ctx->r[2] = _mm_set1_epi32(dst);
+        // TODO
     }
 
-    void memset(uint8_t *rdram, R5900Context *ctx)
+    void ps2_stubs::free(uint8_t *rdram, R5900Context *ctx)
     {
-        uint32_t dst = ctx->r[4].m128i_u32[0];          // a0 = destination
-        uint32_t value = ctx->r[5].m128i_u32[0] & 0xFF; // a1 = fill value (byte)
-        uint32_t size = ctx->r[6].m128i_u32[0];         // a2 = size
-
-        uint32_t physDst = dst & 0x1FFFFFFF;
-
-        std::memset(rdram + physDst, value, size);
-
-        ctx->r[2] = _mm_set1_epi32(dst);
+        // TODO
     }
 
-    void memmove(uint8_t *rdram, R5900Context *ctx)
+    void ps2_stubs::calloc(uint8_t *rdram, R5900Context *ctx)
     {
-        uint32_t dst = ctx->r[4].m128i_u32[0];  // a0 = destination
-        uint32_t src = ctx->r[5].m128i_u32[0];  // a1 = source
-        uint32_t size = ctx->r[6].m128i_u32[0]; // a2 = size
-
-        uint32_t physDst = dst & 0x1FFFFFFF;
-        uint32_t physSrc = src & 0x1FFFFFFF;
-
-        std::memmove(rdram + physDst, rdram + physSrc, size);
-
-        ctx->r[2] = _mm_set1_epi32(dst);
+        // TODO
     }
 
-    void memcmp(uint8_t *rdram, R5900Context *ctx)
+    void ps2_stubs::realloc(uint8_t *rdram, R5900Context *ctx)
     {
-        uint32_t ptr1 = ctx->r[4].m128i_u32[0]; // a0 = first buffer
-        uint32_t ptr2 = ctx->r[5].m128i_u32[0]; // a1 = second buffer
-        uint32_t size = ctx->r[6].m128i_u32[0]; // a2 = size
-
-        uint32_t phys1 = ptr1 & 0x1FFFFFFF;
-        uint32_t phys2 = ptr2 & 0x1FFFFFFF;
-
-        int result = std::memcmp(rdram + phys1, rdram + phys2, size);
-
-        ctx->r[2] = _mm_set1_epi32(result);
+        // TODO
     }
 
-    // String operations
-    void strcpy(uint8_t *rdram, R5900Context *ctx)
+    void ps2_stubs::memcpy(uint8_t *rdram, R5900Context *ctx)
     {
-        uint32_t dst = ctx->r[4].m128i_u32[0]; // a0 = destination
-        uint32_t src = ctx->r[5].m128i_u32[0]; // a1 = source
+        uint32_t destAddr = getRegU32(ctx, 4); // $a0
+        uint32_t srcAddr = getRegU32(ctx, 5);  // $a1
+        size_t size = getRegU32(ctx, 6);       // $a2
 
-        uint32_t physDst = dst & 0x1FFFFFFF;
-        uint32_t physSrc = src & 0x1FFFFFFF;
+        uint8_t *hostDest = getMemPtr(rdram, destAddr);
+        const uint8_t *hostSrc = getConstMemPtr(rdram, srcAddr);
 
-        char *destStr = reinterpret_cast<char *>(rdram + physDst);
-        const char *srcStr = reinterpret_cast<const char *>(rdram + physSrc);
-
-        std::strcpy(destStr, srcStr);
-
-        ctx->r[2] = _mm_set1_epi32(dst);
-    }
-
-    void strncpy(uint8_t *rdram, R5900Context *ctx)
-    {
-        uint32_t dst = ctx->r[4].m128i_u32[0]; // a0 = destination
-        uint32_t src = ctx->r[5].m128i_u32[0]; // a1 = source
-        uint32_t n = ctx->r[6].m128i_u32[0];   // a2 = max length
-
-        uint32_t physDst = dst & 0x1FFFFFFF;
-        uint32_t physSrc = src & 0x1FFFFFFF;
-
-        char *destStr = reinterpret_cast<char *>(rdram + physDst);
-        const char *srcStr = reinterpret_cast<const char *>(rdram + physSrc);
-
-        std::strncpy(destStr, srcStr, n);
-
-        ctx->r[2] = _mm_set1_epi32(dst);
-    }
-
-    void strlen(uint8_t *rdram, R5900Context *ctx)
-    {
-        uint32_t str = ctx->r[4].m128i_u32[0]; // a0 = string
-
-        uint32_t physStr = str & 0x1FFFFFFF;
-        const char *strPtr = reinterpret_cast<const char *>(rdram + physStr);
-
-        size_t length = std::strlen(strPtr);
-
-        ctx->r[2] = _mm_set1_epi32(static_cast<uint32_t>(length));
-    }
-
-    void strcmp(uint8_t *rdram, R5900Context *ctx)
-    {
-        uint32_t str1 = ctx->r[4].m128i_u32[0]; // a0 = first string
-        uint32_t str2 = ctx->r[5].m128i_u32[0]; // a1 = second string
-
-        uint32_t phys1 = str1 & 0x1FFFFFFF;
-        uint32_t phys2 = str2 & 0x1FFFFFFF;
-
-        const char *str1Ptr = reinterpret_cast<const char *>(rdram + phys1);
-        const char *str2Ptr = reinterpret_cast<const char *>(rdram + phys2);
-
-        int result = std::strcmp(str1Ptr, str2Ptr);
-
-        ctx->r[2] = _mm_set1_epi32(result);
-    }
-
-    void strncmp(uint8_t *rdram, R5900Context *ctx)
-    {
-        uint32_t str1 = ctx->r[4].m128i_u32[0]; // a0 = first string
-        uint32_t str2 = ctx->r[5].m128i_u32[0]; // a1 = second string
-        uint32_t n = ctx->r[6].m128i_u32[0];    // a2 = max length
-
-        uint32_t phys1 = str1 & 0x1FFFFFFF;
-        uint32_t phys2 = str2 & 0x1FFFFFFF;
-
-        const char *str1Ptr = reinterpret_cast<const char *>(rdram + phys1);
-        const char *str2Ptr = reinterpret_cast<const char *>(rdram + phys2);
-
-        int result = std::strncmp(str1Ptr, str2Ptr, n);
-
-        ctx->r[2] = _mm_set1_epi32(result);
-    }
-
-    // I/O operations
-    void printf(uint8_t *rdram, R5900Context *ctx)
-    {
-        uint32_t fmtAddr = ctx->r[4].m128i_u32[0]; // a0 = format string
-
-        uint32_t physAddr = fmtAddr & 0x1FFFFFFF;
-        const char *fmt = reinterpret_cast<const char *>(rdram + physAddr);
-
-        // Simple implementation - just print the format string TODO  we would parse the format and handle arguments
-        std::cout << "printf: " << fmt << std::endl;
-
-        ctx->r[2] = _mm_set1_epi32(1);
-    }
-
-    void sprintf(uint8_t *rdram, R5900Context *ctx)
-    {
-        uint32_t destAddr = ctx->r[4].m128i_u32[0]; // a0 = destination buffer
-        uint32_t fmtAddr = ctx->r[5].m128i_u32[0];  // a1 = format string
-
-        uint32_t physDest = destAddr & 0x1FFFFFFF;
-        uint32_t physFmt = fmtAddr & 0x1FFFFFFF;
-
-        char *destStr = reinterpret_cast<char *>(rdram + physDest);
-        const char *fmt = reinterpret_cast<const char *>(rdram + physFmt);
-
-        std::strcpy(destStr, fmt);
-
-        size_t len = std::strlen(fmt);
-        ctx->r[2] = _mm_set1_epi32(static_cast<uint32_t>(len));
-    }
-
-    void puts(uint8_t *rdram, R5900Context *ctx)
-    {
-        uint32_t strAddr = ctx->r[4].m128i_u32[0]; // a0 = string
-
-        uint32_t physAddr = strAddr & 0x1FFFFFFF;
-        const char *str = reinterpret_cast<const char *>(rdram + physAddr);
-
-        std::cout << str << std::endl;
-
-        // Return success (1) in v0
-        ctx->r[2] = _mm_set1_epi32(1);
-    }
-
-    // Memory allocation TODO need a proper PS2 heap implementation
-    void malloc(uint8_t *rdram, R5900Context *ctx)
-    {
-        uint32_t size = ctx->r[4].m128i_u32[0]; // a0 = size
-
-        // Simple implementation - allocate from top of memory
-
-        static uint32_t heapTop = 0x01000000; // Example heap start
-
-        uint32_t allocAddr = heapTop;
-        heapTop += ((size + 15) & ~15); // Align to 16 bytes
-
-        ctx->r[2] = _mm_set1_epi32(allocAddr);
-    }
-
-    void free(uint8_t *rdram, R5900Context *ctx)
-    {
-        uint32_t ptr = ctx->r[4].m128i_u32[0]; // a0 = pointer
-
-        // Simple implementation - do nothing
-    }
-
-    void calloc(uint8_t *rdram, R5900Context *ctx)
-    {
-        uint32_t nmemb = ctx->r[4].m128i_u32[0]; // a0 = number of elements
-        uint32_t size = ctx->r[5].m128i_u32[0];  // a1 = size of each element
-
-        uint32_t totalSize = nmemb * size;
-
-        // Call malloc
-        ctx->r[4] = _mm_set1_epi32(totalSize);
-        malloc(rdram, ctx);
-
-        // Zero the memory
-        uint32_t allocAddr = ctx->r[2].m128i_u32[0];
-        uint32_t physAddr = allocAddr & 0x1FFFFFFF;
-        std::memset(rdram + physAddr, 0, totalSize);
-
-        // Return value already in v0 from malloc
-    }
-
-    void realloc(uint8_t *rdram, R5900Context *ctx)
-    {
-        uint32_t ptr = ctx->r[4].m128i_u32[0];  // a0 = pointer
-        uint32_t size = ctx->r[5].m128i_u32[0]; // a1 = new size
-
-        // Simple implementation - allocate new block and copy
-
-        if (ptr == 0)
+        if (hostDest && hostSrc)
         {
-            ctx->r[4] = _mm_set1_epi32(size);
-            malloc(rdram, ctx);
-            return;
+            ::memcpy(hostDest, hostSrc, size);
+        }
+        else
+        {
+            std::cerr << "memcpy error: Attempted copy involving non-RDRAM address (or invalid RDRAM address)."
+                      << " Dest: 0x" << std::hex << destAddr << " (host ptr valid: " << (hostDest != nullptr) << ")"
+                      << ", Src: 0x" << srcAddr << " (host ptr valid: " << (hostSrc != nullptr) << ")" << std::dec
+                      << ", Size: " << size << std::endl;
         }
 
-        // Allocate new block
-        uint32_t oldPtr = ptr;
-        ctx->r[4] = _mm_set1_epi32(size);
-        malloc(rdram, ctx);
-        uint32_t newPtr = ctx->r[2].m128i_u32[0];
-
-        // Copy data from old to new
-        uint32_t physOld = oldPtr & 0x1FFFFFFF;
-        uint32_t physNew = newPtr & 0x1FFFFFFF;
-        std::memcpy(rdram + physNew, rdram + physOld, size);
-
-        // Return value already in v0
+        ctx->r[2] = ctx->r[4]; // Return dest pointer ($v0 = $a0)
     }
 
-    // Math functions
-    void sqrt(uint8_t *rdram, R5900Context *ctx)
+    void ps2_stubs::memset(uint8_t *rdram, R5900Context *ctx)
     {
-        // Assuming the argument is in the first FPU register (f12)
-        float arg = ctx->f[12];
-        float result = std::sqrt(arg);
+        uint32_t destAddr = getRegU32(ctx, 4);       // $a0
+        int value = (int)(getRegU32(ctx, 5) & 0xFF); // $a1 (char value)
+        uint32_t size = getRegU32(ctx, 6);           // $a2
 
-        // Return result in f0
-        ctx->f[0] = result;
-    }
+        uint8_t *hostDest = getMemPtr(rdram, destAddr);
 
-    void sin(uint8_t *rdram, R5900Context *ctx)
-    {
-        // Assuming the argument is in the first FPU register (f12)
-        float arg = ctx->f[12];
-        float result = std::sin(arg);
-
-        // Return result in f0
-        ctx->f[0] = result;
-    }
-
-    void cos(uint8_t *rdram, R5900Context *ctx)
-    {
-        // Assuming the argument is in the first FPU register (f12)
-        float arg = ctx->f[12];
-        float result = std::cos(arg);
-
-        // Return result in f0
-        ctx->f[0] = result;
-    }
-
-    void atan2(uint8_t *rdram, R5900Context *ctx)
-    {
-        // Assuming the arguments are in f12 and f13
-        float y = ctx->f[12];
-        float x = ctx->f[13];
-        float result = std::atan2(y, x);
-
-        // Return result in f0
-        ctx->f[0] = result;
-    }
-}
-
-// PS2 system call implementation stubs
-namespace ps2_syscalls
-{
-    void FlushCache(uint8_t *rdram, R5900Context *ctx)
-    {
-        uint32_t operation = ctx->r[4].m128i_u32[0]; // a0 = operation
-
-        std::cout << "FlushCache called with operation: " << operation << std::endl;
-
-        // Operation values:
-        // 0 = Instruction cache
-        // 1 = Data cache
-        // 2 = Both
-    }
-
-    void ExitThread(uint8_t *rdram, R5900Context *ctx)
-    {
-        uint32_t exitCode = ctx->r[4].m128i_u32[0]; // a0 = exit code
-
-        std::cout << "ExitThread called with exit code: " << exitCode << std::endl;
-
-        // This would terminate the current thread
-    }
-
-    void SleepThread(uint8_t *rdram, R5900Context *ctx)
-    {
-        std::cout << "SleepThread called" << std::endl;
-
-        // This would suspend the current thread
-    }
-
-    void CreateThread(uint8_t *rdram, R5900Context *ctx)
-    {
-        uint32_t threadParam = ctx->r[4].m128i_u32[0]; // a0 = thread parameter
-
-        // We need to extract all thread creation parameters
-        std::cout << "CreateThread called with parameter: " << std::hex << threadParam << std::dec << std::endl;
-
-        // Return a dummy thread ID
-        ctx->r[2] = _mm_set1_epi32(1);
-    }
-
-    void StartThread(uint8_t *rdram, R5900Context *ctx)
-    {
-        uint32_t threadId = ctx->r[4].m128i_u32[0]; // a0 = thread ID
-        uint32_t priority = ctx->r[5].m128i_u32[0]; // a1 = priority
-
-        std::cout << "StartThread called with ID: " << threadId << ", priority: " << priority << std::endl;
-
-        // Return success (0)
-        ctx->r[2] = _mm_set1_epi32(0);
-    }
-
-    void SifInitRpc(uint8_t *rdram, R5900Context *ctx)
-    {
-        uint32_t mode = ctx->r[4].m128i_u32[0]; // a0 = mode
-
-        std::cout << "SifInitRpc called with mode: " << mode << std::endl;
-
-        // Return success (0)
-        ctx->r[2] = _mm_set1_epi32(0);
-    }
-
-    void SifBindRpc(uint8_t *rdram, R5900Context *ctx)
-    {
-        uint32_t clientPtr = ctx->r[4].m128i_u32[0]; // a0 = client pointer
-        uint32_t rpcId = ctx->r[5].m128i_u32[0];     // a1 = RPC ID
-        uint32_t mode = ctx->r[6].m128i_u32[0];      // a2 = mode
-
-        std::cout << "SifBindRpc called with client: " << std::hex << clientPtr
-                  << ", RPC ID: " << rpcId << ", mode: " << mode << std::dec << std::endl;
-
-        // Return success (0)
-        ctx->r[2] = _mm_set1_epi32(0);
-    }
-
-    void SifCallRpc(uint8_t *rdram, R5900Context *ctx)
-    {
-        uint32_t clientPtr = ctx->r[4].m128i_u32[0]; // a0 = client pointer
-        uint32_t command = ctx->r[5].m128i_u32[0];   // a1 = command
-        uint32_t mode = ctx->r[6].m128i_u32[0];      // a2 = mode
-
-        std::cout << "SifCallRpc called with client: " << std::hex << clientPtr
-                  << ", command: " << command << ", mode: " << mode << std::dec << std::endl;
-
-        // Return success (0)
-        ctx->r[2] = _mm_set1_epi32(0);
-    }
-
-    void SetGsCrt(uint8_t *rdram, R5900Context *ctx)
-    {
-        uint32_t interlaced = ctx->r[4].m128i_u32[0]; // a0 = interlaced
-        uint32_t mode = ctx->r[5].m128i_u32[0];       // a1 = mode (NTSC/PAL)
-        uint32_t field = ctx->r[6].m128i_u32[0];      // a2 = field
-
-        std::cout << "SetGsCrt called with interlaced: " << interlaced
-                  << ", mode: " << mode << ", field: " << field << std::endl;
-
-        // No return value
-    }
-}
-
-// MMI operation implementations
-namespace ps2_mmi
-{
-    void PADDW(R5900Context *ctx, int rd, int rs, int rt)
-    {
-        ctx->r[rd] = _mm_add_epi32(ctx->r[rs], ctx->r[rt]);
-    }
-
-    void PSUBW(R5900Context *ctx, int rd, int rs, int rt)
-    {
-        ctx->r[rd] = _mm_sub_epi32(ctx->r[rs], ctx->r[rt]);
-    }
-
-    void PCGTW(R5900Context *ctx, int rd, int rs, int rt)
-    {
-        ctx->r[rd] = _mm_cmpgt_epi32(ctx->r[rs], ctx->r[rt]);
-    }
-
-    void PMAXW(R5900Context *ctx, int rd, int rs, int rt)
-    {
-        // we could use _mm_max_epi32 but is SSE4.1
-        __m128i mask = _mm_cmpgt_epi32(ctx->r[rs], ctx->r[rt]);
-        ctx->r[rd] = _mm_or_si128(
-            _mm_and_si128(mask, ctx->r[rs]),
-            _mm_andnot_si128(mask, ctx->r[rt]));
-    }
-
-    void PADDH(R5900Context *ctx, int rd, int rs, int rt)
-    {
-        ctx->r[rd] = _mm_add_epi16(ctx->r[rs], ctx->r[rt]);
-    }
-
-    void PSUBH(R5900Context *ctx, int rd, int rs, int rt)
-    {
-        ctx->r[rd] = _mm_sub_epi16(ctx->r[rs], ctx->r[rt]);
-    }
-
-    void PCGTH(R5900Context *ctx, int rd, int rs, int rt)
-    {
-        ctx->r[rd] = _mm_cmpgt_epi16(ctx->r[rs], ctx->r[rt]);
-    }
-
-    void PMAXH(R5900Context *ctx, int rd, int rs, int rt)
-    {
-        ctx->r[rd] = _mm_max_epi16(ctx->r[rs], ctx->r[rt]);
-    }
-
-    void PADDB(R5900Context *ctx, int rd, int rs, int rt)
-    {
-        ctx->r[rd] = _mm_add_epi8(ctx->r[rs], ctx->r[rt]);
-    }
-
-    void PSUBB(R5900Context *ctx, int rd, int rs, int rt)
-    {
-        ctx->r[rd] = _mm_sub_epi8(ctx->r[rs], ctx->r[rt]);
-    }
-
-    void PCGTB(R5900Context *ctx, int rd, int rs, int rt)
-    {
-        ctx->r[rd] = _mm_cmpgt_epi8(ctx->r[rs], ctx->r[rt]);
-    }
-
-    void PEXTLW(R5900Context *ctx, int rd, int rs, int rt)
-    {
-        ctx->r[rd] = _mm_unpacklo_epi32(ctx->r[rt], ctx->r[rs]);
-    }
-
-    void PEXTUW(R5900Context *ctx, int rd, int rs, int rt)
-    {
-        ctx->r[rd] = _mm_unpackhi_epi32(ctx->r[rt], ctx->r[rs]);
-    }
-
-    void PEXTLH(R5900Context *ctx, int rd, int rs, int rt)
-    {
-        ctx->r[rd] = _mm_unpacklo_epi16(ctx->r[rt], ctx->r[rs]);
-    }
-
-    void PEXTUH(R5900Context *ctx, int rd, int rs, int rt)
-    {
-        ctx->r[rd] = _mm_unpackhi_epi16(ctx->r[rt], ctx->r[rs]);
-    }
-
-    void PEXTLB(R5900Context *ctx, int rd, int rs, int rt)
-    {
-        ctx->r[rd] = _mm_unpacklo_epi8(ctx->r[rt], ctx->r[rs]);
-    }
-
-    void PEXTUB(R5900Context *ctx, int rd, int rs, int rt)
-    {
-        ctx->r[rd] = _mm_unpackhi_epi8(ctx->r[rt], ctx->r[rs]);
-    }
-
-    void PMADDW(R5900Context *ctx, int rd, int rs, int rt)
-    {
-        // We need to compute (rs * rt) + (HI:LO) and store in both rd and HI:LO
-        // This is a simplification as the actual MMI operation is more complex
-
-        // Just do vector multiplication
-        __m128i product = _mm_mullo_epi32(ctx->r[rs], ctx->r[rt]);
-
-        // Add the current HI:LO values
-        // This is a simplified version
-        __m128i hiLo = _mm_set_epi32(0, ctx->hi, 0, ctx->lo);
-        __m128i result = _mm_add_epi32(product, hiLo);
-
-        // Set result and update HI:LO
-        ctx->r[rd] = result;
-        ctx->lo = _mm_extract_epi32(result, 0);
-        ctx->hi = _mm_extract_epi32(result, 1);
-    }
-
-    void PMSUBW(R5900Context *ctx, int rd, int rs, int rt)
-    {
-        // Similar to PMADDW but subtracts
-        __m128i product = _mm_mullo_epi32(ctx->r[rs], ctx->r[rt]);
-
-        __m128i hiLo = _mm_set_epi32(0, ctx->hi, 0, ctx->lo);
-        __m128i result = _mm_sub_epi32(hiLo, product);
-
-        ctx->r[rd] = result;
-        ctx->lo = _mm_extract_epi32(result, 0);
-        ctx->hi = _mm_extract_epi32(result, 1);
-    }
-
-    void PAND(R5900Context *ctx, int rd, int rs, int rt)
-    {
-        ctx->r[rd] = _mm_and_si128(ctx->r[rs], ctx->r[rt]);
-    }
-
-    void POR(R5900Context *ctx, int rd, int rs, int rt)
-    {
-        ctx->r[rd] = _mm_or_si128(ctx->r[rs], ctx->r[rt]);
-    }
-
-    void PXOR(R5900Context *ctx, int rd, int rs, int rt)
-    {
-        ctx->r[rd] = _mm_xor_si128(ctx->r[rs], ctx->r[rt]);
-    }
-
-    void PNOR(R5900Context *ctx, int rd, int rs, int rt)
-    {
-        __m128i orResult = _mm_or_si128(ctx->r[rs], ctx->r[rt]);
-        ctx->r[rd] = _mm_xor_si128(orResult, _mm_set1_epi32(0xFFFFFFFF));
-    }
-}
-
-// Hardware register handlers
-namespace ps2_hardware
-{
-    void handleDmacReg(uint32_t address, uint32_t value)
-    {
-        uint32_t channel = (address >> 8) & 0xF;
-        uint32_t reg = address & 0xFF;
-
-        std::cout << "DMA channel " << channel << " register " << std::hex << reg
-                  << " written with value " << value << std::dec << std::endl;
-
-        // Check if this is the start bit in the channel control register
-        if (reg == 0 && (value & 0x100))
+        if (hostDest)
         {
-            std::cout << "Starting DMA transfer on channel " << channel << std::endl;
-
-            // Initiate DMA transfer here
+            ::memset(hostDest, value, size);
         }
+        else
+        {
+            std::cerr << "memset error: Invalid address provided." << std::endl;
+        }
+
+        ctx->r[2] = ctx->r[4]; // Return dest pointer ($v0 = $a0)
     }
 
-    // GS register handlers
-    void handleGsReg(uint32_t address, uint32_t value)
+    void ps2_stubs::memmove(uint8_t *rdram, R5900Context *ctx)
     {
-        std::cout << "GS register " << std::hex << address << " written with value "
-                  << value << std::dec << std::endl;
-
-        // Update GS state and possibly trigger rendering
+        // TODO
     }
 
-    // VIF register handlers
-    void handleVif0Reg(uint32_t address, uint32_t value)
+    void ps2_stubs::memcmp(uint8_t *rdram, R5900Context *ctx)
     {
-        uint32_t reg = address & 0xFF;
+        uint32_t ptr1Addr = getRegU32(ctx, 4); // $a0
+        uint32_t ptr2Addr = getRegU32(ctx, 5); // $a1
+        uint32_t size = getRegU32(ctx, 6);     // $a2
 
-        std::cout << "VIF0 register " << std::hex << reg << " written with value "
-                  << value << std::dec << std::endl;
+        const uint8_t *hostPtr1 = getConstMemPtr(rdram, ptr1Addr);
+        const uint8_t *hostPtr2 = getConstMemPtr(rdram, ptr2Addr);
+        int result = 0; // Default if pointers are bad
 
-        // Handle VIF0 operations
+        if (hostPtr1 && hostPtr2)
+        {
+            result = ::memcmp(hostPtr1, hostPtr2, size);
+        }
+        else
+        {
+            std::cerr << "memcmp error: Invalid address provided." << std::endl;
+            result = 1;
+        }
+        setReturnS32(ctx, result);
     }
 
-    void handleVif1Reg(uint32_t address, uint32_t value)
+    void ps2_stubs::strcpy(uint8_t *rdram, R5900Context *ctx)
     {
-        uint32_t reg = address & 0xFF;
+        uint32_t destAddr = getRegU32(ctx, 4); // $a0
+        uint32_t srcAddr = getRegU32(ctx, 5);  // $a1
 
-        std::cout << "VIF1 register " << std::hex << reg << " written with value "
-                  << value << std::dec << std::endl;
+        char *hostDest = reinterpret_cast<char *>(getMemPtr(rdram, destAddr));
+        const char *hostSrc = reinterpret_cast<const char *>(getConstMemPtr(rdram, srcAddr));
 
-        // Handle VIF1 operations
+        if (hostDest && hostSrc)
+        {
+            ::strcpy(hostDest, hostSrc);
+        }
+        else
+        {
+            std::cerr << "strcpy error: Invalid address provided." << std::endl;
+        }
+
+        ctx->r[2] = ctx->r[4]; // Return dest pointer ($v0 = $a0)
     }
 
-    void handleTimerReg(uint32_t address, uint32_t value)
+    void ps2_stubs::strncpy(uint8_t *rdram, R5900Context *ctx)
     {
-        uint32_t timer = (address >> 4) & 0x3;
-        uint32_t reg = address & 0xF;
+        uint32_t destAddr = getRegU32(ctx, 4); // $a0
+        uint32_t srcAddr = getRegU32(ctx, 5);  // $a1
+        uint32_t size = getRegU32(ctx, 6);     // $a2
 
-        std::cout << "Timer " << timer << " register " << std::hex << reg << " written with value "
-                  << value << std::dec << std::endl;
+        char *hostDest = reinterpret_cast<char *>(getMemPtr(rdram, destAddr));
+        const char *hostSrc = reinterpret_cast<const char *>(getConstMemPtr(rdram, srcAddr));
 
-        // Update timer state
+        if (hostDest && hostSrc)
+        {
+            ::strncpy(hostDest, hostSrc, size);
+            // Null termination if possible
+            if (size > 0)
+                hostDest[size - 1] = '\0';
+        }
+        else
+        {
+            std::cerr << "strncpy error: Invalid address provided." << std::endl;
+        }
+        ctx->r[2] = ctx->r[4]; // Return dest pointer ($v0 = $a0)
     }
 
-    void handleSPU2Reg(uint32_t address, uint32_t value)
+    void ps2_stubs::strlen(uint8_t *rdram, R5900Context *ctx)
     {
-        std::cout << "SPU2 register " << std::hex << address << " written with value "
-                  << value << std::dec << std::endl;
+        uint32_t strAddr = getRegU32(ctx, 4); // $a0
+        const char *hostStr = reinterpret_cast<const char *>(getConstMemPtr(rdram, strAddr));
+        size_t len = 0;
 
-        // Update audio state
+        if (hostStr)
+        {
+            len = ::strlen(hostStr);
+        }
+        else
+        {
+            std::cerr << "strlen error: Invalid address provided." << std::endl;
+        }
+        setReturnU32(ctx, (uint32_t)len);
+    }
+
+    void ps2_stubs::strcmp(uint8_t *rdram, R5900Context *ctx)
+    {
+        uint32_t str1Addr = getRegU32(ctx, 4); // $a0
+        uint32_t str2Addr = getRegU32(ctx, 5); // $a1
+
+        const char *hostStr1 = reinterpret_cast<const char *>(getConstMemPtr(rdram, str1Addr));
+        const char *hostStr2 = reinterpret_cast<const char *>(getConstMemPtr(rdram, str2Addr));
+        int result = 0; // Default if pointers bad
+
+        if (hostStr1 && hostStr2)
+        {
+            result = ::strcmp(hostStr1, hostStr2);
+        }
+        else
+        {
+            std::cerr << "strcmp error: Invalid address provided." << std::endl;
+            result = 1; // Indicate difference on error
+        }
+        setReturnS32(ctx, result);
+    }
+
+    void ps2_stubs::strncmp(uint8_t *rdram, R5900Context *ctx)
+    {
+        uint32_t str1Addr = getRegU32(ctx, 4); // $a0
+        uint32_t str2Addr = getRegU32(ctx, 5); // $a1
+        uint32_t size = getRegU32(ctx, 6);     // $a2
+
+        const char *hostStr1 = reinterpret_cast<const char *>(getConstMemPtr(rdram, str1Addr));
+        const char *hostStr2 = reinterpret_cast<const char *>(getConstMemPtr(rdram, str2Addr));
+        int result = 0; // Default if pointers bad
+
+        if (hostStr1 && hostStr2)
+        {
+            result = ::strncmp(hostStr1, hostStr2, size);
+        }
+        else
+        {
+            std::cerr << "strncmp error: Invalid address provided." << std::endl;
+            result = 1;
+        }
+        setReturnS32(ctx, result);
+    }
+
+    void ps2_stubs::strcat(uint8_t *rdram, R5900Context *ctx)
+    {
+        uint32_t destAddr = getRegU32(ctx, 4); // $a0
+        uint32_t srcAddr = getRegU32(ctx, 5);  // $a1
+
+        char *hostDest = reinterpret_cast<char *>(getMemPtr(rdram, destAddr));
+        const char *hostSrc = reinterpret_cast<const char *>(getConstMemPtr(rdram, srcAddr));
+
+        if (hostDest && hostSrc)
+        {
+            ::strcat(hostDest, hostSrc);
+        }
+        else
+        {
+            std::cerr << "strcat error: Invalid address provided." << std::endl;
+        }
+
+        ctx->r[2] = ctx->r[4]; // Return dest pointer ($v0 = $a0)
+    }
+
+    void ps2_stubs::strncat(uint8_t *rdram, R5900Context *ctx)
+    {
+        // TODO
+    }
+
+    void ps2_stubs::strchr(uint8_t *rdram, R5900Context *ctx)
+    {
+        // TODO
+    }
+
+    void ps2_stubs::strrchr(uint8_t *rdram, R5900Context *ctx)
+    {
+        // TODO
+    }
+
+    void ps2_stubs::strstr(uint8_t *rdram, R5900Context *ctx)
+    {
+        // TODO
+    }
+
+    void ps2_stubs::printf(uint8_t *rdram, R5900Context *ctx)
+    {
+        uint32_t format_addr = getRegU32(ctx, 4); // $a0
+
+        // We can't easily handle variable arguments in this simple implementation,
+        // Check if the address is within RDRAM
+
+        if ((format_addr & PS2_RAM_MASK) == 0)
+        {
+            const char *format = (const char *)(rdram + (format_addr & 0x1FFFFFF));
+            ::printf("PS2 printf: %s\n", format);
+        }
+        else
+        {
+            std::cerr << "strcat error: Invalid address provided." << std::endl;
+        }
+
+        setReturnS32(ctx, (int32_t)1); // TODO fix this later
+    }
+
+    void ps2_stubs::sprintf(uint8_t *rdram, R5900Context *ctx)
+    {
+        uint32_t str_addr = getRegU32(ctx, 4);    // $a0
+        uint32_t format_addr = getRegU32(ctx, 5); // $a1
+
+        // We can't easily handle variable arguments in this simple implementation,
+        // so we'll just copy the format string to the destination without substituting any arguments
+
+        if ((str_addr & PS2_RAM_MASK) == 0 && (format_addr & PS2_RAM_MASK) == 0)
+        {
+            char *str = (char *)(rdram + (str_addr & 0x1FFFFFF));
+            const char *format = (const char *)(rdram + (format_addr & 0x1FFFFFF));
+            ::strcpy(str, format);
+        }
+        else
+        {
+            std::cerr << "strcat error: Invalid address provided." << std::endl;
+        }
+
+        setReturnS32(ctx, 0);
+    }
+
+    void ps2_stubs::snprintf(uint8_t *rdram, R5900Context *ctx)
+    {
+        uint32_t str_addr = getRegU32(ctx, 4);    // $a0
+        size_t size = getRegU32(ctx, 5);          // $a1
+        uint32_t format_addr = getRegU32(ctx, 6); // $a2
+
+        // We can't easily handle variable arguments in this simple implementation,
+        // so we'll just copy the format string to the destination without substituting any arguments
+
+        // Check if the addresses are within RDRAM
+        if ((str_addr & PS2_RAM_MASK) == 0 && (format_addr & PS2_RAM_MASK) == 0)
+        {
+            // Addresses are within RDRAM, use direct access
+            char *str = (char *)(rdram + (str_addr & 0x1FFFFFF));
+            const char *format = (const char *)(rdram + (format_addr & 0x1FFFFFF));
+            ::strncpy(str, format, size);
+            str[size - 1] = '\0'; // Ensure null termination
+        }
+        else
+        {
+            std::cerr << "strcat error: Invalid address provided." << std::endl;
+        }
+
+        setReturnS32(ctx, 0);
+    }
+
+    void ps2_stubs::puts(uint8_t *rdram, R5900Context *ctx)
+    {
+        uint32_t strAddr = getRegU32(ctx, 4); // $a0
+        const char *hostStr = reinterpret_cast<const char *>(getConstMemPtr(rdram, strAddr));
+
+        int result = -1;
+        if (hostStr)
+        {
+            result = std::puts(hostStr);
+        }
+        else
+        {
+            std::cerr << "puts error: Invalid address provided." << std::endl;
+        }
+
+        setReturnS32(ctx, result >= 0 ? 0 : -1); // Return 0 on success, -1 on error like PS2 libs might
+    }
+
+    void ps2_stubs::fopen(uint8_t *rdram, R5900Context *ctx)
+    {
+        // TODO
+    }
+
+    void ps2_stubs::fclose(uint8_t *rdram, R5900Context *ctx)
+    {
+        // TODO
+    }
+
+    void ps2_stubs::fread(uint8_t *rdram, R5900Context *ctx)
+    {
+        // TODO
+    }
+
+    void ps2_stubs::fwrite(uint8_t *rdram, R5900Context *ctx)
+    {
+        // TODO
+    }
+
+    void ps2_stubs::fprintf(uint8_t *rdram, R5900Context *ctx)
+    {
+        // TODO
+    }
+
+    void ps2_stubs::fseek(uint8_t *rdram, R5900Context *ctx)
+    {
+        // TODO
+    }
+
+    void ps2_stubs::ftell(uint8_t *rdram, R5900Context *ctx)
+    {
+        // TODO
+    }
+
+    void ps2_stubs::fflush(uint8_t *rdram, R5900Context *ctx)
+    {
+        // TODO
+    }
+
+    void ps2_stubs::sqrt(uint8_t *rdram, R5900Context *ctx)
+    {
+        // TODO
+    }
+
+    void ps2_stubs::sin(uint8_t *rdram, R5900Context *ctx)
+    {
+        // TODO
+    }
+
+    void ps2_stubs::cos(uint8_t *rdram, R5900Context *ctx)
+    {
+        // TODO
+    }
+
+    void ps2_stubs::tan(uint8_t *rdram, R5900Context *ctx)
+    {
+        // TODO
+    }
+
+    void ps2_stubs::atan2(uint8_t *rdram, R5900Context *ctx)
+    {
+        // TODO
+    }
+
+    void ps2_stubs::pow(uint8_t *rdram, R5900Context *ctx)
+    {
+        // TODO
+    }
+
+    void ps2_stubs::exp(uint8_t *rdram, R5900Context *ctx)
+    {
+        // TODO
+    }
+
+    void ps2_stubs::log(uint8_t *rdram, R5900Context *ctx)
+    {
+        // TODO
+    }
+
+    void ps2_stubs::log10(uint8_t *rdram, R5900Context *ctx)
+    {
+        // TODO
+    }
+
+    void ps2_stubs::ceil(uint8_t *rdram, R5900Context *ctx)
+    {
+        // TODO
+    }
+
+    void ps2_stubs::floor(uint8_t *rdram, R5900Context *ctx)
+    {
+        // TODO
+    }
+
+    void ps2_stubs::fabs(uint8_t *rdram, R5900Context *ctx)
+    {
+        // TODO
+    }
+
+    void ps2_stubs::TODO(uint8_t *rdram, R5900Context *ctx)
+    {
+        uint32_t stub_num = getRegU32(ctx, 2); // $v0 often holds stub num before call
+        std::cerr << "Warning: Unimplemented stub called. PC=0x" << std::hex << ctx->pc
+                  << " stub # (approx): 0x" << stub_num << std::dec << std::endl;
+        setReturnS32(ctx, -1); // Return error
     }
 }
-#endif // PS2_STUBS_H

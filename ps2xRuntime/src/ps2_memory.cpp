@@ -47,11 +47,35 @@ bool PS2Memory::initialize(size_t ramSize)
         }
         std::memset(m_scratchpad, 0, PS2_SCRATCHPAD_SIZE);
 
-        // Initialize IO registers with default values
-        m_ioRegisters.clear();
-
         // Initialize TLB entries
         m_tlbEntries.clear();
+
+        // Allocate IOP RAM
+        iop_ram = new uint8_t[2 * 1024 * 1024]; // 2MB
+        if (!iop_ram)
+        {
+            delete[] m_rdram;
+            delete[] m_scratchpad;
+            m_rdram = nullptr;
+            m_scratchpad = nullptr;
+            return false;
+        }
+
+        // Initialize IOP RAM with zeros
+        std::memset(iop_ram, 0, 2 * 1024 * 1024);
+
+        // Initialize I/O registers
+        m_ioRegisters.clear();
+
+        // Initialize GS registers
+        memset(&gs_regs, 0, sizeof(gs_regs));
+
+        // Initialize VIF registers
+        memset(&vif0_regs, 0, sizeof(vif0_regs));
+        memset(&vif1_regs, 0, sizeof(vif1_regs));
+
+        // Initialize DMA registers
+        memset(dma_regs, 0, sizeof(dma_regs));
 
         return true;
     }

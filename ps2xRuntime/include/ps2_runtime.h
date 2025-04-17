@@ -8,6 +8,7 @@
 #include <functional>
 #include <immintrin.h> // For SSE/AVX instructions
 
+constexpr uint32_t PS2_RAM_MASK = 0xF0000000;
 constexpr uint32_t PS2_RAM_BASE = 0x00000000;
 constexpr uint32_t PS2_RAM_SIZE = 32 * 1024 * 1024; // 32MB
 constexpr uint32_t PS2_SCRATCHPAD_BASE = 0x70000000;
@@ -131,7 +132,39 @@ struct R5900Context
         // Reset COP1 state
         fcr31 = 0;
     }
+
+    ~R5900Context() = default;
 };
+
+inline uint32_t getRegU32(const R5900Context *ctx, int reg)
+{
+    // Check if reg is valid (0-31)
+    if (reg < 0 || reg > 31)
+        return 0;
+    return ctx->r[reg].m128i_u32[0];
+}
+
+inline void setReturnU32(R5900Context *ctx, uint32_t value)
+{
+    ctx->r[2] = _mm_set_epi32(0, 0, 0, value); // $v0
+}
+
+inline void setReturnS32(R5900Context *ctx, int32_t value)
+{
+    ctx->r[2] = _mm_set_epi32(0, 0, 0, value); // $v0 Sign extension handled by cast? TODO Check MIPS ABI.
+}
+
+inline uint8_t *getMemPtr(uint8_t *rdram, uint32_t addr)
+{
+    constexpr uint32_t PS2_RAM_MASK = PS2_RAM_SIZE - 1;
+    return rdram + (addr & PS2_RAM_MASK);
+}
+
+inline const uint8_t *getConstMemPtr(uint8_t *rdram, uint32_t addr)
+{
+    constexpr uint32_t PS2_RAM_MASK = PS2_RAM_SIZE - 1;
+    return rdram + (addr & PS2_RAM_MASK);
+}
 
 // PS2 GS (Graphics Synthesizer) registers
 struct GSRegisters
@@ -299,10 +332,8 @@ private:
     PS2Memory m_memory;
     R5900Context m_cpuContext;
 
-    // Function table for recompiled code
     std::unordered_map<uint32_t, RecompiledFunction> m_functionTable;
 
-    // Currently loaded modules
     struct LoadedModule
     {
         std::string name;
