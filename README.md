@@ -88,7 +88,7 @@ To execute the recompiled code, you'll need to implement or use a runtime that p
 * System call handling
 * PS2-specific hardware simulation
 
-A basic runtime header is provided in `ps2xRuntime` folder.
+A basic runtime lib is provided in `ps2xRuntime` folder.
 
 ### Limitations
 
