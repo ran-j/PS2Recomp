@@ -153,7 +153,6 @@ namespace ps2recomp
         std::string inputPath;
         std::string outputPath;
         bool singleFileOutput;
-        std::vector<std::string> stubFunctions;
         std::vector<std::string> skipFunctions;
         std::unordered_map<uint32_t, std::string> patches;
         std::map<std::string, std::string> stubImplementations;

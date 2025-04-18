@@ -26,7 +26,6 @@ namespace ps2recomp
             config.outputPath = toml::find<std::string>(data, "general", "output");
             config.singleFileOutput = toml::find<bool>(data, "general", "single_file_output");
 
-            config.stubFunctions = toml::find<std::vector<std::string>>(data, "general", "stubs");
             config.skipFunctions = toml::find<std::vector<std::string>>(data, "general", "skip");
 
             if (data.contains("patches") && data.at("patches").is_table())
@@ -77,13 +76,6 @@ namespace ps2recomp
         general["output"] = config.outputPath;
         general["single_file_output"] = config.singleFileOutput;
         data["general"] = general;
-
-        toml::array stubs;
-        for (const auto &stub : config.stubFunctions)
-        {
-            stubs.push_back(stub);
-        }
-        data["stubs"] = stubs;
 
         toml::array skips;
         for (const auto &skip : config.skipFunctions)
