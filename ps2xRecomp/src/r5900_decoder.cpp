@@ -1,4 +1,5 @@
 #include "ps2recomp/r5900_decoder.h"
+#include <iostream>
 
 namespace ps2recomp
 {
@@ -69,6 +70,7 @@ namespace ps2recomp
             decodeJType(inst);
             inst.isJump = true;
             inst.hasDelaySlot = true;
+            inst.modificationInfo.modifiesControl = true; // PC
             break;
 
         case OPCODE_JAL:
@@ -76,6 +78,8 @@ namespace ps2recomp
             inst.isJump = true;
             inst.isCall = true;
             inst.hasDelaySlot = true;
+            inst.modificationInfo.modifiesGPR = true;     // $ra (r[31])
+            inst.modificationInfo.modifiesControl = true; // PC
             break;
 
         case OPCODE_BEQ:
@@ -89,6 +93,7 @@ namespace ps2recomp
             decodeIType(inst);
             inst.isBranch = true;
             inst.hasDelaySlot = true;
+            inst.modificationInfo.modifiesControl = true; // PC potentially
             break;
 
         case OPCODE_ADDI:
@@ -100,6 +105,15 @@ namespace ps2recomp
         case OPCODE_XORI:
         case OPCODE_LUI:
             decodeIType(inst);
+            if (inst.rt != 0)
+                inst.modificationInfo.modifiesGPR = true;
+            break;
+
+        case OPCODE_DADDI:
+        case OPCODE_DADDIU:
+            decodeIType(inst);
+            if (inst.rt != 0)
+                inst.modificationInfo.modifiesGPR = true;
             break;
 
         case OPCODE_MMI:
@@ -113,7 +127,8 @@ namespace ps2recomp
             decodeIType(inst);
             inst.isLoad = true;
             inst.isMultimedia = true; // 128-bit load
-            inst.modificationInfo.modifiesGPR = true;
+            if (inst.rt != 0)
+                inst.modificationInfo.modifiesGPR = true;
             break;
 
         case OPCODE_SQ:
@@ -138,9 +153,15 @@ namespace ps2recomp
         case OPCODE_LWC1:
         case OPCODE_LDC1:
         case OPCODE_LWC2:
-        case OPCODE_LDC2:
+        case OPCODE_LDC2: // VU Load
             decodeIType(inst);
             inst.isLoad = true;
+            if (inst.opcode == OPCODE_LWC1 || inst.opcode == OPCODE_LDC1)
+                inst.modificationInfo.modifiesFPR = true;
+            else if (inst.opcode == OPCODE_LQC2)
+                inst.modificationInfo.modifiesVFR = true;
+            else if (inst.rt != 0)
+                inst.modificationInfo.modifiesGPR = true; // Standard GPR loads
             break;
 
         case OPCODE_SB:
@@ -156,29 +177,76 @@ namespace ps2recomp
         case OPCODE_SDC1:
         case OPCODE_SWC2:
         case OPCODE_SDC2:
-        case OPCODE_SCD:
+        case OPCODE_SCD: // VU Store
             decodeIType(inst);
             inst.isStore = true;
+            if (inst.opcode == OPCODE_SC || inst.opcode == OPCODE_SCD)
+            {
+                if (inst.rt != 0)
+                    inst.modificationInfo.modifiesGPR = true;
+            }
+            break;
+
+        case OPCODE_CACHE:
+            decodeIType(inst);
+            inst.modificationInfo.modifiesControl = true; // Cache state
+            break;
+        case OPCODE_PREF:
+            decodeIType(inst);
             break;
 
         case OPCODE_COP0:
             decodeCOP0(inst);
+            inst.modificationInfo.modifiesControl = true;
+            if (inst.rs == COP0_MF && inst.rt != 0)
+                inst.modificationInfo.modifiesGPR = true;
             break;
 
         case OPCODE_COP1:
             decodeCOP1(inst);
+            // Can modify FPRs, FCRs, GPRs (MFC1/CFC1), or PC (BC1)
+            if (inst.isBranch)
+                inst.modificationInfo.modifiesControl = true; // PC
+            if (inst.rs == COP1_MF || inst.rs == COP1_CF)
+            {
+                // MFC1, CFC1
+                if (inst.rt != 0)
+                    inst.modificationInfo.modifiesGPR = true;
+            }
+            else if (inst.rs == COP1_S || inst.rs == COP1_W || inst.rs == COP1_L)
+            {
+                inst.modificationInfo.modifiesFPR = true;
+            }
+            if (inst.rs == COP1_CT || inst.function >= COP1_FUNC_C_F)
+            {                                                 // CTC1 or Compare
+                inst.modificationInfo.modifiesControl = true; // FCR31
+            }
             break;
 
         case OPCODE_COP2:
             decodeCOP2(inst);
             inst.isVU = true;
             inst.isMultimedia = true;
-            break;
-
-        case OPCODE_PREF:
-        case OPCODE_CACHE:
-            // Prefetch and cache operations
-            decodeIType(inst);
+            // Can modify VFRs, VU Flags, GPRs (QMFC2/CFC2), PC (BC2), memory (VISWR)
+            if (inst.isBranch)
+                inst.modificationInfo.modifiesControl = true; // PC
+            if (inst.rs == COP2_QMFC2 || inst.rs == COP2_CFC2)
+            {
+                // QMFC2, CFC2
+                if (inst.rt != 0)
+                    inst.modificationInfo.modifiesGPR = true;
+            }
+            else if (inst.rs == COP2_QMTC2 || inst.rs == COP2_CTC2)
+            {
+                // Modifies VU state based on GPR
+            }
+            else
+            {
+                inst.modificationInfo.modifiesVFR = true;     // Default assumption
+                inst.modificationInfo.modifiesControl = true; // Flags, Q, P, I etc.
+            }
+            if (inst.isStore)
+                inst.modificationInfo.modifiesMemory = true;
             break;
 
         default:
@@ -193,25 +261,41 @@ namespace ps2recomp
     void R5900Decoder::decodeRType(Instruction &inst) const
     {
         // R-type instructions already have all fields set correctly
+        if (inst.rd != 0)
+            inst.modificationInfo.modifiesGPR = true;
     }
 
     void R5900Decoder::decodeIType(Instruction &inst) const
     {
         // I-type instructions already have all fields set correctly
+        if (!inst.isStore && !inst.isBranch && inst.rt != 0)
+        {
+            inst.modificationInfo.modifiesGPR = true;
+        }
     }
 
     void R5900Decoder::decodeJType(Instruction &inst) const
     {
         // J-type instructions already have all fields set correctly
+        inst.modificationInfo.modifiesControl = true; // PC
+        if (inst.opcode == OPCODE_JAL)
+        {
+            inst.modificationInfo.modifiesGPR = true; // $ra (r[31])
+        }
     }
 
     void R5900Decoder::decodeSpecial(Instruction &inst) const
     {
+        if (inst.rd != 0)
+            inst.modificationInfo.modifiesGPR = true;
+
         switch (inst.function)
         {
         case SPECIAL_JR:
             inst.isJump = true;
             inst.hasDelaySlot = true;
+            inst.modificationInfo.modifiesGPR = false;    // Doesn't modify GPR itself
+            inst.modificationInfo.modifiesControl = true; // PC
             if (inst.rs == 31)
             {
                 // jr $ra is typically a return
@@ -223,18 +307,30 @@ namespace ps2recomp
             inst.isJump = true;
             inst.isCall = true;
             inst.hasDelaySlot = true;
+            if (inst.rd == 0)
+                inst.modificationInfo.modifiesGPR = false; // JALR $zero, $rs is like JR $rs
+            else
+                inst.modificationInfo.modifiesGPR = true;
+            inst.modificationInfo.modifiesControl = true; // PC
             break;
 
         case SPECIAL_SYSCALL:
         case SPECIAL_BREAK:
             // Special handling for syscall/break
+            inst.modificationInfo.modifiesGPR = false;    // No GPR change
+            inst.modificationInfo.modifiesControl = true; // Changes control flow, potentially registers via handler
             break;
 
         case SPECIAL_MFHI:
-        case SPECIAL_MTHI:
         case SPECIAL_MFLO:
+            if (inst.rd == 0)
+                inst.modificationInfo.modifiesGPR = false;
+            break;
+        case SPECIAL_MTHI:
         case SPECIAL_MTLO:
             // HI/LO register operations
+            inst.modificationInfo.modifiesGPR = false;    // Doesn't modify rd
+            inst.modificationInfo.modifiesControl = true; // HI/LO
             break;
 
         case SPECIAL_MULT:
@@ -242,7 +338,8 @@ namespace ps2recomp
         case SPECIAL_DIV:
         case SPECIAL_DIVU:
             // Multiplication and division operations
-            inst.isMultimedia = true;
+            inst.modificationInfo.modifiesGPR = false;    // Doesn't modify rd
+            inst.modificationInfo.modifiesControl = true; // HI/LO
             break;
 
         case SPECIAL_ADD:
@@ -253,9 +350,9 @@ namespace ps2recomp
         case SPECIAL_OR:
         case SPECIAL_XOR:
         case SPECIAL_NOR:
-        case SPECIAL_SLT:
-        case SPECIAL_SLTU:
             // ALU operations
+            if (inst.rd == 0)
+                inst.modificationInfo.modifiesGPR = false;
             break;
 
         case SPECIAL_SLL:
@@ -265,6 +362,8 @@ namespace ps2recomp
         case SPECIAL_SRLV:
         case SPECIAL_SRAV:
             // Shift operations
+            if (inst.rd == 0)
+                inst.modificationInfo.modifiesGPR = false;
             break;
 
         // 64-bit specific operations
@@ -282,6 +381,47 @@ namespace ps2recomp
         case SPECIAL_DSRLV:
         case SPECIAL_DSRAV:
             // 64-bit operations
+            if (inst.rd == 0)
+                inst.modificationInfo.modifiesGPR = false;
+            break;
+
+        case SPECIAL_MOVZ:
+        case SPECIAL_MOVN:
+            if (inst.rd == 0)
+                inst.modificationInfo.modifiesGPR = false;
+            break;
+
+        // Set on Less Than
+        case SPECIAL_SLT:
+        case SPECIAL_SLTU:
+            if (inst.rd == 0)
+                inst.modificationInfo.modifiesGPR = false;
+            break;
+
+        case SPECIAL_TGE:
+        case SPECIAL_TGEU:
+        case SPECIAL_TLT:
+        case SPECIAL_TLTU:
+        case SPECIAL_TEQ:
+        case SPECIAL_TNE:
+            inst.modificationInfo.modifiesGPR = false;
+            inst.modificationInfo.modifiesControl = true; // Control flow change via trap
+            break;
+
+        // PS2 Specific (MFSA/MTSA)
+        case SPECIAL_MFSA: // Modifies rd GPR
+            if (inst.rd == 0)
+                inst.modificationInfo.modifiesGPR = false;
+            break;
+        case SPECIAL_MTSA: // Modifies SA control register
+            inst.modificationInfo.modifiesGPR = false;
+            inst.modificationInfo.modifiesControl = true; // SA reg
+            break;
+
+        case SPECIAL_SYNC:
+            inst.modificationInfo.modifiesGPR = false;
+            // Potentially modifies memory/cache visibility
+            inst.modificationInfo.modifiesControl = true;
             break;
 
         default:
@@ -300,27 +440,44 @@ namespace ps2recomp
         case REGIMM_BGEZ:
         case REGIMM_BLTZL:
         case REGIMM_BGEZL:
+            // Branches
             inst.isBranch = true;
             inst.hasDelaySlot = true;
+            inst.modificationInfo.modifiesControl = true; // PC potentially
             break;
 
         case REGIMM_BLTZAL:
         case REGIMM_BGEZAL:
         case REGIMM_BLTZALL:
         case REGIMM_BGEZALL:
+            // Branch and Link
             inst.isBranch = true;
             inst.isCall = true;
             inst.hasDelaySlot = true;
+            inst.modificationInfo.modifiesGPR = true;     // $ra (r[31])
+            inst.modificationInfo.modifiesControl = true; // PC
+            break;
+
+        case REGIMM_TGEI:
+        case REGIMM_TGEIU:
+        case REGIMM_TLTI:
+        case REGIMM_TLTIU:
+        case REGIMM_TEQI:
+        case REGIMM_TNEI:
+            // Trap Instructions
+            inst.modificationInfo.modifiesControl = true;
             break;
 
         case REGIMM_MTSAB:
         case REGIMM_MTSAH:
             // PS2 specific MTSAB/MTSAH instructions (for QMFC2/QMTC2)
             inst.isMultimedia = true;
+            inst.modificationInfo.modifiesControl = true; // SA register
             break;
 
         default:
-            // Other REGIMM instructions
+            // Unknown REGIMM instructions
+            std::cerr << "Unknown REGIMM instruction: " << std::hex << inst.raw << std::endl;
             break;
         }
     }
@@ -329,6 +486,9 @@ namespace ps2recomp
     {
         inst.isMMI = true;
         inst.isMultimedia = true;
+        inst.modificationInfo.modifiesGPR = true; // Most MMI ops write to rd GPR
+        if (inst.rd == 0)
+            inst.modificationInfo.modifiesGPR = false; // Except if rd is $zero
 
         // The function field is actually determined by the lowest 6 bits (as in R-type)
         uint32_t mmiFunction = inst.function;
@@ -343,6 +503,7 @@ namespace ps2recomp
         case MMI_MADD1:
         case MMI_MADDU1:
             // Multiply-add operations
+            inst.modificationInfo.modifiesControl = true; // Modifies HI/LO or HI1/LO1
             break;
 
         case MMI_PLZCW:
@@ -350,10 +511,15 @@ namespace ps2recomp
             break;
 
         case MMI_MFHI1:
-        case MMI_MTHI1:
         case MMI_MFLO1:
+            // Modifies rd GPR (already set)
+            break;
+
+        case MMI_MTHI1:
         case MMI_MTLO1:
             // Secondary HI/LO register operations
+            inst.modificationInfo.modifiesGPR = false;
+            inst.modificationInfo.modifiesControl = true;
             break;
 
         case MMI_MULT1:
@@ -390,6 +556,8 @@ namespace ps2recomp
 
         case MMI_PMTHL:
             // PMTHL operations
+            inst.modificationInfo.modifiesGPR = false;
+            inst.modificationInfo.modifiesControl = true;
             break;
 
         case MMI_PSLLH:
@@ -403,6 +571,240 @@ namespace ps2recomp
 
         default:
             // Unknown or unsupported MMI function
+            std::cerr << "Unknown MMI function: " << std::hex << mmiFunction << std::endl;
+            break;
+        }
+    }
+
+    void R5900Decoder::decodeMMI0(Instruction &inst) const
+    {
+        inst.mmiType = 0;
+        inst.mmiFunction = inst.sa;
+
+        uint32_t sa = inst.sa;
+
+        switch (sa)
+        {
+        case MMI0_PADDW:
+        case MMI0_PSUBW:
+        case MMI0_PCGTW:
+        case MMI0_PMAXW:
+        case MMI0_PADDH:
+        case MMI0_PSUBH:
+        case MMI0_PCGTH:
+        case MMI0_PMAXH:
+        case MMI0_PADDB:
+        case MMI0_PSUBB:
+        case MMI0_PCGTB:
+            // Arithmetic and comparison operations
+            break;
+
+        case MMI0_PADDSW:
+        case MMI0_PSUBSW:
+        case MMI0_PADDSH:
+        case MMI0_PSUBSH:
+        case MMI0_PADDSB:
+        case MMI0_PSUBSB:
+            // Saturated arithmetic operations
+            break;
+
+        case MMI0_PEXTLW:
+        case MMI0_PPACW:
+        case MMI0_PEXTLH:
+        case MMI0_PPACH:
+        case MMI0_PEXTLB:
+        case MMI0_PPACB:
+        case MMI0_PEXT5:
+        case MMI0_PPAC5:
+            // Data packing/unpacking operations
+            break;
+
+        default:
+            // Unknown MMI0 operation
+            break;
+        }
+    }
+
+    void R5900Decoder::decodeMMI1(Instruction &inst) const
+    {
+        inst.mmiType = 1;
+        inst.mmiFunction = inst.sa;
+
+        uint32_t subFunction = inst.function & 0x3F;
+
+        uint32_t sa = inst.sa;
+
+        switch (sa)
+        {
+        case MMI1_PABSW:
+        case MMI1_PABSH:
+            // Absolute value operations
+            break;
+
+        case MMI1_PCEQW:
+        case MMI1_PCEQH:
+        case MMI1_PCEQB:
+            // Equality comparison operations
+            break;
+
+        case MMI1_PMINW:
+        case MMI1_PMINH:
+            // Minimum value operations
+            break;
+
+        case MMI1_PADDUW:
+        case MMI1_PSUBUW:
+        case MMI1_PEXTUW:
+        case MMI1_PADDUH:
+        case MMI1_PSUBUH:
+        case MMI1_PEXTUH:
+        case MMI1_PADDUB:
+        case MMI1_PSUBUB:
+        case MMI1_PEXTUB:
+            // Unsigned arithmetic and extension operations
+            break;
+
+        case MMI1_QFSRV:
+            // Quadword funnel shift right variable
+            inst.isMultimedia = true;
+            break;
+
+        default:
+            // Unknown MMI1 operation
+            break;
+        }
+    }
+
+    void R5900Decoder::decodeMMI2(Instruction &inst) const
+    {
+        inst.mmiType = 2;
+        inst.mmiFunction = inst.sa;
+
+        if (inst.sa == MMI2_PMADDW || inst.sa == MMI2_PMSUBW ||
+            inst.sa == MMI2_PMULTW || inst.sa == MMI2_PDIVW || inst.sa == MMI2_PDIVBW ||
+            inst.sa == MMI2_PMADDH || inst.sa == MMI2_PHMADH ||
+            inst.sa == MMI2_PMSUBH || inst.sa == MMI2_PHMSBH || inst.sa == MMI2_PMULTH)
+        {
+            inst.modificationInfo.modifiesControl = true; // HI/LO
+        }
+
+        uint32_t sa = inst.sa;
+
+        switch (sa)
+        {
+        case MMI2_PMADDW:
+        case MMI2_PMSUBW:
+        case MMI2_PMADDH:
+        case MMI2_PHMADH:
+        case MMI2_PMSUBH:
+        case MMI2_PHMSBH:
+        case MMI2_PMULTH:
+            // Multiply/multiply-add operations
+            inst.isMultimedia = true;
+            break;
+
+        case MMI2_PSLLVW:
+        case MMI2_PSRLVW:
+            // Variable shift operations
+            break;
+
+        case MMI2_PMFHI:
+        case MMI2_PMFLO:
+            // Move from HI/LO registers
+            break;
+
+        case MMI2_PINTH:
+            // Interleave half words
+            break;
+
+        case MMI2_PMULTW:
+        case MMI2_PDIVW:
+        case MMI2_PDIVBW:
+            // Multiply/divide operations
+            inst.isMultimedia = true;
+            break;
+
+        case MMI2_PCPYLD:
+            // Copy lower doubleword
+            break;
+
+        case MMI2_PAND:
+        case MMI2_PXOR:
+            // Logical operations
+            break;
+
+        case MMI2_PEXEH:
+        case MMI2_PREVH:
+        case MMI2_PEXEW:
+        case MMI2_PROT3W:
+            // Data permutation operations
+            break;
+
+        default:
+            // Unknown MMI2 operation
+            break;
+        }
+    }
+
+    void R5900Decoder::decodeMMI3(Instruction &inst) const
+    {
+        inst.mmiType = 3;
+        inst.mmiFunction = inst.sa;
+
+        uint32_t sa = inst.sa;
+
+        switch (sa)
+        {
+        case MMI3_PMADDUW:
+            // Unsigned multiply-add
+            inst.isMultimedia = true;
+            inst.modificationInfo.modifiesControl = true; // HI/LO
+            break;
+
+        case MMI3_PSRAVW:
+            // Packed shift right arithmetic variable word
+            break;
+
+        case MMI3_PMTHI:
+            inst.mmiFunction = MMI3_PMTHI;
+            inst.modificationInfo.modifiesGPR = false;
+            inst.modificationInfo.modifiesControl = true; // HI register is modified
+            break;
+
+        case MMI3_PMTLO:
+            inst.mmiFunction = MMI3_PMTLO;
+            inst.modificationInfo.modifiesGPR = false;
+            inst.modificationInfo.modifiesControl = true; // LO register is modified
+            break;
+
+        case MMI3_PINTEH:
+            // Interleave even halfwords
+            break;
+
+        case MMI3_PMULTUW:
+        case MMI3_PDIVUW:
+            // Unsigned multiply/divide operations
+            inst.isMultimedia = true;
+            inst.modificationInfo.modifiesControl = true; // HI/LO
+            break;
+
+        case MMI3_PCPYUD:
+            // Copy upper doubleword
+            break;
+
+        case MMI3_POR:
+        case MMI3_PNOR:
+            // Logical operations
+            break;
+
+        case MMI3_PEXCH:
+        case MMI3_PCPYH:
+        case MMI3_PEXCW:
+            // Data permutation operations
+            break;
+
+        default:
+            // Unknown MMI3 operation
             break;
         }
     }
@@ -609,215 +1011,6 @@ namespace ps2recomp
 
         default:
             // Unknown COP2 format
-            break;
-        }
-    }
-
-    void R5900Decoder::decodeMMI0(Instruction &inst) const
-    {
-        uint32_t sa = inst.sa;
-
-        switch (sa)
-        {
-        case MMI0_PADDW:
-        case MMI0_PSUBW:
-        case MMI0_PCGTW:
-        case MMI0_PMAXW:
-        case MMI0_PADDH:
-        case MMI0_PSUBH:
-        case MMI0_PCGTH:
-        case MMI0_PMAXH:
-        case MMI0_PADDB:
-        case MMI0_PSUBB:
-        case MMI0_PCGTB:
-            // Arithmetic and comparison operations
-            break;
-
-        case MMI0_PADDSW:
-        case MMI0_PSUBSW:
-        case MMI0_PADDSH:
-        case MMI0_PSUBSH:
-        case MMI0_PADDSB:
-        case MMI0_PSUBSB:
-            // Saturated arithmetic operations
-            break;
-
-        case MMI0_PEXTLW:
-        case MMI0_PPACW:
-        case MMI0_PEXTLH:
-        case MMI0_PPACH:
-        case MMI0_PEXTLB:
-        case MMI0_PPACB:
-        case MMI0_PEXT5:
-        case MMI0_PPAC5:
-            // Data packing/unpacking operations
-            break;
-
-        default:
-            // Unknown MMI0 operation
-            break;
-        }
-    }
-
-    void R5900Decoder::decodeMMI1(Instruction &inst) const
-    {
-        uint32_t subFunction = inst.function & 0x3F;
-
-        uint32_t sa = inst.sa;
-
-        switch (sa)
-        {
-        case MMI1_PABSW:
-        case MMI1_PABSH:
-            // Absolute value operations
-            break;
-
-        case MMI1_PCEQW:
-        case MMI1_PCEQH:
-        case MMI1_PCEQB:
-            // Equality comparison operations
-            break;
-
-        case MMI1_PMINW:
-        case MMI1_PMINH:
-            // Minimum value operations
-            break;
-
-        case MMI1_PADDUW:
-        case MMI1_PSUBUW:
-        case MMI1_PEXTUW:
-        case MMI1_PADDUH:
-        case MMI1_PSUBUH:
-        case MMI1_PEXTUH:
-        case MMI1_PADDUB:
-        case MMI1_PSUBUB:
-        case MMI1_PEXTUB:
-            // Unsigned arithmetic and extension operations
-            break;
-
-        case MMI1_QFSRV:
-            // Quadword funnel shift right variable
-            inst.isMultimedia = true;
-            break;
-
-        default:
-            // Unknown MMI1 operation
-            break;
-        }
-    }
-
-    void R5900Decoder::decodeMMI2(Instruction &inst) const
-    {
-        uint32_t sa = inst.sa;
-
-        switch (sa)
-        {
-        case MMI2_PMADDW:
-        case MMI2_PMSUBW:
-        case MMI2_PMADDH:
-        case MMI2_PHMADH:
-        case MMI2_PMSUBH:
-        case MMI2_PHMSBH:
-        case MMI2_PMULTH:
-            // Multiply/multiply-add operations
-            inst.isMultimedia = true;
-            break;
-
-        case MMI2_PSLLVW:
-        case MMI2_PSRLVW:
-            // Variable shift operations
-            break;
-
-        case MMI2_PMFHI:
-        case MMI2_PMFLO:
-            // Move from HI/LO registers
-            break;
-
-        case MMI2_PINTH:
-            // Interleave half words
-            break;
-
-        case MMI2_PMULTW:
-        case MMI2_PDIVW:
-        case MMI2_PDIVBW:
-            // Multiply/divide operations
-            inst.isMultimedia = true;
-            break;
-
-        case MMI2_PCPYLD:
-            // Copy lower doubleword
-            break;
-
-        case MMI2_PAND:
-        case MMI2_PXOR:
-            // Logical operations
-            break;
-
-        case MMI2_PEXEH:
-        case MMI2_PREVH:
-        case MMI2_PEXEW:
-        case MMI2_PROT3W:
-            // Data permutation operations
-            break;
-
-        default:
-            // Unknown MMI2 operation
-            break;
-        }
-    }
-
-    void R5900Decoder::decodeMMI3(Instruction &inst) const
-    {
-        uint32_t sa = inst.sa;
-
-        switch (sa)
-        {
-        case MMI3_PMADDUW:
-            // Unsigned multiply-add
-            inst.isMultimedia = true;
-            break;
-
-        case MMI3_PSRAVW:
-            // Packed shift right arithmetic variable word
-            break;
-
-        case MMI3_PMTHI:
-            inst.mmiFunction = MMI3_PMTHI;
-            inst.modificationInfo.modifiesControl = true; // HI register is modified
-            break;
-
-        case MMI3_PMTLO:
-            inst.mmiFunction = MMI3_PMTLO;
-            inst.modificationInfo.modifiesControl = true; // LO register is modified
-            break;
-
-        case MMI3_PINTEH:
-            // Interleave even halfwords
-            break;
-
-        case MMI3_PMULTUW:
-        case MMI3_PDIVUW:
-            // Unsigned multiply/divide operations
-            inst.isMultimedia = true;
-            break;
-
-        case MMI3_PCPYUD:
-            // Copy upper doubleword
-            break;
-
-        case MMI3_POR:
-        case MMI3_PNOR:
-            // Logical operations
-            break;
-
-        case MMI3_PEXCH:
-        case MMI3_PCPYH:
-        case MMI3_PEXCW:
-            // Data permutation operations
-            break;
-
-        default:
-            // Unknown MMI3 operation
             break;
         }
     }

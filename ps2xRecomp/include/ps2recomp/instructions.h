@@ -331,18 +331,62 @@ namespace ps2recomp
     };
 
     // COP1 (FPU) function codes
+    enum Cop1Format
+    {
+        COP1_MF = 0x00, // Move From FPU Register
+        COP1_CF = 0x02, // Move From FPU Control Register
+        COP1_MT = 0x04, // Move To FPU Register
+        COP1_CT = 0x06, // Move To FPU Control Register
+        COP1_BC = 0x08, // Branch on FPU Condition
+        COP1_S = 0x10,  // Single Precision Operation
+        COP1_W = 0x14,  // Word (integer) Operation
+        COP1_BC_BCF = 0x00,
+        COP1_BC_BCT = 0x01,
+        COP1_L = 0x15,  // Long (64-bit integer) Operation
+        COP1_D = 0x11,  // Double Precision Operation (unused on PS2 FPU?)
+    };
+
     enum Cop1Functions
     {
-        COP1_MF = 0x00,
-        COP1_CF = 0x02,
-        COP1_MT = 0x04,
-        COP1_CT = 0x06,
-        COP1_BC = 0x08,
-        COP1_S = 0x10,
-        COP1_W = 0x14,
-        COP1_BC_BCF = 0x00,
-        COP1_BC_BCT = 0x01
+        COP1_FUNC_ADD = 0x00,
+        COP1_FUNC_SUB = 0x01,
+        COP1_FUNC_MUL = 0x02,
+        COP1_FUNC_DIV = 0x03,
+        COP1_FUNC_SQRT = 0x04,
+        COP1_FUNC_ABS = 0x05,
+        COP1_FUNC_MOV = 0x06,
+        COP1_FUNC_NEG = 0x07,
+        COP1_FUNC_ROUND_L = 0x08,
+        COP1_FUNC_TRUNC_L = 0x09,
+        COP1_FUNC_CEIL_L = 0x0A,
+        COP1_FUNC_FLOOR_L = 0x0B,
+        COP1_FUNC_ROUND_W = 0x0C,
+        COP1_FUNC_TRUNC_W = 0x0D,
+        COP1_FUNC_CEIL_W = 0x0E,
+        COP1_FUNC_FLOOR_W = 0x0F,
+        COP1_FUNC_CVT_S = 0x20, // Convert to Single
+        COP1_FUNC_CVT_D = 0x21, // Convert to Double
+        COP1_FUNC_CVT_W = 0x24, // Convert to Word
+        COP1_FUNC_CVT_L = 0x25, // Convert to Long
+        // Comparisons (lowest 5 bits matter for condition, C bit set in FCR31)
+        COP1_FUNC_C_F = 0x30,    // False
+        COP1_FUNC_C_UN = 0x31,   // Unordered
+        COP1_FUNC_C_EQ = 0x32,   // Equal
+        COP1_FUNC_C_UEQ = 0x33,  // Unordered or Equal
+        COP1_FUNC_C_OLT = 0x34,  // Ordered Less Than
+        COP1_FUNC_C_ULT = 0x35,  // Unordered or Less Than
+        COP1_FUNC_C_OLE = 0x36,  // Ordered Less Than or Equal
+        COP1_FUNC_C_ULE = 0x37,  // Unordered or Less Than or Equal
+        COP1_FUNC_C_SF = 0x38,   // Signaling False
+        COP1_FUNC_C_NGLE = 0x39, // Not Greater or Less or Equal (Unordered)
+        COP1_FUNC_C_SEQ = 0x3A,  // Signaling Equal
+        COP1_FUNC_C_NGL = 0x3B,  // Not Greater or Less (Unordered or Equal)
+        COP1_FUNC_C_LT = 0x3C,   // Signaling Less Than
+        COP1_FUNC_C_NGE = 0x3D,  // Not Greater or Equal (Unordered or Less Than)
+        COP1_FUNC_C_LE = 0x3E,   // Signaling Less Than or Equal
+        COP1_FUNC_C_NGT = 0x3F,  // Not Greater Than (Unordered or Less Than or Equal)
     };
+     
 
     // COP2 (VU0 macro) function codes
     enum Cop2Functions
