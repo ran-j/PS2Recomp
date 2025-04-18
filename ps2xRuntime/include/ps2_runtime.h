@@ -8,18 +8,30 @@
 #include <functional>
 #include <immintrin.h> // For SSE/AVX instructions
 
-constexpr uint32_t PS2_RAM_MASK = 0xF0000000;
-constexpr uint32_t PS2_RAM_BASE = 0x00000000;
 constexpr uint32_t PS2_RAM_SIZE = 32 * 1024 * 1024; // 32MB
+constexpr uint32_t PS2_RAM_MASK = PS2_RAM_SIZE - 1; // Mask for 32MB alignment
+constexpr uint32_t PS2_RAM_BASE = 0x00000000;       // Physical base of RDRAM
 constexpr uint32_t PS2_SCRATCHPAD_BASE = 0x70000000;
 constexpr uint32_t PS2_SCRATCHPAD_SIZE = 16 * 1024; // 16KB
-constexpr uint32_t PS2_IO_BASE = 0x10000000;
-constexpr uint32_t PS2_IO_SIZE = 0x10000; // 64KB
-constexpr uint32_t PS2_VU0_CODE_BASE = 0x11000000;
+constexpr uint32_t PS2_IO_BASE = 0x10000000;        // Base for many I/O regs (Timers, DMAC, INTC)
+constexpr uint32_t PS2_IO_SIZE = 0x10000;           // 64KB
+constexpr uint32_t PS2_BIOS_BASE = 0x1FC00000;      // Or BFC00000 depending on KSEG
+constexpr uint32_t PS2_BIOS_SIZE = 4 * 1024 * 1024; // 4MB
+
+constexpr uint32_t PS2_VU0_CODE_BASE = 0x11000000; // Base address as seen from EE
 constexpr uint32_t PS2_VU0_DATA_BASE = 0x11004000;
+constexpr uint32_t PS2_VU0_CODE_SIZE = 4 * 1024; // 4KB Micro Memory
+constexpr uint32_t PS2_VU0_DATA_SIZE = 4 * 1024; // 4KB Data Memory (VU Mem)
+
+constexpr uint32_t PS2_VU1_MEM_BASE = 0x11008000; // Base address as seen from EE
+constexpr uint32_t PS2_VU1_CODE_SIZE = 16 * 1024; // 16KB Micro Memory
+constexpr uint32_t PS2_VU1_DATA_SIZE = 16 * 1024; // 16KB Data Memory (VU Mem)
 constexpr uint32_t PS2_VU1_CODE_BASE = 0x11008000;
 constexpr uint32_t PS2_VU1_DATA_BASE = 0x1100C000;
+
 constexpr uint32_t PS2_GS_BASE = 0x12000000;
+constexpr uint32_t PS2_GS_PRIV_REG_BASE = 0x12000000; // GS Privileged Registers
+constexpr uint32_t PS2_GS_PRIV_REG_SIZE = 0x2000;
 
 #define PS2_FIO_O_RDONLY 0x0001
 #define PS2_FIO_O_WRONLY 0x0002
