@@ -21,6 +21,21 @@ constexpr uint32_t PS2_VU1_CODE_BASE = 0x11008000;
 constexpr uint32_t PS2_VU1_DATA_BASE = 0x1100C000;
 constexpr uint32_t PS2_GS_BASE = 0x12000000;
 
+#define PS2_FIO_O_RDONLY 0x0001
+#define PS2_FIO_O_WRONLY 0x0002
+#define PS2_FIO_O_RDWR 0x0003
+#define PS2_FIO_O_APPEND 0x0100
+#define PS2_FIO_O_CREAT 0x0200
+#define PS2_FIO_O_TRUNC 0x0400
+#define PS2_FIO_O_EXCL 0x0800
+
+#define PS2_FIO_SEEK_SET 0
+#define PS2_FIO_SEEK_CUR 1
+#define PS2_FIO_SEEK_END 2
+
+#define PS2_FIO_S_IFDIR 0x1000
+#define PS2_FIO_S_IFREG 0x2000
+
 // PS2 CPU context (R5900)
 struct R5900Context
 {
