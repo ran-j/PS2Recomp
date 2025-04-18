@@ -7,6 +7,8 @@
 #include <string>
 #include <functional>
 #include <immintrin.h> // For SSE/AVX instructions
+#include <filesystem>
+#include <iostream>
 
 constexpr uint32_t PS2_RAM_SIZE = 32 * 1024 * 1024; // 32MB
 constexpr uint32_t PS2_RAM_MASK = PS2_RAM_SIZE - 1; // Mask for 32MB alignment
@@ -158,6 +160,28 @@ struct R5900Context
 
         // Reset COP1 state
         fcr31 = 0;
+    }
+
+    void dump() const
+    {
+        std::ios_base::fmtflags flags = std::cout.flags();
+        std::cout << std::hex << std::setfill('0');
+        std::cout << "--- R5900 Context Dump ---\n";
+        std::cout << "PC: 0x" << std::setw(8) << pc << "\n";
+        std::cout << "HI: 0x" << std::setw(8) << hi << " LO: 0x" << std::setw(8) << lo << "\n";
+        std::cout << "HI1:0x" << std::setw(8) << hi1 << " LO1:0x" << std::setw(8) << lo1 << "\n";
+        std::cout << "SA: 0x" << std::setw(8) << sa << "\n";
+        for (int i = 0; i < 32; ++i)
+        {
+            std::cout << "R" << std::setw(2) << std::dec << i << ": 0x" << std::hex
+                      << std::setw(8) << r[i].m128i_u32[3] << std::setw(8) << r[i].m128i_u32[2] << "_"
+                      << std::setw(8) << r[i].m128i_u32[1] << std::setw(8) << r[i].m128i_u32[0] << "\n";
+        }
+        std::cout << "Status: 0x" << std::setw(8) << cop0_status
+                  << " Cause: 0x" << std::setw(8) << cop0_cause
+                  << " EPC: 0x" << std::setw(8) << cop0_epc << "\n"; 
+        std::cout << "--- End Context Dump ---\n";
+        std::cout.flags(flags); // Restore format flags
     }
 
     ~R5900Context() = default;
