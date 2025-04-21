@@ -586,17 +586,17 @@ namespace ps2recomp
                                inst.rt, inst.rs, (int16_t)inst.immediate);
 
         // Special case for R5900
+        case OPCODE_COP0:
+            return translateCOP0Instruction(inst);
+
+        case OPCODE_COP1:
+            return translateFPUInstruction(inst);
+
         case OPCODE_CACHE:
             return "// CACHE instruction (ignored)";
 
         case OPCODE_PREF:
             return "// PREF instruction (ignored)";
-
-        case OPCODE_COP1:
-            return translateFPUInstruction(inst);
-
-        case OPCODE_COP0:
-            return translateCOP0Instruction(inst);
 
         // REGIMM special format (opcode=0x01)
         case OPCODE_REGIMM:
@@ -616,8 +616,7 @@ namespace ps2recomp
             }
 
             case REGIMM_MTSAB:
-                return fmt::format("ctx->sa = (ctx->r[{}] + 0x{:X}) & 0x0F;",
-                                   inst.rs, inst.immediate);
+                return fmt::format("ctx->sa = (ADD32(ctx->r[{}], (int32_t)(int16_t)0x{:X})) & 0x0F;", inst.rs, inst.immediate);
 
             case REGIMM_MTSAH:
                 return fmt::format("ctx->sa = ((ctx->r[{}] + 0x{:X}) & 0x07) << 1;",
@@ -1037,7 +1036,7 @@ namespace ps2recomp
                 return fmt::format("ctx->cop0_errorepc = ctx->r[{}];", rt);
 
             default:
-                return fmt::format("// MTC0 to register {} ignored", rd);
+                return fmt::format("// Unimplemented MTC0 to COP0 {}", rd);
             }
 
         case COP0_CO: // COP0 co-processor operations
@@ -1047,24 +1046,16 @@ namespace ps2recomp
             switch (function)
             {
             case COP0_CO_TLBR:
-                return fmt::format("// TLBR instruction - TLB Read\n"
-                                   "    // Reads TLB entry specified by Index register\n"
-                                   "    // Not fully implemented in recompiled code");
+                return fmt::format("runtime->handleTLBR(rdram, ctx);");
 
             case COP0_CO_TLBWI:
-                return fmt::format("// TLBWI instruction - TLB Write Indexed\n"
-                                   "    // Writes TLB entry specified by Index register\n"
-                                   "    // Not fully implemented in recompiled code");
+                return fmt::format("runtime->handleTLBWI(rdram, ctx);");
 
             case COP0_CO_TLBWR:
-                return fmt::format("// TLBWR instruction - TLB Write Random\n"
-                                   "    // Writes TLB entry specified by Random register\n"
-                                   "    // Not fully implemented in recompiled code");
+                return fmt::format("runtime->handleTLBWR(rdram, ctx);");
 
             case COP0_CO_TLBP:
-                return fmt::format("// TLBP instruction - TLB Probe\n"
-                                   "    // Searches TLB for matching entry to EntryHi, sets Index\n"
-                                   "    // Not fully implemented in recompiled code");
+                return fmt::format("runtime->handleTLBP(rdram, ctx);");
 
             case COP0_CO_ERET:
                 return fmt::format("// ERET instruction - Return from Exception\n"
@@ -1543,6 +1534,138 @@ namespace ps2recomp
         case COP2_BC2:
             return fmt::format("// VU branch instruction not implemented");
 
+        case VU0_FMT_LQSQ_COP0:
+            if (inst.function & VU0_SQC0) // Store operation
+            {
+                return fmt::format("WRITE128(ADD32(ctx->r[{}], 0x{:X}), (__m128i)ctx->vu0_vf[{}]);",
+                                   inst.rs, (int16_t)inst.immediate, inst.rt);
+            }
+            else // Load operation
+            {
+                return fmt::format("ctx->vu0_vf[{}] = (__m128)READ128(ADD32(ctx->r[{}], 0x{:X}));",
+                                   inst.rt, inst.rs, (int16_t)inst.immediate);
+            }
+
+        case VU0_FMT_VIF_STATUS:
+        {
+            int field = (inst.function >> VU0_FIELD_SHIFT) & VU0_FIELD_MASK; // Field selector
+            int dest = inst.rd;                                              // Destination register
+
+            if (inst.function & VU0_STORE_BIT) // Store to status
+            {
+                return fmt::format("ctx->vu0_status &= ~(0xFF << {}); ctx->vu0_status |= (_mm_extract_epi32(ctx->vu0_vf[{}], 0) & 0xFF) << {};",
+                                   field * 8, dest, field * 8);
+            }
+            else // Load from status
+            {
+                return fmt::format("ctx->vu0_vf[{}] = (__m128)_mm_set1_epi32((ctx->vu0_status >> {}) & 0xFF);",
+                                   dest, field * 8);
+            }
+        }
+
+        case VU0_FMT_MACRO_MOVE:
+        {
+            uint32_t subop = (inst.function >> VU0_SUBOP_SHIFT) & VU0_SUBOP_MASK;
+
+            switch (subop)
+            {
+            case VU0OPS_QMFC2_NI: // VMOVE - Move between VF registers
+                return fmt::format("ctx->vu0_vf[{}] = ctx->vu0_vf[{}];",
+                                   inst.rd, inst.rs);
+
+            case VU0OPS_QMFC2_I: // VRNEXT - Get next random value
+                return fmt::format("{{ uint32_t random_val = (ctx->vu0_status * 0x41C64E6D + 12345) & 0xFFFFFFFF;\n"
+                                   "    ctx->vu0_status = random_val;\n"
+                                   "    ctx->vu0_vf[{}] = (__m128)_mm_set1_epi32(random_val); }}",
+                                   inst.rd);
+
+            case VU0OPS_QMTC2_NI: // VRGET - Get random state
+                return fmt::format("ctx->vu0_vf[{}] = (__m128)_mm_set1_epi32(ctx->vu0_status);",
+                                   inst.rd);
+
+            default:
+                return fmt::format("// Unhandled VU0 format 0x1 subop: 0x{:X}", subop);
+            }
+        }
+
+        case VU0_FMT_VCALLMS:
+        {
+            uint32_t subop = inst.function & 0x3F;
+
+            switch (subop)
+            {
+            case VU0_VCALLMS_DIRECT: // VCALLMS - Call VU0 microprogram
+                return fmt::format("{{ uint32_t mpg_addr = 0x{:X};\n"
+                                   "    ctx->vu0_cmsar0 = mpg_addr;\n"
+                                   "    ctx->vu0_status |= 0x1; // Set execution bit }}",
+                                   inst.immediate * 8);
+
+            case VU0_VCALLMS_REG: // VCALLMSR - Call VU0 microprogram (register)
+                return fmt::format("{{ uint32_t mpg_addr = ctx->r[{}].m128i_u32[0] & 0xFFF;\n"
+                                   "    ctx->vu0_cmsar0 = mpg_addr;\n"
+                                   "    ctx->vu0_status |= 0x1; // Set execution bit }}",
+                                   inst.rs);
+
+            default:
+                return fmt::format("// Unhandled VU0 format 0x14 subop: 0x{:X}", subop);
+            }
+        }
+
+        case VU0_VSUB_XYZ:
+        {
+            int destMask = (inst.function >> 21) & 0xF;
+
+            return fmt::format("{{ __m128 result = PS2_VSUB(ctx->vu0_vf[{}], ctx->vu0_vf[{}]);\n"
+                               "    __m128 destMask = _mm_set_ps(\n"
+                               "        {}f, {}f, {}f, {}f);\n"
+                               "    // Blend the result with the destination register based on mask\n"
+                               "    ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], result, destMask); }}",
+                               inst.rs, inst.rt,
+                               (destMask & 0x8) ? 0xFFFFFFFF : 0,
+                               (destMask & 0x4) ? 0xFFFFFFFF : 0,
+                               (destMask & 0x2) ? 0xFFFFFFFF : 0,
+                               (destMask & 0x1) ? 0xFFFFFFFF : 0,
+                               inst.rd, inst.rd);
+        }
+
+        case VU0OPS_VMFHL: // 0x1C - Move from High/Low (similar to PMFHL)
+        {
+            int subop = (inst.function >> 16) & 0x1F;
+            switch (subop)
+            {
+            case 0: // LW variant - Extracts low word from accumulator
+                return fmt::format("{{ \n"
+                                   "    float w = _mm_cvtss_f32(_mm_castsi128_ps(_mm_cvtsi32_si128(ctx->lo)));\n"
+                                   "    float z = 0.0f;\n"
+                                   "    float y = 0.0f;\n"
+                                   "    float x = 0.0f;\n"
+                                   "    ctx->vu0_vf[{}] = _mm_set_ps(w, z, y, x); }}",
+                                   inst.rd);
+
+            case 1: // UW variant - Extracts upper word from accumulator
+                return fmt::format("{{ \n"
+                                   "    float w = _mm_cvtss_f32(_mm_castsi128_ps(_mm_cvtsi32_si128(ctx->hi)));\n"
+                                   "    float z = 0.0f;\n"
+                                   "    float y = 0.0f;\n"
+                                   "    float x = 0.0f;\n"
+                                   "    ctx->vu0_vf[{}] = _mm_set_ps(w, z, y, x); }}",
+                                   inst.rd);
+
+            case 2: // SLW variant - Saturated conversion of accumulator
+                return fmt::format("{{ \n"
+                                   "    int64_t acc = ((int64_t)ctx->hi << 32) | ctx->lo;\n"
+                                   "    float result = (float)acc;\n"
+                                   "    // Clamp to prevent overflow\n"
+                                   "    if (result > FLT_MAX) result = FLT_MAX;\n"
+                                   "    if (result < -FLT_MAX) result = -FLT_MAX;\n"
+                                   "    ctx->vu0_vf[{}] = _mm_set_ps(result, 0.0f, 0.0f, 0.0f); }}",
+                                   inst.rd);
+
+            default:
+                return fmt::format("// Unhandled VU0OPS_VMFHL suboperation: 0x{:X}", subop);
+            }
+        }
+
         case COP2_BC2F:
             switch (inst.rt)
             {
@@ -1576,9 +1699,6 @@ namespace ps2recomp
 
         case COP2_MTVUCF:
             return fmt::format("ctx->vu0_cf[{}] = ctx->r[{}];", inst.rd, inst.rt);
-
-        case COP2_VMTIR:
-            return fmt::format("ctx->vu0_i = (float)ctx->r[{}].m128_i32[0];", inst.rt);
 
         case COP2_VCLIP: // VU0 Clipping operation (0x1E)
             return fmt::format("{{ float x = ctx->vu0_vf[{}].m128_f32[0]; "
@@ -1752,6 +1872,9 @@ namespace ps2recomp
             case VU0OPS_VWAITQ: // 0x3C - Wait for Q register operations to complete TODO check this better
                 return fmt::format("// VWAITQ - Wait for Q register operations to complete\n"
                                    "    // need proper implementation for this\n");
+
+            case VU0OPS_VMTIR:
+                return fmt::format("ctx->vu0_i = (float)ctx->r[{}].m128_i32[0];", inst.rt);
 
             default:
                 return fmt::format("// Unhandled VU0OPS function: 0x{:X}", inst.function);

@@ -281,7 +281,7 @@ namespace ps2recomp
         MMI3_PCPYH = 0x1B,
         MMI3_PEXCW = 0x1E,
         MMI3_PMTHI = 0x08, // Move To HI register
-        MMI3_PMTLO = 0x09 // Move To LO register
+        MMI3_PMTLO = 0x09  // Move To LO register
     };
 
     // COP0 (rs field)
@@ -342,8 +342,8 @@ namespace ps2recomp
         COP1_W = 0x14,  // Word (integer) Operation
         COP1_BC_BCF = 0x00,
         COP1_BC_BCT = 0x01,
-        COP1_L = 0x15,  // Long (64-bit integer) Operation
-        COP1_D = 0x11,  // Double Precision Operation (unused on PS2 FPU?)
+        COP1_L = 0x15, // Long (64-bit integer) Operation
+        COP1_D = 0x11, // Double Precision Operation (unused on PS2 FPU?)
     };
 
     enum Cop1Functions
@@ -386,7 +386,6 @@ namespace ps2recomp
         COP1_FUNC_C_LE = 0x3E,   // Signaling Less Than or Equal
         COP1_FUNC_C_NGT = 0x3F,  // Not Greater Than (Unordered or Less Than or Equal)
     };
-     
 
     // COP2 (VU0 macro) function codes
     enum Cop2Functions
@@ -435,7 +434,8 @@ namespace ps2recomp
         VU0_VISWR = 0x16,
         VU0_VCALLMS = 0x20,
         VU0_VCALLMSR = 0x21,
-        VU0_VRGET = 0x3F // Get VU0 R register
+        VU0_VRGET = 0x3F,   // Get VU0 R register
+        VU0_VSUB_XYZ = 0x38 // Subtract with component selection
     };
 
     enum VU0SpecialFormats
@@ -459,13 +459,39 @@ namespace ps2recomp
 
     enum VU0OPSFunctions
     {
-        VU0OPS_QMFC2_NI = 0x00, // Non-incrementing QMFC2
-        VU0OPS_QMFC2_I = 0x01,  // Incrementing QMFC2
-        VU0OPS_QMTC2_NI = 0x02, // Non-incrementing QMTC2
-        VU0OPS_QMTC2_I = 0x03,  // Incrementing QMTC2
-        VU0OPS_VMFIR = 0x04,    // Move From Integer Register
-        VU0OPS_VXITOP = 0x08,   // Execute Interrupt on VU0
-        VU0OPS_VWAITQ = 0x3C    // Wait for Q register operations to complete
+        VU0OPS_QMFC2_NI = 0x00,       // Non-incrementing QMFC2
+        VU0OPS_QMFC2_I = 0x01,        // Incrementing QMFC2
+        VU0OPS_QMTC2_NI = 0x02,       // Non-incrementing QMTC2
+        VU0OPS_QMTC2_I = 0x03,        // Incrementing QMTC2
+        VU0OPS_VMFIR = 0x04,          // Move From Integer Register
+        VU0OPS_VXITOP = 0x08,         // Execute Interrupt on VU0
+        VU0OPS_VWAITQ = 0x3B,         // Wait for Q register operations to complete
+        VU0OPS_VMFHL = 0x1C,          // Move from High / Low(similar to PMFHL)
+        VU0OPS_VMTIR = 0x3C // Move to VU0 I Register with function code
+    };
+
+    enum VU0OPSFunctionsExtra
+    {
+        VU0_VCALLMS_DIRECT = 0x00,
+        VU0_VCALLMS_REG = 0x01
+    };
+
+    enum VU0SpecialMasks
+    {
+        VU0_FIELD_MASK = 0xF,  // Mask for vector field selection
+        VU0_FIELD_SHIFT = 21,  // Shift amount for field selection
+        VU0_STORE_BIT = 0x80,  // Bit indicating store operation
+        VU0_SUBOP_MASK = 0x1F, // Mask for sub-operation code
+        VU0_SUBOP_SHIFT = 6,   // Shift amount for sub-operation
+        VU0_SQC0 = 0x8         // SQC0 instruction code
+    };
+
+    enum VU0FormatsExtra
+    {
+        VU0_FMT_MACRO_MOVE = 0x1, // Move between VU registers format
+        VU0_FMT_VIF_STATUS = 0x5, // VIF status operations
+        VU0_FMT_VCALLMS = 0x14,   // VU0 microprogram call format
+        VU0_FMT_LQSQ_COP0 = 0x1B  // Load/store quad VU0 format
     };
 
     // PMFHL functions (sa field)
