@@ -469,18 +469,18 @@ namespace ps2recomp
             if (inst.modificationInfo.modifiesGPR)
             {
                 return fmt::format("ctx->r[{}] = ADD32(ctx->r[{}], 0x{:X}); // Modifies GPR",
-                                   inst.rt, inst.rs, (int16_t)inst.immediate);
+                                   inst.rt, inst.rs, static_cast<uint32_t>(static_cast<int16_t>(inst.immediate)));
             }
             return fmt::format("ctx->r[{}] = ADD32(ctx->r[{}], 0x{:X});",
-                               inst.rt, inst.rs, (int16_t)inst.immediate);
+                               inst.rt, inst.rs, static_cast<uint32_t>(static_cast<int16_t>(inst.immediate)));
 
         case OPCODE_SLTI:
             return fmt::format("ctx->r[{}] = (int32_t)ctx->r[{}] < (int32_t)0x{:X} ? 1 : 0;",
-                               inst.rt, inst.rs, (int16_t)inst.immediate);
+                               inst.rt, inst.rs, static_cast<uint32_t>(static_cast<int16_t>(inst.immediate)));
 
         case OPCODE_SLTIU:
             return fmt::format("ctx->r[{}] = ctx->r[{}] < (uint32_t)0x{:X} ? 1 : 0;",
-                               inst.rt, inst.rs, (uint32_t)(int16_t)inst.immediate);
+                               inst.rt, inst.rs, (uint32_t)static_cast<uint32_t>(static_cast<int16_t>(inst.immediate)));
 
         case OPCODE_ANDI:
             return fmt::format("ctx->r[{}] = AND32(ctx->r[{}], 0x{:X});",
@@ -500,74 +500,74 @@ namespace ps2recomp
 
         case OPCODE_LB:
             return fmt::format("ctx->r[{}] = (int32_t)(int8_t)READ8(ADD32(ctx->r[{}], 0x{:X}));",
-                               inst.rt, inst.rs, (int16_t)inst.immediate);
+                               inst.rt, inst.rs, static_cast<uint32_t>(static_cast<int16_t>(inst.immediate)));
 
         case OPCODE_LH:
             return fmt::format("ctx->r[{}] = (int32_t)(int16_t)READ16(ADD32(ctx->r[{}], 0x{:X}));",
-                               inst.rt, inst.rs, (int16_t)inst.immediate);
+                               inst.rt, inst.rs, static_cast<uint32_t>(static_cast<int16_t>(inst.immediate)));
 
         case OPCODE_LW:
             return fmt::format("ctx->r[{}] = READ32(ADD32(ctx->r[{}], 0x{:X}));",
-                               inst.rt, inst.rs, (int16_t)inst.immediate);
+                               inst.rt, inst.rs, static_cast<uint32_t>(static_cast<int16_t>(inst.immediate)));
 
         case OPCODE_LBU:
             return fmt::format("ctx->r[{}] = (uint32_t)READ8(ADD32(ctx->r[{}], 0x{:X}));",
-                               inst.rt, inst.rs, (int16_t)inst.immediate);
+                               inst.rt, inst.rs, static_cast<uint32_t>(static_cast<int16_t>(inst.immediate)));
 
         case OPCODE_LHU:
             return fmt::format("ctx->r[{}] = (uint32_t)READ16(ADD32(ctx->r[{}], 0x{:X}));",
-                               inst.rt, inst.rs, (int16_t)inst.immediate);
+                               inst.rt, inst.rs, static_cast<uint32_t>(static_cast<int16_t>(inst.immediate)));
 
         case OPCODE_SB:
             return fmt::format("WRITE8(ADD32(ctx->r[{}], 0x{:X}), (uint8_t)ctx->r[{}]);",
-                               inst.rs, (int16_t)inst.immediate, inst.rt);
+                               inst.rs, static_cast<uint32_t>(static_cast<int16_t>(inst.immediate)), inst.rt);
 
         case OPCODE_SH:
             return fmt::format("WRITE16(ADD32(ctx->r[{}], 0x{:X}), (uint16_t)ctx->r[{}]);",
-                               inst.rs, (int16_t)inst.immediate, inst.rt);
+                               inst.rs, static_cast<uint32_t>(static_cast<int16_t>(inst.immediate)), inst.rt);
 
         case OPCODE_SW:
             return fmt::format("WRITE32(ADD32(ctx->r[{}], 0x{:X}), ctx->r[{}]);",
-                               inst.rs, (int16_t)inst.immediate, inst.rt);
+                               inst.rs, static_cast<uint32_t>(static_cast<int16_t>(inst.immediate)), inst.rt);
 
         // PS2-specific 128-bit load/store
         case OPCODE_LQ:
             if (inst.vectorInfo.isVector)
             {
                 return fmt::format("ctx->r[{}] = (__m128i)READ128(ADD32(ctx->r[{}], 0x{:X})); // Vector load",
-                                   inst.rt, inst.rs, (int16_t)inst.immediate);
+                                   inst.rt, inst.rs, static_cast<uint32_t>(static_cast<int16_t>(inst.immediate)));
             }
             return fmt::format("ctx->r[{}] = (__m128i)READ128(ADD32(ctx->r[{}], 0x{:X}));",
-                               inst.rt, inst.rs, (int16_t)inst.immediate);
+                               inst.rt, inst.rs, static_cast<uint32_t>(static_cast<int16_t>(inst.immediate)));
 
         case OPCODE_SQ:
             if (inst.vectorInfo.isVector)
             {
                 return fmt::format("WRITE128(ADD32(ctx->r[{}], 0x{:X}), (__m128i)ctx->r[{}]); // Vector store",
-                                   inst.rs, (int16_t)inst.immediate, inst.rt);
+                                   inst.rs, static_cast<uint32_t>(static_cast<int16_t>(inst.immediate)), inst.rt);
             }
             return fmt::format("WRITE128(ADD32(ctx->r[{}], 0x{:X}), (__m128i)ctx->r[{}]);",
-                               inst.rs, (int16_t)inst.immediate, inst.rt);
+                               inst.rs, static_cast<uint32_t>(static_cast<int16_t>(inst.immediate)), inst.rt);
 
         case OPCODE_LD:
             return fmt::format("{{ uint64_t val = READ64(ADD32(ctx->r[{}], 0x{:X})); ctx->r[{}].m128i_u32[0] = (uint32_t)val; ctx->r[{}].m128i_u32[1] = (uint32_t)(val >> 32); }}",
-                               inst.rs, (int16_t)inst.immediate, inst.rt, inst.rt);
+                               inst.rs, static_cast<uint32_t>(static_cast<int16_t>(inst.immediate)), inst.rt, inst.rt);
 
         case OPCODE_SD:
             return fmt::format("{{ uint64_t val = ((uint64_t)ctx->r[{}].m128i_u32[1] << 32) | ctx->r[{}].m128i_u32[0]; WRITE64(ADD32(ctx->r[{}], 0x{:X}), val); }}",
-                               inst.rt, inst.rt, inst.rs, (int16_t)inst.immediate);
+                               inst.rt, inst.rt, inst.rs, static_cast<uint32_t>(static_cast<int16_t>(inst.immediate)));
 
         case OPCODE_SWC1:
             return fmt::format("{{ float val = ctx->f[{}]; WRITE32(ADD32(ctx->r[{}], 0x{:X}), *(uint32_t*)&val); }}",
-                               inst.rt, inst.rs, (int16_t)inst.immediate);
+                               inst.rt, inst.rs, static_cast<uint32_t>(static_cast<int16_t>(inst.immediate)));
 
         case OPCODE_LQC2:
             return fmt::format("ctx->vu0_vf[{}] = (__m128)READ128(ADD32(ctx->r[{}], 0x{:X}));",
-                               inst.rt, inst.rs, (int16_t)inst.immediate);
+                               inst.rt, inst.rs, static_cast<uint32_t>(static_cast<int16_t>(inst.immediate)));
 
         case OPCODE_SQC2:
             return fmt::format("WRITE128(ADD32(ctx->r[{}], 0x{:X}), (__m128i)ctx->vu0_vf[{}]);",
-                               inst.rs, (int16_t)inst.immediate, inst.rt);
+                               inst.rs, static_cast<uint32_t>(static_cast<int16_t>(inst.immediate)), inst.rt);
 
         case OPCODE_J:
             return fmt::format("// J 0x{:X} - Handled by branch logic",
@@ -579,11 +579,11 @@ namespace ps2recomp
 
         case OPCODE_LWC1:
             return fmt::format("{{ uint32_t val = READ32(ADD32(ctx->r[{}], 0x{:X})); ctx->f[{}] = *(float*)&val; }}",
-                               inst.rs, (int16_t)inst.immediate, inst.rt);
+                               inst.rs, static_cast<uint32_t>(static_cast<int16_t>(inst.immediate)), inst.rt);
 
         case OPCODE_LWU:
             return fmt::format("ctx->r[{}] = (uint32_t)READ32(ADD32(ctx->r[{}], 0x{:X}));",
-                               inst.rt, inst.rs, (int16_t)inst.immediate);
+                               inst.rt, inst.rs, static_cast<uint32_t>(static_cast<int16_t>(inst.immediate)));
 
         // Special case for R5900
         case OPCODE_COP0:
@@ -611,7 +611,7 @@ namespace ps2recomp
             case REGIMM_BLTZALL:
             case REGIMM_BGEZALL:
             {
-                uint32_t target = inst.address + 4 + ((int16_t)inst.immediate << 2);
+                uint32_t target = inst.address + 4 + (static_cast<uint32_t>(static_cast<int16_t>(inst.immediate)) << 2);
                 return fmt::format("// REGIMM branch instruction to 0x{:X} - Handled by branch logic", target);
             }
 
@@ -624,27 +624,27 @@ namespace ps2recomp
 
             case REGIMM_TGEI:
                 return fmt::format("if ((int32_t)ctx->r[{}] >= (int32_t)0x{:X}) {{ /* Trap */ }}",
-                                   inst.rs, (int16_t)inst.immediate);
+                                   inst.rs, static_cast<uint32_t>(static_cast<int16_t>(inst.immediate)));
 
             case REGIMM_TGEIU:
                 return fmt::format("if (ctx->r[{}] >= (uint32_t)0x{:X}) {{ /* Trap */ }}",
-                                   inst.rs, (uint32_t)(int16_t)inst.immediate);
+                                   inst.rs, (uint32_t)static_cast<uint32_t>(static_cast<int16_t>(inst.immediate)));
 
             case REGIMM_TLTI:
                 return fmt::format("if ((int32_t)ctx->r[{}] < (int32_t)0x{:X}) {{ /* Trap */ }}",
-                                   inst.rs, (int16_t)inst.immediate);
+                                   inst.rs, static_cast<uint32_t>(static_cast<int16_t>(inst.immediate)));
 
             case REGIMM_TLTIU:
                 return fmt::format("if (ctx->r[{}] < (uint32_t)0x{:X}) {{ /* Trap */ }}",
-                                   inst.rs, (uint32_t)(int16_t)inst.immediate);
+                                   inst.rs, (uint32_t)static_cast<uint32_t>(static_cast<int16_t>(inst.immediate)));
 
             case REGIMM_TEQI:
                 return fmt::format("if ((int32_t)ctx->r[{}] == (int32_t)0x{:X}) {{ /* Trap */ }}",
-                                   inst.rs, (int16_t)inst.immediate);
+                                   inst.rs, static_cast<uint32_t>(static_cast<int16_t>(inst.immediate)));
 
             case REGIMM_TNEI:
                 return fmt::format("if ((int32_t)ctx->r[{}] != (int32_t)0x{:X}) {{ /* Trap */ }}",
-                                   inst.rs, (int16_t)inst.immediate);
+                                   inst.rs, static_cast<uint32_t>(static_cast<int16_t>(inst.immediate)));
 
             default:
                 return fmt::format("// Unhandled REGIMM instruction: 0x{:X}", inst.rt);
@@ -1538,12 +1538,12 @@ namespace ps2recomp
             if (inst.function & VU0_SQC0) // Store operation
             {
                 return fmt::format("WRITE128(ADD32(ctx->r[{}], 0x{:X}), (__m128i)ctx->vu0_vf[{}]);",
-                                   inst.rs, (int16_t)inst.immediate, inst.rt);
+                                   inst.rs, static_cast<uint32_t>(static_cast<int16_t>(inst.immediate)), inst.rt);
             }
             else // Load operation
             {
                 return fmt::format("ctx->vu0_vf[{}] = (__m128)READ128(ADD32(ctx->r[{}], 0x{:X}));",
-                                   inst.rt, inst.rs, (int16_t)inst.immediate);
+                                   inst.rt, inst.rs, static_cast<uint32_t>(static_cast<int16_t>(inst.immediate)));
             }
 
         case VU0_FMT_VIF_STATUS:
@@ -1766,7 +1766,7 @@ namespace ps2recomp
 
             case VU0_VIADDI:
                 return fmt::format("ctx->vu0_i += {};",
-                                   (int16_t)inst.immediate);
+                                   static_cast<uint32_t>(static_cast<int16_t>(inst.immediate)));
 
             case VU0_VIAND:
                 return fmt::format("ctx->vu0_i &= _mm_cvtss_f32(_mm_castsi128_ps(_mm_cvtsi32_si128(ctx->vu0_vf[{}].m128_i32[{}])));",
