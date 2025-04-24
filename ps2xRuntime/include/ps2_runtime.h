@@ -11,7 +11,7 @@
 #include <iostream>
 
 constexpr uint32_t PS2_RAM_SIZE = 32 * 1024 * 1024; // 32MB
-constexpr uint32_t PS2_RAM_MASK = PS2_RAM_SIZE - 1; // Mask for 32MB alignment
+constexpr uint32_t PS2_RAM_MASK = 0x1FFFFFF; // Mask for 32MB alignment
 constexpr uint32_t PS2_RAM_BASE = 0x00000000;       // Physical base of RDRAM
 constexpr uint32_t PS2_SCRATCHPAD_BASE = 0x70000000;
 constexpr uint32_t PS2_SCRATCHPAD_SIZE = 16 * 1024; // 16KB

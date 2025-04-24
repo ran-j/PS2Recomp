@@ -15,14 +15,15 @@ namespace ps2recomp
     {
         uint32_t address;
         uint32_t opcode;
-        uint32_t rs;        // Source register
-        uint32_t rt;        // Target register
-        uint32_t rd;        // Destination register
-        uint32_t sa;        // Shift amount
-        uint32_t function;  // Function code for R-type instructions
-        uint32_t immediate; // Immediate value for I-type instructions
-        uint32_t target;    // Jump target for J-type instructions
-        uint32_t raw;       // Raw instruction value
+        uint32_t rs;         // Source register
+        uint32_t rt;         // Target register
+        uint32_t rd;         // Destination register
+        uint32_t sa;         // Shift amount
+        uint32_t function;   // Function code for R-type instructions
+        uint32_t immediate;  // Immediate value for I-type instructions
+        uint32_t simmediate; // Sign-extended immediate value (extended to 32 bits)
+        uint32_t target;     // Jump target for J-type instructions
+        uint32_t raw;        // Raw instruction value
 
         // Instruction type flags
         bool isMMI;        // Is MMI instruction (PS2 specific)
@@ -49,6 +50,8 @@ namespace ps2recomp
             bool usesPReg;       // Uses P register
             bool modifiesMAC;    // Modifies MAC flags
             uint8_t vectorField; // xyzw field mask
+            uint8_t fsf;         // Field select for FS reg (bits 10-11)
+            uint8_t ftf;         // Source Field select for FT reg (bits 8-9)
         } vectorInfo;
 
         struct
@@ -56,9 +59,21 @@ namespace ps2recomp
             bool modifiesGPR;     // Modifies general purpose register
             bool modifiesFPR;     // Modifies floating point register
             bool modifiesVFR;     // Modifies vector float register
+			bool modifiesVIR;     // Modifies vector integer register
+			bool modifiesVIC;     // Modifies vector integer control register
             bool modifiesMemory;  // Modifies memory
             bool modifiesControl; // Modifies control register
         } modificationInfo;
+
+        Instruction() : address(0), opcode(0), rs(0), rt(0), rd(0), sa(0), function(0),
+                        immediate(0), simmediate(0), target(0), raw(0),
+                        isMMI(false), isVU(false), isBranch(false), isJump(false), isCall(false),
+                        isReturn(false), hasDelaySlot(false), isMultimedia(false), isStore(false), isLoad(false),
+                        mmiType(0), mmiFunction(0), pmfhlVariation(0), vuFunction(0)
+        {
+            vectorInfo = {};
+            modificationInfo = {};
+        }
     };
 
     // Function information

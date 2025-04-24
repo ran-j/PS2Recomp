@@ -25,6 +25,7 @@ namespace ps2recomp
         inst.sa = SA(rawInstruction);
         inst.function = FUNCTION(rawInstruction);
         inst.immediate = IMMEDIATE(rawInstruction);
+        inst.simmediate = SIMMEDIATE(rawInstruction);
         inst.target = TARGET(rawInstruction);
 
         inst.isMMI = false;
@@ -53,6 +54,8 @@ namespace ps2recomp
         inst.modificationInfo.modifiesGPR = false;
         inst.modificationInfo.modifiesFPR = false;
         inst.modificationInfo.modifiesVFR = false;
+        inst.modificationInfo.modifiesVIR = false;
+        inst.modificationInfo.modifiesVIC = false;
         inst.modificationInfo.modifiesMemory = false;
         inst.modificationInfo.modifiesControl = false;
 
@@ -68,18 +71,10 @@ namespace ps2recomp
 
         case OPCODE_J:
             decodeJType(inst);
-            inst.isJump = true;
-            inst.hasDelaySlot = true;
-            inst.modificationInfo.modifiesControl = true; // PC
             break;
 
         case OPCODE_JAL:
             decodeJType(inst);
-            inst.isJump = true;
-            inst.isCall = true;
-            inst.hasDelaySlot = true;
-            inst.modificationInfo.modifiesGPR = true;     // $ra (r[31])
-            inst.modificationInfo.modifiesControl = true; // PC
             break;
 
         case OPCODE_BEQ:
@@ -96,6 +91,103 @@ namespace ps2recomp
             inst.modificationInfo.modifiesControl = true; // PC potentially
             break;
 
+        case OPCODE_DADDI:
+        case OPCODE_DADDIU:
+            decodeIType(inst);
+            if (inst.rt != 0)
+                inst.modificationInfo.modifiesGPR = true;
+            break;
+
+        case OPCODE_MMI:
+            decodeMMI(inst);
+            break;
+
+        case OPCODE_LQ:
+            decodeIType(inst);
+            inst.isLoad = true;
+            inst.isMultimedia = true; // 128-bit load
+            break;
+
+        case OPCODE_SQ:
+            decodeIType(inst);
+            inst.isStore = true;
+            inst.isMultimedia = true; // 128-bit store
+            inst.modificationInfo.modifiesMemory = true;
+            break;
+
+        case OPCODE_LB:
+        case OPCODE_LH:
+        case OPCODE_LW:
+        case OPCODE_LBU:
+        case OPCODE_LHU:
+        case OPCODE_LWU:
+        case OPCODE_LD:
+            inst.isLoad = true;
+            if (inst.rt != 0)
+                inst.modificationInfo.modifiesGPR = true;
+            break;
+
+        case OPCODE_LWL:
+        case OPCODE_LWR:
+        case OPCODE_LDL:
+        case OPCODE_LDR:
+            inst.isLoad = true;
+            if (inst.rt != 0)
+                inst.modificationInfo.modifiesGPR = true;
+            inst.modificationInfo.modifiesMemory = true;
+            break;
+
+        case OPCODE_LWC1:
+            inst.isLoad = true;
+            inst.modificationInfo.modifiesFPR = true;
+            break;
+
+        case OPCODE_LDC1: // Not present/used on EE FPU
+        case OPCODE_LWC2: // Maybe unused
+        case OPCODE_LDC2: // VU Load
+            inst.isLoad = true;
+            inst.isVU = true;
+            inst.modificationInfo.modifiesVFR = true;
+            break;
+
+        case OPCODE_SB:
+        case OPCODE_SH:
+        case OPCODE_SW:
+        case OPCODE_SD:
+            inst.isStore = true;
+            inst.modificationInfo.modifiesMemory = true;
+            break;
+
+        case OPCODE_SWL:
+        case OPCODE_SWR:
+        case OPCODE_SDL:
+        case OPCODE_SDR:
+            inst.isStore = true;
+            inst.modificationInfo.modifiesMemory = true;
+            break;
+
+        case OPCODE_SWC1:
+            inst.isStore = true;
+            inst.modificationInfo.modifiesMemory = true;
+            break;
+
+        case OPCODE_SDC1: // Not present/used on EE FPU
+        case OPCODE_SWC2: // Potentially unused
+        case OPCODE_SDC2:
+            inst.isStore = true;
+            inst.isVU = true;
+            inst.modificationInfo.modifiesMemory = true;
+            break;
+
+        case OPCODE_SC:
+        case OPCODE_SCD:
+            inst.isStore = true;
+            inst.modificationInfo.modifiesMemory = true;
+            if (inst.rt != 0)
+                inst.modificationInfo.modifiesGPR = true; // Writes success/fail to rt
+            inst.modificationInfo.modifiesControl = true; // Reads/Clears LLBit
+            break;
+
         case OPCODE_ADDI:
         case OPCODE_ADDIU:
         case OPCODE_SLTI:
@@ -109,150 +201,38 @@ namespace ps2recomp
                 inst.modificationInfo.modifiesGPR = true;
             break;
 
-        case OPCODE_DADDI:
-        case OPCODE_DADDIU:
-            decodeIType(inst);
-            if (inst.rt != 0)
-                inst.modificationInfo.modifiesGPR = true;
-            break;
-
-        case OPCODE_MMI:
-            decodeMMI(inst);
-            inst.isMMI = true;
-            inst.isMultimedia = true;
-            inst.modificationInfo.modifiesGPR = true;
-            break;
-
-        case OPCODE_LQ:
-            decodeIType(inst);
-            inst.isLoad = true;
-            inst.isMultimedia = true; // 128-bit load
-            if (inst.rt != 0)
-                inst.modificationInfo.modifiesGPR = true;
-            break;
-
-        case OPCODE_SQ:
-            decodeIType(inst);
-            inst.isStore = true;
-            inst.isMultimedia = true; // 128-bit store
-            inst.modificationInfo.modifiesMemory = true;
-            break;
-
-        case OPCODE_LB:
-        case OPCODE_LH:
-        case OPCODE_LWL:
-        case OPCODE_LW:
-        case OPCODE_LBU:
-        case OPCODE_LHU:
-        case OPCODE_LWR:
-        case OPCODE_LWU:
-        case OPCODE_LD:
-        case OPCODE_LDL:
-        case OPCODE_LDR:
-        case OPCODE_LL:
-        case OPCODE_LWC1:
-        case OPCODE_LDC1:
-        case OPCODE_LWC2:
-        case OPCODE_LDC2: // VU Load
-            decodeIType(inst);
-            inst.isLoad = true;
-            if (inst.opcode == OPCODE_LWC1 || inst.opcode == OPCODE_LDC1)
-                inst.modificationInfo.modifiesFPR = true;
-            else if (inst.opcode == OPCODE_LQC2)
-                inst.modificationInfo.modifiesVFR = true;
-            else if (inst.rt != 0)
-                inst.modificationInfo.modifiesGPR = true; // Standard GPR loads
-            break;
-
-        case OPCODE_SB:
-        case OPCODE_SH:
-        case OPCODE_SWL:
-        case OPCODE_SW:
-        case OPCODE_SWR:
-        case OPCODE_SD:
-        case OPCODE_SDL:
-        case OPCODE_SDR:
-        case OPCODE_SC:
-        case OPCODE_SWC1:
-        case OPCODE_SDC1:
-        case OPCODE_SWC2:
-        case OPCODE_SDC2:
-        case OPCODE_SCD: // VU Store
-            decodeIType(inst);
-            inst.isStore = true;
-            if (inst.opcode == OPCODE_SC || inst.opcode == OPCODE_SCD)
-            {
-                if (inst.rt != 0)
-                    inst.modificationInfo.modifiesGPR = true;
-            }
-            break;
-
         case OPCODE_CACHE:
             decodeIType(inst);
             inst.modificationInfo.modifiesControl = true; // Cache state
             break;
+
         case OPCODE_PREF:
             decodeIType(inst);
             break;
 
         case OPCODE_COP0:
             decodeCOP0(inst);
-            inst.modificationInfo.modifiesControl = true;
-            if (inst.rs == COP0_MF && inst.rt != 0)
-                inst.modificationInfo.modifiesGPR = true;
             break;
 
         case OPCODE_COP1:
             decodeCOP1(inst);
-            // Can modify FPRs, FCRs, GPRs (MFC1/CFC1), or PC (BC1)
-            if (inst.isBranch)
-                inst.modificationInfo.modifiesControl = true; // PC
-            if (inst.rs == COP1_MF || inst.rs == COP1_CF)
-            {
-                // MFC1, CFC1
-                if (inst.rt != 0)
-                    inst.modificationInfo.modifiesGPR = true;
-            }
-            else if (inst.rs == COP1_S || inst.rs == COP1_W || inst.rs == COP1_L)
-            {
-                inst.modificationInfo.modifiesFPR = true;
-            }
-            if (inst.rs == COP1_CT || inst.function >= COP1_FUNC_C_F)
-            {                                                 // CTC1 or Compare
-                inst.modificationInfo.modifiesControl = true; // FCR31
-            }
             break;
 
         case OPCODE_COP2:
             decodeCOP2(inst);
-            inst.isVU = true;
-            inst.isMultimedia = true;
-            // Can modify VFRs, VU Flags, GPRs (QMFC2/CFC2), PC (BC2), memory (VISWR)
-            if (inst.isBranch)
-                inst.modificationInfo.modifiesControl = true; // PC
-            if (inst.rs == COP2_QMFC2 || inst.rs == COP2_CFC2)
-            {
-                // QMFC2, CFC2
-                if (inst.rt != 0)
-                    inst.modificationInfo.modifiesGPR = true;
-            }
-            else if (inst.rs == COP2_QMTC2 || inst.rs == COP2_CTC2)
-            {
-                // Modifies VU state based on GPR
-            }
-            else
-            {
-                inst.modificationInfo.modifiesVFR = true;     // Default assumption
-                inst.modificationInfo.modifiesControl = true; // Flags, Q, P, I etc.
-            }
-            if (inst.isStore)
-                inst.modificationInfo.modifiesMemory = true;
             break;
 
         default:
             // Default to I-type for most other instructions
             decodeIType(inst);
             break;
+        }
+
+        // Generic multimedia flag if MMI or VU
+        if (inst.isMMI || inst.isVU)
+        {
+            inst.isMultimedia = true;
+            inst.vectorInfo.isVector = inst.isVU; // Only VU ops are truly vector
         }
 
         return inst;
@@ -277,9 +257,12 @@ namespace ps2recomp
     void R5900Decoder::decodeJType(Instruction &inst) const
     {
         // J-type instructions already have all fields set correctly
+        inst.isJump = true;
+        inst.hasDelaySlot = true;
         inst.modificationInfo.modifiesControl = true; // PC
         if (inst.opcode == OPCODE_JAL)
         {
+            inst.isCall = true;
             inst.modificationInfo.modifiesGPR = true; // $ra (r[31])
         }
     }
@@ -420,12 +403,7 @@ namespace ps2recomp
 
         case SPECIAL_SYNC:
             inst.modificationInfo.modifiesGPR = false;
-            // Potentially modifies memory/cache visibility
             inst.modificationInfo.modifiesControl = true;
-            break;
-
-        default:
-            // Other R-type instructions
             break;
         }
     }
@@ -493,82 +471,69 @@ namespace ps2recomp
         // The function field is actually determined by the lowest 6 bits (as in R-type)
         uint32_t mmiFunction = inst.function;
 
-        // Categorize the MMI instruction type based on the rs field
         uint32_t rs = inst.rs;
+
+        if (mmiFunction == MMI_MMI0)
+        {
+            decodeMMI0(inst);
+            return;
+        }
+        if (mmiFunction == MMI_MMI1)
+        {
+            decodeMMI1(inst);
+            return;
+        }
+        if (mmiFunction == MMI_MMI2)
+        {
+            decodeMMI2(inst);
+            return;
+        }
+        if (mmiFunction == MMI_MMI3)
+        {
+            decodeMMI3(inst);
+            return;
+        }
 
         switch (mmiFunction)
         {
+        // Thouse comments has the same value
         case MMI_MADD:
         case MMI_MADDU:
+        case MMI_MSUB:
+        case MMI_MSUBU:
         case MMI_MADD1:
         case MMI_MADDU1:
-            // Multiply-add operations
-            inst.modificationInfo.modifiesControl = true; // Modifies HI/LO or HI1/LO1
-            break;
-
-        case MMI_PLZCW:
-            // Count leading zeros/ones
-            break;
-
-        case MMI_MFHI1:
-        case MMI_MFLO1:
-            // Modifies rd GPR (already set)
-            break;
-
-        case MMI_MTHI1:
-        case MMI_MTLO1:
-            // Secondary HI/LO register operations
-            inst.modificationInfo.modifiesGPR = false;
-            inst.modificationInfo.modifiesControl = true;
-            break;
-
         case MMI_MULT1:
         case MMI_MULTU1:
         case MMI_DIV1:
         case MMI_DIVU1:
-            // Secondary multiply/divide operations
-            break;
-
-        case MMI_MMI0:
-            // First set of multimedia instructions
-            decodeMMI0(inst);
-            break;
-
-        case MMI_MMI1:
-            // Second set of multimedia instructions
-            decodeMMI1(inst);
-            break;
-
-        case MMI_MMI2:
-            // Third set of multimedia instructions
-            decodeMMI2(inst);
-            break;
-
-        case MMI_MMI3:
-            // Fourth set of multimedia instructions
-            decodeMMI3(inst);
-            break;
-
-        case MMI_PMFHL:
-            // PMFHL variations based on sa field
-            decodePMFHL(inst);
-            break;
-
-        case MMI_PMTHL:
-            // PMTHL operations
-            inst.modificationInfo.modifiesGPR = false;
+        // case MMI2_PMADDW:
+        case MMI2_PMSUBW:
+        case MMI2_PMULTW:
+        case MMI2_PDIVW:
+        case MMI2_PDIVBW:
+        case MMI2_PMADDH:
+        case MMI2_PHMADH:
+        // case MMI2_PMSUBH:
+        // case MMI2_PHMSBH:
+        case MMI2_PMULTH:
+            // case MMI3_PMADDUW:
+            // case MMI3_PMULTUW:
+            // case MMI3_PDIVUW:
+            inst.modificationInfo.modifiesGPR = false; // Writes to HI/LO or HI1/LO1
             inst.modificationInfo.modifiesControl = true;
             break;
-
-        case MMI_PSLLH:
-        case MMI_PSRLH:
-        case MMI_PSRAH:
-        case MMI_PSLLW:
-        case MMI_PSRLW:
-        case MMI_PSRAW:
-            // SIMD shift operations
+        case MMI_MTHI1:
+        case MMI_MTLO1:
+        case MMI_PMTHL:
+        case MMI3_PMTHI:
+        case MMI3_PMTLO:
+            inst.modificationInfo.modifiesGPR = false; // Writes to HI/LO or HI1/LO1
+            inst.modificationInfo.modifiesControl = true;
             break;
-
+        case MMI_PMFHL:
+            decodePMFHL(inst);
+            break;
         default:
             // Unknown or unsupported MMI function
             std::cerr << "Unknown MMI function: " << std::hex << mmiFunction << std::endl;
@@ -812,206 +777,196 @@ namespace ps2recomp
     void R5900Decoder::decodeCOP0(Instruction &inst) const
     {
         // COP0 (System Control) instructions
-        uint32_t rs = inst.rs; // Actually the cop0 format field
-
-        if (rs == COP0_MF)
+        uint8_t format = inst.rs;
+        inst.modificationInfo.modifiesControl = true; // Assume COP0 always modifies some control state
+        if (format == COP0_MF && inst.rt != 0)
         {
-            // Move From COP0 register
+            inst.modificationInfo.modifiesGPR = true;
         }
-        else if (rs == COP0_MT)
+        else if (format == COP0_CO && inst.function == COP0_CO_ERET)
         {
-            // Move To COP0 register
-        }
-        else if (rs == COP0_CO)
+            inst.isReturn = true;
+            inst.hasDelaySlot = false;
+        } // ERET is special
+        else if (format == COP0_BC)
         {
-            // COProcessor operations
-            uint32_t function = inst.function;
-
-            if (function == COP0_CO_ERET)
-            {
-                inst.isReturn = true;
-                inst.hasDelaySlot = true;
-            }
-            else if (function == COP0_CO_TLBR ||
-                     function == COP0_CO_TLBWI ||
-                     function == COP0_CO_TLBWR ||
-                     function == COP0_CO_TLBP)
-            {
-                // TLB operations
-            }
-            else if (function == COP0_CO_EI || function == COP0_CO_DI)
-            {
-                // Enable/Disable Interrupts
-            }
+            inst.isBranch = true;
+            inst.hasDelaySlot = true;
         }
     }
 
     void R5900Decoder::decodeCOP1(Instruction &inst) const
     {
-        // COP1 (FPU) instructions
-        uint32_t rs = inst.rs; // The FPU format field
-
-        if (rs == COP1_MF)
+        uint8_t format = inst.rs;
+        if (format == COP1_MF || format == COP1_CF)
         {
-            // Move From FPU register
+            if (inst.rt != 0)
+                inst.modificationInfo.modifiesGPR = true;
         }
-        else if (rs == COP1_CF)
+        else if (format == COP1_BC)
         {
-            // Move From FPU Control register
+            inst.isBranch = true;
+            inst.hasDelaySlot = true;
+            inst.modificationInfo.modifiesControl = true;
         }
-        else if (rs == COP1_MT)
+        else if (format == COP1_S || format == COP1_W || format == COP1_L)
         {
-            // Move To FPU register
+            inst.modificationInfo.modifiesFPR = true;
         }
-        else if (rs == COP1_CT)
+        if (format == COP1_CT || (format == COP1_S && inst.function >= COP1_S_C_F))
         {
-            // Move To FPU Control register
-        }
-        else if (rs == COP1_BC)
-        {
-            // FPU Branch on Condition
-            uint32_t rt = inst.rt; // The condition code
-            if (rt == COP1_BC_BCF || rt == COP1_BC_BCT)
-            {
-                inst.isBranch = true;
-                inst.hasDelaySlot = true;
-            }
-        }
-        else if (rs == COP1_S || rs == COP1_W)
-        {
-            // FPU operations (single precision or word)
-            uint32_t function = inst.function;
-            // Decode specific FPU operation based on function field
-        }
+            inst.modificationInfo.modifiesControl = true;
+        } // FCR31
     }
 
     void R5900Decoder::decodeCOP2(Instruction &inst) const
     {
+        uint8_t format = inst.rs;
         inst.isVU = true;
         inst.isMultimedia = true;
 
-        uint32_t rs = inst.rs; // The format field
-
-        switch (rs)
+        switch (format)
         {
-        case COP2_QMFC2: // Move From COP2 (128-bit)
-        case COP2_CFC2:  // Move Control From COP2
-        case COP2_QMTC2: // Move To COP2 (128-bit)
-        case COP2_CTC2:  // Move Control To COP2
-            // Register transfer operations
+        case COP2_QMFC2:
+        case COP2_CFC2:
+            if (inst.rt != 0)
+                inst.modificationInfo.modifiesGPR = true;
             break;
-
-        case COP2_BC2: // Branch on COP2 condition
-        {
-            uint32_t rt = inst.rt; // The condition code
-
-            if (rt == COP2_BCF || rt == COP2_BCT ||
-                rt == COP2_BCFL || rt == COP2_BCTL ||
-                rt == COP2_BCEF || rt == COP2_BCET ||
-                rt == COP2_BCEFL || rt == COP2_BCETL)
-            {
-                inst.isBranch = true;
-                inst.hasDelaySlot = true;
-            }
-        }
-        break;
-
-        case COP2_CO: // VU0 vector operations
-        {
-            uint32_t function = inst.function;
-
-            switch (function)
-            {
-            case VU0_VADD:
-            case VU0_VSUB:
-            case VU0_VMUL:
-                // Basic vector math operations
-                break;
-
-            case VU0_VDIV:
-            case VU0_VSQRT:
-            case VU0_VRSQRT:
-                // Division and square root operations
-                break;
-
-            case VU0_VMULQ:
-                // Multiply by Q register
-                break;
-
-            case VU0_VIADD:
-            case VU0_VISUB:
-            case VU0_VIADDI:
-                // Integer operations
-                break;
-
-            case VU0_VIAND:
-            case VU0_VIOR:
-                // Logical operations
-                break;
-
-            case VU0_VILWR:
-            case VU0_VISWR:
-                // Load/Store operations
-                inst.isLoad = (function == VU0_VILWR);
-                inst.isStore = (function == VU0_VISWR);
-                break;
-
-            case VU0_VCALLMS:
-            case VU0_VCALLMSR:
-                // VU0 microprogram calls
-                inst.isCall = true;
-                break;
-
-            case VU0_VRGET:
-                // Get random number from R register
-                break;
-
-            default:
-                // Other VU0 operations
-                break;
-            }
-        }
-        break;
-
-        case COP2_CTCVU:  // Control Transfer to VU0
-        case COP2_MTVUCF: // Move To VU Control/Flag register
-        case COP2_VMTIR:  // Move To VU0 I Register
-            // Special register operations
+        case COP2_QMTC2:
+            inst.modificationInfo.modifiesVFR = true;
+            break; // Modifies VU state
+        case COP2_CTC2:
+            inst.modificationInfo.modifiesControl = true;
+            break; // Modifies VU control state
+        case COP2_BC:
+            inst.isBranch = true;
+            inst.hasDelaySlot = true;
+            inst.modificationInfo.modifiesControl = true;
             break;
+        case COP2_CO: // VU Macro instructions (format >= 0x10)
+        case COP2_CO + 1:
+        case COP2_CO + 2:
+        case COP2_CO + 3:
+        case COP2_CO + 4:
+        case COP2_CO + 5:
+        case COP2_CO + 6:
+        case COP2_CO + 7:
+        case COP2_CO + 8:
+        case COP2_CO + 9:
+        case COP2_CO + 10:
+        case COP2_CO + 11:
+        case COP2_CO + 12:
+        case COP2_CO + 13:
+        case COP2_CO + 14:
+        case COP2_CO + 15:
+        { // Refine based on specific VU function
+            uint8_t vu_func = inst.function;
 
-        case COP2_VU0OPS: // Additional VU0 operations
-        {
-            uint32_t function = inst.function;
-
-            switch (function)
+            if (vu_func == VU0_S2_VDIV || vu_func == VU0_S2_VSQRT || vu_func == VU0_S2_VRSQRT)
             {
-            case VU0OPS_QMFC2_NI: // Non-incrementing QMFC2
-            case VU0OPS_QMFC2_I:  // Incrementing QMFC2
-            case VU0OPS_QMTC2_NI: // Non-incrementing QMTC2
-            case VU0OPS_QMTC2_I:  // Incrementing QMTC2
-                // Extended register transfer operations
-                break;
-
-            case VU0OPS_VMFIR: // Move From Integer Register
-                // Move operations
-                break;
-
-            case VU0OPS_VXITOP: // Execute Interrupt on VU0
-                break;
-
-            case VU0OPS_VWAITQ: // Wait for Q register operations
-                break;
-
-            default:
-                // Unknown VU0OPS
-                break;
+                inst.vectorInfo.fsf = (inst.raw >> 10) & 0x3; // Extract bits 10-11
+                inst.vectorInfo.ftf = (inst.raw >> 8) & 0x3;  // Extract bits 8-9
             }
-        }
-        break;
 
-        default:
-            // Unknown COP2 format
+            inst.vectorInfo.vectorField = (inst.raw >> 21) & 0xF;
+
+            inst.modificationInfo.modifiesVFR = true;     // Default: Modifies Vector Float Reg
+            inst.modificationInfo.modifiesControl = true; // Default: Modifies Flags/Special Regs (Q, P, I, MAC, Clip...)
+
+            if (vu_func >= 0x3C) // Special2 Table
+            {
+                switch (vu_func)
+                {
+                case VU0_S2_VDIV:
+                case VU0_S2_VSQRT:
+                case VU0_S2_VRSQRT:
+                    inst.vectorInfo.usesQReg = true;
+                    break;
+                case VU0_S2_VMTIR:
+                    inst.modificationInfo.modifiesVFR = false;
+                    inst.modificationInfo.modifiesVIC = true;
+                    break;
+                case VU0_S2_VMFIR:
+                    inst.modificationInfo.modifiesVIR = false;
+                    break; // Reads VI, writes VF
+                case VU0_S2_VILWR:
+                    inst.modificationInfo.modifiesVFR = false;
+                    inst.modificationInfo.modifiesVIR = true;
+                    inst.isLoad = true;
+                    break;
+                case VU0_S2_VISWR:
+                    inst.modificationInfo.modifiesVFR = false;
+                    inst.modificationInfo.modifiesVIR = false;
+                    inst.isStore = true;
+                    inst.modificationInfo.modifiesMemory = true;
+                    break;
+
+                case VU0_S2_VRINIT:
+                case VU0_S2_VRXOR:
+                    inst.modificationInfo.modifiesVFR = false; /* Modifies R */
+                    break;                                     // Modifies R
+                case VU0_S2_VRGET:
+                    inst.modificationInfo.modifiesControl = false; /* Reads R, writes VF */
+                    break;
+                case VU0_S2_VRNEXT:
+                    inst.modificationInfo.modifiesControl = true; /* Modifies R */
+                    inst.modificationInfo.modifiesVFR = false;
+                    break; // Writes R
+                case VU0_S2_VABS:
+                case VU0_S2_VMOVE:
+                case VU0_S2_VMR32:
+                    inst.modificationInfo.modifiesControl = false;
+                    break; // Only VF
+                case VU0_S2_VNOP:
+                    inst.modificationInfo.modifiesVFR = false;
+                    inst.modificationInfo.modifiesControl = false;
+                    break;
+                case VU0_S2_VCLIPw:
+                    inst.modificationInfo.modifiesVFR = false; /* Modifies Clip flags */
+                    break;
+                }
+            }
+            else // Special1 Table
+            {
+                if (vu_func >= VU0_S1_VIADD && vu_func <= VU0_S1_VIOR)
+                {
+                    inst.modificationInfo.modifiesVFR = false;
+                    inst.modificationInfo.modifiesVIR = true;
+                } // Integer ops
+                if (vu_func == VU0_S1_VIADDI)
+                {
+                    inst.modificationInfo.modifiesVFR = false;
+                    inst.modificationInfo.modifiesVIR = true;
+                }
+                if (vu_func == VU0_S2_VMFIR)
+                {
+                    inst.modificationInfo.modifiesVIR = false;
+                } // Only reads VIR
+                if (vu_func == VU0_S2_VMTIR)
+                {
+                    inst.modificationInfo.modifiesVFR = false;
+                    inst.modificationInfo.modifiesVIC = true;
+                } // Modifies I reg
+                if (vu_func == VU0_S2_VILWR)
+                {
+                    inst.modificationInfo.modifiesVFR = false;
+                    inst.modificationInfo.modifiesVIR = true;
+                    inst.isLoad = true;
+                }
+                if (vu_func == VU0_S2_VISWR)
+                {
+                    inst.modificationInfo.modifiesVFR = false;
+                    inst.modificationInfo.modifiesVIR = false;
+                    inst.isStore = true;
+                    inst.modificationInfo.modifiesMemory = true;
+                }
+                if (vu_func == VU0_S2_VDIV || vu_func == VU0_S2_VSQRT || vu_func == VU0_S2_VRSQRT)
+                {
+                    inst.vectorInfo.usesQReg = true;
+                }
+            }
             break;
+        }
         }
     }
 
@@ -1094,8 +1049,7 @@ namespace ps2recomp
             return 0;
         }
 
-        // Calculate branch target: PC + 4 + (sign-extended immediate << 2)
-        int32_t offset = static_cast<int16_t>(inst.immediate) << 2;
+        int32_t offset = inst.simmediate << 2;
         return inst.address + 4 + offset;
     }
 
@@ -1106,18 +1060,19 @@ namespace ps2recomp
             return 0;
         }
 
+        if (inst.opcode == OPCODE_SPECIAL &&
+            (inst.function == SPECIAL_JR || inst.function == SPECIAL_JALR))
+        {
+            // JR/JALR: target is in the rs register (can't be determined statically)
+            return 0;
+        }
+
         if (inst.opcode == OPCODE_J || inst.opcode == OPCODE_JAL)
         {
             // J/JAL: target is in the lower 26 bits, shifted left by 2
             // and combined with the upper 4 bits of PC + 4
             uint32_t pc_upper = (inst.address + 4) & 0xF0000000;
             return pc_upper | (inst.target << 2);
-        }
-        else if (inst.opcode == OPCODE_SPECIAL &&
-                 (inst.function == SPECIAL_JR || inst.function == SPECIAL_JALR))
-        {
-            // JR/JALR: target is in the rs register (can't be determined statically)
-            return 0;
         }
 
         return 0;
