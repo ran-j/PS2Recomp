@@ -1,6 +1,6 @@
 ## PS2Recomp: PlayStation 2 Static Recompiler (Not ready)
 
-* Note this is an experiment and does work as it should, feel free to open a PR to help the project.
+* Note this is an experiment and doesn't work as it should, feel free to open a PR to help the project.
 
 PS2Recomp is a tool designed to statically recompile PlayStation 2 ELF binaries into C++ code that can be compiled for any modern platform. This enables running PS2 games natively on PC and other platforms without traditional emulation.
 
