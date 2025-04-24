@@ -64,7 +64,8 @@ struct R5900Context
     uint32_t sa;         // Shift amount register
 
     // VU0 registers (when used in macro mode)
-    __m128 vu0_vf[32];       // VU0 vector registers
+    __m128 vu0_vf[32];       // VU0 vector float registers
+    uint16_t vi[16];         // VU0 vector integer registers
     float vu0_q;             // VU0 Q register (quotient)
     float vu0_p;             // VU0 P register (EFU result)
     float vu0_i;             // VU0 I register (integer value)
@@ -116,6 +117,11 @@ struct R5900Context
         for (int i = 0; i < 4; i++)
         {
             vu0_cf[i] = 0.0f;
+        }
+
+        for (int i = 0; i < 16; ++i)
+        {
+            vi[i] = 0;
         }
 
         pc = 0;
@@ -179,7 +185,7 @@ struct R5900Context
         }
         std::cout << "Status: 0x" << std::setw(8) << cop0_status
                   << " Cause: 0x" << std::setw(8) << cop0_cause
-                  << " EPC: 0x" << std::setw(8) << cop0_epc << "\n"; 
+                  << " EPC: 0x" << std::setw(8) << cop0_epc << "\n";
         std::cout << "--- End Context Dump ---\n";
         std::cout.flags(flags); // Restore format flags
     }
