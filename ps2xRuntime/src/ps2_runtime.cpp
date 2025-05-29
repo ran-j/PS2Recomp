@@ -180,6 +180,17 @@ void PS2Runtime::SignalException(R5900Context *ctx, PS2Exception exception)
     }
 }
 
+void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint32_t address)
+{
+    std::cout << "VU0 microprogram call to address 0x" << std::hex << address
+              << " - not implemented" << std::dec << std::endl;
+
+    // mayve implement like this or a vu0_interpreter 
+    // Placeholder for VU0 microprogram execution
+    // auto microprog = findCompiledMicroprogram(address);
+    // if (microprog) microprog(rdram, ctx);
+}
+
 void PS2Runtime::HandleIntegerOverflow(R5900Context *ctx)
 {
     std::cerr << "Integer overflow exception at PC: 0x" << std::hex << ctx->pc << std::dec << std::endl;

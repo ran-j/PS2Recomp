@@ -389,6 +389,7 @@ public:
     RecompiledFunction lookupFunction(uint32_t address);
 
     void SignalException(R5900Context* ctx, PS2Exception exception);
+    void executeVU0Microprogram(uint8_t* rdram, R5900Context* ctx, uint32_t address);
 
 private:
     void HandleIntegerOverflow(R5900Context* ctx);

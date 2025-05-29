@@ -1976,17 +1976,50 @@ namespace ps2recomp
 
     std::string CodeGenerator::translateVU_VCALLMS(const Instruction &inst)
     {
-        return fmt::format("// Calls VU0 microprogram at address {} - not implemented in recompiled code", inst.immediate);
+        // VCALLMS calls a VU0 microprogram at the specified immediate address.
+        // VU0 micro memory is 4KB = 512 instructions (8 bytes each). Index is 0-511.
+        uint16_t instr_index = inst.immediate & 0x1FF;          // Mask to 9 bits for VU0
+        uint32_t target_byte_addr = (uint32_t)instr_index << 3; // Convert instruction index to byte address
+
+        return fmt::format(
+            "{{ "
+            "    ctx->vu0_tpc = 0x{:X}; " // Set target program counter
+            "    runtime->executeVU0Microprogram(rdram, ctx, 0x{:X}); "
+            "}}",
+            target_byte_addr, target_byte_addr);
     }
 
     std::string CodeGenerator::translateVU_VCALLMSR(const Instruction &inst)
     {
-        return fmt::format("// Calls VU0 microprogram at address {} - not implemented in recompiled code", inst.immediate);
+        // VCALLMSR calls a VU0 microprogram at address stored in integer register
+        uint8_t vis_reg_idx = inst.rs; // Source integer register
+
+        return fmt::format(
+            "{{ "
+            "    uint16_t instr_index = ctx->vi[{}] & 0x1FF; "             // Get instruction index from VI[IS], mask to 9 bits
+            "    uint32_t target_byte_addr = (uint32_t)instr_index << 3; " // Convert to byte address
+            "    ctx->vu0_pc = target_byte_addr; "
+            "    runtime->vu0StartMicroProgram(rdram, ctx, target_byte_addr); "
+            "}}",
+            vis_reg_idx);
     }
 
     std::string CodeGenerator::translateVU_VRNEXT(const Instruction &inst)
     {
-        return fmt::format("// Unhandled VU0 VRNEXT instruction: 0x{:X}", inst.function);
+        return fmt::format(
+            "{{ "
+            "    uint32_t r_vals[4]; "
+            "    _mm_storeu_si128((__m128i*)r_vals, (__m128i)ctx->vu0_r); "
+            "    "
+            "    // Simple LFSR-based random number generation (PS2-like behavior) "
+            "    uint32_t feedback = r_vals[0] ^ (r_vals[0] << 13) ^ (r_vals[1] >> 19) ^ (r_vals[2] << 7); "
+            "    r_vals[0] = r_vals[1]; "
+            "    r_vals[1] = r_vals[2]; "
+            "    r_vals[2] = r_vals[3]; "
+            "    r_vals[3] = feedback; "
+            "    "
+            "    ctx->vu0_r = _mm_loadu_si128((__m128i*)r_vals); "
+            "}}");
     }
 
     std::string CodeGenerator::translateVU_VMADD_Field(const Instruction &inst)
