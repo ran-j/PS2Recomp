@@ -80,8 +80,8 @@ namespace ps2recomp
         OPCODE_SDC2 = 0x3E, // PS2 specific Store Quadword from Coprocessor 2 (VU0) - Overrides standard MIPS SDC2
         OPCODE_SD = 0x3F,   // Store Doubleword
 
-        //OPCODE_LQC2 = 0x36,
-        //OPCODE_SQC2 = 0x3E
+        // OPCODE_LQC2 = 0x36,
+        // OPCODE_SQC2 = 0x3E
     };
 
     // SPECIAL Function (bits 5-0) for OPCODE_SPECIAL
@@ -286,7 +286,7 @@ namespace ps2recomp
         MMI2_PMFLO = 0x09,
         MMI2_PINTH = 0x0A,
         MMI2_PMULTW = 0x0C,
-        MMI2_PDIVW = 0x0D, 
+        MMI2_PDIVW = 0x0D,
         MMI2_PCPYLD = 0x0E,
         MMI2_PAND = 0x12,
         MMI2_PXOR = 0x13,
@@ -673,15 +673,35 @@ namespace ps2recomp
     // VU0 Control Register Numbers (used with CFC2/CTC2)
     enum VU0ControlRegisters
     {
-        VU0_CR_STATUS = 0,  // Status/Control register
-        VU0_CR_MAC = 1,     // MAC flags register
-        VU0_CR_CLIP = 5,    // Clipping flags register //TODO maybe this is a 2 instead of 5
-        VU0_CR_R = 3,       // R register (Random number)
-        VU0_CR_I = 4,       // I register (Immediate)
-        VU0_CR_CMSAR0 = 13, // VU0 microprogram start address register
-        VU0_CR_FBRST = 18   // VIF/VU0/VU1 reset register
-    };
+        VU0_CR_STATUS = 0, // Status/Control register
+        VU0_CR_MAC = 1,    // MAC flags register
+        VU0_CR_CLIP = 5,   // Clipping flags register
+        VU0_CR_R = 3,      // R register (Random number)
+        VU0_CR_I = 4,      // I register (Immediate)
 
+        // Add missing registers
+        VU0_CR_VPU_STAT = 2,   // VPU-STAT register
+        VU0_CR_TPC = 6,        // T (program counter) register
+        VU0_CR_CMSAR0 = 7,     // Call/return address 0
+        VU0_CR_FBRST = 8,      // VIF/VU reset register
+        VU0_CR_VPU_STAT2 = 9,  // VPU-STAT register 2
+        VU0_CR_TPC2 = 10,      // T (program counter) register 2
+        VU0_CR_CMSAR1 = 11,    // Call/return address 1
+        VU0_CR_FBRST2 = 12,    // VIF/VU reset register 2
+        VU0_CR_VPU_STAT3 = 13, // VPU-STAT register 3
+        VU0_CR_CMSAR2 = 14,    // Call/return address 2
+        VU0_CR_FBRST3 = 15,    // VIF/VU reset register 3
+        VU0_CR_VPU_STAT4 = 16, // VPU-STAT register 4
+        VU0_CR_CMSAR3 = 17,    // Call/return address 3
+        VU0_CR_FBRST4 = 18,    // VIF/VU reset register 4
+        VU0_CR_ACC = 20,       // Accumulator register
+        VU0_CR_INFO = 21,      // Information register
+        VU0_CR_CLIP2 = 22,     // Clipping flags register 2
+        VU0_CR_P = 26,         // P register
+        VU0_CR_XITOP = 27,     // XITOP register
+        VU0_CR_ITOP = 28,      // ITOP register
+        VU0_CR_TOP = 29        // TOP register
+    };
     enum VU0OPSFunctions
     {
         VU0OPS_QMFC2_NI = 0x00, // Non-incrementing QMFC2

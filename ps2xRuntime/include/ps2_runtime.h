@@ -11,7 +11,7 @@
 #include <iostream>
 
 constexpr uint32_t PS2_RAM_SIZE = 32 * 1024 * 1024; // 32MB
-constexpr uint32_t PS2_RAM_MASK = 0x1FFFFFF; // Mask for 32MB alignment
+constexpr uint32_t PS2_RAM_MASK = 0x1FFFFFF;        // Mask for 32MB alignment
 constexpr uint32_t PS2_RAM_BASE = 0x00000000;       // Physical base of RDRAM
 constexpr uint32_t PS2_SCRATCHPAD_BASE = 0x70000000;
 constexpr uint32_t PS2_SCRATCHPAD_SIZE = 16 * 1024; // 16KB
@@ -49,6 +49,11 @@ constexpr uint32_t PS2_GS_PRIV_REG_SIZE = 0x2000;
 
 #define PS2_FIO_S_IFDIR 0x1000
 #define PS2_FIO_S_IFREG 0x2000
+
+enum PS2Exception
+{
+    EXCEPTION_INTEGER_OVERFLOW = 0x0C, // From MIPS spec
+};
 
 // PS2 CPU context (R5900)
 struct R5900Context
@@ -383,9 +388,15 @@ public:
     void registerFunction(uint32_t address, RecompiledFunction func);
     RecompiledFunction lookupFunction(uint32_t address);
 
+    void SignalException(R5900Context* ctx, PS2Exception exception);
+
+private:
+    void HandleIntegerOverflow(R5900Context* ctx);
+
 private:
     PS2Memory m_memory;
     R5900Context m_cpuContext;
+    bool check_overflow = false; 
 
     std::unordered_map<uint32_t, RecompiledFunction> m_functionTable;
 

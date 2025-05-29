@@ -171,6 +171,29 @@ PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
     return defaultFunction;
 }
 
+void PS2Runtime::SignalException(R5900Context *ctx, PS2Exception exception)
+{
+    if (exception == EXCEPTION_INTEGER_OVERFLOW)
+    {
+        // PS2 behavior: jump to exception handler
+        HandleIntegerOverflow(ctx);
+    }
+}
+
+void PS2Runtime::HandleIntegerOverflow(R5900Context *ctx)
+{
+    std::cerr << "Integer overflow exception at PC: 0x" << std::hex << ctx->pc << std::dec << std::endl;
+
+    // Set the EPC (Exception Program Counter) to the current PC
+    m_cpuContext.cop0_epc = ctx->pc;
+
+    // Set the cause register to indicate an integer overflow
+    m_cpuContext.cop0_cause |= (EXCEPTION_INTEGER_OVERFLOW << 2);
+
+    // Jump to the exception handler (usually at 0x80000000)
+    m_cpuContext.pc = 0x80000000; // Default PS2 exception handler address
+}
+
 void PS2Runtime::run()
 {
     RecompiledFunction entryPoint = lookupFunction(m_cpuContext.pc);
