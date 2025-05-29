@@ -2118,12 +2118,44 @@ namespace ps2recomp
 
     std::string CodeGenerator::translateVU_VRINIT(const Instruction &inst)
     {
-        return fmt::format("// Unhandled VU0 VRINIT instruction: 0x{:X}", inst.function);
+        uint8_t fs_reg = inst.rs;
+
+        return fmt::format(
+            "{{ "
+            "    uint32_t seed = *(uint32_t*)&ctx->vu0_vf[{}]; "
+            "    "
+            "    // PS2 uses a specific LFSR initialization pattern "
+            "    if (seed == 0) seed = 1; " // Prevent zero seed
+            "    "
+            "    uint32_t r0 = seed; "
+            "    uint32_t r1 = seed * 0x41C64E6D + 0x3039; " // PS2-like LCG constants
+            "    uint32_t r2 = r1 * 0x41C64E6D + 0x3039; "
+            "    uint32_t r3 = r2 * 0x41C64E6D + 0x3039; "
+            "    "
+            "    ctx->vu0_r = _mm_set_epi32(r3, r2, r1, r0); "
+            "}}",
+            fs_reg);
     }
 
     std::string CodeGenerator::translateVU_VRXOR(const Instruction &inst)
     {
-        return fmt::format("// Unhandled VU0 VRXOR instruction: 0x{:X}", inst.function);
+        uint8_t fs_reg = inst.rs;
+
+        return fmt::format(
+            "{{ "
+            "    __m128i r_current = (__m128i)ctx->vu0_r; "
+            "    __m128i fs_data = (__m128i)ctx->vu0_vf[{}]; "
+            "    "
+            "     // XOR the current random value with the data from the VU vector register "
+            "    __m128i xored = _mm_xor_si128(r_current, fs_data); "
+            "    "
+            "    // Apply a simple mixing function similar to PS2's LFSR "
+            "    __m128i mixed = _mm_xor_si128(xored, _mm_slli_epi32(xored, 7)); "
+            "    mixed = _mm_xor_si128(mixed, _mm_srli_epi32(mixed, 9)); "
+            "    "
+            "    ctx->vu0_r = (__m128)mixed; "
+            "}}",
+            fs_reg);
     }
 
     std::string CodeGenerator::translateQFSRV(const Instruction &inst)
