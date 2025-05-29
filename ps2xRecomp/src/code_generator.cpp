@@ -285,8 +285,8 @@ namespace ps2recomp
         ss << "#define WRITE64(addr, val) (*(uint64_t*)((rdram) + ((addr) & PS2_RAM_MASK)) = (val))\n";
         ss << "#define WRITE128(addr, val) (*((__m128i*)((rdram) + ((addr) & PS2_RAM_MASK))) = (val))\n\n";
 
-        ss << "// Function lookup for indirect calls\n";
-        ss << "#define LOOKUP_FUNC(addr) runtime->lookupFunction(addr)\n\n";
+        // ss << "// Function lookup for indirect calls\n";
+        // ss << "#define LOOKUP_FUNC(addr, runtime) runtime->lookupFunction(addr)\n\n";
 
         // Packed Compare Greater Than (PCGT)
         ss << "#define PS2_PCGTW(a, b) _mm_cmpgt_epi32((__m128i)(a), (__m128i)(b))\n";
@@ -467,7 +467,7 @@ namespace ps2recomp
 
         ss << "// Function: " << function.name << "\n";
         ss << "// Address: 0x" << std::hex << function.start << " - 0x" << function.end << std::dec << "\n";
-        ss << "void " << function.name << "(uint8_t* rdram, R5900Context* ctx) {\n\n";
+        ss << "void " << function.name << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime) {\n\n";
 
         for (size_t i = 0; i < instructions.size(); ++i)
         {

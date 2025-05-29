@@ -163,7 +163,7 @@ PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
 
     std::cerr << "Warning: Function at address 0x" << std::hex << address << std::dec << " not found" << std::endl;
 
-    static RecompiledFunction defaultFunction = [](uint8_t *rdram, R5900Context *ctx)
+    static RecompiledFunction defaultFunction = [](uint8_t *rdram, R5900Context *ctx, PS2Runtime* runtime)
     {
         std::cerr << "Error: Called unimplemented function at address 0x" << std::hex << ctx->pc << std::dec << std::endl;
     };
@@ -185,10 +185,57 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
     std::cout << "VU0 microprogram call to address 0x" << std::hex << address
               << " - not implemented" << std::dec << std::endl;
 
-    // mayve implement like this or a vu0_interpreter 
+    // mayve implement like this or a vu0_interpreter
     // Placeholder for VU0 microprogram execution
     // auto microprog = findCompiledMicroprogram(address);
     // if (microprog) microprog(rdram, ctx);
+}
+
+void PS2Runtime::vu0StartMicroProgram(uint8_t *rdram, R5900Context *ctx, uint32_t address)
+{
+    std::cout << "VU0 microprogram call to address 0x" << std::hex << address
+              << " - not implemented" << std::dec << std::endl;
+}
+
+void PS2Runtime::handleSyscall(uint8_t *rdram, R5900Context *ctx)
+{
+    std::cout << "Syscall encountered at PC: 0x" << std::hex << ctx->pc << std::dec << std::endl; 
+}
+
+void PS2Runtime::handleBreak(uint8_t *rdram, R5900Context *ctx)
+{
+    std::cout << "Break encountered at PC: 0x" << std::hex << ctx->pc << std::dec << std::endl;
+}
+
+void PS2Runtime::handleTrap(uint8_t *rdram, R5900Context *ctx)
+{
+    std::cout << "Trap encountered at PC: 0x" << std::hex << ctx->pc << std::dec << std::endl;
+}
+
+void PS2Runtime::handleTLBR(uint8_t *rdram, R5900Context *ctx)
+{
+    std::cout << "TLBR (TLB Read) at PC: 0x" << std::hex << ctx->pc << std::dec << std::endl;
+}
+
+void PS2Runtime::handleTLBWI(uint8_t *rdram, R5900Context *ctx)
+{
+    std::cout << "TLBWI (TLB Write Indexed) at PC: 0x" << std::hex << ctx->pc << std::dec << std::endl;
+}
+
+void PS2Runtime::handleTLBWR(uint8_t *rdram, R5900Context *ctx)
+{
+    std::cout << "TLBWR (TLB Write Random) at PC: 0x" << std::hex << ctx->pc << std::dec << std::endl;
+}
+
+void PS2Runtime::handleTLBP(uint8_t *rdram, R5900Context *ctx)
+{
+    std::cout << "TLBP (TLB Probe) at PC: 0x" << std::hex << ctx->pc << std::dec << std::endl;
+}
+
+void PS2Runtime::clearLLBit(R5900Context *ctx)
+{
+    ctx->cop0_status &= ~0x00000002; // LL bit is bit 1 in the status register
+    std::cout << "LL bit cleared at PC: 0x" << std::hex << ctx->pc << std::dec << std::endl;
 }
 
 void PS2Runtime::HandleIntegerOverflow(R5900Context *ctx)
@@ -218,7 +265,7 @@ void PS2Runtime::run()
     try
     {
         // Call the entry point function
-        entryPoint(m_memory.getRDRAM(), &m_cpuContext);
+        entryPoint(m_memory.getRDRAM(), &m_cpuContext, this);
 
         std::cout << "Program execution completed successfully" << std::endl;
     }

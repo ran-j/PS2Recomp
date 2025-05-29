@@ -384,20 +384,36 @@ public:
     bool loadELF(const std::string &elfPath);
     void run();
 
-    using RecompiledFunction = void (*)(uint8_t *, R5900Context *);
+    using RecompiledFunction = void (*)(uint8_t *, R5900Context *, PS2Runtime *);
+
     void registerFunction(uint32_t address, RecompiledFunction func);
     RecompiledFunction lookupFunction(uint32_t address);
 
-    void SignalException(R5900Context* ctx, PS2Exception exception);
-    void executeVU0Microprogram(uint8_t* rdram, R5900Context* ctx, uint32_t address);
+    void SignalException(R5900Context *ctx, PS2Exception exception);
+    
+    void executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint32_t address);
+    void vu0StartMicroProgram(uint8_t *rdram, R5900Context *ctx, uint32_t address);
+
+public:
+    void handleSyscall(uint8_t *rdram, R5900Context *ctx);
+    void handleBreak(uint8_t *rdram, R5900Context *ctx);
+
+    void handleTrap(uint8_t *rdram, R5900Context *ctx);
+    void handleTLBR(uint8_t *rdram, R5900Context *ctx);
+    void handleTLBWI(uint8_t *rdram, R5900Context *ctx);
+    void handleTLBWR(uint8_t *rdram, R5900Context *ctx);
+    void handleTLBP(uint8_t *rdram, R5900Context *ctx);
+    void clearLLBit(R5900Context *ctx);
+
+public:
+    bool check_overflow = false;
 
 private:
-    void HandleIntegerOverflow(R5900Context* ctx);
+    void HandleIntegerOverflow(R5900Context *ctx);
 
 private:
     PS2Memory m_memory;
     R5900Context m_cpuContext;
-    bool check_overflow = false; 
 
     std::unordered_map<uint32_t, RecompiledFunction> m_functionTable;
 

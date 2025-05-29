@@ -21,7 +21,7 @@ namespace ps2recomp
         try
         {
             m_config = m_configManager.loadConfig();
-           
+
             for (const auto &name : m_config.skipFunctions)
             {
                 m_skipFunctions[name] = true;
@@ -198,7 +198,7 @@ namespace ps2recomp
             {
                 if (function.isRecompiled)
                 {
-                    ss << "void " << function.name << "(uint8_t* rdram, R5900Context* ctx);\n";
+                    ss << "void " << function.name << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime);\n";
                 }
             }
 
