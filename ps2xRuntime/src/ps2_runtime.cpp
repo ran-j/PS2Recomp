@@ -3,6 +3,7 @@
 #include <fstream>
 #include <algorithm>
 #include <cstring>
+#include "raylib.h"
 
 #define ELF_MAGIC 0x464C457F // "\x7FELF" in little endian
 #define ET_EXEC 2            // Executable file
@@ -46,6 +47,16 @@ struct ProgramHeader
 };
 
 #define PT_LOAD 1 // Loadable segment
+ 
+static constexpr int FB_WIDTH = 640;
+static constexpr int FB_HEIGHT = 448;
+static constexpr uint32_t DEFAULT_FB_ADDR = 0x00100000; // location in RDRAM the guest will draw to
+
+static void UploadFrame(Texture2D &tex, PS2Runtime *rt)
+{
+    uint8_t *src = rt->memory().getRDRAM() + (DEFAULT_FB_ADDR & 0x1FFFFFFF);
+    UpdateTexture(tex, src);
+}
 
 PS2Runtime::PS2Runtime()
 {
@@ -68,13 +79,17 @@ PS2Runtime::~PS2Runtime()
     m_functionTable.clear();
 }
 
-bool PS2Runtime::initialize()
+bool PS2Runtime::initialize(const char *title)
 {
     if (!m_memory.initialize())
     {
         std::cerr << "Failed to initialize PS2 memory" << std::endl;
         return false;
     }
+
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE);
+    InitWindow(FB_WIDTH, FB_HEIGHT, title);
+    SetTargetFPS(60);
 
     return true;
 }
@@ -163,7 +178,7 @@ PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
 
     std::cerr << "Warning: Function at address 0x" << std::hex << address << std::dec << " not found" << std::endl;
 
-    static RecompiledFunction defaultFunction = [](uint8_t *rdram, R5900Context *ctx, PS2Runtime* runtime)
+    static RecompiledFunction defaultFunction = [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         std::cerr << "Error: Called unimplemented function at address 0x" << std::hex << ctx->pc << std::dec << std::endl;
     };
@@ -199,7 +214,7 @@ void PS2Runtime::vu0StartMicroProgram(uint8_t *rdram, R5900Context *ctx, uint32_
 
 void PS2Runtime::handleSyscall(uint8_t *rdram, R5900Context *ctx)
 {
-    std::cout << "Syscall encountered at PC: 0x" << std::hex << ctx->pc << std::dec << std::endl; 
+    std::cout << "Syscall encountered at PC: 0x" << std::hex << ctx->pc << std::dec << std::endl;
 }
 
 void PS2Runtime::handleBreak(uint8_t *rdram, R5900Context *ctx)
@@ -268,6 +283,30 @@ void PS2Runtime::run()
         entryPoint(m_memory.getRDRAM(), &m_cpuContext, this);
 
         std::cout << "Program execution completed successfully" << std::endl;
+
+        // A blank image to use as a framebuffer
+        Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLANK);
+        Texture2D frameTex = LoadTextureFromImage(blank);
+        UnloadImage(blank);
+
+        while (!WindowShouldClose())
+        {
+            // TODO step only a small slice each host
+			auto self = this;
+            lookupFunction(memory().read32(0))(
+                memory().getRDRAM(),
+                &cpu(),
+                self);
+
+            UploadFrame(frameTex, self);
+
+            BeginDrawing();
+            ClearBackground(BLACK);
+            DrawTexture(frameTex, 0, 0, WHITE);
+            EndDrawing();
+        }
+
+        CloseWindow();
     }
     catch (const std::exception &e)
     {

@@ -14,7 +14,7 @@ int main(int argc, char *argv[])
     std::string elfPath = argv[1];
 
     PS2Runtime runtime;
-    if (!runtime.initialize())
+    if (!runtime.initialize("ps2xRuntime (Raylib host)"))
     {
         std::cerr << "Failed to initialize PS2 runtime" << std::endl;
         return 1;

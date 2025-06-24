@@ -484,7 +484,11 @@ namespace ps2_syscalls
             return;
         }
 
-        size_t bytesRead = ::fread(hostBuf, 1, size, fp);
+        size_t bytesRead = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_sys_fd_mutex);
+            bytesRead = fread(hostBuf, 1, size, fp);
+        }
 
         if (bytesRead < size && ferror(fp))
         {

@@ -380,7 +380,7 @@ public:
     PS2Runtime();
     ~PS2Runtime();
 
-    bool initialize();
+    bool initialize(const char *title = "PS2 Game");
     bool loadELF(const std::string &elfPath);
     void run();
 
@@ -390,7 +390,7 @@ public:
     RecompiledFunction lookupFunction(uint32_t address);
 
     void SignalException(R5900Context *ctx, PS2Exception exception);
-    
+
     void executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint32_t address);
     void vu0StartMicroProgram(uint8_t *rdram, R5900Context *ctx, uint32_t address);
 
@@ -404,6 +404,13 @@ public:
     void handleTLBWR(uint8_t *rdram, R5900Context *ctx);
     void handleTLBP(uint8_t *rdram, R5900Context *ctx);
     void clearLLBit(R5900Context *ctx);
+
+public:
+    inline R5900Context &cpu() { return m_cpuContext; }
+    inline const R5900Context &cpu() const { return m_cpuContext; }
+
+    inline PS2Memory &memory() { return m_memory; }
+    inline const PS2Memory &memory() const { return m_memory; }
 
 public:
     bool check_overflow = false;
