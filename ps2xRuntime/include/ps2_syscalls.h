@@ -110,9 +110,6 @@ namespace ps2_syscalls
     void sceSifLoadModule(uint8_t *rdram, R5900Context *ctx);
 
     void TODO(uint8_t *rdram, R5900Context *ctx);
-
-    // Helper functions
-    void RenderFrame(uint8_t *rdram);
 }
 
 #endif // PS2_SYSCALLS_H
