@@ -231,7 +231,23 @@ namespace ps2recomp
 
         ss << "// Basic MIPS arithmetic operations\n";
         ss << "#define ADD32(a, b) ((uint32_t)((a) + (b)))\n";
+        ss << "#define ADD32_OV(rs, rt, result32, overflow)         \
+            do {                                                    \
+                int32_t _a = (int32_t)(rs);                         \
+                int32_t _b = (int32_t)(rt);                         \
+                int32_t _r = _a + _b;                               \
+                overflow = (((_a ^ _b) >= 0) && ((_a ^ _r) < 0));   \
+                result32 = (uint32_t)_r;                            \
+            } while (0);\n";
         ss << "#define SUB32(a, b) ((uint32_t)((a) - (b)))\n";
+        ss << "#define SUB32_OV(rs, rt, result32, overflow)         \
+            do {                                                    \
+                int32_t _a = (int32_t)(rs);                         \
+                int32_t _b = (int32_t)(rt);                         \
+                int32_t _r = _a - _b;                               \
+                overflow = (((_a ^ _b) < 0) && ((_a ^ _r) < 0));    \
+                result32 = (uint32_t)_r;                            \
+            } while (0);\n";
         ss << "#define MUL32(a, b) ((uint32_t)((a) * (b)))\n";
         ss << "#define DIV32(a, b) ((uint32_t)((a) / (b)))\n";
         ss << "#define AND32(a, b) ((uint32_t)((a) & (b)))\n";
@@ -514,9 +530,20 @@ namespace ps2recomp
         case OPCODE_COP2:
             return translateVUInstruction(inst);
         case OPCODE_ADDI:
+            if (inst.rt == 0)
+                return "// NOP (addi to $zero)";
+            return fmt::format(
+                fmt::runtime("{ { uint32_t tmp; bool ov; "
+                             "ADD32_OV(GPR_U32(ctx, {}), (int32_t){}, tmp, ov); "
+                             "if (ov) runtime->SignalException(ctx, EXCEPTION_INTEGER_OVERFLOW); "
+                             "else SET_GPR_S32(ctx, {}, (int32_t)tmp); } }"),
+                inst.rs, inst.simmediate, inst.rt);
+
         case OPCODE_ADDIU:
             if (inst.rt == 0)
                 return "// NOP (addiu $zero, ...)";
+            return fmt::format("SET_GPR_S32(ctx, {}, ADD32(GPR_U32(ctx, {}), {}));",
+                               inst.rt, inst.rs, inst.simmediate);
             return fmt::format("SET_GPR_S32(ctx, {}, ADD32(GPR_U32(ctx, {}), {}));", inst.rt, inst.rs, inst.simmediate);
         case OPCODE_SLTI:
             return fmt::format("SET_GPR_U32(ctx, {}, SLT32(GPR_S32(ctx, {}), {}));", inst.rt, inst.rs, inst.simmediate);
@@ -599,18 +626,18 @@ namespace ps2recomp
 
         case OPCODE_LWL:
             return fmt::format("{{ uint32_t addr = ADD32(GPR_U32(ctx, {}), {}); "
-                               "uint32_t shift = (addr & 3) << 3; "
-                               "uint32_t mask = 0xFFFFFFFF << shift; "
-                               "uint32_t aligned_data = READ32(addr & ~3); "
-                               "SET_GPR_U32(ctx, {}, (GPR_U32(ctx, {}) & ~mask) | (aligned_data & mask)); }}",
+                               "uint32_t shift = ((~addr) & 3) << 3; /* big-endian */ "
+                               "uint32_t mask  = 0xFFFFFFFF >> shift; "
+                               "uint32_t word  = READ32(addr & ~3); "
+                               "SET_GPR_U32(ctx, {}, (GPR_U32(ctx,{}) & ~mask) | ((word >> shift) & mask)); }}",
                                inst.rs, inst.simmediate, inst.rt, inst.rt);
 
         case OPCODE_LWR:
             return fmt::format("{{ uint32_t addr = ADD32(GPR_U32(ctx, {}), {}); "
-                               "uint32_t shift = ((~addr) & 3) << 3; "
-                               "uint32_t mask = 0xFFFFFFFF >> shift; "
-                               "uint32_t aligned_data = READ32(addr & ~3); "
-                               "SET_GPR_U32(ctx, {}, (GPR_U32(ctx, {}) & ~mask) | (aligned_data & mask)); }}",
+                               "uint32_t shift = (addr & 3) << 3; "
+                               "uint32_t mask  = 0xFFFFFFFF << shift; "
+                               "uint32_t word  = READ32(addr & ~3); "
+                               "SET_GPR_U32(ctx, {}, (GPR_U32(ctx,{}) & ~mask) | (word << shift)); }}",
                                inst.rs, inst.simmediate, inst.rt, inst.rt);
 
         case OPCODE_SWL:
@@ -725,7 +752,12 @@ namespace ps2recomp
         case SPECIAL_ADDU:
             return fmt::format("SET_GPR_U32(ctx, {}, ADD32(GPR_U32(ctx, {}), GPR_U32(ctx, {})));", inst.rd, inst.rs, inst.rt);
         case SPECIAL_SUB:
-            return fmt::format("SET_GPR_S32(ctx, {}, SUB32(GPR_U32(ctx, {}), GPR_U32(ctx, {})));", inst.rd, inst.rs, inst.rt);
+            return fmt::format(
+                fmt::runtime("{ { uint32_t tmp; bool ov; "
+                             "SUB32_OV(GPR_U32(ctx, {}), GPR_U32(ctx, {}), tmp, ov); "
+                             "if (ov) runtime->SignalException(ctx, EXCEPTION_INTEGER_OVERFLOW); "
+                             "else SET_GPR_S32(ctx, {}, (int32_t)tmp); } }"),
+                inst.rs, inst.rt, inst.rd);
         case SPECIAL_SUBU:
             return fmt::format("SET_GPR_U32(ctx, {}, SUB32(GPR_U32(ctx, {}), GPR_U32(ctx, {})));", inst.rd, inst.rs, inst.rt);
         case SPECIAL_AND:
@@ -1012,7 +1044,10 @@ namespace ps2recomp
             case COP1_S_MUL:
                 return fmt::format("ctx->f[{}] = FPU_MUL_S(ctx->f[{}], ctx->f[{}]);", fd, fs, ft);
             case COP1_S_DIV:
-                return fmt::format("ctx->f[{}] = FPU_DIV_S(ctx->f[{}], ctx->f[{}]);", fd, fs, ft);
+                return fmt::format("if (ctx->f[{}] == 0.0f) {{ ctx->fcr31 |= 0x100000; /* DZ flag */ "
+                                   "ctx->f[{}] = copysignf(INFINITY, ctx->f[{}] * 0.0f); }} "
+                                   "else ctx->f[{}] = ctx->f[{}] / ctx->f[{}];",
+                                   ft, fd, fs, fd, fs, ft);
             case COP1_S_SQRT:
                 return fmt::format("ctx->f[{}] = FPU_SQRT_S(ctx->f[{}]);", fd, fs);
             case COP1_S_ABS:
@@ -1197,10 +1232,15 @@ namespace ps2recomp
             return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PSUBB(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
         case MMI0_PCGTB:
             return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PCGTB(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
+        // thouse 2 require SSE4.1 now TODO implement  on SSE2
         case MMI0_PADDSW:
-            return fmt::format("SET_GPR_VEC(ctx, {}, _mm_adds_epi32(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
+            return fmt::format("SET_GPR_VEC(ctx, {}, _mm_min_epi32(_mm_max_epi32(_mm_add_epi32(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})), "
+                               "_mm_set1_epi32(INT32_MIN)), _mm_set1_epi32(INT32_MAX)));",
+                               rd, rs, rt);
         case MMI0_PSUBSW:
-            return fmt::format("SET_GPR_VEC(ctx, {}, _mm_subs_epi32(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
+            return fmt::format("SET_GPR_VEC(ctx, {}, _mm_min_epi32(_mm_max_epi32(_mm_sub_epi32(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})), "
+                               "_mm_set1_epi32(INT32_MIN)), _mm_set1_epi32(INT32_MAX)));",
+                               rd, rs, rt);
         case MMI0_PEXTLW:
             return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PEXTLW(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
         case MMI0_PPACW:
@@ -2469,11 +2509,11 @@ namespace ps2recomp
             Symbol *sym = findSymbolByAddress(entry.target);
             if (sym && sym->isFunction)
             {
-                ss << "        " << sym->name << "(rdram, ctx);\n";
+                ss << "        " << sym->name << "(rdram, ctx, runtime);\n";
             }
             else
             {
-                ss << "        func_" << std::hex << entry.target << std::dec << "(rdram, ctx);\n";
+                ss << "        func_" << std::hex << entry.target << std::dec << "(rdram, ctx,  runtime);\n";
             }
 
             ss << "        return;\n";
