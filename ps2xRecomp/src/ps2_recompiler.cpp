@@ -222,7 +222,7 @@ namespace ps2recomp
             // ss << "namespace ps2recomp {\n";
             // ss << "namespace stubs {\n\n";
 
-            for (const auto &funcName : m_config.stubImplementations)
+            for (const auto &funcName : m_config.skipFunctions)
             {
                 ss << "void " << funcName << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) { ps2_syscalls::TODO(rdram, ctx, runtime); }\n";
             }

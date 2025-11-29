@@ -93,6 +93,7 @@ struct alignas(16) R5900Context
     uint32_t vu0_fbrst;     // VIF/VU reset register
     uint32_t vu0_fbrst2;    // FBRST2
     uint32_t vu0_fbrst3;    // FBRST3
+    uint32_t vu0_fbrst4;    // FBRST4
     uint32_t vu0_itop;
     uint32_t vu0_info;
 
@@ -164,6 +165,9 @@ struct alignas(16) R5900Context
         vu0_clip_flags = 0;
         vu0_cmsar0 = 0;
         vu0_fbrst = 0;
+        vu0_fbrst2 = 0;
+        vu0_fbrst3 = 0;
+        vu0_fbrst4 = 0;
 
         // Reset COP0 registers
         cop0_index = 0;
@@ -193,10 +197,8 @@ struct alignas(16) R5900Context
         vu0_vpu_stat2 = 0;
         vu0_tpc2 = 0;
         vu0_cmsar1 = 0;
-        vu0_fbrst2 = 0;
         vu0_vpu_stat3 = 0;
         vu0_cmsar2 = 0;
-        vu0_fbrst3 = 0;
         vu0_vpu_stat4 = 0;
         vu0_itop = 0;
         vu0_info = 0;
