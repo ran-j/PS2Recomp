@@ -47,9 +47,9 @@ namespace ps2recomp
                 }
             }
 
-            if (data.contains("stub_implementations") && data.at("stub_implementations").is_table())
+            if (data.contains("stubs") && data.at("stubs").is_table())
             {
-                const auto &stubImpls = toml::find(data, "stub_implementations");
+                const auto &stubImpls = toml::find(data, "stubs");
                 for (const auto &item : stubImpls.as_table())
                 {
                     const std::string &funcName = item.first;
@@ -103,7 +103,7 @@ namespace ps2recomp
             {
                 stubImpls[impl.first] = impl.second;
             }
-            data["stub_implementations"] = stubImpls;
+            data["stubs"] = stubImpls;
         }
 
         std::ofstream file(m_configPath);
