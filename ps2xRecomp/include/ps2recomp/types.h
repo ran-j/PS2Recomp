@@ -170,7 +170,7 @@ namespace ps2recomp
         bool singleFileOutput;
         std::vector<std::string> skipFunctions;
         std::unordered_map<uint32_t, std::string> patches;
-        std::map<std::string, std::string> stubImplementations;
+        std::vector<std::string> stubImplementations;
     };
 
 } // namespace ps2recomp

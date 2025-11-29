@@ -119,6 +119,7 @@ namespace ps2recomp
                 combinedOutput << "#include \"ps2_recompiled_functions.h\"\n\n";
                 combinedOutput << "#include \"ps2_runtime_macros.h\"\n";
                 combinedOutput << "#include \"ps2_runtime.h\"\n";
+                combinedOutput << "#include \"ps2_recompiled_stubs.h\"\n";
 
                 for (const auto &function : m_functions)
                 {
@@ -199,10 +200,46 @@ namespace ps2recomp
             fs::path registerPath = fs::path(m_config.outputPath) / "register_functions.cpp";
             writeToFile(registerPath.string(), registerFunctions);
             std::cout << "Generated function registration file: " << registerPath << std::endl;
+
+            generateStubHeader();
         }
         catch (const std::exception &e)
         {
             std::cerr << "Error during output generation: " << e.what() << std::endl;
+        }
+    }
+
+    bool PS2Recompiler::generateStubHeader()
+    {
+        try
+        {
+            std::stringstream ss;
+
+            ss << "#pragma once\n\n";
+            ss << "#include <cstdint>\n";
+            ss << "#include \"ps2_runtime.h\"\n";
+            ss << "#include \"ps2_syscalls.h\"\n\n";
+            ss << "namespace ps2recomp {\n";
+            ss << "namespace stubs {\n\n";
+
+            for (const auto &funcName : m_config.stubImplementations)
+            {
+                ss << "void " << funcName << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) { ps2_syscalls::TODO(rdram, ctx, runtime); }\n";
+            }
+
+            ss << "\n} // namespace stubs\n";
+            ss << "} // namespace ps2recomp\n";
+
+            fs::path headerPath = fs::path(m_config.outputPath) / "ps2_recompiled_stubs.h";
+            writeToFile(headerPath.string(), ss.str());
+
+            std::cout << "Generated generating header file: " << headerPath << std::endl;
+            return true;
+        }
+        catch (const std::exception &e)
+        {
+            std::cerr << "Error generating stub header: " << e.what() << std::endl;
+            return false;
         }
     }
 

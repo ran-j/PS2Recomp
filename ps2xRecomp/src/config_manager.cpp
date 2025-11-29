@@ -20,11 +20,13 @@ namespace ps2recomp
 
         try
         {
+            std::cout << "Parsing toml file: " << m_configPath << std::endl;
             auto data = toml::parse(m_configPath);
 
             config.inputPath = toml::find<std::string>(data, "general", "input");
             config.outputPath = toml::find<std::string>(data, "general", "output");
             config.singleFileOutput = toml::find<bool>(data, "general", "single_file_output");
+            config.stubImplementations = toml::find<std::vector<std::string>>(data, "general", "stubs");
 
             config.skipFunctions = toml::find<std::vector<std::string>>(data, "general", "skip");
 
@@ -44,17 +46,6 @@ namespace ps2recomp
                             config.patches[address] = value;
                         }
                     }
-                }
-            }
-
-            if (data.contains("stubs") && data.at("stubs").is_table())
-            {
-                const auto &stubImpls = toml::find(data, "stubs");
-                for (const auto &item : stubImpls.as_table())
-                {
-                    const std::string &funcName = item.first;
-                    const std::string &implementation = toml::find<std::string>(stubImpls, funcName);
-                    config.stubImplementations[funcName] = implementation;
                 }
             }
         }
@@ -98,12 +89,7 @@ namespace ps2recomp
 
         if (!config.stubImplementations.empty())
         {
-            toml::table stubImpls;
-            for (const auto &impl : config.stubImplementations)
-            {
-                stubImpls[impl.first] = impl.second;
-            }
-            data["stubs"] = stubImpls;
+            data["stubs"] = config.stubImplementations;
         }
 
         std::ofstream file(m_configPath);
