@@ -219,16 +219,16 @@ namespace ps2recomp
             ss << "#include <cstdint>\n";
             ss << "#include \"ps2_runtime.h\"\n";
             ss << "#include \"ps2_syscalls.h\"\n\n";
-            ss << "namespace ps2recomp {\n";
-            ss << "namespace stubs {\n\n";
+            // ss << "namespace ps2recomp {\n";
+            // ss << "namespace stubs {\n\n";
 
             for (const auto &funcName : m_config.stubImplementations)
             {
                 ss << "void " << funcName << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) { ps2_syscalls::TODO(rdram, ctx, runtime); }\n";
             }
 
-            ss << "\n} // namespace stubs\n";
-            ss << "} // namespace ps2recomp\n";
+            // ss << "\n} // namespace stubs\n";
+            // ss << "} // namespace ps2recomp\n";
 
             fs::path headerPath = fs::path(m_config.outputPath) / "ps2_recompiled_stubs.h";
             writeToFile(headerPath.string(), ss.str());
