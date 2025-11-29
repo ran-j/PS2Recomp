@@ -87,7 +87,7 @@ namespace
 namespace ps2_stubs
 {
 
-    void malloc(uint8_t *rdram, R5900Context *ctx)
+    void malloc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         size_t size = getRegU32(ctx, 4); // $a0
         uint32_t handle = 0;
@@ -112,7 +112,7 @@ namespace ps2_stubs
         setReturnU32(ctx, handle);
     }
 
-    void free(uint8_t *rdram, R5900Context *ctx)
+    void free(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t handle = getRegU32(ctx, 4); // $a0
 
@@ -138,7 +138,7 @@ namespace ps2_stubs
         // free dont have return
     }
 
-    void calloc(uint8_t *rdram, R5900Context *ctx)
+    void calloc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         size_t num = getRegU32(ctx, 4);  // $a0
         size_t size = getRegU32(ctx, 5); // $a1
@@ -165,7 +165,7 @@ namespace ps2_stubs
         setReturnU32(ctx, handle);
     }
 
-    void realloc(uint8_t *rdram, R5900Context *ctx)
+    void realloc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t old_handle = getRegU32(ctx, 4); // $a0
         size_t new_size = getRegU32(ctx, 5);     // $a1
@@ -247,7 +247,7 @@ namespace ps2_stubs
         setReturnU32(ctx, new_handle);
     }
 
-    void memcpy(uint8_t *rdram, R5900Context *ctx)
+    void memcpy(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t destAddr = getRegU32(ctx, 4); // $a0
         uint32_t srcAddr = getRegU32(ctx, 5);  // $a1
@@ -272,7 +272,7 @@ namespace ps2_stubs
         ctx->r[2] = ctx->r[4];
     }
 
-    void memset(uint8_t *rdram, R5900Context *ctx)
+    void memset(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t destAddr = getRegU32(ctx, 4);       // $a0
         int value = (int)(getRegU32(ctx, 5) & 0xFF); // $a1 (char value)
@@ -293,7 +293,7 @@ namespace ps2_stubs
         ctx->r[2] = ctx->r[4];
     }
 
-    void memmove(uint8_t *rdram, R5900Context *ctx)
+    void memmove(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t destAddr = getRegU32(ctx, 4); // $a0
         uint32_t srcAddr = getRegU32(ctx, 5);  // $a1
@@ -318,7 +318,7 @@ namespace ps2_stubs
         ctx->r[2] = ctx->r[4];
     }
 
-    void memcmp(uint8_t *rdram, R5900Context *ctx)
+    void memcmp(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t ptr1Addr = getRegU32(ctx, 4); // $a0
         uint32_t ptr2Addr = getRegU32(ctx, 5); // $a1
@@ -346,7 +346,7 @@ namespace ps2_stubs
         setReturnS32(ctx, result);
     }
 
-    void strcpy(uint8_t *rdram, R5900Context *ctx)
+    void strcpy(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t destAddr = getRegU32(ctx, 4); // $a0
         uint32_t srcAddr = getRegU32(ctx, 5);  // $a1
@@ -370,7 +370,7 @@ namespace ps2_stubs
         ctx->r[2] = ctx->r[4];
     }
 
-    void strncpy(uint8_t *rdram, R5900Context *ctx)
+    void strncpy(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t destAddr = getRegU32(ctx, 4); // $a0
         uint32_t srcAddr = getRegU32(ctx, 5);  // $a1
@@ -394,7 +394,7 @@ namespace ps2_stubs
         ctx->r[2] = ctx->r[4];
     }
 
-    void strlen(uint8_t *rdram, R5900Context *ctx)
+    void strlen(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t strAddr = getRegU32(ctx, 4); // $a0
         const char *hostStr = reinterpret_cast<const char *>(getConstMemPtr(rdram, strAddr));
@@ -411,7 +411,7 @@ namespace ps2_stubs
         setReturnU32(ctx, (uint32_t)len);
     }
 
-    void strcmp(uint8_t *rdram, R5900Context *ctx)
+    void strcmp(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t str1Addr = getRegU32(ctx, 4); // $a0
         uint32_t str2Addr = getRegU32(ctx, 5); // $a1
@@ -438,7 +438,7 @@ namespace ps2_stubs
         setReturnS32(ctx, result);
     }
 
-    void strncmp(uint8_t *rdram, R5900Context *ctx)
+    void strncmp(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t str1Addr = getRegU32(ctx, 4); // $a0
         uint32_t str2Addr = getRegU32(ctx, 5); // $a1
@@ -465,7 +465,7 @@ namespace ps2_stubs
         setReturnS32(ctx, result);
     }
 
-    void strcat(uint8_t *rdram, R5900Context *ctx)
+    void strcat(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t destAddr = getRegU32(ctx, 4); // $a0
         uint32_t srcAddr = getRegU32(ctx, 5);  // $a1
@@ -489,7 +489,7 @@ namespace ps2_stubs
         ctx->r[2] = ctx->r[4];
     }
 
-    void strncat(uint8_t *rdram, R5900Context *ctx)
+    void strncat(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t destAddr = getRegU32(ctx, 4); // $a0
         uint32_t srcAddr = getRegU32(ctx, 5);  // $a1
@@ -514,7 +514,7 @@ namespace ps2_stubs
         ctx->r[2] = ctx->r[4];
     }
 
-    void strchr(uint8_t *rdram, R5900Context *ctx)
+    void strchr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t strAddr = getRegU32(ctx, 4);            // $a0
         int char_code = (int)(getRegU32(ctx, 5) & 0xFF); // $a1 (char value)
@@ -540,7 +540,7 @@ namespace ps2_stubs
         setReturnU32(ctx, resultAddr);
     }
 
-    void strrchr(uint8_t *rdram, R5900Context *ctx)
+    void strrchr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t strAddr = getRegU32(ctx, 4);            // $a0
         int char_code = (int)(getRegU32(ctx, 5) & 0xFF); // $a1 (char value)
@@ -566,7 +566,7 @@ namespace ps2_stubs
         setReturnU32(ctx, resultAddr);
     }
 
-    void strstr(uint8_t *rdram, R5900Context *ctx)
+    void strstr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t haystackAddr = getRegU32(ctx, 4); // $a0
         uint32_t needleAddr = getRegU32(ctx, 5);   // $a1
@@ -596,7 +596,7 @@ namespace ps2_stubs
         setReturnU32(ctx, resultAddr);
     }
 
-    void printf(uint8_t *rdram, R5900Context *ctx)
+    void printf(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t format_addr = getRegU32(ctx, 4); // $a0
         const char *format = reinterpret_cast<const char *>(getConstMemPtr(rdram, format_addr));
@@ -618,7 +618,7 @@ namespace ps2_stubs
         setReturnS32(ctx, ret);
     }
 
-    void sprintf(uint8_t *rdram, R5900Context *ctx)
+    void sprintf(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t str_addr = getRegU32(ctx, 4);    // $a0
         uint32_t format_addr = getRegU32(ctx, 5); // $a1
@@ -645,7 +645,7 @@ namespace ps2_stubs
         setReturnS32(ctx, ret);
     }
 
-    void snprintf(uint8_t *rdram, R5900Context *ctx)
+    void snprintf(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t str_addr = getRegU32(ctx, 4);    // $a0
         size_t size = getRegU32(ctx, 5);          // $a1
@@ -679,7 +679,7 @@ namespace ps2_stubs
         setReturnS32(ctx, ret);
     }
 
-    void puts(uint8_t *rdram, R5900Context *ctx)
+    void puts(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t strAddr = getRegU32(ctx, 4); // $a0
         const char *hostStr = reinterpret_cast<const char *>(getConstMemPtr(rdram, strAddr));
@@ -699,7 +699,7 @@ namespace ps2_stubs
         setReturnS32(ctx, result >= 0 ? 0 : -1); // PS2 might expect 0/-1 rather than EOF
     }
 
-    void fopen(uint8_t *rdram, R5900Context *ctx)
+    void fopen(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t pathAddr = getRegU32(ctx, 4); // $a0
         uint32_t modeAddr = getRegU32(ctx, 5); // $a1
@@ -737,7 +737,7 @@ namespace ps2_stubs
         setReturnU32(ctx, file_handle);
     }
 
-    void fclose(uint8_t *rdram, R5900Context *ctx)
+    void fclose(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t file_handle = getRegU32(ctx, 4); // $a0
         int ret = EOF;                            // Default to error
@@ -767,7 +767,7 @@ namespace ps2_stubs
         setReturnS32(ctx, ret);
     }
 
-    void fread(uint8_t *rdram, R5900Context *ctx)
+    void fread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t ptrAddr = getRegU32(ctx, 4);     // $a0 (buffer)
         uint32_t size = getRegU32(ctx, 5);        // $a1 (element size)
@@ -793,7 +793,7 @@ namespace ps2_stubs
         setReturnU32(ctx, (uint32_t)items_read);
     }
 
-    void fwrite(uint8_t *rdram, R5900Context *ctx)
+    void fwrite(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t ptrAddr = getRegU32(ctx, 4);     // $a0 (buffer)
         uint32_t size = getRegU32(ctx, 5);        // $a1 (element size)
@@ -819,7 +819,7 @@ namespace ps2_stubs
         setReturnU32(ctx, (uint32_t)items_written);
     }
 
-    void fprintf(uint8_t *rdram, R5900Context *ctx)
+    void fprintf(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t file_handle = getRegU32(ctx, 4); // $a0
         uint32_t format_addr = getRegU32(ctx, 5); // $a1
@@ -844,7 +844,7 @@ namespace ps2_stubs
         setReturnS32(ctx, ret);
     }
 
-    void fseek(uint8_t *rdram, R5900Context *ctx)
+    void fseek(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t file_handle = getRegU32(ctx, 4); // $a0
         long offset = (long)getRegU32(ctx, 5);    // $a1 (Note: might need 64-bit for large files?)
@@ -874,7 +874,7 @@ namespace ps2_stubs
         setReturnS32(ctx, ret);
     }
 
-    void ftell(uint8_t *rdram, R5900Context *ctx)
+    void ftell(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t file_handle = getRegU32(ctx, 4); // $a0
         long ret = -1L;
@@ -901,7 +901,7 @@ namespace ps2_stubs
         }
     }
 
-    void fflush(uint8_t *rdram, R5900Context *ctx)
+    void fflush(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t file_handle = getRegU32(ctx, 4); // $a0
         int ret = EOF;                            // Default error
@@ -927,81 +927,81 @@ namespace ps2_stubs
         setReturnS32(ctx, ret);
     }
 
-    void sqrt(uint8_t *rdram, R5900Context *ctx)
+    void sqrt(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         float arg = ctx->f[12];
         ctx->f[0] = ::sqrtf(arg);
     }
 
-    void sin(uint8_t *rdram, R5900Context *ctx)
+    void sin(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         float arg = ctx->f[12];
         ctx->f[0] = ::sinf(arg);
     }
 
-    void cos(uint8_t *rdram, R5900Context *ctx)
+    void cos(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         float arg = ctx->f[12];
         ctx->f[0] = ::cosf(arg);
     }
 
-    void tan(uint8_t *rdram, R5900Context *ctx)
+    void tan(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         float arg = ctx->f[12];
         ctx->f[0] = ::tanf(arg);
     }
 
-    void atan2(uint8_t *rdram, R5900Context *ctx)
+    void atan2(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         float y = ctx->f[12];
         float x = ctx->f[14];
         ctx->f[0] = ::atan2f(y, x);
     }
 
-    void pow(uint8_t *rdram, R5900Context *ctx)
+    void pow(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         float base = ctx->f[12];
         float exp = ctx->f[14];
         ctx->f[0] = ::powf(base, exp);
     }
 
-    void exp(uint8_t *rdram, R5900Context *ctx)
+    void exp(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         float arg = ctx->f[12];
         ctx->f[0] = ::expf(arg);
     }
 
-    void log(uint8_t *rdram, R5900Context *ctx)
+    void log(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         float arg = ctx->f[12];
         ctx->f[0] = ::logf(arg);
     }
 
-    void log10(uint8_t *rdram, R5900Context *ctx)
+    void log10(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         float arg = ctx->f[12];
         ctx->f[0] = ::log10f(arg);
     }
 
-    void ceil(uint8_t *rdram, R5900Context *ctx)
+    void ceil(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         float arg = ctx->f[12];
         ctx->f[0] = ::ceilf(arg);
     }
 
-    void floor(uint8_t *rdram, R5900Context *ctx)
+    void floor(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         float arg = ctx->f[12];
         ctx->f[0] = ::floorf(arg);
     }
 
-    void fabs(uint8_t *rdram, R5900Context *ctx)
+    void fabs(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         float arg = ctx->f[12];
         ctx->f[0] = ::fabsf(arg);
     }
 
-    void TODO(uint8_t *rdram, R5900Context *ctx)
+    void TODO(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t stub_num = getRegU32(ctx, 2);   // $v0 often holds stub num *before* call
         uint32_t caller_ra = getRegU32(ctx, 31); // $ra
