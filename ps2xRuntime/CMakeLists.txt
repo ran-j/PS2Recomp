@@ -19,15 +19,18 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(raylib)
 
 add_library(ps2_runtime STATIC
-    src/ps2_memory.cpp
-    src/ps2_runtime.cpp
-    src/ps2_stubs.cpp
-    src/ps2_syscalls.cpp
+    src/lib/ps2_memory.cpp
+    src/lib/ps2_runtime.cpp
+    src/lib/ps2_stubs.cpp
+    src/lib/ps2_syscalls.cpp
+)
+
+file(GLOB RUNNER_SRC_FILES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/runner/*.cpp"
 )
 
 add_executable(ps2EntryRunner
-    src/register_functions.cpp
-    src/main.cpp
+    ${RUNNER_SRC_FILES}
 )
 
 target_include_directories(ps2_runtime PUBLIC
