@@ -126,15 +126,26 @@ namespace ps2recomp
                         continue;
                     }
 
-                    if (function.isStub)
+                    try
                     {
-                        combinedOutput << m_generatedStubs[function.start] << "\n\n";
+                        if (function.isStub)
+                        {
+                            combinedOutput << m_generatedStubs.at(function.start) << "\n\n";
+                        }
+                        else
+                        {
+                            const auto &instructions = m_decodedFunctions.at(function.start);
+                            std::string code = m_codeGenerator->generateFunction(function, instructions, false);
+                            combinedOutput << code << "\n\n";
+                        }
                     }
-                    else
+                    catch (const std::exception &e)
                     {
-                        const auto &instructions = m_decodedFunctions[function.start];
-                        std::string code = m_codeGenerator->generateFunction(function, instructions, false);
-                        combinedOutput << code << "\n\n";
+                        std::cerr << "Error generating code for function "
+                                  << function.name << " (start 0x"
+                                  << std::hex << function.start << "): "
+                                  << e.what() << std::endl;
+                        throw;
                     }
                 }
 
@@ -152,14 +163,25 @@ namespace ps2recomp
                     }
 
                     std::string code;
-                    if (function.isStub)
+                    try
                     {
-                        code = m_generatedStubs[function.start];
+                        if (function.isStub)
+                        {
+                            code = m_generatedStubs[function.start];
+                        }
+                        else
+                        {
+                            const auto &instructions = m_decodedFunctions[function.start];
+                            code = m_codeGenerator->generateFunction(function, instructions, true);
+                        }
                     }
-                    else
+                    catch (const std::exception &e)
                     {
-                        const auto &instructions = m_decodedFunctions[function.start];
-                        code = m_codeGenerator->generateFunction(function, instructions, true);
+                        std::cerr << "Error generating code for function "
+                                  << function.name << " (start 0x"
+                                  << std::hex << function.start << "): "
+                                  << e.what() << std::endl;
+                        throw;
                     }
 
                     fs::path outputPath = getOutputPath(function);

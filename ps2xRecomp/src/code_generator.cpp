@@ -4,6 +4,7 @@
 #include <sstream>
 #include <algorithm>
 #include <unordered_set>
+#include <iostream>
 
 namespace ps2recomp
 {
@@ -491,17 +492,31 @@ namespace ps2recomp
 
             ss << "    // 0x" << std::hex << inst.address << ": 0x" << inst.raw << std::dec << "\n";
 
-            if (inst.hasDelaySlot && i + 1 < instructions.size())
+            try
             {
-                const Instruction &delaySlot = instructions[i + 1];
-                ss << handleBranchDelaySlots(inst, delaySlot);
+                if (inst.hasDelaySlot && i + 1 < instructions.size())
+                {
+                    const Instruction &delaySlot = instructions[i + 1];
+                    ss << handleBranchDelaySlots(inst, delaySlot);
 
-                // Skip the delay slot instruction as we've already handled it
-                ++i;
+                    // Skip the delay slot instruction as we've already handled it
+                    ++i;
+                }
+                else
+                {
+                    ss << "    " << translateInstruction(inst) << "\n";
+                }
             }
-            else
+            catch (const std::exception &e)
             {
-                ss << "    " << translateInstruction(inst) << "\n";
+                std::cerr << "Error in CodeGenerator::generateFunction while translating instruction\n"
+                          << "  Function: " << function.name << "\n"
+                          << "  Start: 0x" << std::hex << function.start << "\n"
+                          << "  Instruction address: 0x" << inst.address << "\n"
+                          << "  Raw: 0x" << inst.raw << "\n"
+                          << "  What: " << e.what() << std::endl;
+
+                throw;
             }
         }
 
@@ -533,10 +548,10 @@ namespace ps2recomp
             if (inst.rt == 0)
                 return "// NOP (addi to $zero)";
             return fmt::format(
-                fmt::runtime("{ { uint32_t tmp; bool ov; "
-                             "ADD32_OV(GPR_U32(ctx, {}), (int32_t){}, tmp, ov); "
-                             "if (ov) runtime->SignalException(ctx, EXCEPTION_INTEGER_OVERFLOW); "
-                             "else SET_GPR_S32(ctx, {}, (int32_t)tmp); } }"),
+                "{{ uint32_t tmp; bool ov; "
+                "ADD32_OV(GPR_U32(ctx, {}), (int32_t){}, tmp, ov); "
+                "if (ov) runtime->SignalException(ctx, EXCEPTION_INTEGER_OVERFLOW); "
+                "else SET_GPR_S32(ctx, {}, (int32_t)tmp); }}",
                 inst.rs, inst.simmediate, inst.rt);
 
         case OPCODE_ADDIU:
@@ -753,10 +768,10 @@ namespace ps2recomp
             return fmt::format("SET_GPR_U32(ctx, {}, ADD32(GPR_U32(ctx, {}), GPR_U32(ctx, {})));", inst.rd, inst.rs, inst.rt);
         case SPECIAL_SUB:
             return fmt::format(
-                fmt::runtime("{ { uint32_t tmp; bool ov; "
-                             "SUB32_OV(GPR_U32(ctx, {}), GPR_U32(ctx, {}), tmp, ov); "
-                             "if (ov) runtime->SignalException(ctx, EXCEPTION_INTEGER_OVERFLOW); "
-                             "else SET_GPR_S32(ctx, {}, (int32_t)tmp); } }"),
+                "{{ uint32_t tmp; bool ov; "
+                "SUB32_OV(GPR_U32(ctx, {}), GPR_U32(ctx, {}), tmp, ov); "
+                "if (ov) runtime->SignalException(ctx, EXCEPTION_INTEGER_OVERFLOW); "
+                "else SET_GPR_S32(ctx, {}, (int32_t)tmp); }}",
                 inst.rs, inst.rt, inst.rd);
         case SPECIAL_SUBU:
             return fmt::format("SET_GPR_U32(ctx, {}, SUB32(GPR_U32(ctx, {}), GPR_U32(ctx, {})));", inst.rd, inst.rs, inst.rt);
