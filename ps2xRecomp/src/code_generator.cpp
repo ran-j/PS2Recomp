@@ -607,8 +607,18 @@ namespace ps2recomp
         case OPCODE_SDC2: // was OPCODE_SQC2 need to check
             return fmt::format("WRITE128(ADD32(GPR_U32(ctx, {}), {}), (__m128i)ctx->vu0_vf[{}]);", inst.rs, inst.simmediate, inst.rt);
         case OPCODE_DADDI:
+            return fmt::format(
+                "{{ int64_t src = (int64_t)GPR_S64(ctx, {}); "
+                "int64_t imm = (int64_t){}; "
+                "int64_t res = src + imm; "
+                "if (((src ^ imm) >= 0) && ((src ^ res) < 0)) "
+                "    runtime->SignalException(ctx, EXCEPTION_INTEGER_OVERFLOW); "
+                "else SET_GPR_S64(ctx, {}, res); }}",
+                inst.rs, inst.simmediate, inst.rt);
         case OPCODE_DADDIU:
-            return fmt::format("SET_GPR_U64(ctx, {}, GPR_U64(ctx, {}) + (uint64_t)(int64_t){});", inst.rt, inst.rs, inst.simmediate);
+            return fmt::format(
+                "SET_GPR_S64(ctx, {}, (int64_t)GPR_S64(ctx, {}) + (int64_t){});",
+                inst.rt, inst.rs, inst.simmediate);
         case OPCODE_J:
             return fmt::format("// JAL 0x{:X} - Handled by branch logic", (inst.address & 0xF0000000) | (inst.target << 2));
         case OPCODE_JAL:
@@ -1516,18 +1526,18 @@ namespace ps2recomp
                 return fmt::format("SET_GPR_U32(ctx, {}, ctx->vu0_fbrst4);", rt);
             case VU0_CR_ACC:
                 return fmt::format("SET_GPR_VEC(ctx, {}, (__m128i)ctx->vu0_acc);", rt);
-            case VU0_CR_INFO:
+            case VU0_CR_INFO: // I dd found on offical docs but ok
                 return fmt::format("SET_GPR_U32(ctx, {}, ctx->vu0_info);", rt);
             case VU0_CR_CLIP2:
                 return fmt::format("SET_GPR_U32(ctx, {}, ctx->vu0_clip_flags2);", rt);
             case VU0_CR_P:
                 return fmt::format("SET_GPR_U32(ctx, {}, *(uint32_t*)&ctx->vu0_p);", rt);
-            case VU0_CR_XITOP:
+            case VU0_CR_XITOP: // Maybe this does not exist, maybe we handle to vu0_itop
                 return fmt::format("SET_GPR_U32(ctx, {}, ctx->vu0_xitop);", rt);
             case VU0_CR_ITOP:
                 return fmt::format("SET_GPR_U32(ctx, {}, ctx->vu0_itop);", rt);
             case VU0_CR_TOP:
-                return fmt::format("SET_GPR_U32(ctx, {}, ctx->vu0_top);", rt);
+                return fmt::format("SET_GPR_U32(ctx, {}, ctx->vu0_vpu_stat);", rt);
             default:
                 return fmt::format("// Unimplemented CFC2 VU CReg: {}", rt);
             }
@@ -1589,7 +1599,7 @@ namespace ps2recomp
             case VU0_CR_ITOP:
                 return fmt::format("ctx->vu0_itop = GPR_U32(ctx, {}) & 0x3FF;", rt);
             case VU0_CR_TOP:
-                return fmt::format("ctx->vu0_top = GPR_U32(ctx, {}) & 0x3FF;", rt);
+                return fmt::format("ctx->vu0_vpu_stat = GPR_U32(ctx, {}) & 0x3FF;", rt);
             default:
                 return fmt::format("// Unimplemented CTC2 VU CReg: {}", rd);
             }
@@ -2420,7 +2430,7 @@ namespace ps2recomp
         ss << "#include \"ps2_runtime.h\"\n";
         ss << "#include \"ps2_recompiled_functions.h\"\n";
         ss << "#include \"ps2_stubs.h\"\n";
-        ss << "#include \"ps2_syscalls.h\"\n\n"; 
+        ss << "#include \"ps2_syscalls.h\"\n\n";
 
         // Registration function
         ss << "void registerAllFunctions(PS2Runtime& runtime) {\n";
