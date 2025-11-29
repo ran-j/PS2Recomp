@@ -508,7 +508,34 @@ namespace ps2recomp
 
         switch (mmiFunction)
         {
-        // Thouse comments has the same value
+        case MMI_PLZCW:
+            // Parallel leading zero/one count word
+            break;
+        case MMI_MFHI1:
+        case MMI_MFLO1:
+            // Move from HI1/LO1 -> rd
+            if (inst.rd == 0)
+            {
+                inst.modificationInfo.modifiesGPR = false;
+            }
+            inst.modificationInfo.modifiesControl = false;
+            break;
+        case MMI_MTHI1:
+        case MMI_MTLO1:
+            // Move to HI1/LO1
+            inst.modificationInfo.modifiesGPR = false;
+            inst.modificationInfo.modifiesControl = true;
+            break;
+        case MMI_PSLLH:
+        case MMI_PSRLH:
+        case MMI_PSRAH:
+        case MMI_PSLLW:
+        case MMI_PSRLW:
+        case MMI_PSRAW:
+            // Packed shift instructions; defaults already mark GPR modify (unless rd==0)
+            break;
+
+        // HI/LO or HI1/LO1 producers/consumers
         case MMI_MADD:
         case MMI_MADDU:
         case MMI_MSUB:
@@ -519,24 +546,9 @@ namespace ps2recomp
         case MMI_MULTU1:
         case MMI_DIV1:
         case MMI_DIVU1:
-        // case MMI2_PMADDW:
-        case MMI2_PMSUBW:
-        case MMI2_PMULTW:
-        case MMI2_PDIVW:
-        case MMI2_PDIVBW:
-        case MMI2_PMADDH:
-        case MMI2_PHMADH:
-        // case MMI2_PMSUBH:
-        // case MMI2_PHMSBH:
-        case MMI2_PMULTH:
-            // case MMI3_PMADDUW:
-            // case MMI3_PMULTUW:
-            // case MMI3_PDIVUW:
             inst.modificationInfo.modifiesGPR = false; // Writes to HI/LO or HI1/LO1
             inst.modificationInfo.modifiesControl = true;
             break;
-        case MMI_MTHI1:
-        case MMI_MTLO1:
         case MMI_PMTHL:
         case MMI3_PMTHI:
         case MMI3_PMTLO:
