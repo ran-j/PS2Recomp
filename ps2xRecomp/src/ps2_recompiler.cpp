@@ -110,6 +110,8 @@ namespace ps2recomp
     {
         try
         {
+            generateFunctionHeader();
+
             if (m_config.singleFileOutput)
             {
                 std::stringstream combinedOutput;
@@ -142,7 +144,6 @@ namespace ps2recomp
             }
             else
             {
-                generateFunctionHeader();
                 for (const auto &function : m_functions)
                 {
                     if (!function.isRecompiled || function.isStub)
@@ -193,6 +194,7 @@ namespace ps2recomp
 
             ss << "#include <cstdint>\n\n";
             ss << "struct R5900Context;\n\n";
+            ss << "class PS2Runtime;\n\n";
 
             for (const auto &function : m_functions)
             {
