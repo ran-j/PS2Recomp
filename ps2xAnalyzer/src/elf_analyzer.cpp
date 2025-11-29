@@ -107,7 +107,7 @@ namespace ps2recomp
         file << "output = \"" << escapeBackslashes(outputDirStr) << "\"\n\n";
 
         file << "# Single file output mode (false for one file per function)\n";
-        file << "single_file_output = false\n\n";
+        file << "single_file_output = true\n\n";
 
         file << "# Functions to stub (these will generate empty implementations)\n";
         file << "stubs = [\n";
