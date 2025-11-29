@@ -6,12 +6,16 @@ The runtime library provides the execution environment for recompiled code, incl
 * Function table for dynamic linking
 * Basic PS2 system call stubs
 
+# How to use:
+
+Take your decompiled code and place the cpp files on ps2xRuntime/src/runner and header files on ps2xRuntime/include and compile/be happy.
+
 ## Adding Custom Function Implementations
 You can add custom implementations for PS2 system calls or game functions by:
 
 1. Creating function implementations that match the signature:
 ```cpp
-void function_name(uint8_t* rdram, R5900Context* ctx);
+void function_name(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime);
 ```
 
 2. Registering them with the runtime:
