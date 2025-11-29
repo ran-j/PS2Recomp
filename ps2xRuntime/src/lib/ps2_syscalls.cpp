@@ -96,303 +96,303 @@ std::string translatePs2Path(const char *ps2Path)
 
 namespace ps2_syscalls
 {
-    void FlushCache(uint8_t *rdram, R5900Context *ctx)
+    void FlushCache(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         std::cout << "Syscall: FlushCache (No-op)" << std::endl;
         // No-op for now
         setReturnS32(ctx, 0);
     }
 
-    void ResetEE(uint8_t *rdram, R5900Context *ctx)
+    void ResetEE(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         std::cerr << "Syscall: ResetEE - Halting Execution (Not fully implemented)" << std::endl;
         exit(0); // Should we exit or just halt the execution?
     }
 
-    void SetMemoryMode(uint8_t *rdram, R5900Context *ctx)
+    void SetMemoryMode(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // Affects memory mapping / TLB behavior.
         // std::cout << "Syscall: SetMemoryMode (No-op)" << std::endl;
         setReturnS32(ctx, 0); // Success
     }
 
-    void CreateThread(uint8_t *rdram, R5900Context *ctx)
+    void CreateThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void DeleteThread(uint8_t *rdram, R5900Context *ctx)
+    void DeleteThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void StartThread(uint8_t *rdram, R5900Context *ctx)
+    void StartThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void ExitThread(uint8_t *rdram, R5900Context *ctx)
+    void ExitThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
         std::cout << "PS2 ExitThread: Thread is exiting (PC=0x" << std::hex << ctx->pc << std::dec << ")" << std::endl;
     }
 
-    void ExitDeleteThread(uint8_t *rdram, R5900Context *ctx)
+    void ExitDeleteThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void TerminateThread(uint8_t *rdram, R5900Context *ctx)
+    void TerminateThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void SuspendThread(uint8_t *rdram, R5900Context *ctx)
+    void SuspendThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void ResumeThread(uint8_t *rdram, R5900Context *ctx)
+    void ResumeThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void GetThreadId(uint8_t *rdram, R5900Context *ctx)
+    void GetThreadId(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void ReferThreadStatus(uint8_t *rdram, R5900Context *ctx)
+    void ReferThreadStatus(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void SleepThread(uint8_t *rdram, R5900Context *ctx)
+    void SleepThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void WakeupThread(uint8_t *rdram, R5900Context *ctx)
+    void WakeupThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void iWakeupThread(uint8_t *rdram, R5900Context *ctx)
+    void iWakeupThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void ChangeThreadPriority(uint8_t *rdram, R5900Context *ctx)
+    void ChangeThreadPriority(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void RotateThreadReadyQueue(uint8_t *rdram, R5900Context *ctx)
+    void RotateThreadReadyQueue(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void ReleaseWaitThread(uint8_t *rdram, R5900Context *ctx)
+    void ReleaseWaitThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void iReleaseWaitThread(uint8_t *rdram, R5900Context *ctx)
+    void iReleaseWaitThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void CreateSema(uint8_t *rdram, R5900Context *ctx)
+    void CreateSema(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void DeleteSema(uint8_t *rdram, R5900Context *ctx)
+    void DeleteSema(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void SignalSema(uint8_t *rdram, R5900Context *ctx)
+    void SignalSema(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void iSignalSema(uint8_t *rdram, R5900Context *ctx)
+    void iSignalSema(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void WaitSema(uint8_t *rdram, R5900Context *ctx)
+    void WaitSema(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void PollSema(uint8_t *rdram, R5900Context *ctx)
+    void PollSema(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void iPollSema(uint8_t *rdram, R5900Context *ctx)
+    void iPollSema(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void ReferSemaStatus(uint8_t *rdram, R5900Context *ctx)
+    void ReferSemaStatus(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void iReferSemaStatus(uint8_t *rdram, R5900Context *ctx)
+    void iReferSemaStatus(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void CreateEventFlag(uint8_t *rdram, R5900Context *ctx)
+    void CreateEventFlag(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void DeleteEventFlag(uint8_t *rdram, R5900Context *ctx)
+    void DeleteEventFlag(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void SetEventFlag(uint8_t *rdram, R5900Context *ctx)
+    void SetEventFlag(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void iSetEventFlag(uint8_t *rdram, R5900Context *ctx)
+    void iSetEventFlag(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void ClearEventFlag(uint8_t *rdram, R5900Context *ctx)
+    void ClearEventFlag(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void iClearEventFlag(uint8_t *rdram, R5900Context *ctx)
+    void iClearEventFlag(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void WaitEventFlag(uint8_t *rdram, R5900Context *ctx)
+    void WaitEventFlag(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void PollEventFlag(uint8_t *rdram, R5900Context *ctx)
+    void PollEventFlag(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void iPollEventFlag(uint8_t *rdram, R5900Context *ctx)
+    void iPollEventFlag(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void ReferEventFlagStatus(uint8_t *rdram, R5900Context *ctx)
+    void ReferEventFlagStatus(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void iReferEventFlagStatus(uint8_t *rdram, R5900Context *ctx)
+    void iReferEventFlagStatus(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void SetAlarm(uint8_t *rdram, R5900Context *ctx)
+    void SetAlarm(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void iSetAlarm(uint8_t *rdram, R5900Context *ctx)
+    void iSetAlarm(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void CancelAlarm(uint8_t *rdram, R5900Context *ctx)
+    void CancelAlarm(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void iCancelAlarm(uint8_t *rdram, R5900Context *ctx)
+    void iCancelAlarm(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void EnableIntc(uint8_t *rdram, R5900Context *ctx)
+    void EnableIntc(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void DisableIntc(uint8_t *rdram, R5900Context *ctx)
+    void DisableIntc(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void EnableDmac(uint8_t *rdram, R5900Context *ctx)
+    void EnableDmac(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void DisableDmac(uint8_t *rdram, R5900Context *ctx)
+    void DisableDmac(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void SifStopModule(uint8_t *rdram, R5900Context *ctx)
+    void SifStopModule(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void SifLoadModule(uint8_t *rdram, R5900Context *ctx)
+    void SifLoadModule(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void SifInitRpc(uint8_t *rdram, R5900Context *ctx)
+    void SifInitRpc(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void SifBindRpc(uint8_t *rdram, R5900Context *ctx)
+    void SifBindRpc(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void SifCallRpc(uint8_t *rdram, R5900Context *ctx)
+    void SifCallRpc(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void SifRegisterRpc(uint8_t *rdram, R5900Context *ctx)
+    void SifRegisterRpc(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void SifCheckStatRpc(uint8_t *rdram, R5900Context *ctx)
+    void SifCheckStatRpc(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void SifSetRpcQueue(uint8_t *rdram, R5900Context *ctx)
+    void SifSetRpcQueue(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void SifRemoveRpcQueue(uint8_t *rdram, R5900Context *ctx)
+    void SifRemoveRpcQueue(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void SifRemoveRpc(uint8_t *rdram, R5900Context *ctx)
+    void SifRemoveRpc(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void fioOpen(uint8_t *rdram, R5900Context *ctx)
+    void fioOpen(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         uint32_t pathAddr = getRegU32(ctx, 4); // $a0
         int flags = (int)getRegU32(ctx, 5);    // $a1 (PS2 FIO flags)
@@ -437,7 +437,7 @@ namespace ps2_syscalls
         setReturnS32(ctx, ps2Fd);
     }
 
-    void fioClose(uint8_t *rdram, R5900Context *ctx)
+    void fioClose(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         int ps2Fd = (int)getRegU32(ctx, 4); // $a0
         std::cout << "fioClose: fd=" << ps2Fd << std::endl;
@@ -457,7 +457,7 @@ namespace ps2_syscalls
         setReturnS32(ctx, ret == 0 ? 0 : -1);
     }
 
-    void fioRead(uint8_t *rdram, R5900Context *ctx)
+    void fioRead(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         int ps2Fd = (int)getRegU32(ctx, 4);   // $a0
         uint32_t bufAddr = getRegU32(ctx, 5); // $a1
@@ -502,7 +502,7 @@ namespace ps2_syscalls
         setReturnS32(ctx, (int32_t)bytesRead);
     }
 
-    void fioWrite(uint8_t *rdram, R5900Context *ctx)
+    void fioWrite(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         int ps2Fd = (int)getRegU32(ctx, 4);   // $a0
         uint32_t bufAddr = getRegU32(ctx, 5); // $a1
@@ -551,7 +551,7 @@ namespace ps2_syscalls
         setReturnS32(ctx, (int32_t)bytesWritten);
     }
 
-    void fioLseek(uint8_t *rdram, R5900Context *ctx)
+    void fioLseek(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         int ps2Fd = (int)getRegU32(ctx, 4);  // $a0
         int32_t offset = getRegU32(ctx, 5);  // $a1 (PS2 seems to use 32-bit offset here commonly)
@@ -611,7 +611,7 @@ namespace ps2_syscalls
         }
     }
 
-    void fioMkdir(uint8_t *rdram, R5900Context *ctx)
+    void fioMkdir(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO maybe we dont need this.
         uint32_t pathAddr = getRegU32(ctx, 4); // $a0
@@ -649,7 +649,7 @@ namespace ps2_syscalls
         }
     }
 
-    void fioChdir(uint8_t *rdram, R5900Context *ctx)
+    void fioChdir(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO maybe we dont need this as well.
         uint32_t pathAddr = getRegU32(ctx, 4); // $a0
@@ -688,7 +688,7 @@ namespace ps2_syscalls
         }
     }
 
-    void fioRmdir(uint8_t *rdram, R5900Context *ctx)
+    void fioRmdir(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         uint32_t pathAddr = getRegU32(ctx, 4); // $a0
         const char *ps2Path = reinterpret_cast<const char *>(getConstMemPtr(rdram, pathAddr));
@@ -723,7 +723,7 @@ namespace ps2_syscalls
         }
     }
 
-    void fioGetstat(uint8_t *rdram, R5900Context *ctx)
+    void fioGetstat(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // we wont implement this for now.
         uint32_t pathAddr = getRegU32(ctx, 4);    // $a0
@@ -756,7 +756,7 @@ namespace ps2_syscalls
         setReturnS32(ctx, -1);
     }
 
-    void fioRemove(uint8_t *rdram, R5900Context *ctx)
+    void fioRemove(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         uint32_t pathAddr = getRegU32(ctx, 4); // $a0
         const char *ps2Path = reinterpret_cast<const char *>(getConstMemPtr(rdram, pathAddr));
@@ -792,7 +792,7 @@ namespace ps2_syscalls
         }
     }
 
-    void GsSetCrt(uint8_t *rdram, R5900Context *ctx)
+    void GsSetCrt(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         int interlaced = getRegU32(ctx, 4); // $a0 - 0=non-interlaced, 1=interlaced
         int videoMode = getRegU32(ctx, 5);  // $a1 - 0=NTSC, 1=PAL, 2=VESA, 3=HiVision
@@ -803,7 +803,7 @@ namespace ps2_syscalls
                   << ", frameMode=" << frameMode << std::endl;
     }
 
-    void GsGetIMR(uint8_t *rdram, R5900Context *ctx)
+    void GsGetIMR(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // TODO return IMR value from the Gs hardware this is just a stub.
         // The IMR (Interrupt Mask Register) is a 64-bit register that controls which interrupts are enabled.
@@ -814,14 +814,14 @@ namespace ps2_syscalls
         setReturnU64(ctx, imr); // Return in $v0/$v1
     }
 
-    void GsPutIMR(uint8_t *rdram, R5900Context *ctx)
+    void GsPutIMR(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         uint64_t imr = getRegU32(ctx, 4) | ((uint64_t)getRegU32(ctx, 5) << 32); // $a0 = lower 32 bits, $a1 = upper 32 bits
         std::cout << "PS2 GsPutIMR: Setting IMR=0x" << std::hex << imr << std::dec << std::endl;
         // Do nothing for now.
     }
 
-    void GsSetVideoMode(uint8_t *rdram, R5900Context *ctx)
+    void GsSetVideoMode(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         int mode = getRegU32(ctx, 4); // $a0 - video mode (various flags)
 
@@ -830,7 +830,7 @@ namespace ps2_syscalls
         // Do nothing for now.
     }
 
-    void GetOsdConfigParam(uint8_t *rdram, R5900Context *ctx)
+    void GetOsdConfigParam(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         uint32_t paramAddr = getRegU32(ctx, 4); // $a0 - pointer to parameter structure
 
@@ -852,7 +852,7 @@ namespace ps2_syscalls
         setReturnS32(ctx, 0);
     }
 
-    void SetOsdConfigParam(uint8_t *rdram, R5900Context *ctx)
+    void SetOsdConfigParam(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         uint32_t paramAddr = getRegU32(ctx, 4); // $a0 - pointer to parameter structure
 
@@ -870,7 +870,7 @@ namespace ps2_syscalls
         setReturnS32(ctx, 0);
     }
 
-    void GetRomName(uint8_t *rdram, R5900Context *ctx)
+    void GetRomName(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         uint32_t bufAddr = getRegU32(ctx, 4); // $a0
         size_t bufSize = getRegU32(ctx, 5);   // $a1
@@ -896,7 +896,7 @@ namespace ps2_syscalls
         setReturnS32(ctx, (int32_t)strlen(hostBuf));
     }
 
-    void SifLoadElfPart(uint8_t *rdram, R5900Context *ctx)
+    void SifLoadElfPart(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         uint32_t pathAddr = getRegU32(ctx, 4); // $a0 - pointer to ELF path
 
@@ -906,7 +906,7 @@ namespace ps2_syscalls
         setReturnS32(ctx, 1); // dummy return value for success
     }
 
-    void sceSifLoadModule(uint8_t *rdram, R5900Context *ctx)
+    void sceSifLoadModule(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         uint32_t moduePath = getRegU32(ctx, 4); // $a0 - pointer to module path
 
@@ -918,7 +918,7 @@ namespace ps2_syscalls
         setReturnS32(ctx, 1);
     }
 
-    void TODO(uint8_t *rdram, R5900Context *ctx)
+    void TODO(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         uint32_t syscall_num = getRegU32(ctx, 3); // Syscall number usually in $v1 ($r3) for SYSCALL instr
         uint32_t caller_ra = getRegU32(ctx, 31);  // $ra
@@ -939,7 +939,7 @@ namespace ps2_syscalls
         if (syscall_num == 0x04)
         {
             std::cerr << "  -> Syscall is Exit(), calling ExitThread stub." << std::endl;
-            ExitThread(rdram, ctx);
+            ExitThread(rdram, ctx, runtime);
             return;
         }
 
