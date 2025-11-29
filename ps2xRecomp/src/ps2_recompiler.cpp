@@ -116,8 +116,9 @@ namespace ps2recomp
             {
                 std::stringstream combinedOutput;
 
+                combinedOutput << "#include \"ps2_recompiled_functions.h\"\n\n";
                 combinedOutput << "#include \"ps2_runtime_macros.h\"\n";
-                combinedOutput << "#include \"ps2_runtime.h\"\n\n";
+                combinedOutput << "#include \"ps2_runtime.h\"\n";
 
                 for (const auto &function : m_functions)
                 {
@@ -149,7 +150,7 @@ namespace ps2recomp
                     }
                 }
 
-                fs::path outputPath = fs::path(m_config.outputPath) / "recompiled.cpp";
+                fs::path outputPath = fs::path(m_config.outputPath) / "ps2_recompiled_functions.cpp";
                 writeToFile(outputPath.string(), combinedOutput.str());
                 std::cout << "Wrote recompiled to combined output to: " << outputPath << std::endl;
             }
@@ -215,7 +216,7 @@ namespace ps2recomp
             ss << "#define PS2_RECOMPILED_FUNCTIONS_H\n\n";
 
             ss << "#include <cstdint>\n\n";
-            ss << "struct R5900Context;\n\n";
+            ss << "struct R5900Context;\n";
             ss << "class PS2Runtime;\n\n";
 
             for (const auto &function : m_functions)

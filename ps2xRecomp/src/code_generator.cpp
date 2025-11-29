@@ -2421,17 +2421,6 @@ namespace ps2recomp
         ss << "#include \"ps2_recompiled_functions.h\"\n";
         ss << "#include \"ps2_stubs.h\"\n\n";
 
-        ss << "// Default handler for unimplemented syscalls/functions\n";
-        ss << "void ps2_syscalls::TODO(uint8_t* rdram, R5900Context* ctx) {\n";
-        ss << "    std::cout << \"Unimplemented syscall/function called at PC=0x\" << std::hex << ctx->pc << std::dec << std::endl;\n";
-        ss << "    ctx->r[2] = 0; // Return 0 by default\n";
-        ss << "}\n\n";
-
-        ss << "void ps2_stubs::TODO(uint8_t* rdram, R5900Context* ctx) {\n";
-        ss << "    std::cout << \"Unimplemented library function called at PC=0x\" << std::hex << ctx->pc << std::dec << std::endl;\n";
-        ss << "    ctx->r[2] = 0; // Return 0 by default\n";
-        ss << "}\n\n";
-
         // Registration function
         ss << "void registerAllFunctions(PS2Runtime& runtime) {\n";
 
