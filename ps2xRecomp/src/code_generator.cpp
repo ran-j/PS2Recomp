@@ -425,11 +425,11 @@ namespace ps2recomp
         ss << "#define PS2_VCALLMS(addr) // VU0 microprogram calls not supported directly\n";
         ss << "#define PS2_VCALLMSR(reg) // VU0 microprogram calls not supported directly\n";
 
-        ss << "#define GPR_U32(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0U : ctx_ptr->r[reg_idx].m128i_u32[0])";
-        ss << "#define GPR_S32(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0 : ctx_ptr->r[reg_idx].m128i_i32[0])";
-        ss << "#define GPR_U64(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0ULL : ctx_ptr->r[reg_idx].m128i_u64[0])";
-        ss << "#define GPR_S64(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0LL : ctx_ptr->r[reg_idx].m128i_i64[0])";
-        ss << "#define GPR_VEC(ctx_ptr, reg_idx) ((reg_idx == 0) ? _mm_setzero_si128() : ctx_ptr->r[reg_idx])";
+        ss << "#define GPR_U32(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0U : ctx_ptr->r[reg_idx].m128i_u32[0])\n";
+        ss << "#define GPR_S32(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0 : ctx_ptr->r[reg_idx].m128i_i32[0])\n";
+        ss << "#define GPR_U64(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0ULL : ctx_ptr->r[reg_idx].m128i_u64[0])\n";
+        ss << "#define GPR_S64(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0LL : ctx_ptr->r[reg_idx].m128i_i64[0])\n";
+        ss << "#define GPR_VEC(ctx_ptr, reg_idx) ((reg_idx == 0) ? _mm_setzero_si128() : ctx_ptr->r[reg_idx])\n";
 
         ss << "#define SET_GPR_U32(ctx_ptr, reg_idx, val) \\\n";
         ss << "    do                                     \\\n";
@@ -2419,7 +2419,8 @@ namespace ps2recomp
         // Begin function
         ss << "#include \"ps2_runtime.h\"\n";
         ss << "#include \"ps2_recompiled_functions.h\"\n";
-        ss << "#include \"ps2_stubs.h\"\n\n";
+        ss << "#include \"ps2_stubs.h\"\n";
+        ss << "#include \"ps2_syscalls.h\"\n\n"; 
 
         // Registration function
         ss << "void registerAllFunctions(PS2Runtime& runtime) {\n";
