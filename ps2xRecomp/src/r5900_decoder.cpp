@@ -137,6 +137,18 @@ namespace ps2recomp
             inst.modificationInfo.modifiesMemory = true;
             break;
 
+        case OPCODE_LL:
+        case OPCODE_LLD:
+            decodeIType(inst);
+            inst.isLoad = true;
+            if (inst.rt != 0)
+            {
+                inst.modificationInfo.modifiesGPR = true;
+            }
+            // LL/LLD manipulate the load-linked bit in COP0 status
+            inst.modificationInfo.modifiesControl = true;
+            break;
+
         case OPCODE_LWC1:
             inst.isLoad = true;
             inst.modificationInfo.modifiesFPR = true;
