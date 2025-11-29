@@ -37,7 +37,7 @@ namespace ps2recomp
             Symbol *sym = findSymbolByAddress(target);
             if (sym && sym->isFunction)
             {
-                ss << "    " << sym->name << "(rdram, ctx); return;\n";
+                ss << "    " << sym->name << "(rdram, ctx, runtime); return;\n";
             }
             else
             {
@@ -169,7 +169,7 @@ namespace ps2recomp
 
             if (sym && sym->isFunction)
             {
-                targetAction = fmt::format("{}(rdram, ctx); return;", sym->name);
+                targetAction = fmt::format("{}(rdram, ctx, runtime); return;", sym->name);
             }
             else
             {
