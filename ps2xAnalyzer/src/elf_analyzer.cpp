@@ -224,7 +224,11 @@ namespace ps2recomp
             // Misc
             "qsort", "bsearch", "abs", "div", "labs", "ldiv", "llabs", "lldiv",
             "isalnum", "isalpha", "isdigit", "islower", "isupper", "isspace", "tolower", "toupper",
-            "setjmp", "longjmp", "getenv", "setenv", "unsetenv"};
+            "setjmp", "longjmp", "getenv", "setenv", "unsetenv",
+            "perror", "fputc", "getc", "ungetc", "freopen", "setvbuf", "setbuf",
+
+            // Extra string helpers
+            "strnlen", "strspn", "strcspn", "strcasecmp", "strncasecmp"};
 
         // PS2-specific system functions
         const std::vector<std::string> ps2SysFuncs = {
@@ -237,6 +241,8 @@ namespace ps2recomp
             "CreateThread", "DeleteThread", "StartThread", "SuspendThread", "ResumeThread",
             "GetThreadStatus", "ReferThreadStatus", "iWakeupThread", "iResumeThread",
             "TerminateThread", "EnableIntc", "DisableIntc", "EnableDmac", "DisableDmac",
+            "ExitDeleteThread", "ExitHandler", "ExecOSD", "ExecPS2Patch", "EnableCache",
+            "EndOfHeap", "ExpandScratchPad",
 
             // SIF
             "SifInitRpc", "SifExitRpc", "SifBindRpc", "SifCallRpc", "SifRegisterRpc",
@@ -245,6 +251,7 @@ namespace ps2recomp
             "sceSifInitCmd", "sceSifExitCmd", "sceSifSetCmdBuffer", "SifDmaInit",
             "SifSetDma", "SifSetDChain", "iSifSetDChain", "SifSetOneDma",
             "sceSifDmaStat", "sceSifSetDmaIntr", "sceSifResetDmaIntr",
+            "sceSifWriteBackDCache",
 
             // IOP
             "PollSema", "WaitSema", "SignalSema", "iSignalSema", "CreateSema",
@@ -253,7 +260,19 @@ namespace ps2recomp
 
             // Timer
             "CreateAlarm", "iSetAlarm", "SetAlarm", "iReleaseAlarm", "ReleaseAlarm",
-            "USec2SysClock", "GetSystemTime", "SetSystemTime", "SysClock2USec"};
+            "USec2SysClock", "GetSystemTime", "SetSystemTime", "SysClock2USec",
+
+            // CD/DVD driver helpers
+            "cd_callback", "cmd_sem_init", "ncmd_prechk", "scmd_prechk",
+            "cdvd_exit", "fileXioInit", "fileXioExit", "fileXioOpen",
+            "fileXioClose", "fileXioRead", "fileXioWrite", "fileXioLseek",
+            "fileXioGetStat", "fileXioSetBlockMode",
+
+            // Interrupt / DMA handlers
+            "AddIntcHandler", "AddIntcHandler2", "RemoveIntcHandler", "RemoveIntcHandler2",
+            "AddDmacHandler", "AddDmacHandler2", "RemoveDmacHandler", "RemoveDmacHandler2",
+            "AddSbusIntcHandler", "RemoveSbusIntcHandler", "EnableIntcHandler", "EnableDmacHandler"
+        };
 
         // PS2-specific library functions
         const std::vector<std::string> ps2LibFuncs = {
@@ -291,7 +310,12 @@ namespace ps2recomp
             "loadModules", "fioInit", "mcInit", "mtapInit", "padInit", "sioInit",
             "ethPutIFAddr", "ethGetNetEther", "ethPutNetIFaddr", "ethGetHWaddr",
             "ethUsrPkt_input", "ethIntrEnable", "ethSetupIF", "ethPutArpReq",
-            "ethPktToIF", "ethGetArpEntry", "ethAllocTxPacket", "ethFreeTxPacket"};
+            "ethPktToIF", "ethGetArpEntry", "ethAllocTxPacket", "ethFreeTxPacket",
+            "sio_puts", "sio_printf", "sio_getc",
+
+            // Extra audsrv helpers
+            "audsrv_quit", "audsrv_play_audio", "audsrv_stop_audio", "audsrv_wait_audio",
+            "audsrv_set_format"};
 
         // Add new PS2-specific functions for more complete coverage
         const std::vector<std::string> additionalPs2Funcs = {

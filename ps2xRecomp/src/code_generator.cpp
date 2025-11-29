@@ -603,9 +603,9 @@ namespace ps2recomp
         case OPCODE_SWC1:
             return fmt::format("{{ float val = ctx->f[{}]; WRITE32(ADD32(GPR_U32(ctx, {}), {}), *(uint32_t*)&val); }}", inst.rt, inst.rs, inst.simmediate);
         case OPCODE_LDC2: // was OPCODE_LQC2 need to check
-            return fmt::format("ctx->vu0_vf[{}] = (__m128)READ128(ADD32(GPR_U32(ctx, {}), {}));", inst.rt, inst.rs, inst.simmediate);
+            return fmt::format("ctx->vu0_vf[{}] = _mm_castsi128_ps(READ128(ADD32(GPR_U32(ctx, {}), {})));", inst.rt, inst.rs, inst.simmediate);
         case OPCODE_SDC2: // was OPCODE_SQC2 need to check
-            return fmt::format("WRITE128(ADD32(GPR_U32(ctx, {}), {}), (__m128i)ctx->vu0_vf[{}]);", inst.rs, inst.simmediate, inst.rt);
+            return fmt::format("WRITE128(ADD32(GPR_U32(ctx, {}), {}), _mm_castps_si128(ctx->vu0_vf[{}]));", inst.rs, inst.simmediate, inst.rt);
         case OPCODE_DADDI:
             return fmt::format(
                 "{{ int64_t src = (int64_t)GPR_S64(ctx, {}); "
@@ -1481,7 +1481,7 @@ namespace ps2recomp
         switch (format)
         {
         case COP2_QMFC2:
-            return fmt::format("SET_GPR_VEC(ctx, {}, (__m128i)ctx->vu0_vf[{}]);", rt, rd);
+            return fmt::format("SET_GPR_VEC(ctx, {}, _mm_castps_si128(ctx->vu0_vf[{}]));", rt, rd);
         case COP2_CFC2:
         {
             switch (rd) // Control register number is in rd
@@ -1493,7 +1493,7 @@ namespace ps2recomp
             case VU0_CR_VPU_STAT:
                 return fmt::format("SET_GPR_U32(ctx, {}, ctx->vu0_vpu_stat);", rt);
             case VU0_CR_R:
-                return fmt::format("SET_GPR_VEC(ctx, {}, (__m128i)ctx->vu0_r);", rt);
+                return fmt::format("SET_GPR_VEC(ctx, {}, _mm_castps_si128(ctx->vu0_r));", rt);
             case VU0_CR_I:
                 return fmt::format("SET_GPR_U32(ctx, {}, *(uint32_t*)&ctx->vu0_i);", rt);
             case VU0_CR_CLIP:
@@ -1525,7 +1525,7 @@ namespace ps2recomp
             case VU0_CR_FBRST4:
                 return fmt::format("SET_GPR_U32(ctx, {}, ctx->vu0_fbrst4);", rt);
             case VU0_CR_ACC:
-                return fmt::format("SET_GPR_VEC(ctx, {}, (__m128i)ctx->vu0_acc);", rt);
+                return fmt::format("SET_GPR_VEC(ctx, {}, _mm_castps_si128(ctx->vu0_acc));", rt);
             case VU0_CR_INFO: // I dd found on offical docs but ok
                 return fmt::format("SET_GPR_U32(ctx, {}, ctx->vu0_info);", rt);
             case VU0_CR_CLIP2:
@@ -1543,7 +1543,7 @@ namespace ps2recomp
             }
         }
         case COP2_QMTC2:
-            return fmt::format("ctx->vu0_vf[{}] = (__m128)GPR_VEC(ctx, {});", rd, rt);
+            return fmt::format("ctx->vu0_vf[{}] = _mm_castsi128_ps(GPR_VEC(ctx, {}));", rd, rt);
         case COP2_CTC2:
         {
             switch (rd) // Control register number is in rd
@@ -1557,7 +1557,7 @@ namespace ps2recomp
             case VU0_CR_CLIP:
                 return fmt::format("ctx->vu0_clip_flags = GPR_U32(ctx, {});", rt);
             case VU0_CR_R:
-                return fmt::format("ctx->vu0_r = (__m128)GPR_VEC(ctx, {});", rt);
+                return fmt::format("ctx->vu0_r = _mm_castsi128_ps(GPR_VEC(ctx, {}));", rt);
             case VU0_CR_I:
                 return fmt::format("ctx->vu0_i = *(float*)&GPR_U32(ctx, {});", rt);
             case VU0_CR_TPC:
@@ -1587,7 +1587,7 @@ namespace ps2recomp
             case VU0_CR_FBRST4:
                 return fmt::format("ctx->vu0_fbrst4 = GPR_U32(ctx, {});", rt);
             case VU0_CR_ACC:
-                return fmt::format("ctx->vu0_acc = (__m128)GPR_VEC(ctx, {});", rt);
+                return fmt::format("ctx->vu0_acc = _mm_castsi128_ps(GPR_VEC(ctx, {}));", rt);
             case VU0_CR_INFO:
                 return fmt::format("ctx->vu0_info = GPR_U32(ctx, {});", rt);
             case VU0_CR_CLIP2:
