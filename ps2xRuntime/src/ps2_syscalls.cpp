@@ -811,8 +811,7 @@ namespace ps2_syscalls
 
         std::cout << "PS2 GsGetIMR: Returning IMR=0x" << std::hex << imr << std::dec << std::endl;
 
-        setReturnS32(ctx, (int32_t)(imr & 0xFFFFFFFF)); // Return lower 32 bits
-        setReturnS32(ctx, (int32_t)(imr >> 32));        // Return upper 32 bits
+        setReturnU64(ctx, imr); // Return in $v0/$v1
     }
 
     void GsPutIMR(uint8_t *rdram, R5900Context *ctx)

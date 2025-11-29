@@ -216,6 +216,13 @@ inline void setReturnS32(R5900Context *ctx, int32_t value)
     ctx->r[2] = _mm_set_epi32(0, 0, 0, value); // $v0 Sign extension handled by cast? TODO Check MIPS ABI.
 }
 
+inline void setReturnU64(R5900Context *ctx, uint64_t value)
+{
+    // 64-bit returns use $v0/$v1 (r2/r3)
+    ctx->r[2] = _mm_set_epi32(0, 0, 0, static_cast<uint32_t>(value));
+    ctx->r[3] = _mm_set_epi32(0, 0, 0, static_cast<uint32_t>(value >> 32));
+}
+
 inline uint8_t *getMemPtr(uint8_t *rdram, uint32_t addr)
 {
     constexpr uint32_t PS2_RAM_MASK = PS2_RAM_SIZE - 1;
@@ -372,6 +379,7 @@ private:
 
     bool isAddressInRegion(uint32_t address, const CodeRegion &region);
     void markModified(uint32_t address, uint32_t size);
+    bool isScratchpad(uint32_t address) const;
 };
 
 class PS2Runtime

@@ -86,10 +86,16 @@ bool PS2Memory::initialize(size_t ramSize)
     }
 }
 
+bool PS2Memory::isScratchpad(uint32_t address) const
+{
+    return address >= PS2_SCRATCHPAD_BASE &&
+           address < PS2_SCRATCHPAD_BASE + PS2_SCRATCHPAD_SIZE;
+}
+
 uint32_t PS2Memory::translateAddress(uint32_t virtualAddress)
 {
     // Handle special memory regions
-    if (virtualAddress >= PS2_SCRATCHPAD_BASE && virtualAddress < PS2_SCRATCHPAD_BASE + PS2_SCRATCHPAD_SIZE)
+    if (isScratchpad(virtualAddress))
     {
         // Scratchpad is directly mapped
         return virtualAddress - PS2_SCRATCHPAD_BASE;
@@ -132,15 +138,16 @@ uint32_t PS2Memory::translateAddress(uint32_t virtualAddress)
 
 uint8_t PS2Memory::read8(uint32_t address)
 {
+    const bool scratch = isScratchpad(address);
     uint32_t physAddr = translateAddress(address);
 
+    if (scratch)
+    {
+        return m_scratchpad[physAddr];
+    }
     if (physAddr < PS2_RAM_SIZE)
     {
         return m_rdram[physAddr];
-    }
-    else if (physAddr >= PS2_SCRATCHPAD_BASE && physAddr < PS2_SCRATCHPAD_BASE + PS2_SCRATCHPAD_SIZE)
-    {
-        return m_scratchpad[physAddr - PS2_SCRATCHPAD_BASE];
     }
     else if (physAddr >= PS2_IO_BASE && physAddr < PS2_IO_BASE + PS2_IO_SIZE)
     {
@@ -167,15 +174,16 @@ uint16_t PS2Memory::read16(uint32_t address)
         throw std::runtime_error("Unaligned 16-bit read at address: 0x" + std::to_string(address));
     }
 
+    const bool scratch = isScratchpad(address);
     uint32_t physAddr = translateAddress(address);
 
+    if (scratch)
+    {
+        return *reinterpret_cast<uint16_t *>(&m_scratchpad[physAddr]);
+    }
     if (physAddr < PS2_RAM_SIZE)
     {
         return *reinterpret_cast<uint16_t *>(&m_rdram[physAddr]);
-    }
-    else if (physAddr >= PS2_SCRATCHPAD_BASE && physAddr < PS2_SCRATCHPAD_BASE + PS2_SCRATCHPAD_SIZE)
-    {
-        return *reinterpret_cast<uint16_t *>(&m_scratchpad[physAddr - PS2_SCRATCHPAD_BASE]);
     }
     else if (physAddr >= PS2_IO_BASE && physAddr < PS2_IO_BASE + PS2_IO_SIZE)
     {
@@ -201,15 +209,16 @@ uint32_t PS2Memory::read32(uint32_t address)
         throw std::runtime_error("Unaligned 32-bit read at address: 0x" + std::to_string(address));
     }
 
+    const bool scratch = isScratchpad(address);
     uint32_t physAddr = translateAddress(address);
 
+    if (scratch)
+    {
+        return *reinterpret_cast<uint32_t *>(&m_scratchpad[physAddr]);
+    }
     if (physAddr < PS2_RAM_SIZE)
     {
         return *reinterpret_cast<uint32_t *>(&m_rdram[physAddr]);
-    }
-    else if (physAddr >= PS2_SCRATCHPAD_BASE && physAddr < PS2_SCRATCHPAD_BASE + PS2_SCRATCHPAD_SIZE)
-    {
-        return *reinterpret_cast<uint32_t *>(&m_scratchpad[physAddr - PS2_SCRATCHPAD_BASE]);
     }
     else if (physAddr >= PS2_IO_BASE && physAddr < PS2_IO_BASE + PS2_IO_SIZE)
     {
@@ -232,15 +241,16 @@ uint64_t PS2Memory::read64(uint32_t address)
         throw std::runtime_error("Unaligned 64-bit read at address: 0x" + std::to_string(address));
     }
 
+    const bool scratch = isScratchpad(address);
     uint32_t physAddr = translateAddress(address);
 
+    if (scratch)
+    {
+        return *reinterpret_cast<uint64_t *>(&m_scratchpad[physAddr]);
+    }
     if (physAddr < PS2_RAM_SIZE)
     {
         return *reinterpret_cast<uint64_t *>(&m_rdram[physAddr]);
-    }
-    else if (physAddr >= PS2_SCRATCHPAD_BASE && physAddr < PS2_SCRATCHPAD_BASE + PS2_SCRATCHPAD_SIZE)
-    {
-        return *reinterpret_cast<uint64_t *>(&m_scratchpad[physAddr - PS2_SCRATCHPAD_BASE]);
     }
 
     // 64-bit IO operations are not common, but who knows
@@ -255,15 +265,16 @@ __m128i PS2Memory::read128(uint32_t address)
         throw std::runtime_error("Unaligned 128-bit read at address: 0x" + std::to_string(address));
     }
 
+    const bool scratch = isScratchpad(address);
     uint32_t physAddr = translateAddress(address);
 
+    if (scratch)
+    {
+        return _mm_loadu_si128(reinterpret_cast<__m128i *>(&m_scratchpad[physAddr]));
+    }
     if (physAddr < PS2_RAM_SIZE)
     {
         return _mm_loadu_si128(reinterpret_cast<__m128i *>(&m_rdram[physAddr]));
-    }
-    else if (physAddr >= PS2_SCRATCHPAD_BASE && physAddr < PS2_SCRATCHPAD_BASE + PS2_SCRATCHPAD_SIZE)
-    {
-        return _mm_loadu_si128(reinterpret_cast<__m128i *>(&m_scratchpad[physAddr - PS2_SCRATCHPAD_BASE]));
     }
 
     // 128-bit reads are primarily for quad-word loads in the EE, which are only valid for RAM areas
@@ -273,15 +284,16 @@ __m128i PS2Memory::read128(uint32_t address)
 
 void PS2Memory::write8(uint32_t address, uint8_t value)
 {
+    const bool scratch = isScratchpad(address);
     uint32_t physAddr = translateAddress(address);
 
-    if (physAddr < PS2_RAM_SIZE)
+    if (scratch)
+    {
+        m_scratchpad[physAddr] = value;
+    }
+    else if (physAddr < PS2_RAM_SIZE)
     {
         m_rdram[physAddr] = value;
-    }
-    else if (physAddr >= PS2_SCRATCHPAD_BASE && physAddr < PS2_SCRATCHPAD_BASE + PS2_SCRATCHPAD_SIZE)
-    {
-        m_scratchpad[physAddr - PS2_SCRATCHPAD_BASE] = value;
     }
     else if (physAddr >= PS2_IO_BASE && physAddr < PS2_IO_BASE + PS2_IO_SIZE)
     {
@@ -304,15 +316,16 @@ void PS2Memory::write16(uint32_t address, uint16_t value)
         throw std::runtime_error("Unaligned 16-bit write at address: 0x" + std::to_string(address));
     }
 
+    const bool scratch = isScratchpad(address);
     uint32_t physAddr = translateAddress(address);
 
-    if (physAddr < PS2_RAM_SIZE)
+    if (scratch)
+    {
+        *reinterpret_cast<uint16_t *>(&m_scratchpad[physAddr]) = value;
+    }
+    else if (physAddr < PS2_RAM_SIZE)
     {
         *reinterpret_cast<uint16_t *>(&m_rdram[physAddr]) = value;
-    }
-    else if (physAddr >= PS2_SCRATCHPAD_BASE && physAddr < PS2_SCRATCHPAD_BASE + PS2_SCRATCHPAD_SIZE)
-    {
-        *reinterpret_cast<uint16_t *>(&m_scratchpad[physAddr - PS2_SCRATCHPAD_BASE]) = value;
     }
     else if (physAddr >= PS2_IO_BASE && physAddr < PS2_IO_BASE + PS2_IO_SIZE)
     {
@@ -335,20 +348,21 @@ void PS2Memory::write32(uint32_t address, uint32_t value)
         throw std::runtime_error("Unaligned 32-bit write at address: 0x" + std::to_string(address));
     }
 
+    const bool scratch = isScratchpad(address);
     uint32_t physAddr = translateAddress(address);
 
-    if (physAddr < PS2_RAM_SIZE)
+    if (scratch)
+    {
+        *reinterpret_cast<uint32_t *>(&m_scratchpad[physAddr]) = value;
+    }
+    else if (physAddr < PS2_RAM_SIZE)
     {
         // Check if this might be code modification
         markModified(address, 4);
 
         *reinterpret_cast<uint32_t *>(&m_rdram[physAddr]) = value;
     }
-    else if (physAddr >= 0x70000000 && physAddr < 0x70004000)
-    { // Scratchpad
-        *reinterpret_cast<uint32_t *>(&m_scratchpad[physAddr - 0x70000000]) = value;
-    }
-    else if (physAddr >= 0x10000000 && physAddr < 0x10010000)
+    else if (physAddr >= PS2_IO_BASE && physAddr < PS2_IO_BASE + PS2_IO_SIZE)
     {
         // Handle IO register writes with potential side effects
         writeIORegister(physAddr, value);
@@ -363,15 +377,16 @@ void PS2Memory::write64(uint32_t address, uint64_t value)
         throw std::runtime_error("Unaligned 64-bit write at address: 0x" + std::to_string(address));
     }
 
+    const bool scratch = isScratchpad(address);
     uint32_t physAddr = translateAddress(address);
 
-    if (physAddr < PS2_RAM_SIZE)
+    if (scratch)
+    {
+        *reinterpret_cast<uint64_t *>(&m_scratchpad[physAddr]) = value;
+    }
+    else if (physAddr < PS2_RAM_SIZE)
     {
         *reinterpret_cast<uint64_t *>(&m_rdram[physAddr]) = value;
-    }
-    else if (physAddr >= PS2_SCRATCHPAD_BASE && physAddr < PS2_SCRATCHPAD_BASE + PS2_SCRATCHPAD_SIZE)
-    {
-        *reinterpret_cast<uint64_t *>(&m_scratchpad[physAddr - PS2_SCRATCHPAD_BASE]) = value;
     }
     else
     {
@@ -389,15 +404,16 @@ void PS2Memory::write128(uint32_t address, __m128i value)
         throw std::runtime_error("Unaligned 128-bit write at address: 0x" + std::to_string(address));
     }
 
+    const bool scratch = isScratchpad(address);
     uint32_t physAddr = translateAddress(address);
 
-    if (physAddr < PS2_RAM_SIZE)
+    if (scratch)
+    {
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(&m_scratchpad[physAddr]), value);
+    }
+    else if (physAddr < PS2_RAM_SIZE)
     {
         _mm_storeu_si128(reinterpret_cast<__m128i *>(&m_rdram[physAddr]), value);
-    }
-    else if (physAddr >= PS2_SCRATCHPAD_BASE && physAddr < PS2_SCRATCHPAD_BASE + PS2_SCRATCHPAD_SIZE)
-    {
-        _mm_storeu_si128(reinterpret_cast<__m128i *>(&m_scratchpad[physAddr - PS2_SCRATCHPAD_BASE]), value);
     }
     else
     {

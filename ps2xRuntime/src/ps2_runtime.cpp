@@ -3,6 +3,8 @@
 #include <fstream>
 #include <algorithm>
 #include <cstring>
+#include <atomic>
+#include <thread>
 #include "raylib.h"
 
 #define ELF_MAGIC 0x464C457F // "\x7FELF" in little endian
@@ -141,12 +143,26 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
 
             // Copy to memory
             uint32_t physAddr = m_memory.translateAddress(ph.vaddr);
-            uint8_t *dest = m_memory.getRDRAM() + physAddr;
+            uint8_t *dest = nullptr;
+            if (ph.vaddr >= PS2_SCRATCHPAD_BASE && ph.vaddr < PS2_SCRATCHPAD_BASE + PS2_SCRATCHPAD_SIZE)
+            {
+                dest = m_memory.getScratchpad() + physAddr;
+            }
+            else
+            {
+                dest = m_memory.getRDRAM() + physAddr;
+            }
             std::memcpy(dest, buffer.data(), ph.filesz);
 
             if (ph.memsz > ph.filesz)
             {
                 std::memset(dest + ph.filesz, 0, ph.memsz - ph.filesz);
+            }
+
+            // Track executable regions for self-modifying code invalidation
+            if (ph.flags & 0x1) // PF_X
+            {
+                m_memory.registerCodeRegion(ph.vaddr, ph.vaddr + ph.memsz);
             }
         }
     }
@@ -277,39 +293,52 @@ void PS2Runtime::run()
 
     std::cout << "Starting execution at address 0x" << std::hex << m_cpuContext.pc << std::dec << std::endl;
 
-    try
-    {
-        // Call the entry point function
-        entryPoint(m_memory.getRDRAM(), &m_cpuContext, this);
+    // A blank image to use as a framebuffer
+    Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLANK);
+    Texture2D frameTex = LoadTextureFromImage(blank);
+    UnloadImage(blank);
 
-        std::cout << "Program execution completed successfully" << std::endl;
+    std::atomic<bool> running{true};
 
-        // A blank image to use as a framebuffer
-        Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLANK);
-        Texture2D frameTex = LoadTextureFromImage(blank);
-        UnloadImage(blank);
-
-        while (!WindowShouldClose())
+    std::thread gameThread([&, entryPoint]() {
+        try
         {
-            // TODO step only a small slice each host
-			auto self = this;
-            lookupFunction(memory().read32(0))(
-                memory().getRDRAM(),
-                &cpu(),
-                self);
-
-            UploadFrame(frameTex, self);
-
-            BeginDrawing();
-            ClearBackground(BLACK);
-            DrawTexture(frameTex, 0, 0, WHITE);
-            EndDrawing();
+            entryPoint(m_memory.getRDRAM(), &m_cpuContext, this);
         }
+        catch (const std::exception &e)
+        {
+            std::cerr << "Error during program execution: " << e.what() << std::endl;
+        }
+        running = false;
+    });
 
-        CloseWindow();
-    }
-    catch (const std::exception &e)
+    while (running && !WindowShouldClose())
     {
-        std::cerr << "Error during program execution: " << e.what() << std::endl;
+        UploadFrame(frameTex, this);
+
+        BeginDrawing();
+        ClearBackground(BLACK);
+        DrawTexture(frameTex, 0, 0, WHITE);
+        EndDrawing();
     }
+
+    if (!running)
+    {
+        // Game thread finished on its own
+        if (gameThread.joinable())
+        {
+            gameThread.join();
+        }
+    }
+    else
+    {
+        // Window was closed while the game thread is still running
+        if (gameThread.joinable())
+        {
+            gameThread.detach();
+        }
+    }
+
+    UnloadTexture(frameTex);
+    CloseWindow();
 }

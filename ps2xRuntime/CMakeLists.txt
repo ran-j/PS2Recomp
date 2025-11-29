@@ -38,6 +38,11 @@ target_link_libraries(ps2_runtime PRIVATE raylib)
 target_link_libraries(ps2EntryRunner PRIVATE raylib)
 target_link_libraries(ps2EntryRunner PRIVATE ps2_runtime)
 
+# Work around WinAPI vs raylib symbol clash for CloseWindow on x64
+if (MSVC)
+    target_link_options(ps2EntryRunner PRIVATE "/FORCE:MULTIPLE")
+endif()
+
 install(TARGETS ps2_runtime
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
