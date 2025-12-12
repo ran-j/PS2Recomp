@@ -94,6 +94,34 @@ static constexpr uint32_t DEFAULT_FB_ADDR = 0x00100000;
 static void UploadFrame(Texture2D &tex, PS2Runtime *rt) {
     uint8_t *src = rt->memory().getRDRAM() + (DEFAULT_FB_ADDR & 0x1FFFFFFF);
     UpdateTexture(tex, src);
+
+    // Debug: dump framebuffer stats once
+    static bool dumped = false;
+    static int frameCount = 0;
+    frameCount++;
+    if (!dumped && frameCount > 120) {  // After ~2 seconds
+        dumped = true;
+        // Check if framebuffer has any non-zero data
+        uint32_t nonZeroCount = 0;
+        uint32_t *pixels = (uint32_t*)src;
+        for (int i = 0; i < FB_WIDTH * FB_HEIGHT; i++) {
+            if (pixels[i] != 0) nonZeroCount++;
+        }
+        char buf[1024];
+        snprintf(buf, sizeof(buf),
+            "\n\n*** FRAMEBUFFER CHECK ***\n"
+            "Address: 0x%08X\n"
+            "Non-zero pixels: %u / %u\n"
+            "First 16 pixels: %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X\n"
+            "*** END FRAMEBUFFER ***\n\n",
+            DEFAULT_FB_ADDR, nonZeroCount, FB_WIDTH * FB_HEIGHT,
+            pixels[0], pixels[1], pixels[2], pixels[3],
+            pixels[4], pixels[5], pixels[6], pixels[7],
+            pixels[8], pixels[9], pixels[10], pixels[11],
+            pixels[12], pixels[13], pixels[14], pixels[15]);
+        fputs(buf, stderr);
+        fflush(stderr);
+    }
 }
 
 PS2Runtime::PS2Runtime() {
@@ -462,6 +490,24 @@ void PS2Runtime::run() {
                     triggerVBlank();
                 }
                 uint32_t pc = m_cpuContext.pc;
+                // Handle null function pointer calls - just return to caller
+                if (pc == 0) {
+                    uint32_t ra = M128I_U32(m_cpuContext.r[31], 0);
+                    static int null_call_count = 0;
+                    null_call_count++;
+                    if (null_call_count <= 10) {
+                        std::cout << "WARNING: Null function pointer call #" << null_call_count
+                                  << ", returning to RA=0x" << std::hex << ra << std::dec << std::endl;
+                    }
+                    // If RA is also 0, we're in a bad state - stop
+                    if (ra == 0) {
+                        std::cerr << "FATAL: Null PC with null RA - stack corrupt!" << std::endl;
+                        m_cpuContext.dump();
+                        break;
+                    }
+                    m_cpuContext.pc = ra;
+                    continue;  // Continue execution from RA
+                }
                 RecompiledFunction func = lookupFunction(pc);
                 if (!func) {
                     std::cerr << "No func at 0x" << std::hex << pc << std::dec << std::endl;

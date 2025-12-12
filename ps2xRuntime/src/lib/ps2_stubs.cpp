@@ -1039,10 +1039,24 @@ namespace ps2_stubs
     void sceCdSyncS_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         static int call_count = 0;
-        if (++call_count <= 5) {
-            std::cout << "sceCdSyncS_stub: Returning complete (call #" << call_count << ")" << std::endl;
+        call_count++;
+
+        // Debug: Print $s3 and calculated CD status address
+        uint32_t s3 = M128I_U32(ctx->r[19], 0);
+        uint32_t cdStatusAddr = s3 + 0xFFFF942Cu; // unsigned to avoid overflow
+        uint32_t cdStatus = (cdStatusAddr < 0x02000000) ? *reinterpret_cast<uint32_t*>(rdram + cdStatusAddr) : 0;
+
+        if (call_count <= 10) {
+            std::cout << "sceCdSyncS_stub #" << call_count
+                      << ": $s3=0x" << std::hex << s3
+                      << ", cdAddr=0x" << cdStatusAddr
+                      << ", cdStatus=" << std::dec << cdStatus << std::endl;
         }
         setReturnS32(ctx, 0);
+        uint32_t ra = M128I_U32(ctx->r[31], 0);
+        if (call_count <= 10) {
+            std::cout << "  sceCdSyncS returning to PC=0x" << std::hex << ra << std::dec << std::endl;
+        }
         continueAtRa_stub(ctx);
     }
 
@@ -1065,4 +1079,272 @@ namespace ps2_stubs
         setReturnS32(ctx, 1);
         continueAtRa_stub(ctx);
     }
+
+
+    // Debug wrapper for CD init check at 0x203880
+    // This replaces the recompiled entry_203880 to debug the CD status check
+    void debug_cd_check_203880(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int call_count = 0;
+        call_count++;
+
+        // Replicate the logic of entry_203880:
+        // 0x203880: lw $v1, 0xFFFF942C($s3)  -- load CD status
+        // 0x203884: li $v0, 6
+        // if ($v1 != $v0) goto return at 0x2039F4
+
+        uint32_t s3 = M128I_U32(ctx->r[19], 0);
+        uint32_t addr = s3 + 0xFFFF942Cu;
+        uint32_t cdStatus = (addr < 0x02000000) ? *reinterpret_cast<uint32_t*>(rdram + addr) : 0;
+
+        if (call_count <= 10 || call_count % 100000 == 0) {
+            std::cout << "debug_cd_check #" << call_count
+                      << ": $s3=0x" << std::hex << s3
+                      << ", addr=0x" << addr
+                      << ", cdStatus=" << std::dec << cdStatus << std::endl;
+        }
+
+        // Force cdStatus to 6 so we can proceed
+        if (addr < 0x02000000) {
+            *reinterpret_cast<uint32_t*>(rdram + addr) = 6;
+            cdStatus = 6;
+        }
+
+        // Set registers as the original code does
+        ctx->r[3] = _mm_set_epi32(0, 0, 0, cdStatus);  // $v1 = cdStatus
+        ctx->r[2] = _mm_set_epi32(0, 0, 0, 6);         // $v0 = 6
+
+        if (cdStatus != 6) {
+            // Branch to return at 0x2039F4
+            ctx->pc = 0x2039F4;
+            return;
+        }
+
+        // cdStatus == 6, continue to sceCdSyncS at 0x20388c
+        // Set RA to 0x203894 (next instruction after jal)
+        ctx->r[31] = _mm_set_epi32(0, 0, 0, 0x203894);
+        ctx->r[4] = _mm_set_epi32(0, 0, 0, 1);  // $a0 = 1 for sceCdSyncS
+
+        // Set PC to continue at entry_203894 after sceCdSyncS returns
+        // sceCdSyncS_stub sets ctx->pc to RA internally
+        sceCdSyncS_stub(rdram, ctx, runtime);
+    }
+
+    // Debug stub for entry_203894 - check $v0 and either proceed to sceSifInitRpc or loop back
+    void debug_entry_203894(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int call_count = 0;
+        call_count++;
+
+        uint32_t v0 = M128I_U32(ctx->r[2], 0);
+
+        if (call_count <= 20 || call_count % 50000 == 0) {
+            std::cout << "debug_entry_203894 #" << call_count
+                      << ": $v0=" << v0
+                      << " (need 0 to proceed to sceSifInitRpc)" << std::endl;
+        }
+
+        // The original code: if ($v0 != 0) goto 0x2039AC (SignalSema loop)
+        // We want to force $v0 = 0 to proceed to sceSifInitRpc
+        if (v0 != 0) {
+            if (call_count <= 20) {
+                std::cout << "  -> Forcing $v0 = 0 to break out of CD init loop!" << std::endl;
+            }
+            ctx->r[2] = _mm_set_epi32(0, 0, 0, 0);  // Force $v0 = 0
+        }
+
+        // Now proceed to sceSifInitRpc at 0x1f7be8
+        // Original code at 0x203894: bne $v0, $zero, 0x2039AC
+        // Delay slot sets $a0 = $zero + $zero
+        ctx->r[4] = _mm_set_epi32(0, 0, 0, 0);  // $a0 = 0
+
+        // Set RA for return from sceSifInitRpc
+        ctx->r[31] = _mm_set_epi32(0, 0, 0, 0x2038a4);
+
+        std::cout << "  -> Calling sceSifInitRpc at 0x1f7be8!" << std::endl;
+
+        // Look up and call sceSifInitRpc directly via runtime function table
+        auto func = runtime->lookupFunction(0x1f7be8);
+        if (func) {
+            func(rdram, ctx, runtime);
+        } else {
+            std::cerr << "ERROR: Could not find sceSifInitRpc at 0x1f7be8!" << std::endl;
+            ctx->pc = 0x2038a4;  // Continue anyway
+        }
+    }
+
+    // Stub for sceCdDiskReady - bypasses CD initialization entirely
+    void sceCdDiskReady_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int call_count = 0;
+        call_count++;
+
+        uint32_t ra = M128I_U32(ctx->r[31], 0);
+        
+        if (call_count <= 10) {
+            std::cout << "sceCdDiskReady_stub #" << call_count 
+                      << ": Returning ready! RA=0x" << std::hex << ra << std::dec << std::endl;
+        }
+
+        // Set return value to indicate CD is ready
+        // $v0 should be 2 (SCECdComplete) based on PS2 SDK
+        setReturnS32(ctx, 2);  // Return 2 = SCECdComplete
+
+        // Patch memory flags to indicate CD is ready
+        *reinterpret_cast<int32_t*>(rdram + 0x279410) = 0;   // Status >= 0 = ready
+        *reinterpret_cast<int32_t*>(rdram + 0x279444) = 0;   // Status >= 0 = ready
+        *reinterpret_cast<uint32_t*>(rdram + 0x27942C) = 6;  // CD status = ready
+
+        // Return directly to caller (don't go through the CD init loop)
+        ctx->pc = ra;
+    }
+    // Stub for sceSifInitRpc - initializes SIF/RPC subsystem
+    void sceSifInitRpc_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int call_count = 0;
+        call_count++;
+
+        uint32_t s1 = M128I_U32(ctx->r[17], 0);  // $s1 register
+        uint32_t statusAddr = (s1 + 0xFFFF9444u) & 0x1FFFFFF;
+        int32_t statusBefore = *reinterpret_cast<int32_t*>(rdram + statusAddr);
+
+        if (call_count <= 10) {
+            std::cout << "sceSifInitRpc_stub #" << call_count 
+                      << ": $s1=0x" << std::hex << s1
+                      << ", statusAddr=0x" << statusAddr
+                      << ", statusBefore=" << std::dec << statusBefore << std::endl;
+        }
+
+        // Set the RPC initialized flag at 0x277134
+        *reinterpret_cast<uint32_t*>(rdram + 0x277134) = 1;
+
+        // Set the CD status flag at the dynamic address (based on $s1)
+        *reinterpret_cast<int32_t*>(rdram + statusAddr) = 0;  // 0 = ready
+
+        // Also set at fixed address just in case
+        *reinterpret_cast<int32_t*>(rdram + 0x279444) = 0;
+
+        // Set return value
+        setReturnS32(ctx, 0);
+
+        // Return to caller
+        uint32_t ra = M128I_U32(ctx->r[31], 0);
+        if (call_count <= 10) {
+            std::cout << "  sceSifInitRpc returning to 0x" << std::hex << ra << std::dec << std::endl;
+        }
+        ctx->pc = ra;
+    }
+    // Stub for entry_2038a4 - bypasses CD init loop check
+    void debug_entry_2038a4(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int call_count = 0;
+        call_count++;
+
+        // Get $s1 value for status check
+        uint32_t s1 = M128I_U32(ctx->r[17], 0);
+        uint32_t statusAddr = (s1 + 0xFFFF9444u) & 0x1FFFFFF;
+        
+        if (call_count <= 10) {
+            std::cout << "debug_entry_2038a4 #" << call_count 
+                      << ": $s1=0x" << std::hex << s1
+                      << ", statusAddr=0x" << statusAddr << std::dec << std::endl;
+        }
+
+        // Force status to be non-negative (>= 0) to exit the loop
+        *reinterpret_cast<int32_t*>(rdram + statusAddr) = 0;
+        *reinterpret_cast<int32_t*>(rdram + 0x279444) = 0;
+
+        // Set $v0 to 0 (non-negative) so branch to 0x20395C is taken
+        ctx->r[2] = _mm_set_epi32(0, 0, 0, 0);
+
+        // Jump to 0x20395C (the exit path)
+        if (call_count <= 10) {
+            std::cout << "  -> Jumping to 0x20395C to exit CD init" << std::endl;
+        }
+        ctx->pc = 0x20395C;
+    }
+    // Stub for entry_203874 - the main PollSema loop entry in CD init
+    // This is the inner loop that keeps polling
+    void debug_entry_203874(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int call_count = 0;
+        call_count++;
+
+        if (call_count <= 10) {
+            std::cout << "debug_entry_203874 #" << call_count 
+                      << ": Skipping PollSema loop, jumping to exit" << std::endl;
+        }
+
+        // Patch CD status to ready
+        *reinterpret_cast<uint32_t*>(rdram + 0x27942C) = 6;
+
+        // Instead of entering the PollSema loop, jump directly to the exit
+        // The exit of sceCdDiskReady is at 0x2039F4 (epilog)
+        ctx->pc = 0x2039F4;
+    }
+
+    // ============================================================
+    // SOUND SYSTEM STUBS - Intercept and log sound commands
+    // ============================================================
+
+    // Stub for sceSifCheckStatRpc - check if RPC call is complete
+    // This is what's causing the sound init loop
+    void sceSifCheckStatRpc_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int call_count = 0;
+        call_count++;
+
+        // $a0 = pointer to RPC client data
+        uint32_t clientPtr = getRegU32(ctx, 4);
+
+        if (call_count <= 20) {
+            std::cout << "[SOUND] sceSifCheckStatRpc #" << call_count
+                      << " client=0x" << std::hex << clientPtr << std::dec << std::endl;
+        }
+
+        // Return 0 = RPC call complete (not busy)
+        // This tells the game the IOP has finished processing
+        setReturnS32(ctx, 0);
+        ctx->pc = getRegU32(ctx, 31);  // Return to caller
+    }
+
+    // Stub for snd_SendIOPCommandAndWait - sends command to IOP sound driver
+    void snd_SendIOPCommandAndWait_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int call_count = 0;
+        call_count++;
+
+        // Arguments: $a0 = command, $a1 = param, $a2 = data pointer
+        uint32_t cmd = getRegU32(ctx, 4);
+        uint32_t param = getRegU32(ctx, 5);
+        uint32_t dataPtr = getRegU32(ctx, 6);
+
+        if (call_count <= 50) {
+            std::cout << "[SOUND] snd_SendIOPCommandAndWait #" << call_count
+                      << " cmd=" << cmd
+                      << " param=" << param
+                      << " data=0x" << std::hex << dataPtr << std::dec << std::endl;
+        }
+
+        // Return success (0)
+        setReturnS32(ctx, 0);
+        ctx->pc = getRegU32(ctx, 31);
+    }
+
+    // Stub for snd_GotReturns - check for IOP responses
+    void snd_GotReturns_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int call_count = 0;
+        call_count++;
+
+        if (call_count <= 20) {
+            std::cout << "[SOUND] snd_GotReturns #" << call_count << std::endl;
+        }
+
+        // Just return - no responses pending
+        setReturnS32(ctx, 0);
+        ctx->pc = getRegU32(ctx, 31);
+    }
+
+
 }

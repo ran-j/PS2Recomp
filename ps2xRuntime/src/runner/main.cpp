@@ -71,6 +71,12 @@ int main(int argc, char* argv[]) {
     *reinterpret_cast<uint32_t*>(rdram + 0x27942C) = 6;
     std::cout << "Patched CD status at 0x27942C = 6 (ready)" << std::endl;
 
+    // Patch game state flag at 0x2701b8 to bypass main loop wait
+    // This flag is checked in the switch statement at 0x1e91dc
+    // When 0, the game loops forever; when non-zero, it proceeds
+    *reinterpret_cast<uint32_t*>(rdram + 0x2701b8) = 1;
+    std::cout << "Patched game state at 0x2701b8 = 1" << std::endl;
+
     // Register all recompiled functions with the runtime
     std::cout << "Registering recompiled functions..." << std::endl;
     registerAllFunctions(runtime);

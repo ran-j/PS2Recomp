@@ -3430,7 +3430,8 @@ void registerAllFunctions(PS2Runtime& runtime) {
     runtime.registerFunction(0x11cff0, entry_11cff0);
     runtime.registerFunction(0x11d018, entry_11d018);
     runtime.registerFunction(0x11d060, junk_0x0011d060);
-    runtime.registerFunction(0x11d078, snd_GotReturns__Fv);
+    // STUBBED: Intercept sound system calls
+    runtime.registerFunction(0x11d078, ps2_stubs::snd_GotReturns_stub);
     runtime.registerFunction(0x11d090, entry_11d090);
     runtime.registerFunction(0x11d0ac, entry_11d0ac);
     runtime.registerFunction(0x11d0fc, entry_11d0fc);
@@ -3512,7 +3513,8 @@ void registerAllFunctions(PS2Runtime& runtime) {
     runtime.registerFunction(0x11d928, snd_SetGlobalExcite);
     runtime.registerFunction(0x11d94c, entry_11d94c);
     runtime.registerFunction(0x11d958, junk_0x0011d958);
-    runtime.registerFunction(0x11d968, snd_SendIOPCommandAndWait__FiiPc);
+    // STUBBED: Intercept sound IOP command
+    runtime.registerFunction(0x11d968, ps2_stubs::snd_SendIOPCommandAndWait_stub);
     runtime.registerFunction(0x11d9d8, entry_11d9d8);
     runtime.registerFunction(0x11d9e0, entry_11d9e0);
     runtime.registerFunction(0x11d9f4, entry_11d9f4);
@@ -20630,7 +20632,7 @@ void registerAllFunctions(PS2Runtime& runtime) {
     runtime.registerFunction(0x1f7b7c, entry_1f7b7c);
     runtime.registerFunction(0x1f7b88, printf_2);
     runtime.registerFunction(0x1f7bd0, entry_1f7bd0);
-    runtime.registerFunction(0x1f7be8, sceSifInitRpc);
+    runtime.registerFunction(0x1f7be8, ps2_stubs::sceSifInitRpc_stub); // DEBUG: replaced sceSifInitRpc
     runtime.registerFunction(0x1f7c00, entry_1f7c00);
     runtime.registerFunction(0x1f7c30, entry_1f7c30);
     runtime.registerFunction(0x1f7c38, entry_1f7c38);
@@ -20685,7 +20687,8 @@ void registerAllFunctions(PS2Runtime& runtime) {
     runtime.registerFunction(0x1f8430, entry_1f8430);
     runtime.registerFunction(0x1f8440, entry_1f8440);
     runtime.registerFunction(0x1f8448, entry_1f8448);
-    runtime.registerFunction(0x1f8480, sceSifCheckStatRpc);
+    // STUBBED: Intercept RPC status check (causes sound init loop)
+    runtime.registerFunction(0x1f8480, ps2_stubs::sceSifCheckStatRpc_stub);
     runtime.registerFunction(0x1f84d8, _sceFsIobSemaMK);
     runtime.registerFunction(0x1f8510, entry_1f8510);
     runtime.registerFunction(0x1f851c, entry_1f851c);
@@ -21481,12 +21484,12 @@ void registerAllFunctions(PS2Runtime& runtime) {
     runtime.registerFunction(0x2037c0, entry_2037c0);
     runtime.registerFunction(0x2037ec, entry_2037ec);
     runtime.registerFunction(0x2037f4, entry_2037f4);
-    runtime.registerFunction(0x203828, sceCdDiskReady);
+    runtime.registerFunction(0x203828, ps2_stubs::sceCdDiskReady_stub); // DEBUG: replaced sceCdDiskReady
     runtime.registerFunction(0x20386c, entry_20386c);
-    runtime.registerFunction(0x203874, entry_203874);
-    runtime.registerFunction(0x203880, entry_203880);
-    runtime.registerFunction(0x203894, entry_203894);
-    runtime.registerFunction(0x2038a4, entry_2038a4);
+    runtime.registerFunction(0x203874, ps2_stubs::debug_entry_203874); // DEBUG: replaced entry_203874
+    runtime.registerFunction(0x203880, ps2_stubs::debug_cd_check_203880); // DEBUG: replaced entry_203880
+    runtime.registerFunction(0x203894, ps2_stubs::debug_entry_203894); // DEBUG: replaced entry_203894
+    runtime.registerFunction(0x2038a4, ps2_stubs::debug_entry_2038a4); // DEBUG: replaced entry_2038a4
     runtime.registerFunction(0x2038fc, entry_2038fc);
     runtime.registerFunction(0x20391c, entry_20391c);
     runtime.registerFunction(0x203978, entry_203978);

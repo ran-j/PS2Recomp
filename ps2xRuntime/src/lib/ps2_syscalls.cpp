@@ -292,11 +292,29 @@ namespace ps2_syscalls
     void PollSema(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         int semaId = getRegU32(ctx, 4);
+        static int pollCount = 0;
+        pollCount++;
 
         // For IOP-related semaphores (typically 5, 6), always return success
         // since we don't have an IOP to signal them
         // This prevents infinite polling loops waiting for IOP responses
         if (semaId >= 5) {
+            // Debug: Print CD status value and actual address from $s3
+            uint32_t s3 = M128I_U32(ctx->r[19], 0);
+            uint32_t actualAddr = s3 + 0xFFFF942Cu;
+            uint32_t cdStatusFixed = *reinterpret_cast<uint32_t*>(rdram + 0x27942C);
+            uint32_t cdStatusActual = (actualAddr < 0x02000000) ? *reinterpret_cast<uint32_t*>(rdram + actualAddr) : 0;
+            if (pollCount <= 5 || pollCount % 50000 == 0) {
+                std::cout << "  -> PollSema(" << semaId << ") poll #" << pollCount
+                          << ", $s3=0x" << std::hex << s3 << std::dec
+                          << ", actual@0x" << std::hex << actualAddr << "=" << std::dec << cdStatusActual
+                          << ", fixed@0x27942C=" << cdStatusFixed << std::endl;
+            }
+            // Patch BOTH locations
+            *reinterpret_cast<uint32_t*>(rdram + 0x27942C) = 6;
+            if (actualAddr < 0x02000000) {
+                *reinterpret_cast<uint32_t*>(rdram + actualAddr) = 6;
+            }
             setReturnS32(ctx, 0); // Always succeed for IOP semaphores
             continueAtRa(ctx);
             return;
