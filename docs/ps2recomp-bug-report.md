@@ -446,3 +446,51 @@ These fixes were developed while testing Sly Cooper recompilation. Happy to prov
 
 **Repository tested:** ps2recomp (commit c05d8f1)
 **Test environment:** Windows 11, MSYS2/MinGW64, GCC 13
+
+---
+
+## Bug #6: Mid-Function Entry Points Not Generated (CRITICAL)
+
+### Problem
+
+When code jumps to an address inside another function (not the function start), there's no registered entry point, causing "No func at 0xXXXXX" errors.
+
+### Solution
+
+**Part 1: Recompiler Detection** - Added `collectMidFunctionEntryPoints()` to scan all instructions for branch targets inside other functions. Found **15,558** mid-function entry points in Sly Cooper.
+
+**Part 2: Dispatch Block Generation** - Functions with mid-function entries get a switch/goto dispatch block at the start.
+
+### Impact
+
+**Without fix:** Crash at call #142 with "No func at 0x15f158"
+**With fix:** Game proceeds past all static mid-function jumps
+
+---
+
+## Bug #7: Indirect Jumps to Mid-Function Addresses (CRITICAL)
+
+### Problem
+
+Indirect jumps (`jr $reg`) can target ANY address computed at runtime.
+
+### Solution
+
+Runtime range lookup fallback using `std::map::upper_bound()` to find the containing function, then set `ctx->pc` for the dispatch block.
+
+### Impact
+
+**Without fix:** Crash on `jr $reg` to mid-function address
+**With fix:** Game reaches **4,800,000+ calls** (33,000x improvement!)
+
+---
+
+## Updated Test Results
+
+| Phase | Calls | Blocker |
+|-------|-------|---------|
+| Before fixes | 0 | "No func at 0x0" |
+| After #1-5 | 108+ | "No func at 0x15f158" |
+| After #6-7 | 4,800,000+ | PollSema loop (IOP sync) |
+
+**Last updated:** December 2024
