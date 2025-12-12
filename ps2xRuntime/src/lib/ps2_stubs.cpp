@@ -1309,25 +1309,95 @@ namespace ps2_stubs
     }
 
     // Stub for snd_SendIOPCommandAndWait - sends command to IOP sound driver
+    // This is the main entry point for all sound commands
     void snd_SendIOPCommandAndWait_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         static int call_count = 0;
+        static int sounds_played = 0;
         call_count++;
 
-        // Arguments: $a0 = command, $a1 = param, $a2 = data pointer
+        // Arguments: $a0 = command, $a1 = param (size), $a2 = data pointer
         uint32_t cmd = getRegU32(ctx, 4);
         uint32_t param = getRegU32(ctx, 5);
         uint32_t dataPtr = getRegU32(ctx, 6);
 
-        if (call_count <= 50) {
-            std::cout << "[SOUND] snd_SendIOPCommandAndWait #" << call_count
-                      << " cmd=" << cmd
-                      << " param=" << param
-                      << " data=0x" << std::hex << dataPtr << std::dec << std::endl;
+        // Get data pointer
+        uint32_t* data = nullptr;
+        if (dataPtr != 0 && dataPtr < 0x2000000) {
+            data = (uint32_t*)(rdram + (dataPtr & 0x1FFFFFF));
         }
 
-        // Return success (0)
-        setReturnS32(ctx, 0);
+        // Interpret commands based on 989snd.c from decomp
+        const char* cmdName = "UNKNOWN";
+        switch (cmd) {
+            case 0x00: cmdName = "snd_SetMasterVolume"; break;
+            case 0x06: cmdName = "snd_SetPlaybackMode"; break;
+            case 0x08: cmdName = "snd_StopAllSounds"; break;
+            case 0x09: cmdName = "snd_SetMixerMode"; break;
+            case 0x0A: cmdName = "snd_GetFreeSPUDMA"; break;
+            case 0x0B: cmdName = "snd_FreeSPUDMA"; break;
+            case 0x0D: cmdName = "snd_SetReverbMode"; break;
+            case 0x10: cmdName = "snd_PlaySound"; break;
+            case 0x11: cmdName = "snd_PlaySoundVolPanPMPB"; break;
+            case 0x13: cmdName = "snd_PauseSound"; break;
+            case 0x14: cmdName = "snd_ContinueSound"; break;
+            case 0x15: cmdName = "snd_StopSound"; break;
+            case 0x16: cmdName = "snd_SetSoundVolume"; break;
+            case 0x17: cmdName = "snd_SetSoundPan"; break;
+            case 0x19: cmdName = "snd_IsSoundPlaying"; break;
+            case 0x1A: cmdName = "snd_SetSoundPitch"; break;
+            case 0x1B: cmdName = "snd_SetSoundParams"; break;
+            case 0x4E: cmdName = "snd_SetGroupVoiceRange"; break;
+            default: break;
+        }
+
+        // Log based on command type
+        if (cmd == 0x11 && data) {  // snd_PlaySoundVolPanPMPB
+            sounds_played++;
+            uint32_t bank = data[0];
+            uint32_t soundId = data[1];
+            uint32_t vol = data[2];
+            uint32_t pan = data[3];
+
+            // Only log unique sound IDs to reduce spam
+            static uint32_t lastSoundId = 0xFFFFFFFF;
+            if (soundId != lastSoundId) {
+                std::cout << "[SOUND] PlaySound #" << sounds_played
+                          << ": ID=" << soundId
+                          << " vol=" << vol
+                          << " pan=" << (int32_t)pan
+                          << " bank=0x" << std::hex << bank << std::dec << std::endl;
+                lastSoundId = soundId;
+            }
+        }
+        else if (cmd == 0x15 && data) {  // snd_StopSound
+            std::cout << "[SOUND] StopSound: handle=0x" << std::hex << data[0] << std::dec << std::endl;
+        }
+        else if (cmd == 0x00 && data) {  // snd_SetMasterVolume
+            std::cout << "[SOUND] SetMasterVolume: vol=" << data[0] << std::endl;
+        }
+        else if (cmd == 0x19 && data) {  // snd_IsSoundPlaying
+            std::cout << "[SOUND] IsSoundPlaying: handle=0x" << std::hex << data[0] << std::dec << std::endl;
+        }
+        else if (call_count <= 50) {  // Log unknown commands
+            std::cout << "[SOUND] cmd=0x" << std::hex << cmd << std::dec
+                      << " (" << cmdName << ") param=" << param;
+            if (data && param >= 4) {
+                std::cout << " data[0]=0x" << std::hex << data[0] << std::dec;
+            }
+            std::cout << std::endl;
+        }
+
+        // Return 0 (success) or fake handle for PlaySound
+        if (cmd == 0x11) {
+            // Return a fake sound handle
+            setReturnS32(ctx, 0x1000 + sounds_played);
+        } else if (cmd == 0x19) {
+            // IsSoundPlaying - return 0 (not playing)
+            setReturnS32(ctx, 0);
+        } else {
+            setReturnS32(ctx, 0);
+        }
         ctx->pc = getRegU32(ctx, 31);
     }
 
