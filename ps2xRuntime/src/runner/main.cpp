@@ -65,6 +65,12 @@ int main(int argc, char* argv[]) {
     std::cout << "=== DEBUG BUILD ===" << std::endl; /* DEBUG_INJECT */
     std::cout << "Debug injection active" << std::endl; /* DEBUG_INJECT */
 
+    // Patch CD-ROM status to bypass loading waits
+    // The game checks memory at 0x27942C to see if CD is ready (value should be 6)
+    uint8_t* rdram = runtime.memory().getRDRAM();
+    *reinterpret_cast<uint32_t*>(rdram + 0x27942C) = 6;
+    std::cout << "Patched CD status at 0x27942C = 6 (ready)" << std::endl;
+
     // Register all recompiled functions with the runtime
     std::cout << "Registering recompiled functions..." << std::endl;
     registerAllFunctions(runtime);

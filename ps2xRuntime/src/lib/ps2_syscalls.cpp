@@ -17,6 +17,8 @@ int g_nextFd = 3; // Start after stdin, stdout, stderr
 // Semaphore tracking
 static int g_nextSemaId = 0; // PS2 kernel starts semaphore IDs at 0
 static std::unordered_map<int, int> g_semaphores; // id -> count
+static std::unordered_map<int, int> g_pollSemaFailCount; // id -> consecutive fail count
+static const int POLL_SEMA_AUTO_SIGNAL_THRESHOLD = 100; // Auto-signal after N failed polls
 
 // Thread tracking
 static int g_nextThreadId = 2; // 1 is main thread
@@ -290,11 +292,33 @@ namespace ps2_syscalls
     void PollSema(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         int semaId = getRegU32(ctx, 4);
+
+        // For IOP-related semaphores (typically 5, 6), always return success
+        // since we don't have an IOP to signal them
+        // This prevents infinite polling loops waiting for IOP responses
+        if (semaId >= 5) {
+            setReturnS32(ctx, 0); // Always succeed for IOP semaphores
+            continueAtRa(ctx);
+            return;
+        }
+
         if (g_semaphores.find(semaId) != g_semaphores.end() && g_semaphores[semaId] > 0) {
             g_semaphores[semaId]--;
+            g_pollSemaFailCount[semaId] = 0;
             setReturnS32(ctx, 0); continueAtRa(ctx);
         } else {
-            setReturnS32(ctx, -1); // Would block
+            // Track consecutive failures
+            g_pollSemaFailCount[semaId]++;
+
+            if (g_pollSemaFailCount[semaId] >= POLL_SEMA_AUTO_SIGNAL_THRESHOLD) {
+                g_semaphores[semaId] = 1;
+                g_semaphores[semaId]--;
+                g_pollSemaFailCount[semaId] = 0;
+                setReturnS32(ctx, 0); continueAtRa(ctx);
+            } else {
+                setReturnS32(ctx, -1);
+                continueAtRa(ctx);
+            }
         }
     }
 

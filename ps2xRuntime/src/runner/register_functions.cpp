@@ -21449,12 +21449,12 @@ void registerAllFunctions(PS2Runtime& runtime) {
     runtime.registerFunction(0x203284, entry_203284);
     runtime.registerFunction(0x203298, entry_203298);
     runtime.registerFunction(0x2032b4, entry_2032b4);
-    runtime.registerFunction(0x2032c8, sceCdSync);
+    runtime.registerFunction(0x2032c8, ps2_stubs::sceCdSync_stub);
     runtime.registerFunction(0x2032f4, entry_2032f4);
     runtime.registerFunction(0x203308, entry_203308);
     runtime.registerFunction(0x20331c, entry_20331c);
     runtime.registerFunction(0x203348, entry_203348);
-    runtime.registerFunction(0x203368, sceCdSyncS);
+    runtime.registerFunction(0x203368, ps2_stubs::sceCdSyncS_stub);
     runtime.registerFunction(0x203390, entry_203390);
     runtime.registerFunction(0x2033a0, entry_2033a0);
     runtime.registerFunction(0x2033a8, entry_2033a8);
@@ -21501,7 +21501,7 @@ void registerAllFunctions(PS2Runtime& runtime) {
     runtime.registerFunction(0x203aac, entry_203aac);
     runtime.registerFunction(0x203ac8, entry_203ac8);
     runtime.registerFunction(0x203ae8, sceCdGetReadPos);
-    runtime.registerFunction(0x203b18, sceCdRead);
+    runtime.registerFunction(0x203b18, ps2_stubs::sceCdRead_stub);
     runtime.registerFunction(0x203b68, entry_203b68);
     runtime.registerFunction(0x203b7c, entry_203b7c);
     runtime.registerFunction(0x203c14, entry_203c14);
@@ -21517,7 +21517,7 @@ void registerAllFunctions(PS2Runtime& runtime) {
     runtime.registerFunction(0x203d4c, entry_203d4c);
     runtime.registerFunction(0x203d60, entry_203d60);
     runtime.registerFunction(0x203d7c, entry_203d7c);
-    runtime.registerFunction(0x203d90, sceCdGetError);
+    runtime.registerFunction(0x203d90, ps2_stubs::sceCdGetError_stub);
     runtime.registerFunction(0x203da4, entry_203da4);
     runtime.registerFunction(0x203de4, entry_203de4);
     runtime.registerFunction(0x203df8, entry_203df8);

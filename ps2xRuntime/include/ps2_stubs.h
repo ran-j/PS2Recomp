@@ -43,6 +43,12 @@ namespace ps2_stubs
     void ftell(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void fflush(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
 
+    // CD-ROM stubs (bypass loading waits)
+    void sceCdSync_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void sceCdSyncS_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void sceCdGetError_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void sceCdRead_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+
     // Math functions
     void sqrt(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sin(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);

@@ -1018,4 +1018,51 @@ namespace ps2_stubs
 
         setReturnS32(ctx, -1); // Return error
     }
+    // Helper function to continue execution at return address
+    static inline void continueAtRa_stub(R5900Context* ctx) {
+        ctx->pc = M128I_U32(ctx->r[31], 0);
+    }
+
+    // CD-ROM stubs - bypass loading waits by always returning "complete"
+    void sceCdSync_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        // sceCdSync(mode) - wait for CD operation to complete
+        // Returns: 0 = complete, 1 = busy
+        static int call_count = 0;
+        if (++call_count <= 5) {
+            std::cout << "sceCdSync_stub: Returning complete (call #" << call_count << ")" << std::endl;
+        }
+        setReturnS32(ctx, 0);
+        continueAtRa_stub(ctx);
+    }
+
+    void sceCdSyncS_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int call_count = 0;
+        if (++call_count <= 5) {
+            std::cout << "sceCdSyncS_stub: Returning complete (call #" << call_count << ")" << std::endl;
+        }
+        setReturnS32(ctx, 0);
+        continueAtRa_stub(ctx);
+    }
+
+    void sceCdGetError_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        setReturnS32(ctx, 0);
+        continueAtRa_stub(ctx);
+    }
+
+    void sceCdRead_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        uint32_t lsn = getRegU32(ctx, 4);
+        uint32_t sectors = getRegU32(ctx, 5);
+        uint32_t buffer = getRegU32(ctx, 6);
+        std::cout << "sceCdRead_stub: lsn=" << lsn << " sectors=" << sectors 
+                  << " buffer=0x" << std::hex << buffer << std::dec << std::endl;
+        if (buffer > 0 && buffer < 0x02000000) {
+            std::memset(rdram + (buffer & 0x1FFFFFF), 0, sectors * 2048);
+        }
+        setReturnS32(ctx, 1);
+        continueAtRa_stub(ctx);
+    }
 }
