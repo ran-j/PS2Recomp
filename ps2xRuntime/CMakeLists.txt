@@ -37,6 +37,12 @@ target_include_directories(ps2_runtime PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
+# Enable SSE4.1/AVX for 128-bit PS2 operations
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(ps2_runtime PRIVATE -msse4.1)
+    target_compile_options(ps2EntryRunner PRIVATE -msse4.1)
+endif()
+
 target_link_libraries(ps2_runtime PRIVATE raylib)
 target_link_libraries(ps2EntryRunner PRIVATE raylib)
 target_link_libraries(ps2EntryRunner PRIVATE ps2_runtime)

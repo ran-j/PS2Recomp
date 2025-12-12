@@ -8,6 +8,21 @@
 
 namespace fs = std::filesystem;
 
+// Helper to rename reserved C++ identifiers (must match code_generator.cpp)
+static std::string sanitizeFunctionName(const std::string& name) {
+    if (name == "main") return "game_main";
+    if (name == "matherr") return "fn_matherr";  // Conflicts with C library
+    // Prefix names starting with double underscore (reserved in C++)
+    if (name.size() >= 2 && name[0] == '_' && name[1] == '_') {
+        return "fn_" + name;
+    }
+    // Also handle names starting with underscore followed by uppercase
+    if (name.size() >= 2 && name[0] == '_' && std::isupper(name[1])) {
+        return "fn_" + name;
+    }
+    return name;
+}
+
 namespace ps2recomp
 {
 
@@ -38,6 +53,33 @@ namespace ps2recomp
             m_symbols = m_elfParser->extractSymbols();
             m_sections = m_elfParser->getSections();
             m_relocations = m_elfParser->getRelocations();
+
+            // If no functions found in ELF (stripped), use external functions from config
+            if (m_functions.empty() && !m_config.externalFunctions.empty())
+            {
+                std::cout << "ELF is stripped, using " << m_config.externalFunctions.size()
+                          << " external function definitions..." << std::endl;
+                for (const auto &extFunc : m_config.externalFunctions)
+                {
+                    Function func;
+                    func.name = extFunc.name;
+                    func.start = extFunc.address;
+                    func.end = extFunc.address + extFunc.size;
+                    func.isRecompiled = false;
+                    func.isStub = false;
+                    m_functions.push_back(func);
+
+                    // Also add to symbols for better resolution
+                    Symbol sym;
+                    sym.name = extFunc.name;
+                    sym.address = extFunc.address;
+                    sym.size = extFunc.size;
+                    sym.isFunction = true;
+                    sym.isImported = false;
+                    sym.isExported = true;
+                    m_symbols.push_back(sym);
+                }
+            }
 
             std::cout << "Extracted " << m_functions.size() << " functions, "
                       << m_symbols.size() << " symbols, "
@@ -224,6 +266,8 @@ namespace ps2recomp
 
             for (const auto &funcName : m_config.skipFunctions)
             {
+                // Skip 'main' as it conflicts with C++ main()
+                if (funcName == "main") continue;
                 ss << "void " << funcName << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) { ps2_syscalls::TODO(rdram, ctx, runtime); }\n";
             }
 
@@ -260,7 +304,8 @@ namespace ps2recomp
             {
                 if (function.isRecompiled)
                 {
-                    ss << "void " << function.name << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime);\n";
+                    std::string funcName = sanitizeFunctionName(function.name);
+                    ss << "void " << funcName << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime);\n";
                 }
             }
 

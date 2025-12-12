@@ -162,15 +162,25 @@ namespace ps2recomp
         std::string calleeName;
     };
 
+    // External function definition (for stripped ELFs)
+    struct ExternalFunction
+    {
+        std::string name;
+        uint32_t address;
+        uint32_t size;
+    };
+
     // Recompiler configuration
     struct RecompilerConfig
     {
         std::string inputPath;
         std::string outputPath;
+        std::string functionsFile;  // Path to JSON functions file
         bool singleFileOutput;
         std::vector<std::string> skipFunctions;
         std::unordered_map<uint32_t, std::string> patches;
         std::vector<std::string> stubImplementations;
+        std::vector<ExternalFunction> externalFunctions;  // Functions loaded from file
     };
 
 } // namespace ps2recomp

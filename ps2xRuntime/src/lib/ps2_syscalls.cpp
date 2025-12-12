@@ -14,6 +14,19 @@
 std::unordered_map<int, FILE *> g_fileDescriptors;
 int g_nextFd = 3; // Start after stdin, stdout, stderr
 
+// Semaphore tracking
+static int g_nextSemaId = 1;
+static std::unordered_map<int, int> g_semaphores; // id -> count
+
+// Thread tracking
+static int g_nextThreadId = 2; // 1 is main thread
+static int g_currentThreadId = 1;
+
+// Helper to continue execution at return address after syscall
+static inline void continueAtRa(R5900Context* ctx) {
+    ctx->pc = M128I_U32(ctx->r[31], 0);
+}
+
 int allocatePs2Fd(FILE *file)
 {
     if (!file)
@@ -100,7 +113,7 @@ namespace ps2_syscalls
     {
         std::cout << "Syscall: FlushCache (No-op)" << std::endl;
         // No-op for now
-        setReturnS32(ctx, 0);
+        setReturnS32(ctx, 0); continueAtRa(ctx);
     }
 
     void ResetEE(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
@@ -118,7 +131,9 @@ namespace ps2_syscalls
 
     void CreateThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        int threadId = g_nextThreadId++;
+        std::cout << "CreateThread: Created thread " << threadId << std::endl;
+        setReturnS32(ctx, threadId); continueAtRa(ctx);
     }
 
     void DeleteThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
@@ -128,7 +143,9 @@ namespace ps2_syscalls
 
     void StartThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        int threadId = getRegU32(ctx, 4);
+        std::cout << "StartThread: Starting thread " << threadId << std::endl;
+        setReturnS32(ctx, 0); continueAtRa(ctx);
     }
 
     void ExitThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
@@ -159,7 +176,7 @@ namespace ps2_syscalls
 
     void GetThreadId(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        setReturnS32(ctx, g_currentThreadId); continueAtRa(ctx);
     }
 
     void ReferThreadStatus(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
@@ -204,32 +221,58 @@ namespace ps2_syscalls
 
     void CreateSema(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        // CreateSema(SemaParam *param)
+        // Returns semaphore ID on success, negative on error
+        uint32_t paramAddr = getRegU32(ctx, 4);
+        int semaId = g_nextSemaId++;
+        g_semaphores[semaId] = 1; // Initial count
+        std::cout << "CreateSema: Created semaphore " << semaId << std::endl;
+        setReturnS32(ctx, semaId); continueAtRa(ctx);
     }
 
     void DeleteSema(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        int semaId = getRegU32(ctx, 4);
+        g_semaphores.erase(semaId);
+        setReturnS32(ctx, 0); continueAtRa(ctx);
     }
 
     void SignalSema(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        int semaId = getRegU32(ctx, 4);
+        if (g_semaphores.find(semaId) != g_semaphores.end()) {
+            g_semaphores[semaId]++;
+        }
+        setReturnS32(ctx, 0);
     }
 
     void iSignalSema(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        int semaId = getRegU32(ctx, 4);
+        if (g_semaphores.find(semaId) != g_semaphores.end()) {
+            g_semaphores[semaId]++;
+        }
+        setReturnS32(ctx, 0);
     }
 
     void WaitSema(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        int semaId = getRegU32(ctx, 4);
+        if (g_semaphores.find(semaId) != g_semaphores.end() && g_semaphores[semaId] > 0) {
+            g_semaphores[semaId]--;
+        }
+        setReturnS32(ctx, 0);
     }
 
     void PollSema(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        int semaId = getRegU32(ctx, 4);
+        if (g_semaphores.find(semaId) != g_semaphores.end() && g_semaphores[semaId] > 0) {
+            g_semaphores[semaId]--;
+            setReturnS32(ctx, 0); continueAtRa(ctx);
+        } else {
+            setReturnS32(ctx, -1); // Would block
+        }
     }
 
     void iPollSema(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
@@ -324,22 +367,22 @@ namespace ps2_syscalls
 
     void EnableIntc(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        setReturnS32(ctx, 1); // Return previous state (enabled)
     }
 
     void DisableIntc(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        setReturnS32(ctx, 1); // Return previous state
     }
 
     void EnableDmac(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        setReturnS32(ctx, 1); continueAtRa(ctx);
     }
 
     void DisableDmac(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        setReturnS32(ctx, 1); continueAtRa(ctx);
     }
 
     void SifStopModule(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
