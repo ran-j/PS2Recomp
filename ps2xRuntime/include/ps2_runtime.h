@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <vector>
 #include <unordered_map>
+#include <map>
 #include <string>
 #include <functional>
 #include <immintrin.h> // For SSE/AVX instructions
@@ -510,10 +511,27 @@ private:
     R5900Context m_cpuContext;
 
     std::unordered_map<uint32_t, RecompiledFunction> m_functionTable;
+    std::map<uint32_t, RecompiledFunction> m_sortedFunctionTable; // For range lookup
 
     // Custom syscall handlers registered via SetSyscall
     std::unordered_map<uint32_t, uint32_t> m_customSyscalls;
 
+    // Interrupt handlers registered via AddIntcHandler
+    // Key: INTC cause (0=GS, 2=VBLANK_S, 3=VBLANK_E, etc.)
+    // Value: handler address
+    std::unordered_map<uint32_t, uint32_t> m_intcHandlers;
+
+    // Track enabled interrupts
+    uint32_t m_intcMask = 0;
+
+public:
+    // Trigger a VBlank interrupt (call from render loop)
+    void triggerVBlank();
+
+    // Register an interrupt handler
+    int addIntcHandler(uint32_t cause, uint32_t handler);
+
+private:
     struct LoadedModule
     {
         std::string name;

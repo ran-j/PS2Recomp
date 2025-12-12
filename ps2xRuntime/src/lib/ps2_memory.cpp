@@ -342,6 +342,9 @@ void PS2Memory::write16(uint32_t address, uint16_t value)
 
 void PS2Memory::write32(uint32_t address, uint32_t value)
 {
+    if (address >= 0x10000000 && address < 0x20000000) { /* DEBUG_INJECT */
+        std::cout << "HW Write32: 0x" << std::hex << address << " = 0x" << value << std::dec << std::endl; /* DEBUG_INJECT */
+    } /* DEBUG_INJECT */
     // Check alignment
     if (address & 3)
     {

@@ -99,11 +99,11 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt) {
 PS2Runtime::PS2Runtime() {
     std::memset(&m_cpuContext, 0, sizeof(m_cpuContext));
     m_cpuContext.r[0] = _mm_set1_epi32(0);
-    m_functionTable.clear();
+    m_functionTable.clear(); m_sortedFunctionTable.clear();
     m_loadedModules.clear();
 }
 
-PS2Runtime::~PS2Runtime() { m_loadedModules.clear(); m_functionTable.clear(); }
+PS2Runtime::~PS2Runtime() { m_loadedModules.clear(); m_functionTable.clear(); m_sortedFunctionTable.clear(); }
 
 bool PS2Runtime::initialize(const char *title) {
     if (!m_memory.initialize()) return false;
@@ -140,10 +140,29 @@ bool PS2Runtime::loadELF(const std::string &elfPath) {
     return true;
 }
 
-void PS2Runtime::registerFunction(uint32_t address, RecompiledFunction func) { m_functionTable[address] = func; }
+void PS2Runtime::registerFunction(uint32_t address, RecompiledFunction func) {
+    m_functionTable[address] = func;
+    m_sortedFunctionTable[address] = func;
+}
 PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address) {
+    // Try exact match first
     auto it = m_functionTable.find(address);
-    return (it != m_functionTable.end()) ? it->second : nullptr;
+    if (it != m_functionTable.end()) {
+        return it->second;
+    }
+    
+    // Fallback: find containing function (for mid-function entry via indirect jumps)
+    // Use upper_bound to find first function > address, then go back one
+    auto upper = m_sortedFunctionTable.upper_bound(address);
+    if (upper != m_sortedFunctionTable.begin()) {
+        --upper;
+        // Found a function that starts at or before this address
+        // Set ctx->pc so the function's dispatch block can handle it
+        m_cpuContext.pc = address;
+        return upper->second;
+    }
+    
+    return nullptr;
 }
 void PS2Runtime::SignalException(R5900Context *ctx, PS2Exception exception) { if (exception == EXCEPTION_INTEGER_OVERFLOW) HandleIntegerOverflow(ctx); }
 void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint32_t address) {}
@@ -177,14 +196,52 @@ void PS2Runtime::handleSyscall(uint8_t *rdram, R5900Context *ctx) {
                 setReturnU32(ctx, handler_addr);
             }
             break;
-        case 0x14: ps2_syscalls::EnableIntc(rdram, ctx, this); break;
-        case 0x15: ps2_syscalls::DisableIntc(rdram, ctx, this); break;
+        case 0x10: // AddIntcHandler
+            {
+                uint32_t cause = M128I_U32(ctx->r[4], 0);
+                uint32_t handler = M128I_U32(ctx->r[5], 0);
+                int handlerId = addIntcHandler(cause, handler);
+                setReturnS32(ctx, handlerId);
+            }
+            break;
+        case 0x11: // RemoveIntcHandler
+            {
+                uint32_t cause = M128I_U32(ctx->r[4], 0);
+                m_intcHandlers.erase(cause);
+                std::cout << "  -> RemoveIntcHandler: cause=" << cause << std::endl;
+                setReturnS32(ctx, 1);
+            }
+            break;
+        case 0x14: // EnableIntc
+            {
+                uint32_t cause = M128I_U32(ctx->r[4], 0);
+                uint32_t oldMask = m_intcMask;
+                m_intcMask |= (1 << cause);
+                std::cout << "  -> EnableIntc: cause=" << cause << " mask=0x" << std::hex << m_intcMask << std::dec << std::endl;
+                setReturnS32(ctx, (oldMask >> cause) & 1);
+            }
+            break;
+        case 0x15: // DisableIntc
+            {
+                uint32_t cause = M128I_U32(ctx->r[4], 0);
+                uint32_t oldMask = m_intcMask;
+                m_intcMask &= ~(1 << cause);
+                std::cout << "  -> DisableIntc: cause=" << cause << " mask=0x" << std::hex << m_intcMask << std::dec << std::endl;
+                setReturnS32(ctx, (oldMask >> cause) & 1);
+            }
+            break;
         case 0x16: ps2_syscalls::EnableDmac(rdram, ctx, this); break;
         case 0x17: ps2_syscalls::DisableDmac(rdram, ctx, this); break;
         case 0x20: ps2_syscalls::CreateThread(rdram, ctx, this); break;
         case 0x21: ps2_syscalls::DeleteThread(rdram, ctx, this); break;
         case 0x22: ps2_syscalls::StartThread(rdram, ctx, this); break;
         case 0x23: ps2_syscalls::ExitThread(rdram, ctx, this); break;
+        case 0x29: // ChangeThreadPriority
+            {
+                std::cout << "  -> ChangeThreadPriority (stubbed)" << std::endl;
+                setReturnS32(ctx, 0); // Return old priority (0 = highest)
+            }
+            break;
         case 0x2f: ps2_syscalls::GetThreadId(rdram, ctx, this); break;
         case 0x32: ps2_syscalls::SleepThread(rdram, ctx, this); break;
         case 0x33: ps2_syscalls::WakeupThread(rdram, ctx, this); break;
@@ -245,9 +302,36 @@ void PS2Runtime::handleSyscall(uint8_t *rdram, R5900Context *ctx) {
         case 0x43: ps2_syscalls::iSignalSema(rdram, ctx, this); break;
         case 0x44: ps2_syscalls::WaitSema(rdram, ctx, this); break;
         case 0x45: ps2_syscalls::PollSema(rdram, ctx, this); break;
+        case 0x4a: // SetOsdConfigParam
+            {
+                std::cout << "  -> SetOsdConfigParam (stubbed)" << std::endl;
+                setReturnS32(ctx, 0);
+            }
+            break;
+        case 0x4b: // GetOsdConfigParam
+            {
+                // Return a dummy OSD config (NTSC, English, etc.)
+                uint32_t configAddr = M128I_U32(ctx->r[4], 0);
+                std::cout << "  -> GetOsdConfigParam: writing to 0x" << std::hex << configAddr << std::dec << std::endl;
+                // Write zero config (default)
+                if (configAddr > 0 && configAddr < 0x02000000) {
+                    *reinterpret_cast<uint32_t*>(rdram + (configAddr & 0x1FFFFFFF)) = 0;
+                }
+                setReturnS32(ctx, 0);
+            }
+            break;
         case 0x64: ps2_syscalls::FlushCache(rdram, ctx, this); break;
         case 0x70: ps2_syscalls::GsGetIMR(rdram, ctx, this); break;
         case 0x71: ps2_syscalls::GsPutIMR(rdram, ctx, this); break;
+        case 0x73: // SetVSyncFlag
+            {
+                // SetVSyncFlag(flag1_addr, flag2_addr) - set addresses for vsync flag updates
+                uint32_t flag1 = M128I_U32(ctx->r[4], 0);
+                uint32_t flag2 = M128I_U32(ctx->r[5], 0);
+                std::cout << "  -> SetVSyncFlag: flag1=0x" << std::hex << flag1 << " flag2=0x" << flag2 << std::dec << std::endl;
+                setReturnS32(ctx, 0);
+            }
+            break;
         case 0x74: // SetSyscall - register custom syscall handler
             {
                 // SetSyscall(int syscall_num, void* handler)
@@ -259,6 +343,12 @@ void PS2Runtime::handleSyscall(uint8_t *rdram, R5900Context *ctx) {
                 // Store the custom handler
                 m_customSyscalls[syscall_to_set] = handler_addr;
                 // Return success (0)
+                setReturnS32(ctx, 0);
+            }
+            break;
+        case 0x83: // Unknown - possibly memory related, stub it
+            {
+                std::cout << "  -> Syscall 0x83 (stubbed)" << std::endl;
                 setReturnS32(ctx, 0);
             }
             break;
@@ -292,6 +382,49 @@ void PS2Runtime::handleSyscall(uint8_t *rdram, R5900Context *ctx) {
             break;
     }
 }
+int PS2Runtime::addIntcHandler(uint32_t cause, uint32_t handler) {
+    static int nextHandlerId = 0;
+    m_intcHandlers[cause] = handler;
+    std::cout << "  -> AddIntcHandler: cause=" << cause << " handler=0x" << std::hex << handler << std::dec << std::endl;
+    return nextHandlerId++;
+}
+
+void PS2Runtime::triggerVBlank() {
+    // INTC cause 2 = VBLANK_S (VBlank Start)
+    const uint32_t INTC_VBLANK_S = 2;
+
+    // Increment VBlank counter at known addresses (game-specific workaround)
+    // Sly Cooper uses 0x2623b8 as g_cVBlank counter
+    static uint32_t vblankCounter = 0;
+    vblankCounter++;
+    uint8_t* rdram = m_memory.getRDRAM();
+    *reinterpret_cast<uint32_t*>(rdram + 0x2623b8) = vblankCounter;
+
+    // Check if VBlank interrupt is enabled and has a handler
+    if ((m_intcMask & (1 << INTC_VBLANK_S)) && m_intcHandlers.find(INTC_VBLANK_S) != m_intcHandlers.end()) {
+        uint32_t handler = m_intcHandlers[INTC_VBLANK_S];
+        RecompiledFunction func = lookupFunction(handler);
+        if (func) {
+            // Save current context
+            uint32_t savedPc = m_cpuContext.pc;
+            __m128i savedRa = m_cpuContext.r[31];
+            __m128i savedA0 = m_cpuContext.r[4];
+
+            // Set up interrupt context
+            // A0 = interrupt cause
+            m_cpuContext.r[4] = _mm_set1_epi32(INTC_VBLANK_S);
+            // RA = return to current PC (we'll restore it)
+            m_cpuContext.r[31] = _mm_set1_epi32(savedPc);
+
+            // Call the handler
+            func(m_memory.getRDRAM(), &m_cpuContext, this);
+
+            // Restore context (handler may have modified things)
+            // Note: We keep any changes the handler made to other registers
+        }
+    }
+}
+
 void PS2Runtime::handleBreak(uint8_t *rdram, R5900Context *ctx) {}
 void PS2Runtime::handleTrap(uint8_t *rdram, R5900Context *ctx) {}
 void PS2Runtime::handleTLBR(uint8_t *rdram, R5900Context *ctx) {}
@@ -311,11 +444,23 @@ void PS2Runtime::run() {
     UnloadImage(blank);
     std::atomic<bool> running{true};
     std::atomic<bool> shouldExit{false};
+    std::atomic<bool> vblankPending{false};
     std::thread gameThread([&]() {
         try {
             uint32_t lastPc = 0;
             uint64_t calls = 0;
+            uint64_t callsSinceVBlank = 0;
+            const uint64_t VBLANK_INTERVAL = 10000; // Trigger VBlank every N calls
             while (!shouldExit) {
+                // Check for pending VBlank from render thread
+                if (vblankPending.exchange(false)) {
+                    triggerVBlank();
+                }
+                // Also trigger VBlank periodically based on call count
+                if (++callsSinceVBlank >= VBLANK_INTERVAL) {
+                    callsSinceVBlank = 0;
+                    triggerVBlank();
+                }
                 uint32_t pc = m_cpuContext.pc;
                 RecompiledFunction func = lookupFunction(pc);
                 if (!func) {
@@ -325,7 +470,8 @@ void PS2Runtime::run() {
                     break;
                 }
                 lastPc = pc; calls++;
-                if (calls < 50 || calls > 95) { /* DEBUG_INJECT */
+                // Log first 50 calls, then every 1000th call, then stops/errors
+                if (calls <= 50 || calls % 1000 == 0) { /* DEBUG_INJECT */
                     std::cout << "=== Call #" << calls << " ===" << std::endl; /* DEBUG_INJECT */
                     std::cout << "  PC: 0x" << std::hex << pc << std::dec << std::endl; /* DEBUG_INJECT */
                     std::cout << "  RA: 0x" << std::hex << M128I_U32(m_cpuContext.r[31], 0) << std::dec << std::endl; /* DEBUG_INJECT */
@@ -333,6 +479,7 @@ void PS2Runtime::run() {
                     std::cout << "  A0: 0x" << std::hex << M128I_U32(m_cpuContext.r[4], 0) << std::dec << std::endl; /* DEBUG_INJECT */
                     std::cout << "  A1: 0x" << std::hex << M128I_U32(m_cpuContext.r[5], 0) << std::dec << std::endl; /* DEBUG_INJECT */
                     std::cout << "  V0: 0x" << std::hex << M128I_U32(m_cpuContext.r[2], 0) << std::dec << std::endl; /* DEBUG_INJECT */
+                    std::cout << std::flush; /* DEBUG_INJECT */
                 }
                 func(m_memory.getRDRAM(), &m_cpuContext, this);
             }
@@ -341,6 +488,9 @@ void PS2Runtime::run() {
         running = false;
     });
     while (running && !WindowShouldClose()) {
+        // Signal VBlank to game thread (synced with actual display refresh)
+        vblankPending = true;
+
         UploadFrame(frameTex, this);
         BeginDrawing();
         ClearBackground(BLACK);

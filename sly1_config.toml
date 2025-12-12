@@ -1,0 +1,72 @@
+# PS2Recomp Configuration for Sly Cooper and the Thievius Raccoonus (NTSC-U)
+# Game: SCUS_971.98
+# SHA1: 57dc305db57932ad3f1122966cdb695d2e62a47a
+
+[general]
+# Path to input ELF file (relative to this config)
+input = "../disc/SCUS_971.98"
+
+# Path to output directory
+output = "../recomp_output/"
+
+# Single file output mode (true = one big file, faster to compile)
+single_file_output = true
+
+# External functions file (for stripped ELFs without symbol tables)
+functions_file = "sly1_functions.json"
+
+# Path to runtime header
+runtime_header = "ps2xRuntime/include/ps2_runtime.h"
+
+# Standard library functions to stub (generate empty implementations)
+stubs = [
+    # C standard library
+    "printf", "sprintf", "snprintf", "vprintf", "vsprintf",
+    "malloc", "free", "calloc", "realloc",
+    "memcpy", "memset", "memmove", "memcmp",
+    "strcpy", "strncpy", "strcat", "strncat", "strcmp", "strncmp", "strlen",
+    "fopen", "fclose", "fread", "fwrite", "fseek", "ftell",
+
+    # PS2 SDK functions (need runtime implementation)
+    "sceSifInitRpc", "sceSifExitRpc",
+    "sceGsResetGraph", "sceGsResetPath",
+    "scePadInit", "scePadRead", "scePadEnd",
+    "sceCdInit", "sceCdRead", "sceCdSync",
+    "sceVu0UnitMatrix", "sceVu0MulMatrix",
+
+    # 989snd audio library
+    "snd_StartSound", "snd_StopSound", "snd_SetSoundVolume"
+]
+
+# Functions to completely skip (not recompiled at all)
+skip = [
+    "abort", "exit", "_exit",
+    "__start",           # CRT startup
+    "_ftext",            # Entry point symbol
+    "__do_global_dtors", # C++ destructors
+    "__do_global_ctors"  # C++ constructors
+    # Note: matherr, __is_pointer, __cp_pop_exception now work with fn_ prefix sanitization
+]
+
+# Patches to apply during recompilation
+[patches]
+# Example: NOP out anti-piracy check (if needed)
+# instructions = [
+#   { address = "0x2c760", value = "0x00000000" },  # NOP anticrack check
+# ]
+
+# Known function addresses from decomp project (for better symbol resolution)
+# These come from the Sly 1 decomp project's splat config
+[symbols]
+# Key game functions (from config/sly1.yaml)
+# Format: address = "function_name"
+# 0x100000 = "_start"
+
+# P2/sort functions
+# 0xBF0A8 = "HeapSort__FPviiPFPvPv_i"
+# 0xBED78 = "SwapEntries__FPviii"
+
+# Note: Full symbol list should be extracted from:
+# - SCUS_971.98.ld (linker script)
+# - config/sly1.yaml (splat config)
+# - asm/nonmatchings/ (disassembled functions)

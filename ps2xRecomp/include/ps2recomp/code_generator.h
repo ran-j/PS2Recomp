@@ -16,10 +16,16 @@ namespace ps2recomp
         CodeGenerator(const std::vector<Symbol> &symbols);
         ~CodeGenerator();
 
-        std::string generateFunction(const Function &function, const std::vector<Instruction> &instructions, const bool &useHeaders);
-        std::string generateFunctionRegistration(const std::vector<Function> &functions, const std::map<uint32_t, std::string> &stubs);
+        std::string generateFunction(const Function &function, const std::vector<Instruction> &instructions, const bool &useHeaders,
+                                      const std::set<uint32_t> &midFunctionEntryPoints = {});
+        std::string generateFunctionRegistration(const std::vector<Function> &functions, const std::map<uint32_t, std::string> &stubs,
+                                                  const std::set<uint32_t> &midFunctionEntryPoints = {});
         std::string generateMacroHeader();
         std::string handleBranchDelaySlots(const Instruction &branchInst, const Instruction &delaySlot);
+
+        // Generate stub for mid-function entry point
+        std::string generateMidFunctionStub(uint32_t entryAddr, const Function &containingFunc,
+                                            const std::vector<Instruction> &instructions);
 
     private:
         std::vector<Symbol> m_symbols;

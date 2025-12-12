@@ -531,8 +531,7 @@ CodeGenerator::CodeGenerator(const std::vector<Symbol> &symbols)
         return ss.str();
     }
 
-    std::string CodeGenerator::generateFunction(const Function &function, const std::vector<Instruction> &instructions, const bool &useHeaders,
-                                                  const std::set<uint32_t> &midFunctionEntryPoints)
+    std::string CodeGenerator::generateFunction(const Function &function, const std::vector<Instruction> &instructions, const bool &useHeaders)
     {
         std::stringstream ss;
 
@@ -554,31 +553,6 @@ CodeGenerator::CodeGenerator(const std::vector<Symbol> &symbols)
         m_currentFuncStart = function.start;
         m_currentFuncEnd = function.end;
         collectBranchTargets(instructions);
-
-        // Find mid-function entry points that fall within this function
-        std::set<uint32_t> localMidFuncEntries;
-        for (uint32_t addr : midFunctionEntryPoints) {
-            if (addr > function.start && addr < function.end) {
-                localMidFuncEntries.insert(addr);
-                // Also add to internal branch targets so labels get generated
-                m_internalBranchTargets.insert(addr);
-            }
-        }
-
-        // If this function has mid-function entry points, generate a dispatch block
-        if (!localMidFuncEntries.empty()) {
-            ss << "    // Dispatch for mid-function entry points\n";
-            ss << "    if (ctx->pc != 0 && ctx->pc != 0x" << std::hex << function.start << std::dec << ") {\n";
-            ss << "        switch (ctx->pc) {\n";
-            for (uint32_t entryAddr : localMidFuncEntries) {
-                ss << "            case 0x" << std::hex << entryAddr << std::dec
-                   << ": ctx->pc = 0; goto label_" << std::hex << entryAddr << std::dec << ";\n";
-            }
-            ss << "            default: break;\n";
-            ss << "        }\n";
-            ss << "        ctx->pc = 0; // Reset PC and continue from start\n";
-            ss << "    }\n\n";
-        }
 
         for (size_t i = 0; i < instructions.size(); ++i)
         {
@@ -2430,8 +2404,7 @@ CodeGenerator::CodeGenerator(const std::vector<Symbol> &symbols)
     }
 
     std::string CodeGenerator::generateFunctionRegistration(const std::vector<Function> &functions,
-                                                            const std::map<uint32_t, std::string> &stubs,
-                                                            const std::set<uint32_t> &midFunctionEntryPoints)
+                                                            const std::map<uint32_t, std::string> &stubs)
     {
         static const std::unordered_map<std::string, std::pair<uint32_t, std::string>> systemCalls = {
             // Memory management

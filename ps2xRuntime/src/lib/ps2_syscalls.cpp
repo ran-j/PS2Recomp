@@ -15,7 +15,7 @@ std::unordered_map<int, FILE *> g_fileDescriptors;
 int g_nextFd = 3; // Start after stdin, stdout, stderr
 
 // Semaphore tracking
-static int g_nextSemaId = 1;
+static int g_nextSemaId = 0; // PS2 kernel starts semaphore IDs at 0
 static std::unordered_map<int, int> g_semaphores; // id -> count
 
 // Thread tracking
@@ -222,11 +222,20 @@ namespace ps2_syscalls
     void CreateSema(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         // CreateSema(SemaParam *param)
+        // SemaParam struct: { u32 attr; u32 option; s32 init_count; s32 max_count; }
         // Returns semaphore ID on success, negative on error
         uint32_t paramAddr = getRegU32(ctx, 4);
         int semaId = g_nextSemaId++;
-        g_semaphores[semaId] = 1; // Initial count
-        std::cout << "CreateSema: Created semaphore " << semaId << std::endl;
+
+        // Read initial count from SemaParam (offset 8)
+        int32_t initCount = 1; // Default
+        if (paramAddr > 0 && paramAddr < 0x02000000) {
+            uint32_t physAddr = paramAddr & 0x1FFFFFFF;
+            initCount = *reinterpret_cast<int32_t*>(rdram + physAddr + 8);
+        }
+
+        g_semaphores[semaId] = initCount;
+        std::cout << "CreateSema: Created semaphore " << semaId << " with count=" << initCount << std::endl;
         setReturnS32(ctx, semaId); continueAtRa(ctx);
     }
 
@@ -241,7 +250,10 @@ namespace ps2_syscalls
     {
         int semaId = getRegU32(ctx, 4);
         if (g_semaphores.find(semaId) != g_semaphores.end()) {
+            int oldCount = g_semaphores[semaId];
             g_semaphores[semaId]++;
+            std::cout << "  SignalSema(" << semaId << "): " << oldCount << " -> " << g_semaphores[semaId];
+            std::cout << " [s0=" << M128I_U32(ctx->r[16], 0) << "]" << std::endl;
         }
         setReturnS32(ctx, 0);
     }
@@ -258,8 +270,19 @@ namespace ps2_syscalls
     void WaitSema(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
         int semaId = getRegU32(ctx, 4);
-        if (g_semaphores.find(semaId) != g_semaphores.end() && g_semaphores[semaId] > 0) {
-            g_semaphores[semaId]--;
+
+        // Always trigger VBlank to update counters
+        runtime->triggerVBlank();
+
+        if (g_semaphores.find(semaId) != g_semaphores.end()) {
+            if (g_semaphores[semaId] > 0) {
+                g_semaphores[semaId]--;
+            } else {
+                // Semaphore not available - simulate VBlank signal to unblock
+                // This is a workaround since we don't have proper blocking semaphores
+                g_semaphores[semaId] = 1;
+                g_semaphores[semaId]--;
+            }
         }
         setReturnS32(ctx, 0);
     }
