@@ -4,11 +4,57 @@
 #include <cstdint>
 #include <vector>
 #include <unordered_map>
+#include <map>
 #include <string>
 #include <functional>
 #include <immintrin.h> // For SSE/AVX instructions
 #include <filesystem>
 #include <iostream>
+#include <iomanip>
+
+// Cross-platform __m128i element access
+// Note: These are also defined in ps2_runtime_macros.h for generated code
+// Check if already defined to avoid redefinition
+#ifndef M128I_U32
+#ifdef _MSC_VER
+    #define M128I_U32(v, i) ((v).m128i_u32[i])
+    #define M128I_U64(v, i) ((v).m128i_u64[i])
+    #define M128I_I32(v, i) ((v).m128i_i32[i])
+    #define M128I_I64(v, i) ((v).m128i_i64[i])
+#else
+    // GCC/Clang - use union or intrinsics
+    #ifndef M128I_UNION_DEFINED
+    #define M128I_UNION_DEFINED
+    union m128i_union_rt {
+        __m128i v;
+        uint32_t u32[4];
+        int32_t i32[4];
+        uint64_t u64[2];
+        int64_t i64[2];
+    };
+    inline uint32_t m128i_get_u32_rt(__m128i v, int i) {
+        m128i_union_rt u; u.v = v;
+        return u.u32[i];
+    }
+    inline int32_t m128i_get_i32_rt(__m128i v, int i) {
+        m128i_union_rt u; u.v = v;
+        return u.i32[i];
+    }
+    inline uint64_t m128i_get_u64_rt(__m128i v, int i) {
+        m128i_union_rt u; u.v = v;
+        return u.u64[i];
+    }
+    inline int64_t m128i_get_i64_rt(__m128i v, int i) {
+        m128i_union_rt u; u.v = v;
+        return u.i64[i];
+    }
+    #endif
+    #define M128I_U32(v, i) m128i_get_u32_rt(v, i)
+    #define M128I_U64(v, i) m128i_get_u64_rt(v, i)
+    #define M128I_I32(v, i) m128i_get_i32_rt(v, i)
+    #define M128I_I64(v, i) m128i_get_i64_rt(v, i)
+#endif
+#endif
 
 constexpr uint32_t PS2_RAM_SIZE = 32 * 1024 * 1024; // 32MB
 constexpr uint32_t PS2_RAM_MASK = 0x1FFFFFF;        // Mask for 32MB alignment
@@ -219,8 +265,8 @@ struct alignas(16) R5900Context
         for (int i = 0; i < 32; ++i)
         {
             std::cout << "R" << std::setw(2) << std::dec << i << ": 0x" << std::hex
-                      << std::setw(8) << r[i].m128i_u32[3] << std::setw(8) << r[i].m128i_u32[2] << "_"
-                      << std::setw(8) << r[i].m128i_u32[1] << std::setw(8) << r[i].m128i_u32[0] << "\n";
+                      << std::setw(8) << M128I_U32(r[i], 3) << std::setw(8) << M128I_U32(r[i], 2) << "_"
+                      << std::setw(8) << M128I_U32(r[i], 1) << std::setw(8) << M128I_U32(r[i], 0) << "\n";
         }
         std::cout << "Status: 0x" << std::setw(8) << cop0_status
                   << " Cause: 0x" << std::setw(8) << cop0_cause
@@ -237,7 +283,7 @@ inline uint32_t getRegU32(const R5900Context *ctx, int reg)
     // Check if reg is valid (0-31)
     if (reg < 0 || reg > 31)
         return 0;
-    return ctx->r[reg].m128i_u32[0];
+    return M128I_U32(ctx->r[reg], 0);
 }
 
 inline void setReturnU32(R5900Context *ctx, uint32_t value)
@@ -465,7 +511,27 @@ private:
     R5900Context m_cpuContext;
 
     std::unordered_map<uint32_t, RecompiledFunction> m_functionTable;
+    std::map<uint32_t, RecompiledFunction> m_sortedFunctionTable; // For range lookup
 
+    // Custom syscall handlers registered via SetSyscall
+    std::unordered_map<uint32_t, uint32_t> m_customSyscalls;
+
+    // Interrupt handlers registered via AddIntcHandler
+    // Key: INTC cause (0=GS, 2=VBLANK_S, 3=VBLANK_E, etc.)
+    // Value: handler address
+    std::unordered_map<uint32_t, uint32_t> m_intcHandlers;
+
+    // Track enabled interrupts
+    uint32_t m_intcMask = 0;
+
+public:
+    // Trigger a VBlank interrupt (call from render loop)
+    void triggerVBlank();
+
+    // Register an interrupt handler
+    int addIntcHandler(uint32_t cause, uint32_t handler);
+
+private:
     struct LoadedModule
     {
         std::string name;

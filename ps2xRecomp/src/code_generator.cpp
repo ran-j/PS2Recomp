@@ -8,7 +8,55 @@
 
 namespace ps2recomp
 {
-    CodeGenerator::CodeGenerator(const std::vector<Symbol> &symbols)
+    // Helper to rename reserved C++ identifiers
+    static std::string sanitizeFunctionName(const std::string& name) {
+        if (name == "main") return "game_main";
+        if (name == "matherr") return "fn_matherr";  // Conflicts with C library
+        // Prefix names starting with double underscore (reserved in C++)
+        if (name.size() >= 2 && name[0] == '_' && name[1] == '_') {
+            return "fn_" + name;
+        }
+        // Also handle names starting with underscore followed by uppercase
+        if (name.size() >= 2 && name[0] == '_' && std::isupper(name[1])) {
+            return "fn_" + name;
+        }
+        return name;
+    }
+
+    
+    bool CodeGenerator::isInternalBranch(uint32_t target) const {
+        return target >= m_currentFuncStart && target < m_currentFuncEnd;
+    }
+
+    void CodeGenerator::collectBranchTargets(const std::vector<Instruction> &instructions) {
+        m_internalBranchTargets.clear();
+        // First collect all instruction addresses
+        std::set<uint32_t> instructionAddresses;
+        for (const auto &inst : instructions) {
+            instructionAddresses.insert(inst.address);
+        }
+        // Then collect branch targets that are actually instructions in this function
+        for (const auto &inst : instructions) {
+            if (inst.isBranch) {
+                int32_t offset = inst.simmediate << 2;
+                uint32_t target = inst.address + 4 + offset;
+                // Only mark as internal if the target is an actual instruction in this function
+                if (instructionAddresses.count(target)) {
+                    m_internalBranchTargets.insert(target);
+                }
+            }
+            // Also collect return addresses of JAL instructions as potential branch targets
+            // This is needed for loops that call functions - we need a label to return to
+            if (inst.opcode == OPCODE_JAL) {
+                uint32_t returnAddr = inst.address + 8;
+                if (instructionAddresses.count(returnAddr)) {
+                    m_internalBranchTargets.insert(returnAddr);
+                }
+            }
+        }
+    }
+
+CodeGenerator::CodeGenerator(const std::vector<Symbol> &symbols)
         : m_symbols(symbols)
     {
     }
@@ -34,10 +82,23 @@ namespace ps2recomp
                 ss << "    " << delaySlotCode << "\n";
             }
             uint32_t target = (branchInst.address & 0xF0000000) | (branchInst.target << 2);
+            uint32_t returnAddr = branchInst.address + 8;
             Symbol *sym = findSymbolByAddress(target);
+
+            // Check if return address is inside current function (for loops with calls)
+            bool returnInsideFunction = isInternalBranch(returnAddr);
+            bool returnAddrIsLabel = m_internalBranchTargets.count(returnAddr) > 0;
+
             if (sym && sym->isFunction)
             {
-                ss << "    " << sym->name << "(rdram, ctx, runtime); return;\n";
+                ss << "    " << sanitizeFunctionName(sym->name) << "(rdram, ctx, runtime);";
+                // If return address is inside this function and is a branch target,
+                // continue execution instead of returning (fixes loops with syscalls)
+                if (returnInsideFunction && returnAddrIsLabel) {
+                    ss << " goto label_" << std::hex << returnAddr << std::dec << ";\n";
+                } else {
+                    ss << " return;\n";
+                }
             }
             else
             {
@@ -58,14 +119,10 @@ namespace ps2recomp
             {
                 ss << "    " << delaySlotCode << "\n";
             }
-            if (rs_reg == 31 && branchInst.function == SPECIAL_JR)
-            {
-                ss << "    return;\n";
-            }
-            else
-            {
-                ss << "    ctx->pc = GPR_U32(ctx, " << (int)rs_reg << "); return;\n";
-            }
+            // All jr instructions should set ctx->pc before returning
+            // This allows the run loop to know where to continue execution
+            ss << "    ctx->pc = GPR_U32(ctx, " << (int)rs_reg << "); return;\n";
+
         }
         else if (branchInst.isBranch)
         {
@@ -169,7 +226,12 @@ namespace ps2recomp
 
             if (sym && sym->isFunction)
             {
-                targetAction = fmt::format("{}(rdram, ctx, runtime); return;", sym->name);
+                targetAction = fmt::format("{}(rdram, ctx, runtime); return;", sanitizeFunctionName(sym->name));
+            }
+            else if (m_internalBranchTargets.count(target))
+            {
+                // Internal branch - use goto
+                targetAction = fmt::format("goto label_{:x};", target);
             }
             else
             {
@@ -199,13 +261,53 @@ namespace ps2recomp
             }
             else
             {
-                if (hasValidDelaySlot)
-                {
-                    ss << "    " << delaySlotCode << "\n";
+                // For non-likely branches, we need to handle the case where the delay slot
+                // modifies a register used in the branch condition.
+                // MIPS semantics: branch condition is evaluated BEFORE delay slot executes,
+                // but delay slot executes regardless of branch outcome.
+
+                // Check if delay slot writes to a register used in the condition
+                bool delaySlotConflict = false;
+                uint8_t delaySlotDestReg = 0;
+
+                if (hasValidDelaySlot) {
+                    // Get the destination register of the delay slot instruction
+                    if (delaySlot.opcode == OPCODE_LUI ||
+                        (delaySlot.opcode >= OPCODE_LB && delaySlot.opcode <= OPCODE_LWU) ||
+                        delaySlot.opcode == OPCODE_ADDIU || delaySlot.opcode == OPCODE_ADDI ||
+                        delaySlot.opcode == OPCODE_SLTI || delaySlot.opcode == OPCODE_SLTIU ||
+                        delaySlot.opcode == OPCODE_ANDI || delaySlot.opcode == OPCODE_ORI ||
+                        delaySlot.opcode == OPCODE_XORI) {
+                        delaySlotDestReg = delaySlot.rt;
+                    } else if (delaySlot.opcode == OPCODE_SPECIAL) {
+                        delaySlotDestReg = delaySlot.rd;
+                    }
+
+                    // Check if this register is used in the branch condition
+                    if (delaySlotDestReg != 0 && (delaySlotDestReg == rs_reg || delaySlotDestReg == rt_reg)) {
+                        delaySlotConflict = true;
+                    }
                 }
-                ss << "    if (" << conditionStr << ") {\n";
-                ss << "        " << targetAction << "\n";
-                ss << "    }\n";
+
+                if (delaySlotConflict) {
+                    // Save the condition value before delay slot modifies the register
+                    ss << "    {\n";
+                    ss << "        bool _branch_cond = " << conditionStr << ";\n";
+                    ss << "        " << delaySlotCode << "\n";
+                    ss << "        if (_branch_cond) {\n";
+                    ss << "            " << targetAction << "\n";
+                    ss << "        }\n";
+                    ss << "    }\n";
+                } else {
+                    // No conflict - original behavior is fine
+                    if (hasValidDelaySlot)
+                    {
+                        ss << "    " << delaySlotCode << "\n";
+                    }
+                    ss << "    if (" << conditionStr << ") {\n";
+                    ss << "        " << targetAction << "\n";
+                    ss << "    }\n";
+                }
             }
         }
         else
@@ -228,6 +330,7 @@ namespace ps2recomp
         ss << "#ifndef PS2_RUNTIME_MACROS_H\n";
         ss << "#define PS2_RUNTIME_MACROS_H\n\n";
         ss << "#include <cstdint>\n";
+        ss << "#include <cmath>\n";
         ss << "#include <immintrin.h> // For SSE/AVX intrinsics\n\n";
 
         ss << "// Basic MIPS arithmetic operations\n";
@@ -425,10 +528,28 @@ namespace ps2recomp
         ss << "#define PS2_VCALLMS(addr) // VU0 microprogram calls not supported directly\n";
         ss << "#define PS2_VCALLMSR(reg) // VU0 microprogram calls not supported directly\n";
 
-        ss << "#define GPR_U32(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0U : ctx_ptr->r[reg_idx].m128i_u32[0])\n";
-        ss << "#define GPR_S32(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0 : ctx_ptr->r[reg_idx].m128i_i32[0])\n";
-        ss << "#define GPR_U64(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0ULL : ctx_ptr->r[reg_idx].m128i_u64[0])\n";
-        ss << "#define GPR_S64(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0LL : ctx_ptr->r[reg_idx].m128i_i64[0])\n";
+        // Cross-platform __m128i element access
+        ss << "// Cross-platform __m128i element access\n";
+        ss << "#ifdef _MSC_VER\n";
+        ss << "    #define M128I_U32(v, i) ((v).m128i_u32[i])\n";
+        ss << "    #define M128I_I32(v, i) ((v).m128i_i32[i])\n";
+        ss << "    #define M128I_U64(v, i) ((v).m128i_u64[i])\n";
+        ss << "    #define M128I_I64(v, i) ((v).m128i_i64[i])\n";
+        ss << "#else\n";
+        ss << "    union m128i_union { __m128i v; uint32_t u32[4]; int32_t i32[4]; uint64_t u64[2]; int64_t i64[2]; };\n";
+        ss << "    inline uint32_t m128i_get_u32(__m128i v, int i) { m128i_union u; u.v = v; return u.u32[i]; }\n";
+        ss << "    inline int32_t m128i_get_i32(__m128i v, int i) { m128i_union u; u.v = v; return u.i32[i]; }\n";
+        ss << "    inline uint64_t m128i_get_u64(__m128i v, int i) { m128i_union u; u.v = v; return u.u64[i]; }\n";
+        ss << "    inline int64_t m128i_get_i64(__m128i v, int i) { m128i_union u; u.v = v; return u.i64[i]; }\n";
+        ss << "    #define M128I_U32(v, i) m128i_get_u32(v, i)\n";
+        ss << "    #define M128I_I32(v, i) m128i_get_i32(v, i)\n";
+        ss << "    #define M128I_U64(v, i) m128i_get_u64(v, i)\n";
+        ss << "    #define M128I_I64(v, i) m128i_get_i64(v, i)\n";
+        ss << "#endif\n\n";
+        ss << "#define GPR_U32(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0U : M128I_U32(ctx_ptr->r[reg_idx], 0))\n";
+        ss << "#define GPR_S32(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0 : M128I_I32(ctx_ptr->r[reg_idx], 0))\n";
+        ss << "#define GPR_U64(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0ULL : M128I_U64(ctx_ptr->r[reg_idx], 0))\n";
+        ss << "#define GPR_S64(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0LL : M128I_I64(ctx_ptr->r[reg_idx], 0))\n";
         ss << "#define GPR_VEC(ctx_ptr, reg_idx) ((reg_idx == 0) ? _mm_setzero_si128() : ctx_ptr->r[reg_idx])\n";
 
         ss << "#define SET_GPR_U32(ctx_ptr, reg_idx, val) \\\n";
@@ -471,7 +592,8 @@ namespace ps2recomp
         return ss.str();
     }
 
-    std::string CodeGenerator::generateFunction(const Function &function, const std::vector<Instruction> &instructions, const bool &useHeaders)
+    std::string CodeGenerator::generateFunction(const Function &function, const std::vector<Instruction> &instructions, const bool &useHeaders,
+                                                  const std::set<uint32_t> &midFunctionEntryPoints)
     {
         std::stringstream ss;
 
@@ -483,13 +605,50 @@ namespace ps2recomp
             ss << "#include \"ps2_recompiled_stubs.h\"\n\n";
         }
 
-        ss << "// Function: " << function.name << "\n";
+        std::string funcName = sanitizeFunctionName(function.name);
+        ss << "// Function: " << funcName << "\n";
         ss << "// Address: 0x" << std::hex << function.start << " - 0x" << function.end << std::dec << "\n";
-        ss << "void " << function.name << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime) {\n\n";
+        ss << "void " << funcName << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime) {\n\n";
+
+
+        // Set current function bounds for internal branch detection
+        m_currentFuncStart = function.start;
+        m_currentFuncEnd = function.end;
+        collectBranchTargets(instructions);
+
+        // Find mid-function entry points that fall within this function
+        std::set<uint32_t> localMidFuncEntries;
+        for (uint32_t addr : midFunctionEntryPoints) {
+            if (addr > function.start && addr < function.end) {
+                localMidFuncEntries.insert(addr);
+                // Also add to internal branch targets so labels get generated
+                m_internalBranchTargets.insert(addr);
+            }
+        }
+
+        // If this function has mid-function entry points, generate a dispatch block
+        if (!localMidFuncEntries.empty()) {
+            ss << "    // Dispatch for mid-function entry points\n";
+            ss << "    if (ctx->pc != 0 && ctx->pc != 0x" << std::hex << function.start << std::dec << ") {\n";
+            ss << "        switch (ctx->pc) {\n";
+            for (uint32_t entryAddr : localMidFuncEntries) {
+                ss << "            case 0x" << std::hex << entryAddr << std::dec
+                   << ": ctx->pc = 0; goto label_" << std::hex << entryAddr << std::dec << ";\n";
+            }
+            ss << "            default: break;\n";
+            ss << "        }\n";
+            ss << "        ctx->pc = 0; // Reset PC and continue from start\n";
+            ss << "    }\n\n";
+        }
 
         for (size_t i = 0; i < instructions.size(); ++i)
         {
             const Instruction &inst = instructions[i];
+
+            // Emit label if this address is an internal branch target
+            if (m_internalBranchTargets.count(inst.address)) {
+                ss << "label_" << std::hex << inst.address << std::dec << ":\n";
+            }
 
             ss << "    // 0x" << std::hex << inst.address << ": 0x" << inst.raw << std::dec << "\n";
 
@@ -498,10 +657,39 @@ namespace ps2recomp
                 if (inst.hasDelaySlot && i + 1 < instructions.size())
                 {
                     const Instruction &delaySlot = instructions[i + 1];
-                    ss << handleBranchDelaySlots(inst, delaySlot);
+
+                    // Check if the delay slot is also a branch target
+                    bool delaySlotIsBranchTarget = m_internalBranchTargets.count(delaySlot.address) > 0;
+
+                    if (delaySlotIsBranchTarget)
+                    {
+                        // Special handling: delay slot is a branch target
+                        // We need to emit code that handles both:
+                        // 1. Normal execution through the branch (delay slot + branch eval)
+                        // 2. Direct jump to the delay slot (delay slot only, no branch eval)
+
+                        ss << handleBranchDelaySlots(inst, delaySlot);
+                        ss << "    goto after_branch_" << std::hex << inst.address << std::dec << ";\n";
+                        ss << "label_" << std::hex << delaySlot.address << std::dec << ":\n";
+                        ss << "    " << translateInstruction(delaySlot) << "\n";
+                        ss << "after_branch_" << std::hex << inst.address << std::dec << ":\n";
+                    }
+                    else
+                    {
+                        ss << handleBranchDelaySlots(inst, delaySlot);
+                    }
 
                     // Skip the delay slot instruction as we've already handled it
                     ++i;
+                }
+                else if (inst.hasDelaySlot)
+                {
+                    // Branch/jump at end of function without delay slot in this function
+                    // The delay slot is in the next function, so create a dummy NOP
+                    Instruction dummyDelaySlot = {};
+                    dummyDelaySlot.raw = 0;  // NOP
+                    dummyDelaySlot.address = inst.address + 4;
+                    ss << handleBranchDelaySlots(inst, dummyDelaySlot);
                 }
                 else
                 {
@@ -519,6 +707,41 @@ namespace ps2recomp
 
                 throw;
             }
+        }
+
+        // Check if the function ends with a branch/return that already sets ctx->pc
+        // If not, add a fall-through to the next address so the run loop can continue
+        bool needsFallthrough = true;
+        if (!instructions.empty()) {
+            // Find the last meaningful instruction (might be delay slot paired with branch)
+            size_t lastIdx = instructions.size() - 1;
+            const Instruction& lastInst = instructions[lastIdx];
+
+            // Check if second-to-last is a branch with delay slot (last would be delay slot)
+            if (instructions.size() >= 2) {
+                const Instruction& secondToLast = instructions[instructions.size() - 2];
+                if (secondToLast.hasDelaySlot) {
+                    // The branch instruction is what matters - check if it's a return/jump
+                    if (secondToLast.opcode == OPCODE_J || secondToLast.opcode == OPCODE_JAL ||
+                        (secondToLast.opcode == OPCODE_SPECIAL &&
+                         (secondToLast.function == SPECIAL_JR || secondToLast.function == SPECIAL_JALR))) {
+                        needsFallthrough = false;
+                    }
+                }
+            }
+
+            // Also check if last instruction itself is a jump (without delay slot, unusual but possible)
+            if (lastInst.opcode == OPCODE_J || lastInst.opcode == OPCODE_JAL ||
+                (lastInst.opcode == OPCODE_SPECIAL &&
+                 (lastInst.function == SPECIAL_JR || lastInst.function == SPECIAL_JALR))) {
+                needsFallthrough = false;
+            }
+        }
+
+        if (needsFallthrough) {
+            // Function falls through to the next address - set PC for run loop
+            ss << "    // Fall-through to next function\n";
+            ss << "    ctx->pc = 0x" << std::hex << function.end << std::dec << "; return;\n";
         }
 
         ss << "}\n";
@@ -1560,7 +1783,7 @@ namespace ps2recomp
             case VU0_CR_R:
                 return fmt::format("ctx->vu0_r = _mm_castsi128_ps(GPR_VEC(ctx, {}));", rt);
             case VU0_CR_I:
-                return fmt::format("ctx->vu0_i = *(float*)&GPR_U32(ctx, {});", rt);
+                return fmt::format("{{ uint32_t tmp = GPR_U32(ctx, {}); ctx->vu0_i = *(float*)&tmp; }}", rt);
             case VU0_CR_TPC:
                 return fmt::format("ctx->vu0_tpc = GPR_U32(ctx, {});", rt);
             case VU0_CR_CMSAR0:
@@ -1594,7 +1817,7 @@ namespace ps2recomp
             case VU0_CR_CLIP2:
                 return fmt::format("ctx->vu0_clip_flags2 = GPR_U32(ctx, {});", rt);
             case VU0_CR_P:
-                return fmt::format("ctx->vu0_p = *(float*)&GPR_U32(ctx, {});", rt);
+                return fmt::format("{{ uint32_t tmp = GPR_U32(ctx, {}); ctx->vu0_p = *(float*)&tmp; }}", rt);
             case VU0_CR_XITOP:
                 return fmt::format("ctx->vu0_xitop = GPR_U32(ctx, {}) & 0x3FF;", rt);
             case VU0_CR_ITOP:
@@ -2268,7 +2491,8 @@ namespace ps2recomp
     }
 
     std::string CodeGenerator::generateFunctionRegistration(const std::vector<Function> &functions,
-                                                            const std::map<uint32_t, std::string> &stubs)
+                                                            const std::map<uint32_t, std::string> &stubs,
+                                                            const std::set<uint32_t> &midFunctionEntryPoints)
     {
         static const std::unordered_map<std::string, std::pair<uint32_t, std::string>> systemCalls = {
             // Memory management
@@ -2468,11 +2692,11 @@ namespace ps2recomp
 
             if (function.isStub)
             {
-                stubFunctions.push_back({function.start, function.name});
+                stubFunctions.push_back({function.start, sanitizeFunctionName(function.name)});
             }
             else
             {
-                normalFunctions.push_back({function.start, function.name});
+                normalFunctions.push_back({function.start, sanitizeFunctionName(function.name)});
             }
         }
 
@@ -2525,7 +2749,7 @@ namespace ps2recomp
             Symbol *sym = findSymbolByAddress(entry.target);
             if (sym && sym->isFunction)
             {
-                ss << "        " << sym->name << "(rdram, ctx, runtime);\n";
+                ss << "        " << sanitizeFunctionName(sym->name) << "(rdram, ctx, runtime);\n";
             }
             else
             {

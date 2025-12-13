@@ -7,22 +7,22 @@
 // Stub implementation for PS2 syscalls
 void syscall(uint8_t *rdram, R5900Context *ctx)
 {
-    uint32_t syscallNum = ctx->r[4].m128i_u32[0];
+    uint32_t syscallNum = M128I_U32(ctx->r[4], 0);
     std::cout << "Syscall " << syscallNum << " called" << std::endl;
 
     switch (syscallNum)
     {
     case 0x01: // Exit program
-        std::cout << "Program requested exit with code: " << ctx->r[5].m128i_u32[0] << std::endl;
+        std::cout << "Program requested exit with code: " << M128I_U32(ctx->r[5], 0) << std::endl;
         break;
 
     case 0x3C: // PutChar - print a character to stdout
-        std::cout << (char)ctx->r[5].m128i_u32[0];
+        std::cout << (char)M128I_U32(ctx->r[5], 0);
         break;
 
     case 0x3D: // PutString - print a string to stdout
     {
-        uint32_t strAddr = ctx->r[5].m128i_u32[0];
+        uint32_t strAddr = M128I_U32(ctx->r[5], 0);
         if (strAddr == 0)
         {
             std::cout << "(null)";
@@ -45,7 +45,7 @@ void syscall(uint8_t *rdram, R5900Context *ctx)
 // Example implementation of FlushCache
 void FlushCache(uint8_t *rdram, R5900Context *ctx)
 {
-    uint32_t cacheType = ctx->r[4].m128i_u32[0];
+    uint32_t cacheType = M128I_U32(ctx->r[4], 0);
     std::cout << "FlushCache called with type: " << cacheType << std::endl;
 }
 

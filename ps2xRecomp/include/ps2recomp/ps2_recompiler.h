@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <set>
 #include <filesystem>
 
 namespace ps2recomp
@@ -39,8 +40,10 @@ namespace ps2recomp
         std::unordered_map<uint32_t, std::vector<Instruction>> m_decodedFunctions;
         std::unordered_map<std::string, bool> m_skipFunctions;
         std::map<uint32_t, std::string> m_generatedStubs;
+        std::set<uint32_t> m_midFunctionEntryPoints;  // External branch targets that fall inside functions
 
         bool decodeFunction(Function &function);
+        void collectMidFunctionEntryPoints();  // Find all external branch targets
         bool shouldSkipFunction(const std::string &name) const;
         std::string generateRuntimeHeader();
         bool generateFunctionHeader();

@@ -14,6 +14,21 @@
 std::unordered_map<int, FILE *> g_fileDescriptors;
 int g_nextFd = 3; // Start after stdin, stdout, stderr
 
+// Semaphore tracking
+static int g_nextSemaId = 0; // PS2 kernel starts semaphore IDs at 0
+static std::unordered_map<int, int> g_semaphores; // id -> count
+static std::unordered_map<int, int> g_pollSemaFailCount; // id -> consecutive fail count
+static const int POLL_SEMA_AUTO_SIGNAL_THRESHOLD = 100; // Auto-signal after N failed polls
+
+// Thread tracking
+static int g_nextThreadId = 2; // 1 is main thread
+static int g_currentThreadId = 1;
+
+// Helper to continue execution at return address after syscall
+static inline void continueAtRa(R5900Context* ctx) {
+    ctx->pc = M128I_U32(ctx->r[31], 0);
+}
+
 int allocatePs2Fd(FILE *file)
 {
     if (!file)
@@ -100,7 +115,7 @@ namespace ps2_syscalls
     {
         std::cout << "Syscall: FlushCache (No-op)" << std::endl;
         // No-op for now
-        setReturnS32(ctx, 0);
+        setReturnS32(ctx, 0); continueAtRa(ctx);
     }
 
     void ResetEE(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
@@ -118,7 +133,9 @@ namespace ps2_syscalls
 
     void CreateThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        int threadId = g_nextThreadId++;
+        std::cout << "CreateThread: Created thread " << threadId << std::endl;
+        setReturnS32(ctx, threadId); continueAtRa(ctx);
     }
 
     void DeleteThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
@@ -128,7 +145,9 @@ namespace ps2_syscalls
 
     void StartThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        int threadId = getRegU32(ctx, 4);
+        std::cout << "StartThread: Starting thread " << threadId << std::endl;
+        setReturnS32(ctx, 0); continueAtRa(ctx);
     }
 
     void ExitThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
@@ -159,7 +178,7 @@ namespace ps2_syscalls
 
     void GetThreadId(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        setReturnS32(ctx, g_currentThreadId); continueAtRa(ctx);
     }
 
     void ReferThreadStatus(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
@@ -204,32 +223,125 @@ namespace ps2_syscalls
 
     void CreateSema(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        // CreateSema(SemaParam *param)
+        // SemaParam struct: { u32 attr; u32 option; s32 init_count; s32 max_count; }
+        // Returns semaphore ID on success, negative on error
+        uint32_t paramAddr = getRegU32(ctx, 4);
+        int semaId = g_nextSemaId++;
+
+        // Read initial count from SemaParam (offset 8)
+        int32_t initCount = 1; // Default
+        if (paramAddr > 0 && paramAddr < 0x02000000) {
+            uint32_t physAddr = paramAddr & 0x1FFFFFFF;
+            initCount = *reinterpret_cast<int32_t*>(rdram + physAddr + 8);
+        }
+
+        g_semaphores[semaId] = initCount;
+        std::cout << "CreateSema: Created semaphore " << semaId << " with count=" << initCount << std::endl;
+        setReturnS32(ctx, semaId); continueAtRa(ctx);
     }
 
     void DeleteSema(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        int semaId = getRegU32(ctx, 4);
+        g_semaphores.erase(semaId);
+        setReturnS32(ctx, 0); continueAtRa(ctx);
     }
 
     void SignalSema(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        int semaId = getRegU32(ctx, 4);
+        if (g_semaphores.find(semaId) != g_semaphores.end()) {
+            int oldCount = g_semaphores[semaId];
+            g_semaphores[semaId]++;
+            std::cout << "  SignalSema(" << semaId << "): " << oldCount << " -> " << g_semaphores[semaId];
+            std::cout << " [s0=" << M128I_U32(ctx->r[16], 0) << "]" << std::endl;
+        }
+        setReturnS32(ctx, 0);
     }
 
     void iSignalSema(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        int semaId = getRegU32(ctx, 4);
+        if (g_semaphores.find(semaId) != g_semaphores.end()) {
+            g_semaphores[semaId]++;
+        }
+        setReturnS32(ctx, 0);
     }
 
     void WaitSema(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        int semaId = getRegU32(ctx, 4);
+
+        // Always trigger VBlank to update counters
+        runtime->triggerVBlank();
+
+        // Clear g_mpeg.oid_1 to escape video loop
+// Set D_002623B8 to 1 to break FlushFrames spin loop at 0x15F270        // FlushFrames waits until this memory location is non-zero        // Normally set by VBlank interrupt or DMA completion        *reinterpret_cast<uint32_t*>(rdram + 0x1623B8) = 1;
+        *reinterpret_cast<uint32_t*>(rdram + 0x169A00) = 0;
+
+        if (g_semaphores.find(semaId) != g_semaphores.end()) {
+            if (g_semaphores[semaId] > 0) {
+                g_semaphores[semaId]--;
+            } else {
+                // Semaphore not available - simulate VBlank signal to unblock
+                // This is a workaround since we don't have proper blocking semaphores
+                g_semaphores[semaId] = 1;
+                g_semaphores[semaId]--;
+            }
+        }
+        setReturnS32(ctx, 0);
     }
 
     void PollSema(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        int semaId = getRegU32(ctx, 4);
+        static int pollCount = 0;
+        pollCount++;
+
+        // For IOP-related semaphores (typically 5, 6), always return success
+        // since we don't have an IOP to signal them
+        // This prevents infinite polling loops waiting for IOP responses
+        if (semaId >= 5) {
+            // Debug: Print CD status value and actual address from $s3
+            uint32_t s3 = M128I_U32(ctx->r[19], 0);
+            uint32_t actualAddr = s3 + 0xFFFF942Cu;
+            uint32_t cdStatusFixed = *reinterpret_cast<uint32_t*>(rdram + 0x27942C);
+            uint32_t cdStatusActual = (actualAddr < 0x02000000) ? *reinterpret_cast<uint32_t*>(rdram + actualAddr) : 0;
+            if (pollCount <= 5 || pollCount % 50000 == 0) {
+                std::cout << "  -> PollSema(" << semaId << ") poll #" << pollCount
+                          << ", $s3=0x" << std::hex << s3 << std::dec
+                          << ", actual@0x" << std::hex << actualAddr << "=" << std::dec << cdStatusActual
+                          << ", fixed@0x27942C=" << cdStatusFixed << std::endl;
+            }
+            // Patch BOTH locations
+            *reinterpret_cast<uint32_t*>(rdram + 0x27942C) = 6;
+            if (actualAddr < 0x02000000) {
+                *reinterpret_cast<uint32_t*>(rdram + actualAddr) = 6;
+            }
+            setReturnS32(ctx, 0); // Always succeed for IOP semaphores
+            continueAtRa(ctx);
+            return;
+        }
+
+        if (g_semaphores.find(semaId) != g_semaphores.end() && g_semaphores[semaId] > 0) {
+            g_semaphores[semaId]--;
+            g_pollSemaFailCount[semaId] = 0;
+            setReturnS32(ctx, 0); continueAtRa(ctx);
+        } else {
+            // Track consecutive failures
+            g_pollSemaFailCount[semaId]++;
+
+            if (g_pollSemaFailCount[semaId] >= POLL_SEMA_AUTO_SIGNAL_THRESHOLD) {
+                g_semaphores[semaId] = 1;
+                g_semaphores[semaId]--;
+                g_pollSemaFailCount[semaId] = 0;
+                setReturnS32(ctx, 0); continueAtRa(ctx);
+            } else {
+                setReturnS32(ctx, -1);
+                continueAtRa(ctx);
+            }
+        }
     }
 
     void iPollSema(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
@@ -324,22 +436,22 @@ namespace ps2_syscalls
 
     void EnableIntc(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        setReturnS32(ctx, 1); // Return previous state (enabled)
     }
 
     void DisableIntc(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        setReturnS32(ctx, 1); // Return previous state
     }
 
     void EnableDmac(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        setReturnS32(ctx, 1); continueAtRa(ctx);
     }
 
     void DisableDmac(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        setReturnS32(ctx, 1); continueAtRa(ctx);
     }
 
     void SifStopModule(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)

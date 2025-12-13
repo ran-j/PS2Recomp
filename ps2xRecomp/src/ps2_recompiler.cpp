@@ -8,6 +8,21 @@
 
 namespace fs = std::filesystem;
 
+// Helper to rename reserved C++ identifiers (must match code_generator.cpp)
+static std::string sanitizeFunctionName(const std::string& name) {
+    if (name == "main") return "game_main";
+    if (name == "matherr") return "fn_matherr";  // Conflicts with C library
+    // Prefix names starting with double underscore (reserved in C++)
+    if (name.size() >= 2 && name[0] == '_' && name[1] == '_') {
+        return "fn_" + name;
+    }
+    // Also handle names starting with underscore followed by uppercase
+    if (name.size() >= 2 && name[0] == '_' && std::isupper(name[1])) {
+        return "fn_" + name;
+    }
+    return name;
+}
+
 namespace ps2recomp
 {
 
@@ -38,6 +53,33 @@ namespace ps2recomp
             m_symbols = m_elfParser->extractSymbols();
             m_sections = m_elfParser->getSections();
             m_relocations = m_elfParser->getRelocations();
+
+            // If no functions found in ELF (stripped), use external functions from config
+            if (m_functions.empty() && !m_config.externalFunctions.empty())
+            {
+                std::cout << "ELF is stripped, using " << m_config.externalFunctions.size()
+                          << " external function definitions..." << std::endl;
+                for (const auto &extFunc : m_config.externalFunctions)
+                {
+                    Function func;
+                    func.name = extFunc.name;
+                    func.start = extFunc.address;
+                    func.end = extFunc.address + extFunc.size;
+                    func.isRecompiled = false;
+                    func.isStub = false;
+                    m_functions.push_back(func);
+
+                    // Also add to symbols for better resolution
+                    Symbol sym;
+                    sym.name = extFunc.name;
+                    sym.address = extFunc.address;
+                    sym.size = extFunc.size;
+                    sym.isFunction = true;
+                    sym.isImported = false;
+                    sym.isExported = true;
+                    m_symbols.push_back(sym);
+                }
+            }
 
             std::cout << "Extracted " << m_functions.size() << " functions, "
                       << m_symbols.size() << " symbols, "
@@ -96,6 +138,9 @@ namespace ps2recomp
 #endif
             }
 
+            // After decoding all functions, find mid-function entry points
+            collectMidFunctionEntryPoints();
+
             std::cout << "Recompilation completed successfully." << std::endl;
             return true;
         }
@@ -137,7 +182,7 @@ namespace ps2recomp
                         else
                         {
                             const auto &instructions = m_decodedFunctions.at(function.start);
-                            std::string code = m_codeGenerator->generateFunction(function, instructions, false);
+                            std::string code = m_codeGenerator->generateFunction(function, instructions, false, m_midFunctionEntryPoints);
                             combinedOutput << code << "\n\n";
                         }
                     }
@@ -148,6 +193,34 @@ namespace ps2recomp
                                   << std::hex << function.start << "): "
                                   << e.what() << std::endl;
                         throw;
+                    }
+                }
+
+                // Generate mid-function entry point stubs
+                if (!m_midFunctionEntryPoints.empty())
+                {
+                    combinedOutput << "\n// ===== Mid-function entry points =====\n";
+                    combinedOutput << "// These handle jumps to addresses inside other functions\n\n";
+
+                    for (uint32_t entryAddr : m_midFunctionEntryPoints)
+                    {
+                        // Find which function contains this address
+                        for (const auto &func : m_functions)
+                        {
+                            if (entryAddr >= func.start && entryAddr < func.end)
+                            {
+                                // Generate a stub that sets PC and calls the containing function
+                                // The containing function should handle the internal branch target
+                                combinedOutput << "void entry_" << std::hex << entryAddr << std::dec
+                                              << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime) {\n";
+                                combinedOutput << "    // Mid-function entry at 0x" << std::hex << entryAddr
+                                              << " inside " << func.name << " (0x" << func.start << " - 0x" << func.end << ")\n" << std::dec;
+                                combinedOutput << "    ctx->pc = 0x" << std::hex << entryAddr << std::dec << ";\n";
+                                combinedOutput << "    " << sanitizeFunctionName(func.name) << "(rdram, ctx, runtime);\n";
+                                combinedOutput << "}\n\n";
+                                break;
+                            }
+                        }
                     }
                 }
 
@@ -174,7 +247,7 @@ namespace ps2recomp
                         else
                         {
                             const auto &instructions = m_decodedFunctions[function.start];
-                            code = m_codeGenerator->generateFunction(function, instructions, true);
+                            code = m_codeGenerator->generateFunction(function, instructions, true, m_midFunctionEntryPoints);
                         }
                     }
                     catch (const std::exception &e)
@@ -195,7 +268,7 @@ namespace ps2recomp
             }
 
             std::string registerFunctions = m_codeGenerator->generateFunctionRegistration(
-                m_functions, m_generatedStubs);
+                m_functions, m_generatedStubs, m_midFunctionEntryPoints);
 
             fs::path registerPath = fs::path(m_config.outputPath) / "register_functions.cpp";
             writeToFile(registerPath.string(), registerFunctions);
@@ -224,6 +297,8 @@ namespace ps2recomp
 
             for (const auto &funcName : m_config.skipFunctions)
             {
+                // Skip 'main' as it conflicts with C++ main()
+                if (funcName == "main") continue;
                 ss << "void " << funcName << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) { ps2_syscalls::TODO(rdram, ctx, runtime); }\n";
             }
 
@@ -260,7 +335,19 @@ namespace ps2recomp
             {
                 if (function.isRecompiled)
                 {
-                    ss << "void " << function.name << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime);\n";
+                    std::string funcName = sanitizeFunctionName(function.name);
+                    ss << "void " << funcName << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime);\n";
+                }
+            }
+
+            // Declare mid-function entry point stubs
+            if (!m_midFunctionEntryPoints.empty())
+            {
+                ss << "\n// Mid-function entry points (for external jumps into middle of functions)\n";
+                for (uint32_t addr : m_midFunctionEntryPoints)
+                {
+                    ss << "void entry_" << std::hex << addr << std::dec
+                       << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime);\n";
                 }
             }
 
@@ -368,5 +455,65 @@ namespace ps2recomp
         outputPath /= safeName + ".cpp";
 
         return outputPath;
+    }
+
+    void PS2Recompiler::collectMidFunctionEntryPoints()
+    {
+        // Build a set of all function start addresses for quick lookup
+        std::set<uint32_t> functionStarts;
+        for (const auto &func : m_functions)
+        {
+            functionStarts.insert(func.start);
+        }
+
+        // Build a map of address ranges to functions
+        std::map<uint32_t, const Function *> addressToFunction;
+        for (const auto &func : m_functions)
+        {
+            for (uint32_t addr = func.start; addr < func.end; addr += 4)
+            {
+                addressToFunction[addr] = &func;
+            }
+        }
+
+        // Scan all decoded instructions for branch/jump targets
+        for (const auto &[funcStart, instructions] : m_decodedFunctions)
+        {
+            for (const auto &inst : instructions)
+            {
+                uint32_t targetAddr = 0;
+
+                // Check for conditional branches (BEQ, BNE, etc.)
+                if (inst.isBranch)
+                {
+                    int32_t offset = inst.simmediate << 2;
+                    targetAddr = inst.address + 4 + offset;
+                }
+                // Check for direct jumps (J, JAL)
+                else if (inst.opcode == 0x02 || inst.opcode == 0x03) // J, JAL
+                {
+                    targetAddr = (inst.address & 0xF0000000) | (inst.target << 2);
+                }
+
+                if (targetAddr != 0)
+                {
+                    // Check if target is inside a function but not at its start
+                    auto it = addressToFunction.find(targetAddr);
+                    if (it != addressToFunction.end())
+                    {
+                        const Function *containingFunc = it->second;
+                        // If target is not the start of a function, it's a mid-function entry point
+                        if (targetAddr != containingFunc->start &&
+                            functionStarts.find(targetAddr) == functionStarts.end())
+                        {
+                            m_midFunctionEntryPoints.insert(targetAddr);
+                        }
+                    }
+                }
+            }
+        }
+
+        std::cout << "Found " << m_midFunctionEntryPoints.size()
+                  << " mid-function entry points that need stub generation." << std::endl;
     }
 }

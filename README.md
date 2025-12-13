@@ -96,9 +96,30 @@ A basic runtime lib is provided in `ps2xRuntime` folder.
 * Graphics Synthesizer and other hardware components need external implementation
 * Some PS2-specific features may not be fully supported yet
 
+### Reference Projects
+
+We have collected useful reference implementations in the `reference/` directory:
+
+| Project | Purpose | Key Files |
+|---------|---------|-----------|
+| **parallel-gs** | GS emulation (Vulkan) | `gs/gs_interface.hpp` |
+| **ps2-recompiler-Cactus** | Threading, semaphores | `src/ps2lib/threading/` |
+| **Ps2Recomp-menaman123** | Event Flags (SDL) | `host_app/syscalls.cpp` |
+| **SotCStaticRecompilation** | Config examples | `config.yaml` |
+
+See `reference/README.md` for detailed documentation.
+
+### Project Documentation
+
+See the `docs/` folder in the project root:
+* `docs/ai-assisted-workflow.md` - How to use AI for reverse engineering
+* `docs/ps2recomp-analysis.md` - Full technical analysis
+* `docs/ps2recomp-bug-report.md` - Bug fixes we've made
+
 ###  Acknowledgments
 
 * Inspired by N64Recomp
 * Uses ELFIO for ELF parsing
 * Uses toml11 for TOML parsing
 * Uses fmt for string formatting
+* Reference implementations from parallel-gs, ps2-recompiler (Cactus), and Ps2Recomp (menaman123)
