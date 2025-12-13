@@ -3430,8 +3430,7 @@ void registerAllFunctions(PS2Runtime& runtime) {
     runtime.registerFunction(0x11cff0, entry_11cff0);
     runtime.registerFunction(0x11d018, entry_11d018);
     runtime.registerFunction(0x11d060, junk_0x0011d060);
-    // STUBBED: Intercept sound system calls
-    runtime.registerFunction(0x11d078, ps2_stubs::snd_GotReturns_stub);
+    runtime.registerFunction(0x11d078, snd_GotReturns__Fv);
     runtime.registerFunction(0x11d090, entry_11d090);
     runtime.registerFunction(0x11d0ac, entry_11d0ac);
     runtime.registerFunction(0x11d0fc, entry_11d0fc);
@@ -3513,8 +3512,7 @@ void registerAllFunctions(PS2Runtime& runtime) {
     runtime.registerFunction(0x11d928, snd_SetGlobalExcite);
     runtime.registerFunction(0x11d94c, entry_11d94c);
     runtime.registerFunction(0x11d958, junk_0x0011d958);
-    // STUBBED: Intercept sound IOP command
-    runtime.registerFunction(0x11d968, ps2_stubs::snd_SendIOPCommandAndWait_stub);
+    runtime.registerFunction(0x11d968, snd_SendIOPCommandAndWait__FiiPc);
     runtime.registerFunction(0x11d9d8, entry_11d9d8);
     runtime.registerFunction(0x11d9e0, entry_11d9e0);
     runtime.registerFunction(0x11d9f4, entry_11d9f4);
@@ -8630,13 +8628,6 @@ void registerAllFunctions(PS2Runtime& runtime) {
     runtime.registerFunction(0x15f1b4, entry_15f1b4);
     runtime.registerFunction(0x15f1c4, entry_15f1c4);
     runtime.registerFunction(0x15f210, FlushFrames__Fi);
-    runtime.registerFunction(0x15f248, entry_15f248);
-    runtime.registerFunction(0x15f260, entry_15f260);
-    runtime.registerFunction(0x15f2ac, entry_15f2ac);
-    runtime.registerFunction(0x15f2b4, entry_15f2b4);
-    runtime.registerFunction(0x15f2bc, entry_15f2bc);
-    runtime.registerFunction(0x15f2e8, entry_15f2e8);
-    runtime.registerFunction(0x15f300, entry_15f300);
     runtime.registerFunction(0x15f320, BlendPrevFrame__Fv);
     runtime.registerFunction(0x15f344, entry_15f344);
     runtime.registerFunction(0x15f358, entry_15f358);
@@ -11647,6 +11638,7 @@ void registerAllFunctions(PS2Runtime& runtime) {
     runtime.registerFunction(0x1857bc, entry_1857bc);
     runtime.registerFunction(0x1857e8, entry_1857e8);
     runtime.registerFunction(0x1857f0, entry_1857f0);
+    runtime.registerFunction(0x1857f4, entry_1857f4);
     runtime.registerFunction(0x185804, entry_185804);
     runtime.registerFunction(0x18580c, entry_18580c);
     runtime.registerFunction(0x185834, entry_185834);
@@ -11696,6 +11688,7 @@ void registerAllFunctions(PS2Runtime& runtime) {
     runtime.registerFunction(0x185b8c, entry_185b8c);
     runtime.registerFunction(0x185b98, entry_185b98);
     runtime.registerFunction(0x185ba0, entry_185ba0);
+    runtime.registerFunction(0x185bb0, entry_185bb0);
     runtime.registerFunction(0x185bc4, entry_185bc4);
     runtime.registerFunction(0x185bc8, entry_185bc8);
     runtime.registerFunction(0x185bd8, entry_185bd8);
@@ -20632,7 +20625,7 @@ void registerAllFunctions(PS2Runtime& runtime) {
     runtime.registerFunction(0x1f7b7c, entry_1f7b7c);
     runtime.registerFunction(0x1f7b88, printf_2);
     runtime.registerFunction(0x1f7bd0, entry_1f7bd0);
-    runtime.registerFunction(0x1f7be8, ps2_stubs::sceSifInitRpc_stub); // DEBUG: replaced sceSifInitRpc
+    runtime.registerFunction(0x1f7be8, sceSifInitRpc);
     runtime.registerFunction(0x1f7c00, entry_1f7c00);
     runtime.registerFunction(0x1f7c30, entry_1f7c30);
     runtime.registerFunction(0x1f7c38, entry_1f7c38);
@@ -20687,8 +20680,7 @@ void registerAllFunctions(PS2Runtime& runtime) {
     runtime.registerFunction(0x1f8430, entry_1f8430);
     runtime.registerFunction(0x1f8440, entry_1f8440);
     runtime.registerFunction(0x1f8448, entry_1f8448);
-    // STUBBED: Intercept RPC status check (causes sound init loop)
-    runtime.registerFunction(0x1f8480, ps2_stubs::sceSifCheckStatRpc_stub);
+    runtime.registerFunction(0x1f8480, sceSifCheckStatRpc);
     runtime.registerFunction(0x1f84d8, _sceFsIobSemaMK);
     runtime.registerFunction(0x1f8510, entry_1f8510);
     runtime.registerFunction(0x1f851c, entry_1f851c);
@@ -21452,12 +21444,12 @@ void registerAllFunctions(PS2Runtime& runtime) {
     runtime.registerFunction(0x203284, entry_203284);
     runtime.registerFunction(0x203298, entry_203298);
     runtime.registerFunction(0x2032b4, entry_2032b4);
-    runtime.registerFunction(0x2032c8, ps2_stubs::sceCdSync_stub);
+    runtime.registerFunction(0x2032c8, sceCdSync);
     runtime.registerFunction(0x2032f4, entry_2032f4);
     runtime.registerFunction(0x203308, entry_203308);
     runtime.registerFunction(0x20331c, entry_20331c);
     runtime.registerFunction(0x203348, entry_203348);
-    runtime.registerFunction(0x203368, ps2_stubs::sceCdSyncS_stub);
+    runtime.registerFunction(0x203368, sceCdSyncS);
     runtime.registerFunction(0x203390, entry_203390);
     runtime.registerFunction(0x2033a0, entry_2033a0);
     runtime.registerFunction(0x2033a8, entry_2033a8);
@@ -21484,12 +21476,12 @@ void registerAllFunctions(PS2Runtime& runtime) {
     runtime.registerFunction(0x2037c0, entry_2037c0);
     runtime.registerFunction(0x2037ec, entry_2037ec);
     runtime.registerFunction(0x2037f4, entry_2037f4);
-    runtime.registerFunction(0x203828, ps2_stubs::sceCdDiskReady_stub); // DEBUG: replaced sceCdDiskReady
+    runtime.registerFunction(0x203828, sceCdDiskReady);
     runtime.registerFunction(0x20386c, entry_20386c);
-    runtime.registerFunction(0x203874, ps2_stubs::debug_entry_203874); // DEBUG: replaced entry_203874
-    runtime.registerFunction(0x203880, ps2_stubs::debug_cd_check_203880); // DEBUG: replaced entry_203880
-    runtime.registerFunction(0x203894, ps2_stubs::debug_entry_203894); // DEBUG: replaced entry_203894
-    runtime.registerFunction(0x2038a4, ps2_stubs::debug_entry_2038a4); // DEBUG: replaced entry_2038a4
+    runtime.registerFunction(0x203874, entry_203874);
+    runtime.registerFunction(0x203880, entry_203880);
+    runtime.registerFunction(0x203894, entry_203894);
+    runtime.registerFunction(0x2038a4, entry_2038a4);
     runtime.registerFunction(0x2038fc, entry_2038fc);
     runtime.registerFunction(0x20391c, entry_20391c);
     runtime.registerFunction(0x203978, entry_203978);
@@ -21504,7 +21496,7 @@ void registerAllFunctions(PS2Runtime& runtime) {
     runtime.registerFunction(0x203aac, entry_203aac);
     runtime.registerFunction(0x203ac8, entry_203ac8);
     runtime.registerFunction(0x203ae8, sceCdGetReadPos);
-    runtime.registerFunction(0x203b18, ps2_stubs::sceCdRead_stub);
+    runtime.registerFunction(0x203b18, sceCdRead);
     runtime.registerFunction(0x203b68, entry_203b68);
     runtime.registerFunction(0x203b7c, entry_203b7c);
     runtime.registerFunction(0x203c14, entry_203c14);
@@ -21520,7 +21512,7 @@ void registerAllFunctions(PS2Runtime& runtime) {
     runtime.registerFunction(0x203d4c, entry_203d4c);
     runtime.registerFunction(0x203d60, entry_203d60);
     runtime.registerFunction(0x203d7c, entry_203d7c);
-    runtime.registerFunction(0x203d90, ps2_stubs::sceCdGetError_stub);
+    runtime.registerFunction(0x203d90, sceCdGetError);
     runtime.registerFunction(0x203da4, entry_203da4);
     runtime.registerFunction(0x203de4, entry_203de4);
     runtime.registerFunction(0x203df8, entry_203df8);

@@ -43117,42 +43117,7 @@
   {
     "name": "FlushFrames__Fi",
     "address": 1438224,
-    "size": 56
-  },
-  {
-    "name": "entry_15f248",
-    "address": 1438280,
-    "size": 24
-  },
-  {
-    "name": "entry_15f260",
-    "address": 1438304,
-    "size": 76
-  },
-  {
-    "name": "entry_15f2ac",
-    "address": 1438380,
-    "size": 8
-  },
-  {
-    "name": "entry_15f2b4",
-    "address": 1438388,
-    "size": 8
-  },
-  {
-    "name": "entry_15f2bc",
-    "address": 1438396,
-    "size": 44
-  },
-  {
-    "name": "entry_15f2e8",
-    "address": 1438440,
-    "size": 24
-  },
-  {
-    "name": "entry_15f300",
-    "address": 1438464,
-    "size": 32
+    "size": 272
   },
   {
     "name": "BlendPrevFrame__Fv",
@@ -58202,7 +58167,12 @@
   {
     "name": "entry_1857f0",
     "address": 1595376,
-    "size": 20
+    "size": 4
+  },
+  {
+    "name": "entry_1857f4",
+    "address": 1595380,
+    "size": 16
   },
   {
     "name": "entry_185804",
@@ -58447,12 +58417,22 @@
   {
     "name": "entry_185ba0",
     "address": 1596320,
-    "size": 36
+    "size": 16
+  },
+  {
+    "name": "entry_185bb0",
+    "address": 1596336,
+    "size": 20
   },
   {
     "name": "entry_185bc4",
     "address": 1596356,
-    "size": 20
+    "size": 4
+  },
+  {
+    "name": "entry_185bc8",
+    "address": 1596360,
+    "size": 16
   },
   {
     "name": "entry_185bd8",

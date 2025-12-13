@@ -45,6 +45,14 @@ namespace ps2recomp
                     m_internalBranchTargets.insert(target);
                 }
             }
+            // Also collect return addresses of JAL instructions as potential branch targets
+            // This is needed for loops that call functions - we need a label to return to
+            if (inst.opcode == OPCODE_JAL) {
+                uint32_t returnAddr = inst.address + 8;
+                if (instructionAddresses.count(returnAddr)) {
+                    m_internalBranchTargets.insert(returnAddr);
+                }
+            }
         }
     }
 
@@ -74,10 +82,23 @@ CodeGenerator::CodeGenerator(const std::vector<Symbol> &symbols)
                 ss << "    " << delaySlotCode << "\n";
             }
             uint32_t target = (branchInst.address & 0xF0000000) | (branchInst.target << 2);
+            uint32_t returnAddr = branchInst.address + 8;
             Symbol *sym = findSymbolByAddress(target);
+
+            // Check if return address is inside current function (for loops with calls)
+            bool returnInsideFunction = isInternalBranch(returnAddr);
+            bool returnAddrIsLabel = m_internalBranchTargets.count(returnAddr) > 0;
+
             if (sym && sym->isFunction)
             {
-                ss << "    " << sanitizeFunctionName(sym->name) << "(rdram, ctx, runtime); return;\n";
+                ss << "    " << sanitizeFunctionName(sym->name) << "(rdram, ctx, runtime);";
+                // If return address is inside this function and is a branch target,
+                // continue execution instead of returning (fixes loops with syscalls)
+                if (returnInsideFunction && returnAddrIsLabel) {
+                    ss << " goto label_" << std::hex << returnAddr << std::dec << ";\n";
+                } else {
+                    ss << " return;\n";
+                }
             }
             else
             {
@@ -240,13 +261,53 @@ CodeGenerator::CodeGenerator(const std::vector<Symbol> &symbols)
             }
             else
             {
-                if (hasValidDelaySlot)
-                {
-                    ss << "    " << delaySlotCode << "\n";
+                // For non-likely branches, we need to handle the case where the delay slot
+                // modifies a register used in the branch condition.
+                // MIPS semantics: branch condition is evaluated BEFORE delay slot executes,
+                // but delay slot executes regardless of branch outcome.
+
+                // Check if delay slot writes to a register used in the condition
+                bool delaySlotConflict = false;
+                uint8_t delaySlotDestReg = 0;
+
+                if (hasValidDelaySlot) {
+                    // Get the destination register of the delay slot instruction
+                    if (delaySlot.opcode == OPCODE_LUI ||
+                        (delaySlot.opcode >= OPCODE_LB && delaySlot.opcode <= OPCODE_LWU) ||
+                        delaySlot.opcode == OPCODE_ADDIU || delaySlot.opcode == OPCODE_ADDI ||
+                        delaySlot.opcode == OPCODE_SLTI || delaySlot.opcode == OPCODE_SLTIU ||
+                        delaySlot.opcode == OPCODE_ANDI || delaySlot.opcode == OPCODE_ORI ||
+                        delaySlot.opcode == OPCODE_XORI) {
+                        delaySlotDestReg = delaySlot.rt;
+                    } else if (delaySlot.opcode == OPCODE_SPECIAL) {
+                        delaySlotDestReg = delaySlot.rd;
+                    }
+
+                    // Check if this register is used in the branch condition
+                    if (delaySlotDestReg != 0 && (delaySlotDestReg == rs_reg || delaySlotDestReg == rt_reg)) {
+                        delaySlotConflict = true;
+                    }
                 }
-                ss << "    if (" << conditionStr << ") {\n";
-                ss << "        " << targetAction << "\n";
-                ss << "    }\n";
+
+                if (delaySlotConflict) {
+                    // Save the condition value before delay slot modifies the register
+                    ss << "    {\n";
+                    ss << "        bool _branch_cond = " << conditionStr << ";\n";
+                    ss << "        " << delaySlotCode << "\n";
+                    ss << "        if (_branch_cond) {\n";
+                    ss << "            " << targetAction << "\n";
+                    ss << "        }\n";
+                    ss << "    }\n";
+                } else {
+                    // No conflict - original behavior is fine
+                    if (hasValidDelaySlot)
+                    {
+                        ss << "    " << delaySlotCode << "\n";
+                    }
+                    ss << "    if (" << conditionStr << ") {\n";
+                    ss << "        " << targetAction << "\n";
+                    ss << "    }\n";
+                }
             }
         }
         else

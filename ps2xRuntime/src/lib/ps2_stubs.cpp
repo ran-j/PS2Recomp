@@ -1,6 +1,9 @@
 #include "ps2_stubs.h"
 #include "ps2_runtime.h"
+#include "raylib.h"
 #include <iostream>
+#include <iomanip>
+#include <fstream>
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
@@ -81,6 +84,152 @@ namespace
                 g_next_handle = 1;
         } while (handle == 0 || g_alloc_map.count(handle));
         return handle;
+    }
+}
+
+// Audio Manager for sound playback using extracted WAV files
+namespace audio_manager
+{
+    static std::unordered_map<int, Sound> g_loaded_sounds;
+    static bool g_audio_initialized = false;
+    static std::string g_sounds_path;
+    static std::mutex g_audio_mutex;
+    static int g_sounds_loaded = 0;
+
+    void InitializeAudio()
+    {
+        if (g_audio_initialized) return;
+
+        // Initialize raylib audio device
+        InitAudioDevice();
+        SetMasterVolume(1.0f);
+        g_audio_initialized = true;
+        std::cout << "[AUDIO] Audio device initialized" << std::endl;
+    }
+
+    void SetSoundsPath(const std::string& path)
+    {
+        g_sounds_path = path;
+        std::cout << "[AUDIO] Sounds path set to: " << path << std::endl;
+    }
+
+    // Pre-load available sounds on initialization
+    static std::vector<int> g_available_sound_ids;
+
+    void PreloadAvailableSounds()
+    {
+        if (g_sounds_path.empty()) return;
+
+        // Note: Called without lock, caller must hold lock
+        // Scan directory for available sound files
+        for (const auto& entry : std::filesystem::directory_iterator(g_sounds_path)) {
+            if (entry.path().extension() == ".wav") {
+                std::string filename = entry.path().stem().string();
+                // Parse "sound_XXX" format
+                if (filename.rfind("sound_", 0) == 0) {
+                    try {
+                        int id = std::stoi(filename.substr(6));
+                        g_available_sound_ids.push_back(id);
+                    } catch (...) {}
+                }
+            }
+        }
+
+        std::cout << "[AUDIO] Found " << g_available_sound_ids.size() << " sound files" << std::endl;
+    }
+
+    // Internal load function - caller must hold the mutex
+    static bool LoadSoundByIdInternal(int soundId)
+    {
+        if (!g_audio_initialized) InitializeAudio();
+
+        // Initialize available sounds list if needed
+        static bool sounds_scanned = false;
+        if (!sounds_scanned && !g_sounds_path.empty()) {
+            PreloadAvailableSounds();
+            sounds_scanned = true;
+        }
+
+        // Check if already loaded
+        if (g_loaded_sounds.count(soundId)) return true;
+
+        // Try exact match first
+        std::string filename = g_sounds_path + "/sound_" + std::to_string(soundId) + ".wav";
+
+        if (!std::filesystem::exists(filename)) {
+            // Map sound ID to available sound using modulo
+            if (!g_available_sound_ids.empty()) {
+                int mapped_id = g_available_sound_ids[soundId % g_available_sound_ids.size()];
+                filename = g_sounds_path + "/sound_" + std::to_string(mapped_id) + ".wav";
+
+                if (!std::filesystem::exists(filename)) {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+
+        Sound sound = LoadSound(filename.c_str());
+        if (sound.frameCount > 0) {
+            g_loaded_sounds[soundId] = sound;
+            g_sounds_loaded++;
+            if (g_sounds_loaded <= 10) {
+                std::cout << "[AUDIO] Loaded sound " << soundId << " from " << filename << std::endl;
+            }
+            return true;
+        }
+
+        return false;
+    }
+
+    bool LoadSoundById(int soundId)
+    {
+        std::lock_guard<std::mutex> lock(g_audio_mutex);
+        return LoadSoundByIdInternal(soundId);
+    }
+
+    void PlaySoundById(int soundId, float volume, float pan)
+    {
+        if (!g_audio_initialized) return;
+
+        std::lock_guard<std::mutex> lock(g_audio_mutex);
+
+        auto it = g_loaded_sounds.find(soundId);
+        if (it == g_loaded_sounds.end()) {
+            // Try to load on-demand (internal version doesn't try to lock)
+            if (!LoadSoundByIdInternal(soundId)) return;
+            it = g_loaded_sounds.find(soundId);
+            if (it == g_loaded_sounds.end()) return;
+        }
+
+        // Set volume (PS2 uses 0-1024 range, raylib uses 0.0-1.0)
+        SetSoundVolume(it->second, volume);
+        SetSoundPan(it->second, pan);
+        PlaySound(it->second);
+    }
+
+    void StopSoundById(int soundId)
+    {
+        std::lock_guard<std::mutex> lock(g_audio_mutex);
+        auto it = g_loaded_sounds.find(soundId);
+        if (it != g_loaded_sounds.end()) {
+            StopSound(it->second);
+        }
+    }
+
+    void Cleanup()
+    {
+        std::lock_guard<std::mutex> lock(g_audio_mutex);
+        for (auto& [id, sound] : g_loaded_sounds) {
+            UnloadSound(sound);
+        }
+        g_loaded_sounds.clear();
+
+        if (g_audio_initialized) {
+            CloseAudioDevice();
+            g_audio_initialized = false;
+        }
     }
 }
 
@@ -1029,7 +1178,7 @@ namespace ps2_stubs
         // sceCdSync(mode) - wait for CD operation to complete
         // Returns: 0 = complete, 1 = busy
         static int call_count = 0;
-        if (++call_count <= 5) {
+        { // always print
             std::cout << "sceCdSync_stub: Returning complete (call #" << call_count << ")" << std::endl;
         }
         setReturnS32(ctx, 0);
@@ -1066,17 +1215,93 @@ namespace ps2_stubs
         continueAtRa_stub(ctx);
     }
 
+    // Global ISO file handle for CD-ROM emulation
+    static FILE* g_iso_file = nullptr;
+    static bool g_iso_initialized = false;
+    static const size_t SECTOR_SIZE = 2048;  // PS2 CD-ROM sector size
+
+    static bool initISOFile() {
+        if (g_iso_initialized) return g_iso_file != nullptr;
+        g_iso_initialized = true;
+
+        // Try to find the ISO file in common locations
+        std::vector<std::string> iso_paths = {
+            "Sly Cooper and the Thievius Raccoonus (USA).iso",
+            "../Sly Cooper and the Thievius Raccoonus (USA).iso",
+            "../../Sly Cooper and the Thievius Raccoonus (USA).iso",
+            "../../../Sly Cooper and the Thievius Raccoonus (USA)/Sly Cooper and the Thievius Raccoonus (USA).iso",
+            "../../../../Sly Cooper and the Thievius Raccoonus (USA)/Sly Cooper and the Thievius Raccoonus (USA).iso"
+        };
+
+        for (const auto& path : iso_paths) {
+            if (std::filesystem::exists(path)) {
+                g_iso_file = ::fopen(path.c_str(), "rb");
+                if (g_iso_file) {
+                    std::cout << "[CD-ROM] ISO file opened: " << path << std::endl;
+                    return true;
+                }
+            }
+        }
+
+        std::cerr << "[CD-ROM] WARNING: Could not find ISO file!" << std::endl;
+        std::cerr << "[CD-ROM] Tried: " << std::endl;
+        for (const auto& path : iso_paths) {
+            std::cerr << "  - " << path << std::endl;
+        }
+        return false;
+    }
+
     void sceCdRead_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t lsn = getRegU32(ctx, 4);
         uint32_t sectors = getRegU32(ctx, 5);
         uint32_t buffer = getRegU32(ctx, 6);
-        std::cout << "sceCdRead_stub: lsn=" << lsn << " sectors=" << sectors 
-                  << " buffer=0x" << std::hex << buffer << std::dec << std::endl;
-        if (buffer > 0 && buffer < 0x02000000) {
-            std::memset(rdram + (buffer & 0x1FFFFFF), 0, sectors * 2048);
+
+        static int read_count = 0;
+        read_count++;
+
+        if (read_count <= 20) {
+            std::cout << "[CD-ROM] sceCdRead #" << read_count
+                      << ": lsn=" << lsn << " sectors=" << sectors
+                      << " buffer=0x" << std::hex << buffer << std::dec << std::endl;
         }
-        setReturnS32(ctx, 1);
+
+        // Initialize ISO if not done yet
+        if (!g_iso_initialized) {
+            initISOFile();
+        }
+
+        if (buffer > 0 && buffer < 0x02000000 && sectors > 0) {
+            uint8_t* dest = rdram + (buffer & 0x1FFFFFF);
+            size_t bytes_to_read = sectors * SECTOR_SIZE;
+
+            if (g_iso_file) {
+                // Seek to the correct position in ISO
+                // ISO files typically have sectors at offset = lsn * SECTOR_SIZE
+                off_t offset = (off_t)lsn * SECTOR_SIZE;
+                if (::fseek(g_iso_file, offset, SEEK_SET) == 0) {
+                    size_t bytes_read = ::fread(dest, 1, bytes_to_read, g_iso_file);
+                    if (bytes_read != bytes_to_read) {
+                        if (read_count <= 20) {
+                            std::cerr << "[CD-ROM] Warning: Read only " << bytes_read
+                                      << " of " << bytes_to_read << " bytes" << std::endl;
+                        }
+                        // Zero the rest
+                        std::memset(dest + bytes_read, 0, bytes_to_read - bytes_read);
+                    }
+                } else {
+                    if (read_count <= 20) {
+                        std::cerr << "[CD-ROM] Error: Seek failed to lsn " << lsn << std::endl;
+                    }
+                    std::memset(dest, 0, bytes_to_read);
+                }
+            } else {
+                // No ISO file - zero the buffer (fallback)
+                std::memset(dest, 0, bytes_to_read);
+            }
+        }
+
+        setReturnS32(ctx, 1);  // Return success
         continueAtRa_stub(ctx);
     }
 
@@ -1305,6 +1530,8 @@ namespace ps2_stubs
         // Return 0 = RPC call complete (not busy)
         // This tells the game the IOP has finished processing
         setReturnS32(ctx, 0);
+        // Force clear g_mpeg.oid_1 to escape video loop
+        *reinterpret_cast<uint32_t*>(rdram + 0x169A00) = 0;
         ctx->pc = getRegU32(ctx, 31);  // Return to caller
     }
 
@@ -1351,39 +1578,99 @@ namespace ps2_stubs
             default: break;
         }
 
-        // Log based on command type
+        // Track command counts for summary
+        static std::unordered_map<uint32_t, int> cmd_counts;
+        cmd_counts[cmd]++;
+
+        // Log and play sound commands
         if (cmd == 0x11 && data) {  // snd_PlaySoundVolPanPMPB
             sounds_played++;
             uint32_t bank = data[0];
             uint32_t soundId = data[1];
             uint32_t vol = data[2];
             uint32_t pan = data[3];
+            uint32_t pitchMod = (param >= 20) ? data[4] : 0;
+            uint32_t pitchBend = (param >= 24) ? data[5] : 0;
 
-            // Only log unique sound IDs to reduce spam
-            static uint32_t lastSoundId = 0xFFFFFFFF;
-            if (soundId != lastSoundId) {
+            // Log (limit spam)
+            if (sounds_played <= 20 || sounds_played % 100 == 0) {
                 std::cout << "[SOUND] PlaySound #" << sounds_played
-                          << ": ID=" << soundId
+                          << ": id=" << soundId
                           << " vol=" << vol
-                          << " pan=" << (int32_t)pan
-                          << " bank=0x" << std::hex << bank << std::dec << std::endl;
-                lastSoundId = soundId;
+                          << " pan=" << (int32_t)pan << std::endl;
             }
+
+            // PLAY ACTUAL AUDIO using raylib
+            float volume = std::min(1.0f, vol / 1024.0f);  // PS2 uses 0-1024
+            float panf = (pan / 32768.0f);  // PS2 pan: -32768 to 32768, raylib: 0.0 to 1.0
+            panf = (panf + 1.0f) / 2.0f;    // Convert to 0-1 range
+            audio_manager::PlaySoundById(soundId, volume, panf);
+        }
+        else if (cmd == 0x10 && data) {  // snd_PlaySound (simpler)
+            sounds_played++;
+            uint32_t soundId = data[1];
+
+            if (sounds_played <= 20) {
+                std::cout << "[SOUND] PlaySound(simple) #" << sounds_played
+                          << ": id=" << soundId << std::endl;
+            }
+
+            audio_manager::PlaySoundById(soundId, 1.0f, 0.5f);
         }
         else if (cmd == 0x15 && data) {  // snd_StopSound
             std::cout << "[SOUND] StopSound: handle=0x" << std::hex << data[0] << std::dec << std::endl;
         }
         else if (cmd == 0x00 && data) {  // snd_SetMasterVolume
-            std::cout << "[SOUND] SetMasterVolume: vol=" << data[0] << std::endl;
+            std::cout << "[SOUND] SetMasterVolume: left=" << data[0] << " right=" << data[1] << std::endl;
         }
         else if (cmd == 0x19 && data) {  // snd_IsSoundPlaying
             std::cout << "[SOUND] IsSoundPlaying: handle=0x" << std::hex << data[0] << std::dec << std::endl;
         }
-        else if (call_count <= 50) {  // Log unknown commands
+        else if (cmd == 0x16 && data) {  // snd_SetSoundVolume
+            std::cout << "[SOUND] SetVolume: handle=0x" << std::hex << data[0]
+                      << std::dec << " vol=" << data[1] << std::endl;
+        }
+        else if (cmd == 0x17 && data) {  // snd_SetSoundPan
+            std::cout << "[SOUND] SetPan: handle=0x" << std::hex << data[0]
+                      << std::dec << " pan=" << (int32_t)data[1] << std::endl;
+        }
+        else if (cmd == 0x1A && data) {  // snd_SetSoundPitch - suppress spam
+            if (cmd_counts[cmd] <= 3) {
+                std::cout << "[SOUND] SetPitch: handle=0x" << std::hex << data[0]
+                          << std::dec << " pitch=" << data[1]
+                          << " (suppressing further)" << std::endl;
+            }
+        }
+        else if (cmd_counts[cmd] <= 5) {  // Log first 5 of each command type
             std::cout << "[SOUND] cmd=0x" << std::hex << cmd << std::dec
                       << " (" << cmdName << ") param=" << param;
             if (data && param >= 4) {
-                std::cout << " data[0]=0x" << std::hex << data[0] << std::dec;
+                std::cout << " data[0]=0x" << std::hex << data[0];
+                if (param >= 8) std::cout << " [1]=0x" << data[1];
+                if (param >= 12) std::cout << " [2]=0x" << data[2];
+                std::cout << std::dec;
+            }
+            std::cout << std::endl;
+        }
+
+        // Print summary every 500 calls
+        if (call_count % 500 == 0) {
+            std::cout << "\n[SOUND] === Summary (" << call_count << " calls, " << sounds_played << " sounds) ===" << std::endl;
+            for (auto& [c, count] : cmd_counts) {
+                const char* name = "?";
+                switch(c) {
+                    case 0x00: name = "MasterVol"; break;
+                    case 0x10: name = "Play"; break;
+                    case 0x11: name = "PlayVPPMPB"; break;
+                    case 0x15: name = "Stop"; break;
+                    case 0x16: name = "SetVol"; break;
+                    case 0x17: name = "SetPan"; break;
+                    case 0x19: name = "IsPlaying"; break;
+                    case 0x1A: name = "SetPitch"; break;
+                    default: name = cmdName; break;
+                }
+                std::cout << "[SOUND]   0x" << std::hex << c << std::dec
+                          << " " << name << ": " << count << "x" << std::endl;
             }
             std::cout << std::endl;
         }
@@ -1398,6 +1685,8 @@ namespace ps2_stubs
         } else {
             setReturnS32(ctx, 0);
         }
+        // Force clear g_mpeg.oid_1 to escape video loop
+        *reinterpret_cast<uint32_t*>(rdram + 0x169A00) = 0;
         ctx->pc = getRegU32(ctx, 31);
     }
 
@@ -1413,8 +1702,580 @@ namespace ps2_stubs
 
         // Just return - no responses pending
         setReturnS32(ctx, 0);
+        // Force clear g_mpeg.oid_1 to escape video loop
+        *reinterpret_cast<uint32_t*>(rdram + 0x169A00) = 0;
         ctx->pc = getRegU32(ctx, 31);
     }
 
+    // Stub for sceSifCallRpc - handles RPC calls to IOP
+    // This is used for sound bank loading among other things
+    void sceSifCallRpc_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int call_count = 0;
+        call_count++;
 
+        // Arguments from MIPS calling convention:
+        // $a0 = client data pointer
+        // $a1 = function number
+        // $a2 = mode (0=blocking, 1=non-blocking)
+        // $a3 = send buffer
+        // stack: send size, recv buffer, recv size, callback, callback data
+        uint32_t clientPtr = getRegU32(ctx, 4);
+        uint32_t funcNum = getRegU32(ctx, 5);
+        uint32_t mode = getRegU32(ctx, 6);
+        uint32_t sendBuf = getRegU32(ctx, 7);
+
+        // Read stack arguments
+        uint32_t sp = getRegU32(ctx, 29);
+        uint32_t sendSize = *(uint32_t*)(rdram + ((sp + 0x10) & 0x1FFFFFF));
+        uint32_t recvBuf = *(uint32_t*)(rdram + ((sp + 0x14) & 0x1FFFFFF));
+        uint32_t recvSize = *(uint32_t*)(rdram + ((sp + 0x18) & 0x1FFFFFF));
+
+        if (call_count <= 30) {
+            std::cout << "[SOUND] sceSifCallRpc #" << call_count
+                      << " func=" << funcNum
+                      << " mode=" << mode
+                      << " sendBuf=0x" << std::hex << sendBuf
+                      << " recvBuf=0x" << recvBuf << std::dec << std::endl;
+        }
+
+        // Check if this is a bank load RPC (function 3 to loader service)
+        // gLoadReturnValue is at 0x260e00
+        const uint32_t LOAD_RETURN_VALUE_ADDR = 0x260e00;
+
+        if (funcNum == 3 && recvBuf != 0) {
+            // This is snd_BankLoadByLoc - return a fake bank pointer
+            // The game expects a valid pointer, we'll give it a fake one
+            // in an unused memory area
+            static uint32_t fakeBankPtr = 0x1F00000;  // High memory, hopefully unused
+
+            // Write the fake bank pointer to the receive buffer
+            uint32_t* recvPtr = (uint32_t*)(rdram + (recvBuf & 0x1FFFFFF));
+            *recvPtr = fakeBankPtr;
+
+            // Also write to gLoadReturnValue directly in case it's checked there
+            uint32_t* loadRetVal = (uint32_t*)(rdram + (LOAD_RETURN_VALUE_ADDR & 0x1FFFFFF));
+            *loadRetVal = fakeBankPtr;
+
+            std::cout << "[SOUND] Bank load RPC - returning fake bank ptr 0x"
+                      << std::hex << fakeBankPtr << std::dec << std::endl;
+
+            fakeBankPtr += 0x10000;  // Next bank gets different address
+        }
+
+        // Return 0 (success)
+        setReturnS32(ctx, 0);
+        // Force clear g_mpeg.oid_1 to escape video loop
+        *reinterpret_cast<uint32_t*>(rdram + 0x169A00) = 0;
+        ctx->pc = getRegU32(ctx, 31);
+    }
+
+    // ============================================================
+    // CONTROLLER STUBS - Map raylib keyboard/gamepad to PS2 pad
+    // ============================================================
+
+    // PS2 pad button masks (from libpad documentation)
+    // These are the bits in the button data word
+    #define PAD_SELECT   0x0001
+    #define PAD_L3       0x0002
+    #define PAD_R3       0x0004
+    #define PAD_START    0x0008
+    #define PAD_UP       0x0010
+    #define PAD_RIGHT    0x0020
+    #define PAD_DOWN     0x0040
+    #define PAD_LEFT     0x0080
+    #define PAD_L2       0x0100
+    #define PAD_R2       0x0200
+    #define PAD_L1       0x0400
+    #define PAD_R1       0x0800
+    #define PAD_TRIANGLE 0x1000
+    #define PAD_CIRCLE   0x2000
+    #define PAD_CROSS    0x4000
+    #define PAD_SQUARE   0x8000
+
+    // scePadInit - Initialize pad library
+    void scePadInit_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int call_count = 0;
+        { // always print
+            std::cout << "[PAD] *** scePadInit STUB CALLED ***" << std::endl;
+        }
+        setReturnS32(ctx, 1);  // Return success
+        // Force clear g_mpeg.oid_1 to escape video loop
+        *reinterpret_cast<uint32_t*>(rdram + 0x169A00) = 0;
+        ctx->pc = getRegU32(ctx, 31);
+    }
+
+    // scePadPortOpen - Open a controller port
+    void scePadPortOpen_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        uint32_t port = getRegU32(ctx, 4);
+        uint32_t slot = getRegU32(ctx, 5);
+        uint32_t dmaBuffer = getRegU32(ctx, 6);
+
+        static int call_count = 0;
+        { // always print
+            std::cout << "[PAD] scePadPortOpen port=" << port << " slot=" << slot
+                      << " dma=0x" << std::hex << dmaBuffer << std::dec << std::endl;
+        }
+
+        setReturnS32(ctx, 1);  // Return success (non-zero = success)
+        // Force clear g_mpeg.oid_1 to escape video loop
+        *reinterpret_cast<uint32_t*>(rdram + 0x169A00) = 0;
+        ctx->pc = getRegU32(ctx, 31);
+    }
+
+    // scePadGetState - Get controller state
+    // Returns: 0=disconnected, 1=finding, 2=ready/stable, 6=ready
+    void scePadGetState_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int call_count = 0;
+        call_count++;
+
+        if (call_count <= 5) {
+            std::cout << "[PAD] scePadGetState called" << std::endl;
+        }
+
+        // Return 6 = stable/ready (same as sceCdComplete for CD)
+        setReturnS32(ctx, 6);
+        // Force clear g_mpeg.oid_1 to escape video loop
+        *reinterpret_cast<uint32_t*>(rdram + 0x169A00) = 0;
+        ctx->pc = getRegU32(ctx, 31);
+    }
+
+    // scePadRead - Read controller data
+    // The data buffer format:
+    // [0] = status byte
+    // [1] = data length / 2
+    // [2-3] = button data (16 bits, active low)
+    // [4] = right stick X (0-255, 128=center)
+    // [5] = right stick Y
+    // [6] = left stick X
+    // [7] = left stick Y
+    void scePadRead_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        uint32_t port = getRegU32(ctx, 4);
+        uint32_t slot = getRegU32(ctx, 5);
+        uint32_t dataAddr = getRegU32(ctx, 6);
+
+        static int call_count = 0;
+        call_count++;
+
+        if (dataAddr == 0 || dataAddr > 0x2000000) {
+            setReturnS32(ctx, 0);
+        // Force clear g_mpeg.oid_1 to escape video loop
+        *reinterpret_cast<uint32_t*>(rdram + 0x169A00) = 0;
+            ctx->pc = getRegU32(ctx, 31);
+            return;
+        }
+
+        uint8_t* data = rdram + (dataAddr & 0x1FFFFFF);
+
+        // Read keyboard/gamepad input from raylib
+        uint16_t buttons = 0xFFFF;  // All buttons released (active low!)
+
+        // Map keyboard to PS2 buttons
+        if (IsKeyDown(KEY_ENTER) || IsKeyDown(KEY_SPACE))  buttons &= ~PAD_CROSS;    // X button
+        if (IsKeyDown(KEY_BACKSPACE) || IsKeyDown(KEY_ESCAPE)) buttons &= ~PAD_CIRCLE;   // Circle
+        if (IsKeyDown(KEY_Q))         buttons &= ~PAD_SQUARE;   // Square
+        if (IsKeyDown(KEY_E))         buttons &= ~PAD_TRIANGLE; // Triangle
+        if (IsKeyDown(KEY_UP) || IsKeyDown(KEY_W))    buttons &= ~PAD_UP;
+        if (IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_S))  buttons &= ~PAD_DOWN;
+        if (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A))  buttons &= ~PAD_LEFT;
+        if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D)) buttons &= ~PAD_RIGHT;
+        if (IsKeyDown(KEY_TAB))       buttons &= ~PAD_SELECT;
+        if (IsKeyDown(KEY_ENTER))     buttons &= ~PAD_START;
+        if (IsKeyDown(KEY_Z))         buttons &= ~PAD_L1;
+        if (IsKeyDown(KEY_C))         buttons &= ~PAD_R1;
+        if (IsKeyDown(KEY_ONE))       buttons &= ~PAD_L2;
+        if (IsKeyDown(KEY_THREE))     buttons &= ~PAD_R2;
+
+        // Also check gamepad if connected
+        if (IsGamepadAvailable(0)) {
+            if (IsGamepadButtonDown(0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN))  buttons &= ~PAD_CROSS;
+            if (IsGamepadButtonDown(0, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT)) buttons &= ~PAD_CIRCLE;
+            if (IsGamepadButtonDown(0, GAMEPAD_BUTTON_RIGHT_FACE_LEFT))  buttons &= ~PAD_SQUARE;
+            if (IsGamepadButtonDown(0, GAMEPAD_BUTTON_RIGHT_FACE_UP))    buttons &= ~PAD_TRIANGLE;
+            if (IsGamepadButtonDown(0, GAMEPAD_BUTTON_LEFT_FACE_UP))     buttons &= ~PAD_UP;
+            if (IsGamepadButtonDown(0, GAMEPAD_BUTTON_LEFT_FACE_DOWN))   buttons &= ~PAD_DOWN;
+            if (IsGamepadButtonDown(0, GAMEPAD_BUTTON_LEFT_FACE_LEFT))   buttons &= ~PAD_LEFT;
+            if (IsGamepadButtonDown(0, GAMEPAD_BUTTON_LEFT_FACE_RIGHT))  buttons &= ~PAD_RIGHT;
+            if (IsGamepadButtonDown(0, GAMEPAD_BUTTON_MIDDLE_LEFT))      buttons &= ~PAD_SELECT;
+            if (IsGamepadButtonDown(0, GAMEPAD_BUTTON_MIDDLE_RIGHT))     buttons &= ~PAD_START;
+            if (IsGamepadButtonDown(0, GAMEPAD_BUTTON_LEFT_TRIGGER_1))   buttons &= ~PAD_L1;
+            if (IsGamepadButtonDown(0, GAMEPAD_BUTTON_RIGHT_TRIGGER_1))  buttons &= ~PAD_R1;
+            if (IsGamepadButtonDown(0, GAMEPAD_BUTTON_LEFT_TRIGGER_2))   buttons &= ~PAD_L2;
+            if (IsGamepadButtonDown(0, GAMEPAD_BUTTON_RIGHT_TRIGGER_2))  buttons &= ~PAD_R2;
+        }
+
+        // Fill the data buffer
+        data[0] = 0x00;  // Status: success
+        data[1] = 0x08;  // Data length: 16 bytes (8 halfwords) / 2 = 8? Actually means mode
+        // Button data (little endian, active low)
+        data[2] = buttons & 0xFF;
+        data[3] = (buttons >> 8) & 0xFF;
+        // Analog sticks (center = 128)
+        data[4] = 128;  // Right stick X
+        data[5] = 128;  // Right stick Y
+        data[6] = 128;  // Left stick X
+        data[7] = 128;  // Left stick Y
+
+        // Read analog sticks from gamepad if available
+        if (IsGamepadAvailable(0)) {
+            float lx = GetGamepadAxisMovement(0, GAMEPAD_AXIS_LEFT_X);
+            float ly = GetGamepadAxisMovement(0, GAMEPAD_AXIS_LEFT_Y);
+            float rx = GetGamepadAxisMovement(0, GAMEPAD_AXIS_RIGHT_X);
+            float ry = GetGamepadAxisMovement(0, GAMEPAD_AXIS_RIGHT_Y);
+
+            data[6] = (uint8_t)(128 + lx * 127);  // Left stick X
+            data[7] = (uint8_t)(128 + ly * 127);  // Left stick Y
+            data[4] = (uint8_t)(128 + rx * 127);  // Right stick X
+            data[5] = (uint8_t)(128 + ry * 127);  // Right stick Y
+        }
+
+        // Log button presses (but not too often)
+        if (call_count <= 10 || (buttons != 0xFFFF && call_count % 60 == 0)) {
+            std::cout << "[PAD] scePadRead: buttons=0x" << std::hex << buttons << std::dec << std::endl;
+        }
+
+        setReturnS32(ctx, 1);  // Return success
+        // Force clear g_mpeg.oid_1 to escape video loop
+        *reinterpret_cast<uint32_t*>(rdram + 0x169A00) = 0;
+        ctx->pc = getRegU32(ctx, 31);
+    }
+
+    // scePadInfoMode - Get pad mode info
+    void scePadInfoMode_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        uint32_t port = getRegU32(ctx, 4);
+        uint32_t slot = getRegU32(ctx, 5);
+        uint32_t term = getRegU32(ctx, 6);
+        uint32_t offs = getRegU32(ctx, 7);
+
+        static int call_count = 0;
+        { // always print
+            std::cout << "[PAD] scePadInfoMode port=" << port << " slot=" << slot
+                      << " term=" << term << " offs=" << offs << std::endl;
+        }
+
+        // Return 1 for DualShock2 mode support
+        setReturnS32(ctx, 1);
+        // Force clear g_mpeg.oid_1 to escape video loop
+        *reinterpret_cast<uint32_t*>(rdram + 0x169A00) = 0;
+        ctx->pc = getRegU32(ctx, 31);
+    }
+
+    // scePadSetMainMode - Set controller mode
+    void scePadSetMainMode_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int call_count = 0;
+        { // always print
+            std::cout << "[PAD] scePadSetMainMode called" << std::endl;
+        }
+        setReturnS32(ctx, 1);
+        // Force clear g_mpeg.oid_1 to escape video loop
+        *reinterpret_cast<uint32_t*>(rdram + 0x169A00) = 0;
+        ctx->pc = getRegU32(ctx, 31);
+    }
+
+    // scePadInfoAct - Get actuator (vibration) info
+    void scePadInfoAct_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int call_count = 0;
+        { // always print
+            std::cout << "[PAD] scePadInfoAct called" << std::endl;
+        }
+        setReturnS32(ctx, 1);  // Has actuators
+        // Force clear g_mpeg.oid_1 to escape video loop
+        *reinterpret_cast<uint32_t*>(rdram + 0x169A00) = 0;
+        ctx->pc = getRegU32(ctx, 31);
+    }
+
+    // scePadSetActAlign - Set actuator alignment
+    void scePadSetActAlign_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int call_count = 0;
+        { // always print
+            std::cout << "[PAD] scePadSetActAlign called" << std::endl;
+        }
+        setReturnS32(ctx, 1);
+        // Force clear g_mpeg.oid_1 to escape video loop
+        *reinterpret_cast<uint32_t*>(rdram + 0x169A00) = 0;
+        ctx->pc = getRegU32(ctx, 31);
+    }
+
+    // scePadSetActDirect - Direct actuator control (vibration)
+    void scePadSetActDirect_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        // Silently ignore vibration commands
+        setReturnS32(ctx, 1);
+        // Force clear g_mpeg.oid_1 to escape video loop
+        *reinterpret_cast<uint32_t*>(rdram + 0x169A00) = 0;
+        ctx->pc = getRegU32(ctx, 31);
+    }
+
+    // scePadInfoPressMode - Check pressure sensitivity support
+    void scePadInfoPressMode_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        setReturnS32(ctx, 1);  // Supports pressure
+        // Force clear g_mpeg.oid_1 to escape video loop
+        *reinterpret_cast<uint32_t*>(rdram + 0x169A00) = 0;
+        ctx->pc = getRegU32(ctx, 31);
+    }
+
+    // scePadEnterPressMode - Enter pressure mode
+    void scePadEnterPressMode_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        setReturnS32(ctx, 1);
+        // Force clear g_mpeg.oid_1 to escape video loop
+        *reinterpret_cast<uint32_t*>(rdram + 0x169A00) = 0;
+        ctx->pc = getRegU32(ctx, 31);
+    }
+
+}
+
+namespace ps2_stubs {
+    // FlushFrames stub - Skip frame waiting to allow game to progress
+    void FlushFrames_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int call_count = 0;
+        if (++call_count <= 5) {
+            std::cout << "[STUB] FlushFrames called, clearing g_mpeg" << std::endl;
+        }
+        // Force clear g_mpeg.oid_1 to escape video loop
+        *reinterpret_cast<uint32_t*>(rdram + 0x169A00) = 0;
+        ctx->pc = getRegU32(ctx, 31);
+    }
+}
+
+// Debug: Check g_mpeg value at runtime
+namespace ps2_stubs {
+    void DebugCheckMpeg_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        // g_mpeg.oid_1 is at 0x269A00 (relative to rdram: 0x169A00)
+        uint32_t mpeg_oid1 = *reinterpret_cast<uint32_t*>(rdram + 0x169A00);
+        static int check_count = 0;
+        if (++check_count <= 10) {
+            std::cout << "[DEBUG] g_mpeg.oid_1 at 0x269A00 = " << mpeg_oid1 << std::endl;
+        }
+        // Force clear g_mpeg.oid_1 to escape video loop
+        *reinterpret_cast<uint32_t*>(rdram + 0x169A00) = 0;
+        ctx->pc = getRegU32(ctx, 31);
+    }
+}
+
+namespace ps2_stubs {
+    // WaitSema function stub - clear g_mpeg to escape video loop
+    void WaitSema_func_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int call_count = 0;
+        call_count++;
+
+        // Clear g_mpeg.oid_1 to escape video loop
+        *reinterpret_cast<uint32_t*>(rdram + 0x169A00) = 0;
+
+        if (call_count <= 3) {
+            std::cout << "[WAITSEMA STUB] Clearing g_mpeg, call #" << call_count << std::endl;
+        }
+
+        // Just return - don't actually wait
+        ctx->pc = getRegU32(ctx, 31);
+    }
+}
+
+namespace ps2_stubs {
+    // ExecuteOids stub - clear OIDs and return without executing MPEG
+    // This allows the game to skip video playback
+    void ExecuteOids_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        // $a0 (register 4) contains 'this' pointer to CMpeg object
+        uint32_t mpegAddr = getRegU32(ctx, 4);
+        
+        static int call_count = 0;
+        if (++call_count <= 5) {
+            std::cout << "[MPEG] ExecuteOids called on CMpeg at 0x" << std::hex << mpegAddr << std::dec << std::endl;
+        }
+        
+        // Clear oid_1 and oid_2 in the CMpeg struct (offset 0 and 4)
+        if (mpegAddr >= 0x100000 && mpegAddr < 0x2000000) {
+            uint32_t offset = mpegAddr - 0x100000;
+            *reinterpret_cast<uint32_t*>(rdram + offset) = 0;      // oid_1
+            *reinterpret_cast<uint32_t*>(rdram + offset + 4) = 0;  // oid_2
+            
+            if (call_count <= 5) {
+                std::cout << "[MPEG] Cleared oid_1 and oid_2" << std::endl;
+            }
+        }
+        
+        // Return without executing any video
+        ctx->pc = getRegU32(ctx, 31);
+    }
+}
+
+namespace ps2_stubs {
+    // sceMpegIsEnd stub - CRITICAL for MPEG video skipping
+    // This PS2 SDK function checks if MPEG video is done playing
+    // Address: 0x20B0B0 (2142384)
+    // By returning 1 (true), we tell the game the video is finished,
+    // which breaks the Execute loop in CMpeg::Execute
+    void sceMpegIsEnd_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int call_count = 0;
+        if (++call_count <= 10) {
+            std::cout << "[MPEG] sceMpegIsEnd called, returning 1 (video done)" << std::endl;
+        }
+
+        // Return 1 in $v0 - video is finished
+        setReturnS32(ctx, 1);
+
+        // Return to caller
+        ctx->pc = getRegU32(ctx, 31);
+    }
+}
+
+namespace ps2_stubs {
+    // ==== DEBUG VERSIONS - Log but let real code run ====
+
+    // Open log file for MPEG data dumps
+    static std::ofstream mpeg_log_file;
+    static bool mpeg_log_initialized = false;
+
+    static void initMpegLog() {
+        if (!mpeg_log_initialized) {
+            mpeg_log_file.open("mpeg_trace.log", std::ios::out | std::ios::trunc);
+            if (mpeg_log_file.is_open()) {
+                mpeg_log_file << "=== MPEG Debug Trace ===" << std::endl;
+                mpeg_log_file << "Logging all MPEG operations without skipping" << std::endl;
+                mpeg_log_file << std::endl;
+            }
+            mpeg_log_initialized = true;
+        }
+    }
+
+    // Dump CMpeg structure (based on decomp analysis)
+    // CMpeg structure layout (from sly1-decomp):
+    // +0x00: OID* oid_1        - Current operation ID 1
+    // +0x04: OID* oid_2        - Current operation ID 2
+    // +0x08: void* pvBuffer    - MPEG buffer pointer
+    // +0x0C: int cbBuffer      - Buffer size
+    // +0x10: sceMpeg mpeg      - PS2 SDK MPEG handle
+    // +0x14+: More fields...
+    static void dumpCMpegStruct(uint8_t* rdram, uint32_t mpegAddr, std::ostream& out) {
+        if (mpegAddr < 0x100000 || mpegAddr >= 0x2000000) {
+            out << "  [Invalid CMpeg address]" << std::endl;
+            return;
+        }
+
+        uint32_t offset = mpegAddr & 0x1FFFFFF;
+        uint32_t* data = reinterpret_cast<uint32_t*>(rdram + offset);
+
+        out << "  CMpeg @ 0x" << std::hex << mpegAddr << std::dec << " {" << std::endl;
+        out << "    oid_1:      0x" << std::hex << data[0] << std::dec << std::endl;
+        out << "    oid_2:      0x" << std::hex << data[1] << std::dec << std::endl;
+        out << "    pvBuffer:   0x" << std::hex << data[2] << std::dec << std::endl;
+        out << "    cbBuffer:   " << data[3] << " bytes" << std::endl;
+        out << "    mpeg:       0x" << std::hex << data[4] << std::dec << std::endl;
+
+        // Dump first 64 bytes for analysis
+        out << "    Raw data (first 64 bytes):" << std::endl << "      ";
+        for (int i = 0; i < 16; i++) {
+            out << std::hex << std::setw(8) << std::setfill('0') << data[i] << " ";
+            if ((i + 1) % 4 == 0 && i < 15) out << std::endl << "      ";
+        }
+        out << std::dec << std::endl << "  }" << std::endl;
+    }
+
+    // ExecuteOids DEBUG version - log but don't skip
+    void ExecuteOids_debug(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        initMpegLog();
+
+        // $a0 (register 4) contains 'this' pointer to CMpeg object
+        uint32_t mpegAddr = getRegU32(ctx, 4);
+
+        static int call_count = 0;
+        call_count++;
+
+        // Log every call to console (first 20) and file (all)
+        if (call_count <= 20) {
+            std::cout << "[MPEG DEBUG #" << call_count << "] ExecuteOids called" << std::endl;
+        }
+
+        // Log to file
+        if (mpeg_log_file.is_open()) {
+            mpeg_log_file << "[ExecuteOids #" << call_count << "] CMpeg @ 0x"
+                         << std::hex << mpegAddr << std::dec << std::endl;
+            dumpCMpegStruct(rdram, mpegAddr, mpeg_log_file);
+            mpeg_log_file.flush();
+        }
+
+        // Log every 1000 calls to console
+        if (call_count % 1000 == 0) {
+            std::cout << "[MPEG DEBUG] ExecuteOids called " << call_count << " times" << std::endl;
+        }
+
+        // DON'T return - let the real recompiled code run!
+        // We just log and pass through to the actual function
+        // The actual function will be called after this stub returns via fallthrough
+
+        // Actually, we need to call the REAL function since we're replacing it
+        // Get the original function from the runtime and call it
+        // For now, let's just log and return without modifying anything
+        // This will show us what the function expects
+
+        // Return to caller WITHOUT modifying CMpeg - let real behavior happen
+        ctx->pc = getRegU32(ctx, 31);
+    }
+
+    // sceMpegIsEnd DEBUG version - log the actual state
+    void sceMpegIsEnd_debug(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        initMpegLog();
+
+        // $a0 contains pointer to sceMpeg structure
+        uint32_t mpegHandle = getRegU32(ctx, 4);
+
+        static int call_count = 0;
+        call_count++;
+
+        // Read some values from the MPEG handle to understand state
+        int isEnd = 0;  // Default: not ended
+        if (mpegHandle >= 0x100000 && mpegHandle < 0x2000000) {
+            uint32_t offset = mpegHandle & 0x1FFFFFF;
+            // Try to determine MPEG state from structure
+            // This is PS2 SDK internal - we need to figure out the format
+        }
+
+        // Log to console (first 20)
+        if (call_count <= 20) {
+            std::cout << "[MPEG DEBUG #" << call_count << "] sceMpegIsEnd called, handle=0x"
+                     << std::hex << mpegHandle << std::dec
+                     << " -> returning 0 (not ended)" << std::endl;
+        }
+
+        // Log to file
+        if (mpeg_log_file.is_open()) {
+            mpeg_log_file << "[sceMpegIsEnd #" << call_count << "] handle=0x"
+                         << std::hex << mpegHandle << std::dec << std::endl;
+
+            // Dump handle structure
+            if (mpegHandle >= 0x100000 && mpegHandle < 0x2000000) {
+                uint32_t offset = mpegHandle & 0x1FFFFFF;
+                uint32_t* data = reinterpret_cast<uint32_t*>(rdram + offset);
+                mpeg_log_file << "  sceMpeg handle data:" << std::endl << "    ";
+                for (int i = 0; i < 8; i++) {
+                    mpeg_log_file << std::hex << std::setw(8) << std::setfill('0') << data[i] << " ";
+                }
+                mpeg_log_file << std::dec << std::endl;
+            }
+            mpeg_log_file.flush();
+        }
+
+        // Return 0 - video NOT ended (let it keep trying)
+        // This is the opposite of the skip stub - we want to see what happens
+        setReturnS32(ctx, 0);
+
+        // Return to caller
+        ctx->pc = getRegU32(ctx, 31);
+    }
 }

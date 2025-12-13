@@ -276,6 +276,10 @@ namespace ps2_syscalls
         // Always trigger VBlank to update counters
         runtime->triggerVBlank();
 
+        // Clear g_mpeg.oid_1 to escape video loop
+// Set D_002623B8 to 1 to break FlushFrames spin loop at 0x15F270        // FlushFrames waits until this memory location is non-zero        // Normally set by VBlank interrupt or DMA completion        *reinterpret_cast<uint32_t*>(rdram + 0x1623B8) = 1;
+        *reinterpret_cast<uint32_t*>(rdram + 0x169A00) = 0;
+
         if (g_semaphores.find(semaId) != g_semaphores.end()) {
             if (g_semaphores[semaId] > 0) {
                 g_semaphores[semaId]--;

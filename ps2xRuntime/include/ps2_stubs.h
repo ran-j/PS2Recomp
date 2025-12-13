@@ -3,6 +3,7 @@
 
 #include "ps2_runtime.h"
 #include <cstdint>
+#include <string>
 
 namespace ps2_stubs
 {
@@ -66,6 +67,7 @@ namespace ps2_stubs
     void sceSifCheckStatRpc_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void snd_SendIOPCommandAndWait_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void snd_GotReturns_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void sceSifCallRpc_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
 
     // Math functions
     void sqrt(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
@@ -82,6 +84,42 @@ namespace ps2_stubs
     void fabs(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
 
     void TODO(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+
+    // Controller (pad) stubs
+    void scePadInit_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void scePadPortOpen_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void scePadGetState_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void scePadRead_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void scePadInfoMode_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void scePadSetMainMode_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void scePadInfoAct_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void scePadSetActAlign_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void scePadSetActDirect_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void scePadInfoPressMode_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void scePadEnterPressMode_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+
+    // FlushFrames stub
+    void FlushFrames_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void WaitSema_func_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void ExecuteOids_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+
+    // sceMpeg stubs - MPEG video system
+    void sceMpegIsEnd_stub(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+
+    // MPEG debug versions - log but don't skip, let real code run
+    void ExecuteOids_debug(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void sceMpegIsEnd_debug(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+}
+
+// Audio manager functions for real sound playback
+namespace audio_manager
+{
+    void InitializeAudio();
+    void SetSoundsPath(const std::string& path);
+    bool LoadSoundById(int soundId);
+    void PlaySoundById(int soundId, float volume, float pan);
+    void StopSoundById(int soundId);
+    void Cleanup();
 }
 
 #endif // PS2_STUBS_H

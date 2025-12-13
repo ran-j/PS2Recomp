@@ -25,12 +25,24 @@ add_library(ps2_runtime STATIC
     src/lib/ps2_syscalls.cpp
 )
 
+# Main runner source files (excluding the big recompiled file)
 file(GLOB RUNNER_SRC_FILES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/runner/*.cpp"
 )
 
+# Split recompiled function files for faster incremental builds
+file(GLOB RECOMPILED_SRC_FILES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/runner/recompiled/*.cpp"
+)
+
+# Remove the old big file if using split files
+if(RECOMPILED_SRC_FILES)
+    list(FILTER RUNNER_SRC_FILES EXCLUDE REGEX "ps2_recompiled_functions\\.cpp$")
+endif()
+
 add_executable(ps2EntryRunner
     ${RUNNER_SRC_FILES}
+    ${RECOMPILED_SRC_FILES}
 )
 
 target_include_directories(ps2_runtime PUBLIC
