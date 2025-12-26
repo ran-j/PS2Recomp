@@ -41,12 +41,14 @@ namespace ps2recomp
         std::map<uint32_t, std::string> m_generatedStubs;
 
         bool decodeFunction(Function &function);
+        void discoverAdditionalEntryPoints();
         bool shouldSkipFunction(const std::string &name) const;
         std::string generateRuntimeHeader();
         bool generateFunctionHeader();
         bool generateStubHeader();
         bool writeToFile(const std::string &path, const std::string &content);
         std::filesystem::path getOutputPath(const Function &function) const;
+        std::string sanitizeFunctionName(const std::string &name) const;
     };
 
 }

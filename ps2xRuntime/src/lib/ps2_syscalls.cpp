@@ -946,4 +946,32 @@ namespace ps2_syscalls
         // Return generic error for unimplemented ones
         setReturnS32(ctx, -1); // Return -ENOSYS or similar? Use -1 for simplicity.
     }
+
+    // 0x3C SetupThread: returns stack pointer (stack + stack_size)
+    // args: $a0 = stack base, $a1 = stack size, $a2 = gp, $a3 = entry point
+    void SetupThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
+    {
+        uint32_t stackBase = getRegU32(ctx, 4);
+        uint32_t stackSize = getRegU32(ctx, 5);
+        uint32_t sp = stackBase + stackSize;
+        setReturnS32(ctx, sp);
+    }
+
+    // 0x5A QueryBootMode (stub): return 0 for now
+    void QueryBootMode(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
+    {
+        setReturnS32(ctx, 0);
+    }
+
+    // 0x5B GetThreadTLS (stub): return 0
+    void GetThreadTLS(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
+    {
+        setReturnS32(ctx, 0);
+    }
+
+    // 0x74 RegisterExitHandler (stub): return 0
+    void RegisterExitHandler(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
+    {
+        setReturnS32(ctx, 0);
+    }
 }

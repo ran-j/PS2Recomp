@@ -4,7 +4,9 @@
 #include <sstream>
 #include <algorithm>
 #include <unordered_set>
+#include <unordered_map>
 #include <iostream>
+#include <cctype>
 
 namespace ps2recomp
 {
@@ -13,7 +15,46 @@ namespace ps2recomp
     {
     }
 
-    std::string CodeGenerator::handleBranchDelaySlots(const Instruction &branchInst, const Instruction &delaySlot)
+    void CodeGenerator::setRenamedFunctions(const std::unordered_map<uint32_t, std::string> &renames)
+    {
+        m_renamedFunctions = renames;
+    }
+
+    std::string CodeGenerator::getFunctionName(uint32_t address)
+    {
+        auto it = m_renamedFunctions.find(address);
+        if (it != m_renamedFunctions.end())
+        {
+            return it->second;
+        }
+
+        Symbol *sym = findSymbolByAddress(address);
+        if (sym && sym->isFunction)
+        {
+            return sym->name;
+        }
+
+        return "";
+    }
+
+    static bool isReservedCxxIdentifier(const std::string &name)
+    {
+        if (name.size() >= 2 && name[0] == '_' && name[1] == '_')
+            return true;
+        if (!name.empty() && name[0] == '_' && std::isupper(static_cast<unsigned char>(name[1])))
+            return true;
+        return false;
+    }
+
+    static std::string sanitizeFunctionName(const std::string &name)
+    {
+        if (!isReservedCxxIdentifier(name))
+            return name;
+        return "ps2_" + name;
+    }
+
+    std::string CodeGenerator::handleBranchDelaySlots(const Instruction &branchInst, const Instruction &delaySlot,
+                                                      const Function &function, const std::unordered_set<uint32_t> &internalTargets)
     {
         std::stringstream ss;
         bool hasValidDelaySlot = (delaySlot.raw != 0);
@@ -34,10 +75,10 @@ namespace ps2recomp
                 ss << "    " << delaySlotCode << "\n";
             }
             uint32_t target = (branchInst.address & 0xF0000000) | (branchInst.target << 2);
-            Symbol *sym = findSymbolByAddress(target);
-            if (sym && sym->isFunction)
+            std::string funcName = getFunctionName(target);
+            if (!funcName.empty())
             {
-                ss << "    " << sym->name << "(rdram, ctx, runtime); return;\n";
+                ss << "    " << funcName << "(rdram, ctx, runtime); return;\n";
             }
             else
             {
@@ -58,14 +99,7 @@ namespace ps2recomp
             {
                 ss << "    " << delaySlotCode << "\n";
             }
-            if (rs_reg == 31 && branchInst.function == SPECIAL_JR)
-            {
-                ss << "    return;\n";
-            }
-            else
-            {
-                ss << "    ctx->pc = GPR_U32(ctx, " << (int)rs_reg << "); return;\n";
-            }
+            ss << "    ctx->pc = GPR_U32(ctx, " << (int)rs_reg << "); return;\n";
         }
         else if (branchInst.isBranch)
         {
@@ -164,12 +198,17 @@ namespace ps2recomp
             int32_t offset = branchInst.simmediate << 2;
             uint32_t target = branchInst.address + 4 + offset;
 
-            Symbol *sym = findSymbolByAddress(target);
             std::string targetAction;
+            std::string funcName = getFunctionName(target);
+            bool isInternalTarget = (internalTargets.find(target) != internalTargets.end());
 
-            if (sym && sym->isFunction)
+            if (!funcName.empty())
             {
-                targetAction = fmt::format("{}(rdram, ctx, runtime); return;", sym->name);
+                targetAction = fmt::format("{}(rdram, ctx, runtime); return;", funcName);
+            }
+            else if (isInternalTarget)
+            {
+                targetAction = fmt::format("goto label_{:x};", target);
             }
             else
             {
@@ -471,6 +510,45 @@ namespace ps2recomp
         return ss.str();
     }
 
+    std::unordered_set<uint32_t> CodeGenerator::collectInternalBranchTargets(
+        const Function &function, const std::vector<Instruction> &instructions)
+    {
+        std::unordered_set<uint32_t> targets;
+
+        for (const auto &inst : instructions)
+        {
+            bool isStaticJump = (inst.opcode == OPCODE_J || inst.opcode == OPCODE_JAL);
+            if (inst.isBranch && inst.opcode != OPCODE_J && inst.opcode != OPCODE_JAL)
+            {
+                int32_t offset = inst.simmediate << 2;
+                uint32_t target = inst.address + 4 + offset;
+
+                if (target >= function.start && target < function.end)
+                {
+                    std::string funcName = getFunctionName(target);
+                    if (funcName.empty())
+                    {
+                        targets.insert(target);
+                    }
+                }
+            }
+            else if (isStaticJump)
+            {
+                uint32_t target = (inst.address & 0xF0000000) | (inst.target << 2);
+                if (target >= function.start && target < function.end)
+                {
+                    std::string funcName = getFunctionName(target);
+                    if (funcName.empty())
+                    {
+                        targets.insert(target);
+                    }
+                }
+            }
+        }
+
+        return targets;
+    }
+
     std::string CodeGenerator::generateFunction(const Function &function, const std::vector<Instruction> &instructions, const bool &useHeaders)
     {
         std::stringstream ss;
@@ -483,13 +561,21 @@ namespace ps2recomp
             ss << "#include \"ps2_recompiled_stubs.h\"\n\n";
         }
 
+        std::unordered_set<uint32_t> internalTargets = collectInternalBranchTargets(function, instructions);
+
         ss << "// Function: " << function.name << "\n";
         ss << "// Address: 0x" << std::hex << function.start << " - 0x" << function.end << std::dec << "\n";
-        ss << "void " << function.name << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime) {\n\n";
+        std::string sanitizedName = sanitizeFunctionName(function.name);
+        ss << "void " << sanitizedName << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime) {\n\n";
 
         for (size_t i = 0; i < instructions.size(); ++i)
         {
             const Instruction &inst = instructions[i];
+
+            if (internalTargets.find(inst.address) != internalTargets.end())
+            {
+                ss << "label_" << std::hex << inst.address << std::dec << ":\n";
+            }
 
             ss << "    // 0x" << std::hex << inst.address << ": 0x" << inst.raw << std::dec << "\n";
 
@@ -498,7 +584,13 @@ namespace ps2recomp
                 if (inst.hasDelaySlot && i + 1 < instructions.size())
                 {
                     const Instruction &delaySlot = instructions[i + 1];
-                    ss << handleBranchDelaySlots(inst, delaySlot);
+
+                    if (internalTargets.find(delaySlot.address) != internalTargets.end())
+                    {
+                        ss << "label_" << std::hex << delaySlot.address << std::dec << ":\n";
+                    }
+
+                    ss << handleBranchDelaySlots(inst, delaySlot, function, internalTargets);
 
                     // Skip the delay slot instruction as we've already handled it
                     ++i;
@@ -2468,11 +2560,11 @@ namespace ps2recomp
 
             if (function.isStub)
             {
-                stubFunctions.push_back({function.start, function.name});
+                stubFunctions.push_back({function.start, sanitizeFunctionName(function.name)});
             }
             else
             {
-                normalFunctions.push_back({function.start, function.name});
+                normalFunctions.push_back({function.start, sanitizeFunctionName(function.name)});
             }
         }
 
@@ -2522,10 +2614,10 @@ namespace ps2recomp
         {
             ss << "    case " << entry.index << ": {\n";
 
-            Symbol *sym = findSymbolByAddress(entry.target);
-            if (sym && sym->isFunction)
+            std::string funcName = getFunctionName(entry.target);
+            if (!funcName.empty())
             {
-                ss << "        " << sym->name << "(rdram, ctx, runtime);\n";
+                ss << "        " << funcName << "(rdram, ctx, runtime);\n";
             }
             else
             {

@@ -1,10 +1,14 @@
 #include "ps2recomp/ps2_recompiler.h"
+#include "ps2recomp/instructions.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
 #include <algorithm>
 #include <stdexcept>
 #include <filesystem>
+#include <cctype>
+#include <unordered_set>
+#include <optional>
 
 namespace fs = std::filesystem;
 
@@ -96,6 +100,8 @@ namespace ps2recomp
 #endif
             }
 
+            discoverAdditionalEntryPoints();
+
             std::cout << "Recompilation completed successfully." << std::endl;
             return true;
         }
@@ -110,6 +116,22 @@ namespace ps2recomp
     {
         try
         {
+            std::unordered_map<uint32_t, std::string> renamed;
+            for (const auto &function : m_functions)
+            {
+                if (!function.isRecompiled)
+                    continue;
+                std::string sanitized = sanitizeFunctionName(function.name);
+                if (sanitized != function.name)
+                {
+                    renamed[function.start] = sanitized;
+                }
+            }
+            if (m_codeGenerator)
+            {
+                m_codeGenerator->setRenamedFunctions(renamed);
+            }
+
             generateFunctionHeader();
 
             if (m_config.singleFileOutput)
@@ -260,7 +282,7 @@ namespace ps2recomp
             {
                 if (function.isRecompiled)
                 {
-                    ss << "void " << function.name << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime);\n";
+                    ss << "void " << sanitizeFunctionName(function.name) << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime);\n";
                 }
             }
 
@@ -276,6 +298,136 @@ namespace ps2recomp
         {
             std::cerr << "Error generating function header: " << e.what() << std::endl;
             return false;
+        }
+    }
+
+    void PS2Recompiler::discoverAdditionalEntryPoints()
+    {
+        std::unordered_set<uint32_t> existingStarts;
+        for (const auto &function : m_functions)
+        {
+            existingStarts.insert(function.start);
+        }
+
+        auto getStaticBranchTarget = [](const Instruction &inst) -> std::optional<uint32_t>
+        {
+            if (inst.opcode == OPCODE_J || inst.opcode == OPCODE_JAL)
+            {
+                return (inst.address & 0xF0000000) | (inst.target << 2);
+            }
+
+            if (inst.opcode == OPCODE_SPECIAL &&
+                (inst.function == SPECIAL_JR || inst.function == SPECIAL_JALR))
+            {
+                return std::nullopt;
+            }
+
+            if (inst.isBranch)
+            {
+                int32_t offset = static_cast<int32_t>(inst.simmediate) << 2;
+                return inst.address + 4 + offset;
+            }
+
+            return std::nullopt;
+        };
+
+        auto findContainingFunction = [&](uint32_t address) -> const Function *
+        {
+            for (const auto &function : m_functions)
+            {
+                if (address >= function.start && address < function.end)
+                {
+                    return &function;
+                }
+            }
+            return nullptr;
+        };
+
+        std::vector<Function> newEntries;
+
+        for (const auto &function : m_functions)
+        {
+            if (!function.isRecompiled || function.isStub)
+            {
+                continue;
+            }
+
+            auto decodedIt = m_decodedFunctions.find(function.start);
+            if (decodedIt == m_decodedFunctions.end())
+            {
+                continue;
+            }
+
+            const auto &instructions = decodedIt->second;
+
+            for (const auto &inst : instructions)
+            {
+                auto targetOpt = getStaticBranchTarget(inst);
+                if (!targetOpt.has_value())
+                {
+                    continue;
+                }
+
+                uint32_t target = targetOpt.value();
+
+                if ((target & 0x3) != 0 || !m_elfParser->isValidAddress(target))
+                {
+                    continue;
+                }
+
+                if (existingStarts.find(target) != existingStarts.end())
+                {
+                    continue;
+                }
+
+                const Function *containingFunction = findContainingFunction(target);
+                if (!containingFunction || containingFunction->isStub || !containingFunction->isRecompiled)
+                {
+                    continue;
+                }
+
+                auto containingDecodedIt = m_decodedFunctions.find(containingFunction->start);
+                if (containingDecodedIt == m_decodedFunctions.end())
+                {
+                    continue;
+                }
+
+                const auto &containingInstructions = containingDecodedIt->second;
+                auto sliceIt = std::find_if(containingInstructions.begin(), containingInstructions.end(),
+                                            [&](const Instruction &candidate)
+                                            { return candidate.address == target; });
+
+                if (sliceIt == containingInstructions.end())
+                {
+                    continue;
+                }
+
+                std::vector<Instruction> slicedInstructions(sliceIt, containingInstructions.end());
+                m_decodedFunctions[target] = slicedInstructions;
+
+                Function entryFunction;
+                std::stringstream name;
+                name << "entry_" << std::hex << target;
+                entryFunction.name = name.str();
+                entryFunction.start = target;
+                entryFunction.end = containingFunction->end;
+                entryFunction.isRecompiled = true;
+                entryFunction.isStub = false;
+
+                newEntries.push_back(entryFunction);
+                existingStarts.insert(target);
+            }
+        }
+
+        if (!newEntries.empty())
+        {
+            m_functions.insert(m_functions.end(), newEntries.begin(), newEntries.end());
+            std::sort(m_functions.begin(), m_functions.end(),
+                      [](const Function &a, const Function &b)
+                      { return a.start < b.start; });
+
+            std::cout << "Discovered " << newEntries.size()
+                      << " additional entry point(s) inside existing functions." << std::endl;
         }
     }
 
@@ -368,5 +520,14 @@ namespace ps2recomp
         outputPath /= safeName + ".cpp";
 
         return outputPath;
+    }
+
+    std::string PS2Recompiler::sanitizeFunctionName(const std::string &name) const
+    {
+        if (name.size() >= 2 && name[0] == '_' && (name[1] == '_' || std::isupper(static_cast<unsigned char>(name[1]))))
+        {
+            return "ps2_" + name;
+        }
+        return name;
     }
 }
