@@ -1,4 +1,5 @@
 #include "ps2_runtime.h"
+#include "ps2_syscalls.h"
 #include <iostream>
 #include <fstream>
 #include <algorithm>
@@ -49,7 +50,7 @@ struct ProgramHeader
 };
 
 #define PT_LOAD 1 // Loadable segment
- 
+
 static constexpr int FB_WIDTH = 640;
 static constexpr int FB_HEIGHT = 448;
 static constexpr uint32_t DEFAULT_FB_ADDR = 0x00100000; // location in RDRAM the guest will draw to
@@ -175,6 +176,12 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
 
     m_loadedModules.push_back(module);
 
+    // Debug: peek at some early globals to verify init state
+    uint32_t dbg_addr = 0x00300000 + 11240;
+    uint8_t *dbg_base = m_memory.getRDRAM();
+    uint32_t dbg_val = *reinterpret_cast<uint32_t *>(dbg_base + (dbg_addr & PS2_RAM_MASK));
+    std::cout << "Debug: [0x" << std::hex << dbg_addr << "] = 0x" << dbg_val << std::dec << std::endl;
+
     std::cout << "ELF file loaded successfully. Entry point: 0x" << std::hex << m_cpuContext.pc << std::dec << std::endl;
     return true;
 }
@@ -298,31 +305,44 @@ void PS2Runtime::run()
     Texture2D frameTex = LoadTextureFromImage(blank);
     UnloadImage(blank);
 
-    std::atomic<bool> running{true};
+    g_activeThreads.store(1, std::memory_order_relaxed);
 
-    std::thread gameThread([&, entryPoint]() {
+    std::thread gameThread([&, entryPoint]()
+                           {
         try
         {
             entryPoint(m_memory.getRDRAM(), &m_cpuContext, this);
+            std::cout << "Game thread returned. PC=0x" << std::hex << m_cpuContext.pc
+                      << " RA=0x" << m_cpuContext.r[31].m128i_u32[0] << std::dec << std::endl;
         }
         catch (const std::exception &e)
         {
             std::cerr << "Error during program execution: " << e.what() << std::endl;
         }
-        running = false;
-    });
+        g_activeThreads.fetch_sub(1, std::memory_order_relaxed); });
 
-    while (running && !WindowShouldClose())
+    uint64_t tick = 0;
+    while (g_activeThreads.load(std::memory_order_relaxed) > 0)
     {
+        if ((tick++ % 120) == 0)
+        {
+            std::cout << "[run] activeThreads=" << g_activeThreads.load(std::memory_order_relaxed) << std::endl;
+        }
         UploadFrame(frameTex, this);
 
         BeginDrawing();
         ClearBackground(BLACK);
         DrawTexture(frameTex, 0, 0, WHITE);
         EndDrawing();
+
+        if (WindowShouldClose())
+        {
+            std::cout << "[run] window close requested, breaking out of loop" << std::endl;
+            break;
+        }
     }
 
-    if (!running)
+    if (g_activeThreads.load(std::memory_order_relaxed) == 0)
     {
         // Game thread finished on its own
         if (gameThread.joinable())
@@ -341,4 +361,6 @@ void PS2Runtime::run()
 
     UnloadTexture(frameTex);
     CloseWindow();
+
+    std::cout << "[run] exiting loop, activeThreads=" << g_activeThreads.load(std::memory_order_relaxed) << std::endl;
 }

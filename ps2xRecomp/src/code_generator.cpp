@@ -10,6 +10,23 @@
 
 namespace ps2recomp
 {
+    static const std::unordered_set<std::string> kKeywords = {
+        "alignas", "alignof", "and", "and_eq", "asm", "auto", "bitand", "bitor", "bool",
+        "break", "case", "catch", "char", "char8_t", "char16_t", "char32_t", "class",
+        "compl", "concept", "const", "consteval", "constexpr", "constinit", "const_cast",
+        "continue", "co_await", "co_return", "co_yield", "decltype", "default", "delete",
+        "do", "double", "dynamic_cast", "else", "enum", "explicit", "export", "extern",
+        "false", "float", "for", "friend", "goto", "if", "inline", "int", "long", "mutable",
+        "namespace", "new", "noexcept", "not", "not_eq", "nullptr", "operator", "or", "or_eq",
+        "private", "protected", "public", "register", "reinterpret_cast", "requires", "return",
+        "short", "signed", "sizeof", "static", "static_assert", "static_cast", "struct",
+        "switch", "template", "this", "thread_local", "throw", "true", "try", "typedef",
+        "typeid", "typename", "union", "unsigned", "using", "virtual", "void", "volatile",
+        "wchar_t", "while", "xor", "xor_eq", "std"};
+}
+
+namespace ps2recomp
+{
     CodeGenerator::CodeGenerator(const std::vector<Symbol> &symbols)
         : m_symbols(symbols)
     {
@@ -18,6 +35,11 @@ namespace ps2recomp
     void CodeGenerator::setRenamedFunctions(const std::unordered_map<uint32_t, std::string> &renames)
     {
         m_renamedFunctions = renames;
+    }
+
+    void CodeGenerator::setBootstrapInfo(const BootstrapInfo &info)
+    {
+        m_bootstrapInfo = info;
     }
 
     std::string CodeGenerator::getFunctionName(uint32_t address)
@@ -46,11 +68,33 @@ namespace ps2recomp
         return false;
     }
 
+    static bool isReservedCxxKeyword(const std::string &name)
+    {
+        return kKeywords.find(name) != kKeywords.end();
+    }
+
     static std::string sanitizeFunctionName(const std::string &name)
     {
+        // ugly but will do for now
+        if (name == "main")
+            return "ps2_main";
+
+        if (isReservedCxxKeyword(name))
+            return "ps2_" + name;
+
         if (!isReservedCxxIdentifier(name))
             return name;
         return "ps2_" + name;
+    }
+
+    std::string CodeGenerator::getGeneratedFunctionName(const Function &function)
+    {
+        std::string name = getFunctionName(function.start);
+        if (name.empty())
+        {
+            name = sanitizeFunctionName(function.name);
+        }
+        return name;
     }
 
     std::string CodeGenerator::handleBranchDelaySlots(const Instruction &branchInst, const Instruction &delaySlot,
@@ -78,7 +122,11 @@ namespace ps2recomp
             std::string funcName = getFunctionName(target);
             if (!funcName.empty())
             {
-                ss << "    " << funcName << "(rdram, ctx, runtime); return;\n";
+                ss << "    " << funcName << "(rdram, ctx, runtime);\n";
+                if (branchInst.opcode == OPCODE_J)
+                {
+                    ss << "    return;\n";
+                }
             }
             else
             {
@@ -268,6 +316,18 @@ namespace ps2recomp
         ss << "#define PS2_RUNTIME_MACROS_H\n\n";
         ss << "#include <cstdint>\n";
         ss << "#include <immintrin.h> // For SSE/AVX intrinsics\n\n";
+        ss << "#include <intrin.h>\n\n";
+        ss << "inline uint32_t ps2_clz32(uint32_t val) {\n";
+        ss << "#if defined(_MSC_VER)\n";
+        ss << "    unsigned long idx;\n";
+        ss << "    if (_BitScanReverse(&idx, val)) {\n";
+        ss << "        return 31u - idx;\n";
+        ss << "    }\n";
+        ss << "    return 32u;\n";
+        ss << "#else\n";
+        ss << "    return val == 0 ? 32u : (uint32_t)__builtin_clz(val);\n";
+        ss << "#endif\n";
+        ss << "}\n\n";
 
         ss << "// Basic MIPS arithmetic operations\n";
         ss << "#define ADD32(a, b) ((uint32_t)((a) + (b)))\n";
@@ -553,6 +613,36 @@ namespace ps2recomp
     {
         std::stringstream ss;
 
+        static const std::unordered_set<std::string> systemCallNames = {
+            "FlushCache", "ResetEE", "SetMemoryMode",
+            "CreateThread", "DeleteThread", "StartThread", "ExitThread", "ExitDeleteThread",
+            "TerminateThread", "SuspendThread", "ResumeThread", "GetThreadId", "ReferThreadStatus",
+            "SleepThread", "WakeupThread", "iWakeupThread", "ChangeThreadPriority",
+            "RotateThreadReadyQueue", "ReleaseWaitThread", "iReleaseWaitThread",
+            "CreateSema", "DeleteSema", "SignalSema", "iSignalSema", "WaitSema", "PollSema",
+            "iPollSema", "ReferSemaStatus", "iReferSemaStatus", "CreateEventFlag",
+            "DeleteEventFlag", "SetEventFlag", "iSetEventFlag", "ClearEventFlag",
+            "iClearEventFlag", "WaitEventFlag", "PollEventFlag", "iPollEventFlag",
+            "ReferEventFlagStatus", "iReferEventFlagStatus", "SetAlarm", "iSetAlarm",
+            "CancelAlarm", "iCancelAlarm", "EnableIntc", "DisableIntc", "EnableDmac",
+            "DisableDmac", "SifStopModule", "SifLoadModule", "SifInitRpc", "SifBindRpc",
+            "SifCallRpc", "SifRegisterRpc", "SifCheckStatRpc", "SifSetRpcQueue",
+            "SifRemoveRpcQueue", "SifRemoveRpc", "fioOpen", "fioClose", "fioRead", "fioWrite",
+            "fioLseek", "fioMkdir", "fioChdir", "fioRmdir", "fioGetstat", "fioRemove",
+            "GsSetCrt", "GsGetIMR", "GsPutIMR", "GsSetVideoMode", "GetOsdConfigParam",
+            "SetOsdConfigParam", "GetRomName", "sceSifLoadModule",
+            "SifSetDChain"};
+
+        if (systemCallNames.find(function.name) != systemCallNames.end())
+        {
+            std::string sanitizedName = sanitizeFunctionName(function.name);
+            ss << "// System call wrapper for " << function.name << "\n";
+            ss << "void " << sanitizedName << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime) {\n";
+            ss << "    ps2_syscalls::" << function.name << "(rdram, ctx, runtime);\n";
+            ss << "}\n";
+            return ss.str();
+        }
+
         if (useHeaders)
         {
             ss << "#include \"ps2_runtime_macros.h\"\n";
@@ -565,7 +655,7 @@ namespace ps2recomp
 
         ss << "// Function: " << function.name << "\n";
         ss << "// Address: 0x" << std::hex << function.start << " - 0x" << function.end << std::dec << "\n";
-        std::string sanitizedName = sanitizeFunctionName(function.name);
+        std::string sanitizedName = getGeneratedFunctionName(function);
         ss << "void " << sanitizedName << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime) {\n\n";
 
         for (size_t i = 0; i < instructions.size(); ++i)
@@ -1290,7 +1380,7 @@ namespace ps2recomp
         case MMI_MADDU1:
             return fmt::format("{{ uint64_t acc = ((uint64_t)ctx->hi1 << 32) | ctx->lo1; uint64_t prod = (uint64_t)GPR_U32(ctx, {}) * (uint64_t)GPR_U32(ctx, {}); uint64_t result = acc + prod; ctx->lo1 = (uint32_t)result; ctx->hi1 = (uint32_t)(result >> 32); }}", rs, rt);
         case MMI_PLZCW:
-            return fmt::format("{{ uint32_t val = GPR_U32(ctx, {}); SET_GPR_U32(ctx, {}, val == 0 ? 32 : __builtin_clz(val)); }}", rs, rd);
+            return fmt::format("{{ uint32_t val = GPR_U32(ctx, {}); SET_GPR_U32(ctx, {}, ps2_clz32(val)); }}", rs, rd);
         case MMI_PSLLH:
             return fmt::format("SET_GPR_VEC(ctx, {}, _mm_slli_epi16(GPR_VEC(ctx, {}), {}));", rd, rt, sa);
         case MMI_PSRLH:
@@ -1652,7 +1742,7 @@ namespace ps2recomp
             case VU0_CR_R:
                 return fmt::format("ctx->vu0_r = _mm_castsi128_ps(GPR_VEC(ctx, {}));", rt);
             case VU0_CR_I:
-                return fmt::format("ctx->vu0_i = *(float*)&GPR_U32(ctx, {});", rt);
+                return fmt::format("{{ uint32_t tmp = GPR_U32(ctx, {}); ctx->vu0_i = *reinterpret_cast<float*>(&tmp); }}", rt);
             case VU0_CR_TPC:
                 return fmt::format("ctx->vu0_tpc = GPR_U32(ctx, {});", rt);
             case VU0_CR_CMSAR0:
@@ -1686,7 +1776,7 @@ namespace ps2recomp
             case VU0_CR_CLIP2:
                 return fmt::format("ctx->vu0_clip_flags2 = GPR_U32(ctx, {});", rt);
             case VU0_CR_P:
-                return fmt::format("ctx->vu0_p = *(float*)&GPR_U32(ctx, {});", rt);
+                return fmt::format("{{ uint32_t tmp = GPR_U32(ctx, {}); ctx->vu0_p = *reinterpret_cast<float*>(&tmp); }}", rt);
             case VU0_CR_XITOP:
                 return fmt::format("ctx->vu0_xitop = GPR_U32(ctx, {}) & 0x3FF;", rt);
             case VU0_CR_ITOP:
@@ -2558,14 +2648,23 @@ namespace ps2recomp
                 continue;
             }
 
+            std::string generatedName = getGeneratedFunctionName(function);
+
             if (function.isStub)
             {
-                stubFunctions.push_back({function.start, sanitizeFunctionName(function.name)});
+                stubFunctions.push_back({function.start, generatedName});
             }
             else
             {
-                normalFunctions.push_back({function.start, sanitizeFunctionName(function.name)});
+                normalFunctions.push_back({function.start, generatedName});
             }
+        }
+
+        if (m_bootstrapInfo.valid)
+        {
+            ss << "    // Register ELF entry bootstrap\n";
+            ss << "    runtime.registerFunction(0x" << std::hex << m_bootstrapInfo.entry << std::dec
+               << ", entry_" << std::hex << m_bootstrapInfo.entry << std::dec << ");\n\n";
         }
 
         ss << "    // Register recompiled functions\n";
@@ -2647,5 +2746,36 @@ namespace ps2recomp
         }
 
         return nullptr;
+    }
+
+    std::string CodeGenerator::generateBootstrapFunction() const
+    {
+        if (!m_bootstrapInfo.valid)
+            return {};
+
+        std::stringstream ss;
+        ss << "// Auto-generated bootstrap for ELF entry point\n";
+        ss << "void entry_" << std::hex << m_bootstrapInfo.entry << std::dec
+           << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime) {\n";
+        if (m_bootstrapInfo.bssEnd > m_bootstrapInfo.bssStart)
+        {
+            ss << "    const uint32_t bss_start = 0x" << std::hex << m_bootstrapInfo.bssStart << ";\n";
+            ss << "    const uint32_t bss_end   = 0x" << std::hex << m_bootstrapInfo.bssEnd << ";\n";
+            ss << "    __m128i zero = _mm_setzero_si128();\n";
+            ss << "    for (uint32_t addr = bss_start; addr < bss_end; addr += 16) {\n";
+            ss << "        WRITE128(addr, zero);\n";
+            ss << "    }\n\n";
+        }
+        if (m_bootstrapInfo.gp != 0)
+        {
+            ss << "    SET_GPR_U32(ctx, 28, 0x" << std::hex << m_bootstrapInfo.gp << ");\n";
+        }
+        if (m_bootstrapInfo.bssEnd > m_bootstrapInfo.bssStart)
+        {
+            ss << "    SET_GPR_U32(ctx, 29, bss_end);\n";
+        }
+        ss << "    InitThread(rdram, ctx, runtime);\n";
+        ss << "}\n";
+        return ss.str();
     }
 };

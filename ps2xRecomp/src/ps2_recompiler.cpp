@@ -9,6 +9,7 @@
 #include <cctype>
 #include <unordered_set>
 #include <optional>
+#include <limits>
 
 namespace fs = std::filesystem;
 
@@ -43,6 +44,65 @@ namespace ps2recomp
             m_sections = m_elfParser->getSections();
             m_relocations = m_elfParser->getRelocations();
 
+            if (m_functions.empty())
+            {
+                std::cerr << "No functions found in ELF file." << std::endl;
+                return false;
+            }
+
+            {
+                m_bootstrapInfo = {};
+                uint32_t entry = m_elfParser->getEntryPoint();
+                std::cout << "ELF entry point: 0x" << std::hex << entry << std::dec << std::endl;
+                uint32_t bssStart = std::numeric_limits<uint32_t>::max();
+                uint32_t bssEnd = 0;
+                for (const auto &sec : m_sections)
+                {
+                    if (sec.isBSS && sec.size > 0)
+                    {
+                        bssStart = std::min(bssStart, sec.address);
+                        bssEnd = std::max(bssEnd, sec.address + sec.size);
+                    }
+                }
+
+                uint32_t gp = 0;
+                for (const auto &sym : m_symbols)
+                {
+                    if (sym.name == "_gp")
+                    {
+                        gp = sym.address;
+                        break;
+                    }
+                }
+
+                if (bssStart != std::numeric_limits<uint32_t>::max())
+                {
+                    std::cout << "BSS range: 0x" << std::hex << bssStart << " - 0x" << bssEnd
+                              << " (size 0x" << (bssEnd - bssStart) << "), gp=0x" << gp << std::dec << std::endl;
+                }
+                else
+                {
+                    std::cout << "No BSS found, gp=0x" << std::hex << gp << std::dec << std::endl;
+                }
+
+                if (entry != 0)
+                {
+                    m_bootstrapInfo.valid = true;
+                    m_bootstrapInfo.entry = entry;
+                    if (bssStart != std::numeric_limits<uint32_t>::max() && bssEnd > bssStart)
+                    {
+                        m_bootstrapInfo.bssStart = bssStart;
+                        m_bootstrapInfo.bssEnd = bssEnd;
+                    }
+                    else
+                    {
+                        m_bootstrapInfo.bssStart = 0;
+                        m_bootstrapInfo.bssEnd = 0;
+                    }
+                    m_bootstrapInfo.gp = gp;
+                }
+            }
+
             std::cout << "Extracted " << m_functions.size() << " functions, "
                       << m_symbols.size() << " symbols, "
                       << m_sections.size() << " sections, "
@@ -50,6 +110,7 @@ namespace ps2recomp
 
             m_decoder = std::make_unique<R5900Decoder>();
             m_codeGenerator = std::make_unique<CodeGenerator>(m_symbols);
+            m_codeGenerator->setBootstrapInfo(m_bootstrapInfo);
 
             fs::create_directories(m_config.outputPath);
 
@@ -116,20 +177,43 @@ namespace ps2recomp
     {
         try
         {
-            std::unordered_map<uint32_t, std::string> renamed;
+            m_functionRenames.clear();
+
+            std::unordered_map<std::string, int> nameCounts;
             for (const auto &function : m_functions)
             {
                 if (!function.isRecompiled)
                     continue;
                 std::string sanitized = sanitizeFunctionName(function.name);
-                if (sanitized != function.name)
+                nameCounts[sanitized]++;
+            }
+
+            for (const auto &function : m_functions)
+            {
+                if (!function.isRecompiled)
+                    continue;
+
+                std::string sanitized = sanitizeFunctionName(function.name);
+                bool isDuplicate = nameCounts[sanitized] > 1;
+
+                if (isDuplicate || sanitized != function.name)
                 {
-                    renamed[function.start] = sanitized;
+                    std::stringstream ss;
+                    if (isDuplicate)
+                    {
+                        ss << sanitized << "_0x" << std::hex << function.start;
+                    }
+                    else
+                    {
+                        ss << sanitized;
+                    }
+                    m_functionRenames[function.start] = ss.str();
                 }
             }
+
             if (m_codeGenerator)
             {
-                m_codeGenerator->setRenamedFunctions(renamed);
+                m_codeGenerator->setRenamedFunctions(m_functionRenames);
             }
 
             generateFunctionHeader();
@@ -142,6 +226,12 @@ namespace ps2recomp
                 combinedOutput << "#include \"ps2_runtime_macros.h\"\n";
                 combinedOutput << "#include \"ps2_runtime.h\"\n";
                 combinedOutput << "#include \"ps2_recompiled_stubs.h\"\n";
+                combinedOutput << "#include \"ps2_syscalls.h\"\n";
+                if (m_bootstrapInfo.valid)
+                {
+                    combinedOutput << "\n"
+                                   << m_codeGenerator->generateBootstrapFunction() << "\n\n";
+                }
 
                 for (const auto &function : m_functions)
                 {
@@ -179,6 +269,17 @@ namespace ps2recomp
             }
             else
             {
+                if (m_bootstrapInfo.valid)
+                {
+                    std::stringstream boot;
+                    boot << "#include \"ps2_recompiled_functions.h\"\n\n";
+                    boot << "#include \"ps2_runtime_macros.h\"\n";
+                    boot << "#include \"ps2_runtime.h\"\n\n";
+                    boot << m_codeGenerator->generateBootstrapFunction() << "\n";
+                    fs::path bootPath = fs::path(m_config.outputPath) / "ps2_entry_bootstrap.cpp";
+                    writeToFile(bootPath.string(), boot.str());
+                }
+
                 for (const auto &function : m_functions)
                 {
                     if (!function.isRecompiled || function.isStub)
@@ -282,8 +383,21 @@ namespace ps2recomp
             {
                 if (function.isRecompiled)
                 {
-                    ss << "void " << sanitizeFunctionName(function.name) << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime);\n";
+                    std::string finalName = sanitizeFunctionName(function.name);
+                    auto renameIt = m_functionRenames.find(function.start);
+                    if (renameIt != m_functionRenames.end())
+                    {
+                        finalName = renameIt->second;
+                    }
+
+                    ss << "void " << finalName << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime);\n";
                 }
+            }
+
+            if (m_bootstrapInfo.valid)
+            {
+                ss << "void entry_" << std::hex << m_bootstrapInfo.entry << std::dec
+                   << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime);\n";
             }
 
             ss << "\n#endif // PS2_RECOMPILED_FUNCTIONS_H\n";
@@ -524,6 +638,16 @@ namespace ps2recomp
 
     std::string PS2Recompiler::sanitizeFunctionName(const std::string &name) const
     {
+        if (name == "main")
+        {
+            return "ps2_main";
+        }
+
+        if (ps2recomp::kKeywords.find(name) != ps2recomp::kKeywords.end())
+        {
+            return "ps2_" + name;
+        }
+
         if (name.size() >= 2 && name[0] == '_' && (name[1] == '_' || std::isupper(static_cast<unsigned char>(name[1]))))
         {
             return "ps2_" + name;

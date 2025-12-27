@@ -3,6 +3,10 @@
 
 #include "ps2_runtime.h"
 #include <mutex>
+#include <atomic>
+
+// Number of active host threads spawned for PS2 thread emulation
+extern std::atomic<int> g_activeThreads;
 
 static std::mutex g_sys_fd_mutex;
 

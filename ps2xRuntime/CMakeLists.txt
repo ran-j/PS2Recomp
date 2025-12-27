@@ -33,6 +33,10 @@ add_executable(ps2EntryRunner
     ${RUNNER_SRC_FILES}
 )
 
+if (MSVC)
+    target_compile_options(ps2EntryRunner PRIVATE /FS /Z7)
+endif()
+
 target_include_directories(ps2_runtime PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )

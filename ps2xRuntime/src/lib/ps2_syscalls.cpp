@@ -1,6 +1,7 @@
 
 #include "ps2_syscalls.h"
 #include "ps2_runtime.h"
+#include "ps2_runtime_macros.h"
 #include "ps2_stubs.h"
 #include <iostream>
 #include <cstring>
@@ -9,10 +10,42 @@
 #include <cmath>
 #include <vector>
 #include <unordered_map>
+#include <thread>
+#include <condition_variable>
+#include <atomic>
 #include <filesystem>
 
 std::unordered_map<int, FILE *> g_fileDescriptors;
 int g_nextFd = 3; // Start after stdin, stdout, stderr
+
+struct ThreadInfo
+{
+    uint32_t entry = 0;
+    uint32_t stack = 0;
+    uint32_t stackSize = 0;
+    uint32_t gp = 0;
+    uint32_t priority = 0;
+    uint32_t attr = 0;
+    uint32_t option = 0;
+    uint32_t arg = 0;
+    bool started = false;
+};
+
+struct SemaInfo
+{
+    int count = 0;
+    int maxCount = 0;
+    std::mutex m;
+    std::condition_variable cv;
+};
+
+static std::unordered_map<int, ThreadInfo> g_threads;
+static int g_nextThreadId = 2;   // Reserve 1 for the main thread
+static thread_local int g_currentThreadId = 1;
+
+static std::unordered_map<int, std::shared_ptr<SemaInfo>> g_semas;
+static int g_nextSemaId = 1;
+std::atomic<int> g_activeThreads{0};
 
 int allocatePs2Fd(FILE *file)
 {
@@ -118,133 +151,295 @@ namespace ps2_syscalls
 
     void CreateThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        uint32_t paramAddr = getRegU32(ctx, 4); // $a0 points to ThreadParam
+        const uint32_t *param = reinterpret_cast<const uint32_t *>(getConstMemPtr(rdram, paramAddr));
+
+        if (!param)
+        {
+            std::cerr << "CreateThread error: invalid ThreadParam address 0x" << std::hex << paramAddr << std::dec << std::endl;
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        ThreadInfo info{};
+        info.attr = param[0];
+        info.entry = param[1];
+        info.stack = param[2];
+        info.stackSize = param[3];
+        info.gp = param[5];       // Often gp is at offset 20
+        info.priority = param[4]; // Commonly priority/init attr slot
+        info.option = param[6];
+
+        int id = g_nextThreadId++;
+        g_threads[id] = info;
+
+        std::cout << "[CreateThread] id=" << id
+                  << " entry=0x" << std::hex << info.entry
+                  << " stack=0x" << info.stack
+                  << " size=0x" << info.stackSize
+                  << " gp=0x" << info.gp
+                  << " prio=" << std::dec << info.priority << std::endl;
+
+        setReturnS32(ctx, id);
     }
 
     void DeleteThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        int tid = static_cast<int>(getRegU32(ctx, 4)); // $a0
+        g_threads.erase(tid);
+        setReturnS32(ctx, 0);
     }
 
     void StartThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        int tid = static_cast<int>(getRegU32(ctx, 4));     // $a0 = thread id
+        uint32_t arg = getRegU32(ctx, 5);                  // $a1 = user arg
+
+        auto it = g_threads.find(tid);
+        if (it == g_threads.end())
+        {
+            std::cerr << "StartThread error: unknown thread id " << tid << std::endl;
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        ThreadInfo &info = it->second;
+        if (info.started)
+        {
+            setReturnS32(ctx, 0);
+            return;
+        }
+
+        info.started = true;
+        info.arg = arg;
+
+        // Spawn a host thread to simulate PS2 thread execution.
+        g_activeThreads.fetch_add(1, std::memory_order_relaxed);
+        std::thread([=]() mutable {
+            R5900Context threadCtxCopy = *ctx; // Copy current CPU state to simulate a new thread context
+            R5900Context *threadCtx = &threadCtxCopy;
+
+            if (info.stack && info.stackSize)
+            {
+                SET_GPR_U32(threadCtx, 29, info.stack + info.stackSize); // SP at top of stack
+            }
+            if (info.gp)
+            {
+                SET_GPR_U32(threadCtx, 28, info.gp);
+            }
+
+            SET_GPR_U32(threadCtx, 4, info.arg);
+            threadCtx->pc = info.entry;
+
+            PS2Runtime::RecompiledFunction func = runtime->lookupFunction(info.entry);
+            g_currentThreadId = tid;
+
+            std::cout << "[StartThread] id=" << tid
+                      << " entry=0x" << std::hex << info.entry
+                      << " sp=0x" << GPR_U32(threadCtx, 29)
+                      << " gp=0x" << GPR_U32(threadCtx, 28)
+                      << " arg=0x" << info.arg << std::dec << std::endl;
+
+            try
+            {
+                func(rdram, threadCtx, runtime);
+            }
+            catch (const std::exception &e)
+            {
+                std::cerr << "[StartThread] id=" << tid << " exception: " << e.what() << std::endl;
+            }
+
+            std::cout << "[StartThread] id=" << tid << " returned (pc=0x"
+                      << std::hex << threadCtx->pc << std::dec << ")" << std::endl;
+
+            g_activeThreads.fetch_sub(1, std::memory_order_relaxed);
+        }).detach();
+
+        // for now report success to the caller.
+        setReturnS32(ctx, 0);
     }
 
     void ExitThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
         std::cout << "PS2 ExitThread: Thread is exiting (PC=0x" << std::hex << ctx->pc << std::dec << ")" << std::endl;
+        setReturnS32(ctx, 0);
     }
 
     void ExitDeleteThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        int tid = static_cast<int>(getRegU32(ctx, 4));
+        g_threads.erase(tid);
+        setReturnS32(ctx, 0);
     }
 
     void TerminateThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        int tid = static_cast<int>(getRegU32(ctx, 4));
+        g_threads.erase(tid);
+        setReturnS32(ctx, 0);
     }
 
     void SuspendThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        setReturnS32(ctx, 0);
     }
 
     void ResumeThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        setReturnS32(ctx, 0);
     }
 
     void GetThreadId(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        setReturnS32(ctx, g_currentThreadId);
     }
 
     void ReferThreadStatus(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        setReturnS32(ctx, 0);
     }
 
     void SleepThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        setReturnS32(ctx, 0);
     }
 
     void WakeupThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        setReturnS32(ctx, 0);
     }
 
     void iWakeupThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        setReturnS32(ctx, 0);
     }
 
     void ChangeThreadPriority(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        int tid = static_cast<int>(getRegU32(ctx, 4));
+        int newPrio = static_cast<int>(getRegU32(ctx, 5));
+        auto it = g_threads.find(tid);
+        if (it != g_threads.end())
+        {
+            it->second.priority = newPrio;
+        }
+        setReturnS32(ctx, 0);
     }
 
     void RotateThreadReadyQueue(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        setReturnS32(ctx, 0);
     }
 
     void ReleaseWaitThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        setReturnS32(ctx, 0);
     }
 
     void iReleaseWaitThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        setReturnS32(ctx, 0);
     }
 
     void CreateSema(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        uint32_t paramAddr = getRegU32(ctx, 4); // $a0
+        const uint32_t *param = reinterpret_cast<const uint32_t *>(getConstMemPtr(rdram, paramAddr));
+        int init = 0;
+        int max = 1;
+        if (param)
+        {
+            // sceSemaParam layout commonly: attr(0), option(1), initCount(2), maxCount(3)
+            init = static_cast<int>(param[2]);
+            max = static_cast<int>(param[3]);
+        }
+
+        int id = g_nextSemaId++;
+        auto info = std::make_shared<SemaInfo>();
+        info->count = init;
+        info->maxCount = max;
+        g_semas.emplace(id, info);
+        std::cout << "[CreateSema] id=" << id << " init=" << init << " max=" << max << std::endl;
+        setReturnS32(ctx, id);
     }
 
     void DeleteSema(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        int sid = static_cast<int>(getRegU32(ctx, 4));
+        g_semas.erase(sid);
+        setReturnS32(ctx, 0);
     }
 
     void SignalSema(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        int sid = static_cast<int>(getRegU32(ctx, 4));
+        auto it = g_semas.find(sid);
+        if (it != g_semas.end())
+        {
+            auto sema = it->second;
+            std::lock_guard<std::mutex> lock(sema->m);
+            if (sema->count < sema->maxCount)
+            {
+                sema->count++;
+            }
+            sema->cv.notify_one();
+        }
+        setReturnS32(ctx, 0);
     }
 
     void iSignalSema(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        SignalSema(rdram, ctx, runtime);
     }
 
     void WaitSema(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        // For now, never block; treat as immediately acquired.
+        int sid = static_cast<int>(getRegU32(ctx, 4));
+        auto it = g_semas.find(sid);
+        if (it != g_semas.end())
+        {
+            auto sema = it->second;
+            std::lock_guard<std::mutex> lock(sema->m);
+            if (sema->count > 0)
+            {
+                sema->count--;
+            }
+        }
+        setReturnS32(ctx, 0);
     }
 
     void PollSema(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        int sid = static_cast<int>(getRegU32(ctx, 4));
+        auto it = g_semas.find(sid);
+        if (it != g_semas.end())
+        {
+            auto sema = it->second;
+            std::lock_guard<std::mutex> lock(sema->m);
+            if (sema->count > 0)
+            {
+                sema->count--;
+                setReturnS32(ctx, 0);
+                return;
+            }
+        }
+        setReturnS32(ctx, 0);
     }
 
     void iPollSema(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        PollSema(rdram, ctx, runtime);
     }
 
     void ReferSemaStatus(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        setReturnS32(ctx, 0);
     }
 
     void iReferSemaStatus(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)
     {
-        // TODO
+        ReferSemaStatus(rdram, ctx, runtime);
     }
 
     void CreateEventFlag(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime)

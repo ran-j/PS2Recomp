@@ -131,6 +131,11 @@ namespace ps2recomp
         return 0;
     }
 
+    uint32_t ElfParser::getEntryPoint() const
+    {
+        return static_cast<uint32_t>(m_elf->get_entry());
+    }
+
     ElfParser::~ElfParser() = default;
 
     bool ElfParser::parse()
@@ -204,7 +209,7 @@ namespace ps2recomp
 
                 ELFIO::section *pstrSec = m_elf->sections[psec->get_link()];
                 ELFIO::string_section_accessor strings(pstrSec);
-                 
+
                 for (ELFIO::Elf_Xword j = 0; j < sym_num; ++j)
                 {
                     std::string name;
@@ -214,7 +219,7 @@ namespace ps2recomp
                     unsigned char type;
                     ELFIO::Elf_Half section_index;
                     unsigned char other;
-                     
+
                     symbols.get_symbol(j, name, value, size, bind, type, section_index, other);
 
                     // Skip empty symbols or those with invalid section index

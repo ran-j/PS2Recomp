@@ -10,12 +10,22 @@
 
 namespace ps2recomp
 {
+    extern const std::unordered_set<std::string> kKeywords;
 
     class CodeGenerator
     {
     public:
         CodeGenerator(const std::vector<Symbol> &symbols);
         ~CodeGenerator();
+
+        struct BootstrapInfo
+        {
+            bool valid = false;
+            uint32_t entry = 0;
+            uint32_t bssStart = 0;
+            uint32_t bssEnd = 0;
+            uint32_t gp = 0;
+        };
 
         std::string generateFunction(const Function &function, const std::vector<Instruction> &instructions, const bool &useHeaders);
         std::string generateFunctionRegistration(const std::vector<Function> &functions, const std::map<uint32_t, std::string> &stubs);
@@ -24,12 +34,14 @@ namespace ps2recomp
                                            const Function &function, const std::unordered_set<uint32_t> &internalTargets);
 
         void setRenamedFunctions(const std::unordered_map<uint32_t, std::string> &renames);
+        void setBootstrapInfo(const BootstrapInfo &info);
         std::unordered_set<uint32_t> collectInternalBranchTargets(const Function &function,
                                                                   const std::vector<Instruction> &instructions);
 
     public:
         std::vector<Symbol> m_symbols;
         std::unordered_map<uint32_t, std::string> m_renamedFunctions;
+        BootstrapInfo m_bootstrapInfo;
 
         std::string translateInstruction(const Instruction &inst);
         std::string translateMMIInstruction(const Instruction &inst);
@@ -104,9 +116,11 @@ namespace ps2recomp
         // Jump Table Generation
         std::string generateJumpTableSwitch(const Instruction &inst, uint32_t tableAddress,
                                             const std::vector<JumpTableEntry> &entries);
+        std::string generateBootstrapFunction() const;
 
         Symbol *findSymbolByAddress(uint32_t address);
         std::string getFunctionName(uint32_t address);
+        std::string getGeneratedFunctionName(const Function &function);
     };
 
 }
