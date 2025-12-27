@@ -2774,7 +2774,7 @@ namespace ps2recomp
         {
             ss << "    SET_GPR_U32(ctx, 29, bss_end);\n";
         }
-        ss << "    InitThread(rdram, ctx, runtime);\n";
+        ss << "    ps2_main(rdram, ctx, runtime);\n";
         ss << "}\n";
         return ss.str();
     }
