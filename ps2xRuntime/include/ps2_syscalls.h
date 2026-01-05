@@ -90,6 +90,9 @@ namespace ps2_syscalls
     void SifSetRpcQueue(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void SifRemoveRpcQueue(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void SifRemoveRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void sceSifCallRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void sceSifSendCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void _sceRpcGetPacket(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
 
     void fioOpen(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void fioClose(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);

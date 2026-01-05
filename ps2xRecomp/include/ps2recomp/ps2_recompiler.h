@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <filesystem>
 
 namespace ps2recomp
@@ -38,6 +39,7 @@ namespace ps2recomp
 
         std::unordered_map<uint32_t, std::vector<Instruction>> m_decodedFunctions;
         std::unordered_map<std::string, bool> m_skipFunctions;
+        std::unordered_set<std::string> m_stubFunctions;
         std::map<uint32_t, std::string> m_generatedStubs;
         std::unordered_map<uint32_t, std::string> m_functionRenames;
         CodeGenerator::BootstrapInfo m_bootstrapInfo;
@@ -45,6 +47,7 @@ namespace ps2recomp
         bool decodeFunction(Function &function);
         void discoverAdditionalEntryPoints();
         bool shouldSkipFunction(const std::string &name) const;
+        bool isStubFunction(const std::string &name) const;
         std::string generateRuntimeHeader();
         bool generateFunctionHeader();
         bool generateStubHeader();

@@ -7,6 +7,7 @@
 #include <string>
 #include <functional>
 #include <immintrin.h> // For SSE/AVX instructions
+#include <atomic>
 #include <filesystem>
 #include <iostream>
 
@@ -34,6 +35,7 @@ constexpr uint32_t PS2_VU1_DATA_BASE = 0x1100C000;
 constexpr uint32_t PS2_GS_BASE = 0x12000000;
 constexpr uint32_t PS2_GS_PRIV_REG_BASE = 0x12000000; // GS Privileged Registers
 constexpr uint32_t PS2_GS_PRIV_REG_SIZE = 0x2000;
+constexpr size_t   PS2_GS_VRAM_SIZE = 4 * 1024 * 1024; // 4MB GS VRAM
 
 #define PS2_FIO_O_RDONLY 0x0001
 #define PS2_FIO_O_WRONLY 0x0002
@@ -351,6 +353,10 @@ public:
     uint8_t *getRDRAM() { return m_rdram; }
     uint8_t *getScratchpad() { return m_scratchpad; }
     uint8_t *getIOPRAM() { return iop_ram; }
+    uint64_t dmaStartCount() const { return m_dmaStartCount.load(std::memory_order_relaxed); }
+    uint64_t gifCopyCount() const { return m_gifCopyCount.load(std::memory_order_relaxed); }
+    uint64_t gsWriteCount() const { return m_gsWriteCount.load(std::memory_order_relaxed); }
+    uint64_t vifWriteCount() const { return m_vifWriteCount.load(std::memory_order_relaxed); }
 
     // Read/write memory
     uint8_t read8(uint32_t address);
@@ -377,7 +383,12 @@ public:
     bool isCodeModified(uint32_t address, uint32_t size);
     void clearModifiedFlag(uint32_t address, uint32_t size);
 
-private:
+    // GS register accessors
+    GSRegisters &gs() { return gs_regs; }
+    const GSRegisters &gs() const { return gs_regs; }
+    uint8_t *getGSVRAM() { return m_gsVRAM; }
+    const uint8_t *getGSVRAM() const { return m_gsVRAM; }
+    bool hasSeenGifCopy() const { return m_seenGifCopy; }
     // Main RAM (32MB)
     uint8_t *m_rdram;
 
@@ -387,11 +398,17 @@ private:
     // IOP RAM (2MB)
     uint8_t *iop_ram;
 
+    bool m_seenGifCopy;
+    std::atomic<uint64_t> m_dmaStartCount{0};
+    std::atomic<uint64_t> m_gifCopyCount{0};
+    std::atomic<uint64_t> m_gsWriteCount{0};
+    std::atomic<uint64_t> m_vifWriteCount{0};
     // I/O registers
     std::unordered_map<uint32_t, uint32_t> m_ioRegisters;
 
     // Registers
     GSRegisters gs_regs;
+    uint8_t *m_gsVRAM;
     VIFRegisters vif0_regs;
     VIFRegisters vif1_regs;
     DMARegisters dma_regs[10]; // 10 DMA channels
@@ -434,6 +451,7 @@ public:
 
     void registerFunction(uint32_t address, RecompiledFunction func);
     RecompiledFunction lookupFunction(uint32_t address);
+    bool hasFunction(uint32_t address) const;
 
     void SignalException(R5900Context *ctx, PS2Exception exception);
 

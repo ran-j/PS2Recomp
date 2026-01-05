@@ -31,6 +31,10 @@ namespace ps2recomp
             {
                 m_skipFunctions[name] = true;
             }
+            for (const auto &name : m_config.stubImplementations)
+            {
+                m_stubFunctions.insert(name);
+            }
 
             m_elfParser = std::make_unique<ElfParser>(m_config.inputPath);
             if (!m_elfParser->parse())
@@ -139,6 +143,12 @@ namespace ps2recomp
             {
                 std::cout << "processing function: " << function.name << std::endl;
 
+                if (isStubFunction(function.name))
+                {
+                    function.isStub = true;
+                    continue;
+                }
+
                 if (shouldSkipFunction(function.name))
                 {
                     std::cout << "Skipping function: " << function.name << std::endl;
@@ -182,7 +192,7 @@ namespace ps2recomp
             std::unordered_map<std::string, int> nameCounts;
             for (const auto &function : m_functions)
             {
-                if (!function.isRecompiled)
+                if (!function.isRecompiled && !function.isStub)
                     continue;
                 std::string sanitized = sanitizeFunctionName(function.name);
                 nameCounts[sanitized]++;
@@ -190,7 +200,7 @@ namespace ps2recomp
 
             for (const auto &function : m_functions)
             {
-                if (!function.isRecompiled)
+                if (!function.isRecompiled && !function.isStub)
                     continue;
 
                 std::string sanitized = sanitizeFunctionName(function.name);
@@ -216,6 +226,19 @@ namespace ps2recomp
                 m_codeGenerator->setRenamedFunctions(m_functionRenames);
             }
 
+            m_generatedStubs.clear();
+            for (const auto &function : m_functions)
+            {
+                if (function.isStub)
+                {
+                    std::string generatedName = m_codeGenerator->getGeneratedFunctionName(function);
+                    std::stringstream stub;
+                    stub << "void " << generatedName
+                         << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime) { ps2_syscalls::TODO(rdram, ctx, runtime); }";
+                    m_generatedStubs[function.start] = stub.str();
+                }
+            }
+
             generateFunctionHeader();
 
             if (m_config.singleFileOutput)
@@ -235,7 +258,7 @@ namespace ps2recomp
 
                 for (const auto &function : m_functions)
                 {
-                    if (!function.isRecompiled)
+                    if (!function.isRecompiled && !function.isStub)
                     {
                         continue;
                     }
@@ -282,7 +305,7 @@ namespace ps2recomp
 
                 for (const auto &function : m_functions)
                 {
-                    if (!function.isRecompiled || function.isStub)
+                    if (!function.isRecompiled && !function.isStub)
                     {
                         continue;
                     }
@@ -317,8 +340,7 @@ namespace ps2recomp
                 std::cout << "Wrote individual function files to: " << m_config.outputPath << std::endl;
             }
 
-            std::string registerFunctions = m_codeGenerator->generateFunctionRegistration(
-                m_functions, m_generatedStubs);
+            std::string registerFunctions = m_codeGenerator->generateFunctionRegistration(m_functions, m_generatedStubs);
 
             fs::path registerPath = fs::path(m_config.outputPath) / "register_functions.cpp";
             writeToFile(registerPath.string(), registerFunctions);
@@ -345,9 +367,13 @@ namespace ps2recomp
             // ss << "namespace ps2recomp {\n";
             // ss << "namespace stubs {\n\n";
 
-            for (const auto &funcName : m_config.skipFunctions)
+            std::unordered_set<std::string> stubNames;
+            stubNames.insert(m_config.skipFunctions.begin(), m_config.skipFunctions.end());
+            stubNames.insert(m_config.stubImplementations.begin(), m_config.stubImplementations.end());
+
+            for (const auto &funcName : stubNames)
             {
-                ss << "void " << funcName << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) { ps2_syscalls::TODO(rdram, ctx, runtime); }\n";
+                ss << "void " << funcName << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime);\n";
             }
 
             // ss << "\n} // namespace stubs\n";
@@ -592,6 +618,11 @@ namespace ps2recomp
     bool PS2Recompiler::shouldSkipFunction(const std::string &name) const
     {
         return m_skipFunctions.find(name) != m_skipFunctions.end();
+    }
+
+    bool PS2Recompiler::isStubFunction(const std::string &name) const
+    {
+        return m_stubFunctions.find(name) != m_stubFunctions.end();
     }
 
     std::string PS2Recompiler::generateRuntimeHeader()

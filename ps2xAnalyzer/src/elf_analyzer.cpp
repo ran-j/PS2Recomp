@@ -13,6 +13,9 @@ namespace fs = std::filesystem;
 
 namespace ps2recomp
 {
+    static bool hasPs2ApiPrefix(const std::string &name);
+    static bool isDoNotSkipOrStub(const std::string &name);
+
     ElfAnalyzer::ElfAnalyzer(const std::string &elfPath)
         : m_elfPath(elfPath)
     {
@@ -189,13 +192,14 @@ namespace ps2recomp
         const std::vector<std::string> stdLibFuncs = {
             // I/O functions
             "printf", "sprintf", "snprintf", "fprintf", "vprintf", "vfprintf", "vsprintf", "vsnprintf",
-            "puts", "putchar", "getchar", "gets", "fgets", "fputs", "scanf", "fscanf", "sscanf",
+            "puts", "putchar", "getchar", "gets", "fgets", "fputs", "scanf", "fscanf", "sscanf", 
+            "sprint", "sbprintf",
 
             // Memory management
             "malloc", "free", "calloc", "realloc", "aligned_alloc", "posix_memalign",
 
             // Memory manipulation
-            "memcpy", "memset", "memmove", "memcmp", "memchr", "bcopy", "bzero",
+            "memcpy", "memset", "memmove", "memcmp", "memcpy2", "memchr", "bcopy", "bzero",
 
             // String manipulation
             "strcpy", "strncpy", "strcat", "strncat", "strcmp", "strncmp", "strlen", "strstr",
@@ -230,134 +234,7 @@ namespace ps2recomp
             // Extra string helpers
             "strnlen", "strspn", "strcspn", "strcasecmp", "strncasecmp"};
 
-        // PS2-specific system functions
-        const std::vector<std::string> ps2SysFuncs = {
-            // EE Kernel
-            "FlushCache", "EI", "DI", "SYNC", "ExitThread", "SleepThread", "WakeupThread",
-            "syscall", "ResetEE", "SetGsCrt", "Exit", "LoadExecPS2", "ExecPS2", "GetThreadId",
-            "RFU009", "InitRCnt", "GetOsTick", "ResetRCnt", "ChangeThreadPriority",
-            "DisableFPUExceptions", "EnableFPUExceptions", "GetEEStatus", "SetEEStatus",
-            "GetCop0", "SetCop0", "GetCop1", "SetCop1", "Exception",
-            "CreateThread", "DeleteThread", "StartThread", "SuspendThread", "ResumeThread",
-            "GetThreadStatus", "ReferThreadStatus", "iWakeupThread", "iResumeThread",
-            "TerminateThread", "EnableIntc", "DisableIntc", "EnableDmac", "DisableDmac",
-            "ExitDeleteThread", "ExitHandler", "ExecOSD", "ExecPS2Patch", "EnableCache",
-            "EndOfHeap", "ExpandScratchPad",
-
-            // SIF
-            "SifInitRpc", "SifExitRpc", "SifBindRpc", "SifCallRpc", "SifRegisterRpc",
-            "SifCheckStatRpc", "SifSetRpcQueue", "SifRpcLoop", "SifGetOtherData",
-            "sceSifAddCmdHandler", "sceSifRemoveCmdHandler", "sceSifSendCmd",
-            "sceSifInitCmd", "sceSifExitCmd", "sceSifSetCmdBuffer", "SifDmaInit",
-            "SifSetDma", "SifSetDChain", "iSifSetDChain", "SifSetOneDma",
-            "sceSifDmaStat", "sceSifSetDmaIntr", "sceSifResetDmaIntr",
-            "sceSifWriteBackDCache",
-
-            // IOP
-            "PollSema", "WaitSema", "SignalSema", "iSignalSema", "CreateSema",
-            "DeleteSema", "iWaitSema", "PollEventFlag", "WaitEventFlag", "SignalEventFlag",
-            "iSignalEventFlag", "CreateEventFlag", "DeleteEventFlag",
-
-            // Timer
-            "CreateAlarm", "iSetAlarm", "SetAlarm", "iReleaseAlarm", "ReleaseAlarm",
-            "USec2SysClock", "GetSystemTime", "SetSystemTime", "SysClock2USec",
-
-            // CD/DVD driver helpers
-            "cd_callback", "cmd_sem_init", "ncmd_prechk", "scmd_prechk",
-            "cdvd_exit", "fileXioInit", "fileXioExit", "fileXioOpen",
-            "fileXioClose", "fileXioRead", "fileXioWrite", "fileXioLseek",
-            "fileXioGetStat", "fileXioSetBlockMode",
-
-            // Interrupt / DMA handlers
-            "AddIntcHandler", "AddIntcHandler2", "RemoveIntcHandler", "RemoveIntcHandler2",
-            "AddDmacHandler", "AddDmacHandler2", "RemoveDmacHandler", "RemoveDmacHandler2",
-            "AddSbusIntcHandler", "RemoveSbusIntcHandler", "EnableIntcHandler", "EnableDmacHandler"
-        };
-
-        // PS2-specific library functions
-        const std::vector<std::string> ps2LibFuncs = {
-            // GS
-            "GsSetCrt", "GsGetIMR", "GsPutIMR", "GsSetIMR", "GsInit", "GsSyncV",
-            "GsGetVideoMode", "GsSetVideoMode", "GsDefDispBuffer", "GsResetGraph",
-            "GsPutDrawEnv", "GsSetClip", "GsSetScissor", "GsInitialCursor", "GsDrawCursor",
-            "GsSetVmode", "GsSetXYOffset", "GsSetClear", "GsTest", "GsTexure", "GsDisplay",
-            "GsDrawPixel", "GsDrawLine", "GsDrawBox", "GsDrawTriangle", "GsDrawRect",
-            "GsDrawSprite", "GsPrimTriangle", "GsSwapFrame", "GsLoadImage", "GsPutImage",
-            "GsMakeIndex", "GsSetCombineMode", "GsSetVertexColor", "GsSetOrigin",
-
-            // Pad
-            "PadInit", "PadPortOpen", "PadGetState", "PadRead", "PadSetMainMode",
-            "PadSetActDirect", "PadSetActAlign", "PadGetReqState", "PadInfoMode",
-            "PadInfoAct", "PadInfoComb", "PadSetActLED", "PadPortClose", "PadStateIntToStr",
-            "PadGetReqState", "PadInfoPressMode", "PadEnterPressMode", "PadExitPressMode",
-
-            // IPU
-            "IPU_FDEC", "IPU_FRST", "IPU_SETIQ", "IPU_IDEC", "IPU_CSC", "IPU_PACK",
-            "IPU_VDEC", "IPU_FDTV", "IPU_SETTH", "IPU_Disable", "IPU_Reset",
-
-            // DMA
-            "DmaGetChcr", "DmaGetMadr", "DmaGetTadr", "DmaGetQwc", "DmaGetRemaining",
-            "DmaSetChcr", "DmaSetMadr", "DmaSetTadr", "DmaSetQwc", "DmaStartTransfer",
-            "DmaEnableDma", "DmaDisableDma", "DmaTransferMem", "DmaWaitForTransfer",
-
-            // CDVD
-            "CdInit", "CdDiskReady", "CdGetError", "CdGetToc", "CdReadSector",
-            "CdGetDiscType", "CdDiskReady", "CdTrayReq", "CdSync", "CdRead",
-            "CdStop", "CdSetmode", "CdSearchFile", "CdReadChain", "CdReadILINK",
-
-            // Other libraries
-            "audsrv_init", "audsrv_adpcm_init", "audsrv_set_volume", "audsrv_play_adpcm",
-            "loadModules", "fioInit", "mcInit", "mtapInit", "padInit", "sioInit",
-            "ethPutIFAddr", "ethGetNetEther", "ethPutNetIFaddr", "ethGetHWaddr",
-            "ethUsrPkt_input", "ethIntrEnable", "ethSetupIF", "ethPutArpReq",
-            "ethPktToIF", "ethGetArpEntry", "ethAllocTxPacket", "ethFreeTxPacket",
-            "sio_puts", "sio_printf", "sio_getc",
-
-            // Extra audsrv helpers
-            "audsrv_quit", "audsrv_play_audio", "audsrv_stop_audio", "audsrv_wait_audio",
-            "audsrv_set_format"};
-
-        // Add new PS2-specific functions for more complete coverage
-        const std::vector<std::string> additionalPs2Funcs = {
-            // VIF and FIFO functions
-            "VIF0_STAT", "VIF0_FBRST", "VIF0_ERR", "VIF0_MARK", "VIF0_CYCLE", "VIF0_MODE",
-            "VIF0_NUM", "VIF0_MASK", "VIF0_CODE", "VIF0_ITOPS", "VIF0_ITOP", "VIF0_R0",
-            "VIF0_R1", "VIF0_R2", "VIF0_R3", "VIF0_C0", "VIF0_C1", "VIF0_C2", "VIF0_C3",
-            "VIF1_STAT", "VIF1_FBRST", "VIF1_ERR", "VIF1_MARK", "VIF1_CYCLE", "VIF1_MODE",
-            "VIF1_NUM", "VIF1_MASK", "VIF1_CODE", "VIF1_ITOPS", "VIF1_BASE", "VIF1_OFST",
-            "VIF1_TOPS", "VIF1_ITOP", "VIF1_TOP", "VIF1_R0", "VIF1_R1", "VIF1_R2", "VIF1_R3",
-            "VIF1_C0", "VIF1_C1", "VIF1_C2", "VIF1_C3",
-
-            // Graphics Synthesis functions
-            "GsGetGParam", "GsSetGParam", "GsGParam", "GsSetCBM", "GsCBM", "GsAddFB",
-            "GsAddFT", "GsFreeMem", "GsGetFBMem", "GsGetFTMem", "GsGetFT", "GsGetFB",
-            "GsSetRefView", "GsSetView", "GsGetActiveFrame", "GsSetDrawFrameBuffer",
-            "GsSetDisplayFrameBuffer", "GsSetZBufferAddress", "GsSetCLUT", "GsSetPaintMethod",
-            "GsCleanZBuffer", "GsSwapDispBuffer", "GsDrawSync", "GsVSync",
-
-            // Audio functions
-            "SdInit", "SdSetParam", "SdGetParam", "SdSetSwitch", "SdGetSwitch", "SdSetAddr",
-            "SdGetAddr", "SdSetCoreAttr", "SdGetCoreAttr", "SdNote2Pitch", "SdPitch2Note",
-            "SdProcBatch", "SdProcBatchEx", "SdVoiceTrans", "SdBlockTrans", "SdVoiceTransStatus",
-            "SdBlockTransStatus", "iSdVoiceTrans", "iSdBlockTrans", "SdSetTransCallback",
-            "SdSetIRQCallback", "SdSetEffectAttr", "SdGetEffectAttr", "SdClearEffectWorkArea",
-
-            // SPU2 functions
-            "sceSPU2Init", "sceSPU2Reset", "sceSPU2SetVolume", "sceSPU2GetVolume",
-            "sceSPU2SetReverb", "sceSPU2GetReverb", "sceSPU2SetTransferMode",
-            "sceSPU2GetTransferMode", "sceSPU2Write", "sceSPU2Read", "sceSPU2ReadDMA",
-            "sceSPU2WriteDMA", "sceSPU2SetVoiceAttributes", "sceSPU2GetVoiceAttributes",
-
-            // Libmath
-            "sinf", "cosf", "tanf", "asinf", "acosf", "atanf", "atan2f", "sinhf", "coshf", "tanhf",
-            "sinl", "cosl", "tanl", "asinl", "acosl", "atanl", "atan2l", "sinhl", "coshl", "tanhl",
-            "sqrtf", "powf", "expf", "logf", "log10f"};
-
-        // Combine all library functions
         m_libFunctions.insert(stdLibFuncs.begin(), stdLibFuncs.end());
-        m_libFunctions.insert(ps2SysFuncs.begin(), ps2SysFuncs.end());
-        m_libFunctions.insert(ps2LibFuncs.begin(), ps2LibFuncs.end());
-        m_libFunctions.insert(additionalPs2Funcs.begin(), additionalPs2Funcs.end());
     }
 
     void ElfAnalyzer::analyzeEntryPoint()
@@ -387,8 +264,7 @@ namespace ps2recomp
                             std::cout << "Found initialization call to: " << func.name << " at 0x"
                                       << std::hex << inst.address << std::dec << std::endl;
 
-                            if (func.name.find("init") != std::string::npos ||
-                                func.name.find("Init") != std::string::npos)
+                            if (!isDoNotSkipOrStub(func.name) && (func.name.find("init") != std::string::npos || func.name.find("Init") != std::string::npos))
                             {
                                 m_skipFunctions.insert(func.name);
                             }
@@ -425,41 +301,10 @@ namespace ps2recomp
                 {
                     m_libFunctions.insert(symbol.name);
                 }
-
-                if (isSystemFunction(symbol.name))
+                else if (isSystemFunction(symbol.name))
                 {
                     m_skipFunctions.insert(symbol.name);
                 }
-            }
-        }
-
-        for (const auto &func : m_functions)
-        {
-            if (m_libFunctions.find(func.name) != m_libFunctions.end() ||
-                m_skipFunctions.find(func.name) != m_skipFunctions.end())
-            {
-                continue;
-            }
-
-            if (identifyMemcpyPattern(func))
-            {
-                std::cout << "Identified function " << func.name << " as memcpy-like implementation" << std::endl;
-                m_libFunctions.insert(func.name);
-            }
-            else if (identifyMemsetPattern(func))
-            {
-                std::cout << "Identified function " << func.name << " as memset-like implementation" << std::endl;
-                m_libFunctions.insert(func.name);
-            }
-            else if (identifyStringOperationPattern(func))
-            {
-                std::cout << "Identified function " << func.name << " as string operation implementation" << std::endl;
-                m_libFunctions.insert(func.name);
-            }
-            else if (identifyMathPattern(func))
-            {
-                std::cout << "Identified function " << func.name << " as math implementation" << std::endl;
-                m_libFunctions.insert(func.name);
             }
         }
     }
@@ -1274,7 +1119,9 @@ namespace ps2recomp
 
                     // If too many patches in one function, maybe better to skip it
                     if (patchAddrs.size() > 5 &&
-                        static_cast<double>(patchAddrs.size()) / ((func.end - func.start) / 4) > 0.2)
+                        static_cast<double>(patchAddrs.size()) / ((func.end - func.start) / 4) > 0.2 &&
+                        !isLibraryFunction(func.name) &&
+                        !isDoNotSkipOrStub(func.name))
                     {
                         std::cout << "  - Adding " << func.name << " to skip list due to high patch density" << std::endl;
                         m_skipFunctions.insert(func.name);
@@ -1639,6 +1486,50 @@ namespace ps2recomp
         return result;
     }
 
+    static bool hasPs2ApiPrefix(const std::string &name)
+    {
+        if (name.empty())
+            return false;
+
+        const std::vector<std::string> libraryPrefixes = {
+            "sce", "Sce", "SCE",   // Sony prefixes
+            "sif", "Sif", "SIF",   // SIF functions
+            "pad", "Pad", "PAD",   // Pad functions
+            "gs", "Gs", "GS",      // Graphics Synthesizer
+            "dma", "Dma", "DMA",   // DMA functions
+            "iop", "Iop", "IOP",   // IOP functions
+            "vif", "Vif", "VIF",   // VIF functions
+            "spu", "Spu", "SPU",   // SPU functions
+            "mc", "Mc", "MC",      // Memory Card functions
+            "libc", "Libc", "LIBC" // C library functions
+        };
+
+        std::string base = name;
+        if (base[0] == '_' && base.size() > 1)
+        {
+            base = base.substr(1);
+        }
+
+        for (const auto &prefix : libraryPrefixes)
+        {
+            if (base.rfind(prefix, 0) == 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    static bool isDoNotSkipOrStub(const std::string &name)
+    {
+        static const std::unordered_set<std::string> kDoNotSkipOrStub = {
+            "topThread",
+            "cmd_sem_init"};
+
+        return kDoNotSkipOrStub.find(name) != kDoNotSkipOrStub.end();
+    }
+
     bool ElfAnalyzer::isSystemFunction(const std::string &name) const
     {
         static const std::unordered_set<std::string> systemFuncs = {
@@ -1663,34 +1554,11 @@ namespace ps2recomp
         if (name.empty())
             return false;
 
-        if (name[0] == '_' && name.size() > 1 && std::isalpha(name[1]))
-        {
-            return true; // Many library functions start with underscore
-        }
-
-        const std::vector<std::string> libraryPrefixes = {
-            "sce", "Sce", "SCE",   // Sony prefixes
-            "sif", "Sif", "SIF",   // SIF functions
-            "pad", "Pad", "PAD",   // Pad functions
-            "gs", "Gs", "GS",      // Graphics Synthesizer
-            "dma", "Dma", "DMA",   // DMA functions
-            "iop", "Iop", "IOP",   // IOP functions
-            "vif", "Vif", "VIF",   // VIF functions
-            "spu", "Spu", "SPU",   // SPU functions
-            "mc", "Mc", "MC",      // Memory Card functions
-            "libc", "Libc", "LIBC" // C library functions
-        };
-
-        for (const auto &prefix : libraryPrefixes)
-        {
-            if (name.rfind(prefix, 0) == 0)
-            {
-                return true;
-            }
-        }
+        if (hasPs2ApiPrefix(name))
+            return true;
 
         // Check for common C/C++ library function names
-        static const std::regex cLibPattern("^(mem|str|time|f?printf|f?scanf|malloc|free|calloc|realloc|atoi|itoa|rand|srand|abort|exit|atexit|getenv|system|bsearch|qsort|abs|labs|div|ldiv|mblen|mbtowc|wctomb|mbstowcs|wcstombs).*");
+        static const std::regex cLibPattern("^_*(mem|str|time|f?printf|f?scanf|malloc|free|calloc|realloc|atoi|itoa|rand|srand|abort|exit|atexit|getenv|system|bsearch|qsort|abs|labs|div|ldiv|mblen|mbtowc|wctomb|mbstowcs|wcstombs).*");
         if (std::regex_match(name, cLibPattern))
         {
             return true;
@@ -1771,6 +1639,14 @@ namespace ps2recomp
         {
             return false;
         }
+        if (isDoNotSkipOrStub(function.name))
+        {
+            return false;
+        }
+        if (hasPs2ApiPrefix(function.name))
+        {
+            return false;
+        }
 
         std::vector<Instruction> instructions = decodeFunction(function);
 
@@ -1826,7 +1702,10 @@ namespace ps2recomp
         if (isSelfModifyingCode(function))
         {
             std::cout << "Function " << function.name << " contains self-modifying code" << std::endl;
-            m_skipFunctions.insert(function.name);
+            if (!isLibraryFunction(function.name) && !isDoNotSkipOrStub(function.name))
+            {
+                m_skipFunctions.insert(function.name);
+            }
         }
 
         if (isLoopHeavyFunction(function))
