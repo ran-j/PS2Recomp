@@ -46,7 +46,6 @@ static thread_local int g_currentThreadId = 1;
 static std::unordered_map<int, std::shared_ptr<SemaInfo>> g_semas;
 static int g_nextSemaId = 1;
 std::atomic<int> g_activeThreads{0};
-std::atomic<int> g_schedulerSemaId{0}; // best guess of the game's scheduler semaphore id
 
 int allocatePs2Fd(FILE *file)
 {
@@ -130,62 +129,6 @@ std::string translatePs2Path(const char *ps2Path)
 
 namespace ps2_syscalls
 {
-    namespace
-    {
-        constexpr uint32_t kCmdqWakeupAddr = 0x10cb00;
-        constexpr uint32_t kCmdqRotateAddr = 0x10cb98;
-        constexpr uint32_t kCmdqSuspendAddr = 0x10cc34;
-
-        bool isSchedulerReturn(uint32_t ra)
-        {
-            if (g_currentThreadId == 2)
-            {
-                return true;
-            }
-            return ra >= 0x10c920 && ra <= 0x10ca00;
-        }
-
-        bool enqueueSchedulerCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime,
-                                 uint32_t funcAddr, uint32_t arg, const char *name)
-        {
-            if (!runtime || !runtime->hasFunction(funcAddr))
-            {
-                static int missCount = 0;
-                if (missCount < 4)
-                {
-                    std::cout << "[" << name << "] missing cmdq function @0x"
-                              << std::hex << funcAddr << std::dec << std::endl;
-                    ++missCount;
-                }
-                return false;
-            }
-
-            uint32_t sp = GPR_U32(ctx, 29);
-            if (sp < 32)
-            {
-                return false;
-            }
-            uint32_t frame = sp - 32;
-            WRITE64(frame + 0, GPR_U64(ctx, 16));
-            WRITE64(frame + 16, GPR_U64(ctx, 31));
-
-            uint32_t savedPc = ctx->pc;
-            SET_GPR_U32(ctx, 29, frame);
-            SET_GPR_U32(ctx, 16, arg);
-
-            auto func = runtime->lookupFunction(funcAddr);
-            func(rdram, ctx, runtime);
-
-            ctx->pc = savedPc;
-            if (GPR_U32(ctx, 29) != sp)
-            {
-                SET_GPR_U32(ctx, 29, sp);
-                SET_GPR_U64(ctx, 16, READ64(frame + 0));
-                SET_GPR_U64(ctx, 31, READ64(frame + 16));
-            }
-            return true;
-        }
-    } // namespace
 
     void FlushCache(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
@@ -321,9 +264,6 @@ namespace ps2_syscalls
             g_activeThreads.fetch_sub(1, std::memory_order_relaxed); })
             .detach();
 
-        // for now kick sema 1 if it was created empty to let render thread proceed.
-        ps2_syscalls::SignalSema(rdram, ctx, runtime);
-
         // for now report success to the caller.
         setReturnS32(ctx, 0);
     }
@@ -356,15 +296,6 @@ namespace ps2_syscalls
         {
             std::cout << "[SuspendThread] tid=" << tid << std::endl;
             ++logCount;
-        }
-        if (isSchedulerReturn(GPR_U32(ctx, 31)))
-        {
-            setReturnS32(ctx, 0);
-            return;
-        }
-        if (enqueueSchedulerCmd(rdram, ctx, runtime, kCmdqSuspendAddr, static_cast<uint32_t>(tid), "SuspendThread"))
-        {
-            return;
         }
         setReturnS32(ctx, 0);
     }
@@ -404,15 +335,6 @@ namespace ps2_syscalls
             std::cout << "[WakeupThread] tid=" << tid << std::endl;
             ++logCount;
         }
-        if (isSchedulerReturn(GPR_U32(ctx, 31)))
-        {
-            setReturnS32(ctx, 0);
-            return;
-        }
-        if (enqueueSchedulerCmd(rdram, ctx, runtime, kCmdqWakeupAddr, static_cast<uint32_t>(tid), "WakeupThread"))
-        {
-            return;
-        }
         setReturnS32(ctx, 0);
     }
 
@@ -424,10 +346,6 @@ namespace ps2_syscalls
         {
             std::cout << "[iWakeupThread] tid=" << tid << std::endl;
             ++logCount;
-        }
-        if (enqueueSchedulerCmd(rdram, ctx, runtime, kCmdqWakeupAddr, static_cast<uint32_t>(tid), "iWakeupThread"))
-        {
-            return;
         }
         setReturnS32(ctx, 0);
     }
@@ -456,15 +374,6 @@ namespace ps2_syscalls
         if (prio >= 128)
         {
             setReturnS32(ctx, -1);
-            return;
-        }
-        if (isSchedulerReturn(GPR_U32(ctx, 31)))
-        {
-            setReturnS32(ctx, 0);
-            return;
-        }
-        if (enqueueSchedulerCmd(rdram, ctx, runtime, kCmdqRotateAddr, static_cast<uint32_t>(prio), "RotateThreadReadyQueue"))
-        {
             return;
         }
         setReturnS32(ctx, 0);
@@ -521,15 +430,6 @@ namespace ps2_syscalls
     {
         int sid = static_cast<int>(getRegU32(ctx, 4));
         auto it = g_semas.find(sid);
-        if (it == g_semas.end() && sid > 1000)
-        {
-            int fallback = g_schedulerSemaId.load(std::memory_order_relaxed);
-            if (fallback > 0)
-            {
-                sid = fallback;
-                it = g_semas.find(sid);
-            }
-        }
         if (it != g_semas.end())
         {
             auto sema = it->second;
@@ -552,50 +452,15 @@ namespace ps2_syscalls
     {
         int sid = static_cast<int>(getRegU32(ctx, 4));
         auto it = g_semas.find(sid);
-        if (it == g_semas.end() && sid > 1000)
-        {
-            int fallback = g_schedulerSemaId.load(std::memory_order_relaxed);
-            if (fallback > 0)
-            {
-                sid = fallback;
-                it = g_semas.find(sid);
-            }
-        }
         if (it != g_semas.end())
         {
             auto sema = it->second;
             std::unique_lock<std::mutex> lock(sema->m);
-            uint32_t schedSid = *reinterpret_cast<uint32_t *>(runtime->memory().getRDRAM() + (0x363a10 & PS2_RAM_MASK));
             static int globalLog = 0;
             if (globalLog < 5)
             {
                 std::cout << "[WaitSema] sid=" << sid << " count=" << sema->count << std::endl;
                 ++globalLog;
-            }
-            if (sid == schedSid)
-            {
-                static thread_local int queueLog = 0;
-                if (queueLog < 3)
-                {
-                    uint32_t off = 0x363a10 & PS2_RAM_MASK;
-                    uint32_t *p = reinterpret_cast<uint32_t *>(runtime->memory().getRDRAM() + off);
-                    std::cout << "[WaitSema] sid=" << sid << " count=" << sema->count
-                              << " queue[0..3]=" << std::hex << p[0] << " " << p[1] << " " << p[2] << " " << p[3] << std::dec << std::endl;
-
-                    // Dump data
-                    uint32_t argPtr = getRegU32(ctx, 17);
-                    uint32_t idx = 0;
-                    if (argPtr)
-                    {
-                        idx = READ32(ADD32(argPtr, 0)) & 0x1FF;
-                        uint32_t cmdBase = (argPtr + 8) & PS2_RAM_MASK;
-                        uint32_t tidBase = (argPtr + 9) & PS2_RAM_MASK;
-                        uint32_t cmd = runtime->memory().getRDRAM()[(cmdBase + (idx << 1)) & PS2_RAM_MASK];
-                        uint32_t tid = runtime->memory().getRDRAM()[(tidBase + (idx << 1)) & PS2_RAM_MASK];
-                        std::cout << "[WaitSema] sched idx=" << idx << " cmd=" << cmd << " tid=" << tid << std::endl;
-                    }
-                    ++queueLog;
-                }
             }
             if (sema->count == 0)
             {
@@ -611,10 +476,6 @@ namespace ps2_syscalls
             if (sema->count > 0)
             {
                 sema->count--;
-            }
-            if (sid < 32)
-            {
-                g_schedulerSemaId.store(sid, std::memory_order_relaxed);
             }
         }
         setReturnS32(ctx, 0);
@@ -900,11 +761,6 @@ namespace ps2_syscalls
     void _sceRpcGetPacket(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t queuePtr = getRegU32(ctx, 4);
-        if (queuePtr == 0)
-        {
-            // Fall back to a safe, writable address in RDRAM.
-            queuePtr = 0x00370000;
-        }
         setReturnS32(ctx, static_cast<int32_t>(queuePtr));
     }
 
@@ -1439,151 +1295,14 @@ namespace ps2_syscalls
         uint32_t syscall_num = getRegU32(ctx, 3); // Syscall number usually in $v1 ($r3) for SYSCALL instr
         uint32_t caller_ra = getRegU32(ctx, 31);  // $ra
 
-        // Many recompiled libc helper stubs land here without setting $v1.
-        if (syscall_num == 0)
-        {
-            static int logCount = 0;
-            if (logCount++ < 5)
-            {
-                std::cout << "[stub] Treating syscall #0 as no-op success PC=0x" << std::hex << ctx->pc
-                          << " RA=0x" << caller_ra << std::dec << std::endl;
-            }
-            setReturnS32(ctx, 0);
-            return;
-        }
-
-        if (syscall_num > 0x1FFF)
-        {
-            static int logCount = 0;
-            if (logCount++ < 5)
-            {
-                std::cout << "[stub] Suspicious syscall id 0x" << std::hex << syscall_num
-                          << " treated as success PC=0x" << ctx->pc
-                          << " RA=0x" << caller_ra << std::dec << std::endl;
-            }
-            setReturnS32(ctx, 0);
-            return;
-        }
-
-        if (syscall_num == 0xff)
-        {
-            // InitGdSystemEx: graphics driver bootstrap. Treat as success.
-            static int logCount = 0;
-            if (logCount++ < 3)
-            {
-                std::cout << "[stub] InitGdSystemEx (syscall 0xff) PC=0x" << std::hex << ctx->pc
-                          << " RA=0x" << caller_ra
-                          << " args a0=0x" << getRegU32(ctx, 4)
-                          << " a1=0x" << getRegU32(ctx, 5)
-                          << " a2=0x" << getRegU32(ctx, 6)
-                          << " a3=0x" << getRegU32(ctx, 7) << std::dec << std::endl;
-            }
-            // For now Seed GS display registers to a sane default 640x448 @ PSMCT32 so the blitter has something to show.
-            PS2Memory &mem = runtime->memory();
-            constexpr uint32_t fbWidth = 640;
-            constexpr uint32_t fbHeight = 448;
-            constexpr uint32_t defaultFbAddr = 0x00100000;
-            uint64_t dispfb = 0;
-            uint32_t fbp = (defaultFbAddr & 0x1FFFFFFF) / 2048;
-            uint32_t fbw = fbWidth / 64;
-            uint32_t psm = 0; // PSMCT32
-            dispfb |= (fbp & 0x1FF);
-            dispfb |= (static_cast<uint64_t>(fbw & 0x3F) << 10);
-            dispfb |= (static_cast<uint64_t>(psm & 0x1F) << 16);
-            mem.gs().dispfb1 = dispfb;
-            uint64_t display = 0;
-            uint64_t dw = fbWidth - 1;
-            uint64_t dh = fbHeight - 1;
-            display |= (dw & 0x7FF) << 23;
-            display |= (dh & 0x7FF) << 34;
-            mem.gs().display1 = display;
-
-            // Fill a visible test pattern only until we see a real GIF copy.
-            if (!mem.hasSeenGifCopy())
-            {
-                uint8_t *vram = mem.getGSVRAM();
-                if (vram)
-                {
-                    size_t base = static_cast<size_t>(fbp) * 2048;
-                    size_t bytes = static_cast<size_t>(fbWidth) * fbHeight * 4;
-                    if (base + bytes <= PS2_GS_VRAM_SIZE)
-                    {
-                        for (uint32_t y = 0; y < fbHeight; ++y)
-                        {
-                            for (uint32_t x = 0; x < fbWidth; ++x)
-                            {
-                                size_t idx = base + (static_cast<size_t>(y) * fbWidth + x) * 4;
-                                vram[idx + 0] = static_cast<uint8_t>(x);     // B
-                                vram[idx + 1] = static_cast<uint8_t>(y);     // G
-                                vram[idx + 2] = static_cast<uint8_t>(x ^ y); // R
-                                vram[idx + 3] = 0xFF;                        // A
-                            }
-                        }
-                        uint32_t sum = 0;
-                        for (int i = 0; i < 32; ++i)
-                        {
-                            sum += vram[base + i];
-                        }
-                        std::cout << "[stub] InitGdSystemEx filled VRAM sum=0x" << std::hex << sum << std::dec << std::endl;
-                    }
-                }
-            }
-
-            setReturnS32(ctx, 0);
-            return;
-        }
-
-        if (syscall_num == 0x41)
-        {
-            // njInitView: initialise a view matrix block; seed with identity so later math has sane defaults.
-            static int logCount = 0;
-            uint32_t viewPtr = getRegU32(ctx, 4);
-            float *dst = reinterpret_cast<float *>(getMemPtr(rdram, viewPtr));
-
-            if (dst)
-            {
-                const float identity[16] = {
-                    1.f, 0.f, 0.f, 0.f,
-                    0.f, 1.f, 0.f, 0.f,
-                    0.f, 0.f, 1.f, 0.f,
-                    0.f, 0.f, 0.f, 1.f};
-                std::memcpy(dst, identity, sizeof(identity));
-            }
-
-            if (logCount++ < 3)
-            {
-                std::cout << "[stub] njInitView (syscall 0x41) PC=0x" << std::hex << ctx->pc
-                          << " RA=0x" << caller_ra
-                          << " viewPtr=0x" << viewPtr
-                          << (dst ? "" : " (invalid)") << std::dec << std::endl;
-            }
-
-            setReturnS32(ctx, 0);
-            return;
-        }
-
-        if (syscall_num == 0x06 || syscall_num == 0x14 || syscall_num == 0x20)
-        {
-            // Treat frequent boot/runtime syscalls as success to avoid tight loops.
-            static int logCount = 0;
-            if (logCount++ < 5)
-            {
-                std::cout << "[stub] Syscall 0x" << std::hex << syscall_num
-                          << " treated as success PC=0x" << ctx->pc
-                          << " RA=0x" << caller_ra << std::dec << std::endl;
-            }
-            setReturnS32(ctx, 0);
-            return;
-        }
-
         std::cerr << "Warning: Unimplemented PS2 syscall called. PC=0x" << std::hex << ctx->pc
-                  << ", RA=0x" << caller_ra
-                  << ", Syscall # (from $v1)=0x" << syscall_num << std::dec << std::endl;
+            << ", RA=0x" << caller_ra
+            << ", Syscall # (from $v1)=0x" << syscall_num << std::dec << std::endl;
 
         std::cerr << "  Args: $a0=0x" << std::hex << getRegU32(ctx, 4)
-                  << ", $a1=0x" << getRegU32(ctx, 5)
-                  << ", $a2=0x" << getRegU32(ctx, 6)
-                  << ", $a3=0x" << getRegU32(ctx, 7) << std::dec << std::endl;
+            << ", $a1=0x" << getRegU32(ctx, 5)
+            << ", $a2=0x" << getRegU32(ctx, 6)
+            << ", $a3=0x" << getRegU32(ctx, 7) << std::dec << std::endl;
 
         // Common syscalls:
         // 0x04: Exit
@@ -1597,7 +1316,7 @@ namespace ps2_syscalls
         }
 
         // Return generic error for unimplemented ones
-        setReturnS32(ctx, -1);
+        setReturnS32(ctx, -1); // Return -ENOSYS or similar? Use -1 for simplicity.
     }
 
     // 0x3C SetupThread: returns stack pointer (stack + stack_size)
