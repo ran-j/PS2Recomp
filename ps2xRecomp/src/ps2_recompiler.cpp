@@ -1,5 +1,6 @@
 #include "ps2recomp/ps2_recompiler.h"
 #include "ps2recomp/instructions.h"
+#include "ps2_runtime_calls.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -15,6 +16,28 @@ namespace fs = std::filesystem;
 
 namespace ps2recomp
 {
+    namespace
+    {
+        enum class StubTarget
+        {
+            Unknown,
+            Syscall,
+            Stub
+        };
+
+        StubTarget resolveStubTarget(const std::string &name)
+        {
+            if (ps2_runtime_calls::isSyscallName(name))
+            {
+                return StubTarget::Syscall;
+            }
+            if (ps2_runtime_calls::isStubName(name))
+            {
+                return StubTarget::Stub;
+            }
+            return StubTarget::Unknown;
+        }
+    }
 
     PS2Recompiler::PS2Recompiler(const std::string &configPath)
         : m_configManager(configPath)
@@ -234,7 +257,22 @@ namespace ps2recomp
                     std::string generatedName = m_codeGenerator->getGeneratedFunctionName(function);
                     std::stringstream stub;
                     stub << "void " << generatedName
-                         << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime) { ps2_syscalls::TODO(rdram, ctx, runtime); }";
+                         << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime) { ";
+
+                    switch (resolveStubTarget(function.name))
+                    {
+                    case StubTarget::Syscall:
+                        stub << "ps2_syscalls::" << function.name << "(rdram, ctx, runtime); ";
+                        break;
+                    case StubTarget::Stub:
+                        stub << "ps2_stubs::" << function.name << "(rdram, ctx, runtime); ";
+                        break;
+                    default:
+                        stub << "ps2_syscalls::TODO(rdram, ctx, runtime); ";
+                        break;
+                    }
+
+                    stub << "}";
                     m_generatedStubs[function.start] = stub.str();
                 }
             }
@@ -250,6 +288,7 @@ namespace ps2recomp
                 combinedOutput << "#include \"ps2_runtime.h\"\n";
                 combinedOutput << "#include \"ps2_recompiled_stubs.h\"\n";
                 combinedOutput << "#include \"ps2_syscalls.h\"\n";
+                combinedOutput << "#include \"ps2_stubs.h\"\n";
                 if (m_bootstrapInfo.valid)
                 {
                     combinedOutput << "\n"
@@ -315,7 +354,12 @@ namespace ps2recomp
                     {
                         if (function.isStub)
                         {
-                            code = m_generatedStubs[function.start];
+                            std::stringstream stubFile;
+                            stubFile << "#include \"ps2_runtime.h\"\n";
+                            stubFile << "#include \"ps2_syscalls.h\"\n";
+                            stubFile << "#include \"ps2_stubs.h\"\n\n";
+                            stubFile << m_generatedStubs[function.start] << "\n";
+                            code = stubFile.str();
                         }
                         else
                         {

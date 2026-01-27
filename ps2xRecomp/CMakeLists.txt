@@ -37,13 +37,14 @@ file(GLOB_RECURSE PS2RECOMP_HEADERS
     "include/*.h"
     "include/*.hpp"
 )
- 
+
 add_executable(ps2recomp ${PS2RECOMP_SOURCES})
- 
+
 add_library(ps2_recomp STATIC ${PS2RECOMP_SOURCES})
- 
+
 target_include_directories(ps2recomp PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ps2xRuntime/include
     ${elfio_SOURCE_DIR}
 )
 
@@ -51,7 +52,11 @@ target_include_directories(ps2_recomp PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${elfio_SOURCE_DIR}
 )
- 
+
+target_include_directories(ps2_recomp PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ps2xRuntime/include
+)
+
 target_link_libraries(ps2recomp PRIVATE
     fmt::fmt
     toml11::toml11
@@ -61,7 +66,7 @@ target_link_libraries(ps2_recomp PUBLIC
     fmt::fmt
     toml11::toml11
 )
- 
+
 install(TARGETS ps2recomp ps2_recomp
     RUNTIME DESTINATION bin
     LIBRARY DESTINATION lib
