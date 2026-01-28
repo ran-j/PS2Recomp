@@ -1,0 +1,38 @@
+name: build
+
+on: [push, pull_request]
+
+jobs:
+  windows-msvc:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            arch: x64
+            target_arch: x86_64
+    
+    name: windows-msvc-${{ matrix.target_arch }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      
+      - uses: lukka/get-cmake@latest
+
+      - uses: TheMrMilchmann/setup-msvc-dev@v3
+        with:
+          arch: ${{ matrix.arch }}
+
+      - name: Build
+        shell: cmd
+        run: |
+          cmake -B build
+          cmake --build build --config Release
+
+      - name: Tests
+        shell: cmd
+        continue-on-error: true # When tests start passing, this line should be removed.
+        run: |
+          .\build\ps2xTest\Release\ps2x_tests.exe
