@@ -154,12 +154,24 @@
     X(njTextureShadingMode) \
     X(njInitView)        \
     X(njSetAspect)       \
+    X(njInitSystem)      \
+    X(njInitPrint)       \
+    X(njPolygonCullingMode) \
+    X(njSetView)         \
+    X(njGetMatrix)       \
+    X(njInitTexture)     \
+    X(njInitTextureBuffer) \
+    X(njSetPaletteMode)  \
+    X(njClipZ)           \
     X(syRtcInit)         \
     X(_builtin_set_imask) \
     X(syFree)            \
     X(InitSdcParameter)  \
     X(Ps2_pad_actuater)  \
     X(syMallocInit)      \
+    X(syHwInit)          \
+    X(syHwInit2)         \
+    X(InitGdSystemEx)    \
     X(pdInitPeripheral)  \
     X(njSetVertexBuffer) \
     X(njPrintSize)       \
@@ -172,4 +184,7 @@
     X(sdSysFinish)       \
     X(ADXT_Init)         \
     X(ADXT_SetNumRetry)  \
-    X(cvFsSetDefDev)
+    X(cvFsSetDefDev)     \
+    X(sndr_trans_func)    \
+    X(sdDrvInit)         \
+    X(ADXF_LoadPartitionNw)

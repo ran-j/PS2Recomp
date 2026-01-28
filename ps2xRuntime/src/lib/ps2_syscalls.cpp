@@ -221,6 +221,16 @@ namespace ps2_syscalls
             return;
         }
 
+        // TODO check later skip audio threads to avoid runaway recursion/stack overflows.
+        if (info.entry == 0x2f42a0 || info.entry == 0x2f4258)
+        {
+            std::cout << "[StartThread] id=" << tid
+                      << " entry=0x" << std::hex << info.entry << std::dec
+                      << " skipped (audio thread stub)" << std::endl;
+            setReturnS32(ctx, 0);
+            return;
+        }
+
         // Spawn a host thread to simulate PS2 thread execution.
         g_activeThreads.fetch_add(1, std::memory_order_relaxed);
         std::thread([=]() mutable

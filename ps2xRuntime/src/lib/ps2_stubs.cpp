@@ -1119,6 +1119,105 @@ namespace ps2_stubs
         setReturnS32(ctx, 0);
     }
 
+    void njInitSystem(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub njInitSystem" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void njInitPrint(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub njInitPrint" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void njPolygonCullingMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub njPolygonCullingMode" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void njSetView(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub njSetView" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void njGetMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub njGetMatrix" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void njInitTexture(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub njInitTexture" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void njInitTextureBuffer(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub njInitTextureBuffer" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void njSetPaletteMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub njSetPaletteMode" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void njClipZ(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub njClipZ" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
     void syRtcInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         static int logCount = 0;
@@ -1180,6 +1279,39 @@ namespace ps2_stubs
         if (logCount < 8)
         {
             std::cout << "ps2_stub syMallocInit" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void syHwInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub syHwInit" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void syHwInit2(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub syHwInit2" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void InitGdSystemEx(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub InitGdSystemEx" << std::endl;
             ++logCount;
         }
         setReturnS32(ctx, 0);
@@ -1273,6 +1405,52 @@ namespace ps2_stubs
         setReturnS32(ctx, 0);
     }
 
+    void sndr_trans_func(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub sndr_trans_func (noop)" << std::endl;
+            ++logCount;
+        }
+
+        // For now just clear the snd busy flag used by sdMultiUnitDownload/SysServer loops.
+        constexpr uint32_t kSndBusyAddr = 0x01E0E170;
+        if (rdram)
+        {
+            uint32_t offset = kSndBusyAddr & PS2_RAM_MASK;
+            if (offset + sizeof(uint32_t) <= PS2_RAM_SIZE)
+            {
+                *reinterpret_cast<uint32_t *>(rdram + offset) = 0;
+            }
+        }
+
+        setReturnS32(ctx, 0);
+    }
+
+    void sdDrvInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub sdDrvInit (noop)" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void ADXF_LoadPartitionNw(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub ADXF_LoadPartitionNw (noop)" << std::endl;
+            ++logCount;
+        }
+        // Return success to keep the ADX partition setup moving.
+        setReturnS32(ctx, 0);
+    }
+
     void sdSndStopAll(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         static int logCount = 0;
@@ -1330,10 +1508,16 @@ namespace ps2_stubs
 
     void TODO(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        uint32_t stub_num = getRegU32(ctx, 2);   // $v0 often holds stub num *before* call
+        TODO_NAMED("unknown", rdram, ctx, runtime);
+    }
+
+    void TODO_NAMED(const char *name, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        uint32_t stub_num = getRegU32(ctx, 2);   // $v0
         uint32_t caller_ra = getRegU32(ctx, 31); // $ra
 
-        std::cerr << "Warning: Unimplemented PS2 stub called. PC=0x" << std::hex << ctx->pc
+        std::cerr << "Warning: Unimplemented PS2 stub called. name=" << (name ? name : "unknown")
+                  << " PC=0x" << std::hex << ctx->pc
                   << ", RA=0x" << caller_ra
                   << ", Stub# guess (from $v0)=0x" << stub_num << std::dec << std::endl;
 

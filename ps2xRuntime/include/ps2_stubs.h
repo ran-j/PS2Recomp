@@ -12,6 +12,7 @@ namespace ps2_stubs
     #undef PS2_DECLARE_STUB
 
     void TODO(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void TODO_NAMED(const char *name, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
 }
 
 #endif // PS2_STUBS_H
