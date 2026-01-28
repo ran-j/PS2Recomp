@@ -714,22 +714,29 @@ namespace ps2recomp
         return outputPath;
     }
 
-    std::string PS2Recompiler::sanitizeFunctionName(const std::string &name) const
+    std::string PS2Recompiler::sanitizeFunctionName(const std::string& name) const
     {
-        if (name == "main")
+        std::string sanitized = name;
+        std::replace(sanitized.begin(), sanitized.end(), '.', '_');
+
+        if (sanitized == "main")
         {
             return "ps2_main";
         }
 
-        if (ps2recomp::kKeywords.find(name) != ps2recomp::kKeywords.end())
+        if (ps2recomp::kKeywords.find(sanitized) != ps2recomp::kKeywords.end())
         {
-            return "ps2_" + name;
+            return "ps2_" + sanitized;
         }
 
-        if (name.size() >= 2 && name[0] == '_' && (name[1] == '_' || std::isupper(static_cast<unsigned char>(name[1]))))
+        if (sanitized.size() >= 2 &&
+            sanitized[0] == '_' &&
+            (sanitized[1] == '_' ||
+                std::isupper(static_cast<unsigned char>(sanitized[1]))))
         {
-            return "ps2_" + name;
+            return "ps2_" + sanitized;
         }
-        return name;
+
+        return sanitized;
     }
 }
