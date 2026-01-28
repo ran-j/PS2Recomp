@@ -36,3 +36,11 @@ jobs:
         continue-on-error: true # When tests start passing, this line should be removed.
         run: |
           .\build\ps2xTest\Release\ps2x_tests.exe
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PS2Recomp - Windows
+          path: |
+            build/ps2xAnalyzer/Release/*.exe
+            build/ps2xRecomp/Release/*.exe
+            build/ps2xTest/Release/*.exe
