@@ -174,7 +174,8 @@ namespace ps2recomp
 
                 if (shouldSkipFunction(function.name))
                 {
-                    std::cout << "Skipping function: " << function.name << std::endl;
+                    std::cout << "Skipping function (stubbed): " << function.name << std::endl;
+                    function.isStub = true;
                     continue;
                 }
 
@@ -268,7 +269,7 @@ namespace ps2recomp
                         stub << "ps2_stubs::" << function.name << "(rdram, ctx, runtime); ";
                         break;
                     default:
-                        stub << "ps2_syscalls::TODO(rdram, ctx, runtime); ";
+                        stub << "ps2_stubs::TODO(rdram, ctx, runtime); ";
                         break;
                     }
 
@@ -451,17 +452,15 @@ namespace ps2recomp
 
             for (const auto &function : m_functions)
             {
-                if (function.isRecompiled)
+                if (!function.isRecompiled && !function.isStub)
                 {
-                    std::string finalName = sanitizeFunctionName(function.name);
-                    auto renameIt = m_functionRenames.find(function.start);
-                    if (renameIt != m_functionRenames.end())
-                    {
-                        finalName = renameIt->second;
-                    }
-
-                    ss << "void " << finalName << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime);\n";
+                    continue;
                 }
+
+                std::string finalName = sanitizeFunctionName(function.name);
+                finalName = m_codeGenerator->getGeneratedFunctionName(function);
+
+                ss << "void " << finalName << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime);\n";
             }
 
             if (m_bootstrapInfo.valid)
@@ -666,7 +665,11 @@ namespace ps2recomp
 
     bool PS2Recompiler::isStubFunction(const std::string &name) const
     {
-        return m_stubFunctions.find(name) != m_stubFunctions.end();
+        if (m_stubFunctions.find(name) != m_stubFunctions.end())
+        {
+            return true;
+        }
+        return ps2_runtime_calls::isStubName(name);
     }
 
     std::string PS2Recompiler::generateRuntimeHeader()

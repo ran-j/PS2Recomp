@@ -1001,6 +1001,333 @@ namespace ps2_stubs
         ctx->f[0] = ::fabsf(arg);
     }
 
+    void sceCdRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        uint32_t lbn = getRegU32(ctx, 4);     // $a0 - logical block number
+        uint32_t sectors = getRegU32(ctx, 5); // $a1 - sector count
+        uint32_t buf = getRegU32(ctx, 6);     // $a2 - destination buffer in RDRAM
+
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub sceCdRead: lbn=0x" << std::hex << lbn
+                      << " sectors=" << std::dec << sectors
+                      << " buf=0x" << std::hex << buf << std::dec << std::endl;
+            ++logCount;
+        }
+
+        size_t bytes = static_cast<size_t>(sectors) * 2048; // CD/DVD sector size
+        if (bytes > 0)
+        {
+            uint32_t offset = buf & PS2_RAM_MASK;
+            size_t maxBytes = PS2_RAM_SIZE - offset;
+            if (bytes > maxBytes)
+                bytes = maxBytes;
+            std::memset(rdram + offset, 0, bytes);
+        }
+
+        setReturnS32(ctx, 1); // Success
+    }
+
+    void sceCdSync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub sceCdSync" << std::endl;
+            ++logCount;
+        }
+
+        setReturnS32(ctx, 0); // 0 = completed/not busy
+    }
+
+    void sceCdGetError(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub sceCdGetError" << std::endl;
+            ++logCount;
+        }
+
+        setReturnS32(ctx, 0); // no error
+    }
+
+    void njSetBorderColor(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub njSetBorderColor" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void njSetTextureMemorySize(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub njSetTextureMemorySize" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void njInitVertexBuffer(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub njInitVertexBuffer" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void njTextureShadingMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub njTextureShadingMode" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void njInitView(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub njInitView" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void njSetAspect(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub njSetAspect" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void syRtcInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub syRtcInit" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void _builtin_set_imask(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub _builtin_set_imask" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void syFree(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub syFree" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void InitSdcParameter(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub InitSdcParameter" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void Ps2_pad_actuater(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub Ps2_pad_actuater" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void syMallocInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub syMallocInit" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void pdInitPeripheral(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub pdInitPeripheral" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void njSetVertexBuffer(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub njSetVertexBuffer" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void njPrintSize(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub njPrintSize" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void pdGetPeripheral(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub pdGetPeripheral" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void Ps2SwapDBuff(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub Ps2SwapDBuff" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void InitReadKeyEx(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub InitReadKeyEx" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void SetRepeatKeyTimer(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub SetRepeatKeyTimer" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void StopFxProgram(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub StopFxProgram" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void sdSndStopAll(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub sdSndStopAll" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void sdSysFinish(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub sdSysFinish" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void ADXT_Init(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub ADXT_Init" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void ADXT_SetNumRetry(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub ADXT_SetNumRetry" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void cvFsSetDefDev(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 8)
+        {
+            std::cout << "ps2_stub cvFsSetDefDev" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
     void TODO(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t stub_num = getRegU32(ctx, 2);   // $v0 often holds stub num *before* call
