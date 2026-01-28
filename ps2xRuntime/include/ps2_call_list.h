@@ -144,4 +144,32 @@
     X(log10)             \
     X(ceil)              \
     X(floor)             \
-    X(fabs)
+    X(fabs)              \
+    X(sceCdRead)         \
+    X(sceCdSync)         \
+    X(sceCdGetError)     \
+    X(njSetBorderColor)  \
+    X(njSetTextureMemorySize) \
+    X(njInitVertexBuffer) \
+    X(njTextureShadingMode) \
+    X(njInitView)        \
+    X(njSetAspect)       \
+    X(syRtcInit)         \
+    X(_builtin_set_imask) \
+    X(syFree)            \
+    X(InitSdcParameter)  \
+    X(Ps2_pad_actuater)  \
+    X(syMallocInit)      \
+    X(pdInitPeripheral)  \
+    X(njSetVertexBuffer) \
+    X(njPrintSize)       \
+    X(pdGetPeripheral)   \
+    X(Ps2SwapDBuff)      \
+    X(InitReadKeyEx)     \
+    X(SetRepeatKeyTimer) \
+    X(StopFxProgram)     \
+    X(sdSndStopAll)      \
+    X(sdSysFinish)       \
+    X(ADXT_Init)         \
+    X(ADXT_SetNumRetry)  \
+    X(cvFsSetDefDev)
