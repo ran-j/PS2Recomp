@@ -73,18 +73,23 @@ namespace ps2recomp
         return kKeywords.find(name) != kKeywords.end();
     }
 
-    static std::string sanitizeFunctionName(const std::string &name)
+    static std::string sanitizeFunctionName(const std::string& name)
     {
+        std::string sanitized = name;
+
+        std::replace(sanitized.begin(), sanitized.end(), '.', '_');
+
         // ugly but will do for now
-        if (name == "main")
+        if (sanitized == "main")
             return "ps2_main";
 
-        if (isReservedCxxKeyword(name))
-            return "ps2_" + name;
+        if (isReservedCxxKeyword(sanitized))
+            return "ps2_" + sanitized;
 
-        if (!isReservedCxxIdentifier(name))
-            return name;
-        return "ps2_" + name;
+        if (!isReservedCxxIdentifier(sanitized))
+            return sanitized;
+
+        return "ps2_" + sanitized;
     }
 
     std::string CodeGenerator::getGeneratedFunctionName(const Function &function)
