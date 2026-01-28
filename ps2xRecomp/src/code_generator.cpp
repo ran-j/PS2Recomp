@@ -10,7 +10,7 @@
 
 namespace ps2recomp
 {
-    static const std::unordered_set<std::string> kKeywords = {
+    const std::unordered_set<std::string> kKeywords = {
         "alignas", "alignof", "and", "and_eq", "asm", "auto", "bitand", "bitor", "bool",
         "break", "case", "catch", "char", "char8_t", "char16_t", "char32_t", "class",
         "compl", "concept", "const", "consteval", "constexpr", "constinit", "const_cast",
