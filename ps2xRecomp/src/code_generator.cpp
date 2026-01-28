@@ -28,8 +28,10 @@ namespace ps2recomp
 namespace ps2recomp
 {
     CodeGenerator::CodeGenerator(const std::vector<Symbol> &symbols)
-        : m_symbols(symbols)
     {
+      for (auto& symbol : symbols) {
+        m_symbols.emplace(symbol.address, symbol);
+      }
     }
 
     void CodeGenerator::setRenamedFunctions(const std::unordered_map<uint32_t, std::string> &renames)
@@ -2573,12 +2575,9 @@ namespace ps2recomp
 
     Symbol *CodeGenerator::findSymbolByAddress(uint32_t address)
     {
-        for (auto &symbol : m_symbols)
-        {
-            if (symbol.address == address)
-            {
-                return &symbol;
-            }
+        auto it = m_symbols.find(address);
+        if (it != m_symbols.end()) {
+          return &it->second;
         }
 
         return nullptr;

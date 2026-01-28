@@ -39,7 +39,7 @@ namespace ps2recomp
                                                                   const std::vector<Instruction> &instructions);
 
     public:
-        std::vector<Symbol> m_symbols;
+        std::unordered_map<uint32_t, Symbol> m_symbols;
         std::unordered_map<uint32_t, std::string> m_renamedFunctions;
         BootstrapInfo m_bootstrapInfo;
 
