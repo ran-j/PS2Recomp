@@ -30,3 +30,9 @@ jobs:
         run: |
           cmake -B build
           cmake --build build --config Release
+
+      - name: Tests
+        shell: cmd
+        continue-on-error: true # When tests start passing, this line should be removed.
+        run: |
+          .\build\ps2xTest\Release\ps2x_tests.exe
