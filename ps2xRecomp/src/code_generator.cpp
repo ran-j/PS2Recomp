@@ -55,7 +55,7 @@ namespace ps2recomp
         Symbol *sym = findSymbolByAddress(address);
         if (sym && sym->isFunction)
         {
-            return sym->name;
+            return CodeGenerator::sanitizeFunctionName(sym->name);
         }
 
         return "";
@@ -75,7 +75,7 @@ namespace ps2recomp
         return kKeywords.find(name) != kKeywords.end();
     }
 
-    static std::string sanitizeFunctionName(const std::string& name)
+    std::string CodeGenerator::sanitizeFunctionName(const std::string &name)
     {
         std::string sanitized = name;
 
@@ -99,7 +99,7 @@ namespace ps2recomp
         std::string name = getFunctionName(function.start);
         if (name.empty())
         {
-            name = sanitizeFunctionName(function.name);
+            name = CodeGenerator::sanitizeFunctionName(function.name);
         }
         return name;
     }
@@ -129,10 +129,13 @@ namespace ps2recomp
             std::string funcName = getFunctionName(target);
             if (!funcName.empty())
             {
-                ss << "    " << funcName << "(rdram, ctx, runtime);\n";
                 if (branchInst.opcode == OPCODE_J)
                 {
-                    ss << "    return;\n";
+                    ss << "    " << funcName << "(rdram, ctx, runtime); return;\n";
+                }
+                else
+                {
+                    ss << "    " << funcName << "(rdram, ctx, runtime);\n";
                 }
             }
             else

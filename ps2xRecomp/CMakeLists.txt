@@ -29,6 +29,28 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(fmt)
 
+FetchContent_Declare(
+    rabbitizer
+    GIT_REPOSITORY https://github.com/Decompollaborate/rabbitizer.git
+    GIT_TAG 1.x
+)
+FetchContent_MakeAvailable(rabbitizer)
+
+file(GLOB_RECURSE RABBITIZER_SOURCES CONFIGURE_DEPENDS
+    "${rabbitizer_SOURCE_DIR}/src/analysis/*.c"
+    "${rabbitizer_SOURCE_DIR}/src/common/*.c"
+    "${rabbitizer_SOURCE_DIR}/src/instructions/*.c"
+    "${rabbitizer_SOURCE_DIR}/src/instructions/*/*.c"
+)
+
+add_library(rabbitizer STATIC ${RABBITIZER_SOURCES})
+
+target_include_directories(rabbitizer PUBLIC
+    "${rabbitizer_SOURCE_DIR}/include"
+    "${rabbitizer_SOURCE_DIR}/tables"
+    "${rabbitizer_SOURCE_DIR}/tables/tables"
+)
+
 file(GLOB_RECURSE PS2RECOMP_SOURCES
     "src/*.cpp"
 )
@@ -60,11 +82,13 @@ target_include_directories(ps2_recomp PRIVATE
 target_link_libraries(ps2recomp PRIVATE
     fmt::fmt
     toml11::toml11
+    rabbitizer
 )
 
 target_link_libraries(ps2_recomp PUBLIC
     fmt::fmt
     toml11::toml11
+    rabbitizer
 )
 
 install(TARGETS ps2recomp ps2_recomp
