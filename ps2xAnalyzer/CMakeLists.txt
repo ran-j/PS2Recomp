@@ -17,7 +17,7 @@ target_include_directories(ps2_analyzer PRIVATE
  
 target_link_libraries(ps2_analyzer PRIVATE
     fmt::fmt
-    ps2_recomp
+    ps2_recomp_lib
 )
  
 install(TARGETS ps2_analyzer
