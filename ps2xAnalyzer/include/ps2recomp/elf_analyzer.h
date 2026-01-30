@@ -52,30 +52,30 @@ namespace ps2recomp
         void identifyPotentialPatches();
         void analyzeControlFlow();
         void detectJumpTables();
-        void analyzePerformanceCriticalPaths();
+        void analyzePerformanceCriticalPaths() const;
         void identifyRecursiveFunctions();
-        void analyzeRegisterUsage();
-        void analyzeFunctionSignatures();
+        void analyzeRegisterUsage() const;
+        void analyzeFunctionSignatures() const;
         void optimizePatches();
  
-        bool identifyMemcpyPattern(const Function &func);
-        bool identifyMemsetPattern(const Function &func);
-        bool identifyStringOperationPattern(const Function &func);
-        bool identifyMathPattern(const Function &func);
+        bool identifyMemcpyPattern(const Function &func) const;
+        bool identifyMemsetPattern(const Function &func) const;
+        bool identifyStringOperationPattern(const Function &func) const;
+        bool identifyMathPattern(const Function &func) const;
  
         bool isSystemFunction(const std::string &name) const;
         bool isLibraryFunction(const std::string &name) const;
-        std::vector<Instruction> decodeFunction(const Function &function);
-        CFG buildCFG(const Function &function);
+        std::vector<Instruction> decodeFunction(const Function &function) const;
+        CFG buildCFG(const Function &function) const;
         std::string formatAddress(uint32_t address) const;
         std::string escapeBackslashes(const std::string &path);
-        bool hasMMIInstructions(const Function &function);
-        bool hasVUInstructions(const Function &function);
+        bool hasMMIInstructions(const Function &function) const;
+        bool hasVUInstructions(const Function &function) const;
         bool identifyFunctionType(const Function &function);
         void categorizeFunction(Function &function);
         uint32_t getSuccessor(const Instruction &inst, uint32_t currentAddr);
-        bool isSelfModifyingCode(const Function &function);
-        bool isLoopHeavyFunction(const Function &function);
+        bool isSelfModifyingCode(const Function &function) const;
+        bool isLoopHeavyFunction(const Function &function) const;
     };
 }
 

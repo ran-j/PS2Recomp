@@ -21,8 +21,7 @@ namespace ps2recomp
                !(section->get_flags() & ELFIO::SHF_EXECINSTR);
     }
 
-    std::vector<Function> ElfParser::extractFunctions()
-    {
+    std::vector<Function> ElfParser::extractFunctions() const {
         std::vector<Function> functions;
 
         for (const auto &symbol : m_symbols)
@@ -92,8 +91,7 @@ namespace ps2recomp
         throw std::runtime_error("Invalid address for readWord: " + std::to_string(address));
     }
 
-    uint8_t *ElfParser::getSectionData(const std::string &sectionName)
-    {
+    uint8_t *ElfParser::getSectionData(const std::string &sectionName) const {
         for (const auto &section : m_sections)
         {
             if (section.name == sectionName)
@@ -105,8 +103,7 @@ namespace ps2recomp
         return nullptr;
     }
 
-    uint32_t ElfParser::getSectionAddress(const std::string &sectionName)
-    {
+    uint32_t ElfParser::getSectionAddress(const std::string &sectionName) const {
         for (const auto &section : m_sections)
         {
             if (section.name == sectionName)
@@ -118,8 +115,7 @@ namespace ps2recomp
         return 0;
     }
 
-    uint32_t ElfParser::getSectionSize(const std::string &sectionName)
-    {
+    uint32_t ElfParser::getSectionSize(const std::string &sectionName) const {
         for (const auto &section : m_sections)
         {
             if (section.name == sectionName)

@@ -779,8 +779,7 @@ namespace ps2recomp
         }
     }
 
-    void ElfAnalyzer::analyzePerformanceCriticalPaths()
-    {
+    void ElfAnalyzer::analyzePerformanceCriticalPaths() const {
         std::cout << "Analyzing performance-critical paths..." << std::endl;
 
         for (const auto &func : m_functions)
@@ -901,8 +900,7 @@ namespace ps2recomp
         }
     }
 
-    void ElfAnalyzer::analyzeRegisterUsage()
-    {
+    void ElfAnalyzer::analyzeRegisterUsage() const {
         std::cout << "Analyzing register usage patterns..." << std::endl;
 
         for (const auto &func : m_functions)
@@ -1000,8 +998,7 @@ namespace ps2recomp
         }
     }
 
-    void ElfAnalyzer::analyzeFunctionSignatures()
-    {
+    void ElfAnalyzer::analyzeFunctionSignatures() const {
         std::cout << "Analyzing function signatures..." << std::endl;
 
         for (const auto &func : m_functions)
@@ -1160,8 +1157,7 @@ namespace ps2recomp
         }
     }
 
-    bool ElfAnalyzer::identifyMemcpyPattern(const Function &func)
-    {
+    bool ElfAnalyzer::identifyMemcpyPattern(const Function &func) const {
         std::vector<Instruction> instructions = decodeFunction(func);
 
         bool hasLoop = false;
@@ -1206,8 +1202,7 @@ namespace ps2recomp
         return hasLoop && loadsData && storesData && incrementsPointers;
     }
 
-    bool ElfAnalyzer::identifyMemsetPattern(const Function &func)
-    {
+    bool ElfAnalyzer::identifyMemsetPattern(const Function &func) const {
         std::vector<Instruction> instructions = decodeFunction(func);
 
         bool hasLoop = false;
@@ -1251,8 +1246,7 @@ namespace ps2recomp
         return hasLoop && usesConstant && storesData && incrementsPointer;
     }
 
-    bool ElfAnalyzer::identifyStringOperationPattern(const Function &func)
-    {
+    bool ElfAnalyzer::identifyStringOperationPattern(const Function &func) const {
         std::vector<Instruction> instructions = decodeFunction(func);
 
         bool hasLoop = false;
@@ -1293,8 +1287,7 @@ namespace ps2recomp
         return hasLoop && checksZero && (loadsByte || storesByte);
     }
 
-    bool ElfAnalyzer::identifyMathPattern(const Function &func)
-    {
+    bool ElfAnalyzer::identifyMathPattern(const Function &func) const {
         std::vector<Instruction> instructions = decodeFunction(func);
 
         int mathOps = 0;
@@ -1324,8 +1317,7 @@ namespace ps2recomp
         return mathOps > instructions.size() * 0.3 || usesFPU;
     }
 
-    CFG ElfAnalyzer::buildCFG(const Function &function)
-    {
+    CFG ElfAnalyzer::buildCFG(const Function &function) const {
         CFG cfg;
         std::vector<Instruction> instructions = decodeFunction(function);
         std::map<uint32_t, size_t> addrToIndex;
@@ -1567,8 +1559,7 @@ namespace ps2recomp
         return false;
     }
 
-    std::vector<Instruction> ElfAnalyzer::decodeFunction(const Function &function)
-    {
+    std::vector<Instruction> ElfAnalyzer::decodeFunction(const Function &function) const {
         std::vector<Instruction> instructions;
 
         for (uint32_t addr = function.start; addr < function.end; addr += 4)
@@ -1602,8 +1593,7 @@ namespace ps2recomp
         return ss.str();
     }
 
-    bool ElfAnalyzer::hasMMIInstructions(const Function &function)
-    {
+    bool ElfAnalyzer::hasMMIInstructions(const Function &function) const {
         std::vector<Instruction> instructions = decodeFunction(function);
 
         for (const auto &inst : instructions)
@@ -1617,8 +1607,7 @@ namespace ps2recomp
         return false;
     }
 
-    bool ElfAnalyzer::hasVUInstructions(const Function &function)
-    {
+    bool ElfAnalyzer::hasVUInstructions(const Function &function) const {
         std::vector<Instruction> instructions = decodeFunction(function);
 
         for (const auto &inst : instructions)
@@ -1714,8 +1703,7 @@ namespace ps2recomp
         }
     }
 
-    bool ElfAnalyzer::isSelfModifyingCode(const Function &function)
-    {
+    bool ElfAnalyzer::isSelfModifyingCode(const Function &function) const {
         std::vector<Instruction> instructions = decodeFunction(function);
 
         for (size_t i = 0; i < instructions.size(); i++)
@@ -1760,8 +1748,7 @@ namespace ps2recomp
         return false;
     }
 
-    bool ElfAnalyzer::isLoopHeavyFunction(const Function &function)
-    {
+    bool ElfAnalyzer::isLoopHeavyFunction(const Function &function) const {
         std::vector<Instruction> instructions = decodeFunction(function);
         int loopCount = 0;
 

@@ -14,8 +14,7 @@ namespace ps2recomp
 
     ConfigManager::~ConfigManager() = default;
 
-    RecompilerConfig ConfigManager::loadConfig()
-    {
+    RecompilerConfig ConfigManager::loadConfig() const {
         RecompilerConfig config;
 
         try
@@ -58,8 +57,7 @@ namespace ps2recomp
         return config;
     }
 
-    void ConfigManager::saveConfig(const RecompilerConfig &config)
-    {
+    void ConfigManager::saveConfig(const RecompilerConfig &config) const {
         toml::value data;
 
         toml::table general;
