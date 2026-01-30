@@ -10,7 +10,7 @@ include(FetchContent)
 FetchContent_Declare(
     elfio
     GIT_REPOSITORY https://github.com/serge1/ELFIO.git
-    GIT_TAG main
+    GIT_TAG 7d30a22fc5aac06adfe7887ae57f3701b6b5f913
     GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(elfio)
@@ -25,7 +25,7 @@ FetchContent_MakeAvailable(toml11)
 FetchContent_Declare(
     fmt
     GIT_REPOSITORY https://github.com/fmtlib/fmt.git
-    GIT_TAG master
+    GIT_TAG 12.1.0
 )
 FetchContent_MakeAvailable(fmt)
 
