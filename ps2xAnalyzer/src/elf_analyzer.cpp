@@ -61,8 +61,8 @@ namespace ps2recomp
 
         for (auto &func : m_functions)
         {
-            if (m_skipFunctions.find(func.name) == m_skipFunctions.end() &&
-                m_libFunctions.find(func.name) == m_libFunctions.end())
+            if (!m_skipFunctions.contains(func.name) &&
+                !m_libFunctions.contains(func.name))
             {
                 categorizeFunction(func);
                 func.instructions = decodeFunction(func);
@@ -317,8 +317,8 @@ namespace ps2recomp
 
         for (const auto &func : m_functions)
         {
-            if (m_skipFunctions.find(func.name) != m_skipFunctions.end() ||
-                m_libFunctions.find(func.name) != m_libFunctions.end())
+            if (m_skipFunctions.contains(func.name) ||
+                m_libFunctions.contains(func.name))
             {
                 continue;
             }
@@ -460,8 +460,8 @@ namespace ps2recomp
 
         for (const auto &func : m_functions)
         {
-            if (m_skipFunctions.find(func.name) != m_skipFunctions.end() ||
-                m_libFunctions.find(func.name) != m_libFunctions.end())
+            if (m_skipFunctions.contains(func.name) ||
+                m_libFunctions.contains(func.name))
             {
                 continue;
             }
@@ -498,7 +498,7 @@ namespace ps2recomp
 
         for (const auto &func : m_functions)
         {
-            if (m_skipFunctions.find(func.name) != m_skipFunctions.end())
+            if (m_skipFunctions.contains(func.name))
             {
                 continue;
             }
@@ -605,7 +605,7 @@ namespace ps2recomp
 
         for (const auto &func : m_functions)
         {
-            if (m_skipFunctions.find(func.name) != m_skipFunctions.end())
+            if (m_skipFunctions.contains(func.name))
             {
                 continue;
             }
@@ -632,8 +632,8 @@ namespace ps2recomp
 
         for (const auto &func : m_functions)
         {
-            if (m_skipFunctions.find(func.name) != m_skipFunctions.end() ||
-                m_libFunctions.find(func.name) != m_libFunctions.end())
+            if (m_skipFunctions.contains(func.name) ||
+                m_libFunctions.contains(func.name))
             {
                 continue;
             }
@@ -687,8 +687,8 @@ namespace ps2recomp
 
         for (const auto &func : m_functions)
         {
-            if (m_skipFunctions.find(func.name) != m_skipFunctions.end() ||
-                m_libFunctions.find(func.name) != m_libFunctions.end())
+            if (m_skipFunctions.contains(func.name) ||
+                m_libFunctions.contains(func.name))
             {
                 continue;
             }
@@ -785,8 +785,8 @@ namespace ps2recomp
 
         for (const auto &func : m_functions)
         {
-            if (m_skipFunctions.find(func.name) != m_skipFunctions.end() ||
-                m_libFunctions.find(func.name) != m_libFunctions.end())
+            if (m_skipFunctions.contains(func.name) ||
+                m_libFunctions.contains(func.name))
             {
                 continue;
             }
@@ -845,7 +845,7 @@ namespace ps2recomp
 
         for (const auto &func : m_functions)
         {
-            if (m_functionCalls.find(func.start) != m_functionCalls.end())
+            if (m_functionCalls.contains(func.start))
             {
                 for (const auto &call : m_functionCalls[func.start])
                 {
@@ -856,7 +856,7 @@ namespace ps2recomp
 
         for (const auto &func : m_functions)
         {
-            if (callGraph[func.name].find(func.name) != callGraph[func.name].end())
+            if (callGraph[func.name].contains(func.name))
             {
                 std::cout << "Function " << func.name << " is directly recursive" << std::endl;
             }
@@ -864,8 +864,8 @@ namespace ps2recomp
 
         for (const auto &func : m_functions)
         {
-            if (m_skipFunctions.find(func.name) != m_skipFunctions.end() ||
-                m_libFunctions.find(func.name) != m_libFunctions.end())
+            if (m_skipFunctions.contains(func.name) ||
+                m_libFunctions.contains(func.name))
             {
                 continue;
             }
@@ -875,7 +875,7 @@ namespace ps2recomp
 
             detectCycle = [&](const std::string &currFunc) -> bool
             {
-                if (visited.find(currFunc) != visited.end())
+                if (visited.contains(currFunc))
                 {
                     return currFunc == func.name;
                 }
@@ -907,8 +907,8 @@ namespace ps2recomp
 
         for (const auto &func : m_functions)
         {
-            if (m_skipFunctions.find(func.name) != m_skipFunctions.end() ||
-                m_libFunctions.find(func.name) != m_libFunctions.end())
+            if (m_skipFunctions.contains(func.name) ||
+                m_libFunctions.contains(func.name))
             {
                 continue;
             }
@@ -953,7 +953,7 @@ namespace ps2recomp
             bool savesFP = false;
             bool savesRA = false;
 
-            for (size_t i = 0; i < std::min(size_t(10), instructions.size()); i++)
+            for (size_t i = 0; i < std::min(static_cast<size_t>(10), instructions.size()); i++)
             {
                 const auto &inst = instructions[i];
 
@@ -987,13 +987,13 @@ namespace ps2recomp
                     std::cout << "  - Saves return address ($ra)" << std::endl;
             }
 
-            if (regsRead.find(4) != regsRead.end() || regsRead.find(5) != regsRead.end() ||
-                regsRead.find(6) != regsRead.end() || regsRead.find(7) != regsRead.end())
+            if (regsRead.contains(4) || regsRead.contains(5) ||
+                regsRead.contains(6) || regsRead.contains(7))
             {
                 std::cout << "  - Uses argument registers (a0-a3)" << std::endl;
             }
 
-            if (regsWritten.find(2) != regsWritten.end() || regsWritten.find(3) != regsWritten.end())
+            if (regsWritten.contains(2) || regsWritten.contains(3))
             {
                 std::cout << "  - Sets return values (v0-v1)" << std::endl;
             }
@@ -1006,8 +1006,8 @@ namespace ps2recomp
 
         for (const auto &func : m_functions)
         {
-            if (m_skipFunctions.find(func.name) != m_skipFunctions.end() ||
-                m_libFunctions.find(func.name) != m_libFunctions.end())
+            if (m_skipFunctions.contains(func.name) ||
+                m_libFunctions.contains(func.name))
             {
                 continue;
             }
@@ -1371,7 +1371,7 @@ namespace ps2recomp
         {
             const auto &inst = instructions[i];
 
-            if (leaders.find(inst.address) != leaders.end())
+            if (leaders.contains(inst.address))
             {
                 if (currentLeader != 0)
                 {
@@ -1404,7 +1404,7 @@ namespace ps2recomp
                 int32_t offset = static_cast<int16_t>(lastInst.immediate) << 2;
                 uint32_t targetAddr = lastInst.address + 4 + offset;
 
-                if (cfg.find(targetAddr) != cfg.end())
+                if (cfg.contains(targetAddr))
                 {
                     node.successors.push_back(targetAddr);
                     cfg[targetAddr].predecessors.push_back(addr);
@@ -1443,7 +1443,7 @@ namespace ps2recomp
 
                     // Only add successor if it's within this function
                     if (targetAddr >= function.start && targetAddr < function.end &&
-                        cfg.find(targetAddr) != cfg.end())
+                        cfg.contains(targetAddr))
                     {
                         node.successors.push_back(targetAddr);
                         cfg[targetAddr].predecessors.push_back(addr);
@@ -1527,7 +1527,7 @@ namespace ps2recomp
             "topThread",
             "cmd_sem_init"};
 
-        return kDoNotSkipOrStub.find(name) != kDoNotSkipOrStub.end();
+        return kDoNotSkipOrStub.contains(name);
     }
 
     bool ElfAnalyzer::isSystemFunction(const std::string &name) const
@@ -1543,7 +1543,7 @@ namespace ps2recomp
             "_ftext", "__bss_start", "__bss_start__",
             "__bss_end__", "__end__", "_stack", "_dso_handle"};
 
-        return systemFuncs.find(name) != systemFuncs.end() ||
+        return systemFuncs.contains(name) ||
                name.find("__") == 0 ||
                name.find("_Z") == 0 || // C++ mangled names
                name.find(".") == 0;    // .text.* or .plt.* symbols
@@ -1634,8 +1634,8 @@ namespace ps2recomp
 
     bool ElfAnalyzer::identifyFunctionType(const Function &function)
     {
-        if (m_libFunctions.find(function.name) != m_libFunctions.end() ||
-            m_skipFunctions.find(function.name) != m_skipFunctions.end())
+        if (m_libFunctions.contains(function.name) ||
+        	m_skipFunctions.contains(function.name))
         {
             return false;
         }

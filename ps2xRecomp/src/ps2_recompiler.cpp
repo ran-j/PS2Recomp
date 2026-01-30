@@ -558,7 +558,7 @@ namespace ps2recomp
                     continue;
                 }
 
-                if (existingStarts.find(target) != existingStarts.end())
+                if (existingStarts.contains(target))
                 {
                     continue;
                 }
@@ -660,12 +660,12 @@ namespace ps2recomp
 
     bool PS2Recompiler::shouldSkipFunction(const std::string &name) const
     {
-        return m_skipFunctions.find(name) != m_skipFunctions.end();
+        return m_skipFunctions.contains(name);
     }
 
     bool PS2Recompiler::isStubFunction(const std::string &name) const
     {
-        if (m_stubFunctions.find(name) != m_stubFunctions.end())
+        if (m_stubFunctions.contains(name))
         {
             return true;
         }
@@ -724,7 +724,7 @@ namespace ps2recomp
             return "ps2_main";
         }
 
-        if (ps2recomp::kKeywords.find(sanitized) != ps2recomp::kKeywords.end())
+        if (ps2recomp::kKeywords.contains(sanitized))
         {
             return "ps2_" + sanitized;
         }
