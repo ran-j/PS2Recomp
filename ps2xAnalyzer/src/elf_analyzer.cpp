@@ -133,18 +133,17 @@ namespace ps2recomp
             file << "# Jump tables detected in the program\n";
             file << "[jump_tables]\n";
 
-            for (size_t i = 0; i < m_jumpTables.size(); ++i)
+            for (const auto & jt : m_jumpTables)
             {
-                const auto &jt = m_jumpTables[i];
                 file << "[[jump_tables.table]]\n";
                 file << "address = \"0x" << std::hex << jt.address << "\"\n"
                      << std::dec;
                 file << "entries = [\n";
 
-                for (const auto &entry : jt.entries)
+                for (const auto & [index, target] : jt.entries)
                 {
-                    file << "  { index = " << entry.index << ", target = \"0x"
-                         << std::hex << entry.target << "\" },\n"
+                    file << "  { index = " << index << ", target = \"0x"
+                         << std::hex << target << "\" },\n"
                          << std::dec;
                 }
 
@@ -792,11 +791,9 @@ namespace ps2recomp
 
             std::vector<Instruction> instructions = decodeFunction(func);
 
-            for (size_t i = 0; i < instructions.size(); i++)
+            for (const auto& inst : instructions)
             {
-                const auto &inst = instructions[i];
-
-                if (inst.isBranch)
+            	if (inst.isBranch)
                 {
                     int32_t offset = static_cast<int16_t>(inst.immediate) << 2;
                     uint32_t targetAddr = inst.address + 4 + offset;
@@ -813,11 +810,11 @@ namespace ps2recomp
                                       << " (size: " << loopSize << " instructions)" << std::endl;
 
                             bool hasMultimedia = false;
-                            for (size_t j = 0; j < instructions.size(); j++)
+                            for (const auto& instruction : instructions)
                             {
-                                if (instructions[j].address >= targetAddr && instructions[j].address <= inst.address)
+                                if (instruction.address >= targetAddr && instruction.address <= inst.address)
                                 {
-                                    if (instructions[j].isMultimedia)
+                                    if (instruction.isMultimedia)
                                     {
                                         hasMultimedia = true;
                                         break;
@@ -1165,10 +1162,8 @@ namespace ps2recomp
         bool storesData = false;
         bool incrementsPointers = false;
 
-        for (size_t i = 0; i < instructions.size(); i++)
+        for (const auto & inst : instructions)
         {
-            const auto &inst = instructions[i];
-
             if (inst.isBranch)
             {
                 int32_t offset = static_cast<int16_t>(inst.immediate) << 2;
@@ -1210,10 +1205,8 @@ namespace ps2recomp
         bool storesData = false;
         bool incrementsPointer = false;
 
-        for (size_t i = 0; i < instructions.size(); i++)
+        for (const auto & inst : instructions)
         {
-            const auto &inst = instructions[i];
-
             if (inst.isBranch)
             {
                 int32_t offset = static_cast<int16_t>(inst.immediate) << 2;
@@ -1254,10 +1247,8 @@ namespace ps2recomp
         bool loadsByte = false;
         bool storesByte = false;
 
-        for (size_t i = 0; i < instructions.size(); i++)
+        for (const auto & inst : instructions)
         {
-            const auto &inst = instructions[i];
-
             if (inst.isBranch)
             {
                 int32_t offset = static_cast<int16_t>(inst.immediate) << 2;
@@ -1752,10 +1743,8 @@ namespace ps2recomp
         std::vector<Instruction> instructions = decodeFunction(function);
         int loopCount = 0;
 
-        for (size_t i = 0; i < instructions.size(); i++)
+        for (const auto & inst : instructions)
         {
-            const auto &inst = instructions[i];
-
             if (inst.isBranch)
             {
                 int32_t offset = static_cast<int16_t>(inst.immediate) << 2;
