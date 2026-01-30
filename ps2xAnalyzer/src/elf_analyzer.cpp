@@ -953,7 +953,7 @@ namespace ps2recomp
             bool savesFP = false;
             bool savesRA = false;
 
-            for (size_t i = 0; i < std::min(size_t(10), instructions.size()); i++)
+            for (size_t i = 0; i < std::min(static_cast<size_t>(10), instructions.size()); i++)
             {
                 const auto &inst = instructions[i];
 

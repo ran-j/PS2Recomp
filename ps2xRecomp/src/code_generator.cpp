@@ -147,14 +147,14 @@ namespace ps2recomp
             uint8_t link_reg = (branchInst.function == SPECIAL_JALR) ? ((rd_reg == 0) ? 31 : rd_reg) : 0;
             if (link_reg != 0)
             {
-                ss << "    SET_GPR_U32(ctx, " << (int)link_reg << ", 0x" << std::hex << (branchInst.address + 8) << ");\n"
+                ss << "    SET_GPR_U32(ctx, " << static_cast<int>(link_reg) << ", 0x" << std::hex << (branchInst.address + 8) << ");\n"
                    << std::dec;
             }
             if (hasValidDelaySlot)
             {
                 ss << "    " << delaySlotCode << "\n";
             }
-            ss << "    ctx->pc = GPR_U32(ctx, " << (int)rs_reg << "); return;\n";
+            ss << "    ctx->pc = GPR_U32(ctx, " << static_cast<int>(rs_reg) << "); return;\n";
         }
         else if (branchInst.isBranch)
         {
@@ -2234,7 +2234,7 @@ namespace ps2recomp
         // VCALLMS calls a VU0 microprogram at the specified immediate address.
         // VU0 micro memory is 4KB = 512 instructions (8 bytes each). Index is 0-511.
         uint16_t instr_index = inst.immediate & 0x1FF;          // Mask to 9 bits for VU0
-        uint32_t target_byte_addr = (uint32_t)instr_index << 3; // Convert instruction index to byte address
+        uint32_t target_byte_addr = static_cast<uint32_t>(instr_index) << 3; // Convert instruction index to byte address
 
         return fmt::format(
             "{{ "
