@@ -8,7 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_executable(ps2x_tests
     src/main.cpp
     src/code_generator_tests.cpp
-    src/r5900_decoder_tests.cpp
+    src/decoder_tests.cpp
 )
 
 target_include_directories(ps2x_tests PRIVATE

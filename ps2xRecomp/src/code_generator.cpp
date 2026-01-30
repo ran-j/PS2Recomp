@@ -29,9 +29,10 @@ namespace ps2recomp
 {
     CodeGenerator::CodeGenerator(const std::vector<Symbol> &symbols)
     {
-      for (auto& symbol : symbols) {
-        m_symbols.emplace(symbol.address, symbol);
-      }
+        for (auto &symbol : symbols)
+        {
+            m_symbols.emplace(symbol.address, symbol);
+        }
     }
 
     void CodeGenerator::setRenamedFunctions(const std::unordered_map<uint32_t, std::string> &renames)
@@ -125,7 +126,7 @@ namespace ps2recomp
             {
                 ss << "    " << delaySlotCode << "\n";
             }
-            uint32_t target = (branchInst.address & 0xF0000000) | (branchInst.target << 2);
+            uint32_t target = branchInst.target;
             std::string funcName = getFunctionName(target);
             if (!funcName.empty())
             {
@@ -604,7 +605,7 @@ namespace ps2recomp
             }
             else if (isStaticJump)
             {
-                uint32_t target = (inst.address & 0xF0000000) | (inst.target << 2);
+                uint32_t target = inst.target;
                 if (target >= function.start && target < function.end)
                 {
                     std::string funcName = getFunctionName(target);
@@ -647,7 +648,7 @@ namespace ps2recomp
         {
             std::string sanitizedName = sanitizeFunctionName(function.name);
             ss << "// System call wrapper for " << function.name << "\n";
-            ss << "void " << sanitizedName << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime) {\n";
+            ss << "void " << sanitizedName << "(uint8_t* rdram, Ps2CpuContext* ctx, PS2Runtime *runtime) {\n";
             ss << "    ps2_syscalls::" << function.name << "(rdram, ctx, runtime);\n";
             ss << "}\n";
             return ss.str();
@@ -666,7 +667,7 @@ namespace ps2recomp
         ss << "// Function: " << function.name << "\n";
         ss << "// Address: 0x" << std::hex << function.start << " - 0x" << function.end << std::dec << "\n";
         std::string sanitizedName = getGeneratedFunctionName(function);
-        ss << "void " << sanitizedName << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime) {\n\n";
+        ss << "void " << sanitizedName << "(uint8_t* rdram, Ps2CpuContext* ctx, PS2Runtime *runtime) {\n\n";
 
         for (size_t i = 0; i < instructions.size(); ++i)
         {
@@ -813,9 +814,9 @@ namespace ps2recomp
                 "SET_GPR_S64(ctx, {}, (int64_t)GPR_S64(ctx, {}) + (int64_t){});",
                 inst.rt, inst.rs, inst.simmediate);
         case OPCODE_J:
-            return fmt::format("// JAL 0x{:X} - Handled by branch logic", (inst.address & 0xF0000000) | (inst.target << 2));
+            return fmt::format("// JAL 0x{:X} - Handled by branch logic", inst.target);
         case OPCODE_JAL:
-            return fmt::format("// JAL 0x{:X} - Handled by branch logic", (inst.address & 0xF0000000) | (inst.target << 2));
+            return fmt::format("// JAL 0x{:X} - Handled by branch logic", inst.target);
         case OPCODE_BEQ:
         case OPCODE_BNE:
         case OPCODE_BLEZ:
@@ -2579,8 +2580,9 @@ namespace ps2recomp
     Symbol *CodeGenerator::findSymbolByAddress(uint32_t address)
     {
         auto it = m_symbols.find(address);
-        if (it != m_symbols.end()) {
-          return &it->second;
+        if (it != m_symbols.end())
+        {
+            return &it->second;
         }
 
         return nullptr;
@@ -2594,7 +2596,7 @@ namespace ps2recomp
         std::stringstream ss;
         ss << "// Auto-generated bootstrap for ELF entry point\n";
         ss << "void entry_" << std::hex << m_bootstrapInfo.entry << std::dec
-           << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime) {\n";
+           << "(uint8_t* rdram, Ps2CpuContext* ctx, PS2Runtime *runtime) {\n";
         if (m_bootstrapInfo.bssEnd > m_bootstrapInfo.bssStart)
         {
             ss << "    const uint32_t bss_start = 0x" << std::hex << m_bootstrapInfo.bssStart << ";\n";

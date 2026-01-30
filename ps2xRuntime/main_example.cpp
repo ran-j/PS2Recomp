@@ -5,7 +5,7 @@
 // Example of how to use the PS2 runtime with recompiled code
 
 // Stub implementation for PS2 syscalls
-void syscall(uint8_t *rdram, R5900Context *ctx)
+void syscall(uint8_t *rdram, Ps2CpuContext *ctx)
 {
     uint32_t syscallNum = ctx->r[4].m128i_u32[0];
     std::cout << "Syscall " << syscallNum << " called" << std::endl;
@@ -43,14 +43,14 @@ void syscall(uint8_t *rdram, R5900Context *ctx)
 }
 
 // Example implementation of FlushCache
-void FlushCache(uint8_t *rdram, R5900Context *ctx)
+void FlushCache(uint8_t *rdram, Ps2CpuContext *ctx)
 {
     uint32_t cacheType = ctx->r[4].m128i_u32[0];
     std::cout << "FlushCache called with type: " << cacheType << std::endl;
 }
 
 // Example implementation of a recompiled function
-void recompiled_main(uint8_t *rdram, R5900Context *ctx)
+void recompiled_main(uint8_t *rdram, Ps2CpuContext *ctx)
 {
     std::cout << "Running recompiled main function" << std::endl;
 

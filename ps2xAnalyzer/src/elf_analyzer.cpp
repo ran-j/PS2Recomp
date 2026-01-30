@@ -192,7 +192,7 @@ namespace ps2recomp
         const std::vector<std::string> stdLibFuncs = {
             // I/O functions
             "printf", "sprintf", "snprintf", "fprintf", "vprintf", "vfprintf", "vsprintf", "vsnprintf",
-            "puts", "putchar", "getchar", "gets", "fgets", "fputs", "scanf", "fscanf", "sscanf", 
+            "puts", "putchar", "getchar", "gets", "fgets", "fputs", "scanf", "fscanf", "sscanf",
             "sprint", "sbprintf",
 
             // Memory management
