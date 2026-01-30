@@ -75,11 +75,11 @@ namespace ps2recomp
 
         toml::table patches;
         toml::array instPatches;
-        for (const auto &patch : config.patches)
+        for (const auto & [addr, value] : config.patches)
         {
             toml::table p;
-            p["address"] = "0x" + std::to_string(patch.first);
-            p["value"] = patch.second;
+            p["address"] = "0x" + std::to_string(addr);
+            p["value"] = value;
             instPatches.push_back(p);
         }
         patches["instructions"] = instPatches;

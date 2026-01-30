@@ -1665,11 +1665,12 @@ namespace ps2recomp
             std::cout << "Skipping function " << function.name << " due to hardware I/O" << std::endl;
             return true;
         }
-        else if (hasComplexMMI && isVeryLarge)
+
+    	if (hasComplexMMI && isVeryLarge)
         {
-            m_skipFunctions.insert(function.name);
-            std::cout << "Skipping large function " << function.name << " with complex MMI" << std::endl;
-            return true;
+	        m_skipFunctions.insert(function.name);
+	        std::cout << "Skipping large function " << function.name << " with complex MMI" << std::endl;
+	        return true;
         }
 
         return false;
@@ -1766,9 +1767,10 @@ namespace ps2recomp
             int32_t offset = static_cast<int16_t>(inst.immediate) << 2;
             return currentAddr + 4 + offset;
         }
-        else if (inst.opcode == OPCODE_J || inst.opcode == OPCODE_JAL)
+
+    	if (inst.opcode == OPCODE_J || inst.opcode == OPCODE_JAL)
         {
-            return (currentAddr & 0xF0000000) | (inst.target << 2);
+	        return (currentAddr & 0xF0000000) | (inst.target << 2);
         }
 
         return currentAddr + 4;
