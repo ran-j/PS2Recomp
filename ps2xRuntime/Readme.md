@@ -15,7 +15,7 @@ You can add custom implementations for PS2 system calls or game functions by:
 
 1. Creating function implementations that match the signature:
 ```cpp
-void function_name(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime);
+void function_name(uint8_t* rdram, Ps2CpuContext* ctx, PS2Runtime *runtime);
 ```
 
 2. Registering them with the runtime:

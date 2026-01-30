@@ -2,8 +2,8 @@
 #define PS2RECOMP_ELF_ANALYZER_H
 
 #include "ps2recomp/elf_parser.h"
-#include "ps2recomp/r5900_decoder.h"
 #include "ps2recomp/types.h"
+#include "ps2recomp/instructions.h"
 #include <string>
 #include <vector>
 #include <unordered_set>
@@ -26,25 +26,24 @@ namespace ps2recomp
     private:
         std::string m_elfPath;
         std::unique_ptr<ElfParser> m_elfParser;
-        std::unique_ptr<R5900Decoder> m_decoder;
 
         std::vector<Function> m_functions;
         std::vector<Symbol> m_symbols;
         std::vector<Section> m_sections;
         std::vector<Relocation> m_relocations;
- 
+
         std::unordered_set<std::string> m_libFunctions;
         std::unordered_set<std::string> m_skipFunctions;
         std::unordered_map<std::string, std::set<std::string>> m_functionDataUsage;
         std::unordered_map<uint32_t, std::string> m_commonDataAccess;
- 
+
         std::map<uint32_t, uint32_t> m_patches;
         std::map<uint32_t, std::string> m_patchReasons;
- 
+
         std::unordered_map<uint32_t, CFG> m_functionCFGs;
         std::vector<JumpTable> m_jumpTables;
         std::unordered_map<uint32_t, std::vector<FunctionCall>> m_functionCalls;
- 
+
         void initializeLibraryFunctions();
         void analyzeEntryPoint();
         void analyzeLibraryFunctions();
@@ -57,12 +56,12 @@ namespace ps2recomp
         void analyzeRegisterUsage();
         void analyzeFunctionSignatures();
         void optimizePatches();
- 
+
         bool identifyMemcpyPattern(const Function &func);
         bool identifyMemsetPattern(const Function &func);
         bool identifyStringOperationPattern(const Function &func);
         bool identifyMathPattern(const Function &func);
- 
+
         bool isSystemFunction(const std::string &name) const;
         bool isLibraryFunction(const std::string &name) const;
         std::vector<Instruction> decodeFunction(const Function &function);

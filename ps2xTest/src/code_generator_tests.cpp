@@ -122,7 +122,7 @@ void register_code_generator_tests()
         Instruction j{};
         j.address = 0x4000;
         j.opcode = OPCODE_J;
-        j.target = (targetSym.address >> 2) & 0x3FFFFFF;
+        j.target = targetSym.address; // absolute target address
         j.hasDelaySlot = true;
         j.raw = 0x08000000 | (j.target & 0x3FFFFFF);
 
@@ -203,7 +203,7 @@ void register_code_generator_tests()
             Instruction j{};
             j.address = 0x8000;
             j.opcode = OPCODE_J;
-            j.target = (targetSym.address >> 2) & 0x3FFFFFF;
+            j.target = targetSym.address; // absolute target address
             j.hasDelaySlot = true;
             j.raw = (OPCODE_J << 26) | (j.target & 0x3FFFFFF);
             Instruction delay = makeNop(0x8004);

@@ -30,7 +30,7 @@ instructions = [
 function = "printf"
 code = '''
 // Custom printf implementation
-void printf(uint8_t* rdram, R5900Context* ctx) {
+void printf(uint8_t* rdram, Ps2CpuContext* ctx) {
     // Implementation here
 }
 '''
@@ -40,7 +40,7 @@ void printf(uint8_t* rdram, R5900Context* ctx) {
 address = "0x100000"
 code = '''
 // Custom implementation for function at 0x100000
-void func_00100000(uint8_t* rdram, R5900Context* ctx) {
+void func_00100000(uint8_t* rdram, Ps2CpuContext* ctx) {
     // Implementation here
 }
 '''

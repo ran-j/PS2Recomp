@@ -1,5 +1,6 @@
 #include "ps2recomp/ps2_recompiler.h"
 #include "ps2recomp/instructions.h"
+#include "ps2recomp/decoder.h"
 #include "ps2_runtime_calls.h"
 #include <iostream>
 #include <fstream>
@@ -135,7 +136,6 @@ namespace ps2recomp
                       << m_sections.size() << " sections, "
                       << m_relocations.size() << " relocations." << std::endl;
 
-            m_decoder = std::make_unique<R5900Decoder>();
             m_codeGenerator = std::make_unique<CodeGenerator>(m_symbols);
             m_codeGenerator->setBootstrapInfo(m_bootstrapInfo);
 
@@ -258,7 +258,7 @@ namespace ps2recomp
                     std::string generatedName = m_codeGenerator->getGeneratedFunctionName(function);
                     std::stringstream stub;
                     stub << "void " << generatedName
-                         << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime) { ";
+                         << "(uint8_t* rdram, Ps2CpuContext* ctx, PS2Runtime *runtime) { ";
 
                     switch (resolveStubTarget(function.name))
                     {
@@ -418,7 +418,7 @@ namespace ps2recomp
 
             for (const auto &funcName : stubNames)
             {
-                ss << "void " << funcName << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime);\n";
+                ss << "void " << funcName << "(uint8_t* rdram, Ps2CpuContext* ctx, PS2Runtime* runtime);\n";
             }
 
             // ss << "\n} // namespace stubs\n";
@@ -447,7 +447,7 @@ namespace ps2recomp
             ss << "#define PS2_RECOMPILED_FUNCTIONS_H\n\n";
 
             ss << "#include <cstdint>\n\n";
-            ss << "struct R5900Context;\n";
+            ss << "struct Ps2CpuContext;\n";
             ss << "class PS2Runtime;\n\n";
 
             for (const auto &function : m_functions)
@@ -460,13 +460,13 @@ namespace ps2recomp
                 std::string finalName = sanitizeFunctionName(function.name);
                 finalName = m_codeGenerator->getGeneratedFunctionName(function);
 
-                ss << "void " << finalName << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime);\n";
+                ss << "void " << finalName << "(uint8_t* rdram, Ps2CpuContext* ctx, PS2Runtime *runtime);\n";
             }
 
             if (m_bootstrapInfo.valid)
             {
                 ss << "void entry_" << std::hex << m_bootstrapInfo.entry << std::dec
-                   << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime);\n";
+                   << "(uint8_t* rdram, Ps2CpuContext* ctx, PS2Runtime *runtime);\n";
             }
 
             ss << "\n#endif // PS2_RECOMPILED_FUNCTIONS_H\n";
@@ -496,7 +496,7 @@ namespace ps2recomp
         {
             if (inst.opcode == OPCODE_J || inst.opcode == OPCODE_JAL)
             {
-                return (inst.address & 0xF0000000) | (inst.target << 2);
+                return inst.target;
             }
 
             if (inst.opcode == OPCODE_SPECIAL &&
@@ -641,7 +641,7 @@ namespace ps2recomp
                     std::cout << "Applied patch at 0x" << std::hex << address << std::dec << std::endl;
                 }
 
-                Instruction inst = m_decoder->decodeInstruction(address, rawInstruction);
+                Instruction inst = decodeInstruction(address, rawInstruction);
 
                 instructions.push_back(inst);
             }

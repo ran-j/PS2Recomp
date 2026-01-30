@@ -165,7 +165,6 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt)
     UpdateTexture(tex, scratch.data());
 }
 
-
 PS2Runtime::PS2Runtime()
 {
     std::memset(&m_cpuContext, 0, sizeof(m_cpuContext));
@@ -305,7 +304,7 @@ PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
 
     std::cerr << "Warning: Function at address 0x" << std::hex << address << std::dec << " not found" << std::endl;
 
-    static RecompiledFunction defaultFunction = [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    static RecompiledFunction defaultFunction = [](uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         std::cerr << "Error: Called unimplemented function at address 0x" << std::hex << ctx->pc << std::dec << std::endl;
     };
@@ -313,7 +312,7 @@ PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
     return defaultFunction;
 }
 
-void PS2Runtime::SignalException(R5900Context *ctx, PS2Exception exception)
+void PS2Runtime::SignalException(Ps2CpuContext *ctx, PS2Exception exception)
 {
     if (exception == EXCEPTION_INTEGER_OVERFLOW)
     {
@@ -322,8 +321,7 @@ void PS2Runtime::SignalException(R5900Context *ctx, PS2Exception exception)
     }
 }
 
-
-void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint32_t address)
+void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, Ps2CpuContext *ctx, uint32_t address)
 {
     static std::unordered_map<uint32_t, int> seen;
     int &count = seen[address];
@@ -346,54 +344,54 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
     // TODO: Implement a real interpreter. For now, no register mutations beyond defaults.
 }
 
-void PS2Runtime::vu0StartMicroProgram(uint8_t *rdram, R5900Context *ctx, uint32_t address)
+void PS2Runtime::vu0StartMicroProgram(uint8_t *rdram, Ps2CpuContext *ctx, uint32_t address)
 {
     // VCALLMS/VCALLMSR paths both end up here; reuse the same minimal stub.
     executeVU0Microprogram(rdram, ctx, address);
 }
 
-void PS2Runtime::handleSyscall(uint8_t *rdram, R5900Context *ctx)
+void PS2Runtime::handleSyscall(uint8_t *rdram, Ps2CpuContext *ctx)
 {
     std::cout << "Syscall encountered at PC: 0x" << std::hex << ctx->pc << std::dec << std::endl;
 }
 
-void PS2Runtime::handleBreak(uint8_t *rdram, R5900Context *ctx)
+void PS2Runtime::handleBreak(uint8_t *rdram, Ps2CpuContext *ctx)
 {
     std::cout << "Break encountered at PC: 0x" << std::hex << ctx->pc << std::dec << std::endl;
 }
 
-void PS2Runtime::handleTrap(uint8_t *rdram, R5900Context *ctx)
+void PS2Runtime::handleTrap(uint8_t *rdram, Ps2CpuContext *ctx)
 {
     std::cout << "Trap encountered at PC: 0x" << std::hex << ctx->pc << std::dec << std::endl;
 }
 
-void PS2Runtime::handleTLBR(uint8_t *rdram, R5900Context *ctx)
+void PS2Runtime::handleTLBR(uint8_t *rdram, Ps2CpuContext *ctx)
 {
     std::cout << "TLBR (TLB Read) at PC: 0x" << std::hex << ctx->pc << std::dec << std::endl;
 }
 
-void PS2Runtime::handleTLBWI(uint8_t *rdram, R5900Context *ctx)
+void PS2Runtime::handleTLBWI(uint8_t *rdram, Ps2CpuContext *ctx)
 {
     std::cout << "TLBWI (TLB Write Indexed) at PC: 0x" << std::hex << ctx->pc << std::dec << std::endl;
 }
 
-void PS2Runtime::handleTLBWR(uint8_t *rdram, R5900Context *ctx)
+void PS2Runtime::handleTLBWR(uint8_t *rdram, Ps2CpuContext *ctx)
 {
     std::cout << "TLBWR (TLB Write Random) at PC: 0x" << std::hex << ctx->pc << std::dec << std::endl;
 }
 
-void PS2Runtime::handleTLBP(uint8_t *rdram, R5900Context *ctx)
+void PS2Runtime::handleTLBP(uint8_t *rdram, Ps2CpuContext *ctx)
 {
     std::cout << "TLBP (TLB Probe) at PC: 0x" << std::hex << ctx->pc << std::dec << std::endl;
 }
 
-void PS2Runtime::clearLLBit(R5900Context *ctx)
+void PS2Runtime::clearLLBit(Ps2CpuContext *ctx)
 {
     ctx->cop0_status &= ~0x00000002; // LL bit is bit 1 in the status register
     std::cout << "LL bit cleared at PC: 0x" << std::hex << ctx->pc << std::dec << std::endl;
 }
 
-void PS2Runtime::HandleIntegerOverflow(R5900Context *ctx)
+void PS2Runtime::HandleIntegerOverflow(Ps2CpuContext *ctx)
 {
     std::cerr << "Integer overflow exception at PC: 0x" << std::hex << ctx->pc << std::dec << std::endl;
 

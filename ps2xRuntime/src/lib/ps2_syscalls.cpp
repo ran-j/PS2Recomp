@@ -130,27 +130,27 @@ std::string translatePs2Path(const char *ps2Path)
 namespace ps2_syscalls
 {
 
-    void FlushCache(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void FlushCache(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         std::cout << "Syscall: FlushCache (No-op)" << std::endl;
         // No-op for now
         setReturnS32(ctx, 0);
     }
 
-    void ResetEE(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void ResetEE(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         std::cerr << "Syscall: ResetEE - Halting Execution (Not fully implemented)" << std::endl;
         exit(0); // Should we exit or just halt the execution?
     }
 
-    void SetMemoryMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void SetMemoryMode(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         // Affects memory mapping / TLB behavior.
         // std::cout << "Syscall: SetMemoryMode (No-op)" << std::endl;
         setReturnS32(ctx, 0); // Success
     }
 
-    void CreateThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void CreateThread(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         uint32_t paramAddr = getRegU32(ctx, 4); // $a0 points to ThreadParam
         const uint32_t *param = reinterpret_cast<const uint32_t *>(getConstMemPtr(rdram, paramAddr));
@@ -184,14 +184,14 @@ namespace ps2_syscalls
         setReturnS32(ctx, id);
     }
 
-    void DeleteThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void DeleteThread(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         int tid = static_cast<int>(getRegU32(ctx, 4)); // $a0
         g_threads.erase(tid);
         setReturnS32(ctx, 0);
     }
 
-    void StartThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void StartThread(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         int tid = static_cast<int>(getRegU32(ctx, 4)); // $a0 = thread id
         uint32_t arg = getRegU32(ctx, 5);              // $a1 = user arg
@@ -235,8 +235,8 @@ namespace ps2_syscalls
         g_activeThreads.fetch_add(1, std::memory_order_relaxed);
         std::thread([=]() mutable
                     {
-            R5900Context threadCtxCopy = *ctx; // Copy current CPU state to simulate a new thread context
-            R5900Context *threadCtx = &threadCtxCopy;
+            Ps2CpuContext threadCtxCopy = *ctx; // Copy current CPU state to simulate a new thread context
+            Ps2CpuContext *threadCtx = &threadCtxCopy;
 
             if (info.stack && info.stackSize)
             {
@@ -278,27 +278,27 @@ namespace ps2_syscalls
         setReturnS32(ctx, 0);
     }
 
-    void ExitThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void ExitThread(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         std::cout << "PS2 ExitThread: Thread is exiting (PC=0x" << std::hex << ctx->pc << std::dec << ")" << std::endl;
         setReturnS32(ctx, 0);
     }
 
-    void ExitDeleteThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void ExitDeleteThread(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         int tid = static_cast<int>(getRegU32(ctx, 4));
         g_threads.erase(tid);
         setReturnS32(ctx, 0);
     }
 
-    void TerminateThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void TerminateThread(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         int tid = static_cast<int>(getRegU32(ctx, 4));
         g_threads.erase(tid);
         setReturnS32(ctx, 0);
     }
 
-    void SuspendThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void SuspendThread(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         static int logCount = 0;
         int tid = static_cast<int>(getRegU32(ctx, 4));
@@ -310,22 +310,22 @@ namespace ps2_syscalls
         setReturnS32(ctx, 0);
     }
 
-    void ResumeThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void ResumeThread(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 0);
     }
 
-    void GetThreadId(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void GetThreadId(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, g_currentThreadId);
     }
 
-    void ReferThreadStatus(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void ReferThreadStatus(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 0);
     }
 
-    void SleepThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void SleepThread(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         static int logCount = 0;
         if (logCount < 16)
@@ -336,7 +336,7 @@ namespace ps2_syscalls
         setReturnS32(ctx, 0);
     }
 
-    void WakeupThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void WakeupThread(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         static int logCount = 0;
         int tid = static_cast<int>(getRegU32(ctx, 4));
@@ -348,7 +348,7 @@ namespace ps2_syscalls
         setReturnS32(ctx, 0);
     }
 
-    void iWakeupThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void iWakeupThread(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         static int logCount = 0;
         int tid = static_cast<int>(getRegU32(ctx, 4));
@@ -360,7 +360,7 @@ namespace ps2_syscalls
         setReturnS32(ctx, 0);
     }
 
-    void ChangeThreadPriority(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void ChangeThreadPriority(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         int tid = static_cast<int>(getRegU32(ctx, 4));
         int newPrio = static_cast<int>(getRegU32(ctx, 5));
@@ -372,7 +372,7 @@ namespace ps2_syscalls
         setReturnS32(ctx, 0);
     }
 
-    void RotateThreadReadyQueue(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void RotateThreadReadyQueue(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         static int logCount = 0;
         int prio = static_cast<int>(getRegU32(ctx, 4));
@@ -389,17 +389,17 @@ namespace ps2_syscalls
         setReturnS32(ctx, 0);
     }
 
-    void ReleaseWaitThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void ReleaseWaitThread(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 0);
     }
 
-    void iReleaseWaitThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void iReleaseWaitThread(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 0);
     }
 
-    void CreateSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void CreateSema(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         uint32_t paramAddr = getRegU32(ctx, 4); // $a0
         const uint32_t *param = reinterpret_cast<const uint32_t *>(getConstMemPtr(rdram, paramAddr));
@@ -429,14 +429,14 @@ namespace ps2_syscalls
         setReturnS32(ctx, id);
     }
 
-    void DeleteSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void DeleteSema(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         int sid = static_cast<int>(getRegU32(ctx, 4));
         g_semas.erase(sid);
         setReturnS32(ctx, 0);
     }
 
-    void SignalSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void SignalSema(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         int sid = static_cast<int>(getRegU32(ctx, 4));
         auto it = g_semas.find(sid);
@@ -453,12 +453,12 @@ namespace ps2_syscalls
         setReturnS32(ctx, 0);
     }
 
-    void iSignalSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void iSignalSema(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         SignalSema(rdram, ctx, runtime);
     }
 
-    void WaitSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void WaitSema(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         int sid = static_cast<int>(getRegU32(ctx, 4));
         auto it = g_semas.find(sid);
@@ -491,7 +491,7 @@ namespace ps2_syscalls
         setReturnS32(ctx, 0);
     }
 
-    void PollSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void PollSema(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         int sid = static_cast<int>(getRegU32(ctx, 4));
         auto it = g_semas.find(sid);
@@ -509,78 +509,78 @@ namespace ps2_syscalls
         setReturnS32(ctx, 0);
     }
 
-    void iPollSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void iPollSema(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         PollSema(rdram, ctx, runtime);
     }
 
-    void ReferSemaStatus(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void ReferSemaStatus(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 0);
     }
 
-    void iReferSemaStatus(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void iReferSemaStatus(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         ReferSemaStatus(rdram, ctx, runtime);
     }
 
-    void CreateEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void CreateEventFlag(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void DeleteEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void DeleteEventFlag(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void SetEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void SetEventFlag(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void iSetEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void iSetEventFlag(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void ClearEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void ClearEventFlag(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void iClearEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void iClearEventFlag(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void WaitEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void WaitEventFlag(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void PollEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void PollEventFlag(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void iPollEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void iPollEventFlag(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void ReferEventFlagStatus(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void ReferEventFlagStatus(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
-    void iReferEventFlagStatus(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void iReferEventFlagStatus(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         // TODO
     }
 
     // According to GPT the real PS2 uses a timer interrupt to invoke a callback. For now, fire  the callback immediately
-    void SetAlarm(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void SetAlarm(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         uint32_t usec = getRegU32(ctx, 4);
         uint32_t handler = getRegU32(ctx, 5);
@@ -598,8 +598,8 @@ namespace ps2_syscalls
         // If the handler looks like a semaphore id, just kick it now.
         if (arg)
         {
-            R5900Context localCtx = *ctx;
-            R5900Context *ctxPtr = &localCtx;
+            Ps2CpuContext localCtx = *ctx;
+            Ps2CpuContext *ctxPtr = &localCtx;
             SET_GPR_U32(ctxPtr, 4, arg);
             SignalSema(rdram, ctxPtr, runtime);
         }
@@ -607,47 +607,47 @@ namespace ps2_syscalls
         setReturnS32(ctx, 0);
     }
 
-    void iSetAlarm(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void iSetAlarm(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         SetAlarm(rdram, ctx, runtime);
     }
 
-    void CancelAlarm(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void CancelAlarm(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 0);
     }
 
-    void iCancelAlarm(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void iCancelAlarm(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         CancelAlarm(rdram, ctx, runtime);
     }
 
-    void EnableIntc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void EnableIntc(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 0);
     }
 
-    void DisableIntc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void DisableIntc(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 0);
     }
 
-    void EnableDmac(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void EnableDmac(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 0);
     }
 
-    void DisableDmac(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void DisableDmac(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 0);
     }
 
-    void SifStopModule(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void SifStopModule(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 0);
     }
 
-    void SifLoadModule(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void SifLoadModule(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         uint32_t pathAddr = getRegU32(ctx, 4);
         const char *path = reinterpret_cast<const char *>(getConstMemPtr(rdram, pathAddr));
@@ -661,12 +661,12 @@ namespace ps2_syscalls
         setReturnS32(ctx, 1);
     }
 
-    void SifInitRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void SifInitRpc(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 0);
     }
 
-    void SifBindRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void SifBindRpc(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         uint32_t clientPtr = getRegU32(ctx, 4);
         uint32_t rpcId = getRegU32(ctx, 5);
@@ -697,7 +697,7 @@ namespace ps2_syscalls
         setReturnS32(ctx, 0);
     }
 
-    void SifCallRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void SifCallRpc(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         uint32_t clientPtr = getRegU32(ctx, 4);
         uint32_t rpcId = getRegU32(ctx, 5);
@@ -724,37 +724,37 @@ namespace ps2_syscalls
         setReturnS32(ctx, 0);
     }
 
-    void SifRegisterRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void SifRegisterRpc(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 0);
     }
 
-    void SifCheckStatRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void SifCheckStatRpc(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 1);
     }
 
-    void SifSetRpcQueue(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void SifSetRpcQueue(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 0);
     }
 
-    void SifRemoveRpcQueue(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void SifRemoveRpcQueue(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 0);
     }
 
-    void SifRemoveRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void SifRemoveRpc(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 0);
     }
 
-    void sceSifCallRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void sceSifCallRpc(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         SifCallRpc(rdram, ctx, runtime);
     }
 
-    void sceSifSendCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void sceSifSendCmd(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         static int logCount = 0;
         if (logCount < 5)
@@ -768,13 +768,13 @@ namespace ps2_syscalls
         setReturnS32(ctx, 0);
     }
 
-    void _sceRpcGetPacket(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void _sceRpcGetPacket(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         uint32_t queuePtr = getRegU32(ctx, 4);
         setReturnS32(ctx, static_cast<int32_t>(queuePtr));
     }
 
-    void fioOpen(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void fioOpen(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         uint32_t pathAddr = getRegU32(ctx, 4); // $a0
         int flags = (int)getRegU32(ctx, 5);    // $a1 (PS2 FIO flags)
@@ -819,7 +819,7 @@ namespace ps2_syscalls
         setReturnS32(ctx, ps2Fd);
     }
 
-    void fioClose(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void fioClose(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         int ps2Fd = (int)getRegU32(ctx, 4); // $a0
         std::cout << "fioClose: fd=" << ps2Fd << std::endl;
@@ -839,7 +839,7 @@ namespace ps2_syscalls
         setReturnS32(ctx, ret == 0 ? 0 : -1);
     }
 
-    void fioRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void fioRead(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         int ps2Fd = (int)getRegU32(ctx, 4);   // $a0
         uint32_t bufAddr = getRegU32(ctx, 5); // $a1
@@ -884,7 +884,7 @@ namespace ps2_syscalls
         setReturnS32(ctx, (int32_t)bytesRead);
     }
 
-    void fioWrite(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void fioWrite(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         int ps2Fd = (int)getRegU32(ctx, 4);   // $a0
         uint32_t bufAddr = getRegU32(ctx, 5); // $a1
@@ -933,7 +933,7 @@ namespace ps2_syscalls
         setReturnS32(ctx, (int32_t)bytesWritten);
     }
 
-    void fioLseek(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void fioLseek(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         int ps2Fd = (int)getRegU32(ctx, 4);  // $a0
         int32_t offset = getRegU32(ctx, 5);  // $a1 (PS2 seems to use 32-bit offset here commonly)
@@ -993,7 +993,7 @@ namespace ps2_syscalls
         }
     }
 
-    void fioMkdir(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void fioMkdir(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         // TODO maybe we dont need this.
         uint32_t pathAddr = getRegU32(ctx, 4); // $a0
@@ -1031,7 +1031,7 @@ namespace ps2_syscalls
         }
     }
 
-    void fioChdir(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void fioChdir(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         // TODO maybe we dont need this as well.
         uint32_t pathAddr = getRegU32(ctx, 4); // $a0
@@ -1070,7 +1070,7 @@ namespace ps2_syscalls
         }
     }
 
-    void fioRmdir(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void fioRmdir(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         uint32_t pathAddr = getRegU32(ctx, 4); // $a0
         const char *ps2Path = reinterpret_cast<const char *>(getConstMemPtr(rdram, pathAddr));
@@ -1105,7 +1105,7 @@ namespace ps2_syscalls
         }
     }
 
-    void fioGetstat(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void fioGetstat(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         // we wont implement this for now.
         uint32_t pathAddr = getRegU32(ctx, 4);    // $a0
@@ -1138,7 +1138,7 @@ namespace ps2_syscalls
         setReturnS32(ctx, -1);
     }
 
-    void fioRemove(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void fioRemove(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         uint32_t pathAddr = getRegU32(ctx, 4); // $a0
         const char *ps2Path = reinterpret_cast<const char *>(getConstMemPtr(rdram, pathAddr));
@@ -1174,7 +1174,7 @@ namespace ps2_syscalls
         }
     }
 
-    void GsSetCrt(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void GsSetCrt(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         int interlaced = getRegU32(ctx, 4); // $a0 - 0=non-interlaced, 1=interlaced
         int videoMode = getRegU32(ctx, 5);  // $a1 - 0=NTSC, 1=PAL, 2=VESA, 3=HiVision
@@ -1185,7 +1185,7 @@ namespace ps2_syscalls
                   << ", frameMode=" << frameMode << std::endl;
     }
 
-    void GsGetIMR(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void GsGetIMR(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         // TODO return IMR value from the Gs hardware this is just a stub.
         // The IMR (Interrupt Mask Register) is a 64-bit register that controls which interrupts are enabled.
@@ -1196,14 +1196,14 @@ namespace ps2_syscalls
         setReturnU64(ctx, imr); // Return in $v0/$v1
     }
 
-    void GsPutIMR(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void GsPutIMR(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         uint64_t imr = getRegU32(ctx, 4) | ((uint64_t)getRegU32(ctx, 5) << 32); // $a0 = lower 32 bits, $a1 = upper 32 bits
         std::cout << "PS2 GsPutIMR: Setting IMR=0x" << std::hex << imr << std::dec << std::endl;
         // Do nothing for now.
     }
 
-    void GsSetVideoMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void GsSetVideoMode(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         int mode = getRegU32(ctx, 4); // $a0 - video mode (various flags)
 
@@ -1212,7 +1212,7 @@ namespace ps2_syscalls
         // Do nothing for now.
     }
 
-    void GetOsdConfigParam(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void GetOsdConfigParam(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         uint32_t paramAddr = getRegU32(ctx, 4); // $a0 - pointer to parameter structure
 
@@ -1234,7 +1234,7 @@ namespace ps2_syscalls
         setReturnS32(ctx, 0);
     }
 
-    void SetOsdConfigParam(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void SetOsdConfigParam(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         uint32_t paramAddr = getRegU32(ctx, 4); // $a0 - pointer to parameter structure
 
@@ -1252,7 +1252,7 @@ namespace ps2_syscalls
         setReturnS32(ctx, 0);
     }
 
-    void GetRomName(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void GetRomName(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         uint32_t bufAddr = getRegU32(ctx, 4); // $a0
         size_t bufSize = getRegU32(ctx, 5);   // $a1
@@ -1278,7 +1278,7 @@ namespace ps2_syscalls
         setReturnS32(ctx, (int32_t)strlen(hostBuf));
     }
 
-    void SifLoadElfPart(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void SifLoadElfPart(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         uint32_t pathAddr = getRegU32(ctx, 4); // $a0 - pointer to ELF path
 
@@ -1288,7 +1288,7 @@ namespace ps2_syscalls
         setReturnS32(ctx, 1); // dummy return value for success
     }
 
-    void sceSifLoadModule(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void sceSifLoadModule(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         uint32_t moduePath = getRegU32(ctx, 4); // $a0 - pointer to module path
 
@@ -1300,19 +1300,19 @@ namespace ps2_syscalls
         setReturnS32(ctx, 1);
     }
 
-    void TODO(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void TODO(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         uint32_t syscall_num = getRegU32(ctx, 3); // Syscall number usually in $v1 ($r3) for SYSCALL instr
         uint32_t caller_ra = getRegU32(ctx, 31);  // $ra
 
         std::cerr << "Warning: Unimplemented PS2 syscall called. PC=0x" << std::hex << ctx->pc
-            << ", RA=0x" << caller_ra
-            << ", Syscall # (from $v1)=0x" << syscall_num << std::dec << std::endl;
+                  << ", RA=0x" << caller_ra
+                  << ", Syscall # (from $v1)=0x" << syscall_num << std::dec << std::endl;
 
         std::cerr << "  Args: $a0=0x" << std::hex << getRegU32(ctx, 4)
-            << ", $a1=0x" << getRegU32(ctx, 5)
-            << ", $a2=0x" << getRegU32(ctx, 6)
-            << ", $a3=0x" << getRegU32(ctx, 7) << std::dec << std::endl;
+                  << ", $a1=0x" << getRegU32(ctx, 5)
+                  << ", $a2=0x" << getRegU32(ctx, 6)
+                  << ", $a3=0x" << getRegU32(ctx, 7) << std::dec << std::endl;
 
         // Common syscalls:
         // 0x04: Exit
@@ -1331,7 +1331,7 @@ namespace ps2_syscalls
 
     // 0x3C SetupThread: returns stack pointer (stack + stack_size)
     // args: $a0 = stack base, $a1 = stack size, $a2 = gp, $a3 = entry point
-    void SetupThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void SetupThread(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         uint32_t stackBase = getRegU32(ctx, 4);
         uint32_t stackSize = getRegU32(ctx, 5);
@@ -1340,19 +1340,19 @@ namespace ps2_syscalls
     }
 
     // 0x5A QueryBootMode (stub): return 0 for now
-    void QueryBootMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void QueryBootMode(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 0);
     }
 
     // 0x5B GetThreadTLS (stub): return 0
-    void GetThreadTLS(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void GetThreadTLS(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 0);
     }
 
     // 0x74 RegisterExitHandler (stub): return 0
-    void RegisterExitHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void RegisterExitHandler(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 0);
     }

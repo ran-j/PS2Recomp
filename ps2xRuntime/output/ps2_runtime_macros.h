@@ -6,10 +6,12 @@
 
 #include <intrin.h>
 
-inline uint32_t ps2_clz32(uint32_t val) {
+inline uint32_t ps2_clz32(uint32_t val)
+{
 #if defined(_MSC_VER)
     unsigned long idx;
-    if (_BitScanReverse(&idx, val)) {
+    if (_BitScanReverse(&idx, val))
+    {
         return 31u - idx;
     }
     return 32u;
@@ -20,9 +22,25 @@ inline uint32_t ps2_clz32(uint32_t val) {
 
 // Basic MIPS arithmetic operations
 #define ADD32(a, b) ((uint32_t)((a) + (b)))
-#define ADD32_OV(rs, rt, result32, overflow)                     do {                                                                    int32_t _a = (int32_t)(rs);                                         int32_t _b = (int32_t)(rt);                                         int32_t _r = _a + _b;                                               overflow = (((_a ^ _b) >= 0) && ((_a ^ _r) < 0));                   result32 = (uint32_t)_r;                                        } while (0);
+#define ADD32_OV(rs, rt, result32, overflow)              \
+    do                                                    \
+    {                                                     \
+        int32_t _a = (int32_t)(rs);                       \
+        int32_t _b = (int32_t)(rt);                       \
+        int32_t _r = _a + _b;                             \
+        overflow = (((_a ^ _b) >= 0) && ((_a ^ _r) < 0)); \
+        result32 = (uint32_t)_r;                          \
+    } while (0);
 #define SUB32(a, b) ((uint32_t)((a) - (b)))
-#define SUB32_OV(rs, rt, result32, overflow)                     do {                                                                    int32_t _a = (int32_t)(rs);                                         int32_t _b = (int32_t)(rt);                                         int32_t _r = _a - _b;                                               overflow = (((_a ^ _b) < 0) && ((_a ^ _r) < 0));                    result32 = (uint32_t)_r;                                        } while (0);
+#define SUB32_OV(rs, rt, result32, overflow)             \
+    do                                                   \
+    {                                                    \
+        int32_t _a = (int32_t)(rs);                      \
+        int32_t _b = (int32_t)(rt);                      \
+        int32_t _r = _a - _b;                            \
+        overflow = (((_a ^ _b) < 0) && ((_a ^ _r) < 0)); \
+        result32 = (uint32_t)_r;                         \
+    } while (0);
 #define MUL32(a, b) ((uint32_t)((a) * (b)))
 #define DIV32(a, b) ((uint32_t)((a) / (b)))
 #define AND32(a, b) ((uint32_t)((a) & (b)))
@@ -65,16 +83,16 @@ inline uint32_t ps2_clz32(uint32_t val) {
 #define PS2_VMULQ(a, q) _mm_mul_ps((__m128)(a), _mm_set1_ps(q))
 
 // Memory access helpers
-#define READ8(addr) (*(uint8_t*)((rdram) + ((addr) & PS2_RAM_MASK)))
-#define READ16(addr) (*(uint16_t*)((rdram) + ((addr) & PS2_RAM_MASK)))
-#define READ32(addr) (*(uint32_t*)((rdram) + ((addr) & PS2_RAM_MASK)))
-#define READ64(addr) (*(uint64_t*)((rdram) + ((addr) & PS2_RAM_MASK)))
-#define READ128(addr) (*((__m128i*)((rdram) + ((addr) & PS2_RAM_MASK))))
-#define WRITE8(addr, val) (*(uint8_t*)((rdram) + ((addr) & PS2_RAM_MASK)) = (val))
-#define WRITE16(addr, val) (*(uint16_t*)((rdram) + ((addr) & PS2_RAM_MASK)) = (val))
-#define WRITE32(addr, val) (*(uint32_t*)((rdram) + ((addr) & PS2_RAM_MASK)) = (val))
-#define WRITE64(addr, val) (*(uint64_t*)((rdram) + ((addr) & PS2_RAM_MASK)) = (val))
-#define WRITE128(addr, val) (*((__m128i*)((rdram) + ((addr) & PS2_RAM_MASK))) = (val))
+#define READ8(addr) (*(uint8_t *)((rdram) + ((addr) & PS2_RAM_MASK)))
+#define READ16(addr) (*(uint16_t *)((rdram) + ((addr) & PS2_RAM_MASK)))
+#define READ32(addr) (*(uint32_t *)((rdram) + ((addr) & PS2_RAM_MASK)))
+#define READ64(addr) (*(uint64_t *)((rdram) + ((addr) & PS2_RAM_MASK)))
+#define READ128(addr) (*((__m128i *)((rdram) + ((addr) & PS2_RAM_MASK))))
+#define WRITE8(addr, val) (*(uint8_t *)((rdram) + ((addr) & PS2_RAM_MASK)) = (val))
+#define WRITE16(addr, val) (*(uint16_t *)((rdram) + ((addr) & PS2_RAM_MASK)) = (val))
+#define WRITE32(addr, val) (*(uint32_t *)((rdram) + ((addr) & PS2_RAM_MASK)) = (val))
+#define WRITE64(addr, val) (*(uint64_t *)((rdram) + ((addr) & PS2_RAM_MASK)) = (val))
+#define WRITE128(addr, val) (*((__m128i *)((rdram) + ((addr) & PS2_RAM_MASK))) = (val))
 
 #define PS2_PCGTW(a, b) _mm_cmpgt_epi32((__m128i)(a), (__m128i)(b))
 #define PS2_PCGTH(a, b) _mm_cmpgt_epi16((__m128i)(a), (__m128i)(b))
@@ -88,47 +106,53 @@ inline uint32_t ps2_clz32(uint32_t val) {
 #define PS2_PPACW(a, b) _mm_packs_epi32((__m128i)(b), (__m128i)(a))
 #define PS2_PPACH(a, b) _mm_packs_epi16((__m128i)(b), (__m128i)(a))
 #define PS2_PPACB(a, b) _mm_packus_epi16(_mm_packs_epi32((__m128i)(b), (__m128i)(a)), _mm_setzero_si128())
-#define PS2_PINTH(a, b) _mm_unpacklo_epi16(_mm_shuffle_epi32((__m128i)(b), _MM_SHUFFLE(3,2,1,0)), _mm_shuffle_epi32((__m128i)(a), _MM_SHUFFLE(3,2,1,0)))
-#define PS2_PINTEH(a, b) _mm_unpackhi_epi16(_mm_shuffle_epi32((__m128i)(b), _MM_SHUFFLE(3,2,1,0)), _mm_shuffle_epi32((__m128i)(a), _MM_SHUFFLE(3,2,1,0)))
-#define PS2_PMADDW(a, b) _mm_add_epi32(_mm_mullo_epi32(_mm_shuffle_epi32((__m128i)(a), _MM_SHUFFLE(1,0,3,2)), _mm_shuffle_epi32((__m128i)(b), _MM_SHUFFLE(1,0,3,2))), _mm_mullo_epi32(_mm_shuffle_epi32((__m128i)(a), _MM_SHUFFLE(3,2,1,0)), _mm_shuffle_epi32((__m128i)(b), _MM_SHUFFLE(3,2,1,0))))
+#define PS2_PINTH(a, b) _mm_unpacklo_epi16(_mm_shuffle_epi32((__m128i)(b), _MM_SHUFFLE(3, 2, 1, 0)), _mm_shuffle_epi32((__m128i)(a), _MM_SHUFFLE(3, 2, 1, 0)))
+#define PS2_PINTEH(a, b) _mm_unpackhi_epi16(_mm_shuffle_epi32((__m128i)(b), _MM_SHUFFLE(3, 2, 1, 0)), _mm_shuffle_epi32((__m128i)(a), _MM_SHUFFLE(3, 2, 1, 0)))
+#define PS2_PMADDW(a, b) _mm_add_epi32(_mm_mullo_epi32(_mm_shuffle_epi32((__m128i)(a), _MM_SHUFFLE(1, 0, 3, 2)), _mm_shuffle_epi32((__m128i)(b), _MM_SHUFFLE(1, 0, 3, 2))), _mm_mullo_epi32(_mm_shuffle_epi32((__m128i)(a), _MM_SHUFFLE(3, 2, 1, 0)), _mm_shuffle_epi32((__m128i)(b), _MM_SHUFFLE(3, 2, 1, 0))))
 #define PS2_PSLLVW(a, b) _mm_custom_sllv_epi32((__m128i)(a), (__m128i)(b))
 #define PS2_PSRLVW(a, b) _mm_custom_srlv_epi32((__m128i)(a), (__m128i)(b))
 #define PS2_PSRAVW(a, b) _mm_custom_srav_epi32((__m128i)(a), (__m128i)(b))
-inline __m128i _mm_custom_sllv_epi32(__m128i a, __m128i count) {
+inline __m128i _mm_custom_sllv_epi32(__m128i a, __m128i count)
+{
     int32_t a_arr[4], count_arr[4], result[4];
-    _mm_storeu_si128((__m128i*)a_arr, a);
-    _mm_storeu_si128((__m128i*)count_arr, count);
-    for (int i = 0; i < 4; i++) {
+    _mm_storeu_si128((__m128i *)a_arr, a);
+    _mm_storeu_si128((__m128i *)count_arr, count);
+    for (int i = 0; i < 4; i++)
+    {
         result[i] = a_arr[i] << (count_arr[i] & 0x1F);
     }
-    return _mm_loadu_si128((__m128i*)result);
+    return _mm_loadu_si128((__m128i *)result);
 }
 
-inline __m128i _mm_custom_srlv_epi32(__m128i a, __m128i count) {
+inline __m128i _mm_custom_srlv_epi32(__m128i a, __m128i count)
+{
     int32_t a_arr[4], count_arr[4], result[4];
-    _mm_storeu_si128((__m128i*)a_arr, a);
-    _mm_storeu_si128((__m128i*)count_arr, count);
-    for (int i = 0; i < 4; i++) {
+    _mm_storeu_si128((__m128i *)a_arr, a);
+    _mm_storeu_si128((__m128i *)count_arr, count);
+    for (int i = 0; i < 4; i++)
+    {
         result[i] = (uint32_t)a_arr[i] >> (count_arr[i] & 0x1F);
     }
-    return _mm_loadu_si128((__m128i*)result);
+    return _mm_loadu_si128((__m128i *)result);
 }
 
-inline __m128i _mm_custom_srav_epi32(__m128i a, __m128i count) {
+inline __m128i _mm_custom_srav_epi32(__m128i a, __m128i count)
+{
     int32_t a_arr[4], count_arr[4], result[4];
-    _mm_storeu_si128((__m128i*)a_arr, a);
-    _mm_storeu_si128((__m128i*)count_arr, count);
-    for (int i = 0; i < 4; i++) {
+    _mm_storeu_si128((__m128i *)a_arr, a);
+    _mm_storeu_si128((__m128i *)count_arr, count);
+    for (int i = 0; i < 4; i++)
+    {
         result[i] = a_arr[i] >> (count_arr[i] & 0x1F);
     }
-    return _mm_loadu_si128((__m128i*)result);
+    return _mm_loadu_si128((__m128i *)result);
 }
 
 #define PS2_PMFHL_LW(hi, lo) _mm_unpacklo_epi64(lo, hi)
 #define PS2_PMFHL_UW(hi, lo) _mm_unpackhi_epi64(lo, hi)
 #define PS2_PMFHL_SLW(hi, lo) _mm_packs_epi32(lo, hi)
-#define PS2_PMFHL_LH(hi, lo) _mm_shuffle_epi32(_mm_packs_epi32(lo, hi), _MM_SHUFFLE(3,1,2,0))
-#define PS2_PMFHL_SH(hi, lo) _mm_shufflehi_epi16(_mm_shufflelo_epi16(_mm_packs_epi32(lo, hi), _MM_SHUFFLE(3,1,2,0)), _MM_SHUFFLE(3,1,2,0))
+#define PS2_PMFHL_LH(hi, lo) _mm_shuffle_epi32(_mm_packs_epi32(lo, hi), _MM_SHUFFLE(3, 1, 2, 0))
+#define PS2_PMFHL_SH(hi, lo) _mm_shufflehi_epi16(_mm_shufflelo_epi16(_mm_packs_epi32(lo, hi), _MM_SHUFFLE(3, 1, 2, 0)), _MM_SHUFFLE(3, 1, 2, 0))
 // FPU (COP1) operations
 #define FPU_ADD_S(a, b) ((float)(a) + (float)(b))
 #define FPU_SUB_S(a, b) ((float)(a) - (float)(b))
@@ -182,34 +206,34 @@ inline __m128i _mm_custom_srav_epi32(__m128i a, __m128i count) {
 #define GPR_U64(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0ULL : ctx_ptr->r[reg_idx].m128i_u64[0])
 #define GPR_S64(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0LL : ctx_ptr->r[reg_idx].m128i_i64[0])
 #define GPR_VEC(ctx_ptr, reg_idx) ((reg_idx == 0) ? _mm_setzero_si128() : ctx_ptr->r[reg_idx])
-#define SET_GPR_U32(ctx_ptr, reg_idx, val) \
-    do                                     \
-    {                                      \
-        if (reg_idx != 0)                  \
+#define SET_GPR_U32(ctx_ptr, reg_idx, val)                       \
+    do                                                           \
+    {                                                            \
+        if (reg_idx != 0)                                        \
             ctx_ptr->r[reg_idx] = _mm_set_epi32(0, 0, 0, (val)); \
     } while (0)
-#define SET_GPR_S32(ctx_ptr, reg_idx, val) \
-    do                                     \
-    {                                      \
-        if (reg_idx != 0)                  \
+#define SET_GPR_S32(ctx_ptr, reg_idx, val)                       \
+    do                                                           \
+    {                                                            \
+        if (reg_idx != 0)                                        \
             ctx_ptr->r[reg_idx] = _mm_set_epi32(0, 0, 0, (val)); \
     } while (0)
-#define SET_GPR_U64(ctx_ptr, reg_idx, val) \
-    do                                     \
-    {                                      \
-        if (reg_idx != 0)                  \
+#define SET_GPR_U64(ctx_ptr, reg_idx, val)                  \
+    do                                                      \
+    {                                                       \
+        if (reg_idx != 0)                                   \
             ctx_ptr->r[reg_idx] = _mm_set_epi64x(0, (val)); \
     } while (0)
-#define SET_GPR_S64(ctx_ptr, reg_idx, val) \
-    do                                     \
-    {                                      \
-        if (reg_idx != 0)                  \
+#define SET_GPR_S64(ctx_ptr, reg_idx, val)                  \
+    do                                                      \
+    {                                                       \
+        if (reg_idx != 0)                                   \
             ctx_ptr->r[reg_idx] = _mm_set_epi64x(0, (val)); \
     } while (0)
 #define SET_GPR_VEC(ctx_ptr, reg_idx, val) \
     do                                     \
     {                                      \
         if (reg_idx != 0)                  \
-            ctx_ptr->r[reg_idx] = (val); \
+            ctx_ptr->r[reg_idx] = (val);   \
     } while (0)
 #endif // PS2_RUNTIME_MACROS_H

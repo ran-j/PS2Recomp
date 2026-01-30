@@ -35,7 +35,7 @@ constexpr uint32_t PS2_VU1_DATA_BASE = 0x1100C000;
 constexpr uint32_t PS2_GS_BASE = 0x12000000;
 constexpr uint32_t PS2_GS_PRIV_REG_BASE = 0x12000000; // GS Privileged Registers
 constexpr uint32_t PS2_GS_PRIV_REG_SIZE = 0x2000;
-constexpr size_t   PS2_GS_VRAM_SIZE = 4 * 1024 * 1024; // 4MB GS VRAM
+constexpr size_t PS2_GS_VRAM_SIZE = 4 * 1024 * 1024; // 4MB GS VRAM
 
 #define PS2_FIO_O_RDONLY 0x0001
 #define PS2_FIO_O_WRONLY 0x0002
@@ -57,8 +57,8 @@ enum PS2Exception
     EXCEPTION_INTEGER_OVERFLOW = 0x0C, // From MIPS spec
 };
 
-// PS2 CPU context (R5900)
-struct alignas(16) R5900Context
+// PS2 CPU context (Emotion Engine R5900)
+struct alignas(16) Ps2CpuContext
 {
     // General Purpose Registers (128-bit)
     __m128i r[32]; // Main registers
@@ -99,7 +99,7 @@ struct alignas(16) R5900Context
     uint32_t vu0_itop;
     uint32_t vu0_info;
     uint32_t vu0_xitop; // VU0 XITOP - input ITOP for VIF/VU sync
-    uint32_t vu0_pc; 
+    uint32_t vu0_pc;
 
     float vu0_cf[4]; // VU0 FMAC control floating-point registers
 
@@ -134,7 +134,7 @@ struct alignas(16) R5900Context
     float f[32];
     uint32_t fcr31; // Control/status register
 
-    R5900Context()
+    Ps2CpuContext()
     {
         for (int i = 0; i < 32; i++)
         {
@@ -183,7 +183,6 @@ struct alignas(16) R5900Context
         vu0_vpu_stat4 = 0;
         vu0_itop = 0;
         vu0_info = 0;
-
 
         // Reset COP0 registers
         cop0_index = 0;
@@ -235,10 +234,10 @@ struct alignas(16) R5900Context
         std::cout.flags(flags); // Restore format flags
     }
 
-    ~R5900Context() = default;
+    ~Ps2CpuContext() = default;
 };
 
-inline uint32_t getRegU32(const R5900Context *ctx, int reg)
+inline uint32_t getRegU32(const Ps2CpuContext *ctx, int reg)
 {
     // Check if reg is valid (0-31)
     if (reg < 0 || reg > 31)
@@ -246,17 +245,17 @@ inline uint32_t getRegU32(const R5900Context *ctx, int reg)
     return ctx->r[reg].m128i_u32[0];
 }
 
-inline void setReturnU32(R5900Context *ctx, uint32_t value)
+inline void setReturnU32(Ps2CpuContext *ctx, uint32_t value)
 {
     ctx->r[2] = _mm_set_epi32(0, 0, 0, value); // $v0
 }
 
-inline void setReturnS32(R5900Context *ctx, int32_t value)
+inline void setReturnS32(Ps2CpuContext *ctx, int32_t value)
 {
     ctx->r[2] = _mm_set_epi32(0, 0, 0, value); // $v0 Sign extension handled by cast? TODO Check MIPS ABI.
 }
 
-inline void setReturnU64(R5900Context *ctx, uint64_t value)
+inline void setReturnU64(Ps2CpuContext *ctx, uint64_t value)
 {
     // 64-bit returns use $v0/$v1 (r2/r3)
     ctx->r[2] = _mm_set_epi32(0, 0, 0, static_cast<uint32_t>(value));
@@ -447,31 +446,31 @@ public:
     bool loadELF(const std::string &elfPath);
     void run();
 
-    using RecompiledFunction = void (*)(uint8_t *, R5900Context *, PS2Runtime *);
+    using RecompiledFunction = void (*)(uint8_t *, Ps2CpuContext *, PS2Runtime *);
 
     void registerFunction(uint32_t address, RecompiledFunction func);
     RecompiledFunction lookupFunction(uint32_t address);
     bool hasFunction(uint32_t address) const;
 
-    void SignalException(R5900Context *ctx, PS2Exception exception);
+    void SignalException(Ps2CpuContext *ctx, PS2Exception exception);
 
-    void executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint32_t address);
-    void vu0StartMicroProgram(uint8_t *rdram, R5900Context *ctx, uint32_t address);
-
-public:
-    void handleSyscall(uint8_t *rdram, R5900Context *ctx);
-    void handleBreak(uint8_t *rdram, R5900Context *ctx);
-
-    void handleTrap(uint8_t *rdram, R5900Context *ctx);
-    void handleTLBR(uint8_t *rdram, R5900Context *ctx);
-    void handleTLBWI(uint8_t *rdram, R5900Context *ctx);
-    void handleTLBWR(uint8_t *rdram, R5900Context *ctx);
-    void handleTLBP(uint8_t *rdram, R5900Context *ctx);
-    void clearLLBit(R5900Context *ctx);
+    void executeVU0Microprogram(uint8_t *rdram, Ps2CpuContext *ctx, uint32_t address);
+    void vu0StartMicroProgram(uint8_t *rdram, Ps2CpuContext *ctx, uint32_t address);
 
 public:
-    inline R5900Context &cpu() { return m_cpuContext; }
-    inline const R5900Context &cpu() const { return m_cpuContext; }
+    void handleSyscall(uint8_t *rdram, Ps2CpuContext *ctx);
+    void handleBreak(uint8_t *rdram, Ps2CpuContext *ctx);
+
+    void handleTrap(uint8_t *rdram, Ps2CpuContext *ctx);
+    void handleTLBR(uint8_t *rdram, Ps2CpuContext *ctx);
+    void handleTLBWI(uint8_t *rdram, Ps2CpuContext *ctx);
+    void handleTLBWR(uint8_t *rdram, Ps2CpuContext *ctx);
+    void handleTLBP(uint8_t *rdram, Ps2CpuContext *ctx);
+    void clearLLBit(Ps2CpuContext *ctx);
+
+public:
+    inline Ps2CpuContext &cpu() { return m_cpuContext; }
+    inline const Ps2CpuContext &cpu() const { return m_cpuContext; }
 
     inline PS2Memory &memory() { return m_memory; }
     inline const PS2Memory &memory() const { return m_memory; }
@@ -480,11 +479,11 @@ public:
     bool check_overflow = false;
 
 private:
-    void HandleIntegerOverflow(R5900Context *ctx);
+    void HandleIntegerOverflow(Ps2CpuContext *ctx);
 
 private:
     PS2Memory m_memory;
-    R5900Context m_cpuContext;
+    Ps2CpuContext m_cpuContext;
 
     std::unordered_map<uint32_t, RecompiledFunction> m_functionTable;
 

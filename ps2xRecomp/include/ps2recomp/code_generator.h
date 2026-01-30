@@ -120,6 +120,7 @@ namespace ps2recomp
 
         Symbol *findSymbolByAddress(uint32_t address);
         std::string getFunctionName(uint32_t address);
+        std::string sanitizeFunctionName(const std::string &name);
         std::string getGeneratedFunctionName(const Function &function);
     };
 

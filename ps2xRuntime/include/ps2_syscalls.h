@@ -27,11 +27,11 @@ static std::mutex g_sys_fd_mutex;
 
 namespace ps2_syscalls
 {
-    #define PS2_DECLARE_SYSCALL(name) void name(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    #define PS2_DECLARE_SYSCALL(name) void name(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime);
     PS2_SYSCALL_LIST(PS2_DECLARE_SYSCALL)
     #undef PS2_DECLARE_SYSCALL
 
-    void TODO(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void TODO(uint8_t *rdram, Ps2CpuContext *ctx, PS2Runtime *runtime);
 }
 
 #endif // PS2_SYSCALLS_H

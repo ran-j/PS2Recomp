@@ -3,7 +3,6 @@
 
 #include "ps2recomp/types.h"
 #include "ps2recomp/elf_parser.h"
-#include "ps2recomp/r5900_decoder.h"
 #include "ps2recomp/code_generator.h"
 #include "ps2recomp/config_manager.h"
 #include <string>
@@ -28,7 +27,6 @@ namespace ps2recomp
     private:
         ConfigManager m_configManager;
         std::unique_ptr<ElfParser> m_elfParser;
-        std::unique_ptr<R5900Decoder> m_decoder;
         std::unique_ptr<CodeGenerator> m_codeGenerator;
         RecompilerConfig m_config;
 
