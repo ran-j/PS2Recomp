@@ -17,7 +17,7 @@ namespace ps2recomp
     class ElfAnalyzer
     {
     public:
-        ElfAnalyzer(const std::string &elfPath);
+	    explicit ElfAnalyzer(const std::string &elfPath);
         ~ElfAnalyzer();
 
         bool analyze();

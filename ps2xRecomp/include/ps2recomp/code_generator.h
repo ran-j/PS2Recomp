@@ -15,7 +15,7 @@ namespace ps2recomp
     class CodeGenerator
     {
     public:
-        CodeGenerator(const std::vector<Symbol> &symbols);
+	    explicit CodeGenerator(const std::vector<Symbol> &symbols);
         ~CodeGenerator();
 
         struct BootstrapInfo

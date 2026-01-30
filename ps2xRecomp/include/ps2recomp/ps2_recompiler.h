@@ -18,7 +18,7 @@ namespace ps2recomp
     class PS2Recompiler
     {
     public:
-        PS2Recompiler(const std::string &configPath);
+	    explicit PS2Recompiler(const std::string &configPath);
         ~PS2Recompiler() = default;
 
         bool initialize();

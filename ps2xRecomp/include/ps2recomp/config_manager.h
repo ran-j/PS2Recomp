@@ -10,7 +10,7 @@ namespace ps2recomp
     class ConfigManager
     {
     public:
-        ConfigManager(const std::string &configPath);
+	    explicit ConfigManager(const std::string &configPath);
         ~ConfigManager();
 
         RecompilerConfig loadConfig() const;

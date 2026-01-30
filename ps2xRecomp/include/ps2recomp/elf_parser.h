@@ -13,7 +13,7 @@ namespace ps2recomp
     class ElfParser
     {
     public:
-        ElfParser(const std::string &filePath);
+	    explicit ElfParser(const std::string &filePath);
         ~ElfParser();
 
         bool parse();
