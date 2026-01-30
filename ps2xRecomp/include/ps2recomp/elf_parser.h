@@ -1,7 +1,6 @@
 #ifndef PS2RECOMP_ELF_PARSER_H
 #define PS2RECOMP_ELF_PARSER_H
 
-#include "ps2recomp/types.h"
 #include <elfio/elfio.hpp>
 #include <string>
 #include <vector>
@@ -9,8 +8,12 @@
 
 namespace ps2recomp
 {
+	struct Relocation;
+	struct Section;
+	struct Function;
+	struct Symbol;
 
-    class ElfParser
+	class ElfParser
     {
     public:
 	    explicit ElfParser(const std::string &filePath);

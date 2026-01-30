@@ -1,9 +1,6 @@
 #ifndef PS2RECOMP_ELF_ANALYZER_H
 #define PS2RECOMP_ELF_ANALYZER_H
 
-#include "ps2recomp/elf_parser.h"
-#include "ps2recomp/r5900_decoder.h"
-#include "ps2recomp/types.h"
 #include <string>
 #include <vector>
 #include <unordered_set>
@@ -14,7 +11,20 @@
 
 namespace ps2recomp
 {
-    class ElfAnalyzer
+	struct CFGNode;
+	struct Instruction;
+	struct FunctionCall;
+	struct JumpTable;
+	struct Relocation;
+	struct Section;
+	struct Symbol;
+	struct Function;
+	class R5900Decoder;
+	class ElfParser;
+
+	using CFG = std::unordered_map<uint32_t, CFGNode>;
+
+	class ElfAnalyzer
     {
     public:
 	    explicit ElfAnalyzer(const std::string &elfPath);
@@ -40,7 +50,6 @@ namespace ps2recomp
  
         std::map<uint32_t, uint32_t> m_patches;
         std::map<uint32_t, std::string> m_patchReasons;
- 
         std::unordered_map<uint32_t, CFG> m_functionCFGs;
         std::vector<JumpTable> m_jumpTables;
         std::unordered_map<uint32_t, std::vector<FunctionCall>> m_functionCalls;

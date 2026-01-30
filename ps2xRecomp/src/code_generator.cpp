@@ -1,5 +1,6 @@
 #include "ps2recomp/code_generator.h"
 #include "ps2recomp/instructions.h"
+#include "ps2recomp/types.h"
 #include <fmt/format.h>
 #include <sstream>
 #include <algorithm>

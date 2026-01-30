@@ -1,7 +1,6 @@
 #ifndef PS2RECOMP_CODE_GENERATOR_H
 #define PS2RECOMP_CODE_GENERATOR_H
 
-#include "ps2recomp/types.h"
 #include <string>
 #include <vector>
 #include <map>
@@ -10,7 +9,12 @@
 
 namespace ps2recomp
 {
-    extern const std::unordered_set<std::string> kKeywords;
+	struct JumpTableEntry;
+	struct Instruction;
+	struct Function;
+	struct Symbol;
+
+	extern const std::unordered_set<std::string> kKeywords;
 
     class CodeGenerator
     {

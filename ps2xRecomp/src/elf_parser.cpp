@@ -1,4 +1,5 @@
 #include "ps2recomp/elf_parser.h"
+#include "ps2recomp/types.h"
 #include <iostream>
 #include <stdexcept>
 

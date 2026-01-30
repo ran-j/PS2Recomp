@@ -1,5 +1,8 @@
 #include "ps2recomp/ps2_recompiler.h"
 #include "ps2recomp/instructions.h"
+#include "ps2recomp/types.h"
+#include "ps2recomp/elf_parser.h"
+#include "ps2recomp/r5900_decoder.h"
 #include "ps2_runtime_calls.h"
 #include <iostream>
 #include <fstream>
@@ -43,6 +46,8 @@ namespace ps2recomp
         : m_configManager(configPath)
     {
     }
+
+    PS2Recompiler::~PS2Recompiler() = default;
 
     bool PS2Recompiler::initialize()
     {
