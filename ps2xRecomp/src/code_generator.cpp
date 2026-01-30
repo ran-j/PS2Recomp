@@ -72,7 +72,7 @@ namespace ps2recomp
 
     static bool isReservedCxxKeyword(const std::string &name)
     {
-        return kKeywords.find(name) != kKeywords.end();
+        return kKeywords.contains(name);
     }
 
     static std::string sanitizeFunctionName(const std::string& name)
@@ -255,7 +255,7 @@ namespace ps2recomp
 
             std::string targetAction;
             std::string funcName = getFunctionName(target);
-            bool isInternalTarget = (internalTargets.find(target) != internalTargets.end());
+            bool isInternalTarget = internalTargets.contains(target);
 
             if (!funcName.empty())
             {
@@ -640,7 +640,7 @@ namespace ps2recomp
             "SetOsdConfigParam", "GetRomName", "sceSifLoadModule",
             "SifSetDChain"};
 
-        if (systemCallNames.find(function.name) != systemCallNames.end())
+        if (systemCallNames.contains(function.name))
         {
             std::string sanitizedName = sanitizeFunctionName(function.name);
             ss << "// System call wrapper for " << function.name << "\n";
@@ -669,7 +669,7 @@ namespace ps2recomp
         {
             const Instruction &inst = instructions[i];
 
-            if (internalTargets.find(inst.address) != internalTargets.end())
+            if (internalTargets.contains(inst.address))
             {
                 ss << "label_" << std::hex << inst.address << std::dec << ":\n";
             }
@@ -682,7 +682,7 @@ namespace ps2recomp
                 {
                     const Instruction &delaySlot = instructions[i + 1];
 
-                    if (internalTargets.find(delaySlot.address) != internalTargets.end())
+                    if (internalTargets.contains(delaySlot.address))
                     {
                         ss << "label_" << std::hex << delaySlot.address << std::dec << ":\n";
                     }
