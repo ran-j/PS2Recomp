@@ -15,7 +15,7 @@ jobs:
     name: windows-msvc-${{ matrix.target_arch }}
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           submodules: recursive
       
@@ -37,7 +37,7 @@ jobs:
         run: |
           .\build\ps2xTest\Release\ps2x_tests.exe
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: PS2Recomp - Windows
           path: |
