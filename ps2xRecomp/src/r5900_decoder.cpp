@@ -12,7 +12,8 @@ namespace ps2recomp
     {
     }
 
-    Instruction R5900Decoder::decodeInstruction(uint32_t address, uint32_t rawInstruction) const {
+    Instruction R5900Decoder::decodeInstruction(uint32_t address, uint32_t rawInstruction) const
+	{
         Instruction inst;
 
         inst.address = address;

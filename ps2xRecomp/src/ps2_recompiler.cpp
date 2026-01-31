@@ -677,7 +677,8 @@ namespace ps2recomp
         return ps2_runtime_calls::isStubName(name);
     }
 
-    std::string PS2Recompiler::generateRuntimeHeader() const {
+    std::string PS2Recompiler::generateRuntimeHeader() const
+	{
         return m_codeGenerator->generateMacroHeader();
     }
 
