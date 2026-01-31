@@ -47,7 +47,6 @@ namespace ps2recomp
         void discoverAdditionalEntryPoints();
         bool shouldSkipFunction(const std::string &name) const;
         bool isStubFunction(const std::string &name) const;
-        std::string generateRuntimeHeader() const;
         bool generateFunctionHeader();
         bool generateStubHeader();
         bool writeToFile(const std::string &path, const std::string &content);

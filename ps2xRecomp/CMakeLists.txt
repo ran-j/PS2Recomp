@@ -29,45 +29,44 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(fmt)
 
-file(GLOB_RECURSE PS2RECOMP_SOURCES
-    "src/*.cpp"
+file(GLOB_RECURSE PS2RECOMP_LIB_SOURCES CONFIGURE_DEPENDS
+    src/lib/*.cpp
 )
 
-file(GLOB_RECURSE PS2RECOMP_HEADERS
-    "include/*.h"
-    "include/*.hpp"
+file(GLOB_RECURSE PS2RECOMP_HEADERS CONFIGURE_DEPENDS
+    include/*.h
+    include/*.hpp
 )
 
-add_executable(ps2recomp ${PS2RECOMP_SOURCES})
+add_library(ps2_recomp_lib STATIC ${PS2RECOMP_LIB_SOURCES} ${PS2RECOMP_HEADERS})
 
-add_library(ps2_recomp STATIC ${PS2RECOMP_SOURCES})
-
-target_include_directories(ps2recomp PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/../ps2xRuntime/include
-    ${elfio_SOURCE_DIR}
-)
-
-target_include_directories(ps2_recomp PUBLIC
+target_include_directories(ps2_recomp_lib
+PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${elfio_SOURCE_DIR}
-)
 
-target_include_directories(ps2_recomp PRIVATE
+PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../ps2xRuntime/include
 )
 
-target_link_libraries(ps2recomp PRIVATE
+target_link_libraries(ps2_recomp_lib
+PUBLIC
     fmt::fmt
     toml11::toml11
 )
 
-target_link_libraries(ps2_recomp PUBLIC
-    fmt::fmt
-    toml11::toml11
+file(GLOB_RECURSE PS2RECOMP_EXE_SOURCES CONFIGURE_DEPENDS
+    src/runner/*.cpp
 )
 
-install(TARGETS ps2recomp ps2_recomp
+add_executable(ps2_recomp ${PS2RECOMP_EXE_SOURCES})
+
+target_link_libraries(ps2_recomp
+PRIVATE
+    ps2_recomp_lib
+)
+
+install(TARGETS ps2_recomp ps2_recomp_lib
     RUNTIME DESTINATION bin
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib

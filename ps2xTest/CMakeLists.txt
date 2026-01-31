@@ -17,5 +17,5 @@ target_include_directories(ps2x_tests PRIVATE
 )
 
 target_link_libraries(ps2x_tests PRIVATE
-    ps2_recomp
+    ps2_recomp_lib
 )

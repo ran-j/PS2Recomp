@@ -8,9 +8,7 @@ option(PS2X_RUNTIME OFF)
 
 add_subdirectory("ps2xRecomp")
 
-if (PS2X_RUNTIME)
-    add_subdirectory("ps2xRuntime")
-endif()
+add_subdirectory("ps2xRuntime")
 
 add_subdirectory("ps2xAnalyzer")
 add_subdirectory("ps2xTest")
