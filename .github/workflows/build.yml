@@ -21,7 +21,7 @@ jobs:
       
       - uses: lukka/get-cmake@latest
 
-      - uses: TheMrMilchmann/setup-msvc-dev@v3
+      - uses: TheMrMilchmann/setup-msvc-dev@v4
         with:
           arch: ${{ matrix.arch }}
 
