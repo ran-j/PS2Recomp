@@ -152,8 +152,6 @@ namespace ps2recomp
         JumpTable jumpTable;
     };
 
-    using CFG = std::unordered_map<uint32_t, CFGNode>;
-
     // Function call
     struct FunctionCall
     {

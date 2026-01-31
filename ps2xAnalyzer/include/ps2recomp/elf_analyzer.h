@@ -1,9 +1,6 @@
 #ifndef PS2RECOMP_ELF_ANALYZER_H
 #define PS2RECOMP_ELF_ANALYZER_H
 
-#include "ps2recomp/elf_parser.h"
-#include "ps2recomp/r5900_decoder.h"
-#include "ps2recomp/types.h"
 #include <string>
 #include <vector>
 #include <unordered_set>
@@ -14,10 +11,23 @@
 
 namespace ps2recomp
 {
-    class ElfAnalyzer
+	struct CFGNode;
+	struct Instruction;
+	struct FunctionCall;
+	struct JumpTable;
+	struct Relocation;
+	struct Section;
+	struct Symbol;
+	struct Function;
+	class R5900Decoder;
+	class ElfParser;
+
+	using CFG = std::unordered_map<uint32_t, CFGNode>;
+
+	class ElfAnalyzer
     {
     public:
-        ElfAnalyzer(const std::string &elfPath);
+	    explicit ElfAnalyzer(const std::string &elfPath);
         ~ElfAnalyzer();
 
         bool analyze();
@@ -40,7 +50,6 @@ namespace ps2recomp
  
         std::map<uint32_t, uint32_t> m_patches;
         std::map<uint32_t, std::string> m_patchReasons;
- 
         std::unordered_map<uint32_t, CFG> m_functionCFGs;
         std::vector<JumpTable> m_jumpTables;
         std::unordered_map<uint32_t, std::vector<FunctionCall>> m_functionCalls;
@@ -52,30 +61,30 @@ namespace ps2recomp
         void identifyPotentialPatches();
         void analyzeControlFlow();
         void detectJumpTables();
-        void analyzePerformanceCriticalPaths();
+        void analyzePerformanceCriticalPaths() const;
         void identifyRecursiveFunctions();
-        void analyzeRegisterUsage();
-        void analyzeFunctionSignatures();
+        void analyzeRegisterUsage() const;
+        void analyzeFunctionSignatures() const;
         void optimizePatches();
  
-        bool identifyMemcpyPattern(const Function &func);
-        bool identifyMemsetPattern(const Function &func);
-        bool identifyStringOperationPattern(const Function &func);
-        bool identifyMathPattern(const Function &func);
+        bool identifyMemcpyPattern(const Function &func) const;
+        bool identifyMemsetPattern(const Function &func) const;
+        bool identifyStringOperationPattern(const Function &func) const;
+        bool identifyMathPattern(const Function &func) const;
  
         bool isSystemFunction(const std::string &name) const;
         bool isLibraryFunction(const std::string &name) const;
-        std::vector<Instruction> decodeFunction(const Function &function);
-        CFG buildCFG(const Function &function);
+        std::vector<Instruction> decodeFunction(const Function &function) const;
+        CFG buildCFG(const Function &function) const;
         std::string formatAddress(uint32_t address) const;
         std::string escapeBackslashes(const std::string &path);
-        bool hasMMIInstructions(const Function &function);
-        bool hasVUInstructions(const Function &function);
+        bool hasMMIInstructions(const Function &function) const;
+        bool hasVUInstructions(const Function &function) const;
         bool identifyFunctionType(const Function &function);
         void categorizeFunction(Function &function);
         uint32_t getSuccessor(const Instruction &inst, uint32_t currentAddr);
-        bool isSelfModifyingCode(const Function &function);
-        bool isLoopHeavyFunction(const Function &function);
+        bool isSelfModifyingCode(const Function &function) const;
+        bool isLoopHeavyFunction(const Function &function) const;
     };
 }
 
