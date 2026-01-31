@@ -161,11 +161,6 @@ namespace ps2recomp
         {
             std::cout << "Recompiling " << m_functions.size() << " functions..." << std::endl;
 
-            std::string runtimeHeader = generateRuntimeHeader();
-            fs::path runtimeHeaderPath = fs::path(m_config.outputPath) / "ps2_runtime_macros.h";
-
-            writeToFile(runtimeHeaderPath.string(), runtimeHeader);
-
             size_t processedCount = 0;
             for (auto &function : m_functions)
             {
@@ -675,11 +670,6 @@ namespace ps2recomp
             return true;
         }
         return ps2_runtime_calls::isStubName(name);
-    }
-
-    std::string PS2Recompiler::generateRuntimeHeader() const
-	{
-        return m_codeGenerator->generateMacroHeader();
     }
 
     bool PS2Recompiler::writeToFile(const std::string &path, const std::string &content)
