@@ -192,7 +192,7 @@ namespace ps2recomp
         const std::vector<std::string> stdLibFuncs = {
             // I/O functions
             "printf", "sprintf", "snprintf", "fprintf", "vprintf", "vfprintf", "vsprintf", "vsnprintf",
-            "puts", "putchar", "getchar", "gets", "fgets", "fputs", "scanf", "fscanf", "sscanf", 
+            "puts", "putchar", "getchar", "gets", "fgets", "fputs", "scanf", "fscanf", "sscanf",
             "sprint", "sbprintf",
 
             // Memory management
@@ -841,26 +841,9 @@ namespace ps2recomp
     {
         std::cout << "Identifying recursive functions..." << std::endl;
 
-        std::unordered_map<std::string, std::set<std::string>> callGraph;
-
-        for (const auto &func : m_functions)
-        {
-            if (m_functionCalls.find(func.start) != m_functionCalls.end())
-            {
-                for (const auto &call : m_functionCalls[func.start])
-                {
-                    callGraph[func.name].insert(call.calleeName);
-                }
-            }
-        }
-
-        for (const auto &func : m_functions)
-        {
-            if (callGraph[func.name].find(func.name) != callGraph[func.name].end())
-            {
-                std::cout << "Function " << func.name << " is directly recursive" << std::endl;
-            }
-        }
+        // lets ignore skip and library
+        std::unordered_set<std::string> eligible;
+        eligible.reserve(m_functions.size());
 
         for (const auto &func : m_functions)
         {
@@ -870,33 +853,137 @@ namespace ps2recomp
                 continue;
             }
 
-            std::set<std::string> visited;
-            std::function<bool(const std::string &)> detectCycle;
+            eligible.insert(func.name);
+        }
 
-            detectCycle = [&](const std::string &currFunc) -> bool
+        std::unordered_map<std::string, std::vector<std::string>> callGraph;
+        callGraph.reserve(eligible.size());
+
+        for (const auto &func : m_functions)
+        {
+            if (eligible.find(func.name) == eligible.end())
             {
-                if (visited.find(currFunc) != visited.end())
+                continue;
+            }
+
+            auto itCalls = m_functionCalls.find(func.start);
+            if (itCalls == m_functionCalls.end())
+            {
+                continue;
+            }
+
+            auto &edges = callGraph[func.name];
+            edges.reserve(itCalls->second.size());
+
+            for (const auto &call : itCalls->second)
+            {
+                // non-eligible nodes to graph.
+                if (eligible.find(call.calleeName) == eligible.end())
                 {
-                    return currFunc == func.name;
+                    continue;
                 }
 
-                visited.insert(currFunc);
+                edges.push_back(call.calleeName);
+            }
+        }
 
-                for (const auto &callee : callGraph[currFunc])
+        std::unordered_map<std::string, int> index;
+        std::unordered_map<std::string, int> lowlink;
+        std::unordered_set<std::string> onStack;
+        std::vector<std::string> stack;
+
+        index.reserve(eligible.size());
+        lowlink.reserve(eligible.size());
+        onStack.reserve(eligible.size());
+        stack.reserve(eligible.size());
+
+        int currentIndex = 0;
+
+        std::vector<std::vector<std::string>> sccs;
+        sccs.reserve(256);
+
+        std::function<void(const std::string &)> strongconnect;
+        strongconnect = [&](const std::string &v)
+        {
+            index[v] = currentIndex;
+            lowlink[v] = currentIndex;
+            currentIndex++;
+
+            stack.push_back(v);
+            onStack.insert(v);
+
+            auto it = callGraph.find(v);
+            if (it != callGraph.end())
+            {
+                for (const auto &w : it->second)
                 {
-                    if (detectCycle(callee))
+                    if (index.find(w) == index.end())
                     {
-                        return true;
+                        strongconnect(w);
+                        lowlink[v] = std::min(lowlink[v], lowlink[w]);
+                    }
+                    else if (onStack.find(w) != onStack.end())
+                    {
+                        lowlink[v] = std::min(lowlink[v], index[w]);
+                    }
+                }
+            }
+
+            if (lowlink[v] == index[v])
+            {
+                std::vector<std::string> scc;
+                while (!stack.empty())
+                {
+                    std::string w = stack.back();
+                    stack.pop_back();
+                    onStack.erase(w);
+
+                    scc.push_back(w);
+                    if (w == v)
+                    {
+                        break;
                     }
                 }
 
-                visited.erase(currFunc);
-                return false;
-            };
+                sccs.push_back(std::move(scc));
+            }
+        };
 
-            if (detectCycle(func.name))
+        for (const auto &name : eligible)
+        {
+            if (index.find(name) == index.end())
             {
-                std::cout << "Function " << func.name << " is part of a mutually recursive cycle" << std::endl;
+                strongconnect(name);
+            }
+        }
+
+        // SCC size > 1 -> mutual recursion
+        // SCC size == 1 -> direct recursion if it calls itself
+        for (const auto &scc : sccs)
+        {
+            if (scc.size() > 1)
+            {
+                for (const auto &name : scc)
+                {
+                    std::cout << "Function " << name << " is part of a mutually recursive cycle" << std::endl;
+                }
+                continue;
+            }
+
+            const std::string &name = scc[0];
+            auto it = callGraph.find(name);
+            if (it == callGraph.end())
+            {
+                continue;
+            }
+
+            for (const auto &callee : it->second)
+            {
+                if (callee == name)
+                {
+                    std::cout << "Function " << name << " is directly recursive" << std::endl;
+                    break;
+                }
             }
         }
     }

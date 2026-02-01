@@ -28,6 +28,24 @@ FetchContent_Declare(
     GIT_TAG 12.1.0
 )
 FetchContent_MakeAvailable(fmt)
+ 
+FetchContent_Declare(
+    libdwarf
+    GIT_REPOSITORY https://github.com/davea42/libdwarf-code.git
+    GIT_TAG v2.2.0
+    GIT_SHALLOW TRUE
+)
+
+set(BUILD_DWARFDUMP    OFF CACHE BOOL "" FORCE)
+set(BUILD_DWARFEXAMPLE OFF CACHE BOOL "" FORCE)
+set(BUILD_DWARFGEN     OFF CACHE BOOL "" FORCE)
+
+set(BUILD_SHARED   OFF CACHE BOOL "" FORCE)
+set(BUILD_NON_SHARED ON CACHE BOOL "" FORCE)
+
+FetchContent_MakeAvailable(libdwarf)
+
+set(LIBDWARF_INCLUDE_DIR "${libdwarf_SOURCE_DIR}/src/lib/libdwarf")
 
 file(GLOB_RECURSE PS2RECOMP_SOURCES
     "src/*.cpp"
@@ -39,18 +57,22 @@ file(GLOB_RECURSE PS2RECOMP_HEADERS
 )
 
 add_executable(ps2recomp ${PS2RECOMP_SOURCES})
-
 add_library(ps2_recomp STATIC ${PS2RECOMP_SOURCES})
+
+target_compile_definitions(ps2_recomp PUBLIC LIBDWARF_STATIC)
+target_compile_definitions(ps2recomp PRIVATE LIBDWARF_STATIC)
 
 target_include_directories(ps2recomp PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../ps2xRuntime/include
     ${elfio_SOURCE_DIR}
+    ${LIBDWARF_INCLUDE_DIR}
 )
 
 target_include_directories(ps2_recomp PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${elfio_SOURCE_DIR}
+    ${LIBDWARF_INCLUDE_DIR}
 )
 
 target_include_directories(ps2_recomp PRIVATE
@@ -59,12 +81,14 @@ target_include_directories(ps2_recomp PRIVATE
 
 target_link_libraries(ps2recomp PRIVATE
     fmt::fmt
-    toml11::toml11
+    toml11::toml11 
+    dwarf
 )
 
 target_link_libraries(ps2_recomp PUBLIC
     fmt::fmt
     toml11::toml11
+    dwarf
 )
 
 install(TARGETS ps2recomp ps2_recomp
