@@ -160,7 +160,7 @@ namespace ps2recomp
         else if (branchInst.isBranch)
         {
             std::string conditionStr = "false";
-            std::string linkCode = "";
+            std::string linkCode;
 
             switch (branchInst.opcode)
             {
@@ -277,7 +277,7 @@ namespace ps2recomp
                              (branchInst.opcode == OPCODE_COP1 && branchInst.rs == COP1_BC && (branchInst.rt == COP1_BC_BCFL || branchInst.rt == COP1_BC_BCTL)) ||
                              (branchInst.opcode == OPCODE_COP2 && branchInst.rs == COP2_BC && (branchInst.rt == COP2_BC_BCFL || branchInst.rt == COP2_BC_BCTL)));
 
-            if (linkCode != "")
+            if (!linkCode.empty())
             {
                 ss << "    " << linkCode << "\n";
             }
@@ -2229,11 +2229,11 @@ namespace ps2recomp
 
             if (function.isStub)
             {
-                stubFunctions.push_back({function.start, generatedName});
+                stubFunctions.emplace_back(function.start, generatedName);
             }
             else
             {
-                normalFunctions.push_back({function.start, generatedName});
+                normalFunctions.emplace_back(function.start, generatedName);
             }
         }
 
@@ -2245,31 +2245,31 @@ namespace ps2recomp
         }
 
         ss << "    // Register recompiled functions\n";
-        for (const auto &function : normalFunctions)
+        for (const auto & [first, second] : normalFunctions)
         {
-            ss << "    runtime.registerFunction(0x" << std::hex << function.first << std::dec
-               << ", " << function.second << ");\n";
+            ss << "    runtime.registerFunction(0x" << std::hex << first << std::dec
+               << ", " << second << ");\n";
         }
 
         ss << "\n    // Register stub functions\n";
-        for (const auto &function : stubFunctions)
+        for (const auto & [first, second] : stubFunctions)
         {
-            ss << "    runtime.registerFunction(0x" << std::hex << function.first << std::dec
-               << ", " << function.second << ");\n";
+            ss << "    runtime.registerFunction(0x" << std::hex << first << std::dec
+               << ", " << second << ");\n";
         }
 
         ss << "\n    // Register system call stubs\n";
-        for (const auto &function : systemCallFunctions)
+        for (const auto & [first, second] : systemCallFunctions)
         {
-            ss << "    runtime.registerFunction(0x" << std::hex << function.first << std::dec
-               << ", " << function.second << ");\n";
+            ss << "    runtime.registerFunction(0x" << std::hex << first << std::dec
+               << ", " << second << ");\n";
         }
 
         ss << "\n    // Register library stubs\n";
-        for (const auto &function : libraryFunctions)
+        for (const auto & [first, second] : libraryFunctions)
         {
-            ss << "    runtime.registerFunction(0x" << std::hex << function.first << std::dec
-               << ", " << function.second << ");\n";
+            ss << "    runtime.registerFunction(0x" << std::hex << first << std::dec
+               << ", " << second << ");\n";
         }
 
         ss << "}\n";
@@ -2286,18 +2286,18 @@ namespace ps2recomp
 
         ss << "switch (ctx->r[" << indexReg << "]) {\n";
 
-        for (const auto &entry : entries)
+        for (const auto & [index, target] : entries)
         {
-            ss << "    case " << entry.index << ": {\n";
+            ss << "    case " << index << ": {\n";
 
-            std::string funcName = getFunctionName(entry.target);
+            std::string funcName = getFunctionName(target);
             if (!funcName.empty())
             {
                 ss << "        " << funcName << "(rdram, ctx, runtime);\n";
             }
             else
             {
-                ss << "        func_" << std::hex << entry.target << std::dec << "(rdram, ctx,  runtime);\n";
+                ss << "        func_" << std::hex << target << std::dec << "(rdram, ctx,  runtime);\n";
             }
 
             ss << "        return;\n";
