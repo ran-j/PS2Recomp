@@ -45,6 +45,7 @@ namespace ps2recomp
  
         std::unordered_set<std::string> m_libFunctions;
         std::unordered_set<std::string> m_skipFunctions;
+        std::unordered_set<std::string> m_knownLibNames;
         std::unordered_map<std::string, std::set<std::string>> m_functionDataUsage;
         std::unordered_map<uint32_t, std::string> m_commonDataAccess;
  

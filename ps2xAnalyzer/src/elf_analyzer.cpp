@@ -236,7 +236,7 @@ namespace ps2recomp
             // Extra string helpers
             "strnlen", "strspn", "strcspn", "strcasecmp", "strncasecmp"};
 
-        m_libFunctions.insert(stdLibFuncs.begin(), stdLibFuncs.end());
+        m_knownLibNames.insert(stdLibFuncs.begin(), stdLibFuncs.end());
     }
 
     void ElfAnalyzer::analyzeEntryPoint()
@@ -307,6 +307,18 @@ namespace ps2recomp
                 {
                     m_skipFunctions.insert(symbol.name);
                 }
+            }
+        }
+
+        for (const auto &func : m_functions)
+        {
+            if (isLibraryFunction(func.name))
+            {
+                m_libFunctions.insert(func.name);
+            }
+            else if (isSystemFunction(func.name))
+            {
+                m_skipFunctions.insert(func.name);
             }
         }
     }
@@ -1637,6 +1649,9 @@ namespace ps2recomp
     {
         if (name.empty())
             return false;
+
+        if (m_knownLibNames.find(name) != m_knownLibNames.end())
+            return true;
 
         if (hasPs2ApiPrefix(name))
             return true;
