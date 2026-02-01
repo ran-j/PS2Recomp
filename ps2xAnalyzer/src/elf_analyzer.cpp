@@ -1229,6 +1229,9 @@ namespace ps2recomp
             patchAddrs.push_back(patch.first);
         }
 
+        if (patchAddrs.size() == 0)
+            return;
+
         std::sort(patchAddrs.begin(), patchAddrs.end());
 
         for (size_t i = 0; i < patchAddrs.size() - 1; i++)
