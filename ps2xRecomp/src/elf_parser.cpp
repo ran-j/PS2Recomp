@@ -465,7 +465,7 @@ namespace ps2recomp
             func.isRecompiled = false;
             func.isStub = false;
 
-            functions.push_back(func);
+            addOrMerge(func);
         }
 
         for (const auto &func : m_extraFunctions)
