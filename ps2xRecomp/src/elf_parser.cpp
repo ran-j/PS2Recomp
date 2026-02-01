@@ -667,6 +667,12 @@ namespace ps2recomp
 
             if (psec->get_type() == ELFIO::SHT_SYMTAB || psec->get_type() == ELFIO::SHT_DYNSYM)
             {
+                if (psec->get_link() >= m_elf->sections.size())
+                {
+                    std::cerr << "Warning: Symbol section link out of bounds: " << psec->get_link() << std::endl;
+                    continue;
+                }
+
                 ELFIO::symbol_section_accessor symbols(*m_elf, psec);
 
                 ELFIO::Elf_Xword sym_num = symbols.get_symbols_num();
@@ -716,9 +722,22 @@ namespace ps2recomp
 
             if (psec->get_type() == ELFIO::SHT_REL || psec->get_type() == ELFIO::SHT_RELA)
             {
+                if (psec->get_link() >= m_elf->sections.size())
+                {
+                    std::cout << "Warning: Relocation section link out of bounds: " << psec->get_link() << std::endl;
+                    continue;
+                }
+
                 ELFIO::relocation_section_accessor relocs(*m_elf, psec);
 
                 ELFIO::section *symSec = m_elf->sections[psec->get_link()];
+                
+                if (symSec->get_link() >= m_elf->sections.size())
+                {
+                    std::cout << "Warning: Symbol section link out of bounds (in relocation): " << symSec->get_link() << std::endl;
+                    continue;
+                }
+
                 ELFIO::symbol_section_accessor symbols(*m_elf, symSec);
 
                 ELFIO::section *strSec = m_elf->sections[symSec->get_link()];
@@ -761,7 +780,6 @@ namespace ps2recomp
     void ElfParser::loadDebugFunctions()
     {
         m_extraFunctions.clear();
-        bool hasDebugSection = false;
 
         if (HasDwarfSections(*m_elf))
         {
@@ -778,7 +796,6 @@ namespace ps2recomp
                 const int initResult = dwarf_init_b(fileDescriptor, DW_GROUPNUMBER_BASE, nullptr, nullptr, &dbg, &error);
                 if (initResult == DW_DLV_OK)
                 {
-                    hasDebugSection = true;
                     for (;;)
                     {
                         Dwarf_Unsigned cuHeaderLength = 0;
@@ -831,7 +848,7 @@ namespace ps2recomp
             }
         }
 
-        if (!hasDebugSection && m_extraFunctions.empty())
+        if (m_extraFunctions.empty())
         {
             ScanJalTargetsFallback(this, m_extraFunctions);
         }
