@@ -14,7 +14,7 @@ namespace ps2recomp
         R5900Decoder();
         ~R5900Decoder();
 
-        Instruction decodeInstruction(uint32_t address, uint32_t rawInstruction);
+        Instruction decodeInstruction(uint32_t address, uint32_t rawInstruction) const;
 
         bool isBranchInstruction(const Instruction &inst) const;
         bool isJumpInstruction(const Instruction &inst) const;

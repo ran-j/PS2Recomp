@@ -1,11 +1,8 @@
 #ifndef PS2RECOMP_PS2_RECOMPILER_H
 #define PS2RECOMP_PS2_RECOMPILER_H
 
-#include "ps2recomp/types.h"
-#include "ps2recomp/elf_parser.h"
-#include "ps2recomp/r5900_decoder.h"
-#include "ps2recomp/code_generator.h"
-#include "ps2recomp/config_manager.h"
+#include "code_generator.h"
+#include "config_manager.h"
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -14,12 +11,14 @@
 
 namespace ps2recomp
 {
+	class R5900Decoder;
+	class ElfParser;
 
-    class PS2Recompiler
+	class PS2Recompiler
     {
     public:
-        PS2Recompiler(const std::string &configPath);
-        ~PS2Recompiler() = default;
+	    explicit PS2Recompiler(const std::string &configPath);
+        ~PS2Recompiler();
 
         bool initialize();
         bool recompile();
@@ -48,7 +47,6 @@ namespace ps2recomp
         void discoverAdditionalEntryPoints();
         bool shouldSkipFunction(const std::string &name) const;
         bool isStubFunction(const std::string &name) const;
-        std::string generateRuntimeHeader();
         bool generateFunctionHeader();
         bool generateStubHeader();
         bool writeToFile(const std::string &path, const std::string &content);

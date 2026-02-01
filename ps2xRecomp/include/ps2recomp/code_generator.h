@@ -1,7 +1,6 @@
 #ifndef PS2RECOMP_CODE_GENERATOR_H
 #define PS2RECOMP_CODE_GENERATOR_H
 
-#include "ps2recomp/types.h"
 #include <string>
 #include <vector>
 #include <map>
@@ -10,12 +9,17 @@
 
 namespace ps2recomp
 {
-    extern const std::unordered_set<std::string> kKeywords;
+	struct JumpTableEntry;
+	struct Instruction;
+	struct Function;
+	struct Symbol;
+
+	extern const std::unordered_set<std::string> kKeywords;
 
     class CodeGenerator
     {
     public:
-        CodeGenerator(const std::vector<Symbol> &symbols);
+	    explicit CodeGenerator(const std::vector<Symbol> &symbols);
         ~CodeGenerator();
 
         struct BootstrapInfo
@@ -29,7 +33,6 @@ namespace ps2recomp
 
         std::string generateFunction(const Function &function, const std::vector<Instruction> &instructions, const bool &useHeaders);
         std::string generateFunctionRegistration(const std::vector<Function> &functions, const std::map<uint32_t, std::string> &stubs);
-        std::string generateMacroHeader();
         std::string handleBranchDelaySlots(const Instruction &branchInst, const Instruction &delaySlot,
                                            const Function &function, const std::unordered_set<uint32_t> &internalTargets);
 

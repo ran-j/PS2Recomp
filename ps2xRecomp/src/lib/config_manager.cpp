@@ -14,8 +14,8 @@ namespace ps2recomp
 
     ConfigManager::~ConfigManager() = default;
 
-    RecompilerConfig ConfigManager::loadConfig()
-    {
+    RecompilerConfig ConfigManager::loadConfig() const
+	{
         RecompilerConfig config;
 
         try
@@ -58,8 +58,8 @@ namespace ps2recomp
         return config;
     }
 
-    void ConfigManager::saveConfig(const RecompilerConfig &config)
-    {
+    void ConfigManager::saveConfig(const RecompilerConfig &config) const
+	{
         toml::value data;
 
         toml::table general;
@@ -77,11 +77,11 @@ namespace ps2recomp
 
         toml::table patches;
         toml::array instPatches;
-        for (const auto &patch : config.patches)
+        for (const auto & [addr, value] : config.patches)
         {
             toml::table p;
-            p["address"] = "0x" + std::to_string(patch.first);
-            p["value"] = patch.second;
+            p["address"] = "0x" + std::to_string(addr);
+            p["value"] = value;
             instPatches.push_back(p);
         }
         patches["instructions"] = instPatches;

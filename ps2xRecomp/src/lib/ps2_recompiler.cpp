@@ -1,5 +1,8 @@
 #include "ps2recomp/ps2_recompiler.h"
 #include "ps2recomp/instructions.h"
+#include "ps2recomp/types.h"
+#include "ps2recomp/elf_parser.h"
+#include "ps2recomp/r5900_decoder.h"
 #include "ps2_runtime_calls.h"
 #include <iostream>
 #include <fstream>
@@ -43,6 +46,8 @@ namespace ps2recomp
         : m_configManager(configPath)
     {
     }
+
+    PS2Recompiler::~PS2Recompiler() = default;
 
     bool PS2Recompiler::initialize()
     {
@@ -155,11 +160,6 @@ namespace ps2recomp
         try
         {
             std::cout << "Recompiling " << m_functions.size() << " functions..." << std::endl;
-
-            std::string runtimeHeader = generateRuntimeHeader();
-            fs::path runtimeHeaderPath = fs::path(m_config.outputPath) / "ps2_runtime_macros.h";
-
-            writeToFile(runtimeHeaderPath.string(), runtimeHeader);
 
             size_t processedCount = 0;
             for (auto &function : m_functions)
@@ -558,7 +558,7 @@ namespace ps2recomp
                     continue;
                 }
 
-                if (existingStarts.find(target) != existingStarts.end())
+                if (existingStarts.contains(target))
                 {
                     continue;
                 }
@@ -660,21 +660,16 @@ namespace ps2recomp
 
     bool PS2Recompiler::shouldSkipFunction(const std::string &name) const
     {
-        return m_skipFunctions.find(name) != m_skipFunctions.end();
+        return m_skipFunctions.contains(name);
     }
 
     bool PS2Recompiler::isStubFunction(const std::string &name) const
     {
-        if (m_stubFunctions.find(name) != m_stubFunctions.end())
+        if (m_stubFunctions.contains(name))
         {
             return true;
         }
         return ps2_runtime_calls::isStubName(name);
-    }
-
-    std::string PS2Recompiler::generateRuntimeHeader()
-    {
-        return m_codeGenerator->generateMacroHeader();
     }
 
     bool PS2Recompiler::writeToFile(const std::string &path, const std::string &content)
@@ -724,7 +719,7 @@ namespace ps2recomp
             return "ps2_main";
         }
 
-        if (ps2recomp::kKeywords.find(sanitized) != ps2recomp::kKeywords.end())
+        if (ps2recomp::kKeywords.contains(sanitized))
         {
             return "ps2_" + sanitized;
         }

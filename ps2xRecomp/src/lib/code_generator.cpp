@@ -1,5 +1,6 @@
 #include "ps2recomp/code_generator.h"
 #include "ps2recomp/instructions.h"
+#include "ps2recomp/types.h"
 #include <fmt/format.h>
 #include <sstream>
 #include <algorithm>
@@ -72,7 +73,7 @@ namespace ps2recomp
 
     static bool isReservedCxxKeyword(const std::string &name)
     {
-        return kKeywords.find(name) != kKeywords.end();
+        return kKeywords.contains(name);
     }
 
     static std::string sanitizeFunctionName(const std::string& name)
@@ -147,14 +148,14 @@ namespace ps2recomp
             uint8_t link_reg = (branchInst.function == SPECIAL_JALR) ? ((rd_reg == 0) ? 31 : rd_reg) : 0;
             if (link_reg != 0)
             {
-                ss << "    SET_GPR_U32(ctx, " << (int)link_reg << ", 0x" << std::hex << (branchInst.address + 8) << ");\n"
+                ss << "    SET_GPR_U32(ctx, " << static_cast<int>(link_reg) << ", 0x" << std::hex << (branchInst.address + 8) << ");\n"
                    << std::dec;
             }
             if (hasValidDelaySlot)
             {
                 ss << "    " << delaySlotCode << "\n";
             }
-            ss << "    ctx->pc = GPR_U32(ctx, " << (int)rs_reg << "); return;\n";
+            ss << "    ctx->pc = GPR_U32(ctx, " << static_cast<int>(rs_reg) << "); return;\n";
         }
         else if (branchInst.isBranch)
         {
@@ -255,7 +256,7 @@ namespace ps2recomp
 
             std::string targetAction;
             std::string funcName = getFunctionName(target);
-            bool isInternalTarget = (internalTargets.find(target) != internalTargets.end());
+            bool isInternalTarget = internalTargets.contains(target);
 
             if (!funcName.empty())
             {
@@ -314,268 +315,6 @@ namespace ps2recomp
     }
 
     CodeGenerator::~CodeGenerator() = default;
-
-    std::string CodeGenerator::generateMacroHeader()
-    {
-        std::stringstream ss;
-
-        ss << "#ifndef PS2_RUNTIME_MACROS_H\n";
-        ss << "#define PS2_RUNTIME_MACROS_H\n\n";
-        ss << "#include <cstdint>\n";
-        ss << "#include <immintrin.h> // For SSE/AVX intrinsics\n\n";
-        ss << "#include <intrin.h>\n\n";
-        ss << "inline uint32_t ps2_clz32(uint32_t val) {\n";
-        ss << "#if defined(_MSC_VER)\n";
-        ss << "    unsigned long idx;\n";
-        ss << "    if (_BitScanReverse(&idx, val)) {\n";
-        ss << "        return 31u - idx;\n";
-        ss << "    }\n";
-        ss << "    return 32u;\n";
-        ss << "#else\n";
-        ss << "    return val == 0 ? 32u : (uint32_t)__builtin_clz(val);\n";
-        ss << "#endif\n";
-        ss << "}\n\n";
-
-        ss << "// Basic MIPS arithmetic operations\n";
-        ss << "#define ADD32(a, b) ((uint32_t)((a) + (b)))\n";
-        ss << "#define ADD32_OV(rs, rt, result32, overflow)         \
-            do {                                                    \
-                int32_t _a = (int32_t)(rs);                         \
-                int32_t _b = (int32_t)(rt);                         \
-                int32_t _r = _a + _b;                               \
-                overflow = (((_a ^ _b) >= 0) && ((_a ^ _r) < 0));   \
-                result32 = (uint32_t)_r;                            \
-            } while (0);\n";
-        ss << "#define SUB32(a, b) ((uint32_t)((a) - (b)))\n";
-        ss << "#define SUB32_OV(rs, rt, result32, overflow)         \
-            do {                                                    \
-                int32_t _a = (int32_t)(rs);                         \
-                int32_t _b = (int32_t)(rt);                         \
-                int32_t _r = _a - _b;                               \
-                overflow = (((_a ^ _b) < 0) && ((_a ^ _r) < 0));    \
-                result32 = (uint32_t)_r;                            \
-            } while (0);\n";
-        ss << "#define MUL32(a, b) ((uint32_t)((a) * (b)))\n";
-        ss << "#define DIV32(a, b) ((uint32_t)((a) / (b)))\n";
-        ss << "#define AND32(a, b) ((uint32_t)((a) & (b)))\n";
-        ss << "#define OR32(a, b) ((uint32_t)((a) | (b)))\n";
-        ss << "#define XOR32(a, b) ((uint32_t)((a) ^ (b)))\n";
-        ss << "#define NOR32(a, b) ((uint32_t)(~((a) | (b))))\n";
-        ss << "#define SLL32(a, b) ((uint32_t)((a) << (b)))\n";
-        ss << "#define SRL32(a, b) ((uint32_t)((a) >> (b)))\n";
-        ss << "#define SRA32(a, b) ((uint32_t)((int32_t)(a) >> (b)))\n";
-        ss << "#define SLT32(a, b) ((uint32_t)((int32_t)(a) < (int32_t)(b) ? 1 : 0))\n";
-        ss << "#define SLTU32(a, b) ((uint32_t)((a) < (b) ? 1 : 0))\n\n";
-
-        ss << "// PS2-specific 128-bit MMI operations\n";
-        ss << "#define PS2_PEXTLW(a, b) _mm_unpacklo_epi32((__m128i)(b), (__m128i)(a))\n";
-        ss << "#define PS2_PEXTUW(a, b) _mm_unpackhi_epi32((__m128i)(b), (__m128i)(a))\n";
-        ss << "#define PS2_PEXTLH(a, b) _mm_unpacklo_epi16((__m128i)(b), (__m128i)(a))\n";
-        ss << "#define PS2_PEXTUH(a, b) _mm_unpackhi_epi16((__m128i)(b), (__m128i)(a))\n";
-        ss << "#define PS2_PEXTLB(a, b) _mm_unpacklo_epi8((__m128i)(b), (__m128i)(a))\n";
-        ss << "#define PS2_PEXTUB(a, b) _mm_unpackhi_epi8((__m128i)(b), (__m128i)(a))\n";
-        ss << "#define PS2_PADDW(a, b) _mm_add_epi32((__m128i)(a), (__m128i)(b))\n";
-        ss << "#define PS2_PSUBW(a, b) _mm_sub_epi32((__m128i)(a), (__m128i)(b))\n";
-        ss << "#define PS2_PMAXW(a, b) _mm_max_epi32((__m128i)(a), (__m128i)(b))\n";
-        ss << "#define PS2_PMINW(a, b) _mm_min_epi32((__m128i)(a), (__m128i)(b))\n";
-        ss << "#define PS2_PADDH(a, b) _mm_add_epi16((__m128i)(a), (__m128i)(b))\n";
-        ss << "#define PS2_PSUBH(a, b) _mm_sub_epi16((__m128i)(a), (__m128i)(b))\n";
-        ss << "#define PS2_PMAXH(a, b) _mm_max_epi16((__m128i)(a), (__m128i)(b))\n";
-        ss << "#define PS2_PMINH(a, b) _mm_min_epi16((__m128i)(a), (__m128i)(b))\n";
-        ss << "#define PS2_PADDB(a, b) _mm_add_epi8((__m128i)(a), (__m128i)(b))\n";
-        ss << "#define PS2_PSUBB(a, b) _mm_sub_epi8((__m128i)(a), (__m128i)(b))\n";
-        ss << "#define PS2_PAND(a, b) _mm_and_si128((__m128i)(a), (__m128i)(b))\n";
-        ss << "#define PS2_POR(a, b) _mm_or_si128((__m128i)(a), (__m128i)(b))\n";
-        ss << "#define PS2_PXOR(a, b) _mm_xor_si128((__m128i)(a), (__m128i)(b))\n";
-        ss << "#define PS2_PNOR(a, b) _mm_xor_si128(_mm_or_si128((__m128i)(a), (__m128i)(b)), _mm_set1_epi32(0xFFFFFFFF))\n\n";
-
-        ss << "// PS2 VU (Vector Unit) operations\n";
-        ss << "#define PS2_VADD(a, b) _mm_add_ps((__m128)(a), (__m128)(b))\n";
-        ss << "#define PS2_VSUB(a, b) _mm_sub_ps((__m128)(a), (__m128)(b))\n";
-        ss << "#define PS2_VMUL(a, b) _mm_mul_ps((__m128)(a), (__m128)(b))\n";
-        ss << "#define PS2_VDIV(a, b) _mm_div_ps((__m128)(a), (__m128)(b))\n";
-        ss << "#define PS2_VMULQ(a, q) _mm_mul_ps((__m128)(a), _mm_set1_ps(q))\n\n";
-
-        ss << "// Memory access helpers\n";
-        ss << "#define READ8(addr) (*(uint8_t*)((rdram) + ((addr) & PS2_RAM_MASK)))\n";
-        ss << "#define READ16(addr) (*(uint16_t*)((rdram) + ((addr) & PS2_RAM_MASK)))\n";
-        ss << "#define READ32(addr) (*(uint32_t*)((rdram) + ((addr) & PS2_RAM_MASK)))\n";
-        ss << "#define READ64(addr) (*(uint64_t*)((rdram) + ((addr) & PS2_RAM_MASK)))\n";
-        ss << "#define READ128(addr) (*((__m128i*)((rdram) + ((addr) & PS2_RAM_MASK))))\n";
-        ss << "#define WRITE8(addr, val) (*(uint8_t*)((rdram) + ((addr) & PS2_RAM_MASK)) = (val))\n";
-        ss << "#define WRITE16(addr, val) (*(uint16_t*)((rdram) + ((addr) & PS2_RAM_MASK)) = (val))\n";
-        ss << "#define WRITE32(addr, val) (*(uint32_t*)((rdram) + ((addr) & PS2_RAM_MASK)) = (val))\n";
-        ss << "#define WRITE64(addr, val) (*(uint64_t*)((rdram) + ((addr) & PS2_RAM_MASK)) = (val))\n";
-        ss << "#define WRITE128(addr, val) (*((__m128i*)((rdram) + ((addr) & PS2_RAM_MASK))) = (val))\n\n";
-
-        // ss << "// Function lookup for indirect calls\n";
-        // ss << "#define LOOKUP_FUNC(addr, runtime) runtime->lookupFunction(addr)\n\n";
-
-        // Packed Compare Greater Than (PCGT)
-        ss << "#define PS2_PCGTW(a, b) _mm_cmpgt_epi32((__m128i)(a), (__m128i)(b))\n";
-        ss << "#define PS2_PCGTH(a, b) _mm_cmpgt_epi16((__m128i)(a), (__m128i)(b))\n";
-        ss << "#define PS2_PCGTB(a, b) _mm_cmpgt_epi8((__m128i)(a), (__m128i)(b))\n";
-
-        // Packed Compare Equal (PCEQ)
-        ss << "#define PS2_PCEQW(a, b) _mm_cmpeq_epi32((__m128i)(a), (__m128i)(b))\n";
-        ss << "#define PS2_PCEQH(a, b) _mm_cmpeq_epi16((__m128i)(a), (__m128i)(b))\n";
-        ss << "#define PS2_PCEQB(a, b) _mm_cmpeq_epi8((__m128i)(a), (__m128i)(b))\n";
-
-        // Packed Absolute (PABS)
-        ss << "#define PS2_PABSW(a) _mm_abs_epi32((__m128i)(a))\n";
-        ss << "#define PS2_PABSH(a) _mm_abs_epi16((__m128i)(a))\n";
-        ss << "#define PS2_PABSB(a) _mm_abs_epi8((__m128i)(a))\n";
-
-        // Packed Pack (PPAC) - Packs larger elements into smaller ones
-        ss << "#define PS2_PPACW(a, b) _mm_packs_epi32((__m128i)(b), (__m128i)(a))\n";
-        ss << "#define PS2_PPACH(a, b) _mm_packs_epi16((__m128i)(b), (__m128i)(a))\n";
-        ss << "#define PS2_PPACB(a, b) _mm_packus_epi16(_mm_packs_epi32((__m128i)(b), (__m128i)(a)), _mm_setzero_si128())\n";
-
-        // Packed Interleave (PINT)
-        ss << "#define PS2_PINTH(a, b) _mm_unpacklo_epi16(_mm_shuffle_epi32((__m128i)(b), _MM_SHUFFLE(3,2,1,0)), _mm_shuffle_epi32((__m128i)(a), _MM_SHUFFLE(3,2,1,0)))\n";
-        ss << "#define PS2_PINTEH(a, b) _mm_unpackhi_epi16(_mm_shuffle_epi32((__m128i)(b), _MM_SHUFFLE(3,2,1,0)), _mm_shuffle_epi32((__m128i)(a), _MM_SHUFFLE(3,2,1,0)))\n";
-
-        // Packed Multiply-Add (PMADD)
-        ss << "#define PS2_PMADDW(a, b) _mm_add_epi32(_mm_mullo_epi32(_mm_shuffle_epi32((__m128i)(a), _MM_SHUFFLE(1,0,3,2)), _mm_shuffle_epi32((__m128i)(b), _MM_SHUFFLE(1,0,3,2))), _mm_mullo_epi32(_mm_shuffle_epi32((__m128i)(a), _MM_SHUFFLE(3,2,1,0)), _mm_shuffle_epi32((__m128i)(b), _MM_SHUFFLE(3,2,1,0))))\n";
-
-        // Packed Variable Shifts
-        ss << "#define PS2_PSLLVW(a, b) _mm_custom_sllv_epi32((__m128i)(a), (__m128i)(b))\n";
-        ss << "#define PS2_PSRLVW(a, b) _mm_custom_srlv_epi32((__m128i)(a), (__m128i)(b))\n";
-        ss << "#define PS2_PSRAVW(a, b) _mm_custom_srav_epi32((__m128i)(a), (__m128i)(b))\n";
-
-        // Helper function declarations for custom variable shifts
-        ss << "inline __m128i _mm_custom_sllv_epi32(__m128i a, __m128i count) {\n";
-        ss << "    int32_t a_arr[4], count_arr[4], result[4];\n";
-        ss << "    _mm_storeu_si128((__m128i*)a_arr, a);\n";
-        ss << "    _mm_storeu_si128((__m128i*)count_arr, count);\n";
-        ss << "    for (int i = 0; i < 4; i++) {\n";
-        ss << "        result[i] = a_arr[i] << (count_arr[i] & 0x1F);\n";
-        ss << "    }\n";
-        ss << "    return _mm_loadu_si128((__m128i*)result);\n";
-        ss << "}\n\n";
-
-        ss << "inline __m128i _mm_custom_srlv_epi32(__m128i a, __m128i count) {\n";
-        ss << "    int32_t a_arr[4], count_arr[4], result[4];\n";
-        ss << "    _mm_storeu_si128((__m128i*)a_arr, a);\n";
-        ss << "    _mm_storeu_si128((__m128i*)count_arr, count);\n";
-        ss << "    for (int i = 0; i < 4; i++) {\n";
-        ss << "        result[i] = (uint32_t)a_arr[i] >> (count_arr[i] & 0x1F);\n";
-        ss << "    }\n";
-        ss << "    return _mm_loadu_si128((__m128i*)result);\n";
-        ss << "}\n\n";
-
-        ss << "inline __m128i _mm_custom_srav_epi32(__m128i a, __m128i count) {\n";
-        ss << "    int32_t a_arr[4], count_arr[4], result[4];\n";
-        ss << "    _mm_storeu_si128((__m128i*)a_arr, a);\n";
-        ss << "    _mm_storeu_si128((__m128i*)count_arr, count);\n";
-        ss << "    for (int i = 0; i < 4; i++) {\n";
-        ss << "        result[i] = a_arr[i] >> (count_arr[i] & 0x1F);\n";
-        ss << "    }\n";
-        ss << "    return _mm_loadu_si128((__m128i*)result);\n";
-        ss << "}\n\n";
-
-        // PMFHL function implementations
-        ss << "#define PS2_PMFHL_LW(hi, lo) _mm_unpacklo_epi64(lo, hi)\n";
-        ss << "#define PS2_PMFHL_UW(hi, lo) _mm_unpackhi_epi64(lo, hi)\n";
-        ss << "#define PS2_PMFHL_SLW(hi, lo) _mm_packs_epi32(lo, hi)\n";
-        ss << "#define PS2_PMFHL_LH(hi, lo) _mm_shuffle_epi32(_mm_packs_epi32(lo, hi), _MM_SHUFFLE(3,1,2,0))\n";
-        ss << "#define PS2_PMFHL_SH(hi, lo) _mm_shufflehi_epi16(_mm_shufflelo_epi16(_mm_packs_epi32(lo, hi), _MM_SHUFFLE(3,1,2,0)), _MM_SHUFFLE(3,1,2,0))\n";
-
-        ss << "// FPU (COP1) operations\n";
-        ss << "#define FPU_ADD_S(a, b) ((float)(a) + (float)(b))\n";
-        ss << "#define FPU_SUB_S(a, b) ((float)(a) - (float)(b))\n";
-        ss << "#define FPU_MUL_S(a, b) ((float)(a) * (float)(b))\n";
-        ss << "#define FPU_DIV_S(a, b) ((float)(a) / (float)(b))\n";
-        ss << "#define FPU_SQRT_S(a) sqrtf((float)(a))\n";
-        ss << "#define FPU_ABS_S(a) fabsf((float)(a))\n";
-        ss << "#define FPU_MOV_S(a) ((float)(a))\n";
-        ss << "#define FPU_NEG_S(a) (-(float)(a))\n";
-        ss << "#define FPU_ROUND_L_S(a) ((int64_t)roundf((float)(a)))\n";
-        ss << "#define FPU_TRUNC_L_S(a) ((int64_t)(float)(a))\n";
-        ss << "#define FPU_CEIL_L_S(a) ((int64_t)ceilf((float)(a)))\n";
-        ss << "#define FPU_FLOOR_L_S(a) ((int64_t)floorf((float)(a)))\n";
-        ss << "#define FPU_ROUND_W_S(a) ((int32_t)roundf((float)(a)))\n";
-        ss << "#define FPU_TRUNC_W_S(a) ((int32_t)(float)(a))\n";
-        ss << "#define FPU_CEIL_W_S(a) ((int32_t)ceilf((float)(a)))\n";
-        ss << "#define FPU_FLOOR_W_S(a) ((int32_t)floorf((float)(a)))\n";
-        ss << "#define FPU_CVT_S_W(a) ((float)(int32_t)(a))\n";
-        ss << "#define FPU_CVT_S_L(a) ((float)(int64_t)(a))\n";
-        ss << "#define FPU_CVT_W_S(a) ((int32_t)(float)(a))\n";
-        ss << "#define FPU_CVT_L_S(a) ((int64_t)(float)(a))\n";
-        ss << "#define FPU_C_F_S(a, b) (0)\n";
-        ss << "#define FPU_C_UN_S(a, b) (isnan((float)(a)) || isnan((float)(b)))\n";
-        ss << "#define FPU_C_EQ_S(a, b) ((float)(a) == (float)(b))\n";
-        ss << "#define FPU_C_UEQ_S(a, b) ((float)(a) == (float)(b) || isnan((float)(a)) || isnan((float)(b)))\n";
-        ss << "#define FPU_C_OLT_S(a, b) ((float)(a) < (float)(b))\n";
-        ss << "#define FPU_C_ULT_S(a, b) ((float)(a) < (float)(b) || isnan((float)(a)) || isnan((float)(b)))\n";
-        ss << "#define FPU_C_OLE_S(a, b) ((float)(a) <= (float)(b))\n";
-        ss << "#define FPU_C_ULE_S(a, b) ((float)(a) <= (float)(b) || isnan((float)(a)) || isnan((float)(b)))\n";
-        ss << "#define FPU_C_SF_S(a, b) (0)\n";
-        ss << "#define FPU_C_NGLE_S(a, b) (isnan((float)(a)) || isnan((float)(b)))\n";
-        ss << "#define FPU_C_SEQ_S(a, b) ((float)(a) == (float)(b))\n";
-        ss << "#define FPU_C_NGL_S(a, b) ((float)(a) == (float)(b) || isnan((float)(a)) || isnan((float)(b)))\n";
-        ss << "#define FPU_C_LT_S(a, b) ((float)(a) < (float)(b))\n";
-        ss << "#define FPU_C_NGE_S(a, b) ((float)(a) < (float)(b) || isnan((float)(a)) || isnan((float)(b)))\n";
-        ss << "#define FPU_C_LE_S(a, b) ((float)(a) <= (float)(b))\n";
-        ss << "#define FPU_C_NGT_S(a, b) ((float)(a) <= (float)(b) || isnan((float)(a)) || isnan((float)(b)))\n\n";
-
-        ss << "#define PS2_QFSRV(rs, rt, sa) _mm_or_si128(_mm_srl_epi32(rt, _mm_cvtsi32_si128(sa)), _mm_sll_epi32(rs, _mm_cvtsi32_si128(32 - sa)))\n";
-        ss << "#define PS2_PCPYLD(rs, rt) _mm_unpacklo_epi64(rt, rs)\n";
-        ss << "#define PS2_PEXEH(rs) _mm_shufflelo_epi16(_mm_shufflehi_epi16(rs, _MM_SHUFFLE(2, 3, 0, 1)), _MM_SHUFFLE(2, 3, 0, 1))\n";
-        ss << "#define PS2_PEXEW(rs) _mm_shuffle_epi32(rs, _MM_SHUFFLE(2, 3, 0, 1))\n";
-        ss << "#define PS2_PROT3W(rs) _mm_shuffle_epi32(rs, _MM_SHUFFLE(0, 3, 2, 1))\n";
-
-        ss << "// Additional VU0 operations\n";
-        ss << "#define PS2_VSQRT(x) sqrtf(x)\n";
-        ss << "#define PS2_VRSQRT(x) (1.0f / sqrtf(x))\n";
-        ss << "#define PS2_VCALLMS(addr) // VU0 microprogram calls not supported directly\n";
-        ss << "#define PS2_VCALLMSR(reg) // VU0 microprogram calls not supported directly\n";
-
-        ss << "#define GPR_U32(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0U : ctx_ptr->r[reg_idx].m128i_u32[0])\n";
-        ss << "#define GPR_S32(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0 : ctx_ptr->r[reg_idx].m128i_i32[0])\n";
-        ss << "#define GPR_U64(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0ULL : ctx_ptr->r[reg_idx].m128i_u64[0])\n";
-        ss << "#define GPR_S64(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0LL : ctx_ptr->r[reg_idx].m128i_i64[0])\n";
-        ss << "#define GPR_VEC(ctx_ptr, reg_idx) ((reg_idx == 0) ? _mm_setzero_si128() : ctx_ptr->r[reg_idx])\n";
-
-        ss << "#define SET_GPR_U32(ctx_ptr, reg_idx, val) \\\n";
-        ss << "    do                                     \\\n";
-        ss << "    {                                      \\\n";
-        ss << "        if (reg_idx != 0)                  \\\n";
-        ss << "            ctx_ptr->r[reg_idx] = _mm_set_epi32(0, 0, 0, (val)); \\\n";
-        ss << "    } while (0)\n";
-
-        ss << "#define SET_GPR_S32(ctx_ptr, reg_idx, val) \\\n";
-        ss << "    do                                     \\\n";
-        ss << "    {                                      \\\n";
-        ss << "        if (reg_idx != 0)                  \\\n";
-        ss << "            ctx_ptr->r[reg_idx] = _mm_set_epi32(0, 0, 0, (val)); \\\n";
-        ss << "    } while (0)\n";
-
-        ss << "#define SET_GPR_U64(ctx_ptr, reg_idx, val) \\\n";
-        ss << "    do                                     \\\n";
-        ss << "    {                                      \\\n";
-        ss << "        if (reg_idx != 0)                  \\\n";
-        ss << "            ctx_ptr->r[reg_idx] = _mm_set_epi64x(0, (val)); \\\n";
-        ss << "    } while (0)\n";
-
-        ss << "#define SET_GPR_S64(ctx_ptr, reg_idx, val) \\\n";
-        ss << "    do                                     \\\n";
-        ss << "    {                                      \\\n";
-        ss << "        if (reg_idx != 0)                  \\\n";
-        ss << "            ctx_ptr->r[reg_idx] = _mm_set_epi64x(0, (val)); \\\n";
-        ss << "    } while (0)\n";
-
-        ss << "#define SET_GPR_VEC(ctx_ptr, reg_idx, val) \\\n";
-        ss << "    do                                     \\\n";
-        ss << "    {                                      \\\n";
-        ss << "        if (reg_idx != 0)                  \\\n";
-        ss << "            ctx_ptr->r[reg_idx] = (val); \\\n";
-        ss << "    } while (0)\n";
-
-        ss << "#endif // PS2_RUNTIME_MACROS_H\n";
-
-        return ss.str();
-    }
 
     std::unordered_set<uint32_t> CodeGenerator::collectInternalBranchTargets(
         const Function &function, const std::vector<Instruction> &instructions)
@@ -640,7 +379,7 @@ namespace ps2recomp
             "SetOsdConfigParam", "GetRomName", "sceSifLoadModule",
             "SifSetDChain"};
 
-        if (systemCallNames.find(function.name) != systemCallNames.end())
+        if (systemCallNames.contains(function.name))
         {
             std::string sanitizedName = sanitizeFunctionName(function.name);
             ss << "// System call wrapper for " << function.name << "\n";
@@ -669,7 +408,7 @@ namespace ps2recomp
         {
             const Instruction &inst = instructions[i];
 
-            if (internalTargets.find(inst.address) != internalTargets.end())
+            if (internalTargets.contains(inst.address))
             {
                 ss << "label_" << std::hex << inst.address << std::dec << ":\n";
             }
@@ -682,7 +421,7 @@ namespace ps2recomp
                 {
                     const Instruction &delaySlot = instructions[i + 1];
 
-                    if (internalTargets.find(delaySlot.address) != internalTargets.end())
+                    if (internalTargets.contains(delaySlot.address))
                     {
                         ss << "label_" << std::hex << delaySlot.address << std::dec << ":\n";
                     }
@@ -2234,7 +1973,7 @@ namespace ps2recomp
         // VCALLMS calls a VU0 microprogram at the specified immediate address.
         // VU0 micro memory is 4KB = 512 instructions (8 bytes each). Index is 0-511.
         uint16_t instr_index = inst.immediate & 0x1FF;          // Mask to 9 bits for VU0
-        uint32_t target_byte_addr = (uint32_t)instr_index << 3; // Convert instruction index to byte address
+        uint32_t target_byte_addr = static_cast<uint32_t>(instr_index) << 3; // Convert instruction index to byte address
 
         return fmt::format(
             "{{ "

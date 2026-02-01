@@ -1,6 +1,7 @@
 #include "MiniTest.h"
 #include "ps2recomp/code_generator.h"
 #include "ps2recomp/instructions.h"
+#include "ps2recomp/types.h"
 
 using namespace ps2recomp;
 
