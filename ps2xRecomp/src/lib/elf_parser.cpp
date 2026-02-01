@@ -46,7 +46,6 @@ namespace
         {
             const ELFIO::section *section = elf.sections[i];
             const std::string &name = section->get_name();
-            // TODO check for more sections
             if (name.rfind(".debug_", 0) == 0 || name.rfind(".zdebug_", 0) == 0)
             {
                 return true;
@@ -413,7 +412,7 @@ namespace ps2recomp
     }
 
     std::vector<Function> ElfParser::extractFunctions() const
-	{
+    {
         std::vector<Function> functions;
         functions.reserve(m_symbols.size() + m_extraFunctions.size());
 
@@ -557,7 +556,7 @@ namespace ps2recomp
     }
 
     uint8_t *ElfParser::getSectionData(const std::string &sectionName) const
-	{
+    {
         for (const auto &section : m_sections)
         {
             if (section.name == sectionName)
@@ -570,7 +569,7 @@ namespace ps2recomp
     }
 
     uint32_t ElfParser::getSectionAddress(const std::string &sectionName) const
-	{
+    {
         for (const auto &section : m_sections)
         {
             if (section.name == sectionName)
@@ -583,7 +582,7 @@ namespace ps2recomp
     }
 
     uint32_t ElfParser::getSectionSize(const std::string &sectionName) const
-	{
+    {
         for (const auto &section : m_sections)
         {
             if (section.name == sectionName)
@@ -732,7 +731,7 @@ namespace ps2recomp
                 ELFIO::relocation_section_accessor relocs(*m_elf, psec);
 
                 ELFIO::section *symSec = m_elf->sections[psec->get_link()];
-                
+
                 if (symSec->get_link() >= m_elf->sections.size())
                 {
                     std::cout << "Warning: Symbol section link out of bounds (in relocation): " << symSec->get_link() << std::endl;

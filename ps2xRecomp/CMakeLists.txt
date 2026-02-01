@@ -65,8 +65,12 @@ file(GLOB_RECURSE PS2RECOMP_HEADERS CONFIGURE_DEPENDS
 
 add_library(ps2_recomp_lib STATIC ${PS2RECOMP_LIB_SOURCES} ${PS2RECOMP_HEADERS})
 
-target_compile_definitions(ps2_recomp_lib PUBLIC LIBDWARF_STATIC)
-target_compile_definitions(ps2_recomp_lib PRIVATE LIBDWARF_STATIC)
+target_compile_definitions(ps2_recomp_lib
+PUBLIC
+    LIBDWARF_STATIC
+PRIVATE
+    LIBDWARF_STATIC
+)
 
 target_include_directories(ps2_recomp_lib
 PUBLIC

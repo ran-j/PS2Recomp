@@ -136,14 +136,14 @@ namespace ps2recomp
             file << "# Jump tables detected in the program\n";
             file << "[jump_tables]\n";
 
-            for (const auto & jt : m_jumpTables)
+            for (const auto &jt : m_jumpTables)
             {
                 file << "[[jump_tables.table]]\n";
                 file << "address = \"0x" << std::hex << jt.address << "\"\n"
                      << std::dec;
                 file << "entries = [\n";
 
-                for (const auto & [index, target] : jt.entries)
+                for (const auto &[index, target] : jt.entries)
                 {
                     file << "  { index = " << index << ", target = \"0x"
                          << std::hex << target << "\" },\n"
@@ -782,7 +782,7 @@ namespace ps2recomp
     }
 
     void ElfAnalyzer::analyzePerformanceCriticalPaths() const
-	{
+    {
         std::cout << "Analyzing performance-critical paths..." << std::endl;
 
         for (const auto &func : m_functions)
@@ -795,9 +795,9 @@ namespace ps2recomp
 
             std::vector<Instruction> instructions = decodeFunction(func);
 
-            for (const auto& inst : instructions)
+            for (const auto &inst : instructions)
             {
-            	if (inst.isBranch)
+                if (inst.isBranch)
                 {
                     int32_t offset = static_cast<int16_t>(inst.immediate) << 2;
                     uint32_t targetAddr = inst.address + 4 + offset;
@@ -814,7 +814,7 @@ namespace ps2recomp
                                       << " (size: " << loopSize << " instructions)" << std::endl;
 
                             bool hasMultimedia = false;
-                            for (const auto& instruction : instructions)
+                            for (const auto &instruction : instructions)
                             {
                                 if (instruction.address >= targetAddr && instruction.address <= inst.address)
                                 {
@@ -861,7 +861,7 @@ namespace ps2recomp
 
         for (const auto &func : m_functions)
         {
-            if (eligible.find(func.name) == eligible.end())
+            if (eligible.contains(func.name))
             {
                 continue;
             }
@@ -878,7 +878,7 @@ namespace ps2recomp
             for (const auto &call : itCalls->second)
             {
                 // non-eligible nodes to graph.
-                if (eligible.find(call.calleeName) == eligible.end())
+                if (eligible.contains(call.calleeName))
                 {
                     continue;
                 }
@@ -917,12 +917,12 @@ namespace ps2recomp
             {
                 for (const auto &w : it->second)
                 {
-                    if (index.find(w) == index.end())
+                    if (index.contains(w))
                     {
                         strongconnect(w);
                         lowlink[v] = std::min(lowlink[v], lowlink[w]);
                     }
-                    else if (onStack.find(w) != onStack.end())
+                    else if (onStack.contains(w))
                     {
                         lowlink[v] = std::min(lowlink[v], index[w]);
                     }
@@ -951,7 +951,7 @@ namespace ps2recomp
 
         for (const auto &name : eligible)
         {
-            if (index.find(name) == index.end())
+            if (index.contains(name))
             {
                 strongconnect(name);
             }
@@ -989,7 +989,7 @@ namespace ps2recomp
     }
 
     void ElfAnalyzer::analyzeRegisterUsage() const
-	{
+    {
         std::cout << "Analyzing register usage patterns..." << std::endl;
 
         for (const auto &func : m_functions)
@@ -1088,7 +1088,7 @@ namespace ps2recomp
     }
 
     void ElfAnalyzer::analyzeFunctionSignatures() const
-	{
+    {
         std::cout << "Analyzing function signatures..." << std::endl;
 
         for (const auto &func : m_functions)
@@ -1251,7 +1251,7 @@ namespace ps2recomp
     }
 
     bool ElfAnalyzer::identifyMemcpyPattern(const Function &func) const
-	{
+    {
         std::vector<Instruction> instructions = decodeFunction(func);
 
         bool hasLoop = false;
@@ -1259,7 +1259,7 @@ namespace ps2recomp
         bool storesData = false;
         bool incrementsPointers = false;
 
-        for (const auto & inst : instructions)
+        for (const auto &inst : instructions)
         {
             if (inst.isBranch)
             {
@@ -1295,7 +1295,7 @@ namespace ps2recomp
     }
 
     bool ElfAnalyzer::identifyMemsetPattern(const Function &func) const
-	{
+    {
         std::vector<Instruction> instructions = decodeFunction(func);
 
         bool hasLoop = false;
@@ -1303,7 +1303,7 @@ namespace ps2recomp
         bool storesData = false;
         bool incrementsPointer = false;
 
-        for (const auto & inst : instructions)
+        for (const auto &inst : instructions)
         {
             if (inst.isBranch)
             {
@@ -1338,7 +1338,7 @@ namespace ps2recomp
     }
 
     bool ElfAnalyzer::identifyStringOperationPattern(const Function &func) const
-	{
+    {
         std::vector<Instruction> instructions = decodeFunction(func);
 
         bool hasLoop = false;
@@ -1346,7 +1346,7 @@ namespace ps2recomp
         bool loadsByte = false;
         bool storesByte = false;
 
-        for (const auto & inst : instructions)
+        for (const auto &inst : instructions)
         {
             if (inst.isBranch)
             {
@@ -1378,7 +1378,7 @@ namespace ps2recomp
     }
 
     bool ElfAnalyzer::identifyMathPattern(const Function &func) const
-	{
+    {
         std::vector<Instruction> instructions = decodeFunction(func);
 
         int mathOps = 0;
@@ -1409,7 +1409,7 @@ namespace ps2recomp
     }
 
     CFG ElfAnalyzer::buildCFG(const Function &function) const
-	{
+    {
         CFG cfg;
         std::vector<Instruction> instructions = decodeFunction(function);
         std::map<uint32_t, size_t> addrToIndex;
@@ -1652,7 +1652,7 @@ namespace ps2recomp
     }
 
     std::vector<Instruction> ElfAnalyzer::decodeFunction(const Function &function) const
-	{
+    {
         std::vector<Instruction> instructions;
 
         for (uint32_t addr = function.start; addr < function.end; addr += 4)
@@ -1687,7 +1687,7 @@ namespace ps2recomp
     }
 
     bool ElfAnalyzer::hasMMIInstructions(const Function &function) const
-	{
+    {
         std::vector<Instruction> instructions = decodeFunction(function);
 
         for (const auto &inst : instructions)
@@ -1702,7 +1702,7 @@ namespace ps2recomp
     }
 
     bool ElfAnalyzer::hasVUInstructions(const Function &function) const
-	{
+    {
         std::vector<Instruction> instructions = decodeFunction(function);
 
         for (const auto &inst : instructions)
@@ -1719,7 +1719,7 @@ namespace ps2recomp
     bool ElfAnalyzer::identifyFunctionType(const Function &function)
     {
         if (m_libFunctions.contains(function.name) ||
-        	m_skipFunctions.contains(function.name))
+            m_skipFunctions.contains(function.name))
         {
             return false;
         }
@@ -1770,11 +1770,11 @@ namespace ps2recomp
             return true;
         }
 
-    	if (hasComplexMMI && isVeryLarge)
+        if (hasComplexMMI && isVeryLarge)
         {
-	        m_skipFunctions.insert(function.name);
-	        std::cout << "Skipping large function " << function.name << " with complex MMI" << std::endl;
-	        return true;
+            m_skipFunctions.insert(function.name);
+            std::cout << "Skipping large function " << function.name << " with complex MMI" << std::endl;
+            return true;
         }
 
         return false;
@@ -1800,7 +1800,7 @@ namespace ps2recomp
     }
 
     bool ElfAnalyzer::isSelfModifyingCode(const Function &function) const
-	{
+    {
         std::vector<Instruction> instructions = decodeFunction(function);
 
         for (size_t i = 0; i < instructions.size(); i++)
@@ -1846,11 +1846,11 @@ namespace ps2recomp
     }
 
     bool ElfAnalyzer::isLoopHeavyFunction(const Function &function) const
-	{
+    {
         std::vector<Instruction> instructions = decodeFunction(function);
         int loopCount = 0;
 
-        for (const auto & inst : instructions)
+        for (const auto &inst : instructions)
         {
             if (inst.isBranch)
             {
@@ -1874,9 +1874,9 @@ namespace ps2recomp
             return currentAddr + 4 + offset;
         }
 
-    	if (inst.opcode == OPCODE_J || inst.opcode == OPCODE_JAL)
+        if (inst.opcode == OPCODE_J || inst.opcode == OPCODE_JAL)
         {
-	        return (currentAddr & 0xF0000000) | (inst.target << 2);
+            return (currentAddr & 0xF0000000) | (inst.target << 2);
         }
 
         return currentAddr + 4;
