@@ -46,14 +46,20 @@ cmake --build .
 ```
 ### Usage
 
-1. Create a configuration file (see `./ps2xRecomp/example_config.toml`)
-2. Run the recompiler: 
+1. **Analyze the ELF**: Use the `ps2_analyzer` tool to generate an initial configuration.
+```bash
+./ps2_analyzer your_game.elf config.toml
 ```
-./ps2recomp your_config.toml
+*For better results on retail games, see the [Ghidra Workflow](ps2xAnalyzer/Readme.md#3-ghidra-integration-recommended-for-complex-games).*
+
+2. **Recompile**: Run the recompiler using the generated configuration.
+```bash
+./ps2recomp config.toml
 ```
 
-Compile the generated C++ code
-Link with a runtime implementation
+3. **Compile Output**: 
+* Compile the generated C++ code in the `output/` directory.
+* Link with the `ps2xRuntime` implementation.
 
 ### Configuration
 PS2Recomp uses TOML configuration files to specify:

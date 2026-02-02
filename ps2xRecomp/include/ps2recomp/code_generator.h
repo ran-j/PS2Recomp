@@ -29,6 +29,7 @@ namespace ps2recomp
             uint32_t bssStart = 0;
             uint32_t bssEnd = 0;
             uint32_t gp = 0;
+            std::string entryName;
         };
 
         std::string generateFunction(const Function &function, const std::vector<Instruction> &instructions, const bool &useHeaders);
@@ -121,9 +122,9 @@ namespace ps2recomp
                                             const std::vector<JumpTableEntry> &entries);
         std::string generateBootstrapFunction() const;
 
-        Symbol *findSymbolByAddress(uint32_t address);
-        std::string getFunctionName(uint32_t address);
-        std::string getGeneratedFunctionName(const Function &function);
+        const Symbol *findSymbolByAddress(uint32_t address) const;
+        std::string getFunctionName(uint32_t address) const;
+        std::string sanitizeFunctionName(const std::string& name) const;
     };
 
 }
