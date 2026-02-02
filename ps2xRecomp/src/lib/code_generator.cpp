@@ -28,6 +28,20 @@ namespace ps2recomp
 
 namespace ps2recomp
 {
+    static bool isReservedCxxIdentifier(const std::string& name)
+    {
+        if (name.size() >= 2 && name[0] == '_' && name[1] == '_')
+            return true;
+        if (!name.empty() && name[0] == '_' && std::isupper(static_cast<unsigned char>(name[1])))
+            return true;
+        return false;
+    }
+
+    static bool isReservedCxxKeyword(const std::string& name)
+    {
+        return kKeywords.contains(name);
+    }
+
     CodeGenerator::CodeGenerator(const std::vector<Symbol> &symbols)
     {
         for (auto &symbol : symbols)
@@ -57,27 +71,13 @@ namespace ps2recomp
         const Symbol *sym = findSymbolByAddress(address);
         if (sym && sym->isFunction)
         {
-            return sym->name;
+            return CodeGenerator::sanitizeFunctionName(sym->name);
         }
 
         return "";
-    }
+    }    
 
-    static bool isReservedCxxIdentifier(const std::string &name)
-    {
-        if (name.size() >= 2 && name[0] == '_' && name[1] == '_')
-            return true;
-        if (!name.empty() && name[0] == '_' && std::isupper(static_cast<unsigned char>(name[1])))
-            return true;
-        return false;
-    }
-
-    static bool isReservedCxxKeyword(const std::string &name)
-    {
-        return kKeywords.contains(name);
-    }
-
-    static std::string sanitizeFunctionName(const std::string &name)
+    std::string CodeGenerator::sanitizeFunctionName(const std::string &name) const
     {
         std::string sanitized = name;
 
@@ -94,16 +94,6 @@ namespace ps2recomp
             return sanitized;
 
         return "ps2_" + sanitized;
-    }
-
-    std::string CodeGenerator::getGeneratedFunctionName(const Function &function)
-    {
-        std::string name = getFunctionName(function.start);
-        if (name.empty())
-        {
-            name = sanitizeFunctionName(function.name);
-        }
-        return name;
     }
 
     std::string CodeGenerator::handleBranchDelaySlots(const Instruction &branchInst, const Instruction &delaySlot,
@@ -131,10 +121,13 @@ namespace ps2recomp
             std::string funcName = getFunctionName(target);
             if (!funcName.empty())
             {
-                ss << "    " << funcName << "(rdram, ctx, runtime);\n";
                 if (branchInst.opcode == OPCODE_J)
                 {
-                    ss << "    return;\n";
+                    ss << "    " << funcName << "(rdram, ctx, runtime); return;\n";
+                }
+                else
+                {
+                    ss << "    " << funcName << "(rdram, ctx, runtime);\n";
                 }
             }
             else
@@ -402,7 +395,13 @@ namespace ps2recomp
 
         ss << "// Function: " << function.name << "\n";
         ss << "// Address: 0x" << std::hex << function.start << " - 0x" << function.end << std::dec << "\n";
-        std::string sanitizedName = getGeneratedFunctionName(function);
+        std::string sanitizedName = getFunctionName(function.start);
+        if (sanitizedName.empty())
+        {
+            std::stringstream nameBuilder;
+            nameBuilder << "Errorfunc_" << std::hex << function.start; // this should never happen but lets put here just to track
+            sanitizedName = nameBuilder.str();
+        }
         ss << "void " << sanitizedName << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime) {\n\n";
 
         for (size_t i = 0; i < instructions.size(); ++i)
@@ -2226,7 +2225,7 @@ namespace ps2recomp
             if (!function.isRecompiled && !function.isStub)
                 continue;
 
-            std::string generatedName = getGeneratedFunctionName(function);
+            std::string generatedName = getFunctionName(function.start);
 
             if (function.isStub)
             {
@@ -2246,28 +2245,28 @@ namespace ps2recomp
         }
 
         ss << "    // Register recompiled functions\n";
-        for (const auto & [first, second] : normalFunctions)
+        for (const auto &[first, second] : normalFunctions)
         {
             ss << "    runtime.registerFunction(0x" << std::hex << first << std::dec
                << ", " << second << ");\n";
         }
 
         ss << "\n    // Register stub functions\n";
-        for (const auto & [first, second] : stubFunctions)
+        for (const auto &[first, second] : stubFunctions)
         {
             ss << "    runtime.registerFunction(0x" << std::hex << first << std::dec
                << ", " << second << ");\n";
         }
 
         ss << "\n    // Register system call stubs\n";
-        for (const auto & [first, second] : systemCallFunctions)
+        for (const auto &[first, second] : systemCallFunctions)
         {
             ss << "    runtime.registerFunction(0x" << std::hex << first << std::dec
                << ", " << second << ");\n";
         }
 
         ss << "\n    // Register library stubs\n";
-        for (const auto & [first, second] : libraryFunctions)
+        for (const auto &[first, second] : libraryFunctions)
         {
             ss << "    runtime.registerFunction(0x" << std::hex << first << std::dec
                << ", " << second << ");\n";
@@ -2287,7 +2286,7 @@ namespace ps2recomp
 
         ss << "switch (ctx->r[" << indexReg << "]) {\n";
 
-        for (const auto & [index, target] : entries)
+        for (const auto &[index, target] : entries)
         {
             ss << "    case " << index << ": {\n";
 
