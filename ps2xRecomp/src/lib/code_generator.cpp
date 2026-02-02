@@ -121,10 +121,13 @@ namespace ps2recomp
             std::string funcName = getFunctionName(target);
             if (!funcName.empty())
             {
-                ss << "    " << funcName << "(rdram, ctx, runtime);\n";
                 if (branchInst.opcode == OPCODE_J)
                 {
-                    ss << "    return;\n";
+                    ss << "    " << funcName << "(rdram, ctx, runtime); return;\n";
+                }
+                else
+                {
+                    ss << "    " << funcName << "(rdram, ctx, runtime);\n";
                 }
             }
             else
@@ -393,6 +396,12 @@ namespace ps2recomp
         ss << "// Function: " << function.name << "\n";
         ss << "// Address: 0x" << std::hex << function.start << " - 0x" << function.end << std::dec << "\n";
         std::string sanitizedName = getFunctionName(function.start);
+        if (sanitizedName.empty())
+        {
+            std::stringstream nameBuilder;
+            nameBuilder << "Errorfunc_" << std::hex << function.start; // this should never happen but lets put here just to track
+            sanitizedName = nameBuilder.str();
+        }
         ss << "void " << sanitizedName << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime) {\n\n";
 
         for (size_t i = 0; i < instructions.size(); ++i)

@@ -113,6 +113,33 @@ namespace ps2recomp
                                                 RabbitizerInstrDescriptor_modifiesHI(desc) ||
                                                 RabbitizerInstrDescriptor_modifiesLO(desc);
 
+        if (rabbitizerInst.uniqueId == RABBITIZER_INSTR_ID_cpu_eret)
+        {
+            inst.isReturn = true;
+            inst.hasDelaySlot = false;
+            inst.modificationInfo.modifiesControl = true;
+        }
+
+        if (inst.opcode == OPCODE_LL || inst.opcode == OPCODE_LLD)
+        {
+            inst.isLoad = true;
+            inst.modificationInfo.modifiesControl = true;
+            if (inst.rt != 0)
+            {
+                inst.modificationInfo.modifiesGPR = true;
+            }
+        }
+
+        if (inst.opcode == OPCODE_SC || inst.opcode == OPCODE_SCD)
+        {
+            inst.isStore = true;
+            inst.modificationInfo.modifiesControl = true;
+            if (inst.rt != 0)
+            {
+                inst.modificationInfo.modifiesGPR = true; // success flag to rt
+            }
+        }
+
         if (inst.opcode == OPCODE_COP2)
         {
             decodeCOP2(inst);
