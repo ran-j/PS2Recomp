@@ -15,7 +15,7 @@ namespace ps2recomp
     ConfigManager::~ConfigManager() = default;
 
     RecompilerConfig ConfigManager::loadConfig() const
-	{
+    {
         RecompilerConfig config;
 
         try
@@ -24,6 +24,7 @@ namespace ps2recomp
             auto data = toml::parse(m_configPath);
 
             config.inputPath = toml::find<std::string>(data, "general", "input");
+            config.ghidraMapPath = toml::find<std::string>(data, "general", "ghidra_output");
             config.outputPath = toml::find<std::string>(data, "general", "output");
             config.singleFileOutput = toml::find<bool>(data, "general", "single_file_output");
             config.stubImplementations = toml::find<std::vector<std::string>>(data, "general", "stubs");
@@ -59,7 +60,7 @@ namespace ps2recomp
     }
 
     void ConfigManager::saveConfig(const RecompilerConfig &config) const
-	{
+    {
         toml::value data;
 
         toml::table general;
@@ -77,7 +78,7 @@ namespace ps2recomp
 
         toml::table patches;
         toml::array instPatches;
-        for (const auto & [addr, value] : config.patches)
+        for (const auto &[addr, value] : config.patches)
         {
             toml::table p;
             p["address"] = "0x" + std::to_string(addr);

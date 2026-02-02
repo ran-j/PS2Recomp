@@ -1,6 +1,26 @@
 # PS2 ELF Analyzer Tool
 
-The PS2 ELF Analyzer Tool helps automate the process of creating TOML configuration files for the PS2Recomp static recompiler. It analyzes PlayStation 2 ELF files and generates a recommended configuration based on the binary's characteristics.
+The PS2 ELF Analyzer Tool automates the creation of TOML configuration files for the PS2Recomp static recompiler. It identifies function boundaries, library stubs, and problematic instructions.
+
+## Analysis Paths
+
+The analyzer supports three distinct paths for discovering code within a PS2 binary:
+
+### 1. DWARF Debug Information
+If the ELF was compiled with debug symbols (`-g`), the analyzer uses `libdwarf` to extract perfect function names and exact start/end addresses. This is common in homebrew or early development builds.
+
+### 2. Native Heuristic Scanner (Retail/Stripped)
+For commercial games where symbols are stripped, the analyzer uses a "JAL Scanner":
+* It scans executable sections for `JAL` (Jump and Link) instructions.
+* It infers function start points based on jump targets.
+* It generates names like `sub_XXXXXXXX`.
+
+### 3. Ghidra Integration (For Complex Games)
+For the highest accuracy in stripped games, you can use Ghidra's superior analysis engine:
+1. Use the provided script: `ps2xRecomp/tools/ghidra/ExportPS2Functions.py` or `.java`.
+2. Run it in Ghidra to export a CSV map of all functions.
+3. Add the CSV path to your TOML: `ghidra_output = "path/to/map.csv"`.
+4. The recompiler will prioritize Ghidra's boundaries over its own heuristics.
 
 ## Key Features
 
@@ -15,70 +35,29 @@ The PS2 ELF Analyzer Tool helps automate the process of creating TOML configurat
 ps2_analyzer <input_elf> <output_toml>
 ```
 
-### Where:
+### Parameters:
 
-* `input_elf` is the path to the PS2 ELF file you want to analyze
-* `output_toml` is the path where the generated TOML configuration will be saved
+* `input_elf`: Path to the PS2 ELF file.
+* `output_toml`: Path where the generated TOML configuration will be saved.
 
-## Example:
-```bash
-ps2_analyzer path/to/your/ps2_game.elf config.toml
-```
-
-## How It Works
-The analyzer performs the following steps:
-
-* Parses the ELF file using the same ElfParser used by PS2Recomp
-* Extracts functions, symbols, sections, and relocations
-* Analyzes the entry point to understand initialization patterns
-* Identifies library functions by name patterns and signatures
-* Maps the call graph to understand relationships between functions
-* Analyzes data usage patterns (basic implementation)
-* Scans for problematic instructions that might need patching
-* Generates a TOML configuration file with all findings
+## Example Workflow
+1. Run the analyzer on your game:
+   `ps2_analyzer game.elf config.toml`
+2. (Optional) Open `game.elf` in Ghidra, run the export script, and update `config.toml` with the CSV path.
+3. Run the recompiler:
+   `ps2recomp config.toml`
 
 ## Generated Configuration
 The tool creates a TOML file with the following sections:
-```toml
-[general]
-input = "path/to/your/ps2_game.elf"
-output = "output/"
-single_file_output = false
-runtime_header = "include/ps2_runtime.h"
-
-stubs = [
-  # List of identified library functions to stub
-  "printf",
-  "malloc",
-  # ...
-]
-
-skip = [
-  # List of system functions to skip
-  "entry",
-  "_start",
-  # ...
-]
-
-[patches]
-instructions = [
-  # Potential instruction patches
-  { address = "0x100008", value = "0x00000000" },
-  # ...
-]
-```
-
-## Extending the Analyzer
-The analyzer is designed to be extensible. You can enhance its capabilities by:
-
-* Adding more library function patterns in initializeLibraryFunctions()
-* Improving the call graph analysis in analyzeCallGraph()
-* Enhancing data usage pattern detection in analyzeDataUsage()
-* Refining patch detection logic in identifyPotentialPatches()
+* `[general]`: Paths to ELF and Ghidra maps.
+* `stubs`: List of library functions to be replaced by C++ stubs.
+* `skip`: List of functions to be ignored (entry points, initialization).
+* `[patches]`: Individual instructions that need to be replaced (SYSCALLs, COP0, etc.).
 
 ## Limitations
 
-* The analyzer uses basic heuristics and may not catch all special cases
-* Function identification relies heavily on symbol names
-* Patch recommendations are preliminary and may need manual review
-* Complex game-specific behaviors may not be detected 
+* Heuristics may not catch all special cases in highly optimized code.
+* Self-modifying code is flagged but requires manual review.
+* Indirect jumps (jump tables) are detected but complex ones might need manual TOML entries.
+
+For more details on the recompilation process, see the [Main README](../README.md).

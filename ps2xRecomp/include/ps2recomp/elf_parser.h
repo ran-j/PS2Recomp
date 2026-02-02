@@ -21,6 +21,7 @@ namespace ps2recomp
 
                 bool parse();
 
+                bool loadGhidraFunctionMap(const std::string &mapPath);
                 std::vector<Function> extractFunctions() const;
                 std::vector<Function> extractExtraFunctions() const;
                 std::vector<Symbol> extractSymbols();

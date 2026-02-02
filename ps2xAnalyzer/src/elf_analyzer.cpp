@@ -109,6 +109,9 @@ namespace ps2recomp
         file << "# Path to input ELF file\n";
         file << "input = \"" << escapeBackslashes(m_elfPath) << "\"\n\n";
 
+        file << "# Path to Ghidra exported function map (optional CSV)\n";
+        file << "ghidra_output = \"\"\n\n";
+
         file << "# Path to output directory\n";
         file << "output = \"" << escapeBackslashes(outputDirStr) << "\"\n\n";
 

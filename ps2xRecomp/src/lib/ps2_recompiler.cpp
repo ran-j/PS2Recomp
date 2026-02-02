@@ -71,6 +71,11 @@ namespace ps2recomp
                 return false;
             }
 
+            if (!m_config.ghidraMapPath.empty())
+            {
+                m_elfParser->loadGhidraFunctionMap(m_config.ghidraMapPath);
+            }
+
             m_functions = m_elfParser->extractFunctions();
             m_symbols = m_elfParser->extractSymbols();
             m_sections = m_elfParser->getSections();
