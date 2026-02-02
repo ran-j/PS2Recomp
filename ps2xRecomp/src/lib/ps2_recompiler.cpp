@@ -281,7 +281,7 @@ namespace ps2recomp
             {
                 if (function.isStub)
                 {
-                    std::string generatedName = m_codeGenerator->getGeneratedFunctionName(function);
+                    std::string generatedName = m_codeGenerator->getFunctionName(function.start);
                     std::stringstream stub;
                     stub << "void " << generatedName
                          << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime) { ";
@@ -483,8 +483,7 @@ namespace ps2recomp
                     continue;
                 }
 
-                std::string finalName = sanitizeFunctionName(function.name);
-                finalName = m_codeGenerator->getGeneratedFunctionName(function);
+                std::string finalName = m_codeGenerator->getFunctionName(function.start);
 
                 ss << "void " << finalName << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime);\n";
             }
