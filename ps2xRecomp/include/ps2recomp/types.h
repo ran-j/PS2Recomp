@@ -165,6 +165,7 @@ namespace ps2recomp
     {
         std::string inputPath;
         std::string outputPath;
+        std::string ghidraMapPath;
         bool singleFileOutput;
         std::vector<std::string> skipFunctions;
         std::unordered_map<uint32_t, std::string> patches;

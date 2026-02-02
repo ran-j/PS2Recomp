@@ -109,6 +109,9 @@ namespace ps2recomp
         file << "# Path to input ELF file\n";
         file << "input = \"" << escapeBackslashes(m_elfPath) << "\"\n\n";
 
+        file << "# Path to Ghidra exported function map (optional CSV)\n";
+        file << "ghidra_output = \"\"\n\n";
+
         file << "# Path to output directory\n";
         file << "output = \"" << escapeBackslashes(outputDirStr) << "\"\n\n";
 
@@ -136,14 +139,14 @@ namespace ps2recomp
             file << "# Jump tables detected in the program\n";
             file << "[jump_tables]\n";
 
-            for (const auto & jt : m_jumpTables)
+            for (const auto &jt : m_jumpTables)
             {
                 file << "[[jump_tables.table]]\n";
                 file << "address = \"0x" << std::hex << jt.address << "\"\n"
                      << std::dec;
                 file << "entries = [\n";
 
-                for (const auto & [index, target] : jt.entries)
+                for (const auto &[index, target] : jt.entries)
                 {
                     file << "  { index = " << index << ", target = \"0x"
                          << std::hex << target << "\" },\n"
@@ -194,7 +197,7 @@ namespace ps2recomp
         const std::vector<std::string> stdLibFuncs = {
             // I/O functions
             "printf", "sprintf", "snprintf", "fprintf", "vprintf", "vfprintf", "vsprintf", "vsnprintf",
-            "puts", "putchar", "getchar", "gets", "fgets", "fputs", "scanf", "fscanf", "sscanf", 
+            "puts", "putchar", "getchar", "gets", "fgets", "fputs", "scanf", "fscanf", "sscanf",
             "sprint", "sbprintf",
 
             // Memory management
@@ -236,7 +239,7 @@ namespace ps2recomp
             // Extra string helpers
             "strnlen", "strspn", "strcspn", "strcasecmp", "strncasecmp"};
 
-        m_libFunctions.insert(stdLibFuncs.begin(), stdLibFuncs.end());
+        m_knownLibNames.insert(stdLibFuncs.begin(), stdLibFuncs.end());
     }
 
     void ElfAnalyzer::analyzeEntryPoint()
@@ -307,6 +310,18 @@ namespace ps2recomp
                 {
                     m_skipFunctions.insert(symbol.name);
                 }
+            }
+        }
+
+        for (const auto &func : m_functions)
+        {
+            if (isLibraryFunction(func.name))
+            {
+                m_libFunctions.insert(func.name);
+            }
+            else if (isSystemFunction(func.name))
+            {
+                m_skipFunctions.insert(func.name);
             }
         }
     }
@@ -782,7 +797,7 @@ namespace ps2recomp
     }
 
     void ElfAnalyzer::analyzePerformanceCriticalPaths() const
-	{
+    {
         std::cout << "Analyzing performance-critical paths..." << std::endl;
 
         for (const auto &func : m_functions)
@@ -795,9 +810,9 @@ namespace ps2recomp
 
             std::vector<Instruction> instructions = decodeFunction(func);
 
-            for (const auto& inst : instructions)
+            for (const auto &inst : instructions)
             {
-            	if (inst.isBranch)
+                if (inst.isBranch)
                 {
                     int32_t offset = static_cast<int16_t>(inst.immediate) << 2;
                     uint32_t targetAddr = inst.address + 4 + offset;
@@ -814,7 +829,7 @@ namespace ps2recomp
                                       << " (size: " << loopSize << " instructions)" << std::endl;
 
                             bool hasMultimedia = false;
-                            for (const auto& instruction : instructions)
+                            for (const auto &instruction : instructions)
                             {
                                 if (instruction.address >= targetAddr && instruction.address <= inst.address)
                                 {
@@ -841,26 +856,9 @@ namespace ps2recomp
     {
         std::cout << "Identifying recursive functions..." << std::endl;
 
-        std::unordered_map<std::string, std::set<std::string>> callGraph;
-
-        for (const auto &func : m_functions)
-        {
-            if (m_functionCalls.contains(func.start))
-            {
-                for (const auto &call : m_functionCalls[func.start])
-                {
-                    callGraph[func.name].insert(call.calleeName);
-                }
-            }
-        }
-
-        for (const auto &func : m_functions)
-        {
-            if (callGraph[func.name].contains(func.name))
-            {
-                std::cout << "Function " << func.name << " is directly recursive" << std::endl;
-            }
-        }
+        // lets ignore skip and library
+        std::unordered_set<std::string> eligible;
+        eligible.reserve(m_functions.size());
 
         for (const auto &func : m_functions)
         {
@@ -870,39 +868,143 @@ namespace ps2recomp
                 continue;
             }
 
-            std::set<std::string> visited;
-            std::function<bool(const std::string &)> detectCycle;
+            eligible.insert(func.name);
+        }
 
-            detectCycle = [&](const std::string &currFunc) -> bool
+        std::unordered_map<std::string, std::vector<std::string>> callGraph;
+        callGraph.reserve(eligible.size());
+
+        for (const auto &func : m_functions)
+        {
+            if (eligible.contains(func.name))
             {
-                if (visited.contains(currFunc))
+                continue;
+            }
+
+            auto itCalls = m_functionCalls.find(func.start);
+            if (itCalls == m_functionCalls.end())
+            {
+                continue;
+            }
+
+            auto &edges = callGraph[func.name];
+            edges.reserve(itCalls->second.size());
+
+            for (const auto &call : itCalls->second)
+            {
+                // non-eligible nodes to graph.
+                if (eligible.contains(call.calleeName))
                 {
-                    return currFunc == func.name;
+                    continue;
                 }
 
-                visited.insert(currFunc);
+                edges.push_back(call.calleeName);
+            }
+        }
 
-                for (const auto &callee : callGraph[currFunc])
+        std::unordered_map<std::string, int> index;
+        std::unordered_map<std::string, int> lowlink;
+        std::unordered_set<std::string> onStack;
+        std::vector<std::string> stack;
+
+        index.reserve(eligible.size());
+        lowlink.reserve(eligible.size());
+        onStack.reserve(eligible.size());
+        stack.reserve(eligible.size());
+
+        int currentIndex = 0;
+
+        std::vector<std::vector<std::string>> sccs;
+        sccs.reserve(256);
+
+        std::function<void(const std::string &)> strongconnect;
+        strongconnect = [&](const std::string &v)
+        {
+            index[v] = currentIndex;
+            lowlink[v] = currentIndex;
+            currentIndex++;
+
+            stack.push_back(v);
+            onStack.insert(v);
+
+            auto it = callGraph.find(v);
+            if (it != callGraph.end())
+            {
+                for (const auto &w : it->second)
                 {
-                    if (detectCycle(callee))
+                    if (index.contains(w))
                     {
-                        return true;
+                        strongconnect(w);
+                        lowlink[v] = std::min(lowlink[v], lowlink[w]);
+                    }
+                    else if (onStack.contains(w))
+                    {
+                        lowlink[v] = std::min(lowlink[v], index[w]);
+                    }
+                }
+            }
+
+            if (lowlink[v] == index[v])
+            {
+                std::vector<std::string> scc;
+                while (!stack.empty())
+                {
+                    std::string w = stack.back();
+                    stack.pop_back();
+                    onStack.erase(w);
+
+                    scc.push_back(w);
+                    if (w == v)
+                    {
+                        break;
                     }
                 }
 
-                visited.erase(currFunc);
-                return false;
-            };
+                sccs.push_back(std::move(scc));
+            }
+        };
 
-            if (detectCycle(func.name))
+        for (const auto &name : eligible)
+        {
+            if (index.contains(name))
             {
-                std::cout << "Function " << func.name << " is part of a mutually recursive cycle" << std::endl;
+                strongconnect(name);
+            }
+        }
+
+        // SCC size > 1 -> mutual recursion
+        // SCC size == 1 -> direct recursion if it calls itself
+        for (const auto &scc : sccs)
+        {
+            if (scc.size() > 1)
+            {
+                for (const auto &name : scc)
+                {
+                    std::cout << "Function " << name << " is part of a mutually recursive cycle" << std::endl;
+                }
+                continue;
+            }
+
+            const std::string &name = scc[0];
+            auto it = callGraph.find(name);
+            if (it == callGraph.end())
+            {
+                continue;
+            }
+
+            for (const auto &callee : it->second)
+            {
+                if (callee == name)
+                {
+                    std::cout << "Function " << name << " is directly recursive" << std::endl;
+                    break;
+                }
             }
         }
     }
 
     void ElfAnalyzer::analyzeRegisterUsage() const
-	{
+    {
         std::cout << "Analyzing register usage patterns..." << std::endl;
 
         for (const auto &func : m_functions)
@@ -1001,7 +1103,7 @@ namespace ps2recomp
     }
 
     void ElfAnalyzer::analyzeFunctionSignatures() const
-	{
+    {
         std::cout << "Analyzing function signatures..." << std::endl;
 
         for (const auto &func : m_functions)
@@ -1142,6 +1244,9 @@ namespace ps2recomp
             patchAddrs.push_back(patch.first);
         }
 
+        if (patchAddrs.size() == 0)
+            return;
+
         std::sort(patchAddrs.begin(), patchAddrs.end());
 
         for (size_t i = 0; i < patchAddrs.size() - 1; i++)
@@ -1161,7 +1266,7 @@ namespace ps2recomp
     }
 
     bool ElfAnalyzer::identifyMemcpyPattern(const Function &func) const
-	{
+    {
         std::vector<Instruction> instructions = decodeFunction(func);
 
         bool hasLoop = false;
@@ -1169,7 +1274,7 @@ namespace ps2recomp
         bool storesData = false;
         bool incrementsPointers = false;
 
-        for (const auto & inst : instructions)
+        for (const auto &inst : instructions)
         {
             if (inst.isBranch)
             {
@@ -1205,7 +1310,7 @@ namespace ps2recomp
     }
 
     bool ElfAnalyzer::identifyMemsetPattern(const Function &func) const
-	{
+    {
         std::vector<Instruction> instructions = decodeFunction(func);
 
         bool hasLoop = false;
@@ -1213,7 +1318,7 @@ namespace ps2recomp
         bool storesData = false;
         bool incrementsPointer = false;
 
-        for (const auto & inst : instructions)
+        for (const auto &inst : instructions)
         {
             if (inst.isBranch)
             {
@@ -1248,7 +1353,7 @@ namespace ps2recomp
     }
 
     bool ElfAnalyzer::identifyStringOperationPattern(const Function &func) const
-	{
+    {
         std::vector<Instruction> instructions = decodeFunction(func);
 
         bool hasLoop = false;
@@ -1256,7 +1361,7 @@ namespace ps2recomp
         bool loadsByte = false;
         bool storesByte = false;
 
-        for (const auto & inst : instructions)
+        for (const auto &inst : instructions)
         {
             if (inst.isBranch)
             {
@@ -1288,7 +1393,7 @@ namespace ps2recomp
     }
 
     bool ElfAnalyzer::identifyMathPattern(const Function &func) const
-	{
+    {
         std::vector<Instruction> instructions = decodeFunction(func);
 
         int mathOps = 0;
@@ -1319,7 +1424,7 @@ namespace ps2recomp
     }
 
     CFG ElfAnalyzer::buildCFG(const Function &function) const
-	{
+    {
         CFG cfg;
         std::vector<Instruction> instructions = decodeFunction(function);
         std::map<uint32_t, size_t> addrToIndex;
@@ -1548,6 +1653,9 @@ namespace ps2recomp
         if (name.empty())
             return false;
 
+        if (m_knownLibNames.find(name) != m_knownLibNames.end())
+            return true;
+
         if (hasPs2ApiPrefix(name))
             return true;
 
@@ -1562,7 +1670,7 @@ namespace ps2recomp
     }
 
     std::vector<Instruction> ElfAnalyzer::decodeFunction(const Function &function) const
-	{
+    {
         std::vector<Instruction> instructions;
 
         for (uint32_t addr = function.start; addr < function.end; addr += 4)
@@ -1597,7 +1705,7 @@ namespace ps2recomp
     }
 
     bool ElfAnalyzer::hasMMIInstructions(const Function &function) const
-	{
+    {
         std::vector<Instruction> instructions = decodeFunction(function);
 
         for (const auto &inst : instructions)
@@ -1612,7 +1720,7 @@ namespace ps2recomp
     }
 
     bool ElfAnalyzer::hasVUInstructions(const Function &function) const
-	{
+    {
         std::vector<Instruction> instructions = decodeFunction(function);
 
         for (const auto &inst : instructions)
@@ -1629,7 +1737,7 @@ namespace ps2recomp
     bool ElfAnalyzer::identifyFunctionType(const Function &function)
     {
         if (m_libFunctions.contains(function.name) ||
-        	m_skipFunctions.contains(function.name))
+            m_skipFunctions.contains(function.name))
         {
             return false;
         }
@@ -1680,11 +1788,11 @@ namespace ps2recomp
             return true;
         }
 
-    	if (hasComplexMMI && isVeryLarge)
+        if (hasComplexMMI && isVeryLarge)
         {
-	        m_skipFunctions.insert(function.name);
-	        std::cout << "Skipping large function " << function.name << " with complex MMI" << std::endl;
-	        return true;
+            m_skipFunctions.insert(function.name);
+            std::cout << "Skipping large function " << function.name << " with complex MMI" << std::endl;
+            return true;
         }
 
         return false;
@@ -1710,7 +1818,7 @@ namespace ps2recomp
     }
 
     bool ElfAnalyzer::isSelfModifyingCode(const Function &function) const
-	{
+    {
         std::vector<Instruction> instructions = decodeFunction(function);
 
         for (size_t i = 0; i < instructions.size(); i++)
@@ -1756,11 +1864,11 @@ namespace ps2recomp
     }
 
     bool ElfAnalyzer::isLoopHeavyFunction(const Function &function) const
-	{
+    {
         std::vector<Instruction> instructions = decodeFunction(function);
         int loopCount = 0;
 
-        for (const auto & inst : instructions)
+        for (const auto &inst : instructions)
         {
             if (inst.isBranch)
             {
@@ -1784,9 +1892,9 @@ namespace ps2recomp
             return currentAddr + 4 + offset;
         }
 
-    	if (inst.opcode == OPCODE_J || inst.opcode == OPCODE_JAL)
+        if (inst.opcode == OPCODE_J || inst.opcode == OPCODE_JAL)
         {
-	        return (currentAddr & 0xF0000000) | (inst.target << 2);
+            return (currentAddr & 0xF0000000) | (inst.target << 2);
         }
 
         return currentAddr + 4;

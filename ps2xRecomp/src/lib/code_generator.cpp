@@ -30,9 +30,10 @@ namespace ps2recomp
 {
     CodeGenerator::CodeGenerator(const std::vector<Symbol> &symbols)
     {
-      for (auto& symbol : symbols) {
-        m_symbols.emplace(symbol.address, symbol);
-      }
+        for (auto &symbol : symbols)
+        {
+            m_symbols.emplace(symbol.address, symbol);
+        }
     }
 
     void CodeGenerator::setRenamedFunctions(const std::unordered_map<uint32_t, std::string> &renames)
@@ -45,7 +46,7 @@ namespace ps2recomp
         m_bootstrapInfo = info;
     }
 
-    std::string CodeGenerator::getFunctionName(uint32_t address)
+    std::string CodeGenerator::getFunctionName(uint32_t address) const
     {
         auto it = m_renamedFunctions.find(address);
         if (it != m_renamedFunctions.end())
@@ -53,7 +54,7 @@ namespace ps2recomp
             return it->second;
         }
 
-        Symbol *sym = findSymbolByAddress(address);
+        const Symbol *sym = findSymbolByAddress(address);
         if (sym && sym->isFunction)
         {
             return sym->name;
@@ -76,7 +77,7 @@ namespace ps2recomp
         return kKeywords.contains(name);
     }
 
-    static std::string sanitizeFunctionName(const std::string& name)
+    static std::string sanitizeFunctionName(const std::string &name)
     {
         std::string sanitized = name;
 
@@ -1972,7 +1973,7 @@ namespace ps2recomp
     {
         // VCALLMS calls a VU0 microprogram at the specified immediate address.
         // VU0 micro memory is 4KB = 512 instructions (8 bytes each). Index is 0-511.
-        uint16_t instr_index = inst.immediate & 0x1FF;          // Mask to 9 bits for VU0
+        uint16_t instr_index = inst.immediate & 0x1FF;                       // Mask to 9 bits for VU0
         uint32_t target_byte_addr = static_cast<uint32_t>(instr_index) << 3; // Convert instruction index to byte address
 
         return fmt::format(
@@ -2312,11 +2313,12 @@ namespace ps2recomp
         return ss.str();
     }
 
-    Symbol *CodeGenerator::findSymbolByAddress(uint32_t address)
+    const Symbol *CodeGenerator::findSymbolByAddress(uint32_t address) const
     {
         auto it = m_symbols.find(address);
-        if (it != m_symbols.end()) {
-          return &it->second;
+        if (it != m_symbols.end())
+        {
+            return &it->second;
         }
 
         return nullptr;
@@ -2348,7 +2350,14 @@ namespace ps2recomp
         {
             ss << "    SET_GPR_U32(ctx, 29, bss_end);\n";
         }
-        ss << "    ps2_main(rdram, ctx, runtime);\n";
+        if (!m_bootstrapInfo.entryName.empty())
+        {
+            ss << "    " << m_bootstrapInfo.entryName << "(rdram, ctx, runtime);\n";
+        }
+        else
+        {
+            throw std::runtime_error(" No entry function name available for bootstrap.");
+        }
         ss << "}\n";
         return ss.str();
     }

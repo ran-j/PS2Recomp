@@ -71,6 +71,11 @@ namespace ps2recomp
                 return false;
             }
 
+            if (!m_config.ghidraMapPath.empty())
+            {
+                m_elfParser->loadGhidraFunctionMap(m_config.ghidraMapPath);
+            }
+
             m_functions = m_elfParser->extractFunctions();
             m_symbols = m_elfParser->extractSymbols();
             m_sections = m_elfParser->getSections();
@@ -248,6 +253,27 @@ namespace ps2recomp
             if (m_codeGenerator)
             {
                 m_codeGenerator->setRenamedFunctions(m_functionRenames);
+            }
+
+            if (m_bootstrapInfo.valid && m_codeGenerator)
+            {
+                auto entryIt = std::find_if(m_functions.begin(), m_functions.end(),
+                                            [&](const Function &fn)
+                                            { return fn.start == m_bootstrapInfo.entry; });
+                if (entryIt != m_functions.end())
+                {
+                    auto renameIt = m_functionRenames.find(entryIt->start);
+                    if (renameIt != m_functionRenames.end())
+                    {
+                        m_bootstrapInfo.entryName = renameIt->second;
+                    }
+                    else
+                    {
+                        m_bootstrapInfo.entryName = sanitizeFunctionName(entryIt->name);
+                    }
+                }
+
+                m_codeGenerator->setBootstrapInfo(m_bootstrapInfo);
             }
 
             m_generatedStubs.clear();
@@ -709,7 +735,7 @@ namespace ps2recomp
         return outputPath;
     }
 
-    std::string PS2Recompiler::sanitizeFunctionName(const std::string& name) const
+    std::string PS2Recompiler::sanitizeFunctionName(const std::string &name) const
     {
         std::string sanitized = name;
         std::replace(sanitized.begin(), sanitized.end(), '.', '_');
@@ -727,7 +753,7 @@ namespace ps2recomp
         if (sanitized.size() >= 2 &&
             sanitized[0] == '_' &&
             (sanitized[1] == '_' ||
-                std::isupper(static_cast<unsigned char>(sanitized[1]))))
+             std::isupper(static_cast<unsigned char>(sanitized[1]))))
         {
             return "ps2_" + sanitized;
         }
