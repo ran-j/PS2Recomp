@@ -1,4 +1,5 @@
 #include "ps2recomp/r5900_decoder.h"
+#include "rabbitizer.h"
 #include <iostream>
 
 namespace ps2recomp
@@ -59,193 +60,86 @@ namespace ps2recomp
         inst.modificationInfo.modifiesMemory = false;
         inst.modificationInfo.modifiesControl = false;
 
-        switch (inst.opcode)
+        RabbitizerInstruction rabbitizerInst;
+        RabbitizerInstructionR5900_init(&rabbitizerInst, rawInstruction, address);
+        RabbitizerInstructionR5900_processUniqueId(&rabbitizerInst);
+
+        const RabbitizerInstrDescriptor *desc = rabbitizerInst.descriptor;
+
+        inst.isBranch = RabbitizerInstrDescriptor_isBranch(desc);
+        inst.isJump = RabbitizerInstrDescriptor_isJump(desc);
+        inst.isCall = RabbitizerInstruction_isFunctionCall(&rabbitizerInst);
+        inst.isReturn = RabbitizerInstruction_isReturn(&rabbitizerInst) ||
+                        rabbitizerInst.uniqueId == RABBITIZER_INSTR_ID_cpu_eret;
+        inst.hasDelaySlot = RabbitizerInstruction_hasDelaySlot(&rabbitizerInst);
+
+        inst.isLoad = RabbitizerInstrDescriptor_doesLoad(desc);
+        inst.isStore = RabbitizerInstrDescriptor_doesStore(desc);
+
+        inst.isMMI = inst.opcode == OPCODE_MMI;
+        inst.isVU = inst.opcode == OPCODE_COP2 ||
+                    inst.opcode == OPCODE_LWC2 ||
+                    inst.opcode == OPCODE_LDC2 ||
+                    inst.opcode == OPCODE_SWC2 ||
+                    inst.opcode == OPCODE_SDC2;
+
+        bool modifiesGpr = false;
+        if (RabbitizerInstrDescriptor_modifiesRs(desc) && inst.rs != 0)
         {
-        case OPCODE_SPECIAL:
-            decodeSpecial(inst);
-            break;
+            modifiesGpr = true;
+        }
+        if (RabbitizerInstrDescriptor_modifiesRt(desc) && inst.rt != 0)
+        {
+            modifiesGpr = true;
+        }
+        if (RabbitizerInstrDescriptor_modifiesRd(desc) && inst.rd != 0)
+        {
+            modifiesGpr = true;
+        }
+        if (RabbitizerInstrDescriptor_doesLink(desc))
+        {
+            modifiesGpr = true;
+        }
+        inst.modificationInfo.modifiesGPR = modifiesGpr;
 
-        case OPCODE_REGIMM:
-            decodeRegimm(inst);
-            break;
+        inst.modificationInfo.modifiesFPR = RabbitizerInstrDescriptor_modifiesFs(desc) ||
+                                            RabbitizerInstrDescriptor_modifiesFt(desc) ||
+                                            RabbitizerInstrDescriptor_modifiesFd(desc);
 
-        case OPCODE_J:
-            decodeJType(inst);
-            break;
+        inst.modificationInfo.modifiesMemory = RabbitizerInstrDescriptor_doesStore(desc);
+        inst.modificationInfo.modifiesControl = RabbitizerInstrDescriptor_isBranch(desc) ||
+                                                RabbitizerInstrDescriptor_isJump(desc) ||
+                                                RabbitizerInstrDescriptor_isTrap(desc) ||
+                                                RabbitizerInstrDescriptor_modifiesHI(desc) ||
+                                                RabbitizerInstrDescriptor_modifiesLO(desc);
 
-        case OPCODE_JAL:
-            decodeJType(inst);
-            break;
-
-        case OPCODE_BEQ:
-        case OPCODE_BNE:
-        case OPCODE_BLEZ:
-        case OPCODE_BGTZ:
-        case OPCODE_BEQL:
-        case OPCODE_BNEL:
-        case OPCODE_BLEZL:
-        case OPCODE_BGTZL:
-            decodeIType(inst);
-            inst.isBranch = true;
-            inst.hasDelaySlot = true;
-            inst.modificationInfo.modifiesControl = true; // PC potentially
-            break;
-
-        case OPCODE_DADDI:
-        case OPCODE_DADDIU:
-            decodeIType(inst);
-            if (inst.rt != 0)
-                inst.modificationInfo.modifiesGPR = true;
-            break;
-
-        case OPCODE_MMI:
-            decodeMMI(inst);
-            break;
-
-        case OPCODE_LQ:
-            decodeIType(inst);
-            inst.isLoad = true;
-            inst.isMultimedia = true; // 128-bit load
-            break;
-
-        case OPCODE_SQ:
-            decodeIType(inst);
-            inst.isStore = true;
-            inst.isMultimedia = true; // 128-bit store
-            inst.modificationInfo.modifiesMemory = true;
-            break;
-
-        case OPCODE_LB:
-        case OPCODE_LH:
-        case OPCODE_LW:
-        case OPCODE_LBU:
-        case OPCODE_LHU:
-        case OPCODE_LWU:
-        case OPCODE_LD:
-            inst.isLoad = true;
-            if (inst.rt != 0)
-                inst.modificationInfo.modifiesGPR = true;
-            break;
-
-        case OPCODE_LWL:
-        case OPCODE_LWR:
-        case OPCODE_LDL:
-        case OPCODE_LDR:
-            inst.isLoad = true;
-            if (inst.rt != 0)
-                inst.modificationInfo.modifiesGPR = true;
-            inst.modificationInfo.modifiesMemory = true;
-            break;
-
-        case OPCODE_LL:
-        case OPCODE_LLD:
-            decodeIType(inst);
-            inst.isLoad = true;
-            if (inst.rt != 0)
-            {
-                inst.modificationInfo.modifiesGPR = true;
-            }
-            // LL/LLD manipulate the load-linked bit in COP0 status
-            inst.modificationInfo.modifiesControl = true;
-            break;
-
-        case OPCODE_LWC1:
-            inst.isLoad = true;
-            inst.modificationInfo.modifiesFPR = true;
-            break;
-
-        case OPCODE_LDC1: // Not present/used on EE FPU
-        case OPCODE_LWC2: // Maybe unused
-        case OPCODE_LDC2: // VU Load
-            inst.isLoad = true;
+        if (inst.opcode == OPCODE_COP2)
+        {
+            decodeCOP2(inst);
+        }
+        else if (inst.opcode == OPCODE_LWC2 || inst.opcode == OPCODE_LDC2)
+        {
             inst.isVU = true;
             inst.modificationInfo.modifiesVFR = true;
-            break;
-
-        case OPCODE_SB:
-        case OPCODE_SH:
-        case OPCODE_SW:
-        case OPCODE_SD:
-            inst.isStore = true;
-            inst.modificationInfo.modifiesMemory = true;
-            break;
-
-        case OPCODE_SWL:
-        case OPCODE_SWR:
-        case OPCODE_SDL:
-        case OPCODE_SDR:
-            inst.isStore = true;
-            inst.modificationInfo.modifiesMemory = true;
-            break;
-
-        case OPCODE_SWC1:
-            inst.isStore = true;
-            inst.modificationInfo.modifiesMemory = true;
-            break;
-
-        case OPCODE_SDC1: // Not present/used on EE FPU
-        case OPCODE_SWC2: // Potentially unused
-        case OPCODE_SDC2:
-            inst.isStore = true;
+        }
+        else if (inst.opcode == OPCODE_SWC2 || inst.opcode == OPCODE_SDC2)
+        {
             inst.isVU = true;
             inst.modificationInfo.modifiesMemory = true;
-            break;
-
-        case OPCODE_SC:
-        case OPCODE_SCD:
-            inst.isStore = true;
-            inst.modificationInfo.modifiesMemory = true;
-            if (inst.rt != 0)
-                inst.modificationInfo.modifiesGPR = true; // Writes success/fail to rt
-            inst.modificationInfo.modifiesControl = true; // Reads/Clears LLBit
-            break;
-
-        case OPCODE_ADDI:
-        case OPCODE_ADDIU:
-        case OPCODE_SLTI:
-        case OPCODE_SLTIU:
-        case OPCODE_ANDI:
-        case OPCODE_ORI:
-        case OPCODE_XORI:
-        case OPCODE_LUI:
-            decodeIType(inst);
-            if (inst.rt != 0)
-                inst.modificationInfo.modifiesGPR = true;
-            break;
-
-        case OPCODE_CACHE:
-            decodeIType(inst);
-            inst.modificationInfo.modifiesControl = true; // Cache state
-            break;
-
-        case OPCODE_PREF:
-            decodeIType(inst);
-            break;
-
-        case OPCODE_COP0:
-            decodeCOP0(inst);
-            break;
-
-        case OPCODE_COP1:
-            decodeCOP1(inst);
-            break;
-
-        case OPCODE_COP2:
-            decodeCOP2(inst);
-            break;
-
-        default:
-            // Default to I-type for most other instructions
-            decodeIType(inst);
-            break;
         }
 
-        // Generic multimedia flag if MMI or VU
+        if (inst.opcode == OPCODE_LQ || inst.opcode == OPCODE_SQ)
+        {
+            inst.isMultimedia = true;
+        }
+
         if (inst.isMMI || inst.isVU)
         {
             inst.isMultimedia = true;
             inst.vectorInfo.isVector = inst.isVU; // Only VU ops are truly vector
         }
+
+        RabbitizerInstructionR5900_destroy(&rabbitizerInst);
 
         return inst;
     }

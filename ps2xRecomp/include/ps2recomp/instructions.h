@@ -80,8 +80,8 @@ namespace ps2recomp
         OPCODE_SDC2 = 0x3E, // PS2 specific Store Quadword from Coprocessor 2 (VU0) - Overrides standard MIPS SDC2
         OPCODE_SD = 0x3F,   // Store Doubleword
 
-        // OPCODE_LQC2 = 0x36,
-        // OPCODE_SQC2 = 0x3E
+        OPCODE_LQC2 = OPCODE_LDC2,
+        OPCODE_SQC2 = OPCODE_SDC2
     };
 
     // SPECIAL Function (bits 5-0) for OPCODE_SPECIAL
