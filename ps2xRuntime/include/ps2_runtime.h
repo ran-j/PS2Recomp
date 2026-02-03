@@ -7,6 +7,7 @@
 #include <string>
 #include <functional>
 #include <immintrin.h> // For SSE/AVX instructions
+#include <smmintrin.h>
 #include <atomic>
 #include <filesystem>
 #include <iostream>
@@ -225,8 +226,10 @@ struct alignas(16) R5900Context
         for (int i = 0; i < 32; ++i)
         {
             std::cout << "R" << std::setw(2) << std::dec << i << ": 0x" << std::hex
-                      << std::setw(8) << r[i].m128i_u32[3] << std::setw(8) << r[i].m128i_u32[2] << "_"
-                      << std::setw(8) << r[i].m128i_u32[1] << std::setw(8) << r[i].m128i_u32[0] << "\n";
+                      << std::setw(8) << static_cast<uint32_t>(_mm_extract_epi32(r[i], 3))
+        			  << std::setw(8) << static_cast<uint32_t>(_mm_extract_epi32(r[i], 2)) << "_"
+                      << std::setw(8) << static_cast<uint32_t>(_mm_extract_epi32(r[i], 1))
+        			  << std::setw(8) << static_cast<uint32_t>(_mm_extract_epi32(r[i], 0)) << "\n";
         }
         std::cout << "Status: 0x" << std::setw(8) << cop0_status
                   << " Cause: 0x" << std::setw(8) << cop0_cause
@@ -243,7 +246,7 @@ inline uint32_t getRegU32(const R5900Context *ctx, int reg)
     // Check if reg is valid (0-31)
     if (reg < 0 || reg > 31)
         return 0;
-    return ctx->r[reg].m128i_u32[0];
+    return static_cast<uint32_t>(_mm_extract_epi32(ctx->r[reg], 0));
 }
 
 inline void setReturnU32(R5900Context *ctx, uint32_t value)

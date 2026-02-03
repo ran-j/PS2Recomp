@@ -331,7 +331,7 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
     {
         std::cout << "[VU0] microprogram @0x" << std::hex << address
                   << " pc=0x" << ctx->pc
-                  << " ra=0x" << ctx->r[31].m128i_u32[0]
+                  << " ra=0x" << static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0))
                   << std::dec << std::endl;
     }
     ++count;
@@ -430,7 +430,7 @@ void PS2Runtime::run()
         {
             entryPoint(m_memory.getRDRAM(), &m_cpuContext, this);
             std::cout << "Game thread returned. PC=0x" << std::hex << m_cpuContext.pc
-                      << " RA=0x" << m_cpuContext.r[31].m128i_u32[0] << std::dec << std::endl;
+                      << " RA=0x" << static_cast<uint32_t>(_mm_extract_epi32(m_cpuContext.r[31], 0)) << std::dec << std::endl;
         }
         catch (const std::exception &e)
         {
@@ -445,9 +445,9 @@ void PS2Runtime::run()
         {
             std::cout << "[run] activeThreads=" << g_activeThreads.load(std::memory_order_relaxed);
             std::cout << " pc=0x" << std::hex << m_cpuContext.pc
-                      << " ra=0x" << m_cpuContext.r[31].m128i_u32[0]
-                      << " sp=0x" << m_cpuContext.r[29].m128i_u32[0]
-                      << " gp=0x" << m_cpuContext.r[28].m128i_u32[0] << std::dec << std::endl;
+                      << " ra=0x" << static_cast<uint32_t>(_mm_extract_epi32(m_cpuContext.r[31], 0))
+                      << " sp=0x" << static_cast<uint32_t>(_mm_extract_epi32(m_cpuContext.r[29], 0))
+                      << " gp=0x" << static_cast<uint32_t>(_mm_extract_epi32(m_cpuContext.r[28], 0)) << std::dec << std::endl;
         }
         if ((tick % 600) == 0)
         {

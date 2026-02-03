@@ -1,8 +1,11 @@
 #ifndef PS2_RUNTIME_MACROS_H
 #define PS2_RUNTIME_MACROS_H
 #include <cstdint>
-#include <immintrin.h> // For SSE/AVX intrinsics
-#include <intrin.h>
+#if defined(_MSC_VER)
+	#include <intrin.h>
+#else
+	#include <immintrin.h> // For SSE/AVX intrinsics
+#endif
 inline uint32_t ps2_clz32(uint32_t val) {
 #if defined(_MSC_VER)
     unsigned long idx;
@@ -207,10 +210,10 @@ inline __m128i _mm_custom_srav_epi32(__m128i a, __m128i count) {
 #define PS2_VCALLMS(addr) // VU0 microprogram calls not supported directly
 #define PS2_VCALLMSR(reg) // VU0 microprogram calls not supported directly
 
-#define GPR_U32(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0U : ctx_ptr->r[reg_idx].m128i_u32[0])
-#define GPR_S32(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0 : ctx_ptr->r[reg_idx].m128i_i32[0])
-#define GPR_U64(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0ULL : ctx_ptr->r[reg_idx].m128i_u64[0])
-#define GPR_S64(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0LL : ctx_ptr->r[reg_idx].m128i_i64[0])
+#define GPR_U32(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0U : static_cast<uint32_t>(_mm_extract_epi32(ctx_ptr->r[reg_idx], 0)))
+#define GPR_S32(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0 : _mm_extract_epi32(ctx_ptr->r[reg_idx], 0))
+#define GPR_U64(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0ULL : static_cast<uint32_t>(_mm_extract_epi64(ctx_ptr->r[reg_idx], 0)))
+#define GPR_S64(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0LL : _mm_extract_epi64(ctx_ptr->r[reg_idx], 0))
 #define GPR_VEC(ctx_ptr, reg_idx) ((reg_idx == 0) ? _mm_setzero_si128() : ctx_ptr->r[reg_idx])
 
 #define SET_GPR_U32(ctx_ptr, reg_idx, val) \

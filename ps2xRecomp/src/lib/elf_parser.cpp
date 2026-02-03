@@ -14,7 +14,7 @@
 #else
 #include <unistd.h>
 #endif
-
+#include "libdwarf_private.h"
 #include <libdwarf.h>
 #include <dwarf.h>
 #include <fstream>

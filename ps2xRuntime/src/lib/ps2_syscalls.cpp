@@ -1,4 +1,3 @@
-
 #include "ps2_syscalls.h"
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
@@ -14,6 +13,12 @@
 #include <condition_variable>
 #include <atomic>
 #include <filesystem>
+
+#ifndef _WIN32
+#include <unistd.h> // for unlink,rmdir,chdir
+#include <sys/stat.h> // for mkdir
+#endif
+
 
 std::unordered_map<int, FILE *> g_fileDescriptors;
 int g_nextFd = 3; // Start after stdin, stdout, stderr
