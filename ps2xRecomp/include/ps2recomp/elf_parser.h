@@ -2,6 +2,7 @@
 #define PS2RECOMP_ELF_PARSER_H
 
 #include <elfio/elfio.hpp>
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <memory>

@@ -2,6 +2,7 @@
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
 #include "ps2_stubs.h"
+#include <cerrno>
 #include <iostream>
 #include <cstring>
 #include <cstdio>
@@ -9,6 +10,7 @@
 #include <cmath>
 #include <vector>
 #include <unordered_map>
+#include <mutex>
 #include <thread>
 #include <condition_variable>
 #include <atomic>
@@ -22,6 +24,7 @@
 
 std::unordered_map<int, FILE *> g_fileDescriptors;
 int g_nextFd = 3; // Start after stdin, stdout, stderr
+static std::mutex g_sys_fd_mutex;
 
 struct ThreadInfo
 {
@@ -129,8 +132,6 @@ std::string translatePs2Path(const char *ps2Path)
     std::cerr << "Warning: Unsupported PS2 path prefix: " << pathStr << std::endl;
     return "";
 }
-
-#include "ps2_syscalls.h"
 
 namespace ps2_syscalls
 {

@@ -41,6 +41,10 @@ target_include_directories(ps2_runtime PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(ps2_runtime PUBLIC -msse4.1)
+endif()
+
 target_link_libraries(ps2_runtime PRIVATE raylib)
 target_link_libraries(ps2EntryRunner 
 PRIVATE 
