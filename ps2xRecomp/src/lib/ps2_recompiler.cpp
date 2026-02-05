@@ -218,12 +218,24 @@ namespace ps2recomp
         {
             m_functionRenames.clear();
 
+            auto makeName = [&](const Function &function) -> std::string
+            {
+                std::string sanitized = sanitizeFunctionName(function.name);
+                if (sanitized.empty())
+                {
+                    std::stringstream ss;
+                    ss << "func_" << std::hex << function.start;
+                    sanitized = ss.str();
+                }
+                return sanitized;
+            };
+
             std::unordered_map<std::string, int> nameCounts;
             for (const auto &function : m_functions)
             {
                 if (!function.isRecompiled && !function.isStub)
                     continue;
-                std::string sanitized = sanitizeFunctionName(function.name);
+                std::string sanitized = makeName(function);
                 nameCounts[sanitized]++;
             }
 
@@ -232,22 +244,19 @@ namespace ps2recomp
                 if (!function.isRecompiled && !function.isStub)
                     continue;
 
-                std::string sanitized = sanitizeFunctionName(function.name);
+                std::string sanitized = makeName(function);
                 bool isDuplicate = nameCounts[sanitized] > 1;
 
-                if (isDuplicate || sanitized != function.name)
+                std::stringstream ss;
+                if (isDuplicate)
                 {
-                    std::stringstream ss;
-                    if (isDuplicate)
-                    {
-                        ss << sanitized << "_0x" << std::hex << function.start;
-                    }
-                    else
-                    {
-                        ss << sanitized;
-                    }
-                    m_functionRenames[function.start] = ss.str();
+                    ss << sanitized << "_0x" << std::hex << function.start;
                 }
+                else
+                {
+                    ss << sanitized;
+                }
+                m_functionRenames[function.start] = ss.str();
             }
 
             if (m_codeGenerator)

@@ -28,7 +28,7 @@ namespace ps2recomp
 
 namespace ps2recomp
 {
-    static bool isReservedCxxIdentifier(const std::string& name)
+    static bool isReservedCxxIdentifier(const std::string &name)
     {
         if (name.size() >= 2 && name[0] == '_' && name[1] == '_')
             return true;
@@ -37,7 +37,7 @@ namespace ps2recomp
         return false;
     }
 
-    static bool isReservedCxxKeyword(const std::string& name)
+    static bool isReservedCxxKeyword(const std::string &name)
     {
         return kKeywords.contains(name);
     }
@@ -75,7 +75,7 @@ namespace ps2recomp
         }
 
         return "";
-    }    
+    }
 
     std::string CodeGenerator::sanitizeFunctionName(const std::string &name) const
     {
@@ -252,13 +252,13 @@ namespace ps2recomp
             std::string funcName = getFunctionName(target);
             bool isInternalTarget = internalTargets.contains(target);
 
-            if (!funcName.empty())
-            {
-                targetAction = fmt::format("{}(rdram, ctx, runtime); return;", funcName);
-            }
-            else if (isInternalTarget)
+            if (isInternalTarget)
             {
                 targetAction = fmt::format("goto label_{:x};", target);
+            }
+            else if (!funcName.empty())
+            {
+                targetAction = fmt::format("{}(rdram, ctx, runtime); return;", funcName);
             }
             else
             {
@@ -325,11 +325,7 @@ namespace ps2recomp
 
                 if (target >= function.start && target < function.end)
                 {
-                    std::string funcName = getFunctionName(target);
-                    if (funcName.empty())
-                    {
-                        targets.insert(target);
-                    }
+                    targets.insert(target);
                 }
             }
             else if (isStaticJump)
@@ -337,11 +333,7 @@ namespace ps2recomp
                 uint32_t target = (inst.address & 0xF0000000) | (inst.target << 2);
                 if (target >= function.start && target < function.end)
                 {
-                    std::string funcName = getFunctionName(target);
-                    if (funcName.empty())
-                    {
-                        targets.insert(target);
-                    }
+                    targets.insert(target);
                 }
             }
         }

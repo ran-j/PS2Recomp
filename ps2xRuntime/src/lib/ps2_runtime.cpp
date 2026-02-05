@@ -9,6 +9,7 @@
 #include <thread>
 #include <unordered_map>
 #include "raylib.h"
+#include <ThreadNaming.h>
 
 #define ELF_MAGIC 0x464C457F // "\x7FELF" in little endian
 #define ET_EXEC 2            // Executable file
@@ -107,12 +108,7 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt)
         return;
     }
 
-    constexpr uint32_t DEFAULT_FB_ADDR = 0x00100000;
     uint32_t baseBytes = fbp * 2048;
-    if (fbp == 0)
-    {
-        baseBytes = DEFAULT_FB_ADDR;
-    }
     uint32_t strideBytes = (fbw ? fbw : (FB_WIDTH / 64)) * 64 * 4;
     uint8_t *rdram = rt->memory().getRDRAM();
     uint8_t *gsvram = rt->memory().getGSVRAM();
@@ -164,7 +160,6 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt)
 
     UpdateTexture(tex, scratch.data());
 }
-
 
 PS2Runtime::PS2Runtime()
 {
@@ -322,7 +317,6 @@ void PS2Runtime::SignalException(R5900Context *ctx, PS2Exception exception)
     }
 }
 
-
 void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint32_t address)
 {
     static std::unordered_map<uint32_t, int> seen;
@@ -426,6 +420,7 @@ void PS2Runtime::run()
 
     std::thread gameThread([&, entryPoint]()
                            {
+        ThreadNaming::SetCurrentThreadName("GameThread");
         try
         {
             entryPoint(m_memory.getRDRAM(), &m_cpuContext, this);
