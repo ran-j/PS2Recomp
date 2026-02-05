@@ -89,6 +89,7 @@ namespace ps2recomp
         std::string translateVU_VADD_Field(const Instruction &inst);
         std::string translateVU_VSUB_Field(const Instruction &inst);
         std::string translateVU_VMUL_Field(const Instruction &inst);
+        std::string translateVU_VMSUB_Field(const Instruction &inst);
         std::string translateVU_VADD(const Instruction &inst);
         std::string translateVU_VSUB(const Instruction &inst);
         std::string translateVU_VMUL(const Instruction &inst);
@@ -113,9 +114,16 @@ namespace ps2recomp
         std::string translateVU_VMADD_Field(const Instruction &inst);
         std::string translateVU_VMINI_Field(const Instruction &inst);
         std::string translateVU_VMADD(const Instruction &inst);
+        std::string translateVU_VMADDq(const Instruction &inst);
+        std::string translateVU_VMADDi(const Instruction &inst);
         std::string translateVU_VMAX(const Instruction &inst);
+        std::string translateVU_VMAXi(const Instruction &inst);
         std::string translateVU_VOPMSUB(const Instruction &inst);
         std::string translateVU_VMINI(const Instruction &inst);
+        std::string translateVU_VMINIi(const Instruction &inst);
+        std::string translateVU_VMSUB(const Instruction &inst);
+        std::string translateVU_VMSUBq(const Instruction &inst);
+        std::string translateVU_VMSUBi(const Instruction &inst);
 
         // Jump Table Generation
         std::string generateJumpTableSwitch(const Instruction &inst, uint32_t tableAddress,
