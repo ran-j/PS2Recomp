@@ -4,6 +4,8 @@
 out
 .vscode
 build
+build*/
+cmake-build-*/
 
 *.exe
 *.ilk
@@ -11,6 +13,14 @@ build
 *.log
 *.tlog
 *.ipch
+
+# CMake/Ninja (in-source builds)
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+*.ninja
+.ninja_*
 
 # Now we can place the dump code here and test while expand the Runtime
 ps2xRuntime/include/ps2_recompiled_functions.h
