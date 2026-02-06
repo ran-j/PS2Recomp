@@ -1506,6 +1506,2223 @@ namespace ps2_stubs
         setReturnS32(ctx, 0);
     }
 
+    void _calloc_r(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("_calloc_r", rdram, ctx, runtime);
+    }
+
+    void _free_r(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("_free_r", rdram, ctx, runtime);
+    }
+
+    void _malloc_r(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("_malloc_r", rdram, ctx, runtime);
+    }
+
+    void _malloc_trim_r(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("_malloc_trim_r", rdram, ctx, runtime);
+    }
+
+    void _mbtowc_r(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("_mbtowc_r", rdram, ctx, runtime);
+    }
+
+    void _printf(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("_printf", rdram, ctx, runtime);
+    }
+
+    void _printf_r(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("_printf_r", rdram, ctx, runtime);
+    }
+
+    void _sceCdRI(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("_sceCdRI", rdram, ctx, runtime);
+    }
+
+    void _sceCdRM(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("_sceCdRM", rdram, ctx, runtime);
+    }
+
+    void _sceFsDbChk(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("_sceFsDbChk", rdram, ctx, runtime);
+    }
+
+    void _sceFsIntrSigSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("_sceFsIntrSigSema", rdram, ctx, runtime);
+    }
+
+    void _sceFsSemExit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("_sceFsSemExit", rdram, ctx, runtime);
+    }
+
+    void _sceFsSemInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("_sceFsSemInit", rdram, ctx, runtime);
+    }
+
+    void _sceFsSigSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("_sceFsSigSema", rdram, ctx, runtime);
+    }
+
+    void _sceIDC(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("_sceIDC", rdram, ctx, runtime);
+    }
+
+    void _sceMpegFlush(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("_sceMpegFlush", rdram, ctx, runtime);
+    }
+
+    void _sceRpcFreePacket(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("_sceRpcFreePacket", rdram, ctx, runtime);
+    }
+
+    void _sceRpcGetFPacket(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("_sceRpcGetFPacket", rdram, ctx, runtime);
+    }
+
+    void _sceRpcGetFPacket2(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("_sceRpcGetFPacket2", rdram, ctx, runtime);
+    }
+
+    void _sceSDC(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("_sceSDC", rdram, ctx, runtime);
+    }
+
+    void _sceSifCmdIntrHdlr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("_sceSifCmdIntrHdlr", rdram, ctx, runtime);
+    }
+
+    void _sceSifLoadElfPart(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("_sceSifLoadElfPart", rdram, ctx, runtime);
+    }
+
+    void _sceSifLoadModule(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("_sceSifLoadModule", rdram, ctx, runtime);
+    }
+
+    void _sceSifSendCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("_sceSifSendCmd", rdram, ctx, runtime);
+    }
+
+    void _sceVu0ecossin(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("_sceVu0ecossin", rdram, ctx, runtime);
+    }
+
+    void abs(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("abs", rdram, ctx, runtime);
+    }
+
+    void atan(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("atan", rdram, ctx, runtime);
+    }
+
+    void close(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("close", rdram, ctx, runtime);
+    }
+
+    void DmaAddr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("DmaAddr", rdram, ctx, runtime);
+    }
+
+    void exit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("exit", rdram, ctx, runtime);
+    }
+
+    void fstat(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("fstat", rdram, ctx, runtime);
+    }
+
+    void getpid(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("getpid", rdram, ctx, runtime);
+    }
+
+    void iopGetArea(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("iopGetArea", rdram, ctx, runtime);
+    }
+
+    void lseek(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("lseek", rdram, ctx, runtime);
+    }
+
+    void mcCallMessageTypeSe(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcCallMessageTypeSe", rdram, ctx, runtime);
+    }
+
+    void mcCheckReadStartConfigFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcCheckReadStartConfigFile", rdram, ctx, runtime);
+    }
+
+    void mcCheckReadStartSaveFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcCheckReadStartSaveFile", rdram, ctx, runtime);
+    }
+
+    void mcCheckWriteStartConfigFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcCheckWriteStartConfigFile", rdram, ctx, runtime);
+    }
+
+    void mcCheckWriteStartSaveFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcCheckWriteStartSaveFile", rdram, ctx, runtime);
+    }
+
+    void mcCreateConfigInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcCreateConfigInit", rdram, ctx, runtime);
+    }
+
+    void mcCreateFileSelectWindow(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcCreateFileSelectWindow", rdram, ctx, runtime);
+    }
+
+    void mcCreateIconInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcCreateIconInit", rdram, ctx, runtime);
+    }
+
+    void mcCreateSaveFileInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcCreateSaveFileInit", rdram, ctx, runtime);
+    }
+
+    void mcDispFileName(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcDispFileName", rdram, ctx, runtime);
+    }
+
+    void mcDispFileNumber(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcDispFileNumber", rdram, ctx, runtime);
+    }
+
+    void mcDisplayFileSelectWindow(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcDisplayFileSelectWindow", rdram, ctx, runtime);
+    }
+
+    void mcDisplaySelectFileInfo(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcDisplaySelectFileInfo", rdram, ctx, runtime);
+    }
+
+    void mcDisplaySelectFileInfoMesCount(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcDisplaySelectFileInfoMesCount", rdram, ctx, runtime);
+    }
+
+    void mcDispWindowCurSol(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcDispWindowCurSol", rdram, ctx, runtime);
+    }
+
+    void mcDispWindowFoundtion(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcDispWindowFoundtion", rdram, ctx, runtime);
+    }
+
+    void mceGetInfoApdx(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mceGetInfoApdx", rdram, ctx, runtime);
+    }
+
+    void mceIntrReadFixAlign(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mceIntrReadFixAlign", rdram, ctx, runtime);
+    }
+
+    void mceStorePwd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mceStorePwd", rdram, ctx, runtime);
+    }
+
+    void mcGetConfigCapacitySize(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcGetConfigCapacitySize", rdram, ctx, runtime);
+    }
+
+    void mcGetFileSelectWindowCursol(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcGetFileSelectWindowCursol", rdram, ctx, runtime);
+    }
+
+    void mcGetFreeCapacitySize(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcGetFreeCapacitySize", rdram, ctx, runtime);
+    }
+
+    void mcGetIconCapacitySize(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcGetIconCapacitySize", rdram, ctx, runtime);
+    }
+
+    void mcGetIconFileCapacitySize(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcGetIconFileCapacitySize", rdram, ctx, runtime);
+    }
+
+    void mcGetPortSelectDirInfo(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcGetPortSelectDirInfo", rdram, ctx, runtime);
+    }
+
+    void mcGetSaveFileCapacitySize(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcGetSaveFileCapacitySize", rdram, ctx, runtime);
+    }
+
+    void mcGetStringEnd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcGetStringEnd", rdram, ctx, runtime);
+    }
+
+    void mcMoveFileSelectWindowCursor(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcMoveFileSelectWindowCursor", rdram, ctx, runtime);
+    }
+
+    void mcNewCreateConfigFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcNewCreateConfigFile", rdram, ctx, runtime);
+    }
+
+    void mcNewCreateIcon(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcNewCreateIcon", rdram, ctx, runtime);
+    }
+
+    void mcNewCreateSaveFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcNewCreateSaveFile", rdram, ctx, runtime);
+    }
+
+    void mcReadIconData(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcReadIconData", rdram, ctx, runtime);
+    }
+
+    void mcReadStartConfigFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcReadStartConfigFile", rdram, ctx, runtime);
+    }
+
+    void mcReadStartSaveFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcReadStartSaveFile", rdram, ctx, runtime);
+    }
+
+    void mcSelectFileInfoInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcSelectFileInfoInit", rdram, ctx, runtime);
+    }
+
+    void mcSelectSaveFileCheck(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcSelectSaveFileCheck", rdram, ctx, runtime);
+    }
+
+    void mcSetFileSelectWindowCursol(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcSetFileSelectWindowCursol", rdram, ctx, runtime);
+    }
+
+    void mcSetFileSelectWindowCursolInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcSetFileSelectWindowCursolInit", rdram, ctx, runtime);
+    }
+
+    void mcSetStringSaveFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcSetStringSaveFile", rdram, ctx, runtime);
+    }
+
+    void mcSetTyepWriteMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcSetTyepWriteMode", rdram, ctx, runtime);
+    }
+
+    void mcWriteIconData(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcWriteIconData", rdram, ctx, runtime);
+    }
+
+    void mcWriteStartConfigFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcWriteStartConfigFile", rdram, ctx, runtime);
+    }
+
+    void mcWriteStartSaveFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("mcWriteStartSaveFile", rdram, ctx, runtime);
+    }
+
+    void memchr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("memchr", rdram, ctx, runtime);
+    }
+
+    void open(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("open", rdram, ctx, runtime);
+    }
+
+    void Pad_init(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("Pad_init", rdram, ctx, runtime);
+    }
+
+    void Pad_set(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("Pad_set", rdram, ctx, runtime);
+    }
+
+    void rand(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("rand", rdram, ctx, runtime);
+    }
+
+    void read(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("read", rdram, ctx, runtime);
+    }
+
+    void sceCdApplyNCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdApplyNCmd", rdram, ctx, runtime);
+    }
+
+    void sceCdBreak(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdBreak", rdram, ctx, runtime);
+    }
+
+    void sceCdCallback(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdCallback", rdram, ctx, runtime);
+    }
+
+    void sceCdChangeThreadPriority(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdChangeThreadPriority", rdram, ctx, runtime);
+    }
+
+    void sceCdDelayThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdDelayThread", rdram, ctx, runtime);
+    }
+
+    void sceCdDiskReady(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdDiskReady", rdram, ctx, runtime);
+    }
+
+    void sceCdGetDiskType(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdGetDiskType", rdram, ctx, runtime);
+    }
+
+    void sceCdGetReadPos(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdGetReadPos", rdram, ctx, runtime);
+    }
+
+    void sceCdGetToc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdGetToc", rdram, ctx, runtime);
+    }
+
+    void sceCdInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdInit", rdram, ctx, runtime);
+    }
+
+    void sceCdInitEeCB(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdInitEeCB", rdram, ctx, runtime);
+    }
+
+    void sceCdIntToPos(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdIntToPos", rdram, ctx, runtime);
+    }
+
+    void sceCdMmode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdMmode", rdram, ctx, runtime);
+    }
+
+    void sceCdNcmdDiskReady(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdNcmdDiskReady", rdram, ctx, runtime);
+    }
+
+    void sceCdPause(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdPause", rdram, ctx, runtime);
+    }
+
+    void sceCdPosToInt(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdPosToInt", rdram, ctx, runtime);
+    }
+
+    void sceCdReadChain(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdReadChain", rdram, ctx, runtime);
+    }
+
+    void sceCdReadClock(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdReadClock", rdram, ctx, runtime);
+    }
+
+    void sceCdReadIOPm(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdReadIOPm", rdram, ctx, runtime);
+    }
+
+    void sceCdSearchFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdSearchFile", rdram, ctx, runtime);
+    }
+
+    void sceCdSeek(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdSeek", rdram, ctx, runtime);
+    }
+
+    void sceCdStandby(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdStandby", rdram, ctx, runtime);
+    }
+
+    void sceCdStatus(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdStatus", rdram, ctx, runtime);
+    }
+
+    void sceCdStInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdStInit", rdram, ctx, runtime);
+    }
+
+    void sceCdStop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdStop", rdram, ctx, runtime);
+    }
+
+    void sceCdStPause(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdStPause", rdram, ctx, runtime);
+    }
+
+    void sceCdStRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdStRead", rdram, ctx, runtime);
+    }
+
+    void sceCdStream(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdStream", rdram, ctx, runtime);
+    }
+
+    void sceCdStResume(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdStResume", rdram, ctx, runtime);
+    }
+
+    void sceCdStSeek(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdStSeek", rdram, ctx, runtime);
+    }
+
+    void sceCdStSeekF(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdStSeekF", rdram, ctx, runtime);
+    }
+
+    void sceCdStStart(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdStStart", rdram, ctx, runtime);
+    }
+
+    void sceCdStStat(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdStStat", rdram, ctx, runtime);
+    }
+
+    void sceCdStStop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdStStop", rdram, ctx, runtime);
+    }
+
+    void sceCdSyncS(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdSyncS", rdram, ctx, runtime);
+    }
+
+    void sceCdTrayReq(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceCdTrayReq", rdram, ctx, runtime);
+    }
+
+    void sceClose(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceClose", rdram, ctx, runtime);
+    }
+
+    void sceDeci2Close(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceDeci2Close", rdram, ctx, runtime);
+    }
+
+    void sceDeci2ExLock(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceDeci2ExLock", rdram, ctx, runtime);
+    }
+
+    void sceDeci2ExRecv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceDeci2ExRecv", rdram, ctx, runtime);
+    }
+
+    void sceDeci2ExReqSend(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceDeci2ExReqSend", rdram, ctx, runtime);
+    }
+
+    void sceDeci2ExSend(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceDeci2ExSend", rdram, ctx, runtime);
+    }
+
+    void sceDeci2ExUnLock(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceDeci2ExUnLock", rdram, ctx, runtime);
+    }
+
+    void sceDeci2Open(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceDeci2Open", rdram, ctx, runtime);
+    }
+
+    void sceDeci2Poll(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceDeci2Poll", rdram, ctx, runtime);
+    }
+
+    void sceDeci2ReqSend(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceDeci2ReqSend", rdram, ctx, runtime);
+    }
+
+    void sceDmaCallback(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceDmaCallback", rdram, ctx, runtime);
+    }
+
+    void sceDmaDebug(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceDmaDebug", rdram, ctx, runtime);
+    }
+
+    void sceDmaGetChan(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceDmaGetChan", rdram, ctx, runtime);
+    }
+
+    void sceDmaGetEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceDmaGetEnv", rdram, ctx, runtime);
+    }
+
+    void sceDmaLastSyncTime(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceDmaLastSyncTime", rdram, ctx, runtime);
+    }
+
+    void sceDmaPause(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceDmaPause", rdram, ctx, runtime);
+    }
+
+    void sceDmaPutEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceDmaPutEnv", rdram, ctx, runtime);
+    }
+
+    void sceDmaPutStallAddr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceDmaPutStallAddr", rdram, ctx, runtime);
+    }
+
+    void sceDmaRecv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceDmaRecv", rdram, ctx, runtime);
+    }
+
+    void sceDmaRecvI(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceDmaRecvI", rdram, ctx, runtime);
+    }
+
+    void sceDmaRecvN(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceDmaRecvN", rdram, ctx, runtime);
+    }
+
+    void sceDmaReset(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceDmaReset", rdram, ctx, runtime);
+    }
+
+    void sceDmaRestart(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceDmaRestart", rdram, ctx, runtime);
+    }
+
+    void sceDmaSend(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceDmaSend", rdram, ctx, runtime);
+    }
+
+    void sceDmaSendI(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceDmaSendI", rdram, ctx, runtime);
+    }
+
+    void sceDmaSendM(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceDmaSendM", rdram, ctx, runtime);
+    }
+
+    void sceDmaSendN(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceDmaSendN", rdram, ctx, runtime);
+    }
+
+    void sceDmaSync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceDmaSync", rdram, ctx, runtime);
+    }
+
+    void sceDmaSyncN(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceDmaSyncN", rdram, ctx, runtime);
+    }
+
+    void sceDmaWatch(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceDmaWatch", rdram, ctx, runtime);
+    }
+
+    void sceFsInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceFsInit", rdram, ctx, runtime);
+    }
+
+    void sceFsReset(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceFsReset", rdram, ctx, runtime);
+    }
+
+    void sceGsExecLoadImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceGsExecLoadImage", rdram, ctx, runtime);
+    }
+
+    void sceGsExecStoreImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceGsExecStoreImage", rdram, ctx, runtime);
+    }
+
+    void sceGsGetGParam(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceGsGetGParam", rdram, ctx, runtime);
+    }
+
+    void sceGsPutDispEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceGsPutDispEnv", rdram, ctx, runtime);
+    }
+
+    void sceGsPutDrawEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceGsPutDrawEnv", rdram, ctx, runtime);
+    }
+
+    void sceGsResetGraph(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceGsResetGraph", rdram, ctx, runtime);
+    }
+
+    void sceGsResetPath(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceGsResetPath", rdram, ctx, runtime);
+    }
+
+    void sceGsSetDefClear(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceGsSetDefClear", rdram, ctx, runtime);
+    }
+
+    void sceGsSetDefDBuffDc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceGsSetDefDBuffDc", rdram, ctx, runtime);
+    }
+
+    void sceGsSetDefDispEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceGsSetDefDispEnv", rdram, ctx, runtime);
+    }
+
+    void sceGsSetDefDrawEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceGsSetDefDrawEnv", rdram, ctx, runtime);
+    }
+
+    void sceGsSetDefDrawEnv2(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceGsSetDefDrawEnv2", rdram, ctx, runtime);
+    }
+
+    void sceGsSetDefLoadImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceGsSetDefLoadImage", rdram, ctx, runtime);
+    }
+
+    void sceGsSetDefStoreImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceGsSetDefStoreImage", rdram, ctx, runtime);
+    }
+
+    void sceGsSwapDBuffDc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceGsSwapDBuffDc", rdram, ctx, runtime);
+    }
+
+    void sceGsSyncPath(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceGsSyncPath", rdram, ctx, runtime);
+    }
+
+    void sceGsSyncV(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceGsSyncV", rdram, ctx, runtime);
+    }
+
+    void sceGsSyncVCallback(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceGsSyncVCallback", rdram, ctx, runtime);
+    }
+
+    void sceGszbufaddr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceGszbufaddr", rdram, ctx, runtime);
+    }
+
+    void sceIoctl(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceIoctl", rdram, ctx, runtime);
+    }
+
+    void sceIpuInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceIpuInit", rdram, ctx, runtime);
+    }
+
+    void sceIpuRestartDMA(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceIpuRestartDMA", rdram, ctx, runtime);
+    }
+
+    void sceIpuStopDMA(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceIpuStopDMA", rdram, ctx, runtime);
+    }
+
+    void sceIpuSync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceIpuSync", rdram, ctx, runtime);
+    }
+
+    void sceLseek(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceLseek", rdram, ctx, runtime);
+    }
+
+    void sceMcChangeThreadPriority(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMcChangeThreadPriority", rdram, ctx, runtime);
+    }
+
+    void sceMcChdir(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMcChdir", rdram, ctx, runtime);
+    }
+
+    void sceMcClose(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMcClose", rdram, ctx, runtime);
+    }
+
+    void sceMcDelete(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMcDelete", rdram, ctx, runtime);
+    }
+
+    void sceMcFlush(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMcFlush", rdram, ctx, runtime);
+    }
+
+    void sceMcFormat(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMcFormat", rdram, ctx, runtime);
+    }
+
+    void sceMcGetDir(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMcGetDir", rdram, ctx, runtime);
+    }
+
+    void sceMcGetEntSpace(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMcGetEntSpace", rdram, ctx, runtime);
+    }
+
+    void sceMcGetInfo(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMcGetInfo", rdram, ctx, runtime);
+    }
+
+    void sceMcGetSlotMax(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMcGetSlotMax", rdram, ctx, runtime);
+    }
+
+    void sceMcInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMcInit", rdram, ctx, runtime);
+    }
+
+    void sceMcMkdir(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMcMkdir", rdram, ctx, runtime);
+    }
+
+    void sceMcOpen(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMcOpen", rdram, ctx, runtime);
+    }
+
+    void sceMcRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMcRead", rdram, ctx, runtime);
+    }
+
+    void sceMcRename(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMcRename", rdram, ctx, runtime);
+    }
+
+    void sceMcSeek(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMcSeek", rdram, ctx, runtime);
+    }
+
+    void sceMcSetFileInfo(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMcSetFileInfo", rdram, ctx, runtime);
+    }
+
+    void sceMcSync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMcSync", rdram, ctx, runtime);
+    }
+
+    void sceMcUnformat(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMcUnformat", rdram, ctx, runtime);
+    }
+
+    void sceMcWrite(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMcWrite", rdram, ctx, runtime);
+    }
+
+    void sceMpegAddBs(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMpegAddBs", rdram, ctx, runtime);
+    }
+
+    void sceMpegAddCallback(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMpegAddCallback", rdram, ctx, runtime);
+    }
+
+    void sceMpegAddStrCallback(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMpegAddStrCallback", rdram, ctx, runtime);
+    }
+
+    void sceMpegClearRefBuff(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMpegClearRefBuff", rdram, ctx, runtime);
+    }
+
+    void sceMpegCreate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMpegCreate", rdram, ctx, runtime);
+    }
+
+    void sceMpegDelete(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMpegDelete", rdram, ctx, runtime);
+    }
+
+    void sceMpegDemuxPss(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMpegDemuxPss", rdram, ctx, runtime);
+    }
+
+    void sceMpegDemuxPssRing(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMpegDemuxPssRing", rdram, ctx, runtime);
+    }
+
+    void sceMpegDispCenterOffX(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMpegDispCenterOffX", rdram, ctx, runtime);
+    }
+
+    void sceMpegDispCenterOffY(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMpegDispCenterOffY", rdram, ctx, runtime);
+    }
+
+    void sceMpegDispHeight(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMpegDispHeight", rdram, ctx, runtime);
+    }
+
+    void sceMpegDispWidth(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMpegDispWidth", rdram, ctx, runtime);
+    }
+
+    void sceMpegGetDecodeMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMpegGetDecodeMode", rdram, ctx, runtime);
+    }
+
+    void sceMpegGetPicture(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMpegGetPicture", rdram, ctx, runtime);
+    }
+
+    void sceMpegGetPictureRAW8(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMpegGetPictureRAW8", rdram, ctx, runtime);
+    }
+
+    void sceMpegGetPictureRAW8xy(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMpegGetPictureRAW8xy", rdram, ctx, runtime);
+    }
+
+    void sceMpegInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMpegInit", rdram, ctx, runtime);
+    }
+
+    void sceMpegIsEnd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMpegIsEnd", rdram, ctx, runtime);
+    }
+
+    void sceMpegIsRefBuffEmpty(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMpegIsRefBuffEmpty", rdram, ctx, runtime);
+    }
+
+    void sceMpegReset(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMpegReset", rdram, ctx, runtime);
+    }
+
+    void sceMpegResetDefaultPtsGap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMpegResetDefaultPtsGap", rdram, ctx, runtime);
+    }
+
+    void sceMpegSetDecodeMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMpegSetDecodeMode", rdram, ctx, runtime);
+    }
+
+    void sceMpegSetDefaultPtsGap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMpegSetDefaultPtsGap", rdram, ctx, runtime);
+    }
+
+    void sceMpegSetImageBuff(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceMpegSetImageBuff", rdram, ctx, runtime);
+    }
+
+    void sceOpen(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceOpen", rdram, ctx, runtime);
+    }
+
+    void scePadEnd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("scePadEnd", rdram, ctx, runtime);
+    }
+
+    void scePadEnterPressMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("scePadEnterPressMode", rdram, ctx, runtime);
+    }
+
+    void scePadExitPressMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("scePadExitPressMode", rdram, ctx, runtime);
+    }
+
+    void scePadGetButtonMask(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("scePadGetButtonMask", rdram, ctx, runtime);
+    }
+
+    void scePadGetDmaStr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("scePadGetDmaStr", rdram, ctx, runtime);
+    }
+
+    void scePadGetFrameCount(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("scePadGetFrameCount", rdram, ctx, runtime);
+    }
+
+    void scePadGetModVersion(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("scePadGetModVersion", rdram, ctx, runtime);
+    }
+
+    void scePadGetPortMax(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("scePadGetPortMax", rdram, ctx, runtime);
+    }
+
+    void scePadGetReqState(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("scePadGetReqState", rdram, ctx, runtime);
+    }
+
+    void scePadGetSlotMax(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("scePadGetSlotMax", rdram, ctx, runtime);
+    }
+
+    void scePadGetState(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("scePadGetState", rdram, ctx, runtime);
+    }
+
+    void scePadInfoAct(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("scePadInfoAct", rdram, ctx, runtime);
+    }
+
+    void scePadInfoComb(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("scePadInfoComb", rdram, ctx, runtime);
+    }
+
+    void scePadInfoMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("scePadInfoMode", rdram, ctx, runtime);
+    }
+
+    void scePadInfoPressMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("scePadInfoPressMode", rdram, ctx, runtime);
+    }
+
+    void scePadInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("scePadInit", rdram, ctx, runtime);
+    }
+
+    void scePadInit2(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("scePadInit2", rdram, ctx, runtime);
+    }
+
+    void scePadPortClose(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("scePadPortClose", rdram, ctx, runtime);
+    }
+
+    void scePadPortOpen(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("scePadPortOpen", rdram, ctx, runtime);
+    }
+
+    void scePadRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("scePadRead", rdram, ctx, runtime);
+    }
+
+    void scePadReqIntToStr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("scePadReqIntToStr", rdram, ctx, runtime);
+    }
+
+    void scePadSetActAlign(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("scePadSetActAlign", rdram, ctx, runtime);
+    }
+
+    void scePadSetActDirect(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("scePadSetActDirect", rdram, ctx, runtime);
+    }
+
+    void scePadSetButtonInfo(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("scePadSetButtonInfo", rdram, ctx, runtime);
+    }
+
+    void scePadSetMainMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("scePadSetMainMode", rdram, ctx, runtime);
+    }
+
+    void scePadSetReqState(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("scePadSetReqState", rdram, ctx, runtime);
+    }
+
+    void scePadSetVrefParam(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("scePadSetVrefParam", rdram, ctx, runtime);
+    }
+
+    void scePadSetWarningLevel(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("scePadSetWarningLevel", rdram, ctx, runtime);
+    }
+
+    void scePadStateIntToStr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("scePadStateIntToStr", rdram, ctx, runtime);
+    }
+
+    void scePrintf(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("scePrintf", rdram, ctx, runtime);
+    }
+
+    void sceRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceRead", rdram, ctx, runtime);
+    }
+
+    void sceResetttyinit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceResetttyinit", rdram, ctx, runtime);
+    }
+
+    void sceSdCallBack(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSdCallBack", rdram, ctx, runtime);
+    }
+
+    void sceSdRemote(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSdRemote", rdram, ctx, runtime);
+    }
+
+    void sceSdRemoteInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSdRemoteInit", rdram, ctx, runtime);
+    }
+
+    void sceSdTransToIOP(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSdTransToIOP", rdram, ctx, runtime);
+    }
+
+    void sceSetBrokenLink(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSetBrokenLink", rdram, ctx, runtime);
+    }
+
+    void sceSetPtm(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSetPtm", rdram, ctx, runtime);
+    }
+
+    void sceSifAddCmdHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifAddCmdHandler", rdram, ctx, runtime);
+    }
+
+    void sceSifAllocIopHeap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifAllocIopHeap", rdram, ctx, runtime);
+    }
+
+    void sceSifBindRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifBindRpc", rdram, ctx, runtime);
+    }
+
+    void sceSifCheckStatRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifCheckStatRpc", rdram, ctx, runtime);
+    }
+
+    void sceSifDmaStat(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifDmaStat", rdram, ctx, runtime);
+    }
+
+    void sceSifExecRequest(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifExecRequest", rdram, ctx, runtime);
+    }
+
+    void sceSifExitCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifExitCmd", rdram, ctx, runtime);
+    }
+
+    void sceSifExitRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifExitRpc", rdram, ctx, runtime);
+    }
+
+    void sceSifFreeIopHeap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifFreeIopHeap", rdram, ctx, runtime);
+    }
+
+    void sceSifGetDataTable(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifGetDataTable", rdram, ctx, runtime);
+    }
+
+    void sceSifGetIopAddr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifGetIopAddr", rdram, ctx, runtime);
+    }
+
+    void sceSifGetNextRequest(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifGetNextRequest", rdram, ctx, runtime);
+    }
+
+    void sceSifGetOtherData(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifGetOtherData", rdram, ctx, runtime);
+    }
+
+    void sceSifGetReg(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifGetReg", rdram, ctx, runtime);
+    }
+
+    void sceSifGetSreg(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifGetSreg", rdram, ctx, runtime);
+    }
+
+    void sceSifInitCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifInitCmd", rdram, ctx, runtime);
+    }
+
+    void sceSifInitIopHeap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifInitIopHeap", rdram, ctx, runtime);
+    }
+
+    void sceSifInitRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifInitRpc", rdram, ctx, runtime);
+    }
+
+    void sceSifIsAliveIop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifIsAliveIop", rdram, ctx, runtime);
+    }
+
+    void sceSifLoadElf(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifLoadElf", rdram, ctx, runtime);
+    }
+
+    void sceSifLoadElfPart(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifLoadElfPart", rdram, ctx, runtime);
+    }
+
+    void sceSifLoadFileReset(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifLoadFileReset", rdram, ctx, runtime);
+    }
+
+    void sceSifLoadIopHeap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifLoadIopHeap", rdram, ctx, runtime);
+    }
+
+    void sceSifLoadModuleBuffer(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifLoadModuleBuffer", rdram, ctx, runtime);
+    }
+
+    void sceSifRebootIop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifRebootIop", rdram, ctx, runtime);
+    }
+
+    void sceSifRegisterRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifRegisterRpc", rdram, ctx, runtime);
+    }
+
+    void sceSifRemoveCmdHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifRemoveCmdHandler", rdram, ctx, runtime);
+    }
+
+    void sceSifRemoveRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifRemoveRpc", rdram, ctx, runtime);
+    }
+
+    void sceSifRemoveRpcQueue(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifRemoveRpcQueue", rdram, ctx, runtime);
+    }
+
+    void sceSifResetIop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifResetIop", rdram, ctx, runtime);
+    }
+
+    void sceSifRpcLoop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifRpcLoop", rdram, ctx, runtime);
+    }
+
+    void sceSifSetCmdBuffer(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifSetCmdBuffer", rdram, ctx, runtime);
+    }
+
+    void sceSifSetDChain(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifSetDChain", rdram, ctx, runtime);
+    }
+
+    void sceSifSetDma(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifSetDma", rdram, ctx, runtime);
+    }
+
+    void sceSifSetIopAddr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifSetIopAddr", rdram, ctx, runtime);
+    }
+
+    void sceSifSetReg(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifSetReg", rdram, ctx, runtime);
+    }
+
+    void sceSifSetRpcQueue(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifSetRpcQueue", rdram, ctx, runtime);
+    }
+
+    void sceSifSetSreg(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifSetSreg", rdram, ctx, runtime);
+    }
+
+    void sceSifSetSysCmdBuffer(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifSetSysCmdBuffer", rdram, ctx, runtime);
+    }
+
+    void sceSifStopDma(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifStopDma", rdram, ctx, runtime);
+    }
+
+    void sceSifSyncIop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifSyncIop", rdram, ctx, runtime);
+    }
+
+    void sceSifWriteBackDCache(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSifWriteBackDCache", rdram, ctx, runtime);
+    }
+
+    void sceSSyn_BreakAtick(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSSyn_BreakAtick", rdram, ctx, runtime);
+    }
+
+    void sceSSyn_ClearBreakAtick(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSSyn_ClearBreakAtick", rdram, ctx, runtime);
+    }
+
+    void sceSSyn_SendExcMsg(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSSyn_SendExcMsg", rdram, ctx, runtime);
+    }
+
+    void sceSSyn_SendNrpnMsg(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSSyn_SendNrpnMsg", rdram, ctx, runtime);
+    }
+
+    void sceSSyn_SendRpnMsg(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSSyn_SendRpnMsg", rdram, ctx, runtime);
+    }
+
+    void sceSSyn_SendShortMsg(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSSyn_SendShortMsg", rdram, ctx, runtime);
+    }
+
+    void sceSSyn_SetChPriority(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSSyn_SetChPriority", rdram, ctx, runtime);
+    }
+
+    void sceSSyn_SetMasterVolume(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSSyn_SetMasterVolume", rdram, ctx, runtime);
+    }
+
+    void sceSSyn_SetOutPortVolume(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSSyn_SetOutPortVolume", rdram, ctx, runtime);
+    }
+
+    void sceSSyn_SetOutputAssign(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSSyn_SetOutputAssign", rdram, ctx, runtime);
+    }
+
+    void sceSSyn_SetOutputMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSSyn_SetOutputMode", rdram, ctx, runtime);
+    }
+
+    void sceSSyn_SetPortMaxPoly(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSSyn_SetPortMaxPoly", rdram, ctx, runtime);
+    }
+
+    void sceSSyn_SetPortVolume(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSSyn_SetPortVolume", rdram, ctx, runtime);
+    }
+
+    void sceSSyn_SetTvaEnvMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSSyn_SetTvaEnvMode", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerAmpProcI(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerAmpProcI", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerAmpProcNI(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerAmpProcNI", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerAssignAllNoteOff(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerAssignAllNoteOff", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerAssignAllSoundOff(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerAssignAllSoundOff", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerAssignHoldChange(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerAssignHoldChange", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerAssignNoteOff(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerAssignNoteOff", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerAssignNoteOn(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerAssignNoteOn", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerCalcEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerCalcEnv", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerCalcPortamentPitch(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerCalcPortamentPitch", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerCalcTvfCoefAll(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerCalcTvfCoefAll", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerCalcTvfCoefF0(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerCalcTvfCoefF0", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerCent2PhaseInc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerCent2PhaseInc", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerChangeEffectSend(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerChangeEffectSend", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerChangeHsPanpot(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerChangeHsPanpot", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerChangeNrpnCutOff(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerChangeNrpnCutOff", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerChangeNrpnLfoDepth(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerChangeNrpnLfoDepth", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerChangeNrpnLfoRate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerChangeNrpnLfoRate", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerChangeOutAttrib(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerChangeOutAttrib", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerChangeOutVol(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerChangeOutVol", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerChangePanpot(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerChangePanpot", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerChangePartBendSens(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerChangePartBendSens", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerChangePartExpression(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerChangePartExpression", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerChangePartHsExpression(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerChangePartHsExpression", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerChangePartHsPitchBend(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerChangePartHsPitchBend", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerChangePartModuration(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerChangePartModuration", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerChangePartPitchBend(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerChangePartPitchBend", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerChangePartVolume(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerChangePartVolume", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerChangePortamento(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerChangePortamento", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerChangePortamentoTime(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerChangePortamentoTime", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerClearKeyMap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerClearKeyMap", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerClearSpr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerClearSpr", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerCopyOutput(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerCopyOutput", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerDmaFromSPR(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerDmaFromSPR", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerDmaSpr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerDmaSpr", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerDmaToSPR(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerDmaToSPR", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerGetPartial(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerGetPartial", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerGetPartOutLevel(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerGetPartOutLevel", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerGetSampleParam(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerGetSampleParam", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerHsMessage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerHsMessage", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerLfoNone(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerLfoNone", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerLfoProc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerLfoProc", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerLfoSawDown(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerLfoSawDown", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerLfoSawUp(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerLfoSawUp", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerLfoSquare(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerLfoSquare", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerReadNoise(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerReadNoise", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerReadNoiseAdd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerReadNoiseAdd", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerReadSample16(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerReadSample16", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerReadSample16Add(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerReadSample16Add", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerReadSample8(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerReadSample8", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerReadSample8Add(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerReadSample8Add", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerResetPart(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerResetPart", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerRestorDma(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerRestorDma", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerSelectPatch(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerSelectPatch", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerSendShortMessage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerSendShortMessage", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerSetMasterVolume(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerSetMasterVolume", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerSetRVoice(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerSetRVoice", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerSetupDma(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerSetupDma", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerSetupLfo(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerSetupLfo", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerSetupMidiModuration(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerSetupMidiModuration", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerSetupMidiPanpot(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerSetupMidiPanpot", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerSetupNewNoise(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerSetupNewNoise", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerSetupReleaseEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerSetupReleaseEnv", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerSetuptEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerSetuptEnv", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerSetupTruncateTvaEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerSetupTruncateTvaEnv", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerSetupTruncateTvfPitchEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerSetupTruncateTvfPitchEnv", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerTonegenerator(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerTonegenerator", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerTransposeMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerTransposeMatrix", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerTvfProcI(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerTvfProcI", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerTvfProcNI(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerTvfProcNI", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerWaitDmaFromSPR(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerWaitDmaFromSPR", rdram, ctx, runtime);
+    }
+
+    void sceSynthesizerWaitDmaToSPR(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthesizerWaitDmaToSPR", rdram, ctx, runtime);
+    }
+
+    void sceSynthsizerGetDrumPatch(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthsizerGetDrumPatch", rdram, ctx, runtime);
+    }
+
+    void sceSynthsizerGetMeloPatch(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthsizerGetMeloPatch", rdram, ctx, runtime);
+    }
+
+    void sceSynthsizerLfoNoise(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthsizerLfoNoise", rdram, ctx, runtime);
+    }
+
+    void sceSynthSizerLfoTriangle(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceSynthSizerLfoTriangle", rdram, ctx, runtime);
+    }
+
+    void sceTtyHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceTtyHandler", rdram, ctx, runtime);
+    }
+
+    void sceTtyInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceTtyInit", rdram, ctx, runtime);
+    }
+
+    void sceTtyRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceTtyRead", rdram, ctx, runtime);
+    }
+
+    void sceTtyWrite(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceTtyWrite", rdram, ctx, runtime);
+    }
+
+    void sceVpu0Reset(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVpu0Reset", rdram, ctx, runtime);
+    }
+
+    void sceVu0AddVector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0AddVector", rdram, ctx, runtime);
+    }
+
+    void sceVu0ApplyMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0ApplyMatrix", rdram, ctx, runtime);
+    }
+
+    void sceVu0CameraMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0CameraMatrix", rdram, ctx, runtime);
+    }
+
+    void sceVu0ClampVector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0ClampVector", rdram, ctx, runtime);
+    }
+
+    void sceVu0ClipAll(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0ClipAll", rdram, ctx, runtime);
+    }
+
+    void sceVu0ClipScreen(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0ClipScreen", rdram, ctx, runtime);
+    }
+
+    void sceVu0ClipScreen3(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0ClipScreen3", rdram, ctx, runtime);
+    }
+
+    void sceVu0CopyMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0CopyMatrix", rdram, ctx, runtime);
+    }
+
+    void sceVu0CopyVector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0CopyVector", rdram, ctx, runtime);
+    }
+
+    void sceVu0CopyVectorXYZ(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0CopyVectorXYZ", rdram, ctx, runtime);
+    }
+
+    void sceVu0DivVector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0DivVector", rdram, ctx, runtime);
+    }
+
+    void sceVu0DivVectorXYZ(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0DivVectorXYZ", rdram, ctx, runtime);
+    }
+
+    void sceVu0DropShadowMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0DropShadowMatrix", rdram, ctx, runtime);
+    }
+
+    void sceVu0FTOI0Vector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0FTOI0Vector", rdram, ctx, runtime);
+    }
+
+    void sceVu0FTOI4Vector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0FTOI4Vector", rdram, ctx, runtime);
+    }
+
+    void sceVu0InnerProduct(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0InnerProduct", rdram, ctx, runtime);
+    }
+
+    void sceVu0InterVector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0InterVector", rdram, ctx, runtime);
+    }
+
+    void sceVu0InterVectorXYZ(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0InterVectorXYZ", rdram, ctx, runtime);
+    }
+
+    void sceVu0InversMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0InversMatrix", rdram, ctx, runtime);
+    }
+
+    void sceVu0ITOF0Vector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0ITOF0Vector", rdram, ctx, runtime);
+    }
+
+    void sceVu0ITOF12Vector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0ITOF12Vector", rdram, ctx, runtime);
+    }
+
+    void sceVu0ITOF4Vector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0ITOF4Vector", rdram, ctx, runtime);
+    }
+
+    void sceVu0LightColorMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0LightColorMatrix", rdram, ctx, runtime);
+    }
+
+    void sceVu0MulMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0MulMatrix", rdram, ctx, runtime);
+    }
+
+    void sceVu0MulVector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0MulVector", rdram, ctx, runtime);
+    }
+
+    void sceVu0Normalize(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0Normalize", rdram, ctx, runtime);
+    }
+
+    void sceVu0NormalLightMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0NormalLightMatrix", rdram, ctx, runtime);
+    }
+
+    void sceVu0OuterProduct(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0OuterProduct", rdram, ctx, runtime);
+    }
+
+    void sceVu0RotMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0RotMatrix", rdram, ctx, runtime);
+    }
+
+    void sceVu0RotMatrixX(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0RotMatrixX", rdram, ctx, runtime);
+    }
+
+    void sceVu0RotMatrixY(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0RotMatrixY", rdram, ctx, runtime);
+    }
+
+    void sceVu0RotMatrixZ(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0RotMatrixZ", rdram, ctx, runtime);
+    }
+
+    void sceVu0RotTransPers(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0RotTransPers", rdram, ctx, runtime);
+    }
+
+    void sceVu0RotTransPersN(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0RotTransPersN", rdram, ctx, runtime);
+    }
+
+    void sceVu0ScaleVector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0ScaleVector", rdram, ctx, runtime);
+    }
+
+    void sceVu0ScaleVectorXYZ(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0ScaleVectorXYZ", rdram, ctx, runtime);
+    }
+
+    void sceVu0SubVector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0SubVector", rdram, ctx, runtime);
+    }
+
+    void sceVu0TransMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0TransMatrix", rdram, ctx, runtime);
+    }
+
+    void sceVu0TransposeMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0TransposeMatrix", rdram, ctx, runtime);
+    }
+
+    void sceVu0UnitMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0UnitMatrix", rdram, ctx, runtime);
+    }
+
+    void sceVu0ViewScreenMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceVu0ViewScreenMatrix", rdram, ctx, runtime);
+    }
+
+    void sceWrite(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("sceWrite", rdram, ctx, runtime);
+    }
+
+    void srand(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("srand", rdram, ctx, runtime);
+    }
+
+    void stat(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("stat", rdram, ctx, runtime);
+    }
+
+    void strcasecmp(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("strcasecmp", rdram, ctx, runtime);
+    }
+
+    void vfprintf(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("vfprintf", rdram, ctx, runtime);
+    }
+
+    void vsprintf(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("vsprintf", rdram, ctx, runtime);
+    }
+
+    void write(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        TODO_NAMED("write", rdram, ctx, runtime);
+    }
+
+    // END AUTO-GENERATED FALLBACK STUBS
+
     void TODO(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         TODO_NAMED("unknown", rdram, ctx, runtime);

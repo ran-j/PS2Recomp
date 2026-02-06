@@ -365,6 +365,28 @@ namespace ps2_syscalls
         setReturnS32(ctx, 0);
     }
 
+    void CancelWakeupThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 32)
+        {
+            std::cout << "[CancelWakeupThread]" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void iCancelWakeupThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static int logCount = 0;
+        if (logCount < 32)
+        {
+            std::cout << "[iCancelWakeupThread]" << std::endl;
+            ++logCount;
+        }
+        setReturnS32(ctx, 0);
+    }
+
     void ChangeThreadPriority(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         int tid = static_cast<int>(getRegU32(ctx, 4));
