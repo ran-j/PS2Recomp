@@ -250,7 +250,7 @@ namespace ps2recomp
 
             std::string targetAction;
             std::string funcName = getFunctionName(target);
-            bool isInternalTarget = internalTargets.find(target) != internalTargets.end();
+            bool isInternalTarget = internalTargets.contains(target);
 
             if (isInternalTarget)
             {
@@ -400,7 +400,7 @@ namespace ps2recomp
         {
             const Instruction &inst = instructions[i];
 
-            if (internalTargets.find(inst.address) != internalTargets.end())
+            if (internalTargets.contains(inst.address))
             {
                 ss << "label_" << std::hex << inst.address << std::dec << ":\n";
             }
@@ -413,7 +413,7 @@ namespace ps2recomp
                 {
                     const Instruction &delaySlot = instructions[i + 1];
 
-                    if (internalTargets.find(delaySlot.address) != internalTargets.end())
+                    if (internalTargets.contains(delaySlot.address))
                     {
                         ss << "label_" << std::hex << delaySlot.address << std::dec << ":\n";
                     }
@@ -1548,7 +1548,6 @@ namespace ps2recomp
             {
                 uint8_t vu_fhi_flo = (uint8_t)((((inst.raw >> 6) & 0x1F) << 2) | (inst.raw & 0x3));
 
-                // Special2: fhi_flo field (see RabbitizerInstructionR5900.h)
                 switch (vu_fhi_flo)
                 {
                 case VU0_S2_VADDAx:

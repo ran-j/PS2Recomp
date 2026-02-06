@@ -882,19 +882,6 @@ namespace ps2recomp
                     break;
                 }
             }
-            else // Special1 Table
-            {
-                if (vu_func >= VU0_S1_VIADD && vu_func <= VU0_S1_VIOR)
-                {
-                    inst.modificationInfo.modifiesVFR = false;
-                    inst.modificationInfo.modifiesVIR = true;
-                } // Integer ops
-                if (vu_func == VU0_S1_VIADDI)
-                {
-                    inst.modificationInfo.modifiesVFR = false;
-                    inst.modificationInfo.modifiesVIR = true;
-                }
-            }
             break;
         }
         }
