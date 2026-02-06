@@ -20,6 +20,7 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include <cstring>
 
 namespace
 {
@@ -613,13 +614,22 @@ namespace ps2recomp
     {
         for (const auto &section : m_sections)
         {
-            if (address >= section.address && address < (section.address + section.size))
+            if (address < section.address || section.size < sizeof(uint32_t))
             {
-                if (section.data)
-                {
-                    uint32_t offset = address - section.address;
-                    return *reinterpret_cast<uint32_t *>(section.data + offset);
-                }
+                continue;
+            }
+
+            const uint32_t offset = address - section.address;
+            if (offset > section.size - static_cast<uint32_t>(sizeof(uint32_t)))
+            {
+                continue;
+            }
+
+            if (section.data)
+            {
+                uint32_t word = 0;
+                std::memcpy(&word, section.data + offset, sizeof(word));
+                return word;
             }
         }
 

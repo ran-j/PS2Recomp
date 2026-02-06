@@ -28,6 +28,56 @@ namespace ps2recomp
             Stub
         };
 
+        uint32_t decodeAbsoluteJumpTarget(uint32_t address, uint32_t target)
+        {
+            return ((address + 4) & 0xF0000000u) | (target << 2);
+        }
+
+        bool isReservedCxxIdentifier(const std::string &name)
+        {
+            if (name.size() >= 2 && name[0] == '_' && name[1] == '_')
+            {
+                return true;
+            }
+            if (name.size() >= 2 && name[0] == '_' && std::isupper(static_cast<unsigned char>(name[1])))
+            {
+                return true;
+            }
+            return false;
+        }
+
+        std::string sanitizeIdentifierBody(const std::string &name)
+        {
+            std::string sanitized;
+            sanitized.reserve(name.size() + 1);
+
+            for (char c : name)
+            {
+                const unsigned char uc = static_cast<unsigned char>(c);
+                if (std::isalnum(uc) || c == '_')
+                {
+                    sanitized.push_back(c);
+                }
+                else
+                {
+                    sanitized.push_back('_');
+                }
+            }
+
+            if (sanitized.empty())
+            {
+                return sanitized;
+            }
+
+            const unsigned char first = static_cast<unsigned char>(sanitized.front());
+            if (!(std::isalpha(first) || sanitized.front() == '_'))
+            {
+                sanitized.insert(sanitized.begin(), '_');
+            }
+
+            return sanitized;
+        }
+
         StubTarget resolveStubTarget(const std::string &name)
         {
             if (ps2_runtime_calls::isSyscallName(name))
@@ -167,6 +217,7 @@ namespace ps2recomp
             std::cout << "Recompiling " << m_functions.size() << " functions..." << std::endl;
 
             size_t processedCount = 0;
+            size_t failedCount = 0;
             for (auto &function : m_functions)
             {
                 std::cout << "processing function: " << function.name << std::endl;
@@ -186,8 +237,9 @@ namespace ps2recomp
 
                 if (!decodeFunction(function))
                 {
-                    std::cerr << "Failed to decode function: " << function.name << std::endl;
-                    return false;
+                    ++failedCount;
+                    std::cerr << "Skipping function due decode failure: " << function.name << std::endl;
+                    continue;
                 }
 
                 function.isRecompiled = true;
@@ -201,6 +253,11 @@ namespace ps2recomp
             }
 
             discoverAdditionalEntryPoints();
+
+            if (failedCount > 0)
+            {
+                std::cerr << "Recompile completed with " << failedCount << " function(s) skipped due decode issues." << std::endl;
+            }
 
             std::cout << "Recompilation completed successfully." << std::endl;
             return true;
@@ -394,12 +451,12 @@ namespace ps2recomp
                             stubFile << "#include \"ps2_runtime.h\"\n";
                             stubFile << "#include \"ps2_syscalls.h\"\n";
                             stubFile << "#include \"ps2_stubs.h\"\n\n";
-                            stubFile << m_generatedStubs[function.start] << "\n";
+                            stubFile << m_generatedStubs.at(function.start) << "\n";
                             code = stubFile.str();
                         }
                         else
                         {
-                            const auto &instructions = m_decodedFunctions[function.start];
+                            const auto &instructions = m_decodedFunctions.at(function.start);
                             code = m_codeGenerator->generateFunction(function, instructions, true);
                         }
                     }
@@ -453,7 +510,7 @@ namespace ps2recomp
 
             for (const auto &funcName : stubNames)
             {
-                ss << "void " << funcName << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime);\n";
+                ss << "void " << sanitizeFunctionName(funcName) << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime);\n";
             }
 
             // ss << "\n} // namespace stubs\n";
@@ -530,7 +587,7 @@ namespace ps2recomp
         {
             if (inst.opcode == OPCODE_J || inst.opcode == OPCODE_JAL)
             {
-                return (inst.address & 0xF0000000) | (inst.target << 2);
+                return decodeAbsoluteJumpTarget(inst.address, inst.target);
             }
 
             if (inst.opcode == OPCODE_SPECIAL &&
@@ -651,6 +708,7 @@ namespace ps2recomp
     bool PS2Recompiler::decodeFunction(Function &function)
     {
         std::vector<Instruction> instructions;
+        bool truncated = false;
 
         uint32_t start = function.start;
         uint32_t end = function.end;
@@ -662,8 +720,10 @@ namespace ps2recomp
                 if (!m_elfParser->isValidAddress(address))
                 {
                     std::cerr << "Invalid address: 0x" << std::hex << address << std::dec
-                              << " in function: " << function.name << std::endl;
-                    return false;
+                              << " in function: " << function.name
+                              << " (truncating decode)" << std::endl;
+                    truncated = true;
+                    break;
                 }
 
                 uint32_t rawInstruction = m_elfParser->readWord(address);
@@ -671,8 +731,17 @@ namespace ps2recomp
                 auto patchIt = m_config.patches.find(address);
                 if (patchIt != m_config.patches.end())
                 {
-                    rawInstruction = std::stoul(patchIt->second, nullptr, 0);
-                    std::cout << "Applied patch at 0x" << std::hex << address << std::dec << std::endl;
+                    try
+                    {
+                        rawInstruction = std::stoul(patchIt->second, nullptr, 0);
+                        std::cout << "Applied patch at 0x" << std::hex << address << std::dec << std::endl;
+                    }
+                    catch (const std::exception &e)
+                    {
+                        std::cerr << "Invalid patch value at 0x" << std::hex << address << std::dec
+                                  << " (" << patchIt->second << "): " << e.what()
+                                  << ". Using original instruction." << std::endl;
+                    }
                 }
 
                 Instruction inst = m_decoder->decodeInstruction(address, rawInstruction);
@@ -682,12 +751,26 @@ namespace ps2recomp
             catch (const std::exception &e)
             {
                 std::cerr << "Error decoding instruction at 0x" << std::hex << address << std::dec
-                          << " in function: " << function.name << ": " << e.what() << std::endl;
-                return false;
+                          << " in function: " << function.name << ": " << e.what()
+                          << " (truncating decode)" << std::endl;
+                truncated = true;
+                break;
             }
         }
 
-        m_decodedFunctions[function.start] = instructions;
+        if (instructions.empty())
+        {
+            std::cerr << "No decodable instructions found for function: " << function.name
+                      << " (0x" << std::hex << function.start << ")" << std::dec << std::endl;
+            return false;
+        }
+
+        if (truncated)
+        {
+            function.end = instructions.back().address + 4;
+        }
+
+        m_decodedFunctions.insert_or_assign(function.start, std::move(instructions));
 
         return true;
     }
@@ -723,7 +806,16 @@ namespace ps2recomp
 
     std::filesystem::path PS2Recompiler::getOutputPath(const Function &function) const
     {
-        std::string safeName = function.name;
+        std::string safeName;
+        auto renameIt = m_functionRenames.find(function.start);
+        if (renameIt != m_functionRenames.end() && !renameIt->second.empty())
+        {
+            safeName = renameIt->second;
+        }
+        else
+        {
+            safeName = sanitizeFunctionName(function.name);
+        }
 
         std::replace_if(safeName.begin(), safeName.end(), [](char c)
                         { return c == '/' || c == '\\' || c == ':' || c == '*' ||
@@ -737,6 +829,15 @@ namespace ps2recomp
             safeName = ss.str();
         }
 
+        std::stringstream suffix;
+        suffix << "_0x" << std::hex << function.start;
+        const std::string suffixText = suffix.str();
+        if (safeName.size() < suffixText.size() ||
+            safeName.compare(safeName.size() - suffixText.size(), suffixText.size(), suffixText) != 0)
+        {
+            safeName += suffixText;
+        }
+
         std::filesystem::path outputPath = m_config.outputPath;
         outputPath /= safeName + ".cpp";
 
@@ -745,23 +846,18 @@ namespace ps2recomp
 
     std::string PS2Recompiler::sanitizeFunctionName(const std::string &name) const
     {
-        std::string sanitized = name;
-        std::replace(sanitized.begin(), sanitized.end(), '.', '_');
+        std::string sanitized = sanitizeIdentifierBody(name);
+        if (sanitized.empty())
+        {
+            return sanitized;
+        }
 
         if (sanitized == "main")
         {
             return "ps2_main";
         }
 
-        if (ps2recomp::kKeywords.contains(sanitized))
-        {
-            return "ps2_" + sanitized;
-        }
-
-        if (sanitized.size() >= 2 &&
-            sanitized[0] == '_' &&
-            (sanitized[1] == '_' ||
-             std::isupper(static_cast<unsigned char>(sanitized[1]))))
+        if (ps2recomp::kKeywords.contains(sanitized) || isReservedCxxIdentifier(sanitized))
         {
             return "ps2_" + sanitized;
         }
