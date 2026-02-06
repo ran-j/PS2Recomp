@@ -76,7 +76,7 @@ namespace ps2recomp
 
     static bool isReservedCxxKeyword(const std::string &name)
     {
-        return kKeywords.find(name) != kKeywords.end();
+        return kKeywords.contains(name);
     }
 
     CodeGenerator::CodeGenerator(const std::vector<Symbol> &symbols)
@@ -402,7 +402,7 @@ namespace ps2recomp
             "SetOsdConfigParam", "GetRomName", "sceSifLoadModule",
             "SifSetDChain"};
 
-        if (systemCallNames.find(function.name) != systemCallNames.end())
+        if (systemCallNames.contains(function.name))
         {
             std::string sanitizedName = sanitizeFunctionName(function.name);
             ss << "// System call wrapper for " << function.name << "\n";
