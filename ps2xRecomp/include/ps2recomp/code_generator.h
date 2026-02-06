@@ -1,6 +1,7 @@
 #ifndef PS2RECOMP_CODE_GENERATOR_H
 #define PS2RECOMP_CODE_GENERATOR_H
 
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <map>
@@ -118,6 +119,7 @@ namespace ps2recomp
         std::string translateVU_VRXOR(const Instruction &inst);
         std::string translateVU_VMADD_Field(const Instruction &inst);
         std::string translateVU_VMINI_Field(const Instruction &inst);
+        std::string translateVU_VMAX_Field(const Instruction &inst);
         std::string translateVU_VMADD(const Instruction &inst);
         std::string translateVU_VMADDq(const Instruction &inst);
         std::string translateVU_VMADDi(const Instruction &inst);

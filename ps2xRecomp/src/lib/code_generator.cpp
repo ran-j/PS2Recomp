@@ -1758,13 +1758,10 @@ namespace ps2recomp
             case VU0_S1_VMSUBw:
                 return translateVU_VMSUB_Field(inst);
             case VU0_S1_VMAXx:
-                return fmt::format("ctx->vu0_vf[{}] = _mm_max_ps(ctx->vu0_vf[{}], _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,0)));", inst.rd, inst.rs, inst.rt, inst.rt);
             case VU0_S1_VMAXy:
-                return fmt::format("ctx->vu0_vf[{}] = _mm_max_ps(ctx->vu0_vf[{}], _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(1,1,1,1)));", inst.rd, inst.rs, inst.rt, inst.rt);
             case VU0_S1_VMAXz:
-                return fmt::format("ctx->vu0_vf[{}] = _mm_max_ps(ctx->vu0_vf[{}], _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(2,2,2,2)));", inst.rd, inst.rs, inst.rt, inst.rt);
             case VU0_S1_VMAXw:
-                return fmt::format("ctx->vu0_vf[{}] = _mm_max_ps(ctx->vu0_vf[{}], _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(3,3,3,3)));", inst.rd, inst.rs, inst.rt, inst.rt);
+                return translateVU_VMAX_Field(inst);
             case VU0_S1_VMINIx:
             case VU0_S1_VMINIy:
             case VU0_S1_VMINIz:
@@ -1795,7 +1792,7 @@ namespace ps2recomp
             default:
                 return fmt::format("// Unhandled VU0 Special1 function: 0x{:X}", vu_func);
             }
-        }
+            }
         default:
             return fmt::format("// Unhandled COP2 format: 0x{:X}", format);
         }
@@ -1823,23 +1820,6 @@ namespace ps2recomp
         uint8_t field = inst.function & 0x3;
         std::string shuffle_pattern = fmt::format("_MM_SHUFFLE({},{},{},{})", field, field, field, field);
         return fmt::format("{{ __m128 res = PS2_VMUL(ctx->vu0_vf[{}], _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], {})); __m128i mask = _mm_set_epi32({}, {}, {}, {}); ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}", inst.rs, inst.rt, inst.rt, shuffle_pattern, (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0, inst.rd, inst.rd);
-    }
-
-    std::string CodeGenerator::translateVU_VMSUB_Field(const Instruction &inst)
-    {
-        uint8_t dest_mask = inst.vectorInfo.vectorField;
-        uint8_t field = inst.function & 0x3;
-        std::string shuffle_pattern = fmt::format("_MM_SHUFFLE({},{},{},{})", field, field, field, field);
-
-        return fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], {})); "
-                           "__m128 res = PS2_VSUB(ctx->vu0_acc, mul_res); "
-                           "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
-                           "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); "
-                           "ctx->vu0_acc = res; }}",
-                           inst.rs, inst.rt, inst.rt, shuffle_pattern,
-                           (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
-                           (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
-                           inst.rd, inst.rd);
     }
 
     std::string CodeGenerator::translateVU_VADD(const Instruction &inst)
@@ -2184,6 +2164,24 @@ namespace ps2recomp
                            inst.rd, inst.rd);
     }
 
+    std::string CodeGenerator::translateVU_VMSUB_Field(const Instruction &inst)
+    {
+        uint8_t dest_mask = inst.vectorInfo.vectorField;
+        uint8_t field = inst.function & 0x3; // Extract field from function code
+
+        std::string shuffle_pattern = fmt::format("_MM_SHUFFLE({},{},{},{})", field, field, field, field);
+
+        return fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], {})); "
+                           "__m128 res = PS2_VSUB(ctx->vu0_acc, mul_res); "
+                           "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
+                           "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); "
+                           "ctx->vu0_acc = res; }}",
+                           inst.rs, inst.rt, inst.rt, shuffle_pattern,
+                           (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
+                           (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
+                           inst.rd, inst.rd);
+    }
+
     std::string CodeGenerator::translateVU_VMINI_Field(const Instruction &inst)
     {
         uint8_t dest_mask = inst.vectorInfo.vectorField;
@@ -2192,6 +2190,22 @@ namespace ps2recomp
         std::string shuffle_pattern = fmt::format("_MM_SHUFFLE({},{},{},{})", field, field, field, field);
 
         return fmt::format("{{ __m128 res = _mm_min_ps(ctx->vu0_vf[{}], _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], {})); "
+                           "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
+                           "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
+                           inst.rs, inst.rt, inst.rt, shuffle_pattern,
+                           (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
+                           (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
+                           inst.rd, inst.rd);
+    }
+
+    std::string CodeGenerator::translateVU_VMAX_Field(const Instruction &inst)
+    {
+        uint8_t dest_mask = inst.vectorInfo.vectorField;
+        uint8_t field = inst.function & 0x3;
+
+        std::string shuffle_pattern = fmt::format("_MM_SHUFFLE({},{},{},{})", field, field, field, field);
+
+        return fmt::format("{{ __m128 res = _mm_max_ps(ctx->vu0_vf[{}], _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], {})); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
                            inst.rs, inst.rt, inst.rt, shuffle_pattern,
