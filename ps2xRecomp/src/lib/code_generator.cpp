@@ -28,11 +28,48 @@ namespace ps2recomp
 
 namespace ps2recomp
 {
+    static uint32_t buildAbsoluteJumpTarget(uint32_t address, uint32_t target)
+    {
+        return ((address + 4) & 0xF0000000u) | (target << 2);
+    }
+
+    static std::string sanitizeIdentifierBody(const std::string &name)
+    {
+        std::string sanitized;
+        sanitized.reserve(name.size() + 1);
+
+        for (char c : name)
+        {
+            const unsigned char uc = static_cast<unsigned char>(c);
+            if (std::isalnum(uc) || c == '_')
+            {
+                sanitized.push_back(c);
+            }
+            else
+            {
+                sanitized.push_back('_');
+            }
+        }
+
+        if (sanitized.empty())
+        {
+            return sanitized;
+        }
+
+        const unsigned char first = static_cast<unsigned char>(sanitized.front());
+        if (!(std::isalpha(first) || sanitized.front() == '_'))
+        {
+            sanitized.insert(sanitized.begin(), '_');
+        }
+
+        return sanitized;
+    }
+
     static bool isReservedCxxIdentifier(const std::string &name)
     {
         if (name.size() >= 2 && name[0] == '_' && name[1] == '_')
             return true;
-        if (!name.empty() && name[0] == '_' && std::isupper(static_cast<unsigned char>(name[1])))
+        if (name.size() >= 2 && name[0] == '_' && std::isupper(static_cast<unsigned char>(name[1])))
             return true;
         return false;
     }
@@ -79,9 +116,9 @@ namespace ps2recomp
 
     std::string CodeGenerator::sanitizeFunctionName(const std::string &name) const
     {
-        std::string sanitized = name;
-
-        std::replace(sanitized.begin(), sanitized.end(), '.', '_');
+        std::string sanitized = sanitizeIdentifierBody(name);
+        if (sanitized.empty())
+            return sanitized;
 
         // ugly but will do for now
         if (sanitized == "main")
@@ -117,7 +154,7 @@ namespace ps2recomp
             {
                 ss << "    " << delaySlotCode << "\n";
             }
-            uint32_t target = (branchInst.address & 0xF0000000) | (branchInst.target << 2);
+            uint32_t target = buildAbsoluteJumpTarget(branchInst.address, branchInst.target);
             std::string funcName = getFunctionName(target);
             if (!funcName.empty())
             {
@@ -330,7 +367,7 @@ namespace ps2recomp
             }
             else if (isStaticJump)
             {
-                uint32_t target = (inst.address & 0xF0000000) | (inst.target << 2);
+                uint32_t target = buildAbsoluteJumpTarget(inst.address, inst.target);
                 if (target >= function.start && target < function.end)
                 {
                     targets.insert(target);
@@ -540,9 +577,9 @@ namespace ps2recomp
                 "SET_GPR_S64(ctx, {}, (int64_t)GPR_S64(ctx, {}) + (int64_t){});",
                 inst.rt, inst.rs, inst.simmediate);
         case OPCODE_J:
-            return fmt::format("// JAL 0x{:X} - Handled by branch logic", (inst.address & 0xF0000000) | (inst.target << 2));
+            return fmt::format("// J 0x{:X} - Handled by branch logic", buildAbsoluteJumpTarget(inst.address, inst.target));
         case OPCODE_JAL:
-            return fmt::format("// JAL 0x{:X} - Handled by branch logic", (inst.address & 0xF0000000) | (inst.target << 2));
+            return fmt::format("// JAL 0x{:X} - Handled by branch logic", buildAbsoluteJumpTarget(inst.address, inst.target));
         case OPCODE_BEQ:
         case OPCODE_BNE:
         case OPCODE_BLEZ:
@@ -2840,8 +2877,15 @@ namespace ps2recomp
             ss << "    const uint32_t bss_start = 0x" << std::hex << m_bootstrapInfo.bssStart << ";\n";
             ss << "    const uint32_t bss_end   = 0x" << std::hex << m_bootstrapInfo.bssEnd << ";\n";
             ss << "    __m128i zero = _mm_setzero_si128();\n";
-            ss << "    for (uint32_t addr = bss_start; addr < bss_end; addr += 16) {\n";
+            ss << "    uint32_t addr = bss_start;\n";
+            ss << "    for (; (bss_end - addr) >= 16; addr += 16) {\n";
             ss << "        WRITE128(addr, zero);\n";
+            ss << "    }\n";
+            ss << "    for (; (bss_end - addr) >= 4; addr += 4) {\n";
+            ss << "        WRITE32(addr, 0);\n";
+            ss << "    }\n";
+            ss << "    for (; addr < bss_end; ++addr) {\n";
+            ss << "        WRITE8(addr, 0);\n";
             ss << "    }\n\n";
         }
         if (m_bootstrapInfo.gp != 0)

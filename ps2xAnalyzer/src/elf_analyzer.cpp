@@ -11,6 +11,8 @@
 #include <queue>
 #include <fstream>
 #include <iomanip>
+#include <functional>
+#include <limits>
 
 namespace fs = std::filesystem;
 
@@ -18,6 +20,8 @@ namespace ps2recomp
 {
     static bool hasPs2ApiPrefix(const std::string &name);
     static bool isDoNotSkipOrStub(const std::string &name);
+    static uint32_t decodeAbsoluteJumpTarget(uint32_t instructionAddress, uint32_t targetField);
+    static bool tryReadWord(const ElfParser *parser, uint32_t address, uint32_t &outWord);
 
     ElfAnalyzer::ElfAnalyzer(const std::string &elfPath)
         : m_elfPath(elfPath)
@@ -95,11 +99,17 @@ namespace ps2recomp
 
         fs::path outputPathObj(outputPath);
         fs::path outputDir = outputPathObj.parent_path();
-        std::string outputDirStr = outputDir.string() + "/output/";
-
-        if (!fs::exists(outputDir / "output"))
+        if (outputDir.empty())
         {
-            fs::create_directory(outputDir / "output");
+            outputDir = ".";
+        }
+
+        const fs::path generatedOutputDir = outputDir / "output";
+        std::string outputDirStr = generatedOutputDir.generic_string() + "/";
+
+        if (!fs::exists(generatedOutputDir))
+        {
+            fs::create_directories(generatedOutputDir);
         }
 
         file << "# PS2Recomp configuration for: " << elfFileName << "\n";
@@ -244,13 +254,23 @@ namespace ps2recomp
 
     void ElfAnalyzer::analyzeEntryPoint()
     {
+        const uint32_t entryAddress = m_elfParser->getEntryPoint();
         auto it = std::find_if(m_functions.begin(), m_functions.end(),
-                               [](const Function &f)
-                               { return f.name == "entry" || f.name == "_start"; });
+                               [entryAddress](const Function &f)
+                               { return f.start == entryAddress; });
+
+        if (it == m_functions.end())
+        {
+            it = std::find_if(m_functions.begin(), m_functions.end(),
+                              [entryAddress](const Function &f)
+                              { return f.start <= entryAddress && entryAddress < f.end; });
+        }
 
         if (it != m_functions.end())
         {
-            std::cout << "Found entry point: " << it->name << " at 0x" << std::hex << it->start << std::dec << std::endl;
+            std::cout << "Found entry point from ELF header: 0x" << std::hex << entryAddress
+                      << " in function " << it->name << " (starts at 0x" << it->start << ")"
+                      << std::dec << std::endl;
 
             m_skipFunctions.insert(it->name);
 
@@ -260,7 +280,7 @@ namespace ps2recomp
             {
                 if (inst.opcode == OPCODE_JAL)
                 {
-                    uint32_t target = (inst.address & 0xF0000000) | (inst.target << 2);
+                    uint32_t target = decodeAbsoluteJumpTarget(inst.address, inst.target);
 
                     for (const auto &func : m_functions)
                     {
@@ -281,7 +301,8 @@ namespace ps2recomp
         }
         else
         {
-            std::cout << "Entry point not found" << std::endl;
+            std::cout << "Entry point 0x" << std::hex << entryAddress
+                      << " not mapped to an extracted function" << std::dec << std::endl;
 
             for (const auto &func : m_functions)
             {
@@ -411,7 +432,11 @@ namespace ps2recomp
                         for (int i = 1; i <= 5 && static_cast<int>(inst.address) - i * 4 >= static_cast<int>(func.start); i++)
                         {
                             uint32_t prevAddr = inst.address - i * 4;
-                            uint32_t prevInst = m_elfParser->readWord(prevAddr);
+                            uint32_t prevInst = 0;
+                            if (!tryReadWord(m_elfParser.get(), prevAddr, prevInst))
+                            {
+                                continue;
+                            }
 
                             // Check if it's a LUI instruction for the same register
                             if (OPCODE(prevInst) == OPCODE_LUI && RT(prevInst) == inst.rs)
@@ -554,7 +579,7 @@ namespace ps2recomp
 
                     if (nextInst.opcode == OPCODE_J || nextInst.opcode == OPCODE_JAL)
                     {
-                        uint32_t jumpTarget = (nextInst.address & 0xF0000000) | (nextInst.target << 2);
+                        uint32_t jumpTarget = decodeAbsoluteJumpTarget(nextInst.address, nextInst.target);
 
                         for (const auto &section : m_sections)
                         {
@@ -576,7 +601,11 @@ namespace ps2recomp
                     for (int j = 1; j <= 5 && static_cast<int>(inst.address) - j * 4 >= static_cast<int>(func.start); j++)
                     {
                         uint32_t prevAddr = inst.address - j * 4;
-                        uint32_t prevInst = m_elfParser->readWord(prevAddr);
+                        uint32_t prevInst = 0;
+                        if (!tryReadWord(m_elfParser.get(), prevAddr, prevInst))
+                        {
+                            continue;
+                        }
 
                         if (OPCODE(prevInst) == OPCODE_LUI && RT(prevInst) == inst.rs)
                         {
@@ -669,7 +698,7 @@ namespace ps2recomp
 
                     if (inst.opcode == OPCODE_JAL)
                     {
-                        targetAddr = (inst.address & 0xF0000000) | (inst.target << 2);
+                        targetAddr = decodeAbsoluteJumpTarget(inst.address, inst.target);
                     }
                     else
                     {
@@ -766,10 +795,9 @@ namespace ps2recomp
                                         {
                                             uint32_t entryAddr = baseAddr + (e * 4);
 
-                                            if (m_elfParser->isValidAddress(entryAddr))
+                                            uint32_t targetAddr = 0;
+                                            if (tryReadWord(m_elfParser.get(), entryAddr, targetAddr))
                                             {
-                                                uint32_t targetAddr = m_elfParser->readWord(entryAddr);
-
                                                 JumpTableEntry entry;
                                                 entry.index = e;
                                                 entry.target = targetAddr;
@@ -876,7 +904,7 @@ namespace ps2recomp
 
         for (const auto &func : m_functions)
         {
-            if (eligible.contains(func.name))
+            if (!eligible.contains(func.name))
             {
                 continue;
             }
@@ -893,7 +921,7 @@ namespace ps2recomp
             for (const auto &call : itCalls->second)
             {
                 // non-eligible nodes to graph.
-                if (eligible.contains(call.calleeName))
+                if (!eligible.contains(call.calleeName))
                 {
                     continue;
                 }
@@ -932,7 +960,7 @@ namespace ps2recomp
             {
                 for (const auto &w : it->second)
                 {
-                    if (index.contains(w))
+                    if (!index.contains(w))
                     {
                         strongconnect(w);
                         lowlink[v] = std::min(lowlink[v], lowlink[w]);
@@ -966,7 +994,7 @@ namespace ps2recomp
 
         for (const auto &name : eligible)
         {
-            if (index.contains(name))
+            if (!index.contains(name))
             {
                 strongconnect(name);
             }
@@ -1442,9 +1470,10 @@ namespace ps2recomp
 
             if (inst.isBranch || inst.isJump)
             {
-                if (i + 1 < instructions.size())
+                size_t fallthroughIndex = i + (inst.hasDelaySlot ? 2 : 1);
+                if (fallthroughIndex < instructions.size())
                 {
-                    leaders.insert(instructions[i + 1].address);
+                    leaders.insert(instructions[fallthroughIndex].address);
                 }
 
                 if (inst.isBranch)
@@ -1457,7 +1486,7 @@ namespace ps2recomp
                 // Jump target for J/JAL
                 if ((inst.opcode == OPCODE_J || inst.opcode == OPCODE_JAL) && !inst.isCall)
                 {
-                    uint32_t target = (inst.address & 0xF0000000) | (inst.target << 2);
+                    uint32_t target = decodeAbsoluteJumpTarget(inst.address, inst.target);
                     leaders.insert(target);
                 }
             }
@@ -1496,12 +1525,29 @@ namespace ps2recomp
 
         for (auto &[addr, node] : cfg)
         {
-            const auto &lastInst = node.instructions.back();
-
-            if (lastInst.isBranch)
+            if (node.instructions.empty())
             {
-                int32_t offset = static_cast<int16_t>(lastInst.immediate) << 2;
-                uint32_t targetAddr = lastInst.address + 4 + offset;
+                continue;
+            }
+
+            const auto &lastInst = node.instructions.back();
+            const Instruction *terminator = &lastInst;
+
+            if (node.instructions.size() >= 2)
+            {
+                const auto &candidate = node.instructions[node.instructions.size() - 2];
+                if (candidate.hasDelaySlot &&
+                    (candidate.isBranch || candidate.isJump) &&
+                    candidate.address + 4 == lastInst.address)
+                {
+                    terminator = &candidate;
+                }
+            }
+
+            if (terminator->isBranch)
+            {
+                int32_t offset = static_cast<int16_t>(terminator->immediate) << 2;
+                uint32_t targetAddr = terminator->address + 4 + offset;
 
                 if (cfg.contains(targetAddr))
                 {
@@ -1509,16 +1555,17 @@ namespace ps2recomp
                     cfg[targetAddr].predecessors.push_back(addr);
                 }
 
-                bool likelyBranch = (lastInst.opcode == OPCODE_BEQL ||
-                                     lastInst.opcode == OPCODE_BNEL ||
-                                     lastInst.opcode == OPCODE_BLEZL ||
-                                     lastInst.opcode == OPCODE_BGTZL);
+                bool likelyBranch = (terminator->opcode == OPCODE_BEQL ||
+                                     terminator->opcode == OPCODE_BNEL ||
+                                     terminator->opcode == OPCODE_BLEZL ||
+                                     terminator->opcode == OPCODE_BGTZL);
 
                 if (!likelyBranch)
                 {
-                    if (lastInst.address + 8 <= function.end)
+                    const uint32_t step = terminator->hasDelaySlot ? 8 : 4;
+                    if (terminator->address + step <= function.end)
                     {
-                        uint32_t nextAddr = lastInst.address + 8; // Skip delay slot
+                        uint32_t nextAddr = terminator->address + step;
 
                         for (const auto &[blockAddr, blockNode] : cfg)
                         {
@@ -1533,12 +1580,12 @@ namespace ps2recomp
                     }
                 }
             }
-            else if (lastInst.isJump)
+            else if (terminator->isJump)
             {
-                if (lastInst.opcode == OPCODE_J || lastInst.opcode == OPCODE_JAL)
+                if (terminator->opcode == OPCODE_J || terminator->opcode == OPCODE_JAL)
                 {
                     // Direct jump
-                    uint32_t targetAddr = (lastInst.address & 0xF0000000) | (lastInst.target << 2);
+                    uint32_t targetAddr = decodeAbsoluteJumpTarget(terminator->address, terminator->target);
 
                     // Only add successor if it's within this function
                     if (targetAddr >= function.start && targetAddr < function.end &&
@@ -1644,8 +1691,7 @@ namespace ps2recomp
 
         return systemFuncs.contains(name) ||
                name.find("__") == 0 ||
-               name.find("_Z") == 0 || // C++ mangled names
-               name.find(".") == 0;    // .text.* or .plt.* symbols
+               name.find(".") == 0; // .text.* or .plt.* symbols
     }
 
     bool ElfAnalyzer::isLibraryFunction(const std::string &name) const
@@ -1675,12 +1721,11 @@ namespace ps2recomp
 
         for (uint32_t addr = function.start; addr < function.end; addr += 4)
         {
-            if (!m_elfParser->isValidAddress(addr))
+            uint32_t rawInstruction = 0;
+            if (!tryReadWord(m_elfParser.get(), addr, rawInstruction))
             {
                 continue;
             }
-
-            uint32_t rawInstruction = m_elfParser->readWord(addr);
 
             try
             {
@@ -1880,8 +1925,8 @@ namespace ps2recomp
             }
         }
 
-        // Consider it loop-heavy if it has more than 3 loops
-        return loopCount > 3;
+        // Consider it loop-heavy if it has more than 5 loops
+        return loopCount > 5;
     }
 
     uint32_t ElfAnalyzer::getSuccessor(const Instruction &inst, uint32_t currentAddr)
@@ -1894,9 +1939,42 @@ namespace ps2recomp
 
         if (inst.opcode == OPCODE_J || inst.opcode == OPCODE_JAL)
         {
-            return (currentAddr & 0xF0000000) | (inst.target << 2);
+            return decodeAbsoluteJumpTarget(currentAddr, inst.target);
         }
 
         return currentAddr + 4;
+    }
+
+    static uint32_t decodeAbsoluteJumpTarget(uint32_t instructionAddress, uint32_t targetField)
+    {
+        return ((instructionAddress + 4) & 0xF0000000u) | (targetField << 2);
+    }
+
+    static bool tryReadWord(const ElfParser *parser, uint32_t address, uint32_t &outWord)
+    {
+        if (parser == nullptr)
+        {
+            return false;
+        }
+
+        if (address > (std::numeric_limits<uint32_t>::max() - 3))
+        {
+            return false;
+        }
+
+        if (!parser->isValidAddress(address) || !parser->isValidAddress(address + 3))
+        {
+            return false;
+        }
+
+        try
+        {
+            outWord = parser->readWord(address);
+            return true;
+        }
+        catch (const std::exception &)
+        {
+            return false;
+        }
     }
 }
