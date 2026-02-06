@@ -806,8 +806,15 @@ namespace ps2recomp
         case COP2_CO + 15:
         { // Refine based on specific VU function
             uint8_t vu_func = inst.function;
+            bool is_special2 = vu_func >= 0x3C;
+            uint8_t vu_fhi_flo = 0;
 
-            if (vu_func == VU0_S2_VDIV || vu_func == VU0_S2_VSQRT || vu_func == VU0_S2_VRSQRT)
+            if (is_special2)
+            {
+                vu_fhi_flo = static_cast<uint8_t>((((inst.raw >> 6) & 0x1F) << 2) | (inst.raw & 0x3));
+            }
+
+            if (is_special2 && (vu_fhi_flo == VU0_S2_VDIV || vu_fhi_flo == VU0_S2_VSQRT || vu_fhi_flo == VU0_S2_VRSQRT))
             {
                 inst.vectorInfo.fsf = (inst.raw >> 10) & 0x3; // Extract bits 10-11
                 inst.vectorInfo.ftf = (inst.raw >> 8) & 0x3;  // Extract bits 8-9
@@ -818,9 +825,9 @@ namespace ps2recomp
             inst.modificationInfo.modifiesVFR = true;     // Default: Modifies Vector Float Reg
             inst.modificationInfo.modifiesControl = true; // Default: Modifies Flags/Special Regs (Q, P, I, MAC, Clip...)
 
-            if (vu_func >= 0x3C) // Special2 Table
+            if (is_special2) // Special2 Table
             {
-                switch (vu_func)
+                switch (vu_fhi_flo)
                 {
                 case VU0_S2_VDIV:
                 case VU0_S2_VSQRT:
@@ -857,6 +864,10 @@ namespace ps2recomp
                     inst.modificationInfo.modifiesControl = true; /* Modifies R */
                     inst.modificationInfo.modifiesVFR = false;
                     break; // Writes R
+                case VU0_S2_VWAITQ:
+                    inst.modificationInfo.modifiesVFR = false;
+                    inst.modificationInfo.modifiesControl = false;
+                    break;
                 case VU0_S2_VABS:
                 case VU0_S2_VMOVE:
                 case VU0_S2_VMR32:
@@ -882,32 +893,6 @@ namespace ps2recomp
                 {
                     inst.modificationInfo.modifiesVFR = false;
                     inst.modificationInfo.modifiesVIR = true;
-                }
-                if (vu_func == VU0_S2_VMFIR)
-                {
-                    inst.modificationInfo.modifiesVIR = false;
-                } // Only reads VIR
-                if (vu_func == VU0_S2_VMTIR)
-                {
-                    inst.modificationInfo.modifiesVFR = false;
-                    inst.modificationInfo.modifiesVIC = true;
-                } // Modifies I reg
-                if (vu_func == VU0_S2_VILWR)
-                {
-                    inst.modificationInfo.modifiesVFR = false;
-                    inst.modificationInfo.modifiesVIR = true;
-                    inst.isLoad = true;
-                }
-                if (vu_func == VU0_S2_VISWR)
-                {
-                    inst.modificationInfo.modifiesVFR = false;
-                    inst.modificationInfo.modifiesVIR = false;
-                    inst.isStore = true;
-                    inst.modificationInfo.modifiesMemory = true;
-                }
-                if (vu_func == VU0_S2_VDIV || vu_func == VU0_S2_VSQRT || vu_func == VU0_S2_VRSQRT)
-                {
-                    inst.vectorInfo.usesQReg = true;
                 }
             }
             break;

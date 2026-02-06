@@ -90,6 +90,11 @@ namespace ps2recomp
         std::string translateVU_VSUB_Field(const Instruction &inst);
         std::string translateVU_VMUL_Field(const Instruction &inst);
         std::string translateVU_VMSUB_Field(const Instruction &inst);
+        std::string translateVU_VADDA_Field(const Instruction &inst);
+        std::string translateVU_VSUBA_Field(const Instruction &inst);
+        std::string translateVU_VMADDA_Field(const Instruction &inst);
+        std::string translateVU_VMSUBA_Field(const Instruction &inst);
+        std::string translateVU_VMULA_Field(const Instruction &inst);
         std::string translateVU_VADD(const Instruction &inst);
         std::string translateVU_VSUB(const Instruction &inst);
         std::string translateVU_VMUL(const Instruction &inst);
@@ -118,12 +123,34 @@ namespace ps2recomp
         std::string translateVU_VMADDi(const Instruction &inst);
         std::string translateVU_VMAX(const Instruction &inst);
         std::string translateVU_VMAXi(const Instruction &inst);
+        std::string translateVU_VADDA(const Instruction &inst);
+        std::string translateVU_VADDAq(const Instruction &inst);
+        std::string translateVU_VADDAi(const Instruction &inst);
+        std::string translateVU_VSUBA(const Instruction &inst);
+        std::string translateVU_VSUBAq(const Instruction &inst);
+        std::string translateVU_VSUBAi(const Instruction &inst);
+        std::string translateVU_VMADDA(const Instruction &inst);
+        std::string translateVU_VMADDAq(const Instruction &inst);
+        std::string translateVU_VMADDAi(const Instruction &inst);
+        std::string translateVU_VMSUBA(const Instruction &inst);
+        std::string translateVU_VMSUBAq(const Instruction &inst);
+        std::string translateVU_VMSUBAi(const Instruction &inst);
+        std::string translateVU_VMULA(const Instruction &inst);
+        std::string translateVU_VMULAq(const Instruction &inst);
+        std::string translateVU_VMULAi(const Instruction &inst);
+        std::string translateVU_VOPMULA(const Instruction &inst);
         std::string translateVU_VOPMSUB(const Instruction &inst);
         std::string translateVU_VMINI(const Instruction &inst);
         std::string translateVU_VMINIi(const Instruction &inst);
         std::string translateVU_VMSUB(const Instruction &inst);
         std::string translateVU_VMSUBq(const Instruction &inst);
         std::string translateVU_VMSUBi(const Instruction &inst);
+        std::string translateVU_VITOF(const Instruction &inst, int shift);
+        std::string translateVU_VFTOI(const Instruction &inst, int shift);
+        std::string translateVU_VLQI(const Instruction &inst);
+        std::string translateVU_VSQI(const Instruction &inst);
+        std::string translateVU_VLQD(const Instruction &inst);
+        std::string translateVU_VSQD(const Instruction &inst);
 
         // Jump Table Generation
         std::string generateJumpTableSwitch(const Instruction &inst, uint32_t tableAddress,
