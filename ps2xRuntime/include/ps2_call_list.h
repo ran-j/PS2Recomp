@@ -603,4 +603,4 @@
     X(syHwInit2)                              \
     X(syMallocInit)                           \
     X(syRtcInit)                              \
-    /* Game/middleware */                     \
+    /* Game/middleware */
