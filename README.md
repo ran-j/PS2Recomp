@@ -19,10 +19,10 @@ PS2Recomp is a tool designed to statically recompile PlayStation 2 ELF binaries 
 ### How It Works
 PS2Recomp works by:
 
-Parsing a PS2 ELF file to extract functions, symbols, and relocations
-Decoding the MIPS R5900 instructions in each function
-Translating those instructions to equivalent C++ code
-Generating a runtime that can execute the recompiled code
+* Parsing a PS2 ELF file to extract functions, symbols, and relocations
+* Decoding the MIPS R5900 instructions in each function
+* Translating those instructions to equivalent C++ code
+* Generating a runtime that can execute the recompiled code
 
 The translated code is very literal, with each MIPS instruction mapping to a C++ operation. For example, `addiu $r4, $r4, 0x20` becomes `ctx->r4 = ADD32(ctx->r4, 0X20);`.
 
