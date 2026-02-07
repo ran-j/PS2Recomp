@@ -67,9 +67,8 @@ namespace ps2recomp
 
     static bool isReservedCxxIdentifier(const std::string &name)
     {
-        if (name.size() >= 2 && name[0] == '_' && name[1] == '_')
-            return true;
-        if (name.size() >= 2 && name[0] == '_' && std::isupper(static_cast<unsigned char>(name[1])))
+        if (name.size() >= 2 && name[0] == '_' &&
+            (name[1] == '_' || std::isupper(static_cast<unsigned char>(name[1]))))
             return true;
         return false;
     }
@@ -120,15 +119,20 @@ namespace ps2recomp
         if (sanitized.empty())
             return sanitized;
 
-        // ugly but will do for now
         if (sanitized == "main")
+        {
             return "ps2_main";
+        }
 
         if (isReservedCxxKeyword(sanitized))
+        {
             return "ps2_" + sanitized;
+        }
 
         if (!isReservedCxxIdentifier(sanitized))
+        {
             return sanitized;
+        }
 
         return "ps2_" + sanitized;
     }
@@ -2224,30 +2228,21 @@ namespace ps2recomp
             rt, rs, rd);
     }
 
-    std::string CodeGenerator::generateFunctionRegistration(const std::vector<Function> &functions,
-                                                            const std::map<uint32_t, std::string> &stubs)
+    std::string CodeGenerator::generateFunctionRegistration(const std::vector<Function> &functions)
     {
         std::stringstream ss;
 
-        std::unordered_set<uint32_t> registeredAddresses;
-
-        // Begin function
+        // Includes
         ss << "#include \"ps2_runtime.h\"\n";
         ss << "#include \"ps2_recompiled_functions.h\"\n";
-        ss << "#include \"ps2_stubs.h\"\n";
-        ss << "#include \"ps2_recompiled_stubs.h\"//this will give duplicated erros because runtime maybe has it define already, just delete the TODOS ones\n";
         ss << "#include \"ps2_syscalls.h\"\n\n";
+        ss << "#include \"ps2_stubs.h\"\n\n";
 
         // Registration function
         ss << "void registerAllFunctions(PS2Runtime& runtime) {\n";
 
         std::vector<std::pair<uint32_t, std::string>> normalFunctions;
         std::vector<std::pair<uint32_t, std::string>> stubFunctions;
-        std::vector<std::pair<uint32_t, std::string>> systemCallFunctions;
-        std::vector<std::pair<uint32_t, std::string>> libraryFunctions;
-
-        uint32_t libBaseAddr = 0x00110000;
-        uint32_t libOffset = 0;
 
         for (const auto &function : functions)
         {
@@ -2282,20 +2277,6 @@ namespace ps2recomp
 
         ss << "\n    // Register stub functions\n";
         for (const auto &[first, second] : stubFunctions)
-        {
-            ss << "    runtime.registerFunction(0x" << std::hex << first << std::dec
-               << ", " << second << ");\n";
-        }
-
-        ss << "\n    // Register system call stubs\n";
-        for (const auto &[first, second] : systemCallFunctions)
-        {
-            ss << "    runtime.registerFunction(0x" << std::hex << first << std::dec
-               << ", " << second << ");\n";
-        }
-
-        ss << "\n    // Register library stubs\n";
-        for (const auto &[first, second] : libraryFunctions)
         {
             ss << "    runtime.registerFunction(0x" << std::hex << first << std::dec
                << ", " << second << ");\n";

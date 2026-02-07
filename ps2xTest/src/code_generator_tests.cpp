@@ -220,5 +220,44 @@ void register_code_generator_tests()
                      "definition should use sanitized name");
             t.IsTrue(generated.find("ps2___is_pointer(rdram, ctx, runtime); return;") != std::string::npos,
                      "call should use sanitized name");
-        }); });
+        });
+
+        tc.Run("non identifier symbols are normalized and used in calls", [](TestCase &t) {
+            Function func;
+            func.name = "123.bad-name";
+            func.start = 0xA000;
+            func.end = 0xA010;
+            func.isRecompiled = true;
+            func.isStub = false;
+
+            Symbol targetSym;
+            targetSym.name = "123.bad-name";
+            targetSym.address = func.start;
+            targetSym.isFunction = true;
+
+            Instruction j{};
+            j.address = 0xA100;
+            j.opcode = OPCODE_J;
+            j.target = (targetSym.address >> 2) & 0x3FFFFFF;
+            j.hasDelaySlot = true;
+            j.raw = (OPCODE_J << 26) | (j.target & 0x3FFFFFF);
+            Instruction delay = makeNop(0xA104);
+
+            std::vector<Instruction> instructions{j, delay};
+
+            CodeGenerator gen({targetSym});
+            std::string generated = gen.generateFunction(func, instructions, false);
+
+            t.IsTrue(generated.find("void _123_bad_name(") != std::string::npos,
+                     "definition should normalize invalid chars and leading digits");
+            t.IsTrue(generated.find("_123_bad_name(rdram, ctx, runtime); return;") != std::string::npos,
+                     "call should use normalized function name");
+        });
+
+        tc.Run("single underscore remains a valid identifier", [](TestCase &t) {
+            CodeGenerator gen({});
+            t.Equals(gen.sanitizeFunctionName("_"), "_",
+                     "single underscore should remain unchanged");
+        });
+    });
 }

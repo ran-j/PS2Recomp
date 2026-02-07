@@ -90,6 +90,7 @@ namespace ps2recomp
             }
             return StubTarget::Unknown;
         }
+
     }
 
     PS2Recompiler::PS2Recompiler(const std::string &configPath)
@@ -379,7 +380,6 @@ namespace ps2recomp
                 combinedOutput << "#include \"ps2_recompiled_functions.h\"\n\n";
                 combinedOutput << "#include \"ps2_runtime_macros.h\"\n";
                 combinedOutput << "#include \"ps2_runtime.h\"\n";
-                combinedOutput << "#include \"ps2_recompiled_stubs.h\"\n";
                 combinedOutput << "#include \"ps2_syscalls.h\"\n";
                 combinedOutput << "#include \"ps2_stubs.h\"\n";
                 if (m_bootstrapInfo.valid)
@@ -477,7 +477,7 @@ namespace ps2recomp
                 std::cout << "Wrote individual function files to: " << m_config.outputPath << std::endl;
             }
 
-            std::string registerFunctions = m_codeGenerator->generateFunctionRegistration(m_functions, m_generatedStubs);
+            std::string registerFunctions = m_codeGenerator->generateFunctionRegistration(m_functions);
 
             fs::path registerPath = fs::path(m_config.outputPath) / "register_functions.cpp";
             writeToFile(registerPath.string(), registerFunctions);
@@ -499,27 +499,44 @@ namespace ps2recomp
 
             ss << "#pragma once\n\n";
             ss << "#include <cstdint>\n";
-            ss << "#include \"ps2_runtime.h\"\n";
-            ss << "#include \"ps2_syscalls.h\"\n\n";
-            // ss << "namespace ps2recomp {\n";
-            // ss << "namespace stubs {\n\n";
+            ss << "#include \"ps2_runtime.h\"\n\n";
 
-            std::unordered_set<std::string> stubNames;
-            stubNames.insert(m_config.skipFunctions.begin(), m_config.skipFunctions.end());
-            stubNames.insert(m_config.stubImplementations.begin(), m_config.stubImplementations.end());
+            std::unordered_set<std::string> uniqueStubNames;
+            for (const auto &function : m_functions)
+            {
+                if (!function.isStub)
+                {
+                    continue;
+                }
+
+                std::string generatedName;
+                if (m_codeGenerator)
+                {
+                    generatedName = m_codeGenerator->getFunctionName(function.start);
+                }
+                if (generatedName.empty())
+                {
+                    generatedName = sanitizeFunctionName(function.name);
+                }
+
+                if (!generatedName.empty())
+                {
+                    uniqueStubNames.insert(generatedName);
+                }
+            }
+
+            std::vector<std::string> stubNames(uniqueStubNames.begin(), uniqueStubNames.end());
+            std::sort(stubNames.begin(), stubNames.end());
 
             for (const auto &funcName : stubNames)
             {
                 ss << "void " << sanitizeFunctionName(funcName) << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime);\n";
             }
 
-            // ss << "\n} // namespace stubs\n";
-            // ss << "} // namespace ps2recomp\n";
-
             fs::path headerPath = fs::path(m_config.outputPath) / "ps2_recompiled_stubs.h";
             writeToFile(headerPath.string(), ss.str());
 
-            std::cout << "Generated generating header file: " << headerPath << std::endl;
+            std::cout << "Generated stub header file: " << headerPath << std::endl;
             return true;
         }
         catch (const std::exception &e)

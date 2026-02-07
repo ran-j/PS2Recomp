@@ -33,9 +33,8 @@ jobs:
 
       - name: Tests
         shell: cmd
-        continue-on-error: true # When tests start passing, this line should be removed.
         run: |
-          .\build\ps2xTest\Release\ps2x_tests.exe
+          ctest --test-dir build -C Release --output-on-failure
       - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:

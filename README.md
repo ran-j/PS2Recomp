@@ -43,7 +43,13 @@ cd build
 
 cmake ..
 cmake --build .
+ctest --output-on-failure
 ```
+
+Optional CMake flags:
+- `-DPS2X_RUNTIME=OFF` to skip building `ps2xRuntime`
+- `-DPS2X_TESTS=OFF` to skip building `ps2xTest`
+
 ### Usage
 
 1. **Analyze the ELF**: Use the `ps2_analyzer` tool to generate an initial configuration.

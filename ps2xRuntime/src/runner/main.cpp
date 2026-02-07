@@ -3,15 +3,28 @@
 #include <iostream>
 #include <string>
 
+static void printUsage(const char *exe)
+{
+    std::cout << "Usage: " << exe << " <elf_file>\n"
+              << "       " << exe << " --help\n";
+}
+
 int main(int argc, char *argv[])
 {
     if (argc < 2)
     {
-        std::cout << "Usage: " << argv[0] << " <elf_file>" << std::endl;
+        printUsage(argv[0]);
         return 1;
     }
 
-    std::string elfPath = argv[1];
+    const std::string firstArg = argv[1];
+    if (firstArg == "-h" || firstArg == "--help")
+    {
+        printUsage(argv[0]);
+        return 0;
+    }
+
+    const std::string elfPath = firstArg;
 
     PS2Runtime runtime;
     if (!runtime.initialize("ps2xRuntime (Raylib host)"))

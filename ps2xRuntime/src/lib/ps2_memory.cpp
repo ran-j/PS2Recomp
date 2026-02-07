@@ -3,6 +3,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <unordered_map>
+#include <sstream>
 
 namespace
 {
@@ -68,6 +69,13 @@ namespace
             std::cout << "[GS] write 0x" << std::hex << addr << " = 0x" << value << std::dec << std::endl;
         }
         ++count;
+    }
+
+    inline std::string hex32(uint32_t value)
+    {
+        std::ostringstream ss;
+        ss << std::hex << value;
+        return ss.str();
     }
 
     constexpr uint32_t kSchedulerBase = 0x00363a10;
@@ -238,7 +246,7 @@ uint32_t PS2Memory::translateAddress(uint32_t virtualAddress)
                 }
             }
         }
-        throw std::runtime_error("TLB miss for address: 0x" + std::to_string(virtualAddress));
+        throw std::runtime_error("TLB miss for address: 0x" + hex32(virtualAddress));
     }
 
     return virtualAddress & 0x1FFFFFFF;
@@ -277,7 +285,7 @@ uint16_t PS2Memory::read16(uint32_t address)
 {
     if (address & 1)
     {
-        throw std::runtime_error("Unaligned 16-bit read at address: 0x" + std::to_string(address));
+        throw std::runtime_error("Unaligned 16-bit read at address: 0x" + hex32(address));
     }
 
     const bool scratch = isScratchpad(address);
@@ -310,7 +318,7 @@ uint32_t PS2Memory::read32(uint32_t address)
 {
     if (address & 3)
     {
-        throw std::runtime_error("Unaligned 32-bit read at address: 0x" + std::to_string(address));
+        throw std::runtime_error("Unaligned 32-bit read at address: 0x" + hex32(address));
     }
 
     if (isGsPrivReg(address))
@@ -348,7 +356,7 @@ uint64_t PS2Memory::read64(uint32_t address)
 {
     if (address & 7)
     {
-        throw std::runtime_error("Unaligned 64-bit read at address: 0x" + std::to_string(address));
+        throw std::runtime_error("Unaligned 64-bit read at address: 0x" + hex32(address));
     }
 
     if (isGsPrivReg(address))
@@ -377,7 +385,7 @@ __m128i PS2Memory::read128(uint32_t address)
 {
     if (address & 15)
     {
-        throw std::runtime_error("Unaligned 128-bit read at address: 0x" + std::to_string(address));
+        throw std::runtime_error("Unaligned 128-bit read at address: 0x" + hex32(address));
     }
 
     const bool scratch = isScratchpad(address);
@@ -428,7 +436,7 @@ void PS2Memory::write16(uint32_t address, uint16_t value)
 {
     if (address & 1)
     {
-        throw std::runtime_error("Unaligned 16-bit write at address: 0x" + std::to_string(address));
+        throw std::runtime_error("Unaligned 16-bit write at address: 0x" + hex32(address));
     }
 
     const bool scratch = isScratchpad(address);
@@ -459,7 +467,7 @@ void PS2Memory::write32(uint32_t address, uint32_t value)
 {
     if (address & 3)
     {
-        throw std::runtime_error("Unaligned 32-bit write at address: 0x" + std::to_string(address));
+        throw std::runtime_error("Unaligned 32-bit write at address: 0x" + hex32(address));
     }
 
     if (isGsPrivReg(address))
@@ -508,7 +516,7 @@ void PS2Memory::write64(uint32_t address, uint64_t value)
 {
     if (address & 7)
     {
-        throw std::runtime_error("Unaligned 64-bit write at address: 0x" + std::to_string(address));
+        throw std::runtime_error("Unaligned 64-bit write at address: 0x" + hex32(address));
     }
 
     if (isGsPrivReg(address))
@@ -545,7 +553,7 @@ void PS2Memory::write128(uint32_t address, __m128i value)
 {
     if (address & 15)
     {
-        throw std::runtime_error("Unaligned 128-bit write at address: 0x" + std::to_string(address));
+        throw std::runtime_error("Unaligned 128-bit write at address: 0x" + hex32(address));
     }
 
     const bool scratch = isScratchpad(address);

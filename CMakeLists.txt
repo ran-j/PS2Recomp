@@ -4,7 +4,8 @@ project("PS2 Retro X")
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-option(PS2X_RUNTIME OFF)
+option(PS2X_RUNTIME "Build ps2xRuntime components" ON)
+option(PS2X_TESTS "Build ps2xTest suite" ON)
 
 # ARM64 support using sse2neon
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64|ARM64")
@@ -45,7 +46,13 @@ endif()
 
 add_subdirectory("ps2xRecomp")
 
-add_subdirectory("ps2xRuntime")
+if (PS2X_RUNTIME)
+    add_subdirectory("ps2xRuntime")
+endif()
 
 add_subdirectory("ps2xAnalyzer")
-add_subdirectory("ps2xTest")
+
+if (PS2X_TESTS)
+    enable_testing()
+    add_subdirectory("ps2xTest")
+endif()
