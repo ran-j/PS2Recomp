@@ -7,12 +7,14 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
+#include <fstream>
 #include <vector>
 #include <unordered_map>
 #include <thread>
 #include <condition_variable>
 #include <atomic>
 #include <filesystem>
+#include <limits>
 
 #ifndef _WIN32
 #include <unistd.h> // for unlink,rmdir,chdir
@@ -22,6 +24,11 @@
 
 std::unordered_map<int, FILE *> g_fileDescriptors;
 int g_nextFd = 3; // Start after stdin, stdout, stderr
+std::mutex g_sys_fd_mutex;
+static std::mutex g_fs_state_mutex;
+static std::mutex g_thread_state_mutex;
+static std::mutex g_sync_state_mutex;
+static std::filesystem::path g_virtualHostCwd;
 
 struct ThreadInfo
 {
@@ -38,8 +45,25 @@ struct ThreadInfo
 
 struct SemaInfo
 {
+    uint32_t attr = 0;
+    uint32_t option = 0;
+    int initCount = 0;
     int count = 0;
     int maxCount = 0;
+    int waiters = 0;
+    bool deleted = false;
+    std::mutex m;
+    std::condition_variable cv;
+};
+
+struct EventFlagInfo
+{
+    uint32_t attr = 0;
+    uint32_t option = 0;
+    uint32_t initPattern = 0;
+    uint32_t pattern = 0;
+    int waiters = 0;
+    bool deleted = false;
     std::mutex m;
     std::condition_variable cv;
 };
@@ -50,56 +74,178 @@ static thread_local int g_currentThreadId = 1;
 
 static std::unordered_map<int, std::shared_ptr<SemaInfo>> g_semas;
 static int g_nextSemaId = 1;
+static std::unordered_map<int, std::shared_ptr<EventFlagInfo>> g_eventFlags;
+static int g_nextEventFlagId = 1;
+static uint32_t g_osdConfigParam = 0;
 std::atomic<int> g_activeThreads{0};
+
+static constexpr uint32_t EVENT_WAIT_OR = 0x01;
+static constexpr uint32_t EVENT_WAIT_CLEAR = 0x10;
+static constexpr uint32_t EVENT_WAIT_CLEAR_ALL = 0x20;
+
+static bool eventConditionMet(uint32_t current, uint32_t mask, uint32_t mode)
+{
+    if (mask == 0)
+    {
+        return true;
+    }
+
+    if (mode & EVENT_WAIT_OR)
+    {
+        return (current & mask) != 0;
+    }
+
+    return (current & mask) == mask;
+}
+
+static void applyEventWaitMode(EventFlagInfo &info, uint32_t mask, uint32_t mode)
+{
+    if (mode & EVENT_WAIT_CLEAR_ALL)
+    {
+        info.pattern = 0;
+    }
+    else if (mode & EVENT_WAIT_CLEAR)
+    {
+        info.pattern &= ~mask;
+    }
+}
+
+static const std::filesystem::path &getRuntimeBasePath()
+{
+    static const std::filesystem::path runtimeBasePath = std::filesystem::current_path();
+    return runtimeBasePath;
+}
+
+static const std::filesystem::path &getHostBasePath()
+{
+    static const std::filesystem::path hostBasePath = getRuntimeBasePath() / "host_fs";
+    return hostBasePath;
+}
+
+static const std::filesystem::path &getCdBasePath()
+{
+    static const std::filesystem::path cdBasePath = getRuntimeBasePath() / "cd_fs";
+    return cdBasePath;
+}
+
+static const std::filesystem::path &getMc0BasePath()
+{
+    static const std::filesystem::path mc0BasePath = getRuntimeBasePath() / "mc0_fs";
+    return mc0BasePath;
+}
+
+static bool pathStartsWith(const std::filesystem::path &pathValue, const std::filesystem::path &basePath)
+{
+    auto pathIt = pathValue.begin();
+    auto baseIt = basePath.begin();
+
+    for (; baseIt != basePath.end(); ++baseIt, ++pathIt)
+    {
+        if (pathIt == pathValue.end() || *pathIt != *baseIt)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+static std::string mapPathUnderBase(const std::filesystem::path &basePath, std::string relativePath)
+{
+    std::filesystem::path normalizedBase = basePath.lexically_normal();
+    std::filesystem::create_directories(normalizedBase);
+
+    while (!relativePath.empty() && (relativePath.front() == '/' || relativePath.front() == '\\'))
+    {
+        relativePath.erase(relativePath.begin());
+    }
+
+    const std::filesystem::path candidatePath = (normalizedBase / relativePath).lexically_normal();
+    if (!pathStartsWith(candidatePath, normalizedBase))
+    {
+        std::cerr << "Warning: Rejected path escaping base root: " << candidatePath << std::endl;
+        return "";
+    }
+
+    return candidatePath.string();
+}
+
+static std::shared_ptr<SemaInfo> findSema(int sid)
+{
+    std::lock_guard<std::mutex> lock(g_sync_state_mutex);
+    auto it = g_semas.find(sid);
+    if (it == g_semas.end())
+    {
+        return {};
+    }
+    return it->second;
+}
+
+static std::shared_ptr<EventFlagInfo> findEventFlag(int id)
+{
+    std::lock_guard<std::mutex> lock(g_sync_state_mutex);
+    auto it = g_eventFlags.find(id);
+    if (it == g_eventFlags.end())
+    {
+        return {};
+    }
+    return it->second;
+}
+
+static int hostFileSeek64(FILE *fp, int64_t offset, int whence)
+{
+#ifdef _WIN32
+    return _fseeki64(fp, offset, whence);
+#else
+    return fseeko(fp, static_cast<off_t>(offset), whence);
+#endif
+}
+
+static int64_t hostFileTell64(FILE *fp)
+{
+#ifdef _WIN32
+    return _ftelli64(fp);
+#else
+    const off_t pos = ftello(fp);
+    if (pos < 0)
+    {
+        return -1;
+    }
+    return static_cast<int64_t>(pos);
+#endif
+}
 
 int allocatePs2Fd(FILE *file)
 {
     if (!file)
         return -1;
+    std::lock_guard<std::mutex> lock(g_sys_fd_mutex);
     int fd = g_nextFd++;
     g_fileDescriptors[fd] = file;
     return fd;
 }
 
-FILE *getHostFile(int ps2Fd)
-{
-    auto it = g_fileDescriptors.find(ps2Fd);
-    if (it != g_fileDescriptors.end())
-    {
-        return it->second;
-    }
-    return nullptr;
-}
-
-void releasePs2Fd(int ps2Fd)
-{
-    g_fileDescriptors.erase(ps2Fd);
-}
-
 const char *translateFioMode(int ps2Flags)
 {
-    bool read = (ps2Flags & PS2_FIO_O_RDONLY) || (ps2Flags & PS2_FIO_O_RDWR);
-    bool write = (ps2Flags & PS2_FIO_O_WRONLY) || (ps2Flags & PS2_FIO_O_RDWR);
+    int accessMode = ps2Flags & PS2_FIO_O_RDWR;
+    bool read = accessMode == PS2_FIO_O_RDONLY || accessMode == PS2_FIO_O_RDWR || accessMode == 0;
+    bool write = accessMode == PS2_FIO_O_WRONLY || accessMode == PS2_FIO_O_RDWR;
     bool append = (ps2Flags & PS2_FIO_O_APPEND);
-    bool create = (ps2Flags & PS2_FIO_O_CREAT);
     bool truncate = (ps2Flags & PS2_FIO_O_TRUNC);
 
     if (read && write)
     {
-        if (create && truncate)
-            return "w+b";
-        if (create)
+        if (append)
             return "a+b";
+        if (truncate)
+            return "w+b";
         return "r+b";
     }
     else if (write)
     {
         if (append)
             return "ab";
-        if (create && truncate)
+        if (truncate)
             return "wb";
-        if (create)
-            return "wx";
         return "r+b";
     }
     else if (read)
@@ -111,26 +257,102 @@ const char *translateFioMode(int ps2Flags)
 
 std::string translatePs2Path(const char *ps2Path)
 {
+    if (!ps2Path || *ps2Path == '\0')
+    {
+        return "";
+    }
+
     std::string pathStr(ps2Path);
+    for (char &c : pathStr)
+    {
+        if (c == '\\')
+        {
+            c = '/';
+        }
+    }
+
+    auto mapToHostCwd = [&](std::string relativePath) -> std::string
+    {
+        const std::filesystem::path hostBasePath = getHostBasePath().lexically_normal();
+
+        if (!relativePath.empty() && (relativePath.front() == '/' || relativePath.front() == '\\'))
+        {
+            return mapPathUnderBase(hostBasePath, std::move(relativePath));
+        }
+
+        std::filesystem::path cwd;
+        {
+            std::lock_guard<std::mutex> lock(g_fs_state_mutex);
+            if (g_virtualHostCwd.empty())
+            {
+                g_virtualHostCwd = hostBasePath;
+            }
+            cwd = g_virtualHostCwd.lexically_normal();
+            if (!pathStartsWith(cwd, hostBasePath))
+            {
+                g_virtualHostCwd = hostBasePath;
+                cwd = hostBasePath;
+            }
+
+            // If emulated cwd was removed externally, fall back to host root.
+            std::error_code ec;
+            if (!std::filesystem::is_directory(cwd, ec))
+            {
+                g_virtualHostCwd = hostBasePath;
+                cwd = hostBasePath;
+            }
+        }
+
+        const std::filesystem::path candidatePath = (cwd / relativePath).lexically_normal();
+        if (!pathStartsWith(candidatePath, hostBasePath))
+        {
+            std::cerr << "Warning: Rejected host cwd-relative path escaping host_fs: " << candidatePath << std::endl;
+            return "";
+        }
+
+        return candidatePath.string();
+    };
+
+    const std::filesystem::path hostBasePath = getHostBasePath().lexically_normal();
+    const std::filesystem::path cdBasePath = getCdBasePath().lexically_normal();
+    const std::filesystem::path mc0BasePath = getMc0BasePath().lexically_normal();
+
     if (pathStr.rfind("host0:", 0) == 0)
     {
-        // Map host0: to ./host_fs/ relative to executable
-        std::filesystem::path hostBasePath = std::filesystem::current_path() / "host_fs";
-        std::filesystem::create_directories(hostBasePath); // Ensure it exists
-        return (hostBasePath / pathStr.substr(6)).string();
+        return mapPathUnderBase(hostBasePath, pathStr.substr(6));
     }
-    else if (pathStr.rfind("cdrom0:", 0) == 0)
+    if (pathStr.rfind("host:", 0) == 0)
     {
-        // Map cdrom0: to ./cd_fs/ relative to executable (for example)
-        std::filesystem::path cdBasePath = std::filesystem::current_path() / "cd_fs";
-        std::filesystem::create_directories(cdBasePath); // Ensure it exists
-        return (cdBasePath / pathStr.substr(7)).string();
+        return mapPathUnderBase(hostBasePath, pathStr.substr(5));
     }
-    std::cerr << "Warning: Unsupported PS2 path prefix: " << pathStr << std::endl;
-    return "";
-}
+    if (pathStr.rfind("cdrom0:", 0) == 0)
+    {
+        return mapPathUnderBase(cdBasePath, pathStr.substr(7));
+    }
+    if (pathStr.rfind("cdrom:", 0) == 0)
+    {
+        return mapPathUnderBase(cdBasePath, pathStr.substr(6));
+    }
+    if (pathStr.rfind("mc0:", 0) == 0)
+    {
+        return mapPathUnderBase(mc0BasePath, pathStr.substr(4));
+    }
 
-#include "ps2_syscalls.h"
+    const size_t colon = pathStr.find(':');
+    if (colon != std::string::npos)
+    {
+        static int warnCount = 0;
+        if (warnCount < 16)
+        {
+            std::cerr << "Warning: Unsupported PS2 path prefix, mapping to host_fs: " << pathStr << std::endl;
+            ++warnCount;
+        }
+        return mapToHostCwd(pathStr.substr(colon + 1));
+    }
+
+    // Treat unprefixed paths as host filesystem paths, relative to emulated cwd.
+    return mapToHostCwd(pathStr);
+}
 
 namespace ps2_syscalls
 {
@@ -176,8 +398,12 @@ namespace ps2_syscalls
         info.priority = param[4]; // Commonly priority/init attr slot
         info.option = param[6];
 
-        int id = g_nextThreadId++;
-        g_threads[id] = info;
+        int id = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_thread_state_mutex);
+            id = g_nextThreadId++;
+            g_threads[id] = info;
+        }
 
         std::cout << "[CreateThread] id=" << id
                   << " entry=0x" << std::hex << info.entry
@@ -192,7 +418,10 @@ namespace ps2_syscalls
     void DeleteThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         int tid = static_cast<int>(getRegU32(ctx, 4)); // $a0
-        g_threads.erase(tid);
+        {
+            std::lock_guard<std::mutex> lock(g_thread_state_mutex);
+            g_threads.erase(tid);
+        }
         setReturnS32(ctx, 0);
     }
 
@@ -201,82 +430,116 @@ namespace ps2_syscalls
         int tid = static_cast<int>(getRegU32(ctx, 4)); // $a0 = thread id
         uint32_t arg = getRegU32(ctx, 5);              // $a1 = user arg
 
-        auto it = g_threads.find(tid);
-        if (it == g_threads.end())
+        ThreadInfo threadInfo{};
         {
-            std::cerr << "StartThread error: unknown thread id " << tid << std::endl;
-            setReturnS32(ctx, -1);
-            return;
+            std::lock_guard<std::mutex> lock(g_thread_state_mutex);
+            auto it = g_threads.find(tid);
+            if (it == g_threads.end())
+            {
+                std::cerr << "StartThread error: unknown thread id " << tid << std::endl;
+                setReturnS32(ctx, -1);
+                return;
+            }
+
+            if (it->second.started)
+            {
+                setReturnS32(ctx, 0);
+                return;
+            }
+
+            threadInfo = it->second;
         }
 
-        ThreadInfo &info = it->second;
-        if (info.started)
+        if (!runtime || !runtime->hasFunction(threadInfo.entry))
         {
-            setReturnS32(ctx, 0);
-            return;
-        }
-
-        info.started = true;
-        info.arg = arg;
-
-        if (!runtime->hasFunction(info.entry))
-        {
-            std::cerr << "[StartThread] entry 0x" << std::hex << info.entry << std::dec << " is not registered" << std::endl;
+            std::cerr << "[StartThread] entry 0x" << std::hex << threadInfo.entry << std::dec
+                      << " is not registered or runtime is unavailable" << std::endl;
             setReturnS32(ctx, -1);
             return;
         }
 
         // TODO check later skip audio threads to avoid runaway recursion/stack overflows.
-        if (info.entry == 0x2f42a0 || info.entry == 0x2f4258)
+        if (threadInfo.entry == 0x2f42a0 || threadInfo.entry == 0x2f4258)
         {
+            std::lock_guard<std::mutex> lock(g_thread_state_mutex);
+            auto it = g_threads.find(tid);
+            if (it != g_threads.end())
+            {
+                it->second.started = true;
+                it->second.arg = arg;
+            }
+
             std::cout << "[StartThread] id=" << tid
-                      << " entry=0x" << std::hex << info.entry << std::dec
+                      << " entry=0x" << std::hex << threadInfo.entry << std::dec
                       << " skipped (audio thread stub)" << std::endl;
             setReturnS32(ctx, 0);
             return;
         }
 
+        {
+            std::lock_guard<std::mutex> lock(g_thread_state_mutex);
+            auto it = g_threads.find(tid);
+            if (it == g_threads.end())
+            {
+                std::cerr << "StartThread error: thread deleted before start " << tid << std::endl;
+                setReturnS32(ctx, -1);
+                return;
+            }
+
+            if (it->second.started)
+            {
+                setReturnS32(ctx, 0);
+                return;
+            }
+
+            it->second.started = true;
+            it->second.arg = arg;
+            threadInfo = it->second;
+        }
+
+        const R5900Context parentCtx = *ctx;
+
         // Spawn a host thread to simulate PS2 thread execution.
         g_activeThreads.fetch_add(1, std::memory_order_relaxed);
         std::thread([=]() mutable
                     {
-            R5900Context threadCtxCopy = *ctx; // Copy current CPU state to simulate a new thread context
-            R5900Context *threadCtx = &threadCtxCopy;
+                        R5900Context threadCtxCopy = parentCtx; // Copy caller CPU state to simulate a new thread context
+                        R5900Context *threadCtx = &threadCtxCopy;
 
-            if (info.stack && info.stackSize)
-            {
-                SET_GPR_U32(threadCtx, 29, info.stack + info.stackSize); // SP at top of stack
-            }
-            if (info.gp)
-            {
-                SET_GPR_U32(threadCtx, 28, info.gp);
-            }
+                        if (threadInfo.stack && threadInfo.stackSize)
+                        {
+                            SET_GPR_U32(threadCtx, 29, threadInfo.stack + threadInfo.stackSize); // SP at top of stack
+                        }
+                        if (threadInfo.gp)
+                        {
+                            SET_GPR_U32(threadCtx, 28, threadInfo.gp);
+                        }
 
-            SET_GPR_U32(threadCtx, 4, info.arg);
-            threadCtx->pc = info.entry;
+                        SET_GPR_U32(threadCtx, 4, threadInfo.arg);
+                        threadCtx->pc = threadInfo.entry;
 
-            PS2Runtime::RecompiledFunction func = runtime->lookupFunction(info.entry);
-            g_currentThreadId = tid;
+                        PS2Runtime::RecompiledFunction func = runtime->lookupFunction(threadInfo.entry);
+                        g_currentThreadId = tid;
 
-            std::cout << "[StartThread] id=" << tid
-                      << " entry=0x" << std::hex << info.entry
-                      << " sp=0x" << GPR_U32(threadCtx, 29)
-                      << " gp=0x" << GPR_U32(threadCtx, 28)
-                      << " arg=0x" << info.arg << std::dec << std::endl;
+                        std::cout << "[StartThread] id=" << tid
+                                  << " entry=0x" << std::hex << threadInfo.entry
+                                  << " sp=0x" << GPR_U32(threadCtx, 29)
+                                  << " gp=0x" << GPR_U32(threadCtx, 28)
+                                  << " arg=0x" << threadInfo.arg << std::dec << std::endl;
 
-            try
-            {
-                func(rdram, threadCtx, runtime);
-            }
-            catch (const std::exception &e)
-            {
-                std::cerr << "[StartThread] id=" << tid << " exception: " << e.what() << std::endl;
-            }
+                        try
+                        {
+                            func(rdram, threadCtx, runtime);
+                        }
+                        catch (const std::exception &e)
+                        {
+                            std::cerr << "[StartThread] id=" << tid << " exception: " << e.what() << std::endl;
+                        }
 
-            std::cout << "[StartThread] id=" << tid << " returned (pc=0x"
-                      << std::hex << threadCtx->pc << std::dec << ")" << std::endl;
+                        std::cout << "[StartThread] id=" << tid << " returned (pc=0x"
+                                  << std::hex << threadCtx->pc << std::dec << ")" << std::endl;
 
-            g_activeThreads.fetch_sub(1, std::memory_order_relaxed); })
+                        g_activeThreads.fetch_sub(1, std::memory_order_relaxed); })
             .detach();
 
         // for now report success to the caller.
@@ -292,14 +555,20 @@ namespace ps2_syscalls
     void ExitDeleteThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         int tid = static_cast<int>(getRegU32(ctx, 4));
-        g_threads.erase(tid);
+        {
+            std::lock_guard<std::mutex> lock(g_thread_state_mutex);
+            g_threads.erase(tid);
+        }
         setReturnS32(ctx, 0);
     }
 
     void TerminateThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         int tid = static_cast<int>(getRegU32(ctx, 4));
-        g_threads.erase(tid);
+        {
+            std::lock_guard<std::mutex> lock(g_thread_state_mutex);
+            g_threads.erase(tid);
+        }
         setReturnS32(ctx, 0);
     }
 
@@ -327,6 +596,46 @@ namespace ps2_syscalls
 
     void ReferThreadStatus(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        int tid = static_cast<int>(getRegU32(ctx, 4));
+        uint32_t statusAddr = getRegU32(ctx, 5);
+
+        if (statusAddr == 0)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        ThreadInfo thread{};
+        {
+            std::lock_guard<std::mutex> lock(g_thread_state_mutex);
+            auto it = g_threads.find(tid);
+            if (it == g_threads.end())
+            {
+                setReturnS32(ctx, -1);
+                return;
+            }
+            thread = it->second;
+        }
+
+        uint32_t *status = reinterpret_cast<uint32_t *>(getMemPtr(rdram, statusAddr));
+        if (!status)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        // Minimal ThreadStatus layout with commonly consumed fields.
+        status[0] = thread.attr;
+        status[1] = thread.option;
+        status[2] = thread.started ? 1u : 0u;
+        status[3] = thread.entry;
+        status[4] = thread.stack;
+        status[5] = thread.stackSize;
+        status[6] = thread.gp;
+        status[7] = thread.priority;
+        status[8] = thread.arg;
+        status[9] = 0;
+
         setReturnS32(ctx, 0);
     }
 
@@ -391,6 +700,7 @@ namespace ps2_syscalls
     {
         int tid = static_cast<int>(getRegU32(ctx, 4));
         int newPrio = static_cast<int>(getRegU32(ctx, 5));
+        std::lock_guard<std::mutex> lock(g_thread_state_mutex);
         auto it = g_threads.find(tid);
         if (it != g_threads.end())
         {
@@ -430,11 +740,15 @@ namespace ps2_syscalls
     {
         uint32_t paramAddr = getRegU32(ctx, 4); // $a0
         const uint32_t *param = reinterpret_cast<const uint32_t *>(getConstMemPtr(rdram, paramAddr));
+        uint32_t attr = 0;
+        uint32_t option = 0;
         int init = 0;
         int max = 1;
         if (param)
         {
             // sceSemaParam layout commonly: attr(0), option(1), initCount(2), maxCount(3)
+            attr = param[0];
+            option = param[1];
             init = static_cast<int>(param[2]);
             max = static_cast<int>(param[3]);
         }
@@ -447,11 +761,18 @@ namespace ps2_syscalls
             init = max;
         }
 
-        int id = g_nextSemaId++;
+        int id = 0;
         auto info = std::make_shared<SemaInfo>();
+        info->attr = attr;
+        info->option = option;
+        info->initCount = init;
         info->count = init;
         info->maxCount = max;
-        g_semas.emplace(id, info);
+        {
+            std::lock_guard<std::mutex> lock(g_sync_state_mutex);
+            id = g_nextSemaId++;
+            g_semas.emplace(id, info);
+        }
         std::cout << "[CreateSema] id=" << id << " init=" << init << " max=" << max << std::endl;
         setReturnS32(ctx, id);
     }
@@ -459,18 +780,47 @@ namespace ps2_syscalls
     void DeleteSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         int sid = static_cast<int>(getRegU32(ctx, 4));
-        g_semas.erase(sid);
+        std::shared_ptr<SemaInfo> sema;
+        {
+            std::lock_guard<std::mutex> lock(g_sync_state_mutex);
+            auto it = g_semas.find(sid);
+            if (it != g_semas.end())
+            {
+                sema = it->second;
+                g_semas.erase(it);
+            }
+        }
+
+        if (!sema)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(sema->m);
+            sema->deleted = true;
+        }
+        sema->cv.notify_all();
         setReturnS32(ctx, 0);
     }
 
     void SignalSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         int sid = static_cast<int>(getRegU32(ctx, 4));
-        auto it = g_semas.find(sid);
-        if (it != g_semas.end())
+        auto sema = findSema(sid);
+        if (!sema)
         {
-            auto sema = it->second;
+            setReturnS32(ctx, -1);
+            return;
+        }
+        {
             std::lock_guard<std::mutex> lock(sema->m);
+            if (sema->deleted)
+            {
+                setReturnS32(ctx, -1);
+                return;
+            }
             if (sema->count < sema->maxCount)
             {
                 sema->count++;
@@ -488,52 +838,82 @@ namespace ps2_syscalls
     void WaitSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         int sid = static_cast<int>(getRegU32(ctx, 4));
-        auto it = g_semas.find(sid);
-        if (it != g_semas.end())
+        auto sema = findSema(sid);
+        if (!sema)
         {
-            auto sema = it->second;
-            std::unique_lock<std::mutex> lock(sema->m);
-            static int globalLog = 0;
-            if (globalLog < 5)
+            setReturnS32(ctx, -1);
+            return;
+        }
+        std::unique_lock<std::mutex> lock(sema->m);
+        if (sema->deleted)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+        static int globalLog = 0;
+        if (globalLog < 5)
+        {
+            std::cout << "[WaitSema] sid=" << sid << " count=" << sema->count << std::endl;
+            ++globalLog;
+        }
+
+        if (sema->count == 0)
+        {
+            static thread_local int logCount = 0;
+            if (logCount < 3)
             {
-                std::cout << "[WaitSema] sid=" << sid << " count=" << sema->count << std::endl;
-                ++globalLog;
+                std::cout << "[WaitSema] sid=" << sid << " blocking until signaled" << std::endl;
+                ++logCount;
             }
-            if (sema->count == 0)
+
+            sema->waiters++;
+            sema->cv.wait(lock, [&]()
+                          { return sema->count > 0 || sema->deleted; });
+            if (sema->waiters > 0)
             {
-                static thread_local int logCount = 0;
-                if (logCount < 3)
-                {
-                    std::cout << "[WaitSema] sid=" << sid << " blocking until signaled" << std::endl;
-                    ++logCount;
-                }
-                sema->cv.wait(lock, [&]()
-                              { return sema->count > 0; });
-            }
-            if (sema->count > 0)
-            {
-                sema->count--;
+                sema->waiters--;
             }
         }
-        setReturnS32(ctx, 0);
+
+        if (sema->deleted)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        if (sema->count > 0)
+        {
+            sema->count--;
+            setReturnS32(ctx, 0);
+            return;
+        }
+
+        setReturnS32(ctx, -1);
     }
 
     void PollSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         int sid = static_cast<int>(getRegU32(ctx, 4));
-        auto it = g_semas.find(sid);
-        if (it != g_semas.end())
+        auto sema = findSema(sid);
+        if (!sema)
         {
-            auto sema = it->second;
-            std::lock_guard<std::mutex> lock(sema->m);
-            if (sema->count > 0)
-            {
-                sema->count--;
-                setReturnS32(ctx, 0);
-                return;
-            }
+            setReturnS32(ctx, -1);
+            return;
         }
-        setReturnS32(ctx, 0);
+        std::lock_guard<std::mutex> lock(sema->m);
+        if (sema->deleted)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+        if (sema->count > 0)
+        {
+            sema->count--;
+            setReturnS32(ctx, 0);
+            return;
+        }
+
+        setReturnS32(ctx, -1);
     }
 
     void iPollSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -543,6 +923,33 @@ namespace ps2_syscalls
 
     void ReferSemaStatus(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        int sid = static_cast<int>(getRegU32(ctx, 4));
+        uint32_t statusAddr = getRegU32(ctx, 5);
+
+        auto sema = findSema(sid);
+        if (!sema || statusAddr == 0)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        uint32_t *status = reinterpret_cast<uint32_t *>(getMemPtr(rdram, statusAddr));
+        if (!status)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(sema->m);
+
+        // Minimal sceSemaInfo-compatible layout.
+        status[0] = sema->attr;
+        status[1] = sema->option;
+        status[2] = static_cast<uint32_t>(sema->initCount);
+        status[3] = static_cast<uint32_t>(sema->maxCount);
+        status[4] = static_cast<uint32_t>(sema->count);
+        status[5] = static_cast<uint32_t>(sema->waiters);
+
         setReturnS32(ctx, 0);
     }
 
@@ -553,57 +960,258 @@ namespace ps2_syscalls
 
     void CreateEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        // TODO
+        uint32_t paramAddr = getRegU32(ctx, 4); // $a0
+        const uint32_t *param = reinterpret_cast<const uint32_t *>(getConstMemPtr(rdram, paramAddr));
+
+        uint32_t attr = 0;
+        uint32_t option = 0;
+        uint32_t initPattern = 0;
+        if (param)
+        {
+            // Common sceEventFlagParam layout: attr, option, initPattern.
+            attr = param[0];
+            option = param[1];
+            initPattern = param[2];
+        }
+
+        int id = 0;
+        auto info = std::make_shared<EventFlagInfo>();
+        info->attr = attr;
+        info->option = option;
+        info->initPattern = initPattern;
+        info->pattern = initPattern;
+
+        {
+            std::lock_guard<std::mutex> lock(g_sync_state_mutex);
+            id = g_nextEventFlagId++;
+            g_eventFlags.emplace(id, info);
+        }
+        setReturnS32(ctx, id);
     }
 
     void DeleteEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        // TODO
+        int id = static_cast<int>(getRegU32(ctx, 4));
+        std::shared_ptr<EventFlagInfo> flag;
+        {
+            std::lock_guard<std::mutex> lock(g_sync_state_mutex);
+            auto it = g_eventFlags.find(id);
+            if (it != g_eventFlags.end())
+            {
+                flag = it->second;
+                g_eventFlags.erase(it);
+            }
+        }
+
+        if (!flag)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(flag->m);
+            flag->deleted = true;
+        }
+        flag->cv.notify_all();
+        setReturnS32(ctx, 0);
     }
 
     void SetEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        // TODO
+        int id = static_cast<int>(getRegU32(ctx, 4));
+        uint32_t bits = getRegU32(ctx, 5);
+
+        auto flag = findEventFlag(id);
+        if (!flag)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(flag->m);
+            if (flag->deleted)
+            {
+                setReturnS32(ctx, -1);
+                return;
+            }
+            flag->pattern |= bits;
+        }
+        flag->cv.notify_all();
+        setReturnS32(ctx, 0);
     }
 
     void iSetEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        // TODO
+        SetEventFlag(rdram, ctx, runtime);
     }
 
     void ClearEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        // TODO
+        int id = static_cast<int>(getRegU32(ctx, 4));
+        uint32_t bits = getRegU32(ctx, 5);
+
+        auto flag = findEventFlag(id);
+        if (!flag)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(flag->m);
+            if (flag->deleted)
+            {
+                setReturnS32(ctx, -1);
+                return;
+            }
+            // EE kernel semantics: clear with `current &= bits`.
+            flag->pattern &= bits;
+        }
+        setReturnS32(ctx, 0);
     }
 
     void iClearEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        // TODO
+        ClearEventFlag(rdram, ctx, runtime);
     }
 
     void WaitEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        // TODO
+        int id = static_cast<int>(getRegU32(ctx, 4));
+        uint32_t bits = getRegU32(ctx, 5);
+        uint32_t mode = getRegU32(ctx, 6);
+        uint32_t resultAddr = getRegU32(ctx, 7);
+
+        auto flag = findEventFlag(id);
+        if (!flag)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+        std::unique_lock<std::mutex> lock(flag->m);
+        if (flag->deleted)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        flag->waiters++;
+        flag->cv.wait(lock, [&]()
+                      { return flag->deleted || eventConditionMet(flag->pattern, bits, mode); });
+
+        if (flag->waiters > 0)
+        {
+            flag->waiters--;
+        }
+
+        if (flag->deleted)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        const uint32_t matched = flag->pattern;
+        if (resultAddr != 0)
+        {
+            uint32_t *result = reinterpret_cast<uint32_t *>(getMemPtr(rdram, resultAddr));
+            if (!result)
+            {
+                setReturnS32(ctx, -1);
+                return;
+            }
+            *result = matched;
+        }
+
+        applyEventWaitMode(*flag, bits, mode);
+        setReturnS32(ctx, 0);
     }
 
     void PollEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        // TODO
+        int id = static_cast<int>(getRegU32(ctx, 4));
+        uint32_t bits = getRegU32(ctx, 5);
+        uint32_t mode = getRegU32(ctx, 6);
+        uint32_t resultAddr = getRegU32(ctx, 7);
+
+        auto flag = findEventFlag(id);
+        if (!flag)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+        std::lock_guard<std::mutex> lock(flag->m);
+        if (flag->deleted)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+        if (!eventConditionMet(flag->pattern, bits, mode))
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        const uint32_t matched = flag->pattern;
+        if (resultAddr != 0)
+        {
+            uint32_t *result = reinterpret_cast<uint32_t *>(getMemPtr(rdram, resultAddr));
+            if (!result)
+            {
+                setReturnS32(ctx, -1);
+                return;
+            }
+            *result = matched;
+        }
+
+        applyEventWaitMode(*flag, bits, mode);
+        setReturnS32(ctx, 0);
     }
 
     void iPollEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        // TODO
+        PollEventFlag(rdram, ctx, runtime);
     }
 
     void ReferEventFlagStatus(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        // TODO
+        int id = static_cast<int>(getRegU32(ctx, 4));
+        uint32_t statusAddr = getRegU32(ctx, 5);
+
+        auto flag = findEventFlag(id);
+        if (!flag || statusAddr == 0)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        uint32_t *status = reinterpret_cast<uint32_t *>(getMemPtr(rdram, statusAddr));
+        if (!status)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(flag->m);
+        if (flag->deleted)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        // Minimal sceEventFlagInfo-compatible layout.
+        status[0] = flag->attr;
+        status[1] = flag->option;
+        status[2] = flag->initPattern;
+        status[3] = flag->pattern;
+        status[4] = static_cast<uint32_t>(flag->waiters);
+        status[5] = 0;
+
+        setReturnS32(ctx, 0);
     }
 
     void iReferEventFlagStatus(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        // TODO
+        ReferEventFlagStatus(rdram, ctx, runtime);
     }
 
     // According to GPT the real PS2 uses a timer interrupt to invoke a callback. For now, fire  the callback immediately
@@ -822,8 +1430,54 @@ namespace ps2_syscalls
             return;
         }
 
+        const bool createRequested = (flags & PS2_FIO_O_CREAT) != 0;
+        const bool exclusiveRequested = (flags & PS2_FIO_O_EXCL) != 0;
+        const bool truncateRequested = (flags & PS2_FIO_O_TRUNC) != 0;
+        const int accessMode = flags & PS2_FIO_O_RDWR;
+        const bool writeRequested = accessMode == PS2_FIO_O_WRONLY || accessMode == PS2_FIO_O_RDWR;
+
+        if (createRequested)
+        {
+            std::error_code ec;
+            const std::filesystem::path parentPath = std::filesystem::path(hostPath).parent_path();
+            if (!parentPath.empty())
+            {
+                std::filesystem::create_directories(parentPath, ec);
+            }
+        }
+
+        if (createRequested && exclusiveRequested && std::filesystem::exists(hostPath))
+        {
+            std::cerr << "fioOpen error: Exclusive create requested but file already exists: " << hostPath << std::endl;
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        if (!createRequested && truncateRequested && writeRequested && !std::filesystem::exists(hostPath))
+        {
+            std::cerr << "fioOpen error: truncate requested on missing file without O_CREAT: " << hostPath << std::endl;
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        if (createRequested && !truncateRequested && !std::filesystem::exists(hostPath))
+        {
+            std::ofstream createFile(hostPath, std::ios::binary);
+            if (!createFile)
+            {
+                std::cerr << "fioOpen error: failed to create file '" << hostPath << "'" << std::endl;
+                setReturnS32(ctx, -1);
+                return;
+            }
+        }
+
         const char *mode = translateFioMode(flags);
-        std::cout << "fioOpen: '" << hostPath << "' flags=0x" << std::hex << flags << std::dec << " mode='" << mode << "'" << std::endl;
+        static int openLogCount = 0;
+        if (openLogCount < 64)
+        {
+            std::cout << "fioOpen: '" << hostPath << "' flags=0x" << std::hex << flags << std::dec << " mode='" << mode << "'" << std::endl;
+            ++openLogCount;
+        }
 
         FILE *fp = ::fopen(hostPath.c_str(), mode);
         if (!fp)
@@ -849,9 +1503,24 @@ namespace ps2_syscalls
     void fioClose(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         int ps2Fd = (int)getRegU32(ctx, 4); // $a0
-        std::cout << "fioClose: fd=" << ps2Fd << std::endl;
+        static int closeLogCount = 0;
+        if (closeLogCount < 64)
+        {
+            std::cout << "fioClose: fd=" << ps2Fd << std::endl;
+            ++closeLogCount;
+        }
 
-        FILE *fp = getHostFile(ps2Fd);
+        FILE *fp = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(g_sys_fd_mutex);
+            auto it = g_fileDescriptors.find(ps2Fd);
+            if (it != g_fileDescriptors.end())
+            {
+                fp = it->second;
+                g_fileDescriptors.erase(it);
+            }
+        }
+
         if (!fp)
         {
             std::cerr << "fioClose warning: Invalid PS2 file descriptor " << ps2Fd << std::endl;
@@ -860,7 +1529,6 @@ namespace ps2_syscalls
         }
 
         int ret = ::fclose(fp);
-        releasePs2Fd(ps2Fd);
 
         // returns 0 on success, -1 on error
         setReturnS32(ctx, ret == 0 ? 0 : -1);
@@ -873,18 +1541,11 @@ namespace ps2_syscalls
         size_t size = getRegU32(ctx, 6);      // $a2
 
         uint8_t *hostBuf = getMemPtr(rdram, bufAddr);
-        FILE *fp = getHostFile(ps2Fd);
 
         if (!hostBuf)
         {
             std::cerr << "fioRead error: Invalid buffer address for fd " << ps2Fd << std::endl;
             setReturnS32(ctx, -1); // -EFAULT
-            return;
-        }
-        if (!fp)
-        {
-            std::cerr << "fioRead error: Invalid file descriptor " << ps2Fd << std::endl;
-            setReturnS32(ctx, -1); // -EBADF
             return;
         }
         if (size == 0)
@@ -894,15 +1555,37 @@ namespace ps2_syscalls
         }
 
         size_t bytesRead = 0;
+        bool validFd = true;
+        bool readError = false;
         {
             std::lock_guard<std::mutex> lock(g_sys_fd_mutex);
-            bytesRead = fread(hostBuf, 1, size, fp);
+            auto it = g_fileDescriptors.find(ps2Fd);
+            if (it == g_fileDescriptors.end())
+            {
+                validFd = false;
+            }
+            else
+            {
+                FILE *fp = it->second;
+                bytesRead = fread(hostBuf, 1, size, fp);
+                readError = (bytesRead < size && ferror(fp));
+                if (readError)
+                {
+                    clearerr(fp);
+                }
+            }
         }
 
-        if (bytesRead < size && ferror(fp))
+        if (!validFd)
+        {
+            std::cerr << "fioRead error: Invalid file descriptor " << ps2Fd << std::endl;
+            setReturnS32(ctx, -1); // -EBADF
+            return;
+        }
+
+        if (readError)
         {
             std::cerr << "fioRead error: fread failed for fd " << ps2Fd << ": " << strerror(errno) << std::endl;
-            clearerr(fp);
             setReturnS32(ctx, -1); // -EIO or other appropriate error
             return;
         }
@@ -918,18 +1601,11 @@ namespace ps2_syscalls
         size_t size = getRegU32(ctx, 6);      // $a2
 
         const uint8_t *hostBuf = getConstMemPtr(rdram, bufAddr);
-        FILE *fp = getHostFile(ps2Fd);
 
         if (!hostBuf)
         {
             std::cerr << "fioWrite error: Invalid buffer address for fd " << ps2Fd << std::endl;
             setReturnS32(ctx, -1); // -EFAULT
-            return;
-        }
-        if (!fp)
-        {
-            std::cerr << "fioWrite error: Invalid file descriptor " << ps2Fd << std::endl;
-            setReturnS32(ctx, -1); // -EBADF
             return;
         }
         if (size == 0)
@@ -938,14 +1614,40 @@ namespace ps2_syscalls
             return;
         }
 
-        size_t bytesWritten = ::fwrite(hostBuf, 1, size, fp);
+        size_t bytesWritten = 0;
+        bool validFd = true;
+        bool writeError = false;
+        {
+            std::lock_guard<std::mutex> lock(g_sys_fd_mutex);
+            auto it = g_fileDescriptors.find(ps2Fd);
+            if (it == g_fileDescriptors.end())
+            {
+                validFd = false;
+            }
+            else
+            {
+                FILE *fp = it->second;
+                bytesWritten = ::fwrite(hostBuf, 1, size, fp);
+                writeError = (bytesWritten < size && ferror(fp));
+                if (writeError)
+                {
+                    clearerr(fp);
+                }
+            }
+        }
+
+        if (!validFd)
+        {
+            std::cerr << "fioWrite error: Invalid file descriptor " << ps2Fd << std::endl;
+            setReturnS32(ctx, -1); // -EBADF
+            return;
+        }
 
         if (bytesWritten < size)
         {
-            if (ferror(fp))
+            if (writeError)
             {
                 std::cerr << "fioWrite error: fwrite failed for fd " << ps2Fd << ": " << strerror(errno) << std::endl;
-                clearerr(fp);
                 setReturnS32(ctx, -1); // -EIO, -ENOSPC etc.
             }
             else
@@ -963,68 +1665,135 @@ namespace ps2_syscalls
     void fioLseek(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         int ps2Fd = (int)getRegU32(ctx, 4);  // $a0
-        int32_t offset = getRegU32(ctx, 5);  // $a1 (PS2 seems to use 32-bit offset here commonly)
+        int32_t offset = static_cast<int32_t>(getRegU32(ctx, 5)); // $a1 (signed 32-bit offset)
         int whence = (int)getRegU32(ctx, 6); // $a2 (PS2 FIO_SEEK constants)
 
-        FILE *fp = getHostFile(ps2Fd);
-        if (!fp)
+        bool validFd = true;
+        bool seekError = false;
+        bool tellError = false;
+        bool rangeError = false;
+        int64_t newPos = -1;
+        {
+            std::lock_guard<std::mutex> lock(g_sys_fd_mutex);
+            auto it = g_fileDescriptors.find(ps2Fd);
+            if (it == g_fileDescriptors.end())
+            {
+                validFd = false;
+            }
+            else
+            {
+                FILE *fp = it->second;
+
+                int64_t basePos = 0;
+                if (whence == PS2_FIO_SEEK_SET)
+                {
+                    basePos = 0;
+                }
+                else if (whence == PS2_FIO_SEEK_CUR)
+                {
+                    basePos = hostFileTell64(fp);
+                    if (basePos < 0)
+                    {
+                        tellError = true;
+                    }
+                }
+                else if (whence == PS2_FIO_SEEK_END)
+                {
+                    const int64_t currentPos = hostFileTell64(fp);
+                    if (currentPos < 0)
+                    {
+                        tellError = true;
+                    }
+                    else
+                    {
+                        if (hostFileSeek64(fp, 0, SEEK_END) != 0)
+                        {
+                            seekError = true;
+                        }
+                        else
+                        {
+                            basePos = hostFileTell64(fp);
+                            if (basePos < 0)
+                            {
+                                tellError = true;
+                            }
+                            if (hostFileSeek64(fp, currentPos, SEEK_SET) != 0)
+                            {
+                                seekError = true;
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    rangeError = true;
+                }
+
+                if (!seekError && !tellError && !rangeError)
+                {
+                    const int64_t targetPos = basePos + static_cast<int64_t>(offset);
+                    if (targetPos < 0 || targetPos > std::numeric_limits<int32_t>::max())
+                    {
+                        rangeError = true;
+                    }
+                    else if (hostFileSeek64(fp, targetPos, SEEK_SET) != 0)
+                    {
+                        seekError = true;
+                    }
+                    else
+                    {
+                        newPos = hostFileTell64(fp);
+                        if (newPos < 0)
+                        {
+                            tellError = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!validFd)
         {
             std::cerr << "fioLseek error: Invalid file descriptor " << ps2Fd << std::endl;
             setReturnS32(ctx, -1); // -EBADF
             return;
         }
 
-        int hostWhence;
-        switch (whence)
+        if (whence != PS2_FIO_SEEK_SET && whence != PS2_FIO_SEEK_CUR && whence != PS2_FIO_SEEK_END)
         {
-        case PS2_FIO_SEEK_SET:
-            hostWhence = SEEK_SET;
-            break;
-        case PS2_FIO_SEEK_CUR:
-            hostWhence = SEEK_CUR;
-            break;
-        case PS2_FIO_SEEK_END:
-            hostWhence = SEEK_END;
-            break;
-        default:
             std::cerr << "fioLseek error: Invalid whence value " << whence << " for fd " << ps2Fd << std::endl;
-            setReturnS32(ctx, -1); // -EINVAL
+            setReturnS32(ctx, -1);
             return;
         }
 
-        if (::fseek(fp, static_cast<long>(offset), hostWhence) != 0)
+        if (rangeError)
+        {
+            std::cerr << "fioLseek error: target position out of 32-bit range for fd " << ps2Fd << std::endl;
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        if (seekError)
         {
             std::cerr << "fioLseek error: fseek failed for fd " << ps2Fd << ": " << strerror(errno) << std::endl;
             setReturnS32(ctx, -1); // Return error code
             return;
         }
 
-        long newPos = ::ftell(fp);
-        if (newPos < 0)
+        if (tellError || newPos < 0)
         {
             std::cerr << "fioLseek error: ftell failed after fseek for fd " << ps2Fd << ": " << strerror(errno) << std::endl;
-            setReturnS32(ctx, -1);
+            setReturnS32(ctx, -1); // Return error code
         }
         else
         {
-            // maybe we dont need this check. if position fits in 32 bits
-            if (newPos > 0xFFFFFFFFL)
-            {
-                std::cerr << "fioLseek warning: New position exceeds 32-bit for fd " << ps2Fd << std::endl;
-                setReturnS32(ctx, -1);
-            }
-            else
-            {
-                setReturnS32(ctx, (int32_t)newPos);
-            }
+            setReturnS32(ctx, static_cast<int32_t>(newPos));
         }
     }
 
     void fioMkdir(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        // TODO maybe we dont need this.
         uint32_t pathAddr = getRegU32(ctx, 4); // $a0
-        // int mode = (int)getRegU32(ctx, 5);
 
         const char *ps2Path = reinterpret_cast<const char *>(getConstMemPtr(rdram, pathAddr));
         if (!ps2Path)
@@ -1041,26 +1810,22 @@ namespace ps2_syscalls
             return;
         }
 
-#ifdef _WIN32
-        int ret = -1;
-#else
-        int ret = ::mkdir(hostPath.c_str(), 0775);
-#endif
-
-        if (ret != 0)
+        std::error_code ec;
+        const bool created = std::filesystem::create_directories(hostPath, ec);
+        if (ec)
         {
-            std::cerr << "fioMkdir error: mkdir failed for '" << hostPath << "': " << strerror(errno) << std::endl;
-            setReturnS32(ctx, -1); // errno
+            std::cerr << "fioMkdir error: mkdir failed for '" << hostPath << "': " << ec.message() << std::endl;
+            setReturnS32(ctx, -1);
         }
         else
         {
-            setReturnS32(ctx, 0); // Success
+            (void)created;
+            setReturnS32(ctx, 0);
         }
     }
 
     void fioChdir(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        // TODO maybe we dont need this as well.
         uint32_t pathAddr = getRegU32(ctx, 4); // $a0
         const char *ps2Path = reinterpret_cast<const char *>(getConstMemPtr(rdram, pathAddr));
         if (!ps2Path)
@@ -1078,22 +1843,24 @@ namespace ps2_syscalls
             return;
         }
 
-        std::cerr << "fioChdir: Attempting host chdir to '" << hostPath << "' (Stub - Check side effects)" << std::endl;
-
-#ifdef _WIN32
-        int ret = -1;
-#else
-        int ret = ::chdir(hostPath.c_str());
-#endif
-
-        if (ret != 0)
+        std::error_code ec;
+        const bool isDir = std::filesystem::is_directory(hostPath, ec);
+        if (ec || !isDir)
         {
-            std::cerr << "fioChdir error: chdir failed for '" << hostPath << "': " << strerror(errno) << std::endl;
+            std::cerr << "fioChdir error: directory not found '" << hostPath << "'" << std::endl;
             setReturnS32(ctx, -1);
         }
         else
         {
-            setReturnS32(ctx, 0); // Success
+            // Keep host process cwd unchanged; update emulated host cwd when applicable.
+            const std::filesystem::path targetPath = std::filesystem::path(hostPath).lexically_normal();
+            const std::filesystem::path hostBasePath = getHostBasePath().lexically_normal();
+            if (pathStartsWith(targetPath, hostBasePath))
+            {
+                std::lock_guard<std::mutex> lock(g_fs_state_mutex);
+                g_virtualHostCwd = targetPath;
+            }
+            setReturnS32(ctx, 0);
         }
     }
 
@@ -1115,15 +1882,26 @@ namespace ps2_syscalls
             return;
         }
 
-#ifdef _WIN32
-        int ret = -1;
-#else
-        int ret = ::rmdir(hostPath.c_str());
-#endif
-
-        if (ret != 0)
+        std::error_code ec;
+        const auto status = std::filesystem::status(hostPath, ec);
+        if (ec || status.type() == std::filesystem::file_type::not_found)
         {
-            std::cerr << "fioRmdir error: rmdir failed for '" << hostPath << "': " << strerror(errno) << std::endl;
+            std::cerr << "fioRmdir error: directory not found '" << hostPath << "'" << std::endl;
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        if (!std::filesystem::is_directory(status))
+        {
+            std::cerr << "fioRmdir error: path is not a directory '" << hostPath << "'" << std::endl;
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        const bool removed = std::filesystem::remove(hostPath, ec);
+        if (ec || !removed)
+        {
+            std::cerr << "fioRmdir error: rmdir failed for '" << hostPath << "'" << std::endl;
             setReturnS32(ctx, -1);
         }
         else
@@ -1134,7 +1912,6 @@ namespace ps2_syscalls
 
     void fioGetstat(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        // we wont implement this for now.
         uint32_t pathAddr = getRegU32(ctx, 4);    // $a0
         uint32_t statBufAddr = getRegU32(ctx, 5); // $a1
 
@@ -1162,7 +1939,38 @@ namespace ps2_syscalls
             return;
         }
 
-        setReturnS32(ctx, -1);
+        std::error_code ec;
+        const auto status = std::filesystem::status(hostPath, ec);
+        if (ec || status.type() == std::filesystem::file_type::not_found)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        std::memset(ps2StatBuf, 0, 64);
+
+        uint32_t *fields = reinterpret_cast<uint32_t *>(ps2StatBuf);
+        const bool isDir = std::filesystem::is_directory(status);
+
+        // Minimal fio_stat mapping: mode, attr, size, ... , hisize.
+        fields[0] = isDir ? 0x4000u : 0x2000u;
+        fields[1] = 0;
+
+        uint64_t size = 0;
+        if (!isDir)
+        {
+            size = std::filesystem::file_size(hostPath, ec);
+            if (ec)
+            {
+                setReturnS32(ctx, -1);
+                return;
+            }
+        }
+
+        fields[2] = static_cast<uint32_t>(size & 0xFFFFFFFFu);
+        fields[9] = static_cast<uint32_t>(size >> 32);
+
+        setReturnS32(ctx, 0);
     }
 
     void fioRemove(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1184,15 +1992,26 @@ namespace ps2_syscalls
             return;
         }
 
-#ifdef _WIN32
-        int ret = -1;
-#else
-        int ret = ::unlink(hostPath.c_str());
-#endif
-
-        if (ret != 0)
+        std::error_code ec;
+        const auto status = std::filesystem::status(hostPath, ec);
+        if (ec || status.type() == std::filesystem::file_type::not_found)
         {
-            std::cerr << "fioRemove error: unlink failed for '" << hostPath << "': " << strerror(errno) << std::endl;
+            std::cerr << "fioRemove error: file not found '" << hostPath << "'" << std::endl;
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        if (std::filesystem::is_directory(status))
+        {
+            std::cerr << "fioRemove error: path is a directory '" << hostPath << "'" << std::endl;
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        const bool removed = std::filesystem::remove(hostPath, ec);
+        if (ec || !removed)
+        {
+            std::cerr << "fioRemove error: unlink failed for '" << hostPath << "'" << std::endl;
             setReturnS32(ctx, -1);
         }
         else
@@ -1210,13 +2029,17 @@ namespace ps2_syscalls
         std::cout << "PS2 GsSetCrt: interlaced=" << interlaced
                   << ", videoMode=" << videoMode
                   << ", frameMode=" << frameMode << std::endl;
+
+        setReturnS32(ctx, 0);
     }
 
     void GsGetIMR(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        // TODO return IMR value from the Gs hardware this is just a stub.
-        // The IMR (Interrupt Mask Register) is a 64-bit register that controls which interrupts are enabled.
-        uint64_t imr = 0x0000000000000000ULL;
+        uint64_t imr = 0;
+        if (runtime)
+        {
+            imr = runtime->memory().gs().imr;
+        }
 
         std::cout << "PS2 GsGetIMR: Returning IMR=0x" << std::hex << imr << std::dec << std::endl;
 
@@ -1227,7 +2050,12 @@ namespace ps2_syscalls
     {
         uint64_t imr = getRegU32(ctx, 4) | ((uint64_t)getRegU32(ctx, 5) << 32); // $a0 = lower 32 bits, $a1 = upper 32 bits
         std::cout << "PS2 GsPutIMR: Setting IMR=0x" << std::hex << imr << std::dec << std::endl;
-        // Do nothing for now.
+        if (runtime)
+        {
+            runtime->memory().gs().imr = imr;
+        }
+
+        setReturnS32(ctx, 0);
     }
 
     void GsSetVideoMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1236,7 +2064,7 @@ namespace ps2_syscalls
 
         std::cout << "PS2 GsSetVideoMode: mode=0x" << std::hex << mode << std::dec << std::endl;
 
-        // Do nothing for now.
+        setReturnS32(ctx, 0);
     }
 
     void GetOsdConfigParam(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1253,8 +2081,7 @@ namespace ps2_syscalls
 
         uint32_t *param = reinterpret_cast<uint32_t *>(getMemPtr(rdram, paramAddr));
 
-        // Default to English language, USA region
-        *param = 0x00000000;
+        *param = g_osdConfigParam;
 
         std::cout << "PS2 GetOsdConfigParam: Retrieved OSD parameters" << std::endl;
 
@@ -1273,7 +2100,8 @@ namespace ps2_syscalls
             return;
         }
 
-        // TODO save user preferences
+        const uint32_t *param = reinterpret_cast<const uint32_t *>(getConstMemPtr(rdram, paramAddr));
+        g_osdConfigParam = *param;
         std::cout << "PS2 SetOsdConfigParam: Set OSD parameters" << std::endl;
 
         setReturnS32(ctx, 0);

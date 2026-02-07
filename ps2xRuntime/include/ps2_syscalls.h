@@ -9,7 +9,7 @@
 // Number of active host threads spawned for PS2 thread emulation
 extern std::atomic<int> g_activeThreads;
 
-static std::mutex g_sys_fd_mutex;
+extern std::mutex g_sys_fd_mutex;
 
 #define PS2_FIO_O_RDONLY 0x0001
 #define PS2_FIO_O_WRONLY 0x0002
