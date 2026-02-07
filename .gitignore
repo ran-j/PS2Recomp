@@ -4,6 +4,9 @@
 out
 .vscode
 build
+/host_fs/
+/cd_fs/
+/mc0_fs/
 
 *.exe
 *.ilk
