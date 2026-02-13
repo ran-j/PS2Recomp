@@ -29,6 +29,9 @@ namespace ps2recomp
             config.ghidraMapPath = toml::find_or<std::string>(general, "ghidra_output", "");
             config.outputPath = toml::find<std::string>(general, "output");
             config.singleFileOutput = toml::find_or<bool>(general, "single_file_output", false);
+            config.patchSyscalls = toml::find_or<bool>(general, "patch_syscalls", config.patchSyscalls);
+            config.patchCop0 = toml::find_or<bool>(general, "patch_cop0", config.patchCop0);
+            config.patchCache = toml::find_or<bool>(general, "patch_cache", config.patchCache);
 
             if (general.contains("stubs") && general.at("stubs").is_array())
             {
@@ -90,6 +93,25 @@ namespace ps2recomp
                     }
                 }
             }
+
+            if (data.contains("mmio") && data.at("mmio").is_table())
+            {
+                const auto &mmioTable = toml::find(data, "mmio").as_table();
+                for (const auto &[key, value] : mmioTable)
+                {
+                    uint32_t instAddr = std::stoul(key, nullptr, 0);
+                    uint32_t mmioAddr = 0;
+                    if (value.is_string())
+                    {
+                        mmioAddr = std::stoul(value.as_string(), nullptr, 0);
+                    }
+                    else if (value.is_integer())
+                    {
+                        mmioAddr = static_cast<uint32_t>(value.as_integer());
+                    }
+                    config.mmioByInstructionAddress[instAddr] = mmioAddr;
+                }
+            }
         }
         catch (const std::exception &e)
         {
@@ -109,9 +131,26 @@ namespace ps2recomp
         general["ghidra_output"] = config.ghidraMapPath;
         general["output"] = config.outputPath;
         general["single_file_output"] = config.singleFileOutput;
+        general["patch_syscalls"] = config.patchSyscalls;
+        general["patch_cop0"] = config.patchCop0;
+        general["patch_cache"] = config.patchCache;
         general["skip"] = config.skipFunctions;
         general["stubs"] = config.stubImplementations;
         data["general"] = general;
+
+        if (!config.mmioByInstructionAddress.empty())
+        {
+            toml::table mmioTable;
+            for (const auto &[instAddr, mmioAddr] : config.mmioByInstructionAddress)
+            {
+                std::ostringstream keyStream;
+                keyStream << "0x" << std::hex << instAddr;
+                std::ostringstream valStream;
+                valStream << "0x" << std::hex << mmioAddr;
+                mmioTable[keyStream.str()] = valStream.str();
+            }
+            data["mmio"] = mmioTable;
+        }
 
         toml::table patches;
         toml::array instPatches;

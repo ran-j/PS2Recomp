@@ -111,6 +111,9 @@
     X(_printf)                                \
     X(_printf_r)                              \
     X(abs)                                    \
+    X(__ieee754_rem_pio2f)                    \
+    X(__kernel_cosf)                          \
+    X(__kernel_sinf)                          \
     X(atan)                                   \
     X(atan2)                                  \
     X(calloc)                                 \

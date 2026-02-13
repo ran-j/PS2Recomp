@@ -13,7 +13,7 @@
 #include <cctype>
 #include <unordered_set>
 #include <optional>
-#include <limits>
+#include <limits> 
 
 namespace fs = std::filesystem;
 
@@ -21,13 +21,6 @@ namespace ps2recomp
 {
     namespace
     {
-        enum class StubTarget
-        {
-            Unknown,
-            Syscall,
-            Stub
-        };
-
         uint32_t decodeAbsoluteJumpTarget(uint32_t address, uint32_t target)
         {
             return ((address + 4) & 0xF0000000u) | (target << 2);
@@ -78,17 +71,167 @@ namespace ps2recomp
             return sanitized;
         }
 
-        StubTarget resolveStubTarget(const std::string &name)
+        bool shouldGenerateCodeForFunction(const Function &function)
         {
-            if (ps2_runtime_calls::isSyscallName(name))
+            return function.isRecompiled || function.isStub || function.isSkipped;
+        }
+
+        enum class PatchClass
+        {
+            Generic,
+            Syscall,
+            Cop0,
+            Cache
+        };
+
+        PatchClass classifyPatchedInstruction(uint32_t rawInstruction)
+        {
+            const uint32_t opcode = OPCODE(rawInstruction);
+            if (opcode == OPCODE_SPECIAL && FUNCTION(rawInstruction) == SPECIAL_SYSCALL)
             {
-                return StubTarget::Syscall;
+                return PatchClass::Syscall;
             }
-            if (ps2_runtime_calls::isStubName(name))
+            if (opcode == OPCODE_COP0)
             {
-                return StubTarget::Stub;
+                return PatchClass::Cop0;
             }
-            return StubTarget::Unknown;
+            if (opcode == OPCODE_CACHE)
+            {
+                return PatchClass::Cache;
+            }
+            return PatchClass::Generic;
+        }
+
+        bool shouldApplyConfiguredPatch(PatchClass patchClass, const RecompilerConfig &config)
+        {
+            switch (patchClass)
+            {
+            case PatchClass::Syscall:
+                return config.patchSyscalls;
+            case PatchClass::Cop0:
+                return config.patchCop0;
+            case PatchClass::Cache:
+                return config.patchCache;
+            default:
+                return true;
+            }
+        }
+
+        std::string escapeCStringLiteral(const std::string &value)
+        {
+            std::string escaped;
+            escaped.reserve(value.size());
+            for (char c : value)
+            {
+                switch (c)
+                {
+                case '\\':
+                    escaped += "\\\\";
+                    break;
+                case '"':
+                    escaped += "\\\"";
+                    break;
+                case '\n':
+                    escaped += "\\n";
+                    break;
+                case '\r':
+                    escaped += "\\r";
+                    break;
+                case '\t':
+                    escaped += "\\t";
+                    break;
+                default:
+                    escaped.push_back(c);
+                    break;
+                }
+            }
+            return escaped;
+        }
+
+        std::string trimAsciiWhitespace(const std::string &value)
+        {
+            const auto first = std::find_if_not(value.begin(), value.end(),
+                                                [](unsigned char c)
+                                                { return std::isspace(c) != 0; });
+            if (first == value.end())
+            {
+                return {};
+            }
+
+            const auto last = std::find_if_not(value.rbegin(), value.rend(),
+                                               [](unsigned char c)
+                                               { return std::isspace(c) != 0; })
+                                  .base();
+            return std::string(first, last);
+        }
+
+        bool tryParseU32AddressLiteral(const std::string &literal, uint32_t &outAddress)
+        {
+            if (literal.empty())
+            {
+                return false;
+            }
+
+            try
+            {
+                size_t parsedCount = 0;
+                const unsigned long parsed = std::stoul(literal, &parsedCount, 0);
+                if (parsedCount != literal.size() || parsed > std::numeric_limits<uint32_t>::max())
+                {
+                    return false;
+                }
+
+                outAddress = static_cast<uint32_t>(parsed);
+                return true;
+            }
+            catch (...)
+            {
+                return false;
+            }
+        }
+
+        struct FunctionSelector
+        {
+            std::string name;
+            std::optional<uint32_t> start;
+        };
+
+        FunctionSelector parseFunctionSelector(const std::string &rawSelector)
+        {
+            FunctionSelector selector{};
+            const std::string trimmed = trimAsciiWhitespace(rawSelector);
+            if (trimmed.empty())
+            {
+                return selector;
+            }
+
+            const std::size_t at = trimmed.rfind('@');
+            if (at != std::string::npos)
+            {
+                selector.name = trimAsciiWhitespace(trimmed.substr(0, at));
+
+                uint32_t parsedAddress = 0;
+                const std::string addressLiteral = trimAsciiWhitespace(trimmed.substr(at + 1));
+                if (tryParseU32AddressLiteral(addressLiteral, parsedAddress))
+                {
+                    selector.start = parsedAddress;
+                    return selector;
+                }
+
+                // for now backward compatibility
+                selector.name = trimmed;
+                return selector;
+            }
+
+            uint32_t parsedAddress = 0;
+            if (tryParseU32AddressLiteral(trimmed, parsedAddress))
+            {
+                selector.start = parsedAddress;
+                return selector;
+            }
+
+            selector.name = trimmed;
+            return selector;
         }
     }
 
@@ -107,11 +250,27 @@ namespace ps2recomp
 
             for (const auto &name : m_config.skipFunctions)
             {
-                m_skipFunctions[name] = true;
+                const FunctionSelector selector = parseFunctionSelector(name);
+                if (!selector.name.empty())
+                {
+                    m_skipFunctions[selector.name] = true;
+                }
+                if (selector.start.has_value())
+                {
+                    m_skipFunctionStarts.insert(*selector.start);
+                }
             }
             for (const auto &name : m_config.stubImplementations)
             {
-                m_stubFunctions.insert(name);
+                const FunctionSelector selector = parseFunctionSelector(name);
+                if (!selector.name.empty())
+                {
+                    m_stubFunctions.insert(selector.name);
+                }
+                if (selector.start.has_value())
+                {
+                    m_stubFunctionStarts.insert(*selector.start);
+                }
             }
 
             m_elfParser = std::make_unique<ElfParser>(m_config.inputPath);
@@ -222,16 +381,18 @@ namespace ps2recomp
             {
                 std::cout << "processing function: " << function.name << std::endl;
 
-                if (isStubFunction(function.name))
+                if (isStubFunction(function))
                 {
                     function.isStub = true;
+                    function.isSkipped = false;
                     continue;
                 }
 
-                if (shouldSkipFunction(function.name))
+                if (shouldSkipFunction(function))
                 {
-                    std::cout << "Skipping function (stubbed): " << function.name << std::endl;
-                    function.isStub = true;
+                    std::cout << "Skipping function (runtime TODO wrapper): " << function.name << std::endl;
+                    function.isSkipped = true;
+                    function.isStub = false;
                     continue;
                 }
 
@@ -239,6 +400,7 @@ namespace ps2recomp
                 {
                     ++failedCount;
                     std::cerr << "Skipping function due decode failure: " << function.name << std::endl;
+                    function.isSkipped = true;
                     continue;
                 }
 
@@ -280,40 +442,19 @@ namespace ps2recomp
                 std::string sanitized = sanitizeFunctionName(function.name);
                 if (sanitized.empty())
                 {
-                    std::stringstream ss;
-                    ss << "func_" << std::hex << function.start;
-                    sanitized = ss.str();
+                    sanitized = "func";
                 }
-                return sanitized;
+                std::stringstream ss;
+                ss << sanitized << "_0x" << std::hex << function.start;
+                return ss.str();
             };
 
-            std::unordered_map<std::string, int> nameCounts;
             for (const auto &function : m_functions)
             {
-                if (!function.isRecompiled && !function.isStub)
-                    continue;
-                std::string sanitized = makeName(function);
-                nameCounts[sanitized]++;
-            }
-
-            for (const auto &function : m_functions)
-            {
-                if (!function.isRecompiled && !function.isStub)
+                if (!shouldGenerateCodeForFunction(function))
                     continue;
 
-                std::string sanitized = makeName(function);
-                bool isDuplicate = nameCounts[sanitized] > 1;
-
-                std::stringstream ss;
-                if (isDuplicate)
-                {
-                    ss << sanitized << "_0x" << std::hex << function.start;
-                }
-                else
-                {
-                    ss << sanitized;
-                }
-                m_functionRenames[function.start] = ss.str();
+                m_functionRenames[function.start] = makeName(function);
             }
 
             if (m_codeGenerator)
@@ -345,24 +486,31 @@ namespace ps2recomp
             m_generatedStubs.clear();
             for (const auto &function : m_functions)
             {
-                if (function.isStub)
+                if (function.isStub || function.isSkipped)
                 {
                     std::string generatedName = m_codeGenerator->getFunctionName(function.start);
                     std::stringstream stub;
                     stub << "void " << generatedName
                          << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime) { ";
 
-                    switch (resolveStubTarget(function.name))
+                    if (function.isSkipped)
                     {
-                    case StubTarget::Syscall:
-                        stub << "ps2_syscalls::" << function.name << "(rdram, ctx, runtime); ";
-                        break;
-                    case StubTarget::Stub:
-                        stub << "ps2_stubs::" << function.name << "(rdram, ctx, runtime); ";
-                        break;
-                    default:
-                        stub << "ps2_stubs::TODO(rdram, ctx, runtime); ";
-                        break;
+                        stub << "ps2_stubs::TODO_NAMED(\"" << escapeCStringLiteral(function.name) << "\", rdram, ctx, runtime); ";
+                    }
+                    else
+                    {
+                        switch (resolveStubTarget(function.name))
+                        {
+                        case StubTarget::Syscall:
+                            stub << "ps2_syscalls::" << function.name << "(rdram, ctx, runtime); ";
+                            break;
+                        case StubTarget::Stub:
+                            stub << "ps2_stubs::" << function.name << "(rdram, ctx, runtime); ";
+                            break;
+                        default:
+                            stub << "ps2_stubs::TODO_NAMED(\"" << escapeCStringLiteral(function.name) << "\", rdram, ctx, runtime); ";
+                            break;
+                        }
                     }
 
                     stub << "}";
@@ -382,22 +530,18 @@ namespace ps2recomp
                 combinedOutput << "#include \"ps2_recompiled_stubs.h\"\n";
                 combinedOutput << "#include \"ps2_syscalls.h\"\n";
                 combinedOutput << "#include \"ps2_stubs.h\"\n";
-                if (m_bootstrapInfo.valid)
-                {
-                    combinedOutput << "\n"
-                                   << m_codeGenerator->generateBootstrapFunction() << "\n\n";
-                }
+                combinedOutput << "\n";
 
                 for (const auto &function : m_functions)
                 {
-                    if (!function.isRecompiled && !function.isStub)
+                    if (!shouldGenerateCodeForFunction(function))
                     {
                         continue;
                     }
 
                     try
                     {
-                        if (function.isStub)
+                        if (function.isStub || function.isSkipped)
                         {
                             combinedOutput << m_generatedStubs.at(function.start) << "\n\n";
                         }
@@ -419,25 +563,17 @@ namespace ps2recomp
                 }
 
                 fs::path outputPath = fs::path(m_config.outputPath) / "ps2_recompiled_functions.cpp";
-                writeToFile(outputPath.string(), combinedOutput.str());
+                if (!writeToFile(outputPath.string(), combinedOutput.str()))
+                {
+                    throw std::runtime_error("Failed to write combined output: " + outputPath.string());
+                }
                 std::cout << "Wrote recompiled to combined output to: " << outputPath << std::endl;
             }
             else
             {
-                if (m_bootstrapInfo.valid)
-                {
-                    std::stringstream boot;
-                    boot << "#include \"ps2_recompiled_functions.h\"\n\n";
-                    boot << "#include \"ps2_runtime_macros.h\"\n";
-                    boot << "#include \"ps2_runtime.h\"\n\n";
-                    boot << m_codeGenerator->generateBootstrapFunction() << "\n";
-                    fs::path bootPath = fs::path(m_config.outputPath) / "ps2_entry_bootstrap.cpp";
-                    writeToFile(bootPath.string(), boot.str());
-                }
-
                 for (const auto &function : m_functions)
                 {
-                    if (!function.isRecompiled && !function.isStub)
+                    if (!shouldGenerateCodeForFunction(function))
                     {
                         continue;
                     }
@@ -445,7 +581,7 @@ namespace ps2recomp
                     std::string code;
                     try
                     {
-                        if (function.isStub)
+                        if (function.isStub || function.isSkipped)
                         {
                             std::stringstream stubFile;
                             stubFile << "#include \"ps2_runtime.h\"\n";
@@ -471,7 +607,10 @@ namespace ps2recomp
 
                     fs::path outputPath = getOutputPath(function);
                     fs::create_directories(outputPath.parent_path());
-                    writeToFile(outputPath.string(), code);
+                    if (!writeToFile(outputPath.string(), code))
+                    {
+                        throw std::runtime_error("Failed to write function output: " + outputPath.string());
+                    }
                 }
 
                 std::cout << "Wrote individual function files to: " << m_config.outputPath << std::endl;
@@ -480,7 +619,10 @@ namespace ps2recomp
             std::string registerFunctions = m_codeGenerator->generateFunctionRegistration(m_functions, m_generatedStubs);
 
             fs::path registerPath = fs::path(m_config.outputPath) / "register_functions.cpp";
-            writeToFile(registerPath.string(), registerFunctions);
+            if (!writeToFile(registerPath.string(), registerFunctions))
+            {
+                throw std::runtime_error("Failed to write function registration file: " + registerPath.string());
+            }
             std::cout << "Generated function registration file: " << registerPath << std::endl;
 
             generateStubHeader();
@@ -505,12 +647,25 @@ namespace ps2recomp
             // ss << "namespace stubs {\n\n";
 
             std::unordered_set<std::string> stubNames;
-            stubNames.insert(m_config.skipFunctions.begin(), m_config.skipFunctions.end());
-            stubNames.insert(m_config.stubImplementations.begin(), m_config.stubImplementations.end());
-
-            for (const auto &funcName : stubNames)
+            for (const auto &function : m_functions)
             {
-                ss << "void " << sanitizeFunctionName(funcName) << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime);\n";
+                if (!function.isStub && !function.isSkipped)
+                {
+                    continue;
+                }
+
+                const std::string generatedName = m_codeGenerator->getFunctionName(function.start);
+                if (generatedName.empty())
+                {
+                    continue;
+                }
+
+                if (!stubNames.insert(generatedName).second)
+                {
+                    continue;
+                }
+
+                ss << "void " << generatedName << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime);\n";
             }
 
             // ss << "\n} // namespace stubs\n";
@@ -544,7 +699,7 @@ namespace ps2recomp
 
             for (const auto &function : m_functions)
             {
-                if (!function.isRecompiled && !function.isStub)
+                if (!shouldGenerateCodeForFunction(function))
                 {
                     continue;
                 }
@@ -552,12 +707,6 @@ namespace ps2recomp
                 std::string finalName = m_codeGenerator->getFunctionName(function.start);
 
                 ss << "void " << finalName << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime);\n";
-            }
-
-            if (m_bootstrapInfo.valid)
-            {
-                ss << "void entry_" << std::hex << m_bootstrapInfo.entry << std::dec
-                   << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime);\n";
             }
 
             ss << "\n#endif // PS2_RECOMPILED_FUNCTIONS_H\n";
@@ -583,7 +732,7 @@ namespace ps2recomp
             existingStarts.insert(function.start);
         }
 
-        auto getStaticBranchTarget = [](const Instruction &inst) -> std::optional<uint32_t>
+        auto getStaticEntryTarget = [](const Instruction &inst) -> std::optional<uint32_t>
         {
             if (inst.opcode == OPCODE_J || inst.opcode == OPCODE_JAL)
             {
@@ -594,12 +743,6 @@ namespace ps2recomp
                 (inst.function == SPECIAL_JR || inst.function == SPECIAL_JALR))
             {
                 return std::nullopt;
-            }
-
-            if (inst.isBranch)
-            {
-                int32_t offset = static_cast<int32_t>(inst.simmediate) << 2;
-                return inst.address + 4 + offset;
             }
 
             return std::nullopt;
@@ -621,7 +764,7 @@ namespace ps2recomp
 
         for (const auto &function : m_functions)
         {
-            if (!function.isRecompiled || function.isStub)
+            if (!function.isRecompiled || function.isStub || function.isSkipped)
             {
                 continue;
             }
@@ -636,7 +779,7 @@ namespace ps2recomp
 
             for (const auto &inst : instructions)
             {
-                auto targetOpt = getStaticBranchTarget(inst);
+                auto targetOpt = getStaticEntryTarget(inst);
                 if (!targetOpt.has_value())
                 {
                     continue;
@@ -655,7 +798,13 @@ namespace ps2recomp
                 }
 
                 const Function *containingFunction = findContainingFunction(target);
-                if (!containingFunction || containingFunction->isStub || !containingFunction->isRecompiled)
+                if (!containingFunction || containingFunction->isStub || containingFunction->isSkipped || !containingFunction->isRecompiled)
+                {
+                    continue;
+                }
+
+                // Internal branches within the same function are handled as labels/gotos and should not produce separate entry wrappers.
+                if (containingFunction->start == function.start)
                 {
                     continue;
                 }
@@ -687,6 +836,7 @@ namespace ps2recomp
                 entryFunction.end = containingFunction->end;
                 entryFunction.isRecompiled = true;
                 entryFunction.isStub = false;
+                entryFunction.isSkipped = false;
 
                 newEntries.push_back(entryFunction);
                 existingStarts.insert(target);
@@ -727,24 +877,36 @@ namespace ps2recomp
                 }
 
                 uint32_t rawInstruction = m_elfParser->readWord(address);
+                const uint32_t originalInstruction = rawInstruction;
 
                 auto patchIt = m_config.patches.find(address);
                 if (patchIt != m_config.patches.end())
                 {
-                    try
+                    const PatchClass patchClass = classifyPatchedInstruction(originalInstruction);
+                    if (shouldApplyConfiguredPatch(patchClass, m_config))
                     {
-                        rawInstruction = std::stoul(patchIt->second, nullptr, 0);
-                        std::cout << "Applied patch at 0x" << std::hex << address << std::dec << std::endl;
-                    }
-                    catch (const std::exception &e)
-                    {
-                        std::cerr << "Invalid patch value at 0x" << std::hex << address << std::dec
-                                  << " (" << patchIt->second << "): " << e.what()
-                                  << ". Using original instruction." << std::endl;
+                        try
+                        {
+                            rawInstruction = std::stoul(patchIt->second, nullptr, 0);
+                            std::cout << "Applied patch at 0x" << std::hex << address << std::dec << std::endl;
+                        }
+                        catch (const std::exception &e)
+                        {
+                            std::cerr << "Invalid patch value at 0x" << std::hex << address << std::dec
+                                      << " (" << patchIt->second << "): " << e.what()
+                                      << ". Using original instruction." << std::endl;
+                        }
                     }
                 }
 
                 Instruction inst = m_decoder->decodeInstruction(address, rawInstruction);
+
+                auto mmioIt = m_config.mmioByInstructionAddress.find(address);
+                if (mmioIt != m_config.mmioByInstructionAddress.end())
+                {
+                    inst.isMmio = true;
+                    inst.mmioAddress = mmioIt->second;
+                }
 
                 instructions.push_back(inst);
             }
@@ -775,18 +937,28 @@ namespace ps2recomp
         return true;
     }
 
-    bool PS2Recompiler::shouldSkipFunction(const std::string &name) const
+    bool PS2Recompiler::shouldSkipFunction(const Function &function) const
     {
-        return m_skipFunctions.contains(name);
-    }
-
-    bool PS2Recompiler::isStubFunction(const std::string &name) const
-    {
-        if (m_stubFunctions.contains(name))
+        if (m_skipFunctionStarts.contains(function.start))
         {
             return true;
         }
-        return ps2_runtime_calls::isStubName(name);
+
+        return m_skipFunctions.contains(function.name);
+    }
+
+    bool PS2Recompiler::isStubFunction(const Function &function) const
+    {
+        if (m_stubFunctionStarts.contains(function.start))
+        {
+            return true;
+        }
+
+        if (m_stubFunctions.contains(function.name))
+        {
+            return true;
+        }
+        return ps2_runtime_calls::isStubName(function.name);
     }
 
     bool PS2Recompiler::writeToFile(const std::string &path, const std::string &content)
@@ -863,5 +1035,18 @@ namespace ps2recomp
         }
 
         return sanitized;
+    }
+
+    StubTarget PS2Recompiler::resolveStubTarget(const std::string &name)
+    {
+        if (ps2_runtime_calls::isSyscallName(name))
+        {
+            return StubTarget::Syscall;
+        }
+        if (ps2_runtime_calls::isStubName(name))
+        {
+            return StubTarget::Stub;
+        }
+        return StubTarget::Unknown;
     }
 }

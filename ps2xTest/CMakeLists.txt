@@ -9,13 +9,21 @@ add_executable(ps2x_tests
     src/main.cpp
     src/code_generator_tests.cpp
     src/r5900_decoder_tests.cpp
+    src/elf_analyzer_tests.cpp
 )
+
+option(PRINT_GENERATED_CODE "Print generated code in tests" OFF)
+if(PRINT_GENERATED_CODE)
+    target_compile_definitions(ps2x_tests PRIVATE PRINT_GENERATED_CODE)
+endif()
 
 target_include_directories(ps2x_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/ps2xRecomp/include
+    ${CMAKE_SOURCE_DIR}/ps2xAnalyzer/include
 )
 
 target_link_libraries(ps2x_tests PRIVATE
     ps2_recomp_lib
+    ps2_analyzer_lib
 )

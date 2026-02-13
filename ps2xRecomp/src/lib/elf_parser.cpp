@@ -352,6 +352,7 @@ namespace
                             func.end = highPc;
                             func.isRecompiled = false;
                             func.isStub = false;
+                            func.isSkipped = false;
 
                             if (func.name.empty())
                             {
@@ -458,6 +459,7 @@ namespace
             func.end = (end > start) ? end : (start + 4);
             func.isRecompiled = false;
             func.isStub = false;
+            func.isSkipped = false;
 
             outFunctions.push_back(std::move(func));
         }
@@ -522,6 +524,7 @@ namespace ps2recomp
             }
 
             existing.isStub = existing.isStub || newFunction.isStub;
+            existing.isSkipped = existing.isSkipped || newFunction.isSkipped;
         };
 
         for (const auto &symbol : m_symbols)
@@ -536,6 +539,7 @@ namespace ps2recomp
             func.end = (symbol.size > 0) ? (symbol.address + symbol.size) : 0;
             func.isRecompiled = false;
             func.isStub = false;
+            func.isSkipped = false;
 
             addOrMerge(func);
         }
@@ -675,6 +679,53 @@ namespace ps2recomp
         return 0;
     }
 
+    void ElfParser::debugAddress(uint32_t address) const
+    {
+        for (const auto &section : m_sections)
+        {
+            if (address < section.address || address >= (section.address + section.size))
+            {
+                continue;
+            }
+
+            const uint32_t offset = address - section.address;
+
+            std::printf(
+                "Address 0x%08X -> section '%s'\n"
+                "  section.address=0x%08X section.size=0x%08X section.offset=0x%08X\n"
+                "  isCode=%d isData=%d isBSS=%d isReadOnly=%d data=%p\n"
+                "  offsetInSection=0x%08X\n",
+                address,
+                section.name.c_str(),
+                section.address, section.size, section.offset,
+                section.isCode ? 1 : 0,
+                section.isData ? 1 : 0,
+                section.isBSS ? 1 : 0,
+                section.isReadOnly ? 1 : 0,
+                (void *)section.data,
+                offset);
+
+            if (!section.data)
+            {
+                std::printf("  section.data == nullptr (possible SHT_NOBITS/BSS)\n");
+                return;
+            }
+
+            const uint32_t dumpStart = (offset >= 16) ? (offset - 16) : 0;
+            const uint32_t dumpEnd = std::min(section.size, offset + 32);
+
+            std::printf("  bytes around address:\n  ");
+            for (uint32_t dumpOffset = dumpStart; dumpOffset < dumpEnd; ++dumpOffset)
+            {
+                std::printf("%02X ", section.data[dumpOffset]);
+            }
+            std::printf("\n");
+            return;
+        }
+
+        std::printf("Address 0x%08X not covered by any section in m_sections\n", address);
+    }
+
     uint32_t ElfParser::getEntryPoint() const
     {
         return static_cast<uint32_t>(m_elf->get_entry());
@@ -728,6 +779,7 @@ namespace ps2recomp
                 func.end = end;
                 func.isRecompiled = false;
                 func.isStub = false;
+                func.isSkipped = false;
 
                 m_extraFunctions.push_back(std::move(func));
                 count++;

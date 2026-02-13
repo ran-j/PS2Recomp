@@ -120,7 +120,6 @@ namespace ps2recomp
         // Jump Table Generation
         std::string generateJumpTableSwitch(const Instruction &inst, uint32_t tableAddress,
                                             const std::vector<JumpTableEntry> &entries);
-        std::string generateBootstrapFunction() const;
 
         const Symbol *findSymbolByAddress(uint32_t address) const;
         std::string getFunctionName(uint32_t address) const;
