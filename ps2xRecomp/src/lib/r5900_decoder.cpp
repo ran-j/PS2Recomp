@@ -14,7 +14,7 @@ namespace ps2recomp
     }
 
     Instruction R5900Decoder::decodeInstruction(uint32_t address, uint32_t rawInstruction) const
-	{
+    {
         Instruction inst;
 
         inst.address = address;
@@ -39,12 +39,14 @@ namespace ps2recomp
         inst.isMultimedia = false;
         inst.isLoad = false;
         inst.isStore = false;
+        inst.isMmio = false;
 
         // Initialize the enhanced fields
         inst.mmiType = 0;
         inst.mmiFunction = 0;
         inst.pmfhlVariation = 0;
         inst.vuFunction = 0;
+        inst.mmioAddress = 0;
 
         inst.vectorInfo.isVector = false;
         inst.vectorInfo.usesQReg = false;

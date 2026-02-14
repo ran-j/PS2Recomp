@@ -35,6 +35,7 @@ namespace ps2recomp
                 uint32_t getSectionAddress(const std::string &sectionName) const;
                 uint32_t getSectionSize(const std::string &sectionName) const;
                 uint32_t getEntryPoint() const;
+                void debugAddress(uint32_t address) const;
 
         private:
                 std::string m_filePath;

@@ -43,6 +43,9 @@ namespace ps2recomp
         uint8_t pmfhlVariation; // For PMFHL instructions
         uint8_t vuFunction;     // For VU instructions
 
+        bool isMmio = false;
+        uint32_t mmioAddress = 0;
+
         struct
         {
             bool isVector;       // Uses vector operations
@@ -59,8 +62,8 @@ namespace ps2recomp
             bool modifiesGPR;     // Modifies general purpose register
             bool modifiesFPR;     // Modifies floating point register
             bool modifiesVFR;     // Modifies vector float register
-			bool modifiesVIR;     // Modifies vector integer register
-			bool modifiesVIC;     // Modifies vector integer control register
+            bool modifiesVIR;     // Modifies vector integer register
+            bool modifiesVIC;     // Modifies vector integer control register
             bool modifiesMemory;  // Modifies memory
             bool modifiesControl; // Modifies control register
         } modificationInfo;
@@ -69,7 +72,7 @@ namespace ps2recomp
                         immediate(0), simmediate(0), target(0), raw(0),
                         isMMI(false), isVU(false), isBranch(false), isJump(false), isCall(false),
                         isReturn(false), hasDelaySlot(false), isMultimedia(false), isStore(false), isLoad(false),
-                        mmiType(0), mmiFunction(0), pmfhlVariation(0), vuFunction(0)
+                        mmiType(0), mmiFunction(0), pmfhlVariation(0), vuFunction(0), isMmio(false), mmioAddress(0)
         {
             vectorInfo = {};
             modificationInfo = {};
@@ -85,8 +88,9 @@ namespace ps2recomp
         std::vector<Instruction> instructions;
         std::vector<uint32_t> callers;
         std::vector<uint32_t> callees;
-        bool isRecompiled;
-        bool isStub;
+        bool isRecompiled = false;
+        bool isStub = false;
+        bool isSkipped = false;
     };
 
     // Symbol information
@@ -166,10 +170,14 @@ namespace ps2recomp
         std::string inputPath;
         std::string outputPath;
         std::string ghidraMapPath;
-        bool singleFileOutput;
+        bool singleFileOutput = false;
+        bool patchSyscalls = false;
+        bool patchCop0 = true;
+        bool patchCache = true;
         std::vector<std::string> skipFunctions;
         std::unordered_map<uint32_t, std::string> patches;
         std::vector<std::string> stubImplementations;
+        std::unordered_map<uint32_t, uint32_t> mmioByInstructionAddress;
     };
 
 } // namespace ps2recomp

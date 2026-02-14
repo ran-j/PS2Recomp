@@ -13,12 +13,14 @@
 #include <iomanip>
 #include <functional>
 #include <limits>
+#include <cctype>
 
 namespace fs = std::filesystem;
 
 namespace ps2recomp
 {
     static bool hasPs2ApiPrefix(const std::string &name);
+    static bool hasReliableSymbolName(const std::string &name);
     static bool isDoNotSkipOrStub(const std::string &name);
     static uint32_t decodeAbsoluteJumpTarget(uint32_t instructionAddress, uint32_t targetField);
     static bool tryReadWord(const ElfParser *parser, uint32_t address, uint32_t &outWord);
@@ -55,7 +57,6 @@ namespace ps2recomp
         std::cout << "Extracted " << m_relocations.size() << " relocations" << std::endl;
 
         analyzeEntryPoint();
-        analyzeLibraryFunctions();
         analyzeDataUsage();
         identifyPotentialPatches();
         analyzeControlFlow();
@@ -64,14 +65,16 @@ namespace ps2recomp
         identifyRecursiveFunctions();
         analyzeRegisterUsage();
         analyzeFunctionSignatures();
+        analyzeLibraryFunctions();
         optimizePatches();
 
         for (auto &func : m_functions)
         {
+            categorizeFunction(func);
+
             if (!m_skipFunctions.contains(func.name) &&
                 !m_libFunctions.contains(func.name))
             {
-                categorizeFunction(func);
                 func.instructions = decodeFunction(func);
             }
         }
@@ -125,12 +128,93 @@ namespace ps2recomp
         file << "# Path to output directory\n";
         file << "output = \"" << escapeBackslashes(outputDirStr) << "\"\n\n";
 
-        file << "# Single file output mode (false for one file per function)\n";
-        file << "single_file_output = true\n\n";
+        file << "# Single file output mode (recommended for large games)\n";
+        file << "single_file_output = false\n\n";
+
+        file << "# Patch policy (instruction-driven handling is preferred for syscalls)\n";
+        file << "patch_syscalls = false\n";
+        file << "patch_cop0 = true\n";
+        file << "patch_cache = true\n\n";
+
+        std::unordered_map<std::string, size_t> functionNameCounts;
+        functionNameCounts.reserve(m_functions.size());
+        for (const auto &func : m_functions)
+        {
+            if (!func.name.empty())
+            {
+                functionNameCounts[func.name]++;
+            }
+        }
+
+        auto makeSelector = [&](const std::string &name, uint32_t start) -> std::string
+        {
+            auto it = functionNameCounts.find(name);
+            if (it == functionNameCounts.end() || it->second <= 1)
+            {
+                return name;
+            }
+
+            std::stringstream selector;
+            selector << name << "@0x"
+                     << std::hex << std::uppercase << std::setw(8) << std::setfill('0')
+                     << start;
+            return selector.str();
+        };
+
+        auto collectFunctionSelectors =
+            [&](const std::unordered_set<std::string> &nameSet) -> std::vector<std::string>
+        {
+            std::vector<const Function *> orderedFunctions;
+            orderedFunctions.reserve(m_functions.size());
+            for (const auto &func : m_functions)
+            {
+                orderedFunctions.push_back(&func);
+            }
+
+            std::sort(orderedFunctions.begin(), orderedFunctions.end(),
+                      [](const Function *a, const Function *b)
+                      { return a->start < b->start; });
+
+            std::vector<std::string> entries;
+            std::unordered_set<std::string> seenEntries;
+            std::unordered_set<std::string> coveredNames;
+
+            for (const Function *func : orderedFunctions)
+            {
+                if (!nameSet.contains(func->name))
+                {
+                    continue;
+                }
+
+                coveredNames.insert(func->name);
+                const std::string entry = makeSelector(func->name, func->start);
+                if (seenEntries.insert(entry).second)
+                {
+                    entries.push_back(entry);
+                }
+            }
+
+            std::vector<std::string> leftovers;
+            leftovers.reserve(nameSet.size());
+            for (const auto &name : nameSet)
+            {
+                if (!coveredNames.contains(name) && seenEntries.insert(name).second)
+                {
+                    leftovers.push_back(name);
+                }
+            }
+            std::sort(leftovers.begin(), leftovers.end());
+            entries.insert(entries.end(), leftovers.begin(), leftovers.end());
+
+            return entries;
+        };
+
+        const std::vector<std::string> stubEntries = collectFunctionSelectors(m_libFunctions);
+        const std::vector<std::string> skipEntries = collectFunctionSelectors(m_skipFunctions);
 
         file << "# Functions to stub (these will generate empty implementations)\n";
         file << "stubs = [\n";
-        for (const auto &func : m_libFunctions)
+        for (const auto &func : stubEntries)
         {
             file << "  \"" << func << "\",\n";
         }
@@ -138,11 +222,23 @@ namespace ps2recomp
 
         file << "# Functions to skip (these will not be recompiled)\n";
         file << "skip = [\n";
-        for (const auto &func : m_skipFunctions)
+        for (const auto &func : skipEntries)
         {
             file << "  \"" << func << "\",\n";
         }
         file << "]\n\n";
+
+        if (!m_mmioByInstructionAddress.empty())
+        {
+            file << "# Detected MMIO accesses\n";
+            file << "[mmio]\n";
+            for (const auto &[instAddr, mmioAddr] : m_mmioByInstructionAddress)
+            {
+                file << "\"0x" << std::hex << instAddr << "\" = \"0x" << mmioAddr << "\"\n"
+                     << std::dec;
+            }
+            file << "\n";
+        }
 
         if (!m_jumpTables.empty())
         {
@@ -252,29 +348,55 @@ namespace ps2recomp
         m_knownLibNames.insert(stdLibFuncs.begin(), stdLibFuncs.end());
     }
 
+    int ElfAnalyzer::findEntryFunctionIndexForHeuristics(const std::vector<Function> &functions, uint32_t entryAddress)
+    {
+        auto it = std::find_if(functions.begin(), functions.end(),
+                               [entryAddress](const Function &f)
+                               { return f.start == entryAddress; });
+        if (it != functions.end())
+        {
+            return static_cast<int>(std::distance(functions.begin(), it));
+        }
+
+        it = std::find_if(functions.begin(), functions.end(),
+                          [entryAddress](const Function &f)
+                          { return f.start <= entryAddress && entryAddress < f.end; });
+        if (it != functions.end())
+        {
+            return static_cast<int>(std::distance(functions.begin(), it));
+        }
+
+        return -1;
+    }
+
+    int ElfAnalyzer::findFallbackEntryFunctionIndexForHeuristics(const std::vector<Function> &functions)
+    {
+        auto it = std::find_if(functions.begin(), functions.end(),
+                               [](const Function &f)
+                               { return f.start == 0x100000 || f.start == 0x80100000; });
+        if (it == functions.end())
+        {
+            return -1;
+        }
+
+        return static_cast<int>(std::distance(functions.begin(), it));
+    }
+
     void ElfAnalyzer::analyzeEntryPoint()
     {
         const uint32_t entryAddress = m_elfParser->getEntryPoint();
-        auto it = std::find_if(m_functions.begin(), m_functions.end(),
-                               [entryAddress](const Function &f)
-                               { return f.start == entryAddress; });
-
-        if (it == m_functions.end())
+        const int entryIndex = findEntryFunctionIndexForHeuristics(m_functions, entryAddress);
+        if (entryIndex >= 0)
         {
-            it = std::find_if(m_functions.begin(), m_functions.end(),
-                              [entryAddress](const Function &f)
-                              { return f.start <= entryAddress && entryAddress < f.end; });
-        }
-
-        if (it != m_functions.end())
-        {
+            const Function &entryFunction = m_functions[static_cast<size_t>(entryIndex)];
             std::cout << "Found entry point from ELF header: 0x" << std::hex << entryAddress
-                      << " in function " << it->name << " (starts at 0x" << it->start << ")"
+                      << " in function " << entryFunction.name << " (starts at 0x" << entryFunction.start << ")"
                       << std::dec << std::endl;
 
-            m_skipFunctions.insert(it->name);
+            m_forceRecompileStarts.insert(entryFunction.start);
+            m_skipFunctions.erase(entryFunction.name);
 
-            std::vector<Instruction> instructions = decodeFunction(*it);
+            std::vector<Instruction> instructions = decodeFunction(entryFunction);
 
             for (const auto &inst : instructions)
             {
@@ -286,10 +408,12 @@ namespace ps2recomp
                     {
                         if (func.start == target)
                         {
-                            std::cout << "Found initialization call to: " << func.name << " at 0x"
+                            std::cout << "Found entry call to: " << func.name << " at 0x"
                                       << std::hex << inst.address << std::dec << std::endl;
 
-                            if (!isDoNotSkipOrStub(func.name) && (func.name.find("init") != std::string::npos || func.name.find("Init") != std::string::npos))
+                            if (hasReliableSymbolName(func.name) &&
+                                !isDoNotSkipOrStub(func.name) &&
+                                isSystemFunction(func.name))
                             {
                                 m_skipFunctions.insert(func.name);
                             }
@@ -304,15 +428,14 @@ namespace ps2recomp
             std::cout << "Entry point 0x" << std::hex << entryAddress
                       << " not mapped to an extracted function" << std::dec << std::endl;
 
-            for (const auto &func : m_functions)
+            const int fallbackIndex = findFallbackEntryFunctionIndexForHeuristics(m_functions);
+            if (fallbackIndex >= 0)
             {
-                if (func.start == 0x100000 || func.start == 0x80100000)
-                {
-                    std::cout << "Found potential entry point by address: " << func.name
-                              << " at 0x" << std::hex << func.start << std::dec << std::endl;
-                    m_skipFunctions.insert(func.name);
-                    break;
-                }
+                const Function &fallbackEntry = m_functions[static_cast<size_t>(fallbackIndex)];
+                std::cout << "Found potential entry point by address: " << fallbackEntry.name
+                          << " at 0x" << std::hex << fallbackEntry.start << std::dec << std::endl;
+                m_forceRecompileStarts.insert(fallbackEntry.start);
+                m_skipFunctions.erase(fallbackEntry.name);
             }
         }
     }
@@ -323,6 +446,11 @@ namespace ps2recomp
         {
             if (symbol.isFunction)
             {
+                if (!hasReliableSymbolName(symbol.name))
+                {
+                    continue;
+                }
+
                 if (isLibraryFunction(symbol.name))
                 {
                     m_libFunctions.insert(symbol.name);
@@ -336,6 +464,11 @@ namespace ps2recomp
 
         for (const auto &func : m_functions)
         {
+            if (!hasReliableSymbolName(func.name))
+            {
+                continue;
+            }
+
             if (isLibraryFunction(func.name))
             {
                 m_libFunctions.insert(func.name);
@@ -450,6 +583,15 @@ namespace ps2recomp
                         {
                             uint32_t targetAddr = baseAddr + static_cast<int16_t>(inst.immediate);
 
+                            // Detect MMIO accesses
+                            if ((targetAddr >= 0x10000000 && targetAddr < 0x14000000) || // I/O
+                                (targetAddr >= 0x70000000 && targetAddr < 0x70004000))   // Scratchpad
+                            {
+                                m_mmioByInstructionAddress[inst.address] = targetAddr;
+                                std::cout << "Detected MMIO access at " << std::hex << inst.address
+                                          << " -> " << targetAddr << std::dec << std::endl;
+                            }
+
                             for (const auto &section : m_sections)
                             {
                                 if (targetAddr >= section.address && targetAddr < section.address + section.size)
@@ -545,131 +687,141 @@ namespace ps2recomp
                 continue;
             }
 
-            std::vector<Instruction> instructions = decodeFunction(func);
+            const std::vector<Instruction> instructions = decodeFunction(func);
 
-            for (size_t i = 0; i < instructions.size(); i++)
+            for (size_t index = 0; index + 1 < instructions.size(); ++index)
             {
-                const auto &inst = instructions[i];
+                tryPatchSelfModifyingStore(func, instructions, index);
+            }
+        }
+    }
 
-                if (inst.opcode == OPCODE_SPECIAL && inst.function == SPECIAL_SYSCALL)
+    bool ElfAnalyzer::tryPatchSelfModifyingStore(
+        const Function &func,
+        const std::vector<Instruction> &instructions,
+        size_t index)
+    {
+        const Instruction &storeInst = instructions[index];
+        if (storeInst.opcode != OPCODE_SW)
+        {
+            return false;
+        }
+
+        const Instruction &nextInst = instructions[index + 1];
+        if (nextInst.opcode != OPCODE_J && nextInst.opcode != OPCODE_JAL)
+        {
+            return false;
+        }
+
+        uint32_t targetAddr = 0;
+        if (!tryResolveBasePlusOffset(instructions, index, storeInst.rs, static_cast<int16_t>(storeInst.immediate), targetAddr))
+        {
+            return false;
+        }
+
+        if (!isCodeAddress(targetAddr))
+        {
+            return false;
+        }
+
+        const uint32_t jumpTarget = decodeAbsoluteJumpTarget(nextInst.address, nextInst.target);
+        if (!isCodeAddress(jumpTarget))
+        {
+            return false;
+        }
+
+        std::cout << "Potential self-modifying code at " << formatAddress(storeInst.address)
+                  << " writing to " << formatAddress(targetAddr)
+                  << " then jumping to " << formatAddress(jumpTarget)
+                  << " in function " << func.name << std::endl;
+
+        m_patches[storeInst.address] = 0x00000000;
+        m_patchReasons[storeInst.address] = "Potential self-modifying code";
+        return true;
+    }
+
+    bool ElfAnalyzer::tryResolveBasePlusOffset(
+        const std::vector<Instruction> &instructions,
+        size_t index,
+        uint32_t baseReg,
+        int16_t offset,
+        uint32_t &outAddr) const
+    {
+        uint32_t baseAddr = 0;
+        if (!tryResolveLuiBase(instructions, index, baseReg, baseAddr))
+        {
+            return false;
+        }
+
+        outAddr = baseAddr + static_cast<int32_t>(offset);
+        return true;
+    }
+
+    bool ElfAnalyzer::tryResolveLuiBase(
+        const std::vector<Instruction> &instructions,
+        size_t index,
+        uint32_t reg,
+        uint32_t &baseAddr) const
+    {
+        baseAddr = 0;
+
+        const size_t start = (index > 8) ? (index - 8) : 0;
+        for (size_t pos = index; pos-- > start;)
+        {
+            const Instruction &prev = instructions[pos];
+
+            if ((prev.opcode == OPCODE_ADDIU || prev.opcode == OPCODE_ORI) && prev.rt == reg)
+            {
+                uint32_t hiBase = 0;
+                if (!tryResolveLuiBase(instructions, pos, prev.rs, hiBase))
                 {
-                    std::cout << "Found syscall at " << formatAddress(inst.address) << " in function " << func.name << std::endl;
-                    m_patches[inst.address] = 0x00000000; // NOP
-                    m_patchReasons[inst.address] = "Syscall requires special handling";
+                    return false;
                 }
 
-                if (inst.opcode == OPCODE_COP0)
+                if (prev.opcode == OPCODE_ADDIU)
                 {
-                    std::cout << "Found COP0 instruction at " << formatAddress(inst.address) << " in function " << func.name << std::endl;
-                    m_patches[inst.address] = 0x00000000; // NOP
-                    m_patchReasons[inst.address] = "Privileged COP0 instruction";
+                    baseAddr = hiBase + static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(prev.immediate)));
+                }
+                else
+                {
+                    baseAddr = hiBase | static_cast<uint32_t>(prev.immediate);
                 }
 
-                if (inst.opcode == OPCODE_CACHE)
-                {
-                    std::cout << "Found CACHE instruction at " << formatAddress(inst.address) << " in function " << func.name << std::endl;
-                    m_patches[inst.address] = 0x00000000; // NOP
-                    m_patchReasons[inst.address] = "Cache manipulation not supported";
-                }
+                return true;
+            }
 
-                // Detect potential self-modifying code
-                if (inst.opcode == OPCODE_SW && i + 1 < instructions.size())
-                {
-                    const auto &nextInst = instructions[i + 1];
+            if (prev.opcode == OPCODE_LUI && prev.rt == reg)
+            {
+                baseAddr = prev.immediate << 16;
+                return true;
+            }
 
-                    if (nextInst.opcode == OPCODE_J || nextInst.opcode == OPCODE_JAL)
-                    {
-                        uint32_t jumpTarget = decodeAbsoluteJumpTarget(nextInst.address, nextInst.target);
-
-                        for (const auto &section : m_sections)
-                        {
-                            if (section.isCode && jumpTarget >= section.address && jumpTarget < section.address + section.size)
-                            {
-                                std::cout << "Potential self-modifying code at " << formatAddress(inst.address) << " in function " << func.name << std::endl;
-                                m_patches[inst.address] = 0x00000000; // NOP the store
-                                m_patchReasons[inst.address] = "Potential self-modifying code";
-                            }
-                        }
-                    }
-                }
-
-                // Detect stores to regions mapped to hardware registers
-                if ((inst.opcode == OPCODE_SW || inst.opcode == OPCODE_SH || inst.opcode == OPCODE_SB) &&
-                    inst.rs != 28) // Not GP-relative
-                {
-                    uint32_t baseAddr = 0;
-                    for (int j = 1; j <= 5 && static_cast<int>(inst.address) - j * 4 >= static_cast<int>(func.start); j++)
-                    {
-                        uint32_t prevAddr = inst.address - j * 4;
-                        uint32_t prevInst = 0;
-                        if (!tryReadWord(m_elfParser.get(), prevAddr, prevInst))
-                        {
-                            continue;
-                        }
-
-                        if (OPCODE(prevInst) == OPCODE_LUI && RT(prevInst) == inst.rs)
-                        {
-                            baseAddr = IMMEDIATE(prevInst) << 16;
-                            break;
-                        }
-                    }
-
-                    if (baseAddr != 0)
-                    {
-                        uint32_t targetAddr = baseAddr + static_cast<int16_t>(inst.immediate);
-
-                        if ((targetAddr >= 0x10000000 && targetAddr < 0x10010000) || // Timer registers
-                            (targetAddr >= 0x10020000 && targetAddr < 0x10030000) || // DMAC registers
-                            (targetAddr >= 0x12000000 && targetAddr < 0x12010000))   // GS registers
-                        {
-                            std::cout << "Hardware register access at " << formatAddress(inst.address)
-                                      << " to address 0x" << std::hex << targetAddr << std::dec
-                                      << " in function " << func.name << std::endl;
-
-                            // We might need to replace this with a special function call but lets just patch it for now
-                            m_patchReasons[inst.address] = "Hardware register access to " + formatAddress(targetAddr);
-                        }
-                    }
-                }
-
-                if (inst.opcode == OPCODE_SPECIAL && inst.function == SPECIAL_SYNC)
-                {
-                    std::cout << "SYNC instruction (memory barrier) at " << formatAddress(inst.address)
-                              << " in function " << func.name << std::endl;
-                    // We might need to add memory barriers in the recompiled code
-                }
-
-                // Detect instructions that use special PS2 features like quad load/store
-                if (inst.opcode == OPCODE_LQ || inst.opcode == OPCODE_SQ)
-                {
-                    std::cout << "Quad word " << (inst.opcode == OPCODE_LQ ? "load" : "store")
-                              << " at " << formatAddress(inst.address) << " in function " << func.name << std::endl;
-                    // These will require special handling with SIMD instructions
-                }
+            if (prev.rt == reg || prev.rd == reg)
+            {
+                break;
             }
         }
 
-        for (const auto &func : m_functions)
+        return false;
+    }
+
+    bool ElfAnalyzer::isCodeAddress(uint32_t addr) const
+    {
+        for (const auto &section : m_sections)
         {
-            if (m_skipFunctions.contains(func.name))
+            if (!section.isCode)
             {
                 continue;
             }
 
-            std::vector<Instruction> instructions = decodeFunction(func);
-
-            for (const auto &inst : instructions)
+            const uint32_t sectionEnd = section.address + section.size;
+            if (addr >= section.address && addr < sectionEnd)
             {
-                if (inst.isMMI || inst.isVU)
-                {
-                    std::cout << "Found PS2 multimedia instruction at " << formatAddress(inst.address)
-                              << " in function " << func.name << std::endl;
-
-                    // These might need special handling, but we won't patch them with NOPs
-                    m_patchReasons[inst.address] = "PS2 multimedia instruction";
-                }
+                return true;
             }
         }
+
+        return false;
     }
 
     void ElfAnalyzer::analyzeControlFlow()
@@ -727,6 +879,257 @@ namespace ps2recomp
         }
     }
 
+    std::vector<JumpTable> ElfAnalyzer::detectJumpTablesForHeuristics(
+        const std::vector<Instruction> &instructions,
+        const std::vector<Section> &sections,
+        const std::function<bool(uint32_t, uint32_t &)> &readWord)
+    {
+        std::vector<JumpTable> jumpTables;
+
+        auto addSignedImm16 = [](uint32_t hiPart, uint16_t imm16) -> uint32_t
+        {
+            return hiPart + static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(imm16)));
+        };
+
+        auto orUnsignedImm16 = [](uint32_t hiPart, uint16_t imm16) -> uint32_t
+        {
+            return hiPart | static_cast<uint32_t>(imm16);
+        };
+
+        auto looksLikeCodeTarget = [sections](uint32_t addr) -> bool
+        {
+            if (addr == 0)
+            {
+                return false;
+            }
+
+            if (sections.empty())
+            {
+                return true;
+            }
+
+            for (const auto &section : sections)
+            {
+                if (!section.isCode)
+                {
+                    continue;
+                }
+
+                const uint32_t sectionEnd = section.address + section.size;
+                if (addr >= section.address && addr < sectionEnd)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        };
+
+        auto readJumpEntryCandidate = [&](uint32_t entryAddr, bool isLoadDouble, uint32_t &outTarget) -> bool
+        {
+            outTarget = 0;
+
+            uint32_t w0 = 0;
+            if (!readWord(entryAddr, w0))
+            {
+                return false;
+            }
+
+            if (!isLoadDouble)
+            {
+                outTarget = w0;
+                return true;
+            }
+
+            uint32_t w1 = 0;
+            if (!readWord(entryAddr + 4u, w1))
+            {
+                outTarget = w0; // still keep something
+                return true;
+            }
+
+            const bool w0Looks = looksLikeCodeTarget(w0);
+            const bool w1Looks = looksLikeCodeTarget(w1);
+
+            if (w0Looks && !w1Looks)
+            {
+                outTarget = w0;
+                return true;
+            }
+            if (w1Looks && !w0Looks)
+            {
+                outTarget = w1;
+                return true;
+            }
+            outTarget = w0;
+            return true;
+        };
+
+        auto tryBuildTable = [&](uint32_t baseAddr, uint32_t baseReg, uint32_t numEntries, uint32_t strideBytes, bool isLoadDouble) -> std::optional<JumpTable>
+        {
+            JumpTable jumpTable;
+            jumpTable.address = baseAddr;
+            jumpTable.baseRegister = baseReg;
+
+            uint32_t validCodeTargets = 0;
+            uint32_t totalRead = 0;
+
+            for (uint32_t e = 0; e < numEntries; e++)
+            {
+                const uint32_t entryAddr = baseAddr + (e * strideBytes);
+
+                uint32_t targetAddr = 0;
+                if (!readJumpEntryCandidate(entryAddr, isLoadDouble, targetAddr))
+                {
+                    continue;
+                }
+
+                totalRead++;
+
+                if (looksLikeCodeTarget(targetAddr))
+                {
+                    validCodeTargets++;
+                }
+
+                JumpTableEntry entry;
+                entry.index = e;
+                entry.target = targetAddr;
+                jumpTable.entries.push_back(entry);
+            }
+
+            if (jumpTable.entries.empty())
+            {
+                return std::nullopt;
+            }
+
+            bool ok = false;
+            if (sections.empty())
+            {
+                ok = (totalRead >= 2);
+            }
+            else
+            {
+                ok = (validCodeTargets >= 2) &&
+                     (totalRead >= 2) &&
+                     (validCodeTargets * 2 >= totalRead);
+            }
+
+            if (!ok)
+            {
+                return std::nullopt;
+            }
+
+            return jumpTable;
+        };
+
+        for (size_t i = 0; i < instructions.size(); i++)
+        {
+            const auto &inst = instructions[i];
+
+            if (inst.opcode != OPCODE_SLTIU || i + 2 >= instructions.size())
+            {
+                continue;
+            }
+
+            const auto &nextInst = instructions[i + 1];
+            if (nextInst.opcode != OPCODE_BNE && nextInst.opcode != OPCODE_BEQ)
+            {
+                continue;
+            }
+
+            // scan for LW/LD + JR pair
+            for (size_t j = i + 2; j < std::min(i + 10, instructions.size()); j++)
+            {
+                const auto &loadInst = instructions[j];
+                const bool isLoadWord = (loadInst.opcode == OPCODE_LW);
+                const bool isLoadDouble = (loadInst.opcode == OPCODE_LD);
+
+                if ((!isLoadWord && !isLoadDouble) || j + 1 >= instructions.size())
+                {
+                    continue;
+                }
+
+                const auto &jumpInst = instructions[j + 1];
+                if (jumpInst.opcode != OPCODE_SPECIAL ||
+                    jumpInst.function != SPECIAL_JR ||
+                    jumpInst.rs != loadInst.rt)
+                {
+                    continue;
+                }
+
+                const uint32_t numEntries = inst.immediate;
+                if (numEntries == 0 || numEntries >= 1000)
+                {
+                    break;
+                }
+
+                uint32_t baseAddr = 0;
+
+                // A) LUI tmp ; ADDIU/ORI base, tmp, lo
+                // B) LUI base ; ... ; LW/LD rt, lo(base)
+                for (int k = static_cast<int>(j) - 1; k >= static_cast<int>(i); k--)
+                {
+                    const auto &addrInst = instructions[static_cast<size_t>(k)];
+                    if (addrInst.opcode != OPCODE_LUI)
+                    {
+                        continue;
+                    }
+
+                    const uint32_t hiPart = (addrInst.immediate << 16);
+
+                    if (static_cast<size_t>(k + 1) < instructions.size())
+                    {
+                        const auto &offsetInst = instructions[static_cast<size_t>(k + 1)];
+                        const bool isAddiuOrOri = (offsetInst.opcode == OPCODE_ADDIU || offsetInst.opcode == OPCODE_ORI);
+
+                        if (isAddiuOrOri &&
+                            offsetInst.rs == addrInst.rt &&
+                            offsetInst.rt == loadInst.rs)
+                        {
+                            if (offsetInst.opcode == OPCODE_ADDIU)
+                            {
+                                baseAddr = addSignedImm16(hiPart, offsetInst.immediate);
+                            }
+                            else
+                            {
+                                baseAddr = orUnsignedImm16(hiPart, offsetInst.immediate);
+                            }
+                            break;
+                        }
+                    }
+
+                    if (addrInst.rt == loadInst.rs)
+                    {
+                        baseAddr = addSignedImm16(hiPart, loadInst.immediate);
+                        break;
+                    }
+                }
+
+                if (baseAddr == 0)
+                {
+                    break;
+                }
+
+                const uint32_t preferredStride = isLoadDouble ? 8u : 4u;
+
+                std::optional<JumpTable> table = tryBuildTable(baseAddr, loadInst.rs, numEntries, preferredStride, isLoadDouble);
+                if (!table && isLoadDouble)
+                {
+                    table = tryBuildTable(baseAddr, loadInst.rs, numEntries, 4u, isLoadDouble);
+                }
+
+                if (table)
+                {
+                    jumpTables.push_back(std::move(*table));
+                }
+
+                break;
+            }
+        }
+
+        return jumpTables;
+    }
+
     void ElfAnalyzer::detectJumpTables()
     {
         std::cout << "Detecting jump tables..." << std::endl;
@@ -740,86 +1143,25 @@ namespace ps2recomp
             }
 
             std::vector<Instruction> instructions = decodeFunction(func);
-
-            for (size_t i = 0; i < instructions.size(); i++)
-            {
-                const auto &inst = instructions[i];
-
-                if (inst.opcode == OPCODE_SLTIU && i + 2 < instructions.size())
+            std::vector<JumpTable> detectedTables = detectJumpTablesForHeuristics(
+                instructions,
+                m_sections,
+                [this](uint32_t address, uint32_t &outWord) -> bool
                 {
-                    const auto &nextInst = instructions[i + 1];
-                    if (nextInst.opcode == OPCODE_BNE || nextInst.opcode == OPCODE_BEQ)
-                    {
-                        for (size_t j = i + 2; j < std::min(i + 10, instructions.size()); j++)
-                        {
-                            const auto &loadInst = instructions[j];
+                    return tryReadWord(m_elfParser.get(), address, outWord);
+                });
 
-                            if (loadInst.opcode == OPCODE_LW && j + 1 < instructions.size())
-                            {
-                                const auto &jumpInst = instructions[j + 1];
-
-                                if (jumpInst.opcode == OPCODE_SPECIAL && jumpInst.function == SPECIAL_JR &&
-                                    jumpInst.rs == loadInst.rt)
-                                {
-                                    std::cout << "Detected jump table in function " << func.name
-                                              << " at " << formatAddress(loadInst.address) << std::endl;
-
-                                    uint32_t baseAddr = 0;
-                                    uint32_t numEntries = inst.immediate; // From the bounds check
-
-                                    for (int k = j - 1; k >= static_cast<int>(i); k--)
-                                    {
-                                        const auto &addrInst = instructions[k];
-
-                                        if (addrInst.opcode == OPCODE_LUI && k + 1 < instructions.size())
-                                        {
-                                            const auto &offsetInst = instructions[k + 1];
-
-                                            if ((offsetInst.opcode == OPCODE_ADDIU || offsetInst.opcode == OPCODE_ORI) &&
-                                                offsetInst.rs == addrInst.rt && offsetInst.rt == loadInst.rs)
-                                            {
-
-                                                baseAddr = (addrInst.immediate << 16) | (offsetInst.immediate & 0xFFFF);
-                                                break;
-                                            }
-                                        }
-                                    }
-
-                                    if (baseAddr != 0 && numEntries > 0 && numEntries < 1000)
-                                    {
-                                        JumpTable jumpTable;
-                                        jumpTable.address = baseAddr;
-                                        jumpTable.baseRegister = loadInst.rs;
-
-                                        for (uint32_t e = 0; e < numEntries; e++)
-                                        {
-                                            uint32_t entryAddr = baseAddr + (e * 4);
-
-                                            uint32_t targetAddr = 0;
-                                            if (tryReadWord(m_elfParser.get(), entryAddr, targetAddr))
-                                            {
-                                                JumpTableEntry entry;
-                                                entry.index = e;
-                                                entry.target = targetAddr;
-                                                jumpTable.entries.push_back(entry);
-
-                                                std::cout << "  - Jump table entry " << e << ": 0x"
-                                                          << std::hex << targetAddr << std::dec << std::endl;
-                                            }
-                                        }
-
-                                        if (!jumpTable.entries.empty())
-                                        {
-                                            m_jumpTables.push_back(jumpTable);
-                                        }
-                                    }
-
-                                    break;
-                                }
-                            }
-                        }
-                    }
+            for (const auto &jumpTable : detectedTables)
+            {
+                std::cout << "Detected jump table in function " << func.name
+                          << " at " << formatAddress(jumpTable.address) << std::endl;
+                for (const auto &[index, target] : jumpTable.entries)
+                {
+                    std::cout << "  - Jump table entry " << index << ": 0x"
+                              << std::hex << target << std::dec << std::endl;
                 }
+
+                m_jumpTables.push_back(jumpTable);
             }
         }
     }
@@ -880,6 +1222,112 @@ namespace ps2recomp
         }
     }
 
+    std::unordered_set<std::string> ElfAnalyzer::findRecursiveFunctionsForHeuristics(
+        const std::unordered_map<std::string, std::vector<std::string>> &callGraph)
+    {
+        std::unordered_set<std::string> nodes;
+        for (const auto &[caller, callees] : callGraph)
+        {
+            nodes.insert(caller);
+            for (const auto &callee : callees)
+            {
+                nodes.insert(callee);
+            }
+        }
+
+        std::unordered_map<std::string, int> index;
+        std::unordered_map<std::string, int> lowlink;
+        std::unordered_set<std::string> onStack;
+        std::vector<std::string> stack;
+
+        index.reserve(nodes.size());
+        lowlink.reserve(nodes.size());
+        onStack.reserve(nodes.size());
+        stack.reserve(nodes.size());
+
+        int currentIndex = 0;
+        std::vector<std::vector<std::string>> sccs;
+        sccs.reserve(nodes.size());
+
+        std::function<void(const std::string &)> strongconnect;
+        strongconnect = [&](const std::string &v)
+        {
+            index[v] = currentIndex;
+            lowlink[v] = currentIndex;
+            currentIndex++;
+
+            stack.push_back(v);
+            onStack.insert(v);
+
+            auto it = callGraph.find(v);
+            if (it != callGraph.end())
+            {
+                for (const auto &w : it->second)
+                {
+                    if (!index.contains(w))
+                    {
+                        strongconnect(w);
+                        lowlink[v] = std::min(lowlink[v], lowlink[w]);
+                    }
+                    else if (onStack.contains(w))
+                    {
+                        lowlink[v] = std::min(lowlink[v], index[w]);
+                    }
+                }
+            }
+
+            if (lowlink[v] == index[v])
+            {
+                std::vector<std::string> scc;
+                while (!stack.empty())
+                {
+                    std::string w = stack.back();
+                    stack.pop_back();
+                    onStack.erase(w);
+                    scc.push_back(w);
+                    if (w == v)
+                    {
+                        break;
+                    }
+                }
+
+                sccs.push_back(std::move(scc));
+            }
+        };
+
+        for (const auto &name : nodes)
+        {
+            if (!index.contains(name))
+            {
+                strongconnect(name);
+            }
+        }
+
+        std::unordered_set<std::string> recursive;
+        for (const auto &scc : sccs)
+        {
+            if (scc.size() > 1)
+            {
+                recursive.insert(scc.begin(), scc.end());
+                continue;
+            }
+
+            const std::string &name = scc[0];
+            auto it = callGraph.find(name);
+            if (it == callGraph.end())
+            {
+                continue;
+            }
+
+            if (std::find(it->second.begin(), it->second.end(), name) != it->second.end())
+            {
+                recursive.insert(name);
+            }
+        }
+
+        return recursive;
+    }
+
     void ElfAnalyzer::identifyRecursiveFunctions()
     {
         std::cout << "Identifying recursive functions..." << std::endl;
@@ -930,103 +1378,18 @@ namespace ps2recomp
             }
         }
 
-        std::unordered_map<std::string, int> index;
-        std::unordered_map<std::string, int> lowlink;
-        std::unordered_set<std::string> onStack;
-        std::vector<std::string> stack;
-
-        index.reserve(eligible.size());
-        lowlink.reserve(eligible.size());
-        onStack.reserve(eligible.size());
-        stack.reserve(eligible.size());
-
-        int currentIndex = 0;
-
-        std::vector<std::vector<std::string>> sccs;
-        sccs.reserve(256);
-
-        std::function<void(const std::string &)> strongconnect;
-        strongconnect = [&](const std::string &v)
+        std::unordered_set<std::string> recursive = findRecursiveFunctionsForHeuristics(callGraph);
+        for (const auto &name : recursive)
         {
-            index[v] = currentIndex;
-            lowlink[v] = currentIndex;
-            currentIndex++;
-
-            stack.push_back(v);
-            onStack.insert(v);
-
-            auto it = callGraph.find(v);
-            if (it != callGraph.end())
-            {
-                for (const auto &w : it->second)
-                {
-                    if (!index.contains(w))
-                    {
-                        strongconnect(w);
-                        lowlink[v] = std::min(lowlink[v], lowlink[w]);
-                    }
-                    else if (onStack.contains(w))
-                    {
-                        lowlink[v] = std::min(lowlink[v], index[w]);
-                    }
-                }
-            }
-
-            if (lowlink[v] == index[v])
-            {
-                std::vector<std::string> scc;
-                while (!stack.empty())
-                {
-                    std::string w = stack.back();
-                    stack.pop_back();
-                    onStack.erase(w);
-
-                    scc.push_back(w);
-                    if (w == v)
-                    {
-                        break;
-                    }
-                }
-
-                sccs.push_back(std::move(scc));
-            }
-        };
-
-        for (const auto &name : eligible)
-        {
-            if (!index.contains(name))
-            {
-                strongconnect(name);
-            }
-        }
-
-        // SCC size > 1 -> mutual recursion
-        // SCC size == 1 -> direct recursion if it calls itself
-        for (const auto &scc : sccs)
-        {
-            if (scc.size() > 1)
-            {
-                for (const auto &name : scc)
-                {
-                    std::cout << "Function " << name << " is part of a mutually recursive cycle" << std::endl;
-                }
-                continue;
-            }
-
-            const std::string &name = scc[0];
             auto it = callGraph.find(name);
-            if (it == callGraph.end())
+            if (it != callGraph.end() &&
+                std::find(it->second.begin(), it->second.end(), name) != it->second.end())
             {
-                continue;
+                std::cout << "Function " << name << " is directly recursive" << std::endl;
             }
-
-            for (const auto &callee : it->second)
+            else
             {
-                if (callee == name)
-                {
-                    std::cout << "Function " << name << " is directly recursive" << std::endl;
-                    break;
-                }
+                std::cout << "Function " << name << " is part of a mutually recursive cycle" << std::endl;
             }
         }
     }
@@ -1248,10 +1611,10 @@ namespace ps2recomp
                               << " patches. Consider skipping or stubing instead." << std::endl;
 
                     // If too many patches in one function, maybe better to skip it
-                    if (patchAddrs.size() > 5 &&
-                        static_cast<double>(patchAddrs.size()) / ((func.end - func.start) / 4) > 0.2 &&
-                        !isLibraryFunction(func.name) &&
-                        !isDoNotSkipOrStub(func.name))
+                    if (shouldSkipForPatchDensityForHeuristics(func.name,
+                                                               func.end - func.start,
+                                                               patchAddrs.size(),
+                                                               isLibraryFunction(func.name)))
                     {
                         std::cout << "  - Adding " << func.name << " to skip list due to high patch density" << std::endl;
                         m_skipFunctions.insert(func.name);
@@ -1676,8 +2039,64 @@ namespace ps2recomp
         return kDoNotSkipOrStub.contains(name);
     }
 
-    bool ElfAnalyzer::isSystemFunction(const std::string &name) const
+    static bool hasReliableSymbolName(const std::string &name)
     {
+        if (name.empty())
+        {
+            return false;
+        }
+
+        auto startsWith = [&](const char *prefix) -> bool
+        {
+            return name.rfind(prefix, 0) == 0;
+        };
+
+        if (startsWith("sub_") || startsWith("FUN_") || startsWith("func_") ||
+            startsWith("entry_") || startsWith("function_") || startsWith("LAB_"))
+        {
+            return false;
+        }
+
+        bool hasAlpha = false;
+        bool allHexOrPrefix = true;
+        for (char c : name)
+        {
+            if (std::isalpha(static_cast<unsigned char>(c)))
+            {
+                hasAlpha = true;
+            }
+
+            if (!(std::isxdigit(static_cast<unsigned char>(c)) || c == 'x' || c == 'X' || c == '_'))
+            {
+                allHexOrPrefix = false;
+            }
+        }
+
+        if (!hasAlpha)
+        {
+            return false;
+        }
+
+        if ((startsWith("0x") || startsWith("0X")) && allHexOrPrefix)
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    bool ElfAnalyzer::isReliableSymbolNameForHeuristics(const std::string &name)
+    {
+        return hasReliableSymbolName(name);
+    }
+
+    bool ElfAnalyzer::isSystemSymbolNameForHeuristics(const std::string &name)
+    {
+        if (!hasReliableSymbolName(name))
+        {
+            return false;
+        }
+
         static const std::unordered_set<std::string> systemFuncs = {
             "entry", "_start", "_init", "_fini",
             "abort", "exit", "_exit",
@@ -1694,9 +2113,33 @@ namespace ps2recomp
                name.find(".") == 0; // .text.* or .plt.* symbols
     }
 
+    bool ElfAnalyzer::shouldAutoSkipNameForHeuristics(const std::string &name)
+    {
+        if (isDoNotSkipOrStub(name))
+        {
+            return false;
+        }
+
+        // For named game logic, prefer recompiling and only skip explicit/system cases.
+        if (!hasReliableSymbolName(name))
+        {
+            return true;
+        }
+
+        return isSystemSymbolNameForHeuristics(name);
+    }
+
+    bool ElfAnalyzer::isSystemFunction(const std::string &name) const
+    {
+        return isSystemSymbolNameForHeuristics(name);
+    }
+
     bool ElfAnalyzer::isLibraryFunction(const std::string &name) const
     {
         if (name.empty())
+            return false;
+
+        if (!hasReliableSymbolName(name))
             return false;
 
         if (m_knownLibNames.find(name) != m_knownLibNames.end())
@@ -1713,6 +2156,124 @@ namespace ps2recomp
         }
 
         return false;
+    }
+
+    bool ElfAnalyzer::isLibrarySymbolNameForHeuristics(const std::string &name) const
+    {
+        return isLibraryFunction(name);
+    }
+
+    bool ElfAnalyzer::hasHardwareIOSignalForHeuristics(const std::vector<Instruction> &instructions)
+    {
+        for (const auto &inst : instructions)
+        {
+            if (inst.opcode == OPCODE_LUI)
+            {
+                const uint32_t upperAddr = inst.immediate << 16;
+                if ((upperAddr >= 0x10000000 && upperAddr < 0x14000000) || // I/O area
+                    (upperAddr >= 0x1F800000 && upperAddr < 0x1F900000))   // Scratchpad RAM
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    bool ElfAnalyzer::hasLargeComplexMMISignalForHeuristics(const std::vector<Instruction> &instructions,
+                                                            size_t largeInstructionThreshold)
+    {
+        if (instructions.size() <= largeInstructionThreshold)
+        {
+            return false;
+        }
+
+        for (const auto &inst : instructions)
+        {
+            if (inst.isMMI &&
+                inst.opcode == OPCODE_MMI &&
+                (inst.function == MMI_MMI0 || inst.function == MMI_MMI1 ||
+                 inst.function == MMI_MMI2 || inst.function == MMI_MMI3))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    bool ElfAnalyzer::hasSelfModifyingSignalForHeuristics(const std::vector<Instruction> &instructions,
+                                                          const std::vector<Section> &sections)
+    {
+        for (size_t i = 0; i < instructions.size(); i++)
+        {
+            const auto &inst = instructions[i];
+            if (!(inst.opcode == OPCODE_SW || inst.opcode == OPCODE_SH ||
+                  inst.opcode == OPCODE_SB || inst.opcode == OPCODE_SQ))
+            {
+                continue;
+            }
+
+            uint32_t baseAddr = 0;
+            for (int j = static_cast<int>(i) - 1; j >= 0 && j >= static_cast<int>(i) - 5; j--)
+            {
+                const auto &prevInst = instructions[static_cast<size_t>(j)];
+                if (prevInst.opcode == OPCODE_LUI && prevInst.rt == inst.rs)
+                {
+                    baseAddr = prevInst.immediate << 16;
+                    break;
+                }
+            }
+
+            if (baseAddr == 0)
+            {
+                continue;
+            }
+
+            const uint32_t targetAddr = baseAddr + static_cast<int16_t>(inst.immediate);
+            for (const auto &section : sections)
+            {
+                if (section.isCode &&
+                    targetAddr >= section.address &&
+                    targetAddr < section.address + section.size)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    bool ElfAnalyzer::shouldSkipForPatchDensityForHeuristics(const std::string &functionName,
+                                                             uint32_t functionSizeBytes,
+                                                             size_t patchCount,
+                                                             bool isLibraryFunction)
+    {
+        if (patchCount <= 5 || functionSizeBytes < 4)
+        {
+            return false;
+        }
+
+        const double instructionCount = static_cast<double>(functionSizeBytes) / 4.0;
+        if (instructionCount <= 0.0)
+        {
+            return false;
+        }
+
+        const double density = static_cast<double>(patchCount) / instructionCount;
+        if (density <= 0.2)
+        {
+            return false;
+        }
+
+        if (isLibraryFunction || isDoNotSkipOrStub(functionName))
+        {
+            return false;
+        }
+
+        return shouldAutoSkipNameForHeuristics(functionName);
     }
 
     std::vector<Instruction> ElfAnalyzer::decodeFunction(const Function &function) const
@@ -1779,13 +2340,17 @@ namespace ps2recomp
         return false;
     }
 
-    bool ElfAnalyzer::identifyFunctionType(const Function &function)
+    bool ElfAnalyzer::shouldAutoSkipByHeuristic(const Function &function) const
     {
-        if (m_libFunctions.contains(function.name) ||
-            m_skipFunctions.contains(function.name))
+        if (m_forceRecompileStarts.contains(function.start))
         {
             return false;
         }
+        return shouldAutoSkipNameForHeuristics(function.name);
+    }
+
+    bool ElfAnalyzer::identifyFunctionType(const Function &function)
+    {
         if (isDoNotSkipOrStub(function.name))
         {
             return false;
@@ -1797,47 +2362,33 @@ namespace ps2recomp
 
         std::vector<Instruction> instructions = decodeFunction(function);
 
-        bool hasHardwareIO = false;
-        bool hasComplexMMI = false;
-        bool isVeryLarge = instructions.size() > 500; // Arbitrary large function threshold
-
-        for (const auto &inst : instructions)
-        {
-            // Check for LUI+SW combinations to hardware registers
-            if (inst.opcode == OPCODE_LUI)
-            {
-                uint32_t upperAddr = inst.immediate << 16;
-
-                // Check if upper address is in hardware region
-                if ((upperAddr >= 0x10000000 && upperAddr < 0x14000000) || // I/O area
-                    (upperAddr >= 0x1F800000 && upperAddr < 0x1F900000))   // Scratchpad RAM
-                {
-                    hasHardwareIO = true;
-                }
-            }
-
-            // Check for complex MMI operations
-            if (inst.isMMI &&
-                (inst.opcode == OPCODE_MMI &&
-                 (inst.function == MMI_MMI0 || inst.function == MMI_MMI1 ||
-                  inst.function == MMI_MMI2 || inst.function == MMI_MMI3)))
-            {
-                hasComplexMMI = true;
-            }
-        }
+        const bool hasHardwareIO = hasHardwareIOSignalForHeuristics(instructions);
+        const bool hasLargeComplexMMI = hasLargeComplexMMISignalForHeuristics(instructions);
 
         if (hasHardwareIO)
         {
-            m_skipFunctions.insert(function.name);
-            std::cout << "Skipping function " << function.name << " due to hardware I/O" << std::endl;
-            return true;
+            if (shouldAutoSkipByHeuristic(function))
+            {
+                m_skipFunctions.insert(function.name);
+                std::cout << "Skipping function " << function.name << " due to hardware I/O" << std::endl;
+                return true;
+            }
+
+            std::cout << "Keeping function " << function.name
+                      << " despite hardware I/O (reliable game symbol)" << std::endl;
         }
 
-        if (hasComplexMMI && isVeryLarge)
+        if (hasLargeComplexMMI)
         {
-            m_skipFunctions.insert(function.name);
-            std::cout << "Skipping large function " << function.name << " with complex MMI" << std::endl;
-            return true;
+            if (shouldAutoSkipByHeuristic(function))
+            {
+                m_skipFunctions.insert(function.name);
+                std::cout << "Skipping large function " << function.name << " with complex MMI" << std::endl;
+                return true;
+            }
+
+            std::cout << "Keeping large function " << function.name
+                      << " with complex MMI (reliable game symbol)" << std::endl;
         }
 
         return false;
@@ -1850,7 +2401,9 @@ namespace ps2recomp
         if (isSelfModifyingCode(function))
         {
             std::cout << "Function " << function.name << " contains self-modifying code" << std::endl;
-            if (!isLibraryFunction(function.name) && !isDoNotSkipOrStub(function.name))
+            if (!isLibraryFunction(function.name) &&
+                !isDoNotSkipOrStub(function.name) &&
+                shouldAutoSkipByHeuristic(function))
             {
                 m_skipFunctions.insert(function.name);
             }
@@ -1865,47 +2418,7 @@ namespace ps2recomp
     bool ElfAnalyzer::isSelfModifyingCode(const Function &function) const
     {
         std::vector<Instruction> instructions = decodeFunction(function);
-
-        for (size_t i = 0; i < instructions.size(); i++)
-        {
-            const auto &inst = instructions[i];
-
-            if ((inst.opcode == OPCODE_SW || inst.opcode == OPCODE_SH ||
-                 inst.opcode == OPCODE_SB || inst.opcode == OPCODE_SQ))
-            {
-
-                uint32_t baseAddr = 0;
-
-                // Look for preceding LUI instruction
-                for (int j = i - 1; j >= 0 && j >= static_cast<int>(i) - 5; j--)
-                {
-                    const auto &prevInst = instructions[j];
-
-                    if (prevInst.opcode == OPCODE_LUI && prevInst.rt == inst.rs)
-                    {
-                        baseAddr = prevInst.immediate << 16;
-                        break;
-                    }
-                }
-
-                if (baseAddr != 0)
-                {
-                    uint32_t targetAddr = baseAddr + static_cast<int16_t>(inst.immediate);
-
-                    // Check if target address is within a code section
-                    for (const auto &section : m_sections)
-                    {
-                        if (section.isCode && targetAddr >= section.address &&
-                            targetAddr < section.address + section.size)
-                        {
-                            return true;
-                        }
-                    }
-                }
-            }
-        }
-
-        return false;
+        return hasSelfModifyingSignalForHeuristics(instructions, m_sections);
     }
 
     bool ElfAnalyzer::isLoopHeavyFunction(const Function &function) const
