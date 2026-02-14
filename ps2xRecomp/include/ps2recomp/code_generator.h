@@ -1,6 +1,7 @@
 #ifndef PS2RECOMP_CODE_GENERATOR_H
 #define PS2RECOMP_CODE_GENERATOR_H
 
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <map>

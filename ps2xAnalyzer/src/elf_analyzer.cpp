@@ -14,6 +14,7 @@
 #include <functional>
 #include <limits>
 #include <cctype>
+#include <optional>
 
 namespace fs = std::filesystem;
 
