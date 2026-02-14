@@ -2,6 +2,10 @@
 #include "ps2recomp/code_generator.h"
 #include "ps2recomp/instructions.h"
 #include "ps2recomp/types.h"
+#include <filesystem>
+#include <fstream>
+#include <regex>
+#include <sstream>
 
 using namespace ps2recomp;
 
@@ -28,6 +32,34 @@ static Instruction makeNop(uint32_t address)
     inst.rt = 0; // encode as nop in translator
     inst.hasDelaySlot = false;
     return inst;
+}
+
+static std::string readFileFromCandidates(const std::vector<std::string> &candidates)
+{
+    for (const auto &path : candidates)
+    {
+        std::ifstream file(path);
+        if (file)
+        {
+            std::ostringstream ss;
+            ss << file.rdbuf();
+            return ss.str();
+        }
+    }
+    return {};
+}
+
+static std::vector<uint32_t> parseEnumValues(const std::string &text, const std::string &prefix)
+{
+    std::vector<uint32_t> values;
+    std::regex re("\\b(" + prefix + "[A-Za-z0-9_]+)\\b\\s*=\\s*0x([0-9A-Fa-f]+)");
+    for (auto it = std::sregex_iterator(text.begin(), text.end(), re); it != std::sregex_iterator(); ++it)
+    {
+        const auto &match = *it;
+        uint32_t value = static_cast<uint32_t>(std::stoul(match[2].str(), nullptr, 16));
+        values.push_back(value);
+    }
+    return values;
 }
 
 static Instruction makeJal(uint32_t address, uint32_t target)
@@ -272,6 +304,60 @@ void register_code_generator_tests()
                      "definition should use sanitized name");
             t.IsTrue(generated.find("ps2___is_pointer(rdram, ctx, runtime); return;") != std::string::npos,
                 "call should use sanitized name but got: " + generated);
+        });
+
+        tc.Run("VU0 macro mappings cover all S1/S2 enums", [](TestCase &t) {
+            const std::vector<std::string> candidates = {
+                "ps2xRecomp/include/ps2recomp/instructions.h",
+                "../ps2xRecomp/include/ps2recomp/instructions.h",
+                "../../ps2xRecomp/include/ps2recomp/instructions.h"
+            };
+
+            std::string text = readFileFromCandidates(candidates);
+            t.IsTrue(!text.empty(), "instructions.h should be readable from the test working directory");
+
+            std::vector<uint32_t> s1 = parseEnumValues(text, "VU0_S1_");
+            std::vector<uint32_t> s2 = parseEnumValues(text, "VU0_S2_");
+            t.IsTrue(!s1.empty(), "VU0_S1 enum list should not be empty");
+            t.IsTrue(!s2.empty(), "VU0_S2 enum list should not be empty");
+
+            CodeGenerator gen({});
+
+            for (uint32_t value : s1)
+            {
+                Instruction inst;
+                inst.opcode = OPCODE_COP2;
+                inst.rs = COP2_CO; // format
+                inst.rt = 2;
+                inst.rd = 3;
+                inst.function = value;
+                inst.vectorInfo.vectorField = 0xF;
+
+                std::string out = gen.translateInstruction(inst);
+                std::ostringstream msg;
+                msg << "VU0 S1 0x" << std::hex << value << " should be mapped";
+                t.IsTrue(out.find("Unhandled VU0 Special1") == std::string::npos, msg.str().c_str());
+            }
+
+            for (uint32_t value : s2)
+            {
+                Instruction inst;
+                inst.opcode = OPCODE_COP2;
+                inst.rs = COP2_CO; // format
+                inst.rt = 2;
+                inst.rd = 3;
+                inst.function = 0x3C; // force Special2 path
+                inst.vectorInfo.vectorField = 0xF;
+
+                uint32_t upper = (value >> 2) & 0x1F;
+                uint32_t lower = value & 0x3;
+                inst.raw = (upper << 6) | lower;
+
+                std::string out = gen.translateInstruction(inst);
+                std::ostringstream msg;
+                msg << "VU0 S2 0x" << std::hex << value << " should be mapped";
+                t.IsTrue(out.find("Unhandled VU0 Special2") == std::string::npos, msg.str().c_str());
+            }
         });
 
         tc.Run("JAL to known function emits call and check", [](TestCase &t) {
