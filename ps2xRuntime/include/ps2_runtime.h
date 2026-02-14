@@ -1,6 +1,7 @@
 #ifndef PS2_RUNTIME_H
 #define PS2_RUNTIME_H
 
+#include <cstring>
 #include <cstdint>
 #include <vector>
 #include <unordered_map>
