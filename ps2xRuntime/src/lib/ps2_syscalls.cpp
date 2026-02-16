@@ -19,6 +19,7 @@
 #include <ctime>
 #include <memory>
 #include <string>
+#include <string_view>
 
 #ifndef _WIN32
 #include <unistd.h>   // for unlink,rmdir,chdir
@@ -30,6 +31,8 @@ std::string translatePs2Path(const char *ps2Path);
 
 namespace
 {
+    constexpr std::string_view kMc0Prefix = "mc0:";
+
     std::string toLowerAscii(std::string value)
     {
         std::transform(value.begin(), value.end(), value.begin(),
@@ -106,6 +109,23 @@ namespace
         std::error_code ec;
         const std::filesystem::path cwd = std::filesystem::current_path(ec);
         return ec ? std::filesystem::path(".") : cwd.lexically_normal();
+    }
+
+    std::filesystem::path getConfiguredMcRoot()
+    {
+        const PS2Runtime::IoPaths &paths = PS2Runtime::getIoPaths();
+        if (!paths.mcRoot.empty())
+        {
+            return paths.mcRoot;
+        }
+        if (!paths.elfDirectory.empty())
+        {
+            return paths.elfDirectory / "mc0";
+        }
+
+        std::error_code ec;
+        const std::filesystem::path cwd = std::filesystem::current_path(ec);
+        return ec ? std::filesystem::path("mc0") : (cwd / "mc0").lexically_normal();
     }
 }
 
@@ -1426,6 +1446,12 @@ std::string translatePs2Path(const char *ps2Path)
     {
         const std::size_t prefixLength = (lower.rfind("cdrom0:", 0) == 0) ? 7 : 6;
         return resolveWithBase(getConfiguredCdRoot(), pathStr.substr(prefixLength));
+    }
+
+    if (lower.rfind(kMc0Prefix, 0) == 0)
+    {
+        const std::size_t prefixLength = kMc0Prefix.size();
+        return resolveWithBase(getConfiguredMcRoot(), pathStr.substr(prefixLength));
     }
 
     if (!pathStr.empty() && (pathStr.front() == '/' || pathStr.front() == '\\'))
