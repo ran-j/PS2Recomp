@@ -318,6 +318,8 @@ struct IrqHandlerInfo
     uint32_t cause = 0;
     uint32_t handler = 0;
     uint32_t arg = 0;
+    uint32_t gp = 0;
+    uint32_t sp = 0;
     bool enabled = true;
 };
 

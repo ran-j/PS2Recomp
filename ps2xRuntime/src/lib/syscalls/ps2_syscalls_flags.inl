@@ -35,39 +35,41 @@ struct DecodedSemaParams
     uint32_t option = 0;
 };
 
-static DecodedSemaParams decodeCreateSemaParams(const uint32_t *param)
+static DecodedSemaParams decodeCreateSemaParams(const uint32_t *param, uint32_t availableWords)
 {
     DecodedSemaParams out{};
-    if (!param)
+    if (!param || availableWords == 0u)
     {
         return out;
     }
 
     // EE layout (kernel.h):
     // [0]=count [1]=max_count [2]=init_count [3]=wait_threads [4]=attr [5]=option
-    const int eeMax = static_cast<int>(param[1]);
-    const int eeInit = static_cast<int>(param[2]);
-    const uint32_t eeAttr = param[4];
-    const uint32_t eeOption = param[5];
+    const bool hasEeLayout = availableWords >= 3u;
+    const int eeMax = hasEeLayout ? static_cast<int>(param[1]) : 1;
+    const int eeInit = hasEeLayout ? static_cast<int>(param[2]) : 0;
+    const uint32_t eeAttr = (availableWords >= 5u) ? param[4] : 0u;
+    const uint32_t eeOption = (availableWords >= 6u) ? param[5] : 0u;
 
     // Legacy layout (IOP-style):
     // [0]=attr [1]=option [2]=init [3]=max
-    const int legacyMax = static_cast<int>(param[3]);
-    const int legacyInit = static_cast<int>(param[2]);
-    const uint32_t legacyAttr = param[0];
-    const uint32_t legacyOption = param[1];
+    const bool hasLegacyLayout = availableWords >= 4u;
+    const int legacyMax = hasLegacyLayout ? static_cast<int>(param[3]) : 1;
+    const int legacyInit = hasLegacyLayout ? static_cast<int>(param[2]) : 0;
+    const uint32_t legacyAttr = hasLegacyLayout ? param[0] : 0u;
+    const uint32_t legacyOption = hasLegacyLayout ? param[1] : 0u;
 
     auto countLooksPlausible = [](int value) -> bool
     {
         return value > 0 && value <= 0x10000;
     };
 
-    bool useLegacyLayout = false;
-    if (countLooksPlausible(legacyMax) && !countLooksPlausible(eeMax))
+    bool useLegacyLayout = hasLegacyLayout && !hasEeLayout;
+    if (hasLegacyLayout && hasEeLayout && countLooksPlausible(legacyMax) && !countLooksPlausible(eeMax))
     {
         useLegacyLayout = true;
     }
-    else if (countLooksPlausible(legacyMax) && countLooksPlausible(eeMax))
+    else if (hasLegacyLayout && hasEeLayout && countLooksPlausible(legacyMax) && countLooksPlausible(eeMax))
     {
         // If both max values look valid, prefer the layout whose option field
         // looks like a pointer/NULL payload.
@@ -79,7 +81,7 @@ static DecodedSemaParams decodeCreateSemaParams(const uint32_t *param)
         }
     }
 
-    if (useLegacyLayout)
+    if (useLegacyLayout && hasLegacyLayout)
     {
         out.max = legacyMax;
         out.init = legacyInit;
@@ -88,6 +90,10 @@ static DecodedSemaParams decodeCreateSemaParams(const uint32_t *param)
     }
     else
     {
+        if (!hasEeLayout)
+        {
+            return out;
+        }
         out.max = eeMax;
         out.init = eeInit;
         out.attr = eeAttr;
@@ -107,17 +113,23 @@ void CreateSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     }
 
     uint32_t rawParams[6] = {};
-    bool hasAllWords = true;
+    uint32_t availableWords = 0u;
     for (uint32_t i = 0; i < 6u; ++i)
     {
         if (!readGuestU32Safe(rdram, paramAddr + (i * 4u), rawParams[i]))
         {
-            hasAllWords = false;
             break;
         }
+        availableWords = i + 1u;
     }
 
-    const DecodedSemaParams decoded = decodeCreateSemaParams(hasAllWords ? rawParams : nullptr);
+    if (availableWords < 3u)
+    {
+        setReturnS32(ctx, KE_ERROR);
+        return;
+    }
+
+    const DecodedSemaParams decoded = decodeCreateSemaParams(rawParams, availableWords);
     int init = decoded.init;
     int max = decoded.max;
     uint32_t attr = decoded.attr;
@@ -146,11 +158,32 @@ void CreateSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
     {
         std::lock_guard<std::mutex> lock(g_sema_map_mutex);
-        id = g_nextSemaId++;
-        if (g_nextSemaId <= 0)
+        for (int attempts = 0; attempts < 0x7FFF; ++attempts)
         {
-            g_nextSemaId = 1;
+            if (g_nextSemaId <= 0)
+            {
+                g_nextSemaId = 1;
+            }
+
+            const int candidate = g_nextSemaId++;
+            if (candidate <= 0)
+            {
+                continue;
+            }
+
+            if (g_semas.find(candidate) == g_semas.end())
+            {
+                id = candidate;
+                break;
+            }
         }
+
+        if (id <= 0)
+        {
+            setReturnS32(ctx, KE_ERROR);
+            return;
+        }
+
         g_semas.emplace(id, info);
     }
     std::cout << "[CreateSema] id=" << id << " init=" << init << " max=" << max << std::endl;
@@ -181,6 +214,11 @@ void DeleteSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     sema->cv.notify_all();
 
     setReturnS32(ctx, KE_OK);
+}
+
+void iDeleteSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    DeleteSema(rdram, ctx, runtime);
 }
 
 void SignalSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

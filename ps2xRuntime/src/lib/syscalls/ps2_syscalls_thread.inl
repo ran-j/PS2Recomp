@@ -138,11 +138,30 @@ void CreateThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     int id = 0;
     {
         std::lock_guard<std::mutex> lock(g_thread_map_mutex);
-        id = g_nextThreadId++;
-        if (g_nextThreadId <= 1)
+        // Keep IDs in the classic low range used by patched libkernel helpers.
+        for (int attempts = 0; attempts < 0xFE; ++attempts)
         {
-            g_nextThreadId = 2;
+            if (g_nextThreadId < 2 || g_nextThreadId > 0xFF)
+            {
+                g_nextThreadId = 2;
+            }
+
+            const int candidate = g_nextThreadId;
+            g_nextThreadId = (g_nextThreadId >= 0xFF) ? 2 : (g_nextThreadId + 1);
+
+            if (g_threads.find(candidate) == g_threads.end())
+            {
+                id = candidate;
+                break;
+            }
         }
+
+        if (id == 0)
+        {
+            setReturnS32(ctx, KE_ERROR);
+            return;
+        }
+
         g_threads[id] = info;
     }
 
@@ -277,8 +296,7 @@ void StartThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     g_activeThreads.fetch_add(1, std::memory_order_relaxed);
     try
     {
-        std::thread([=]() mutable
-                           {
+        std::thread worker([=]() mutable {
             {
                 std::string name = "PS2Thread_" + std::to_string(tid);
                 ThreadNaming::SetCurrentThreadName(name);
@@ -310,7 +328,6 @@ void StartThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             SET_GPR_U32(threadCtx, 31, 0);
             threadCtx->pc = info->entry;
 
-            PS2Runtime::RecompiledFunction func = runtime->lookupFunction(info->entry);
             g_currentThreadId = tid;
 
             std::cout << "[StartThread] id=" << tid
@@ -322,7 +339,43 @@ void StartThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             bool exited = false;
             try
             {
-                func(rdram, threadCtx, runtime);
+                uint32_t lastPc = 0xFFFFFFFFu;
+                uint32_t samePcCount = 0;
+                constexpr uint32_t kSamePcYieldMask = 0x3FFFu;
+                constexpr uint32_t kSamePcWarnInterval = 0x400000u;
+
+                while (runtime && !runtime->isStopRequested())
+                {
+                    const uint32_t pc = threadCtx->pc;
+                    if (pc == 0u)
+                    {
+                        break;
+                    }
+
+                    if (pc == lastPc)
+                    {
+                        ++samePcCount;
+                        if ((samePcCount & kSamePcYieldMask) == 0u)
+                        {
+                            std::this_thread::yield();
+                        }
+                        if ((samePcCount % kSamePcWarnInterval) == 0u)
+                        {
+                            std::cout << "[StartThread] id=" << tid
+                                      << " spinning at pc=0x" << std::hex << pc
+                                      << " ra=0x" << GPR_U32(threadCtx, 31)
+                                      << std::dec << std::endl;
+                        }
+                    }
+                    else
+                    {
+                        samePcCount = 0;
+                        lastPc = pc;
+                    }
+
+                    PS2Runtime::RecompiledFunction step = runtime->lookupFunction(pc);
+                    step(rdram, threadCtx, runtime);
+                }
             }
             catch (const ThreadExitException &)
             {
@@ -377,8 +430,9 @@ void StartThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
                 runtime->guestFree(detachedAutoStack);
             }
 
-            g_activeThreads.fetch_sub(1, std::memory_order_relaxed); })
-            .detach();
+            g_activeThreads.fetch_sub(1, std::memory_order_relaxed);
+        });
+        worker.detach();
     }
     catch (const std::exception &e)
     {
