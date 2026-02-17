@@ -43,7 +43,7 @@ add_executable(ps2EntryRunner
 )
 
 if(MSVC)
-    target_compile_options(ps2EntryRunner PRIVATE /FS /Z7)
+    target_compile_options(ps2EntryRunner PRIVATE /FS)
 endif()
 
 target_include_directories(ps2_runtime PUBLIC
