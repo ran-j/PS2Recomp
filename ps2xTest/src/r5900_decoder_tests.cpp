@@ -133,8 +133,10 @@ void register_r5900_decoder_tests()
 
     tc.Run("COP2 VU macro op marks VU flags", [](TestCase &t) {
         uint32_t address = 0x7000;
-        // COP2, rs = COP2_CO (macro), function = VU0_S2_VDIV (0x31)
-        uint32_t raw = (OPCODE_COP2 << 26) | (COP2_CO << 21) | VU0_S2_VDIV;
+        uint8_t s2op = VU0_S2_VDIV;          // 0x38
+        uint8_t fhi  = s2op >> 2;             // 0x0E -> bits[10:6]
+        uint8_t flo  = s2op & 0x3;            // 0x00 -> bits[1:0]
+        uint32_t raw = (OPCODE_COP2 << 26) | (COP2_CO << 21) | (fhi << 6) | (0x3C | flo);
 
         R5900Decoder decoder;
         Instruction inst = decoder.decodeInstruction(address, raw);
