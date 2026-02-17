@@ -182,22 +182,22 @@ void fioWrite(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         return;
     }
 
+    FILE *fp = getHostFile(ps2Fd);
+    if (!fp)
+    {
+        setReturnS32(ctx, -1); // -EFAULT
+        return;
+    }
+
+    if (size == 0)
+    {
+        setReturnS32(ctx, 0); // Wrote 0 bytes
+        return;
+    }
+
     size_t bytesWritten = 0;
     {
-        std::lock_guard<std::mutex> lock(g_fd_mutex);
-        FILE *fp = getHostFile(ps2Fd);
-        if (!fp)
-        {
-            setReturnS32(ctx, -1); // -EFAULT
-            return;
-        }
-
-        if (size == 0)
-        {
-            setReturnS32(ctx, 0); // Wrote 0 bytes
-            return;
-        }
-
+        std::lock_guard<std::mutex> lock(g_sys_fd_mutex);
         bytesWritten = ::fwrite(hostBuf, 1, size, fp);
         if (bytesWritten < size && ferror(fp))
         {
