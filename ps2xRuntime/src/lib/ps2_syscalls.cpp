@@ -107,6 +107,7 @@ namespace ps2_syscalls
             ExitDeleteThread(rdram, ctx, runtime);
             return true;
         case 0x25:
+        case static_cast<uint32_t>(-0x26):
             TerminateThread(rdram, ctx, runtime);
             return true;
         case 0x29:

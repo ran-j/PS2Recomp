@@ -1,23 +1,135 @@
-void CreateSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+static bool looksLikeGuestPointerOrNull(uint32_t value)
 {
-    uint32_t paramAddr = getRegU32(ctx, 4); // $a0
-    const uint32_t *param = reinterpret_cast<const uint32_t *>(getConstMemPtr(rdram, paramAddr));
+    if (value == 0u)
+    {
+        return true;
+    }
+    const uint32_t normalized = value & 0x1FFFFFFFu;
+    return normalized < PS2_RAM_SIZE;
+}
+
+static bool readGuestU32Safe(const uint8_t *rdram, uint32_t addr, uint32_t &out)
+{
+    const uint8_t *b0 = getConstMemPtr(rdram, addr + 0u);
+    const uint8_t *b1 = getConstMemPtr(rdram, addr + 1u);
+    const uint8_t *b2 = getConstMemPtr(rdram, addr + 2u);
+    const uint8_t *b3 = getConstMemPtr(rdram, addr + 3u);
+    if (!b0 || !b1 || !b2 || !b3)
+    {
+        out = 0u;
+        return false;
+    }
+
+    out = static_cast<uint32_t>(*b0) |
+          (static_cast<uint32_t>(*b1) << 8) |
+          (static_cast<uint32_t>(*b2) << 16) |
+          (static_cast<uint32_t>(*b3) << 24);
+    return true;
+}
+
+struct DecodedSemaParams
+{
     int init = 0;
     int max = 1;
     uint32_t attr = 0;
     uint32_t option = 0;
+};
 
-    if (param)
+static DecodedSemaParams decodeCreateSemaParams(const uint32_t *param)
+{
+    DecodedSemaParams out{};
+    if (!param)
     {
-        // sceSemaParam layout commonly: attr(0), option(1), initCount(2), maxCount(3)
-        attr = param[0];
-        option = param[1];
-        init = static_cast<int>(param[2]);
-        max = static_cast<int>(param[3]);
+        return out;
     }
+
+    // EE layout (kernel.h):
+    // [0]=count [1]=max_count [2]=init_count [3]=wait_threads [4]=attr [5]=option
+    const int eeMax = static_cast<int>(param[1]);
+    const int eeInit = static_cast<int>(param[2]);
+    const uint32_t eeAttr = param[4];
+    const uint32_t eeOption = param[5];
+
+    // Legacy layout (IOP-style):
+    // [0]=attr [1]=option [2]=init [3]=max
+    const int legacyMax = static_cast<int>(param[3]);
+    const int legacyInit = static_cast<int>(param[2]);
+    const uint32_t legacyAttr = param[0];
+    const uint32_t legacyOption = param[1];
+
+    auto countLooksPlausible = [](int value) -> bool
+    {
+        return value > 0 && value <= 0x10000;
+    };
+
+    bool useLegacyLayout = false;
+    if (countLooksPlausible(legacyMax) && !countLooksPlausible(eeMax))
+    {
+        useLegacyLayout = true;
+    }
+    else if (countLooksPlausible(legacyMax) && countLooksPlausible(eeMax))
+    {
+        // If both max values look valid, prefer the layout whose option field
+        // looks like a pointer/NULL payload.
+        const bool eeOptionLooksValid = looksLikeGuestPointerOrNull(eeOption);
+        const bool legacyOptionLooksValid = looksLikeGuestPointerOrNull(legacyOption);
+        if (!eeOptionLooksValid && legacyOptionLooksValid)
+        {
+            useLegacyLayout = true;
+        }
+    }
+
+    if (useLegacyLayout)
+    {
+        out.max = legacyMax;
+        out.init = legacyInit;
+        out.attr = legacyAttr;
+        out.option = legacyOption;
+    }
+    else
+    {
+        out.max = eeMax;
+        out.init = eeInit;
+        out.attr = eeAttr;
+        out.option = eeOption;
+    }
+
+    return out;
+}
+
+void CreateSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    uint32_t paramAddr = getRegU32(ctx, 4); // $a0
+    if (paramAddr == 0u)
+    {
+        setReturnS32(ctx, KE_ERROR);
+        return;
+    }
+
+    uint32_t rawParams[6] = {};
+    bool hasAllWords = true;
+    for (uint32_t i = 0; i < 6u; ++i)
+    {
+        if (!readGuestU32Safe(rdram, paramAddr + (i * 4u), rawParams[i]))
+        {
+            hasAllWords = false;
+            break;
+        }
+    }
+
+    const DecodedSemaParams decoded = decodeCreateSemaParams(hasAllWords ? rawParams : nullptr);
+    int init = decoded.init;
+    int max = decoded.max;
+    uint32_t attr = decoded.attr;
+    uint32_t option = decoded.option;
+
     if (max <= 0)
     {
         max = 1;
+    }
+    if (init < 0)
+    {
+        init = 0;
     }
     if (init > max)
     {
@@ -35,6 +147,10 @@ void CreateSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         std::lock_guard<std::mutex> lock(g_sema_map_mutex);
         id = g_nextSemaId++;
+        if (g_nextSemaId <= 0)
+        {
+            g_nextSemaId = 1;
+        }
         g_semas.emplace(id, info);
     }
     std::cout << "[CreateSema] id=" << id << " init=" << init << " max=" << max << std::endl;
@@ -71,16 +187,27 @@ void SignalSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     int sid = static_cast<int>(getRegU32(ctx, 4));
     auto sema = lookupSemaInfo(sid);
-    if (sema)
+    if (!sema)
+    {
+        setReturnS32(ctx, KE_UNKNOWN_SEMID);
+        return;
+    }
+
+    int ret = KE_OK;
     {
         std::lock_guard<std::mutex> lock(sema->m);
-        if (sema->count < sema->maxCount)
+        if (sema->count >= sema->maxCount)
+        {
+            ret = KE_SEMA_OVF;
+        }
+        else
         {
             sema->count++;
+            sema->cv.notify_one();
         }
-        sema->cv.notify_one();
     }
-    setReturnS32(ctx, 0);
+
+    setReturnS32(ctx, ret);
 }
 
 void iSignalSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -108,7 +235,7 @@ void WaitSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         if (info)
         {
             std::lock_guard<std::mutex> tLock(info->m);
-            info->status = THS_WAIT;
+            info->status = (info->suspendCount > 0) ? THS_WAITSUSPEND : THS_WAIT;
             info->waitType = TSW_SEMA;
             info->waitId = sid;
             info->forceRelease = false;
@@ -130,7 +257,7 @@ void WaitSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         if (info)
         {
             std::lock_guard<std::mutex> tLock(info->m);
-            info->status = THS_RUN;
+            info->status = (info->suspendCount > 0) ? THS_SUSPEND : THS_RUN;
             info->waitType = TSW_NONE;
             info->waitId = 0;
             if (info->forceRelease)
@@ -189,14 +316,14 @@ void ReferSemaStatus(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     auto sema = lookupSemaInfo(sid);
     if (!sema)
     {
-        setReturnS32(ctx, -1);
+        setReturnS32(ctx, KE_UNKNOWN_SEMID);
         return;
     }
 
     ee_sema_t *status = reinterpret_cast<ee_sema_t *>(getMemPtr(rdram, statusAddr));
     if (!status)
     {
-        setReturnS32(ctx, -1);
+        setReturnS32(ctx, KE_ERROR);
         return;
     }
 
@@ -207,7 +334,7 @@ void ReferSemaStatus(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     status->wait_threads = sema->waiters;
     status->attr = sema->attr;
     status->option = sema->option;
-    setReturnS32(ctx, 0);
+    setReturnS32(ctx, KE_OK);
 }
 
 void iReferSemaStatus(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
