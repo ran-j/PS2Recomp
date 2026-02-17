@@ -30,7 +30,7 @@ jobs:
             export CC=clang
             export CXX=clang++
           fi
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-msse4.1 -DCMAKE_CXX_FLAGS=-msse4.1
 
       - name: Build
         run: cmake --build build --config Release
