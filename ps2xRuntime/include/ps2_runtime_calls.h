@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+#include <cstddef>
 #include <string_view>
 #include "ps2_call_list.h"
 
@@ -17,27 +19,68 @@ namespace ps2_runtime_calls
 #undef PS2_STUB_NAME
     };
 
+    namespace detail
+    {
+        template <std::size_t N>
+        inline std::string_view findExact(
+            std::string_view name,
+            const std::string_view (&entries)[N])
+        {
+            const auto it = std::ranges::find(entries, name);
+            return (it == std::end(entries)) ? std::string_view{} : *it;
+        }
+
+        template <std::size_t N>
+        inline std::string_view resolveNameWithOptionalLeadingUnderscoreAlias(
+            std::string_view name,
+            const std::string_view (&entries)[N])
+        {
+            if (name.empty())
+            {
+                return {};
+            }
+
+            if (const std::string_view exact = findExact(name, entries); !exact.empty())
+            {
+                return exact;
+            }
+
+            if (name.starts_with('_'))
+            {
+                return findExact(name.substr(1), entries);
+            }
+
+            for (auto entry : entries)
+            {
+                if (entry.size() == name.size() + 1 &&
+                    entry.starts_with('_') &&
+                    entry.substr(1) == name)
+                {
+                    return entry;
+                }
+            }
+
+            return {};
+        }
+    }
+
+    inline std::string_view resolveSyscallName(std::string_view name)
+    {
+        return detail::resolveNameWithOptionalLeadingUnderscoreAlias(name, kSyscallNames);
+    }
+
+    inline std::string_view resolveStubName(std::string_view name)
+    {
+        return detail::resolveNameWithOptionalLeadingUnderscoreAlias(name, kStubNames);
+    }
+
     inline bool isSyscallName(std::string_view name)
     {
-        for (auto entry : kSyscallNames)
-        {
-            if (entry == name)
-            {
-                return true;
-            }
-        }
-        return false;
+        return !resolveSyscallName(name).empty();
     }
 
     inline bool isStubName(std::string_view name)
     {
-        for (auto entry : kStubNames)
-        {
-            if (entry == name)
-            {
-                return true;
-            }
-        }
-        return false;
+        return !resolveStubName(name).empty();
     }
 }
