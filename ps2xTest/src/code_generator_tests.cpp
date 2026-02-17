@@ -360,6 +360,86 @@ void register_code_generator_tests()
             }
         });
 
+        tc.Run("VU0 S1 uses fd/fs/ft fields (sa/rd/rt)", [](TestCase &t) {
+            Instruction inst{};
+            inst.opcode = OPCODE_COP2;
+            inst.rs = COP2_CO | 0xB; // format + destination mask bits, not a VF register index
+            inst.rt = 7;
+            inst.rd = 11;
+            inst.sa = 3;
+            inst.function = VU0_S1_VADD;
+            inst.vectorInfo.vectorField = 0xF;
+
+            CodeGenerator gen({});
+            std::string out = gen.translateInstruction(inst);
+
+            t.IsTrue(out.find("ctx->vu0_vf[11]") != std::string::npos, "S1 fs should come from rd");
+            t.IsTrue(out.find("ctx->vu0_vf[7]") != std::string::npos, "S1 ft should come from rt");
+            t.IsTrue(out.find("ctx->vu0_vf[3]") != std::string::npos, "S1 fd should come from sa");
+            t.IsTrue(out.find("ctx->vu0_vf[27]") == std::string::npos, "S1 must not use rs(format) as register index");
+        });
+
+        tc.Run("VU0 S1 q/i forms keep mask and use sa as destination", [](TestCase &t) {
+            Instruction inst{};
+            inst.opcode = OPCODE_COP2;
+            inst.rs = COP2_CO | 0x9; // format + destination mask bits
+            inst.rt = 5;
+            inst.rd = 13;
+            inst.sa = 4;
+            inst.function = VU0_S1_VADDq;
+            inst.vectorInfo.vectorField = 0x9;
+
+            CodeGenerator gen({});
+            std::string out = gen.translateInstruction(inst);
+
+            t.IsTrue(out.find("_mm_blendv_ps") != std::string::npos, "S1 q/i form should honor destination mask");
+            t.IsTrue(out.find("ctx->vu0_vf[13]") != std::string::npos, "S1 q/i source should come from rd");
+            t.IsTrue(out.find("ctx->vu0_vf[4]") != std::string::npos, "S1 q/i destination should come from sa");
+            t.IsTrue(out.find("ctx->vu0_vf[25]") == std::string::npos, "S1 q/i must not use rs(format) as register index");
+        });
+
+        tc.Run("VU0 S2 vector ops use rd as source and rt as destination", [](TestCase &t) {
+            Instruction inst{};
+            inst.opcode = OPCODE_COP2;
+            inst.rs = COP2_CO | 0x6; // format + destination mask bits
+            inst.rt = 8;
+            inst.rd = 12;
+            inst.function = 0x3C; // force Special2 path
+            inst.vectorInfo.vectorField = 0xF;
+
+            uint32_t upper = (VU0_S2_VABS >> 2) & 0x1F;
+            uint32_t lower = VU0_S2_VABS & 0x3;
+            inst.raw = (upper << 6) | lower;
+
+            CodeGenerator gen({});
+            std::string out = gen.translateInstruction(inst);
+
+            t.IsTrue(out.find("ctx->vu0_vf[12]") != std::string::npos, "S2 source VF should come from rd");
+            t.IsTrue(out.find("ctx->vu0_vf[8]") != std::string::npos, "S2 destination VF should come from rt");
+            t.IsTrue(out.find("ctx->vu0_vf[22]") == std::string::npos, "S2 must not use rs(format) as register index");
+        });
+
+        tc.Run("VU0 S2 VI memory ops use rd as VI base register", [](TestCase &t) {
+            Instruction inst{};
+            inst.opcode = OPCODE_COP2;
+            inst.rs = COP2_CO | 0x4; // format + destination mask bits
+            inst.rt = 6;
+            inst.rd = 14;
+            inst.function = 0x3C; // force Special2 path
+            inst.vectorInfo.vectorField = 0xF;
+
+            uint32_t upper = (VU0_S2_VLQI >> 2) & 0x1F;
+            uint32_t lower = VU0_S2_VLQI & 0x3;
+            inst.raw = (upper << 6) | lower;
+
+            CodeGenerator gen({});
+            std::string out = gen.translateInstruction(inst);
+
+            t.IsTrue(out.find("ctx->vi[14]") != std::string::npos, "S2 VLQI base VI should come from rd");
+            t.IsTrue(out.find("ctx->vu0_vf[6]") != std::string::npos, "S2 VLQI destination VF should come from rt");
+            t.IsTrue(out.find("ctx->vi[20]") == std::string::npos, "S2 VLQI must not use rs(format) as VI index");
+        });
+
         tc.Run("JAL to known function emits call and check", [](TestCase &t) {
             Function func;
             func.name = "jal_test";
@@ -515,9 +595,10 @@ void register_code_generator_tests()
             func.isRecompiled = true;
             func.isStub = false;
 
-            // Create an internal JAL so collectInternalBranchTargets inserts returnAddr (0x1308) as internal target.
+            // Create an internal JAL with an explicit instruction at returnAddr (0x1308).
             Instruction jal = makeJal(0x1300, 0x1310);
             Instruction jalDelay = makeNop(0x1304);
+            Instruction atReturn = makeNop(0x1308);
             Instruction atTarget = makeNop(0x1310);
 
             // JR $31 at 0x1314 with delay slot at 0x1318
@@ -525,7 +606,7 @@ void register_code_generator_tests()
             Instruction jrDelay = makeNop(0x1318);
 
             CodeGenerator gen({});
-            std::string generated = gen.generateFunction(func, { jal, jalDelay, atTarget, jr, jrDelay }, false);
+            std::string generated = gen.generateFunction(func, { jal, jalDelay, atReturn, atTarget, jr, jrDelay }, false);
             printGeneratedCode("JR $31 emits switch for internal return targets", generated);
 
             t.IsTrue(generated.find("switch (jumpTarget)") != std::string::npos, "JR $31 should emit switch for internal targets");

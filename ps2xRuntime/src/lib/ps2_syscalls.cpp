@@ -255,6 +255,7 @@ struct SemaInfo
     uint32_t attr = 0;
     uint32_t option = 0;
     int waiters = 0;
+    bool deleted = false;
     std::mutex m;
     std::condition_variable cv;
 };
@@ -319,6 +320,7 @@ static std::mutex g_alarm_mutex;
 static std::condition_variable g_alarm_cv;
 static std::once_flag g_alarm_worker_once;
 std::atomic<int> g_activeThreads{0};
+static std::mutex g_fd_mutex;
 
 struct RpcServerState
 {
@@ -1110,9 +1112,8 @@ static std::chrono::microseconds alarmTicksToDuration(uint16_t ticks)
 static void ensureAlarmWorkerRunning()
 {
     std::call_once(g_alarm_worker_once, []()
-                   {
-        std::thread([]()
-                    {
+                   { std::thread([]()
+                                 {
             for (;;)
             {
                 std::shared_ptr<AlarmInfo> readyAlarm;
@@ -1186,7 +1187,7 @@ static void ensureAlarmWorkerRunning()
                     }
                 }
             } })
-            .detach(); });
+                         .detach(); });
 }
 
 static void rpcCopyToRdram(uint8_t *rdram, uint32_t dst, uint32_t src, size_t size)
@@ -1307,23 +1308,6 @@ static uint32_t rpcAllocServerAddr(uint8_t *rdram)
     rpcZeroRdram(rdram, addr, kRpcServerStride);
     return addr;
 }
-/*
-struct SemaInfo
-{
-    int count = 0;
-    int maxCount = 0;
-    std::mutex m;
-    std::condition_variable cv;
-};
-
-static std::unordered_map<int, ThreadInfo> g_threads;
-static int g_nextThreadId = 2; // Reserve 1 for the main thread
-static thread_local int g_currentThreadId = 1;
-
-static std::unordered_map<int, std::shared_ptr<SemaInfo>> g_semas;
-static int g_nextSemaId = 1;
-std::atomic<int> g_activeThreads{0};
-*/
 
 struct IrqHandlerInfo
 {
@@ -1342,6 +1326,8 @@ int allocatePs2Fd(FILE *file)
 {
     if (!file)
         return -1;
+
+    std::lock_guard<std::mutex> lock(g_fd_mutex);
     int fd = g_nextFd++;
     g_fileDescriptors[fd] = file;
     return fd;
@@ -1349,6 +1335,7 @@ int allocatePs2Fd(FILE *file)
 
 FILE *getHostFile(int ps2Fd)
 {
+    std::lock_guard<std::mutex> lock(g_fd_mutex);
     auto it = g_fileDescriptors.find(ps2Fd);
     if (it != g_fileDescriptors.end())
     {
@@ -1359,6 +1346,7 @@ FILE *getHostFile(int ps2Fd)
 
 void releasePs2Fd(int ps2Fd)
 {
+    std::lock_guard<std::mutex> lock(g_fd_mutex);
     g_fileDescriptors.erase(ps2Fd);
 }
 
@@ -2024,9 +2012,28 @@ namespace ps2_syscalls
     void DeleteThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         int tid = static_cast<int>(getRegU32(ctx, 4)); // $a0
-        std::lock_guard<std::mutex> lock(g_thread_map_mutex);
-        g_threads.erase(tid);
-        setReturnS32(ctx, 0);
+        auto info = lookupThreadInfo(tid);
+        if (!info)
+        {
+            setReturnS32(ctx, KE_UNKNOWN_THID);
+            return;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(info->m);
+            if (info->status != THS_DORMANT)
+            {
+                setReturnS32(ctx, KE_NOT_WAIT); // for now
+                return;
+            }
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(g_thread_map_mutex);
+            g_threads.erase(tid);
+        }
+
+        setReturnS32(ctx, KE_OK);
     }
 
     void StartThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -2157,7 +2164,7 @@ namespace ps2_syscalls
             .detach();
 
         // for now report success to the caller.
-        setReturnS32(ctx, tid);
+        setReturnS32(ctx, 0);
     }
 
     void ExitThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -2675,9 +2682,27 @@ namespace ps2_syscalls
     void DeleteSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         int sid = static_cast<int>(getRegU32(ctx, 4));
-        std::lock_guard<std::mutex> lock(g_sema_map_mutex);
-        g_semas.erase(sid);
-        setReturnS32(ctx, 0);
+        std::shared_ptr<SemaInfo> sema;
+
+        {
+            std::lock_guard<std::mutex> lock(g_sema_map_mutex);
+            auto it = g_semas.find(sid);
+            if (it == g_semas.end())
+            {
+                setReturnS32(ctx, KE_UNKNOWN_SEMID);
+                return;
+            }
+            sema = it->second;
+            g_semas.erase(it);
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(sema->m);
+            sema->deleted = true;
+        }
+        sema->cv.notify_all();
+
+        setReturnS32(ctx, KE_OK);
     }
 
     void SignalSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -2729,11 +2754,16 @@ namespace ps2_syscalls
 
             sema->waiters++;
             sema->cv.wait(lock, [&]()
-                          { 
+                          {
                               bool forced = info ? info->forceRelease.load() : false;
                               bool terminated = info ? info->terminated.load() : false;
-                              return sema->count > 0 || forced || terminated; });
+                              return sema->count > 0 || sema->deleted || forced || terminated; //
+                          });
             sema->waiters--;
+            if (sema->deleted)
+            {
+                ret = KE_WAIT_DELETE;
+            }
 
             if (info)
             {
@@ -3036,9 +3066,21 @@ namespace ps2_syscalls
             *resBitsPtr = info->bits;
         }
 
-        if (ret == KE_OK && (mode & (WEF_CLEAR | WEF_CLEAR_ALL)))
+        if (ret == KE_OK)
         {
-            info->bits = 0;
+            if (resBitsPtr)
+            {
+                *resBitsPtr = info->bits;
+            }
+
+            if (mode & WEF_CLEAR_ALL)
+            {
+                info->bits = 0;
+            }
+            else if (mode & WEF_CLEAR)
+            {
+                info->bits &= ~waitBits;
+            }
         }
 
         lock.unlock();
@@ -4556,42 +4598,35 @@ namespace ps2_syscalls
         size_t size = getRegU32(ctx, 6);      // $a2
 
         const uint8_t *hostBuf = getConstMemPtr(rdram, bufAddr);
-        FILE *fp = getHostFile(ps2Fd);
-
         if (!hostBuf)
         {
-            std::cerr << "fioWrite error: Invalid buffer address for fd " << ps2Fd << std::endl;
-            setReturnS32(ctx, -1); // -EFAULT
-            return;
-        }
-        if (!fp)
-        {
-            std::cerr << "fioWrite error: Invalid file descriptor " << ps2Fd << std::endl;
-            setReturnS32(ctx, -1); // -EBADF
-            return;
-        }
-        if (size == 0)
-        {
-            setReturnS32(ctx, 0); // Wrote 0 bytes
+            setReturnS32(ctx, -1);
             return;
         }
 
-        size_t bytesWritten = ::fwrite(hostBuf, 1, size, fp);
-
-        if (bytesWritten < size)
+        size_t bytesWritten = 0;
         {
-            if (ferror(fp))
+            std::lock_guard<std::mutex> lock(g_fd_mutex);
+            FILE *fp = getHostFile(ps2Fd);
+            if (!fp)
             {
-                std::cerr << "fioWrite error: fwrite failed for fd " << ps2Fd << ": " << strerror(errno) << std::endl;
+                setReturnS32(ctx, -1); // -EFAULT
+                return;
+            }
+
+            if (size == 0)
+            {
+                setReturnS32(ctx, 0); // Wrote 0 bytes
+                return;
+            }
+
+            bytesWritten = ::fwrite(hostBuf, 1, size, fp);
+            if (bytesWritten < size && ferror(fp))
+            {
                 clearerr(fp);
                 setReturnS32(ctx, -1); // -EIO, -ENOSPC etc.
+                return;
             }
-            else
-            {
-                // Partial write without error? Possible but idk.
-                setReturnS32(ctx, (int32_t)bytesWritten);
-            }
-            return;
         }
 
         // returns number of bytes written
@@ -4960,8 +4995,8 @@ namespace ps2_syscalls
 
     void SifLoadElfPart(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        const uint32_t pathAddr = getRegU32(ctx, 4);    // $a0 - path
-        const uint32_t secNameAddr = getRegU32(ctx, 5); // $a1 - section name ("all" typically)
+        const uint32_t pathAddr = getRegU32(ctx, 4);     // $a0 - path
+        const uint32_t secNameAddr = getRegU32(ctx, 5);  // $a1 - section name ("all" typically)
         const uint32_t execDataAddr = getRegU32(ctx, 6); // $a2 - t_ExecData*
 
         std::string secName = readGuestCStringBounded(rdram, secNameAddr, kLoadfileArgMaxBytes);
@@ -5026,6 +5061,18 @@ namespace ps2_syscalls
 
     void TODO(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t encodedSyscallId)
     {
+        // a bit more detail mayber reomve old logic, lets get it more raw
+        std::cerr << "[Syscall TODO]"
+                  << " encoded=0x" << std::hex << encodedSyscallId
+                  << " v1=0x" << getRegU32(ctx, 3)
+                  << " v0=0x" << getRegU32(ctx, 2)
+                  << " a0=0x" << getRegU32(ctx, 4)
+                  << " a1=0x" << getRegU32(ctx, 5)
+                  << " a2=0x" << getRegU32(ctx, 6)
+                  << " a3=0x" << getRegU32(ctx, 7)
+                  << " pc=0x" << ctx->pc
+                  << std::dec << std::endl;
+
         const uint32_t v0 = getRegU32(ctx, 2);
         const uint32_t v1 = getRegU32(ctx, 3);
         const uint32_t caller_ra = getRegU32(ctx, 31);

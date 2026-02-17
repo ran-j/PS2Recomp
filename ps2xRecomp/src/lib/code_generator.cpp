@@ -497,6 +497,13 @@ namespace ps2recomp
         const Function &function, const std::vector<Instruction> &instructions)
     {
         std::unordered_set<uint32_t> targets;
+        std::unordered_set<uint32_t> instructionAddresses;
+        instructionAddresses.reserve(instructions.size());
+
+        for (const auto &inst : instructions)
+        {
+            instructionAddresses.insert(inst.address);
+        }
 
         for (const auto &inst : instructions)
         {
@@ -507,7 +514,8 @@ namespace ps2recomp
                 const uint32_t target = static_cast<uint32_t>(
                     static_cast<int64_t>(inst.address + 4u) + static_cast<int64_t>(offsetBytes));
 
-                if (target >= function.start && target < function.end)
+                if (target >= function.start && target < function.end &&
+                    instructionAddresses.contains(target))
                 {
                     targets.insert(target);
                 }
@@ -515,14 +523,16 @@ namespace ps2recomp
             else if (isStaticJump)
             {
                 uint32_t target = buildAbsoluteJumpTarget(inst.address, inst.target);
-                if (target > function.start && target < function.end)
+                if (target >= function.start && target < function.end &&
+                    instructionAddresses.contains(target))
                 {
                     targets.insert(target);
 
                     if (inst.opcode == OPCODE_JAL)
                     {
                         uint32_t returnAddr = inst.address + 8;
-                        if (returnAddr >= function.start && returnAddr < function.end)
+                        if (returnAddr >= function.start && returnAddr < function.end &&
+                            instructionAddresses.contains(returnAddr))
                         {
                             targets.insert(returnAddr);
                         }
@@ -945,6 +955,13 @@ namespace ps2recomp
                 "SET_GPR_U64(ctx, {}, (uint64_t)GPR_U64(ctx, {}) + (uint64_t)GPR_U64(ctx, {}));",
                 inst.rd, inst.rs, inst.rt);
         case SPECIAL_DSUB:
+            return fmt::format(
+                "{{ int64_t a = (int64_t)GPR_S64(ctx, {}); "
+                "int64_t b = (int64_t)GPR_S64(ctx, {}); "
+                "int64_t r = a - b; "
+                "if (((a ^ b) < 0) && ((a ^ r) < 0)) runtime->SignalException(ctx, EXCEPTION_INTEGER_OVERFLOW); "
+                "else SET_GPR_S64(ctx, {}, r); }}",
+                inst.rs, inst.rt, inst.rd);
         case SPECIAL_DSUBU:
             return fmt::format("SET_GPR_U64(ctx, {}, GPR_U64(ctx, {}) - GPR_U64(ctx, {}));", inst.rd, inst.rs, inst.rt);
         case SPECIAL_DSLL:
@@ -1622,6 +1639,7 @@ namespace ps2recomp
         uint8_t format = inst.rs; // Use parsed rs field for COP2 format
         uint8_t rt = inst.rt;
         uint8_t rd = inst.rd;
+        uint8_t sa = inst.sa;
 
         switch (format)
         {
@@ -1768,12 +1786,11 @@ namespace ps2recomp
         case COP2_CO + 14:
         case COP2_CO + 15:
         {
-            uint8_t vu_func = inst.function;
-            if (vu_func >= 0x3C)
+            const uint8_t special1_func = static_cast<uint8_t>(inst.function & 0x3F);
+            if (special1_func >= 0x3C) // Special2 Table
             {
-                uint8_t vu_fhi_flo = (uint8_t)((((inst.raw >> 6) & 0x1F) << 2) | (inst.raw & 0x3));
-
-                switch (vu_fhi_flo)
+                const uint8_t vu_func = static_cast<uint8_t>((((inst.raw >> 6) & 0x1F) << 2) | (inst.raw & 0x3));
+                switch (vu_func)
                 {
                 case VU0_S2_VADDAx:
                 case VU0_S2_VADDAy:
@@ -1878,15 +1895,15 @@ namespace ps2recomp
                     return fmt::format("{{ __m128 res = _mm_and_ps(ctx->vu0_vf[{}], _mm_castsi128_ps(_mm_set1_epi32(0x7FFFFFFF))); "
                                        "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                                        "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
-                                       inst.rs,
+                                       inst.rd,
                                        (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
                                        (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
                                        inst.rt, inst.rt);
                 }
                 case VU0_S2_VMOVE:
-                    return fmt::format("ctx->vu0_vf[{}] = ctx->vu0_vf[{}];", inst.rt, inst.rs);
+                    return fmt::format("ctx->vu0_vf[{}] = ctx->vu0_vf[{}];", inst.rt, inst.rd);
                 case VU0_S2_VMR32:
-                    return fmt::format("ctx->vu0_vf[{}] = _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,1));", inst.rt, inst.rs, inst.rs);
+                    return fmt::format("ctx->vu0_vf[{}] = _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,1));", inst.rt, inst.rd, inst.rd);
                 case VU0_S2_VCLIPw:
                 {
                     uint8_t field = inst.function & 0x3;
@@ -1904,7 +1921,7 @@ namespace ps2recomp
                         "((lt_mask & 0x2) << 1) | ((gt_mask & 0x2) << 2) | "
                         "((lt_mask & 0x4) << 2) | ((gt_mask & 0x4) << 3); "
                         "ctx->vu0_clip_flags = ((ctx->vu0_clip_flags << 6) | (flags & 0x3F)) & 0xFFFFFF; }}",
-                        inst.rs, inst.rt, inst.rt, shuffle_pattern);
+                        inst.rd, inst.rt, inst.rt, shuffle_pattern);
                 }
                 case VU0_S2_VNOP:
                     return fmt::format("// NOP operation, no action needed for VU0");
@@ -1917,12 +1934,12 @@ namespace ps2recomp
                 case VU0_S2_VRXOR:
                     return translateVU_VRXOR(inst);
                 default:
-                    return fmt::format("// Unhandled VU0 Special2 fhi_flo: 0x{:X}", vu_fhi_flo);
+                    return fmt::format("// Unhandled VU0 Special2 function: 0x{:X}", vu_func);
                 }
             }
 
             // Special1 Table (function-based)
-            switch (vu_func)
+            switch (special1_func)
             {
             case VU0_S1_VADDx:
             case VU0_S1_VADDy:
@@ -1960,17 +1977,71 @@ namespace ps2recomp
             case VU0_S1_VCALLMSR:
                 return translateVU_VCALLMSR(inst);
             case VU0_S1_VADDq:
-                return fmt::format("ctx->vu0_vf[{}] = PS2_VADD(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_q));", inst.rd, inst.rs);
+            {
+                uint8_t dest_mask = inst.vectorInfo.vectorField;
+                return fmt::format("{{ __m128 res = PS2_VADD(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_q)); "
+                                   "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
+                                   "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
+                                   inst.rd,
+                                   (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
+                                   (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
+                                   inst.sa, inst.sa);
+            }
             case VU0_S1_VSUBq:
-                return fmt::format("ctx->vu0_vf[{}] = PS2_VSUB(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_q));", inst.rd, inst.rs);
+            {
+                uint8_t dest_mask = inst.vectorInfo.vectorField;
+                return fmt::format("{{ __m128 res = PS2_VSUB(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_q)); "
+                                   "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
+                                   "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
+                                   inst.rd,
+                                   (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
+                                   (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
+                                   inst.sa, inst.sa);
+            }
             case VU0_S1_VMULq:
-                return fmt::format("ctx->vu0_vf[{}] = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_q));", inst.rd, inst.rs);
+            {
+                uint8_t dest_mask = inst.vectorInfo.vectorField;
+                return fmt::format("{{ __m128 res = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_q)); "
+                                   "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
+                                   "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
+                                   inst.rd,
+                                   (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
+                                   (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
+                                   inst.sa, inst.sa);
+            }
             case VU0_S1_VADDi:
-                return fmt::format("ctx->vu0_vf[{}] = PS2_VADD(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i));", inst.rd, inst.rs);
+            {
+                uint8_t dest_mask = inst.vectorInfo.vectorField;
+                return fmt::format("{{ __m128 res = PS2_VADD(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i)); "
+                                   "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
+                                   "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
+                                   inst.rd,
+                                   (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
+                                   (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
+                                   inst.sa, inst.sa);
+            }
             case VU0_S1_VSUBi:
-                return fmt::format("ctx->vu0_vf[{}] = PS2_VSUB(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i));", inst.rd, inst.rs);
+            {
+                uint8_t dest_mask = inst.vectorInfo.vectorField;
+                return fmt::format("{{ __m128 res = PS2_VSUB(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i)); "
+                                   "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
+                                   "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
+                                   inst.rd,
+                                   (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
+                                   (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
+                                   inst.sa, inst.sa);
+            }
             case VU0_S1_VMULi:
-                return fmt::format("ctx->vu0_vf[{}] = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i));", inst.rd, inst.rs);
+            {
+                uint8_t dest_mask = inst.vectorInfo.vectorField;
+                return fmt::format("{{ __m128 res = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i)); "
+                                   "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
+                                   "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
+                                   inst.rd,
+                                   (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
+                                   (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
+                                   inst.sa, inst.sa);
+            }
             case VU0_S1_VMADDx:
             case VU0_S1_VMADDy:
             case VU0_S1_VMADDz:
@@ -2014,7 +2085,7 @@ namespace ps2recomp
             case VU0_S1_VMSUBi:
                 return translateVU_VMSUBi(inst);
             default:
-                return fmt::format("// Unhandled VU0 Special1 function: 0x{:X}", vu_func);
+                return fmt::format("// Unhandled VU0 Special1 function: 0x{:X}", special1_func);
             }
             }
         default:
@@ -2024,44 +2095,62 @@ namespace ps2recomp
 
     std::string CodeGenerator::translateVU_VADD_Field(const Instruction &inst)
     {
+        uint8_t vfd = inst.sa;
+        uint8_t vfs = inst.rd;
+        uint8_t vft = inst.rt;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         uint8_t field = inst.function & 0x3;
         std::string shuffle_pattern = fmt::format("_MM_SHUFFLE({},{},{},{})", field, field, field, field);
-        return fmt::format("{{ __m128 res = PS2_VADD(ctx->vu0_vf[{}], _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], {})); __m128i mask = _mm_set_epi32({}, {}, {}, {}); ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}", inst.rs, inst.rt, inst.rt, shuffle_pattern, (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0, inst.rd, inst.rd);
+        return fmt::format("{{ __m128 res = PS2_VADD(ctx->vu0_vf[{}], _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], {})); __m128i mask = _mm_set_epi32({}, {}, {}, {}); ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}", vfs, vft, vft, shuffle_pattern, (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0, vfd, vfd);
     }
 
     std::string CodeGenerator::translateVU_VSUB_Field(const Instruction &inst)
     {
+        uint8_t vfd = inst.sa;
+        uint8_t vfs = inst.rd;
+        uint8_t vft = inst.rt;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         uint8_t field = inst.function & 0x3;
         std::string shuffle_pattern = fmt::format("_MM_SHUFFLE({},{},{},{})", field, field, field, field);
-        return fmt::format("{{ __m128 res = PS2_VSUB(ctx->vu0_vf[{}], _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], {})); __m128i mask = _mm_set_epi32({}, {}, {}, {}); ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}", inst.rs, inst.rt, inst.rt, shuffle_pattern, (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0, inst.rd, inst.rd);
+        return fmt::format("{{ __m128 res = PS2_VSUB(ctx->vu0_vf[{}], _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], {})); __m128i mask = _mm_set_epi32({}, {}, {}, {}); ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}", vfs, vft, vft, shuffle_pattern, (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0, vfd, vfd);
     }
 
     std::string CodeGenerator::translateVU_VMUL_Field(const Instruction &inst)
     {
+        uint8_t vfd = inst.sa;
+        uint8_t vfs = inst.rd;
+        uint8_t vft = inst.rt;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         uint8_t field = inst.function & 0x3;
         std::string shuffle_pattern = fmt::format("_MM_SHUFFLE({},{},{},{})", field, field, field, field);
-        return fmt::format("{{ __m128 res = PS2_VMUL(ctx->vu0_vf[{}], _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], {})); __m128i mask = _mm_set_epi32({}, {}, {}, {}); ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}", inst.rs, inst.rt, inst.rt, shuffle_pattern, (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0, inst.rd, inst.rd);
+        return fmt::format("{{ __m128 res = PS2_VMUL(ctx->vu0_vf[{}], _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], {})); __m128i mask = _mm_set_epi32({}, {}, {}, {}); ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}", vfs, vft, vft, shuffle_pattern, (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0, vfd, vfd);
     }
 
     std::string CodeGenerator::translateVU_VADD(const Instruction &inst)
     {
+        uint8_t vfd = inst.sa;
+        uint8_t vfs = inst.rd;
+        uint8_t vft = inst.rt;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
-        return fmt::format("{{ __m128 res = PS2_VADD(ctx->vu0_vf[{}], ctx->vu0_vf[{}]); __m128i mask = _mm_set_epi32({}, {}, {}, {}); ctx->vu0_vf[{}] = PS2_VBLEND(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}", inst.rs, inst.rt, (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0, inst.rd, inst.rd);
+        return fmt::format("{{ __m128 res = PS2_VADD(ctx->vu0_vf[{}], ctx->vu0_vf[{}]); __m128i mask = _mm_set_epi32({}, {}, {}, {}); ctx->vu0_vf[{}] = PS2_VBLEND(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}", vfs, vft, (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0, vfd, vfd);
     }
 
     std::string CodeGenerator::translateVU_VSUB(const Instruction &inst)
     {
+        uint8_t vfd = inst.sa;
+        uint8_t vfs = inst.rd;
+        uint8_t vft = inst.rt;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
-        return fmt::format("{{ __m128 res = PS2_VSUB(ctx->vu0_vf[{}], ctx->vu0_vf[{}]); __m128i mask = _mm_set_epi32({}, {}, {}, {}); ctx->vu0_vf[{}] = PS2_VBLEND(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}", inst.rs, inst.rt, (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0, inst.rd, inst.rd);
+        return fmt::format("{{ __m128 res = PS2_VSUB(ctx->vu0_vf[{}], ctx->vu0_vf[{}]); __m128i mask = _mm_set_epi32({}, {}, {}, {}); ctx->vu0_vf[{}] = PS2_VBLEND(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}", vfs, vft, (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0, vfd, vfd);
     }
 
     std::string CodeGenerator::translateVU_VMUL(const Instruction &inst)
     {
+        uint8_t vfd = inst.sa;
+        uint8_t vfs = inst.rd;
+        uint8_t vft = inst.rt;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
-        return fmt::format("{{ __m128 res = PS2_VMUL(ctx->vu0_vf[{}], ctx->vu0_vf[{}]); __m128i mask = _mm_set_epi32({}, {}, {}, {}); ctx->vu0_vf[{}] = PS2_VBLEND(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}", inst.rs, inst.rt, (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0, inst.rd, inst.rd);
+        return fmt::format("{{ __m128 res = PS2_VMUL(ctx->vu0_vf[{}], ctx->vu0_vf[{}]); __m128i mask = _mm_set_epi32({}, {}, {}, {}); ctx->vu0_vf[{}] = PS2_VBLEND(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}", vfs, vft, (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0, vfd, vfd);
     }
 
     std::string CodeGenerator::translatePMADDW(const Instruction &inst)
@@ -2263,7 +2352,7 @@ namespace ps2recomp
     {
         uint8_t fsf = inst.vectorInfo.fsf;
         uint8_t ftf = inst.vectorInfo.ftf;
-        uint8_t fs_reg = inst.rs;
+        uint8_t fs_reg = inst.rd;
         uint8_t ft_reg = inst.rt;
 
         return fmt::format("{{ float fs = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))); float ft = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))); ctx->vu0_q = (ft != 0.0f) ? (fs / ft) : 0.0f; }}", fs_reg, fs_reg, fsf, ft_reg, ft_reg, ftf);
@@ -2285,7 +2374,8 @@ namespace ps2recomp
 
     std::string CodeGenerator::translateVU_VMTIR(const Instruction &inst)
     {
-        return fmt::format("{{ uint32_t tmp = ctx->vi[{}]; ctx->vu0_i = *(float*)&tmp; }}", inst.rt);
+        uint8_t fsf = inst.vectorInfo.fsf;
+        return fmt::format("{{ float src = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))); ctx->vi[{}] = static_cast<uint16_t>(static_cast<int32_t>(src)); }}", inst.rd, inst.rd, fsf, inst.rt);
     }
 
     std::string CodeGenerator::translateVU_VMFIR(const Instruction &inst)
@@ -2295,7 +2385,7 @@ namespace ps2recomp
                            "__m128 res = _mm_set1_ps(val); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
-                           inst.rs,
+                           inst.rd,
                            (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
                            (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
                            inst.rt, inst.rt);
@@ -2303,46 +2393,45 @@ namespace ps2recomp
 
     std::string CodeGenerator::translateVU_VILWR(const Instruction &inst)
     {
-        uint8_t field_idx = inst.vectorInfo.ftf;                                                                                                                                                                                                 // Use parsed ftf field
-        return fmt::format("{{ uint32_t addr = (uint32_t)(_mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))) + ctx->vu0_i) & 0x3FFC; ctx->vi[{}] = READ32(addr); }}", inst.rs, inst.rs, field_idx, inst.rt); // rs=IS, rt=IT
+        return fmt::format("{{ uint32_t addr = (uint32_t)(ctx->vi[{}] << 2) & 0x3FFC; ctx->vi[{}] = static_cast<uint16_t>(READ32(addr)); }}", inst.rd, inst.rt); // VILWR.<f> vit, (vis)
     }
 
     std::string CodeGenerator::translateVU_VISWR(const Instruction &inst)
     {
-        uint8_t field_idx = inst.vectorInfo.ftf;                                                                                                                                                                                                 // Use parsed ftf field
-        return fmt::format("{{ uint32_t addr = (uint32_t)(_mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))) + ctx->vu0_i) & 0x3FFC; WRITE32(addr, ctx->vi[{}]); }}", inst.rs, inst.rs, field_idx, inst.rt); // rs=IS, rt=IT
+        return fmt::format("{{ uint32_t addr = (uint32_t)(ctx->vi[{}] << 2) & 0x3FFC; WRITE32(addr, (uint32_t)ctx->vi[{}]); }}", inst.rd, inst.rt); // VISWR.<f> vit, (vis)
     }
 
     std::string CodeGenerator::translateVU_VIADD(const Instruction &inst)
     {
-        return fmt::format("ctx->vi[{}] = ctx->vi[{}] + ctx->vi[{}];", inst.rd, inst.rs, inst.rt); // rd=ID, rs=IS, rt=IT
+        return fmt::format("ctx->vi[{}] = ctx->vi[{}] + ctx->vi[{}];", inst.sa, inst.rd, inst.rt); // vid, vis, vit
     }
 
     std::string CodeGenerator::translateVU_VISUB(const Instruction &inst)
     {
-        return fmt::format("ctx->vi[{}] = ctx->vi[{}] - ctx->vi[{}];", inst.rd, inst.rs, inst.rt); // rd=ID, rs=IS, rt=IT
+        return fmt::format("ctx->vi[{}] = ctx->vi[{}] - ctx->vi[{}];", inst.sa, inst.rd, inst.rt); // vid, vis, vit
     }
 
     std::string CodeGenerator::translateVU_VIADDI(const Instruction &inst)
     {
-        return fmt::format("ctx->vi[{}] = ctx->vi[{}] + {};", inst.rt, inst.rs, inst.sa); // rt=IT, rs=IS, sa=Imm5
+        int32_t imm5 = (inst.sa & 0x10) ? static_cast<int32_t>(inst.sa | ~0x1F) : static_cast<int32_t>(inst.sa);
+        return fmt::format("ctx->vi[{}] = ctx->vi[{}] + {};", inst.rt, inst.rd, imm5); // vit, vis, imm5
     }
 
     std::string CodeGenerator::translateVU_VIAND(const Instruction &inst)
     {
-        return fmt::format("ctx->vi[{}] = ctx->vi[{}] & ctx->vi[{}];", inst.rd, inst.rs, inst.rt); // rd=ID, rs=IS, rt=IT
+        return fmt::format("ctx->vi[{}] = ctx->vi[{}] & ctx->vi[{}];", inst.sa, inst.rd, inst.rt); // vid, vis, vit
     }
 
     std::string CodeGenerator::translateVU_VIOR(const Instruction &inst)
     {
-        return fmt::format("ctx->vi[{}] = ctx->vi[{}] | ctx->vi[{}];", inst.rd, inst.rs, inst.rt); // rd=ID, rs=IS, rt=IT
+        return fmt::format("ctx->vi[{}] = ctx->vi[{}] | ctx->vi[{}];", inst.sa, inst.rd, inst.rt); // vid, vis, vit
     }
 
     std::string CodeGenerator::translateVU_VCALLMS(const Instruction &inst)
     {
         // VCALLMS calls a VU0 microprogram at the specified immediate address.
         // VU0 micro memory is 4KB = 512 instructions (8 bytes each). Index is 0-511.
-        uint16_t instr_index = inst.immediate & 0x1FF;                       // Mask to 9 bits for VU0
+        uint16_t instr_index = static_cast<uint16_t>((inst.raw >> 6) & 0x1FF); // imm15[8:0]
         uint32_t target_byte_addr = static_cast<uint32_t>(instr_index) << 3; // Convert instruction index to byte address
 
         return fmt::format(
@@ -2356,7 +2445,7 @@ namespace ps2recomp
     std::string CodeGenerator::translateVU_VCALLMSR(const Instruction &inst)
     {
         // VCALLMSR calls a VU0 microprogram at address stored in integer register
-        uint8_t vis_reg_idx = inst.rs; // Source integer register
+        uint8_t vis_reg_idx = inst.rd; // Source integer register (vis)
 
         return fmt::format(
             "{{ "
@@ -2388,6 +2477,9 @@ namespace ps2recomp
 
     std::string CodeGenerator::translateVU_VMADD_Field(const Instruction &inst)
     {
+        uint8_t vfd = inst.sa;
+        uint8_t vfs = inst.rd;
+        uint8_t vft = inst.rt;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         uint8_t field = inst.function & 0x3; // Extract field from function code
 
@@ -2399,14 +2491,17 @@ namespace ps2recomp
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); "
                            "ctx->vu0_acc = res; }}",
-                           inst.rs, inst.rt, inst.rt, shuffle_pattern,
+                           vfs, vft, vft, shuffle_pattern,
                            (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
                            (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
-                           inst.rd, inst.rd);
+                           vfd, vfd);
     }
 
     std::string CodeGenerator::translateVU_VMSUB_Field(const Instruction &inst)
     {
+        uint8_t vfd = inst.sa;
+        uint8_t vfs = inst.rd;
+        uint8_t vft = inst.rt;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         uint8_t field = inst.function & 0x3; // Extract field from function code
 
@@ -2417,14 +2512,17 @@ namespace ps2recomp
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); "
                            "ctx->vu0_acc = res; }}",
-                           inst.rs, inst.rt, inst.rt, shuffle_pattern,
+                           vfs, vft, vft, shuffle_pattern,
                            (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
                            (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
-                           inst.rd, inst.rd);
+                           vfd, vfd);
     }
 
     std::string CodeGenerator::translateVU_VMINI_Field(const Instruction &inst)
     {
+        uint8_t vfd = inst.sa;
+        uint8_t vfs = inst.rd;
+        uint8_t vft = inst.rt;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         uint8_t field = inst.function & 0x3;
 
@@ -2433,14 +2531,17 @@ namespace ps2recomp
         return fmt::format("{{ __m128 res = _mm_min_ps(ctx->vu0_vf[{}], _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], {})); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
-                           inst.rs, inst.rt, inst.rt, shuffle_pattern,
+                           vfs, vft, vft, shuffle_pattern,
                            (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
                            (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
-                           inst.rd, inst.rd);
+                           vfd, vfd);
     }
 
     std::string CodeGenerator::translateVU_VMAX_Field(const Instruction &inst)
     {
+        uint8_t vfd = inst.sa;
+        uint8_t vfs = inst.rd;
+        uint8_t vft = inst.rt;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         uint8_t field = inst.function & 0x3;
 
@@ -2449,314 +2550,374 @@ namespace ps2recomp
         return fmt::format("{{ __m128 res = _mm_max_ps(ctx->vu0_vf[{}], _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], {})); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
-                           inst.rs, inst.rt, inst.rt, shuffle_pattern,
+                           vfs, vft, vft, shuffle_pattern,
                            (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
                            (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
-                           inst.rd, inst.rd);
+                           vfd, vfd);
     }
 
     std::string CodeGenerator::translateVU_VMADD(const Instruction &inst)
     {
+        uint8_t vfd = inst.sa;
+        uint8_t vfs = inst.rd;
+        uint8_t vft = inst.rt;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         return fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], ctx->vu0_vf[{}]); "
                            "__m128 res = PS2_VADD(ctx->vu0_acc, mul_res); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); "
                            "ctx->vu0_acc = res; }}",
-                           inst.rs, inst.rt,
+                           vfs, vft,
                            (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
                            (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
-                           inst.rd, inst.rd);
+                           vfd, vfd);
     }
 
     std::string CodeGenerator::translateVU_VMADDq(const Instruction &inst)
     {
+        uint8_t vfd = inst.sa;
+        uint8_t vfs = inst.rd;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         return fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_q)); "
                            "__m128 res = PS2_VADD(ctx->vu0_acc, mul_res); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); "
                            "ctx->vu0_acc = res; }}",
-                           inst.rs,
+                           vfs,
                            (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
                            (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
-                           inst.rd, inst.rd);
+                           vfd, vfd);
     }
 
     std::string CodeGenerator::translateVU_VMADDi(const Instruction &inst)
     {
+        uint8_t vfd = inst.sa;
+        uint8_t vfs = inst.rd;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         return fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i)); "
                            "__m128 res = PS2_VADD(ctx->vu0_acc, mul_res); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); "
                            "ctx->vu0_acc = res; }}",
-                           inst.rs,
+                           vfs,
                            (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
                            (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
-                           inst.rd, inst.rd);
+                           vfd, vfd);
     }
 
     std::string CodeGenerator::translateVU_VMAX(const Instruction &inst)
     {
+        uint8_t vfd = inst.sa;
+        uint8_t vfs = inst.rd;
+        uint8_t vft = inst.rt;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         return fmt::format("{{ __m128 res = _mm_max_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}]); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
-                           inst.rs, inst.rt,
+                           vfs, vft,
                            (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
                            (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
-                           inst.rd, inst.rd);
+                           vfd, vfd);
     }
 
     std::string CodeGenerator::translateVU_VMAXi(const Instruction &inst)
     {
+        uint8_t vfd = inst.sa;
+        uint8_t vfs = inst.rd;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         return fmt::format("{{ __m128 res = _mm_max_ps(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i)); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
-                           inst.rs,
+                           vfs,
                            (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
                            (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
-                           inst.rd, inst.rd);
+                           vfd, vfd);
     }
 
     std::string CodeGenerator::translateVU_VOPMSUB(const Instruction &inst)
     {
+        uint8_t vfd = inst.sa;
+        uint8_t vfs = inst.rd;
+        uint8_t vft = inst.rt;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         return fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], ctx->vu0_vf[{}]); "
                            "__m128 res = PS2_VSUB(ctx->vu0_acc, mul_res); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); "
                            "ctx->vu0_acc = res; }}",
-                           inst.rs, inst.rt,
+                           vfs, vft,
                            (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
                            (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
-                           inst.rd, inst.rd);
+                           vfd, vfd);
     }
 
     std::string CodeGenerator::translateVU_VMINI(const Instruction &inst)
     {
+        uint8_t vfd = inst.sa;
+        uint8_t vfs = inst.rd;
+        uint8_t vft = inst.rt;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         return fmt::format("{{ __m128 res = _mm_min_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}]); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
-                           inst.rs, inst.rt,
+                           vfs, vft,
                            (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
                            (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
-                           inst.rd, inst.rd);
+                           vfd, vfd);
     }
 
     std::string CodeGenerator::translateVU_VMINIi(const Instruction &inst)
     {
+        uint8_t vfd = inst.sa;
+        uint8_t vfs = inst.rd;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         return fmt::format("{{ __m128 res = _mm_min_ps(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i)); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
-                           inst.rs,
+                           vfs,
                            (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
                            (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
-                           inst.rd, inst.rd);
+                           vfd, vfd);
     }
 
     std::string CodeGenerator::translateVU_VMSUB(const Instruction &inst)
     {
+        uint8_t vfd = inst.sa;
+        uint8_t vfs = inst.rd;
+        uint8_t vft = inst.rt;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         return fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], ctx->vu0_vf[{}]); "
                            "__m128 res = PS2_VSUB(ctx->vu0_acc, mul_res); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); "
                            "ctx->vu0_acc = res; }}",
-                           inst.rs, inst.rt,
+                           vfs, vft,
                            (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
                            (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
-                           inst.rd, inst.rd);
+                           vfd, vfd);
     }
 
     std::string CodeGenerator::translateVU_VMSUBq(const Instruction &inst)
     {
+        uint8_t vfd = inst.sa;
+        uint8_t vfs = inst.rd;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         return fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_q)); "
                            "__m128 res = PS2_VSUB(ctx->vu0_acc, mul_res); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); "
                            "ctx->vu0_acc = res; }}",
-                           inst.rs,
+                           vfs,
                            (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
                            (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
-                           inst.rd, inst.rd);
+                           vfd, vfd);
     }
 
     std::string CodeGenerator::translateVU_VMSUBi(const Instruction &inst)
     {
+        uint8_t vfd = inst.sa;
+        uint8_t vfs = inst.rd;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         return fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i)); "
                            "__m128 res = PS2_VSUB(ctx->vu0_acc, mul_res); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); "
                            "ctx->vu0_acc = res; }}",
-                           inst.rs,
+                           vfs,
                            (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
                            (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
-                           inst.rd, inst.rd);
+                           vfd, vfd);
     }
 
     std::string CodeGenerator::translateVU_VADDA_Field(const Instruction &inst)
     {
+        uint8_t vfs = inst.rd;
+        uint8_t vft = inst.rt;
         uint8_t field = inst.function & 0x3;
         std::string shuffle_pattern = fmt::format("_MM_SHUFFLE({},{},{},{})", field, field, field, field);
 
         return fmt::format("{{ __m128 res = PS2_VADD(ctx->vu0_vf[{}], _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], {})); "
                            "ctx->vu0_acc = res; }}",
-                           inst.rs, inst.rt, inst.rt, shuffle_pattern);
+                           vfs, vft, vft, shuffle_pattern);
     }
 
     std::string CodeGenerator::translateVU_VSUBA_Field(const Instruction &inst)
     {
+        uint8_t vfs = inst.rd;
+        uint8_t vft = inst.rt;
         uint8_t field = inst.function & 0x3;
         std::string shuffle_pattern = fmt::format("_MM_SHUFFLE({},{},{},{})", field, field, field, field);
 
         return fmt::format("{{ __m128 res = PS2_VSUB(ctx->vu0_vf[{}], _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], {})); "
                            "ctx->vu0_acc = res; }}",
-                           inst.rs, inst.rt, inst.rt, shuffle_pattern);
+                           vfs, vft, vft, shuffle_pattern);
     }
 
     std::string CodeGenerator::translateVU_VMADDA_Field(const Instruction &inst)
     {
+        uint8_t vfs = inst.rd;
+        uint8_t vft = inst.rt;
         uint8_t field = inst.function & 0x3;
         std::string shuffle_pattern = fmt::format("_MM_SHUFFLE({},{},{},{})", field, field, field, field);
 
         return fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], {})); "
                            "__m128 res = PS2_VADD(ctx->vu0_acc, mul_res); "
                            "ctx->vu0_acc = res; }}",
-                           inst.rs, inst.rt, inst.rt, shuffle_pattern);
+                           vfs, vft, vft, shuffle_pattern);
     }
 
     std::string CodeGenerator::translateVU_VMSUBA_Field(const Instruction &inst)
     {
+        uint8_t vfs = inst.rd;
+        uint8_t vft = inst.rt;
         uint8_t field = inst.function & 0x3;
         std::string shuffle_pattern = fmt::format("_MM_SHUFFLE({},{},{},{})", field, field, field, field);
 
         return fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], {})); "
                            "__m128 res = PS2_VSUB(ctx->vu0_acc, mul_res); "
                            "ctx->vu0_acc = res; }}",
-                           inst.rs, inst.rt, inst.rt, shuffle_pattern);
+                           vfs, vft, vft, shuffle_pattern);
     }
 
     std::string CodeGenerator::translateVU_VMULA_Field(const Instruction &inst)
     {
+        uint8_t vfs = inst.rd;
+        uint8_t vft = inst.rt;
         uint8_t field = inst.function & 0x3;
         std::string shuffle_pattern = fmt::format("_MM_SHUFFLE({},{},{},{})", field, field, field, field);
 
         return fmt::format("{{ __m128 res = PS2_VMUL(ctx->vu0_vf[{}], _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], {})); "
                            "ctx->vu0_acc = res; }}",
-                           inst.rs, inst.rt, inst.rt, shuffle_pattern);
+                           vfs, vft, vft, shuffle_pattern);
     }
 
     std::string CodeGenerator::translateVU_VADDA(const Instruction &inst)
     {
+        uint8_t vfs = inst.rd;
+        uint8_t vft = inst.rt;
         return fmt::format("ctx->vu0_acc = PS2_VADD(ctx->vu0_vf[{}], ctx->vu0_vf[{}]);",
-                           inst.rs, inst.rt);
+                           vfs, vft);
     }
 
     std::string CodeGenerator::translateVU_VADDAq(const Instruction &inst)
     {
+        uint8_t vfs = inst.rd;
         return fmt::format("ctx->vu0_acc = PS2_VADD(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_q));",
-                           inst.rs);
+                           vfs);
     }
 
     std::string CodeGenerator::translateVU_VADDAi(const Instruction &inst)
     {
+        uint8_t vfs = inst.rd;
         return fmt::format("ctx->vu0_acc = PS2_VADD(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i));",
-                           inst.rs);
+                           vfs);
     }
 
     std::string CodeGenerator::translateVU_VSUBA(const Instruction &inst)
     {
+        uint8_t vfs = inst.rd;
+        uint8_t vft = inst.rt;
         return fmt::format("ctx->vu0_acc = PS2_VSUB(ctx->vu0_vf[{}], ctx->vu0_vf[{}]);",
-                           inst.rs, inst.rt);
+                           vfs, vft);
     }
 
     std::string CodeGenerator::translateVU_VSUBAq(const Instruction &inst)
     {
+        uint8_t vfs = inst.rd;
         return fmt::format("ctx->vu0_acc = PS2_VSUB(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_q));",
-                           inst.rs);
+                           vfs);
     }
 
     std::string CodeGenerator::translateVU_VSUBAi(const Instruction &inst)
     {
+        uint8_t vfs = inst.rd;
         return fmt::format("ctx->vu0_acc = PS2_VSUB(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i));",
-                           inst.rs);
+                           vfs);
     }
 
     std::string CodeGenerator::translateVU_VMADDA(const Instruction &inst)
     {
+        uint8_t vfs = inst.rd;
+        uint8_t vft = inst.rt;
         return fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], ctx->vu0_vf[{}]); "
                            "ctx->vu0_acc = PS2_VADD(ctx->vu0_acc, mul_res); }}",
-                           inst.rs, inst.rt);
+                           vfs, vft);
     }
 
     std::string CodeGenerator::translateVU_VMADDAq(const Instruction &inst)
     {
+        uint8_t vfs = inst.rd;
         return fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_q)); "
                            "ctx->vu0_acc = PS2_VADD(ctx->vu0_acc, mul_res); }}",
-                           inst.rs);
+                           vfs);
     }
 
     std::string CodeGenerator::translateVU_VMADDAi(const Instruction &inst)
     {
+        uint8_t vfs = inst.rd;
         return fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i)); "
                            "ctx->vu0_acc = PS2_VADD(ctx->vu0_acc, mul_res); }}",
-                           inst.rs);
+                           vfs);
     }
 
     std::string CodeGenerator::translateVU_VMSUBA(const Instruction &inst)
     {
+        uint8_t vfs = inst.rd;
+        uint8_t vft = inst.rt;
         return fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], ctx->vu0_vf[{}]); "
                            "ctx->vu0_acc = PS2_VSUB(ctx->vu0_acc, mul_res); }}",
-                           inst.rs, inst.rt);
+                           vfs, vft);
     }
 
     std::string CodeGenerator::translateVU_VMSUBAq(const Instruction &inst)
     {
+        uint8_t vfs = inst.rd;
         return fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_q)); "
                            "ctx->vu0_acc = PS2_VSUB(ctx->vu0_acc, mul_res); }}",
-                           inst.rs);
+                           vfs);
     }
 
     std::string CodeGenerator::translateVU_VMSUBAi(const Instruction &inst)
     {
+        uint8_t vfs = inst.rd;
         return fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i)); "
                            "ctx->vu0_acc = PS2_VSUB(ctx->vu0_acc, mul_res); }}",
-                           inst.rs);
+                           vfs);
     }
 
     std::string CodeGenerator::translateVU_VMULA(const Instruction &inst)
     {
+        uint8_t vfs = inst.rd;
+        uint8_t vft = inst.rt;
         return fmt::format("ctx->vu0_acc = PS2_VMUL(ctx->vu0_vf[{}], ctx->vu0_vf[{}]);",
-                           inst.rs, inst.rt);
+                           vfs, vft);
     }
 
     std::string CodeGenerator::translateVU_VMULAq(const Instruction &inst)
     {
+        uint8_t vfs = inst.rd;
         return fmt::format("ctx->vu0_acc = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_q));",
-                           inst.rs);
+                           vfs);
     }
 
     std::string CodeGenerator::translateVU_VMULAi(const Instruction &inst)
     {
+        uint8_t vfs = inst.rd;
         return fmt::format("ctx->vu0_acc = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i));",
-                           inst.rs);
+                           vfs);
     }
 
     std::string CodeGenerator::translateVU_VOPMULA(const Instruction &inst)
     {
+        uint8_t vfs = inst.rd;
+        uint8_t vft = inst.rt;
         return fmt::format("ctx->vu0_acc = PS2_VMUL(ctx->vu0_vf[{}], ctx->vu0_vf[{}]);",
-                           inst.rs, inst.rt);
+                           vfs, vft);
     }
 
     std::string CodeGenerator::translateVU_VITOF(const Instruction &inst, int shift)
     {
+        uint8_t vfs = inst.rd;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         float scale = (shift == 0) ? 1.0f : (1.0f / static_cast<float>(1 << shift));
 
@@ -2765,7 +2926,7 @@ namespace ps2recomp
                            "res = _mm_mul_ps(res, _mm_set1_ps({}f)); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
-                           inst.rs, scale,
+                           vfs, scale,
                            (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
                            (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
                            inst.rt, inst.rt);
@@ -2773,6 +2934,7 @@ namespace ps2recomp
 
     std::string CodeGenerator::translateVU_VFTOI(const Instruction &inst, int shift)
     {
+        uint8_t vfs = inst.rd;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         float scale = (shift == 0) ? 1.0f : static_cast<float>(1 << shift);
 
@@ -2782,7 +2944,7 @@ namespace ps2recomp
                            "__m128 res = _mm_castsi128_ps(res_i); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
-                           inst.rs, scale,
+                           vfs, scale,
                            (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
                            (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
                            inst.rt, inst.rt);
@@ -2790,44 +2952,47 @@ namespace ps2recomp
 
     std::string CodeGenerator::translateVU_VLQI(const Instruction &inst)
     {
+        uint8_t vis = inst.rd;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         return fmt::format("{{ uint32_t addr = ((uint32_t)(ctx->vi[{}] & 0x3FF)) << 4; "
                            "__m128 res = _mm_castsi128_ps(READ128(addr)); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); "
                            "ctx->vi[{}] = (ctx->vi[{}] + 1) & 0x3FF; }}",
-                           inst.rs,
+                           vis,
                            (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
                            (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
                            inst.rt, inst.rt,
-                           inst.rs, inst.rs);
+                           vis, vis);
     }
 
     std::string CodeGenerator::translateVU_VSQI(const Instruction &inst)
     {
+        uint8_t vis = inst.rd;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         return fmt::format("{{ uint32_t addr = ((uint32_t)(ctx->vi[{}] & 0x3FF)) << 4; "
                            "__m128i old_val = READ128(addr); "
                            "__m128 res = _mm_blendv_ps(_mm_castsi128_ps(old_val), ctx->vu0_vf[{}], _mm_castsi128_ps(_mm_set_epi32({}, {}, {}, {}))); "
                            "WRITE128(addr, _mm_castps_si128(res)); "
                            "ctx->vi[{}] = (ctx->vi[{}] + 1) & 0x3FF; }}",
-                           inst.rs,
+                           vis,
                            inst.rt,
                            (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
                            (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
-                           inst.rs, inst.rs);
+                           vis, vis);
     }
 
     std::string CodeGenerator::translateVU_VLQD(const Instruction &inst)
     {
+        uint8_t vis = inst.rd;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         return fmt::format("{{ ctx->vi[{}] = (ctx->vi[{}] - 1) & 0x3FF; "
                            "uint32_t addr = ((uint32_t)(ctx->vi[{}] & 0x3FF)) << 4; "
                            "__m128 res = _mm_castsi128_ps(READ128(addr)); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
-                           inst.rs, inst.rs,
-                           inst.rs,
+                           vis, vis,
+                           vis,
                            (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
                            (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
                            inst.rt, inst.rt);
@@ -2835,14 +3000,15 @@ namespace ps2recomp
 
     std::string CodeGenerator::translateVU_VSQD(const Instruction &inst)
     {
+        uint8_t vis = inst.rd;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         return fmt::format("{{ ctx->vi[{}] = (ctx->vi[{}] - 1) & 0x3FF; "
                            "uint32_t addr = ((uint32_t)(ctx->vi[{}] & 0x3FF)) << 4; "
                            "__m128i old_val = READ128(addr); "
                            "__m128 res = _mm_blendv_ps(_mm_castsi128_ps(old_val), ctx->vu0_vf[{}], _mm_castsi128_ps(_mm_set_epi32({}, {}, {}, {}))); "
                            "WRITE128(addr, _mm_castps_si128(res)); }}",
-                           inst.rs, inst.rs,
-                           inst.rs,
+                           vis, vis,
+                           vis,
                            inst.rt,
                            (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
                            (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0);
@@ -2857,11 +3023,13 @@ namespace ps2recomp
 
     std::string CodeGenerator::translateVU_VRINIT(const Instruction &inst)
     {
-        uint8_t fs_reg = inst.rs;
+        uint8_t fs_reg = inst.rd;
+        uint8_t fsf = inst.vectorInfo.fsf;
 
         return fmt::format(
             "{{ "
-            "    uint32_t seed = *(uint32_t*)&ctx->vu0_vf[{}]; "
+            "    float src = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))); "
+            "    uint32_t seed; std::memcpy(&seed, &src, sizeof(seed)); "
             "    "
             "    // PS2 uses a specific LFSR initialization pattern "
             "    if (seed == 0) seed = 1; " // Prevent zero seed
@@ -2873,17 +3041,20 @@ namespace ps2recomp
             "    "
             "    ctx->vu0_r = _mm_castsi128_ps(_mm_set_epi32(r3, r2, r1, r0)); \n "
             "}}",
-            fs_reg);
+            fs_reg, fs_reg, fsf);
     }
 
     std::string CodeGenerator::translateVU_VRXOR(const Instruction &inst)
     {
-        uint8_t fs_reg = inst.rs;
+        uint8_t fs_reg = inst.rd;
+        uint8_t fsf = inst.vectorInfo.fsf;
 
         return fmt::format(
             "{{ "
+            "    float src = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))); "
+            "    uint32_t src_bits; std::memcpy(&src_bits, &src, sizeof(src_bits)); "
             "    __m128i r_current = _mm_castps_si128(ctx->vu0_r); "
-            "    __m128i fs_data = _mm_castps_si128(ctx->vu0_vf[{}]); "
+            "    __m128i fs_data = _mm_set1_epi32((int)src_bits); "
             "    "
             "     // XOR the current random value with the data from the VU vector register "
             "    __m128i xored = _mm_xor_si128(r_current, fs_data); "
@@ -2894,7 +3065,7 @@ namespace ps2recomp
             "    "
             "    ctx->vu0_r = (__m128)mixed; "
             "}}",
-            fs_reg);
+            fs_reg, fs_reg, fsf);
     }
 
     std::string CodeGenerator::translateQFSRV(const Instruction &inst)

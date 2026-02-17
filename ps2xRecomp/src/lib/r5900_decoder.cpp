@@ -807,29 +807,30 @@ namespace ps2recomp
         case COP2_CO + 14:
         case COP2_CO + 15:
         { // Refine based on specific VU function
-            uint8_t vu_func = inst.function;
-            bool is_special2 = vu_func >= 0x3C;
-            uint8_t vu_fhi_flo = 0;
+            const uint8_t special1Func = static_cast<uint8_t>(inst.function & 0x3F);
+            const bool isSpecial2 = special1Func >= 0x3C;
+            const uint8_t special2Func = static_cast<uint8_t>((((inst.raw >> 6) & 0x1F) << 2) | (inst.raw & 0x3));
+            const uint8_t vuFunc = isSpecial2 ? special2Func : special1Func;
 
-            if (is_special2)
+            inst.vectorInfo.vectorField = static_cast<uint8_t>((inst.raw >> 21) & 0xF);
+
+            // Component selectors are encoded in bits 21-24 as L/M for these macro ops.
+            if (vuFunc == VU0_S2_VDIV || vuFunc == VU0_S2_VRSQRT ||
+                vuFunc == VU0_S2_VMTIR || vuFunc == VU0_S2_VRINIT || vuFunc == VU0_S2_VRXOR)
             {
-                vu_fhi_flo = static_cast<uint8_t>((((inst.raw >> 6) & 0x1F) << 2) | (inst.raw & 0x3));
+                inst.vectorInfo.fsf = static_cast<uint8_t>((inst.raw >> 21) & 0x3); // L selector
             }
-
-            if (is_special2 && (vu_fhi_flo == VU0_S2_VDIV || vu_fhi_flo == VU0_S2_VSQRT || vu_fhi_flo == VU0_S2_VRSQRT))
+            if (vuFunc == VU0_S2_VDIV || vuFunc == VU0_S2_VSQRT || vuFunc == VU0_S2_VRSQRT)
             {
-                inst.vectorInfo.fsf = (inst.raw >> 10) & 0x3; // Extract bits 10-11
-                inst.vectorInfo.ftf = (inst.raw >> 8) & 0x3;  // Extract bits 8-9
+                inst.vectorInfo.ftf = static_cast<uint8_t>((inst.raw >> 23) & 0x3); // M selector
             }
-
-            inst.vectorInfo.vectorField = (inst.raw >> 21) & 0xF;
 
             inst.modificationInfo.modifiesVFR = true;     // Default: Modifies Vector Float Reg
             inst.modificationInfo.modifiesControl = true; // Default: Modifies Flags/Special Regs (Q, P, I, MAC, Clip...)
 
-            if (is_special2) // Special2 Table
+            if (isSpecial2)
             {
-                switch (vu_fhi_flo)
+                switch (vuFunc)
                 {
                 case VU0_S2_VDIV:
                 case VU0_S2_VSQRT:
@@ -854,21 +855,16 @@ namespace ps2recomp
                     inst.isStore = true;
                     inst.modificationInfo.modifiesMemory = true;
                     break;
-
                 case VU0_S2_VRINIT:
                 case VU0_S2_VRXOR:
                     inst.modificationInfo.modifiesVFR = false; /* Modifies R */
-                    break;                                     // Modifies R
+                    break;
                 case VU0_S2_VRGET:
                     inst.modificationInfo.modifiesControl = false; /* Reads R, writes VF */
                     break;
                 case VU0_S2_VRNEXT:
                     inst.modificationInfo.modifiesControl = true; /* Modifies R */
                     inst.modificationInfo.modifiesVFR = false;
-                    break; // Writes R
-                case VU0_S2_VWAITQ:
-                    inst.modificationInfo.modifiesVFR = false;
-                    inst.modificationInfo.modifiesControl = false;
                     break;
                 case VU0_S2_VABS:
                 case VU0_S2_VMOVE:
@@ -882,6 +878,19 @@ namespace ps2recomp
                 case VU0_S2_VCLIPw:
                     inst.modificationInfo.modifiesVFR = false; /* Modifies Clip flags */
                     break;
+                }
+            }
+            else // Special1 Table
+            {
+                if (vuFunc >= VU0_S1_VIADD && vuFunc <= VU0_S1_VIOR)
+                {
+                    inst.modificationInfo.modifiesVFR = false;
+                    inst.modificationInfo.modifiesVIR = true;
+                } // Integer ops
+                if (vuFunc == VU0_S1_VIADDI)
+                {
+                    inst.modificationInfo.modifiesVFR = false;
+                    inst.modificationInfo.modifiesVIR = true;
                 }
             }
             break;
