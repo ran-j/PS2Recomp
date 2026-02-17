@@ -1096,32 +1096,47 @@ void sceOpen(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void scePadEnd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("scePadEnd", rdram, ctx, runtime);
+    (void)rdram;
+    (void)runtime;
+    setReturnS32(ctx, 1);
 }
 
 void scePadEnterPressMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("scePadEnterPressMode", rdram, ctx, runtime);
+    (void)rdram;
+    (void)runtime;
+    setReturnS32(ctx, 1);
 }
 
 void scePadExitPressMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("scePadExitPressMode", rdram, ctx, runtime);
+    (void)rdram;
+    (void)runtime;
+    setReturnS32(ctx, 1);
 }
 
 void scePadGetButtonMask(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("scePadGetButtonMask", rdram, ctx, runtime);
+    (void)rdram;
+    (void)runtime;
+    // Report all buttons supported.
+    setReturnS32(ctx, 0xFFFF);
 }
 
 void scePadGetDmaStr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("scePadGetDmaStr", rdram, ctx, runtime);
+    (void)rdram;
+    (void)runtime;
+    // No DMA structure exposed in this minimal implementation.
+    setReturnS32(ctx, 0);
 }
 
 void scePadGetFrameCount(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("scePadGetFrameCount", rdram, ctx, runtime);
+    (void)rdram;
+    (void)runtime;
+    static std::atomic<uint32_t> frameCount{0};
+    setReturnU32(ctx, frameCount++);
 }
 
 void scePadGetModVersion(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1165,12 +1180,18 @@ void scePadGetState(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void scePadInfoAct(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("scePadInfoAct", rdram, ctx, runtime);
+    (void)rdram;
+    (void)runtime;
+    // No actuators supported.
+    setReturnS32(ctx, 0);
 }
 
 void scePadInfoComb(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("scePadInfoComb", rdram, ctx, runtime);
+    (void)rdram;
+    (void)runtime;
+    // No combined modes reported.
+    setReturnS32(ctx, 0);
 }
 
 void scePadInfoMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1262,62 +1283,138 @@ void scePadRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         return;
     }
 
-    // struct padButtonStatus (32 bytes): neutral state, no buttons pressed.
-    std::memset(data, 0, 32);
-    data[1] = 0x73; // analog/dualshock mode marker
-    data[2] = 0xFF; // btns low (active-low)
-    data[3] = 0xFF; // btns high
-    data[4] = 0x80; // rjoy_h
-    data[5] = 0x80; // rjoy_v
-    data[6] = 0x80; // ljoy_h
-    data[7] = 0x80; // ljoy_v
+    PadInputState state;
+    bool useOverride = false;
+    {
+        std::lock_guard<std::mutex> lock(g_padOverrideMutex);
+        if (g_padOverrideEnabled)
+        {
+            state = g_padOverrideState;
+            useOverride = true;
+        }
+    }
+
+    if (!useOverride)
+    {
+        applyGamepadState(state);
+        applyKeyboardState(state, true);
+    }
+
+    fillPadStatus(data, state);
+
+    if (padDebugEnabled())
+    {
+        static uint32_t logCounter = 0;
+        if ((logCounter++ % 60u) == 0u)
+        {
+            std::cout << "[pad] buttons=0x" << std::hex << state.buttons << std::dec
+                      << " lx=" << static_cast<int>(state.lx)
+                      << " ly=" << static_cast<int>(state.ly)
+                      << " rx=" << static_cast<int>(state.rx)
+                      << " ry=" << static_cast<int>(state.ry)
+                      << (useOverride ? " (override)" : "") << std::endl;
+        }
+    }
 
     setReturnS32(ctx, 1);
 }
 
 void scePadReqIntToStr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("scePadReqIntToStr", rdram, ctx, runtime);
+    (void)runtime;
+    const uint32_t state = getRegU32(ctx, 4);
+    const uint32_t strAddr = getRegU32(ctx, 5);
+    char *buf = reinterpret_cast<char *>(getMemPtr(rdram, strAddr));
+    if (!buf)
+    {
+        setReturnS32(ctx, -1);
+        return;
+    }
+
+    const char *text = (state == 0) ? "COMPLETE" : "BUSY";
+    std::strncpy(buf, text, 31);
+    buf[31] = '\0';
+    setReturnS32(ctx, 0);
 }
 
 void scePadSetActAlign(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("scePadSetActAlign", rdram, ctx, runtime);
+    (void)rdram;
+    (void)runtime;
+    setReturnS32(ctx, 1);
 }
 
 void scePadSetActDirect(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("scePadSetActDirect", rdram, ctx, runtime);
+    (void)rdram;
+    (void)runtime;
+    setReturnS32(ctx, 1);
 }
 
 void scePadSetButtonInfo(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("scePadSetButtonInfo", rdram, ctx, runtime);
+    (void)rdram;
+    (void)runtime;
+    setReturnS32(ctx, 1);
 }
 
 void scePadSetMainMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("scePadSetMainMode", rdram, ctx, runtime);
+    (void)rdram;
+    (void)runtime;
+    setReturnS32(ctx, 1);
 }
 
 void scePadSetReqState(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("scePadSetReqState", rdram, ctx, runtime);
+    (void)rdram;
+    (void)runtime;
+    setReturnS32(ctx, 1);
 }
 
 void scePadSetVrefParam(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("scePadSetVrefParam", rdram, ctx, runtime);
+    (void)rdram;
+    (void)runtime;
+    setReturnS32(ctx, 1);
 }
 
 void scePadSetWarningLevel(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("scePadSetWarningLevel", rdram, ctx, runtime);
+    (void)rdram;
+    (void)runtime;
+    setReturnS32(ctx, 0);
 }
 
 void scePadStateIntToStr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("scePadStateIntToStr", rdram, ctx, runtime);
+    (void)runtime;
+    const uint32_t state = getRegU32(ctx, 4);
+    const uint32_t strAddr = getRegU32(ctx, 5);
+    char *buf = reinterpret_cast<char *>(getMemPtr(rdram, strAddr));
+    if (!buf)
+    {
+        setReturnS32(ctx, -1);
+        return;
+    }
+
+    const char *text = "UNKNOWN";
+    if (state == 6)
+    {
+        text = "STABLE";
+    }
+    else if (state == 1)
+    {
+        text = "FINDPAD";
+    }
+    else if (state == 0)
+    {
+        text = "DISCONNECTED";
+    }
+
+    std::strncpy(buf, text, 31);
+    buf[31] = '\0';
+    setReturnS32(ctx, 0);
 }
 
 void scePrintf(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -2360,4 +2457,3 @@ void write(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     ps2_syscalls::fioWrite(rdram, ctx, runtime);
 }
-

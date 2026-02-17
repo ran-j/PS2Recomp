@@ -16,6 +16,10 @@ namespace ps2_stubs
 
     void TODO(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void TODO_NAMED(const char *name, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+
+    // Test hook: override pad input for scePadRead.
+    void setPadOverrideState(uint16_t buttons, uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry);
+    void clearPadOverrideState();
 }
 
 #endif // PS2_STUBS_H
