@@ -47,13 +47,14 @@ void sceCdGetError(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     setReturnS32(ctx, g_lastCdError);
 }
 
-void _builtin_set_imask(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+void builtin_set_imask(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     static int logCount = 0;
     if (logCount < 8)
     {
-        std::cout << "ps2_stub _builtin_set_imask" << std::endl;
+        std::cout << "ps2_stub builtin_set_imask" << std::endl;
         ++logCount;
     }
     setReturnS32(ctx, 0);
 }
+

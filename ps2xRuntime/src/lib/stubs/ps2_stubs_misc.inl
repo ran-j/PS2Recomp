@@ -1,4 +1,4 @@
-void _calloc_r(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+void calloc_r(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     const uint32_t count = getRegU32(ctx, 5); // $a1
     const uint32_t size = getRegU32(ctx, 6);  // $a2
@@ -6,7 +6,7 @@ void _calloc_r(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     setReturnU32(ctx, guestAddr);
 }
 
-void _free_r(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+void free_r(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     const uint32_t guestAddr = getRegU32(ctx, 5); // $a1
     if (runtime && guestAddr != 0u)
@@ -15,29 +15,24 @@ void _free_r(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     }
 }
 
-void _malloc_r(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+void malloc_r(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     const uint32_t size = getRegU32(ctx, 5); // $a1
     const uint32_t guestAddr = runtime ? runtime->guestMalloc(size) : 0u;
     setReturnU32(ctx, guestAddr);
 }
 
-void _malloc_trim_r(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+void malloc_trim_r(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     setReturnS32(ctx, 0);
 }
 
-void _mbtowc_r(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+void mbtowc_r(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("_mbtowc_r", rdram, ctx, runtime);
+    TODO_NAMED("mbtowc_r", rdram, ctx, runtime);
 }
 
-void _printf(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    printf(rdram, ctx, runtime);
-}
-
-void _printf_r(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+void printf_r(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     uint32_t format_addr = getRegU32(ctx, 5); // $a1
     const std::string formatOwned = readPs2CStringBounded(rdram, runtime, format_addr, 1024);
@@ -69,100 +64,95 @@ void _printf_r(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     }
     else
     {
-        std::cerr << "_printf_r error: Invalid format string address provided: 0x" << std::hex << format_addr << std::dec << std::endl;
+        std::cerr << "printf_r error: Invalid format string address provided: 0x" << std::hex << format_addr << std::dec << std::endl;
     }
 
     setReturnS32(ctx, ret);
 }
 
-void _sceCdRI(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+void sceCdRI(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("_sceCdRI", rdram, ctx, runtime);
+    TODO_NAMED("sceCdRI", rdram, ctx, runtime);
 }
 
-void _sceCdRM(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+void sceCdRM(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("_sceCdRM", rdram, ctx, runtime);
+    TODO_NAMED("sceCdRM", rdram, ctx, runtime);
 }
 
-void _sceFsDbChk(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+void sceFsDbChk(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("_sceFsDbChk", rdram, ctx, runtime);
+    TODO_NAMED("sceFsDbChk", rdram, ctx, runtime);
 }
 
-void _sceFsIntrSigSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+void sceFsIntrSigSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("_sceFsIntrSigSema", rdram, ctx, runtime);
+    TODO_NAMED("sceFsIntrSigSema", rdram, ctx, runtime);
 }
 
-void _sceFsSemExit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+void sceFsSemExit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("_sceFsSemExit", rdram, ctx, runtime);
+    TODO_NAMED("sceFsSemExit", rdram, ctx, runtime);
 }
 
-void _sceFsSemInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+void sceFsSemInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("_sceFsSemInit", rdram, ctx, runtime);
+    TODO_NAMED("sceFsSemInit", rdram, ctx, runtime);
 }
 
-void _sceFsSigSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+void sceFsSigSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("_sceFsSigSema", rdram, ctx, runtime);
+    TODO_NAMED("sceFsSigSema", rdram, ctx, runtime);
 }
 
-void _sceIDC(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+void sceIDC(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("_sceIDC", rdram, ctx, runtime);
+    TODO_NAMED("sceIDC", rdram, ctx, runtime);
 }
 
-void _sceMpegFlush(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+void sceMpegFlush(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("_sceMpegFlush", rdram, ctx, runtime);
+    TODO_NAMED("sceMpegFlush", rdram, ctx, runtime);
 }
 
-void _sceRpcFreePacket(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+void sceRpcFreePacket(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("_sceRpcFreePacket", rdram, ctx, runtime);
+    TODO_NAMED("sceRpcFreePacket", rdram, ctx, runtime);
 }
 
-void _sceRpcGetFPacket(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+void sceRpcGetFPacket(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("_sceRpcGetFPacket", rdram, ctx, runtime);
+    TODO_NAMED("sceRpcGetFPacket", rdram, ctx, runtime);
 }
 
-void _sceRpcGetFPacket2(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+void sceRpcGetFPacket2(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("_sceRpcGetFPacket2", rdram, ctx, runtime);
+    TODO_NAMED("sceRpcGetFPacket2", rdram, ctx, runtime);
 }
 
-void _sceSDC(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+void sceSDC(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("_sceSDC", rdram, ctx, runtime);
+    TODO_NAMED("sceSDC", rdram, ctx, runtime);
 }
 
-void _sceSifCmdIntrHdlr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+void sceSifCmdIntrHdlr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("_sceSifCmdIntrHdlr", rdram, ctx, runtime);
+    TODO_NAMED("sceSifCmdIntrHdlr", rdram, ctx, runtime);
 }
 
-void _sceSifLoadElfPart(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+void sceSifLoadModule(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    ps2_syscalls::SifLoadElfPart(rdram, ctx, runtime);
+    TODO_NAMED("sceSifLoadModule", rdram, ctx, runtime);
 }
 
-void _sceSifLoadModule(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+void sceSifSendCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("_sceSifLoadModule", rdram, ctx, runtime);
+    TODO_NAMED("sceSifSendCmd", rdram, ctx, runtime);
 }
 
-void _sceSifSendCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+void sceVu0ecossin(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("_sceSifSendCmd", rdram, ctx, runtime);
-}
-
-void _sceVu0ecossin(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    TODO_NAMED("_sceVu0ecossin", rdram, ctx, runtime);
+    TODO_NAMED("sceVu0ecossin", rdram, ctx, runtime);
 }
 
 void abs(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -2370,3 +2360,4 @@ void write(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     ps2_syscalls::fioWrite(rdram, ctx, runtime);
 }
+

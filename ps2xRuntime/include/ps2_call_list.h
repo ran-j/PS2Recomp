@@ -71,7 +71,7 @@
     X(SifRemoveRpc)           \
     X(sceSifCallRpc)          \
     X(sceSifSendCmd)          \
-    X(_sceRpcGetPacket)       \
+    X(sceRpcGetPacket)        \
                               \
     X(fioOpen)                \
     X(fioClose)               \
@@ -106,13 +106,12 @@
 // Stubs
 #define PS2_STUB_LIST(X)                      \
     /* Std/Libc */                            \
-    X(_calloc_r)                              \
-    X(_free_r)                                \
-    X(_malloc_r)                              \
-    X(_malloc_trim_r)                         \
-    X(_mbtowc_r)                              \
-    X(_printf)                                \
-    X(_printf_r)                              \
+    X(calloc_r)                               \
+    X(free_r)                                 \
+    X(malloc_r)                               \
+    X(malloc_trim_r)                          \
+    X(mbtowc_r)                               \
+    X(printf_r)                               \
     X(abs)                                    \
     X(__ieee754_rem_pio2f)                    \
     X(__kernel_cosf)                          \
@@ -179,25 +178,25 @@
     X(DmaAddr)                                \
     X(Pad_init)                               \
     X(Pad_set)                                \
-    X(_builtin_set_imask)                     \
-    X(_sceCdRI)                               \
-    X(_sceCdRM)                               \
-    X(_sceFsDbChk)                            \
-    X(_sceFsIntrSigSema)                      \
-    X(_sceFsSemExit)                          \
-    X(_sceFsSemInit)                          \
-    X(_sceFsSigSema)                          \
-    X(_sceIDC)                                \
-    X(_sceMpegFlush)                          \
-    X(_sceRpcFreePacket)                      \
-    X(_sceRpcGetFPacket)                      \
-    X(_sceRpcGetFPacket2)                     \
-    X(_sceSDC)                                \
-    X(_sceSifCmdIntrHdlr)                     \
-    X(_sceSifLoadElfPart)                     \
-    X(_sceSifLoadModule)                      \
-    X(_sceSifSendCmd)                         \
-    X(_sceVu0ecossin)                         \
+    X(builtin_set_imask)                      \
+    X(sceCdRI)                                \
+    X(sceCdRM)                                \
+    X(sceFsDbChk)                             \
+    X(sceFsIntrSigSema)                       \
+    X(sceFsSemExit)                           \
+    X(sceFsSemInit)                           \
+    X(sceFsSigSema)                           \
+    X(sceIDC)                                 \
+    X(sceMpegFlush)                           \
+    X(sceRpcFreePacket)                       \
+    X(sceRpcGetFPacket)                       \
+    X(sceRpcGetFPacket2)                      \
+    X(sceSDC)                                 \
+    X(sceSifCmdIntrHdlr)                      \
+    X(sceSifLoadElfPart)                      \
+    X(sceSifLoadModule)                       \
+    X(sceSifSendCmd)                          \
+    X(sceVu0ecossin)                          \
     X(iopGetArea)                             \
     X(mcCallMessageTypeSe)                    \
     X(mcCheckReadStartConfigFile)             \
