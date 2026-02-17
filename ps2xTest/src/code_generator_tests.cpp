@@ -1,7 +1,12 @@
 #include "MiniTest.h"
 #include "ps2recomp/code_generator.h"
 #include "ps2recomp/instructions.h"
+#include "ps2recomp/ps2_recompiler.h"
 #include "ps2recomp/types.h"
+#include <filesystem>
+#include <fstream>
+#include <regex>
+#include <sstream>
 
 using namespace ps2recomp;
 
@@ -28,6 +33,34 @@ static Instruction makeNop(uint32_t address)
     inst.rt = 0; // encode as nop in translator
     inst.hasDelaySlot = false;
     return inst;
+}
+
+static std::string readFileFromCandidates(const std::vector<std::string> &candidates)
+{
+    for (const auto &path : candidates)
+    {
+        std::ifstream file(path);
+        if (file)
+        {
+            std::ostringstream ss;
+            ss << file.rdbuf();
+            return ss.str();
+        }
+    }
+    return {};
+}
+
+static std::vector<uint32_t> parseEnumValues(const std::string &text, const std::string &prefix)
+{
+    std::vector<uint32_t> values;
+    std::regex re("\\b(" + prefix + "[A-Za-z0-9_]+)\\b\\s*=\\s*0x([0-9A-Fa-f]+)");
+    for (auto it = std::sregex_iterator(text.begin(), text.end(), re); it != std::sregex_iterator(); ++it)
+    {
+        const auto &match = *it;
+        uint32_t value = static_cast<uint32_t>(std::stoul(match[2].str(), nullptr, 16));
+        values.push_back(value);
+    }
+    return values;
 }
 
 static Instruction makeJal(uint32_t address, uint32_t target)
@@ -274,6 +307,140 @@ void register_code_generator_tests()
                 "call should use sanitized name but got: " + generated);
         });
 
+        tc.Run("VU0 macro mappings cover all S1/S2 enums", [](TestCase &t) {
+            const std::vector<std::string> candidates = {
+                "ps2xRecomp/include/ps2recomp/instructions.h",
+                "../ps2xRecomp/include/ps2recomp/instructions.h",
+                "../../ps2xRecomp/include/ps2recomp/instructions.h"
+            };
+
+            std::string text = readFileFromCandidates(candidates);
+            t.IsTrue(!text.empty(), "instructions.h should be readable from the test working directory");
+
+            std::vector<uint32_t> s1 = parseEnumValues(text, "VU0_S1_");
+            std::vector<uint32_t> s2 = parseEnumValues(text, "VU0_S2_");
+            t.IsTrue(!s1.empty(), "VU0_S1 enum list should not be empty");
+            t.IsTrue(!s2.empty(), "VU0_S2 enum list should not be empty");
+
+            CodeGenerator gen({});
+
+            for (uint32_t value : s1)
+            {
+                Instruction inst;
+                inst.opcode = OPCODE_COP2;
+                inst.rs = COP2_CO; // format
+                inst.rt = 2;
+                inst.rd = 3;
+                inst.function = value;
+                inst.vectorInfo.vectorField = 0xF;
+
+                std::string out = gen.translateInstruction(inst);
+                std::ostringstream msg;
+                msg << "VU0 S1 0x" << std::hex << value << " should be mapped";
+                t.IsTrue(out.find("Unhandled VU0 Special1") == std::string::npos, msg.str().c_str());
+            }
+
+            for (uint32_t value : s2)
+            {
+                Instruction inst;
+                inst.opcode = OPCODE_COP2;
+                inst.rs = COP2_CO; // format
+                inst.rt = 2;
+                inst.rd = 3;
+                inst.function = 0x3C; // force Special2 path
+                inst.vectorInfo.vectorField = 0xF;
+
+                uint32_t upper = (value >> 2) & 0x1F;
+                uint32_t lower = value & 0x3;
+                inst.raw = (upper << 6) | lower;
+
+                std::string out = gen.translateInstruction(inst);
+                std::ostringstream msg;
+                msg << "VU0 S2 0x" << std::hex << value << " should be mapped";
+                t.IsTrue(out.find("Unhandled VU0 Special2") == std::string::npos, msg.str().c_str());
+            }
+        });
+
+        tc.Run("VU0 S1 uses fd/fs/ft fields (sa/rd/rt)", [](TestCase &t) {
+            Instruction inst{};
+            inst.opcode = OPCODE_COP2;
+            inst.rs = COP2_CO | 0xB; // format + destination mask bits, not a VF register index
+            inst.rt = 7;
+            inst.rd = 11;
+            inst.sa = 3;
+            inst.function = VU0_S1_VADD;
+            inst.vectorInfo.vectorField = 0xF;
+
+            CodeGenerator gen({});
+            std::string out = gen.translateInstruction(inst);
+
+            t.IsTrue(out.find("ctx->vu0_vf[11]") != std::string::npos, "S1 fs should come from rd");
+            t.IsTrue(out.find("ctx->vu0_vf[7]") != std::string::npos, "S1 ft should come from rt");
+            t.IsTrue(out.find("ctx->vu0_vf[3]") != std::string::npos, "S1 fd should come from sa");
+            t.IsTrue(out.find("ctx->vu0_vf[27]") == std::string::npos, "S1 must not use rs(format) as register index");
+        });
+
+        tc.Run("VU0 S1 q/i forms keep mask and use sa as destination", [](TestCase &t) {
+            Instruction inst{};
+            inst.opcode = OPCODE_COP2;
+            inst.rs = COP2_CO | 0x9; // format + destination mask bits
+            inst.rt = 5;
+            inst.rd = 13;
+            inst.sa = 4;
+            inst.function = VU0_S1_VADDq;
+            inst.vectorInfo.vectorField = 0x9;
+
+            CodeGenerator gen({});
+            std::string out = gen.translateInstruction(inst);
+
+            t.IsTrue(out.find("_mm_blendv_ps") != std::string::npos, "S1 q/i form should honor destination mask");
+            t.IsTrue(out.find("ctx->vu0_vf[13]") != std::string::npos, "S1 q/i source should come from rd");
+            t.IsTrue(out.find("ctx->vu0_vf[4]") != std::string::npos, "S1 q/i destination should come from sa");
+            t.IsTrue(out.find("ctx->vu0_vf[25]") == std::string::npos, "S1 q/i must not use rs(format) as register index");
+        });
+
+        tc.Run("VU0 S2 vector ops use rd as source and rt as destination", [](TestCase &t) {
+            Instruction inst{};
+            inst.opcode = OPCODE_COP2;
+            inst.rs = COP2_CO | 0x6; // format + destination mask bits
+            inst.rt = 8;
+            inst.rd = 12;
+            inst.function = 0x3C; // force Special2 path
+            inst.vectorInfo.vectorField = 0xF;
+
+            uint32_t upper = (VU0_S2_VABS >> 2) & 0x1F;
+            uint32_t lower = VU0_S2_VABS & 0x3;
+            inst.raw = (upper << 6) | lower;
+
+            CodeGenerator gen({});
+            std::string out = gen.translateInstruction(inst);
+
+            t.IsTrue(out.find("ctx->vu0_vf[12]") != std::string::npos, "S2 source VF should come from rd");
+            t.IsTrue(out.find("ctx->vu0_vf[8]") != std::string::npos, "S2 destination VF should come from rt");
+            t.IsTrue(out.find("ctx->vu0_vf[22]") == std::string::npos, "S2 must not use rs(format) as register index");
+        });
+
+        tc.Run("VU0 S2 VI memory ops use rd as VI base register", [](TestCase &t) {
+            Instruction inst{};
+            inst.opcode = OPCODE_COP2;
+            inst.rs = COP2_CO | 0x4; // format + destination mask bits
+            inst.rt = 6;
+            inst.rd = 14;
+            inst.function = 0x3C; // force Special2 path
+            inst.vectorInfo.vectorField = 0xF;
+
+            uint32_t upper = (VU0_S2_VLQI >> 2) & 0x1F;
+            uint32_t lower = VU0_S2_VLQI & 0x3;
+            inst.raw = (upper << 6) | lower;
+
+            CodeGenerator gen({});
+            std::string out = gen.translateInstruction(inst);
+
+            t.IsTrue(out.find("ctx->vi[14]") != std::string::npos, "S2 VLQI base VI should come from rd");
+            t.IsTrue(out.find("ctx->vu0_vf[6]") != std::string::npos, "S2 VLQI destination VF should come from rt");
+            t.IsTrue(out.find("ctx->vi[20]") == std::string::npos, "S2 VLQI must not use rs(format) as VI index");
+        });
+
         tc.Run("JAL to known function emits call and check", [](TestCase &t) {
             Function func;
             func.name = "jal_test";
@@ -429,9 +596,10 @@ void register_code_generator_tests()
             func.isRecompiled = true;
             func.isStub = false;
 
-            // Create an internal JAL so collectInternalBranchTargets inserts returnAddr (0x1308) as internal target.
+            // Create an internal JAL with an explicit instruction at returnAddr (0x1308).
             Instruction jal = makeJal(0x1300, 0x1310);
             Instruction jalDelay = makeNop(0x1304);
+            Instruction atReturn = makeNop(0x1308);
             Instruction atTarget = makeNop(0x1310);
 
             // JR $31 at 0x1314 with delay slot at 0x1318
@@ -439,13 +607,21 @@ void register_code_generator_tests()
             Instruction jrDelay = makeNop(0x1318);
 
             CodeGenerator gen({});
-            std::string generated = gen.generateFunction(func, { jal, jalDelay, atTarget, jr, jrDelay }, false);
+            std::string generated = gen.generateFunction(func, { jal, jalDelay, atReturn, atTarget, jr, jrDelay }, false);
             printGeneratedCode("JR $31 emits switch for internal return targets", generated);
 
             t.IsTrue(generated.find("switch (jumpTarget)") != std::string::npos, "JR $31 should emit switch for internal targets");
             t.IsTrue(generated.find("case 0x1308u: goto label_1308;") != std::string::npos, "switch should include return address from internal JAL");
         });
-    
+
+        tc.Run("resolveStubTarget allows leading underscore alias", [](TestCase &t) {
+            t.Equals(PS2Recompiler::resolveStubTarget("_rand"), StubTarget::Stub,
+                     "_rand should resolve via rand stub alias");
+            t.Equals(PS2Recompiler::resolveStubTarget("_GetThreadId"), StubTarget::Syscall,
+                     "_GetThreadId should resolve via GetThreadId syscall alias");
+            t.Equals(PS2Recompiler::resolveStubTarget("_DefinitelyNotARealCall"), StubTarget::Unknown,
+                     "unknown names must still stay unknown");
+        });
     
     });
 }

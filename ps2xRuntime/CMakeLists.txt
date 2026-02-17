@@ -29,11 +29,20 @@ file(GLOB RUNNER_SRC_FILES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/runner/*.cpp"
 )
 
+set(RUNNER_MAIN_CPP "${CMAKE_CURRENT_SOURCE_DIR}/src/runner/main.cpp")
+set(ROOT_MAIN_CPP "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp")
+
+if(EXISTS "${RUNNER_MAIN_CPP}")
+    list(APPEND RUNNER_SRC_FILES "${RUNNER_MAIN_CPP}")
+elseif(EXISTS "${ROOT_MAIN_CPP}")
+    list(APPEND RUNNER_SRC_FILES "${ROOT_MAIN_CPP}")
+endif()
+
 add_executable(ps2EntryRunner
     ${RUNNER_SRC_FILES}
 )
 
-if (MSVC)
+if(MSVC)
     target_compile_options(ps2EntryRunner PRIVATE /FS /Z7)
 endif()
 
@@ -42,14 +51,14 @@ target_include_directories(ps2_runtime PUBLIC
 )
 
 target_link_libraries(ps2_runtime PRIVATE raylib)
-target_link_libraries(ps2EntryRunner 
-PRIVATE 
+target_link_libraries(ps2EntryRunner
+    PRIVATE
     ps2_runtime
     raylib
 )
 
 # Work around WinAPI vs raylib symbol clash for CloseWindow on x64
-if (MSVC)
+if(MSVC)
     target_link_options(ps2EntryRunner PRIVATE "/FORCE:MULTIPLE")
 endif()
 
