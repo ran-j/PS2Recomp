@@ -1130,9 +1130,8 @@ static std::chrono::microseconds alarmTicksToDuration(uint16_t ticks)
 static void ensureAlarmWorkerRunning()
 {
     std::call_once(g_alarm_worker_once, []()
-                   {
-        std::thread([]()
-                    {
+                   { std::thread([]()
+                                 {
             for (;;)
             {
                 std::shared_ptr<AlarmInfo> readyAlarm;
@@ -1206,7 +1205,7 @@ static void ensureAlarmWorkerRunning()
                     }
                 }
             } })
-            .detach(); });
+                         .detach(); });
 }
 
 static void rpcCopyToRdram(uint8_t *rdram, uint32_t dst, uint32_t src, size_t size)
@@ -4686,7 +4685,7 @@ namespace ps2_syscalls
     void fioMkdir(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t pathAddr = getRegU32(ctx, 4); // $a0
-        // int mode = (int)getRegU32(ctx, 5);
+        // int mode = (int)getRegU32(ctx, 5);  // $a1 - ignored on Windows
 
         const char *ps2Path = reinterpret_cast<const char *>(getConstMemPtr(rdram, pathAddr));
         if (!ps2Path)
@@ -4703,19 +4702,18 @@ namespace ps2_syscalls
             return;
         }
 
-#ifdef _WIN32
-        int ret = -1;
-#else
-        int ret = ::mkdir(hostPath.c_str(), 0775);
-#endif
+        std::error_code ec;
+        bool success = std::filesystem::create_directory(hostPath, ec);
 
-        if (ret != 0)
+        if (!success && ec)
         {
-            std::cerr << "fioMkdir error: mkdir failed for '" << hostPath << "': " << strerror(errno) << std::endl;
-            setReturnS32(ctx, -1); // errno
+            std::cerr << "fioMkdir error: create_directory failed for '" << hostPath
+                      << "': " << ec.message() << std::endl;
+            setReturnS32(ctx, -1);
         }
         else
         {
+            std::cout << "fioMkdir: Created directory '" << hostPath << "'" << std::endl;
             setReturnS32(ctx, 0); // Success
         }
     }
@@ -4739,21 +4737,18 @@ namespace ps2_syscalls
             return;
         }
 
-        std::cerr << "fioChdir: Attempting host chdir to '" << hostPath << "' (Stub - Check side effects)" << std::endl;
+        std::error_code ec;
+        std::filesystem::current_path(hostPath, ec);
 
-#ifdef _WIN32
-        int ret = -1;
-#else
-        int ret = ::chdir(hostPath.c_str());
-#endif
-
-        if (ret != 0)
+        if (ec)
         {
-            std::cerr << "fioChdir error: chdir failed for '" << hostPath << "': " << strerror(errno) << std::endl;
+            std::cerr << "fioChdir error: current_path failed for '" << hostPath
+                      << "': " << ec.message() << std::endl;
             setReturnS32(ctx, -1);
         }
         else
         {
+            std::cout << "fioChdir: Changed directory to '" << hostPath << "'" << std::endl;
             setReturnS32(ctx, 0); // Success
         }
     }
@@ -4776,19 +4771,18 @@ namespace ps2_syscalls
             return;
         }
 
-#ifdef _WIN32
-        int ret = -1;
-#else
-        int ret = ::rmdir(hostPath.c_str());
-#endif
+        std::error_code ec;
+        bool success = std::filesystem::remove(hostPath, ec);
 
-        if (ret != 0)
+        if (!success || ec)
         {
-            std::cerr << "fioRmdir error: rmdir failed for '" << hostPath << "': " << strerror(errno) << std::endl;
+            std::cerr << "fioRmdir error: remove failed for '" << hostPath
+                      << "': " << ec.message() << std::endl;
             setReturnS32(ctx, -1);
         }
         else
         {
+            std::cout << "fioRmdir: Removed directory '" << hostPath << "'" << std::endl;
             setReturnS32(ctx, 0); // Success
         }
     }
@@ -4845,19 +4839,19 @@ namespace ps2_syscalls
             return;
         }
 
-#ifdef _WIN32
-        int ret = -1;
-#else
-        int ret = ::unlink(hostPath.c_str());
-#endif
+        // *** FIX: Usa std::filesystem::remove per cross-platform ***
+        std::error_code ec;
+        bool success = std::filesystem::remove(hostPath, ec);
 
-        if (ret != 0)
+        if (!success || ec)
         {
-            std::cerr << "fioRemove error: unlink failed for '" << hostPath << "': " << strerror(errno) << std::endl;
+            std::cerr << "fioRemove error: remove failed for '" << hostPath
+                      << "': " << ec.message() << std::endl;
             setReturnS32(ctx, -1);
         }
         else
         {
+            std::cout << "fioRemove: Removed file '" << hostPath << "'" << std::endl;
             setReturnS32(ctx, 0); // Success
         }
     }
@@ -4986,8 +4980,8 @@ namespace ps2_syscalls
 
     void SifLoadElfPart(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        const uint32_t pathAddr = getRegU32(ctx, 4);    // $a0 - path
-        const uint32_t secNameAddr = getRegU32(ctx, 5); // $a1 - section name ("all" typically)
+        const uint32_t pathAddr = getRegU32(ctx, 4);     // $a0 - path
+        const uint32_t secNameAddr = getRegU32(ctx, 5);  // $a1 - section name ("all" typically)
         const uint32_t execDataAddr = getRegU32(ctx, 6); // $a2 - t_ExecData*
 
         std::string secName = readGuestCStringBounded(rdram, secNameAddr, kLoadfileArgMaxBytes);
