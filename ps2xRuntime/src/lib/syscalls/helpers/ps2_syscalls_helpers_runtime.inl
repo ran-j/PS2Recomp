@@ -361,6 +361,12 @@ std::string translatePs2Path(const char *ps2Path)
         return resolveWithBase(getConfiguredCdRoot(), pathStr.substr(prefixLength));
     }
 
+    if (lower.rfind(kMc0Prefix, 0) == 0)
+    {
+        const std::size_t prefixLength = sizeof(kMc0Prefix) - 1;
+        return resolveWithBase(getConfiguredMcRoot(), pathStr.substr(prefixLength));
+    }
+
     if (!pathStr.empty() && (pathStr.front() == '/' || pathStr.front() == '\\'))
     {
         return resolveWithBase(getConfiguredCdRoot(), pathStr);

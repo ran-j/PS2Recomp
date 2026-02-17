@@ -1,5 +1,7 @@
 namespace
 {
+    constexpr char kMc0Prefix[] = "mc0:";
+
     std::string toLowerAscii(std::string value)
     {
         std::transform(value.begin(), value.end(), value.begin(),
@@ -76,5 +78,22 @@ namespace
         std::error_code ec;
         const std::filesystem::path cwd = std::filesystem::current_path(ec);
         return ec ? std::filesystem::path(".") : cwd.lexically_normal();
+    }
+
+    std::filesystem::path getConfiguredMcRoot()
+    {
+        const PS2Runtime::IoPaths &paths = PS2Runtime::getIoPaths();
+        if (!paths.mcRoot.empty())
+        {
+            return paths.mcRoot;
+        }
+        if (!paths.elfDirectory.empty())
+        {
+            return paths.elfDirectory / "mc0";
+        }
+
+        std::error_code ec;
+        const std::filesystem::path cwd = std::filesystem::current_path(ec);
+        return ec ? std::filesystem::path("mc0") : (cwd / "mc0").lexically_normal();
     }
 }

@@ -351,6 +351,7 @@ public:
         std::filesystem::path elfDirectory;
         std::filesystem::path hostRoot;
         std::filesystem::path cdRoot;
+        std::filesystem::path mcRoot;
         std::filesystem::path cdImage;
     };
 
