@@ -8,6 +8,7 @@
 #include <cctype>
 #include <cstring>
 #include <limits>
+#include <chrono>
 #include <atomic>
 #include <thread>
 #include <unordered_map>
@@ -258,6 +259,12 @@ PS2Runtime::PS2Runtime()
 
 PS2Runtime::~PS2Runtime()
 {
+    requestStop();
+    if (IsWindowReady())
+    {
+        CloseWindow();
+    }
+
     m_loadedModules.clear();
 
     m_functionTable.clear();
@@ -289,12 +296,31 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
         return false;
     }
 
-    ElfHeader header;
-    file.read(reinterpret_cast<char *>(&header), sizeof(header));
+    file.seekg(0, std::ios::end);
+    const std::streamoff fileSize = file.tellg();
+    if (fileSize < static_cast<std::streamoff>(sizeof(ElfHeader)))
+    {
+        std::cerr << "ELF file is too small: " << elfPath << std::endl;
+        return false;
+    }
+    file.seekg(0, std::ios::beg);
+
+    ElfHeader header{};
+    if (!file.read(reinterpret_cast<char *>(&header), sizeof(header)))
+    {
+        std::cerr << "Failed to read ELF header from: " << elfPath << std::endl;
+        return false;
+    }
 
     if (header.magic != ELF_MAGIC)
     {
         std::cerr << "Invalid ELF magic number" << std::endl;
+        return false;
+    }
+
+    if (header.elf_class != 1u || header.endianness != 1u)
+    {
+        std::cerr << "Unsupported ELF format (expected 32-bit little-endian)." << std::endl;
         return false;
     }
 
@@ -304,64 +330,156 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
         return false;
     }
 
+    if (header.phnum != 0u && header.phentsize < sizeof(ProgramHeader))
+    {
+        std::cerr << "Unsupported ELF program-header entry size: " << header.phentsize << std::endl;
+        return false;
+    }
+
+    const uint64_t programHeaderTableEnd =
+        static_cast<uint64_t>(header.phoff) +
+        static_cast<uint64_t>(header.phnum) * static_cast<uint64_t>(header.phentsize);
+    if (programHeaderTableEnd > static_cast<uint64_t>(fileSize))
+    {
+        std::cerr << "ELF program-header table is out of range." << std::endl;
+        return false;
+    }
+
     m_cpuContext.pc = header.entry;
+    m_debugPc.store(m_cpuContext.pc, std::memory_order_relaxed);
 
     uint32_t maxLoadedRdramEnd = kGuestHeapDefaultBase;
+    uint32_t moduleBase = std::numeric_limits<uint32_t>::max();
+    uint32_t moduleEnd = 0u;
+    bool loadedAnySegment = false;
 
     for (uint16_t i = 0; i < header.phnum; i++)
     {
-        ProgramHeader ph;
-        file.seekg(header.phoff + i * header.phentsize);
-        file.read(reinterpret_cast<char *>(&ph), sizeof(ph));
-
-        if (ph.type == PT_LOAD && ph.filesz > 0)
+        const uint64_t phOffset =
+            static_cast<uint64_t>(header.phoff) +
+            static_cast<uint64_t>(i) * static_cast<uint64_t>(header.phentsize);
+        if (phOffset + sizeof(ProgramHeader) > static_cast<uint64_t>(fileSize))
         {
-            std::cout << "Loading segment: 0x" << std::hex << ph.vaddr
-                      << " - 0x" << (ph.vaddr + ph.memsz)
-                      << " (filesz: 0x" << ph.filesz
-                      << ", memsz: 0x" << ph.memsz << ")"
-                      << std::dec << std::endl;
+            std::cerr << "ELF program header " << i << " is out of range." << std::endl;
+            return false;
+        }
 
-            // Allocate temporary buffer for the segment
-            std::vector<uint8_t> buffer(ph.filesz);
+        ProgramHeader ph{};
+        file.seekg(static_cast<std::streamoff>(phOffset), std::ios::beg);
+        if (!file.read(reinterpret_cast<char *>(&ph), sizeof(ph)))
+        {
+            std::cerr << "Failed to read ELF program header " << i << std::endl;
+            return false;
+        }
 
-            // Read segment data
-            file.seekg(ph.offset);
-            file.read(reinterpret_cast<char *>(buffer.data()), ph.filesz);
+        if (ph.type != PT_LOAD || ph.memsz == 0u)
+        {
+            continue;
+        }
 
-            // Copy to memory
-            uint32_t physAddr = m_memory.translateAddress(ph.vaddr);
-            uint8_t *dest = nullptr;
-            if (ph.vaddr >= PS2_SCRATCHPAD_BASE && ph.vaddr < PS2_SCRATCHPAD_BASE + PS2_SCRATCHPAD_SIZE)
+        if (ph.filesz > ph.memsz)
+        {
+            std::cerr << "ELF segment " << i << " has filesz > memsz." << std::endl;
+            return false;
+        }
+
+        const uint64_t segmentFileEnd = static_cast<uint64_t>(ph.offset) + static_cast<uint64_t>(ph.filesz);
+        if (segmentFileEnd > static_cast<uint64_t>(fileSize))
+        {
+            std::cerr << "ELF segment " << i << " exceeds file bounds." << std::endl;
+            return false;
+        }
+
+        const bool scratch =
+            ph.vaddr >= PS2_SCRATCHPAD_BASE &&
+            ph.vaddr < (PS2_SCRATCHPAD_BASE + PS2_SCRATCHPAD_SIZE);
+
+        uint32_t physAddr = 0u;
+        try
+        {
+            physAddr = m_memory.translateAddress(ph.vaddr);
+        }
+        catch (const std::exception &e)
+        {
+            std::cerr << "Failed to translate ELF segment " << i
+                      << " virtual address 0x" << std::hex << ph.vaddr
+                      << std::dec << ": " << e.what() << std::endl;
+            return false;
+        }
+        const uint64_t regionSize = scratch ? static_cast<uint64_t>(PS2_SCRATCHPAD_SIZE)
+                                            : static_cast<uint64_t>(PS2_RAM_SIZE);
+        const uint64_t segmentMemEnd = static_cast<uint64_t>(physAddr) + static_cast<uint64_t>(ph.memsz);
+        if (segmentMemEnd > regionSize)
+        {
+            std::cerr << "ELF segment " << i << " exceeds "
+                      << (scratch ? "scratchpad" : "RDRAM")
+                      << " bounds (vaddr=0x" << std::hex << ph.vaddr
+                      << " memsz=0x" << ph.memsz << std::dec << ")." << std::endl;
+            return false;
+        }
+
+        uint8_t *destBase = scratch ? m_memory.getScratchpad() : m_memory.getRDRAM();
+        if (!destBase)
+        {
+            std::cerr << "ELF segment " << i << " has no destination memory backing." << std::endl;
+            return false;
+        }
+
+        uint8_t *dest = destBase + physAddr;
+        if (ph.filesz > 0u)
+        {
+            file.seekg(static_cast<std::streamoff>(ph.offset), std::ios::beg);
+            if (!file.read(reinterpret_cast<char *>(dest), ph.filesz))
             {
-                dest = m_memory.getScratchpad() + physAddr;
-            }
-            else
-            {
-                dest = m_memory.getRDRAM() + physAddr;
-            }
-            std::memcpy(dest, buffer.data(), ph.filesz);
-
-            if (ph.memsz > ph.filesz)
-            {
-                std::memset(dest + ph.filesz, 0, ph.memsz - ph.filesz);
-            }
-
-            if (!(ph.vaddr >= PS2_SCRATCHPAD_BASE && ph.vaddr < PS2_SCRATCHPAD_BASE + PS2_SCRATCHPAD_SIZE))
-            {
-                const uint64_t segmentEnd = static_cast<uint64_t>(physAddr) + static_cast<uint64_t>(ph.memsz);
-                if (segmentEnd <= PS2_RAM_SIZE)
-                {
-                    maxLoadedRdramEnd = std::max(maxLoadedRdramEnd, static_cast<uint32_t>(segmentEnd));
-                }
-            }
-
-            // Track executable regions for self-modifying code invalidation
-            if (ph.flags & 0x1) // PF_X
-            {
-                m_memory.registerCodeRegion(ph.vaddr, ph.vaddr + ph.memsz);
+                std::cerr << "Failed to read ELF segment " << i << " payload." << std::endl;
+                return false;
             }
         }
+
+        if (ph.memsz > ph.filesz)
+        {
+            std::memset(dest + ph.filesz, 0, ph.memsz - ph.filesz);
+        }
+
+        std::cout << "Loading segment: 0x" << std::hex << ph.vaddr
+                  << " - 0x" << (static_cast<uint64_t>(ph.vaddr) + static_cast<uint64_t>(ph.memsz))
+                  << " (filesz: 0x" << ph.filesz
+                  << ", memsz: 0x" << ph.memsz << ")"
+                  << std::dec << std::endl;
+
+        if (!scratch)
+        {
+            maxLoadedRdramEnd = std::max(maxLoadedRdramEnd, static_cast<uint32_t>(segmentMemEnd));
+        }
+
+        if (ph.flags & 0x1u) // PF_X
+        {
+            const uint64_t execEnd = static_cast<uint64_t>(ph.vaddr) + static_cast<uint64_t>(ph.memsz);
+            if (execEnd <= std::numeric_limits<uint32_t>::max())
+            {
+                m_memory.registerCodeRegion(ph.vaddr, static_cast<uint32_t>(execEnd));
+            }
+        }
+
+        loadedAnySegment = true;
+        moduleBase = std::min(moduleBase, ph.vaddr);
+        const uint64_t segmentVirtualEnd = static_cast<uint64_t>(ph.vaddr) + static_cast<uint64_t>(ph.memsz);
+        const uint32_t clampedVirtualEnd =
+            (segmentVirtualEnd > std::numeric_limits<uint32_t>::max())
+                ? std::numeric_limits<uint32_t>::max()
+                : static_cast<uint32_t>(segmentVirtualEnd);
+        moduleEnd = std::max(moduleEnd, clampedVirtualEnd);
+    }
+
+    if (!loadedAnySegment)
+    {
+        std::cerr << "ELF contains no loadable PT_LOAD segments." << std::endl;
+        return false;
+    }
+
+    if (maxLoadedRdramEnd > PS2_RAM_SIZE)
+    {
+        maxLoadedRdramEnd = PS2_RAM_SIZE;
     }
 
     const uint32_t paddedEnd = (maxLoadedRdramEnd > (PS2_RAM_SIZE - kGuestHeapSafetyPad))
@@ -382,8 +500,8 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
 
     LoadedModule module;
     module.name = elfPath.substr(elfPath.find_last_of("/\\") + 1);
-    module.baseAddress = 0x00100000; // Typical base address for PS2 executables
-    module.size = 0;                 // Would need to calculate from segments
+    module.baseAddress = (moduleBase == std::numeric_limits<uint32_t>::max()) ? 0x00100000u : moduleBase;
+    module.size = (moduleEnd > module.baseAddress) ? static_cast<size_t>(moduleEnd - module.baseAddress) : 0u;
     module.active = true;
 
     m_loadedModules.push_back(module);
@@ -1024,29 +1142,28 @@ uint32_t PS2Runtime::guestHeapEnd() const
 
 void PS2Runtime::dispatchLoop(uint8_t *rdram, R5900Context *ctx)
 {
-    uint32_t lastPc = 0;
-    int stuckCount = 0;
+    uint32_t lastPc = std::numeric_limits<uint32_t>::max();
+    uint32_t samePcCount = 0;
+    constexpr uint32_t kSamePcYieldInterval = 0x4000u;
 
     while (!isStopRequested())
     {
         const uint32_t pc = ctx->pc;
 
-        // this helps a lot but lets not forget to remove later
         if (pc == lastPc)
         {
-            stuckCount++;
-            if (stuckCount > 1000)
+            ++samePcCount;
+            if ((samePcCount % kSamePcYieldInterval) == 0u)
             {
-                std::cerr << "CPU Stuck at PC 0x" << std::hex << pc << ". PC not updating." << std::endl;
-                requestStop();
-                break;
+                std::cout << "CPU is doing some work at PC 0x" << std::hex << pc << ". PC not updating." << std::endl;
+                std::this_thread::yield();
             }
         }
         else
         {
-            stuckCount = 0;
+            samePcCount = 0;
+            lastPc = pc;
         }
-        lastPc = pc;
 
         m_debugPc.store(pc, std::memory_order_relaxed);
         m_debugRa.store(static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0)), std::memory_order_relaxed);
@@ -1199,7 +1316,11 @@ void PS2Runtime::Store128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, __m
 
 void PS2Runtime::requestStop()
 {
-    m_stopRequested.store(true, std::memory_order_relaxed);
+    const bool alreadyRequested = m_stopRequested.exchange(true, std::memory_order_relaxed);
+    if (!alreadyRequested)
+    {
+        ps2_syscalls::notifyRuntimeStop();
+    }
 }
 
 bool PS2Runtime::isStopRequested() const
@@ -1214,11 +1335,16 @@ void PS2Runtime::HandleIntegerOverflow(R5900Context *ctx)
 
 void PS2Runtime::run()
 {
+    m_stopRequested.store(false, std::memory_order_relaxed);
     m_cpuContext.r[4] = _mm_setzero_si128();
     m_cpuContext.r[5] = _mm_setzero_si128();
     m_cpuContext.r[29] = _mm_set_epi64x(0, static_cast<int64_t>(PS2_RAM_SIZE - 0x10u));
+    m_debugPc.store(m_cpuContext.pc, std::memory_order_relaxed);
+    m_debugRa.store(static_cast<uint32_t>(_mm_extract_epi32(m_cpuContext.r[31], 0)), std::memory_order_relaxed);
+    m_debugSp.store(static_cast<uint32_t>(_mm_extract_epi32(m_cpuContext.r[29], 0)), std::memory_order_relaxed);
+    m_debugGp.store(static_cast<uint32_t>(_mm_extract_epi32(m_cpuContext.r[28], 0)), std::memory_order_relaxed);
 
-    std::cout << "Starting execution at address 0x" << std::hex << m_debugPc.load(std::memory_order_relaxed) << std::dec << std::endl;
+    std::cout << "Starting execution at address 0x" << std::hex << m_cpuContext.pc << std::dec << std::endl;
 
     // A blank image to use as a framebuffer
     Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLANK);
@@ -1226,6 +1352,7 @@ void PS2Runtime::run()
     UnloadImage(blank);
 
     g_activeThreads.store(1, std::memory_order_relaxed);
+    std::atomic<bool> gameThreadFinished{false};
 
     std::thread gameThread([&]()
                            {
@@ -1241,10 +1368,15 @@ void PS2Runtime::run()
         {
             std::cerr << "Error during program execution: " << e.what() << std::endl;
         }
-        g_activeThreads.fetch_sub(1, std::memory_order_relaxed); });
+        catch (...)
+        {
+            std::cerr << "Error during program execution: unknown exception" << std::endl;
+        }
+        g_activeThreads.fetch_sub(1, std::memory_order_relaxed);
+        gameThreadFinished.store(true, std::memory_order_release); });
 
     uint64_t tick = 0;
-    while (g_activeThreads.load(std::memory_order_relaxed) > 0)
+    while (!gameThreadFinished.load(std::memory_order_acquire))
     {
         const uint32_t pc = m_debugPc.load(std::memory_order_relaxed);
         const uint32_t ra = m_debugRa.load(std::memory_order_relaxed);
@@ -1257,7 +1389,8 @@ void PS2Runtime::run()
             std::cout << " pc=0x" << std::hex << pc
                       << " ra=0x" << ra
                       << " sp=0x" << sp
-                      << " gp=0x" << gp;
+                      << " gp=0x" << gp
+                      << std::dec << std::endl;
         }
         if ((tick % 600) == 0)
         {
@@ -1293,24 +1426,43 @@ void PS2Runtime::run()
         }
     }
 
-    if (g_activeThreads.load(std::memory_order_relaxed) == 0)
+    requestStop();
+
+    const auto joinDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!gameThreadFinished.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < joinDeadline)
     {
-        if (gameThread.joinable())
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    if (gameThread.joinable())
+    {
+        if (gameThreadFinished.load(std::memory_order_acquire))
         {
             gameThread.join();
         }
-    }
-    else
-    {
-
-        if (gameThread.joinable())
+        else
         {
+            std::cerr << "[run] game thread did not stop within timeout; detaching" << std::endl;
             gameThread.detach();
         }
+    }
+
+    const auto workerDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+    while (g_activeThreads.load(std::memory_order_relaxed) > 0 &&
+           std::chrono::steady_clock::now() < workerDeadline)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
     UnloadTexture(frameTex);
     CloseWindow();
 
-    std::cout << "[run] exiting loop, activeThreads=" << g_activeThreads.load(std::memory_order_relaxed) << std::endl;
+    const int remainingThreads = g_activeThreads.load(std::memory_order_relaxed);
+    std::cout << "[run] exiting loop, activeThreads=" << remainingThreads << std::endl;
+    if (remainingThreads > 0)
+    {
+        std::cerr << "[run] warning: " << remainingThreads
+                  << " guest worker thread(s) still active during shutdown." << std::endl;
+    }
 }

@@ -50,8 +50,9 @@ void FlushCache(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void ResetEE(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    std::cerr << "Syscall: ResetEE - Halting Execution (Not fully implemented)" << std::endl;
-    exit(0); // Should we exit or just halt the execution?
+    std::cerr << "Syscall: ResetEE - requesting runtime stop" << std::endl;
+    runtime->requestStop();
+    setReturnS32(ctx, KE_OK);
 }
 
 void SetMemoryMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -276,7 +277,7 @@ void StartThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     g_activeThreads.fetch_add(1, std::memory_order_relaxed);
     try
     {
-        std::thread worker([=]() mutable
+        std::thread([=]() mutable
                            {
             {
                 std::string name = "PS2Thread_" + std::to_string(tid);
