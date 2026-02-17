@@ -131,7 +131,7 @@ namespace ps2recomp
         file << "output = \"" << escapeBackslashes(outputDirStr) << "\"\n\n";
 
         file << "# Single file output mode (recommended for large games)\n";
-        file << "single_file_output = false\n\n";
+        file << "single_file_output = true\n\n";
 
         file << "# Patch policy (instruction-driven handling is preferred for syscalls)\n";
         file << "patch_syscalls = false\n";
