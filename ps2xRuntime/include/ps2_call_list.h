@@ -93,7 +93,10 @@
     X(SetOsdConfigParam)      \
     X(GetRomName)             \
     X(SifLoadElfPart)         \
+    X(sceSifLoadElf)          \
+    X(sceSifLoadElfPart)      \
     X(sceSifLoadModule)       \
+    X(sceSifLoadModuleBuffer) \
                               \
     X(SetupThread)            \
     X(QueryBootMode)          \

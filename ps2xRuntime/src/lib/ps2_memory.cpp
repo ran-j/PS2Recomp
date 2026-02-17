@@ -1,8 +1,9 @@
-#include "ps2_runtime.h"
+#include "ps2_memory.h"
 #include <iostream>
 #include <cstring>
 #include <stdexcept>
 #include <algorithm>
+#include <string>
 
 namespace
 {
