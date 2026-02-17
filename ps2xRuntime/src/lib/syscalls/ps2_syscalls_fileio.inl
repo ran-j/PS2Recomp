@@ -182,22 +182,22 @@ void fioWrite(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         return;
     }
 
+    FILE *fp = getHostFile(ps2Fd);
+    if (!fp)
+    {
+        setReturnS32(ctx, -1); // -EFAULT
+        return;
+    }
+
+    if (size == 0)
+    {
+        setReturnS32(ctx, 0); // Wrote 0 bytes
+        return;
+    }
+
     size_t bytesWritten = 0;
     {
-        std::lock_guard<std::mutex> lock(g_fd_mutex);
-        FILE *fp = getHostFile(ps2Fd);
-        if (!fp)
-        {
-            setReturnS32(ctx, -1); // -EFAULT
-            return;
-        }
-
-        if (size == 0)
-        {
-            setReturnS32(ctx, 0); // Wrote 0 bytes
-            return;
-        }
-
+        std::lock_guard<std::mutex> lock(g_sys_fd_mutex);
         bytesWritten = ::fwrite(hostBuf, 1, size, fp);
         if (bytesWritten < size && ferror(fp))
         {
@@ -273,7 +273,7 @@ void fioLseek(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 void fioMkdir(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     uint32_t pathAddr = getRegU32(ctx, 4); // $a0
-    // int mode = (int)getRegU32(ctx, 5);
+    // int mode = (int)getRegU32(ctx, 5);  // $a1 - ignored on host
 
     const char *ps2Path = reinterpret_cast<const char *>(getConstMemPtr(rdram, pathAddr));
     if (!ps2Path)
@@ -289,20 +289,18 @@ void fioMkdir(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         setReturnS32(ctx, -1);
         return;
     }
+    std::error_code ec;
+    bool success = std::filesystem::create_directory(hostPath, ec);
 
-#ifdef _WIN32
-    int ret = -1;
-#else
-    int ret = ::mkdir(hostPath.c_str(), 0775);
-#endif
-
-    if (ret != 0)
+    if (!success && ec)
     {
-        std::cerr << "fioMkdir error: mkdir failed for '" << hostPath << "': " << strerror(errno) << std::endl;
-        setReturnS32(ctx, -1); // errno
+        std::cerr << "fioMkdir error: create_directory failed for '" << hostPath
+                  << "': " << ec.message() << std::endl;
+        setReturnS32(ctx, -1);
     }
     else
     {
+        std::cout << "fioMkdir: Created directory '" << hostPath << "'" << std::endl;
         setReturnS32(ctx, 0); // Success
     }
 }
@@ -326,21 +324,18 @@ void fioChdir(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         return;
     }
 
-    std::cerr << "fioChdir: Attempting host chdir to '" << hostPath << "' (Stub - Check side effects)" << std::endl;
+    std::error_code ec;
+    std::filesystem::current_path(hostPath, ec);
 
-#ifdef _WIN32
-    int ret = -1;
-#else
-    int ret = ::chdir(hostPath.c_str());
-#endif
-
-    if (ret != 0)
+    if (ec)
     {
-        std::cerr << "fioChdir error: chdir failed for '" << hostPath << "': " << strerror(errno) << std::endl;
+        std::cerr << "fioChdir error: current_path failed for '" << hostPath
+                  << "': " << ec.message() << std::endl;
         setReturnS32(ctx, -1);
     }
     else
     {
+        std::cout << "fioChdir: Changed directory to '" << hostPath << "'" << std::endl;
         setReturnS32(ctx, 0); // Success
     }
 }
@@ -363,19 +358,18 @@ void fioRmdir(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         return;
     }
 
-#ifdef _WIN32
-    int ret = -1;
-#else
-    int ret = ::rmdir(hostPath.c_str());
-#endif
+    std::error_code ec;
+    bool success = std::filesystem::remove(hostPath, ec);
 
-    if (ret != 0)
+    if (!success || ec)
     {
-        std::cerr << "fioRmdir error: rmdir failed for '" << hostPath << "': " << strerror(errno) << std::endl;
+        std::cerr << "fioRmdir error: remove failed for '" << hostPath
+                  << "': " << ec.message() << std::endl;
         setReturnS32(ctx, -1);
     }
     else
     {
+        std::cout << "fioRmdir: Removed directory '" << hostPath << "'" << std::endl;
         setReturnS32(ctx, 0); // Success
     }
 }
@@ -432,19 +426,18 @@ void fioRemove(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         return;
     }
 
-#ifdef _WIN32
-    int ret = -1;
-#else
-    int ret = ::unlink(hostPath.c_str());
-#endif
+    std::error_code ec;
+    bool success = std::filesystem::remove(hostPath, ec);
 
-    if (ret != 0)
+    if (!success || ec)
     {
-        std::cerr << "fioRemove error: unlink failed for '" << hostPath << "': " << strerror(errno) << std::endl;
+        std::cerr << "fioRemove error: remove failed for '" << hostPath
+                  << "': " << ec.message() << std::endl;
         setReturnS32(ctx, -1);
     }
     else
     {
+        std::cout << "fioRemove: Removed file '" << hostPath << "'" << std::endl;
         setReturnS32(ctx, 0); // Success
     }
 }
