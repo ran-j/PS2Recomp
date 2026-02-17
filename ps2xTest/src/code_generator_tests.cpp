@@ -1,6 +1,7 @@
 #include "MiniTest.h"
 #include "ps2recomp/code_generator.h"
 #include "ps2recomp/instructions.h"
+#include "ps2recomp/ps2_recompiler.h"
 #include "ps2recomp/types.h"
 #include <filesystem>
 #include <fstream>
@@ -612,7 +613,15 @@ void register_code_generator_tests()
             t.IsTrue(generated.find("switch (jumpTarget)") != std::string::npos, "JR $31 should emit switch for internal targets");
             t.IsTrue(generated.find("case 0x1308u: goto label_1308;") != std::string::npos, "switch should include return address from internal JAL");
         });
-    
+
+        tc.Run("resolveStubTarget allows leading underscore alias", [](TestCase &t) {
+            t.Equals(PS2Recompiler::resolveStubTarget("_rand"), StubTarget::Stub,
+                     "_rand should resolve via rand stub alias");
+            t.Equals(PS2Recompiler::resolveStubTarget("_GetThreadId"), StubTarget::Syscall,
+                     "_GetThreadId should resolve via GetThreadId syscall alias");
+            t.Equals(PS2Recompiler::resolveStubTarget("_DefinitelyNotARealCall"), StubTarget::Unknown,
+                     "unknown names must still stay unknown");
+        });
     
     });
 }

@@ -499,17 +499,19 @@ namespace ps2recomp
                     }
                     else
                     {
-                        switch (resolveStubTarget(function.name))
+                        const std::string_view resolvedSyscallName = ps2_runtime_calls::resolveSyscallName(function.name);
+                        const std::string_view resolvedStubName = ps2_runtime_calls::resolveStubName(function.name);
+                        if (!resolvedSyscallName.empty())
                         {
-                        case StubTarget::Syscall:
-                            stub << "ps2_syscalls::" << function.name << "(rdram, ctx, runtime); ";
-                            break;
-                        case StubTarget::Stub:
-                            stub << "ps2_stubs::" << function.name << "(rdram, ctx, runtime); ";
-                            break;
-                        default:
+                            stub << "ps2_syscalls::" << resolvedSyscallName << "(rdram, ctx, runtime); ";
+                        }
+                        else if (!resolvedStubName.empty())
+                        {
+                            stub << "ps2_stubs::" << resolvedStubName << "(rdram, ctx, runtime); ";
+                        }
+                        else
+                        {
                             stub << "ps2_stubs::TODO_NAMED(\"" << escapeCStringLiteral(function.name) << "\", rdram, ctx, runtime); ";
-                            break;
                         }
                     }
 
@@ -1039,11 +1041,11 @@ namespace ps2recomp
 
     StubTarget PS2Recompiler::resolveStubTarget(const std::string &name)
     {
-        if (ps2_runtime_calls::isSyscallName(name))
+        if (!ps2_runtime_calls::resolveSyscallName(name).empty())
         {
             return StubTarget::Syscall;
         }
-        if (ps2_runtime_calls::isStubName(name))
+        if (!ps2_runtime_calls::resolveStubName(name).empty())
         {
             return StubTarget::Stub;
         }
