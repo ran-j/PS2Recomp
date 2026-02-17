@@ -3,6 +3,41 @@ name: build
 on: [push, pull_request]
 
 jobs:
+  linux-gcc-clang:
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+
+    name: linux-${{ matrix.compiler }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev
+
+      - name: Configure
+        run: |
+          if [ "${{ matrix.compiler }}" = "gcc" ]; then
+            export CC=gcc
+            export CXX=g++
+          else
+            export CC=clang
+            export CXX=clang++
+          fi
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Tests
+        run: ./build/ps2xTest/ps2x_tests
+
   windows-msvc:
     strategy:
       fail-fast: false
