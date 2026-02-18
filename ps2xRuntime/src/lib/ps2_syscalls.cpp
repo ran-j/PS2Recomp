@@ -273,6 +273,18 @@ namespace ps2_syscalls
         case 0x74:
             RegisterExitHandler(rdram, ctx, runtime);
             return true;
+        case 0x76:
+        case static_cast<uint32_t>(-0x76):
+            ps2_stubs::sceSifDmaStat(rdram, ctx, runtime);
+            return true;
+        case 0x77:
+        case static_cast<uint32_t>(-0x77):
+            ps2_stubs::sceSifSetDma(rdram, ctx, runtime);
+            return true;
+        case 0x78:
+        case static_cast<uint32_t>(-0x78):
+            ps2_stubs::sceSifSetDChain(rdram, ctx, runtime);
+            return true;
         case 0x85:
             SetMemoryMode(rdram, ctx, runtime);
             return true;

@@ -735,6 +735,74 @@ void SifCallRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         }
     }
 
+    auto signalRpcCompletionSema = [&](uint32_t semaId) -> bool
+    {
+        if (semaId == 0u || semaId > 0xFFFFu)
+        {
+            return false;
+        }
+
+        auto sema = lookupSemaInfo(static_cast<int>(semaId));
+        if (!sema)
+        {
+            return false;
+        }
+
+        bool signaled = false;
+        {
+            std::lock_guard<std::mutex> lock(sema->m);
+            if (!sema->deleted && sema->count < sema->maxCount)
+            {
+                sema->count++;
+                signaled = true;
+            }
+        }
+
+        if (signaled)
+        {
+            sema->cv.notify_one();
+        }
+        return signaled;
+    };
+
+    if (sid == 1u && (rpcNum == 0x12u || rpcNum == 0x13u))
+    {
+        uint32_t responseWord = 1u;
+        if (rpcNum == 0x13u)
+        {
+            static uint32_t sdrStateBlobAddr = 0u;
+            if (sdrStateBlobAddr == 0u)
+            {
+                sdrStateBlobAddr = rpcAllocPacketAddr(rdram);
+                if (sdrStateBlobAddr == 0u)
+                {
+                    sdrStateBlobAddr = kRpcPacketPoolBase;
+                }
+            }
+
+            rpcZeroRdram(rdram, sdrStateBlobAddr, 64u);
+            (void)writeRpcU32(sdrStateBlobAddr + 0u, 1u);
+            responseWord = sdrStateBlobAddr;
+        }
+
+        if (recvBuf && recvSize >= sizeof(uint32_t))
+        {
+            (void)writeRpcU32(recvBuf, responseWord);
+            if (recvSize > sizeof(uint32_t))
+            {
+                rpcZeroRdram(rdram, recvBuf + sizeof(uint32_t), recvSize - sizeof(uint32_t));
+            }
+            resultPtr = recvBuf;
+        }
+
+        handled = true;
+
+        if ((mode & kSifRpcModeNowait) != 0u)
+        {
+            (void)signalRpcCompletionSema(endParam);
+        }
+    }
+
     if (recvBuf && recvSize > 0)
     {
         if (handled && resultPtr)
@@ -780,7 +848,48 @@ void SifCallRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
     if (endFunc)
     {
-        rpcInvokeFunction(rdram, ctx, runtime, endFunc, endParam, 0, 0, 0, nullptr);
+        bool callbackInvoked = rpcInvokeFunction(rdram, ctx, runtime, endFunc, endParam, 0, 0, 0, nullptr);
+
+        // Some generated callsites may pass 0x2fac20/0x2fac30 instead of
+        // 0x2eac20/0x2eac30 for sound-driver RPC callbacks.
+        if (!callbackInvoked && (endFunc == 0x2fac20u || endFunc == 0x2fac30u))
+        {
+            const uint32_t normalizedEndFunc = endFunc - 0x10000u;
+            callbackInvoked = rpcInvokeFunction(rdram, ctx, runtime, normalizedEndFunc, endParam, 0, 0, 0, nullptr);
+        }
+
+        // Guard against callback dispatch gaps that would leak the semaphore
+        // acquired in SdrSendReq/SdrGetStateSend.
+        const bool isSoundRpcCallback =
+            (endFunc == 0x2eac20u || endFunc == 0x2eac30u ||
+             endFunc == 0x2fac20u || endFunc == 0x2fac30u);
+        if (isSoundRpcCallback)
+        {
+            (void)signalRpcCompletionSema(endParam);
+            if (rdram && (endFunc == 0x2eac30u || endFunc == 0x2fac30u))
+            {
+                constexpr uint32_t kSndBusyFlagAddr = 0x01E212C8u;
+                if (uint32_t *busy = reinterpret_cast<uint32_t *>(getMemPtr(rdram, kSndBusyFlagAddr)))
+                {
+                    *busy = 0u;
+                }
+            }
+        }
+
+        if (!callbackInvoked)
+        {
+            const bool fallbackSignaledSema = signalRpcCompletionSema(endParam);
+
+            static uint32_t unresolvedEndFuncWarnCount = 0;
+            if (unresolvedEndFuncWarnCount < 32u)
+            {
+                std::cerr << "[SifCallRpc] unresolved end callback endFunc=0x" << std::hex << endFunc
+                          << " endParam=0x" << endParam
+                          << " fallbackSignal=" << std::dec << (fallbackSignaledSema ? 1 : 0)
+                          << std::endl;
+                ++unresolvedEndFuncWarnCount;
+            }
+        }
     }
 
     static int logCount = 0;
@@ -1086,4 +1195,3 @@ void sceRpcGetPacket(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     uint32_t queuePtr = getRegU32(ctx, 4);
     setReturnS32(ctx, static_cast<int32_t>(queuePtr));
 }
-

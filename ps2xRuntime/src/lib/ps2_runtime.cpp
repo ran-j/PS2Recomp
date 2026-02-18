@@ -563,8 +563,6 @@ void PS2Runtime::configureIoPathsFromElf(const std::string &elfPath)
         paths.mcRoot = paths.elfDirectory / "mc0";
     }
 
-    paths.cdImage.clear();
-
     setIoPaths(paths);
 }
 
