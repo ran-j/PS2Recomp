@@ -11,8 +11,19 @@ single_file_output = false
 # Path to runtime header (optional)
 runtime_header = "include/ps2_runtime.h"
 
-# Functions to stub (these will generate empty implementations)
-stubs = ["printf", "malloc", "free", "memcpy", "memset", "strncpy", "sprintf"]
+# Functions to stub (these will generate wrappers to runtime syscall/stub handlers when names match)
+# You can also bind stripped functions by address with "handler@0xADDRESS".
+stubs = [
+  "printf",
+  "malloc",
+  "free",
+  "memcpy",
+  "memset",
+  "strncpy",
+  "sprintf",
+  # "sceCdRead@0x00123456",
+  # "SifLoadModule@0x00127890",
+]
 
 # Functions to skip (these will not be recompiled)
 skip = ["abort", "exit", "_exit"]

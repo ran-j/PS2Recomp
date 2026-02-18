@@ -2,6 +2,7 @@
 #include "ps2recomp/instructions.h"
 #include "ps2recomp/ps2_recompiler.h"
 #include "ps2recomp/types.h"
+#include "ps2_runtime_calls.h"
 #include <fmt/format.h>
 #include <sstream>
 #include <algorithm>
@@ -9,6 +10,7 @@
 #include <unordered_map>
 #include <iostream>
 #include <cctype>
+#include <cmath>
 
 namespace ps2recomp
 {
@@ -32,6 +34,22 @@ namespace ps2recomp
     static uint32_t buildAbsoluteJumpTarget(uint32_t address, uint32_t target)
     {
         return ((address + 4) & 0xF0000000u) | (target << 2);
+    }
+
+    static std::string formatFloatLiteral(float value)
+    {
+        if (!std::isfinite(value))
+        {
+            return (value < 0.0f) ? "-INFINITY" : "INFINITY";
+        }
+
+        std::string literal = fmt::format("{:.9g}", value);
+        if (literal.find_first_of(".eE") == std::string::npos)
+        {
+            literal += ".0";
+        }
+        literal += 'f';
+        return literal;
     }
 
     static std::string sanitizeIdentifierBody(const std::string &name)
@@ -96,6 +114,11 @@ namespace ps2recomp
     void CodeGenerator::setBootstrapInfo(const BootstrapInfo &info)
     {
         m_bootstrapInfo = info;
+    }
+
+    void CodeGenerator::setRelocationCallNames(const std::unordered_map<uint32_t, std::string> &callNames)
+    {
+        m_relocationCallNames = callNames;
     }
 
     std::string CodeGenerator::getFunctionName(uint32_t address) const
@@ -243,18 +266,54 @@ namespace ps2recomp
                 }
                 else
                 {
-                    ss << "    {\n";
-                    ss << fmt::format("        auto targetFn = runtime->lookupFunction(0x{:X}u);\n", target);
-                    ss << "        targetFn(rdram, ctx, runtime);\n";
-                    if (branchInst.opcode == OPCODE_J)
+                    bool emittedRelocCall = false;
+                    const auto relocIt = m_relocationCallNames.find(branchInst.address);
+                    if (relocIt != m_relocationCallNames.end() && !relocIt->second.empty())
                     {
-                        ss << "        return;\n";
+                        const std::string_view resolvedSyscallName =
+                            ps2_runtime_calls::resolveSyscallName(relocIt->second);
+                        const std::string_view resolvedStubName =
+                            ps2_runtime_calls::resolveStubName(relocIt->second);
+
+                        if (!resolvedSyscallName.empty() || !resolvedStubName.empty())
+                        {
+                            const bool isSyscall = !resolvedSyscallName.empty();
+                            const std::string_view handlerName = isSyscall ? resolvedSyscallName : resolvedStubName;
+
+                            ss << "    {\n";
+                            ss << "        const uint32_t __entryPc = ctx->pc;\n";
+                            ss << "        "
+                               << (isSyscall ? "ps2_syscalls::" : "ps2_stubs::")
+                               << handlerName << "(rdram, ctx, runtime);\n";
+                            ss << "        if (ctx->pc == __entryPc) { ctx->pc = getRegU32(ctx, 31); }\n";
+                            ss << "    }\n";
+                            if (branchInst.opcode == OPCODE_J)
+                            {
+                                ss << "    return;\n";
+                            }
+                            else
+                            {
+                                ss << fmt::format("    if (ctx->pc != 0x{:X}u) {{ return; }}\n", fallthroughPc);
+                            }
+                            emittedRelocCall = true;
+                        }
                     }
-                    else
+
+                    if (!emittedRelocCall)
                     {
-                        ss << fmt::format("        if (ctx->pc != 0x{:X}u) {{ return; }}\n", fallthroughPc);
+                        ss << "    {\n";
+                        ss << fmt::format("        auto targetFn = runtime->lookupFunction(0x{:X}u);\n", target);
+                        ss << "        targetFn(rdram, ctx, runtime);\n";
+                        if (branchInst.opcode == OPCODE_J)
+                        {
+                            ss << "        return;\n";
+                        }
+                        else
+                        {
+                            ss << fmt::format("        if (ctx->pc != 0x{:X}u) {{ return; }}\n", fallthroughPc);
+                        }
+                        ss << "    }\n";
                     }
-                    ss << "    }\n";
                 }
             }
         }
@@ -557,6 +616,8 @@ namespace ps2recomp
             ss << "#include \"ps2_runtime.h\"\n";
             ss << "#include \"ps2_recompiled_functions.h\"\n";
             ss << "#include \"ps2_recompiled_stubs.h\"\n\n";
+            ss << "#include \"ps2_syscalls.h\"\n";
+            ss << "#include \"ps2_stubs.h\"\n\n";
         }
 
         std::unordered_set<uint32_t> internalTargets = collectInternalBranchTargets(function, instructions);
@@ -2087,7 +2148,7 @@ namespace ps2recomp
             default:
                 return fmt::format("// Unhandled VU0 Special1 function: 0x{:X}", special1_func);
             }
-            }
+        }
         default:
             return fmt::format("// Unhandled COP2 format: 0x{:X}", format);
         }
@@ -2432,7 +2493,7 @@ namespace ps2recomp
         // VCALLMS calls a VU0 microprogram at the specified immediate address.
         // VU0 micro memory is 4KB = 512 instructions (8 bytes each). Index is 0-511.
         uint16_t instr_index = static_cast<uint16_t>((inst.raw >> 6) & 0x1FF); // imm15[8:0]
-        uint32_t target_byte_addr = static_cast<uint32_t>(instr_index) << 3; // Convert instruction index to byte address
+        uint32_t target_byte_addr = static_cast<uint32_t>(instr_index) << 3;   // Convert instruction index to byte address
 
         return fmt::format(
             "{{ "
@@ -2923,10 +2984,10 @@ namespace ps2recomp
 
         return fmt::format("{{ __m128i src = _mm_castps_si128(ctx->vu0_vf[{}]); "
                            "__m128 res = _mm_cvtepi32_ps(src); "
-                           "res = _mm_mul_ps(res, _mm_set1_ps({}f)); "
+                           "res = _mm_mul_ps(res, _mm_set1_ps({})); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
-                           vfs, scale,
+                           vfs, formatFloatLiteral(scale),
                            (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
                            (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
                            inst.rt, inst.rt);
@@ -2939,12 +3000,12 @@ namespace ps2recomp
         float scale = (shift == 0) ? 1.0f : static_cast<float>(1 << shift);
 
         return fmt::format("{{ __m128 src = ctx->vu0_vf[{}]; "
-                           "src = _mm_mul_ps(src, _mm_set1_ps({}f)); "
+                           "src = _mm_mul_ps(src, _mm_set1_ps({})); "
                            "__m128i res_i = _mm_cvttps_epi32(src); "
                            "__m128 res = _mm_castsi128_ps(res_i); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
-                           vfs, scale,
+                           vfs, formatFloatLiteral(scale),
                            (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
                            (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
                            inst.rt, inst.rt);

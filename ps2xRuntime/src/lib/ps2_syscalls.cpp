@@ -37,6 +37,7 @@ namespace ps2_syscalls
 {
 #include "syscalls/ps2_syscalls_interrupt.inl"
 #include "syscalls/ps2_syscalls_system.inl"
+    void iDeleteSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
 
     bool dispatchNumericSyscall(uint32_t syscallNumber, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
@@ -107,6 +108,7 @@ namespace ps2_syscalls
             ExitDeleteThread(rdram, ctx, runtime);
             return true;
         case 0x25:
+        case static_cast<uint32_t>(-0x26):
             TerminateThread(rdram, ctx, runtime);
             return true;
         case 0x29:
@@ -167,8 +169,10 @@ namespace ps2_syscalls
             CreateSema(rdram, ctx, runtime);
             return true;
         case 0x41:
-        case static_cast<uint32_t>(-0x49):
             DeleteSema(rdram, ctx, runtime);
+            return true;
+        case static_cast<uint32_t>(-0x49):
+            iDeleteSema(rdram, ctx, runtime);
             return true;
         case 0x42:
             SignalSema(rdram, ctx, runtime);
@@ -263,8 +267,23 @@ namespace ps2_syscalls
         case static_cast<uint32_t>(-0x71):
             GsPutIMR(rdram, ctx, runtime);
             return true;
+        case 0x73:
+            SetVSyncFlag(rdram, ctx, runtime);
+            return true;
         case 0x74:
             RegisterExitHandler(rdram, ctx, runtime);
+            return true;
+        case 0x76:
+        case static_cast<uint32_t>(-0x76):
+            ps2_stubs::sceSifDmaStat(rdram, ctx, runtime);
+            return true;
+        case 0x77:
+        case static_cast<uint32_t>(-0x77):
+            ps2_stubs::sceSifSetDma(rdram, ctx, runtime);
+            return true;
+        case 0x78:
+        case static_cast<uint32_t>(-0x78):
+            ps2_stubs::sceSifSetDChain(rdram, ctx, runtime);
             return true;
         case 0x85:
             SetMemoryMode(rdram, ctx, runtime);
@@ -278,4 +297,86 @@ namespace ps2_syscalls
 #include "syscalls/ps2_syscalls_flags.inl"
 #include "syscalls/ps2_syscalls_rpc.inl"
 #include "syscalls/ps2_syscalls_fileio.inl"
+
+    void notifyRuntimeStop()
+    {
+        stopInterruptWorker();
+        {
+            std::lock_guard<std::mutex> lock(g_irq_handler_mutex);
+            g_intcHandlers.clear();
+            g_dmacHandlers.clear();
+            g_nextIntcHandlerId = 1;
+            g_nextDmacHandlerId = 1;
+            g_enabled_intc_mask = 0xFFFFFFFFu;
+            g_enabled_dmac_mask = 0xFFFFFFFFu;
+        }
+        {
+            std::lock_guard<std::mutex> lock(g_vsync_flag_mutex);
+            g_vsync_registration = {};
+            g_vsync_tick_counter = 0u;
+        }
+
+        std::vector<std::shared_ptr<ThreadInfo>> threads;
+        threads.reserve(32);
+        {
+            std::lock_guard<std::mutex> lock(g_thread_map_mutex);
+            for (const auto &entry : g_threads)
+            {
+                if (entry.second)
+                {
+                    threads.push_back(entry.second);
+                }
+            }
+        }
+
+        for (const auto &threadInfo : threads)
+        {
+            {
+                std::lock_guard<std::mutex> lock(threadInfo->m);
+                threadInfo->forceRelease = true;
+                threadInfo->terminated = true;
+            }
+            threadInfo->cv.notify_all();
+        }
+
+        std::vector<std::shared_ptr<SemaInfo>> semas;
+        {
+            std::lock_guard<std::mutex> lock(g_sema_map_mutex);
+            semas.reserve(g_semas.size());
+            for (const auto &entry : g_semas)
+            {
+                if (entry.second)
+                {
+                    semas.push_back(entry.second);
+                }
+            }
+        }
+        for (const auto &sema : semas)
+        {
+            sema->cv.notify_all();
+        }
+
+        std::vector<std::shared_ptr<EventFlagInfo>> eventFlags;
+        {
+            std::lock_guard<std::mutex> lock(g_event_flag_map_mutex);
+            eventFlags.reserve(g_eventFlags.size());
+            for (const auto &entry : g_eventFlags)
+            {
+                if (entry.second)
+                {
+                    eventFlags.push_back(entry.second);
+                }
+            }
+        }
+        for (const auto &eventFlag : eventFlags)
+        {
+            eventFlag->cv.notify_all();
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(g_alarm_mutex);
+            g_alarms.clear();
+        }
+        g_alarm_cv.notify_all();
+    }
 }

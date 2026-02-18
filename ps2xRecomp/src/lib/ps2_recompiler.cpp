@@ -13,7 +13,7 @@
 #include <cctype>
 #include <unordered_set>
 #include <optional>
-#include <limits> 
+#include <limits>
 
 namespace fs = std::filesystem;
 
@@ -247,6 +247,11 @@ namespace ps2recomp
         try
         {
             m_config = m_configManager.loadConfig();
+            m_skipFunctions.clear();
+            m_skipFunctionStarts.clear();
+            m_stubFunctions.clear();
+            m_stubFunctionStarts.clear();
+            m_stubHandlerBindingsByStart.clear();
 
             for (const auto &name : m_config.skipFunctions)
             {
@@ -270,6 +275,19 @@ namespace ps2recomp
                 if (selector.start.has_value())
                 {
                     m_stubFunctionStarts.insert(*selector.start);
+                    if (!selector.name.empty())
+                    {
+                        auto bindingIt = m_stubHandlerBindingsByStart.find(*selector.start);
+                        if (bindingIt != m_stubHandlerBindingsByStart.end() &&
+                            bindingIt->second != selector.name)
+                        {
+                            std::cerr << "Warning: Multiple stub handler bindings for 0x"
+                                      << std::hex << *selector.start << std::dec
+                                      << " (keeping latest '" << selector.name
+                                      << "', previous '" << bindingIt->second << "')" << std::endl;
+                        }
+                        m_stubHandlerBindingsByStart[*selector.start] = selector.name;
+                    }
                 }
             }
 
@@ -356,6 +374,25 @@ namespace ps2recomp
 
             m_decoder = std::make_unique<R5900Decoder>();
             m_codeGenerator = std::make_unique<CodeGenerator>(m_symbols);
+            std::unordered_map<uint32_t, std::string> relocationCallNames;
+            relocationCallNames.reserve(m_relocations.size());
+            for (const auto &reloc : m_relocations)
+            {
+                if (reloc.symbolName.empty())
+                {
+                    continue;
+                }
+
+                auto inserted = relocationCallNames.emplace(reloc.offset, reloc.symbolName);
+                if (!inserted.second && inserted.first->second != reloc.symbolName)
+                {
+                    std::cerr << "Warning: multiple relocation symbols at 0x"
+                              << std::hex << reloc.offset << std::dec
+                              << " (keeping '" << inserted.first->second
+                              << "', ignoring '" << reloc.symbolName << "')" << std::endl;
+                }
+            }
+            m_codeGenerator->setRelocationCallNames(relocationCallNames);
             m_codeGenerator->setBootstrapInfo(m_bootstrapInfo);
 
             fs::create_directories(m_config.outputPath);
@@ -491,7 +528,9 @@ namespace ps2recomp
                     std::string generatedName = m_codeGenerator->getFunctionName(function.start);
                     std::stringstream stub;
                     stub << "void " << generatedName
-                         << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime) { ";
+                         << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime) {\n"
+                         << "    const uint32_t __entryPc = ctx->pc;\n"
+                         << "    ";
 
                     if (function.isSkipped)
                     {
@@ -499,8 +538,16 @@ namespace ps2recomp
                     }
                     else
                     {
-                        const std::string_view resolvedSyscallName = ps2_runtime_calls::resolveSyscallName(function.name);
-                        const std::string_view resolvedStubName = ps2_runtime_calls::resolveStubName(function.name);
+                        std::string dispatchName = function.name;
+                        const auto bindingIt = m_stubHandlerBindingsByStart.find(function.start);
+                        if (bindingIt != m_stubHandlerBindingsByStart.end() &&
+                            !bindingIt->second.empty())
+                        {
+                            dispatchName = bindingIt->second;
+                        }
+
+                        const std::string_view resolvedSyscallName = ps2_runtime_calls::resolveSyscallName(dispatchName);
+                        const std::string_view resolvedStubName = ps2_runtime_calls::resolveStubName(dispatchName);
                         if (!resolvedSyscallName.empty())
                         {
                             stub << "ps2_syscalls::" << resolvedSyscallName << "(rdram, ctx, runtime); ";
@@ -511,11 +558,20 @@ namespace ps2recomp
                         }
                         else
                         {
-                            stub << "ps2_stubs::TODO_NAMED(\"" << escapeCStringLiteral(function.name) << "\", rdram, ctx, runtime); ";
+                            if (dispatchName.empty())
+                            {
+                                dispatchName = function.name;
+                            }
+                            stub << "ps2_stubs::TODO_NAMED(\"" << escapeCStringLiteral(dispatchName) << "\", rdram, ctx, runtime); ";
                         }
                     }
 
-                    stub << "}";
+                    stub << "\n"
+                         << "    if (ctx->pc == __entryPc)\n"
+                         << "    {\n"
+                         << "        ctx->pc = getRegU32(ctx, 31);\n"
+                         << "    }\n"
+                         << "}";
                     m_generatedStubs[function.start] = stub.str();
                 }
             }

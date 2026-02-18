@@ -318,6 +318,8 @@ struct IrqHandlerInfo
     uint32_t cause = 0;
     uint32_t handler = 0;
     uint32_t arg = 0;
+    uint32_t gp = 0;
+    uint32_t sp = 0;
     bool enabled = true;
 };
 
@@ -357,6 +359,12 @@ std::string translatePs2Path(const char *ps2Path)
     {
         const std::size_t prefixLength = (lower.rfind("cdrom0:", 0) == 0) ? 7 : 6;
         return resolveWithBase(getConfiguredCdRoot(), pathStr.substr(prefixLength));
+    }
+
+    if (lower.rfind(kMc0Prefix, 0) == 0)
+    {
+        const std::size_t prefixLength = sizeof(kMc0Prefix) - 1;
+        return resolveWithBase(getConfiguredMcRoot(), pathStr.substr(prefixLength));
     }
 
     if (!pathStr.empty() && (pathStr.front() == '/' || pathStr.front() == '\\'))
