@@ -35,6 +35,7 @@ The translated code is very literal, with each MIPS instruction mapping to a C++
 
 * `stubs` entries generate wrappers that call known runtime syscall/stub handlers by name.
 * `stubs` also supports address bindings with `handler@0xADDRESS` for stripped games (for example `sceCdRead@0x00123456`).
+* Recompiler now tries relocation-symbol auto-binding at callsites (`J/JAL`) before raw address dispatch; when relocation symbol is known (for example `sceCdRead`), it can call runtime handlers without manual address mapping.
 * `skip` entries are not recompiled and generate explicit `ps2_stubs::TODO_NAMED(...)` wrappers.
 * Recompiled `SYSCALL` now calls `runtime->handleSyscall(...)` with the encoded syscall immediate.
 * Runtime syscall dispatch tries encoded syscall ID first, then falls back to `$v1`.
@@ -91,6 +92,7 @@ Address binding for stripped ELFs:
 
 * Use `handler@0xADDRESS` inside `general.stubs` to map a stripped function start directly to a runtime handler.
 * Example: `sceCdRead@0x00123456` binds function start `0x00123456` to `ps2_stubs::sceCdRead(...)`.
+* Before manual binding, try plain recompilation first: if ELF relocation symbols are present for calls, runtime handler routing can be inferred automatically.
 * The address must be the function start in that exact ELF build.
 * Addresses are not portable across different games/regions/builds.
 * The handler name must exist in runtime call lists (`PS2_SYSCALL_LIST` or `PS2_STUB_LIST`).

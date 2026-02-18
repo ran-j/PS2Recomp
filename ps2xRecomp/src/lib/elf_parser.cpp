@@ -1090,8 +1090,25 @@ namespace ps2recomp
                     reloc.offset = static_cast<uint32_t>(offset);
                     reloc.info = (symbol << 8) | (type & 0xFF);
                     reloc.symbol = symbol;
+                    reloc.symbolName.clear();
                     reloc.type = type;
                     reloc.addend = static_cast<int32_t>(addend);
+
+                    if (symbol < symbols.get_symbols_num())
+                    {
+                        std::string symName;
+                        ELFIO::Elf64_Addr symValue = 0;
+                        ELFIO::Elf_Xword symSize = 0;
+                        unsigned char symBind = 0;
+                        unsigned char symType = 0;
+                        ELFIO::Elf_Half symSectionIndex = 0;
+                        unsigned char symOther = 0;
+                        if (symbols.get_symbol(symbol, symName, symValue, symSize,
+                                               symBind, symType, symSectionIndex, symOther))
+                        {
+                            reloc.symbolName = symName;
+                        }
+                    }
 
                     m_relocations.push_back(reloc);
                 }

@@ -374,6 +374,25 @@ namespace ps2recomp
 
             m_decoder = std::make_unique<R5900Decoder>();
             m_codeGenerator = std::make_unique<CodeGenerator>(m_symbols);
+            std::unordered_map<uint32_t, std::string> relocationCallNames;
+            relocationCallNames.reserve(m_relocations.size());
+            for (const auto &reloc : m_relocations)
+            {
+                if (reloc.symbolName.empty())
+                {
+                    continue;
+                }
+
+                auto inserted = relocationCallNames.emplace(reloc.offset, reloc.symbolName);
+                if (!inserted.second && inserted.first->second != reloc.symbolName)
+                {
+                    std::cerr << "Warning: multiple relocation symbols at 0x"
+                              << std::hex << reloc.offset << std::dec
+                              << " (keeping '" << inserted.first->second
+                              << "', ignoring '" << reloc.symbolName << "')" << std::endl;
+                }
+            }
+            m_codeGenerator->setRelocationCallNames(relocationCallNames);
             m_codeGenerator->setBootstrapInfo(m_bootstrapInfo);
 
             fs::create_directories(m_config.outputPath);
