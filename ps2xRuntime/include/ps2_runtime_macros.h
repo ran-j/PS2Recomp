@@ -47,6 +47,7 @@ static inline uint32_t ps2_clz32(uint32_t x)
 #define PS2_BLENDV_PS(a, b, mask) _mm_blendv_ps((a), (b), (mask))
 #define PS2_MIN_EPI32(a, b) _mm_min_epi32((a), (b))
 #define PS2_MAX_EPI32(a, b) _mm_max_epi32((a), (b))
+#define PS2_SHUFFLE_EPI8(v, mask) _mm_shuffle_epi8((v), (mask))
 
 #define PS2_EXTRACT_EPI32(v, i) Ps2ExtractEpi32((v), (i))
 #define PS2_EXTRACT_EPI64(v, i) Ps2ExtractEpi64((v), (i))
