@@ -35,7 +35,10 @@ The translated code is very literal, with each MIPS instruction mapping to a C++
 
 * `stubs` entries generate wrappers that call known runtime syscall/stub handlers by name.
 * `stubs` also supports address bindings with `handler@0xADDRESS` for stripped games (for example `sceCdRead@0x00123456`).
+* Address bindings also support generic return handlers for triage: `ret0`, `ret1`, `reta0`.
 * Recompiler now tries relocation-symbol auto-binding at callsites (`J/JAL`) before raw address dispatch; when relocation symbol is known (for example `sceCdRead`), it can call runtime handlers without manual address mapping.
+* Recompiler discovers additional internal static entry targets and emits `entry_...` wrappers for those addresses.
+* For unresolved static `J/JAL` sites, generated code falls back to `runtime->lookupFunction(0x...)`.
 * `skip` entries are not recompiled and generate explicit `ps2_stubs::TODO_NAMED(...)` wrappers.
 * Recompiled `SYSCALL` now calls `runtime->handleSyscall(...)` with the encoded syscall immediate.
 * Runtime syscall dispatch tries encoded syscall ID first, then falls back to `$v1`.
@@ -84,7 +87,7 @@ Main fields in `config.toml`:
 * `general.patch_syscalls`: apply configured patches to `SYSCALL` instructions (`false` recommended).
 * `general.patch_cop0`: apply configured patches to COP0 instructions.
 * `general.patch_cache`: apply configured patches to CACHE instructions.
-* `general.stubs`: names to force as stubs. Also accepts `handler@0xADDRESS` to bind a stripped function address directly to a runtime syscall/stub handler.
+* `general.stubs`: names to force as stubs. Also accepts `handler@0xADDRESS` to bind a stripped function address directly to a runtime syscall/stub handler. Includes generic handlers `ret0`, `ret1`, `reta0`.
 * `general.skip`: names to force as skipped wrappers.
 * `patches.instructions`: raw instruction replacements by address.
 
@@ -92,6 +95,7 @@ Address binding for stripped ELFs:
 
 * Use `handler@0xADDRESS` inside `general.stubs` to map a stripped function start directly to a runtime handler.
 * Example: `sceCdRead@0x00123456` binds function start `0x00123456` to `ps2_stubs::sceCdRead(...)`.
+* Generic temporary handlers are available: `ret0@0xADDR`, `ret1@0xADDR`, `reta0@0xADDR`.
 * Before manual binding, try plain recompilation first: if ELF relocation symbols are present for calls, runtime handler routing can be inferred automatically.
 * The address must be the function start in that exact ELF build.
 * Addresses are not portable across different games/regions/builds.
@@ -114,6 +118,8 @@ stubs = ["printf", "malloc", "free"]
 
 # stripped function binding by address:
 # stubs = ["sceCdRead@0x00123456", "SifLoadModule@0x00127890"]
+# temporary return handlers:
+# stubs = ["ret0@0x001D9410", "ret1@0x001D5BC8", "reta0@0x0024B7C0"]
 # mixed example:
 # stubs = ["printf", "sceCdRead@0x00123456", "SifLoadModule@0x00127890"]
 
@@ -135,6 +141,32 @@ To execute the recompiled code.
 * Some syscall dispatcher with common kernel IDs.
 * Basic GS/VU/file/system stubs.
 * Foundation to expand and port your game.
+
+### Game Override Hooks
+
+Game overrides are runtime-side, build-scoped patch modules.
+ 
+A game override is C++ code that runs during `loadELF` and can replace function bindings by address for one specific game build. This is separate from recompilation output and separate from global runtime stubs/syscalls. 
+ 
+API:
+
+* Header: `ps2xRuntime/include/game_overrides.h`
+* Register macro: `PS2_REGISTER_GAME_OVERRIDE(name, elfName, entry, crc32, applyFn)`
+* Direct bind helper: `ps2_game_overrides::bindAddressHandler(runtime, addr, "handler")`
+
+Use Game Override modules when:
+
+* You need per-game/per-build routing or patches without polluting global behavior.
+* You need to bind many addresses, or install custom replacement logic for a specific title.
+
+#### Recommended Iteration Loop
+
+1. Run with minimal config and no aggressive skipping.
+2. Fix hard blockers first (`function not found`, syscall TODO, critical IO stubs).
+3. Use temporary return stubs only to classify call importance.
+4. Promote temporary fixes to real implementations.
+5. Move per-game hacks into game overrides keyed by ELF metadata.
+6. Re-test from cold boot after each batch.
 
 ### Limitations
 

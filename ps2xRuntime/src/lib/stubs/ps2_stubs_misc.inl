@@ -6,6 +6,24 @@ void calloc_r(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     setReturnU32(ctx, guestAddr);
 }
 
+void ret0(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    setReturnU32(ctx, 0u);
+    ctx->pc = getRegU32(ctx, 31);
+}
+
+void ret1(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    setReturnU32(ctx, 1u);
+    ctx->pc = getRegU32(ctx, 31);
+}
+
+void reta0(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    setReturnU32(ctx, getRegU32(ctx, 4));
+    ctx->pc = getRegU32(ctx, 31);
+}
+
 void free_r(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     const uint32_t guestAddr = getRegU32(ctx, 5); // $a1

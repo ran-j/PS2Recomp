@@ -1,5 +1,6 @@
 #include "ps2_runtime.h"
 #include "ps2_syscalls.h"
+#include "game_overrides.h"
 #include "ps2_runtime_macros.h"
 #include <iostream>
 #include <fstream>
@@ -506,6 +507,8 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     module.active = true;
 
     m_loadedModules.push_back(module);
+
+    ps2_game_overrides::applyMatching(*this, elfPath, m_cpuContext.pc);
 
     std::cout << "ELF file loaded successfully. Entry point: 0x" << std::hex << m_cpuContext.pc << std::dec << std::endl;
     return true;
