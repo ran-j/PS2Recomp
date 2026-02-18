@@ -124,6 +124,7 @@ namespace ps2recomp
         uint32_t offset;
         uint32_t info;
         uint32_t symbol;
+        std::string symbolName;
         uint32_t type;
         int32_t addend;
     };

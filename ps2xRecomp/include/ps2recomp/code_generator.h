@@ -40,12 +40,14 @@ namespace ps2recomp
 
         void setRenamedFunctions(const std::unordered_map<uint32_t, std::string> &renames);
         void setBootstrapInfo(const BootstrapInfo &info);
+        void setRelocationCallNames(const std::unordered_map<uint32_t, std::string> &callNames);
         std::unordered_set<uint32_t> collectInternalBranchTargets(const Function &function,
                                                                   const std::vector<Instruction> &instructions);
 
     public:
         std::unordered_map<uint32_t, Symbol> m_symbols;
         std::unordered_map<uint32_t, std::string> m_renamedFunctions;
+        std::unordered_map<uint32_t, std::string> m_relocationCallNames;
         BootstrapInfo m_bootstrapInfo;
 
         std::string translateInstruction(const Instruction &inst);
