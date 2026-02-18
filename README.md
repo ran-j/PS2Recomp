@@ -34,6 +34,7 @@ The translated code is very literal, with each MIPS instruction mapping to a C++
 ### Current Behavior
 
 * `stubs` entries generate wrappers that call known runtime syscall/stub handlers by name.
+* `stubs` also supports address bindings with `handler@0xADDRESS` for stripped games (for example `sceCdRead@0x00123456`).
 * `skip` entries are not recompiled and generate explicit `ps2_stubs::TODO_NAMED(...)` wrappers.
 * Recompiled `SYSCALL` now calls `runtime->handleSyscall(...)` with the encoded syscall immediate.
 * Runtime syscall dispatch tries encoded syscall ID first, then falls back to `$v1`.
@@ -82,9 +83,17 @@ Main fields in `config.toml`:
 * `general.patch_syscalls`: apply configured patches to `SYSCALL` instructions (`false` recommended).
 * `general.patch_cop0`: apply configured patches to COP0 instructions.
 * `general.patch_cache`: apply configured patches to CACHE instructions.
-* `general.stubs`: names to force as stubs.
+* `general.stubs`: names to force as stubs. Also accepts `handler@0xADDRESS` to bind a stripped function address directly to a runtime syscall/stub handler.
 * `general.skip`: names to force as skipped wrappers.
 * `patches.instructions`: raw instruction replacements by address.
+
+Address binding for stripped ELFs:
+
+* Use `handler@0xADDRESS` inside `general.stubs` to map a stripped function start directly to a runtime handler.
+* Example: `sceCdRead@0x00123456` binds function start `0x00123456` to `ps2_stubs::sceCdRead(...)`.
+* The address must be the function start in that exact ELF build.
+* Addresses are not portable across different games/regions/builds.
+* The handler name must exist in runtime call lists (`PS2_SYSCALL_LIST` or `PS2_STUB_LIST`).
 
 Example:
 
@@ -100,6 +109,11 @@ patch_cop0 = true
 patch_cache = true
 
 stubs = ["printf", "malloc", "free"]
+
+# stripped function binding by address:
+# stubs = ["sceCdRead@0x00123456", "SifLoadModule@0x00127890"]
+# mixed example:
+# stubs = ["printf", "sceCdRead@0x00123456", "SifLoadModule@0x00127890"]
 
 skip = ["abort", "exit"]
 
