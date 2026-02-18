@@ -45,29 +45,37 @@ static void runExitHandlersForThread(int tid, uint8_t *rdram, R5900Context *ctx,
 
 void FlushCache(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    setReturnS32(ctx, 0);
+    setReturnS32(ctx, KE_OK);
 }
 
 void ResetEE(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    std::cerr << "Syscall: ResetEE - Halting Execution (Not fully implemented)" << std::endl;
-    exit(0); // Should we exit or just halt the execution?
+    std::cerr << "Syscall: ResetEE - requesting runtime stop" << std::endl;
+    runtime->requestStop();
+    setReturnS32(ctx, KE_OK);
 }
 
 void SetMemoryMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    setReturnS32(ctx, 0);
+    setReturnS32(ctx, KE_OK);
 }
 
 void CreateThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     uint32_t paramAddr = getRegU32(ctx, 4); // $a0 points to ThreadParam
+    if (paramAddr == 0u)
+    {
+        std::cerr << "CreateThread error: null ThreadParam pointer" << std::endl;
+        setReturnS32(ctx, KE_ERROR);
+        return;
+    }
+
     const uint32_t *param = reinterpret_cast<const uint32_t *>(getConstMemPtr(rdram, paramAddr));
 
     if (!param)
     {
         std::cerr << "CreateThread error: invalid ThreadParam address 0x" << std::hex << paramAddr << std::dec << std::endl;
-        setReturnS32(ctx, -1);
+        setReturnS32(ctx, KE_ERROR);
         return;
     }
 
@@ -117,12 +125,43 @@ void CreateThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     }
 
     info->option = param[6];
+    if (info->priority == 0)
+    {
+        info->priority = 1;
+    }
+    if (info->priority >= 128)
+    {
+        info->priority = 127;
+    }
     info->currentPriority = static_cast<int>(info->priority);
 
     int id = 0;
     {
         std::lock_guard<std::mutex> lock(g_thread_map_mutex);
-        id = g_nextThreadId++;
+        // Keep IDs in the classic low range used by patched libkernel helpers.
+        for (int attempts = 0; attempts < 0xFE; ++attempts)
+        {
+            if (g_nextThreadId < 2 || g_nextThreadId > 0xFF)
+            {
+                g_nextThreadId = 2;
+            }
+
+            const int candidate = g_nextThreadId;
+            g_nextThreadId = (g_nextThreadId >= 0xFF) ? 2 : (g_nextThreadId + 1);
+
+            if (g_threads.find(candidate) == g_threads.end())
+            {
+                id = candidate;
+                break;
+            }
+        }
+
+        if (id == 0)
+        {
+            setReturnS32(ctx, KE_ERROR);
+            return;
+        }
+
         g_threads[id] = info;
     }
 
@@ -139,6 +178,12 @@ void CreateThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 void DeleteThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     int tid = static_cast<int>(getRegU32(ctx, 4)); // $a0
+    if (tid == 0)
+    {
+        setReturnS32(ctx, KE_ILLEGAL_THID);
+        return;
+    }
+
     auto info = lookupThreadInfo(tid);
     if (!info)
     {
@@ -146,18 +191,37 @@ void DeleteThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         return;
     }
 
+    uint32_t autoStackToFree = 0;
     {
         std::lock_guard<std::mutex> lock(info->m);
         if (info->status != THS_DORMANT)
         {
-            setReturnS32(ctx, KE_NOT_WAIT); // for now
+            setReturnS32(ctx, KE_NOT_DORMANT);
             return;
+        }
+
+        if (info->ownsStack && info->stack != 0)
+        {
+            autoStackToFree = info->stack;
+            info->stack = 0;
+            info->stackSize = 0;
+            info->ownsStack = false;
         }
     }
 
     {
         std::lock_guard<std::mutex> lock(g_thread_map_mutex);
         g_threads.erase(tid);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_exit_handler_mutex);
+        g_exit_handlers.erase(tid);
+    }
+
+    if (runtime && autoStackToFree != 0)
+    {
+        runtime->guestFree(autoStackToFree);
     }
 
     setReturnS32(ctx, KE_OK);
@@ -167,32 +231,24 @@ void StartThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     int tid = static_cast<int>(getRegU32(ctx, 4)); // $a0 = thread id
     uint32_t arg = getRegU32(ctx, 5);              // $a1 = user arg
+    if (tid == 0)
+    {
+        setReturnS32(ctx, KE_ILLEGAL_THID);
+        return;
+    }
 
     auto info = lookupThreadInfo(tid);
     if (!info)
     {
         std::cerr << "StartThread error: unknown thread id " << tid << std::endl;
-        setReturnS32(ctx, -1);
+        setReturnS32(ctx, KE_UNKNOWN_THID);
         return;
     }
 
-    {
-        std::lock_guard<std::mutex> lock(info->m);
-        if (info->started)
-        {
-            setReturnS32(ctx, tid); // Already started
-            return;
-        }
-
-        info->started = true;
-        info->status = THS_RUN;
-        info->arg = arg;
-    }
-
-    if (!runtime->hasFunction(info->entry))
+    if (!runtime || !runtime->hasFunction(info->entry))
     {
         std::cerr << "[StartThread] entry 0x" << std::hex << info->entry << std::dec << " is not registered" << std::endl;
-        setReturnS32(ctx, -1);
+        setReturnS32(ctx, KE_ERROR);
         return;
     }
 
@@ -201,12 +257,28 @@ void StartThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
     {
         std::lock_guard<std::mutex> lock(info->m);
+        if (info->started || info->status != THS_DORMANT)
+        {
+            setReturnS32(ctx, KE_NOT_DORMANT);
+            return;
+        }
+
+        info->started = true;
+        info->status = THS_READY;
+        info->arg = arg;
+        info->terminated = false;
+        info->forceRelease = false;
+        info->waitType = TSW_NONE;
+        info->waitId = 0;
+        info->wakeupCount = 0;
+        info->suspendCount = 0;
         if (info->stack == 0 && info->stackSize != 0)
         {
             const uint32_t autoStack = runtime->guestMalloc(info->stackSize, 16u);
             if (autoStack != 0)
             {
                 info->stack = autoStack;
+                info->ownsStack = true;
                 std::cout << "[StartThread] id=" << tid
                           << " auto-stack=0x" << std::hex << autoStack
                           << " size=0x" << info->stackSize << std::dec << std::endl;
@@ -222,14 +294,20 @@ void StartThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     }
 
     g_activeThreads.fetch_add(1, std::memory_order_relaxed);
-    std::thread([=]() mutable
-                {
+    try
+    {
+        std::thread worker([=]() mutable {
             {
                 std::string name = "PS2Thread_" + std::to_string(tid);
                 ThreadNaming::SetCurrentThreadName(name);
             }
             R5900Context threadCtxCopy{};
             R5900Context *threadCtx = &threadCtxCopy;
+
+            {
+                std::lock_guard<std::mutex> lock(info->m);
+                info->status = THS_RUN;
+            }
 
             uint32_t threadSp = callerSp;
             if (info->stack)
@@ -250,7 +328,6 @@ void StartThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             SET_GPR_U32(threadCtx, 31, 0);
             threadCtx->pc = info->entry;
 
-            PS2Runtime::RecompiledFunction func = runtime->lookupFunction(info->entry);
             g_currentThreadId = tid;
 
             std::cout << "[StartThread] id=" << tid
@@ -262,7 +339,43 @@ void StartThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             bool exited = false;
             try
             {
-                func(rdram, threadCtx, runtime);
+                uint32_t lastPc = 0xFFFFFFFFu;
+                uint32_t samePcCount = 0;
+                constexpr uint32_t kSamePcYieldMask = 0x3FFFu;
+                constexpr uint32_t kSamePcWarnInterval = 0x400000u;
+
+                while (runtime && !runtime->isStopRequested())
+                {
+                    const uint32_t pc = threadCtx->pc;
+                    if (pc == 0u)
+                    {
+                        break;
+                    }
+
+                    if (pc == lastPc)
+                    {
+                        ++samePcCount;
+                        if ((samePcCount & kSamePcYieldMask) == 0u)
+                        {
+                            std::this_thread::yield();
+                        }
+                        if ((samePcCount % kSamePcWarnInterval) == 0u)
+                        {
+                            std::cout << "[StartThread] id=" << tid
+                                      << " spinning at pc=0x" << std::hex << pc
+                                      << " ra=0x" << GPR_U32(threadCtx, 31)
+                                      << std::dec << std::endl;
+                        }
+                    }
+                    else
+                    {
+                        samePcCount = 0;
+                        lastPc = pc;
+                    }
+
+                    PS2Runtime::RecompiledFunction step = runtime->lookupFunction(pc);
+                    step(rdram, threadCtx, runtime);
+                }
             }
             catch (const ThreadExitException &)
             {
@@ -281,17 +394,64 @@ void StartThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
             runExitHandlersForThread(tid, rdram, threadCtx, runtime);
 
+            uint32_t detachedAutoStack = 0;
             {
                 std::lock_guard<std::mutex> lock(info->m);
                 info->started = false;
                 info->status = THS_DORMANT;
+                info->waitType = TSW_NONE;
+                info->waitId = 0;
+                info->wakeupCount = 0;
+                info->suspendCount = 0;
+                info->forceRelease = false;
+                info->terminated = false;
             }
 
-            g_activeThreads.fetch_sub(1, std::memory_order_relaxed); })
-        .detach();
+            bool stillRegistered = false;
+            {
+                std::lock_guard<std::mutex> lock(g_thread_map_mutex);
+                stillRegistered = (g_threads.find(tid) != g_threads.end());
+            }
+            if (!stillRegistered)
+            {
+                // ExitDeleteThread removes the record immediately; reclaim auto stack here.
+                std::lock_guard<std::mutex> lock(info->m);
+                if (info->ownsStack && info->stack != 0)
+                {
+                    detachedAutoStack = info->stack;
+                    info->stack = 0;
+                    info->stackSize = 0;
+                    info->ownsStack = false;
+                }
+            }
 
-    // for now report success to the caller.
-    setReturnS32(ctx, 0);
+            if (detachedAutoStack != 0 && runtime)
+            {
+                runtime->guestFree(detachedAutoStack);
+            }
+
+            g_activeThreads.fetch_sub(1, std::memory_order_relaxed);
+        });
+        worker.detach();
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "[StartThread] failed to spawn host thread for tid=" << tid << ": " << e.what() << std::endl;
+        g_activeThreads.fetch_sub(1, std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lock(info->m);
+        info->started = false;
+        info->status = THS_DORMANT;
+        info->waitType = TSW_NONE;
+        info->waitId = 0;
+        info->wakeupCount = 0;
+        info->suspendCount = 0;
+        info->forceRelease = false;
+        info->terminated = false;
+        setReturnS32(ctx, KE_ERROR);
+        return;
+    }
+
+    setReturnS32(ctx, KE_OK);
 }
 
 void ExitThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -350,12 +510,17 @@ void TerminateThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     auto info = (tid == g_currentThreadId) ? ensureCurrentThreadInfo(ctx) : lookupThreadInfo(tid);
     if (!info)
     {
-        setReturnS32(ctx, -1);
+        setReturnS32(ctx, KE_UNKNOWN_THID);
         return;
     }
 
     {
         std::lock_guard<std::mutex> lock(info->m);
+        if (info->status == THS_DORMANT)
+        {
+            setReturnS32(ctx, KE_DORMANT);
+            return;
+        }
         info->terminated = true;
         info->forceRelease = true;
         info->status = THS_DORMANT;
@@ -370,7 +535,7 @@ void TerminateThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         runExitHandlersForThread(tid, rdram, ctx, runtime);
         throw ThreadExitException();
     }
-    setReturnS32(ctx, 0);
+    setReturnS32(ctx, KE_OK);
 }
 
 void SuspendThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -382,7 +547,7 @@ void SuspendThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     auto info = (tid == g_currentThreadId) ? ensureCurrentThreadInfo(ctx) : lookupThreadInfo(tid);
     if (!info)
     {
-        setReturnS32(ctx, -1);
+        setReturnS32(ctx, KE_UNKNOWN_THID);
         return;
     }
 
@@ -390,7 +555,7 @@ void SuspendThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         std::lock_guard<std::mutex> lock(info->m);
         if (info->status == THS_DORMANT)
         {
-            setReturnS32(ctx, -1);
+            setReturnS32(ctx, KE_DORMANT);
             return;
         }
         info->suspendCount++;
@@ -410,7 +575,7 @@ void SuspendThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         info->status = THS_RUN;
     }
 
-    setReturnS32(ctx, 0);
+    setReturnS32(ctx, KE_OK);
 }
 
 void ResumeThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -422,15 +587,20 @@ void ResumeThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     auto info = (tid == g_currentThreadId) ? ensureCurrentThreadInfo(ctx) : lookupThreadInfo(tid);
     if (!info)
     {
-        setReturnS32(ctx, -1);
+        setReturnS32(ctx, KE_UNKNOWN_THID);
         return;
     }
 
     {
         std::lock_guard<std::mutex> lock(info->m);
+        if (info->status == THS_DORMANT)
+        {
+            setReturnS32(ctx, KE_DORMANT);
+            return;
+        }
         if (info->suspendCount <= 0)
         {
-            setReturnS32(ctx, -1);
+            setReturnS32(ctx, KE_NOT_SUSPEND);
             return;
         }
         info->suspendCount--;
@@ -447,7 +617,7 @@ void ResumeThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         }
     }
     info->cv.notify_all();
-    setReturnS32(ctx, 0);
+    setReturnS32(ctx, KE_OK);
 }
 
 void GetThreadId(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -468,14 +638,14 @@ void ReferThreadStatus(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     auto info = (tid == g_currentThreadId) ? ensureCurrentThreadInfo(ctx) : lookupThreadInfo(tid);
     if (!info)
     {
-        setReturnS32(ctx, -1);
+        setReturnS32(ctx, KE_UNKNOWN_THID);
         return;
     }
 
     ee_thread_status_t *status = reinterpret_cast<ee_thread_status_t *>(getMemPtr(rdram, statusAddr));
     if (!status)
     {
-        setReturnS32(ctx, -1);
+        setReturnS32(ctx, KE_ERROR);
         return;
     }
 
@@ -492,7 +662,7 @@ void ReferThreadStatus(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     status->waitType = info->waitType;
     status->waitId = info->waitId;
     status->wakeupCount = info->wakeupCount;
-    setReturnS32(ctx, 0);
+    setReturnS32(ctx, KE_OK);
 }
 
 void SleepThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -562,8 +732,13 @@ void WakeupThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         setReturnS32(ctx, KE_ILLEGAL_THID);
         return;
     }
+    if (tid == g_currentThreadId)
+    {
+        setReturnS32(ctx, KE_ILLEGAL_THID);
+        return;
+    }
 
-    auto info = (tid == g_currentThreadId) ? ensureCurrentThreadInfo(ctx) : lookupThreadInfo(tid);
+    auto info = lookupThreadInfo(tid);
     if (!info)
     {
         setReturnS32(ctx, KE_UNKNOWN_THID);
@@ -597,7 +772,7 @@ void WakeupThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             info->wakeupCount++;
         }
     }
-    setReturnS32(ctx, 0);
+    setReturnS32(ctx, KE_OK);
 }
 
 void iWakeupThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -614,7 +789,7 @@ void CancelWakeupThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     auto info = (tid == g_currentThreadId) ? ensureCurrentThreadInfo(ctx) : lookupThreadInfo(tid);
     if (!info)
     {
-        setReturnS32(ctx, -1);
+        setReturnS32(ctx, KE_UNKNOWN_THID);
         return;
     }
 
@@ -661,39 +836,66 @@ void ChangeThreadPriority(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime
         tid = g_currentThreadId;
 
     auto info = (tid == g_currentThreadId) ? ensureCurrentThreadInfo(ctx) : lookupThreadInfo(tid);
-    if (info)
+    if (!info)
     {
-        int oldPrio = info->currentPriority;
+        setReturnS32(ctx, KE_UNKNOWN_THID);
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(info->m);
+        if (info->status == THS_DORMANT)
+        {
+            setReturnS32(ctx, KE_DORMANT);
+            return;
+        }
+
+        if (newPrio == 0)
+        {
+            newPrio = (info->currentPriority > 0) ? info->currentPriority : 1;
+        }
+        if (newPrio <= 0 || newPrio >= 128)
+        {
+            setReturnS32(ctx, KE_ILLEGAL_PRIORITY);
+            return;
+        }
+
         info->currentPriority = newPrio;
-        setReturnS32(ctx, oldPrio); // Return old priority?
     }
-    else
-    {
-        setReturnS32(ctx, -1);
-    }
+
+    setReturnS32(ctx, KE_OK);
 }
 
 void RotateThreadReadyQueue(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     static int logCount = 0;
     int prio = static_cast<int>(getRegU32(ctx, 4));
+    if (prio == 0)
+    {
+        auto current = ensureCurrentThreadInfo(ctx);
+        if (current)
+        {
+            std::lock_guard<std::mutex> lock(current->m);
+            prio = (current->currentPriority > 0) ? current->currentPriority : 1;
+        }
+    }
     if (logCount < 16)
     {
         std::cout << "[RotateThreadReadyQueue] prio=" << prio << std::endl;
         ++logCount;
     }
-    if (prio >= 128)
+    if (prio <= 0 || prio >= 128)
     {
-        setReturnS32(ctx, -1);
+        setReturnS32(ctx, KE_ILLEGAL_PRIORITY);
         return;
     }
-    setReturnS32(ctx, 0);
+    setReturnS32(ctx, KE_OK);
 }
 
 void ReleaseWaitThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     int tid = static_cast<int>(getRegU32(ctx, 4));
-    if (tid == 0)
+    if (tid == 0 || tid == g_currentThreadId)
     {
         setReturnS32(ctx, KE_ILLEGAL_THID);
         return;
@@ -712,7 +914,7 @@ void ReleaseWaitThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
     {
         std::lock_guard<std::mutex> lock(info->m);
-        if (info->status == THS_WAIT)
+        if (info->status == THS_WAIT || info->status == THS_WAITSUSPEND)
         {
             wasWaiting = true;
             waitType = info->waitType;
@@ -755,7 +957,7 @@ void ReleaseWaitThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             eventFlag->cv.notify_all();
         }
     }
-    setReturnS32(ctx, 0);
+    setReturnS32(ctx, KE_OK);
 }
 
 void iReleaseWaitThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

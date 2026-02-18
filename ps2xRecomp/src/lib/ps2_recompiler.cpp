@@ -13,7 +13,7 @@
 #include <cctype>
 #include <unordered_set>
 #include <optional>
-#include <limits> 
+#include <limits>
 
 namespace fs = std::filesystem;
 
@@ -491,7 +491,9 @@ namespace ps2recomp
                     std::string generatedName = m_codeGenerator->getFunctionName(function.start);
                     std::stringstream stub;
                     stub << "void " << generatedName
-                         << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime) { ";
+                         << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime) {\n"
+                         << "    const uint32_t __entryPc = ctx->pc;\n"
+                         << "    ";
 
                     if (function.isSkipped)
                     {
@@ -515,7 +517,12 @@ namespace ps2recomp
                         }
                     }
 
-                    stub << "}";
+                    stub << "\n"
+                         << "    if (ctx->pc == __entryPc)\n"
+                         << "    {\n"
+                         << "        ctx->pc = getRegU32(ctx, 31);\n"
+                         << "    }\n"
+                         << "}";
                     m_generatedStubs[function.start] = stub.str();
                 }
             }

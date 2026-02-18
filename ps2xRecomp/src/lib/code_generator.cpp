@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <iostream>
 #include <cctype>
+#include <cmath>
 
 namespace ps2recomp
 {
@@ -32,6 +33,22 @@ namespace ps2recomp
     static uint32_t buildAbsoluteJumpTarget(uint32_t address, uint32_t target)
     {
         return ((address + 4) & 0xF0000000u) | (target << 2);
+    }
+
+    static std::string formatFloatLiteral(float value)
+    {
+        if (!std::isfinite(value))
+        {
+            return (value < 0.0f) ? "-INFINITY" : "INFINITY";
+        }
+
+        std::string literal = fmt::format("{:.9g}", value);
+        if (literal.find_first_of(".eE") == std::string::npos)
+        {
+            literal += ".0";
+        }
+        literal += 'f';
+        return literal;
     }
 
     static std::string sanitizeIdentifierBody(const std::string &name)
@@ -2923,10 +2940,10 @@ namespace ps2recomp
 
         return fmt::format("{{ __m128i src = _mm_castps_si128(ctx->vu0_vf[{}]); "
                            "__m128 res = _mm_cvtepi32_ps(src); "
-                           "res = _mm_mul_ps(res, _mm_set1_ps({}f)); "
+                           "res = _mm_mul_ps(res, _mm_set1_ps({})); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
-                           vfs, scale,
+                           vfs, formatFloatLiteral(scale),
                            (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
                            (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
                            inst.rt, inst.rt);
@@ -2939,12 +2956,12 @@ namespace ps2recomp
         float scale = (shift == 0) ? 1.0f : static_cast<float>(1 << shift);
 
         return fmt::format("{{ __m128 src = ctx->vu0_vf[{}]; "
-                           "src = _mm_mul_ps(src, _mm_set1_ps({}f)); "
+                           "src = _mm_mul_ps(src, _mm_set1_ps({})); "
                            "__m128i res_i = _mm_cvttps_epi32(src); "
                            "__m128 res = _mm_castsi128_ps(res_i); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
-                           vfs, scale,
+                           vfs, formatFloatLiteral(scale),
                            (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
                            (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
                            inst.rt, inst.rt);

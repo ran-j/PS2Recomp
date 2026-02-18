@@ -12,6 +12,7 @@ struct ThreadInfo
     uint32_t option = 0;
     uint32_t arg = 0;
     bool started = false;
+    bool ownsStack = false;
     uint32_t tlsBase = 0;
 
     // Thread Status
@@ -45,15 +46,19 @@ struct ThreadInfo
 // Common kernel-like error codes used by thread/event/alarm syscalls.
 constexpr int KE_OK = 0;
 constexpr int KE_ERROR = -1;
+constexpr int KE_ILLEGAL_PRIORITY = -403;
 constexpr int KE_ILLEGAL_MODE = -405;
 constexpr int KE_ILLEGAL_THID = -406;
 constexpr int KE_UNKNOWN_THID = -407;
 constexpr int KE_UNKNOWN_SEMID = -408;
 constexpr int KE_UNKNOWN_EVFID = -409;
 constexpr int KE_DORMANT = -413;
+constexpr int KE_NOT_DORMANT = -414;
+constexpr int KE_NOT_SUSPEND = -415;
 constexpr int KE_NOT_WAIT = -416;
 constexpr int KE_RELEASE_WAIT = -418;
 constexpr int KE_SEMA_ZERO = -419;
+constexpr int KE_SEMA_OVF = -420;
 constexpr int KE_EVF_COND = -421;
 constexpr int KE_EVF_MULTI = -422;
 constexpr int KE_EVF_ILPAT = -423;

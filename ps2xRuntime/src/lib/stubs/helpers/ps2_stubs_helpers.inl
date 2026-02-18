@@ -20,6 +20,12 @@ namespace
     std::filesystem::path g_cdLeafIndexRoot;
     bool g_cdLeafIndexBuilt = false;
     uint32_t g_nextPseudoLbn = kCdPseudoLbnStart;
+    std::filesystem::path g_cdAutoImagePath;
+    std::filesystem::path g_cdAutoImageRoot;
+    bool g_cdAutoImageSearched = false;
+    std::filesystem::path g_cdImageSizePath;
+    uint64_t g_cdImageSizeBytes = 0;
+    bool g_cdImageSizeValid = false;
     int32_t g_lastCdError = 0;
     uint32_t g_cdMode = 0;
     uint32_t g_cdStreamingLbn = 0;
@@ -120,9 +126,174 @@ namespace
         return ec ? std::filesystem::path(".") : cwd.lexically_normal();
     }
 
+    bool hasCdImageExtension(const std::filesystem::path &path)
+    {
+        const std::string ext = toLowerAscii(path.extension().string());
+        return ext == ".iso" || ext == ".bin" || ext == ".img" || ext == ".mdf" || ext == ".nrg";
+    }
+
+    bool trySelectBestDiscImageFromDirectory(const std::filesystem::path &dir,
+                                             std::filesystem::path &pathOut)
+    {
+        std::error_code ec;
+        if (!std::filesystem::exists(dir, ec) || ec || !std::filesystem::is_directory(dir, ec))
+        {
+            return false;
+        }
+
+        std::filesystem::path bestPath;
+        uint64_t bestSize = 0;
+        for (const auto &entry : std::filesystem::directory_iterator(
+                 dir, std::filesystem::directory_options::skip_permission_denied, ec))
+        {
+            if (ec)
+            {
+                break;
+            }
+
+            if (!entry.is_regular_file())
+            {
+                continue;
+            }
+            if (!hasCdImageExtension(entry.path()))
+            {
+                continue;
+            }
+
+            std::error_code sizeEc;
+            const uint64_t size = static_cast<uint64_t>(entry.file_size(sizeEc));
+            if (sizeEc || size < (64ull * 1024ull * 1024ull))
+            {
+                continue;
+            }
+
+            if (size > bestSize)
+            {
+                bestSize = size;
+                bestPath = entry.path();
+            }
+        }
+
+        if (bestPath.empty())
+        {
+            return false;
+        }
+
+        pathOut = bestPath;
+        return true;
+    }
+
+    std::filesystem::path autoDetectCdImagePath()
+    {
+        const PS2Runtime::IoPaths &paths = PS2Runtime::getIoPaths();
+        std::vector<std::filesystem::path> roots;
+
+        const std::filesystem::path cdRoot = getCdRootPath();
+        if (!cdRoot.empty())
+        {
+            roots.push_back(cdRoot);
+            std::filesystem::path parent = cdRoot;
+            for (int i = 0; i < 4; ++i)
+            {
+                parent = parent.parent_path();
+                if (parent.empty())
+                {
+                    break;
+                }
+                roots.push_back(parent);
+            }
+        }
+
+        if (!paths.hostRoot.empty())
+        {
+            roots.push_back(paths.hostRoot);
+        }
+        if (!paths.elfDirectory.empty())
+        {
+            roots.push_back(paths.elfDirectory);
+        }
+
+        std::filesystem::path bestPath;
+        uint64_t bestSize = 0;
+        std::unordered_set<std::string> seenRoots;
+        for (const std::filesystem::path &root : roots)
+        {
+            if (root.empty())
+            {
+                continue;
+            }
+
+            const std::string key = toLowerAscii(root.lexically_normal().string());
+            if (!seenRoots.emplace(key).second)
+            {
+                continue;
+            }
+
+            std::filesystem::path candidate;
+            if (!trySelectBestDiscImageFromDirectory(root, candidate))
+            {
+                continue;
+            }
+
+            std::error_code sizeEc;
+            const uint64_t size = static_cast<uint64_t>(std::filesystem::file_size(candidate, sizeEc));
+            if (sizeEc || size <= bestSize)
+            {
+                continue;
+            }
+
+            bestSize = size;
+            bestPath = candidate;
+        }
+
+        if (!bestPath.empty())
+        {
+            std::cout << "[CD] Auto-detected disc image: " << bestPath.string() << std::endl;
+        }
+        return bestPath;
+    }
+
     std::filesystem::path getCdImagePath()
     {
-        return PS2Runtime::getIoPaths().cdImage;
+        const PS2Runtime::IoPaths &paths = PS2Runtime::getIoPaths();
+        if (!paths.cdImage.empty())
+        {
+            return paths.cdImage;
+        }
+
+        const std::filesystem::path cdRoot = getCdRootPath();
+        if (!g_cdAutoImageSearched || g_cdAutoImageRoot != cdRoot)
+        {
+            g_cdAutoImageRoot = cdRoot;
+            g_cdAutoImagePath = autoDetectCdImagePath();
+            g_cdAutoImageSearched = true;
+        }
+
+        return g_cdAutoImagePath;
+    }
+
+    bool tryGetCdImageTotalSectors(uint64_t &totalSectorsOut)
+    {
+        const std::filesystem::path imagePath = getCdImagePath();
+        if (imagePath.empty())
+        {
+            return false;
+        }
+
+        if (!g_cdImageSizeValid || g_cdImageSizePath != imagePath)
+        {
+            std::error_code ec;
+            g_cdImageSizeBytes = static_cast<uint64_t>(std::filesystem::file_size(imagePath, ec));
+            g_cdImageSizePath = imagePath;
+            g_cdImageSizeValid = !ec;
+        }
+        if (!g_cdImageSizeValid)
+        {
+            return false;
+        }
+
+        totalSectorsOut = g_cdImageSizeBytes / static_cast<uint64_t>(kCdSectorSize);
+        return true;
     }
 
     uint32_t sectorsForBytes(uint64_t byteCount)
@@ -348,6 +519,18 @@ namespace
         const std::filesystem::path cdImage = getCdImagePath();
         if (!cdImage.empty())
         {
+            uint64_t totalSectors = 0;
+            if (tryGetCdImageTotalSectors(totalSectors))
+            {
+                const uint64_t start = static_cast<uint64_t>(lbn);
+                const uint64_t end = start + static_cast<uint64_t>(sectors);
+                if (start >= totalSectors || end > totalSectors)
+                {
+                    g_lastCdError = -1;
+                    return false;
+                }
+            }
+
             const uint64_t offset = static_cast<uint64_t>(lbn) * kCdSectorSize;
             return readHostRange(cdImage, offset, dst, byteCount);
         }
@@ -356,6 +539,26 @@ namespace
                   << " sectors=" << std::dec << sectors
                   << " (no mapped file and no configured CD image)" << std::endl;
         g_lastCdError = -1;
+        return false;
+    }
+
+    bool isResolvableCdLbn(uint32_t lbn)
+    {
+        for (const auto &[key, entry] : g_cdFilesByKey)
+        {
+            const uint32_t endLbn = entry.baseLbn + entry.sectors;
+            if (lbn >= entry.baseLbn && lbn < endLbn)
+            {
+                return true;
+            }
+        }
+
+        uint64_t totalSectors = 0;
+        if (tryGetCdImageTotalSectors(totalSectors))
+        {
+            return static_cast<uint64_t>(lbn) < totalSectors;
+        }
+
         return false;
     }
 
