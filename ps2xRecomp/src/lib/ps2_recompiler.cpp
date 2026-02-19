@@ -14,6 +14,7 @@
 #include <unordered_set>
 #include <optional>
 #include <limits>
+#include <functional>
 
 namespace fs = std::filesystem;
 
@@ -232,6 +233,283 @@ namespace ps2recomp
 
             selector.name = trimmed;
             return selector;
+        }
+
+        struct EntryDiscoveryStats
+        {
+            size_t discoveredCount = 0;
+            size_t passCount = 0;
+        };
+
+        EntryDiscoveryStats discoverAdditionalEntryPointsImpl(
+            std::vector<Function> &functions,
+            std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions,
+            const std::vector<Section> &sections,
+            const std::function<bool(Function &)> &decodeExternalFunction)
+        {
+            std::unordered_set<uint32_t> existingStarts;
+            for (const auto &function : functions)
+            {
+                existingStarts.insert(function.start);
+            }
+
+            auto isExecutableAddress = [&](uint32_t address) -> bool
+            {
+                for (const auto &section : sections)
+                {
+                    if (!section.isCode)
+                    {
+                        continue;
+                    }
+                    if (address >= section.address && address < (section.address + section.size))
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            };
+
+            auto getStaticEntryTarget = [](const Instruction &inst) -> std::optional<uint32_t>
+            {
+                if (inst.opcode == OPCODE_J || inst.opcode == OPCODE_JAL)
+                {
+                    return decodeAbsoluteJumpTarget(inst.address, inst.target);
+                }
+
+                if (inst.opcode == OPCODE_SPECIAL &&
+                    (inst.function == SPECIAL_JR || inst.function == SPECIAL_JALR))
+                {
+                    return std::nullopt;
+                }
+
+                return std::nullopt;
+            };
+
+            auto findContainingFunction = [&](uint32_t address) -> const Function *
+            {
+                const Function *best = nullptr;
+                for (const auto &function : functions)
+                {
+                    if (address < function.start || address >= function.end)
+                    {
+                        continue;
+                    }
+
+                    if (!function.isRecompiled || function.isStub || function.isSkipped)
+                    {
+                        continue;
+                    }
+
+                    auto decodedIt = decodedFunctions.find(function.start);
+                    if (decodedIt == decodedFunctions.end())
+                    {
+                        continue;
+                    }
+
+                    const auto &decoded = decodedIt->second;
+                    const bool hasAddress = std::any_of(decoded.begin(), decoded.end(),
+                                                        [&](const Instruction &candidate)
+                                                        { return candidate.address == address; });
+                    if (!hasAddress)
+                    {
+                        continue;
+                    }
+
+                    if (!best || function.start > best->start)
+                    {
+                        best = &function;
+                    }
+                }
+                return best;
+            };
+
+            EntryDiscoveryStats stats{};
+
+            while (true)
+            {
+                ++stats.passCount;
+                struct PendingEntry
+                {
+                    uint32_t target = 0;
+                    std::optional<uint32_t> containingStart;
+                    uint32_t containingEnd = 0;
+                };
+
+                std::vector<PendingEntry> pendingEntries;
+                std::vector<Function> newEntries;
+                std::unordered_set<uint32_t> pendingStarts;
+
+                for (const auto &function : functions)
+                {
+                    if (!function.isRecompiled || function.isStub || function.isSkipped)
+                    {
+                        continue;
+                    }
+
+                    auto decodedIt = decodedFunctions.find(function.start);
+                    if (decodedIt == decodedFunctions.end())
+                    {
+                        continue;
+                    }
+
+                    const auto &instructions = decodedIt->second;
+
+                    for (const auto &inst : instructions)
+                    {
+                        auto targetOpt = getStaticEntryTarget(inst);
+                        if (!targetOpt.has_value())
+                        {
+                            continue;
+                        }
+
+                        uint32_t target = targetOpt.value();
+
+                        if ((target & 0x3) != 0 || !isExecutableAddress(target))
+                        {
+                            continue;
+                        }
+
+                        if (existingStarts.contains(target) || pendingStarts.contains(target))
+                        {
+                            continue;
+                        }
+
+                        const Function *containingFunction = findContainingFunction(target);
+                        if (containingFunction && containingFunction->start == function.start)
+                        {
+                            // Internal branches within the same function are handled as labels/gotos and should not produce separate entry wrappers.
+                            continue;
+                        }
+
+                        PendingEntry pending{};
+                        pending.target = target;
+                        if (containingFunction)
+                        {
+                            pending.containingStart = containingFunction->start;
+                            pending.containingEnd = containingFunction->end;
+                        }
+
+                        pendingEntries.push_back(pending);
+                        pendingStarts.insert(target);
+                    }
+                }
+
+                if (pendingEntries.empty())
+                {
+                    break;
+                }
+
+                std::sort(pendingEntries.begin(), pendingEntries.end(),
+                          [](const PendingEntry &a, const PendingEntry &b)
+                          { return a.target < b.target; });
+
+                std::vector<uint32_t> boundaryStarts;
+                boundaryStarts.reserve(existingStarts.size() + pendingStarts.size());
+                boundaryStarts.insert(boundaryStarts.end(), existingStarts.begin(), existingStarts.end());
+                boundaryStarts.insert(boundaryStarts.end(), pendingStarts.begin(), pendingStarts.end());
+                std::sort(boundaryStarts.begin(), boundaryStarts.end());
+                boundaryStarts.erase(std::unique(boundaryStarts.begin(), boundaryStarts.end()), boundaryStarts.end());
+
+                auto findNextBoundaryStart = [&](uint32_t address) -> std::optional<uint32_t>
+                {
+                    auto it = std::upper_bound(boundaryStarts.begin(), boundaryStarts.end(), address);
+                    if (it == boundaryStarts.end())
+                    {
+                        return std::nullopt;
+                    }
+                    return *it;
+                };
+
+                std::unordered_set<uint32_t> successfulStarts;
+
+                for (const auto &pending : pendingEntries)
+                {
+                    const uint32_t target = pending.target;
+
+                    Function entryFunction;
+                    std::stringstream name;
+                    name << "entry_" << std::hex << target;
+                    entryFunction.name = name.str();
+                    entryFunction.start = target;
+                    entryFunction.isStub = false;
+                    entryFunction.isSkipped = false;
+                    entryFunction.isRecompiled = true;
+
+                    if (pending.containingStart.has_value())
+                    {
+                        auto containingDecodedIt = decodedFunctions.find(*pending.containingStart);
+                        if (containingDecodedIt == decodedFunctions.end())
+                        {
+                            continue;
+                        }
+
+                        const auto &containingInstructions = containingDecodedIt->second;
+                        auto sliceIt = std::find_if(containingInstructions.begin(), containingInstructions.end(),
+                                                    [&](const Instruction &candidate)
+                                                    { return candidate.address == target; });
+
+                        if (sliceIt == containingInstructions.end())
+                        {
+                            continue;
+                        }
+
+                        uint32_t sliceEndAddress = pending.containingEnd;
+                        auto nextStartOpt = findNextBoundaryStart(target);
+                        if (nextStartOpt.has_value() && nextStartOpt.value() < sliceEndAddress)
+                        {
+                            sliceEndAddress = nextStartOpt.value();
+                        }
+
+                        if (sliceEndAddress <= target)
+                        {
+                            continue;
+                        }
+
+                        auto sliceEndIt = std::find_if(sliceIt, containingInstructions.end(),
+                                                       [&](const Instruction &candidate)
+                                                       { return candidate.address >= sliceEndAddress; });
+                        if (sliceEndIt == sliceIt)
+                        {
+                            continue;
+                        }
+
+                        std::vector<Instruction> slicedInstructions(sliceIt, sliceEndIt);
+                        decodedFunctions[target] = std::move(slicedInstructions);
+                        entryFunction.end = sliceEndAddress;
+                    }
+                    else
+                    {
+                        auto nextStartOpt = findNextBoundaryStart(target);
+                        if (!nextStartOpt.has_value() || nextStartOpt.value() <= target)
+                        {
+                            continue;
+                        }
+
+                        entryFunction.end = nextStartOpt.value();
+                        if (!decodeExternalFunction(entryFunction))
+                        {
+                            continue;
+                        }
+                    }
+
+                    newEntries.push_back(entryFunction);
+                    successfulStarts.insert(target);
+                }
+
+                if (newEntries.empty())
+                {
+                    break;
+                }
+
+                stats.discoveredCount += newEntries.size();
+                functions.insert(functions.end(), newEntries.begin(), newEntries.end());
+                existingStarts.insert(successfulStarts.begin(), successfulStarts.end());
+                std::sort(functions.begin(), functions.end(),
+                          [](const Function &a, const Function &b)
+                          { return a.start < b.start; });
+            }
+
+            return stats;
         }
     }
 
@@ -481,6 +759,19 @@ namespace ps2recomp
                 {
                     sanitized = "func";
                 }
+
+                if (sanitized.rfind("entry_", 0) == 0)
+                {
+                    std::stringstream expectedStartName;
+                    expectedStartName << "entry_" << std::hex << function.start;
+                    if (sanitized == expectedStartName.str())
+                    {
+                        std::stringstream entryName;
+                        entryName << sanitized << "_0x" << std::hex << function.end;
+                        return entryName.str();
+                    }
+                }
+
                 std::stringstream ss;
                 ss << sanitized << "_0x" << std::hex << function.start;
                 return ss.str();
@@ -784,203 +1075,18 @@ namespace ps2recomp
 
     void PS2Recompiler::discoverAdditionalEntryPoints()
     {
-        std::unordered_set<uint32_t> existingStarts;
-        for (const auto &function : m_functions)
+        const EntryDiscoveryStats stats = discoverAdditionalEntryPointsImpl(
+            m_functions,
+            m_decodedFunctions,
+            m_sections,
+            [&](Function &entryFunction)
+            { return decodeFunction(entryFunction); });
+
+        if (stats.discoveredCount > 0)
         {
-            existingStarts.insert(function.start);
-        }
-
-        auto getStaticEntryTarget = [](const Instruction &inst) -> std::optional<uint32_t>
-        {
-            if (inst.opcode == OPCODE_J || inst.opcode == OPCODE_JAL)
-            {
-                return decodeAbsoluteJumpTarget(inst.address, inst.target);
-            }
-
-            if (inst.opcode == OPCODE_SPECIAL &&
-                (inst.function == SPECIAL_JR || inst.function == SPECIAL_JALR))
-            {
-                return std::nullopt;
-            }
-
-            return std::nullopt;
-        };
-
-        auto findContainingFunction = [&](uint32_t address) -> const Function *
-        {
-            const Function *best = nullptr;
-            for (const auto &function : m_functions)
-            {
-                if (address < function.start || address >= function.end)
-                {
-                    continue;
-                }
-
-                if (!function.isRecompiled || function.isStub || function.isSkipped)
-                {
-                    continue;
-                }
-
-                auto decodedIt = m_decodedFunctions.find(function.start);
-                if (decodedIt == m_decodedFunctions.end())
-                {
-                    continue;
-                }
-
-                const auto &decoded = decodedIt->second;
-                const bool hasAddress = std::any_of(decoded.begin(), decoded.end(),
-                                                    [&](const Instruction &candidate)
-                                                    { return candidate.address == address; });
-                if (!hasAddress)
-                {
-                    continue;
-                }
-
-                if (!best || function.start > best->start)
-                {
-                    best = &function;
-                }
-            }
-            return best;
-        };
-
-        auto findNextFunctionStart = [&](uint32_t address) -> std::optional<uint32_t>
-        {
-            uint32_t nextStart = std::numeric_limits<uint32_t>::max();
-            for (const auto &function : m_functions)
-            {
-                if (function.start > address && function.start < nextStart)
-                {
-                    nextStart = function.start;
-                }
-            }
-
-            if (nextStart == std::numeric_limits<uint32_t>::max())
-            {
-                return std::nullopt;
-            }
-
-            return nextStart;
-        };
-
-        size_t totalDiscovered = 0;
-        size_t passCount = 0;
-
-        while (true)
-        {
-            ++passCount;
-            std::vector<Function> newEntries;
-
-            for (const auto &function : m_functions)
-            {
-                if (!function.isRecompiled || function.isStub || function.isSkipped)
-                {
-                    continue;
-                }
-
-                auto decodedIt = m_decodedFunctions.find(function.start);
-                if (decodedIt == m_decodedFunctions.end())
-                {
-                    continue;
-                }
-
-                const auto &instructions = decodedIt->second;
-
-                for (const auto &inst : instructions)
-                {
-                    auto targetOpt = getStaticEntryTarget(inst);
-                    if (!targetOpt.has_value())
-                    {
-                        continue;
-                    }
-
-                    uint32_t target = targetOpt.value();
-
-                    if ((target & 0x3) != 0 || !m_elfParser->isValidAddress(target))
-                    {
-                        continue;
-                    }
-
-                    if (existingStarts.contains(target))
-                    {
-                        continue;
-                    }
-
-                    const Function *containingFunction = findContainingFunction(target);
-                    if (containingFunction && containingFunction->start == function.start)
-                    {
-                        // Internal branches within the same function are handled as labels/gotos and should not produce separate entry wrappers.
-                        continue;
-                    }
-
-                    Function entryFunction;
-                    std::stringstream name;
-                    name << "entry_" << std::hex << target;
-                    entryFunction.name = name.str();
-                    entryFunction.start = target;
-                    entryFunction.isStub = false;
-                    entryFunction.isSkipped = false;
-                    entryFunction.isRecompiled = true;
-
-                    if (containingFunction)
-                    {
-                        auto containingDecodedIt = m_decodedFunctions.find(containingFunction->start);
-                        if (containingDecodedIt == m_decodedFunctions.end())
-                        {
-                            continue;
-                        }
-
-                        const auto &containingInstructions = containingDecodedIt->second;
-                        auto sliceIt = std::find_if(containingInstructions.begin(), containingInstructions.end(),
-                                                    [&](const Instruction &candidate)
-                                                    { return candidate.address == target; });
-
-                        if (sliceIt == containingInstructions.end())
-                        {
-                            continue;
-                        }
-
-                        std::vector<Instruction> slicedInstructions(sliceIt, containingInstructions.end());
-                        m_decodedFunctions[target] = slicedInstructions;
-                        entryFunction.end = containingFunction->end;
-                    }
-                    else
-                    {
-                        auto nextStartOpt = findNextFunctionStart(target);
-                        if (!nextStartOpt.has_value() || nextStartOpt.value() <= target)
-                        {
-                            continue;
-                        }
-
-                        entryFunction.end = nextStartOpt.value();
-                        if (!decodeFunction(entryFunction))
-                        {
-                            continue;
-                        }
-                    }
-
-                    newEntries.push_back(entryFunction);
-                    existingStarts.insert(target);
-                }
-            }
-
-            if (newEntries.empty())
-            {
-                break;
-            }
-
-            totalDiscovered += newEntries.size();
-            m_functions.insert(m_functions.end(), newEntries.begin(), newEntries.end());
-            std::sort(m_functions.begin(), m_functions.end(),
-                      [](const Function &a, const Function &b)
-                      { return a.start < b.start; });
-        }
-
-        if (totalDiscovered > 0)
-        {
-            std::cout << "Discovered " << totalDiscovered
+            std::cout << "Discovered " << stats.discoveredCount
                       << " additional entry point(s) inside existing functions across "
-                      << passCount << " pass(es)." << std::endl;
+                      << stats.passCount << " pass(es)." << std::endl;
         }
     }
 
@@ -1108,10 +1214,12 @@ namespace ps2recomp
     std::filesystem::path PS2Recompiler::getOutputPath(const Function &function) const
     {
         std::string safeName;
+        bool usedRenamedName = false;
         auto renameIt = m_functionRenames.find(function.start);
         if (renameIt != m_functionRenames.end() && !renameIt->second.empty())
         {
             safeName = renameIt->second;
+            usedRenamedName = true;
         }
         else
         {
@@ -1130,13 +1238,16 @@ namespace ps2recomp
             safeName = ss.str();
         }
 
-        std::stringstream suffix;
-        suffix << "_0x" << std::hex << function.start;
-        const std::string suffixText = suffix.str();
-        if (safeName.size() < suffixText.size() ||
-            safeName.compare(safeName.size() - suffixText.size(), suffixText.size(), suffixText) != 0)
+        if (!usedRenamedName)
         {
-            safeName += suffixText;
+            std::stringstream suffix;
+            suffix << "_0x" << std::hex << function.start;
+            const std::string suffixText = suffix.str();
+            if (safeName.size() < suffixText.size() ||
+                safeName.compare(safeName.size() - suffixText.size(), suffixText.size(), suffixText) != 0)
+            {
+                safeName += suffixText;
+            }
         }
 
         std::filesystem::path outputPath = m_config.outputPath;
@@ -1164,6 +1275,20 @@ namespace ps2recomp
         }
 
         return sanitized;
+    }
+
+    size_t PS2Recompiler::DiscoverAdditionalEntryPoints(
+        std::vector<Function> &functions,
+        std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions,
+        const std::vector<Section> &sections)
+    {
+        const EntryDiscoveryStats stats = discoverAdditionalEntryPointsImpl(
+            functions,
+            decodedFunctions,
+            sections,
+            [](Function &)
+            { return false; });
+        return stats.discoveredCount;
     }
 
     StubTarget PS2Recompiler::resolveStubTarget(const std::string &name)
