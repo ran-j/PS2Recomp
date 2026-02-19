@@ -1657,7 +1657,7 @@ namespace ps2recomp
         switch (subfunc)
         {
         case MMI3_PMADDUW:
-            return fmt::format("Unhandled PMADDUW instruction: function 0x{:X}", subfunc);
+            return fmt::format("// Unhandled PMADDUW instruction: function 0x{:X}", subfunc);
         case MMI3_PSRAVW:
             return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PSRAVW(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
         case MMI3_PMTHI:
