@@ -472,6 +472,10 @@ void register_code_generator_tests()
 
             t.IsTrue(generated.find("SET_GPR_U32(ctx, 31, 0xA008u);") != std::string::npos, "JAL should set RA");
             t.IsTrue(generated.find("some_func(rdram, ctx, runtime);") != std::string::npos, "JAL should call function");
+            t.IsTrue(generated.find("const uint32_t __entryPc = ctx->pc;") != std::string::npos,
+                     "JAL should capture entry PC before call");
+            t.IsTrue(generated.find("if (ctx->pc == __entryPc) { ctx->pc = 0xA008u; }") != std::string::npos,
+                     "JAL should recover fallthrough when callee leaves ctx->pc unchanged");
             t.IsTrue(generated.find("if (ctx->pc != 0xA008u) { return; }") != std::string::npos, "JAL should check return PC");
         });
 
@@ -520,7 +524,11 @@ void register_code_generator_tests()
             t.IsTrue(generated.find("SET_GPR_U32(ctx, 31, 0xD008u);") != std::string::npos, "JALR should set link register");
             t.IsTrue(generated.find("auto targetFn = runtime->lookupFunction(jumpTarget);") != std::string::npos, "JALR should lookup function");
             t.IsTrue(generated.find("targetFn(rdram, ctx, runtime);") != std::string::npos, "JALR should call function");
-             t.IsTrue(generated.find("if (ctx->pc != 0xD008u) { return; }") != std::string::npos, "JALR should check return PC");
+            t.IsTrue(generated.find("const uint32_t __entryPc = ctx->pc;") != std::string::npos,
+                     "JALR should capture entry PC before indirect call");
+            t.IsTrue(generated.find("if (ctx->pc == __entryPc) { ctx->pc = 0xD008u; }") != std::string::npos,
+                     "JALR should recover fallthrough when callee leaves ctx->pc unchanged");
+            t.IsTrue(generated.find("if (ctx->pc != 0xD008u) { return; }") != std::string::npos, "JALR should check return PC");
         }); 
 
         tc.Run("backward BEQ emits label and goto (sign-extended offset)", [](TestCase &t) {
@@ -612,6 +620,65 @@ void register_code_generator_tests()
 
             t.IsTrue(generated.find("switch (jumpTarget)") != std::string::npos, "JR $31 should emit switch for internal targets");
             t.IsTrue(generated.find("case 0x1308u: goto label_1308;") != std::string::npos, "switch should include return address from internal JAL");
+        });
+
+        tc.Run("JR non-RA emits switch for in-function jump targets", [](TestCase &t) {
+            Function func;
+            func.name = "jr_non_ra_switch";
+            func.start = 0x1400;
+            func.end = 0x1420;
+            func.isRecompiled = true;
+            func.isStub = false;
+
+            // 0x1400: nop
+            // 0x1404: jr $16 (register jump)
+            // 0x1408: nop (delay slot)
+            // 0x140c: nop
+            Instruction i0 = makeNop(0x1400);
+            Instruction jr = makeJr(0x1404, 16);
+            Instruction delay = makeNop(0x1408);
+            Instruction i3 = makeNop(0x140c);
+
+            CodeGenerator gen({});
+            std::string generated = gen.generateFunction(func, {i0, jr, delay, i3}, false);
+            printGeneratedCode("JR non-RA emits switch for in-function jump targets", generated);
+
+            t.IsTrue(generated.find("switch (jumpTarget)") != std::string::npos,
+                     "JR via non-RA register should emit switch for internal targets");
+            t.IsTrue(generated.find("case 0x1400u: goto label_1400;") != std::string::npos,
+                     "switch should include in-function entry label");
+            t.IsTrue(generated.find("case 0x140Cu: goto label_140c;") != std::string::npos,
+                     "switch should include other in-function labels");
+        });
+
+        tc.Run("JALR includes switch and fallback/guard pair", [](TestCase &t) {
+            Function func;
+            func.name = "jalr_switch_and_fallback";
+            func.start = 0x1500;
+            func.end = 0x1530;
+            func.isRecompiled = true;
+            func.isStub = false;
+
+            // A call-like setup so there are multiple in-function labels to dispatch to.
+            Instruction jal = makeJal(0x1500, 0x1510);
+            Instruction jalDelay = makeNop(0x1504);
+            Instruction atReturn = makeNop(0x1508);
+            Instruction atTarget = makeNop(0x1510);
+            Instruction jalr = makeJalr(0x1514, 4, 31);
+            Instruction jalrDelay = makeNop(0x1518);
+
+            CodeGenerator gen({});
+            std::string generated = gen.generateFunction(func, {jal, jalDelay, atReturn, atTarget, jalr, jalrDelay}, false);
+            printGeneratedCode("JALR includes switch and fallback/guard pair", generated);
+
+            t.IsTrue(generated.find("switch (jumpTarget)") != std::string::npos,
+                     "JALR should emit switch when in-function register-jump targets exist");
+            t.IsTrue(generated.find("case 0x1508u: goto label_1508;") != std::string::npos,
+                     "switch should include internal return label from JAL in same function");
+            t.IsTrue(generated.find("if (ctx->pc == __entryPc) { ctx->pc = 0x151Cu; }") != std::string::npos,
+                     "JALR should contain unchanged-PC fallback to fallthrough");
+            t.IsTrue(generated.find("if (ctx->pc != 0x151Cu) { return; }") != std::string::npos,
+                     "JALR should retain non-fallthrough guard");
         });
 
         tc.Run("resolveStubTarget allows leading underscore alias", [](TestCase &t) {

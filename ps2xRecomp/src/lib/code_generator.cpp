@@ -186,8 +186,7 @@ namespace ps2recomp
 
         std::vector<uint32_t> sortedInternalTargets;
         if (branchInst.opcode == OPCODE_SPECIAL &&
-            branchInst.function == SPECIAL_JR &&
-            rs_reg == 31 &&
+            (branchInst.function == SPECIAL_JR || branchInst.function == SPECIAL_JALR) &&
             !internalTargets.empty())
         {
             sortedInternalTargets.reserve(internalTargets.size());
@@ -260,7 +259,11 @@ namespace ps2recomp
                     }
                     else
                     {
-                        ss << "    " << funcName << "(rdram, ctx, runtime);\n";
+                        ss << "    {\n";
+                        ss << "        const uint32_t __entryPc = ctx->pc;\n";
+                        ss << "        " << funcName << "(rdram, ctx, runtime);\n";
+                        ss << fmt::format("        if (ctx->pc == __entryPc) {{ ctx->pc = 0x{:X}u; }}\n", fallthroughPc);
+                        ss << "    }\n";
                         ss << fmt::format("    if (ctx->pc != 0x{:X}u) {{ return; }}\n", fallthroughPc);
                     }
                 }
@@ -303,6 +306,7 @@ namespace ps2recomp
                     {
                         ss << "    {\n";
                         ss << fmt::format("        auto targetFn = runtime->lookupFunction(0x{:X}u);\n", target);
+                        ss << "        const uint32_t __entryPc = ctx->pc;\n";
                         ss << "        targetFn(rdram, ctx, runtime);\n";
                         if (branchInst.opcode == OPCODE_J)
                         {
@@ -310,6 +314,7 @@ namespace ps2recomp
                         }
                         else
                         {
+                            ss << fmt::format("        if (ctx->pc == __entryPc) {{ ctx->pc = 0x{:X}u; }}\n", fallthroughPc);
                             ss << fmt::format("        if (ctx->pc != 0x{:X}u) {{ return; }}\n", fallthroughPc);
                         }
                         ss << "    }\n";
@@ -339,7 +344,7 @@ namespace ps2recomp
 
             ss << "        ctx->pc = jumpTarget;\n";
 
-            if (branchInst.function == SPECIAL_JR && rs_reg == 31 && !sortedInternalTargets.empty())
+            if (!sortedInternalTargets.empty())
             {
                 ss << "        switch (jumpTarget) {\n";
                 for (uint32_t t : sortedInternalTargets)
@@ -358,7 +363,9 @@ namespace ps2recomp
             {
                 ss << "        {\n";
                 ss << "            auto targetFn = runtime->lookupFunction(jumpTarget);\n";
+                ss << "            const uint32_t __entryPc = ctx->pc;\n";
                 ss << "            targetFn(rdram, ctx, runtime);\n";
+                ss << fmt::format("            if (ctx->pc == __entryPc) {{ ctx->pc = 0x{:X}u; }}\n", fallthroughPc);
                 ss << fmt::format("            if (ctx->pc != 0x{:X}u) {{ return; }}\n", fallthroughPc);
                 ss << "        }\n";
             }
@@ -558,10 +565,17 @@ namespace ps2recomp
         std::unordered_set<uint32_t> targets;
         std::unordered_set<uint32_t> instructionAddresses;
         instructionAddresses.reserve(instructions.size());
+        bool hasIndirectRegisterJump = false;
 
         for (const auto &inst : instructions)
         {
             instructionAddresses.insert(inst.address);
+            if (inst.opcode == OPCODE_SPECIAL &&
+                ((inst.function == SPECIAL_JR && inst.rs != 31) ||
+                 inst.function == SPECIAL_JALR))
+            {
+                hasIndirectRegisterJump = true;
+            }
         }
 
         for (const auto &inst : instructions)
@@ -600,6 +614,17 @@ namespace ps2recomp
             }
         }
 
+        if (hasIndirectRegisterJump)
+        {
+            for (uint32_t addr : instructionAddresses)
+            {
+                if (addr >= function.start && addr < function.end)
+                {
+                    targets.insert(addr);
+                }
+            }
+        }
+
         return targets;
     }
 
@@ -621,7 +646,6 @@ namespace ps2recomp
         }
 
         std::unordered_set<uint32_t> internalTargets = collectInternalBranchTargets(function, instructions);
-
         ss << "// Function: " << function.name << "\n";
         ss << "// Address: 0x" << std::hex << function.start << " - 0x" << function.end << std::dec << "\n";
 
