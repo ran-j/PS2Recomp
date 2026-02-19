@@ -32,6 +32,10 @@ namespace ps2recomp
         void generateOutput();
 
         static StubTarget resolveStubTarget(const std::string& name);
+        static size_t DiscoverAdditionalEntryPoints(
+            std::vector<Function> &functions,
+            std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions,
+            const std::vector<Section> &sections);
 
     private:
         ConfigManager m_configManager;
