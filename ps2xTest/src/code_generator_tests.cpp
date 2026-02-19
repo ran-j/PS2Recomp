@@ -307,6 +307,92 @@ void register_code_generator_tests()
                 "call should use sanitized name but got: " + generated);
         });
 
+        tc.Run("COP0 MFC0/MTC0 translate to COP0 register access", [](TestCase &t) {
+            CodeGenerator gen({});
+
+            Instruction mfc0{};
+            mfc0.opcode = OPCODE_COP0;
+            mfc0.rs = COP0_MF;
+            mfc0.rt = 5;
+            mfc0.rd = COP0_REG_STATUS;
+
+            std::string mfc0Code = gen.translateInstruction(mfc0);
+            printGeneratedCode("COP0 MFC0/MTC0 translate to COP0 register access (MFC0)", mfc0Code);
+            t.IsTrue(mfc0Code.find("SET_GPR_U32(ctx, 5") != std::string::npos, "MFC0 should write to rt");
+            t.IsTrue(mfc0Code.find("ctx->cop0_status") != std::string::npos, "MFC0 STATUS should read cop0_status");
+            t.IsTrue(mfc0Code.find("Unimplemented COP0 register") == std::string::npos, "MFC0 should not hit unimplemented COP0 register path");
+            t.IsTrue(mfc0Code.find("Unhandled COP0") == std::string::npos, "MFC0 should not hit unhandled COP0 path");
+
+            Instruction mtc0{};
+            mtc0.opcode = OPCODE_COP0;
+            mtc0.rs = COP0_MT;
+            mtc0.rt = 7;
+            mtc0.rd = COP0_REG_STATUS;
+
+            std::string mtc0Code = gen.translateInstruction(mtc0);
+            printGeneratedCode("COP0 MFC0/MTC0 translate to COP0 register access (MTC0)", mtc0Code);
+            t.IsTrue(mtc0Code.find("ctx->cop0_status") != std::string::npos, "MTC0 STATUS should write cop0_status");
+            t.IsTrue(mtc0Code.find("GPR_U32(ctx, 7)") != std::string::npos, "MTC0 should read from rt");
+            t.IsTrue(mtc0Code.find("Unimplemented MTC0") == std::string::npos, "MTC0 should not hit unimplemented path");
+            t.IsTrue(mtc0Code.find("Unhandled COP0") == std::string::npos, "MTC0 should not hit unhandled COP0 path");
+        });
+
+        tc.Run("FCR access uses CFC1/CTC1", [](TestCase &t) {
+            CodeGenerator gen({});
+
+            Instruction cfc1{};
+            cfc1.opcode = OPCODE_COP1;
+            cfc1.rs = COP1_CF;
+            cfc1.rt = 4;
+            cfc1.rd = 31;
+
+            std::string cfc1Code = gen.translateInstruction(cfc1);
+            printGeneratedCode("FCR access uses CFC1/CTC1 (CFC1)", cfc1Code);
+            t.IsTrue(cfc1Code.find("SET_GPR_U32(ctx, 4") != std::string::npos, "CFC1 should write to rt");
+            t.IsTrue(cfc1Code.find("ctx->fcr31") != std::string::npos, "CFC1 FCR31 should read fcr31");
+            t.IsTrue(cfc1Code.find("Unimplemented FCR") == std::string::npos, "CFC1 should not hit unimplemented FCR path");
+
+            Instruction ctc1{};
+            ctc1.opcode = OPCODE_COP1;
+            ctc1.rs = COP1_CT;
+            ctc1.rt = 4;
+            ctc1.rd = 31;
+
+            std::string ctc1Code = gen.translateInstruction(ctc1);
+            printGeneratedCode("FCR access uses CFC1/CTC1 (CTC1)", ctc1Code);
+            t.IsTrue(ctc1Code.find("ctx->fcr31 = GPR_U32(ctx, 4) & 0x0183FFFF") != std::string::npos,
+                     "CTC1 FCR31 should mask and write fcr31");
+            t.IsTrue(ctc1Code.find("ignored") == std::string::npos, "CTC1 FCR31 should not be ignored");
+        });
+
+        tc.Run("VU CReg access uses CFC2/CTC2", [](TestCase &t) {
+            CodeGenerator gen({});
+
+            Instruction cfc2{};
+            cfc2.opcode = OPCODE_COP2;
+            cfc2.rs = COP2_CFC2;
+            cfc2.rt = 2;
+            cfc2.rd = VU0_CR_STATUS;
+
+            std::string cfc2Code = gen.translateInstruction(cfc2);
+            printGeneratedCode("VU CReg access uses CFC2/CTC2 (CFC2)", cfc2Code);
+            t.IsTrue(cfc2Code.find("SET_GPR_U32(ctx, 2") != std::string::npos, "CFC2 should write to rt");
+            t.IsTrue(cfc2Code.find("ctx->vu0_status") != std::string::npos, "CFC2 STATUS should read vu0_status");
+            t.IsTrue(cfc2Code.find("Unimplemented CFC2 VU CReg") == std::string::npos, "CFC2 should not hit unimplemented CReg path");
+
+            Instruction ctc2{};
+            ctc2.opcode = OPCODE_COP2;
+            ctc2.rs = COP2_CTC2;
+            ctc2.rt = 3;
+            ctc2.rd = VU0_CR_ITOP;
+
+            std::string ctc2Code = gen.translateInstruction(ctc2);
+            printGeneratedCode("VU CReg access uses CFC2/CTC2 (CTC2)", ctc2Code);
+            t.IsTrue(ctc2Code.find("ctx->vu0_itop") != std::string::npos, "CTC2 ITOP should write vu0_itop");
+            t.IsTrue(ctc2Code.find("GPR_U32(ctx, 3) & 0x3FF") != std::string::npos, "CTC2 ITOP should mask to 10 bits");
+            t.IsTrue(ctc2Code.find("Unimplemented CTC2 VU CReg") == std::string::npos, "CTC2 should not hit unimplemented CReg path");
+        });
+
         tc.Run("VU0 macro mappings cover all S1/S2 enums", [](TestCase &t) {
             const std::vector<std::string> candidates = {
                 "ps2xRecomp/include/ps2recomp/instructions.h",
