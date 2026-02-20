@@ -36,6 +36,9 @@ namespace ps2recomp
             std::vector<Function> &functions,
             std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions,
             const std::vector<Section> &sections);
+        static size_t ResliceEntryFunctions(
+            std::vector<Function> &functions,
+            std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions);
 
     private:
         ConfigManager m_configManager;
