@@ -1258,9 +1258,9 @@ namespace ps2recomp
                     "return;"                      // Stop execution in this recompiled block
                 );
             case COP0_CO_EI:
-                return fmt::format("ctx->cop0_status |= 0x1; // Enable interrupts");
+                return fmt::format("ctx->cop0_status |= 0x10000; // Enable interrupts");
             case COP0_CO_DI:
-                return fmt::format("ctx->cop0_status &= ~0x1; // Disable interrupts");
+                return fmt::format("ctx->cop0_status &= ~0x10000; // Disable interrupts");
             default:
                 return fmt::format("// Unhandled COP0 CO-OP: 0x{:X}", function);
             }
