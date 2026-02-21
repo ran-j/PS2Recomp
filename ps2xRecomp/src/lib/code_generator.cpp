@@ -964,9 +964,9 @@ namespace ps2recomp
         case SPECIAL_MTLO:
             return fmt::format("ctx->lo = GPR_U32(ctx, {});", inst.rs);
         case SPECIAL_MULT:
-            return fmt::format("{{ int64_t result = (int64_t)GPR_S32(ctx, {}) * (int64_t)GPR_S32(ctx, {}); ctx->lo = (uint32_t)result; ctx->hi = (uint32_t)(result >> 32); }}", inst.rs, inst.rt);
+            return fmt::format("{{ int64_t result = (int64_t)GPR_S32(ctx, {}) * (int64_t)GPR_S32(ctx, {}); ctx->lo = (uint32_t)result; ctx->hi = (uint32_t)(result >> 32); SET_GPR_S32(ctx, {}, (int32_t)(uint32_t)result); }}", inst.rs, inst.rt, inst.rd);
         case SPECIAL_MULTU:
-            return fmt::format("{{ uint64_t result = (uint64_t)GPR_U32(ctx, {}) * (uint64_t)GPR_U32(ctx, {}); ctx->lo = (uint32_t)result; ctx->hi = (uint32_t)(result >> 32); }}", inst.rs, inst.rt);
+            return fmt::format("{{ uint64_t result = (uint64_t)GPR_U32(ctx, {}) * (uint64_t)GPR_U32(ctx, {}); ctx->lo = (uint32_t)result; ctx->hi = (uint32_t)(result >> 32); SET_GPR_U32(ctx, {}, (uint32_t)result); }}", inst.rs, inst.rt, inst.rd);
         case SPECIAL_DIV:
             return fmt::format("{{ int32_t divisor = GPR_S32(ctx, {}); "
                                "   int32_t dividend = GPR_S32(ctx, {}); "
@@ -1258,9 +1258,9 @@ namespace ps2recomp
                     "return;"                      // Stop execution in this recompiled block
                 );
             case COP0_CO_EI:
-                return fmt::format("ctx->cop0_status |= 0x1; // Enable interrupts");
+                return fmt::format("ctx->cop0_status |= 0x10000; // Enable interrupts");
             case COP0_CO_DI:
-                return fmt::format("ctx->cop0_status &= ~0x1; // Disable interrupts");
+                return fmt::format("ctx->cop0_status &= ~0x10000; // Disable interrupts");
             default:
                 return fmt::format("// Unhandled COP0 CO-OP: 0x{:X}", function);
             }
