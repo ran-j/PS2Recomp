@@ -308,7 +308,7 @@ void register_code_generator_tests()
         });
 
         tc.Run("COP0 MFC0/MTC0 translate to COP0 register access", [](TestCase &t) {
-            CodeGenerator gen({});
+            CodeGenerator gen({}, {});
 
             Instruction mfc0{};
             mfc0.opcode = OPCODE_COP0;
@@ -338,7 +338,7 @@ void register_code_generator_tests()
         });
 
         tc.Run("FCR access uses CFC1/CTC1", [](TestCase &t) {
-            CodeGenerator gen({});
+            CodeGenerator gen({}, {});
 
             Instruction cfc1{};
             cfc1.opcode = OPCODE_COP1;
@@ -366,7 +366,7 @@ void register_code_generator_tests()
         });
 
         tc.Run("VU CReg access uses CFC2/CTC2", [](TestCase &t) {
-            CodeGenerator gen({});
+            CodeGenerator gen({}, {});
 
             Instruction cfc2{};
             cfc2.opcode = OPCODE_COP2;

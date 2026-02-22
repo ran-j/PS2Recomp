@@ -8,12 +8,12 @@
 #include <string>
 #include <functional>
 #if defined(_MSC_VER)
-    #include <intrin.h>
+#include <intrin.h>
 #elif defined(USE_SSE2NEON)
-    #include "sse2neon.h"
+#include "sse2neon.h"
 #else
-    #include <immintrin.h> // For SSE/AVX instructions
-    #include <smmintrin.h> // For SSE4.1 instructions
+#include <immintrin.h> // For SSE/AVX instructions
+#include <smmintrin.h> // For SSE4.1 instructions
 #endif
 #include <atomic>
 #include <mutex>
@@ -135,7 +135,7 @@ struct alignas(16) R5900Context
         // 0x00000000 = Normal mode (after BIOS handoff).
         cop0_status = 0x00000000;
         cop0_prid = 0x00002e20; // CPU ID for R5900
-        
+
         in_delay_slot = false;
         branch_pc = 0;
     }
@@ -421,60 +421,33 @@ public:
 
     static inline bool isSpecialAddress(uint32_t addr)
     {
-        auto isPhysicalSpecial = [](uint32_t physAddr) -> bool
+        auto inRange = [](uint32_t value, uint32_t base, uint32_t size) -> bool
         {
-            if (physAddr >= PS2_BIOS_BASE && physAddr < (PS2_BIOS_BASE + PS2_BIOS_SIZE))
-            {
+            return (value - base) < size;
+        };
+
+        auto isPhysicalSpecial = [&](uint32_t physAddr) -> bool
+        {
+            if (inRange(physAddr, PS2_BIOS_BASE, PS2_BIOS_SIZE))
                 return true;
-            }
-            if (physAddr >= PS2_SCRATCHPAD_BASE && physAddr < (PS2_SCRATCHPAD_BASE + PS2_SCRATCHPAD_SIZE))
-            {
+            if (inRange(physAddr, PS2_SCRATCHPAD_BASE, PS2_SCRATCHPAD_SIZE))
                 return true;
-            }
-            if (physAddr >= PS2_IO_BASE && physAddr < (PS2_IO_BASE + PS2_IO_SIZE))
-            {
+            if (inRange(physAddr, PS2_IO_BASE, PS2_IO_SIZE))
                 return true;
-            }
-            if (physAddr >= PS2_GS_PRIV_REG_BASE && physAddr < (PS2_GS_PRIV_REG_BASE + PS2_GS_PRIV_REG_SIZE))
-            {
+            if (inRange(physAddr, PS2_GS_PRIV_REG_BASE, PS2_GS_PRIV_REG_SIZE))
                 return true;
-            }
             if (physAddr >= PS2_VU0_CODE_BASE && physAddr < (PS2_VU1_DATA_BASE + PS2_VU1_DATA_SIZE))
-            {
                 return true;
-            }
             return false;
         };
 
-        // Direct physical windows.
-        if (isPhysicalSpecial(addr))
-        {
-            return true;
-        }
-
-        // BIOS uncached alias.
-        if (addr >= 0xBFC00000u && addr < (0xBFC00000u + PS2_BIOS_SIZE))
-        {
-            return true;
-        }
-
-        // KSEG0/KSEG1 direct-mapped aliases. This ensures writes like 0xB000A000
-        if (addr >= 0x80000000u && addr < 0xC0000000u)
-        {
-            const uint32_t physAddr = addr & 0x1FFFFFFFu;
-            if (isPhysicalSpecial(physAddr))
-            {
-                return true;
-            }
-        }
-
         // KSEG2/KSEG3 (TLB mapped)
         if (addr >= 0xC0000000u)
-        {
             return true;
-        }
 
-        return false;
+        // KSEG0/KSEG1 aliases → physical
+        const uint32_t physAddr = (addr >= 0x80000000u) ? (addr & 0x1FFFFFFFu) : addr;
+        return isPhysicalSpecial(physAddr);
     }
 
 public:
@@ -538,4 +511,3 @@ private:
 };
 
 #endif // PS2_RUNTIME_H
-
