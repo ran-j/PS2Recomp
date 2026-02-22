@@ -13,6 +13,7 @@ runtime_header = "include/ps2_runtime.h"
 
 # Functions to stub (these will generate wrappers to runtime syscall/stub handlers when names match)
 # You can also bind stripped functions by address with "handler@0xADDRESS".
+# Generic temporary handlers are available: ret0, ret1, reta0.
 stubs = [
   "printf",
   "malloc",
@@ -23,6 +24,7 @@ stubs = [
   "sprintf",
   # "sceCdRead@0x00123456",
   # "SifLoadModule@0x00127890",
+  # "ret0@0x001D9410",
 ]
 
 # Functions to skip (these will not be recompiled)

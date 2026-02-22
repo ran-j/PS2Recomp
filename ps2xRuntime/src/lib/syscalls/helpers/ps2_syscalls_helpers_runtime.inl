@@ -315,18 +315,25 @@ static uint32_t rpcAllocServerAddr(uint8_t *rdram)
 
 struct IrqHandlerInfo
 {
+    int id = 0;
     uint32_t cause = 0;
     uint32_t handler = 0;
     uint32_t arg = 0;
     uint32_t gp = 0;
     uint32_t sp = 0;
     bool enabled = true;
+    int order = 0;
 };
 
 static std::unordered_map<int, IrqHandlerInfo> g_intcHandlers;
 static std::unordered_map<int, IrqHandlerInfo> g_dmacHandlers;
 static int g_nextIntcHandlerId = 1;
 static int g_nextDmacHandlerId = 1;
+
+static int g_intc_head_order = 0;
+static int g_intc_tail_order = 1000;
+static int g_dmac_head_order = 0;
+static int g_dmac_tail_order = 1000;
 
 std::string translatePs2Path(const char *ps2Path)
 {

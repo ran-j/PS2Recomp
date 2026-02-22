@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <mutex>
 #include <atomic>
+#include <limits>
 
 #include "raylib.h"
 #include "stubs/helpers/ps2_stubs_helpers.inl"

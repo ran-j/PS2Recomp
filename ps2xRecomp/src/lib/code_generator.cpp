@@ -6,6 +6,7 @@
 #include <fmt/format.h>
 #include <sstream>
 #include <algorithm>
+#include <cstring>
 #include <unordered_set>
 #include <unordered_map>
 #include <iostream>
@@ -98,7 +99,8 @@ namespace ps2recomp
         return kKeywords.contains(name);
     }
 
-    CodeGenerator::CodeGenerator(const std::vector<Symbol> &symbols)
+    CodeGenerator::CodeGenerator(const std::vector<Symbol> &symbols, const std::vector<Section> &sections)
+        : m_sections(sections)
     {
         for (auto &symbol : symbols)
         {
@@ -164,8 +166,9 @@ namespace ps2recomp
         const Instruction &branchInst,
         const Instruction &delaySlot,
         const Function &function,
-        const std::unordered_set<uint32_t> &internalTargets)
+        const AnalysisResult &analysisResult)
     {
+        const std::unordered_set<uint32_t> &internalTargets = analysisResult.entryPoints;
         std::stringstream ss;
 
         const bool hasValidDelaySlot = !(delaySlot.opcode == OPCODE_SPECIAL &&
@@ -174,7 +177,18 @@ namespace ps2recomp
                                          delaySlot.rt == 0 &&
                                          delaySlot.sa == 0);
 
-        const std::string delaySlotCode = hasValidDelaySlot ? translateInstruction(delaySlot) : "";
+        std::string delaySlotCode = "";
+        std::string delaySlotPrefix = "";
+        std::string delaySlotSuffix = "";
+        if (hasValidDelaySlot) {
+            delaySlotPrefix = "ctx->in_delay_slot = true; ctx->branch_pc = 0x" + fmt::format("{:X}", branchInst.address) + "u;\n        ";
+            delaySlotCode = "    // 0x" + fmt::format("{:x}", delaySlot.address) + ": 0x" + fmt::format("{:x}", delaySlot.raw);
+            if (!delaySlot.disassembly.empty()) {
+                delaySlotCode += "  " + delaySlot.disassembly;
+            }
+            delaySlotCode += " (Delay Slot)\n        " + translateInstruction(delaySlot);
+            delaySlotSuffix = "\n        ctx->in_delay_slot = false;";
+        }
 
         const uint8_t rs_reg = branchInst.rs;
         const uint8_t rt_reg = branchInst.rt;
@@ -186,16 +200,21 @@ namespace ps2recomp
 
         std::vector<uint32_t> sortedInternalTargets;
         if (branchInst.opcode == OPCODE_SPECIAL &&
-            branchInst.function == SPECIAL_JR &&
-            rs_reg == 31 &&
+            (branchInst.function == SPECIAL_JR || branchInst.function == SPECIAL_JALR) &&
             !internalTargets.empty())
         {
-            sortedInternalTargets.reserve(internalTargets.size());
-            for (uint32_t t : internalTargets)
-            {
-                sortedInternalTargets.push_back(t);
+            auto jtIt = analysisResult.jumpTableTargets.find(branchInst.address);
+            if (jtIt != analysisResult.jumpTableTargets.end()) {
+                sortedInternalTargets = jtIt->second;
+                std::sort(sortedInternalTargets.begin(), sortedInternalTargets.end());
+            } else {
+                sortedInternalTargets.reserve(internalTargets.size());
+                for (uint32_t t : internalTargets)
+                {
+                    sortedInternalTargets.push_back(t);
+                }
+                std::sort(sortedInternalTargets.begin(), sortedInternalTargets.end());
             }
-            std::sort(sortedInternalTargets.begin(), sortedInternalTargets.end());
         }
 
         if (internalTargets.contains(delayPc))
@@ -237,7 +256,7 @@ namespace ps2recomp
             if (hasValidDelaySlot)
             {
                 ss << fmt::format("    ctx->pc = 0x{:X}u;\n", delayPc);
-                ss << "    " << delaySlotCode << "\n";
+                ss << "    " << delaySlotPrefix << delaySlotCode << delaySlotSuffix << "\n";
             }
 
             const uint32_t target = buildAbsoluteJumpTarget(branchInst.address, branchInst.target);
@@ -254,15 +273,33 @@ namespace ps2recomp
 
                 if (!funcName.empty())
                 {
+                    ss << fmt::format("    if (runtime->hasFunction(0x{:X}u)) {{\n", target);
+                    ss << fmt::format("        auto targetFn = runtime->lookupFunction(0x{:X}u);\n", target);
                     if (branchInst.opcode == OPCODE_J)
                     {
-                        ss << "    " << funcName << "(rdram, ctx, runtime); return;\n";
+                        ss << "        targetFn(rdram, ctx, runtime); return;\n";
                     }
                     else
                     {
-                        ss << "    " << funcName << "(rdram, ctx, runtime);\n";
-                        ss << fmt::format("    if (ctx->pc != 0x{:X}u) {{ return; }}\n", fallthroughPc);
+                        ss << "        const uint32_t __entryPc = ctx->pc;\n";
+                        ss << "        targetFn(rdram, ctx, runtime);\n";
+                        ss << fmt::format("        if (ctx->pc == __entryPc) {{ ctx->pc = 0x{:X}u; }}\n", fallthroughPc);
+                        ss << fmt::format("        if (ctx->pc != 0x{:X}u) {{ return; }}\n", fallthroughPc);
                     }
+                    ss << "    } else {\n";
+                    
+                    if (branchInst.opcode == OPCODE_J)
+                    {
+                        ss << "        " << funcName << "(rdram, ctx, runtime); return;\n";
+                    }
+                    else
+                    {
+                        ss << "        const uint32_t __entryPc = ctx->pc;\n";
+                        ss << "        " << funcName << "(rdram, ctx, runtime);\n";
+                        ss << fmt::format("        if (ctx->pc == __entryPc) {{ ctx->pc = 0x{:X}u; }}\n", fallthroughPc);
+                        ss << fmt::format("        if (ctx->pc != 0x{:X}u) {{ return; }}\n", fallthroughPc);
+                    }
+                    ss << "    }\n";
                 }
                 else
                 {
@@ -303,6 +340,7 @@ namespace ps2recomp
                     {
                         ss << "    {\n";
                         ss << fmt::format("        auto targetFn = runtime->lookupFunction(0x{:X}u);\n", target);
+                        ss << "        const uint32_t __entryPc = ctx->pc;\n";
                         ss << "        targetFn(rdram, ctx, runtime);\n";
                         if (branchInst.opcode == OPCODE_J)
                         {
@@ -310,6 +348,7 @@ namespace ps2recomp
                         }
                         else
                         {
+                            ss << fmt::format("        if (ctx->pc == __entryPc) {{ ctx->pc = 0x{:X}u; }}\n", fallthroughPc);
                             ss << fmt::format("        if (ctx->pc != 0x{:X}u) {{ return; }}\n", fallthroughPc);
                         }
                         ss << "    }\n";
@@ -334,12 +373,12 @@ namespace ps2recomp
             if (hasValidDelaySlot)
             {
                 ss << fmt::format("        ctx->pc = 0x{:X}u;\n", delayPc);
-                ss << "        " << delaySlotCode << "\n";
+                ss << "        " << delaySlotPrefix << delaySlotCode << delaySlotSuffix << "\n";
             }
 
             ss << "        ctx->pc = jumpTarget;\n";
 
-            if (branchInst.function == SPECIAL_JR && rs_reg == 31 && !sortedInternalTargets.empty())
+            if (!sortedInternalTargets.empty())
             {
                 ss << "        switch (jumpTarget) {\n";
                 for (uint32_t t : sortedInternalTargets)
@@ -358,7 +397,9 @@ namespace ps2recomp
             {
                 ss << "        {\n";
                 ss << "            auto targetFn = runtime->lookupFunction(jumpTarget);\n";
+                ss << "            const uint32_t __entryPc = ctx->pc;\n";
                 ss << "            targetFn(rdram, ctx, runtime);\n";
+                ss << fmt::format("            if (ctx->pc == __entryPc) {{ ctx->pc = 0x{:X}u; }}\n", fallthroughPc);
                 ss << fmt::format("            if (ctx->pc != 0x{:X}u) {{ return; }}\n", fallthroughPc);
                 ss << "        }\n";
             }
@@ -371,15 +412,16 @@ namespace ps2recomp
         else if (branchInst.isBranch)
         {
             std::string conditionStr = "false";
-            std::string linkCode;
+            std::string conditionalLinkCode;
+            std::string unconditionalLinkCode;
 
             switch (branchInst.opcode)
             {
             case OPCODE_BEQ:
-                conditionStr = fmt::format("GPR_U32(ctx, {}) == GPR_U32(ctx, {})", rs_reg, rt_reg);
+                conditionStr = fmt::format("GPR_U64(ctx, {}) == GPR_U64(ctx, {})", rs_reg, rt_reg);
                 break;
             case OPCODE_BNE:
-                conditionStr = fmt::format("GPR_U32(ctx, {}) != GPR_U32(ctx, {})", rs_reg, rt_reg);
+                conditionStr = fmt::format("GPR_U64(ctx, {}) != GPR_U64(ctx, {})", rs_reg, rt_reg);
                 break;
             case OPCODE_BLEZ:
                 conditionStr = fmt::format("GPR_S32(ctx, {}) <= 0", rs_reg);
@@ -388,10 +430,10 @@ namespace ps2recomp
                 conditionStr = fmt::format("GPR_S32(ctx, {}) > 0", rs_reg);
                 break;
             case OPCODE_BEQL:
-                conditionStr = fmt::format("GPR_U32(ctx, {}) == GPR_U32(ctx, {})", rs_reg, rt_reg);
+                conditionStr = fmt::format("GPR_U64(ctx, {}) == GPR_U64(ctx, {})", rs_reg, rt_reg);
                 break;
             case OPCODE_BNEL:
-                conditionStr = fmt::format("GPR_U32(ctx, {}) != GPR_U32(ctx, {})", rs_reg, rt_reg);
+                conditionStr = fmt::format("GPR_U64(ctx, {}) != GPR_U64(ctx, {})", rs_reg, rt_reg);
                 break;
             case OPCODE_BLEZL:
                 conditionStr = fmt::format("GPR_S32(ctx, {}) <= 0", rs_reg);
@@ -416,19 +458,19 @@ namespace ps2recomp
                     break;
                 case REGIMM_BLTZAL:
                     conditionStr = fmt::format("GPR_S32(ctx, {}) < 0", rs_reg);
-                    linkCode = fmt::format("SET_GPR_U32(ctx, 31, 0x{:X}u);", fallthroughPc);
+                    unconditionalLinkCode = fmt::format("SET_GPR_U32(ctx, 31, 0x{:X}u);", fallthroughPc);
                     break;
                 case REGIMM_BGEZAL:
                     conditionStr = fmt::format("GPR_S32(ctx, {}) >= 0", rs_reg);
-                    linkCode = fmt::format("SET_GPR_U32(ctx, 31, 0x{:X}u);", fallthroughPc);
+                    unconditionalLinkCode = fmt::format("SET_GPR_U32(ctx, 31, 0x{:X}u);", fallthroughPc);
                     break;
                 case REGIMM_BLTZALL:
                     conditionStr = fmt::format("GPR_S32(ctx, {}) < 0", rs_reg);
-                    linkCode = fmt::format("SET_GPR_U32(ctx, 31, 0x{:X}u);", fallthroughPc);
+                    conditionalLinkCode = fmt::format("SET_GPR_U32(ctx, 31, 0x{:X}u);", fallthroughPc);
                     break;
                 case REGIMM_BGEZALL:
                     conditionStr = fmt::format("GPR_S32(ctx, {}) >= 0", rs_reg);
-                    linkCode = fmt::format("SET_GPR_U32(ctx, 31, 0x{:X}u);", fallthroughPc);
+                    conditionalLinkCode = fmt::format("SET_GPR_U32(ctx, 31, 0x{:X}u);", fallthroughPc);
                     break;
                 default:
                     break;
@@ -475,17 +517,22 @@ namespace ps2recomp
             ss << "    {\n";
             ss << "        const bool " << branchTakenVar << " = (" << conditionStr << ");\n";
 
+            if (!unconditionalLinkCode.empty())
+            {
+                ss << "        " << unconditionalLinkCode << "\n";
+            }
+
             if (isLikely)
             {
                 ss << "        if (" << branchTakenVar << ") {\n";
-                if (!linkCode.empty())
+                if (!conditionalLinkCode.empty())
                 {
-                    ss << "            " << linkCode << "\n";
+                    ss << "            " << conditionalLinkCode << "\n";
                 }
                 if (hasValidDelaySlot)
                 {
                     ss << fmt::format("            ctx->pc = 0x{:X}u;\n", delayPc);
-                    ss << "            " << delaySlotCode << "\n";
+                    ss << "            " << delaySlotPrefix << delaySlotCode << delaySlotSuffix << "\n";
                 }
 
                 if (internalTargets.contains(target))
@@ -503,15 +550,15 @@ namespace ps2recomp
             }
             else
             {
-                if (!linkCode.empty())
+                if (!conditionalLinkCode.empty())
                 {
-                    ss << "        if (" << branchTakenVar << ") { " << linkCode << " }\n";
+                    ss << "        if (" << branchTakenVar << ") { " << conditionalLinkCode << " }\n";
                 }
 
                 if (hasValidDelaySlot)
                 {
                     ss << fmt::format("        ctx->pc = 0x{:X}u;\n", delayPc);
-                    ss << "        " << delaySlotCode << "\n";
+                    ss << "        " << delaySlotPrefix << delaySlotCode << delaySlotSuffix << "\n";
                 }
 
                 ss << "        if (" << branchTakenVar << ") {\n";
@@ -536,7 +583,7 @@ namespace ps2recomp
             if (hasValidDelaySlot)
             {
                 ss << fmt::format("    ctx->pc = 0x{:X}u;\n", delayPc);
-                ss << "    " << delaySlotCode << "\n";
+                ss << "    " << delaySlotPrefix << delaySlotCode << delaySlotSuffix << "\n";
             }
         }
 
@@ -552,16 +599,25 @@ namespace ps2recomp
 
     CodeGenerator::~CodeGenerator() = default;
 
-    std::unordered_set<uint32_t> CodeGenerator::collectInternalBranchTargets(
+    CodeGenerator::AnalysisResult CodeGenerator::collectInternalBranchTargets(
         const Function &function, const std::vector<Instruction> &instructions)
     {
-        std::unordered_set<uint32_t> targets;
+        AnalysisResult result;
         std::unordered_set<uint32_t> instructionAddresses;
         instructionAddresses.reserve(instructions.size());
+        bool hasIndirectRegisterJump = false;
+        std::vector<const Instruction*> indirectJumps;
 
         for (const auto &inst : instructions)
         {
             instructionAddresses.insert(inst.address);
+            if (inst.opcode == OPCODE_SPECIAL &&
+                ((inst.function == SPECIAL_JR && inst.rs != 31) ||
+                 inst.function == SPECIAL_JALR))
+            {
+                hasIndirectRegisterJump = true;
+                indirectJumps.push_back(&inst);
+            }
         }
 
         for (const auto &inst : instructions)
@@ -576,7 +632,7 @@ namespace ps2recomp
                 if (target >= function.start && target < function.end &&
                     instructionAddresses.contains(target))
                 {
-                    targets.insert(target);
+                    result.entryPoints.insert(target);
                 }
             }
             else if (isStaticJump)
@@ -585,7 +641,7 @@ namespace ps2recomp
                 if (target >= function.start && target < function.end &&
                     instructionAddresses.contains(target))
                 {
-                    targets.insert(target);
+                    result.entryPoints.insert(target);
 
                     if (inst.opcode == OPCODE_JAL)
                     {
@@ -593,14 +649,161 @@ namespace ps2recomp
                         if (returnAddr >= function.start && returnAddr < function.end &&
                             instructionAddresses.contains(returnAddr))
                         {
-                            targets.insert(returnAddr);
+                            result.entryPoints.insert(returnAddr);
                         }
                     }
                 }
             }
         }
 
-        return targets;
+        if (hasIndirectRegisterJump)
+        {
+            bool hasFallback = false;
+            for (const Instruction* jrInst : indirectJumps) {
+                bool foundTable = false;
+                
+                uint32_t jrReg = jrInst->rs;
+                
+                int lwIndex = -1;
+                uint32_t baseReg = 0;
+                int32_t lwOffset = 0;
+                
+                auto it = std::find_if(instructions.begin(), instructions.end(), [&](const Instruction& inst) { return inst.address == jrInst->address; });
+                if (it != instructions.end()) {
+                    int jrIndex = std::distance(instructions.begin(), it);
+                    for (int i = jrIndex - 1; i >= 0 && i >= jrIndex - 20; --i) {
+                        const auto& inst = instructions[i];
+                        if ((inst.opcode == OPCODE_LW || inst.opcode == OPCODE_LWU) && inst.rt == jrReg) {
+                            lwIndex = i;
+                            baseReg = inst.rs;
+                            lwOffset = inst.simmediate;
+                            break;
+                        }
+                    }
+                    
+                    if (lwIndex != -1) {
+                        int adduIndex = -1;
+                        uint32_t tableBaseReg = 0;
+                        uint32_t indexReg = 0;
+                        for (int i = lwIndex - 1; i >= 0 && i >= lwIndex - 10; --i) {
+                            const auto& inst = instructions[i];
+                            if (inst.opcode == OPCODE_SPECIAL && inst.function == SPECIAL_ADDU && inst.rd == baseReg) {
+                                adduIndex = i;
+                                tableBaseReg = inst.rs;  
+                                indexReg = inst.rt;
+                                break;
+                            }
+                        }
+                        
+                        uint32_t tableAddress = 0;
+                        bool foundTableAddress = false;
+
+                        if (adduIndex != -1) {
+                            for (int i = adduIndex - 1; i >= 0 && i >= adduIndex - 20; --i) {
+                                const auto& inst = instructions[i];
+                                if (inst.opcode == OPCODE_LUI) {
+                                    if (inst.rt == tableBaseReg || inst.rt == indexReg) {
+                                        uint32_t high = inst.immediate << 16;
+                                        uint32_t low = 0;
+                                        for (int j = i + 1; j < adduIndex; ++j) {
+                                            const auto& lowInst = instructions[j];
+                                            if (lowInst.rs == inst.rt && lowInst.rt == inst.rt) {
+                                                if (lowInst.opcode == OPCODE_ADDIU) {
+                                                    low = (uint32_t)lowInst.simmediate;
+                                                } else if (lowInst.opcode == OPCODE_ORI) {
+                                                    low = lowInst.immediate;
+                                                }
+                                            }
+                                        }
+                                        tableAddress = high + low;
+                                        foundTableAddress = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if (foundTableAddress) {
+                            tableAddress += lwOffset;
+
+                            uint32_t unshiftedIndexReg = 0;
+                            for (int i = adduIndex - 1; i >= 0 && i >= adduIndex - 10; --i) {
+                                const auto& inst = instructions[i];
+                                if (inst.opcode == OPCODE_SPECIAL && inst.function == SPECIAL_SLL && (inst.rd == tableBaseReg || inst.rd == indexReg)) {
+                                    unshiftedIndexReg = inst.rt;
+                                    break;
+                                }
+                            }
+
+                            uint32_t numCases = 0;
+                            if (unshiftedIndexReg != 0) {
+                                for (int i = adduIndex - 1; i >= 0 && i >= adduIndex - 30; --i) {
+                                    const auto& inst = instructions[i];
+                                    if ((inst.opcode == OPCODE_SLTIU || inst.opcode == OPCODE_SLTI) && inst.rs == unshiftedIndexReg) {
+                                        numCases = inst.immediate; 
+                                        break;
+                                    }
+                                }
+                            }
+                            
+                            if (numCases > 0 && numCases <= 1000) {
+                                const Section* rodata = nullptr;
+                                for (const auto& sec : m_sections) {
+                                    if (tableAddress >= sec.address && tableAddress < sec.address + sec.size) {
+                                        rodata = &sec;
+                                        break;
+                                    }
+                                }
+
+                                if (rodata && rodata->data) {
+                                    std::vector<uint32_t> jrTargets;
+                                    bool validJumpTable = true;
+                                    std::unordered_set<uint32_t> uniqueTargets;
+                                    for (uint32_t i = 0; i < numCases; ++i) {
+                                        uint32_t addr = tableAddress + i * 4;
+                                        if (addr >= rodata->address && addr + 4 <= rodata->address + rodata->size) {
+                                            uint32_t target = 0;
+                                            std::memcpy(&target, rodata->data + (addr - rodata->address), 4);
+                                            if (target >= function.start && target < function.end && instructionAddresses.contains(target)) {
+                                                if (!uniqueTargets.contains(target)) {
+                                                    jrTargets.push_back(target);
+                                                    uniqueTargets.insert(target);
+                                                }
+                                            }
+                                        } else {
+                                            validJumpTable = false;
+                                            break;
+                                        }
+                                    }
+                                    if (validJumpTable && !jrTargets.empty()) {
+                                        result.jumpTableTargets[jrInst->address] = jrTargets;
+                                        for (uint32_t t : jrTargets) {
+                                            result.entryPoints.insert(t);
+                                        }
+                                        foundTable = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if (!foundTable) {
+                    hasFallback = true;
+                }
+            }
+
+            if (hasFallback) {
+                for (uint32_t addr : instructionAddresses)
+                {
+                    if (addr >= function.start && addr < function.end)
+                    {
+                        result.entryPoints.insert(addr);
+                    }
+                }
+            }
+        }
+
+        return result;
     }
 
     std::string ps2recomp::CodeGenerator::generateFunction(
@@ -620,8 +823,8 @@ namespace ps2recomp
             ss << "#include \"ps2_stubs.h\"\n\n";
         }
 
-        std::unordered_set<uint32_t> internalTargets = collectInternalBranchTargets(function, instructions);
-
+        AnalysisResult analysisResult = collectInternalBranchTargets(function, instructions);
+        const std::unordered_set<uint32_t>& internalTargets = analysisResult.entryPoints;
         ss << "// Function: " << function.name << "\n";
         ss << "// Address: 0x" << std::hex << function.start << " - 0x" << function.end << std::dec << "\n";
 
@@ -647,7 +850,11 @@ namespace ps2recomp
                 ss << "label_" << std::hex << inst.address << std::dec << ":\n";
             }
 
-            ss << "    // 0x" << std::hex << inst.address << ": 0x" << inst.raw << std::dec << "\n";
+            ss << "    // 0x" << std::hex << inst.address << ": 0x" << inst.raw << std::dec;
+            if (!inst.disassembly.empty()) {
+                ss << "  " << inst.disassembly;
+            }
+            ss << "\n";
 
             try
             {
@@ -660,7 +867,7 @@ namespace ps2recomp
                         ss << "label_" << std::hex << delaySlot.address << std::dec << ":\n";
                     }
 
-                    ss << handleBranchDelaySlots(inst, delaySlot, function, internalTargets);
+                    ss << handleBranchDelaySlots(inst, delaySlot, function, analysisResult);
 
                     ++i; // Skip delay slot instruction (handled inside branch logic)
                 }
@@ -744,25 +951,25 @@ namespace ps2recomp
         case OPCODE_ADDIU:
             if (inst.rt == 0)
                 return "// NOP (addiu $zero, ...)";
-            return fmt::format("SET_GPR_S32(ctx, {}, ADD32(GPR_U32(ctx, {}), {}));", inst.rt, inst.rs, inst.simmediate);
+            return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ADD32(GPR_U32(ctx, {}), {}));", inst.rt, inst.rs, inst.simmediate);
         case OPCODE_SLTI:
-            return fmt::format("SET_GPR_U32(ctx, {}, SLT32(GPR_S32(ctx, {}), {}));", inst.rt, inst.rs, inst.simmediate);
+            return fmt::format("SET_GPR_U64(ctx, {}, ((int64_t)GPR_S64(ctx, {}) < (int64_t)(int32_t){}) ? 1 : 0);", inst.rt, inst.rs, inst.simmediate);
         case OPCODE_SLTIU:
-            return fmt::format("SET_GPR_U32(ctx, {}, SLTU32(GPR_U32(ctx, {}), {}));", inst.rt, inst.rs, inst.immediate);
+            return fmt::format("SET_GPR_U64(ctx, {}, ((uint64_t)GPR_U64(ctx, {}) < (uint64_t)(int64_t)(int32_t){}) ? 1 : 0);", inst.rt, inst.rs, inst.simmediate);
         case OPCODE_ANDI:
-            return fmt::format("SET_GPR_U32(ctx, {}, AND32(GPR_U32(ctx, {}), {}));", inst.rt, inst.rs, inst.immediate);
+            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PAND(GPR_VEC(ctx, {}), _mm_cvtsi32_si128((int){}{})));", inst.rt, inst.rs, inst.immediate, "u");
         case OPCODE_ORI:
-            return fmt::format("SET_GPR_U32(ctx, {}, OR32(GPR_U32(ctx, {}), {}));", inst.rt, inst.rs, inst.immediate);
+            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_POR(GPR_VEC(ctx, {}), _mm_cvtsi32_si128((int){}{})));", inst.rt, inst.rs, inst.immediate, "u");
         case OPCODE_XORI:
-            return fmt::format("SET_GPR_U32(ctx, {}, XOR32(GPR_U32(ctx, {}), {}));", inst.rt, inst.rs, inst.immediate);
+            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PXOR(GPR_VEC(ctx, {}), _mm_cvtsi32_si128((int){}{})));", inst.rt, inst.rs, inst.immediate, "u");
         case OPCODE_LUI:
-            return fmt::format("SET_GPR_U32(ctx, {}, ((uint32_t){} << 16));", inst.rt, inst.immediate);
+            return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)((uint32_t){} << 16));", inst.rt, inst.immediate);
         case OPCODE_LB:
             return fmt::format("SET_GPR_S32(ctx, {}, (int8_t){});", inst.rt, genRead(8, fmt::format("ADD32(GPR_U32(ctx, {}), {})", inst.rs, inst.simmediate)));
         case OPCODE_LH:
             return fmt::format("SET_GPR_S32(ctx, {}, (int16_t){});", inst.rt, genRead(16, fmt::format("ADD32(GPR_U32(ctx, {}), {})", inst.rs, inst.simmediate)));
         case OPCODE_LW:
-            return fmt::format("SET_GPR_U32(ctx, {}, {});", inst.rt, genRead(32, fmt::format("ADD32(GPR_U32(ctx, {}), {})", inst.rs, inst.simmediate)));
+            return fmt::format("SET_GPR_S32(ctx, {}, (int32_t){});", inst.rt, genRead(32, fmt::format("ADD32(GPR_U32(ctx, {}), {})", inst.rs, inst.simmediate)));
         case OPCODE_LBU:
             return fmt::format("SET_GPR_U32(ctx, {}, (uint8_t){});", inst.rt, genRead(8, fmt::format("ADD32(GPR_U32(ctx, {}), {})", inst.rs, inst.simmediate)));
         case OPCODE_LHU:
@@ -790,14 +997,14 @@ namespace ps2recomp
                 "{{ float f = ctx->f[{}]; uint32_t bits; std::memcpy(&bits, &f, sizeof(bits)); {}; }}",
                 inst.rt,
                 genWrite(32, fmt::format("ADD32(GPR_U32(ctx, {}), {})", inst.rs, inst.simmediate), "bits"));
-        case OPCODE_LDC2: // was OPCODE_LQC2 need to check
+        case OPCODE_LDC2:
             return fmt::format("ctx->vu0_vf[{}] = _mm_castsi128_ps({});", inst.rt, genRead(128, fmt::format("ADD32(GPR_U32(ctx, {}), {})", inst.rs, inst.simmediate)));
-        case OPCODE_SDC2: // was OPCODE_SQC2 need to check
+        case OPCODE_SDC2:
             return genWrite(128, fmt::format("ADD32(GPR_U32(ctx, {}), {})", inst.rs, inst.simmediate), fmt::format("_mm_castps_si128(ctx->vu0_vf[{}])", inst.rt)) + ";";
         case OPCODE_DADDI:
             return fmt::format(
                 "{{ int64_t src = (int64_t)GPR_S64(ctx, {}); "
-                "int64_t imm = (int64_t){}; "
+                "int64_t imm = (int64_t)(int32_t){}; "
                 "int64_t res = src + imm; "
                 "if (((src ^ imm) >= 0) && ((src ^ res) < 0)) "
                 "    runtime->SignalException(ctx, EXCEPTION_INTEGER_OVERFLOW); "
@@ -805,7 +1012,7 @@ namespace ps2recomp
                 inst.rs, inst.simmediate, inst.rt);
         case OPCODE_DADDIU:
             return fmt::format(
-                "SET_GPR_S64(ctx, {}, (int64_t)GPR_S64(ctx, {}) + (int64_t){});",
+                "SET_GPR_S64(ctx, {}, (int64_t)GPR_S64(ctx, {}) + (int64_t)(int32_t){});",
                 inst.rt, inst.rs, inst.simmediate);
         case OPCODE_J:
             return fmt::format("// J 0x{:X} - Handled by branch logic", buildAbsoluteJumpTarget(inst.address, inst.target));
@@ -823,79 +1030,114 @@ namespace ps2recomp
 
         case OPCODE_LDL:
             return fmt::format("{{ uint32_t addr = ADD32(GPR_U32(ctx, {}), {}); "
-                               "uint32_t shift = (7 - (addr & 7)) << 3; "
-                               "uint64_t mask = 0xFFFFFFFFFFFFFFFFULL << shift; "
-                               "uint64_t aligned_data = {}; "
-                               "SET_GPR_U64(ctx, {}, (GPR_U64(ctx, {}) & ~mask) | ((aligned_data << shift) & mask)); }}",
-                               inst.rs, inst.simmediate, genRead(64, "addr & ~7ULL"), inst.rt, inst.rt);
+                               "uint32_t aligned_addr = addr & ~7u; "
+                               "uint32_t offset = addr & 7u; "
+                               "uint64_t mem = {}; "
+                               "uint32_t shift = (7u - offset) << 3; "
+                               "uint64_t keepMask = (shift == 0) ? 0ull : ((1ull << shift) - 1ull); "
+                               "SET_GPR_U64(ctx, {}, (GPR_U64(ctx, {}) & keepMask) | (mem << shift)); }}",
+                               inst.rs, inst.simmediate, genRead(64, "aligned_addr"), inst.rt, inst.rt);
 
         case OPCODE_LDR:
             return fmt::format("{{ uint32_t addr = ADD32(GPR_U32(ctx, {}), {}); "
-                               "uint32_t shift = (addr & 7) << 3; "
-                               "uint64_t mask = 0xFFFFFFFFFFFFFFFFULL >> shift; "
-                               "uint64_t aligned_data = {}; "
-                               "SET_GPR_U64(ctx, {}, (GPR_U64(ctx, {}) & ~mask) | ((aligned_data >> shift) & mask)); }}",
-                               inst.rs, inst.simmediate, genRead(64, "addr & ~7ULL"), inst.rt, inst.rt);
+                               "uint32_t aligned_addr = addr & ~7u; "
+                               "uint32_t offset = addr & 7u; "
+                               "uint64_t mem = {}; "
+                               "uint32_t shift = offset << 3; "
+                               "uint64_t keepMask = (offset == 0) ? 0ull : (0xFFFFFFFFFFFFFFFFull << ((8u - offset) << 3)); "
+                               "SET_GPR_U64(ctx, {}, (GPR_U64(ctx, {}) & keepMask) | (mem >> shift)); }}",
+                               inst.rs, inst.simmediate, genRead(64, "aligned_addr"), inst.rt, inst.rt);
 
         case OPCODE_LWL:
             return fmt::format("{{ uint32_t addr = ADD32(GPR_U32(ctx, {}), {}); "
-                               "uint32_t shift = (3 - (addr & 3)) << 3; "
-                               "uint32_t mask = 0xFFFFFFFF << shift; "
-                               "uint32_t aligned_word = {}; "
-                               "SET_GPR_U32(ctx, {}, (GPR_U32(ctx, {}) & ~mask) | ((aligned_word << shift) & mask)); }}",
-                               inst.rs, inst.simmediate, genRead(32, "addr & ~3"), inst.rt, inst.rt);
+                               "uint32_t aligned_addr = addr & ~3u; "
+                               "uint32_t offset = addr & 3u; "
+                               "uint32_t mem = {}; "
+                               "uint32_t shift = (3u - offset) << 3; "
+                               "uint32_t keepMask = (shift == 0) ? 0u : ((1u << shift) - 1u); "
+                               "uint32_t merged = (GPR_U32(ctx, {}) & keepMask) | (mem << shift); "
+                               "SET_GPR_S32(ctx, {}, (int32_t)merged); }}",
+                               inst.rs, inst.simmediate, genRead(32, "aligned_addr"), inst.rt, inst.rt);
 
         case OPCODE_LWR:
             return fmt::format("{{ uint32_t addr = ADD32(GPR_U32(ctx, {}), {}); "
-                               "uint32_t shift = (addr & 3) << 3; "
-                               "uint32_t mask = 0xFFFFFFFF >> shift; "
-                               "uint32_t aligned_word = {}; "
-                               "SET_GPR_U32(ctx, {}, (GPR_U32(ctx, {}) & ~mask) | ((aligned_word >> shift) & mask)); }}",
-                               inst.rs, inst.simmediate, genRead(32, "addr & ~3"), inst.rt, inst.rt);
+                               "uint32_t aligned_addr = addr & ~3u; "
+                               "uint32_t offset = addr & 3u; "
+                               "uint32_t mem = {}; "
+                               "uint32_t shift = offset << 3; "
+                               "uint32_t keepMask = (offset == 0) ? 0u : (0xFFFFFFFFu << ((4u - offset) << 3)); "
+                               "uint32_t merged32 = (GPR_U32(ctx, {}) & keepMask) | (mem >> shift); "
+                               "uint64_t merged64 = (GPR_U64(ctx, {}) & 0xFFFFFFFF00000000ull) | (uint64_t)merged32; "
+                               "if (offset == 0) merged64 = (uint64_t)(int64_t)(int32_t)merged32; "
+                               "SET_GPR_U64(ctx, {}, merged64); }}",
+                               inst.rs, inst.simmediate, genRead(32, "aligned_addr"),
+                               inst.rt, inst.rt, inst.rt);
 
         case OPCODE_SWL:
             return fmt::format("{{ uint32_t addr = ADD32(GPR_U32(ctx, {}), {}); "
-                               "uint32_t shift = (3 - (addr & 3)) << 3; "
-                               "uint32_t mask = 0xFFFFFFFF >> shift; "
-                               "uint32_t aligned_addr = addr & ~3; "
+                               "uint32_t aligned_addr = addr & ~3u; "
+                               "uint32_t offset = addr & 3u; "
+                               "uint32_t shift = (3u - offset) << 3; "
+                               "uint32_t mask = 0xFFFFFFFFu >> shift; "
                                "uint32_t old_data = {}; "
-                               "uint32_t new_data = (old_data & ~mask) | ((GPR_U32(ctx, {}) >> shift) & mask); "
+                               "uint32_t val = GPR_U32(ctx, {}); "
+                               "uint32_t new_data = (old_data & ~mask) | ((val >> shift) & mask); "
                                "{}; }}",
                                inst.rs, inst.simmediate, genRead(32, "aligned_addr"), inst.rt, genWrite(32, "aligned_addr", "new_data"));
 
         case OPCODE_SWR:
             return fmt::format("{{ uint32_t addr = ADD32(GPR_U32(ctx, {}), {}); "
-                               "uint32_t shift = (addr & 3) << 3; "
-                               "uint32_t mask = 0xFFFFFFFF << shift; "
-                               "uint32_t aligned_addr = addr & ~3; "
+                               "uint32_t aligned_addr = addr & ~3u; "
+                               "uint32_t offset = addr & 3u; "
+                               "uint32_t shift = offset << 3; "
+                               "uint32_t mask = 0xFFFFFFFFu << shift; "
                                "uint32_t old_data = {}; "
-                               "uint32_t new_data = (old_data & ~mask) | ((GPR_U32(ctx, {}) << shift) & mask); "
+                               "uint32_t val = GPR_U32(ctx, {}); "
+                               "uint32_t new_data = (old_data & ~mask) | ((val << shift) & mask); "
                                "{}; }}",
                                inst.rs, inst.simmediate, genRead(32, "aligned_addr"), inst.rt, genWrite(32, "aligned_addr", "new_data"));
 
         case OPCODE_SDL:
             return fmt::format("{{ uint32_t addr = ADD32(GPR_U32(ctx, {}), {}); "
-                               "uint32_t shift = (7 - (addr & 7)) << 3; "
-                               "uint64_t mask = 0xFFFFFFFFFFFFFFFFULL >> shift; "
-                               "uint64_t aligned_addr = addr & ~7ULL; "
+                               "uint32_t aligned_addr = addr & ~7u; "
+                               "uint32_t offset = addr & 7u; "
+                               "uint32_t shift = (7u - offset) << 3; "
+                               "uint64_t mask = 0xFFFFFFFFFFFFFFFFull >> shift; "
                                "uint64_t old_data = {}; "
-                               "uint64_t new_data = (old_data & ~mask) | ((GPR_U64(ctx, {}) >> shift) & mask); "
+                               "uint64_t val = GPR_U64(ctx, {}); "
+                               "uint64_t new_data = (old_data & ~mask) | ((val >> shift) & mask); "
                                "{}; }}",
                                inst.rs, inst.simmediate, genRead(64, "aligned_addr"), inst.rt, genWrite(64, "aligned_addr", "new_data"));
 
         case OPCODE_SDR:
             return fmt::format("{{ uint32_t addr = ADD32(GPR_U32(ctx, {}), {}); "
-                               "uint32_t shift = ((addr & 7)) << 3; "
-                               "uint64_t mask = 0xFFFFFFFFFFFFFFFFULL << shift; "
-                               "uint64_t aligned_addr = addr & ~7ULL; "
+                               "uint32_t aligned_addr = addr & ~7u; "
+                               "uint32_t offset = addr & 7u; "
+                               "uint32_t shift = offset << 3; "
+                               "uint64_t mask = 0xFFFFFFFFFFFFFFFFull << shift; "
                                "uint64_t old_data = {}; "
-                               "uint64_t new_data = (old_data & ~mask) | ((GPR_U64(ctx, {}) << shift) & mask); "
+                               "uint64_t val = GPR_U64(ctx, {}); "
+                               "uint64_t new_data = (old_data & ~mask) | ((val << shift) & mask); "
                                "{}; }}",
                                inst.rs, inst.simmediate, genRead(64, "aligned_addr"), inst.rt, genWrite(64, "aligned_addr", "new_data"));
         case OPCODE_CACHE:
             return "// CACHE instruction (ignored)";
         case OPCODE_PREF:
             return "// PREF instruction (ignored)";
+        case OPCODE_LL:
+            return fmt::format(
+                "{{ uint32_t addr = ADD32(GPR_U32(ctx, {}), {}); "
+                "SET_GPR_S32(ctx, {}, (int32_t)READ32(addr)); "
+                "ctx->llbit = 1; ctx->lladdr = addr; }}",
+                inst.rs, inst.simmediate, inst.rt);
+        case OPCODE_SC:
+            return fmt::format(
+                "{{ uint32_t addr = ADD32(GPR_U32(ctx, {}), {}); "
+                "if (ctx->llbit) {{ WRITE32(addr, GPR_U32(ctx, {})); "
+                "SET_GPR_S32(ctx, {}, 1); }} "
+                "else {{ SET_GPR_S32(ctx, {}, 0); }} "
+                "ctx->llbit = 0; }}",
+                inst.rs, inst.simmediate, inst.rt, inst.rt, inst.rt);
         default:
             return fmt::format("// Unhandled opcode: 0x{:X}", inst.opcode);
         }
@@ -910,15 +1152,15 @@ namespace ps2recomp
                 return "// NOP";
             if (inst.rd == 0)
                 return "";
-            return fmt::format("SET_GPR_U32(ctx, {}, SLL32(GPR_U32(ctx, {}), {}));", inst.rd, inst.rt, inst.sa);
+            return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)SLL32(GPR_U32(ctx, {}), {}));", inst.rd, inst.rt, inst.sa);
         case SPECIAL_SRL:
-            return fmt::format("SET_GPR_U32(ctx, {}, SRL32(GPR_U32(ctx, {}), {}));", inst.rd, inst.rt, inst.sa);
+            return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)SRL32(GPR_U32(ctx, {}), {}));", inst.rd, inst.rt, inst.sa);
         case SPECIAL_SRA:
             return fmt::format("SET_GPR_S32(ctx, {}, SRA32(GPR_S32(ctx, {}), {}));", inst.rd, inst.rt, inst.sa);
         case SPECIAL_SLLV:
-            return fmt::format("SET_GPR_U32(ctx, {}, SLL32(GPR_U32(ctx, {}), GPR_U32(ctx, {}) & 0x1F));", inst.rd, inst.rt, inst.rs);
+            return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)SLL32(GPR_U32(ctx, {}), GPR_U32(ctx, {}) & 0x1F));", inst.rd, inst.rt, inst.rs);
         case SPECIAL_SRLV:
-            return fmt::format("SET_GPR_U32(ctx, {}, SRL32(GPR_U32(ctx, {}), GPR_U32(ctx, {}) & 0x1F));", inst.rd, inst.rt, inst.rs);
+            return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)SRL32(GPR_U32(ctx, {}), GPR_U32(ctx, {}) & 0x1F));", inst.rd, inst.rt, inst.rs);
         case SPECIAL_SRAV:
             return fmt::format("SET_GPR_S32(ctx, {}, SRA32(GPR_S32(ctx, {}), GPR_U32(ctx, {}) & 0x1F));", inst.rd, inst.rt, inst.rs);
         case SPECIAL_JR:
@@ -932,33 +1174,33 @@ namespace ps2recomp
         case SPECIAL_SYNC:
             return "// SYNC instruction - memory barrier\n// In recompiled code, we don't need explicit memory barriers";
         case SPECIAL_MFHI:
-            return fmt::format("SET_GPR_U32(ctx, {}, ctx->hi);", inst.rd);
+            return fmt::format("SET_GPR_U64(ctx, {}, ctx->hi);", inst.rd);
         case SPECIAL_MTHI:
-            return fmt::format("ctx->hi = GPR_U32(ctx, {});", inst.rs);
+            return fmt::format("ctx->hi = GPR_U64(ctx, {});", inst.rs);
         case SPECIAL_MFLO:
-            return fmt::format("SET_GPR_U32(ctx, {}, ctx->lo);", inst.rd);
+            return fmt::format("SET_GPR_U64(ctx, {}, ctx->lo);", inst.rd);
         case SPECIAL_MTLO:
-            return fmt::format("ctx->lo = GPR_U32(ctx, {});", inst.rs);
+            return fmt::format("ctx->lo = GPR_U64(ctx, {});", inst.rs);
         case SPECIAL_MULT:
-            return fmt::format("{{ int64_t result = (int64_t)GPR_S32(ctx, {}) * (int64_t)GPR_S32(ctx, {}); ctx->lo = (uint32_t)result; ctx->hi = (uint32_t)(result >> 32); }}", inst.rs, inst.rt);
+            return fmt::format("{{ int64_t result = (int64_t)GPR_S32(ctx, {}) * (int64_t)GPR_S32(ctx, {}); ctx->lo = (uint64_t)(int64_t)(int32_t)result; ctx->hi = (uint64_t)(int64_t)(int32_t)(result >> 32); }}", inst.rs, inst.rt);
         case SPECIAL_MULTU:
-            return fmt::format("{{ uint64_t result = (uint64_t)GPR_U32(ctx, {}) * (uint64_t)GPR_U32(ctx, {}); ctx->lo = (uint32_t)result; ctx->hi = (uint32_t)(result >> 32); }}", inst.rs, inst.rt);
+            return fmt::format("{{ uint64_t result = (uint64_t)GPR_U32(ctx, {}) * (uint64_t)GPR_U32(ctx, {}); ctx->lo = (uint64_t)(int64_t)(int32_t)result; ctx->hi = (uint64_t)(int64_t)(int32_t)(result >> 32); }}", inst.rs, inst.rt);
         case SPECIAL_DIV:
             return fmt::format("{{ int32_t divisor = GPR_S32(ctx, {}); "
                                "   int32_t dividend = GPR_S32(ctx, {}); "
                                "   if (divisor != 0) {{ "
                                "       if (divisor == -1 && dividend == INT32_MIN) {{ "
-                               "           ctx->lo = INT32_MIN; ctx->hi = 0; "
+                               "           ctx->lo = (uint64_t)(int64_t)INT32_MIN; ctx->hi = 0; "
                                "       }} else {{ "
-                               "           ctx->lo = (uint32_t)(dividend / divisor); "
-                               "           ctx->hi = (uint32_t)(dividend % divisor); "
+                               "           ctx->lo = (uint64_t)(int64_t)(dividend / divisor); "
+                               "           ctx->hi = (uint64_t)(int64_t)(dividend % divisor); "
                                "       }} "
                                "   }} else {{ "
-                               "       ctx->lo = (dividend < 0) ? 1 : -1; ctx->hi = dividend; "
+                               "       ctx->lo = (dividend < 0) ? 1ull : 0xFFFFFFFFFFFFFFFFull; ctx->hi = (uint64_t)(int64_t)dividend; "
                                "   }} }}",
                                inst.rt, inst.rs);
         case SPECIAL_DIVU:
-            return fmt::format("{{ uint32_t divisor = GPR_U32(ctx, {}); if (divisor != 0) {{ ctx->lo = GPR_U32(ctx, {}) / divisor; ctx->hi = GPR_U32(ctx, {}) % divisor; }} else {{ ctx->lo = 0xFFFFFFFF; ctx->hi = GPR_U32(ctx,{}); }} }}", inst.rt, inst.rs, inst.rt, inst.rs, inst.rt);
+            return fmt::format("{{ uint32_t divisor = GPR_U32(ctx, {}); if (divisor != 0) {{ ctx->lo = (uint64_t)(int64_t)(int32_t)(GPR_U32(ctx, {}) / divisor); ctx->hi = (uint64_t)(int64_t)(int32_t)(GPR_U32(ctx, {}) % divisor); }} else {{ ctx->lo = 0xFFFFFFFFFFFFFFFFull; ctx->hi = (uint64_t)(int64_t)(int32_t)GPR_U32(ctx,{}); }} }}", inst.rt, inst.rs, inst.rs, inst.rs);
         case SPECIAL_ADD:
             return fmt::format(
                 "{{ "
@@ -973,7 +1215,7 @@ namespace ps2recomp
                 "}}",
                 inst.rs, inst.rt, inst.rd);
         case SPECIAL_ADDU:
-            return fmt::format("SET_GPR_U32(ctx, {}, ADD32(GPR_U32(ctx, {}), GPR_U32(ctx, {})));", inst.rd, inst.rs, inst.rt);
+            return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ADD32(GPR_U32(ctx, {}), GPR_U32(ctx, {})));", inst.rd, inst.rs, inst.rt);
         case SPECIAL_SUB:
             return fmt::format(
                 "{{ uint32_t tmp; bool ov; "
@@ -982,27 +1224,27 @@ namespace ps2recomp
                 "else SET_GPR_S32(ctx, {}, (int32_t)tmp); }}",
                 inst.rs, inst.rt, inst.rd);
         case SPECIAL_SUBU:
-            return fmt::format("SET_GPR_U32(ctx, {}, SUB32(GPR_U32(ctx, {}), GPR_U32(ctx, {})));", inst.rd, inst.rs, inst.rt);
+            return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)SUB32(GPR_U32(ctx, {}), GPR_U32(ctx, {})));", inst.rd, inst.rs, inst.rt);
         case SPECIAL_AND:
-            return fmt::format("SET_GPR_U32(ctx, {}, AND32(GPR_U32(ctx, {}), GPR_U32(ctx, {})));", inst.rd, inst.rs, inst.rt);
+            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PAND(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", inst.rd, inst.rs, inst.rt);
         case SPECIAL_OR:
-            return fmt::format("SET_GPR_U32(ctx, {}, OR32(GPR_U32(ctx, {}), GPR_U32(ctx, {})));", inst.rd, inst.rs, inst.rt);
+            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_POR(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", inst.rd, inst.rs, inst.rt);
         case SPECIAL_XOR:
-            return fmt::format("SET_GPR_U32(ctx, {}, XOR32(GPR_U32(ctx, {}), GPR_U32(ctx, {})));", inst.rd, inst.rs, inst.rt);
+            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PXOR(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", inst.rd, inst.rs, inst.rt);
         case SPECIAL_NOR:
-            return fmt::format("SET_GPR_U32(ctx, {}, NOR32(GPR_U32(ctx, {}), GPR_U32(ctx, {})));", inst.rd, inst.rs, inst.rt);
+            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PNOR(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", inst.rd, inst.rs, inst.rt);
         case SPECIAL_SLT:
-            return fmt::format("SET_GPR_U32(ctx, {}, SLT32(GPR_S32(ctx, {}), GPR_S32(ctx, {})));", inst.rd, inst.rs, inst.rt);
+            return fmt::format("SET_GPR_U64(ctx, {}, ((int64_t)GPR_S64(ctx, {}) < (int64_t)GPR_S64(ctx, {})) ? 1 : 0);", inst.rd, inst.rs, inst.rt);
         case SPECIAL_SLTU:
-            return fmt::format("SET_GPR_U32(ctx, {}, SLTU32(GPR_U32(ctx, {}), GPR_U32(ctx, {})));", inst.rd, inst.rs, inst.rt);
+            return fmt::format("SET_GPR_U64(ctx, {}, ((uint64_t)GPR_U64(ctx, {}) < (uint64_t)GPR_U64(ctx, {})) ? 1 : 0);", inst.rd, inst.rs, inst.rt);
         case SPECIAL_MOVZ:
-            return fmt::format("if (GPR_U32(ctx, {}) == 0) SET_GPR_U32(ctx, {}, GPR_U32(ctx, {}));", inst.rt, inst.rd, inst.rs);
+            return fmt::format("if (GPR_U64(ctx, {}) == 0) SET_GPR_VEC(ctx, {}, GPR_VEC(ctx, {}));", inst.rt, inst.rd, inst.rs);
         case SPECIAL_MOVN:
-            return fmt::format("if (GPR_U32(ctx, {}) != 0) SET_GPR_U32(ctx, {}, GPR_U32(ctx, {}));", inst.rt, inst.rd, inst.rs);
+            return fmt::format("if (GPR_U64(ctx, {}) != 0) SET_GPR_VEC(ctx, {}, GPR_VEC(ctx, {}));", inst.rt, inst.rd, inst.rs);
         case SPECIAL_MFSA:
             return fmt::format("SET_GPR_U32(ctx, {}, ctx->sa);", inst.rd);
         case SPECIAL_MTSA:
-            return fmt::format("ctx->sa = GPR_U32(ctx, {}) & 0x1F;", inst.rs);
+            return fmt::format("ctx->sa = GPR_U32(ctx, {}) & 0x7F;", inst.rs);
         case SPECIAL_DADD:
             return fmt::format(
                 "{{ int64_t a = (int64_t)GPR_S64(ctx, {}); "
@@ -1044,17 +1286,17 @@ namespace ps2recomp
         case SPECIAL_DSRA32:
             return fmt::format("SET_GPR_S64(ctx, {}, GPR_S64(ctx, {}) >> (32 + {}));", inst.rd, inst.rt, inst.sa);
         case SPECIAL_TGE:
-            return fmt::format("if (GPR_S32(ctx, {}) >= GPR_S32(ctx, {})) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.rt);
+            return fmt::format("if (GPR_S64(ctx, {}) >= GPR_S64(ctx, {})) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.rt);
         case SPECIAL_TGEU:
-            return fmt::format("if (GPR_U32(ctx, {}) >= GPR_U32(ctx, {})) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.rt);
+            return fmt::format("if (GPR_U64(ctx, {}) >= GPR_U64(ctx, {})) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.rt);
         case SPECIAL_TLT:
-            return fmt::format("if (GPR_S32(ctx, {}) < GPR_S32(ctx, {})) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.rt);
+            return fmt::format("if (GPR_S64(ctx, {}) < GPR_S64(ctx, {})) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.rt);
         case SPECIAL_TLTU:
-            return fmt::format("if (GPR_U32(ctx, {}) < GPR_U32(ctx, {})) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.rt);
+            return fmt::format("if (GPR_U64(ctx, {}) < GPR_U64(ctx, {})) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.rt);
         case SPECIAL_TEQ:
-            return fmt::format("if (GPR_U32(ctx, {}) == GPR_U32(ctx, {})) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.rt);
+            return fmt::format("if (GPR_U64(ctx, {}) == GPR_U64(ctx, {})) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.rt);
         case SPECIAL_TNE:
-            return fmt::format("if (GPR_U32(ctx, {}) != GPR_U32(ctx, {})) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.rt);
+            return fmt::format("if (GPR_U64(ctx, {}) != GPR_U64(ctx, {})) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.rt);
         default:
             return fmt::format("// Unhandled SPECIAL instruction: 0x{:X}", inst.function);
         }
@@ -1078,21 +1320,21 @@ namespace ps2recomp
             return fmt::format("// REGIMM branch instruction to 0x{:X} - Handled by branch logic", target);
         }
         case REGIMM_MTSAB:
-            return fmt::format("ctx->sa = (GPR_U32(ctx, {}) + {}) & 0xF;", inst.rs, inst.simmediate);
+            return fmt::format("ctx->sa = ((GPR_U32(ctx, {}) ^ (uint32_t){}) & 0xF) << 3;", inst.rs, inst.simmediate);
         case REGIMM_MTSAH:
-            return fmt::format("ctx->sa = ((GPR_U32(ctx, {}) + {}) & 0x7) << 1;", inst.rs, inst.simmediate);
+            return fmt::format("ctx->sa = ((GPR_U32(ctx, {}) ^ (uint32_t){}) & 0x7) << 4;", inst.rs, inst.simmediate);
         case REGIMM_TGEI:
-            return fmt::format("if (GPR_S32(ctx, {}) >= {}) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.simmediate);
+            return fmt::format("if (GPR_S64(ctx, {}) >= (int64_t)(int32_t){}) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.simmediate);
         case REGIMM_TGEIU:
-            return fmt::format("if (GPR_U32(ctx, {}) >= (uint32_t){}) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.simmediate);
+            return fmt::format("if (GPR_U64(ctx, {}) >= (uint64_t)(int64_t)(int32_t){}) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.simmediate);
         case REGIMM_TLTI:
-            return fmt::format("if (GPR_S32(ctx, {}) < {}) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.simmediate);
+            return fmt::format("if (GPR_S64(ctx, {}) < (int64_t)(int32_t){}) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.simmediate);
         case REGIMM_TLTIU:
-            return fmt::format("if (GPR_U32(ctx, {}) < (uint32_t){}) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.simmediate);
+            return fmt::format("if (GPR_U64(ctx, {}) < (uint64_t)(int64_t)(int32_t){}) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.simmediate);
         case REGIMM_TEQI:
-            return fmt::format("if (GPR_S32(ctx, {}) == {}) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.simmediate);
+            return fmt::format("if (GPR_S64(ctx, {}) == (int64_t)(int32_t){}) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.simmediate);
         case REGIMM_TNEI:
-            return fmt::format("if (GPR_S32(ctx, {}) != {}) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.simmediate);
+            return fmt::format("if (GPR_S64(ctx, {}) != (int64_t)(int32_t){}) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.simmediate);
         default:
             return fmt::format("// Unhandled REGIMM instruction: 0x{:X}", inst.rt);
         }
@@ -1110,51 +1352,51 @@ namespace ps2recomp
             switch (rd)
             {
             case COP0_REG_INDEX:
-                return fmt::format("SET_GPR_U32(ctx, {}, ctx->cop0_index);", rt);
+                return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_index);", rt);
             case COP0_REG_RANDOM:
-                return fmt::format("SET_GPR_U32(ctx, {}, ctx->cop0_random);", rt);
+                return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_random);", rt);
             case COP0_REG_ENTRYLO0:
-                return fmt::format("SET_GPR_U32(ctx, {}, ctx->cop0_entrylo0);", rt);
+                return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_entrylo0);", rt);
             case COP0_REG_ENTRYLO1:
-                return fmt::format("SET_GPR_U32(ctx, {}, ctx->cop0_entrylo1);", rt);
+                return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_entrylo1);", rt);
             case COP0_REG_CONTEXT:
-                return fmt::format("SET_GPR_U32(ctx, {}, ctx->cop0_context);", rt);
+                return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_context);", rt);
             case COP0_REG_PAGEMASK:
-                return fmt::format("SET_GPR_U32(ctx, {}, ctx->cop0_pagemask);", rt);
+                return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_pagemask);", rt);
             case COP0_REG_WIRED:
-                return fmt::format("SET_GPR_U32(ctx, {}, ctx->cop0_wired);", rt);
+                return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_wired);", rt);
             case COP0_REG_BADVADDR:
-                return fmt::format("SET_GPR_U32(ctx, {}, ctx->cop0_badvaddr);", rt);
+                return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_badvaddr);", rt);
             case COP0_REG_COUNT:
-                return fmt::format("SET_GPR_U32(ctx, {}, ctx->cop0_count);", rt);
+                return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_count);", rt);
             case COP0_REG_ENTRYHI:
-                return fmt::format("SET_GPR_U32(ctx, {}, ctx->cop0_entryhi);", rt);
+                return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_entryhi);", rt);
             case COP0_REG_COMPARE:
-                return fmt::format("SET_GPR_U32(ctx, {}, ctx->cop0_compare);", rt);
+                return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_compare);", rt);
             case COP0_REG_STATUS:
-                return fmt::format("SET_GPR_U32(ctx, {}, ctx->cop0_status);", rt);
+                return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_status);", rt);
             case COP0_REG_CAUSE:
-                return fmt::format("SET_GPR_U32(ctx, {}, ctx->cop0_cause);", rt);
+                return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_cause);", rt);
             case COP0_REG_EPC:
-                return fmt::format("SET_GPR_U32(ctx, {}, ctx->cop0_epc);", rt);
+                return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_epc);", rt);
             case COP0_REG_PRID:
-                return fmt::format("SET_GPR_U32(ctx, {}, ctx->cop0_prid);", rt);
+                return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_prid);", rt);
             case COP0_REG_CONFIG:
-                return fmt::format("SET_GPR_U32(ctx, {}, ctx->cop0_config);", rt);
+                return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_config);", rt);
             case COP0_REG_BADPADDR:
-                return fmt::format("SET_GPR_U32(ctx, {}, ctx->cop0_badpaddr);", rt);
+                return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_badpaddr);", rt);
             case COP0_REG_DEBUG:
-                return fmt::format("SET_GPR_U32(ctx, {}, ctx->cop0_debug);", rt);
+                return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_debug);", rt);
             case COP0_REG_PERF:
-                return fmt::format("SET_GPR_U32(ctx, {}, ctx->cop0_perf);", rt);
+                return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_perf);", rt);
             case COP0_REG_TAGLO:
-                return fmt::format("SET_GPR_U32(ctx, {}, ctx->cop0_taglo);", rt);
+                return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_taglo);", rt);
             case COP0_REG_TAGHI:
-                return fmt::format("SET_GPR_U32(ctx, {}, ctx->cop0_taghi);", rt);
+                return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_taghi);", rt);
             case COP0_REG_ERROREPC:
-                return fmt::format("SET_GPR_U32(ctx, {}, ctx->cop0_errorepc);", rt);
+                return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_errorepc);", rt);
             default:
-                return fmt::format("SET_GPR_U32(ctx, {}, 0);  // Unimplemented COP0 register {}", rt, rd);
+                return fmt::format("SET_GPR_S32(ctx, {}, 0);  // Unimplemented COP0 register {}", rt, rd);
             }
         case COP0_MT:
             switch (rd)
@@ -1234,9 +1476,9 @@ namespace ps2recomp
                     "return;"                      // Stop execution in this recompiled block
                 );
             case COP0_CO_EI:
-                return fmt::format("ctx->cop0_status |= 0x1; // Enable interrupts");
+                return fmt::format("ctx->cop0_status |= 0x10000; // Enable interrupts");
             case COP0_CO_DI:
-                return fmt::format("ctx->cop0_status &= ~0x1; // Disable interrupts");
+                return fmt::format("ctx->cop0_status &= ~0x10000; // Disable interrupts");
             default:
                 return fmt::format("// Unhandled COP0 CO-OP: 0x{:X}", function);
             }
@@ -1257,9 +1499,9 @@ namespace ps2recomp
         switch (format)
         {
         case COP1_MF:
-            return fmt::format("SET_GPR_U32(ctx, {}, *(uint32_t*)&ctx->f[{}]);", ft, fs);
+            return fmt::format("{{ uint32_t bits; std::memcpy(&bits, &ctx->f[{}], sizeof(bits)); SET_GPR_U32(ctx, {}, bits); }}", fs, ft);
         case COP1_MT:
-            return fmt::format("*(uint32_t*)&ctx->f[{}] = GPR_U32(ctx, {});", fs, ft);
+            return fmt::format("{{ uint32_t bits = GPR_U32(ctx, {}); std::memcpy(&ctx->f[{}], &bits, sizeof(bits)); }}", ft, fs);
         case COP1_CF:
             if (fs == 31)
                 return fmt::format("SET_GPR_U32(ctx, {}, ctx->fcr31);", ft); // FCR31 contains status/control
@@ -1297,15 +1539,15 @@ namespace ps2recomp
             case COP1_S_NEG:
                 return fmt::format("ctx->f[{}] = FPU_NEG_S(ctx->f[{}]);", fd, fs);
             case COP1_S_ROUND_W:
-                return fmt::format("*(int32_t*)&ctx->f[{}] = FPU_ROUND_W_S(ctx->f[{}]);", fd, fs);
+                return fmt::format("{{ int32_t tmp = FPU_ROUND_W_S(ctx->f[{}]); std::memcpy(&ctx->f[{}], &tmp, sizeof(tmp)); }}", fs, fd);
             case COP1_S_TRUNC_W:
-                return fmt::format("*(int32_t*)&ctx->f[{}] = FPU_TRUNC_W_S(ctx->f[{}]);", fd, fs);
+                return fmt::format("{{ int32_t tmp = FPU_TRUNC_W_S(ctx->f[{}]); std::memcpy(&ctx->f[{}], &tmp, sizeof(tmp)); }}", fs, fd);
             case COP1_S_CEIL_W:
-                return fmt::format("*(int32_t*)&ctx->f[{}] = FPU_CEIL_W_S(ctx->f[{}]);", fd, fs);
+                return fmt::format("{{ int32_t tmp = FPU_CEIL_W_S(ctx->f[{}]); std::memcpy(&ctx->f[{}], &tmp, sizeof(tmp)); }}", fs, fd);
             case COP1_S_FLOOR_W:
-                return fmt::format("*(int32_t*)&ctx->f[{}] = FPU_FLOOR_W_S(ctx->f[{}]);", fd, fs);
+                return fmt::format("{{ int32_t tmp = FPU_FLOOR_W_S(ctx->f[{}]); std::memcpy(&ctx->f[{}], &tmp, sizeof(tmp)); }}", fs, fd);
             case COP1_S_CVT_W:
-                return fmt::format("*(int32_t*)&ctx->f[{}] = FPU_CVT_W_S(ctx->f[{}]);", fd, fs);
+                return fmt::format("{{ int32_t tmp = FPU_CVT_W_S(ctx->f[{}]); std::memcpy(&ctx->f[{}], &tmp, sizeof(tmp)); }}", fs, fd);
             case COP1_S_RSQRT:
                 return fmt::format("ctx->f[{}] = 1.0f / sqrtf(ctx->f[{}]);", fd, fs);
             case COP1_S_ADDA:
@@ -1365,7 +1607,7 @@ namespace ps2recomp
             switch (function)
             {
             case COP1_W_CVT_S:
-                return fmt::format("ctx->f[{}] = FPU_CVT_S_W(*(int32_t*)&ctx->f[{}]);", fd, fs);
+                return fmt::format("{{ int32_t tmp; std::memcpy(&tmp, &ctx->f[{}], sizeof(tmp)); ctx->f[{}] = FPU_CVT_S_W(tmp); }}", fs, fd);
             default:
                 return fmt::format("// Unhandled FPU.W instruction: function 0x{:X}", function);
             }
@@ -1384,40 +1626,52 @@ namespace ps2recomp
         switch (function)
         {
         case MMI_MFHI1:
-            return fmt::format("SET_GPR_U32(ctx, {}, ctx->hi1);", rd);
+            return fmt::format("SET_GPR_U64(ctx, {}, ctx->hi1);", rd);
         case MMI_MTHI1:
-            return fmt::format("ctx->hi1 = GPR_U32(ctx, {});", rs);
+            return fmt::format("ctx->hi1 = GPR_U64(ctx, {});", rs);
         case MMI_MFLO1:
-            return fmt::format("SET_GPR_U32(ctx, {}, ctx->lo1);", rd);
+            return fmt::format("SET_GPR_U64(ctx, {}, ctx->lo1);", rd);
         case MMI_MTLO1:
-            return fmt::format("ctx->lo1 = GPR_U32(ctx, {});", rs);
+            return fmt::format("ctx->lo1 = GPR_U64(ctx, {});", rs);
         case MMI_MULT1:
-            return fmt::format("{{ int64_t result = (int64_t)GPR_S32(ctx, {}) * (int64_t)GPR_S32(ctx, {}); ctx->lo1 = (uint32_t)result; ctx->hi1 = (uint32_t)(result >> 32); }}", rs, rt);
+            return fmt::format("{{ int64_t result = (int64_t)GPR_S32(ctx, {}) * (int64_t)GPR_S32(ctx, {}); ctx->lo1 = (uint64_t)(int64_t)(int32_t)result; ctx->hi1 = (uint64_t)(int64_t)(int32_t)(result >> 32); }}", rs, rt);
         case MMI_MULTU1:
-            return fmt::format("{{ uint64_t result = (uint64_t)GPR_U32(ctx, {}) * (uint64_t)GPR_U32(ctx, {}); ctx->lo1 = (uint32_t)result; ctx->hi1 = (uint32_t)(result >> 32); }}", rs, rt);
+            return fmt::format("{{ uint64_t result = (uint64_t)GPR_U32(ctx, {}) * (uint64_t)GPR_U32(ctx, {}); ctx->lo1 = (uint64_t)(int64_t)(int32_t)result; ctx->hi1 = (uint64_t)(int64_t)(int32_t)(result >> 32); }}", rs, rt);
         case MMI_DIV1:
-            return fmt::format("{{ int32_t divisor = GPR_S32(ctx, {}); if (divisor != 0) {{ ctx->lo1 = (uint32_t)(GPR_S32(ctx, {}) / divisor); ctx->hi1 = (uint32_t)(GPR_S32(ctx, {}) % divisor); }} else {{ ctx->lo1= (GPR_S32(ctx,{}) < 0) ? 1 : -1; ctx->hi1=GPR_S32(ctx,{}); }} }}", rt, rs, rt, rs, rt);
+            return fmt::format("{{ int32_t divisor = GPR_S32(ctx, {}); "
+                               "int32_t dividend = GPR_S32(ctx, {}); "
+                               "if (divisor != 0) {{ "
+                               "    if (divisor == -1 && dividend == INT32_MIN) {{ "
+                               "        ctx->lo1 = (uint64_t)(int64_t)INT32_MIN; ctx->hi1 = 0; "
+                               "    }} else {{ "
+                               "        ctx->lo1 = (uint64_t)(int64_t)(dividend / divisor); "
+                               "        ctx->hi1 = (uint64_t)(int64_t)(dividend % divisor); "
+                               "    }} "
+                               "}} else {{ "
+                               "    ctx->lo1 = (dividend < 0) ? 1ull : 0xFFFFFFFFFFFFFFFFull; ctx->hi1 = (uint64_t)(int64_t)dividend; "
+                               "}} }}",
+                               inst.rt, inst.rs);
         case MMI_DIVU1:
-            return fmt::format("{{ uint32_t divisor = GPR_U32(ctx, {}); if (divisor != 0) {{ ctx->lo1 = GPR_U32(ctx, {}) / divisor; ctx->hi1 = GPR_U32(ctx, {}) % divisor; }} else {{ ctx->lo1=0xFFFFFFFF; ctx->hi1=GPR_U32(ctx,{}); }} }}", rt, rs, rt, rs, rt);
+            return fmt::format("{{ uint32_t divisor = GPR_U32(ctx, {}); if (divisor != 0) {{ ctx->lo1 = (uint64_t)(int64_t)(int32_t)(GPR_U32(ctx, {}) / divisor); ctx->hi1 = (uint64_t)(int64_t)(int32_t)(GPR_U32(ctx, {}) % divisor); }} else {{ ctx->lo1=0xFFFFFFFFFFFFFFFFull; ctx->hi1=(uint64_t)(int64_t)(int32_t)GPR_U32(ctx,{}); }} }}", rt, rs, rs, rs);
         case MMI_MADD:
-            return fmt::format("{{ int64_t acc = ((int64_t)ctx->hi << 32) | ctx->lo; int64_t prod = (int64_t)GPR_S32(ctx, {}) * (int64_t)GPR_S32(ctx, {}); int64_t result = acc + prod; ctx->lo = (uint32_t)result; ctx->hi = (uint32_t)(result >> 32); }}", rs, rt);
+            return fmt::format("{{ uint64_t acc = Ps2HiLoToU64(ctx->hi, ctx->lo); int64_t prod = (int64_t)GPR_S32(ctx, {}) * (int64_t)GPR_S32(ctx, {}); int64_t result = acc + prod; ctx->lo = Ps2SignExt32ToU64((uint32_t)result); ctx->hi = Ps2SignExt32ToU64((uint32_t)(result >> 32)); }}", rs, rt);
         case MMI_MADDU:
-            return fmt::format("{{ uint64_t acc = ((uint64_t)ctx->hi << 32) | ctx->lo; uint64_t prod = (uint64_t)GPR_U32(ctx, {}) * (uint64_t)GPR_U32(ctx, {}); uint64_t result = acc + prod; ctx->lo = (uint32_t)result; ctx->hi = (uint32_t)(result >> 32); }}", rs, rt);
+            return fmt::format("{{ uint64_t acc = Ps2HiLoToU64(ctx->hi, ctx->lo); uint64_t prod = (uint64_t)GPR_U32(ctx, {}) * (uint64_t)GPR_U32(ctx, {}); uint64_t result = acc + prod; ctx->lo = Ps2SignExt32ToU64((uint32_t)result); ctx->hi = Ps2SignExt32ToU64((uint32_t)(result >> 32)); }}", rs, rt);
         case MMI_MSUB:
-            return fmt::format("{{ int64_t acc = ((int64_t)ctx->hi << 32) | ctx->lo; int64_t prod = (int64_t)GPR_S32(ctx, {}) * (int64_t)GPR_S32(ctx, {}); int64_t result = acc - prod; ctx->lo = (uint32_t)result; ctx->hi = (uint32_t)(result >> 32); }}", rs, rt);
+            return fmt::format("{{ uint64_t acc = Ps2HiLoToU64(ctx->hi, ctx->lo); int64_t prod = (int64_t)GPR_S32(ctx, {}) * (int64_t)GPR_S32(ctx, {}); int64_t result = acc - prod; ctx->lo = Ps2SignExt32ToU64((uint32_t)result); ctx->hi = Ps2SignExt32ToU64((uint32_t)(result >> 32)); }}", rs, rt);
         case MMI_MSUBU:
-            return fmt::format("{{ uint64_t acc = ((uint64_t)ctx->hi << 32) | ctx->lo; uint64_t prod = (uint64_t)GPR_U32(ctx, {}) * (uint64_t)GPR_U32(ctx, {}); uint64_t result = acc - prod; ctx->lo = (uint32_t)result; ctx->hi = (uint32_t)(result >> 32); }}", rs, rt);
+            return fmt::format("{{ uint64_t acc = Ps2HiLoToU64(ctx->hi, ctx->lo); uint64_t prod = (uint64_t)GPR_U32(ctx, {}) * (uint64_t)GPR_U32(ctx, {}); uint64_t result = acc - prod; ctx->lo = Ps2SignExt32ToU64((uint32_t)result); ctx->hi = Ps2SignExt32ToU64((uint32_t)(result >> 32)); }}", rs, rt);
         case MMI_MADD1:
-            return fmt::format("{{ int64_t acc = ((int64_t)ctx->hi1 << 32) | ctx->lo1; int64_t prod = (int64_t)GPR_S32(ctx, {}) * (int64_t)GPR_S32(ctx, {}); int64_t result = acc + prod; ctx->lo1 = (uint32_t)result; ctx->hi1 = (uint32_t)(result >> 32); }}", rs, rt);
+            return fmt::format("{{ uint64_t acc = Ps2HiLoToU64(ctx->hi1, ctx->lo1); int64_t prod = (int64_t)GPR_S32(ctx, {}) * (int64_t)GPR_S32(ctx, {}); int64_t result = acc + prod; ctx->lo1 = Ps2SignExt32ToU64((uint32_t)result); ctx->hi1 = Ps2SignExt32ToU64((uint32_t)(result >> 32)); }}", rs, rt);
         case MMI_MADDU1:
-            return fmt::format("{{ uint64_t acc = ((uint64_t)ctx->hi1 << 32) | ctx->lo1; uint64_t prod = (uint64_t)GPR_U32(ctx, {}) * (uint64_t)GPR_U32(ctx, {}); uint64_t result = acc + prod; ctx->lo1 = (uint32_t)result; ctx->hi1 = (uint32_t)(result >> 32); }}", rs, rt);
+            return fmt::format("{{ uint64_t acc = Ps2HiLoToU64(ctx->hi1, ctx->lo1); uint64_t prod = (uint64_t)GPR_U32(ctx, {}) * (uint64_t)GPR_U32(ctx, {}); uint64_t result = acc + prod; ctx->lo1 = Ps2SignExt32ToU64((uint32_t)result); ctx->hi1 = Ps2SignExt32ToU64((uint32_t)(result >> 32)); }}", rs, rt);
         case MMI_PLZCW:
             return fmt::format(
                 "{{ "
                 "uint64_t v = GPR_U64(ctx, {}); "
                 "uint32_t lo = (uint32_t)(v & 0xFFFFFFFFu); "
                 "uint32_t hi = (uint32_t)(v >> 32); "
-                "uint64_t out = ((uint64_t)ps2_clz32(hi) << 32) | (uint64_t)ps2_clz32(lo); "
+                "uint64_t out = ((uint64_t)ps2_plzcw32(hi) << 32) | (uint64_t)ps2_plzcw32(lo); "
                 "SET_GPR_U64(ctx, {}, out); "
                 "}}",
                 rs, rd);
@@ -1510,9 +1764,9 @@ namespace ps2recomp
         case MMI0_PPACB:
             return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PPACB(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
         case MMI0_PEXT5:
-            return fmt::format("// Unhandled PEXT5 instruction: function 0x{:X}", subfunc);
+            return translatePEXT5(inst);
         case MMI0_PPAC5:
-            return fmt::format("// Unhandled PPAC5 instruction: function 0x{:X}", subfunc);
+            return translatePPAC5(inst);
         default:
             return fmt::format("// Unhandled MMI0 instruction: function 0x{:X}", subfunc);
         }
@@ -1533,7 +1787,7 @@ namespace ps2recomp
         case MMI1_PMINW:
             return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PMINW(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
         case MMI1_PADSBH:
-            return fmt::format("// Unhandled PADSBH instruction: function 0x{:X}", subfunc);
+            return translatePADSBH(inst);
         case MMI1_PABSH:
             return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PABSH(GPR_VEC(ctx, {})));", rd, rs);
         case MMI1_PCEQH:
@@ -1543,9 +1797,11 @@ namespace ps2recomp
         case MMI1_PCEQB:
             return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PCEQB(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
         case MMI1_PADDUW:
-            return fmt::format("SET_GPR_VEC(ctx, {}, _mm_add_epi32(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
+            return fmt::format(
+                "SET_GPR_VEC(ctx, {}, ps2_paddu32(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
         case MMI1_PSUBUW:
-            return fmt::format("SET_GPR_VEC(ctx, {}, _mm_sub_epi32(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
+            return fmt::format(
+                "SET_GPR_VEC(ctx, {}, ps2_psubu32(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
         case MMI1_PEXTUW:
             return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PEXTUW(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
         case MMI1_PADDUH:
@@ -1582,15 +1838,15 @@ namespace ps2recomp
         case MMI2_PSRLVW:
             return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PSRLVW(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
         case MMI2_PMSUBW:
-            return fmt::format("// Unhandled PMSUBW instruction: function 0x{:X}", subfunc);
+            return translatePMSUBW(inst);
         case MMI2_PMFHI:
-            return fmt::format("SET_GPR_U32(ctx, {}, ctx->hi);", rd);
+            return fmt::format("SET_GPR_U64(ctx, {}, ctx->hi);", rd);
         case MMI2_PMFLO:
-            return fmt::format("SET_GPR_U32(ctx, {}, ctx->lo);", rd);
+            return fmt::format("SET_GPR_U64(ctx, {}, ctx->lo);", rd);
         case MMI2_PINTH:
             return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PINTH(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
         case MMI2_PMULTW:
-            return fmt::format("// Unhandled PMULTW instruction: function 0x{:X}", subfunc);
+            return translatePMULTW(inst);
         case MMI2_PDIVW:
             return translatePDIVW(inst);
         case MMI2_PCPYLD:
@@ -1604,9 +1860,9 @@ namespace ps2recomp
         case MMI2_PHMADH:
             return translatePHMADH(inst);
         case MMI2_PMSUBH:
-            return fmt::format("// Unhandled PMSUBH instruction: function 0x{:X}", subfunc);
+            return translatePMSUBH(inst);
         case MMI2_PHMSBH:
-            return fmt::format("// Unhandled PHMSBH instruction: function 0x{:X}", subfunc);
+            return translatePHMSBH(inst);
         case MMI2_PEXEH:
             return translatePEXEH(inst);
         case MMI2_PREVH:
@@ -1633,7 +1889,7 @@ namespace ps2recomp
         switch (subfunc)
         {
         case MMI3_PMADDUW:
-            return fmt::format("Unhandled PMADDUW instruction: function 0x{:X}", subfunc);
+            return translatePMADDUW(inst);
         case MMI3_PSRAVW:
             return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PSRAVW(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
         case MMI3_PMTHI:
@@ -1719,7 +1975,7 @@ namespace ps2recomp
             case VU0_CR_R:
                 return fmt::format("SET_GPR_VEC(ctx, {}, _mm_castps_si128(ctx->vu0_r));", rt);
             case VU0_CR_I:
-                return fmt::format("SET_GPR_U32(ctx, {}, *(uint32_t*)&ctx->vu0_i);", rt);
+                return fmt::format("{{ uint32_t bits; std::memcpy(&bits, &ctx->vu0_i, sizeof(bits)); SET_GPR_U32(ctx, {}, bits); }}", rt);
             case VU0_CR_CLIP:
                 return fmt::format("SET_GPR_U32(ctx, {}, ctx->vu0_clip_flags);", rt);
             case VU0_CR_TPC:
@@ -1755,13 +2011,13 @@ namespace ps2recomp
             case VU0_CR_CLIP2:
                 return fmt::format("SET_GPR_U32(ctx, {}, ctx->vu0_clip_flags2);", rt);
             case VU0_CR_P:
-                return fmt::format("SET_GPR_U32(ctx, {}, *(uint32_t*)&ctx->vu0_p);", rt);
+                return fmt::format("{{ uint32_t bits; std::memcpy(&bits, &ctx->vu0_p, sizeof(bits)); SET_GPR_U32(ctx, {}, bits); }}", rt);
             case VU0_CR_XITOP: // Maybe this does not exist, maybe we handle to vu0_itop
                 return fmt::format("SET_GPR_U32(ctx, {}, ctx->vu0_xitop);", rt);
             case VU0_CR_ITOP:
                 return fmt::format("SET_GPR_U32(ctx, {}, ctx->vu0_itop);", rt);
             case VU0_CR_TOP:
-                return fmt::format("SET_GPR_U32(ctx, {}, ctx->vu0_vpu_stat);", rt);
+                return fmt::format("SET_GPR_U32(ctx, {}, ctx->vu0_top);", rt); // TODO: verify vu0_top field exists in R5900Context
             default:
                 return fmt::format("// Unimplemented CFC2 VU CReg: {}", rt);
             }
@@ -1783,7 +2039,7 @@ namespace ps2recomp
             case VU0_CR_R:
                 return fmt::format("ctx->vu0_r = _mm_castsi128_ps(GPR_VEC(ctx, {}));", rt);
             case VU0_CR_I:
-                return fmt::format("{{ uint32_t tmp = GPR_U32(ctx, {}); ctx->vu0_i = *reinterpret_cast<float*>(&tmp); }}", rt);
+                return fmt::format("{{ uint32_t tmp = GPR_U32(ctx, {}); std::memcpy(&ctx->vu0_i, &tmp, sizeof(tmp)); }}", rt);
             case VU0_CR_TPC:
                 return fmt::format("ctx->vu0_tpc = GPR_U32(ctx, {});", rt);
             case VU0_CR_CMSAR0:
@@ -1817,13 +2073,13 @@ namespace ps2recomp
             case VU0_CR_CLIP2:
                 return fmt::format("ctx->vu0_clip_flags2 = GPR_U32(ctx, {});", rt);
             case VU0_CR_P:
-                return fmt::format("{{ uint32_t tmp = GPR_U32(ctx, {}); ctx->vu0_p = *reinterpret_cast<float*>(&tmp); }}", rt);
+                return fmt::format("{{ uint32_t tmp = GPR_U32(ctx, {}); std::memcpy(&ctx->vu0_p, &tmp, sizeof(tmp)); }}", rt);
             case VU0_CR_XITOP:
                 return fmt::format("ctx->vu0_xitop = GPR_U32(ctx, {}) & 0x3FF;", rt);
             case VU0_CR_ITOP:
                 return fmt::format("ctx->vu0_itop = GPR_U32(ctx, {}) & 0x3FF;", rt);
             case VU0_CR_TOP:
-                return fmt::format("ctx->vu0_vpu_stat = GPR_U32(ctx, {}) & 0x3FF;", rt);
+                return fmt::format("ctx->vu0_top = GPR_U32(ctx, {}) & 0x3FF;", rt);
             default:
                 return fmt::format("// Unimplemented CTC2 VU CReg: {}", rd);
             }
@@ -2038,71 +2294,17 @@ namespace ps2recomp
             case VU0_S1_VCALLMSR:
                 return translateVU_VCALLMSR(inst);
             case VU0_S1_VADDq:
-            {
-                uint8_t dest_mask = inst.vectorInfo.vectorField;
-                return fmt::format("{{ __m128 res = PS2_VADD(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_q)); "
-                                   "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
-                                   "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
-                                   inst.rd,
-                                   (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
-                                   (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
-                                   inst.sa, inst.sa);
-            }
+                return translateVU_VADDq(inst);
             case VU0_S1_VSUBq:
-            {
-                uint8_t dest_mask = inst.vectorInfo.vectorField;
-                return fmt::format("{{ __m128 res = PS2_VSUB(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_q)); "
-                                   "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
-                                   "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
-                                   inst.rd,
-                                   (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
-                                   (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
-                                   inst.sa, inst.sa);
-            }
+                return translateVU_VSUBq(inst);
             case VU0_S1_VMULq:
-            {
-                uint8_t dest_mask = inst.vectorInfo.vectorField;
-                return fmt::format("{{ __m128 res = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_q)); "
-                                   "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
-                                   "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
-                                   inst.rd,
-                                   (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
-                                   (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
-                                   inst.sa, inst.sa);
-            }
+                return translateVU_VMULq(inst);
             case VU0_S1_VADDi:
-            {
-                uint8_t dest_mask = inst.vectorInfo.vectorField;
-                return fmt::format("{{ __m128 res = PS2_VADD(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i)); "
-                                   "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
-                                   "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
-                                   inst.rd,
-                                   (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
-                                   (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
-                                   inst.sa, inst.sa);
-            }
+                return translateVU_VADDi(inst);
             case VU0_S1_VSUBi:
-            {
-                uint8_t dest_mask = inst.vectorInfo.vectorField;
-                return fmt::format("{{ __m128 res = PS2_VSUB(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i)); "
-                                   "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
-                                   "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
-                                   inst.rd,
-                                   (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
-                                   (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
-                                   inst.sa, inst.sa);
-            }
+                return translateVU_VSUBi(inst);
             case VU0_S1_VMULi:
-            {
-                uint8_t dest_mask = inst.vectorInfo.vectorField;
-                return fmt::format("{{ __m128 res = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i)); "
-                                   "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
-                                   "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
-                                   inst.rd,
-                                   (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
-                                   (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
-                                   inst.sa, inst.sa);
-            }
+                return translateVU_VMULi(inst);
             case VU0_S1_VMADDx:
             case VU0_S1_VMADDy:
             case VU0_S1_VMADDz:
@@ -2214,17 +2416,101 @@ namespace ps2recomp
         return fmt::format("{{ __m128 res = PS2_VMUL(ctx->vu0_vf[{}], ctx->vu0_vf[{}]); __m128i mask = _mm_set_epi32({}, {}, {}, {}); ctx->vu0_vf[{}] = PS2_VBLEND(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}", vfs, vft, (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0, vfd, vfd);
     }
 
+    std::string CodeGenerator::translatePEXT5(const Instruction &inst)
+    {
+        return fmt::format(
+            "{{ __m128i rt = GPR_VEC(ctx, {}); \n"
+            "   __m128i m1 = _mm_set1_epi32(0x0000001F); \n"
+            "   __m128i m2 = _mm_set1_epi32(0x000003E0); \n"
+            "   __m128i m3 = _mm_set1_epi32(0x00007C00); \n"
+            "   __m128i m4 = _mm_set1_epi32(0x00008000); \n"
+            "   __m128i a1 = _mm_slli_epi32(_mm_and_si128(rt, m1), 3); \n"
+            "   __m128i a2 = _mm_slli_epi32(_mm_and_si128(rt, m2), 6); \n"
+            "   __m128i a3 = _mm_slli_epi32(_mm_and_si128(rt, m3), 9); \n"
+            "   __m128i a4 = _mm_slli_epi32(_mm_and_si128(rt, m4), 16); \n"
+            "   SET_GPR_VEC(ctx, {}, _mm_or_si128(_mm_or_si128(a1, a2), _mm_or_si128(a3, a4))); }}",
+            inst.rt, inst.rd);
+    }
+
+    std::string CodeGenerator::translatePPAC5(const Instruction &inst)
+    {
+        return fmt::format(
+            "{{ __m128i rt = GPR_VEC(ctx, {}); \n"
+            "   __m128i m1 = _mm_set1_epi32(0x0000001F); \n"
+            "   __m128i m2 = _mm_set1_epi32(0x000003E0); \n"
+            "   __m128i m3 = _mm_set1_epi32(0x00007C00); \n"
+            "   __m128i m4 = _mm_set1_epi32(0x00008000); \n"
+            "   __m128i a1 = _mm_and_si128(_mm_srli_epi32(rt, 3), m1); \n"
+            "   __m128i a2 = _mm_and_si128(_mm_srli_epi32(rt, 6), m2); \n"
+            "   __m128i a3 = _mm_and_si128(_mm_srli_epi32(rt, 9), m3); \n"
+            "   __m128i a4 = _mm_and_si128(_mm_srli_epi32(rt, 16), m4); \n"
+            "   SET_GPR_VEC(ctx, {}, _mm_or_si128(_mm_or_si128(a1, a2), _mm_or_si128(a3, a4))); }}",
+            inst.rt, inst.rd);
+    }
+
+    std::string CodeGenerator::translatePADSBH(const Instruction &inst)
+    {
+        return fmt::format(
+            "{{ __m128i rs = GPR_VEC(ctx, {}); __m128i rt = GPR_VEC(ctx, {}); \n"
+            "   __m128i sub = _mm_sub_epi16(rs, rt); \n"
+            "   __m128i add = _mm_add_epi16(rs, rt); \n"
+            "   SET_GPR_VEC(ctx, {}, _mm_unpacklo_epi64(sub, _mm_unpackhi_epi64(add, add))); }}",
+            inst.rs, inst.rt, inst.rd);
+    }
+
     std::string CodeGenerator::translatePMADDW(const Instruction &inst)
     {
-        return fmt::format("{{ __m128i p01 = _mm_mul_epu32(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})); \n"                                       // [p1, p0] 64b each
-                           "   __m128i p23 = _mm_mul_epu32(_mm_srli_si128(GPR_VEC(ctx, {}), 8), _mm_srli_si128(GPR_VEC(ctx, {}), 8)); \n" // [p3, p2] 64b each
-                           "   uint64_t acc = ((uint64_t)ctx->hi << 32) | ctx->lo; \n"
-                           "   acc += _mm_cvtsi128_si64(p01); \n"                    // Add product 0
-                           "   acc += _mm_cvtsi128_si64(_mm_srli_si128(p01, 8)); \n" // Add product 1
-                           "   acc += _mm_cvtsi128_si64(p23); \n"                    // Add product 2
-                           "   acc += _mm_cvtsi128_si64(_mm_srli_si128(p23, 8)); \n" // Add product 3
+        return fmt::format("{{ __m128i p01 = _mm_mul_epu32(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})); \n"
+                           "   __m128i p23 = _mm_mul_epu32(_mm_srli_si128(GPR_VEC(ctx, {}), 8), _mm_srli_si128(GPR_VEC(ctx, {}), 8)); \n"
+                           "   uint64_t acc = Ps2HiLoToU64(ctx->hi, ctx->lo); \n"
+                           "   acc += _mm_cvtsi128_si64(p01); \n"
+                           "   acc += _mm_cvtsi128_si64(_mm_srli_si128(p01, 8)); \n"
+                           "   acc += _mm_cvtsi128_si64(p23); \n"
+                           "   acc += _mm_cvtsi128_si64(_mm_srli_si128(p23, 8)); \n"
                            "   ctx->lo = (uint32_t)acc; ctx->hi = (uint32_t)(acc >> 32); \n"
-                           "   SET_GPR_U64(ctx, {}, acc); }}", // Store 64-bit acc result in rd
+                           "   SET_GPR_U64(ctx, {}, acc); }}",
+                           inst.rs, inst.rt, inst.rs, inst.rt, inst.rd);
+    }
+
+    std::string CodeGenerator::translatePMSUBW(const Instruction &inst)
+    {
+        return fmt::format("{{ __m128i p01 = _mm_mul_epu32(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})); \n"
+                           "   __m128i p23 = _mm_mul_epu32(_mm_srli_si128(GPR_VEC(ctx, {}), 8), _mm_srli_si128(GPR_VEC(ctx, {}), 8)); \n"
+                           "   uint64_t acc = Ps2HiLoToU64(ctx->hi, ctx->lo); \n"
+                           "   acc -= _mm_cvtsi128_si64(p01); \n"
+                           "   acc -= _mm_cvtsi128_si64(_mm_srli_si128(p01, 8)); \n"
+                           "   acc -= _mm_cvtsi128_si64(p23); \n"
+                           "   acc -= _mm_cvtsi128_si64(_mm_srli_si128(p23, 8)); \n"
+                           "   ctx->lo = (uint32_t)acc; ctx->hi = (uint32_t)(acc >> 32); \n"
+                           "   SET_GPR_U64(ctx, {}, acc); }}",
+                           inst.rs, inst.rt, inst.rs, inst.rt, inst.rd);
+    }
+
+    std::string CodeGenerator::translatePMULTW(const Instruction &inst)
+    {
+        return fmt::format("{{ __m128i p01 = _mm_mul_epu32(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})); \n"
+                           "   __m128i p23 = _mm_mul_epu32(_mm_srli_si128(GPR_VEC(ctx, {}), 8), _mm_srli_si128(GPR_VEC(ctx, {}), 8)); \n"
+                           "   uint64_t acc = 0; \n"
+                           "   acc += _mm_cvtsi128_si64(p01); \n"
+                           "   acc += _mm_cvtsi128_si64(_mm_srli_si128(p01, 8)); \n"
+                           "   acc += _mm_cvtsi128_si64(p23); \n"
+                           "   acc += _mm_cvtsi128_si64(_mm_srli_si128(p23, 8)); \n"
+                           "   ctx->lo = (uint32_t)acc; ctx->hi = (uint32_t)(acc >> 32); \n"
+                           "   SET_GPR_U64(ctx, {}, acc); }}",
+                           inst.rs, inst.rt, inst.rs, inst.rt, inst.rd);
+    }
+
+    std::string CodeGenerator::translatePMADDUW(const Instruction &inst)
+    {
+        return fmt::format("{{ __m128i p01 = _mm_mul_epu32(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})); \n"
+                           "   __m128i p23 = _mm_mul_epu32(_mm_srli_si128(GPR_VEC(ctx, {}), 8), _mm_srli_si128(GPR_VEC(ctx, {}), 8)); \n"
+                           "   uint64_t acc = Ps2HiLoToU64(ctx->hi, ctx->lo); \n"
+                           "   acc += _mm_cvtsi128_si64(p01); \n"
+                           "   acc += _mm_cvtsi128_si64(_mm_srli_si128(p01, 8)); \n"
+                           "   acc += _mm_cvtsi128_si64(p23); \n"
+                           "   acc += _mm_cvtsi128_si64(_mm_srli_si128(p23, 8)); \n"
+                           "   ctx->lo = (uint32_t)acc; ctx->hi = (uint32_t)(acc >> 32); \n"
+                           "   SET_GPR_U64(ctx, {}, acc); }}",
                            inst.rs, inst.rt, inst.rs, inst.rt, inst.rd);
     }
 
@@ -2232,9 +2518,11 @@ namespace ps2recomp
     {
         // Only divides the first word element rs[0] / rt[0]
         return fmt::format("{{ int32_t rs0 = GPR_S32(ctx, {}); int32_t rt0 = GPR_S32(ctx, {}); \n"
-                           "   if (rt0 != 0) {{ ctx->lo = (uint32_t)(rs0 / rt0); ctx->hi = (uint32_t)(rs0 % rt0); }} \n"
-                           "   else {{ ctx->lo = (rs0 < 0) ? 1 : -1; ctx->hi = rs0; }} \n" // Div by zero behavior
-                           "   SET_GPR_U32(ctx, {}, ctx->lo); }}",                         // Store quotient in rd[0]
+                           "   if (rt0 != 0) {{ \n"
+                           "       if (rt0 == -1 && rs0 == INT32_MIN) {{ ctx->lo = (uint32_t)INT32_MIN; ctx->hi = 0; }} \n"
+                           "       else {{ ctx->lo = (uint32_t)(rs0 / rt0); ctx->hi = (uint32_t)(rs0 % rt0); }} \n"
+                           "   }} else {{ ctx->lo = (rs0 < 0) ? 1 : -1; ctx->hi = (uint32_t)rs0; }} \n"
+                           "   SET_GPR_U32(ctx, {}, ctx->lo); }}",
                            inst.rs, inst.rt, inst.rd);
     }
 
@@ -2253,7 +2541,7 @@ namespace ps2recomp
                            "   int32_t p1 = _mm_cvtsi128_si32(_mm_srli_si128(prod, 4)); \n"
                            "   int32_t p2 = _mm_cvtsi128_si32(_mm_srli_si128(prod, 8)); \n"
                            "   int32_t p3 = _mm_cvtsi128_si32(_mm_srli_si128(prod, 12)); \n"
-                           "   int64_t acc = ((int64_t)ctx->hi << 32) | ctx->lo; \n"
+                           "   int64_t acc = Ps2HiLoToU64(ctx->hi, ctx->lo); \n"
                            "   acc += (int64_t)p0 + (int64_t)p1 + (int64_t)p2 + (int64_t)p3; \n"
                            "   ctx->lo = (uint32_t)acc; ctx->hi = (uint32_t)(acc >> 32); \n"
                            "   SET_GPR_U64(ctx, {}, acc); }}",
@@ -2272,7 +2560,39 @@ namespace ps2recomp
                            "   int32_t h1 = _mm_extract_epi16(sum_pairs, 2) + _mm_extract_epi16(sum_pairs, 3); \n" // Horizontal add within next 32b
                            "   int32_t h2 = _mm_extract_epi16(sum_pairs, 4) + _mm_extract_epi16(sum_pairs, 5); \n"
                            "   int32_t h3 = _mm_extract_epi16(sum_pairs, 6) + _mm_extract_epi16(sum_pairs, 7); \n"
-                           "   int64_t acc = ((int64_t)ctx->hi << 32) | ctx->lo; \n"
+                           "   int64_t acc = Ps2HiLoToU64(ctx->hi, ctx->lo); \n"
+                           "   acc += (int64_t)h0 + (int64_t)h1 + (int64_t)h2 + (int64_t)h3; \n"
+                           "   ctx->lo = (uint32_t)acc; ctx->hi = (uint32_t)(acc >> 32); \n"
+                           "   SET_GPR_U64(ctx, {}, acc); }}",
+                           inst.rs, inst.rt, inst.rs, inst.rt, inst.rd);
+    }
+
+    std::string CodeGenerator::translatePMSUBH(const Instruction &inst)
+    {
+        return fmt::format("{{ __m128i prod = _mm_madd_epi16(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})); \n"
+                           "   int32_t p0 = _mm_cvtsi128_si32(prod); \n"
+                           "   int32_t p1 = _mm_cvtsi128_si32(_mm_srli_si128(prod, 4)); \n"
+                           "   int32_t p2 = _mm_cvtsi128_si32(_mm_srli_si128(prod, 8)); \n"
+                           "   int32_t p3 = _mm_cvtsi128_si32(_mm_srli_si128(prod, 12)); \n"
+                           "   int64_t acc = Ps2HiLoToU64(ctx->hi, ctx->lo); \n"
+                           "   acc -= (int64_t)p0 + (int64_t)p1 + (int64_t)p2 + (int64_t)p3; \n"
+                           "   ctx->lo = (uint32_t)acc; ctx->hi = (uint32_t)(acc >> 32); \n"
+                           "   SET_GPR_U64(ctx, {}, acc); }}",
+                           inst.rs, inst.rt, inst.rd);
+    }
+
+    std::string CodeGenerator::translatePHMSBH(const Instruction &inst)
+    {
+        return fmt::format("{{ __m128i evens = _mm_shuffle_epi32(GPR_VEC(ctx, {}), _MM_SHUFFLE(2,0,2,0)); \n"
+                           "   __m128i odds  = _mm_shuffle_epi32(GPR_VEC(ctx, {}), _MM_SHUFFLE(3,1,3,1)); \n"
+                           "   __m128i prod_ev = _mm_mullo_epi16(evens, _mm_shuffle_epi32(GPR_VEC(ctx, {}), _MM_SHUFFLE(2,0,2,0))); \n"
+                           "   __m128i prod_od = _mm_mullo_epi16(odds,  _mm_shuffle_epi32(GPR_VEC(ctx, {}), _MM_SHUFFLE(3,1,3,1))); \n"
+                           "   __m128i sub_pairs = _mm_sub_epi16(prod_od, prod_ev); \n"
+                           "   int32_t h0 = _mm_extract_epi16(sub_pairs, 0) + _mm_extract_epi16(sub_pairs, 1); \n"
+                           "   int32_t h1 = _mm_extract_epi16(sub_pairs, 2) + _mm_extract_epi16(sub_pairs, 3); \n"
+                           "   int32_t h2 = _mm_extract_epi16(sub_pairs, 4) + _mm_extract_epi16(sub_pairs, 5); \n"
+                           "   int32_t h3 = _mm_extract_epi16(sub_pairs, 6) + _mm_extract_epi16(sub_pairs, 7); \n"
+                           "   int64_t acc = Ps2HiLoToU64(ctx->hi, ctx->lo); \n"
                            "   acc += (int64_t)h0 + (int64_t)h1 + (int64_t)h2 + (int64_t)h3; \n"
                            "   ctx->lo = (uint32_t)acc; ctx->hi = (uint32_t)(acc >> 32); \n"
                            "   SET_GPR_U64(ctx, {}, acc); }}",
@@ -2436,13 +2756,13 @@ namespace ps2recomp
     std::string CodeGenerator::translateVU_VMTIR(const Instruction &inst)
     {
         uint8_t fsf = inst.vectorInfo.fsf;
-        return fmt::format("{{ float src = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))); ctx->vi[{}] = static_cast<uint16_t>(static_cast<int32_t>(src)); }}", inst.rd, inst.rd, fsf, inst.rt);
+        return fmt::format("{{ uint32_t bits; float src = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))); std::memcpy(&bits, &src, sizeof(bits)); ctx->vi[{}] = (uint16_t)(bits & 0xFFFF); }}", inst.rd, inst.rd, fsf, inst.rt);
     }
 
     std::string CodeGenerator::translateVU_VMFIR(const Instruction &inst)
     {
         uint8_t dest_mask = inst.vectorInfo.vectorField;
-        return fmt::format("{{ uint32_t tmp = ctx->vi[{}]; float val = *(float*)&tmp; "
+        return fmt::format("{{ uint32_t tmp = (uint32_t)(int32_t)(int16_t)ctx->vi[{}]; float val; std::memcpy(&val, &tmp, sizeof(val)); "
                            "__m128 res = _mm_set1_ps(val); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
@@ -2695,7 +3015,99 @@ namespace ps2recomp
                            vfd, vfd);
     }
 
+    std::string CodeGenerator::translateVU_VMINIi(const Instruction &inst)
+    {
+        uint8_t vfd = inst.sa;
+        uint8_t vfs = inst.rd;
+        uint8_t dest_mask = inst.vectorInfo.vectorField;
+        return fmt::format("{{ __m128 res = _mm_min_ps(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i)); "
+                           "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
+                           "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
+                           vfs,
+                           (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
+                           (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
+                           vfd, vfd);
+    }
+
+    std::string CodeGenerator::translateVU_VMULi(const Instruction &inst)
+    {
+        uint8_t vfd = inst.sa;
+        uint8_t vfs = inst.rd;
+        uint8_t dest_mask = inst.vectorInfo.vectorField;
+        return fmt::format("{{ __m128 res = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i)); "
+                           "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
+                           "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
+                           vfs,
+                           (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
+                           (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
+                           vfd, vfd);
+    }
+
+    std::string CodeGenerator::translateVU_VMULq(const Instruction &inst)
+    {
+        uint8_t vfd = inst.sa;
+        uint8_t vfs = inst.rd;
+        uint8_t dest_mask = inst.vectorInfo.vectorField;
+        return fmt::format("{{ __m128 res = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_q)); "
+                           "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
+                           "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
+                           vfs,
+                           (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
+                           (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
+                           vfd, vfd);
+    }
+
+
     std::string CodeGenerator::translateVU_VOPMSUB(const Instruction &inst)
+    {
+        uint8_t vfd = inst.sa;
+        uint8_t vfs = inst.rd;
+        uint8_t vft = inst.rt;
+        uint8_t dest_mask = inst.vectorInfo.vectorField;
+        return fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], ctx->vu0_vf[{}]); "
+                           "__m128 res = PS2_VSUB(ctx->vu0_acc, mul_res); "
+                           "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
+                           "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); "
+                           "ctx->vu0_acc = res; }}",
+                           vfs, vft,
+                           (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
+                           (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
+                           vfd, vfd);
+    }
+
+
+
+    std::string CodeGenerator::translateVU_VADDq(const Instruction &inst)
+    {
+        uint8_t vfd = inst.sa;
+        uint8_t vfs = inst.rd;
+        uint8_t dest_mask = inst.vectorInfo.vectorField;
+        return fmt::format("{{ __m128 res = PS2_VADD(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_q)); "
+                           "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
+                           "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
+                           vfs,
+                           (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
+                           (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
+                           vfd, vfd);
+    }
+
+    std::string CodeGenerator::translateVU_VADDi(const Instruction &inst)
+    {
+        uint8_t vfd = inst.sa;
+        uint8_t vfs = inst.rd;
+        uint8_t dest_mask = inst.vectorInfo.vectorField;
+        return fmt::format("{{ __m128 res = PS2_VADD(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i)); "
+                           "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
+                           "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
+                           vfs,
+                           (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
+                           (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
+                           vfd, vfd);
+    }
+
+
+
+    std::string CodeGenerator::translateVU_VMSUB(const Instruction &inst)
     {
         uint8_t vfd = inst.sa;
         uint8_t vfs = inst.rd;
@@ -2727,12 +3139,14 @@ namespace ps2recomp
                            vfd, vfd);
     }
 
-    std::string CodeGenerator::translateVU_VMINIi(const Instruction &inst)
+
+
+    std::string CodeGenerator::translateVU_VSUBi(const Instruction &inst)
     {
         uint8_t vfd = inst.sa;
         uint8_t vfs = inst.rd;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
-        return fmt::format("{{ __m128 res = _mm_min_ps(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i)); "
+        return fmt::format("{{ __m128 res = PS2_VSUB(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i)); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
                            vfs,
@@ -2741,22 +3155,20 @@ namespace ps2recomp
                            vfd, vfd);
     }
 
-    std::string CodeGenerator::translateVU_VMSUB(const Instruction &inst)
+    std::string CodeGenerator::translateVU_VSUBq(const Instruction &inst)
     {
         uint8_t vfd = inst.sa;
         uint8_t vfs = inst.rd;
-        uint8_t vft = inst.rt;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
-        return fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], ctx->vu0_vf[{}]); "
-                           "__m128 res = PS2_VSUB(ctx->vu0_acc, mul_res); "
+        return fmt::format("{{ __m128 res = PS2_VSUB(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_q)); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
-                           "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); "
-                           "ctx->vu0_acc = res; }}",
-                           vfs, vft,
+                           "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
+                           vfs,
                            (dest_mask & 0x8) ? -1 : 0, (dest_mask & 0x4) ? -1 : 0,
                            (dest_mask & 0x2) ? -1 : 0, (dest_mask & 0x1) ? -1 : 0,
                            vfd, vfd);
     }
+
 
     std::string CodeGenerator::translateVU_VMSUBq(const Instruction &inst)
     {
@@ -3124,7 +3536,7 @@ namespace ps2recomp
             "    __m128i mixed = _mm_xor_si128(xored, _mm_slli_epi32(xored, 7)); "
             "    mixed = _mm_xor_si128(mixed, _mm_srli_epi32(mixed, 9)); "
             "    "
-            "    ctx->vu0_r = (__m128)mixed; "
+            "    ctx->vu0_r = _mm_castsi128_ps(mixed);"
             "}}",
             fs_reg, fs_reg, fsf);
     }
@@ -3288,7 +3700,7 @@ namespace ps2recomp
 
         uint32_t indexReg = inst.rs;
 
-        ss << "switch (ctx->r[" << indexReg << "]) {\n";
+        ss << "switch (GPR_U32(ctx, " << indexReg << ")) {\n";
 
         for (const auto &[index, target] : entries)
         {

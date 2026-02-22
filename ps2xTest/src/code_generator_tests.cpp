@@ -133,7 +133,7 @@ void register_code_generator_tests()
         instructions.push_back(makeNop(0x100c));       // branch target
         instructions.push_back(makeNop(0x1010));       // extra
 
-        CodeGenerator gen({});
+        CodeGenerator gen({}, {});
         std::string generated = gen.generateFunction(func, instructions, false);
         printGeneratedCode("emits labels and gotos for internal branches", generated);
 
@@ -156,7 +156,7 @@ void register_code_generator_tests()
         instructions.push_back(makeNop(0x2004));       // delay slot and target
         instructions.push_back(makeNop(0x2008));       // extra
 
-        CodeGenerator gen({});
+        CodeGenerator gen({}, {});
         std::string generated = gen.generateFunction(func, instructions, false);
         printGeneratedCode("labels delay slot when it is a branch target", generated);
 
@@ -180,7 +180,7 @@ void register_code_generator_tests()
         instructions.push_back(br);
         instructions.push_back(makeNop(0x3004)); // delay slot
 
-        CodeGenerator gen({});
+        CodeGenerator gen({}, {});
         std::string generated = gen.generateFunction(func, instructions, false);
         printGeneratedCode("branches outside function still set pc", generated);
 
@@ -212,7 +212,7 @@ void register_code_generator_tests()
 
         std::vector<Instruction> instructions{j, delay, makeNop(0x4008)};
 
-        CodeGenerator gen({targetSym});
+        CodeGenerator gen({targetSym}, {});
         std::string generated = gen.generateFunction(func, instructions, false);
         printGeneratedCode("jumps to known symbols call by name", generated);
 
@@ -238,7 +238,7 @@ void register_code_generator_tests()
 
             std::vector<Instruction> instructions{j, delay};
 
-            CodeGenerator gen({});
+            CodeGenerator gen({}, {});
             std::string generated = gen.generateFunction(func, instructions, false);
             printGeneratedCode("jump to unknown target sets pc", generated);
 
@@ -262,7 +262,7 @@ void register_code_generator_tests()
             Instruction inst{};
             inst.opcode = OPCODE_REGIMM;
 
-            CodeGenerator gen({});
+            CodeGenerator gen({}, {});
             gen.setRenamedFunctions({{0x8000, "renamed_target"}});
 
             std::string sw = gen.generateJumpTableSwitch(inst, 0x0, entries);
@@ -295,7 +295,7 @@ void register_code_generator_tests()
 
             std::vector<Instruction> instructions{j, delay};
 
-            CodeGenerator gen({targetSym});
+            CodeGenerator gen({targetSym}, {});
             gen.setRenamedFunctions({{targetSym.address, "ps2___is_pointer"}});
 
             std::string generated = gen.generateFunction(func, instructions, false);
@@ -305,6 +305,92 @@ void register_code_generator_tests()
                      "definition should use sanitized name");
             t.IsTrue(generated.find("ps2___is_pointer(rdram, ctx, runtime); return;") != std::string::npos,
                 "call should use sanitized name but got: " + generated);
+        });
+
+        tc.Run("COP0 MFC0/MTC0 translate to COP0 register access", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+
+            Instruction mfc0{};
+            mfc0.opcode = OPCODE_COP0;
+            mfc0.rs = COP0_MF;
+            mfc0.rt = 5;
+            mfc0.rd = COP0_REG_STATUS;
+
+            std::string mfc0Code = gen.translateInstruction(mfc0);
+            printGeneratedCode("COP0 MFC0/MTC0 translate to COP0 register access (MFC0)", mfc0Code);
+            t.IsTrue(mfc0Code.find("SET_GPR_S32(ctx, 5") != std::string::npos, "MFC0 should write to rt");
+            t.IsTrue(mfc0Code.find("ctx->cop0_status") != std::string::npos, "MFC0 STATUS should read cop0_status");
+            t.IsTrue(mfc0Code.find("Unimplemented COP0 register") == std::string::npos, "MFC0 should not hit unimplemented COP0 register path");
+            t.IsTrue(mfc0Code.find("Unhandled COP0") == std::string::npos, "MFC0 should not hit unhandled COP0 path");
+
+            Instruction mtc0{};
+            mtc0.opcode = OPCODE_COP0;
+            mtc0.rs = COP0_MT;
+            mtc0.rt = 7;
+            mtc0.rd = COP0_REG_STATUS;
+
+            std::string mtc0Code = gen.translateInstruction(mtc0);
+            printGeneratedCode("COP0 MFC0/MTC0 translate to COP0 register access (MTC0)", mtc0Code);
+            t.IsTrue(mtc0Code.find("ctx->cop0_status") != std::string::npos, "MTC0 STATUS should write cop0_status");
+            t.IsTrue(mtc0Code.find("GPR_U32(ctx, 7)") != std::string::npos, "MTC0 should read from rt");
+            t.IsTrue(mtc0Code.find("Unimplemented MTC0") == std::string::npos, "MTC0 should not hit unimplemented path");
+            t.IsTrue(mtc0Code.find("Unhandled COP0") == std::string::npos, "MTC0 should not hit unhandled COP0 path");
+        });
+
+        tc.Run("FCR access uses CFC1/CTC1", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+
+            Instruction cfc1{};
+            cfc1.opcode = OPCODE_COP1;
+            cfc1.rs = COP1_CF;
+            cfc1.rt = 4;
+            cfc1.rd = 31;
+
+            std::string cfc1Code = gen.translateInstruction(cfc1);
+            printGeneratedCode("FCR access uses CFC1/CTC1 (CFC1)", cfc1Code);
+            t.IsTrue(cfc1Code.find("SET_GPR_U32(ctx, 4") != std::string::npos, "CFC1 should write to rt");
+            t.IsTrue(cfc1Code.find("ctx->fcr31") != std::string::npos, "CFC1 FCR31 should read fcr31");
+            t.IsTrue(cfc1Code.find("Unimplemented FCR") == std::string::npos, "CFC1 should not hit unimplemented FCR path");
+
+            Instruction ctc1{};
+            ctc1.opcode = OPCODE_COP1;
+            ctc1.rs = COP1_CT;
+            ctc1.rt = 4;
+            ctc1.rd = 31;
+
+            std::string ctc1Code = gen.translateInstruction(ctc1);
+            printGeneratedCode("FCR access uses CFC1/CTC1 (CTC1)", ctc1Code);
+            t.IsTrue(ctc1Code.find("ctx->fcr31 = GPR_U32(ctx, 4) & 0x0183FFFF") != std::string::npos,
+                     "CTC1 FCR31 should mask and write fcr31");
+            t.IsTrue(ctc1Code.find("ignored") == std::string::npos, "CTC1 FCR31 should not be ignored");
+        });
+
+        tc.Run("VU CReg access uses CFC2/CTC2", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+
+            Instruction cfc2{};
+            cfc2.opcode = OPCODE_COP2;
+            cfc2.rs = COP2_CFC2;
+            cfc2.rt = 2;
+            cfc2.rd = VU0_CR_STATUS;
+
+            std::string cfc2Code = gen.translateInstruction(cfc2);
+            printGeneratedCode("VU CReg access uses CFC2/CTC2 (CFC2)", cfc2Code);
+            t.IsTrue(cfc2Code.find("SET_GPR_U32(ctx, 2") != std::string::npos, "CFC2 should write to rt");
+            t.IsTrue(cfc2Code.find("ctx->vu0_status") != std::string::npos, "CFC2 STATUS should read vu0_status");
+            t.IsTrue(cfc2Code.find("Unimplemented CFC2 VU CReg") == std::string::npos, "CFC2 should not hit unimplemented CReg path");
+
+            Instruction ctc2{};
+            ctc2.opcode = OPCODE_COP2;
+            ctc2.rs = COP2_CTC2;
+            ctc2.rt = 3;
+            ctc2.rd = VU0_CR_ITOP;
+
+            std::string ctc2Code = gen.translateInstruction(ctc2);
+            printGeneratedCode("VU CReg access uses CFC2/CTC2 (CTC2)", ctc2Code);
+            t.IsTrue(ctc2Code.find("ctx->vu0_itop") != std::string::npos, "CTC2 ITOP should write vu0_itop");
+            t.IsTrue(ctc2Code.find("GPR_U32(ctx, 3) & 0x3FF") != std::string::npos, "CTC2 ITOP should mask to 10 bits");
+            t.IsTrue(ctc2Code.find("Unimplemented CTC2 VU CReg") == std::string::npos, "CTC2 should not hit unimplemented CReg path");
         });
 
         tc.Run("VU0 macro mappings cover all S1/S2 enums", [](TestCase &t) {
@@ -322,7 +408,7 @@ void register_code_generator_tests()
             t.IsTrue(!s1.empty(), "VU0_S1 enum list should not be empty");
             t.IsTrue(!s2.empty(), "VU0_S2 enum list should not be empty");
 
-            CodeGenerator gen({});
+            CodeGenerator gen({}, {});
 
             for (uint32_t value : s1)
             {
@@ -371,7 +457,7 @@ void register_code_generator_tests()
             inst.function = VU0_S1_VADD;
             inst.vectorInfo.vectorField = 0xF;
 
-            CodeGenerator gen({});
+            CodeGenerator gen({}, {});
             std::string out = gen.translateInstruction(inst);
 
             t.IsTrue(out.find("ctx->vu0_vf[11]") != std::string::npos, "S1 fs should come from rd");
@@ -390,7 +476,7 @@ void register_code_generator_tests()
             inst.function = VU0_S1_VADDq;
             inst.vectorInfo.vectorField = 0x9;
 
-            CodeGenerator gen({});
+            CodeGenerator gen({}, {});
             std::string out = gen.translateInstruction(inst);
 
             t.IsTrue(out.find("_mm_blendv_ps") != std::string::npos, "S1 q/i form should honor destination mask");
@@ -412,7 +498,7 @@ void register_code_generator_tests()
             uint32_t lower = VU0_S2_VABS & 0x3;
             inst.raw = (upper << 6) | lower;
 
-            CodeGenerator gen({});
+            CodeGenerator gen({}, {});
             std::string out = gen.translateInstruction(inst);
 
             t.IsTrue(out.find("ctx->vu0_vf[12]") != std::string::npos, "S2 source VF should come from rd");
@@ -433,7 +519,7 @@ void register_code_generator_tests()
             uint32_t lower = VU0_S2_VLQI & 0x3;
             inst.raw = (upper << 6) | lower;
 
-            CodeGenerator gen({});
+            CodeGenerator gen({}, {});
             std::string out = gen.translateInstruction(inst);
 
             t.IsTrue(out.find("ctx->vi[14]") != std::string::npos, "S2 VLQI base VI should come from rd");
@@ -459,7 +545,7 @@ void register_code_generator_tests()
             Instruction jal = makeJal(0xA000, 0xB000);
             Instruction delay = makeNop(0xA004);
             
-            CodeGenerator gen({targetSym});
+            CodeGenerator gen({targetSym}, {});
             std::string generated = gen.generateFunction(func, {jal, delay}, false);
             printGeneratedCode("JAL to known function emits call and check", generated);
 
@@ -472,6 +558,10 @@ void register_code_generator_tests()
 
             t.IsTrue(generated.find("SET_GPR_U32(ctx, 31, 0xA008u);") != std::string::npos, "JAL should set RA");
             t.IsTrue(generated.find("some_func(rdram, ctx, runtime);") != std::string::npos, "JAL should call function");
+            t.IsTrue(generated.find("const uint32_t __entryPc = ctx->pc;") != std::string::npos,
+                     "JAL should capture entry PC before call");
+            t.IsTrue(generated.find("if (ctx->pc == __entryPc) { ctx->pc = 0xA008u; }") != std::string::npos,
+                     "JAL should recover fallthrough when callee leaves ctx->pc unchanged");
             t.IsTrue(generated.find("if (ctx->pc != 0xA008u) { return; }") != std::string::npos, "JAL should check return PC");
         });
 
@@ -491,7 +581,7 @@ void register_code_generator_tests()
             Instruction delay = makeNop(0xC004);
             Instruction targetInst = makeNop(0xC010);
 
-            CodeGenerator gen({});
+            CodeGenerator gen({}, {});
             std::string generated = gen.generateFunction(func, {jal, delay, targetInst}, false);
             printGeneratedCode("JAL to internal target becomes goto", generated);
 
@@ -512,7 +602,7 @@ void register_code_generator_tests()
             Instruction jalr = makeJalr(0xD000, 4, 31);
             Instruction delay = makeNop(0xD004);
 
-            CodeGenerator gen({});
+            CodeGenerator gen({}, {});
             std::string generated = gen.generateFunction(func, {jalr, delay}, false);
             printGeneratedCode("JALR emits indirect call", generated);
 
@@ -520,7 +610,11 @@ void register_code_generator_tests()
             t.IsTrue(generated.find("SET_GPR_U32(ctx, 31, 0xD008u);") != std::string::npos, "JALR should set link register");
             t.IsTrue(generated.find("auto targetFn = runtime->lookupFunction(jumpTarget);") != std::string::npos, "JALR should lookup function");
             t.IsTrue(generated.find("targetFn(rdram, ctx, runtime);") != std::string::npos, "JALR should call function");
-             t.IsTrue(generated.find("if (ctx->pc != 0xD008u) { return; }") != std::string::npos, "JALR should check return PC");
+            t.IsTrue(generated.find("const uint32_t __entryPc = ctx->pc;") != std::string::npos,
+                     "JALR should capture entry PC before indirect call");
+            t.IsTrue(generated.find("if (ctx->pc == __entryPc) { ctx->pc = 0xD008u; }") != std::string::npos,
+                     "JALR should recover fallthrough when callee leaves ctx->pc unchanged");
+            t.IsTrue(generated.find("if (ctx->pc != 0xD008u) { return; }") != std::string::npos, "JALR should check return PC");
         }); 
 
         tc.Run("backward BEQ emits label and goto (sign-extended offset)", [](TestCase &t) {
@@ -544,7 +638,7 @@ void register_code_generator_tests()
             instructions.push_back(makeNop(0x1108));
             instructions.push_back(makeNop(0x110c));
 
-            CodeGenerator gen({});
+            CodeGenerator gen({}, {});
             std::string generated = gen.generateFunction(func, instructions, false);
             printGeneratedCode("backward BEQ emits label and goto (sign-extended offset)", generated);
 
@@ -580,7 +674,7 @@ void register_code_generator_tests()
 
             Instruction target = makeNop(0x1208);
 
-            CodeGenerator gen({});
+            CodeGenerator gen({}, {});
             std::string generated = gen.generateFunction(func, { br, delay, target }, false);
             printGeneratedCode("branch-likely places delay slot only in taken path", generated);
  
@@ -606,12 +700,71 @@ void register_code_generator_tests()
             Instruction jr = makeJr(0x1314, 31);
             Instruction jrDelay = makeNop(0x1318);
 
-            CodeGenerator gen({});
+            CodeGenerator gen({}, {});
             std::string generated = gen.generateFunction(func, { jal, jalDelay, atReturn, atTarget, jr, jrDelay }, false);
             printGeneratedCode("JR $31 emits switch for internal return targets", generated);
 
             t.IsTrue(generated.find("switch (jumpTarget)") != std::string::npos, "JR $31 should emit switch for internal targets");
             t.IsTrue(generated.find("case 0x1308u: goto label_1308;") != std::string::npos, "switch should include return address from internal JAL");
+        });
+
+        tc.Run("JR non-RA emits switch for in-function jump targets", [](TestCase &t) {
+            Function func;
+            func.name = "jr_non_ra_switch";
+            func.start = 0x1400;
+            func.end = 0x1420;
+            func.isRecompiled = true;
+            func.isStub = false;
+
+            // 0x1400: nop
+            // 0x1404: jr $16 (register jump)
+            // 0x1408: nop (delay slot)
+            // 0x140c: nop
+            Instruction i0 = makeNop(0x1400);
+            Instruction jr = makeJr(0x1404, 16);
+            Instruction delay = makeNop(0x1408);
+            Instruction i3 = makeNop(0x140c);
+
+            CodeGenerator gen({}, {});
+            std::string generated = gen.generateFunction(func, {i0, jr, delay, i3}, false);
+            printGeneratedCode("JR non-RA emits switch for in-function jump targets", generated);
+
+            t.IsTrue(generated.find("switch (jumpTarget)") != std::string::npos,
+                     "JR via non-RA register should emit switch for internal targets");
+            t.IsTrue(generated.find("case 0x1400u: goto label_1400;") != std::string::npos,
+                     "switch should include in-function entry label");
+            t.IsTrue(generated.find("case 0x140Cu: goto label_140c;") != std::string::npos,
+                     "switch should include other in-function labels");
+        });
+
+        tc.Run("JALR includes switch and fallback/guard pair", [](TestCase &t) {
+            Function func;
+            func.name = "jalr_switch_and_fallback";
+            func.start = 0x1500;
+            func.end = 0x1530;
+            func.isRecompiled = true;
+            func.isStub = false;
+
+            // A call-like setup so there are multiple in-function labels to dispatch to.
+            Instruction jal = makeJal(0x1500, 0x1510);
+            Instruction jalDelay = makeNop(0x1504);
+            Instruction atReturn = makeNop(0x1508);
+            Instruction atTarget = makeNop(0x1510);
+            Instruction jalr = makeJalr(0x1514, 4, 31);
+            Instruction jalrDelay = makeNop(0x1518);
+
+            CodeGenerator gen({}, {});
+            std::string generated = gen.generateFunction(func, {jal, jalDelay, atReturn, atTarget, jalr, jalrDelay}, false);
+            printGeneratedCode("JALR includes switch and fallback/guard pair", generated);
+
+            t.IsTrue(generated.find("switch (jumpTarget)") != std::string::npos,
+                     "JALR should emit switch when in-function register-jump targets exist");
+            t.IsTrue(generated.find("case 0x1508u: goto label_1508;") != std::string::npos,
+                     "switch should include internal return label from JAL in same function");
+            t.IsTrue(generated.find("if (ctx->pc == __entryPc) { ctx->pc = 0x151Cu; }") != std::string::npos,
+                     "JALR should contain unchanged-PC fallback to fallthrough");
+            t.IsTrue(generated.find("if (ctx->pc != 0x151Cu) { return; }") != std::string::npos,
+                     "JALR should retain non-fallthrough guard");
         });
 
         tc.Run("resolveStubTarget allows leading underscore alias", [](TestCase &t) {

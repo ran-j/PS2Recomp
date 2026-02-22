@@ -106,6 +106,9 @@
 // Stubs
 #define PS2_STUB_LIST(X)                      \
     /* Std/Libc */                            \
+    X(ret0)                                   \
+    X(ret1)                                   \
+    X(reta0)                                  \
     X(calloc_r)                               \
     X(free_r)                                 \
     X(malloc_r)                               \

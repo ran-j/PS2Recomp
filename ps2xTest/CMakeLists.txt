@@ -12,6 +12,7 @@ add_executable(ps2x_tests
     src/elf_analyzer_tests.cpp
     src/pad_input_tests.cpp
     src/ps2_runtime_io_tests.cpp
+    src/ps2_recompiler_tests.cpp
 )
 
 option(PRINT_GENERATED_CODE "Print generated code in tests" OFF)

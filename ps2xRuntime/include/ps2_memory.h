@@ -6,13 +6,14 @@
 #include <vector>
 #include <unordered_map>
 #include <atomic>
+#include <iostream>
 #if defined(_MSC_VER)
-    #include <intrin.h>
+#include <intrin.h>
 #elif defined(USE_SSE2NEON)
-    #include "sse2neon.h"
+#include "sse2neon.h"
 #else
-    #include <immintrin.h> // For SSE/AVX instructions
-    #include <smmintrin.h> // For SSE4.1 instructions
+#include <immintrin.h> // For SSE/AVX instructions
+#include <smmintrin.h> // For SSE4.1 instructions
 #endif
 
 constexpr uint32_t PS2_RAM_SIZE = 32u * 1024u * 1024u; // 32MB
@@ -95,11 +96,6 @@ inline bool ps2ResolveGuestPointer(uint32_t addr, uint32_t &offset, bool &scratc
              (addr >= 0x80000000u && addr < 0xC0000000u))
     {
         phys = addr & 0x1FFFFFFFu;
-    }
-    else
-    {
-        // Keep legacy runtime behavior for odd upper-bit aliases used by game code.
-        phys = addr & PS2_RAM_MASK;
     }
 
     if (phys >= PS2_RAM_SIZE)
@@ -271,6 +267,34 @@ public:
     bool writeIORegister(uint32_t address, uint32_t value);
     uint32_t readIORegister(uint32_t address);
 
+    // Software GS/VIF path used by GIF and VIF1 DMA channels.
+    void processGIFPacket(uint32_t srcPhysAddr, uint32_t qwCount);
+    void processVIF1Data(uint32_t srcPhysAddr, uint32_t sizeBytes);
+
+    // Poll DMA registers from rdram shadow (workaround for KSEG1 fast-path bypass)
+    int pollDmaRegisters();
+
+    struct GSDrawContext
+    {
+        uint64_t bitbltbuf = 0;
+        uint64_t trxpos = 0;
+        uint64_t trxreg = 0;
+        uint64_t trxdir = 0;
+        bool xferActive = false;
+        uint32_t xferDestX = 0;
+        uint32_t xferDestY = 0;
+        uint32_t xferWidth = 0;
+        uint32_t xferHeight = 0;
+        uint32_t xferDBP = 0;
+        uint32_t xferDBW = 0;
+        uint32_t xferDPSM = 0;
+        uint32_t xferPixelsWritten = 0;
+        uint32_t gifTagsProcessed = 0;
+        uint32_t adWrites = 0;
+        uint32_t imageTransfers = 0;
+        uint32_t primitivesDrawn = 0;
+    };
+
     // Track code modifications for self-modifying code
     void registerCodeRegion(uint32_t start, uint32_t end);
     bool isCodeModified(uint32_t address, uint32_t size);
@@ -281,6 +305,8 @@ public:
     const GSRegisters &gs() const { return gs_regs; }
     uint8_t *getGSVRAM() { return m_gsVRAM; }
     const uint8_t *getGSVRAM() const { return m_gsVRAM; }
+    GSDrawContext &gsDrawCtx() { return m_gsDrawCtx; }
+    const GSDrawContext &gsDrawCtx() const { return m_gsDrawCtx; }
     bool hasSeenGifCopy() const { return m_seenGifCopy; }
     // Main RAM (32MB)
     uint8_t *m_rdram;
@@ -301,6 +327,7 @@ public:
 
     // Registers
     GSRegisters gs_regs;
+    GSDrawContext m_gsDrawCtx;
     uint8_t *m_gsVRAM;
     VIFRegisters vif0_regs;
     VIFRegisters vif1_regs;

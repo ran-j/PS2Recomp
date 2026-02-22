@@ -14,13 +14,14 @@ namespace ps2recomp
 	struct Instruction;
 	struct Function;
 	struct Symbol;
+	struct Section;
 
 	extern const std::unordered_set<std::string> kKeywords;
 
     class CodeGenerator
     {
     public:
-	    explicit CodeGenerator(const std::vector<Symbol> &symbols);
+	    explicit CodeGenerator(const std::vector<Symbol> &symbols, const std::vector<Section> &sections);
         ~CodeGenerator();
 
         struct BootstrapInfo
@@ -33,21 +34,28 @@ namespace ps2recomp
             std::string entryName;
         };
 
+        struct AnalysisResult {
+            std::unordered_set<uint32_t> entryPoints;
+            std::unordered_map<uint32_t, std::vector<uint32_t>> jumpTableTargets;
+        };
+
         std::string generateFunction(const Function &function, const std::vector<Instruction> &instructions, const bool &useHeaders);
         std::string generateFunctionRegistration(const std::vector<Function> &functions, const std::map<uint32_t, std::string> &stubs);
         std::string handleBranchDelaySlots(const Instruction &branchInst, const Instruction &delaySlot,
-                                           const Function &function, const std::unordered_set<uint32_t> &internalTargets);
+                                           const Function &function, const AnalysisResult &analysisResult);
 
         void setRenamedFunctions(const std::unordered_map<uint32_t, std::string> &renames);
         void setBootstrapInfo(const BootstrapInfo &info);
         void setRelocationCallNames(const std::unordered_map<uint32_t, std::string> &callNames);
-        std::unordered_set<uint32_t> collectInternalBranchTargets(const Function &function,
-                                                                  const std::vector<Instruction> &instructions);
+
+        AnalysisResult collectInternalBranchTargets(const Function &function,
+                                                  const std::vector<Instruction> &instructions);
 
     public:
         std::unordered_map<uint32_t, Symbol> m_symbols;
         std::unordered_map<uint32_t, std::string> m_renamedFunctions;
         std::unordered_map<uint32_t, std::string> m_relocationCallNames;
+        const std::vector<Section>& m_sections;
         BootstrapInfo m_bootstrapInfo;
 
         std::string translateInstruction(const Instruction &inst);
@@ -69,6 +77,14 @@ namespace ps2recomp
         // Instruction Helpers
         std::string translateQFSRV(const Instruction &inst);
         std::string translatePMADDW(const Instruction &inst);
+        std::string translatePMULTW(const Instruction &inst);
+        std::string translatePMSUBW(const Instruction &inst);
+        std::string translatePEXT5(const Instruction &inst);
+        std::string translatePPAC5(const Instruction &inst);
+        std::string translatePADSBH(const Instruction &inst);
+        std::string translatePMSUBH(const Instruction &inst);
+        std::string translatePHMSBH(const Instruction &inst);
+        std::string translatePMADDUW(const Instruction &inst);
         std::string translatePDIVW(const Instruction &inst);
         std::string translatePCPYLD(const Instruction &inst);
         std::string translatePMADDH(const Instruction &inst);
@@ -149,6 +165,12 @@ namespace ps2recomp
         std::string translateVU_VMSUB(const Instruction &inst);
         std::string translateVU_VMSUBq(const Instruction &inst);
         std::string translateVU_VMSUBi(const Instruction &inst);
+        std::string translateVU_VMULq(const Instruction &inst);
+        std::string translateVU_VMULi(const Instruction &inst);
+        std::string translateVU_VADDq(const Instruction &inst);
+        std::string translateVU_VADDi(const Instruction &inst);
+        std::string translateVU_VSUBq(const Instruction &inst);
+        std::string translateVU_VSUBi(const Instruction &inst);
         std::string translateVU_VITOF(const Instruction &inst, int shift);
         std::string translateVU_VFTOI(const Instruction &inst, int shift);
         std::string translateVU_VLQI(const Instruction &inst);

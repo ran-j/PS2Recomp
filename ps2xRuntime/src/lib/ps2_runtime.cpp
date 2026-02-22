@@ -1,5 +1,6 @@
 #include "ps2_runtime.h"
 #include "ps2_syscalls.h"
+#include "game_overrides.h"
 #include "ps2_runtime_macros.h"
 #include <iostream>
 #include <fstream>
@@ -13,6 +14,7 @@
 #include <thread>
 #include <unordered_map>
 #include "raylib.h"
+#include "ps2_gs_gpu.h"
 #include <ThreadNaming.h>
 
 #define ELF_MAGIC 0x464C457F // "\x7FELF" in little endian
@@ -86,11 +88,23 @@ namespace
 
     void raiseCop0Exception(R5900Context *ctx, uint32_t exceptionCode, bool tlbRefill = false)
     {
-        ctx->cop0_epc = ctx->pc;
-        ctx->cop0_cause = (ctx->cop0_cause & ~(COP0_CAUSE_EXCCODE_MASK | COP0_CAUSE_BD)) |
-                          ((exceptionCode << 2) & COP0_CAUSE_EXCCODE_MASK);
+        if (ctx->in_delay_slot)
+        {
+            ctx->cop0_epc = ctx->branch_pc;
+            ctx->cop0_cause = (ctx->cop0_cause & ~COP0_CAUSE_EXCCODE_MASK) |
+                              ((exceptionCode << 2) & COP0_CAUSE_EXCCODE_MASK) |
+                              COP0_CAUSE_BD;
+        }
+        else
+        {
+            ctx->cop0_epc = ctx->pc;
+            ctx->cop0_cause = (ctx->cop0_cause & ~(COP0_CAUSE_EXCCODE_MASK | COP0_CAUSE_BD)) |
+                              ((exceptionCode << 2) & COP0_CAUSE_EXCCODE_MASK);
+        }
+
         ctx->cop0_status |= COP0_STATUS_EXL;
         ctx->pc = selectExceptionVector(ctx, tlbRefill);
+        ctx->in_delay_slot = false;
     }
 
     std::filesystem::path normalizeAbsolutePath(const std::filesystem::path &path)
@@ -181,13 +195,15 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt)
     uint32_t fbw = (dispfb >> 9) & 0x3F;
     uint32_t psm = (dispfb >> 15) & 0x1F;
 
-    // DISPLAY1 fields used here: DW bits 32-43, DH bits 44-54.
+    // DISPLAY1 fields used here: DX[11:0], DY[22:12], MAGH[25:23], MAGV[27:26], DW[43:32], DH[54:44].
     uint64_t display64 = gs.display1;
+    uint32_t magh = static_cast<uint32_t>((display64 >> 23) & 0x7); // magnification H (0-7)
     uint32_t dw = static_cast<uint32_t>((display64 >> 32) & 0xFFF);
     uint32_t dh = static_cast<uint32_t>((display64 >> 44) & 0x7FF);
 
-    // Default to 640x448 if regs look strange.
-    uint32_t width = (dw + 1);
+    // DW is in VCK units: actual pixel width = (DW + 1) / (MAGH + 1).
+    uint32_t maghDiv = magh + 1;
+    uint32_t width = (dw + 1) / maghDiv;
     uint32_t height = (dh + 1);
     if (dw == 0)
         width = FB_WIDTH;
@@ -212,7 +228,8 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt)
     const uint32_t bytesPerPixel = (psm == 2u || psm == 0x0Au) ? 2u : 4u;
     uint32_t strideBytes = (fbw ? fbw : (FB_WIDTH / 64)) * 64 * bytesPerPixel;
 
-    std::vector<uint8_t> scratch(FB_WIDTH * FB_HEIGHT * 4, 0); // maybe we can do this static
+    static std::vector<uint8_t> scratch(FB_WIDTH * FB_HEIGHT * 4, 0);
+    std::memset(scratch.data(), 0, scratch.size());
 
     uint8_t *rdram = rt->memory().getRDRAM();
     uint8_t *gsvram = rt->memory().getGSVRAM();
@@ -507,6 +524,8 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
 
     m_loadedModules.push_back(module);
 
+    ps2_game_overrides::applyMatching(*this, elfPath, m_cpuContext.pc);
+
     std::cout << "ELF file loaded successfully. Entry point: 0x" << std::hex << m_cpuContext.pc << std::dec << std::endl;
     return true;
 }
@@ -642,6 +661,12 @@ void PS2Runtime::handleSyscall(uint8_t *rdram, R5900Context *ctx)
 
 void PS2Runtime::handleSyscall(uint8_t *rdram, R5900Context *ctx, uint32_t encodedSyscallId)
 {
+    if (ctx->in_delay_slot)
+    {
+        throw std::runtime_error("Attempted to execute a syscall inside a branch delay slot! "
+                                 "This breaks the atomic basic block model and is structurally unsupported by the emulator.");
+    }
+
     // Try immediate first
     if (encodedSyscallId != 0 && ps2_syscalls::dispatchNumericSyscall(encodedSyscallId, rdram, ctx, this))
     {
@@ -1022,7 +1047,9 @@ uint32_t PS2Runtime::guestCalloc(uint32_t count, uint32_t size, uint32_t alignme
         uint8_t *rdram = m_memory.getRDRAM();
         if (rdram)
         {
-            std::memset(rdram + guestAddr, 0, totalSize);
+            uint32_t physAddr = guestAddr & PS2_RAM_MASK;
+            if (physAddr + totalSize <= PS2_RAM_SIZE)
+                std::memset(rdram + physAddr, 0, totalSize);
         }
     }
 
@@ -1114,7 +1141,10 @@ uint32_t PS2Runtime::guestRealloc(uint32_t guestAddr, uint32_t newSize, uint32_t
     if (rdram)
     {
         const uint32_t copyBytes = std::min(oldSize, newSize);
-        std::memmove(rdram + newAddr, rdram + oldAddr, copyBytes);
+        uint32_t dstPhys = newAddr & PS2_RAM_MASK;
+        uint32_t srcPhys = oldAddr & PS2_RAM_MASK;
+        if (dstPhys + copyBytes <= PS2_RAM_SIZE && srcPhys + copyBytes <= PS2_RAM_SIZE)
+            std::memmove(rdram + dstPhys, rdram + srcPhys, copyBytes);
     }
 
     freeGuestBlockLocked(oldAddr);
@@ -1416,11 +1446,18 @@ void PS2Runtime::run()
                 lastVif = curVif;
             }
         }
-        UploadFrame(frameTex, this);
-
         BeginDrawing();
         ClearBackground(BLACK);
-        DrawTexture(frameTex, 0, 0, WHITE);
+
+        bool gpuRendered = gsGpuRenderFrame();
+
+        if (!gpuRendered)
+        {
+            // lets draw for now as debug but we wont need this in future
+            UploadFrame(frameTex, this);
+            DrawTexture(frameTex, 0, 0, WHITE);
+        }
+
         EndDrawing();
 
         if (WindowShouldClose())
