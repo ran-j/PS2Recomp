@@ -67,7 +67,7 @@ int main(int argc, char* argv[])
 
     if (gameName)
     {
-        windowTitle += gameName;
+        windowTitle += std::string(gameName) + " | " + folderName;
     }
     else
     {
