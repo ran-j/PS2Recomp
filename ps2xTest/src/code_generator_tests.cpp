@@ -318,7 +318,7 @@ void register_code_generator_tests()
 
             std::string mfc0Code = gen.translateInstruction(mfc0);
             printGeneratedCode("COP0 MFC0/MTC0 translate to COP0 register access (MFC0)", mfc0Code);
-            t.IsTrue(mfc0Code.find("SET_GPR_U32(ctx, 5") != std::string::npos, "MFC0 should write to rt");
+            t.IsTrue(mfc0Code.find("SET_GPR_S32(ctx, 5") != std::string::npos, "MFC0 should write to rt");
             t.IsTrue(mfc0Code.find("ctx->cop0_status") != std::string::npos, "MFC0 STATUS should read cop0_status");
             t.IsTrue(mfc0Code.find("Unimplemented COP0 register") == std::string::npos, "MFC0 should not hit unimplemented COP0 register path");
             t.IsTrue(mfc0Code.find("Unhandled COP0") == std::string::npos, "MFC0 should not hit unhandled COP0 path");
