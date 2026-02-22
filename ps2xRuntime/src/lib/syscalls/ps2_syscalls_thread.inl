@@ -50,7 +50,7 @@ void FlushCache(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void ResetEE(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    std::cerr << "Syscall: ResetEE - requesting runtime stop" << std::endl;
+    std::cerr << "Syscall: ResetEE - requesting runtime stop" << std::endl; 
     runtime->requestStop();
     setReturnS32(ctx, KE_OK);
 }
@@ -194,7 +194,7 @@ void DeleteThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     uint32_t autoStackToFree = 0;
     {
         std::lock_guard<std::mutex> lock(info->m);
-        if (info->status != THS_DORMANT)
+        if (info->started || info->status != THS_DORMANT)
         {
             setReturnS32(ctx, KE_NOT_DORMANT);
             return;
@@ -346,6 +346,13 @@ void StartThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
                 while (runtime && !runtime->isStopRequested())
                 {
+                    if (info->terminated.load(std::memory_order_relaxed))
+                    {
+                        throw ThreadExitException();
+                    }
+
+                    waitWhileSuspended(info);
+
                     const uint32_t pc = threadCtx->pc;
                     if (pc == 0u)
                     {
@@ -374,6 +381,12 @@ void StartThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
                     }
 
                     PS2Runtime::RecompiledFunction step = runtime->lookupFunction(pc);
+                    if (!step)
+                    {
+                        std::cerr << "[StartThread] id=" << tid << " missing function for pc=0x"
+                                  << std::hex << pc << std::dec << std::endl;
+                        throw ThreadExitException();
+                    }
                     step(rdram, threadCtx, runtime);
                 }
             }
@@ -430,6 +443,9 @@ void StartThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
                 runtime->guestFree(detachedAutoStack);
             }
 
+            // Notify anybody waiting for termination (like TerminateThread)
+            info->cv.notify_all();
+
             g_activeThreads.fetch_sub(1, std::memory_order_relaxed);
         });
         worker.detach();
@@ -463,7 +479,6 @@ void ExitThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         std::lock_guard<std::mutex> lock(info->m);
         info->terminated = true;
         info->forceRelease = true;
-        info->status = THS_DORMANT;
         info->waitType = TSW_NONE;
         info->waitId = 0;
         info->wakeupCount = 0;
@@ -485,7 +500,6 @@ void ExitDeleteThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         std::lock_guard<std::mutex> lock(info->m);
         info->terminated = true;
         info->forceRelease = true;
-        info->status = THS_DORMANT;
         info->waitType = TSW_NONE;
         info->waitId = 0;
         info->wakeupCount = 0;
@@ -523,10 +537,6 @@ void TerminateThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         }
         info->terminated = true;
         info->forceRelease = true;
-        info->status = THS_DORMANT;
-        info->waitType = TSW_NONE;
-        info->waitId = 0;
-        info->wakeupCount = 0;
     }
     info->cv.notify_all();
 
@@ -535,6 +545,15 @@ void TerminateThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         runExitHandlersForThread(tid, rdram, ctx, runtime);
         throw ThreadExitException();
     }
+    else
+    {
+        // Block until the target thread actually finishes unwinding and becomes dormant
+        std::unique_lock<std::mutex> lock(info->m);
+        info->cv.wait(lock, [&]() {
+            return !info->started && info->status == THS_DORMANT;
+        });
+    }
+
     setReturnS32(ctx, KE_OK);
 }
 
@@ -889,6 +908,9 @@ void RotateThreadReadyQueue(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runti
         setReturnS32(ctx, KE_ILLEGAL_PRIORITY);
         return;
     }
+
+    std::this_thread::yield();
+
     setReturnS32(ctx, KE_OK);
 }
 

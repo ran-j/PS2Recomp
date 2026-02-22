@@ -75,6 +75,7 @@ struct alignas(16) R5900Context
     uint32_t vu0_fbrst3;    // FBRST3
     uint32_t vu0_fbrst4;    // FBRST4
     uint32_t vu0_itop;
+    uint32_t vu0_top;
     uint32_t vu0_info;
     uint32_t vu0_xitop; // VU0 XITOP - input ITOP for VIF/VU sync
     uint32_t vu0_pc;
@@ -109,6 +110,10 @@ struct alignas(16) R5900Context
     uint32_t llbit;
     uint32_t lladdr;
 
+    // Delay slot state tracking
+    bool in_delay_slot;
+    uint32_t branch_pc;
+
     // COP2 control registers (VU0 integer + control)
     uint32_t cop2_ccr[32];
 
@@ -130,6 +135,9 @@ struct alignas(16) R5900Context
         // 0x00000000 = Normal mode (after BIOS handoff).
         cop0_status = 0x00000000;
         cop0_prid = 0x00002e20; // CPU ID for R5900
+        
+        in_delay_slot = false;
+        branch_pc = 0;
     }
 
     void dump() const
@@ -171,8 +179,8 @@ inline uint32_t getRegU32(const R5900Context *ctx, int reg)
 
 inline void setReturnU32(R5900Context *ctx, uint32_t value)
 {
-    // Keep low 64-bits coherent for helpers that read GPRs as 64-bit.
-    ctx->r[2] = _mm_set_epi64x(0, static_cast<int64_t>(value)); // $v0
+    // R5900 sign-extends 32-bit results into 64-bit GPR, even for unsigned values.
+    ctx->r[2] = _mm_set_epi64x(0, static_cast<int64_t>(static_cast<int32_t>(value))); // $v0
 }
 
 inline void setReturnS32(R5900Context *ctx, int32_t value)
@@ -413,32 +421,58 @@ public:
 
     static inline bool isSpecialAddress(uint32_t addr)
     {
-        // BIOS (physical + cached/uncached aliases)
-        if ((addr >= PS2_BIOS_BASE && addr < (PS2_BIOS_BASE + PS2_BIOS_SIZE)) ||
-            (addr >= 0xBFC00000u && addr < (0xBFC00000u + PS2_BIOS_SIZE)))
+        auto isPhysicalSpecial = [](uint32_t physAddr) -> bool
+        {
+            if (physAddr >= PS2_BIOS_BASE && physAddr < (PS2_BIOS_BASE + PS2_BIOS_SIZE))
+            {
+                return true;
+            }
+            if (physAddr >= PS2_SCRATCHPAD_BASE && physAddr < (PS2_SCRATCHPAD_BASE + PS2_SCRATCHPAD_SIZE))
+            {
+                return true;
+            }
+            if (physAddr >= PS2_IO_BASE && physAddr < (PS2_IO_BASE + PS2_IO_SIZE))
+            {
+                return true;
+            }
+            if (physAddr >= PS2_GS_PRIV_REG_BASE && physAddr < (PS2_GS_PRIV_REG_BASE + PS2_GS_PRIV_REG_SIZE))
+            {
+                return true;
+            }
+            if (physAddr >= PS2_VU0_CODE_BASE && physAddr < (PS2_VU1_DATA_BASE + PS2_VU1_DATA_SIZE))
+            {
+                return true;
+            }
+            return false;
+        };
+
+        // Direct physical windows.
+        if (isPhysicalSpecial(addr))
         {
             return true;
         }
 
-        // Scratchpad (16KB)
-        if (addr >= PS2_SCRATCHPAD_BASE && addr < (PS2_SCRATCHPAD_BASE + PS2_SCRATCHPAD_SIZE))
+        // BIOS uncached alias.
+        if (addr >= 0xBFC00000u && addr < (0xBFC00000u + PS2_BIOS_SIZE))
+        {
             return true;
+        }
 
-        // EE MMIO window (Timers, DMAC, INTC, etc)
-        if (addr >= PS2_IO_BASE && addr < (PS2_IO_BASE + PS2_IO_SIZE))
-            return true;
-
-        // GS privileged regs
-        if (addr >= PS2_GS_PRIV_REG_BASE && addr < (PS2_GS_PRIV_REG_BASE + PS2_GS_PRIV_REG_SIZE))
-            return true;
+        // KSEG0/KSEG1 direct-mapped aliases. This ensures writes like 0xB000A000
+        if (addr >= 0x80000000u && addr < 0xC0000000u)
+        {
+            const uint32_t physAddr = addr & 0x1FFFFFFFu;
+            if (isPhysicalSpecial(physAddr))
+            {
+                return true;
+            }
+        }
 
         // KSEG2/KSEG3 (TLB mapped)
         if (addr >= 0xC0000000u)
+        {
             return true;
-
-        // VU Memory (Micro/Data) mapped into EE space
-        if (addr >= PS2_VU0_CODE_BASE && addr < (PS2_VU1_DATA_BASE + PS2_VU1_DATA_SIZE))
-            return true;
+        }
 
         return false;
     }

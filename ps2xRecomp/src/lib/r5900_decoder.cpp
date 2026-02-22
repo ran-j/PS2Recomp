@@ -168,6 +168,14 @@ namespace ps2recomp
             inst.vectorInfo.isVector = inst.isVU; // Only VU ops are truly vector
         }
 
+        size_t bufferSize = RabbitizerInstruction_getSizeForBuffer(&rabbitizerInst, 0, 0);
+        if (bufferSize > 0)
+        {
+            std::vector<char> buffer(bufferSize + 1, '\0');
+            RabbitizerInstruction_disassemble(&rabbitizerInst, buffer.data(), nullptr, 0, 0);
+            inst.disassembly = buffer.data();
+        }
+
         RabbitizerInstructionR5900_destroy(&rabbitizerInst);
 
         return inst;

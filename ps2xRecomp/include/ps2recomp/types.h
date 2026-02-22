@@ -45,6 +45,7 @@ namespace ps2recomp
 
         bool isMmio = false;
         uint32_t mmioAddress = 0;
+        std::string disassembly;
 
         struct
         {

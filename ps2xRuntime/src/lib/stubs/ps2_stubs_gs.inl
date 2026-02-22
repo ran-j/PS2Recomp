@@ -225,7 +225,12 @@ void sceGsResetPath(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void sceGsSetDefClear(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceGsSetDefClear", rdram, ctx, runtime);
+    const uint32_t clearAddr = getRegU32(ctx, 4);
+    if (uint8_t *clear = getMemPtr(rdram, clearAddr))
+    {
+        std::memset(clear, 0, 64);
+    }
+    setReturnS32(ctx, 0);
 }
 
 void sceGsSetDefDBuffDc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -257,12 +262,50 @@ void sceGsSetDefDispEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void sceGsSetDefDrawEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceGsSetDefDrawEnv", rdram, ctx, runtime);
+    const uint32_t envAddr = getRegU32(ctx, 4);
+    uint32_t psm = getRegU32(ctx, 5);
+    uint32_t w = getRegU32(ctx, 6);
+    uint32_t h = getRegU32(ctx, 7);
+    const uint32_t vramAddr = readStackU32(rdram, ctx, 16);
+    const uint32_t vramX = readStackU32(rdram, ctx, 20);
+    const uint32_t vramY = readStackU32(rdram, ctx, 24);
+
+    if (w == 0)
+        w = 640;
+    if (h == 0)
+        h = 448;
+
+    GsDrawEnvMem env{};
+    env.offset_x = static_cast<uint16_t>(2048 - (w / 2));
+    env.offset_y = static_cast<uint16_t>(2048 - (h / 2));
+    env.clip_x = 0;
+    env.clip_y = 0;
+    env.clip_w = static_cast<uint16_t>(w);
+    env.clip_h = static_cast<uint16_t>(h);
+    env.vram_addr = static_cast<uint16_t>(vramAddr & 0xFFFFu);
+    env.fbw = static_cast<uint8_t>((w + 63u) / 64u);
+    env.psm = static_cast<uint8_t>(psm & 0xFFu);
+    env.vram_x = static_cast<uint16_t>(vramX & 0xFFFFu);
+    env.vram_y = static_cast<uint16_t>(vramY & 0xFFFFu);
+    env.draw_mask = 0;
+    env.auto_clear = 1;
+    env.bg_r = 0;
+    env.bg_g = 0;
+    env.bg_b = 0;
+    env.bg_a = 0x80;
+    env.bg_q = 0.0f;
+
+    if (uint8_t *ptr = getMemPtr(rdram, envAddr))
+    {
+        std::memcpy(ptr, &env, sizeof(env));
+    }
+
+    setReturnS32(ctx, 0);
 }
 
 void sceGsSetDefDrawEnv2(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceGsSetDefDrawEnv2", rdram, ctx, runtime);
+    sceGsSetDefDrawEnv(rdram, ctx, runtime);
 }
 
 void sceGsSetDefLoadImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -303,15 +346,17 @@ void sceGsSyncPath(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void sceGsSyncV(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    ps2_syscalls::WaitVSyncTick(rdram, runtime);
     setReturnS32(ctx, 0);
 }
 
 void sceGsSyncVCallback(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    ps2_syscalls::WaitVSyncTick(rdram, runtime);
     setReturnS32(ctx, 0);
 }
 
 void sceGszbufaddr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceGszbufaddr", rdram, ctx, runtime);
+    setReturnU32(ctx, getRegU32(ctx, 4));
 }

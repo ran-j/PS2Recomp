@@ -816,7 +816,7 @@ namespace ps2recomp
                       << m_relocations.size() << " relocations." << std::endl;
 
             m_decoder = std::make_unique<R5900Decoder>();
-            m_codeGenerator = std::make_unique<CodeGenerator>(m_symbols);
+            m_codeGenerator = std::make_unique<CodeGenerator>(m_symbols, m_sections);
             std::unordered_map<uint32_t, std::string> relocationCallNames;
             relocationCallNames.reserve(m_relocations.size());
             for (const auto &reloc : m_relocations)
