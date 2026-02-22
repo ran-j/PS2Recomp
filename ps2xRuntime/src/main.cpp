@@ -5,33 +5,6 @@
 #include <iostream>
 #include <string>
 #include <filesystem>
-#include <fstream>
-#include <unordered_map>
-
-std::unordered_map<std::string, std::string> loadGameDatabase(const std::string& path)
-{
-    std::unordered_map<std::string, std::string> database;
-    std::ifstream file(path);
-
-    if (!file.is_open())
-    {
-        return database;
-    }
-
-    std::string line;
-    while (std::getline(file, line))
-    {
-        size_t sep = line.find('|');
-        if (sep != std::string::npos)
-        {
-            std::string id = line.substr(0, sep);
-            std::string name = line.substr(sep + 1);
-            database[id] = name;
-        }
-    }
-
-    return database;
-}
 
 std::string normalizeGameId(const std::string& folderName)
 {
@@ -60,9 +33,8 @@ int main(int argc, char* argv[])
     std::filesystem::path pathObj(elfPath);
     std::string folderName = pathObj.filename().string();
     std::string normalizedId = normalizeGameId(folderName);
-    auto gameDatabase = loadGameDatabase("games.txt");
-    std::string windowTitle = "PS2-Recomp | ";
 
+    std::string windowTitle = "PS2-Recomp | ";
     const char* gameName = getGameName(normalizedId);
 
     if (gameName)
