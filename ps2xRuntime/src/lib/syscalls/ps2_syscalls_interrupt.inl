@@ -13,7 +13,9 @@ namespace
 
     static std::mutex g_irq_handler_mutex;
     static std::mutex g_irq_worker_mutex;
+    static std::condition_variable g_irq_worker_cv;
     static std::mutex g_vsync_flag_mutex;
+    static std::condition_variable g_vsync_cv;
     static std::atomic<bool> g_irq_worker_stop{false};
     static std::atomic<bool> g_irq_worker_running{false};
     static uint32_t g_enabled_intc_mask = 0xFFFFFFFFu;
@@ -85,6 +87,9 @@ static void dispatchIntcHandlersForCause(uint8_t *rdram, PS2Runtime *runtime, ui
             }
             handlers.push_back(info);
         }
+        std::sort(handlers.begin(), handlers.end(), [](const IrqHandlerInfo &a, const IrqHandlerInfo &b) {
+            return a.order < b.order;
+        });
     }
 
     for (const IrqHandlerInfo &info : handlers)
@@ -107,8 +112,15 @@ static void dispatchIntcHandlersForCause(uint8_t *rdram, PS2Runtime *runtime, ui
             SET_GPR_U32(&irqCtx, 7, 0u);
             irqCtx.pc = info.handler;
 
-            PS2Runtime::RecompiledFunction func = runtime->lookupFunction(info.handler);
-            func(rdram, &irqCtx, runtime);
+            while (irqCtx.pc != 0u && runtime && !runtime->isStopRequested())
+            {
+                PS2Runtime::RecompiledFunction step = runtime->lookupFunction(irqCtx.pc);
+                if (!step)
+                {
+                    break;
+                }
+                step(rdram, &irqCtx, runtime);
+            }
         }
         catch (const ThreadExitException &)
         {
@@ -126,15 +138,17 @@ static void dispatchIntcHandlersForCause(uint8_t *rdram, PS2Runtime *runtime, ui
     }
 }
 
-static void signalVSyncFlag(uint8_t *rdram, uint64_t tickValue)
+static uint64_t signalVSyncFlag(uint8_t *rdram)
 {
     VSyncFlagRegistration reg{};
+    uint64_t tickValue = 0u;
     {
         std::lock_guard<std::mutex> lock(g_vsync_flag_mutex);
         reg = g_vsync_registration;
-        g_vsync_registration = {};
-        g_vsync_tick_counter = tickValue;
+        tickValue = ++g_vsync_tick_counter;
     }
+
+    g_vsync_cv.notify_all();
 
     if (reg.flagAddr != 0u)
     {
@@ -144,18 +158,25 @@ static void signalVSyncFlag(uint8_t *rdram, uint64_t tickValue)
     {
         writeGuestU64NoThrow(rdram, reg.tickAddr, tickValue);
     }
+    return tickValue;
 }
 
 static void interruptWorkerMain(uint8_t *rdram, PS2Runtime *runtime)
 {
+    g_currentThreadId = -1;
+
     using clock = std::chrono::steady_clock;
     auto nextTick = clock::now() + kVblankPeriod;
 
-    while (!g_irq_worker_stop.load(std::memory_order_acquire) &&
-           runtime != nullptr &&
-           !runtime->isStopRequested())
+    while (runtime != nullptr && !runtime->isStopRequested())
     {
-        std::this_thread::sleep_until(nextTick);
+        {
+            std::unique_lock<std::mutex> lock(g_irq_worker_mutex);
+            if (g_irq_worker_cv.wait_until(lock, nextTick, []() { return g_irq_worker_stop.load(std::memory_order_acquire); }))
+            {
+                break;
+            }
+        }
 
         const auto now = clock::now();
         int ticksToProcess = 0;
@@ -171,19 +192,15 @@ static void interruptWorkerMain(uint8_t *rdram, PS2Runtime *runtime)
 
         for (int i = 0; i < ticksToProcess; ++i)
         {
-            uint64_t tickValue = 0u;
-            {
-                std::lock_guard<std::mutex> lock(g_vsync_flag_mutex);
-                tickValue = ++g_vsync_tick_counter;
-            }
-
-            signalVSyncFlag(rdram, tickValue);
+            signalVSyncFlag(rdram);
             dispatchIntcHandlersForCause(rdram, runtime, kIntcVblankStart);
+            std::this_thread::sleep_for(std::chrono::microseconds(500));
             dispatchIntcHandlersForCause(rdram, runtime, kIntcVblankEnd);
         }
     }
 
     g_irq_worker_running.store(false, std::memory_order_release);
+    g_irq_worker_cv.notify_all();
 }
 
 static void ensureInterruptWorkerRunning(uint8_t *rdram, PS2Runtime *runtime)
@@ -214,10 +231,19 @@ static void ensureInterruptWorkerRunning(uint8_t *rdram, PS2Runtime *runtime)
 void stopInterruptWorker()
 {
     g_irq_worker_stop.store(true, std::memory_order_release);
-    for (int i = 0; i < 100 && g_irq_worker_running.load(std::memory_order_acquire); ++i)
-    {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    g_irq_worker_cv.notify_all();
+    std::unique_lock<std::mutex> lock(g_irq_worker_mutex);
+    g_irq_worker_cv.wait_for(lock, std::chrono::milliseconds(500), []() {
+        return !g_irq_worker_running.load(std::memory_order_acquire);
+    });
+}
+
+void WaitVSyncTick(uint8_t *rdram, PS2Runtime *runtime)
+{
+    ensureInterruptWorkerRunning(rdram, runtime);
+    std::unique_lock<std::mutex> lock(g_vsync_flag_mutex);
+    uint64_t current = g_vsync_tick_counter;
+    g_vsync_cv.wait(lock, [current]() { return g_vsync_tick_counter > current; });
 }
 
 void SetVSyncFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -264,6 +290,7 @@ void AddIntcHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     IrqHandlerInfo info{};
     info.cause = getRegU32(ctx, 4);
     info.handler = getRegU32(ctx, 5);
+    uint32_t next = getRegU32(ctx, 6);
     info.arg = getRegU32(ctx, 7);
     info.gp = getRegU32(ctx, 28);
     info.sp = getRegU32(ctx, 29);
@@ -272,7 +299,9 @@ void AddIntcHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     int handlerId = 0;
     {
         std::lock_guard<std::mutex> lock(g_irq_handler_mutex);
+        info.order = (next == 0) ? --g_intc_head_order : ++g_intc_tail_order;
         handlerId = g_nextIntcHandlerId++;
+        info.id = handlerId;
         g_intcHandlers[handlerId] = info;
     }
 
@@ -282,11 +311,16 @@ void AddIntcHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void RemoveIntcHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    const uint32_t cause = getRegU32(ctx, 4);
     const int handlerId = static_cast<int>(getRegU32(ctx, 5));
     if (handlerId > 0)
     {
         std::lock_guard<std::mutex> lock(g_irq_handler_mutex);
-        g_intcHandlers.erase(handlerId);
+        auto it = g_intcHandlers.find(handlerId);
+        if (it != g_intcHandlers.end() && it->second.cause == cause)
+        {
+            g_intcHandlers.erase(it);
+        }
     }
     setReturnS32(ctx, KE_OK);
 }
@@ -296,6 +330,7 @@ void AddDmacHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     IrqHandlerInfo info{};
     info.cause = getRegU32(ctx, 4);
     info.handler = getRegU32(ctx, 5);
+    uint32_t next = getRegU32(ctx, 6);
     info.arg = getRegU32(ctx, 7);
     info.gp = getRegU32(ctx, 28);
     info.sp = getRegU32(ctx, 29);
@@ -304,7 +339,9 @@ void AddDmacHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     int handlerId = 0;
     {
         std::lock_guard<std::mutex> lock(g_irq_handler_mutex);
+        info.order = (next == 0) ? --g_dmac_head_order : ++g_dmac_tail_order;
         handlerId = g_nextDmacHandlerId++;
+        info.id = handlerId;
         g_dmacHandlers[handlerId] = info;
     }
     setReturnS32(ctx, handlerId);
@@ -312,11 +349,16 @@ void AddDmacHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void RemoveDmacHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    const uint32_t cause = getRegU32(ctx, 4);
     const int handlerId = static_cast<int>(getRegU32(ctx, 5));
     if (handlerId > 0)
     {
         std::lock_guard<std::mutex> lock(g_irq_handler_mutex);
-        g_dmacHandlers.erase(handlerId);
+        auto it = g_dmacHandlers.find(handlerId);
+        if (it != g_dmacHandlers.end() && it->second.cause == cause)
+        {
+            g_dmacHandlers.erase(it);
+        }
     }
     setReturnS32(ctx, KE_OK);
 }

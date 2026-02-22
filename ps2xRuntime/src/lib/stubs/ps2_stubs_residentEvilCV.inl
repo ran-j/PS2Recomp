@@ -9,6 +9,57 @@ void syRtcInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     setReturnS32(ctx, 0);
 }
 
+namespace
+{
+    constexpr uint32_t kCvSyMallocAddr = 0x002D9A70u;
+
+    constexpr uint32_t kCvMallocMaxSizeAddr = 0x01140B60u;
+    constexpr uint32_t kCvMallocFreeSizeAddr = 0x01140B68u;
+    constexpr uint32_t kCvMallocHeadPtrAddr = 0x01140B70u;
+    constexpr uint32_t kCvMallocPoolAddr = 0x01140B80u;
+    constexpr uint32_t kCvMallocPoolSize = 0x00CCD000u;
+
+    constexpr uint32_t kCvMallocUseSizeOff = 0x00u;
+    constexpr uint32_t kCvMallocTotalSizeOff = 0x04u;
+    constexpr uint32_t kCvMallocNextOff = 0x0Cu;
+    constexpr uint32_t kCvMallocHeaderSize = 0x40u;
+    constexpr uint32_t kCvMallocInitialFreeSize = kCvMallocPoolSize - kCvMallocHeaderSize;
+
+    uint32_t cvReadU32(const uint8_t *rdram, uint32_t addr)
+    {
+        if (!rdram)
+        {
+            return 0u;
+        }
+
+        const uint32_t offset = addr & PS2_RAM_MASK;
+        if (offset + sizeof(uint32_t) > PS2_RAM_SIZE)
+        {
+            return 0u;
+        }
+
+        uint32_t value = 0u;
+        std::memcpy(&value, rdram + offset, sizeof(value));
+        return value;
+    }
+
+    void cvWriteU32(uint8_t *rdram, uint32_t addr, uint32_t value)
+    {
+        if (!rdram)
+        {
+            return;
+        }
+
+        const uint32_t offset = addr & PS2_RAM_MASK;
+        if (offset + sizeof(uint32_t) > PS2_RAM_SIZE)
+        {
+            return;
+        }
+
+        std::memcpy(rdram + offset, &value, sizeof(value));
+    }
+}
+
 void syFree(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     static int logCount = 0;
@@ -19,7 +70,47 @@ void syFree(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     }
 
     const uint32_t guestAddr = getRegU32(ctx, 4); // $a0
-    if (runtime && guestAddr != 0u)
+    bool released = false;
+
+    if (rdram && guestAddr != 0u)
+    {
+        uint32_t search = cvReadU32(rdram, kCvMallocHeadPtrAddr);
+        if (search < PS2_RAM_SIZE)
+        {
+            for (uint32_t guard = 0; guard < 0x100000u; ++guard)
+            {
+                const uint32_t next = cvReadU32(rdram, search + kCvMallocNextOff);
+                if (next == 0u)
+                {
+                    break;
+                }
+
+                if (guestAddr == (next + kCvMallocHeaderSize))
+                {
+                    const uint32_t searchTotal = cvReadU32(rdram, search + kCvMallocTotalSizeOff);
+                    const uint32_t nextTotal = cvReadU32(rdram, next + kCvMallocTotalSizeOff);
+                    const uint32_t nextUsed = cvReadU32(rdram, next + kCvMallocUseSizeOff);
+                    const uint32_t nextNext = cvReadU32(rdram, next + kCvMallocNextOff);
+                    const uint32_t freeSize = cvReadU32(rdram, kCvMallocFreeSizeAddr);
+
+                    cvWriteU32(rdram, search + kCvMallocTotalSizeOff, searchTotal + nextTotal + kCvMallocHeaderSize);
+                    cvWriteU32(rdram, search + kCvMallocNextOff, nextNext);
+                    cvWriteU32(rdram, kCvMallocFreeSizeAddr, freeSize + nextUsed + kCvMallocHeaderSize);
+
+                    released = true;
+                    break;
+                }
+
+                search = next;
+                if (search >= PS2_RAM_SIZE)
+                {
+                    break;
+                }
+            }
+        }
+    }
+
+    if (!released && runtime && guestAddr != 0u)
     {
         runtime->guestFree(guestAddr);
     }
@@ -32,7 +123,21 @@ void syMalloc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     const uint32_t requestedSize = getRegU32(ctx, 4); // $a0
     uint32_t resultAddr = 0u;
 
-    if (runtime && requestedSize != 0u)
+    if (runtime && requestedSize != 0u && runtime->hasFunction(kCvSyMallocAddr) && ctx->pc != kCvSyMallocAddr)
+    {
+        const uint32_t returnPc = getRegU32(ctx, 31);
+        PS2Runtime::RecompiledFunction syMallocFn = runtime->lookupFunction(kCvSyMallocAddr);
+        ctx->pc = kCvSyMallocAddr;
+        syMallocFn(rdram, ctx, runtime);
+
+        if (ctx->pc == kCvSyMallocAddr || ctx->pc == 0u)
+        {
+            ctx->pc = returnPc;
+        }
+
+        resultAddr = getRegU32(ctx, 2);
+    }
+    else if (runtime && requestedSize != 0u)
     {
         // Match game expectation for allocator alignment while keeping pointers in EE RAM.
         resultAddr = runtime->guestMalloc(requestedSize, 64u);
@@ -75,54 +180,26 @@ void Ps2_pad_actuater(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void syMallocInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    const uint32_t heapBase = getRegU32(ctx, 4); // $a0 (ignored by original CV allocator)
+    const uint32_t heapSize = getRegU32(ctx, 5); // $a1 (ignored by original CV allocator)
+ 
+    cvWriteU32(rdram, kCvMallocMaxSizeAddr, 0u);
+    cvWriteU32(rdram, kCvMallocFreeSizeAddr, kCvMallocInitialFreeSize);
+    cvWriteU32(rdram, kCvMallocHeadPtrAddr, kCvMallocPoolAddr);
+
+    cvWriteU32(rdram, kCvMallocPoolAddr + kCvMallocUseSizeOff, 0u);
+    cvWriteU32(rdram, kCvMallocPoolAddr + kCvMallocTotalSizeOff, kCvMallocInitialFreeSize);
+    cvWriteU32(rdram, kCvMallocPoolAddr + kCvMallocNextOff, 0u); 
+
     static int logCount = 0;
-    if (runtime)
+    if (logCount < 8)
     {
-        const uint32_t heapBase = getRegU32(ctx, 4); // $a0
-        const uint32_t heapSize = getRegU32(ctx, 5); // $a1 (optional size)
-
-        constexpr uint32_t kHeapBaseFloor = 0x00100000u;
-        uint32_t normalizedBase = heapBase;
-        if (normalizedBase >= 0x80000000u && normalizedBase < 0xC0000000u)
-        {
-            normalizedBase &= 0x1FFFFFFFu;
-        }
-        else if (normalizedBase >= PS2_RAM_SIZE)
-        {
-            normalizedBase &= PS2_RAM_MASK;
-        }
-
-        const bool suspiciousKsegBase = (heapBase & 0xE0000000u) == 0x80000000u && normalizedBase < kHeapBaseFloor;
-        if (normalizedBase == 0u || suspiciousKsegBase)
-        {
-            // Keep the ELF-driven suggestion instead of collapsing heap to low memory.
-            normalizedBase = runtime->guestHeapBase();
-        }
-
-        // Treat absurd "size" values as unspecified limit.
-        uint32_t heapLimit = 0u;
-        if (heapSize != 0u && heapSize <= PS2_RAM_SIZE && normalizedBase < PS2_RAM_SIZE)
-        {
-            const uint64_t candidateLimit = static_cast<uint64_t>(normalizedBase) + static_cast<uint64_t>(heapSize);
-            heapLimit = static_cast<uint32_t>(std::min<uint64_t>(candidateLimit, PS2_RAM_SIZE));
-        }
-        runtime->configureGuestHeap(normalizedBase, heapLimit);
-        if (logCount < 8)
-        {
-            std::cout << "ps2_stub syMallocInit"
-                      << " reqBase=0x" << std::hex << heapBase
-                      << " reqSize=0x" << heapSize
-                      << " normBase=0x" << normalizedBase
-                      << " reqLimit=0x" << heapLimit
-                      << " finalBase=0x" << runtime->guestHeapBase()
-                      << " finalEnd=0x" << runtime->guestHeapEnd()
-                      << std::dec << std::endl;
-            ++logCount;
-        }
-    }
-    else if (logCount < 8)
-    {
-        std::cout << "ps2_stub syMallocInit" << std::endl;
+        std::cout << "ps2_stub syMallocInit"
+                  << " reqBase=0x" << std::hex << heapBase
+                  << " reqSize=0x" << heapSize
+                  << " pool=0x" << kCvMallocPoolAddr
+                  << " free=0x" << kCvMallocInitialFreeSize
+                  << std::dec << std::endl;
         ++logCount;
     }
 
@@ -237,11 +314,18 @@ void sndr_trans_func(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         ++logCount;
     }
 
-    // For now just clear the snd busy flag used by sdMultiUnitDownload/SysServer loops.
-    constexpr uint32_t kSndBusyAddr = 0x01E0E170;
+    // small hack for code veronica
+    constexpr uint32_t kSndBusyAddrCv = 0x01E1E190;
+    constexpr uint32_t kSndBusyAddrLegacy = 0x01E0E170;
     if (rdram)
     {
-        uint32_t offset = kSndBusyAddr & PS2_RAM_MASK;
+        uint32_t offset = kSndBusyAddrCv & PS2_RAM_MASK;
+        if (offset + sizeof(uint32_t) <= PS2_RAM_SIZE)
+        {
+            *reinterpret_cast<uint32_t *>(rdram + offset) = 0;
+        }
+
+        offset = kSndBusyAddrLegacy & PS2_RAM_MASK;
         if (offset + sizeof(uint32_t) <= PS2_RAM_SIZE)
         {
             *reinterpret_cast<uint32_t *>(rdram + offset) = 0;
@@ -346,217 +430,235 @@ void cvFsSetDefDev(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     setReturnS32(ctx, 0);
 }
 
+namespace
+{
+    int32_t g_cvMcFileCursor = 0;
+    constexpr int32_t kCvMcFreeCapacityBytes = 0x01000000;
+    constexpr int32_t kCvMcSaveCapacityBytes = 0x00080000;
+    constexpr int32_t kCvMcConfigCapacityBytes = 0x00008000;
+    constexpr int32_t kCvMcIconCapacityBytes = 0x00004000;
+}
+
 void mcCallMessageTypeSe(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcCallMessageTypeSe", rdram, ctx, runtime);
+    setReturnS32(ctx, 0);
 }
 
 void mcCheckReadStartConfigFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcCheckReadStartConfigFile", rdram, ctx, runtime);
+    setReturnS32(ctx, 1);
 }
 
 void mcCheckReadStartSaveFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcCheckReadStartSaveFile", rdram, ctx, runtime);
+    setReturnS32(ctx, 1);
 }
 
 void mcCheckWriteStartConfigFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcCheckWriteStartConfigFile", rdram, ctx, runtime);
+    setReturnS32(ctx, 1);
 }
 
 void mcCheckWriteStartSaveFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcCheckWriteStartSaveFile", rdram, ctx, runtime);
+    setReturnS32(ctx, 1);
 }
 
 void mcCreateConfigInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcCreateConfigInit", rdram, ctx, runtime);
+    setReturnS32(ctx, 1);
 }
 
 void mcCreateFileSelectWindow(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcCreateFileSelectWindow", rdram, ctx, runtime);
+    setReturnS32(ctx, 1);
 }
 
 void mcCreateIconInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcCreateIconInit", rdram, ctx, runtime);
+    setReturnS32(ctx, 1);
 }
 
 void mcCreateSaveFileInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcCreateSaveFileInit", rdram, ctx, runtime);
+    setReturnS32(ctx, 1);
 }
 
 void mcDispFileName(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcDispFileName", rdram, ctx, runtime);
+    setReturnS32(ctx, 0);
 }
 
 void mcDispFileNumber(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcDispFileNumber", rdram, ctx, runtime);
+    setReturnS32(ctx, 0);
 }
 
 void mcDisplayFileSelectWindow(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcDisplayFileSelectWindow", rdram, ctx, runtime);
+    setReturnS32(ctx, 0);
 }
 
 void mcDisplaySelectFileInfo(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcDisplaySelectFileInfo", rdram, ctx, runtime);
+    setReturnS32(ctx, 0);
 }
 
 void mcDisplaySelectFileInfoMesCount(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcDisplaySelectFileInfoMesCount", rdram, ctx, runtime);
+    setReturnS32(ctx, 0);
 }
 
 void mcDispWindowCurSol(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcDispWindowCurSol", rdram, ctx, runtime);
+    setReturnS32(ctx, 0);
 }
 
 void mcDispWindowFoundtion(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcDispWindowFoundtion", rdram, ctx, runtime);
+    setReturnS32(ctx, 0);
 }
 
 void mceGetInfoApdx(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mceGetInfoApdx", rdram, ctx, runtime);
+    setReturnS32(ctx, 0);
 }
 
 void mceIntrReadFixAlign(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mceIntrReadFixAlign", rdram, ctx, runtime);
+    setReturnS32(ctx, 0);
 }
 
 void mceStorePwd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mceStorePwd", rdram, ctx, runtime);
+    setReturnS32(ctx, 0);
 }
 
 void mcGetConfigCapacitySize(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcGetConfigCapacitySize", rdram, ctx, runtime);
+    setReturnS32(ctx, kCvMcConfigCapacityBytes);
 }
 
 void mcGetFileSelectWindowCursol(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcGetFileSelectWindowCursol", rdram, ctx, runtime);
+    setReturnS32(ctx, g_cvMcFileCursor);
 }
 
 void mcGetFreeCapacitySize(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcGetFreeCapacitySize", rdram, ctx, runtime);
+    setReturnS32(ctx, kCvMcFreeCapacityBytes);
 }
 
 void mcGetIconCapacitySize(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcGetIconCapacitySize", rdram, ctx, runtime);
+    setReturnS32(ctx, kCvMcIconCapacityBytes);
 }
 
 void mcGetIconFileCapacitySize(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcGetIconFileCapacitySize", rdram, ctx, runtime);
+    setReturnS32(ctx, kCvMcIconCapacityBytes);
 }
 
 void mcGetPortSelectDirInfo(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcGetPortSelectDirInfo", rdram, ctx, runtime);
+    setReturnS32(ctx, 0);
 }
 
 void mcGetSaveFileCapacitySize(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcGetSaveFileCapacitySize", rdram, ctx, runtime);
+    setReturnS32(ctx, kCvMcSaveCapacityBytes);
 }
 
 void mcGetStringEnd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcGetStringEnd", rdram, ctx, runtime);
+    const uint32_t strAddr = getRegU32(ctx, 4);
+    const std::string value = readPs2CStringBounded(rdram, runtime, strAddr, 1024);
+    setReturnU32(ctx, strAddr + static_cast<uint32_t>(value.size()));
 }
 
 void mcMoveFileSelectWindowCursor(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcMoveFileSelectWindowCursor", rdram, ctx, runtime);
+    const int32_t delta = static_cast<int32_t>(getRegU32(ctx, 5));
+    g_cvMcFileCursor += delta;
+    g_cvMcFileCursor = std::clamp(g_cvMcFileCursor, -1, 15);
+    setReturnS32(ctx, 0);
 }
 
 void mcNewCreateConfigFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcNewCreateConfigFile", rdram, ctx, runtime);
+    setReturnS32(ctx, 1);
 }
 
 void mcNewCreateIcon(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcNewCreateIcon", rdram, ctx, runtime);
+    setReturnS32(ctx, 1);
 }
 
 void mcNewCreateSaveFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcNewCreateSaveFile", rdram, ctx, runtime);
+    setReturnS32(ctx, 1);
 }
 
 void mcReadIconData(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcReadIconData", rdram, ctx, runtime);
+    setReturnS32(ctx, 1);
 }
 
 void mcReadStartConfigFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcReadStartConfigFile", rdram, ctx, runtime);
+    setReturnS32(ctx, 1);
 }
 
 void mcReadStartSaveFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcReadStartSaveFile", rdram, ctx, runtime);
+    setReturnS32(ctx, 1);
 }
 
 void mcSelectFileInfoInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcSelectFileInfoInit", rdram, ctx, runtime);
+    g_cvMcFileCursor = 0;
+    setReturnS32(ctx, 1);
 }
 
 void mcSelectSaveFileCheck(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcSelectSaveFileCheck", rdram, ctx, runtime);
+    setReturnS32(ctx, 1);
 }
 
 void mcSetFileSelectWindowCursol(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcSetFileSelectWindowCursol", rdram, ctx, runtime);
+    g_cvMcFileCursor = static_cast<int32_t>(getRegU32(ctx, 5));
+    g_cvMcFileCursor = std::clamp(g_cvMcFileCursor, -1, 15);
+    setReturnS32(ctx, 0);
 }
 
 void mcSetFileSelectWindowCursolInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcSetFileSelectWindowCursolInit", rdram, ctx, runtime);
+    g_cvMcFileCursor = 0;
+    setReturnS32(ctx, 0);
 }
 
 void mcSetStringSaveFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcSetStringSaveFile", rdram, ctx, runtime);
+    setReturnS32(ctx, 0);
 }
 
 void mcSetTyepWriteMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcSetTyepWriteMode", rdram, ctx, runtime);
+    setReturnS32(ctx, 0);
 }
 
 void mcWriteIconData(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcWriteIconData", rdram, ctx, runtime);
+    setReturnS32(ctx, 1);
 }
 
 void mcWriteStartConfigFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcWriteStartConfigFile", rdram, ctx, runtime);
+    setReturnS32(ctx, 1);
 }
 
 void mcWriteStartSaveFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mcWriteStartSaveFile", rdram, ctx, runtime);
+    setReturnS32(ctx, 1);
 }

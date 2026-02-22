@@ -1,6 +1,8 @@
 #ifndef PS2_RUNTIME_MACROS_H
 #define PS2_RUNTIME_MACROS_H
 #include <cstdint>
+#include <cmath>
+#include <cstring>
 #include <bit>
 #if defined(_MSC_VER)
 #include <intrin.h>
@@ -42,6 +44,29 @@ static inline int64_t Ps2ExtractEpi64(__m128i v, int index)
 static inline uint32_t ps2_clz32(uint32_t x)
 {
     return static_cast<uint32_t>(std::countl_zero(x));
+}
+
+static inline uint64_t Ps2HiLoToU64(uint64_t hi, uint64_t lo)
+{
+    return ((hi & 0xFFFFFFFFull) << 32) | (lo & 0xFFFFFFFFull);
+}
+
+static inline uint64_t Ps2SignExt32ToU64(uint32_t v)
+{
+    return (uint64_t)(int64_t)(int32_t)v;
+}
+
+// PLZCW: Count leading bits that match the sign bit, minus 1.
+// For positive values: count leading zeros minus 1 (excludes sign bit).
+// For negative values: count leading ones minus 1 (excludes sign bit).
+// Special cases: 0x00000000 -> 31, 0xFFFFFFFF -> 31.
+static inline uint32_t ps2_plzcw32(uint32_t x)
+{
+    if (x == 0 || x == 0xFFFFFFFF)
+        return 31;
+    if (x & 0x80000000u)
+        x = ~x; // If sign bit set, invert to count leading ones as zeros
+    return static_cast<uint32_t>(std::countl_zero(x)) - 1;
 }
 
 #define PS2_BLENDV_PS(a, b, mask) _mm_blendv_ps((a), (b), (mask))
@@ -305,11 +330,52 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
 #define PS2_PABSW(a) _mm_abs_epi32((__m128i)(a))
 #define PS2_PABSH(a) _mm_abs_epi16((__m128i)(a))
 #define PS2_PABSB(a) _mm_abs_epi8((__m128i)(a))
-
+ 
 // Packed Pack (PPAC) - Packs larger elements into smaller ones
-#define PS2_PPACW(a, b) _mm_packs_epi32((__m128i)(b), (__m128i)(a))
-#define PS2_PPACH(a, b) _mm_packs_epi16((__m128i)(b), (__m128i)(a))
-#define PS2_PPACB(a, b) _mm_packus_epi16(_mm_packs_epi32((__m128i)(b), (__m128i)(a)), _mm_setzero_si128())
+inline __m128i ps2_paddu32(__m128i a, __m128i b)
+{
+    __m128i sum = _mm_add_epi32(a, b);
+    __m128i overflow = _mm_cmpgt_epi32(_mm_xor_si128(a, _mm_set1_epi32(INT32_MIN)),
+                                        _mm_xor_si128(sum, _mm_set1_epi32(INT32_MIN)));
+    return _mm_or_si128(sum, overflow); // overflow lanes become all-1s
+}
+inline __m128i ps2_psubu32(__m128i a, __m128i b)
+{
+    __m128i diff = _mm_sub_epi32(a, b);
+    // Underflow if a < b (unsigned). Clamp to 0.
+    __m128i underflow = _mm_cmpgt_epi32(_mm_xor_si128(b, _mm_set1_epi32(INT32_MIN)),
+                                         _mm_xor_si128(a, _mm_set1_epi32(INT32_MIN)));
+    return _mm_andnot_si128(underflow, diff); // underflow lanes become 0
+}
+
+inline __m128i ps2_ppacw(__m128i rs, __m128i rt)
+{
+    // rs = [rs3 rs2 rs1 rs0], rt = [rt3 rt2 rt1 rt0]
+    return _mm_castps_si128(_mm_shuffle_ps(_mm_castsi128_ps(rt), _mm_castsi128_ps(rs), _MM_SHUFFLE(2, 0, 2, 0)));
+}
+#define PS2_PPACW(a, b) ps2_ppacw((__m128i)(a), (__m128i)(b))
+
+inline __m128i ps2_ppach(__m128i rs, __m128i rt)
+{
+    const __m128i mask = _mm_setr_epi8(
+        0, 1, 4, 5, 8, 9, 12, 13,   // from rt: halfwords 0,2,4,6
+        0, 1, 4, 5, 8, 9, 12, 13);  // from rs: halfwords 0,2,4,6
+    __m128i lo = _mm_shuffle_epi8(rt, mask);
+    __m128i hi = _mm_shuffle_epi8(rs, mask);
+    return _mm_unpacklo_epi64(lo, hi);
+}
+#define PS2_PPACH(a, b) ps2_ppach((__m128i)(a), (__m128i)(b))
+
+inline __m128i ps2_ppacb(__m128i rs, __m128i rt)
+{
+    const __m128i mask = _mm_setr_epi8(
+        0, 2, 4, 6, 8, 10, 12, 14,  // from rt: bytes 0,2,4,6,8,10,12,14
+        0, 2, 4, 6, 8, 10, 12, 14); // from rs
+    __m128i lo = _mm_shuffle_epi8(rt, mask);
+    __m128i hi = _mm_shuffle_epi8(rs, mask);
+    return _mm_unpacklo_epi64(lo, hi);
+}
+#define PS2_PPACB(a, b) ps2_ppacb((__m128i)(a), (__m128i)(b))
 
 // Packed Interleave (PINT)
 #define PS2_PINTH(a, b) _mm_unpacklo_epi16(_mm_shuffle_epi32((__m128i)(b), _MM_SHUFFLE(3, 2, 1, 0)), _mm_shuffle_epi32((__m128i)(a), _MM_SHUFFLE(3, 2, 1, 0)))
@@ -391,13 +457,13 @@ inline __m128i ps2_u64_to_epi64_pair(uint64_t value)
 #define FPU_TRUNC_L_S(a) ((int64_t)(float)(a))
 #define FPU_CEIL_L_S(a) ((int64_t)ceilf((float)(a)))
 #define FPU_FLOOR_L_S(a) ((int64_t)floorf((float)(a)))
-#define FPU_ROUND_W_S(a) ((int32_t)roundf((float)(a)))
+#define FPU_ROUND_W_S(a) ((int32_t)nearbyintf((float)(a)))
 #define FPU_TRUNC_W_S(a) ((int32_t)(float)(a))
 #define FPU_CEIL_W_S(a) ((int32_t)ceilf((float)(a)))
 #define FPU_FLOOR_W_S(a) ((int32_t)floorf((float)(a)))
 #define FPU_CVT_S_W(a) ((float)(int32_t)(a))
 #define FPU_CVT_S_L(a) ((float)(int64_t)(a))
-#define FPU_CVT_W_S(a) ((int32_t)(float)(a))
+#define FPU_CVT_W_S(a) ((int32_t)nearbyintf((float)(a)))
 #define FPU_CVT_L_S(a) ((int64_t)(float)(a))
 #define FPU_C_F_S(a, b) (0)
 #define FPU_C_UN_S(a, b) (isnan((float)(a)) || isnan((float)(b)))
@@ -416,7 +482,68 @@ inline __m128i ps2_u64_to_epi64_pair(uint64_t value)
 #define FPU_C_LE_S(a, b) ((float)(a) <= (float)(b))
 #define FPU_C_NGT_S(a, b) ((float)(a) <= (float)(b) || isnan((float)(a)) || isnan((float)(b)))
 
-#define PS2_QFSRV(rs, rt, sa) _mm_or_si128(_mm_srl_epi32(rt, _mm_cvtsi32_si128(sa)), _mm_sll_epi32(rs, _mm_cvtsi32_si128(32 - sa)))
+// QFSRV: Quadword Funnel Shift Right Variable
+// Concatenates rs || rt (256 bits) and right-shifts by SA bits, taking lower 128 bits.
+inline __m128i ps2_qfsrv(__m128i rs, __m128i rt, uint32_t sa)
+{
+    if (sa == 0) return rt;
+    if (sa >= 128) {
+        if (sa >= 256) return _mm_setzero_si128();
+        uint32_t shift = sa - 128;
+        if (shift == 0) return rs;
+        // Shift rs right by (sa-128) bits
+        uint32_t byteShift = shift / 8;
+        uint32_t bitShift = shift % 8;
+        // Byte shift rs right
+        alignas(16) uint8_t buf[16] = {};
+        alignas(16) uint8_t src[16];
+        _mm_store_si128((__m128i*)src, rs);
+        for (uint32_t i = 0; i + byteShift < 16; i++)
+            buf[i] = src[i + byteShift];
+        __m128i result = _mm_load_si128((__m128i*)buf);
+        if (bitShift > 0)
+            result = _mm_or_si128(_mm_srli_epi64(result, bitShift),
+                                  _mm_slli_epi64(_mm_bsrli_si128(result, 8), 64 - bitShift));
+        return result;
+    }
+    // sa is 1..127: result = (rs || rt) >> sa, lower 128 bits
+    uint32_t byteShift = sa / 8;
+    uint32_t bitShift = sa % 8;
+    alignas(16) uint8_t combined[32];
+    _mm_store_si128((__m128i*)(combined), rt);      // low 128 bits
+    _mm_store_si128((__m128i*)(combined + 16), rs); // high 128 bits
+    // Shift right by byteShift bytes
+    alignas(16) uint8_t shifted[16];
+    for (uint32_t i = 0; i < 16; i++)
+        shifted[i] = (i + byteShift < 32) ? combined[i + byteShift] : 0;
+    __m128i result = _mm_load_si128((__m128i*)shifted);
+    if (bitShift > 0) {
+        uint8_t extra = (byteShift + 16 < 32) ? combined[byteShift + 16] : 0;
+        __m128i hi_byte = _mm_insert_epi8(_mm_setzero_si128(), extra, 15);
+        alignas(16) uint8_t src32[32];
+        for (uint32_t i = 0; i < 32; i++) src32[i] = combined[i]; 
+        uint64_t lo0, lo1, hi0, hi1;
+        std::memcpy(&lo0, src32, 8);
+        std::memcpy(&lo1, src32 + 8, 8);
+        std::memcpy(&hi0, src32 + 16, 8);
+        std::memcpy(&hi1, src32 + 24, 8);
+        // 256-bit right shift by sa bits
+        uint64_t r0, r1;
+        if (sa < 64) {
+            r0 = (lo0 >> sa) | (lo1 << (64 - sa));
+            r1 = (lo1 >> sa) | (hi0 << (64 - sa));
+        } else if (sa < 128) {
+            uint32_t s = sa - 64;
+            if (s == 0) { r0 = lo1; r1 = hi0; }
+            else { r0 = (lo1 >> s) | (hi0 << (64 - s)); r1 = (hi0 >> s) | (hi1 << (64 - s)); }
+        } else {
+            r0 = 0; r1 = 0; // handled above
+        }
+        result = _mm_set_epi64x((long long)r1, (long long)r0);
+    }
+    return result;
+}
+#define PS2_QFSRV(rs, rt, sa) ps2_qfsrv((__m128i)(rs), (__m128i)(rt), (uint32_t)(sa))
 #define PS2_PCPYLD(rs, rt) _mm_unpacklo_epi64(rt, rs)
 #define PS2_PEXEH(rs) _mm_shufflelo_epi16(_mm_shufflehi_epi16(rs, _MM_SHUFFLE(2, 3, 0, 1)), _MM_SHUFFLE(2, 3, 0, 1))
 #define PS2_PEXEW(rs) _mm_shuffle_epi32(rs, _MM_SHUFFLE(2, 3, 0, 1))
@@ -425,8 +552,6 @@ inline __m128i ps2_u64_to_epi64_pair(uint64_t value)
 // Additional VU0 operations
 #define PS2_VSQRT(x) sqrtf(x)
 #define PS2_VRSQRT(x) (1.0f / sqrtf(x))
-#define PS2_VCALLMS(addr) // VU0 microprogram calls not supported directly
-#define PS2_VCALLMSR(reg) // VU0 microprogram calls not supported directly
 
 #define GPR_U32(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0U : static_cast<uint32_t>(PS2_EXTRACT_EPI32_0(ctx_ptr->r[reg_idx])))
 #define GPR_S32(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0 : PS2_EXTRACT_EPI32_0(ctx_ptr->r[reg_idx]))
@@ -447,7 +572,7 @@ static inline void Ps2SetGprLow64(R5900Context *ctx, int reg, __m128i new_low)
     {                                                        \
         if ((reg_idx) != 0)                                  \
         {                                                    \
-            __m128i _newVal = _mm_cvtsi32_si128((int)(val)); \
+            __m128i _newVal = _mm_cvtsi64_si128((int64_t)(int32_t)(val)); \
                                                              \
             Ps2SetGprLow64(ctx_ptr, reg_idx, _newVal);       \
         }                                                    \

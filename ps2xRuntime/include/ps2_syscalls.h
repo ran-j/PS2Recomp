@@ -5,8 +5,9 @@
 #include "ps2_call_list.h"
 #include <mutex>
 #include <atomic>
+#include <cstdint>
+#include <cstring>
 
-// Number of active host threads spawned for PS2 thread emulation
 extern std::atomic<int> g_activeThreads;
 
 static std::mutex g_sys_fd_mutex;
@@ -20,6 +21,7 @@ namespace ps2_syscalls
     bool dispatchNumericSyscall(uint32_t syscallNumber, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void TODO(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t encodedSyscallId);
     void notifyRuntimeStop();
+    void WaitVSyncTick(uint8_t *rdram, PS2Runtime *runtime);
 }
 
 #endif // PS2_SYSCALLS_H

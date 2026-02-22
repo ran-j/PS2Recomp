@@ -66,7 +66,7 @@ void SifLoadModule(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void SifInitRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    std::lock_guard<std::mutex> lock(g_rpc_mutex);
+    std::scoped_lock lock(g_rpc_mutex, g_dtx_rpc_mutex);
     if (!g_rpc_initialized)
     {
         g_rpc_servers.clear();
@@ -75,11 +75,8 @@ void SifInitRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         g_rpc_packet_index = 0;
         g_rpc_server_index = 0;
         g_rpc_active_queue = 0;
-        {
-            std::lock_guard<std::mutex> dtxLock(g_dtx_rpc_mutex);
-            g_dtx_remote_by_id.clear();
-            g_dtx_next_urpc_obj = kDtxUrpcObjBase;
-        }
+        g_dtx_remote_by_id.clear();
+        g_dtx_next_urpc_obj = kDtxUrpcObjBase;
         g_rpc_initialized = true;
         std::cout << "[SifInitRpc] Initialized" << std::endl;
     }
@@ -169,24 +166,65 @@ void SifCallRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     uint32_t endFunc = 0;
     uint32_t endParam = 0;
 
-    // EE-side calls use extended arg registers:
-    // a0-a3 => r4-r7, arg5-arg8 => r8-r11, arg9 => stack + 0x0.
-    // Keep O32 stack-layout fallback for compatibility with other call sites.
+    // Decode both extended-reg convention (EE default) and standard O32 stack convention,
+    // picking REG whenever plausible, to avoid zero-collision on the stack.
     uint32_t sp = getRegU32(ctx, 29);
-    sendSize = getRegU32(ctx, 8);
-    recvBuf = getRegU32(ctx, 9);
-    recvSize = getRegU32(ctx, 10);
-    endFunc = getRegU32(ctx, 11);
-    (void)readStackU32(rdram, sp, 0x0, endParam);
 
-    if (sendSize == 0 && recvBuf == 0 && recvSize == 0 && endFunc == 0)
+    uint32_t sendSizeReg = getRegU32(ctx, 8);
+    uint32_t recvBufReg = getRegU32(ctx, 9);
+    uint32_t recvSizeReg = getRegU32(ctx, 10);
+    uint32_t endFuncReg = getRegU32(ctx, 11);
+    uint32_t endParamReg = 0;
+    (void)readStackU32(rdram, sp, 0x0, endParamReg);
+
+    uint32_t sendSizeStk = 0;
+    uint32_t recvBufStk = 0;
+    uint32_t recvSizeStk = 0;
+    uint32_t endFuncStk = 0;
+    uint32_t endParamStk = 0;
+    (void)readStackU32(rdram, sp, 0x10, sendSizeStk);
+    (void)readStackU32(rdram, sp, 0x14, recvBufStk);
+    (void)readStackU32(rdram, sp, 0x18, recvSizeStk);
+    (void)readStackU32(rdram, sp, 0x1C, endFuncStk);
+    (void)readStackU32(rdram, sp, 0x20, endParamStk);
+
+    auto looksLikeGuestPtr = [&](uint32_t v) -> bool
     {
-        readStackU32(rdram, sp, 0x10, sendSize);
-        readStackU32(rdram, sp, 0x14, recvBuf);
-        readStackU32(rdram, sp, 0x18, recvSize);
-        readStackU32(rdram, sp, 0x1C, endFunc);
-        readStackU32(rdram, sp, 0x20, endParam);
+        if (v == 0)
+            return true;
+        const uint32_t norm = v & 0x1FFFFFFFu;
+        return norm >= 0x10000u && norm < PS2_RAM_SIZE;
+    };
+
+    auto looksLikeSize = [&](uint32_t v) -> bool
+    {
+        return v <= 0x100000u;
+    };
+
+    auto looksLikeFunc = [&](uint32_t v) -> bool
+    {
+        return v == 0 || looksLikeGuestPtr(v);
+    };
+
+    auto plausiblePack = [&](uint32_t sendSz, uint32_t rbuf, uint32_t rsz, uint32_t endFn) -> bool
+    {
+        return looksLikeSize(sendSz) && looksLikeGuestPtr(rbuf) && looksLikeSize(rsz) && looksLikeFunc(endFn);
+    };
+
+    bool useRegConvention = true;
+    if (!plausiblePack(sendSizeReg, recvBufReg, recvSizeReg, endFuncReg))
+    {
+        if (plausiblePack(sendSizeStk, recvBufStk, recvSizeStk, endFuncStk))
+        {
+            useRegConvention = false;
+        }
     }
+
+    sendSize = useRegConvention ? sendSizeReg : sendSizeStk;
+    recvBuf = useRegConvention ? recvBufReg : recvBufStk;
+    recvSize = useRegConvention ? recvSizeReg : recvSizeStk;
+    endFunc = useRegConvention ? endFuncReg : endFuncStk;
+    endParam = useRegConvention ? endParamReg : endParamStk;
 
     t_SifRpcClientData *client = reinterpret_cast<t_SifRpcClientData *>(getMemPtr(rdram, clientPtr));
 
@@ -799,17 +837,22 @@ void SifCallRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
         if ((mode & kSifRpcModeNowait) != 0u)
         {
-            (void)signalRpcCompletionSema(endParam);
+            uint32_t semaId = static_cast<uint32_t>(client->hdr.sema_id);
+            if (semaId == 0xFFFFFFFFu || semaId == 0u)
+            {
+                semaId = endParam;
+            }
+            (void)signalRpcCompletionSema(semaId);
         }
     }
 
     if (recvBuf && recvSize > 0)
     {
-        if (handled && resultPtr)
+        if (handled && resultPtr && resultPtr != recvBuf)
         {
             rpcCopyToRdram(rdram, recvBuf, resultPtr, recvSize);
         }
-        else if (!handled && sendBuf && sendSize > 0)
+        else if (!handled && sendBuf && sendSize > 0 && sendBuf != recvBuf)
         {
             size_t copySize = (sendSize < recvSize) ? sendSize : recvSize;
             rpcCopyToRdram(rdram, recvBuf, sendBuf, copySize);
@@ -850,22 +893,23 @@ void SifCallRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         bool callbackInvoked = rpcInvokeFunction(rdram, ctx, runtime, endFunc, endParam, 0, 0, 0, nullptr);
 
-        // Some generated callsites may pass 0x2fac20/0x2fac30 instead of
-        // 0x2eac20/0x2eac30 for sound-driver RPC callbacks.
         if (!callbackInvoked && (endFunc == 0x2fac20u || endFunc == 0x2fac30u))
         {
             const uint32_t normalizedEndFunc = endFunc - 0x10000u;
             callbackInvoked = rpcInvokeFunction(rdram, ctx, runtime, normalizedEndFunc, endParam, 0, 0, 0, nullptr);
         }
 
-        // Guard against callback dispatch gaps that would leak the semaphore
-        // acquired in SdrSendReq/SdrGetStateSend.
         const bool isSoundRpcCallback =
             (endFunc == 0x2eac20u || endFunc == 0x2eac30u ||
              endFunc == 0x2fac20u || endFunc == 0x2fac30u);
         if (isSoundRpcCallback)
         {
-            (void)signalRpcCompletionSema(endParam);
+            uint32_t semaId = static_cast<uint32_t>(client->hdr.sema_id);
+            if (semaId == 0xFFFFFFFFu || semaId == 0u)
+            {
+                semaId = endParam;
+            }
+            (void)signalRpcCompletionSema(semaId);
             if (rdram && (endFunc == 0x2eac30u || endFunc == 0x2fac30u))
             {
                 constexpr uint32_t kSndBusyFlagAddr = 0x01E212C8u;
@@ -878,13 +922,18 @@ void SifCallRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
         if (!callbackInvoked)
         {
-            const bool fallbackSignaledSema = signalRpcCompletionSema(endParam);
+            uint32_t semaId = static_cast<uint32_t>(client->hdr.sema_id);
+            if (semaId == 0xFFFFFFFFu || semaId == 0u)
+            {
+                semaId = endParam;
+            }
+            const bool fallbackSignaledSema = signalRpcCompletionSema(semaId);
 
             static uint32_t unresolvedEndFuncWarnCount = 0;
             if (unresolvedEndFuncWarnCount < 32u)
             {
                 std::cerr << "[SifCallRpc] unresolved end callback endFunc=0x" << std::hex << endFunc
-                          << " endParam=0x" << endParam
+                          << " semaId=0x" << semaId
                           << " fallbackSignal=" << std::dec << (fallbackSignaledSema ? 1 : 0)
                           << std::endl;
                 ++unresolvedEndFuncWarnCount;
@@ -954,38 +1003,39 @@ void SifRegisterRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     sd->link = 0;
     sd->next = 0;
 
-    if (qd)
     {
-        t_SifRpcDataQueue *queue = reinterpret_cast<t_SifRpcDataQueue *>(getMemPtr(rdram, qd));
-        if (queue)
+        std::lock_guard<std::mutex> lock(g_rpc_mutex);
+
+        if (qd)
         {
-            if (!queue->link)
+            t_SifRpcDataQueue *queue = reinterpret_cast<t_SifRpcDataQueue *>(getMemPtr(rdram, qd));
+            if (queue)
             {
-                queue->link = sdPtr;
-            }
-            else
-            {
-                uint32_t curPtr = queue->link;
-                for (int guard = 0; guard < 1024 && curPtr; ++guard)
+                if (!queue->link)
                 {
-                    t_SifRpcServerData *cur = reinterpret_cast<t_SifRpcServerData *>(getMemPtr(rdram, curPtr));
-                    if (!cur)
-                        break;
-                    if (!cur->link)
+                    queue->link = sdPtr;
+                }
+                else
+                {
+                    uint32_t curPtr = queue->link;
+                    for (int guard = 0; guard < 1024 && curPtr; ++guard)
                     {
-                        cur->link = sdPtr;
-                        break;
+                        t_SifRpcServerData *cur = reinterpret_cast<t_SifRpcServerData *>(getMemPtr(rdram, curPtr));
+                        if (!cur)
+                            break;
+                        if (!cur->link)
+                        {
+                            cur->link = sdPtr;
+                            break;
+                        }
+                        if (cur->link == sdPtr)
+                            break;
+                        curPtr = cur->link;
                     }
-                    if (cur->link == sdPtr)
-                        break;
-                    curPtr = cur->link;
                 }
             }
         }
-    }
 
-    {
-        std::lock_guard<std::mutex> lock(g_rpc_mutex);
         g_rpc_servers[sid] = {sid, sdPtr};
         for (auto &entry : g_rpc_clients)
         {
@@ -1121,6 +1171,8 @@ void SifRemoveRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         setReturnU32(ctx, 0);
         return;
     }
+
+    std::lock_guard<std::mutex> lock(g_rpc_mutex);
 
     if (qd->link == sdPtr)
     {

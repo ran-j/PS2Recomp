@@ -47,7 +47,32 @@ void malloc_trim_r(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void mbtowc_r(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("mbtowc_r", rdram, ctx, runtime);
+    const uint32_t wcAddr = getRegU32(ctx, 5);                 // $a1
+    const uint32_t strAddr = getRegU32(ctx, 6);                // $a2
+    const int32_t n = static_cast<int32_t>(getRegU32(ctx, 7)); // $a3
+    if (n <= 0 || strAddr == 0u)
+    {
+        setReturnS32(ctx, 0);
+        return;
+    }
+
+    const uint8_t *src = getConstMemPtr(rdram, strAddr);
+    if (!src)
+    {
+        setReturnS32(ctx, -1);
+        return;
+    }
+
+    const uint8_t ch = *src;
+    if (wcAddr != 0u)
+    {
+        if (uint8_t *dst = getMemPtr(rdram, wcAddr))
+        {
+            const uint32_t out = static_cast<uint32_t>(ch);
+            std::memcpy(dst, &out, sizeof(out));
+        }
+    }
+    setReturnS32(ctx, (ch == 0u) ? 0 : 1);
 }
 
 void printf_r(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -125,7 +150,7 @@ void sceFsSigSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void sceIDC(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceIDC", rdram, ctx, runtime);
+    setReturnS32(ctx, 0);
 }
 
 void sceMpegFlush(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -150,7 +175,7 @@ void sceRpcGetFPacket2(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void sceSDC(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceSDC", rdram, ctx, runtime);
+    setReturnS32(ctx, 0);
 }
 
 void sceSifCmdIntrHdlr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -160,12 +185,29 @@ void sceSifCmdIntrHdlr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void sceSifLoadModule(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceSifLoadModule", rdram, ctx, runtime);
+    ps2_syscalls::SifLoadModule(rdram, ctx, runtime);
 }
 
 void sceSifSendCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceSifSendCmd", rdram, ctx, runtime);
+    const uint32_t srcAddr = getRegU32(ctx, 7); // $a3
+    const uint32_t dstAddr = readStackU32(rdram, ctx, 16);
+    const uint32_t size = readStackU32(rdram, ctx, 20);
+    if (size != 0u && srcAddr != 0u && dstAddr != 0u)
+    {
+        for (uint32_t i = 0; i < size; ++i)
+        {
+            const uint8_t *src = getConstMemPtr(rdram, srcAddr + i);
+            uint8_t *dst = getMemPtr(rdram, dstAddr + i);
+            if (!src || !dst)
+            {
+                break;
+            }
+            *dst = *src;
+        }
+    }
+
+    setReturnS32(ctx, 1);
 }
 
 void sceVu0ecossin(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -175,12 +217,32 @@ void sceVu0ecossin(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void abs(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("abs", rdram, ctx, runtime);
+    const int32_t value = static_cast<int32_t>(getRegU32(ctx, 4));
+    if (value == std::numeric_limits<int32_t>::min())
+    {
+        setReturnS32(ctx, std::numeric_limits<int32_t>::max());
+        return;
+    }
+    setReturnS32(ctx, value < 0 ? -value : value);
 }
 
 void atan(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("atan", rdram, ctx, runtime);
+    float in = ctx ? ctx->f[12] : 0.0f;
+    if (in == 0.0f)
+    {
+        uint32_t raw = getRegU32(ctx, 4);
+        std::memcpy(&in, &raw, sizeof(in));
+    }
+    const float out = std::atan(in);
+    if (ctx)
+    {
+        ctx->f[0] = out;
+    }
+
+    uint32_t outRaw = 0u;
+    std::memcpy(&outRaw, &out, sizeof(outRaw));
+    setReturnU32(ctx, outRaw);
 }
 
 void close(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -190,12 +252,16 @@ void close(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void DmaAddr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("DmaAddr", rdram, ctx, runtime);
+    setReturnU32(ctx, getRegU32(ctx, 4));
 }
 
 void exit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("exit", rdram, ctx, runtime);
+    if (runtime)
+    {
+        runtime->requestStop();
+    }
+    setReturnS32(ctx, 0);
 }
 
 void fstat(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -212,12 +278,12 @@ void fstat(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void getpid(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("getpid", rdram, ctx, runtime);
+    setReturnS32(ctx, 1);
 }
 
 void iopGetArea(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("iopGetArea", rdram, ctx, runtime);
+    setReturnU32(ctx, kIopHeapBase);
 }
 
 void lseek(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -227,7 +293,25 @@ void lseek(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void memchr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("memchr", rdram, ctx, runtime);
+    const uint32_t srcAddr = getRegU32(ctx, 4);
+    const uint8_t needle = static_cast<uint8_t>(getRegU32(ctx, 5) & 0xFFu);
+    const uint32_t size = getRegU32(ctx, 6);
+
+    for (uint32_t i = 0; i < size; ++i)
+    {
+        const uint8_t *src = getConstMemPtr(rdram, srcAddr + i);
+        if (!src)
+        {
+            break;
+        }
+        if (*src == needle)
+        {
+            setReturnU32(ctx, srcAddr + i);
+            return;
+        }
+    }
+
+    setReturnU32(ctx, 0u);
 }
 
 void open(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -242,12 +326,19 @@ void Pad_init(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void Pad_set(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("Pad_set", rdram, ctx, runtime);
+    setReturnS32(ctx, 1);
 }
 
 void rand(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("rand", rdram, ctx, runtime);
+    setReturnS32(ctx, std::rand() & 0x7FFF);
+}
+
+namespace
+{
+    std::mutex g_mcStateMutex;
+    int32_t g_mcNextFd = 1;
+    int32_t g_mcLastResult = 0;
 }
 
 void read(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -843,7 +934,7 @@ void sceDmaWatch(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void sceFsInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceFsInit", rdram, ctx, runtime);
+    setReturnS32(ctx, 0);
 }
 
 void sceFsReset(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -853,27 +944,27 @@ void sceFsReset(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void sceIoctl(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceIoctl", rdram, ctx, runtime);
+    setReturnS32(ctx, 0);
 }
 
 void sceIpuInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceIpuInit", rdram, ctx, runtime);
+    setReturnS32(ctx, 0);
 }
 
 void sceIpuRestartDMA(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceIpuRestartDMA", rdram, ctx, runtime);
+    setReturnS32(ctx, 0);
 }
 
 void sceIpuStopDMA(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceIpuStopDMA", rdram, ctx, runtime);
+    setReturnS32(ctx, 0);
 }
 
 void sceIpuSync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceIpuSync", rdram, ctx, runtime);
+    setReturnS32(ctx, 0);
 }
 
 void sceLseek(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -883,52 +974,110 @@ void sceLseek(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void sceMcChangeThreadPriority(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceMcChangeThreadPriority", rdram, ctx, runtime);
+    setReturnS32(ctx, 0);
 }
 
 void sceMcChdir(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceMcChdir", rdram, ctx, runtime);
+    {
+        std::lock_guard<std::mutex> lock(g_mcStateMutex);
+        g_mcLastResult = 0;
+    }
+    setReturnS32(ctx, 0);
 }
 
 void sceMcClose(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceMcClose", rdram, ctx, runtime);
+    {
+        std::lock_guard<std::mutex> lock(g_mcStateMutex);
+        g_mcLastResult = 0;
+    }
+    setReturnS32(ctx, 0);
 }
 
 void sceMcDelete(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceMcDelete", rdram, ctx, runtime);
+    {
+        std::lock_guard<std::mutex> lock(g_mcStateMutex);
+        g_mcLastResult = 0;
+    }
+    setReturnS32(ctx, 0);
 }
 
 void sceMcFlush(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceMcFlush", rdram, ctx, runtime);
+    {
+        std::lock_guard<std::mutex> lock(g_mcStateMutex);
+        g_mcLastResult = 0;
+    }
+    setReturnS32(ctx, 0);
 }
 
 void sceMcFormat(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceMcFormat", rdram, ctx, runtime);
+    {
+        std::lock_guard<std::mutex> lock(g_mcStateMutex);
+        g_mcLastResult = 0;
+    }
+    setReturnS32(ctx, 0);
 }
 
 void sceMcGetDir(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceMcGetDir", rdram, ctx, runtime);
+    {
+        std::lock_guard<std::mutex> lock(g_mcStateMutex);
+        g_mcLastResult = 0;
+    }
+    setReturnS32(ctx, 0);
 }
 
 void sceMcGetEntSpace(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceMcGetEntSpace", rdram, ctx, runtime);
+    setReturnS32(ctx, 1024);
 }
 
 void sceMcGetInfo(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceMcGetInfo", rdram, ctx, runtime);
+    const uint32_t typePtr = getRegU32(ctx, 6);
+    const uint32_t freePtr = getRegU32(ctx, 7);
+    const uint32_t formatPtr = readStackU32(rdram, ctx, 16);
+
+    const int32_t cardType = 2; // PS2 memory card.
+    const int32_t freeBlocks = 0x2000;
+    const int32_t format = 2; // formatted.
+
+    if (typePtr != 0u)
+    {
+        if (uint8_t *out = getMemPtr(rdram, typePtr))
+        {
+            std::memcpy(out, &cardType, sizeof(cardType));
+        }
+    }
+    if (freePtr != 0u)
+    {
+        if (uint8_t *out = getMemPtr(rdram, freePtr))
+        {
+            std::memcpy(out, &freeBlocks, sizeof(freeBlocks));
+        }
+    }
+    if (formatPtr != 0u)
+    {
+        if (uint8_t *out = getMemPtr(rdram, formatPtr))
+        {
+            std::memcpy(out, &format, sizeof(format));
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_mcStateMutex);
+        g_mcLastResult = 0;
+    }
+    setReturnS32(ctx, 0);
 }
 
 void sceMcGetSlotMax(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceMcGetSlotMax", rdram, ctx, runtime);
+    setReturnS32(ctx, 1);
 }
 
 void sceMcInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -944,47 +1093,121 @@ void sceMcInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void sceMcMkdir(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceMcMkdir", rdram, ctx, runtime);
+    {
+        std::lock_guard<std::mutex> lock(g_mcStateMutex);
+        g_mcLastResult = 0;
+    }
+    setReturnS32(ctx, 0);
 }
 
 void sceMcOpen(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceMcOpen", rdram, ctx, runtime);
+    int32_t fd = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_mcStateMutex);
+        fd = g_mcNextFd++;
+        if (g_mcNextFd <= 0)
+        {
+            g_mcNextFd = 1;
+        }
+        g_mcLastResult = fd;
+    }
+    setReturnS32(ctx, 0);
 }
 
 void sceMcRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceMcRead", rdram, ctx, runtime);
+    const int32_t size = static_cast<int32_t>(getRegU32(ctx, 7));
+    if (size > 0)
+    {
+        const uint32_t dstAddr = readStackU32(rdram, ctx, 16);
+        if (uint8_t *dst = getMemPtr(rdram, dstAddr))
+        {
+            std::memset(dst, 0, static_cast<size_t>(size));
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_mcStateMutex);
+        g_mcLastResult = std::max<int32_t>(0, size);
+    }
+    setReturnS32(ctx, 0);
 }
 
 void sceMcRename(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceMcRename", rdram, ctx, runtime);
+    {
+        std::lock_guard<std::mutex> lock(g_mcStateMutex);
+        g_mcLastResult = 0;
+    }
+    setReturnS32(ctx, 0);
 }
 
 void sceMcSeek(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceMcSeek", rdram, ctx, runtime);
+    const int32_t offset = static_cast<int32_t>(getRegU32(ctx, 5));
+    {
+        std::lock_guard<std::mutex> lock(g_mcStateMutex);
+        g_mcLastResult = std::max<int32_t>(0, offset);
+    }
+    setReturnS32(ctx, 0);
 }
 
 void sceMcSetFileInfo(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceMcSetFileInfo", rdram, ctx, runtime);
+    {
+        std::lock_guard<std::mutex> lock(g_mcStateMutex);
+        g_mcLastResult = 0;
+    }
+    setReturnS32(ctx, 0);
 }
 
 void sceMcSync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceMcSync", rdram, ctx, runtime);
+    const uint32_t cmdPtr = getRegU32(ctx, 5);
+    const uint32_t resultPtr = getRegU32(ctx, 6);
+    int32_t result = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_mcStateMutex);
+        result = g_mcLastResult;
+    }
+
+    if (cmdPtr != 0u)
+    {
+        if (uint8_t *out = getMemPtr(rdram, cmdPtr))
+        {
+            const int32_t cmd = 0;
+            std::memcpy(out, &cmd, sizeof(cmd));
+        }
+    }
+    if (resultPtr != 0u)
+    {
+        if (uint8_t *out = getMemPtr(rdram, resultPtr))
+        {
+            std::memcpy(out, &result, sizeof(result));
+        }
+    }
+
+    // 1 = command finished in this runtime's immediate model.
+    setReturnS32(ctx, 1);
 }
 
 void sceMcUnformat(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceMcUnformat", rdram, ctx, runtime);
+    {
+        std::lock_guard<std::mutex> lock(g_mcStateMutex);
+        g_mcLastResult = 0;
+    }
+    setReturnS32(ctx, 0);
 }
 
 void sceMcWrite(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceMcWrite", rdram, ctx, runtime);
+    const int32_t size = static_cast<int32_t>(getRegU32(ctx, 7));
+    {
+        std::lock_guard<std::mutex> lock(g_mcStateMutex);
+        g_mcLastResult = std::max<int32_t>(0, size);
+    }
+    setReturnS32(ctx, 0);
 }
 
 void sceMpegAddBs(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1114,32 +1337,33 @@ void sceOpen(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void scePadEnd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("scePadEnd", rdram, ctx, runtime);
+    setReturnS32(ctx, 1);
 }
 
 void scePadEnterPressMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("scePadEnterPressMode", rdram, ctx, runtime);
+    setReturnS32(ctx, 1);
 }
 
 void scePadExitPressMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("scePadExitPressMode", rdram, ctx, runtime);
+    setReturnS32(ctx, 1);
 }
 
 void scePadGetButtonMask(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("scePadGetButtonMask", rdram, ctx, runtime);
+    setReturnS32(ctx, static_cast<int32_t>(0xFFFFu));
 }
 
 void scePadGetDmaStr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("scePadGetDmaStr", rdram, ctx, runtime);
+    setReturnU32(ctx, getRegU32(ctx, 6));
 }
 
 void scePadGetFrameCount(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("scePadGetFrameCount", rdram, ctx, runtime);
+    static uint32_t frameCount = 0u;
+    setReturnU32(ctx, ++frameCount);
 }
 
 void scePadGetModVersion(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1183,12 +1407,18 @@ void scePadGetState(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void scePadInfoAct(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("scePadInfoAct", rdram, ctx, runtime);
+    const int32_t act = static_cast<int32_t>(getRegU32(ctx, 6));
+    if (act < 0)
+    {
+        setReturnS32(ctx, 1); // one actuator descriptor
+        return;
+    }
+    setReturnS32(ctx, 0);
 }
 
 void scePadInfoComb(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("scePadInfoComb", rdram, ctx, runtime);
+    setReturnS32(ctx, 0);
 }
 
 void scePadInfoMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1295,47 +1525,76 @@ void scePadRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void scePadReqIntToStr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("scePadReqIntToStr", rdram, ctx, runtime);
+    const uint32_t outAddr = getRegU32(ctx, 5);
+    if (uint8_t *out = getMemPtr(rdram, outAddr))
+    {
+        constexpr const char *kReq = "COMPLETE";
+        std::memcpy(out, kReq, std::strlen(kReq) + 1u);
+        setReturnU32(ctx, outAddr);
+        return;
+    }
+    setReturnU32(ctx, 0u);
 }
 
 void scePadSetActAlign(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("scePadSetActAlign", rdram, ctx, runtime);
+    setReturnS32(ctx, 1);
 }
 
 void scePadSetActDirect(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("scePadSetActDirect", rdram, ctx, runtime);
+    setReturnS32(ctx, 1);
 }
 
 void scePadSetButtonInfo(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("scePadSetButtonInfo", rdram, ctx, runtime);
+    setReturnS32(ctx, 1);
 }
 
 void scePadSetMainMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("scePadSetMainMode", rdram, ctx, runtime);
+    setReturnS32(ctx, 1);
 }
 
 void scePadSetReqState(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("scePadSetReqState", rdram, ctx, runtime);
+    setReturnS32(ctx, 1);
 }
 
 void scePadSetVrefParam(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("scePadSetVrefParam", rdram, ctx, runtime);
+    setReturnS32(ctx, 1);
 }
 
 void scePadSetWarningLevel(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("scePadSetWarningLevel", rdram, ctx, runtime);
+    setReturnS32(ctx, 1);
 }
 
 void scePadStateIntToStr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("scePadStateIntToStr", rdram, ctx, runtime);
+    const int32_t state = static_cast<int32_t>(getRegU32(ctx, 4));
+    const uint32_t outAddr = getRegU32(ctx, 5);
+    const char *label = "UNKNOWN";
+    switch (state)
+    {
+    case 0:
+        label = "DISCONN";
+        break;
+    case 6:
+        label = "STABLE";
+        break;
+    default:
+        break;
+    }
+
+    if (uint8_t *out = getMemPtr(rdram, outAddr))
+    {
+        std::memcpy(out, label, std::strlen(label) + 1u);
+        setReturnU32(ctx, outAddr);
+        return;
+    }
+    setReturnU32(ctx, 0u);
 }
 
 void scePrintf(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1396,6 +1655,13 @@ namespace
 
     std::mutex g_sifDmaTransferMutex;
     uint32_t g_nextSifDmaTransferId = 1u;
+    std::mutex g_sifCmdStateMutex;
+    std::unordered_map<uint32_t, uint32_t> g_sifRegs;
+    std::unordered_map<uint32_t, uint32_t> g_sifSregs;
+    std::unordered_map<uint32_t, uint32_t> g_sifCmdHandlers;
+    uint32_t g_sifCmdBuffer = 0u;
+    uint32_t g_sifSysCmdBuffer = 0u;
+    bool g_sifCmdInitialized = false;
 
     uint32_t allocateSifDmaTransferId()
     {
@@ -1452,7 +1718,11 @@ namespace
 
 void sceSifAddCmdHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceSifAddCmdHandler", rdram, ctx, runtime);
+    const uint32_t cid = getRegU32(ctx, 4);
+    const uint32_t handler = getRegU32(ctx, 5);
+    std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
+    g_sifCmdHandlers[cid] = handler;
+    setReturnS32(ctx, 0);
 }
 
 void sceSifAllocIopHeap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1497,7 +1767,10 @@ void sceSifExecRequest(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void sceSifExitCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceSifExitCmd", rdram, ctx, runtime);
+    std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
+    g_sifCmdInitialized = false;
+    g_sifCmdHandlers.clear();
+    setReturnS32(ctx, 0);
 }
 
 void sceSifExitRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1512,12 +1785,13 @@ void sceSifFreeIopHeap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void sceSifGetDataTable(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceSifGetDataTable", rdram, ctx, runtime);
+    std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
+    setReturnU32(ctx, g_sifCmdBuffer);
 }
 
 void sceSifGetIopAddr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceSifGetIopAddr", rdram, ctx, runtime);
+    setReturnU32(ctx, getRegU32(ctx, 4));
 }
 
 void sceSifGetNextRequest(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1582,17 +1856,39 @@ void sceSifGetOtherData(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void sceSifGetReg(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceSifGetReg", rdram, ctx, runtime);
+    const uint32_t reg = getRegU32(ctx, 4);
+    uint32_t value = 0u;
+    {
+        std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
+        auto it = g_sifRegs.find(reg);
+        if (it != g_sifRegs.end())
+        {
+            value = it->second;
+        }
+    }
+    setReturnU32(ctx, value);
 }
 
 void sceSifGetSreg(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceSifGetSreg", rdram, ctx, runtime);
+    const uint32_t reg = getRegU32(ctx, 4);
+    uint32_t value = 0u;
+    {
+        std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
+        auto it = g_sifSregs.find(reg);
+        if (it != g_sifSregs.end())
+        {
+            value = it->second;
+        }
+    }
+    setReturnU32(ctx, value);
 }
 
 void sceSifInitCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceSifInitCmd", rdram, ctx, runtime);
+    std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
+    g_sifCmdInitialized = true;
+    setReturnS32(ctx, 0);
 }
 
 void sceSifInitIopHeap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1608,7 +1904,7 @@ void sceSifInitRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void sceSifIsAliveIop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceSifIsAliveIop", rdram, ctx, runtime);
+    setReturnS32(ctx, 1);
 }
 
 void sceSifLoadElf(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1623,7 +1919,7 @@ void sceSifLoadElfPart(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void sceSifLoadFileReset(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceSifLoadFileReset", rdram, ctx, runtime);
+    setReturnS32(ctx, 0);
 }
 
 void sceSifLoadIopHeap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1648,7 +1944,10 @@ void sceSifRegisterRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void sceSifRemoveCmdHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceSifRemoveCmdHandler", rdram, ctx, runtime);
+    const uint32_t cid = getRegU32(ctx, 4);
+    std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
+    g_sifCmdHandlers.erase(cid);
+    setReturnS32(ctx, 0);
 }
 
 void sceSifRemoveRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1663,7 +1962,7 @@ void sceSifRemoveRpcQueue(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime
 
 void sceSifResetIop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceSifResetIop", rdram, ctx, runtime);
+    setReturnS32(ctx, 1);
 }
 
 void sceSifRpcLoop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1673,7 +1972,14 @@ void sceSifRpcLoop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void sceSifSetCmdBuffer(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceSifSetCmdBuffer", rdram, ctx, runtime);
+    const uint32_t newBuffer = getRegU32(ctx, 4);
+    uint32_t prev = 0u;
+    {
+        std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
+        prev = g_sifCmdBuffer;
+        g_sifCmdBuffer = newBuffer;
+    }
+    setReturnU32(ctx, prev);
 }
 
 void sceSifSetDChain(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1745,12 +2051,24 @@ void sceSifSetDma(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void sceSifSetIopAddr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceSifSetIopAddr", rdram, ctx, runtime);
+    setReturnU32(ctx, getRegU32(ctx, 5));
 }
 
 void sceSifSetReg(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceSifSetReg", rdram, ctx, runtime);
+    const uint32_t reg = getRegU32(ctx, 4);
+    const uint32_t value = getRegU32(ctx, 5);
+    uint32_t prev = 0u;
+    {
+        std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
+        auto it = g_sifRegs.find(reg);
+        if (it != g_sifRegs.end())
+        {
+            prev = it->second;
+        }
+        g_sifRegs[reg] = value;
+    }
+    setReturnU32(ctx, prev);
 }
 
 void sceSifSetRpcQueue(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1760,17 +2078,36 @@ void sceSifSetRpcQueue(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void sceSifSetSreg(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceSifSetSreg", rdram, ctx, runtime);
+    const uint32_t reg = getRegU32(ctx, 4);
+    const uint32_t value = getRegU32(ctx, 5);
+    uint32_t prev = 0u;
+    {
+        std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
+        auto it = g_sifSregs.find(reg);
+        if (it != g_sifSregs.end())
+        {
+            prev = it->second;
+        }
+        g_sifSregs[reg] = value;
+    }
+    setReturnU32(ctx, prev);
 }
 
 void sceSifSetSysCmdBuffer(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceSifSetSysCmdBuffer", rdram, ctx, runtime);
+    const uint32_t newBuffer = getRegU32(ctx, 4);
+    uint32_t prev = 0u;
+    {
+        std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
+        prev = g_sifSysCmdBuffer;
+        g_sifSysCmdBuffer = newBuffer;
+    }
+    setReturnU32(ctx, prev);
 }
 
 void sceSifStopDma(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceSifStopDma", rdram, ctx, runtime);
+    setReturnS32(ctx, 0);
 }
 
 void sceSifSyncIop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1780,7 +2117,7 @@ void sceSifSyncIop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void sceSifWriteBackDCache(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceSifWriteBackDCache", rdram, ctx, runtime);
+    setReturnS32(ctx, 0);
 }
 
 void sceSSyn_BreakAtick(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -2248,6 +2585,53 @@ void sceTtyWrite(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     TODO_NAMED("sceTtyWrite", rdram, ctx, runtime);
 }
 
+namespace
+{
+    bool readVuVec4f(uint8_t *rdram, uint32_t addr, float (&out)[4])
+    {
+        const uint8_t *ptr = getConstMemPtr(rdram, addr);
+        if (!ptr)
+        {
+            return false;
+        }
+        std::memcpy(out, ptr, sizeof(out));
+        return true;
+    }
+
+    bool writeVuVec4f(uint8_t *rdram, uint32_t addr, const float (&in)[4])
+    {
+        uint8_t *ptr = getMemPtr(rdram, addr);
+        if (!ptr)
+        {
+            return false;
+        }
+        std::memcpy(ptr, in, sizeof(in));
+        return true;
+    }
+
+    bool readVuVec4i(uint8_t *rdram, uint32_t addr, int32_t (&out)[4])
+    {
+        const uint8_t *ptr = getConstMemPtr(rdram, addr);
+        if (!ptr)
+        {
+            return false;
+        }
+        std::memcpy(out, ptr, sizeof(out));
+        return true;
+    }
+
+    bool writeVuVec4i(uint8_t *rdram, uint32_t addr, const int32_t (&in)[4])
+    {
+        uint8_t *ptr = getMemPtr(rdram, addr);
+        if (!ptr)
+        {
+            return false;
+        }
+        std::memcpy(ptr, in, sizeof(in));
+        return true;
+    }
+}
+
 void sceVpu0Reset(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     setReturnS32(ctx, 0);
@@ -2255,7 +2639,19 @@ void sceVpu0Reset(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void sceVu0AddVector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceVu0AddVector", rdram, ctx, runtime);
+    const uint32_t dstAddr = getRegU32(ctx, 4);
+    const uint32_t lhsAddr = getRegU32(ctx, 5);
+    const uint32_t rhsAddr = getRegU32(ctx, 6);
+    float lhs[4]{}, rhs[4]{}, out[4]{};
+    if (readVuVec4f(rdram, lhsAddr, lhs) && readVuVec4f(rdram, rhsAddr, rhs))
+    {
+        for (int i = 0; i < 4; ++i)
+        {
+            out[i] = lhs[i] + rhs[i];
+        }
+        (void)writeVuVec4f(rdram, dstAddr, out);
+    }
+    setReturnS32(ctx, 0);
 }
 
 void sceVu0ApplyMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -2320,17 +2716,56 @@ void sceVu0DropShadowMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runti
 
 void sceVu0FTOI0Vector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceVu0FTOI0Vector", rdram, ctx, runtime);
+    const uint32_t dstAddr = getRegU32(ctx, 4);
+    const uint32_t srcAddr = getRegU32(ctx, 5);
+    float src[4]{};
+    int32_t out[4]{};
+    if (readVuVec4f(rdram, srcAddr, src))
+    {
+        for (int i = 0; i < 4; ++i)
+        {
+            out[i] = static_cast<int32_t>(src[i]);
+        }
+        (void)writeVuVec4i(rdram, dstAddr, out);
+    }
+    setReturnS32(ctx, 0);
 }
 
 void sceVu0FTOI4Vector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceVu0FTOI4Vector", rdram, ctx, runtime);
+    const uint32_t dstAddr = getRegU32(ctx, 4);
+    const uint32_t srcAddr = getRegU32(ctx, 5);
+    float src[4]{};
+    int32_t out[4]{};
+    if (readVuVec4f(rdram, srcAddr, src))
+    {
+        for (int i = 0; i < 4; ++i)
+        {
+            out[i] = static_cast<int32_t>(src[i] * 16.0f);
+        }
+        (void)writeVuVec4i(rdram, dstAddr, out);
+    }
+    setReturnS32(ctx, 0);
 }
 
 void sceVu0InnerProduct(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceVu0InnerProduct", rdram, ctx, runtime);
+    const uint32_t lhsAddr = getRegU32(ctx, 4);
+    const uint32_t rhsAddr = getRegU32(ctx, 5);
+    float lhs[4]{}, rhs[4]{};
+    float dot = 0.0f;
+    if (readVuVec4f(rdram, lhsAddr, lhs) && readVuVec4f(rdram, rhsAddr, rhs))
+    {
+        dot = (lhs[0] * rhs[0]) + (lhs[1] * rhs[1]) + (lhs[2] * rhs[2]) + (lhs[3] * rhs[3]);
+    }
+
+    if (ctx)
+    {
+        ctx->f[0] = dot;
+    }
+    uint32_t raw = 0u;
+    std::memcpy(&raw, &dot, sizeof(raw));
+    setReturnU32(ctx, raw);
 }
 
 void sceVu0InterVector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -2350,17 +2785,53 @@ void sceVu0InversMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void sceVu0ITOF0Vector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceVu0ITOF0Vector", rdram, ctx, runtime);
+    const uint32_t dstAddr = getRegU32(ctx, 4);
+    const uint32_t srcAddr = getRegU32(ctx, 5);
+    int32_t src[4]{};
+    float out[4]{};
+    if (readVuVec4i(rdram, srcAddr, src))
+    {
+        for (int i = 0; i < 4; ++i)
+        {
+            out[i] = static_cast<float>(src[i]);
+        }
+        (void)writeVuVec4f(rdram, dstAddr, out);
+    }
+    setReturnS32(ctx, 0);
 }
 
 void sceVu0ITOF12Vector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceVu0ITOF12Vector", rdram, ctx, runtime);
+    const uint32_t dstAddr = getRegU32(ctx, 4);
+    const uint32_t srcAddr = getRegU32(ctx, 5);
+    int32_t src[4]{};
+    float out[4]{};
+    if (readVuVec4i(rdram, srcAddr, src))
+    {
+        for (int i = 0; i < 4; ++i)
+        {
+            out[i] = static_cast<float>(src[i]) / 4096.0f;
+        }
+        (void)writeVuVec4f(rdram, dstAddr, out);
+    }
+    setReturnS32(ctx, 0);
 }
 
 void sceVu0ITOF4Vector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceVu0ITOF4Vector", rdram, ctx, runtime);
+    const uint32_t dstAddr = getRegU32(ctx, 4);
+    const uint32_t srcAddr = getRegU32(ctx, 5);
+    int32_t src[4]{};
+    float out[4]{};
+    if (readVuVec4i(rdram, srcAddr, src))
+    {
+        for (int i = 0; i < 4; ++i)
+        {
+            out[i] = static_cast<float>(src[i]) / 16.0f;
+        }
+        (void)writeVuVec4f(rdram, dstAddr, out);
+    }
+    setReturnS32(ctx, 0);
 }
 
 void sceVu0LightColorMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -2380,7 +2851,23 @@ void sceVu0MulVector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void sceVu0Normalize(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceVu0Normalize", rdram, ctx, runtime);
+    const uint32_t dstAddr = getRegU32(ctx, 4);
+    const uint32_t srcAddr = getRegU32(ctx, 5);
+    float src[4]{}, out[4]{};
+    if (readVuVec4f(rdram, srcAddr, src))
+    {
+        const float len = std::sqrt((src[0] * src[0]) + (src[1] * src[1]) + (src[2] * src[2]) + (src[3] * src[3]));
+        if (len > 1.0e-6f)
+        {
+            const float invLen = 1.0f / len;
+            for (int i = 0; i < 4; ++i)
+            {
+                out[i] = src[i] * invLen;
+            }
+        }
+        (void)writeVuVec4f(rdram, dstAddr, out);
+    }
+    setReturnS32(ctx, 0);
 }
 
 void sceVu0NormalLightMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -2390,7 +2877,19 @@ void sceVu0NormalLightMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runt
 
 void sceVu0OuterProduct(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceVu0OuterProduct", rdram, ctx, runtime);
+    const uint32_t dstAddr = getRegU32(ctx, 4);
+    const uint32_t lhsAddr = getRegU32(ctx, 5);
+    const uint32_t rhsAddr = getRegU32(ctx, 6);
+    float lhs[4]{}, rhs[4]{}, out[4]{};
+    if (readVuVec4f(rdram, lhsAddr, lhs) && readVuVec4f(rdram, rhsAddr, rhs))
+    {
+        out[0] = (lhs[1] * rhs[2]) - (lhs[2] * rhs[1]);
+        out[1] = (lhs[2] * rhs[0]) - (lhs[0] * rhs[2]);
+        out[2] = (lhs[0] * rhs[1]) - (lhs[1] * rhs[0]);
+        out[3] = 0.0f;
+        (void)writeVuVec4f(rdram, dstAddr, out);
+    }
+    setReturnS32(ctx, 0);
 }
 
 void sceVu0RotMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -2425,7 +2924,29 @@ void sceVu0RotTransPersN(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void sceVu0ScaleVector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceVu0ScaleVector", rdram, ctx, runtime);
+    const uint32_t dstAddr = getRegU32(ctx, 4);
+    const uint32_t srcAddr = getRegU32(ctx, 5);
+    float src[4]{}, out[4]{};
+    float scale = ctx ? ctx->f[12] : 0.0f;
+    if (scale == 0.0f)
+    {
+        uint32_t raw = getRegU32(ctx, 6);
+        std::memcpy(&scale, &raw, sizeof(scale));
+        if (scale == 0.0f)
+        {
+            scale = static_cast<float>(getRegU32(ctx, 6));
+        }
+    }
+
+    if (readVuVec4f(rdram, srcAddr, src))
+    {
+        for (int i = 0; i < 4; ++i)
+        {
+            out[i] = src[i] * scale;
+        }
+        (void)writeVuVec4f(rdram, dstAddr, out);
+    }
+    setReturnS32(ctx, 0);
 }
 
 void sceVu0ScaleVectorXYZ(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -2435,7 +2956,19 @@ void sceVu0ScaleVectorXYZ(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime
 
 void sceVu0SubVector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("sceVu0SubVector", rdram, ctx, runtime);
+    const uint32_t dstAddr = getRegU32(ctx, 4);
+    const uint32_t lhsAddr = getRegU32(ctx, 5);
+    const uint32_t rhsAddr = getRegU32(ctx, 6);
+    float lhs[4]{}, rhs[4]{}, out[4]{};
+    if (readVuVec4f(rdram, lhsAddr, lhs) && readVuVec4f(rdram, rhsAddr, rhs))
+    {
+        for (int i = 0; i < 4; ++i)
+        {
+            out[i] = lhs[i] - rhs[i];
+        }
+        (void)writeVuVec4f(rdram, dstAddr, out);
+    }
+    setReturnS32(ctx, 0);
 }
 
 void sceVu0TransMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -2483,17 +3016,45 @@ void sceWrite(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void srand(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("srand", rdram, ctx, runtime);
+    std::srand(getRegU32(ctx, 4));
+    setReturnS32(ctx, 0);
 }
 
 void stat(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("stat", rdram, ctx, runtime);
+    const uint32_t statAddr = getRegU32(ctx, 5);
+    uint8_t *statBuf = getMemPtr(rdram, statAddr);
+    if (!statBuf)
+    {
+        setReturnS32(ctx, -1);
+        return;
+    }
+
+    // Minimal fake stat payload: zeroed structure indicates a valid, readable file.
+    std::memset(statBuf, 0, 128);
+    setReturnS32(ctx, 0);
 }
 
 void strcasecmp(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    TODO_NAMED("strcasecmp", rdram, ctx, runtime);
+    const uint32_t lhsAddr = getRegU32(ctx, 4);
+    const uint32_t rhsAddr = getRegU32(ctx, 5);
+    const std::string lhs = readPs2CStringBounded(rdram, runtime, lhsAddr, 1024);
+    const std::string rhs = readPs2CStringBounded(rdram, runtime, rhsAddr, 1024);
+
+    const size_t n = std::min(lhs.size(), rhs.size());
+    for (size_t i = 0; i < n; ++i)
+    {
+        const int a = std::tolower(static_cast<unsigned char>(lhs[i]));
+        const int b = std::tolower(static_cast<unsigned char>(rhs[i]));
+        if (a != b)
+        {
+            setReturnS32(ctx, a - b);
+            return;
+        }
+    }
+
+    setReturnS32(ctx, static_cast<int32_t>(lhs.size()) - static_cast<int32_t>(rhs.size()));
 }
 
 void vfprintf(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
