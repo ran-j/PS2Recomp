@@ -1626,7 +1626,7 @@ void scePadSetWarningLevel(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtim
 {
     (void)rdram;
     (void)runtime;
-    setReturnS32(ctx, 1);
+    setReturnS32(ctx, 0);
 }
 
 void scePadStateIntToStr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

@@ -1,5 +1,9 @@
 #pragma once
 
+#ifdef __cplusplus
+#include <cstdint>
+#endif
+
 // I know ugly, but will work for now.
 
 #define PS2_SYSCALL_LIST(X)   \
@@ -612,3 +616,12 @@
     X(syMallocInit)                           \
     X(syRtcInit)                              \
     /* Game/middleware */
+
+// Test hooks (C++ only): override pad input for scePadRead.
+#ifdef __cplusplus
+namespace ps2_stubs
+{
+    void setPadOverrideState(uint16_t buttons, uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry);
+    void clearPadOverrideState();
+}
+#endif
