@@ -1500,26 +1500,24 @@ void scePadPortOpen(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void scePadRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    (void)runtime;
-
-    const uint32_t dataAddr = getRegU32(ctx, 6); // a2
+    const int port = static_cast<int>(getRegU32(ctx, 4));
+    const int slot = static_cast<int>(getRegU32(ctx, 5));
+    const uint32_t dataAddr = getRegU32(ctx, 6);
     uint8_t *data = getMemPtr(rdram, dataAddr);
     if (!data)
     {
         setReturnS32(ctx, 0);
         return;
     }
-
-    // struct padButtonStatus (32 bytes): neutral state, no buttons pressed.
+    if (runtime && runtime->padBackend().readState(port, slot, data, 32))
+    {
+        setReturnS32(ctx, 1);
+        return;
+    }
     std::memset(data, 0, 32);
-    data[1] = 0x73; // analog/dualshock mode marker
-    data[2] = 0xFF; // btns low (active-low)
-    data[3] = 0xFF; // btns high
-    data[4] = 0x80; // rjoy_h
-    data[5] = 0x80; // rjoy_v
-    data[6] = 0x80; // ljoy_h
-    data[7] = 0x80; // ljoy_v
-
+    data[1] = 0x73;
+    data[2] = data[3] = 0xFF;
+    data[4] = data[5] = data[6] = data[7] = 0x80;
     setReturnS32(ctx, 1);
 }
 

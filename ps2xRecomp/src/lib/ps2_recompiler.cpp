@@ -984,8 +984,11 @@ namespace ps2recomp
                     std::string generatedName = m_codeGenerator->getFunctionName(function.start);
                     std::stringstream stub;
                     stub << "void " << generatedName
-                         << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime) {\n"
-                         << "    const uint32_t __entryPc = ctx->pc;\n"
+                         << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime) {\n";
+                    stub << "#ifdef _DEBUG\n";
+                    stub << "    PS_LOG_ENTRY(\"" << generatedName << "\");\n";
+                    stub << "#endif\n";
+                    stub << "    const uint32_t __entryPc = ctx->pc;\n"
                          << "    ";
 
                     if (function.isSkipped)
@@ -1044,6 +1047,9 @@ namespace ps2recomp
                 combinedOutput << "#include \"ps2_recompiled_stubs.h\"\n";
                 combinedOutput << "#include \"ps2_syscalls.h\"\n";
                 combinedOutput << "#include \"ps2_stubs.h\"\n";
+                combinedOutput << "#ifdef _DEBUG\n";
+                combinedOutput << "#include \"ps2_log.h\"\n";
+                combinedOutput << "#endif\n";
                 combinedOutput << "\n";
 
                 for (const auto &function : m_functions)
@@ -1100,7 +1106,11 @@ namespace ps2recomp
                             std::stringstream stubFile;
                             stubFile << "#include \"ps2_runtime.h\"\n";
                             stubFile << "#include \"ps2_syscalls.h\"\n";
-                            stubFile << "#include \"ps2_stubs.h\"\n\n";
+                            stubFile << "#include \"ps2_stubs.h\"\n";
+                            stubFile << "#ifdef _DEBUG\n";
+                            stubFile << "#include \"ps2_log.h\"\n";
+                            stubFile << "#endif\n";
+                            stubFile << "\n";
                             stubFile << m_generatedStubs.at(function.start) << "\n";
                             code = stubFile.str();
                         }

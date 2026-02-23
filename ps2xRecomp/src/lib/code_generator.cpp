@@ -821,6 +821,9 @@ namespace ps2recomp
             ss << "#include \"ps2_recompiled_stubs.h\"\n\n";
             ss << "#include \"ps2_syscalls.h\"\n";
             ss << "#include \"ps2_stubs.h\"\n\n";
+            ss << "#ifdef _DEBUG\n";
+            ss << "#include \"ps2_log.h\"\n";
+            ss << "#endif\n\n";
         }
 
         AnalysisResult analysisResult = collectInternalBranchTargets(function, instructions);
@@ -836,7 +839,11 @@ namespace ps2recomp
             sanitizedName = nameBuilder.str();
         }
 
-        ss << "void " << sanitizedName << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime) {\n\n";
+        ss << "void " << sanitizedName << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime) {\n";
+        ss << "#ifdef _DEBUG\n";
+        ss << "    PS_LOG_ENTRY(\"" << sanitizedName << "\");\n";
+        ss << "#endif\n";
+        ss << "\n";
         ss << "    ctx->pc = 0x" << std::hex << function.start << "u;\n"
            << std::dec;
         ss << "\n";

@@ -1,6 +1,9 @@
 #include "ps2_runtime.h"
 #include "register_functions.h"
 #include "games_database.h"
+#ifdef _DEBUG
+#include "ps2_log.h"
+#endif
 
 #include <iostream>
 #include <string>
@@ -63,5 +66,8 @@ int main(int argc, char* argv[])
 
     runtime.run();
 
+#ifdef _DEBUG
+    ps2_log::print_saved_location();
+#endif
     return 0;
 }
