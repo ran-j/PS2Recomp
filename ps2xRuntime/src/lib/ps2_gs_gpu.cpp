@@ -611,6 +611,18 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
         }
         break;
     }
+    case 0x59:
+        if (m_privRegs)
+            m_privRegs->dispfb1 = value;
+        break;
+    case 0x5a:
+        if (m_privRegs)
+            m_privRegs->display1 = value;
+        break;
+    case 0x5f:
+        if (m_privRegs)
+            m_privRegs->bgcolor = value;
+        break;
     default:
         break;
     }

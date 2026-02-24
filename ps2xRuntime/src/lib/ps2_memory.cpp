@@ -192,6 +192,8 @@ bool PS2Memory::initialize(size_t ramSize)
 
         // Initialize GS registers
         memset(&gs_regs, 0, sizeof(gs_regs));
+        gs_regs.dispfb1 = (0ULL << 0) | (10ULL << 9) | (0ULL << 15) | (0ULL << 32) | (0ULL << 43);
+        gs_regs.display1 = (0ULL << 0) | (0ULL << 12) | (0ULL << 23) | (0ULL << 27) | (639ULL << 32) | (447ULL << 44);
 
         // Allocate GS VRAM (4MB)
         m_gsVRAM = new uint8_t[PS2_GS_VRAM_SIZE];
@@ -634,27 +636,12 @@ void PS2Memory::write128(uint32_t address, __m128i value)
 
 bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 {
-    // ── IPU registers (0x10002000-0x10002030) ──────────────────
-    // On real PS2, IPU_CTRL bit 31 (BUSY) is READ-ONLY — set by hardware.
-    // We must NOT store the raw value for IPU_CTRL because the game
-    // might write 0x40000000 (RST) and we'd return 0 with no BUSY,
-    // but if any stale value had bit 31, the polling loop would hang.
     if (address >= 0x10002000 && address <= 0x10002030)
     {
-        static int ipuWriteLog = 0;
-        if (ipuWriteLog < 30)
-        {
-            std::cerr << "[IPU] write addr=0x" << std::hex << address
-                      << " val=0x" << value << std::dec << std::endl;
-            ++ipuWriteLog;
-        }
         if (address == 0x10002010)
         {
-            // IPU_CTRL write: bit 30 = RST (reset). After reset,
-            // all status bits clear. Never store BUSY (bit 31).
             if (value & (1u << 30))
             {
-                // Reset IPU — clear all IPU registers
                 m_ioRegisters[0x10002000] = 0;
                 m_ioRegisters[0x10002010] = 0;
                 m_ioRegisters[0x10002020] = 0;
@@ -662,13 +649,11 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
             }
             else
             {
-                // Store without BUSY bit
                 m_ioRegisters[address] = value & ~(1u << 31);
             }
         }
         else
         {
-            // IPU_CMD (0x10002000) — store command, don't set busy
             m_ioRegisters[address] = value;
         }
         return true;
@@ -1033,36 +1018,24 @@ int PS2Memory::pollDmaRegisters()
 
 uint32_t PS2Memory::readIORegister(uint32_t address)
 {
-    // ── IPU registers (0x10002000-0x10002030) ──────────────────
-    // IPU_CMD  0x10002000: command result / FIFO output
-    // IPU_CTRL 0x10002010: status — bit 31=BUSY (always 0: we don't decode)
-    // IPU_BP   0x10002020: bitstream pointer
-    // IPU_TOP  0x10002030: top 32 bits of FIFO
     if (address >= 0x10002000 && address <= 0x10002030)
     {
-        static int ipuReadLog = 0;
         uint32_t val = 0;
         switch (address)
         {
-        case 0x10002000: // IPU_CMD — command result
+        case 0x10002000:
             val = m_ioRegisters[address];
             break;
-        case 0x10002010:                                // IPU_CTRL — always NOT busy, ECD=0
-            val = m_ioRegisters[address] & ~(1u << 31); // clear BUSY
+        case 0x10002010:
+            val = m_ioRegisters[address] & ~(1u << 31);
             break;
-        case 0x10002020: // IPU_BP
-        case 0x10002030: // IPU_TOP
+        case 0x10002020:
+        case 0x10002030:
             val = m_ioRegisters[address];
             break;
         default:
             val = 0;
             break;
-        }
-        if (ipuReadLog < 30)
-        {
-            std::cerr << "[IPU] read addr=0x" << std::hex << address
-                      << " val=0x" << val << std::dec << std::endl;
-            ++ipuReadLog;
         }
         return val;
     }
@@ -1080,9 +1053,9 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
         {
             if ((address & 0xFF) == 0x00)
             {
-                // Return CHCR as-is. STR (bit 8) is cleared after DMA
-                // completion in writeIORegister, not on read.
-                return m_ioRegisters[address];
+                uint32_t channelStatus = m_ioRegisters[address] & ~0x100u;
+                m_ioRegisters[address] = channelStatus;
+                return channelStatus;
             }
         }
 
@@ -1091,21 +1064,8 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
             return 0;
         }
 
-        // SIF hardware registers — HLE: pretend IOP is always ready
-        // 0x1000F200: SIF_SMCOM — IOP communication status
-        // 0x1000F210: SIF_MSCOM — EE→IOP command
-        // 0x1000F220: SIF_MSFLG — Main→Sub flags
-        // 0x1000F230: SIF_SMFLG — Sub→Main flags (IOP ready bits)
-        // 0x1000F240: SIF_CTRL  — SIF control
         if (address >= 0x1000F200 && address <= 0x1000F260)
         {
-            static std::atomic<uint64_t> sifReads{0};
-            uint64_t n = sifReads.fetch_add(1);
-            if (n < 5 || (n % 100000) == 0)
-            {
-                std::cerr << "[SIF-HW] read 0x" << std::hex << address
-                          << " #" << std::dec << n << std::endl;
-            }
             if (address == 0x1000F230)
             {
                 return 0x60000;

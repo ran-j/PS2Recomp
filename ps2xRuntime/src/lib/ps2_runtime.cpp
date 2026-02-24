@@ -1466,20 +1466,7 @@ void PS2Runtime::run()
     uint64_t tick = 0;
     while (!gameThreadFinished.load(std::memory_order_acquire))
     {
-        const uint32_t pc = m_debugPc.load(std::memory_order_relaxed);
-        const uint32_t ra = m_debugRa.load(std::memory_order_relaxed);
-        const uint32_t sp = m_debugSp.load(std::memory_order_relaxed);
-        const uint32_t gp = m_debugGp.load(std::memory_order_relaxed);
-
-        if ((tick++ % 120) == 0)
-        {
-            std::cout << "[run] activeThreads=" << g_activeThreads.load(std::memory_order_relaxed);
-            std::cout << " pc=0x" << std::hex << pc
-                      << " ra=0x" << ra
-                      << " sp=0x" << sp
-                      << " gp=0x" << gp
-                      << std::dec << std::endl;
-        }
+        tick++;
         if ((tick % 600) == 0)
         {
             static uint64_t lastDma = 0, lastGif = 0, lastGs = 0, lastVif = 0;
@@ -1489,10 +1476,6 @@ void PS2Runtime::run()
             uint64_t curVif = m_memory.vifWriteCount();
             if (curDma != lastDma || curGif != lastGif || curGs != lastGs || curVif != lastVif)
             {
-                std::cout << "[hw] dma_starts=" << curDma
-                          << " gif_copies=" << curGif
-                          << " gs_writes=" << curGs
-                          << " vif_writes=" << curVif << std::endl;
                 lastDma = curDma;
                 lastGif = curGif;
                 lastGs = curGs;
