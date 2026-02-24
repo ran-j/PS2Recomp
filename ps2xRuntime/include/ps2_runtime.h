@@ -470,8 +470,8 @@ public:
     inline VU1Interpreter &vu1() { return m_vu1; }
     inline const VU1Interpreter &vu1() const { return m_vu1; }
 
-    inline IOP &iop() { return m_iop; }
-    inline const IOP &iop() const { return m_iop; }
+    inline ps2_iop &iop() { return m_iop; }
+    inline const ps2_iop &iop() const { return m_iop; }
     inline PS2AudioBackend &audioBackend() { return m_audioBackend; }
     inline const PS2AudioBackend &audioBackend() const { return m_audioBackend; }
     inline PSPadBackend &padBackend() { return m_padBackend; }
@@ -503,7 +503,7 @@ private:
     PS2Memory m_memory;
     GifArbiter m_gifArbiter;
     GS m_gs;
-    IOP m_iop;
+    ps2_iop m_iop;
     PS2AudioBackend m_audioBackend;
     PSPadBackend m_padBackend;
     VU1Interpreter m_vu1;
