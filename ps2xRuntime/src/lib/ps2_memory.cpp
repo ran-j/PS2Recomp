@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <string>
+#include <vector>
 
 namespace
 {
@@ -121,6 +122,17 @@ PS2Memory::~PS2Memory()
         m_gsVRAM = nullptr;
     }
 
+    if (m_vu1Code)
+    {
+        delete[] m_vu1Code;
+        m_vu1Code = nullptr;
+    }
+    if (m_vu1Data)
+    {
+        delete[] m_vu1Data;
+        m_vu1Data = nullptr;
+    }
+
     if (iop_ram)
     {
         delete[] iop_ram;
@@ -136,11 +148,15 @@ bool PS2Memory::initialize(size_t ramSize)
         delete[] m_scratchpad;
         delete[] iop_ram;
         delete[] m_gsVRAM;
+        delete[] m_vu1Code;
+        delete[] m_vu1Data;
         m_rdram = nullptr;
         m_scratchpad = nullptr;
         ps2SetScratchpadHostPtr(nullptr);
         iop_ram = nullptr;
         m_gsVRAM = nullptr;
+        m_vu1Code = nullptr;
+        m_vu1Data = nullptr;
     };
 
     cleanup();
@@ -176,11 +192,17 @@ bool PS2Memory::initialize(size_t ramSize)
 
         // Initialize GS registers
         memset(&gs_regs, 0, sizeof(gs_regs));
-        m_gsDrawCtx = GSDrawContext{};
+        gs_regs.dispfb1 = (0ULL << 0) | (10ULL << 9) | (0ULL << 15) | (0ULL << 32) | (0ULL << 43);
+        gs_regs.display1 = (0ULL << 0) | (0ULL << 12) | (0ULL << 23) | (0ULL << 27) | (639ULL << 32) | (447ULL << 44);
 
         // Allocate GS VRAM (4MB)
         m_gsVRAM = new uint8_t[PS2_GS_VRAM_SIZE];
         std::memset(m_gsVRAM, 0, PS2_GS_VRAM_SIZE);
+
+        m_vu1Code = new uint8_t[PS2_VU1_CODE_SIZE];
+        m_vu1Data = new uint8_t[PS2_VU1_DATA_SIZE];
+        std::memset(m_vu1Code, 0, PS2_VU1_CODE_SIZE);
+        std::memset(m_vu1Data, 0, PS2_VU1_DATA_SIZE);
 
         // Initialize VIF registers
         memset(&vif0_regs, 0, sizeof(vif0_regs));
@@ -614,27 +636,12 @@ void PS2Memory::write128(uint32_t address, __m128i value)
 
 bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 {
-    // ── IPU registers (0x10002000-0x10002030) ──────────────────
-    // On real PS2, IPU_CTRL bit 31 (BUSY) is READ-ONLY — set by hardware.
-    // We must NOT store the raw value for IPU_CTRL because the game
-    // might write 0x40000000 (RST) and we'd return 0 with no BUSY,
-    // but if any stale value had bit 31, the polling loop would hang.
     if (address >= 0x10002000 && address <= 0x10002030)
     {
-        static int ipuWriteLog = 0;
-        if (ipuWriteLog < 30)
-        {
-            std::cerr << "[IPU] write addr=0x" << std::hex << address
-                      << " val=0x" << value << std::dec << std::endl;
-            ++ipuWriteLog;
-        }
         if (address == 0x10002010)
         {
-            // IPU_CTRL write: bit 30 = RST (reset). After reset,
-            // all status bits clear. Never store BUSY (bit 31).
             if (value & (1u << 30))
             {
-                // Reset IPU — clear all IPU registers
                 m_ioRegisters[0x10002000] = 0;
                 m_ioRegisters[0x10002010] = 0;
                 m_ioRegisters[0x10002020] = 0;
@@ -642,41 +649,17 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
             }
             else
             {
-                // Store without BUSY bit
                 m_ioRegisters[address] = value & ~(1u << 31);
             }
         }
         else
         {
-            // IPU_CMD (0x10002000) — store command, don't set busy
             m_ioRegisters[address] = value;
         }
         return true;
     }
 
     m_ioRegisters[address] = value;
-
-    {
-        static int io_total_log = 0;
-        if (io_total_log < 100)
-        {
-            std::cerr << "[IO_WRITE] addr=0x" << std::hex << address << " val=0x" << value << std::dec << std::endl;
-            ++io_total_log;
-        }
-    }
-
-    if (address >= 0x10008000 && address < 0x1000F000)
-    {
-        static int dma_io_log = 0;
-        if (dma_io_log < 200)
-        {
-            uint32_t ch = (address >> 8) & 0xFF;
-            uint32_t off = address & 0xFF;
-            std::cerr << "[DMA_IO] ch=0x" << std::hex << (address & 0xFFFFFF00)
-                      << " off=0x" << off << " val=0x" << value << std::dec << std::endl;
-            ++dma_io_log;
-        }
-    }
 
     if (address >= 0x10008000 && address < 0x1000F000)
     {
@@ -689,128 +672,171 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
             if ((channelBase == 0x1000A000 || channelBase == 0x10009000) && m_gsVRAM)
             {
-                auto dispatchTransfer = [&](uint32_t srcAddr, uint32_t qwCount)
+                auto enqueueTransfer = [&](uint32_t srcAddr, uint32_t qwCount)
                 {
                     if (qwCount == 0)
-                    {
                         return;
-                    }
-
-                    uint32_t srcPhys = 0;
-                    try
-                    {
-                        srcPhys = translateAddress(srcAddr);
-                    }
-                    catch (const std::exception &)
-                    {
-                        return;
-                    }
-
-                    if (srcPhys >= PS2_RAM_SIZE)
-                    {
-                        return;
-                    }
-
+                    const bool scratch = isScratchpad(srcAddr);
+                    PendingTransfer pt;
+                    pt.fromScratchpad = scratch;
+                    pt.srcAddr = srcAddr;
+                    pt.qwc = qwCount;
                     if (channelBase == 0x1000A000)
-                    {
-                        processGIFPacket(srcPhys, qwCount);
-                        return;
-                    }
-
-                    const uint64_t bytes64 = static_cast<uint64_t>(qwCount) * 16ull;
-                    uint32_t bytes = bytes64 > static_cast<uint64_t>(PS2_RAM_SIZE)
-                                         ? PS2_RAM_SIZE
-                                         : static_cast<uint32_t>(bytes64);
-                    if (srcPhys + bytes > PS2_RAM_SIZE)
-                    {
-                        bytes = PS2_RAM_SIZE - srcPhys;
-                    }
-                    processVIF1Data(srcPhys, bytes);
+                        m_pendingGifTransfers.push_back(pt);
+                    else if (channelBase == 0x10009000 && !scratch)
+                        m_pendingVif1Transfers.push_back(pt);
                 };
 
-                auto walkChain = [&](uint32_t startTadr)
+                uint32_t chcr = value;
+                uint32_t mode = (chcr >> 2) & 0x3;
+
+                if (mode == 0 && qwc > 0)
                 {
-                    uint32_t curTadr = startTadr;
-                    constexpr int kMaxTags = 4096;
-                    for (int i = 0; i < kMaxTags; ++i)
+                    enqueueTransfer(madr, qwc);
+                }
+                else if (mode == 1)
+                {
+                    uint32_t tagAddr = m_ioRegisters[channelBase + 0x30];
+                    const int kMaxChainTags = 4096;
+                    std::vector<uint8_t> chainBuf;
+
+                    auto appendData = [&](uint32_t srcAddr, uint32_t qwCount)
                     {
+                        const uint64_t bytes64 = static_cast<uint64_t>(qwCount) * 16ull;
+                        uint32_t bytes = (bytes64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu : static_cast<uint32_t>(bytes64);
+                        const bool scratch = isScratchpad(srcAddr);
+                        uint32_t src = 0;
+                        try
+                        {
+                            src = translateAddress(srcAddr);
+                        }
+                        catch (...)
+                        {
+                            return;
+                        }
+                        const uint8_t *base2;
+                        uint32_t maxSz2;
+                        if (scratch)
+                        {
+                            base2 = m_scratchpad;
+                            maxSz2 = PS2_SCRATCHPAD_SIZE;
+                        }
+                        else
+                        {
+                            base2 = m_rdram;
+                            maxSz2 = PS2_RAM_SIZE;
+                        }
+                        if (src >= maxSz2)
+                            return;
+                        if (src + bytes > maxSz2)
+                            bytes = maxSz2 - src;
+                        if (bytes == 0)
+                            return;
+                        chainBuf.insert(chainBuf.end(), base2 + src, base2 + src + bytes);
+                    };
+
+                    std::vector<uint32_t> retStack;
+                    retStack.reserve(8);
+                    int tagsProcessed = 0;
+
+                    while (tagsProcessed < kMaxChainTags)
+                    {
+                        const bool tagInSPR = isScratchpad(tagAddr);
                         uint32_t physTag = 0;
                         try
                         {
-                            physTag = translateAddress(curTadr);
+                            physTag = translateAddress(tagAddr);
                         }
-                        catch (const std::exception &)
+                        catch (...)
                         {
                             break;
                         }
-
-                        if (physTag + 16 > PS2_RAM_SIZE)
+                        const uint8_t *tagBase;
+                        uint32_t tagMax;
+                        if (tagInSPR)
                         {
-                            break;
+                            tagBase = m_scratchpad;
+                            tagMax = PS2_SCRATCHPAD_SIZE;
                         }
+                        else
+                        {
+                            tagBase = m_rdram;
+                            tagMax = PS2_RAM_SIZE;
+                        }
+                        if (physTag + 16 > tagMax)
+                            break;
 
-                        const uint64_t tag = loadScalar<uint64_t>(m_rdram, physTag, PS2_RAM_SIZE, "dma chain tag", curTadr);
-                        const uint16_t tagQwc = static_cast<uint16_t>(tag & 0xFFFFu);
-                        const uint32_t id = static_cast<uint32_t>((tag >> 28) & 0x7u);
-                        const uint32_t addr = static_cast<uint32_t>((tag >> 32) & 0x7FFFFFF0u);
-                        const bool irq = ((tag >> 31) & 0x1u) != 0;
-
-                        uint32_t dataAddr = 0;
-                        uint32_t nextTag = 0;
-                        bool endChain = false;
+                        const uint8_t *tp = tagBase + physTag;
+                        uint64_t tag = loadScalar<uint64_t>(tp, 0, 16, "dma chain tag", tagAddr);
+                        uint16_t tagQwc = static_cast<uint16_t>(tag & 0xFFFF);
+                        uint32_t id = static_cast<uint32_t>((tag >> 28) & 0x7);
+                        uint32_t addr = static_cast<uint32_t>((tag >> 32) & 0x7FFFFFFF);
+                        ++tagsProcessed;
 
                         switch (id)
                         {
-                        case 0: // REFE
-                            dataAddr = addr;
-                            endChain = true;
+                        case 0:
+                            if (tagQwc > 0)
+                                appendData(addr, tagQwc);
+                            goto chain_done;
+                        case 1:
+                            if (tagQwc > 0)
+                                appendData(tagAddr + 16, tagQwc);
+                            tagAddr = tagAddr + 16 + tagQwc * 16;
                             break;
-                        case 1: // CNT
-                            dataAddr = curTadr + 16u;
-                            nextTag = curTadr + 16u + static_cast<uint32_t>(tagQwc) * 16u;
+                        case 2:
+                            if (tagQwc > 0)
+                                appendData(tagAddr + 16, tagQwc);
+                            tagAddr = addr;
                             break;
-                        case 2: // NEXT
-                            dataAddr = curTadr + 16u;
-                            nextTag = addr;
+                        case 3:
+                        case 4:
+                            if (tagQwc > 0)
+                                appendData(addr, tagQwc);
+                            tagAddr = tagAddr + 16;
                             break;
-                        case 3: // REF
-                        case 4: // REFS
-                            dataAddr = addr;
-                            nextTag = curTadr + 16u;
+                        case 5:
+                            if (tagQwc > 0)
+                                appendData(addr, tagQwc);
+                            if (retStack.size() < 16)
+                                retStack.push_back(tagAddr + 16);
+                            tagAddr = addr;
                             break;
-                        case 7: // END
-                            dataAddr = curTadr + 16u;
-                            endChain = true;
+                        case 6:
+                            if (!retStack.empty())
+                            {
+                                tagAddr = retStack.back();
+                                retStack.pop_back();
+                            }
+                            else
+                                goto chain_done;
                             break;
+                        case 7:
+                            if (tagQwc > 0)
+                                appendData(tagAddr + 16, tagQwc);
+                            goto chain_done;
                         default:
-                            endChain = true;
-                            break;
+                            goto chain_done;
                         }
-
-                        if (tagQwc > 0 && dataAddr != 0)
-                        {
-                            dispatchTransfer(dataAddr, tagQwc);
-                        }
-
-                        if (endChain || irq)
-                        {
-                            break;
-                        }
-                        curTadr = nextTag;
                     }
-                };
-
-                if (qwc > 0)
-                {
-                    dispatchTransfer(madr, qwc);
+                chain_done:
+                    if (!chainBuf.empty())
+                    {
+                        PendingTransfer pt;
+                        pt.fromScratchpad = false;
+                        pt.srcAddr = 0;
+                        pt.qwc = 0;
+                        pt.chainData = std::move(chainBuf);
+                        if (channelBase == 0x1000A000)
+                            m_pendingGifTransfers.push_back(std::move(pt));
+                        else if (channelBase == 0x10009000)
+                            m_pendingVif1Transfers.push_back(std::move(pt));
+                    }
                 }
-                else
+                else if (qwc > 0)
                 {
-                    const uint32_t tadr = m_ioRegisters[channelBase + 0x30];
-                    walkChain(tadr);
+                    enqueueTransfer(madr, qwc);
                 }
-
-                m_ioRegisters[address] &= ~0x100;
             }
         }
         return true;
@@ -845,57 +871,171 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
     return false;
 }
 
-// ============================================================================
-// pollDmaRegisters: Workaround for KSEG1 fast-path bypass
-// When libsles.a is compiled with old headers, isSpecialAddress() doesn't
-// recognize KSEG0/KSEG1 addresses (0x8xxx/0xBxxx). Game writes to e.g.
-// 0xB000A000 (GIF DMA CHCR via KSEG1) go through Ps2FastWrite32 which
-// stores to rdram[addr & 0x01FFFFFF] = rdram[0x1000A000], bypassing
-// writeIORegister entirely. This function polls those shadow locations
-// and triggers DMA processing when CHCR.STR (bit 8) is set.
-//
-// NOTE: DISABLED — sho_runner writes DMA regs via physical addresses which
-// go through writeIORegister correctly. This function was reading garbage
-// from rdram shadow (ELF code area) and triggering bogus DMA transfers.
-// ============================================================================
+void PS2Memory::processPendingTransfers()
+{
+    const bool hadGif = !m_pendingGifTransfers.empty();
+    for (size_t idx = 0; idx < m_pendingGifTransfers.size(); ++idx)
+    {
+        auto &p = m_pendingGifTransfers[idx];
+        if (!p.chainData.empty())
+        {
+            m_seenGifCopy = true;
+            m_gifCopyCount.fetch_add(1, std::memory_order_relaxed);
+            submitGifPacket(GifPathId::Path3, p.chainData.data(), static_cast<uint32_t>(p.chainData.size()), false);
+        }
+        else if (p.qwc > 0)
+        {
+            const uint64_t bytes64 = static_cast<uint64_t>(p.qwc) * 16ull;
+            uint32_t sizeBytes = (bytes64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu : static_cast<uint32_t>(bytes64);
+            uint32_t srcPhys = 0;
+            try
+            {
+                srcPhys = translateAddress(p.srcAddr);
+            }
+            catch (const std::exception &)
+            {
+                continue;
+            }
+            if (p.fromScratchpad)
+            {
+                if (srcPhys + sizeBytes <= PS2_SCRATCHPAD_SIZE && sizeBytes >= 16)
+                {
+                    m_seenGifCopy = true;
+                    m_gifCopyCount.fetch_add(1, std::memory_order_relaxed);
+                    submitGifPacket(GifPathId::Path3, m_scratchpad + srcPhys, sizeBytes, false);
+                }
+            }
+            else if (srcPhys < PS2_RAM_SIZE)
+            {
+                if (static_cast<uint64_t>(srcPhys) + sizeBytes > PS2_RAM_SIZE)
+                    sizeBytes = PS2_RAM_SIZE - srcPhys;
+                if (sizeBytes >= 16)
+                {
+                    m_seenGifCopy = true;
+                    m_gifCopyCount.fetch_add(1, std::memory_order_relaxed);
+                    submitGifPacket(GifPathId::Path3, m_rdram + srcPhys, sizeBytes, false);
+                }
+            }
+        }
+    }
+    m_pendingGifTransfers.clear();
+
+    const bool hadVif1 = !m_pendingVif1Transfers.empty();
+    for (auto &p : m_pendingVif1Transfers)
+    {
+        if (!p.chainData.empty())
+        {
+            processVIF1Data(p.chainData.data(), static_cast<uint32_t>(p.chainData.size()));
+        }
+        else if (p.qwc > 0 && !p.fromScratchpad)
+        {
+            uint32_t srcPhys = 0;
+            try
+            {
+                srcPhys = translateAddress(p.srcAddr);
+            }
+            catch (const std::exception &)
+            {
+                continue;
+            }
+            if (srcPhys < PS2_RAM_SIZE)
+            {
+                const uint64_t bytes64 = static_cast<uint64_t>(p.qwc) * 16ull;
+                uint32_t sizeBytes = (bytes64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu : static_cast<uint32_t>(bytes64);
+                if (srcPhys + sizeBytes > PS2_RAM_SIZE)
+                    sizeBytes = PS2_RAM_SIZE - srcPhys;
+                if (sizeBytes > 0)
+                    processVIF1Data(srcPhys, sizeBytes);
+            }
+        }
+    }
+    m_pendingVif1Transfers.clear();
+
+    if (m_gifArbiter)
+        m_gifArbiter->drain();
+
+    static constexpr uint32_t GIF_CHANNEL = 0x1000A000;
+    static constexpr uint32_t VIF1_CHANNEL = 0x10009000;
+    if (hadGif)
+    {
+        m_ioRegisters[GIF_CHANNEL + 0x00] &= ~0x100u;
+        m_ioRegisters[GIF_CHANNEL + 0x20] = 0;
+    }
+    if (hadVif1)
+    {
+        m_ioRegisters[VIF1_CHANNEL + 0x00] &= ~0x100u;
+        m_ioRegisters[VIF1_CHANNEL + 0x20] = 0;
+    }
+}
+
+void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool drainImmediately)
+{
+    if (!data || sizeBytes < 16)
+        return;
+    if (pathId == GifPathId::Path3 && m_path3Masked)
+        return;
+    if (m_gifArbiter)
+    {
+        m_gifArbiter->submit(pathId, data, sizeBytes);
+        if (drainImmediately)
+            m_gifArbiter->drain();
+    }
+    else if (m_gifPacketCallback)
+    {
+        m_gifPacketCallback(data, sizeBytes);
+    }
+}
+
+void PS2Memory::processGIFPacket(uint32_t srcPhysAddr, uint32_t qwCount)
+{
+    if (!m_rdram || qwCount == 0)
+        return;
+    const uint64_t bytes64 = static_cast<uint64_t>(qwCount) * 16ull;
+    uint32_t sizeBytes = (bytes64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu : static_cast<uint32_t>(bytes64);
+    if (srcPhysAddr >= PS2_RAM_SIZE)
+        return;
+    if (static_cast<uint64_t>(srcPhysAddr) + static_cast<uint64_t>(sizeBytes) > static_cast<uint64_t>(PS2_RAM_SIZE))
+        sizeBytes = PS2_RAM_SIZE - srcPhysAddr;
+    if (sizeBytes < 16)
+        return;
+    m_seenGifCopy = true;
+    m_gifCopyCount.fetch_add(1, std::memory_order_relaxed);
+    submitGifPacket(GifPathId::Path3, m_rdram + srcPhysAddr, sizeBytes);
+}
+
+void PS2Memory::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
+{
+    if (m_gifArbiter)
+        submitGifPacket(GifPathId::Path3, data, sizeBytes);
+    else if (m_gifPacketCallback && data && sizeBytes >= 16)
+        m_gifPacketCallback(data, sizeBytes);
+}
+
 int PS2Memory::pollDmaRegisters()
 {
-    // Disabled — DMA writes go through writeIORegister, not KSEG1 shadow
     return 0;
 }
 
 uint32_t PS2Memory::readIORegister(uint32_t address)
 {
-    // ── IPU registers (0x10002000-0x10002030) ──────────────────
-    // IPU_CMD  0x10002000: command result / FIFO output
-    // IPU_CTRL 0x10002010: status — bit 31=BUSY (always 0: we don't decode)
-    // IPU_BP   0x10002020: bitstream pointer
-    // IPU_TOP  0x10002030: top 32 bits of FIFO
     if (address >= 0x10002000 && address <= 0x10002030)
     {
-        static int ipuReadLog = 0;
         uint32_t val = 0;
         switch (address)
         {
-        case 0x10002000: // IPU_CMD — command result
+        case 0x10002000:
             val = m_ioRegisters[address];
             break;
-        case 0x10002010:                                // IPU_CTRL — always NOT busy, ECD=0
-            val = m_ioRegisters[address] & ~(1u << 31); // clear BUSY
+        case 0x10002010:
+            val = m_ioRegisters[address] & ~(1u << 31);
             break;
-        case 0x10002020: // IPU_BP
-        case 0x10002030: // IPU_TOP
+        case 0x10002020:
+        case 0x10002030:
             val = m_ioRegisters[address];
             break;
         default:
             val = 0;
             break;
-        }
-        if (ipuReadLog < 30)
-        {
-            std::cerr << "[IPU] read addr=0x" << std::hex << address
-                      << " val=0x" << val << std::dec << std::endl;
-            ++ipuReadLog;
         }
         return val;
     }
@@ -913,9 +1053,9 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
         {
             if ((address & 0xFF) == 0x00)
             {
-                // Return CHCR as-is. STR (bit 8) is cleared after DMA
-                // completion in writeIORegister, not on read.
-                return m_ioRegisters[address];
+                uint32_t channelStatus = m_ioRegisters[address] & ~0x100u;
+                m_ioRegisters[address] = channelStatus;
+                return channelStatus;
             }
         }
 
@@ -924,21 +1064,8 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
             return 0;
         }
 
-        // SIF hardware registers — HLE: pretend IOP is always ready
-        // 0x1000F200: SIF_SMCOM — IOP communication status
-        // 0x1000F210: SIF_MSCOM — EE→IOP command
-        // 0x1000F220: SIF_MSFLG — Main→Sub flags
-        // 0x1000F230: SIF_SMFLG — Sub→Main flags (IOP ready bits)
-        // 0x1000F240: SIF_CTRL  — SIF control
         if (address >= 0x1000F200 && address <= 0x1000F260)
         {
-            static std::atomic<uint64_t> sifReads{0};
-            uint64_t n = sifReads.fetch_add(1);
-            if (n < 5 || (n % 100000) == 0)
-            {
-                std::cerr << "[SIF-HW] read 0x" << std::hex << address
-                          << " #" << std::dec << n << std::endl;
-            }
             if (address == 0x1000F230)
             {
                 return 0x60000;

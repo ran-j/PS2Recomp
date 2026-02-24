@@ -186,71 +186,107 @@ namespace
 
 static void UploadFrame(Texture2D &tex, PS2Runtime *rt)
 {
-    // Try to use GS dispfb/display registers to locate the visible buffer.
     const GSRegisters &gs = rt->memory().gs();
 
-    // DISPFBUF1 fields: FBP bits 0-8, FBW bits 9-14, PSM bits 15-19.
     uint32_t dispfb = static_cast<uint32_t>(gs.dispfb1 & 0xFFFFFFFFULL);
     uint32_t fbp = dispfb & 0x1FF;
     uint32_t fbw = (dispfb >> 9) & 0x3F;
     uint32_t psm = (dispfb >> 15) & 0x1F;
 
-    // DISPLAY1 fields used here: DX[11:0], DY[22:12], MAGH[25:23], MAGV[27:26], DW[43:32], DH[54:44].
     uint64_t display64 = gs.display1;
-    uint32_t magh = static_cast<uint32_t>((display64 >> 23) & 0x7); // magnification H (0-7)
     uint32_t dw = static_cast<uint32_t>((display64 >> 32) & 0xFFF);
     uint32_t dh = static_cast<uint32_t>((display64 >> 44) & 0x7FF);
 
-    // DW is in VCK units: actual pixel width = (DW + 1) / (MAGH + 1).
-    uint32_t maghDiv = magh + 1;
-    uint32_t width = (dw + 1) / maghDiv;
+    uint32_t width = (dw + 1);
     uint32_t height = (dh + 1);
-    if (dw == 0)
+    if (width < 64 || height < 64)
+    {
         width = FB_WIDTH;
-    if (dh == 0)
         height = FB_HEIGHT;
+    }
     if (width > FB_WIDTH)
         width = FB_WIDTH;
     if (height > FB_HEIGHT)
         height = FB_HEIGHT;
 
-    // Only handle PSMCT32 (0).
-    if (psm != 0)
+    uint32_t baseBytes = fbp * 8192u;
+    const uint32_t bytesPerPixel = (psm == 2u || psm == 0x0Au) ? 2u : 4u;
+    uint32_t strideBytes = (fbw ? fbw : (FB_WIDTH / 64)) * 64 * bytesPerPixel;
+
+    std::vector<uint8_t> scratch(FB_WIDTH * FB_HEIGHT * 4, 0);
+
+    uint8_t *rdram = rt->memory().getRDRAM();
+    uint8_t *gsvram = rt->memory().getGSVRAM();
+
+    uint32_t snapSize = 0;
+    const uint8_t *snapVram = rt->gs().lockDisplaySnapshot(snapSize);
+    const uint8_t *vramSrc = (snapVram && snapSize > 0) ? snapVram : gsvram;
+
+    if (snapVram)
     {
-        // I can`t stand a random RAM glitch screen so lets use some magenta to calm down
+        baseBytes = rt->gs().getLastDisplayBaseBytes();
+    }
+
+    if (psm == 0u)
+    {
+        for (uint32_t y = 0; y < height; ++y)
+        {
+            uint32_t srcOff = baseBytes + y * strideBytes;
+            uint32_t dstOff = y * FB_WIDTH * 4;
+            uint32_t copyW = width * 4;
+            uint32_t srcIdx = srcOff;
+            if (srcIdx + copyW <= PS2_GS_VRAM_SIZE && vramSrc)
+                std::memcpy(&scratch[dstOff], vramSrc + srcIdx, copyW);
+            else
+            {
+                uint32_t rdramIdx = srcOff & PS2_RAM_MASK;
+                if (rdramIdx + copyW > PS2_RAM_SIZE)
+                    copyW = PS2_RAM_SIZE - rdramIdx;
+                std::memcpy(&scratch[dstOff], rdram + rdramIdx, copyW);
+            }
+            uint8_t *row = scratch.data() + dstOff;
+            for (uint32_t x = 0; x < width; ++x)
+                row[x * 4 + 3] = 255u;
+        }
+    }
+    else if (psm == 2u)
+    {
+        const uint32_t srcLineBytes = width * 2u;
+        for (uint32_t y = 0; y < height; ++y)
+        {
+            uint32_t srcOff = baseBytes + y * strideBytes;
+            uint32_t dstOff = y * FB_WIDTH * 4;
+            const uint8_t *src = nullptr;
+            if (srcOff + srcLineBytes <= PS2_GS_VRAM_SIZE && vramSrc)
+                src = vramSrc + srcOff;
+            else if ((srcOff & PS2_RAM_MASK) + srcLineBytes <= PS2_RAM_SIZE)
+                src = rdram + (srcOff & PS2_RAM_MASK);
+            if (!src)
+                continue;
+            uint8_t *dst = scratch.data() + dstOff;
+            for (uint32_t x = 0; x < width; ++x)
+            {
+                uint16_t p = *reinterpret_cast<const uint16_t *>(src + x * 2);
+                uint32_t r = (p >> 10) & 31u;
+                uint32_t g = (p >> 5) & 31u;
+                uint32_t b = p & 31u;
+                dst[x * 4 + 0] = static_cast<uint8_t>((r << 3) | (r >> 2));
+                dst[x * 4 + 1] = static_cast<uint8_t>((g << 3) | (g >> 2));
+                dst[x * 4 + 2] = static_cast<uint8_t>((b << 3) | (b >> 2));
+                dst[x * 4 + 3] = 255u;
+            }
+        }
+    }
+    else
+    {
+        rt->gs().unlockDisplaySnapshot();
         Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, MAGENTA);
         UpdateTexture(tex, blank.data);
         UnloadImage(blank);
         return;
     }
 
-    uint32_t baseBytes = fbp * 2048;
-    const uint32_t bytesPerPixel = (psm == 2u || psm == 0x0Au) ? 2u : 4u;
-    uint32_t strideBytes = (fbw ? fbw : (FB_WIDTH / 64)) * 64 * bytesPerPixel;
-
-    static std::vector<uint8_t> scratch(FB_WIDTH * FB_HEIGHT * 4, 0);
-    std::memset(scratch.data(), 0, scratch.size());
-
-    uint8_t *rdram = rt->memory().getRDRAM();
-    uint8_t *gsvram = rt->memory().getGSVRAM();
-    for (uint32_t y = 0; y < height; ++y)
-    {
-        uint32_t srcOff = baseBytes + y * strideBytes;
-        uint32_t dstOff = y * FB_WIDTH * 4;
-        uint32_t copyW = width * 4;
-        uint32_t srcIdx = srcOff;
-        if (srcIdx + copyW <= PS2_GS_VRAM_SIZE && gsvram)
-        {
-            std::memcpy(&scratch[dstOff], gsvram + srcIdx, copyW);
-        }
-        else
-        {
-            uint32_t rdramIdx = srcOff & PS2_RAM_MASK;
-            if (rdramIdx + copyW > PS2_RAM_SIZE)
-                copyW = PS2_RAM_SIZE - rdramIdx;
-            std::memcpy(&scratch[dstOff], rdram + rdramIdx, copyW);
-        }
-    }
+    rt->gs().unlockDisplaySnapshot();
 
     UpdateTexture(tex, scratch.data());
 }
@@ -296,6 +332,16 @@ bool PS2Runtime::initialize(const char *title)
         return false;
     }
 
+    m_gs.init(m_memory.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &m_memory.gs());
+    m_gs.reset();
+    m_gifArbiter.setProcessPacketFn([this](const uint8_t *data, uint32_t size) { m_gs.processGIFPacket(data, size); });
+    m_memory.setGifArbiter(&m_gifArbiter);
+    m_memory.setVu1MscalCallback([this](uint32_t startPC, uint32_t itop) {
+        m_vu1.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
+                      m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
+                      m_gs, &m_memory, startPC, itop, 65536);
+    });
+
     m_iop.init(m_memory.getRDRAM());
     m_iop.reset();
 
@@ -304,6 +350,8 @@ bool PS2Runtime::initialize(const char *title)
     InitAudioDevice();
     m_audioBackend.setAudioReady(IsAudioDeviceReady());
     SetTargetFPS(60);
+
+    m_vu1.reset();
 
     return true;
 }
@@ -1418,20 +1466,7 @@ void PS2Runtime::run()
     uint64_t tick = 0;
     while (!gameThreadFinished.load(std::memory_order_acquire))
     {
-        const uint32_t pc = m_debugPc.load(std::memory_order_relaxed);
-        const uint32_t ra = m_debugRa.load(std::memory_order_relaxed);
-        const uint32_t sp = m_debugSp.load(std::memory_order_relaxed);
-        const uint32_t gp = m_debugGp.load(std::memory_order_relaxed);
-
-        if ((tick++ % 120) == 0)
-        {
-            std::cout << "[run] activeThreads=" << g_activeThreads.load(std::memory_order_relaxed);
-            std::cout << " pc=0x" << std::hex << pc
-                      << " ra=0x" << ra
-                      << " sp=0x" << sp
-                      << " gp=0x" << gp
-                      << std::dec << std::endl;
-        }
+        tick++;
         if ((tick % 600) == 0)
         {
             static uint64_t lastDma = 0, lastGif = 0, lastGs = 0, lastVif = 0;
@@ -1441,28 +1476,17 @@ void PS2Runtime::run()
             uint64_t curVif = m_memory.vifWriteCount();
             if (curDma != lastDma || curGif != lastGif || curGs != lastGs || curVif != lastVif)
             {
-                std::cout << "[hw] dma_starts=" << curDma
-                          << " gif_copies=" << curGif
-                          << " gs_writes=" << curGs
-                          << " vif_writes=" << curVif << std::endl;
                 lastDma = curDma;
                 lastGif = curGif;
                 lastGs = curGs;
                 lastVif = curVif;
             }
         }
+        UploadFrame(frameTex, this);
+
         BeginDrawing();
         ClearBackground(BLACK);
-
-        bool gpuRendered = gsGpuRenderFrame();
-
-        if (!gpuRendered)
-        {
-            // lets draw for now as debug but we wont need this in future
-            UploadFrame(frameTex, this);
-            DrawTexture(frameTex, 0, 0, WHITE);
-        }
-
+        DrawTexture(frameTex, 0, 0, WHITE);
         EndDrawing();
 
         if (WindowShouldClose())

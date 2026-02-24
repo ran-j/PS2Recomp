@@ -7,6 +7,9 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <string>
+
+std::string translatePs2Path(const char *ps2Path);
 
 extern std::atomic<int> g_activeThreads;
 

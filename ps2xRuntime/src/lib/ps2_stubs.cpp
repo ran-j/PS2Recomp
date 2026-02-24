@@ -1,5 +1,6 @@
 #include "ps2_stubs.h"
 #include "ps2_runtime.h"
+#include "ps2_runtime_macros.h"
 #include "ps2_syscalls.h"
 #include <iostream>
 #include <algorithm>
