@@ -1337,33 +1337,46 @@ void sceOpen(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void scePadEnd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    (void)rdram;
+    (void)runtime;
     setReturnS32(ctx, 1);
 }
 
 void scePadEnterPressMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    (void)rdram;
+    (void)runtime;
     setReturnS32(ctx, 1);
 }
 
 void scePadExitPressMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    (void)rdram;
+    (void)runtime;
     setReturnS32(ctx, 1);
 }
 
 void scePadGetButtonMask(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    (void)rdram;
+    (void)runtime;
+    // Report all buttons supported.
     setReturnS32(ctx, static_cast<int32_t>(0xFFFFu));
 }
 
 void scePadGetDmaStr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    (void)rdram;
+    (void)runtime;
     setReturnU32(ctx, getRegU32(ctx, 6));
 }
 
 void scePadGetFrameCount(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    static uint32_t frameCount = 0u;
-    setReturnU32(ctx, ++frameCount);
+    (void)rdram;
+    (void)runtime;
+    static std::atomic<uint32_t> frameCount{0};
+    setReturnU32(ctx, frameCount++);
 }
 
 void scePadGetModVersion(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1418,6 +1431,9 @@ void scePadInfoAct(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void scePadInfoComb(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    (void)rdram;
+    (void)runtime;
+    // No combined modes reported.
     setReturnS32(ctx, 0);
 }
 
@@ -1509,90 +1525,145 @@ void scePadRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         setReturnS32(ctx, 0);
         return;
     }
-    if (runtime && runtime->padBackend().readState(port, slot, data, 32))
+
+    PadInputState state;
+    bool useOverride = false;
     {
-        setReturnS32(ctx, 1);
-        return;
+        std::lock_guard<std::mutex> lock(g_padOverrideMutex);
+        if (g_padOverrideEnabled)
+        {
+            state = g_padOverrideState;
+            useOverride = true;
+        }
     }
-    std::memset(data, 0, 32);
-    data[1] = 0x73;
-    data[2] = data[3] = 0xFF;
-    data[4] = data[5] = data[6] = data[7] = 0x80;
+
+    if (!useOverride)
+    {
+        if (runtime && runtime->padBackend().readState(port, slot, data, 32))
+        {
+            setReturnS32(ctx, 1);
+            return;
+        }
+
+        applyGamepadState(state);
+        applyKeyboardState(state, true);
+    }
+
+    fillPadStatus(data, state);
+
+    if (padDebugEnabled())
+    {
+        static uint32_t logCounter = 0;
+        if ((logCounter++ % 60u) == 0u)
+        {
+            std::cout << "[pad] buttons=0x" << std::hex << state.buttons << std::dec
+                      << " lx=" << static_cast<int>(state.lx)
+                      << " ly=" << static_cast<int>(state.ly)
+                      << " rx=" << static_cast<int>(state.rx)
+                      << " ry=" << static_cast<int>(state.ry)
+                      << (useOverride ? " (override)" : "") << std::endl;
+        }
+    }
+
     setReturnS32(ctx, 1);
 }
 
 void scePadReqIntToStr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    const uint32_t outAddr = getRegU32(ctx, 5);
-    if (uint8_t *out = getMemPtr(rdram, outAddr))
+    (void)runtime;
+    const uint32_t state = getRegU32(ctx, 4);
+    const uint32_t strAddr = getRegU32(ctx, 5);
+    char *buf = reinterpret_cast<char *>(getMemPtr(rdram, strAddr));
+    if (!buf)
     {
-        constexpr const char *kReq = "COMPLETE";
-        std::memcpy(out, kReq, std::strlen(kReq) + 1u);
-        setReturnU32(ctx, outAddr);
+        setReturnS32(ctx, -1);
         return;
     }
-    setReturnU32(ctx, 0u);
+
+    const char *text = (state == 0) ? "COMPLETE" : "BUSY";
+    std::strncpy(buf, text, 31);
+    buf[31] = '\0';
+    setReturnS32(ctx, 0);
 }
 
 void scePadSetActAlign(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    (void)rdram;
+    (void)runtime;
     setReturnS32(ctx, 1);
 }
 
 void scePadSetActDirect(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    (void)rdram;
+    (void)runtime;
     setReturnS32(ctx, 1);
 }
 
 void scePadSetButtonInfo(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    (void)rdram;
+    (void)runtime;
     setReturnS32(ctx, 1);
 }
 
 void scePadSetMainMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    (void)rdram;
+    (void)runtime;
     setReturnS32(ctx, 1);
 }
 
 void scePadSetReqState(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    (void)rdram;
+    (void)runtime;
     setReturnS32(ctx, 1);
 }
 
 void scePadSetVrefParam(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    (void)rdram;
+    (void)runtime;
     setReturnS32(ctx, 1);
 }
 
 void scePadSetWarningLevel(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    setReturnS32(ctx, 1);
+    (void)rdram;
+    (void)runtime;
+    setReturnS32(ctx, 0);
 }
 
 void scePadStateIntToStr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    const int32_t state = static_cast<int32_t>(getRegU32(ctx, 4));
-    const uint32_t outAddr = getRegU32(ctx, 5);
-    const char *label = "UNKNOWN";
-    switch (state)
+    (void)runtime;
+    const uint32_t state = getRegU32(ctx, 4);
+    const uint32_t strAddr = getRegU32(ctx, 5);
+    char *buf = reinterpret_cast<char *>(getMemPtr(rdram, strAddr));
+    if (!buf)
     {
-    case 0:
-        label = "DISCONN";
-        break;
-    case 6:
-        label = "STABLE";
-        break;
-    default:
-        break;
-    }
-
-    if (uint8_t *out = getMemPtr(rdram, outAddr))
-    {
-        std::memcpy(out, label, std::strlen(label) + 1u);
-        setReturnU32(ctx, outAddr);
+        setReturnS32(ctx, -1);
         return;
     }
-    setReturnU32(ctx, 0u);
+
+    const char *text = "UNKNOWN";
+    if (state == 6)
+    {
+        text = "STABLE";
+    }
+    else if (state == 1)
+    {
+        text = "FINDPAD";
+    }
+    else if (state == 0)
+    {
+        text = "DISCONNECTED";
+    }
+
+    std::strncpy(buf, text, 31);
+    buf[31] = '\0';
+    setReturnS32(ctx, 0);
 }
 
 void scePrintf(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
