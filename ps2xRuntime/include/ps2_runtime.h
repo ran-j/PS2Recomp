@@ -22,6 +22,9 @@
 #include <iomanip>
 
 #include "ps2_memory.h"
+#include "ps2_iop.h"
+#include "ps2_audio.h"
+#include "ps2_pad.h"
 
 enum PS2Exception
 {
@@ -457,6 +460,13 @@ public:
     inline PS2Memory &memory() { return m_memory; }
     inline const PS2Memory &memory() const { return m_memory; }
 
+    inline IOP &iop() { return m_iop; }
+    inline const IOP &iop() const { return m_iop; }
+    inline PS2AudioBackend &audioBackend() { return m_audioBackend; }
+    inline const PS2AudioBackend &audioBackend() const { return m_audioBackend; }
+    inline PSPadBackend &padBackend() { return m_padBackend; }
+    inline const PSPadBackend &padBackend() const { return m_padBackend; }
+
 private:
     struct GuestHeapBlock
     {
@@ -481,6 +491,9 @@ private:
 
 private:
     PS2Memory m_memory;
+    IOP m_iop;
+    PS2AudioBackend m_audioBackend;
+    PSPadBackend m_padBackend;
     R5900Context m_cpuContext;
     mutable std::mutex m_guestHeapMutex;
     std::vector<GuestHeapBlock> m_guestHeapBlocks;

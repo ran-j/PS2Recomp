@@ -296,8 +296,13 @@ bool PS2Runtime::initialize(const char *title)
         return false;
     }
 
+    m_iop.init(m_memory.getRDRAM());
+    m_iop.reset();
+
     SetConfigFlags(FLAG_WINDOW_RESIZABLE);
     InitWindow(FB_WIDTH, FB_HEIGHT, title);
+    InitAudioDevice();
+    m_audioBackend.setAudioReady(IsAudioDeviceReady());
     SetTargetFPS(60);
 
     return true;
