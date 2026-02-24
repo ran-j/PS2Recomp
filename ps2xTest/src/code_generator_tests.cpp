@@ -393,6 +393,158 @@ void register_code_generator_tests()
             t.IsTrue(ctc2Code.find("Unimplemented CTC2 VU CReg") == std::string::npos, "CTC2 should not hit unimplemented CReg path");
         });
 
+        tc.Run("scalar logical immediates emit low64 operations", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+
+            Instruction andi{};
+            andi.opcode = OPCODE_ANDI;
+            andi.rs = 4;
+            andi.rt = 5;
+            andi.immediate = 0xABCD;
+
+            std::string andiCode = gen.translateInstruction(andi);
+            t.IsTrue(andiCode.find("SET_GPR_U64(ctx, 5, GPR_U64(ctx, 4) & (uint64_t)(uint16_t)43981);") != std::string::npos,
+                     "ANDI should use low64 scalar emission");
+            t.IsTrue(andiCode.find("SET_GPR_VEC") == std::string::npos,
+                     "ANDI should not use vector emission");
+
+            Instruction ori{};
+            ori.opcode = OPCODE_ORI;
+            ori.rs = 6;
+            ori.rt = 7;
+            ori.immediate = 0x1234;
+
+            std::string oriCode = gen.translateInstruction(ori);
+            t.IsTrue(oriCode.find("SET_GPR_U64(ctx, 7, GPR_U64(ctx, 6) | (uint64_t)(uint16_t)4660);") != std::string::npos,
+                     "ORI should use low64 scalar emission");
+            t.IsTrue(oriCode.find("SET_GPR_VEC") == std::string::npos,
+                     "ORI should not use vector emission");
+
+            Instruction xori{};
+            xori.opcode = OPCODE_XORI;
+            xori.rs = 8;
+            xori.rt = 9;
+            xori.immediate = 0x00FF;
+
+            std::string xoriCode = gen.translateInstruction(xori);
+            t.IsTrue(xoriCode.find("SET_GPR_U64(ctx, 9, GPR_U64(ctx, 8) ^ (uint64_t)(uint16_t)255);") != std::string::npos,
+                     "XORI should use low64 scalar emission");
+            t.IsTrue(xoriCode.find("SET_GPR_VEC") == std::string::npos,
+                     "XORI should not use vector emission");
+        });
+
+        tc.Run("scalar logical register ops emit low64 operations", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+
+            Instruction andInst{};
+            andInst.opcode = OPCODE_SPECIAL;
+            andInst.function = SPECIAL_AND;
+            andInst.rs = 2;
+            andInst.rt = 3;
+            andInst.rd = 1;
+
+            std::string andCode = gen.translateInstruction(andInst);
+            t.IsTrue(andCode.find("SET_GPR_U64(ctx, 1, GPR_U64(ctx, 2) & GPR_U64(ctx, 3));") != std::string::npos,
+                     "AND should use low64 scalar emission");
+
+            Instruction orInst{};
+            orInst.opcode = OPCODE_SPECIAL;
+            orInst.function = SPECIAL_OR;
+            orInst.rs = 4;
+            orInst.rt = 5;
+            orInst.rd = 6;
+
+            std::string orCode = gen.translateInstruction(orInst);
+            t.IsTrue(orCode.find("SET_GPR_U64(ctx, 6, GPR_U64(ctx, 4) | GPR_U64(ctx, 5));") != std::string::npos,
+                     "OR should use low64 scalar emission");
+
+            Instruction xorInst{};
+            xorInst.opcode = OPCODE_SPECIAL;
+            xorInst.function = SPECIAL_XOR;
+            xorInst.rs = 7;
+            xorInst.rt = 8;
+            xorInst.rd = 9;
+
+            std::string xorCode = gen.translateInstruction(xorInst);
+            t.IsTrue(xorCode.find("SET_GPR_U64(ctx, 9, GPR_U64(ctx, 7) ^ GPR_U64(ctx, 8));") != std::string::npos,
+                     "XOR should use low64 scalar emission");
+
+            Instruction norInst{};
+            norInst.opcode = OPCODE_SPECIAL;
+            norInst.function = SPECIAL_NOR;
+            norInst.rs = 10;
+            norInst.rt = 11;
+            norInst.rd = 12;
+
+            std::string norCode = gen.translateInstruction(norInst);
+            t.IsTrue(norCode.find("SET_GPR_U64(ctx, 12, ~(GPR_U64(ctx, 10) | GPR_U64(ctx, 11)));") != std::string::npos,
+                     "NOR should use low64 scalar emission");
+            t.IsTrue(norCode.find("SET_GPR_VEC") == std::string::npos,
+                     "SPECIAL logical ops should not use vector emission");
+        });
+
+        tc.Run("SC requires matching LL reservation address", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+
+            Instruction sc{};
+            sc.opcode = OPCODE_SC;
+            sc.rs = 9;
+            sc.rt = 10;
+            sc.simmediate = static_cast<uint32_t>(static_cast<int16_t>(4));
+
+            std::string out = gen.translateInstruction(sc);
+            t.IsTrue(out.find("ctx->llbit && ctx->lladdr == addr") != std::string::npos,
+                     "SC must require both llbit and matching lladdr");
+            t.IsTrue(out.find("ctx->llbit = 0; ctx->lladdr = 0;") != std::string::npos,
+                     "SC must clear reservation state after attempting the store");
+        });
+
+        tc.Run("QFSRV translation uses runtime helper macro", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+
+            Instruction qfsrv{};
+            qfsrv.isMMI = true;
+            qfsrv.opcode = OPCODE_MMI;
+            qfsrv.function = MMI_MMI1;
+            qfsrv.sa = MMI1_QFSRV;
+            qfsrv.rd = 3;
+            qfsrv.rs = 4;
+            qfsrv.rt = 5;
+
+            std::string out = gen.translateInstruction(qfsrv);
+            t.IsTrue(out.find("PS2_QFSRV(GPR_VEC(ctx, 4), GPR_VEC(ctx, 5), ctx->sa & 0x7F)") != std::string::npos,
+                     "QFSRV should map to PS2_QFSRV with rs/rt ordering");
+        });
+
+        tc.Run("PCPYLD and PEXEW use runtime helper macros", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+
+            Instruction pcpyld{};
+            pcpyld.isMMI = true;
+            pcpyld.opcode = OPCODE_MMI;
+            pcpyld.function = MMI_MMI2;
+            pcpyld.sa = MMI2_PCPYLD;
+            pcpyld.rd = 6;
+            pcpyld.rs = 7;
+            pcpyld.rt = 8;
+
+            std::string pcpyldOut = gen.translateInstruction(pcpyld);
+            t.IsTrue(pcpyldOut.find("PS2_PCPYLD(GPR_VEC(ctx, 7), GPR_VEC(ctx, 8))") != std::string::npos,
+                     "PCPYLD should use PS2_PCPYLD helper");
+
+            Instruction pexew{};
+            pexew.isMMI = true;
+            pexew.opcode = OPCODE_MMI;
+            pexew.function = MMI_MMI2;
+            pexew.sa = MMI2_PEXEW;
+            pexew.rd = 9;
+            pexew.rs = 10;
+
+            std::string pexewOut = gen.translateInstruction(pexew);
+            t.IsTrue(pexewOut.find("PS2_PEXEW(GPR_VEC(ctx, 10))") != std::string::npos,
+                     "PEXEW should use PS2_PEXEW helper");
+        });
+
         tc.Run("VU0 macro mappings cover all S1/S2 enums", [](TestCase &t) {
             const std::vector<std::string> candidates = {
                 "ps2xRecomp/include/ps2recomp/instructions.h",
