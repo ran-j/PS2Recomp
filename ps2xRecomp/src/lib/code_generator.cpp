@@ -376,6 +376,13 @@ namespace ps2recomp
                 ss << "        " << delaySlotPrefix << delaySlotCode << delaySlotSuffix << "\n";
             }
 
+            if (branchInst.function == SPECIAL_JALR)
+            {
+                ss << "        if (jumpTarget == 0u) {\n";
+                ss << fmt::format("            ctx->pc = 0x{:X}u;\n", fallthroughPc);
+                ss << "        } else {\n";
+            }
+
             ss << "        ctx->pc = jumpTarget;\n";
 
             if (!sortedInternalTargets.empty())
@@ -401,6 +408,11 @@ namespace ps2recomp
                 ss << "            targetFn(rdram, ctx, runtime);\n";
                 ss << fmt::format("            if (ctx->pc == __entryPc) {{ ctx->pc = 0x{:X}u; }}\n", fallthroughPc);
                 ss << fmt::format("            if (ctx->pc != 0x{:X}u) {{ return; }}\n", fallthroughPc);
+                ss << "        }\n";
+            }
+
+            if (branchInst.function == SPECIAL_JALR)
+            {
                 ss << "        }\n";
             }
 
@@ -964,11 +976,11 @@ namespace ps2recomp
         case OPCODE_SLTIU:
             return fmt::format("SET_GPR_U64(ctx, {}, ((uint64_t)GPR_U64(ctx, {}) < (uint64_t)(int64_t)(int32_t){}) ? 1 : 0);", inst.rt, inst.rs, inst.simmediate);
         case OPCODE_ANDI:
-            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PAND(GPR_VEC(ctx, {}), _mm_cvtsi32_si128((int){}{})));", inst.rt, inst.rs, inst.immediate, "u");
+            return fmt::format("SET_GPR_U64(ctx, {}, GPR_U64(ctx, {}) & (uint64_t)(uint16_t){});", inst.rt, inst.rs, inst.immediate);
         case OPCODE_ORI:
-            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_POR(GPR_VEC(ctx, {}), _mm_cvtsi32_si128((int){}{})));", inst.rt, inst.rs, inst.immediate, "u");
+            return fmt::format("SET_GPR_U64(ctx, {}, GPR_U64(ctx, {}) | (uint64_t)(uint16_t){});", inst.rt, inst.rs, inst.immediate);
         case OPCODE_XORI:
-            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PXOR(GPR_VEC(ctx, {}), _mm_cvtsi32_si128((int){}{})));", inst.rt, inst.rs, inst.immediate, "u");
+            return fmt::format("SET_GPR_U64(ctx, {}, GPR_U64(ctx, {}) ^ (uint64_t)(uint16_t){});", inst.rt, inst.rs, inst.immediate);
         case OPCODE_LUI:
             return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)((uint32_t){} << 16));", inst.rt, inst.immediate);
         case OPCODE_LB:
@@ -1140,10 +1152,10 @@ namespace ps2recomp
         case OPCODE_SC:
             return fmt::format(
                 "{{ uint32_t addr = ADD32(GPR_U32(ctx, {}), {}); "
-                "if (ctx->llbit) {{ WRITE32(addr, GPR_U32(ctx, {})); "
+                "if (ctx->llbit && ctx->lladdr == addr) {{ WRITE32(addr, GPR_U32(ctx, {})); "
                 "SET_GPR_S32(ctx, {}, 1); }} "
                 "else {{ SET_GPR_S32(ctx, {}, 0); }} "
-                "ctx->llbit = 0; }}",
+                "ctx->llbit = 0; ctx->lladdr = 0; }}",
                 inst.rs, inst.simmediate, inst.rt, inst.rt, inst.rt);
         default:
             return fmt::format("// Unhandled opcode: 0x{:X}", inst.opcode);
@@ -1233,13 +1245,13 @@ namespace ps2recomp
         case SPECIAL_SUBU:
             return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)SUB32(GPR_U32(ctx, {}), GPR_U32(ctx, {})));", inst.rd, inst.rs, inst.rt);
         case SPECIAL_AND:
-            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PAND(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", inst.rd, inst.rs, inst.rt);
+            return fmt::format("SET_GPR_U64(ctx, {}, GPR_U64(ctx, {}) & GPR_U64(ctx, {}));", inst.rd, inst.rs, inst.rt);
         case SPECIAL_OR:
-            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_POR(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", inst.rd, inst.rs, inst.rt);
+            return fmt::format("SET_GPR_U64(ctx, {}, GPR_U64(ctx, {}) | GPR_U64(ctx, {}));", inst.rd, inst.rs, inst.rt);
         case SPECIAL_XOR:
-            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PXOR(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", inst.rd, inst.rs, inst.rt);
+            return fmt::format("SET_GPR_U64(ctx, {}, GPR_U64(ctx, {}) ^ GPR_U64(ctx, {}));", inst.rd, inst.rs, inst.rt);
         case SPECIAL_NOR:
-            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PNOR(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", inst.rd, inst.rs, inst.rt);
+            return fmt::format("SET_GPR_U64(ctx, {}, ~(GPR_U64(ctx, {}) | GPR_U64(ctx, {})));", inst.rd, inst.rs, inst.rt);
         case SPECIAL_SLT:
             return fmt::format("SET_GPR_U64(ctx, {}, ((int64_t)GPR_S64(ctx, {}) < (int64_t)GPR_S64(ctx, {})) ? 1 : 0);", inst.rd, inst.rs, inst.rt);
         case SPECIAL_SLTU:
@@ -2535,9 +2547,9 @@ namespace ps2recomp
 
     std::string CodeGenerator::translatePCPYLD(const Instruction &inst)
     {
-        // Copies lower 64 of rs to lower 64 of rd, lower 64 of rt to upper 64 of rd
-        return fmt::format("SET_GPR_VEC(ctx, {}, _mm_unpacklo_epi64(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));",
-                           inst.rd, inst.rs, inst.rt); // Order matters for unpack
+        // PCPYLD uses rs as the upper source and rt as the lower source.
+        return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PCPYLD(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));",
+                           inst.rd, inst.rs, inst.rt);
     }
 
     std::string CodeGenerator::translatePMADDH(const Instruction &inst)
@@ -2663,8 +2675,7 @@ namespace ps2recomp
 
     std::string CodeGenerator::translatePEXEW(const Instruction &inst)
     {
-        // Swaps words 0<->2 and 1<->3
-        return fmt::format("SET_GPR_VEC(ctx, {}, _mm_shuffle_epi32(GPR_VEC(ctx, {}), _MM_SHUFFLE(1,0,3,2)));",
+        return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PEXEW(GPR_VEC(ctx, {})));",
                            inst.rd, inst.rs);
     }
 
@@ -3553,42 +3564,9 @@ namespace ps2recomp
         uint8_t rd = inst.rd;
         uint8_t rs = inst.rs;
         uint8_t rt = inst.rt;
-        // PS2 MMI QFSRV uses the lower 7 bits of the SA register.
-        return fmt::format(
-            "{{ \n"
-            "    __m128i val_rt = GPR_VEC(ctx, {});\n"       // Get rt (higher bits of the 256-bit value)
-            "    __m128i val_rs = GPR_VEC(ctx, {});\n"       // Get rs (lower bits of the 256-bit value)
-            "    uint32_t shift_amount = ctx->sa & 0x7F; \n" // Get shift amount (0-127) from SA reg
-
-            // Perform the shift using 64-bit parts for easier SSE2 implementation
-            "    uint64_t rt_hi = _mm_cvtsi128_si64(_mm_srli_si128(val_rt, 8));\n"
-            "    uint64_t rt_lo = _mm_cvtsi128_si64(val_rt);\n"
-            "    uint64_t rs_hi = _mm_cvtsi128_si64(_mm_srli_si128(val_rs, 8));\n"
-            "    uint64_t rs_lo = _mm_cvtsi128_si64(val_rs);\n"
-
-            "    __m128i result; \n"
-            "    if (shift_amount == 0) {{ \n"
-            "        result = val_rs; \n" // No shift, result is just rs
-            "    }} else if (shift_amount < 64) {{ \n"
-            "        uint64_t res_lo = (rs_lo >> shift_amount) | (rs_hi << (64 - shift_amount)); \n"
-            "        uint64_t res_hi = (rs_hi >> shift_amount) | (rt_lo << (64 - shift_amount)); \n"
-            "        result = _mm_set_epi64x(res_hi, res_lo); \n"
-            "    }} else if (shift_amount == 64) {{ \n"
-            "        result = _mm_set_epi64x(rt_lo, rs_hi); \n" // Shift exactly 64 bits
-            "    }} else if (shift_amount < 128) {{ \n"         // shift_amount > 64
-            "        uint32_t sub_shift = shift_amount - 64; \n"
-            "        uint64_t res_lo = (rs_hi >> sub_shift) | (rt_lo << (64 - sub_shift)); \n"
-            "        uint64_t res_hi = (rt_lo >> sub_shift) | (rt_hi << (64 - sub_shift)); \n"
-            "        result = _mm_set_epi64x(res_hi, res_lo); \n"
-            "    }} else {{ // shift_amount >= 128 \n"
-            "         uint32_t sub_shift = shift_amount - 128; \n"
-            "         uint64_t res_lo = (rt_lo >> sub_shift) | (rt_hi << (64 - sub_shift)); \n" // Shift rt into result
-            "         uint64_t res_hi = (rt_hi >> sub_shift); \n"                               // Shift hi part of rt
-            "         result = _mm_set_epi64x(res_hi, res_lo); \n"
-            "    }} \n"
-            "    SET_GPR_VEC(ctx, {}, result); \n"
-            "}}",
-            rt, rs, rd);
+        // QFSRV semantics are centralized in runtime macro helpers.
+        return fmt::format("SET_GPR_VEC(ctx, {}, PS2_QFSRV(GPR_VEC(ctx, {}), GPR_VEC(ctx, {}), ctx->sa & 0x7F));",
+                           rd, rs, rt);
     }
 
     std::string CodeGenerator::generateFunctionRegistration(const std::vector<Function> &functions,
