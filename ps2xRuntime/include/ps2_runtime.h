@@ -21,8 +21,11 @@
 #include <iostream>
 #include <iomanip>
 
+#include "ps2_gif_arbiter.h"
 #include "ps2_memory.h"
+#include "ps2_gs_gpu.h"
 #include "ps2_iop.h"
+#include "ps2_vu1.h"
 #include "ps2_audio.h"
 #include "ps2_pad.h"
 
@@ -460,6 +463,13 @@ public:
     inline PS2Memory &memory() { return m_memory; }
     inline const PS2Memory &memory() const { return m_memory; }
 
+    inline GS &gs() { return m_gs; }
+    inline const GS &gs() const { return m_gs; }
+    inline GifArbiter &gifArbiter() { return m_gifArbiter; }
+    inline const GifArbiter &gifArbiter() const { return m_gifArbiter; }
+    inline VU1Interpreter &vu1() { return m_vu1; }
+    inline const VU1Interpreter &vu1() const { return m_vu1; }
+
     inline IOP &iop() { return m_iop; }
     inline const IOP &iop() const { return m_iop; }
     inline PS2AudioBackend &audioBackend() { return m_audioBackend; }
@@ -491,9 +501,12 @@ private:
 
 private:
     PS2Memory m_memory;
+    GifArbiter m_gifArbiter;
+    GS m_gs;
     IOP m_iop;
     PS2AudioBackend m_audioBackend;
     PSPadBackend m_padBackend;
+    VU1Interpreter m_vu1;
     R5900Context m_cpuContext;
     mutable std::mutex m_guestHeapMutex;
     std::vector<GuestHeapBlock> m_guestHeapBlocks;

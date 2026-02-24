@@ -942,6 +942,298 @@ void sceFsReset(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     setReturnS32(ctx, 0);
 }
 
+static void writeU32AtGp(uint8_t *rdram, uint32_t gp, int32_t offset, uint32_t value)
+{
+    const uint32_t addr = gp + static_cast<uint32_t>(offset);
+    if (uint8_t *p = getMemPtr(rdram, addr))
+        *reinterpret_cast<uint32_t *>(p) = value;
+}
+
+void sceeFontInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t gp = getRegU32(ctx, 28);
+    const uint32_t a0 = getRegU32(ctx, 4);
+    const uint32_t a1 = getRegU32(ctx, 5);
+    const uint32_t a2 = getRegU32(ctx, 6);
+    const uint32_t a3 = getRegU32(ctx, 7);
+    writeU32AtGp(rdram, gp, -0x7b60, a1);
+    writeU32AtGp(rdram, gp, -0x7b5c, a2);
+    writeU32AtGp(rdram, gp, -0x7b64, a0);
+    writeU32AtGp(rdram, gp, -0x7c98, a3);
+    writeU32AtGp(rdram, gp, -0x7b4c, 0x7f7f7f7f);
+    writeU32AtGp(rdram, gp, -0x7b50, 0x3f800000);
+    writeU32AtGp(rdram, gp, -0x7b54, 0x3f800000);
+    writeU32AtGp(rdram, gp, -0x7b58, 0);
+
+    if (runtime && a0 != 0u)
+    {
+        if ((a0 * 256u) + 64u <= PS2_GS_VRAM_SIZE)
+        {
+            uint32_t clutData[16];
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                uint8_t alpha = static_cast<uint8_t>((i * 0x80u) / 15u);
+                clutData[i] = (i == 0)
+                    ? 0x00000000u
+                    : (0x80u | (0x80u << 8) | (0x80u << 16) | (static_cast<uint32_t>(alpha) << 24));
+            }
+            constexpr uint32_t kClutQwc = 4u;
+            constexpr uint32_t kHeaderQwc = 6u;
+            constexpr uint32_t kTotalQwc = kHeaderQwc + kClutQwc;
+            uint32_t pktAddr = runtime->guestMalloc(kTotalQwc * 16u, 16u);
+            if (pktAddr != 0u)
+            {
+                uint8_t *pkt = getMemPtr(rdram, pktAddr);
+                if (pkt)
+                {
+                    uint64_t *q = reinterpret_cast<uint64_t *>(pkt);
+                    const uint32_t dbp = a0 & 0x3FFFu;
+                    constexpr uint8_t psm = 0u;
+                    q[0] = (4ULL << 60) | (1ULL << 56) | 1ULL;
+                    q[1] = 0x0E0E0E0E0E0E0E0EULL;
+                    q[2] = (static_cast<uint64_t>(dbp) << 32) | (1ULL << 48) | (static_cast<uint64_t>(psm) << 56);
+                    q[3] = 0x50ULL;
+                    q[4] = 0ULL;
+                    q[5] = 0x51ULL;
+                    q[6] = 16ULL | (1ULL << 32);
+                    q[7] = 0x52ULL;
+                    q[8] = 0ULL;
+                    q[9] = 0x53ULL;
+                    q[10] = (2ULL << 58) | (kClutQwc & 0x7FFF) | (1ULL << 15);
+                    q[11] = 0ULL;
+                    std::memcpy(pkt + 12u * 8u, clutData, 64u);
+                    constexpr uint32_t GIF_CHANNEL = 0x1000A000;
+                    constexpr uint32_t CHCR_STR_MODE0 = 0x101u;
+                    runtime->memory().writeIORegister(GIF_CHANNEL + 0x10u, pktAddr);
+                    runtime->memory().writeIORegister(GIF_CHANNEL + 0x20u, kTotalQwc & 0xFFFFu);
+                    runtime->memory().writeIORegister(GIF_CHANNEL + 0x00u, CHCR_STR_MODE0);
+                    runtime->memory().processPendingTransfers();
+                }
+            }
+        }
+    }
+
+    setReturnS32(ctx, static_cast<int32_t>(a0 + 4));
+}
+
+void sceeFontLoadFont(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    static constexpr uint32_t kFontBase = 0x176148u;
+    static constexpr uint32_t kFontEntrySz = 0x24u;
+
+    const uint32_t fontDataAddr = getRegU32(ctx, 4);
+    const int fontId = static_cast<int>(getRegU32(ctx, 5));
+    const int tbp0 = static_cast<int>(getRegU32(ctx, 7));
+
+    if (!fontDataAddr || !runtime)
+    {
+        setReturnS32(ctx, tbp0);
+        return;
+    }
+
+    const uint8_t *fontPtr = getConstMemPtr(rdram, fontDataAddr);
+    if (!fontPtr)
+    {
+        setReturnS32(ctx, tbp0);
+        return;
+    }
+
+    int width = static_cast<int>(*reinterpret_cast<const uint32_t *>(fontPtr + 0x00u));
+    int height = static_cast<int>(*reinterpret_cast<const uint32_t *>(fontPtr + 0x04u));
+    uint32_t raw8 = *reinterpret_cast<const uint32_t *>(fontPtr + 0x08u);
+    int fontDataSz = static_cast<int>(*reinterpret_cast<const uint32_t *>(fontPtr + 0x0cu));
+
+    uint32_t pointsize = raw8;
+    uint32_t fontOff = static_cast<uint32_t>(fontId * static_cast<int>(kFontEntrySz));
+    if (raw8 & 0x40000000u)
+    {
+        pointsize = raw8 - 0x40000000u;
+        if (uint8_t *p = getMemPtr(rdram, kFontBase + fontOff + 0x20u))
+            *reinterpret_cast<uint32_t *>(p) = 1u;
+    }
+    else
+    {
+        if (uint8_t *p = getMemPtr(rdram, kFontBase + fontOff + 0x20u))
+            *reinterpret_cast<uint32_t *>(p) = 0u;
+    }
+
+    int tw = (width >= 0) ? (width >> 6) : ((width + 0x3f) >> 6);
+    int qwc = (fontDataSz >= 0) ? (fontDataSz >> 4) : ((fontDataSz + 0xf) >> 4);
+
+    uint32_t glyphSrc = fontDataAddr + static_cast<uint32_t>(fontDataSz) + 0x10u;
+    uint32_t glyphAlloc = runtime->guestMalloc(0x2010u, 0x40u);
+    if (uint8_t *p = getMemPtr(rdram, kFontBase + fontOff))
+        *reinterpret_cast<uint32_t *>(p) = glyphAlloc;
+
+    if (glyphAlloc != 0u)
+    {
+        uint8_t *dst = getMemPtr(rdram, glyphAlloc);
+        const uint8_t *src = getConstMemPtr(rdram, glyphSrc);
+        if (dst && src)
+            std::memcpy(dst, src, 0x2010u);
+    }
+
+    uint32_t isDoubleByte = 0;
+    if (const uint8_t *p = getConstMemPtr(rdram, kFontBase + fontOff + 0x20u))
+        isDoubleByte = *reinterpret_cast<const uint32_t *>(p);
+    if (isDoubleByte == 0u)
+    {
+        uint32_t kernSrc = glyphSrc + 0x2010u;
+        uint32_t kernAlloc = runtime->guestMalloc(0xc400u, 0x40u);
+        if (glyphAlloc != 0u)
+        {
+            uint8_t *kernSlot = getMemPtr(rdram, glyphAlloc + 0x2000u);
+            if (kernSlot)
+                *reinterpret_cast<uint32_t *>(kernSlot) = kernAlloc;
+        }
+        if (kernAlloc != 0u)
+        {
+            uint8_t *dst = getMemPtr(rdram, kernAlloc);
+            const uint8_t *src = getConstMemPtr(rdram, kernSrc);
+            if (dst && src)
+                std::memcpy(dst, src, 0xc400u);
+        }
+    }
+
+    auto writeFontField = [&](uint32_t off, uint32_t val)
+    {
+        if (uint8_t *p = getMemPtr(rdram, kFontBase + fontOff + off))
+            *reinterpret_cast<uint32_t *>(p) = val;
+    };
+    writeFontField(0x18u, pointsize);
+    writeFontField(0x08u, static_cast<uint32_t>(tbp0));
+    writeFontField(0x0cu, static_cast<uint32_t>(tw));
+
+    int logW = 0;
+    for (int w = width; w != 1 && w != 0; w = static_cast<int>(static_cast<uint32_t>(w) >> 1))
+        logW++;
+    writeFontField(0x10u, static_cast<uint32_t>(logW));
+
+    int logH = 0;
+    for (int h = height; h != 1 && h != 0; h = static_cast<int>(static_cast<uint32_t>(h) >> 1))
+        logH++;
+    writeFontField(0x14u, static_cast<uint32_t>(logH));
+    writeFontField(0x04u, 0u);
+    writeFontField(0x1cu, getRegU32(ctx, 6));
+
+    if (qwc > 0)
+    {
+        const uint32_t imageBytes = static_cast<uint32_t>(qwc) * 16u;
+        const uint8_t psm = 20u;
+        const uint32_t headerQwc = 12u;
+        const uint32_t imageQwc = static_cast<uint32_t>(qwc);
+        const uint32_t totalQwc = headerQwc + imageQwc;
+        uint32_t pktAddr = runtime->guestMalloc(totalQwc * 16u, 16u);
+        if (pktAddr != 0u)
+        {
+            uint8_t *pkt = getMemPtr(rdram, pktAddr);
+            const uint8_t *imgSrc = getConstMemPtr(rdram, fontDataAddr + 0x10u);
+            if (pkt && imgSrc)
+            {
+                uint64_t *q = reinterpret_cast<uint64_t *>(pkt);
+                const uint32_t dbp = static_cast<uint32_t>(tbp0) & 0x3FFFu;
+                const uint32_t dbw = static_cast<uint32_t>(tw > 0 ? tw : 1) & 0x3Fu;
+                const uint32_t rrw = static_cast<uint32_t>(width > 0 ? width : 64);
+                const uint32_t rrh = static_cast<uint32_t>(height > 0 ? height : 1);
+
+                q[0] = (4ULL << 60) | (1ULL << 56) | 1ULL;
+                q[1] = 0x0E0E0E0E0E0E0E0EULL;
+                q[2] = (static_cast<uint64_t>(psm) << 24) | (1ULL << 16) |
+                       (static_cast<uint64_t>(dbp) << 32) | (static_cast<uint64_t>(dbw) << 48) |
+                       (static_cast<uint64_t>(psm) << 56);
+                q[3] = 0x50ULL;
+                q[4] = 0ULL;
+                q[5] = 0x51ULL;
+                q[6] = (static_cast<uint64_t>(rrh) << 32) | static_cast<uint64_t>(rrw);
+                q[7] = 0x52ULL;
+                q[8] = 0ULL;
+                q[9] = 0x53ULL;
+                q[10] = (2ULL << 58) | (imageQwc & 0x7FFF) | (1ULL << 15);
+                q[11] = 0ULL;
+                std::memcpy(pkt + 12 * 8, imgSrc, imageBytes);
+
+                constexpr uint32_t GIF_CHANNEL = 0x1000A000;
+                constexpr uint32_t CHCR_STR_MODE0 = 0x101u;
+                runtime->memory().writeIORegister(GIF_CHANNEL + 0x10u, pktAddr);
+                runtime->memory().writeIORegister(GIF_CHANNEL + 0x20u, totalQwc & 0xFFFFu);
+                runtime->memory().writeIORegister(GIF_CHANNEL + 0x00u, CHCR_STR_MODE0);
+            }
+        }
+    }
+
+    int retTbp = tbp0 + ((fontDataSz >= 0 ? fontDataSz : fontDataSz + 0x7f) >> 7);
+    setReturnS32(ctx, retTbp);
+}
+
+void sceeFontPrintfAt(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    TODO_NAMED("sceeFontPrintfAt", rdram, ctx, runtime);
+}
+
+void sceeFontPrintfAt2(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    setReturnS32(ctx, 0);
+}
+
+void sceeFontClose(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    static constexpr uint32_t kFontBase = 0x176148u;
+    static constexpr uint32_t kFontEntrySz = 0x24u;
+    const int fontId = static_cast<int>(getRegU32(ctx, 4));
+    const uint32_t fontOff = static_cast<uint32_t>(fontId * static_cast<int>(kFontEntrySz));
+    uint32_t glyphPtr = 0;
+    if (const uint8_t *p = getConstMemPtr(rdram, kFontBase + fontOff))
+        glyphPtr = *reinterpret_cast<const uint32_t *>(p);
+    if (glyphPtr != 0u)
+    {
+        if (runtime)
+        {
+            uint32_t kernPtr = 0;
+            if (const uint8_t *kp = getConstMemPtr(rdram, glyphPtr + 0x2000u))
+                kernPtr = *reinterpret_cast<const uint32_t *>(kp);
+            if (kernPtr != 0u)
+                runtime->guestFree(kernPtr);
+            runtime->guestFree(glyphPtr);
+        }
+        if (uint8_t *p = getMemPtr(rdram, kFontBase + fontOff))
+            *reinterpret_cast<uint32_t *>(p) = 0u;
+        setReturnS32(ctx, 0);
+    }
+    else
+    {
+        setReturnS32(ctx, -1);
+    }
+}
+
+void sceeFontSetColour(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t gp = getRegU32(ctx, 28);
+    writeU32AtGp(rdram, gp, -0x7b4c, getRegU32(ctx, 4));
+}
+
+void sceeFontSetMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t gp = getRegU32(ctx, 28);
+    writeU32AtGp(rdram, gp, -0x7c98, getRegU32(ctx, 4));
+    setReturnS32(ctx, 0);
+}
+
+void sceeFontSetFont(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t gp = getRegU32(ctx, 28);
+    writeU32AtGp(rdram, gp, -0x7b58, getRegU32(ctx, 4));
+}
+
+void sceeFontSetScale(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t gp = getRegU32(ctx, 28);
+    uint32_t sclx_bits, scly_bits;
+    std::memcpy(&sclx_bits, &ctx->f[12], sizeof(float));
+    std::memcpy(&scly_bits, &ctx->f[13], sizeof(float));
+    writeU32AtGp(rdram, gp, -0x7b54, sclx_bits);
+    writeU32AtGp(rdram, gp, -0x7b50, scly_bits);
+}
+
 void sceIoctl(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     setReturnS32(ctx, 0);

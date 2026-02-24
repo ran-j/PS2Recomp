@@ -3,10 +3,13 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <vector>
 #include <unordered_map>
 #include <atomic>
 #include <iostream>
+
+#include "ps2_gif_arbiter.h"
 #if defined(_MSC_VER)
 #include <intrin.h>
 #elif defined(USE_SSE2NEON)
@@ -267,33 +270,28 @@ public:
     bool writeIORegister(uint32_t address, uint32_t value);
     uint32_t readIORegister(uint32_t address);
 
-    // Software GS/VIF path used by GIF and VIF1 DMA channels.
+    using GifPacketCallback = std::function<void(const uint8_t *, uint32_t)>;
+    void setGifPacketCallback(GifPacketCallback cb) { m_gifPacketCallback = std::move(cb); }
+    void setGifArbiter(GifArbiter *arbiter) { m_gifArbiter = arbiter; }
+
+    using Vu1MscalCallback = std::function<void(uint32_t startPC, uint32_t itop)>;
+    void setVu1MscalCallback(Vu1MscalCallback cb) { m_vu1MscalCallback = std::move(cb); }
+
+    uint8_t *getVU1Code() { return m_vu1Code; }
+    const uint8_t *getVU1Code() const { return m_vu1Code; }
+    uint8_t *getVU1Data() { return m_vu1Data; }
+    const uint8_t *getVU1Data() const { return m_vu1Data; }
+
+    bool isPath3Masked() const { return m_path3Masked; }
+
+    void submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool drainImmediately = true);
     void processGIFPacket(uint32_t srcPhysAddr, uint32_t qwCount);
+    void processGIFPacket(const uint8_t *data, uint32_t sizeBytes);
     void processVIF1Data(uint32_t srcPhysAddr, uint32_t sizeBytes);
+    void processVIF1Data(const uint8_t *data, uint32_t sizeBytes);
+    void processPendingTransfers();
 
-    // Poll DMA registers from rdram shadow (workaround for KSEG1 fast-path bypass)
     int pollDmaRegisters();
-
-    struct GSDrawContext
-    {
-        uint64_t bitbltbuf = 0;
-        uint64_t trxpos = 0;
-        uint64_t trxreg = 0;
-        uint64_t trxdir = 0;
-        bool xferActive = false;
-        uint32_t xferDestX = 0;
-        uint32_t xferDestY = 0;
-        uint32_t xferWidth = 0;
-        uint32_t xferHeight = 0;
-        uint32_t xferDBP = 0;
-        uint32_t xferDBW = 0;
-        uint32_t xferDPSM = 0;
-        uint32_t xferPixelsWritten = 0;
-        uint32_t gifTagsProcessed = 0;
-        uint32_t adWrites = 0;
-        uint32_t imageTransfers = 0;
-        uint32_t primitivesDrawn = 0;
-    };
 
     // Track code modifications for self-modifying code
     void registerCodeRegion(uint32_t start, uint32_t end);
@@ -305,8 +303,6 @@ public:
     const GSRegisters &gs() const { return gs_regs; }
     uint8_t *getGSVRAM() { return m_gsVRAM; }
     const uint8_t *getGSVRAM() const { return m_gsVRAM; }
-    GSDrawContext &gsDrawCtx() { return m_gsDrawCtx; }
-    const GSDrawContext &gsDrawCtx() const { return m_gsDrawCtx; }
     bool hasSeenGifCopy() const { return m_seenGifCopy; }
     // Main RAM (32MB)
     uint8_t *m_rdram;
@@ -327,7 +323,6 @@ public:
 
     // Registers
     GSRegisters gs_regs;
-    GSDrawContext m_gsDrawCtx;
     uint8_t *m_gsVRAM;
     VIFRegisters vif0_regs;
     VIFRegisters vif1_regs;
@@ -343,6 +338,24 @@ public:
     };
 
     std::vector<TLBEntry> m_tlbEntries;
+
+    GifPacketCallback m_gifPacketCallback;
+    GifArbiter *m_gifArbiter = nullptr;
+    Vu1MscalCallback m_vu1MscalCallback;
+
+    uint8_t *m_vu1Code = nullptr;
+    uint8_t *m_vu1Data = nullptr;
+    bool m_path3Masked = false;
+
+    struct PendingTransfer
+    {
+        bool fromScratchpad = false;
+        uint32_t srcAddr = 0;
+        uint32_t qwc = 0;
+        std::vector<uint8_t> chainData;
+    };
+    std::vector<PendingTransfer> m_pendingGifTransfers;
+    std::vector<PendingTransfer> m_pendingVif1Transfers;
 
     struct CodeRegion
     {

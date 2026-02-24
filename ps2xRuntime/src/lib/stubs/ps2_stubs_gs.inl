@@ -18,54 +18,55 @@ void sceGsExecLoadImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     }
 
     uint32_t fbw = img.vram_width ? img.vram_width : std::max<uint32_t>(1, (img.width + 63) / 64);
-    uint32_t base = static_cast<uint32_t>(img.vram_addr) * 2048u;
-    uint32_t stride = bytesForPixels(img.psm, fbw * 64u);
-    if (stride == 0)
+    const uint32_t totalImageBytes = rowBytes * static_cast<uint32_t>(img.height);
+    const uint32_t headerQwc = 12u;
+    const uint32_t imageQwc = (totalImageBytes + 15u) / 16u;
+    const uint32_t totalQwc = headerQwc + imageQwc;
+
+    uint32_t pktAddr = runtime->guestMalloc(totalQwc * 16u, 16u);
+    if (pktAddr == 0)
     {
         setReturnS32(ctx, -1);
         return;
     }
 
-    uint8_t *gsvram = runtime->memory().getGSVRAM();
-    uint8_t *src = getMemPtr(rdram, srcAddr);
-    if (!gsvram || !src)
+    uint8_t *pkt = getMemPtr(rdram, pktAddr);
+    const uint8_t *src = getConstMemPtr(rdram, srcAddr);
+    if (!pkt || !src)
     {
         setReturnS32(ctx, -1);
         return;
     }
 
-    static int logCount = 0;
-    if (logCount < 8)
-    {
-        std::cout << "ps2_stub sceGsExecLoadImage: x=" << img.x
-                  << " y=" << img.y
-                  << " w=" << img.width
-                  << " h=" << img.height
-                  << " vram=0x" << std::hex << img.vram_addr
-                  << " fbw=" << std::dec << static_cast<int>(fbw)
-                  << " psm=" << static_cast<int>(img.psm)
-                  << " src=0x" << std::hex << srcAddr << std::dec << std::endl;
-        ++logCount;
-    }
+    uint32_t dbp = (static_cast<uint32_t>(img.vram_addr) * 2048u) / 256u;
+    uint32_t dsax = static_cast<uint32_t>(img.x);
+    uint32_t dsay = static_cast<uint32_t>(img.y);
 
-    for (uint32_t row = 0; row < img.height; ++row)
-    {
-        uint32_t dstOff = base + (static_cast<uint32_t>(img.y) + row) * stride + bytesForPixels(img.psm, static_cast<uint32_t>(img.x));
-        uint32_t srcOff = row * rowBytes;
-        if (dstOff >= PS2_GS_VRAM_SIZE)
-            break;
-        uint32_t copyBytes = rowBytes;
-        if (dstOff + copyBytes > PS2_GS_VRAM_SIZE)
-            copyBytes = PS2_GS_VRAM_SIZE - dstOff;
-        std::memcpy(gsvram + dstOff, src + srcOff, copyBytes);
-    }
+    uint64_t *q = reinterpret_cast<uint64_t *>(pkt);
+    q[0] = 0x1000000000000004ULL;
+    q[1] = 0x0E0E0E0E0E0E0E0EULL;
+    q[2] = (static_cast<uint64_t>(img.psm & 0x3Fu) << 24) | (static_cast<uint64_t>(1u) << 16) |
+           (static_cast<uint64_t>(dbp & 0x3FFFu) << 32) | (static_cast<uint64_t>(fbw & 0x3Fu) << 48) |
+           (static_cast<uint64_t>(img.psm & 0x3Fu) << 56);
+    q[3] = 0x50ULL;
+    q[4] = (static_cast<uint64_t>(dsay & 0x7FFu) << 48) | (static_cast<uint64_t>(dsax & 0x7FFu) << 32);
+    q[5] = 0x51ULL;
+    q[6] = (static_cast<uint64_t>(img.height) << 32) | static_cast<uint64_t>(img.width);
+    q[7] = 0x52ULL;
+    q[8] = 0ULL;
+    q[9] = 0x53ULL;
+    q[10] = (static_cast<uint64_t>(2) << 58) | (static_cast<uint64_t>(imageQwc) & 0x7FFF) |
+            (1ULL << 15);
+    q[11] = 0ULL;
 
-    if (img.width >= 320 && img.height >= 200)
-    {
-        auto &gs = runtime->memory().gs();
-        gs.dispfb1 = makeDispFb(img.vram_addr, fbw, img.psm, 0, 0);
-        gs.display1 = makeDisplay(0, 0, 0, 0, img.width - 1, img.height - 1);
-    }
+    std::memcpy(pkt + 12 * 8, src, totalImageBytes);
+
+    constexpr uint32_t GIF_CHANNEL = 0x1000A000;
+    constexpr uint32_t CHCR_STR_MODE0 = 0x101u;
+    auto &mem = runtime->memory();
+    mem.writeIORegister(GIF_CHANNEL + 0x10u, pktAddr);
+    mem.writeIORegister(GIF_CHANNEL + 0x20u, totalQwc & 0xFFFFu);
+    mem.writeIORegister(GIF_CHANNEL + 0x00u, CHCR_STR_MODE0);
 
     setReturnS32(ctx, 0);
 }
@@ -90,47 +91,63 @@ void sceGsExecStoreImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     }
 
     uint32_t fbw = img.vram_width ? img.vram_width : std::max<uint32_t>(1, (img.width + 63) / 64);
-    uint32_t base = static_cast<uint32_t>(img.vram_addr) * 2048u;
-    uint32_t stride = bytesForPixels(img.psm, fbw * 64u);
-    if (stride == 0)
-    {
-        setReturnS32(ctx, -1);
-        return;
-    }
+    const uint32_t totalImageBytes = rowBytes * static_cast<uint32_t>(img.height);
 
-    uint8_t *gsvram = runtime->memory().getGSVRAM();
     uint8_t *dst = getMemPtr(rdram, dstAddr);
-    if (!gsvram || !dst)
+    if (!dst)
     {
         setReturnS32(ctx, -1);
         return;
     }
 
-    static int logCount = 0;
-    if (logCount < 8)
+    uint32_t sbp = (static_cast<uint32_t>(img.vram_addr) * 2048u) / 256u;
+    uint64_t bitbltbuf = (static_cast<uint64_t>(sbp & 0x3FFFu) << 0) |
+                        (static_cast<uint64_t>(fbw & 0x3Fu) << 16) |
+                        (static_cast<uint64_t>(img.psm & 0x3Fu) << 24) |
+                        (static_cast<uint64_t>(0u) << 32) |
+                        (static_cast<uint64_t>(1u) << 48) |
+                        (static_cast<uint64_t>(0u) << 56);
+    uint64_t trxpos = (static_cast<uint64_t>(img.x & 0x7FFu) << 0) |
+                      (static_cast<uint64_t>(img.y & 0x7FFu) << 16) |
+                      (static_cast<uint64_t>(0u) << 32) |
+                      (static_cast<uint64_t>(0u) << 48);
+    uint64_t trxreg = static_cast<uint64_t>(img.height) << 32 | static_cast<uint64_t>(img.width);
+
+    uint32_t pktAddr = runtime->guestMalloc(80u, 16u);
+    if (pktAddr == 0)
     {
-        std::cout << "ps2_stub sceGsExecStoreImage: x=" << img.x
-                  << " y=" << img.y
-                  << " w=" << img.width
-                  << " h=" << img.height
-                  << " vram=0x" << std::hex << img.vram_addr
-                  << " fbw=" << std::dec << static_cast<int>(fbw)
-                  << " psm=" << static_cast<int>(img.psm)
-                  << " dst=0x" << std::hex << dstAddr << std::dec << std::endl;
-        ++logCount;
+        setReturnS32(ctx, -1);
+        return;
     }
 
-    for (uint32_t row = 0; row < img.height; ++row)
+    uint8_t *pkt = getMemPtr(rdram, pktAddr);
+    if (!pkt)
     {
-        uint32_t srcOff = base + (static_cast<uint32_t>(img.y) + row) * stride + bytesForPixels(img.psm, static_cast<uint32_t>(img.x));
-        uint32_t dstOff = row * rowBytes;
-        if (srcOff >= PS2_GS_VRAM_SIZE)
-            break;
-        uint32_t copyBytes = rowBytes;
-        if (srcOff + copyBytes > PS2_GS_VRAM_SIZE)
-            copyBytes = PS2_GS_VRAM_SIZE - srcOff;
-        std::memcpy(dst + dstOff, gsvram + srcOff, copyBytes);
+        setReturnS32(ctx, -1);
+        return;
     }
+
+    uint64_t *q = reinterpret_cast<uint64_t *>(pkt);
+    q[0] = 0x1000000000000004ULL;
+    q[1] = 0x0E0E0E0E0E0E0E0EULL;
+    q[2] = bitbltbuf;
+    q[3] = 0x50ULL;
+    q[4] = trxpos;
+    q[5] = 0x51ULL;
+    q[6] = trxreg;
+    q[7] = 0x52ULL;
+    q[8] = 1ULL;
+    q[9] = 0x53ULL;
+
+    constexpr uint32_t GIF_CHANNEL = 0x1000A000;
+    constexpr uint32_t CHCR_STR_MODE0 = 0x101u;
+    auto &mem = runtime->memory();
+    mem.writeIORegister(GIF_CHANNEL + 0x10u, pktAddr);
+    mem.writeIORegister(GIF_CHANNEL + 0x20u, 5u);
+    mem.writeIORegister(GIF_CHANNEL + 0x00u, CHCR_STR_MODE0);
+    mem.processPendingTransfers();
+
+    runtime->gs().consumeLocalToHostBytes(dst, totalImageBytes);
 
     setReturnS32(ctx, 0);
 }
@@ -144,53 +161,40 @@ void sceGsGetGParam(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 void sceGsPutDispEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     uint32_t envAddr = getRegU32(ctx, 4);
-    GsDispEnvMem env{};
-    if (readGsDispEnv(rdram, envAddr, env))
+    uint8_t *ptr = getMemPtr(rdram, envAddr);
+    if (!ptr)
     {
-        auto &gs = runtime->memory().gs();
-        gs.display1 = env.display;
-        gs.dispfb1 = env.dispfb;
+        setReturnS32(ctx, -1);
+        return;
     }
+    constexpr uint32_t GIF_CHANNEL = 0x1000A000;
+    constexpr uint32_t QWC = 5;
+    constexpr uint32_t CHCR_STR_MODE0 = 0x101u;
+    auto &mem = runtime->memory();
+    mem.writeIORegister(GIF_CHANNEL + 0x10u, envAddr);
+    mem.writeIORegister(GIF_CHANNEL + 0x20u, QWC);
+    mem.writeIORegister(GIF_CHANNEL + 0x00u, CHCR_STR_MODE0);
     setReturnS32(ctx, 0);
 }
 
 void sceGsPutDrawEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     uint32_t envAddr = getRegU32(ctx, 4);
-    uint32_t psm = getRegU32(ctx, 5);
-    uint32_t w = getRegU32(ctx, 6);
-    uint32_t h = getRegU32(ctx, 7);
-
-    if (w == 0)
-        w = 640;
-    if (h == 0)
-        h = 448;
-
-    GsDrawEnvMem env{};
-    env.offset_x = static_cast<uint16_t>(2048 - (w / 2));
-    env.offset_y = static_cast<uint16_t>(2048 - (h / 2));
-    env.clip_x = 0;
-    env.clip_y = 0;
-    env.clip_w = static_cast<uint16_t>(w);
-    env.clip_h = static_cast<uint16_t>(h);
-    env.vram_addr = 0;
-    env.fbw = static_cast<uint8_t>((w + 63) / 64);
-    env.psm = static_cast<uint8_t>(psm);
-    env.vram_x = 0;
-    env.vram_y = 0;
-    env.draw_mask = 0;
-    env.auto_clear = 1;
-    env.bg_r = 1;
-    env.bg_g = 1;
-    env.bg_b = 1;
-    env.bg_a = 0x80;
-    env.bg_q = 0.0f;
-
     uint8_t *ptr = getMemPtr(rdram, envAddr);
-    if (ptr)
+    if (!ptr)
     {
-        std::memcpy(ptr, &env, sizeof(env));
+        setReturnS32(ctx, -1);
+        return;
     }
+
+    constexpr uint32_t GIF_CHANNEL = 0x1000A000;
+    constexpr uint32_t QWC = 9;
+    constexpr uint32_t CHCR_STR_MODE0 = 0x101u;
+    auto &mem = runtime->memory();
+    mem.writeIORegister(GIF_CHANNEL + 0x10u, envAddr);
+    mem.writeIORegister(GIF_CHANNEL + 0x20u, QWC);
+    mem.writeIORegister(GIF_CHANNEL + 0x00u, CHCR_STR_MODE0);
+
     setReturnS32(ctx, 0);
 }
 
@@ -208,11 +212,42 @@ void sceGsResetGraph(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         g_gparam.ffmode = static_cast<uint8_t>(ffmode & 0x1);
         writeGsGParamToScratch(runtime);
 
-        auto &gs = runtime->memory().gs();
-        gs.pmode = makePmode(1, 0, 0, 0, 0, 0x80);
-        gs.smode2 = (interlace & 0x1) | ((ffmode & 0x1) << 1);
-        gs.dispfb1 = makeDispFb(0, 10, 0, 0, 0);
-        gs.display1 = makeDisplay(0, 0, 0, 0, 639, 447);
+        uint64_t pmode = makePmode(1, 0, 0, 0, 0, 0x80);
+        uint64_t smode2 = (interlace & 0x1) | ((ffmode & 0x1) << 1);
+        uint64_t dispfb = makeDispFb(0, 10, 0, 0, 0);
+        uint64_t display = makeDisplay(0, 0, 0, 0, 639, 447);
+        uint64_t bgcolor = 0ULL;
+
+        if (runtime)
+        {
+            uint32_t pktAddr = runtime->guestMalloc(192u, 16u);
+            if (pktAddr != 0u)
+            {
+                uint8_t *pkt = getMemPtr(rdram, pktAddr);
+                if (pkt)
+                {
+                    uint64_t *q = reinterpret_cast<uint64_t *>(pkt);
+                    q[0] = 0x1000000000000005ULL;
+                    q[1] = 0x0E0E0E0E0E0E0E0EULL;
+                    q[2] = pmode;
+                    q[3] = 0x41ULL;
+                    q[4] = smode2;
+                    q[5] = 0x42ULL;
+                    q[6] = dispfb;
+                    q[7] = 0x59ULL;
+                    q[8] = display;
+                    q[9] = 0x5aULL;
+                    q[10] = bgcolor;
+                    q[11] = 0x5fULL;
+                    constexpr uint32_t GIF_CHANNEL = 0x1000A000;
+                    constexpr uint32_t CHCR_STR_MODE0 = 0x101u;
+                    auto &mem = runtime->memory();
+                    mem.writeIORegister(GIF_CHANNEL + 0x10u, pktAddr);
+                    mem.writeIORegister(GIF_CHANNEL + 0x20u, 12u);
+                    mem.writeIORegister(GIF_CHANNEL + 0x00u, CHCR_STR_MODE0);
+                }
+            }
+        }
     }
 
     setReturnS32(ctx, 0);
@@ -225,11 +260,9 @@ void sceGsResetPath(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void sceGsSetDefClear(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    const uint32_t clearAddr = getRegU32(ctx, 4);
-    if (uint8_t *clear = getMemPtr(rdram, clearAddr))
-    {
-        std::memset(clear, 0, 64);
-    }
+    (void)rdram;
+    (void)ctx;
+    (void)runtime;
     setReturnS32(ctx, 0);
 }
 
@@ -262,45 +295,65 @@ void sceGsSetDefDispEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void sceGsSetDefDrawEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    const uint32_t envAddr = getRegU32(ctx, 4);
-    uint32_t psm = getRegU32(ctx, 5);
-    uint32_t w = getRegU32(ctx, 6);
-    uint32_t h = getRegU32(ctx, 7);
-    const uint32_t vramAddr = readStackU32(rdram, ctx, 16);
-    const uint32_t vramX = readStackU32(rdram, ctx, 20);
-    const uint32_t vramY = readStackU32(rdram, ctx, 24);
+    uint32_t envAddr = getRegU32(ctx, 4);
+    uint32_t param_2 = getRegU32(ctx, 5);
+    int32_t w = static_cast<int32_t>(static_cast<int16_t>(getRegU32(ctx, 6) & 0xFFFF));
+    int32_t h = static_cast<int32_t>(static_cast<int16_t>(getRegU32(ctx, 7) & 0xFFFF));
+    uint32_t param_5 = readStackU32(rdram, ctx, 16);
+    uint32_t param_6 = readStackU32(rdram, ctx, 20);
 
-    if (w == 0)
+    if (w <= 0)
         w = 640;
-    if (h == 0)
+    if (h <= 0)
         h = 448;
 
-    GsDrawEnvMem env{};
-    env.offset_x = static_cast<uint16_t>(2048 - (w / 2));
-    env.offset_y = static_cast<uint16_t>(2048 - (h / 2));
-    env.clip_x = 0;
-    env.clip_y = 0;
-    env.clip_w = static_cast<uint16_t>(w);
-    env.clip_h = static_cast<uint16_t>(h);
-    env.vram_addr = static_cast<uint16_t>(vramAddr & 0xFFFFu);
-    env.fbw = static_cast<uint8_t>((w + 63u) / 64u);
-    env.psm = static_cast<uint8_t>(psm & 0xFFu);
-    env.vram_x = static_cast<uint16_t>(vramX & 0xFFFFu);
-    env.vram_y = static_cast<uint16_t>(vramY & 0xFFFFu);
-    env.draw_mask = 0;
-    env.auto_clear = 1;
-    env.bg_r = 0;
-    env.bg_g = 0;
-    env.bg_b = 0;
-    env.bg_a = 0x80;
-    env.bg_q = 0.0f;
+    uint32_t psm = param_2 & 0xFU;
+    uint32_t fbw = ((static_cast<uint32_t>(w) + 63u) >> 6) & 0x3FU;
+    sceGszbufaddr(rdram, ctx, runtime);
+    int32_t zbuf = static_cast<int32_t>(static_cast<int16_t>(getRegU32(ctx, 2) & 0xFFFF));
 
-    if (uint8_t *ptr = getMemPtr(rdram, envAddr))
+    uint8_t *const ptr = getMemPtr(rdram, envAddr);
+    if (!ptr)
     {
-        std::memcpy(ptr, &env, sizeof(env));
+        setReturnS32(ctx, 8);
+        return;
     }
 
-    setReturnS32(ctx, 0);
+    uint64_t *const words = reinterpret_cast<uint64_t *>(ptr);
+
+    words[0] = 0x1000000000008008ULL;
+    words[1] = 0x000000000000000EULL;
+
+    words[2] = (static_cast<uint64_t>(fbw) << 16) | (static_cast<uint64_t>(psm) << 24);
+    words[3] = 0x4c;
+
+    words[4] = (static_cast<uint64_t>(zbuf) & 0xFFFFULL) | (static_cast<uint64_t>(param_6 & 0xF) << 24) |
+               (param_5 == 0 ? 0x100000000ULL : 0ULL);
+    words[5] = 0x4e;
+
+    int32_t off_x = 0x800 - (w >> 1);
+    int32_t off_y = 0x800 - (h >> 1);
+    words[6] = (static_cast<uint64_t>(static_cast<uint32_t>(off_y) & 0xFFFF) << 36) |
+               (static_cast<uint32_t>(off_x) & 0xFFFF) * 16ULL;
+    words[7] = 0x18;
+
+    words[8] = (static_cast<uint64_t>(static_cast<uint32_t>(h - 1) & 0xFFFF) << 48) |
+               (static_cast<uint64_t>(static_cast<uint32_t>(w - 1) & 0xFFFF) << 16);
+    words[9] = 0x40;
+
+    words[10] = 1;
+    words[11] = 0x1a;
+
+    words[12] = 1;
+    words[13] = 0x46;
+
+    words[14] = (param_2 & 2) ? 1ULL : 0ULL;
+    words[15] = 0x45;
+
+    words[16] = (param_5 == 0) ? 0x30000ULL : ((static_cast<uint64_t>(param_5 & 3) << 17) | 0x10000ULL);
+    words[17] = 0x47;
+
+    setReturnS32(ctx, 8);
 }
 
 void sceGsSetDefDrawEnv2(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -333,7 +386,6 @@ void sceGsSetDefStoreImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtim
 
 void sceGsSwapDBuffDc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    // can we get away with that ? kkkk
     static int cur = 0;
     cur ^= 1;
     setReturnS32(ctx, cur);
@@ -341,22 +393,123 @@ void sceGsSwapDBuffDc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void sceGsSyncPath(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    setReturnS32(ctx, 0);
+    int32_t mode = static_cast<int32_t>(getRegU32(ctx, 4));
+    auto &mem = runtime->memory();
+
+    if (mode == 0)
+    {
+        mem.processPendingTransfers();
+
+        uint32_t count = 0;
+        constexpr uint32_t kTimeout = 0x1000000;
+
+        while ((mem.readIORegister(0x10009000) & 0x100) != 0)
+        {
+            if (++count > kTimeout)
+            {
+                setReturnS32(ctx, -1);
+                return;
+            }
+        }
+
+        while ((mem.readIORegister(0x1000A000) & 0x100) != 0)
+        {
+            if (++count > kTimeout)
+            {
+                setReturnS32(ctx, -1);
+                return;
+            }
+        }
+
+        while ((mem.readIORegister(0x10003C00) & 0x1F000003) != 0)
+        {
+            if (++count > kTimeout)
+            {
+                setReturnS32(ctx, -1);
+                return;
+            }
+        }
+
+        while ((mem.readIORegister(0x10003020) & 0xC00) != 0)
+        {
+            if (++count > kTimeout)
+            {
+                setReturnS32(ctx, -1);
+                return;
+            }
+        }
+
+        setReturnS32(ctx, 0);
+    }
+    else
+    {
+        uint32_t result = 0;
+
+        if ((mem.readIORegister(0x10009000) & 0x100) != 0)
+            result |= 1;
+        if ((mem.readIORegister(0x1000A000) & 0x100) != 0)
+            result |= 2;
+        if ((mem.readIORegister(0x10003C00) & 0x1F000003) != 0)
+            result |= 4;
+        if ((mem.readIORegister(0x10003020) & 0xC00) != 0)
+            result |= 0x10;
+
+        setReturnS32(ctx, result);
+    }
 }
 
 void sceGsSyncV(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    ps2_syscalls::WaitVSyncTick(rdram, runtime);
     setReturnS32(ctx, 0);
 }
 
 void sceGsSyncVCallback(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    ps2_syscalls::WaitVSyncTick(rdram, runtime);
     setReturnS32(ctx, 0);
 }
 
 void sceGszbufaddr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    setReturnU32(ctx, getRegU32(ctx, 4));
+    (void)rdram;
+    uint32_t param_1 = getRegU32(ctx, 4);
+    int32_t w = static_cast<int32_t>(static_cast<int16_t>(getRegU32(ctx, 6) & 0xFFFF));
+    int32_t h = static_cast<int32_t>(static_cast<int16_t>(getRegU32(ctx, 7) & 0xFFFF));
+
+    int32_t width_blocks = (w + 63) >> 6;
+    if (w + 63 < 0)
+        width_blocks = (w + 126) >> 6;
+
+    int32_t height_blocks;
+    if ((param_1 & 2) != 0)
+    {
+        int32_t v = (h + 63) >> 6;
+        if (h + 63 < 0)
+            v = (h + 126) >> 6;
+        height_blocks = v;
+    }
+    else
+    {
+        int32_t v = (h + 31) >> 5;
+        if (h + 31 < 0)
+            v = (h + 62) >> 5;
+        height_blocks = v;
+    }
+
+    int32_t product = width_blocks * height_blocks;
+
+    uint64_t gparam_val = 0;
+    if (runtime)
+    {
+        uint8_t *scratch = runtime->memory().getScratchpad();
+        if (scratch)
+        {
+            std::memcpy(&gparam_val, scratch + 0x100, sizeof(gparam_val));
+        }
+    }
+    if ((gparam_val & 0xFFFF0000FFFFULL) == 1ULL)
+        product = (product * 0x10000) >> 16;
+    else
+        product = (product * 0x20000) >> 16;
+
+    setReturnS32(ctx, product);
 }
