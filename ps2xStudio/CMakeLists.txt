@@ -48,7 +48,7 @@ target_include_directories(imgui_lib PUBLIC
 
 # --- Build ImGuiColorTextEdit ---
 add_library(imgui_colortextedit_lib STATIC
-    ${imgui_colortextedit_SOURCE_DIR}/ImGuiColorTextEdit.cpp
+    ${imgui_colortextedit_SOURCE_DIR}/TextEditor.cpp
 )
 target_include_directories(imgui_colortextedit_lib PUBLIC ${imgui_colortextedit_SOURCE_DIR})
 target_link_libraries(imgui_colortextedit_lib PUBLIC imgui_lib)
