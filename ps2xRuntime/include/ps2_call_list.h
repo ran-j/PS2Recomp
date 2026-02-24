@@ -1,8 +1,6 @@
 #pragma once
 
-#ifdef __cplusplus
 #include <cstdint>
-#endif
 
 // I know ugly, but will work for now.
 
