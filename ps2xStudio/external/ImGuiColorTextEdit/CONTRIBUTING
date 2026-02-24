@@ -1,0 +1,11 @@
+# Contributing
+Pull requests are welcome, feel free to contribute if you have implemented something which might be useful for the general audience of this little piece of software. Apparently, it became kind of a community project now. :)
+
+Whem contributing, please follow the following guidelines. I will keep it updated as we bump into something which worth doing better.
+- Try to follow the same coding and naming conventions you find in the source already. I know that everyone has its own preference/taste in coding, but please keep the source consistent in style.
+- Please submit to the 'dev' branch first for testing, and it will be merged to 'main' if it seems to work fine. I would like try keep 'master' in a good working condition, as more and more people are using it.
+- Please send your submissions in small, well defined requests, i. e. do not accumulate many unrelated changes in one large pull request. Keep your submissions as small as possible, it will make everyone's life easier.
+- Avoid using ImGui internal since it would make the source fragile against internal changes in ImGui.
+- Try to keep the perormance high within the render function. Try to avoid doing anything which leads to memory allocations (like using temporary std::string, std::vector variables), or complex algorithm. If you really have to, try to amortise it between frames.
+
+Thank you. :)
