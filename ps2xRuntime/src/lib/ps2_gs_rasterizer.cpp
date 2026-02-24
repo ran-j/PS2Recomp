@@ -2,6 +2,7 @@
 #include "ps2_gs_gpu.h"
 #include "ps2_gs_common.h"
 #include "ps2_gs_psmt4.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
