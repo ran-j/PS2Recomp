@@ -33,6 +33,8 @@ namespace ps2recomp
 
         bool analyze();
         bool generateToml(const std::string &outputPath);
+        bool importGhidraMap(const std::string &csvPath);
+        const std::vector<Function>& getFunctions() const;
         bool isLibrarySymbolNameForHeuristics(const std::string &name) const;
         static bool isReliableSymbolNameForHeuristics(const std::string &name);
         static bool isSystemSymbolNameForHeuristics(const std::string &name);
