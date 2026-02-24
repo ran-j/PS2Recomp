@@ -321,6 +321,19 @@ void SifCallRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         return true;
     };
 
+    if (!handled && sid != 0 && runtime)
+    {
+        if (!runtime->iop().handleRPC(sid, rpcNum, sendBuf, sendSize, recvBuf, recvSize) &&
+            sid == IOP_SID_LIBSD)
+        {
+            const uint8_t *sendPtr = sendBuf ? getConstMemPtr(rdram, sendBuf) : nullptr;
+            uint8_t *recvPtr = recvBuf ? getMemPtr(rdram, recvBuf) : nullptr;
+            ps2_iop_audio::handleLibSdRpc(runtime, sid, rpcNum, sendPtr, sendSize, recvPtr, recvSize);
+            handled = true;
+            resultPtr = recvBuf;
+        }
+    }
+
     const bool isDtxUrpc = (sid == kDtxRpcSid) && (rpcNum >= 0x400u) && (rpcNum < 0x500u);
     uint32_t dtxUrpcCommand = isDtxUrpc ? (rpcNum & 0xFFu) : 0u;
     uint32_t dtxUrpcFn = 0;

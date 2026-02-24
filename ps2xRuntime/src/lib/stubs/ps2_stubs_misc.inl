@@ -1516,9 +1516,9 @@ void scePadPortOpen(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void scePadRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    (void)runtime;
-
-    const uint32_t dataAddr = getRegU32(ctx, 6); // a2
+    const int port = static_cast<int>(getRegU32(ctx, 4));
+    const int slot = static_cast<int>(getRegU32(ctx, 5));
+    const uint32_t dataAddr = getRegU32(ctx, 6);
     uint8_t *data = getMemPtr(rdram, dataAddr);
     if (!data)
     {
@@ -1539,6 +1539,12 @@ void scePadRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
     if (!useOverride)
     {
+        if (runtime && runtime->padBackend().readState(port, slot, data, 32))
+        {
+            setReturnS32(ctx, 1);
+            return;
+        }
+
         applyGamepadState(state);
         applyKeyboardState(state, true);
     }
