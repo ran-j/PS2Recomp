@@ -1,9 +1,10 @@
+# Blackline Interactive
+
 cmake_minimum_required(VERSION 3.21)
 project(ps2xStudio)
 
 include(FetchContent)
 
-# 1. Dear ImGui (Docking branch for multi-viewport support)
 FetchContent_Declare(
     imgui
     GIT_REPOSITORY https://github.com/ocornut/imgui.git
@@ -11,7 +12,6 @@ FetchContent_Declare(
     GIT_SHALLOW    TRUE
 )
 
-# 2. ImGuiColorTextEdit
 FetchContent_Declare(
     imgui_colortextedit
     GIT_REPOSITORY https://github.com/BalazsJako/ImGuiColorTextEdit.git
@@ -19,7 +19,6 @@ FetchContent_Declare(
     GIT_SHALLOW    TRUE
 )
 
-# 3. imgui_club (Contains the Memory Editor)
 FetchContent_Declare(
     imgui_club
     GIT_REPOSITORY https://github.com/ocornut/imgui_club.git
@@ -27,9 +26,23 @@ FetchContent_Declare(
     GIT_SHALLOW    TRUE
 )
 
+FetchContent_Declare(
+    imgui_file_dialog
+    GIT_REPOSITORY https://github.com/aiekick/ImGuiFileDialog.git
+    GIT_TAG        master
+    GIT_SHALLOW    TRUE
+)
+
 FetchContent_MakeAvailable(imgui imgui_colortextedit imgui_club)
 
-# --- Build ImGui Library (SDL2 + OpenGL3) ---
+FetchContent_GetProperties(imgui_file_dialog)
+if(NOT imgui_file_dialog_POPULATED)
+    FetchContent_Populate(imgui_file_dialog)
+endif()
+
+find_package(SDL2 REQUIRED)
+find_package(OpenGL REQUIRED)
+
 set(IMGUI_SOURCES
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
@@ -41,35 +54,62 @@ set(IMGUI_SOURCES
 )
 
 add_library(imgui_lib STATIC ${IMGUI_SOURCES})
+
 target_include_directories(imgui_lib PUBLIC
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
+    ${SDL2_INCLUDE_DIRS}
 )
 
-# --- Build ImGuiColorTextEdit ---
+target_link_libraries(imgui_lib PUBLIC ${SDL2_LIBRARIES} OpenGL::GL)
+
 add_library(imgui_colortextedit_lib STATIC
     ${imgui_colortextedit_SOURCE_DIR}/TextEditor.cpp
 )
+
 target_include_directories(imgui_colortextedit_lib PUBLIC ${imgui_colortextedit_SOURCE_DIR})
+
 target_link_libraries(imgui_colortextedit_lib PUBLIC imgui_lib)
 
-# --- Setup ImGuiMemoryEditor (Header-only) ---
 add_library(imgui_memory_editor_lib INTERFACE)
+
 target_include_directories(imgui_memory_editor_lib INTERFACE
     ${imgui_club_SOURCE_DIR}/imgui_memory_editor
 )
+
 target_link_libraries(imgui_memory_editor_lib INTERFACE imgui_lib)
 
-# --- Main ps2xStudio Target ---
+add_library(imgui_filedialog_lib STATIC
+    ${imgui_file_dialog_SOURCE_DIR}/ImGuiFileDialog.cpp
+)
+
+target_include_directories(imgui_filedialog_lib PUBLIC 
+    ${imgui_file_dialog_SOURCE_DIR}
+    ${imgui_SOURCE_DIR}
+)
+
+target_link_libraries(imgui_filedialog_lib PUBLIC imgui_lib)
+
 file(GLOB_RECURSE STUDIO_SOURCES "src/*.cpp")
 file(GLOB_RECURSE STUDIO_HEADERS "include/*.hpp")
 
 add_executable(ps2xStudio ${STUDIO_SOURCES} ${STUDIO_HEADERS})
-target_include_directories(ps2xStudio PRIVATE include)
 
-# Link everything together
+target_include_directories(ps2xStudio PRIVATE 
+    include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ps2xAnalyzer/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ps2xRecomp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ps2xTest/include
+)
+
 target_link_libraries(ps2xStudio PRIVATE
     imgui_lib
     imgui_colortextedit_lib
     imgui_memory_editor_lib
+    imgui_filedialog_lib
+    ps2_recomp_lib
+    ps2_analyzer_lib
+    ps2_test_lib
+    ${SDL2_LIBRARIES}
+    OpenGL::GL
 )
