@@ -54,7 +54,7 @@ add_executable(ps2EntryRunner
 )
 
 if(MSVC)
-    target_compile_options(ps2EntryRunner PRIVATE /FS)
+    target_compile_options(ps2EntryRunner PRIVATE /FS /MP4)
 endif()
 
 target_include_directories(ps2_runtime PUBLIC
