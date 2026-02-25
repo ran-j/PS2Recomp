@@ -670,7 +670,7 @@ namespace ps2recomp
 
         if (hasIndirectRegisterJump)
         {
-            bool hasFallback = false;
+            bool needsJrFallback = false;
             for (const Instruction* jrInst : indirectJumps) {
                 bool foundTable = false;
                 
@@ -800,11 +800,14 @@ namespace ps2recomp
                     }
                 }
                 if (!foundTable) {
-                    hasFallback = true;
+                    if (!(jrInst->function == SPECIAL_JALR))
+                    {
+                        needsJrFallback = true;
+                    }
                 }
             }
 
-            if (hasFallback) {
+            if (needsJrFallback) {
                 for (uint32_t addr : instructionAddresses)
                 {
                     if (addr >= function.start && addr < function.end)

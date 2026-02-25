@@ -919,6 +919,71 @@ void register_code_generator_tests()
                      "JALR should retain non-fallthrough guard");
         });
 
+        tc.Run("JALR fallback should not expose epilogue tail-jump labels", [](TestCase &t) {
+            Function func;
+            func.name = "jalr_epilogue_guard";
+            func.start = 0x2000;
+            func.end = 0x2030;
+            func.isRecompiled = true;
+            func.isStub = false;
+
+            Instruction prolog{};
+            prolog.address = 0x2000;
+            prolog.opcode = OPCODE_ADDIU;
+            prolog.rs = 29;
+            prolog.rt = 29;
+            prolog.simmediate = static_cast<uint32_t>(static_cast<int32_t>(-0x20));
+            prolog.raw = 0;
+
+            Instruction saveRa{};
+            saveRa.address = 0x2004;
+            saveRa.opcode = OPCODE_SD;
+            saveRa.rs = 29;
+            saveRa.rt = 31;
+            saveRa.simmediate = 0x10;
+            saveRa.raw = 0;
+
+            // Dynamic callback entry point.
+            Instruction jalr = makeJalr(0x2008, 2, 31);
+            Instruction jalrDelay = makeNop(0x200C);
+
+            Instruction restoreRa{};
+            restoreRa.address = 0x2010;
+            restoreRa.opcode = OPCODE_LD;
+            restoreRa.rs = 29;
+            restoreRa.rt = 31;
+            restoreRa.simmediate = 0x10;
+            restoreRa.raw = 0;
+
+            // Tail jump sequence that must not be reachable from jalr fallback dispatch.
+            Instruction tailJump{};
+            tailJump.address = 0x2014;
+            tailJump.opcode = OPCODE_J;
+            tailJump.target = (0x3000u >> 2) & 0x3FFFFFFu;
+            tailJump.hasDelaySlot = true;
+            tailJump.raw = 0;
+
+            Instruction tailDelay{};
+            tailDelay.address = 0x2018;
+            tailDelay.opcode = OPCODE_ADDIU;
+            tailDelay.rs = 29;
+            tailDelay.rt = 29;
+            tailDelay.simmediate = 0x20;
+            tailDelay.raw = 0;
+
+            CodeGenerator gen({}, {});
+            std::string generated = gen.generateFunction(
+                func,
+                {prolog, saveRa, jalr, jalrDelay, restoreRa, tailJump, tailDelay},
+                false);
+            printGeneratedCode("JALR fallback should not expose epilogue tail-jump labels", generated);
+
+            t.IsTrue(generated.find("case 0x2014u: goto label_2014;") == std::string::npos,
+                     "jalr fallback should not dispatch directly to epilogue tail-jump block");
+            t.IsTrue(generated.find("case 0x2018u: goto label_2018;") == std::string::npos,
+                     "jalr fallback should not dispatch directly to tail-jump delay slot");
+        });
+
         tc.Run("resolveStubTarget allows leading underscore alias", [](TestCase &t) {
             t.Equals(PS2Recompiler::resolveStubTarget("_rand"), StubTarget::Stub,
                      "_rand should resolve via rand stub alias");
