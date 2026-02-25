@@ -836,7 +836,7 @@ namespace ps2recomp
             ss << "#include \"ps2_recompiled_stubs.h\"\n\n";
             ss << "#include \"ps2_syscalls.h\"\n";
             ss << "#include \"ps2_stubs.h\"\n\n";
-            ss << "#ifdef _DEBUG\n";
+            ss << "#ifdef PS2_FUNCTION_LOG_TRACKER\n";
             ss << "#include \"ps2_log.h\"\n";
             ss << "#endif\n\n";
         }
@@ -855,7 +855,7 @@ namespace ps2recomp
         }
 
         ss << "void " << sanitizedName << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime) {\n";
-        ss << "#ifdef _DEBUG\n";
+        ss << "#ifdef PS2_FUNCTION_LOG_TRACKER\n";
         ss << "    PS_LOG_ENTRY(\"" << sanitizedName << "\");\n";
         ss << "#endif\n";
         ss << "\n";
