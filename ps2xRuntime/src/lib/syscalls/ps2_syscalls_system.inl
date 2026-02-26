@@ -249,14 +249,54 @@ void TODO(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t encod
     setReturnS32(ctx, 0);
 }
 
-// 0x3C SetupThread: returns stack pointer (stack + stack_size)
-// args: $a0 = stack base, $a1 = stack size, $a2 = gp, $a3 = entry point
+// 0x3C SetupThread
+// args: $a0 = gp, $a1 = stack, $a2 = stack_size, $a3 = args, $t0 = root_func
 void SetupThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    uint32_t stackBase = getRegU32(ctx, 4);
-    uint32_t stackSize = getRegU32(ctx, 5);
-    uint32_t sp = stackBase + stackSize;
-    setReturnS32(ctx, sp);
+    const uint32_t gp = getRegU32(ctx, 4);
+    const uint32_t stack = getRegU32(ctx, 5);
+    const int32_t stackSizeSigned = static_cast<int32_t>(getRegU32(ctx, 6));
+    const uint32_t currentSp = getRegU32(ctx, 29);
+
+    if (gp != 0u)
+    {
+        setRegU32(ctx, 28, gp);
+    }
+
+    uint32_t sp = currentSp;
+    if (stack == 0xFFFFFFFFu)
+    {
+        if (stackSizeSigned > 0)
+        {
+            const uint32_t requestedSize = static_cast<uint32_t>(stackSizeSigned);
+            if (requestedSize < PS2_RAM_SIZE)
+            {
+                sp = PS2_RAM_SIZE - requestedSize;
+            }
+            else
+            {
+                sp = PS2_RAM_SIZE;
+            }
+        }
+        else
+        {
+            sp = PS2_RAM_SIZE;
+        }
+    }
+    else if (stack != 0u)
+    {
+        if (stackSizeSigned > 0)
+        {
+            sp = stack + static_cast<uint32_t>(stackSizeSigned);
+        }
+        else
+        {
+            sp = stack;
+        }
+    }
+
+    sp &= ~0xFu;
+    setReturnU32(ctx, sp);
 }
 
 // 0x3D SetupHeap: returns heap base/start pointer

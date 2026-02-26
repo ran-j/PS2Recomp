@@ -283,8 +283,9 @@ public:
     const uint8_t *getVU1Data() const { return m_vu1Data; }
 
     bool isPath3Masked() const { return m_path3Masked; }
+    void flushMaskedPath3Packets(bool drainImmediately = true);
 
-    void submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool drainImmediately = true);
+    void submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool drainImmediately = true, bool path2DirectHl = false);
     void processGIFPacket(uint32_t srcPhysAddr, uint32_t qwCount);
     void processGIFPacket(const uint8_t *data, uint32_t sizeBytes);
     void processVIF1Data(uint32_t srcPhysAddr, uint32_t sizeBytes);
@@ -346,6 +347,7 @@ public:
     uint8_t *m_vu1Code = nullptr;
     uint8_t *m_vu1Data = nullptr;
     bool m_path3Masked = false;
+    std::vector<std::vector<uint8_t>> m_path3MaskedFifo;
 
     struct PendingTransfer
     {

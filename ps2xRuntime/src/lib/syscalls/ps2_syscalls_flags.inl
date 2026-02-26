@@ -232,8 +232,11 @@ void SignalSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     }
 
     int ret = KE_OK;
+    int beforeCount = 0;
+    int afterCount = 0;
     {
         std::lock_guard<std::mutex> lock(sema->m);
+        beforeCount = sema->count;
         if (sema->count >= sema->maxCount)
         {
             ret = KE_SEMA_OVF;
@@ -243,6 +246,18 @@ void SignalSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             sema->count++;
             sema->cv.notify_one();
         }
+        afterCount = sema->count;
+    }
+
+    static std::atomic<uint32_t> s_signalSemaLogs{0};
+    const uint32_t sigLog = s_signalSemaLogs.fetch_add(1, std::memory_order_relaxed);
+    if (sigLog < 256u)
+    {
+        std::cout << "[SignalSema] tid=" << g_currentThreadId
+                  << " sid=" << sid
+                  << " count=" << beforeCount << "->" << afterCount
+                  << " ret=" << ret
+                  << std::endl;
     }
 
     setReturnS32(ctx, ret);
@@ -270,6 +285,18 @@ void WaitSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
     if (sema->count == 0)
     {
+        static std::atomic<uint32_t> s_waitSemaBlockLogs{0};
+        const uint32_t blockLog = s_waitSemaBlockLogs.fetch_add(1, std::memory_order_relaxed);
+        if (blockLog < 256u)
+        {
+            std::cout << "[WaitSema:block] tid=" << g_currentThreadId
+                      << " sid=" << sid
+                      << " pc=0x" << std::hex << ctx->pc
+                      << " ra=0x" << getRegU32(ctx, 31)
+                      << std::dec
+                      << std::endl;
+        }
+
         if (info)
         {
             std::lock_guard<std::mutex> tLock(info->m);
@@ -314,6 +341,17 @@ void WaitSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     if (ret == 0 && sema->count > 0)
     {
         sema->count--;
+    }
+
+    static std::atomic<uint32_t> s_waitSemaWakeLogs{0};
+    const uint32_t wakeLog = s_waitSemaWakeLogs.fetch_add(1, std::memory_order_relaxed);
+    if (wakeLog < 256u)
+    {
+        std::cout << "[WaitSema:wake] tid=" << g_currentThreadId
+                  << " sid=" << sid
+                  << " ret=" << ret
+                  << " count=" << sema->count
+                  << std::endl;
     }
     lock.unlock();
     waitWhileSuspended(info);
@@ -456,9 +494,22 @@ void SetEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         return;
     }
 
+    uint32_t newBits = 0u;
     {
         std::lock_guard<std::mutex> lock(info->m);
         info->bits |= bits;
+        newBits = info->bits;
+    }
+
+    static std::atomic<uint32_t> s_setEventFlagLogs{0};
+    const uint32_t setLog = s_setEventFlagLogs.fetch_add(1, std::memory_order_relaxed);
+    if (setLog < 256u)
+    {
+        std::cout << "[SetEventFlag] tid=" << g_currentThreadId
+                  << " eid=" << eid
+                  << " bits=0x" << std::hex << bits
+                  << " newBits=0x" << newBits
+                  << std::dec << std::endl;
     }
     info->cv.notify_all();
     setReturnS32(ctx, 0);
@@ -551,6 +602,21 @@ void WaitEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
     if (!satisfied())
     {
+        static std::atomic<uint32_t> s_waitEventBlockLogs{0};
+        const uint32_t evBlockLog = s_waitEventBlockLogs.fetch_add(1, std::memory_order_relaxed);
+        if (evBlockLog < 256u)
+        {
+            std::cout << "[WaitEventFlag:block] tid=" << g_currentThreadId
+                      << " eid=" << eid
+                      << " waitBits=0x" << std::hex << waitBits
+                      << " mode=0x" << mode
+                      << " bits=0x" << info->bits
+                      << " pc=0x" << ctx->pc
+                      << " ra=0x" << getRegU32(ctx, 31)
+                      << std::dec
+                      << std::endl;
+        }
+
         if (tInfo)
         {
             std::lock_guard<std::mutex> tLock(tInfo->m);
@@ -608,6 +674,18 @@ void WaitEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             info->bits &= ~waitBits;
         }
+    }
+
+    static std::atomic<uint32_t> s_waitEventWakeLogs{0};
+    const uint32_t evWakeLog = s_waitEventWakeLogs.fetch_add(1, std::memory_order_relaxed);
+    if (evWakeLog < 256u)
+    {
+        std::cout << "[WaitEventFlag:wake] tid=" << g_currentThreadId
+                  << " eid=" << eid
+                  << " ret=" << ret
+                  << " bits=0x" << std::hex << info->bits
+                  << std::dec
+                  << std::endl;
     }
 
     lock.unlock();
@@ -671,9 +749,13 @@ void PollEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         *resBitsPtr = info->bits;
     }
 
-    if (mode & (WEF_CLEAR | WEF_CLEAR_ALL))
+    if (mode & WEF_CLEAR_ALL)
     {
         info->bits = 0;
+    }
+    else if (mode & WEF_CLEAR)
+    {
+        info->bits &= ~waitBits;
     }
 
     setReturnS32(ctx, KE_OK);

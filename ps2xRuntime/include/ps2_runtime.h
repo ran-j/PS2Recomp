@@ -202,9 +202,9 @@ inline void setReturnU64(R5900Context *ctx, uint64_t value)
     ctx->r[3] = _mm_set_epi64x(0, static_cast<int64_t>(static_cast<uint32_t>(value >> 32)));
 }
 
-inline constexpr uint32_t PS2_PATH_WATCH_ADDR = 0x00369F2Fu;
-inline constexpr uint32_t PS2_PATH_WATCH_BYTES = 32u;
-inline constexpr uint32_t PS2_PATH_WATCH_MAX_LOGS = 512u;
+inline constexpr uint32_t PS2_PATH_WATCH_ADDR = 0x01EFFFA0u;
+inline constexpr uint32_t PS2_PATH_WATCH_BYTES = 0x200u;
+inline constexpr uint32_t PS2_PATH_WATCH_MAX_LOGS = 4096u;
 inline std::atomic<uint32_t> g_ps2PathWatchLogCount{0};
 
 inline uint32_t ps2PathWatchPhysAddr()

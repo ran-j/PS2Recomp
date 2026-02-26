@@ -444,6 +444,16 @@ namespace ps2recomp
 
     void ElfAnalyzer::analyzeLibraryFunctions()
     {
+        std::unordered_set<std::string> forcedRecompileNames;
+        forcedRecompileNames.reserve(m_forceRecompileStarts.size());
+        for (const auto &func : m_functions)
+        {
+            if (m_forceRecompileStarts.contains(func.start))
+            {
+                forcedRecompileNames.insert(func.name);
+            }
+        }
+
         for (const auto &symbol : m_symbols)
         {
             if (symbol.isFunction)
@@ -457,7 +467,7 @@ namespace ps2recomp
                 {
                     m_libFunctions.insert(symbol.name);
                 }
-                else if (isSystemFunction(symbol.name))
+                else if (shouldSkipSystemSymbolForHeuristics(symbol.name, forcedRecompileNames))
                 {
                     m_skipFunctions.insert(symbol.name);
                 }
@@ -475,7 +485,7 @@ namespace ps2recomp
             {
                 m_libFunctions.insert(func.name);
             }
-            else if (isSystemFunction(func.name))
+            else if (shouldSkipSystemSymbolForHeuristics(func.name, forcedRecompileNames))
             {
                 m_skipFunctions.insert(func.name);
             }
@@ -1606,6 +1616,10 @@ namespace ps2recomp
             if (funcIt != m_functions.end())
             {
                 const Function &func = *funcIt;
+                if (m_forceRecompileStarts.contains(func.start))
+                {
+                    continue;
+                }
 
                 if (patchAddrs.size() > 3)
                 {
@@ -2128,6 +2142,17 @@ namespace ps2recomp
             return true;
         }
 
+        return isSystemSymbolNameForHeuristics(name);
+    }
+
+    bool ElfAnalyzer::shouldSkipSystemSymbolForHeuristics(
+        const std::string &name,
+        const std::unordered_set<std::string> &forcedRecompileNames)
+    {
+        if (forcedRecompileNames.contains(name))
+        {
+            return false;
+        }
         return isSystemSymbolNameForHeuristics(name);
     }
 

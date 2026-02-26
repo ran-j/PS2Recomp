@@ -11,7 +11,14 @@ add_executable(ps2x_tests
     src/r5900_decoder_tests.cpp
     src/elf_analyzer_tests.cpp
     src/ps2_runtime_io_tests.cpp
+    src/ps2_runtime_kernel_tests.cpp
+    src/ps2_runtime_interrupt_tests.cpp
+    src/ps2_memory_tests.cpp
+    src/ps2_gs_tests.cpp
+    src/ps2_sif_rpc_tests.cpp
+    src/ps2_sif_dma_tests.cpp
     src/ps2_recompiler_tests.cpp
+    src/ps2_runtime_expansion_tests.cpp
 )
 
 option(PRINT_GENERATED_CODE "Print generated code in tests" OFF)

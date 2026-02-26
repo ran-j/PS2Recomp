@@ -117,6 +117,31 @@ void register_r5900_decoder_tests()
         t.IsTrue(inst.modificationInfo.modifiesGPR, "jalr with rd!=0 should mark GPR modification");
     });
 
+    tc.Run("R5900 MULT marks rd modification when rd is non-zero", [](TestCase &t) {
+        uint32_t address = 0x5800;
+        uint32_t rawWithRd = (OPCODE_SPECIAL << 26) | (4 << 21) | (5 << 16) | (3 << 11) | SPECIAL_MULT;
+        uint32_t rawRdZero = (OPCODE_SPECIAL << 26) | (4 << 21) | (5 << 16) | (0 << 11) | SPECIAL_MULT;
+
+        R5900Decoder decoder;
+        Instruction withRd = decoder.decodeInstruction(address, rawWithRd);
+        Instruction rdZero = decoder.decodeInstruction(address + 4, rawRdZero);
+
+        t.IsTrue(withRd.modificationInfo.modifiesControl, "MULT should modify HI/LO");
+        t.IsTrue(withRd.modificationInfo.modifiesGPR, "MULT should mark rd modification when rd!=0");
+        t.IsFalse(rdZero.modificationInfo.modifiesGPR, "MULT should not mark rd modification when rd==0");
+    });
+
+    tc.Run("R5900 MMI MULT1 marks rd modification when rd is non-zero", [](TestCase &t) {
+        uint32_t address = 0x5900;
+        uint32_t raw = (OPCODE_MMI << 26) | (6 << 21) | (7 << 16) | (8 << 11) | MMI_MULT1;
+
+        R5900Decoder decoder;
+        Instruction inst = decoder.decodeInstruction(address, raw);
+
+        t.IsTrue(inst.modificationInfo.modifiesControl, "MULT1 should modify HI1/LO1");
+        t.IsTrue(inst.modificationInfo.modifiesGPR, "MULT1 should mark rd modification when rd!=0");
+    });
+
     tc.Run("MMI instruction sets MMI flags", [](TestCase &t) {
         uint32_t address = 0x6000;
         // Use opcode 0x1C (MMI), rs=1, rt=2, rd=3, sa=MMI0_PADDW (0)

@@ -4,6 +4,7 @@
 #include "ps2recomp/types.h"
 
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 using namespace ps2recomp;
@@ -74,6 +75,21 @@ void register_elf_analyzer_tests()
                       "engine/game symbol should not be classified as system");
             t.IsFalse(ElfAnalyzer::isSystemSymbolNameForHeuristics("sub_00100C00"),
                       "unreliable names should not be considered system by this classifier"); });
+
+                       tc.Run("system skip keeps forced entry names recompiled", [](TestCase &t)
+                              {
+            std::unordered_set<std::string> forcedNames{"_start", "_init"};
+            t.IsFalse(ElfAnalyzer::shouldSkipSystemSymbolForHeuristics("_start", forcedNames),
+                      "forced entry name _start should not be skipped");
+            t.IsFalse(ElfAnalyzer::shouldSkipSystemSymbolForHeuristics("_init", forcedNames),
+                      "forced entry name _init should not be skipped");
+
+            t.IsTrue(ElfAnalyzer::shouldSkipSystemSymbolForHeuristics("__main", forcedNames),
+                     "system symbol not marked as forced should still be skipped");
+            t.IsTrue(ElfAnalyzer::shouldSkipSystemSymbolForHeuristics("__divdi3", {}),
+                     "compiler helper __divdi3 should be skippable as system/runtime");
+            t.IsFalse(ElfAnalyzer::shouldSkipSystemSymbolForHeuristics("ps2___divdi3", {}),
+                      "generated ps2_ wrapper names should not be treated as system"); });
 
                        tc.Run("entry-point mapping handles exact inside and fallback", [](TestCase &t)
                               {

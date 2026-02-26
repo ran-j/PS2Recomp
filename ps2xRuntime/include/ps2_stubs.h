@@ -11,6 +11,9 @@ namespace ps2_stubs
     PS2_STUB_LIST(PS2_DECLARE_STUB)
     #undef PS2_DECLARE_STUB
 
+    void resetGsSyncVCallbackState();
+    void dispatchGsSyncVCallback(uint8_t *rdram, PS2Runtime *runtime);
+
     void syMalloc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sndr_trans_func(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
 

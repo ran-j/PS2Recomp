@@ -221,6 +221,13 @@ void GSRasterizer::drawSprite(GS *gs)
     if (x0 > x1) std::swap(x0, x1);
     if (y0 > y1) std::swap(y0, y1);
 
+    // If the sprite rectangle is fully outside scissor, nothing should render.
+    if (x1 < ctx.scissor.x0 || x0 > ctx.scissor.x1 ||
+        y1 < ctx.scissor.y0 || y0 > ctx.scissor.y1)
+    {
+        return;
+    }
+
     x0 = clampInt(x0, ctx.scissor.x0, ctx.scissor.x1);
     y0 = clampInt(y0, ctx.scissor.y0, ctx.scissor.y1);
     x1 = clampInt(x1, ctx.scissor.x0, ctx.scissor.x1);

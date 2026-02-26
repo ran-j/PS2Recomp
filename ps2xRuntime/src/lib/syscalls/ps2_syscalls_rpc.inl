@@ -198,7 +198,7 @@ void SifCallRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
     auto looksLikeSize = [&](uint32_t v) -> bool
     {
-        return v <= 0x100000u;
+        return v <= 0x2000000u;
     };
 
     auto looksLikeFunc = [&](uint32_t v) -> bool
@@ -211,10 +211,15 @@ void SifCallRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         return looksLikeSize(sendSz) && looksLikeGuestPtr(rbuf) && looksLikeSize(rsz) && looksLikeFunc(endFn);
     };
 
+    const bool regPackPlausible = plausiblePack(sendSizeReg, recvBufReg, recvSizeReg, endFuncReg);
+    const bool stackPackPlausible = plausiblePack(sendSizeStk, recvBufStk, recvSizeStk, endFuncStk);
+
     bool useRegConvention = true;
-    if (!plausiblePack(sendSizeReg, recvBufReg, recvSizeReg, endFuncReg))
+    if (!regPackPlausible && stackPackPlausible)
     {
-        if (plausiblePack(sendSizeStk, recvBufStk, recvSizeStk, endFuncStk))
+        const bool regHasValidCallback = (endFuncReg != 0u) && looksLikeFunc(endFuncReg);
+        const bool stackHasValidCallback = (endFuncStk != 0u) && looksLikeFunc(endFuncStk);
+        if (!(regHasValidCallback && !stackHasValidCallback))
         {
             useRegConvention = false;
         }
@@ -424,6 +429,16 @@ void SifCallRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             if (recvSize > sizeof(uint32_t))
             {
                 rpcZeroRdram(rdram, recvBuf + sizeof(uint32_t), recvSize - sizeof(uint32_t));
+            }
+            static uint32_t dtxCreateLogCount = 0;
+            if (dtxCreateLogCount < 64u)
+            {
+                std::cout << "[SifCallRpc:DTX_CREATE] dtxId=0x" << std::hex << dtxId
+                          << " remote=0x" << remoteHandle
+                          << " recvBuf=0x" << recvBuf
+                          << " recvSize=0x" << recvSize
+                          << std::dec << std::endl;
+                ++dtxCreateLogCount;
             }
             handled = true;
             resultPtr = recvBuf;
@@ -818,24 +833,22 @@ void SifCallRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
     if (sid == 1u && (rpcNum == 0x12u || rpcNum == 0x13u))
     {
-        uint32_t responseWord = 1u;
-        if (rpcNum == 0x13u)
-        {
-            static uint32_t sdrStateBlobAddr = 0u;
-            if (sdrStateBlobAddr == 0u)
-            {
-                sdrStateBlobAddr = rpcAllocPacketAddr(rdram);
-                if (sdrStateBlobAddr == 0u)
-                {
-                    sdrStateBlobAddr = kRpcPacketPoolBase;
-                }
-            }
+        // RECVX snddrv expects:
+        //   cmd 0x12 -> SND_STATUS* (get_adrs)
+        //   cmd 0x13 -> int[16]*   (iop_data_adr_top)
+        constexpr uint32_t kSdrStatusAddr = 0x00012000u;
+        constexpr uint32_t kSdrAddrTableAddr = 0x00012100u;
+        constexpr uint32_t kSdrHdBaseAddr = 0x00014000u;
+        constexpr uint32_t kSdrSqBaseAddr = 0x00018000u;
+        constexpr uint32_t kSdrDataBaseAddr = 0x00030000u;
 
-            rpcZeroRdram(rdram, sdrStateBlobAddr, 64u);
-            (void)writeRpcU32(sdrStateBlobAddr + 0u, 1u);
-            responseWord = sdrStateBlobAddr;
-        }
+        rpcZeroRdram(rdram, kSdrStatusAddr, 0x42u);
+        rpcZeroRdram(rdram, kSdrAddrTableAddr, 16u * sizeof(uint32_t));
+        (void)writeRpcU32(kSdrAddrTableAddr + (0u * sizeof(uint32_t)), kSdrHdBaseAddr);
+        (void)writeRpcU32(kSdrAddrTableAddr + (1u * sizeof(uint32_t)), kSdrSqBaseAddr);
+        (void)writeRpcU32(kSdrAddrTableAddr + (2u * sizeof(uint32_t)), kSdrDataBaseAddr);
 
+        const uint32_t responseWord = (rpcNum == 0x12u) ? kSdrStatusAddr : kSdrAddrTableAddr;
         if (recvBuf && recvSize >= sizeof(uint32_t))
         {
             (void)writeRpcU32(recvBuf, responseWord);

@@ -112,6 +112,46 @@ void register_code_generator_tests()
 {
     MiniTest::Case("CodeGenerator", [](TestCase &tc)
                    {
+    tc.Run("R5900 MULT writes rd when rd is non-zero", [](TestCase &t) {
+        CodeGenerator gen({}, {});
+
+        Instruction mult{};
+        mult.opcode = OPCODE_SPECIAL;
+        mult.function = SPECIAL_MULT;
+        mult.rs = 4;
+        mult.rt = 5;
+        mult.rd = 3;
+
+        std::string generated = gen.translateInstruction(mult);
+        printGeneratedCode("R5900 MULT writes rd when rd is non-zero", generated);
+
+        t.IsTrue(generated.find("SET_GPR_S32(ctx, 3, (int32_t)result);") != std::string::npos,
+                 "MULT should write low product to rd on R5900");
+
+        mult.rd = 0;
+        generated = gen.translateInstruction(mult);
+        t.IsTrue(generated.find("SET_GPR_S32(") == std::string::npos,
+                 "MULT should not write rd when rd is zero");
+    });
+
+    tc.Run("R5900 MMI MULT1 writes rd when rd is non-zero", [](TestCase &t) {
+        CodeGenerator gen({}, {});
+
+        Instruction mult1{};
+        mult1.opcode = OPCODE_MMI;
+        mult1.isMMI = true;
+        mult1.function = MMI_MULT1;
+        mult1.rs = 8;
+        mult1.rt = 9;
+        mult1.rd = 10;
+
+        std::string generated = gen.translateInstruction(mult1);
+        printGeneratedCode("R5900 MMI MULT1 writes rd when rd is non-zero", generated);
+
+        t.IsTrue(generated.find("SET_GPR_S32(ctx, 10, (int32_t)result);") != std::string::npos,
+                 "MULT1 should write low product to rd on R5900");
+    });
+
         tc.Run("emits labels and gotos for internal branches", [](TestCase &t) {
             Function func;
             func.name = "test_func";
