@@ -70,7 +70,7 @@ namespace ps2recomp
         bool generateStubHeader();
         bool writeToFile(const std::string &path, const std::string &content);
         std::filesystem::path getOutputPath(const Function &function) const;
-        std::string PS2Recompiler::clampFilenameLength(const std::string& baseName, const std::string& extension, std::size_t maxLength) const;
+        std::string clampFilenameLength(const std::string& baseName, const std::string& extension, std::size_t maxLength) const;
         std::string sanitizeFunctionName(const std::string &name) const;       
     };
 
