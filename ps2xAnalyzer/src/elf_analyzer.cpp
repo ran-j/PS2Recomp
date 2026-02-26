@@ -24,6 +24,7 @@ namespace ps2recomp
     static bool hasPs2ApiPrefix(const std::string &name);
     static bool hasReliableSymbolName(const std::string &name);
     static bool isDoNotSkipOrStub(const std::string &name);
+    static bool matchesKernelRuntimeName(const std::string &name);
     static uint32_t decodeAbsoluteJumpTarget(uint32_t instructionAddress, uint32_t targetField);
     static bool tryReadWord(const ElfParser *parser, uint32_t address, uint32_t &outWord);
 
@@ -2046,6 +2047,18 @@ namespace ps2recomp
         return false;
     }
 
+    static bool matchesKernelRuntimeName(const std::string &name)
+    {
+        if (name.empty())
+        {
+            return false;
+        }
+
+        static const std::regex kernelRuntimePattern(
+            "^(?:(?:Create|Delete|Start|ExitDelete|Exit|Terminate|Suspend|Resume|Sleep|Wakeup|CancelWakeup|Change|Rotate|Release|Setup|Register|Query|Get|Set|Refer|Poll|Wait|Signal|Enable|Disable|Flush|Reset|Add|Init)(?:Thread|Sema|EventFlag|Alarm|Intc|IntcHandler2|Dmac|DmacHandler2|OsdConfigParam|MemorySize|VSyncFlag|Heap|TLS|Status|Cache|Syscall|TLB|TLBEntry|GsCrt)|EndOfHeap|GsGetIMR|GsPutIMR|Deci2Call|Sif[A-Za-z0-9_]+|i(?:SignalSema|PollSema|ReferSemaStatus|SetEventFlag|ClearEventFlag|PollEventFlag|ReferEventFlagStatus|WakeupThread|CancelWakeupThread|ReleaseWaitThread|SetAlarm|CancelAlarm|FlushCache|sceSifSetDma|sceSifSetDChain))$");
+        return std::regex_match(name, kernelRuntimePattern);
+    }
+
     static bool isDoNotSkipOrStub(const std::string &name)
     {
         static const std::unordered_set<std::string> kDoNotSkipOrStub = {
@@ -2169,7 +2182,19 @@ namespace ps2recomp
         if (!hasReliableSymbolName(name))
             return false;
 
+        std::string normalizedName = name;
+        if (normalizedName[0] == '_' && normalizedName.size() > 1)
+        {
+            normalizedName = normalizedName.substr(1);
+        }
+
+        if (matchesKernelRuntimeName(normalizedName))
+            return true;
+
         if (m_knownLibNames.find(name) != m_knownLibNames.end())
+            return true;
+
+        if (m_knownLibNames.find(normalizedName) != m_knownLibNames.end())
             return true;
 
         if (hasPs2ApiPrefix(name))
@@ -2177,7 +2202,7 @@ namespace ps2recomp
 
         // Check for common C/C++ library function names
         static const std::regex cLibPattern("^_*(mem|str|time|f?printf|f?scanf|malloc|free|calloc|realloc|atoi|itoa|rand|srand|abort|exit|atexit|getenv|system|bsearch|qsort|abs|labs|div|ldiv|mblen|mbtowc|wctomb|mbstowcs|wcstombs).*");
-        if (std::regex_match(name, cLibPattern))
+        if (std::regex_match(normalizedName, cLibPattern))
         {
             return true;
         }

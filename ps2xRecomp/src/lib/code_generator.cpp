@@ -123,6 +123,26 @@ namespace ps2recomp
         m_relocationCallNames = callNames;
     }
 
+    void CodeGenerator::setConfiguredJumpTables(const std::vector<JumpTable> &jumpTables)
+    {
+        m_configJumpTableTargetsByAddress.clear();
+        for (const auto &table : jumpTables)
+        {
+            auto &targets = m_configJumpTableTargetsByAddress[table.address];
+            for (const auto &entry : table.entries)
+            {
+                targets.push_back(entry.target);
+            }
+        }
+
+        for (auto &[address, targets] : m_configJumpTableTargetsByAddress)
+        {
+            (void)address;
+            std::sort(targets.begin(), targets.end());
+            targets.erase(std::unique(targets.begin(), targets.end()), targets.end());
+        }
+    }
+
     std::string CodeGenerator::getFunctionName(uint32_t address) const
     {
         auto it = m_renamedFunctions.find(address);
@@ -738,6 +758,33 @@ namespace ps2recomp
                         if (foundTableAddress) {
                             tableAddress += lwOffset;
 
+                            const auto configuredTableIt = m_configJumpTableTargetsByAddress.find(tableAddress);
+                            if (configuredTableIt != m_configJumpTableTargetsByAddress.end())
+                            {
+                                std::vector<uint32_t> jrTargets;
+                                jrTargets.reserve(configuredTableIt->second.size());
+                                for (uint32_t target : configuredTableIt->second)
+                                {
+                                    if (target >= function.start && target < function.end &&
+                                        instructionAddresses.contains(target))
+                                    {
+                                        jrTargets.push_back(target);
+                                    }
+                                }
+
+                                if (!jrTargets.empty())
+                                {
+                                    std::sort(jrTargets.begin(), jrTargets.end());
+                                    jrTargets.erase(std::unique(jrTargets.begin(), jrTargets.end()), jrTargets.end());
+                                    result.jumpTableTargets[jrInst->address] = jrTargets;
+                                    for (uint32_t target : jrTargets)
+                                    {
+                                        result.entryPoints.insert(target);
+                                    }
+                                    foundTable = true;
+                                }
+                            }
+
                             uint32_t unshiftedIndexReg = 0;
                             for (int i = adduIndex - 1; i >= 0 && i >= adduIndex - 10; --i) {
                                 const auto& inst = instructions[i];
@@ -758,7 +805,7 @@ namespace ps2recomp
                                 }
                             }
                             
-                            if (numCases > 0 && numCases <= 1000) {
+                            if (!foundTable && numCases > 0 && numCases <= 1000) {
                                 const Section* rodata = nullptr;
                                 for (const auto& sec : m_sections) {
                                     if (tableAddress >= sec.address && tableAddress < sec.address + sec.size) {

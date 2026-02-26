@@ -929,6 +929,82 @@ void register_code_generator_tests()
                      "switch should include other in-function labels");
         });
 
+        tc.Run("configured jump table addresses drive JR dispatch targets", [](TestCase &t) {
+            Function func;
+            func.name = "jr_configured_jump_table";
+            func.start = 0x1600;
+            func.end = 0x1640;
+            func.isRecompiled = true;
+            func.isStub = false;
+
+            constexpr uint32_t tableAddress = 0x00200000u;
+
+            Instruction lui{};
+            lui.address = 0x1600;
+            lui.opcode = OPCODE_LUI;
+            lui.rt = 9;
+            lui.immediate = static_cast<uint16_t>((tableAddress >> 16) & 0xFFFFu);
+
+            Instruction addiu{};
+            addiu.address = 0x1604;
+            addiu.opcode = OPCODE_ADDIU;
+            addiu.rs = 9;
+            addiu.rt = 9;
+            addiu.immediate = static_cast<uint16_t>(tableAddress & 0xFFFFu);
+            addiu.simmediate = addiu.immediate;
+
+            Instruction sll{};
+            sll.address = 0x1608;
+            sll.opcode = OPCODE_SPECIAL;
+            sll.function = SPECIAL_SLL;
+            sll.rd = 8;
+            sll.rt = 4;
+            sll.sa = 2;
+
+            Instruction addu{};
+            addu.address = 0x160C;
+            addu.opcode = OPCODE_SPECIAL;
+            addu.function = SPECIAL_ADDU;
+            addu.rs = 9;
+            addu.rt = 8;
+            addu.rd = 9;
+
+            Instruction lw{};
+            lw.address = 0x1610;
+            lw.opcode = OPCODE_LW;
+            lw.rs = 9;
+            lw.rt = 10;
+            lw.immediate = 0;
+            lw.simmediate = 0;
+
+            Instruction jr = makeJr(0x1614, 10);
+            Instruction jrDelay = makeNop(0x1618);
+            Instruction target0 = makeNop(0x1620);
+            Instruction target1 = makeNop(0x1630);
+
+            JumpTable configured{};
+            configured.address = tableAddress;
+            configured.entries.push_back({0u, 0x1620u});
+            configured.entries.push_back({1u, 0x1630u});
+
+            CodeGenerator gen({}, {});
+            gen.setConfiguredJumpTables({configured});
+            std::string generated = gen.generateFunction(
+                func,
+                {lui, addiu, sll, addu, lw, jr, jrDelay, target0, target1},
+                false);
+            printGeneratedCode("configured jump table addresses drive JR dispatch targets", generated);
+
+            t.IsTrue(generated.find("switch (jumpTarget)") != std::string::npos,
+                     "JR should emit a switch");
+            t.IsTrue(generated.find("case 0x1620u: goto label_1620;") != std::string::npos,
+                     "configured table target 0x1620 should be emitted");
+            t.IsTrue(generated.find("case 0x1630u: goto label_1630;") != std::string::npos,
+                     "configured table target 0x1630 should be emitted");
+            t.IsTrue(generated.find("case 0x1600u: goto label_1600;") == std::string::npos,
+                     "configured table should avoid broad JR fallback labels");
+        });
+
         tc.Run("JALR includes switch and fallback/guard pair", [](TestCase &t) {
             Function func;
             func.name = "jalr_switch_and_fallback";

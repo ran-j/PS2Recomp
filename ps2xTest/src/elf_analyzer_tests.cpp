@@ -34,6 +34,16 @@ void register_elf_analyzer_tests()
                      "_printf should be classified as library");
             t.IsTrue(analyzer.isLibrarySymbolNameForHeuristics("sceCdRead"),
                      "sce-prefixed PS2 API should be classified as library");
+            t.IsTrue(analyzer.isLibrarySymbolNameForHeuristics("SetSyscall"),
+                     "SetSyscall kernel wrapper should be classified as library/runtime");
+            t.IsTrue(analyzer.isLibrarySymbolNameForHeuristics("SetTLBEntry"),
+                     "SetTLBEntry kernel wrapper should be classified as library/runtime");
+            t.IsTrue(analyzer.isLibrarySymbolNameForHeuristics("InitTLB"),
+                     "InitTLB kernel wrapper should be classified as library/runtime");
+            t.IsTrue(analyzer.isLibrarySymbolNameForHeuristics("AddIntcHandler2"),
+                     "AddIntcHandler2 kernel wrapper should be classified as library/runtime");
+            t.IsTrue(analyzer.isLibrarySymbolNameForHeuristics("SetGsCrt"),
+                     "SetGsCrt kernel wrapper should be classified as library/runtime");
 
             t.IsFalse(analyzer.isLibrarySymbolNameForHeuristics("bhEne13_Brain"),
                       "named game function should not be classified as library");
