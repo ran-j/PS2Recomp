@@ -40,6 +40,9 @@ FetchContent_Declare(
     GIT_SHALLOW    TRUE
 )
 
+set(SDL_SHARED ON  CACHE BOOL "" FORCE)
+set(SDL_STATIC OFF CACHE BOOL "" FORCE)
+
 FetchContent_MakeAvailable(imgui imgui_colortextedit imgui_club SDL2)
 
 FetchContent_GetProperties(imgui_file_dialog)
@@ -118,3 +121,7 @@ target_link_libraries(ps2xStudio PRIVATE
     SDL2::SDL2
     OpenGL::GL
 )
+
+if(WIN32)
+    target_link_libraries(ps2xStudio PRIVATE SDL2::SDL2main)
+endif()
