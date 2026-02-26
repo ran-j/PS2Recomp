@@ -33,14 +33,20 @@ FetchContent_Declare(
     GIT_SHALLOW    TRUE
 )
 
-FetchContent_MakeAvailable(imgui imgui_colortextedit imgui_club)
+FetchContent_Declare(
+    SDL2
+    GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
+    GIT_TAG        release-2.30.9
+    GIT_SHALLOW    TRUE
+)
+
+FetchContent_MakeAvailable(imgui imgui_colortextedit imgui_club SDL2)
 
 FetchContent_GetProperties(imgui_file_dialog)
 if(NOT imgui_file_dialog_POPULATED)
     FetchContent_Populate(imgui_file_dialog)
 endif()
 
-find_package(SDL2 REQUIRED)
 find_package(OpenGL REQUIRED)
 
 set(IMGUI_SOURCES
@@ -58,10 +64,9 @@ add_library(imgui_lib STATIC ${IMGUI_SOURCES})
 target_include_directories(imgui_lib PUBLIC
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
-    ${SDL2_INCLUDE_DIRS}
 )
 
-target_link_libraries(imgui_lib PUBLIC ${SDL2_LIBRARIES} OpenGL::GL)
+target_link_libraries(imgui_lib PUBLIC SDL2::SDL2 OpenGL::GL)
 
 add_library(imgui_colortextedit_lib STATIC
     ${imgui_colortextedit_SOURCE_DIR}/TextEditor.cpp
@@ -110,6 +115,6 @@ target_link_libraries(ps2xStudio PRIVATE
     ps2_recomp_lib
     ps2_analyzer_lib
     ps2_test_lib
-    ${SDL2_LIBRARIES}
+    SDL2::SDL2
     OpenGL::GL
 )
