@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <vector>
 
 // Instruction field extraction helpers
 static inline uint8_t DEST(uint32_t i) { return (uint8_t)((i >> 21) & 0xF); }
@@ -99,8 +100,9 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         bool mBit = (upper >> 31) & 1;
         (void)mBit;
 
-        // LOI: if bit 31 of lower is set, the upper word is an immediate float loaded into I
-        bool loi = (lower >> 31) & 1;
+        // LOI uses a dedicated lower opcode (0x8000033C). Do not key on bit31 alone:
+        // opHi=0x40 instructions (including XGKICK) also have bit31 set.
+        bool loi = (lower == 0x8000033Cu);
         if (loi)
         {
             std::memcpy(&m_state.i, &upper, 4);
@@ -108,8 +110,8 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         else
         {
             execUpper(upper);
+            execLower(lower, vuData, dataSize, gs, memory, upper);
         }
-        execLower(lower & 0x7FFFFFFF, vuData, dataSize, gs, memory, upper);
 
         // Enforce VF0 invariant
         m_state.vf[0][0] = 0.0f;
@@ -966,47 +968,92 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
                 return;
             }
         }
-        case 0x3D: // XGKICK — send GIF packet from VU1 data memory
+        case 0x3D: // XGKICK - send GIF packet from VU1 data memory
         {
+            if (!vuData || dataSize < 16u)
+                return;
+
+            auto wrapOffset = [&](uint32_t off) -> uint32_t
+            {
+                return off % dataSize;
+            };
+
+            auto read64Wrap = [&](uint32_t off) -> uint64_t
+            {
+                uint8_t bytes[8];
+                for (uint32_t i = 0; i < 8u; ++i)
+                {
+                    bytes[i] = vuData[wrapOffset(off + i)];
+                }
+                uint64_t value = 0;
+                std::memcpy(&value, bytes, sizeof(value));
+                return value;
+            };
+
             uint32_t addr = ((uint32_t)(uint16_t)m_state.vi[is]) * 16u;
-            addr &= (dataSize - 1);
-            // Walk the GIF packet to find its total size
+            addr = wrapOffset(addr);
             uint32_t pktOff = addr;
-            uint32_t totalBytes = 0;
+            uint32_t totalBytes = 0u;
             bool done = false;
+
             for (int safety = 0; safety < 256 && !done; ++safety)
             {
-                if (pktOff + 16 > dataSize) break;
-                uint64_t tagLo;
-                std::memcpy(&tagLo, vuData + pktOff, 8);
-                uint32_t nloop = (uint32_t)(tagLo & 0x7FFF);
-                uint8_t flg = (uint8_t)((tagLo >> 58) & 0x3);
-                uint32_t nreg = (uint32_t)((tagLo >> 60) & 0xF);
-                if (nreg == 0) nreg = 16;
-                bool eop = (tagLo >> 15) & 1;
+                uint64_t tagLo = read64Wrap(pktOff);
+                uint32_t nloop = (uint32_t)(tagLo & 0x7FFFu);
+                uint8_t flg = (uint8_t)((tagLo >> 58) & 0x3u);
+                uint32_t nreg = (uint32_t)((tagLo >> 60) & 0xFu);
+                if (nreg == 0u)
+                    nreg = 16u;
+                bool eop = ((tagLo >> 15) & 0x1ull) != 0ull;
 
-                uint32_t pktSize = 16; // GIF tag
-                if (flg == 0) // PACKED
-                    pktSize += nloop * nreg * 16;
-                else if (flg == 1) // REGLIST
+                uint32_t pktSize = 16u;
+                if (flg == 0u)
+                {
+                    pktSize += nloop * nreg * 16u;
+                }
+                else if (flg == 1u)
                 {
                     uint32_t regs = nloop * nreg;
-                    pktSize += regs * 8;
-                    if (regs & 1) pktSize += 8; // pad to 128-bit
+                    pktSize += regs * 8u;
+                    if ((regs & 1u) != 0u)
+                        pktSize += 8u;
                 }
-                else if (flg == 2) // IMAGE
-                    pktSize += nloop * 16;
+                else if (flg == 2u)
+                {
+                    pktSize += nloop * 16u;
+                }
 
-                pktOff += pktSize;
+                if (pktSize == 0u)
+                    break;
+
                 totalBytes += pktSize;
-                if (eop) done = true;
+                pktOff = wrapOffset(pktOff + pktSize);
+                if (eop)
+                    done = true;
             }
-            if (totalBytes > 0 && addr + totalBytes <= dataSize)
+
+            if (totalBytes == 0u)
+                return;
+
+            if (addr + totalBytes <= dataSize)
             {
                 if (memory)
                     memory->submitGifPacket(GifPathId::Path1, vuData + addr, totalBytes);
                 else
                     gs.processGIFPacket(vuData + addr, totalBytes);
+            }
+            else
+            {
+                std::vector<uint8_t> wrappedPacket(totalBytes);
+                for (uint32_t i = 0; i < totalBytes; ++i)
+                {
+                    wrappedPacket[i] = vuData[wrapOffset(addr + i)];
+                }
+
+                if (memory)
+                    memory->submitGifPacket(GifPathId::Path1, wrappedPacket.data(), totalBytes);
+                else
+                    gs.processGIFPacket(wrappedPacket.data(), totalBytes);
             }
             return;
         }

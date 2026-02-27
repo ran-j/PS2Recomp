@@ -112,6 +112,46 @@ void register_code_generator_tests()
 {
     MiniTest::Case("CodeGenerator", [](TestCase &tc)
                    {
+    tc.Run("R5900 MULT writes rd when rd is non-zero", [](TestCase &t) {
+        CodeGenerator gen({}, {});
+
+        Instruction mult{};
+        mult.opcode = OPCODE_SPECIAL;
+        mult.function = SPECIAL_MULT;
+        mult.rs = 4;
+        mult.rt = 5;
+        mult.rd = 3;
+
+        std::string generated = gen.translateInstruction(mult);
+        printGeneratedCode("R5900 MULT writes rd when rd is non-zero", generated);
+
+        t.IsTrue(generated.find("SET_GPR_S32(ctx, 3, (int32_t)result);") != std::string::npos,
+                 "MULT should write low product to rd on R5900");
+
+        mult.rd = 0;
+        generated = gen.translateInstruction(mult);
+        t.IsTrue(generated.find("SET_GPR_S32(") == std::string::npos,
+                 "MULT should not write rd when rd is zero");
+    });
+
+    tc.Run("R5900 MMI MULT1 writes rd when rd is non-zero", [](TestCase &t) {
+        CodeGenerator gen({}, {});
+
+        Instruction mult1{};
+        mult1.opcode = OPCODE_MMI;
+        mult1.isMMI = true;
+        mult1.function = MMI_MULT1;
+        mult1.rs = 8;
+        mult1.rt = 9;
+        mult1.rd = 10;
+
+        std::string generated = gen.translateInstruction(mult1);
+        printGeneratedCode("R5900 MMI MULT1 writes rd when rd is non-zero", generated);
+
+        t.IsTrue(generated.find("SET_GPR_S32(ctx, 10, (int32_t)result);") != std::string::npos,
+                 "MULT1 should write low product to rd on R5900");
+    });
+
         tc.Run("emits labels and gotos for internal branches", [](TestCase &t) {
             Function func;
             func.name = "test_func";
@@ -391,6 +431,158 @@ void register_code_generator_tests()
             t.IsTrue(ctc2Code.find("ctx->vu0_itop") != std::string::npos, "CTC2 ITOP should write vu0_itop");
             t.IsTrue(ctc2Code.find("GPR_U32(ctx, 3) & 0x3FF") != std::string::npos, "CTC2 ITOP should mask to 10 bits");
             t.IsTrue(ctc2Code.find("Unimplemented CTC2 VU CReg") == std::string::npos, "CTC2 should not hit unimplemented CReg path");
+        });
+
+        tc.Run("scalar logical immediates emit low64 operations", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+
+            Instruction andi{};
+            andi.opcode = OPCODE_ANDI;
+            andi.rs = 4;
+            andi.rt = 5;
+            andi.immediate = 0xABCD;
+
+            std::string andiCode = gen.translateInstruction(andi);
+            t.IsTrue(andiCode.find("SET_GPR_U64(ctx, 5, GPR_U64(ctx, 4) & (uint64_t)(uint16_t)43981);") != std::string::npos,
+                     "ANDI should use low64 scalar emission");
+            t.IsTrue(andiCode.find("SET_GPR_VEC") == std::string::npos,
+                     "ANDI should not use vector emission");
+
+            Instruction ori{};
+            ori.opcode = OPCODE_ORI;
+            ori.rs = 6;
+            ori.rt = 7;
+            ori.immediate = 0x1234;
+
+            std::string oriCode = gen.translateInstruction(ori);
+            t.IsTrue(oriCode.find("SET_GPR_U64(ctx, 7, GPR_U64(ctx, 6) | (uint64_t)(uint16_t)4660);") != std::string::npos,
+                     "ORI should use low64 scalar emission");
+            t.IsTrue(oriCode.find("SET_GPR_VEC") == std::string::npos,
+                     "ORI should not use vector emission");
+
+            Instruction xori{};
+            xori.opcode = OPCODE_XORI;
+            xori.rs = 8;
+            xori.rt = 9;
+            xori.immediate = 0x00FF;
+
+            std::string xoriCode = gen.translateInstruction(xori);
+            t.IsTrue(xoriCode.find("SET_GPR_U64(ctx, 9, GPR_U64(ctx, 8) ^ (uint64_t)(uint16_t)255);") != std::string::npos,
+                     "XORI should use low64 scalar emission");
+            t.IsTrue(xoriCode.find("SET_GPR_VEC") == std::string::npos,
+                     "XORI should not use vector emission");
+        });
+
+        tc.Run("scalar logical register ops emit low64 operations", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+
+            Instruction andInst{};
+            andInst.opcode = OPCODE_SPECIAL;
+            andInst.function = SPECIAL_AND;
+            andInst.rs = 2;
+            andInst.rt = 3;
+            andInst.rd = 1;
+
+            std::string andCode = gen.translateInstruction(andInst);
+            t.IsTrue(andCode.find("SET_GPR_U64(ctx, 1, GPR_U64(ctx, 2) & GPR_U64(ctx, 3));") != std::string::npos,
+                     "AND should use low64 scalar emission");
+
+            Instruction orInst{};
+            orInst.opcode = OPCODE_SPECIAL;
+            orInst.function = SPECIAL_OR;
+            orInst.rs = 4;
+            orInst.rt = 5;
+            orInst.rd = 6;
+
+            std::string orCode = gen.translateInstruction(orInst);
+            t.IsTrue(orCode.find("SET_GPR_U64(ctx, 6, GPR_U64(ctx, 4) | GPR_U64(ctx, 5));") != std::string::npos,
+                     "OR should use low64 scalar emission");
+
+            Instruction xorInst{};
+            xorInst.opcode = OPCODE_SPECIAL;
+            xorInst.function = SPECIAL_XOR;
+            xorInst.rs = 7;
+            xorInst.rt = 8;
+            xorInst.rd = 9;
+
+            std::string xorCode = gen.translateInstruction(xorInst);
+            t.IsTrue(xorCode.find("SET_GPR_U64(ctx, 9, GPR_U64(ctx, 7) ^ GPR_U64(ctx, 8));") != std::string::npos,
+                     "XOR should use low64 scalar emission");
+
+            Instruction norInst{};
+            norInst.opcode = OPCODE_SPECIAL;
+            norInst.function = SPECIAL_NOR;
+            norInst.rs = 10;
+            norInst.rt = 11;
+            norInst.rd = 12;
+
+            std::string norCode = gen.translateInstruction(norInst);
+            t.IsTrue(norCode.find("SET_GPR_U64(ctx, 12, ~(GPR_U64(ctx, 10) | GPR_U64(ctx, 11)));") != std::string::npos,
+                     "NOR should use low64 scalar emission");
+            t.IsTrue(norCode.find("SET_GPR_VEC") == std::string::npos,
+                     "SPECIAL logical ops should not use vector emission");
+        });
+
+        tc.Run("SC requires matching LL reservation address", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+
+            Instruction sc{};
+            sc.opcode = OPCODE_SC;
+            sc.rs = 9;
+            sc.rt = 10;
+            sc.simmediate = static_cast<uint32_t>(static_cast<int16_t>(4));
+
+            std::string out = gen.translateInstruction(sc);
+            t.IsTrue(out.find("ctx->llbit && ctx->lladdr == addr") != std::string::npos,
+                     "SC must require both llbit and matching lladdr");
+            t.IsTrue(out.find("ctx->llbit = 0; ctx->lladdr = 0;") != std::string::npos,
+                     "SC must clear reservation state after attempting the store");
+        });
+
+        tc.Run("QFSRV translation uses runtime helper macro", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+
+            Instruction qfsrv{};
+            qfsrv.isMMI = true;
+            qfsrv.opcode = OPCODE_MMI;
+            qfsrv.function = MMI_MMI1;
+            qfsrv.sa = MMI1_QFSRV;
+            qfsrv.rd = 3;
+            qfsrv.rs = 4;
+            qfsrv.rt = 5;
+
+            std::string out = gen.translateInstruction(qfsrv);
+            t.IsTrue(out.find("PS2_QFSRV(GPR_VEC(ctx, 4), GPR_VEC(ctx, 5), ctx->sa & 0x7F)") != std::string::npos,
+                     "QFSRV should map to PS2_QFSRV with rs/rt ordering");
+        });
+
+        tc.Run("PCPYLD and PEXEW use runtime helper macros", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+
+            Instruction pcpyld{};
+            pcpyld.isMMI = true;
+            pcpyld.opcode = OPCODE_MMI;
+            pcpyld.function = MMI_MMI2;
+            pcpyld.sa = MMI2_PCPYLD;
+            pcpyld.rd = 6;
+            pcpyld.rs = 7;
+            pcpyld.rt = 8;
+
+            std::string pcpyldOut = gen.translateInstruction(pcpyld);
+            t.IsTrue(pcpyldOut.find("PS2_PCPYLD(GPR_VEC(ctx, 7), GPR_VEC(ctx, 8))") != std::string::npos,
+                     "PCPYLD should use PS2_PCPYLD helper");
+
+            Instruction pexew{};
+            pexew.isMMI = true;
+            pexew.opcode = OPCODE_MMI;
+            pexew.function = MMI_MMI2;
+            pexew.sa = MMI2_PEXEW;
+            pexew.rd = 9;
+            pexew.rs = 10;
+
+            std::string pexewOut = gen.translateInstruction(pexew);
+            t.IsTrue(pexewOut.find("PS2_PEXEW(GPR_VEC(ctx, 10))") != std::string::npos,
+                     "PEXEW should use PS2_PEXEW helper");
         });
 
         tc.Run("VU0 macro mappings cover all S1/S2 enums", [](TestCase &t) {
@@ -737,6 +929,82 @@ void register_code_generator_tests()
                      "switch should include other in-function labels");
         });
 
+        tc.Run("configured jump table addresses drive JR dispatch targets", [](TestCase &t) {
+            Function func;
+            func.name = "jr_configured_jump_table";
+            func.start = 0x1600;
+            func.end = 0x1640;
+            func.isRecompiled = true;
+            func.isStub = false;
+
+            constexpr uint32_t tableAddress = 0x00200000u;
+
+            Instruction lui{};
+            lui.address = 0x1600;
+            lui.opcode = OPCODE_LUI;
+            lui.rt = 9;
+            lui.immediate = static_cast<uint16_t>((tableAddress >> 16) & 0xFFFFu);
+
+            Instruction addiu{};
+            addiu.address = 0x1604;
+            addiu.opcode = OPCODE_ADDIU;
+            addiu.rs = 9;
+            addiu.rt = 9;
+            addiu.immediate = static_cast<uint16_t>(tableAddress & 0xFFFFu);
+            addiu.simmediate = addiu.immediate;
+
+            Instruction sll{};
+            sll.address = 0x1608;
+            sll.opcode = OPCODE_SPECIAL;
+            sll.function = SPECIAL_SLL;
+            sll.rd = 8;
+            sll.rt = 4;
+            sll.sa = 2;
+
+            Instruction addu{};
+            addu.address = 0x160C;
+            addu.opcode = OPCODE_SPECIAL;
+            addu.function = SPECIAL_ADDU;
+            addu.rs = 9;
+            addu.rt = 8;
+            addu.rd = 9;
+
+            Instruction lw{};
+            lw.address = 0x1610;
+            lw.opcode = OPCODE_LW;
+            lw.rs = 9;
+            lw.rt = 10;
+            lw.immediate = 0;
+            lw.simmediate = 0;
+
+            Instruction jr = makeJr(0x1614, 10);
+            Instruction jrDelay = makeNop(0x1618);
+            Instruction target0 = makeNop(0x1620);
+            Instruction target1 = makeNop(0x1630);
+
+            JumpTable configured{};
+            configured.address = tableAddress;
+            configured.entries.push_back({0u, 0x1620u});
+            configured.entries.push_back({1u, 0x1630u});
+
+            CodeGenerator gen({}, {});
+            gen.setConfiguredJumpTables({configured});
+            std::string generated = gen.generateFunction(
+                func,
+                {lui, addiu, sll, addu, lw, jr, jrDelay, target0, target1},
+                false);
+            printGeneratedCode("configured jump table addresses drive JR dispatch targets", generated);
+
+            t.IsTrue(generated.find("switch (jumpTarget)") != std::string::npos,
+                     "JR should emit a switch");
+            t.IsTrue(generated.find("case 0x1620u: goto label_1620;") != std::string::npos,
+                     "configured table target 0x1620 should be emitted");
+            t.IsTrue(generated.find("case 0x1630u: goto label_1630;") != std::string::npos,
+                     "configured table target 0x1630 should be emitted");
+            t.IsTrue(generated.find("case 0x1600u: goto label_1600;") == std::string::npos,
+                     "configured table should avoid broad JR fallback labels");
+        });
+
         tc.Run("JALR includes switch and fallback/guard pair", [](TestCase &t) {
             Function func;
             func.name = "jalr_switch_and_fallback";
@@ -765,6 +1033,71 @@ void register_code_generator_tests()
                      "JALR should contain unchanged-PC fallback to fallthrough");
             t.IsTrue(generated.find("if (ctx->pc != 0x151Cu) { return; }") != std::string::npos,
                      "JALR should retain non-fallthrough guard");
+        });
+
+        tc.Run("JALR fallback should not expose epilogue tail-jump labels", [](TestCase &t) {
+            Function func;
+            func.name = "jalr_epilogue_guard";
+            func.start = 0x2000;
+            func.end = 0x2030;
+            func.isRecompiled = true;
+            func.isStub = false;
+
+            Instruction prolog{};
+            prolog.address = 0x2000;
+            prolog.opcode = OPCODE_ADDIU;
+            prolog.rs = 29;
+            prolog.rt = 29;
+            prolog.simmediate = static_cast<uint32_t>(static_cast<int32_t>(-0x20));
+            prolog.raw = 0;
+
+            Instruction saveRa{};
+            saveRa.address = 0x2004;
+            saveRa.opcode = OPCODE_SD;
+            saveRa.rs = 29;
+            saveRa.rt = 31;
+            saveRa.simmediate = 0x10;
+            saveRa.raw = 0;
+
+            // Dynamic callback entry point.
+            Instruction jalr = makeJalr(0x2008, 2, 31);
+            Instruction jalrDelay = makeNop(0x200C);
+
+            Instruction restoreRa{};
+            restoreRa.address = 0x2010;
+            restoreRa.opcode = OPCODE_LD;
+            restoreRa.rs = 29;
+            restoreRa.rt = 31;
+            restoreRa.simmediate = 0x10;
+            restoreRa.raw = 0;
+
+            // Tail jump sequence that must not be reachable from jalr fallback dispatch.
+            Instruction tailJump{};
+            tailJump.address = 0x2014;
+            tailJump.opcode = OPCODE_J;
+            tailJump.target = (0x3000u >> 2) & 0x3FFFFFFu;
+            tailJump.hasDelaySlot = true;
+            tailJump.raw = 0;
+
+            Instruction tailDelay{};
+            tailDelay.address = 0x2018;
+            tailDelay.opcode = OPCODE_ADDIU;
+            tailDelay.rs = 29;
+            tailDelay.rt = 29;
+            tailDelay.simmediate = 0x20;
+            tailDelay.raw = 0;
+
+            CodeGenerator gen({}, {});
+            std::string generated = gen.generateFunction(
+                func,
+                {prolog, saveRa, jalr, jalrDelay, restoreRa, tailJump, tailDelay},
+                false);
+            printGeneratedCode("JALR fallback should not expose epilogue tail-jump labels", generated);
+
+            t.IsTrue(generated.find("case 0x2014u: goto label_2014;") == std::string::npos,
+                     "jalr fallback should not dispatch directly to epilogue tail-jump block");
+            t.IsTrue(generated.find("case 0x2018u: goto label_2018;") == std::string::npos,
+                     "jalr fallback should not dispatch directly to tail-jump delay slot");
         });
 
         tc.Run("resolveStubTarget allows leading underscore alias", [](TestCase &t) {

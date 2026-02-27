@@ -1606,6 +1606,24 @@ void sceeFontSetScale(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void sceIoctl(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    const int32_t cmd = static_cast<int32_t>(getRegU32(ctx, 5));
+    const uint32_t argAddr = getRegU32(ctx, 6);
+
+    // HTCI wait paths poll sceIoctl(fd, 1, &state) and expect state to move
+    // away from 1 once host-side I/O is no longer busy.
+    if (cmd == 1 && argAddr != 0u)
+    {
+        uint8_t *argPtr = getMemPtr(rdram, argAddr);
+        if (!argPtr)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        const uint32_t ready = 0u;
+        std::memcpy(argPtr, &ready, sizeof(ready));
+    }
+
     setReturnS32(ctx, 0);
 }
 
@@ -2550,9 +2568,72 @@ namespace
         return id;
     }
 
+    bool isCopyableGuestAddress(uint32_t addr)
+    {
+        if (addr >= PS2_SCRATCHPAD_BASE && addr < (PS2_SCRATCHPAD_BASE + PS2_SCRATCHPAD_SIZE))
+        {
+            return true;
+        }
+
+        if (addr < 0x20000000u)
+        {
+            return true;
+        }
+
+        if (addr >= 0x20000000u && addr < 0x40000000u)
+        {
+            return true;
+        }
+
+        if (addr >= 0x80000000u && addr < 0xC0000000u)
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    bool canCopyGuestByteRange(const uint8_t *rdram, uint32_t dstAddr, uint32_t srcAddr, uint32_t sizeBytes)
+    {
+        if (!rdram)
+        {
+            return false;
+        }
+
+        if (sizeBytes == 0u)
+        {
+            return true;
+        }
+
+        for (uint32_t i = 0u; i < sizeBytes; ++i)
+        {
+            const uint32_t srcByteAddr = srcAddr + i;
+            const uint32_t dstByteAddr = dstAddr + i;
+
+            if (!isCopyableGuestAddress(srcByteAddr) || !isCopyableGuestAddress(dstByteAddr))
+            {
+                return false;
+            }
+
+            const uint8_t *src = getConstMemPtr(rdram, srcByteAddr);
+            const uint8_t *dst = getConstMemPtr(rdram, dstByteAddr);
+            if (!src || !dst)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     bool copyGuestByteRange(uint8_t *rdram, uint32_t dstAddr, uint32_t srcAddr, uint32_t sizeBytes)
     {
-        if (!rdram || sizeBytes == 0u)
+        if (!canCopyGuestByteRange(rdram, dstAddr, srcAddr, sizeBytes))
+        {
+            return false;
+        }
+
+        if (sizeBytes == 0u)
         {
             return true;
         }
@@ -2704,6 +2785,142 @@ void sceSifGetOtherData(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         return;
     }
 
+    auto readGuestU32Local = [&](uint32_t addr, uint32_t &out) -> bool
+    {
+        const uint8_t *ptr = getConstMemPtr(rdram, addr);
+        if (!ptr)
+        {
+            out = 0u;
+            return false;
+        }
+        std::memcpy(&out, ptr, sizeof(out));
+        return true;
+    };
+
+    auto readGuestS16Local = [&](uint32_t addr, int16_t &out) -> bool
+    {
+        const uint8_t *b0 = getConstMemPtr(rdram, addr + 0u);
+        const uint8_t *b1 = getConstMemPtr(rdram, addr + 1u);
+        if (!b0 || !b1)
+        {
+            out = 0;
+            return false;
+        }
+        const uint16_t raw = static_cast<uint16_t>(static_cast<uint16_t>(*b0) |
+                                                   (static_cast<uint16_t>(*b1) << 8));
+        out = static_cast<int16_t>(raw);
+        return true;
+    };
+
+    constexpr uint32_t kSndTransTypeAddr = 0x01E0E1C0u;
+    constexpr uint32_t kSndTransBankAddr = 0x01E0E1C8u;
+    constexpr uint32_t kSndTransLevelAddr = 0x01E0E1B8u;
+    constexpr uint32_t kSndGetAdrsAddr = 0x01E212D8u;
+    constexpr uint32_t kSndStatusMirrorAddr = 0x01E213C0u;
+    constexpr uint32_t kSndSeCheckAddr = 0x01E0EF10u;
+    constexpr uint32_t kSndMidiCheckAddr = 0x01E0EF20u;
+
+    static uint32_t s_sifGetOtherDataStatusLogs = 0u;
+    const bool isSndStatusTransfer = (size == 0x42u);
+    const uint32_t statusLogIndex = s_sifGetOtherDataStatusLogs++;
+    const bool shouldLogStatus =
+        isSndStatusTransfer &&
+        (statusLogIndex < 96u || (statusLogIndex % 256u) == 0u);
+
+    if (shouldLogStatus)
+    {
+        uint32_t transType = 0u;
+        uint32_t transLevel = 0u;
+        uint32_t transBank = 0u;
+        uint32_t getAdrs = 0u;
+        (void)readGuestU32Local(kSndTransTypeAddr, transType);
+        (void)readGuestU32Local(kSndTransLevelAddr, transLevel);
+        (void)readGuestU32Local(kSndTransBankAddr, transBank);
+        (void)readGuestU32Local(kSndGetAdrsAddr, getAdrs);
+        std::cout << "[sceSifGetOtherData] src=0x" << std::hex << srcAddr
+                  << " dst=0x" << dstAddr
+                  << " size=0x" << size
+                  << " get_adrs=0x" << getAdrs
+                  << std::dec
+                  << " transType=" << transType
+                  << " transLevel=" << transLevel
+                  << " transBank=" << transBank
+                  << std::endl;
+    }
+
+    // Keep RECVX SND_STATUS checksums synchronized with EE-side transfer checks.
+    if (srcAddr == 0x00012000u && size == 0x42u)
+    {
+        constexpr uint32_t kPrimarySeAddr = 0x01E0EF10u;
+        constexpr uint32_t kPrimaryMidiAddr = 0x01E0EF20u;
+        constexpr uint32_t kFallbackSeAddr = 0x01E1EF10u;
+        constexpr uint32_t kFallbackMidiAddr = 0x01E1EF20u;
+
+        auto hasAnyNonZero = [](const uint8_t *ptr, size_t bytes) -> bool
+        {
+            if (!ptr)
+            {
+                return false;
+            }
+            for (size_t i = 0; i < bytes; ++i)
+            {
+                if (ptr[i] != 0u)
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        const uint8_t *selectedSe = getConstMemPtr(rdram, kPrimarySeAddr);
+        const uint8_t *selectedMidi = getConstMemPtr(rdram, kPrimaryMidiAddr);
+
+        const bool primaryLooksLive =
+            hasAnyNonZero(selectedSe, 5u * sizeof(int16_t)) ||
+            hasAnyNonZero(selectedMidi, 4u * sizeof(int16_t));
+
+        if ((!selectedSe || !selectedMidi) || !primaryLooksLive)
+        {
+            const uint8_t *fallbackSe = getConstMemPtr(rdram, kFallbackSeAddr);
+            const uint8_t *fallbackMidi = getConstMemPtr(rdram, kFallbackMidiAddr);
+            const bool fallbackLooksLive =
+                hasAnyNonZero(fallbackSe, 5u * sizeof(int16_t)) ||
+                hasAnyNonZero(fallbackMidi, 4u * sizeof(int16_t));
+
+            if (fallbackLooksLive)
+            {
+                selectedSe = fallbackSe;
+                selectedMidi = fallbackMidi;
+            }
+        }
+
+        if (selectedSe && selectedMidi)
+        {
+            if (uint8_t *status = getMemPtr(rdram, srcAddr))
+            {
+                std::memcpy(status + 0x26u, selectedSe, 5u * sizeof(int16_t));   // se_sum[5]
+                std::memcpy(status + 0x1Eu, selectedMidi, 4u * sizeof(int16_t)); // midi_sum[4]
+            }
+        }
+
+        if (shouldLogStatus)
+        {
+            int16_t se0 = 0;
+            int16_t midi0 = 0;
+            int16_t seChk0 = 0;
+            int16_t midiChk0 = 0;
+            (void)readGuestS16Local(srcAddr + 0x26u, se0);
+            (void)readGuestS16Local(srcAddr + 0x1Eu, midi0);
+            (void)readGuestS16Local(kSndSeCheckAddr + 0u, seChk0);
+            (void)readGuestS16Local(kSndMidiCheckAddr + 0u, midiChk0);
+            std::cout << "[sceSifGetOtherData:sndstatus] srcSe0=" << se0
+                      << " srcMidi0=" << midi0
+                      << " chkSe0=" << seChk0
+                      << " chkMidi0=" << midiChk0
+                      << std::endl;
+        }
+    }
+
     if (!copyGuestByteRange(rdram, dstAddr, srcAddr, size))
     {
         static uint32_t warnCount = 0;
@@ -2725,6 +2942,38 @@ void sceSifGetOtherData(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         std::memcpy(rd + 0x10u, &srcAddr, sizeof(srcAddr));
         std::memcpy(rd + 0x14u, &dstAddr, sizeof(dstAddr));
         std::memcpy(rd + 0x18u, &size, sizeof(size));
+    }
+
+    if (shouldLogStatus)
+    {
+        uint32_t transBank = 0u;
+        (void)readGuestU32Local(kSndTransBankAddr, transBank);
+        int16_t dstSe = 0;
+        int16_t dstMidi = 0;
+        int16_t mirrorSe = 0;
+        int16_t mirrorMidi = 0;
+        int16_t bankSeChk = 0;
+        int16_t bankMidiChk = 0;
+        (void)readGuestS16Local(dstAddr + 0x26u, dstSe);
+        (void)readGuestS16Local(dstAddr + 0x1Eu, dstMidi);
+        (void)readGuestS16Local(kSndStatusMirrorAddr + 0x26u, mirrorSe);
+        (void)readGuestS16Local(kSndStatusMirrorAddr + 0x1Eu, mirrorMidi);
+        if (transBank < 5u)
+        {
+            (void)readGuestS16Local(kSndSeCheckAddr + (transBank * 2u), bankSeChk);
+        }
+        if (transBank < 4u)
+        {
+            (void)readGuestS16Local(kSndMidiCheckAddr + (transBank * 2u), bankMidiChk);
+        }
+        std::cout << "[sceSifGetOtherData:post] bank=" << transBank
+                  << " dstSe=" << dstSe
+                  << " dstMidi=" << dstMidi
+                  << " mirrorSe=" << mirrorSe
+                  << " mirrorMidi=" << mirrorMidi
+                  << " bankSeChk=" << bankSeChk
+                  << " bankMidiChk=" << bankMidiChk
+                  << std::endl;
     }
 
     setReturnS32(ctx, 0);
@@ -2877,6 +3126,8 @@ void sceSifSetDma(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         return;
     }
 
+    std::array<Ps2SifDmaTransfer, 32u> pending{};
+    uint32_t pendingCount = 0u;
     bool ok = true;
     for (uint32_t i = 0; i < count; ++i)
     {
@@ -2901,10 +3152,25 @@ void sceSifSetDma(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             ok = false;
             break;
         }
-        if (!copyGuestByteRange(rdram, xfer.dest, xfer.src, sizeBytes))
+        if (!canCopyGuestByteRange(rdram, xfer.dest, xfer.src, sizeBytes))
         {
             ok = false;
             break;
+        }
+
+        pending[pendingCount++] = xfer;
+    }
+
+    if (ok)
+    {
+        for (uint32_t i = 0; i < pendingCount; ++i)
+        {
+            const Ps2SifDmaTransfer &xfer = pending[i];
+            if (!copyGuestByteRange(rdram, xfer.dest, xfer.src, static_cast<uint32_t>(xfer.size)))
+            {
+                ok = false;
+                break;
+            }
         }
     }
 
@@ -3963,12 +4229,17 @@ void vsprintf(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     uint32_t str_addr = getRegU32(ctx, 4);     // $a0
     uint32_t format_addr = getRegU32(ctx, 5);  // $a1
     uint32_t va_list_addr = getRegU32(ctx, 6); // $a2
+    constexpr size_t kSafeVsprintfBytes = 256u; // Keep guest stack temporaries from being overwritten.
     const std::string formatOwned = readPs2CStringBounded(rdram, runtime, format_addr, 1024);
     int ret = -1;
 
     if (format_addr != 0)
     {
         std::string rendered = formatPs2StringWithVaList(rdram, runtime, formatOwned.c_str(), va_list_addr);
+        if (rendered.size() >= kSafeVsprintfBytes)
+        {
+            rendered.resize(kSafeVsprintfBytes - 1);
+        }
         if (writeGuestBytes(rdram, runtime, str_addr, reinterpret_cast<const uint8_t *>(rendered.c_str()), rendered.size() + 1u))
         {
             ret = static_cast<int>(rendered.size());

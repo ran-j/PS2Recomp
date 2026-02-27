@@ -328,7 +328,10 @@ namespace ps2_syscalls
                     threads.push_back(entry.second);
                 }
             }
+            g_threads.clear();
+            g_nextThreadId = 2; // Reserve id 1 for main thread.
         }
+        g_currentThreadId = 1;
 
         for (const auto &threadInfo : threads)
         {
@@ -339,6 +342,8 @@ namespace ps2_syscalls
             }
             threadInfo->cv.notify_all();
         }
+
+        joinAllHostThreads();
 
         std::vector<std::shared_ptr<SemaInfo>> semas;
         {
@@ -351,6 +356,8 @@ namespace ps2_syscalls
                     semas.push_back(entry.second);
                 }
             }
+            g_semas.clear();
+            g_nextSemaId = 1;
         }
         for (const auto &sema : semas)
         {
@@ -368,6 +375,8 @@ namespace ps2_syscalls
                     eventFlags.push_back(entry.second);
                 }
             }
+            g_eventFlags.clear();
+            g_nextEventFlagId = 1;
         }
         for (const auto &eventFlag : eventFlags)
         {

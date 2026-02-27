@@ -152,6 +152,11 @@ static inline uint32_t ps2_plzcw32(uint32_t x)
 // Fast path: Direct RDRAM access (masked).
 // Slow path: Full runtime->Load/Store
 
+static inline bool Ps2FastRangeIsContiguous(uint32_t offset, uint32_t bytes)
+{
+    return offset <= (PS2_RAM_SIZE - bytes);
+}
+
 static inline uint8_t Ps2FastRead8(const uint8_t *rdram, uint32_t addr)
 {
     return rdram[addr & PS2_RAM_MASK];
@@ -159,29 +164,81 @@ static inline uint8_t Ps2FastRead8(const uint8_t *rdram, uint32_t addr)
 
 static inline uint16_t Ps2FastRead16(const uint8_t *rdram, uint32_t addr)
 {
+    const uint32_t offset = addr & PS2_RAM_MASK;
+    if (!Ps2FastRangeIsContiguous(offset, sizeof(uint16_t)))
+    {
+        uint8_t wrapped[sizeof(uint16_t)];
+        for (uint32_t i = 0; i < sizeof(uint16_t); ++i)
+        {
+            wrapped[i] = rdram[(offset + i) & PS2_RAM_MASK];
+        }
+        uint16_t value;
+        std::memcpy(&value, wrapped, sizeof(value));
+        return value;
+    }
+
     uint16_t value;
-    std::memcpy(&value, rdram + (addr & PS2_RAM_MASK), sizeof(value));
+    std::memcpy(&value, rdram + offset, sizeof(value));
     return value;
 }
 
 static inline uint32_t Ps2FastRead32(const uint8_t *rdram, uint32_t addr)
 {
+    const uint32_t offset = addr & PS2_RAM_MASK;
+    if (!Ps2FastRangeIsContiguous(offset, sizeof(uint32_t)))
+    {
+        uint8_t wrapped[sizeof(uint32_t)];
+        for (uint32_t i = 0; i < sizeof(uint32_t); ++i)
+        {
+            wrapped[i] = rdram[(offset + i) & PS2_RAM_MASK];
+        }
+        uint32_t value;
+        std::memcpy(&value, wrapped, sizeof(value));
+        return value;
+    }
+
     uint32_t value;
-    std::memcpy(&value, rdram + (addr & PS2_RAM_MASK), sizeof(value));
+    std::memcpy(&value, rdram + offset, sizeof(value));
     return value;
 }
 
 static inline uint64_t Ps2FastRead64(const uint8_t *rdram, uint32_t addr)
 {
+    const uint32_t offset = addr & PS2_RAM_MASK;
+    if (!Ps2FastRangeIsContiguous(offset, sizeof(uint64_t)))
+    {
+        uint8_t wrapped[sizeof(uint64_t)];
+        for (uint32_t i = 0; i < sizeof(uint64_t); ++i)
+        {
+            wrapped[i] = rdram[(offset + i) & PS2_RAM_MASK];
+        }
+        uint64_t value;
+        std::memcpy(&value, wrapped, sizeof(value));
+        return value;
+    }
+
     uint64_t value;
-    std::memcpy(&value, rdram + (addr & PS2_RAM_MASK), sizeof(value));
+    std::memcpy(&value, rdram + offset, sizeof(value));
     return value;
 }
 
 static inline __m128i Ps2FastRead128(const uint8_t *rdram, uint32_t addr)
 {
+    const uint32_t offset = addr & PS2_RAM_MASK;
+    if (!Ps2FastRangeIsContiguous(offset, sizeof(__m128i)))
+    {
+        alignas(16) uint8_t wrapped[sizeof(__m128i)];
+        for (uint32_t i = 0; i < sizeof(__m128i); ++i)
+        {
+            wrapped[i] = rdram[(offset + i) & PS2_RAM_MASK];
+        }
+        __m128i value;
+        std::memcpy(&value, wrapped, sizeof(value));
+        return value;
+    }
+
     __m128i value;
-    std::memcpy(&value, rdram + (addr & PS2_RAM_MASK), sizeof(value));
+    std::memcpy(&value, rdram + offset, sizeof(value));
     return value;
 }
 
@@ -192,22 +249,66 @@ static inline void Ps2FastWrite8(uint8_t *rdram, uint32_t addr, uint8_t value)
 
 static inline void Ps2FastWrite16(uint8_t *rdram, uint32_t addr, uint16_t value)
 {
-    std::memcpy(rdram + (addr & PS2_RAM_MASK), &value, sizeof(value));
+    const uint32_t offset = addr & PS2_RAM_MASK;
+    if (!Ps2FastRangeIsContiguous(offset, sizeof(uint16_t)))
+    {
+        uint8_t wrapped[sizeof(uint16_t)];
+        std::memcpy(wrapped, &value, sizeof(value));
+        for (uint32_t i = 0; i < sizeof(uint16_t); ++i)
+        {
+            rdram[(offset + i) & PS2_RAM_MASK] = wrapped[i];
+        }
+        return;
+    }
+    std::memcpy(rdram + offset, &value, sizeof(value));
 }
 
 static inline void Ps2FastWrite32(uint8_t *rdram, uint32_t addr, uint32_t value)
 {
-    std::memcpy(rdram + (addr & PS2_RAM_MASK), &value, sizeof(value));
+    const uint32_t offset = addr & PS2_RAM_MASK;
+    if (!Ps2FastRangeIsContiguous(offset, sizeof(uint32_t)))
+    {
+        uint8_t wrapped[sizeof(uint32_t)];
+        std::memcpy(wrapped, &value, sizeof(value));
+        for (uint32_t i = 0; i < sizeof(uint32_t); ++i)
+        {
+            rdram[(offset + i) & PS2_RAM_MASK] = wrapped[i];
+        }
+        return;
+    }
+    std::memcpy(rdram + offset, &value, sizeof(value));
 }
 
 static inline void Ps2FastWrite64(uint8_t *rdram, uint32_t addr, uint64_t value)
 {
-    std::memcpy(rdram + (addr & PS2_RAM_MASK), &value, sizeof(value));
+    const uint32_t offset = addr & PS2_RAM_MASK;
+    if (!Ps2FastRangeIsContiguous(offset, sizeof(uint64_t)))
+    {
+        uint8_t wrapped[sizeof(uint64_t)];
+        std::memcpy(wrapped, &value, sizeof(value));
+        for (uint32_t i = 0; i < sizeof(uint64_t); ++i)
+        {
+            rdram[(offset + i) & PS2_RAM_MASK] = wrapped[i];
+        }
+        return;
+    }
+    std::memcpy(rdram + offset, &value, sizeof(value));
 }
 
 static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
 {
-    std::memcpy(rdram + (addr & PS2_RAM_MASK), &value, sizeof(value));
+    const uint32_t offset = addr & PS2_RAM_MASK;
+    if (!Ps2FastRangeIsContiguous(offset, sizeof(__m128i)))
+    {
+        alignas(16) uint8_t wrapped[sizeof(__m128i)];
+        std::memcpy(wrapped, &value, sizeof(value));
+        for (uint32_t i = 0; i < sizeof(__m128i); ++i)
+        {
+            rdram[(offset + i) & PS2_RAM_MASK] = wrapped[i];
+        }
+        return;
+    }
+    std::memcpy(rdram + offset, &value, sizeof(value));
 }
 
 #define FAST_READ8(addr) Ps2FastRead8(rdram, (uint32_t)(addr))
@@ -304,16 +405,20 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
         }                                                                              \
     } while (0)
 
-#define WRITE128(addr, val)                              \
-    do                                                   \
-    {                                                    \
-        uint32_t _addr = (addr);                         \
-        if (PS2Runtime::isSpecialAddress(_addr))         \
-            runtime->Store128(rdram, ctx, _addr, (val)); \
-        else                                             \
-        {                                                \
-            FAST_WRITE128(_addr, (val));                 \
-        }                                                \
+#define WRITE128(addr, val)                                                          \
+    do                                                                               \
+    {                                                                                \
+        uint32_t _addr = (addr);                                                     \
+        __m128i _value = (val);                                                      \
+        if (PS2Runtime::isSpecialAddress(_addr))                                     \
+            runtime->Store128(rdram, ctx, _addr, _value);                            \
+        else                                                                         \
+        {                                                                            \
+            const uint64_t _lo = static_cast<uint64_t>(PS2_EXTRACT_EPI64_0(_value)); \
+            const uint64_t _hi = static_cast<uint64_t>(PS2_EXTRACT_EPI64_1(_value)); \
+            ps2TraceGuestWrite(rdram, _addr, 16u, _lo, _hi, "WRITE128", ctx);        \
+            FAST_WRITE128(_addr, _value);                                            \
+        }                                                                            \
     } while (0)
 
 // Packed Compare Greater Than (PCGT)
@@ -330,13 +435,13 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
 #define PS2_PABSW(a) _mm_abs_epi32((__m128i)(a))
 #define PS2_PABSH(a) _mm_abs_epi16((__m128i)(a))
 #define PS2_PABSB(a) _mm_abs_epi8((__m128i)(a))
- 
+
 // Packed Pack (PPAC) - Packs larger elements into smaller ones
 inline __m128i ps2_paddu32(__m128i a, __m128i b)
 {
     __m128i sum = _mm_add_epi32(a, b);
     __m128i overflow = _mm_cmpgt_epi32(_mm_xor_si128(a, _mm_set1_epi32(INT32_MIN)),
-                                        _mm_xor_si128(sum, _mm_set1_epi32(INT32_MIN)));
+                                       _mm_xor_si128(sum, _mm_set1_epi32(INT32_MIN)));
     return _mm_or_si128(sum, overflow); // overflow lanes become all-1s
 }
 inline __m128i ps2_psubu32(__m128i a, __m128i b)
@@ -344,7 +449,7 @@ inline __m128i ps2_psubu32(__m128i a, __m128i b)
     __m128i diff = _mm_sub_epi32(a, b);
     // Underflow if a < b (unsigned). Clamp to 0.
     __m128i underflow = _mm_cmpgt_epi32(_mm_xor_si128(b, _mm_set1_epi32(INT32_MIN)),
-                                         _mm_xor_si128(a, _mm_set1_epi32(INT32_MIN)));
+                                        _mm_xor_si128(a, _mm_set1_epi32(INT32_MIN)));
     return _mm_andnot_si128(underflow, diff); // underflow lanes become 0
 }
 
@@ -358,8 +463,8 @@ inline __m128i ps2_ppacw(__m128i rs, __m128i rt)
 inline __m128i ps2_ppach(__m128i rs, __m128i rt)
 {
     const __m128i mask = _mm_setr_epi8(
-        0, 1, 4, 5, 8, 9, 12, 13,   // from rt: halfwords 0,2,4,6
-        0, 1, 4, 5, 8, 9, 12, 13);  // from rs: halfwords 0,2,4,6
+        0, 1, 4, 5, 8, 9, 12, 13,  // from rt: halfwords 0,2,4,6
+        0, 1, 4, 5, 8, 9, 12, 13); // from rs: halfwords 0,2,4,6
     __m128i lo = _mm_shuffle_epi8(rt, mask);
     __m128i hi = _mm_shuffle_epi8(rs, mask);
     return _mm_unpacklo_epi64(lo, hi);
@@ -486,21 +591,25 @@ inline __m128i ps2_u64_to_epi64_pair(uint64_t value)
 // Concatenates rs || rt (256 bits) and right-shifts by SA bits, taking lower 128 bits.
 inline __m128i ps2_qfsrv(__m128i rs, __m128i rt, uint32_t sa)
 {
-    if (sa == 0) return rt;
-    if (sa >= 128) {
-        if (sa >= 256) return _mm_setzero_si128();
+    if (sa == 0)
+        return rt;
+    if (sa >= 128)
+    {
+        if (sa >= 256)
+            return _mm_setzero_si128();
         uint32_t shift = sa - 128;
-        if (shift == 0) return rs;
+        if (shift == 0)
+            return rs;
         // Shift rs right by (sa-128) bits
         uint32_t byteShift = shift / 8;
         uint32_t bitShift = shift % 8;
         // Byte shift rs right
         alignas(16) uint8_t buf[16] = {};
         alignas(16) uint8_t src[16];
-        _mm_store_si128((__m128i*)src, rs);
+        _mm_store_si128((__m128i *)src, rs);
         for (uint32_t i = 0; i + byteShift < 16; i++)
             buf[i] = src[i + byteShift];
-        __m128i result = _mm_load_si128((__m128i*)buf);
+        __m128i result = _mm_load_si128((__m128i *)buf);
         if (bitShift > 0)
             result = _mm_or_si128(_mm_srli_epi64(result, bitShift),
                                   _mm_slli_epi64(_mm_bsrli_si128(result, 8), 64 - bitShift));
@@ -510,18 +619,20 @@ inline __m128i ps2_qfsrv(__m128i rs, __m128i rt, uint32_t sa)
     uint32_t byteShift = sa / 8;
     uint32_t bitShift = sa % 8;
     alignas(16) uint8_t combined[32];
-    _mm_store_si128((__m128i*)(combined), rt);      // low 128 bits
-    _mm_store_si128((__m128i*)(combined + 16), rs); // high 128 bits
+    _mm_store_si128((__m128i *)(combined), rt);      // low 128 bits
+    _mm_store_si128((__m128i *)(combined + 16), rs); // high 128 bits
     // Shift right by byteShift bytes
     alignas(16) uint8_t shifted[16];
     for (uint32_t i = 0; i < 16; i++)
         shifted[i] = (i + byteShift < 32) ? combined[i + byteShift] : 0;
-    __m128i result = _mm_load_si128((__m128i*)shifted);
-    if (bitShift > 0) {
+    __m128i result = _mm_load_si128((__m128i *)shifted);
+    if (bitShift > 0)
+    {
         uint8_t extra = (byteShift + 16 < 32) ? combined[byteShift + 16] : 0;
         __m128i hi_byte = _mm_insert_epi8(_mm_setzero_si128(), extra, 15);
         alignas(16) uint8_t src32[32];
-        for (uint32_t i = 0; i < 32; i++) src32[i] = combined[i]; 
+        for (uint32_t i = 0; i < 32; i++)
+            src32[i] = combined[i];
         uint64_t lo0, lo1, hi0, hi1;
         std::memcpy(&lo0, src32, 8);
         std::memcpy(&lo1, src32 + 8, 8);
@@ -529,15 +640,29 @@ inline __m128i ps2_qfsrv(__m128i rs, __m128i rt, uint32_t sa)
         std::memcpy(&hi1, src32 + 24, 8);
         // 256-bit right shift by sa bits
         uint64_t r0, r1;
-        if (sa < 64) {
+        if (sa < 64)
+        {
             r0 = (lo0 >> sa) | (lo1 << (64 - sa));
             r1 = (lo1 >> sa) | (hi0 << (64 - sa));
-        } else if (sa < 128) {
+        }
+        else if (sa < 128)
+        {
             uint32_t s = sa - 64;
-            if (s == 0) { r0 = lo1; r1 = hi0; }
-            else { r0 = (lo1 >> s) | (hi0 << (64 - s)); r1 = (hi0 >> s) | (hi1 << (64 - s)); }
-        } else {
-            r0 = 0; r1 = 0; // handled above
+            if (s == 0)
+            {
+                r0 = lo1;
+                r1 = hi0;
+            }
+            else
+            {
+                r0 = (lo1 >> s) | (hi0 << (64 - s));
+                r1 = (hi0 >> s) | (hi1 << (64 - s));
+            }
+        }
+        else
+        {
+            r0 = 0;
+            r1 = 0; // handled above
         }
         result = _mm_set_epi64x((long long)r1, (long long)r0);
     }
@@ -567,15 +692,15 @@ static inline void Ps2SetGprLow64(R5900Context *ctx, int reg, __m128i new_low)
     }
 }
 
-#define SET_GPR_U32(ctx_ptr, reg_idx, val)                   \
-    do                                                       \
-    {                                                        \
-        if ((reg_idx) != 0)                                  \
-        {                                                    \
+#define SET_GPR_U32(ctx_ptr, reg_idx, val)                                \
+    do                                                                    \
+    {                                                                     \
+        if ((reg_idx) != 0)                                               \
+        {                                                                 \
             __m128i _newVal = _mm_cvtsi64_si128((int64_t)(int32_t)(val)); \
-                                                             \
-            Ps2SetGprLow64(ctx_ptr, reg_idx, _newVal);       \
-        }                                                    \
+                                                                          \
+            Ps2SetGprLow64(ctx_ptr, reg_idx, _newVal);                    \
+        }                                                                 \
     } while (0)
 
 #define SET_GPR_S32(ctx_ptr, reg_idx, val)                                \

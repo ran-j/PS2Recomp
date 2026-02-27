@@ -1,3 +1,120 @@
+namespace
+{
+    std::mutex g_gs_sync_v_callback_mutex;
+    uint32_t g_gs_sync_v_callback_func = 0u;
+    uint32_t g_gs_sync_v_callback_gp = 0u;
+    uint32_t g_gs_sync_v_callback_sp = 0u;
+    uint32_t g_gs_sync_v_callback_stack_base = 0u;
+    uint32_t g_gs_sync_v_callback_stack_top = 0u;
+    uint64_t g_gs_sync_v_callback_tick = 0u;
+    uint32_t g_gs_sync_v_callback_bad_pc_logs = 0u;
+}
+
+void resetGsSyncVCallbackState()
+{
+    std::lock_guard<std::mutex> lock(g_gs_sync_v_callback_mutex);
+    g_gs_sync_v_callback_func = 0u;
+    g_gs_sync_v_callback_gp = 0u;
+    g_gs_sync_v_callback_sp = 0u;
+    g_gs_sync_v_callback_stack_base = 0u;
+    g_gs_sync_v_callback_stack_top = 0u;
+    g_gs_sync_v_callback_tick = 0u;
+    g_gs_sync_v_callback_bad_pc_logs = 0u;
+}
+
+void dispatchGsSyncVCallback(uint8_t *rdram, PS2Runtime *runtime)
+{
+    if (!rdram || !runtime)
+    {
+        return;
+    }
+
+    uint32_t callback = 0u;
+    uint32_t gp = 0u;
+    uint32_t sp = 0u;
+    uint32_t callbackStackTop = 0u;
+    uint64_t tick = 0u;
+    {
+        std::lock_guard<std::mutex> lock(g_gs_sync_v_callback_mutex);
+        callback = g_gs_sync_v_callback_func;
+        gp = g_gs_sync_v_callback_gp;
+        sp = g_gs_sync_v_callback_sp;
+        callbackStackTop = g_gs_sync_v_callback_stack_top;
+        if (callback == 0u)
+        {
+            return;
+        }
+        tick = ++g_gs_sync_v_callback_tick;
+    }
+
+    if (!runtime->hasFunction(callback))
+    {
+        return;
+    }
+
+    if (callbackStackTop == 0u)
+    {
+        constexpr uint32_t kCallbackStackSize = 0x4000u;
+        const uint32_t stackBase = runtime->guestMalloc(kCallbackStackSize, 16u);
+        if (stackBase != 0u)
+        {
+            std::lock_guard<std::mutex> lock(g_gs_sync_v_callback_mutex);
+            if (g_gs_sync_v_callback_stack_top == 0u)
+            {
+                g_gs_sync_v_callback_stack_base = stackBase;
+                g_gs_sync_v_callback_stack_top = stackBase + kCallbackStackSize - 0x10u;
+            }
+            callbackStackTop = g_gs_sync_v_callback_stack_top;
+        }
+    }
+
+    try
+    {
+        R5900Context callbackCtx{};
+        SET_GPR_U32(&callbackCtx, 28, gp);
+        SET_GPR_U32(&callbackCtx, 29, (callbackStackTop != 0u) ? callbackStackTop : ((sp != 0u) ? sp : (PS2_RAM_SIZE - 0x10u)));
+        SET_GPR_U32(&callbackCtx, 31, 0u);
+        SET_GPR_U32(&callbackCtx, 4, static_cast<uint32_t>(tick));
+        callbackCtx.pc = callback;
+
+        uint32_t steps = 0u;
+        while (callbackCtx.pc != 0u && !runtime->isStopRequested() && steps < 1024u)
+        {
+            if (!runtime->hasFunction(callbackCtx.pc))
+            {
+                if (g_gs_sync_v_callback_bad_pc_logs < 16u)
+                {
+                    std::cerr << "[sceGsSyncVCallback:bad-pc] pc=0x" << std::hex << callbackCtx.pc
+                              << " ra=0x" << getRegU32(&callbackCtx, 31)
+                              << " sp=0x" << getRegU32(&callbackCtx, 29)
+                              << " gp=0x" << getRegU32(&callbackCtx, 28)
+                              << std::dec << std::endl;
+                    ++g_gs_sync_v_callback_bad_pc_logs;
+                }
+                callbackCtx.pc = 0u;
+                break;
+            }
+
+            auto step = runtime->lookupFunction(callbackCtx.pc);
+            if (!step)
+            {
+                break;
+            }
+            ++steps;
+            step(rdram, &callbackCtx, runtime);
+        }
+    }
+    catch (const std::exception &e)
+    {
+        static uint32_t warnCount = 0u;
+        if (warnCount < 8u)
+        {
+            std::cerr << "[sceGsSyncVCallback] callback exception: " << e.what() << std::endl;
+            ++warnCount;
+        }
+    }
+}
+
 void sceGsExecLoadImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     uint32_t imgAddr = getRegU32(ctx, 4);
@@ -465,7 +582,40 @@ void sceGsSyncV(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void sceGsSyncVCallback(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    setReturnS32(ctx, 0);
+    (void)rdram;
+
+    const uint32_t newCallback = getRegU32(ctx, 4);
+    const uint32_t callerPc = ctx ? ctx->pc : 0u;
+    const uint32_t callerRa = ctx ? getRegU32(ctx, 31) : 0u;
+    const uint32_t gp = getRegU32(ctx, 28);
+    const uint32_t sp = getRegU32(ctx, 29);
+
+    uint32_t oldCallback = 0u;
+    {
+        std::lock_guard<std::mutex> lock(g_gs_sync_v_callback_mutex);
+        oldCallback = g_gs_sync_v_callback_func;
+        g_gs_sync_v_callback_func = newCallback;
+        if (newCallback != 0u)
+        {
+            g_gs_sync_v_callback_gp = gp;
+            g_gs_sync_v_callback_sp = sp;
+        }
+    }
+
+    static uint32_t s_syncVCallbackLogCount = 0u;
+    if (s_syncVCallbackLogCount < 128u)
+    {
+        std::cout << "[sceGsSyncVCallback:set] new=0x" << std::hex << newCallback
+                  << " old=0x" << oldCallback
+                  << " callerPc=0x" << callerPc
+                  << " callerRa=0x" << callerRa
+                  << " gp=0x" << gp
+                  << " sp=0x" << sp
+                  << std::dec << std::endl;
+        ++s_syncVCallbackLogCount;
+    }
+
+    setReturnU32(ctx, oldCallback);
 }
 
 void sceGszbufaddr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

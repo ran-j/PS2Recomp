@@ -274,6 +274,11 @@ void EnableIntc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     setReturnS32(ctx, KE_OK);
 }
 
+void iEnableIntc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    EnableIntc(rdram, ctx, runtime);
+}
+
 void DisableIntc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     const uint32_t cause = getRegU32(ctx, 4);
@@ -283,6 +288,11 @@ void DisableIntc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         g_enabled_intc_mask &= ~(1u << cause);
     }
     setReturnS32(ctx, KE_OK);
+}
+
+void iDisableIntc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    DisableIntc(rdram, ctx, runtime);
 }
 
 void AddIntcHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -307,6 +317,11 @@ void AddIntcHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
     ensureInterruptWorkerRunning(rdram, runtime);
     setReturnS32(ctx, handlerId);
+}
+
+void AddIntcHandler2(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    AddIntcHandler(rdram, ctx, runtime);
 }
 
 void RemoveIntcHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -345,6 +360,11 @@ void AddDmacHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         g_dmacHandlers[handlerId] = info;
     }
     setReturnS32(ctx, handlerId);
+}
+
+void AddDmacHandler2(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    AddDmacHandler(rdram, ctx, runtime);
 }
 
 void RemoveDmacHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -426,6 +446,11 @@ void EnableDmac(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     setReturnS32(ctx, KE_OK);
 }
 
+void iEnableDmac(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    EnableDmac(rdram, ctx, runtime);
+}
+
 void DisableDmac(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     const uint32_t cause = getRegU32(ctx, 4);
@@ -435,4 +460,9 @@ void DisableDmac(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         g_enabled_dmac_mask &= ~(1u << cause);
     }
     setReturnS32(ctx, KE_OK);
+}
+
+void iDisableDmac(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    DisableDmac(rdram, ctx, runtime);
 }

@@ -4,6 +4,7 @@
 
 #define PS2_SYSCALL_LIST(X)   \
     X(FlushCache)             \
+    X(iFlushCache)            \
     X(ResetEE)                \
     X(SetMemoryMode)          \
                               \
@@ -17,13 +18,16 @@
     X(ResumeThread)           \
     X(GetThreadId)            \
     X(ReferThreadStatus)      \
+    X(iReferThreadStatus)     \
     X(SleepThread)            \
     X(WakeupThread)           \
     X(iWakeupThread)          \
     X(CancelWakeupThread)     \
     X(iCancelWakeupThread)    \
     X(ChangeThreadPriority)   \
+    X(iChangeThreadPriority)  \
     X(RotateThreadReadyQueue) \
+    X(iRotateThreadReadyQueue)\
     X(ReleaseWaitThread)      \
     X(iReleaseWaitThread)     \
                               \
@@ -54,10 +58,20 @@
     X(CancelAlarm)            \
     X(iCancelAlarm)           \
                               \
+    X(AddIntcHandler)         \
+    X(AddIntcHandler2)        \
+    X(RemoveIntcHandler)      \
+    X(AddDmacHandler)         \
+    X(AddDmacHandler2)        \
+    X(RemoveDmacHandler)      \
     X(EnableIntc)             \
+    X(iEnableIntc)            \
     X(DisableIntc)            \
+    X(iDisableIntc)           \
     X(EnableDmac)             \
+    X(iEnableDmac)            \
     X(DisableDmac)            \
+    X(iDisableDmac)           \
                               \
     X(SifStopModule)          \
     X(SifLoadModule)          \
@@ -84,9 +98,13 @@
     X(fioGetstat)             \
     X(fioRemove)              \
                               \
+    X(SetGsCrt)               \
     X(GsSetCrt)               \
     X(GsGetIMR)               \
+    X(iGsGetIMR)              \
     X(GsPutIMR)               \
+    X(iGsPutIMR)              \
+    X(SetVSyncFlag)           \
     X(GsSetVideoMode)         \
                               \
     X(GetOsdConfigParam)      \
@@ -99,6 +117,9 @@
     X(sceSifLoadModuleBuffer) \
                               \
     X(SetupThread)            \
+    X(EndOfHeap)              \
+    X(GetMemorySize)          \
+    X(Deci2Call)              \
     X(QueryBootMode)          \
     X(GetThreadTLS)           \
     X(RegisterExitHandler)
@@ -621,4 +642,5 @@
     X(syHwInit2)                              \
     X(syMallocInit)                           \
     X(syRtcInit)                              \
+    X(InitThread)                             \
     /* Game/middleware */

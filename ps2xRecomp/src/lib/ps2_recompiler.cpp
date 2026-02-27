@@ -285,6 +285,13 @@ namespace ps2recomp
                 return std::nullopt;
             };
 
+            auto isSimpleReturnThunkStart = [](const Instruction &inst) -> bool
+            {
+                return inst.opcode == OPCODE_SPECIAL &&
+                       inst.function == SPECIAL_JR &&
+                       inst.rs == 31;
+            };
+
             auto findContainingFunction = [&](uint32_t address) -> const Function *
             {
                 const Function *best = nullptr;
@@ -458,6 +465,16 @@ namespace ps2recomp
                         if (nextStartOpt.has_value() && nextStartOpt.value() < sliceEndAddress)
                         {
                             sliceEndAddress = nextStartOpt.value();
+                        }
+
+                        if (isSimpleReturnThunkStart(*sliceIt) &&
+                            target <= (std::numeric_limits<uint32_t>::max() - 8u))
+                        {
+                            const uint32_t returnThunkEnd = target + 8u;
+                            if (returnThunkEnd < sliceEndAddress)
+                            {
+                                sliceEndAddress = returnThunkEnd;
+                            }
                         }
 
                         if (sliceEndAddress <= target)
@@ -837,6 +854,7 @@ namespace ps2recomp
             }
             m_codeGenerator->setRelocationCallNames(relocationCallNames);
             m_codeGenerator->setBootstrapInfo(m_bootstrapInfo);
+            m_codeGenerator->setConfiguredJumpTables(m_config.jumpTables);
 
             fs::create_directories(m_config.outputPath);
 

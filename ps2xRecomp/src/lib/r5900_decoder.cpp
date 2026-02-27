@@ -162,6 +162,15 @@ namespace ps2recomp
             inst.isMultimedia = true;
         }
 
+        if (inst.opcode == OPCODE_SPECIAL)
+        {
+            decodeSpecial(inst);
+        }
+        else if (inst.opcode == OPCODE_MMI)
+        {
+            decodeMMI(inst);
+        }
+
         if (inst.isMMI || inst.isVU)
         {
             inst.isMultimedia = true;
@@ -258,16 +267,18 @@ namespace ps2recomp
             inst.modificationInfo.modifiesGPR = false;    // Doesn't modify rd
             inst.modificationInfo.modifiesControl = true; // HI/LO
             break;
-
-        case SPECIAL_MULT:
-        case SPECIAL_MULTU:
         case SPECIAL_DIV:
         case SPECIAL_DIVU:
             // Multiplication and division operations
             inst.modificationInfo.modifiesGPR = false;    // Doesn't modify rd
             inst.modificationInfo.modifiesControl = true; // HI/LO
             break;
-
+        case SPECIAL_MULT:
+        case SPECIAL_MULTU:
+            // R5900 MULT/MULTU also write rd when rd != 0.
+            inst.modificationInfo.modifiesGPR = (inst.rd != 0);
+            inst.modificationInfo.modifiesControl = true; // HI/LO
+            break;
         case SPECIAL_ADD:
         case SPECIAL_ADDU:
         case SPECIAL_SUB:
@@ -473,11 +484,17 @@ namespace ps2recomp
         case MMI_MSUBU:
         case MMI_MADD1:
         case MMI_MADDU1:
+            inst.modificationInfo.modifiesGPR = (inst.rd != 0); // Also writes rd on R5900 I checkd on EE manual
+            inst.modificationInfo.modifiesControl = true;
+            break;
         case MMI_MULT1:
         case MMI_MULTU1:
+            inst.modificationInfo.modifiesGPR = (inst.rd != 0); // same
+            inst.modificationInfo.modifiesControl = true;
+            break;
         case MMI_DIV1:
         case MMI_DIVU1:
-            inst.modificationInfo.modifiesGPR = false; // Writes to HI/LO or HI1/LO1
+            inst.modificationInfo.modifiesGPR = false; // Writes to HI1/LO1
             inst.modificationInfo.modifiesControl = true;
             break;
         case MMI_PMTHL:
@@ -490,7 +507,6 @@ namespace ps2recomp
             decodePMFHL(inst);
             break;
         default:
-            // Unknown or unsupported MMI function
             std::cerr << "Unknown MMI function: " << std::hex << mmiFunction << std::endl;
             break;
         }

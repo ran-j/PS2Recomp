@@ -1,6 +1,7 @@
 #include "MiniTest.h"
 #include "ps2_runtime.h"
 #include "ps2_syscalls.h"
+#include "ps2_stubs.h"
 
 #include <filesystem>
 #include <fstream>
@@ -273,6 +274,27 @@ void register_ps2_runtime_io_tests()
                 "mc0: directory should exist under mcRoot");
             t.IsFalse(std::filesystem::exists(test.paths.cdRoot / "ISOLATED"), 
                 "mc0: directory should NOT exist under cdRoot");
+        });
+
+        tc.Run("sceIoctl cmd1 updates wait flag state", [](TestCase &t)
+        {
+            TestContext test;
+
+            constexpr uint32_t statusAddr = GUEST_BUFFER_AREA_START + 0x1800;
+            const uint32_t busy = 1u;
+            std::memcpy(test.rdram.data() + statusAddr, &busy, sizeof(busy));
+
+            setRegU32(test.ctx, 4, 3u);          // fd
+            setRegU32(test.ctx, 5, 1u);          // cmd
+            setRegU32(test.ctx, 6, statusAddr);  // arg
+
+            ps2_stubs::sceIoctl(test.rdram.data(), &test.ctx, nullptr);
+
+            t.Equals(getRegS32(&test.ctx, 2), 0, "sceIoctl cmd1 should return success");
+
+            uint32_t state = 0xFFFFFFFFu;
+            std::memcpy(&state, test.rdram.data() + statusAddr, sizeof(state));
+            t.Equals(state, 0u, "sceIoctl cmd1 should clear wait state from busy to ready");
         });
     });
 }

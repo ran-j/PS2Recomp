@@ -48,16 +48,27 @@ void FlushCache(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     setReturnS32(ctx, KE_OK);
 }
 
+void iFlushCache(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    FlushCache(rdram, ctx, runtime);
+}
+
 void ResetEE(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    std::cerr << "Syscall: ResetEE - requesting runtime stop" << std::endl; 
-    runtime->requestStop();
+    std::cerr << "Syscall: ResetEE - requesting runtime stop" << std::endl;
+    // runtime->requestStop();
     setReturnS32(ctx, KE_OK);
 }
 
 void SetMemoryMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     setReturnS32(ctx, KE_OK);
+}
+
+void InitThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    // This is a common ps2sdk helper that some games link against.
+    setReturnS32(ctx, 1);
 }
 
 void CreateThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -251,6 +262,13 @@ void StartThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         setReturnS32(ctx, KE_ERROR);
         return;
     }
+    if (runtime->isStopRequested())
+    {
+        setReturnS32(ctx, KE_ERROR);
+        return;
+    }
+
+    joinHostThreadById(tid);
 
     const uint32_t callerSp = getRegU32(ctx, 29);
     const uint32_t callerGp = getRegU32(ctx, 28);
@@ -296,7 +314,8 @@ void StartThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     g_activeThreads.fetch_add(1, std::memory_order_relaxed);
     try
     {
-        std::thread worker([=]() mutable {
+        std::thread worker([=]() mutable
+                           {
             {
                 std::string name = "PS2Thread_" + std::to_string(tid);
                 ThreadNaming::SetCurrentThreadName(name);
@@ -342,10 +361,12 @@ void StartThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
                 uint32_t lastPc = 0xFFFFFFFFu;
                 uint32_t samePcCount = 0;
                 constexpr uint32_t kSamePcYieldMask = 0x3FFFu;
-                constexpr uint32_t kSamePcWarnInterval = 0x400000u;
+                constexpr uint32_t kSamePcWarnInterval = 0x20000u;
+                uint64_t stepCount = 0u;
 
                 while (runtime && !runtime->isStopRequested())
                 {
+                    ++stepCount;
                     if (info->terminated.load(std::memory_order_relaxed))
                     {
                         throw ThreadExitException();
@@ -357,6 +378,16 @@ void StartThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
                     if (pc == 0u)
                     {
                         break;
+                    }
+
+                    if ((stepCount & 0x1FFFFFu) == 0u)
+                    {
+                        std::cout << "[StartThread] id=" << tid
+                                  << " heartbeat pc=0x" << std::hex << pc
+                                  << " ra=0x" << GPR_U32(threadCtx, 31)
+                                  << " sp=0x" << GPR_U32(threadCtx, 29)
+                                  << " gp=0x" << GPR_U32(threadCtx, 28)
+                                  << std::dec << std::endl;
                     }
 
                     if (pc == lastPc)
@@ -378,6 +409,33 @@ void StartThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
                     {
                         samePcCount = 0;
                         lastPc = pc;
+                    }
+
+                    thread_local uint32_t s_adxProbeLogs = 0u;
+                    if (s_adxProbeLogs < 256u)
+                    {
+                        const uint32_t raProbe = GPR_U32(threadCtx, 31);
+                        const bool probeAdxSetCmd = (pc == 0x2F22E0u) &&
+                                                    ((raProbe < 0x00100000u) || (raProbe == 0x2F45B0u));
+                        const bool probeAdxUnlock = (pc == 0x2F45B0u) &&
+                                                    (raProbe < 0x00100000u);
+                        const bool probeLowPc = (pc < 0x00100000u);
+                        if (probeAdxSetCmd || probeAdxUnlock || probeLowPc)
+                        {
+                            auto flags = std::cerr.flags();
+                            std::cerr << "[StartThread:adx-probe] tid=" << tid
+                                      << " pc=0x" << std::hex << pc
+                                      << " ra=0x" << raProbe
+                                      << " sp=0x" << GPR_U32(threadCtx, 29)
+                                      << " gp=0x" << GPR_U32(threadCtx, 28)
+                                      << " a0=0x" << GPR_U32(threadCtx, 4)
+                                      << " a1=0x" << GPR_U32(threadCtx, 5)
+                                      << " a2=0x" << GPR_U32(threadCtx, 6)
+                                      << " a3=0x" << GPR_U32(threadCtx, 7)
+                                      << std::dec << std::endl;
+                            std::cerr.flags(flags);
+                            ++s_adxProbeLogs;
+                        }
                     }
 
                     PS2Runtime::RecompiledFunction step = runtime->lookupFunction(pc);
@@ -446,9 +504,8 @@ void StartThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             // Notify anybody waiting for termination (like TerminateThread)
             info->cv.notify_all();
 
-            g_activeThreads.fetch_sub(1, std::memory_order_relaxed);
-        });
-        worker.detach();
+            g_activeThreads.fetch_sub(1, std::memory_order_relaxed); });
+        registerHostThread(tid, std::move(worker));
     }
     catch (const std::exception &e)
     {
@@ -549,9 +606,8 @@ void TerminateThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         // Block until the target thread actually finishes unwinding and becomes dormant
         std::unique_lock<std::mutex> lock(info->m);
-        info->cv.wait(lock, [&]() {
-            return !info->started && info->status == THS_DORMANT;
-        });
+        info->cv.wait(lock, [&]()
+                      { return !info->started && info->status == THS_DORMANT; });
     }
 
     setReturnS32(ctx, KE_OK);
@@ -684,6 +740,11 @@ void ReferThreadStatus(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     setReturnS32(ctx, KE_OK);
 }
 
+void iReferThreadStatus(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    ReferThreadStatus(rdram, ctx, runtime);
+}
+
 void SleepThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     auto info = ensureCurrentThreadInfo(ctx);
@@ -708,6 +769,16 @@ void SleepThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     }
     else
     {
+        static std::atomic<uint32_t> s_sleepBlockLogs{0};
+        const uint32_t sleepBlockLog = s_sleepBlockLogs.fetch_add(1, std::memory_order_relaxed);
+        if (sleepBlockLog < 256u)
+        {
+            std::cout << "[SleepThread:block] tid=" << g_currentThreadId
+                      << " pc=0x" << std::hex << ctx->pc
+                      << " ra=0x" << getRegU32(ctx, 31)
+                      << std::dec << std::endl;
+        }
+
         info->status = THS_WAIT;
         info->waitType = TSW_SLEEP;
         info->waitId = 0;
@@ -738,6 +809,16 @@ void SleepThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         }
     }
 
+    static std::atomic<uint32_t> s_sleepWakeLogs{0};
+    const uint32_t sleepWakeLog = s_sleepWakeLogs.fetch_add(1, std::memory_order_relaxed);
+    if (sleepWakeLog < 256u)
+    {
+        std::cout << "[SleepThread:wake] tid=" << g_currentThreadId
+                  << " ret=" << ret
+                  << " wakeupCount=" << info->wakeupCount
+                  << std::endl;
+    }
+
     lock.unlock();
     waitWhileSuspended(info);
     setReturnS32(ctx, ret);
@@ -764,6 +845,8 @@ void WakeupThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         return;
     }
 
+    int newWakeupCount = 0;
+    int statusAfter = THS_DORMANT;
     {
         std::lock_guard<std::mutex> lock(info->m);
         if (info->status == THS_DORMANT)
@@ -790,6 +873,19 @@ void WakeupThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             info->wakeupCount++;
         }
+        newWakeupCount = info->wakeupCount;
+        statusAfter = info->status;
+    }
+
+    static std::atomic<uint32_t> s_wakeupLogs{0};
+    const uint32_t wakeupLog = s_wakeupLogs.fetch_add(1, std::memory_order_relaxed);
+    if (wakeupLog < 256u)
+    {
+        std::cout << "[WakeupThread] tid=" << g_currentThreadId
+                  << " target=" << tid
+                  << " status=" << statusAfter
+                  << " wakeupCount=" << newWakeupCount
+                  << std::endl;
     }
     setReturnS32(ctx, KE_OK);
 }
@@ -885,6 +981,11 @@ void ChangeThreadPriority(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime
     setReturnS32(ctx, KE_OK);
 }
 
+void iChangeThreadPriority(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    ChangeThreadPriority(rdram, ctx, runtime);
+}
+
 void RotateThreadReadyQueue(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     static int logCount = 0;
@@ -912,6 +1013,11 @@ void RotateThreadReadyQueue(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runti
     std::this_thread::yield();
 
     setReturnS32(ctx, KE_OK);
+}
+
+void iRotateThreadReadyQueue(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    RotateThreadReadyQueue(rdram, ctx, runtime);
 }
 
 void ReleaseWaitThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
