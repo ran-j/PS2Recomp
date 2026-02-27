@@ -1,5 +1,6 @@
 #pragma once
 
+#include <filesystem>
 #include <string>
 #include <vector>
 #include <map>
@@ -10,7 +11,6 @@
 #include <sstream>
 #include <fstream>
 #include <memory>
-#include <filesystem>
 
 #include "ps2recomp/elf_analyzer.h"
 #include "ps2recomp/config_manager.h"
