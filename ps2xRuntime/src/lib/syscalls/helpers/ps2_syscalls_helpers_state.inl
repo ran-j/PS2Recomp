@@ -320,6 +320,7 @@ struct RpcClientState
 static std::unordered_map<uint32_t, RpcServerState> g_rpc_servers;
 static std::unordered_map<uint32_t, RpcClientState> g_rpc_clients;
 static std::mutex g_rpc_mutex;
+static std::recursive_mutex g_sif_call_rpc_mutex;
 static bool g_rpc_initialized = false;
 static uint32_t g_rpc_next_id = 1;
 static uint32_t g_rpc_packet_index = 0;

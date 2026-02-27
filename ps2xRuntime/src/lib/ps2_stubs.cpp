@@ -39,6 +39,7 @@ namespace ps2_stubs
     void TODO_NAMED(const char *name, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const std::string stubName = name ? name : "unknown";
+
         uint32_t callCount = 0;
         {
             std::lock_guard<std::mutex> lock(g_stubWarningMutex);

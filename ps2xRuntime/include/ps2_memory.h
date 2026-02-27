@@ -296,6 +296,7 @@ public:
 
     // Track code modifications for self-modifying code
     void registerCodeRegion(uint32_t start, uint32_t end);
+    bool isCodeAddress(uint32_t address) const;
     bool isCodeModified(uint32_t address, uint32_t size);
     void clearModifiedFlag(uint32_t address, uint32_t size);
 

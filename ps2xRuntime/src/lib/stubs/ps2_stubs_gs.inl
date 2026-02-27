@@ -585,6 +585,8 @@ void sceGsSyncVCallback(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     (void)rdram;
 
     const uint32_t newCallback = getRegU32(ctx, 4);
+    const uint32_t callerPc = ctx ? ctx->pc : 0u;
+    const uint32_t callerRa = ctx ? getRegU32(ctx, 31) : 0u;
     const uint32_t gp = getRegU32(ctx, 28);
     const uint32_t sp = getRegU32(ctx, 29);
 
@@ -598,6 +600,19 @@ void sceGsSyncVCallback(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             g_gs_sync_v_callback_gp = gp;
             g_gs_sync_v_callback_sp = sp;
         }
+    }
+
+    static uint32_t s_syncVCallbackLogCount = 0u;
+    if (s_syncVCallbackLogCount < 128u)
+    {
+        std::cout << "[sceGsSyncVCallback:set] new=0x" << std::hex << newCallback
+                  << " old=0x" << oldCallback
+                  << " callerPc=0x" << callerPc
+                  << " callerRa=0x" << callerRa
+                  << " gp=0x" << gp
+                  << " sp=0x" << sp
+                  << std::dec << std::endl;
+        ++s_syncVCallbackLogCount;
     }
 
     setReturnU32(ctx, oldCallback);

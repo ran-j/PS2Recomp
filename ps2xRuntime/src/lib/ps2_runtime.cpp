@@ -317,6 +317,9 @@ namespace
 
 static void UploadFrame(Texture2D &tex, PS2Runtime *rt)
 {
+    // For now lets keep the display snapshot in sync with rasterized VRAM so the host frame
+    rt->gs().refreshDisplaySnapshot();
+
     const GSRegisters &gs = rt->memory().gs();
 
     uint32_t dispfb = static_cast<uint32_t>(gs.dispfb1 & 0xFFFFFFFFULL);
@@ -789,6 +792,18 @@ PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
         return it->second;
     }
 
+    // Some games dispatch to internal basic-block addresses that belong to a
+    // larger recompiled function. Map known hot-path aliases to their parent
+    // function entry so execution can resume from the current ctx->pc.
+    if (address == 0x2913E4u)
+    {
+        auto parent = m_functionTable.find(0x2913B0u);
+        if (parent != m_functionTable.end())
+        {
+            return parent->second;
+        }
+    }
+
     std::cerr << "Warning: Function at address 0x" << std::hex << address << std::dec << " not found" << std::endl;
 
     static RecompiledFunction defaultFunction = [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -803,12 +818,14 @@ PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
 
         if (ctx && runtime)
         {
-            thread_local uint32_t s_lowPcRecoverCount = 0u;
-            thread_local bool s_loggedLowPcContext = false;
+            thread_local uint32_t s_recoverCount = 0u;
+            thread_local bool s_loggedContext = false;
             const uint32_t pc = ctx->pc;
-            if (pc < 0x00100000u && ra == pc && s_lowPcRecoverCount < 4096u)
+            const bool hasPcFunction = runtime->hasFunction(pc);
+
+            if (!hasPcFunction && s_recoverCount < 8192u)
             {
-                if (!s_loggedLowPcContext)
+                if (!s_loggedContext)
                 {
                     std::ostringstream stackDump;
                     if (rdram)
@@ -820,7 +837,7 @@ PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
                             stackDump << " +" << std::hex << off << "=0x" << slot;
                         }
                     }
-                    std::cerr << "[dispatch:first-low-pc] bad=0x" << std::hex << pc
+                    std::cerr << "[dispatch:first-bad-pc] bad=0x" << std::hex << pc
                               << " ra=0x" << ra
                               << " sp=0x" << sp
                               << " gp=0x" << gp
@@ -831,8 +848,48 @@ PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
                               << " trace=" << formatDispatchHistory()
                               << stackDump.str()
                               << std::dec << std::endl;
-                    s_loggedLowPcContext = true;
+                    s_loggedContext = true;
                 }
+
+                uint32_t recoveryPc = 0u;
+                if (ra != 0u && runtime->hasFunction(ra))
+                {
+                    recoveryPc = ra;
+                }
+
+                if (recoveryPc == 0u)
+                {
+                    recoveryPc = selectStackRecoveryPc(rdram, ctx, runtime);
+                }
+
+                if (recoveryPc == 0u)
+                {
+                    recoveryPc = selectDispatchRecoveryPc(runtime);
+                }
+
+                if (recoveryPc != 0u && recoveryPc != pc)
+                {
+                    if (s_recoverCount < 256u)
+                    {
+                        std::cerr << "[dispatch:recover-pc] bad=0x" << std::hex << pc
+                                  << " ra=0x" << ra
+                                  << " fallback=0x" << recoveryPc
+                                  << " sp=0x" << sp
+                                  << std::dec << std::endl;
+                    }
+                    ++s_recoverCount;
+                    ctx->pc = recoveryPc;
+                    return;
+                }
+            }
+
+            if (hasPcFunction)
+            {
+                s_recoverCount = 0u;
+                s_loggedContext = false;
+            }
+            else if (pc < 0x00100000u && ra == pc && s_recoverCount < 4096u)
+            {
                 uint32_t recoveryPc = selectStackRecoveryPc(rdram, ctx, runtime);
                 if (recoveryPc == 0u)
                 {
@@ -840,7 +897,7 @@ PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
                 }
                 if (recoveryPc != 0u && recoveryPc != pc)
                 {
-                    if (s_lowPcRecoverCount < 128u)
+                    if (s_recoverCount < 128u)
                     {
                         std::cerr << "[dispatch:recover-low-pc] bad=0x" << std::hex << pc
                                   << " ra=0x" << ra
@@ -848,15 +905,10 @@ PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
                                   << " sp=0x" << sp
                                   << std::dec << std::endl;
                     }
-                    ++s_lowPcRecoverCount;
+                    ++s_recoverCount;
                     ctx->pc = recoveryPc;
                     return;
                 }
-            }
-            else if (pc >= 0x00100000u)
-            {
-                s_lowPcRecoverCount = 0u;
-                s_loggedLowPcContext = false;
             }
         }
 
@@ -1473,12 +1525,26 @@ void PS2Runtime::dispatchLoop(uint8_t *rdram, R5900Context *ctx)
         m_debugGp.store(static_cast<uint32_t>(_mm_extract_epi32(ctx->r[28], 0)), std::memory_order_relaxed);
 
         RecompiledFunction fn = lookupFunction(pc);
+        const uint32_t dispatchedPc = pc;
+        const uint32_t dispatchedRa = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0));
 
         fn(rdram, ctx, this);
 
         if (ctx->pc == 0u)
         {
-            requestStop();
+            const uint32_t ra = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0));
+            const uint32_t sp = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0));
+            const uint32_t gp = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[28], 0));
+            std::cerr << "[dispatch:pc-zero] from=0x" << std::hex << dispatchedPc
+                      << " fromRa=0x" << dispatchedRa
+                      << " ra=0x" << ra
+                      << " sp=0x" << sp
+                      << " gp=0x" << gp
+                      << " trace=" << formatDispatchHistory()
+                      << std::dec << std::endl;
+
+            // PC=0 means this guest thread returned (usually via jr $ra with RA=0).
+            // Do not request a global runtime stop here: other guest threads may still run.
             break;
         }
     }
@@ -1676,7 +1742,7 @@ void PS2Runtime::run()
         gameThreadFinished.store(true, std::memory_order_release); });
 
     uint64_t tick = 0;
-    while (!gameThreadFinished.load(std::memory_order_acquire))
+    while (!isStopRequested() && g_activeThreads.load(std::memory_order_relaxed) > 0)
     {
         tick++;
         ps2_stubs::dispatchGsSyncVCallback(m_memory.getRDRAM(), this);

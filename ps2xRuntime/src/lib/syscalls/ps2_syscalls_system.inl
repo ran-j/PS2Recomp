@@ -9,6 +9,11 @@ void GsSetCrt(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
               << ", frameMode=" << frameMode << std::endl;
 }
 
+void SetGsCrt(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    GsSetCrt(rdram, ctx, runtime);
+}
+
 void GsGetIMR(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     uint64_t imr = 0;
@@ -22,6 +27,11 @@ void GsGetIMR(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     setReturnU64(ctx, imr); // Return in $v0/$v1
 }
 
+void iGsGetIMR(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    GsGetIMR(rdram, ctx, runtime);
+}
+
 void GsPutIMR(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     uint64_t newImr = getRegU32(ctx, 4) | ((uint64_t)getRegU32(ctx, 5) << 32); // $a0 = lower 32 bits, $a1 = upper 32 bits
@@ -33,6 +43,11 @@ void GsPutIMR(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     }
     std::cout << "PS2 GsPutIMR: Setting IMR=0x" << std::hex << newImr << std::dec << std::endl;
     setReturnU64(ctx, oldImr);
+}
+
+void iGsPutIMR(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    GsPutIMR(rdram, ctx, runtime);
 }
 
 void GsSetVideoMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -331,6 +346,20 @@ void EndOfHeap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     }
 
     setReturnU32(ctx, getRegU32(ctx, 4));
+}
+
+void GetMemorySize(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    (void)rdram;
+    (void)runtime;
+    setReturnU32(ctx, PS2_RAM_SIZE);
+}
+
+void Deci2Call(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    (void)rdram;
+    (void)runtime;
+    setReturnS32(ctx, KE_OK);
 }
 
 // 0x5A QueryBootMode (stub): return 0 for now

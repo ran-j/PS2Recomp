@@ -1364,6 +1364,18 @@ bool PS2Memory::isAddressInRegion(uint32_t address, const CodeRegion &region)
     return (address >= region.start && address < region.end);
 }
 
+bool PS2Memory::isCodeAddress(uint32_t address) const
+{
+    for (const auto &region : m_codeRegions)
+    {
+        if (address >= region.start && address < region.end)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 void PS2Memory::markModified(uint32_t address, uint32_t size)
 {
     if (size == 0)

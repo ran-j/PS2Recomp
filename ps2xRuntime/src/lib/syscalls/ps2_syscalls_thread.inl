@@ -48,6 +48,11 @@ void FlushCache(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     setReturnS32(ctx, KE_OK);
 }
 
+void iFlushCache(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    FlushCache(rdram, ctx, runtime);
+}
+
 void ResetEE(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     std::cerr << "Syscall: ResetEE - requesting runtime stop" << std::endl;
@@ -58,6 +63,12 @@ void ResetEE(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 void SetMemoryMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     setReturnS32(ctx, KE_OK);
+}
+
+void InitThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    // This is a common ps2sdk helper that some games link against.
+    setReturnS32(ctx, 1);
 }
 
 void CreateThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -729,6 +740,11 @@ void ReferThreadStatus(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     setReturnS32(ctx, KE_OK);
 }
 
+void iReferThreadStatus(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    ReferThreadStatus(rdram, ctx, runtime);
+}
+
 void SleepThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     auto info = ensureCurrentThreadInfo(ctx);
@@ -965,6 +981,11 @@ void ChangeThreadPriority(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime
     setReturnS32(ctx, KE_OK);
 }
 
+void iChangeThreadPriority(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    ChangeThreadPriority(rdram, ctx, runtime);
+}
+
 void RotateThreadReadyQueue(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     static int logCount = 0;
@@ -992,6 +1013,11 @@ void RotateThreadReadyQueue(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runti
     std::this_thread::yield();
 
     setReturnS32(ctx, KE_OK);
+}
+
+void iRotateThreadReadyQueue(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    RotateThreadReadyQueue(rdram, ctx, runtime);
 }
 
 void ReleaseWaitThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

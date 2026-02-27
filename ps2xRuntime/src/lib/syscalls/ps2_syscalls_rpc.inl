@@ -156,6 +156,8 @@ void SifBindRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void SifCallRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    std::lock_guard<std::recursive_mutex> rpcCallLock(g_sif_call_rpc_mutex);
+
     uint32_t clientPtr = getRegU32(ctx, 4);
     uint32_t rpcNum = getRegU32(ctx, 5);
     uint32_t mode = getRegU32(ctx, 6);
@@ -214,8 +216,35 @@ void SifCallRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     const bool regPackPlausible = plausiblePack(sendSizeReg, recvBufReg, recvSizeReg, endFuncReg);
     const bool stackPackPlausible = plausiblePack(sendSizeStk, recvBufStk, recvSizeStk, endFuncStk);
 
+    uint32_t boundSidHint = 0u;
+    {
+        std::lock_guard<std::mutex> lock(g_rpc_mutex);
+        auto it = g_rpc_clients.find(clientPtr);
+        if (it != g_rpc_clients.end())
+        {
+            boundSidHint = it->second.sid;
+        }
+    }
+
+    auto looksLikeDtxCreatePack = [&](uint32_t sendSz, uint32_t rbuf, uint32_t rsz) -> bool
+    {
+        return rbuf != 0u && rsz >= 4u && rsz <= 0x40u &&
+               sendSz >= 12u && sendSz <= 0x1000u;
+    };
+
+    const bool isDtxCreate34Call = (boundSidHint == kDtxRpcSid) && (rpcNum == 0x422u);
+    const bool forceStackForDtxCreate34 =
+        isDtxCreate34Call &&
+        stackPackPlausible &&
+        looksLikeDtxCreatePack(sendSizeStk, recvBufStk, recvSizeStk) &&
+        !looksLikeDtxCreatePack(sendSizeReg, recvBufReg, recvSizeReg);
+
     bool useRegConvention = true;
-    if (!regPackPlausible && stackPackPlausible)
+    if (forceStackForDtxCreate34)
+    {
+        useRegConvention = false;
+    }
+    else if (!regPackPlausible && stackPackPlausible)
     {
         const bool regHasValidCallback = (endFuncReg != 0u) && looksLikeFunc(endFuncReg);
         const bool stackHasValidCallback = (endFuncStk != 0u) && looksLikeFunc(endFuncStk);
@@ -230,6 +259,22 @@ void SifCallRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     recvSize = useRegConvention ? recvSizeReg : recvSizeStk;
     endFunc = useRegConvention ? endFuncReg : endFuncStk;
     endParam = useRegConvention ? endParamReg : endParamStk;
+
+    const bool isDtxLikeRpc = (boundSidHint == kDtxRpcSid) || ((rpcNum & 0xFF00u) == 0x0400u);
+    static uint32_t dtxAbiLogCount = 0u;
+    if (isDtxLikeRpc && dtxAbiLogCount < 96u)
+    {
+        std::cout << "[SifCallRpc:ABI] client=0x" << std::hex << clientPtr
+                  << " rpc=0x" << rpcNum
+                  << " sidHint=0x" << boundSidHint
+                  << " useReg=" << (useRegConvention ? 1 : 0)
+                  << " reg=(" << sendSizeReg << "," << recvBufReg << "," << recvSizeReg << "," << endFuncReg << "," << endParamReg << ")"
+                  << " stk=(" << sendSizeStk << "," << recvBufStk << "," << recvSizeStk << "," << endFuncStk << "," << endParamStk << ")"
+                  << " plausible=(" << (regPackPlausible ? 1 : 0) << "," << (stackPackPlausible ? 1 : 0) << ")"
+                  << " force34=" << (forceStackForDtxCreate34 ? 1 : 0)
+                  << std::dec << std::endl;
+        ++dtxAbiLogCount;
+    }
 
     t_SifRpcClientData *client = reinterpret_cast<t_SifRpcClientData *>(getMemPtr(rdram, clientPtr));
 

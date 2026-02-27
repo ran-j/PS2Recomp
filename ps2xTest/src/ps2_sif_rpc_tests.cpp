@@ -454,5 +454,56 @@ void register_ps2_sif_rpc_tests()
             t.IsTrue(std::memcmp(env.rdram.data() + kRecvAddr, payload.data(), payload.size()) == 0,
                      "recv payload should match stack-selected transfer size");
         });
+
+        tc.Run("SifCallRpc prefers stack ABI for DTX URPC when both packs look plausible", [](TestCase &t)
+        {
+            TestEnv env;
+
+            constexpr uint32_t kClientAddr = 0x0002B000u;
+            constexpr uint32_t kDtxSid = 0x7D000000u;
+            constexpr uint32_t kSendAddr = 0x0002B100u;
+            constexpr uint32_t kRecvStackAddr = 0x0002B200u;
+            constexpr uint32_t kRecvRegAddr = 0x0002B300u;
+
+            SifInitRpc(env.rdram.data(), &env.ctx, &env.runtime);
+
+            setRegU32(env.ctx, 4, kClientAddr);
+            setRegU32(env.ctx, 5, kDtxSid);
+            setRegU32(env.ctx, 6, 0u);
+            SifBindRpc(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_OK, "SifBindRpc should succeed for DTX sid");
+
+            writeGuestU32(env.rdram.data(), kSendAddr + 0x00u, 1u);        // mode
+            writeGuestU32(env.rdram.data(), kSendAddr + 0x04u, 0x1E21440u); // wk addr
+            writeGuestU32(env.rdram.data(), kSendAddr + 0x08u, 0x100u);      // wk size
+            writeGuestU32(env.rdram.data(), kRecvStackAddr, 0u);
+            writeGuestU32(env.rdram.data(), kRecvRegAddr, 0u);
+
+            setRegU32(env.ctx, 29, K_STACK_ADDR);
+            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x10u, 12u);
+            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x14u, kRecvStackAddr);
+            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x18u, 4u);
+            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x1Cu, 0u);
+            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x20u, 0u);
+            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x00u, 0u);
+
+            setRegU32(env.ctx, 4, kClientAddr);
+            setRegU32(env.ctx, 5, 0x422u); // DTX URPC command 34 (SJUNI create)
+            setRegU32(env.ctx, 6, 0u);
+            setRegU32(env.ctx, 7, kSendAddr);
+            // Plausible but intentionally wrong register-side packed args.
+            setRegU32(env.ctx, 8, 4u);
+            setRegU32(env.ctx, 9, kRecvRegAddr);
+            setRegU32(env.ctx, 10, 12u);
+            setRegU32(env.ctx, 11, 0u);
+
+            SifCallRpc(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_OK, "SifCallRpc should succeed for DTX URPC");
+
+            const uint32_t stackHandle = readGuestStruct<uint32_t>(env.rdram.data(), kRecvStackAddr);
+            const uint32_t regHandle = readGuestStruct<uint32_t>(env.rdram.data(), kRecvRegAddr);
+            t.IsTrue(stackHandle != 0u, "DTX handle should be written to stack-selected recv buffer");
+            t.Equals(regHandle, 0u, "register recv buffer should remain untouched when stack ABI is preferred");
+        });
     });
 }
