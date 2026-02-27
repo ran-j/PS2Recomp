@@ -40,6 +40,8 @@ namespace ps2recomp
             std::vector<Function> &functions,
             std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions);
 
+        static std::string ClampFilenameLength(const std::string& baseName, const std::string& extension, std::size_t maxLength);
+
     private:
         ConfigManager m_configManager;
         std::unique_ptr<ElfParser> m_elfParser;
@@ -70,7 +72,7 @@ namespace ps2recomp
         bool generateStubHeader();
         bool writeToFile(const std::string &path, const std::string &content);
         std::filesystem::path getOutputPath(const Function &function) const;
-        std::string clampFilenameLength(const std::string& baseName, const std::string& extension, std::size_t maxLength) const;
+        static std::string clampFilenameLength(const std::string& baseName, const std::string& extension, std::size_t maxLength);
         std::string sanitizeFunctionName(const std::string &name) const;       
     };
 

@@ -1456,7 +1456,7 @@ namespace ps2recomp
         return outputPath;
     }
 
-    std::string PS2Recompiler::clampFilenameLength(const std::string& baseName, const std::string& extension, std::size_t maxLength) const
+    std::string PS2Recompiler::clampFilenameLength(const std::string& baseName, const std::string& extension, std::size_t maxLength)
     {
         if (maxLength == 0)
         {
@@ -1487,8 +1487,6 @@ namespace ps2recomp
 
         if (namePart.size() > available)
             namePart = namePart.substr(0, available);
-
-        std::cout << baseName << " filename will be truncated to " << namePart << " because is more than " << maxLength << " characters (" << baseName.length() << " characters)" << std::endl;
 
         return namePart + preservedSuffix + extension;
     }
@@ -1546,5 +1544,10 @@ namespace ps2recomp
             return StubTarget::Stub;
         }
         return StubTarget::Unknown;
+    }
+
+    std::string PS2Recompiler::ClampFilenameLength(const std::string& baseName, const std::string& extension, std::size_t maxLength)
+    {
+        return clampFilenameLength(baseName, extension, maxLength);
     }
 }

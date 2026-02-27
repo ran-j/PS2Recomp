@@ -513,5 +513,14 @@ void register_ps2_recompiler_tests()
 
             std::error_code removeError;
             std::filesystem::remove(elfPath, removeError);
-        }); });
+        });
+
+        tc.Run("respect max length for .cpp filenames", [](TestCase& t) {
+            
+            t.IsTrue(PS2Recompiler::ClampFilenameLength("ReallyLongFunctionNameReallyLongFunctionNameReallyLongFunctionName_0x12345678",".cpp",50).length() <= 50,"Function name must be max 50 characters");
+
+            t.IsTrue(PS2Recompiler::ClampFilenameLength("ReallyLongFunctionNameReallyLongFunctionNameReallyLongFunctionName_0x12345678", ".cpp", 50).rfind("0x12345678") != std::string::npos, "Function name must mantain the function address at the end, if present");
+            
+        });
+    });
 }
