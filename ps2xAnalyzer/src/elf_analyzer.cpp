@@ -2542,4 +2542,88 @@ namespace ps2recomp
             return false;
         }
     }
+
+    bool ElfAnalyzer::importGhidraMap(const std::string &csvPath)
+    {
+        std::ifstream file(csvPath);
+        if (!file)
+        {
+            std::cerr << "Failed to open Ghidra CSV file: " << csvPath << std::endl;
+            return false;
+        }
+
+        std::string line;
+        int lineNum = 0;
+        int importedCount = 0;
+
+        while (std::getline(file, line))
+        {
+            lineNum++;
+            
+            // Skip header line
+            if (lineNum == 1 && line.find("Name") != std::string::npos)
+            {
+                continue;
+            }
+
+            // Parse CSV line: Name,Start,End,Size
+            std::stringstream ss(line);
+            std::string name, startStr, endStr, sizeStr;
+
+            if (!std::getline(ss, name, ',') ||
+                !std::getline(ss, startStr, ',') ||
+                !std::getline(ss, endStr, ','))
+            {
+                continue; // Skip malformed lines
+            }
+
+            // Parse hex addresses (e.g., "0x00123456")
+            uint32_t startAddr = 0;
+            uint32_t endAddr = 0;
+            
+            try
+            {
+                startAddr = std::stoul(startStr, nullptr, 16);
+                endAddr = std::stoul(endStr, nullptr, 16);
+            }
+            catch (...)
+            {
+                continue; // Skip lines with invalid addresses
+            }
+
+            // Update existing function or create new one
+            bool found = false;
+            for (auto &func : m_functions)
+            {
+                if (func.start == startAddr)
+                {
+                    // Update with Ghidra's more accurate boundaries
+                    func.name = name;
+                    func.end = endAddr;
+                    found = true;
+                    importedCount++;
+                    break;
+                }
+            }
+
+            // If not found, create new function from Ghidra data
+            if (!found)
+            {
+                Function newFunc;
+                newFunc.name = name;
+                newFunc.start = startAddr;
+                newFunc.end = endAddr;
+                m_functions.push_back(newFunc);
+                importedCount++;
+            }
+        }
+
+        std::cout << "Imported " << importedCount << " functions from Ghidra CSV: " << csvPath << std::endl;
+        return true;
+    }
+
+    const std::vector<Function>& ElfAnalyzer::getFunctions() const
+    {
+        return m_functions;
+    }
 }
