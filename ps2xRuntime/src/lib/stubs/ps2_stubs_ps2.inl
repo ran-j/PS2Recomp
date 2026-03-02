@@ -138,3 +138,13 @@ void builtin_set_imask(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     setReturnS32(ctx, 0);
 }
 
+void InitThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    static int logCount = 0;
+    if (logCount < 8)
+    {
+        std::cout << "ps2_stub InitThread" << std::endl;
+        ++logCount;
+    }
+    setReturnS32(ctx, 1); // success
+}

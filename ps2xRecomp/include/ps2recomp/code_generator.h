@@ -11,6 +11,7 @@
 namespace ps2recomp
 {
 	struct JumpTableEntry;
+    struct JumpTable;
 	struct Instruction;
 	struct Function;
 	struct Symbol;
@@ -47,6 +48,7 @@ namespace ps2recomp
         void setRenamedFunctions(const std::unordered_map<uint32_t, std::string> &renames);
         void setBootstrapInfo(const BootstrapInfo &info);
         void setRelocationCallNames(const std::unordered_map<uint32_t, std::string> &callNames);
+        void setConfiguredJumpTables(const std::vector<JumpTable> &jumpTables);
 
         AnalysisResult collectInternalBranchTargets(const Function &function,
                                                   const std::vector<Instruction> &instructions);
@@ -55,6 +57,7 @@ namespace ps2recomp
         std::unordered_map<uint32_t, Symbol> m_symbols;
         std::unordered_map<uint32_t, std::string> m_renamedFunctions;
         std::unordered_map<uint32_t, std::string> m_relocationCallNames;
+        std::unordered_map<uint32_t, std::vector<uint32_t>> m_configJumpTableTargetsByAddress;
         const std::vector<Section>& m_sections;
         BootstrapInfo m_bootstrapInfo;
 

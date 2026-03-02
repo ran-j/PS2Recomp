@@ -1279,6 +1279,15 @@ namespace
 
     uint32_t toDmaPhys(uint32_t addr)
     {
+        if ((addr & 0x80000000u) != 0)
+        {
+            uint32_t lower = addr & 0x7FFFFFFFu;
+            if (lower >= PS2_SCRATCHPAD_BASE &&
+                lower < PS2_SCRATCHPAD_BASE + PS2_SCRATCHPAD_SIZE)
+            {
+                return lower;
+            }
+        }
         return addr & 0x1FFFFFFFu;
     }
 
@@ -1395,28 +1404,7 @@ namespace
         }
         else
         {
-            const ParsedDmaTag tag = tryParseDmaTag(rdram, payloadPhys);
-            if (tag.valid && tag.qwc != 0)
-            {
-                qwc = tag.qwc;
-                switch (tag.id)
-                {
-                case 0: // REFE
-                case 3: // REF
-                case 4: // REFS
-                    madr = toDmaPhys(tag.addr);
-                    break;
-                default:
-                    // CNT/NEXT/CALL/RET-style tags carry payload inline after the tag.
-                    madr = toDmaPhys(payloadPhys + 0x10u);
-                    break;
-                }
-            }
-            else
-            {
-                // Fall back to chain mode so the runtime DMA path can walk TADR.
-                chcr = 0x00000185u; // MODE=1 chain, DIR=1, TIE=1, STR=1.
-            }
+            chcr = 0x00000185u; // MODE=1 chain, DIR=1, TIE=1, STR=1.
         }
 
         PS2Memory &mem = runtime->memory();
@@ -1497,8 +1485,11 @@ namespace
 
     struct GsDispEnvMem
     {
-        uint64_t display;
+        uint64_t pmode;
+        uint64_t smode2;
         uint64_t dispfb;
+        uint64_t display;
+        uint64_t bgcolor;
     };
 
     struct GsImageMem
@@ -1704,7 +1695,10 @@ namespace
         uint8_t *ptr = getMemPtr(rdram, addr);
         if (!ptr)
             return false;
-        GsDispEnvMem env{display, dispfb};
+        GsDispEnvMem env{};
+        std::memcpy(&env, ptr, sizeof(env));
+        env.dispfb = dispfb;
+        env.display = display;
         std::memcpy(ptr, &env, sizeof(env));
         return true;
     }

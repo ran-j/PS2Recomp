@@ -5,11 +5,11 @@
 
 constexpr uint32_t IOP_SID_LIBSD = 0x80000701u;
 
-class IOP
+class ps2_iop
 {
 public:
-    IOP();
-    ~IOP() = default;
+    ps2_iop();
+    ~ps2_iop() = default;
 
     void init(uint8_t *rdram);
     void reset();

@@ -1,5 +1,6 @@
 #include "ps2_runtime.h"
 #include "ps2_syscalls.h"
+#include "ps2_stubs.h"
 #include "game_overrides.h"
 #include "ps2_runtime_macros.h"
 #include <iostream>
@@ -13,6 +14,7 @@
 #include <atomic>
 #include <thread>
 #include <unordered_map>
+#include <sstream>
 #include "raylib.h"
 #include "ps2_gs_gpu.h"
 #include <ThreadNaming.h>
@@ -76,6 +78,85 @@ namespace
     constexpr uint32_t EXCEPTION_VECTOR_GENERAL = 0x80000080u;
     constexpr uint32_t EXCEPTION_VECTOR_TLB_REFILL = 0x80000000u;
     constexpr uint32_t EXCEPTION_VECTOR_BOOT = 0xBFC00200u;
+
+    struct DispatchHistory
+    {
+        std::array<uint32_t, 64> pcs{};
+        uint32_t next = 0u;
+        bool wrapped = false;
+    };
+
+    thread_local DispatchHistory g_dispatchHistory;
+
+    void pushDispatchPc(uint32_t pc)
+    {
+        DispatchHistory &h = g_dispatchHistory;
+        h.pcs[h.next] = pc;
+        h.next = (h.next + 1u) % static_cast<uint32_t>(h.pcs.size());
+        if (h.next == 0u)
+        {
+            h.wrapped = true;
+        }
+    }
+
+    std::string formatDispatchHistory()
+    {
+        const DispatchHistory &h = g_dispatchHistory;
+        const uint32_t count = h.wrapped ? static_cast<uint32_t>(h.pcs.size()) : h.next;
+        if (count == 0u)
+        {
+            return "(empty)";
+        }
+
+        std::ostringstream oss;
+        bool first = true;
+        for (uint32_t i = 0u; i < count; ++i)
+        {
+            const uint32_t idx = (h.next + h.pcs.size() - count + i) % static_cast<uint32_t>(h.pcs.size());
+            if (!first)
+            {
+                oss << " -> ";
+            }
+            first = false;
+            oss << "0x" << std::hex << h.pcs[idx];
+        }
+        return oss.str();
+    }
+
+    uint32_t selectDispatchRecoveryPc(const PS2Runtime *runtime)
+    {
+        const DispatchHistory &h = g_dispatchHistory;
+        const uint32_t count = h.wrapped ? static_cast<uint32_t>(h.pcs.size()) : h.next;
+        if (count == 0u)
+        {
+            return 0u;
+        }
+
+        uint32_t firstHigh = 0u;
+        for (uint32_t step = 1u; step <= count; ++step)
+        {
+            const uint32_t idx = (h.next + h.pcs.size() - step) % static_cast<uint32_t>(h.pcs.size());
+            const uint32_t pc = h.pcs[idx];
+            if (pc < 0x00100000u)
+            {
+                continue;
+            }
+            if (runtime && !runtime->hasFunction(pc))
+            {
+                continue;
+            }
+
+            if (firstHigh == 0u)
+            {
+                firstHigh = pc;
+                continue;
+            }
+
+            return pc;
+        }
+
+        return firstHigh;
+    }
 
     uint32_t selectExceptionVector(const R5900Context *ctx, bool tlbRefill)
     {
@@ -155,6 +236,56 @@ namespace
         return value;
     }
 
+    uint64_t readGuestU64Wrapped(const uint8_t *rdram, uint32_t addr)
+    {
+        const uint64_t lo = readGuestU32Wrapped(rdram, addr);
+        const uint64_t hi = readGuestU32Wrapped(rdram, addr + 4u);
+        return lo | (hi << 32);
+    }
+
+    uint32_t selectStackRecoveryPc(const uint8_t *rdram, const R5900Context *ctx, const PS2Runtime *runtime)
+    {
+        if (!rdram || !ctx || !runtime)
+        {
+            return 0u;
+        }
+
+        const uint32_t sp = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0));
+        constexpr uint32_t kScanBytes = 0x200u;
+
+        for (uint32_t offset = 0u; offset < kScanBytes; offset += 8u)
+        {
+            const uint32_t slotAddr = sp + offset;
+            const uint32_t ra32 = static_cast<uint32_t>(readGuestU64Wrapped(rdram, slotAddr));
+            if (ra32 < 0x00100000u)
+            {
+                continue;
+            }
+            if (!runtime->hasFunction(ra32))
+            {
+                continue;
+            }
+            return ra32;
+        }
+
+        for (uint32_t offset = 0u; offset < kScanBytes; offset += 4u)
+        {
+            const uint32_t slotAddr = sp + offset;
+            const uint32_t ra32 = readGuestU32Wrapped(rdram, slotAddr);
+            if (ra32 < 0x00100000u)
+            {
+                continue;
+            }
+            if (!runtime->hasFunction(ra32))
+            {
+                continue;
+            }
+            return ra32;
+        }
+
+        return 0u;
+    }
+
     std::string readGuestPrintableString(const uint8_t *rdram, uint32_t addr, size_t maxLen)
     {
         std::string out;
@@ -186,71 +317,110 @@ namespace
 
 static void UploadFrame(Texture2D &tex, PS2Runtime *rt)
 {
-    // Try to use GS dispfb/display registers to locate the visible buffer.
+    // For now lets keep the display snapshot in sync with rasterized VRAM so the host frame
+    rt->gs().refreshDisplaySnapshot();
+
     const GSRegisters &gs = rt->memory().gs();
 
-    // DISPFBUF1 fields: FBP bits 0-8, FBW bits 9-14, PSM bits 15-19.
     uint32_t dispfb = static_cast<uint32_t>(gs.dispfb1 & 0xFFFFFFFFULL);
     uint32_t fbp = dispfb & 0x1FF;
     uint32_t fbw = (dispfb >> 9) & 0x3F;
     uint32_t psm = (dispfb >> 15) & 0x1F;
 
-    // DISPLAY1 fields used here: DX[11:0], DY[22:12], MAGH[25:23], MAGV[27:26], DW[43:32], DH[54:44].
     uint64_t display64 = gs.display1;
-    uint32_t magh = static_cast<uint32_t>((display64 >> 23) & 0x7); // magnification H (0-7)
     uint32_t dw = static_cast<uint32_t>((display64 >> 32) & 0xFFF);
     uint32_t dh = static_cast<uint32_t>((display64 >> 44) & 0x7FF);
 
-    // DW is in VCK units: actual pixel width = (DW + 1) / (MAGH + 1).
-    uint32_t maghDiv = magh + 1;
-    uint32_t width = (dw + 1) / maghDiv;
+    uint32_t width = (dw + 1);
     uint32_t height = (dh + 1);
-    if (dw == 0)
+    if (width < 64 || height < 64)
+    {
         width = FB_WIDTH;
-    if (dh == 0)
         height = FB_HEIGHT;
+    }
     if (width > FB_WIDTH)
         width = FB_WIDTH;
     if (height > FB_HEIGHT)
         height = FB_HEIGHT;
 
-    // Only handle PSMCT32 (0).
-    if (psm != 0)
+    uint32_t baseBytes = fbp * 8192u;
+    const uint32_t bytesPerPixel = (psm == 2u || psm == 0x0Au) ? 2u : 4u;
+    uint32_t strideBytes = (fbw ? fbw : (FB_WIDTH / 64)) * 64 * bytesPerPixel;
+
+    std::vector<uint8_t> scratch(FB_WIDTH * FB_HEIGHT * 4, 0);
+
+    uint8_t *rdram = rt->memory().getRDRAM();
+    uint8_t *gsvram = rt->memory().getGSVRAM();
+
+    uint32_t snapSize = 0;
+    const uint8_t *snapVram = rt->gs().lockDisplaySnapshot(snapSize);
+    const uint8_t *vramSrc = (snapVram && snapSize > 0) ? snapVram : gsvram;
+
+    if (snapVram)
     {
-        // I can`t stand a random RAM glitch screen so lets use some magenta to calm down
+        baseBytes = rt->gs().getLastDisplayBaseBytes();
+    }
+
+    if (psm == 0u)
+    {
+        for (uint32_t y = 0; y < height; ++y)
+        {
+            uint32_t srcOff = baseBytes + y * strideBytes;
+            uint32_t dstOff = y * FB_WIDTH * 4;
+            uint32_t copyW = width * 4;
+            uint32_t srcIdx = srcOff;
+            if (srcIdx + copyW <= PS2_GS_VRAM_SIZE && vramSrc)
+                std::memcpy(&scratch[dstOff], vramSrc + srcIdx, copyW);
+            else
+            {
+                uint32_t rdramIdx = srcOff & PS2_RAM_MASK;
+                if (rdramIdx + copyW > PS2_RAM_SIZE)
+                    copyW = PS2_RAM_SIZE - rdramIdx;
+                std::memcpy(&scratch[dstOff], rdram + rdramIdx, copyW);
+            }
+            uint8_t *row = scratch.data() + dstOff;
+            for (uint32_t x = 0; x < width; ++x)
+                row[x * 4 + 3] = 255u;
+        }
+    }
+    else if (psm == 2u)
+    {
+        const uint32_t srcLineBytes = width * 2u;
+        for (uint32_t y = 0; y < height; ++y)
+        {
+            uint32_t srcOff = baseBytes + y * strideBytes;
+            uint32_t dstOff = y * FB_WIDTH * 4;
+            const uint8_t *src = nullptr;
+            if (srcOff + srcLineBytes <= PS2_GS_VRAM_SIZE && vramSrc)
+                src = vramSrc + srcOff;
+            else if ((srcOff & PS2_RAM_MASK) + srcLineBytes <= PS2_RAM_SIZE)
+                src = rdram + (srcOff & PS2_RAM_MASK);
+            if (!src)
+                continue;
+            uint8_t *dst = scratch.data() + dstOff;
+            for (uint32_t x = 0; x < width; ++x)
+            {
+                uint16_t p = *reinterpret_cast<const uint16_t *>(src + x * 2);
+                uint32_t r = (p >> 10) & 31u;
+                uint32_t g = (p >> 5) & 31u;
+                uint32_t b = p & 31u;
+                dst[x * 4 + 0] = static_cast<uint8_t>((r << 3) | (r >> 2));
+                dst[x * 4 + 1] = static_cast<uint8_t>((g << 3) | (g >> 2));
+                dst[x * 4 + 2] = static_cast<uint8_t>((b << 3) | (b >> 2));
+                dst[x * 4 + 3] = 255u;
+            }
+        }
+    }
+    else
+    {
+        rt->gs().unlockDisplaySnapshot();
         Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, MAGENTA);
         UpdateTexture(tex, blank.data);
         UnloadImage(blank);
         return;
     }
 
-    uint32_t baseBytes = fbp * 2048;
-    const uint32_t bytesPerPixel = (psm == 2u || psm == 0x0Au) ? 2u : 4u;
-    uint32_t strideBytes = (fbw ? fbw : (FB_WIDTH / 64)) * 64 * bytesPerPixel;
-
-    static std::vector<uint8_t> scratch(FB_WIDTH * FB_HEIGHT * 4, 0);
-    std::memset(scratch.data(), 0, scratch.size());
-
-    uint8_t *rdram = rt->memory().getRDRAM();
-    uint8_t *gsvram = rt->memory().getGSVRAM();
-    for (uint32_t y = 0; y < height; ++y)
-    {
-        uint32_t srcOff = baseBytes + y * strideBytes;
-        uint32_t dstOff = y * FB_WIDTH * 4;
-        uint32_t copyW = width * 4;
-        uint32_t srcIdx = srcOff;
-        if (srcIdx + copyW <= PS2_GS_VRAM_SIZE && gsvram)
-        {
-            std::memcpy(&scratch[dstOff], gsvram + srcIdx, copyW);
-        }
-        else
-        {
-            uint32_t rdramIdx = srcOff & PS2_RAM_MASK;
-            if (rdramIdx + copyW > PS2_RAM_SIZE)
-                copyW = PS2_RAM_SIZE - rdramIdx;
-            std::memcpy(&scratch[dstOff], rdram + rdramIdx, copyW);
-        }
-    }
+    rt->gs().unlockDisplaySnapshot();
 
     UpdateTexture(tex, scratch.data());
 }
@@ -296,6 +466,16 @@ bool PS2Runtime::initialize(const char *title)
         return false;
     }
 
+    m_gs.init(m_memory.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &m_memory.gs());
+    m_gs.reset();
+    m_gifArbiter.setProcessPacketFn([this](const uint8_t *data, uint32_t size) { m_gs.processGIFPacket(data, size); });
+    m_memory.setGifArbiter(&m_gifArbiter);
+    m_memory.setVu1MscalCallback([this](uint32_t startPC, uint32_t itop) {
+        m_vu1.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
+                      m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
+                      m_gs, &m_memory, startPC, itop, 65536);
+    });
+
     m_iop.init(m_memory.getRDRAM());
     m_iop.reset();
 
@@ -304,6 +484,8 @@ bool PS2Runtime::initialize(const char *title)
     InitAudioDevice();
     m_audioBackend.setAudioReady(IsAudioDeviceReady());
     SetTargetFPS(60);
+
+    m_vu1.reset();
 
     return true;
 }
@@ -602,17 +784,149 @@ bool PS2Runtime::hasFunction(uint32_t address) const
 
 PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
 {
+    pushDispatchPc(address);
+
     auto it = m_functionTable.find(address);
     if (it != m_functionTable.end())
     {
         return it->second;
     }
 
+    // Some games dispatch to internal basic-block addresses that belong to a
+    // larger recompiled function. Map known hot-path aliases to their parent
+    // function entry so execution can resume from the current ctx->pc.
+    if (address == 0x2913E4u)
+    {
+        auto parent = m_functionTable.find(0x2913B0u);
+        if (parent != m_functionTable.end())
+        {
+            return parent->second;
+        }
+    }
+
     std::cerr << "Warning: Function at address 0x" << std::hex << address << std::dec << " not found" << std::endl;
 
     static RecompiledFunction defaultFunction = [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        std::cerr << "Error: Called unimplemented function at address 0x" << std::hex << ctx->pc << std::dec << std::endl;
+        const uint32_t ra = ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0)) : 0u;
+        const uint32_t sp = ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0)) : 0u;
+        const uint32_t gp = ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[28], 0)) : 0u;
+        const uint32_t a0 = ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[4], 0)) : 0u;
+        const uint32_t a1 = ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[5], 0)) : 0u;
+        const uint32_t v0 = ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[2], 0)) : 0u;
+        const uint32_t v1 = ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[3], 0)) : 0u;
+
+        if (ctx && runtime)
+        {
+            thread_local uint32_t s_recoverCount = 0u;
+            thread_local bool s_loggedContext = false;
+            const uint32_t pc = ctx->pc;
+            const bool hasPcFunction = runtime->hasFunction(pc);
+
+            if (!hasPcFunction && s_recoverCount < 8192u)
+            {
+                if (!s_loggedContext)
+                {
+                    std::ostringstream stackDump;
+                    if (rdram)
+                    {
+                        stackDump << " [stack]";
+                        for (uint32_t off = 0u; off < 0x40u; off += 4u)
+                        {
+                            const uint32_t slot = readGuestU32Wrapped(rdram, sp + off);
+                            stackDump << " +" << std::hex << off << "=0x" << slot;
+                        }
+                    }
+                    std::cerr << "[dispatch:first-bad-pc] bad=0x" << std::hex << pc
+                              << " ra=0x" << ra
+                              << " sp=0x" << sp
+                              << " gp=0x" << gp
+                              << " v0=0x" << v0
+                              << " v1=0x" << v1
+                              << " a0=0x" << a0
+                              << " a1=0x" << a1
+                              << " trace=" << formatDispatchHistory()
+                              << stackDump.str()
+                              << std::dec << std::endl;
+                    s_loggedContext = true;
+                }
+
+                uint32_t recoveryPc = 0u;
+                if (ra != 0u && runtime->hasFunction(ra))
+                {
+                    recoveryPc = ra;
+                }
+
+                if (recoveryPc == 0u)
+                {
+                    recoveryPc = selectStackRecoveryPc(rdram, ctx, runtime);
+                }
+
+                if (recoveryPc == 0u)
+                {
+                    recoveryPc = selectDispatchRecoveryPc(runtime);
+                }
+
+                if (recoveryPc != 0u && recoveryPc != pc)
+                {
+                    if (s_recoverCount < 256u)
+                    {
+                        std::cerr << "[dispatch:recover-pc] bad=0x" << std::hex << pc
+                                  << " ra=0x" << ra
+                                  << " fallback=0x" << recoveryPc
+                                  << " sp=0x" << sp
+                                  << std::dec << std::endl;
+                    }
+                    ++s_recoverCount;
+                    ctx->pc = recoveryPc;
+                    return;
+                }
+            }
+
+            if (hasPcFunction)
+            {
+                s_recoverCount = 0u;
+                s_loggedContext = false;
+            }
+            else if (pc < 0x00100000u && ra == pc && s_recoverCount < 4096u)
+            {
+                uint32_t recoveryPc = selectStackRecoveryPc(rdram, ctx, runtime);
+                if (recoveryPc == 0u)
+                {
+                    recoveryPc = selectDispatchRecoveryPc(runtime);
+                }
+                if (recoveryPc != 0u && recoveryPc != pc)
+                {
+                    if (s_recoverCount < 128u)
+                    {
+                        std::cerr << "[dispatch:recover-low-pc] bad=0x" << std::hex << pc
+                                  << " ra=0x" << ra
+                                  << " fallback=0x" << recoveryPc
+                                  << " sp=0x" << sp
+                                  << std::dec << std::endl;
+                    }
+                    ++s_recoverCount;
+                    ctx->pc = recoveryPc;
+                    return;
+                }
+            }
+        }
+
+        std::ostringstream oss;
+        oss << "Error: Called unimplemented function at address 0x" << std::hex << (ctx ? ctx->pc : 0u)
+            << " ra=0x" << ra
+            << " sp=0x" << sp
+            << " gp=0x" << gp
+            << " a0=0x" << a0
+            << " hostTid=" << std::this_thread::get_id()
+            << " pcTrace=" << formatDispatchHistory()
+            << std::dec;
+
+        static std::mutex s_defaultFnLogMutex;
+        {
+            std::lock_guard<std::mutex> lock(s_defaultFnLogMutex);
+            std::cerr << oss.str() << std::endl;
+        }
 
         runtime->requestStop();
     };
@@ -1211,12 +1525,26 @@ void PS2Runtime::dispatchLoop(uint8_t *rdram, R5900Context *ctx)
         m_debugGp.store(static_cast<uint32_t>(_mm_extract_epi32(ctx->r[28], 0)), std::memory_order_relaxed);
 
         RecompiledFunction fn = lookupFunction(pc);
+        const uint32_t dispatchedPc = pc;
+        const uint32_t dispatchedRa = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0));
 
         fn(rdram, ctx, this);
 
         if (ctx->pc == 0u)
         {
-            requestStop();
+            const uint32_t ra = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0));
+            const uint32_t sp = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0));
+            const uint32_t gp = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[28], 0));
+            std::cerr << "[dispatch:pc-zero] from=0x" << std::hex << dispatchedPc
+                      << " fromRa=0x" << dispatchedRa
+                      << " ra=0x" << ra
+                      << " sp=0x" << sp
+                      << " gp=0x" << gp
+                      << " trace=" << formatDispatchHistory()
+                      << std::dec << std::endl;
+
+            // PC=0 means this guest thread returned (usually via jr $ra with RA=0).
+            // Do not request a global runtime stop here: other guest threads may still run.
             break;
         }
     }
@@ -1356,11 +1684,8 @@ void PS2Runtime::Store128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, __m
 
 void PS2Runtime::requestStop()
 {
-    const bool alreadyRequested = m_stopRequested.exchange(true, std::memory_order_relaxed);
-    if (!alreadyRequested)
-    {
-        ps2_syscalls::notifyRuntimeStop();
-    }
+    m_stopRequested.store(true, std::memory_order_relaxed);
+    ps2_syscalls::notifyRuntimeStop();
 }
 
 bool PS2Runtime::isStopRequested() const
@@ -1376,6 +1701,7 @@ void PS2Runtime::HandleIntegerOverflow(R5900Context *ctx)
 void PS2Runtime::run()
 {
     m_stopRequested.store(false, std::memory_order_relaxed);
+    ps2_stubs::resetGsSyncVCallbackState();
     m_cpuContext.r[4] = _mm_setzero_si128();
     m_cpuContext.r[5] = _mm_setzero_si128();
     m_cpuContext.r[29] = _mm_set_epi64x(0, static_cast<int64_t>(PS2_RAM_SIZE - 0x10u));
@@ -1416,53 +1742,87 @@ void PS2Runtime::run()
         gameThreadFinished.store(true, std::memory_order_release); });
 
     uint64_t tick = 0;
-    while (!gameThreadFinished.load(std::memory_order_acquire))
+    while (!isStopRequested() && g_activeThreads.load(std::memory_order_relaxed) > 0)
     {
-        const uint32_t pc = m_debugPc.load(std::memory_order_relaxed);
-        const uint32_t ra = m_debugRa.load(std::memory_order_relaxed);
-        const uint32_t sp = m_debugSp.load(std::memory_order_relaxed);
-        const uint32_t gp = m_debugGp.load(std::memory_order_relaxed);
-
-        if ((tick++ % 120) == 0)
+        tick++;
+        ps2_stubs::dispatchGsSyncVCallback(m_memory.getRDRAM(), this);
+        if ((tick % 120) == 0)
         {
-            std::cout << "[run] activeThreads=" << g_activeThreads.load(std::memory_order_relaxed);
-            std::cout << " pc=0x" << std::hex << pc
-                      << " ra=0x" << ra
-                      << " sp=0x" << sp
-                      << " gp=0x" << gp
-                      << std::dec << std::endl;
-        }
-        if ((tick % 600) == 0)
-        {
-            static uint64_t lastDma = 0, lastGif = 0, lastGs = 0, lastVif = 0;
             uint64_t curDma = m_memory.dmaStartCount();
             uint64_t curGif = m_memory.gifCopyCount();
             uint64_t curGs = m_memory.gsWriteCount();
             uint64_t curVif = m_memory.vifWriteCount();
-            if (curDma != lastDma || curGif != lastGif || curGs != lastGs || curVif != lastVif)
+            const GSRegisters &gs = m_memory.gs();
+            const uint32_t dbgPc = m_debugPc.load(std::memory_order_relaxed);
+            const uint32_t dbgRa = m_debugRa.load(std::memory_order_relaxed);
+            const uint32_t dbgSp = m_debugSp.load(std::memory_order_relaxed);
+            const uint32_t dbgGp = m_debugGp.load(std::memory_order_relaxed);
+            const int activeThreads = g_activeThreads.load(std::memory_order_relaxed);
+
+            constexpr uint32_t kSndTransTypeAddr = 0x01E0E1C0u;
+            constexpr uint32_t kSndTransBankAddr = 0x01E0E1C8u;
+            constexpr uint32_t kSndTransLevelAddr = 0x01E0E1B8u;
+            constexpr uint32_t kSndGetAdrsAddr = 0x01E212D8u;
+            constexpr uint32_t kSndStatusMirrorAddr = 0x01E213C0u;
+            constexpr uint32_t kSndSeCheckAddr = 0x01E0EF10u;
+            constexpr uint32_t kSndMidiCheckAddr = 0x01E0EF20u;
+
+            const uint32_t sndTransType = readGuestU32Wrapped(m_memory.getRDRAM(), kSndTransTypeAddr);
+            const uint32_t sndTransLevel = readGuestU32Wrapped(m_memory.getRDRAM(), kSndTransLevelAddr);
+            const uint32_t sndTransBank = readGuestU32Wrapped(m_memory.getRDRAM(), kSndTransBankAddr);
+            const uint32_t sndGetAdrs = readGuestU32Wrapped(m_memory.getRDRAM(), kSndGetAdrsAddr);
+            auto readGuestS16 = [&](uint32_t addr) -> int32_t
             {
-                std::cout << "[hw] dma_starts=" << curDma
-                          << " gif_copies=" << curGif
-                          << " gs_writes=" << curGs
-                          << " vif_writes=" << curVif << std::endl;
-                lastDma = curDma;
-                lastGif = curGif;
-                lastGs = curGs;
-                lastVif = curVif;
+                const uint8_t *rdram = m_memory.getRDRAM();
+                if (!rdram)
+                {
+                    return 0;
+                }
+                const uint16_t raw = static_cast<uint16_t>(
+                    static_cast<uint16_t>(rdram[(addr + 0u) & PS2_RAM_MASK]) |
+                    (static_cast<uint16_t>(rdram[(addr + 1u) & PS2_RAM_MASK]) << 8));
+                return static_cast<int16_t>(raw);
+            };
+            const int32_t sndMirrorMidi0 = readGuestS16(kSndStatusMirrorAddr + 0x1Eu);
+            const int32_t sndMirrorSe0 = readGuestS16(kSndStatusMirrorAddr + 0x26u);
+            int32_t sndBankMidiCheck = 0;
+            int32_t sndBankSeCheck = 0;
+            if (sndTransBank < 4u)
+            {
+                sndBankMidiCheck = readGuestS16(kSndMidiCheckAddr + (sndTransBank * 2u));
             }
+            if (sndTransBank < 5u)
+            {
+                sndBankSeCheck = readGuestS16(kSndSeCheckAddr + (sndTransBank * 2u));
+            }
+            std::cout << "[run:tick] tick=" << tick
+                      << " pc=0x" << std::hex << dbgPc
+                      << " ra=0x" << dbgRa
+                      << " sp=0x" << dbgSp
+                      << " gp=0x" << dbgGp
+                      << " dispfb1=0x" << gs.dispfb1
+                      << " display1=0x" << gs.display1
+                      << std::dec
+                      << " activeThreads=" << activeThreads
+                      << " dma=" << curDma
+                      << " gif=" << curGif
+                      << " gsw=" << curGs
+                      << " vif=" << curVif
+                      << " sndType=" << sndTransType
+                      << " sndLvl=" << sndTransLevel
+                      << " sndBank=" << sndTransBank
+                      << " getAdrs=0x" << std::hex << sndGetAdrs << std::dec
+                      << " sndMirrorMidi0=" << sndMirrorMidi0
+                      << " sndMirrorSe0=" << sndMirrorSe0
+                      << " sndChkMidi=" << sndBankMidiCheck
+                      << " sndChkSe=" << sndBankSeCheck
+                      << std::endl;
         }
+        UploadFrame(frameTex, this);
+
         BeginDrawing();
         ClearBackground(BLACK);
-
-        bool gpuRendered = gsGpuRenderFrame();
-
-        if (!gpuRendered)
-        {
-            // lets draw for now as debug but we wont need this in future
-            UploadFrame(frameTex, this);
-            DrawTexture(frameTex, 0, 0, WHITE);
-        }
-
+        DrawTexture(frameTex, 0, 0, WHITE);
         EndDrawing();
 
         if (WindowShouldClose())
@@ -1495,11 +1855,22 @@ void PS2Runtime::run()
         }
     }
 
-    const auto workerDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+    const auto workerDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);
     while (g_activeThreads.load(std::memory_order_relaxed) > 0 &&
            std::chrono::steady_clock::now() < workerDeadline)
     {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    if (g_activeThreads.load(std::memory_order_relaxed) > 0)
+    {
+        requestStop();
+        const auto finalWorkerDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);
+        while (g_activeThreads.load(std::memory_order_relaxed) > 0 &&
+               std::chrono::steady_clock::now() < finalWorkerDeadline)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
     }
 
     UnloadTexture(frameTex);

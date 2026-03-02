@@ -24,6 +24,7 @@ namespace ps2recomp
     static bool hasPs2ApiPrefix(const std::string &name);
     static bool hasReliableSymbolName(const std::string &name);
     static bool isDoNotSkipOrStub(const std::string &name);
+    static bool matchesKernelRuntimeName(const std::string &name);
     static uint32_t decodeAbsoluteJumpTarget(uint32_t instructionAddress, uint32_t targetField);
     static bool tryReadWord(const ElfParser *parser, uint32_t address, uint32_t &outWord);
 
@@ -444,6 +445,16 @@ namespace ps2recomp
 
     void ElfAnalyzer::analyzeLibraryFunctions()
     {
+        std::unordered_set<std::string> forcedRecompileNames;
+        forcedRecompileNames.reserve(m_forceRecompileStarts.size());
+        for (const auto &func : m_functions)
+        {
+            if (m_forceRecompileStarts.contains(func.start))
+            {
+                forcedRecompileNames.insert(func.name);
+            }
+        }
+
         for (const auto &symbol : m_symbols)
         {
             if (symbol.isFunction)
@@ -457,7 +468,7 @@ namespace ps2recomp
                 {
                     m_libFunctions.insert(symbol.name);
                 }
-                else if (isSystemFunction(symbol.name))
+                else if (shouldSkipSystemSymbolForHeuristics(symbol.name, forcedRecompileNames))
                 {
                     m_skipFunctions.insert(symbol.name);
                 }
@@ -475,7 +486,7 @@ namespace ps2recomp
             {
                 m_libFunctions.insert(func.name);
             }
-            else if (isSystemFunction(func.name))
+            else if (shouldSkipSystemSymbolForHeuristics(func.name, forcedRecompileNames))
             {
                 m_skipFunctions.insert(func.name);
             }
@@ -1606,6 +1617,10 @@ namespace ps2recomp
             if (funcIt != m_functions.end())
             {
                 const Function &func = *funcIt;
+                if (m_forceRecompileStarts.contains(func.start))
+                {
+                    continue;
+                }
 
                 if (patchAddrs.size() > 3)
                 {
@@ -2032,6 +2047,18 @@ namespace ps2recomp
         return false;
     }
 
+    static bool matchesKernelRuntimeName(const std::string &name)
+    {
+        if (name.empty())
+        {
+            return false;
+        }
+
+        static const std::regex kernelRuntimePattern(
+            "^(?:(?:Create|Delete|Start|ExitDelete|Exit|Terminate|Suspend|Resume|Sleep|Wakeup|CancelWakeup|Change|Rotate|Release|Setup|Register|Query|Get|Set|Refer|Poll|Wait|Signal|Enable|Disable|Flush|Reset|Add|Init)(?:Thread|Sema|EventFlag|Alarm|Intc|IntcHandler2|Dmac|DmacHandler2|OsdConfigParam|MemorySize|VSyncFlag|Heap|TLS|Status|Cache|Syscall|TLB|TLBEntry|GsCrt)|EndOfHeap|GsGetIMR|GsPutIMR|Deci2Call|Sif[A-Za-z0-9_]+|i(?:SignalSema|PollSema|ReferSemaStatus|SetEventFlag|ClearEventFlag|PollEventFlag|ReferEventFlagStatus|WakeupThread|CancelWakeupThread|ReleaseWaitThread|SetAlarm|CancelAlarm|FlushCache|sceSifSetDma|sceSifSetDChain))$");
+        return std::regex_match(name, kernelRuntimePattern);
+    }
+
     static bool isDoNotSkipOrStub(const std::string &name)
     {
         static const std::unordered_set<std::string> kDoNotSkipOrStub = {
@@ -2131,6 +2158,17 @@ namespace ps2recomp
         return isSystemSymbolNameForHeuristics(name);
     }
 
+    bool ElfAnalyzer::shouldSkipSystemSymbolForHeuristics(
+        const std::string &name,
+        const std::unordered_set<std::string> &forcedRecompileNames)
+    {
+        if (forcedRecompileNames.contains(name))
+        {
+            return false;
+        }
+        return isSystemSymbolNameForHeuristics(name);
+    }
+
     bool ElfAnalyzer::isSystemFunction(const std::string &name) const
     {
         return isSystemSymbolNameForHeuristics(name);
@@ -2144,7 +2182,19 @@ namespace ps2recomp
         if (!hasReliableSymbolName(name))
             return false;
 
+        std::string normalizedName = name;
+        if (normalizedName[0] == '_' && normalizedName.size() > 1)
+        {
+            normalizedName = normalizedName.substr(1);
+        }
+
+        if (matchesKernelRuntimeName(normalizedName))
+            return true;
+
         if (m_knownLibNames.find(name) != m_knownLibNames.end())
+            return true;
+
+        if (m_knownLibNames.find(normalizedName) != m_knownLibNames.end())
             return true;
 
         if (hasPs2ApiPrefix(name))
@@ -2152,7 +2202,7 @@ namespace ps2recomp
 
         // Check for common C/C++ library function names
         static const std::regex cLibPattern("^_*(mem|str|time|f?printf|f?scanf|malloc|free|calloc|realloc|atoi|itoa|rand|srand|abort|exit|atexit|getenv|system|bsearch|qsort|abs|labs|div|ldiv|mblen|mbtowc|wctomb|mbstowcs|wcstombs).*");
-        if (std::regex_match(name, cLibPattern))
+        if (std::regex_match(normalizedName, cLibPattern))
         {
             return true;
         }
@@ -2491,5 +2541,89 @@ namespace ps2recomp
         {
             return false;
         }
+    }
+
+    bool ElfAnalyzer::importGhidraMap(const std::string &csvPath)
+    {
+        std::ifstream file(csvPath);
+        if (!file)
+        {
+            std::cerr << "Failed to open Ghidra CSV file: " << csvPath << std::endl;
+            return false;
+        }
+
+        std::string line;
+        int lineNum = 0;
+        int importedCount = 0;
+
+        while (std::getline(file, line))
+        {
+            lineNum++;
+            
+            // Skip header line
+            if (lineNum == 1 && line.find("Name") != std::string::npos)
+            {
+                continue;
+            }
+
+            // Parse CSV line: Name,Start,End,Size
+            std::stringstream ss(line);
+            std::string name, startStr, endStr, sizeStr;
+
+            if (!std::getline(ss, name, ',') ||
+                !std::getline(ss, startStr, ',') ||
+                !std::getline(ss, endStr, ','))
+            {
+                continue; // Skip malformed lines
+            }
+
+            // Parse hex addresses (e.g., "0x00123456")
+            uint32_t startAddr = 0;
+            uint32_t endAddr = 0;
+            
+            try
+            {
+                startAddr = std::stoul(startStr, nullptr, 16);
+                endAddr = std::stoul(endStr, nullptr, 16);
+            }
+            catch (...)
+            {
+                continue; // Skip lines with invalid addresses
+            }
+
+            // Update existing function or create new one
+            bool found = false;
+            for (auto &func : m_functions)
+            {
+                if (func.start == startAddr)
+                {
+                    // Update with Ghidra's more accurate boundaries
+                    func.name = name;
+                    func.end = endAddr;
+                    found = true;
+                    importedCount++;
+                    break;
+                }
+            }
+
+            // If not found, create new function from Ghidra data
+            if (!found)
+            {
+                Function newFunc;
+                newFunc.name = name;
+                newFunc.start = startAddr;
+                newFunc.end = endAddr;
+                m_functions.push_back(newFunc);
+                importedCount++;
+            }
+        }
+
+        std::cout << "Imported " << importedCount << " functions from Ghidra CSV: " << csvPath << std::endl;
+        return true;
+    }
+
+    const std::vector<Function>& ElfAnalyzer::getFunctions() const
+    {
+        return m_functions;
     }
 }

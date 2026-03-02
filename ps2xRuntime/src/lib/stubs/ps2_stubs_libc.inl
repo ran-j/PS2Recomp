@@ -1,3 +1,45 @@
+namespace
+{
+    uint32_t sanitizeMemTransferSize(uint32_t size, const char *op)
+    {
+        constexpr uint32_t kMaxTransfer = PS2_RAM_SIZE;
+        if (size <= kMaxTransfer)
+        {
+            return size;
+        }
+
+        static std::mutex s_warnMutex;
+        static std::unordered_map<std::string, uint32_t> s_warnCounts;
+        uint32_t warnCount = 0u;
+        {
+            std::lock_guard<std::mutex> lock(s_warnMutex);
+            warnCount = ++s_warnCounts[op ? op : "memop"];
+        }
+        if (warnCount <= 16u)
+        {
+            std::cerr << "[" << (op ? op : "memop") << "] size clamp from 0x"
+                      << std::hex << size << " to 0x" << kMaxTransfer
+                      << std::dec << std::endl;
+        }
+        return kMaxTransfer;
+    }
+
+    uint32_t guestContiguousBytes(uint32_t guestAddr)
+    {
+        uint32_t offset = 0u;
+        bool scratch = false;
+        if (!ps2ResolveGuestPointer(guestAddr, offset, scratch))
+        {
+            return 0u;
+        }
+        if (scratch)
+        {
+            return (offset < PS2_SCRATCHPAD_SIZE) ? (PS2_SCRATCHPAD_SIZE - offset) : 0u;
+        }
+        return (offset < PS2_RAM_SIZE) ? (PS2_RAM_SIZE - offset) : 0u;
+    }
+}
+
 void malloc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     const uint32_t size = getRegU32(ctx, 4); // $a0
@@ -34,22 +76,38 @@ void memcpy(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     uint32_t destAddr = getRegU32(ctx, 4); // $a0
     uint32_t srcAddr = getRegU32(ctx, 5);  // $a1
-    size_t size = getRegU32(ctx, 6);       // $a2
+    uint32_t size = getRegU32(ctx, 6);     // $a2
+    size = sanitizeMemTransferSize(size, "memcpy");
 
-    uint8_t *hostDest = getMemPtr(rdram, destAddr);
-    const uint8_t *hostSrc = getConstMemPtr(rdram, srcAddr);
-
-    if (hostDest && hostSrc)
+    uint32_t copied = 0u;
+    uint32_t curDst = destAddr;
+    uint32_t curSrc = srcAddr;
+    while (copied < size)
     {
-        ::memcpy(hostDest, hostSrc, size);
-        ps2TraceGuestRangeWrite(rdram, destAddr, static_cast<uint32_t>(size), "memcpy", ctx);
+        uint8_t *hostDest = getMemPtr(rdram, curDst);
+        const uint8_t *hostSrc = getConstMemPtr(rdram, curSrc);
+        if (!hostDest || !hostSrc)
+        {
+            break;
+        }
+
+        uint32_t chunk = size - copied;
+        chunk = std::min(chunk, guestContiguousBytes(curDst));
+        chunk = std::min(chunk, guestContiguousBytes(curSrc));
+        if (chunk == 0u)
+        {
+            break;
+        }
+
+        ::memcpy(hostDest, hostSrc, chunk);
+        copied += chunk;
+        curDst += chunk;
+        curSrc += chunk;
     }
-    else
+
+    if (copied != 0u)
     {
-        std::cerr << "memcpy error: Attempted copy involving non-RDRAM address (or invalid RDRAM address)."
-                  << " Dest: 0x" << std::hex << destAddr << " (host ptr valid: " << (hostDest != nullptr) << ")"
-                  << ", Src: 0x" << srcAddr << " (host ptr valid: " << (hostSrc != nullptr) << ")" << std::dec
-                  << ", Size: " << size << std::endl;
+        ps2TraceGuestRangeWrite(rdram, destAddr, copied, "memcpy", ctx);
     }
 
     // returns dest pointer ($v0 = $a0)
@@ -61,17 +119,33 @@ void memset(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     uint32_t destAddr = getRegU32(ctx, 4);       // $a0
     int value = (int)(getRegU32(ctx, 5) & 0xFF); // $a1 (char value)
     uint32_t size = getRegU32(ctx, 6);           // $a2
+    size = sanitizeMemTransferSize(size, "memset");
 
-    uint8_t *hostDest = getMemPtr(rdram, destAddr);
-
-    if (hostDest)
+    uint32_t written = 0u;
+    uint32_t curDst = destAddr;
+    while (written < size)
     {
-        ::memset(hostDest, value, size);
-        ps2TraceGuestRangeWrite(rdram, destAddr, size, "memset", ctx);
+        uint8_t *hostDest = getMemPtr(rdram, curDst);
+        if (!hostDest)
+        {
+            break;
+        }
+
+        uint32_t chunk = size - written;
+        chunk = std::min(chunk, guestContiguousBytes(curDst));
+        if (chunk == 0u)
+        {
+            break;
+        }
+
+        ::memset(hostDest, value, chunk);
+        written += chunk;
+        curDst += chunk;
     }
-    else
+
+    if (written != 0u)
     {
-        std::cerr << "memset error: Invalid address provided." << std::endl;
+        ps2TraceGuestRangeWrite(rdram, destAddr, written, "memset", ctx);
     }
 
     // returns dest pointer ($v0 = $a0)
@@ -82,22 +156,36 @@ void memmove(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     uint32_t destAddr = getRegU32(ctx, 4); // $a0
     uint32_t srcAddr = getRegU32(ctx, 5);  // $a1
-    size_t size = getRegU32(ctx, 6);       // $a2
+    uint32_t size = getRegU32(ctx, 6);     // $a2
+    size = sanitizeMemTransferSize(size, "memmove");
 
-    uint8_t *hostDest = getMemPtr(rdram, destAddr);
-    const uint8_t *hostSrc = getConstMemPtr(rdram, srcAddr);
-
-    if (hostDest && hostSrc)
+    uint32_t copied = 0u;
+    std::vector<uint8_t> tmp;
+    tmp.reserve(size);
+    for (uint32_t i = 0u; i < size; ++i)
     {
-        ::memmove(hostDest, hostSrc, size);
-        ps2TraceGuestRangeWrite(rdram, destAddr, static_cast<uint32_t>(size), "memmove", ctx);
+        const uint8_t *src = getConstMemPtr(rdram, srcAddr + i);
+        if (!src)
+        {
+            break;
+        }
+        tmp.push_back(*src);
     }
-    else
+
+    for (uint32_t i = 0u; i < static_cast<uint32_t>(tmp.size()); ++i)
     {
-        std::cerr << "memmove error: Attempted move involving potentially invalid RDRAM address."
-                  << " Dest: 0x" << std::hex << destAddr << " (host ptr valid: " << (hostDest != nullptr) << ")"
-                  << ", Src: 0x" << srcAddr << " (host ptr valid: " << (hostSrc != nullptr) << ")" << std::dec
-                  << ", Size: " << size << std::endl;
+        uint8_t *dst = getMemPtr(rdram, destAddr + i);
+        if (!dst)
+        {
+            break;
+        }
+        *dst = tmp[i];
+        ++copied;
+    }
+
+    if (copied != 0u)
+    {
+        ps2TraceGuestRangeWrite(rdram, destAddr, copied, "memmove", ctx);
     }
 
     // returns dest pointer ($v0 = $a0)
@@ -109,25 +197,23 @@ void memcmp(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     uint32_t ptr1Addr = getRegU32(ctx, 4); // $a0
     uint32_t ptr2Addr = getRegU32(ctx, 5); // $a1
     uint32_t size = getRegU32(ctx, 6);     // $a2
-
-    const uint8_t *hostPtr1 = getConstMemPtr(rdram, ptr1Addr);
-    const uint8_t *hostPtr2 = getConstMemPtr(rdram, ptr2Addr);
+    size = sanitizeMemTransferSize(size, "memcmp");
     int result = 0;
 
-    if (hostPtr1 && hostPtr2)
+    for (uint32_t i = 0u; i < size; ++i)
     {
-        result = ::memcmp(hostPtr1, hostPtr2, size);
-    }
-    else
-    {
-        std::cerr << "memcmp error: Invalid address provided."
-                  << " Ptr1: 0x" << std::hex << ptr1Addr << " (host ptr valid: " << (hostPtr1 != nullptr) << ")"
-                  << ", Ptr2: 0x" << ptr2Addr << " (host ptr valid: " << (hostPtr2 != nullptr) << ")" << std::dec
-                  << std::endl;
-
-        result = (hostPtr1 == nullptr) - (hostPtr2 == nullptr);
-        if (result == 0)
-            result = 1; // If both null, still different? Or 0?
+        const uint8_t *lhs = getConstMemPtr(rdram, ptr1Addr + i);
+        const uint8_t *rhs = getConstMemPtr(rdram, ptr2Addr + i);
+        if (!lhs || !rhs)
+        {
+            result = (!lhs && !rhs) ? 0 : (lhs ? 1 : -1);
+            break;
+        }
+        if (*lhs != *rhs)
+        {
+            result = static_cast<int>(*lhs) - static_cast<int>(*rhs);
+            break;
+        }
     }
     setReturnS32(ctx, result);
 }
@@ -427,6 +513,7 @@ void sprintf(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     uint32_t str_addr = getRegU32(ctx, 4);    // $a0
     uint32_t format_addr = getRegU32(ctx, 5); // $a1
+    constexpr size_t kSafeSprintfBytes = 256u; // Keep guest stack temporaries from being overwritten.
 
     const std::string formatOwned = readPs2CStringBounded(rdram, runtime, format_addr, 1024);
     int ret = -1;
@@ -454,9 +541,9 @@ void sprintf(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         }
 
         std::string rendered = formatPs2StringWithArgs(rdram, ctx, runtime, formatOwned.c_str(), 2);
-        if (rendered.size() >= kMaxFormattedOutputBytes)
+        if (rendered.size() >= kSafeSprintfBytes)
         {
-            rendered.resize(kMaxFormattedOutputBytes - 1);
+            rendered.resize(kSafeSprintfBytes - 1);
         }
         const size_t writeLen = rendered.size() + 1u;
         if (writeGuestBytes(rdram, runtime, str_addr, reinterpret_cast<const uint8_t *>(rendered.c_str()), writeLen))

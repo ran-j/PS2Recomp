@@ -49,3 +49,4 @@ add_subdirectory("ps2xRuntime")
 
 add_subdirectory("ps2xAnalyzer")
 add_subdirectory("ps2xTest")
+add_subdirectory("ps2xStudio")

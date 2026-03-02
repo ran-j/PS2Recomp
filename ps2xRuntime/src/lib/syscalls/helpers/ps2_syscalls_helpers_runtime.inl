@@ -271,18 +271,66 @@ static bool readStackU32(uint8_t *rdram, uint32_t sp, uint32_t offset, uint32_t 
 static bool rpcInvokeFunction(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime,
                               uint32_t funcAddr, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t *outV0)
 {
-    if (!runtime || !funcAddr || !runtime->hasFunction(funcAddr))
+    if (!runtime || !ctx || !funcAddr || !runtime->hasFunction(funcAddr))
         return false;
+
+    constexpr uint32_t kRpcInvokeStackSize = 0x4000u;
+    constexpr uint32_t kRpcInvokeReturnSentinel = 0x00FFF000u;
+    constexpr uint32_t kRpcInvokeMaxSteps = 0x8000u;
 
     R5900Context tmp = *ctx;
     setRegU32(&tmp, 4, a0);
     setRegU32(&tmp, 5, a1);
     setRegU32(&tmp, 6, a2);
     setRegU32(&tmp, 7, a3);
+
+    thread_local uint32_t s_rpcInvokeStackBase = 0u;
+    thread_local uint32_t s_rpcInvokeStackTop = 0u;
+    if (s_rpcInvokeStackTop == 0u)
+    {
+        const uint32_t stackBase = runtime->guestMalloc(kRpcInvokeStackSize, 16u);
+        if (stackBase != 0u)
+        {
+            s_rpcInvokeStackBase = stackBase;
+            s_rpcInvokeStackTop = (stackBase + kRpcInvokeStackSize) & ~0xFu;
+        }
+    }
+    if (s_rpcInvokeStackTop != 0u)
+    {
+        setRegU32(&tmp, 29, s_rpcInvokeStackTop);
+    }
+    (void)s_rpcInvokeStackBase;
+
+    setRegU32(&tmp, 31, kRpcInvokeReturnSentinel);
     tmp.pc = funcAddr;
 
-    PS2Runtime::RecompiledFunction func = runtime->lookupFunction(funcAddr);
-    func(rdram, &tmp, runtime);
+    uint32_t steps = 0u;
+    uint32_t lastPc = 0xFFFFFFFFu;
+    uint32_t samePcCount = 0u;
+    while (tmp.pc != 0u &&
+           tmp.pc != kRpcInvokeReturnSentinel &&
+           runtime->hasFunction(tmp.pc) &&
+           steps < kRpcInvokeMaxSteps)
+    {
+        const uint32_t pc = tmp.pc;
+        if (pc == lastPc)
+        {
+            ++samePcCount;
+            if (samePcCount > 0x2000u)
+            {
+                break;
+            }
+        }
+        else
+        {
+            lastPc = pc;
+            samePcCount = 0u;
+        }
+
+        PS2Runtime::RecompiledFunction func = runtime->lookupFunction(pc);
+        func(rdram, &tmp, runtime);
+        ++steps;
+    }
 
     if (outV0)
     {

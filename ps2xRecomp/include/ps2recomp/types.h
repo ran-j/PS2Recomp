@@ -180,6 +180,7 @@ namespace ps2recomp
         std::unordered_map<uint32_t, std::string> patches;
         std::vector<std::string> stubImplementations;
         std::unordered_map<uint32_t, uint32_t> mmioByInstructionAddress;
+        std::vector<JumpTable> jumpTables;
     };
 
 } // namespace ps2recomp

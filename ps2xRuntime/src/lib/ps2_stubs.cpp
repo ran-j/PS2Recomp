@@ -1,5 +1,6 @@
 #include "ps2_stubs.h"
 #include "ps2_runtime.h"
+#include "ps2_runtime_macros.h"
 #include "ps2_syscalls.h"
 #include <iostream>
 #include <algorithm>
@@ -226,6 +227,7 @@ namespace ps2_stubs
     void TODO_NAMED(const char *name, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const std::string stubName = name ? name : "unknown";
+
         uint32_t callCount = 0;
         {
             std::lock_guard<std::mutex> lock(g_stubWarningMutex);

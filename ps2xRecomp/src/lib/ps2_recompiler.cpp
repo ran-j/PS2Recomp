@@ -285,6 +285,13 @@ namespace ps2recomp
                 return std::nullopt;
             };
 
+            auto isSimpleReturnThunkStart = [](const Instruction &inst) -> bool
+            {
+                return inst.opcode == OPCODE_SPECIAL &&
+                       inst.function == SPECIAL_JR &&
+                       inst.rs == 31;
+            };
+
             auto findContainingFunction = [&](uint32_t address) -> const Function *
             {
                 const Function *best = nullptr;
@@ -458,6 +465,16 @@ namespace ps2recomp
                         if (nextStartOpt.has_value() && nextStartOpt.value() < sliceEndAddress)
                         {
                             sliceEndAddress = nextStartOpt.value();
+                        }
+
+                        if (isSimpleReturnThunkStart(*sliceIt) &&
+                            target <= (std::numeric_limits<uint32_t>::max() - 8u))
+                        {
+                            const uint32_t returnThunkEnd = target + 8u;
+                            if (returnThunkEnd < sliceEndAddress)
+                            {
+                                sliceEndAddress = returnThunkEnd;
+                            }
                         }
 
                         if (sliceEndAddress <= target)
@@ -837,6 +854,7 @@ namespace ps2recomp
             }
             m_codeGenerator->setRelocationCallNames(relocationCallNames);
             m_codeGenerator->setBootstrapInfo(m_bootstrapInfo);
+            m_codeGenerator->setConfiguredJumpTables(m_config.jumpTables);
 
             fs::create_directories(m_config.outputPath);
 
@@ -1433,9 +1451,44 @@ namespace ps2recomp
         }
 
         std::filesystem::path outputPath = m_config.outputPath;
-        outputPath /= safeName + ".cpp";
+        outputPath /= clampFilenameLength(safeName, ".cpp", 100);
 
         return outputPath;
+    }
+
+    std::string PS2Recompiler::clampFilenameLength(const std::string& baseName, const std::string& extension, std::size_t maxLength)
+    {
+        if (maxLength == 0)
+        {
+            std::cerr << "clampFilenameLength::maxLength must be greater than 0" << std::endl;
+            //Better go over the limit than create files with an empty path
+            return baseName + extension;
+        }
+
+        if (baseName.size() + extension.size() <= maxLength)
+            return baseName + extension;
+
+        std::string namePart = baseName;
+        std::string preservedSuffix;
+
+        auto suffixPos = namePart.rfind("_0x");
+        if (suffixPos != std::string::npos)
+        {
+            preservedSuffix = namePart.substr(suffixPos);
+            namePart = namePart.substr(0, suffixPos);
+        }
+
+        std::size_t available = maxLength - extension.size() - preservedSuffix.size();
+
+        if (available == 0)
+        {
+            return preservedSuffix + extension;
+        }
+
+        if (namePart.size() > available)
+            namePart = namePart.substr(0, available);
+
+        return namePart + preservedSuffix + extension;
     }
 
     std::string PS2Recompiler::sanitizeFunctionName(const std::string &name) const
@@ -1491,5 +1544,10 @@ namespace ps2recomp
             return StubTarget::Stub;
         }
         return StubTarget::Unknown;
+    }
+
+    std::string PS2Recompiler::ClampFilenameLength(const std::string& baseName, const std::string& extension, std::size_t maxLength)
+    {
+        return clampFilenameLength(baseName, extension, maxLength);
     }
 }

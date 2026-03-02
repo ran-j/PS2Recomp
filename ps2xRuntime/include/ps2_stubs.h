@@ -14,6 +14,8 @@ namespace ps2_stubs
     #define PS2_DECLARE_TEST_HOOK(name, signature) void name signature;
     PS2_TEST_HOOK_LIST(PS2_DECLARE_TEST_HOOK)
     #undef PS2_DECLARE_TEST_HOOK
+    void resetGsSyncVCallbackState();
+    void dispatchGsSyncVCallback(uint8_t *rdram, PS2Runtime *runtime);
 
     void syMalloc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sndr_trans_func(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);

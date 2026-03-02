@@ -112,6 +112,109 @@ namespace ps2recomp
                     config.mmioByInstructionAddress[instAddr] = mmioAddr;
                 }
             }
+
+            if (data.contains("jump_tables") && data.at("jump_tables").is_table())
+            {
+                const auto &jumpTablesNode = data.at("jump_tables");
+                if (jumpTablesNode.contains("table") && jumpTablesNode.at("table").is_array())
+                {
+                    const auto &tables = jumpTablesNode.at("table").as_array();
+                    for (const auto &tableNode : tables)
+                    {
+                        if (!tableNode.is_table())
+                        {
+                            continue;
+                        }
+
+                        JumpTable table{};
+
+                        if (tableNode.contains("address"))
+                        {
+                            const auto &addressValue = tableNode.at("address");
+                            if (addressValue.is_string())
+                            {
+                                table.address = std::stoul(addressValue.as_string(), nullptr, 0);
+                            }
+                            else if (addressValue.is_integer())
+                            {
+                                table.address = static_cast<uint32_t>(addressValue.as_integer());
+                            }
+                        }
+
+                        if (tableNode.contains("base_register"))
+                        {
+                            const auto &baseRegisterValue = tableNode.at("base_register");
+                            if (baseRegisterValue.is_string())
+                            {
+                                table.baseRegister = std::stoul(baseRegisterValue.as_string(), nullptr, 0);
+                            }
+                            else if (baseRegisterValue.is_integer())
+                            {
+                                table.baseRegister = static_cast<uint32_t>(baseRegisterValue.as_integer());
+                            }
+                        }
+
+                        if (table.address == 0u || !tableNode.contains("entries") || !tableNode.at("entries").is_array())
+                        {
+                            continue;
+                        }
+
+                        const auto &entries = tableNode.at("entries").as_array();
+                        uint32_t fallbackIndex = 0u;
+                        for (const auto &entryNode : entries)
+                        {
+                            if (!entryNode.is_table())
+                            {
+                                ++fallbackIndex;
+                                continue;
+                            }
+
+                            JumpTableEntry entry{};
+                            entry.index = fallbackIndex;
+
+                            if (entryNode.contains("index"))
+                            {
+                                const auto &indexValue = entryNode.at("index");
+                                if (indexValue.is_string())
+                                {
+                                    entry.index = std::stoul(indexValue.as_string(), nullptr, 0);
+                                }
+                                else if (indexValue.is_integer())
+                                {
+                                    entry.index = static_cast<uint32_t>(indexValue.as_integer());
+                                }
+                            }
+
+                            bool hasTarget = false;
+                            if (entryNode.contains("target"))
+                            {
+                                const auto &targetValue = entryNode.at("target");
+                                if (targetValue.is_string())
+                                {
+                                    entry.target = std::stoul(targetValue.as_string(), nullptr, 0);
+                                    hasTarget = true;
+                                }
+                                else if (targetValue.is_integer())
+                                {
+                                    entry.target = static_cast<uint32_t>(targetValue.as_integer());
+                                    hasTarget = true;
+                                }
+                            }
+
+                            if (hasTarget)
+                            {
+                                table.entries.push_back(entry);
+                            }
+                            ++fallbackIndex;
+                        }
+
+                        if (!table.entries.empty())
+                        {
+                            config.jumpTables.push_back(std::move(table));
+                        }
+                    }
+                }
+            }
         }
         catch (const std::exception &e)
         {
@@ -150,6 +253,35 @@ namespace ps2recomp
                 mmioTable[keyStream.str()] = valStream.str();
             }
             data["mmio"] = mmioTable;
+        }
+
+        if (!config.jumpTables.empty())
+        {
+            toml::table jumpTables;
+            toml::array tableArray;
+            for (const auto &table : config.jumpTables)
+            {
+                toml::table tableNode;
+                std::ostringstream addressStream;
+                addressStream << "0x" << std::hex << table.address;
+                tableNode["address"] = addressStream.str();
+                tableNode["base_register"] = static_cast<int64_t>(table.baseRegister);
+
+                toml::array entries;
+                for (const auto &entry : table.entries)
+                {
+                    toml::table entryNode;
+                    entryNode["index"] = static_cast<int64_t>(entry.index);
+                    std::ostringstream targetStream;
+                    targetStream << "0x" << std::hex << entry.target;
+                    entryNode["target"] = targetStream.str();
+                    entries.push_back(entryNode);
+                }
+                tableNode["entries"] = entries;
+                tableArray.push_back(tableNode);
+            }
+            jumpTables["table"] = tableArray;
+            data["jump_tables"] = jumpTables;
         }
 
         toml::table patches;

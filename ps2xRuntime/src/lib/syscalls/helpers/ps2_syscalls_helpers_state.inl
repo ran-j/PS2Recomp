@@ -201,6 +201,8 @@ static std::unordered_map<int, std::shared_ptr<ThreadInfo>> g_threads;
 static int g_nextThreadId = 2; // Reserve 1 for the main thread
 static thread_local int g_currentThreadId = 1;
 static std::mutex g_thread_map_mutex;
+static std::unordered_map<int, std::thread> g_hostThreads;
+static std::mutex g_host_thread_mutex;
 
 static std::unordered_map<int, std::shared_ptr<SemaInfo>> g_semas;
 static int g_nextSemaId = 1;
@@ -215,6 +217,92 @@ static std::condition_variable g_alarm_cv;
 static std::once_flag g_alarm_worker_once;
 std::atomic<int> g_activeThreads{0};
 static std::mutex g_fd_mutex;
+
+static void registerHostThread(int tid, std::thread worker)
+{
+    std::thread stale;
+    {
+        std::lock_guard<std::mutex> lock(g_host_thread_mutex);
+        auto it = g_hostThreads.find(tid);
+        if (it != g_hostThreads.end())
+        {
+            stale = std::move(it->second);
+            g_hostThreads.erase(it);
+        }
+        g_hostThreads.emplace(tid, std::move(worker));
+    }
+
+    if (stale.joinable())
+    {
+        if (stale.get_id() == std::this_thread::get_id())
+        {
+            stale.detach();
+        }
+        else
+        {
+            stale.join();
+        }
+    }
+}
+
+static void joinHostThreadById(int tid)
+{
+    std::thread worker;
+    {
+        std::lock_guard<std::mutex> lock(g_host_thread_mutex);
+        auto it = g_hostThreads.find(tid);
+        if (it != g_hostThreads.end())
+        {
+            worker = std::move(it->second);
+            g_hostThreads.erase(it);
+        }
+    }
+
+    if (!worker.joinable())
+    {
+        return;
+    }
+
+    if (worker.get_id() == std::this_thread::get_id())
+    {
+        worker.detach();
+    }
+    else
+    {
+        worker.join();
+    }
+}
+
+static void joinAllHostThreads()
+{
+    std::vector<std::thread> workers;
+    {
+        std::lock_guard<std::mutex> lock(g_host_thread_mutex);
+        workers.reserve(g_hostThreads.size());
+        const std::thread::id selfId = std::this_thread::get_id();
+        for (auto it = g_hostThreads.begin(); it != g_hostThreads.end();)
+        {
+            std::thread &worker = it->second;
+            if (worker.joinable() && worker.get_id() == selfId)
+            {
+                ++it;
+                continue;
+            }
+
+            workers.push_back(std::move(worker));
+            it = g_hostThreads.erase(it);
+        }
+    }
+
+    for (auto &worker : workers)
+    {
+        if (!worker.joinable())
+        {
+            continue;
+        }
+        worker.join();
+    }
+}
 
 struct RpcServerState
 {
@@ -232,6 +320,7 @@ struct RpcClientState
 static std::unordered_map<uint32_t, RpcServerState> g_rpc_servers;
 static std::unordered_map<uint32_t, RpcClientState> g_rpc_clients;
 static std::mutex g_rpc_mutex;
+static std::recursive_mutex g_sif_call_rpc_mutex;
 static bool g_rpc_initialized = false;
 static uint32_t g_rpc_next_id = 1;
 static uint32_t g_rpc_packet_index = 0;

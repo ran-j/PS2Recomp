@@ -20,6 +20,7 @@ FetchContent_MakeAvailable(raylib)
 
 add_library(ps2_runtime STATIC
     src/lib/game_overrides.cpp
+    src/lib/ps2_gif_arbiter.cpp
     src/lib/ps2_audio.cpp
     src/lib/ps2_audio_vag.cpp
     src/lib/ps2_gs_gpu.cpp
@@ -32,6 +33,7 @@ add_library(ps2_runtime STATIC
     src/lib/ps2_stubs.cpp
     src/lib/ps2_syscalls.cpp
     src/lib/ps2_vif1_interpreter.cpp
+    src/lib/ps2_vu1.cpp
 )
 
 file(GLOB RUNNER_SRC_FILES CONFIGURE_DEPENDS
