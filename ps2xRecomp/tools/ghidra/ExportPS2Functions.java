@@ -120,6 +120,23 @@ public class ExportPS2Functions extends GhidraScript {
         return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
     }
 
+    // Ghidra on Windows can return executable paths like "/D:/path/to/elf".
+    // TOML expects "D:/path/to/elf" for this field.
+    private static String normalizeWindowsDrivePath(String value) {
+        if (value == null || value.length() < 4) {
+            return value;
+        }
+
+        if (value.charAt(0) == '/' &&
+            Character.isLetter(value.charAt(1)) &&
+            value.charAt(2) == ':' &&
+            (value.charAt(3) == '/' || value.charAt(3) == '\\')) {
+            return value.substring(1);
+        }
+
+        return value;
+    }
+
     private static String normalizeOptionalLeadingUnderscore(String value) {
         if (value == null || value.isEmpty()) {
             return "";
@@ -385,6 +402,7 @@ public class ExportPS2Functions extends GhidraScript {
         if (programPath == null) {
             programPath = "";
         }
+        programPath = normalizeWindowsDrivePath(programPath);
 
         File outputDir = tomlFile.getParentFile() == null ? new File("output") : new File(tomlFile.getParentFile(), "output");
         String ghidraCsvPath = (exportCsv && csvFile != null) ? csvFile.getAbsolutePath() : "";
