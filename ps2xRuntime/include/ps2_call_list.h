@@ -107,6 +107,7 @@
     X(GsPutIMR)               \
     X(iGsPutIMR)              \
     X(SetVSyncFlag)           \
+    X(SetSyscall)             \
     X(GsSetVideoMode)         \
                               \
     X(GetOsdConfigParam)      \

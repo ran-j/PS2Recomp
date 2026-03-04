@@ -411,6 +411,9 @@ struct ExitHandlerEntry
 static std::mutex g_exit_handler_mutex;
 static std::unordered_map<int, std::vector<ExitHandlerEntry>> g_exit_handlers;
 
+static std::mutex g_syscall_override_mutex;
+static std::unordered_map<uint32_t, uint32_t> g_syscall_overrides;
+
 static std::mutex g_bootmode_mutex;
 static bool g_bootmode_initialized = false;
 static uint32_t g_bootmode_pool_offset = 0;
