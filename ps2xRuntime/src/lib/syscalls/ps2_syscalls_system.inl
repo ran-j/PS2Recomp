@@ -355,6 +355,59 @@ void GetMemorySize(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     setReturnU32(ctx, PS2_RAM_SIZE);
 }
 
+static inline uint32_t normalizeKernelAlias(uint32_t addr)
+{
+    if (addr >= 0x80000000u && addr < 0xC0000000u)
+    {
+        return addr & 0x1FFFFFFFu;
+    }
+    return addr;
+}
+
+// 0x83 FindAddress:
+// - a0: table start (inclusive)
+// - a1: table end (exclusive)
+// - a2: target address to locate inside the table (word entries)
+// Returns the guest address of the matching word entry, or 0 if not found.
+void FindAddress(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    (void)runtime;
+
+    uint32_t start = getRegU32(ctx, 4);
+    uint32_t end = getRegU32(ctx, 5);
+    const uint32_t target = getRegU32(ctx, 6);
+    const uint32_t targetNorm = normalizeKernelAlias(target);
+
+    // Word-scan semantics: align the search window to uint32 boundaries.
+    start = (start + 3u) & ~0x3u;
+    end &= ~0x3u;
+
+    if (start >= end)
+    {
+        setReturnU32(ctx, 0u);
+        return;
+    }
+
+    for (uint32_t addr = start; addr < end; addr += sizeof(uint32_t))
+    {
+        const uint8_t *entryPtr = getConstMemPtr(rdram, addr);
+        if (!entryPtr)
+        {
+            break;
+        }
+
+        uint32_t entry = 0;
+        std::memcpy(&entry, entryPtr, sizeof(entry));
+        if (entry == target || normalizeKernelAlias(entry) == targetNorm)
+        {
+            setReturnU32(ctx, addr);
+            return;
+        }
+    }
+
+    setReturnU32(ctx, 0u);
+}
+
 void Deci2Call(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     (void)rdram;

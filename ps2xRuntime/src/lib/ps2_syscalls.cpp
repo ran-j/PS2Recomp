@@ -286,6 +286,9 @@ namespace ps2_syscalls
         case static_cast<uint32_t>(-0x78):
             ps2_stubs::sceSifSetDChain(rdram, ctx, runtime);
             return true;
+        case 0x83:
+            FindAddress(rdram, ctx, runtime);
+            return true;
         case 0x85:
             SetMemoryMode(rdram, ctx, runtime);
             return true;
