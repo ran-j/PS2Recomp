@@ -403,6 +403,10 @@ void register_ps2_runtime_kernel_tests()
             constexpr uint32_t kHookAddr = 0x00250000u;
             constexpr uint32_t kTargetSyscall = 0x70u; // GsGetIMR
 
+            t.IsTrue(callSyscall(kTargetSyscall, env.rdram.data(), &env.ctx, &env.runtime),
+                     "baseline syscall dispatch should succeed");
+            const uint32_t baselineImr = static_cast<uint32_t>(getRegS32(env.ctx, 2));
+
             g_setSyscallHookCalls = 0u;
             env.runtime.registerFunction(kHookAddr, testSetSyscallHook);
 
@@ -428,8 +432,8 @@ void register_ps2_runtime_kernel_tests()
             t.IsTrue(callSyscall(kTargetSyscall, env.rdram.data(), &env.ctx, &env.runtime),
                      "target syscall should fall back to built-in handler after clear");
             t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)),
-                     0u,
-                     "GsGetIMR default path should return zero in a fresh runtime");
+                     baselineImr,
+                     "GsGetIMR value after clear should match baseline built-in behavior");
             t.Equals(g_setSyscallHookCalls, 1u, "override handler should not run after clear");
         });
 
@@ -437,6 +441,10 @@ void register_ps2_runtime_kernel_tests()
         {
             TestEnv env;
             constexpr uint32_t kTargetSyscall = 0x70u; // GsGetIMR
+
+            t.IsTrue(callSyscall(kTargetSyscall, env.rdram.data(), &env.ctx, &env.runtime),
+                     "baseline syscall dispatch should succeed");
+            const uint32_t baselineImr = static_cast<uint32_t>(getRegS32(env.ctx, 2));
 
             setRegU32(env.ctx, 4, kTargetSyscall);
             setRegU32(env.ctx, 5, 0x00ABCDEFu); // not registered in runtime
@@ -446,8 +454,8 @@ void register_ps2_runtime_kernel_tests()
             t.IsTrue(callSyscall(kTargetSyscall, env.rdram.data(), &env.ctx, &env.runtime),
                      "dispatch should fall back to built-in syscall when override cannot be invoked");
             t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)),
-                     0u,
-                     "fallback GsGetIMR path should return zero");
+                     baselineImr,
+                     "fallback GsGetIMR result should match baseline built-in behavior");
         });
     });
 }
