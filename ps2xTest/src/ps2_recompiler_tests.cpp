@@ -6,6 +6,7 @@
 #include "ps2recomp/types.h"
 #include <elfio/elfio.hpp>
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -114,6 +115,41 @@ static bool writeMinimalMipsElfWithCodeAndDataFunctionSymbols(const std::filesys
     dataSegment->set_flags(ELFIO::PF_R | ELFIO::PF_W);
     dataSegment->set_align(0x1000);
     dataSegment->add_section_index(data->get_index(), data->get_addr_align());
+
+    return writer.save(elfPath.string());
+}
+
+static bool writeMinimalMipsElfWithJalFallbackTarget(const std::filesystem::path &elfPath)
+{
+    ELFIO::elfio writer;
+    writer.create(ELFIO::ELFCLASS32, ELFIO::ELFDATA2LSB);
+    writer.set_os_abi(ELFIO::ELFOSABI_NONE);
+    writer.set_type(ELFIO::ET_EXEC);
+    writer.set_machine(ELFIO::EM_MIPS);
+    writer.set_entry(0x00100000u);
+
+    ELFIO::section *text = writer.sections.add(".text");
+    text->set_type(ELFIO::SHT_PROGBITS);
+    text->set_flags(ELFIO::SHF_ALLOC | ELFIO::SHF_EXECINSTR);
+    text->set_addr_align(4);
+    text->set_address(0x00100000u);
+
+    const std::array<uint32_t, 6> textWords = {
+        0x0C040004u, // jal 0x00100010
+        0x00000000u, // nop
+        0x03E00008u, // jr $ra
+        0x00000000u, // nop
+        0x03E00008u, // jr $ra
+        0x00000000u  // nop
+    };
+    text->set_data(reinterpret_cast<const char *>(textWords.data()),
+                   static_cast<ELFIO::Elf_Word>(textWords.size() * sizeof(uint32_t)));
+
+    ELFIO::segment *textSegment = writer.segments.add();
+    textSegment->set_type(ELFIO::PT_LOAD);
+    textSegment->set_flags(ELFIO::PF_R | ELFIO::PF_X);
+    textSegment->set_align(0x1000);
+    textSegment->add_section_index(text->get_index(), text->get_addr_align());
 
     return writer.save(elfPath.string());
 }
@@ -513,6 +549,77 @@ void register_ps2_recompiler_tests()
 
             std::error_code removeError;
             std::filesystem::remove(elfPath, removeError);
+        });
+
+        tc.Run("ghidra map replaces JAL fallback-only auto starts", [](TestCase &t) {
+            const auto uniqueSuffix = std::to_string(
+                static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+            const std::filesystem::path elfPath =
+                std::filesystem::temp_directory_path() / ("ps2recomp-ghidra-merge-" + uniqueSuffix + ".elf");
+            const std::filesystem::path mapPath =
+                std::filesystem::temp_directory_path() / ("ps2recomp-ghidra-merge-" + uniqueSuffix + ".csv");
+
+            const bool writeOk = writeMinimalMipsElfWithJalFallbackTarget(elfPath);
+            t.IsTrue(writeOk, "temporary ELF should be generated");
+            if (!writeOk)
+            {
+                return;
+            }
+
+            ElfParser parser(elfPath.string());
+            const bool parseOk = parser.parse();
+            t.IsTrue(parseOk, "generated ELF should parse");
+            if (!parseOk)
+            {
+                std::error_code removeError;
+                std::filesystem::remove(elfPath, removeError);
+                return;
+            }
+
+            const auto fallbackExtras = parser.extractExtraFunctions();
+            const bool hasFallbackStart = std::any_of(
+                fallbackExtras.begin(), fallbackExtras.end(),
+                [](const Function &fn)
+                { return fn.start == 0x00100010u; });
+            t.IsTrue(hasFallbackStart, "JAL fallback should discover secondary start before map load");
+
+            std::ofstream mapFile(mapPath);
+            t.IsTrue(static_cast<bool>(mapFile), "ghidra map file should be writable");
+            if (!mapFile)
+            {
+                std::error_code removeError;
+                std::filesystem::remove(elfPath, removeError);
+                return;
+            }
+            mapFile << "name,start,end,size\n";
+            mapFile << "FUN_00100000,0x00100000,0x00100010,0x10\n";
+            mapFile.close();
+
+            const bool mapLoaded = parser.loadGhidraFunctionMap(mapPath.string());
+            t.IsTrue(mapLoaded, "ghidra map should load");
+
+            const auto functions = parser.extractFunctions();
+            const auto entryIt = std::find_if(
+                functions.begin(), functions.end(),
+                [](const Function &fn)
+                { return fn.start == 0x00100000u; });
+            t.IsTrue(entryIt != functions.end(), "ghidra entry should exist");
+            if (entryIt != functions.end())
+            {
+                t.Equals(entryIt->name, std::string("FUN_00100000"),
+                         "ghidra name should win over fallback auto-name");
+            }
+
+            const bool stillHasFallbackOnlyStart = std::any_of(
+                functions.begin(), functions.end(),
+                [](const Function &fn)
+                { return fn.start == 0x00100010u; });
+            t.IsFalse(stillHasFallbackOnlyStart,
+                      "fallback-only function starts should be removed once ghidra map is loaded");
+
+            std::error_code removeError;
+            std::filesystem::remove(elfPath, removeError);
+            std::filesystem::remove(mapPath, removeError);
         });
 
         tc.Run("respect max length for .cpp filenames", [](TestCase& t) {

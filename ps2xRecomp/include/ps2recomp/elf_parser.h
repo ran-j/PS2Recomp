@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <unordered_set>
 
 namespace ps2recomp
 {
@@ -45,6 +46,8 @@ namespace ps2recomp
                 std::vector<Symbol> m_symbols;
                 std::vector<Relocation> m_relocations;
                 std::vector<Function> m_extraFunctions;
+                bool m_hasLoadedGhidraMap = false;
+                std::unordered_set<uint32_t> m_ghidraMapStarts;
 
                 void loadSections();
                 void loadSymbols();
