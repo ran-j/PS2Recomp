@@ -93,6 +93,16 @@ namespace
             std::memset(&ctx, 0, sizeof(ctx));
         }
     };
+
+    static uint32_t g_setSyscallHookCalls = 0u;
+    void testSetSyscallHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        (void)runtime;
+        ++g_setSyscallHookCalls;
+        setReturnU32(ctx, 0xCAFEBABEu);
+        ctx->pc = getRegU32(ctx, 31);
+    }
 }
 
 void register_ps2_runtime_kernel_tests()
@@ -385,6 +395,67 @@ void register_ps2_runtime_kernel_tests()
             t.IsTrue(callSyscall(0x3Cu, env.rdram.data(), &env.ctx, &env.runtime), "SetupThread syscall should dispatch");
             const uint32_t setupSp = static_cast<uint32_t>(getRegS32(env.ctx, 2));
             t.Equals(setupSp & 0xFu, 0u, "SetupThread should always return a 16-byte aligned stack pointer");
+        });
+
+        tc.Run("SetSyscall overrides and clears numeric syscall handlers", [](TestCase &t)
+        {
+            TestEnv env;
+            constexpr uint32_t kHookAddr = 0x00250000u;
+            constexpr uint32_t kTargetSyscall = 0x70u; // GsGetIMR
+
+            t.IsTrue(callSyscall(kTargetSyscall, env.rdram.data(), &env.ctx, &env.runtime),
+                     "baseline syscall dispatch should succeed");
+            const uint32_t baselineImr = static_cast<uint32_t>(getRegS32(env.ctx, 2));
+
+            g_setSyscallHookCalls = 0u;
+            env.runtime.registerFunction(kHookAddr, testSetSyscallHook);
+
+            setRegU32(env.ctx, 4, kTargetSyscall);
+            setRegU32(env.ctx, 5, kHookAddr);
+            t.IsTrue(callSyscall(0x74u, env.rdram.data(), &env.ctx, &env.runtime),
+                     "SetSyscall should dispatch");
+            t.Equals(getRegS32(env.ctx, 2), 0, "SetSyscall should report success");
+
+            setRegU32(env.ctx, 4, 0x12345678u);
+            t.IsTrue(callSyscall(kTargetSyscall, env.rdram.data(), &env.ctx, &env.runtime),
+                     "target syscall should dispatch through override");
+            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)),
+                     0xCAFEBABEu,
+                     "override handler return value should be visible in v0");
+            t.Equals(g_setSyscallHookCalls, 1u, "override handler should execute once");
+
+            setRegU32(env.ctx, 4, kTargetSyscall);
+            setRegU32(env.ctx, 5, 0u);
+            t.IsTrue(callSyscall(0x74u, env.rdram.data(), &env.ctx, &env.runtime),
+                     "SetSyscall clear should dispatch");
+
+            t.IsTrue(callSyscall(kTargetSyscall, env.rdram.data(), &env.ctx, &env.runtime),
+                     "target syscall should fall back to built-in handler after clear");
+            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)),
+                     baselineImr,
+                     "GsGetIMR value after clear should match baseline built-in behavior");
+            t.Equals(g_setSyscallHookCalls, 1u, "override handler should not run after clear");
+        });
+
+        tc.Run("SetSyscall falls back to built-in handler when override target is missing", [](TestCase &t)
+        {
+            TestEnv env;
+            constexpr uint32_t kTargetSyscall = 0x70u; // GsGetIMR
+
+            t.IsTrue(callSyscall(kTargetSyscall, env.rdram.data(), &env.ctx, &env.runtime),
+                     "baseline syscall dispatch should succeed");
+            const uint32_t baselineImr = static_cast<uint32_t>(getRegS32(env.ctx, 2));
+
+            setRegU32(env.ctx, 4, kTargetSyscall);
+            setRegU32(env.ctx, 5, 0x00ABCDEFu); // not registered in runtime
+            t.IsTrue(callSyscall(0x74u, env.rdram.data(), &env.ctx, &env.runtime),
+                     "SetSyscall should dispatch even for unknown handler address");
+
+            t.IsTrue(callSyscall(kTargetSyscall, env.rdram.data(), &env.ctx, &env.runtime),
+                     "dispatch should fall back to built-in syscall when override cannot be invoked");
+            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)),
+                     baselineImr,
+                     "fallback GsGetIMR result should match baseline built-in behavior");
         });
     });
 }

@@ -264,6 +264,66 @@ void TODO(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t encod
     setReturnS32(ctx, 0);
 }
 
+static bool dispatchSyscallOverride(uint32_t syscallNumber, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    uint32_t handler = 0u;
+    {
+        std::lock_guard<std::mutex> lock(g_syscall_override_mutex);
+        auto it = g_syscall_overrides.find(syscallNumber);
+        if (it == g_syscall_overrides.end())
+        {
+            return false;
+        }
+        handler = it->second;
+    }
+
+    if (!runtime || !ctx || handler == 0u)
+    {
+        return false;
+    }
+
+    uint32_t retV0 = 0u;
+    const bool invoked = rpcInvokeFunction(rdram,
+                                           ctx,
+                                           runtime,
+                                           handler,
+                                           getRegU32(ctx, 4),
+                                           getRegU32(ctx, 5),
+                                           getRegU32(ctx, 6),
+                                           getRegU32(ctx, 7),
+                                           &retV0);
+    if (!invoked)
+    {
+        return false;
+    }
+
+    setReturnU32(ctx, retV0);
+    return true;
+}
+
+// 0x74 SetSyscall: replaces the handler for a numeric syscall index.
+void SetSyscall(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    (void)rdram;
+    (void)runtime;
+    const uint32_t syscallIndex = getRegU32(ctx, 4);
+    const uint32_t handler = getRegU32(ctx, 5);
+
+    {
+        std::lock_guard<std::mutex> lock(g_syscall_override_mutex);
+        if (handler == 0u)
+        {
+            g_syscall_overrides.erase(syscallIndex);
+        }
+        else
+        {
+            g_syscall_overrides[syscallIndex] = handler;
+        }
+    }
+
+    setReturnS32(ctx, 0);
+}
+
 // 0x3C SetupThread
 // args: $a0 = gp, $a1 = stack, $a2 = stack_size, $a3 = args, $t0 = root_func
 void SetupThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -395,7 +455,7 @@ void GetThreadTLS(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     setReturnU32(ctx, info->tlsBase);
 }
 
-// 0x74 RegisterExitHandler (stub): return 0
+// Legacy helper used by some code paths; not currently bound to a numeric syscall.
 void RegisterExitHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     uint32_t func = getRegU32(ctx, 4);

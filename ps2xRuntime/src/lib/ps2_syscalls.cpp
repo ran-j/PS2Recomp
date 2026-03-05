@@ -42,6 +42,11 @@ namespace ps2_syscalls
 
     bool dispatchNumericSyscall(uint32_t syscallNumber, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        if (dispatchSyscallOverride(syscallNumber, rdram, ctx, runtime))
+        {
+            return true;
+        }
+
         switch (syscallNumber)
         {
         case 0x01:
@@ -272,7 +277,7 @@ namespace ps2_syscalls
             SetVSyncFlag(rdram, ctx, runtime);
             return true;
         case 0x74:
-            RegisterExitHandler(rdram, ctx, runtime);
+            SetSyscall(rdram, ctx, runtime);
             return true;
         case 0x76:
         case static_cast<uint32_t>(-0x76):
@@ -388,5 +393,14 @@ namespace ps2_syscalls
             g_alarms.clear();
         }
         g_alarm_cv.notify_all();
+
+        {
+            std::lock_guard<std::mutex> lock(g_exit_handler_mutex);
+            g_exit_handlers.clear();
+        }
+        {
+            std::lock_guard<std::mutex> lock(g_syscall_override_mutex);
+            g_syscall_overrides.clear();
+        }
     }
 }
