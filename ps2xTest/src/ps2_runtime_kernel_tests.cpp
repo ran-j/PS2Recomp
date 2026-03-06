@@ -386,5 +386,72 @@ void register_ps2_runtime_kernel_tests()
             const uint32_t setupSp = static_cast<uint32_t>(getRegS32(env.ctx, 2));
             t.Equals(setupSp & 0xFu, 0u, "SetupThread should always return a 16-byte aligned stack pointer");
         });
+
+        tc.Run("numeric syscall 0x83 finds matching table entry", [](TestCase &t)
+        {
+            TestEnv env;
+            constexpr uint32_t kTableBase = 0x00002000u;
+            constexpr uint32_t kValues[] = {
+                0x11111111u,
+                0x11223344u,
+                0x55555555u,
+                0x89ABCDEFu
+            };
+
+            writeGuestWords(env.rdram.data(), kTableBase, kValues, std::size(kValues));
+            setRegU32(env.ctx, 4, kTableBase);
+            setRegU32(env.ctx, 5, kTableBase + static_cast<uint32_t>(sizeof(kValues)));
+            setRegU32(env.ctx, 6, 0x11223344u);
+
+            t.IsTrue(callSyscall(0x83u, env.rdram.data(), &env.ctx, &env.runtime),
+                     "syscall 0x83 should dispatch");
+            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)),
+                     kTableBase + 4u,
+                     "FindAddress should return address of first matching word");
+        });
+
+        tc.Run("numeric syscall 0x83 supports KSEG aliases", [](TestCase &t)
+        {
+            TestEnv env;
+            constexpr uint32_t kTableBasePhys = 0x00003000u;
+            constexpr uint32_t kTableBaseKseg = 0x80003000u;
+            constexpr uint32_t kValues[] = {
+                0x00123456u,
+                0x8000AAAAu
+            };
+
+            writeGuestWords(env.rdram.data(), kTableBasePhys, kValues, std::size(kValues));
+            setRegU32(env.ctx, 4, kTableBaseKseg);
+            setRegU32(env.ctx, 5, kTableBaseKseg + static_cast<uint32_t>(sizeof(kValues)));
+            setRegU32(env.ctx, 6, 0x80123456u); // Alias of first table value
+
+            t.IsTrue(callSyscall(0x83u, env.rdram.data(), &env.ctx, &env.runtime),
+                     "syscall 0x83 should dispatch");
+            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)),
+                     kTableBaseKseg,
+                     "FindAddress should match KSEG aliases and preserve guest segment in return value");
+        });
+
+        tc.Run("numeric syscall 0x83 returns 0 when entry is absent", [](TestCase &t)
+        {
+            TestEnv env;
+            constexpr uint32_t kTableBase = 0x00004000u;
+            constexpr uint32_t kValues[] = {
+                0x00000001u,
+                0x00000002u,
+                0x00000003u
+            };
+
+            writeGuestWords(env.rdram.data(), kTableBase, kValues, std::size(kValues));
+            setRegU32(env.ctx, 4, kTableBase);
+            setRegU32(env.ctx, 5, kTableBase + static_cast<uint32_t>(sizeof(kValues)));
+            setRegU32(env.ctx, 6, 0xDEADBEEFu);
+
+            t.IsTrue(callSyscall(0x83u, env.rdram.data(), &env.ctx, &env.runtime),
+                     "syscall 0x83 should dispatch");
+            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)),
+                     0u,
+                     "FindAddress should return 0 when no matching word exists");
+        });
     });
 }
