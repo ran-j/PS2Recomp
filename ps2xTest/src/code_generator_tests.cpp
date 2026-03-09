@@ -757,6 +757,35 @@ void register_code_generator_tests()
             t.IsTrue(generated.find("if (ctx->pc != 0xA008u) { return; }") != std::string::npos, "JAL should check return PC");
         });
 
+        tc.Run("trailing JAL without decoded delay slot still emits call flow", [](TestCase &t) {
+            Function func;
+            func.name = "jal_truncated";
+            func.start = 0xA100;
+            func.end = 0xA108;
+            func.isRecompiled = true;
+            func.isStub = false;
+
+            Symbol targetSym;
+            targetSym.name = "some_func";
+            targetSym.address = 0xB000;
+            targetSym.isFunction = true;
+
+            Instruction jal = makeJal(0xA100, 0xB000);
+
+            CodeGenerator gen({targetSym}, {});
+            std::string generated = gen.generateFunction(func, {jal}, false);
+            printGeneratedCode("trailing JAL without decoded delay slot still emits call flow", generated);
+
+            t.IsTrue(generated.find("SET_GPR_U32(ctx, 31, 0xA108u);") != std::string::npos,
+                     "truncated trailing JAL should still set RA");
+            t.IsTrue(generated.find("some_func(rdram, ctx, runtime);") != std::string::npos,
+                     "truncated trailing JAL should still emit the call");
+            t.IsTrue(generated.find("if (ctx->pc != 0xA108u) { return; }") != std::string::npos,
+                     "truncated trailing JAL should still enforce fallthrough");
+            t.IsTrue(generated.find("// JAL 0xB000 - Handled by branch logic") == std::string::npos,
+                     "truncated trailing JAL must not degrade to comment-only output");
+        });
+
         tc.Run("JAL to internal target becomes goto", [](TestCase &t) {
             Function func;
             func.name = "jal_internal";
@@ -898,6 +927,34 @@ void register_code_generator_tests()
 
             t.IsTrue(generated.find("switch (jumpTarget)") != std::string::npos, "JR $31 should emit switch for internal targets");
             t.IsTrue(generated.find("case 0x1308u: goto label_1308;") != std::string::npos, "switch should include return address from internal JAL");
+        });
+
+        tc.Run("trailing JR $31 without decoded delay slot still emits return flow", [](TestCase &t) {
+            Function func;
+            func.name = "jr_ra_truncated";
+            func.start = 0x1500;
+            func.end = 0x1540;
+            func.isRecompiled = true;
+            func.isStub = false;
+
+            Instruction jal = makeJal(0x1500, 0x1510);
+            Instruction jalDelay = makeNop(0x1504);
+            Instruction atReturn = makeNop(0x1508);
+            Instruction atTarget = makeNop(0x1510);
+            Instruction jr = makeJr(0x1514, 31);
+
+            CodeGenerator gen({}, {});
+            std::string generated = gen.generateFunction(func, {jal, jalDelay, atReturn, atTarget, jr}, false);
+            printGeneratedCode("trailing JR $31 without decoded delay slot still emits return flow", generated);
+
+            t.IsTrue(generated.find("uint32_t jumpTarget = GPR_U32(ctx, 31);") != std::string::npos,
+                     "truncated trailing JR should still read the return target");
+            t.IsTrue(generated.find("switch (jumpTarget)") != std::string::npos,
+                     "truncated trailing JR should still emit the return-target switch");
+            t.IsTrue(generated.find("case 0x1508u: goto label_1508;") != std::string::npos,
+                     "truncated trailing JR should still include internal return targets");
+            t.IsTrue(generated.find("// JR $31 - Handled by branch logic") == std::string::npos,
+                     "truncated trailing JR must not degrade to comment-only output");
         });
 
         tc.Run("JR non-RA emits switch for in-function jump targets", [](TestCase &t) {
@@ -1098,6 +1155,35 @@ void register_code_generator_tests()
                      "jalr fallback should not dispatch directly to epilogue tail-jump block");
             t.IsTrue(generated.find("case 0x2018u: goto label_2018;") == std::string::npos,
                      "jalr fallback should not dispatch directly to tail-jump delay slot");
+        });
+
+        tc.Run("VU random helpers emit line comments on separate lines", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+
+            Instruction inst{};
+            inst.rd = 7;
+            inst.vectorInfo.fsf = 2;
+
+            std::string vrnext = gen.translateVU_VRNEXT(inst);
+            printGeneratedCode("VU random helpers emit line comments on separate lines - VRNEXT", vrnext);
+            t.IsTrue(vrnext.find("// Simple LFSR-based random number generation (PS2-like behavior)\n"
+                                 "    uint32_t feedback") != std::string::npos,
+                     "VRNEXT should place the generated line comment on its own line");
+
+            std::string vrinit = gen.translateVU_VRINIT(inst);
+            printGeneratedCode("VU random helpers emit line comments on separate lines - VRINIT", vrinit);
+            t.IsTrue(vrinit.find("// PS2 uses a specific LFSR initialization pattern\n"
+                                 "    if (seed == 0) seed = 1;") != std::string::npos,
+                     "VRINIT should place the generated line comment on its own line");
+
+            std::string vrxor = gen.translateVU_VRXOR(inst);
+            printGeneratedCode("VU random helpers emit line comments on separate lines - VRXOR", vrxor);
+            t.IsTrue(vrxor.find("// XOR the current random value with the data from the VU vector register\n"
+                                "    __m128i xored") != std::string::npos,
+                     "VRXOR should keep the XOR comment on its own line");
+            t.IsTrue(vrxor.find("// Apply a simple mixing function similar to PS2's LFSR\n"
+                                "    __m128i mixed") != std::string::npos,
+                     "VRXOR should keep the LFSR comment on its own line");
         });
 
         tc.Run("resolveStubTarget allows leading underscore alias", [](TestCase &t) {

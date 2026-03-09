@@ -22,6 +22,8 @@ namespace ps2_syscalls
 #undef PS2_DECLARE_SYSCALL
 
     bool dispatchNumericSyscall(uint32_t syscallNumber, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void dispatchDmacHandlersForCause(uint8_t *rdram, PS2Runtime *runtime, uint32_t cause);
+    void initializeGuestKernelState(uint8_t *rdram);
     void TODO(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t encodedSyscallId);
     void notifyRuntimeStop();
     void WaitVSyncTick(uint8_t *rdram, PS2Runtime *runtime);

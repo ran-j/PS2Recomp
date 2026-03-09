@@ -1,11 +1,17 @@
 #include "MiniTest.h"
 #include "ps2_runtime.h"
+#include "ps2_syscalls.h"
 #include "ps2_stubs.h"
 
 #include <array>
 #include <cstdint>
 #include <cstring>
 #include <vector>
+
+namespace ps2_stubs
+{
+    void resetSifState();
+}
 
 namespace
 {
@@ -17,6 +23,7 @@ namespace
 
         TestEnv() : rdram(PS2_RAM_SIZE, 0u)
         {
+            ps2_stubs::resetSifState();
             std::memset(&ctx, 0, sizeof(ctx));
         }
     };
@@ -71,6 +78,23 @@ namespace
         std::memcpy(&value, rdram + addr, sizeof(value));
         return value;
     }
+
+    uint32_t g_dmacHandlerWriteAddr = 0u;
+    uint32_t g_dmacHandlerValue = 0u;
+    uint32_t g_dmacHandlerLastCause = 0u;
+    uint32_t g_dmacHandlerLastArg = 0u;
+
+    void testDmacHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)runtime;
+        g_dmacHandlerLastCause = ::getRegU32(ctx, 4);
+        g_dmacHandlerLastArg = ::getRegU32(ctx, 5);
+        if (g_dmacHandlerWriteAddr != 0u)
+        {
+            writeGuestU32(rdram, g_dmacHandlerWriteAddr, g_dmacHandlerValue);
+        }
+        ctx->pc = 0u;
+    }
 }
 
 void register_ps2_sif_dma_tests()
@@ -112,6 +136,103 @@ void register_ps2_sif_dma_tests()
             setRegU32(env.ctx, 4, static_cast<uint32_t>(dmaId));
             ps2_stubs::sceSifDmaStat(env.rdram.data(), &env.ctx, &env.runtime);
             t.IsTrue(getRegS32(env.ctx, 2) < 0, "sceSifDmaStat should be negative when transfer is complete");
+        });
+
+        tc.Run("sceSifSetDma dispatches enabled DMAC handlers for cause 5", [](TestCase &t)
+        {
+            TestEnv env;
+
+            constexpr uint32_t kDescAddr = 0x00020300u;
+            constexpr uint32_t kSrcAddr = 0x00020400u;
+            constexpr uint32_t kDstAddr = 0x00020500u;
+            constexpr uint32_t kHandlerAddr = 0x00100000u;
+            constexpr uint32_t kHandlerWriteAddr = 0x00020600u;
+            constexpr uint32_t kHandlerArg = 0x12345678u;
+
+            g_dmacHandlerWriteAddr = kHandlerWriteAddr;
+            g_dmacHandlerValue = 0xCAFEBABEu;
+            g_dmacHandlerLastCause = 0u;
+            g_dmacHandlerLastArg = 0u;
+            env.runtime.registerFunction(kHandlerAddr, &testDmacHandler);
+
+            setRegU32(env.ctx, 4, 5u);
+            setRegU32(env.ctx, 5, kHandlerAddr);
+            setRegU32(env.ctx, 6, 0u);
+            setRegU32(env.ctx, 7, kHandlerArg);
+            ps2_syscalls::AddDmacHandler(env.rdram.data(), &env.ctx, &env.runtime);
+            const int32_t handlerId = getRegS32(env.ctx, 2);
+            t.IsTrue(handlerId > 0, "AddDmacHandler should register a handler");
+
+            setRegU32(env.ctx, 4, 5u);
+            ps2_syscalls::EnableDmac(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), 0, "EnableDmac should succeed");
+
+            std::array<uint8_t, 16> payload{};
+            for (size_t i = 0; i < payload.size(); ++i)
+            {
+                payload[i] = static_cast<uint8_t>(0x40u + i);
+            }
+            std::memcpy(env.rdram.data() + kSrcAddr, payload.data(), payload.size());
+
+            const Ps2SifDmaTransfer desc{
+                kSrcAddr,
+                kDstAddr,
+                static_cast<int32_t>(payload.size()),
+                0};
+            std::memcpy(env.rdram.data() + kDescAddr, &desc, sizeof(desc));
+
+            setRegU32(env.ctx, 4, kDescAddr);
+            setRegU32(env.ctx, 5, 1u);
+            ps2_stubs::sceSifSetDma(env.rdram.data(), &env.ctx, &env.runtime);
+
+            t.IsTrue(getRegS32(env.ctx, 2) > 0, "sceSifSetDma should still report success");
+            t.Equals(readGuestU32(env.rdram.data(), kHandlerWriteAddr), g_dmacHandlerValue,
+                     "sceSifSetDma should invoke registered DMAC handlers");
+            t.Equals(g_dmacHandlerLastCause, 5u, "DMAC handler should observe cause 5");
+            t.Equals(g_dmacHandlerLastArg, kHandlerArg, "DMAC handler should receive registered argument");
+        });
+
+        tc.Run("resetSifState seeds boot-ready SIF registers", [](TestCase &t)
+        {
+            TestEnv env;
+
+            auto getReg = [&](uint32_t reg) -> uint32_t
+            {
+                setRegU32(env.ctx, 4, reg);
+                ps2_stubs::sceSifGetReg(env.rdram.data(), &env.ctx, &env.runtime);
+                return ::getRegU32(&env.ctx, 2);
+            };
+
+            t.Equals(getReg(0x4u), 0x00020000u, "SIF boot status register should expose ready bit by default");
+            t.Equals(getReg(0x80000000u), 0u, "SIF main-address register should default to zero");
+            t.Equals(getReg(0x80000001u), 0u, "SIF sub-address register should default to zero");
+            t.Equals(getReg(0x80000002u), 0u, "SIF mscom register should default to zero");
+        });
+
+        tc.Run("sceSifExitCmd restores default boot-ready SIF registers", [](TestCase &t)
+        {
+            TestEnv env;
+
+            setRegU32(env.ctx, 4, 0x4u);
+            setRegU32(env.ctx, 5, 0x12340000u);
+            ps2_stubs::sceSifSetReg(env.rdram.data(), &env.ctx, &env.runtime);
+
+            setRegU32(env.ctx, 4, 0x80000002u);
+            setRegU32(env.ctx, 5, 0x89ABCDEFu);
+            ps2_stubs::sceSifSetReg(env.rdram.data(), &env.ctx, &env.runtime);
+
+            ps2_stubs::sceSifExitCmd(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), 0, "sceSifExitCmd should succeed");
+
+            auto getReg = [&](uint32_t reg) -> uint32_t
+            {
+                setRegU32(env.ctx, 4, reg);
+                ps2_stubs::sceSifGetReg(env.rdram.data(), &env.ctx, &env.runtime);
+                return ::getRegU32(&env.ctx, 2);
+            };
+
+            t.Equals(getReg(0x4u), 0x00020000u, "sceSifExitCmd should restore the boot-ready status bit");
+            t.Equals(getReg(0x80000002u), 0u, "sceSifExitCmd should clear transient mscom state");
         });
 
         tc.Run("sceSifSetDma rejects invalid descriptors without partial writes", [](TestCase &t)

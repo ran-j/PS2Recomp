@@ -2,10 +2,21 @@
 // @category PS2Recomp
 
 import ghidra.app.script.GhidraScript;
+import ghidra.program.model.address.Address;
+import ghidra.program.model.address.AddressSet;
 import ghidra.program.model.address.AddressSetView;
+import ghidra.program.model.listing.Instruction;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.FunctionIterator;
 import ghidra.program.model.listing.FunctionManager;
+import ghidra.program.model.listing.InstructionIterator;
+import ghidra.program.model.mem.MemoryBlock;
+import ghidra.program.model.symbol.Reference;
+import ghidra.program.model.symbol.ReferenceIterator;
+import ghidra.program.model.symbol.RefType;
+import ghidra.program.model.symbol.Symbol;
+import ghidra.program.model.symbol.SymbolIterator;
+import ghidra.program.model.symbol.SymbolType;
 
 import java.io.File;
 import java.io.PrintWriter;
@@ -91,6 +102,7 @@ public class ExportPS2Functions extends GhidraScript {
         long start;
         long endExclusive;
         long size;
+        boolean syntheticEntry = false;
     }
 
     private enum ClassificationKind {
@@ -331,6 +343,178 @@ public class ExportPS2Functions extends GhidraScript {
         return selectors;
     }
 
+    private boolean isExecutableAddress(Address address) {
+        if (address == null) {
+            return false;
+        }
+
+        MemoryBlock block = currentProgram.getMemory().getBlock(address);
+        return block != null && block.isExecute();
+    }
+
+    private boolean hasCallableLabelReference(Address address) {
+        if (address == null) {
+            return false;
+        }
+
+        ReferenceIterator refs = currentProgram.getReferenceManager().getReferencesTo(address);
+        while (refs.hasNext()) {
+            Reference ref = refs.next();
+            if (ref == null) {
+                continue;
+            }
+
+            RefType type = ref.getReferenceType();
+            if (type != null && type.isCall()) {
+                return true;
+            }
+
+            Address from = ref.getFromAddress();
+            if (from == null) {
+                continue;
+            }
+
+            MemoryBlock fromBlock = currentProgram.getMemory().getBlock(from);
+            if (fromBlock == null || !fromBlock.isExecute()) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static String makeAnonymousEntryName(long start) {
+        return String.format("entry_%08x", start & 0xFFFFFFFFL);
+    }
+
+    private List<FunctionRecord> collectExecutableLabelRecords(List<FunctionRecord> functionRecords) {
+        List<FunctionRecord> labelRecords = new ArrayList<>();
+        Set<Long> existingStarts = new HashSet<>();
+        for (FunctionRecord record : functionRecords) {
+            existingStarts.add(record.start);
+        }
+
+        SymbolIterator symbols = currentProgram.getSymbolTable().getSymbolIterator(true);
+        while (symbols.hasNext() && !monitor.isCancelled()) {
+            Symbol symbol = symbols.next();
+            if (symbol == null || !symbol.isPrimary()) {
+                continue;
+            }
+
+            if (symbol.getSymbolType() == SymbolType.FUNCTION) {
+                continue;
+            }
+
+            Address address = symbol.getAddress();
+            if (!isExecutableAddress(address)) {
+                continue;
+            }
+
+            long start = address.getOffset();
+            if (existingStarts.contains(start)) {
+                continue;
+            }
+
+            Instruction instruction = currentProgram.getListing().getInstructionAt(address);
+            if (instruction == null) {
+                continue;
+            }
+
+            if (!hasCallableLabelReference(address)) {
+                continue;
+            }
+
+            FunctionRecord record = new FunctionRecord();
+            record.name = symbol.getName();
+            record.start = start;
+            record.syntheticEntry = true;
+            labelRecords.add(record);
+            existingStarts.add(start);
+        }
+
+        AddressSet executableAddresses = new AddressSet();
+        for (MemoryBlock block : currentProgram.getMemory().getBlocks()) {
+            if (block != null && block.isExecute()) {
+                executableAddresses.addRange(block.getStart(), block.getEnd());
+            }
+        }
+
+        InstructionIterator instructions = currentProgram.getListing().getInstructions(executableAddresses, true);
+        while (instructions.hasNext() && !monitor.isCancelled()) {
+            Instruction instruction = instructions.next();
+            if (instruction == null) {
+                continue;
+            }
+
+            Address address = instruction.getAddress();
+            long start = address.getOffset();
+            if (existingStarts.contains(start)) {
+                continue;
+            }
+
+            if (!hasCallableLabelReference(address)) {
+                continue;
+            }
+
+            FunctionRecord record = new FunctionRecord();
+            record.name = makeAnonymousEntryName(start);
+            record.start = start;
+            record.syntheticEntry = true;
+            labelRecords.add(record);
+            existingStarts.add(start);
+        }
+
+        if (labelRecords.isEmpty()) {
+            return labelRecords;
+        }
+
+        List<Long> boundaries = new ArrayList<>();
+        for (FunctionRecord record : functionRecords) {
+            boundaries.add(record.start);
+        }
+        for (FunctionRecord record : labelRecords) {
+            boundaries.add(record.start);
+        }
+        Collections.sort(boundaries);
+
+        functionRecords.sort(Comparator.comparingLong(r -> r.start));
+        for (FunctionRecord record : labelRecords) {
+            long endExclusive = 0L;
+
+            for (FunctionRecord functionRecord : functionRecords) {
+                if (record.start > functionRecord.start && record.start < functionRecord.endExclusive) {
+                    endExclusive = functionRecord.endExclusive;
+                    break;
+                }
+            }
+
+            if (endExclusive == 0L) {
+                Address startAddress = currentProgram.getAddressFactory().getDefaultAddressSpace().getAddress(record.start);
+                MemoryBlock block = currentProgram.getMemory().getBlock(startAddress);
+                if (block != null) {
+                    endExclusive = block.getEnd().getOffset() + 1L;
+                }
+            }
+
+            for (Long boundary : boundaries) {
+                if (boundary > record.start && (endExclusive == 0L || boundary < endExclusive)) {
+                    endExclusive = boundary;
+                    break;
+                }
+            }
+
+            if (endExclusive <= record.start) {
+                endExclusive = record.start + 4L;
+            }
+
+            record.endExclusive = endExclusive;
+            record.size = record.endExclusive - record.start;
+        }
+
+        labelRecords.sort(Comparator.comparingLong(r -> r.start));
+        return labelRecords;
+    }
+
     @Override
     public void run() throws Exception {
         File tomlFile = askFile("Choose output TOML config file", "Save");
@@ -340,11 +524,9 @@ public class ExportPS2Functions extends GhidraScript {
 
         boolean exportCsv = askYesNo("Export CSV", "Also export compatibility CSV function map?");
         File csvFile = null;
-        if (exportCsv) {
-            csvFile = askFile("Choose output CSV file", "Save");
-            if (csvFile == null) {
-                exportCsv = false;
-            }
+        csvFile = askFile("Choose output CSV file", "Save");
+        if (csvFile == null) {
+            return;
         }
 
         FunctionManager fm = currentProgram.getFunctionManager();
@@ -380,23 +562,26 @@ public class ExportPS2Functions extends GhidraScript {
             }
         }
 
-        List<String> stubSelectors = collectFunctionSelectors(stubNames, functionRecords, true);
-        List<String> skipSelectors = collectFunctionSelectors(skipNames, functionRecords, true);
+        final int functionCount = functionRecords.size();
+        List<FunctionRecord> labelRecords = collectExecutableLabelRecords(functionRecords);
+        List<FunctionRecord> exportRecords = new ArrayList<>(functionRecords);
+        exportRecords.addAll(labelRecords);
+        exportRecords.sort(Comparator.comparingLong(r -> r.start));
 
-        if (exportCsv && csvFile != null) {
-            try (PrintWriter writer = new PrintWriter(csvFile)) {
-                writer.println("Name,Start,End,Size");
-                functionRecords.sort(Comparator.comparingLong(r -> r.start));
-                for (FunctionRecord record : functionRecords) {
-                    writer.printf("%s,0x%08X,0x%08X,%d%n",
-                        record.name,
-                        record.start,
-                        record.endExclusive,
-                        record.size
-                    );
-                }
+        List<String> stubSelectors = collectFunctionSelectors(stubNames, exportRecords, true);
+        List<String> skipSelectors = collectFunctionSelectors(skipNames, exportRecords, true);
+ 
+        try (PrintWriter writer = new PrintWriter(csvFile)) {
+            writer.println("Name,Start,End,Size");
+            for (FunctionRecord record : exportRecords) {
+                writer.printf("%s,0x%08X,0x%08X,%d%n",
+                    record.name,
+                    record.start,
+                    record.endExclusive,
+                    record.size
+                );
             }
-        }
+        } 
 
         String programPath = currentProgram.getExecutablePath();
         if (programPath == null) {
@@ -405,7 +590,7 @@ public class ExportPS2Functions extends GhidraScript {
         programPath = normalizeWindowsDrivePath(programPath);
 
         File outputDir = tomlFile.getParentFile() == null ? new File("output") : new File(tomlFile.getParentFile(), "output");
-        String ghidraCsvPath = (exportCsv && csvFile != null) ? csvFile.getAbsolutePath() : "";
+        String ghidraCsvPath = csvFile.getAbsolutePath();
 
         try (PrintWriter writer = new PrintWriter(tomlFile)) {
             writer.println("# Auto-generated by ExportPS2Functions.java");
@@ -437,7 +622,9 @@ public class ExportPS2Functions extends GhidraScript {
             writer.println();
 
             writer.println("[ghidra_export]");
-            writer.println("function_count = " + functionRecords.size());
+            writer.println("function_count = " + functionCount);
+            writer.println("code_label_count = " + labelRecords.size());
+            writer.println("csv_record_count = " + exportRecords.size());
             writer.println("stub_count = " + stubSelectors.size());
             writer.println("skip_count = " + skipSelectors.size());
             writer.println("uncategorized_count = " + uncategorizedCount);
@@ -445,9 +632,7 @@ public class ExportPS2Functions extends GhidraScript {
             writer.println("runtime_call_source = \"regex_only\"");
         }
 
-        if (exportCsv && csvFile != null) {
-            println(String.format("Exported %d functions to %s", functionRecords.size(), csvFile.getAbsolutePath()));
-        }
+         println(String.format("Exported %d functions and %d executable labels to %s", functionCount, labelRecords.size(), csvFile.getAbsolutePath()));
 
         println("Using regex-only runtime/library classification (no ps2_call_list.h).");
         println(String.format("Exported TOML config to %s", tomlFile.getAbsolutePath()));

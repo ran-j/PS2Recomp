@@ -416,6 +416,15 @@ static bool g_bootmode_initialized = false;
 static uint32_t g_bootmode_pool_offset = 0;
 static std::unordered_map<uint8_t, uint32_t> g_bootmode_addresses;
 
+static std::mutex g_syscall_override_mutex;
+static std::unordered_map<uint32_t, uint32_t> g_syscall_overrides;
+static std::unordered_set<uint32_t> g_syscall_mirror_addrs;
+
+static constexpr uint32_t kGuestSyscallTableGuestBase = 0x80011F80u;
+static constexpr uint32_t kGuestSyscallTablePhysBase = kGuestSyscallTableGuestBase & 0x1FFFFFFFu;
+static constexpr uint32_t kGuestSyscallMirrorLimit = 0x00080000u;
+static constexpr uint32_t kGuestSyscallTableProbeBase = 0x000002F0u;
+
 static std::mutex g_tls_mutex;
 static uint32_t g_tls_index = 0;
 

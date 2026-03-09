@@ -1,6 +1,7 @@
 #include "MiniTest.h"
 #include "ps2_runtime.h"
 #include "ps2_syscalls.h"
+#include "ps2_stubs.h"
 
 #include <array>
 #include <cstdint>
@@ -8,6 +9,11 @@
 #include <vector>
 
 using namespace ps2_syscalls;
+
+namespace ps2_stubs
+{
+    void resetSifState();
+}
 
 namespace
 {
@@ -82,6 +88,7 @@ namespace
 
         TestEnv() : rdram(PS2_RAM_SIZE, 0)
         {
+            ps2_stubs::resetSifState();
             std::memset(&ctx, 0, sizeof(ctx));
         }
     };
