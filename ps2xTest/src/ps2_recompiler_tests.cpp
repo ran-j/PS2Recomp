@@ -311,6 +311,43 @@ void register_ps2_recompiler_tests()
             }
         });
 
+        tc.Run("same-function JAL targets get entry wrappers but J targets stay labels", [](TestCase &t) {
+            std::vector<Section> sections = {
+                {".text", 0x1000u, 0x40u, 0u, true, false, false, true, nullptr}
+            };
+
+            std::vector<Function> functions = {
+                makeFunction("container", 0x1000u, 0x101Cu)
+            };
+
+            std::unordered_map<uint32_t, std::vector<Instruction>> decodedFunctions;
+            decodedFunctions[0x1000u] = {
+                makeAbsJump(0x1000u, 0x100Cu, OPCODE_JAL),
+                makeNopLike(0x1004u),
+                makeAbsJump(0x1008u, 0x1014u, OPCODE_J),
+                makeNopLike(0x100Cu),
+                makeNopLike(0x1010u),
+                makeNopLike(0x1014u),
+                makeJrRa(0x1018u)
+            };
+
+            size_t discovered = PS2Recompiler::DiscoverAdditionalEntryPoints(
+                functions, decodedFunctions, sections);
+
+            t.Equals(discovered, static_cast<size_t>(1),
+                     "same-function JAL should create one entry while plain J stays internal");
+
+            const bool hasCallEntry = std::any_of(
+                functions.begin(), functions.end(),
+                [](const Function &fn) { return fn.start == 0x100Cu; });
+            const bool hasJumpEntry = std::any_of(
+                functions.begin(), functions.end(),
+                [](const Function &fn) { return fn.start == 0x1014u && fn.name.rfind("entry_", 0) == 0; });
+
+            t.IsTrue(hasCallEntry, "same-function JAL target should be promoted to an entry wrapper");
+            t.IsFalse(hasJumpEntry, "same-function J target should remain an internal label only");
+        });
+
         tc.Run("entry reslice handles entries without containing function", [](TestCase &t) {
             std::vector<Function> functions = {
                 makeFunction("entry_1008", 0x1008u, 0x1018u),

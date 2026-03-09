@@ -37,6 +37,16 @@ namespace ps2recomp
         return ((address + 4) & 0xF0000000u) | (target << 2);
     }
 
+    static Instruction makeSyntheticDelaySlot(uint32_t address)
+    {
+        Instruction inst{};
+        inst.address = address;
+        inst.raw = 0;
+        inst.opcode = OPCODE_SPECIAL;
+        inst.function = SPECIAL_SLL;
+        return inst;
+    }
+
     static std::string formatFloatLiteral(float value)
     {
         if (!std::isfinite(value))
@@ -927,18 +937,35 @@ namespace ps2recomp
 
             try
             {
-                if (inst.hasDelaySlot && i + 1 < instructions.size())
+                if (inst.hasDelaySlot)
                 {
-                    const Instruction &delaySlot = instructions[i + 1];
+                    const bool hasDecodedDelaySlot =
+                        i + 1 < instructions.size() &&
+                        instructions[i + 1].address == inst.address + 4u;
 
-                    if (internalTargets.contains(delaySlot.address))
+                    Instruction syntheticDelaySlot{};
+                    const Instruction *delaySlot = nullptr;
+                    if (hasDecodedDelaySlot)
                     {
-                        ss << "label_" << std::hex << delaySlot.address << std::dec << ":\n";
+                        delaySlot = &instructions[i + 1];
+                    }
+                    else
+                    {
+                        syntheticDelaySlot = makeSyntheticDelaySlot(inst.address + 4u);
+                        delaySlot = &syntheticDelaySlot;
                     }
 
-                    ss << handleBranchDelaySlots(inst, delaySlot, function, analysisResult);
+                    if (hasDecodedDelaySlot && internalTargets.contains(delaySlot->address))
+                    {
+                        ss << "label_" << std::hex << delaySlot->address << std::dec << ":\n";
+                    }
 
-                    ++i; // Skip delay slot instruction (handled inside branch logic)
+                    ss << handleBranchDelaySlots(inst, *delaySlot, function, analysisResult);
+
+                    if (hasDecodedDelaySlot)
+                    {
+                        ++i; // Skip delay slot instruction (handled inside branch logic)
+                    }
                 }
                 else
                 {
@@ -2949,18 +2976,18 @@ namespace ps2recomp
     std::string CodeGenerator::translateVU_VRNEXT(const Instruction &inst)
     {
         return fmt::format(
-            "{{ "
-            "    uint32_t r_vals[4]; "
-            "    _mm_storeu_si128((__m128i*)r_vals, _mm_castps_si128(ctx->vu0_r)); "
-            "    "
-            "    // Simple LFSR-based random number generation (PS2-like behavior) "
-            "    uint32_t feedback = r_vals[0] ^ (r_vals[0] << 13) ^ (r_vals[1] >> 19) ^ (r_vals[2] << 7); "
-            "    r_vals[0] = r_vals[1]; "
-            "    r_vals[1] = r_vals[2]; "
-            "    r_vals[2] = r_vals[3]; "
-            "    r_vals[3] = feedback; "
-            "    "
-            "    ctx->vu0_r = _mm_castsi128_ps(_mm_loadu_si128((__m128i*)r_vals)); \n"
+            "{{\n"
+            "    uint32_t r_vals[4];\n"
+            "    _mm_storeu_si128((__m128i*)r_vals, _mm_castps_si128(ctx->vu0_r));\n"
+            "\n"
+            "    // Simple LFSR-based random number generation (PS2-like behavior)\n"
+            "    uint32_t feedback = r_vals[0] ^ (r_vals[0] << 13) ^ (r_vals[1] >> 19) ^ (r_vals[2] << 7);\n"
+            "    r_vals[0] = r_vals[1];\n"
+            "    r_vals[1] = r_vals[2];\n"
+            "    r_vals[2] = r_vals[3];\n"
+            "    r_vals[3] = feedback;\n"
+            "\n"
+            "    ctx->vu0_r = _mm_castsi128_ps(_mm_loadu_si128((__m128i*)r_vals));\n"
             "}}");
     }
 
@@ -3608,19 +3635,19 @@ namespace ps2recomp
         uint8_t fsf = inst.vectorInfo.fsf;
 
         return fmt::format(
-            "{{ "
-            "    float src = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))); "
-            "    uint32_t seed; std::memcpy(&seed, &src, sizeof(seed)); "
-            "    "
-            "    // PS2 uses a specific LFSR initialization pattern "
-            "    if (seed == 0) seed = 1; " // Prevent zero seed
-            "    "
-            "    uint32_t r0 = seed; "
-            "    uint32_t r1 = seed * 0x41C64E6D + 0x3039; " // PS2-like LCG constants
-            "    uint32_t r2 = r1 * 0x41C64E6D + 0x3039; "
-            "    uint32_t r3 = r2 * 0x41C64E6D + 0x3039; "
-            "    "
-            "    ctx->vu0_r = _mm_castsi128_ps(_mm_set_epi32(r3, r2, r1, r0)); \n "
+            "{{\n"
+            "    float src = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{})));\n"
+            "    uint32_t seed; std::memcpy(&seed, &src, sizeof(seed));\n"
+            "\n"
+            "    // PS2 uses a specific LFSR initialization pattern\n"
+            "    if (seed == 0) seed = 1;\n"
+            "\n"
+            "    uint32_t r0 = seed;\n"
+            "    uint32_t r1 = seed * 0x41C64E6D + 0x3039;\n"
+            "    uint32_t r2 = r1 * 0x41C64E6D + 0x3039;\n"
+            "    uint32_t r3 = r2 * 0x41C64E6D + 0x3039;\n"
+            "\n"
+            "    ctx->vu0_r = _mm_castsi128_ps(_mm_set_epi32(r3, r2, r1, r0));\n"
             "}}",
             fs_reg, fs_reg, fsf);
     }
@@ -3631,20 +3658,20 @@ namespace ps2recomp
         uint8_t fsf = inst.vectorInfo.fsf;
 
         return fmt::format(
-            "{{ "
-            "    float src = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))); "
-            "    uint32_t src_bits; std::memcpy(&src_bits, &src, sizeof(src_bits)); "
-            "    __m128i r_current = _mm_castps_si128(ctx->vu0_r); "
-            "    __m128i fs_data = _mm_set1_epi32((int)src_bits); "
-            "    "
-            "     // XOR the current random value with the data from the VU vector register "
-            "    __m128i xored = _mm_xor_si128(r_current, fs_data); "
-            "    "
-            "    // Apply a simple mixing function similar to PS2's LFSR "
-            "    __m128i mixed = _mm_xor_si128(xored, _mm_slli_epi32(xored, 7)); "
-            "    mixed = _mm_xor_si128(mixed, _mm_srli_epi32(mixed, 9)); "
-            "    "
-            "    ctx->vu0_r = _mm_castsi128_ps(mixed);"
+            "{{\n"
+            "    float src = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{})));\n"
+            "    uint32_t src_bits; std::memcpy(&src_bits, &src, sizeof(src_bits));\n"
+            "    __m128i r_current = _mm_castps_si128(ctx->vu0_r);\n"
+            "    __m128i fs_data = _mm_set1_epi32((int)src_bits);\n"
+            "\n"
+            "    // XOR the current random value with the data from the VU vector register\n"
+            "    __m128i xored = _mm_xor_si128(r_current, fs_data);\n"
+            "\n"
+            "    // Apply a simple mixing function similar to PS2's LFSR\n"
+            "    __m128i mixed = _mm_xor_si128(xored, _mm_slli_epi32(xored, 7));\n"
+            "    mixed = _mm_xor_si128(mixed, _mm_srli_epi32(mixed, 9));\n"
+            "\n"
+            "    ctx->vu0_r = _mm_castsi128_ps(mixed);\n"
             "}}",
             fs_reg, fs_reg, fsf);
     }
