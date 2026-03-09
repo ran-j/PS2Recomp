@@ -241,6 +241,12 @@ namespace ps2recomp
             size_t passCount = 0;
         };
 
+        struct StaticEntryTarget
+        {
+            uint32_t target = 0u;
+            bool isCall = false;
+        };
+
         EntryDiscoveryStats discoverAdditionalEntryPointsImpl(
             std::vector<Function> &functions,
             std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions,
@@ -269,11 +275,14 @@ namespace ps2recomp
                 return false;
             };
 
-            auto getStaticEntryTarget = [](const Instruction &inst) -> std::optional<uint32_t>
+            auto getStaticEntryTarget = [](const Instruction &inst) -> std::optional<StaticEntryTarget>
             {
                 if (inst.opcode == OPCODE_J || inst.opcode == OPCODE_JAL)
                 {
-                    return decodeAbsoluteJumpTarget(inst.address, inst.target);
+                    StaticEntryTarget target{};
+                    target.target = decodeAbsoluteJumpTarget(inst.address, inst.target);
+                    target.isCall = (inst.opcode == OPCODE_JAL);
+                    return target;
                 }
 
                 if (inst.opcode == OPCODE_SPECIAL &&
@@ -369,7 +378,8 @@ namespace ps2recomp
                             continue;
                         }
 
-                        uint32_t target = targetOpt.value();
+                        const StaticEntryTarget staticTarget = targetOpt.value();
+                        const uint32_t target = staticTarget.target;
 
                         if ((target & 0x3) != 0 || !isExecutableAddress(target))
                         {
@@ -381,10 +391,25 @@ namespace ps2recomp
                             continue;
                         }
 
-                        const Function *containingFunction = findContainingFunction(target);
-                        if (containingFunction && containingFunction->start == function.start)
+                        const bool targetInCurrentFunction = std::any_of(
+                            instructions.begin(), instructions.end(),
+                            [&](const Instruction &candidate)
+                            { return candidate.address == target; });
+                        if (targetInCurrentFunction && !staticTarget.isCall)
                         {
-                            // Internal branches within the same function are handled as labels/gotos and should not produce separate entry wrappers.
+                            // jumps with the current decoded function remain labels/gotos.
+                            continue;
+                        }
+
+                        const Function *containingFunction = findContainingFunction(target);
+                        if (targetInCurrentFunction)
+                        {
+                            PendingEntry pending{};
+                            pending.target = target;
+                            pending.containingStart = function.start;
+                            pending.containingEnd = function.end;
+                            pendingEntries.push_back(pending);
+                            pendingStarts.insert(target);
                             continue;
                         }
 

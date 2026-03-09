@@ -2627,6 +2627,55 @@ namespace
     uint32_t g_sifCmdBuffer = 0u;
     uint32_t g_sifSysCmdBuffer = 0u;
     bool g_sifCmdInitialized = false;
+    uint32_t g_sifGetRegLogCount = 0u;
+    uint32_t g_sifSetRegLogCount = 0u;
+
+    constexpr uint32_t kSifRegBootStatus = 0x4u;
+    constexpr uint32_t kSifRegMainAddr = 0x80000000u;
+    constexpr uint32_t kSifRegSubAddr = 0x80000001u;
+    constexpr uint32_t kSifRegMsCom = 0x80000002u;
+    constexpr uint32_t kSifBootReadyMask = 0x00020000u;
+
+    void seedDefaultSifRegsLocked()
+    {
+        g_sifRegs.clear();
+        g_sifSregs.clear();
+        g_sifCmdHandlers.clear();
+        g_sifCmdBuffer = 0u;
+        g_sifSysCmdBuffer = 0u;
+        g_sifCmdInitialized = false;
+        g_sifGetRegLogCount = 0u;
+        g_sifSetRegLogCount = 0u;
+
+        g_sifRegs[kSifRegBootStatus] = kSifBootReadyMask;
+        g_sifRegs[kSifRegMainAddr] = 0u;
+        g_sifRegs[kSifRegSubAddr] = 0u;
+        g_sifRegs[kSifRegMsCom] = 0u;
+    }
+
+    bool shouldTraceSifReg(uint32_t reg)
+    {
+        switch (reg)
+        {
+        case 0x2u:
+        case 0x4u:
+        case 0x80000000u:
+        case 0x80000001u:
+        case 0x80000002u:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    struct SifStateInitializer
+    {
+        SifStateInitializer()
+        {
+            std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
+            seedDefaultSifRegsLocked();
+        }
+    } g_sifStateInitializer;
 
     uint32_t allocateSifDmaTransferId()
     {
@@ -2744,6 +2793,12 @@ namespace
     }
 }
 
+void resetSifState()
+{
+    std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
+    seedDefaultSifRegsLocked();
+}
+
 void sceSifAddCmdHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     const uint32_t cid = getRegU32(ctx, 4);
@@ -2796,8 +2851,7 @@ void sceSifExecRequest(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 void sceSifExitCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
-    g_sifCmdInitialized = false;
-    g_sifCmdHandlers.clear();
+    seedDefaultSifRegsLocked();
     setReturnS32(ctx, 0);
 }
 
@@ -3054,6 +3108,7 @@ void sceSifGetReg(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     const uint32_t reg = getRegU32(ctx, 4);
     uint32_t value = 0u;
+    bool shouldLog = false;
     {
         std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
         auto it = g_sifRegs.find(reg);
@@ -3061,6 +3116,21 @@ void sceSifGetReg(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             value = it->second;
         }
+        shouldLog = shouldTraceSifReg(reg) && g_sifGetRegLogCount < 128u;
+        if (shouldLog)
+        {
+            ++g_sifGetRegLogCount;
+        }
+    }
+    if (shouldLog)
+    {
+        auto flags = std::cerr.flags();
+        std::cerr << "[sceSifGetReg] reg=0x" << std::hex << reg
+                  << " value=0x" << value
+                  << " pc=0x" << (ctx ? ctx->pc : 0u)
+                  << " ra=0x" << (ctx ? getRegU32(ctx, 31) : 0u)
+                  << std::dec << std::endl;
+        std::cerr.flags(flags);
     }
     setReturnU32(ctx, value);
 }
@@ -3259,6 +3329,8 @@ void sceSifSetDma(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         return;
     }
 
+    ps2_syscalls::dispatchDmacHandlersForCause(rdram, runtime, 5u);
+
     setReturnS32(ctx, static_cast<int32_t>(allocateSifDmaTransferId()));
 }
 
@@ -3272,6 +3344,7 @@ void sceSifSetReg(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     const uint32_t reg = getRegU32(ctx, 4);
     const uint32_t value = getRegU32(ctx, 5);
     uint32_t prev = 0u;
+    bool shouldLog = false;
     {
         std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
         auto it = g_sifRegs.find(reg);
@@ -3280,6 +3353,22 @@ void sceSifSetReg(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             prev = it->second;
         }
         g_sifRegs[reg] = value;
+        shouldLog = shouldTraceSifReg(reg) && g_sifSetRegLogCount < 128u;
+        if (shouldLog)
+        {
+            ++g_sifSetRegLogCount;
+        }
+    }
+    if (shouldLog)
+    {
+        auto flags = std::cerr.flags();
+        std::cerr << "[sceSifSetReg] reg=0x" << std::hex << reg
+                  << " prev=0x" << prev
+                  << " value=0x" << value
+                  << " pc=0x" << (ctx ? ctx->pc : 0u)
+                  << " ra=0x" << (ctx ? getRegU32(ctx, 31) : 0u)
+                  << std::dec << std::endl;
+        std::cerr.flags(flags);
     }
     setReturnU32(ctx, prev);
 }

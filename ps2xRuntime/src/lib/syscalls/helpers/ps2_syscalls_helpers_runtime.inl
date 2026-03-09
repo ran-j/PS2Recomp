@@ -101,9 +101,9 @@ static std::shared_ptr<EventFlagInfo> lookupEventFlagInfo(int eid)
 
 static void setRegU32(R5900Context *ctx, int reg, uint32_t value)
 {
-    if (reg < 0 || reg > 31)
+    if (!ctx || reg < 0 || reg > 31)
         return;
-    ctx->r[reg] = _mm_set_epi32(0, 0, 0, value);
+    SET_GPR_U32(ctx, reg, value);
 }
 
 static std::chrono::microseconds alarmTicksToDuration(uint16_t ticks)
@@ -268,6 +268,34 @@ static bool readStackU32(uint8_t *rdram, uint32_t sp, uint32_t offset, uint32_t 
     return true;
 }
 
+enum class RpcInvokeExitReason
+{
+    Returned,
+    NullPc,
+    MissingFunction,
+    StepLimit,
+    SamePcLimit
+};
+
+static const char *rpcInvokeExitReasonName(RpcInvokeExitReason reason)
+{
+    switch (reason)
+    {
+    case RpcInvokeExitReason::Returned:
+        return "returned";
+    case RpcInvokeExitReason::NullPc:
+        return "null-pc";
+    case RpcInvokeExitReason::MissingFunction:
+        return "missing-function";
+    case RpcInvokeExitReason::StepLimit:
+        return "step-limit";
+    case RpcInvokeExitReason::SamePcLimit:
+        return "same-pc-limit";
+    default:
+        return "unknown";
+    }
+}
+
 static bool rpcInvokeFunction(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime,
                               uint32_t funcAddr, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t *outV0)
 {
@@ -307,6 +335,7 @@ static bool rpcInvokeFunction(uint8_t *rdram, R5900Context *ctx, PS2Runtime *run
     uint32_t steps = 0u;
     uint32_t lastPc = 0xFFFFFFFFu;
     uint32_t samePcCount = 0u;
+    RpcInvokeExitReason exitReason = RpcInvokeExitReason::MissingFunction;
     while (tmp.pc != 0u &&
            tmp.pc != kRpcInvokeReturnSentinel &&
            runtime->hasFunction(tmp.pc) &&
@@ -318,6 +347,7 @@ static bool rpcInvokeFunction(uint8_t *rdram, R5900Context *ctx, PS2Runtime *run
             ++samePcCount;
             if (samePcCount > 0x2000u)
             {
+                exitReason = RpcInvokeExitReason::SamePcLimit;
                 break;
             }
         }
@@ -336,7 +366,41 @@ static bool rpcInvokeFunction(uint8_t *rdram, R5900Context *ctx, PS2Runtime *run
     {
         *outV0 = getRegU32(&tmp, 2);
     }
-    return true;
+
+    if (tmp.pc == kRpcInvokeReturnSentinel)
+    {
+        return true;
+    }
+
+    if (tmp.pc == 0u)
+    {
+        exitReason = RpcInvokeExitReason::NullPc;
+    }
+    else if (steps >= kRpcInvokeMaxSteps)
+    {
+        exitReason = RpcInvokeExitReason::StepLimit;
+    }
+    else if (!runtime->hasFunction(tmp.pc))
+    {
+        exitReason = RpcInvokeExitReason::MissingFunction;
+    }
+
+    static std::atomic<uint32_t> s_rpcInvokeFailureLogs{0u};
+    constexpr uint32_t kMaxRpcInvokeFailureLogs = 64u;
+    const uint32_t logIndex = s_rpcInvokeFailureLogs.fetch_add(1u, std::memory_order_relaxed);
+    if (logIndex < kMaxRpcInvokeFailureLogs)
+    {
+        std::cerr << "[SyscallOverride:invoke-failed]"
+                  << " func=0x" << std::hex << funcAddr
+                  << " exitPc=0x" << tmp.pc
+                  << " ra=0x" << getRegU32(&tmp, 31)
+                  << std::dec
+                  << " steps=" << steps
+                  << " reason=" << rpcInvokeExitReasonName(exitReason)
+                  << std::endl;
+    }
+
+    return false;
 }
 
 static uint32_t rpcAllocPacketAddr(uint8_t *rdram)

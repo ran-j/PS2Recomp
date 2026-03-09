@@ -19,6 +19,11 @@
 #include "ps2_gs_gpu.h"
 #include <ThreadNaming.h>
 
+namespace ps2_stubs
+{
+    void resetSifState();
+}
+
 #define ELF_MAGIC 0x464C457F // "\x7FELF" in little endian
 #define ET_EXEC 2            // Executable file
 #define EM_MIPS 8            // MIPS architecture
@@ -1701,7 +1706,9 @@ void PS2Runtime::HandleIntegerOverflow(R5900Context *ctx)
 void PS2Runtime::run()
 {
     m_stopRequested.store(false, std::memory_order_relaxed);
+    ps2_stubs::resetSifState();
     ps2_stubs::resetGsSyncVCallbackState();
+    ps2_syscalls::initializeGuestKernelState(m_memory.getRDRAM());
     m_cpuContext.r[4] = _mm_setzero_si128();
     m_cpuContext.r[5] = _mm_setzero_si128();
     m_cpuContext.r[29] = _mm_set_epi64x(0, static_cast<int64_t>(PS2_RAM_SIZE - 0x10u));

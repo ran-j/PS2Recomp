@@ -61,27 +61,35 @@ cmake --build out/build --config Debug
 
 ### Usage
 
-1. Analyze ELF and generate config:
+Preferred workflow for retail or stripped games:
 
-```bash
-./ps2_analyzer your_game.elf config.toml
-```
-*For better results on retail games, see the [Ghidra Workflow](ps2xAnalyzer/Readme.md#3-ghidra-integration-recommended-for-complex-games).*
-
-2. Recompile using generated TOML:
+1. Open the ELF in Ghidra.
+2. Run `ps2xRecomp/tools/ghidra/ExportPS2Functions.java`.
+3. Use the exported TOML and CSV map.
+4. Recompile with the exported TOML:
 
 ```bash
 ./ps2_recomp config.toml
 ```
 
-3. Build generated output and link with `ps2xRuntime`.
+Fallback workflow for quick local experiments or ELFs with debug symbol :
+
+```bash
+./ps2_analyzer your_game.elf config.toml
+```
+
+Use this only when you do not have a Ghidra project yet. The native analyzer is faster to start, but it is less accurate on stripped retail games and more likely to miss internal callable entry points.
+
+See the [Ghidra Workflow](ps2xAnalyzer/Readme.md#3-ghidra-integration-for-retail-and-stripped-games-preferred) for the recommended path.
+
+Then build generated output and link with `ps2xRuntime`.
 
 ### Configuration
 
 Main fields in `config.toml`:
 
 * `general.input`: source ELF path.
-* `general.ghidra_output`: optional function map CSV.
+* `general.ghidra_output`: recommended function map CSV exported from Ghidra.
 * `general.output`: generated C++ output folder.
 * `general.single_file_output`: one combined cpp or one file per function.
 * `general.patch_syscalls`: apply configured patches to `SYSCALL` instructions (`false` recommended).
@@ -96,7 +104,7 @@ Address binding for stripped ELFs:
 * Use `handler@0xADDRESS` inside `general.stubs` to map a stripped function start directly to a runtime handler.
 * Example: `sceCdRead@0x00123456` binds function start `0x00123456` to `ps2_stubs::sceCdRead(...)`.
 * Generic temporary handlers are available: `ret0@0xADDR`, `ret1@0xADDR`, `reta0@0xADDR`.
-* Before manual binding, try plain recompilation first: if ELF relocation symbols are present for calls, runtime handler routing can be inferred automatically.
+* Before manual binding, prefer recompilation from a Ghidra-exported TOML/CSV first. The extra boundaries and synthetic entry points are usually more important than manual early triage.
 * The address must be the function start in that exact ELF build.
 * Addresses are not portable across different games/regions/builds.
 * The handler name must exist in runtime call lists (`PS2_SYSCALL_LIST` or `PS2_STUB_LIST`).

@@ -264,6 +264,239 @@ void TODO(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t encod
     setReturnS32(ctx, 0);
 }
 
+static uint32_t computeBuiltinFindAddressResult(uint8_t *rdram,
+                                                uint32_t originalStart,
+                                                uint32_t originalEnd,
+                                                uint32_t target);
+
+static bool dispatchSyscallOverride(uint32_t syscallNumber, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    uint32_t handler = 0u;
+    {
+        std::lock_guard<std::mutex> lock(g_syscall_override_mutex);
+        auto it = g_syscall_overrides.find(syscallNumber);
+        if (it == g_syscall_overrides.end())
+        {
+            return false;
+        }
+        handler = it->second;
+    }
+
+    if (!runtime || !ctx || handler == 0u)
+    {
+        return false;
+    }
+
+    const uint32_t overrideA0 = getRegU32(ctx, 4);
+    const uint32_t overrideA1 = getRegU32(ctx, 5);
+    const uint32_t overrideA2 = getRegU32(ctx, 6);
+    const uint32_t overrideA3 = getRegU32(ctx, 7);
+    const uint32_t overridePc = ctx->pc;
+    const uint32_t overrideRa = getRegU32(ctx, 31);
+
+    thread_local std::vector<uint32_t> s_activeSyscallOverrides;
+    if (std::find(s_activeSyscallOverrides.begin(), s_activeSyscallOverrides.end(), syscallNumber) != s_activeSyscallOverrides.end())
+    {
+        static std::atomic<uint32_t> s_reentrantLogs{0u};
+        constexpr uint32_t kMaxReentrantLogs = 32u;
+        const uint32_t logIndex = s_reentrantLogs.fetch_add(1u, std::memory_order_relaxed);
+        if (logIndex < kMaxReentrantLogs)
+        {
+            std::cerr << "[SyscallOverride:reentrant]"
+                      << " syscall=0x" << std::hex << syscallNumber
+                      << " handler=0x" << handler
+                      << " pc=0x" << ctx->pc
+                      << " ra=0x" << getRegU32(ctx, 31)
+                      << std::dec << std::endl;
+        }
+        return false;
+    }
+
+    s_activeSyscallOverrides.push_back(syscallNumber);
+    struct ScopedActiveOverride
+    {
+        std::vector<uint32_t> &active;
+        ~ScopedActiveOverride()
+        {
+            if (!active.empty())
+            {
+                active.pop_back();
+            }
+        }
+    } scopedActiveOverride{s_activeSyscallOverrides};
+
+    uint32_t retV0 = 0u;
+    const bool invoked = rpcInvokeFunction(rdram,
+                                           ctx,
+                                           runtime,
+                                           handler,
+                                           getRegU32(ctx, 4),
+                                           getRegU32(ctx, 5),
+                                           getRegU32(ctx, 6),
+                                           getRegU32(ctx, 7),
+                                           &retV0);
+
+    if (syscallNumber == 0x83u)
+    {
+        const uint32_t builtinRet = computeBuiltinFindAddressResult(rdram, overrideA0, overrideA1, overrideA2);
+        const bool mismatch = (retV0 != builtinRet);
+
+        static std::atomic<uint32_t> s_findAddressOverrideLogs{0u};
+        static std::atomic<uint32_t> s_findAddressOverrideMismatchLogs{0u};
+        constexpr uint32_t kMaxFindAddressOverrideLogs = 64u;
+        constexpr uint32_t kMaxFindAddressOverrideMismatchLogs = 128u;
+
+        const uint32_t logIndex = s_findAddressOverrideLogs.fetch_add(1u, std::memory_order_relaxed);
+        const uint32_t mismatchIndex = mismatch
+                                           ? s_findAddressOverrideMismatchLogs.fetch_add(1u, std::memory_order_relaxed)
+                                           : 0u;
+        if (logIndex < kMaxFindAddressOverrideLogs ||
+            (mismatch && mismatchIndex < kMaxFindAddressOverrideMismatchLogs))
+        {
+            const uint32_t guestMinus20c = (retV0 != 0u) ? (retV0 - 0x20Cu) : 0u;
+            const uint32_t guestMinus168 = (retV0 != 0u) ? (retV0 - 0x168u) : 0u;
+            const uint32_t builtinMinus20c = (builtinRet != 0u) ? (builtinRet - 0x20Cu) : 0u;
+            const uint32_t builtinMinus168 = (builtinRet != 0u) ? (builtinRet - 0x168u) : 0u;
+
+            std::cerr << "[Syscall83:override]"
+                      << " handler=0x" << std::hex << handler
+                      << " invoked=" << (invoked ? "true" : "false")
+                      << " pc=0x" << overridePc
+                      << " ra=0x" << overrideRa
+                      << " a0=0x" << overrideA0
+                      << " a1=0x" << overrideA1
+                      << " a2=0x" << overrideA2
+                      << " a3=0x" << overrideA3
+                      << " guestRet=0x" << retV0
+                      << " builtinRet=0x" << builtinRet
+                      << " guest-20c=0x" << guestMinus20c
+                      << " builtin-20c=0x" << builtinMinus20c
+                      << " guest-168=0x" << guestMinus168
+                      << " builtin-168=0x" << builtinMinus168
+                      << " match=" << (mismatch ? "false" : "true")
+                      << std::dec << std::endl;
+        }
+    }
+
+    if (!invoked)
+    {
+        static std::atomic<uint32_t> s_fallbackLogs{0u};
+        constexpr uint32_t kMaxFallbackLogs = 64u;
+        const uint32_t logIndex = s_fallbackLogs.fetch_add(1u, std::memory_order_relaxed);
+        if (logIndex < kMaxFallbackLogs)
+        {
+            std::cerr << "[SyscallOverride:fallback]"
+                      << " syscall=0x" << std::hex << syscallNumber
+                      << " handler=0x" << handler
+                      << " pc=0x" << ctx->pc
+                      << " ra=0x" << getRegU32(ctx, 31)
+                      << std::dec << std::endl;
+        }
+        return false;
+    }
+
+    setReturnU32(ctx, retV0);
+    return true;
+}
+
+static bool tryResolveGuestSyscallMirrorAddr(uint32_t syscallIndex, uint32_t &guestAddr)
+{
+    const int64_t offsetBytes =
+        static_cast<int64_t>(static_cast<int32_t>(syscallIndex)) * static_cast<int64_t>(sizeof(uint32_t));
+    const int64_t guestAddr64 = static_cast<int64_t>(kGuestSyscallTablePhysBase) + offsetBytes;
+    if (guestAddr64 < 0 || (guestAddr64 + static_cast<int64_t>(sizeof(uint32_t))) > static_cast<int64_t>(kGuestSyscallMirrorLimit))
+    {
+        return false;
+    }
+
+    guestAddr = static_cast<uint32_t>(guestAddr64);
+    return true;
+}
+
+static void writeGuestKernelWord(uint8_t *rdram, uint32_t guestAddr, uint32_t value)
+{
+    if (!rdram)
+    {
+        return;
+    }
+
+    if (uint8_t *ptr = getMemPtr(rdram, guestAddr))
+    {
+        std::memcpy(ptr, &value, sizeof(value));
+    }
+}
+
+static void seedGuestSyscallTableProbeLocked(uint8_t *rdram)
+{
+    writeGuestKernelWord(rdram, kGuestSyscallTableProbeBase + 0u, kGuestSyscallTableGuestBase >> 16);
+    writeGuestKernelWord(rdram, kGuestSyscallTableProbeBase + 8u, kGuestSyscallTableGuestBase & 0xFFFFu);
+    g_syscall_mirror_addrs.insert(kGuestSyscallTableProbeBase + 0u);
+    g_syscall_mirror_addrs.insert(kGuestSyscallTableProbeBase + 8u);
+}
+
+static void mirrorGuestSyscallEntryLocked(uint8_t *rdram, uint32_t syscallIndex, uint32_t handler)
+{
+    uint32_t guestAddr = 0u;
+    if (!tryResolveGuestSyscallMirrorAddr(syscallIndex, guestAddr))
+    {
+        return;
+    }
+
+    writeGuestKernelWord(rdram, guestAddr, handler);
+    if (handler == 0u)
+    {
+        g_syscall_mirror_addrs.erase(guestAddr);
+        return;
+    }
+
+    g_syscall_mirror_addrs.insert(guestAddr);
+}
+
+void initializeGuestKernelState(uint8_t *rdram)
+{
+    if (!rdram)
+    {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(g_syscall_override_mutex);
+    for (uint32_t guestAddr : g_syscall_mirror_addrs)
+    {
+        writeGuestKernelWord(rdram, guestAddr, 0u);
+    }
+    g_syscall_mirror_addrs.clear();
+
+    seedGuestSyscallTableProbeLocked(rdram);
+
+    for (const auto &entry : g_syscall_overrides)
+    {
+        mirrorGuestSyscallEntryLocked(rdram, entry.first, entry.second);
+    }
+}
+
+void SetSyscall(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    (void)runtime;
+    const uint32_t syscallIndex = getRegU32(ctx, 4);
+    const uint32_t handler = getRegU32(ctx, 5);
+
+    {
+        std::lock_guard<std::mutex> lock(g_syscall_override_mutex);
+        if (handler == 0u)
+        {
+            g_syscall_overrides.erase(syscallIndex);
+        }
+        else
+        {
+            g_syscall_overrides[syscallIndex] = handler;
+        }
+
+        mirrorGuestSyscallEntryLocked(rdram, syscallIndex, handler);
+    }
+
+    setReturnS32(ctx, 0);
+}
+
 // 0x3C SetupThread
 // args: $a0 = gp, $a1 = stack, $a2 = stack_size, $a3 = args, $t0 = root_func
 void SetupThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -364,6 +597,153 @@ static inline uint32_t normalizeKernelAlias(uint32_t addr)
     return addr;
 }
 
+static uint32_t computeBuiltinFindAddressResult(uint8_t *rdram,
+                                                uint32_t originalStart,
+                                                uint32_t originalEnd,
+                                                uint32_t target)
+{
+    uint32_t start = (originalStart + 3u) & ~0x3u;
+    uint32_t end = originalEnd & ~0x3u;
+    if (start >= end)
+    {
+        return 0u;
+    }
+
+    const uint32_t targetNorm = normalizeKernelAlias(target);
+    for (uint32_t addr = start; addr < end; addr += sizeof(uint32_t))
+    {
+        const uint8_t *entryPtr = getConstMemPtr(rdram, addr);
+        if (!entryPtr)
+        {
+            break;
+        }
+
+        uint32_t entry = 0u;
+        std::memcpy(&entry, entryPtr, sizeof(entry));
+        if (entry == target || normalizeKernelAlias(entry) == targetNorm)
+        {
+            return addr;
+        }
+    }
+
+    return 0u;
+}
+
+struct FindAddressWordSample
+{
+    uint32_t addr = 0u;
+    uint32_t value = 0u;
+};
+
+struct FindAddressMatchSample
+{
+    uint32_t addr = 0u;
+    uint32_t value = 0u;
+    bool aliasOnly = false;
+};
+
+static void logFindAddressDiagnostics(uint32_t callerPc,
+                                      uint32_t originalStart,
+                                      uint32_t originalEnd,
+                                      uint32_t alignedStart,
+                                      uint32_t alignedEnd,
+                                      uint32_t target,
+                                      uint32_t targetNorm,
+                                      bool found,
+                                      uint32_t resultAddr,
+                                      uint32_t scannedWords,
+                                      bool allZero,
+                                      bool aborted,
+                                      uint32_t abortedAddr,
+                                      const FindAddressWordSample *firstWords,
+                                      uint32_t firstWordCount,
+                                      const FindAddressWordSample *nonZeroWords,
+                                      uint32_t nonZeroWordCount,
+                                      const FindAddressMatchSample *matches,
+                                      uint32_t matchCount)
+{
+    static std::atomic<uint32_t> s_findAddressHitLogs{0u};
+    static std::atomic<uint32_t> s_findAddressMissLogs{0u};
+    constexpr uint32_t kMaxFindAddressHitLogs = 16u;
+    constexpr uint32_t kMaxFindAddressMissLogs = 128u;
+
+    std::atomic<uint32_t> &counter = found ? s_findAddressHitLogs : s_findAddressMissLogs;
+    const uint32_t logIndex = counter.fetch_add(1u, std::memory_order_relaxed);
+    const uint32_t logLimit = found ? kMaxFindAddressHitLogs : kMaxFindAddressMissLogs;
+    if (logIndex >= logLimit)
+    {
+        return;
+    }
+
+    std::cerr << "[FindAddress:" << (found ? "hit" : "miss") << "]"
+              << " pc=0x" << std::hex << callerPc
+              << " start=0x" << originalStart
+              << " end=0x" << originalEnd
+              << " alignedStart=0x" << alignedStart
+              << " alignedEnd=0x" << alignedEnd
+              << " target=0x" << target
+              << " targetNorm=0x" << targetNorm
+              << " result=0x" << resultAddr
+              << std::dec
+              << " scannedWords=" << scannedWords
+              << " allZero=" << (allZero ? "true" : "false")
+              << " aborted=" << (aborted ? "true" : "false");
+    if (aborted)
+    {
+        std::cerr << " abortedAddr=0x" << std::hex << abortedAddr << std::dec;
+    }
+    std::cerr << std::endl;
+
+    std::cerr << "  firstWords:";
+    if (firstWordCount == 0u)
+    {
+        std::cerr << " none";
+    }
+    else
+    {
+        for (uint32_t i = 0; i < firstWordCount; ++i)
+        {
+            std::cerr << " [0x" << std::hex << firstWords[i].addr
+                      << "]=0x" << firstWords[i].value;
+        }
+        std::cerr << std::dec;
+    }
+    std::cerr << std::endl;
+
+    std::cerr << "  nonZeroSample:";
+    if (nonZeroWordCount == 0u)
+    {
+        std::cerr << " none";
+    }
+    else
+    {
+        for (uint32_t i = 0; i < nonZeroWordCount; ++i)
+        {
+            std::cerr << " [0x" << std::hex << nonZeroWords[i].addr
+                      << "]=0x" << nonZeroWords[i].value;
+        }
+        std::cerr << std::dec;
+    }
+    std::cerr << std::endl;
+
+    std::cerr << "  matches:";
+    if (matchCount == 0u)
+    {
+        std::cerr << " none";
+    }
+    else
+    {
+        for (uint32_t i = 0; i < matchCount; ++i)
+        {
+            std::cerr << " [0x" << std::hex << matches[i].addr
+                      << "]=0x" << matches[i].value
+                      << (matches[i].aliasOnly ? "(alias)" : "(exact)");
+        }
+        std::cerr << std::dec;
+    }
+    std::cerr << std::endl;
+}
+
 // 0x83 FindAddress:
 // - a0: table start (inclusive)
 // - a1: table end (exclusive)
@@ -373,10 +753,17 @@ void FindAddress(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     (void)runtime;
 
-    uint32_t start = getRegU32(ctx, 4);
-    uint32_t end = getRegU32(ctx, 5);
+    constexpr uint32_t kFindAddressWordSamples = 8u;
+    constexpr uint32_t kFindAddressMatchSamples = 4u;
+
+    const uint32_t originalStart = getRegU32(ctx, 4);
+    const uint32_t originalEnd = getRegU32(ctx, 5);
     const uint32_t target = getRegU32(ctx, 6);
     const uint32_t targetNorm = normalizeKernelAlias(target);
+    const uint32_t callerPc = ctx->pc;
+
+    uint32_t start = originalStart;
+    uint32_t end = originalEnd;
 
     // Word-scan semantics: align the search window to uint32 boundaries.
     start = (start + 3u) & ~0x3u;
@@ -384,28 +771,107 @@ void FindAddress(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
     if (start >= end)
     {
+        logFindAddressDiagnostics(callerPc,
+                                  originalStart,
+                                  originalEnd,
+                                  start,
+                                  end,
+                                  target,
+                                  targetNorm,
+                                  false,
+                                  0u,
+                                  0u,
+                                  true,
+                                  false,
+                                  0u,
+                                  nullptr,
+                                  0u,
+                                  nullptr,
+                                  0u,
+                                  nullptr,
+                                  0u);
         setReturnU32(ctx, 0u);
         return;
     }
+
+    FindAddressWordSample firstWords[kFindAddressWordSamples]{};
+    FindAddressWordSample nonZeroWords[kFindAddressWordSamples]{};
+    FindAddressMatchSample matches[kFindAddressMatchSamples]{};
+    uint32_t firstWordCount = 0u;
+    uint32_t nonZeroWordCount = 0u;
+    uint32_t matchCount = 0u;
+    uint32_t scannedWords = 0u;
+    uint32_t resultAddr = 0u;
+    uint32_t abortedAddr = 0u;
+    bool aborted = false;
+    bool allZero = true;
+    bool foundMatch = false;
 
     for (uint32_t addr = start; addr < end; addr += sizeof(uint32_t))
     {
         const uint8_t *entryPtr = getConstMemPtr(rdram, addr);
         if (!entryPtr)
         {
+            aborted = true;
+            abortedAddr = addr;
             break;
         }
 
         uint32_t entry = 0;
         std::memcpy(&entry, entryPtr, sizeof(entry));
-        if (entry == target || normalizeKernelAlias(entry) == targetNorm)
+        ++scannedWords;
+
+        if (firstWordCount < kFindAddressWordSamples)
         {
-            setReturnU32(ctx, addr);
-            return;
+            firstWords[firstWordCount++] = {addr, entry};
+        }
+
+        if (entry != 0u)
+        {
+            allZero = false;
+            if (nonZeroWordCount < kFindAddressWordSamples)
+            {
+                nonZeroWords[nonZeroWordCount++] = {addr, entry};
+            }
+        }
+
+        const bool exactMatch = (entry == target);
+        const bool aliasMatch = !exactMatch && (normalizeKernelAlias(entry) == targetNorm);
+        if (exactMatch || aliasMatch)
+        {
+            if (!foundMatch)
+            {
+                resultAddr = addr;
+                foundMatch = true;
+            }
+            if (matchCount < kFindAddressMatchSamples)
+            {
+                matches[matchCount++] = {addr, entry, aliasMatch};
+            }
         }
     }
 
-    setReturnU32(ctx, 0u);
+    logFindAddressDiagnostics(callerPc,
+                              originalStart,
+                              originalEnd,
+                              start,
+                              end,
+                              target,
+                              targetNorm,
+                              foundMatch,
+                              resultAddr,
+                              scannedWords,
+                              allZero,
+                              aborted,
+                              abortedAddr,
+                              firstWords,
+                              firstWordCount,
+                              nonZeroWords,
+                              nonZeroWordCount,
+                              matches,
+                              matchCount);
+
+    setReturnU32(ctx, resultAddr);
 }
 
 void Deci2Call(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

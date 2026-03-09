@@ -1,5 +1,6 @@
 #include "MiniTest.h"
 #include "ps2_runtime.h"
+#include "ps2_runtime_macros.h"
 #include "ps2_syscalls.h"
 
 #include <array>
@@ -56,7 +57,7 @@ namespace
 
     void setRegU32(R5900Context &ctx, int reg, uint32_t value)
     {
-        ctx.r[reg] = _mm_set_epi64x(0, static_cast<int64_t>(value));
+        SET_GPR_U32(&ctx, reg, value);
     }
 
     int32_t getRegS32(const R5900Context &ctx, int reg)
@@ -80,6 +81,61 @@ namespace
     bool callSyscall(uint32_t syscallNumber, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         return dispatchNumericSyscall(syscallNumber, rdram, ctx, runtime);
+    }
+
+    void overrideReturnHandler(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        setReturnU32(ctx, ::getRegU32(ctx, 4) + ::getRegU32(ctx, 5));
+        ctx->pc = ::getRegU32(ctx, 31);
+    }
+
+    void overrideBrokenHandler(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        setReturnU32(ctx, 0xDEADBEEFu);
+        ctx->pc = 0x12345678u;
+    }
+
+    void overrideRecursiveFindAddressHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        runtime->handleSyscall(rdram, ctx, 0x83u);
+        ctx->pc = ::getRegU32(ctx, 31);
+    }
+
+    void overrideKsegCompareHandler(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        auto getLowU64 = [](const R5900Context *cpu, int reg) -> uint64_t
+        {
+            return (reg == 0) ? 0u : static_cast<uint64_t>(_mm_extract_epi64(cpu->r[reg], 0));
+        };
+        auto setLowS32 = [](R5900Context *cpu, int reg, uint32_t value)
+        {
+            SET_GPR_S32(cpu, reg, value);
+        };
+        auto setLowU64 = [](R5900Context *cpu, int reg, uint64_t value)
+        {
+            SET_GPR_U64(cpu, reg, value);
+        };
+
+        const uint32_t nextA0 = static_cast<uint32_t>(::getRegU32(ctx, 4) + 4u);
+        setLowS32(ctx, 4, nextA0);
+        setLowU64(ctx, 2, (getLowU64(ctx, 4) < getLowU64(ctx, 5)) ? 1u : 0u);
+        if (getLowU64(ctx, 2) == 0u)
+        {
+            ctx->r[4] = _mm_setzero_si128();
+        }
+        setLowU64(ctx, 2, getLowU64(ctx, 4));
+        ctx->pc = ::getRegU32(ctx, 31);
+    }
+
+    constexpr uint64_t K_EXPECTED_UPPER64 = 0x1122334455667788ull;
+
+    void overridePreserveUpper64Handler(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        const uint64_t hi = static_cast<uint64_t>(_mm_extract_epi64(ctx->r[4], 1));
+        const uint64_t low = static_cast<uint64_t>(_mm_extract_epi64(ctx->r[4], 0));
+        const uint64_t expectedLow = static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(0x80000000u)));
+        setReturnU32(ctx, (hi == K_EXPECTED_UPPER64 && low == expectedLow) ? 1u : 0u);
+        ctx->pc = ::getRegU32(ctx, 31);
     }
 
     struct TestEnv
@@ -452,6 +508,238 @@ void register_ps2_runtime_kernel_tests()
             t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)),
                      0u,
                      "FindAddress should return 0 when no matching word exists");
+        });
+
+        tc.Run("SetSyscall mirrors guest kernel table entries into low memory", [](TestCase &t)
+        {
+            notifyRuntimeStop();
+            TestEnv env;
+            initializeGuestKernelState(env.rdram.data());
+
+            constexpr uint32_t kGuestSyscallTableGuestBase = 0x80011F80u;
+            constexpr uint32_t kSyscallIndex = 0x83u;
+            constexpr uint32_t kHandler = 0x00383548u;
+            constexpr uint32_t kExpectedGuestAddr = kGuestSyscallTableGuestBase + (kSyscallIndex * 4u);
+            constexpr uint32_t kExpectedPhysAddr = kExpectedGuestAddr & 0x1FFFFFFFu;
+
+            setRegU32(env.ctx, 4, kSyscallIndex);
+            setRegU32(env.ctx, 5, kHandler);
+            t.IsTrue(callSyscall(0x74u, env.rdram.data(), &env.ctx, &env.runtime),
+                     "SetSyscall syscall should dispatch");
+
+            uint32_t mirrored = 0u;
+            std::memcpy(&mirrored, env.rdram.data() + kExpectedPhysAddr, sizeof(mirrored));
+            t.Equals(mirrored,
+                     kHandler,
+                     "SetSyscall should mirror handler pointers into the guest kernel syscall table");
+
+            setRegU32(env.ctx, 4, 0x80000000u);
+            setRegU32(env.ctx, 5, 0x80080000u);
+            setRegU32(env.ctx, 6, kHandler);
+            t.IsTrue(callSyscall(0x83u, env.rdram.data(), &env.ctx, &env.runtime),
+                     "FindAddress syscall should dispatch");
+            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)),
+                     kExpectedGuestAddr,
+                     "FindAddress should discover mirrored SetSyscall entries in low guest memory");
+
+            notifyRuntimeStop();
+        });
+
+        tc.Run("SetSyscall honors signed kernel-table offsets", [](TestCase &t)
+        {
+            notifyRuntimeStop();
+            TestEnv env;
+            initializeGuestKernelState(env.rdram.data());
+
+            constexpr uint32_t kPatchIndex = 0xFFFFC402u;
+            constexpr uint32_t kHandler = 0xDEADBEEFu;
+            constexpr uint32_t kExpectedGuestAddr = 0x80002F88u;
+            constexpr uint32_t kExpectedPhysAddr = kExpectedGuestAddr & 0x1FFFFFFFu;
+
+            setRegU32(env.ctx, 4, kPatchIndex);
+            setRegU32(env.ctx, 5, kHandler);
+            t.IsTrue(callSyscall(0x74u, env.rdram.data(), &env.ctx, &env.runtime),
+                     "SetSyscall syscall should dispatch for signed offsets");
+
+            uint32_t mirrored = 0u;
+            std::memcpy(&mirrored, env.rdram.data() + kExpectedPhysAddr, sizeof(mirrored));
+            t.Equals(mirrored,
+                     kHandler,
+                     "SetSyscall should treat the syscall index as a signed offset from the kernel table base");
+
+            notifyRuntimeStop();
+        });
+
+        tc.Run("guest kernel syscall mirror resets between runs", [](TestCase &t)
+        {
+            notifyRuntimeStop();
+            TestEnv env;
+            initializeGuestKernelState(env.rdram.data());
+
+            constexpr uint32_t kGuestSyscallTableGuestBase = 0x80011F80u;
+            constexpr uint32_t kGuestSyscallTableProbeBase = 0x000002F0u;
+            constexpr uint32_t kSyscallIndex = 0x5Au;
+            constexpr uint32_t kHandler = 0x00383510u;
+            constexpr uint32_t kEntryPhysAddr = (kGuestSyscallTableGuestBase + (kSyscallIndex * 4u)) & 0x1FFFFFFFu;
+
+            setRegU32(env.ctx, 4, kSyscallIndex);
+            setRegU32(env.ctx, 5, kHandler);
+            t.IsTrue(callSyscall(0x74u, env.rdram.data(), &env.ctx, &env.runtime),
+                     "SetSyscall syscall should dispatch");
+
+            notifyRuntimeStop();
+            initializeGuestKernelState(env.rdram.data());
+
+            uint32_t mirrored = 1u;
+            std::memcpy(&mirrored, env.rdram.data() + kEntryPhysAddr, sizeof(mirrored));
+            t.Equals(mirrored,
+                     0u,
+                     "Initializing guest kernel state should clear stale mirrored syscall entries");
+
+            uint32_t probeHi = 0u;
+            uint32_t probeLo = 0u;
+            std::memcpy(&probeHi, env.rdram.data() + kGuestSyscallTableProbeBase + 0u, sizeof(probeHi));
+            std::memcpy(&probeLo, env.rdram.data() + kGuestSyscallTableProbeBase + 8u, sizeof(probeLo));
+            t.Equals(probeHi,
+                     kGuestSyscallTableGuestBase >> 16,
+                     "Guest kernel initialization should seed the syscall table probe high word");
+            t.Equals(probeLo,
+                     kGuestSyscallTableGuestBase & 0xFFFFu,
+                     "Guest kernel initialization should seed the syscall table probe low word");
+        });
+
+        tc.Run("SetSyscall override dispatches guest handlers that return through the sentinel", [](TestCase &t)
+        {
+            notifyRuntimeStop();
+            TestEnv env;
+            constexpr uint32_t kSyscallIndex = 0x91u;
+            constexpr uint32_t kHandler = 0x00200000u;
+
+            env.runtime.registerFunction(kHandler, overrideReturnHandler);
+            setRegU32(env.ctx, 4, kSyscallIndex);
+            setRegU32(env.ctx, 5, kHandler);
+            t.IsTrue(callSyscall(0x74u, env.rdram.data(), &env.ctx, &env.runtime),
+                     "SetSyscall syscall should dispatch");
+
+            setRegU32(env.ctx, 4, 7u);
+            setRegU32(env.ctx, 5, 5u);
+            t.IsTrue(callSyscall(kSyscallIndex, env.rdram.data(), &env.ctx, &env.runtime),
+                     "Overridden syscall should dispatch through guest handler");
+            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)),
+                     12u,
+                     "Successful override dispatch should propagate guest handler return value");
+
+            notifyRuntimeStop();
+        });
+
+        tc.Run("SetSyscall override preserves KSEG argument sign extension", [](TestCase &t)
+        {
+            notifyRuntimeStop();
+            TestEnv env;
+            constexpr uint32_t kSyscallIndex = 0x92u;
+            constexpr uint32_t kHandler = 0x00200030u;
+
+            env.runtime.registerFunction(kHandler, overrideKsegCompareHandler);
+            setRegU32(env.ctx, 4, kSyscallIndex);
+            setRegU32(env.ctx, 5, kHandler);
+            t.IsTrue(callSyscall(0x74u, env.rdram.data(), &env.ctx, &env.runtime),
+                     "SetSyscall syscall should dispatch");
+
+            setRegU32(env.ctx, 4, 0x80000000u);
+            setRegU32(env.ctx, 5, 0x80080000u);
+            t.IsTrue(callSyscall(kSyscallIndex, env.rdram.data(), &env.ctx, &env.runtime),
+                     "Override syscall should invoke the guest handler");
+            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)),
+                     0x80000004u,
+                     "Override invocation should preserve KSEG ordering after 32-bit guest writes");
+
+            notifyRuntimeStop();
+        });
+
+        tc.Run("SetSyscall override preserves upper 64 bits when writing 32-bit args", [](TestCase &t)
+        {
+            notifyRuntimeStop();
+            TestEnv env;
+            constexpr uint32_t kSyscallIndex = 0x93u;
+            constexpr uint32_t kHandler = 0x00200040u;
+
+            env.runtime.registerFunction(kHandler, overridePreserveUpper64Handler);
+            setRegU32(env.ctx, 4, kSyscallIndex);
+            setRegU32(env.ctx, 5, kHandler);
+            t.IsTrue(callSyscall(0x74u, env.rdram.data(), &env.ctx, &env.runtime),
+                     "SetSyscall syscall should dispatch");
+
+            env.ctx.r[4] = _mm_set_epi64x(static_cast<int64_t>(K_EXPECTED_UPPER64),
+                                          static_cast<int64_t>(static_cast<int32_t>(0x80000000u)));
+            t.IsTrue(callSyscall(kSyscallIndex, env.rdram.data(), &env.ctx, &env.runtime),
+                     "Override syscall should invoke the guest handler");
+            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)),
+                     1u,
+                     "Override invocation should preserve the upper 64 bits of 128-bit GPRs when setting 32-bit args");
+
+            notifyRuntimeStop();
+        });
+
+        tc.Run("broken syscall overrides fall back to builtin handlers", [](TestCase &t)
+        {
+            notifyRuntimeStop();
+            TestEnv env;
+            constexpr uint32_t kHandler = 0x00200010u;
+            constexpr uint32_t kTableBase = 0x00002000u;
+            constexpr uint32_t kValues[] = {
+                0x11111111u,
+                0x11223344u,
+                0x55555555u
+            };
+
+            env.runtime.registerFunction(kHandler, overrideBrokenHandler);
+            setRegU32(env.ctx, 4, 0x83u);
+            setRegU32(env.ctx, 5, kHandler);
+            t.IsTrue(callSyscall(0x74u, env.rdram.data(), &env.ctx, &env.runtime),
+                     "SetSyscall syscall should dispatch");
+
+            writeGuestWords(env.rdram.data(), kTableBase, kValues, std::size(kValues));
+            setRegU32(env.ctx, 4, kTableBase);
+            setRegU32(env.ctx, 5, kTableBase + static_cast<uint32_t>(sizeof(kValues)));
+            setRegU32(env.ctx, 6, 0x11223344u);
+            t.IsTrue(callSyscall(0x83u, env.rdram.data(), &env.ctx, &env.runtime),
+                     "Builtin syscall should still dispatch when override exits abnormally");
+            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)),
+                     kTableBase + 4u,
+                     "Abnormal override exits should fall back to the builtin syscall implementation");
+
+            notifyRuntimeStop();
+        });
+
+        tc.Run("reentrant syscall overrides fall back to builtin handlers", [](TestCase &t)
+        {
+            notifyRuntimeStop();
+            TestEnv env;
+            constexpr uint32_t kHandler = 0x00200020u;
+            constexpr uint32_t kTableBase = 0x00003000u;
+            constexpr uint32_t kValues[] = {
+                0xCAFEBABEu,
+                0x11223344u,
+                0x55667788u
+            };
+
+            env.runtime.registerFunction(kHandler, overrideRecursiveFindAddressHandler);
+            setRegU32(env.ctx, 4, 0x83u);
+            setRegU32(env.ctx, 5, kHandler);
+            t.IsTrue(callSyscall(0x74u, env.rdram.data(), &env.ctx, &env.runtime),
+                     "SetSyscall syscall should dispatch");
+
+            writeGuestWords(env.rdram.data(), kTableBase, kValues, std::size(kValues));
+            setRegU32(env.ctx, 4, kTableBase);
+            setRegU32(env.ctx, 5, kTableBase + static_cast<uint32_t>(sizeof(kValues)));
+            setRegU32(env.ctx, 6, 0x11223344u);
+            t.IsTrue(callSyscall(0x83u, env.rdram.data(), &env.ctx, &env.runtime),
+                     "Reentrant override should resolve through builtin fallback");
+            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)),
+                     kTableBase + 4u,
+                     "Reentrant override dispatch should use builtin syscall implementation");
+
+            notifyRuntimeStop();
         });
     });
 }
