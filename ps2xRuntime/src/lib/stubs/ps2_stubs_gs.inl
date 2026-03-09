@@ -575,9 +575,27 @@ void sceGsSyncPath(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     }
 }
 
+int interlacedFrameCounter = 0;
 void sceGsSyncV(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    setReturnS32(ctx, 0);
+    if (g_gparam.interlace)
+    {
+        //Game is running interlaced
+        //Return value is which line is being rendered
+        //0 => Even
+        //1 => Odd
+        //First call should return 0
+        //Second call should return 1
+        //And so on
+        setReturnS32(ctx, interlacedFrameCounter);
+        interlacedFrameCounter ^= 1;
+    }
+    else
+    {
+        //Running progressive
+        //Always return 1
+        setReturnS32(ctx, 1);
+    }
 }
 
 void sceGsSyncVCallback(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
