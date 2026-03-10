@@ -575,9 +575,21 @@ void sceGsSyncPath(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     }
 }
 
+static uint32_t g_syncField = 0;
 void sceGsSyncV(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    setReturnS32(ctx, 0);
+    if (g_gparam.interlace)
+    {
+        if(g_syncField == 1)
+            ps2_syscalls::WaitVSyncTick(rdram, runtime);
+        setReturnS32(ctx, g_syncField);
+        g_syncField ^= 1u;
+    }
+    else
+    {
+        ps2_syscalls::WaitVSyncTick(rdram, runtime);
+        setReturnS32(ctx, 1);
+    }
 }
 
 void sceGsSyncVCallback(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
