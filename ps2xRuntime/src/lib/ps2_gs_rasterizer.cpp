@@ -770,8 +770,7 @@ void GSRasterizer::drawSprite(GS *gs)
                                   << static_cast<uint32_t>(color.g) << ","
                                   << static_cast<uint32_t>(color.b) << ","
                                   << static_cast<uint32_t>(color.a) << ")"
-                                  << " passA=" << static_cast<uint32_t>(passesAlphaTest(ctx.test, color.a) ? 1u : 0u) <
-                            std::endl;
+                                  << " passA=" << static_cast<uint32_t>(passesAlphaTest(ctx.test, color.a) ? 1u : 0u) << std::endl;
                     }
                 }
                 writePixel(gs, x, y, color.r, color.g, color.b, color.a);
@@ -1101,8 +1100,7 @@ void GSRasterizer::drawTriangle(GS *gs)
                                   << static_cast<uint32_t>((dstBefore >> 16) & 0xFFu) << ","
                                   << static_cast<uint32_t>((dstBefore >> 24) & 0xFFu) << ")"
                                   << " alphaWrite=" << static_cast<uint32_t>(alphaTest.writeFramebuffer ? 1u : 0u)
-                                  << " keepDstA=" << static_cast<uint32_t>(alphaTest.preserveDestinationAlpha ? 1u : 0u) <
-                            std::endl;
+                                  << " keepDstA=" << static_cast<uint32_t>(alphaTest.preserveDestinationAlpha ? 1u : 0u) << std::endl;
                     }
                 }
 
