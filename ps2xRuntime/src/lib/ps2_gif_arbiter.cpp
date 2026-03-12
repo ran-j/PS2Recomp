@@ -1,6 +1,25 @@
 #include "ps2_gif_arbiter.h"
 #include <algorithm>
+#include <atomic>
 #include <cstring>
+#include <iostream>
+
+namespace
+{
+std::atomic<uint32_t> s_debugGifArbiterSubmitCount{0};
+std::atomic<uint32_t> s_debugGifArbiterDrainCount{0};
+
+const char *pathName(GifPathId id)
+{
+    switch (id)
+    {
+    case GifPathId::Path1: return "path1";
+    case GifPathId::Path2: return "path2";
+    case GifPathId::Path3: return "path3";
+    default: return "path?";
+    }
+}
+}
 
 GifArbiter::GifArbiter(ProcessPacketFn processFn)
     : m_processFn(std::move(processFn))
@@ -22,6 +41,26 @@ void GifArbiter::submit(GifPathId pathId, const uint8_t *data, uint32_t sizeByte
 {
     if (!data || sizeBytes < 16 || !m_processFn)
         return;
+
+    const uint32_t debugIndex = s_debugGifArbiterSubmitCount.fetch_add(1, std::memory_order_relaxed);
+    if (debugIndex < 96u)
+    {
+        uint64_t tagLo = 0;
+        std::memcpy(&tagLo, data, sizeof(tagLo));
+        const uint32_t nloop = static_cast<uint32_t>(tagLo & 0x7FFFu);
+        const uint8_t flg = static_cast<uint8_t>((tagLo >> 58) & 0x3u);
+        uint32_t nreg = static_cast<uint32_t>((tagLo >> 60) & 0xFu);
+        if (nreg == 0u)
+            nreg = 16u;
+        std::cout << "[gif:submit] idx=" << debugIndex
+                  << " path=" << pathName(pathId)
+                  << " size=" << sizeBytes
+                  << " nloop=" << nloop
+                  << " flg=" << static_cast<uint32_t>(flg)
+                  << " nreg=" << nreg
+                  << " directhl=" << static_cast<uint32_t>(path2DirectHl ? 1u : 0u)
+                  << std::endl;
+    }
 
     GifArbiterPacket pkt;
     pkt.pathId = pathId;
@@ -54,7 +93,29 @@ void GifArbiter::drain()
     {
         auto &pkt = m_queue[i];
         if (!pkt.data.empty())
+        {
+            const uint32_t debugIndex = s_debugGifArbiterDrainCount.fetch_add(1, std::memory_order_relaxed);
+            if (debugIndex < 96u)
+            {
+                uint64_t tagLo = 0;
+                std::memcpy(&tagLo, pkt.data.data(), sizeof(tagLo));
+                const uint32_t nloop = static_cast<uint32_t>(tagLo & 0x7FFFu);
+                const uint8_t flg = static_cast<uint8_t>((tagLo >> 58) & 0x3u);
+                uint32_t nreg = static_cast<uint32_t>((tagLo >> 60) & 0xFu);
+                if (nreg == 0u)
+                    nreg = 16u;
+                std::cout << "[gif:drain] idx=" << debugIndex
+                          << " path=" << pathName(pkt.pathId)
+                          << " size=" << pkt.data.size()
+                          << " nloop=" << nloop
+                          << " flg=" << static_cast<uint32_t>(flg)
+                          << " nreg=" << nreg
+                          << " directhl=" << static_cast<uint32_t>(pkt.path2DirectHl ? 1u : 0u)
+                          << " path3image=" << static_cast<uint32_t>(pkt.path3Image ? 1u : 0u)
+                          << std::endl;
+            }
             m_processFn(pkt.data.data(), static_cast<uint32_t>(pkt.data.size()));
+        }
     }
     m_queue.clear();
 }
