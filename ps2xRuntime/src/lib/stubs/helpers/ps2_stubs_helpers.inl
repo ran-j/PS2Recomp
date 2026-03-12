@@ -1412,6 +1412,7 @@ namespace
         mem.writeIORegister(channelBase + 0x10u, madr);
         mem.writeIORegister(channelBase + 0x30u, tadr);
         mem.writeIORegister(channelBase + 0x00u, chcr);
+        mem.processPendingTransfers();
 
         std::lock_guard<std::mutex> lock(g_dmaStubMutex);
         g_dmaPendingPolls[channelBase] = 1;
@@ -1492,6 +1493,65 @@ namespace
         uint64_t bgcolor;
     };
 
+    struct GsGiftagMem
+    {
+        uint64_t lo;
+        uint64_t hi;
+    };
+
+    struct GsRegPairMem
+    {
+        uint64_t value;
+        uint64_t reg;
+    };
+
+    struct GsDrawEnv1Mem
+    {
+        GsRegPairMem frame1;
+        GsRegPairMem zbuf1;
+        GsRegPairMem xyoffset1;
+        GsRegPairMem scissor1;
+        GsRegPairMem prmodecont;
+        GsRegPairMem colclamp;
+        GsRegPairMem dthe;
+        GsRegPairMem test1;
+    };
+
+    struct GsDrawEnv2Mem
+    {
+        GsRegPairMem frame2;
+        GsRegPairMem zbuf2;
+        GsRegPairMem xyoffset2;
+        GsRegPairMem scissor2;
+        GsRegPairMem prmodecont;
+        GsRegPairMem colclamp;
+        GsRegPairMem dthe;
+        GsRegPairMem test2;
+    };
+
+    struct GsClearMem
+    {
+        GsRegPairMem testa;
+        GsRegPairMem prim;
+        GsRegPairMem rgbaq;
+        GsRegPairMem xyz2a;
+        GsRegPairMem xyz2b;
+        GsRegPairMem testb;
+    };
+
+    struct GsDBuffDcMem
+    {
+        GsDispEnvMem disp[2];
+        GsGiftagMem giftag0;
+        GsDrawEnv1Mem draw01;
+        GsDrawEnv2Mem draw02;
+        GsClearMem clear0;
+        GsGiftagMem giftag1;
+        GsDrawEnv1Mem draw11;
+        GsDrawEnv2Mem draw12;
+        GsClearMem clear1;
+    };
+
     struct GsImageMem
     {
         uint16_t x;
@@ -1503,33 +1563,14 @@ namespace
         uint8_t psm;
     };
 
-#pragma pack(push, 1)
-    struct GsDrawEnvMem
-    {
-        uint16_t offset_x;
-        uint16_t offset_y;
-        uint16_t clip_x;
-        uint16_t clip_y;
-        uint16_t clip_w;
-        uint16_t clip_h;
-        uint16_t vram_addr;
-        uint8_t fbw;
-        uint8_t psm;
-        uint16_t vram_x;
-        uint16_t vram_y;
-        uint32_t draw_mask;
-        uint8_t auto_clear;
-        uint8_t pad[3];
-        uint8_t bg_r;
-        uint8_t bg_g;
-        uint8_t bg_b;
-        uint8_t bg_a;
-        float bg_q;
-    };
-#pragma pack(pop)
-
     static_assert(sizeof(GsImageMem) == 12, "GsImageMem size mismatch");
-    static_assert(sizeof(GsDrawEnvMem) == 36, "GsDrawEnvMem size mismatch");
+    static_assert(sizeof(GsDispEnvMem) == 40, "GsDispEnvMem size mismatch");
+    static_assert(sizeof(GsGiftagMem) == 16, "GsGiftagMem size mismatch");
+    static_assert(sizeof(GsRegPairMem) == 16, "GsRegPairMem size mismatch");
+    static_assert(sizeof(GsDrawEnv1Mem) == 128, "GsDrawEnv1Mem size mismatch");
+    static_assert(sizeof(GsDrawEnv2Mem) == 128, "GsDrawEnv2Mem size mismatch");
+    static_assert(sizeof(GsClearMem) == 96, "GsClearMem size mismatch");
+    static_assert(sizeof(GsDBuffDcMem) == 0x330, "GsDBuffDcMem size mismatch");
 
     constexpr uint32_t kGsParamScratchOffset = 0x100;
     GsGParam g_gparam{1, 2, 1, 3}; // Default: interlaced NTSC, frame mode.
@@ -1562,6 +1603,53 @@ namespace
                (static_cast<uint64_t>(magv & 0x03) << 27) |
                (static_cast<uint64_t>(dw & 0x0FFF) << 32) |
                (static_cast<uint64_t>(dh & 0x07FF) << 44);
+    }
+
+    static uint64_t makeFrame(uint32_t fbp, uint32_t fbw, uint32_t psm, uint32_t fbmsk)
+    {
+        return (static_cast<uint64_t>(fbp & 0x1FFu) << 0) |
+               (static_cast<uint64_t>(fbw & 0x3Fu) << 16) |
+               (static_cast<uint64_t>(psm & 0x3Fu) << 24) |
+               (static_cast<uint64_t>(fbmsk) << 32);
+    }
+
+    static uint64_t makeZbuf(uint32_t zbp, uint32_t psm, bool zmsk)
+    {
+        return (static_cast<uint64_t>(zbp & 0x1FFu) << 0) |
+               (static_cast<uint64_t>(psm & 0xFu) << 24) |
+               (static_cast<uint64_t>(zmsk ? 1u : 0u) << 32);
+    }
+
+    static uint64_t makeXYOffset(int32_t width, int32_t height)
+    {
+        const int32_t offX = 0x800 - (width >> 1);
+        const int32_t offY = 0x800 - (height >> 1);
+        return (static_cast<uint64_t>(static_cast<uint32_t>(offY) & 0xFFFFu) << 36) |
+               (static_cast<uint64_t>(static_cast<uint32_t>(offX) & 0xFFFFu) << 4);
+    }
+
+    static uint64_t makeScissor(int32_t width, int32_t height)
+    {
+        return (static_cast<uint64_t>(0u) << 0) |
+               (static_cast<uint64_t>(static_cast<uint32_t>(width - 1) & 0x7FFu) << 16) |
+               (static_cast<uint64_t>(0u) << 32) |
+               (static_cast<uint64_t>(static_cast<uint32_t>(height - 1) & 0x7FFu) << 48);
+    }
+
+    static uint64_t makeTest(uint32_t ztest)
+    {
+        if ((ztest & 0x3u) == 0u)
+        {
+            return 0x30000ULL;
+        }
+        return (static_cast<uint64_t>(ztest & 0x3u) << 17) | 0x10000ULL;
+    }
+
+    static uint64_t makeGiftagAplusD(uint32_t nloop)
+    {
+        return (static_cast<uint64_t>(nloop & 0x7FFFu) << 0) |
+               (static_cast<uint64_t>(1u) << 15) |
+               (static_cast<uint64_t>(1u) << 60);
     }
 
     static uint32_t readStackU32(uint8_t *rdram, R5900Context *ctx, uint32_t offset)
@@ -1710,6 +1798,99 @@ namespace
             return false;
         std::memcpy(&out, ptr, sizeof(out));
         return true;
+    }
+
+    static bool readGsDBuffDc(uint8_t *rdram, uint32_t addr, GsDBuffDcMem &out)
+    {
+        const uint8_t *ptr = getConstMemPtr(rdram, addr);
+        if (!ptr)
+            return false;
+        std::memcpy(&out, ptr, sizeof(out));
+        return true;
+    }
+
+    static bool writeGsDBuffDc(uint8_t *rdram, uint32_t addr, const GsDBuffDcMem &db)
+    {
+        uint8_t *ptr = getMemPtr(rdram, addr);
+        if (!ptr)
+            return false;
+        std::memcpy(ptr, &db, sizeof(db));
+        return true;
+    }
+
+    static bool readGsRegPairs(uint8_t *rdram, uint32_t addr, GsRegPairMem *pairs, size_t pairCount)
+    {
+        if (!pairs || pairCount == 0u)
+            return false;
+        const uint8_t *ptr = getConstMemPtr(rdram, addr);
+        if (!ptr)
+            return false;
+        std::memcpy(pairs, ptr, pairCount * sizeof(GsRegPairMem));
+        return true;
+    }
+
+    static void applyGsDispEnv(PS2Runtime *runtime, const GsDispEnvMem &env)
+    {
+        if (!runtime)
+            return;
+        auto &regs = runtime->memory().gs();
+        regs.pmode = env.pmode;
+        regs.smode2 = env.smode2;
+        regs.dispfb1 = env.dispfb;
+        regs.display1 = env.display;
+        regs.bgcolor = env.bgcolor;
+    }
+
+    static void applyGsRegPairs(PS2Runtime *runtime, const GsRegPairMem *pairs, size_t pairCount)
+    {
+        if (!runtime || !pairs)
+            return;
+        for (size_t i = 0; i < pairCount; ++i)
+        {
+            runtime->gs().writeRegister(static_cast<uint8_t>(pairs[i].reg & 0xFFu), pairs[i].value);
+        }
+    }
+
+    static void seedGsDrawEnv1(GsDrawEnv1Mem &env,
+                               int32_t width,
+                               int32_t height,
+                               uint32_t fbp,
+                               uint32_t fbw,
+                               uint32_t psm,
+                               uint32_t zbp,
+                               uint32_t zpsm,
+                               uint32_t ztest,
+                               bool dthe)
+    {
+        env.frame1 = {makeFrame(fbp, fbw, psm, 0u), GS_REG_FRAME_1};
+        env.zbuf1 = {makeZbuf(zbp, zpsm, (ztest & 0x3u) == 0u), GS_REG_ZBUF_1};
+        env.xyoffset1 = {makeXYOffset(width, height), GS_REG_XYOFFSET_1};
+        env.scissor1 = {makeScissor(width, height), GS_REG_SCISSOR_1};
+        env.prmodecont = {1u, GS_REG_PRMODECONT};
+        env.colclamp = {1u, GS_REG_COLCLAMP};
+        env.dthe = {dthe ? 1u : 0u, GS_REG_DTHE};
+        env.test1 = {makeTest(ztest), GS_REG_TEST_1};
+    }
+
+    static void seedGsDrawEnv2(GsDrawEnv2Mem &env,
+                               int32_t width,
+                               int32_t height,
+                               uint32_t fbp,
+                               uint32_t fbw,
+                               uint32_t psm,
+                               uint32_t zbp,
+                               uint32_t zpsm,
+                               uint32_t ztest,
+                               bool dthe)
+    {
+        env.frame2 = {makeFrame(fbp, fbw, psm, 0u), GS_REG_FRAME_2};
+        env.zbuf2 = {makeZbuf(zbp, zpsm, (ztest & 0x3u) == 0u), GS_REG_ZBUF_2};
+        env.xyoffset2 = {makeXYOffset(width, height), GS_REG_XYOFFSET_2};
+        env.scissor2 = {makeScissor(width, height), GS_REG_SCISSOR_2};
+        env.prmodecont = {1u, GS_REG_PRMODECONT};
+        env.colclamp = {1u, GS_REG_COLCLAMP};
+        env.dthe = {dthe ? 1u : 0u, GS_REG_DTHE};
+        env.test2 = {makeTest(ztest), GS_REG_TEST_2};
     }
 
     static uint32_t writeGsGParamToScratch(PS2Runtime *runtime)

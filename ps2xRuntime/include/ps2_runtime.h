@@ -378,6 +378,33 @@ public:
 
     using RecompiledFunction = void (*)(uint8_t *, R5900Context *, PS2Runtime *);
 
+    class GuestExecutionScope
+    {
+    public:
+        explicit GuestExecutionScope(PS2Runtime *runtime) noexcept;
+        ~GuestExecutionScope();
+
+        GuestExecutionScope(const GuestExecutionScope &) = delete;
+        GuestExecutionScope &operator=(const GuestExecutionScope &) = delete;
+
+    private:
+        PS2Runtime *m_runtime = nullptr;
+    };
+
+    class GuestExecutionReleaseScope
+    {
+    public:
+        explicit GuestExecutionReleaseScope(PS2Runtime *runtime) noexcept;
+        ~GuestExecutionReleaseScope();
+
+        GuestExecutionReleaseScope(const GuestExecutionReleaseScope &) = delete;
+        GuestExecutionReleaseScope &operator=(const GuestExecutionReleaseScope &) = delete;
+
+    private:
+        PS2Runtime *m_runtime = nullptr;
+        uint32_t m_depth = 0u;
+    };
+
     void registerFunction(uint32_t address, RecompiledFunction func);
     RecompiledFunction lookupFunction(uint32_t address);
     bool hasFunction(uint32_t address) const;
@@ -409,7 +436,9 @@ public:
     void guestFree(uint32_t guestAddr);
     uint32_t guestHeapBase() const;
     uint32_t guestHeapEnd() const;
+    uint32_t reserveAsyncCallbackStack(uint32_t size, uint32_t alignment = 16u);
     void dispatchLoop(uint8_t *rdram, R5900Context *ctx);
+    void cooperativeGuestYield();
     void requestStop();
     bool isStopRequested() const;
 
@@ -496,8 +525,15 @@ private:
     uint32_t allocateGuestBlockLocked(uint32_t size, uint32_t alignment);
     void freeGuestBlockLocked(uint32_t guestAddr);
     void coalesceGuestHeapLocked();
+    void enterGuestExecution();
+    void leaveGuestExecution();
+    uint32_t releaseGuestExecution();
+    void reacquireGuestExecution(uint32_t depth);
 
     void HandleIntegerOverflow(R5900Context *ctx);
+
+    friend class GuestExecutionScope;
+    friend class GuestExecutionReleaseScope;
 
 private:
     PS2Memory m_memory;
@@ -508,13 +544,18 @@ private:
     PSPadBackend m_padBackend;
     VU1Interpreter m_vu1;
     R5900Context m_cpuContext;
+    mutable std::recursive_mutex m_guestExecutionMutex;
+    mutable std::atomic<uint32_t> m_guestExecutionWaiters{0u};
     mutable std::mutex m_guestHeapMutex;
+    mutable std::mutex m_asyncCallbackStackMutex;
     std::vector<GuestHeapBlock> m_guestHeapBlocks;
     uint32_t m_guestHeapBase = 0x00100000u;
     uint32_t m_guestHeapEnd = 0x00100000u;
     uint32_t m_guestHeapLimit = PS2_RAM_SIZE;
     uint32_t m_guestHeapSuggestedBase = 0x00100000u;
     bool m_guestHeapConfigured = false;
+    uint32_t m_asyncCallbackStackFloor = 0x01F00000u;
+    uint32_t m_asyncCallbackStackTop = PS2_RAM_SIZE;
 
     std::unordered_map<uint32_t, RecompiledFunction> m_functionTable;
     std::atomic<bool> m_stopRequested{false};
