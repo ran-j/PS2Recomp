@@ -83,6 +83,18 @@ namespace ps2_syscalls
         case 0x17:
             DisableDmac(rdram, ctx, runtime);
             return true;
+        case static_cast<uint32_t>(-0x1A):
+            iEnableIntc(rdram, ctx, runtime);
+            return true;
+        case static_cast<uint32_t>(-0x1B):
+            iDisableIntc(rdram, ctx, runtime);
+            return true;
+        case static_cast<uint32_t>(-0x1C):
+            iEnableDmac(rdram, ctx, runtime);
+            return true;
+        case static_cast<uint32_t>(-0x1D):
+            iDisableDmac(rdram, ctx, runtime);
+            return true;
         case 0x18:
         case 0xFC:
             SetAlarm(rdram, ctx, runtime);
@@ -119,12 +131,16 @@ namespace ps2_syscalls
             TerminateThread(rdram, ctx, runtime);
             return true;
         case 0x29:
-        case static_cast<uint32_t>(-0x2A):
             ChangeThreadPriority(rdram, ctx, runtime);
             return true;
+        case static_cast<uint32_t>(-0x2A):
+            iChangeThreadPriority(rdram, ctx, runtime);
+            return true;
         case 0x2B:
-        case static_cast<uint32_t>(-0x2C):
             RotateThreadReadyQueue(rdram, ctx, runtime);
+            return true;
+        case static_cast<uint32_t>(-0x2C):
+            iRotateThreadReadyQueue(rdram, ctx, runtime);
             return true;
         case 0x2D:
             ReleaseWaitThread(rdram, ctx, runtime);
@@ -137,8 +153,10 @@ namespace ps2_syscalls
             GetThreadId(rdram, ctx, runtime);
             return true;
         case 0x30:
-        case static_cast<uint32_t>(-0x31):
             ReferThreadStatus(rdram, ctx, runtime);
+            return true;
+        case static_cast<uint32_t>(-0x31):
+            iReferThreadStatus(rdram, ctx, runtime);
             return true;
         case 0x32:
             SleepThread(rdram, ctx, runtime);
@@ -217,7 +235,7 @@ namespace ps2_syscalls
         case 0x52:
             SetEventFlag(rdram, ctx, runtime);
             return true;
-        case 0x53:
+        case static_cast<uint32_t>(-0x53):
             iSetEventFlag(rdram, ctx, runtime);
             return true;
         case 0x54:
@@ -267,12 +285,16 @@ namespace ps2_syscalls
             FlushCache(rdram, ctx, runtime);
             return true;
         case 0x70:
-        case static_cast<uint32_t>(-0x70):
             GsGetIMR(rdram, ctx, runtime);
             return true;
+        case static_cast<uint32_t>(-0x70):
+            iGsGetIMR(rdram, ctx, runtime);
+            return true;
         case 0x71:
-        case static_cast<uint32_t>(-0x71):
             GsPutIMR(rdram, ctx, runtime);
+            return true;
+        case static_cast<uint32_t>(-0x71):
+            iGsPutIMR(rdram, ctx, runtime);
             return true;
         case 0x73:
             SetVSyncFlag(rdram, ctx, runtime);
