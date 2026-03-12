@@ -227,6 +227,19 @@ namespace ps2recomp
         const uint32_t branchPc = branchInst.address;
         const uint32_t delayPc = branchInst.address + 4u;
         const uint32_t fallthroughPc = branchInst.address + 8u;
+        auto emitInternalTarget = [&](uint32_t target, uint32_t sourcePc, std::string_view indent)
+        {
+            ss << fmt::format("{}ctx->pc = 0x{:X}u;\n", indent, target);
+            if (target <= sourcePc)
+            {
+                ss << fmt::format("{}runtime->cooperativeGuestYield();\n", indent);
+                ss << fmt::format("{}goto label_{:x};\n", indent, target);
+            }
+            else
+            {
+                ss << fmt::format("{}goto label_{:x};\n", indent, target);
+            }
+        };
 
         std::vector<uint32_t> sortedInternalTargets;
         if (branchInst.opcode == OPCODE_SPECIAL &&
@@ -293,8 +306,7 @@ namespace ps2recomp
 
             if (internalTargets.contains(target))
             {
-                ss << fmt::format("    ctx->pc = 0x{:X}u;\n", target);
-                ss << fmt::format("    goto label_{:x};\n", target);
+                emitInternalTarget(target, branchPc, "    ");
             }
             else
             {
@@ -579,8 +591,7 @@ namespace ps2recomp
 
                 if (internalTargets.contains(target))
                 {
-                    ss << fmt::format("            ctx->pc = 0x{:X}u;\n", target);
-                    ss << fmt::format("            goto label_{:x};\n", target);
+                    emitInternalTarget(target, branchPc, "            ");
                 }
                 else
                 {
@@ -606,8 +617,7 @@ namespace ps2recomp
                 ss << "        if (" << branchTakenVar << ") {\n";
                 if (internalTargets.contains(target))
                 {
-                    ss << fmt::format("            ctx->pc = 0x{:X}u;\n", target);
-                    ss << fmt::format("            goto label_{:x};\n", target);
+                    emitInternalTarget(target, branchPc, "            ");
                 }
                 else
                 {

@@ -838,7 +838,7 @@ void register_code_generator_tests()
             t.IsTrue(generated.find("if (ctx->pc != 0xD008u) { return; }") != std::string::npos, "JALR should check return PC");
         }); 
 
-        tc.Run("backward BEQ emits label and goto (sign-extended offset)", [](TestCase &t) {
+        tc.Run("backward BEQ yields cooperatively on sign-extended internal loop", [](TestCase &t) {
             Function func;
             func.name = "backward_branch";
             func.start = 0x1100;
@@ -861,10 +861,17 @@ void register_code_generator_tests()
 
             CodeGenerator gen({}, {});
             std::string generated = gen.generateFunction(func, instructions, false);
-            printGeneratedCode("backward BEQ emits label and goto (sign-extended offset)", generated);
+            printGeneratedCode("backward BEQ yields cooperatively on sign-extended internal loop", generated);
 
             t.IsTrue(generated.find("label_1100:") != std::string::npos, "target should emit a label");
-            t.IsTrue(generated.find("goto label_1100;") != std::string::npos, "backward internal branch should goto label");
+            t.IsTrue(generated.find("ctx->pc = 0x1100u;") != std::string::npos,
+                     "backward internal branch should preserve the loop target in ctx->pc");
+            t.IsTrue(generated.find("runtime->cooperativeGuestYield();") != std::string::npos,
+                     "backward internal branch should yield guest execution before re-entering the loop");
+            t.IsTrue(generated.find("goto label_1100;") != std::string::npos,
+                     "backward internal branch should re-enter the in-function label after yielding");
+            t.IsTrue(generated.find("ctx->pc = 0x1100u;\n            return;") == std::string::npos,
+                     "backward internal branch should not return to the dispatcher for a non-entry internal label");
         });
 
         tc.Run("branch-likely places delay slot only in taken path", [](TestCase &t) {
