@@ -23,6 +23,7 @@ constexpr uint32_t PS2_RAM_SIZE = 32u * 1024u * 1024u; // 32MB
 constexpr uint32_t PS2_RAM_MASK = PS2_RAM_SIZE - 1u;   // Mask for 32MB alignment
 constexpr uint32_t PS2_RAM_BASE = 0x00000000;          // Physical base of RDRAM
 constexpr uint32_t PS2_SCRATCHPAD_BASE = 0x70000000;
+constexpr uint32_t PS2_SCRATCHPAD_ALIAS_BASE = 0xF0000000;
 constexpr uint32_t PS2_SCRATCHPAD_SIZE = 16u * 1024u;  // 16KB
 constexpr uint32_t PS2_IO_BASE = 0x10000000;           // Base for many I/O regs (Timers, DMAC, INTC)
 constexpr uint32_t PS2_IO_SIZE = 0x10000;              // 64KB
@@ -81,12 +82,40 @@ inline uint8_t *ps2GetScratchpadHostPtr()
     return ps2ScratchpadHostPtrStorage().load(std::memory_order_relaxed);
 }
 
-inline bool ps2ResolveGuestPointer(uint32_t addr, uint32_t &offset, bool &scratch)
+inline bool ps2IsScratchpadAddress(uint32_t addr)
 {
     if (addr >= PS2_SCRATCHPAD_BASE && addr < (PS2_SCRATCHPAD_BASE + PS2_SCRATCHPAD_SIZE))
     {
+        return true;
+    }
+
+    if ((addr & 0x80000000u) != 0u)
+    {
+        const uint32_t lower = addr & 0x7FFFFFFFu;
+        return lower >= PS2_SCRATCHPAD_BASE &&
+               lower < (PS2_SCRATCHPAD_BASE + PS2_SCRATCHPAD_SIZE);
+    }
+
+    return false;
+}
+
+inline uint32_t ps2ScratchpadOffset(uint32_t addr)
+{
+    if (addr >= PS2_SCRATCHPAD_BASE && addr < (PS2_SCRATCHPAD_BASE + PS2_SCRATCHPAD_SIZE))
+    {
+        return addr - PS2_SCRATCHPAD_BASE;
+    }
+
+    const uint32_t lower = addr & 0x7FFFFFFFu;
+    return lower - PS2_SCRATCHPAD_BASE;
+}
+
+inline bool ps2ResolveGuestPointer(uint32_t addr, uint32_t &offset, bool &scratch)
+{
+    if (ps2IsScratchpadAddress(addr))
+    {
         scratch = true;
-        offset = addr - PS2_SCRATCHPAD_BASE;
+        offset = ps2ScratchpadOffset(addr);
         return true;
     }
 

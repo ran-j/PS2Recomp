@@ -224,15 +224,14 @@ bool PS2Memory::initialize(size_t ramSize)
 
 bool PS2Memory::isScratchpad(uint32_t address) const
 {
-    return address >= PS2_SCRATCHPAD_BASE &&
-           address < PS2_SCRATCHPAD_BASE + PS2_SCRATCHPAD_SIZE;
+    return ps2IsScratchpadAddress(address);
 }
 
 uint32_t PS2Memory::translateAddress(uint32_t virtualAddress)
 {
     if (isScratchpad(virtualAddress))
     {
-        return virtualAddress - PS2_SCRATCHPAD_BASE;
+        return ps2ScratchpadOffset(virtualAddress);
     }
 
     // EE uncached aliases of main RAM (per PS2 memory map):
@@ -837,7 +836,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     pt.qwc = qwCount;
                     if (channelBase == 0x1000A000)
                         m_pendingGifTransfers.push_back(pt);
-                    else if (channelBase == 0x10009000 && !scratch)
+                    else if (channelBase == 0x10009000)
                         m_pendingVif1Transfers.push_back(pt);
                 };
 
@@ -1029,6 +1028,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                 {
                     enqueueTransfer(madr, qwc);
                 }
+
+                processPendingTransfers();
             }
         }
         return true;
@@ -1105,9 +1106,11 @@ void PS2Memory::processPendingTransfers()
         {
             processVIF1Data(p.chainData.data(), static_cast<uint32_t>(p.chainData.size()));
         }
-        else if (p.qwc > 0 && !p.fromScratchpad)
+        else if (p.qwc > 0)
         {
             uint32_t srcPhys = 0;
+            const uint64_t bytes64 = static_cast<uint64_t>(p.qwc) * 16ull;
+            uint32_t sizeBytes = (bytes64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu : static_cast<uint32_t>(bytes64);
             try
             {
                 srcPhys = translateAddress(p.srcAddr);
@@ -1116,10 +1119,13 @@ void PS2Memory::processPendingTransfers()
             {
                 continue;
             }
-            if (srcPhys < PS2_RAM_SIZE)
+            if (p.fromScratchpad)
             {
-                const uint64_t bytes64 = static_cast<uint64_t>(p.qwc) * 16ull;
-                uint32_t sizeBytes = (bytes64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu : static_cast<uint32_t>(bytes64);
+                if (srcPhys + sizeBytes <= PS2_SCRATCHPAD_SIZE && sizeBytes > 0u)
+                    processVIF1Data(m_scratchpad + srcPhys, sizeBytes);
+            }
+            else if (srcPhys < PS2_RAM_SIZE)
+            {
                 if (srcPhys + sizeBytes > PS2_RAM_SIZE)
                     sizeBytes = PS2_RAM_SIZE - srcPhys;
                 if (sizeBytes > 0)
