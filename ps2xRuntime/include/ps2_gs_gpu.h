@@ -216,6 +216,10 @@ public:
     const uint8_t *lockDisplaySnapshot(uint32_t &outSize);
     void unlockDisplaySnapshot();
     uint32_t getLastDisplayBaseBytes() const;
+    const GSFrameReg &getContextFrame(int index) const
+    {
+        return m_ctx[(index != 0) ? 1 : 0].frame;
+    }
 
     uint32_t consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes);
 
@@ -227,6 +231,7 @@ private:
     void vertexKick(bool drawing);
 
     void processImageData(const uint8_t *data, uint32_t sizeBytes);
+    void performLocalToLocalTransfer();
     void performLocalToHostToBuffer();
 
     GSContext &activeContext();
