@@ -1,6 +1,8 @@
 // Based on Blackline Interactive implementation
 #include "ps2_memory.h"
+#include <atomic>
 #include <cstring>
+#include <iostream>
 #include <iostream>
 
 enum VIFCmd : uint8_t
@@ -26,6 +28,13 @@ enum VIFCmd : uint8_t
     VIF_DIRECT = 0x50,
     VIF_DIRECTHL = 0x51,
 };
+
+namespace
+{
+    std::atomic<uint32_t> s_debugVu1KickCount{0};
+    std::atomic<uint32_t> s_debugVif1OpcodeCount{0};
+    constexpr uint32_t kVu1ResumePc = 0xFFFFFFFFu;
+}
 
 void PS2Memory::processVIF1Data(uint32_t srcPhys, uint32_t sizeBytes)
 {
@@ -66,6 +75,18 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         uint16_t imm = cmd & 0xFFFF;
         uint8_t num = (cmd >> 16) & 0xFF;
         const bool irq = (cmd & 0x80000000u) != 0u;
+
+        const uint32_t opcodeIndex = s_debugVif1OpcodeCount.fetch_add(1, std::memory_order_relaxed);
+        if (opcodeIndex < 160u)
+        {
+            std::cout << "[vif1:cmd] idx=" << opcodeIndex
+                      << " opcode=0x" << std::hex << static_cast<uint32_t>(opcode)
+                      << " imm=0x" << imm
+                      << std::dec
+                      << " num=" << static_cast<uint32_t>(num)
+                      << " irq=" << static_cast<uint32_t>(irq ? 1u : 0u)
+                      << std::endl;
+        }
 
         // Track most-recent command for VIFn_CODE emulation.
         vif1_regs.code = cmd;
@@ -132,6 +153,16 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             vif1_regs.stat ^= (1u << 7); // toggle DBF
             recomputeVif1Tops();
             uint32_t startPC = (uint32_t)imm * 8u;
+            const uint32_t kickIndex = s_debugVu1KickCount.fetch_add(1, std::memory_order_relaxed);
+            if (kickIndex < 48u)
+            {
+                std::cout << "[vif1:mscal] idx=" << kickIndex
+                          << " opcode=0x" << std::hex << static_cast<uint32_t>(opcode)
+                          << " imm=0x" << imm
+                          << " startPc=0x" << startPC
+                          << " itop=0x" << vif1_regs.itop
+                          << std::dec << std::endl;
+            }
             if (m_vu1MscalCallback)
                 m_vu1MscalCallback(startPC, vif1_regs.itop);
             continue;
@@ -141,6 +172,16 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             vif1_regs.itops = vif1_regs.itop & 0x3FFu;
             vif1_regs.stat ^= (1u << 7); // toggle DBF
             recomputeVif1Tops();
+            const uint32_t kickIndex = s_debugVu1KickCount.fetch_add(1, std::memory_order_relaxed);
+            if (kickIndex < 48u)
+            {
+                std::cout << "[vif1:mscnt] idx=" << kickIndex
+                          << " itop=0x" << std::hex << vif1_regs.itop
+                          << " pc=resume"
+                          << std::dec << std::endl;
+            }
+            if (m_vu1MscalCallback)
+                m_vu1MscalCallback(kVu1ResumePc, vif1_regs.itop);
             continue;
         }
         else if (opcode == VIF_STMASK)
@@ -222,11 +263,20 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             int bitsPerComponent = 32;
             switch (vl)
             {
-            case 0: bitsPerComponent = 32; break;
-            case 1: bitsPerComponent = 16; break;
-            case 2: bitsPerComponent = 8; break;
-            case 3: bitsPerComponent = (vn == 3) ? 4 : 16; break;
-            default: break;
+            case 0:
+                bitsPerComponent = 32;
+                break;
+            case 1:
+                bitsPerComponent = 16;
+                break;
+            case 2:
+                bitsPerComponent = 8;
+                break;
+            case 3:
+                bitsPerComponent = (vn == 3) ? 4 : 16;
+                break;
+            default:
+                break;
             }
             int bitsPerVector = (vl == 3 && vn == 3) ? 16 : (components * bitsPerComponent);
             uint32_t bytesPerVector = (bitsPerVector + 7) / 8;

@@ -6,19 +6,23 @@
 
 namespace
 {
-std::atomic<uint32_t> s_debugGifArbiterSubmitCount{0};
-std::atomic<uint32_t> s_debugGifArbiterDrainCount{0};
+    std::atomic<uint32_t> s_debugGifArbiterSubmitCount{0};
+    std::atomic<uint32_t> s_debugGifArbiterDrainCount{0};
 
-const char *pathName(GifPathId id)
-{
-    switch (id)
+    const char *pathName(GifPathId id)
     {
-    case GifPathId::Path1: return "path1";
-    case GifPathId::Path2: return "path2";
-    case GifPathId::Path3: return "path3";
-    default: return "path?";
+        switch (id)
+        {
+        case GifPathId::Path1:
+            return "path1";
+        case GifPathId::Path2:
+            return "path2";
+        case GifPathId::Path3:
+            return "path3";
+        default:
+            return "path?";
+        }
     }
-}
 }
 
 GifArbiter::GifArbiter(ProcessPacketFn processFn)
@@ -77,17 +81,18 @@ void GifArbiter::drain()
         return;
 
     std::stable_sort(m_queue.begin(), m_queue.end(),
-        [](const GifArbiterPacket &a, const GifArbiterPacket &b) {
-            // DIRECTHL cannot preempt PATH3 IMAGE transfers.
-            if (a.path2DirectHl != b.path2DirectHl || a.path3Image != b.path3Image)
-            {
-                if (a.path3Image && b.path2DirectHl)
-                    return true;
-                if (a.path2DirectHl && b.path3Image)
-                    return false;
-            }
-            return pathPriority(a.pathId) < pathPriority(b.pathId);
-        });
+                     [](const GifArbiterPacket &a, const GifArbiterPacket &b)
+                     {
+                         // DIRECTHL cannot preempt PATH3 IMAGE transfers.
+                         if (a.path2DirectHl != b.path2DirectHl || a.path3Image != b.path3Image)
+                         {
+                             if (a.path3Image && b.path2DirectHl)
+                                 return true;
+                             if (a.path2DirectHl && b.path3Image)
+                                 return false;
+                         }
+                         return pathPriority(a.pathId) < pathPriority(b.pathId);
+                     });
 
     for (size_t i = 0; i < m_queue.size(); ++i)
     {
