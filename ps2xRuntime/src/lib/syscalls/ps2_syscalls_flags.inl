@@ -307,12 +307,15 @@ void WaitSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         }
 
         sema->waiters++;
-        sema->cv.wait(lock, [&]()
-                      {
-                          bool forced = info ? info->forceRelease.load() : false;
-                          bool terminated = info ? info->terminated.load() : false;
-                          return sema->count > 0 || sema->deleted || forced || terminated; //
-                      });
+        {
+            PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime);
+            sema->cv.wait(lock, [&]()
+                          {
+                              bool forced = info ? info->forceRelease.load() : false;
+                              bool terminated = info ? info->terminated.load() : false;
+                              return sema->count > 0 || sema->deleted || forced || terminated; //
+                          });
+        }
         sema->waiters--;
         if (sema->deleted)
         {
@@ -354,7 +357,7 @@ void WaitSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
                   << std::endl;
     }
     lock.unlock();
-    waitWhileSuspended(info);
+    waitWhileSuspended(info, runtime);
     setReturnS32(ctx, ret);
 }
 
@@ -627,7 +630,10 @@ void WaitEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         }
 
         info->waiters++;
-        info->cv.wait(lock, satisfied);
+        {
+            PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime);
+            info->cv.wait(lock, satisfied);
+        }
         info->waiters--;
 
         if (tInfo)
@@ -689,7 +695,7 @@ void WaitEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     }
 
     lock.unlock();
-    waitWhileSuspended(tInfo);
+    waitWhileSuspended(tInfo, runtime);
     setReturnS32(ctx, ret);
 }
 

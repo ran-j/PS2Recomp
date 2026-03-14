@@ -251,6 +251,73 @@ void register_ps2_runtime_interrupt_tests()
             cleanupRuntime(env);
         });
 
+        tc.Run("negative interrupt-safe EE syscall ids dispatch", [](TestCase &t)
+        {
+            notifyRuntimeStop();
+            TestEnv env;
+
+            constexpr uint32_t kEventParamAddr = 0x1200u;
+            constexpr uint32_t kStatusAddr = 0x1210u;
+
+            const uint32_t eventParam[3] = {
+                0u,
+                0u,
+                0u
+            };
+            std::memcpy(env.rdram.data() + kEventParamAddr, eventParam, sizeof(eventParam));
+
+            R5900Context createCtx{};
+            setRegU32(createCtx, 4, kEventParamAddr);
+            CreateEventFlag(env.rdram.data(), &createCtx, &env.runtime);
+            const int32_t eid = getRegS32(createCtx, 2);
+            t.IsTrue(eid > 0, "CreateEventFlag should return a valid event id");
+
+            R5900Context disableIntcCtx{};
+            setRegU32(disableIntcCtx, 4, 2u);
+            t.IsTrue(callSyscall(static_cast<uint32_t>(-0x1B), env.rdram.data(), &disableIntcCtx, &env.runtime),
+                     "negative iDisableIntc syscall id should dispatch");
+            t.Equals(getRegS32(disableIntcCtx, 2), KE_OK, "negative iDisableIntc should return KE_OK");
+
+            R5900Context enableIntcCtx{};
+            setRegU32(enableIntcCtx, 4, 2u);
+            t.IsTrue(callSyscall(static_cast<uint32_t>(-0x1A), env.rdram.data(), &enableIntcCtx, &env.runtime),
+                     "negative iEnableIntc syscall id should dispatch");
+            t.Equals(getRegS32(enableIntcCtx, 2), KE_OK, "negative iEnableIntc should return KE_OK");
+
+            R5900Context disableDmacCtx{};
+            setRegU32(disableDmacCtx, 4, 5u);
+            t.IsTrue(callSyscall(static_cast<uint32_t>(-0x1D), env.rdram.data(), &disableDmacCtx, &env.runtime),
+                     "negative iDisableDmac syscall id should dispatch");
+            t.Equals(getRegS32(disableDmacCtx, 2), KE_OK, "negative iDisableDmac should return KE_OK");
+
+            R5900Context enableDmacCtx{};
+            setRegU32(enableDmacCtx, 4, 5u);
+            t.IsTrue(callSyscall(static_cast<uint32_t>(-0x1C), env.rdram.data(), &enableDmacCtx, &env.runtime),
+                     "negative iEnableDmac syscall id should dispatch");
+            t.Equals(getRegS32(enableDmacCtx, 2), KE_OK, "negative iEnableDmac should return KE_OK");
+
+            R5900Context setEventFlagCtx{};
+            setRegU32(setEventFlagCtx, 4, static_cast<uint32_t>(eid));
+            setRegU32(setEventFlagCtx, 5, 0x6u);
+            t.IsTrue(callSyscall(static_cast<uint32_t>(-0x53), env.rdram.data(), &setEventFlagCtx, &env.runtime),
+                     "negative iSetEventFlag syscall id should dispatch");
+            t.Equals(getRegS32(setEventFlagCtx, 2), KE_OK, "negative iSetEventFlag should return KE_OK");
+
+            R5900Context referCtx{};
+            setRegU32(referCtx, 4, static_cast<uint32_t>(eid));
+            setRegU32(referCtx, 5, kStatusAddr);
+            ReferEventFlagStatus(env.rdram.data(), &referCtx, &env.runtime);
+            t.Equals(getRegS32(referCtx, 2), KE_OK, "ReferEventFlagStatus should succeed after iSetEventFlag");
+            t.Equals(readGuestU32(env.rdram.data(), kStatusAddr + 12u), 0x6u,
+                     "negative iSetEventFlag should publish the requested bits");
+
+            R5900Context deleteCtx{};
+            setRegU32(deleteCtx, 4, static_cast<uint32_t>(eid));
+            DeleteEventFlag(env.rdram.data(), &deleteCtx, &env.runtime);
+
+            cleanupRuntime(env);
+        });
+
         tc.Run("WaitEventFlag blocks and wakes when SetEventFlag publishes bits", [](TestCase &t)
         {
             notifyRuntimeStop();

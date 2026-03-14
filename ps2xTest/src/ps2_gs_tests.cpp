@@ -1,17 +1,25 @@
 #include "MiniTest.h"
 #include "ps2_memory.h"
 #include "ps2_runtime.h"
+#include "ps2_stubs.h"
 #include "ps2_syscalls.h"
 #include "ps2_gs_gpu.h"
+#include "ps2_gs_psmt4.h"
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <thread>
 #include <vector>
 
 using namespace ps2_syscalls;
 
 namespace
 {
+    std::atomic<uint32_t> g_gsSyncCallbackHits{0u};
+    std::atomic<uint32_t> g_gsSyncCallbackLastTick{0u};
+
     void setRegU32(R5900Context &ctx, int reg, uint32_t value)
     {
         ctx.r[reg] = _mm_set_epi64x(0, static_cast<int64_t>(value));
@@ -44,6 +52,32 @@ namespace
         const size_t pos = dst.size();
         dst.resize(pos + sizeof(uint64_t));
         std::memcpy(dst.data() + pos, &value, sizeof(uint64_t));
+    }
+
+    template <typename Predicate>
+    bool waitUntil(Predicate pred, std::chrono::milliseconds timeout)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            if (pred())
+            {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+
+        return pred();
+    }
+
+    void testGsSyncVCallback(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        (void)runtime;
+
+        g_gsSyncCallbackLastTick.store(getRegU32(ctx, 4), std::memory_order_relaxed);
+        g_gsSyncCallbackHits.fetch_add(1u, std::memory_order_relaxed);
+        ctx->pc = 0u;
     }
 }
 
@@ -133,6 +167,71 @@ void register_ps2_gs_tests()
             t.Equals(currentImr, 0x3333444411112222ull, "GsGetIMR should return current GS IMR");
         });
 
+        tc.Run("sceGsSetDefDBuffDc seeds display envs and swap applies the selected page", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            constexpr uint32_t kEnvAddr = 0x4000u;
+            constexpr uint32_t kDispEnvSize = 40u;
+            constexpr uint32_t kDBuffSize = 0x330u;
+            constexpr uint32_t kDispFbOffset = 16u;
+            constexpr uint32_t kDisplayOffset = 24u;
+            constexpr uint32_t kDraw01Offset = 0x60u;
+            constexpr uint32_t kFrame1Offset = kDraw01Offset + 0x00u;
+            constexpr uint32_t kFrame1AddrOffset = kDraw01Offset + 0x08u;
+            constexpr uint32_t kXYOffset1Offset = kDraw01Offset + 0x20u;
+            constexpr uint32_t kXYOffset1AddrOffset = kDraw01Offset + 0x28u;
+
+            R5900Context ctx{};
+            setRegU32(ctx, 4, kEnvAddr);
+            setRegU32(ctx, 5, 0u);
+            setRegU32(ctx, 6, 640u);
+            setRegU32(ctx, 7, 448u);
+            std::memset(rdram.data() + kEnvAddr, 0xCD, kDBuffSize);
+            ps2_stubs::sceGsSetDefDBuffDc(rdram.data(), &ctx, &runtime);
+
+            uint64_t dispfb0 = 0u;
+            uint64_t display0 = 0u;
+            uint64_t frame10 = 0u;
+            uint64_t frame10Addr = 0u;
+            uint64_t xyoffset10 = 0u;
+            uint64_t xyoffset10Addr = 0u;
+            std::memcpy(&dispfb0, rdram.data() + kEnvAddr + kDispFbOffset, sizeof(dispfb0));
+            std::memcpy(&display0, rdram.data() + kEnvAddr + kDisplayOffset, sizeof(display0));
+            std::memcpy(&frame10, rdram.data() + kEnvAddr + kFrame1Offset, sizeof(frame10));
+            std::memcpy(&frame10Addr, rdram.data() + kEnvAddr + kFrame1AddrOffset, sizeof(frame10Addr));
+            std::memcpy(&xyoffset10, rdram.data() + kEnvAddr + kXYOffset1Offset, sizeof(xyoffset10));
+            std::memcpy(&xyoffset10Addr, rdram.data() + kEnvAddr + kXYOffset1AddrOffset, sizeof(xyoffset10Addr));
+
+            t.Equals((dispfb0 >> 9) & 0x3Fu, 10ull, "dbuff display env should seed FBW from width");
+            t.Equals((display0 >> 32) & 0x0FFFull, 639ull, "dbuff display env should seed DW from width");
+            t.Equals((display0 >> 44) & 0x07FFull, 447ull, "dbuff display env should seed DH from height");
+            t.Equals((frame10 >> 16) & 0x3Full, 10ull, "dbuff draw env should seed FRAME FBW from width");
+            t.Equals(frame10Addr, 0x4Cull, "dbuff draw env should seed FRAME_1 register id");
+            t.Equals(xyoffset10 & 0xFFFFull, 0x6C00ull, "dbuff draw env should seed OFX in 12.4 fixed point");
+            t.Equals((xyoffset10 >> 32) & 0xFFFFull, 0x7200ull, "dbuff draw env should seed OFY in 12.4 fixed point");
+            t.Equals(xyoffset10Addr, 0x18ull, "dbuff draw env should seed XYOFFSET_1 register id");
+
+            dispfb0 = (dispfb0 & ~0x1FFull) | 150ull;
+            std::memcpy(rdram.data() + kEnvAddr + kDispFbOffset, &dispfb0, sizeof(dispfb0));
+
+            uint64_t dispfb1 = dispfb0;
+            dispfb1 = (dispfb1 & ~0x1FFull) | 151ull;
+            std::memcpy(rdram.data() + kEnvAddr + kDispEnvSize + kDispFbOffset, &dispfb1, sizeof(dispfb1));
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, kEnvAddr);
+            setRegU32(ctx, 5, 1u);
+            ps2_stubs::sceGsSwapDBuffDc(rdram.data(), &ctx, &runtime);
+
+            t.Equals(runtime.memory().gs().dispfb1 & 0x1FFull, 151ull,
+                     "sceGsSwapDBuffDc should program GS to the selected display page");
+            t.Equals((runtime.memory().gs().display1 >> 32) & 0x0FFFull, 639ull,
+                     "sceGsSwapDBuffDc should preserve the display width from the seeded env");
+        });
+
         tc.Run("GIF PACKED A+D writes DISPFB1 and DISPLAY1 privileged registers", [](TestCase &t)
         {
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
@@ -155,6 +254,35 @@ void register_ps2_gs_tests()
 
             t.Equals(regs.dispfb1, dispfb1, "A+D should write GS DISPFB1");
             t.Equals(regs.display1, display1, "A+D should write GS DISPLAY1");
+        });
+
+        tc.Run("PSMT4 address mapping matches Veronica Conv4to32 layout", [](TestCase &t)
+        {
+            constexpr uint32_t kBaseBlock = 0u;
+            constexpr uint32_t kWidth = 2u; // One 128x128 PSMT4 page.
+
+            t.Equals(GSPSMT4::addrPSMT4(kBaseBlock, kWidth, 0u, 0u), 0u,
+                     "PSMT4 origin should map to nibble offset 0");
+            t.Equals(GSPSMT4::addrPSMT4(kBaseBlock, kWidth, 1u, 0u), 8u,
+                     "PSMT4 x=1 should advance to the next packed nibble group");
+            t.Equals(GSPSMT4::addrPSMT4(kBaseBlock, kWidth, 0u, 1u), 512u,
+                     "PSMT4 second source row should land on the next CT32 row stride");
+            t.Equals(GSPSMT4::addrPSMT4(kBaseBlock, kWidth, 0u, 2u), 33u,
+                     "PSMT4 third source row should keep Veronica's interleaved ordering");
+            t.Equals(GSPSMT4::addrPSMT4(kBaseBlock, kWidth, 0u, 3u), 545u,
+                     "PSMT4 fourth source row should include both interleave and CT32 row stride");
+            t.Equals(GSPSMT4::addrPSMT4(kBaseBlock, kWidth, 31u, 15u), 3647u,
+                     "PSMT4 final texel in the first 32x16 block should match Veronica's block layout");
+            t.Equals(GSPSMT4::addrPSMT4(kBaseBlock, kWidth, 32u, 0u), 4096u,
+                     "PSMT4 x=32 should advance to the next CT32 block column");
+            t.Equals(GSPSMT4::addrPSMT4(kBaseBlock, kWidth, 32u, 16u), 4160u,
+                     "PSMT4 x=32,y=16 should include both block-column and block-row offsets");
+            t.Equals(GSPSMT4::addrPSMT4(kBaseBlock, kWidth, 64u, 0u), 8192u,
+                     "PSMT4 x=64 should advance to the third block column in the page");
+            t.Equals(GSPSMT4::addrPSMT4(kBaseBlock, kWidth, 96u, 112u), 12736u,
+                     "PSMT4 bottom-right block origin should match Veronica's page permutation");
+            t.Equals(GSPSMT4::addrPSMT4(kBaseBlock, kWidth, 127u, 127u), 16383u,
+                     "PSMT4 final texel in a 128x128 page should land at the end of the page");
         });
 
         tc.Run("GIF REGLIST with odd register count consumes 128-bit padding before next tag", [](TestCase &t)
@@ -447,6 +575,349 @@ void register_ps2_gs_tests()
             t.Equals(outBytes, 2u, "PSMT4 local->host should return packed nibble bytes");
             t.Equals(out[0], static_cast<uint8_t>(0x21u), "packed nibble byte 0 should roundtrip");
             t.Equals(out[1], static_cast<uint8_t>(0x43u), "packed nibble byte 1 should roundtrip");
+        });
+
+        tc.Run("GS PSMT4 host-local upload keeps position across split IMAGE packets", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            const uint64_t bitblt =
+                (static_cast<uint64_t>(0u) << 0) |
+                (static_cast<uint64_t>(1u) << 16) |
+                (static_cast<uint64_t>(GS_PSM_T4) << 24) |
+                (static_cast<uint64_t>(0u) << 32) |
+                (static_cast<uint64_t>(1u) << 48) |
+                (static_cast<uint64_t>(GS_PSM_T4) << 56);
+            gs.writeRegister(GS_REG_BITBLTBUF, bitblt);
+            gs.writeRegister(GS_REG_TRXPOS, 0ull);
+            gs.writeRegister(GS_REG_TRXREG, (8ull << 0) | (8ull << 32)); // 64 texels => 32 bytes
+            gs.writeRegister(GS_REG_TRXDIR, 0ull);
+
+            uint8_t packedSource[32] = {};
+            for (uint32_t i = 0; i < 32u; ++i)
+            {
+                packedSource[i] = static_cast<uint8_t>(0x10u + i);
+            }
+
+            std::vector<uint8_t> packetA;
+            appendU64(packetA, makeGifTag(1u, GIF_FMT_IMAGE, 0u, true));
+            appendU64(packetA, 0ull);
+            packetA.insert(packetA.end(), packedSource, packedSource + 16u);
+
+            std::vector<uint8_t> packetB;
+            appendU64(packetB, makeGifTag(1u, GIF_FMT_IMAGE, 0u, true));
+            appendU64(packetB, 0ull);
+            packetB.insert(packetB.end(), packedSource + 16u, packedSource + 32u);
+
+            gs.processGIFPacket(packetA.data(), static_cast<uint32_t>(packetA.size()));
+            gs.processGIFPacket(packetB.data(), static_cast<uint32_t>(packetB.size()));
+
+            gs.writeRegister(GS_REG_TRXDIR, 1ull);
+            uint8_t out[32] = {};
+            const uint32_t outBytes = gs.consumeLocalToHostBytes(out, sizeof(out));
+
+            t.Equals(outBytes, 32u, "split T4 IMAGE upload should fill the full packed byte range");
+            for (uint32_t i = 0; i < 32u; ++i)
+            {
+                t.Equals(out[i], packedSource[i], "split T4 IMAGE upload should preserve packed nibble order");
+            }
+        });
+
+        tc.Run("GS PSMT4 local-local copy respects swizzled page layout", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            constexpr uint32_t kSrcBp = 64u;
+            constexpr uint32_t kDstBp = 96u;
+            constexpr uint64_t kUploadBitblt =
+                (static_cast<uint64_t>(0u) << 0) |
+                (static_cast<uint64_t>(2u) << 16) |
+                (static_cast<uint64_t>(GS_PSM_T4) << 24) |
+                (static_cast<uint64_t>(kSrcBp) << 32) |
+                (static_cast<uint64_t>(2u) << 48) |
+                (static_cast<uint64_t>(GS_PSM_T4) << 56);
+            constexpr uint64_t kCopyBitblt =
+                (static_cast<uint64_t>(kSrcBp) << 0) |
+                (static_cast<uint64_t>(2u) << 16) |
+                (static_cast<uint64_t>(GS_PSM_T4) << 24) |
+                (static_cast<uint64_t>(kDstBp) << 32) |
+                (static_cast<uint64_t>(2u) << 48) |
+                (static_cast<uint64_t>(GS_PSM_T4) << 56);
+            constexpr uint64_t kCopyPos =
+                (static_cast<uint64_t>(0u) << 0) |
+                (static_cast<uint64_t>(0u) << 16) |
+                (static_cast<uint64_t>(32u) << 32) |
+                (static_cast<uint64_t>(16u) << 48);
+            constexpr uint64_t kReadBitblt =
+                (static_cast<uint64_t>(kDstBp) << 0) |
+                (static_cast<uint64_t>(2u) << 16) |
+                (static_cast<uint64_t>(GS_PSM_T4) << 24) |
+                (static_cast<uint64_t>(0u) << 32) |
+                (static_cast<uint64_t>(2u) << 48) |
+                (static_cast<uint64_t>(GS_PSM_T4) << 56);
+            constexpr uint64_t kReadPos =
+                (static_cast<uint64_t>(32u) << 0) |
+                (static_cast<uint64_t>(16u) << 16);
+            constexpr uint64_t kRect = (8ull << 0) | (4ull << 32);
+            const uint8_t packedSource[16] = {
+                0x10u, 0x32u, 0x54u, 0x76u,
+                0x98u, 0xBAu, 0xDCu, 0xFEu,
+                0x01u, 0x23u, 0x45u, 0x67u,
+                0x89u, 0xABu, 0xCDu, 0xEFu
+            };
+
+            gs.writeRegister(GS_REG_BITBLTBUF, kUploadBitblt);
+            gs.writeRegister(GS_REG_TRXPOS, 0ull);
+            gs.writeRegister(GS_REG_TRXREG, kRect);
+            gs.writeRegister(GS_REG_TRXDIR, 0ull);
+
+            std::vector<uint8_t> packet;
+            appendU64(packet, makeGifTag(1u, GIF_FMT_IMAGE, 0u, true));
+            appendU64(packet, 0ull);
+            packet.insert(packet.end(), packedSource, packedSource + sizeof(packedSource));
+            gs.processGIFPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            gs.writeRegister(GS_REG_BITBLTBUF, kCopyBitblt);
+            gs.writeRegister(GS_REG_TRXPOS, kCopyPos);
+            gs.writeRegister(GS_REG_TRXREG, kRect);
+            gs.writeRegister(GS_REG_TRXDIR, 2ull);
+
+            gs.writeRegister(GS_REG_BITBLTBUF, kReadBitblt);
+            gs.writeRegister(GS_REG_TRXPOS, kReadPos);
+            gs.writeRegister(GS_REG_TRXREG, kRect);
+            gs.writeRegister(GS_REG_TRXDIR, 1ull);
+
+            uint8_t out[16] = {};
+            const uint32_t outBytes = gs.consumeLocalToHostBytes(out, sizeof(out));
+            t.Equals(outBytes, 16u, "PSMT4 local-local copy should preserve the full packed byte count");
+            for (size_t i = 0; i < sizeof(packedSource); ++i)
+            {
+                t.Equals(out[i], packedSource[i], "PSMT4 local-local copy should preserve packed nibble order");
+            }
+        });
+
+        tc.Run("GS T4 CSM1 lookup matches Veronica ClutCopy layout", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            constexpr uint32_t kTexTbp = 64u;
+            constexpr uint32_t kClutCbp = 128u;
+            constexpr uint32_t kFrameReg =
+                (0ull << 0) |
+                (1ull << 16) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kTex0 =
+                (static_cast<uint64_t>(kTexTbp) << 0) |
+                (1ull << 14) |
+                (static_cast<uint64_t>(GS_PSM_T4) << 20) |
+                (0ull << 26) |
+                (0ull << 30) |
+                (1ull << 34) |
+                (1ull << 35) |
+                (static_cast<uint64_t>(kClutCbp) << 37) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 51);
+            constexpr uint64_t kPrim =
+                static_cast<uint64_t>(GS_PRIM_SPRITE) |
+                (1ull << 4) |  // TME
+                (1ull << 8);   // FST
+            constexpr uint32_t kExpectedColor = 0x800000FFu; // RGBA = (255,0,0,128)
+            constexpr uint32_t kWrongColor = 0x8000FF00u;    // RGBA = (0,255,0,128)
+
+            const uint32_t texNibbleAddr = GSPSMT4::addrPSMT4(kTexTbp, 1u, 0u, 0u);
+            const uint32_t texByteOff = texNibbleAddr >> 1;
+            vram[texByteOff] = static_cast<uint8_t>((vram[texByteOff] & 0xF0u) | 0x08u);
+
+            // Veronica's ClutCopy stores logical entries 8..15 into physical slots 16..23.
+            std::memcpy(vram.data() + kClutCbp * 256u + 8u * 4u, &kWrongColor, sizeof(kWrongColor));
+            std::memcpy(vram.data() + kClutCbp * 256u + 16u * 4u, &kExpectedColor, sizeof(kExpectedColor));
+
+            gs.writeRegister(GS_REG_FRAME_1, kFrameReg);
+            gs.writeRegister(GS_REG_SCISSOR_1, 0ull);
+            gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0ull);
+            gs.writeRegister(GS_REG_ALPHA_1, 0ull);
+            gs.writeRegister(GS_REG_TEX0_1, kTex0);
+            gs.writeRegister(GS_REG_PRIM, kPrim);
+            gs.writeRegister(GS_REG_RGBAQ, 0x80808080ull);
+            gs.writeRegister(GS_REG_UV, 0ull);
+            gs.writeRegister(GS_REG_XYZ2, 0ull);
+            gs.writeRegister(GS_REG_UV, 0ull);
+            gs.writeRegister(GS_REG_XYZ2, 0ull);
+
+            uint32_t pixel = 0u;
+            std::memcpy(&pixel, vram.data(), sizeof(pixel));
+            t.Equals(pixel, kExpectedColor,
+                     "T4 CSM1 lookup should follow Veronica's swizzled CLUT layout for logical index 8");
+        });
+
+        tc.Run("GS alpha test AFAIL framebuffer-only still writes the pixel", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            constexpr uint64_t kFrame =
+                (0ull << 0) |
+                (1ull << 16) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kScissor =
+                (0ull << 0) |
+                (0ull << 16) |
+                (0ull << 32) |
+                (0ull << 48);
+            constexpr uint64_t kTest =
+                1ull |                  // ATE
+                (5ull << 1) |          // ATST = GEQUAL
+                (0x80ull << 4) |       // AREF
+                (1ull << 12);          // AFAIL = FB_ONLY
+            constexpr uint64_t kPrim =
+                static_cast<uint64_t>(GS_PRIM_POINT);
+            constexpr uint64_t kRgbaq =
+                (0x12ull << 0) |
+                (0x34ull << 8) |
+                (0x56ull << 16) |
+                (0x00ull << 24) |
+                (0x3F800000ull << 32); // q = 1.0f
+
+            gs.writeRegister(GS_REG_FRAME_1, kFrame);
+            gs.writeRegister(GS_REG_SCISSOR_1, kScissor);
+            gs.writeRegister(GS_REG_TEST_1, kTest);
+            gs.writeRegister(GS_REG_PRIM, kPrim);
+            gs.writeRegister(GS_REG_RGBAQ, kRgbaq);
+            gs.writeRegister(GS_REG_XYZ2, 0ull);
+
+            uint32_t pixel = 0u;
+            std::memcpy(&pixel, vram.data(), sizeof(pixel));
+            t.Equals(pixel, 0x00563412u,
+                     "AFAIL=FB_ONLY should still update the framebuffer when the alpha test fails");
+        });
+
+        tc.Run("GS alpha test AFAIL RGB-only preserves destination alpha", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            constexpr uint64_t kFrame =
+                (0ull << 0) |
+                (1ull << 16) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kScissor =
+                (0ull << 0) |
+                (0ull << 16) |
+                (0ull << 32) |
+                (0ull << 48);
+            constexpr uint64_t kTest =
+                1ull |                  // ATE
+                (5ull << 1) |          // ATST = GEQUAL
+                (0x80ull << 4) |       // AREF
+                (3ull << 12);          // AFAIL = RGB_ONLY
+            constexpr uint64_t kPrim =
+                static_cast<uint64_t>(GS_PRIM_POINT);
+            constexpr uint64_t kRgbaq =
+                (0x12ull << 0) |
+                (0x34ull << 8) |
+                (0x56ull << 16) |
+                (0x00ull << 24) |
+                (0x3F800000ull << 32); // q = 1.0f
+            constexpr uint32_t kExisting = 0xAB030201u;
+
+            std::memcpy(vram.data(), &kExisting, sizeof(kExisting));
+
+            gs.writeRegister(GS_REG_FRAME_1, kFrame);
+            gs.writeRegister(GS_REG_SCISSOR_1, kScissor);
+            gs.writeRegister(GS_REG_TEST_1, kTest);
+            gs.writeRegister(GS_REG_PRIM, kPrim);
+            gs.writeRegister(GS_REG_RGBAQ, kRgbaq);
+            gs.writeRegister(GS_REG_XYZ2, 0ull);
+
+            uint32_t pixel = 0u;
+            std::memcpy(&pixel, vram.data(), sizeof(pixel));
+            t.Equals(pixel, 0xAB563412u,
+                     "AFAIL=RGB_ONLY should update RGB while preserving destination alpha");
+        });
+
+        tc.Run("sceGsSyncV waits on VBlank and reports interlaced field parity", [](TestCase &t)
+        {
+            notifyRuntimeStop();
+            ps2_stubs::resetGsSyncVCallbackState();
+
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+
+            R5900Context resetCtx{};
+            setRegU32(resetCtx, 4, 0u);
+            setRegU32(resetCtx, 5, 1u);
+            setRegU32(resetCtx, 6, 2u);
+            setRegU32(resetCtx, 7, 1u);
+            ps2_stubs::sceGsResetGraph(rdram.data(), &resetCtx, &runtime);
+
+            R5900Context sync0{};
+            ps2_stubs::sceGsSyncV(rdram.data(), &sync0, &runtime);
+            t.Equals(static_cast<int32_t>(getRegU32Test(sync0, 2)), 0, "first interlaced sceGsSyncV should report even field");
+
+            R5900Context sync1{};
+            ps2_stubs::sceGsSyncV(rdram.data(), &sync1, &runtime);
+            t.Equals(static_cast<int32_t>(getRegU32Test(sync1, 2)), 1, "second interlaced sceGsSyncV should report odd field");
+
+            R5900Context resetProgCtx{};
+            setRegU32(resetProgCtx, 4, 0u);
+            setRegU32(resetProgCtx, 5, 0u);
+            setRegU32(resetProgCtx, 6, 2u);
+            setRegU32(resetProgCtx, 7, 1u);
+            ps2_stubs::sceGsResetGraph(rdram.data(), &resetProgCtx, &runtime);
+
+            R5900Context syncProg{};
+            ps2_stubs::sceGsSyncV(rdram.data(), &syncProg, &runtime);
+            t.Equals(static_cast<int32_t>(getRegU32Test(syncProg, 2)), 1, "progressive sceGsSyncV should always return one");
+
+            runtime.requestStop();
+            notifyRuntimeStop();
+            ps2_stubs::resetGsSyncVCallbackState();
+        });
+
+        tc.Run("sceGsSyncVCallback uses the shared VBlank worker", [](TestCase &t)
+        {
+            notifyRuntimeStop();
+            ps2_stubs::resetGsSyncVCallbackState();
+            g_gsSyncCallbackHits.store(0u, std::memory_order_relaxed);
+            g_gsSyncCallbackLastTick.store(0u, std::memory_order_relaxed);
+
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+
+            constexpr uint32_t kCallbackAddr = 0x120000u;
+            runtime.registerFunction(kCallbackAddr, testGsSyncVCallback);
+
+            R5900Context callbackCtx{};
+            setRegU32(callbackCtx, 4, kCallbackAddr);
+            ps2_stubs::sceGsSyncVCallback(rdram.data(), &callbackCtx, &runtime);
+            t.Equals(getRegU32Test(callbackCtx, 2), 0u, "first sceGsSyncVCallback registration should return no previous callback");
+
+            const bool callbackFired = waitUntil([]() {
+                return g_gsSyncCallbackHits.load(std::memory_order_acquire) > 0u;
+            }, std::chrono::milliseconds(80));
+
+            t.IsTrue(callbackFired, "registered GS VSync callback should fire from the VBlank worker");
+            t.IsTrue(g_gsSyncCallbackLastTick.load(std::memory_order_acquire) > 0u,
+                     "VSync callback should receive a positive tick value");
+
+            R5900Context clearCtx{};
+            setRegU32(clearCtx, 4, 0u);
+            ps2_stubs::sceGsSyncVCallback(rdram.data(), &clearCtx, &runtime);
+            t.Equals(getRegU32Test(clearCtx, 2), kCallbackAddr, "clearing sceGsSyncVCallback should return the previous callback");
+
+            runtime.requestStop();
+            notifyRuntimeStop();
+            ps2_stubs::resetGsSyncVCallbackState();
         });
     });
 }

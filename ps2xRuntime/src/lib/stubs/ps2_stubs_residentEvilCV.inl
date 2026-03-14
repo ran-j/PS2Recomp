@@ -128,7 +128,10 @@ void syMalloc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         const uint32_t returnPc = getRegU32(ctx, 31);
         PS2Runtime::RecompiledFunction syMallocFn = runtime->lookupFunction(kCvSyMallocAddr);
         ctx->pc = kCvSyMallocAddr;
-        syMallocFn(rdram, ctx, runtime);
+        {
+            PS2Runtime::GuestExecutionScope guestExecution(runtime);
+            syMallocFn(rdram, ctx, runtime);
+        }
 
         if (ctx->pc == kCvSyMallocAddr || ctx->pc == 0u)
         {
@@ -355,7 +358,10 @@ void sdDrvInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     const uint32_t returnPc = getRegU32(ctx, 31);
     PS2Runtime::RecompiledFunction sdrInit = runtime->lookupFunction(kSdrInitAddr);
     ctx->pc = kSdrInitAddr;
-    sdrInit(rdram, ctx, runtime);
+    {
+        PS2Runtime::GuestExecutionScope guestExecution(runtime);
+        sdrInit(rdram, ctx, runtime);
+    }
 
     if (ctx->pc == kSdrInitAddr || ctx->pc == 0u)
     {

@@ -92,6 +92,7 @@ namespace
     };
 
     thread_local DispatchHistory g_dispatchHistory;
+    thread_local std::unordered_map<PS2Runtime *, uint32_t> g_guestExecutionDepths;
 
     void pushDispatchPc(uint32_t pc)
     {
@@ -320,6 +321,40 @@ namespace
     }
 }
 
+PS2Runtime::GuestExecutionScope::GuestExecutionScope(PS2Runtime *runtime) noexcept
+    : m_runtime(runtime)
+{
+    if (m_runtime)
+    {
+        m_runtime->enterGuestExecution();
+    }
+}
+
+PS2Runtime::GuestExecutionScope::~GuestExecutionScope()
+{
+    if (m_runtime)
+    {
+        m_runtime->leaveGuestExecution();
+    }
+}
+
+PS2Runtime::GuestExecutionReleaseScope::GuestExecutionReleaseScope(PS2Runtime *runtime) noexcept
+    : m_runtime(runtime)
+{
+    if (m_runtime)
+    {
+        m_depth = m_runtime->releaseGuestExecution();
+    }
+}
+
+PS2Runtime::GuestExecutionReleaseScope::~GuestExecutionReleaseScope()
+{
+    if (m_runtime && m_depth != 0u)
+    {
+        m_runtime->reacquireGuestExecution(m_depth);
+    }
+}
+
 static void UploadFrame(Texture2D &tex, PS2Runtime *rt)
 {
     // For now lets keep the display snapshot in sync with rasterized VRAM so the host frame
@@ -348,75 +383,159 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt)
     if (height > FB_HEIGHT)
         height = FB_HEIGHT;
 
-    uint32_t baseBytes = fbp * 8192u;
-    const uint32_t bytesPerPixel = (psm == 2u || psm == 0x0Au) ? 2u : 4u;
-    uint32_t strideBytes = (fbw ? fbw : (FB_WIDTH / 64)) * 64 * bytesPerPixel;
-
-    std::vector<uint8_t> scratch(FB_WIDTH * FB_HEIGHT * 4, 0);
-
     uint8_t *rdram = rt->memory().getRDRAM();
     uint8_t *gsvram = rt->memory().getGSVRAM();
 
     uint32_t snapSize = 0;
     const uint8_t *snapVram = rt->gs().lockDisplaySnapshot(snapSize);
     const uint8_t *vramSrc = (snapVram && snapSize > 0) ? snapVram : gsvram;
-
-    if (snapVram)
+    auto fillScratchFromFrame = [&](uint32_t srcFbp,
+                                    uint32_t srcFbw,
+                                    uint32_t srcPsm,
+                                    std::vector<uint8_t> &outScratch) -> bool
     {
-        baseBytes = rt->gs().getLastDisplayBaseBytes();
-    }
+        outScratch.assign(FB_WIDTH * FB_HEIGHT * 4u, 0u);
 
-    if (psm == 0u)
+        const uint32_t baseBytes = srcFbp * 8192u;
+        const uint32_t bytesPerPixel = (srcPsm == 2u || srcPsm == 0x0Au) ? 2u : 4u;
+        const uint32_t strideBytes = (srcFbw ? srcFbw : (FB_WIDTH / 64u)) * 64u * bytesPerPixel;
+
+        if (srcPsm == 0u)
+        {
+            for (uint32_t y = 0; y < height; ++y)
+            {
+                uint32_t srcOff = baseBytes + y * strideBytes;
+                uint32_t dstOff = y * FB_WIDTH * 4u;
+                uint32_t copyW = width * 4u;
+                if (srcOff + copyW <= PS2_GS_VRAM_SIZE && vramSrc)
+                {
+                    std::memcpy(&outScratch[dstOff], vramSrc + srcOff, copyW);
+                }
+                else
+                {
+                    uint32_t rdramIdx = srcOff & PS2_RAM_MASK;
+                    if (rdramIdx + copyW > PS2_RAM_SIZE)
+                    {
+                        copyW = PS2_RAM_SIZE - rdramIdx;
+                    }
+                    std::memcpy(&outScratch[dstOff], rdram + rdramIdx, copyW);
+                }
+                uint8_t *row = outScratch.data() + dstOff;
+                for (uint32_t x = 0; x < width; ++x)
+                {
+                    row[x * 4u + 3u] = 255u;
+                }
+            }
+            return true;
+        }
+
+        if (srcPsm == 2u || srcPsm == 0x0Au)
+        {
+            const uint32_t srcLineBytes = width * 2u;
+            for (uint32_t y = 0; y < height; ++y)
+            {
+                uint32_t srcOff = baseBytes + y * strideBytes;
+                uint32_t dstOff = y * FB_WIDTH * 4u;
+                const uint8_t *src = nullptr;
+                if (srcOff + srcLineBytes <= PS2_GS_VRAM_SIZE && vramSrc)
+                {
+                    src = vramSrc + srcOff;
+                }
+                else if ((srcOff & PS2_RAM_MASK) + srcLineBytes <= PS2_RAM_SIZE)
+                {
+                    src = rdram + (srcOff & PS2_RAM_MASK);
+                }
+                if (!src)
+                {
+                    continue;
+                }
+                uint8_t *dst = outScratch.data() + dstOff;
+                for (uint32_t x = 0; x < width; ++x)
+                {
+                    uint16_t p = *reinterpret_cast<const uint16_t *>(src + x * 2u);
+                    uint32_t r = (p >> 10) & 31u;
+                    uint32_t g = (p >> 5) & 31u;
+                    uint32_t b = p & 31u;
+                    dst[x * 4u + 0u] = static_cast<uint8_t>((r << 3) | (r >> 2));
+                    dst[x * 4u + 1u] = static_cast<uint8_t>((g << 3) | (g >> 2));
+                    dst[x * 4u + 2u] = static_cast<uint8_t>((b << 3) | (b >> 2));
+                    dst[x * 4u + 3u] = 255u;
+                }
+            }
+            return true;
+        }
+
+        return false;
+    };
+
+    auto analyzeScratch = [&](const std::vector<uint8_t> &scratchBuf,
+                              uint32_t &outNonBlack,
+                              uint32_t &outFirstColor,
+                              uint32_t &outFirstX,
+                              uint32_t &outFirstY)
     {
+        outNonBlack = 0u;
+        outFirstColor = 0u;
+        outFirstX = 0u;
+        outFirstY = 0u;
+
         for (uint32_t y = 0; y < height; ++y)
         {
-            uint32_t srcOff = baseBytes + y * strideBytes;
-            uint32_t dstOff = y * FB_WIDTH * 4;
-            uint32_t copyW = width * 4;
-            uint32_t srcIdx = srcOff;
-            if (srcIdx + copyW <= PS2_GS_VRAM_SIZE && vramSrc)
-                std::memcpy(&scratch[dstOff], vramSrc + srcIdx, copyW);
-            else
-            {
-                uint32_t rdramIdx = srcOff & PS2_RAM_MASK;
-                if (rdramIdx + copyW > PS2_RAM_SIZE)
-                    copyW = PS2_RAM_SIZE - rdramIdx;
-                std::memcpy(&scratch[dstOff], rdram + rdramIdx, copyW);
-            }
-            uint8_t *row = scratch.data() + dstOff;
+            const uint8_t *row = scratchBuf.data() + y * FB_WIDTH * 4u;
             for (uint32_t x = 0; x < width; ++x)
-                row[x * 4 + 3] = 255u;
+            {
+                const uint8_t r = row[x * 4u + 0u];
+                const uint8_t g = row[x * 4u + 1u];
+                const uint8_t b = row[x * 4u + 2u];
+                if (r != 0u || g != 0u || b != 0u)
+                {
+                    ++outNonBlack;
+                    if (outFirstColor == 0u)
+                    {
+                        outFirstColor = static_cast<uint32_t>(r) |
+                                        (static_cast<uint32_t>(g) << 8) |
+                                        (static_cast<uint32_t>(b) << 16);
+                        outFirstX = x;
+                        outFirstY = y;
+                    }
+                }
+            }
         }
-    }
-    else if (psm == 2u)
+    };
+
+    auto countLinearPageNonBlack = [&](uint32_t probeFbp) -> uint32_t
     {
-        const uint32_t srcLineBytes = width * 2u;
-        for (uint32_t y = 0; y < height; ++y)
+        if (!vramSrc)
         {
-            uint32_t srcOff = baseBytes + y * strideBytes;
-            uint32_t dstOff = y * FB_WIDTH * 4;
-            const uint8_t *src = nullptr;
-            if (srcOff + srcLineBytes <= PS2_GS_VRAM_SIZE && vramSrc)
-                src = vramSrc + srcOff;
-            else if ((srcOff & PS2_RAM_MASK) + srcLineBytes <= PS2_RAM_SIZE)
-                src = rdram + (srcOff & PS2_RAM_MASK);
-            if (!src)
-                continue;
-            uint8_t *dst = scratch.data() + dstOff;
-            for (uint32_t x = 0; x < width; ++x)
+            return 0u;
+        }
+        const uint32_t probeBaseBytes = probeFbp * 8192u;
+        const uint32_t probeStrideBytes = 10u * 64u * 4u;
+        uint32_t count = 0u;
+        for (uint32_t py = 0; py < height; ++py)
+        {
+            const uint32_t srcOff = probeBaseBytes + py * probeStrideBytes;
+            if (srcOff + width * 4u > PS2_GS_VRAM_SIZE)
             {
-                uint16_t p = *reinterpret_cast<const uint16_t *>(src + x * 2);
-                uint32_t r = (p >> 10) & 31u;
-                uint32_t g = (p >> 5) & 31u;
-                uint32_t b = p & 31u;
-                dst[x * 4 + 0] = static_cast<uint8_t>((r << 3) | (r >> 2));
-                dst[x * 4 + 1] = static_cast<uint8_t>((g << 3) | (g >> 2));
-                dst[x * 4 + 2] = static_cast<uint8_t>((b << 3) | (b >> 2));
-                dst[x * 4 + 3] = 255u;
+                break;
+            }
+            const uint8_t *row = vramSrc + srcOff;
+            for (uint32_t px = 0; px < width; ++px)
+            {
+                const uint8_t r = row[px * 4u + 0u];
+                const uint8_t g = row[px * 4u + 1u];
+                const uint8_t b = row[px * 4u + 2u];
+                if (r != 0u || g != 0u || b != 0u)
+                {
+                    ++count;
+                }
             }
         }
-    }
-    else
+        return count;
+    };
+
+    std::vector<uint8_t> scratch;
+    if (!fillScratchFromFrame(fbp, fbw, psm, scratch))
     {
         rt->gs().unlockDisplaySnapshot();
         Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, MAGENTA);
@@ -425,7 +544,95 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt)
         return;
     }
 
+    uint32_t selectedFbp = fbp;
+    uint32_t selectedFbw = fbw;
+    uint32_t selectedPsm = psm;
+    uint32_t nonBlack = 0u;
+    uint32_t firstColor = 0u;
+    uint32_t firstX = 0u;
+    uint32_t firstY = 0u;
+    analyzeScratch(scratch, nonBlack, firstColor, firstX, firstY);
+
+    int fallbackContext = -1;
+    const bool allowFallbackPresentation = (fbp == 0u);
+    if (allowFallbackPresentation && nonBlack == 0u)
+    {
+        for (int contextIndex = 0; contextIndex < 2; ++contextIndex)
+        {
+            const GSFrameReg &candidate = rt->gs().getContextFrame(contextIndex);
+            if (candidate.fbp == selectedFbp &&
+                candidate.fbw == selectedFbw &&
+                candidate.psm == selectedPsm)
+            {
+                continue;
+            }
+
+            std::vector<uint8_t> candidateScratch;
+            if (!fillScratchFromFrame(candidate.fbp, candidate.fbw, candidate.psm, candidateScratch))
+            {
+                continue;
+            }
+
+            uint32_t candidateNonBlack = 0u;
+            uint32_t candidateFirstColor = 0u;
+            uint32_t candidateFirstX = 0u;
+            uint32_t candidateFirstY = 0u;
+            analyzeScratch(candidateScratch, candidateNonBlack, candidateFirstColor, candidateFirstX, candidateFirstY);
+            if (candidateNonBlack == 0u)
+            {
+                continue;
+            }
+
+            scratch.swap(candidateScratch);
+            selectedFbp = candidate.fbp;
+            selectedFbw = candidate.fbw;
+            selectedPsm = candidate.psm;
+            nonBlack = candidateNonBlack;
+            firstColor = candidateFirstColor;
+            firstX = candidateFirstX;
+            firstY = candidateFirstY;
+            fallbackContext = contextIndex;
+            break;
+        }
+    }
+
     rt->gs().unlockDisplaySnapshot();
+
+    static uint32_t s_uploadDebugCount = 0u;
+    static uint32_t s_lastLoggedFbp = std::numeric_limits<uint32_t>::max();
+    static uint32_t s_lastLoggedNonBlack = std::numeric_limits<uint32_t>::max();
+    const bool shouldProbe = (s_uploadDebugCount < 96u) || (fbp != s_lastLoggedFbp);
+    if (shouldProbe || fallbackContext >= 0)
+    {
+        if (s_uploadDebugCount < 96u || selectedFbp != s_lastLoggedFbp || nonBlack != s_lastLoggedNonBlack || fallbackContext >= 0)
+        {
+            const uint32_t page0NonBlack = countLinearPageNonBlack(0u);
+            const uint32_t page150NonBlack = countLinearPageNonBlack(150u);
+            std::cout << "[frame:upload] idx=" << s_uploadDebugCount
+                      << " fbp=" << selectedFbp
+                      << " fbw=" << selectedFbw
+                      << " psm=0x" << std::hex << selectedPsm << std::dec
+                      << " size=" << width << "x" << height
+                      << " nonBlack=" << nonBlack
+                      << " page0=" << page0NonBlack
+                      << " page150=" << page150NonBlack
+                      << " allowFallback=" << static_cast<uint32_t>(allowFallbackPresentation ? 1u : 0u);
+            if (fallbackContext >= 0)
+            {
+                std::cout << " displayFbp=" << fbp
+                          << " fallbackCtx=" << fallbackContext;
+            }
+            if (firstColor != 0u)
+            {
+                std::cout << " first=(" << firstX << "," << firstY << ")"
+                          << " rgb=0x" << std::hex << firstColor << std::dec;
+            }
+            std::cout << std::endl;
+        }
+        s_lastLoggedFbp = selectedFbp;
+        s_lastLoggedNonBlack = nonBlack;
+        ++s_uploadDebugCount;
+    }
 
     UpdateTexture(tex, scratch.data());
 }
@@ -448,11 +655,14 @@ PS2Runtime::PS2Runtime()
     m_guestHeapLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
     m_guestHeapSuggestedBase = kGuestHeapDefaultBase;
     m_guestHeapConfigured = false;
+    m_asyncCallbackStackFloor = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
+    m_asyncCallbackStackTop = PS2_RAM_SIZE;
 }
 
 PS2Runtime::~PS2Runtime()
 {
     requestStop();
+    ps2_syscalls::detachAllGuestHostThreads();
     if (IsWindowReady())
     {
         CloseWindow();
@@ -473,13 +683,17 @@ bool PS2Runtime::initialize(const char *title)
 
     m_gs.init(m_memory.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &m_memory.gs());
     m_gs.reset();
-    m_gifArbiter.setProcessPacketFn([this](const uint8_t *data, uint32_t size) { m_gs.processGIFPacket(data, size); });
+    m_gifArbiter.setProcessPacketFn([this](const uint8_t *data, uint32_t size)
+                                    { m_gs.processGIFPacket(data, size); });
     m_memory.setGifArbiter(&m_gifArbiter);
-    m_memory.setVu1MscalCallback([this](uint32_t startPC, uint32_t itop) {
-        m_vu1.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
-                      m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
-                      m_gs, &m_memory, startPC, itop, 65536);
-    });
+    m_memory.setVu1MscalCallback([this](uint32_t startPC, uint32_t itop)
+                                 { m_vu1.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
+                                                 m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
+                                                 m_gs, &m_memory, startPC, itop, 65536); });
+    m_memory.setVu1MscntCallback([this](uint32_t itop)
+                                 { m_vu1.resume(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
+                                                m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
+                                                m_gs, &m_memory, itop, 65536); });
 
     m_iop.init(m_memory.getRDRAM());
     m_iop.reset();
@@ -707,6 +921,12 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
             m_guestHeapLimit = hardLimit;
         }
     }
+    {
+        std::lock_guard<std::mutex> lock(m_asyncCallbackStackMutex);
+        const uint32_t hardLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
+        m_asyncCallbackStackFloor = std::min(std::max(hardLimit, suggestedHeapBase), PS2_RAM_SIZE);
+        m_asyncCallbackStackTop = PS2_RAM_SIZE;
+    }
 
     LoadedModule module;
     module.name = elfPath.substr(elfPath.find_last_of("/\\") + 1);
@@ -784,7 +1004,19 @@ void PS2Runtime::registerFunction(uint32_t address, RecompiledFunction func)
 
 bool PS2Runtime::hasFunction(uint32_t address) const
 {
-    return m_functionTable.find(address) != m_functionTable.end();
+    auto it = m_functionTable.find(address);
+    if (it != m_functionTable.end())
+    {
+        return true;
+    }
+
+    if (address == 0x2913E4u)
+    {
+        auto parent = m_functionTable.find(0x2913B0u);
+        return parent != m_functionTable.end();
+    }
+
+    return false;
 }
 
 PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
@@ -797,9 +1029,6 @@ PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
         return it->second;
     }
 
-    // Some games dispatch to internal basic-block addresses that belong to a
-    // larger recompiled function. Map known hot-path aliases to their parent
-    // function entry so execution can resume from the current ctx->pc.
     if (address == 0x2913E4u)
     {
         auto parent = m_functionTable.find(0x2913B0u);
@@ -1499,6 +1728,44 @@ uint32_t PS2Runtime::guestHeapEnd() const
     return m_guestHeapConfigured ? m_guestHeapEnd : m_guestHeapSuggestedBase;
 }
 
+uint32_t PS2Runtime::reserveAsyncCallbackStack(uint32_t size, uint32_t alignment)
+{
+    if (size == 0u)
+    {
+        return 0u;
+    }
+
+    const uint32_t normalizedAlignment = normalizeGuestHeapAlignment(alignment);
+    const uint32_t allocSize = alignGuestHeapValue(size, kGuestHeapDefaultAlignment);
+    if (allocSize == 0u)
+    {
+        return 0u;
+    }
+
+    std::lock_guard<std::mutex> lock(m_asyncCallbackStackMutex);
+    uint32_t top = m_asyncCallbackStackTop;
+    if (top > PS2_RAM_SIZE)
+    {
+        top = PS2_RAM_SIZE;
+    }
+    top &= ~(kGuestHeapDefaultAlignment - 1u);
+
+    if (top <= allocSize)
+    {
+        return 0u;
+    }
+
+    uint32_t base = top - allocSize;
+    base &= ~(normalizedAlignment - 1u);
+    if (base < m_asyncCallbackStackFloor || base >= top)
+    {
+        return 0u;
+    }
+
+    m_asyncCallbackStackTop = base;
+    return top - 0x10u;
+}
+
 void PS2Runtime::dispatchLoop(uint8_t *rdram, R5900Context *ctx)
 {
     uint32_t lastPc = std::numeric_limits<uint32_t>::max();
@@ -1533,7 +1800,10 @@ void PS2Runtime::dispatchLoop(uint8_t *rdram, R5900Context *ctx)
         const uint32_t dispatchedPc = pc;
         const uint32_t dispatchedRa = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0));
 
-        fn(rdram, ctx, this);
+        {
+            GuestExecutionScope guestExecution(this);
+            fn(rdram, ctx, this);
+        }
 
         if (ctx->pc == 0u)
         {
@@ -1552,6 +1822,77 @@ void PS2Runtime::dispatchLoop(uint8_t *rdram, R5900Context *ctx)
             // Do not request a global runtime stop here: other guest threads may still run.
             break;
         }
+    }
+}
+
+void PS2Runtime::enterGuestExecution()
+{
+    m_guestExecutionWaiters.fetch_add(1u, std::memory_order_acq_rel);
+    m_guestExecutionMutex.lock();
+    m_guestExecutionWaiters.fetch_sub(1u, std::memory_order_acq_rel);
+    ++g_guestExecutionDepths[this];
+}
+
+void PS2Runtime::leaveGuestExecution()
+{
+    auto it = g_guestExecutionDepths.find(this);
+    if (it == g_guestExecutionDepths.end() || it->second == 0u)
+    {
+        return;
+    }
+
+    --it->second;
+    m_guestExecutionMutex.unlock();
+    if (it->second == 0u)
+    {
+        g_guestExecutionDepths.erase(it);
+    }
+}
+
+uint32_t PS2Runtime::releaseGuestExecution()
+{
+    auto it = g_guestExecutionDepths.find(this);
+    if (it == g_guestExecutionDepths.end() || it->second == 0u)
+    {
+        return 0u;
+    }
+
+    const uint32_t depth = it->second;
+    for (uint32_t i = 0; i < depth; ++i)
+    {
+        m_guestExecutionMutex.unlock();
+    }
+    g_guestExecutionDepths.erase(it);
+    return depth;
+}
+
+void PS2Runtime::reacquireGuestExecution(uint32_t depth)
+{
+    if (depth == 0u)
+    {
+        return;
+    }
+
+    uint32_t &heldDepth = g_guestExecutionDepths[this];
+    for (uint32_t i = 0; i < depth; ++i)
+    {
+        m_guestExecutionWaiters.fetch_add(1u, std::memory_order_acq_rel);
+        m_guestExecutionMutex.lock();
+        m_guestExecutionWaiters.fetch_sub(1u, std::memory_order_acq_rel);
+        ++heldDepth;
+    }
+}
+
+void PS2Runtime::cooperativeGuestYield()
+{
+    GuestExecutionReleaseScope release(this);
+    if (m_guestExecutionWaiters.load(std::memory_order_acquire) != 0u)
+    {
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+    else
+    {
+        std::this_thread::yield();
     }
 }
 
@@ -1752,7 +2093,6 @@ void PS2Runtime::run()
     while (!isStopRequested() && g_activeThreads.load(std::memory_order_relaxed) > 0)
     {
         tick++;
-        ps2_stubs::dispatchGsSyncVCallback(m_memory.getRDRAM(), this);
         if ((tick % 120) == 0)
         {
             uint64_t curDma = m_memory.dmaStartCount();
@@ -1878,6 +2218,17 @@ void PS2Runtime::run()
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
+    }
+
+    if (g_activeThreads.load(std::memory_order_relaxed) == 0)
+    {
+        ps2_syscalls::joinAllGuestHostThreads();
+    }
+    else
+    {
+        std::cerr << "[run] guest host threads did not stop within timeout; detaching remaining worker threads"
+                  << std::endl;
+        ps2_syscalls::detachAllGuestHostThreads();
     }
 
     UnloadTexture(frameTex);

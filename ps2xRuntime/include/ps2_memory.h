@@ -23,6 +23,7 @@ constexpr uint32_t PS2_RAM_SIZE = 32u * 1024u * 1024u; // 32MB
 constexpr uint32_t PS2_RAM_MASK = PS2_RAM_SIZE - 1u;   // Mask for 32MB alignment
 constexpr uint32_t PS2_RAM_BASE = 0x00000000;          // Physical base of RDRAM
 constexpr uint32_t PS2_SCRATCHPAD_BASE = 0x70000000;
+constexpr uint32_t PS2_SCRATCHPAD_ALIAS_BASE = 0xF0000000;
 constexpr uint32_t PS2_SCRATCHPAD_SIZE = 16u * 1024u;  // 16KB
 constexpr uint32_t PS2_IO_BASE = 0x10000000;           // Base for many I/O regs (Timers, DMAC, INTC)
 constexpr uint32_t PS2_IO_SIZE = 0x10000;              // 64KB
@@ -81,12 +82,40 @@ inline uint8_t *ps2GetScratchpadHostPtr()
     return ps2ScratchpadHostPtrStorage().load(std::memory_order_relaxed);
 }
 
-inline bool ps2ResolveGuestPointer(uint32_t addr, uint32_t &offset, bool &scratch)
+inline bool ps2IsScratchpadAddress(uint32_t addr)
 {
     if (addr >= PS2_SCRATCHPAD_BASE && addr < (PS2_SCRATCHPAD_BASE + PS2_SCRATCHPAD_SIZE))
     {
+        return true;
+    }
+
+    if ((addr & 0x80000000u) != 0u)
+    {
+        const uint32_t lower = addr & 0x7FFFFFFFu;
+        return lower >= PS2_SCRATCHPAD_BASE &&
+               lower < (PS2_SCRATCHPAD_BASE + PS2_SCRATCHPAD_SIZE);
+    }
+
+    return false;
+}
+
+inline uint32_t ps2ScratchpadOffset(uint32_t addr)
+{
+    if (addr >= PS2_SCRATCHPAD_BASE && addr < (PS2_SCRATCHPAD_BASE + PS2_SCRATCHPAD_SIZE))
+    {
+        return addr - PS2_SCRATCHPAD_BASE;
+    }
+
+    const uint32_t lower = addr & 0x7FFFFFFFu;
+    return lower - PS2_SCRATCHPAD_BASE;
+}
+
+inline bool ps2ResolveGuestPointer(uint32_t addr, uint32_t &offset, bool &scratch)
+{
+    if (ps2IsScratchpadAddress(addr))
+    {
         scratch = true;
-        offset = addr - PS2_SCRATCHPAD_BASE;
+        offset = ps2ScratchpadOffset(addr);
         return true;
     }
 
@@ -276,6 +305,8 @@ public:
 
     using Vu1MscalCallback = std::function<void(uint32_t startPC, uint32_t itop)>;
     void setVu1MscalCallback(Vu1MscalCallback cb) { m_vu1MscalCallback = std::move(cb); }
+    using Vu1MscntCallback = std::function<void(uint32_t itop)>;
+    void setVu1MscntCallback(Vu1MscntCallback cb) { m_vu1MscntCallback = std::move(cb); }
 
     uint8_t *getVU1Code() { return m_vu1Code; }
     const uint8_t *getVU1Code() const { return m_vu1Code; }
@@ -344,6 +375,7 @@ public:
     GifPacketCallback m_gifPacketCallback;
     GifArbiter *m_gifArbiter = nullptr;
     Vu1MscalCallback m_vu1MscalCallback;
+    Vu1MscntCallback m_vu1MscntCallback;
 
     uint8_t *m_vu1Code = nullptr;
     uint8_t *m_vu1Data = nullptr;

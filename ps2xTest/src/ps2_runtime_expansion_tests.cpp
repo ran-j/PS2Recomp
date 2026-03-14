@@ -6,6 +6,7 @@
 #include "ps2_runtime.h"
 #include "ps2_memory.h"
 #include "ps2_syscalls.h"
+#include "ps2_stubs.h"
 #include "ps2_gs_gpu.h"
 #include "ps2_runtime_macros.h"
 
@@ -100,6 +101,116 @@ namespace
 
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+
+    std::atomic<int32_t> gSerializedGuestActive{0};
+    std::atomic<int32_t> gSerializedGuestMaxActive{0};
+    std::atomic<int32_t> gCooperativeYieldEntryCount{0};
+    std::atomic<bool> gCooperativeYieldAllowFirstYield{false};
+    std::atomic<bool> gCooperativeYieldPeerRan{false};
+
+    void testSerializedGuestStep(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        const int32_t active = gSerializedGuestActive.fetch_add(1, std::memory_order_acq_rel) + 1;
+        int32_t observedMax = gSerializedGuestMaxActive.load(std::memory_order_relaxed);
+        while (observedMax < active &&
+               !gSerializedGuestMaxActive.compare_exchange_weak(
+                   observedMax,
+                   active,
+                   std::memory_order_release,
+                   std::memory_order_relaxed))
+        {
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        gSerializedGuestActive.fetch_sub(1, std::memory_order_acq_rel);
+        if (ctx)
+        {
+            ctx->pc = 0u;
+        }
+    }
+
+    void testCooperativeGuestYieldStep(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (!ctx || !runtime)
+        {
+            return;
+        }
+
+        const int32_t entryIndex = gCooperativeYieldEntryCount.fetch_add(1, std::memory_order_acq_rel) + 1;
+        if (entryIndex == 1)
+        {
+            while (!gCooperativeYieldAllowFirstYield.load(std::memory_order_acquire))
+            {
+                std::this_thread::yield();
+            }
+
+            for (int attempt = 0; attempt < 32 &&
+                                  !gCooperativeYieldPeerRan.load(std::memory_order_acquire);
+                 ++attempt)
+            {
+                runtime->cooperativeGuestYield();
+            }
+            setRegU32(*ctx, 2, gCooperativeYieldPeerRan.load(std::memory_order_acquire) ? 1u : 0u);
+        }
+        else
+        {
+            gCooperativeYieldPeerRan.store(true, std::memory_order_release);
+            setRegU32(*ctx, 2, 2u);
+        }
+
+        ctx->pc = 0u;
+    }
+
+    constexpr uint32_t kAsyncCounterAddr = 0x2400u;
+
+    void testWaitForAsyncCounter(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
+    {
+        if (!rdram || !ctx)
+        {
+            return;
+        }
+
+        uint32_t counter = 0u;
+        do
+        {
+            std::memcpy(&counter, rdram + kAsyncCounterAddr, sizeof(counter));
+            if (counter == 0u)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        } while (counter == 0u);
+
+        ctx->pc = 0u;
+    }
+
+    void testSignalAsyncCounter(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
+    {
+        if (rdram)
+        {
+            const uint32_t counter = 1u;
+            std::memcpy(rdram + kAsyncCounterAddr, &counter, sizeof(counter));
+        }
+
+        if (ctx)
+        {
+            ctx->pc = 0u;
+        }
+    }
+
+    std::atomic<uint32_t> gAsyncCallbackObservedSp{0u};
+    std::atomic<uint32_t> gAsyncCallbackObservedGp{0u};
+
+    void testRecordAsyncCallbackStack(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        if (!ctx)
+        {
+            return;
+        }
+
+        gAsyncCallbackObservedSp.store(::getRegU32(ctx, 29), std::memory_order_release);
+        gAsyncCallbackObservedGp.store(::getRegU32(ctx, 28), std::memory_order_release);
+        ctx->pc = 0u;
+    }
 }
 
 void register_ps2_runtime_expansion_tests()
@@ -134,6 +245,212 @@ void register_ps2_runtime_expansion_tests()
                 t.IsTrue(inst.modificationInfo.modifiesControl,
                          std::string("HI/LO control side-effect missing for ") + cases[i].name);
             }
+        });
+
+        tc.Run("guest execution is serialized per runtime", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            gSerializedGuestActive.store(0, std::memory_order_release);
+            gSerializedGuestMaxActive.store(0, std::memory_order_release);
+
+            constexpr uint32_t kEntries[] = {
+                0x120000u,
+                0x130000u,
+                0x140000u,
+                0x150000u,
+            };
+            constexpr size_t kEntryCount = sizeof(kEntries) / sizeof(kEntries[0]);
+            R5900Context contexts[kEntryCount]{};
+            std::vector<std::thread> workers;
+            workers.reserve(kEntryCount);
+
+            for (size_t i = 0; i < kEntryCount; ++i)
+            {
+                runtime.registerFunction(kEntries[i], &testSerializedGuestStep);
+                contexts[i].pc = kEntries[i];
+            }
+
+            for (size_t i = 0; i < kEntryCount; ++i)
+            {
+                workers.emplace_back([&, i]()
+                {
+                    runtime.dispatchLoop(rdram.data(), &contexts[i]);
+                });
+            }
+
+            for (std::thread &worker : workers)
+            {
+                if (worker.joinable())
+                {
+                    worker.join();
+                }
+            }
+
+            t.Equals(gSerializedGuestActive.load(std::memory_order_acquire), 0,
+                     "serialized guest dispatch should leave no active workers");
+            t.Equals(gSerializedGuestMaxActive.load(std::memory_order_acquire), 1,
+                     "dispatchLoop should not execute guest code concurrently on one runtime");
+        });
+
+        tc.Run("cooperative guest yield lets another guest thread run without leaving the current function", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            constexpr uint32_t kFirstEntry = 0x190000u;
+            constexpr uint32_t kSecondEntry = 0x1A0000u;
+
+            gCooperativeYieldEntryCount.store(0, std::memory_order_release);
+            gCooperativeYieldAllowFirstYield.store(false, std::memory_order_release);
+            gCooperativeYieldPeerRan.store(false, std::memory_order_release);
+
+            runtime.registerFunction(kFirstEntry, &testCooperativeGuestYieldStep);
+            runtime.registerFunction(kSecondEntry, &testCooperativeGuestYieldStep);
+
+            R5900Context firstCtx{};
+            R5900Context secondCtx{};
+            firstCtx.pc = kFirstEntry;
+            secondCtx.pc = kSecondEntry;
+
+            std::thread firstWorker([&]()
+            {
+                runtime.dispatchLoop(rdram.data(), &firstCtx);
+            });
+
+            const bool firstEntered = waitUntil([&]()
+            {
+                return gCooperativeYieldEntryCount.load(std::memory_order_acquire) >= 1;
+            }, std::chrono::milliseconds(100));
+
+            std::thread secondWorker([&]()
+            {
+                runtime.dispatchLoop(rdram.data(), &secondCtx);
+            });
+
+            gCooperativeYieldAllowFirstYield.store(true, std::memory_order_release);
+
+            if (firstWorker.joinable())
+            {
+                firstWorker.join();
+            }
+            if (secondWorker.joinable())
+            {
+                secondWorker.join();
+            }
+
+            t.IsTrue(firstEntered, "first guest worker should enter before yielding");
+            t.IsTrue(gCooperativeYieldPeerRan.load(std::memory_order_acquire),
+                     "second guest worker should run while the first cooperatively yields");
+            t.Equals(getRegU32(&firstCtx, 2), 1u,
+                     "first guest worker should observe that a peer ran before it resumed");
+        });
+
+        tc.Run("vblank intc handlers can preempt serialized guest execution", [](TestCase &t)
+        {
+            notifyRuntimeStop();
+
+            PS2Runtime runtime;
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            constexpr uint32_t kBusyEntry = 0x160000u;
+            constexpr uint32_t kIntcHandlerEntry = 0x170000u;
+
+            runtime.registerFunction(kBusyEntry, &testWaitForAsyncCounter);
+            runtime.registerFunction(kIntcHandlerEntry, &testSignalAsyncCounter);
+
+            R5900Context addCtx{};
+            setRegU32(addCtx, 4, 2u);
+            setRegU32(addCtx, 5, kIntcHandlerEntry);
+            setRegU32(addCtx, 6, 0u);
+            setRegU32(addCtx, 7, 0u);
+            AddIntcHandler(rdram.data(), &addCtx, &runtime);
+            t.IsTrue(getRegS32(addCtx, 2) > 0, "AddIntcHandler should register a VBlank handler");
+
+            R5900Context busyCtx{};
+            busyCtx.pc = kBusyEntry;
+            std::atomic<bool> workerDone{false};
+            std::atomic<bool> workerThrew{false};
+
+            std::thread worker([&]()
+            {
+                try
+                {
+                    runtime.dispatchLoop(rdram.data(), &busyCtx);
+                }
+                catch (...)
+                {
+                    workerThrew.store(true, std::memory_order_release);
+                }
+                workerDone.store(true, std::memory_order_release);
+            });
+
+            ps2_syscalls::EnsureVSyncWorkerRunning(rdram.data(), &runtime);
+
+            const bool finished = waitUntil([&]()
+            {
+                return workerDone.load(std::memory_order_acquire);
+            }, std::chrono::milliseconds(250));
+
+            if (!finished)
+            {
+                const uint32_t counter = 1u;
+                std::memcpy(rdram.data() + kAsyncCounterAddr, &counter, sizeof(counter));
+            }
+
+            if (worker.joinable())
+            {
+                worker.join();
+            }
+
+            runtime.requestStop();
+            notifyRuntimeStop();
+
+            uint32_t counter = 0u;
+            std::memcpy(&counter, rdram.data() + kAsyncCounterAddr, sizeof(counter));
+
+            t.IsFalse(workerThrew.load(std::memory_order_acquire),
+                      "busy dispatch worker should not throw while VBlank handlers fire");
+            t.IsTrue(finished,
+                     "VBlank interrupt handlers should run even while a guest thread is spinning");
+            t.Equals(counter, 1u, "VBlank handler should publish the awaited counter value");
+        });
+
+        tc.Run("GS async callbacks keep a dedicated stack when guest heap is exhausted", [](TestCase &t)
+        {
+            notifyRuntimeStop();
+
+            PS2Runtime runtime;
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            constexpr uint32_t kCallbackEntry = 0x180000u;
+            constexpr uint32_t kCallerGp = 0x0036A7F0u;
+            constexpr uint32_t kCallerSp = 0x00123450u;
+            constexpr uint32_t kAsyncStackFloor = 0x01F00000u;
+
+            runtime.configureGuestHeap(kAsyncStackFloor, kAsyncStackFloor);
+            runtime.registerFunction(kCallbackEntry, &testRecordAsyncCallbackStack);
+            ps2_stubs::resetGsSyncVCallbackState();
+            gAsyncCallbackObservedSp.store(0u, std::memory_order_release);
+            gAsyncCallbackObservedGp.store(0u, std::memory_order_release);
+
+            R5900Context registerCtx{};
+            registerCtx.pc = 0x00101900u;
+            setRegU32(registerCtx, 4, kCallbackEntry);
+            setRegU32(registerCtx, 28, kCallerGp);
+            setRegU32(registerCtx, 29, kCallerSp);
+            ps2_stubs::sceGsSyncVCallback(rdram.data(), &registerCtx, &runtime);
+
+            ps2_stubs::dispatchGsSyncVCallback(rdram.data(), &runtime, 1u);
+
+            const uint32_t observedSp = gAsyncCallbackObservedSp.load(std::memory_order_acquire);
+            const uint32_t observedGp = gAsyncCallbackObservedGp.load(std::memory_order_acquire);
+
+            t.IsTrue(observedSp != 0u, "callback should execute");
+            t.Equals(observedGp, kCallerGp, "callback should preserve the registered GP");
+            t.IsTrue(observedSp != kCallerSp, "callback should not reuse the registering thread stack");
+            t.IsTrue(observedSp >= kAsyncStackFloor,
+                     "callback should switch to the reserved async stack pool");
+
+            runtime.requestStop();
+            notifyRuntimeStop();
         });
 
         tc.Run("multiply-add matrix writes rd only when R5900 requires it", [](TestCase &t)

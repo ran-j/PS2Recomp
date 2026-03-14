@@ -17,7 +17,7 @@ static void throwIfTerminated(const std::shared_ptr<ThreadInfo> &info)
     }
 }
 
-static void waitWhileSuspended(const std::shared_ptr<ThreadInfo> &info)
+static void waitWhileSuspended(const std::shared_ptr<ThreadInfo> &info, PS2Runtime *runtime = nullptr)
 {
     if (!info)
         return;
@@ -28,8 +28,11 @@ static void waitWhileSuspended(const std::shared_ptr<ThreadInfo> &info)
         info->status = THS_SUSPEND;
         info->waitType = TSW_NONE;
         info->waitId = 0;
-        info->cv.wait(lock, [&]()
-                      { return info->suspendCount == 0 || info->terminated.load(); });
+        {
+            PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime);
+            info->cv.wait(lock, [&]()
+                          { return info->suspendCount == 0 || info->terminated.load(); });
+        }
         if (info->terminated.load())
         {
             throw ThreadExitException();
@@ -165,9 +168,19 @@ static void ensureAlarmWorkerRunning()
 
                 try
                 {
+                    constexpr uint32_t kAlarmCallbackStackSize = 0x4000u;
+                    thread_local PS2Runtime *s_alarmStackRuntime = nullptr;
+                    thread_local uint32_t s_alarmStackTop = 0u;
+                    if (s_alarmStackRuntime != readyAlarm->runtime || s_alarmStackTop == 0u)
+                    {
+                        s_alarmStackRuntime = readyAlarm->runtime;
+                        s_alarmStackTop = readyAlarm->runtime->reserveAsyncCallbackStack(kAlarmCallbackStackSize, 16u);
+                    }
+
                     R5900Context callbackCtx{};
                     setRegU32(&callbackCtx, 28, readyAlarm->gp);
-                    setRegU32(&callbackCtx, 29, readyAlarm->sp);
+                    setRegU32(&callbackCtx, 29,
+                              (s_alarmStackTop != 0u) ? s_alarmStackTop : (PS2_RAM_SIZE - 0x10u));
                     setRegU32(&callbackCtx, 31, 0);
                     setRegU32(&callbackCtx, 4, static_cast<uint32_t>(readyAlarm->id));
                     setRegU32(&callbackCtx, 5, static_cast<uint32_t>(readyAlarm->ticks));
@@ -358,7 +371,10 @@ static bool rpcInvokeFunction(uint8_t *rdram, R5900Context *ctx, PS2Runtime *run
         }
 
         PS2Runtime::RecompiledFunction func = runtime->lookupFunction(pc);
-        func(rdram, &tmp, runtime);
+        {
+            PS2Runtime::GuestExecutionScope guestExecution(runtime);
+            func(rdram, &tmp, runtime);
+        }
         ++steps;
     }
 

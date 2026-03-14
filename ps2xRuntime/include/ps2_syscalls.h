@@ -26,6 +26,11 @@ namespace ps2_syscalls
     void initializeGuestKernelState(uint8_t *rdram);
     void TODO(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t encodedSyscallId);
     void notifyRuntimeStop();
+    void joinAllGuestHostThreads();
+    void detachAllGuestHostThreads();
+    void EnsureVSyncWorkerRunning(uint8_t *rdram, PS2Runtime *runtime);
+    uint64_t GetCurrentVSyncTick();
+    uint64_t WaitForNextVSyncTick(uint8_t *rdram, PS2Runtime *runtime);
     void WaitVSyncTick(uint8_t *rdram, PS2Runtime *runtime);
 }
 
