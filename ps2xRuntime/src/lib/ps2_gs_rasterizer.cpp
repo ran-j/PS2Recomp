@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <sstream>
 
@@ -41,11 +42,6 @@ namespace
     std::atomic<uint32_t> s_debugPixelCount{0};
     std::atomic<uint32_t> s_debugContext1PrimitiveCount{0};
     std::atomic<uint32_t> s_debugFbp150PixelCount{0};
-    std::atomic<uint32_t> s_debugCvFontPrimitiveCount{0};
-    std::atomic<uint32_t> s_debugCvFontSampleCount{0};
-    std::atomic<bool> s_debugCvFontClutDumped{false};
-    std::atomic<uint32_t> s_debugCvFontTrianglePrimitiveCount{0};
-    std::atomic<uint32_t> s_debugCvFontTriangleSampleCount{0};
 
     bool passesAlphaTest(uint64_t testReg, uint8_t alpha)
     {
@@ -191,44 +187,6 @@ namespace
 
         return clutIndex;
     }
-
-    bool isVeronicaWarningFont(const GSTex0Reg &tex)
-    {
-        return tex.tbp0 == 12160u &&
-               tex.tbw == 8u &&
-               tex.psm == GS_PSM_T4 &&
-               tex.cbp == 16368u &&
-               tex.cpsm == GS_PSM_CT32 &&
-               tex.csm == 0u &&
-               tex.csa == 0u;
-    }
-
-    void dumpFontClut(const uint8_t *vram, uint32_t vramSize, uint32_t cbp)
-    {
-        //this is for code veronica only but maybe can help in other games
-        bool expected = false;
-        if (!s_debugCvFontClutDumped.compare_exchange_strong(expected, true, std::memory_order_relaxed))
-            return;
-
-        {
-            std::cout << "[cvfont:clut] cbp=" << cbp << std::endl;
-        }
-        for (uint32_t i = 0; i < 24u; ++i)
-        {
-            const uint32_t off = cbp * 256u + i * 4u;
-            if (off + 4u > vramSize)
-                break;
-
-            uint32_t color = 0u;
-            std::memcpy(&color, vram + off, sizeof(color));
-            std::cout << "  [" << i << "] rgba=("
-                      << static_cast<uint32_t>(color & 0xFFu) << ","
-                      << static_cast<uint32_t>((color >> 8) & 0xFFu) << ","
-                      << static_cast<uint32_t>((color >> 16) & 0xFFu) << ","
-                      << static_cast<uint32_t>((color >> 24) & 0xFFu) << ")" << std::endl;
-        }
-    }
-
 }
 
 void GSRasterizer::drawPrimitive(GS *gs)
@@ -250,6 +208,8 @@ void GSRasterizer::drawPrimitive(GS *gs)
                   << "tbp0=" << ctx.tex0.tbp0
                   << " tbw=" << static_cast<uint32_t>(ctx.tex0.tbw)
                   << " psm=0x" << std::hex << static_cast<uint32_t>(ctx.tex0.psm) << std::dec
+                  << " tw=" << static_cast<uint32_t>(ctx.tex0.tw)
+                  << " th=" << static_cast<uint32_t>(ctx.tex0.th)
                   << " tcc=" << static_cast<uint32_t>(ctx.tex0.tcc)
                   << " tfx=" << static_cast<uint32_t>(ctx.tex0.tfx)
                   << " cbp=" << ctx.tex0.cbp
@@ -646,49 +606,14 @@ void GSRasterizer::drawSprite(GS *gs)
 
     if (gs->m_prim.tme)
     {
-        const auto &tex = ctx.tex0;
-        const bool debugCvFont =
-            (tex.tbp0 != 0u &&
-             s_debugCvFontPrimitiveCount.load(std::memory_order_relaxed) < 32u);
+        const auto &tex = ctx.tex0; 
         int texW = 1 << tex.tw;
         int texH = 1 << tex.th;
         if (texW == 0)
             texW = 1;
         if (texH == 0)
             texH = 1;
-
-        if (debugCvFont)
-        {
-            const uint32_t primIndex = s_debugCvFontPrimitiveCount.fetch_add(1u, std::memory_order_relaxed);
-            if (primIndex < 16u)
-            {
-                if (tex.psm == GS_PSM_T4 || tex.psm == GS_PSM_T8)
-                {
-                    dumpFontClut(gs->m_vram, gs->m_vramSize, tex.cbp);
-                }
-                std::cout << "[cvfont:prim] idx=" << primIndex
-                          << " rect=(" << x0 << "," << y0 << ")-(" << x1 << "," << y1 << ")"
-                          << " uv0=(" << (v0.u >> 4) << "," << (v0.v >> 4) << ")"
-                          << " uv1=(" << (v1.u >> 4) << "," << (v1.v >> 4) << ")"
-                          << " tex=("
-                          << "tbp0=" << tex.tbp0
-                          << " tbw=" << static_cast<uint32_t>(tex.tbw)
-                          << " psm=0x" << std::hex << static_cast<uint32_t>(tex.psm) << std::dec
-                          << " cbp=" << tex.cbp
-                          << " cpsm=0x" << std::hex << static_cast<uint32_t>(tex.cpsm) << std::dec
-                          << " csm=" << static_cast<uint32_t>(tex.csm)
-                          << " csa=" << static_cast<uint32_t>(tex.csa)
-                          << ")"
-                          << " rgba=(" << static_cast<uint32_t>(r) << ","
-                          << static_cast<uint32_t>(g) << ","
-                          << static_cast<uint32_t>(b) << ","
-                          << static_cast<uint32_t>(a) << ")"
-                          << " test=0x" << std::hex << ctx.test
-                          << " alpha=0x" << ctx.alpha
-                          << std::dec << std::endl;
-            }
-        }
-
+ 
         float u0f, v0f, u1f, v1f;
         if (gs->m_prim.fst)
         {
@@ -753,26 +678,6 @@ void GSRasterizer::drawSprite(GS *gs)
                 uint8_t ta = static_cast<uint8_t>((texel >> 24) & 0xFF);
 
                 const TextureCombineResult color = combineTexture(tex, r, g, b, a, tr, tg, tb, ta);
-                if (debugCvFont)
-                {
-                    const uint32_t debugSample = s_debugCvFontSampleCount.fetch_add(1u, std::memory_order_relaxed);
-                    if (debugSample < 48u)
-                    {
-                        std::cout << "[cvfont:sample] idx=" << debugSample
-                                  << " xy=(" << x << "," << y << ")"
-                                  << " uv=(" << tu << "," << tv << ")"
-                                  << " clutIdx=" << sampleIndexValue
-                                  << " texel=(" << static_cast<uint32_t>(tr) << ","
-                                  << static_cast<uint32_t>(tg) << ","
-                                  << static_cast<uint32_t>(tb) << ","
-                                  << static_cast<uint32_t>(ta) << ")"
-                                  << " out=(" << static_cast<uint32_t>(color.r) << ","
-                                  << static_cast<uint32_t>(color.g) << ","
-                                  << static_cast<uint32_t>(color.b) << ","
-                                  << static_cast<uint32_t>(color.a) << ")"
-                                  << " passA=" << static_cast<uint32_t>(passesAlphaTest(ctx.test, color.a) ? 1u : 0u) << std::endl;
-                    }
-                }
                 writePixel(gs, x, y, color.r, color.g, color.b, color.a);
             }
         }
@@ -818,48 +723,6 @@ void GSRasterizer::drawTriangle(GS *gs)
 
     const float winding = (denom < 0.0f) ? -1.0f : 1.0f;
     const float invAbsDenom = 1.0f / std::fabs(denom);
-    const bool debugCvFontTriangle = gs->m_prim.tme && isVeronicaWarningFont(ctx.tex0);
-
-    if (debugCvFontTriangle)
-    {
-        const uint32_t primIndex = s_debugCvFontTrianglePrimitiveCount.fetch_add(1u, std::memory_order_relaxed);
-        if (primIndex < 24u)
-        {
-            dumpFontClut(gs->m_vram, gs->m_vramSize, ctx.tex0.cbp);
-            std::cout << "[cvfont:tri-prim] idx=" << primIndex
-                      << " box=(" << minX << "," << minY << ")-(" << maxX << "," << maxY << ")"
-                      << " tex=("
-                      << "tbp0=" << ctx.tex0.tbp0
-                      << " tbw=" << static_cast<uint32_t>(ctx.tex0.tbw)
-                      << " psm=0x" << std::hex << static_cast<uint32_t>(ctx.tex0.psm) << std::dec
-                      << " cbp=" << ctx.tex0.cbp
-                      << " cpsm=0x" << std::hex << static_cast<uint32_t>(ctx.tex0.cpsm) << std::dec
-                      << " csm=" << static_cast<uint32_t>(ctx.tex0.csm)
-                      << " csa=" << static_cast<uint32_t>(ctx.tex0.csa)
-                      << ")"
-                      << " v0=(" << fx0 << "," << fy0 << ")"
-                      << " stq0=(" << v0.s << "," << v0.t << "," << v0.q << ")"
-                      << " rgba0=(" << static_cast<uint32_t>(v0.r) << ","
-                      << static_cast<uint32_t>(v0.g) << ","
-                      << static_cast<uint32_t>(v0.b) << ","
-                      << static_cast<uint32_t>(v0.a) << ")"
-                      << " v1=(" << fx1 << "," << fy1 << ")"
-                      << " stq1=(" << v1.s << "," << v1.t << "," << v1.q << ")"
-                      << " rgba1=(" << static_cast<uint32_t>(v1.r) << ","
-                      << static_cast<uint32_t>(v1.g) << ","
-                      << static_cast<uint32_t>(v1.b) << ","
-                      << static_cast<uint32_t>(v1.a) << ")"
-                      << " v2=(" << fx2 << "," << fy2 << ")"
-                      << " stq2=(" << v2.s << "," << v2.t << "," << v2.q << ")"
-                      << " rgba2=(" << static_cast<uint32_t>(v2.r) << ","
-                      << static_cast<uint32_t>(v2.g) << ","
-                      << static_cast<uint32_t>(v2.b) << ","
-                      << static_cast<uint32_t>(v2.a) << ")"
-                      << " test=0x" << std::hex << ctx.test
-                      << " alpha=0x" << ctx.alpha
-                      << std::dec << std::endl;
-        }
-    }
 
     for (int y = minY; y <= maxY; ++y)
     {
@@ -895,11 +758,6 @@ void GSRasterizer::drawTriangle(GS *gs)
             {
                 float is, it, iq;
                 uint16_t iu, iv;
-                int debugTexU = -1;
-                int debugTexV = -1;
-                uint32_t debugRawIndex = 0u;
-                uint32_t debugPhysicalClutIndex = 0u;
-                uint32_t debugTexel = 0u;
                 if (gs->m_prim.fst)
                 {
                     iu = static_cast<uint16_t>(v0.u * w0 + v1.u * w1 + v2.u * w2);
@@ -923,119 +781,7 @@ void GSRasterizer::drawTriangle(GS *gs)
                     iv = 0;
                 }
 
-                uint32_t texel = 0u;
-                if (debugCvFontTriangle)
-                {
-                    const auto &tex = ctx.tex0;
-                    int texW = 1 << tex.tw;
-                    int texH = 1 << tex.th;
-                    if (texW == 0)
-                        texW = 1;
-                    if (texH == 0)
-                        texH = 1;
-
-                    if (gs->m_prim.fst)
-                    {
-                        debugTexU = clampInt(static_cast<int>(iu >> 4), 0, texW - 1);
-                        debugTexV = clampInt(static_cast<int>(iv >> 4), 0, texH - 1);
-                    }
-                    else
-                    {
-                        const float invQ = 1.0f / fabsQ(iq);
-                        debugTexU = clampInt(static_cast<int>(is * invQ * static_cast<float>(texW)), 0, texW - 1);
-                        debugTexV = clampInt(static_cast<int>(it * invQ * static_cast<float>(texH)), 0, texH - 1);
-                    }
-
-                    if (tex.psm == GS_PSM_T4)
-                    {
-                        const uint32_t debugNibbleAddr = GSPSMT4::addrPSMT4(tex.tbp0,
-                                                                            tex.tbw ? tex.tbw : 1u,
-                                                                            static_cast<uint32_t>(debugTexU),
-                                                                            static_cast<uint32_t>(debugTexV));
-                        const uint32_t debugByteOff = debugNibbleAddr >> 1;
-                        const uint8_t debugPackedByte =
-                            (debugByteOff < gs->m_vramSize) ? gs->m_vram[debugByteOff] : 0u;
-                        const uint32_t debugShift = (debugNibbleAddr & 1u) << 2;
-                        const uint32_t debugAltShift = ((debugNibbleAddr ^ 1u) & 1u) << 2;
-                        const uint32_t debugAltRawIndex = (debugPackedByte >> debugAltShift) & 0xFu;
-
-                        debugRawIndex = (debugPackedByte >> debugShift) & 0xFu;
-                        debugPhysicalClutIndex = resolveClutIndex(static_cast<uint8_t>(debugRawIndex),
-                                                                  tex.csm,
-                                                                  tex.csa,
-                                                                  tex.psm);
-                        const uint32_t debugAltPhysicalClutIndex =
-                            resolveClutIndex(static_cast<uint8_t>(debugAltRawIndex),
-                                             tex.csm,
-                                             tex.csa,
-                                             tex.psm);
-                        debugTexel = lookupCLUT(gs,
-                                                static_cast<uint8_t>(debugRawIndex),
-                                                tex.cbp,
-                                                tex.cpsm,
-                                                tex.csm,
-                                                tex.csa,
-                                                tex.psm);
-                        const uint32_t debugAltTexel = lookupCLUT(gs,
-                                                                  static_cast<uint8_t>(debugAltRawIndex),
-                                                                  tex.cbp,
-                                                                  tex.cpsm,
-                                                                  tex.csm,
-                                                                  tex.csa,
-                                                                  tex.psm);
-
-                        if (s_debugCvFontTriangleSampleCount.load(std::memory_order_relaxed) < 96u)
-                        {
-                            std::cout << "[cvfont:tri-fetch]"
-                                      << " uv=(" << debugTexU << "," << debugTexV << ")"
-                                      << " nibbleAddr=" << debugNibbleAddr
-                                      << " byteOff=0x" << std::hex << debugByteOff << std::dec
-                                      << " packed=0x" << std::hex << static_cast<uint32_t>(debugPackedByte) << std::dec
-                                      << " nibbleSel=" << (debugNibbleAddr & 1u)
-                                      << " rawIdx=" << debugRawIndex
-                                      << " altIdx=" << debugAltRawIndex
-                                      << " physClut=" << debugPhysicalClutIndex
-                                      << " altPhysClut=" << debugAltPhysicalClutIndex
-                                      << " texelA=(" << static_cast<uint32_t>(debugTexel & 0xFFu) << ","
-                                      << static_cast<uint32_t>((debugTexel >> 8) & 0xFFu) << ","
-                                      << static_cast<uint32_t>((debugTexel >> 16) & 0xFFu) << ","
-                                      << static_cast<uint32_t>((debugTexel >> 24) & 0xFFu) << ")"
-                                      << " texelB=(" << static_cast<uint32_t>(debugAltTexel & 0xFFu) << ","
-                                      << static_cast<uint32_t>((debugAltTexel >> 8) & 0xFFu) << ","
-                                      << static_cast<uint32_t>((debugAltTexel >> 16) & 0xFFu) << ","
-                                      << static_cast<uint32_t>((debugAltTexel >> 24) & 0xFFu) << ")" << std::endl;
-                        }
-                    }
-                    else if (tex.psm == GS_PSM_T8)
-                    {
-                        const uint32_t off = GSPSMT8::addrPSMT8(tex.tbp0,
-                                                                tex.tbw ? tex.tbw : 1u,
-                                                                static_cast<uint32_t>(debugTexU),
-                                                                static_cast<uint32_t>(debugTexV));
-                        debugRawIndex = (off < gs->m_vramSize) ? gs->m_vram[off] : 0u;
-                        debugPhysicalClutIndex = resolveClutIndex(static_cast<uint8_t>(debugRawIndex),
-                                                                  tex.csm,
-                                                                  tex.csa,
-                                                                  tex.psm);
-                        debugTexel = lookupCLUT(gs,
-                                                static_cast<uint8_t>(debugRawIndex),
-                                                tex.cbp,
-                                                tex.cpsm,
-                                                tex.csm,
-                                                tex.csa,
-                                                tex.psm);
-                    }
-                    else
-                    {
-                        debugTexel = sampleTexture(gs, is, it, iq, iu, iv);
-                    }
-
-                    texel = debugTexel;
-                }
-                else
-                {
-                    texel = sampleTexture(gs, is, it, iq, iu, iv);
-                }
+                uint32_t texel = sampleTexture(gs, is, it, iq, iu, iv);
 
                 uint8_t tr = static_cast<uint8_t>(texel & 0xFF);
                 uint8_t tg = static_cast<uint8_t>((texel >> 8) & 0xFF);
@@ -1048,61 +794,6 @@ void GSRasterizer::drawTriangle(GS *gs)
                 const uint8_t shadeB = b;
                 const uint8_t shadeA = a;
                 const TextureCombineResult color = combineTexture(tex, shadeR, shadeG, shadeB, shadeA, tr, tg, tb, ta);
-
-                if (debugCvFontTriangle)
-                {
-                    const uint32_t debugSample = s_debugCvFontTriangleSampleCount.fetch_add(1u, std::memory_order_relaxed);
-                    if (debugSample < 96u)
-                    {
-                        uint32_t dstBefore = 0u;
-                        if (ctx.frame.psm == GS_PSM_CT16 || ctx.frame.psm == GS_PSM_CT16S)
-                        {
-                            const uint32_t base = ctx.frame.fbp * 8192u;
-                            const uint32_t stride = fbStride(ctx.frame.fbw, ctx.frame.psm);
-                            const uint32_t off = base + static_cast<uint32_t>(y) * stride + static_cast<uint32_t>(x) * 2u;
-                            if (off + 2u <= gs->m_vramSize)
-                            {
-                                uint16_t packed = 0u;
-                                std::memcpy(&packed, gs->m_vram + off, sizeof(packed));
-                                dstBefore = decodePSMCT16(packed);
-                            }
-                        }
-                        else
-                        {
-                            const uint32_t base = ctx.frame.fbp * 8192u;
-                            const uint32_t stride = fbStride(ctx.frame.fbw, ctx.frame.psm);
-                            const uint32_t off = base + static_cast<uint32_t>(y) * stride + static_cast<uint32_t>(x) * 4u;
-                            if (off + 4u <= gs->m_vramSize)
-                                std::memcpy(&dstBefore, gs->m_vram + off, sizeof(dstBefore));
-                        }
-
-                        const AlphaTestResult alphaTest = classifyAlphaTest(ctx.test, color.a);
-                        std::cout << "[cvfont:tri-sample] idx=" << debugSample
-                                  << " xy=(" << x << "," << y << ")"
-                                  << " stq=(" << is << "," << it << "," << iq << ")"
-                                  << " texUV=(" << debugTexU << "," << debugTexV << ")"
-                                  << " rawIdx=" << debugRawIndex
-                                  << " physClut=" << debugPhysicalClutIndex
-                                  << " shade=(" << static_cast<uint32_t>(shadeR) << ","
-                                  << static_cast<uint32_t>(shadeG) << ","
-                                  << static_cast<uint32_t>(shadeB) << ","
-                                  << static_cast<uint32_t>(shadeA) << ")"
-                                  << " texel=(" << static_cast<uint32_t>(tr) << ","
-                                  << static_cast<uint32_t>(tg) << ","
-                                  << static_cast<uint32_t>(tb) << ","
-                                  << static_cast<uint32_t>(ta) << ")"
-                                  << " out=(" << static_cast<uint32_t>(color.r) << ","
-                                  << static_cast<uint32_t>(color.g) << ","
-                                  << static_cast<uint32_t>(color.b) << ","
-                                  << static_cast<uint32_t>(color.a) << ")"
-                                  << " dstBefore=(" << static_cast<uint32_t>(dstBefore & 0xFFu) << ","
-                                  << static_cast<uint32_t>((dstBefore >> 8) & 0xFFu) << ","
-                                  << static_cast<uint32_t>((dstBefore >> 16) & 0xFFu) << ","
-                                  << static_cast<uint32_t>((dstBefore >> 24) & 0xFFu) << ")"
-                                  << " alphaWrite=" << static_cast<uint32_t>(alphaTest.writeFramebuffer ? 1u : 0u)
-                                  << " keepDstA=" << static_cast<uint32_t>(alphaTest.preserveDestinationAlpha ? 1u : 0u) << std::endl;
-                    }
-                }
 
                 r = color.r;
                 g = color.g;

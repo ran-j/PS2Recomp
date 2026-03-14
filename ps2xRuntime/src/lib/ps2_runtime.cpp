@@ -662,6 +662,7 @@ PS2Runtime::PS2Runtime()
 PS2Runtime::~PS2Runtime()
 {
     requestStop();
+    ps2_syscalls::detachAllGuestHostThreads();
     if (IsWindowReady())
     {
         CloseWindow();
@@ -674,8 +675,6 @@ PS2Runtime::~PS2Runtime()
 
 bool PS2Runtime::initialize(const char *title)
 {
-    constexpr uint32_t kVu1ResumePc = 0xFFFFFFFFu;
-
     if (!m_memory.initialize())
     {
         std::cerr << "Failed to initialize PS2 memory" << std::endl;
@@ -688,19 +687,13 @@ bool PS2Runtime::initialize(const char *title)
                                     { m_gs.processGIFPacket(data, size); });
     m_memory.setGifArbiter(&m_gifArbiter);
     m_memory.setVu1MscalCallback([this](uint32_t startPC, uint32_t itop)
-                                 {
-        if (startPC == kVu1ResumePc)
-        {
-            m_vu1.resume(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
-                         m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
-                         m_gs, &m_memory, itop, 65536);
-        }
-        else
-        {
-            m_vu1.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
-                          m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
-                          m_gs, &m_memory, startPC, itop, 65536);
-        } });
+                                 { m_vu1.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
+                                                 m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
+                                                 m_gs, &m_memory, startPC, itop, 65536); });
+    m_memory.setVu1MscntCallback([this](uint32_t itop)
+                                 { m_vu1.resume(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
+                                                m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
+                                                m_gs, &m_memory, itop, 65536); });
 
     m_iop.init(m_memory.getRDRAM());
     m_iop.reset();
@@ -2225,6 +2218,17 @@ void PS2Runtime::run()
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
+    }
+
+    if (g_activeThreads.load(std::memory_order_relaxed) == 0)
+    {
+        ps2_syscalls::joinAllGuestHostThreads();
+    }
+    else
+    {
+        std::cerr << "[run] guest host threads did not stop within timeout; detaching remaining worker threads"
+                  << std::endl;
+        ps2_syscalls::detachAllGuestHostThreads();
     }
 
     UnloadTexture(frameTex);

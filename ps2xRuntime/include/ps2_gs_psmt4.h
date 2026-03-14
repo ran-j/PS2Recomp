@@ -25,18 +25,27 @@ namespace GSPSMT4
         {3585, 3593, 3601, 3609, 3617, 3625, 3633, 3641, 3587, 3595, 3603, 3611, 3619, 3627, 3635, 3643, 3589, 3597, 3605, 3613, 3621, 3629, 3637, 3645, 3591, 3599, 3607, 3615, 3623, 3631, 3639, 3647},
     };
 
-    inline uint32_t addrPSMT4(uint32_t block, uint32_t width, uint32_t x, uint32_t y)
+    inline uint32_t pageLocalNibbleOffset(uint32_t x, uint32_t y)
     {
-        uint32_t page = (block >> 5) + (y >> 7) * (width >> 1) + (x >> 7);
         uint32_t yy = y & 0x7Fu;
         uint32_t xx = x & 0x7Fu;
-        uint32_t blockBase = ((block & 0x1Fu) << 9) +
-                             (((xx >> 5) & 3u) << 12) +
+        uint32_t blockBase = (((xx >> 5) & 3u) << 12) +
                              (((yy >> 4) & 7u) << 6);
-        uint32_t offset = blockBase + columnTable4[yy & 15u][xx & 31u];
-        page += offset >> 14;
-        offset &= 0x3FFFu;
-        return (page << 14) + offset;
+        return blockBase + columnTable4[yy & 15u][xx & 31u];
+    }
+
+    inline uint32_t addrPSMT4(uint32_t block, uint32_t width, uint32_t x, uint32_t y)
+    {
+        const uint32_t pagesPerRow = ((width >> 1u) != 0u) ? (width >> 1u) : 1u;
+        const uint32_t localNibble = pageLocalNibbleOffset(x, y);
+        const uint32_t localByte = localNibble >> 1u;
+        const uint32_t localRow = localByte >> 8u;
+        const uint32_t localColumnByte = localByte & 0xFFu;
+        const uint32_t globalByte =
+            block * 256u +
+            (((y >> 7u) * 32u + localRow) * (pagesPerRow * 256u)) +
+            ((x >> 7u) * 256u + localColumnByte);
+        return (globalByte << 1u) | (localNibble & 1u);
     }
 
 }

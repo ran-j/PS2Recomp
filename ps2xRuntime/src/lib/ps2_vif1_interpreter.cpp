@@ -33,7 +33,6 @@ namespace
 {
     std::atomic<uint32_t> s_debugVu1KickCount{0};
     std::atomic<uint32_t> s_debugVif1OpcodeCount{0};
-    constexpr uint32_t kVu1ResumePc = 0xFFFFFFFFu;
 }
 
 void PS2Memory::processVIF1Data(uint32_t srcPhys, uint32_t sizeBytes)
@@ -180,8 +179,8 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                           << " pc=resume"
                           << std::dec << std::endl;
             }
-            if (m_vu1MscalCallback)
-                m_vu1MscalCallback(kVu1ResumePc, vif1_regs.itop);
+            if (m_vu1MscntCallback)
+                m_vu1MscntCallback(vif1_regs.itop);
             continue;
         }
         else if (opcode == VIF_STMASK)

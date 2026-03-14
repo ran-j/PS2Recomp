@@ -1161,29 +1161,6 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
                 uint8_t &b = m_vram[byteOff];
                 b = static_cast<uint8_t>((b & (0xF0u >> shift)) | ((nibble & 0x0Fu) << shift));
             }
-
-            if (dbp == 12160u &&
-                dpsm == GS_PSM_T4 &&
-                vx >= 470u && vx < 505u &&
-                vy >= 28u && vy < 40u)
-            {
-                const uint32_t debugIndex = s_debugCvFontUploadCount.fetch_add(1u, std::memory_order_relaxed);
-                if (debugIndex < 160u)
-                {
-                    std::ostringstream line;
-                    std::cout << "[cvfont:upload] idx=" << debugIndex
-                              << " xy=(" << vx << "," << vy << ")"
-                              << " srcByte=0x" << std::hex << static_cast<uint32_t>(srcByte) << std::dec
-                              << " srcLo=" << srcLo
-                              << " srcHi=" << srcHi
-                              << " chosen=" << static_cast<uint32_t>(nibble)
-                              << " nibbleAddr=" << nibbleAddr
-                              << " byteOff=0x" << std::hex << byteOff << std::dec
-                              << " nibbleSel=" << (nibbleAddr & 1u)
-                              << " shift=" << ((nibbleAddr & 1u) << 2) << std::endl;
-                }
-            }
-
             ++m_hwregX;
             if (m_hwregX >= rrw)
             {

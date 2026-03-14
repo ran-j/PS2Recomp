@@ -1029,7 +1029,12 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     enqueueTransfer(madr, qwc);
                 }
 
-                processPendingTransfers();
+                const bool autoProcessTransfers =
+                    (channelBase == 0x1000A000u) ? (m_gifPacketCallback || m_gifArbiter != nullptr) : true;
+                if (autoProcessTransfers)
+                {
+                    processPendingTransfers();
+                }
             }
         }
         return true;

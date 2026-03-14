@@ -374,8 +374,6 @@ namespace ps2_syscalls
             threadInfo->cv.notify_all();
         }
 
-        joinAllHostThreads();
-
         std::vector<std::shared_ptr<SemaInfo>> semas;
         {
             std::lock_guard<std::mutex> lock(g_sema_map_mutex);
@@ -428,5 +426,15 @@ namespace ps2_syscalls
             std::lock_guard<std::mutex> lock(g_syscall_override_mutex);
             g_syscall_overrides.clear();
         }
+    }
+
+    void joinAllGuestHostThreads()
+    {
+        joinAllHostThreads();
+    }
+
+    void detachAllGuestHostThreads()
+    {
+        detachAllHostThreads();
     }
 }
