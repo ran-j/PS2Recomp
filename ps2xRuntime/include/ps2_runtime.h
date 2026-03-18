@@ -441,6 +441,10 @@ public:
     void cooperativeGuestYield();
     void requestStop();
     bool isStopRequested() const;
+    uint32_t guestExecutionWaiterCountForTesting() const
+    {
+        return m_guestExecutionWaiters.load(std::memory_order_acquire);
+    }
 
     uint8_t Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr);
     uint16_t Load16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr);

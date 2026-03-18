@@ -327,6 +327,11 @@ void register_ps2_runtime_expansion_tests()
                 runtime.dispatchLoop(rdram.data(), &secondCtx);
             });
 
+            const bool secondContending = waitUntil([&]()
+            {
+                return runtime.guestExecutionWaiterCountForTesting() > 0u;
+            }, std::chrono::milliseconds(100));
+
             gCooperativeYieldAllowFirstYield.store(true, std::memory_order_release);
 
             if (firstWorker.joinable())
@@ -339,6 +344,7 @@ void register_ps2_runtime_expansion_tests()
             }
 
             t.IsTrue(firstEntered, "first guest worker should enter before yielding");
+            t.IsTrue(secondContending, "second guest worker should contend for guest execution before the first yields");
             t.IsTrue(gCooperativeYieldPeerRan.load(std::memory_order_acquire),
                      "second guest worker should run while the first cooperatively yields");
             t.Equals(getRegU32(&firstCtx, 2), 1u,
