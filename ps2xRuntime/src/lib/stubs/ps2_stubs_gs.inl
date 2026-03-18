@@ -1,28 +1,48 @@
 namespace
 {
+    std::mutex g_gs_sync_v_mutex;
+    uint64_t g_gs_sync_v_base_tick = 0u;
     std::mutex g_gs_sync_v_callback_mutex;
     uint32_t g_gs_sync_v_callback_func = 0u;
     uint32_t g_gs_sync_v_callback_gp = 0u;
     uint32_t g_gs_sync_v_callback_sp = 0u;
     uint32_t g_gs_sync_v_callback_stack_base = 0u;
     uint32_t g_gs_sync_v_callback_stack_top = 0u;
-    uint64_t g_gs_sync_v_callback_tick = 0u;
     uint32_t g_gs_sync_v_callback_bad_pc_logs = 0u;
+}
+
+static void resetGsSyncVState()
+{
+    std::lock_guard<std::mutex> lock(g_gs_sync_v_mutex);
+    g_gs_sync_v_base_tick = ps2_syscalls::GetCurrentVSyncTick();
+}
+
+static int32_t getGsSyncVFieldForTick(uint64_t tick)
+{
+    std::lock_guard<std::mutex> lock(g_gs_sync_v_mutex);
+    if (tick <= g_gs_sync_v_base_tick)
+    {
+        return 0;
+    }
+
+    return static_cast<int32_t>((tick - g_gs_sync_v_base_tick - 1u) & 1u);
 }
 
 void resetGsSyncVCallbackState()
 {
-    std::lock_guard<std::mutex> lock(g_gs_sync_v_callback_mutex);
-    g_gs_sync_v_callback_func = 0u;
-    g_gs_sync_v_callback_gp = 0u;
-    g_gs_sync_v_callback_sp = 0u;
-    g_gs_sync_v_callback_stack_base = 0u;
-    g_gs_sync_v_callback_stack_top = 0u;
-    g_gs_sync_v_callback_tick = 0u;
-    g_gs_sync_v_callback_bad_pc_logs = 0u;
+    {
+        std::lock_guard<std::mutex> lock(g_gs_sync_v_callback_mutex);
+        g_gs_sync_v_callback_func = 0u;
+        g_gs_sync_v_callback_gp = 0u;
+        g_gs_sync_v_callback_sp = 0u;
+        g_gs_sync_v_callback_stack_base = 0u;
+        g_gs_sync_v_callback_stack_top = 0u;
+        g_gs_sync_v_callback_bad_pc_logs = 0u;
+    }
+    resetGsSyncVState();
 }
 
-void dispatchGsSyncVCallback(uint8_t *rdram, PS2Runtime *runtime)
+void dispatchGsSyncVCallback(uint8_t *rdram, PS2Runtime *runtime, uint64_t tick)
 {
     if (!rdram || !runtime)
     {
@@ -31,20 +51,17 @@ void dispatchGsSyncVCallback(uint8_t *rdram, PS2Runtime *runtime)
 
     uint32_t callback = 0u;
     uint32_t gp = 0u;
-    uint32_t sp = 0u;
     uint32_t callbackStackTop = 0u;
-    uint64_t tick = 0u;
+    const uint64_t callbackTick = (tick != 0u) ? tick : ps2_syscalls::GetCurrentVSyncTick();
     {
         std::lock_guard<std::mutex> lock(g_gs_sync_v_callback_mutex);
         callback = g_gs_sync_v_callback_func;
         gp = g_gs_sync_v_callback_gp;
-        sp = g_gs_sync_v_callback_sp;
         callbackStackTop = g_gs_sync_v_callback_stack_top;
         if (callback == 0u)
         {
             return;
         }
-        tick = ++g_gs_sync_v_callback_tick;
     }
 
     if (!runtime->hasFunction(callback))
@@ -55,14 +72,14 @@ void dispatchGsSyncVCallback(uint8_t *rdram, PS2Runtime *runtime)
     if (callbackStackTop == 0u)
     {
         constexpr uint32_t kCallbackStackSize = 0x4000u;
-        const uint32_t stackBase = runtime->guestMalloc(kCallbackStackSize, 16u);
-        if (stackBase != 0u)
+        const uint32_t stackTop = runtime->reserveAsyncCallbackStack(kCallbackStackSize, 16u);
+        if (stackTop != 0u)
         {
             std::lock_guard<std::mutex> lock(g_gs_sync_v_callback_mutex);
             if (g_gs_sync_v_callback_stack_top == 0u)
             {
-                g_gs_sync_v_callback_stack_base = stackBase;
-                g_gs_sync_v_callback_stack_top = stackBase + kCallbackStackSize - 0x10u;
+                g_gs_sync_v_callback_stack_base = stackTop - (kCallbackStackSize - 0x10u);
+                g_gs_sync_v_callback_stack_top = stackTop;
             }
             callbackStackTop = g_gs_sync_v_callback_stack_top;
         }
@@ -72,9 +89,9 @@ void dispatchGsSyncVCallback(uint8_t *rdram, PS2Runtime *runtime)
     {
         R5900Context callbackCtx{};
         SET_GPR_U32(&callbackCtx, 28, gp);
-        SET_GPR_U32(&callbackCtx, 29, (callbackStackTop != 0u) ? callbackStackTop : ((sp != 0u) ? sp : (PS2_RAM_SIZE - 0x10u)));
+        SET_GPR_U32(&callbackCtx, 29, (callbackStackTop != 0u) ? callbackStackTop : (PS2_RAM_SIZE - 0x10u));
         SET_GPR_U32(&callbackCtx, 31, 0u);
-        SET_GPR_U32(&callbackCtx, 4, static_cast<uint32_t>(tick));
+        SET_GPR_U32(&callbackCtx, 4, static_cast<uint32_t>(callbackTick));
         callbackCtx.pc = callback;
 
         uint32_t steps = 0u;
@@ -159,6 +176,7 @@ void sceGsExecLoadImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     uint32_t dsax = static_cast<uint32_t>(img.x);
     uint32_t dsay = static_cast<uint32_t>(img.y);
 
+    // Full messy
     uint64_t *q = reinterpret_cast<uint64_t *>(pkt);
     q[0] = 0x1000000000000004ULL;
     q[1] = 0x0E0E0E0E0E0E0E0EULL;
@@ -219,11 +237,11 @@ void sceGsExecStoreImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
     uint32_t sbp = (static_cast<uint32_t>(img.vram_addr) * 2048u) / 256u;
     uint64_t bitbltbuf = (static_cast<uint64_t>(sbp & 0x3FFFu) << 0) |
-                        (static_cast<uint64_t>(fbw & 0x3Fu) << 16) |
-                        (static_cast<uint64_t>(img.psm & 0x3Fu) << 24) |
-                        (static_cast<uint64_t>(0u) << 32) |
-                        (static_cast<uint64_t>(1u) << 48) |
-                        (static_cast<uint64_t>(0u) << 56);
+                         (static_cast<uint64_t>(fbw & 0x3Fu) << 16) |
+                         (static_cast<uint64_t>(img.psm & 0x3Fu) << 24) |
+                         (static_cast<uint64_t>(0u) << 32) |
+                         (static_cast<uint64_t>(1u) << 48) |
+                         (static_cast<uint64_t>(0u) << 56);
     uint64_t trxpos = (static_cast<uint64_t>(img.x & 0x7FFu) << 0) |
                       (static_cast<uint64_t>(img.y & 0x7FFu) << 16) |
                       (static_cast<uint64_t>(0u) << 32) |
@@ -278,40 +296,26 @@ void sceGsGetGParam(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 void sceGsPutDispEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     uint32_t envAddr = getRegU32(ctx, 4);
-    uint8_t *ptr = getMemPtr(rdram, envAddr);
-    if (!ptr)
+    GsDispEnvMem env{};
+    if (!readGsDispEnv(rdram, envAddr, env))
     {
         setReturnS32(ctx, -1);
         return;
     }
-    constexpr uint32_t GIF_CHANNEL = 0x1000A000;
-    constexpr uint32_t QWC = 5;
-    constexpr uint32_t CHCR_STR_MODE0 = 0x101u;
-    auto &mem = runtime->memory();
-    mem.writeIORegister(GIF_CHANNEL + 0x10u, envAddr);
-    mem.writeIORegister(GIF_CHANNEL + 0x20u, QWC);
-    mem.writeIORegister(GIF_CHANNEL + 0x00u, CHCR_STR_MODE0);
+    applyGsDispEnv(runtime, env);
     setReturnS32(ctx, 0);
 }
 
 void sceGsPutDrawEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     uint32_t envAddr = getRegU32(ctx, 4);
-    uint8_t *ptr = getMemPtr(rdram, envAddr);
-    if (!ptr)
+    GsRegPairMem pairs[8]{};
+    if (!readGsRegPairs(rdram, envAddr, pairs, 8u))
     {
         setReturnS32(ctx, -1);
         return;
     }
-
-    constexpr uint32_t GIF_CHANNEL = 0x1000A000;
-    constexpr uint32_t QWC = 9;
-    constexpr uint32_t CHCR_STR_MODE0 = 0x101u;
-    auto &mem = runtime->memory();
-    mem.writeIORegister(GIF_CHANNEL + 0x10u, envAddr);
-    mem.writeIORegister(GIF_CHANNEL + 0x20u, QWC);
-    mem.writeIORegister(GIF_CHANNEL + 0x00u, CHCR_STR_MODE0);
-
+    applyGsRegPairs(runtime, pairs, 8u);
     setReturnS32(ctx, 0);
 }
 
@@ -328,6 +332,7 @@ void sceGsResetGraph(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         g_gparam.omode = static_cast<uint8_t>(omode & 0xFF);
         g_gparam.ffmode = static_cast<uint8_t>(ffmode & 0x1);
         writeGsGParamToScratch(runtime);
+        resetGsSyncVState();
 
         uint64_t pmode = makePmode(1, 0, 0, 0, 0, 0x80);
         uint64_t smode2 = (interlace & 0x1) | ((ffmode & 0x1) << 1);
@@ -385,6 +390,62 @@ void sceGsSetDefClear(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void sceGsSetDefDBuffDc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    const uint32_t envAddr = getRegU32(ctx, 4);
+    uint32_t psm = getRegU32(ctx, 5);
+    uint32_t w = getRegU32(ctx, 6);
+    uint32_t h = getRegU32(ctx, 7);
+    const uint32_t ztest = readStackU32(rdram, ctx, 16);
+    const uint32_t zpsm = readStackU32(rdram, ctx, 20);
+    const uint32_t clear = readStackU32(rdram, ctx, 24);
+    (void)clear;
+
+    if (w == 0u)
+    {
+        w = 640u;
+    }
+    if (h == 0u)
+    {
+        h = 448u;
+    }
+
+    const uint32_t fbw = std::max<uint32_t>(1u, (w + 63u) / 64u);
+    const uint64_t pmode = makePmode(1u, 1u, 0u, 0u, 0u, 0x80u);
+    const uint64_t smode2 =
+        (static_cast<uint64_t>(g_gparam.interlace & 0x1u) << 0) |
+        (static_cast<uint64_t>(g_gparam.ffmode & 0x1u) << 1);
+    const uint64_t dispfb = makeDispFb(0u, fbw, psm, 0u, 0u);
+    const uint64_t display = makeDisplay(636u, 32u, 0u, 0u, w - 1u, h - 1u);
+
+    const int32_t drawWidth = static_cast<int32_t>(w);
+    const int32_t drawHeight = static_cast<int32_t>(h);
+
+    uint32_t zbufAddr = 0u;
+    {
+        R5900Context temp = *ctx;
+        sceGszbufaddr(rdram, &temp, runtime);
+        zbufAddr = getRegU32(&temp, 2);
+    }
+
+    GsDBuffDcMem db{};
+    db.disp[0].pmode = pmode;
+    db.disp[0].smode2 = smode2;
+    db.disp[0].dispfb = dispfb;
+    db.disp[0].display = display;
+    db.disp[0].bgcolor = 0u;
+    db.disp[1] = db.disp[0];
+
+    db.giftag0 = {makeGiftagAplusD(14u), 0x0E0E0E0E0E0E0E0EULL};
+    seedGsDrawEnv1(db.draw01, drawWidth, drawHeight, 0u, fbw, psm, zbufAddr, zpsm, ztest, false);
+    seedGsDrawEnv2(db.draw02, drawWidth, drawHeight, 0u, fbw, psm, zbufAddr, zpsm, ztest, false);
+    db.giftag1 = db.giftag0;
+    seedGsDrawEnv1(db.draw11, drawWidth, drawHeight, 0u, fbw, psm, zbufAddr, zpsm, ztest, false);
+    seedGsDrawEnv2(db.draw12, drawWidth, drawHeight, 0u, fbw, psm, zbufAddr, zpsm, ztest, false);
+
+    if (!writeGsDBuffDc(rdram, envAddr, db))
+    {
+        setReturnS32(ctx, -1);
+        return;
+    }
     setReturnS32(ctx, 0);
 }
 
@@ -429,6 +490,60 @@ void sceGsSetDefDrawEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     sceGszbufaddr(rdram, ctx, runtime);
     int32_t zbuf = static_cast<int32_t>(static_cast<int16_t>(getRegU32(ctx, 2) & 0xFFFF));
 
+    GsDrawEnv1Mem env{};
+    seedGsDrawEnv1(env,
+                   w,
+                   h,
+                   0u,
+                   fbw,
+                   psm,
+                   static_cast<uint32_t>(zbuf),
+                   param_6 & 0xFu,
+                   param_5 & 0x3u,
+                   (param_2 & 2u) != 0u);
+
+    uint8_t *const ptr = getMemPtr(rdram, envAddr);
+    if (!ptr)
+    {
+        setReturnS32(ctx, 8);
+        return;
+    }
+    std::memcpy(ptr, &env, sizeof(env));
+
+    setReturnS32(ctx, 8);
+}
+
+void sceGsSetDefDrawEnv2(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    uint32_t envAddr = getRegU32(ctx, 4);
+    uint32_t param_2 = getRegU32(ctx, 5);
+    int32_t w = static_cast<int32_t>(static_cast<int16_t>(getRegU32(ctx, 6) & 0xFFFF));
+    int32_t h = static_cast<int32_t>(static_cast<int16_t>(getRegU32(ctx, 7) & 0xFFFF));
+    uint32_t param_5 = readStackU32(rdram, ctx, 16);
+    uint32_t param_6 = readStackU32(rdram, ctx, 20);
+
+    if (w <= 0)
+        w = 640;
+    if (h <= 0)
+        h = 448;
+
+    uint32_t psm = param_2 & 0xFU;
+    uint32_t fbw = ((static_cast<uint32_t>(w) + 63u) >> 6) & 0x3FU;
+    sceGszbufaddr(rdram, ctx, runtime);
+    int32_t zbuf = static_cast<int32_t>(static_cast<int16_t>(getRegU32(ctx, 2) & 0xFFFF));
+
+    GsDrawEnv2Mem env{};
+    seedGsDrawEnv2(env,
+                   w,
+                   h,
+                   0u,
+                   fbw,
+                   psm,
+                   static_cast<uint32_t>(zbuf),
+                   param_6 & 0xFu,
+                   param_5 & 0x3u,
+                   (param_2 & 2u) != 0u);
+
     uint8_t *const ptr = getMemPtr(rdram, envAddr);
     if (!ptr)
     {
@@ -436,46 +551,8 @@ void sceGsSetDefDrawEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         return;
     }
 
-    uint64_t *const words = reinterpret_cast<uint64_t *>(ptr);
-
-    words[0] = 0x1000000000008008ULL;
-    words[1] = 0x000000000000000EULL;
-
-    words[2] = (static_cast<uint64_t>(fbw) << 16) | (static_cast<uint64_t>(psm) << 24);
-    words[3] = 0x4c;
-
-    words[4] = (static_cast<uint64_t>(zbuf) & 0xFFFFULL) | (static_cast<uint64_t>(param_6 & 0xF) << 24) |
-               (param_5 == 0 ? 0x100000000ULL : 0ULL);
-    words[5] = 0x4e;
-
-    int32_t off_x = 0x800 - (w >> 1);
-    int32_t off_y = 0x800 - (h >> 1);
-    words[6] = (static_cast<uint64_t>(static_cast<uint32_t>(off_y) & 0xFFFF) << 36) |
-               (static_cast<uint32_t>(off_x) & 0xFFFF) * 16ULL;
-    words[7] = 0x18;
-
-    words[8] = (static_cast<uint64_t>(static_cast<uint32_t>(h - 1) & 0xFFFF) << 48) |
-               (static_cast<uint64_t>(static_cast<uint32_t>(w - 1) & 0xFFFF) << 16);
-    words[9] = 0x40;
-
-    words[10] = 1;
-    words[11] = 0x1a;
-
-    words[12] = 1;
-    words[13] = 0x46;
-
-    words[14] = (param_2 & 2) ? 1ULL : 0ULL;
-    words[15] = 0x45;
-
-    words[16] = (param_5 == 0) ? 0x30000ULL : ((static_cast<uint64_t>(param_5 & 3) << 17) | 0x10000ULL);
-    words[17] = 0x47;
-
+    std::memcpy(ptr, &env, sizeof(env));
     setReturnS32(ctx, 8);
-}
-
-void sceGsSetDefDrawEnv2(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    sceGsSetDefDrawEnv(rdram, ctx, runtime);
 }
 
 void sceGsSetDefLoadImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -503,9 +580,29 @@ void sceGsSetDefStoreImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtim
 
 void sceGsSwapDBuffDc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    static int cur = 0;
-    cur ^= 1;
-    setReturnS32(ctx, cur);
+    const uint32_t envAddr = getRegU32(ctx, 4);
+    const uint32_t which = getRegU32(ctx, 5) & 1u;
+
+    GsDBuffDcMem db{};
+    if (!runtime || !readGsDBuffDc(rdram, envAddr, db))
+    {
+        setReturnS32(ctx, -1);
+        return;
+    }
+
+    applyGsDispEnv(runtime, db.disp[which]);
+    if (which == 0u)
+    {
+        applyGsRegPairs(runtime, reinterpret_cast<const GsRegPairMem *>(&db.draw01), 8u);
+        applyGsRegPairs(runtime, reinterpret_cast<const GsRegPairMem *>(&db.draw02), 8u);
+    }
+    else
+    {
+        applyGsRegPairs(runtime, reinterpret_cast<const GsRegPairMem *>(&db.draw11), 8u);
+        applyGsRegPairs(runtime, reinterpret_cast<const GsRegPairMem *>(&db.draw12), 8u);
+    }
+
+    setReturnS32(ctx, static_cast<int32_t>(which ^ 1u));
 }
 
 void sceGsSyncPath(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -577,13 +674,18 @@ void sceGsSyncPath(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void sceGsSyncV(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    setReturnS32(ctx, 0);
+    const uint64_t tick = ps2_syscalls::WaitForNextVSyncTick(rdram, runtime);
+    if (g_gparam.interlace != 0u)
+    {
+        setReturnS32(ctx, getGsSyncVFieldForTick(tick));
+        return;
+    }
+
+    setReturnS32(ctx, 1);
 }
 
 void sceGsSyncVCallback(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    (void)rdram;
-
     const uint32_t newCallback = getRegU32(ctx, 4);
     const uint32_t callerPc = ctx ? ctx->pc : 0u;
     const uint32_t callerRa = ctx ? getRegU32(ctx, 31) : 0u;
@@ -613,6 +715,11 @@ void sceGsSyncVCallback(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
                   << " sp=0x" << sp
                   << std::dec << std::endl;
         ++s_syncVCallbackLogCount;
+    }
+
+    if (newCallback != 0u)
+    {
+        ps2_syscalls::EnsureVSyncWorkerRunning(rdram, runtime);
     }
 
     setReturnU32(ctx, oldCallback);

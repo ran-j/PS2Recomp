@@ -372,7 +372,7 @@ void StartThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
                         throw ThreadExitException();
                     }
 
-                    waitWhileSuspended(info);
+                    waitWhileSuspended(info, runtime);
 
                     const uint32_t pc = threadCtx->pc;
                     if (pc == 0u)
@@ -445,7 +445,10 @@ void StartThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
                                   << std::hex << pc << std::dec << std::endl;
                         throw ThreadExitException();
                     }
-                    step(rdram, threadCtx, runtime);
+                    {
+                        PS2Runtime::GuestExecutionScope guestExecution(runtime);
+                        step(rdram, threadCtx, runtime);
+                    }
                 }
             }
             catch (const ThreadExitException &)
@@ -606,8 +609,11 @@ void TerminateThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         // Block until the target thread actually finishes unwinding and becomes dormant
         std::unique_lock<std::mutex> lock(info->m);
-        info->cv.wait(lock, [&]()
-                      { return !info->started && info->status == THS_DORMANT; });
+        {
+            PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime);
+            info->cv.wait(lock, [&]()
+                          { return !info->started && info->status == THS_DORMANT; });
+        }
     }
 
     setReturnS32(ctx, KE_OK);
@@ -641,8 +647,11 @@ void SuspendThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     if (tid == g_currentThreadId)
     {
         std::unique_lock<std::mutex> lock(info->m);
-        info->cv.wait(lock, [&]()
-                      { return info->suspendCount == 0 || info->terminated.load(); });
+        {
+            PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime);
+            info->cv.wait(lock, [&]()
+                          { return info->suspendCount == 0 || info->terminated.load(); });
+        }
         if (info->terminated.load())
         {
             throw ThreadExitException();
@@ -784,8 +793,11 @@ void SleepThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         info->waitId = 0;
         info->forceRelease = false;
 
-        info->cv.wait(lock, [&]()
-                      { return info->wakeupCount > 0 || info->forceRelease.load() || info->terminated.load(); });
+        {
+            PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime);
+            info->cv.wait(lock, [&]()
+                          { return info->wakeupCount > 0 || info->forceRelease.load() || info->terminated.load(); });
+        }
 
         if (info->terminated.load())
         {
@@ -820,7 +832,7 @@ void SleepThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     }
 
     lock.unlock();
-    waitWhileSuspended(info);
+    waitWhileSuspended(info, runtime);
     setReturnS32(ctx, ret);
 }
 

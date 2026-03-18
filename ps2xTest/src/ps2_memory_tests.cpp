@@ -100,6 +100,22 @@ void register_ps2_memory_tests()
             t.Equals(mem.translateAddress(0xA0005678u), 0x00005678u, "KSEG1 should map directly to physical");
             t.Equals(mem.translateAddress(0x20001234u), 0x00001234u, "0x2000 uncached alias should map to RAM");
             t.Equals(mem.translateAddress(0x30105678u), 0x00105678u, "0x3010 accelerated alias should map to RAM");
+            t.Equals(mem.translateAddress(PS2_SCRATCHPAD_BASE + 0x123u), 0x123u, "scratchpad base should translate to local offset");
+            t.Equals(mem.translateAddress(PS2_SCRATCHPAD_ALIAS_BASE + 0x123u), 0x123u, "0xF000 scratchpad alias should translate to local offset");
+        });
+
+        tc.Run("scratchpad alias accesses the same bytes as base", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kOffset = 0x140u;
+            constexpr uint32_t kScratchAddr = PS2_SCRATCHPAD_BASE + kOffset;
+            constexpr uint32_t kScratchAliasAddr = PS2_SCRATCHPAD_ALIAS_BASE + kOffset;
+
+            mem.write32(kScratchAliasAddr, 0xCAFEBABEu);
+            t.Equals(mem.read32(kScratchAddr), 0xCAFEBABEu, "writes through 0xF000 scratchpad alias should land in scratchpad");
+            t.Equals(mem.read32(kScratchAliasAddr), 0xCAFEBABEu, "reads through 0xF000 scratchpad alias should see scratchpad bytes");
         });
 
         tc.Run("fast memory helpers wrap safely at RAM boundary", [](TestCase &t)
@@ -790,6 +806,50 @@ void register_ps2_memory_tests()
                 }
             }
             t.IsTrue(contentOk, "scratchpad GIF DMA packet bytes should match scratchpad source");
+        });
+
+        tc.Run("GIF DMA chain can source tags and payload from 0xF000 scratchpad alias", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kGifCh = 0x1000A000u;
+            constexpr uint32_t kTagAlias = PS2_SCRATCHPAD_ALIAS_BASE + 0x100u;
+
+            uint8_t *scratch = mem.getScratchpad();
+            std::memset(scratch + 0x100u, 0, 32u);
+
+            const uint64_t endTag = makeDmaTag(1u, 7u, 0u, false);
+            std::memcpy(scratch + 0x100u, &endTag, sizeof(endTag));
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                scratch[0x110u + i] = static_cast<uint8_t>(0xC0u + i);
+            }
+
+            std::vector<std::vector<uint8_t>> captured;
+            mem.setGifPacketCallback([&](const uint8_t *data, uint32_t sizeBytes)
+            {
+                captured.emplace_back(data, data + sizeBytes);
+            });
+
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x30u, kTagAlias), "write TADR scratchpad alias should succeed");
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x00u, 0x104u), "write CHCR STR|CHAIN should succeed");
+
+            mem.processPendingTransfers();
+
+            t.Equals(captured.size(), static_cast<size_t>(1u), "scratchpad alias chain should emit one packet");
+            t.Equals(captured[0].size(), static_cast<size_t>(16u), "scratchpad alias chain should emit one qword");
+
+            bool contentOk = true;
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                if (captured[0][i] != static_cast<uint8_t>(0xC0u + i))
+                {
+                    contentOk = false;
+                    break;
+                }
+            }
+            t.IsTrue(contentOk, "scratchpad alias chain payload should match scratchpad bytes");
         });
 
         tc.Run("VIF1 DMA DIRECT forwards payload to GIF callback and clears channel", [](TestCase &t)

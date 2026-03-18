@@ -1645,7 +1645,10 @@ void sceIpuInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     if (setD4)
     {
         ctx->r[4] = _mm_set_epi64x(0, 1);
-        setD4(rdram, ctx, runtime);
+        {
+            PS2Runtime::GuestExecutionScope guestExecution(runtime);
+            setD4(rdram, ctx, runtime);
+        }
     }
 
     mem.write32(REG_IPU_CTRL, 0x40000000u);

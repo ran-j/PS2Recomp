@@ -376,7 +376,7 @@ public class ExportPS2Functions extends GhidraScript {
 
             MemoryBlock fromBlock = currentProgram.getMemory().getBlock(from);
             if (fromBlock == null || !fromBlock.isExecute()) {
-                return true;
+                continue; // lets ignore DATA/non-code refs
             }
         }
 

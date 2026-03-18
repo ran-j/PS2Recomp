@@ -304,6 +304,29 @@ static void joinAllHostThreads()
     }
 }
 
+static void detachAllHostThreads()
+{
+    std::vector<std::thread> workers;
+    {
+        std::lock_guard<std::mutex> lock(g_host_thread_mutex);
+        workers.reserve(g_hostThreads.size());
+        for (auto &entry : g_hostThreads)
+        {
+            workers.push_back(std::move(entry.second));
+        }
+        g_hostThreads.clear();
+    }
+
+    for (auto &worker : workers)
+    {
+        if (!worker.joinable())
+        {
+            continue;
+        }
+        worker.detach();
+    }
+}
+
 struct RpcServerState
 {
     uint32_t sid = 0;

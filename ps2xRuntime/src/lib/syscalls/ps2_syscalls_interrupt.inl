@@ -54,6 +54,26 @@ static void writeGuestU64NoThrow(uint8_t *rdram, uint32_t addr, uint64_t value)
     std::memcpy(dst, &value, sizeof(value));
 }
 
+static uint32_t getAsyncHandlerStackTop(PS2Runtime *runtime)
+{
+    constexpr uint32_t kAsyncHandlerStackSize = 0x4000u;
+    thread_local PS2Runtime *s_cachedRuntime = nullptr;
+    thread_local uint32_t s_cachedStackTop = 0u;
+
+    if (runtime == nullptr)
+    {
+        return PS2_RAM_SIZE - 0x10u;
+    }
+
+    if (s_cachedRuntime != runtime || s_cachedStackTop == 0u)
+    {
+        s_cachedRuntime = runtime;
+        s_cachedStackTop = runtime->reserveAsyncCallbackStack(kAsyncHandlerStackSize, 16u);
+    }
+
+    return (s_cachedStackTop != 0u) ? s_cachedStackTop : (PS2_RAM_SIZE - 0x10u);
+}
+
 static void dispatchIntcHandlersForCause(uint8_t *rdram, PS2Runtime *runtime, uint32_t cause)
 {
     if (!rdram || !runtime)
@@ -87,9 +107,8 @@ static void dispatchIntcHandlersForCause(uint8_t *rdram, PS2Runtime *runtime, ui
             }
             handlers.push_back(info);
         }
-        std::sort(handlers.begin(), handlers.end(), [](const IrqHandlerInfo &a, const IrqHandlerInfo &b) {
-            return a.order < b.order;
-        });
+        std::sort(handlers.begin(), handlers.end(), [](const IrqHandlerInfo &a, const IrqHandlerInfo &b)
+                  { return a.order < b.order; });
     }
 
     for (const IrqHandlerInfo &info : handlers)
@@ -102,9 +121,8 @@ static void dispatchIntcHandlersForCause(uint8_t *rdram, PS2Runtime *runtime, ui
         try
         {
             R5900Context irqCtx{};
-            const uint32_t sp = (info.sp != 0u) ? info.sp : (PS2_RAM_SIZE - 0x10u);
             SET_GPR_U32(&irqCtx, 28, info.gp);
-            SET_GPR_U32(&irqCtx, 29, sp);
+            SET_GPR_U32(&irqCtx, 29, getAsyncHandlerStackTop(runtime));
             SET_GPR_U32(&irqCtx, 31, 0u);
             SET_GPR_U32(&irqCtx, 4, cause);
             SET_GPR_U32(&irqCtx, 5, info.arg);
@@ -119,6 +137,8 @@ static void dispatchIntcHandlersForCause(uint8_t *rdram, PS2Runtime *runtime, ui
                 {
                     break;
                 }
+                // Interrupt handlers must be able to preempt a guest thread that is
+                // spinning on interrupt-produced state, such as a vblank counter.
                 step(rdram, &irqCtx, runtime);
             }
         }
@@ -171,9 +191,8 @@ void dispatchDmacHandlersForCause(uint8_t *rdram, PS2Runtime *runtime, uint32_t 
             }
             handlers.push_back(info);
         }
-        std::sort(handlers.begin(), handlers.end(), [](const IrqHandlerInfo &a, const IrqHandlerInfo &b) {
-            return a.order < b.order;
-        });
+        std::sort(handlers.begin(), handlers.end(), [](const IrqHandlerInfo &a, const IrqHandlerInfo &b)
+                  { return a.order < b.order; });
     }
 
     for (const IrqHandlerInfo &info : handlers)
@@ -186,9 +205,8 @@ void dispatchDmacHandlersForCause(uint8_t *rdram, PS2Runtime *runtime, uint32_t 
         try
         {
             R5900Context irqCtx{};
-            const uint32_t sp = (info.sp != 0u) ? info.sp : (PS2_RAM_SIZE - 0x10u);
             SET_GPR_U32(&irqCtx, 28, info.gp);
-            SET_GPR_U32(&irqCtx, 29, sp);
+            SET_GPR_U32(&irqCtx, 29, getAsyncHandlerStackTop(runtime));
             SET_GPR_U32(&irqCtx, 31, 0u);
             SET_GPR_U32(&irqCtx, 4, cause);
             SET_GPR_U32(&irqCtx, 5, info.arg);
@@ -256,7 +274,8 @@ static void interruptWorkerMain(uint8_t *rdram, PS2Runtime *runtime)
     {
         {
             std::unique_lock<std::mutex> lock(g_irq_worker_mutex);
-            if (g_irq_worker_cv.wait_until(lock, nextTick, []() { return g_irq_worker_stop.load(std::memory_order_acquire); }))
+            if (g_irq_worker_cv.wait_until(lock, nextTick, []()
+                                           { return g_irq_worker_stop.load(std::memory_order_acquire); }))
             {
                 break;
             }
@@ -276,7 +295,8 @@ static void interruptWorkerMain(uint8_t *rdram, PS2Runtime *runtime)
 
         for (int i = 0; i < ticksToProcess; ++i)
         {
-            signalVSyncFlag(rdram);
+            const uint64_t tickValue = signalVSyncFlag(rdram);
+            ps2_stubs::dispatchGsSyncVCallback(rdram, runtime, tickValue);
             dispatchIntcHandlersForCause(rdram, runtime, kIntcVblankStart);
             std::this_thread::sleep_for(std::chrono::microseconds(500));
             dispatchIntcHandlersForCause(rdram, runtime, kIntcVblankEnd);
@@ -312,22 +332,43 @@ static void ensureInterruptWorkerRunning(uint8_t *rdram, PS2Runtime *runtime)
     }
 }
 
+void EnsureVSyncWorkerRunning(uint8_t *rdram, PS2Runtime *runtime)
+{
+    ensureInterruptWorkerRunning(rdram, runtime);
+}
+
+uint64_t GetCurrentVSyncTick()
+{
+    std::lock_guard<std::mutex> lock(g_vsync_flag_mutex);
+    return g_vsync_tick_counter;
+}
+
 void stopInterruptWorker()
 {
     g_irq_worker_stop.store(true, std::memory_order_release);
     g_irq_worker_cv.notify_all();
     std::unique_lock<std::mutex> lock(g_irq_worker_mutex);
-    g_irq_worker_cv.wait_for(lock, std::chrono::milliseconds(500), []() {
-        return !g_irq_worker_running.load(std::memory_order_acquire);
-    });
+    g_irq_worker_cv.wait_for(lock, std::chrono::milliseconds(500), []()
+                             { return !g_irq_worker_running.load(std::memory_order_acquire); });
+    g_vsync_cv.notify_all();
 }
 
-void WaitVSyncTick(uint8_t *rdram, PS2Runtime *runtime)
+uint64_t WaitForNextVSyncTick(uint8_t *rdram, PS2Runtime *runtime)
 {
     ensureInterruptWorkerRunning(rdram, runtime);
     std::unique_lock<std::mutex> lock(g_vsync_flag_mutex);
     uint64_t current = g_vsync_tick_counter;
-    g_vsync_cv.wait(lock, [current]() { return g_vsync_tick_counter > current; });
+    {
+        PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime);
+        g_vsync_cv.wait(lock, [current, runtime]()
+                        { return g_vsync_tick_counter > current || (runtime != nullptr && runtime->isStopRequested()); });
+    }
+    return g_vsync_tick_counter;
+}
+
+void WaitVSyncTick(uint8_t *rdram, PS2Runtime *runtime)
+{
+    (void)WaitForNextVSyncTick(rdram, runtime);
 }
 
 void SetVSyncFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
