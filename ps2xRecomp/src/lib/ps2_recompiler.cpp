@@ -636,10 +636,22 @@ namespace ps2recomp
 
                 const Function *containingFunction = findContainingFunction(function.start);
                 uint32_t sliceEndAddress = containingFunction ? containingFunction->end : function.end;
+                // Only clamp to boundaries OUTSIDE the containing function.
+                // Sub-functions inside the parent (e.g. Ghidra-detected sub_xxx)
+                // must not truncate sibling entry slices that share the parent range.
+                uint32_t parentEnd = sliceEndAddress;
                 auto nextIt = std::upper_bound(boundaryStarts.begin(), boundaryStarts.end(), function.start);
-                if (nextIt != boundaryStarts.end() && *nextIt < sliceEndAddress)
+                while (nextIt != boundaryStarts.end() && *nextIt < parentEnd)
                 {
+                    // Skip boundaries inside the containing function — they are
+                    // sub-functions, not real function starts that should truncate us.
+                    if (containingFunction && *nextIt < containingFunction->end)
+                    {
+                        ++nextIt;
+                        continue;
+                    }
                     sliceEndAddress = *nextIt;
+                    break;
                 }
 
                 if (sliceEndAddress <= function.start)

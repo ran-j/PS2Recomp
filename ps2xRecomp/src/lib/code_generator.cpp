@@ -1003,6 +1003,12 @@ namespace ps2recomp
             }
         }
 
+        // Safety fallback: if execution reaches here, the function boundary
+        // was incomplete (missing jr $ra). Return via $ra to prevent ctx->pc
+        // from being left in a bad state, which would cascade returns up the
+        // entire call chain. For correctly-terminated functions this is
+        // unreachable dead code after the jr $ra return block.
+        ss << "    ctx->pc = GPR_U32(ctx, 31); return;\n";
         ss << "}\n";
         return ss.str();
     }
