@@ -797,6 +797,27 @@ namespace ps2recomp
             func.end = (nextStart > func.start) ? nextStart : (func.start + 4);
         }
 
+        // Clamp overlapping functions.  Ghidra sometimes reports parent functions
+        // whose range includes nested sub-functions (e.g. 0x1046B8 spanning
+        // 456 bytes when it should be 52).  Without this clamp the recompiler
+        // emits one giant body containing the sub-functions inline, and the
+        // pc-mismatch checks on sub-calls cause cascading early returns.
+        //
+        // Entry slices (alternate entry points into the same function body)
+        // start within a few bytes of the parent (e.g. 0x15D680 and
+        // game_loop_body at 0x15D684).  These must NOT be clamped — doing so
+        // would truncate the parent to just a few bytes.  We use a 16-byte
+        // threshold: if the next function starts within 16 bytes, it is likely
+        // an entry slice and we skip the clamp.
+        for (size_t index = 0; index + 1 < functions.size(); index++)
+        {
+            uint32_t gap = functions[index + 1].start - functions[index].start;
+            if (functions[index].end > functions[index + 1].start && gap >= 16)
+            {
+                functions[index].end = functions[index + 1].start;
+            }
+        }
+
         return functions;
     }
 
