@@ -387,8 +387,17 @@ namespace ps2recomp
                     {
                         ss << "        const uint32_t __entryPc = ctx->pc;\n";
                         ss << "        targetFn(rdram, ctx, runtime);\n";
+                        ss << fmt::format("        while (runtime->hasFunction(ctx->pc) && runtime->lookupFunction(ctx->pc) == targetFn) {{\n");
+                        ss << "            const uint32_t __resumePc = ctx->pc;\n";
+                        ss << fmt::format("            if (__resumePc == 0x{:X}u) {{ break; }}\n", fallthroughPc);
+                        ss << "            targetFn(rdram, ctx, runtime);\n";
+                        ss << fmt::format("            if (ctx->pc == __resumePc) {{ ctx->pc = 0x{:X}u; break; }}\n", fallthroughPc);
+                        ss << "        }\n";
                         ss << fmt::format("        if (ctx->pc == __entryPc) {{ ctx->pc = 0x{:X}u; }}\n", fallthroughPc);
-                        ss << fmt::format("        if (ctx->pc != 0x{:X}u) {{ fprintf(stderr, \"[PC_MISMATCH] at 0x{:X}: called 0x%x, expected ret 0x{:X}, got 0x%x\\n\", __entryPc, ctx->pc); return; }}\n", fallthroughPc, branchInst.address, fallthroughPc);
+                        ss << fmt::format("        if (ctx->pc != 0x{:X}u) {{\n", fallthroughPc);
+                        ss << fmt::format("            fprintf(stderr, \"[PC_MISMATCH] at 0x{:X}: called 0x%x, expected ret 0x{:X}, got 0x%x\\n\", __entryPc, ctx->pc);\n", branchInst.address, fallthroughPc);
+                        ss << "            return;\n";
+                        ss << "        }\n";
                     }
                     ss << "    }\n";
                 }
@@ -439,8 +448,17 @@ namespace ps2recomp
                         }
                         else
                         {
+                            ss << fmt::format("        while (runtime->hasFunction(ctx->pc) && runtime->lookupFunction(ctx->pc) == targetFn) {{\n");
+                            ss << "            const uint32_t __resumePc = ctx->pc;\n";
+                            ss << fmt::format("            if (__resumePc == 0x{:X}u) {{ break; }}\n", fallthroughPc);
+                            ss << "            targetFn(rdram, ctx, runtime);\n";
+                            ss << fmt::format("            if (ctx->pc == __resumePc) {{ ctx->pc = 0x{:X}u; break; }}\n", fallthroughPc);
+                            ss << "        }\n";
                             ss << fmt::format("        if (ctx->pc == __entryPc) {{ ctx->pc = 0x{:X}u; }}\n", fallthroughPc);
-                            ss << fmt::format("        if (ctx->pc != 0x{:X}u) {{ fprintf(stderr, \"[PC_MISMATCH] at 0x{:X}: called 0x{:X}, expected ret 0x{:X}, got 0x%x\\n\", ctx->pc); return; }}\n", fallthroughPc, branchInst.address, target, fallthroughPc);
+                            ss << fmt::format("        if (ctx->pc != 0x{:X}u) {{\n", fallthroughPc);
+                            ss << fmt::format("            fprintf(stderr, \"[PC_MISMATCH] at 0x{:X}: called 0x{:X}, expected ret 0x{:X}, got 0x%x\\n\", ctx->pc);\n", branchInst.address, target, fallthroughPc);
+                            ss << "            return;\n";
+                            ss << "        }\n";
                         }
                         ss << "    }\n";
                     }
@@ -497,8 +515,17 @@ namespace ps2recomp
                 ss << "            auto targetFn = runtime->lookupFunction(jumpTarget);\n";
                 ss << "            const uint32_t __entryPc = ctx->pc;\n";
                 ss << "            targetFn(rdram, ctx, runtime);\n";
+                ss << fmt::format("            while (runtime->hasFunction(ctx->pc) && runtime->lookupFunction(ctx->pc) == targetFn) {{\n");
+                ss << "                const uint32_t __resumePc = ctx->pc;\n";
+                ss << fmt::format("                if (__resumePc == 0x{:X}u) {{ break; }}\n", fallthroughPc);
+                ss << "                targetFn(rdram, ctx, runtime);\n";
+                ss << fmt::format("                if (ctx->pc == __resumePc) {{ ctx->pc = 0x{:X}u; break; }}\n", fallthroughPc);
+                ss << "            }\n";
                 ss << fmt::format("            if (ctx->pc == __entryPc) {{ ctx->pc = 0x{:X}u; }}\n", fallthroughPc);
-                ss << fmt::format("            if (ctx->pc != 0x{:X}u) {{ fprintf(stderr, \"[PC_MISMATCH] at 0x{:X}: jalr 0x%x, expected ret 0x{:X}, got 0x%x\\n\", __entryPc, ctx->pc); return; }}\n", fallthroughPc, branchInst.address, fallthroughPc);
+                ss << fmt::format("            if (ctx->pc != 0x{:X}u) {{\n", fallthroughPc);
+                ss << fmt::format("                fprintf(stderr, \"[PC_MISMATCH] at 0x{:X}: jalr 0x%x, expected ret 0x{:X}, got 0x%x\\n\", __entryPc, ctx->pc);\n", branchInst.address, fallthroughPc);
+                ss << "                return;\n";
+                ss << "            }\n";
                 ss << "        }\n";
             }
 
