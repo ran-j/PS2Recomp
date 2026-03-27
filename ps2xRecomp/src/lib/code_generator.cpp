@@ -192,6 +192,63 @@ namespace ps2recomp
         return "ps2_" + sanitized;
     }
 
+    void CodeGenerator::setFunctionBounds(const std::vector<Function> &functions)
+    {
+        m_functionResumePoints.clear();
+        m_entryOwnerStarts.clear();
+
+        std::vector<const Function *> owners;
+        owners.reserve(functions.size());
+        for (const auto &function : functions)
+        {
+            if (!function.isRecompiled || function.isStub || function.isSkipped)
+            {
+                continue;
+            }
+            if (function.name.rfind("entry_", 0) == 0)
+            {
+                continue;
+            }
+            owners.push_back(&function);
+        }
+
+        for (const auto &function : functions)
+        {
+            if (function.name.rfind("entry_", 0) != 0)
+            {
+                continue;
+            }
+
+            const Function *bestOwner = nullptr;
+            for (const Function *candidate : owners)
+            {
+                if (function.start <= candidate->start || function.start >= candidate->end)
+                {
+                    continue;
+                }
+                if (!bestOwner || candidate->start > bestOwner->start)
+                {
+                    bestOwner = candidate;
+                }
+            }
+
+            if (!bestOwner)
+            {
+                continue;
+            }
+
+            m_entryOwnerStarts[function.start] = bestOwner->start;
+            m_functionResumePoints[bestOwner->start].push_back(function.start);
+        }
+
+        for (auto &[ownerStart, resumePoints] : m_functionResumePoints)
+        {
+            (void)ownerStart;
+            std::sort(resumePoints.begin(), resumePoints.end());
+            resumePoints.erase(std::unique(resumePoints.begin(), resumePoints.end()), resumePoints.end());
+        }
+    }
+
     std::string CodeGenerator::handleBranchDelaySlots(
         const Instruction &branchInst,
         const Instruction &delaySlot,
@@ -900,6 +957,12 @@ namespace ps2recomp
         }
 
         AnalysisResult analysisResult = collectInternalBranchTargets(function, instructions);
+        std::unordered_set<uint32_t> resumeTargets = analysisResult.entryPoints;
+        auto resumeIt = m_functionResumePoints.find(function.start);
+        if (resumeIt != m_functionResumePoints.end())
+        {
+            resumeTargets.insert(resumeIt->second.begin(), resumeIt->second.end());
+        }
         const std::unordered_set<uint32_t>& internalTargets = analysisResult.entryPoints;
         ss << "// Function: " << function.name << "\n";
         ss << "// Address: 0x" << std::hex << function.start << " - 0x" << function.end << std::dec << "\n";
@@ -917,6 +980,23 @@ namespace ps2recomp
         ss << "    PS_LOG_ENTRY(\"" << sanitizedName << "\");\n";
         ss << "#endif\n";
         ss << "\n";
+        if (!resumeTargets.empty())
+        {
+            ss << "    const uint32_t __resumePc = ctx->pc;\n";
+            ss << fmt::format("    if (__resumePc != 0x{:X}u) {{\n", function.start);
+            ss << "        switch (__resumePc) {\n";
+            std::vector<uint32_t> sortedResumeTargets(resumeTargets.begin(), resumeTargets.end());
+            std::sort(sortedResumeTargets.begin(), sortedResumeTargets.end());
+            for (uint32_t target : sortedResumeTargets)
+            {
+                ss << fmt::format("            case 0x{:X}u: ctx->pc = __resumePc; goto label_{:x};\n",
+                                  target, target);
+            }
+            ss << "            default: break;\n";
+            ss << "        }\n";
+            ss << "    }\n";
+            ss << "\n";
+        }
         ss << "    ctx->pc = 0x" << std::hex << function.start << "u;\n"
            << std::dec;
         ss << "\n";
@@ -925,7 +1005,7 @@ namespace ps2recomp
         {
             const Instruction &inst = instructions[i];
 
-            if (internalTargets.contains(inst.address))
+            if (resumeTargets.contains(inst.address))
             {
                 ss << "label_" << std::hex << inst.address << std::dec << ":\n";
             }
@@ -956,7 +1036,7 @@ namespace ps2recomp
                         delaySlot = &syntheticDelaySlot;
                     }
 
-                    if (hasDecodedDelaySlot && internalTargets.contains(delaySlot->address))
+                    if (hasDecodedDelaySlot && resumeTargets.contains(delaySlot->address))
                     {
                         ss << "label_" << std::hex << delaySlot->address << std::dec << ":\n";
                     }
@@ -3729,6 +3809,19 @@ namespace ps2recomp
                 continue;
 
             std::string generatedName = getFunctionName(function.start);
+            if (function.name.rfind("entry_", 0) == 0)
+            {
+                auto ownerIt = m_entryOwnerStarts.find(function.start);
+                if (ownerIt != m_entryOwnerStarts.end())
+                {
+                    generatedName = getFunctionName(ownerIt->second);
+                }
+            }
+
+            if (generatedName.empty())
+            {
+                continue;
+            }
 
             if (function.isSkipped)
             {

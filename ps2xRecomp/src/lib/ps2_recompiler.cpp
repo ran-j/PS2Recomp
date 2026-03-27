@@ -74,6 +74,10 @@ namespace ps2recomp
 
         bool shouldGenerateCodeForFunction(const Function &function)
         {
+            if (function.isRecompiled && function.name.rfind("entry_", 0) == 0)
+            {
+                return false;
+            }
             return function.isRecompiled || function.isStub || function.isSkipped;
         }
 
@@ -370,36 +374,22 @@ namespace ps2recomp
 
                     const auto &instructions = decodedIt->second;
 
-                    for (const auto &inst : instructions)
+                    auto queuePendingEntry = [&](uint32_t target)
                     {
-                        auto targetOpt = getStaticEntryTarget(inst);
-                        if (!targetOpt.has_value())
-                        {
-                            continue;
-                        }
-
-                        const StaticEntryTarget staticTarget = targetOpt.value();
-                        const uint32_t target = staticTarget.target;
-
                         if ((target & 0x3) != 0 || !isExecutableAddress(target))
                         {
-                            continue;
+                            return;
                         }
 
                         if (existingStarts.contains(target) || pendingStarts.contains(target))
                         {
-                            continue;
+                            return;
                         }
 
                         const bool targetInCurrentFunction = std::any_of(
                             instructions.begin(), instructions.end(),
                             [&](const Instruction &candidate)
                             { return candidate.address == target; });
-                        if (targetInCurrentFunction && !staticTarget.isCall)
-                        {
-                            // jumps with the current decoded function remain labels/gotos.
-                            continue;
-                        }
 
                         const Function *containingFunction = findContainingFunction(target);
                         if (targetInCurrentFunction)
@@ -410,7 +400,7 @@ namespace ps2recomp
                             pending.containingEnd = function.end;
                             pendingEntries.push_back(pending);
                             pendingStarts.insert(target);
-                            continue;
+                            return;
                         }
 
                         PendingEntry pending{};
@@ -423,6 +413,37 @@ namespace ps2recomp
 
                         pendingEntries.push_back(pending);
                         pendingStarts.insert(target);
+                    };
+
+                    for (const auto &inst : instructions)
+                    {
+                        // Calls can yield and bubble their return PC up to the top-level
+                        // dispatcher, so the post-call fallthrough must be resumable.
+                        if (inst.isCall && inst.address <= (std::numeric_limits<uint32_t>::max() - 8u))
+                        {
+                            queuePendingEntry(inst.address + 8u);
+                        }
+
+                        auto targetOpt = getStaticEntryTarget(inst);
+                        if (!targetOpt.has_value())
+                        {
+                            continue;
+                        }
+
+                        const StaticEntryTarget staticTarget = targetOpt.value();
+                        const uint32_t target = staticTarget.target;
+
+                        const bool targetInCurrentFunction = std::any_of(
+                            instructions.begin(), instructions.end(),
+                            [&](const Instruction &candidate)
+                            { return candidate.address == target; });
+                        if (targetInCurrentFunction && !staticTarget.isCall)
+                        {
+                            // jumps with the current decoded function remain labels/gotos.
+                            continue;
+                        }
+
+                        queuePendingEntry(target);
                     }
                 }
 
@@ -996,6 +1017,7 @@ namespace ps2recomp
             if (m_codeGenerator)
             {
                 m_codeGenerator->setRenamedFunctions(m_functionRenames);
+                m_codeGenerator->setFunctionBounds(m_functions);
             }
 
             if (m_bootstrapInfo.valid && m_codeGenerator)
