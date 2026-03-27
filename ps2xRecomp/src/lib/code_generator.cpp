@@ -315,7 +315,12 @@ namespace ps2recomp
 
                 if (!funcName.empty())
                 {
-                    ss << fmt::format("    if (runtime->hasFunction(0x{:X}u)) {{\n", target);
+                    // Always use runtime dispatch (lookupFunction). The else branch
+                    // that direct-called by symbol is dead code: all functions are
+                    // registered before any execute. Removing it eliminates the
+                    // #include "ps2_recompiled_functions.h" dependency from each
+                    // .cpp file, dramatically improving ccache hit rates.
+                    ss << "    {\n";
                     ss << fmt::format("        auto targetFn = runtime->lookupFunction(0x{:X}u);\n", target);
                     if (branchInst.opcode == OPCODE_J)
                     {
@@ -326,20 +331,7 @@ namespace ps2recomp
                         ss << "        const uint32_t __entryPc = ctx->pc;\n";
                         ss << "        targetFn(rdram, ctx, runtime);\n";
                         ss << fmt::format("        if (ctx->pc == __entryPc) {{ ctx->pc = 0x{:X}u; }}\n", fallthroughPc);
-                        ss << fmt::format("        if (ctx->pc != 0x{:X}u) {{ return; }}\n", fallthroughPc);
-                    }
-                    ss << "    } else {\n";
-                    
-                    if (branchInst.opcode == OPCODE_J)
-                    {
-                        ss << "        " << funcName << "(rdram, ctx, runtime); return;\n";
-                    }
-                    else
-                    {
-                        ss << "        const uint32_t __entryPc = ctx->pc;\n";
-                        ss << "        " << funcName << "(rdram, ctx, runtime);\n";
-                        ss << fmt::format("        if (ctx->pc == __entryPc) {{ ctx->pc = 0x{:X}u; }}\n", fallthroughPc);
-                        ss << fmt::format("        if (ctx->pc != 0x{:X}u) {{ return; }}\n", fallthroughPc);
+                        ss << fmt::format("        if (ctx->pc != 0x{:X}u) {{ fprintf(stderr, \"[PC_MISMATCH] at 0x{:X}: called 0x%x, expected ret 0x{:X}, got 0x%x\\n\", __entryPc, ctx->pc); return; }}\n", fallthroughPc, branchInst.address, fallthroughPc);
                     }
                     ss << "    }\n";
                 }
@@ -372,7 +364,7 @@ namespace ps2recomp
                             }
                             else
                             {
-                                ss << fmt::format("    if (ctx->pc != 0x{:X}u) {{ return; }}\n", fallthroughPc);
+                                ss << fmt::format("    if (ctx->pc != 0x{:X}u) {{ fprintf(stderr, \"[PC_MISMATCH] at 0x{:X}: called reloc, expected ret 0x{:X}, got 0x%x\\n\", ctx->pc); return; }}\n", fallthroughPc, branchInst.address, fallthroughPc);
                             }
                             emittedRelocCall = true;
                         }
@@ -391,7 +383,7 @@ namespace ps2recomp
                         else
                         {
                             ss << fmt::format("        if (ctx->pc == __entryPc) {{ ctx->pc = 0x{:X}u; }}\n", fallthroughPc);
-                            ss << fmt::format("        if (ctx->pc != 0x{:X}u) {{ return; }}\n", fallthroughPc);
+                            ss << fmt::format("        if (ctx->pc != 0x{:X}u) {{ fprintf(stderr, \"[PC_MISMATCH] at 0x{:X}: called 0x{:X}, expected ret 0x{:X}, got 0x%x\\n\", ctx->pc); return; }}\n", fallthroughPc, branchInst.address, target, fallthroughPc);
                         }
                         ss << "    }\n";
                     }
@@ -449,7 +441,7 @@ namespace ps2recomp
                 ss << "            const uint32_t __entryPc = ctx->pc;\n";
                 ss << "            targetFn(rdram, ctx, runtime);\n";
                 ss << fmt::format("            if (ctx->pc == __entryPc) {{ ctx->pc = 0x{:X}u; }}\n", fallthroughPc);
-                ss << fmt::format("            if (ctx->pc != 0x{:X}u) {{ return; }}\n", fallthroughPc);
+                ss << fmt::format("            if (ctx->pc != 0x{:X}u) {{ fprintf(stderr, \"[PC_MISMATCH] at 0x{:X}: jalr 0x%x, expected ret 0x{:X}, got 0x%x\\n\", __entryPc, ctx->pc); return; }}\n", fallthroughPc, branchInst.address, fallthroughPc);
                 ss << "        }\n";
             }
 
@@ -899,7 +891,6 @@ namespace ps2recomp
         {
             ss << "#include \"ps2_runtime_macros.h\"\n";
             ss << "#include \"ps2_runtime.h\"\n";
-            ss << "#include \"ps2_recompiled_functions.h\"\n";
             ss << "#include \"ps2_recompiled_stubs.h\"\n\n";
             ss << "#include \"ps2_syscalls.h\"\n";
             ss << "#include \"ps2_stubs.h\"\n\n";
@@ -3717,10 +3708,11 @@ namespace ps2recomp
         ss << "#include \"ps2_runtime.h\"\n";
         ss << "#include \"ps2_recompiled_functions.h\"\n";
         ss << "#include \"ps2_stubs.h\"\n";
-        ss << "#include \"ps2_recompiled_stubs.h\"//this will give duplicated erros because runtime maybe has it define already, just delete the TODOS ones\n";
+        ss << "#include \"ps2_recompiled_stubs.h\"\n";
         ss << "#include \"ps2_syscalls.h\"\n\n";
 
-        // Registration function
+        // Registration function — this file needs ps2_recompiled_functions.h
+        // for forward declarations of all function symbols
         ss << "void registerAllFunctions(PS2Runtime& runtime) {\n";
 
         std::vector<std::pair<uint32_t, std::string>> normalFunctions;
