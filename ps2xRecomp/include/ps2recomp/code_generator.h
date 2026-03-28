@@ -38,6 +38,10 @@ namespace ps2recomp
         struct AnalysisResult {
             std::unordered_set<uint32_t> entryPoints;
             std::unordered_map<uint32_t, std::vector<uint32_t>> jumpTableTargets;
+            // Targets from TOML-configured jump tables that are OUTSIDE the
+            // function boundary. Codegen emits lookupFunction calls for these
+            // instead of internal goto labels.
+            std::unordered_set<uint32_t> externalJumpTableTargets;
         };
 
         std::string generateFunction(const Function &function, const std::vector<Instruction> &instructions, const bool &useHeaders);

@@ -432,7 +432,22 @@ namespace ps2recomp
                 ss << "        switch (jumpTarget) {\n";
                 for (uint32_t t : sortedInternalTargets)
                 {
-                    ss << fmt::format("            case 0x{:X}u: goto label_{:x};\n", t, t);
+                    if (analysisResult.externalJumpTableTargets.contains(t))
+                    {
+                        // External target from TOML config: emit lookupFunction
+                        // call. The target is in a different compiled function
+                        // (e.g., a jump table case block in another CSV entry).
+                        // After the call, chain if pc stays in the external range.
+                        ss << fmt::format("            case 0x{:X}u: {{\n", t);
+                        ss << "                auto __extFn = runtime->lookupFunction(jumpTarget);\n";
+                        ss << "                if (__extFn) __extFn(rdram, ctx, runtime);\n";
+                        ss << "                return;\n";
+                        ss << "            }\n";
+                    }
+                    else
+                    {
+                        ss << fmt::format("            case 0x{:X}u: goto label_{:x};\n", t, t);
+                    }
                 }
                 ss << "            default: break;\n";
                 ss << "        }\n";
@@ -781,26 +796,48 @@ namespace ps2recomp
                             const auto configuredTableIt = m_configJumpTableTargetsByAddress.find(tableAddress);
                             if (configuredTableIt != m_configJumpTableTargetsByAddress.end())
                             {
-                                std::vector<uint32_t> jrTargets;
-                                jrTargets.reserve(configuredTableIt->second.size());
+                                std::vector<uint32_t> internalTargets;
+                                std::vector<uint32_t> externalTargets;
                                 for (uint32_t target : configuredTableIt->second)
                                 {
                                     if (target >= function.start && target < function.end &&
                                         instructionAddresses.contains(target))
                                     {
-                                        jrTargets.push_back(target);
+                                        internalTargets.push_back(target);
+                                    }
+                                    else
+                                    {
+                                        externalTargets.push_back(target);
                                     }
                                 }
 
-                                if (!jrTargets.empty())
+                                // Internal targets: handled as goto labels (existing path)
+                                if (!internalTargets.empty())
                                 {
-                                    std::sort(jrTargets.begin(), jrTargets.end());
-                                    jrTargets.erase(std::unique(jrTargets.begin(), jrTargets.end()), jrTargets.end());
-                                    result.jumpTableTargets[jrInst->address] = jrTargets;
-                                    for (uint32_t target : jrTargets)
+                                    std::sort(internalTargets.begin(), internalTargets.end());
+                                    internalTargets.erase(std::unique(internalTargets.begin(), internalTargets.end()), internalTargets.end());
+                                    result.jumpTableTargets[jrInst->address] = internalTargets;
+                                    for (uint32_t target : internalTargets)
                                     {
                                         result.entryPoints.insert(target);
                                     }
+                                    foundTable = true;
+                                }
+
+                                // External targets: will be emitted as function calls
+                                // in the jr dispatch switch. Store them alongside internal
+                                // targets so the codegen can emit both gotos and calls.
+                                if (!externalTargets.empty())
+                                {
+                                    auto &targets = result.jumpTableTargets[jrInst->address];
+                                    for (uint32_t target : externalTargets)
+                                    {
+                                        targets.push_back(target);
+                                    }
+                                    std::sort(targets.begin(), targets.end());
+                                    targets.erase(std::unique(targets.begin(), targets.end()), targets.end());
+                                    // Mark external targets so codegen emits calls not gotos
+                                    result.externalJumpTableTargets.insert(externalTargets.begin(), externalTargets.end());
                                     foundTable = true;
                                 }
                             }
