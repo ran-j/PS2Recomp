@@ -4,7 +4,11 @@ project("PS2 Retro X")
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-option(PS2X_RUNTIME OFF)
+option(PS2X_BUILD_RECOMP "Build ps2xRecomp" ON)
+option(PS2X_BUILD_RUNTIME "Build ps2xRuntime" ON)
+option(PS2X_BUILD_ANALYZER "Build ps2xAnalyzer" ON)
+option(PS2X_BUILD_TEST "Build ps2xTest" ON)
+option(PS2X_BUILD_STUDIO "Build ps2xStudio" ON)
 
 # ARM64 support using sse2neon
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64|ARM64")
@@ -39,14 +43,28 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64|ARM64")
         if(COMPILER_SUPPORTS_CRYPTO_CRC)
             set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=armv8-a+fp+simd+crypto+crc")
             message(STATUS "Crypto and CRC extensions enabled")
+        else()
+            add_compile_options(-march=armv8-a+fp+simd)
         endif()
     endif()
 endif()
 
-add_subdirectory("ps2xRecomp")
+if(PS2X_BUILD_RECOMP)
+    add_subdirectory("ps2xRecomp")
+endif()
 
-add_subdirectory("ps2xRuntime")
+if(PS2X_BUILD_RUNTIME)
+    add_subdirectory("ps2xRuntime")
+endif()
 
-add_subdirectory("ps2xAnalyzer")
-add_subdirectory("ps2xTest")
-add_subdirectory("ps2xStudio")
+if(PS2X_BUILD_ANALYZER)
+    add_subdirectory("ps2xAnalyzer")
+endif()
+
+if(PS2X_BUILD_TEST)
+    add_subdirectory("ps2xTest")
+endif()
+
+if(PS2X_BUILD_STUDIO)
+    add_subdirectory("ps2xStudio")
+endif()
