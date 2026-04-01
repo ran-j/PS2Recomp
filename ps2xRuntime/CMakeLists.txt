@@ -45,6 +45,7 @@ add_library(ps2_runtime STATIC
     src/lib/ps2_runtime.cpp
     src/lib/ps2_vif1_interpreter.cpp
     src/lib/ps2_vu1.cpp
+    src/lib/games_database.cpp
 )
 
 file(GLOB_RECURSE KERNEL_SRC_FILES CONFIGURE_DEPENDS

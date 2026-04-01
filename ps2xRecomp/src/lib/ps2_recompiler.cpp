@@ -246,50 +246,6 @@ namespace ps2recomp
             return name.rfind("entry_", 0) == 0;
         }
 
-        void removeStaleGeneratedOutputs(const fs::path &outputDir)
-        {
-            if (!fs::exists(outputDir) || !fs::is_directory(outputDir))
-            {
-                return;
-            }
-
-            for (const auto &entry : fs::directory_iterator(outputDir))
-            {
-                if (!entry.is_regular_file())
-                {
-                    continue;
-                }
-
-                const fs::path &path = entry.path();
-                const std::string filename = path.filename().string();
-                const std::string extension = path.extension().string();
-
-                const bool isPerFunctionSource =
-                    extension == ".cpp" &&
-                    (filename.find("_0x") != std::string::npos ||
-                     filename.rfind("entry_", 0) == 0);
-                const bool isAggregateSource =
-                    filename == "ps2_recompiled_functions.cpp" ||
-                    filename == "register_functions.cpp";
-                const bool isGeneratedHeader =
-                    filename == "ps2_recompiled_functions.h" ||
-                    filename == "ps2_recompiled_stubs.h";
-
-                if (!isPerFunctionSource && !isAggregateSource && !isGeneratedHeader)
-                {
-                    continue;
-                }
-
-                std::error_code removeError;
-                fs::remove(path, removeError);
-                if (removeError)
-                {
-                    std::cerr << "Warning: failed to remove stale generated file "
-                              << path << ": " << removeError.message() << std::endl;
-                }
-            }
-        }
-
         EntryDiscoveryStats discoverAdditionalEntryPointsImpl(
             std::vector<Function> &functions,
             std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions,
@@ -1092,7 +1048,6 @@ namespace ps2recomp
                 }
             }
 
-            removeStaleGeneratedOutputs(fs::path(m_config.outputPath));
             generateFunctionHeader();
 
             if (m_config.singleFileOutput)
