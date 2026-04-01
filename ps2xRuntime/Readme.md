@@ -10,6 +10,19 @@ The runtime library provides the execution environment for recompiled code, incl
 
 Take your decompiled code and place the cpp files on ps2xRuntime/src/runner and header files on ps2xRuntime/include and compile/be happy.
 
+## Vita Build Notes
+
+The Vita runtime uses `Quenom/raylib-5.5-vita` for vita build. I recommend build runtime only.
+
+Expected environment:
+
+* `VITASDK` points to your VitaSDK root.
+* `Quenom/raylib-5.5-vita` has already been built and installed into `$VITASDK/arm-vita-eabi`.
+* SDL2 with the PVR backend required by that raylib fork is also installed into the same VitaSDK prefix.
+* `PS2X_DEFAULT_BOOT_ELF` is mandatory, you need to define where your game is like "ux0:data/RANJ00001/game/SLUS_201.84".
+
+The CMake for `ps2xRuntime` consumes those preinstalled headers and libraries from VitaSDK. It does not fetch or install the Vita raylib fork for you.
+
 ## Adding Custom Function Implementations
 You can add custom implementations for PS2 system calls or game functions by:
 

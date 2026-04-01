@@ -513,7 +513,7 @@ public:
     uint32_t guestHeapEnd() const;
     uint32_t reserveAsyncCallbackStack(uint32_t size, uint32_t alignment = 16u);
     void dispatchLoop(uint8_t *rdram, R5900Context *ctx);
-    void cooperativeGuestYield();
+    bool shouldPreemptGuestExecution();
     void requestStop();
     bool isStopRequested() const;
     uint32_t guestExecutionWaiterCountForTesting() const

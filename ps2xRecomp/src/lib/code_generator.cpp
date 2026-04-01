@@ -241,9 +241,14 @@ namespace ps2recomp
         auto emitInternalTarget = [&](uint32_t target, uint32_t sourcePc, std::string_view indent)
         {
             ss << fmt::format("{}ctx->pc = 0x{:X}u;\n", indent, target);
-            if (target <= sourcePc)
+            const bool isCallLikeEdge =
+                (branchInst.opcode == OPCODE_JAL) ||
+                (branchInst.opcode == OPCODE_SPECIAL && branchInst.function == SPECIAL_JALR);
+            if (target <= sourcePc && !isCallLikeEdge)
             {
-                ss << fmt::format("{}runtime->cooperativeGuestYield();\n", indent);
+                ss << fmt::format("{}if (runtime->shouldPreemptGuestExecution()) {{\n", indent);
+                ss << fmt::format("{}    return;\n", indent);
+                ss << fmt::format("{}}}\n", indent);
                 ss << fmt::format("{}goto label_{:x};\n", indent, target);
             }
             else
@@ -752,6 +757,16 @@ namespace ps2recomp
             }
         };
 
+        auto queueLoopResumeEntryTarget = [&](uint32_t target, uint32_t sourcePc)
+        {
+            if (target > sourcePc || target == function.start)
+            {
+                return;
+            }
+
+            queueResumeEntryTarget(target);
+        };
+
         for (const auto &inst : instructions)
         {
             instructionAddresses.insert(inst.address);
@@ -777,6 +792,7 @@ namespace ps2recomp
                     instructionAddresses.contains(target))
                 {
                     result.entryPoints.insert(target);
+                    queueLoopResumeEntryTarget(target, inst.address);
                 }
                 else
                 {
@@ -790,6 +806,7 @@ namespace ps2recomp
                     instructionAddresses.contains(target))
                 {
                     result.entryPoints.insert(target);
+                    queueLoopResumeEntryTarget(target, inst.address);
 
                     if (inst.opcode == OPCODE_JAL)
                     {
@@ -1022,13 +1039,18 @@ namespace ps2recomp
         }
 
         AnalysisResult analysisResult = collectInternalBranchTargets(function, instructions);
+        std::vector<uint32_t> resumeTargets(analysisResult.resumeEntryPoints.begin(),
+                                            analysisResult.resumeEntryPoints.end());
         auto resumeIt = m_resumeEntryTargetsByOwner.find(function.start);
         if (resumeIt != m_resumeEntryTargetsByOwner.end())
         {
-            for (uint32_t target : resumeIt->second)
-            {
-                analysisResult.entryPoints.insert(target);
-            }
+            resumeTargets.insert(resumeTargets.end(), resumeIt->second.begin(), resumeIt->second.end());
+        }
+        std::sort(resumeTargets.begin(), resumeTargets.end());
+        resumeTargets.erase(std::unique(resumeTargets.begin(), resumeTargets.end()), resumeTargets.end());
+        for (uint32_t target : resumeTargets)
+        {
+            analysisResult.entryPoints.insert(target);
         }
 
         const std::unordered_set<uint32_t>& internalTargets = analysisResult.entryPoints;
@@ -1048,10 +1070,10 @@ namespace ps2recomp
         ss << "    PS_LOG_ENTRY(\"" << sanitizedName << "\");\n";
         ss << "#endif\n";
         ss << "\n";
-        if (resumeIt != m_resumeEntryTargetsByOwner.end() && !resumeIt->second.empty())
+        if (!resumeTargets.empty())
         {
             ss << "    switch (ctx->pc) {\n";
-            for (uint32_t target : resumeIt->second)
+            for (uint32_t target : resumeTargets)
             {
                 ss << "        case 0x" << std::hex << target << "u: goto label_" << target << ";\n" << std::dec;
             }

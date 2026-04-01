@@ -1006,6 +1006,30 @@ void register_code_generator_tests()
             t.IsTrue(generated.find("goto label_c010;") != std::string::npos, "Internal JAL should use goto");
         });
 
+        tc.Run("backward internal JAL stays inline and does not return to dispatcher", [](TestCase &t) {
+            Function func;
+            func.name = "jal_internal_backward";
+            func.start = 0xC100;
+            func.end = 0xC120;
+            func.isRecompiled = true;
+            func.isStub = false;
+
+            Instruction loopHead = makeNop(0xC100);
+            Instruction backwardJal = makeJal(0xC108, 0xC100);
+            Instruction delay = makeNop(0xC10C);
+
+            CodeGenerator gen({}, {});
+            std::string generated = gen.generateFunction(func, {loopHead, backwardJal, delay}, false);
+            printGeneratedCode("backward internal JAL stays inline and does not return to dispatcher", generated);
+
+            t.IsTrue(generated.find("SET_GPR_U32(ctx, 31, 0xC110u);") != std::string::npos,
+                     "backward internal JAL should still set RA");
+            t.IsTrue(generated.find("goto label_c100;") != std::string::npos,
+                     "backward internal JAL should still re-enter the internal target directly");
+            t.IsTrue(generated.find("if (runtime->shouldPreemptGuestExecution())") == std::string::npos,
+                     "backward internal JAL should not expose a mid-call dispatcher return");
+        });
+
         tc.Run("JALR emits indirect call", [](TestCase &t) {
             Function func;
             func.name = "jalr_test";
@@ -1034,7 +1058,7 @@ void register_code_generator_tests()
             t.IsTrue(generated.find("if (ctx->pc != 0xD008u) { return; }") != std::string::npos, "JALR should check return PC");
         }); 
 
-        tc.Run("backward BEQ yields cooperatively on sign-extended internal loop", [](TestCase &t) {
+        tc.Run("backward BEQ returns to the dispatcher through a resumable loop head", [](TestCase &t) {
             Function func;
             func.name = "backward_branch";
             func.start = 0x1100;
@@ -1043,31 +1067,43 @@ void register_code_generator_tests()
             func.isStub = false;
 
             // 0x1100: nop
-            // 0x1104: beq $1,$1, target 0x1100 (offset = -2 words)
-            // 0x1108: nop (delay)
+            // 0x1104: nop (loop head)
+            // 0x1108: beq $1,$1, target 0x1104 (offset = -2 words)
+            // 0x110c: nop (delay)
             std::vector<Instruction> instructions;
             instructions.push_back(makeNop(0x1100));
+            instructions.push_back(makeNop(0x1104));
 
-            Instruction br = makeBranch(0x1104, 0); 
-            br.simmediate = static_cast<uint32_t>(static_cast<int16_t>(-2)); 
+            Instruction br = makeBranch(0x1108, 0);
+            br.simmediate = static_cast<uint32_t>(static_cast<int16_t>(-2));
             instructions.push_back(br);
 
-            instructions.push_back(makeNop(0x1108));
             instructions.push_back(makeNop(0x110c));
+            instructions.push_back(makeNop(0x1110));
 
             CodeGenerator gen({}, {});
-            std::string generated = gen.generateFunction(func, instructions, false);
-            printGeneratedCode("backward BEQ yields cooperatively on sign-extended internal loop", generated);
+            CodeGenerator::AnalysisResult analysis = gen.collectInternalBranchTargets(func, instructions);
+            t.IsTrue(analysis.resumeEntryPoints.contains(0x1104u),
+                     "mid-function backward loop head should be resumable so preemption can return to the dispatcher");
 
-            t.IsTrue(generated.find("label_1100:") != std::string::npos, "target should emit a label");
-            t.IsTrue(generated.find("ctx->pc = 0x1100u;") != std::string::npos,
+            std::string generated = gen.generateFunction(func, instructions, false);
+            printGeneratedCode("backward BEQ returns to the dispatcher through a resumable loop head", generated);
+
+            t.IsTrue(generated.find("label_1104:") != std::string::npos, "target should emit a label");
+            t.IsTrue(generated.find("switch (ctx->pc)") != std::string::npos,
+                     "resumable backward loop heads should emit a wrapper resume switch");
+            t.IsTrue(generated.find("case 0x1104u: goto label_1104;") != std::string::npos,
+                     "mid-function backward loop head should be re-enterable after returning to the dispatcher");
+            t.IsTrue(generated.find("ctx->pc = 0x1104u;") != std::string::npos,
                      "backward internal branch should preserve the loop target in ctx->pc");
-            t.IsTrue(generated.find("runtime->cooperativeGuestYield();") != std::string::npos,
-                     "backward internal branch should yield guest execution before re-entering the loop");
-            t.IsTrue(generated.find("goto label_1100;") != std::string::npos,
-                     "backward internal branch should re-enter the in-function label after yielding");
-            t.IsTrue(generated.find("ctx->pc = 0x1100u;\n            return;") == std::string::npos,
-                     "backward internal branch should not return to the dispatcher for a non-entry internal label");
+            t.IsTrue(generated.find("if (runtime->shouldPreemptGuestExecution()) {") != std::string::npos,
+                     "backward internal branch should consult the runtime preemption policy before re-entering the loop");
+            t.IsTrue(generated.find("return;") != std::string::npos,
+                     "backward internal branch should return to the dispatcher when the runtime preemption policy requests it");
+            t.IsTrue(generated.find("runtime->cooperativeGuestYield();") == std::string::npos,
+                     "backward internal branch should no longer emit an unconditional cooperative-yield call");
+            t.IsTrue(generated.find("goto label_1104;") != std::string::npos,
+                     "backward internal branch should still re-enter the in-function label when it keeps the current slice");
         });
 
         tc.Run("branch-likely places delay slot only in taken path", [](TestCase &t) {
@@ -1183,6 +1219,8 @@ void register_code_generator_tests()
 
             t.IsTrue(generated.find("switch (jumpTarget)") != std::string::npos,
                      "JR via non-RA register should emit switch for internal targets");
+            t.IsTrue(generated.find("switch (ctx->pc)") == std::string::npos,
+                     "JR fallback labels should not be promoted to dispatcher resume sites");
             t.IsTrue(generated.find("case 0x1400u: goto label_1400;") != std::string::npos,
                      "switch should include in-function entry label");
             t.IsTrue(generated.find("case 0x140Cu: goto label_140c;") != std::string::npos,
@@ -1249,6 +1287,15 @@ void register_code_generator_tests()
 
             CodeGenerator gen({}, {});
             gen.setConfiguredJumpTables({configured});
+            CodeGenerator::AnalysisResult analysis = gen.collectInternalBranchTargets(
+                func,
+                {lui, addiu, sll, addu, lw, jr, jrDelay, target0, target1});
+
+            t.IsFalse(analysis.resumeEntryPoints.contains(0x1620u),
+                      "configured JR table targets should stay in-function dispatch labels");
+            t.IsFalse(analysis.resumeEntryPoints.contains(0x1630u),
+                      "configured JR table targets should not become dispatcher resume sites");
+
             std::string generated = gen.generateFunction(
                 func,
                 {lui, addiu, sll, addu, lw, jr, jrDelay, target0, target1},
@@ -1261,6 +1308,8 @@ void register_code_generator_tests()
                      "configured table target 0x1620 should be emitted");
             t.IsTrue(generated.find("case 0x1630u: goto label_1630;") != std::string::npos,
                      "configured table target 0x1630 should be emitted");
+            t.IsTrue(generated.find("switch (ctx->pc)") == std::string::npos,
+                     "configured JR table labels should not emit a top-level dispatcher resume switch");
             t.IsTrue(generated.find("case 0x1600u: goto label_1600;") == std::string::npos,
                      "configured table should avoid broad JR fallback labels");
         });

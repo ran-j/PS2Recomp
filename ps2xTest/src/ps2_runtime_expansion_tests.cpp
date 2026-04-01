@@ -107,9 +107,9 @@ namespace
 
     std::atomic<int32_t> gSerializedGuestActive{0};
     std::atomic<int32_t> gSerializedGuestMaxActive{0};
-    std::atomic<int32_t> gCooperativeYieldEntryCount{0};
-    std::atomic<bool> gCooperativeYieldAllowFirstYield{false};
-    std::atomic<bool> gCooperativeYieldPeerRan{false};
+    std::atomic<int32_t> gPreemptionPolicyEntryCount{0};
+    std::atomic<bool> gPreemptionPolicyAllowFirstProbe{false};
+    std::atomic<bool> gPreemptionPolicyPeerRan{false};
 
     void testSerializedGuestStep(uint8_t *, R5900Context *ctx, PS2Runtime *)
     {
@@ -132,32 +132,33 @@ namespace
         }
     }
 
-    void testCooperativeGuestYieldStep(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    void testPreemptionPolicyStep(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
     {
         if (!ctx || !runtime)
         {
             return;
         }
 
-        const int32_t entryIndex = gCooperativeYieldEntryCount.fetch_add(1, std::memory_order_acq_rel) + 1;
+        const int32_t entryIndex = gPreemptionPolicyEntryCount.fetch_add(1, std::memory_order_acq_rel) + 1;
         if (entryIndex == 1)
         {
-            while (!gCooperativeYieldAllowFirstYield.load(std::memory_order_acquire))
+            while (!gPreemptionPolicyAllowFirstProbe.load(std::memory_order_acquire))
             {
                 std::this_thread::yield();
             }
 
-            for (int attempt = 0; attempt < 32 &&
-                                  !gCooperativeYieldPeerRan.load(std::memory_order_acquire);
+            bool shouldPreempt = false;
+            for (int attempt = 0; attempt < 256 &&
+                                  !shouldPreempt;
                  ++attempt)
             {
-                runtime->cooperativeGuestYield();
+                shouldPreempt = runtime->shouldPreemptGuestExecution();
             }
-            setRegU32(*ctx, 2, gCooperativeYieldPeerRan.load(std::memory_order_acquire) ? 1u : 0u);
+            setRegU32(*ctx, 2, shouldPreempt ? 1u : 0u);
         }
         else
         {
-            gCooperativeYieldPeerRan.store(true, std::memory_order_release);
+            gPreemptionPolicyPeerRan.store(true, std::memory_order_release);
             setRegU32(*ctx, 2, 2u);
         }
 
@@ -297,19 +298,19 @@ void register_ps2_runtime_expansion_tests()
                      "dispatchLoop should not execute guest code concurrently on one runtime");
         });
 
-        tc.Run("cooperative guest yield lets another guest thread run without leaving the current function", [](TestCase &t)
+        tc.Run("guest preemption policy requests a dispatcher handoff when another guest thread contends", [](TestCase &t)
         {
             PS2Runtime runtime;
             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
             constexpr uint32_t kFirstEntry = 0x190000u;
             constexpr uint32_t kSecondEntry = 0x1A0000u;
 
-            gCooperativeYieldEntryCount.store(0, std::memory_order_release);
-            gCooperativeYieldAllowFirstYield.store(false, std::memory_order_release);
-            gCooperativeYieldPeerRan.store(false, std::memory_order_release);
+            gPreemptionPolicyEntryCount.store(0, std::memory_order_release);
+            gPreemptionPolicyAllowFirstProbe.store(false, std::memory_order_release);
+            gPreemptionPolicyPeerRan.store(false, std::memory_order_release);
 
-            runtime.registerFunction(kFirstEntry, &testCooperativeGuestYieldStep);
-            runtime.registerFunction(kSecondEntry, &testCooperativeGuestYieldStep);
+            runtime.registerFunction(kFirstEntry, &testPreemptionPolicyStep);
+            runtime.registerFunction(kSecondEntry, &testPreemptionPolicyStep);
 
             R5900Context firstCtx{};
             R5900Context secondCtx{};
@@ -323,7 +324,7 @@ void register_ps2_runtime_expansion_tests()
 
             const bool firstEntered = waitUntil([&]()
             {
-                return gCooperativeYieldEntryCount.load(std::memory_order_acquire) >= 1;
+                return gPreemptionPolicyEntryCount.load(std::memory_order_acquire) >= 1;
             }, std::chrono::milliseconds(100));
 
             std::thread secondWorker([&]()
@@ -336,7 +337,7 @@ void register_ps2_runtime_expansion_tests()
                 return runtime.guestExecutionWaiterCountForTesting() > 0u;
             }, std::chrono::milliseconds(100));
 
-            gCooperativeYieldAllowFirstYield.store(true, std::memory_order_release);
+            gPreemptionPolicyAllowFirstProbe.store(true, std::memory_order_release);
 
             if (firstWorker.joinable())
             {
@@ -347,12 +348,12 @@ void register_ps2_runtime_expansion_tests()
                 secondWorker.join();
             }
 
-            t.IsTrue(firstEntered, "first guest worker should enter before yielding");
-            t.IsTrue(secondContending, "second guest worker should contend for guest execution before the first yields");
-            t.IsTrue(gCooperativeYieldPeerRan.load(std::memory_order_acquire),
-                     "second guest worker should run while the first cooperatively yields");
+            t.IsTrue(firstEntered, "first guest worker should enter before probing for preemption");
+            t.IsTrue(secondContending, "second guest worker should contend for guest execution before the first returns");
+            t.IsTrue(gPreemptionPolicyPeerRan.load(std::memory_order_acquire),
+                     "second guest worker should run after the first returns to the dispatcher");
             t.Equals(getRegU32(&firstCtx, 2), 1u,
-                     "first guest worker should observe that a peer ran before it resumed");
+                     "first guest worker should observe that the runtime requested preemption under contention");
         });
 
         tc.Run("vblank intc handlers can preempt serialized guest execution", [](TestCase &t)

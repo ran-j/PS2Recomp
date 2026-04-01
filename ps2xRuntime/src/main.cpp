@@ -100,11 +100,13 @@ int main(int argc, char *argv[])
         std::string windowTitle = "PS2-Recomp | ";
         const char *gameName = getGameName(normalizedId);
 
+#if !defined(PLATFORM_VITA)
         if (gameName)
         {
             windowTitle += std::string(gameName) + " | " + elfName;
         }
         else
+#endif
         {
             windowTitle += elfName;
         }

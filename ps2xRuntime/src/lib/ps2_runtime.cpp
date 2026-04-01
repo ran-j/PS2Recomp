@@ -1824,19 +1824,18 @@ void PS2Runtime::reacquireGuestExecution(uint32_t depth)
     }
 }
 
-void PS2Runtime::cooperativeGuestYield()
+bool PS2Runtime::shouldPreemptGuestExecution()
 {
     thread_local uint32_t s_backEdgeYieldCounter = 0u;
     const uint32_t waiterCount = m_guestExecutionWaiters.load(std::memory_order_acquire);
-    const uint32_t yieldInterval = (waiterCount != 0u) ? 64u : 100;
+    const uint32_t yieldInterval = (waiterCount != 0u) ? 64u : 100u;
     if (++s_backEdgeYieldCounter < yieldInterval)
     {
-        return;
+        return false;
     }
 
     s_backEdgeYieldCounter = 0u;
-    GuestExecutionReleaseScope release(this);
-    std::this_thread::yield();
+    return true;
 }
 
 uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
