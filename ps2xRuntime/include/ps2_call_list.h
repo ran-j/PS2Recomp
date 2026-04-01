@@ -4,127 +4,132 @@
 
 // I know ugly, but will work for now.
 
-#define PS2_SYSCALL_LIST(X)   \
-    X(FlushCache)             \
-    X(iFlushCache)            \
-    X(ResetEE)                \
-    X(SetMemoryMode)          \
-                              \
-    X(CreateThread)           \
-    X(DeleteThread)           \
-    X(StartThread)            \
-    X(ExitThread)             \
-    X(ExitDeleteThread)       \
-    X(TerminateThread)        \
-    X(SuspendThread)          \
-    X(ResumeThread)           \
-    X(GetThreadId)            \
-    X(ReferThreadStatus)      \
-    X(iReferThreadStatus)     \
-    X(SleepThread)            \
-    X(WakeupThread)           \
-    X(iWakeupThread)          \
-    X(CancelWakeupThread)     \
-    X(iCancelWakeupThread)    \
-    X(ChangeThreadPriority)   \
-    X(iChangeThreadPriority)  \
-    X(RotateThreadReadyQueue) \
-    X(iRotateThreadReadyQueue)\
-    X(ReleaseWaitThread)      \
-    X(iReleaseWaitThread)     \
-                              \
-    X(CreateSema)             \
-    X(DeleteSema)             \
-    X(SignalSema)             \
-    X(iSignalSema)            \
-    X(WaitSema)               \
-    X(PollSema)               \
-    X(iPollSema)              \
-    X(ReferSemaStatus)        \
-    X(iReferSemaStatus)       \
-                              \
-    X(CreateEventFlag)        \
-    X(DeleteEventFlag)        \
-    X(SetEventFlag)           \
-    X(iSetEventFlag)          \
-    X(ClearEventFlag)         \
-    X(iClearEventFlag)        \
-    X(WaitEventFlag)          \
-    X(PollEventFlag)          \
-    X(iPollEventFlag)         \
-    X(ReferEventFlagStatus)   \
-    X(iReferEventFlagStatus)  \
-                              \
-    X(SetAlarm)               \
-    X(iSetAlarm)              \
-    X(CancelAlarm)            \
-    X(iCancelAlarm)           \
-                              \
-    X(AddIntcHandler)         \
-    X(AddIntcHandler2)        \
-    X(RemoveIntcHandler)      \
-    X(AddDmacHandler)         \
-    X(AddDmacHandler2)        \
-    X(RemoveDmacHandler)      \
-    X(EnableIntc)             \
-    X(iEnableIntc)            \
-    X(DisableIntc)            \
-    X(iDisableIntc)           \
-    X(EnableDmac)             \
-    X(iEnableDmac)            \
-    X(DisableDmac)            \
-    X(iDisableDmac)           \
-                              \
-    X(SifStopModule)          \
-    X(SifLoadModule)          \
-    X(SifInitRpc)             \
-    X(SifBindRpc)             \
-    X(SifCallRpc)             \
-    X(SifRegisterRpc)         \
-    X(SifCheckStatRpc)        \
-    X(SifSetRpcQueue)         \
-    X(SifRemoveRpcQueue)      \
-    X(SifRemoveRpc)           \
-    X(sceSifCallRpc)          \
-    X(sceSifSendCmd)          \
-    X(sceRpcGetPacket)        \
-                              \
-    X(fioOpen)                \
-    X(fioClose)               \
-    X(fioRead)                \
-    X(fioWrite)               \
-    X(fioLseek)               \
-    X(fioMkdir)               \
-    X(fioChdir)               \
-    X(fioRmdir)               \
-    X(fioGetstat)             \
-    X(fioRemove)              \
-                              \
-    X(SetGsCrt)               \
-    X(GsSetCrt)               \
-    X(GsGetIMR)               \
-    X(iGsGetIMR)              \
-    X(GsPutIMR)               \
-    X(iGsPutIMR)              \
-    X(SetVSyncFlag)           \
-    X(SetSyscall)             \
-    X(GsSetVideoMode)         \
-                              \
-    X(GetOsdConfigParam)      \
-    X(SetOsdConfigParam)      \
-    X(GetRomName)             \
-    X(SifLoadElfPart)         \
-    X(sceSifLoadElf)          \
-    X(sceSifLoadElfPart)      \
-    X(sceSifLoadModule)       \
-    X(sceSifLoadModuleBuffer) \
-                              \
-    X(SetupThread)            \
-    X(EndOfHeap)              \
-    X(GetMemorySize)          \
-    X(Deci2Call)              \
-    X(QueryBootMode)          \
-    X(GetThreadTLS)           \
+#define PS2_SYSCALL_LIST(X)    \
+    X(FlushCache)              \
+    X(iFlushCache)             \
+    X(ResetEE)                 \
+    X(SetMemoryMode)           \
+                               \
+    X(CreateThread)            \
+    X(DeleteThread)            \
+    X(StartThread)             \
+    X(ExitThread)              \
+    X(ExitDeleteThread)        \
+    X(TerminateThread)         \
+    X(SuspendThread)           \
+    X(ResumeThread)            \
+    X(GetThreadId)             \
+    X(ReferThreadStatus)       \
+    X(iReferThreadStatus)      \
+    X(SleepThread)             \
+    X(WakeupThread)            \
+    X(iWakeupThread)           \
+    X(CancelWakeupThread)      \
+    X(iCancelWakeupThread)     \
+    X(ChangeThreadPriority)    \
+    X(iChangeThreadPriority)   \
+    X(RotateThreadReadyQueue)  \
+    X(iRotateThreadReadyQueue) \
+    X(ReleaseWaitThread)       \
+    X(iReleaseWaitThread)      \
+                               \
+    X(CreateSema)              \
+    X(DeleteSema)              \
+    X(SignalSema)              \
+    X(iSignalSema)             \
+    X(WaitSema)                \
+    X(PollSema)                \
+    X(iPollSema)               \
+    X(ReferSemaStatus)         \
+    X(iReferSemaStatus)        \
+                               \
+    X(CreateEventFlag)         \
+    X(DeleteEventFlag)         \
+    X(SetEventFlag)            \
+    X(iSetEventFlag)           \
+    X(ClearEventFlag)          \
+    X(iClearEventFlag)         \
+    X(WaitEventFlag)           \
+    X(PollEventFlag)           \
+    X(iPollEventFlag)          \
+    X(ReferEventFlagStatus)    \
+    X(iReferEventFlagStatus)   \
+                               \
+    X(InitAlarm)               \
+    X(SetAlarm)                \
+    X(iSetAlarm)               \
+    X(CancelAlarm)             \
+    X(iCancelAlarm)            \
+    X(ReleaseAlarm)            \
+    X(iReleaseAlarm)           \
+                               \
+    X(AddIntcHandler)          \
+    X(AddIntcHandler2)         \
+    X(RemoveIntcHandler)       \
+    X(AddDmacHandler)          \
+    X(AddDmacHandler2)         \
+    X(RemoveDmacHandler)       \
+    X(EnableIntc)              \
+    X(iEnableIntc)             \
+    X(DisableIntc)             \
+    X(iDisableIntc)            \
+    X(EnableDmac)              \
+    X(iEnableDmac)             \
+    X(DisableDmac)             \
+    X(iDisableDmac)            \
+                               \
+    X(SifStopModule)           \
+    X(SifLoadModule)           \
+    X(SifInitRpc)              \
+    X(SifBindRpc)              \
+    X(SifCallRpc)              \
+    X(SifRegisterRpc)          \
+    X(SifCheckStatRpc)         \
+    X(SifSetRpcQueue)          \
+    X(SifRemoveRpcQueue)       \
+    X(SifRemoveRpc)            \
+    X(sceSifCallRpc)           \
+    X(sceSifSendCmd)           \
+    X(sceRpcGetPacket)         \
+                               \
+    X(fioOpen)                 \
+    X(fioClose)                \
+    X(fioRead)                 \
+    X(fioWrite)                \
+    X(fioLseek)                \
+    X(fioMkdir)                \
+    X(fioChdir)                \
+    X(fioRmdir)                \
+    X(fioGetstat)              \
+    X(fioRemove)               \
+                               \
+    X(SetGsCrt)                \
+    X(GsSetCrt)                \
+    X(GsGetIMR)                \
+    X(iGsGetIMR)               \
+    X(GsPutIMR)                \
+    X(iGsPutIMR)               \
+    X(SetVSyncFlag)            \
+    X(SetSyscall)              \
+    X(GsSetVideoMode)          \
+                               \
+    X(GetOsdConfigParam)       \
+    X(SetOsdConfigParam)       \
+    X(EnableCache)             \
+    X(DisableCache)            \
+    X(GetRomName)              \
+    X(SifLoadElfPart)          \
+    X(sceSifLoadElf)           \
+    X(sceSifLoadElfPart)       \
+    X(sceSifLoadModule)        \
+    X(sceSifLoadModuleBuffer)  \
+                               \
+    X(SetupThread)             \
+    X(EndOfHeap)               \
+    X(GetMemorySize)           \
+    X(Deci2Call)               \
+    X(QueryBootMode)           \
+    X(GetThreadTLS)            \
     X(RegisterExitHandler)
 
 // Stubs
@@ -203,11 +208,11 @@
     X(write)                                  \
     /* PS2 native */                          \
     X(DmaAddr)                                \
-    X(Pad_init)                               \
-    X(Pad_set)                                \
     X(builtin_set_imask)                      \
     X(sceCdRI)                                \
     X(sceCdRM)                                \
+    X(sceDevVif0Reset)                        \
+    X(sceDevVu0Reset)                         \
     X(sceFsDbChk)                             \
     X(sceFsIntrSigSema)                       \
     X(sceFsSemExit)                           \
@@ -224,7 +229,6 @@
     X(sceSifLoadModule)                       \
     X(sceSifSendCmd)                          \
     X(sceVu0ecossin)                          \
-    X(iopGetArea)                             \
     X(mcCallMessageTypeSe)                    \
     X(mcCheckReadStartConfigFile)             \
     X(mcCheckReadStartSaveFile)               \
@@ -268,8 +272,6 @@
     X(mceGetInfoApdx)                         \
     X(mceIntrReadFixAlign)                    \
     X(mceStorePwd)                            \
-    X(pdGetPeripheral)                        \
-    X(pdInitPeripheral)                       \
     X(sceCdApplyNCmd)                         \
     X(sceCdBreak)                             \
     X(sceCdCallback)                          \
@@ -350,14 +352,12 @@
     X(sceGsResetPath)                         \
     X(sceGsSetDefClear)                       \
     X(sceGsSetDefDBuffDc)                     \
-    X(sceGsSetDefDBuff)                       \
     X(sceGsSetDefDispEnv)                     \
     X(sceGsSetDefDrawEnv)                     \
     X(sceGsSetDefDrawEnv2)                    \
     X(sceGsSetDefLoadImage)                   \
     X(sceGsSetDefStoreImage)                  \
     X(sceGsSwapDBuffDc)                       \
-    X(sceGsSwapDBuff)                         \
     X(sceGsSyncPath)                          \
     X(sceGsSyncV)                             \
     X(sceGsSyncVCallback)                     \
@@ -509,6 +509,8 @@
     X(sceSifSetCmdBuffer)                     \
     X(sceSifSetDChain)                        \
     X(sceSifSetDma)                           \
+    X(isceSifSetDChain)                       \
+    X(isceSifSetDma)                          \
     X(sceSifSetIopAddr)                       \
     X(sceSifSetReg)                           \
     X(sceSifSetRpcQueue)                      \
@@ -639,19 +641,10 @@
     X(sceVu0UnitMatrix)                       \
     X(sceVu0ViewScreenMatrix)                 \
     X(sceWrite)                               \
-    X(sdDrvInit)                              \
-    X(sdSndStopAll)                           \
-    X(sdSysFinish)                            \
-    X(syFree)                                 \
-    X(syHwInit)                               \
-    X(syHwInit2)                              \
-    X(syMallocInit)                           \
-    X(syRtcInit)                              \
-    X(InitThread)                             \
     /* Game/middleware */
 
 // Test hooks: override pad input for scePadRead.
-#define PS2_TEST_HOOK_LIST(X)                                                     \
-    X(setPadOverrideState, (uint16_t buttons, uint8_t lx, uint8_t ly,             \
-                            uint8_t rx, uint8_t ry))                              \
+#define PS2_TEST_HOOK_LIST(X)                                         \
+    X(setPadOverrideState, (uint16_t buttons, uint8_t lx, uint8_t ly, \
+                            uint8_t rx, uint8_t ry))                  \
     X(clearPadOverrideState, (void))

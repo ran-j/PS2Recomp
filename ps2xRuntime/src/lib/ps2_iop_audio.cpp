@@ -1,4 +1,4 @@
-#include "ps2_iop_audio.h"
+#include "runtime/ps2_iop_audio.h"
 #include "ps2_runtime.h"
 
 namespace ps2_iop_audio

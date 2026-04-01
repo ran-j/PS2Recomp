@@ -1,7 +1,8 @@
-#include "ps2_vu1.h"
-#include "ps2_gs_gpu.h"
-#include "ps2_gif_arbiter.h"
-#include "ps2_memory.h"
+#include "runtime/ps2_vu1.h"
+#include "runtime/ps2_gs_gpu.h"
+#include "runtime/ps2_gif_arbiter.h"
+#include "runtime/ps2_memory.h"
+#include "ps2_log.h"
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -1225,12 +1226,12 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
             const uint32_t debugIndex = s_debugVu1XgkickCount.fetch_add(1, std::memory_order_relaxed);
             if (debugIndex < 64u)
             {
-                std::cout << "[vu1:xgkick] idx=" << debugIndex
+                RUNTIME_LOG("[vu1:xgkick] idx=" << debugIndex
                           << " addr=0x" << std::hex << addr
                           << " totalBytes=0x" << totalBytes
                           << std::dec
                           << " wrap=" << static_cast<uint32_t>((addr + totalBytes > dataSize) ? 1u : 0u)
-                          << std::endl;
+                          << std::endl);
             }
 
             if (addr + totalBytes <= dataSize)

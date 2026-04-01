@@ -1,4 +1,5 @@
-#include "ps2_memory.h"
+#include "runtime/ps2_memory.h"
+#include "ps2_log.h"
 #include <iostream>
 #include <cstring>
 #include <stdexcept>
@@ -195,6 +196,8 @@ bool PS2Memory::initialize(size_t ramSize)
         memset(&gs_regs, 0, sizeof(gs_regs));
         gs_regs.dispfb1 = (0ULL << 0) | (10ULL << 9) | (0ULL << 15) | (0ULL << 32) | (0ULL << 43);
         gs_regs.display1 = (0ULL << 0) | (0ULL << 12) | (0ULL << 23) | (0ULL << 27) | (639ULL << 32) | (447ULL << 44);
+        gs_regs.dispfb2 = gs_regs.dispfb1;
+        gs_regs.display2 = gs_regs.display1;
 
         // Allocate GS VRAM (4MB)
         m_gsVRAM = new uint8_t[PS2_GS_VRAM_SIZE];
@@ -702,16 +705,12 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
     {
         if (address == 0x10002010)
         {
+            m_ioRegisters[address] = value & ~(1u << 31);
             if (value & (1u << 30))
             {
                 m_ioRegisters[0x10002000] = 0;
-                m_ioRegisters[0x10002010] = 0;
                 m_ioRegisters[0x10002020] = 0;
                 m_ioRegisters[0x10002030] = 0;
-            }
-            else
-            {
-                m_ioRegisters[address] = value & ~(1u << 31);
             }
         }
         else
@@ -1367,7 +1366,7 @@ void PS2Memory::registerCodeRegion(uint32_t start, uint32_t end)
     region.modified.resize(sizeInWords, false);
 
     m_codeRegions.push_back(region);
-    std::cout << "Registered code region: " << std::hex << start << " - " << end << std::dec << std::endl;
+    RUNTIME_LOG("Registered code region: " << std::hex << start << " - " << end << std::dec);
 }
 
 bool PS2Memory::isAddressInRegion(uint32_t address, const CodeRegion &region)
@@ -1413,7 +1412,7 @@ void PS2Memory::markModified(uint32_t address, uint32_t size)
             if (bitIndex < region.modified.size())
             {
                 region.modified[bitIndex] = true;
-                std::cout << "Marked code at " << std::hex << addr << std::dec << " as modified" << std::endl;
+                RUNTIME_LOG("Marked code at " << std::hex << addr << std::dec << " as modified");
             }
         }
     }

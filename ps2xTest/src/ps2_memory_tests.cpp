@@ -1,7 +1,8 @@
 #include "MiniTest.h"
-#include "ps2_memory.h"
-#include "ps2_gs_gpu.h"
-#include "ps2_vu1.h"
+#include "runtime/ps2_memory.h"
+#include "runtime/ps2_gs_gpu.h"
+#include "runtime/ps2_gs_psmct32.h"
+#include "runtime/ps2_vu1.h"
 #include "ps2_runtime_macros.h"
 
 #include <algorithm>
@@ -1257,12 +1258,16 @@ void register_ps2_memory_tests()
 
             const uint8_t *vramOut = mem.getGSVRAM();
             bool imageOk = true;
-            for (uint32_t i = 0; i < 16u; ++i)
+            for (uint32_t x = 0; x < 4u && imageOk; ++x)
             {
-                if (vramOut[i] != static_cast<uint8_t>(0x70u + i))
+                const uint32_t off = GSPSMCT32::addrPSMCT32(0u, 1u, x, 0u);
+                for (uint32_t c = 0; c < 4u; ++c)
                 {
-                    imageOk = false;
-                    break;
+                    if (vramOut[off + c] != static_cast<uint8_t>(0x70u + x * 4u + c))
+                    {
+                        imageOk = false;
+                        break;
+                    }
                 }
             }
             t.IsTrue(imageOk, "VIF1 DIRECT image should update GS VRAM through GIF path2");
@@ -1331,12 +1336,16 @@ void register_ps2_memory_tests()
 
             const uint8_t *vramOut = mem.getGSVRAM();
             bool imageOk = true;
-            for (uint32_t i = 0; i < 16u; ++i)
+            for (uint32_t x = 0; x < 4u && imageOk; ++x)
             {
-                if (vramOut[i] != static_cast<uint8_t>(0x90u + i))
+                const uint32_t off = GSPSMCT32::addrPSMCT32(0u, 1u, x, 0u);
+                for (uint32_t c = 0; c < 4u; ++c)
                 {
-                    imageOk = false;
-                    break;
+                    if (vramOut[off + c] != static_cast<uint8_t>(0x90u + x * 4u + c))
+                    {
+                        imageOk = false;
+                        break;
+                    }
                 }
             }
             t.IsTrue(imageOk, "MSCAL-triggered XGKICK should route PATH1 packet into GS VRAM");

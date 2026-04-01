@@ -1,5 +1,5 @@
-#include "ps2_audio.h"
-#include "ps2_memory.h"
+#include "runtime/ps2_audio.h"
+#include "runtime/ps2_memory.h"
 #include "raylib.h"
 #include <cstring>
 #include <vector>
@@ -106,9 +106,13 @@ void PS2AudioBackend::onVagTransferFromBuffer(const uint8_t *data, uint32_t size
     m_sampleBank[physAddr] = sample;
     m_mostRecentSampleKey = physAddr;
     m_loadOrderSamples.push_back(std::move(sample));
+    m_loadOrderSampleKeys.push_back(physAddr);
     constexpr size_t kMaxLoadOrderSamples = 32;
     if (m_loadOrderSamples.size() > kMaxLoadOrderSamples)
+    {
         m_loadOrderSamples.erase(m_loadOrderSamples.begin());
+        m_loadOrderSampleKeys.erase(m_loadOrderSampleKeys.begin());
+    }
 }
 
 namespace
@@ -177,10 +181,12 @@ void PS2AudioBackend::play(uint32_t sampleAddr, float pitch, float volume, uint3
         sampleToPlay = &it->second;
         sampleKey = it->first;
     }
-    else if (voiceIndex != 0xFFFFFFFFu && voiceIndex < m_loadOrderSamples.size())
+    else if (voiceIndex != 0xFFFFFFFFu &&
+             voiceIndex < m_loadOrderSamples.size() &&
+             voiceIndex < m_loadOrderSampleKeys.size())
     {
         sampleToPlay = &m_loadOrderSamples[voiceIndex];
-        sampleKey = 0x1719740u + voiceIndex;
+        sampleKey = m_loadOrderSampleKeys[voiceIndex];
     }
     else
     {

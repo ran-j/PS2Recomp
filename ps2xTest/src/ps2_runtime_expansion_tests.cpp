@@ -4,10 +4,11 @@
 #include "ps2recomp/r5900_decoder.h"
 #include "ps2recomp/types.h"
 #include "ps2_runtime.h"
-#include "ps2_memory.h"
+#include "runtime/ps2_memory.h"
 #include "ps2_syscalls.h"
 #include "ps2_stubs.h"
-#include "ps2_gs_gpu.h"
+#include "runtime/ps2_gs_gpu.h"
+#include "runtime/ps2_gs_psmct32.h"
 #include "ps2_runtime_macros.h"
 
 #include <atomic>
@@ -78,8 +79,7 @@ namespace
 
     uint32_t frameOffsetBytes(uint32_t x, uint32_t y, uint32_t fbw)
     {
-        const uint32_t stride = fbw * 64u * 4u; // CT32
-        return y * stride + x * 4u;
+        return GSPSMCT32::addrPSMCT32(0u, (fbw != 0u) ? fbw : 1u, x, y);
     }
 
     void testRuntimeWorkerLoop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -211,6 +211,7 @@ namespace
         gAsyncCallbackObservedGp.store(::getRegU32(ctx, 28), std::memory_order_release);
         ctx->pc = 0u;
     }
+
 }
 
 void register_ps2_runtime_expansion_tests()
@@ -457,6 +458,227 @@ void register_ps2_runtime_expansion_tests()
 
             runtime.requestStop();
             notifyRuntimeStop();
+        });
+
+        tc.Run("MPEG init and callback stubs return success instead of TODO errors", [](TestCase &t)
+        {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            ps2_stubs::resetMpegStubState();
+
+            R5900Context initCtx{};
+            ps2_stubs::sceMpegInit(rdram.data(), &initCtx, nullptr);
+            t.Equals(getRegS32(initCtx, 2), 0,
+                     "sceMpegInit should succeed so games can continue through movie setup");
+
+            R5900Context addCtx0{};
+            setRegU32(addCtx0, 4, 0x00123000u);
+            setRegU32(addCtx0, 5, 1u);
+            setRegU32(addCtx0, 6, 0x00124000u);
+            setRegU32(addCtx0, 7, 0u);
+            ps2_stubs::sceMpegAddCallback(rdram.data(), &addCtx0, nullptr);
+            t.Equals(getRegS32(addCtx0, 2), 1,
+                     "first sceMpegAddCallback should hand back a non-error callback handle");
+
+            R5900Context addCtx1{};
+            setRegU32(addCtx1, 4, 0x00123000u);
+            setRegU32(addCtx1, 5, 2u);
+            setRegU32(addCtx1, 6, 0x00124010u);
+            setRegU32(addCtx1, 7, 0u);
+            ps2_stubs::sceMpegAddCallback(rdram.data(), &addCtx1, nullptr);
+            t.Equals(getRegS32(addCtx1, 2), 2,
+                     "subsequent sceMpegAddCallback calls should keep succeeding");
+
+            R5900Context reinitCtx{};
+            ps2_stubs::sceMpegInit(rdram.data(), &reinitCtx, nullptr);
+
+            R5900Context addAfterReinit{};
+            setRegU32(addAfterReinit, 4, 0x00123000u);
+            setRegU32(addAfterReinit, 5, 3u);
+            setRegU32(addAfterReinit, 6, 0x00124020u);
+            setRegU32(addAfterReinit, 7, 0u);
+            ps2_stubs::sceMpegAddCallback(rdram.data(), &addAfterReinit, nullptr);
+            t.Equals(getRegS32(addAfterReinit, 2), 1,
+                     "sceMpegInit should reset MPEG callback bookkeeping between runs");
+        });
+
+        tc.Run("movie startup MPEG and audio stubs return safe progress values", [](TestCase &t)
+        {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            ps2_stubs::clearMpegCompatLayout();
+            ps2_stubs::resetMpegStubState();
+            ps2_stubs::resetAudioStubState();
+
+            R5900Context firstIsEndCtx{};
+            setRegU32(firstIsEndCtx, 4, 0x00123000u);
+            ps2_stubs::sceMpegIsEnd(rdram.data(), &firstIsEndCtx, nullptr);
+            t.Equals(getRegS32(firstIsEndCtx, 2), 0,
+                     "sceMpegIsEnd should allow one synthetic frame before reporting end");
+
+            R5900Context demuxCtx{};
+            setRegU32(demuxCtx, 4, 0x00123000u);
+            setRegU32(demuxCtx, 5, 0x00400000u);
+            setRegU32(demuxCtx, 6, 0x00004000u);
+            setRegU32(demuxCtx, 7, 0x00410000u);
+            ps2_stubs::sceMpegDemuxPssRing(rdram.data(), &demuxCtx, nullptr);
+            t.Equals(getRegS32(demuxCtx, 2), 0x4000,
+                     "sceMpegDemuxPssRing should consume the provided input instead of trapping");
+
+            R5900Context getPictureCtx{};
+            setRegU32(getPictureCtx, 4, 0x00123000u);
+            setRegU32(getPictureCtx, 5, 0x00124000u);
+            setRegU32(getPictureCtx, 6, 440u);
+            ps2_stubs::sceMpegGetPicture(rdram.data(), &getPictureCtx, nullptr);
+            t.Equals(Ps2FastRead32(rdram.data(), 0x00123000u + 0x00u), 320u,
+                     "sceMpegGetPicture should seed a safe movie width");
+            t.Equals(Ps2FastRead32(rdram.data(), 0x00123000u + 0x04u), 240u,
+                     "sceMpegGetPicture should seed a safe movie height");
+            t.Equals(Ps2FastRead32(rdram.data(), 0x00123000u + 0x08u), 0u,
+                     "first synthetic picture should preserve frameCount==0 for guest setup");
+
+            R5900Context secondIsEndCtx{};
+            setRegU32(secondIsEndCtx, 4, 0x00123000u);
+            ps2_stubs::sceMpegIsEnd(rdram.data(), &secondIsEndCtx, nullptr);
+            t.Equals(getRegS32(secondIsEndCtx, 2), 0,
+                     "sceMpegIsEnd should keep the decode thread alive and let the guest stop playback");
+
+            R5900Context remoteInitCtx{};
+            ps2_stubs::sceSdRemoteInit(rdram.data(), &remoteInitCtx, nullptr);
+            t.Equals(getRegS32(remoteInitCtx, 2), 0,
+                     "sceSdRemoteInit should succeed so Veronica can set up movie audio");
+
+            R5900Context blockTransCtx{};
+            const uint32_t blockTransSp = 0x00100000u;
+            setRegU32(blockTransCtx, 29, blockTransSp);
+            setRegU32(blockTransCtx, 4, 1u);
+            setRegU32(blockTransCtx, 5, 0x80E0u);
+            setRegU32(blockTransCtx, 6, 1u);
+            setRegU32(blockTransCtx, 7, 2u);
+            std::memcpy(rdram.data() + blockTransSp + 0x10u, "\x40\x23\x01\x00", 4u);
+            std::memcpy(rdram.data() + blockTransSp + 0x14u, "\x00\x30\x00\x00", 4u);
+            std::memcpy(rdram.data() + blockTransSp + 0x18u, "\x40\x27\x01\x00", 4u);
+            ps2_stubs::sceSdRemote(rdram.data(), &blockTransCtx, nullptr);
+            t.Equals(getRegU32(&blockTransCtx, 2), 0x00012340u,
+                     "sceSdRemote block transfer should publish the current IOP ring position");
+
+            R5900Context statusCtx{};
+            setRegU32(statusCtx, 29, blockTransSp);
+            setRegU32(statusCtx, 4, 1u);
+            setRegU32(statusCtx, 5, 0x80F0u);
+            setRegU32(statusCtx, 6, 1u);
+            setRegU32(statusCtx, 7, 0u);
+            std::memset(rdram.data() + blockTransSp + 0x10u, 0, 12u);
+            ps2_stubs::sceSdRemote(rdram.data(), &statusCtx, nullptr);
+            t.Equals(getRegU32(&statusCtx, 2), 0x00012340u,
+                     "sceSdRemote status polling should reuse the last configured transfer base");
+
+            R5900Context setParamCtx{};
+            setRegU32(setParamCtx, 29, blockTransSp);
+            setRegU32(setParamCtx, 4, 1u);
+            setRegU32(setParamCtx, 5, 0x8010u);
+            setRegU32(setParamCtx, 6, 0x0F81u);
+            setRegU32(setParamCtx, 7, 0u);
+            ps2_stubs::sceSdRemote(rdram.data(), &setParamCtx, nullptr);
+            t.Equals(getRegU32(&setParamCtx, 2), 0x00012340u,
+                     "sceSdRemote set-param calls should not trap or disturb the movie audio state");
+        });
+
+        tc.Run("MPEG compat layout enters playing state and defers end to guest state", [](TestCase &t)
+        {
+            constexpr uint32_t kCodeVeronicaMpegAddr = 0x01E27140u;
+            constexpr uint32_t kCodeVeronicaVideoStateAddr = 0x01E271E8u;
+            constexpr uint32_t kCodeVeronicaMovieStateAddr = 0x01E21914u;
+
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            PS2MpegCompatLayout compat{};
+            compat.mpegObjectAddr = kCodeVeronicaMpegAddr;
+            compat.videoStateAddr = kCodeVeronicaVideoStateAddr;
+            compat.movieStateAddr = kCodeVeronicaMovieStateAddr;
+            compat.syntheticFramesBeforeEnd = 0u;
+            compat.playingVideoStateValue = 0u;
+            compat.playingMovieStateValue = 2u;
+            compat.finishedVideoStateValue = 3u;
+            compat.finishedMovieStateValue = 3u;
+            ps2_stubs::setMpegCompatLayout(compat);
+            ps2_stubs::resetMpegStubState();
+
+            R5900Context firstIsEndCtx{};
+            setRegU32(firstIsEndCtx, 4, kCodeVeronicaMpegAddr);
+            ps2_stubs::sceMpegIsEnd(rdram.data(), &firstIsEndCtx, nullptr);
+            t.Equals(getRegS32(firstIsEndCtx, 2), 0,
+                     "compat movie path should get one synthetic frame before the MPEG stub reports end");
+
+            R5900Context getPictureCtx{};
+            setRegU32(getPictureCtx, 4, kCodeVeronicaMpegAddr);
+            setRegU32(getPictureCtx, 5, 0x00124000u);
+            setRegU32(getPictureCtx, 6, 440u);
+            ps2_stubs::sceMpegGetPicture(rdram.data(), &getPictureCtx, nullptr);
+            t.Equals(Ps2FastRead32(rdram.data(), kCodeVeronicaMpegAddr + 0x00u), 320u,
+                     "compat movie fallback should seed a movie width");
+            t.Equals(Ps2FastRead32(rdram.data(), kCodeVeronicaMpegAddr + 0x04u), 240u,
+                     "compat movie fallback should seed a movie height");
+            t.Equals(Ps2FastRead32(rdram.data(), kCodeVeronicaVideoStateAddr), 0u,
+                     "compat movie fallback should leave videoDec.state in the active state while playback is running");
+            t.Equals(Ps2FastRead32(rdram.data(), kCodeVeronicaMovieStateAddr), 2u,
+                     "compat movie fallback should promote the movie state to playing after the first synthetic frame");
+
+            R5900Context secondIsEndCtx{};
+            setRegU32(secondIsEndCtx, 4, kCodeVeronicaMpegAddr);
+            ps2_stubs::sceMpegIsEnd(rdram.data(), &secondIsEndCtx, nullptr);
+            t.Equals(getRegS32(secondIsEndCtx, 2), 0,
+                     "compat movie fallback should keep the decode thread alive until the guest marks playback finished");
+
+            Ps2FastWrite32(rdram.data(), kCodeVeronicaMovieStateAddr, 3u);
+
+            R5900Context guestFinishedIsEndCtx{};
+            setRegU32(guestFinishedIsEndCtx, 4, kCodeVeronicaMpegAddr);
+            ps2_stubs::sceMpegIsEnd(rdram.data(), &guestFinishedIsEndCtx, nullptr);
+            t.Equals(getRegS32(guestFinishedIsEndCtx, 2), 1,
+                     "compat movie fallback should report end once the guest movie state reaches the finished value");
+
+            ps2_stubs::clearMpegCompatLayout();
+        });
+
+        tc.Run("IPU init skips missing optional helper instead of dispatching the default trap", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            R5900Context ctx{};
+            ctx.pc = 0x0010B470u;
+
+            ps2_stubs::sceIpuInit(rdram.data(), &ctx, &runtime);
+
+            t.IsFalse(runtime.isStopRequested(),
+                      "sceIpuInit should tolerate the missing optional SetD4 helper");
+            t.Equals(runtime.memory().read32(0x10002010u), 0x40000000u,
+                     "sceIpuInit should still program IPU_CTRL");
+            t.Equals(runtime.memory().read32(0x10002000u), 0u,
+                     "sceIpuInit should leave IPU_CMD reset after initialization");
+        });
+
+        tc.Run("sprintf consumes EE varargs from a2 a3 t0 and preserves width formatting", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            R5900Context ctx{};
+
+            constexpr uint32_t kDestAddr = 0x00002000u;
+            constexpr uint32_t kFormatAddr = 0x00002100u;
+            constexpr char kFormat[] = "rm_%1d%02d%1d.rdx";
+
+            std::memcpy(rdram.data() + kFormatAddr, kFormat, sizeof(kFormat));
+            setRegU32(ctx, 4, kDestAddr);
+            setRegU32(ctx, 5, kFormatAddr);
+            setRegU32(ctx, 6, 0u); // a2
+            setRegU32(ctx, 7, 3u); // a3
+            setRegU32(ctx, 8, 1u); // t0
+
+            ps2_stubs::sprintf(rdram.data(), &ctx, &runtime);
+
+            const std::string rendered(reinterpret_cast<const char *>(rdram.data() + kDestAddr));
+            t.Equals(rendered, std::string("rm_0031.rdx"),
+                     "sprintf should read the third variadic integer from t0 and honor %02d");
+            t.Equals(getRegS32(ctx, 2), static_cast<int32_t>(rendered.size()),
+                     "sprintf should return the rendered length");
         });
 
         tc.Run("multiply-add matrix writes rd only when R5900 requires it", [](TestCase &t)
