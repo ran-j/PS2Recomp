@@ -10,6 +10,8 @@ set(FETCHCONTENT_QUIET FALSE)
 set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(BUILD_GAMES OFF CACHE BOOL "" FORCE)
 
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/ReleaseMode.cmake")
+
 FetchContent_Declare(
     raylib
     GIT_REPOSITORY "https://github.com/raysan5/raylib.git"
@@ -30,10 +32,16 @@ add_library(ps2_runtime STATIC
     src/lib/ps2_memory.cpp
     src/lib/ps2_pad.cpp
     src/lib/ps2_runtime.cpp
-    src/lib/ps2_stubs.cpp
-    src/lib/ps2_syscalls.cpp
     src/lib/ps2_vif1_interpreter.cpp
     src/lib/ps2_vu1.cpp
+)
+
+file(GLOB_RECURSE KERNEL_SRC_FILES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/Kernel/*.cpp"
+)
+
+target_sources(ps2_runtime PRIVATE
+    ${KERNEL_SRC_FILES}
 )
 
 file(GLOB RUNNER_SRC_FILES CONFIGURE_DEPENDS
@@ -67,6 +75,23 @@ target_link_libraries(ps2EntryRunner
     ps2_runtime
     raylib
 )
+
+if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+    EnableFastReleaseMode(ps2_runtime)
+    EnableFastReleaseMode(ps2EntryRunner)
+
+    if(MSVC AND WIN32)
+        target_link_options(ps2EntryRunner PRIVATE
+            $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:/SUBSYSTEM:WINDOWS>
+            $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:/ENTRY:mainCRTStartup>
+        )
+    elseif(MINGW AND WIN32)
+        target_link_options(ps2EntryRunner PRIVATE
+            $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:-mwindows>
+        )
+    endif()
+ 
+endif()
 
 # Work around WinAPI vs raylib symbol clash for CloseWindow on x64
 if(MSVC)
