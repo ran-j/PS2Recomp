@@ -1,9 +1,16 @@
 #include "ps2_runtime.h"
-#include "ps2_syscalls.h"
-#include "ps2_stubs.h"
-#include "game_overrides.h"
 #include "ps2_log.h"
+#include "ps2_stubs.h"
+#include "ps2_syscalls.h"
+#include "game_overrides.h"
 #include "ps2_runtime_macros.h"
+#include "runtime/ps2_gs_gpu.h"
+#include "ThreadNaming.h"
+
+#include <raylib.h>
+#if defined(PLATFORM_VITA)
+#include <pib.h>
+#endif
 #include <iostream>
 #include <fstream>
 #include <algorithm>
@@ -16,9 +23,6 @@
 #include <thread>
 #include <unordered_map>
 #include <sstream>
-#include "raylib.h"
-#include "runtime/ps2_gs_gpu.h"
-#include <ThreadNaming.h>
 
 namespace ps2_stubs
 {
@@ -135,6 +139,11 @@ namespace
     thread_local DispatchHistory g_dispatchHistory;
     thread_local std::unordered_map<PS2Runtime *, uint32_t> g_guestExecutionDepths;
 
+#if defined(PLATFORM_VITA)
+    std::mutex g_pibInitMutex;
+    std::atomic<bool> g_pibInitialized{false};
+#endif
+
     void pushDispatchPc(uint32_t pc)
     {
         DispatchHistory &h = g_dispatchHistory;
@@ -242,6 +251,19 @@ namespace
             return {};
         }
 
+#if defined(PLATFORM_VITA)
+        const std::string generic = path.generic_string();
+        const std::size_t colon = generic.find(':');
+        if (colon != std::string::npos && colon != 0u)
+        {
+            const std::size_t slash = generic.find_first_of("/\\");
+            if (slash == std::string::npos || colon < slash)
+            {
+                return path.lexically_normal();
+            }
+        }
+#endif
+
         std::error_code ec;
         const std::filesystem::path absolute = std::filesystem::absolute(path, ec);
         if (ec)
@@ -250,6 +272,39 @@ namespace
         }
         return absolute.lexically_normal();
     }
+
+#if defined(PLATFORM_VITA)
+    bool ensurePibInitialized()
+    {
+        if (g_pibInitialized.load(std::memory_order_acquire))
+        {
+            return true;
+        }
+
+        std::lock_guard<std::mutex> lock(g_pibInitMutex);
+        if (g_pibInitialized.load(std::memory_order_relaxed))
+        {
+            return true;
+        }
+
+        try
+        {
+            pibInit(static_cast<PibOptions>(PIB_SHACCCG | PIB_GET_PROC_ADDR_CORE));
+            g_pibInitialized.store(true, std::memory_order_release);
+            return true;
+        }
+        catch (const std::exception &e)
+        {
+            std::cerr << "[vita] pibInit failed: " << e.what() << std::endl;
+        }
+        catch (...)
+        {
+            std::cerr << "[vita] pibInit failed: unknown exception" << std::endl;
+        }
+
+        return false;
+    }
+#endif
 
     PS2Runtime::IoPaths &runtimeIoPaths()
     {
@@ -535,16 +590,27 @@ PS2Runtime::PS2Runtime()
 
 PS2Runtime::~PS2Runtime()
 {
-    requestStop();
-    ps2_syscalls::detachAllGuestHostThreads();
-    if (IsWindowReady())
+    try
     {
-        CloseWindow();
+        requestStop();
+        ps2_syscalls::detachAllGuestHostThreads();
+        if (IsWindowReady())
+        {
+            CloseWindow();
+        }
+
+        m_loadedModules.clear();
+
+        m_functionTable.clear();
     }
-
-    m_loadedModules.clear();
-
-    m_functionTable.clear();
+    catch (const std::exception &e)
+    {
+        std::cerr << "[~PS2Runtime] cleanup exception: " << e.what() << std::endl;
+    }
+    catch (...)
+    {
+        std::cerr << "[~PS2Runtime] cleanup exception: unknown" << std::endl;
+    }
 }
 
 bool PS2Runtime::ensureCoreSubsystemsInitialized()
@@ -584,25 +650,45 @@ bool PS2Runtime::ensureCoreSubsystemsInitialized()
 
 bool PS2Runtime::initialize(const char *title)
 {
-    if (!m_memory.initialize())
+    try
     {
-        std::cerr << "Failed to initialize PS2 memory" << std::endl;
-        return false;
+        if (!m_memory.initialize())
+        {
+            std::cerr << "Failed to initialize PS2 memory" << std::endl;
+            return false;
+        }
+
+        if (!ensureCoreSubsystemsInitialized())
+        {
+            std::cerr << "Failed to bind runtime core subsystems" << std::endl;
+            return false;
+        }
+
+#if defined(PLATFORM_VITA)
+        if (!ensurePibInitialized())
+        {
+            return false;
+        }
+#endif
+
+        SetConfigFlags(FLAG_WINDOW_RESIZABLE);
+        InitWindow(FB_WIDTH, DEFAULT_DISPLAY_HEIGHT, title);
+        InitAudioDevice();
+        m_audioBackend.setAudioReady(IsAudioDeviceReady());
+        SetTargetFPS(60);
+
+        return true;
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "Failed to initialize PS2 runtime: " << e.what() << std::endl;
+    }
+    catch (...)
+    {
+        std::cerr << "Failed to initialize PS2 runtime: unknown exception" << std::endl;
     }
 
-    if (!ensureCoreSubsystemsInitialized())
-    {
-        std::cerr << "Failed to bind runtime core subsystems" << std::endl;
-        return false;
-    }
-
-    SetConfigFlags(FLAG_WINDOW_RESIZABLE);
-    InitWindow(FB_WIDTH, DEFAULT_DISPLAY_HEIGHT, title);
-    InitAudioDevice();
-    m_audioBackend.setAudioReady(IsAudioDeviceReady());
-    SetTargetFPS(60);
-
-    return true;
+    return false;
 }
 
 bool PS2Runtime::loadELF(const std::string &elfPath)

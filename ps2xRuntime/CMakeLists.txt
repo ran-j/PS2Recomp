@@ -5,6 +5,17 @@ project(PS2Runtime VERSION 0.1.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+set(PS2X_IS_VITA OFF)
+if((CMAKE_C_COMPILER MATCHES "arm-vita-eabi") OR
+   (CMAKE_CXX_COMPILER MATCHES "arm-vita-eabi"))
+    set(PS2X_IS_VITA ON)
+endif()
+
+option(PS2X_VITA_CREATE_PACKAGE "Create Vita eboot/vpk targets" OFF)
+set(PS2X_VITA_APP_NAME "PS2 Retro X" CACHE STRING "Display name for the Vita bubble")
+set(PS2X_VITA_TITLEID "RANJ00001" CACHE STRING "9-character Vita title id")
+set(PS2X_VITA_VERSION "01.00" CACHE STRING "Vita app version")
+
 include(FetchContent)
 set(FETCHCONTENT_QUIET FALSE)
 set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -75,6 +86,18 @@ target_link_libraries(ps2EntryRunner
     ps2_runtime
     raylib
 )
+
+if(PS2X_IS_VITA)
+    set(VITA_MKSFOEX_FLAGS "${VITA_MKSFOEX_FLAGS} -d PARENTAL_LEVEL=1")
+
+    if(PS2X_VITA_CREATE_PACKAGE)
+        vita_create_self(eboot.bin ps2EntryRunner UNSAFE)
+        vita_create_vpk(ps2EntryRunner.vpk ${PS2X_VITA_TITLEID} eboot.bin
+            VERSION ${PS2X_VITA_VERSION}
+            NAME ${PS2X_VITA_APP_NAME}
+        )
+    endif()
+endif()
 
 if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
     EnableFastReleaseMode(ps2_runtime)
