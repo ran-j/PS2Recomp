@@ -746,7 +746,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
         switch (address)
         {
-        case 0x10003C10u: // VIF1_FBRST
+        case 0x10003C10u:     // VIF1_FBRST
             if (value & 0x1u) // RST
             {
                 std::memset(&vif1_regs, 0, sizeof(vif1_regs));

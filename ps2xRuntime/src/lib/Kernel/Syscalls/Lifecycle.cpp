@@ -104,12 +104,10 @@ namespace ps2_syscalls
         }
     }
 
-
     void joinAllGuestHostThreads()
     {
         joinAllHostThreads();
     }
-
 
     void detachAllGuestHostThreads()
     {

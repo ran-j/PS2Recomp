@@ -1227,11 +1227,11 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
             if (debugIndex < 64u)
             {
                 RUNTIME_LOG("[vu1:xgkick] idx=" << debugIndex
-                          << " addr=0x" << std::hex << addr
-                          << " totalBytes=0x" << totalBytes
-                          << std::dec
-                          << " wrap=" << static_cast<uint32_t>((addr + totalBytes > dataSize) ? 1u : 0u)
-                          << std::endl);
+                                                << " addr=0x" << std::hex << addr
+                                                << " totalBytes=0x" << totalBytes
+                                                << std::dec
+                                                << " wrap=" << static_cast<uint32_t>((addr + totalBytes > dataSize) ? 1u : 0u)
+                                                << std::endl);
             }
 
             if (addr + totalBytes <= dataSize)

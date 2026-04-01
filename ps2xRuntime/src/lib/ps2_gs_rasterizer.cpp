@@ -762,14 +762,14 @@ void GSRasterizer::drawSprite(GS *gs)
 
     if (gs->m_prim.tme)
     {
-        const auto &tex = ctx.tex0; 
+        const auto &tex = ctx.tex0;
         int texW = 1 << tex.tw;
         int texH = 1 << tex.th;
         if (texW == 0)
             texW = 1;
         if (texH == 0)
             texH = 1;
- 
+
         float u0f, v0f, u1f, v1f;
         if (gs->m_prim.fst)
         {

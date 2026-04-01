@@ -27,7 +27,6 @@
 #include <unordered_map>
 #include <sstream>
 
-
 namespace ps2_stubs
 {
     void resetSifState();
@@ -617,7 +616,7 @@ PS2Runtime::~PS2Runtime()
     }
 }
 
-bool PS2Runtime::ensureCoreSubsystemsInitialized()
+bool PS2Runtime::syncCoreSubsystems()
 {
     uint8_t *const rdram = m_memory.getRDRAM();
     uint8_t *const gsVram = m_memory.getGSVRAM();
@@ -662,7 +661,7 @@ bool PS2Runtime::initialize(const char *title)
             return false;
         }
 
-        if (!ensureCoreSubsystemsInitialized())
+        if (!syncCoreSubsystems())
         {
             std::cerr << "Failed to bind runtime core subsystems" << std::endl;
             return false;
@@ -852,10 +851,10 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
         }
 
         RUNTIME_LOG("Loading segment: 0x" << std::hex << ph.vaddr
-                    << " - 0x" << (static_cast<uint64_t>(ph.vaddr) + static_cast<uint64_t>(ph.memsz))
-                    << " (filesz: 0x" << ph.filesz
-                    << ", memsz: 0x" << ph.memsz << ")"
-                    << std::dec << std::endl);
+                                          << " - 0x" << (static_cast<uint64_t>(ph.vaddr) + static_cast<uint64_t>(ph.memsz))
+                                          << " (filesz: 0x" << ph.filesz
+                                          << ", memsz: 0x" << ph.memsz << ")"
+                                          << std::dec << std::endl);
 
         if (!scratch)
         {
@@ -1158,9 +1157,9 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
     if (count < 3)
     {
         RUNTIME_LOG("[VU0] microprogram @0x" << std::hex << address
-                    << " pc=0x" << ctx->pc
-                    << " ra=0x" << static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0))
-                    << std::dec << std::endl);
+                                             << " pc=0x" << ctx->pc
+                                             << " ra=0x" << static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0))
+                                             << std::dec << std::endl);
     }
     ++count;
 

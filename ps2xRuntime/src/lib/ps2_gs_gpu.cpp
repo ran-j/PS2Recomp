@@ -64,7 +64,7 @@ namespace
 
         outWidth = (dw + 1u) / (magh + 1u);
         outHeight = dh + 1u;
-        
+
         if (outWidth < 64u || outHeight < 64u)
         {
             outWidth = kDefaultDisplayWidth;
@@ -825,14 +825,14 @@ void GS::latchHostPresentationFrame()
             (m_preferredDisplaySourceFrame.fbw != 0u || m_preferredDisplaySourceFrame.fbp != displayFrame.fbp))
         {
             if (copyFrameToHostRgbaUnlocked(m_preferredDisplaySourceFrame,
-                                           width,
-                                           height,
-                                           scratch,
-                                           preserveAlpha,
-                                           true,
-                                           false,
-                                           0u,
-                                           0u))
+                                            width,
+                                            height,
+                                            scratch,
+                                            preserveAlpha,
+                                            true,
+                                            false,
+                                            0u,
+                                            0u))
             {
                 selectedFrame = m_preferredDisplaySourceFrame;
                 usedPreferred = true;
@@ -867,14 +867,14 @@ void GS::latchHostPresentationFrame()
 
                 std::vector<uint8_t> candidatePixels;
                 if (!copyFrameToHostRgbaUnlocked(candidate,
-                                                width,
-                                                height,
-                                                candidatePixels,
-                                                preserveAlpha,
-                                                true,
-                                                true,
-                                                0u,
-                                                0u))
+                                                 width,
+                                                 height,
+                                                 candidatePixels,
+                                                 preserveAlpha,
+                                                 true,
+                                                 true,
+                                                 0u,
+                                                 0u))
                 {
                     continue;
                 }
@@ -1092,13 +1092,13 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
             if (nreg == 0u)
                 nreg = 16u;
             RUNTIME_LOG("[gs:gif] idx=" << packetIndex
-                      << " size=" << sizeBytes
-                      << " nloop=" << nloop
-                      << " flg=" << static_cast<uint32_t>(flg)
-                      << " nreg=" << nreg
-                      << " ctx0fbp=" << m_ctx[0].frame.fbp
-                      << " ctx1fbp=" << m_ctx[1].frame.fbp
-                      << std::endl);
+                                        << " size=" << sizeBytes
+                                        << " nloop=" << nloop
+                                        << " flg=" << static_cast<uint32_t>(flg)
+                                        << " nreg=" << nreg
+                                        << " ctx0fbp=" << m_ctx[0].frame.fbp
+                                        << " ctx1fbp=" << m_ctx[1].frame.fbp
+                                        << std::endl);
         }
     });
 
@@ -1220,14 +1220,14 @@ void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
             if (debugIndex < 64u)
             {
                 RUNTIME_LOG("[gs:packed-xyzf] idx=" << debugIndex
-                          << " x=" << x
-                          << " y=" << y
-                          << " z=0x" << std::hex << z
-                          << std::dec
-                          << " fog=" << static_cast<uint32_t>(f)
-                          << " kick=" << static_cast<uint32_t>(!adk ? 1u : 0u)
-                          << " prim=" << static_cast<uint32_t>(m_prim.type)
-                          << std::endl);
+                                                    << " x=" << x
+                                                    << " y=" << y
+                                                    << " z=0x" << std::hex << z
+                                                    << std::dec
+                                                    << " fog=" << static_cast<uint32_t>(f)
+                                                    << " kick=" << static_cast<uint32_t>(!adk ? 1u : 0u)
+                                                    << " prim=" << static_cast<uint32_t>(m_prim.type)
+                                                    << std::endl);
             }
         });
         GSVertex &vtx = m_vtxQueue[m_vtxCount % kMaxVerts];
@@ -1258,13 +1258,13 @@ void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
             if (debugIndex < 64u)
             {
                 RUNTIME_LOG("[gs:packed-xyz] idx=" << debugIndex
-                          << " x=" << x
-                          << " y=" << y
-                          << " z=0x" << std::hex << z
-                          << std::dec
-                          << " kick=" << static_cast<uint32_t>(!adk ? 1u : 0u)
-                          << " prim=" << static_cast<uint32_t>(m_prim.type)
-                          << std::endl);
+                                                   << " x=" << x
+                                                   << " y=" << y
+                                                   << " z=0x" << std::hex << z
+                                                   << std::dec
+                                                   << " kick=" << static_cast<uint32_t>(!adk ? 1u : 0u)
+                                                   << " prim=" << static_cast<uint32_t>(m_prim.type)
+                                                   << std::endl);
             }
         });
         GSVertex &vtx = m_vtxQueue[m_vtxCount % kMaxVerts];
@@ -1294,11 +1294,11 @@ void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
             if (debugIndex < 64u)
             {
                 RUNTIME_LOG("[gs:packed-xyzf3] idx=" << debugIndex
-                          << " x=" << static_cast<uint32_t>(lo & 0xFFFFu)
-                          << " y=" << static_cast<uint32_t>((lo >> 32) & 0xFFFFu)
-                          << " kick=0"
-                          << " prim=" << static_cast<uint32_t>(m_prim.type)
-                          << std::endl);
+                                                     << " x=" << static_cast<uint32_t>(lo & 0xFFFFu)
+                                                     << " y=" << static_cast<uint32_t>((lo >> 32) & 0xFFFFu)
+                                                     << " kick=0"
+                                                     << " prim=" << static_cast<uint32_t>(m_prim.type)
+                                                     << std::endl);
             }
         });
         GSVertex &vtx = m_vtxQueue[m_vtxCount % kMaxVerts];
@@ -1325,11 +1325,11 @@ void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
             if (debugIndex < 64u)
             {
                 RUNTIME_LOG("[gs:packed-xyz3] idx=" << debugIndex
-                          << " x=" << static_cast<uint32_t>(lo & 0xFFFFu)
-                          << " y=" << static_cast<uint32_t>((lo >> 32) & 0xFFFFu)
-                          << " kick=0"
-                          << " prim=" << static_cast<uint32_t>(m_prim.type)
-                          << std::endl);
+                                                    << " x=" << static_cast<uint32_t>(lo & 0xFFFFu)
+                                                    << " y=" << static_cast<uint32_t>((lo >> 32) & 0xFFFFu)
+                                                    << " kick=0"
+                                                    << " prim=" << static_cast<uint32_t>(m_prim.type)
+                                                    << std::endl);
             }
         });
         GSVertex &vtx = m_vtxQueue[m_vtxCount % kMaxVerts];
@@ -1399,10 +1399,10 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
             if (debugIndex < 128u)
             {
                 RUNTIME_LOG("[gs:reg] idx=" << debugIndex
-                          << " reg=0x" << std::hex << static_cast<uint32_t>(regAddr)
-                          << " value=0x" << value
-                          << std::dec
-                          << std::endl);
+                                            << " reg=0x" << std::hex << static_cast<uint32_t>(regAddr)
+                                            << " value=0x" << value
+                                            << std::dec
+                                            << std::endl);
             }
         }
     });
@@ -1422,13 +1422,13 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
             s_debugCopyRegCount.fetch_add(1u, std::memory_order_relaxed) < 64u)
         {
             RUNTIME_LOG("[gs:copy-reg] reg=0x"
-                      << std::hex << static_cast<uint32_t>(regAddr)
-                      << " value=0x" << value
-                      << std::dec
-                      << " primCtxt=" << static_cast<uint32_t>(m_prim.ctxt)
-                      << " ctx0fbp=" << m_ctx[0].frame.fbp
-                      << " ctx1fbp=" << m_ctx[1].frame.fbp
-                      << std::endl);
+                        << std::hex << static_cast<uint32_t>(regAddr)
+                        << " value=0x" << value
+                        << std::dec
+                        << " primCtxt=" << static_cast<uint32_t>(m_prim.ctxt)
+                        << " ctx0fbp=" << m_ctx[0].frame.fbp
+                        << " ctx1fbp=" << m_ctx[1].frame.fbp
+                        << std::endl);
         }
     });
 
@@ -1696,12 +1696,12 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
             if (texaIndex < 24u)
             {
                 RUNTIME_LOG("[gs:texa] idx=" << texaIndex
-                          << " value=0x" << std::hex << value
-                          << " ta0=0x" << ((value >> 0) & 0xFFu)
-                          << " aem=" << ((value >> 15) & 0x1u)
-                          << " ta1=0x" << ((value >> 32) & 0xFFu)
-                          << std::dec
-                          << std::endl);
+                                             << " value=0x" << std::hex << value
+                                             << " ta0=0x" << ((value >> 0) & 0xFFu)
+                                             << " aem=" << ((value >> 15) & 0x1u)
+                                             << " ta1=0x" << ((value >> 32) & 0xFFu)
+                                             << std::dec
+                                             << std::endl);
             }
         });
         break;
@@ -1798,16 +1798,16 @@ void GS::performLocalToLocalTransfer()
             s_debugLocalCopyCount.fetch_add(1u, std::memory_order_relaxed) < 96u)
         {
             RUNTIME_LOG("[gs:l2l] sbp=" << sbp
-                      << " dbp=" << dbp
-                      << " sbw=" << static_cast<uint32_t>(sbw)
-                      << " dbw=" << static_cast<uint32_t>(dbw)
-                      << " spsm=0x" << std::hex << static_cast<uint32_t>(spsm)
-                      << " dpsm=0x" << static_cast<uint32_t>(dpsm) << std::dec
-                      << " ss=(" << ssax << "," << ssay << ")"
-                      << " ds=(" << dsax << "," << dsay << ")"
-                      << " rr=(" << rrw << "," << rrh << ")"
-                      << " dir=" << static_cast<uint32_t>(m_trxpos.dir)
-                      << " formatAware=" << (formatAware ? 1 : 0) << std::endl);
+                                        << " dbp=" << dbp
+                                        << " sbw=" << static_cast<uint32_t>(sbw)
+                                        << " dbw=" << static_cast<uint32_t>(dbw)
+                                        << " spsm=0x" << std::hex << static_cast<uint32_t>(spsm)
+                                        << " dpsm=0x" << static_cast<uint32_t>(dpsm) << std::dec
+                                        << " ss=(" << ssax << "," << ssay << ")"
+                                        << " ds=(" << dsax << "," << dsay << ")"
+                                        << " rr=(" << rrw << "," << rrh << ")"
+                                        << " dir=" << static_cast<uint32_t>(m_trxpos.dir)
+                                        << " formatAware=" << (formatAware ? 1 : 0) << std::endl);
         }
     });
 
@@ -1880,10 +1880,10 @@ void GS::vertexKick(bool drawing)
         if (debugIndex < 96u)
         {
             RUNTIME_LOG("[gs:kick] idx=" << debugIndex
-                      << " drawing=" << static_cast<uint32_t>(drawing ? 1u : 0u)
-                      << " prim=" << static_cast<uint32_t>(m_prim.type)
-                      << " vtxCount=" << m_vtxCount
-                      << std::endl);
+                                         << " drawing=" << static_cast<uint32_t>(drawing ? 1u : 0u)
+                                         << " prim=" << static_cast<uint32_t>(m_prim.type)
+                                         << " vtxCount=" << m_vtxCount
+                                         << std::endl);
         }
     });
 

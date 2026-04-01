@@ -116,10 +116,10 @@ namespace
         const std::string_view resolvedSyscall = ps2_runtime_calls::resolveSyscallName(handlerName);
         if (!resolvedSyscall.empty())
         {
-#define PS2_RESOLVE_SYSCALL(name)                      \
-    if (resolvedSyscall == std::string_view{#name})    \
-    {                                                  \
-        return &ps2_syscalls::name;                    \
+#define PS2_RESOLVE_SYSCALL(name)                   \
+    if (resolvedSyscall == std::string_view{#name}) \
+    {                                               \
+        return &ps2_syscalls::name;                 \
     }
             PS2_SYSCALL_LIST(PS2_RESOLVE_SYSCALL)
 #undef PS2_RESOLVE_SYSCALL
@@ -128,10 +128,10 @@ namespace
         const std::string_view resolvedStub = ps2_runtime_calls::resolveStubName(handlerName);
         if (!resolvedStub.empty())
         {
-#define PS2_RESOLVE_STUB(name)                       \
-    if (resolvedStub == std::string_view{#name})     \
-    {                                                \
-        return &ps2_stubs::name;                     \
+#define PS2_RESOLVE_STUB(name)                   \
+    if (resolvedStub == std::string_view{#name}) \
+    {                                            \
+        return &ps2_stubs::name;                 \
     }
             PS2_STUB_LIST(PS2_RESOLVE_STUB)
 #undef PS2_RESOLVE_STUB

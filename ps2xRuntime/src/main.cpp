@@ -82,7 +82,7 @@ int main(int argc, char *argv[])
     try
     {
         std::filesystem::path exePath = getExecutablePath(argc, argv);
-    
+
         std::string elfPath = exePath.filename().string();
         std::filesystem::path pathObj(elfPath);
         std::string folderName = pathObj.filename().string();

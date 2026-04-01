@@ -78,12 +78,12 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         if (opcodeIndex < 160u)
         {
             RUNTIME_LOG("[vif1:cmd] idx=" << opcodeIndex
-                      << " opcode=0x" << std::hex << static_cast<uint32_t>(opcode)
-                      << " imm=0x" << imm
-                      << std::dec
-                      << " num=" << static_cast<uint32_t>(num)
-                      << " irq=" << static_cast<uint32_t>(irq ? 1u : 0u)
-                      << std::endl);
+                                          << " opcode=0x" << std::hex << static_cast<uint32_t>(opcode)
+                                          << " imm=0x" << imm
+                                          << std::dec
+                                          << " num=" << static_cast<uint32_t>(num)
+                                          << " irq=" << static_cast<uint32_t>(irq ? 1u : 0u)
+                                          << std::endl);
         }
 
         // Track most-recent command for VIFn_CODE emulation.
@@ -155,11 +155,11 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             if (kickIndex < 48u)
             {
                 RUNTIME_LOG("[vif1:mscal] idx=" << kickIndex
-                          << " opcode=0x" << std::hex << static_cast<uint32_t>(opcode)
-                          << " imm=0x" << imm
-                          << " startPc=0x" << startPC
-                          << " itop=0x" << vif1_regs.itop
-                          << std::dec << std::endl);
+                                                << " opcode=0x" << std::hex << static_cast<uint32_t>(opcode)
+                                                << " imm=0x" << imm
+                                                << " startPc=0x" << startPC
+                                                << " itop=0x" << vif1_regs.itop
+                                                << std::dec << std::endl);
             }
             if (m_vu1MscalCallback)
                 m_vu1MscalCallback(startPC, vif1_regs.itop);
@@ -174,9 +174,9 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             if (kickIndex < 48u)
             {
                 RUNTIME_LOG("[vif1:mscnt] idx=" << kickIndex
-                          << " itop=0x" << std::hex << vif1_regs.itop
-                          << " pc=resume"
-                          << std::dec << std::endl);
+                                                << " itop=0x" << std::hex << vif1_regs.itop
+                                                << " pc=resume"
+                                                << std::dec << std::endl);
             }
             if (m_vu1MscntCallback)
                 m_vu1MscntCallback(vif1_regs.itop);

@@ -304,440 +304,440 @@ namespace ps2_stubs
         }
     }
 
-void PadSyncCallback(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    setReturnS32(ctx, 0);
-}
-
-void scePadEnd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    (void)rdram;
-    (void)runtime;
+    void PadSyncCallback(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        setReturnS32(ctx, 0);
+    }
+
+    void scePadEnd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        (void)runtime;
+        {
+            std::lock_guard<std::mutex> lock(g_padStateMutex);
+            resetPadStateLocked();
+        }
+        setReturnS32(ctx, 1);
+    }
+
+    void scePadEnterPressMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)runtime;
         std::lock_guard<std::mutex> lock(g_padStateMutex);
-        resetPadStateLocked();
-    }
-    setReturnS32(ctx, 1);
-}
-
-void scePadEnterPressMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    (void)runtime;
-    std::lock_guard<std::mutex> lock(g_padStateMutex);
-    PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
-                                                       static_cast<int>(getRegU32(ctx, 5)));
-    if (!portState || !portState->open)
-    {
-        setReturnS32(ctx, 0);
-        return;
-    }
-
-    portState->pressureEnabled = true;
-    portState->reqState = 0u;
-    setReturnS32(ctx, 1);
-}
-
-void scePadExitPressMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    (void)runtime;
-    std::lock_guard<std::mutex> lock(g_padStateMutex);
-    PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
-                                                       static_cast<int>(getRegU32(ctx, 5)));
-    if (!portState || !portState->open)
-    {
-        setReturnS32(ctx, 0);
-        return;
-    }
-
-    portState->pressureEnabled = false;
-    portState->reqState = 0u;
-    setReturnS32(ctx, 1);
-}
-
-void scePadGetButtonMask(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    (void)rdram;
-    (void)runtime;
-    std::lock_guard<std::mutex> lock(g_padStateMutex);
-    const PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
-                                                             static_cast<int>(getRegU32(ctx, 5)));
-    const uint16_t mask = portState ? portState->buttonMask : 0xFFFFu;
-    setReturnS32(ctx, static_cast<int32_t>(mask));
-}
-
-void scePadGetDmaStr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    (void)rdram;
-    (void)runtime;
-    std::lock_guard<std::mutex> lock(g_padStateMutex);
-    const PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
-                                                             static_cast<int>(getRegU32(ctx, 5)));
-    const uint32_t dmaAddr = portState ? portState->dmaAddr : getRegU32(ctx, 6);
-    setReturnU32(ctx, dmaAddr);
-}
-
-void scePadGetFrameCount(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    (void)rdram;
-    (void)runtime;
-    static std::atomic<uint32_t> frameCount{0};
-    setReturnU32(ctx, frameCount++);
-}
-
-void scePadGetModVersion(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    (void)rdram;
-    (void)runtime;
-    // Arbitrary non-zero module version.
-    setReturnS32(ctx, 0x0200);
-}
-
-void scePadGetPortMax(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    (void)rdram;
-    (void)runtime;
-    setReturnS32(ctx, 2);
-}
-
-void scePadGetReqState(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    (void)rdram;
-    (void)runtime;
-    std::lock_guard<std::mutex> lock(g_padStateMutex);
-    const PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
-                                                             static_cast<int>(getRegU32(ctx, 5)));
-    setReturnS32(ctx, static_cast<int32_t>(portState ? portState->reqState : 0u));
-}
-
-void scePadGetSlotMax(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    (void)rdram;
-    (void)runtime;
-    // Most games use one slot unless multitap is active.
-    setReturnS32(ctx, 1);
-}
-
-void scePadGetState(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    (void)rdram;
-    (void)runtime;
-    std::lock_guard<std::mutex> lock(g_padStateMutex);
-    const PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
-                                                             static_cast<int>(getRegU32(ctx, 5)));
-    setReturnS32(ctx, (portState && portState->open) ? kPadStateStable : kPadStateDisconnected);
-}
-
-void scePadInfoAct(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    const int32_t act = static_cast<int32_t>(getRegU32(ctx, 6));
-    std::lock_guard<std::mutex> lock(g_padStateMutex);
-    const PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
-                                                             static_cast<int>(getRegU32(ctx, 5)));
-    if (!portState || !portState->open)
-    {
-        setReturnS32(ctx, 0);
-        return;
-    }
-
-    if (act < 0)
-    {
-        setReturnS32(ctx, 2); // small + large motors
-        return;
-    }
-    setReturnS32(ctx, (act < 2) ? 1 : 0);
-}
-
-void scePadInfoComb(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    (void)rdram;
-    (void)runtime;
-    // No combined modes reported.
-    setReturnS32(ctx, 0);
-}
-
-void scePadInfoMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    (void)rdram;
-    (void)runtime;
-
-    const int32_t infoMode = static_cast<int32_t>(getRegU32(ctx, 6)); // a2
-    const int32_t index = static_cast<int32_t>(getRegU32(ctx, 7));    // a3
-    std::lock_guard<std::mutex> lock(g_padStateMutex);
-    const PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
-                                                             static_cast<int>(getRegU32(ctx, 5)));
-    if (!portState || !portState->open)
-    {
-        setReturnS32(ctx, 0);
-        return;
-    }
-
-    const int32_t currentId = portState->analogMode ? kPadTypeDualShock : kPadTypeDigital;
-    switch (infoMode)
-    {
-    case 1: // PAD_MODECURID
-        setReturnS32(ctx, currentId);
-        return;
-    case 2: // PAD_MODECUREXID
-        setReturnS32(ctx, currentId);
-        return;
-    case 3: // PAD_MODECUROFFS
-        setReturnS32(ctx, 0);
-        return;
-    case 4: // PAD_MODETABLE
-        if (index == -1)
-        {
-            setReturnS32(ctx, 1); // one available mode
-        }
-        else if (index == 0)
-        {
-            setReturnS32(ctx, currentId);
-        }
-        else
+        PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
+                                                           static_cast<int>(getRegU32(ctx, 5)));
+        if (!portState || !portState->open)
         {
             setReturnS32(ctx, 0);
+            return;
         }
-        return;
-    default:
-        setReturnS32(ctx, 0);
-        return;
-    }
-}
 
-void scePadInfoPressMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    (void)rdram;
-    (void)runtime;
-    std::lock_guard<std::mutex> lock(g_padStateMutex);
-    const PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
-                                                             static_cast<int>(getRegU32(ctx, 5)));
-    setReturnS32(ctx, (portState && portState->open) ? 1 : 0);
-}
-
-void scePadInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    (void)rdram;
-    (void)runtime;
-    {
-        std::lock_guard<std::mutex> lock(g_padStateMutex);
-        resetPadStateLocked();
-    }
-    setReturnS32(ctx, 1);
-}
-
-void scePadInit2(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    scePadInit(rdram, ctx, runtime);
-}
-
-void scePadPortClose(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    (void)rdram;
-    (void)runtime;
-    std::lock_guard<std::mutex> lock(g_padStateMutex);
-    PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
-                                                       static_cast<int>(getRegU32(ctx, 5)));
-    if (!portState)
-    {
-        setReturnS32(ctx, 0);
-        return;
-    }
-
-    portState->open = false;
-    portState->pressureEnabled = false;
-    portState->reqState = 0u;
-    setReturnS32(ctx, 1);
-}
-
-void scePadPortOpen(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    (void)runtime;
-    const uint32_t dmaAddr = getRegU32(ctx, 6);
-    uint8_t *dmaStr = getMemPtr(rdram, dmaAddr);
-    std::lock_guard<std::mutex> lock(g_padStateMutex);
-    PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
-                                                       static_cast<int>(getRegU32(ctx, 5)));
-    if (!portState || (dmaAddr != 0u && !dmaStr))
-    {
-        setReturnS32(ctx, 0);
-        return;
-    }
-
-    portState->open = true;
-    portState->analogMode = true;
-    portState->pressureEnabled = false;
-    portState->buttonMask = 0xFFFFu;
-    portState->dmaAddr = dmaAddr;
-    portState->reqState = 0u;
-    if (dmaStr)
-    {
-        std::memset(dmaStr, 0, 32);
-    }
-    setReturnS32(ctx, 1);
-}
-
-void scePadRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    const int port = static_cast<int>(getRegU32(ctx, 4));
-    const int slot = static_cast<int>(getRegU32(ctx, 5));
-    const uint32_t dataAddr = getRegU32(ctx, 6);
-    uint8_t *data = getMemPtr(rdram, dataAddr);
-    if (!data)
-    {
-        setReturnS32(ctx, 0);
-        return;
-    }
-
-    if (!readPadPortData(port, slot, runtime, data))
-    {
-        setReturnS32(ctx, 0);
-        return;
-    }
-
-    if (g_padReadLogCount < 48)
-    {
-        const int gamepad = findFirstGamepad();
-        const bool gamepadStartPressed =
-            (gamepad >= 0) && IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_MIDDLE_RIGHT);
-        const bool startPressed = (data[2] != 0xFFu || data[3] != 0xFFu ||
-                                   IsKeyDown(KEY_ENTER) || gamepadStartPressed);
-        if (startPressed)
-        {
-            const uint32_t guestButtons =
-                (static_cast<uint32_t>(static_cast<uint8_t>(data[2] ^ 0xFFu)) << 8) |
-                static_cast<uint32_t>(static_cast<uint8_t>(data[3] ^ 0xFFu));
-            std::printf("[padread] port=%d slot=%d data2=0x%02x data3=0x%02x guestButtons=0x%04x enter=%d gamepadStart=%d\n",
-                        port, slot, data[2], data[3], guestButtons,
-                        IsKeyDown(KEY_ENTER) ? 1 : 0, gamepadStartPressed ? 1 : 0);
-            ++g_padReadLogCount;
-        }
-    }
-
-    setReturnS32(ctx, 1);
-}
-
-void scePadReqIntToStr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    (void)runtime;
-    const uint32_t state = getRegU32(ctx, 4);
-    const uint32_t strAddr = getRegU32(ctx, 5);
-    char *buf = reinterpret_cast<char *>(getMemPtr(rdram, strAddr));
-    if (!buf)
-    {
-        setReturnS32(ctx, -1);
-        return;
-    }
-
-    const char *text = (state == 0) ? "COMPLETE" : "BUSY";
-    std::strncpy(buf, text, 31);
-    buf[31] = '\0';
-    setReturnS32(ctx, 0);
-}
-
-void scePadSetActAlign(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    (void)rdram;
-    (void)runtime;
-    setReturnS32(ctx, 1);
-}
-
-void scePadSetActDirect(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    (void)rdram;
-    (void)runtime;
-    setReturnS32(ctx, 1);
-}
-
-void scePadSetButtonInfo(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    (void)rdram;
-    (void)runtime;
-    std::lock_guard<std::mutex> lock(g_padStateMutex);
-    PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
-                                                       static_cast<int>(getRegU32(ctx, 5)));
-    if (portState && portState->open)
-    {
-        portState->buttonMask = static_cast<uint16_t>(getRegU32(ctx, 6));
+        portState->pressureEnabled = true;
         portState->reqState = 0u;
+        setReturnS32(ctx, 1);
     }
-    setReturnS32(ctx, 1);
-}
 
-void scePadSetMainMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    (void)rdram;
-    (void)runtime;
-    std::lock_guard<std::mutex> lock(g_padStateMutex);
-    PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
-                                                       static_cast<int>(getRegU32(ctx, 5)));
-    if (!portState || !portState->open)
+    void scePadExitPressMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        (void)runtime;
+        std::lock_guard<std::mutex> lock(g_padStateMutex);
+        PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
+                                                           static_cast<int>(getRegU32(ctx, 5)));
+        if (!portState || !portState->open)
+        {
+            setReturnS32(ctx, 0);
+            return;
+        }
+
+        portState->pressureEnabled = false;
+        portState->reqState = 0u;
+        setReturnS32(ctx, 1);
+    }
+
+    void scePadGetButtonMask(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        (void)runtime;
+        std::lock_guard<std::mutex> lock(g_padStateMutex);
+        const PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
+                                                                 static_cast<int>(getRegU32(ctx, 5)));
+        const uint16_t mask = portState ? portState->buttonMask : 0xFFFFu;
+        setReturnS32(ctx, static_cast<int32_t>(mask));
+    }
+
+    void scePadGetDmaStr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        (void)runtime;
+        std::lock_guard<std::mutex> lock(g_padStateMutex);
+        const PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
+                                                                 static_cast<int>(getRegU32(ctx, 5)));
+        const uint32_t dmaAddr = portState ? portState->dmaAddr : getRegU32(ctx, 6);
+        setReturnU32(ctx, dmaAddr);
+    }
+
+    void scePadGetFrameCount(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        (void)runtime;
+        static std::atomic<uint32_t> frameCount{0};
+        setReturnU32(ctx, frameCount++);
+    }
+
+    void scePadGetModVersion(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        (void)runtime;
+        // Arbitrary non-zero module version.
+        setReturnS32(ctx, 0x0200);
+    }
+
+    void scePadGetPortMax(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        (void)runtime;
+        setReturnS32(ctx, 2);
+    }
+
+    void scePadGetReqState(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        (void)runtime;
+        std::lock_guard<std::mutex> lock(g_padStateMutex);
+        const PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
+                                                                 static_cast<int>(getRegU32(ctx, 5)));
+        setReturnS32(ctx, static_cast<int32_t>(portState ? portState->reqState : 0u));
+    }
+
+    void scePadGetSlotMax(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        (void)runtime;
+        // Most games use one slot unless multitap is active.
+        setReturnS32(ctx, 1);
+    }
+
+    void scePadGetState(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        (void)runtime;
+        std::lock_guard<std::mutex> lock(g_padStateMutex);
+        const PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
+                                                                 static_cast<int>(getRegU32(ctx, 5)));
+        setReturnS32(ctx, (portState && portState->open) ? kPadStateStable : kPadStateDisconnected);
+    }
+
+    void scePadInfoAct(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const int32_t act = static_cast<int32_t>(getRegU32(ctx, 6));
+        std::lock_guard<std::mutex> lock(g_padStateMutex);
+        const PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
+                                                                 static_cast<int>(getRegU32(ctx, 5)));
+        if (!portState || !portState->open)
+        {
+            setReturnS32(ctx, 0);
+            return;
+        }
+
+        if (act < 0)
+        {
+            setReturnS32(ctx, 2); // small + large motors
+            return;
+        }
+        setReturnS32(ctx, (act < 2) ? 1 : 0);
+    }
+
+    void scePadInfoComb(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        (void)runtime;
+        // No combined modes reported.
         setReturnS32(ctx, 0);
-        return;
     }
 
-    portState->analogMode = (getRegU32(ctx, 6) != 0u);
-    portState->reqState = 0u;
-    setReturnS32(ctx, 1);
-}
-
-void scePadSetReqState(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    (void)rdram;
-    (void)runtime;
-    std::lock_guard<std::mutex> lock(g_padStateMutex);
-    PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
-                                                       static_cast<int>(getRegU32(ctx, 5)));
-    if (portState && portState->open)
+    void scePadInfoMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        portState->reqState = static_cast<uint32_t>(getRegU32(ctx, 6) ? 1u : 0u);
+        (void)rdram;
+        (void)runtime;
+
+        const int32_t infoMode = static_cast<int32_t>(getRegU32(ctx, 6)); // a2
+        const int32_t index = static_cast<int32_t>(getRegU32(ctx, 7));    // a3
+        std::lock_guard<std::mutex> lock(g_padStateMutex);
+        const PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
+                                                                 static_cast<int>(getRegU32(ctx, 5)));
+        if (!portState || !portState->open)
+        {
+            setReturnS32(ctx, 0);
+            return;
+        }
+
+        const int32_t currentId = portState->analogMode ? kPadTypeDualShock : kPadTypeDigital;
+        switch (infoMode)
+        {
+        case 1: // PAD_MODECURID
+            setReturnS32(ctx, currentId);
+            return;
+        case 2: // PAD_MODECUREXID
+            setReturnS32(ctx, currentId);
+            return;
+        case 3: // PAD_MODECUROFFS
+            setReturnS32(ctx, 0);
+            return;
+        case 4: // PAD_MODETABLE
+            if (index == -1)
+            {
+                setReturnS32(ctx, 1); // one available mode
+            }
+            else if (index == 0)
+            {
+                setReturnS32(ctx, currentId);
+            }
+            else
+            {
+                setReturnS32(ctx, 0);
+            }
+            return;
+        default:
+            setReturnS32(ctx, 0);
+            return;
+        }
     }
-    setReturnS32(ctx, 1);
-}
 
-void scePadSetVrefParam(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    (void)rdram;
-    (void)runtime;
-    setReturnS32(ctx, 1);
-}
-
-void scePadSetWarningLevel(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    (void)rdram;
-    (void)runtime;
-    setReturnS32(ctx, 0);
-}
-
-void scePadStateIntToStr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    (void)runtime;
-    const uint32_t state = getRegU32(ctx, 4);
-    const uint32_t strAddr = getRegU32(ctx, 5);
-    char *buf = reinterpret_cast<char *>(getMemPtr(rdram, strAddr));
-    if (!buf)
+    void scePadInfoPressMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        setReturnS32(ctx, -1);
-        return;
+        (void)rdram;
+        (void)runtime;
+        std::lock_guard<std::mutex> lock(g_padStateMutex);
+        const PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
+                                                                 static_cast<int>(getRegU32(ctx, 5)));
+        setReturnS32(ctx, (portState && portState->open) ? 1 : 0);
     }
 
-    const char *text = "UNKNOWN";
-    if (state == 6)
+    void scePadInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        text = "STABLE";
-    }
-    else if (state == 1)
-    {
-        text = "FINDPAD";
-    }
-    else if (state == 0)
-    {
-        text = "DISCONNECTED";
+        (void)rdram;
+        (void)runtime;
+        {
+            std::lock_guard<std::mutex> lock(g_padStateMutex);
+            resetPadStateLocked();
+        }
+        setReturnS32(ctx, 1);
     }
 
-    std::strncpy(buf, text, 31);
-    buf[31] = '\0';
-    setReturnS32(ctx, 0);
-}
+    void scePadInit2(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        scePadInit(rdram, ctx, runtime);
+    }
+
+    void scePadPortClose(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        (void)runtime;
+        std::lock_guard<std::mutex> lock(g_padStateMutex);
+        PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
+                                                           static_cast<int>(getRegU32(ctx, 5)));
+        if (!portState)
+        {
+            setReturnS32(ctx, 0);
+            return;
+        }
+
+        portState->open = false;
+        portState->pressureEnabled = false;
+        portState->reqState = 0u;
+        setReturnS32(ctx, 1);
+    }
+
+    void scePadPortOpen(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)runtime;
+        const uint32_t dmaAddr = getRegU32(ctx, 6);
+        uint8_t *dmaStr = getMemPtr(rdram, dmaAddr);
+        std::lock_guard<std::mutex> lock(g_padStateMutex);
+        PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
+                                                           static_cast<int>(getRegU32(ctx, 5)));
+        if (!portState || (dmaAddr != 0u && !dmaStr))
+        {
+            setReturnS32(ctx, 0);
+            return;
+        }
+
+        portState->open = true;
+        portState->analogMode = true;
+        portState->pressureEnabled = false;
+        portState->buttonMask = 0xFFFFu;
+        portState->dmaAddr = dmaAddr;
+        portState->reqState = 0u;
+        if (dmaStr)
+        {
+            std::memset(dmaStr, 0, 32);
+        }
+        setReturnS32(ctx, 1);
+    }
+
+    void scePadRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const int port = static_cast<int>(getRegU32(ctx, 4));
+        const int slot = static_cast<int>(getRegU32(ctx, 5));
+        const uint32_t dataAddr = getRegU32(ctx, 6);
+        uint8_t *data = getMemPtr(rdram, dataAddr);
+        if (!data)
+        {
+            setReturnS32(ctx, 0);
+            return;
+        }
+
+        if (!readPadPortData(port, slot, runtime, data))
+        {
+            setReturnS32(ctx, 0);
+            return;
+        }
+
+        if (g_padReadLogCount < 48)
+        {
+            const int gamepad = findFirstGamepad();
+            const bool gamepadStartPressed =
+                (gamepad >= 0) && IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_MIDDLE_RIGHT);
+            const bool startPressed = (data[2] != 0xFFu || data[3] != 0xFFu ||
+                                       IsKeyDown(KEY_ENTER) || gamepadStartPressed);
+            if (startPressed)
+            {
+                const uint32_t guestButtons =
+                    (static_cast<uint32_t>(static_cast<uint8_t>(data[2] ^ 0xFFu)) << 8) |
+                    static_cast<uint32_t>(static_cast<uint8_t>(data[3] ^ 0xFFu));
+                std::printf("[padread] port=%d slot=%d data2=0x%02x data3=0x%02x guestButtons=0x%04x enter=%d gamepadStart=%d\n",
+                            port, slot, data[2], data[3], guestButtons,
+                            IsKeyDown(KEY_ENTER) ? 1 : 0, gamepadStartPressed ? 1 : 0);
+                ++g_padReadLogCount;
+            }
+        }
+
+        setReturnS32(ctx, 1);
+    }
+
+    void scePadReqIntToStr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)runtime;
+        const uint32_t state = getRegU32(ctx, 4);
+        const uint32_t strAddr = getRegU32(ctx, 5);
+        char *buf = reinterpret_cast<char *>(getMemPtr(rdram, strAddr));
+        if (!buf)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        const char *text = (state == 0) ? "COMPLETE" : "BUSY";
+        std::strncpy(buf, text, 31);
+        buf[31] = '\0';
+        setReturnS32(ctx, 0);
+    }
+
+    void scePadSetActAlign(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        (void)runtime;
+        setReturnS32(ctx, 1);
+    }
+
+    void scePadSetActDirect(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        (void)runtime;
+        setReturnS32(ctx, 1);
+    }
+
+    void scePadSetButtonInfo(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        (void)runtime;
+        std::lock_guard<std::mutex> lock(g_padStateMutex);
+        PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
+                                                           static_cast<int>(getRegU32(ctx, 5)));
+        if (portState && portState->open)
+        {
+            portState->buttonMask = static_cast<uint16_t>(getRegU32(ctx, 6));
+            portState->reqState = 0u;
+        }
+        setReturnS32(ctx, 1);
+    }
+
+    void scePadSetMainMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        (void)runtime;
+        std::lock_guard<std::mutex> lock(g_padStateMutex);
+        PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
+                                                           static_cast<int>(getRegU32(ctx, 5)));
+        if (!portState || !portState->open)
+        {
+            setReturnS32(ctx, 0);
+            return;
+        }
+
+        portState->analogMode = (getRegU32(ctx, 6) != 0u);
+        portState->reqState = 0u;
+        setReturnS32(ctx, 1);
+    }
+
+    void scePadSetReqState(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        (void)runtime;
+        std::lock_guard<std::mutex> lock(g_padStateMutex);
+        PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
+                                                           static_cast<int>(getRegU32(ctx, 5)));
+        if (portState && portState->open)
+        {
+            portState->reqState = static_cast<uint32_t>(getRegU32(ctx, 6) ? 1u : 0u);
+        }
+        setReturnS32(ctx, 1);
+    }
+
+    void scePadSetVrefParam(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        (void)runtime;
+        setReturnS32(ctx, 1);
+    }
+
+    void scePadSetWarningLevel(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        (void)runtime;
+        setReturnS32(ctx, 0);
+    }
+
+    void scePadStateIntToStr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)runtime;
+        const uint32_t state = getRegU32(ctx, 4);
+        const uint32_t strAddr = getRegU32(ctx, 5);
+        char *buf = reinterpret_cast<char *>(getMemPtr(rdram, strAddr));
+        if (!buf)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        const char *text = "UNKNOWN";
+        if (state == 6)
+        {
+            text = "STABLE";
+        }
+        else if (state == 1)
+        {
+            text = "FINDPAD";
+        }
+        else if (state == 0)
+        {
+            text = "DISCONNECTED";
+        }
+
+        std::strncpy(buf, text, 31);
+        buf[31] = '\0';
+        setReturnS32(ctx, 0);
+    }
 
     void setPadOverrideState(uint16_t buttons, uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry)
     {
@@ -749,7 +749,6 @@ void scePadStateIntToStr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         g_padOverrideState.rx = rx;
         g_padOverrideState.ry = ry;
     }
-
 
     void clearPadOverrideState()
     {

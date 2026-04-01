@@ -6,53 +6,76 @@
 
 namespace
 {
-std::vector<uint8_t> buildWavFromPcm(const int16_t *pcm, size_t sampleCount, uint32_t sampleRate)
-{
-    const uint32_t dataSize = static_cast<uint32_t>(sampleCount * 2);
-    const uint32_t fileSize = 36 + dataSize;
-    std::vector<uint8_t> wav(8 + fileSize);
+    std::vector<uint8_t> buildWavFromPcm(const int16_t *pcm, size_t sampleCount, uint32_t sampleRate)
+    {
+        const uint32_t dataSize = static_cast<uint32_t>(sampleCount * 2);
+        const uint32_t fileSize = 36 + dataSize;
+        std::vector<uint8_t> wav(8 + fileSize);
 
-    uint8_t *p = wav.data();
-    p[0] = 'R'; p[1] = 'I'; p[2] = 'F'; p[3] = 'F';
-    p[4] = static_cast<uint8_t>(fileSize);
-    p[5] = static_cast<uint8_t>(fileSize >> 8);
-    p[6] = static_cast<uint8_t>(fileSize >> 16);
-    p[7] = static_cast<uint8_t>(fileSize >> 24);
-    p[8] = 'W'; p[9] = 'A'; p[10] = 'V'; p[11] = 'E';
-    p[12] = 'f'; p[13] = 'm'; p[14] = 't'; p[15] = ' ';
-    p[16] = 16; p[17] = 0; p[18] = 0; p[19] = 0;
-    p[20] = 1; p[21] = 0;
-    p[22] = 1; p[23] = 0;
-    p[24] = static_cast<uint8_t>(sampleRate);
-    p[25] = static_cast<uint8_t>(sampleRate >> 8);
-    p[26] = static_cast<uint8_t>(sampleRate >> 16);
-    p[27] = static_cast<uint8_t>(sampleRate >> 24);
-    const uint32_t byteRate = sampleRate * 2;
-    p[28] = static_cast<uint8_t>(byteRate);
-    p[29] = static_cast<uint8_t>(byteRate >> 8);
-    p[30] = static_cast<uint8_t>(byteRate >> 16);
-    p[31] = static_cast<uint8_t>(byteRate >> 24);
-    p[32] = 2; p[33] = 0;
-    p[34] = 16; p[35] = 0;
-    p[36] = 'd'; p[37] = 'a'; p[38] = 't'; p[39] = 'a';
-    p[40] = static_cast<uint8_t>(dataSize);
-    p[41] = static_cast<uint8_t>(dataSize >> 8);
-    p[42] = static_cast<uint8_t>(dataSize >> 16);
-    p[43] = static_cast<uint8_t>(dataSize >> 24);
-    std::memcpy(p + 44, pcm, dataSize);
-    return wav;
-}
+        uint8_t *p = wav.data();
+        p[0] = 'R';
+        p[1] = 'I';
+        p[2] = 'F';
+        p[3] = 'F';
+        p[4] = static_cast<uint8_t>(fileSize);
+        p[5] = static_cast<uint8_t>(fileSize >> 8);
+        p[6] = static_cast<uint8_t>(fileSize >> 16);
+        p[7] = static_cast<uint8_t>(fileSize >> 24);
+        p[8] = 'W';
+        p[9] = 'A';
+        p[10] = 'V';
+        p[11] = 'E';
+        p[12] = 'f';
+        p[13] = 'm';
+        p[14] = 't';
+        p[15] = ' ';
+        p[16] = 16;
+        p[17] = 0;
+        p[18] = 0;
+        p[19] = 0;
+        p[20] = 1;
+        p[21] = 0;
+        p[22] = 1;
+        p[23] = 0;
+        p[24] = static_cast<uint8_t>(sampleRate);
+        p[25] = static_cast<uint8_t>(sampleRate >> 8);
+        p[26] = static_cast<uint8_t>(sampleRate >> 16);
+        p[27] = static_cast<uint8_t>(sampleRate >> 24);
+        const uint32_t byteRate = sampleRate * 2;
+        p[28] = static_cast<uint8_t>(byteRate);
+        p[29] = static_cast<uint8_t>(byteRate >> 8);
+        p[30] = static_cast<uint8_t>(byteRate >> 16);
+        p[31] = static_cast<uint8_t>(byteRate >> 24);
+        p[32] = 2;
+        p[33] = 0;
+        p[34] = 16;
+        p[35] = 0;
+        p[36] = 'd';
+        p[37] = 'a';
+        p[38] = 't';
+        p[39] = 'a';
+        p[40] = static_cast<uint8_t>(dataSize);
+        p[41] = static_cast<uint8_t>(dataSize >> 8);
+        p[42] = static_cast<uint8_t>(dataSize >> 16);
+        p[43] = static_cast<uint8_t>(dataSize >> 24);
+        std::memcpy(p + 44, pcm, dataSize);
+        return wav;
+    }
 }
 
 namespace ps2_vag
 {
-bool decode(const uint8_t *data, uint32_t sizeBytes,
-            std::vector<int16_t> &outPcm, uint32_t &outSampleRate);
+    bool decode(const uint8_t *data, uint32_t sizeBytes,
+                std::vector<int16_t> &outPcm, uint32_t &outSampleRate);
 }
 
 struct PS2AudioBackend::Impl
 {
-    struct TrackedSound { Sound snd; uint32_t sampleKey; };
+    struct TrackedSound
+    {
+        Sound snd;
+        uint32_t sampleKey;
+    };
     std::vector<TrackedSound> activeSounds;
 };
 
@@ -117,7 +140,7 @@ void PS2AudioBackend::onVagTransferFromBuffer(const uint8_t *data, uint32_t size
 
 namespace
 {
-constexpr uint32_t LIBSD_CMD_SET_VOICE = 0x8010u;
+    constexpr uint32_t LIBSD_CMD_SET_VOICE = 0x8010u;
 }
 
 void PS2AudioBackend::onSoundCommand(uint32_t sid, uint32_t rpcNum,

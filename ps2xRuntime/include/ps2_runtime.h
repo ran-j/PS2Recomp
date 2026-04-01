@@ -447,7 +447,7 @@ public:
     ~PS2Runtime();
 
     bool initialize(const char *title = "PS2 Game");
-    bool ensureCoreSubsystemsInitialized();
+    bool syncCoreSubsystems();
     bool loadELF(const std::string &elfPath);
     void run();
 

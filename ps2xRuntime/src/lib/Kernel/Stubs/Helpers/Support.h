@@ -141,7 +141,7 @@ namespace
         const std::string normalized = normalizeCdPathNoPrefix(relative.generic_string());
         if (normalized.empty())
         {
-            return {};
+            throw std::runtime_error("cdLoosePathKeyFromRelative: normalized path is empty");
         }
 
         const std::filesystem::path relPath(normalized);
@@ -1768,7 +1768,7 @@ namespace
 
     static void applyGsDispEnv(PS2Runtime *runtime, const GsDispEnvMem &env)
     {
-        if (!runtime || !runtime->ensureCoreSubsystemsInitialized())
+        if (!runtime || !runtime->syncCoreSubsystems())
             return;
         auto &regs = runtime->memory().gs();
         regs.pmode = env.pmode;
@@ -1782,7 +1782,7 @@ namespace
 
     static void applyGsRegPairs(PS2Runtime *runtime, const GsRegPairMem *pairs, size_t pairCount)
     {
-        if (!runtime || !pairs || !runtime->ensureCoreSubsystemsInitialized())
+        if (!runtime || !pairs || !runtime->syncCoreSubsystems())
             return;
         for (size_t i = 0; i < pairCount; ++i)
         {

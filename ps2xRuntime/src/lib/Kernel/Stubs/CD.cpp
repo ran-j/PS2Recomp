@@ -3,7 +3,7 @@
 
 namespace ps2_stubs
 {
-    void sceCdRead(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const uint32_t a0 = getRegU32(ctx, 4); // usually lbn
         const uint32_t a1 = getRegU32(ctx, 5); // usually sector count
@@ -14,35 +14,35 @@ namespace ps2_stubs
             uint32_t lbn = 0;
             uint32_t sectors = 0;
             uint32_t buf = 0;
-            const char* tag = "";
+            const char *tag = "";
         };
 
         auto clampReadBytes = [](uint32_t sectors, uint32_t offset) -> size_t
+        {
+            const uint64_t requested = static_cast<uint64_t>(sectors) * static_cast<uint64_t>(kCdSectorSize);
+            if (requested == 0)
             {
-                const uint64_t requested = static_cast<uint64_t>(sectors) * static_cast<uint64_t>(kCdSectorSize);
-                if (requested == 0)
-                {
-                    return 0;
-                }
+                return 0;
+            }
 
-                const uint64_t maxBytes = static_cast<uint64_t>(PS2_RAM_SIZE - offset);
-                const uint64_t clamped = std::min<uint64_t>(requested, maxBytes);
-                return static_cast<size_t>(clamped);
-            };
+            const uint64_t maxBytes = static_cast<uint64_t>(PS2_RAM_SIZE - offset);
+            const uint64_t clamped = std::min<uint64_t>(requested, maxBytes);
+            return static_cast<size_t>(clamped);
+        };
 
-        auto tryRead = [&](const CdReadArgs& args) -> bool
+        auto tryRead = [&](const CdReadArgs &args) -> bool
+        {
+            const uint32_t offset = args.buf & PS2_RAM_MASK;
+            const size_t bytes = clampReadBytes(args.sectors, offset);
+            if (bytes == 0)
             {
-                const uint32_t offset = args.buf & PS2_RAM_MASK;
-                const size_t bytes = clampReadBytes(args.sectors, offset);
-                if (bytes == 0)
-                {
-                    return true;
-                }
+                return true;
+            }
 
-                return readCdSectors(args.lbn, args.sectors, rdram + offset, bytes);
-            };
+            return readCdSectors(args.lbn, args.sectors, rdram + offset, bytes);
+        };
 
-        CdReadArgs selected{ a0, a1, a2, "a0/a1/a2" };
+        CdReadArgs selected{a0, a1, a2, "a0/a1/a2"};
         bool ok = tryRead(selected);
 
         if (!ok)
@@ -57,9 +57,9 @@ namespace ps2_stubs
                     CdReadArgs{a0, a2, a1, "a0/a2/a1"},
                     CdReadArgs{a1, a0, a2, "a1/a0/a2"},
                     CdReadArgs{a1, a2, a0, "a1/a2/a0"},
-                    CdReadArgs{a2, a0, a1, "a2/a0/a1"} };
+                    CdReadArgs{a2, a0, a1, "a2/a0/a1"}};
 
-                for (const CdReadArgs& candidate : alternatives)
+                for (const CdReadArgs &candidate : alternatives)
                 {
                     if (candidate.sectors > kMaxReasonableSectors)
                     {
@@ -76,11 +76,11 @@ namespace ps2_stubs
                         if (recoverLogCount < 16)
                         {
                             RUNTIME_LOG("[sceCdRead] recovered with alternate args " << candidate.tag
-                                << " (pc=0x" << std::hex << ctx->pc
-                                << " ra=0x" << getRegU32(ctx, 31)
-                                << " a0=0x" << a0
-                                << " a1=0x" << a1
-                                << " a2=0x" << a2 << std::dec << ")" << std::endl);
+                                                                                     << " (pc=0x" << std::hex << ctx->pc
+                                                                                     << " ra=0x" << getRegU32(ctx, 31)
+                                                                                     << " a0=0x" << a0
+                                                                                     << " a1=0x" << a1
+                                                                                     << " a2=0x" << a2 << std::dec << ")" << std::endl);
                             ++recoverLogCount;
                         }
                         selected = candidate;
@@ -103,10 +103,10 @@ namespace ps2_stubs
                 if (unresolvedLogCount < 32)
                 {
                     std::cerr << "[sceCdRead] unresolved request pc=0x" << std::hex << ctx->pc
-                        << " ra=0x" << getRegU32(ctx, 31)
-                        << " a0=0x" << a0
-                        << " a1=0x" << a1
-                        << " a2=0x" << a2 << std::dec << std::endl;
+                              << " ra=0x" << getRegU32(ctx, 31)
+                              << " a0=0x" << a0
+                              << " a1=0x" << a1
+                              << " a2=0x" << a2 << std::dec << std::endl;
                     ++unresolvedLogCount;
                 }
             }
@@ -122,99 +122,94 @@ namespace ps2_stubs
         setReturnS32(ctx, 0);
     }
 
-
-    void sceCdSync(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdSync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 0); // 0 = completed/not busy
     }
 
-
-    void sceCdGetError(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdGetError(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, g_lastCdError);
     }
 
-
-    void sceCdRI(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdRI(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         TODO_NAMED("sceCdRI", rdram, ctx, runtime);
     }
 
-
-    void sceCdRM(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdRM(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         TODO_NAMED("sceCdRM", rdram, ctx, runtime);
     }
 
-
-    void sceCdApplyNCmd(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdApplyNCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 1);
     }
 
-    void sceCdBreak(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdBreak(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 1);
     }
 
-    void sceCdCallback(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdCallback(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 0);
     }
 
-    void sceCdChangeThreadPriority(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdChangeThreadPriority(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 1);
     }
 
-    void sceCdDelayThread(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdDelayThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 0);
     }
 
-    void sceCdDiskReady(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdDiskReady(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 2);
     }
 
-    void sceCdGetDiskType(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdGetDiskType(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         // SCECdPS2DVD
         setReturnS32(ctx, 0x14);
     }
 
-    void sceCdGetReadPos(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdGetReadPos(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         setReturnU32(ctx, g_cdStreamingLbn);
     }
 
-    void sceCdGetToc(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdGetToc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t tocAddr = getRegU32(ctx, 4);
-        if (uint8_t* toc = getMemPtr(rdram, tocAddr))
+        if (uint8_t *toc = getMemPtr(rdram, tocAddr))
         {
             std::memset(toc, 0, 1024);
         }
         setReturnS32(ctx, 1);
     }
 
-    void sceCdInit(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         g_cdInitialized = true;
         g_lastCdError = 0;
         setReturnS32(ctx, 1);
     }
 
-    void sceCdInitEeCB(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdInitEeCB(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 1);
     }
 
-    void sceCdIntToPos(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdIntToPos(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t lsn = getRegU32(ctx, 4);
         uint32_t posAddr = getRegU32(ctx, 5);
-        uint8_t* pos = getMemPtr(rdram, posAddr);
+        uint8_t *pos = getMemPtr(rdram, posAddr);
         if (!pos)
         {
             setReturnS32(ctx, 0);
@@ -234,26 +229,26 @@ namespace ps2_stubs
         setReturnS32(ctx, 1);
     }
 
-    void sceCdMmode(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdMmode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         g_cdMode = getRegU32(ctx, 4);
         setReturnS32(ctx, 1);
     }
 
-    void sceCdNcmdDiskReady(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdNcmdDiskReady(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 2);
     }
 
-    void sceCdPause(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdPause(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 1);
     }
 
-    void sceCdPosToInt(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdPosToInt(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t posAddr = getRegU32(ctx, 4);
-        const uint8_t* pos = getConstMemPtr(rdram, posAddr);
+        const uint8_t *pos = getConstMemPtr(rdram, posAddr);
         if (!pos)
         {
             setReturnS32(ctx, -1);
@@ -268,14 +263,14 @@ namespace ps2_stubs
         setReturnS32(ctx, lsn);
     }
 
-    void sceCdReadChain(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdReadChain(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t chainAddr = getRegU32(ctx, 4);
         bool ok = true;
 
         for (int i = 0; i < 64; ++i)
         {
-            uint32_t* entry = reinterpret_cast<uint32_t*>(getMemPtr(rdram, chainAddr + (i * 16)));
+            uint32_t *entry = reinterpret_cast<uint32_t *>(getMemPtr(rdram, chainAddr + (i * 16)));
             if (!entry)
             {
                 ok = false;
@@ -310,10 +305,10 @@ namespace ps2_stubs
         setReturnS32(ctx, ok ? 1 : 0);
     }
 
-    void sceCdReadClock(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdReadClock(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t clockAddr = getRegU32(ctx, 4);
-        uint8_t* clockData = getMemPtr(rdram, clockAddr);
+        uint8_t *clockData = getMemPtr(rdram, clockAddr);
         if (!clockData)
         {
             setReturnS32(ctx, 0);
@@ -340,12 +335,12 @@ namespace ps2_stubs
         setReturnS32(ctx, 1);
     }
 
-    void sceCdReadIOPm(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdReadIOPm(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         sceCdRead(rdram, ctx, runtime);
     }
 
-    void sceCdSearchFile(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdSearchFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t fileAddr = getRegU32(ctx, 4);
         uint32_t pathAddr = getRegU32(ctx, 5);
@@ -357,11 +352,11 @@ namespace ps2_stubs
         if (shouldTrace)
         {
             RUNTIME_LOG("[sceCdSearchFile] pc=0x" << std::hex << ctx->pc
-                << " ra=0x" << callerRa
-                << " file=0x" << fileAddr
-                << " pathAddr=0x" << pathAddr
-                << " path=\"" << sanitizeForLog(path) << "\""
-                << std::dec << std::endl);
+                                                  << " ra=0x" << callerRa
+                                                  << " file=0x" << fileAddr
+                                                  << " pathAddr=0x" << pathAddr
+                                                  << " path=\"" << sanitizeForLog(path) << "\""
+                                                  << std::dec << std::endl);
         }
         ++traceCount;
 
@@ -378,8 +373,8 @@ namespace ps2_stubs
                     preview << (i == 0 ? "" : " ") << static_cast<uint32_t>(byte);
                 }
                 std::cerr << "[sceCdSearchFile] empty path at 0x" << std::hex << pathAddr
-                    << " preview=" << preview.str()
-                    << " ra=0x" << callerRa << std::dec << std::endl;
+                          << " preview=" << preview.str()
+                          << " ra=0x" << callerRa << std::dec << std::endl;
             }
             ++emptyPathCount;
             g_lastCdError = -1;
@@ -393,8 +388,8 @@ namespace ps2_stubs
             if (emptyNormalizedCount < 64u || (emptyNormalizedCount % 512u) == 0u)
             {
                 std::cerr << "sceCdSearchFile failed: " << sanitizeForLog(path)
-                    << " (normalized path is empty, root: " << getCdRootPath().string() << ")"
-                    << std::endl;
+                          << " (normalized path is empty, root: " << getCdRootPath().string() << ")"
+                          << std::endl;
             }
             ++emptyNormalizedCount;
             g_lastCdError = -1;
@@ -424,8 +419,8 @@ namespace ps2_stubs
             if (samePathFailCount <= 16u || (samePathFailCount % 512u) == 0u)
             {
                 std::cerr << "sceCdSearchFile failed: " << sanitizeForLog(path)
-                    << " (root: " << getCdRootPath().string()
-                    << ", repeat=" << samePathFailCount << ")" << std::endl;
+                          << " (root: " << getCdRootPath().string()
+                          << ", repeat=" << samePathFailCount << ")" << std::endl;
             }
             setReturnS32(ctx, 0);
             return;
@@ -442,46 +437,46 @@ namespace ps2_stubs
         if (shouldTrace)
         {
             RUNTIME_LOG("[sceCdSearchFile:ok] path=\"" << sanitizeForLog(path)
-                << "\" lsn=0x" << std::hex << resolvedEntry.baseLbn
-                << " size=0x" << resolvedEntry.sizeBytes
-                << " sectors=0x" << resolvedEntry.sectors
-                << std::dec << std::endl);
+                                                       << "\" lsn=0x" << std::hex << resolvedEntry.baseLbn
+                                                       << " size=0x" << resolvedEntry.sizeBytes
+                                                       << " sectors=0x" << resolvedEntry.sectors
+                                                       << std::dec << std::endl);
         }
         setReturnS32(ctx, 1);
     }
 
-    void sceCdSeek(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdSeek(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         g_cdStreamingLbn = getRegU32(ctx, 4);
         setReturnS32(ctx, 1);
     }
 
-    void sceCdStandby(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdStandby(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 1);
     }
 
-    void sceCdStatus(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdStatus(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, g_cdInitialized ? 6 : 0);
     }
 
-    void sceCdStInit(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdStInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 1);
     }
 
-    void sceCdStop(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdStop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 1);
     }
 
-    void sceCdStPause(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdStPause(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 1);
     }
 
-    void sceCdStRead(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdStRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t sectors = getRegU32(ctx, 4);
         uint32_t buf = getRegU32(ctx, 5);
@@ -501,7 +496,7 @@ namespace ps2_stubs
             g_cdStreamingLbn += sectors;
         }
 
-        if (int32_t* err = reinterpret_cast<int32_t*>(getMemPtr(rdram, errAddr)); err)
+        if (int32_t *err = reinterpret_cast<int32_t *>(getMemPtr(rdram, errAddr)); err)
         {
             *err = ok ? 0 : g_lastCdError;
         }
@@ -509,53 +504,53 @@ namespace ps2_stubs
         setReturnS32(ctx, ok ? static_cast<int32_t>(sectors) : 0);
     }
 
-    void sceCdStream(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdStream(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 1);
     }
 
-    void sceCdStResume(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdStResume(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 1);
     }
 
-    void sceCdStSeek(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
-    {
-        g_cdStreamingLbn = getRegU32(ctx, 4);
-        setReturnS32(ctx, 1);
-    }
-
-    void sceCdStSeekF(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdStSeek(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         g_cdStreamingLbn = getRegU32(ctx, 4);
         setReturnS32(ctx, 1);
     }
 
-    void sceCdStStart(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdStSeekF(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         g_cdStreamingLbn = getRegU32(ctx, 4);
         setReturnS32(ctx, 1);
     }
 
-    void sceCdStStat(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdStStart(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_cdStreamingLbn = getRegU32(ctx, 4);
+        setReturnS32(ctx, 1);
+    }
+
+    void sceCdStStat(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 0);
     }
 
-    void sceCdStStop(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdStStop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 1);
     }
 
-    void sceCdSyncS(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdSyncS(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 0);
     }
 
-    void sceCdTrayReq(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    void sceCdTrayReq(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t statusPtr = getRegU32(ctx, 5);
-        if (uint32_t* status = reinterpret_cast<uint32_t*>(getMemPtr(rdram, statusPtr)); status)
+        if (uint32_t *status = reinterpret_cast<uint32_t *>(getMemPtr(rdram, statusPtr)); status)
         {
             *status = 0;
         }
