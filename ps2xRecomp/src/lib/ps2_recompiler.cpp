@@ -241,16 +241,60 @@ namespace ps2recomp
             size_t passCount = 0;
         };
 
-        struct StaticEntryTarget
+        bool isEntryFunctionName(const std::string &name)
         {
-            uint32_t target = 0u;
-            bool isCall = false;
-        };
+            return name.rfind("entry_", 0) == 0;
+        }
+
+        void removeStaleGeneratedOutputs(const fs::path &outputDir)
+        {
+            if (!fs::exists(outputDir) || !fs::is_directory(outputDir))
+            {
+                return;
+            }
+
+            for (const auto &entry : fs::directory_iterator(outputDir))
+            {
+                if (!entry.is_regular_file())
+                {
+                    continue;
+                }
+
+                const fs::path &path = entry.path();
+                const std::string filename = path.filename().string();
+                const std::string extension = path.extension().string();
+
+                const bool isPerFunctionSource =
+                    extension == ".cpp" &&
+                    (filename.find("_0x") != std::string::npos ||
+                     filename.rfind("entry_", 0) == 0);
+                const bool isAggregateSource =
+                    filename == "ps2_recompiled_functions.cpp" ||
+                    filename == "register_functions.cpp";
+                const bool isGeneratedHeader =
+                    filename == "ps2_recompiled_functions.h" ||
+                    filename == "ps2_recompiled_stubs.h";
+
+                if (!isPerFunctionSource && !isAggregateSource && !isGeneratedHeader)
+                {
+                    continue;
+                }
+
+                std::error_code removeError;
+                fs::remove(path, removeError);
+                if (removeError)
+                {
+                    std::cerr << "Warning: failed to remove stale generated file "
+                              << path << ": " << removeError.message() << std::endl;
+                }
+            }
+        }
 
         EntryDiscoveryStats discoverAdditionalEntryPointsImpl(
             std::vector<Function> &functions,
             std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions,
             const std::vector<Section> &sections,
+            CodeGenerator *codeGenerator,
             const std::function<bool(Function &)> &decodeExternalFunction)
         {
             std::unordered_set<uint32_t> existingStarts;
@@ -273,25 +317,6 @@ namespace ps2recomp
                     }
                 }
                 return false;
-            };
-
-            auto getStaticEntryTarget = [](const Instruction &inst) -> std::optional<StaticEntryTarget>
-            {
-                if (inst.opcode == OPCODE_J || inst.opcode == OPCODE_JAL)
-                {
-                    StaticEntryTarget target{};
-                    target.target = decodeAbsoluteJumpTarget(inst.address, inst.target);
-                    target.isCall = (inst.opcode == OPCODE_JAL);
-                    return target;
-                }
-
-                if (inst.opcode == OPCODE_SPECIAL &&
-                    (inst.function == SPECIAL_JR || inst.function == SPECIAL_JALR))
-                {
-                    return std::nullopt;
-                }
-
-                return std::nullopt;
             };
 
             auto isSimpleReturnThunkStart = [](const Instruction &inst) -> bool
@@ -355,9 +380,38 @@ namespace ps2recomp
                 std::vector<Function> newEntries;
                 std::unordered_set<uint32_t> pendingStarts;
 
+                auto queuePendingEntry = [&](uint32_t target)
+                {
+                    if (!isExecutableAddress(target))
+                    {
+                        return;
+                    }
+
+                    if (existingStarts.contains(target) || pendingStarts.contains(target))
+                    {
+                        return;
+                    }
+
+                    PendingEntry pending{};
+                    pending.target = target;
+                    if (const Function *containingFunction = findContainingFunction(target))
+                    {
+                        pending.containingStart = containingFunction->start;
+                        pending.containingEnd = containingFunction->end;
+                    }
+
+                    pendingEntries.push_back(pending);
+                    pendingStarts.insert(target);
+                };
+
                 for (const auto &function : functions)
                 {
                     if (!function.isRecompiled || function.isStub || function.isSkipped)
+                    {
+                        continue;
+                    }
+
+                    if (isEntryFunctionName(function.name))
                     {
                         continue;
                     }
@@ -369,60 +423,26 @@ namespace ps2recomp
                     }
 
                     const auto &instructions = decodedIt->second;
-
-                    for (const auto &inst : instructions)
+                    CodeGenerator::AnalysisResult analysisResult{};
+                    if (codeGenerator)
                     {
-                        auto targetOpt = getStaticEntryTarget(inst);
-                        if (!targetOpt.has_value())
-                        {
-                            continue;
-                        }
+                        analysisResult = codeGenerator->collectInternalBranchTargets(
+                            function, instructions, &functions);
+                    }
+                    else
+                    {
+                        analysisResult.resumeEntryPoints.clear();
+                        analysisResult.externalEntryPoints.clear();
+                    }
 
-                        const StaticEntryTarget staticTarget = targetOpt.value();
-                        const uint32_t target = staticTarget.target;
+                    for (uint32_t target : analysisResult.externalEntryPoints)
+                    {
+                        queuePendingEntry(target);
+                    }
 
-                        if ((target & 0x3) != 0 || !isExecutableAddress(target))
-                        {
-                            continue;
-                        }
-
-                        if (existingStarts.contains(target) || pendingStarts.contains(target))
-                        {
-                            continue;
-                        }
-
-                        const bool targetInCurrentFunction = std::any_of(
-                            instructions.begin(), instructions.end(),
-                            [&](const Instruction &candidate)
-                            { return candidate.address == target; });
-                        if (targetInCurrentFunction && !staticTarget.isCall)
-                        {
-                            // jumps with the current decoded function remain labels/gotos.
-                            continue;
-                        }
-
-                        const Function *containingFunction = findContainingFunction(target);
-                        if (targetInCurrentFunction)
-                        {
-                            PendingEntry pending{};
-                            pending.target = target;
-                            pending.containingStart = function.start;
-                            pending.containingEnd = function.end;
-                            pendingEntries.push_back(pending);
-                            pendingStarts.insert(target);
-                            continue;
-                        }
-
-                        PendingEntry pending{};
-                        pending.target = target;
-                        if (containingFunction)
-                        {
-                            pending.containingStart = containingFunction->start;
-                            pending.containingEnd = containingFunction->end;
-                        }
-
-                        pendingEntries.push_back(pending);
-                        pendingStarts.insert(target);
+                    for (uint32_t target : analysisResult.resumeEntryPoints)
+                    {
+                        queuePendingEntry(target);
                     }
                 }
 
@@ -553,12 +573,6 @@ namespace ps2recomp
 
             return stats;
         }
-
-        bool isEntryFunctionName(const std::string &name)
-        {
-            return name.rfind("entry_", 0) == 0;
-        }
-
         size_t resliceEntryFunctionsImpl(
             std::vector<Function> &functions,
             std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions)
@@ -1078,6 +1092,7 @@ namespace ps2recomp
                 }
             }
 
+            removeStaleGeneratedOutputs(fs::path(m_config.outputPath));
             generateFunctionHeader();
 
             if (m_config.singleFileOutput)
@@ -1293,25 +1308,124 @@ namespace ps2recomp
 
     void PS2Recompiler::discoverAdditionalEntryPoints()
     {
-        const EntryDiscoveryStats stats = discoverAdditionalEntryPointsImpl(
-            m_functions,
-            m_decodedFunctions,
-            m_sections,
-            [&](Function &entryFunction)
-            { return decodeFunction(entryFunction); });
-
-        if (stats.discoveredCount > 0)
+        m_resumeEntryTargetsByOwner.clear();
+        if (!m_codeGenerator)
         {
-            std::cout << "Discovered " << stats.discoveredCount
-                      << " additional entry point(s) inside existing functions across "
-                      << stats.passCount << " pass(es)." << std::endl;
+            return;
         }
 
-        const size_t reslicedCount = resliceEntryFunctionsImpl(m_functions, m_decodedFunctions);
-        if (reslicedCount > 0)
+        auto findContainingFunction = [&](uint32_t address) -> const Function *
         {
-            std::cout << "Resliced " << reslicedCount
-                      << " entry function(s) after discovery." << std::endl;
+            const Function *best = nullptr;
+            for (const auto &function : m_functions)
+            {
+                if (!function.isRecompiled || function.isStub || function.isSkipped)
+                {
+                    continue;
+                }
+
+                if (isEntryFunctionName(function.name))
+                {
+                    continue;
+                }
+
+                if (address < function.start || address >= function.end)
+                {
+                    continue;
+                }
+
+                auto decodedIt = m_decodedFunctions.find(function.start);
+                if (decodedIt == m_decodedFunctions.end())
+                {
+                    continue;
+                }
+
+                const auto &decoded = decodedIt->second;
+                const bool hasAddress = std::any_of(decoded.begin(), decoded.end(),
+                                                    [&](const Instruction &candidate)
+                                                    { return candidate.address == address; });
+                if (!hasAddress)
+                {
+                    continue;
+                }
+
+                if (!best || function.start > best->start)
+                {
+                    best = &function;
+                }
+            }
+            return best;
+        };
+
+        for (const auto &function : m_functions)
+        {
+            if (!function.isRecompiled || function.isStub || function.isSkipped)
+            {
+                continue;
+            }
+
+            if (isEntryFunctionName(function.name))
+            {
+                continue;
+            }
+
+            auto decodedIt = m_decodedFunctions.find(function.start);
+            if (decodedIt == m_decodedFunctions.end())
+            {
+                continue;
+            }
+
+            const auto &instructions = decodedIt->second;
+            CodeGenerator::AnalysisResult analysisResult =
+                m_codeGenerator->collectInternalBranchTargets(function, instructions, &m_functions);
+
+            auto &ownerTargets = m_resumeEntryTargetsByOwner[function.start];
+            ownerTargets.insert(ownerTargets.end(),
+                                analysisResult.resumeEntryPoints.begin(),
+                                analysisResult.resumeEntryPoints.end());
+
+            for (uint32_t target : analysisResult.externalEntryPoints)
+            {
+                const Function *owner = findContainingFunction(target);
+                if (!owner)
+                {
+                    continue;
+                }
+
+                if (owner->start == target)
+                {
+                    continue;
+                }
+
+                auto &targets = m_resumeEntryTargetsByOwner[owner->start];
+                targets.push_back(target);
+            }
+        }
+
+        size_t totalTargets = 0u;
+        for (auto it = m_resumeEntryTargetsByOwner.begin(); it != m_resumeEntryTargetsByOwner.end();)
+        {
+            auto &targets = it->second;
+            std::sort(targets.begin(), targets.end());
+            targets.erase(std::unique(targets.begin(), targets.end()), targets.end());
+            if (targets.empty())
+            {
+                it = m_resumeEntryTargetsByOwner.erase(it);
+                continue;
+            }
+
+            totalTargets += targets.size();
+            ++it;
+        }
+
+        m_codeGenerator->setResumeEntryTargets(m_resumeEntryTargetsByOwner);
+
+        if (totalTargets > 0u)
+        {
+            std::cout << "Collected " << totalTargets
+                      << " resumable entry point(s) across "
+                      << m_resumeEntryTargetsByOwner.size()
+                      << " owner function(s)." << std::endl;
         }
     }
 
@@ -1542,10 +1656,12 @@ namespace ps2recomp
         std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions,
         const std::vector<Section> &sections)
     {
+        CodeGenerator codeGenerator({}, sections);
         const EntryDiscoveryStats stats = discoverAdditionalEntryPointsImpl(
             functions,
             decodedFunctions,
             sections,
+            &codeGenerator,
             [](Function &)
             { return false; });
         return stats.discoveredCount;

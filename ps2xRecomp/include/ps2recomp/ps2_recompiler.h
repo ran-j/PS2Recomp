@@ -62,6 +62,7 @@ namespace ps2recomp
         std::unordered_map<uint32_t, std::string> m_stubHandlerBindingsByStart;
         std::map<uint32_t, std::string> m_generatedStubs;
         std::unordered_map<uint32_t, std::string> m_functionRenames;
+        std::unordered_map<uint32_t, std::vector<uint32_t>> m_resumeEntryTargetsByOwner;
         CodeGenerator::BootstrapInfo m_bootstrapInfo;
 
         bool decodeFunction(Function &function);
