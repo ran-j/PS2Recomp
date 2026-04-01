@@ -204,6 +204,202 @@ void register_code_generator_tests()
         t.IsTrue(generated.find("goto label_2004;") != std::string::npos, "branch to delay slot should use goto");
     });
 
+    tc.Run("control-flow analysis keeps same-function JAL target internal and promotes only the return pc", [](TestCase &t) {
+        Function func;
+        func.name = "same_function_call";
+        func.start = 0x1000;
+        func.end = 0x101C;
+        func.isRecompiled = true;
+        func.isStub = false;
+
+        std::vector<Instruction> instructions;
+        instructions.push_back(makeJal(0x1000, 0x100C));
+        instructions.push_back(makeNop(0x1004));
+        instructions.push_back(makeNop(0x1008));
+        instructions.push_back(makeNop(0x100C));
+        instructions.push_back(makeNop(0x1010));
+        instructions.push_back(makeJr(0x1014, 31));
+        instructions.push_back(makeNop(0x1018));
+
+        std::vector<Function> functions{func};
+        std::vector<Section> sections = {
+            {".text", 0x1000u, 0x100u, 0u, true, false, false, true, nullptr}
+        };
+
+        CodeGenerator gen({}, sections);
+        CodeGenerator::AnalysisResult analysis =
+            gen.collectInternalBranchTargets(func, instructions, &functions);
+
+        t.IsTrue(analysis.entryPoints.contains(0x100Cu),
+                 "same-function JAL target should stay as an internal label target");
+        t.IsTrue(analysis.resumeEntryPoints.contains(0x1008u),
+                 "same-function JAL should mark the fallthrough pc as resumable");
+        t.IsFalse(analysis.externalEntryPoints.contains(0x100Cu),
+                  "same-function JAL target should not become an external entry candidate");
+    });
+
+    tc.Run("control-flow analysis reports cross-function mid-function jumps as external entry candidates", [](TestCase &t) {
+        Function caller;
+        caller.name = "caller";
+        caller.start = 0x4000;
+        caller.end = 0x4008;
+        caller.isRecompiled = true;
+        caller.isStub = false;
+
+        Function target;
+        target.name = "target";
+        target.start = 0x5000;
+        target.end = 0x5010;
+        target.isRecompiled = true;
+        target.isStub = false;
+
+        Instruction j{};
+        j.address = 0x4000;
+        j.opcode = OPCODE_J;
+        j.target = (0x5004u >> 2) & 0x3FFFFFFu;
+        j.hasDelaySlot = true;
+        j.raw = (OPCODE_J << 26) | (j.target & 0x3FFFFFFu);
+
+        std::vector<Instruction> instructions{j, makeNop(0x4004)};
+        std::vector<Function> functions{caller, target};
+        std::vector<Section> sections = {
+            {".text", 0x4000u, 0x2000u, 0u, true, false, false, true, nullptr}
+        };
+
+        CodeGenerator gen({}, sections);
+        CodeGenerator::AnalysisResult analysis =
+            gen.collectInternalBranchTargets(caller, instructions, &functions);
+
+        t.IsTrue(analysis.externalEntryPoints.contains(0x5004u),
+                 "cross-function jump into the middle of a function should become an external entry candidate");
+    });
+
+    tc.Run("control-flow analysis promotes JALR fallthrough as a resumable entry", [](TestCase &t) {
+        Function func;
+        func.name = "jalr_resume";
+        func.start = 0x1200;
+        func.end = 0x1218;
+        func.isRecompiled = true;
+        func.isStub = false;
+
+        std::vector<Instruction> instructions;
+        instructions.push_back(makeNop(0x1200));
+        instructions.push_back(makeJalr(0x1204, 2, 31));
+        instructions.push_back(makeNop(0x1208));
+        instructions.push_back(makeNop(0x120C));
+        instructions.push_back(makeJr(0x1210, 31));
+        instructions.push_back(makeNop(0x1214));
+
+        std::vector<Function> functions{func};
+        std::vector<Section> sections = {
+            {".text", 0x1200u, 0x100u, 0u, true, false, false, true, nullptr}
+        };
+
+        CodeGenerator gen({}, sections);
+        CodeGenerator::AnalysisResult analysis =
+            gen.collectInternalBranchTargets(func, instructions, &functions);
+
+        t.IsTrue(analysis.resumeEntryPoints.contains(0x120Cu),
+                 "JALR should mark its return/fallthrough pc as resumable");
+        t.IsTrue(analysis.entryPoints.contains(0x120Cu),
+                 "JALR resume pc should also be emitted as an internal label");
+    });
+
+    tc.Run("resume entry targets emit a top-level pc switch in the owner wrapper", [](TestCase &t) {
+        Function func;
+        func.name = "resume_owner";
+        func.start = 0x6000;
+        func.end = 0x6010;
+        func.isRecompiled = true;
+        func.isStub = false;
+
+        std::vector<Instruction> instructions{
+            makeNop(0x6000),
+            makeNop(0x6004),
+            makeNop(0x6008),
+            makeNop(0x600C)
+        };
+
+        CodeGenerator gen({}, {});
+        gen.setResumeEntryTargets({{0x6000u, {0x6008u}}});
+
+        std::string generated = gen.generateFunction(func, instructions, false);
+        printGeneratedCode("resume entry targets emit a top-level pc switch in the owner wrapper", generated);
+
+        t.IsTrue(generated.find("switch (ctx->pc)") != std::string::npos,
+                 "owner wrapper should dispatch resumable pcs with a switch");
+        t.IsTrue(generated.find("case 0x6008u: goto label_6008;") != std::string::npos,
+                 "resume pc should jump directly to the internal label");
+        t.IsTrue(generated.find("label_6008:") != std::string::npos,
+                 "resume pc should force label emission for that instruction");
+    });
+
+    tc.Run("resume entry targets register to the owner wrapper", [](TestCase &t) {
+        Function func;
+        func.name = "resume_owner";
+        func.start = 0x7000;
+        func.end = 0x7010;
+        func.isRecompiled = true;
+        func.isStub = false;
+
+        CodeGenerator gen({}, {});
+        gen.setRenamedFunctions({{0x7000u, "resume_owner_0x7000"}});
+        gen.setResumeEntryTargets({{0x7000u, {0x7008u, 0x700Cu}}});
+
+        std::string registration = gen.generateFunctionRegistration({func}, {});
+        printGeneratedCode("resume entry targets register to the owner wrapper", registration);
+
+        t.IsTrue(registration.find("runtime.registerFunction(0x7008, resume_owner_0x7000);") != std::string::npos,
+                 "resume entry pc should register to the owner wrapper");
+        t.IsTrue(registration.find("runtime.registerFunction(0x700c, resume_owner_0x7000);") != std::string::npos,
+                 "multiple resume pcs should register to the same owner wrapper");
+    });
+
+    tc.Run("external mid-function entry can register to the owner wrapper", [](TestCase &t) {
+        Function caller;
+        caller.name = "caller";
+        caller.start = 0x4000;
+        caller.end = 0x4008;
+        caller.isRecompiled = true;
+        caller.isStub = false;
+
+        Function owner;
+        owner.name = "owner";
+        owner.start = 0x5000;
+        owner.end = 0x5010;
+        owner.isRecompiled = true;
+        owner.isStub = false;
+
+        Instruction j{};
+        j.address = 0x4000;
+        j.opcode = OPCODE_J;
+        j.target = (0x5004u >> 2) & 0x3FFFFFFu;
+        j.hasDelaySlot = true;
+        j.raw = (OPCODE_J << 26) | (j.target & 0x3FFFFFFu);
+
+        std::vector<Instruction> callerInstructions{j, makeNop(0x4004)};
+        std::vector<Function> functions{caller, owner};
+        std::vector<Section> sections = {
+            {".text", 0x4000u, 0x2000u, 0u, true, false, false, true, nullptr}
+        };
+
+        CodeGenerator gen({}, sections);
+        CodeGenerator::AnalysisResult analysis =
+            gen.collectInternalBranchTargets(caller, callerInstructions, &functions);
+
+        t.IsTrue(analysis.externalEntryPoints.contains(0x5004u),
+                 "cross-function jump should identify the mid-function target as externally reachable");
+
+        gen.setRenamedFunctions({{0x5000u, "owner_0x5000"}});
+        gen.setResumeEntryTargets({{0x5000u, {0x5004u}}});
+
+        std::string registration = gen.generateFunctionRegistration({owner}, {});
+        printGeneratedCode("external mid-function entry can register to the owner wrapper", registration);
+
+        t.IsTrue(registration.find("runtime.registerFunction(0x5004, owner_0x5000);") != std::string::npos,
+                 "mid-function external entry should register back to the owner wrapper");
+    });
+
     tc.Run("branches outside function still set pc", [](TestCase &t) {
         Function func;
         func.name = "external_branch";
