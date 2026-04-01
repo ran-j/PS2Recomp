@@ -5,31 +5,144 @@ project(PS2Runtime VERSION 0.1.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/ReleaseMode.cmake")
+
 set(PS2X_IS_VITA OFF)
 if((CMAKE_C_COMPILER MATCHES "arm-vita-eabi") OR
    (CMAKE_CXX_COMPILER MATCHES "arm-vita-eabi"))
     set(PS2X_IS_VITA ON)
 endif()
 
-option(PS2X_VITA_CREATE_PACKAGE "Create Vita eboot/vpk targets" OFF)
+option(PS2X_VITA_CREATE_PACKAGE "Create Vita eboot/vpk targets" ON)
 set(PS2X_VITA_APP_NAME "PS2 Retro X" CACHE STRING "Display name for the Vita bubble")
 set(PS2X_VITA_TITLEID "RANJ00001" CACHE STRING "9-character Vita title id")
 set(PS2X_VITA_VERSION "01.00" CACHE STRING "Vita app version")
+set(PS2X_DEFAULT_BOOT_ELF "" CACHE STRING "Guest ELF path passed directly to main() when argv is unavailable")
 
-include(FetchContent)
-set(FETCHCONTENT_QUIET FALSE)
-set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(BUILD_GAMES OFF CACHE BOOL "" FORCE)
+if(PS2X_IS_VITA)
+    if(NOT DEFINED ENV{VITASDK})
+        message(FATAL_ERROR "VITASDK is not defined. Configure inside the VitaSDK environment or pass the Vita toolchain file.")
+    endif()
 
-include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/ReleaseMode.cmake")
+    set(PS2X_VITASDK "$ENV{VITASDK}")
+    if(NOT EXISTS "${PS2X_VITASDK}/share/vita.cmake")
+        message(FATAL_ERROR "Could not find vita.cmake under ${PS2X_VITASDK}/share.")
+    endif()
 
-FetchContent_Declare(
-    raylib
-    GIT_REPOSITORY "https://github.com/raysan5/raylib.git"
-    GIT_TAG "5.5" # we will migrate to 4.2.0 later, trust me it will be better
-    GIT_PROGRESS TRUE
-)
-FetchContent_MakeAvailable(raylib)
+    include("${PS2X_VITASDK}/share/vita.cmake" REQUIRED)
+else()
+    include(FetchContent)
+    set(FETCHCONTENT_QUIET FALSE)
+    set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(BUILD_GAMES OFF CACHE BOOL "" FORCE)
+
+    FetchContent_Declare(
+        raylib
+        GIT_REPOSITORY "https://github.com/raysan5/raylib.git"
+        GIT_TAG "5.5" # we will migrate to 4.2.0 later, trust me it will be better
+        GIT_PROGRESS TRUE
+    )
+    FetchContent_MakeAvailable(raylib)
+endif()
+
+add_library(ps2_host_backend INTERFACE)
+
+set(PS2X_DEFAULT_BOOT_ELF_DEFINE "")
+if(PS2X_DEFAULT_BOOT_ELF)
+    set(PS2X_DEFAULT_BOOT_ELF_DEFINE "${PS2X_DEFAULT_BOOT_ELF}")
+    string(REPLACE "\\" "\\\\" PS2X_DEFAULT_BOOT_ELF_DEFINE "${PS2X_DEFAULT_BOOT_ELF_DEFINE}")
+    string(REPLACE "\"" "\\\"" PS2X_DEFAULT_BOOT_ELF_DEFINE "${PS2X_DEFAULT_BOOT_ELF_DEFINE}")
+endif()
+
+if(PS2X_IS_VITA)
+    set(PS2X_VITA_PREFIX "${PS2X_VITASDK}/arm-vita-eabi")
+    set(PS2X_VITA_EXTRA_INCLUDE_DIRS "" CACHE STRING "Extra include directories for Vita host dependencies")
+    set(PS2X_VITA_LIBRARY_DIR "${PS2X_VITA_PREFIX}/lib")
+    set(PS2X_VITA_REQUIRED_LIBRARY_NAMES
+        raylib
+        SDL2
+        OpenSLES
+        taihen_stub
+        SceAppMgr_stub
+        SceCtrl_stub
+        SceGxm_stub
+        SceCommonDialog_stub
+        SceLibKernel_stub
+        SceAudio_stub
+        SceTouch_stub
+        SceHid_stub
+        SceMotion_stub
+        SceSysmodule_stub
+        SceIofilemgr_stub
+        SceNetCtl_stub
+        SceNet_stub
+        SceDisplay_stub
+        SceAppUtil_stub
+        SceAudioIn_stub
+        ScePower_stub
+        SceProcessmgr_stub
+        SceIme_stub
+        libIMGEGL_stub_weak
+        libgpu_es4_ext_stub_weak
+        libGLESv2_stub_weak
+    )
+
+    set(PS2X_VITA_INCLUDE_DIRS
+        "${PS2X_VITA_PREFIX}/include"
+    )
+    foreach(PS2X_VITA_OPTIONAL_INCLUDE_DIR IN ITEMS
+            "${PS2X_VITA_PREFIX}/include/raylib"
+            "${PS2X_VITA_PREFIX}/include/SDL2")
+        if(EXISTS "${PS2X_VITA_OPTIONAL_INCLUDE_DIR}")
+            list(APPEND PS2X_VITA_INCLUDE_DIRS "${PS2X_VITA_OPTIONAL_INCLUDE_DIR}")
+        endif()
+    endforeach()
+    if(PS2X_VITA_EXTRA_INCLUDE_DIRS)
+        list(APPEND PS2X_VITA_INCLUDE_DIRS ${PS2X_VITA_EXTRA_INCLUDE_DIRS})
+    endif()
+
+    if(NOT EXISTS "${PS2X_VITA_PREFIX}/include/SDL2/SDL.h")
+        message(FATAL_ERROR
+            "Missing SDL2 headers under ${PS2X_VITA_PREFIX}/include/SDL2. "
+            "Quenom/raylib-5.5-vita requires SDL2 with PVR support installed into VitaSDK.")
+    endif()
+
+    if(NOT EXISTS "${PS2X_VITA_LIBRARY_DIR}")
+        message(FATAL_ERROR "Missing Vita library directory: ${PS2X_VITA_LIBRARY_DIR}")
+    endif()
+
+    function(ps2x_find_vita_library out_var library_name)
+        string(MAKE_C_IDENTIFIER "${library_name}" library_id)
+        find_library(${out_var}
+            NAMES "${library_name}" "${library_name}.a" "lib${library_name}.a"
+            PATHS "${PS2X_VITA_LIBRARY_DIR}"
+            NO_DEFAULT_PATH
+        )
+        if(NOT ${out_var})
+            message(FATAL_ERROR
+                "Could not find Vita library '${library_name}' under ${PS2X_VITA_LIBRARY_DIR}. "
+                "Install Quenom/raylib-5.5-vita and its SDL2/PVR dependencies into VitaSDK first.")
+        endif()
+        set(${out_var} "${${out_var}}" PARENT_SCOPE)
+    endfunction()
+
+    set(PS2X_VITA_RESOLVED_LIBRARIES "")
+    foreach(PS2X_VITA_LIBRARY_NAME IN LISTS PS2X_VITA_REQUIRED_LIBRARY_NAMES)
+        ps2x_find_vita_library(PS2X_VITA_LIBRARY_PATH "${PS2X_VITA_LIBRARY_NAME}")
+        list(APPEND PS2X_VITA_RESOLVED_LIBRARIES "${PS2X_VITA_LIBRARY_PATH}")
+    endforeach()
+
+    target_compile_definitions(ps2_host_backend INTERFACE PLATFORM_VITA)
+    target_include_directories(ps2_host_backend INTERFACE ${PS2X_VITA_INCLUDE_DIRS})
+    target_link_libraries(ps2_host_backend INTERFACE
+        ${PS2X_VITA_RESOLVED_LIBRARIES}
+        m
+        c
+        pthread
+    )
+else()
+    target_link_libraries(ps2_host_backend INTERFACE raylib)
+endif()
 
 add_library(ps2_runtime STATIC
     src/lib/game_overrides.cpp
@@ -73,6 +186,12 @@ add_executable(ps2EntryRunner
     ${RUNNER_SRC_FILES}
 )
 
+if(PS2X_DEFAULT_BOOT_ELF_DEFINE)
+    target_compile_definitions(ps2EntryRunner PRIVATE
+        PS2X_DEFAULT_BOOT_ELF="${PS2X_DEFAULT_BOOT_ELF_DEFINE}"
+    )
+endif()
+
 if(MSVC)
     target_compile_options(ps2EntryRunner PRIVATE /FS)
 endif()
@@ -82,11 +201,10 @@ target_include_directories(ps2_runtime PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/lib/Kernel
 )
 
-target_link_libraries(ps2_runtime PRIVATE raylib)
+target_link_libraries(ps2_runtime PUBLIC ps2_host_backend)
 target_link_libraries(ps2EntryRunner
     PRIVATE
     ps2_runtime
-    raylib
 )
 
 if(PS2X_IS_VITA)

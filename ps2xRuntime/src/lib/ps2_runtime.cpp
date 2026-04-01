@@ -9,11 +9,8 @@
 #include "Kernel/Stubs/Audio.h"
 #include "Kernel/Stubs/GS.h"
 #include "Kernel/Stubs/MPEG.h"
+#include "ps2_host_backend.h"
 
-#include <raylib.h>
-#if defined(PLATFORM_VITA)
-#include <pib.h>
-#endif
 #include <iostream>
 #include <fstream>
 #include <algorithm>
@@ -42,6 +39,13 @@ static constexpr int FB_HEIGHT = 512;
 static constexpr int DEFAULT_DISPLAY_HEIGHT = 448;
 static constexpr uint32_t DEFAULT_FB_SIZE = FB_WIDTH * FB_HEIGHT * 4;
 static constexpr uint32_t DEFAULT_FB_ADDR = (PS2_RAM_SIZE - DEFAULT_FB_SIZE - 0x10000u);
+#if defined(PLATFORM_VITA)
+static constexpr int HOST_WINDOW_WIDTH = 960;
+static constexpr int HOST_WINDOW_HEIGHT = 544;
+#else
+static constexpr int HOST_WINDOW_WIDTH = FB_WIDTH;
+static constexpr int HOST_WINDOW_HEIGHT = DEFAULT_DISPLAY_HEIGHT;
+#endif
 struct ElfHeader
 {
     uint32_t magic;
@@ -141,11 +145,6 @@ namespace
 
     thread_local DispatchHistory g_dispatchHistory;
     thread_local std::unordered_map<PS2Runtime *, uint32_t> g_guestExecutionDepths;
-
-#if defined(PLATFORM_VITA)
-    std::mutex g_pibInitMutex;
-    std::atomic<bool> g_pibInitialized{false};
-#endif
 
     void pushDispatchPc(uint32_t pc)
     {
@@ -275,39 +274,6 @@ namespace
         }
         return absolute.lexically_normal();
     }
-
-#if defined(PLATFORM_VITA)
-    bool ensurePibInitialized()
-    {
-        if (g_pibInitialized.load(std::memory_order_acquire))
-        {
-            return true;
-        }
-
-        std::lock_guard<std::mutex> lock(g_pibInitMutex);
-        if (g_pibInitialized.load(std::memory_order_relaxed))
-        {
-            return true;
-        }
-
-        try
-        {
-            pibInit(static_cast<PibOptions>(PIB_SHACCCG | PIB_GET_PROC_ADDR_CORE));
-            g_pibInitialized.store(true, std::memory_order_release);
-            return true;
-        }
-        catch (const std::exception &e)
-        {
-            std::cerr << "[vita] pibInit failed: " << e.what() << std::endl;
-        }
-        catch (...)
-        {
-            std::cerr << "[vita] pibInit failed: unknown exception" << std::endl;
-        }
-
-        return false;
-    }
-#endif
 
     PS2Runtime::IoPaths &runtimeIoPaths()
     {
@@ -597,6 +563,14 @@ PS2Runtime::~PS2Runtime()
     {
         requestStop();
         ps2_syscalls::detachAllGuestHostThreads();
+#if defined(PLATFORM_VITA)
+        m_audioBackend.stopAll();
+        if (IsAudioDeviceReady())
+        {
+            CloseAudioDevice();
+            m_audioBackend.setAudioReady(false);
+        }
+#endif
         if (IsWindowReady())
         {
             CloseWindow();
@@ -667,15 +641,10 @@ bool PS2Runtime::initialize(const char *title)
             return false;
         }
 
-#if defined(PLATFORM_VITA)
-        if (!ensurePibInitialized())
-        {
-            return false;
-        }
-#endif
-
+#if !defined(PLATFORM_VITA)
         SetConfigFlags(FLAG_WINDOW_RESIZABLE);
-        InitWindow(FB_WIDTH, DEFAULT_DISPLAY_HEIGHT, title);
+#endif
+        InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
         InitAudioDevice();
         m_audioBackend.setAudioReady(IsAudioDeviceReady());
         SetTargetFPS(60);
@@ -1857,15 +1826,17 @@ void PS2Runtime::reacquireGuestExecution(uint32_t depth)
 
 void PS2Runtime::cooperativeGuestYield()
 {
+    thread_local uint32_t s_backEdgeYieldCounter = 0u;
+    const uint32_t waiterCount = m_guestExecutionWaiters.load(std::memory_order_acquire);
+    const uint32_t yieldInterval = (waiterCount != 0u) ? 64u : 100;
+    if (++s_backEdgeYieldCounter < yieldInterval)
+    {
+        return;
+    }
+
+    s_backEdgeYieldCounter = 0u;
     GuestExecutionReleaseScope release(this);
-    if (m_guestExecutionWaiters.load(std::memory_order_acquire) != 0u)
-    {
-        std::this_thread::sleep_for(std::chrono::microseconds(100));
-    }
-    else
-    {
-        std::this_thread::yield();
-    }
+    std::this_thread::yield();
 }
 
 uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)

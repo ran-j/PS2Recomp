@@ -63,19 +63,24 @@ namespace
 
     std::filesystem::path getExecutablePath(int argc, char *argv[])
     {
-        if (argc >= 2)
+        if (argc >= 2 && argv[1] && argv[1][0] != '\0')
         {
-            std::cout << "Using agrs" << std::endl;
+            std::cout << "Using argv boot path" << std::endl;
             return std::filesystem::path(argv[1]);
         }
 #if defined(PS2X_DEFAULT_BOOT_ELF)
         std::cout << "Using default boot file" << std::endl;
+        const std::filesystem::path configuredPath = std::filesystem::path(PS2X_DEFAULT_BOOT_ELF);
 #if defined(PLATFORM_VITA)
-        return std::filesystem::path(PS2X_DEFAULT_BOOT_ELF);
+        return configuredPath;
 #endif
-        return std::filesystem::current_path() + std::filesystem::path(PS2X_DEFAULT_BOOT_ELF);
+        if (configuredPath.is_absolute())
+        {
+            return configuredPath;
+        }
+        return (std::filesystem::current_path() / configuredPath).lexically_normal();
 #else
-        throw std::runtime_error("Unable to determine executable path");
+        throw std::runtime_error("Unable to determine executable path. Pass the guest ELF as argv[1] or define PS2X_DEFAULT_BOOT_ELF.");
 #endif
     }
 }
