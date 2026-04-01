@@ -55,21 +55,26 @@ namespace
         if (dot != std::string::npos)
             result.erase(dot, 1);
 
+        std::ranges::transform(result, result.begin(), [](unsigned char character)
+                               { return static_cast<char>(std::toupper(character)); });
+
         return result;
     }
 
     std::filesystem::path getExecutablePath(int argc, char *argv[])
     {
+        if (argc >= 2)
+        {
+            std::cout << "Using agrs" << std::endl;
+            return std::filesystem::path(argv[1]);
+        }
 #if defined(PS2X_DEFAULT_BOOT_ELF)
         std::cout << "Using default boot file" << std::endl;
-        return std::filesystem::current_path() + PS2X_DEFAULT_BOOT_ELF;
+#if defined(PLATFORM_VITA)
+        return std::filesystem::path(PS2X_DEFAULT_BOOT_ELF);
+#endif
+        return std::filesystem::current_path() + std::filesystem::path(PS2X_DEFAULT_BOOT_ELF);
 #else
-        std::cout << "Using agrs" << std::endl;
-        if (argc > 0)
-        {
-            return std::filesystem::path(argv[0]).parent_path();
-        }
-
         throw std::runtime_error("Unable to determine executable path");
 #endif
     }
@@ -81,23 +86,22 @@ int main(int argc, char *argv[])
 
     try
     {
-        std::filesystem::path exePath = getExecutablePath(argc, argv);
+        std::filesystem::path pathObj = getExecutablePath(argc, argv);
 
-        std::string elfPath = exePath.filename().string();
-        std::filesystem::path pathObj(elfPath);
-        std::string folderName = pathObj.filename().string();
-        std::string normalizedId = normalizeGameId(folderName);
+        std::string filePathStr = pathObj.string();
+        std::string elfName = pathObj.filename().string();
+        std::string normalizedId = normalizeGameId(elfName);
 
         std::string windowTitle = "PS2-Recomp | ";
         const char *gameName = getGameName(normalizedId);
 
         if (gameName)
         {
-            windowTitle += std::string(gameName) + " | " + folderName;
+            windowTitle += std::string(gameName) + " | " + elfName;
         }
         else
         {
-            windowTitle += folderName;
+            windowTitle += elfName;
         }
 
         PS2Runtime runtime;
@@ -109,9 +113,9 @@ int main(int argc, char *argv[])
 
         registerAllFunctions(runtime);
 
-        if (!runtime.loadELF(elfPath))
+        if (!runtime.loadELF(filePathStr))
         {
-            std::cerr << "Failed to load ELF file: " << elfPath << std::endl;
+            std::cerr << "Failed to load ELF file: " << filePathStr << std::endl;
             return 1;
         }
 
@@ -130,4 +134,6 @@ int main(int argc, char *argv[])
     {
         std::cerr << "[main] fatal exception: unknown" << std::endl;
     }
+
+    return 1;
 }
