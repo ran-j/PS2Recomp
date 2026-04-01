@@ -6,6 +6,9 @@
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_gs_gpu.h"
 #include "ThreadNaming.h"
+#include "Kernel/Stubs/Audio.h"
+#include "Kernel/Stubs/GS.h"
+#include "Kernel/Stubs/MPEG.h"
 
 #include <raylib.h>
 #if defined(PLATFORM_VITA)
@@ -23,6 +26,7 @@
 #include <thread>
 #include <unordered_map>
 #include <sstream>
+
 
 namespace ps2_stubs
 {
@@ -2021,7 +2025,6 @@ void PS2Runtime::run()
     ps2_stubs::resetAudioStubState();
     ps2_stubs::resetGsSyncVCallbackState();
     ps2_stubs::resetMpegStubState();
-    ps2_stubs::resetMpegSourceTracking();
     ps2_syscalls::initializeGuestKernelState(m_memory.getRDRAM());
     m_cpuContext.r[4] = _mm_setzero_si128();
     m_cpuContext.r[5] = _mm_setzero_si128();

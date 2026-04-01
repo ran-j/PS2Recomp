@@ -1,6 +1,7 @@
 #include "Common.h"
 #include "Interrupt.h"
 #include "ps2_log.h"
+#include "Stubs/GS.h"
 
 namespace ps2_syscalls
 {

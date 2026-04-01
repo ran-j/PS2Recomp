@@ -7,6 +7,7 @@
 #include "runtime/ps2_gs_psmct32.h"
 #include "runtime/ps2_gs_psmt4.h"
 #include "runtime/ps2_gs_psmt8.h"
+#include "Stubs/GS.h"
 
 #include <atomic>
 #include <chrono>

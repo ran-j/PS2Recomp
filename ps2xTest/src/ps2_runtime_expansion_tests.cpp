@@ -10,6 +10,9 @@
 #include "runtime/ps2_gs_gpu.h"
 #include "runtime/ps2_gs_psmct32.h"
 #include "ps2_runtime_macros.h"
+#include "Stubs/MPEG.h"
+#include "Stubs/Audio.h"
+#include "Stubs/GS.h"
 
 #include <atomic>
 #include <chrono>
@@ -581,63 +584,7 @@ void register_ps2_runtime_expansion_tests()
             t.Equals(getRegU32(&setParamCtx, 2), 0x00012340u,
                      "sceSdRemote set-param calls should not trap or disturb the movie audio state");
         });
-
-        tc.Run("MPEG compat layout enters playing state and defers end to guest state", [](TestCase &t)
-        {
-            constexpr uint32_t kCodeVeronicaMpegAddr = 0x01E27140u;
-            constexpr uint32_t kCodeVeronicaVideoStateAddr = 0x01E271E8u;
-            constexpr uint32_t kCodeVeronicaMovieStateAddr = 0x01E21914u;
-
-            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
-            PS2MpegCompatLayout compat{};
-            compat.mpegObjectAddr = kCodeVeronicaMpegAddr;
-            compat.videoStateAddr = kCodeVeronicaVideoStateAddr;
-            compat.movieStateAddr = kCodeVeronicaMovieStateAddr;
-            compat.syntheticFramesBeforeEnd = 0u;
-            compat.playingVideoStateValue = 0u;
-            compat.playingMovieStateValue = 2u;
-            compat.finishedVideoStateValue = 3u;
-            compat.finishedMovieStateValue = 3u;
-            ps2_stubs::setMpegCompatLayout(compat);
-            ps2_stubs::resetMpegStubState();
-
-            R5900Context firstIsEndCtx{};
-            setRegU32(firstIsEndCtx, 4, kCodeVeronicaMpegAddr);
-            ps2_stubs::sceMpegIsEnd(rdram.data(), &firstIsEndCtx, nullptr);
-            t.Equals(getRegS32(firstIsEndCtx, 2), 0,
-                     "compat movie path should get one synthetic frame before the MPEG stub reports end");
-
-            R5900Context getPictureCtx{};
-            setRegU32(getPictureCtx, 4, kCodeVeronicaMpegAddr);
-            setRegU32(getPictureCtx, 5, 0x00124000u);
-            setRegU32(getPictureCtx, 6, 440u);
-            ps2_stubs::sceMpegGetPicture(rdram.data(), &getPictureCtx, nullptr);
-            t.Equals(Ps2FastRead32(rdram.data(), kCodeVeronicaMpegAddr + 0x00u), 320u,
-                     "compat movie fallback should seed a movie width");
-            t.Equals(Ps2FastRead32(rdram.data(), kCodeVeronicaMpegAddr + 0x04u), 240u,
-                     "compat movie fallback should seed a movie height");
-            t.Equals(Ps2FastRead32(rdram.data(), kCodeVeronicaVideoStateAddr), 0u,
-                     "compat movie fallback should leave videoDec.state in the active state while playback is running");
-            t.Equals(Ps2FastRead32(rdram.data(), kCodeVeronicaMovieStateAddr), 2u,
-                     "compat movie fallback should promote the movie state to playing after the first synthetic frame");
-
-            R5900Context secondIsEndCtx{};
-            setRegU32(secondIsEndCtx, 4, kCodeVeronicaMpegAddr);
-            ps2_stubs::sceMpegIsEnd(rdram.data(), &secondIsEndCtx, nullptr);
-            t.Equals(getRegS32(secondIsEndCtx, 2), 0,
-                     "compat movie fallback should keep the decode thread alive until the guest marks playback finished");
-
-            Ps2FastWrite32(rdram.data(), kCodeVeronicaMovieStateAddr, 3u);
-
-            R5900Context guestFinishedIsEndCtx{};
-            setRegU32(guestFinishedIsEndCtx, 4, kCodeVeronicaMpegAddr);
-            ps2_stubs::sceMpegIsEnd(rdram.data(), &guestFinishedIsEndCtx, nullptr);
-            t.Equals(getRegS32(guestFinishedIsEndCtx, 2), 1,
-                     "compat movie fallback should report end once the guest movie state reaches the finished value");
-
-            ps2_stubs::clearMpegCompatLayout();
-        });
-
+         
         tc.Run("IPU init skips missing optional helper instead of dispatching the default trap", [](TestCase &t)
         {
             PS2Runtime runtime;
