@@ -352,12 +352,14 @@
     X(sceGsResetPath)                         \
     X(sceGsSetDefClear)                       \
     X(sceGsSetDefDBuffDc)                     \
+    X(sceGsSetDefDBuff)                       \
     X(sceGsSetDefDispEnv)                     \
     X(sceGsSetDefDrawEnv)                     \
     X(sceGsSetDefDrawEnv2)                    \
     X(sceGsSetDefLoadImage)                   \
     X(sceGsSetDefStoreImage)                  \
     X(sceGsSwapDBuffDc)                       \
+    X(sceGsSwapDBuff)                         \
     X(sceGsSyncPath)                          \
     X(sceGsSyncV)                             \
     X(sceGsSyncVCallback)                     \

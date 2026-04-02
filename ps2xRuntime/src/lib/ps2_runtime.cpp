@@ -565,6 +565,8 @@ PS2Runtime::~PS2Runtime()
         ps2_syscalls::detachAllGuestHostThreads();
 #if defined(PLATFORM_VITA)
         m_audioBackend.stopAll();
+        m_audioBackend.setAudioReady(false);
+#else
         if (IsAudioDeviceReady())
         {
             CloseAudioDevice();
@@ -641,12 +643,14 @@ bool PS2Runtime::initialize(const char *title)
             return false;
         }
 
-#if !defined(PLATFORM_VITA)
+#if defined(PLATFORM_VITA)
+        InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
+#else
         SetConfigFlags(FLAG_WINDOW_RESIZABLE);
-#endif
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
         InitAudioDevice();
         m_audioBackend.setAudioReady(IsAudioDeviceReady());
+#endif
         SetTargetFPS(60);
 
         return true;

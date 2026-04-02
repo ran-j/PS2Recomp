@@ -1489,6 +1489,17 @@ namespace
         GsClearMem clear1;
     };
 
+    struct GsDBuffMem
+    {
+        GsDispEnvMem disp[2];
+        GsGiftagMem giftag0;
+        GsDrawEnv1Mem draw0;
+        GsClearMem clear0;
+        GsGiftagMem giftag1;
+        GsDrawEnv1Mem draw1;
+        GsClearMem clear1;
+    };
+
     struct GsImageMem
     {
         uint16_t x;
@@ -1746,9 +1757,27 @@ namespace
         return true;
     }
 
+    static bool readGsDBuff(uint8_t* rdram, uint32_t addr, GsDBuffMem& out)
+    {
+        const uint8_t* ptr = getConstMemPtr(rdram, addr);
+        if (!ptr)
+            return false;
+        std::memcpy(&out, ptr, sizeof(out));
+        return true;
+    }
+
     static bool writeGsDBuffDc(uint8_t *rdram, uint32_t addr, const GsDBuffDcMem &db)
     {
         uint8_t *ptr = getMemPtr(rdram, addr);
+        if (!ptr)
+            return false;
+        std::memcpy(ptr, &db, sizeof(db));
+        return true;
+    }
+
+    static bool writeGsDBuff(uint8_t* rdram, uint32_t addr, const GsDBuffMem& db)
+    {
+        uint8_t* ptr = getMemPtr(rdram, addr);
         if (!ptr)
             return false;
         std::memcpy(ptr, &db, sizeof(db));

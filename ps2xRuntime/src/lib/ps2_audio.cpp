@@ -228,6 +228,9 @@ void PS2AudioBackend::play(uint32_t sampleAddr, float pitch, float volume, uint3
 
 void PS2AudioBackend::pruneFinishedSounds()
 {
+#if defined(PLATFORM_VITA)
+    return;
+#else
     auto &sounds = m_impl->activeSounds;
     auto it = sounds.begin();
     while (it != sounds.end())
@@ -242,11 +245,20 @@ void PS2AudioBackend::pruneFinishedSounds()
             ++it;
         }
     }
+#endif
 }
 
 void PS2AudioBackend::playDecodedSample(uint32_t sampleKey, DecodedSample &sample, float pitch, float volume,
                                         bool isBgm)
 {
+#if defined(PLATFORM_VITA)
+    (void)sampleKey;
+    (void)sample;
+    (void)pitch;
+    (void)volume;
+    (void)isBgm;
+    return;
+#else
     if (!m_audioReady || sample.pcm.empty())
         return;
 
@@ -292,6 +304,7 @@ void PS2AudioBackend::playDecodedSample(uint32_t sampleKey, DecodedSample &sampl
     SetSoundVolume(snd, volume);
     m_impl->activeSounds.push_back({snd, sampleKey});
     PlaySound(snd);
+#endif
 }
 
 void PS2AudioBackend::stop(uint32_t voiceId)
@@ -302,10 +315,14 @@ void PS2AudioBackend::stop(uint32_t voiceId)
 void PS2AudioBackend::stopAll()
 {
     std::lock_guard<std::mutex> lock(m_mutex);
+#if defined(PLATFORM_VITA)
+    return;
+#else
     for (auto &t : m_impl->activeSounds)
     {
         StopSound(t.snd);
         UnloadSound(t.snd);
     }
     m_impl->activeSounds.clear();
+#endif
 }

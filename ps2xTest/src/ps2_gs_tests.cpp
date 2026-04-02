@@ -23,17 +23,6 @@ namespace
     std::atomic<uint32_t> g_gsSyncCallbackHits{0u};
     std::atomic<uint32_t> g_gsSyncCallbackLastTick{0u};
 
-    struct GsImageMem
-    {
-        uint16_t x;
-        uint16_t y;
-        uint16_t width;
-        uint16_t height;
-        uint16_t vramAddr;
-        uint8_t vramWidth;
-        uint8_t psm;
-    };
-
     static_assert(sizeof(GsImageMem) == 12, "GsImageMem size mismatch");
 
     void setRegU32(R5900Context &ctx, int reg, uint32_t value)

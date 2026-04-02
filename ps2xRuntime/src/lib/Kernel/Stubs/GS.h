@@ -15,12 +15,14 @@ namespace ps2_stubs
     void sceGsResetPath(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceGsSetDefClear(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceGsSetDefDBuffDc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void sceGsSetDefDBuff(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceGsSetDefDispEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceGsSetDefDrawEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceGsSetDefDrawEnv2(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceGsSetDefLoadImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceGsSetDefStoreImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceGsSwapDBuffDc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void sceGsSwapDBuff(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceGsSyncPath(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceGsSyncV(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceGsSyncVCallback(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
