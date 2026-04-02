@@ -10,6 +10,7 @@
     X(ResetEE)                 \
     X(SetMemoryMode)           \
                                \
+    X(InitThread)              \
     X(CreateThread)            \
     X(DeleteThread)            \
     X(StartThread)             \
