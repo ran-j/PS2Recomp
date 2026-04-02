@@ -91,9 +91,23 @@ namespace
             ps2_stubs::resetSifState();
             ps2_syscalls::resetSoundDriverRpcState();
             ps2_syscalls::clearSoundDriverCompatLayout();
+            ps2_syscalls::clearDtxCompatLayout();
             std::memset(&ctx, 0, sizeof(ctx));
         }
     };
+
+    void setRecvxDtxCompatLayout()
+    {
+        PS2DtxCompatLayout layout{};
+        layout.rpcSid = 0x7D000000u;
+        layout.urpcObjBase = 0x01F18000u;
+        layout.urpcObjLimit = 0x01F1FF00u;
+        layout.urpcObjStride = 0x20u;
+        layout.urpcFnTableBase = 0x0034FED0u;
+        layout.urpcObjTableBase = 0x0034FFD0u;
+        layout.dispatcherFuncAddr = 0x002FABC0u;
+        ps2_syscalls::setDtxCompatLayout(layout);
+    }
 
     void setRegU32(R5900Context &ctx, int reg, uint32_t value)
     {
@@ -549,6 +563,7 @@ void register_ps2_sif_rpc_tests()
         tc.Run("SifCallRpc prefers stack ABI for DTX URPC when both packs look plausible", [](TestCase &t)
         {
             TestEnv env;
+            setRecvxDtxCompatLayout();
 
             constexpr uint32_t kClientAddr = 0x0002B000u;
             constexpr uint32_t kDtxSid = 0x7D000000u;

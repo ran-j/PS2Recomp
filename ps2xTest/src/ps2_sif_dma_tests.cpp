@@ -28,9 +28,23 @@ namespace
             ps2_stubs::resetSifState();
             ps2_syscalls::resetSoundDriverRpcState();
             ps2_syscalls::clearSoundDriverCompatLayout();
+            ps2_syscalls::clearDtxCompatLayout();
             std::memset(&ctx, 0, sizeof(ctx));
         }
     };
+
+    void setRecvxDtxCompatLayout()
+    {
+        PS2DtxCompatLayout layout{};
+        layout.rpcSid = 0x7D000000u;
+        layout.urpcObjBase = 0x01F18000u;
+        layout.urpcObjLimit = 0x01F1FF00u;
+        layout.urpcObjStride = 0x20u;
+        layout.urpcFnTableBase = 0x0034FED0u;
+        layout.urpcObjTableBase = 0x0034FFD0u;
+        layout.dispatcherFuncAddr = 0x002FABC0u;
+        ps2_syscalls::setDtxCompatLayout(layout);
+    }
 
     #pragma pack(push, 1)
     struct Ps2SifDmaTransfer
@@ -245,6 +259,7 @@ void register_ps2_sif_dma_tests()
         tc.Run("sceSifSetDma acknowledges DTX work-buffer transfers by advancing the EE footer ticket", [](TestCase &t)
         {
             TestEnv env;
+            setRecvxDtxCompatLayout();
 
             constexpr uint32_t kClientAddr = 0x0002D000u;
             constexpr uint32_t kDtxSid = 0x7D000000u;
@@ -306,6 +321,7 @@ void register_ps2_sif_dma_tests()
         tc.Run("sceSifSetDma applies SJX DTX payloads into the emulated SJRMT data ring", [](TestCase &t)
         {
             TestEnv env;
+            setRecvxDtxCompatLayout();
 
             constexpr uint32_t kClientAddr = 0x0002E000u;
             constexpr uint32_t kDtxSid = 0x7D000000u;
@@ -426,6 +442,7 @@ void register_ps2_sif_dma_tests()
         tc.Run("sceSifSetDma lets active PS2RNA playback drain emulated SJRMT data", [](TestCase &t)
         {
             TestEnv env;
+            setRecvxDtxCompatLayout();
 
             constexpr uint32_t kClientAddr = 0x0002F000u;
             constexpr uint32_t kDtxSid = 0x7D000000u;
