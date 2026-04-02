@@ -86,14 +86,14 @@ namespace
         ctx->pc = 0u;
     }
 
-    void writeGsImage(uint8_t *rdram, uint32_t addr, const GsImageMem &image)
+    void writeGsImageTest(uint8_t *rdram, uint32_t addr, const GsImageMem &image)
     {
         std::memcpy(rdram + addr, &image, sizeof(image));
     }
 
-    void writeGsImage(std::vector<uint8_t> &rdram, uint32_t addr, const GsImageMem &image)
+    void writeGsImageTest(std::vector<uint8_t> &rdram, uint32_t addr, const GsImageMem &image)
     {
-        writeGsImage(rdram.data(), addr, image);
+        writeGsImageTest(rdram.data(), addr, image);
     }
 
     void writePSMT4Texel(std::vector<uint8_t> &vram, uint32_t tbp, uint32_t tbw, uint32_t x, uint32_t y, uint8_t index)
@@ -2623,7 +2623,7 @@ void register_ps2_gs_tests()
                 0xD0u, 0xE0u, 0xF0u, 0xFFu,
             };
 
-            writeGsImage(rdram, kImageAddr, image);
+            writeGsImageTest(rdram, kImageAddr, image);
             std::memcpy(rdram + kSrcAddr, pixels, sizeof(pixels));
 
             R5900Context loadCtx{};
