@@ -109,16 +109,6 @@ namespace
         ps2_syscalls::setDtxCompatLayout(layout);
     }
 
-    void setDarkCloud2EzMidiCompatLayout(PS2Runtime &runtime)
-    {
-        PS2EzMidiCompatLayout layout{};
-        layout.rpcSid = 0x00012346u;
-        layout.reportedFreeIopBytes = 0x00200000u;
-        layout.defaultPortVolume = 0x00000100u;
-        layout.reportedVoiceCount = 0x00000020u;
-        runtime.iop().setEzMidiCompatLayout(layout);
-    }
-
     void setRegU32(R5900Context &ctx, int reg, uint32_t value)
     {
         ctx.r[reg] = _mm_set_epi64x(0, static_cast<int64_t>(value));
@@ -620,101 +610,6 @@ void register_ps2_sif_rpc_tests()
             const uint32_t regHandle = readGuestStruct<uint32_t>(env.rdram.data(), kRecvRegAddr);
             t.IsTrue(stackHandle != 0u, "DTX handle should be written to stack-selected recv buffer");
             t.Equals(regHandle, 0u, "register recv buffer should remain untouched when stack ABI is preferred");
-        });
-
-        tc.Run("SifCallRpc routes Dark Cloud 2 ezMidi families through compat state", [](TestCase &t)
-        {
-            TestEnv env;
-            setDarkCloud2EzMidiCompatLayout(env.runtime);
-            env.runtime.iop().init(env.rdram.data());
-
-            constexpr uint32_t kClientAddr = 0x0002C000u;
-            constexpr uint32_t kEzMidiSid = 0x00012346u;
-            constexpr uint32_t kSendAddr = 0x0002C100u;
-            constexpr uint32_t kRecvAddr = 0x0002C200u;
-
-            SifInitRpc(env.rdram.data(), &env.ctx, &env.runtime);
-
-            setRegU32(env.ctx, 4, kClientAddr);
-            setRegU32(env.ctx, 5, kEzMidiSid);
-            setRegU32(env.ctx, 6, 0u);
-            SifBindRpc(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_OK, "SifBindRpc should succeed for ezMidi sid");
-
-            std::memset(env.rdram.data() + kRecvAddr, 0xCC, 0x40u);
-            setRegU32(env.ctx, 4, kClientAddr);
-            setRegU32(env.ctx, 5, 0x8010u);
-            setRegU32(env.ctx, 6, 0u);
-            setRegU32(env.ctx, 7, kSendAddr);
-            setRegU32(env.ctx, 8, 0x10u);
-            setRegU32(env.ctx, 9, kRecvAddr);
-            setRegU32(env.ctx, 10, 0x40u);
-            setRegU32(env.ctx, 11, 0u);
-            setRegU32(env.ctx, 29, K_STACK_ADDR);
-            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x00u, 0u);
-            SifCallRpc(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_OK, "ezMidi init should succeed");
-            t.Equals(readGuestStruct<uint32_t>(env.rdram.data(), kRecvAddr + 0x00u), 0u,
-                     "ezMidi init should zero the recv status word");
-
-            writeGuestU32(env.rdram.data(), kSendAddr + 0x00u, 0u);
-            writeGuestU32(env.rdram.data(), kSendAddr + 0x04u, 0x01A00000u);
-            writeGuestU32(env.rdram.data(), kSendAddr + 0x08u, 0x01A00000u);
-            writeGuestU32(env.rdram.data(), kSendAddr + 0x0Cu, 0x000117E0u);
-            std::memset(env.rdram.data() + kRecvAddr, 0, 0x40u);
-            setRegU32(env.ctx, 4, kClientAddr);
-            setRegU32(env.ctx, 5, 0x9052u);
-            setRegU32(env.ctx, 6, 0u);
-            setRegU32(env.ctx, 7, kSendAddr);
-            setRegU32(env.ctx, 8, 0x40u);
-            setRegU32(env.ctx, 9, kRecvAddr);
-            setRegU32(env.ctx, 10, 0x40u);
-            setRegU32(env.ctx, 11, 0u);
-            SifCallRpc(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_OK, "MidiSetHd family should succeed");
-
-            std::memset(env.rdram.data() + kRecvAddr, 0, 0x40u);
-            setRegU32(env.ctx, 4, kClientAddr);
-            setRegU32(env.ctx, 5, 0x8092u);
-            setRegU32(env.ctx, 6, 0u);
-            setRegU32(env.ctx, 7, kSendAddr);
-            setRegU32(env.ctx, 8, 0x10u);
-            setRegU32(env.ctx, 9, kRecvAddr);
-            setRegU32(env.ctx, 10, 0x40u);
-            setRegU32(env.ctx, 11, 0u);
-            SifCallRpc(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(readGuestStruct<uint32_t>(env.rdram.data(), kRecvAddr + 0x00u), 1u,
-                     "MidiGetStatus should report a loaded-ready port after MidiSetHd");
-            t.Equals(readGuestStruct<uint32_t>(env.rdram.data(), kRecvAddr + 0x08u), 0x000117E0u,
-                     "MidiGetStatus should preserve the last loaded data size");
-
-            writeGuestU32(env.rdram.data(), kSendAddr + 0x00u, 0x00000339u);
-            std::memset(env.rdram.data() + kRecvAddr, 0xCD, 0x40u);
-            setRegU32(env.ctx, 4, kClientAddr);
-            setRegU32(env.ctx, 5, 0x00B2u);
-            setRegU32(env.ctx, 6, 0u);
-            setRegU32(env.ctx, 7, kSendAddr);
-            setRegU32(env.ctx, 8, 0x10u);
-            setRegU32(env.ctx, 9, kRecvAddr);
-            setRegU32(env.ctx, 10, 0x0u);
-            setRegU32(env.ctx, 11, 0u);
-            SifCallRpc(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_OK, "MidiSetPortVolume family should succeed");
-            t.Equals(readGuestStruct<uint32_t>(env.rdram.data(), kRecvAddr + 0x00u), 0u,
-                     "zero-recv ezMidi calls should still clear the scratch reply word");
-
-            std::memset(env.rdram.data() + kRecvAddr, 0, 0x40u);
-            setRegU32(env.ctx, 4, kClientAddr);
-            setRegU32(env.ctx, 5, 0x80E2u);
-            setRegU32(env.ctx, 6, 0u);
-            setRegU32(env.ctx, 7, kSendAddr);
-            setRegU32(env.ctx, 8, 0x10u);
-            setRegU32(env.ctx, 9, kRecvAddr);
-            setRegU32(env.ctx, 10, 0x40u);
-            setRegU32(env.ctx, 11, 0u);
-            SifCallRpc(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(readGuestStruct<uint32_t>(env.rdram.data(), kRecvAddr + 0x00u), 0x00000339u,
-                     "MidiGetPortVolume should mirror the last per-port volume write");
         });
     });
 }

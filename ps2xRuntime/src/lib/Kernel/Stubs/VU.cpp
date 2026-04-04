@@ -54,6 +54,52 @@ namespace ps2_stubs
             std::memcpy(ptr, in, sizeof(in));
             return true;
         }
+
+        bool readVuMatrix4f(uint8_t *rdram, uint32_t addr, float (&out)[16])
+        {
+            const uint8_t *ptr = getConstMemPtr(rdram, addr);
+            if (!ptr)
+            {
+                return false;
+            }
+            std::memcpy(out, ptr, sizeof(out));
+            return true;
+        }
+
+        bool writeVuMatrix4f(uint8_t *rdram, uint32_t addr, const float (&in)[16])
+        {
+            uint8_t *ptr = getMemPtr(rdram, addr);
+            if (!ptr)
+            {
+                return false;
+            }
+            std::memcpy(ptr, in, sizeof(in));
+            return true;
+        }
+
+        void mulVuMatrix(const float (&lhs)[16], const float (&rhs)[16], float (&out)[16])
+        {
+            std::fill(std::begin(out), std::end(out), 0.0f);
+            for (int i = 0; i < 4; ++i)
+            {
+                for (int j = 0; j < 4; ++j)
+                {
+                    for (int k = 0; k < 4; ++k)
+                    {
+                        out[4 * i + j] += rhs[4 * k + j] * lhs[4 * i + k];
+                    }
+                }
+            }
+        }
+
+        void makeIdentityMatrix(float (&out)[16])
+        {
+            std::fill(std::begin(out), std::end(out), 0.0f);
+            out[0] = 1.0f;
+            out[5] = 1.0f;
+            out[10] = 1.0f;
+            out[15] = 1.0f;
+        }
     }
 
     void sceVpu0Reset(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -80,7 +126,23 @@ namespace ps2_stubs
 
     void sceVu0ApplyMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        TODO_NAMED("sceVu0ApplyMatrix", rdram, ctx, runtime);
+        const uint32_t dstAddr = getRegU32(ctx, 4);
+        const uint32_t matrixAddr = getRegU32(ctx, 5);
+        const uint32_t srcAddr = getRegU32(ctx, 6);
+        float matrix[16]{};
+        float src[4]{};
+        float out[4]{};
+        if (readVuMatrix4f(rdram, matrixAddr, matrix) && readVuVec4f(rdram, srcAddr, src))
+        {
+            // Match libvux VuxApplyMatrix math while honoring the imported EE ABI:
+            // a0=out, a1=matrix, a2=vector.
+            out[0] = (matrix[0] * src[0]) + (matrix[4] * src[1]) + (matrix[8] * src[2]) + (matrix[12] * src[3]);
+            out[1] = (matrix[1] * src[0]) + (matrix[5] * src[1]) + (matrix[9] * src[2]) + (matrix[13] * src[3]);
+            out[2] = (matrix[2] * src[0]) + (matrix[6] * src[1]) + (matrix[10] * src[2]) + (matrix[14] * src[3]);
+            out[3] = (matrix[3] * src[0]) + (matrix[7] * src[1]) + (matrix[11] * src[2]) + (matrix[15] * src[3]);
+            (void)writeVuVec4f(rdram, dstAddr, out);
+        }
+        setReturnS32(ctx, 0);
     }
 
     void sceVu0CameraMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -110,17 +172,41 @@ namespace ps2_stubs
 
     void sceVu0CopyMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        TODO_NAMED("sceVu0CopyMatrix", rdram, ctx, runtime);
+        const uint32_t dstAddr = getRegU32(ctx, 4);
+        const uint32_t srcAddr = getRegU32(ctx, 5);
+        uint8_t *dst = getMemPtr(rdram, dstAddr);
+        const uint8_t *src = getConstMemPtr(rdram, srcAddr);
+        if (dst && src)
+        {
+            std::memcpy(dst, src, sizeof(float) * 16u);
+        }
+        setReturnS32(ctx, 0);
     }
 
     void sceVu0CopyVector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        TODO_NAMED("sceVu0CopyVector", rdram, ctx, runtime);
+        const uint32_t dstAddr = getRegU32(ctx, 4);
+        const uint32_t srcAddr = getRegU32(ctx, 5);
+        uint8_t *dst = getMemPtr(rdram, dstAddr);
+        const uint8_t *src = getConstMemPtr(rdram, srcAddr);
+        if (dst && src)
+        {
+            std::memcpy(dst, src, sizeof(float) * 4u);
+        }
+        setReturnS32(ctx, 0);
     }
 
     void sceVu0CopyVectorXYZ(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        TODO_NAMED("sceVu0CopyVectorXYZ", rdram, ctx, runtime);
+        const uint32_t dstAddr = getRegU32(ctx, 4);
+        const uint32_t srcAddr = getRegU32(ctx, 5);
+        uint8_t *dst = getMemPtr(rdram, dstAddr);
+        const uint8_t *src = getConstMemPtr(rdram, srcAddr);
+        if (dst && src)
+        {
+            std::memcpy(dst, src, sizeof(float) * 3u);
+        }
+        setReturnS32(ctx, 0);
     }
 
     void sceVu0DivVector(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -323,17 +409,65 @@ namespace ps2_stubs
 
     void sceVu0RotMatrixX(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        TODO_NAMED("sceVu0RotMatrixX", rdram, ctx, runtime);
+        const uint32_t dstAddr = getRegU32(ctx, 4);
+        const uint32_t srcAddr = getRegU32(ctx, 5);
+        const float angle = ctx ? ctx->f[12] : 0.0f;
+        float src[16]{}, rot[16]{}, out[16]{};
+        if (readVuMatrix4f(rdram, srcAddr, src))
+        {
+            makeIdentityMatrix(rot);
+            const float cs = std::cos(angle);
+            const float sn = std::sin(angle);
+            rot[5] = cs;
+            rot[6] = sn;
+            rot[9] = -sn;
+            rot[10] = cs;
+            mulVuMatrix(src, rot, out);
+            (void)writeVuMatrix4f(rdram, dstAddr, out);
+        }
+        setReturnS32(ctx, 0);
     }
 
     void sceVu0RotMatrixY(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        TODO_NAMED("sceVu0RotMatrixY", rdram, ctx, runtime);
+        const uint32_t dstAddr = getRegU32(ctx, 4);
+        const uint32_t srcAddr = getRegU32(ctx, 5);
+        const float angle = ctx ? ctx->f[12] : 0.0f;
+        float src[16]{}, rot[16]{}, out[16]{};
+        if (readVuMatrix4f(rdram, srcAddr, src))
+        {
+            makeIdentityMatrix(rot);
+            const float cs = std::cos(angle);
+            const float sn = std::sin(angle);
+            rot[0] = cs;
+            rot[2] = -sn;
+            rot[8] = sn;
+            rot[10] = cs;
+            mulVuMatrix(src, rot, out);
+            (void)writeVuMatrix4f(rdram, dstAddr, out);
+        }
+        setReturnS32(ctx, 0);
     }
 
     void sceVu0RotMatrixZ(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        TODO_NAMED("sceVu0RotMatrixZ", rdram, ctx, runtime);
+        const uint32_t dstAddr = getRegU32(ctx, 4);
+        const uint32_t srcAddr = getRegU32(ctx, 5);
+        const float angle = ctx ? ctx->f[12] : 0.0f;
+        float src[16]{}, rot[16]{}, out[16]{};
+        if (readVuMatrix4f(rdram, srcAddr, src))
+        {
+            makeIdentityMatrix(rot);
+            const float cs = std::cos(angle);
+            const float sn = std::sin(angle);
+            rot[0] = cs;
+            rot[1] = sn;
+            rot[4] = -sn;
+            rot[5] = cs;
+            mulVuMatrix(src, rot, out);
+            (void)writeVuMatrix4f(rdram, dstAddr, out);
+        }
+        setReturnS32(ctx, 0);
     }
 
     void sceVu0RotTransPers(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -402,7 +536,22 @@ namespace ps2_stubs
 
     void sceVu0TransposeMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        TODO_NAMED("sceVu0TransposeMatrix", rdram, ctx, runtime);
+        const uint32_t dstAddr = getRegU32(ctx, 4);
+        const uint32_t srcAddr = getRegU32(ctx, 5);
+        float src[16]{};
+        float out[16]{};
+        if (readVuMatrix4f(rdram, srcAddr, src))
+        {
+            for (int row = 0; row < 4; ++row)
+            {
+                for (int col = 0; col < 4; ++col)
+                {
+                    out[4 * row + col] = src[4 * col + row];
+                }
+            }
+            (void)writeVuMatrix4f(rdram, dstAddr, out);
+        }
+        setReturnS32(ctx, 0);
     }
 
     void sceVu0UnitMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
