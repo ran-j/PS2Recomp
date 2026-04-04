@@ -10,6 +10,7 @@
 #include <string>
 #include <filesystem>
 #include <exception>
+#include <algorithm>
 
 namespace
 {
@@ -54,10 +55,10 @@ namespace
         size_t dot = result.find('.');
         if (dot != std::string::npos)
             result.erase(dot, 1);
-#if !defined(PLATFORM_VITA)
+
         std::ranges::transform(result, result.begin(), [](unsigned char character)
                                { return static_cast<char>(std::toupper(character)); });
-#endif
+
         return result;
     }
 
