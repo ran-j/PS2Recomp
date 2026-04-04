@@ -5,6 +5,23 @@ project(PS2Runtime VERSION 0.1.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+option(PS2X_ENABLE_RUNNER_UNITY_BUILD "Build ps2EntryRunner with CMake unity build" ON)
+set(PS2X_RUNNER_UNITY_BUILD_BATCH_SIZE 8 CACHE STRING "Unity build batch size for ps2EntryRunner")
+option(PS2X_ENABLE_SCCACHE "Use sccache as compiler launcher when available" ON)
+
+if(PS2X_ENABLE_SCCACHE)
+    find_program(PS2X_SCCACHE_PROGRAM sccache)
+    if(PS2X_SCCACHE_PROGRAM)
+        if(CMAKE_C_COMPILER)
+            set(CMAKE_C_COMPILER_LAUNCHER "${PS2X_SCCACHE_PROGRAM}")
+        endif()
+        set(CMAKE_CXX_COMPILER_LAUNCHER "${PS2X_SCCACHE_PROGRAM}")
+        message(STATUS "Using sccache: ${PS2X_SCCACHE_PROGRAM}")
+    else()
+        message(STATUS "sccache not found; continuing without compiler launcher")
+    endif()
+endif()
+
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/ReleaseMode.cmake")
 
 set(PS2X_IS_VITA OFF)
@@ -185,6 +202,13 @@ endif()
 add_executable(ps2EntryRunner
     ${RUNNER_SRC_FILES}
 )
+
+if(PS2X_ENABLE_RUNNER_UNITY_BUILD)
+    set_target_properties(ps2EntryRunner PROPERTIES
+        UNITY_BUILD ON
+        UNITY_BUILD_BATCH_SIZE "${PS2X_RUNNER_UNITY_BUILD_BATCH_SIZE}"
+    )
+endif()
 
 if(PS2X_DEFAULT_BOOT_ELF_DEFINE)
     target_compile_definitions(ps2EntryRunner PRIVATE

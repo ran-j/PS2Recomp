@@ -33,6 +33,36 @@ namespace
         return r | (g << 8) | (b << 16) | (a << 24);
     }
 
+    uint32_t applyTexa(const GSTexaReg &texa, uint8_t psm, uint32_t texel)
+    {
+        if (psm == GS_PSM_CT32)
+            return texel;
+
+        const uint8_t r = static_cast<uint8_t>(texel & 0xFFu);
+        const uint8_t g = static_cast<uint8_t>((texel >> 8) & 0xFFu);
+        const uint8_t b = static_cast<uint8_t>((texel >> 16) & 0xFFu);
+        const bool rgbZero = r == 0u && g == 0u && b == 0u;
+        uint8_t a = static_cast<uint8_t>((texel >> 24) & 0xFFu);
+
+        switch (psm)
+        {
+        case GS_PSM_CT24:
+            a = (texa.aem && rgbZero) ? 0u : texa.ta0;
+            break;
+        case GS_PSM_CT16:
+        case GS_PSM_CT16S:
+            if ((a & 0x80u) != 0u)
+                a = texa.ta1;
+            else
+                a = (texa.aem && rgbZero) ? 0u : texa.ta0;
+            break;
+        default:
+            break;
+        }
+
+        return (texel & 0x00FFFFFFu) | (static_cast<uint32_t>(a) << 24);
+    }
+
     uint16_t encodePSMCT16(uint8_t r, uint8_t g, uint8_t b, uint8_t a)
     {
         return static_cast<uint16_t>(((r >> 3) & 0x1Fu) |
@@ -137,47 +167,40 @@ namespace
                                         uint8_t tb,
                                         uint8_t ta)
     {
-        const bool useTextureRgb = tex.tcc != 0u;
-        TextureCombineResult out{vr, vg, vb, ta};
+        const bool textureHasAlpha = tex.tcc != 0u;
+        TextureCombineResult out{tr, tg, tb, textureHasAlpha ? ta : va};
 
         switch (tex.tfx)
         {
-        case 0:
-            if (useTextureRgb)
-            {
-                out.r = clampU8((tr * vr) >> 7);
-                out.g = clampU8((tg * vg) >> 7);
-                out.b = clampU8((tb * vb) >> 7);
-            }
-            out.a = clampU8((ta * va) >> 7);
+        case 0: // MODULATE
+            out.r = clampU8((tr * vr) >> 7);
+            out.g = clampU8((tg * vg) >> 7);
+            out.b = clampU8((tb * vb) >> 7);
+            out.a = textureHasAlpha ? clampU8((ta * va) >> 7) : va;
             break;
-        case 1:
-            if (useTextureRgb)
-            {
-                out.r = tr;
-                out.g = tg;
-                out.b = tb;
-            }
-            out.a = ta;
+        case 1: // DECAL
+            out.r = tr;
+            out.g = tg;
+            out.b = tb;
+            out.a = textureHasAlpha ? ta : va;
             break;
-        case 2:
-        case 3:
-            if (useTextureRgb)
-            {
-                out.r = clampU8((tr * vr) >> 7);
-                out.g = clampU8((tg * vg) >> 7);
-                out.b = clampU8((tb * vb) >> 7);
-            }
-            out.a = ta;
+        case 2: // HIGHLIGHT
+            out.r = clampU8(((tr * vr) >> 7) + va);
+            out.g = clampU8(((tg * vg) >> 7) + va);
+            out.b = clampU8(((tb * vb) >> 7) + va);
+            out.a = textureHasAlpha ? clampU8(ta + va) : va;
+            break;
+        case 3: // HIGHLIGHT2
+            out.r = clampU8(((tr * vr) >> 7) + va);
+            out.g = clampU8(((tg * vg) >> 7) + va);
+            out.b = clampU8(((tb * vb) >> 7) + va);
+            out.a = textureHasAlpha ? ta : va;
             break;
         default:
-            if (useTextureRgb)
-            {
-                out.r = tr;
-                out.g = tg;
-                out.b = tb;
-            }
-            out.a = ta;
+            out.r = tr;
+            out.g = tg;
+            out.b = tb;
+            out.a = textureHasAlpha ? ta : va;
             break;
         }
 
@@ -226,7 +249,7 @@ void GSRasterizer::drawPrimitive(GS *gs)
 {
     const auto &ctx = gs->activeContext();
     PS2_IF_AGRESSIVE_LOGS({
-        const uint32_t primitiveIndex = s_debugPrimitiveCount.fetch_add(1, std::memory_order_relaxed);
+        const uint32_t primitiveIndex = s_debugPrimitiveCount.fetch_add(1u, std::memory_order_relaxed);
         if (primitiveIndex < 64u)
         {
             std::cout << "[gs:prim] idx=" << primitiveIndex
@@ -250,6 +273,11 @@ void GSRasterizer::drawPrimitive(GS *gs)
                       << " cpsm=0x" << std::hex << static_cast<uint32_t>(ctx.tex0.cpsm) << std::dec
                       << " csm=" << static_cast<uint32_t>(ctx.tex0.csm)
                       << " csa=" << static_cast<uint32_t>(ctx.tex0.csa)
+                      << ")"
+                      << " texclut=("
+                      << "cbw=" << static_cast<uint32_t>(gs->m_texclut.cbw)
+                      << " cou=" << static_cast<uint32_t>(gs->m_texclut.cou)
+                      << " cov=" << gs->m_texclut.cov
                       << ")"
                       << " ofx=" << (ctx.xyoffset.ofx >> 4)
                       << " ofy=" << (ctx.xyoffset.ofy >> 4)
@@ -308,6 +336,11 @@ void GSRasterizer::drawPrimitive(GS *gs)
                       << " cpsm=0x" << std::hex << static_cast<uint32_t>(ctx.tex0.cpsm) << std::dec
                       << " csm=" << static_cast<uint32_t>(ctx.tex0.csm)
                       << " csa=" << static_cast<uint32_t>(ctx.tex0.csa)
+                      << ")"
+                      << " texclut=("
+                      << "cbw=" << static_cast<uint32_t>(gs->m_texclut.cbw)
+                      << " cou=" << static_cast<uint32_t>(gs->m_texclut.cou)
+                      << " cov=" << gs->m_texclut.cov
                       << ")"
                       << " ofx=" << (ctx.xyoffset.ofx >> 4)
                       << " ofy=" << (ctx.xyoffset.ofy >> 4)
@@ -567,33 +600,29 @@ uint32_t GSRasterizer::lookupCLUT(GS *gs,
                                   uint8_t csa,
                                   uint8_t sourcePsm)
 {
-    uint32_t clutBase = cbp * 256u;
     const uint32_t clutIndex = resolveClutIndex(index, csm, csa, sourcePsm);
-    const uint32_t clutX = clutIndex & 0x0Fu;
-    const uint32_t clutY = clutIndex >> 4;
+    const uint32_t clutWidth = (gs->m_texclut.cbw != 0u) ? static_cast<uint32_t>(gs->m_texclut.cbw) : 1u;
+    const uint32_t clutX = static_cast<uint32_t>(gs->m_texclut.cou) + (clutIndex & 0x0Fu);
+    const uint32_t clutY = static_cast<uint32_t>(gs->m_texclut.cov) + (clutIndex >> 4);
 
     if (cpsm == GS_PSM_CT32 || cpsm == GS_PSM_CT24)
     {
-        const uint32_t off = GSPSMCT32::addrPSMCT32(cbp, 1u, clutX, clutY);
+        const uint32_t off = GSPSMCT32::addrPSMCT32(cbp, clutWidth, clutX, clutY);
         if (off + 4 > gs->m_vramSize)
             return 0xFFFF00FFu;
         uint32_t color;
         std::memcpy(&color, gs->m_vram + off, 4);
-        return color;
+        return applyTexa(gs->m_texa, cpsm, color);
     }
 
     if (cpsm == GS_PSM_CT16 || cpsm == GS_PSM_CT16S)
     {
-        uint32_t off = addrPSMCT16Family(cbp, 1u, cpsm, clutX, clutY);
+        uint32_t off = addrPSMCT16Family(cbp, clutWidth, cpsm, clutX, clutY);
         if (off + 2 > gs->m_vramSize)
             return 0xFFFF00FFu;
         uint16_t c16;
         std::memcpy(&c16, gs->m_vram + off, 2);
-        uint32_t r = ((c16 >> 0) & 0x1Fu) << 3;
-        uint32_t g = ((c16 >> 5) & 0x1Fu) << 3;
-        uint32_t b = ((c16 >> 10) & 0x1Fu) << 3;
-        uint32_t a = (c16 & 0x8000u) ? 0x80u : 0u;
-        return r | (g << 8) | (b << 16) | (a << 24);
+        return applyTexa(gs->m_texa, cpsm, decodePSMCT16(c16));
     }
 
     return 0xFFFF00FFu;
@@ -626,10 +655,10 @@ uint32_t GSRasterizer::sampleTexture(GS *gs, float s, float t, float q, uint16_t
         sampleV = clampInt(sampleV, 0, texH - 1);
 
         if (tex.psm == GS_PSM_CT32 || tex.psm == GS_PSM_CT24)
-            return readTexelPSMCT32(gs, tex.tbp0, tex.tbw, sampleU, sampleV);
+            return applyTexa(gs->m_texa, tex.psm, readTexelPSMCT32(gs, tex.tbp0, tex.tbw, sampleU, sampleV));
 
         if (tex.psm == GS_PSM_CT16 || tex.psm == GS_PSM_CT16S)
-            return readTexelPSMCT16(gs, tex.tbp0, tex.tbw, sampleU, sampleV);
+            return applyTexa(gs->m_texa, tex.psm, readTexelPSMCT16(gs, tex.tbp0, tex.tbw, sampleU, sampleV));
 
         if (tex.psm == GS_PSM_T4)
         {

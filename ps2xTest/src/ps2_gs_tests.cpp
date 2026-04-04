@@ -1050,6 +1050,60 @@ void register_ps2_gs_tests()
                      "relatching should pick up the updated source frame contents");
         });
 
+        tc.Run("latched host presentation frame is returned tightly packed for narrower display widths", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GSRegisters regs{};
+            regs.pmode = 1ull;
+            regs.dispfb1 =
+                150ull |
+                (1ull << 9) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 15);
+            regs.display1 =
+                (63ull << 32) |
+                (63ull << 44);
+
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), &regs);
+
+            constexpr uint32_t kTopLeft = 0xFF332211u;
+            constexpr uint32_t kTopRight = 0xFF665544u;
+            constexpr uint32_t kBottomLeft = 0xFF998877u;
+            constexpr uint32_t kBottomRight = 0xFFCCBBAAu;
+            writeReferenceFramePSMCT32Pixel(vram, 150u, 1u, 0u, 0u, kTopLeft);
+            writeReferenceFramePSMCT32Pixel(vram, 150u, 1u, 1u, 0u, kTopRight);
+            writeReferenceFramePSMCT32Pixel(vram, 150u, 1u, 0u, 1u, kBottomLeft);
+            writeReferenceFramePSMCT32Pixel(vram, 150u, 1u, 1u, 1u, kBottomRight);
+
+            gs.latchHostPresentationFrame();
+
+            std::vector<uint8_t> latchedFrame;
+            uint32_t latchedWidth = 0u;
+            uint32_t latchedHeight = 0u;
+            t.IsTrue(gs.copyLatchedHostPresentationFrame(latchedFrame, latchedWidth, latchedHeight),
+                     "latched host presentation should be readable for narrow display widths");
+            t.Equals(latchedWidth, 64u,
+                     "latched host presentation should preserve the decoded display width");
+            t.Equals(latchedHeight, 64u,
+                     "latched host presentation should preserve the decoded display height");
+            t.Equals(static_cast<uint32_t>(latchedFrame.size()), 64u * 64u * 4u,
+                     "latched host presentation should return a tightly packed RGBA buffer");
+
+            uint32_t pixel = 0u;
+            std::memcpy(&pixel, latchedFrame.data() + 0u, sizeof(pixel));
+            t.Equals(pixel, kTopLeft,
+                     "latched host presentation should keep the first row intact");
+            std::memcpy(&pixel, latchedFrame.data() + 4u, sizeof(pixel));
+            t.Equals(pixel, kTopRight,
+                     "latched host presentation should pack the first row contiguously");
+            std::memcpy(&pixel, latchedFrame.data() + (64u * 4u), sizeof(pixel));
+            t.Equals(pixel, kBottomLeft,
+                     "latched host presentation should start the second row immediately after the first");
+            std::memcpy(&pixel, latchedFrame.data() + (64u * 4u) + 4u, sizeof(pixel));
+            t.Equals(pixel, kBottomRight,
+                     "latched host presentation should preserve subsequent rows without the internal 640-pixel stride");
+        });
+
         tc.Run("latched host presentation reads preferred CT32 source with GS swizzle", [](TestCase &t)
         {
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
@@ -2342,6 +2396,387 @@ void register_ps2_gs_tests()
             std::memcpy(&pixel, vram.data(), sizeof(pixel));
             t.Equals(pixel, kExpectedColor,
                      "T8 CSM1 CLUT sampling should read CT32-uploaded palette entries through GS swizzled addressing");
+        });
+
+        tc.Run("GS TEX2 updates CLUT state independently from TEX0", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            constexpr uint32_t kTexTbp = 64u;
+            constexpr uint32_t kWrongClutCbp = 128u;
+            constexpr uint32_t kExpectedClutCbp = 192u;
+            constexpr uint64_t kFrameReg =
+                (0ull << 0) |
+                (1ull << 16) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kTex0 =
+                (static_cast<uint64_t>(kTexTbp) << 0) |
+                (1ull << 14) |
+                (static_cast<uint64_t>(GS_PSM_T8) << 20) |
+                (0ull << 26) |
+                (0ull << 30) |
+                (1ull << 34) |
+                (1ull << 35) |
+                (static_cast<uint64_t>(kWrongClutCbp) << 37) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 51) |
+                (1ull << 55);
+            constexpr uint64_t kTex2 =
+                (static_cast<uint64_t>(GS_PSM_T8) << 20) |
+                (static_cast<uint64_t>(kExpectedClutCbp) << 37) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 51) |
+                (1ull << 55);
+            constexpr uint64_t kPrim =
+                static_cast<uint64_t>(GS_PRIM_SPRITE) |
+                (1ull << 4) |
+                (1ull << 8);
+            constexpr uint32_t kWrongColor = 0xFF00FF00u;
+            constexpr uint32_t kExpectedColor = 0xFF0000FFu;
+
+            const uint32_t texOff = GSPSMT8::addrPSMT8(kTexTbp, 1u, 0u, 0u);
+            vram[texOff] = 8u;
+
+            const uint32_t wrongClutOff = GSPSMCT32::addrPSMCT32(kWrongClutCbp, 1u, 8u, 0u);
+            const uint32_t expectedClutOff = GSPSMCT32::addrPSMCT32(kExpectedClutCbp, 1u, 8u, 0u);
+            std::memcpy(vram.data() + wrongClutOff, &kWrongColor, sizeof(kWrongColor));
+            std::memcpy(vram.data() + expectedClutOff, &kExpectedColor, sizeof(kExpectedColor));
+
+            gs.writeRegister(GS_REG_FRAME_1, kFrameReg);
+            gs.writeRegister(GS_REG_SCISSOR_1, 0ull);
+            gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0ull);
+            gs.writeRegister(GS_REG_ALPHA_1, 0ull);
+            gs.writeRegister(GS_REG_TEX0_1, kTex0);
+            gs.writeRegister(GS_REG_TEX2_1, kTex2);
+            gs.writeRegister(GS_REG_PRIM, kPrim);
+            gs.writeRegister(GS_REG_RGBAQ, 0x80808080ull);
+            gs.writeRegister(GS_REG_UV, 0ull);
+            gs.writeRegister(GS_REG_XYZ2, 0ull);
+            gs.writeRegister(GS_REG_UV, 0ull);
+            gs.writeRegister(GS_REG_XYZ2, (16ull << 0) | (16ull << 16));
+
+            uint32_t pixel = 0u;
+            std::memcpy(&pixel, vram.data(), sizeof(pixel));
+            t.Equals(pixel, kExpectedColor,
+                     "TEX2 should override the active CLUT base and format state without requiring a new TEX0 write");
+        });
+
+        tc.Run("GS TEXCLUT offsets T8 CLUT fetch coordinates", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            constexpr uint32_t kTexTbp = 64u;
+            constexpr uint32_t kClutCbp = 128u;
+            constexpr uint64_t kFrameReg =
+                (0ull << 0) |
+                (1ull << 16) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kTex0 =
+                (static_cast<uint64_t>(kTexTbp) << 0) |
+                (1ull << 14) |
+                (static_cast<uint64_t>(GS_PSM_T8) << 20) |
+                (0ull << 26) |
+                (0ull << 30) |
+                (1ull << 34) |
+                (1ull << 35) |
+                (static_cast<uint64_t>(kClutCbp) << 37) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 51) |
+                (1ull << 55);
+            constexpr uint64_t kTexClut =
+                (1ull << 0) |
+                (3ull << 6) |
+                (2ull << 12);
+            constexpr uint64_t kPrim =
+                static_cast<uint64_t>(GS_PRIM_SPRITE) |
+                (1ull << 4) |
+                (1ull << 8);
+            constexpr uint32_t kWrongColor = 0xFF00FF00u;
+            constexpr uint32_t kExpectedColor = 0xFF3366CCu;
+
+            const uint32_t texOff = GSPSMT8::addrPSMT8(kTexTbp, 1u, 0u, 0u);
+            vram[texOff] = 0u;
+
+            const uint32_t wrongClutOff = GSPSMCT32::addrPSMCT32(kClutCbp, 1u, 0u, 0u);
+            const uint32_t expectedClutOff = GSPSMCT32::addrPSMCT32(kClutCbp, 1u, 3u, 2u);
+            std::memcpy(vram.data() + wrongClutOff, &kWrongColor, sizeof(kWrongColor));
+            std::memcpy(vram.data() + expectedClutOff, &kExpectedColor, sizeof(kExpectedColor));
+
+            gs.writeRegister(GS_REG_FRAME_1, kFrameReg);
+            gs.writeRegister(GS_REG_SCISSOR_1, 0ull);
+            gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0ull);
+            gs.writeRegister(GS_REG_ALPHA_1, 0ull);
+            gs.writeRegister(GS_REG_TEX0_1, kTex0);
+            gs.writeRegister(GS_REG_TEXCLUT, kTexClut);
+            gs.writeRegister(GS_REG_PRIM, kPrim);
+            gs.writeRegister(GS_REG_RGBAQ, 0x80808080ull);
+            gs.writeRegister(GS_REG_UV, 0ull);
+            gs.writeRegister(GS_REG_XYZ2, 0ull);
+            gs.writeRegister(GS_REG_UV, 0ull);
+            gs.writeRegister(GS_REG_XYZ2, (16ull << 0) | (16ull << 16));
+
+            uint32_t pixel = 0u;
+            std::memcpy(&pixel, vram.data(), sizeof(pixel));
+            t.Equals(pixel, kExpectedColor,
+                     "TEXCLUT should offset the CLUT lookup coordinates instead of always starting from the CLUT base");
+        });
+
+        tc.Run("GS TEXA expands CT24 alpha and honors AEM for black texels", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            constexpr uint32_t kTexTbp = 64u;
+            constexpr uint64_t kFrameReg =
+                (0ull << 0) |
+                (1ull << 16) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kScissor =
+                (0ull << 0) |
+                (1ull << 16) |
+                (0ull << 32) |
+                (0ull << 48);
+            constexpr uint64_t kTex0 =
+                (static_cast<uint64_t>(kTexTbp) << 0) |
+                (1ull << 14) |
+                (static_cast<uint64_t>(GS_PSM_CT24) << 20) |
+                (1ull << 26) |
+                (0ull << 30) |
+                (1ull << 34) |
+                (1ull << 35);
+            constexpr uint64_t kTexa =
+                (0x55ull << 0) |
+                (1ull << 15) |
+                (0xAAull << 32);
+            constexpr uint64_t kPrim =
+                static_cast<uint64_t>(GS_PRIM_SPRITE) |
+                (1ull << 4) |
+                (1ull << 8);
+            constexpr uint32_t kExpectedRed = 0x550000FFu;
+            constexpr uint32_t kExpectedBlack = 0x00000000u;
+
+            const uint32_t redOff = GSPSMCT32::addrPSMCT32(kTexTbp, 1u, 0u, 0u);
+            vram[redOff + 0u] = 0xFFu;
+            vram[redOff + 1u] = 0x00u;
+            vram[redOff + 2u] = 0x00u;
+            vram[redOff + 3u] = 0x00u;
+
+            const uint32_t blackOff = GSPSMCT32::addrPSMCT32(kTexTbp, 1u, 1u, 0u);
+            vram[blackOff + 0u] = 0x00u;
+            vram[blackOff + 1u] = 0x00u;
+            vram[blackOff + 2u] = 0x00u;
+            vram[blackOff + 3u] = 0x00u;
+
+            gs.writeRegister(GS_REG_FRAME_1, kFrameReg);
+            gs.writeRegister(GS_REG_SCISSOR_1, kScissor);
+            gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0ull);
+            gs.writeRegister(GS_REG_ALPHA_1, 0ull);
+            gs.writeRegister(GS_REG_TEX0_1, kTex0);
+            gs.writeRegister(GS_REG_TEXA, kTexa);
+            gs.writeRegister(GS_REG_PRIM, kPrim);
+            gs.writeRegister(GS_REG_RGBAQ, 0x80808080ull);
+
+            gs.writeRegister(GS_REG_UV, 0ull);
+            gs.writeRegister(GS_REG_XYZ2, 0ull);
+            gs.writeRegister(GS_REG_UV, 0ull);
+            gs.writeRegister(GS_REG_XYZ2, (16ull << 0) | (16ull << 16));
+
+            gs.writeRegister(GS_REG_UV, (16ull << 0));
+            gs.writeRegister(GS_REG_XYZ2, (16ull << 0));
+            gs.writeRegister(GS_REG_UV, (16ull << 0));
+            gs.writeRegister(GS_REG_XYZ2, (32ull << 0) | (16ull << 16));
+
+            const uint32_t redPixel = readReferencePSMCT32Pixel(vram, 0u, 1u, 0u, 0u);
+            const uint32_t blackPixel = readReferencePSMCT32Pixel(vram, 0u, 1u, 1u, 0u);
+            t.Equals(redPixel, kExpectedRed,
+                     "TEXA should supply TA0 as the alpha for non-alpha CT24 texels");
+            t.Equals(blackPixel, kExpectedBlack,
+                     "TEXA AEM should force zero alpha when a CT24 texel is RGB=0");
+        });
+
+        tc.Run("GS TCC=0 MODULATE uses texture RGB and keeps vertex alpha", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            constexpr uint32_t kTexTbp = 64u;
+            constexpr uint64_t kFrameReg =
+                (0ull << 0) |
+                (1ull << 16) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kScissor =
+                (0ull << 0) |
+                (0ull << 16) |
+                (0ull << 32) |
+                (0ull << 48);
+            constexpr uint64_t kTex0 =
+                (static_cast<uint64_t>(kTexTbp) << 0) |
+                (1ull << 14) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 20) |
+                (0ull << 26) |
+                (0ull << 30) |
+                (0ull << 34) |
+                (0ull << 35);
+            constexpr uint64_t kPrim =
+                static_cast<uint64_t>(GS_PRIM_SPRITE) |
+                (1ull << 4) |
+                (1ull << 8);
+            constexpr uint32_t kTexturePixel =
+                0x12u |
+                (0x34u << 8) |
+                (0x56u << 16) |
+                (0x78u << 24);
+            constexpr uint32_t kExpectedPixel =
+                0x12u |
+                (0x34u << 8) |
+                (0x56u << 16) |
+                (0x44u << 24);
+
+            const uint32_t texOff = GSPSMCT32::addrPSMCT32(kTexTbp, 1u, 0u, 0u);
+            std::memcpy(vram.data() + texOff, &kTexturePixel, sizeof(kTexturePixel));
+
+            gs.writeRegister(GS_REG_FRAME_1, kFrameReg);
+            gs.writeRegister(GS_REG_SCISSOR_1, kScissor);
+            gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0ull);
+            gs.writeRegister(GS_REG_ALPHA_1, 0ull);
+            gs.writeRegister(GS_REG_TEX0_1, kTex0);
+            gs.writeRegister(GS_REG_PRIM, kPrim);
+            gs.writeRegister(GS_REG_RGBAQ, 0x44808080ull);
+            gs.writeRegister(GS_REG_UV, 0ull);
+            gs.writeRegister(GS_REG_XYZ2, 0ull);
+            gs.writeRegister(GS_REG_UV, 0ull);
+            gs.writeRegister(GS_REG_XYZ2, (16ull << 0) | (16ull << 16));
+
+            const uint32_t pixel = readReferencePSMCT32Pixel(vram, 0u, 1u, 0u, 0u);
+            t.Equals(pixel, kExpectedPixel,
+                     "TCC=0 MODULATE should still use texture RGB while sourcing alpha from the shaded vertex");
+        });
+
+        tc.Run("GS HIGHLIGHT adds vertex alpha into RGB and texture alpha into A", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            constexpr uint32_t kTexTbp = 64u;
+            constexpr uint64_t kFrameReg =
+                (0ull << 0) |
+                (1ull << 16) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kScissor =
+                (0ull << 0) |
+                (0ull << 16) |
+                (0ull << 32) |
+                (0ull << 48);
+            constexpr uint64_t kTex0 =
+                (static_cast<uint64_t>(kTexTbp) << 0) |
+                (1ull << 14) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 20) |
+                (0ull << 26) |
+                (0ull << 30) |
+                (1ull << 34) |
+                (2ull << 35);
+            constexpr uint64_t kPrim =
+                static_cast<uint64_t>(GS_PRIM_SPRITE) |
+                (1ull << 4) |
+                (1ull << 8);
+            constexpr uint32_t kTexturePixel =
+                0x20u |
+                (0x40u << 8) |
+                (0x60u << 16) |
+                (0x10u << 24);
+            constexpr uint32_t kExpectedPixel =
+                0x40u |
+                (0x60u << 8) |
+                (0x80u << 16) |
+                (0x30u << 24);
+
+            const uint32_t texOff = GSPSMCT32::addrPSMCT32(kTexTbp, 1u, 0u, 0u);
+            std::memcpy(vram.data() + texOff, &kTexturePixel, sizeof(kTexturePixel));
+
+            gs.writeRegister(GS_REG_FRAME_1, kFrameReg);
+            gs.writeRegister(GS_REG_SCISSOR_1, kScissor);
+            gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0ull);
+            gs.writeRegister(GS_REG_ALPHA_1, 0ull);
+            gs.writeRegister(GS_REG_TEX0_1, kTex0);
+            gs.writeRegister(GS_REG_PRIM, kPrim);
+            gs.writeRegister(GS_REG_RGBAQ, 0x20808080ull);
+            gs.writeRegister(GS_REG_UV, 0ull);
+            gs.writeRegister(GS_REG_XYZ2, 0ull);
+            gs.writeRegister(GS_REG_UV, 0ull);
+            gs.writeRegister(GS_REG_XYZ2, (16ull << 0) | (16ull << 16));
+
+            const uint32_t pixel = readReferencePSMCT32Pixel(vram, 0u, 1u, 0u, 0u);
+            t.Equals(pixel, kExpectedPixel,
+                     "HIGHLIGHT should add the shaded vertex alpha into RGB and accumulate texture plus vertex alpha");
+        });
+
+        tc.Run("GS HIGHLIGHT2 keeps texture alpha while adding vertex alpha into RGB", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            constexpr uint32_t kTexTbp = 64u;
+            constexpr uint64_t kFrameReg =
+                (0ull << 0) |
+                (1ull << 16) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kScissor =
+                (0ull << 0) |
+                (0ull << 16) |
+                (0ull << 32) |
+                (0ull << 48);
+            constexpr uint64_t kTex0 =
+                (static_cast<uint64_t>(kTexTbp) << 0) |
+                (1ull << 14) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 20) |
+                (0ull << 26) |
+                (0ull << 30) |
+                (1ull << 34) |
+                (3ull << 35);
+            constexpr uint64_t kPrim =
+                static_cast<uint64_t>(GS_PRIM_SPRITE) |
+                (1ull << 4) |
+                (1ull << 8);
+            constexpr uint32_t kTexturePixel =
+                0x20u |
+                (0x40u << 8) |
+                (0x60u << 16) |
+                (0x10u << 24);
+            constexpr uint32_t kExpectedPixel =
+                0x40u |
+                (0x60u << 8) |
+                (0x80u << 16) |
+                (0x10u << 24);
+
+            const uint32_t texOff = GSPSMCT32::addrPSMCT32(kTexTbp, 1u, 0u, 0u);
+            std::memcpy(vram.data() + texOff, &kTexturePixel, sizeof(kTexturePixel));
+
+            gs.writeRegister(GS_REG_FRAME_1, kFrameReg);
+            gs.writeRegister(GS_REG_SCISSOR_1, kScissor);
+            gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0ull);
+            gs.writeRegister(GS_REG_ALPHA_1, 0ull);
+            gs.writeRegister(GS_REG_TEX0_1, kTex0);
+            gs.writeRegister(GS_REG_PRIM, kPrim);
+            gs.writeRegister(GS_REG_RGBAQ, 0x20808080ull);
+            gs.writeRegister(GS_REG_UV, 0ull);
+            gs.writeRegister(GS_REG_XYZ2, 0ull);
+            gs.writeRegister(GS_REG_UV, 0ull);
+            gs.writeRegister(GS_REG_XYZ2, (16ull << 0) | (16ull << 16));
+
+            const uint32_t pixel = readReferencePSMCT32Pixel(vram, 0u, 1u, 0u, 0u);
+            t.Equals(pixel, kExpectedPixel,
+                     "HIGHLIGHT2 should add the shaded vertex alpha into RGB while preserving the texture alpha");
         });
 
         tc.Run("GS TEX1 linear filter blends T4 STQ triangle samples", [](TestCase &t)

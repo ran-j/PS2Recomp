@@ -509,6 +509,34 @@ void register_ps2_runtime_io_tests()
             t.Equals(readGuestS32(test.rdram.data(), formatAddr), 0, "sceMcGetInfo should report an unformatted card after sceMcUnformat");
         });
 
+        tc.Run("sceMcEnd resets libmc state so sync reports no active command", [](TestCase &t)
+        {
+            TestContext test;
+
+            constexpr uint32_t dirAddr = GUEST_STRING_AREA_START + 0xB00;
+
+            clearContext(test.ctx);
+            ps2_stubs::sceMcInit(test.rdram.data(), &test.ctx, nullptr);
+            t.Equals(getRegS32(&test.ctx, 2), 0, "sceMcInit should succeed");
+
+            writeGuestString(test.rdram.data(), dirAddr, "/SAVEDATA");
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 4, 0u);
+            setRegU32(test.ctx, 5, 0u);
+            setRegU32(test.ctx, 6, dirAddr);
+            ps2_stubs::sceMcMkdir(test.rdram.data(), &test.ctx, nullptr);
+            int32_t cmd = 0;
+            t.Equals(syncMc(test.rdram, &cmd), 0, "sceMcMkdir should complete before teardown");
+            t.Equals(cmd, 0x0B, "sceMcSync should report MKDIR before teardown");
+
+            clearContext(test.ctx);
+            ps2_stubs::sceMcEnd(test.rdram.data(), &test.ctx, nullptr);
+            t.Equals(getRegS32(&test.ctx, 2), 0, "sceMcEnd should succeed");
+
+            t.Equals(syncMc(test.rdram, &cmd), 0, "sceMcSync should report cleared result after sceMcEnd");
+            t.Equals(cmd, 0, "sceMcEnd should clear the last active libmc command");
+        });
+
         tc.Run("sceIoctl cmd1 updates wait flag state", [](TestCase &t)
         {
             TestContext test;

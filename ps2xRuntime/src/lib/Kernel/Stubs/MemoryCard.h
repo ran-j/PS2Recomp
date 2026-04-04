@@ -8,6 +8,7 @@ namespace ps2_stubs
     void sceMcChdir(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceMcClose(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceMcDelete(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void sceMcEnd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceMcFlush(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceMcFormat(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceMcGetDir(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);

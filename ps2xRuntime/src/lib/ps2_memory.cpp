@@ -1,5 +1,6 @@
 #include "runtime/ps2_memory.h"
 #include "ps2_log.h"
+#include <atomic>
 #include <iostream>
 #include <cstring>
 #include <stdexcept>
@@ -168,6 +169,10 @@ bool PS2Memory::initialize(size_t ramSize)
     m_gsWriteCount.store(0, std::memory_order_relaxed);
     m_vifWriteCount.store(0, std::memory_order_relaxed);
     m_codeRegions.clear();
+    m_path3Masked = false;
+    m_path3MaskedFifo.clear();
+    m_vif1PendingPath2ImageQwc = 0u;
+    m_vif1PendingPath2DirectHl = false;
 
     try
     {
@@ -750,6 +755,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
             if (value & 0x1u) // RST
             {
                 std::memset(&vif1_regs, 0, sizeof(vif1_regs));
+                m_vif1PendingPath2ImageQwc = 0u;
+                m_vif1PendingPath2DirectHl = false;
             }
             if (value & 0x8u) // STC
             {
@@ -861,15 +868,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         const uint64_t bytes64 = static_cast<uint64_t>(qwCount) * 16ull;
                         uint32_t bytes = (bytes64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu : static_cast<uint32_t>(bytes64);
                         const bool scratch = isScratchpad(srcAddr);
-                        uint32_t src = 0;
-                        try
-                        {
-                            src = translateAddress(srcAddr);
-                        }
-                        catch (...)
-                        {
-                            return;
-                        }
+                        uint32_t src = 0; 
+                        src = translateAddress(srcAddr); 
                         const uint8_t *base2;
                         uint32_t maxSz2;
                         if (scratch)
@@ -891,10 +891,27 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         chainBuf.insert(chainBuf.end(), base2 + src, base2 + src + bytes);
                     };
 
+                    auto appendCompactVif1TagData = [&](uint32_t localTagAddr, uint32_t qwCount)
+                    {
+                        uint32_t tagPhys = 0u;
+                        const bool tagScratch = isScratchpad(localTagAddr); 
+                        tagPhys = translateAddress(localTagAddr);
+                        
+                        const uint8_t *localBase = tagScratch ? m_scratchpad : m_rdram;
+                        const uint32_t localMax = tagScratch ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
+                        if (tagPhys + 16u > localMax)
+                            return;
+
+                        // VIF1 packet helpers embed 8 bytes of VIF stream in the DMAtag's upper half.
+                        chainBuf.insert(chainBuf.end(), localBase + tagPhys + 8u, localBase + tagPhys + 16u);
+                        appendData(localTagAddr + 16u, qwCount);
+                    };
+
                     int tagsProcessed = 0;
 
                     while (tagsProcessed < kMaxChainTags)
                     {
+                        const uint32_t currentTagAddr = tagAddr;
                         const bool tagInSPR = isScratchpad(tagAddr);
                         uint32_t physTag = 0;
                         try
@@ -997,7 +1014,15 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         }
 
                         if (hasPayload)
-                            appendData(dataAddr, tagQwc);
+                        {
+                            const bool compactVif1LocalPayload =
+                                (channelBase == 0x10009000u) &&
+                                (id == 1u || id == 2u || id == 5u || id == 6u || id == 7u);
+                            if (compactVif1LocalPayload)
+                                appendCompactVif1TagData(currentTagAddr, tagQwc);
+                            else
+                                appendData(dataAddr, tagQwc);
+                        }
                         if (irq && tieEnabled)
                             endChain = true;
                         if (endChain)
@@ -1018,10 +1043,18 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         pt.qwc = 0;
                         pt.chainData = std::move(chainBuf);
                         if (channelBase == 0x1000A000)
+                        {
                             m_pendingGifTransfers.push_back(std::move(pt));
+                        }
                         else if (channelBase == 0x10009000)
+                        {
                             m_pendingVif1Transfers.push_back(std::move(pt));
+                        }
                     }
+                    // else if (channelBase == 0x10009000u)
+                    // {
+
+                    // }
                 }
                 else if (qwc > 0)
                 {

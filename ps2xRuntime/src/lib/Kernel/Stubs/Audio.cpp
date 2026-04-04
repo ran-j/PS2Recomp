@@ -6,7 +6,8 @@ namespace ps2_stubs
     namespace
     {
         constexpr uint32_t kLibSdCmdSetParam = 0x8010u;
-        constexpr uint32_t kLibSdCmdBlockTrans = 0x80E0u;
+        constexpr uint32_t kLibSdCmdBlockTrans = 0x80D0u;
+        constexpr uint32_t kLibSdCmdBlockTransAlt = 0x80E0u;
         constexpr uint32_t kAudioPositionMask = 0x00FFFFFFu;
 
         struct AudioStubState
@@ -45,14 +46,20 @@ namespace ps2_stubs
         const uint32_t cmdArg0 = getRegU32(ctx, 6);
         const uint32_t cmdArg1 = getRegU32(ctx, 7);
         const uint32_t sp = getRegU32(ctx, 29);
-        const uint32_t arg4 = FAST_READ32(sp + 0x10u);
-        const uint32_t arg5 = FAST_READ32(sp + 0x14u);
-        const uint32_t arg6 = FAST_READ32(sp + 0x18u);
+        const uint32_t arg4Reg = getRegU32(ctx, 8);
+        const uint32_t arg5Reg = getRegU32(ctx, 9);
+        const uint32_t arg6Reg = getRegU32(ctx, 10);
+        const uint32_t arg4Stk = FAST_READ32(sp + 0x10u);
+        const uint32_t arg5Stk = FAST_READ32(sp + 0x14u);
+        const uint32_t arg6Stk = FAST_READ32(sp + 0x18u);
+        const uint32_t arg4 = (arg4Reg != 0u) ? arg4Reg : arg4Stk;
+        const uint32_t arg5 = (arg5Reg != 0u) ? arg5Reg : arg5Stk;
+        const uint32_t arg6 = (arg6Reg != 0u) ? arg6Reg : arg6Stk;
 
         std::lock_guard<std::mutex> lock(g_audio_stub_mutex);
         g_audio_stub_state.initialized = true;
 
-        if (cmd == kLibSdCmdBlockTrans)
+        if (cmd == kLibSdCmdBlockTrans || cmd == kLibSdCmdBlockTransAlt)
         {
             if (arg4 != 0u)
             {

@@ -13,6 +13,7 @@
 #include "Stubs/MPEG.h"
 #include "Stubs/Audio.h"
 #include "Stubs/GS.h"
+#include "Stubs/VU.h"
 
 #include <atomic>
 #include <chrono>
@@ -1119,6 +1120,154 @@ void register_ps2_runtime_expansion_tests()
             DeleteEventFlag(rdram.data(), &deleteCtx, &runtime);
             runtime.requestStop();
             notifyRuntimeStop();
+        });
+
+        tc.Run("sceVu0ApplyMatrix uses libvux matrix math with the imported EE ABI", [](TestCase &t)
+        {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            R5900Context ctx{};
+
+            constexpr uint32_t kOutAddr = 0x00100000u;
+            constexpr uint32_t kMatrixAddr = 0x00100040u;
+            constexpr uint32_t kSrcAddr = 0x00100080u;
+
+            const float matrix[16] = {
+                1.0f, 2.0f, 3.0f, 4.0f,
+                5.0f, 6.0f, 7.0f, 8.0f,
+                9.0f, 10.0f, 11.0f, 12.0f,
+                13.0f, 14.0f, 15.0f, 16.0f,
+            };
+            const float src[4] = {1.0f, 2.0f, 3.0f, 1.0f};
+            std::memcpy(rdram.data() + kMatrixAddr, matrix, sizeof(matrix));
+            std::memcpy(rdram.data() + kSrcAddr, src, sizeof(src));
+
+            setRegU32(ctx, 4, kOutAddr);
+            setRegU32(ctx, 5, kMatrixAddr);
+            setRegU32(ctx, 6, kSrcAddr);
+
+            ps2_stubs::sceVu0ApplyMatrix(rdram.data(), &ctx, nullptr);
+
+            float out[4]{};
+            std::memcpy(out, rdram.data() + kOutAddr, sizeof(out));
+            t.Equals(out[0], 51.0f, "sceVu0ApplyMatrix should compute X with libvux layout");
+            t.Equals(out[1], 58.0f, "sceVu0ApplyMatrix should compute Y with libvux layout");
+            t.Equals(out[2], 65.0f, "sceVu0ApplyMatrix should compute Z with libvux layout");
+            t.Equals(out[3], 72.0f, "sceVu0ApplyMatrix should compute W with libvux layout");
+            t.Equals(getRegS32(ctx, 2), 0, "sceVu0ApplyMatrix should report success");
+        });
+
+        tc.Run("sceVu0TransposeMatrix transposes a 4x4 matrix with dst/src ABI", [](TestCase &t)
+        {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            R5900Context ctx{};
+
+            constexpr uint32_t kDstAddr = 0x00100100u;
+            constexpr uint32_t kSrcAddr = 0x00100140u;
+            const float src[16] = {
+                1.0f, 2.0f, 3.0f, 4.0f,
+                5.0f, 6.0f, 7.0f, 8.0f,
+                9.0f, 10.0f, 11.0f, 12.0f,
+                13.0f, 14.0f, 15.0f, 16.0f,
+            };
+            std::memcpy(rdram.data() + kSrcAddr, src, sizeof(src));
+
+            setRegU32(ctx, 4, kDstAddr);
+            setRegU32(ctx, 5, kSrcAddr);
+
+            ps2_stubs::sceVu0TransposeMatrix(rdram.data(), &ctx, nullptr);
+
+            float out[16]{};
+            std::memcpy(out, rdram.data() + kDstAddr, sizeof(out));
+            t.Equals(out[0], 1.0f, "transpose should preserve [0][0]");
+            t.Equals(out[1], 5.0f, "transpose should swap row 0 col 1");
+            t.Equals(out[2], 9.0f, "transpose should swap row 0 col 2");
+            t.Equals(out[3], 13.0f, "transpose should swap row 0 col 3");
+            t.Equals(out[4], 2.0f, "transpose should swap row 1 col 0");
+            t.Equals(out[5], 6.0f, "transpose should preserve [1][1]");
+            t.Equals(out[10], 11.0f, "transpose should preserve [2][2]");
+            t.Equals(out[12], 4.0f, "transpose should swap row 3 col 0");
+            t.Equals(out[15], 16.0f, "transpose should preserve [3][3]");
+            t.Equals(getRegS32(ctx, 2), 0, "sceVu0TransposeMatrix should report success");
+        });
+
+        tc.Run("sceVif1PkReset preserves the packet base pointer and clears open tag state", [](TestCase &t)
+        {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            R5900Context ctx{};
+
+            constexpr uint32_t kStateAddr = 0x00100200u;
+            constexpr uint32_t kBaseAddr = 0x00101000u;
+
+            setRegU32(ctx, 4, kStateAddr);
+            setRegU32(ctx, 5, kBaseAddr);
+            ps2_stubs::sceVif1PkInit(rdram.data(), &ctx, nullptr);
+
+            const uint32_t dirtyCurrent = kBaseAddr + 0x40u;
+            const uint32_t dirtyPending = 0x12345678u;
+            const uint32_t dirtyDirectOpen = 0x00ABCDEFu;
+            const uint32_t dirtyGifOpen = 0x00112233u;
+            std::memcpy(rdram.data() + kStateAddr + 0u, &dirtyCurrent, sizeof(dirtyCurrent));
+            std::memcpy(rdram.data() + kStateAddr + 8u, &dirtyPending, sizeof(dirtyPending));
+            std::memcpy(rdram.data() + kStateAddr + 12u, &dirtyDirectOpen, sizeof(dirtyDirectOpen));
+            std::memcpy(rdram.data() + kStateAddr + 20u, &dirtyGifOpen, sizeof(dirtyGifOpen));
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, kStateAddr);
+            ps2_stubs::sceVif1PkReset(rdram.data(), &ctx, nullptr);
+
+            uint32_t current = 0u;
+            uint32_t base = 0u;
+            uint32_t pending = 0u;
+            uint32_t directOpen = 0u;
+            uint32_t gifOpen = 0u;
+            std::memcpy(&current, rdram.data() + kStateAddr + 0u, sizeof(current));
+            std::memcpy(&base, rdram.data() + kStateAddr + 4u, sizeof(base));
+            std::memcpy(&pending, rdram.data() + kStateAddr + 8u, sizeof(pending));
+            std::memcpy(&directOpen, rdram.data() + kStateAddr + 12u, sizeof(directOpen));
+            std::memcpy(&gifOpen, rdram.data() + kStateAddr + 20u, sizeof(gifOpen));
+
+            t.Equals(current, kBaseAddr, "sceVif1PkReset should restore current pointer to the packet base");
+            t.Equals(base, kBaseAddr, "sceVif1PkReset should preserve the packet base pointer");
+            t.Equals(pending, 0u, "sceVif1PkReset should clear pending count tracking");
+            t.Equals(directOpen, 0u, "sceVif1PkReset should clear direct-code open state");
+            t.Equals(gifOpen, 0u, "sceVif1PkReset should clear GIF-tag open state");
+            t.Equals(::getRegU32(&ctx, 2), kBaseAddr, "sceVif1PkReset should return the packet base pointer");
+        });
+
+        tc.Run("sceVif1PkCloseDirectCode encodes DIRECT length in qwords", [](TestCase &t)
+        {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            R5900Context ctx{};
+
+            constexpr uint32_t kStateAddr = 0x00100400u;
+            constexpr uint32_t kBaseAddr = 0x00102000u;
+
+            setRegU32(ctx, 4, kStateAddr);
+            setRegU32(ctx, 5, kBaseAddr);
+            ps2_stubs::sceVif1PkInit(rdram.data(), &ctx, nullptr);
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, kStateAddr);
+            setRegU32(ctx, 5, 0u);
+            ps2_stubs::sceVif1PkCnt(rdram.data(), &ctx, nullptr);
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, kStateAddr);
+            setRegU32(ctx, 5, 0u);
+            ps2_stubs::sceVif1PkOpenDirectCode(rdram.data(), &ctx, nullptr);
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, kStateAddr);
+            setRegU32(ctx, 5, 4u); // reserve one qword worth of GIF payload
+            ps2_stubs::sceVif1PkReserve(rdram.data(), &ctx, nullptr);
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, kStateAddr);
+            ps2_stubs::sceVif1PkCloseDirectCode(rdram.data(), &ctx, nullptr);
+
+            uint32_t directCmd = 0u;
+            std::memcpy(&directCmd, rdram.data() + kBaseAddr + 12u, sizeof(directCmd));
+            t.Equals(directCmd, 0x50000001u, "sceVif1PkCloseDirectCode should store a 1-QW DIRECT length");
         });
     });
 }

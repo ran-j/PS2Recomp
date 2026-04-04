@@ -344,6 +344,18 @@
     X(sceDmaWatch)                            \
     X(sceFsInit)                              \
     X(sceFsReset)                             \
+    X(sceGifPkAddGsAD)                        \
+    X(sceGifPkAddGsData)                      \
+    X(sceGifPkCloseGifTag)                    \
+    X(sceGifPkCnt)                            \
+    X(sceGifPkEnd)                            \
+    X(sceGifPkInit)                           \
+    X(sceGifPkOpenGifTag)                     \
+    X(sceGifPkRef)                            \
+    X(sceGifPkRefLoadImage)                   \
+    X(sceGifPkReset)                          \
+    X(sceGifPkReserve)                        \
+    X(sceGifPkTerminate)                      \
     X(sceGsExecLoadImage)                     \
     X(sceGsExecStoreImage)                    \
     X(sceGsGetGParam)                         \
@@ -365,6 +377,19 @@
     X(sceGsSyncV)                             \
     X(sceGsSyncVCallback)                     \
     X(sceGszbufaddr)                          \
+    X(sceVif1PkAddGsAD)                       \
+    X(sceVif1PkAlign)                         \
+    X(sceVif1PkCall)                          \
+    X(sceVif1PkCloseDirectCode)               \
+    X(sceVif1PkCloseGifTag)                   \
+    X(sceVif1PkCnt)                           \
+    X(sceVif1PkEnd)                           \
+    X(sceVif1PkInit)                          \
+    X(sceVif1PkOpenDirectCode)                \
+    X(sceVif1PkOpenGifTag)                    \
+    X(sceVif1PkReset)                         \
+    X(sceVif1PkReserve)                       \
+    X(sceVif1PkTerminate)                     \
     X(sceeFontInit)                           \
     X(sceeFontLoadFont)                       \
     X(sceeFontPrintfAt)                       \
@@ -385,6 +410,7 @@
     X(sceMcChdir)                             \
     X(sceMcClose)                             \
     X(sceMcDelete)                            \
+    X(sceMcEnd)                               \
     X(sceMcFlush)                             \
     X(sceMcFormat)                            \
     X(sceMcGetDir)                            \
@@ -480,6 +506,7 @@
     X(sceSetPtm)                              \
     X(sceSifAddCmdHandler)                    \
     X(sceSifAllocIopHeap)                     \
+    X(sceSifAllocSysMemory)                   \
     X(sceSifBindRpc)                          \
     X(sceSifCheckStatRpc)                     \
     X(sceSifDmaStat)                          \
@@ -487,6 +514,7 @@
     X(sceSifExitCmd)                          \
     X(sceSifExitRpc)                          \
     X(sceSifFreeIopHeap)                      \
+    X(sceSifFreeSysMemory)                    \
     X(sceSifGetDataTable)                     \
     X(sceSifGetIopAddr)                       \
     X(sceSifGetNextRequest)                   \

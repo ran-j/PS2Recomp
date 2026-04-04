@@ -148,6 +148,20 @@ struct GSXYOffsetReg
     uint16_t ofy;
 };
 
+struct GSTexaReg
+{
+    uint8_t ta0;
+    bool aem;
+    uint8_t ta1;
+};
+
+struct GSTexClutReg
+{
+    uint8_t cbw;
+    uint8_t cou;
+    uint16_t cov;
+};
+
 struct GSContext
 {
     GSFrameReg frame;
@@ -271,6 +285,8 @@ private:
 
     bool m_prmodecont = true;
     bool m_pabe = false;
+    GSTexaReg m_texa{0u, false, 0u};
+    GSTexClutReg m_texclut{0u, 0u, 0u};
 
     GSBitBltBuf m_bitbltbuf{};
     GSTrxPos m_trxpos{};

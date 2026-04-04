@@ -545,6 +545,8 @@ void GS::reset()
     m_curFog = 0;
     m_prmodecont = true;
     m_pabe = false;
+    m_texa = {0u, false, 0u};
+    m_texclut = {0u, 0u, 0u};
     m_bitbltbuf = {};
     m_trxpos = {};
     m_trxreg = {};
@@ -1063,7 +1065,6 @@ bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
         return false;
     }
 
-    outPixels = m_hostPresentationFrame;
     outWidth = m_hostPresentationWidth;
     outHeight = m_hostPresentationHeight;
     if (outDisplayFbp)
@@ -1072,6 +1073,36 @@ bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
         *outSourceFbp = m_hostPresentationSourceFbp;
     if (outUsedPreferred)
         *outUsedPreferred = m_hostPresentationUsedPreferred;
+
+    const size_t packedRowBytes = static_cast<size_t>(outWidth) * 4u;
+    outPixels.assign(packedRowBytes * static_cast<size_t>(outHeight), 0u);
+    if (outWidth != 0u && outHeight != 0u)
+    {
+        const size_t sourceRowBytes = static_cast<size_t>(kHostFrameWidth) * 4u;
+        for (uint32_t y = 0; y < outHeight; ++y)
+        {
+            const size_t srcOffset = static_cast<size_t>(y) * sourceRowBytes;
+            const size_t dstOffset = static_cast<size_t>(y) * packedRowBytes;
+            if (srcOffset + packedRowBytes > m_hostPresentationFrame.size() ||
+                dstOffset + packedRowBytes > outPixels.size())
+            {
+                outPixels.clear();
+                outWidth = 0u;
+                outHeight = 0u;
+                if (outDisplayFbp)
+                    *outDisplayFbp = 0u;
+                if (outSourceFbp)
+                    *outSourceFbp = 0u;
+                if (outUsedPreferred)
+                    *outUsedPreferred = false;
+                return false;
+            }
+
+            std::memcpy(outPixels.data() + dstOffset,
+                        m_hostPresentationFrame.data() + srcOffset,
+                        packedRowBytes);
+        }
+    }
     return true;
 }
 
@@ -1377,6 +1408,10 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
         regAddr == GS_REG_XYZF3 ||
         regAddr == GS_REG_TEX0_1 ||
         regAddr == GS_REG_TEX0_2 ||
+        regAddr == GS_REG_TEX2_1 ||
+        regAddr == GS_REG_TEX2_2 ||
+        regAddr == GS_REG_TEXCLUT ||
+        regAddr == GS_REG_TEXA ||
         regAddr == GS_REG_XYOFFSET_1 ||
         regAddr == GS_REG_XYOFFSET_2 ||
         regAddr == GS_REG_SCISSOR_1 ||
@@ -1553,7 +1588,17 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
     }
     case GS_REG_TEX2_1:
     case GS_REG_TEX2_2:
+    {
+        int ci = (regAddr == GS_REG_TEX2_2) ? 1 : 0;
+        auto &t = m_ctx[ci].tex0;
+        t.psm = static_cast<uint8_t>((value >> 20) & 0x3F);
+        t.cbp = static_cast<uint32_t>((value >> 37) & 0x3FFF);
+        t.cpsm = static_cast<uint8_t>((value >> 51) & 0xF);
+        t.csm = static_cast<uint8_t>((value >> 55) & 0x1);
+        t.csa = static_cast<uint8_t>((value >> 56) & 0x1F);
+        t.cld = static_cast<uint8_t>((value >> 61) & 0x7);
         break;
+    }
     case GS_REG_XYOFFSET_1:
     case GS_REG_XYOFFSET_2:
     {
@@ -1577,6 +1622,11 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
             m_prim.ctxt = ((value >> 9) & 1) != 0;
             m_prim.fix = ((value >> 10) & 1) != 0;
         }
+        break;
+    case GS_REG_TEXCLUT:
+        m_texclut.cbw = static_cast<uint8_t>(value & 0x3Fu);
+        m_texclut.cou = static_cast<uint8_t>((value >> 6) & 0x3Fu);
+        m_texclut.cov = static_cast<uint16_t>((value >> 12) & 0x3FFu);
         break;
     case GS_REG_SCISSOR_1:
     case GS_REG_SCISSOR_2:
@@ -1678,7 +1728,6 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
         m_pabe = (value & 1u) != 0u;
         break;
     case GS_REG_TEXFLUSH:
-    case GS_REG_TEXCLUT:
     case GS_REG_SCANMSK:
     case GS_REG_FOGCOL:
     case GS_REG_DIMX:
@@ -1691,6 +1740,9 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
         break;
     case GS_REG_TEXA:
     {
+        m_texa.ta0 = static_cast<uint8_t>(value & 0xFFu);
+        m_texa.aem = ((value >> 15) & 0x1u) != 0u;
+        m_texa.ta1 = static_cast<uint8_t>((value >> 32) & 0xFFu);
         PS2_IF_AGRESSIVE_LOGS({
             const uint32_t texaIndex = s_debugTexaWriteCount.fetch_add(1u, std::memory_order_relaxed);
             if (texaIndex < 24u)

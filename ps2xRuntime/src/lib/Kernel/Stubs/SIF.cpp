@@ -2,6 +2,8 @@
 #include "SIF.h"
 #include "../Syscalls/RPC.h"
 
+#include <map>
+
 namespace ps2_stubs
 {
     void sceSifCmdIntrHdlr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -50,9 +52,11 @@ namespace ps2_stubs
         std::mutex g_sifDmaTransferMutex;
         uint32_t g_nextSifDmaTransferId = 1u;
         std::mutex g_sifCmdStateMutex;
+        std::mutex g_sifHeapMutex;
         std::unordered_map<uint32_t, uint32_t> g_sifRegs;
         std::unordered_map<uint32_t, uint32_t> g_sifSregs;
         std::unordered_map<uint32_t, uint32_t> g_sifCmdHandlers;
+        std::map<uint32_t, uint32_t> g_sifHeapAllocations;
         uint32_t g_sifCmdBuffer = 0u;
         uint32_t g_sifSysCmdBuffer = 0u;
         bool g_sifCmdInitialized = false;
@@ -115,6 +119,69 @@ namespace ps2_stubs
                 id = g_nextSifDmaTransferId++;
             }
             return id;
+        }
+
+        uint32_t alignIopHeapSize(uint32_t size)
+        {
+            return (size + (kIopHeapAlign - 1u)) & ~(kIopHeapAlign - 1u);
+        }
+
+        uint32_t allocateSifHeapBlock(uint32_t requestSize)
+        {
+            const uint32_t alignedSize = alignIopHeapSize(requestSize);
+            if (alignedSize == 0u)
+            {
+                return 0u;
+            }
+
+            std::lock_guard<std::mutex> lock(g_sifHeapMutex);
+            uint32_t candidate = kIopHeapBase;
+            for (const auto &[addr, size] : g_sifHeapAllocations)
+            {
+                if (candidate + alignedSize <= addr)
+                {
+                    break;
+                }
+
+                const uint32_t blockEnd = alignIopHeapSize(addr + size);
+                if (blockEnd > candidate)
+                {
+                    candidate = blockEnd;
+                }
+            }
+
+            if (candidate < kIopHeapBase || candidate + alignedSize > kIopHeapLimit)
+            {
+                return 0u;
+            }
+
+            g_sifHeapAllocations[candidate] = alignedSize;
+            g_iopHeapNext = candidate + alignedSize;
+            return candidate;
+        }
+
+        bool freeSifHeapBlock(uint32_t addr)
+        {
+            std::lock_guard<std::mutex> lock(g_sifHeapMutex);
+            const auto it = g_sifHeapAllocations.find(addr);
+            if (it == g_sifHeapAllocations.end())
+            {
+                return false;
+            }
+
+            g_sifHeapAllocations.erase(it);
+            if (g_sifHeapAllocations.empty())
+            {
+                g_iopHeapNext = kIopHeapBase;
+            }
+            return true;
+        }
+
+        void resetSifHeapState()
+        {
+            std::lock_guard<std::mutex> lock(g_sifHeapMutex);
+            g_sifHeapAllocations.clear();
+            g_iopHeapNext = kIopHeapBase;
         }
 
         bool isCopyableGuestAddress(uint32_t addr)
@@ -226,6 +293,7 @@ namespace ps2_stubs
     {
         std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
         seedDefaultSifRegsLocked();
+        resetSifHeapState();
     }
 
     void sceSifAddCmdHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -239,17 +307,20 @@ namespace ps2_stubs
 
     void sceSifAllocIopHeap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        const uint32_t reqSize = getRegU32(ctx, 4);
-        const uint32_t alignedSize = (reqSize + (kIopHeapAlign - 1)) & ~(kIopHeapAlign - 1);
-        if (alignedSize == 0 || g_iopHeapNext + alignedSize > kIopHeapLimit)
-        {
-            setReturnS32(ctx, 0);
-            return;
-        }
+        (void)rdram;
+        (void)runtime;
 
-        const uint32_t allocAddr = g_iopHeapNext;
-        g_iopHeapNext += alignedSize;
-        setReturnS32(ctx, static_cast<int32_t>(allocAddr));
+        const uint32_t reqSize = getRegU32(ctx, 4);
+        setReturnU32(ctx, allocateSifHeapBlock(reqSize));
+    }
+
+    void sceSifAllocSysMemory(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        (void)runtime;
+
+        const uint32_t size = getRegU32(ctx, 5);
+        setReturnU32(ctx, allocateSifHeapBlock(size));
     }
 
     void sceSifBindRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -291,7 +362,20 @@ namespace ps2_stubs
 
     void sceSifFreeIopHeap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        setReturnS32(ctx, 0);
+        (void)rdram;
+        (void)runtime;
+
+        const uint32_t addr = getRegU32(ctx, 4);
+        setReturnS32(ctx, freeSifHeapBlock(addr) ? 0 : -1);
+    }
+
+    void sceSifFreeSysMemory(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        (void)runtime;
+
+        const uint32_t addr = getRegU32(ctx, 4);
+        setReturnS32(ctx, freeSifHeapBlock(addr) ? 0 : -1);
     }
 
     void sceSifGetDataTable(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -424,7 +508,7 @@ namespace ps2_stubs
 
     void sceSifInitIopHeap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        g_iopHeapNext = kIopHeapBase;
+        resetSifHeapState();
         setReturnS32(ctx, 0);
     }
 

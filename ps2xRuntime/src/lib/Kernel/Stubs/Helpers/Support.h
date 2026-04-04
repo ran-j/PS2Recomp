@@ -1360,6 +1360,27 @@ namespace
                       << " qwc=0x" << qwc
                       << " tadr=0x" << tadr
                       << " chcr=0x" << chcr << std::dec << std::endl);
+
+            if (!preferNormalCount && (channelBase == 0x10009000u || channelBase == 0x1000A000u))
+            {
+                if (const uint8_t *tagPtr = getConstMemPtr(rdram, tadr))
+                {
+                    uint64_t tagLo = 0u;
+                    std::memcpy(&tagLo, tagPtr, sizeof(tagLo));
+                    uint32_t w2 = 0u;
+                    uint32_t w3 = 0u;
+                    std::memcpy(&w2, tagPtr + 8u, sizeof(w2));
+                    std::memcpy(&w3, tagPtr + 12u, sizeof(w3));
+                    RUNTIME_LOG("[sceDmaSend:head] ch=0x" << std::hex << channelBase
+                              << " tagQwc=0x" << static_cast<uint32_t>(tagLo & 0xFFFFu)
+                              << " id=0x" << static_cast<uint32_t>((tagLo >> 28u) & 0x7u)
+                              << " irq=0x" << static_cast<uint32_t>((tagLo >> 31u) & 0x1u)
+                              << " addr=0x" << static_cast<uint32_t>((tagLo >> 32u) & 0x7FFFFFFFu)
+                              << " w2=0x" << w2
+                              << " w3=0x" << w3
+                              << std::dec << std::endl);
+                }
+            }
             ++g_dmaStubLogCount;
         }
 

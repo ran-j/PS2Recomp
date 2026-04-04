@@ -10,6 +10,7 @@ namespace ps2_stubs
     void resetSifState();
     void sceSifAddCmdHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifAllocIopHeap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void sceSifAllocSysMemory(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifBindRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifCheckStatRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifDmaStat(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
@@ -17,6 +18,7 @@ namespace ps2_stubs
     void sceSifExitCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifExitRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifFreeIopHeap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void sceSifFreeSysMemory(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifGetDataTable(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifGetIopAddr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifGetNextRequest(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);

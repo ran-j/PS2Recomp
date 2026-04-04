@@ -172,6 +172,25 @@ namespace ps2_stubs
 
     void sceDmaReset(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        if (runtime)
+        {
+            PS2Memory &mem = runtime->memory();
+
+            // libdma reset leaves the controller runnable; DMAE must be re-enabled or chain submissions will be accepted but never execute.
+            mem.writeIORegister(DMA_REG_CTRL, 0u);
+            mem.writeIORegister(DMA_REG_PCR, 0u);
+            mem.writeIORegister(DMA_REG_SQWC, 0u);
+            mem.writeIORegister(DMA_REG_RBOR, 0u);
+            mem.writeIORegister(DMA_REG_RBSR, 0u);
+            mem.writeIORegister(DMA_REG_STADR, 0u);
+            mem.writeIORegister(DMA_REG_CTRL, 1u);
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(g_dmaEnvMutex);
+            g_dmaCurrentEnv = {};
+        }
+
         setReturnS32(ctx, 0);
     }
 

@@ -582,6 +582,24 @@ namespace ps2_stubs
         setReturnS32(ctx, 0);
     }
 
+    void sceMcEnd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        {
+            std::lock_guard<std::mutex> lock(g_mcStateMutex);
+            closeMcFilesLocked();
+            g_mcNextFd = 1;
+            g_mcLastCmd = 0;
+            g_mcLastResult = 0;
+            for (McPortState &state : g_mcPorts)
+            {
+                state.currentDir = "/";
+            }
+        }
+
+        // libmc teardown is just a local state reset in this immediate runtime model.
+        setReturnS32(ctx, 0);
+    }
+
     void sceMcFlush(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const int32_t fd = static_cast<int32_t>(getRegU32(ctx, 4));
