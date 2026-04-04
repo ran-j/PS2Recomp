@@ -1,3 +1,6 @@
+#include <algorithm>
+#include <cctype>
+
 namespace
 {
     constexpr uint32_t kCdSectorSize = 2048;
