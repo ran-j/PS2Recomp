@@ -395,8 +395,7 @@ namespace ps2recomp
                         ss << "        }\n";
                         ss << fmt::format("        if (ctx->pc == __entryPc) {{ ctx->pc = 0x{:X}u; }}\n", fallthroughPc);
                         ss << fmt::format("        if (ctx->pc != 0x{:X}u) {{\n", fallthroughPc);
-                        ss << fmt::format("            fprintf(stderr, \"[PC_MISMATCH] at 0x{:X}: called 0x%x, expected ret 0x{:X}, got 0x%x\\n\", __entryPc, ctx->pc);\n", branchInst.address, fallthroughPc);
-                        ss << "            return;\n";
+                        ss << fmt::format("            ctx->pc = 0x{:X}u;\n", fallthroughPc);
                         ss << "        }\n";
                     }
                     ss << "    }\n";
@@ -430,7 +429,7 @@ namespace ps2recomp
                             }
                             else
                             {
-                                ss << fmt::format("    if (ctx->pc != 0x{:X}u) {{ fprintf(stderr, \"[PC_MISMATCH] at 0x{:X}: called reloc, expected ret 0x{:X}, got 0x%x\\n\", ctx->pc); return; }}\n", fallthroughPc, branchInst.address, fallthroughPc);
+                                ss << fmt::format("    if (ctx->pc != 0x{:X}u) {{ ctx->pc = 0x{:X}u; }}\n", fallthroughPc, fallthroughPc);
                             }
                             emittedRelocCall = true;
                         }
@@ -456,8 +455,13 @@ namespace ps2recomp
                             ss << "        }\n";
                             ss << fmt::format("        if (ctx->pc == __entryPc) {{ ctx->pc = 0x{:X}u; }}\n", fallthroughPc);
                             ss << fmt::format("        if (ctx->pc != 0x{:X}u) {{\n", fallthroughPc);
-                            ss << fmt::format("            fprintf(stderr, \"[PC_MISMATCH] at 0x{:X}: called 0x{:X}, expected ret 0x{:X}, got 0x%x\\n\", ctx->pc);\n", branchInst.address, target, fallthroughPc);
-                            ss << "            return;\n";
+                            // Same fix as JALR: force continuation instead of aborting.
+                            // Callees may leave ctx->pc at internal resume targets.
+                            ss << fmt::format("            static int __jalWarn_{:X} = 0;\n", branchInst.address);
+                            ss << fmt::format("            if (__jalWarn_{:X}++ < 5) {{\n", branchInst.address);
+                            ss << fmt::format("                fprintf(stderr, \"[JAL_FIXUP] at 0x{:X}: called 0x{:X}, expected 0x{:X}, got 0x%x (forced continue)\\n\", ctx->pc);\n", branchInst.address, target, fallthroughPc);
+                            ss << "            }\n";
+                            ss << fmt::format("            ctx->pc = 0x{:X}u;\n", fallthroughPc);
                             ss << "        }\n";
                         }
                         ss << "    }\n";
