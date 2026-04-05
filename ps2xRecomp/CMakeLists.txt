@@ -136,3 +136,10 @@ install(TARGETS ps2_recomp ps2_recomp_lib
 install(DIRECTORY include/
     DESTINATION include
 )
+
+include("${CMAKE_SOURCE_DIR}/ps2xRuntime/cmake/ReleaseMode.cmake")
+
+if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+    EnableFastReleaseMode(ps2_recomp_lib)
+    EnableFastReleaseMode(ps2_recomp)
+endif()

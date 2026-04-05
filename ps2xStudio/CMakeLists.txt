@@ -128,3 +128,12 @@ target_link_libraries(ps2xStudio PRIVATE
 if(WIN32)
     target_link_libraries(ps2xStudio PRIVATE SDL2::SDL2main)
 endif()
+
+include("${CMAKE_SOURCE_DIR}/ps2xRuntime/cmake/ReleaseMode.cmake")
+
+if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+    EnableFastReleaseMode(imgui_lib)
+    EnableFastReleaseMode(imgui_colortextedit_lib)
+    EnableFastReleaseMode(imgui_filedialog_lib)
+    EnableFastReleaseMode(ps2xStudio)
+endif()
