@@ -1,4 +1,6 @@
 #include "MiniTest.h"
+#include <cstdlib>
+#include <iostream>
 
 void register_code_generator_tests();
 void register_r5900_decoder_tests();
@@ -29,5 +31,8 @@ int main()
     register_ps2_sif_dma_tests();
     register_ps2_recompiler_tests();
     register_ps2_runtime_expansion_tests();
-    return MiniTest::Run();
+    int res = MiniTest::Run();
+    std::cout.flush();
+    std::cerr.flush();
+    std::_Exit(res);
 }

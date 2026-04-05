@@ -1,0 +1,2512 @@
+#include "Common.h"
+#include "RPC.h"
+
+namespace ps2_syscalls
+{
+    namespace
+    {
+        constexpr uint32_t kSoundDriverStatusSize = 0x42u;
+        constexpr uint32_t kSoundDriverSeInfoOffset = 0x00u;
+        constexpr uint32_t kSoundDriverMidiInfoOffset = 0x0Cu;
+        constexpr uint32_t kSoundDriverMidiSumOffset = 0x1Eu;
+        constexpr uint32_t kSoundDriverSeSumOffset = 0x26u;
+        constexpr uint32_t kSoundDriverAddrTableEntries = 16u;
+        constexpr uint32_t kSoundDriverHdRegionSize = 0x4000u;
+        constexpr uint32_t kSoundDriverSqRegionSize = 0x18000u;
+        constexpr uint32_t kSoundDriverDataRegionSize = 0x40000u;
+        constexpr uint32_t kSoundDriverStatusAlignment = 0x100u;
+        constexpr uint32_t kSoundDriverAddrTableAlignment = 0x100u;
+        constexpr uint32_t kSoundDriverStorageAlignment = 0x1000u;
+        constexpr uint32_t kSoundDriverGuestPoolBase = 0x00120000u;
+        constexpr uint32_t kSoundDriverGuestPoolLimit = 0x00200000u;
+
+        void resetDtxRpcStateUnlocked()
+        {
+            g_dtx_remote_by_id.clear();
+            g_dtx_transfer_by_id.clear();
+            g_dtx_sjx_by_handle.clear();
+            g_dtx_ps2rna_by_handle.clear();
+            g_dtx_sjrmt_by_handle.clear();
+            g_dtx_next_urpc_obj = g_dtxCompatLayout.urpcObjBase;
+        }
+
+        bool readGuestU16(const uint8_t *rdram, uint32_t addr, uint16_t &out)
+        {
+            const uint8_t *ptr = getConstMemPtr(rdram, addr);
+            if (!ptr)
+            {
+                out = 0u;
+                return false;
+            }
+            std::memcpy(&out, ptr, sizeof(out));
+            return true;
+        }
+
+        bool readGuestS16(const uint8_t *rdram, uint32_t addr, int16_t &out)
+        {
+            const uint8_t *ptr = getConstMemPtr(rdram, addr);
+            if (!ptr)
+            {
+                out = 0;
+                return false;
+            }
+            std::memcpy(&out, ptr, sizeof(out));
+            return true;
+        }
+
+        bool writeGuestU16(uint8_t *rdram, uint32_t addr, uint16_t value)
+        {
+            uint8_t *ptr = getMemPtr(rdram, addr);
+            if (!ptr)
+            {
+                return false;
+            }
+            std::memcpy(ptr, &value, sizeof(value));
+            return true;
+        }
+
+        bool writeGuestS16(uint8_t *rdram, uint32_t addr, int16_t value)
+        {
+            uint8_t *ptr = getMemPtr(rdram, addr);
+            if (!ptr)
+            {
+                return false;
+            }
+            std::memcpy(ptr, &value, sizeof(value));
+            return true;
+        }
+
+        bool readGuestU32(const uint8_t *rdram, uint32_t addr, uint32_t &out)
+        {
+            const uint8_t *ptr = getConstMemPtr(rdram, addr);
+            if (!ptr)
+            {
+                out = 0u;
+                return false;
+            }
+            std::memcpy(&out, ptr, sizeof(out));
+            return true;
+        }
+
+        bool writeGuestU32(uint8_t *rdram, uint32_t addr, uint32_t value)
+        {
+            uint8_t *ptr = getMemPtr(rdram, addr);
+            if (!ptr)
+            {
+                return false;
+            }
+            std::memcpy(ptr, &value, sizeof(value));
+            return true;
+        }
+
+        bool normalizeGuestLinearAddr(uint32_t addr, uint32_t &out)
+        {
+            uint32_t offset = 0u;
+            bool scratch = false;
+            if (!ps2ResolveGuestPointer(addr, offset, scratch) || scratch)
+            {
+                out = 0u;
+                return false;
+            }
+            out = offset;
+            return true;
+        }
+
+        bool hasAnyNonZero(const uint8_t *ptr, size_t bytes)
+        {
+            if (!ptr)
+            {
+                return false;
+            }
+            for (size_t i = 0; i < bytes; ++i)
+            {
+                if (ptr[i] != 0u)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        uint32_t alignUp(uint32_t value, uint32_t alignment)
+        {
+            if (alignment == 0u)
+            {
+                return value;
+            }
+            return (value + (alignment - 1u)) & ~(alignment - 1u);
+        }
+
+        void resetSoundDriverRpcStateUnlocked()
+        {
+            const PS2SoundDriverCompatLayout compat = g_soundDriverCompatLayout;
+            g_soundDriverRpcState = {};
+            g_soundDriverCompatLayout = compat;
+        }
+
+        void adoptSoundDriverRuntimeUnlocked(PS2Runtime *runtime)
+        {
+            const uintptr_t runtimeCookie = reinterpret_cast<uintptr_t>(runtime);
+            if (g_soundDriverRpcState.ownerRuntime != runtimeCookie)
+            {
+                resetSoundDriverRpcStateUnlocked();
+                g_soundDriverRpcState.ownerRuntime = runtimeCookie;
+            }
+        }
+
+        bool checkSoundDriverMemoryUnlocked(uint8_t *rdram, PS2Runtime *runtime)
+        {
+            if (!rdram || !runtime)
+            {
+                return false;
+            }
+
+            adoptSoundDriverRuntimeUnlocked(runtime);
+
+            if (g_soundDriverRpcState.statusAddr == 0u)
+            {
+                const uint32_t statusAddr = alignUp(kSoundDriverGuestPoolBase, kSoundDriverStatusAlignment);
+                const uint32_t addrTableAddr =
+                    alignUp(statusAddr + kSoundDriverStatusSize, kSoundDriverAddrTableAlignment);
+                const uint32_t hdBaseAddr =
+                    alignUp(addrTableAddr + (kSoundDriverAddrTableEntries * sizeof(uint32_t)), kSoundDriverStorageAlignment);
+                const uint32_t sqBaseAddr = alignUp(hdBaseAddr + kSoundDriverHdRegionSize, kSoundDriverStorageAlignment);
+                const uint32_t dataBaseAddr = alignUp(sqBaseAddr + kSoundDriverSqRegionSize, kSoundDriverStorageAlignment);
+                const uint32_t storageEnd = dataBaseAddr + kSoundDriverDataRegionSize;
+                if (storageEnd > kSoundDriverGuestPoolLimit)
+                {
+                    return false;
+                }
+
+                g_soundDriverRpcState.statusAddr = statusAddr;
+                g_soundDriverRpcState.addrTableAddr = addrTableAddr;
+                g_soundDriverRpcState.hdBaseAddr = hdBaseAddr;
+                g_soundDriverRpcState.sqBaseAddr = sqBaseAddr;
+                g_soundDriverRpcState.dataBaseAddr = dataBaseAddr;
+                g_soundDriverRpcState.storageBaseAddr = hdBaseAddr;
+                g_soundDriverRpcState.storageSize =
+                    (dataBaseAddr + kSoundDriverDataRegionSize) - hdBaseAddr;
+            }
+
+            if (g_soundDriverRpcState.statusAddr == 0u ||
+                g_soundDriverRpcState.addrTableAddr == 0u ||
+                g_soundDriverRpcState.storageBaseAddr == 0u)
+            {
+                return false;
+            }
+
+            if (!g_soundDriverRpcState.initialized)
+            {
+                rpcZeroRdram(rdram, g_soundDriverRpcState.statusAddr, kSoundDriverStatusSize);
+                rpcZeroRdram(rdram,
+                             g_soundDriverRpcState.addrTableAddr,
+                             kSoundDriverAddrTableEntries * sizeof(uint32_t));
+                rpcZeroRdram(rdram, g_soundDriverRpcState.storageBaseAddr, g_soundDriverRpcState.storageSize);
+                (void)writeGuestU32(rdram, g_soundDriverRpcState.addrTableAddr + (0u * sizeof(uint32_t)), g_soundDriverRpcState.hdBaseAddr);
+                (void)writeGuestU32(rdram, g_soundDriverRpcState.addrTableAddr + (1u * sizeof(uint32_t)), g_soundDriverRpcState.sqBaseAddr);
+                (void)writeGuestU32(rdram, g_soundDriverRpcState.addrTableAddr + (2u * sizeof(uint32_t)), g_soundDriverRpcState.dataBaseAddr);
+                g_soundDriverRpcState.initialized = true;
+            }
+
+            return true;
+        }
+
+        int16_t soundDriverCheckValue(const uint8_t *rdram, uint32_t primaryBase, uint32_t fallbackBase, uint32_t index, uint32_t count)
+        {
+            if (index >= count)
+            {
+                return 0;
+            }
+
+            int16_t value = 0;
+            if (readGuestS16(rdram, primaryBase + (index * sizeof(int16_t)), value) && value != 0)
+            {
+                return value;
+            }
+
+            (void)readGuestS16(rdram, fallbackBase + (index * sizeof(int16_t)), value);
+            return value;
+        }
+
+        bool selectSoundDriverCompatChecks(const uint8_t *rdram, uint32_t &seBase, uint32_t &midiBase)
+        {
+            const PS2SoundDriverCompatLayout &compat = g_soundDriverCompatLayout;
+            if (!compat.hasChecksumTables())
+            {
+                return false;
+            }
+
+            seBase = compat.primarySeCheckAddr;
+            midiBase = compat.primaryMidiCheckAddr;
+
+            const uint8_t *selectedSe = getConstMemPtr(rdram, seBase);
+            const uint8_t *selectedMidi = getConstMemPtr(rdram, midiBase);
+            const bool primaryLooksLive =
+                hasAnyNonZero(selectedSe, 5u * sizeof(int16_t)) ||
+                hasAnyNonZero(selectedMidi, 4u * sizeof(int16_t));
+
+            if ((!selectedSe || !selectedMidi) || !primaryLooksLive)
+            {
+                const uint8_t *fallbackSe = getConstMemPtr(rdram, compat.fallbackSeCheckAddr);
+                const uint8_t *fallbackMidi = getConstMemPtr(rdram, compat.fallbackMidiCheckAddr);
+                const bool fallbackLooksLive =
+                    hasAnyNonZero(fallbackSe, 5u * sizeof(int16_t)) ||
+                    hasAnyNonZero(fallbackMidi, 4u * sizeof(int16_t));
+                if (fallbackLooksLive)
+                {
+                    seBase = compat.fallbackSeCheckAddr;
+                    midiBase = compat.fallbackMidiCheckAddr;
+                    return true;
+                }
+            }
+
+            return selectedSe != nullptr && selectedMidi != nullptr;
+        }
+
+        void backfillSoundDriverStatusFromCompatUnlocked(uint8_t *rdram)
+        {
+            if (!rdram || g_soundDriverRpcState.statusAddr == 0u || !g_soundDriverCompatLayout.hasChecksumTables())
+            {
+                return;
+            }
+
+            uint32_t seBase = 0u;
+            uint32_t midiBase = 0u;
+            if (!selectSoundDriverCompatChecks(rdram, seBase, midiBase))
+            {
+                return;
+            }
+
+            const uint8_t *selectedSe = getConstMemPtr(rdram, seBase);
+            const uint8_t *selectedMidi = getConstMemPtr(rdram, midiBase);
+            uint8_t *status = getMemPtr(rdram, g_soundDriverRpcState.statusAddr);
+            if (!selectedSe || !selectedMidi || !status)
+            {
+                return;
+            }
+
+            auto backfillZeroS16Slots = [&](uint32_t statusOffset, const uint8_t *compatBase, uint32_t slotCount)
+            {
+                for (uint32_t slot = 0u; slot < slotCount; ++slot)
+                {
+                    int16_t liveValue = 0;
+                    if (!readGuestS16(rdram,
+                                      g_soundDriverRpcState.statusAddr + statusOffset + (slot * sizeof(int16_t)),
+                                      liveValue))
+                    {
+                        continue;
+                    }
+
+                    if (liveValue != 0)
+                    {
+                        continue;
+                    }
+
+                    int16_t compatValue = 0;
+                    std::memcpy(&compatValue, compatBase + (slot * sizeof(int16_t)), sizeof(compatValue));
+                    if (compatValue == 0)
+                    {
+                        continue;
+                    }
+
+                    (void)writeGuestS16(rdram,
+                                        g_soundDriverRpcState.statusAddr + statusOffset + (slot * sizeof(int16_t)),
+                                        compatValue);
+                }
+            };
+
+            backfillZeroS16Slots(kSoundDriverSeSumOffset, selectedSe, 5u);
+            backfillZeroS16Slots(kSoundDriverMidiSumOffset, selectedMidi, 4u);
+        }
+
+        size_t soundDriverCommandLength(uint8_t command)
+        {
+            const uint8_t hi = static_cast<uint8_t>(command & 0xF0u);
+            switch (hi)
+            {
+            case 0x00u:
+            {
+                size_t len = 4u;
+                if ((command & 0x01u) != 0u)
+                {
+                    ++len;
+                }
+                if ((command & 0x02u) != 0u)
+                {
+                    ++len;
+                }
+                if ((command & 0x04u) != 0u)
+                {
+                    len += 2u;
+                }
+                return len;
+            }
+            case 0x10u:
+                return (command == 0x11u) ? 3u : 1u;
+            case 0x20u:
+                if (command == 0x22u || command == 0x23u || command == 0x24u || command == 0x25u)
+                {
+                    return 3u;
+                }
+                if (command == 0x26u)
+                {
+                    return 4u;
+                }
+                if (command == 0x20u)
+                {
+                    return 5u;
+                }
+                if (command == 0x27u || command == 0x28u || command == 0x29u || command == 0x2Cu || command == 0x2Du)
+                {
+                    return 8u;
+                }
+                return 2u;
+            case 0x40u:
+                if (command == 0x47u || command == 0x48u || command == 0x49u || command == 0x4Au ||
+                    command == 0x41u || command == 0x42u)
+                {
+                    return 2u;
+                }
+                if (command == 0x4Bu)
+                {
+                    return 3u;
+                }
+                if (command == 0x45u || command == 0x4Cu)
+                {
+                    return 4u;
+                }
+                if (command == 0x44u)
+                {
+                    return 6u;
+                }
+                if (command == 0x4Du || command == 0x4Eu)
+                {
+                    return 3u;
+                }
+                if (command == 0x4Fu)
+                {
+                    return 6u;
+                }
+                return 1u;
+            case 0x50u:
+            case 0x60u:
+                if (command == 0x51u || command == 0x52u || command == 0x53u || command == 0x54u)
+                {
+                    return 8u;
+                }
+                return 2u;
+            default:
+                return 0u;
+            }
+        }
+
+        void applySoundDriverCommandUnlocked(uint8_t *rdram, const uint8_t *cmd)
+        {
+            if (!rdram || !cmd || g_soundDriverRpcState.statusAddr == 0u)
+            {
+                return;
+            }
+
+            const uint8_t op = cmd[0];
+            switch (op)
+            {
+            case 0x20u: // SdrBgmReq
+            {
+                const uint32_t port = cmd[1] & 0x0Fu;
+                uint16_t midiInfo = 0u;
+                (void)readGuestU16(rdram, g_soundDriverRpcState.statusAddr + kSoundDriverMidiInfoOffset, midiInfo);
+                midiInfo = static_cast<uint16_t>(midiInfo | static_cast<uint16_t>(1u << port));
+                (void)writeGuestU16(rdram, g_soundDriverRpcState.statusAddr + kSoundDriverMidiInfoOffset, midiInfo);
+                break;
+            }
+            case 0x21u: // SdrBgmStop
+            {
+                const uint32_t port = cmd[1] & 0x0Fu;
+                uint16_t midiInfo = 0u;
+                (void)readGuestU16(rdram, g_soundDriverRpcState.statusAddr + kSoundDriverMidiInfoOffset, midiInfo);
+                midiInfo = static_cast<uint16_t>(midiInfo & ~static_cast<uint16_t>(1u << port));
+                (void)writeGuestU16(rdram, g_soundDriverRpcState.statusAddr + kSoundDriverMidiInfoOffset, midiInfo);
+                break;
+            }
+            case 0x28u: // SdrHDDataSet
+            {
+                const uint32_t port = cmd[1] & 0x0Fu;
+                const PS2SoundDriverCompatLayout &compat = g_soundDriverCompatLayout;
+                if (compat.primaryMidiCheckAddr != 0u || compat.fallbackMidiCheckAddr != 0u)
+                {
+                    const int16_t checksum =
+                        soundDriverCheckValue(rdram, compat.primaryMidiCheckAddr, compat.fallbackMidiCheckAddr, port, 4u);
+                    (void)writeGuestS16(rdram,
+                                        g_soundDriverRpcState.statusAddr + kSoundDriverMidiSumOffset + (port * sizeof(int16_t)),
+                                        checksum);
+                }
+                break;
+            }
+            case 0x29u: // SdrHDDataSet2
+            {
+                const uint32_t port = cmd[1] & 0x0Fu;
+                const PS2SoundDriverCompatLayout &compat = g_soundDriverCompatLayout;
+                if (compat.primarySeCheckAddr != 0u || compat.fallbackSeCheckAddr != 0u)
+                {
+                    const int16_t checksum =
+                        soundDriverCheckValue(rdram, compat.primarySeCheckAddr, compat.fallbackSeCheckAddr, port, 5u);
+                    (void)writeGuestS16(rdram,
+                                        g_soundDriverRpcState.statusAddr + kSoundDriverSeSumOffset + (port * sizeof(int16_t)),
+                                        checksum);
+                }
+                break;
+            }
+            case 0x10u: // SdrSeAllStop
+                rpcZeroRdram(rdram, g_soundDriverRpcState.statusAddr + kSoundDriverSeInfoOffset, 6u * sizeof(uint16_t));
+                break;
+            default:
+                break;
+            }
+        }
+
+        void handleSoundDriverCommandBuffer(uint8_t *rdram, PS2Runtime *runtime, uint32_t sendBuf, uint32_t sendSize)
+        {
+            if (!rdram || !runtime || !sendBuf || sendSize == 0u)
+            {
+                return;
+            }
+
+            std::lock_guard<std::mutex> lock(g_rpc_mutex);
+            if (!checkSoundDriverMemoryUnlocked(rdram, runtime))
+            {
+                return;
+            }
+
+            const uint8_t *packet = getConstMemPtr(rdram, sendBuf);
+            if (!packet)
+            {
+                return;
+            }
+
+            for (uint32_t offset = 0u; offset < sendSize;)
+            {
+                const uint8_t op = packet[offset];
+                if (op == 0xFFu)
+                {
+                    break;
+                }
+
+                const size_t len = soundDriverCommandLength(op);
+                if (len == 0u || (offset + len) > sendSize)
+                {
+                    break;
+                }
+
+                applySoundDriverCommandUnlocked(rdram, packet + offset);
+                offset += static_cast<uint32_t>(len);
+            }
+        }
+
+        bool handleSoundDriverRpcServiceImpl(uint8_t *rdram, PS2Runtime *runtime,
+                                             uint32_t sid, uint32_t rpcNum,
+                                             uint32_t sendBuf, uint32_t sendSize,
+                                             uint32_t recvBuf, uint32_t recvSize,
+                                             uint32_t &resultPtr,
+                                             bool &signalNowaitCompletion)
+        {
+            resultPtr = 0u;
+            signalNowaitCompletion = false;
+
+            if (!runtime || !rdram)
+            {
+                return false;
+            }
+
+            if (sid == IOP_SID_SNDDRV_COMMAND && rpcNum == IOP_RPC_SNDDRV_SUBMIT)
+            {
+                handleSoundDriverCommandBuffer(rdram, runtime, sendBuf, sendSize);
+                return true;
+            }
+
+            if (sid == IOP_SID_SNDDRV_STATE &&
+                (rpcNum == IOP_RPC_SNDDRV_GET_STATUS_ADDR || rpcNum == IOP_RPC_SNDDRV_GET_ADDR_TABLE))
+            {
+                uint32_t responseWord = 0u;
+                {
+                    std::lock_guard<std::mutex> lock(g_rpc_mutex);
+                    if (!checkSoundDriverMemoryUnlocked(rdram, runtime))
+                    {
+                        return false;
+                    }
+                    responseWord =
+                        (rpcNum == IOP_RPC_SNDDRV_GET_STATUS_ADDR) ? g_soundDriverRpcState.statusAddr
+                                                                   : g_soundDriverRpcState.addrTableAddr;
+                }
+
+                if (recvBuf && recvSize >= sizeof(uint32_t))
+                {
+                    (void)writeGuestU32(rdram, recvBuf, responseWord);
+                    if (recvSize > sizeof(uint32_t))
+                    {
+                        rpcZeroRdram(rdram, recvBuf + sizeof(uint32_t), recvSize - sizeof(uint32_t));
+                    }
+                    resultPtr = recvBuf;
+                }
+
+                signalNowaitCompletion = true;
+                return true;
+            }
+
+            return false;
+        }
+
+    } // namespace
+
+    bool handleSoundDriverRpcService(uint8_t *rdram, PS2Runtime *runtime,
+                                     uint32_t sid, uint32_t rpcNum,
+                                     uint32_t sendBuf, uint32_t sendSize,
+                                     uint32_t recvBuf, uint32_t recvSize,
+                                     uint32_t &resultPtr,
+                                     bool &signalNowaitCompletion)
+    {
+        return handleSoundDriverRpcServiceImpl(rdram, runtime,
+                                               sid, rpcNum,
+                                               sendBuf, sendSize,
+                                               recvBuf, recvSize,
+                                               resultPtr,
+                                               signalNowaitCompletion);
+    }
+
+    namespace
+    {
+
+        bool signalRpcCompletionSema(uint32_t semaId)
+        {
+            if (semaId == 0u || semaId > 0xFFFFu)
+            {
+                return false;
+            }
+
+            auto sema = lookupSemaInfo(static_cast<int>(semaId));
+            if (!sema)
+            {
+                return false;
+            }
+
+            bool signaled = false;
+            {
+                std::lock_guard<std::mutex> lock(sema->m);
+                if (!sema->deleted && sema->count < sema->maxCount)
+                {
+                    sema->count++;
+                    signaled = true;
+                }
+            }
+
+            if (signaled)
+            {
+                sema->cv.notify_one();
+            }
+            return signaled;
+        }
+
+        const char *dtxUrpcCommandName(uint32_t command)
+        {
+            switch (command)
+            {
+            case 0u:
+                return "SJX_CREATE";
+            case 1u:
+                return "SJX_DESTROY";
+            case 2u:
+                return "SJX_RESET";
+            case 3u:
+                return "SJX_REINIT";
+            case 8u:
+                return "PS2RNA_CREATE";
+            case 9u:
+                return "PS2RNA_DESTROY";
+            case 10u:
+                return "PS2RNA_REINIT";
+            case 32u:
+                return "SJRMT_RBF_CREATE";
+            case 33u:
+                return "SJRMT_MEM_CREATE";
+            case 34u:
+                return "SJRMT_UNI_CREATE";
+            case 35u:
+                return "SJRMT_DESTROY";
+            case 36u:
+                return "SJRMT_GET_UUID";
+            case 37u:
+                return "SJRMT_RESET";
+            case 38u:
+                return "SJRMT_GET_CHUNK";
+            case 39u:
+                return "SJRMT_UNGET_CHUNK";
+            case 40u:
+                return "SJRMT_PUT_CHUNK";
+            case 41u:
+                return "SJRMT_GET_NUM_DATA";
+            case 42u:
+                return "SJRMT_IS_GET_CHUNK";
+            case 43u:
+                return "SJRMT_INIT";
+            case 44u:
+                return "SJRMT_FINISH";
+            default:
+                return "UNKNOWN";
+            }
+        }
+
+        const char *dtxStreamName(uint32_t streamId)
+        {
+            switch (streamId)
+            {
+            case 0u:
+                return "room";
+            case 1u:
+                return "data";
+            default:
+                return "other";
+            }
+        }
+
+        bool dtxMatchesTransfer(const DtxTransferState &state, uint32_t srcAddr, uint32_t dstAddr, uint32_t sizeBytes)
+        {
+            (void)dstAddr;
+            return state.eeWorkAddr != 0u &&
+                   state.wkSize >= 64u &&
+                   state.eeWorkAddr == srcAddr &&
+                   state.wkSize == sizeBytes;
+        }
+
+        bool dtxCopyBytes(uint8_t *rdram, uint32_t dstAddr, uint32_t srcAddr, uint32_t len)
+        {
+            for (uint32_t i = 0; i < len; ++i)
+            {
+                const uint8_t *src = getConstMemPtr(rdram, srcAddr + i);
+                uint8_t *dst = getMemPtr(rdram, dstAddr + i);
+                if (!src || !dst)
+                {
+                    return false;
+                }
+                *dst = *src;
+            }
+            return true;
+        }
+
+        void dtxAppendToSjrmtData(uint8_t *rdram, DtxSjrmtState &state, uint32_t srcDataAddr, uint32_t requestedLen)
+        {
+            if (!rdram)
+            {
+                return;
+            }
+
+            const uint32_t cap = (state.wkSize == 0u) ? 0x4000u : state.wkSize;
+            if (cap == 0u || state.wkAddr == 0u || state.roomBytes == 0u || requestedLen == 0u)
+            {
+                return;
+            }
+
+            const uint32_t requestedCopyLen = std::min(requestedLen, state.roomBytes);
+            uint32_t copiedLen = 0u;
+            for (uint32_t i = 0; i < requestedCopyLen; ++i)
+            {
+                const uint32_t writeOffset = (state.writePos + i) % cap;
+                if (!dtxCopyBytes(rdram, state.wkAddr + writeOffset, srcDataAddr + i, 1u))
+                {
+                    break;
+                }
+                ++copiedLen;
+            }
+
+            state.writePos = (state.writePos + copiedLen) % cap;
+            state.roomBytes -= copiedLen;
+            state.dataBytes = std::min(cap, state.dataBytes + copiedLen);
+        }
+
+        void dtxConsumeSjrmtDataLocked(DtxSjrmtState &state)
+        {
+            const uint32_t cap = (state.wkSize == 0u) ? 0x4000u : state.wkSize;
+            if (cap == 0u || state.dataBytes == 0u)
+            {
+                return;
+            }
+
+            const uint32_t consumed = std::min(cap, state.dataBytes);
+            state.readPos = (state.readPos + consumed) % cap;
+            state.dataBytes -= consumed;
+            state.roomBytes = std::min(cap, state.roomBytes + consumed);
+        }
+
+        void dtxConsumeActivePs2RnaStreamsLocked()
+        {
+            for (const auto &entry : g_dtx_ps2rna_by_handle)
+            {
+                const DtxPs2RnaState &rna = entry.second;
+                if (!rna.playEnabled)
+                {
+                    continue;
+                }
+
+                auto consumeHandle = [&](uint32_t sjHandle)
+                {
+                    if (sjHandle == 0u)
+                    {
+                        return;
+                    }
+
+                    auto it = g_dtx_sjrmt_by_handle.find(sjHandle);
+                    if (it == g_dtx_sjrmt_by_handle.end())
+                    {
+                        return;
+                    }
+
+                    dtxConsumeSjrmtDataLocked(it->second);
+                };
+
+                consumeHandle(rna.sjHandle0);
+                consumeHandle(rna.sjHandle1);
+            }
+        }
+
+        void dtxApplySjxPayload(uint8_t *rdram, const DtxTransferState &transfer)
+        {
+            if (!rdram || transfer.eeWorkAddr == 0u || transfer.wkSize < 64u)
+            {
+                return;
+            }
+
+            uint32_t commandCount = 0u;
+            if (!readGuestU32(rdram, transfer.eeWorkAddr, commandCount))
+            {
+                return;
+            }
+
+            commandCount = std::min(commandCount, 128u);
+            if (commandCount == 0u)
+            {
+                return;
+            }
+
+            constexpr uint32_t kSjxHeaderSize = 16u;
+            constexpr uint32_t kSjxCommandSize = 16u;
+
+            std::lock_guard<std::mutex> lock(g_dtx_rpc_mutex);
+            for (uint32_t i = 0; i < commandCount; ++i)
+            {
+                const uint32_t cmdAddr = transfer.eeWorkAddr + kSjxHeaderSize + (i * kSjxCommandSize);
+                uint8_t *cmdPtr = getMemPtr(rdram, cmdAddr);
+                if (!cmdPtr)
+                {
+                    break;
+                }
+
+                const uint8_t cmdNo = cmdPtr[0];
+                const uint8_t cmdLine = cmdPtr[1];
+                uint16_t cmdXid = 0u;
+                uint32_t sjxHandle = 0u;
+                uint32_t chunkDataAddr = 0u;
+                uint32_t chunkLen = 0u;
+                std::memcpy(&cmdXid, cmdPtr + 2u, sizeof(cmdXid));
+                std::memcpy(&sjxHandle, cmdPtr + 4u, sizeof(sjxHandle));
+                std::memcpy(&chunkDataAddr, cmdPtr + 8u, sizeof(chunkDataAddr));
+                std::memcpy(&chunkLen, cmdPtr + 12u, sizeof(chunkLen));
+
+                if (cmdNo != 0u || chunkLen == 0u)
+                {
+                    continue;
+                }
+
+                auto sjxIt = g_dtx_sjx_by_handle.find(sjxHandle);
+                if (sjxIt == g_dtx_sjx_by_handle.end())
+                {
+                    continue;
+                }
+
+                DtxSjxState &sjx = sjxIt->second;
+                if (sjx.xid != 0u && sjx.xid != cmdXid)
+                {
+                    continue;
+                }
+
+                auto sjrmtIt = g_dtx_sjrmt_by_handle.find(sjx.dstSjHandle);
+                if (sjrmtIt == g_dtx_sjrmt_by_handle.end())
+                {
+                    continue;
+                }
+
+                if (cmdLine == sjx.line)
+                {
+                    dtxAppendToSjrmtData(rdram, sjrmtIt->second, chunkDataAddr, chunkLen);
+
+                    // The IOP side consumes data from the remote SJ stream and returns the
+                    // chunk to the EE-side room queue. Rewriting the ack packet to line 0
+                    // makes the EE sjx_rcvcbf recycle the chunk instead of requeueing it
+                    // as playable data forever.
+                    cmdPtr[1] = 0u;
+                }
+            }
+
+            dtxConsumeActivePs2RnaStreamsLocked();
+        }
+
+        void dtxApplyPs2RnaPayload(uint8_t *rdram, const DtxTransferState &transfer)
+        {
+            if (!rdram || transfer.eeWorkAddr == 0u || transfer.wkSize < 64u)
+            {
+                return;
+            }
+
+            uint32_t commandCount = 0u;
+            if (!readGuestU32(rdram, transfer.eeWorkAddr, commandCount))
+            {
+                return;
+            }
+
+            commandCount = std::min(commandCount, 128u);
+            if (commandCount == 0u)
+            {
+                return;
+            }
+
+            constexpr uint32_t kPs2RnaHeaderSize = 16u;
+            constexpr uint32_t kPs2RnaCommandSize = 16u;
+
+            std::lock_guard<std::mutex> lock(g_dtx_rpc_mutex);
+            for (uint32_t i = 0; i < commandCount; ++i)
+            {
+                const uint32_t cmdAddr = transfer.eeWorkAddr + kPs2RnaHeaderSize + (i * kPs2RnaCommandSize);
+                const uint8_t *cmdPtr = getConstMemPtr(rdram, cmdAddr);
+                if (!cmdPtr)
+                {
+                    break;
+                }
+
+                uint16_t cmdNo = 0u;
+                uint32_t rnaHandle = 0u;
+                uint32_t arg1 = 0u;
+                uint32_t arg2 = 0u;
+                std::memcpy(&cmdNo, cmdPtr + 0u, sizeof(cmdNo));
+                std::memcpy(&rnaHandle, cmdPtr + 4u, sizeof(rnaHandle));
+                std::memcpy(&arg1, cmdPtr + 8u, sizeof(arg1));
+                std::memcpy(&arg2, cmdPtr + 12u, sizeof(arg2));
+
+                auto it = g_dtx_ps2rna_by_handle.find(rnaHandle);
+                if (it == g_dtx_ps2rna_by_handle.end())
+                {
+                    continue;
+                }
+
+                DtxPs2RnaState &state = it->second;
+                switch (cmdNo)
+                {
+                case 0u: // IOPRNA_CMD_START
+                    state.playEnabled = true;
+                    break;
+                case 1u: // IOPRNA_CMD_STOP
+                    state.playEnabled = false;
+                    break;
+                case 2u: // IOPRNA_CMD_SETPSW
+                    state.playEnabled = (arg1 != 0u);
+                    break;
+                case 3u: // IOPRNA_CMD_SETNCH
+                    state.channelCount = arg1;
+                    break;
+                case 4u: // IOPRNA_CMD_SETSFREQ
+                    state.sampleFreq = arg1;
+                    break;
+                case 5u: // IOPRNA_CMD_SETVOL
+                    state.volume = arg2;
+                    break;
+                default:
+                    break;
+                }
+            }
+
+            dtxConsumeActivePs2RnaStreamsLocked();
+        }
+
+    } // namespace
+
+    void noteDtxSifDmaTransfer(uint8_t *rdram, uint32_t srcAddr, uint32_t dstAddr, uint32_t sizeBytes)
+    {
+        if (!rdram || sizeBytes < 64u)
+        {
+            return;
+        }
+
+        uint32_t normalizedSrc = 0u;
+        uint32_t normalizedDst = 0u;
+        if (!normalizeGuestLinearAddr(srcAddr, normalizedSrc) ||
+            !normalizeGuestLinearAddr(dstAddr, normalizedDst))
+        {
+            return;
+        }
+
+        DtxTransferState matched{};
+        bool found = false;
+        {
+            std::lock_guard<std::mutex> lock(g_dtx_rpc_mutex);
+            if (!g_dtxCompatLayout.isConfigured())
+            {
+                return;
+            }
+            for (const auto &entry : g_dtx_transfer_by_id)
+            {
+                if (dtxMatchesTransfer(entry.second, normalizedSrc, normalizedDst, sizeBytes))
+                {
+                    matched = entry.second;
+                    found = true;
+                    break;
+                }
+            }
+        }
+
+        if (!found)
+        {
+            static uint32_t dtxMissLogCount = 0u;
+            if (dtxMissLogCount < 64u)
+            {
+                uint32_t knownTransfers = 0u;
+                uint32_t sampleDtxId = 0u;
+                uint32_t sampleSrc = 0u;
+                uint32_t sampleSize = 0u;
+                {
+                    std::lock_guard<std::mutex> lock(g_dtx_rpc_mutex);
+                    knownTransfers = static_cast<uint32_t>(g_dtx_transfer_by_id.size());
+                    if (!g_dtx_transfer_by_id.empty())
+                    {
+                        const auto &sample = *g_dtx_transfer_by_id.begin();
+                        sampleDtxId = sample.second.dtxId;
+                        sampleSrc = sample.second.eeWorkAddr;
+                        sampleSize = sample.second.wkSize;
+                    }
+                }
+
+                if (knownTransfers != 0u)
+                {
+                    RUNTIME_LOG("[sceSifSetDma:DTX_MISS] src=0x" << std::hex << normalizedSrc
+                                                                 << " dst=0x" << normalizedDst
+                                                                 << " size=0x" << sizeBytes
+                                                                 << " known=" << std::dec << knownTransfers
+                                                                 << " sampleDtxId=0x" << std::hex << sampleDtxId
+                                                                 << " sampleSrc=0x" << sampleSrc
+                                                                 << " sampleSize=0x" << sampleSize
+                                                                 << std::dec << std::endl);
+                    ++dtxMissLogCount;
+                }
+            }
+            return;
+        }
+
+        const uint32_t footerTicketAddr = matched.eeWorkAddr + matched.wkSize - sizeof(uint32_t);
+        uint32_t ticketNo = 0u;
+        if (!readGuestU32(rdram, footerTicketAddr, ticketNo))
+        {
+            return;
+        }
+
+        (void)writeGuestU32(rdram, footerTicketAddr, ticketNo + 1u);
+
+        if (matched.dtxId == 0u)
+        {
+            dtxApplySjxPayload(rdram, matched);
+        }
+        else if (matched.dtxId == 1u)
+        {
+            dtxApplyPs2RnaPayload(rdram, matched);
+        }
+
+        static uint32_t dtxAckLogCount = 0u;
+        if (dtxAckLogCount < 32u)
+        {
+            RUNTIME_LOG("[sceSifSetDma:DTX_ACK] dtxId=0x" << std::hex << matched.dtxId
+                                                          << " ee=0x" << matched.eeWorkAddr
+                                                          << " iop=0x" << matched.iopWorkAddr
+                                                          << " size=0x" << matched.wkSize
+                                                          << " ticket=0x" << ticketNo
+                                                          << "->0x" << (ticketNo + 1u));
+            if (matched.dtxId == 0u)
+            {
+                uint32_t totalData = 0u;
+                std::lock_guard<std::mutex> lock(g_dtx_rpc_mutex);
+                for (const auto &entry : g_dtx_sjrmt_by_handle)
+                {
+                    totalData += entry.second.dataBytes;
+                }
+                RUNTIME_LOG(" sjrmtData=0x" << totalData);
+            }
+            RUNTIME_LOG(std::dec << std::endl);
+            ++dtxAckLogCount;
+        }
+    }
+
+    void resetSoundDriverRpcState()
+    {
+        std::lock_guard<std::mutex> lock(g_rpc_mutex);
+        resetSoundDriverRpcStateUnlocked();
+    }
+
+    void setSoundDriverCompatLayout(const PS2SoundDriverCompatLayout &layout)
+    {
+        std::lock_guard<std::mutex> lock(g_rpc_mutex);
+        g_soundDriverCompatLayout = layout;
+    }
+
+    void clearSoundDriverCompatLayout()
+    {
+        std::lock_guard<std::mutex> lock(g_rpc_mutex);
+        g_soundDriverCompatLayout = {};
+    }
+
+    void setDtxCompatLayout(const PS2DtxCompatLayout &layout)
+    {
+        std::scoped_lock lock(g_rpc_mutex, g_dtx_rpc_mutex);
+        g_dtxCompatLayout = layout;
+        resetDtxRpcStateUnlocked();
+    }
+
+    void clearDtxCompatLayout()
+    {
+        std::scoped_lock lock(g_rpc_mutex, g_dtx_rpc_mutex);
+        g_dtxCompatLayout = {};
+        resetDtxRpcStateUnlocked();
+    }
+
+    void prepareSoundDriverStatusTransfer(uint8_t *rdram, uint32_t srcAddr, uint32_t size)
+    {
+        std::lock_guard<std::mutex> lock(g_rpc_mutex);
+        if (srcAddr != g_soundDriverRpcState.statusAddr || size != kSoundDriverStatusSize)
+        {
+            return;
+        }
+
+        backfillSoundDriverStatusFromCompatUnlocked(rdram);
+    }
+
+    void finalizeSoundDriverStatusTransfer(uint8_t *rdram, uint32_t srcAddr, uint32_t dstAddr, uint32_t size)
+    {
+        (void)rdram;
+        (void)srcAddr;
+        (void)dstAddr;
+        (void)size;
+    }
+
+    void SifStopModule(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const int32_t moduleId = static_cast<int32_t>(getRegU32(ctx, 4)); // $a0
+        const uint32_t resultAddr = getRegU32(ctx, 7);                    // $a3 (int* result, optional)
+
+        uint32_t refsLeft = 0;
+        const bool knownModule = trackSifModuleStop(moduleId, &refsLeft);
+        const int32_t ret = knownModule ? 0 : -1;
+
+        if (resultAddr != 0)
+        {
+            int32_t *hostResult = reinterpret_cast<int32_t *>(getMemPtr(rdram, resultAddr));
+            if (hostResult)
+            {
+                *hostResult = knownModule ? 0 : -1;
+            }
+        }
+
+        if (knownModule)
+        {
+            std::string modulePath;
+            {
+                std::lock_guard<std::mutex> lock(g_sif_module_mutex);
+                auto it = g_sif_modules_by_id.find(moduleId);
+                if (it != g_sif_modules_by_id.end())
+                {
+                    modulePath = it->second.path;
+                }
+            }
+            logSifModuleAction("stop", moduleId, modulePath, refsLeft);
+        }
+
+        setReturnS32(ctx, ret);
+    }
+
+    void SifLoadModule(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t pathAddr = getRegU32(ctx, 4); // $a0
+        const std::string modulePath = readGuestCStringBounded(rdram, pathAddr, kMaxSifModulePathBytes);
+        if (modulePath.empty())
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        const int32_t moduleId = trackSifModuleLoad(modulePath);
+        if (moduleId <= 0)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        uint32_t refs = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_sif_module_mutex);
+            auto it = g_sif_modules_by_id.find(moduleId);
+            if (it != g_sif_modules_by_id.end())
+            {
+                refs = it->second.refCount;
+            }
+        }
+        logSifModuleAction("load", moduleId, modulePath, refs);
+
+        setReturnS32(ctx, moduleId);
+    }
+
+    void SifInitRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        std::scoped_lock lock(g_rpc_mutex, g_dtx_rpc_mutex);
+        if (runtime)
+        {
+            runtime->iop().init(rdram);
+        }
+        if (!g_rpc_initialized)
+        {
+            g_rpc_servers.clear();
+            g_rpc_clients.clear();
+            g_rpc_next_id = 1;
+            g_rpc_packet_index = 0;
+            g_rpc_server_index = 0;
+            g_rpc_active_queue = 0;
+            resetDtxRpcStateUnlocked();
+            g_soundDriverRpcState.initialized = false;
+            g_rpc_initialized = true;
+            RUNTIME_LOG("[SifInitRpc] Initialized");
+        }
+        else
+        {
+            resetDtxRpcStateUnlocked();
+            g_soundDriverRpcState.initialized = false;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void SifBindRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        uint32_t clientPtr = getRegU32(ctx, 4);
+        uint32_t rpcId = getRegU32(ctx, 5);
+        uint32_t mode = getRegU32(ctx, 6);
+
+        t_SifRpcClientData *client = reinterpret_cast<t_SifRpcClientData *>(getMemPtr(rdram, clientPtr));
+
+        if (!client)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        client->command = 0;
+        client->buf = 0;
+        client->cbuf = 0;
+        client->end_function = 0;
+        client->end_param = 0;
+        client->server = 0;
+        client->hdr.pkt_addr = 0;
+        client->hdr.sema_id = -1;
+        client->hdr.mode = mode;
+
+        uint32_t serverPtr = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_rpc_mutex);
+            client->hdr.rpc_id = g_rpc_next_id++;
+            auto it = g_rpc_servers.find(rpcId);
+            if (it != g_rpc_servers.end())
+            {
+                serverPtr = it->second.sd_ptr;
+            }
+            g_rpc_clients[clientPtr] = {};
+            g_rpc_clients[clientPtr].sid = rpcId;
+        }
+
+        if (!serverPtr)
+        {
+            // Allocate a dummy server so bind loops can proceed.
+            serverPtr = rpcAllocServerAddr(rdram);
+            if (serverPtr)
+            {
+                t_SifRpcServerData *dummy = reinterpret_cast<t_SifRpcServerData *>(getMemPtr(rdram, serverPtr));
+                if (dummy)
+                {
+                    std::memset(dummy, 0, sizeof(*dummy));
+                    dummy->sid = static_cast<int>(rpcId);
+                }
+                std::lock_guard<std::mutex> lock(g_rpc_mutex);
+                g_rpc_servers[rpcId] = {rpcId, serverPtr};
+            }
+        }
+
+        if (serverPtr)
+        {
+            t_SifRpcServerData *sd = reinterpret_cast<t_SifRpcServerData *>(getMemPtr(rdram, serverPtr));
+            client->server = serverPtr;
+            client->buf = sd ? sd->buf : 0;
+            client->cbuf = sd ? sd->cbuf : 0;
+        }
+        else
+        {
+            client->server = 0;
+            client->buf = 0;
+            client->cbuf = 0;
+        }
+
+        setReturnS32(ctx, 0);
+    }
+
+    void SifCallRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        std::lock_guard<std::recursive_mutex> rpcCallLock(g_sif_call_rpc_mutex);
+
+        uint32_t clientPtr = getRegU32(ctx, 4);
+        uint32_t rpcNum = getRegU32(ctx, 5);
+        uint32_t mode = getRegU32(ctx, 6);
+        uint32_t sendBuf = getRegU32(ctx, 7);
+        uint32_t sendSize = 0;
+        uint32_t recvBuf = 0;
+        uint32_t recvSize = 0;
+        uint32_t endFunc = 0;
+        uint32_t endParam = 0;
+
+        // Decode both extended-reg convention (EE default) and standard O32 stack convention,
+        // picking REG whenever plausible, to avoid zero-collision on the stack.
+        uint32_t sp = getRegU32(ctx, 29);
+
+        uint32_t sendSizeReg = getRegU32(ctx, 8);
+        uint32_t recvBufReg = getRegU32(ctx, 9);
+        uint32_t recvSizeReg = getRegU32(ctx, 10);
+        uint32_t endFuncReg = getRegU32(ctx, 11);
+        uint32_t endParamReg = 0;
+        (void)readStackU32(rdram, sp, 0x0, endParamReg);
+
+        uint32_t sendSizeStk = 0;
+        uint32_t recvBufStk = 0;
+        uint32_t recvSizeStk = 0;
+        uint32_t endFuncStk = 0;
+        uint32_t endParamStk = 0;
+        (void)readStackU32(rdram, sp, 0x10, sendSizeStk);
+        (void)readStackU32(rdram, sp, 0x14, recvBufStk);
+        (void)readStackU32(rdram, sp, 0x18, recvSizeStk);
+        (void)readStackU32(rdram, sp, 0x1C, endFuncStk);
+        (void)readStackU32(rdram, sp, 0x20, endParamStk);
+
+        auto looksLikeGuestPtr = [&](uint32_t v) -> bool
+        {
+            if (v == 0)
+                return true;
+            const uint32_t norm = v & 0x1FFFFFFFu;
+            return norm >= 0x10000u && norm < PS2_RAM_SIZE;
+        };
+
+        auto looksLikeSize = [&](uint32_t v) -> bool
+        {
+            return v <= 0x2000000u;
+        };
+
+        auto looksLikeFunc = [&](uint32_t v) -> bool
+        {
+            return v == 0 || looksLikeGuestPtr(v);
+        };
+
+        auto plausiblePack = [&](uint32_t sendSz, uint32_t rbuf, uint32_t rsz, uint32_t endFn) -> bool
+        {
+            return looksLikeSize(sendSz) && looksLikeGuestPtr(rbuf) && looksLikeSize(rsz) && looksLikeFunc(endFn);
+        };
+
+        const bool regPackPlausible = plausiblePack(sendSizeReg, recvBufReg, recvSizeReg, endFuncReg);
+        const bool stackPackPlausible = plausiblePack(sendSizeStk, recvBufStk, recvSizeStk, endFuncStk);
+
+        uint32_t boundSidHint = 0u;
+        {
+            std::lock_guard<std::mutex> lock(g_rpc_mutex);
+            auto it = g_rpc_clients.find(clientPtr);
+            if (it != g_rpc_clients.end())
+            {
+                boundSidHint = it->second.sid;
+            }
+        }
+        PS2DtxCompatLayout dtxCompat{};
+        {
+            std::lock_guard<std::mutex> lock(g_dtx_rpc_mutex);
+            dtxCompat = g_dtxCompatLayout;
+        }
+
+        auto looksLikeDtxCreatePack = [&](uint32_t sendSz, uint32_t rbuf, uint32_t rsz) -> bool
+        {
+            return rbuf != 0u && rsz >= 4u && rsz <= 0x40u &&
+                   sendSz >= 12u && sendSz <= 0x1000u;
+        };
+
+        const bool isDtxCreate34Call = dtxCompat.isConfigured() &&
+                                       (boundSidHint == dtxCompat.rpcSid) &&
+                                       (rpcNum == 0x422u);
+        const bool forceStackForDtxCreate34 =
+            isDtxCreate34Call &&
+            stackPackPlausible &&
+            looksLikeDtxCreatePack(sendSizeStk, recvBufStk, recvSizeStk) &&
+            !looksLikeDtxCreatePack(sendSizeReg, recvBufReg, recvSizeReg);
+
+        bool useRegConvention = true;
+        if (forceStackForDtxCreate34)
+        {
+            useRegConvention = false;
+        }
+        else if (!regPackPlausible && stackPackPlausible)
+        {
+            const bool regHasValidCallback = (endFuncReg != 0u) && looksLikeFunc(endFuncReg);
+            const bool stackHasValidCallback = (endFuncStk != 0u) && looksLikeFunc(endFuncStk);
+            if (!(regHasValidCallback && !stackHasValidCallback))
+            {
+                useRegConvention = false;
+            }
+        }
+
+        sendSize = useRegConvention ? sendSizeReg : sendSizeStk;
+        recvBuf = useRegConvention ? recvBufReg : recvBufStk;
+        recvSize = useRegConvention ? recvSizeReg : recvSizeStk;
+        endFunc = useRegConvention ? endFuncReg : endFuncStk;
+        endParam = useRegConvention ? endParamReg : endParamStk;
+
+        const bool isDtxLikeRpc = dtxCompat.isConfigured() &&
+                                  ((boundSidHint == dtxCompat.rpcSid) || ((rpcNum & 0xFF00u) == 0x0400u));
+        static uint32_t dtxAbiLogCount = 0u;
+        if (isDtxLikeRpc && dtxAbiLogCount < 96u)
+        {
+            RUNTIME_LOG("[SifCallRpc:ABI] client=0x" << std::hex << clientPtr
+                                                     << " rpc=0x" << rpcNum
+                                                     << " sidHint=0x" << boundSidHint
+                                                     << " useReg=" << (useRegConvention ? 1 : 0)
+                                                     << " reg=(" << sendSizeReg << "," << recvBufReg << "," << recvSizeReg << "," << endFuncReg << "," << endParamReg << ")"
+                                                     << " stk=(" << sendSizeStk << "," << recvBufStk << "," << recvSizeStk << "," << endFuncStk << "," << endParamStk << ")"
+                                                     << " plausible=(" << (regPackPlausible ? 1 : 0) << "," << (stackPackPlausible ? 1 : 0) << ")"
+                                                     << " force34=" << (forceStackForDtxCreate34 ? 1 : 0)
+                                                     << std::dec << std::endl);
+            ++dtxAbiLogCount;
+        }
+
+        t_SifRpcClientData *client = reinterpret_cast<t_SifRpcClientData *>(getMemPtr(rdram, clientPtr));
+
+        if (!client)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        client->command = rpcNum;
+        client->end_function = endFunc;
+        client->end_param = endParam;
+        client->hdr.mode = mode;
+
+        {
+            std::lock_guard<std::mutex> lock(g_rpc_mutex);
+            g_rpc_clients[clientPtr].busy = true;
+            g_rpc_clients[clientPtr].last_rpc = rpcNum;
+            uint32_t sid = g_rpc_clients[clientPtr].sid;
+            if (sid)
+            {
+                auto it = g_rpc_servers.find(sid);
+                if (it != g_rpc_servers.end())
+                {
+                    uint32_t mappedServer = it->second.sd_ptr;
+                    if (mappedServer && client->server != mappedServer)
+                    {
+                        client->server = mappedServer;
+                    }
+                }
+            }
+        }
+
+        uint32_t sid = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_rpc_mutex);
+            auto it = g_rpc_clients.find(clientPtr);
+            if (it != g_rpc_clients.end())
+            {
+                sid = it->second.sid;
+            }
+        }
+
+        uint32_t serverPtr = client->server;
+        t_SifRpcServerData *sd = serverPtr ? reinterpret_cast<t_SifRpcServerData *>(getMemPtr(rdram, serverPtr)) : nullptr;
+
+        if (sd)
+        {
+            sd->client = clientPtr;
+            sd->pkt_addr = client->hdr.pkt_addr;
+            sd->rpc_number = rpcNum;
+            sd->size = static_cast<int>(sendSize);
+            sd->recvbuf = recvBuf;
+            sd->rsize = static_cast<int>(recvSize);
+            sd->rmode = ((mode & kSifRpcModeNowait) && endFunc == 0) ? 0 : 1;
+            sd->rid = 0;
+        }
+
+        if (sd && sd->buf && sendBuf && sendSize > 0)
+        {
+            rpcCopyToRdram(rdram, sd->buf, sendBuf, sendSize);
+        }
+
+        uint32_t resultPtr = 0;
+        bool handled = false;
+
+        auto readRpcU32 = [&](uint32_t addr, uint32_t &out) -> bool
+        {
+            if (!addr)
+            {
+                return false;
+            }
+            const uint8_t *ptr = getConstMemPtr(rdram, addr);
+            if (!ptr)
+            {
+                return false;
+            }
+            std::memcpy(&out, ptr, sizeof(out));
+            return true;
+        };
+
+        auto writeRpcU32 = [&](uint32_t addr, uint32_t value) -> bool
+        {
+            if (!addr)
+            {
+                return false;
+            }
+            uint8_t *ptr = getMemPtr(rdram, addr);
+            if (!ptr)
+            {
+                return false;
+            }
+            std::memcpy(ptr, &value, sizeof(value));
+            return true;
+        };
+
+        if (!handled && runtime)
+        {
+            runtime->iop().init(rdram);
+            uint32_t iopResultPtr = 0u;
+            bool iopSignalNowaitCompletion = false;
+            if (runtime->iop().handleRPC(runtime,
+                                         sid, rpcNum,
+                                         sendBuf, sendSize,
+                                         recvBuf, recvSize,
+                                         iopResultPtr,
+                                         iopSignalNowaitCompletion))
+            {
+                handled = true;
+                resultPtr = iopResultPtr;
+                if (iopSignalNowaitCompletion && (mode & kSifRpcModeNowait) != 0u)
+                {
+                    uint32_t semaId = static_cast<uint32_t>(client->hdr.sema_id);
+                    if (semaId == 0xFFFFFFFFu || semaId == 0u)
+                    {
+                        semaId = endParam;
+                    }
+                    (void)signalRpcCompletionSema(semaId);
+                }
+            }
+        }
+
+        const bool isDtxUrpc = dtxCompat.isUrpcRpc(sid, rpcNum);
+        uint32_t dtxUrpcCommand = isDtxUrpc ? (rpcNum & 0xFFu) : 0u;
+        uint32_t dtxUrpcFn = 0;
+        uint32_t dtxUrpcObj = 0;
+        uint32_t dtxUrpcSend0 = 0;
+        bool dtxUrpcDispatchAttempted = false;
+        bool dtxUrpcFallbackEmulated = false;
+        bool dtxUrpcFallbackCreate34 = false;
+        bool hasUrpcHandler = false;
+        if (isDtxUrpc)
+        {
+            if (sendBuf && sendSize >= sizeof(uint32_t))
+            {
+                (void)readRpcU32(sendBuf, dtxUrpcSend0);
+            }
+            if (dtxCompat.hasUrpcTables() && dtxUrpcCommand < 64u)
+            {
+                (void)readRpcU32(dtxCompat.urpcFnTableBase + (dtxUrpcCommand * 4u), dtxUrpcFn);
+                (void)readRpcU32(dtxCompat.urpcObjTableBase + (dtxUrpcCommand * 4u), dtxUrpcObj);
+            }
+            hasUrpcHandler = (dtxUrpcCommand < 64u) && (dtxUrpcFn != 0u);
+        }
+        const bool allowServerDispatch = !isDtxUrpc || hasUrpcHandler;
+        const bool isDtxSid = dtxCompat.isConfigured() && sid == dtxCompat.rpcSid;
+
+        if (sd && sd->func && (!isDtxSid || isDtxUrpc) && allowServerDispatch)
+        {
+            dtxUrpcDispatchAttempted = dtxUrpcDispatchAttempted || isDtxUrpc;
+            handled = rpcInvokeFunction(rdram, ctx, runtime, sd->func, rpcNum, sd->buf, sendSize, 0, &resultPtr);
+            if (handled && resultPtr == 0 && sd->buf)
+            {
+                resultPtr = sd->buf;
+            }
+            if (handled && resultPtr == 0 && recvBuf)
+            {
+                resultPtr = recvBuf;
+            }
+        }
+
+        if (!handled && isDtxUrpc && sendBuf && sendSize > 0)
+        {
+            // Only dispatch through dtx_rpc_func when a URPC handler is registered in the table.
+            // If the slot is empty, defer to the fallback emulation below.
+            if (hasUrpcHandler && dtxCompat.dispatcherFuncAddr != 0u)
+            {
+                dtxUrpcDispatchAttempted = true;
+                handled = rpcInvokeFunction(rdram, ctx, runtime, dtxCompat.dispatcherFuncAddr, rpcNum, sendBuf, sendSize, 0, &resultPtr);
+                if (handled && resultPtr == 0)
+                {
+                    resultPtr = sendBuf;
+                }
+            }
+        }
+
+        if (!handled && isDtxSid)
+        {
+            if (rpcNum == 2 && recvBuf && recvSize >= sizeof(uint32_t))
+            {
+                uint32_t dtxId = 0;
+                uint32_t eeWorkAddr = 0u;
+                uint32_t iopWorkAddr = 0u;
+                uint32_t wkSize = 0u;
+                if (sendBuf && sendSize >= sizeof(uint32_t))
+                {
+                    (void)readRpcU32(sendBuf + 0u, dtxId);
+                }
+                if (sendBuf && sendSize >= (4u * sizeof(uint32_t)))
+                {
+                    (void)readRpcU32(sendBuf + 4u, eeWorkAddr);
+                    (void)readRpcU32(sendBuf + 8u, iopWorkAddr);
+                    (void)readRpcU32(sendBuf + 12u, wkSize);
+                }
+
+                uint32_t normalizedEeWorkAddr = 0u;
+                uint32_t normalizedIopWorkAddr = 0u;
+                (void)normalizeGuestLinearAddr(eeWorkAddr, normalizedEeWorkAddr);
+                (void)normalizeGuestLinearAddr(iopWorkAddr, normalizedIopWorkAddr);
+
+                uint32_t remoteHandle = 0;
+                {
+                    std::lock_guard<std::mutex> lock(g_dtx_rpc_mutex);
+                    auto it = g_dtx_remote_by_id.find(dtxId);
+                    if (it != g_dtx_remote_by_id.end())
+                    {
+                        remoteHandle = it->second;
+                    }
+                    if (!remoteHandle)
+                    {
+                        remoteHandle = rpcAllocServerAddr(rdram);
+                        if (!remoteHandle)
+                        {
+                            remoteHandle = rpcAllocPacketAddr(rdram);
+                        }
+                        if (!remoteHandle)
+                        {
+                            remoteHandle = kRpcServerPoolBase + ((dtxId & 0xFFu) * kRpcServerStride);
+                        }
+                        g_dtx_remote_by_id[dtxId] = remoteHandle;
+                    }
+
+                    DtxTransferState state{};
+                    state.dtxId = dtxId;
+                    state.remoteHandle = remoteHandle;
+                    state.eeWorkAddr = normalizedEeWorkAddr;
+                    state.iopWorkAddr = normalizedIopWorkAddr;
+                    state.wkSize = wkSize;
+                    g_dtx_transfer_by_id[dtxId] = state;
+                }
+
+                (void)writeRpcU32(recvBuf, remoteHandle);
+                if (recvSize > sizeof(uint32_t))
+                {
+                    rpcZeroRdram(rdram, recvBuf + sizeof(uint32_t), recvSize - sizeof(uint32_t));
+                }
+                static uint32_t dtxCreateLogCount = 0;
+                if (dtxCreateLogCount < 64u)
+                {
+                    RUNTIME_LOG("[SifCallRpc:DTX_CREATE] dtxId=0x" << std::hex << dtxId
+                                                                   << " remote=0x" << remoteHandle
+                                                                   << " recvBuf=0x" << recvBuf
+                                                                   << " recvSize=0x" << recvSize
+                                                                   << std::dec << std::endl);
+                    ++dtxCreateLogCount;
+                }
+                handled = true;
+                resultPtr = recvBuf;
+            }
+            else if (rpcNum == 3)
+            {
+                uint32_t remoteHandle = 0;
+                if (sendBuf && sendSize >= sizeof(uint32_t) && readRpcU32(sendBuf, remoteHandle) && remoteHandle)
+                {
+                    std::lock_guard<std::mutex> lock(g_dtx_rpc_mutex);
+                    for (auto it = g_dtx_remote_by_id.begin(); it != g_dtx_remote_by_id.end(); ++it)
+                    {
+                        if (it->second == remoteHandle)
+                        {
+                            g_dtx_transfer_by_id.erase(it->first);
+                            g_dtx_remote_by_id.erase(it);
+                            break;
+                        }
+                    }
+                }
+                if (recvBuf && recvSize > 0)
+                {
+                    rpcZeroRdram(rdram, recvBuf, recvSize);
+                }
+                handled = true;
+                resultPtr = recvBuf;
+            }
+            else if (rpcNum >= 0x400 && rpcNum < 0x500)
+            {
+                dtxUrpcFallbackEmulated = true;
+                const uint32_t urpcCommand = rpcNum & 0xFFu;
+                uint32_t outWords[4] = {1u, 0u, 0u, 0u};
+                uint32_t outWordCount = 1u;
+
+                auto readSendWord = [&](uint32_t index, uint32_t &out) -> bool
+                {
+                    const uint64_t byteOffset = static_cast<uint64_t>(index) * sizeof(uint32_t);
+                    if (!sendBuf || sendSize < (byteOffset + sizeof(uint32_t)))
+                    {
+                        return false;
+                    }
+                    return readRpcU32(sendBuf + static_cast<uint32_t>(byteOffset), out);
+                };
+
+                switch (urpcCommand)
+                {
+                case 0u: // SJX_CREATE
+                {
+                    uint32_t srcSjHandle = 0u;
+                    uint32_t dstSjHandle = 0u;
+                    uint32_t line = 0u;
+                    uint32_t eeObjAddr = 0u;
+                    (void)readSendWord(0u, srcSjHandle);
+                    (void)readSendWord(1u, dstSjHandle);
+                    (void)readSendWord(2u, line);
+                    (void)readSendWord(3u, eeObjAddr);
+
+                    std::lock_guard<std::mutex> lock(g_dtx_rpc_mutex);
+                    const uint32_t handle = dtxAllocUrpcHandleLocked();
+                    DtxSjxState state{};
+                    state.handle = handle;
+                    state.srcSjHandle = srcSjHandle;
+                    state.dstSjHandle = dstSjHandle;
+                    state.line = line;
+                    state.eeObjAddr = eeObjAddr;
+                    g_dtx_sjx_by_handle[handle] = state;
+                    outWords[0] = handle ? handle : 1u;
+                    outWordCount = 1u;
+                    break;
+                }
+                case 1u: // SJX_DESTROY
+                {
+                    uint32_t handle = 0u;
+                    (void)readSendWord(0u, handle);
+                    std::lock_guard<std::mutex> lock(g_dtx_rpc_mutex);
+                    g_dtx_sjx_by_handle.erase(handle);
+                    outWords[0] = 1u;
+                    outWordCount = 1u;
+                    break;
+                }
+                case 2u: // SJX_RESET
+                {
+                    uint32_t handle = 0u;
+                    uint32_t xid = 0u;
+                    (void)readSendWord(0u, handle);
+                    (void)readSendWord(1u, xid);
+                    std::lock_guard<std::mutex> lock(g_dtx_rpc_mutex);
+                    auto it = g_dtx_sjx_by_handle.find(handle);
+                    if (it != g_dtx_sjx_by_handle.end())
+                    {
+                        it->second.xid = static_cast<uint16_t>(xid & 0xFFFFu);
+                    }
+                    outWords[0] = 1u;
+                    outWordCount = 1u;
+                    break;
+                }
+                case 8u: // PS2RNA_CREATE
+                {
+                    uint32_t maxChannels = 0u;
+                    uint32_t sjHandle0 = 0u;
+                    uint32_t sjHandle1 = 0u;
+                    (void)readSendWord(0u, maxChannels);
+                    (void)readSendWord(2u, sjHandle0);
+                    (void)readSendWord(3u, sjHandle1);
+
+                    std::lock_guard<std::mutex> lock(g_dtx_rpc_mutex);
+                    const uint32_t handle = dtxAllocUrpcHandleLocked();
+                    DtxPs2RnaState state{};
+                    state.handle = handle;
+                    state.maxChannels = maxChannels;
+                    state.sjHandle0 = sjHandle0;
+                    state.sjHandle1 = sjHandle1;
+                    state.channelCount = maxChannels;
+                    g_dtx_ps2rna_by_handle[handle] = state;
+                    outWords[0] = handle ? handle : 1u;
+                    outWordCount = 1u;
+                    break;
+                }
+                case 9u: // PS2RNA_DESTROY
+                {
+                    uint32_t handle = 0u;
+                    (void)readSendWord(0u, handle);
+                    std::lock_guard<std::mutex> lock(g_dtx_rpc_mutex);
+                    g_dtx_ps2rna_by_handle.erase(handle);
+                    outWords[0] = 1u;
+                    outWordCount = 1u;
+                    break;
+                }
+                case 32u: // SJRMT_RBF_CREATE
+                case 33u: // SJRMT_MEM_CREATE
+                case 34u: // SJRMT_UNI_CREATE
+                {
+                    uint32_t arg0 = 0;
+                    uint32_t arg1 = 0;
+                    uint32_t arg2 = 0;
+                    (void)readSendWord(0u, arg0);
+                    (void)readSendWord(1u, arg1);
+                    (void)readSendWord(2u, arg2);
+
+                    uint32_t mode = 0;
+                    uint32_t wkAddr = 0;
+                    uint32_t wkSize = 0;
+                    if (urpcCommand == 34u)
+                    {
+                        mode = arg0;
+                        wkAddr = arg1;
+                        wkSize = arg2;
+                        dtxUrpcFallbackCreate34 = true;
+                    }
+                    else if (urpcCommand == 33u)
+                    {
+                        wkAddr = arg0;
+                        wkSize = arg1;
+                    }
+                    else
+                    {
+                        wkAddr = arg0;
+                        wkSize = (arg1 != 0u) ? arg1 : arg2;
+                    }
+
+                    wkSize = dtxNormalizeSjrmtCapacity(wkSize);
+
+                    std::lock_guard<std::mutex> lock(g_dtx_rpc_mutex);
+                    const uint32_t handle = dtxAllocUrpcHandleLocked();
+                    DtxSjrmtState state{};
+                    state.handle = handle;
+                    state.mode = mode;
+                    state.wkAddr = wkAddr;
+                    state.wkSize = wkSize;
+                    state.readPos = 0u;
+                    state.writePos = 0u;
+                    state.roomBytes = wkSize;
+                    state.dataBytes = 0u;
+                    state.uuid0 = 0x53524D54u; // "SRMT"
+                    state.uuid1 = handle;
+                    state.uuid2 = wkAddr;
+                    state.uuid3 = wkSize;
+                    g_dtx_sjrmt_by_handle[handle] = state;
+
+                    outWords[0] = handle ? handle : 1u;
+                    outWordCount = 1u;
+                    break;
+                }
+                case 35u: // SJRMT_DESTROY
+                {
+                    uint32_t handle = 0;
+                    (void)readSendWord(0u, handle);
+                    std::lock_guard<std::mutex> lock(g_dtx_rpc_mutex);
+                    g_dtx_sjrmt_by_handle.erase(handle);
+                    outWords[0] = 1u;
+                    outWordCount = 1u;
+                    break;
+                }
+                case 36u: // SJRMT_GET_UUID
+                {
+                    uint32_t handle = 0;
+                    (void)readSendWord(0u, handle);
+                    std::lock_guard<std::mutex> lock(g_dtx_rpc_mutex);
+                    auto it = g_dtx_sjrmt_by_handle.find(handle);
+                    if (it != g_dtx_sjrmt_by_handle.end())
+                    {
+                        outWords[0] = it->second.uuid0;
+                        outWords[1] = it->second.uuid1;
+                        outWords[2] = it->second.uuid2;
+                        outWords[3] = it->second.uuid3;
+                    }
+                    else
+                    {
+                        outWords[0] = 0u;
+                        outWords[1] = 0u;
+                        outWords[2] = 0u;
+                        outWords[3] = 0u;
+                    }
+                    outWordCount = 4u;
+                    break;
+                }
+                case 37u: // SJRMT_RESET
+                {
+                    uint32_t handle = 0;
+                    (void)readSendWord(0u, handle);
+                    std::lock_guard<std::mutex> lock(g_dtx_rpc_mutex);
+                    auto it = g_dtx_sjrmt_by_handle.find(handle);
+                    if (it != g_dtx_sjrmt_by_handle.end())
+                    {
+                        const uint32_t cap = (it->second.wkSize == 0u) ? 0x4000u : it->second.wkSize;
+                        it->second.readPos = 0u;
+                        it->second.writePos = 0u;
+                        it->second.roomBytes = cap;
+                        it->second.dataBytes = 0u;
+                    }
+                    outWords[0] = 1u;
+                    outWordCount = 1u;
+                    break;
+                }
+                case 38u: // SJRMT_GET_CHUNK
+                {
+                    uint32_t handle = 0;
+                    uint32_t streamId = 0;
+                    uint32_t nbyte = 0;
+                    (void)readSendWord(0u, handle);
+                    (void)readSendWord(1u, streamId);
+                    (void)readSendWord(2u, nbyte);
+
+                    uint32_t ptr = 0u;
+                    uint32_t len = 0u;
+
+                    std::lock_guard<std::mutex> lock(g_dtx_rpc_mutex);
+                    auto it = g_dtx_sjrmt_by_handle.find(handle);
+                    if (it != g_dtx_sjrmt_by_handle.end())
+                    {
+                        DtxSjrmtState &state = it->second;
+                        const uint32_t cap = (state.wkSize == 0u) ? 0x4000u : state.wkSize;
+
+                        if (streamId == 0u)
+                        {
+                            len = std::min(nbyte, state.roomBytes);
+                            ptr = state.wkAddr + (cap ? (state.writePos % cap) : 0u);
+                            if (cap != 0u)
+                            {
+                                state.writePos = (state.writePos + len) % cap;
+                            }
+                            state.roomBytes -= len;
+                        }
+                        else if (streamId == 1u)
+                        {
+                            len = std::min(nbyte, state.dataBytes);
+                            ptr = state.wkAddr + (cap ? (state.readPos % cap) : 0u);
+                            if (cap != 0u)
+                            {
+                                state.readPos = (state.readPos + len) % cap;
+                            }
+                            state.dataBytes -= len;
+                        }
+                    }
+
+                    outWords[0] = ptr;
+                    outWords[1] = len;
+                    outWordCount = 2u;
+                    break;
+                }
+                case 39u: // SJRMT_UNGET_CHUNK
+                {
+                    uint32_t handle = 0;
+                    uint32_t streamId = 0;
+                    uint32_t len = 0;
+                    (void)readSendWord(0u, handle);
+                    (void)readSendWord(1u, streamId);
+                    (void)readSendWord(3u, len);
+
+                    std::lock_guard<std::mutex> lock(g_dtx_rpc_mutex);
+                    auto it = g_dtx_sjrmt_by_handle.find(handle);
+                    if (it != g_dtx_sjrmt_by_handle.end())
+                    {
+                        DtxSjrmtState &state = it->second;
+                        const uint32_t cap = (state.wkSize == 0u) ? 0x4000u : state.wkSize;
+                        if (streamId == 0u)
+                        {
+                            const uint32_t delta = (cap == 0u) ? 0u : (len % cap);
+                            if (cap != 0u)
+                            {
+                                state.writePos = (state.writePos + cap - delta) % cap;
+                            }
+                            state.roomBytes = std::min(cap, state.roomBytes + len);
+                        }
+                        else if (streamId == 1u)
+                        {
+                            const uint32_t delta = (cap == 0u) ? 0u : (len % cap);
+                            if (cap != 0u)
+                            {
+                                state.readPos = (state.readPos + cap - delta) % cap;
+                            }
+                            state.dataBytes = std::min(cap, state.dataBytes + len);
+                        }
+                    }
+
+                    outWords[0] = 1u;
+                    outWordCount = 1u;
+                    break;
+                }
+                case 40u: // SJRMT_PUT_CHUNK
+                {
+                    uint32_t handle = 0;
+                    uint32_t streamId = 0;
+                    uint32_t len = 0;
+                    (void)readSendWord(0u, handle);
+                    (void)readSendWord(1u, streamId);
+                    (void)readSendWord(3u, len);
+
+                    std::lock_guard<std::mutex> lock(g_dtx_rpc_mutex);
+                    auto it = g_dtx_sjrmt_by_handle.find(handle);
+                    if (it != g_dtx_sjrmt_by_handle.end())
+                    {
+                        DtxSjrmtState &state = it->second;
+                        const uint32_t cap = (state.wkSize == 0u) ? 0x4000u : state.wkSize;
+                        if (streamId == 0u)
+                        {
+                            state.roomBytes = std::min(cap, state.roomBytes + len);
+                        }
+                        else if (streamId == 1u)
+                        {
+                            state.dataBytes = std::min(cap, state.dataBytes + len);
+                        }
+                    }
+
+                    outWords[0] = 1u;
+                    outWordCount = 1u;
+                    break;
+                }
+                case 41u: // SJRMT_GET_NUM_DATA
+                {
+                    uint32_t handle = 0;
+                    uint32_t streamId = 0;
+                    (void)readSendWord(0u, handle);
+                    (void)readSendWord(1u, streamId);
+
+                    std::lock_guard<std::mutex> lock(g_dtx_rpc_mutex);
+                    auto it = g_dtx_sjrmt_by_handle.find(handle);
+                    if (it != g_dtx_sjrmt_by_handle.end())
+                    {
+                        outWords[0] = (streamId == 0u) ? it->second.roomBytes : it->second.dataBytes;
+                    }
+                    else
+                    {
+                        outWords[0] = 0u;
+                    }
+                    outWordCount = 1u;
+                    break;
+                }
+                case 42u: // SJRMT_IS_GET_CHUNK
+                {
+                    uint32_t handle = 0;
+                    uint32_t streamId = 0;
+                    uint32_t nbyte = 0;
+                    (void)readSendWord(0u, handle);
+                    (void)readSendWord(1u, streamId);
+                    (void)readSendWord(2u, nbyte);
+
+                    uint32_t available = 0u;
+                    std::lock_guard<std::mutex> lock(g_dtx_rpc_mutex);
+                    auto it = g_dtx_sjrmt_by_handle.find(handle);
+                    if (it != g_dtx_sjrmt_by_handle.end())
+                    {
+                        available = (streamId == 0u) ? it->second.roomBytes : it->second.dataBytes;
+                    }
+                    outWords[0] = (available >= nbyte) ? 1u : 0u;
+                    outWords[1] = available;
+                    outWordCount = 2u;
+                    break;
+                }
+                case 43u: // SJRMT_INIT
+                case 44u: // SJRMT_FINISH
+                {
+                    outWords[0] = 1u;
+                    outWordCount = 1u;
+                    break;
+                }
+                default:
+                {
+                    uint32_t urpcRet = 1u;
+                    if (sendBuf && sendSize >= sizeof(uint32_t))
+                    {
+                        (void)readRpcU32(sendBuf, urpcRet);
+                    }
+                    if (urpcCommand == 0u)
+                    {
+                        std::lock_guard<std::mutex> lock(g_dtx_rpc_mutex);
+                        urpcRet = dtxAllocUrpcHandleLocked();
+                    }
+                    if (urpcRet == 0u)
+                    {
+                        urpcRet = 1u;
+                    }
+                    outWords[0] = urpcRet;
+                    outWordCount = 1u;
+                    break;
+                }
+                }
+
+                if (recvBuf && recvSize > 0u)
+                {
+                    const uint32_t recvWordCapacity = static_cast<uint32_t>(recvSize / sizeof(uint32_t));
+                    const uint32_t wordsToWrite = std::min(outWordCount, recvWordCapacity);
+                    for (uint32_t i = 0; i < wordsToWrite; ++i)
+                    {
+                        (void)writeRpcU32(recvBuf + (i * sizeof(uint32_t)), outWords[i]);
+                    }
+
+                    // SJRMT_IsGetChunk callers read rbuf[1] even when nout==1.
+                    if (urpcCommand == 42u && outWordCount > 1u)
+                    {
+                        (void)writeRpcU32(recvBuf + sizeof(uint32_t), outWords[1]);
+                    }
+
+                    if (recvSize > (wordsToWrite * sizeof(uint32_t)))
+                    {
+                        rpcZeroRdram(rdram, recvBuf + (wordsToWrite * sizeof(uint32_t)),
+                                     recvSize - (wordsToWrite * sizeof(uint32_t)));
+                    }
+                }
+
+                handled = true;
+                resultPtr = recvBuf;
+            }
+        }
+
+        if (recvBuf && recvSize > 0)
+        {
+            if (handled && resultPtr && resultPtr != recvBuf)
+            {
+                rpcCopyToRdram(rdram, recvBuf, resultPtr, recvSize);
+            }
+            else if (!handled && sendBuf && sendSize > 0 && sendBuf != recvBuf)
+            {
+                size_t copySize = (sendSize < recvSize) ? sendSize : recvSize;
+                rpcCopyToRdram(rdram, recvBuf, sendBuf, copySize);
+            }
+            else if (!handled)
+            {
+                rpcZeroRdram(rdram, recvBuf, recvSize);
+            }
+        }
+
+        if (isDtxUrpc)
+        {
+            static int dtxUrpcLogCount = 0;
+            if (dtxUrpcLogCount < 64)
+            {
+                uint32_t dtxUrpcRecv0 = 0;
+                if (recvBuf && recvSize >= sizeof(uint32_t))
+                {
+                    (void)readRpcU32(recvBuf, dtxUrpcRecv0);
+                }
+                RUNTIME_LOG("[SifCallRpc:DTX] rpcNum=0x" << std::hex << rpcNum
+                                                         << " cmd=0x" << dtxUrpcCommand
+                                                         << " name=" << dtxUrpcCommandName(dtxUrpcCommand)
+                                                         << " fn=0x" << dtxUrpcFn
+                                                         << " obj=0x" << dtxUrpcObj
+                                                         << " send0=0x" << dtxUrpcSend0
+                                                         << " recv0=0x" << dtxUrpcRecv0
+                                                         << " resultPtr=0x" << resultPtr
+                                                         << " handled=" << std::dec << (handled ? 1 : 0)
+                                                         << " dispatch=" << (dtxUrpcDispatchAttempted ? 1 : 0)
+                                                         << " emu=" << (dtxUrpcFallbackEmulated ? 1 : 0)
+                                                         << " emu34=" << (dtxUrpcFallbackCreate34 ? 1 : 0)
+                                                         << std::endl);
+
+                if (dtxUrpcCommand >= 37u && dtxUrpcCommand <= 42u)
+                {
+                    std::lock_guard<std::mutex> lock(g_dtx_rpc_mutex);
+                    auto it = g_dtx_sjrmt_by_handle.find(dtxUrpcSend0);
+                    if (it != g_dtx_sjrmt_by_handle.end())
+                    {
+                        const DtxSjrmtState &state = it->second;
+                        RUNTIME_LOG("[SifCallRpc:DTX_SJRMT] handle=0x" << std::hex << dtxUrpcSend0
+                                                                       << " cmd=" << dtxUrpcCommandName(dtxUrpcCommand)
+                                                                       << " wk=0x" << state.wkAddr
+                                                                       << " size=0x" << state.wkSize
+                                                                       << " read=0x" << state.readPos
+                                                                       << " write=0x" << state.writePos
+                                                                       << std::dec
+                                                                       << " room=" << state.roomBytes
+                                                                       << " data=" << state.dataBytes);
+                        if ((dtxUrpcCommand == 38u || dtxUrpcCommand == 42u) && sendBuf && sendSize >= 12u)
+                        {
+                            uint32_t streamId = 0u;
+                            uint32_t nbyte = 0u;
+                            (void)readRpcU32(sendBuf + 4u, streamId);
+                            (void)readRpcU32(sendBuf + 8u, nbyte);
+                            RUNTIME_LOG(" stream=" << dtxStreamName(streamId)
+                                                   << " req=" << nbyte);
+                        }
+                        RUNTIME_LOG(std::endl);
+                    }
+                }
+                ++dtxUrpcLogCount;
+            }
+        }
+
+        if (endFunc)
+        {
+            bool callbackInvoked = rpcInvokeFunction(rdram, ctx, runtime, endFunc, endParam, 0, 0, 0, nullptr);
+
+            if (!callbackInvoked && endFunc >= 0x10000u)
+            {
+                const uint32_t normalizedEndFunc = endFunc - 0x10000u;
+                if (runtime->hasFunction(normalizedEndFunc))
+                {
+                    callbackInvoked = rpcInvokeFunction(rdram, ctx, runtime, normalizedEndFunc, endParam, 0, 0, 0, nullptr);
+                }
+            }
+
+            PS2SoundDriverCompatLayout soundCompat{};
+            {
+                std::lock_guard<std::mutex> lock(g_rpc_mutex);
+                soundCompat = g_soundDriverCompatLayout;
+            }
+
+            if (soundCompat.matchesCompletionCallback(endFunc))
+            {
+                uint32_t semaId = static_cast<uint32_t>(client->hdr.sema_id);
+                if (semaId == 0xFFFFFFFFu || semaId == 0u)
+                {
+                    semaId = endParam;
+                }
+                (void)signalRpcCompletionSema(semaId);
+                if (rdram && soundCompat.busyFlagAddr != 0u && soundCompat.matchesClearBusyCallback(endFunc))
+                {
+                    if (uint32_t *busy = reinterpret_cast<uint32_t *>(getMemPtr(rdram, soundCompat.busyFlagAddr)))
+                    {
+                        *busy = 0u;
+                    }
+                }
+            }
+
+            if (!callbackInvoked)
+            {
+                uint32_t semaId = static_cast<uint32_t>(client->hdr.sema_id);
+                if (semaId == 0xFFFFFFFFu || semaId == 0u)
+                {
+                    semaId = endParam;
+                }
+                const bool fallbackSignaledSema = signalRpcCompletionSema(semaId);
+
+                static uint32_t unresolvedEndFuncWarnCount = 0;
+                if (unresolvedEndFuncWarnCount < 32u)
+                {
+                    std::cerr << "[SifCallRpc] unresolved end callback endFunc=0x" << std::hex << endFunc
+                              << " semaId=0x" << semaId
+                              << " fallbackSignal=" << std::dec << (fallbackSignaledSema ? 1 : 0)
+                              << std::endl;
+                    ++unresolvedEndFuncWarnCount;
+                }
+            }
+        }
+
+        static int logCount = 0;
+        if (logCount < 10)
+        {
+            RUNTIME_LOG("[SifCallRpc] client=0x" << std::hex << clientPtr
+                                                 << " sid=0x" << sid
+                                                 << " rpcNum=0x" << rpcNum
+                                                 << " mode=0x" << mode
+                                                 << " sendBuf=0x" << sendBuf
+                                                 << " recvBuf=0x" << recvBuf
+                                                 << " recvSize=0x" << recvSize
+                                                 << " size=" << std::dec << sendSize << std::endl);
+            ++logCount;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(g_rpc_mutex);
+            g_rpc_clients[clientPtr].busy = false;
+        }
+
+        setReturnS32(ctx, 0);
+    }
+
+    void SifRegisterRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        uint32_t sdPtr = getRegU32(ctx, 4);
+        uint32_t sid = getRegU32(ctx, 5);
+        uint32_t func = getRegU32(ctx, 6);
+        uint32_t buf = getRegU32(ctx, 7);
+        // stack args: cfunc, cbuf, qd...
+        uint32_t sp = getRegU32(ctx, 29);
+        uint32_t cfunc = 0;
+        uint32_t cbuf = 0;
+        uint32_t qd = 0;
+        readStackU32(rdram, sp, 0x10, cfunc);
+        readStackU32(rdram, sp, 0x14, cbuf);
+        readStackU32(rdram, sp, 0x18, qd);
+
+        t_SifRpcServerData *sd = reinterpret_cast<t_SifRpcServerData *>(getMemPtr(rdram, sdPtr));
+        if (!sd)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        sd->sid = static_cast<int>(sid);
+        sd->func = func;
+        sd->buf = buf;
+        sd->size = 0;
+        sd->cfunc = cfunc;
+        sd->cbuf = cbuf;
+        sd->size2 = 0;
+        sd->client = 0;
+        sd->pkt_addr = 0;
+        sd->rpc_number = 0;
+        sd->recvbuf = 0;
+        sd->rsize = 0;
+        sd->rmode = 0;
+        sd->rid = 0;
+        sd->base = qd;
+        sd->link = 0;
+        sd->next = 0;
+
+        {
+            std::lock_guard<std::mutex> lock(g_rpc_mutex);
+
+            if (qd)
+            {
+                t_SifRpcDataQueue *queue = reinterpret_cast<t_SifRpcDataQueue *>(getMemPtr(rdram, qd));
+                if (queue)
+                {
+                    if (!queue->link)
+                    {
+                        queue->link = sdPtr;
+                    }
+                    else
+                    {
+                        uint32_t curPtr = queue->link;
+                        for (int guard = 0; guard < 1024 && curPtr; ++guard)
+                        {
+                            t_SifRpcServerData *cur = reinterpret_cast<t_SifRpcServerData *>(getMemPtr(rdram, curPtr));
+                            if (!cur)
+                                break;
+                            if (!cur->link)
+                            {
+                                cur->link = sdPtr;
+                                break;
+                            }
+                            if (cur->link == sdPtr)
+                                break;
+                            curPtr = cur->link;
+                        }
+                    }
+                }
+            }
+
+            g_rpc_servers[sid] = {sid, sdPtr};
+            for (auto &entry : g_rpc_clients)
+            {
+                if (entry.second.sid == sid)
+                {
+                    t_SifRpcClientData *cd = reinterpret_cast<t_SifRpcClientData *>(getMemPtr(rdram, entry.first));
+                    if (cd)
+                    {
+                        cd->server = sdPtr;
+                        cd->buf = sd->buf;
+                        cd->cbuf = sd->cbuf;
+                    }
+                }
+            }
+        }
+
+        RUNTIME_LOG("[SifRegisterRpc] sid=0x" << std::hex << sid << " sd=0x" << sdPtr << std::dec);
+        setReturnS32(ctx, 0);
+    }
+
+    void SifCheckStatRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        uint32_t clientPtr = getRegU32(ctx, 4);
+        std::lock_guard<std::mutex> lock(g_rpc_mutex);
+        auto it = g_rpc_clients.find(clientPtr);
+        if (it == g_rpc_clients.end())
+        {
+            setReturnS32(ctx, 0);
+            return;
+        }
+        setReturnS32(ctx, it->second.busy ? 1 : 0);
+    }
+
+    void SifSetRpcQueue(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        uint32_t qdPtr = getRegU32(ctx, 4);
+        int threadId = static_cast<int>(getRegU32(ctx, 5));
+
+        t_SifRpcDataQueue *qd = reinterpret_cast<t_SifRpcDataQueue *>(getMemPtr(rdram, qdPtr));
+        if (!qd)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        qd->thread_id = threadId;
+        qd->active = 0;
+        qd->link = 0;
+        qd->start = 0;
+        qd->end = 0;
+        qd->next = 0;
+
+        {
+            std::lock_guard<std::mutex> lock(g_rpc_mutex);
+            if (!g_rpc_active_queue)
+            {
+                g_rpc_active_queue = qdPtr;
+            }
+            else
+            {
+                uint32_t curPtr = g_rpc_active_queue;
+                for (int guard = 0; guard < 1024 && curPtr; ++guard)
+                {
+                    if (curPtr == qdPtr)
+                        break;
+                    t_SifRpcDataQueue *cur = reinterpret_cast<t_SifRpcDataQueue *>(getMemPtr(rdram, curPtr));
+                    if (!cur)
+                        break;
+                    if (!cur->next)
+                    {
+                        cur->next = qdPtr;
+                        break;
+                    }
+                    curPtr = cur->next;
+                }
+            }
+        }
+
+        setReturnS32(ctx, 0);
+    }
+
+    void SifRemoveRpcQueue(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        uint32_t qdPtr = getRegU32(ctx, 4);
+        if (!qdPtr)
+        {
+            setReturnU32(ctx, 0);
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(g_rpc_mutex);
+        if (!g_rpc_active_queue)
+        {
+            setReturnU32(ctx, 0);
+            return;
+        }
+
+        if (g_rpc_active_queue == qdPtr)
+        {
+            t_SifRpcDataQueue *qd = reinterpret_cast<t_SifRpcDataQueue *>(getMemPtr(rdram, qdPtr));
+            g_rpc_active_queue = qd ? qd->next : 0;
+            setReturnU32(ctx, qdPtr);
+            return;
+        }
+
+        uint32_t curPtr = g_rpc_active_queue;
+        for (int guard = 0; guard < 1024 && curPtr; ++guard)
+        {
+            t_SifRpcDataQueue *cur = reinterpret_cast<t_SifRpcDataQueue *>(getMemPtr(rdram, curPtr));
+            if (!cur)
+                break;
+            if (cur->next == qdPtr)
+            {
+                t_SifRpcDataQueue *rem = reinterpret_cast<t_SifRpcDataQueue *>(getMemPtr(rdram, qdPtr));
+                cur->next = rem ? rem->next : 0;
+                setReturnU32(ctx, qdPtr);
+                return;
+            }
+            curPtr = cur->next;
+        }
+
+        setReturnU32(ctx, 0);
+    }
+
+    void SifRemoveRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        uint32_t sdPtr = getRegU32(ctx, 4);
+        uint32_t qdPtr = getRegU32(ctx, 5);
+
+        t_SifRpcDataQueue *qd = reinterpret_cast<t_SifRpcDataQueue *>(getMemPtr(rdram, qdPtr));
+        if (!qd || !sdPtr)
+        {
+            setReturnU32(ctx, 0);
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(g_rpc_mutex);
+
+        if (qd->link == sdPtr)
+        {
+            t_SifRpcServerData *sd = reinterpret_cast<t_SifRpcServerData *>(getMemPtr(rdram, sdPtr));
+            qd->link = sd ? sd->link : 0;
+            if (sd)
+                sd->link = 0;
+            setReturnU32(ctx, sdPtr);
+            return;
+        }
+
+        uint32_t curPtr = qd->link;
+        for (int guard = 0; guard < 1024 && curPtr; ++guard)
+        {
+            t_SifRpcServerData *cur = reinterpret_cast<t_SifRpcServerData *>(getMemPtr(rdram, curPtr));
+            if (!cur)
+                break;
+            if (cur->link == sdPtr)
+            {
+                t_SifRpcServerData *sd = reinterpret_cast<t_SifRpcServerData *>(getMemPtr(rdram, sdPtr));
+                cur->link = sd ? sd->link : 0;
+                if (sd)
+                    sd->link = 0;
+                setReturnU32(ctx, sdPtr);
+                return;
+            }
+            curPtr = cur->link;
+        }
+
+        setReturnU32(ctx, 0);
+    }
+
+    void sceSifCallRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        SifCallRpc(rdram, ctx, runtime);
+    }
+
+    void sceSifSendCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        uint32_t cid = getRegU32(ctx, 4);
+        uint32_t packetAddr = getRegU32(ctx, 5);
+        uint32_t packetSize = getRegU32(ctx, 6);
+        uint32_t srcExtra = getRegU32(ctx, 7);
+
+        uint32_t sp = getRegU32(ctx, 29);
+        uint32_t destExtra = 0;
+        uint32_t sizeExtra = 0;
+        readStackU32(rdram, sp, 0x10, destExtra);
+        readStackU32(rdram, sp, 0x14, sizeExtra);
+
+        if (sizeExtra > 0 && srcExtra && destExtra)
+        {
+            rpcCopyToRdram(rdram, destExtra, srcExtra, sizeExtra);
+        }
+
+        static int logCount = 0;
+        if (logCount < 5)
+        {
+            RUNTIME_LOG("[sceSifSendCmd] cid=0x" << std::hex << cid
+                                                 << " packet=0x" << packetAddr
+                                                 << " psize=0x" << packetSize
+                                                 << " extra=0x" << destExtra << std::dec << std::endl);
+            ++logCount;
+        }
+
+        // Return non-zero on success.
+        setReturnS32(ctx, 1);
+    }
+
+    void sceRpcGetPacket(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        uint32_t queuePtr = getRegU32(ctx, 4);
+        setReturnS32(ctx, static_cast<int32_t>(queuePtr));
+    }
+}

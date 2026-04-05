@@ -3,6 +3,7 @@
 #include "ps2_runtime_calls.h"
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
+#include "ps2_log.h"
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -115,10 +116,10 @@ namespace
         const std::string_view resolvedSyscall = ps2_runtime_calls::resolveSyscallName(handlerName);
         if (!resolvedSyscall.empty())
         {
-#define PS2_RESOLVE_SYSCALL(name)                      \
-    if (resolvedSyscall == std::string_view{#name})    \
-    {                                                  \
-        return &ps2_syscalls::name;                    \
+#define PS2_RESOLVE_SYSCALL(name)                   \
+    if (resolvedSyscall == std::string_view{#name}) \
+    {                                               \
+        return &ps2_syscalls::name;                 \
     }
             PS2_SYSCALL_LIST(PS2_RESOLVE_SYSCALL)
 #undef PS2_RESOLVE_SYSCALL
@@ -127,10 +128,10 @@ namespace
         const std::string_view resolvedStub = ps2_runtime_calls::resolveStubName(handlerName);
         if (!resolvedStub.empty())
         {
-#define PS2_RESOLVE_STUB(name)                       \
-    if (resolvedStub == std::string_view{#name})     \
-    {                                                \
-        return &ps2_stubs::name;                     \
+#define PS2_RESOLVE_STUB(name)                   \
+    if (resolvedStub == std::string_view{#name}) \
+    {                                            \
+        return &ps2_stubs::name;                 \
     }
             PS2_STUB_LIST(PS2_RESOLVE_STUB)
 #undef PS2_RESOLVE_STUB
@@ -175,6 +176,10 @@ namespace ps2_game_overrides
 
     void applyMatching(PS2Runtime &runtime, const std::string &elfPath, uint32_t entry)
     {
+        ps2_syscalls::clearSoundDriverCompatLayout();
+        ps2_syscalls::clearDtxCompatLayout();
+        ps2_stubs::clearMpegCompatLayout();
+
         std::vector<Descriptor> descriptors;
         {
             std::lock_guard<std::mutex> lock(registryMutex());
@@ -233,14 +238,76 @@ namespace ps2_game_overrides
             const char *name = (descriptor.name && descriptor.name[0] != '\0')
                                    ? descriptor.name
                                    : "unnamed";
-            std::cout << "[game_overrides] applying '" << name << "'" << std::endl;
+            RUNTIME_LOG("[game_overrides] applying '" << name << "'");
             descriptor.apply(runtime);
             ++appliedCount;
         }
 
         if (appliedCount > 0)
         {
-            std::cout << "[game_overrides] applied " << appliedCount << " matching override(s)." << std::endl;
+            RUNTIME_LOG("[game_overrides] applied " << appliedCount << " matching override(s).");
         }
     }
+}
+
+namespace
+{
+    void applyRecvxSoundDriverCompat(PS2Runtime &runtime)
+    {
+        (void)runtime;
+
+        // Trying to explain a bit of Resident Evil Code: Veronica X sound-driver guest globals.
+        // Update these guest addresses/callback PCs when porting the override to another build:
+        // - checksum tables back the SE/MIDI status values mirrored through the snddrv RPC stubs
+        // - busyFlagAddr is the guest-side "work in progress" word cleared on completion
+        // - completion/clearBusy callbacks are guest PCs reached when async snddrv work finishes
+        PS2SoundDriverCompatLayout layout{};
+        layout.primarySeCheckAddr = 0x01E0EF10u;
+        layout.primaryMidiCheckAddr = 0x01E0EF20u;
+        layout.fallbackSeCheckAddr = 0x01E1EF10u;
+        layout.fallbackMidiCheckAddr = 0x01E1EF20u;
+        layout.busyFlagAddr = 0x01E212C8u;
+        layout.completionCallbacks = {0x002EAC20u, 0x002EAC30u, 0x002FAC20u, 0x002FAC30u};
+        layout.clearBusyCallbacks = {0x002EAC30u, 0x002FAC30u};
+        ps2_syscalls::setSoundDriverCompatLayout(layout);
+    }
+
+    void applyRecvxDtxCompat(PS2Runtime &runtime)
+    {
+        (void)runtime;
+
+        // Trying to explain abit of Resident Evil Code: Veronica X DTX guest layout.
+        // Update these guest values when porting the middleware override to another build:
+        // - rpcSid identifies the DTX RPC service the guest binds/registers
+        // - urpc object/table addresses back the SJX/PS2RNA/SJRMT command tables
+        // - dispatcherFuncAddr is the guest-side DTX RPC handler used for URPC dispatch
+        PS2DtxCompatLayout layout{};
+        layout.rpcSid = 0x7D000000u;
+        layout.urpcObjBase = 0x01F18000u;
+        layout.urpcObjLimit = 0x01F1FF00u;
+        layout.urpcObjStride = 0x20u;
+        layout.urpcFnTableBase = 0x0034FED0u;
+        layout.urpcObjTableBase = 0x0034FFD0u;
+        layout.dispatcherFuncAddr = 0x002FABC0u;
+        ps2_syscalls::setDtxCompatLayout(layout);
+    }
+
+    void applyRecvxMpegCompat(PS2Runtime &runtime)
+    {
+        (void)runtime;
+
+        // this is temporary so ignore for now
+        PS2MpegCompatLayout layout{};
+        layout.mpegObjectAddr = 0x01E27140u;
+        layout.videoStateAddr = 0x01E271E8u;
+        layout.movieStateAddr = 0x01E21914u;
+        layout.syntheticFramesBeforeEnd = 1u;
+        layout.finishedVideoStateValue = 3u;
+        layout.finishedMovieStateValue = 3u;
+        ps2_stubs::setMpegCompatLayout(layout);
+    }
+
+    PS2_REGISTER_GAME_OVERRIDE("RECVX sound-driver compat", "slus_201.84", 0u, 0u, &applyRecvxSoundDriverCompat);
+    PS2_REGISTER_GAME_OVERRIDE("RECVX DTX compat", "slus_201.84", 0u, 0u, &applyRecvxDtxCompat);
+    PS2_REGISTER_GAME_OVERRIDE("RECVX MPEG compat", "slus_201.84", 0u, 0u, &applyRecvxMpegCompat);
 }

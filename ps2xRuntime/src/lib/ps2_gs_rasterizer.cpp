@@ -1,8 +1,11 @@
-#include "ps2_gs_rasterizer.h"
-#include "ps2_gs_gpu.h"
-#include "ps2_gs_common.h"
-#include "ps2_gs_psmt4.h"
-#include "ps2_gs_psmt8.h"
+#include "runtime/ps2_gs_rasterizer.h"
+#include "runtime/ps2_gs_gpu.h"
+#include "runtime/ps2_gs_common.h"
+#include "runtime/ps2_gs_psmct16.h"
+#include "runtime/ps2_gs_psmct32.h"
+#include "runtime/ps2_gs_psmt4.h"
+#include "runtime/ps2_gs_psmt8.h"
+#include "ps2_log.h"
 #include <atomic>
 #include <algorithm>
 #include <cmath>
@@ -30,6 +33,36 @@ namespace
         return r | (g << 8) | (b << 16) | (a << 24);
     }
 
+    uint32_t applyTexa(const GSTexaReg &texa, uint8_t psm, uint32_t texel)
+    {
+        if (psm == GS_PSM_CT32)
+            return texel;
+
+        const uint8_t r = static_cast<uint8_t>(texel & 0xFFu);
+        const uint8_t g = static_cast<uint8_t>((texel >> 8) & 0xFFu);
+        const uint8_t b = static_cast<uint8_t>((texel >> 16) & 0xFFu);
+        const bool rgbZero = r == 0u && g == 0u && b == 0u;
+        uint8_t a = static_cast<uint8_t>((texel >> 24) & 0xFFu);
+
+        switch (psm)
+        {
+        case GS_PSM_CT24:
+            a = (texa.aem && rgbZero) ? 0u : texa.ta0;
+            break;
+        case GS_PSM_CT16:
+        case GS_PSM_CT16S:
+            if ((a & 0x80u) != 0u)
+                a = texa.ta1;
+            else
+                a = (texa.aem && rgbZero) ? 0u : texa.ta0;
+            break;
+        default:
+            break;
+        }
+
+        return (texel & 0x00FFFFFFu) | (static_cast<uint32_t>(a) << 24);
+    }
+
     uint16_t encodePSMCT16(uint8_t r, uint8_t g, uint8_t b, uint8_t a)
     {
         return static_cast<uint16_t>(((r >> 3) & 0x1Fu) |
@@ -38,11 +71,27 @@ namespace
                                      ((a >= 0x40u) ? 0x8000u : 0u));
     }
 
+    uint32_t addrPSMCT16Family(uint32_t basePtr, uint32_t width, uint8_t psm, uint32_t x, uint32_t y)
+    {
+        switch (psm)
+        {
+        case GS_PSM_CT16:
+            return GSPSMCT16::addrPSMCT16(basePtr, width, x, y);
+        case GS_PSM_CT16S:
+            return GSPSMCT16::addrPSMCT16S(basePtr, width, x, y);
+        case GS_PSM_Z16:
+            return GSPSMCT16::addrPSMZ16(basePtr, width, x, y);
+        case GS_PSM_Z16S:
+            return GSPSMCT16::addrPSMZ16S(basePtr, width, x, y);
+        default:
+            return 0u;
+        }
+    }
+
     std::atomic<uint32_t> s_debugPrimitiveCount{0};
     std::atomic<uint32_t> s_debugPixelCount{0};
     std::atomic<uint32_t> s_debugContext1PrimitiveCount{0};
     std::atomic<uint32_t> s_debugFbp150PixelCount{0};
-
     bool passesAlphaTest(uint64_t testReg, uint8_t alpha)
     {
         if ((testReg & 0x1u) == 0u)
@@ -118,47 +167,40 @@ namespace
                                         uint8_t tb,
                                         uint8_t ta)
     {
-        const bool useTextureRgb = tex.tcc != 0u;
-        TextureCombineResult out{vr, vg, vb, ta};
+        const bool textureHasAlpha = tex.tcc != 0u;
+        TextureCombineResult out{tr, tg, tb, textureHasAlpha ? ta : va};
 
         switch (tex.tfx)
         {
-        case 0:
-            if (useTextureRgb)
-            {
-                out.r = clampU8((tr * vr) >> 7);
-                out.g = clampU8((tg * vg) >> 7);
-                out.b = clampU8((tb * vb) >> 7);
-            }
-            out.a = clampU8((ta * va) >> 7);
+        case 0: // MODULATE
+            out.r = clampU8((tr * vr) >> 7);
+            out.g = clampU8((tg * vg) >> 7);
+            out.b = clampU8((tb * vb) >> 7);
+            out.a = textureHasAlpha ? clampU8((ta * va) >> 7) : va;
             break;
-        case 1:
-            if (useTextureRgb)
-            {
-                out.r = tr;
-                out.g = tg;
-                out.b = tb;
-            }
-            out.a = ta;
+        case 1: // DECAL
+            out.r = tr;
+            out.g = tg;
+            out.b = tb;
+            out.a = textureHasAlpha ? ta : va;
             break;
-        case 2:
-        case 3:
-            if (useTextureRgb)
-            {
-                out.r = clampU8((tr * vr) >> 7);
-                out.g = clampU8((tg * vg) >> 7);
-                out.b = clampU8((tb * vb) >> 7);
-            }
-            out.a = ta;
+        case 2: // HIGHLIGHT
+            out.r = clampU8(((tr * vr) >> 7) + va);
+            out.g = clampU8(((tg * vg) >> 7) + va);
+            out.b = clampU8(((tb * vb) >> 7) + va);
+            out.a = textureHasAlpha ? clampU8(ta + va) : va;
+            break;
+        case 3: // HIGHLIGHT2
+            out.r = clampU8(((tr * vr) >> 7) + va);
+            out.g = clampU8(((tg * vg) >> 7) + va);
+            out.b = clampU8(((tb * vb) >> 7) + va);
+            out.a = textureHasAlpha ? ta : va;
             break;
         default:
-            if (useTextureRgb)
-            {
-                out.r = tr;
-                out.g = tg;
-                out.b = tb;
-            }
-            out.a = ta;
+            out.r = tr;
+            out.g = tg;
+            out.b = tb;
+            out.a = textureHasAlpha ? ta : va;
             break;
         }
 
@@ -187,102 +229,134 @@ namespace
 
         return clutIndex;
     }
+
+    bool tex1UsesLinearFilter(uint64_t tex1)
+    {
+        const uint8_t mmag = static_cast<uint8_t>((tex1 >> 5) & 0x1u);
+        const uint8_t mmin = static_cast<uint8_t>((tex1 >> 6) & 0x7u);
+        return mmag != 0u || mmin == 1u || (mmin & 0x4u) != 0u;
+    }
+
+    uint8_t lerpChannel(uint8_t c00, uint8_t c10, uint8_t c01, uint8_t c11, float fx, float fy)
+    {
+        const float top = static_cast<float>(c00) + (static_cast<float>(c10) - static_cast<float>(c00)) * fx;
+        const float bottom = static_cast<float>(c01) + (static_cast<float>(c11) - static_cast<float>(c01)) * fx;
+        return clampU8(static_cast<int>(std::lround(top + (bottom - top) * fy)));
+    }
 }
 
 void GSRasterizer::drawPrimitive(GS *gs)
 {
-    const uint32_t primitiveIndex = s_debugPrimitiveCount.fetch_add(1, std::memory_order_relaxed);
-    if (primitiveIndex < 64u)
-    {
-        const auto &ctx = gs->activeContext();
-        std::cout << "[gs:prim] idx=" << primitiveIndex
-                  << " type=" << static_cast<uint32_t>(gs->m_prim.type)
-                  << " tme=" << static_cast<uint32_t>(gs->m_prim.tme)
-                  << " abe=" << static_cast<uint32_t>(gs->m_prim.abe)
-                  << " fst=" << static_cast<uint32_t>(gs->m_prim.fst)
-                  << " ctxt=" << static_cast<uint32_t>(gs->m_prim.ctxt)
-                  << " fbp=" << ctx.frame.fbp
-                  << " fbw=" << ctx.frame.fbw
-                  << " psm=0x" << std::hex << static_cast<uint32_t>(ctx.frame.psm) << std::dec
-                  << " tex0=("
-                  << "tbp0=" << ctx.tex0.tbp0
-                  << " tbw=" << static_cast<uint32_t>(ctx.tex0.tbw)
-                  << " psm=0x" << std::hex << static_cast<uint32_t>(ctx.tex0.psm) << std::dec
-                  << " tw=" << static_cast<uint32_t>(ctx.tex0.tw)
-                  << " th=" << static_cast<uint32_t>(ctx.tex0.th)
-                  << " tcc=" << static_cast<uint32_t>(ctx.tex0.tcc)
-                  << " tfx=" << static_cast<uint32_t>(ctx.tex0.tfx)
-                  << " cbp=" << ctx.tex0.cbp
-                  << " cpsm=0x" << std::hex << static_cast<uint32_t>(ctx.tex0.cpsm) << std::dec
-                  << " csm=" << static_cast<uint32_t>(ctx.tex0.csm)
-                  << " csa=" << static_cast<uint32_t>(ctx.tex0.csa)
-                  << ")"
-                  << " ofx=" << (ctx.xyoffset.ofx >> 4)
-                  << " ofy=" << (ctx.xyoffset.ofy >> 4)
-                  << " scissor=(" << ctx.scissor.x0
-                  << "," << ctx.scissor.y0
-                  << ")-(" << ctx.scissor.x1
-                  << "," << ctx.scissor.y1 << ")"
-                  << " test=0x" << std::hex << ctx.test
-                  << " alpha=0x" << ctx.alpha
-                  << std::dec
-                  << " v0=(" << gs->m_vtxQueue[0].x << "," << gs->m_vtxQueue[0].y << ")"
-                  << " uv0=(" << (gs->m_vtxQueue[0].u >> 4) << "," << (gs->m_vtxQueue[0].v >> 4) << ")"
-                  << " stq0=(" << gs->m_vtxQueue[0].s << "," << gs->m_vtxQueue[0].t << "," << gs->m_vtxQueue[0].q << ")"
-                  << " v1=(" << gs->m_vtxQueue[1].x << "," << gs->m_vtxQueue[1].y << ")"
-                  << " uv1=(" << (gs->m_vtxQueue[1].u >> 4) << "," << (gs->m_vtxQueue[1].v >> 4) << ")"
-                  << " stq1=(" << gs->m_vtxQueue[1].s << "," << gs->m_vtxQueue[1].t << "," << gs->m_vtxQueue[1].q << ")"
-                  << " v2=(" << gs->m_vtxQueue[2].x << "," << gs->m_vtxQueue[2].y << ")"
-                  << " uv2=(" << (gs->m_vtxQueue[2].u >> 4) << "," << (gs->m_vtxQueue[2].v >> 4) << ")"
-                  << " stq2=(" << gs->m_vtxQueue[2].s << "," << gs->m_vtxQueue[2].t << "," << gs->m_vtxQueue[2].q << ")"
-                  << " rgba0=(" << static_cast<uint32_t>(gs->m_vtxQueue[0].r) << ","
-                  << static_cast<uint32_t>(gs->m_vtxQueue[0].g) << ","
-                  << static_cast<uint32_t>(gs->m_vtxQueue[0].b) << ","
-                  << static_cast<uint32_t>(gs->m_vtxQueue[0].a) << ")"
-                  << " rgba1=(" << static_cast<uint32_t>(gs->m_vtxQueue[1].r) << ","
-                  << static_cast<uint32_t>(gs->m_vtxQueue[1].g) << ","
-                  << static_cast<uint32_t>(gs->m_vtxQueue[1].b) << ","
-                  << static_cast<uint32_t>(gs->m_vtxQueue[1].a) << ")"
-                  << " rgba2=(" << static_cast<uint32_t>(gs->m_vtxQueue[2].r) << ","
-                  << static_cast<uint32_t>(gs->m_vtxQueue[2].g) << ","
-                  << static_cast<uint32_t>(gs->m_vtxQueue[2].b) << ","
-                  << static_cast<uint32_t>(gs->m_vtxQueue[2].a) << ")"
-                  << std::endl;
-    }
-
     const auto &ctx = gs->activeContext();
-    if ((gs->m_prim.ctxt != 0u || ctx.frame.fbp == 150u) &&
-        s_debugContext1PrimitiveCount.fetch_add(1u, std::memory_order_relaxed) < 32u)
+    PS2_IF_AGRESSIVE_LOGS({
+        const uint32_t primitiveIndex = s_debugPrimitiveCount.fetch_add(1u, std::memory_order_relaxed);
+        if (primitiveIndex < 64u)
+        {
+            std::cout << "[gs:prim] idx=" << primitiveIndex
+                      << " type=" << static_cast<uint32_t>(gs->m_prim.type)
+                      << " tme=" << static_cast<uint32_t>(gs->m_prim.tme)
+                      << " abe=" << static_cast<uint32_t>(gs->m_prim.abe)
+                      << " fst=" << static_cast<uint32_t>(gs->m_prim.fst)
+                      << " ctxt=" << static_cast<uint32_t>(gs->m_prim.ctxt)
+                      << " fbp=" << ctx.frame.fbp
+                      << " fbw=" << ctx.frame.fbw
+                      << " psm=0x" << std::hex << static_cast<uint32_t>(ctx.frame.psm) << std::dec
+                      << " tex0=("
+                      << "tbp0=" << ctx.tex0.tbp0
+                      << " tbw=" << static_cast<uint32_t>(ctx.tex0.tbw)
+                      << " psm=0x" << std::hex << static_cast<uint32_t>(ctx.tex0.psm) << std::dec
+                      << " tw=" << static_cast<uint32_t>(ctx.tex0.tw)
+                      << " th=" << static_cast<uint32_t>(ctx.tex0.th)
+                      << " tcc=" << static_cast<uint32_t>(ctx.tex0.tcc)
+                      << " tfx=" << static_cast<uint32_t>(ctx.tex0.tfx)
+                      << " cbp=" << ctx.tex0.cbp
+                      << " cpsm=0x" << std::hex << static_cast<uint32_t>(ctx.tex0.cpsm) << std::dec
+                      << " csm=" << static_cast<uint32_t>(ctx.tex0.csm)
+                      << " csa=" << static_cast<uint32_t>(ctx.tex0.csa)
+                      << ")"
+                      << " texclut=("
+                      << "cbw=" << static_cast<uint32_t>(gs->m_texclut.cbw)
+                      << " cou=" << static_cast<uint32_t>(gs->m_texclut.cou)
+                      << " cov=" << gs->m_texclut.cov
+                      << ")"
+                      << " ofx=" << (ctx.xyoffset.ofx >> 4)
+                      << " ofy=" << (ctx.xyoffset.ofy >> 4)
+                      << " scissor=(" << ctx.scissor.x0
+                      << "," << ctx.scissor.y0
+                      << ")-(" << ctx.scissor.x1
+                      << "," << ctx.scissor.y1 << ")"
+                      << " test=0x" << std::hex << ctx.test
+                      << " alpha=0x" << ctx.alpha
+                      << std::dec
+                      << " v0=(" << gs->m_vtxQueue[0].x << "," << gs->m_vtxQueue[0].y << ")"
+                      << " uv0=(" << (gs->m_vtxQueue[0].u >> 4) << "," << (gs->m_vtxQueue[0].v >> 4) << ")"
+                      << " stq0=(" << gs->m_vtxQueue[0].s << "," << gs->m_vtxQueue[0].t << "," << gs->m_vtxQueue[0].q << ")"
+                      << " v1=(" << gs->m_vtxQueue[1].x << "," << gs->m_vtxQueue[1].y << ")"
+                      << " uv1=(" << (gs->m_vtxQueue[1].u >> 4) << "," << (gs->m_vtxQueue[1].v >> 4) << ")"
+                      << " stq1=(" << gs->m_vtxQueue[1].s << "," << gs->m_vtxQueue[1].t << "," << gs->m_vtxQueue[1].q << ")"
+                      << " v2=(" << gs->m_vtxQueue[2].x << "," << gs->m_vtxQueue[2].y << ")"
+                      << " uv2=(" << (gs->m_vtxQueue[2].u >> 4) << "," << (gs->m_vtxQueue[2].v >> 4) << ")"
+                      << " stq2=(" << gs->m_vtxQueue[2].s << "," << gs->m_vtxQueue[2].t << "," << gs->m_vtxQueue[2].q << ")"
+                      << " rgba0=(" << static_cast<uint32_t>(gs->m_vtxQueue[0].r) << ","
+                      << static_cast<uint32_t>(gs->m_vtxQueue[0].g) << ","
+                      << static_cast<uint32_t>(gs->m_vtxQueue[0].b) << ","
+                      << static_cast<uint32_t>(gs->m_vtxQueue[0].a) << ")"
+                      << " rgba1=(" << static_cast<uint32_t>(gs->m_vtxQueue[1].r) << ","
+                      << static_cast<uint32_t>(gs->m_vtxQueue[1].g) << ","
+                      << static_cast<uint32_t>(gs->m_vtxQueue[1].b) << ","
+                      << static_cast<uint32_t>(gs->m_vtxQueue[1].a) << ")"
+                      << " rgba2=(" << static_cast<uint32_t>(gs->m_vtxQueue[2].r) << ","
+                      << static_cast<uint32_t>(gs->m_vtxQueue[2].g) << ","
+                      << static_cast<uint32_t>(gs->m_vtxQueue[2].b) << ","
+                      << static_cast<uint32_t>(gs->m_vtxQueue[2].a) << ")"
+                      << std::endl;
+        }
+    });
+
+    PS2_IF_AGRESSIVE_LOGS({
+        if ((gs->m_prim.ctxt != 0u || ctx.frame.fbp == 150u) &&
+            s_debugContext1PrimitiveCount.fetch_add(1u, std::memory_order_relaxed) < 32u)
+        {
+            std::cout << "[gs:copy-prim]"
+                      << " type=" << static_cast<uint32_t>(gs->m_prim.type)
+                      << " tme=" << static_cast<uint32_t>(gs->m_prim.tme)
+                      << " abe=" << static_cast<uint32_t>(gs->m_prim.abe)
+                      << " fst=" << static_cast<uint32_t>(gs->m_prim.fst)
+                      << " ctxt=" << static_cast<uint32_t>(gs->m_prim.ctxt)
+                      << " fbp=" << ctx.frame.fbp
+                      << " fbw=" << ctx.frame.fbw
+                      << " psm=0x" << std::hex << static_cast<uint32_t>(ctx.frame.psm) << std::dec
+                      << " tex0=("
+                      << "tbp0=" << ctx.tex0.tbp0
+                      << " tbw=" << static_cast<uint32_t>(ctx.tex0.tbw)
+                      << " psm=0x" << std::hex << static_cast<uint32_t>(ctx.tex0.psm) << std::dec
+                      << " tcc=" << static_cast<uint32_t>(ctx.tex0.tcc)
+                      << " tfx=" << static_cast<uint32_t>(ctx.tex0.tfx)
+                      << " cbp=" << ctx.tex0.cbp
+                      << " cpsm=0x" << std::hex << static_cast<uint32_t>(ctx.tex0.cpsm) << std::dec
+                      << " csm=" << static_cast<uint32_t>(ctx.tex0.csm)
+                      << " csa=" << static_cast<uint32_t>(ctx.tex0.csa)
+                      << ")"
+                      << " texclut=("
+                      << "cbw=" << static_cast<uint32_t>(gs->m_texclut.cbw)
+                      << " cou=" << static_cast<uint32_t>(gs->m_texclut.cou)
+                      << " cov=" << gs->m_texclut.cov
+                      << ")"
+                      << " ofx=" << (ctx.xyoffset.ofx >> 4)
+                      << " ofy=" << (ctx.xyoffset.ofy >> 4)
+                      << " scissor=(" << ctx.scissor.x0
+                      << "," << ctx.scissor.y0
+                      << ")-(" << ctx.scissor.x1
+                      << "," << ctx.scissor.y1 << ")"
+                      << " test=0x" << std::hex << ctx.test
+                      << " alpha=0x" << ctx.alpha
+                      << std::dec << std::endl;
+        }
+    });
+
+    if (gs->m_hasPreferredDisplaySource && ctx.frame.fbp == gs->m_preferredDisplayDestFbp)
     {
-        std::cout << "[gs:copy-prim]"
-                  << " type=" << static_cast<uint32_t>(gs->m_prim.type)
-                  << " tme=" << static_cast<uint32_t>(gs->m_prim.tme)
-                  << " abe=" << static_cast<uint32_t>(gs->m_prim.abe)
-                  << " fst=" << static_cast<uint32_t>(gs->m_prim.fst)
-                  << " ctxt=" << static_cast<uint32_t>(gs->m_prim.ctxt)
-                  << " fbp=" << ctx.frame.fbp
-                  << " fbw=" << ctx.frame.fbw
-                  << " psm=0x" << std::hex << static_cast<uint32_t>(ctx.frame.psm) << std::dec
-                  << " tex0=("
-                  << "tbp0=" << ctx.tex0.tbp0
-                  << " tbw=" << static_cast<uint32_t>(ctx.tex0.tbw)
-                  << " psm=0x" << std::hex << static_cast<uint32_t>(ctx.tex0.psm) << std::dec
-                  << " tcc=" << static_cast<uint32_t>(ctx.tex0.tcc)
-                  << " tfx=" << static_cast<uint32_t>(ctx.tex0.tfx)
-                  << " cbp=" << ctx.tex0.cbp
-                  << " cpsm=0x" << std::hex << static_cast<uint32_t>(ctx.tex0.cpsm) << std::dec
-                  << " csm=" << static_cast<uint32_t>(ctx.tex0.csm)
-                  << " csa=" << static_cast<uint32_t>(ctx.tex0.csa)
-                  << ")"
-                  << " ofx=" << (ctx.xyoffset.ofx >> 4)
-                  << " ofy=" << (ctx.xyoffset.ofy >> 4)
-                  << " scissor=(" << ctx.scissor.x0
-                  << "," << ctx.scissor.y0
-                  << ")-(" << ctx.scissor.x1
-                  << "," << ctx.scissor.y1 << ")"
-                  << " test=0x" << std::hex << ctx.test
-                  << " alpha=0x" << ctx.alpha
-                  << std::dec << std::endl;
+        gs->m_hasPreferredDisplaySource = false;
     }
 
     switch (gs->m_prim.type)
@@ -324,47 +398,69 @@ void GSRasterizer::writePixel(GS *gs, int x, int y, uint8_t r, uint8_t g, uint8_
     if (!alphaTest.writeFramebuffer)
         return;
 
-    uint32_t fbBase = ctx.frame.fbp * 8192u;
-    uint32_t stride = fbStride(ctx.frame.fbw, ctx.frame.psm);
-    if (stride == 0)
-        return;
+    const uint32_t widthBlocks = (ctx.frame.fbw != 0u) ? ctx.frame.fbw : 1u;
+    const uint32_t bytesPerPixel =
+        (ctx.frame.psm == GS_PSM_CT16 || ctx.frame.psm == GS_PSM_CT16S) ? 2u : 4u;
 
-    const uint32_t bytesPerPixel = std::max<uint32_t>(1u, bitsPerPixel(ctx.frame.psm) / 8u);
-    uint32_t off = fbBase + static_cast<uint32_t>(y) * stride + static_cast<uint32_t>(x) * bytesPerPixel;
+    uint32_t off = 0u;
+    if (ctx.frame.psm == GS_PSM_CT32 || ctx.frame.psm == GS_PSM_CT24)
+    {
+        off = GSPSMCT32::addrPSMCT32(GSInternal::framePageBaseToBlock(ctx.frame.fbp),
+                                     widthBlocks,
+                                     static_cast<uint32_t>(x),
+                                     static_cast<uint32_t>(y));
+    }
+    else
+    {
+        off = addrPSMCT16Family(GSInternal::framePageBaseToBlock(ctx.frame.fbp),
+                                widthBlocks,
+                                ctx.frame.psm,
+                                static_cast<uint32_t>(x),
+                                static_cast<uint32_t>(y));
+    }
+
     if (off + bytesPerPixel > gs->m_vramSize)
         return;
 
-    const uint32_t pixelIndex = s_debugPixelCount.fetch_add(1, std::memory_order_relaxed);
-    if (pixelIndex < 32u)
-    {
-        std::cout << "[gs:pixel] idx=" << pixelIndex
-                  << " xy=(" << x << "," << y << ")"
-                  << " rgba=(" << static_cast<uint32_t>(r) << ","
-                  << static_cast<uint32_t>(g) << ","
-                  << static_cast<uint32_t>(b) << ","
-                  << static_cast<uint32_t>(a) << ")"
-                  << " fbp=" << ctx.frame.fbp
-                  << " fbw=" << ctx.frame.fbw
-                  << " psm=0x" << std::hex << static_cast<uint32_t>(ctx.frame.psm) << std::dec
-                  << " off=0x" << std::hex << off << std::dec
-                  << std::endl;
-    }
+    PS2_IF_AGRESSIVE_LOGS({
+        const uint32_t pixelIndex = s_debugPixelCount.fetch_add(1, std::memory_order_relaxed);
+        if (pixelIndex < 32u)
+        {
+            std::cout << "[gs:pixel] idx=" << pixelIndex
+                      << " xy=(" << x << "," << y << ")"
+                      << " rgba=(" << static_cast<uint32_t>(r) << ","
+                      << static_cast<uint32_t>(g) << ","
+                      << static_cast<uint32_t>(b) << ","
+                      << static_cast<uint32_t>(a) << ")"
+                      << " fbp=" << ctx.frame.fbp
+                      << " fbw=" << ctx.frame.fbw
+                      << " psm=0x" << std::hex << static_cast<uint32_t>(ctx.frame.psm) << std::dec
+                      << " off=0x" << std::hex << off << std::dec
+                      << std::endl;
+        }
+    });
 
-    if (ctx.frame.fbp == 150u &&
-        s_debugFbp150PixelCount.fetch_add(1u, std::memory_order_relaxed) < 32u)
-    {
-        std::cout << "[gs:fbp150-pixel]"
-                  << " xy=(" << x << "," << y << ")"
-                  << " rgba=(" << static_cast<uint32_t>(r) << ","
-                  << static_cast<uint32_t>(g) << ","
-                  << static_cast<uint32_t>(b) << ","
-                  << static_cast<uint32_t>(a) << ")"
-                  << " scissor=(" << ctx.scissor.x0
-                  << "," << ctx.scissor.y0
-                  << ")-(" << ctx.scissor.x1
-                  << "," << ctx.scissor.y1 << ")"
-                  << " off=0x" << std::hex << off << std::dec << std::endl;
-    }
+    PS2_IF_AGRESSIVE_LOGS({
+        if (ctx.frame.fbp == 150u &&
+            s_debugFbp150PixelCount.fetch_add(1u, std::memory_order_relaxed) < 32u)
+        {
+            std::cout << "[gs:fbp150-pixel]"
+                      << " xy=(" << x << "," << y << ")"
+                      << " rgba=(" << static_cast<uint32_t>(r) << ","
+                      << static_cast<uint32_t>(g) << ","
+                      << static_cast<uint32_t>(b) << ","
+                      << static_cast<uint32_t>(a) << ")"
+                      << " scissor=(" << ctx.scissor.x0
+                      << "," << ctx.scissor.y0
+                      << ")-(" << ctx.scissor.x1
+                      << "," << ctx.scissor.y1 << ")"
+                      << " off=0x" << std::hex << off << std::dec << std::endl;
+        }
+    });
+
+    const uint8_t srcR = r;
+    const uint8_t srcG = g;
+    const uint8_t srcB = b;
 
     if (gs->m_prim.abe)
     {
@@ -384,30 +480,47 @@ void GSRasterizer::writePixel(GS *gs, int x, int y, uint8_t r, uint8_t g, uint8_
         uint8_t db = (existing >> 16) & 0xFF;
         uint8_t da = (existing >> 24) & 0xFF;
 
-        uint64_t alphaReg = ctx.alpha;
-        uint8_t asel = alphaReg & 3;
-        uint8_t bsel = (alphaReg >> 2) & 3;
-        uint8_t csel = (alphaReg >> 4) & 3;
-        uint8_t dsel = (alphaReg >> 6) & 3;
-        uint8_t fix = static_cast<uint8_t>((alphaReg >> 32) & 0xFF);
-
-        auto pickRGB = [&](uint8_t sel, int cs, int cd) -> int
+        // PABE disables alpha blending when the source alpha MSB is clear.
+        if (!(gs->m_pabe && (a & 0x80u) == 0u))
         {
-            if (sel == 0)
-                return cs;
-            if (sel == 1)
-                return cd;
-            return 0;
-        };
-        int cAlpha = (csel == 0) ? a : (csel == 1) ? da
-                                                   : fix;
+            uint64_t alphaReg = ctx.alpha;
+            uint8_t asel = alphaReg & 3;
+            uint8_t bsel = (alphaReg >> 2) & 3;
+            uint8_t csel = (alphaReg >> 4) & 3;
+            uint8_t dsel = (alphaReg >> 6) & 3;
+            uint8_t fix = static_cast<uint8_t>((alphaReg >> 32) & 0xFF);
 
-        r = clampU8(((pickRGB(asel, r, dr) - pickRGB(bsel, r, dr)) * cAlpha >> 7) + pickRGB(dsel, r, dr));
-        g = clampU8(((pickRGB(asel, g, dg) - pickRGB(bsel, g, dg)) * cAlpha >> 7) + pickRGB(dsel, g, dg));
-        b = clampU8(((pickRGB(asel, b, db) - pickRGB(bsel, b, db)) * cAlpha >> 7) + pickRGB(dsel, b, db));
+            auto pickRGB = [&](uint8_t sel, int cs, int cd) -> int
+            {
+                if (sel == 0)
+                    return cs;
+                if (sel == 1)
+                    return cd;
+                return 0;
+            };
+            int cAlpha = (csel == 0) ? a : (csel == 1) ? da
+                                                       : fix;
+
+            r = clampU8(((pickRGB(asel, r, dr) - pickRGB(bsel, r, dr)) * cAlpha >> 7) + pickRGB(dsel, r, dr));
+            g = clampU8(((pickRGB(asel, g, dg) - pickRGB(bsel, g, dg)) * cAlpha >> 7) + pickRGB(dsel, g, dg));
+            b = clampU8(((pickRGB(asel, b, db) - pickRGB(bsel, b, db)) * cAlpha >> 7) + pickRGB(dsel, b, db));
+        }
+        else
+        {
+            r = srcR;
+            g = srcG;
+            b = srcB;
+        }
     }
 
     uint32_t mask = ctx.frame.fbmsk;
+    if (!alphaTest.preserveDestinationAlpha &&
+        (ctx.fba & 0x1ull) != 0ull &&
+        ctx.frame.psm != GS_PSM_CT24)
+    {
+        a = static_cast<uint8_t>(a | 0x80u);
+    }
+
     if (bytesPerPixel == 2u)
     {
         uint16_t pixel = encodePSMCT16(r, g, b, a);
@@ -444,9 +557,7 @@ uint32_t GSRasterizer::readTexelPSMCT32(GS *gs, uint32_t tbp0, uint32_t tbw, int
 {
     if (tbw == 0)
         tbw = 1;
-    uint32_t base = tbp0 * 256u;
-    uint32_t stride = tbw * 64u * 4u;
-    uint32_t off = base + static_cast<uint32_t>(texV) * stride + static_cast<uint32_t>(texU) * 4u;
+    uint32_t off = GSPSMCT32::addrPSMCT32(tbp0, tbw, static_cast<uint32_t>(texU), static_cast<uint32_t>(texV));
     if (off + 4 > gs->m_vramSize)
         return 0xFFFF00FFu;
     uint32_t texel;
@@ -458,9 +569,8 @@ uint32_t GSRasterizer::readTexelPSMCT16(GS *gs, uint32_t tbp0, uint32_t tbw, int
 {
     if (tbw == 0)
         tbw = 1;
-    uint32_t base = tbp0 * 256u;
-    uint32_t stride = tbw * 64u * 2u;
-    uint32_t off = base + static_cast<uint32_t>(texV) * stride + static_cast<uint32_t>(texU) * 2u;
+    const uint8_t psm = gs->activeContext().tex0.psm;
+    uint32_t off = addrPSMCT16Family(tbp0, tbw, psm, static_cast<uint32_t>(texU), static_cast<uint32_t>(texV));
     if (off + 2 > gs->m_vramSize)
         return 0xFFFF00FFu;
     uint16_t texel;
@@ -490,31 +600,29 @@ uint32_t GSRasterizer::lookupCLUT(GS *gs,
                                   uint8_t csa,
                                   uint8_t sourcePsm)
 {
-    uint32_t clutBase = cbp * 256u;
     const uint32_t clutIndex = resolveClutIndex(index, csm, csa, sourcePsm);
+    const uint32_t clutWidth = (gs->m_texclut.cbw != 0u) ? static_cast<uint32_t>(gs->m_texclut.cbw) : 1u;
+    const uint32_t clutX = static_cast<uint32_t>(gs->m_texclut.cou) + (clutIndex & 0x0Fu);
+    const uint32_t clutY = static_cast<uint32_t>(gs->m_texclut.cov) + (clutIndex >> 4);
 
     if (cpsm == GS_PSM_CT32 || cpsm == GS_PSM_CT24)
     {
-        uint32_t off = clutBase + clutIndex * 4u;
+        const uint32_t off = GSPSMCT32::addrPSMCT32(cbp, clutWidth, clutX, clutY);
         if (off + 4 > gs->m_vramSize)
             return 0xFFFF00FFu;
         uint32_t color;
         std::memcpy(&color, gs->m_vram + off, 4);
-        return color;
+        return applyTexa(gs->m_texa, cpsm, color);
     }
 
     if (cpsm == GS_PSM_CT16 || cpsm == GS_PSM_CT16S)
     {
-        uint32_t off = clutBase + clutIndex * 2u;
+        uint32_t off = addrPSMCT16Family(cbp, clutWidth, cpsm, clutX, clutY);
         if (off + 2 > gs->m_vramSize)
             return 0xFFFF00FFu;
         uint16_t c16;
         std::memcpy(&c16, gs->m_vram + off, 2);
-        uint32_t r = ((c16 >> 0) & 0x1Fu) << 3;
-        uint32_t g = ((c16 >> 5) & 0x1Fu) << 3;
-        uint32_t b = ((c16 >> 10) & 0x1Fu) << 3;
-        uint32_t a = (c16 & 0x8000u) ? 0x80u : 0u;
-        return r | (g << 8) | (b << 16) | (a << 24);
+        return applyTexa(gs->m_texa, cpsm, decodePSMCT16(c16));
     }
 
     return 0xFFFF00FFu;
@@ -528,46 +636,94 @@ uint32_t GSRasterizer::sampleTexture(GS *gs, float s, float t, float q, uint16_t
     int texW = 1 << tex.tw;
     int texH = 1 << tex.th;
 
-    int texU, texV;
+    float texUf, texVf;
     if (gs->m_prim.fst)
     {
-        texU = static_cast<int>(u >> 4);
-        texV = static_cast<int>(v >> 4);
+        texUf = static_cast<float>(u) / 16.0f;
+        texVf = static_cast<float>(v) / 16.0f;
     }
     else
     {
         const float invQ = 1.0f / fabsQ(q);
-        texU = static_cast<int>(s * invQ * static_cast<float>(texW));
-        texV = static_cast<int>(t * invQ * static_cast<float>(texH));
+        texUf = s * invQ * static_cast<float>(texW);
+        texVf = t * invQ * static_cast<float>(texH);
     }
 
-    texU = clampInt(texU, 0, texW - 1);
-    texV = clampInt(texV, 0, texH - 1);
-
-    if (tex.psm == GS_PSM_CT32 || tex.psm == GS_PSM_CT24)
-        return readTexelPSMCT32(gs, tex.tbp0, tex.tbw, texU, texV);
-
-    if (tex.psm == GS_PSM_CT16 || tex.psm == GS_PSM_CT16S)
-        return readTexelPSMCT16(gs, tex.tbp0, tex.tbw, texU, texV);
-
-    if (tex.psm == GS_PSM_T4)
+    auto samplePoint = [&](int sampleU, int sampleV) -> uint32_t
     {
-        uint32_t idx = readTexelPSMT4(gs, tex.tbp0, tex.tbw, texU, texV);
-        return lookupCLUT(gs, static_cast<uint8_t>(idx), tex.cbp, tex.cpsm, tex.csm, tex.csa, tex.psm);
-    }
+        sampleU = clampInt(sampleU, 0, texW - 1);
+        sampleV = clampInt(sampleV, 0, texH - 1);
 
-    if (tex.psm == GS_PSM_T8)
+        if (tex.psm == GS_PSM_CT32 || tex.psm == GS_PSM_CT24)
+            return applyTexa(gs->m_texa, tex.psm, readTexelPSMCT32(gs, tex.tbp0, tex.tbw, sampleU, sampleV));
+
+        if (tex.psm == GS_PSM_CT16 || tex.psm == GS_PSM_CT16S)
+            return applyTexa(gs->m_texa, tex.psm, readTexelPSMCT16(gs, tex.tbp0, tex.tbw, sampleU, sampleV));
+
+        if (tex.psm == GS_PSM_T4)
+        {
+            uint32_t idx = readTexelPSMT4(gs, tex.tbp0, tex.tbw, sampleU, sampleV);
+            return lookupCLUT(gs, static_cast<uint8_t>(idx), tex.cbp, tex.cpsm, tex.csm, tex.csa, tex.psm);
+        }
+
+        if (tex.psm == GS_PSM_T8)
+        {
+            if (tex.tbw == 0)
+                return 0xFFFF00FFu;
+            uint32_t off = GSPSMT8::addrPSMT8(tex.tbp0, tex.tbw, static_cast<uint32_t>(sampleU), static_cast<uint32_t>(sampleV));
+            if (off >= gs->m_vramSize)
+                return 0xFFFF00FFu;
+            uint8_t idx = gs->m_vram[off];
+            return lookupCLUT(gs, idx, tex.cbp, tex.cpsm, tex.csm, tex.csa, tex.psm);
+        }
+
+        return 0xFFFF00FFu;
+    };
+
+    if (!tex1UsesLinearFilter(ctx.tex1))
     {
-        if (tex.tbw == 0)
-            return 0xFFFF00FFu;
-        uint32_t off = GSPSMT8::addrPSMT8(tex.tbp0, tex.tbw, static_cast<uint32_t>(texU), static_cast<uint32_t>(texV));
-        if (off >= gs->m_vramSize)
-            return 0xFFFF00FFu;
-        uint8_t idx = gs->m_vram[off];
-        return lookupCLUT(gs, idx, tex.cbp, tex.cpsm, tex.csm, tex.csa, tex.psm);
+        return samplePoint(static_cast<int>(texUf), static_cast<int>(texVf));
     }
 
-    return 0xFFFF00FFu;
+    const float sampleU = texUf - 0.5f;
+    const float sampleV = texVf - 0.5f;
+    const int u0 = static_cast<int>(std::floor(sampleU));
+    const int v0 = static_cast<int>(std::floor(sampleV));
+    const int u1 = u0 + 1;
+    const int v1 = v0 + 1;
+    const float fx = sampleU - static_cast<float>(u0);
+    const float fy = sampleV - static_cast<float>(v0);
+
+    const uint32_t c00 = samplePoint(u0, v0);
+    const uint32_t c10 = samplePoint(u1, v0);
+    const uint32_t c01 = samplePoint(u0, v1);
+    const uint32_t c11 = samplePoint(u1, v1);
+
+    const uint8_t r = lerpChannel(static_cast<uint8_t>(c00 & 0xFFu),
+                                  static_cast<uint8_t>(c10 & 0xFFu),
+                                  static_cast<uint8_t>(c01 & 0xFFu),
+                                  static_cast<uint8_t>(c11 & 0xFFu),
+                                  fx, fy);
+    const uint8_t g = lerpChannel(static_cast<uint8_t>((c00 >> 8) & 0xFFu),
+                                  static_cast<uint8_t>((c10 >> 8) & 0xFFu),
+                                  static_cast<uint8_t>((c01 >> 8) & 0xFFu),
+                                  static_cast<uint8_t>((c11 >> 8) & 0xFFu),
+                                  fx, fy);
+    const uint8_t b = lerpChannel(static_cast<uint8_t>((c00 >> 16) & 0xFFu),
+                                  static_cast<uint8_t>((c10 >> 16) & 0xFFu),
+                                  static_cast<uint8_t>((c01 >> 16) & 0xFFu),
+                                  static_cast<uint8_t>((c11 >> 16) & 0xFFu),
+                                  fx, fy);
+    const uint8_t a = lerpChannel(static_cast<uint8_t>((c00 >> 24) & 0xFFu),
+                                  static_cast<uint8_t>((c10 >> 24) & 0xFFu),
+                                  static_cast<uint8_t>((c01 >> 24) & 0xFFu),
+                                  static_cast<uint8_t>((c11 >> 24) & 0xFFu),
+                                  fx, fy);
+
+    return static_cast<uint32_t>(r) |
+           (static_cast<uint32_t>(g) << 8) |
+           (static_cast<uint32_t>(b) << 16) |
+           (static_cast<uint32_t>(a) << 24);
 }
 
 void GSRasterizer::drawSprite(GS *gs)
@@ -589,31 +745,60 @@ void GSRasterizer::drawSprite(GS *gs)
     if (y0 > y1)
         std::swap(y0, y1);
 
+    const int unclippedX0 = x0;
+    const int unclippedY0 = y0;
+    const int spanX = std::max(1, x1 - x0);
+    const int spanY = std::max(1, y1 - y0);
+    const int unclippedX1 = unclippedX0 + spanX - 1;
+    const int unclippedY1 = unclippedY0 + spanY - 1;
+
     // If the sprite rectangle is fully outside scissor, nothing should render.
-    if (x1 < ctx.scissor.x0 || x0 > ctx.scissor.x1 ||
-        y1 < ctx.scissor.y0 || y0 > ctx.scissor.y1)
+    if (unclippedX1 < ctx.scissor.x0 || unclippedX0 > ctx.scissor.x1 ||
+        unclippedY1 < ctx.scissor.y0 || unclippedY0 > ctx.scissor.y1)
     {
         // maybe a log here idk ?
         return;
     }
 
-    x0 = clampInt(x0, ctx.scissor.x0, ctx.scissor.x1);
-    y0 = clampInt(y0, ctx.scissor.y0, ctx.scissor.y1);
-    x1 = clampInt(x1, ctx.scissor.x0, ctx.scissor.x1);
-    y1 = clampInt(y1, ctx.scissor.y0, ctx.scissor.y1);
+    const int drawX0 = clampInt(unclippedX0, ctx.scissor.x0, ctx.scissor.x1);
+    const int drawY0 = clampInt(unclippedY0, ctx.scissor.y0, ctx.scissor.y1);
+    const int drawX1 = clampInt(unclippedX1, ctx.scissor.x0, ctx.scissor.x1);
+    const int drawY1 = clampInt(unclippedY1, ctx.scissor.y0, ctx.scissor.y1);
+
+    const uint64_t alphaReg = ctx.alpha;
+    const uint8_t alphaMode = static_cast<uint8_t>(alphaReg & 0xFFu);
+    const uint8_t alphaFix = static_cast<uint8_t>((alphaReg >> 32) & 0xFFu);
+    const bool looksLikeDisplayCopy =
+        gs->m_prim.tme &&
+        gs->m_prim.abe &&
+        gs->m_prim.fst &&
+        gs->m_prim.ctxt &&
+        ctx.frame.fbp != ctx.tex0.tbp0 &&
+        alphaMode == 0x64u &&
+        (alphaFix == 0x60u || alphaFix == 0x80u) &&
+        unclippedX0 <= 0 &&
+        unclippedY0 <= 0 &&
+        unclippedX1 >= 639 &&
+        unclippedY1 >= 447;
+    if (looksLikeDisplayCopy)
+    {
+        gs->m_preferredDisplaySourceFrame = {ctx.tex0.tbp0, ctx.tex0.tbw, ctx.tex0.psm, 0u};
+        gs->m_preferredDisplayDestFbp = ctx.frame.fbp;
+        gs->m_hasPreferredDisplaySource = true;
+    }
 
     uint8_t r = v1.r, g = v1.g, b = v1.b, a = v1.a;
 
     if (gs->m_prim.tme)
     {
-        const auto &tex = ctx.tex0; 
+        const auto &tex = ctx.tex0;
         int texW = 1 << tex.tw;
         int texH = 1 << tex.th;
         if (texW == 0)
             texW = 1;
         if (texH == 0)
             texH = 1;
- 
+
         float u0f, v0f, u1f, v1f;
         if (gs->m_prim.fst)
         {
@@ -632,45 +817,36 @@ void GSRasterizer::drawSprite(GS *gs)
             v1f = (v1.t / q1) * static_cast<float>(texH);
         }
 
-        float spriteW = static_cast<float>(x1 - x0);
-        float spriteH = static_cast<float>(y1 - y0);
+        float spriteW = static_cast<float>(spanX);
+        float spriteH = static_cast<float>(spanY);
         if (spriteW < 1.0f)
             spriteW = 1.0f;
         if (spriteH < 1.0f)
             spriteH = 1.0f;
 
-        for (int y = y0; y <= y1; ++y)
+        for (int y = drawY0; y <= drawY1; ++y)
         {
-            float ty = (static_cast<float>(y - y0) + 0.5f) / spriteH;
+            float ty = (static_cast<float>(y - unclippedY0) + 0.5f) / spriteH;
             float texVf = v0f + (v1f - v0f) * ty;
-            int tv = clampInt(static_cast<int>(texVf), 0, texH - 1);
 
-            for (int x = x0; x <= x1; ++x)
+            for (int x = drawX0; x <= drawX1; ++x)
             {
-                float tx = (static_cast<float>(x - x0) + 0.5f) / spriteW;
+                float tx = (static_cast<float>(x - unclippedX0) + 0.5f) / spriteW;
                 float texUf = u0f + (u1f - u0f) * tx;
-                int tu = clampInt(static_cast<int>(texUf), 0, texW - 1);
-
-                uint32_t texel;
-                uint32_t sampleIndexValue = 0u;
-                if (tex.psm == GS_PSM_CT32 || tex.psm == GS_PSM_CT24)
-                    texel = readTexelPSMCT32(gs, tex.tbp0, tex.tbw, tu, tv);
-                else if (tex.psm == GS_PSM_CT16 || tex.psm == GS_PSM_CT16S)
-                    texel = readTexelPSMCT16(gs, tex.tbp0, tex.tbw, tu, tv);
-                else if (tex.psm == GS_PSM_T4)
+                uint32_t texel = 0xFFFF00FFu;
+                if (gs->m_prim.fst)
                 {
-                    sampleIndexValue = readTexelPSMT4(gs, tex.tbp0, tex.tbw, tu, tv);
-                    texel = lookupCLUT(gs, static_cast<uint8_t>(sampleIndexValue), tex.cbp, tex.cpsm, tex.csm, tex.csa, tex.psm);
-                }
-                else if (tex.psm == GS_PSM_T8)
-                {
-                    uint32_t off = GSPSMT8::addrPSMT8(tex.tbp0, tex.tbw ? tex.tbw : 1u,
-                                                      static_cast<uint32_t>(tu), static_cast<uint32_t>(tv));
-                    sampleIndexValue = (off < gs->m_vramSize) ? gs->m_vram[off] : 0u;
-                    texel = lookupCLUT(gs, static_cast<uint8_t>(sampleIndexValue), tex.cbp, tex.cpsm, tex.csm, tex.csa, tex.psm);
+                    const uint16_t sampleU = static_cast<uint16_t>(clampInt(static_cast<int>(std::lround(texUf * 16.0f)), 0, 0xFFFF));
+                    const uint16_t sampleV = static_cast<uint16_t>(clampInt(static_cast<int>(std::lround(texVf * 16.0f)), 0, 0xFFFF));
+                    texel = sampleTexture(gs, 0.0f, 0.0f, 1.0f, sampleU, sampleV);
                 }
                 else
-                    texel = 0xFFFF00FFu;
+                {
+                    texel = sampleTexture(gs,
+                                          texUf / static_cast<float>(texW),
+                                          texVf / static_cast<float>(texH),
+                                          1.0f, 0u, 0u);
+                }
 
                 uint8_t tr = static_cast<uint8_t>(texel & 0xFF);
                 uint8_t tg = static_cast<uint8_t>((texel >> 8) & 0xFF);
@@ -684,8 +860,8 @@ void GSRasterizer::drawSprite(GS *gs)
     }
     else
     {
-        for (int y = y0; y <= y1; ++y)
-            for (int x = x0; x <= x1; ++x)
+        for (int y = drawY0; y <= drawY1; ++y)
+            for (int x = drawX0; x <= drawX1; ++x)
                 writePixel(gs, x, y, r, g, b, a);
     }
 }
@@ -723,6 +899,7 @@ void GSRasterizer::drawTriangle(GS *gs)
 
     const float winding = (denom < 0.0f) ? -1.0f : 1.0f;
     const float invAbsDenom = 1.0f / std::fabs(denom);
+    constexpr float kEdgeEpsilon = 1.0e-4f;
 
     for (int y = minY; y <= maxY; ++y)
     {
@@ -735,7 +912,7 @@ void GSRasterizer::drawTriangle(GS *gs)
             float w1 = (((fy2 - fy0) * (px - fx2) + (fx0 - fx2) * (py - fy2)) * winding) * invAbsDenom;
             float w2 = 1.0f - w0 - w1;
 
-            if (w0 < 0.0f || w1 < 0.0f || w2 < 0.0f)
+            if (w0 < -kEdgeEpsilon || w1 < -kEdgeEpsilon || w2 < -kEdgeEpsilon)
                 continue;
 
             uint8_t r, g, b, a;

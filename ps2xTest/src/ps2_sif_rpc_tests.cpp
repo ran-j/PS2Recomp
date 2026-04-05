@@ -89,9 +89,25 @@ namespace
         TestEnv() : rdram(PS2_RAM_SIZE, 0)
         {
             ps2_stubs::resetSifState();
+            ps2_syscalls::resetSoundDriverRpcState();
+            ps2_syscalls::clearSoundDriverCompatLayout();
+            ps2_syscalls::clearDtxCompatLayout();
             std::memset(&ctx, 0, sizeof(ctx));
         }
     };
+
+    void setRecvxDtxCompatLayout()
+    {
+        PS2DtxCompatLayout layout{};
+        layout.rpcSid = 0x7D000000u;
+        layout.urpcObjBase = 0x01F18000u;
+        layout.urpcObjLimit = 0x01F1FF00u;
+        layout.urpcObjStride = 0x20u;
+        layout.urpcFnTableBase = 0x0034FED0u;
+        layout.urpcObjTableBase = 0x0034FFD0u;
+        layout.dispatcherFuncAddr = 0x002FABC0u;
+        ps2_syscalls::setDtxCompatLayout(layout);
+    }
 
     void setRegU32(R5900Context &ctx, int reg, uint32_t value)
     {
@@ -309,14 +325,14 @@ void register_ps2_sif_rpc_tests()
             t.Equals(getRegU32Result(env.ctx, 2), 0u, "removing the same queue twice should return 0");
         });
 
-        tc.Run("sid1 nowait RPC 0x12/0x13 returns expected pointers and signals sema", [](TestCase &t)
+        tc.Run("snddrv state RPC returns stable buffers and signals sema", [](TestCase &t)
         {
             TestEnv env;
 
             constexpr uint32_t kClientAddr = 0x00028000u;
             constexpr uint32_t kSemaParamAddr = 0x00028100u;
             constexpr uint32_t kRecvAddr = 0x00028200u;
-            constexpr uint32_t kSid = 1u;
+            constexpr uint32_t kSid = IOP_SID_SNDDRV_STATE;
 
             SifInitRpc(env.rdram.data(), &env.ctx, &env.runtime);
 
@@ -339,11 +355,7 @@ void register_ps2_sif_rpc_tests()
             setRegU32(env.ctx, 5, kSid);
             setRegU32(env.ctx, 6, 0u);
             SifBindRpc(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_OK, "SifBindRpc should succeed for sid 1");
-
-            SifRpcClientData client = readGuestStruct<SifRpcClientData>(env.rdram.data(), kClientAddr);
-            client.hdr.sema_id = semaId;
-            writeGuestStruct(env.rdram.data(), kClientAddr, client);
+            t.Equals(getRegS32(env.ctx, 2), KE_OK, "SifBindRpc should succeed for snddrv state sid");
 
             setRegU32(env.ctx, 4, static_cast<uint32_t>(semaId));
             PollSema(env.rdram.data(), &env.ctx, &env.runtime);
@@ -351,7 +363,7 @@ void register_ps2_sif_rpc_tests()
 
             std::memset(env.rdram.data() + kRecvAddr, 0, 16u);
             setRegU32(env.ctx, 4, kClientAddr);
-            setRegU32(env.ctx, 5, 0x12u);
+            setRegU32(env.ctx, 5, IOP_RPC_SNDDRV_GET_STATUS_ADDR);
             setRegU32(env.ctx, 6, K_SIF_RPC_MODE_NOWAIT);
             setRegU32(env.ctx, 7, 0u);
             setRegU32(env.ctx, 8, 0u);
@@ -359,10 +371,11 @@ void register_ps2_sif_rpc_tests()
             setRegU32(env.ctx, 10, 16u);
             setRegU32(env.ctx, 11, 0u);
             setRegU32(env.ctx, 29, K_STACK_ADDR);
-            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x00u, 0u);
+            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x00u, static_cast<uint32_t>(semaId));
             SifCallRpc(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_OK, "SifCallRpc(0x12) should succeed");
-            t.Equals(readGuestStruct<uint32_t>(env.rdram.data(), kRecvAddr), 0x00012000u, "rpc 0x12 should return SND_STATUS pointer");
+            t.Equals(getRegS32(env.ctx, 2), KE_OK, "SifCallRpc(sound status) should succeed");
+            const uint32_t statusAddr = readGuestStruct<uint32_t>(env.rdram.data(), kRecvAddr);
+            t.IsTrue(statusAddr != 0u, "rpc 0x12 should return a nonzero sound-status pointer");
 
             setRegU32(env.ctx, 4, static_cast<uint32_t>(semaId));
             PollSema(env.rdram.data(), &env.ctx, &env.runtime);
@@ -370,7 +383,85 @@ void register_ps2_sif_rpc_tests()
 
             std::memset(env.rdram.data() + kRecvAddr, 0, 16u);
             setRegU32(env.ctx, 4, kClientAddr);
-            setRegU32(env.ctx, 5, 0x13u);
+            setRegU32(env.ctx, 5, IOP_RPC_SNDDRV_GET_ADDR_TABLE);
+            setRegU32(env.ctx, 6, K_SIF_RPC_MODE_NOWAIT);
+            setRegU32(env.ctx, 7, 0u);
+            setRegU32(env.ctx, 8, 0u);
+            setRegU32(env.ctx, 9, kRecvAddr);
+            setRegU32(env.ctx, 10, 16u);
+            setRegU32(env.ctx, 11, 0u);
+            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x00u, static_cast<uint32_t>(semaId));
+            SifCallRpc(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_OK, "SifCallRpc(sound addr table) should succeed");
+            const uint32_t addrTableAddr = readGuestStruct<uint32_t>(env.rdram.data(), kRecvAddr);
+            t.IsTrue(addrTableAddr != 0u, "rpc 0x13 should return a nonzero address-table pointer");
+            t.IsTrue(addrTableAddr != statusAddr, "sound-status and address-table pointers should be distinct");
+
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(semaId));
+            PollSema(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_OK, "each nowait rpc should signal completion sema");
+
+            std::memset(env.rdram.data() + kRecvAddr, 0, 16u);
+            setRegU32(env.ctx, 4, kClientAddr);
+            setRegU32(env.ctx, 5, IOP_RPC_SNDDRV_GET_STATUS_ADDR);
+            setRegU32(env.ctx, 6, K_SIF_RPC_MODE_NOWAIT);
+            setRegU32(env.ctx, 7, 0u);
+            setRegU32(env.ctx, 8, 0u);
+            setRegU32(env.ctx, 9, kRecvAddr);
+            setRegU32(env.ctx, 10, 16u);
+            setRegU32(env.ctx, 11, 0u);
+            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x00u, static_cast<uint32_t>(semaId));
+            SifCallRpc(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(readGuestStruct<uint32_t>(env.rdram.data(), kRecvAddr), statusAddr,
+                     "sound-status pointer should remain stable across repeated rpc 0x12 calls");
+        });
+
+        tc.Run("snddrv state RPC returns low guest sound-driver addresses", [](TestCase &t)
+        {
+            TestEnv env;
+
+            constexpr uint32_t kClientAddr = 0x00028300u;
+            constexpr uint32_t kSemaParamAddr = 0x00028400u;
+            constexpr uint32_t kRecvAddr = 0x00028500u;
+            constexpr uint32_t kSid = IOP_SID_SNDDRV_STATE;
+
+            SifInitRpc(env.rdram.data(), &env.ctx, &env.runtime);
+
+            const uint32_t semaParam[6] = {0u, 1u, 0u, 0u, 0u, 0u};
+            std::memcpy(env.rdram.data() + kSemaParamAddr, semaParam, sizeof(semaParam));
+
+            setRegU32(env.ctx, 4, kSemaParamAddr);
+            CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
+            const int32_t semaId = getRegS32(env.ctx, 2);
+            t.IsTrue(semaId > 0, "CreateSema should return a positive semaphore id");
+
+            setRegU32(env.ctx, 4, kClientAddr);
+            setRegU32(env.ctx, 5, kSid);
+            setRegU32(env.ctx, 6, 0u);
+            SifBindRpc(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_OK, "SifBindRpc should succeed for snddrv state sid");
+
+            SifRpcClientData client = readGuestStruct<SifRpcClientData>(env.rdram.data(), kClientAddr);
+            client.hdr.sema_id = semaId;
+            writeGuestStruct(env.rdram.data(), kClientAddr, client);
+
+            setRegU32(env.ctx, 4, kClientAddr);
+            setRegU32(env.ctx, 5, IOP_RPC_SNDDRV_GET_STATUS_ADDR);
+            setRegU32(env.ctx, 6, K_SIF_RPC_MODE_NOWAIT);
+            setRegU32(env.ctx, 7, 0u);
+            setRegU32(env.ctx, 8, 0u);
+            setRegU32(env.ctx, 9, kRecvAddr);
+            setRegU32(env.ctx, 10, 16u);
+            setRegU32(env.ctx, 11, 0u);
+            setRegU32(env.ctx, 29, K_STACK_ADDR);
+            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x00u, static_cast<uint32_t>(semaId));
+            SifCallRpc(env.rdram.data(), &env.ctx, &env.runtime);
+            const uint32_t statusAddr = readGuestStruct<uint32_t>(env.rdram.data(), kRecvAddr);
+            t.IsTrue(statusAddr > 0u && statusAddr < 0x00200000u,
+                     "rpc 0x12 should return a low guest address like an IOP pointer");
+
+            setRegU32(env.ctx, 4, kClientAddr);
+            setRegU32(env.ctx, 5, IOP_RPC_SNDDRV_GET_ADDR_TABLE);
             setRegU32(env.ctx, 6, K_SIF_RPC_MODE_NOWAIT);
             setRegU32(env.ctx, 7, 0u);
             setRegU32(env.ctx, 8, 0u);
@@ -378,12 +469,19 @@ void register_ps2_sif_rpc_tests()
             setRegU32(env.ctx, 10, 16u);
             setRegU32(env.ctx, 11, 0u);
             SifCallRpc(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_OK, "SifCallRpc(0x13) should succeed");
-            t.Equals(readGuestStruct<uint32_t>(env.rdram.data(), kRecvAddr), 0x00012100u, "rpc 0x13 should return address-table pointer");
+            const uint32_t addrTableAddr = readGuestStruct<uint32_t>(env.rdram.data(), kRecvAddr);
+            t.IsTrue(addrTableAddr > 0u && addrTableAddr < 0x00200000u,
+                     "rpc 0x13 should return a low guest address like an IOP pointer");
 
-            setRegU32(env.ctx, 4, static_cast<uint32_t>(semaId));
-            PollSema(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_OK, "each nowait rpc should signal completion sema");
+            const uint32_t hdBaseAddr = readGuestStruct<uint32_t>(env.rdram.data(), addrTableAddr + 0u);
+            const uint32_t sqBaseAddr = readGuestStruct<uint32_t>(env.rdram.data(), addrTableAddr + 4u);
+            const uint32_t dataBaseAddr = readGuestStruct<uint32_t>(env.rdram.data(), addrTableAddr + 8u);
+            t.IsTrue(hdBaseAddr > 0u && hdBaseAddr < 0x00200000u,
+                     "sound-driver hd base should stay in low guest address space");
+            t.IsTrue(sqBaseAddr > hdBaseAddr && sqBaseAddr < 0x00200000u,
+                     "sound-driver sq base should be a later low guest address");
+            t.IsTrue(dataBaseAddr > sqBaseAddr && dataBaseAddr < 0x00200000u,
+                     "sound-driver data base should be a later low guest address");
         });
 
         tc.Run("SifCallRpc falls back to stack ABI when register pack is implausible", [](TestCase &t)
@@ -465,6 +563,7 @@ void register_ps2_sif_rpc_tests()
         tc.Run("SifCallRpc prefers stack ABI for DTX URPC when both packs look plausible", [](TestCase &t)
         {
             TestEnv env;
+            setRecvxDtxCompatLayout();
 
             constexpr uint32_t kClientAddr = 0x0002B000u;
             constexpr uint32_t kDtxSid = 0x7D000000u;

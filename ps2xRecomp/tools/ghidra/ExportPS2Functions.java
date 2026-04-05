@@ -52,8 +52,13 @@ public class ExportPS2Functions extends GhidraScript {
         "cmd_sem_init"
     ));
 
+    private static final Set<String> KNOWN_LOCAL_HELPER_NAMES = new HashSet<>(Arrays.asList(
+        "memcpy2",
+        "_memcpy2"
+    ));
+
     private static final Set<String> PS2_API_PREFIXES = new HashSet<>(Arrays.asList(
-        "sce", "sif", "pad", "gs", "dma", "iop", "vif", "spu", "mc", "libc"
+        "sce", "sif", "gs", "dma", "iop", "vif", "spu", "mc", "libc"
     ));
 
     private static final Set<String> KNOWN_STDLIB_NAMES = new HashSet<>(Arrays.asList(
@@ -61,7 +66,7 @@ public class ExportPS2Functions extends GhidraScript {
         "puts", "putchar", "getchar", "gets", "fgets", "fputs", "scanf", "fscanf", "sscanf",
         "sprint", "sbprintf",
         "malloc", "free", "calloc", "realloc", "aligned_alloc", "posix_memalign",
-        "memcpy", "memset", "memmove", "memcmp", "memcpy2", "memchr", "bcopy", "bzero",
+        "memcpy", "memset", "memmove", "memcmp", "memchr", "bcopy", "bzero",
         "strcpy", "strncpy", "strcat", "strncat", "strcmp", "strncmp", "strlen", "strstr",
         "strchr", "strrchr", "strdup", "strtok", "strtok_r", "strerror",
         "fopen", "fclose", "fread", "fwrite", "fseek", "ftell", "rewind", "fflush",
@@ -237,7 +242,14 @@ public class ExportPS2Functions extends GhidraScript {
             return false;
         }
 
+        if (KNOWN_LOCAL_HELPER_NAMES.contains(name)) {
+            return false;
+        }
+
         String normalized = normalizeOptionalLeadingUnderscore(name);
+        if (KNOWN_LOCAL_HELPER_NAMES.contains(normalized)) {
+            return false;
+        }
         if (KERNEL_RUNTIME_NAME_PATTERN.matcher(normalized).matches()) {
             return true;
         }

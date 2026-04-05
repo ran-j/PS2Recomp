@@ -4,6 +4,7 @@
 #include "ps2recomp/elf_parser.h"
 #include "ps2recomp/instructions.h"
 #include "ps2recomp/types.h"
+#include "ps2_runtime_calls.h"
 #include <elfio/elfio.hpp>
 #include <algorithm>
 #include <array>
@@ -158,6 +159,43 @@ void register_ps2_recompiler_tests()
 {
     MiniTest::Case("PS2Recompiler", [](TestCase &tc)
                    {
+        tc.Run("game helpers are not classified as runtime stubs", [](TestCase &t) {
+            t.IsFalse(ps2_runtime_calls::isStubName("Pad_init"),
+                      "Pad_init should be recompiled as game code");
+            t.IsFalse(ps2_runtime_calls::isStubName("Pad_set"),
+                      "Pad_set should be recompiled as game code");
+            t.IsFalse(ps2_runtime_calls::isStubName("pdInitPeripheral"),
+                      "pdInitPeripheral should be recompiled as game code");
+            t.IsFalse(ps2_runtime_calls::isStubName("pdGetPeripheral"),
+                      "pdGetPeripheral should be recompiled as game code");
+            t.IsFalse(ps2_runtime_calls::isStubName("InitThread"),
+                      "InitThread should be recompiled as game code");
+            t.IsFalse(ps2_runtime_calls::isStubName("syFree"),
+                      "syFree should be recompiled as game code");
+            t.IsFalse(ps2_runtime_calls::isStubName("syMallocInit"),
+                      "syMallocInit should be recompiled as game code");
+            t.IsFalse(ps2_runtime_calls::isStubName("syHwInit"),
+                      "syHwInit should be recompiled as game code");
+            t.IsFalse(ps2_runtime_calls::isStubName("syHwInit2"),
+                      "syHwInit2 should be recompiled as game code");
+            t.IsFalse(ps2_runtime_calls::isStubName("syRtcInit"),
+                      "syRtcInit should be recompiled as game code");
+            t.IsFalse(ps2_runtime_calls::isStubName("sdDrvInit"),
+                      "sdDrvInit should be recompiled as game code");
+            t.IsFalse(ps2_runtime_calls::isStubName("sdSndStopAll"),
+                      "sdSndStopAll should be recompiled as game code");
+            t.IsFalse(ps2_runtime_calls::isStubName("sdSysFinish"),
+                      "sdSysFinish should be recompiled as game code");
+            t.IsFalse(ps2_runtime_calls::isStubName("iopGetArea"),
+                      "iopGetArea should be recompiled as game code");
+            t.IsTrue(ps2_runtime_calls::isStubName("builtin_set_imask"),
+                     "builtin_set_imask should remain a runtime helper");
+            t.IsTrue(ps2_runtime_calls::isStubName("getpid"),
+                     "getpid should remain a runtime helper");
+            t.IsTrue(ps2_runtime_calls::isStubName("scePadRead"),
+                     "scePadRead should remain a runtime pad stub");
+        });
+
         tc.Run("additional entries split at nearest discovered boundary", [](TestCase &t) {
             std::vector<Section> sections = {
                 {".text", 0x1000u, 0x3000u, 0u, true, false, false, true, nullptr}
@@ -187,8 +225,8 @@ void register_ps2_recompiler_tests()
             size_t discovered = PS2Recompiler::DiscoverAdditionalEntryPoints(
                 functions, decodedFunctions, sections);
 
-            t.Equals(discovered, static_cast<size_t>(2),
-                     "expected two additional entries to be discovered");
+            t.Equals(discovered, static_cast<size_t>(3),
+                     "expected two mid-function targets plus the JAL return entry to be discovered");
 
             auto findByStart = [&](uint32_t start) -> const Function* {
                 auto it = std::find_if(functions.begin(), functions.end(),
@@ -202,8 +240,10 @@ void register_ps2_recompiler_tests()
 
             const Function *entry1008 = findByStart(0x1008u);
             const Function *entry100C = findByStart(0x100Cu);
+            const Function *entry2008 = findByStart(0x2008u);
             t.IsNotNull(entry1008, "entry at 0x1008 should exist");
             t.IsNotNull(entry100C, "entry at 0x100C should exist");
+            t.IsNotNull(entry2008, "JAL return address entry at 0x2008 should exist");
             if (entry1008 && entry100C)
             {
                 t.Equals(entry1008->end, 0x100Cu,
@@ -211,11 +251,18 @@ void register_ps2_recompiler_tests()
                 t.Equals(entry100C->end, 0x1018u,
                          "entry 0x100C should end at containing function end");
             }
+            if (entry2008)
+            {
+                t.Equals(entry2008->end, 0x2010u,
+                         "return entry 0x2008 should slice through the caller tail");
+            }
 
             auto decoded1008It = decodedFunctions.find(0x1008u);
             auto decoded100CIt = decodedFunctions.find(0x100Cu);
+            auto decoded2008It = decodedFunctions.find(0x2008u);
             t.IsTrue(decoded1008It != decodedFunctions.end(), "decoded slice for 0x1008 should exist");
             t.IsTrue(decoded100CIt != decodedFunctions.end(), "decoded slice for 0x100C should exist");
+            t.IsTrue(decoded2008It != decodedFunctions.end(), "decoded slice for 0x2008 should exist");
             if (decoded1008It != decodedFunctions.end())
             {
                 t.Equals(decoded1008It->second.size(), static_cast<size_t>(1),
@@ -230,6 +277,16 @@ void register_ps2_recompiler_tests()
             {
                 t.Equals(decoded100CIt->second.front().address, 0x100Cu,
                          "entry 0x100C slice should begin at 0x100C");
+            }
+            if (decoded2008It != decodedFunctions.end())
+            {
+                t.Equals(decoded2008It->second.size(), static_cast<size_t>(2),
+                         "return entry 0x2008 slice should keep the jump and its delay slot");
+                if (!decoded2008It->second.empty())
+                {
+                    t.Equals(decoded2008It->second.front().address, 0x2008u,
+                             "return entry 0x2008 slice should begin at the JAL fallthrough");
+                }
             }
         });
 
@@ -311,7 +368,7 @@ void register_ps2_recompiler_tests()
             }
         });
 
-        tc.Run("same-function JAL targets get entry wrappers but J targets stay labels", [](TestCase &t) {
+        tc.Run("same-function JAL return addresses get entry wrappers but targets stay labels", [](TestCase &t) {
             std::vector<Section> sections = {
                 {".text", 0x1000u, 0x40u, 0u, true, false, false, true, nullptr}
             };
@@ -335,8 +392,11 @@ void register_ps2_recompiler_tests()
                 functions, decodedFunctions, sections);
 
             t.Equals(discovered, static_cast<size_t>(1),
-                     "same-function JAL should create one entry while plain J stays internal");
+                     "same-function JAL should create only the resume entry while plain J stays internal");
 
+            const bool hasResumeEntry = std::any_of(
+                functions.begin(), functions.end(),
+                [](const Function &fn) { return fn.start == 0x1008u; });
             const bool hasCallEntry = std::any_of(
                 functions.begin(), functions.end(),
                 [](const Function &fn) { return fn.start == 0x100Cu; });
@@ -344,8 +404,140 @@ void register_ps2_recompiler_tests()
                 functions.begin(), functions.end(),
                 [](const Function &fn) { return fn.start == 0x1014u && fn.name.rfind("entry_", 0) == 0; });
 
-            t.IsTrue(hasCallEntry, "same-function JAL target should be promoted to an entry wrapper");
+            t.IsTrue(hasResumeEntry, "same-function JAL return address should be promoted to a resumable entry");
+            t.IsFalse(hasCallEntry, "same-function JAL target should remain an internal label");
             t.IsFalse(hasJumpEntry, "same-function J target should remain an internal label only");
+        });
+
+        tc.Run("JAL return addresses get resumable entry wrappers", [](TestCase &t) {
+            std::vector<Section> sections = {
+                {".text", 0x1000u, 0x2000u, 0u, true, false, false, true, nullptr}
+            };
+
+            std::vector<Function> functions = {
+                makeFunction("caller", 0x1000u, 0x1018u),
+                makeFunction("callee", 0x2000u, 0x2008u)
+            };
+
+            std::unordered_map<uint32_t, std::vector<Instruction>> decodedFunctions;
+            decodedFunctions[0x1000u] = {
+                makeAbsJump(0x1000u, 0x2000u, OPCODE_JAL),
+                makeNopLike(0x1004u),
+                makeNopLike(0x1008u),
+                makeNopLike(0x100Cu),
+                makeJrRa(0x1010u),
+                makeNopLike(0x1014u)
+            };
+            decodedFunctions[0x2000u] = {
+                makeJrRa(0x2000u),
+                makeNopLike(0x2004u)
+            };
+
+            size_t discovered = PS2Recompiler::DiscoverAdditionalEntryPoints(
+                functions, decodedFunctions, sections);
+            t.Equals(discovered, static_cast<size_t>(1),
+                     "external JAL should create one resumable entry at the caller return address");
+
+            auto entryIt = std::find_if(functions.begin(), functions.end(),
+                                        [](const Function &fn) { return fn.start == 0x1008u; });
+            t.IsTrue(entryIt != functions.end(), "return address 0x1008 should be promoted to an entry wrapper");
+            if (entryIt != functions.end())
+            {
+                t.Equals(entryIt->end, 0x1018u,
+                         "return-address entry should slice through the remainder of the caller");
+            }
+
+            auto decodedEntryIt = decodedFunctions.find(0x1008u);
+            t.IsTrue(decodedEntryIt != decodedFunctions.end(),
+                     "decoded entry slice for the caller return address should exist");
+            if (decodedEntryIt != decodedFunctions.end())
+            {
+                t.Equals(decodedEntryIt->second.size(), static_cast<size_t>(4),
+                         "return-address entry slice should keep the caller tail");
+                if (!decodedEntryIt->second.empty())
+                {
+                    t.Equals(decodedEntryIt->second.front().address, 0x1008u,
+                             "return-address entry slice should begin at the JAL fallthrough");
+                }
+            }
+        });
+
+        tc.Run("JAL to an already-known function still discovers the return entry", [](TestCase &t) {
+            std::vector<Section> sections = {
+                {".text", 0x1000u, 0x2000u, 0u, true, false, false, true, nullptr}
+            };
+
+            std::vector<Function> functions = {
+                makeFunction("caller", 0x1000u, 0x1020u),
+                makeFunction("callee", 0x1100u, 0x1108u)
+            };
+
+            std::unordered_map<uint32_t, std::vector<Instruction>> decodedFunctions;
+            decodedFunctions[0x1000u] = {
+                makeNopLike(0x1000u),
+                makeNopLike(0x1004u),
+                makeAbsJump(0x1008u, 0x1100u, OPCODE_JAL),
+                makeNopLike(0x100Cu),
+                makeNopLike(0x1010u),
+                makeNopLike(0x1014u),
+                makeJrRa(0x1018u),
+                makeNopLike(0x101Cu)
+            };
+            decodedFunctions[0x1100u] = {
+                makeJrRa(0x1100u),
+                makeNopLike(0x1104u)
+            };
+
+            size_t discovered = PS2Recompiler::DiscoverAdditionalEntryPoints(
+                functions, decodedFunctions, sections);
+            t.Equals(discovered, static_cast<size_t>(1),
+                     "return entry should still be discovered even when the JAL target is already registered");
+
+            auto entryIt = std::find_if(functions.begin(), functions.end(),
+                                        [](const Function &fn) { return fn.start == 0x1010u; });
+            t.IsTrue(entryIt != functions.end(),
+                     "return address 0x1010 should be emitted as a resumable entry");
+            if (entryIt != functions.end())
+            {
+                t.Equals(entryIt->end, 0x1020u,
+                         "return entry should cover the remaining caller tail");
+            }
+        });
+
+        tc.Run("discovery ignores synthetic entry wrappers", [](TestCase &t) {
+            std::vector<Section> sections = {
+                {".text", 0x1000u, 0x2000u, 0u, true, false, false, true, nullptr}
+            };
+
+            std::vector<Function> functions = {
+                makeFunction("entry_1008", 0x1008u, 0x1020u),
+                makeFunction("callee", 0x1100u, 0x1108u)
+            };
+
+            std::unordered_map<uint32_t, std::vector<Instruction>> decodedFunctions;
+            decodedFunctions[0x1008u] = {
+                makeAbsJump(0x1008u, 0x1100u, OPCODE_JAL),
+                makeNopLike(0x100Cu),
+                makeNopLike(0x1010u),
+                makeNopLike(0x1014u),
+                makeJrRa(0x1018u),
+                makeNopLike(0x101Cu)
+            };
+            decodedFunctions[0x1100u] = {
+                makeJrRa(0x1100u),
+                makeNopLike(0x1104u)
+            };
+
+            size_t discovered = PS2Recompiler::DiscoverAdditionalEntryPoints(
+                functions, decodedFunctions, sections);
+            t.Equals(discovered, static_cast<size_t>(0),
+                     "synthetic entry wrappers should not recursively produce more entries");
+
+            const bool hasRecursiveResumeEntry = std::any_of(
+                functions.begin(), functions.end(),
+                [](const Function &fn) { return fn.start == 0x1010u; });
+            t.IsFalse(hasRecursiveResumeEntry,
+                      "discovery should not promote a return entry out of an existing entry wrapper");
         });
 
         tc.Run("entry reslice handles entries without containing function", [](TestCase &t) {
@@ -657,6 +849,21 @@ void register_ps2_recompiler_tests()
             std::error_code removeError;
             std::filesystem::remove(elfPath, removeError);
             std::filesystem::remove(mapPath, removeError);
+        });
+
+        tc.Run("runtime call resolution includes Veronica compatibility aliases", [](TestCase &t) {
+            t.Equals(ps2_runtime_calls::resolveSyscallName("ReleaseAlarm"), std::string_view{"ReleaseAlarm"},
+                     "ReleaseAlarm should resolve as a syscall name");
+            t.Equals(ps2_runtime_calls::resolveSyscallName("_ReleaseAlarm"), std::string_view{"ReleaseAlarm"},
+                     "underscore ReleaseAlarm alias should resolve to ReleaseAlarm");
+            t.Equals(ps2_runtime_calls::resolveSyscallName("EnableCache"), std::string_view{"EnableCache"},
+                     "EnableCache should resolve as a syscall name");
+            t.Equals(ps2_runtime_calls::resolveSyscallName("DisableCache"), std::string_view{"DisableCache"},
+                     "DisableCache should resolve as a syscall name");
+            t.Equals(ps2_runtime_calls::resolveStubName("isceSifSetDma"), std::string_view{"isceSifSetDma"},
+                     "isceSifSetDma should resolve as a stub name");
+            t.Equals(ps2_runtime_calls::resolveStubName("isceSifSetDChain"), std::string_view{"isceSifSetDChain"},
+                     "isceSifSetDChain should resolve as a stub name");
         });
 
         tc.Run("respect max length for .cpp filenames", [](TestCase& t) {

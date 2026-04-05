@@ -1,9 +1,8 @@
 // Based on Blackline Interactive implementation
-#include "ps2_memory.h"
+#include "runtime/ps2_memory.h"
 #include <atomic>
 #include <cstring>
-#include <iostream>
-#include <iostream>
+#include "ps2_log.h"
 
 enum VIFCmd : uint8_t
 {
@@ -33,6 +32,21 @@ namespace
 {
     std::atomic<uint32_t> s_debugVu1KickCount{0};
     std::atomic<uint32_t> s_debugVif1OpcodeCount{0};
+    constexpr uint8_t kGifFmtImage = 2u;
+
+    uint32_t gifImageQwcFromTag(const uint8_t *data, uint32_t sizeBytes)
+    {
+        if (!data || sizeBytes < 16u)
+            return 0u;
+
+        uint64_t tagLo = 0u;
+        std::memcpy(&tagLo, data, sizeof(tagLo));
+        const uint8_t flg = static_cast<uint8_t>((tagLo >> 58) & 0x3u);
+        if (flg != kGifFmtImage)
+            return 0u;
+
+        return static_cast<uint32_t>(tagLo & 0x7FFFu);
+    }
 }
 
 void PS2Memory::processVIF1Data(uint32_t srcPhys, uint32_t sizeBytes)
@@ -66,6 +80,37 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 
     while (pos + 4 <= sizeBytes)
     {
+        if (m_vif1PendingPath2ImageQwc != 0u)
+        {
+            const uint32_t availableQw = (sizeBytes - pos) / 16u;
+            if (availableQw == 0u)
+            {
+                break;
+            }
+
+            const uint32_t chunkQw = std::min<uint32_t>(m_vif1PendingPath2ImageQwc, availableQw);
+            std::vector<uint8_t> imagePacket(16u + static_cast<size_t>(chunkQw) * 16u, 0u);
+            const uint64_t imageTag =
+                static_cast<uint64_t>(chunkQw & 0x7FFFu) |
+                ((m_vif1PendingPath2ImageQwc == chunkQw) ? (1ull << 15) : 0ull) |
+                (static_cast<uint64_t>(kGifFmtImage) << 58);
+            std::memcpy(imagePacket.data(), &imageTag, sizeof(imageTag));
+            std::memcpy(imagePacket.data() + 16u, data + pos, static_cast<size_t>(chunkQw) * 16u);
+            submitGifPacket(GifPathId::Path2,
+                            imagePacket.data(),
+                            static_cast<uint32_t>(imagePacket.size()),
+                            true,
+                            m_vif1PendingPath2DirectHl);
+
+            pos += chunkQw * 16u;
+            m_vif1PendingPath2ImageQwc -= chunkQw;
+            if (m_vif1PendingPath2ImageQwc == 0u)
+            {
+                m_vif1PendingPath2DirectHl = false;
+            }
+            continue;
+        }
+
         uint32_t cmd;
         memcpy(&cmd, data + pos, 4);
         pos += 4;
@@ -78,13 +123,13 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         const uint32_t opcodeIndex = s_debugVif1OpcodeCount.fetch_add(1, std::memory_order_relaxed);
         if (opcodeIndex < 160u)
         {
-            std::cout << "[vif1:cmd] idx=" << opcodeIndex
-                      << " opcode=0x" << std::hex << static_cast<uint32_t>(opcode)
-                      << " imm=0x" << imm
-                      << std::dec
-                      << " num=" << static_cast<uint32_t>(num)
-                      << " irq=" << static_cast<uint32_t>(irq ? 1u : 0u)
-                      << std::endl;
+            RUNTIME_LOG("[vif1:cmd] idx=" << opcodeIndex
+                                          << " opcode=0x" << std::hex << static_cast<uint32_t>(opcode)
+                                          << " imm=0x" << imm
+                                          << std::dec
+                                          << " num=" << static_cast<uint32_t>(num)
+                                          << " irq=" << static_cast<uint32_t>(irq ? 1u : 0u)
+                                          << std::endl);
         }
 
         // Track most-recent command for VIFn_CODE emulation.
@@ -155,12 +200,12 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             const uint32_t kickIndex = s_debugVu1KickCount.fetch_add(1, std::memory_order_relaxed);
             if (kickIndex < 48u)
             {
-                std::cout << "[vif1:mscal] idx=" << kickIndex
-                          << " opcode=0x" << std::hex << static_cast<uint32_t>(opcode)
-                          << " imm=0x" << imm
-                          << " startPc=0x" << startPC
-                          << " itop=0x" << vif1_regs.itop
-                          << std::dec << std::endl;
+                RUNTIME_LOG("[vif1:mscal] idx=" << kickIndex
+                                                << " opcode=0x" << std::hex << static_cast<uint32_t>(opcode)
+                                                << " imm=0x" << imm
+                                                << " startPc=0x" << startPC
+                                                << " itop=0x" << vif1_regs.itop
+                                                << std::dec << std::endl);
             }
             if (m_vu1MscalCallback)
                 m_vu1MscalCallback(startPC, vif1_regs.itop);
@@ -174,10 +219,10 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             const uint32_t kickIndex = s_debugVu1KickCount.fetch_add(1, std::memory_order_relaxed);
             if (kickIndex < 48u)
             {
-                std::cout << "[vif1:mscnt] idx=" << kickIndex
-                          << " itop=0x" << std::hex << vif1_regs.itop
-                          << " pc=resume"
-                          << std::dec << std::endl;
+                RUNTIME_LOG("[vif1:mscnt] idx=" << kickIndex
+                                                << " itop=0x" << std::hex << vif1_regs.itop
+                                                << " pc=resume"
+                                                << std::dec << std::endl);
             }
             if (m_vu1MscntCallback)
                 m_vu1MscntCallback(vif1_regs.itop);
@@ -243,6 +288,17 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             {
                 const bool directHl = (opcode == VIF_DIRECTHL);
                 submitGifPacket(GifPathId::Path2, data + pos, qwCount * 16, true, directHl);
+
+                const uint32_t imageQw = gifImageQwcFromTag(data + pos, qwCount * 16u);
+                if (imageQw != 0u)
+                {
+                    const uint32_t inlineImageQw = (qwCount > 0u) ? (qwCount - 1u) : 0u;
+                    if (imageQw > inlineImageQw)
+                    {
+                        m_vif1PendingPath2ImageQwc = imageQw - inlineImageQw;
+                        m_vif1PendingPath2DirectHl = directHl;
+                    }
+                }
             }
 
             pos += qwCount * 16;

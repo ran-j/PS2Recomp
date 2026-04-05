@@ -4,27 +4,31 @@
 #include <fstream>
 #include <iostream>
 #include <filesystem>
-#if defined(_WIN32)
-#define NOMINMAX
-#include <windows.h>
+
+#if defined(AGRESSIVE_LOGS)
+#define PS2_AGRESSIVE_LOGS_ENABLED 1
+#else
+#define PS2_AGRESSIVE_LOGS_ENABLED 0
 #endif
 
-#ifdef _DEBUG
+#if defined(_DEBUG)
+#define RUNTIME_LOG(x) do { std::cout << x; } while (0)
+#else
+#define RUNTIME_LOG(x) do {} while(0)
+#endif
+
+#ifdef neverDone
 
 namespace ps2_log
 {
+inline constexpr bool agressive_logs_enabled = PS2_AGRESSIVE_LOGS_ENABLED != 0;
+
 inline std::string log_path()
 {
     static std::string path;
     if (path.empty())
     {
-#if defined(_WIN32)
-        char buf[MAX_PATH];
-        if (GetModuleFileNameA(nullptr, buf, sizeof(buf)))
-            path = (std::filesystem::path(buf).parent_path() / "ps2_log.txt").string();
-#endif
-        if (path.empty())
-            path = (std::filesystem::current_path() / "ps2_log.txt").string();
+        path = (std::filesystem::current_path() / "ps2_log.txt").string();
     }
     return path;
 }
@@ -64,14 +68,24 @@ inline void print_saved_location()
     ps2_log::log_entry(name); \
     struct _ps2_log_guard_ { const char *_n; _ps2_log_guard_(const char *n) : _n(n) {} \
         ~_ps2_log_guard_() { ps2_log::log_exit(_n); } } _ps2_log_guard_(name)
+#define PS2_IF_AGRESSIVE_LOGS(code) \
+    do                              \
+    {                               \
+        if constexpr (ps2_log::agressive_logs_enabled) \
+        {                           \
+            code;                   \
+        }                           \
+    } while (0)
 
 #else
 
 namespace ps2_log
 {
+inline constexpr bool agressive_logs_enabled = false;
 inline void print_saved_location() {}
 }
 #define PS_LOG_ENTRY(name) ((void)0)
+#define PS2_IF_AGRESSIVE_LOGS(code) ((void)0)
 
 #endif
 

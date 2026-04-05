@@ -24,6 +24,7 @@ namespace ps2recomp
     static bool hasPs2ApiPrefix(const std::string &name);
     static bool hasReliableSymbolName(const std::string &name);
     static bool isDoNotSkipOrStub(const std::string &name);
+    static bool isKnownLocalHelperName(const std::string &name);
     static bool matchesKernelRuntimeName(const std::string &name);
     static uint32_t decodeAbsoluteJumpTarget(uint32_t instructionAddress, uint32_t targetField);
     static bool tryReadWord(const ElfParser *parser, uint32_t address, uint32_t &outWord);
@@ -313,7 +314,7 @@ namespace ps2recomp
             "malloc", "free", "calloc", "realloc", "aligned_alloc", "posix_memalign",
 
             // Memory manipulation
-            "memcpy", "memset", "memmove", "memcmp", "memcpy2", "memchr", "bcopy", "bzero",
+            "memcpy", "memset", "memmove", "memcmp", "memchr", "bcopy", "bzero",
 
             // String manipulation
             "strcpy", "strncpy", "strcat", "strncat", "strcmp", "strncmp", "strlen", "strstr",
@@ -2020,7 +2021,6 @@ namespace ps2recomp
         const std::vector<std::string> libraryPrefixes = {
             "sce", "Sce", "SCE",   // Sony prefixes
             "sif", "Sif", "SIF",   // SIF functions
-            "pad", "Pad", "PAD",   // Pad functions
             "gs", "Gs", "GS",      // Graphics Synthesizer
             "dma", "Dma", "DMA",   // DMA functions
             "iop", "Iop", "IOP",   // IOP functions
@@ -2066,6 +2066,15 @@ namespace ps2recomp
             "cmd_sem_init"};
 
         return kDoNotSkipOrStub.contains(name);
+    }
+
+    static bool isKnownLocalHelperName(const std::string &name)
+    {
+        static const std::unordered_set<std::string> kKnownLocalHelpers = {
+            "memcpy2",
+            "_memcpy2"};
+
+        return kKnownLocalHelpers.contains(name);
     }
 
     static bool hasReliableSymbolName(const std::string &name)
@@ -2182,11 +2191,17 @@ namespace ps2recomp
         if (!hasReliableSymbolName(name))
             return false;
 
+        if (isKnownLocalHelperName(name))
+            return false;
+
         std::string normalizedName = name;
         if (normalizedName[0] == '_' && normalizedName.size() > 1)
         {
             normalizedName = normalizedName.substr(1);
         }
+
+        if (isKnownLocalHelperName(normalizedName))
+            return false;
 
         if (matchesKernelRuntimeName(normalizedName))
             return true;

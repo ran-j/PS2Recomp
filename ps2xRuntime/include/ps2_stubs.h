@@ -1,28 +1,44 @@
-#ifndef PS2_STUBS_H
-#define PS2_STUBS_H
+#pragma once
 
-#include "ps2_runtime.h"
-#include "ps2_call_list.h"
+struct R5900Context;
+class  PS2Runtime;
+
 #include <cstdint>
+#include "ps2_call_list.h"
+#include "runtime/ps2_memory.h"
+#include "Stubs/Unimplemented.h"
+
+struct PS2MpegCompatLayout
+{
+    uint32_t mpegObjectAddr = 0;
+    uint32_t videoStateAddr = 0;
+    uint32_t movieStateAddr = 0;
+    uint32_t syntheticFramesBeforeEnd = 1u;
+    uint32_t playingVideoStateValue = 0u;
+    uint32_t playingMovieStateValue = 2u;
+    uint32_t finishedVideoStateValue = 3u;
+    uint32_t finishedMovieStateValue = 3u;
+
+    [[nodiscard]] bool matchesMpegObject(uint32_t addr) const
+    {
+        return mpegObjectAddr != 0u && ((addr & PS2_RAM_MASK) == (mpegObjectAddr & PS2_RAM_MASK));
+    }
+
+    [[nodiscard]] bool hasFinishTargets() const
+    {
+        return videoStateAddr != 0u || movieStateAddr != 0u;
+    }
+};
+
 
 namespace ps2_stubs
 {
-    #define PS2_DECLARE_STUB(name) void name(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+#define PS2_DECLARE_STUB(name) void name(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     PS2_STUB_LIST(PS2_DECLARE_STUB)
-    #undef PS2_DECLARE_STUB
+#undef PS2_DECLARE_STUB
 
-    #define PS2_DECLARE_TEST_HOOK(name, signature) void name signature;
-    PS2_TEST_HOOK_LIST(PS2_DECLARE_TEST_HOOK)
-    #undef PS2_DECLARE_TEST_HOOK
-    void resetGsSyncVCallbackState();
-    void dispatchGsSyncVCallback(uint8_t *rdram, PS2Runtime *runtime, uint64_t tick);
+    void resetSifState();
 
-    void syMalloc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
-    void sndr_trans_func(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
-
-    void TODO(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
-    void TODO_NAMED(const char *name, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
-
+    void setMpegCompatLayout(const PS2MpegCompatLayout &layout);
+    void clearMpegCompatLayout();
 }
-
-#endif // PS2_STUBS_H

@@ -16,18 +16,20 @@
 #include <smmintrin.h> // For SSE4.1 instructions
 #endif
 #include <atomic>
+#include <array>
 #include <mutex>
 #include <filesystem>
 #include <iostream>
 #include <iomanip>
 
-#include "ps2_gif_arbiter.h"
-#include "ps2_memory.h"
-#include "ps2_gs_gpu.h"
-#include "ps2_iop.h"
-#include "ps2_vu1.h"
-#include "ps2_audio.h"
-#include "ps2_pad.h"
+#include "ps2_log.h"
+#include "runtime/ps2_gif_arbiter.h"
+#include "runtime/ps2_memory.h"
+#include "runtime/ps2_gs_gpu.h"
+#include "runtime/ps2_iop.h"
+#include "runtime/ps2_vu1.h"
+#include "runtime/ps2_audio.h"
+#include "runtime/ps2_pad.h"
 
 enum PS2Exception
 {
@@ -356,6 +358,78 @@ inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
     std::cout << std::endl;
 }
 
+struct PS2SoundDriverCompatLayout
+{
+    uint32_t primarySeCheckAddr = 0;
+    uint32_t primaryMidiCheckAddr = 0;
+    uint32_t fallbackSeCheckAddr = 0;
+    uint32_t fallbackMidiCheckAddr = 0;
+    uint32_t busyFlagAddr = 0;
+    std::array<uint32_t, 4> completionCallbacks{};
+    std::array<uint32_t, 2> clearBusyCallbacks{};
+
+    [[nodiscard]] bool hasChecksumTables() const
+    {
+        return primarySeCheckAddr != 0u || primaryMidiCheckAddr != 0u ||
+               fallbackSeCheckAddr != 0u || fallbackMidiCheckAddr != 0u;
+    }
+
+    [[nodiscard]] bool matchesCompletionCallback(uint32_t addr) const
+    {
+        for (const uint32_t candidate : completionCallbacks)
+        {
+            if (candidate != 0u && candidate == addr)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    [[nodiscard]] bool matchesClearBusyCallback(uint32_t addr) const
+    {
+        for (const uint32_t candidate : clearBusyCallbacks)
+        {
+            if (candidate != 0u && candidate == addr)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+};
+
+struct PS2DtxCompatLayout
+{
+    uint32_t rpcSid = 0;
+    uint32_t urpcObjBase = 0;
+    uint32_t urpcObjLimit = 0;
+    uint32_t urpcObjStride = 0x20u;
+    uint32_t urpcFnTableBase = 0;
+    uint32_t urpcObjTableBase = 0;
+    uint32_t dispatcherFuncAddr = 0;
+
+    [[nodiscard]] bool isConfigured() const
+    {
+        return rpcSid != 0u;
+    }
+
+    [[nodiscard]] bool hasUrpcObjectRange() const
+    {
+        return urpcObjBase != 0u && urpcObjLimit > urpcObjBase && urpcObjStride != 0u;
+    }
+
+    [[nodiscard]] bool hasUrpcTables() const
+    {
+        return urpcFnTableBase != 0u && urpcObjTableBase != 0u;
+    }
+
+    [[nodiscard]] bool isUrpcRpc(uint32_t sid, uint32_t rpcNum) const
+    {
+        return isConfigured() && sid == rpcSid && rpcNum >= 0x400u && rpcNum < 0x500u;
+    }
+};
+
 class PS2Runtime
 {
 public:
@@ -373,6 +447,7 @@ public:
     ~PS2Runtime();
 
     bool initialize(const char *title = "PS2 Game");
+    bool syncCoreSubsystems();
     bool loadELF(const std::string &elfPath);
     void run();
 
@@ -438,7 +513,7 @@ public:
     uint32_t guestHeapEnd() const;
     uint32_t reserveAsyncCallbackStack(uint32_t size, uint32_t alignment = 16u);
     void dispatchLoop(uint8_t *rdram, R5900Context *ctx);
-    void cooperativeGuestYield();
+    bool shouldPreemptGuestExecution();
     void requestStop();
     bool isStopRequested() const;
     uint32_t guestExecutionWaiterCountForTesting() const
@@ -579,6 +654,8 @@ private:
     };
 
     std::vector<LoadedModule> m_loadedModules;
+    uint8_t *m_boundRdram = nullptr;
+    uint8_t *m_boundGSVram = nullptr;
 };
 
 #endif // PS2_RUNTIME_H

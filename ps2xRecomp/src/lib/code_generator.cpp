@@ -153,6 +153,17 @@ namespace ps2recomp
         }
     }
 
+    void CodeGenerator::setResumeEntryTargets(const std::unordered_map<uint32_t, std::vector<uint32_t>> &resumeTargetsByOwner)
+    {
+        m_resumeEntryTargetsByOwner = resumeTargetsByOwner;
+        for (auto &[owner, targets] : m_resumeEntryTargetsByOwner)
+        {
+            (void)owner;
+            std::sort(targets.begin(), targets.end());
+            targets.erase(std::unique(targets.begin(), targets.end()), targets.end());
+        }
+    }
+
     std::string CodeGenerator::getFunctionName(uint32_t address) const
     {
         auto it = m_renamedFunctions.find(address);
@@ -230,9 +241,14 @@ namespace ps2recomp
         auto emitInternalTarget = [&](uint32_t target, uint32_t sourcePc, std::string_view indent)
         {
             ss << fmt::format("{}ctx->pc = 0x{:X}u;\n", indent, target);
-            if (target <= sourcePc)
+            const bool isCallLikeEdge =
+                (branchInst.opcode == OPCODE_JAL) ||
+                (branchInst.opcode == OPCODE_SPECIAL && branchInst.function == SPECIAL_JALR);
+            if (target <= sourcePc && !isCallLikeEdge)
             {
-                ss << fmt::format("{}runtime->cooperativeGuestYield();\n", indent);
+                ss << fmt::format("{}if (runtime->shouldPreemptGuestExecution()) {{\n", indent);
+                ss << fmt::format("{}    return;\n", indent);
+                ss << fmt::format("{}}}\n", indent);
                 ss << fmt::format("{}goto label_{:x};\n", indent, target);
             }
             else
@@ -652,13 +668,104 @@ namespace ps2recomp
     CodeGenerator::~CodeGenerator() = default;
 
     CodeGenerator::AnalysisResult CodeGenerator::collectInternalBranchTargets(
-        const Function &function, const std::vector<Instruction> &instructions)
+        const Function &function, const std::vector<Instruction> &instructions, const std::vector<Function> *allFunctions)
     {
         AnalysisResult result;
         std::unordered_set<uint32_t> instructionAddresses;
         instructionAddresses.reserve(instructions.size());
         bool hasIndirectRegisterJump = false;
         std::vector<const Instruction*> indirectJumps;
+
+        auto isExecutableAddress = [&](uint32_t address) -> bool
+        {
+            for (const auto &section : m_sections)
+            {
+                if (!section.isCode)
+                {
+                    continue;
+                }
+                if (address >= section.address && address < (section.address + section.size))
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        auto findContainingExternalFunction = [&](uint32_t address) -> const Function *
+        {
+            if (!allFunctions || !isExecutableAddress(address))
+            {
+                return nullptr;
+            }
+
+            const Function *best = nullptr;
+            for (const auto &candidateFn : *allFunctions)
+            {
+                if (!candidateFn.isRecompiled || candidateFn.isStub || candidateFn.isSkipped)
+                {
+                    continue;
+                }
+
+                if (candidateFn.name.rfind("entry_", 0) == 0)
+                {
+                    continue;
+                }
+
+                if (address < candidateFn.start || address >= candidateFn.end)
+                {
+                    continue;
+                }
+
+                if (!best || candidateFn.start > best->start)
+                {
+                    best = &candidateFn;
+                }
+            }
+
+            return best;
+        };
+
+        auto queueExternalEntryTarget = [&](uint32_t target)
+        {
+            const Function *containingFn = findContainingExternalFunction(target);
+            if (!containingFn)
+            {
+                return;
+            }
+
+            if (containingFn->start == function.start)
+            {
+                return;
+            }
+
+            if (target == containingFn->start)
+            {
+                return;
+            }
+
+            result.externalEntryPoints.insert(target);
+        };
+
+        auto queueResumeEntryTarget = [&](uint32_t resumeAddr)
+        {
+            if (resumeAddr >= function.start && resumeAddr < function.end &&
+                instructionAddresses.contains(resumeAddr))
+            {
+                result.entryPoints.insert(resumeAddr);
+                result.resumeEntryPoints.insert(resumeAddr);
+            }
+        };
+
+        auto queueLoopResumeEntryTarget = [&](uint32_t target, uint32_t sourcePc)
+        {
+            if (target > sourcePc || target == function.start)
+            {
+                return;
+            }
+
+            queueResumeEntryTarget(target);
+        };
 
         for (const auto &inst : instructions)
         {
@@ -685,6 +792,11 @@ namespace ps2recomp
                     instructionAddresses.contains(target))
                 {
                     result.entryPoints.insert(target);
+                    queueLoopResumeEntryTarget(target, inst.address);
+                }
+                else
+                {
+                    queueExternalEntryTarget(target);
                 }
             }
             else if (isStaticJump)
@@ -694,15 +806,20 @@ namespace ps2recomp
                     instructionAddresses.contains(target))
                 {
                     result.entryPoints.insert(target);
+                    queueLoopResumeEntryTarget(target, inst.address);
 
                     if (inst.opcode == OPCODE_JAL)
                     {
-                        uint32_t returnAddr = inst.address + 8;
-                        if (returnAddr >= function.start && returnAddr < function.end &&
-                            instructionAddresses.contains(returnAddr))
-                        {
-                            result.entryPoints.insert(returnAddr);
-                        }
+                        queueResumeEntryTarget(inst.address + 8u);
+                    }
+                }
+                else
+                {
+                    queueExternalEntryTarget(target);
+
+                    if (inst.opcode == OPCODE_JAL)
+                    {
+                        queueResumeEntryTarget(inst.address + 8u);
                     }
                 }
             }
@@ -712,6 +829,11 @@ namespace ps2recomp
         {
             bool needsJrFallback = false;
             for (const Instruction* jrInst : indirectJumps) {
+                if (jrInst->function == SPECIAL_JALR)
+                {
+                    queueResumeEntryTarget(jrInst->address + 8u);
+                }
+
                 bool foundTable = false;
                 
                 uint32_t jrReg = jrInst->rs;
@@ -790,6 +912,10 @@ namespace ps2recomp
                                     {
                                         jrTargets.push_back(target);
                                     }
+                                    else
+                                    {
+                                        queueExternalEntryTarget(target);
+                                    }
                                 }
 
                                 if (!jrTargets.empty())
@@ -848,6 +974,10 @@ namespace ps2recomp
                                                     jrTargets.push_back(target);
                                                     uniqueTargets.insert(target);
                                                 }
+                                            }
+                                            else
+                                            {
+                                                queueExternalEntryTarget(target);
                                             }
                                         } else {
                                             validJumpTable = false;
@@ -909,6 +1039,20 @@ namespace ps2recomp
         }
 
         AnalysisResult analysisResult = collectInternalBranchTargets(function, instructions);
+        std::vector<uint32_t> resumeTargets(analysisResult.resumeEntryPoints.begin(),
+                                            analysisResult.resumeEntryPoints.end());
+        auto resumeIt = m_resumeEntryTargetsByOwner.find(function.start);
+        if (resumeIt != m_resumeEntryTargetsByOwner.end())
+        {
+            resumeTargets.insert(resumeTargets.end(), resumeIt->second.begin(), resumeIt->second.end());
+        }
+        std::sort(resumeTargets.begin(), resumeTargets.end());
+        resumeTargets.erase(std::unique(resumeTargets.begin(), resumeTargets.end()), resumeTargets.end());
+        for (uint32_t target : resumeTargets)
+        {
+            analysisResult.entryPoints.insert(target);
+        }
+
         const std::unordered_set<uint32_t>& internalTargets = analysisResult.entryPoints;
         ss << "// Function: " << function.name << "\n";
         ss << "// Address: 0x" << std::hex << function.start << " - 0x" << function.end << std::dec << "\n";
@@ -926,6 +1070,16 @@ namespace ps2recomp
         ss << "    PS_LOG_ENTRY(\"" << sanitizedName << "\");\n";
         ss << "#endif\n";
         ss << "\n";
+        if (!resumeTargets.empty())
+        {
+            ss << "    switch (ctx->pc) {\n";
+            for (uint32_t target : resumeTargets)
+            {
+                ss << "        case 0x" << std::hex << target << "u: goto label_" << target << ";\n" << std::dec;
+            }
+            ss << "        default: break;\n";
+            ss << "    }\n\n";
+        }
         ss << "    ctx->pc = 0x" << std::hex << function.start << "u;\n"
            << std::dec;
         ss << "\n";
@@ -3780,6 +3934,21 @@ namespace ps2recomp
         for (const auto &[first, second] : normalFunctions)
         {
             emitRegistration(first, second);
+        }
+
+        ss << "\n    // Register resumable entry points\n";
+        for (const auto &[ownerStart, targets] : m_resumeEntryTargetsByOwner)
+        {
+            const std::string ownerName = getFunctionName(ownerStart);
+            if (ownerName.empty())
+            {
+                continue;
+            }
+
+            for (uint32_t target : targets)
+            {
+                emitRegistration(target, ownerName);
+            }
         }
 
         ss << "\n    // Register stub functions\n";

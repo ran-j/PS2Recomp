@@ -1,4 +1,5 @@
-#include "ps2_gif_arbiter.h"
+#include "runtime/ps2_gif_arbiter.h"
+#include "ps2_log.h"
 #include <algorithm>
 #include <atomic>
 #include <cstring>
@@ -56,14 +57,14 @@ void GifArbiter::submit(GifPathId pathId, const uint8_t *data, uint32_t sizeByte
         uint32_t nreg = static_cast<uint32_t>((tagLo >> 60) & 0xFu);
         if (nreg == 0u)
             nreg = 16u;
-        std::cout << "[gif:submit] idx=" << debugIndex
-                  << " path=" << pathName(pathId)
-                  << " size=" << sizeBytes
-                  << " nloop=" << nloop
-                  << " flg=" << static_cast<uint32_t>(flg)
-                  << " nreg=" << nreg
-                  << " directhl=" << static_cast<uint32_t>(path2DirectHl ? 1u : 0u)
-                  << std::endl;
+        RUNTIME_LOG("[gif:submit] idx=" << debugIndex
+                                        << " path=" << pathName(pathId)
+                                        << " size=" << sizeBytes
+                                        << " nloop=" << nloop
+                                        << " flg=" << static_cast<uint32_t>(flg)
+                                        << " nreg=" << nreg
+                                        << " directhl=" << static_cast<uint32_t>(path2DirectHl ? 1u : 0u)
+                                        << std::endl);
     }
 
     GifArbiterPacket pkt;
@@ -109,15 +110,15 @@ void GifArbiter::drain()
                 uint32_t nreg = static_cast<uint32_t>((tagLo >> 60) & 0xFu);
                 if (nreg == 0u)
                     nreg = 16u;
-                std::cout << "[gif:drain] idx=" << debugIndex
-                          << " path=" << pathName(pkt.pathId)
-                          << " size=" << pkt.data.size()
-                          << " nloop=" << nloop
-                          << " flg=" << static_cast<uint32_t>(flg)
-                          << " nreg=" << nreg
-                          << " directhl=" << static_cast<uint32_t>(pkt.path2DirectHl ? 1u : 0u)
-                          << " path3image=" << static_cast<uint32_t>(pkt.path3Image ? 1u : 0u)
-                          << std::endl;
+                RUNTIME_LOG("[gif:drain] idx=" << debugIndex
+                                               << " path=" << pathName(pkt.pathId)
+                                               << " size=" << pkt.data.size()
+                                               << " nloop=" << nloop
+                                               << " flg=" << static_cast<uint32_t>(flg)
+                                               << " nreg=" << nreg
+                                               << " directhl=" << static_cast<uint32_t>(pkt.path2DirectHl ? 1u : 0u)
+                                               << " path3image=" << static_cast<uint32_t>(pkt.path3Image ? 1u : 0u)
+                                               << std::endl);
             }
             m_processFn(pkt.data.data(), static_cast<uint32_t>(pkt.data.size()));
         }

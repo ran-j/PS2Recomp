@@ -204,6 +204,202 @@ void register_code_generator_tests()
         t.IsTrue(generated.find("goto label_2004;") != std::string::npos, "branch to delay slot should use goto");
     });
 
+    tc.Run("control-flow analysis keeps same-function JAL target internal and promotes only the return pc", [](TestCase &t) {
+        Function func;
+        func.name = "same_function_call";
+        func.start = 0x1000;
+        func.end = 0x101C;
+        func.isRecompiled = true;
+        func.isStub = false;
+
+        std::vector<Instruction> instructions;
+        instructions.push_back(makeJal(0x1000, 0x100C));
+        instructions.push_back(makeNop(0x1004));
+        instructions.push_back(makeNop(0x1008));
+        instructions.push_back(makeNop(0x100C));
+        instructions.push_back(makeNop(0x1010));
+        instructions.push_back(makeJr(0x1014, 31));
+        instructions.push_back(makeNop(0x1018));
+
+        std::vector<Function> functions{func};
+        std::vector<Section> sections = {
+            {".text", 0x1000u, 0x100u, 0u, true, false, false, true, nullptr}
+        };
+
+        CodeGenerator gen({}, sections);
+        CodeGenerator::AnalysisResult analysis =
+            gen.collectInternalBranchTargets(func, instructions, &functions);
+
+        t.IsTrue(analysis.entryPoints.contains(0x100Cu),
+                 "same-function JAL target should stay as an internal label target");
+        t.IsTrue(analysis.resumeEntryPoints.contains(0x1008u),
+                 "same-function JAL should mark the fallthrough pc as resumable");
+        t.IsFalse(analysis.externalEntryPoints.contains(0x100Cu),
+                  "same-function JAL target should not become an external entry candidate");
+    });
+
+    tc.Run("control-flow analysis reports cross-function mid-function jumps as external entry candidates", [](TestCase &t) {
+        Function caller;
+        caller.name = "caller";
+        caller.start = 0x4000;
+        caller.end = 0x4008;
+        caller.isRecompiled = true;
+        caller.isStub = false;
+
+        Function target;
+        target.name = "target";
+        target.start = 0x5000;
+        target.end = 0x5010;
+        target.isRecompiled = true;
+        target.isStub = false;
+
+        Instruction j{};
+        j.address = 0x4000;
+        j.opcode = OPCODE_J;
+        j.target = (0x5004u >> 2) & 0x3FFFFFFu;
+        j.hasDelaySlot = true;
+        j.raw = (OPCODE_J << 26) | (j.target & 0x3FFFFFFu);
+
+        std::vector<Instruction> instructions{j, makeNop(0x4004)};
+        std::vector<Function> functions{caller, target};
+        std::vector<Section> sections = {
+            {".text", 0x4000u, 0x2000u, 0u, true, false, false, true, nullptr}
+        };
+
+        CodeGenerator gen({}, sections);
+        CodeGenerator::AnalysisResult analysis =
+            gen.collectInternalBranchTargets(caller, instructions, &functions);
+
+        t.IsTrue(analysis.externalEntryPoints.contains(0x5004u),
+                 "cross-function jump into the middle of a function should become an external entry candidate");
+    });
+
+    tc.Run("control-flow analysis promotes JALR fallthrough as a resumable entry", [](TestCase &t) {
+        Function func;
+        func.name = "jalr_resume";
+        func.start = 0x1200;
+        func.end = 0x1218;
+        func.isRecompiled = true;
+        func.isStub = false;
+
+        std::vector<Instruction> instructions;
+        instructions.push_back(makeNop(0x1200));
+        instructions.push_back(makeJalr(0x1204, 2, 31));
+        instructions.push_back(makeNop(0x1208));
+        instructions.push_back(makeNop(0x120C));
+        instructions.push_back(makeJr(0x1210, 31));
+        instructions.push_back(makeNop(0x1214));
+
+        std::vector<Function> functions{func};
+        std::vector<Section> sections = {
+            {".text", 0x1200u, 0x100u, 0u, true, false, false, true, nullptr}
+        };
+
+        CodeGenerator gen({}, sections);
+        CodeGenerator::AnalysisResult analysis =
+            gen.collectInternalBranchTargets(func, instructions, &functions);
+
+        t.IsTrue(analysis.resumeEntryPoints.contains(0x120Cu),
+                 "JALR should mark its return/fallthrough pc as resumable");
+        t.IsTrue(analysis.entryPoints.contains(0x120Cu),
+                 "JALR resume pc should also be emitted as an internal label");
+    });
+
+    tc.Run("resume entry targets emit a top-level pc switch in the owner wrapper", [](TestCase &t) {
+        Function func;
+        func.name = "resume_owner";
+        func.start = 0x6000;
+        func.end = 0x6010;
+        func.isRecompiled = true;
+        func.isStub = false;
+
+        std::vector<Instruction> instructions{
+            makeNop(0x6000),
+            makeNop(0x6004),
+            makeNop(0x6008),
+            makeNop(0x600C)
+        };
+
+        CodeGenerator gen({}, {});
+        gen.setResumeEntryTargets({{0x6000u, {0x6008u}}});
+
+        std::string generated = gen.generateFunction(func, instructions, false);
+        printGeneratedCode("resume entry targets emit a top-level pc switch in the owner wrapper", generated);
+
+        t.IsTrue(generated.find("switch (ctx->pc)") != std::string::npos,
+                 "owner wrapper should dispatch resumable pcs with a switch");
+        t.IsTrue(generated.find("case 0x6008u: goto label_6008;") != std::string::npos,
+                 "resume pc should jump directly to the internal label");
+        t.IsTrue(generated.find("label_6008:") != std::string::npos,
+                 "resume pc should force label emission for that instruction");
+    });
+
+    tc.Run("resume entry targets register to the owner wrapper", [](TestCase &t) {
+        Function func;
+        func.name = "resume_owner";
+        func.start = 0x7000;
+        func.end = 0x7010;
+        func.isRecompiled = true;
+        func.isStub = false;
+
+        CodeGenerator gen({}, {});
+        gen.setRenamedFunctions({{0x7000u, "resume_owner_0x7000"}});
+        gen.setResumeEntryTargets({{0x7000u, {0x7008u, 0x700Cu}}});
+
+        std::string registration = gen.generateFunctionRegistration({func}, {});
+        printGeneratedCode("resume entry targets register to the owner wrapper", registration);
+
+        t.IsTrue(registration.find("runtime.registerFunction(0x7008, resume_owner_0x7000);") != std::string::npos,
+                 "resume entry pc should register to the owner wrapper");
+        t.IsTrue(registration.find("runtime.registerFunction(0x700c, resume_owner_0x7000);") != std::string::npos,
+                 "multiple resume pcs should register to the same owner wrapper");
+    });
+
+    tc.Run("external mid-function entry can register to the owner wrapper", [](TestCase &t) {
+        Function caller;
+        caller.name = "caller";
+        caller.start = 0x4000;
+        caller.end = 0x4008;
+        caller.isRecompiled = true;
+        caller.isStub = false;
+
+        Function owner;
+        owner.name = "owner";
+        owner.start = 0x5000;
+        owner.end = 0x5010;
+        owner.isRecompiled = true;
+        owner.isStub = false;
+
+        Instruction j{};
+        j.address = 0x4000;
+        j.opcode = OPCODE_J;
+        j.target = (0x5004u >> 2) & 0x3FFFFFFu;
+        j.hasDelaySlot = true;
+        j.raw = (OPCODE_J << 26) | (j.target & 0x3FFFFFFu);
+
+        std::vector<Instruction> callerInstructions{j, makeNop(0x4004)};
+        std::vector<Function> functions{caller, owner};
+        std::vector<Section> sections = {
+            {".text", 0x4000u, 0x2000u, 0u, true, false, false, true, nullptr}
+        };
+
+        CodeGenerator gen({}, sections);
+        CodeGenerator::AnalysisResult analysis =
+            gen.collectInternalBranchTargets(caller, callerInstructions, &functions);
+
+        t.IsTrue(analysis.externalEntryPoints.contains(0x5004u),
+                 "cross-function jump should identify the mid-function target as externally reachable");
+
+        gen.setRenamedFunctions({{0x5000u, "owner_0x5000"}});
+        gen.setResumeEntryTargets({{0x5000u, {0x5004u}}});
+
+        std::string registration = gen.generateFunctionRegistration({owner}, {});
+        printGeneratedCode("external mid-function entry can register to the owner wrapper", registration);
+
+        t.IsTrue(registration.find("runtime.registerFunction(0x5004, owner_0x5000);") != std::string::npos,
+                 "mid-function external entry should register back to the owner wrapper");
+    });
+
     tc.Run("branches outside function still set pc", [](TestCase &t) {
         Function func;
         func.name = "external_branch";
@@ -810,6 +1006,30 @@ void register_code_generator_tests()
             t.IsTrue(generated.find("goto label_c010;") != std::string::npos, "Internal JAL should use goto");
         });
 
+        tc.Run("backward internal JAL stays inline and does not return to dispatcher", [](TestCase &t) {
+            Function func;
+            func.name = "jal_internal_backward";
+            func.start = 0xC100;
+            func.end = 0xC120;
+            func.isRecompiled = true;
+            func.isStub = false;
+
+            Instruction loopHead = makeNop(0xC100);
+            Instruction backwardJal = makeJal(0xC108, 0xC100);
+            Instruction delay = makeNop(0xC10C);
+
+            CodeGenerator gen({}, {});
+            std::string generated = gen.generateFunction(func, {loopHead, backwardJal, delay}, false);
+            printGeneratedCode("backward internal JAL stays inline and does not return to dispatcher", generated);
+
+            t.IsTrue(generated.find("SET_GPR_U32(ctx, 31, 0xC110u);") != std::string::npos,
+                     "backward internal JAL should still set RA");
+            t.IsTrue(generated.find("goto label_c100;") != std::string::npos,
+                     "backward internal JAL should still re-enter the internal target directly");
+            t.IsTrue(generated.find("if (runtime->shouldPreemptGuestExecution())") == std::string::npos,
+                     "backward internal JAL should not expose a mid-call dispatcher return");
+        });
+
         tc.Run("JALR emits indirect call", [](TestCase &t) {
             Function func;
             func.name = "jalr_test";
@@ -838,7 +1058,7 @@ void register_code_generator_tests()
             t.IsTrue(generated.find("if (ctx->pc != 0xD008u) { return; }") != std::string::npos, "JALR should check return PC");
         }); 
 
-        tc.Run("backward BEQ yields cooperatively on sign-extended internal loop", [](TestCase &t) {
+        tc.Run("backward BEQ returns to the dispatcher through a resumable loop head", [](TestCase &t) {
             Function func;
             func.name = "backward_branch";
             func.start = 0x1100;
@@ -847,31 +1067,43 @@ void register_code_generator_tests()
             func.isStub = false;
 
             // 0x1100: nop
-            // 0x1104: beq $1,$1, target 0x1100 (offset = -2 words)
-            // 0x1108: nop (delay)
+            // 0x1104: nop (loop head)
+            // 0x1108: beq $1,$1, target 0x1104 (offset = -2 words)
+            // 0x110c: nop (delay)
             std::vector<Instruction> instructions;
             instructions.push_back(makeNop(0x1100));
+            instructions.push_back(makeNop(0x1104));
 
-            Instruction br = makeBranch(0x1104, 0); 
-            br.simmediate = static_cast<uint32_t>(static_cast<int16_t>(-2)); 
+            Instruction br = makeBranch(0x1108, 0);
+            br.simmediate = static_cast<uint32_t>(static_cast<int16_t>(-2));
             instructions.push_back(br);
 
-            instructions.push_back(makeNop(0x1108));
             instructions.push_back(makeNop(0x110c));
+            instructions.push_back(makeNop(0x1110));
 
             CodeGenerator gen({}, {});
-            std::string generated = gen.generateFunction(func, instructions, false);
-            printGeneratedCode("backward BEQ yields cooperatively on sign-extended internal loop", generated);
+            CodeGenerator::AnalysisResult analysis = gen.collectInternalBranchTargets(func, instructions);
+            t.IsTrue(analysis.resumeEntryPoints.contains(0x1104u),
+                     "mid-function backward loop head should be resumable so preemption can return to the dispatcher");
 
-            t.IsTrue(generated.find("label_1100:") != std::string::npos, "target should emit a label");
-            t.IsTrue(generated.find("ctx->pc = 0x1100u;") != std::string::npos,
+            std::string generated = gen.generateFunction(func, instructions, false);
+            printGeneratedCode("backward BEQ returns to the dispatcher through a resumable loop head", generated);
+
+            t.IsTrue(generated.find("label_1104:") != std::string::npos, "target should emit a label");
+            t.IsTrue(generated.find("switch (ctx->pc)") != std::string::npos,
+                     "resumable backward loop heads should emit a wrapper resume switch");
+            t.IsTrue(generated.find("case 0x1104u: goto label_1104;") != std::string::npos,
+                     "mid-function backward loop head should be re-enterable after returning to the dispatcher");
+            t.IsTrue(generated.find("ctx->pc = 0x1104u;") != std::string::npos,
                      "backward internal branch should preserve the loop target in ctx->pc");
-            t.IsTrue(generated.find("runtime->cooperativeGuestYield();") != std::string::npos,
-                     "backward internal branch should yield guest execution before re-entering the loop");
-            t.IsTrue(generated.find("goto label_1100;") != std::string::npos,
-                     "backward internal branch should re-enter the in-function label after yielding");
-            t.IsTrue(generated.find("ctx->pc = 0x1100u;\n            return;") == std::string::npos,
-                     "backward internal branch should not return to the dispatcher for a non-entry internal label");
+            t.IsTrue(generated.find("if (runtime->shouldPreemptGuestExecution()) {") != std::string::npos,
+                     "backward internal branch should consult the runtime preemption policy before re-entering the loop");
+            t.IsTrue(generated.find("return;") != std::string::npos,
+                     "backward internal branch should return to the dispatcher when the runtime preemption policy requests it");
+            t.IsTrue(generated.find("runtime->cooperativeGuestYield();") == std::string::npos,
+                     "backward internal branch should no longer emit an unconditional cooperative-yield call");
+            t.IsTrue(generated.find("goto label_1104;") != std::string::npos,
+                     "backward internal branch should still re-enter the in-function label when it keeps the current slice");
         });
 
         tc.Run("branch-likely places delay slot only in taken path", [](TestCase &t) {
@@ -987,6 +1219,8 @@ void register_code_generator_tests()
 
             t.IsTrue(generated.find("switch (jumpTarget)") != std::string::npos,
                      "JR via non-RA register should emit switch for internal targets");
+            t.IsTrue(generated.find("switch (ctx->pc)") == std::string::npos,
+                     "JR fallback labels should not be promoted to dispatcher resume sites");
             t.IsTrue(generated.find("case 0x1400u: goto label_1400;") != std::string::npos,
                      "switch should include in-function entry label");
             t.IsTrue(generated.find("case 0x140Cu: goto label_140c;") != std::string::npos,
@@ -1053,6 +1287,15 @@ void register_code_generator_tests()
 
             CodeGenerator gen({}, {});
             gen.setConfiguredJumpTables({configured});
+            CodeGenerator::AnalysisResult analysis = gen.collectInternalBranchTargets(
+                func,
+                {lui, addiu, sll, addu, lw, jr, jrDelay, target0, target1});
+
+            t.IsFalse(analysis.resumeEntryPoints.contains(0x1620u),
+                      "configured JR table targets should stay in-function dispatch labels");
+            t.IsFalse(analysis.resumeEntryPoints.contains(0x1630u),
+                      "configured JR table targets should not become dispatcher resume sites");
+
             std::string generated = gen.generateFunction(
                 func,
                 {lui, addiu, sll, addu, lw, jr, jrDelay, target0, target1},
@@ -1065,6 +1308,8 @@ void register_code_generator_tests()
                      "configured table target 0x1620 should be emitted");
             t.IsTrue(generated.find("case 0x1630u: goto label_1630;") != std::string::npos,
                      "configured table target 0x1630 should be emitted");
+            t.IsTrue(generated.find("switch (ctx->pc)") == std::string::npos,
+                     "configured JR table labels should not emit a top-level dispatcher resume switch");
             t.IsTrue(generated.find("case 0x1600u: goto label_1600;") == std::string::npos,
                      "configured table should avoid broad JR fallback labels");
         });

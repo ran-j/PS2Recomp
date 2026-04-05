@@ -1,8 +1,16 @@
 #include "ps2_runtime.h"
-#include "ps2_syscalls.h"
+#include "ps2_log.h"
 #include "ps2_stubs.h"
+#include "ps2_syscalls.h"
 #include "game_overrides.h"
 #include "ps2_runtime_macros.h"
+#include "runtime/ps2_gs_gpu.h"
+#include "ThreadNaming.h"
+#include "Kernel/Stubs/Audio.h"
+#include "Kernel/Stubs/GS.h"
+#include "Kernel/Stubs/MPEG.h"
+#include "ps2_host_backend.h"
+
 #include <iostream>
 #include <fstream>
 #include <algorithm>
@@ -15,9 +23,6 @@
 #include <thread>
 #include <unordered_map>
 #include <sstream>
-#include "raylib.h"
-#include "ps2_gs_gpu.h"
-#include <ThreadNaming.h>
 
 namespace ps2_stubs
 {
@@ -30,9 +35,17 @@ namespace ps2_stubs
 #define PT_LOAD 1            // Loadable segment
 
 static constexpr int FB_WIDTH = 640;
-static constexpr int FB_HEIGHT = 448;
+static constexpr int FB_HEIGHT = 512;
+static constexpr int DEFAULT_DISPLAY_HEIGHT = 448;
 static constexpr uint32_t DEFAULT_FB_SIZE = FB_WIDTH * FB_HEIGHT * 4;
 static constexpr uint32_t DEFAULT_FB_ADDR = (PS2_RAM_SIZE - DEFAULT_FB_SIZE - 0x10000u);
+#if defined(PLATFORM_VITA)
+static constexpr int HOST_WINDOW_WIDTH = 960;
+static constexpr int HOST_WINDOW_HEIGHT = 544;
+#else
+static constexpr int HOST_WINDOW_WIDTH = FB_WIDTH;
+static constexpr int HOST_WINDOW_HEIGHT = DEFAULT_DISPLAY_HEIGHT;
+#endif
 struct ElfHeader
 {
     uint32_t magic;
@@ -83,6 +96,45 @@ namespace
     constexpr uint32_t EXCEPTION_VECTOR_GENERAL = 0x80000080u;
     constexpr uint32_t EXCEPTION_VECTOR_TLB_REFILL = 0x80000000u;
     constexpr uint32_t EXCEPTION_VECTOR_BOOT = 0xBFC00200u;
+
+    struct HostFrameProbePoint
+    {
+        uint32_t x;
+        uint32_t y;
+    };
+
+    constexpr HostFrameProbePoint kGhostProbePoints[] = {
+        {220u, 176u},
+        {260u, 208u},
+        {320u, 208u},
+        {260u, 240u},
+        {320u, 240u},
+        {260u, 272u},
+        {320u, 272u},
+    };
+
+    uint32_t sampleHostFramePixel(const std::vector<uint8_t> &pixels,
+                                  uint32_t width,
+                                  uint32_t height,
+                                  uint32_t x,
+                                  uint32_t y)
+    {
+        if (x >= width || y >= height)
+        {
+            return 0u;
+        }
+
+        const size_t offset = (static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)) * 4u;
+        if (offset + 4u > pixels.size())
+        {
+            return 0u;
+        }
+
+        return static_cast<uint32_t>(pixels[offset + 0u]) |
+               (static_cast<uint32_t>(pixels[offset + 1u]) << 8) |
+               (static_cast<uint32_t>(pixels[offset + 2u]) << 16) |
+               (static_cast<uint32_t>(pixels[offset + 3u]) << 24);
+    }
 
     struct DispatchHistory
     {
@@ -200,6 +252,19 @@ namespace
         {
             return {};
         }
+
+#if defined(PLATFORM_VITA)
+        const std::string generic = path.generic_string();
+        const std::size_t colon = generic.find(':');
+        if (colon != std::string::npos && colon != 0u)
+        {
+            const std::size_t slash = generic.find_first_of("/\\");
+            if (slash == std::string::npos || colon < slash)
+            {
+                return path.lexically_normal();
+            }
+        }
+#endif
 
         std::error_code ec;
         const std::filesystem::path absolute = std::filesystem::absolute(path, ec);
@@ -355,286 +420,119 @@ PS2Runtime::GuestExecutionReleaseScope::~GuestExecutionReleaseScope()
     }
 }
 
-static void UploadFrame(Texture2D &tex, PS2Runtime *rt)
+static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint32_t &outHeight)
 {
-    // For now lets keep the display snapshot in sync with rasterized VRAM so the host frame
-    rt->gs().refreshDisplaySnapshot();
+    static uint64_t s_lastPresentationTick = std::numeric_limits<uint64_t>::max();
+    static bool s_hasLatchedInitialFrame = false;
+    static uint32_t s_lastDisplayFbp = std::numeric_limits<uint32_t>::max();
+    static uint32_t s_lastSourceFbp = std::numeric_limits<uint32_t>::max();
+    static bool s_lastPreferred = false;
+    static uint32_t s_lastWidth = 0u;
+    static uint32_t s_lastHeight = 0u;
 
-    const GSRegisters &gs = rt->memory().gs();
-
-    uint32_t dispfb = static_cast<uint32_t>(gs.dispfb1 & 0xFFFFFFFFULL);
-    uint32_t fbp = dispfb & 0x1FF;
-    uint32_t fbw = (dispfb >> 9) & 0x3F;
-    uint32_t psm = (dispfb >> 15) & 0x1F;
-
-    uint64_t display64 = gs.display1;
-    uint32_t dw = static_cast<uint32_t>((display64 >> 32) & 0xFFF);
-    uint32_t dh = static_cast<uint32_t>((display64 >> 44) & 0x7FF);
-
-    uint32_t width = (dw + 1);
-    uint32_t height = (dh + 1);
-    if (width < 64 || height < 64)
+    const uint64_t currentTick = ps2_syscalls::GetCurrentVSyncTick();
+    if (!s_hasLatchedInitialFrame || currentTick != s_lastPresentationTick)
     {
-        width = FB_WIDTH;
-        height = FB_HEIGHT;
+        rt->gs().latchHostPresentationFrame();
+        s_lastPresentationTick = currentTick;
+        s_hasLatchedInitialFrame = true;
     }
-    if (width > FB_WIDTH)
-        width = FB_WIDTH;
-    if (height > FB_HEIGHT)
-        height = FB_HEIGHT;
-
-    uint8_t *rdram = rt->memory().getRDRAM();
-    uint8_t *gsvram = rt->memory().getGSVRAM();
-
-    uint32_t snapSize = 0;
-    const uint8_t *snapVram = rt->gs().lockDisplaySnapshot(snapSize);
-    const uint8_t *vramSrc = (snapVram && snapSize > 0) ? snapVram : gsvram;
-    auto fillScratchFromFrame = [&](uint32_t srcFbp,
-                                    uint32_t srcFbw,
-                                    uint32_t srcPsm,
-                                    std::vector<uint8_t> &outScratch) -> bool
-    {
-        outScratch.assign(FB_WIDTH * FB_HEIGHT * 4u, 0u);
-
-        const uint32_t baseBytes = srcFbp * 8192u;
-        const uint32_t bytesPerPixel = (srcPsm == 2u || srcPsm == 0x0Au) ? 2u : 4u;
-        const uint32_t strideBytes = (srcFbw ? srcFbw : (FB_WIDTH / 64u)) * 64u * bytesPerPixel;
-
-        if (srcPsm == 0u)
-        {
-            for (uint32_t y = 0; y < height; ++y)
-            {
-                uint32_t srcOff = baseBytes + y * strideBytes;
-                uint32_t dstOff = y * FB_WIDTH * 4u;
-                uint32_t copyW = width * 4u;
-                if (srcOff + copyW <= PS2_GS_VRAM_SIZE && vramSrc)
-                {
-                    std::memcpy(&outScratch[dstOff], vramSrc + srcOff, copyW);
-                }
-                else
-                {
-                    uint32_t rdramIdx = srcOff & PS2_RAM_MASK;
-                    if (rdramIdx + copyW > PS2_RAM_SIZE)
-                    {
-                        copyW = PS2_RAM_SIZE - rdramIdx;
-                    }
-                    std::memcpy(&outScratch[dstOff], rdram + rdramIdx, copyW);
-                }
-                uint8_t *row = outScratch.data() + dstOff;
-                for (uint32_t x = 0; x < width; ++x)
-                {
-                    row[x * 4u + 3u] = 255u;
-                }
-            }
-            return true;
-        }
-
-        if (srcPsm == 2u || srcPsm == 0x0Au)
-        {
-            const uint32_t srcLineBytes = width * 2u;
-            for (uint32_t y = 0; y < height; ++y)
-            {
-                uint32_t srcOff = baseBytes + y * strideBytes;
-                uint32_t dstOff = y * FB_WIDTH * 4u;
-                const uint8_t *src = nullptr;
-                if (srcOff + srcLineBytes <= PS2_GS_VRAM_SIZE && vramSrc)
-                {
-                    src = vramSrc + srcOff;
-                }
-                else if ((srcOff & PS2_RAM_MASK) + srcLineBytes <= PS2_RAM_SIZE)
-                {
-                    src = rdram + (srcOff & PS2_RAM_MASK);
-                }
-                if (!src)
-                {
-                    continue;
-                }
-                uint8_t *dst = outScratch.data() + dstOff;
-                for (uint32_t x = 0; x < width; ++x)
-                {
-                    uint16_t p = *reinterpret_cast<const uint16_t *>(src + x * 2u);
-                    uint32_t r = (p >> 10) & 31u;
-                    uint32_t g = (p >> 5) & 31u;
-                    uint32_t b = p & 31u;
-                    dst[x * 4u + 0u] = static_cast<uint8_t>((r << 3) | (r >> 2));
-                    dst[x * 4u + 1u] = static_cast<uint8_t>((g << 3) | (g >> 2));
-                    dst[x * 4u + 2u] = static_cast<uint8_t>((b << 3) | (b >> 2));
-                    dst[x * 4u + 3u] = 255u;
-                }
-            }
-            return true;
-        }
-
-        return false;
-    };
-
-    auto analyzeScratch = [&](const std::vector<uint8_t> &scratchBuf,
-                              uint32_t &outNonBlack,
-                              uint32_t &outFirstColor,
-                              uint32_t &outFirstX,
-                              uint32_t &outFirstY)
-    {
-        outNonBlack = 0u;
-        outFirstColor = 0u;
-        outFirstX = 0u;
-        outFirstY = 0u;
-
-        for (uint32_t y = 0; y < height; ++y)
-        {
-            const uint8_t *row = scratchBuf.data() + y * FB_WIDTH * 4u;
-            for (uint32_t x = 0; x < width; ++x)
-            {
-                const uint8_t r = row[x * 4u + 0u];
-                const uint8_t g = row[x * 4u + 1u];
-                const uint8_t b = row[x * 4u + 2u];
-                if (r != 0u || g != 0u || b != 0u)
-                {
-                    ++outNonBlack;
-                    if (outFirstColor == 0u)
-                    {
-                        outFirstColor = static_cast<uint32_t>(r) |
-                                        (static_cast<uint32_t>(g) << 8) |
-                                        (static_cast<uint32_t>(b) << 16);
-                        outFirstX = x;
-                        outFirstY = y;
-                    }
-                }
-            }
-        }
-    };
-
-    auto countLinearPageNonBlack = [&](uint32_t probeFbp) -> uint32_t
-    {
-        if (!vramSrc)
-        {
-            return 0u;
-        }
-        const uint32_t probeBaseBytes = probeFbp * 8192u;
-        const uint32_t probeStrideBytes = 10u * 64u * 4u;
-        uint32_t count = 0u;
-        for (uint32_t py = 0; py < height; ++py)
-        {
-            const uint32_t srcOff = probeBaseBytes + py * probeStrideBytes;
-            if (srcOff + width * 4u > PS2_GS_VRAM_SIZE)
-            {
-                break;
-            }
-            const uint8_t *row = vramSrc + srcOff;
-            for (uint32_t px = 0; px < width; ++px)
-            {
-                const uint8_t r = row[px * 4u + 0u];
-                const uint8_t g = row[px * 4u + 1u];
-                const uint8_t b = row[px * 4u + 2u];
-                if (r != 0u || g != 0u || b != 0u)
-                {
-                    ++count;
-                }
-            }
-        }
-        return count;
-    };
 
     std::vector<uint8_t> scratch;
-    if (!fillScratchFromFrame(fbp, fbw, psm, scratch))
+    uint32_t width = 0u;
+    uint32_t height = 0u;
+    uint32_t displayFbp = 0u;
+    uint32_t sourceFbp = 0u;
+    bool usedPreferredDisplaySource = false;
+    if (!rt->gs().copyLatchedHostPresentationFrame(scratch,
+                                                   width,
+                                                   height,
+                                                   &displayFbp,
+                                                   &sourceFbp,
+                                                   &usedPreferredDisplaySource))
     {
-        rt->gs().unlockDisplaySnapshot();
         Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, MAGENTA);
         UpdateTexture(tex, blank.data);
         UnloadImage(blank);
+        outWidth = FB_WIDTH;
+        outHeight = DEFAULT_DISPLAY_HEIGHT;
         return;
     }
 
-    uint32_t selectedFbp = fbp;
-    uint32_t selectedFbw = fbw;
-    uint32_t selectedPsm = psm;
-    uint32_t nonBlack = 0u;
-    uint32_t firstColor = 0u;
-    uint32_t firstX = 0u;
-    uint32_t firstY = 0u;
-    analyzeScratch(scratch, nonBlack, firstColor, firstX, firstY);
-
-    int fallbackContext = -1;
-    const bool allowFallbackPresentation = (fbp == 0u);
-    if (allowFallbackPresentation && nonBlack == 0u)
-    {
-        for (int contextIndex = 0; contextIndex < 2; ++contextIndex)
+    PS2_IF_AGRESSIVE_LOGS({
+        static uint32_t s_uploadDebugCount = 0u;
+        if (s_uploadDebugCount < 128u ||
+            displayFbp != s_lastDisplayFbp ||
+            sourceFbp != s_lastSourceFbp ||
+            usedPreferredDisplaySource != s_lastPreferred ||
+            width != s_lastWidth ||
+            height != s_lastHeight)
         {
-            const GSFrameReg &candidate = rt->gs().getContextFrame(contextIndex);
-            if (candidate.fbp == selectedFbp &&
-                candidate.fbw == selectedFbw &&
-                candidate.psm == selectedPsm)
-            {
-                continue;
-            }
-
-            std::vector<uint8_t> candidateScratch;
-            if (!fillScratchFromFrame(candidate.fbp, candidate.fbw, candidate.psm, candidateScratch))
-            {
-                continue;
-            }
-
-            uint32_t candidateNonBlack = 0u;
-            uint32_t candidateFirstColor = 0u;
-            uint32_t candidateFirstX = 0u;
-            uint32_t candidateFirstY = 0u;
-            analyzeScratch(candidateScratch, candidateNonBlack, candidateFirstColor, candidateFirstX, candidateFirstY);
-            if (candidateNonBlack == 0u)
-            {
-                continue;
-            }
-
-            scratch.swap(candidateScratch);
-            selectedFbp = candidate.fbp;
-            selectedFbw = candidate.fbw;
-            selectedPsm = candidate.psm;
-            nonBlack = candidateNonBlack;
-            firstColor = candidateFirstColor;
-            firstX = candidateFirstX;
-            firstY = candidateFirstY;
-            fallbackContext = contextIndex;
-            break;
-        }
-    }
-
-    rt->gs().unlockDisplaySnapshot();
-
-    static uint32_t s_uploadDebugCount = 0u;
-    static uint32_t s_lastLoggedFbp = std::numeric_limits<uint32_t>::max();
-    static uint32_t s_lastLoggedNonBlack = std::numeric_limits<uint32_t>::max();
-    const bool shouldProbe = (s_uploadDebugCount < 96u) || (fbp != s_lastLoggedFbp);
-    if (shouldProbe || fallbackContext >= 0)
-    {
-        if (s_uploadDebugCount < 96u || selectedFbp != s_lastLoggedFbp || nonBlack != s_lastLoggedNonBlack || fallbackContext >= 0)
-        {
-            const uint32_t page0NonBlack = countLinearPageNonBlack(0u);
-            const uint32_t page150NonBlack = countLinearPageNonBlack(150u);
             std::cout << "[frame:upload] idx=" << s_uploadDebugCount
-                      << " fbp=" << selectedFbp
-                      << " fbw=" << selectedFbw
-                      << " psm=0x" << std::hex << selectedPsm << std::dec
+                      << " tick=" << currentTick
+                      << " displayFbp=" << displayFbp
+                      << " sourceFbp=" << sourceFbp
                       << " size=" << width << "x" << height
-                      << " nonBlack=" << nonBlack
-                      << " page0=" << page0NonBlack
-                      << " page150=" << page150NonBlack
-                      << " allowFallback=" << static_cast<uint32_t>(allowFallbackPresentation ? 1u : 0u);
-            if (fallbackContext >= 0)
+                      << " preferred=" << static_cast<uint32_t>(usedPreferredDisplaySource ? 1u : 0u)
+                      << std::endl;
+        }
+        static uint32_t s_probeDebugCount = 0u;
+        if (s_probeDebugCount < 32u ||
+            displayFbp != s_lastDisplayFbp ||
+            sourceFbp != s_lastSourceFbp ||
+            usedPreferredDisplaySource != s_lastPreferred)
+        {
+            std::cout << "[frame:probe] idx=" << s_probeDebugCount
+                      << " tick=" << currentTick
+                      << " displayFbp=" << displayFbp
+                      << " sourceFbp=" << sourceFbp
+                      << " preferred=" << static_cast<uint32_t>(usedPreferredDisplaySource ? 1u : 0u);
+            for (const auto &probe : kGhostProbePoints)
             {
-                std::cout << " displayFbp=" << fbp
-                          << " fallbackCtx=" << fallbackContext;
-            }
-            if (firstColor != 0u)
-            {
-                std::cout << " first=(" << firstX << "," << firstY << ")"
-                          << " rgb=0x" << std::hex << firstColor << std::dec;
+                if (probe.x >= width || probe.y >= height)
+                {
+                    continue;
+                }
+
+                const uint32_t pixel = sampleHostFramePixel(scratch, width, height, probe.x, probe.y);
+                std::cout << " host[" << probe.x << "," << probe.y << "]=0x"
+                          << std::hex << pixel << std::dec;
             }
             std::cout << std::endl;
+            ++s_probeDebugCount;
         }
-        s_lastLoggedFbp = selectedFbp;
-        s_lastLoggedNonBlack = nonBlack;
         ++s_uploadDebugCount;
+    });
+    s_lastDisplayFbp = displayFbp;
+    s_lastSourceFbp = sourceFbp;
+    s_lastPreferred = usedPreferredDisplaySource;
+    s_lastWidth = width;
+    s_lastHeight = height;
+
+    std::vector<uint8_t> uploadBuffer(DEFAULT_FB_SIZE, 0u);
+    if (!scratch.empty() && width != 0u && height != 0u)
+    {
+        const uint32_t copyWidth = std::min<uint32_t>(width, FB_WIDTH);
+        const uint32_t copyHeight = std::min<uint32_t>(height, FB_HEIGHT);
+        const size_t srcRowBytes = static_cast<size_t>(width) * 4u;
+        const size_t dstRowBytes = static_cast<size_t>(FB_WIDTH) * 4u;
+        const size_t copyRowBytes = static_cast<size_t>(copyWidth) * 4u;
+        for (uint32_t y = 0; y < copyHeight; ++y)
+        {
+            const size_t srcOffset = static_cast<size_t>(y) * srcRowBytes;
+            const size_t dstOffset = static_cast<size_t>(y) * dstRowBytes;
+            if (srcOffset + copyRowBytes > scratch.size() ||
+                dstOffset + copyRowBytes > uploadBuffer.size())
+            {
+                break;
+            }
+            std::memcpy(uploadBuffer.data() + dstOffset, scratch.data() + srcOffset, copyRowBytes);
+        }
     }
 
-    UpdateTexture(tex, scratch.data());
+    UpdateTexture(tex, uploadBuffer.data());
+    outWidth = width;
+    outHeight = height;
 }
 
 PS2Runtime::PS2Runtime()
@@ -661,28 +559,54 @@ PS2Runtime::PS2Runtime()
 
 PS2Runtime::~PS2Runtime()
 {
-    requestStop();
-    ps2_syscalls::detachAllGuestHostThreads();
-    if (IsWindowReady())
+    try
     {
-        CloseWindow();
+        requestStop();
+        ps2_syscalls::detachAllGuestHostThreads();
+#if defined(PLATFORM_VITA)
+        m_audioBackend.stopAll();
+        m_audioBackend.setAudioReady(false);
+#else
+        if (IsAudioDeviceReady())
+        {
+            CloseAudioDevice();
+            m_audioBackend.setAudioReady(false);
+        }
+#endif
+        if (IsWindowReady())
+        {
+            CloseWindow();
+        }
+
+        m_loadedModules.clear();
+
+        m_functionTable.clear();
     }
-
-    m_loadedModules.clear();
-
-    m_functionTable.clear();
+    catch (const std::exception &e)
+    {
+        std::cerr << "[~PS2Runtime] cleanup exception: " << e.what() << std::endl;
+    }
+    catch (...)
+    {
+        std::cerr << "[~PS2Runtime] cleanup exception: unknown" << std::endl;
+    }
 }
 
-bool PS2Runtime::initialize(const char *title)
+bool PS2Runtime::syncCoreSubsystems()
 {
-    if (!m_memory.initialize())
+    uint8_t *const rdram = m_memory.getRDRAM();
+    uint8_t *const gsVram = m_memory.getGSVRAM();
+    if (!rdram || !gsVram)
     {
-        std::cerr << "Failed to initialize PS2 memory" << std::endl;
         return false;
     }
 
-    m_gs.init(m_memory.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &m_memory.gs());
-    m_gs.reset();
+    if (m_boundRdram == rdram && m_boundGSVram == gsVram)
+    {
+        return true;
+    }
+
+    m_gs.init(gsVram, static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &m_memory.gs());
     m_gifArbiter.setProcessPacketFn([this](const uint8_t *data, uint32_t size)
                                     { m_gs.processGIFPacket(data, size); });
     m_memory.setGifArbiter(&m_gifArbiter);
@@ -694,19 +618,53 @@ bool PS2Runtime::initialize(const char *title)
                                  { m_vu1.resume(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
                                                 m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
                                                 m_gs, &m_memory, itop, 65536); });
-
-    m_iop.init(m_memory.getRDRAM());
+    m_iop.init(rdram);
     m_iop.reset();
-
-    SetConfigFlags(FLAG_WINDOW_RESIZABLE);
-    InitWindow(FB_WIDTH, FB_HEIGHT, title);
-    InitAudioDevice();
-    m_audioBackend.setAudioReady(IsAudioDeviceReady());
-    SetTargetFPS(60);
-
     m_vu1.reset();
 
+    m_boundRdram = rdram;
+    m_boundGSVram = gsVram;
     return true;
+}
+
+bool PS2Runtime::initialize(const char *title)
+{
+    try
+    {
+        if (!m_memory.initialize())
+        {
+            std::cerr << "Failed to initialize PS2 memory" << std::endl;
+            return false;
+        }
+
+        if (!syncCoreSubsystems())
+        {
+            std::cerr << "Failed to bind runtime core subsystems" << std::endl;
+            return false;
+        }
+
+#if defined(PLATFORM_VITA)
+        InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
+#else
+        SetConfigFlags(FLAG_WINDOW_RESIZABLE);
+        InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
+        InitAudioDevice();
+        m_audioBackend.setAudioReady(IsAudioDeviceReady());
+#endif
+        SetTargetFPS(60);
+
+        return true;
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "Failed to initialize PS2 runtime: " << e.what() << std::endl;
+    }
+    catch (...)
+    {
+        std::cerr << "Failed to initialize PS2 runtime: unknown exception" << std::endl;
+    }
+
+    return false;
 }
 
 bool PS2Runtime::loadELF(const std::string &elfPath)
@@ -865,11 +823,11 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
             std::memset(dest + ph.filesz, 0, ph.memsz - ph.filesz);
         }
 
-        std::cout << "Loading segment: 0x" << std::hex << ph.vaddr
-                  << " - 0x" << (static_cast<uint64_t>(ph.vaddr) + static_cast<uint64_t>(ph.memsz))
-                  << " (filesz: 0x" << ph.filesz
-                  << ", memsz: 0x" << ph.memsz << ")"
-                  << std::dec << std::endl;
+        RUNTIME_LOG("Loading segment: 0x" << std::hex << ph.vaddr
+                                          << " - 0x" << (static_cast<uint64_t>(ph.vaddr) + static_cast<uint64_t>(ph.memsz))
+                                          << " (filesz: 0x" << ph.filesz
+                                          << ", memsz: 0x" << ph.memsz << ")"
+                                          << std::dec << std::endl);
 
         if (!scratch)
         {
@@ -938,7 +896,7 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
 
     ps2_game_overrides::applyMatching(*this, elfPath, m_cpuContext.pc);
 
-    std::cout << "ELF file loaded successfully. Entry point: 0x" << std::hex << m_cpuContext.pc << std::dec << std::endl;
+    RUNTIME_LOG("ELF file loaded successfully. Entry point: 0x" << std::hex << m_cpuContext.pc << std::dec);
     return true;
 }
 
@@ -1010,12 +968,6 @@ bool PS2Runtime::hasFunction(uint32_t address) const
         return true;
     }
 
-    if (address == 0x2913E4u)
-    {
-        auto parent = m_functionTable.find(0x2913B0u);
-        return parent != m_functionTable.end();
-    }
-
     return false;
 }
 
@@ -1027,15 +979,6 @@ PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
     if (it != m_functionTable.end())
     {
         return it->second;
-    }
-
-    if (address == 0x2913E4u)
-    {
-        auto parent = m_functionTable.find(0x2913B0u);
-        if (parent != m_functionTable.end())
-        {
-            return parent->second;
-        }
     }
 
     std::cerr << "Warning: Function at address 0x" << std::hex << address << std::dec << " not found" << std::endl;
@@ -1186,10 +1129,10 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
     int &count = seen[address];
     if (count < 3)
     {
-        std::cout << "[VU0] microprogram @0x" << std::hex << address
-                  << " pc=0x" << ctx->pc
-                  << " ra=0x" << static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0))
-                  << std::dec << std::endl;
+        RUNTIME_LOG("[VU0] microprogram @0x" << std::hex << address
+                                             << " pc=0x" << ctx->pc
+                                             << " ra=0x" << static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0))
+                                             << std::dec << std::endl);
     }
     ++count;
 
@@ -1781,7 +1724,9 @@ void PS2Runtime::dispatchLoop(uint8_t *rdram, R5900Context *ctx)
             ++samePcCount;
             if ((samePcCount % kSamePcYieldInterval) == 0u)
             {
-                std::cout << "CPU is doing some work at PC 0x" << std::hex << pc << ". PC not updating." << std::endl;
+                PS2_IF_AGRESSIVE_LOGS({
+                    RUNTIME_LOG("CPU is doing some work at PC 0x" << std::hex << pc << ". PC not updating.");
+                });
                 std::this_thread::yield();
             }
         }
@@ -1883,17 +1828,18 @@ void PS2Runtime::reacquireGuestExecution(uint32_t depth)
     }
 }
 
-void PS2Runtime::cooperativeGuestYield()
+bool PS2Runtime::shouldPreemptGuestExecution()
 {
-    GuestExecutionReleaseScope release(this);
-    if (m_guestExecutionWaiters.load(std::memory_order_acquire) != 0u)
+    thread_local uint32_t s_backEdgeYieldCounter = 0u;
+    const uint32_t waiterCount = m_guestExecutionWaiters.load(std::memory_order_acquire);
+    const uint32_t yieldInterval = (waiterCount != 0u) ? 64u : 100u;
+    if (++s_backEdgeYieldCounter < yieldInterval)
     {
-        std::this_thread::sleep_for(std::chrono::microseconds(100));
+        return false;
     }
-    else
-    {
-        std::this_thread::yield();
-    }
+
+    s_backEdgeYieldCounter = 0u;
+    return true;
 }
 
 uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
@@ -2048,7 +1994,10 @@ void PS2Runtime::run()
 {
     m_stopRequested.store(false, std::memory_order_relaxed);
     ps2_stubs::resetSifState();
+    ps2_syscalls::resetSoundDriverRpcState();
+    ps2_stubs::resetAudioStubState();
     ps2_stubs::resetGsSyncVCallbackState();
+    ps2_stubs::resetMpegStubState();
     ps2_syscalls::initializeGuestKernelState(m_memory.getRDRAM());
     m_cpuContext.r[4] = _mm_setzero_si128();
     m_cpuContext.r[5] = _mm_setzero_si128();
@@ -2058,7 +2007,7 @@ void PS2Runtime::run()
     m_debugSp.store(static_cast<uint32_t>(_mm_extract_epi32(m_cpuContext.r[29], 0)), std::memory_order_relaxed);
     m_debugGp.store(static_cast<uint32_t>(_mm_extract_epi32(m_cpuContext.r[28], 0)), std::memory_order_relaxed);
 
-    std::cout << "Starting execution at address 0x" << std::hex << m_cpuContext.pc << std::dec << std::endl;
+    RUNTIME_LOG("Starting execution at address 0x" << std::hex << m_cpuContext.pc << std::dec);
 
     // A blank image to use as a framebuffer
     Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLANK);
@@ -2075,8 +2024,8 @@ void PS2Runtime::run()
         {
             dispatchLoop(m_memory.getRDRAM(), &m_cpuContext);
             uint32_t pc = m_debugPc.load(std::memory_order_relaxed);
-            std::cout << "Game thread returned. PC=0x" << std::hex << pc
-                      << " RA=0x" << static_cast<uint32_t>(_mm_extract_epi32(m_cpuContext.r[31], 0)) << std::dec << std::endl;
+            RUNTIME_LOG("Game thread returned. PC=0x" << std::hex << pc
+                      << " RA=0x" << static_cast<uint32_t>(_mm_extract_epi32(m_cpuContext.r[31], 0)) << std::dec << std::endl);
         }
         catch (const std::exception &e)
         {
@@ -2089,92 +2038,67 @@ void PS2Runtime::run()
         g_activeThreads.fetch_sub(1, std::memory_order_relaxed);
         gameThreadFinished.store(true, std::memory_order_release); });
 
+    ps2_syscalls::EnsureVSyncWorkerRunning(m_memory.getRDRAM(), this);
+
     uint64_t tick = 0;
     while (!isStopRequested() && g_activeThreads.load(std::memory_order_relaxed) > 0)
     {
-        tick++;
-        if ((tick % 120) == 0)
-        {
-            uint64_t curDma = m_memory.dmaStartCount();
-            uint64_t curGif = m_memory.gifCopyCount();
-            uint64_t curGs = m_memory.gsWriteCount();
-            uint64_t curVif = m_memory.vifWriteCount();
-            const GSRegisters &gs = m_memory.gs();
-            const uint32_t dbgPc = m_debugPc.load(std::memory_order_relaxed);
-            const uint32_t dbgRa = m_debugRa.load(std::memory_order_relaxed);
-            const uint32_t dbgSp = m_debugSp.load(std::memory_order_relaxed);
-            const uint32_t dbgGp = m_debugGp.load(std::memory_order_relaxed);
-            const int activeThreads = g_activeThreads.load(std::memory_order_relaxed);
+        PS2_IF_AGRESSIVE_LOGS({
+            tick++;
+            if ((tick % 120) == 0)
+            {
+                uint64_t curDma = m_memory.dmaStartCount();
+                uint64_t curGif = m_memory.gifCopyCount();
+                uint64_t curGs = m_memory.gsWriteCount();
+                uint64_t curVif = m_memory.vifWriteCount();
+                const GSRegisters &gs = m_memory.gs();
+                const uint32_t dbgPc = m_debugPc.load(std::memory_order_relaxed);
+                const uint32_t dbgRa = m_debugRa.load(std::memory_order_relaxed);
+                const uint32_t dbgSp = m_debugSp.load(std::memory_order_relaxed);
+                const uint32_t dbgGp = m_debugGp.load(std::memory_order_relaxed);
+                const int activeThreads = g_activeThreads.load(std::memory_order_relaxed);
 
-            constexpr uint32_t kSndTransTypeAddr = 0x01E0E1C0u;
-            constexpr uint32_t kSndTransBankAddr = 0x01E0E1C8u;
-            constexpr uint32_t kSndTransLevelAddr = 0x01E0E1B8u;
-            constexpr uint32_t kSndGetAdrsAddr = 0x01E212D8u;
-            constexpr uint32_t kSndStatusMirrorAddr = 0x01E213C0u;
-            constexpr uint32_t kSndSeCheckAddr = 0x01E0EF10u;
-            constexpr uint32_t kSndMidiCheckAddr = 0x01E0EF20u;
-
-            const uint32_t sndTransType = readGuestU32Wrapped(m_memory.getRDRAM(), kSndTransTypeAddr);
-            const uint32_t sndTransLevel = readGuestU32Wrapped(m_memory.getRDRAM(), kSndTransLevelAddr);
-            const uint32_t sndTransBank = readGuestU32Wrapped(m_memory.getRDRAM(), kSndTransBankAddr);
-            const uint32_t sndGetAdrs = readGuestU32Wrapped(m_memory.getRDRAM(), kSndGetAdrsAddr);
-            auto readGuestS16 = [&](uint32_t addr) -> int32_t
-            {
-                const uint8_t *rdram = m_memory.getRDRAM();
-                if (!rdram)
-                {
-                    return 0;
-                }
-                const uint16_t raw = static_cast<uint16_t>(
-                    static_cast<uint16_t>(rdram[(addr + 0u) & PS2_RAM_MASK]) |
-                    (static_cast<uint16_t>(rdram[(addr + 1u) & PS2_RAM_MASK]) << 8));
-                return static_cast<int16_t>(raw);
-            };
-            const int32_t sndMirrorMidi0 = readGuestS16(kSndStatusMirrorAddr + 0x1Eu);
-            const int32_t sndMirrorSe0 = readGuestS16(kSndStatusMirrorAddr + 0x26u);
-            int32_t sndBankMidiCheck = 0;
-            int32_t sndBankSeCheck = 0;
-            if (sndTransBank < 4u)
-            {
-                sndBankMidiCheck = readGuestS16(kSndMidiCheckAddr + (sndTransBank * 2u));
+                std::cout << "[run:tick] tick=" << tick
+                          << " pc=0x" << std::hex << dbgPc
+                          << " ra=0x" << dbgRa
+                          << " sp=0x" << dbgSp
+                          << " gp=0x" << dbgGp
+                          << " dispfb1=0x" << gs.dispfb1
+                          << " display1=0x" << gs.display1
+                          << std::dec
+                          << " activeThreads=" << activeThreads
+                          << " dma=" << curDma
+                          << " gif=" << curGif
+                          << " gsw=" << curGs
+                          << " vif=" << curVif
+                          << std::endl;
             }
-            if (sndTransBank < 5u)
-            {
-                sndBankSeCheck = readGuestS16(kSndSeCheckAddr + (sndTransBank * 2u));
-            }
-            std::cout << "[run:tick] tick=" << tick
-                      << " pc=0x" << std::hex << dbgPc
-                      << " ra=0x" << dbgRa
-                      << " sp=0x" << dbgSp
-                      << " gp=0x" << dbgGp
-                      << " dispfb1=0x" << gs.dispfb1
-                      << " display1=0x" << gs.display1
-                      << std::dec
-                      << " activeThreads=" << activeThreads
-                      << " dma=" << curDma
-                      << " gif=" << curGif
-                      << " gsw=" << curGs
-                      << " vif=" << curVif
-                      << " sndType=" << sndTransType
-                      << " sndLvl=" << sndTransLevel
-                      << " sndBank=" << sndTransBank
-                      << " getAdrs=0x" << std::hex << sndGetAdrs << std::dec
-                      << " sndMirrorMidi0=" << sndMirrorMidi0
-                      << " sndMirrorSe0=" << sndMirrorSe0
-                      << " sndChkMidi=" << sndBankMidiCheck
-                      << " sndChkSe=" << sndBankSeCheck
-                      << std::endl;
-        }
-        UploadFrame(frameTex, this);
+        });
+        uint32_t presentWidth = FB_WIDTH;
+        uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
+        UploadFrame(frameTex, this, presentWidth, presentHeight);
 
         BeginDrawing();
         ClearBackground(BLACK);
-        DrawTexture(frameTex, 0, 0, WHITE);
+        const float srcWidth = static_cast<float>(std::max<uint32_t>(1u, presentWidth));
+        const float srcHeight = static_cast<float>(std::max<uint32_t>(1u, presentHeight));
+        const float screenWidth = static_cast<float>(GetScreenWidth());
+        const float screenHeight = static_cast<float>(GetScreenHeight());
+        const float scale = std::min(screenWidth / srcWidth, screenHeight / srcHeight);
+        const float dstWidth = srcWidth * scale;
+        const float dstHeight = srcHeight * scale;
+        const Rectangle srcRect{0.0f, 0.0f, srcWidth, srcHeight};
+        const Rectangle dstRect{
+            (screenWidth - dstWidth) * 0.5f,
+            (screenHeight - dstHeight) * 0.5f,
+            dstWidth,
+            dstHeight};
+        DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
         EndDrawing();
 
         if (WindowShouldClose())
         {
-            std::cout << "[run] window close requested, breaking out of loop" << std::endl;
+            RUNTIME_LOG("[run] window close requested, breaking out of loop");
             requestStop();
             break;
         }
@@ -2235,7 +2159,7 @@ void PS2Runtime::run()
     CloseWindow();
 
     const int remainingThreads = g_activeThreads.load(std::memory_order_relaxed);
-    std::cout << "[run] exiting loop, activeThreads=" << remainingThreads << std::endl;
+    RUNTIME_LOG("[run] exiting loop, activeThreads=" << remainingThreads);
     if (remainingThreads > 0)
     {
         std::cerr << "[run] warning: " << remainingThreads

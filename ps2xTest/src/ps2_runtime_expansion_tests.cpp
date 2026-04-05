@@ -4,11 +4,16 @@
 #include "ps2recomp/r5900_decoder.h"
 #include "ps2recomp/types.h"
 #include "ps2_runtime.h"
-#include "ps2_memory.h"
+#include "runtime/ps2_memory.h"
 #include "ps2_syscalls.h"
 #include "ps2_stubs.h"
-#include "ps2_gs_gpu.h"
+#include "runtime/ps2_gs_gpu.h"
+#include "runtime/ps2_gs_psmct32.h"
 #include "ps2_runtime_macros.h"
+#include "Stubs/MPEG.h"
+#include "Stubs/Audio.h"
+#include "Stubs/GS.h"
+#include "Stubs/VU.h"
 
 #include <atomic>
 #include <chrono>
@@ -78,8 +83,7 @@ namespace
 
     uint32_t frameOffsetBytes(uint32_t x, uint32_t y, uint32_t fbw)
     {
-        const uint32_t stride = fbw * 64u * 4u; // CT32
-        return y * stride + x * 4u;
+        return GSPSMCT32::addrPSMCT32(0u, (fbw != 0u) ? fbw : 1u, x, y);
     }
 
     void testRuntimeWorkerLoop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -104,9 +108,9 @@ namespace
 
     std::atomic<int32_t> gSerializedGuestActive{0};
     std::atomic<int32_t> gSerializedGuestMaxActive{0};
-    std::atomic<int32_t> gCooperativeYieldEntryCount{0};
-    std::atomic<bool> gCooperativeYieldAllowFirstYield{false};
-    std::atomic<bool> gCooperativeYieldPeerRan{false};
+    std::atomic<int32_t> gPreemptionPolicyEntryCount{0};
+    std::atomic<bool> gPreemptionPolicyAllowFirstProbe{false};
+    std::atomic<bool> gPreemptionPolicyPeerRan{false};
 
     void testSerializedGuestStep(uint8_t *, R5900Context *ctx, PS2Runtime *)
     {
@@ -129,32 +133,33 @@ namespace
         }
     }
 
-    void testCooperativeGuestYieldStep(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    void testPreemptionPolicyStep(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
     {
         if (!ctx || !runtime)
         {
             return;
         }
 
-        const int32_t entryIndex = gCooperativeYieldEntryCount.fetch_add(1, std::memory_order_acq_rel) + 1;
+        const int32_t entryIndex = gPreemptionPolicyEntryCount.fetch_add(1, std::memory_order_acq_rel) + 1;
         if (entryIndex == 1)
         {
-            while (!gCooperativeYieldAllowFirstYield.load(std::memory_order_acquire))
+            while (!gPreemptionPolicyAllowFirstProbe.load(std::memory_order_acquire))
             {
                 std::this_thread::yield();
             }
 
-            for (int attempt = 0; attempt < 32 &&
-                                  !gCooperativeYieldPeerRan.load(std::memory_order_acquire);
+            bool shouldPreempt = false;
+            for (int attempt = 0; attempt < 256 &&
+                                  !shouldPreempt;
                  ++attempt)
             {
-                runtime->cooperativeGuestYield();
+                shouldPreempt = runtime->shouldPreemptGuestExecution();
             }
-            setRegU32(*ctx, 2, gCooperativeYieldPeerRan.load(std::memory_order_acquire) ? 1u : 0u);
+            setRegU32(*ctx, 2, shouldPreempt ? 1u : 0u);
         }
         else
         {
-            gCooperativeYieldPeerRan.store(true, std::memory_order_release);
+            gPreemptionPolicyPeerRan.store(true, std::memory_order_release);
             setRegU32(*ctx, 2, 2u);
         }
 
@@ -211,6 +216,7 @@ namespace
         gAsyncCallbackObservedGp.store(::getRegU32(ctx, 28), std::memory_order_release);
         ctx->pc = 0u;
     }
+
 }
 
 void register_ps2_runtime_expansion_tests()
@@ -293,19 +299,19 @@ void register_ps2_runtime_expansion_tests()
                      "dispatchLoop should not execute guest code concurrently on one runtime");
         });
 
-        tc.Run("cooperative guest yield lets another guest thread run without leaving the current function", [](TestCase &t)
+        tc.Run("guest preemption policy requests a dispatcher handoff when another guest thread contends", [](TestCase &t)
         {
             PS2Runtime runtime;
             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
             constexpr uint32_t kFirstEntry = 0x190000u;
             constexpr uint32_t kSecondEntry = 0x1A0000u;
 
-            gCooperativeYieldEntryCount.store(0, std::memory_order_release);
-            gCooperativeYieldAllowFirstYield.store(false, std::memory_order_release);
-            gCooperativeYieldPeerRan.store(false, std::memory_order_release);
+            gPreemptionPolicyEntryCount.store(0, std::memory_order_release);
+            gPreemptionPolicyAllowFirstProbe.store(false, std::memory_order_release);
+            gPreemptionPolicyPeerRan.store(false, std::memory_order_release);
 
-            runtime.registerFunction(kFirstEntry, &testCooperativeGuestYieldStep);
-            runtime.registerFunction(kSecondEntry, &testCooperativeGuestYieldStep);
+            runtime.registerFunction(kFirstEntry, &testPreemptionPolicyStep);
+            runtime.registerFunction(kSecondEntry, &testPreemptionPolicyStep);
 
             R5900Context firstCtx{};
             R5900Context secondCtx{};
@@ -319,7 +325,7 @@ void register_ps2_runtime_expansion_tests()
 
             const bool firstEntered = waitUntil([&]()
             {
-                return gCooperativeYieldEntryCount.load(std::memory_order_acquire) >= 1;
+                return gPreemptionPolicyEntryCount.load(std::memory_order_acquire) >= 1;
             }, std::chrono::milliseconds(100));
 
             std::thread secondWorker([&]()
@@ -332,7 +338,7 @@ void register_ps2_runtime_expansion_tests()
                 return runtime.guestExecutionWaiterCountForTesting() > 0u;
             }, std::chrono::milliseconds(100));
 
-            gCooperativeYieldAllowFirstYield.store(true, std::memory_order_release);
+            gPreemptionPolicyAllowFirstProbe.store(true, std::memory_order_release);
 
             if (firstWorker.joinable())
             {
@@ -343,12 +349,12 @@ void register_ps2_runtime_expansion_tests()
                 secondWorker.join();
             }
 
-            t.IsTrue(firstEntered, "first guest worker should enter before yielding");
-            t.IsTrue(secondContending, "second guest worker should contend for guest execution before the first yields");
-            t.IsTrue(gCooperativeYieldPeerRan.load(std::memory_order_acquire),
-                     "second guest worker should run while the first cooperatively yields");
+            t.IsTrue(firstEntered, "first guest worker should enter before probing for preemption");
+            t.IsTrue(secondContending, "second guest worker should contend for guest execution before the first returns");
+            t.IsTrue(gPreemptionPolicyPeerRan.load(std::memory_order_acquire),
+                     "second guest worker should run after the first returns to the dispatcher");
             t.Equals(getRegU32(&firstCtx, 2), 1u,
-                     "first guest worker should observe that a peer ran before it resumed");
+                     "first guest worker should observe that the runtime requested preemption under contention");
         });
 
         tc.Run("vblank intc handlers can preempt serialized guest execution", [](TestCase &t)
@@ -457,6 +463,171 @@ void register_ps2_runtime_expansion_tests()
 
             runtime.requestStop();
             notifyRuntimeStop();
+        });
+
+        tc.Run("MPEG init and callback stubs return success instead of TODO errors", [](TestCase &t)
+        {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            ps2_stubs::resetMpegStubState();
+
+            R5900Context initCtx{};
+            ps2_stubs::sceMpegInit(rdram.data(), &initCtx, nullptr);
+            t.Equals(getRegS32(initCtx, 2), 0,
+                     "sceMpegInit should succeed so games can continue through movie setup");
+
+            R5900Context addCtx0{};
+            setRegU32(addCtx0, 4, 0x00123000u);
+            setRegU32(addCtx0, 5, 1u);
+            setRegU32(addCtx0, 6, 0x00124000u);
+            setRegU32(addCtx0, 7, 0u);
+            ps2_stubs::sceMpegAddCallback(rdram.data(), &addCtx0, nullptr);
+            t.Equals(getRegS32(addCtx0, 2), 1,
+                     "first sceMpegAddCallback should hand back a non-error callback handle");
+
+            R5900Context addCtx1{};
+            setRegU32(addCtx1, 4, 0x00123000u);
+            setRegU32(addCtx1, 5, 2u);
+            setRegU32(addCtx1, 6, 0x00124010u);
+            setRegU32(addCtx1, 7, 0u);
+            ps2_stubs::sceMpegAddCallback(rdram.data(), &addCtx1, nullptr);
+            t.Equals(getRegS32(addCtx1, 2), 2,
+                     "subsequent sceMpegAddCallback calls should keep succeeding");
+
+            R5900Context reinitCtx{};
+            ps2_stubs::sceMpegInit(rdram.data(), &reinitCtx, nullptr);
+
+            R5900Context addAfterReinit{};
+            setRegU32(addAfterReinit, 4, 0x00123000u);
+            setRegU32(addAfterReinit, 5, 3u);
+            setRegU32(addAfterReinit, 6, 0x00124020u);
+            setRegU32(addAfterReinit, 7, 0u);
+            ps2_stubs::sceMpegAddCallback(rdram.data(), &addAfterReinit, nullptr);
+            t.Equals(getRegS32(addAfterReinit, 2), 1,
+                     "sceMpegInit should reset MPEG callback bookkeeping between runs");
+        });
+
+        tc.Run("movie startup MPEG and audio stubs return safe progress values", [](TestCase &t)
+        {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            ps2_stubs::clearMpegCompatLayout();
+            ps2_stubs::resetMpegStubState();
+            ps2_stubs::resetAudioStubState();
+
+            R5900Context firstIsEndCtx{};
+            setRegU32(firstIsEndCtx, 4, 0x00123000u);
+            ps2_stubs::sceMpegIsEnd(rdram.data(), &firstIsEndCtx, nullptr);
+            t.Equals(getRegS32(firstIsEndCtx, 2), 0,
+                     "sceMpegIsEnd should allow one synthetic frame before reporting end");
+
+            R5900Context demuxCtx{};
+            setRegU32(demuxCtx, 4, 0x00123000u);
+            setRegU32(demuxCtx, 5, 0x00400000u);
+            setRegU32(demuxCtx, 6, 0x00004000u);
+            setRegU32(demuxCtx, 7, 0x00410000u);
+            ps2_stubs::sceMpegDemuxPssRing(rdram.data(), &demuxCtx, nullptr);
+            t.Equals(getRegS32(demuxCtx, 2), 0x4000,
+                     "sceMpegDemuxPssRing should consume the provided input instead of trapping");
+
+            R5900Context getPictureCtx{};
+            setRegU32(getPictureCtx, 4, 0x00123000u);
+            setRegU32(getPictureCtx, 5, 0x00124000u);
+            setRegU32(getPictureCtx, 6, 440u);
+            ps2_stubs::sceMpegGetPicture(rdram.data(), &getPictureCtx, nullptr);
+            t.Equals(Ps2FastRead32(rdram.data(), 0x00123000u + 0x00u), 320u,
+                     "sceMpegGetPicture should seed a safe movie width");
+            t.Equals(Ps2FastRead32(rdram.data(), 0x00123000u + 0x04u), 240u,
+                     "sceMpegGetPicture should seed a safe movie height");
+            t.Equals(Ps2FastRead32(rdram.data(), 0x00123000u + 0x08u), 0u,
+                     "first synthetic picture should preserve frameCount==0 for guest setup");
+
+            R5900Context secondIsEndCtx{};
+            setRegU32(secondIsEndCtx, 4, 0x00123000u);
+            ps2_stubs::sceMpegIsEnd(rdram.data(), &secondIsEndCtx, nullptr);
+            t.Equals(getRegS32(secondIsEndCtx, 2), 0,
+                     "sceMpegIsEnd should keep the decode thread alive and let the guest stop playback");
+
+            R5900Context remoteInitCtx{};
+            ps2_stubs::sceSdRemoteInit(rdram.data(), &remoteInitCtx, nullptr);
+            t.Equals(getRegS32(remoteInitCtx, 2), 0,
+                     "sceSdRemoteInit should succeed so Veronica can set up movie audio");
+
+            R5900Context blockTransCtx{};
+            const uint32_t blockTransSp = 0x00100000u;
+            setRegU32(blockTransCtx, 29, blockTransSp);
+            setRegU32(blockTransCtx, 4, 1u);
+            setRegU32(blockTransCtx, 5, 0x80E0u);
+            setRegU32(blockTransCtx, 6, 1u);
+            setRegU32(blockTransCtx, 7, 2u);
+            std::memcpy(rdram.data() + blockTransSp + 0x10u, "\x40\x23\x01\x00", 4u);
+            std::memcpy(rdram.data() + blockTransSp + 0x14u, "\x00\x30\x00\x00", 4u);
+            std::memcpy(rdram.data() + blockTransSp + 0x18u, "\x40\x27\x01\x00", 4u);
+            ps2_stubs::sceSdRemote(rdram.data(), &blockTransCtx, nullptr);
+            t.Equals(getRegU32(&blockTransCtx, 2), 0x00012340u,
+                     "sceSdRemote block transfer should publish the current IOP ring position");
+
+            R5900Context statusCtx{};
+            setRegU32(statusCtx, 29, blockTransSp);
+            setRegU32(statusCtx, 4, 1u);
+            setRegU32(statusCtx, 5, 0x80F0u);
+            setRegU32(statusCtx, 6, 1u);
+            setRegU32(statusCtx, 7, 0u);
+            std::memset(rdram.data() + blockTransSp + 0x10u, 0, 12u);
+            ps2_stubs::sceSdRemote(rdram.data(), &statusCtx, nullptr);
+            t.Equals(getRegU32(&statusCtx, 2), 0x00012340u,
+                     "sceSdRemote status polling should reuse the last configured transfer base");
+
+            R5900Context setParamCtx{};
+            setRegU32(setParamCtx, 29, blockTransSp);
+            setRegU32(setParamCtx, 4, 1u);
+            setRegU32(setParamCtx, 5, 0x8010u);
+            setRegU32(setParamCtx, 6, 0x0F81u);
+            setRegU32(setParamCtx, 7, 0u);
+            ps2_stubs::sceSdRemote(rdram.data(), &setParamCtx, nullptr);
+            t.Equals(getRegU32(&setParamCtx, 2), 0x00012340u,
+                     "sceSdRemote set-param calls should not trap or disturb the movie audio state");
+        });
+         
+        tc.Run("IPU init skips missing optional helper instead of dispatching the default trap", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            R5900Context ctx{};
+            ctx.pc = 0x0010B470u;
+
+            ps2_stubs::sceIpuInit(rdram.data(), &ctx, &runtime);
+
+            t.IsFalse(runtime.isStopRequested(),
+                      "sceIpuInit should tolerate the missing optional SetD4 helper");
+            t.Equals(runtime.memory().read32(0x10002010u), 0x40000000u,
+                     "sceIpuInit should still program IPU_CTRL");
+            t.Equals(runtime.memory().read32(0x10002000u), 0u,
+                     "sceIpuInit should leave IPU_CMD reset after initialization");
+        });
+
+        tc.Run("sprintf consumes EE varargs from a2 a3 t0 and preserves width formatting", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            R5900Context ctx{};
+
+            constexpr uint32_t kDestAddr = 0x00002000u;
+            constexpr uint32_t kFormatAddr = 0x00002100u;
+            constexpr char kFormat[] = "rm_%1d%02d%1d.rdx";
+
+            std::memcpy(rdram.data() + kFormatAddr, kFormat, sizeof(kFormat));
+            setRegU32(ctx, 4, kDestAddr);
+            setRegU32(ctx, 5, kFormatAddr);
+            setRegU32(ctx, 6, 0u); // a2
+            setRegU32(ctx, 7, 3u); // a3
+            setRegU32(ctx, 8, 1u); // t0
+
+            ps2_stubs::sprintf(rdram.data(), &ctx, &runtime);
+
+            const std::string rendered(reinterpret_cast<const char *>(rdram.data() + kDestAddr));
+            t.Equals(rendered, std::string("rm_0031.rdx"),
+                     "sprintf should read the third variadic integer from t0 and honor %02d");
+            t.Equals(getRegS32(ctx, 2), static_cast<int32_t>(rendered.size()),
+                     "sprintf should return the rendered length");
         });
 
         tc.Run("multiply-add matrix writes rd only when R5900 requires it", [](TestCase &t)
@@ -949,6 +1120,154 @@ void register_ps2_runtime_expansion_tests()
             DeleteEventFlag(rdram.data(), &deleteCtx, &runtime);
             runtime.requestStop();
             notifyRuntimeStop();
+        });
+
+        tc.Run("sceVu0ApplyMatrix uses libvux matrix math with the imported EE ABI", [](TestCase &t)
+        {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            R5900Context ctx{};
+
+            constexpr uint32_t kOutAddr = 0x00100000u;
+            constexpr uint32_t kMatrixAddr = 0x00100040u;
+            constexpr uint32_t kSrcAddr = 0x00100080u;
+
+            const float matrix[16] = {
+                1.0f, 2.0f, 3.0f, 4.0f,
+                5.0f, 6.0f, 7.0f, 8.0f,
+                9.0f, 10.0f, 11.0f, 12.0f,
+                13.0f, 14.0f, 15.0f, 16.0f,
+            };
+            const float src[4] = {1.0f, 2.0f, 3.0f, 1.0f};
+            std::memcpy(rdram.data() + kMatrixAddr, matrix, sizeof(matrix));
+            std::memcpy(rdram.data() + kSrcAddr, src, sizeof(src));
+
+            setRegU32(ctx, 4, kOutAddr);
+            setRegU32(ctx, 5, kMatrixAddr);
+            setRegU32(ctx, 6, kSrcAddr);
+
+            ps2_stubs::sceVu0ApplyMatrix(rdram.data(), &ctx, nullptr);
+
+            float out[4]{};
+            std::memcpy(out, rdram.data() + kOutAddr, sizeof(out));
+            t.Equals(out[0], 51.0f, "sceVu0ApplyMatrix should compute X with libvux layout");
+            t.Equals(out[1], 58.0f, "sceVu0ApplyMatrix should compute Y with libvux layout");
+            t.Equals(out[2], 65.0f, "sceVu0ApplyMatrix should compute Z with libvux layout");
+            t.Equals(out[3], 72.0f, "sceVu0ApplyMatrix should compute W with libvux layout");
+            t.Equals(getRegS32(ctx, 2), 0, "sceVu0ApplyMatrix should report success");
+        });
+
+        tc.Run("sceVu0TransposeMatrix transposes a 4x4 matrix with dst/src ABI", [](TestCase &t)
+        {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            R5900Context ctx{};
+
+            constexpr uint32_t kDstAddr = 0x00100100u;
+            constexpr uint32_t kSrcAddr = 0x00100140u;
+            const float src[16] = {
+                1.0f, 2.0f, 3.0f, 4.0f,
+                5.0f, 6.0f, 7.0f, 8.0f,
+                9.0f, 10.0f, 11.0f, 12.0f,
+                13.0f, 14.0f, 15.0f, 16.0f,
+            };
+            std::memcpy(rdram.data() + kSrcAddr, src, sizeof(src));
+
+            setRegU32(ctx, 4, kDstAddr);
+            setRegU32(ctx, 5, kSrcAddr);
+
+            ps2_stubs::sceVu0TransposeMatrix(rdram.data(), &ctx, nullptr);
+
+            float out[16]{};
+            std::memcpy(out, rdram.data() + kDstAddr, sizeof(out));
+            t.Equals(out[0], 1.0f, "transpose should preserve [0][0]");
+            t.Equals(out[1], 5.0f, "transpose should swap row 0 col 1");
+            t.Equals(out[2], 9.0f, "transpose should swap row 0 col 2");
+            t.Equals(out[3], 13.0f, "transpose should swap row 0 col 3");
+            t.Equals(out[4], 2.0f, "transpose should swap row 1 col 0");
+            t.Equals(out[5], 6.0f, "transpose should preserve [1][1]");
+            t.Equals(out[10], 11.0f, "transpose should preserve [2][2]");
+            t.Equals(out[12], 4.0f, "transpose should swap row 3 col 0");
+            t.Equals(out[15], 16.0f, "transpose should preserve [3][3]");
+            t.Equals(getRegS32(ctx, 2), 0, "sceVu0TransposeMatrix should report success");
+        });
+
+        tc.Run("sceVif1PkReset preserves the packet base pointer and clears open tag state", [](TestCase &t)
+        {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            R5900Context ctx{};
+
+            constexpr uint32_t kStateAddr = 0x00100200u;
+            constexpr uint32_t kBaseAddr = 0x00101000u;
+
+            setRegU32(ctx, 4, kStateAddr);
+            setRegU32(ctx, 5, kBaseAddr);
+            ps2_stubs::sceVif1PkInit(rdram.data(), &ctx, nullptr);
+
+            const uint32_t dirtyCurrent = kBaseAddr + 0x40u;
+            const uint32_t dirtyPending = 0x12345678u;
+            const uint32_t dirtyDirectOpen = 0x00ABCDEFu;
+            const uint32_t dirtyGifOpen = 0x00112233u;
+            std::memcpy(rdram.data() + kStateAddr + 0u, &dirtyCurrent, sizeof(dirtyCurrent));
+            std::memcpy(rdram.data() + kStateAddr + 8u, &dirtyPending, sizeof(dirtyPending));
+            std::memcpy(rdram.data() + kStateAddr + 12u, &dirtyDirectOpen, sizeof(dirtyDirectOpen));
+            std::memcpy(rdram.data() + kStateAddr + 20u, &dirtyGifOpen, sizeof(dirtyGifOpen));
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, kStateAddr);
+            ps2_stubs::sceVif1PkReset(rdram.data(), &ctx, nullptr);
+
+            uint32_t current = 0u;
+            uint32_t base = 0u;
+            uint32_t pending = 0u;
+            uint32_t directOpen = 0u;
+            uint32_t gifOpen = 0u;
+            std::memcpy(&current, rdram.data() + kStateAddr + 0u, sizeof(current));
+            std::memcpy(&base, rdram.data() + kStateAddr + 4u, sizeof(base));
+            std::memcpy(&pending, rdram.data() + kStateAddr + 8u, sizeof(pending));
+            std::memcpy(&directOpen, rdram.data() + kStateAddr + 12u, sizeof(directOpen));
+            std::memcpy(&gifOpen, rdram.data() + kStateAddr + 20u, sizeof(gifOpen));
+
+            t.Equals(current, kBaseAddr, "sceVif1PkReset should restore current pointer to the packet base");
+            t.Equals(base, kBaseAddr, "sceVif1PkReset should preserve the packet base pointer");
+            t.Equals(pending, 0u, "sceVif1PkReset should clear pending count tracking");
+            t.Equals(directOpen, 0u, "sceVif1PkReset should clear direct-code open state");
+            t.Equals(gifOpen, 0u, "sceVif1PkReset should clear GIF-tag open state");
+            t.Equals(::getRegU32(&ctx, 2), kBaseAddr, "sceVif1PkReset should return the packet base pointer");
+        });
+
+        tc.Run("sceVif1PkCloseDirectCode encodes DIRECT length in qwords", [](TestCase &t)
+        {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            R5900Context ctx{};
+
+            constexpr uint32_t kStateAddr = 0x00100400u;
+            constexpr uint32_t kBaseAddr = 0x00102000u;
+
+            setRegU32(ctx, 4, kStateAddr);
+            setRegU32(ctx, 5, kBaseAddr);
+            ps2_stubs::sceVif1PkInit(rdram.data(), &ctx, nullptr);
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, kStateAddr);
+            setRegU32(ctx, 5, 0u);
+            ps2_stubs::sceVif1PkCnt(rdram.data(), &ctx, nullptr);
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, kStateAddr);
+            setRegU32(ctx, 5, 0u);
+            ps2_stubs::sceVif1PkOpenDirectCode(rdram.data(), &ctx, nullptr);
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, kStateAddr);
+            setRegU32(ctx, 5, 4u); // reserve one qword worth of GIF payload
+            ps2_stubs::sceVif1PkReserve(rdram.data(), &ctx, nullptr);
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, kStateAddr);
+            ps2_stubs::sceVif1PkCloseDirectCode(rdram.data(), &ctx, nullptr);
+
+            uint32_t directCmd = 0u;
+            std::memcpy(&directCmd, rdram.data() + kBaseAddr + 12u, sizeof(directCmd));
+            t.Equals(directCmd, 0x50000001u, "sceVif1PkCloseDirectCode should store a 1-QW DIRECT length");
         });
     });
 }

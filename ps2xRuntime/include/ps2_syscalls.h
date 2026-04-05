@@ -13,13 +13,19 @@ std::string translatePs2Path(const char *ps2Path);
 
 extern std::atomic<int> g_activeThreads;
 
-static std::mutex g_sys_fd_mutex;
+inline std::mutex g_sys_fd_mutex;
 
 namespace ps2_syscalls
 {
 #define PS2_DECLARE_SYSCALL(name) void name(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     PS2_SYSCALL_LIST(PS2_DECLARE_SYSCALL)
 #undef PS2_DECLARE_SYSCALL
+
+    void iDeleteSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void EnableIntcHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void DisableIntcHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void EnableDmacHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void DisableDmacHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
 
     bool dispatchNumericSyscall(uint32_t syscallNumber, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void dispatchDmacHandlersForCause(uint8_t *rdram, PS2Runtime *runtime, uint32_t cause);
@@ -28,6 +34,11 @@ namespace ps2_syscalls
     void notifyRuntimeStop();
     void joinAllGuestHostThreads();
     void detachAllGuestHostThreads();
+    void resetSoundDriverRpcState();
+    void setSoundDriverCompatLayout(const PS2SoundDriverCompatLayout &layout);
+    void clearSoundDriverCompatLayout();
+    void setDtxCompatLayout(const PS2DtxCompatLayout &layout);
+    void clearDtxCompatLayout();
     void EnsureVSyncWorkerRunning(uint8_t *rdram, PS2Runtime *runtime);
     uint64_t GetCurrentVSyncTick();
     uint64_t WaitForNextVSyncTick(uint8_t *rdram, PS2Runtime *runtime);
@@ -35,3 +46,4 @@ namespace ps2_syscalls
 }
 
 #endif // PS2_SYSCALLS_H
+
