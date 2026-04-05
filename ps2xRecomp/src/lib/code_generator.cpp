@@ -478,10 +478,10 @@ namespace ps2recomp
                 conditionStr = fmt::format("GPR_U64(ctx, {}) != GPR_U64(ctx, {})", rs_reg, rt_reg);
                 break;
             case OPCODE_BLEZ:
-                conditionStr = fmt::format("GPR_S32(ctx, {}) <= 0", rs_reg);
+                conditionStr = fmt::format("GPR_S64(ctx, {}) <= 0", rs_reg);
                 break;
             case OPCODE_BGTZ:
-                conditionStr = fmt::format("GPR_S32(ctx, {}) > 0", rs_reg);
+                conditionStr = fmt::format("GPR_S64(ctx, {}) > 0", rs_reg);
                 break;
             case OPCODE_BEQL:
                 conditionStr = fmt::format("GPR_U64(ctx, {}) == GPR_U64(ctx, {})", rs_reg, rt_reg);
@@ -490,40 +490,40 @@ namespace ps2recomp
                 conditionStr = fmt::format("GPR_U64(ctx, {}) != GPR_U64(ctx, {})", rs_reg, rt_reg);
                 break;
             case OPCODE_BLEZL:
-                conditionStr = fmt::format("GPR_S32(ctx, {}) <= 0", rs_reg);
+                conditionStr = fmt::format("GPR_S64(ctx, {}) <= 0", rs_reg);
                 break;
             case OPCODE_BGTZL:
-                conditionStr = fmt::format("GPR_S32(ctx, {}) > 0", rs_reg);
+                conditionStr = fmt::format("GPR_S64(ctx, {}) > 0", rs_reg);
                 break;
             case OPCODE_REGIMM:
                 switch (rt_reg)
                 {
                 case REGIMM_BLTZ:
-                    conditionStr = fmt::format("GPR_S32(ctx, {}) < 0", rs_reg);
+                    conditionStr = fmt::format("GPR_S64(ctx, {}) < 0", rs_reg);
                     break;
                 case REGIMM_BGEZ:
-                    conditionStr = fmt::format("GPR_S32(ctx, {}) >= 0", rs_reg);
+                    conditionStr = fmt::format("GPR_S64(ctx, {}) >= 0", rs_reg);
                     break;
                 case REGIMM_BLTZL:
-                    conditionStr = fmt::format("GPR_S32(ctx, {}) < 0", rs_reg);
+                    conditionStr = fmt::format("GPR_S64(ctx, {}) < 0", rs_reg);
                     break;
                 case REGIMM_BGEZL:
-                    conditionStr = fmt::format("GPR_S32(ctx, {}) >= 0", rs_reg);
+                    conditionStr = fmt::format("GPR_S64(ctx, {}) >= 0", rs_reg);
                     break;
                 case REGIMM_BLTZAL:
-                    conditionStr = fmt::format("GPR_S32(ctx, {}) < 0", rs_reg);
+                    conditionStr = fmt::format("GPR_S64(ctx, {}) < 0", rs_reg);
                     unconditionalLinkCode = fmt::format("SET_GPR_U32(ctx, 31, 0x{:X}u);", fallthroughPc);
                     break;
                 case REGIMM_BGEZAL:
-                    conditionStr = fmt::format("GPR_S32(ctx, {}) >= 0", rs_reg);
+                    conditionStr = fmt::format("GPR_S64(ctx, {}) >= 0", rs_reg);
                     unconditionalLinkCode = fmt::format("SET_GPR_U32(ctx, 31, 0x{:X}u);", fallthroughPc);
                     break;
                 case REGIMM_BLTZALL:
-                    conditionStr = fmt::format("GPR_S32(ctx, {}) < 0", rs_reg);
+                    conditionStr = fmt::format("GPR_S64(ctx, {}) < 0", rs_reg);
                     conditionalLinkCode = fmt::format("SET_GPR_U32(ctx, 31, 0x{:X}u);", fallthroughPc);
                     break;
                 case REGIMM_BGEZALL:
-                    conditionStr = fmt::format("GPR_S32(ctx, {}) >= 0", rs_reg);
+                    conditionStr = fmt::format("GPR_S64(ctx, {}) >= 0", rs_reg);
                     conditionalLinkCode = fmt::format("SET_GPR_U32(ctx, 31, 0x{:X}u);", fallthroughPc);
                     break;
                 default:
