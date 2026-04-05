@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <exception>
 #include <algorithm>
+#include <cstdlib>
 
 namespace
 {
@@ -132,7 +133,9 @@ int main(int argc, char *argv[])
 #ifdef _DEBUG
         ps2_log::print_saved_location();
 #endif
-        return 0;
+        std::cout.flush();
+        std::cerr.flush();
+        std::_Exit(0);
     }
     catch (const std::exception &e)
     {
@@ -143,5 +146,7 @@ int main(int argc, char *argv[])
         std::cerr << "[main] fatal exception: unknown" << std::endl;
     }
 
-    return 1;
+    std::cout.flush();
+    std::cerr.flush();
+    std::_Exit(1);
 }
