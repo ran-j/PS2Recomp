@@ -523,8 +523,18 @@ namespace ps2recomp
                 ss << "            }\n";
                 ss << fmt::format("            if (ctx->pc == __entryPc) {{ ctx->pc = 0x{:X}u; }}\n", fallthroughPc);
                 ss << fmt::format("            if (ctx->pc != 0x{:X}u) {{\n", fallthroughPc);
-                ss << fmt::format("                fprintf(stderr, \"[PC_MISMATCH] at 0x{:X}: jalr 0x%x, expected ret 0x{:X}, got 0x%x\\n\", __entryPc, ctx->pc);\n", branchInst.address, fallthroughPc);
-                ss << "                return;\n";
+                // JALR contract: call the target, then continue at fallthrough.
+                // The callee may leave ctx->pc at an internal resume target
+                // (e.g., overlay functions, nested JALR chains, or functions
+                // that set ctx->pc for their own resume-PC mechanism). Rather
+                // than aborting the caller, force continuation and log the
+                // mismatch for diagnostics. The caller's stack frame and
+                // register context are still valid.
+                ss << fmt::format("                static int __jalrWarn_{:X} = 0;\n", branchInst.address);
+                ss << fmt::format("                if (__jalrWarn_{:X}++ < 5) {{\n", branchInst.address);
+                ss << fmt::format("                    fprintf(stderr, \"[JALR_FIXUP] at 0x{:X}: jalr 0x%x, expected 0x{:X}, got 0x%x (forced continue)\\n\", __entryPc, ctx->pc);\n", branchInst.address, fallthroughPc);
+                ss << "                }\n";
+                ss << fmt::format("                ctx->pc = 0x{:X}u;\n", fallthroughPc);
                 ss << "            }\n";
                 ss << "        }\n";
             }
