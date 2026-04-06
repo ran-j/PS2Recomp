@@ -1640,10 +1640,12 @@ namespace ps2recomp
             case COP1_S_MUL:
                 return fmt::format("ctx->f[{}] = FPU_MUL_S(ctx->f[{}], ctx->f[{}]);", fd, fs, ft);
             case COP1_S_DIV:
+                // PS2 EE div.s: division by zero returns max float (0x7F7FFFFF) with sign preserved, not IEEE infinity
                 return fmt::format("if (ctx->f[{}] == 0.0f) {{ ctx->fcr31 |= 0x100000; /* DZ flag */ "
-                                   "ctx->f[{}] = copysignf(INFINITY, ctx->f[{}] * 0.0f); }} "
+                                   "uint32_t __sign = (std::bit_cast<uint32_t>(ctx->f[{}]) ^ std::bit_cast<uint32_t>(ctx->f[{}])) & 0x80000000u; "
+                                   "uint32_t __maxf = 0x7F7FFFFFu | __sign; ctx->f[{}] = std::bit_cast<float>(__maxf); }} "
                                    "else ctx->f[{}] = ctx->f[{}] / ctx->f[{}];",
-                                   ft, fd, fs, fd, fs, ft);
+                                   ft, fs, ft, fd, fd, fs, ft);
             case COP1_S_SQRT:
                 return fmt::format("ctx->f[{}] = FPU_SQRT_S(ctx->f[{}]);", fd, fs);
             case COP1_S_ABS:
@@ -1663,7 +1665,8 @@ namespace ps2recomp
             case COP1_S_CVT_W:
                 return fmt::format("{{ int32_t tmp = FPU_CVT_W_S(ctx->f[{}]); std::memcpy(&ctx->f[{}], &tmp, sizeof(tmp)); }}", fs, fd);
             case COP1_S_RSQRT:
-                return fmt::format("ctx->f[{}] = 1.0f / sqrtf(ctx->f[{}]);", fd, fs);
+                // PS2 EE rsqrt.s: fd = fs / sqrt(ft). Division by zero returns max float (0x7F7FFFFF) with sign preserved
+                return fmt::format("{{ float __sq = sqrtf(std::max(0.0f, ctx->f[{}])); if (__sq != 0.0f) {{ ctx->f[{}] = ctx->f[{}] / __sq; }} else {{ uint32_t __sign = std::bit_cast<uint32_t>(ctx->f[{}]) & 0x80000000u; uint32_t __maxf = 0x7F7FFFFFu | __sign; ctx->f[{}] = std::bit_cast<float>(__maxf); }} }}", ft, fd, fs, fs, fd);
             case COP1_S_ADDA:
                 return fmt::format("ctx->f[31] = FPU_ADD_S(ctx->f[{}], ctx->f[{}]);", fs, ft);
             case COP1_S_SUBA:
@@ -2881,7 +2884,8 @@ namespace ps2recomp
         uint8_t fs_reg = inst.rd;
         uint8_t ft_reg = inst.rt;
 
-        return fmt::format("{{ float fs = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))); float ft = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))); ctx->vu0_q = (ft != 0.0f) ? (fs / ft) : 0.0f; }}", fs_reg, fs_reg, fsf, ft_reg, ft_reg, ftf);
+        // PS2 VU0 vdiv: division by zero returns max float (0x7F7FFFFF) with sign preserved
+        return fmt::format("{{ float fs = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))); float ft = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))); if (ft != 0.0f) {{ ctx->vu0_q = fs / ft; }} else {{ uint32_t sign = (std::bit_cast<uint32_t>(fs) ^ std::bit_cast<uint32_t>(ft)) & 0x80000000u; uint32_t maxf = 0x7F7FFFFFu | sign; ctx->vu0_q = std::bit_cast<float>(maxf); }} }}", fs_reg, fs_reg, fsf, ft_reg, ft_reg, ftf);
     }
 
     std::string CodeGenerator::translateVU_VSQRT(const Instruction &inst)
@@ -2895,7 +2899,8 @@ namespace ps2recomp
     {
         uint8_t ftf = inst.vectorInfo.ftf;
         uint8_t ft_reg = inst.rt;
-        return fmt::format("{{ float ft = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))); ctx->vu0_q = (ft > 0.0f) ? (1.0f / sqrtf(ft)) : 0.0f; }}", ft_reg, ft_reg, ftf);
+        // PS2 VU0 vrsqrt: division by zero returns max float (0x7F7FFFFF)
+        return fmt::format("{{ float ft = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,0,0,{}))); if (ft > 0.0f) {{ ctx->vu0_q = 1.0f / sqrtf(ft); }} else {{ uint32_t maxf = 0x7F7FFFFFu; ctx->vu0_q = std::bit_cast<float>(maxf); }} }}", ft_reg, ft_reg, ftf);
     }
 
     std::string CodeGenerator::translateVU_VMTIR(const Instruction &inst)
