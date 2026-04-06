@@ -2364,9 +2364,32 @@ namespace ps2recomp
                                        inst.rt, inst.rt);
                 }
                 case VU0_S2_VMOVE:
-                    return fmt::format("ctx->vu0_vf[{}] = ctx->vu0_vf[{}];", inst.rt, inst.rd);
+                {
+                    uint8_t dest_mask = inst.vectorInfo.vectorField;
+                    if (dest_mask == 0xF) {
+                        return fmt::format("ctx->vu0_vf[{}] = ctx->vu0_vf[{}];", inst.rt, inst.rd);
+                    }
+                    return fmt::format("{{ __m128i mask = _mm_set_epi32({}, {}, {}, {}); "
+                                       "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _mm_castsi128_ps(mask)); }}",
+                                       (dest_mask & 0x1) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0,
+                                       (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x8) ? -1 : 0,
+                                       inst.rt, inst.rt, inst.rd);
+                }
                 case VU0_S2_VMR32:
-                    return fmt::format("ctx->vu0_vf[{}] = _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,3,2,1));", inst.rt, inst.rd, inst.rd);
+                {
+                    uint8_t dest_mask = inst.vectorInfo.vectorField;
+                    if (dest_mask == 0xF) {
+                        // All components — no blend needed
+                        return fmt::format("ctx->vu0_vf[{}] = _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,3,2,1));", inst.rt, inst.rd, inst.rd);
+                    }
+                    return fmt::format("{{ __m128 res = _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,3,2,1)); "
+                                       "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
+                                       "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
+                                       inst.rd, inst.rd,
+                                       (dest_mask & 0x1) ? -1 : 0, (dest_mask & 0x2) ? -1 : 0,
+                                       (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x8) ? -1 : 0,
+                                       inst.rt, inst.rt);
+                }
                 case VU0_S2_VCLIPw:
                 {
                     uint8_t field = inst.function & 0x3;
