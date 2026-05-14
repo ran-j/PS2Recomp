@@ -509,7 +509,6 @@ void register_ps2_runtime_expansion_tests()
         tc.Run("movie startup MPEG and audio stubs return safe progress values", [](TestCase &t)
         {
             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
-            ps2_stubs::clearMpegCompatLayout();
             ps2_stubs::resetMpegStubState();
             ps2_stubs::resetAudioStubState();
 
@@ -545,6 +544,47 @@ void register_ps2_runtime_expansion_tests()
             ps2_stubs::sceMpegIsEnd(rdram.data(), &secondIsEndCtx, nullptr);
             t.Equals(getRegS32(secondIsEndCtx, 2), 0,
                      "sceMpegIsEnd should keep the decode thread alive and let the guest stop playback");
+
+            constexpr uint32_t pssEndAddr = 0x00128000u;
+            constexpr uint32_t stackAddr = 0x00129000u;
+            const uint8_t programEnd[] = {0x00u, 0x00u, 0x01u, 0xB9u};
+            std::memcpy(rdram.data() + pssEndAddr, programEnd, sizeof(programEnd));
+            std::memcpy(rdram.data() + stackAddr + 0x10u, "\x04\x00\x00\x00", 4u);
+
+            R5900Context endDemuxCtx{};
+            setRegU32(endDemuxCtx, 29, stackAddr);
+            setRegU32(endDemuxCtx, 4, 0x00123000u);
+            setRegU32(endDemuxCtx, 5, pssEndAddr);
+            setRegU32(endDemuxCtx, 6, sizeof(programEnd));
+            setRegU32(endDemuxCtx, 7, pssEndAddr);
+            ps2_stubs::sceMpegDemuxPssRing(rdram.data(), &endDemuxCtx, nullptr);
+
+            R5900Context endIsEndCtx{};
+            setRegU32(endIsEndCtx, 4, 0x00123000u);
+            ps2_stubs::sceMpegIsEnd(rdram.data(), &endIsEndCtx, nullptr);
+            t.Equals(getRegS32(endIsEndCtx, 2), 1,
+                     "sceMpegIsEnd should report end after a demuxed MPEG program end code");
+
+            ps2_stubs::resetMpegStubState();
+            constexpr uint32_t wrappedEndBase = 0x0012A000u;
+            rdram[wrappedEndBase + 0u] = 0x00u;
+            rdram[wrappedEndBase + 1u] = 0x01u;
+            rdram[wrappedEndBase + 2u] = 0xB9u;
+            rdram[wrappedEndBase + 3u] = 0x00u;
+
+            R5900Context wrappedEndDemuxCtx{};
+            setRegU32(wrappedEndDemuxCtx, 4, 0x00123000u);
+            setRegU32(wrappedEndDemuxCtx, 5, wrappedEndBase + 3u);
+            setRegU32(wrappedEndDemuxCtx, 6, 4u);
+            setRegU32(wrappedEndDemuxCtx, 7, wrappedEndBase);
+            setRegU32(wrappedEndDemuxCtx, 8, 4u);
+            ps2_stubs::sceMpegDemuxPssRing(rdram.data(), &wrappedEndDemuxCtx, nullptr);
+
+            R5900Context wrappedEndIsEndCtx{};
+            setRegU32(wrappedEndIsEndCtx, 4, 0x00123000u);
+            ps2_stubs::sceMpegIsEnd(rdram.data(), &wrappedEndIsEndCtx, nullptr);
+            t.Equals(getRegS32(wrappedEndIsEndCtx, 2), 1,
+                     "sceMpegDemuxPssRing should use the ABI fifth argument in t0 for wrapped rings");
 
             R5900Context remoteInitCtx{};
             ps2_stubs::sceSdRemoteInit(rdram.data(), &remoteInitCtx, nullptr);

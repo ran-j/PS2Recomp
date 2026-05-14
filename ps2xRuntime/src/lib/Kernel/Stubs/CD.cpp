@@ -501,6 +501,17 @@ namespace ps2_stubs
             *err = ok ? 0 : g_lastCdError;
         }
 
+        static uint32_t s_stReadLogCount = 0u;
+        if (s_stReadLogCount < 16u)
+        {
+            std::cerr << "[sceCdStRead] sectors=" << sectors
+                      << " buf=0x" << std::hex << buf
+                      << " lbn=0x" << (g_cdStreamingLbn - (ok ? sectors : 0))
+                      << std::dec << " ok=" << ok
+                      << " bytes=" << bytes << std::endl;
+            ++s_stReadLogCount;
+        }
+
         setReturnS32(ctx, ok ? static_cast<int32_t>(sectors) : 0);
     }
 
@@ -529,6 +540,7 @@ namespace ps2_stubs
     void sceCdStStart(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         g_cdStreamingLbn = getRegU32(ctx, 4);
+        std::cerr << "[sceCdStStart] lbn=0x" << std::hex << g_cdStreamingLbn << std::dec << std::endl;
         setReturnS32(ctx, 1);
     }
 
