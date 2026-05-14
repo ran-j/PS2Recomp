@@ -12,7 +12,7 @@ include(FetchContent)
 FetchContent_Declare(
     elfio
     GIT_REPOSITORY https://github.com/serge1/ELFIO.git
-    GIT_TAG 7d30a22fc5aac06adfe7887ae57f3701b6b5f913
+    GIT_TAG Release_3.12
     GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(elfio)
@@ -20,7 +20,7 @@ FetchContent_MakeAvailable(elfio)
 FetchContent_Declare(
     toml11
     GIT_REPOSITORY https://github.com/ToruNiina/toml11.git
-    GIT_TAG master
+    GIT_TAG v4.4.0
 )
 FetchContent_MakeAvailable(toml11)
 
@@ -31,13 +31,6 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(fmt)
  
-FetchContent_Declare(
-    libdwarf
-    GIT_REPOSITORY https://github.com/davea42/libdwarf-code.git
-    GIT_TAG v2.2.0
-    GIT_SHALLOW TRUE
-)
-
 FetchContent_Declare(
     libdwarf
     GIT_REPOSITORY https://github.com/davea42/libdwarf-code.git

@@ -11,7 +11,7 @@
 #define PS2_AGRESSIVE_LOGS_ENABLED 0
 #endif
 
-#if defined(_DEBUG)
+#if defined(PS2_RUNTIME_LOGS) || defined(AGRESSIVE_LOGS)
 #define RUNTIME_LOG(x) do { std::cout << x; } while (0)
 #else
 #define RUNTIME_LOG(x) do {} while(0)
