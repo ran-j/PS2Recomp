@@ -1,5 +1,6 @@
 #include "Common.h"
 #include "CD.h"
+#include "MPEG.h"
 
 namespace ps2_stubs
 {
@@ -490,10 +491,14 @@ namespace ps2_stubs
             bytes = maxBytes;
         }
 
-        const bool ok = readCdSectors(g_cdStreamingLbn, sectors, rdram + offset, bytes);
+        const bool ok = (sectors > 0) && readCdSectors(g_cdStreamingLbn, sectors, rdram + offset, bytes);
         if (ok)
         {
             g_cdStreamingLbn += sectors;
+        }
+        else
+        {
+            notifyMpegCdStreamEof();
         }
 
         if (int32_t *err = reinterpret_cast<int32_t *>(getMemPtr(rdram, errAddr)); err)
@@ -540,7 +545,11 @@ namespace ps2_stubs
     void sceCdStStart(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         g_cdStreamingLbn = getRegU32(ctx, 4);
-        std::cerr << "[sceCdStStart] lbn=0x" << std::hex << g_cdStreamingLbn << std::dec << std::endl;
+
+        notifyMpegCdStreamStart();
+
+        std::cerr << "[sceCdStStart] lbn=0x" << std::hex << g_cdStreamingLbn
+                  << " endLbn=0x" << g_cdStreamingEndLbn << std::dec << std::endl;
         setReturnS32(ctx, 1);
     }
 
@@ -551,6 +560,7 @@ namespace ps2_stubs
 
     void sceCdStStop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        notifyMpegCdStreamEof();
         setReturnS32(ctx, 1);
     }
 

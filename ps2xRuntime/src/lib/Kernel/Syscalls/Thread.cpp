@@ -15,6 +15,26 @@ namespace ps2_syscalls
         }
     }
 
+    static void notifyThreadWaitObject(int waitType, int waitId)
+    {
+        if (waitType == TSW_SEMA)
+        {
+            auto sema = lookupSemaInfo(waitId);
+            if (sema)
+            {
+                sema->cv.notify_all();
+            }
+        }
+        else if (waitType == TSW_EVENT)
+        {
+            auto eventFlag = lookupEventFlagInfo(waitId);
+            if (eventFlag)
+            {
+                eventFlag->cv.notify_all();
+            }
+        }
+    }
+
     static void runExitHandlersForThread(int tid, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         if (!runtime || !ctx)
@@ -583,6 +603,8 @@ namespace ps2_syscalls
             return;
         }
 
+        int waitType = TSW_NONE;
+        int waitId = 0;
         {
             std::lock_guard<std::mutex> lock(info->m);
             if (info->status == THS_DORMANT)
@@ -590,10 +612,13 @@ namespace ps2_syscalls
                 setReturnS32(ctx, KE_DORMANT);
                 return;
             }
+            waitType = info->waitType;
+            waitId = info->waitId;
             info->terminated = true;
             info->forceRelease = true;
         }
         info->cv.notify_all();
+        notifyThreadWaitObject(waitType, waitId);
 
         if (tid == g_currentThreadId)
         {
@@ -1075,23 +1100,7 @@ namespace ps2_syscalls
         }
 
         info->cv.notify_all();
-
-        if (waitType == TSW_SEMA)
-        {
-            auto sema = lookupSemaInfo(waitId);
-            if (sema)
-            {
-                sema->cv.notify_all();
-            }
-        }
-        else if (waitType == TSW_EVENT)
-        {
-            auto eventFlag = lookupEventFlagInfo(waitId);
-            if (eventFlag)
-            {
-                eventFlag->cv.notify_all();
-            }
-        }
+        notifyThreadWaitObject(waitType, waitId);
         setReturnS32(ctx, KE_OK);
     }
 

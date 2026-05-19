@@ -1,13 +1,10 @@
-namespace
+struct ThreadExitException final : public std::exception
 {
-    struct ThreadExitException final : public std::exception
+    const char *what() const noexcept override
     {
-        const char *what() const noexcept override
-        {
-            return "PS2 Thread Exit";
-        }
-    };
-}
+        return "PS2 Thread Exit";
+    }
+};
 
 static void throwIfTerminated(const std::shared_ptr<ThreadInfo> &info)
 {
