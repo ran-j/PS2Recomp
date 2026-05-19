@@ -9,7 +9,7 @@ if(NOT DEFINED CMAKE_TOOLCHAIN_FILE AND DEFINED ENV{VITASDK})
     endif()
 endif()
 
-project("PS2 Retro X")
+project(PS2RetroX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 

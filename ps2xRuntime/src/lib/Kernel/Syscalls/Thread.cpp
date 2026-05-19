@@ -15,6 +15,26 @@ namespace ps2_syscalls
         }
     }
 
+    static void notifyThreadWaitObject(int waitType, int waitId)
+    {
+        if (waitType == TSW_SEMA)
+        {
+            auto sema = lookupSemaInfo(waitId);
+            if (sema)
+            {
+                sema->cv.notify_all();
+            }
+        }
+        else if (waitType == TSW_EVENT)
+        {
+            auto eventFlag = lookupEventFlagInfo(waitId);
+            if (eventFlag)
+            {
+                eventFlag->cv.notify_all();
+            }
+        }
+    }
+
     static void runExitHandlersForThread(int tid, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         if (!runtime || !ctx)
@@ -375,7 +395,7 @@ namespace ps2_syscalls
             {
                 uint32_t lastPc = 0xFFFFFFFFu;
                 uint32_t samePcCount = 0;
-                constexpr uint32_t kSamePcYieldMask = 0x3FFFu;
+                constexpr uint32_t kSamePcYieldMask = 0xFFu;
                 constexpr uint32_t kSamePcWarnInterval = 0x20000u;
                 uint64_t stepCount = 0u;
 
@@ -390,6 +410,7 @@ namespace ps2_syscalls
                     waitWhileSuspended(info, runtime);
 
                     const uint32_t pc = threadCtx->pc;
+                    info->currentPc.store(pc, std::memory_order_relaxed);
                     if (pc == 0u)
                     {
                         break;
@@ -410,14 +431,20 @@ namespace ps2_syscalls
                         ++samePcCount;
                         if ((samePcCount & kSamePcYieldMask) == 0u)
                         {
-                            std::this_thread::yield();
+                            std::this_thread::sleep_for(std::chrono::milliseconds(1));
                         }
-                        if ((samePcCount % kSamePcWarnInterval) == 0u)
+                        if (samePcCount > kSamePcWarnInterval)
                         {
-                            RUNTIME_LOG("[StartThread] id=" << tid
-                                      << " spinning at pc=0x" << std::hex << pc
-                                      << " ra=0x" << GPR_U32(threadCtx, 31)
-                                      << std::dec << std::endl);
+                            // If a thread is spinning for an extremely long time (e.g. idle thread),
+                            // force a 1ms sleep to prevent host CPU starvation.
+                            if ((samePcCount % (kSamePcWarnInterval * 8u)) == 0u)
+                            {
+                                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                            }
+                            else if ((samePcCount % (kSamePcWarnInterval)) == 0u)
+                            {
+                                std::this_thread::yield();
+                            }
                         }
                     }
                     else
@@ -576,6 +603,8 @@ namespace ps2_syscalls
             return;
         }
 
+        int waitType = TSW_NONE;
+        int waitId = 0;
         {
             std::lock_guard<std::mutex> lock(info->m);
             if (info->status == THS_DORMANT)
@@ -583,10 +612,13 @@ namespace ps2_syscalls
                 setReturnS32(ctx, KE_DORMANT);
                 return;
             }
+            waitType = info->waitType;
+            waitId = info->waitId;
             info->terminated = true;
             info->forceRelease = true;
         }
         info->cv.notify_all();
+        notifyThreadWaitObject(waitType, waitId);
 
         if (tid == g_currentThreadId)
         {
@@ -1068,23 +1100,7 @@ namespace ps2_syscalls
         }
 
         info->cv.notify_all();
-
-        if (waitType == TSW_SEMA)
-        {
-            auto sema = lookupSemaInfo(waitId);
-            if (sema)
-            {
-                sema->cv.notify_all();
-            }
-        }
-        else if (waitType == TSW_EVENT)
-        {
-            auto eventFlag = lookupEventFlagInfo(waitId);
-            if (eventFlag)
-            {
-                eventFlag->cv.notify_all();
-            }
-        }
+        notifyThreadWaitObject(waitType, waitId);
         setReturnS32(ctx, KE_OK);
     }
 

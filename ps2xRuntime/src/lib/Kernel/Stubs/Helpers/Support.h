@@ -26,6 +26,7 @@ namespace
     int32_t g_lastCdError = 0;
     uint32_t g_cdMode = 0;
     uint32_t g_cdStreamingLbn = 0;
+    uint32_t g_cdStreamingEndLbn = 0xFFFFFFFFu;
     bool g_cdInitialized = false;
 
     constexpr uint32_t kIopHeapBase = 0x01A00000;

@@ -639,11 +639,13 @@ private:
     std::unordered_map<uint32_t, RecompiledFunction> m_functionTable;
     std::atomic<bool> m_stopRequested{false};
 
+public:
     // TODO remove this later
     std::atomic<uint32_t> m_debugPc{0};
     std::atomic<uint32_t> m_debugRa{0};
     std::atomic<uint32_t> m_debugSp{0};
     std::atomic<uint32_t> m_debugGp{0};
+private:
 
     struct LoadedModule
     {

@@ -22,6 +22,7 @@ struct ThreadInfo
     int wakeupCount = 0;
     int currentPriority = 0;
     int suspendCount = 0;
+    std::atomic<uint32_t> currentPc{0};
 
     std::mutex m;
     std::condition_variable cv;

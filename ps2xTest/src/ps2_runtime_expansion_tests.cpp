@@ -11,6 +11,7 @@
 #include "runtime/ps2_gs_psmct32.h"
 #include "ps2_runtime_macros.h"
 #include "Stubs/MPEG.h"
+#include "Stubs/CD.h"
 #include "Stubs/Audio.h"
 #include "Stubs/GS.h"
 #include "Stubs/VU.h"
@@ -214,6 +215,37 @@ namespace
 
         gAsyncCallbackObservedSp.store(::getRegU32(ctx, 29), std::memory_order_release);
         gAsyncCallbackObservedGp.store(::getRegU32(ctx, 28), std::memory_order_release);
+        ctx->pc = 0u;
+    }
+
+    std::atomic<uint32_t> gMpegStreamCallbackCount{0u};
+    std::atomic<uint32_t> gMpegStreamCallbackMpeg{0u};
+    std::atomic<uint32_t> gMpegStreamCallbackType{0u};
+    std::atomic<uint32_t> gMpegStreamCallbackDataAddr{0u};
+    std::atomic<uint32_t> gMpegStreamCallbackLen{0u};
+    std::atomic<uint32_t> gMpegStreamCallbackUserData{0u};
+
+    void testRecordMpegStreamCallback(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
+    {
+        if (!rdram || !ctx)
+        {
+            return;
+        }
+
+        const uint32_t cbData = ::getRegU32(ctx, 5);
+        uint32_t type = 0u;
+        uint32_t dataAddr = 0u;
+        uint32_t len = 0u;
+        std::memcpy(&type, rdram + cbData + 0x00u, sizeof(type));
+        std::memcpy(&dataAddr, rdram + cbData + 0x08u, sizeof(dataAddr));
+        std::memcpy(&len, rdram + cbData + 0x0Cu, sizeof(len));
+
+        gMpegStreamCallbackMpeg.store(::getRegU32(ctx, 4), std::memory_order_release);
+        gMpegStreamCallbackType.store(type, std::memory_order_release);
+        gMpegStreamCallbackDataAddr.store(dataAddr, std::memory_order_release);
+        gMpegStreamCallbackLen.store(len, std::memory_order_release);
+        gMpegStreamCallbackUserData.store(::getRegU32(ctx, 6), std::memory_order_release);
+        gMpegStreamCallbackCount.fetch_add(1u, std::memory_order_acq_rel);
         ctx->pc = 0u;
     }
 
@@ -506,10 +538,192 @@ void register_ps2_runtime_expansion_tests()
                      "sceMpegInit should reset MPEG callback bookkeeping between runs");
         });
 
+        tc.Run("sceMpegDemuxPssRing dispatches registered video and audio stream callbacks", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            ps2_stubs::resetMpegStubState();
+
+            constexpr uint32_t kMpegAddr = 0x00123000u;
+            constexpr uint32_t kCallbackEntry = 0x00124000u;
+            constexpr uint32_t kVideoUserData = 0x11223344u;
+            constexpr uint32_t kAudioUserData = 0x55667788u;
+            constexpr uint32_t kVideoPacketAddr = 0x00128000u;
+            constexpr uint32_t kAudioPacketAddr = 0x00129000u;
+
+            runtime.registerFunction(kCallbackEntry, &testRecordMpegStreamCallback);
+
+            auto registerGenericCallback = [&](uint32_t callbackType, uint32_t userData)
+            {
+                R5900Context addCtx{};
+                setRegU32(addCtx, 4, kMpegAddr);
+                setRegU32(addCtx, 5, callbackType);
+                setRegU32(addCtx, 6, kCallbackEntry);
+                setRegU32(addCtx, 7, userData);
+                ps2_stubs::sceMpegAddCallback(rdram.data(), &addCtx, &runtime);
+            };
+
+            auto registerStreamCallback = [&](uint32_t streamType, uint32_t userData)
+            {
+                R5900Context addCtx{};
+                setRegU32(addCtx, 4, kMpegAddr);
+                setRegU32(addCtx, 5, streamType);
+                setRegU32(addCtx, 6, 0u);
+                setRegU32(addCtx, 7, kCallbackEntry);
+                setRegU32(addCtx, 8, userData);
+                ps2_stubs::sceMpegAddStrCallback(rdram.data(), &addCtx, &runtime);
+            };
+
+            auto writePesPacket = [&](uint32_t addr, uint8_t streamId, const std::vector<uint8_t> &payload)
+            {
+                const uint16_t packetLen = static_cast<uint16_t>(payload.size() + 3u);
+                std::vector<uint8_t> packet = {
+                    0x00u, 0x00u, 0x01u, streamId,
+                    static_cast<uint8_t>(packetLen >> 8u),
+                    static_cast<uint8_t>(packetLen & 0xFFu),
+                    0x80u, 0x00u, 0x00u};
+                packet.insert(packet.end(), payload.begin(), payload.end());
+                std::memcpy(rdram.data() + addr, packet.data(), packet.size());
+                return static_cast<uint32_t>(packet.size());
+            };
+
+            registerGenericCallback(0u, 0xDEAD0000u);
+            registerGenericCallback(2u, 0xDEAD0002u);
+            registerStreamCallback(0u, kVideoUserData);
+            registerStreamCallback(2u, kAudioUserData);
+
+            const std::vector<uint8_t> videoPayload = {
+                0x00u, 0x00u, 0x01u, 0xB3u, 0x14u, 0x00u, 0xF0u, 0x13u};
+            const uint32_t videoPacketSize = writePesPacket(kVideoPacketAddr, 0xE0u, videoPayload);
+
+            gMpegStreamCallbackCount.store(0u, std::memory_order_release);
+            R5900Context videoDemuxCtx{};
+            setRegU32(videoDemuxCtx, 4, kMpegAddr);
+            setRegU32(videoDemuxCtx, 5, kVideoPacketAddr);
+            setRegU32(videoDemuxCtx, 6, videoPacketSize);
+            setRegU32(videoDemuxCtx, 7, kVideoPacketAddr);
+            setRegU32(videoDemuxCtx, 8, videoPacketSize);
+            ps2_stubs::sceMpegDemuxPssRing(rdram.data(), &videoDemuxCtx, &runtime);
+
+            t.Equals(getRegS32(videoDemuxCtx, 2), static_cast<int32_t>(videoPacketSize),
+                     "sceMpegDemuxPssRing should consume the video PES packet");
+            t.Equals(gMpegStreamCallbackCount.load(std::memory_order_acquire), 1u,
+                     "registered video stream callback should be invoked");
+            t.Equals(gMpegStreamCallbackMpeg.load(std::memory_order_acquire), kMpegAddr,
+                     "video callback should receive the MPEG handle");
+            t.Equals(gMpegStreamCallbackType.load(std::memory_order_acquire), 0u,
+                     "video callback data should report M2V stream type");
+            t.Equals(gMpegStreamCallbackDataAddr.load(std::memory_order_acquire), kVideoPacketAddr + 9u,
+                     "video callback data should point at PES payload");
+            t.Equals(gMpegStreamCallbackLen.load(std::memory_order_acquire),
+                     static_cast<uint32_t>(videoPayload.size()),
+                     "video callback data should report PES payload length");
+            t.Equals(gMpegStreamCallbackUserData.load(std::memory_order_acquire), kVideoUserData,
+                     "video callback should receive registered user data");
+
+            const std::vector<uint8_t> audioPayload = {0x80u, 0x01u, 0x02u, 0x03u, 0x04u, 0x05u};
+            const uint32_t audioPacketSize = writePesPacket(kAudioPacketAddr, 0xBDu, audioPayload);
+
+            gMpegStreamCallbackCount.store(0u, std::memory_order_release);
+            R5900Context audioDemuxCtx{};
+            setRegU32(audioDemuxCtx, 4, kMpegAddr);
+            setRegU32(audioDemuxCtx, 5, kAudioPacketAddr);
+            setRegU32(audioDemuxCtx, 6, audioPacketSize);
+            setRegU32(audioDemuxCtx, 7, kAudioPacketAddr);
+            setRegU32(audioDemuxCtx, 8, audioPacketSize);
+            ps2_stubs::sceMpegDemuxPssRing(rdram.data(), &audioDemuxCtx, &runtime);
+
+            t.Equals(getRegS32(audioDemuxCtx, 2), static_cast<int32_t>(audioPacketSize),
+                     "sceMpegDemuxPssRing should consume the audio PES packet");
+            t.Equals(gMpegStreamCallbackCount.load(std::memory_order_acquire), 1u,
+                     "registered audio stream callback should be invoked");
+            t.Equals(gMpegStreamCallbackType.load(std::memory_order_acquire), 2u,
+                     "audio callback data should report PCM stream type");
+            t.Equals(gMpegStreamCallbackDataAddr.load(std::memory_order_acquire), kAudioPacketAddr + 9u,
+                     "audio callback data should point at PES payload");
+            t.Equals(gMpegStreamCallbackLen.load(std::memory_order_acquire),
+                     static_cast<uint32_t>(audioPayload.size()),
+                     "audio callback data should report PES payload length");
+            t.Equals(gMpegStreamCallbackUserData.load(std::memory_order_acquire), kAudioUserData,
+                     "audio callback should receive registered user data");
+
+            ps2_stubs::notifyMpegCdStreamEof();
+
+            gMpegStreamCallbackCount.store(0u, std::memory_order_release);
+            R5900Context afterEofDemuxCtx{};
+            setRegU32(afterEofDemuxCtx, 4, kMpegAddr);
+            setRegU32(afterEofDemuxCtx, 5, kVideoPacketAddr);
+            setRegU32(afterEofDemuxCtx, 6, videoPacketSize);
+            setRegU32(afterEofDemuxCtx, 7, kVideoPacketAddr);
+            setRegU32(afterEofDemuxCtx, 8, videoPacketSize);
+            ps2_stubs::sceMpegDemuxPssRing(rdram.data(), &afterEofDemuxCtx, &runtime);
+
+            t.Equals(getRegS32(afterEofDemuxCtx, 2), static_cast<int32_t>(videoPacketSize),
+                     "post-EOF demux should continue consuming caller data");
+            t.Equals(gMpegStreamCallbackCount.load(std::memory_order_acquire), 0u,
+                     "post-EOF demux should not feed callbacks again");
+
+            R5900Context resetCtx{};
+            setRegU32(resetCtx, 4, kMpegAddr);
+            ps2_stubs::sceMpegReset(rdram.data(), &resetCtx, &runtime);
+
+            gMpegStreamCallbackCount.store(0u, std::memory_order_release);
+            R5900Context afterResetDemuxCtx{};
+            setRegU32(afterResetDemuxCtx, 4, kMpegAddr);
+            setRegU32(afterResetDemuxCtx, 5, kVideoPacketAddr);
+            setRegU32(afterResetDemuxCtx, 6, videoPacketSize);
+            setRegU32(afterResetDemuxCtx, 7, kVideoPacketAddr);
+            setRegU32(afterResetDemuxCtx, 8, videoPacketSize);
+            ps2_stubs::sceMpegDemuxPssRing(rdram.data(), &afterResetDemuxCtx, &runtime);
+
+            t.Equals(getRegS32(afterResetDemuxCtx, 2), static_cast<int32_t>(videoPacketSize),
+                     "post-EOF reset demux should still drain caller data");
+            t.Equals(gMpegStreamCallbackCount.load(std::memory_order_acquire), 0u,
+                     "post-EOF reset demux should not restart callbacks on stale data");
+
+            ps2_stubs::notifyMpegCdStreamStart();
+
+            gMpegStreamCallbackCount.store(0u, std::memory_order_release);
+            R5900Context afterNewStreamDemuxCtx{};
+            setRegU32(afterNewStreamDemuxCtx, 4, kMpegAddr);
+            setRegU32(afterNewStreamDemuxCtx, 5, kVideoPacketAddr);
+            setRegU32(afterNewStreamDemuxCtx, 6, videoPacketSize);
+            setRegU32(afterNewStreamDemuxCtx, 7, kVideoPacketAddr);
+            setRegU32(afterNewStreamDemuxCtx, 8, videoPacketSize);
+            ps2_stubs::sceMpegDemuxPssRing(rdram.data(), &afterNewStreamDemuxCtx, &runtime);
+
+            t.Equals(getRegS32(afterNewStreamDemuxCtx, 2), static_cast<int32_t>(videoPacketSize),
+                     "new CD stream demux should reopen an ended MPEG handle");
+            t.Equals(gMpegStreamCallbackCount.load(std::memory_order_acquire), 1u,
+                     "new CD stream demux should allow callbacks on a reused MPEG handle");
+
+            constexpr uint32_t kMpegWorkAddr = 0x00130000u;
+            R5900Context createCtx{};
+            setRegU32(createCtx, 4, kMpegAddr);
+            setRegU32(createCtx, 5, kMpegWorkAddr);
+            setRegU32(createCtx, 6, 0x2000u);
+            ps2_stubs::sceMpegCreate(rdram.data(), &createCtx, &runtime);
+            t.IsTrue(::getRegU32(&createCtx, 2) != 0u,
+                     "sceMpegCreate should reopen the MPEG handle after an ended reset");
+
+            gMpegStreamCallbackCount.store(0u, std::memory_order_release);
+            R5900Context afterCreateDemuxCtx{};
+            setRegU32(afterCreateDemuxCtx, 4, kMpegAddr);
+            setRegU32(afterCreateDemuxCtx, 5, kVideoPacketAddr);
+            setRegU32(afterCreateDemuxCtx, 6, videoPacketSize);
+            setRegU32(afterCreateDemuxCtx, 7, kVideoPacketAddr);
+            setRegU32(afterCreateDemuxCtx, 8, videoPacketSize);
+            ps2_stubs::sceMpegDemuxPssRing(rdram.data(), &afterCreateDemuxCtx, &runtime);
+
+            t.Equals(gMpegStreamCallbackCount.load(std::memory_order_acquire), 1u,
+                     "new MPEG create should allow callbacks for the next stream");
+
+            runtime.requestStop();
+        });
+
         tc.Run("movie startup MPEG and audio stubs return safe progress values", [](TestCase &t)
         {
             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
-            ps2_stubs::clearMpegCompatLayout();
             ps2_stubs::resetMpegStubState();
             ps2_stubs::resetAudioStubState();
 
@@ -545,6 +759,78 @@ void register_ps2_runtime_expansion_tests()
             ps2_stubs::sceMpegIsEnd(rdram.data(), &secondIsEndCtx, nullptr);
             t.Equals(getRegS32(secondIsEndCtx, 2), 0,
                      "sceMpegIsEnd should keep the decode thread alive and let the guest stop playback");
+
+            constexpr uint32_t pssEndAddr = 0x00128000u;
+            constexpr uint32_t stackAddr = 0x00129000u;
+            const uint8_t programEnd[] = {0x00u, 0x00u, 0x01u, 0xB9u};
+            std::memcpy(rdram.data() + pssEndAddr, programEnd, sizeof(programEnd));
+            std::memcpy(rdram.data() + stackAddr + 0x10u, "\x04\x00\x00\x00", 4u);
+
+            R5900Context endDemuxCtx{};
+            setRegU32(endDemuxCtx, 29, stackAddr);
+            setRegU32(endDemuxCtx, 4, 0x00123000u);
+            setRegU32(endDemuxCtx, 5, pssEndAddr);
+            setRegU32(endDemuxCtx, 6, sizeof(programEnd));
+            setRegU32(endDemuxCtx, 7, pssEndAddr);
+            ps2_stubs::sceMpegDemuxPssRing(rdram.data(), &endDemuxCtx, nullptr);
+
+            R5900Context endIsEndCtx{};
+            setRegU32(endIsEndCtx, 4, 0x00123000u);
+            ps2_stubs::sceMpegIsEnd(rdram.data(), &endIsEndCtx, nullptr);
+            t.Equals(getRegS32(endIsEndCtx, 2), 1,
+                     "sceMpegIsEnd should report end after a demuxed MPEG program end code");
+
+            ps2_stubs::resetMpegStubState();
+            constexpr uint32_t wrappedEndBase = 0x0012A000u;
+            rdram[wrappedEndBase + 0u] = 0x00u;
+            rdram[wrappedEndBase + 1u] = 0x01u;
+            rdram[wrappedEndBase + 2u] = 0xB9u;
+            rdram[wrappedEndBase + 3u] = 0x00u;
+
+            R5900Context wrappedEndDemuxCtx{};
+            setRegU32(wrappedEndDemuxCtx, 4, 0x00123000u);
+            setRegU32(wrappedEndDemuxCtx, 5, wrappedEndBase + 3u);
+            setRegU32(wrappedEndDemuxCtx, 6, 4u);
+            setRegU32(wrappedEndDemuxCtx, 7, wrappedEndBase);
+            setRegU32(wrappedEndDemuxCtx, 8, 4u);
+            ps2_stubs::sceMpegDemuxPssRing(rdram.data(), &wrappedEndDemuxCtx, nullptr);
+
+            R5900Context wrappedEndIsEndCtx{};
+            setRegU32(wrappedEndIsEndCtx, 4, 0x00123000u);
+            ps2_stubs::sceMpegIsEnd(rdram.data(), &wrappedEndIsEndCtx, nullptr);
+            t.Equals(getRegS32(wrappedEndIsEndCtx, 2), 1,
+                     "sceMpegDemuxPssRing should use the ABI fifth argument in t0 for wrapped rings");
+
+            ps2_stubs::resetMpegStubState();
+            constexpr uint32_t eofMpegAddr = 0x0012B000u;
+            constexpr uint32_t eofPssAddr = 0x0012C000u;
+            const uint8_t incompletePssStart[] = {0x00u, 0x00u, 0x01u};
+            std::memcpy(rdram.data() + eofPssAddr, incompletePssStart, sizeof(incompletePssStart));
+
+            R5900Context eofDemuxCtx{};
+            setRegU32(eofDemuxCtx, 4, eofMpegAddr);
+            setRegU32(eofDemuxCtx, 5, eofPssAddr);
+            setRegU32(eofDemuxCtx, 6, sizeof(incompletePssStart));
+            setRegU32(eofDemuxCtx, 7, eofPssAddr);
+            setRegU32(eofDemuxCtx, 8, sizeof(incompletePssStart));
+            ps2_stubs::sceMpegDemuxPssRing(rdram.data(), &eofDemuxCtx, nullptr);
+            t.Equals(getRegS32(eofDemuxCtx, 2), static_cast<int32_t>(sizeof(incompletePssStart)),
+                     "sceMpegDemuxPssRing should accept partial trailing stream data");
+
+            R5900Context eofBeforeStopCtx{};
+            setRegU32(eofBeforeStopCtx, 4, eofMpegAddr);
+            ps2_stubs::sceMpegIsEnd(rdram.data(), &eofBeforeStopCtx, nullptr);
+            t.Equals(getRegS32(eofBeforeStopCtx, 2), 0,
+                     "sceMpegIsEnd should not report end until the CD stream terminates");
+
+            R5900Context cdStopCtx{};
+            ps2_stubs::sceCdStStop(rdram.data(), &cdStopCtx, nullptr);
+
+            R5900Context eofAfterStopCtx{};
+            setRegU32(eofAfterStopCtx, 4, eofMpegAddr);
+            ps2_stubs::sceMpegIsEnd(rdram.data(), &eofAfterStopCtx, nullptr);
+            t.Equals(getRegS32(eofAfterStopCtx, 2), 1,
+                     "sceCdStStop should finalize active MPEG playback so movie threads can advance");
 
             R5900Context remoteInitCtx{};
             ps2_stubs::sceSdRemoteInit(rdram.data(), &remoteInitCtx, nullptr);

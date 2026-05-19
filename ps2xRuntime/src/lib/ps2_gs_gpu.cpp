@@ -649,7 +649,12 @@ bool GS::copyFrameToHostRgbaUnlocked(const GSFrameReg &frame,
         return false;
     }
 
-    outPixels.assign(kHostFrameWidth * kHostFrameHeight * 4u, 0u);
+    outPixels.resize(kHostFrameWidth * kHostFrameHeight * 4u);
+    auto failCopy = [&outPixels]() -> bool
+    {
+        outPixels.clear();
+        return false;
+    };
 
     const uint32_t baseBytes = frameBaseIsPages ? (frame.fbp * 8192u) : (frame.fbp * 256u);
     const uint32_t basePtr = frameBaseIsPages ? GSInternal::framePageBaseToBlock(frame.fbp) : frame.fbp;
@@ -672,7 +677,7 @@ bool GS::copyFrameToHostRgbaUnlocked(const GSFrameReg &frame,
                     const uint32_t srcOff = GSPSMCT32::addrPSMCT32(basePtr, fbwBlocks, srcX, srcY);
                     if (srcOff + srcPixelBytes > m_vramSize)
                     {
-                        return false;
+                        return failCopy();
                     }
 
                     dstRow[x * 4u + 0u] = m_vram[srcOff + 0u];
@@ -696,7 +701,7 @@ bool GS::copyFrameToHostRgbaUnlocked(const GSFrameReg &frame,
                 const uint32_t srcOff = baseBytes + (srcY * strideBytes) + (srcX * srcPixelBytes);
                 if (srcOff + srcPixelBytes > m_vramSize)
                 {
-                    return false;
+                    return failCopy();
                 }
 
                 dstRow[x * 4u + 0u] = m_vram[srcOff + 0u];
@@ -724,7 +729,7 @@ bool GS::copyFrameToHostRgbaUnlocked(const GSFrameReg &frame,
                     const uint32_t srcOff = addrPSMCT16Family(basePtr, fbwBlocks, frame.psm, srcX, srcY);
                     if (srcOff + sizeof(uint16_t) > m_vramSize)
                     {
-                        return false;
+                        return failCopy();
                     }
 
                     uint16_t pixel = 0u;
@@ -752,7 +757,7 @@ bool GS::copyFrameToHostRgbaUnlocked(const GSFrameReg &frame,
                 const uint32_t srcOff = baseBytes + (srcY * strideBytes) + (srcX * 2u);
                 if (srcOff + sizeof(uint16_t) > m_vramSize)
                 {
-                    return false;
+                    return failCopy();
                 }
 
                 uint16_t pixel = 0u;
@@ -769,13 +774,29 @@ bool GS::copyFrameToHostRgbaUnlocked(const GSFrameReg &frame,
         return true;
     }
 
-    return false;
+    return failCopy();
 }
 
 void GS::latchHostPresentationFrame()
 {
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    latchHostPresentationFrameUnlocked();
+}
 
+bool GS::tryLatchHostPresentationFrame()
+{
+    if (!m_stateMutex.try_lock())
+    {
+        return false;
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(m_stateMutex, std::adopt_lock);
+    latchHostPresentationFrameUnlocked();
+    return true;
+}
+
+void GS::latchHostPresentationFrameUnlocked()
+{
     if (!m_privRegs || !m_vram || m_vramSize == 0u)
     {
         m_hostPresentationFrame.clear();
@@ -1075,7 +1096,7 @@ bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
         *outUsedPreferred = m_hostPresentationUsedPreferred;
 
     const size_t packedRowBytes = static_cast<size_t>(outWidth) * 4u;
-    outPixels.assign(packedRowBytes * static_cast<size_t>(outHeight), 0u);
+    outPixels.resize(packedRowBytes * static_cast<size_t>(outHeight));
     if (outWidth != 0u && outHeight != 0u)
     {
         const size_t sourceRowBytes = static_cast<size_t>(kHostFrameWidth) * 4u;

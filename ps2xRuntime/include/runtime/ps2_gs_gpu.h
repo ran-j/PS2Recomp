@@ -236,6 +236,7 @@ public:
     }
     bool getPreferredDisplaySource(GSFrameReg &outSource, uint32_t &outDestFbp) const;
     void latchHostPresentationFrame();
+    bool tryLatchHostPresentationFrame();
     bool copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
                                           uint32_t &outWidth,
                                           uint32_t &outHeight,
@@ -253,6 +254,7 @@ private:
     void snapshotVRAM();
     void writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi);
     void vertexKick(bool drawing);
+    void latchHostPresentationFrameUnlocked();
 
     void processImageData(const uint8_t *data, uint32_t sizeBytes);
     void performLocalToLocalTransfer();

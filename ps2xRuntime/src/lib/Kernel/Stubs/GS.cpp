@@ -1618,6 +1618,14 @@ namespace ps2_stubs
 
     void sceGsSyncV(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        static uint32_t s_syncVLogCount = 0u;
+        if (s_syncVLogCount < 32u)
+        {
+            std::cerr << "[sceGsSyncV:enter] pc=0x" << std::hex << ctx->pc
+                      << " ra=0x" << getRegU32(ctx, 31) << std::dec << std::endl;
+            ++s_syncVLogCount;
+        }
+
         const uint64_t tick = ps2_syscalls::WaitForNextVSyncTick(rdram, runtime);
         if (g_gparam.interlace != 0u)
         {
