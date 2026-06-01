@@ -161,90 +161,104 @@ else()
     target_link_libraries(ps2_host_backend INTERFACE raylib)
 endif()
 
-include(ExternalProject)
+if(WIN32)
+    include(ExternalProject)
 
-set(FFMPEG_PREBUILT_TAG  "n7.1-241205")
-set(FFMPEG_PREBUILT_URL
-    "https://github.com/System233/ffmpeg-msvc-prebuilt/releases/download/${FFMPEG_PREBUILT_TAG}/ffmpeg-${FFMPEG_PREBUILT_TAG}-lgpl-amd64-shared.zip")
+    set(FFMPEG_PREBUILT_TAG  "n7.1-241205")
+    set(FFMPEG_PREBUILT_URL
+        "https://github.com/System233/ffmpeg-msvc-prebuilt/releases/download/${FFMPEG_PREBUILT_TAG}/ffmpeg-${FFMPEG_PREBUILT_TAG}-lgpl-amd64-shared.zip")
 
-set(FFMPEG_PREFIX_DIR "${CMAKE_BINARY_DIR}/ThirdParty/ffmpeg-prefix")
-set(FFMPEG_SOURCE_DIR "${FFMPEG_PREFIX_DIR}/src/ffmpeg_external")
-set(FFMPEG_INCLUDE_DIR "${FFMPEG_SOURCE_DIR}/include")
-set(FFMPEG_LIB_DIR     "${FFMPEG_SOURCE_DIR}/bin")
-set(FFMPEG_BIN_DIR     "${FFMPEG_SOURCE_DIR}/bin")
+    set(FFMPEG_PREFIX_DIR "${CMAKE_BINARY_DIR}/ThirdParty/ffmpeg-prefix")
+    set(FFMPEG_SOURCE_DIR "${FFMPEG_PREFIX_DIR}/src/ffmpeg_external")
+    set(FFMPEG_INCLUDE_DIR "${FFMPEG_SOURCE_DIR}/include")
+    set(FFMPEG_LIB_DIR     "${FFMPEG_SOURCE_DIR}/bin")
+    set(FFMPEG_BIN_DIR     "${FFMPEG_SOURCE_DIR}/bin")
 
-ExternalProject_Add(ffmpeg_external
-    URL "${FFMPEG_PREBUILT_URL}"
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-    PREFIX "${FFMPEG_PREFIX_DIR}"
-    CONFIGURE_COMMAND ""
-    BUILD_COMMAND ""
-    INSTALL_COMMAND ""
-    BUILD_BYPRODUCTS
-        "${FFMPEG_LIB_DIR}/avcodec.lib"
-        "${FFMPEG_LIB_DIR}/avformat.lib"
-        "${FFMPEG_LIB_DIR}/avutil.lib"
-        "${FFMPEG_LIB_DIR}/swresample.lib"
-        "${FFMPEG_LIB_DIR}/swscale.lib"
-)
+    ExternalProject_Add(ffmpeg_external
+        URL "${FFMPEG_PREBUILT_URL}"
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        PREFIX "${FFMPEG_PREFIX_DIR}"
+        CONFIGURE_COMMAND ""
+        BUILD_COMMAND ""
+        INSTALL_COMMAND ""
+        BUILD_BYPRODUCTS
+            "${FFMPEG_LIB_DIR}/avcodec.lib"
+            "${FFMPEG_LIB_DIR}/avformat.lib"
+            "${FFMPEG_LIB_DIR}/avutil.lib"
+            "${FFMPEG_LIB_DIR}/swresample.lib"
+            "${FFMPEG_LIB_DIR}/swscale.lib"
+    )
 
-# --- imported targets (link against the .lib import libraries) ----------
-add_library(ffmpeg_avcodec STATIC IMPORTED GLOBAL)
-set_target_properties(ffmpeg_avcodec PROPERTIES
-    IMPORTED_LOCATION "${FFMPEG_LIB_DIR}/avcodec.lib"
-    INTERFACE_INCLUDE_DIRECTORIES "${FFMPEG_INCLUDE_DIR}"
-)
-add_dependencies(ffmpeg_avcodec ffmpeg_external)
+    # Link against the import libraries shipped with the Windows DLLs.
+    add_library(ffmpeg_avcodec STATIC IMPORTED GLOBAL)
+    set_target_properties(ffmpeg_avcodec PROPERTIES
+        IMPORTED_LOCATION "${FFMPEG_LIB_DIR}/avcodec.lib"
+        INTERFACE_INCLUDE_DIRECTORIES "${FFMPEG_INCLUDE_DIR}"
+    )
+    add_dependencies(ffmpeg_avcodec ffmpeg_external)
 
-add_library(ffmpeg_avformat STATIC IMPORTED GLOBAL)
-set_target_properties(ffmpeg_avformat PROPERTIES
-    IMPORTED_LOCATION "${FFMPEG_LIB_DIR}/avformat.lib"
-    INTERFACE_INCLUDE_DIRECTORIES "${FFMPEG_INCLUDE_DIR}"
-)
-add_dependencies(ffmpeg_avformat ffmpeg_external)
+    add_library(ffmpeg_avformat STATIC IMPORTED GLOBAL)
+    set_target_properties(ffmpeg_avformat PROPERTIES
+        IMPORTED_LOCATION "${FFMPEG_LIB_DIR}/avformat.lib"
+        INTERFACE_INCLUDE_DIRECTORIES "${FFMPEG_INCLUDE_DIR}"
+    )
+    add_dependencies(ffmpeg_avformat ffmpeg_external)
 
-add_library(ffmpeg_avutil STATIC IMPORTED GLOBAL)
-set_target_properties(ffmpeg_avutil PROPERTIES
-    IMPORTED_LOCATION "${FFMPEG_LIB_DIR}/avutil.lib"
-    INTERFACE_INCLUDE_DIRECTORIES "${FFMPEG_INCLUDE_DIR}"
-)
-add_dependencies(ffmpeg_avutil ffmpeg_external)
+    add_library(ffmpeg_avutil STATIC IMPORTED GLOBAL)
+    set_target_properties(ffmpeg_avutil PROPERTIES
+        IMPORTED_LOCATION "${FFMPEG_LIB_DIR}/avutil.lib"
+        INTERFACE_INCLUDE_DIRECTORIES "${FFMPEG_INCLUDE_DIR}"
+    )
+    add_dependencies(ffmpeg_avutil ffmpeg_external)
 
-add_library(ffmpeg_swresample STATIC IMPORTED GLOBAL)
-set_target_properties(ffmpeg_swresample PROPERTIES
-    IMPORTED_LOCATION "${FFMPEG_LIB_DIR}/swresample.lib"
-    INTERFACE_INCLUDE_DIRECTORIES "${FFMPEG_INCLUDE_DIR}"
-)
-add_dependencies(ffmpeg_swresample ffmpeg_external)
+    add_library(ffmpeg_swresample STATIC IMPORTED GLOBAL)
+    set_target_properties(ffmpeg_swresample PROPERTIES
+        IMPORTED_LOCATION "${FFMPEG_LIB_DIR}/swresample.lib"
+        INTERFACE_INCLUDE_DIRECTORIES "${FFMPEG_INCLUDE_DIR}"
+    )
+    add_dependencies(ffmpeg_swresample ffmpeg_external)
 
-add_library(ffmpeg_swscale STATIC IMPORTED GLOBAL)
-set_target_properties(ffmpeg_swscale PROPERTIES
-    IMPORTED_LOCATION "${FFMPEG_LIB_DIR}/swscale.lib"
-    INTERFACE_INCLUDE_DIRECTORIES "${FFMPEG_INCLUDE_DIR}"
-)
-add_dependencies(ffmpeg_swscale ffmpeg_external)
+    add_library(ffmpeg_swscale STATIC IMPORTED GLOBAL)
+    set_target_properties(ffmpeg_swscale PROPERTIES
+        IMPORTED_LOCATION "${FFMPEG_LIB_DIR}/swscale.lib"
+        INTERFACE_INCLUDE_DIRECTORIES "${FFMPEG_INCLUDE_DIR}"
+    )
+    add_dependencies(ffmpeg_swscale ffmpeg_external)
 
-add_library(ffmpeg INTERFACE)
-target_link_libraries(ffmpeg INTERFACE
-    ffmpeg_avcodec
-    ffmpeg_avformat
-    ffmpeg_avutil
-    ffmpeg_swresample
-    ffmpeg_swscale
-    bcrypt
-    secur32
-    ws2_32
-    user32
-    advapi32
-    ole32
-    shell32
-)
+    add_library(ffmpeg INTERFACE)
+    target_link_libraries(ffmpeg INTERFACE
+        ffmpeg_avcodec
+        ffmpeg_avformat
+        ffmpeg_avutil
+        ffmpeg_swresample
+        ffmpeg_swscale
+        bcrypt
+        secur32
+        ws2_32
+        user32
+        advapi32
+        ole32
+        shell32
+    )
 
-set(PS2X_FFMPEG_BIN_DIR "${FFMPEG_BIN_DIR}" CACHE INTERNAL "Directory containing FFmpeg runtime DLLs")
-set(PS2X_COPY_FFMPEG_DLLS_SCRIPT
-    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CopyFfmpegDlls.cmake"
-    CACHE INTERNAL
-    "Script used to stage FFmpeg runtime DLLs beside executables")
+    set(PS2X_FFMPEG_BIN_DIR "${FFMPEG_BIN_DIR}" CACHE INTERNAL "Directory containing FFmpeg runtime DLLs")
+    set(PS2X_COPY_FFMPEG_DLLS_SCRIPT
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CopyFfmpegDlls.cmake"
+        CACHE INTERNAL
+        "Script used to stage FFmpeg runtime DLLs beside executables")
+else()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET GLOBAL
+        libavcodec
+        libavformat
+        libavutil
+        libswresample
+        libswscale
+    )
+
+    add_library(ffmpeg INTERFACE)
+    target_link_libraries(ffmpeg INTERFACE PkgConfig::FFMPEG)
+endif()
 
 function(ps2x_stage_ffmpeg_runtime_dlls target_name)
     if(NOT WIN32)

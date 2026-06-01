@@ -498,6 +498,30 @@ namespace
         return false;
     }
 
+    bool findRegisteredCdFileForLbn(uint32_t lbn, CdFileEntry &entryOut)
+    {
+        for (const auto &[key, entry] : g_cdFilesByKey)
+        {
+            const uint32_t endLbn = entry.baseLbn + entry.sectors;
+            if (lbn >= entry.baseLbn && lbn < endLbn)
+            {
+                entryOut = entry;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    uint32_t cdStreamingEndLbnForStart(uint32_t lbn)
+    {
+        CdFileEntry entry{};
+        if (findRegisteredCdFileForLbn(lbn, entry))
+        {
+            return entry.baseLbn + entry.sectors;
+        }
+        return 0xFFFFFFFFu;
+    }
+
     bool writeCdSearchResult(uint8_t *rdram, uint32_t fileAddr, const std::string &ps2Path, const CdFileEntry &entry)
     {
         // sceCdlFILE layout: u32 lsn, u32 size, char name[16], u8 date[8]

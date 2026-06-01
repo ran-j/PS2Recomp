@@ -4,6 +4,11 @@
 
 namespace ps2_stubs
 {
+    namespace
+    {
+        uint32_t g_cdStReadTraceCount = 0u;
+    }
+
     void sceCdRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const uint32_t a0 = getRegU32(ctx, 4); // usually lbn
@@ -435,6 +440,7 @@ namespace ps2_stubs
         }
 
         g_cdStreamingLbn = resolvedEntry.baseLbn;
+        g_cdStreamingEndLbn = resolvedEntry.baseLbn + resolvedEntry.sectors;
         if (shouldTrace)
         {
             RUNTIME_LOG("[sceCdSearchFile:ok] path=\"" << sanitizeForLog(path)
@@ -449,6 +455,7 @@ namespace ps2_stubs
     void sceCdSeek(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         g_cdStreamingLbn = getRegU32(ctx, 4);
+        g_cdStreamingEndLbn = cdStreamingEndLbnForStart(g_cdStreamingLbn);
         setReturnS32(ctx, 1);
     }
 
@@ -479,25 +486,64 @@ namespace ps2_stubs
 
     void sceCdStRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        uint32_t sectors = getRegU32(ctx, 4);
+        uint32_t requestedSectors = getRegU32(ctx, 4);
+        uint32_t sectors = requestedSectors;
         uint32_t buf = getRegU32(ctx, 5);
         uint32_t errAddr = getRegU32(ctx, 7);
 
         uint32_t offset = buf & PS2_RAM_MASK;
-        size_t bytes = static_cast<size_t>(sectors) * kCdSectorSize;
+        size_t requestedBytes = static_cast<size_t>(requestedSectors) * kCdSectorSize;
         const size_t maxBytes = PS2_RAM_SIZE - offset;
+        if (requestedBytes > maxBytes)
+        {
+            requestedBytes = maxBytes;
+        }
+
+        bool hitStreamEnd = false;
+        if (g_cdStreamingEndLbn != 0xFFFFFFFFu)
+        {
+            if (g_cdStreamingLbn >= g_cdStreamingEndLbn)
+            {
+                sectors = 0u;
+                hitStreamEnd = true;
+            }
+            else
+            {
+                const uint32_t remaining = g_cdStreamingEndLbn - g_cdStreamingLbn;
+                if (sectors > remaining)
+                {
+                    sectors = remaining;
+                    hitStreamEnd = true;
+                }
+            }
+        }
+
+        size_t bytes = static_cast<size_t>(sectors) * kCdSectorSize;
         if (bytes > maxBytes)
         {
             bytes = maxBytes;
         }
 
-        const bool ok = (sectors > 0) && readCdSectors(g_cdStreamingLbn, sectors, rdram + offset, bytes);
+        const uint32_t readLbn = g_cdStreamingLbn;
+        const bool ok = (sectors > 0u) && readCdSectors(readLbn, sectors, rdram + offset, bytes);
         if (ok)
         {
             g_cdStreamingLbn += sectors;
+            if (requestedBytes > bytes)
+            {
+                std::memset(rdram + offset + bytes, 0, requestedBytes - bytes);
+            }
+            if (hitStreamEnd || g_cdStreamingLbn == g_cdStreamingEndLbn)
+            {
+                notifyMpegCdStreamEof();
+            }
         }
         else
         {
+            if (requestedBytes > 0u)
+            {
+                std::memset(rdram + offset, 0, requestedBytes);
+            }
             notifyMpegCdStreamEof();
         }
 
@@ -506,15 +552,16 @@ namespace ps2_stubs
             *err = ok ? 0 : g_lastCdError;
         }
 
-        static uint32_t s_stReadLogCount = 0u;
-        if (s_stReadLogCount < 16u)
+        if (g_cdStReadTraceCount < 32u)
         {
-            std::cerr << "[sceCdStRead] sectors=" << sectors
+            std::cerr << "[sceCdStRead] sectors=" << requestedSectors
+                      << " read=" << sectors
                       << " buf=0x" << std::hex << buf
-                      << " lbn=0x" << (g_cdStreamingLbn - (ok ? sectors : 0))
+                      << " lbn=0x" << readLbn
+                      << " end=0x" << g_cdStreamingEndLbn
                       << std::dec << " ok=" << ok
                       << " bytes=" << bytes << std::endl;
-            ++s_stReadLogCount;
+            ++g_cdStReadTraceCount;
         }
 
         setReturnS32(ctx, ok ? static_cast<int32_t>(sectors) : 0);
@@ -533,18 +580,22 @@ namespace ps2_stubs
     void sceCdStSeek(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         g_cdStreamingLbn = getRegU32(ctx, 4);
+        g_cdStreamingEndLbn = cdStreamingEndLbnForStart(g_cdStreamingLbn);
         setReturnS32(ctx, 1);
     }
 
     void sceCdStSeekF(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         g_cdStreamingLbn = getRegU32(ctx, 4);
+        g_cdStreamingEndLbn = cdStreamingEndLbnForStart(g_cdStreamingLbn);
         setReturnS32(ctx, 1);
     }
 
     void sceCdStStart(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         g_cdStreamingLbn = getRegU32(ctx, 4);
+        g_cdStreamingEndLbn = cdStreamingEndLbnForStart(g_cdStreamingLbn);
+        g_cdStReadTraceCount = 0u;
 
         notifyMpegCdStreamStart();
 
