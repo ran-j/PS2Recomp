@@ -173,6 +173,8 @@ namespace ps2recomp
         std::string outputPath;
         std::string ghidraMapPath;
         bool singleFileOutput = false;
+        bool lowMemoryMode = false;
+        uint32_t outputWorkerThreads = 0;
         bool patchSyscalls = false;
         bool patchCop0 = true;
         bool patchCache = true;

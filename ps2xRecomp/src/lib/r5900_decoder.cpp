@@ -13,7 +13,7 @@ namespace ps2recomp
     {
     }
 
-    Instruction R5900Decoder::decodeInstruction(uint32_t address, uint32_t rawInstruction) const
+    Instruction R5900Decoder::decodeInstruction(uint32_t address, uint32_t rawInstruction, bool includeDisassembly) const
     {
         Instruction inst;
 
@@ -177,12 +177,15 @@ namespace ps2recomp
             inst.vectorInfo.isVector = inst.isVU; // Only VU ops are truly vector
         }
 
-        size_t bufferSize = RabbitizerInstruction_getSizeForBuffer(&rabbitizerInst, 0, 0);
-        if (bufferSize > 0)
+        if (includeDisassembly)
         {
-            std::vector<char> buffer(bufferSize + 1, '\0');
-            RabbitizerInstruction_disassemble(&rabbitizerInst, buffer.data(), nullptr, 0, 0);
-            inst.disassembly = buffer.data();
+            size_t bufferSize = RabbitizerInstruction_getSizeForBuffer(&rabbitizerInst, 0, 0);
+            if (bufferSize > 0)
+            {
+                std::vector<char> buffer(bufferSize + 1, '\0');
+                RabbitizerInstruction_disassemble(&rabbitizerInst, buffer.data(), nullptr, 0, 0);
+                inst.disassembly = buffer.data();
+            }
         }
 
         RabbitizerInstructionR5900_destroy(&rabbitizerInst);

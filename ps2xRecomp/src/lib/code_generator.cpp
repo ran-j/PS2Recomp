@@ -3,6 +3,7 @@
 #include "ps2recomp/ps2_recompiler.h"
 #include "ps2recomp/types.h"
 #include "ps2_runtime_calls.h"
+#include "rabbitizer.h"
 #include <fmt/format.h>
 #include <sstream>
 #include <algorithm>
@@ -12,6 +13,7 @@
 #include <iostream>
 #include <cctype>
 #include <cmath>
+#include <vector>
 
 namespace ps2recomp
 {
@@ -109,6 +111,30 @@ namespace ps2recomp
         return kKeywords.contains(name);
     }
 
+    static std::string getInstructionDisassembly(const Instruction &inst)
+    {
+        if (!inst.disassembly.empty())
+        {
+            return inst.disassembly;
+        }
+
+        RabbitizerInstruction rabbitizerInst;
+        RabbitizerInstructionR5900_init(&rabbitizerInst, inst.raw, inst.address);
+        RabbitizerInstructionR5900_processUniqueId(&rabbitizerInst);
+
+        std::string disassembly;
+        const size_t bufferSize = RabbitizerInstruction_getSizeForBuffer(&rabbitizerInst, 0, 0);
+        if (bufferSize > 0)
+        {
+            std::vector<char> buffer(bufferSize + 1, '\0');
+            RabbitizerInstruction_disassemble(&rabbitizerInst, buffer.data(), nullptr, 0, 0);
+            disassembly = buffer.data();
+        }
+
+        RabbitizerInstructionR5900_destroy(&rabbitizerInst);
+        return disassembly;
+    }
+
     CodeGenerator::CodeGenerator(const std::vector<Symbol> &symbols, const std::vector<Section> &sections)
         : m_sections(sections)
     {
@@ -162,6 +188,11 @@ namespace ps2recomp
             std::sort(targets.begin(), targets.end());
             targets.erase(std::unique(targets.begin(), targets.end()), targets.end());
         }
+    }
+
+    void CodeGenerator::setEmitInstructionComments(bool emitInstructionComments)
+    {
+        m_emitInstructionComments = emitInstructionComments;
     }
 
     std::string CodeGenerator::getFunctionName(uint32_t address) const
@@ -223,11 +254,16 @@ namespace ps2recomp
         std::string delaySlotSuffix = "";
         if (hasValidDelaySlot) {
             delaySlotPrefix = "ctx->in_delay_slot = true; ctx->branch_pc = 0x" + fmt::format("{:X}", branchInst.address) + "u;\n        ";
-            delaySlotCode = "    // 0x" + fmt::format("{:x}", delaySlot.address) + ": 0x" + fmt::format("{:x}", delaySlot.raw);
-            if (!delaySlot.disassembly.empty()) {
-                delaySlotCode += "  " + delaySlot.disassembly;
+            if (m_emitInstructionComments)
+            {
+                delaySlotCode = "    // 0x" + fmt::format("{:x}", delaySlot.address) + ": 0x" + fmt::format("{:x}", delaySlot.raw);
+                std::string disassembly = getInstructionDisassembly(delaySlot);
+                if (!disassembly.empty()) {
+                    delaySlotCode += "  " + disassembly;
+                }
+                delaySlotCode += " (Delay Slot)\n        ";
             }
-            delaySlotCode += " (Delay Slot)\n        " + translateInstruction(delaySlot);
+            delaySlotCode += translateInstruction(delaySlot);
             delaySlotSuffix = "\n        ctx->in_delay_slot = false;";
         }
 
@@ -259,19 +295,17 @@ namespace ps2recomp
 
         std::vector<uint32_t> sortedInternalTargets;
         if (branchInst.opcode == OPCODE_SPECIAL &&
-            (branchInst.function == SPECIAL_JR || branchInst.function == SPECIAL_JALR) &&
+            ((branchInst.function == SPECIAL_JR && branchInst.rs != 31) ||
+             branchInst.function == SPECIAL_JALR) &&
             !internalTargets.empty())
         {
+            // Only emit local indirect-jump switches for jump tables we actually resolved.
+            // Falling back to every internal target here can duplicate huge switches at each
+            // indirect branch; unresolved fallback targets are registered as resumable entries
+            // instead, so runtime dispatch can re-enter this function at ctx->pc.
             auto jtIt = analysisResult.jumpTableTargets.find(branchInst.address);
             if (jtIt != analysisResult.jumpTableTargets.end()) {
                 sortedInternalTargets = jtIt->second;
-                std::sort(sortedInternalTargets.begin(), sortedInternalTargets.end());
-            } else {
-                sortedInternalTargets.reserve(internalTargets.size());
-                for (uint32_t t : internalTargets)
-                {
-                    sortedInternalTargets.push_back(t);
-                }
                 std::sort(sortedInternalTargets.begin(), sortedInternalTargets.end());
             }
         }
@@ -1010,6 +1044,9 @@ namespace ps2recomp
                     if (addr >= function.start && addr < function.end)
                     {
                         result.entryPoints.insert(addr);
+                        // Keep labels and runtime registration for unresolved indirect jumps
+                        // without emitting a local switch over every possible target.
+                        result.indirectFallbackEntryPoints.insert(addr);
                     }
                 }
             }
@@ -1093,11 +1130,15 @@ namespace ps2recomp
                 ss << "label_" << std::hex << inst.address << std::dec << ":\n";
             }
 
-            ss << "    // 0x" << std::hex << inst.address << ": 0x" << inst.raw << std::dec;
-            if (!inst.disassembly.empty()) {
-                ss << "  " << inst.disassembly;
+            if (m_emitInstructionComments)
+            {
+                ss << "    // 0x" << std::hex << inst.address << ": 0x" << inst.raw << std::dec;
+                std::string disassembly = getInstructionDisassembly(inst);
+                if (!disassembly.empty()) {
+                    ss << "  " << disassembly;
+                }
+                ss << "\n";
             }
-            ss << "\n";
 
             try
             {

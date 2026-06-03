@@ -39,6 +39,7 @@ namespace ps2recomp
             std::unordered_set<uint32_t> entryPoints;
             std::unordered_set<uint32_t> externalEntryPoints;
             std::unordered_set<uint32_t> resumeEntryPoints;
+            std::unordered_set<uint32_t> indirectFallbackEntryPoints;
             std::unordered_map<uint32_t, std::vector<uint32_t>> jumpTableTargets;
         };
 
@@ -52,6 +53,7 @@ namespace ps2recomp
         void setRelocationCallNames(const std::unordered_map<uint32_t, std::string> &callNames);
         void setConfiguredJumpTables(const std::vector<JumpTable> &jumpTables);
         void setResumeEntryTargets(const std::unordered_map<uint32_t, std::vector<uint32_t>> &resumeTargetsByOwner);
+        void setEmitInstructionComments(bool emitInstructionComments);
 
         AnalysisResult collectInternalBranchTargets(const Function &function,
                                                   const std::vector<Instruction> &instructions,
@@ -65,6 +67,7 @@ namespace ps2recomp
         std::unordered_map<uint32_t, std::vector<uint32_t>> m_resumeEntryTargetsByOwner;
         const std::vector<Section>& m_sections;
         BootstrapInfo m_bootstrapInfo;
+        bool m_emitInstructionComments = true;
 
         std::string translateInstruction(const Instruction &inst);
         std::string translateMMIInstruction(const Instruction &inst);
