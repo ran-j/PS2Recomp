@@ -38,6 +38,8 @@ void SetupFonts(AppSettings& settings) {
     }
 
     // Font atlas will be built automatically by the backend
+    // ImGui 1.90+ new renderer backend handles GPU upload automatically if we build the CPU texture
+    io.Fonts->Build();
 }
 
 void ApplyDarkTheme() {
@@ -159,6 +161,138 @@ void ApplyCustomTheme(AppSettings& settings) {
     colors[ImGuiCol_ButtonActive] = ImVec4(accent.x - 0.1f, accent.y - 0.1f, accent.z - 0.1f, accent.w);
 }
 
+void ApplyStylizedTheme() {
+    if (ImGui::GetCurrentContext() == nullptr) return;
+
+    ImGuiStyle& style = ImGui::GetStyle();
+    ImVec4* colors = style.Colors;
+
+    // Neon/Cyberpunk aesthetic
+    const ImVec4 bgBase       = ImVec4(0.06f, 0.05f, 0.07f, 1.00f);
+    const ImVec4 bgPanel      = ImVec4(0.10f, 0.09f, 0.12f, 1.00f);
+    const ImVec4 bgInput      = ImVec4(0.15f, 0.13f, 0.18f, 1.00f);
+    
+    // Vibrant Neon Accent (Cyan/Pink gradient vibe)
+    const ImVec4 accentMain   = ImVec4(0.00f, 0.85f, 0.85f, 1.00f); // Cyan
+    const ImVec4 accentHover  = ImVec4(0.95f, 0.20f, 0.60f, 1.00f); // Pink/Magenta
+    const ImVec4 accentActive = ImVec4(0.70f, 0.10f, 0.40f, 1.00f); 
+    
+    const ImVec4 textBright   = ImVec4(0.95f, 0.96f, 0.98f, 1.00f);
+    const ImVec4 textDim      = ImVec4(0.60f, 0.65f, 0.70f, 1.00f);
+
+    colors[ImGuiCol_Text]                   = textBright;
+    colors[ImGuiCol_TextDisabled]           = textDim;
+    colors[ImGuiCol_WindowBg]               = bgBase;
+    colors[ImGuiCol_ChildBg]                = bgPanel;
+    colors[ImGuiCol_PopupBg]                = ImVec4(0.08f, 0.07f, 0.09f, 0.98f);
+    colors[ImGuiCol_Border]                 = ImVec4(0.30f, 0.15f, 0.40f, 0.60f); // Purple tint border
+    colors[ImGuiCol_TitleBg]                = ImVec4(0.05f, 0.04f, 0.06f, 1.00f);
+    colors[ImGuiCol_TitleBgActive]          = ImVec4(0.15f, 0.08f, 0.25f, 1.00f);
+    colors[ImGuiCol_MenuBarBg]              = ImVec4(0.09f, 0.08f, 0.11f, 1.00f);
+    colors[ImGuiCol_ScrollbarBg]            = bgBase;
+    colors[ImGuiCol_ScrollbarGrab]          = ImVec4(0.30f, 0.20f, 0.40f, 1.00f);
+    colors[ImGuiCol_ScrollbarGrabHovered]   = accentHover;
+    colors[ImGuiCol_ScrollbarGrabActive]    = accentActive;
+    colors[ImGuiCol_CheckMark]              = accentMain;
+    colors[ImGuiCol_SliderGrab]             = accentMain;
+    colors[ImGuiCol_SliderGrabActive]       = accentActive;
+    colors[ImGuiCol_Button]                 = ImVec4(0.20f, 0.15f, 0.30f, 1.00f); // Purple tint button
+    colors[ImGuiCol_ButtonHovered]          = accentHover;
+    colors[ImGuiCol_ButtonActive]           = accentActive;
+    colors[ImGuiCol_Header]                 = ImVec4(0.20f, 0.15f, 0.30f, 1.00f);
+    colors[ImGuiCol_HeaderHovered]          = accentHover;
+    colors[ImGuiCol_HeaderActive]           = accentActive;
+    colors[ImGuiCol_FrameBg]                = bgInput;
+    colors[ImGuiCol_FrameBgHovered]         = ImVec4(0.25f, 0.20f, 0.35f, 1.00f);
+    colors[ImGuiCol_FrameBgActive]          = ImVec4(0.30f, 0.25f, 0.40f, 1.00f);
+    colors[ImGuiCol_Tab]                    = ImVec4(0.12f, 0.10f, 0.15f, 1.00f);
+    colors[ImGuiCol_TabHovered]             = accentHover;
+    colors[ImGuiCol_TabActive]              = accentMain;
+    colors[ImGuiCol_TabUnfocused]           = ImVec4(0.10f, 0.08f, 0.12f, 1.00f);
+    colors[ImGuiCol_TabUnfocusedActive]     = ImVec4(0.20f, 0.15f, 0.25f, 1.00f);
+    colors[ImGuiCol_DockingPreview]         = accentMain;
+    colors[ImGuiCol_DockingEmptyBg]         = bgBase;
+    colors[ImGuiCol_TextSelectedBg]         = ImVec4(accentHover.x, accentHover.y, accentHover.z, 0.50f);
+    colors[ImGuiCol_NavHighlight]           = accentMain;
+
+    // Stylized Rounding
+    style.WindowRounding    = 12.0f;
+    style.ChildRounding     = 10.0f;
+    style.FrameRounding     = 8.0f;
+    style.PopupRounding     = 10.0f;
+    style.ScrollbarRounding = 12.0f;
+    style.GrabRounding      = 8.0f;
+    style.TabRounding       = 8.0f;
+    style.WindowBorderSize  = 1.0f;
+    style.FrameBorderSize   = 1.0f;
+}
+
+void ApplyPS2ClassicTheme() {
+    if (ImGui::GetCurrentContext() == nullptr) return;
+
+    ImGuiStyle& style = ImGui::GetStyle();
+    ImVec4* colors = style.Colors;
+
+    // Classic PS2 BIOS aesthetic
+    const ImVec4 bgBase       = ImVec4(0.00f, 0.00f, 0.15f, 1.00f); // Deep navy blue
+    const ImVec4 bgPanel      = ImVec4(0.05f, 0.05f, 0.25f, 1.00f);
+    const ImVec4 bgInput      = ImVec4(0.10f, 0.10f, 0.35f, 1.00f);
+    
+    // PS2 Blue Accent
+    const ImVec4 accentMain   = ImVec4(0.30f, 0.60f, 0.95f, 1.00f); 
+    const ImVec4 accentHover  = ImVec4(0.40f, 0.70f, 1.00f, 1.00f); 
+    const ImVec4 accentActive = ImVec4(0.20f, 0.50f, 0.85f, 1.00f); 
+    
+    const ImVec4 textBright   = ImVec4(0.90f, 0.95f, 1.00f, 1.00f);
+    const ImVec4 textDim      = ImVec4(0.60f, 0.70f, 0.85f, 1.00f);
+
+    colors[ImGuiCol_Text]                   = textBright;
+    colors[ImGuiCol_TextDisabled]           = textDim;
+    colors[ImGuiCol_WindowBg]               = bgBase;
+    colors[ImGuiCol_ChildBg]                = bgPanel;
+    colors[ImGuiCol_PopupBg]                = ImVec4(0.02f, 0.02f, 0.18f, 0.98f);
+    colors[ImGuiCol_Border]                 = accentMain;
+    colors[ImGuiCol_TitleBg]                = ImVec4(0.02f, 0.02f, 0.20f, 1.00f);
+    colors[ImGuiCol_TitleBgActive]          = ImVec4(0.05f, 0.05f, 0.30f, 1.00f);
+    colors[ImGuiCol_MenuBarBg]              = ImVec4(0.05f, 0.05f, 0.25f, 1.00f);
+    colors[ImGuiCol_ScrollbarBg]            = bgBase;
+    colors[ImGuiCol_ScrollbarGrab]          = ImVec4(0.20f, 0.30f, 0.60f, 1.00f);
+    colors[ImGuiCol_ScrollbarGrabHovered]   = accentHover;
+    colors[ImGuiCol_ScrollbarGrabActive]    = accentActive;
+    colors[ImGuiCol_CheckMark]              = accentMain;
+    colors[ImGuiCol_SliderGrab]             = accentMain;
+    colors[ImGuiCol_SliderGrabActive]       = accentActive;
+    colors[ImGuiCol_Button]                 = ImVec4(0.15f, 0.20f, 0.40f, 1.00f);
+    colors[ImGuiCol_ButtonHovered]          = accentHover;
+    colors[ImGuiCol_ButtonActive]           = accentActive;
+    colors[ImGuiCol_Header]                 = ImVec4(0.15f, 0.20f, 0.40f, 1.00f);
+    colors[ImGuiCol_HeaderHovered]          = accentHover;
+    colors[ImGuiCol_HeaderActive]           = accentActive;
+    colors[ImGuiCol_FrameBg]                = bgInput;
+    colors[ImGuiCol_FrameBgHovered]         = ImVec4(0.20f, 0.20f, 0.45f, 1.00f);
+    colors[ImGuiCol_FrameBgActive]          = ImVec4(0.25f, 0.25f, 0.50f, 1.00f);
+    colors[ImGuiCol_Tab]                    = ImVec4(0.08f, 0.08f, 0.28f, 1.00f);
+    colors[ImGuiCol_TabHovered]             = accentHover;
+    colors[ImGuiCol_TabActive]              = accentMain;
+    colors[ImGuiCol_TabUnfocused]           = ImVec4(0.05f, 0.05f, 0.25f, 1.00f);
+    colors[ImGuiCol_TabUnfocusedActive]     = ImVec4(0.10f, 0.10f, 0.30f, 1.00f);
+    colors[ImGuiCol_DockingPreview]         = accentMain;
+    colors[ImGuiCol_DockingEmptyBg]         = bgBase;
+    colors[ImGuiCol_TextSelectedBg]         = ImVec4(accentHover.x, accentHover.y, accentHover.z, 0.50f);
+    colors[ImGuiCol_NavHighlight]           = accentMain;
+
+    // Rigid edges to fit early 2000s style
+    style.WindowRounding    = 0.0f;
+    style.ChildRounding     = 0.0f;
+    style.FrameRounding     = 0.0f;
+    style.PopupRounding     = 0.0f;
+    style.ScrollbarRounding = 0.0f;
+    style.GrabRounding      = 0.0f;
+    style.TabRounding       = 0.0f;
+    style.WindowBorderSize  = 1.0f;
+    style.FrameBorderSize   = 1.0f;
+}
+
 void ApplyTheme(ThemeMode mode, AppSettings& settings) {
     if (ImGui::GetCurrentContext() == nullptr) return;
 
@@ -197,6 +331,12 @@ void ApplyTheme(ThemeMode mode, AppSettings& settings) {
         case ThemeMode::Custom:
             ApplyDarkTheme();
             ApplyCustomTheme(settings);
+            break;
+        case ThemeMode::Stylized:
+            ApplyStylizedTheme();
+            break;
+        case ThemeMode::PS2Classic:
+            ApplyPS2ClassicTheme();
             break;
     }
 }

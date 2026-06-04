@@ -7,5 +7,6 @@ namespace StyleManager {
     void ApplyDarkTheme();
     void ApplyLightTheme();
     void ApplyCustomTheme(AppSettings& settings);
+    void ApplyStylizedTheme();
     void SetupFonts(AppSettings& settings);
 }

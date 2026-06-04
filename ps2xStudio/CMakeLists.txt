@@ -37,23 +37,18 @@ FetchContent_Declare(
 )
 
 FetchContent_Declare(
-    SDL2
-    GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
-    GIT_TAG        release-2.32.10
+    rlImGui
+    GIT_REPOSITORY https://github.com/raylib-extras/rlImGui.git
+    GIT_TAG        main
     GIT_SHALLOW    TRUE
 )
 
-set(SDL_SHARED ON  CACHE BOOL "" FORCE)
-set(SDL_STATIC OFF CACHE BOOL "" FORCE)
-
-FetchContent_MakeAvailable(imgui imgui_colortextedit imgui_club SDL2)
+FetchContent_MakeAvailable(imgui imgui_colortextedit imgui_club rlImGui)
 
 FetchContent_GetProperties(imgui_file_dialog)
 if(NOT imgui_file_dialog_POPULATED)
     FetchContent_Populate(imgui_file_dialog)
 endif()
-
-find_package(OpenGL REQUIRED)
 
 set(IMGUI_SOURCES
     ${imgui_SOURCE_DIR}/imgui.cpp
@@ -61,8 +56,7 @@ set(IMGUI_SOURCES
     ${imgui_SOURCE_DIR}/imgui_tables.cpp
     ${imgui_SOURCE_DIR}/imgui_widgets.cpp
     ${imgui_SOURCE_DIR}/imgui_demo.cpp
-    ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl2.cpp
-    ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
+    ${rlimgui_SOURCE_DIR}/rlImGui.cpp
 )
 
 add_library(imgui_lib STATIC ${IMGUI_SOURCES})
@@ -70,9 +64,10 @@ add_library(imgui_lib STATIC ${IMGUI_SOURCES})
 target_include_directories(imgui_lib PUBLIC
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
+    ${rlimgui_SOURCE_DIR}
 )
 
-target_link_libraries(imgui_lib PUBLIC SDL2::SDL2 OpenGL::GL)
+target_link_libraries(imgui_lib PUBLIC raylib)
 
 add_library(imgui_colortextedit_lib STATIC
     ${imgui_colortextedit_SOURCE_DIR}/TextEditor.cpp
@@ -111,6 +106,7 @@ target_include_directories(ps2xStudio PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../ps2xAnalyzer/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../ps2xRecomp/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../ps2xTest/include
+    ${rlimgui_SOURCE_DIR}
 )
 
 target_link_libraries(ps2xStudio PRIVATE
@@ -121,13 +117,8 @@ target_link_libraries(ps2xStudio PRIVATE
     ps2_recomp_lib
     ps2_analyzer_lib
     ps2_test_lib
-    SDL2::SDL2
-    OpenGL::GL
+    raylib
 )
-
-if(WIN32)
-    target_link_libraries(ps2xStudio PRIVATE SDL2::SDL2main)
-endif()
 
 include("${CMAKE_SOURCE_DIR}/ps2xRuntime/cmake/ReleaseMode.cmake")
 

@@ -17,6 +17,7 @@ static TextEditor ghidra_editor;
 static TextEditor log_editor;  // TextEditor for logs - supports text selection
 static bool editors_initialized = false;
 static bool show_settings_window = false;
+static bool show_manual_window = false;
 static bool config_editor_needs_sync = false;
 static size_t last_log_version = 0;
 static bool s_wantsQuit = false;
@@ -70,6 +71,30 @@ bool GUI::WantsQuit() {
     return s_wantsQuit;
 }
 
+// ---- Manual Window ----
+static void DrawManualWindow() {
+    if (!show_manual_window) return;
+
+    ImGui::SetNextWindowSize(ImVec2(600, 400), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("User Manual", &show_manual_window)) {
+        ImGui::TextWrapped("Welcome to ps2xStudio! This professional recompilation suite is designed to translate PS2 ELF binaries into native C++ code.");
+        ImGui::Spacing();
+        ImGui::BulletText("1. Open an ELF file using 'File -> Open ELF...'.");
+        ImGui::BulletText("2. Click 'Run Analysis' to disassemble and analyze the binary.");
+        ImGui::BulletText("3. Use the Explorer to navigate functions. Apply overrides (Stub, Skip, Force Recompile) in the Inspector.");
+        ImGui::BulletText("4. Set your output directory via 'File -> Set Output Directory...'.");
+        ImGui::BulletText("5. Click 'Recompile' (or press F7) to generate the C++ source files.");
+        ImGui::Spacing();
+        ImGui::TextWrapped("The config.toml file manages your overrides, memory map, and patches. You can manually edit it in the 'config.toml' tab and it will sync automatically when you save.");
+        
+        ImGui::Spacing();
+        if (ImGui::Button("Close", ImVec2(100, 0))) {
+            show_manual_window = false;
+        }
+    }
+    ImGui::End();
+}
+
 // ---- Settings Window ----
 static void DrawSettingsWindow(StudioState& state) {
     if (!show_settings_window) return;
@@ -78,9 +103,9 @@ static void DrawSettingsWindow(StudioState& state) {
     if (ImGui::Begin("Settings", &show_settings_window)) {
 
         if (ImGui::CollapsingHeader("Theme", ImGuiTreeNodeFlags_DefaultOpen)) {
-            const char* themes[] = { "Dark", "Light", "Custom" };
+            const char* themes[] = { "Dark", "Light", "Custom", "Stylized", "PS2Classic" };
             int current = static_cast<int>(state.settings.theme);
-            if (ImGui::Combo("Theme Mode", &current, themes, 3)) {
+            if (ImGui::Combo("Theme Mode", &current, themes, 5)) {
                 state.settings.theme = static_cast<ThemeMode>(current);
                 StyleManager::ApplyTheme(state.settings.theme, state.settings);
             }
@@ -127,6 +152,7 @@ static void DrawSettingsWindow(StudioState& state) {
 
         if (ImGui::CollapsingHeader("Window", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Checkbox("Start Maximized", &state.settings.maximized);
+            ImGui::Checkbox("Show First-Run Hints", &state.settings.showHints);
             ImGui::SliderInt("Default Width", &state.settings.windowWidth, 800, 3840);
             ImGui::SliderInt("Default Height", &state.settings.windowHeight, 600, 2160);
         }
@@ -322,8 +348,15 @@ void GUI::DrawStudio(StudioState& state) {
         }
 
         if (ImGui::BeginMenu("Settings")) {
-            if (ImGui::MenuItem("Open Settings Window")) {
+            if (ImGui::MenuItem("Preferences")) {
                 show_settings_window = true;
+            }
+            ImGui::EndMenu();
+        }
+
+        if (ImGui::BeginMenu("Help")) {
+            if (ImGui::MenuItem("User Manual")) {
+                show_manual_window = true;
             }
             ImGui::EndMenu();
         }
@@ -364,6 +397,7 @@ void GUI::DrawStudio(StudioState& state) {
     }
 
     DrawSettingsWindow(state);
+    DrawManualWindow();
 
     // ---- Explorer Panel ----
     ImGui::Begin("Explorer");
@@ -738,5 +772,43 @@ void GUI::DrawStudio(StudioState& state) {
     // Log viewer using TextEditor - supports text selection, Ctrl+A, Ctrl+C, mouse drag
     log_editor.Render("LogEditor");
 
+    ImGui::End();
+
+    // ---- First-Run Hints Overlay ----
+    if (state.settings.showHints) {
+        ImGuiWindowFlags hintFlags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
+        ImGui::SetNextWindowPos(ImVec2(ImGui::GetMainViewport()->WorkPos.x + 20, ImGui::GetMainViewport()->WorkPos.y + 40), ImGuiCond_Appearing);
+        ImGui::SetNextWindowBgAlpha(0.75f);
+        if (ImGui::Begin("FirstRunHints", nullptr, hintFlags)) {
+            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "Welcome to ps2xStudio!");
+            ImGui::Separator();
+            ImGui::Text("1. Start by going to File -> Open ELF...");
+            ImGui::Text("2. Click 'Run Analysis' to disassemble the code.");
+            ImGui::Text("3. Change overrides in the Inspector for each function.");
+            ImGui::Text("4. Press F7 to Recompile your C++ code.");
+            ImGui::Separator();
+            if (ImGui::Button("Got it! (Don't show again)")) {
+                state.settings.showHints = false;
+                state.SaveSettings();
+            }
+        }
+        ImGui::End();
+    }
+
+    // ---- Watermark ----
+    ImGuiWindowFlags watermarkFlags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoBackground;
+    const float PAD = 10.0f;
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImVec2 work_pos = viewport->WorkPos;
+    ImVec2 work_size = viewport->WorkSize;
+    ImVec2 window_pos, window_pos_pivot;
+    window_pos.x = (work_pos.x + work_size.x - PAD);
+    window_pos.y = (work_pos.y + work_size.y - PAD);
+    window_pos_pivot.x = 1.0f;
+    window_pos_pivot.y = 1.0f;
+    ImGui::SetNextWindowPos(window_pos, ImGuiCond_Always, window_pos_pivot);
+    if (ImGui::Begin("Watermark", nullptr, watermarkFlags)) {
+        ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 0.2f), "made by Blackline Interactive");
+    }
     ImGui::End();
 }

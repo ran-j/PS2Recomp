@@ -1,27 +1,21 @@
 #include "imgui.h"
-#include "imgui_impl_sdl2.h"
-#include "imgui_impl_opengl3.h"
-#include <SDL.h>
-#include <SDL_opengl.h>
+#include "rlImGui.h"
+#include "raylib.h"
 #include "GUI.hpp"
 #include "StudioState.hpp"
+#include <fstream>
+#include <string>
 
 int main(int argc, char** argv) {
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) return -1;
-
-    SDL_DisplayMode displayMode;
-    SDL_GetCurrentDisplayMode(0, &displayMode);
-
-    int screenWidth = displayMode.w;
-    int screenHeight = displayMode.h;
+    // Basic initialization for reading monitor size
+    InitWindow(800, 600, "PS2Recomp Studio Initializing");
+    int screenWidth = GetMonitorWidth(GetCurrentMonitor());
+    int screenHeight = GetMonitorHeight(GetCurrentMonitor());
+    CloseWindow();
 
     int windowWidth = (int)(screenWidth * 0.8f);
     int windowHeight = (int)(screenHeight * 0.8f);
-
-    SDL_WindowFlags window_flags = (SDL_WindowFlags)(
-        SDL_WINDOW_OPENGL |
-        SDL_WINDOW_RESIZABLE
-    );
+    bool maximized = false;
 
     // Pre-load window settings before StudioState construction
     AppSettings tempSettings;
@@ -48,32 +42,23 @@ int main(int argc, char** argv) {
     } catch(...) {}
 
     if (tempSettings.maximized) {
-        window_flags = (SDL_WindowFlags)(window_flags | SDL_WINDOW_MAXIMIZED);
+        maximized = true;
     } else {
         windowWidth = tempSettings.windowWidth;
         windowHeight = tempSettings.windowHeight;
     }
 
-    SDL_Window* window = SDL_CreateWindow(
-        "PS2Recomp Studio",
-        SDL_WINDOWPOS_CENTERED,
-        SDL_WINDOWPOS_CENTERED,
-        windowWidth,
-        windowHeight,
-        window_flags
-    );
-
-    if (!window) {
-        SDL_Quit();
-        return -1;
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
+    if (maximized) {
+        SetConfigFlags(FLAG_WINDOW_MAXIMIZED);
     }
+    
+    InitWindow(windowWidth, windowHeight, "PS2Recomp Studio");
+    SetTargetFPS(60);
 
-    SDL_GLContext gl_context = SDL_GL_CreateContext(window);
-    SDL_GL_MakeCurrent(window, gl_context);
-    SDL_GL_SetSwapInterval(1);
+    // Setup rlImGui
+    rlImGuiSetup(true);
 
-    IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 
@@ -83,62 +68,47 @@ int main(int argc, char** argv) {
     // Initial font and theme setup
     GUI::ApplySettings(state);
 
-    ImGui_ImplSDL2_InitForOpenGL(window, gl_context);
-    ImGui_ImplOpenGL3_Init("#version 130");
-
     if (argc > 1) {
         state.StartAnalysis(argv[1]);
     }
 
-    bool done = false;
-    while (!done) {
-        SDL_Event event;
-        while (SDL_PollEvent(&event)) {
-            ImGui_ImplSDL2_ProcessEvent(&event);
-            if (event.type == SDL_QUIT) {
-                done = true;
-            }
-            if (event.type == SDL_WINDOWEVENT) {
-                if (event.window.event == SDL_WINDOWEVENT_RESIZED) {
-                    state.settings.windowWidth = event.window.data1;
-                    state.settings.windowHeight = event.window.data2;
-                }
-                if (event.window.event == SDL_WINDOWEVENT_MAXIMIZED) {
-                    state.settings.maximized = true;
-                }
-                if (event.window.event == SDL_WINDOWEVENT_RESTORED) {
-                    state.settings.maximized = false;
-                }
-            }
+    while (!WindowShouldClose()) {
+        // Track window events
+        if (IsWindowResized()) {
+            state.settings.windowWidth = GetScreenWidth();
+            state.settings.windowHeight = GetScreenHeight();
         }
+        if (IsWindowMaximized()) {
+            state.settings.maximized = true;
+        }
+        if (!IsWindowMaximized() && maximized) { // simplified transition tracking
+            state.settings.maximized = false;
+        }
+        maximized = IsWindowMaximized();
 
         // Check GUI quit request (File > Exit)
         if (GUI::WantsQuit()) {
-            done = true;
+            break;
         }
 
         // CRITICAL: Handle deferred font rebuild BEFORE NewFrame
-        // This is the safe place to modify fonts - outside of the rendering frame
         if (state.pendingFontRebuild.load()) {
-            // Rebuild fonts (clears atlas, adds fonts with new size)
             GUI::RebuildFontsIfNeeded(state);
-            // Build the font atlas; the OpenGL3 backend will detect the
-            // change and upload the new texture automatically on NewFrame.
-            io.Fonts->Build();
+            // The rlImGui backend automatically syncs the font texture to the GPU
+            // because ImGui automatically flags the font atlas as needing an update
+            // when we call io.Fonts->Build() in SetupFonts.
         }
 
-        ImGui_ImplOpenGL3_NewFrame();
-        ImGui_ImplSDL2_NewFrame();
-        ImGui::NewFrame();
+        BeginDrawing();
+        ClearBackground(Color{25, 25, 25, 255}); // #191919 hex
+
+        rlImGuiBegin();
 
         GUI::DrawStudio(state);
 
-        ImGui::Render();
-        glViewport(0, 0, (int)io.DisplaySize.x, (int)io.DisplaySize.y);
-        glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-        SDL_GL_SwapWindow(window);
+        rlImGuiEnd();
+        
+        EndDrawing();
     }
 
     // Save settings before shutdown
@@ -148,12 +118,8 @@ int main(int argc, char** argv) {
         state.workerThread.wait();
     }
 
-    ImGui_ImplOpenGL3_Shutdown();
-    ImGui_ImplSDL2_Shutdown();
-    ImGui::DestroyContext();
-    SDL_GL_DeleteContext(gl_context);
-    SDL_DestroyWindow(window);
-    SDL_Quit();
+    rlImGuiShutdown();
+    CloseWindow();
 
     return 0;
 }
