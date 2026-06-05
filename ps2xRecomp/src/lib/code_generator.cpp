@@ -1,9 +1,9 @@
 #include "ps2recomp/code_generator.h"
 #include "ps2recomp/instructions.h"
 #include "ps2recomp/ps2_recompiler.h"
+#include "ps2recomp/r5900_decoder.h"
 #include "ps2recomp/types.h"
 #include "ps2_runtime_calls.h"
-#include "rabbitizer.h"
 #include <fmt/format.h>
 #include <sstream>
 #include <algorithm>
@@ -109,30 +109,6 @@ namespace ps2recomp
     static bool isReservedCxxKeyword(const std::string &name)
     {
         return kKeywords.contains(name);
-    }
-
-    static std::string getInstructionDisassembly(const Instruction &inst)
-    {
-        if (!inst.disassembly.empty())
-        {
-            return inst.disassembly;
-        }
-
-        RabbitizerInstruction rabbitizerInst;
-        RabbitizerInstructionR5900_init(&rabbitizerInst, inst.raw, inst.address);
-        RabbitizerInstructionR5900_processUniqueId(&rabbitizerInst);
-
-        std::string disassembly;
-        const size_t bufferSize = RabbitizerInstruction_getSizeForBuffer(&rabbitizerInst, 0, 0);
-        if (bufferSize > 0)
-        {
-            std::vector<char> buffer(bufferSize + 1, '\0');
-            RabbitizerInstruction_disassemble(&rabbitizerInst, buffer.data(), nullptr, 0, 0);
-            disassembly = buffer.data();
-        }
-
-        RabbitizerInstructionR5900_destroy(&rabbitizerInst);
-        return disassembly;
     }
 
     CodeGenerator::CodeGenerator(const std::vector<Symbol> &symbols, const std::vector<Section> &sections)
@@ -257,7 +233,7 @@ namespace ps2recomp
             if (m_emitInstructionComments)
             {
                 delaySlotCode = "    // 0x" + fmt::format("{:x}", delaySlot.address) + ": 0x" + fmt::format("{:x}", delaySlot.raw);
-                std::string disassembly = getInstructionDisassembly(delaySlot);
+                std::string disassembly = R5900Decoder::disassembleInstruction(delaySlot);
                 if (!disassembly.empty()) {
                     delaySlotCode += "  " + disassembly;
                 }
@@ -301,7 +277,7 @@ namespace ps2recomp
         {
             // Only emit local indirect-jump switches for jump tables we actually resolved.
             // Falling back to every internal target here can duplicate huge switches at each
-            // indirect branch; unresolved fallback targets are registered as resumable entries
+            // indirect branch. Unresolved JR/JALR targets are registered as resumable entries
             // instead, so runtime dispatch can re-enter this function at ctx->pc.
             auto jtIt = analysisResult.jumpTableTargets.find(branchInst.address);
             if (jtIt != analysisResult.jumpTableTargets.end()) {
@@ -861,7 +837,7 @@ namespace ps2recomp
 
         if (hasIndirectRegisterJump)
         {
-            bool needsJrFallback = false;
+            bool needsIndirectFallback = false;
             for (const Instruction* jrInst : indirectJumps) {
                 if (jrInst->function == SPECIAL_JALR)
                 {
@@ -1031,20 +1007,17 @@ namespace ps2recomp
                     }
                 }
                 if (!foundTable) {
-                    if (!(jrInst->function == SPECIAL_JALR))
-                    {
-                        needsJrFallback = true;
-                    }
+                    needsIndirectFallback = true;
                 }
             }
 
-            if (needsJrFallback) {
+            if (needsIndirectFallback) {
                 for (uint32_t addr : instructionAddresses)
                 {
                     if (addr >= function.start && addr < function.end)
                     {
                         result.entryPoints.insert(addr);
-                        // Keep labels and runtime registration for unresolved indirect jumps
+                        // Keep labels and runtime registration for unresolved JR/JALR targets
                         // without emitting a local switch over every possible target.
                         result.indirectFallbackEntryPoints.insert(addr);
                     }
@@ -1133,7 +1106,7 @@ namespace ps2recomp
             if (m_emitInstructionComments)
             {
                 ss << "    // 0x" << std::hex << inst.address << ": 0x" << inst.raw << std::dec;
-                std::string disassembly = getInstructionDisassembly(inst);
+                std::string disassembly = R5900Decoder::disassembleInstruction(inst);
                 if (!disassembly.empty()) {
                     ss << "  " << disassembly;
                 }

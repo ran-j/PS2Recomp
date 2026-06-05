@@ -1,9 +1,23 @@
 #include "ps2recomp/r5900_decoder.h"
 #include "rabbitizer.h"
 #include <iostream>
+#include <vector>
 
 namespace ps2recomp
 {
+    static std::string disassembleRabbitizerInstruction(RabbitizerInstruction &rabbitizerInst)
+    {
+        std::string disassembly;
+        const size_t bufferSize = RabbitizerInstruction_getSizeForBuffer(&rabbitizerInst, 0, 0);
+        if (bufferSize > 0)
+        {
+            std::vector<char> buffer(bufferSize + 1, '\0');
+            RabbitizerInstruction_disassemble(&rabbitizerInst, buffer.data(), nullptr, 0, 0);
+            disassembly = buffer.data();
+        }
+
+        return disassembly;
+    }
 
     R5900Decoder::R5900Decoder()
     {
@@ -11,6 +25,28 @@ namespace ps2recomp
 
     R5900Decoder::~R5900Decoder()
     {
+    }
+
+    std::string R5900Decoder::disassembleInstruction(uint32_t address, uint32_t rawInstruction)
+    {
+        RabbitizerInstruction rabbitizerInst;
+        RabbitizerInstructionR5900_init(&rabbitizerInst, rawInstruction, address);
+        RabbitizerInstructionR5900_processUniqueId(&rabbitizerInst);
+
+        std::string disassembly = disassembleRabbitizerInstruction(rabbitizerInst);
+
+        RabbitizerInstructionR5900_destroy(&rabbitizerInst);
+        return disassembly;
+    }
+
+    std::string R5900Decoder::disassembleInstruction(const Instruction &inst)
+    {
+        if (!inst.disassembly.empty())
+        {
+            return inst.disassembly;
+        }
+
+        return disassembleInstruction(inst.address, inst.raw);
     }
 
     Instruction R5900Decoder::decodeInstruction(uint32_t address, uint32_t rawInstruction, bool includeDisassembly) const
@@ -179,13 +215,7 @@ namespace ps2recomp
 
         if (includeDisassembly)
         {
-            size_t bufferSize = RabbitizerInstruction_getSizeForBuffer(&rabbitizerInst, 0, 0);
-            if (bufferSize > 0)
-            {
-                std::vector<char> buffer(bufferSize + 1, '\0');
-                RabbitizerInstruction_disassemble(&rabbitizerInst, buffer.data(), nullptr, 0, 0);
-                inst.disassembly = buffer.data();
-            }
+            inst.disassembly = disassembleRabbitizerInstruction(rabbitizerInst);
         }
 
         RabbitizerInstructionR5900_destroy(&rabbitizerInst);

@@ -93,7 +93,7 @@ Main fields in `config.toml`:
 * `general.output`: generated C++ output folder.
 * `general.single_file_output`: one combined cpp or one file per function.
 * `general.low_memory_mode`: reduce peak output-generation memory by avoiding retained disassembly strings and forcing serial output generation. Generated instruction comments are still emitted; disassembly text is produced while writing each output file instead of being kept in memory.
-* `general.output_worker_threads`: number of output-generation workers. A positive value uses exactly that many workers. `0` uses `nproc - 1` when at least two hardware threads are available, otherwise serial output generation. `1` forces serial output generation.
+* `general.output_worker_threads`: number of output-generation workers (clamped to nproc * 2). A positive value uses exactly that many workers. `0` uses `nproc - 1` when at least two hardware threads are available, otherwise serial output generation. `1` forces serial output generation.
 * `general.patch_syscalls`: apply configured patches to `SYSCALL` instructions (`false` recommended).
 * `general.patch_cop0`: apply configured patches to COP0 instructions.
 * `general.patch_cache`: apply configured patches to CACHE instructions.
