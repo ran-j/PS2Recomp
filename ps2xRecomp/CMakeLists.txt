@@ -8,45 +8,38 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(FetchContent)
 
-# ImGui: docking branch pinned to a specific commit for stability
 FetchContent_Declare(
     imgui
     GIT_REPOSITORY https://github.com/ocornut/imgui.git
-    GIT_TAG        v1.91.6
+    GIT_TAG        docking
     GIT_SHALLOW    TRUE
 )
 
-# ImGuiColorTextEdit: pinned to a known stable commit
 FetchContent_Declare(
     imgui_colortextedit
     GIT_REPOSITORY https://github.com/BalazsJako/ImGuiColorTextEdit.git
-    GIT_TAG        0a88824f7de47d71b30f0f2bec550ca3e6714650
+    GIT_TAG        master
     GIT_SHALLOW    TRUE
 )
 
-# imgui_club: pinned to a known stable commit
 FetchContent_Declare(
     imgui_club
     GIT_REPOSITORY https://github.com/ocornut/imgui_club.git
-    GIT_TAG        d4f9b46b7e3f368a8d80b4a5e0dbb411892cb2b5
+    GIT_TAG        main
     GIT_SHALLOW    TRUE
 )
 
-# ImGuiFileDialog: pinned to a known stable commit
 FetchContent_Declare(
     imgui_file_dialog
     GIT_REPOSITORY https://github.com/aiekick/ImGuiFileDialog.git
-    GIT_TAG        v0.6.7
+    GIT_TAG        master
     GIT_SHALLOW    TRUE
 )
 
-# rlImGui: pinned to Raylib 5.5 compatible tag (ImGui 1.92.7)
-# This prevents breaking changes when upstream updates raylib/imgui versions.
-# See: https://github.com/raylib-extras/rlImGui/tree/Raylib_5_5
 FetchContent_Declare(
     rlImGui
     GIT_REPOSITORY https://github.com/raylib-extras/rlImGui.git
-    GIT_TAG        Raylib_5_5
+    GIT_TAG        main
     GIT_SHALLOW    TRUE
 )
 
