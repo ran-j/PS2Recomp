@@ -1,6 +1,9 @@
 #ifndef PS2RECOMP_ELF_ANALYZER_H
 #define PS2RECOMP_ELF_ANALYZER_H
 
+#include "ps2recomp/elf_analysis_context.h"
+#include "ps2recomp/function_classifier.h"
+
 #include <string>
 #include <vector>
 #include <unordered_set>
@@ -9,6 +12,7 @@
 #include <map>
 #include <set>
 #include <functional>
+#include <cstdint>
 
 namespace ps2recomp
 {
@@ -31,21 +35,37 @@ namespace ps2recomp
         explicit ElfAnalyzer(const std::string &elfPath);
         ~ElfAnalyzer();
 
+    public:
+        void setSceSymbolDatabasePath(const std::string &databasePath);
         bool analyze();
         bool generateToml(const std::string &outputPath);
         bool importGhidraMap(const std::string &csvPath);
-        const std::vector<Function>& getFunctions() const;
+
+    public:
+        const std::vector<Function> &getFunctions() const;
+
+    public:
         bool isLibrarySymbolNameForHeuristics(const std::string &name) const;
         static bool isReliableSymbolNameForHeuristics(const std::string &name);
         static bool isSystemSymbolNameForHeuristics(const std::string &name);
+
+    public:
         static bool shouldAutoSkipNameForHeuristics(const std::string &name);
         static bool shouldSkipSystemSymbolForHeuristics(const std::string &name, const std::unordered_set<std::string> &forcedRecompileNames);
+
+    public:
         static int findEntryFunctionIndexForHeuristics(const std::vector<Function> &functions, uint32_t entryAddress);
         static int findFallbackEntryFunctionIndexForHeuristics(const std::vector<Function> &functions);
+
+    public:
         static bool hasHardwareIOSignalForHeuristics(const std::vector<Instruction> &instructions);
         static bool hasLargeComplexMMISignalForHeuristics(const std::vector<Instruction> &instructions, size_t largeInstructionThreshold = 500);
         static bool hasSelfModifyingSignalForHeuristics(const std::vector<Instruction> &instructions, const std::vector<Section> &sections);
+
+    public:
         static bool shouldSkipForPatchDensityForHeuristics(const std::string &functionName, uint32_t functionSizeBytes, size_t patchCount, bool isLibraryFunction);
+
+    public:
         static std::vector<JumpTable> detectJumpTablesForHeuristics(const std::vector<Instruction> &instructions, const std::vector<Section> &sections, const std::function<bool(uint32_t, uint32_t &)> &readWord);
         static std::unordered_set<std::string> findRecursiveFunctionsForHeuristics(const std::unordered_map<std::string, std::vector<std::string>> &callGraph);
 
@@ -54,27 +74,44 @@ namespace ps2recomp
         std::unique_ptr<ElfParser> m_elfParser;
         std::unique_ptr<R5900Decoder> m_decoder;
 
-        std::vector<Function> m_functions;
-        std::vector<Symbol> m_symbols;
-        std::vector<Section> m_sections;
-        std::vector<Relocation> m_relocations;
+        ElfAnalysisContext m_context;
 
         std::unordered_set<std::string> m_libFunctions;
         std::unordered_set<std::string> m_skipFunctions;
+        std::unordered_set<std::string> m_untrackedStubFunctions;
         std::unordered_set<uint32_t> m_forceRecompileStarts;
-        std::unordered_set<std::string> m_knownLibNames;
+        std::unordered_set<std::string> m_sceSdkFunctionNames;
+
+        FunctionClassifier m_classifier;
+
         std::unordered_map<std::string, std::set<std::string>> m_functionDataUsage;
         std::unordered_map<uint32_t, std::string> m_commonDataAccess;
 
         std::map<uint32_t, uint32_t> m_patches;
         std::map<uint32_t, std::string> m_patchReasons;
+
         std::unordered_map<uint32_t, CFG> m_functionCFGs;
         std::vector<JumpTable> m_jumpTables;
         std::unordered_map<uint32_t, std::vector<FunctionCall>> m_functionCalls;
+        std::map<uint32_t, std::string> m_performanceCriticalReasons;
 
         std::unordered_map<uint32_t, uint32_t> m_mmioByInstructionAddress;
 
-        void initializeLibraryFunctions();
+        std::string m_sceSymbolDatabasePath;
+
+        bool loadElf();
+        void buildFunctionIndex();
+        void decodeAllFunctionsOnce();
+        void classifyFunctions();
+        void runDataUsagePass();
+        void runPatchDetectionPass();
+        void runControlFlowPass();
+        void runJumpTablePass();
+        void runPerformancePass();
+        void runSignaturePass() const;
+        void printAnalysisSummary() const;
+
+        void discoverSceSdkSymbols();
         void analyzeEntryPoint();
         void analyzeLibraryFunctions();
         void analyzeDataUsage();
@@ -96,7 +133,7 @@ namespace ps2recomp
 
         void analyzeControlFlow();
         void detectJumpTables();
-        void analyzePerformanceCriticalPaths() const;
+        void analyzePerformanceCriticalPaths();
         void identifyRecursiveFunctions();
         void analyzeRegisterUsage() const;
         void analyzeFunctionSignatures() const;
@@ -109,10 +146,11 @@ namespace ps2recomp
 
         bool isSystemFunction(const std::string &name) const;
         bool isLibraryFunction(const std::string &name) const;
+        void clearDecodedInstructionCache();
+        const std::vector<Instruction> &getDecodedInstructions(const Function &function) const;
         std::vector<Instruction> decodeFunction(const Function &function) const;
         CFG buildCFG(const Function &function) const;
         std::string formatAddress(uint32_t address) const;
-        std::string escapeBackslashes(const std::string &path);
         bool hasMMIInstructions(const Function &function) const;
         bool hasVUInstructions(const Function &function) const;
         bool shouldAutoSkipByHeuristic(const Function &function) const;

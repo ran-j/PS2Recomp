@@ -1,31 +1,21 @@
 #include "ps2recomp/elf_analyzer.h"
+#include "ps2recomp/analysis_passes.h"
 #include "ps2recomp/elf_parser.h"
 #include "ps2recomp/r5900_decoder.h"
+#include "ps2recomp/sce_symbol_scanner.h"
+#include "ps2recomp/toml_generator.h"
 #include "ps2recomp/types.h"
 #include <iostream>
 #include <sstream>
 #include <algorithm>
-#include <filesystem>
-#include <regex>
-#include <stack>
-#include <queue>
 #include <fstream>
 #include <iomanip>
 #include <functional>
 #include <limits>
-#include <optional>
-#include <cctype>
-#include <optional>
-
-namespace fs = std::filesystem;
+#include <cstdlib>
 
 namespace ps2recomp
 {
-    static bool hasPs2ApiPrefix(const std::string &name);
-    static bool hasReliableSymbolName(const std::string &name);
-    static bool isDoNotSkipOrStub(const std::string &name);
-    static bool isKnownLocalHelperName(const std::string &name);
-    static bool matchesKernelRuntimeName(const std::string &name);
     static uint32_t decodeAbsoluteJumpTarget(uint32_t instructionAddress, uint32_t targetField);
     static bool tryReadWord(const ElfParser *parser, uint32_t address, uint32_t &outWord);
 
@@ -34,322 +24,193 @@ namespace ps2recomp
     {
         m_elfParser = std::make_unique<ElfParser>(elfPath);
         m_decoder = std::make_unique<R5900Decoder>();
-
-        initializeLibraryFunctions();
+        m_classifier.setSceSdkFunctionNames(&m_sceSdkFunctionNames);
     }
 
     ElfAnalyzer::~ElfAnalyzer() = default;
+
+    void ElfAnalyzer::setSceSymbolDatabasePath(const std::string &databasePath)
+    {
+        m_sceSymbolDatabasePath = databasePath;
+    }
 
     bool ElfAnalyzer::analyze()
     {
         std::cout << "Analyzing ELF file: " << m_elfPath << std::endl;
 
+        if (!loadElf())
+        {
+            return false;
+        }
+
+        discoverSceSdkSymbols();
+        buildFunctionIndex();
+
+        analyzeEntryPoint();
+        analyzeLibraryFunctions();
+        decodeAllFunctionsOnce();
+        classifyFunctions();
+
+        runDataUsagePass();
+        runPatchDetectionPass();
+        runControlFlowPass();
+        runJumpTablePass();
+        runPerformancePass();
+        identifyRecursiveFunctions();
+        analyzeRegisterUsage();
+        runSignaturePass();
+
+        optimizePatches();
+        printAnalysisSummary();
+
+        return true;
+    }
+
+    bool ElfAnalyzer::loadElf()
+    {
         if (!m_elfParser->parse())
         {
             std::cerr << "Failed to parse ELF file" << std::endl;
             return false;
         }
 
-        m_functions = m_elfParser->extractFunctions();
-        m_symbols = m_elfParser->extractSymbols();
-        m_sections = m_elfParser->getSections();
-        m_relocations = m_elfParser->getRelocations();
+        m_context.clear();
+        m_libFunctions.clear();
+        m_skipFunctions.clear();
+        m_untrackedStubFunctions.clear();
+        m_forceRecompileStarts.clear();
+        m_sceSdkFunctionNames.clear();
+        m_functionDataUsage.clear();
+        m_commonDataAccess.clear();
+        m_patches.clear();
+        m_patchReasons.clear();
+        m_functionCFGs.clear();
+        m_jumpTables.clear();
+        m_functionCalls.clear();
+        m_performanceCriticalReasons.clear();
+        m_mmioByInstructionAddress.clear();
 
-        std::cout << "Extracted " << m_functions.size() << " functions" << std::endl;
-        std::cout << "Extracted " << m_symbols.size() << " symbols" << std::endl;
-        std::cout << "Extracted " << m_sections.size() << " sections" << std::endl;
-        std::cout << "Extracted " << m_relocations.size() << " relocations" << std::endl;
+        m_context.functions = m_elfParser->extractFunctions();
+        m_context.symbols = m_elfParser->extractSymbols();
+        m_context.sections = m_elfParser->getSections();
+        m_context.relocations = m_elfParser->getRelocations();
+        m_context.buildFunctionIndex();
 
-        analyzeEntryPoint();
-        analyzeDataUsage();
-        identifyPotentialPatches();
-        analyzeControlFlow();
-        detectJumpTables();
-        analyzePerformanceCriticalPaths();
-        identifyRecursiveFunctions();
-        analyzeRegisterUsage();
-        analyzeFunctionSignatures();
-        analyzeLibraryFunctions();
-        optimizePatches();
-
-        for (auto &func : m_functions)
-        {
-            categorizeFunction(func);
-
-            if (!m_skipFunctions.contains(func.name) &&
-                !m_libFunctions.contains(func.name))
-            {
-                func.instructions = decodeFunction(func);
-            }
-        }
-
-        std::cout << "Analysis completed" << std::endl;
-        std::cout << "- " << m_libFunctions.size() << " library functions to stub" << std::endl;
-        std::cout << "- " << m_skipFunctions.size() << " functions to skip" << std::endl;
-        std::cout << "- " << m_patches.size() << " potential patches identified" << std::endl;
-        std::cout << "- " << m_jumpTables.size() << " jump tables detected" << std::endl;
+        std::cout << "Extracted " << m_context.functions.size() << " functions" << std::endl;
+        std::cout << "Extracted " << m_context.symbols.size() << " symbols" << std::endl;
+        std::cout << "Extracted " << m_context.sections.size() << " sections" << std::endl;
+        std::cout << "Extracted " << m_context.relocations.size() << " relocations" << std::endl;
 
         return true;
     }
 
     bool ElfAnalyzer::generateToml(const std::string &outputPath)
     {
-        std::ofstream file(outputPath);
-        if (!file)
-        {
-            std::cerr << "Failed to open output file: " << outputPath << std::endl;
-            return false;
-        }
+        const TomlGeneratorInput input{
+            m_elfPath,
+            m_context,
+            m_libFunctions,
+            m_skipFunctions,
+            m_untrackedStubFunctions,
+            m_mmioByInstructionAddress,
+            m_jumpTables,
+            m_patches,
+            m_patchReasons,
+            m_performanceCriticalReasons};
 
-        fs::path elfPathObj(m_elfPath);
-        std::string elfFileName = elfPathObj.filename().string();
-
-        fs::path outputPathObj(outputPath);
-        fs::path outputDir = outputPathObj.parent_path();
-        if (outputDir.empty())
-        {
-            outputDir = ".";
-        }
-
-        const fs::path generatedOutputDir = outputDir / "output";
-        std::string outputDirStr = generatedOutputDir.generic_string() + "/";
-
-        if (!fs::exists(generatedOutputDir))
-        {
-            fs::create_directories(generatedOutputDir);
-        }
-
-        file << "# PS2Recomp configuration for: " << elfFileName << "\n";
-        file << "# Generated by ElfAnalyzer\n\n";
-
-        file << "[general]\n";
-        file << "# Path to input ELF file\n";
-        file << "input = \"" << escapeBackslashes(m_elfPath) << "\"\n\n";
-
-        file << "# Path to Ghidra exported function map (optional CSV)\n";
-        file << "ghidra_output = \"\"\n\n";
-
-        file << "# Path to output directory\n";
-        file << "output = \"" << escapeBackslashes(outputDirStr) << "\"\n\n";
-
-        file << "# Single file output mode (recommended for large games)\n";
-        file << "single_file_output = false\n\n";
-
-        file << "# Patch policy (instruction-driven handling is preferred for syscalls)\n";
-        file << "patch_syscalls = false\n";
-        file << "patch_cop0 = true\n";
-        file << "patch_cache = true\n\n";
-
-        std::unordered_map<std::string, size_t> functionNameCounts;
-        functionNameCounts.reserve(m_functions.size());
-        for (const auto &func : m_functions)
-        {
-            if (!func.name.empty())
-            {
-                functionNameCounts[func.name]++;
-            }
-        }
-
-        auto makeSelector = [&](const std::string &name, uint32_t start) -> std::string
-        {
-            auto it = functionNameCounts.find(name);
-            if (it == functionNameCounts.end() || it->second <= 1)
-            {
-                return name;
-            }
-
-            std::stringstream selector;
-            selector << name << "@0x"
-                     << std::hex << std::uppercase << std::setw(8) << std::setfill('0')
-                     << start;
-            return selector.str();
-        };
-
-        auto collectFunctionSelectors =
-            [&](const std::unordered_set<std::string> &nameSet) -> std::vector<std::string>
-        {
-            std::vector<const Function *> orderedFunctions;
-            orderedFunctions.reserve(m_functions.size());
-            for (const auto &func : m_functions)
-            {
-                orderedFunctions.push_back(&func);
-            }
-
-            std::sort(orderedFunctions.begin(), orderedFunctions.end(),
-                      [](const Function *a, const Function *b)
-                      { return a->start < b->start; });
-
-            std::vector<std::string> entries;
-            std::unordered_set<std::string> seenEntries;
-            std::unordered_set<std::string> coveredNames;
-
-            for (const Function *func : orderedFunctions)
-            {
-                if (!nameSet.contains(func->name))
-                {
-                    continue;
-                }
-
-                coveredNames.insert(func->name);
-                const std::string entry = makeSelector(func->name, func->start);
-                if (seenEntries.insert(entry).second)
-                {
-                    entries.push_back(entry);
-                }
-            }
-
-            std::vector<std::string> leftovers;
-            leftovers.reserve(nameSet.size());
-            for (const auto &name : nameSet)
-            {
-                if (!coveredNames.contains(name) && seenEntries.insert(name).second)
-                {
-                    leftovers.push_back(name);
-                }
-            }
-            std::sort(leftovers.begin(), leftovers.end());
-            entries.insert(entries.end(), leftovers.begin(), leftovers.end());
-
-            return entries;
-        };
-
-        const std::vector<std::string> stubEntries = collectFunctionSelectors(m_libFunctions);
-        const std::vector<std::string> skipEntries = collectFunctionSelectors(m_skipFunctions);
-
-        file << "# Functions to stub (these will generate empty implementations)\n";
-        file << "stubs = [\n";
-        for (const auto &func : stubEntries)
-        {
-            file << "  \"" << func << "\",\n";
-        }
-        file << "]\n\n";
-
-        file << "# Functions to skip (these will not be recompiled)\n";
-        file << "skip = [\n";
-        for (const auto &func : skipEntries)
-        {
-            file << "  \"" << func << "\",\n";
-        }
-        file << "]\n\n";
-
-        if (!m_mmioByInstructionAddress.empty())
-        {
-            file << "# Detected MMIO accesses\n";
-            file << "[mmio]\n";
-            for (const auto &[instAddr, mmioAddr] : m_mmioByInstructionAddress)
-            {
-                file << "\"0x" << std::hex << instAddr << "\" = \"0x" << mmioAddr << "\"\n"
-                     << std::dec;
-            }
-            file << "\n";
-        }
-
-        if (!m_jumpTables.empty())
-        {
-            file << "# Jump tables detected in the program\n";
-            file << "[jump_tables]\n";
-
-            for (const auto &jt : m_jumpTables)
-            {
-                file << "[[jump_tables.table]]\n";
-                file << "address = \"0x" << std::hex << jt.address << "\"\n"
-                     << std::dec;
-                file << "entries = [\n";
-
-                for (const auto &[index, target] : jt.entries)
-                {
-                    file << "  { index = " << index << ", target = \"0x"
-                         << std::hex << target << "\" },\n"
-                         << std::dec;
-                }
-
-                file << "]\n\n";
-            }
-        }
-
-        if (!m_patches.empty())
-        {
-            file << "# Patches to apply during recompilation\n";
-            file << "[patches]\n";
-            file << "# Individual instruction patches\n";
-            file << "instructions = [\n";
-            for (const auto &[address, value] : m_patches)
-            {
-                file << "  { address = \"0x" << std::hex << address << "\", value = \"0x"
-                     << std::hex << value << "\" },  # " << m_patchReasons[address] << "\n";
-            }
-            file << "]\n\n";
-        }
-
-        file << "# Performance critical functions (may need manual optimization)\n";
-        file << "[performance]\n";
-        file << "critical = [\n";
-        for (const auto &func : m_functions)
-        {
-            if (hasMMIInstructions(func) || hasVUInstructions(func))
-            {
-                file << "  \"" << func.name << "\", # Uses SIMD instructions\n";
-            }
-            else if (isLoopHeavyFunction(func))
-            {
-                file << "  \"" << func.name << "\", # Contains heavy loops\n";
-            }
-        }
-        file << "]\n\n";
-
-        std::cout << "Generated TOML configuration: " << outputPath << std::endl;
-        return true;
+        return TomlGenerator::generate(input, outputPath);
     }
 
-    void ElfAnalyzer::initializeLibraryFunctions()
+    void ElfAnalyzer::discoverSceSdkSymbols()
     {
-        // Standard C library functions
-        const std::vector<std::string> stdLibFuncs = {
-            // I/O functions
-            "printf", "sprintf", "snprintf", "fprintf", "vprintf", "vfprintf", "vsprintf", "vsnprintf",
-            "puts", "putchar", "getchar", "gets", "fgets", "fputs", "scanf", "fscanf", "sscanf",
-            "sprint", "sbprintf",
+        std::string databasePath = m_sceSymbolDatabasePath;
+        if (databasePath.empty())
+        {
+            if (const char *envPath = std::getenv("PS2RECOMP_SCE_SYMBOL_DB"))
+            {
+                databasePath = envPath;
+            }
+        }
 
-            // Memory management
-            "malloc", "free", "calloc", "realloc", "aligned_alloc", "posix_memalign",
+        if (databasePath.empty())
+        {
+            return;
+        }
 
-            // Memory manipulation
-            "memcpy", "memset", "memmove", "memcmp", "memchr", "bcopy", "bzero",
+        SceSymbolScanner scanner;
+        if (!scanner.loadDatabase(databasePath))
+        {
+            std::cerr << "Failed to load SCE symbol database from " << databasePath
+                      << ": " << scanner.lastError() << std::endl;
+            return;
+        }
 
-            // String manipulation
-            "strcpy", "strncpy", "strcat", "strncat", "strcmp", "strncmp", "strlen", "strstr",
-            "strchr", "strrchr", "strdup", "strtok", "strtok_r", "strerror",
+        const std::vector<SceSymbolMatch> matches = scanner.scan(m_context.sections);
+        if (matches.empty())
+        {
+            std::cout << "No SCE SDK symbols discovered from " << databasePath << std::endl;
+            return;
+        }
 
-            // File operations
-            "fopen", "fclose", "fread", "fwrite", "fseek", "ftell", "rewind", "fflush",
-            "fgetc", "fgets", "feof", "ferror", "clearerr", "fileno", "tmpfile", "remove", "rename",
-            "open", "close", "read", "write", "lseek", "stat", "fstat",
+        size_t renamedFunctions = 0;
+        size_t addedFunctions = 0;
 
-            // Type conversion
-            "atoi", "atol", "atoll", "atof", "strtol", "strtoul", "strtoll", "strtoull", "strtod", "strtof",
+        for (const auto &match : matches)
+        {
+            if (match.size > std::numeric_limits<uint32_t>::max() - match.address)
+            {
+                continue;
+            }
 
-            // Math functions
-            "rand", "srand", "random", "srandom", "drand48", "sqrt", "pow", "exp", "log", "log10",
-            "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh",
-            "floor", "ceil", "fabs", "fmod", "frexp", "ldexp", "modf",
+            m_sceSdkFunctionNames.insert(match.name);
 
-            // Time functions
-            "time", "ctime", "clock", "difftime", "mktime", "localtime", "gmtime", "asctime", "strftime",
-            "gettimeofday", "nanosleep", "usleep",
+            Symbol symbol;
+            symbol.name = match.name;
+            symbol.address = match.address;
+            symbol.size = match.size;
+            symbol.isFunction = true;
+            symbol.isImported = false;
+            symbol.isExported = true;
+            m_context.symbols.push_back(std::move(symbol));
 
-            // Process control
-            "abort", "exit", "_exit", "atexit", "system", "getpid", "fork", "waitpid",
+            const uint32_t discoveredEnd = match.address + match.size;
+            if (Function *func = m_context.findFunction(match.address))
+            {
+                if (func->name != match.name)
+                {
+                    func->name = match.name;
+                    renamedFunctions++;
+                }
 
-            // Misc
-            "qsort", "bsearch", "abs", "div", "labs", "ldiv", "llabs", "lldiv",
-            "isalnum", "isalpha", "isdigit", "islower", "isupper", "isspace", "tolower", "toupper",
-            "setjmp", "longjmp", "getenv", "setenv", "unsetenv",
-            "perror", "fputc", "getc", "ungetc", "freopen", "setvbuf", "setbuf",
+                if (func->end < discoveredEnd)
+                {
+                    func->end = discoveredEnd;
+                }
+                continue;
+            }
 
-            // Extra string helpers
-            "strnlen", "strspn", "strcspn", "strcasecmp", "strncasecmp"};
+            Function function;
+            function.name = match.name;
+            function.start = match.address;
+            function.end = discoveredEnd;
+            m_context.functions.push_back(std::move(function));
+            m_context.functionIndexByStart[match.address] = m_context.functions.size() - 1;
+            addedFunctions++;
+        }
 
-        m_knownLibNames.insert(stdLibFuncs.begin(), stdLibFuncs.end());
+        std::sort(m_context.functions.begin(), m_context.functions.end(),
+                  [](const Function &a, const Function &b)
+                  {
+                      return a.start < b.start;
+                  });
+
+        buildFunctionIndex();
+        clearDecodedInstructionCache();
+
+        std::cout << "Discovered " << matches.size() << " SCE SDK symbol match(es) from "
+                  << databasePath << std::endl;
+        std::cout << "- renamed " << renamedFunctions << " existing function(s)" << std::endl;
+        std::cout << "- added " << addedFunctions << " function(s)" << std::endl;
     }
 
     int ElfAnalyzer::findEntryFunctionIndexForHeuristics(const std::vector<Function> &functions, uint32_t entryAddress)
@@ -389,10 +250,10 @@ namespace ps2recomp
     void ElfAnalyzer::analyzeEntryPoint()
     {
         const uint32_t entryAddress = m_elfParser->getEntryPoint();
-        const int entryIndex = findEntryFunctionIndexForHeuristics(m_functions, entryAddress);
+        const int entryIndex = findEntryFunctionIndexForHeuristics(m_context.functions, entryAddress);
         if (entryIndex >= 0)
         {
-            const Function &entryFunction = m_functions[static_cast<size_t>(entryIndex)];
+            const Function &entryFunction = m_context.functions[static_cast<size_t>(entryIndex)];
             std::cout << "Found entry point from ELF header: 0x" << std::hex << entryAddress
                       << " in function " << entryFunction.name << " (starts at 0x" << entryFunction.start << ")"
                       << std::dec << std::endl;
@@ -400,7 +261,7 @@ namespace ps2recomp
             m_forceRecompileStarts.insert(entryFunction.start);
             m_skipFunctions.erase(entryFunction.name);
 
-            std::vector<Instruction> instructions = decodeFunction(entryFunction);
+            const auto &instructions = getDecodedInstructions(entryFunction);
 
             for (const auto &inst : instructions)
             {
@@ -408,20 +269,16 @@ namespace ps2recomp
                 {
                     uint32_t target = decodeAbsoluteJumpTarget(inst.address, inst.target);
 
-                    for (const auto &func : m_functions)
+                    if (const Function *func = m_context.findFunction(target))
                     {
-                        if (func.start == target)
-                        {
-                            std::cout << "Found entry call to: " << func.name << " at 0x"
-                                      << std::hex << inst.address << std::dec << std::endl;
+                        std::cout << "Found entry call to: " << func->name << " at 0x"
+                                  << std::hex << inst.address << std::dec << std::endl;
 
-                            if (hasReliableSymbolName(func.name) &&
-                                !isDoNotSkipOrStub(func.name) &&
-                                isSystemFunction(func.name))
-                            {
-                                m_skipFunctions.insert(func.name);
-                            }
-                            break;
+                        if (FunctionClassifier::isReliableSymbolName(func->name) &&
+                            !FunctionClassifier::isDoNotSkipOrStub(func->name) &&
+                            isSystemFunction(func->name))
+                        {
+                            m_skipFunctions.insert(func->name);
                         }
                     }
                 }
@@ -432,10 +289,10 @@ namespace ps2recomp
             std::cout << "Entry point 0x" << std::hex << entryAddress
                       << " not mapped to an extracted function" << std::dec << std::endl;
 
-            const int fallbackIndex = findFallbackEntryFunctionIndexForHeuristics(m_functions);
+            const int fallbackIndex = findFallbackEntryFunctionIndexForHeuristics(m_context.functions);
             if (fallbackIndex >= 0)
             {
-                const Function &fallbackEntry = m_functions[static_cast<size_t>(fallbackIndex)];
+                const Function &fallbackEntry = m_context.functions[static_cast<size_t>(fallbackIndex)];
                 std::cout << "Found potential entry point by address: " << fallbackEntry.name
                           << " at 0x" << std::hex << fallbackEntry.start << std::dec << std::endl;
                 m_forceRecompileStarts.insert(fallbackEntry.start);
@@ -448,7 +305,7 @@ namespace ps2recomp
     {
         std::unordered_set<std::string> forcedRecompileNames;
         forcedRecompileNames.reserve(m_forceRecompileStarts.size());
-        for (const auto &func : m_functions)
+        for (const auto &func : m_context.functions)
         {
             if (m_forceRecompileStarts.contains(func.start))
             {
@@ -456,18 +313,29 @@ namespace ps2recomp
             }
         }
 
-        for (const auto &symbol : m_symbols)
+        for (const auto &symbol : m_context.symbols)
         {
             if (symbol.isFunction)
             {
-                if (!hasReliableSymbolName(symbol.name))
+                if (!FunctionClassifier::isReliableSymbolName(symbol.name))
                 {
                     continue;
                 }
 
                 if (isLibraryFunction(symbol.name))
                 {
-                    m_libFunctions.insert(symbol.name);
+                    if (!m_forceRecompileStarts.contains(symbol.address) &&
+                        !forcedRecompileNames.contains(symbol.name))
+                    {
+                        if (FunctionClassifier::hasRuntimeHandler(symbol.name))
+                        {
+                            m_libFunctions.insert(symbol.name);
+                        }
+                        else
+                        {
+                            m_untrackedStubFunctions.insert(symbol.name);
+                        }
+                    }
                 }
                 else if (shouldSkipSystemSymbolForHeuristics(symbol.name, forcedRecompileNames))
                 {
@@ -476,16 +344,26 @@ namespace ps2recomp
             }
         }
 
-        for (const auto &func : m_functions)
+        for (const auto &func : m_context.functions)
         {
-            if (!hasReliableSymbolName(func.name))
+            if (!FunctionClassifier::isReliableSymbolName(func.name))
             {
                 continue;
             }
 
             if (isLibraryFunction(func.name))
             {
-                m_libFunctions.insert(func.name);
+                if (!m_forceRecompileStarts.contains(func.start))
+                {
+                    if (FunctionClassifier::hasRuntimeHandler(func.name))
+                    {
+                        m_libFunctions.insert(func.name);
+                    }
+                    else
+                    {
+                        m_untrackedStubFunctions.insert(func.name);
+                    }
+                }
             }
             else if (shouldSkipSystemSymbolForHeuristics(func.name, forcedRecompileNames))
             {
@@ -500,7 +378,7 @@ namespace ps2recomp
 
         std::map<uint32_t, std::set<std::string>> memoryAccessMap;
 
-        for (const auto &func : m_functions)
+        for (const auto &func : m_context.functions)
         {
             if (m_skipFunctions.contains(func.name) ||
                 m_libFunctions.contains(func.name))
@@ -508,7 +386,7 @@ namespace ps2recomp
                 continue;
             }
 
-            std::vector<Instruction> instructions = decodeFunction(func);
+            const auto &instructions = getDecodedInstructions(func);
 
             for (const auto &inst : instructions)
             {
@@ -525,7 +403,7 @@ namespace ps2recomp
                         uint32_t gpValue = 0;
 
                         // Try to find GP value in ELF sections
-                        for (const auto &section : m_sections)
+                        for (const auto &section : m_context.sections)
                         {
                             if (section.name == ".got" || section.name == ".data" ||
                                 section.name == ".sdata" || section.name == ".sbss")
@@ -540,11 +418,11 @@ namespace ps2recomp
                             uint32_t targetAddr = gpValue + offset;
                             memoryAccessMap[targetAddr].insert(func.name);
 
-                            auto symIt = std::find_if(m_symbols.begin(), m_symbols.end(),
+                            auto symIt = std::find_if(m_context.symbols.begin(), m_context.symbols.end(),
                                                       [targetAddr](const Symbol &s)
                                                       { return !s.isFunction && s.address == targetAddr; });
 
-                            if (symIt != m_symbols.end())
+                            if (symIt != m_context.symbols.end())
                             {
                                 std::cout << "Function " << func.name << " accesses data symbol "
                                           << symIt->name << " at 0x" << std::hex << targetAddr
@@ -555,7 +433,7 @@ namespace ps2recomp
                             else
                             {
                                 // Try to find the symbol it belongs to, even if not exact match
-                                for (const auto &sym : m_symbols)
+                                for (const auto &sym : m_context.symbols)
                                 {
                                     if (!sym.isFunction && targetAddr >= sym.address &&
                                         targetAddr < sym.address + sym.size)
@@ -606,16 +484,16 @@ namespace ps2recomp
                                           << " -> " << targetAddr << std::dec << std::endl;
                             }
 
-                            for (const auto &section : m_sections)
+                            for (const auto &section : m_context.sections)
                             {
                                 if (targetAddr >= section.address && targetAddr < section.address + section.size)
                                 {
-                                    auto symIt = std::find_if(m_symbols.begin(), m_symbols.end(),
+                                    auto symIt = std::find_if(m_context.symbols.begin(), m_context.symbols.end(),
                                                               [targetAddr](const Symbol &s)
                                                               { return !s.isFunction && s.address <= targetAddr &&
                                                                        s.address + s.size > targetAddr; });
 
-                                    if (symIt != m_symbols.end())
+                                    if (symIt != m_context.symbols.end())
                                     {
                                         std::cout << "Function " << func.name << " directly accesses "
                                                   << (inst.opcode == OPCODE_LW ? "reads from" : "writes to")
@@ -640,11 +518,11 @@ namespace ps2recomp
             {
                 std::string dataName = formatAddress(addr);
 
-                auto symIt = std::find_if(m_symbols.begin(), m_symbols.end(),
+                auto symIt = std::find_if(m_context.symbols.begin(), m_context.symbols.end(),
                                           [addr](const Symbol &s)
                                           { return !s.isFunction && s.address == addr; });
 
-                if (symIt != m_symbols.end())
+                if (symIt != m_context.symbols.end())
                 {
                     dataName = symIt->name;
                 }
@@ -656,7 +534,7 @@ namespace ps2recomp
             }
         }
 
-        for (const auto &func : m_functions)
+        for (const auto &func : m_context.functions)
         {
             if (m_skipFunctions.contains(func.name) ||
                 m_libFunctions.contains(func.name))
@@ -664,7 +542,7 @@ namespace ps2recomp
                 continue;
             }
 
-            std::vector<Instruction> instructions = decodeFunction(func);
+            const auto &instructions = getDecodedInstructions(func);
 
             for (size_t i = 0; i < instructions.size(); i++)
             {
@@ -694,14 +572,14 @@ namespace ps2recomp
     {
         std::cout << "Identifying potential patches..." << std::endl;
 
-        for (const auto &func : m_functions)
+        for (const auto &func : m_context.functions)
         {
             if (m_skipFunctions.contains(func.name))
             {
                 continue;
             }
 
-            const std::vector<Instruction> instructions = decodeFunction(func);
+            const auto &instructions = getDecodedInstructions(func);
 
             for (size_t index = 0; index + 1 < instructions.size(); ++index)
             {
@@ -821,7 +699,7 @@ namespace ps2recomp
 
     bool ElfAnalyzer::isCodeAddress(uint32_t addr) const
     {
-        for (const auto &section : m_sections)
+        for (const auto &section : m_context.sections)
         {
             if (!section.isCode)
             {
@@ -842,7 +720,7 @@ namespace ps2recomp
     {
         std::cout << "Analyzing control flow of functions..." << std::endl;
 
-        for (const auto &func : m_functions)
+        for (const auto &func : m_context.functions)
         {
             if (m_skipFunctions.contains(func.name) ||
                 m_libFunctions.contains(func.name))
@@ -853,7 +731,7 @@ namespace ps2recomp
             CFG cfg = buildCFG(func);
             m_functionCFGs[func.start] = cfg;
 
-            std::vector<Instruction> instructions = decodeFunction(func);
+            const auto &instructions = getDecodedInstructions(func);
             for (const auto &inst : instructions)
             {
                 if (inst.opcode == OPCODE_JAL ||
@@ -872,21 +750,17 @@ namespace ps2recomp
                         continue;
                     }
 
-                    for (const auto &targetFunc : m_functions)
+                    if (const Function *targetFunc = m_context.findFunction(targetAddr))
                     {
-                        if (targetFunc.start == targetAddr)
-                        {
-                            FunctionCall call;
-                            call.callerAddress = inst.address;
-                            call.calleeAddress = targetAddr;
-                            call.calleeName = targetFunc.name;
+                        FunctionCall call;
+                        call.callerAddress = inst.address;
+                        call.calleeAddress = targetAddr;
+                        call.calleeName = targetFunc->name;
 
-                            m_functionCalls[func.start].push_back(call);
+                        m_functionCalls[func.start].push_back(call);
 
-                            std::cout << "Function " << func.name << " calls " << targetFunc.name
-                                      << " at " << formatAddress(inst.address) << std::endl;
-                            break;
-                        }
+                        std::cout << "Function " << func.name << " calls " << targetFunc->name
+                                  << " at " << formatAddress(inst.address) << std::endl;
                     }
                 }
             }
@@ -898,257 +772,14 @@ namespace ps2recomp
         const std::vector<Section> &sections,
         const std::function<bool(uint32_t, uint32_t &)> &readWord)
     {
-        std::vector<JumpTable> jumpTables;
-
-        auto addSignedImm16 = [](uint32_t hiPart, uint16_t imm16) -> uint32_t
-        {
-            return hiPart + static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(imm16)));
-        };
-
-        auto orUnsignedImm16 = [](uint32_t hiPart, uint16_t imm16) -> uint32_t
-        {
-            return hiPart | static_cast<uint32_t>(imm16);
-        };
-
-        auto looksLikeCodeTarget = [sections](uint32_t addr) -> bool
-        {
-            if (addr == 0)
-            {
-                return false;
-            }
-
-            if (sections.empty())
-            {
-                return true;
-            }
-
-            for (const auto &section : sections)
-            {
-                if (!section.isCode)
-                {
-                    continue;
-                }
-
-                const uint32_t sectionEnd = section.address + section.size;
-                if (addr >= section.address && addr < sectionEnd)
-                {
-                    return true;
-                }
-            }
-
-            return false;
-        };
-
-        auto readJumpEntryCandidate = [&](uint32_t entryAddr, bool isLoadDouble, uint32_t &outTarget) -> bool
-        {
-            outTarget = 0;
-
-            uint32_t w0 = 0;
-            if (!readWord(entryAddr, w0))
-            {
-                return false;
-            }
-
-            if (!isLoadDouble)
-            {
-                outTarget = w0;
-                return true;
-            }
-
-            uint32_t w1 = 0;
-            if (!readWord(entryAddr + 4u, w1))
-            {
-                outTarget = w0; // still keep something
-                return true;
-            }
-
-            const bool w0Looks = looksLikeCodeTarget(w0);
-            const bool w1Looks = looksLikeCodeTarget(w1);
-
-            if (w0Looks && !w1Looks)
-            {
-                outTarget = w0;
-                return true;
-            }
-            if (w1Looks && !w0Looks)
-            {
-                outTarget = w1;
-                return true;
-            }
-            outTarget = w0;
-            return true;
-        };
-
-        auto tryBuildTable = [&](uint32_t baseAddr, uint32_t baseReg, uint32_t numEntries, uint32_t strideBytes, bool isLoadDouble) -> std::optional<JumpTable>
-        {
-            JumpTable jumpTable;
-            jumpTable.address = baseAddr;
-            jumpTable.baseRegister = baseReg;
-
-            uint32_t validCodeTargets = 0;
-            uint32_t totalRead = 0;
-
-            for (uint32_t e = 0; e < numEntries; e++)
-            {
-                const uint32_t entryAddr = baseAddr + (e * strideBytes);
-
-                uint32_t targetAddr = 0;
-                if (!readJumpEntryCandidate(entryAddr, isLoadDouble, targetAddr))
-                {
-                    continue;
-                }
-
-                totalRead++;
-
-                if (looksLikeCodeTarget(targetAddr))
-                {
-                    validCodeTargets++;
-                }
-
-                JumpTableEntry entry;
-                entry.index = e;
-                entry.target = targetAddr;
-                jumpTable.entries.push_back(entry);
-            }
-
-            if (jumpTable.entries.empty())
-            {
-                return std::nullopt;
-            }
-
-            bool ok = false;
-            if (sections.empty())
-            {
-                ok = (totalRead >= 2);
-            }
-            else
-            {
-                ok = (validCodeTargets >= 2) &&
-                     (totalRead >= 2) &&
-                     (validCodeTargets * 2 >= totalRead);
-            }
-
-            if (!ok)
-            {
-                return std::nullopt;
-            }
-
-            return jumpTable;
-        };
-
-        for (size_t i = 0; i < instructions.size(); i++)
-        {
-            const auto &inst = instructions[i];
-
-            if (inst.opcode != OPCODE_SLTIU || i + 2 >= instructions.size())
-            {
-                continue;
-            }
-
-            const auto &nextInst = instructions[i + 1];
-            if (nextInst.opcode != OPCODE_BNE && nextInst.opcode != OPCODE_BEQ)
-            {
-                continue;
-            }
-
-            // scan for LW/LD + JR pair
-            for (size_t j = i + 2; j < std::min(i + 10, instructions.size()); j++)
-            {
-                const auto &loadInst = instructions[j];
-                const bool isLoadWord = (loadInst.opcode == OPCODE_LW);
-                const bool isLoadDouble = (loadInst.opcode == OPCODE_LD);
-
-                if ((!isLoadWord && !isLoadDouble) || j + 1 >= instructions.size())
-                {
-                    continue;
-                }
-
-                const auto &jumpInst = instructions[j + 1];
-                if (jumpInst.opcode != OPCODE_SPECIAL ||
-                    jumpInst.function != SPECIAL_JR ||
-                    jumpInst.rs != loadInst.rt)
-                {
-                    continue;
-                }
-
-                const uint32_t numEntries = inst.immediate;
-                if (numEntries == 0 || numEntries >= 1000)
-                {
-                    break;
-                }
-
-                uint32_t baseAddr = 0;
-
-                // A) LUI tmp ; ADDIU/ORI base, tmp, lo
-                // B) LUI base ; ... ; LW/LD rt, lo(base)
-                for (int k = static_cast<int>(j) - 1; k >= static_cast<int>(i); k--)
-                {
-                    const auto &addrInst = instructions[static_cast<size_t>(k)];
-                    if (addrInst.opcode != OPCODE_LUI)
-                    {
-                        continue;
-                    }
-
-                    const uint32_t hiPart = (addrInst.immediate << 16);
-
-                    if (static_cast<size_t>(k + 1) < instructions.size())
-                    {
-                        const auto &offsetInst = instructions[static_cast<size_t>(k + 1)];
-                        const bool isAddiuOrOri = (offsetInst.opcode == OPCODE_ADDIU || offsetInst.opcode == OPCODE_ORI);
-
-                        if (isAddiuOrOri &&
-                            offsetInst.rs == addrInst.rt &&
-                            offsetInst.rt == loadInst.rs)
-                        {
-                            if (offsetInst.opcode == OPCODE_ADDIU)
-                            {
-                                baseAddr = addSignedImm16(hiPart, offsetInst.immediate);
-                            }
-                            else
-                            {
-                                baseAddr = orUnsignedImm16(hiPart, offsetInst.immediate);
-                            }
-                            break;
-                        }
-                    }
-
-                    if (addrInst.rt == loadInst.rs)
-                    {
-                        baseAddr = addSignedImm16(hiPart, loadInst.immediate);
-                        break;
-                    }
-                }
-
-                if (baseAddr == 0)
-                {
-                    break;
-                }
-
-                const uint32_t preferredStride = isLoadDouble ? 8u : 4u;
-
-                std::optional<JumpTable> table = tryBuildTable(baseAddr, loadInst.rs, numEntries, preferredStride, isLoadDouble);
-                if (!table && isLoadDouble)
-                {
-                    table = tryBuildTable(baseAddr, loadInst.rs, numEntries, 4u, isLoadDouble);
-                }
-
-                if (table)
-                {
-                    jumpTables.push_back(std::move(*table));
-                }
-
-                break;
-            }
-        }
-
-        return jumpTables;
+        return AnalysisPasses::detectJumpTables(instructions, sections, readWord);
     }
 
     void ElfAnalyzer::detectJumpTables()
     {
         std::cout << "Detecting jump tables..." << std::endl;
 
-        for (const auto &func : m_functions)
+        for (const auto &func : m_context.functions)
         {
             if (m_skipFunctions.contains(func.name) ||
                 m_libFunctions.contains(func.name))
@@ -1156,10 +787,10 @@ namespace ps2recomp
                 continue;
             }
 
-            std::vector<Instruction> instructions = decodeFunction(func);
+            const auto &instructions = getDecodedInstructions(func);
             std::vector<JumpTable> detectedTables = detectJumpTablesForHeuristics(
                 instructions,
-                m_sections,
+                m_context.sections,
                 [this](uint32_t address, uint32_t &outWord) -> bool
                 {
                     return tryReadWord(m_elfParser.get(), address, outWord);
@@ -1180,11 +811,12 @@ namespace ps2recomp
         }
     }
 
-    void ElfAnalyzer::analyzePerformanceCriticalPaths() const
+    void ElfAnalyzer::analyzePerformanceCriticalPaths()
     {
         std::cout << "Analyzing performance-critical paths..." << std::endl;
+        m_performanceCriticalReasons.clear();
 
-        for (const auto &func : m_functions)
+        for (const auto &func : m_context.functions)
         {
             if (m_skipFunctions.contains(func.name) ||
                 m_libFunctions.contains(func.name))
@@ -1192,7 +824,15 @@ namespace ps2recomp
                 continue;
             }
 
-            std::vector<Instruction> instructions = decodeFunction(func);
+            const auto &instructions = getDecodedInstructions(func);
+            if (hasMMIInstructions(func) || hasVUInstructions(func))
+            {
+                m_performanceCriticalReasons[func.start] = "Uses SIMD instructions";
+            }
+            else if (isLoopHeavyFunction(func))
+            {
+                m_performanceCriticalReasons[func.start] = "Contains heavy loops";
+            }
 
             for (const auto &inst : instructions)
             {
@@ -1239,107 +879,7 @@ namespace ps2recomp
     std::unordered_set<std::string> ElfAnalyzer::findRecursiveFunctionsForHeuristics(
         const std::unordered_map<std::string, std::vector<std::string>> &callGraph)
     {
-        std::unordered_set<std::string> nodes;
-        for (const auto &[caller, callees] : callGraph)
-        {
-            nodes.insert(caller);
-            for (const auto &callee : callees)
-            {
-                nodes.insert(callee);
-            }
-        }
-
-        std::unordered_map<std::string, int> index;
-        std::unordered_map<std::string, int> lowlink;
-        std::unordered_set<std::string> onStack;
-        std::vector<std::string> stack;
-
-        index.reserve(nodes.size());
-        lowlink.reserve(nodes.size());
-        onStack.reserve(nodes.size());
-        stack.reserve(nodes.size());
-
-        int currentIndex = 0;
-        std::vector<std::vector<std::string>> sccs;
-        sccs.reserve(nodes.size());
-
-        std::function<void(const std::string &)> strongconnect;
-        strongconnect = [&](const std::string &v)
-        {
-            index[v] = currentIndex;
-            lowlink[v] = currentIndex;
-            currentIndex++;
-
-            stack.push_back(v);
-            onStack.insert(v);
-
-            auto it = callGraph.find(v);
-            if (it != callGraph.end())
-            {
-                for (const auto &w : it->second)
-                {
-                    if (!index.contains(w))
-                    {
-                        strongconnect(w);
-                        lowlink[v] = std::min(lowlink[v], lowlink[w]);
-                    }
-                    else if (onStack.contains(w))
-                    {
-                        lowlink[v] = std::min(lowlink[v], index[w]);
-                    }
-                }
-            }
-
-            if (lowlink[v] == index[v])
-            {
-                std::vector<std::string> scc;
-                while (!stack.empty())
-                {
-                    std::string w = stack.back();
-                    stack.pop_back();
-                    onStack.erase(w);
-                    scc.push_back(w);
-                    if (w == v)
-                    {
-                        break;
-                    }
-                }
-
-                sccs.push_back(std::move(scc));
-            }
-        };
-
-        for (const auto &name : nodes)
-        {
-            if (!index.contains(name))
-            {
-                strongconnect(name);
-            }
-        }
-
-        std::unordered_set<std::string> recursive;
-        for (const auto &scc : sccs)
-        {
-            if (scc.size() > 1)
-            {
-                recursive.insert(scc.begin(), scc.end());
-                continue;
-            }
-
-            const std::string &name = scc[0];
-            auto it = callGraph.find(name);
-            if (it == callGraph.end())
-            {
-                continue;
-            }
-
-            if (std::find(it->second.begin(), it->second.end(), name) != it->second.end())
-            {
-                recursive.insert(name);
-            }
-        }
-
-        return recursive;
+        return AnalysisPasses::findRecursiveFunctions(callGraph);
     }
 
     void ElfAnalyzer::identifyRecursiveFunctions()
@@ -1348,9 +888,9 @@ namespace ps2recomp
 
         // lets ignore skip and library
         std::unordered_set<std::string> eligible;
-        eligible.reserve(m_functions.size());
+        eligible.reserve(m_context.functions.size());
 
-        for (const auto &func : m_functions)
+        for (const auto &func : m_context.functions)
         {
             if (m_skipFunctions.contains(func.name) ||
                 m_libFunctions.contains(func.name))
@@ -1364,7 +904,7 @@ namespace ps2recomp
         std::unordered_map<std::string, std::vector<std::string>> callGraph;
         callGraph.reserve(eligible.size());
 
-        for (const auto &func : m_functions)
+        for (const auto &func : m_context.functions)
         {
             if (!eligible.contains(func.name))
             {
@@ -1412,7 +952,7 @@ namespace ps2recomp
     {
         std::cout << "Analyzing register usage patterns..." << std::endl;
 
-        for (const auto &func : m_functions)
+        for (const auto &func : m_context.functions)
         {
             if (m_skipFunctions.contains(func.name) ||
                 m_libFunctions.contains(func.name))
@@ -1420,7 +960,7 @@ namespace ps2recomp
                 continue;
             }
 
-            std::vector<Instruction> instructions = decodeFunction(func);
+            const auto &instructions = getDecodedInstructions(func);
             std::set<uint32_t> regsRead, regsWritten;
 
             for (const auto &inst : instructions)
@@ -1511,7 +1051,7 @@ namespace ps2recomp
     {
         std::cout << "Analyzing function signatures..." << std::endl;
 
-        for (const auto &func : m_functions)
+        for (const auto &func : m_context.functions)
         {
             if (m_skipFunctions.contains(func.name) ||
                 m_libFunctions.contains(func.name))
@@ -1519,7 +1059,7 @@ namespace ps2recomp
                 continue;
             }
 
-            std::vector<Instruction> instructions = decodeFunction(func);
+            const auto &instructions = getDecodedInstructions(func);
 
             int paramCount = 0;
             bool usesFloatingPoint = false;
@@ -1599,43 +1139,35 @@ namespace ps2recomp
         {
             uint32_t patchAddr = patch.first;
 
-            for (const auto &func : m_functions)
+            if (const Function *func = m_context.findFunctionContaining(patchAddr))
             {
-                if (patchAddr >= func.start && patchAddr < func.end)
-                {
-                    functionPatches[func.start].push_back(patchAddr);
-                    break;
-                }
+                functionPatches[func->start].push_back(patchAddr);
             }
         }
 
         for (const auto &[funcStart, patchAddrs] : functionPatches)
         {
-            auto funcIt = std::find_if(m_functions.begin(), m_functions.end(),
-                                       [funcStart](const Function &f)
-                                       { return f.start == funcStart; });
-
-            if (funcIt != m_functions.end())
+            if (Function *func = m_context.findFunction(funcStart))
             {
-                const Function &func = *funcIt;
-                if (m_forceRecompileStarts.contains(func.start))
+                if (m_forceRecompileStarts.contains(func->start))
                 {
                     continue;
                 }
 
                 if (patchAddrs.size() > 3)
                 {
-                    std::cout << "Function " << func.name << " has " << patchAddrs.size()
+                    std::cout << "Function " << func->name << " has " << patchAddrs.size()
                               << " patches. Consider skipping or stubing instead." << std::endl;
 
                     // If too many patches in one function, maybe better to skip it
-                    if (shouldSkipForPatchDensityForHeuristics(func.name,
-                                                               func.end - func.start,
+                    if (shouldSkipForPatchDensityForHeuristics(func->name,
+                                                               func->end - func->start,
                                                                patchAddrs.size(),
-                                                               isLibraryFunction(func.name)))
+                                                               isLibraryFunction(func->name)))
                     {
-                        std::cout << "  - Adding " << func.name << " to skip list due to high patch density" << std::endl;
-                        m_skipFunctions.insert(func.name);
+                        std::cout << "  - Adding " << func->name << " to skip list due to high patch density" << std::endl;
+                        m_skipFunctions.insert(func->name);
+                        func->instructions.clear();
 
                         for (const auto &addr : patchAddrs)
                         {
@@ -1676,7 +1208,7 @@ namespace ps2recomp
 
     bool ElfAnalyzer::identifyMemcpyPattern(const Function &func) const
     {
-        std::vector<Instruction> instructions = decodeFunction(func);
+        const auto &instructions = getDecodedInstructions(func);
 
         bool hasLoop = false;
         bool loadsData = false;
@@ -1720,7 +1252,7 @@ namespace ps2recomp
 
     bool ElfAnalyzer::identifyMemsetPattern(const Function &func) const
     {
-        std::vector<Instruction> instructions = decodeFunction(func);
+        const auto &instructions = getDecodedInstructions(func);
 
         bool hasLoop = false;
         bool usesConstant = false;
@@ -1763,7 +1295,7 @@ namespace ps2recomp
 
     bool ElfAnalyzer::identifyStringOperationPattern(const Function &func) const
     {
-        std::vector<Instruction> instructions = decodeFunction(func);
+        const auto &instructions = getDecodedInstructions(func);
 
         bool hasLoop = false;
         bool checksZero = false;
@@ -1803,7 +1335,7 @@ namespace ps2recomp
 
     bool ElfAnalyzer::identifyMathPattern(const Function &func) const
     {
-        std::vector<Instruction> instructions = decodeFunction(func);
+        const auto &instructions = getDecodedInstructions(func);
 
         int mathOps = 0;
         bool usesFPU = false;
@@ -1835,7 +1367,7 @@ namespace ps2recomp
     CFG ElfAnalyzer::buildCFG(const Function &function) const
     {
         CFG cfg;
-        std::vector<Instruction> instructions = decodeFunction(function);
+        const auto &instructions = getDecodedInstructions(function);
         std::map<uint32_t, size_t> addrToIndex;
 
         for (size_t i = 0; i < instructions.size(); i++)
@@ -2000,182 +1532,26 @@ namespace ps2recomp
         return cfg;
     }
 
-    std::string ElfAnalyzer::escapeBackslashes(const std::string &path)
-    {
-        std::string result;
-        for (char ch : path)
-        {
-            if (ch == '\\')
-                result.append("\\\\");
-            else
-                result.push_back(ch);
-        }
-        return result;
-    }
-
-    static bool hasPs2ApiPrefix(const std::string &name)
-    {
-        if (name.empty())
-            return false;
-
-        const std::vector<std::string> libraryPrefixes = {
-            "sce", "Sce", "SCE",   // Sony prefixes
-            "sif", "Sif", "SIF",   // SIF functions
-            "gs", "Gs", "GS",      // Graphics Synthesizer
-            "dma", "Dma", "DMA",   // DMA functions
-            "iop", "Iop", "IOP",   // IOP functions
-            "vif", "Vif", "VIF",   // VIF functions
-            "spu", "Spu", "SPU",   // SPU functions
-            "mc", "Mc", "MC",      // Memory Card functions
-            "libc", "Libc", "LIBC" // C library functions
-        };
-
-        std::string base = name;
-        if (base[0] == '_' && base.size() > 1)
-        {
-            base = base.substr(1);
-        }
-
-        for (const auto &prefix : libraryPrefixes)
-        {
-            if (base.rfind(prefix, 0) == 0)
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    static bool matchesKernelRuntimeName(const std::string &name)
-    {
-        if (name.empty())
-        {
-            return false;
-        }
-
-        static const std::regex kernelRuntimePattern(
-            "^(?:(?:Create|Delete|Start|ExitDelete|Exit|Terminate|Suspend|Resume|Sleep|Wakeup|CancelWakeup|Change|Rotate|Release|Setup|Register|Query|Get|Set|Refer|Poll|Wait|Signal|Enable|Disable|Flush|Reset|Add|Init)(?:Thread|Sema|EventFlag|Alarm|Intc|IntcHandler2|Dmac|DmacHandler2|OsdConfigParam|MemorySize|VSyncFlag|Heap|TLS|Status|Cache|Syscall|TLB|TLBEntry|GsCrt)|EndOfHeap|GsGetIMR|GsPutIMR|Deci2Call|Sif[A-Za-z0-9_]+|i(?:SignalSema|PollSema|ReferSemaStatus|SetEventFlag|ClearEventFlag|PollEventFlag|ReferEventFlagStatus|WakeupThread|CancelWakeupThread|ReleaseWaitThread|SetAlarm|CancelAlarm|FlushCache|sceSifSetDma|sceSifSetDChain))$");
-        return std::regex_match(name, kernelRuntimePattern);
-    }
-
-    static bool isDoNotSkipOrStub(const std::string &name)
-    {
-        static const std::unordered_set<std::string> kDoNotSkipOrStub = {
-            "topThread",
-            "cmd_sem_init"};
-
-        return kDoNotSkipOrStub.contains(name);
-    }
-
-    static bool isKnownLocalHelperName(const std::string &name)
-    {
-        static const std::unordered_set<std::string> kKnownLocalHelpers = {
-            "memcpy2",
-            "_memcpy2"};
-
-        return kKnownLocalHelpers.contains(name);
-    }
-
-    static bool hasReliableSymbolName(const std::string &name)
-    {
-        if (name.empty())
-        {
-            return false;
-        }
-
-        auto startsWith = [&](const char *prefix) -> bool
-        {
-            return name.rfind(prefix, 0) == 0;
-        };
-
-        if (startsWith("sub_") || startsWith("FUN_") || startsWith("func_") ||
-            startsWith("entry_") || startsWith("function_") || startsWith("LAB_"))
-        {
-            return false;
-        }
-
-        bool hasAlpha = false;
-        bool allHexOrPrefix = true;
-        for (char c : name)
-        {
-            if (std::isalpha(static_cast<unsigned char>(c)))
-            {
-                hasAlpha = true;
-            }
-
-            if (!(std::isxdigit(static_cast<unsigned char>(c)) || c == 'x' || c == 'X' || c == '_'))
-            {
-                allHexOrPrefix = false;
-            }
-        }
-
-        if (!hasAlpha)
-        {
-            return false;
-        }
-
-        if ((startsWith("0x") || startsWith("0X")) && allHexOrPrefix)
-        {
-            return false;
-        }
-
-        return true;
-    }
-
     bool ElfAnalyzer::isReliableSymbolNameForHeuristics(const std::string &name)
     {
-        return hasReliableSymbolName(name);
+        return FunctionClassifier::isReliableSymbolName(name);
     }
 
     bool ElfAnalyzer::isSystemSymbolNameForHeuristics(const std::string &name)
     {
-        if (!hasReliableSymbolName(name))
-        {
-            return false;
-        }
-
-        static const std::unordered_set<std::string> systemFuncs = {
-            "entry", "_start", "_init", "_fini",
-            "abort", "exit", "_exit",
-            "_profiler_start", "_profiler_stop",
-            "__main", "__do_global_ctors", "__do_global_dtors",
-            "_GLOBAL__sub_I_", "_GLOBAL__sub_D_",
-            "__ctor_list", "__dtor_list", "_edata", "_end",
-            "etext", "__exidx_start", "__exidx_end",
-            "_ftext", "__bss_start", "__bss_start__",
-            "__bss_end__", "__end__", "_stack", "_dso_handle"};
-
-        return systemFuncs.contains(name) ||
-               name.find("__") == 0 ||
-               name.find(".") == 0; // .text.* or .plt.* symbols
+        return FunctionClassifier::isSystemSymbolName(name);
     }
 
     bool ElfAnalyzer::shouldAutoSkipNameForHeuristics(const std::string &name)
     {
-        if (isDoNotSkipOrStub(name))
-        {
-            return false;
-        }
-
-        // For named game logic, prefer recompiling and only skip explicit/system cases.
-        if (!hasReliableSymbolName(name))
-        {
-            return true;
-        }
-
-        return isSystemSymbolNameForHeuristics(name);
+        return FunctionClassifier::shouldAutoSkipName(name);
     }
 
     bool ElfAnalyzer::shouldSkipSystemSymbolForHeuristics(
         const std::string &name,
         const std::unordered_set<std::string> &forcedRecompileNames)
     {
-        if (forcedRecompileNames.contains(name))
-        {
-            return false;
-        }
-        return isSystemSymbolNameForHeuristics(name);
+        return FunctionClassifier::shouldSkipSystemSymbol(name, forcedRecompileNames);
     }
 
     bool ElfAnalyzer::isSystemFunction(const std::string &name) const
@@ -2185,44 +1561,7 @@ namespace ps2recomp
 
     bool ElfAnalyzer::isLibraryFunction(const std::string &name) const
     {
-        if (name.empty())
-            return false;
-
-        if (!hasReliableSymbolName(name))
-            return false;
-
-        if (isKnownLocalHelperName(name))
-            return false;
-
-        std::string normalizedName = name;
-        if (normalizedName[0] == '_' && normalizedName.size() > 1)
-        {
-            normalizedName = normalizedName.substr(1);
-        }
-
-        if (isKnownLocalHelperName(normalizedName))
-            return false;
-
-        if (matchesKernelRuntimeName(normalizedName))
-            return true;
-
-        if (m_knownLibNames.find(name) != m_knownLibNames.end())
-            return true;
-
-        if (m_knownLibNames.find(normalizedName) != m_knownLibNames.end())
-            return true;
-
-        if (hasPs2ApiPrefix(name))
-            return true;
-
-        // Check for common C/C++ library function names
-        static const std::regex cLibPattern("^_*(mem|str|time|f?printf|f?scanf|malloc|free|calloc|realloc|atoi|itoa|rand|srand|abort|exit|atexit|getenv|system|bsearch|qsort|abs|labs|div|ldiv|mblen|mbtowc|wctomb|mbstowcs|wcstombs).*");
-        if (std::regex_match(normalizedName, cLibPattern))
-        {
-            return true;
-        }
-
-        return false;
+        return m_classifier.isLibraryFunction(name);
     }
 
     bool ElfAnalyzer::isLibrarySymbolNameForHeuristics(const std::string &name) const
@@ -2232,85 +1571,19 @@ namespace ps2recomp
 
     bool ElfAnalyzer::hasHardwareIOSignalForHeuristics(const std::vector<Instruction> &instructions)
     {
-        for (const auto &inst : instructions)
-        {
-            if (inst.opcode == OPCODE_LUI)
-            {
-                const uint32_t upperAddr = inst.immediate << 16;
-                if ((upperAddr >= 0x10000000 && upperAddr < 0x14000000) || // I/O area
-                    (upperAddr >= 0x1F800000 && upperAddr < 0x1F900000))   // Scratchpad RAM
-                {
-                    return true;
-                }
-            }
-        }
-
-        return false;
+        return AnalysisPasses::hasHardwareIOSignal(instructions);
     }
 
     bool ElfAnalyzer::hasLargeComplexMMISignalForHeuristics(const std::vector<Instruction> &instructions,
                                                             size_t largeInstructionThreshold)
     {
-        if (instructions.size() <= largeInstructionThreshold)
-        {
-            return false;
-        }
-
-        for (const auto &inst : instructions)
-        {
-            if (inst.isMMI &&
-                inst.opcode == OPCODE_MMI &&
-                (inst.function == MMI_MMI0 || inst.function == MMI_MMI1 ||
-                 inst.function == MMI_MMI2 || inst.function == MMI_MMI3))
-            {
-                return true;
-            }
-        }
-
-        return false;
+        return AnalysisPasses::hasLargeComplexMMISignal(instructions, largeInstructionThreshold);
     }
 
     bool ElfAnalyzer::hasSelfModifyingSignalForHeuristics(const std::vector<Instruction> &instructions,
                                                           const std::vector<Section> &sections)
     {
-        for (size_t i = 0; i < instructions.size(); i++)
-        {
-            const auto &inst = instructions[i];
-            if (!(inst.opcode == OPCODE_SW || inst.opcode == OPCODE_SH ||
-                  inst.opcode == OPCODE_SB || inst.opcode == OPCODE_SQ))
-            {
-                continue;
-            }
-
-            uint32_t baseAddr = 0;
-            for (int j = static_cast<int>(i) - 1; j >= 0 && j >= static_cast<int>(i) - 5; j--)
-            {
-                const auto &prevInst = instructions[static_cast<size_t>(j)];
-                if (prevInst.opcode == OPCODE_LUI && prevInst.rt == inst.rs)
-                {
-                    baseAddr = prevInst.immediate << 16;
-                    break;
-                }
-            }
-
-            if (baseAddr == 0)
-            {
-                continue;
-            }
-
-            const uint32_t targetAddr = baseAddr + static_cast<int16_t>(inst.immediate);
-            for (const auto &section : sections)
-            {
-                if (section.isCode &&
-                    targetAddr >= section.address &&
-                    targetAddr < section.address + section.size)
-                {
-                    return true;
-                }
-            }
-        }
-
-        return false;
+        return AnalysisPasses::hasSelfModifyingSignal(instructions, sections);
     }
 
     bool ElfAnalyzer::shouldSkipForPatchDensityForHeuristics(const std::string &functionName,
@@ -2318,29 +1591,113 @@ namespace ps2recomp
                                                              size_t patchCount,
                                                              bool isLibraryFunction)
     {
-        if (patchCount <= 5 || functionSizeBytes < 4)
+        return AnalysisPasses::shouldSkipForPatchDensity(
+            functionName,
+            functionSizeBytes,
+            patchCount,
+            isLibraryFunction);
+    }
+
+    void ElfAnalyzer::clearDecodedInstructionCache()
+    {
+        m_context.clearInstructionCache();
+    }
+
+    void ElfAnalyzer::buildFunctionIndex()
+    {
+        m_context.buildFunctionIndex();
+    }
+
+    void ElfAnalyzer::decodeAllFunctionsOnce()
+    {
+        m_context.instructionCache.clear();
+        for (auto &func : m_context.functions)
         {
-            return false;
+            if (m_skipFunctions.contains(func.name) ||
+                m_libFunctions.contains(func.name) ||
+                func.start >= func.end)
+            {
+                continue;
+            }
+
+            if (func.instructions.empty())
+            {
+                func.instructions = decodeFunction(func);
+            }
+        }
+    }
+
+    void ElfAnalyzer::classifyFunctions()
+    {
+        for (auto &func : m_context.functions)
+        {
+            if (m_libFunctions.contains(func.name))
+            {
+                continue;
+            }
+
+            categorizeFunction(func);
+            if (m_skipFunctions.contains(func.name))
+            {
+                func.instructions.clear();
+            }
+        }
+    }
+
+    void ElfAnalyzer::runDataUsagePass()
+    {
+        analyzeDataUsage();
+    }
+
+    void ElfAnalyzer::runPatchDetectionPass()
+    {
+        identifyPotentialPatches();
+    }
+
+    void ElfAnalyzer::runControlFlowPass()
+    {
+        analyzeControlFlow();
+    }
+
+    void ElfAnalyzer::runJumpTablePass()
+    {
+        detectJumpTables();
+    }
+
+    void ElfAnalyzer::runPerformancePass()
+    {
+        analyzePerformanceCriticalPaths();
+    }
+
+    void ElfAnalyzer::runSignaturePass() const
+    {
+        analyzeFunctionSignatures();
+    }
+
+    void ElfAnalyzer::printAnalysisSummary() const
+    {
+        std::cout << "Analysis completed" << std::endl;
+        std::cout << "- " << m_libFunctions.size() << " library functions to stub" << std::endl;
+        std::cout << "- " << m_untrackedStubFunctions.size() << " detected library functions without runtime handlers" << std::endl;
+        std::cout << "- " << m_skipFunctions.size() << " functions to skip" << std::endl;
+        std::cout << "- " << m_patches.size() << " potential patches identified" << std::endl;
+        std::cout << "- " << m_jumpTables.size() << " jump tables detected" << std::endl;
+    }
+
+    const std::vector<Instruction> &ElfAnalyzer::getDecodedInstructions(const Function &function) const
+    {
+        if (!function.instructions.empty() || function.start >= function.end)
+        {
+            return function.instructions;
         }
 
-        const double instructionCount = static_cast<double>(functionSizeBytes) / 4.0;
-        if (instructionCount <= 0.0)
+        auto cacheIt = m_context.instructionCache.find(function.start);
+        if (cacheIt == m_context.instructionCache.end())
         {
-            return false;
+            cacheIt = m_context.instructionCache.emplace(function.start, decodeFunction(function)).first;
         }
 
-        const double density = static_cast<double>(patchCount) / instructionCount;
-        if (density <= 0.2)
-        {
-            return false;
-        }
-
-        if (isLibraryFunction || isDoNotSkipOrStub(functionName))
-        {
-            return false;
-        }
-
-        return shouldAutoSkipNameForHeuristics(functionName);
+        return cacheIt->second;
     }
 
     std::vector<Instruction> ElfAnalyzer::decodeFunction(const Function &function) const
@@ -2379,7 +1736,7 @@ namespace ps2recomp
 
     bool ElfAnalyzer::hasMMIInstructions(const Function &function) const
     {
-        std::vector<Instruction> instructions = decodeFunction(function);
+        const auto &instructions = getDecodedInstructions(function);
 
         for (const auto &inst : instructions)
         {
@@ -2394,7 +1751,7 @@ namespace ps2recomp
 
     bool ElfAnalyzer::hasVUInstructions(const Function &function) const
     {
-        std::vector<Instruction> instructions = decodeFunction(function);
+        const auto &instructions = getDecodedInstructions(function);
 
         for (const auto &inst : instructions)
         {
@@ -2418,16 +1775,16 @@ namespace ps2recomp
 
     bool ElfAnalyzer::identifyFunctionType(const Function &function)
     {
-        if (isDoNotSkipOrStub(function.name))
+        if (FunctionClassifier::isDoNotSkipOrStub(function.name))
         {
             return false;
         }
-        if (hasPs2ApiPrefix(function.name))
+        if (FunctionClassifier::hasPs2ApiPrefix(function.name))
         {
             return false;
         }
 
-        std::vector<Instruction> instructions = decodeFunction(function);
+        const auto &instructions = getDecodedInstructions(function);
 
         const bool hasHardwareIO = hasHardwareIOSignalForHeuristics(instructions);
         const bool hasLargeComplexMMI = hasLargeComplexMMISignalForHeuristics(instructions);
@@ -2469,7 +1826,7 @@ namespace ps2recomp
         {
             std::cout << "Function " << function.name << " contains self-modifying code" << std::endl;
             if (!isLibraryFunction(function.name) &&
-                !isDoNotSkipOrStub(function.name) &&
+                !FunctionClassifier::isDoNotSkipOrStub(function.name) &&
                 shouldAutoSkipByHeuristic(function))
             {
                 m_skipFunctions.insert(function.name);
@@ -2484,13 +1841,13 @@ namespace ps2recomp
 
     bool ElfAnalyzer::isSelfModifyingCode(const Function &function) const
     {
-        std::vector<Instruction> instructions = decodeFunction(function);
-        return hasSelfModifyingSignalForHeuristics(instructions, m_sections);
+        const auto &instructions = getDecodedInstructions(function);
+        return hasSelfModifyingSignalForHeuristics(instructions, m_context.sections);
     }
 
     bool ElfAnalyzer::isLoopHeavyFunction(const Function &function) const
     {
-        std::vector<Instruction> instructions = decodeFunction(function);
+        const auto &instructions = getDecodedInstructions(function);
         int loopCount = 0;
 
         for (const auto &inst : instructions)
@@ -2608,7 +1965,7 @@ namespace ps2recomp
 
             // Update existing function or create new one
             bool found = false;
-            for (auto &func : m_functions)
+            for (auto &func : m_context.functions)
             {
                 if (func.start == startAddr)
                 {
@@ -2628,10 +1985,18 @@ namespace ps2recomp
                 newFunc.name = name;
                 newFunc.start = startAddr;
                 newFunc.end = endAddr;
-                m_functions.push_back(newFunc);
+                m_context.functions.push_back(newFunc);
                 importedCount++;
             }
         }
+
+        clearDecodedInstructionCache();
+        std::sort(m_context.functions.begin(), m_context.functions.end(),
+                  [](const Function &a, const Function &b)
+                  {
+                      return a.start < b.start;
+                  });
+        buildFunctionIndex();
 
         std::cout << "Imported " << importedCount << " functions from Ghidra CSV: " << csvPath << std::endl;
         return true;
@@ -2639,6 +2004,6 @@ namespace ps2recomp
 
     const std::vector<Function>& ElfAnalyzer::getFunctions() const
     {
-        return m_functions;
+        return m_context.functions;
     }
 }
