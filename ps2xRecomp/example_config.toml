@@ -8,6 +8,13 @@ output = "output/"
 # Single file output mode (false for one file per function)
 single_file_output = false
 
+# Lower peak memory by avoiding retained disassembly strings and forcing serial output generation.
+low_memory_mode = false
+
+# Function generation workers. 0 uses nproc - 1 when at least 2 hardware threads are available; 1 disables parallel generation.
+# Limited to nproc * 2 to avoid oversubscription.
+output_worker_threads = 0
+
 # Path to runtime header (optional)
 runtime_header = "include/ps2_runtime.h"
 

@@ -4,6 +4,7 @@
 #include "ps2recomp/types.h"
 #include "ps2recomp/instructions.h"
 #include <cstdint>
+#include <string>
 
 namespace ps2recomp
 {
@@ -14,7 +15,10 @@ namespace ps2recomp
         R5900Decoder();
         ~R5900Decoder();
 
-        Instruction decodeInstruction(uint32_t address, uint32_t rawInstruction) const;
+        static std::string disassembleInstruction(uint32_t address, uint32_t rawInstruction);
+        static std::string disassembleInstruction(const Instruction &inst);
+
+        Instruction decodeInstruction(uint32_t address, uint32_t rawInstruction, bool includeDisassembly = true) const;
 
         bool isBranchInstruction(const Instruction &inst) const;
         bool isJumpInstruction(const Instruction &inst) const;
