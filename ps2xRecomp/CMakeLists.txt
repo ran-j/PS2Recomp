@@ -1,145 +1,137 @@
-cmake_minimum_required(VERSION 3.20)
+# Blackline Interactive
 
-project(PS2Recomp VERSION 0.1.0 LANGUAGES C CXX)
+cmake_minimum_required(VERSION 3.21)
+project(ps2xStudio)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_C_STANDARD 99)
-set(CMAKE_C_STANDARD_REQUIRED ON)
 
 include(FetchContent)
 
+# ImGui: docking branch pinned to a specific commit for stability
 FetchContent_Declare(
-    elfio
-    GIT_REPOSITORY https://github.com/serge1/ELFIO.git
-    GIT_TAG 94f7706b5325b2ad9872e4481278278592cf86c9
-    GIT_SHALLOW TRUE
-)
-FetchContent_MakeAvailable(elfio)
-
-FetchContent_Declare(
-    toml11
-    GIT_REPOSITORY https://github.com/ToruNiina/toml11.git
-    GIT_TAG master
-)
-FetchContent_MakeAvailable(toml11)
-
-FetchContent_Declare(
-    fmt
-    GIT_REPOSITORY https://github.com/fmtlib/fmt.git
-    GIT_TAG 12.1.0
-)
-FetchContent_MakeAvailable(fmt)
- 
-FetchContent_Declare(
-    libdwarf
-    GIT_REPOSITORY https://github.com/davea42/libdwarf-code.git
-    GIT_TAG v2.2.0
-    GIT_SHALLOW TRUE
+    imgui
+    GIT_REPOSITORY https://github.com/ocornut/imgui.git
+    GIT_TAG        v1.91.6
+    GIT_SHALLOW    TRUE
 )
 
+# ImGuiColorTextEdit: pinned to a known stable commit
 FetchContent_Declare(
-    libdwarf
-    GIT_REPOSITORY https://github.com/davea42/libdwarf-code.git
-    GIT_TAG v2.2.0
-    GIT_SHALLOW TRUE
+    imgui_colortextedit
+    GIT_REPOSITORY https://github.com/BalazsJako/ImGuiColorTextEdit.git
+    GIT_TAG        0a88824f7de47d71b30f0f2bec550ca3e6714650
+    GIT_SHALLOW    TRUE
 )
 
-set(BUILD_DWARFDUMP    OFF CACHE BOOL "" FORCE)
-set(BUILD_DWARFEXAMPLE OFF CACHE BOOL "" FORCE)
-set(BUILD_DWARFGEN     OFF CACHE BOOL "" FORCE)
-
-set(BUILD_SHARED   OFF CACHE BOOL "" FORCE)
-set(BUILD_NON_SHARED ON CACHE BOOL "" FORCE)
-
-FetchContent_MakeAvailable(libdwarf)
-
-set(LIBDWARF_INCLUDE_DIR "${libdwarf_SOURCE_DIR}/src/lib/libdwarf")
-
+# imgui_club: pinned to a known stable commit
 FetchContent_Declare(
-    rabbitizer
-    GIT_REPOSITORY https://github.com/Decompollaborate/rabbitizer.git
-    GIT_TAG 1.14.3
+    imgui_club
+    GIT_REPOSITORY https://github.com/ocornut/imgui_club.git
+    GIT_TAG        d4f9b46b7e3f368a8d80b4a5e0dbb411892cb2b5
+    GIT_SHALLOW    TRUE
 )
-FetchContent_MakeAvailable(rabbitizer)
 
-if (NOT TARGET rabbitizer)
-    file(GLOB_RECURSE RABBITIZER_SOURCES CONFIGURE_DEPENDS
-        "${rabbitizer_SOURCE_DIR}/src/analysis/*.c"
-        "${rabbitizer_SOURCE_DIR}/src/common/*.c"
-        "${rabbitizer_SOURCE_DIR}/src/instructions/*.c"
-        "${rabbitizer_SOURCE_DIR}/src/instructions/*/*.c"
-    )
+# ImGuiFileDialog: pinned to a known stable commit
+FetchContent_Declare(
+    imgui_file_dialog
+    GIT_REPOSITORY https://github.com/aiekick/ImGuiFileDialog.git
+    GIT_TAG        v0.6.7
+    GIT_SHALLOW    TRUE
+)
 
-    add_library(rabbitizer STATIC ${RABBITIZER_SOURCES})
+# rlImGui: pinned to Raylib 5.5 compatible tag (ImGui 1.92.7)
+# This prevents breaking changes when upstream updates raylib/imgui versions.
+# See: https://github.com/raylib-extras/rlImGui/tree/Raylib_5_5
+FetchContent_Declare(
+    rlImGui
+    GIT_REPOSITORY https://github.com/raylib-extras/rlImGui.git
+    GIT_TAG        Raylib_5_5
+    GIT_SHALLOW    TRUE
+)
 
-    target_include_directories(rabbitizer PUBLIC
-        "${rabbitizer_SOURCE_DIR}/include"
-        "${rabbitizer_SOURCE_DIR}/tables"
-        "${rabbitizer_SOURCE_DIR}/tables/tables"
-    )
+FetchContent_MakeAvailable(imgui imgui_colortextedit imgui_club rlImGui)
+
+FetchContent_GetProperties(imgui_file_dialog)
+if(NOT imgui_file_dialog_POPULATED)
+    FetchContent_Populate(imgui_file_dialog)
 endif()
 
-file(GLOB_RECURSE PS2RECOMP_LIB_SOURCES CONFIGURE_DEPENDS
-    src/lib/*.cpp
+set(IMGUI_SOURCES
+    ${imgui_SOURCE_DIR}/imgui.cpp
+    ${imgui_SOURCE_DIR}/imgui_draw.cpp
+    ${imgui_SOURCE_DIR}/imgui_tables.cpp
+    ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+    ${imgui_SOURCE_DIR}/imgui_demo.cpp
+    ${rlimgui_SOURCE_DIR}/rlImGui.cpp
 )
 
-file(GLOB_RECURSE PS2RECOMP_HEADERS CONFIGURE_DEPENDS
-    include/*.h
-    include/*.hpp
+add_library(imgui_lib STATIC ${IMGUI_SOURCES})
+
+target_include_directories(imgui_lib PUBLIC
+    ${imgui_SOURCE_DIR}
+    ${imgui_SOURCE_DIR}/backends
+    ${rlimgui_SOURCE_DIR}
 )
 
-add_library(ps2_recomp_lib STATIC ${PS2RECOMP_LIB_SOURCES} ${PS2RECOMP_HEADERS})
+target_link_libraries(imgui_lib PUBLIC raylib)
 
-target_compile_definitions(ps2_recomp_lib
-PUBLIC
-    LIBDWARF_STATIC
-PRIVATE
-    LIBDWARF_STATIC
+add_library(imgui_colortextedit_lib STATIC
+    ${imgui_colortextedit_SOURCE_DIR}/TextEditor.cpp
 )
 
-target_include_directories(ps2_recomp_lib
-PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${elfio_SOURCE_DIR}
-    ${LIBDWARF_INCLUDE_DIR}
+target_include_directories(imgui_colortextedit_lib PUBLIC ${imgui_colortextedit_SOURCE_DIR})
 
-PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/../ps2xRuntime/include
+target_link_libraries(imgui_colortextedit_lib PUBLIC imgui_lib)
+
+add_library(imgui_memory_editor_lib INTERFACE)
+
+target_include_directories(imgui_memory_editor_lib INTERFACE
+    ${imgui_club_SOURCE_DIR}/imgui_memory_editor
 )
 
-target_link_libraries(ps2_recomp_lib
-PUBLIC
-    fmt::fmt
-    toml11::toml11 
-    dwarf
-    rabbitizer
+target_link_libraries(imgui_memory_editor_lib INTERFACE imgui_lib)
+
+add_library(imgui_filedialog_lib STATIC
+    ${imgui_file_dialog_SOURCE_DIR}/ImGuiFileDialog.cpp
 )
 
-file(GLOB_RECURSE PS2RECOMP_EXE_SOURCES CONFIGURE_DEPENDS
-    src/runner/*.cpp
+target_include_directories(imgui_filedialog_lib PUBLIC 
+    ${imgui_file_dialog_SOURCE_DIR}
+    ${imgui_SOURCE_DIR}
 )
 
-add_executable(ps2_recomp ${PS2RECOMP_EXE_SOURCES})
+target_link_libraries(imgui_filedialog_lib PUBLIC imgui_lib)
 
-target_link_libraries(ps2_recomp
-PRIVATE
+file(GLOB_RECURSE STUDIO_SOURCES "src/*.cpp")
+file(GLOB_RECURSE STUDIO_HEADERS "include/*.hpp")
+
+add_executable(ps2xStudio ${STUDIO_SOURCES} ${STUDIO_HEADERS})
+
+target_include_directories(ps2xStudio PRIVATE 
+    include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ps2xAnalyzer/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ps2xRecomp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ps2xTest/include
+    ${rlimgui_SOURCE_DIR}
+)
+
+target_link_libraries(ps2xStudio PRIVATE
+    imgui_lib
+    imgui_colortextedit_lib
+    imgui_memory_editor_lib
+    imgui_filedialog_lib
     ps2_recomp_lib
-)
-
-install(TARGETS ps2_recomp ps2_recomp_lib
-    RUNTIME DESTINATION bin
-    LIBRARY DESTINATION lib
-    ARCHIVE DESTINATION lib
-)
-
-install(DIRECTORY include/
-    DESTINATION include
+    ps2_analyzer_lib
+    ps2_test_lib
+    raylib
 )
 
 include("${CMAKE_SOURCE_DIR}/ps2xRuntime/cmake/ReleaseMode.cmake")
 
 if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
-    EnableFastReleaseMode(ps2_recomp_lib)
-    EnableFastReleaseMode(ps2_recomp)
+    EnableFastReleaseMode(imgui_lib)
+    EnableFastReleaseMode(imgui_colortextedit_lib)
+    EnableFastReleaseMode(imgui_filedialog_lib)
+    EnableFastReleaseMode(ps2xStudio)
 endif()
