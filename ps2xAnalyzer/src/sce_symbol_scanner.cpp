@@ -1,4 +1,5 @@
 #include "ps2recomp/sce_symbol_scanner.h"
+#include "ps2recomp/sce_symbol_database_data.h"
 #include "ps2recomp/types.h"
 
 #include <nlohmann/json.hpp>
@@ -13,6 +14,7 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <unordered_map>
 
 namespace fs = std::filesystem;
@@ -382,6 +384,24 @@ namespace ps2recomp
 
             return inputPath;
         }
+
+        template <size_t N>
+        static std::string joinJsonChunks(const std::string_view (&chunks)[N])
+        {
+            size_t size = 0;
+            for (std::string_view chunk : chunks)
+            {
+                size += chunk.size();
+            }
+
+            std::string joined;
+            joined.reserve(size);
+            for (std::string_view chunk : chunks)
+            {
+                joined.append(chunk.data(), chunk.size());
+            }
+            return joined;
+        }
     }
 
     class SceSymbolScanner::Impl
@@ -395,9 +415,17 @@ namespace ps2recomp
 
             try
             {
-                const fs::path resolvedPath = resolveDatabasePath(databasePath);
-                loadSymbols(resolvedPath / "symbols.json");
-                loadTree(resolvedPath / "tree.json");
+                if (databasePath.empty())
+                {
+                    loadEmbeddedSymbols();
+                    loadEmbeddedTree();
+                }
+                else
+                {
+                    const fs::path resolvedPath = resolveDatabasePath(databasePath);
+                    loadSymbols(resolvedPath / "symbols.json");
+                    loadTree(resolvedPath / "tree.json");
+                }
                 return true;
             }
             catch (const std::exception &e)
@@ -479,6 +507,18 @@ namespace ps2recomp
         std::unique_ptr<MatchNode> m_root;
         std::string m_lastError;
 
+        void loadEmbeddedSymbols()
+        {
+            const std::string jsonText = joinJsonChunks(sce_symbol_database::kSymbolsJsonChunks);
+            loadSymbolsJson(nlohmann::json::parse(jsonText));
+        }
+
+        void loadEmbeddedTree()
+        {
+            const std::string jsonText = joinJsonChunks(sce_symbol_database::kTreeJsonChunks);
+            loadTreeJson(nlohmann::json::parse(jsonText));
+        }
+
         void loadSymbols(const fs::path &path)
         {
             std::ifstream file(path);
@@ -488,6 +528,11 @@ namespace ps2recomp
             }
 
             const nlohmann::json root = nlohmann::json::parse(file);
+            loadSymbolsJson(root);
+        }
+
+        void loadSymbolsJson(const nlohmann::json &root)
+        {
             for (auto libraryIt = root.begin(); libraryIt != root.end(); ++libraryIt)
             {
                 const std::string library = libraryIt.key();
@@ -538,6 +583,11 @@ namespace ps2recomp
             }
 
             const nlohmann::json root = nlohmann::json::parse(file);
+            loadTreeJson(root);
+        }
+
+        void loadTreeJson(const nlohmann::json &root)
+        {
             m_root = parseNode(root);
         }
 

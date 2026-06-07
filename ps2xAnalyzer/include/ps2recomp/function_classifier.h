@@ -17,12 +17,7 @@ namespace ps2recomp
         static bool hasRuntimeHandler(const std::string &name);
 
         static bool isReliableSymbolName(const std::string &name);
-        static bool isSystemSymbolName(const std::string &name);
-        static bool shouldAutoSkipName(const std::string &name);
-        static bool shouldSkipSystemSymbol(const std::string &name, const std::unordered_set<std::string> &forcedRecompileNames);
         static bool hasPs2ApiPrefix(const std::string &name);
-        static bool isDoNotSkipOrStub(const std::string &name);
-        static bool isKnownLocalHelperName(const std::string &name);
 
     private:
         std::unordered_set<std::string> m_knownLibNames;

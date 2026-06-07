@@ -134,7 +134,6 @@ namespace ps2recomp
         };
 
         const std::vector<std::string> stubEntries = collectFunctionSelectors(input.libFunctions);
-        const std::vector<std::string> skipEntries = collectFunctionSelectors(input.skipFunctions);
         const std::vector<std::string> untrackedStubEntries = collectFunctionSelectors(input.untrackedStubFunctions);
 
         file << "# Functions to stub (only names with runtime syscall/stub handlers)\n";
@@ -154,13 +153,8 @@ namespace ps2recomp
         }
         file << "]\n\n";
 
-        file << "# Functions to skip (these will not be recompiled)\n";
-        file << "skip = [\n";
-        for (const auto &func : skipEntries)
-        {
-            file << "  \"" << func << "\",\n";
-        }
-        file << "]\n\n";
+        file << "# Legacy compatibility field. The analyzer no longer auto-populates skip entries.\n";
+        file << "skip = []\n\n";
 
         if (!input.mmioByInstructionAddress.empty())
         {

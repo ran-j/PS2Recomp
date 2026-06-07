@@ -18,7 +18,6 @@ namespace ps2recomp
         const std::string &elfPath;
         const ElfAnalysisContext &context;
         const std::unordered_set<std::string> &libFunctions;
-        const std::unordered_set<std::string> &skipFunctions;
         const std::unordered_set<std::string> &untrackedStubFunctions;
         const std::unordered_map<uint32_t, uint32_t> &mmioByInstructionAddress;
         const std::vector<JumpTable> &jumpTables;

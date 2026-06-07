@@ -76,7 +76,6 @@ namespace ps2recomp
 
         m_context.clear();
         m_libFunctions.clear();
-        m_skipFunctions.clear();
         m_untrackedStubFunctions.clear();
         m_forceRecompileStarts.clear();
         m_sceSdkFunctionNames.clear();
@@ -110,7 +109,6 @@ namespace ps2recomp
             m_elfPath,
             m_context,
             m_libFunctions,
-            m_skipFunctions,
             m_untrackedStubFunctions,
             m_mmioByInstructionAddress,
             m_jumpTables,
@@ -132,23 +130,25 @@ namespace ps2recomp
             }
         }
 
-        if (databasePath.empty())
-        {
-            return;
-        }
-
         SceSymbolScanner scanner;
         if (!scanner.loadDatabase(databasePath))
         {
-            std::cerr << "Failed to load SCE symbol database from " << databasePath
+            const std::string sourceDescription = databasePath.empty()
+                                                      ? std::string("embedded database")
+                                                      : databasePath;
+            std::cerr << "Failed to load SCE symbol database from " << sourceDescription
                       << ": " << scanner.lastError() << std::endl;
             return;
         }
 
+        const std::string sourceDescription = databasePath.empty()
+                                                  ? std::string("embedded database")
+                                                  : databasePath;
+
         const std::vector<SceSymbolMatch> matches = scanner.scan(m_context.sections);
         if (matches.empty())
         {
-            std::cout << "No SCE SDK symbols discovered from " << databasePath << std::endl;
+            std::cout << "No SCE SDK symbols discovered from " << sourceDescription << std::endl;
             return;
         }
 
@@ -208,7 +208,7 @@ namespace ps2recomp
         clearDecodedInstructionCache();
 
         std::cout << "Discovered " << matches.size() << " SCE SDK symbol match(es) from "
-                  << databasePath << std::endl;
+                  << sourceDescription << std::endl;
         std::cout << "- renamed " << renamedFunctions << " existing function(s)" << std::endl;
         std::cout << "- added " << addedFunctions << " function(s)" << std::endl;
     }
@@ -259,7 +259,6 @@ namespace ps2recomp
                       << std::dec << std::endl;
 
             m_forceRecompileStarts.insert(entryFunction.start);
-            m_skipFunctions.erase(entryFunction.name);
 
             const auto &instructions = getDecodedInstructions(entryFunction);
 
@@ -273,13 +272,6 @@ namespace ps2recomp
                     {
                         std::cout << "Found entry call to: " << func->name << " at 0x"
                                   << std::hex << inst.address << std::dec << std::endl;
-
-                        if (FunctionClassifier::isReliableSymbolName(func->name) &&
-                            !FunctionClassifier::isDoNotSkipOrStub(func->name) &&
-                            isSystemFunction(func->name))
-                        {
-                            m_skipFunctions.insert(func->name);
-                        }
                     }
                 }
             }
@@ -296,23 +288,12 @@ namespace ps2recomp
                 std::cout << "Found potential entry point by address: " << fallbackEntry.name
                           << " at 0x" << std::hex << fallbackEntry.start << std::dec << std::endl;
                 m_forceRecompileStarts.insert(fallbackEntry.start);
-                m_skipFunctions.erase(fallbackEntry.name);
             }
         }
     }
 
     void ElfAnalyzer::analyzeLibraryFunctions()
     {
-        std::unordered_set<std::string> forcedRecompileNames;
-        forcedRecompileNames.reserve(m_forceRecompileStarts.size());
-        for (const auto &func : m_context.functions)
-        {
-            if (m_forceRecompileStarts.contains(func.start))
-            {
-                forcedRecompileNames.insert(func.name);
-            }
-        }
-
         for (const auto &symbol : m_context.symbols)
         {
             if (symbol.isFunction)
@@ -324,8 +305,7 @@ namespace ps2recomp
 
                 if (isLibraryFunction(symbol.name))
                 {
-                    if (!m_forceRecompileStarts.contains(symbol.address) &&
-                        !forcedRecompileNames.contains(symbol.name))
+                    if (!m_forceRecompileStarts.contains(symbol.address))
                     {
                         if (FunctionClassifier::hasRuntimeHandler(symbol.name))
                         {
@@ -336,10 +316,6 @@ namespace ps2recomp
                             m_untrackedStubFunctions.insert(symbol.name);
                         }
                     }
-                }
-                else if (shouldSkipSystemSymbolForHeuristics(symbol.name, forcedRecompileNames))
-                {
-                    m_skipFunctions.insert(symbol.name);
                 }
             }
         }
@@ -365,10 +341,6 @@ namespace ps2recomp
                     }
                 }
             }
-            else if (shouldSkipSystemSymbolForHeuristics(func.name, forcedRecompileNames))
-            {
-                m_skipFunctions.insert(func.name);
-            }
         }
     }
 
@@ -380,8 +352,7 @@ namespace ps2recomp
 
         for (const auto &func : m_context.functions)
         {
-            if (m_skipFunctions.contains(func.name) ||
-                m_libFunctions.contains(func.name))
+            if (m_libFunctions.contains(func.name))
             {
                 continue;
             }
@@ -536,8 +507,7 @@ namespace ps2recomp
 
         for (const auto &func : m_context.functions)
         {
-            if (m_skipFunctions.contains(func.name) ||
-                m_libFunctions.contains(func.name))
+            if (m_libFunctions.contains(func.name))
             {
                 continue;
             }
@@ -574,11 +544,6 @@ namespace ps2recomp
 
         for (const auto &func : m_context.functions)
         {
-            if (m_skipFunctions.contains(func.name))
-            {
-                continue;
-            }
-
             const auto &instructions = getDecodedInstructions(func);
 
             for (size_t index = 0; index + 1 < instructions.size(); ++index)
@@ -722,8 +687,7 @@ namespace ps2recomp
 
         for (const auto &func : m_context.functions)
         {
-            if (m_skipFunctions.contains(func.name) ||
-                m_libFunctions.contains(func.name))
+            if (m_libFunctions.contains(func.name))
             {
                 continue;
             }
@@ -781,8 +745,7 @@ namespace ps2recomp
 
         for (const auto &func : m_context.functions)
         {
-            if (m_skipFunctions.contains(func.name) ||
-                m_libFunctions.contains(func.name))
+            if (m_libFunctions.contains(func.name))
             {
                 continue;
             }
@@ -818,8 +781,7 @@ namespace ps2recomp
 
         for (const auto &func : m_context.functions)
         {
-            if (m_skipFunctions.contains(func.name) ||
-                m_libFunctions.contains(func.name))
+            if (m_libFunctions.contains(func.name))
             {
                 continue;
             }
@@ -886,14 +848,13 @@ namespace ps2recomp
     {
         std::cout << "Identifying recursive functions..." << std::endl;
 
-        // lets ignore skip and library
+        // Library stubs are runtime-owned and do not need analyzer graph work.
         std::unordered_set<std::string> eligible;
         eligible.reserve(m_context.functions.size());
 
         for (const auto &func : m_context.functions)
         {
-            if (m_skipFunctions.contains(func.name) ||
-                m_libFunctions.contains(func.name))
+            if (m_libFunctions.contains(func.name))
             {
                 continue;
             }
@@ -954,8 +915,7 @@ namespace ps2recomp
 
         for (const auto &func : m_context.functions)
         {
-            if (m_skipFunctions.contains(func.name) ||
-                m_libFunctions.contains(func.name))
+            if (m_libFunctions.contains(func.name))
             {
                 continue;
             }
@@ -1053,8 +1013,7 @@ namespace ps2recomp
 
         for (const auto &func : m_context.functions)
         {
-            if (m_skipFunctions.contains(func.name) ||
-                m_libFunctions.contains(func.name))
+            if (m_libFunctions.contains(func.name))
             {
                 continue;
             }
@@ -1157,24 +1116,7 @@ namespace ps2recomp
                 if (patchAddrs.size() > 3)
                 {
                     std::cout << "Function " << func->name << " has " << patchAddrs.size()
-                              << " patches. Consider skipping or stubing instead." << std::endl;
-
-                    // If too many patches in one function, maybe better to skip it
-                    if (shouldSkipForPatchDensityForHeuristics(func->name,
-                                                               func->end - func->start,
-                                                               patchAddrs.size(),
-                                                               isLibraryFunction(func->name)))
-                    {
-                        std::cout << "  - Adding " << func->name << " to skip list due to high patch density" << std::endl;
-                        m_skipFunctions.insert(func->name);
-                        func->instructions.clear();
-
-                        for (const auto &addr : patchAddrs)
-                        {
-                            m_patches.erase(addr);
-                            m_patchReasons.erase(addr);
-                        }
-                    }
+                              << " patches. Manual review may be needed." << std::endl;
                 }
             }
         }
@@ -1537,28 +1479,6 @@ namespace ps2recomp
         return FunctionClassifier::isReliableSymbolName(name);
     }
 
-    bool ElfAnalyzer::isSystemSymbolNameForHeuristics(const std::string &name)
-    {
-        return FunctionClassifier::isSystemSymbolName(name);
-    }
-
-    bool ElfAnalyzer::shouldAutoSkipNameForHeuristics(const std::string &name)
-    {
-        return FunctionClassifier::shouldAutoSkipName(name);
-    }
-
-    bool ElfAnalyzer::shouldSkipSystemSymbolForHeuristics(
-        const std::string &name,
-        const std::unordered_set<std::string> &forcedRecompileNames)
-    {
-        return FunctionClassifier::shouldSkipSystemSymbol(name, forcedRecompileNames);
-    }
-
-    bool ElfAnalyzer::isSystemFunction(const std::string &name) const
-    {
-        return isSystemSymbolNameForHeuristics(name);
-    }
-
     bool ElfAnalyzer::isLibraryFunction(const std::string &name) const
     {
         return m_classifier.isLibraryFunction(name);
@@ -1586,18 +1506,6 @@ namespace ps2recomp
         return AnalysisPasses::hasSelfModifyingSignal(instructions, sections);
     }
 
-    bool ElfAnalyzer::shouldSkipForPatchDensityForHeuristics(const std::string &functionName,
-                                                             uint32_t functionSizeBytes,
-                                                             size_t patchCount,
-                                                             bool isLibraryFunction)
-    {
-        return AnalysisPasses::shouldSkipForPatchDensity(
-            functionName,
-            functionSizeBytes,
-            patchCount,
-            isLibraryFunction);
-    }
-
     void ElfAnalyzer::clearDecodedInstructionCache()
     {
         m_context.clearInstructionCache();
@@ -1613,8 +1521,7 @@ namespace ps2recomp
         m_context.instructionCache.clear();
         for (auto &func : m_context.functions)
         {
-            if (m_skipFunctions.contains(func.name) ||
-                m_libFunctions.contains(func.name) ||
+            if (m_libFunctions.contains(func.name) ||
                 func.start >= func.end)
             {
                 continue;
@@ -1637,10 +1544,6 @@ namespace ps2recomp
             }
 
             categorizeFunction(func);
-            if (m_skipFunctions.contains(func.name))
-            {
-                func.instructions.clear();
-            }
         }
     }
 
@@ -1679,7 +1582,7 @@ namespace ps2recomp
         std::cout << "Analysis completed" << std::endl;
         std::cout << "- " << m_libFunctions.size() << " library functions to stub" << std::endl;
         std::cout << "- " << m_untrackedStubFunctions.size() << " detected library functions without runtime handlers" << std::endl;
-        std::cout << "- " << m_skipFunctions.size() << " functions to skip" << std::endl;
+        std::cout << "- skip output retained for compatibility; analyzer does not auto-skip functions" << std::endl;
         std::cout << "- " << m_patches.size() << " potential patches identified" << std::endl;
         std::cout << "- " << m_jumpTables.size() << " jump tables detected" << std::endl;
     }
@@ -1764,24 +1667,11 @@ namespace ps2recomp
         return false;
     }
 
-    bool ElfAnalyzer::shouldAutoSkipByHeuristic(const Function &function) const
+    void ElfAnalyzer::identifyFunctionType(const Function &function) const
     {
-        if (m_forceRecompileStarts.contains(function.start))
-        {
-            return false;
-        }
-        return shouldAutoSkipNameForHeuristics(function.name);
-    }
-
-    bool ElfAnalyzer::identifyFunctionType(const Function &function)
-    {
-        if (FunctionClassifier::isDoNotSkipOrStub(function.name))
-        {
-            return false;
-        }
         if (FunctionClassifier::hasPs2ApiPrefix(function.name))
         {
-            return false;
+            return;
         }
 
         const auto &instructions = getDecodedInstructions(function);
@@ -1791,31 +1681,15 @@ namespace ps2recomp
 
         if (hasHardwareIO)
         {
-            if (shouldAutoSkipByHeuristic(function))
-            {
-                m_skipFunctions.insert(function.name);
-                std::cout << "Skipping function " << function.name << " due to hardware I/O" << std::endl;
-                return true;
-            }
-
-            std::cout << "Keeping function " << function.name
-                      << " despite hardware I/O (reliable game symbol)" << std::endl;
+            std::cout << "Function " << function.name
+                      << " has a hardware I/O signal" << std::endl;
         }
 
         if (hasLargeComplexMMI)
         {
-            if (shouldAutoSkipByHeuristic(function))
-            {
-                m_skipFunctions.insert(function.name);
-                std::cout << "Skipping large function " << function.name << " with complex MMI" << std::endl;
-                return true;
-            }
-
-            std::cout << "Keeping large function " << function.name
-                      << " with complex MMI (reliable game symbol)" << std::endl;
+            std::cout << "Function " << function.name
+                      << " is large and uses complex MMI" << std::endl;
         }
-
-        return false;
     }
 
     void ElfAnalyzer::categorizeFunction(Function &function)
@@ -1825,12 +1699,6 @@ namespace ps2recomp
         if (isSelfModifyingCode(function))
         {
             std::cout << "Function " << function.name << " contains self-modifying code" << std::endl;
-            if (!isLibraryFunction(function.name) &&
-                !FunctionClassifier::isDoNotSkipOrStub(function.name) &&
-                shouldAutoSkipByHeuristic(function))
-            {
-                m_skipFunctions.insert(function.name);
-            }
         }
 
         if (isLoopHeavyFunction(function))

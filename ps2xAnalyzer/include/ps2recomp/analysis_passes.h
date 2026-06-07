@@ -21,10 +21,6 @@ namespace ps2recomp
                                              size_t largeInstructionThreshold = 500);
         static bool hasSelfModifyingSignal(const std::vector<Instruction> &instructions,
                                            const std::vector<Section> &sections);
-        static bool shouldSkipForPatchDensity(const std::string &functionName,
-                                              uint32_t functionSizeBytes,
-                                              size_t patchCount,
-                                              bool isLibraryFunction);
         static std::vector<JumpTable> detectJumpTables(
             const std::vector<Instruction> &instructions,
             const std::vector<Section> &sections,

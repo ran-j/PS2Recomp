@@ -1,6 +1,5 @@
 #include "ps2recomp/analysis_passes.h"
 
-#include "ps2recomp/function_classifier.h"
 #include "ps2recomp/instructions.h"
 
 #include <algorithm>
@@ -90,37 +89,6 @@ namespace ps2recomp
         }
 
         return false;
-    }
-
-    bool AnalysisPasses::shouldSkipForPatchDensity(const std::string &functionName,
-                                                   uint32_t functionSizeBytes,
-                                                   size_t patchCount,
-                                                   bool isLibraryFunction)
-    {
-        if (patchCount <= 5 || functionSizeBytes < 4)
-        {
-            return false;
-        }
-
-        const double instructionCount = static_cast<double>(functionSizeBytes) / 4.0;
-        if (instructionCount <= 0.0)
-        {
-            return false;
-        }
-
-        const double density = static_cast<double>(patchCount) / instructionCount;
-        if (density <= 0.2)
-        {
-            return false;
-        }
-
-        //TODO review this
-        if (isLibraryFunction || FunctionClassifier::isDoNotSkipOrStub(functionName))
-        {
-            return false;
-        }
-
-        return FunctionClassifier::shouldAutoSkipName(functionName);
     }
 
     std::vector<JumpTable> AnalysisPasses::detectJumpTables(

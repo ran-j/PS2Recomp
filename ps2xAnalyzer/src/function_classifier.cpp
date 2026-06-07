@@ -115,24 +115,6 @@ namespace ps2recomp
         return std::regex_match(name, kernelRuntimePattern);
     }
 
-    bool FunctionClassifier::isDoNotSkipOrStub(const std::string &name)
-    {
-        static const std::unordered_set<std::string> kDoNotSkipOrStub = {
-            "topThread",
-            "cmd_sem_init"};
-
-        return kDoNotSkipOrStub.contains(name);
-    }
-
-    bool FunctionClassifier::isKnownLocalHelperName(const std::string &name)
-    {
-        static const std::unordered_set<std::string> kKnownLocalHelpers = {
-            "memcpy2",
-            "_memcpy2"};
-
-        return kKnownLocalHelpers.contains(name);
-    }
-
     bool FunctionClassifier::isReliableSymbolName(const std::string &name)
     {
         if (name.empty())
@@ -179,55 +161,6 @@ namespace ps2recomp
         return true;
     }
 
-    bool FunctionClassifier::isSystemSymbolName(const std::string &name)
-    {
-        if (!isReliableSymbolName(name))
-        {
-            return false;
-        }
-
-        static const std::unordered_set<std::string> systemFuncs = {
-            "entry", "_start", "_init", "_fini",
-            "abort", "exit", "_exit",
-            "_profiler_start", "_profiler_stop",
-            "__main", "__do_global_ctors", "__do_global_dtors",
-            "_GLOBAL__sub_I_", "_GLOBAL__sub_D_",
-            "__ctor_list", "__dtor_list", "_edata", "_end",
-            "etext", "__exidx_start", "__exidx_end",
-            "_ftext", "__bss_start", "__bss_start__",
-            "__bss_end__", "__end__", "_stack", "_dso_handle"};
-
-        return systemFuncs.contains(name) ||
-               name.find("__") == 0 ||
-               name.find(".") == 0;
-    }
-
-    bool FunctionClassifier::shouldAutoSkipName(const std::string &name)
-    {
-        if (isDoNotSkipOrStub(name))
-        {
-            return false;
-        }
-
-        if (!isReliableSymbolName(name))
-        {
-            return true;
-        }
-
-        return isSystemSymbolName(name);
-    }
-
-    bool FunctionClassifier::shouldSkipSystemSymbol(
-        const std::string &name,
-        const std::unordered_set<std::string> &forcedRecompileNames)
-    {
-        if (forcedRecompileNames.contains(name))
-        {
-            return false;
-        }
-        return isSystemSymbolName(name);
-    }
-
     bool FunctionClassifier::isLibraryFunction(const std::string &name) const
     {
         if (name.empty())
@@ -240,9 +173,9 @@ namespace ps2recomp
             return false;
         }
 
-        if (isKnownLocalHelperName(name))
+        if (hasRuntimeHandler(name))
         {
-            return false;
+            return true;
         }
 
         std::string normalizedName = name;
@@ -251,9 +184,9 @@ namespace ps2recomp
             normalizedName = normalizedName.substr(1);
         }
 
-        if (isKnownLocalHelperName(normalizedName))
+        if (hasRuntimeHandler(normalizedName))
         {
-            return false;
+            return true;
         }
 
         if (m_sceSdkFunctionNames != nullptr &&

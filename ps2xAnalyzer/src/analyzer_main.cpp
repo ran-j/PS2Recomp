@@ -9,7 +9,8 @@ void printUsage()
     std::cout << "Usage: ps2_analyzer <input_elf> <output_toml> [sce_symbol_db_dir]\n";
     std::cout << "  input_elf    Path to the PS2 ELF file\n";
     std::cout << "  output_toml  Path to output TOML configuration file\n";
-    std::cout << "  sce_symbol_db_dir  Optional directory containing symbols.json and tree.json\n";
+    std::cout << "  sce_symbol_db_dir  Optional override directory containing symbols.json and tree.json\n";
+    std::cout << "                     If omitted, the embedded SCE symbol database is used\n";
 }
 
 int main(int argc, char *argv[])
@@ -31,6 +32,10 @@ int main(int argc, char *argv[])
     if (!sceSymbolDbPath.empty())
     {
         std::cout << "SCE symbol DB: " << sceSymbolDbPath << "\n\n";
+    }
+    else
+    {
+        std::cout << "SCE symbol DB: embedded\n\n";
     }
 
     try

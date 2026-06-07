@@ -19,8 +19,10 @@ Use this path only as a quick fallback when you do not yet have a Ghidra project
 
 ### 3. SCE SDK Symbol Database (For SDK Function Names)
 For stripped retail games, the analyzer can identify SCE/PS2SDK library functions from a
-`sce-symbol-scanner` compatible database. Pass the directory that contains `symbols.json`
-and `tree.json`, or point `PS2RECOMP_SCE_SYMBOL_DB` at that directory.
+`sce-symbol-scanner` compatible database. A snapshot of the database is embedded in the
+analyzer. Pass the directory that contains `symbols.json` and `tree.json`, or point
+`PS2RECOMP_SCE_SYMBOL_DB` at that directory, only when you want to override the embedded
+snapshot.
 
 This path is meant to recover names such as CD/DVD, pad, DMA, GS, kernel, and libc SDK
 functions so they can be classified before the expensive analysis passes run.
@@ -42,7 +44,7 @@ This is the recommended workflow for almost every commercial game:
 
 * Analyzes PS2 ELF binaries to extract symbols, functions, and structure
 * Identifies common library functions that should be stubbed
-* Flags system functions that should be skipped during recompilation
+* Reports risky instruction patterns for manual review without auto-skipping functions
 * Detects potential instruction patterns that may need patching
 * Generates a ready-to-use TOML configuration file for PS2Recomp
 
@@ -55,7 +57,7 @@ ps2_analyzer <input_elf> <output_toml> [sce_symbol_db_dir]
 
 * `input_elf`: Path to the PS2 ELF file.
 * `output_toml`: Path where the generated TOML configuration will be saved.
-* `sce_symbol_db_dir`: Optional path to a directory containing `symbols.json` and `tree.json`.
+* `sce_symbol_db_dir`: Optional override path to a directory containing `symbols.json` and `tree.json`.
 
 ## Example Workflow
 1. Open `game.elf` in Ghidra.
@@ -65,7 +67,7 @@ ps2_analyzer <input_elf> <output_toml> [sce_symbol_db_dir]
    `ps2recomp config.toml`
 
 Fallback:
-1. Run `ps2_analyzer game.elf config.toml path/to/symboldb/app/src/main/resources`.
+1. Run `ps2_analyzer game.elf config.toml`.
 2. Use that TOML only for quick bring-up or symbol-rich builds.
 
 ## Generated Configuration
@@ -74,7 +76,7 @@ The tool creates a TOML file with the following sections:
 * `stubs`: Runtime-known functions to be replaced by C++ stubs or syscall handlers.
 * `untracked_stubs`: Detected library-like functions without runtime handlers. This is
   informational only and is ignored by the recompiler.
-* `skip`: List of functions to be ignored (entry points, initialization).
+* `skip`: Legacy compatibility field. The analyzer no longer auto-populates it.
 * `[patches]`: Individual instructions that need to be replaced (SYSCALLs, COP0, etc.).
 
 ## Limitations

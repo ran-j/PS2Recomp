@@ -47,11 +47,6 @@ namespace ps2recomp
     public:
         bool isLibrarySymbolNameForHeuristics(const std::string &name) const;
         static bool isReliableSymbolNameForHeuristics(const std::string &name);
-        static bool isSystemSymbolNameForHeuristics(const std::string &name);
-
-    public:
-        static bool shouldAutoSkipNameForHeuristics(const std::string &name);
-        static bool shouldSkipSystemSymbolForHeuristics(const std::string &name, const std::unordered_set<std::string> &forcedRecompileNames);
 
     public:
         static int findEntryFunctionIndexForHeuristics(const std::vector<Function> &functions, uint32_t entryAddress);
@@ -61,9 +56,6 @@ namespace ps2recomp
         static bool hasHardwareIOSignalForHeuristics(const std::vector<Instruction> &instructions);
         static bool hasLargeComplexMMISignalForHeuristics(const std::vector<Instruction> &instructions, size_t largeInstructionThreshold = 500);
         static bool hasSelfModifyingSignalForHeuristics(const std::vector<Instruction> &instructions, const std::vector<Section> &sections);
-
-    public:
-        static bool shouldSkipForPatchDensityForHeuristics(const std::string &functionName, uint32_t functionSizeBytes, size_t patchCount, bool isLibraryFunction);
 
     public:
         static std::vector<JumpTable> detectJumpTablesForHeuristics(const std::vector<Instruction> &instructions, const std::vector<Section> &sections, const std::function<bool(uint32_t, uint32_t &)> &readWord);
@@ -77,7 +69,6 @@ namespace ps2recomp
         ElfAnalysisContext m_context;
 
         std::unordered_set<std::string> m_libFunctions;
-        std::unordered_set<std::string> m_skipFunctions;
         std::unordered_set<std::string> m_untrackedStubFunctions;
         std::unordered_set<uint32_t> m_forceRecompileStarts;
         std::unordered_set<std::string> m_sceSdkFunctionNames;
@@ -144,7 +135,6 @@ namespace ps2recomp
         bool identifyStringOperationPattern(const Function &func) const;
         bool identifyMathPattern(const Function &func) const;
 
-        bool isSystemFunction(const std::string &name) const;
         bool isLibraryFunction(const std::string &name) const;
         void clearDecodedInstructionCache();
         const std::vector<Instruction> &getDecodedInstructions(const Function &function) const;
@@ -153,8 +143,7 @@ namespace ps2recomp
         std::string formatAddress(uint32_t address) const;
         bool hasMMIInstructions(const Function &function) const;
         bool hasVUInstructions(const Function &function) const;
-        bool shouldAutoSkipByHeuristic(const Function &function) const;
-        bool identifyFunctionType(const Function &function);
+        void identifyFunctionType(const Function &function) const;
         void categorizeFunction(Function &function);
         uint32_t getSuccessor(const Instruction &inst, uint32_t currentAddr);
         bool isSelfModifyingCode(const Function &function) const;
