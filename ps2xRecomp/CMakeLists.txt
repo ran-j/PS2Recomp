@@ -12,7 +12,7 @@ include(FetchContent)
 FetchContent_Declare(
     elfio
     GIT_REPOSITORY https://github.com/serge1/ELFIO.git
-    GIT_TAG 7d30a22fc5aac06adfe7887ae57f3701b6b5f913
+    GIT_TAG Release_3.12
     GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(elfio)
