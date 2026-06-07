@@ -848,8 +848,8 @@ void register_ps2_runtime_expansion_tests()
             std::memcpy(rdram.data() + blockTransSp + 0x14u, "\x00\x30\x00\x00", 4u);
             std::memcpy(rdram.data() + blockTransSp + 0x18u, "\x40\x27\x01\x00", 4u);
             ps2_stubs::sceSdRemote(rdram.data(), &blockTransCtx, nullptr);
-            t.Equals(getRegU32(&blockTransCtx, 2), 0x00012340u,
-                     "sceSdRemote block transfer should publish the current IOP ring position");
+            t.Equals(getRegU32(&blockTransCtx, 2), 0x00012740u,
+                     "sceSdRemote block transfer should resume from the configured IOP pause position");
 
             R5900Context statusCtx{};
             setRegU32(statusCtx, 29, blockTransSp);
@@ -859,8 +859,15 @@ void register_ps2_runtime_expansion_tests()
             setRegU32(statusCtx, 7, 0u);
             std::memset(rdram.data() + blockTransSp + 0x10u, 0, 12u);
             ps2_stubs::sceSdRemote(rdram.data(), &statusCtx, nullptr);
-            t.Equals(getRegU32(&statusCtx, 2), 0x00012340u,
-                     "sceSdRemote status polling should reuse the last configured transfer base");
+            t.Equals(getRegU32(&statusCtx, 2), 0x00012B40u,
+                     "sceSdRemote status polling should advance the emulated SPU transfer head");
+
+            for (uint32_t i = 0u; i < 11u; ++i)
+            {
+                ps2_stubs::sceSdRemote(rdram.data(), &statusCtx, nullptr);
+            }
+            t.Equals(getRegU32(&statusCtx, 2), 0x00012740u,
+                     "sceSdRemote status polling should wrap inside the configured IOP ring");
 
             R5900Context setParamCtx{};
             setRegU32(setParamCtx, 29, blockTransSp);
@@ -869,7 +876,7 @@ void register_ps2_runtime_expansion_tests()
             setRegU32(setParamCtx, 6, 0x0F81u);
             setRegU32(setParamCtx, 7, 0u);
             ps2_stubs::sceSdRemote(rdram.data(), &setParamCtx, nullptr);
-            t.Equals(getRegU32(&setParamCtx, 2), 0x00012340u,
+            t.Equals(getRegU32(&setParamCtx, 2), 0x00012740u,
                      "sceSdRemote set-param calls should not trap or disturb the movie audio state");
         });
          
