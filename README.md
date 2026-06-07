@@ -114,33 +114,12 @@ Address binding for stripped ELFs:
 Example:
 
 ```toml
-[general]
-input = "path/to/game.elf"
-ghidra_output = ""
-output = "output/"
-
-single_file_output = true
-low_memory_mode = true
-output_worker_threads = 0
-patch_syscalls = false
-patch_cop0 = true
-patch_cache = true
-
-stubs = ["printf", "malloc", "free"]
-
 # stripped function binding by address:
-# stubs = ["sceCdRead@0x00123456", "SifLoadModule@0x00127890"]
+stubs = ["sceCdRead@0x00123456", "SifLoadModule@0x00127890"]
 # temporary return handlers:
-# stubs = ["ret0@0x001D9410", "ret1@0x001D5BC8", "reta0@0x0024B7C0"]
+stubs = ["ret0@0x001D9410", "ret1@0x001D5BC8", "reta0@0x0024B7C0"]
 # mixed example:
-# stubs = ["printf", "sceCdRead@0x00123456", "SifLoadModule@0x00127890"]
-
-skip = ["abort", "exit"]
-
-[patches]
-instructions = [
-  { address = "0x100004", value = "0x00000000" }
-]
+stubs = ["printf", "sceCdRead@0x00123456", "SifLoadModule@0x00127890"] 
 ```
 
 ### Runtime

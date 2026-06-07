@@ -32,33 +32,128 @@ import java.util.regex.Pattern;
 
 public class ExportPS2Functions extends GhidraScript {
 
-    private static final Set<String> SYSTEM_FUNCTION_NAMES = new HashSet<>(Arrays.asList(
-        "entry", "_start", "_init", "_fini",
-        "abort", "exit", "_exit",
-        "_profiler_start", "_profiler_stop",
-        "__main", "__do_global_ctors", "__do_global_dtors",
-        "_GLOBAL__sub_I_", "_GLOBAL__sub_D_",
-        "__ctor_list", "__dtor_list", "_edata", "_end",
-        "etext", "__exidx_start", "__exidx_end",
-        "_ftext", "__bss_start", "__bss_start__",
-        "__bss_end__", "__end__", "_stack", "_dso_handle"
-    ));
-
-    private static final Set<String> DO_NOT_SKIP_OR_STUB = new HashSet<>(Arrays.asList(
-        "entry",
-        "_start",
-        "_init",
-        "topThread",
-        "cmd_sem_init"
-    ));
-
-    private static final Set<String> KNOWN_LOCAL_HELPER_NAMES = new HashSet<>(Arrays.asList(
-        "memcpy2",
-        "_memcpy2"
+    // For now I have to copy all functions from the runtime handler list
+    private static final Set<String> RUNTIME_HANDLER_NAMES = new HashSet<>(Arrays.asList(
+        "FlushCache", "iFlushCache", "ResetEE", "SetMemoryMode", "InitThread", "CreateThread",
+        "DeleteThread", "StartThread", "ExitThread", "ExitDeleteThread", "TerminateThread", "SuspendThread",
+        "ResumeThread", "GetThreadId", "ReferThreadStatus", "iReferThreadStatus", "SleepThread", "WakeupThread",
+        "iWakeupThread", "CancelWakeupThread", "iCancelWakeupThread", "ChangeThreadPriority", "iChangeThreadPriority", "RotateThreadReadyQueue",
+        "iRotateThreadReadyQueue", "ReleaseWaitThread", "iReleaseWaitThread", "CreateSema", "DeleteSema", "SignalSema",
+        "iSignalSema", "WaitSema", "PollSema", "iPollSema", "ReferSemaStatus", "iReferSemaStatus",
+        "CreateEventFlag", "DeleteEventFlag", "SetEventFlag", "iSetEventFlag", "ClearEventFlag", "iClearEventFlag",
+        "WaitEventFlag", "PollEventFlag", "iPollEventFlag", "ReferEventFlagStatus", "iReferEventFlagStatus", "InitAlarm",
+        "SetAlarm", "iSetAlarm", "CancelAlarm", "iCancelAlarm", "ReleaseAlarm", "iReleaseAlarm",
+        "AddIntcHandler", "AddIntcHandler2", "RemoveIntcHandler", "AddDmacHandler", "AddDmacHandler2", "RemoveDmacHandler",
+        "EnableIntc", "iEnableIntc", "DisableIntc", "iDisableIntc", "EnableDmac", "iEnableDmac",
+        "DisableDmac", "iDisableDmac", "SifStopModule", "SifLoadModule", "SifInitRpc", "SifBindRpc",
+        "SifCallRpc", "SifRegisterRpc", "SifCheckStatRpc", "SifSetRpcQueue", "SifRemoveRpcQueue", "SifRemoveRpc",
+        "sceSifCallRpc", "sceSifSendCmd", "sceRpcGetPacket", "fioOpen", "fioClose", "fioRead",
+        "fioWrite", "fioLseek", "fioMkdir", "fioChdir", "fioRmdir", "fioGetstat",
+        "fioRemove", "SetGsCrt", "GsSetCrt", "GsGetIMR", "iGsGetIMR", "GsPutIMR",
+        "iGsPutIMR", "SetVSyncFlag", "SetSyscall", "GsSetVideoMode", "GetOsdConfigParam", "SetOsdConfigParam",
+        "EnableCache", "DisableCache", "GetRomName", "SifLoadElfPart", "sceSifLoadElf", "sceSifLoadElfPart",
+        "sceSifLoadModule", "sceSifLoadModuleBuffer", "SetupThread", "EndOfHeap", "GetMemorySize", "Deci2Call",
+        "QueryBootMode", "GetThreadTLS", "RegisterExitHandler", "ret0", "ret1", "reta0",
+        "calloc_r", "free_r", "malloc_r", "malloc_trim_r", "mbtowc_r", "printf_r",
+        "abs", "__ieee754_rem_pio2f", "__kernel_cosf", "__kernel_sinf", "atan", "atan2",
+        "calloc", "ceil", "close", "cos", "exit", "exp",
+        "fabs", "fclose", "fflush", "floor", "fopen", "fprintf",
+        "fread", "free", "fseek", "fstat", "ftell", "fwrite",
+        "getpid", "log", "log10", "lseek", "malloc", "memchr",
+        "memcmp", "memcpy", "memmove", "memset", "open", "pow",
+        "printf", "puts", "rand", "read", "realloc", "sin",
+        "snprintf", "sprintf", "sqrt", "srand", "stat", "strcasecmp",
+        "strcat", "strchr", "strcmp", "strcpy", "strlen", "strncat",
+        "strncmp", "strncpy", "strrchr", "strstr", "tan", "vfprintf",
+        "vsprintf", "write", "DmaAddr", "builtin_set_imask", "sceCdRI", "sceCdRM",
+        "sceDevVif0Reset", "sceDevVu0Reset", "sceFsDbChk", "sceFsIntrSigSema", "sceFsSemExit", "sceFsSemInit",
+        "sceFsSigSema", "sceIDC", "sceMpegFlush", "sceRpcFreePacket", "sceRpcGetFPacket", "sceRpcGetFPacket2",
+        "sceSDC", "sceSifCmdIntrHdlr", "sceVu0ecossin", "mcCallMessageTypeSe", "mcCheckReadStartConfigFile", "mcCheckReadStartSaveFile",
+        "mcCheckWriteStartConfigFile", "mcCheckWriteStartSaveFile", "mcCreateConfigInit", "mcCreateFileSelectWindow", "mcCreateIconInit", "mcCreateSaveFileInit",
+        "mcDispFileName", "mcDispFileNumber", "mcDispWindowCurSol", "mcDispWindowFoundtion", "mcDisplayFileSelectWindow", "mcDisplaySelectFileInfo",
+        "mcDisplaySelectFileInfoMesCount", "mcGetConfigCapacitySize", "mcGetFileSelectWindowCursol", "mcGetFreeCapacitySize", "mcGetIconCapacitySize", "mcGetIconFileCapacitySize",
+        "mcGetPortSelectDirInfo", "mcGetSaveFileCapacitySize", "mcGetStringEnd", "mcMoveFileSelectWindowCursor", "mcNewCreateConfigFile", "mcNewCreateIcon",
+        "mcNewCreateSaveFile", "mcReadIconData", "mcReadStartConfigFile", "mcReadStartSaveFile", "mcSelectFileInfoInit", "mcSelectSaveFileCheck",
+        "mcSetFileSelectWindowCursol", "mcSetFileSelectWindowCursolInit", "mcSetStringSaveFile", "mcSetTyepWriteMode", "mcWriteIconData", "mcWriteStartConfigFile",
+        "mcWriteStartSaveFile", "mceGetInfoApdx", "mceIntrReadFixAlign", "mceStorePwd", "sceCdApplyNCmd", "sceCdBreak",
+        "sceCdCallback", "sceCdChangeThreadPriority", "sceCdDelayThread", "sceCdDiskReady", "sceCdGetDiskType", "sceCdGetError",
+        "sceCdGetReadPos", "sceCdGetToc", "sceCdInit", "sceCdInitEeCB", "sceCdIntToPos", "sceCdMmode",
+        "sceCdNcmdDiskReady", "sceCdPause", "sceCdPosToInt", "sceCdRead", "sceCdReadChain", "sceCdReadClock",
+        "sceCdReadIOPm", "sceCdSearchFile", "sceCdSeek", "sceCdStInit", "sceCdStPause", "sceCdStRead",
+        "sceCdStResume", "sceCdStSeek", "sceCdStSeekF", "sceCdStStart", "sceCdStStat", "sceCdStStop",
+        "sceCdStandby", "sceCdStatus", "sceCdStop", "sceCdStream", "sceCdSync", "sceCdSyncS",
+        "sceCdTrayReq", "sceClose", "sceDeci2Close", "sceDeci2ExLock", "sceDeci2ExRecv", "sceDeci2ExReqSend",
+        "sceDeci2ExSend", "sceDeci2ExUnLock", "sceDeci2Open", "sceDeci2Poll", "sceDeci2ReqSend", "sceDmaCallback",
+        "sceDmaDebug", "sceDmaGetChan", "sceDmaGetEnv", "sceDmaLastSyncTime", "sceDmaPause", "sceDmaPutEnv",
+        "sceDmaPutStallAddr", "sceDmaRecv", "sceDmaRecvI", "sceDmaRecvN", "sceDmaReset", "sceDmaRestart",
+        "sceDmaSend", "sceDmaSendI", "sceDmaSendM", "sceDmaSendN", "sceDmaSync", "sceDmaSyncN",
+        "sceDmaWatch", "sceFsInit", "sceFsReset", "sceGifPkAddGsAD", "sceGifPkAddGsData", "sceGifPkCloseGifTag",
+        "sceGifPkCnt", "sceGifPkEnd", "sceGifPkInit", "sceGifPkOpenGifTag", "sceGifPkRef", "sceGifPkRefLoadImage",
+        "sceGifPkReset", "sceGifPkReserve", "sceGifPkTerminate", "sceGsExecLoadImage", "sceGsExecStoreImage", "sceGsGetGParam",
+        "sceGsPutDispEnv", "sceGsPutDrawEnv", "sceGsResetGraph", "sceGsResetPath", "sceGsSetDefClear", "sceGsSetDefDBuffDc",
+        "sceGsSetDefDBuff", "sceGsSetDefDispEnv", "sceGsSetDefDrawEnv", "sceGsSetDefDrawEnv2", "sceGsSetDefLoadImage", "sceGsSetDefStoreImage",
+        "sceGsSwapDBuffDc", "sceGsSwapDBuff", "sceGsSyncPath", "sceGsSyncV", "sceGsSyncVCallback", "sceGszbufaddr",
+        "sceVif1PkAddGsAD", "sceVif1PkAlign", "sceVif1PkCall", "sceVif1PkCloseDirectCode", "sceVif1PkCloseGifTag", "sceVif1PkCnt",
+        "sceVif1PkEnd", "sceVif1PkInit", "sceVif1PkOpenDirectCode", "sceVif1PkOpenGifTag", "sceVif1PkReset", "sceVif1PkReserve",
+        "sceVif1PkTerminate", "sceeFontInit", "sceeFontLoadFont", "sceeFontPrintfAt", "sceeFontPrintfAt2", "sceeFontGenerateString",
+        "sceeFontClose", "sceeFontSetColour", "sceeFontSetMode", "sceeFontSetFont", "sceeFontSetScale", "sceIoctl",
+        "sceIpuInit", "sceIpuRestartDMA", "sceIpuStopDMA", "sceIpuSync", "sceLseek", "sceMcChangeThreadPriority",
+        "sceMcChdir", "sceMcClose", "sceMcDelete", "sceMcEnd", "sceMcFlush", "sceMcFormat",
+        "sceMcGetDir", "sceMcGetEntSpace", "sceMcGetInfo", "sceMcGetSlotMax", "sceMcInit", "sceMcMkdir",
+        "sceMcOpen", "sceMcRead", "sceMcRename", "sceMcSeek", "sceMcSetFileInfo", "sceMcSync",
+        "sceMcUnformat", "sceMcWrite", "sceMpegAddBs", "sceMpegAddCallback", "sceMpegAddStrCallback", "sceMpegClearRefBuff",
+        "sceMpegCreate", "sceMpegDelete", "sceMpegDemuxPss", "sceMpegDemuxPssRing", "sceMpegDispCenterOffX", "sceMpegDispCenterOffY",
+        "sceMpegDispHeight", "sceMpegDispWidth", "sceMpegGetDecodeMode", "sceMpegGetPicture", "sceMpegGetPictureRAW8", "sceMpegGetPictureRAW8xy",
+        "sceMpegInit", "sceMpegIsEnd", "sceMpegIsRefBuffEmpty", "sceMpegReset", "sceMpegResetDefaultPtsGap", "sceMpegSetDecodeMode",
+        "sceMpegSetDefaultPtsGap", "sceMpegSetImageBuff", "sceOpen", "scePadEnd", "scePadEnterPressMode", "scePadExitPressMode",
+        "scePadGetButtonMask", "scePadGetDmaStr", "scePadGetFrameCount", "scePadGetModVersion", "scePadGetPortMax", "scePadGetReqState",
+        "scePadGetSlotMax", "scePadGetState", "scePadInfoAct", "scePadInfoComb", "scePadInfoMode", "scePadInfoPressMode",
+        "scePadInit", "scePadInit2", "scePadPortClose", "scePadPortOpen", "scePadRead", "scePadReqIntToStr",
+        "scePadSetActAlign", "scePadSetActDirect", "scePadSetButtonInfo", "scePadSetMainMode", "scePadSetReqState", "scePadSetVrefParam",
+        "scePadSetWarningLevel", "scePadStateIntToStr", "scePrintf", "sceRead", "sceResetttyinit", "sceSSyn_BreakAtick",
+        "sceSSyn_ClearBreakAtick", "sceSSyn_SendExcMsg", "sceSSyn_SendNrpnMsg", "sceSSyn_SendRpnMsg", "sceSSyn_SendShortMsg", "sceSSyn_SetChPriority",
+        "sceSSyn_SetMasterVolume", "sceSSyn_SetOutPortVolume", "sceSSyn_SetOutputAssign", "sceSSyn_SetOutputMode", "sceSSyn_SetPortMaxPoly", "sceSSyn_SetPortVolume",
+        "sceSSyn_SetTvaEnvMode", "sceSdCallBack", "sceSdRemote", "sceSdRemoteInit", "sceSdTransToIOP", "sceSetBrokenLink",
+        "sceSetPtm", "sceSifAddCmdHandler", "sceSifAllocIopHeap", "sceSifAllocSysMemory", "sceSifBindRpc", "sceSifCheckStatRpc",
+        "sceSifDmaStat", "sceSifExecRequest", "sceSifExitCmd", "sceSifExitRpc", "sceSifFreeIopHeap", "sceSifFreeSysMemory",
+        "sceSifGetDataTable", "sceSifGetIopAddr", "sceSifGetNextRequest", "sceSifGetOtherData", "sceSifGetReg", "sceSifGetSreg",
+        "sceSifInitCmd", "sceSifInitIopHeap", "sceSifInitRpc", "sceSifIsAliveIop", "sceSifLoadFileReset", "sceSifLoadIopHeap",
+        "sceSifRebootIop", "sceSifRegisterRpc", "sceSifRemoveCmdHandler", "sceSifRemoveRpc", "sceSifRemoveRpcQueue", "sceSifResetIop",
+        "sceSifRpcLoop", "sceSifSetCmdBuffer", "sceSifSetDChain", "sceSifSetDma", "isceSifSetDChain", "isceSifSetDma",
+        "sceSifSetIopAddr", "sceSifSetReg", "sceSifSetRpcQueue", "sceSifSetSreg", "sceSifSetSysCmdBuffer", "sceSifStopDma",
+        "sceSifSyncIop", "sceSifWriteBackDCache", "sceSynthSizerLfoTriangle", "sceSynthesizerAmpProcI", "sceSynthesizerAmpProcNI", "sceSynthesizerAssignAllNoteOff",
+        "sceSynthesizerAssignAllSoundOff", "sceSynthesizerAssignHoldChange", "sceSynthesizerAssignNoteOff", "sceSynthesizerAssignNoteOn", "sceSynthesizerCalcEnv", "sceSynthesizerCalcPortamentPitch",
+        "sceSynthesizerCalcTvfCoefAll", "sceSynthesizerCalcTvfCoefF0", "sceSynthesizerCent2PhaseInc", "sceSynthesizerChangeEffectSend", "sceSynthesizerChangeHsPanpot", "sceSynthesizerChangeNrpnCutOff",
+        "sceSynthesizerChangeNrpnLfoDepth", "sceSynthesizerChangeNrpnLfoRate", "sceSynthesizerChangeOutAttrib", "sceSynthesizerChangeOutVol", "sceSynthesizerChangePanpot", "sceSynthesizerChangePartBendSens",
+        "sceSynthesizerChangePartExpression", "sceSynthesizerChangePartHsExpression", "sceSynthesizerChangePartHsPitchBend", "sceSynthesizerChangePartModuration", "sceSynthesizerChangePartPitchBend", "sceSynthesizerChangePartVolume",
+        "sceSynthesizerChangePortamento", "sceSynthesizerChangePortamentoTime", "sceSynthesizerClearKeyMap", "sceSynthesizerClearSpr", "sceSynthesizerCopyOutput", "sceSynthesizerDmaFromSPR",
+        "sceSynthesizerDmaSpr", "sceSynthesizerDmaToSPR", "sceSynthesizerGetPartOutLevel", "sceSynthesizerGetPartial", "sceSynthesizerGetSampleParam", "sceSynthesizerHsMessage",
+        "sceSynthesizerLfoNone", "sceSynthesizerLfoProc", "sceSynthesizerLfoSawDown", "sceSynthesizerLfoSawUp", "sceSynthesizerLfoSquare", "sceSynthesizerReadNoise",
+        "sceSynthesizerReadNoiseAdd", "sceSynthesizerReadSample16", "sceSynthesizerReadSample16Add", "sceSynthesizerReadSample8", "sceSynthesizerReadSample8Add", "sceSynthesizerResetPart",
+        "sceSynthesizerRestorDma", "sceSynthesizerSelectPatch", "sceSynthesizerSendShortMessage", "sceSynthesizerSetMasterVolume", "sceSynthesizerSetRVoice", "sceSynthesizerSetupDma",
+        "sceSynthesizerSetupLfo", "sceSynthesizerSetupMidiModuration", "sceSynthesizerSetupMidiPanpot", "sceSynthesizerSetupNewNoise", "sceSynthesizerSetupReleaseEnv", "sceSynthesizerSetupTruncateTvaEnv",
+        "sceSynthesizerSetupTruncateTvfPitchEnv", "sceSynthesizerSetuptEnv", "sceSynthesizerTonegenerator", "sceSynthesizerTransposeMatrix", "sceSynthesizerTvfProcI", "sceSynthesizerTvfProcNI",
+        "sceSynthesizerWaitDmaFromSPR", "sceSynthesizerWaitDmaToSPR", "sceSynthsizerGetDrumPatch", "sceSynthsizerGetMeloPatch", "sceSynthsizerLfoNoise", "sceTtyHandler",
+        "sceTtyInit", "sceTtyRead", "sceTtyWrite", "sceVpu0Reset", "sceVu0AddVector", "sceVu0ApplyMatrix",
+        "sceVu0CameraMatrix", "sceVu0ClampVector", "sceVu0ClipAll", "sceVu0ClipScreen", "sceVu0ClipScreen3", "sceVu0CopyMatrix",
+        "sceVu0CopyVector", "sceVu0CopyVectorXYZ", "sceVu0DivVector", "sceVu0DivVectorXYZ", "sceVu0DropShadowMatrix", "sceVu0FTOI0Vector",
+        "sceVu0FTOI4Vector", "sceVu0ITOF0Vector", "sceVu0ITOF12Vector", "sceVu0ITOF4Vector", "sceVu0InnerProduct", "sceVu0InterVector",
+        "sceVu0InterVectorXYZ", "sceVu0InversMatrix", "sceVu0LightColorMatrix", "sceVu0MulMatrix", "sceVu0MulVector", "sceVu0NormalLightMatrix",
+        "sceVu0Normalize", "sceVu0OuterProduct", "sceVu0RotMatrix", "sceVu0RotMatrixX", "sceVu0RotMatrixY", "sceVu0RotMatrixZ",
+        "sceVu0RotTransPers", "sceVu0RotTransPersN", "sceVu0ScaleVector", "sceVu0ScaleVectorXYZ", "sceVu0SubVector", "sceVu0TransMatrix",
+        "sceVu0TransposeMatrix", "sceVu0UnitMatrix", "sceVu0ViewScreenMatrix", "sceWrite"
     ));
 
     private static final Set<String> PS2_API_PREFIXES = new HashSet<>(Arrays.asList(
-        "sce", "sif", "gs", "dma", "iop", "vif", "spu", "mc", "libc"
+        "sce", "Sce", "SCE",
+        "sif", "Sif", "SIF",
+        "gs", "Gs", "GS",
+        "dma", "Dma", "DMA",
+        "iop", "Iop", "IOP",
+        "vif", "Vif", "VIF",
+        "spu", "Spu", "SPU",
+        "mc", "Mc", "MC",
+        "libc", "Libc", "LIBC"
     ));
 
     private static final Set<String> KNOWN_STDLIB_NAMES = new HashSet<>(Arrays.asList(
@@ -112,7 +207,7 @@ public class ExportPS2Functions extends GhidraScript {
 
     private enum ClassificationKind {
         STUB,
-        SKIP,
+        UNTRACKED_STUB,
         NONE
     }
 
@@ -161,6 +256,32 @@ public class ExportPS2Functions extends GhidraScript {
         return value.startsWith("_") && value.length() > 1 ? value.substring(1) : value;
     }
 
+    private static String resolveRuntimeHandlerName(String name) {
+        if (name == null || name.isEmpty()) {
+            return "";
+        }
+
+        if (RUNTIME_HANDLER_NAMES.contains(name)) {
+            return name;
+        }
+
+        String normalized = normalizeOptionalLeadingUnderscore(name);
+        if (!normalized.equals(name) && RUNTIME_HANDLER_NAMES.contains(normalized)) {
+            return normalized;
+        }
+
+        String underscored = "_" + name;
+        if (!name.startsWith("_") && RUNTIME_HANDLER_NAMES.contains(underscored)) {
+            return underscored;
+        }
+
+        return "";
+    }
+
+    private static boolean hasRuntimeHandler(String name) {
+        return !resolveRuntimeHandlerName(name).isEmpty();
+    }
+
     private static boolean hasReliableSymbolName(String name) {
         if (name == null || name.isEmpty()) {
             return false;
@@ -199,21 +320,22 @@ public class ExportPS2Functions extends GhidraScript {
             return false;
         }
 
-        String base = normalizeOptionalLeadingUnderscore(name).toLowerCase();
+        String base = normalizeOptionalLeadingUnderscore(name);
         for (String prefix : PS2_API_PREFIXES) {
-            if (base.startsWith(prefix)) {
+            if (!base.startsWith(prefix)) {
+                continue;
+            }
+
+            if (base.length() == prefix.length()) {
+                return true;
+            }
+
+            if (!Character.isLowerCase(base.charAt(prefix.length()))) {
                 return true;
             }
         }
+
         return false;
-    }
-
-    private static boolean isSystemSymbolNameForHeuristics(String name) {
-        if (!hasReliableSymbolName(name)) {
-            return false;
-        }
-
-        return SYSTEM_FUNCTION_NAMES.contains(name) || name.startsWith("__") || name.startsWith(".");
     }
 
     private static boolean matchesWithOptionalLeadingUnderscoreAlias(String candidate, Set<String> names) {
@@ -242,14 +364,15 @@ public class ExportPS2Functions extends GhidraScript {
             return false;
         }
 
-        if (KNOWN_LOCAL_HELPER_NAMES.contains(name)) {
-            return false;
+        if (hasRuntimeHandler(name)) {
+            return true;
         }
 
         String normalized = normalizeOptionalLeadingUnderscore(name);
-        if (KNOWN_LOCAL_HELPER_NAMES.contains(normalized)) {
-            return false;
+        if (hasRuntimeHandler(normalized)) {
+            return true;
         }
+
         if (KERNEL_RUNTIME_NAME_PATTERN.matcher(normalized).matches()) {
             return true;
         }
@@ -258,7 +381,7 @@ public class ExportPS2Functions extends GhidraScript {
             return true;
         }
 
-        if (hasPs2ApiPrefix(normalized)) {
+        if (hasPs2ApiPrefix(name)) {
             return true;
         }
 
@@ -271,36 +394,32 @@ public class ExportPS2Functions extends GhidraScript {
         }
 
         String name = function.getName();
-        if (name == null || name.isEmpty() || DO_NOT_SKIP_OR_STUB.contains(name)) {
-            return new ClassificationResult(ClassificationKind.NONE, name == null ? "" : name);
+        if (name == null || name.isEmpty()) {
+            return new ClassificationResult(ClassificationKind.NONE, "");
+        }
+
+        String runtimeName = resolveRuntimeHandlerName(name);
+        if (!runtimeName.isEmpty()) {
+            return new ClassificationResult(ClassificationKind.STUB, runtimeName);
         }
 
         if (function.isThunk()) {
-            if (isLibraryFunctionName(name)) {
-                return new ClassificationResult(ClassificationKind.STUB, name);
-            }
-
             Function target = function.getThunkedFunction(true);
             if (target != null) {
                 String targetName = target.getName();
+                String targetRuntimeName = resolveRuntimeHandlerName(targetName);
+                if (!targetRuntimeName.isEmpty()) {
+                    return new ClassificationResult(ClassificationKind.STUB, targetRuntimeName);
+                }
+
                 if (isLibraryFunctionName(targetName)) {
-                    return new ClassificationResult(ClassificationKind.STUB, targetName);
+                    return new ClassificationResult(ClassificationKind.UNTRACKED_STUB, targetName);
                 }
             }
-
-            if (isSystemSymbolNameForHeuristics(name)) {
-                return new ClassificationResult(ClassificationKind.SKIP, name);
-            }
-
-            return new ClassificationResult(ClassificationKind.NONE, name);
         }
 
         if (isLibraryFunctionName(name)) {
-            return new ClassificationResult(ClassificationKind.STUB, name);
-        }
-
-        if (isSystemSymbolNameForHeuristics(name)) {
-            return new ClassificationResult(ClassificationKind.SKIP, name);
+            return new ClassificationResult(ClassificationKind.UNTRACKED_STUB, name);
         }
 
         return new ClassificationResult(ClassificationKind.NONE, name);
@@ -311,48 +430,6 @@ public class ExportPS2Functions extends GhidraScript {
             return name + "@" + hex(start);
         }
         return name;
-    }
-
-    private static List<String> collectFunctionSelectors(
-        Set<String> names,
-        List<FunctionRecord> records,
-        boolean includeAddress
-    ) {
-        List<FunctionRecord> ordered = new ArrayList<>(records);
-        ordered.sort(Comparator.comparingLong(r -> r.start));
-
-        List<String> selectors = new ArrayList<>();
-        Set<String> seenSelectors = new LinkedHashSet<>();
-        Set<String> coveredNames = new HashSet<>();
-
-        for (FunctionRecord record : ordered) {
-            if (record.name == null || !names.contains(record.name)) {
-                continue;
-            }
-
-            coveredNames.add(record.name);
-            String selector = makeSelector(record.name, record.start, includeAddress);
-            if (seenSelectors.add(selector)) {
-                selectors.add(selector);
-            }
-        }
-
-        if (includeAddress) {
-            List<String> unresolved = new ArrayList<>();
-            for (String name : names) {
-                if (!coveredNames.contains(name)) {
-                    unresolved.add(name);
-                }
-            }
-            Collections.sort(unresolved);
-            for (String name : unresolved) {
-                System.out.println("Warning: unresolved selector name without address, omitting from TOML: " + name);
-            }
-        } else {
-            Collections.sort(selectors);
-        }
-
-        return selectors;
     }
 
     private boolean isExecutableAddress(Address address) {
@@ -534,9 +611,7 @@ public class ExportPS2Functions extends GhidraScript {
             return;
         }
 
-        boolean exportCsv = askYesNo("Export CSV", "Also export compatibility CSV function map?");
-        File csvFile = null;
-        csvFile = askFile("Choose output CSV file", "Save");
+        File csvFile = askFile("Choose output CSV file", "Save");
         if (csvFile == null) {
             return;
         }
@@ -545,8 +620,8 @@ public class ExportPS2Functions extends GhidraScript {
         FunctionIterator it = fm.getFunctions(true);
 
         List<FunctionRecord> functionRecords = new ArrayList<>();
-        Set<String> stubNames = new LinkedHashSet<>();
-        Set<String> skipNames = new LinkedHashSet<>();
+        Set<String> stubSelectors = new LinkedHashSet<>();
+        Set<String> untrackedStubSelectors = new LinkedHashSet<>();
         int uncategorizedCount = 0;
 
         while (it.hasNext() && !monitor.isCancelled()) {
@@ -566,9 +641,9 @@ public class ExportPS2Functions extends GhidraScript {
 
             ClassificationResult classification = classifyFunction(func);
             if (classification.kind == ClassificationKind.STUB) {
-                stubNames.add(classification.name);
-            } else if (classification.kind == ClassificationKind.SKIP) {
-                skipNames.add(classification.name);
+                stubSelectors.add(makeSelector(classification.name, record.start, true));
+            } else if (classification.kind == ClassificationKind.UNTRACKED_STUB) {
+                untrackedStubSelectors.add(makeSelector(classification.name, record.start, true));
             } else {
                 uncategorizedCount++;
             }
@@ -580,9 +655,6 @@ public class ExportPS2Functions extends GhidraScript {
         exportRecords.addAll(labelRecords);
         exportRecords.sort(Comparator.comparingLong(r -> r.start));
 
-        List<String> stubSelectors = collectFunctionSelectors(stubNames, exportRecords, true);
-        List<String> skipSelectors = collectFunctionSelectors(skipNames, exportRecords, true);
- 
         try (PrintWriter writer = new PrintWriter(csvFile)) {
             writer.println("Name,Start,End,Size");
             for (FunctionRecord record : exportRecords) {
@@ -608,9 +680,10 @@ public class ExportPS2Functions extends GhidraScript {
             writer.println("# Auto-generated by ExportPS2Functions.java");
             writer.println("#");
             writer.println("# Classification policy (aligned with analyzer intent):");
-            writer.println("# - library/runtime names -> [general].stubs");
-            writer.println("# - system names -> [general].skip");
-            writer.println("# - others are left for recompilation");
+            writer.println("# - runtime-known names -> [general].stubs");
+            writer.println("# - library-like names without runtime handlers -> [general].untracked_stubs");
+            writer.println("# - [general].skip is retained empty for legacy compatibility");
+            writer.println("# - no SCE symbol database is used by this Ghidra script");
             writer.println();
 
             writer.println("[general]");
@@ -626,11 +699,12 @@ public class ExportPS2Functions extends GhidraScript {
                 writer.println("  " + tomlString(selector) + ",");
             }
             writer.println("]");
-            writer.println("skip = [");
-            for (String selector : skipSelectors) {
+            writer.println("untracked_stubs = [");
+            for (String selector : untrackedStubSelectors) {
                 writer.println("  " + tomlString(selector) + ",");
             }
             writer.println("]");
+            writer.println("skip = []");
             writer.println();
 
             writer.println("[ghidra_export]");
@@ -638,15 +712,16 @@ public class ExportPS2Functions extends GhidraScript {
             writer.println("code_label_count = " + labelRecords.size());
             writer.println("csv_record_count = " + exportRecords.size());
             writer.println("stub_count = " + stubSelectors.size());
-            writer.println("skip_count = " + skipSelectors.size());
+            writer.println("untracked_stub_count = " + untrackedStubSelectors.size());
+            writer.println("skip_count = 0");
             writer.println("uncategorized_count = " + uncategorizedCount);
-            writer.println("runtime_call_name_count = 0");
-            writer.println("runtime_call_source = \"regex_only\"");
+            writer.println("runtime_call_name_count = " + RUNTIME_HANDLER_NAMES.size());
+            writer.println("runtime_call_source = \"embedded_ps2_call_list_snapshot\"");
         }
 
          println(String.format("Exported %d functions and %d executable labels to %s", functionCount, labelRecords.size(), csvFile.getAbsolutePath()));
 
-        println("Using regex-only runtime/library classification (no ps2_call_list.h).");
+        println(String.format("Using %d embedded runtime handler names from ps2_call_list.h snapshot.", RUNTIME_HANDLER_NAMES.size()));
         println(String.format("Exported TOML config to %s", tomlFile.getAbsolutePath()));
     }
 }
