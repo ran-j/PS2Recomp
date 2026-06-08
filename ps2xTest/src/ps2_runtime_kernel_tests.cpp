@@ -965,5 +965,59 @@ void register_ps2_runtime_kernel_tests()
 
             notifyRuntimeStop();
         });
+
+        tc.Run("Copy syscall (0x5A) performs a memory copy", [](TestCase &t)
+        {
+            TestEnv env;
+            constexpr uint32_t kDestAddr = 0x00005000u;
+            constexpr uint32_t kSrcAddr = 0x00006000u;
+            constexpr uint32_t kSize = 16u;
+            constexpr uint32_t kValues[] = {
+                0x11223344u,
+                0x55667788u,
+                0x99AABBCCu,
+                0xDDEEFF00u
+            };
+
+            writeGuestWords(env.rdram.data(), kSrcAddr, kValues, std::size(kValues));
+            
+            setRegU32(env.ctx, 4, kDestAddr);
+            setRegU32(env.ctx, 5, kSrcAddr);
+            setRegU32(env.ctx, 6, kSize);
+
+            t.IsTrue(callSyscall(0x5Au, env.rdram.data(), &env.ctx, &env.runtime),
+                     "Copy syscall should dispatch");
+            
+            for (size_t i = 0; i < std::size(kValues); ++i)
+            {
+                uint32_t destVal = readGuestU32(env.rdram.data(), kDestAddr + static_cast<uint32_t>(i * sizeof(uint32_t)));
+                t.Equals(destVal, kValues[i], "Copy should correctly transfer bytes");
+            }
+        });
+
+        tc.Run("GetEntryAddress syscall (0x5B) returns handler from guest table", [](TestCase &t)
+        {
+            notifyRuntimeStop();
+            TestEnv env;
+            initializeGuestKernelState(env.rdram.data());
+
+            constexpr uint32_t kGuestSyscallTableGuestBase = 0x80011F80u;
+            constexpr uint32_t kSyscallIndex = 0x5Au;
+            constexpr uint32_t kExpectedHandler = 0x00383548u;
+            constexpr uint32_t kEntryPhysAddr = (kGuestSyscallTableGuestBase + (kSyscallIndex * 4u)) & 0x1FFFFFFFu;
+
+            writeGuestU32(env.rdram.data(), kEntryPhysAddr, kExpectedHandler);
+
+            setRegU32(env.ctx, 4, kSyscallIndex);
+
+            t.IsTrue(callSyscall(0x5Bu, env.rdram.data(), &env.ctx, &env.runtime),
+                     "GetEntryAddress syscall should dispatch");
+            
+            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)),
+                     kExpectedHandler,
+                     "GetEntryAddress should read and return the handler address from the table");
+
+            notifyRuntimeStop();
+        });
     });
 }

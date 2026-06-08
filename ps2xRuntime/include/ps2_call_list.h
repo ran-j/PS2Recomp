@@ -131,6 +131,8 @@
     X(Deci2Call)               \
     X(QueryBootMode)           \
     X(GetThreadTLS)            \
+    X(Copy)                    \
+    X(GetEntryAddress)         \
     X(RegisterExitHandler)
 
 // Stubs

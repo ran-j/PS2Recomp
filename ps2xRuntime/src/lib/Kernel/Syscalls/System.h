@@ -31,5 +31,7 @@ namespace ps2_syscalls
     void Deci2Call(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void QueryBootMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void GetThreadTLS(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void Copy(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void GetEntryAddress(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void RegisterExitHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
 }

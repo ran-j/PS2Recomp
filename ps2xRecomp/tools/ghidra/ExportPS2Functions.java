@@ -53,7 +53,7 @@ public class ExportPS2Functions extends GhidraScript {
         "iGsPutIMR", "SetVSyncFlag", "SetSyscall", "GsSetVideoMode", "GetOsdConfigParam", "SetOsdConfigParam",
         "EnableCache", "DisableCache", "GetRomName", "SifLoadElfPart", "sceSifLoadElf", "sceSifLoadElfPart",
         "sceSifLoadModule", "sceSifLoadModuleBuffer", "SetupThread", "EndOfHeap", "GetMemorySize", "Deci2Call",
-        "QueryBootMode", "GetThreadTLS", "RegisterExitHandler", "ret0", "ret1", "reta0",
+        "QueryBootMode", "GetThreadTLS", "Copy", "GetEntryAddress", "RegisterExitHandler", "ret0", "ret1", "reta0",
         "calloc_r", "free_r", "malloc_r", "malloc_trim_r", "mbtowc_r", "printf_r",
         "abs", "__ieee754_rem_pio2f", "__kernel_cosf", "__kernel_sinf", "atan", "atan2",
         "calloc", "ceil", "close", "cos", "exit", "exp",

@@ -904,7 +904,7 @@ namespace ps2_syscalls
         setReturnS32(ctx, KE_OK);
     }
 
-    // 0x5A QueryBootMode (stub): return 0 for now
+    // QueryBootMode (stub): return 0 for now
     void QueryBootMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t mode = getRegU32(ctx, 4);
@@ -919,7 +919,7 @@ namespace ps2_syscalls
         setReturnU32(ctx, addr);
     }
 
-    // 0x5B GetThreadTLS (stub): return 0
+    // GetThreadTLS (stub): return 0
     void GetThreadTLS(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         auto info = ensureCurrentThreadInfo(ctx);
@@ -935,6 +935,37 @@ namespace ps2_syscalls
         }
 
         setReturnU32(ctx, info->tlsBase);
+    }
+
+    void Copy(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t dest = getRegU32(ctx, 4);
+        const uint32_t src = getRegU32(ctx, 5);
+        const uint32_t size = getRegU32(ctx, 6);
+
+        if (rdram && size > 0)
+        {
+            uint8_t *destPtr = getMemPtr(rdram, dest);
+            const uint8_t *srcPtr = getConstMemPtr(rdram, src);
+            if (destPtr && srcPtr)
+            {
+                std::memcpy(destPtr, srcPtr, size);
+            }
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void GetEntryAddress(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t syscallNum = getRegU32(ctx, 4);
+
+        const uint32_t entryAddr = kGuestSyscallTableGuestBase + (syscallNum * 4u);
+        uint32_t handler = 0;
+        if (const uint8_t *ptr = getConstMemPtr(rdram, entryAddr))
+        {
+            std::memcpy(&handler, ptr, sizeof(handler));
+        }
+        setReturnU32(ctx, handler);
     }
 
     // 0x74 RegisterExitHandler (stub): return 0
