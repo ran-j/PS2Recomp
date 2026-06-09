@@ -244,7 +244,7 @@ namespace ps2_syscalls
         uint32_t syscallId = encodedSyscallId;
         if (syscallId == 0u)
         {
-            syscallId = (v0 != 0u) ? v0 : v1;
+            syscallId = v1;
         }
 
         std::cerr << "Warning: Unimplemented PS2 syscall called. PC=0x" << std::hex << ctx->pc

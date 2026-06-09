@@ -1163,23 +1163,11 @@ void PS2Runtime::handleSyscall(uint8_t *rdram, R5900Context *ctx, uint32_t encod
                                  "This breaks the atomic basic block model and is structurally unsupported by the emulator.");
     }
 
-    // Try immediate first
-    if (encodedSyscallId != 0 && ps2_syscalls::dispatchNumericSyscall(encodedSyscallId, rdram, ctx, this))
-    {
-        return;
-    }
+    const uint32_t syscallId = (encodedSyscallId != 0u)
+                                   ? encodedSyscallId
+                                   : getRegU32(ctx, 3); // $v1 / $3 is the EE kernel syscall number
 
-    // Try $v1 (standard)
-    const uint32_t syscallFromV1 = getRegU32(ctx, 3); // $v1
-    if (ps2_syscalls::dispatchNumericSyscall(syscallFromV1, rdram, ctx, this))
-    {
-        return;
-    }
-
-    // Try $v0 (negative syscalls)
-    const uint32_t syscallFromV0 = getRegU32(ctx, 2); // $v0 (some ABIs)
-    if (syscallFromV0 != syscallFromV1 &&
-        ps2_syscalls::dispatchNumericSyscall(syscallFromV0, rdram, ctx, this))
+    if (ps2_syscalls::dispatchNumericSyscall(syscallId, rdram, ctx, this))
     {
         return;
     }
