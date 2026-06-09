@@ -611,6 +611,30 @@ namespace ps2_syscalls
         setReturnU32(ctx, PS2_RAM_SIZE);
     }
 
+    void InitTLB(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        // TODO I`m 99% sure we dont need this we could just return ok and should be fine.
+        auto &memory = runtime->memory();
+
+        const uint32_t entryCount = static_cast<uint32_t>(memory.tlbEntryCount());
+        for (uint32_t entryIndex = 0; entryIndex < entryCount; ++entryIndex)
+        {
+            memory.tlbWrite(entryIndex, 0u, 0u, 0u, false);
+        }
+
+        // Reset basic COP0 TLB bookkeeping to sane post-init values.
+        ctx->cop0_index = 0u;
+        ctx->cop0_random = entryCount > 0u ? (entryCount - 1u) : 0u;
+        ctx->cop0_entrylo0 = 0u;
+        ctx->cop0_entrylo1 = 0u;
+        ctx->cop0_context = 0u;
+        ctx->cop0_pagemask = 0u;
+        ctx->cop0_entryhi = 0u;
+
+        setReturnS32(ctx, KE_OK);
+    }
+
     static inline uint32_t normalizeKernelAlias(uint32_t addr)
     {
         if (addr >= 0x80000000u && addr < 0xC0000000u)

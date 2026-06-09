@@ -27,6 +27,7 @@ namespace ps2_syscalls
     void SetupHeap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void EndOfHeap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void GetMemorySize(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void InitTLB(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void FindAddress(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void Deci2Call(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void QueryBootMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);

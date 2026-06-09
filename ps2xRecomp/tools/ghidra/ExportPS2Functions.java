@@ -141,7 +141,7 @@ public class ExportPS2Functions extends GhidraScript {
         "sceVu0InterVectorXYZ", "sceVu0InversMatrix", "sceVu0LightColorMatrix", "sceVu0MulMatrix", "sceVu0MulVector", "sceVu0NormalLightMatrix",
         "sceVu0Normalize", "sceVu0OuterProduct", "sceVu0RotMatrix", "sceVu0RotMatrixX", "sceVu0RotMatrixY", "sceVu0RotMatrixZ",
         "sceVu0RotTransPers", "sceVu0RotTransPersN", "sceVu0ScaleVector", "sceVu0ScaleVectorXYZ", "sceVu0SubVector", "sceVu0TransMatrix",
-        "sceVu0TransposeMatrix", "sceVu0UnitMatrix", "sceVu0ViewScreenMatrix", "sceWrite"
+        "sceVu0TransposeMatrix", "sceVu0UnitMatrix", "sceVu0ViewScreenMatrix", "sceWrite", "InitTLB"
     ));
 
     private static final Set<String> PS2_API_PREFIXES = new HashSet<>(Arrays.asList(

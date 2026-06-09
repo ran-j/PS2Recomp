@@ -128,6 +128,7 @@
     X(SetupThread)             \
     X(EndOfHeap)               \
     X(GetMemorySize)           \
+    X(InitTLB)                 \
     X(Deci2Call)               \
     X(QueryBootMode)           \
     X(GetThreadTLS)            \

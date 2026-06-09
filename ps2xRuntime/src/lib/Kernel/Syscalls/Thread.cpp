@@ -520,6 +520,9 @@ namespace ps2_syscalls
 
     void ExitThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        RUNTIME_LOG("[ExitThread] Game requested thread exit! PC=0x" << std::hex << ctx->pc
+                                                                     << " RA=0x" << getRegU32(ctx, 31) << std::dec << " tid=" << g_currentThreadId << std::endl);
+
         runExitHandlersForThread(g_currentThreadId, rdram, ctx, runtime);
         auto info = ensureCurrentThreadInfo(ctx);
         if (info)
@@ -541,6 +544,9 @@ namespace ps2_syscalls
     void ExitDeleteThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         int tid = g_currentThreadId;
+        RUNTIME_LOG("[ExitDeleteThread] Game requested thread exit & delete! PC=0x" << std::hex << ctx->pc
+                                                                                    << " RA=0x" << getRegU32(ctx, 31) << std::dec << " tid=" << tid << std::endl);
+
         runExitHandlersForThread(tid, rdram, ctx, runtime);
         auto info = ensureCurrentThreadInfo(ctx);
         if (info)
