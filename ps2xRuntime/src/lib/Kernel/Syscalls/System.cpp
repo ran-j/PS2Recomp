@@ -897,13 +897,6 @@ namespace ps2_syscalls
         setReturnU32(ctx, resultAddr);
     }
 
-    void Deci2Call(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-    {
-        (void)rdram;
-        (void)runtime;
-        setReturnS32(ctx, KE_OK);
-    }
-
     // QueryBootMode (stub): return 0 for now
     void QueryBootMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
