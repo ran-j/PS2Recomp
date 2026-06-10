@@ -573,18 +573,38 @@ namespace ps2_syscalls
     // 0x3D SetupHeap: returns heap base/start pointer
     void SetupHeap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        const uint32_t heapBase = getRegU32(ctx, 4); // $a0
+        const uint32_t heapBaseRaw = getRegU32(ctx, 4); // $a0
         const uint32_t heapSize = getRegU32(ctx, 5); // $a1 (optional size)
+
+        const uint32_t heapBase = (heapBaseRaw + 0xFu) & ~0xFu;
+
+        // Silent Hill and other games often pass -1 (0xFFFFFFFF) to mean "rest of RAM".
+        static constexpr uint32_t kDefaultGuestHeapEnd = 0x01F00000u;
+        uint32_t heapLimit = kDefaultGuestHeapEnd;
+
+        if (heapSize != 0u && heapSize != 0xFFFFFFFFu)
+        {
+            const uint64_t candidate = static_cast<uint64_t>(heapBase) + static_cast<uint64_t>(heapSize);
+            heapLimit = static_cast<uint32_t>(std::min<uint64_t>(candidate, kDefaultGuestHeapEnd));
+        }
+
+        if (heapLimit <= heapBase)
+        {
+            heapLimit = kDefaultGuestHeapEnd;
+        }
 
         if (runtime)
         {
-            uint32_t heapLimit = PS2_RAM_SIZE;
-            if (heapSize != 0u && heapBase < PS2_RAM_SIZE)
-            {
-                const uint64_t candidateLimit = static_cast<uint64_t>(heapBase) + static_cast<uint64_t>(heapSize);
-                heapLimit = static_cast<uint32_t>(std::min<uint64_t>(candidateLimit, PS2_RAM_SIZE));
-            }
             runtime->configureGuestHeap(heapBase, heapLimit);
+
+            std::cerr << "[SetupHeap]"
+                      << " base=0x" << std::hex << heapBaseRaw
+                      << " alignedBase=0x" << heapBase
+                      << " size=0x" << heapSize
+                      << " runtimeBase=0x" << runtime->guestHeapBase()
+                      << " runtimeEnd=0x" << runtime->guestHeapEnd()
+                      << std::dec << std::endl;
+
             setReturnU32(ctx, runtime->guestHeapBase());
             return;
         }
@@ -595,13 +615,15 @@ namespace ps2_syscalls
     // 0x3E EndOfHeap: commonly returns current heap end; keep it stable for now.
     void EndOfHeap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        if (runtime)
-        {
-            setReturnU32(ctx, runtime->guestHeapEnd());
-            return;
-        }
+        (void)rdram;
 
-        setReturnU32(ctx, getRegU32(ctx, 4));
+        static constexpr uint32_t kDefaultGuestHeapEnd = 0x01F00000u;
+
+        const uint32_t ret = runtime
+            ? runtime->guestHeapLimit()
+            : kDefaultGuestHeapEnd;
+
+        setReturnU32(ctx, ret);
     }
 
     void GetMemorySize(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
