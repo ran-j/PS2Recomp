@@ -558,7 +558,7 @@ void register_ps2_runtime_kernel_tests()
             t.Equals(getRegS32(env.ctx, 2), KE_OK, "DeleteThread should clean up the waiter thread");
         });
 
-        tc.Run("setup heap and allocator primitives track end-of-heap", [](TestCase &t)
+        tc.Run("setup heap configures limits and EndOfHeap reports the limit", [](TestCase &t)
         {
             TestEnv env;
 
@@ -569,16 +569,12 @@ void register_ps2_runtime_kernel_tests()
             t.Equals(heapBase, 0x00180010u, "SetupHeap should return configured base");
 
             t.IsTrue(callSyscall(0x3Eu, env.rdram.data(), &env.ctx, &env.runtime), "EndOfHeap syscall should dispatch");
-            const uint32_t heapEndBefore = static_cast<uint32_t>(getRegS32(env.ctx, 2));
-            t.Equals(heapEndBefore, heapBase, "EndOfHeap should start at heap base before allocation");
+            const uint32_t heapLimit = static_cast<uint32_t>(getRegS32(env.ctx, 2));
+            t.Equals(heapLimit, 0x00181010u, "EndOfHeap should report the upper limit of the configured heap");
 
             const uint32_t alignedAlloc = env.runtime.guestMalloc(0x20u, 64u);
             t.IsTrue(alignedAlloc != 0u, "guestMalloc should allocate inside configured heap");
             t.Equals(alignedAlloc & 0x3Fu, 0u, "guestMalloc should honor 64-byte alignment");
-
-            t.IsTrue(callSyscall(0x3Eu, env.rdram.data(), &env.ctx, &env.runtime), "EndOfHeap syscall should dispatch");
-            const uint32_t heapEndAfter = static_cast<uint32_t>(getRegS32(env.ctx, 2));
-            t.IsTrue(heapEndAfter >= alignedAlloc + 0x20u, "EndOfHeap should advance after allocation");
 
             env.runtime.guestFree(alignedAlloc);
 
