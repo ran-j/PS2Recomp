@@ -167,6 +167,24 @@ namespace
         ctx->pc = 0u;
     }
 
+    void testResumeOwnerFallbackHandler(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        if (ctx)
+        {
+            setRegU32(*ctx, 2, 0x00ABC123u);
+            ctx->pc = 0u;
+        }
+    }
+
+    void testResumeNextFunctionHandler(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        if (ctx)
+        {
+            setRegU32(*ctx, 2, 0x00555555u);
+            ctx->pc = 0u;
+        }
+    }
+
     constexpr uint32_t kAsyncCounterAddr = 0x2400u;
 
     void testWaitForAsyncCounter(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
@@ -387,6 +405,36 @@ void register_ps2_runtime_expansion_tests()
                      "second guest worker should run after the first returns to the dispatcher");
             t.Equals(getRegU32(&firstCtx, 2), 1u,
                      "first guest worker should observe that the runtime requested preemption under contention");
+        });
+
+        tc.Run("lookupFunction aliases internal resume PCs to nearest owner", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            runtime.registerFunction(0x1000u, &testResumeOwnerFallbackHandler);
+            runtime.registerFunction(0x1100u, &testResumeNextFunctionHandler);
+
+            R5900Context ctx{};
+            ctx.pc = 0x1010u;
+            auto fn = runtime.lookupFunction(ctx.pc);
+            fn(nullptr, &ctx, &runtime);
+
+            t.Equals(::getRegU32(&ctx, 2), 0x00ABC123u,
+                     "internal resume PC should dispatch to its owner function");
+        });
+
+        tc.Run("lookupFunction aliases final-function resume PCs inside code regions", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            runtime.memory().registerCodeRegion(0x2000u, 0x2100u);
+            runtime.registerFunction(0x2000u, &testResumeOwnerFallbackHandler);
+
+            R5900Context ctx{};
+            ctx.pc = 0x2010u;
+            auto fn = runtime.lookupFunction(ctx.pc);
+            fn(nullptr, &ctx, &runtime);
+
+            t.Equals(::getRegU32(&ctx, 2), 0x00ABC123u,
+                     "last function should own resumable PCs within its code region");
         });
 
         tc.Run("vblank intc handlers can preempt serialized guest execution", [](TestCase &t)

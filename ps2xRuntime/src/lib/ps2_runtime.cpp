@@ -145,6 +145,8 @@ namespace
 
     thread_local DispatchHistory g_dispatchHistory;
     thread_local std::unordered_map<PS2Runtime *, uint32_t> g_guestExecutionDepths;
+    std::mutex g_functionStartsMutex;
+    std::unordered_map<const PS2Runtime *, std::vector<uint32_t>> g_functionStartsByRuntime;
 
     void pushDispatchPc(uint32_t pc)
     {
@@ -357,6 +359,34 @@ namespace
         return 0u;
     }
 
+    void clearFunctionStarts(const PS2Runtime *runtime)
+    {
+        std::lock_guard<std::mutex> lock(g_functionStartsMutex);
+        g_functionStartsByRuntime.erase(runtime);
+    }
+
+    std::vector<uint32_t> snapshotFunctionStarts(const PS2Runtime *runtime)
+    {
+        std::lock_guard<std::mutex> lock(g_functionStartsMutex);
+        auto it = g_functionStartsByRuntime.find(runtime);
+        if (it == g_functionStartsByRuntime.end())
+        {
+            return {};
+        }
+        return it->second;
+    }
+
+    void registerFunctionStart(const PS2Runtime *runtime, uint32_t address)
+    {
+        std::lock_guard<std::mutex> lock(g_functionStartsMutex);
+        auto &starts = g_functionStartsByRuntime[runtime];
+        auto insertPos = std::lower_bound(starts.begin(), starts.end(), address);
+        if (insertPos == starts.end() || *insertPos != address)
+        {
+            starts.insert(insertPos, address);
+        }
+    }
+
     std::string readGuestPrintableString(const uint8_t *rdram, uint32_t addr, size_t maxLen)
     {
         std::string out;
@@ -566,6 +596,7 @@ PS2Runtime::PS2Runtime()
     // Stack pointer (SP) and global pointer (GP) will be set by the loaded ELF
 
     m_functionTable.clear();
+    clearFunctionStarts(this);
 
     m_loadedModules.clear();
     m_guestHeapBlocks.clear();
@@ -602,6 +633,7 @@ PS2Runtime::~PS2Runtime()
         m_loadedModules.clear();
 
         m_functionTable.clear();
+        clearFunctionStarts(this);
     }
     catch (const std::exception &e)
     {
@@ -978,6 +1010,7 @@ void PS2Runtime::configureIoPathsFromElf(const std::string &elfPath)
 
 void PS2Runtime::registerFunction(uint32_t address, RecompiledFunction func)
 {
+    registerFunctionStart(this, address);
     m_functionTable[address] = func;
 }
 
@@ -1002,7 +1035,89 @@ PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
         return it->second;
     }
 
-    std::cerr << "Warning: Function at address 0x" << std::hex << address << std::dec << " not found" << std::endl;
+    const std::vector<uint32_t> functionStarts = snapshotFunctionStarts(this);
+    auto aliasOwner = [&](uint32_t ownerAddress) -> RecompiledFunction
+    {
+        auto owner = m_functionTable.find(ownerAddress);
+        if (owner == m_functionTable.end())
+        {
+            return nullptr;
+        }
+
+        auto ownerStart = std::lower_bound(functionStarts.begin(), functionStarts.end(), ownerAddress);
+        if (ownerStart == functionStarts.end() || *ownerStart != ownerAddress)
+        {
+            return nullptr;
+        }
+
+        auto nextStart = ownerStart;
+        ++nextStart;
+        if (nextStart != functionStarts.end())
+        {
+            if (address >= *nextStart)
+            {
+                return nullptr;
+            }
+        }
+        else if (!m_memory.isCodeAddress(address))
+        {
+            return nullptr;
+        }
+
+        return owner->second;
+    };
+
+    if (!functionStarts.empty())
+    {
+        const DispatchHistory &history = g_dispatchHistory;
+        const uint32_t count = history.wrapped ? static_cast<uint32_t>(history.pcs.size()) : history.next;
+        for (uint32_t step = 1u; step <= count; ++step)
+        {
+            const uint32_t idx = (history.next + static_cast<uint32_t>(history.pcs.size()) - step) %
+                                 static_cast<uint32_t>(history.pcs.size());
+            const uint32_t previousPc = history.pcs[idx];
+            if (previousPc == address)
+            {
+                continue;
+            }
+            if (RecompiledFunction owner = aliasOwner(previousPc))
+            {
+                return owner;
+            }
+        }
+
+        auto nextStart = std::upper_bound(functionStarts.begin(), functionStarts.end(), address);
+        if (nextStart != functionStarts.begin())
+        {
+            auto ownerStart = nextStart;
+            --ownerStart;
+            if (RecompiledFunction owner = aliasOwner(*ownerStart))
+            {
+                return owner;
+            }
+        }
+    }
+
+    std::cerr << "Warning: Function at address 0x" << std::hex << address;
+    if (!functionStarts.empty())
+    {
+        auto nextStart = std::upper_bound(functionStarts.begin(), functionStarts.end(), address);
+        if (nextStart != functionStarts.begin())
+        {
+            auto ownerStart = nextStart;
+            --ownerStart;
+            std::cerr << " nearestStart=0x" << *ownerStart;
+        }
+        if (nextStart != functionStarts.end())
+        {
+            std::cerr << " nextStart=0x" << *nextStart;
+        }
+        else
+        {
+            std::cerr << " nextStart=<end>";
+        }
+    }
+    std::cerr << std::dec << " not found" << std::endl;
 
     static RecompiledFunction defaultFunction = [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
