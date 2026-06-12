@@ -1,6 +1,7 @@
 #include "ps2recomp/code_generator.h"
 #include "ps2recomp/instructions.h"
 #include "ps2recomp/ps2_recompiler.h"
+#include "ps2recomp/r5900_decoder.h"
 #include "ps2recomp/types.h"
 #include "ps2_runtime_calls.h"
 #include <fmt/format.h>
@@ -12,6 +13,7 @@
 #include <iostream>
 #include <cctype>
 #include <cmath>
+#include <vector>
 
 namespace ps2recomp
 {
@@ -164,6 +166,11 @@ namespace ps2recomp
         }
     }
 
+    void CodeGenerator::setEmitInstructionComments(bool emitInstructionComments)
+    {
+        m_emitInstructionComments = emitInstructionComments;
+    }
+
     std::string CodeGenerator::getFunctionName(uint32_t address) const
     {
         auto it = m_renamedFunctions.find(address);
@@ -223,11 +230,16 @@ namespace ps2recomp
         std::string delaySlotSuffix = "";
         if (hasValidDelaySlot) {
             delaySlotPrefix = "ctx->in_delay_slot = true; ctx->branch_pc = 0x" + fmt::format("{:X}", branchInst.address) + "u;\n        ";
-            delaySlotCode = "    // 0x" + fmt::format("{:x}", delaySlot.address) + ": 0x" + fmt::format("{:x}", delaySlot.raw);
-            if (!delaySlot.disassembly.empty()) {
-                delaySlotCode += "  " + delaySlot.disassembly;
+            if (m_emitInstructionComments)
+            {
+                delaySlotCode = "    // 0x" + fmt::format("{:x}", delaySlot.address) + ": 0x" + fmt::format("{:x}", delaySlot.raw);
+                std::string disassembly = R5900Decoder::disassembleInstruction(delaySlot);
+                if (!disassembly.empty()) {
+                    delaySlotCode += "  " + disassembly;
+                }
+                delaySlotCode += " (Delay Slot)\n        ";
             }
-            delaySlotCode += " (Delay Slot)\n        " + translateInstruction(delaySlot);
+            delaySlotCode += translateInstruction(delaySlot);
             delaySlotSuffix = "\n        ctx->in_delay_slot = false;";
         }
 
@@ -259,19 +271,17 @@ namespace ps2recomp
 
         std::vector<uint32_t> sortedInternalTargets;
         if (branchInst.opcode == OPCODE_SPECIAL &&
-            (branchInst.function == SPECIAL_JR || branchInst.function == SPECIAL_JALR) &&
+            ((branchInst.function == SPECIAL_JR && branchInst.rs != 31) ||
+             branchInst.function == SPECIAL_JALR) &&
             !internalTargets.empty())
         {
+            // Only emit local indirect-jump switches for jump tables we actually resolved.
+            // Falling back to every internal target here can duplicate huge switches at each
+            // indirect branch. Unresolved JR/JALR targets are registered as resumable entries
+            // instead, so runtime dispatch can re-enter this function at ctx->pc.
             auto jtIt = analysisResult.jumpTableTargets.find(branchInst.address);
             if (jtIt != analysisResult.jumpTableTargets.end()) {
                 sortedInternalTargets = jtIt->second;
-                std::sort(sortedInternalTargets.begin(), sortedInternalTargets.end());
-            } else {
-                sortedInternalTargets.reserve(internalTargets.size());
-                for (uint32_t t : internalTargets)
-                {
-                    sortedInternalTargets.push_back(t);
-                }
                 std::sort(sortedInternalTargets.begin(), sortedInternalTargets.end());
             }
         }
@@ -827,7 +837,7 @@ namespace ps2recomp
 
         if (hasIndirectRegisterJump)
         {
-            bool needsJrFallback = false;
+            bool needsIndirectFallback = false;
             for (const Instruction* jrInst : indirectJumps) {
                 if (jrInst->function == SPECIAL_JALR)
                 {
@@ -997,19 +1007,19 @@ namespace ps2recomp
                     }
                 }
                 if (!foundTable) {
-                    if (!(jrInst->function == SPECIAL_JALR))
-                    {
-                        needsJrFallback = true;
-                    }
+                    needsIndirectFallback = true;
                 }
             }
 
-            if (needsJrFallback) {
+            if (needsIndirectFallback) {
                 for (uint32_t addr : instructionAddresses)
                 {
                     if (addr >= function.start && addr < function.end)
                     {
                         result.entryPoints.insert(addr);
+                        // Keep labels and runtime registration for unresolved JR/JALR targets
+                        // without emitting a local switch over every possible target.
+                        result.indirectFallbackEntryPoints.insert(addr);
                     }
                 }
             }
@@ -1093,11 +1103,15 @@ namespace ps2recomp
                 ss << "label_" << std::hex << inst.address << std::dec << ":\n";
             }
 
-            ss << "    // 0x" << std::hex << inst.address << ": 0x" << inst.raw << std::dec;
-            if (!inst.disassembly.empty()) {
-                ss << "  " << inst.disassembly;
+            if (m_emitInstructionComments)
+            {
+                ss << "    // 0x" << std::hex << inst.address << ": 0x" << inst.raw << std::dec;
+                std::string disassembly = R5900Decoder::disassembleInstruction(inst);
+                if (!disassembly.empty()) {
+                    ss << "  " << disassembly;
+                }
+                ss << "\n";
             }
-            ss << "\n";
 
             try
             {

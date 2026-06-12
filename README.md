@@ -92,6 +92,8 @@ Main fields in `config.toml`:
 * `general.ghidra_output`: recommended function map CSV exported from Ghidra.
 * `general.output`: generated C++ output folder.
 * `general.single_file_output`: one combined cpp or one file per function.
+* `general.low_memory_mode`: reduce peak output-generation memory by avoiding retained disassembly strings and forcing serial output generation. Generated instruction comments are still emitted; disassembly text is produced while writing each output file instead of being kept in memory.
+* `general.output_worker_threads`: number of output-generation workers (clamped to nproc * 2). A positive value uses exactly that many workers. `0` uses `nproc - 1` when at least two hardware threads are available, otherwise serial output generation. `1` forces serial output generation.
 * `general.patch_syscalls`: apply configured patches to `SYSCALL` instructions (`false` recommended).
 * `general.patch_cop0`: apply configured patches to COP0 instructions.
 * `general.patch_cache`: apply configured patches to CACHE instructions.
@@ -112,31 +114,12 @@ Address binding for stripped ELFs:
 Example:
 
 ```toml
-[general]
-input = "path/to/game.elf"
-ghidra_output = ""
-output = "output/"
-
-single_file_output = true
-patch_syscalls = false
-patch_cop0 = true
-patch_cache = true
-
-stubs = ["printf", "malloc", "free"]
-
 # stripped function binding by address:
-# stubs = ["sceCdRead@0x00123456", "SifLoadModule@0x00127890"]
+stubs = ["sceCdRead@0x00123456", "SifLoadModule@0x00127890"]
 # temporary return handlers:
-# stubs = ["ret0@0x001D9410", "ret1@0x001D5BC8", "reta0@0x0024B7C0"]
+stubs = ["ret0@0x001D9410", "ret1@0x001D5BC8", "reta0@0x0024B7C0"]
 # mixed example:
-# stubs = ["printf", "sceCdRead@0x00123456", "SifLoadModule@0x00127890"]
-
-skip = ["abort", "exit"]
-
-[patches]
-instructions = [
-  { address = "0x100004", value = "0x00000000" }
-]
+stubs = ["printf", "sceCdRead@0x00123456", "SifLoadModule@0x00127890"] 
 ```
 
 ### Runtime

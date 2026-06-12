@@ -305,6 +305,60 @@ void register_code_generator_tests()
                  "JALR resume pc should also be emitted as an internal label");
     });
 
+    tc.Run("unresolved JR marks internal labels as indirect fallback resume entries", [](TestCase &t) {
+        Function func;
+        func.name = "unresolved_jr_fallback";
+        func.start = 0x3100;
+        func.end = 0x3120;
+        func.isRecompiled = true;
+        func.isStub = false;
+
+        std::vector<Instruction> instructions{
+            makeNop(0x3100),
+            makeJr(0x3104, 8),
+            makeNop(0x3108),
+            makeNop(0x310C),
+            makeNop(0x3110),
+        };
+
+        CodeGenerator gen({}, {});
+        CodeGenerator::AnalysisResult analysis = gen.collectInternalBranchTargets(func, instructions);
+
+        t.IsTrue(analysis.indirectFallbackEntryPoints.contains(0x310Cu),
+                 "unresolved JR should register internal labels as resumable entries for the owning function");
+        t.IsTrue(analysis.entryPoints.contains(0x310Cu),
+                 "unresolved JR fallback targets should still emit labels in the owner");
+        t.IsFalse(analysis.jumpTableTargets.contains(0x3104u),
+                  "unresolved JR should not pretend it has a resolved local jump table");
+    });
+
+    tc.Run("unresolved JALR marks internal labels as indirect fallback resume entries", [](TestCase &t) {
+        Function func;
+        func.name = "unresolved_jalr_fallback";
+        func.start = 0x3200;
+        func.end = 0x3220;
+        func.isRecompiled = true;
+        func.isStub = false;
+
+        std::vector<Instruction> instructions{
+            makeNop(0x3200),
+            makeJalr(0x3204, 25, 31),
+            makeNop(0x3208),
+            makeNop(0x320C),
+            makeNop(0x3210),
+        };
+
+        CodeGenerator gen({}, {});
+        CodeGenerator::AnalysisResult analysis = gen.collectInternalBranchTargets(func, instructions);
+
+        t.IsTrue(analysis.indirectFallbackEntryPoints.contains(0x320Cu),
+                 "unresolved JALR should register internal labels as resumable entries for the owning function");
+        t.IsTrue(analysis.entryPoints.contains(0x320Cu),
+                 "unresolved JALR fallback targets should still emit labels in the owner");
+        t.IsFalse(analysis.jumpTableTargets.contains(0x3204u),
+                  "unresolved JALR should not pretend it has a resolved local jump table");
+    });
+
     tc.Run("resume entry targets emit a top-level pc switch in the owner wrapper", [](TestCase &t) {
         Function func;
         func.name = "resume_owner";
@@ -1142,9 +1196,9 @@ void register_code_generator_tests()
             t.IsTrue(generated.find("if (branch_taken_0x1200)") != std::string::npos, "should generate branch_taken variable and if for likely branch");
         });
 
-        tc.Run("JR $31 emits switch for internal return targets", [](TestCase &t) {
+        tc.Run("JR $31 returns through dynamic target without broad local switch", [](TestCase &t) {
             Function func;
-            func.name = "jr_ra_switch";
+            func.name = "jr_ra_return";
             func.start = 0x1300;
             func.end = 0x1340;
             func.isRecompiled = true;
@@ -1162,10 +1216,16 @@ void register_code_generator_tests()
 
             CodeGenerator gen({}, {});
             std::string generated = gen.generateFunction(func, { jal, jalDelay, atReturn, atTarget, jr, jrDelay }, false);
-            printGeneratedCode("JR $31 emits switch for internal return targets", generated);
+            printGeneratedCode("JR $31 returns through dynamic target without broad local switch", generated);
 
-            t.IsTrue(generated.find("switch (jumpTarget)") != std::string::npos, "JR $31 should emit switch for internal targets");
-            t.IsTrue(generated.find("case 0x1308u: goto label_1308;") != std::string::npos, "switch should include return address from internal JAL");
+            t.IsTrue(generated.find("uint32_t jumpTarget = GPR_U32(ctx, 31);") != std::string::npos,
+                     "JR $31 should still read the dynamic return target");
+            t.IsFalse(generated.find("switch (jumpTarget)") != std::string::npos,
+                      "JR $31 should not emit a broad local switch over internal labels");
+            t.IsTrue(generated.find("label_1308:") != std::string::npos,
+                     "internal JAL return address should still be emitted as a label");
+            t.IsTrue(generated.find("        return;") != std::string::npos,
+                     "JR $31 should return to the dispatcher/runtime after setting ctx->pc");
         });
 
         tc.Run("trailing JR $31 without decoded delay slot still emits return flow", [](TestCase &t) {
@@ -1188,17 +1248,17 @@ void register_code_generator_tests()
 
             t.IsTrue(generated.find("uint32_t jumpTarget = GPR_U32(ctx, 31);") != std::string::npos,
                      "truncated trailing JR should still read the return target");
-            t.IsTrue(generated.find("switch (jumpTarget)") != std::string::npos,
-                     "truncated trailing JR should still emit the return-target switch");
-            t.IsTrue(generated.find("case 0x1508u: goto label_1508;") != std::string::npos,
-                     "truncated trailing JR should still include internal return targets");
+            t.IsFalse(generated.find("switch (jumpTarget)") != std::string::npos,
+                      "truncated trailing JR should not emit a broad local return-target switch");
+            t.IsTrue(generated.find("label_1508:") != std::string::npos,
+                     "truncated trailing JR should still include the internal return label");
             t.IsTrue(generated.find("// JR $31 - Handled by branch logic") == std::string::npos,
                      "truncated trailing JR must not degrade to comment-only output");
         });
 
-        tc.Run("JR non-RA emits switch for in-function jump targets", [](TestCase &t) {
+        tc.Run("unresolved JR non-RA uses dispatcher resume entries without broad local switch", [](TestCase &t) {
             Function func;
-            func.name = "jr_non_ra_switch";
+            func.name = "jr_non_ra_dispatcher_resume";
             func.start = 0x1400;
             func.end = 0x1420;
             func.isRecompiled = true;
@@ -1214,17 +1274,21 @@ void register_code_generator_tests()
             Instruction i3 = makeNop(0x140c);
 
             CodeGenerator gen({}, {});
+            CodeGenerator::AnalysisResult analysis = gen.collectInternalBranchTargets(func, {i0, jr, delay, i3});
+            gen.setResumeEntryTargets({{func.start, std::vector<uint32_t>(
+                                                        analysis.indirectFallbackEntryPoints.begin(),
+                                                        analysis.indirectFallbackEntryPoints.end())}});
             std::string generated = gen.generateFunction(func, {i0, jr, delay, i3}, false);
-            printGeneratedCode("JR non-RA emits switch for in-function jump targets", generated);
+            printGeneratedCode("unresolved JR non-RA uses dispatcher resume entries without broad local switch", generated);
 
-            t.IsTrue(generated.find("switch (jumpTarget)") != std::string::npos,
-                     "JR via non-RA register should emit switch for internal targets");
-            t.IsTrue(generated.find("switch (ctx->pc)") == std::string::npos,
-                     "JR fallback labels should not be promoted to dispatcher resume sites");
-            t.IsTrue(generated.find("case 0x1400u: goto label_1400;") != std::string::npos,
-                     "switch should include in-function entry label");
-            t.IsTrue(generated.find("case 0x140Cu: goto label_140c;") != std::string::npos,
-                     "switch should include other in-function labels");
+            t.IsFalse(generated.find("switch (jumpTarget)") != std::string::npos,
+                      "unresolved JR via non-RA register should not emit a broad local switch over internal labels");
+            t.IsTrue(generated.find("switch (ctx->pc)") != std::string::npos,
+                     "JR fallback labels should be promoted to dispatcher resume sites");
+            t.IsTrue(generated.find("case 0x140cu: goto label_140c;") != std::string::npos,
+                     "owner resume switch should include internal fallback labels");
+            t.IsTrue(generated.find("ctx->pc = jumpTarget;") != std::string::npos,
+                     "unresolved JR should hand the dynamic target back through ctx->pc");
         });
 
         tc.Run("configured jump table addresses drive JR dispatch targets", [](TestCase &t) {
@@ -1291,6 +1355,8 @@ void register_code_generator_tests()
                 func,
                 {lui, addiu, sll, addu, lw, jr, jrDelay, target0, target1});
 
+            t.IsTrue(analysis.jumpTableTargets.contains(0x1614u),
+                     "configured JR table should be tracked as a resolved local jump table");
             t.IsFalse(analysis.resumeEntryPoints.contains(0x1620u),
                       "configured JR table targets should stay in-function dispatch labels");
             t.IsFalse(analysis.resumeEntryPoints.contains(0x1630u),
@@ -1314,15 +1380,15 @@ void register_code_generator_tests()
                      "configured table should avoid broad JR fallback labels");
         });
 
-        tc.Run("JALR includes switch and fallback/guard pair", [](TestCase &t) {
+        tc.Run("unresolved JALR uses runtime dispatch without broad local switch", [](TestCase &t) {
             Function func;
-            func.name = "jalr_switch_and_fallback";
+            func.name = "jalr_runtime_fallback";
             func.start = 0x1500;
             func.end = 0x1530;
             func.isRecompiled = true;
             func.isStub = false;
 
-            // A call-like setup so there are multiple in-function labels to dispatch to.
+            // A call-like setup so there are multiple in-function labels available.
             Instruction jal = makeJal(0x1500, 0x1510);
             Instruction jalDelay = makeNop(0x1504);
             Instruction atReturn = makeNop(0x1508);
@@ -1332,12 +1398,12 @@ void register_code_generator_tests()
 
             CodeGenerator gen({}, {});
             std::string generated = gen.generateFunction(func, {jal, jalDelay, atReturn, atTarget, jalr, jalrDelay}, false);
-            printGeneratedCode("JALR includes switch and fallback/guard pair", generated);
+            printGeneratedCode("unresolved JALR uses runtime dispatch without broad local switch", generated);
 
-            t.IsTrue(generated.find("switch (jumpTarget)") != std::string::npos,
-                     "JALR should emit switch when in-function register-jump targets exist");
-            t.IsTrue(generated.find("case 0x1508u: goto label_1508;") != std::string::npos,
-                     "switch should include internal return label from JAL in same function");
+            t.IsFalse(generated.find("switch (jumpTarget)") != std::string::npos,
+                      "unresolved JALR should not emit a broad local switch over every internal label");
+            t.IsTrue(generated.find("auto targetFn = runtime->lookupFunction(jumpTarget);") != std::string::npos,
+                     "unresolved JALR should dispatch through the runtime");
             t.IsTrue(generated.find("if (ctx->pc == __entryPc) { ctx->pc = 0x151Cu; }") != std::string::npos,
                      "JALR should contain unchanged-PC fallback to fallthrough");
             t.IsTrue(generated.find("if (ctx->pc != 0x151Cu) { return; }") != std::string::npos,
