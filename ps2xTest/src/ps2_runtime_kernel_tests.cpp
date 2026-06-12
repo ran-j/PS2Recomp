@@ -2,6 +2,7 @@
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
 #include "ps2_syscalls.h"
+#include "ps2_stubs.h"
 
 #include <chrono>
 #include <array>
@@ -591,6 +592,28 @@ void register_ps2_runtime_kernel_tests()
             t.Equals(reused, heapBase, "guestFree should make the head block reusable");
         });
 
+        tc.Run("memalign stubs allocate aligned guest memory", [](TestCase &t)
+        {
+            TestEnv env;
+
+            env.runtime.configureGuestHeap(0x00180010u, 0x00182010u);
+
+            setRegU32(env.ctx, 4, 128u);
+            setRegU32(env.ctx, 5, 0x40u);
+            ps2_stubs::memalign(env.rdram.data(), &env.ctx, &env.runtime);
+            const uint32_t direct = ::getRegU32(&env.ctx, 2);
+            t.IsTrue(direct != 0u, "memalign should return a guest address");
+            t.Equals(direct & 0x7Fu, 0u, "memalign should honor 128-byte alignment");
+
+            setRegU32(env.ctx, 5, 64u);
+            setRegU32(env.ctx, 6, 0x40u);
+            ps2_stubs::memalign_r(env.rdram.data(), &env.ctx, &env.runtime);
+            const uint32_t reent = ::getRegU32(&env.ctx, 2);
+            t.IsTrue(reent != 0u, "_memalign_r should return a guest address");
+            t.Equals(reent & 0x3Fu, 0u, "_memalign_r should honor 64-byte alignment");
+            t.IsTrue(reent != direct, "_memalign_r should allocate a distinct block");
+        });
+
         tc.Run("ReleaseAlarm aliases CancelAlarm and cache toggles succeed", [](TestCase &t)
         {
             TestEnv env;
@@ -661,6 +684,56 @@ void register_ps2_runtime_kernel_tests()
             t.IsTrue(callSyscall(0x3Cu, env.rdram.data(), &env.ctx, &env.runtime), "SetupThread syscall should dispatch");
             const uint32_t setupSp = static_cast<uint32_t>(getRegS32(env.ctx, 2));
             t.Equals(setupSp & 0xFu, 0u, "SetupThread should always return a 16-byte aligned stack pointer");
+        });
+
+        tc.Run("OSD config2 syscalls round-trip extended config", [](TestCase &t)
+        {
+            TestEnv env;
+            constexpr uint32_t kConfig2Addr = 0x00005000u;
+            constexpr uint32_t kConfig2OutAddr = 0x00005010u;
+            constexpr uint32_t kConfig1OutAddr = 0x00005020u;
+            constexpr uint32_t kInitialConfig1 =
+                (1u << 0) |  // SPDIF disabled
+                (1u << 4) |  // non-Japanese language flag
+                (1u << 13) | // OSD2
+                (1u << 16);  // English
+            constexpr uint32_t kConfig2Raw =
+                0xABu |        // format
+                (0xB0u << 8) | // daylightSaving=1, timeFormat=1, dateFormat=2
+                (2u << 16) |   // extended OSD version
+                (10u << 24);   // traditional Chinese
+
+            writeGuestU32(env.rdram.data(), K_PARAM_ADDR, kInitialConfig1);
+            setRegU32(env.ctx, 4, K_PARAM_ADDR);
+            t.IsTrue(callSyscall(0x4Au, env.rdram.data(), &env.ctx, &env.runtime),
+                     "SetOsdConfigParam syscall should dispatch");
+            t.Equals(getRegS32(env.ctx, 2), KE_OK, "SetOsdConfigParam should seed base OSD state");
+
+            writeGuestU32(env.rdram.data(), kConfig2Addr, kConfig2Raw);
+            setRegU32(env.ctx, 4, kConfig2Addr);
+            setRegU32(env.ctx, 5, 4u);
+            setRegU32(env.ctx, 6, 0u);
+            t.IsTrue(callSyscall(0x6Eu, env.rdram.data(), &env.ctx, &env.runtime),
+                     "SetOsdConfigParam2 syscall should dispatch");
+            t.Equals(getRegS32(env.ctx, 2), KE_OK, "SetOsdConfigParam2 should succeed");
+
+            writeGuestU32(env.rdram.data(), kConfig2OutAddr, 0xFFFFFFFFu);
+            setRegU32(env.ctx, 4, kConfig2OutAddr);
+            setRegU32(env.ctx, 5, 4u);
+            setRegU32(env.ctx, 6, 0u);
+            t.IsTrue(callSyscall(0x6Fu, env.rdram.data(), &env.ctx, &env.runtime),
+                     "GetOsdConfigParam2 syscall should dispatch");
+            t.Equals(getRegS32(env.ctx, 2), KE_OK, "GetOsdConfigParam2 should succeed");
+            const uint32_t readConfig2 = readGuestU32(env.rdram.data(), kConfig2OutAddr);
+            t.Equals(readConfig2, kConfig2Raw, "GetOsdConfigParam2 should round-trip the sanitized Config2Param bytes");
+            t.Equals((readConfig2 >> 12) & 1u, 1u, "Config2 daylightSaving should live at bit 12 for libosd callers");
+
+            setRegU32(env.ctx, 4, kConfig1OutAddr);
+            t.IsTrue(callSyscall(0x4Bu, env.rdram.data(), &env.ctx, &env.runtime),
+                     "GetOsdConfigParam syscall should dispatch after Config2 update");
+            const uint32_t readConfig1 = readGuestU32(env.rdram.data(), kConfig1OutAddr);
+            t.Equals((readConfig1 >> 13) & 0x7u, 2u, "SetOsdConfigParam2 should sync ConfigParam.version");
+            t.Equals((readConfig1 >> 16) & 0x1Fu, 10u, "SetOsdConfigParam2 should sync ConfigParam.language");
         });
 
         tc.Run("numeric syscall 0x83 finds matching table entry", [](TestCase &t)

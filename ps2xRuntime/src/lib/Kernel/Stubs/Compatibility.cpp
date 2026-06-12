@@ -39,6 +39,14 @@ namespace ps2_stubs
         }
     }
 
+    void memalign_r(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t alignment = getRegU32(ctx, 5); // $a1
+        const uint32_t size = getRegU32(ctx, 6);      // $a2
+        const uint32_t guestAddr = runtime ? runtime->guestMalloc(size, alignment) : 0u;
+        setReturnU32(ctx, guestAddr);
+    }
+
     void malloc_r(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const uint32_t size = getRegU32(ctx, 5); // $a1

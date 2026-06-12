@@ -126,7 +126,116 @@ namespace ps2_syscalls
         {
             std::lock_guard<std::mutex> lock(g_osd_mutex);
             g_osd_config_raw = raw;
+            g_osd_config2_raw = makeReadableOsdConfig2RawLocked();
             g_osd_config_initialized = true;
+        }
+
+        setReturnS32(ctx, 0);
+    }
+
+    void SetOsdConfigParam2(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)runtime;
+        const uint32_t paramAddr = getRegU32(ctx, 4); // $a0 - Config2Param*
+        const uint32_t size = getRegU32(ctx, 5);      // $a1 - sizeof(Config2Param), normally 4
+
+        ensureOsdConfigInitialized();
+
+        if (size == 0u)
+        {
+            setReturnS32(ctx, 0);
+            return;
+        }
+
+        uint32_t raw = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_osd_mutex);
+            raw = makeReadableOsdConfig2RawLocked();
+        }
+
+        const uint32_t copyBytes = std::min<uint32_t>(size, 4u);
+        uint8_t rawBytes[4] = {
+            static_cast<uint8_t>(raw & 0xFFu),
+            static_cast<uint8_t>((raw >> 8) & 0xFFu),
+            static_cast<uint8_t>((raw >> 16) & 0xFFu),
+            static_cast<uint8_t>((raw >> 24) & 0xFFu),
+        };
+
+        for (uint32_t i = 0; i < copyBytes; ++i)
+        {
+            const uint8_t *src = getConstMemPtr(rdram, paramAddr + i);
+            if (!src)
+            {
+                std::cerr << "PS2 SetOsdConfigParam2 error: Invalid parameter address: 0x"
+                          << std::hex << (paramAddr + i) << std::dec << std::endl;
+                setReturnS32(ctx, -1);
+                return;
+            }
+            rawBytes[i] = *src;
+        }
+
+        raw = static_cast<uint32_t>(rawBytes[0]) |
+              (static_cast<uint32_t>(rawBytes[1]) << 8) |
+              (static_cast<uint32_t>(rawBytes[2]) << 16) |
+              (static_cast<uint32_t>(rawBytes[3]) << 24);
+        raw = sanitizeOsdConfig2Raw(raw);
+
+        {
+            std::lock_guard<std::mutex> lock(g_osd_mutex);
+            g_osd_config2_raw = raw;
+
+            uint32_t version = (g_osd_config_raw >> 13) & 0x7u;
+            uint32_t language = (g_osd_config_raw >> 16) & 0x1Fu;
+            if (copyBytes >= 3u)
+                version = (raw >> 16) & 0xFFu;
+            if (copyBytes >= 4u)
+                language = (raw >> 24) & 0xFFu;
+            g_osd_config_raw = syncOsdConfigRawVersionLanguage(g_osd_config_raw, version, language);
+            g_osd_config_initialized = true;
+        }
+
+        setReturnS32(ctx, 0);
+    }
+
+    void GetOsdConfigParam2(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)runtime;
+        const uint32_t paramAddr = getRegU32(ctx, 4); // $a0 - Config2Param*
+        const uint32_t size = getRegU32(ctx, 5);      // $a1 - sizeof(Config2Param), normally 4
+
+        ensureOsdConfigInitialized();
+
+        if (size == 0u)
+        {
+            setReturnS32(ctx, 0);
+            return;
+        }
+
+        uint32_t raw = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_osd_mutex);
+            raw = makeReadableOsdConfig2RawLocked();
+        }
+
+        const uint8_t rawBytes[4] = {
+            static_cast<uint8_t>(raw & 0xFFu),
+            static_cast<uint8_t>((raw >> 8) & 0xFFu),
+            static_cast<uint8_t>((raw >> 16) & 0xFFu),
+            static_cast<uint8_t>((raw >> 24) & 0xFFu),
+        };
+        const uint32_t copyBytes = std::min<uint32_t>(size, 4u);
+
+        for (uint32_t i = 0; i < copyBytes; ++i)
+        {
+            uint8_t *dst = getMemPtr(rdram, paramAddr + i);
+            if (!dst)
+            {
+                std::cerr << "PS2 GetOsdConfigParam2 error: Invalid parameter address: 0x"
+                          << std::hex << (paramAddr + i) << std::dec << std::endl;
+                setReturnS32(ctx, -1);
+                return;
+            }
+            *dst = rawBytes[i];
         }
 
         setReturnS32(ctx, 0);

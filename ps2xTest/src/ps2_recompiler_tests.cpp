@@ -864,6 +864,10 @@ void register_ps2_recompiler_tests()
                      "isceSifSetDma should resolve as a stub name");
             t.Equals(ps2_runtime_calls::resolveStubName("isceSifSetDChain"), std::string_view{"isceSifSetDChain"},
                      "isceSifSetDChain should resolve as a stub name");
+            t.Equals(ps2_runtime_calls::resolveStubName("memalign"), std::string_view{"memalign"},
+                     "memalign should resolve as a stub name");
+            t.Equals(ps2_runtime_calls::resolveStubName("_memalign_r"), std::string_view{"memalign_r"},
+                     "_memalign_r should resolve to the memalign_r stub");
         });
 
         tc.Run("respect max length for .cpp filenames", [](TestCase& t) {

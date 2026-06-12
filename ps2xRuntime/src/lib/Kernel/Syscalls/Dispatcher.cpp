@@ -253,6 +253,12 @@ namespace ps2_syscalls
         case 0x64:
             FlushCache(rdram, ctx, runtime);
             return true;
+        case 0x6E:
+            SetOsdConfigParam2(rdram, ctx, runtime);
+            return true;
+        case 0x6F:
+            GetOsdConfigParam2(rdram, ctx, runtime);
+            return true;
         case 0x70:
             GsGetIMR(rdram, ctx, runtime);
             return true;

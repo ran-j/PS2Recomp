@@ -116,6 +116,8 @@
                                \
     X(GetOsdConfigParam)       \
     X(SetOsdConfigParam)       \
+    X(GetOsdConfigParam2)      \
+    X(SetOsdConfigParam2)      \
     X(EnableCache)             \
     X(DisableCache)            \
     X(GetRomName)              \
@@ -144,6 +146,7 @@
     X(reta0)                                  \
     X(calloc_r)                               \
     X(free_r)                                 \
+    X(memalign_r)                             \
     X(malloc_r)                               \
     X(malloc_trim_r)                          \
     X(mbtowc_r)                               \
@@ -177,6 +180,7 @@
     X(log10)                                  \
     X(lseek)                                  \
     X(malloc)                                 \
+    X(memalign)                               \
     X(memchr)                                 \
     X(memcmp)                                 \
     X(memcpy)                                 \

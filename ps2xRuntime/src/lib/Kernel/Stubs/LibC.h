@@ -5,6 +5,7 @@
 namespace ps2_stubs
 {
     void malloc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void memalign(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void free(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void calloc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void realloc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
