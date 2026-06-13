@@ -29,7 +29,7 @@ namespace ps2recomp
         const std::vector<std::string> stdLibFuncs = {
             "printf", "sprintf", "snprintf", "fprintf", "vprintf", "vfprintf", "vsprintf", "vsnprintf",
             "puts", "putchar", "getchar", "gets", "fgets", "fputs", "scanf", "fscanf", "sscanf",
-            "sprint", "sbprintf",
+            "sprint", "sbprintf", "__mcmp", "__sbprintf", "__sprint", "__sprint_r",
             "malloc", "free", "calloc", "realloc", "aligned_alloc", "posix_memalign",
             "memcpy", "memset", "memmove", "memcmp", "memchr", "bcopy", "bzero",
             "strcpy", "strncpy", "strcat", "strncat", "strcmp", "strncmp", "strlen", "strstr",

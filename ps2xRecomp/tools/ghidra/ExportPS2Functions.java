@@ -161,6 +161,7 @@ public class ExportPS2Functions extends GhidraScript {
     private static final Set<String> KNOWN_STDLIB_NAMES = new HashSet<>(Arrays.asList(
         "printf", "sprintf", "snprintf", "fprintf", "vprintf", "vfprintf", "vsprintf", "vsnprintf",
         "puts", "putchar", "getchar", "gets", "fgets",
+        "__mcmp", "__sbprintf", "__sprint", "__sprint_r",
         "malloc", "free", "calloc", "realloc", "memalign", "memclr", "aligned_alloc", "posix_memalign",
         "memcpy", "memset", "memmove", "memcmp", "memchr", "bcopy", "bzero",
         "strcpy", "strncpy", "strcat", "strncat", "strcmp", "strncmp", "strlen", "strstr",
