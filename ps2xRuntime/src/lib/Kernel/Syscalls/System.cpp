@@ -126,7 +126,116 @@ namespace ps2_syscalls
         {
             std::lock_guard<std::mutex> lock(g_osd_mutex);
             g_osd_config_raw = raw;
+            g_osd_config2_raw = makeReadableOsdConfig2RawLocked();
             g_osd_config_initialized = true;
+        }
+
+        setReturnS32(ctx, 0);
+    }
+
+    void SetOsdConfigParam2(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)runtime;
+        const uint32_t paramAddr = getRegU32(ctx, 4); // $a0 - Config2Param*
+        const uint32_t size = getRegU32(ctx, 5);      // $a1 - sizeof(Config2Param), normally 4
+
+        ensureOsdConfigInitialized();
+
+        if (size == 0u)
+        {
+            setReturnS32(ctx, 0);
+            return;
+        }
+
+        uint32_t raw = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_osd_mutex);
+            raw = makeReadableOsdConfig2RawLocked();
+        }
+
+        const uint32_t copyBytes = std::min<uint32_t>(size, 4u);
+        uint8_t rawBytes[4] = {
+            static_cast<uint8_t>(raw & 0xFFu),
+            static_cast<uint8_t>((raw >> 8) & 0xFFu),
+            static_cast<uint8_t>((raw >> 16) & 0xFFu),
+            static_cast<uint8_t>((raw >> 24) & 0xFFu),
+        };
+
+        for (uint32_t i = 0; i < copyBytes; ++i)
+        {
+            const uint8_t *src = getConstMemPtr(rdram, paramAddr + i);
+            if (!src)
+            {
+                std::cerr << "PS2 SetOsdConfigParam2 error: Invalid parameter address: 0x"
+                          << std::hex << (paramAddr + i) << std::dec << std::endl;
+                setReturnS32(ctx, -1);
+                return;
+            }
+            rawBytes[i] = *src;
+        }
+
+        raw = static_cast<uint32_t>(rawBytes[0]) |
+              (static_cast<uint32_t>(rawBytes[1]) << 8) |
+              (static_cast<uint32_t>(rawBytes[2]) << 16) |
+              (static_cast<uint32_t>(rawBytes[3]) << 24);
+        raw = sanitizeOsdConfig2Raw(raw);
+
+        {
+            std::lock_guard<std::mutex> lock(g_osd_mutex);
+            g_osd_config2_raw = raw;
+
+            uint32_t version = (g_osd_config_raw >> 13) & 0x7u;
+            uint32_t language = (g_osd_config_raw >> 16) & 0x1Fu;
+            if (copyBytes >= 3u)
+                version = (raw >> 16) & 0xFFu;
+            if (copyBytes >= 4u)
+                language = (raw >> 24) & 0xFFu;
+            g_osd_config_raw = syncOsdConfigRawVersionLanguage(g_osd_config_raw, version, language);
+            g_osd_config_initialized = true;
+        }
+
+        setReturnS32(ctx, 0);
+    }
+
+    void GetOsdConfigParam2(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)runtime;
+        const uint32_t paramAddr = getRegU32(ctx, 4); // $a0 - Config2Param*
+        const uint32_t size = getRegU32(ctx, 5);      // $a1 - sizeof(Config2Param), normally 4
+
+        ensureOsdConfigInitialized();
+
+        if (size == 0u)
+        {
+            setReturnS32(ctx, 0);
+            return;
+        }
+
+        uint32_t raw = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_osd_mutex);
+            raw = makeReadableOsdConfig2RawLocked();
+        }
+
+        const uint8_t rawBytes[4] = {
+            static_cast<uint8_t>(raw & 0xFFu),
+            static_cast<uint8_t>((raw >> 8) & 0xFFu),
+            static_cast<uint8_t>((raw >> 16) & 0xFFu),
+            static_cast<uint8_t>((raw >> 24) & 0xFFu),
+        };
+        const uint32_t copyBytes = std::min<uint32_t>(size, 4u);
+
+        for (uint32_t i = 0; i < copyBytes; ++i)
+        {
+            uint8_t *dst = getMemPtr(rdram, paramAddr + i);
+            if (!dst)
+            {
+                std::cerr << "PS2 GetOsdConfigParam2 error: Invalid parameter address: 0x"
+                          << std::hex << (paramAddr + i) << std::dec << std::endl;
+                setReturnS32(ctx, -1);
+                return;
+            }
+            *dst = rawBytes[i];
         }
 
         setReturnS32(ctx, 0);
@@ -244,7 +353,7 @@ namespace ps2_syscalls
         uint32_t syscallId = encodedSyscallId;
         if (syscallId == 0u)
         {
-            syscallId = (v0 != 0u) ? v0 : v1;
+            syscallId = v1;
         }
 
         std::cerr << "Warning: Unimplemented PS2 syscall called. PC=0x" << std::hex << ctx->pc
@@ -573,18 +682,38 @@ namespace ps2_syscalls
     // 0x3D SetupHeap: returns heap base/start pointer
     void SetupHeap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        const uint32_t heapBase = getRegU32(ctx, 4); // $a0
+        const uint32_t heapBaseRaw = getRegU32(ctx, 4); // $a0
         const uint32_t heapSize = getRegU32(ctx, 5); // $a1 (optional size)
+
+        const uint32_t heapBase = (heapBaseRaw + 0xFu) & ~0xFu;
+
+        // Silent Hill and other games often pass -1 (0xFFFFFFFF) to mean "rest of RAM".
+        static constexpr uint32_t kDefaultGuestHeapEnd = 0x01F00000u;
+        uint32_t heapLimit = kDefaultGuestHeapEnd;
+
+        if (heapSize != 0u && heapSize != 0xFFFFFFFFu)
+        {
+            const uint64_t candidate = static_cast<uint64_t>(heapBase) + static_cast<uint64_t>(heapSize);
+            heapLimit = static_cast<uint32_t>(std::min<uint64_t>(candidate, kDefaultGuestHeapEnd));
+        }
+
+        if (heapLimit <= heapBase)
+        {
+            heapLimit = kDefaultGuestHeapEnd;
+        }
 
         if (runtime)
         {
-            uint32_t heapLimit = PS2_RAM_SIZE;
-            if (heapSize != 0u && heapBase < PS2_RAM_SIZE)
-            {
-                const uint64_t candidateLimit = static_cast<uint64_t>(heapBase) + static_cast<uint64_t>(heapSize);
-                heapLimit = static_cast<uint32_t>(std::min<uint64_t>(candidateLimit, PS2_RAM_SIZE));
-            }
             runtime->configureGuestHeap(heapBase, heapLimit);
+
+            std::cerr << "[SetupHeap]"
+                      << " base=0x" << std::hex << heapBaseRaw
+                      << " alignedBase=0x" << heapBase
+                      << " size=0x" << heapSize
+                      << " runtimeBase=0x" << runtime->guestHeapBase()
+                      << " runtimeEnd=0x" << runtime->guestHeapEnd()
+                      << std::dec << std::endl;
+
             setReturnU32(ctx, runtime->guestHeapBase());
             return;
         }
@@ -595,13 +724,15 @@ namespace ps2_syscalls
     // 0x3E EndOfHeap: commonly returns current heap end; keep it stable for now.
     void EndOfHeap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        if (runtime)
-        {
-            setReturnU32(ctx, runtime->guestHeapEnd());
-            return;
-        }
+        (void)rdram;
 
-        setReturnU32(ctx, getRegU32(ctx, 4));
+        static constexpr uint32_t kDefaultGuestHeapEnd = 0x01F00000u;
+
+        const uint32_t ret = runtime
+            ? runtime->guestHeapLimit()
+            : kDefaultGuestHeapEnd;
+
+        setReturnU32(ctx, ret);
     }
 
     void GetMemorySize(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -609,6 +740,30 @@ namespace ps2_syscalls
         (void)rdram;
         (void)runtime;
         setReturnU32(ctx, PS2_RAM_SIZE);
+    }
+
+    void InitTLB(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        // TODO I`m 99% sure we dont need this we could just return ok and should be fine.
+        auto &memory = runtime->memory();
+
+        const uint32_t entryCount = static_cast<uint32_t>(memory.tlbEntryCount());
+        for (uint32_t entryIndex = 0; entryIndex < entryCount; ++entryIndex)
+        {
+            memory.tlbWrite(entryIndex, 0u, 0u, 0u, false);
+        }
+
+        // Reset basic COP0 TLB bookkeeping to sane post-init values.
+        ctx->cop0_index = 0u;
+        ctx->cop0_random = entryCount > 0u ? (entryCount - 1u) : 0u;
+        ctx->cop0_entrylo0 = 0u;
+        ctx->cop0_entrylo1 = 0u;
+        ctx->cop0_context = 0u;
+        ctx->cop0_pagemask = 0u;
+        ctx->cop0_entryhi = 0u;
+
+        setReturnS32(ctx, KE_OK);
     }
 
     static inline uint32_t normalizeKernelAlias(uint32_t addr)
@@ -897,14 +1052,7 @@ namespace ps2_syscalls
         setReturnU32(ctx, resultAddr);
     }
 
-    void Deci2Call(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-    {
-        (void)rdram;
-        (void)runtime;
-        setReturnS32(ctx, KE_OK);
-    }
-
-    // 0x5A QueryBootMode (stub): return 0 for now
+    // QueryBootMode (stub): return 0 for now
     void QueryBootMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t mode = getRegU32(ctx, 4);
@@ -919,7 +1067,7 @@ namespace ps2_syscalls
         setReturnU32(ctx, addr);
     }
 
-    // 0x5B GetThreadTLS (stub): return 0
+    // GetThreadTLS (stub): return 0
     void GetThreadTLS(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         auto info = ensureCurrentThreadInfo(ctx);
@@ -935,6 +1083,37 @@ namespace ps2_syscalls
         }
 
         setReturnU32(ctx, info->tlsBase);
+    }
+
+    void Copy(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t dest = getRegU32(ctx, 4);
+        const uint32_t src = getRegU32(ctx, 5);
+        const uint32_t size = getRegU32(ctx, 6);
+
+        if (rdram && size > 0)
+        {
+            uint8_t *destPtr = getMemPtr(rdram, dest);
+            const uint8_t *srcPtr = getConstMemPtr(rdram, src);
+            if (destPtr && srcPtr)
+            {
+                std::memcpy(destPtr, srcPtr, size);
+            }
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void GetEntryAddress(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t syscallNum = getRegU32(ctx, 4);
+
+        const uint32_t entryAddr = kGuestSyscallTableGuestBase + (syscallNum * 4u);
+        uint32_t handler = 0;
+        if (const uint8_t *ptr = getConstMemPtr(rdram, entryAddr))
+        {
+            std::memcpy(&handler, ptr, sizeof(handler));
+        }
+        setReturnU32(ctx, handler);
     }
 
     // 0x74 RegisterExitHandler (stub): return 0

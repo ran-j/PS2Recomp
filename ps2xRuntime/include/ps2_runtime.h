@@ -511,6 +511,7 @@ public:
     void guestFree(uint32_t guestAddr);
     uint32_t guestHeapBase() const;
     uint32_t guestHeapEnd() const;
+    uint32_t guestHeapLimit() const;
     uint32_t reserveAsyncCallbackStack(uint32_t size, uint32_t alignment = 16u);
     void dispatchLoop(uint8_t *rdram, R5900Context *ctx);
     bool shouldPreemptGuestExecution();

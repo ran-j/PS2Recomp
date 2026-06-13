@@ -524,6 +524,7 @@ inline uint32_t g_tls_index = 0;
 inline std::mutex g_osd_mutex;
 inline bool g_osd_config_initialized = false;
 inline uint32_t g_osd_config_raw = 0;
+inline uint32_t g_osd_config2_raw = 0;
 
 inline std::mutex g_ps2_path_mutex;
 inline bool g_ps2_paths_initialized = false;

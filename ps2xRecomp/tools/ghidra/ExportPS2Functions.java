@@ -53,19 +53,21 @@ public class ExportPS2Functions extends GhidraScript {
         "iGsPutIMR", "SetVSyncFlag", "SetSyscall", "GsSetVideoMode", "GetOsdConfigParam", "SetOsdConfigParam",
         "EnableCache", "DisableCache", "GetRomName", "SifLoadElfPart", "sceSifLoadElf", "sceSifLoadElfPart",
         "sceSifLoadModule", "sceSifLoadModuleBuffer", "SetupThread", "EndOfHeap", "GetMemorySize", "Deci2Call",
-        "QueryBootMode", "GetThreadTLS", "RegisterExitHandler", "ret0", "ret1", "reta0",
-        "calloc_r", "free_r", "malloc_r", "malloc_trim_r", "mbtowc_r", "printf_r",
+        "QueryBootMode", "GetThreadTLS", "Copy", "GetEntryAddress", "RegisterExitHandler", "ret0", "ret1", "reta0",
+        "calloc_r", "free_r", "realloc_r", "memalign_r", "malloc_r", "malloc_extend_top", "malloc_trim_r", "mbtowc_r", "printf_r",
+        "__malloc_lock", "__malloc_unlock",
         "abs", "__ieee754_rem_pio2f", "__kernel_cosf", "__kernel_sinf", "atan", "atan2",
         "calloc", "ceil", "close", "cos", "exit", "exp",
         "fabs", "fclose", "fflush", "floor", "fopen", "fprintf",
         "fread", "free", "fseek", "fstat", "ftell", "fwrite",
-        "getpid", "log", "log10", "lseek", "malloc", "memchr",
+        "getpid", "log", "log10", "lseek", "malloc", "memalign", "memclr", "memchr",
         "memcmp", "memcpy", "memmove", "memset", "open", "pow",
         "printf", "puts", "rand", "read", "realloc", "sin",
         "snprintf", "sprintf", "sqrt", "srand", "stat", "strcasecmp",
         "strcat", "strchr", "strcmp", "strcpy", "strlen", "strncat",
         "strncmp", "strncpy", "strrchr", "strstr", "tan", "vfprintf",
-        "vsprintf", "write", "DmaAddr", "builtin_set_imask", "sceCdRI", "sceCdRM",
+        "vsprintf", "write", "__divdi3",
+        "DmaAddr", "builtin_set_imask", "sceCdRI", "sceCdRM",
         "sceDevVif0Reset", "sceDevVu0Reset", "sceFsDbChk", "sceFsIntrSigSema", "sceFsSemExit", "sceFsSemInit",
         "sceFsSigSema", "sceIDC", "sceMpegFlush", "sceRpcFreePacket", "sceRpcGetFPacket", "sceRpcGetFPacket2",
         "sceSDC", "sceSifCmdIntrHdlr", "sceVu0ecossin", "mcCallMessageTypeSe", "mcCheckReadStartConfigFile", "mcCheckReadStartSaveFile",
@@ -141,7 +143,7 @@ public class ExportPS2Functions extends GhidraScript {
         "sceVu0InterVectorXYZ", "sceVu0InversMatrix", "sceVu0LightColorMatrix", "sceVu0MulMatrix", "sceVu0MulVector", "sceVu0NormalLightMatrix",
         "sceVu0Normalize", "sceVu0OuterProduct", "sceVu0RotMatrix", "sceVu0RotMatrixX", "sceVu0RotMatrixY", "sceVu0RotMatrixZ",
         "sceVu0RotTransPers", "sceVu0RotTransPersN", "sceVu0ScaleVector", "sceVu0ScaleVectorXYZ", "sceVu0SubVector", "sceVu0TransMatrix",
-        "sceVu0TransposeMatrix", "sceVu0UnitMatrix", "sceVu0ViewScreenMatrix", "sceWrite"
+        "sceVu0TransposeMatrix", "sceVu0UnitMatrix", "sceVu0ViewScreenMatrix", "sceWrite", "InitTLB"
     ));
 
     private static final Set<String> PS2_API_PREFIXES = new HashSet<>(Arrays.asList(
@@ -158,9 +160,9 @@ public class ExportPS2Functions extends GhidraScript {
 
     private static final Set<String> KNOWN_STDLIB_NAMES = new HashSet<>(Arrays.asList(
         "printf", "sprintf", "snprintf", "fprintf", "vprintf", "vfprintf", "vsprintf", "vsnprintf",
-        "puts", "putchar", "getchar", "gets", "fgets", "fputs", "scanf", "fscanf", "sscanf",
-        "sprint", "sbprintf",
-        "malloc", "free", "calloc", "realloc", "aligned_alloc", "posix_memalign",
+        "puts", "putchar", "getchar", "gets", "fgets",
+        "__mcmp", "__sbprintf", "__sprint", "__sprint_r",
+        "malloc", "free", "calloc", "realloc", "memalign", "memclr", "aligned_alloc", "posix_memalign",
         "memcpy", "memset", "memmove", "memcmp", "memchr", "bcopy", "bzero",
         "strcpy", "strncpy", "strcat", "strncat", "strcmp", "strncmp", "strlen", "strstr",
         "strchr", "strrchr", "strdup", "strtok", "strtok_r", "strerror",

@@ -55,6 +55,52 @@ namespace
         std::memcpy(rdram + tagAddr, &tagLo, sizeof(tagLo));
     }
 
+    void writeU64(uint8_t *rdram, uint32_t addr, uint64_t value)
+    {
+        std::memcpy(rdram + addr, &value, sizeof(value));
+    }
+
+    uint64_t makeGifTag(uint16_t nloop, uint8_t flg, uint8_t nreg, bool eop);
+
+    uint64_t makeBitbltbuf(uint32_t dbp, uint32_t dbw, uint32_t dpsm)
+    {
+        return (static_cast<uint64_t>(dbp & 0x3FFFu) << 32) |
+               (static_cast<uint64_t>(dbw & 0x3Fu) << 48) |
+               (static_cast<uint64_t>(dpsm & 0x3Fu) << 56);
+    }
+
+    uint32_t writeGifAd(uint8_t *rdram, uint32_t addr, uint64_t value, uint64_t reg)
+    {
+        writeU64(rdram, addr + 0u, value);
+        writeU64(rdram, addr + 8u, reg);
+        return addr + 16u;
+    }
+
+    uint32_t writeTextureUploadSetup(uint8_t *rdram, uint32_t addr, uint32_t dbp, uint32_t dpsm)
+    {
+        writeDmaTag(rdram, addr, makeDmaTag(5u, 1u, 0u, false)); // CNT: setup tag + four A+D writes.
+        addr += 16u;
+        writeU64(rdram, addr + 0u, makeGifTag(4u, GIF_FMT_PACKED, 1u, false));
+        writeU64(rdram, addr + 8u, 0x0Eull); // GIF PACKED A+D descriptor.
+        addr += 16u;
+        addr = writeGifAd(rdram, addr, makeBitbltbuf(dbp, 1u, dpsm), GS_REG_BITBLTBUF);
+        addr = writeGifAd(rdram, addr, 0ull, GS_REG_TRXPOS);
+        addr = writeGifAd(rdram, addr, (16ull << 0) | (16ull << 32), GS_REG_TRXREG);
+        addr = writeGifAd(rdram, addr, 0ull, GS_REG_TRXDIR);
+        return addr;
+    }
+
+    uint32_t writeTextureImageRef(uint8_t *rdram, uint32_t addr, uint32_t qwc, uint32_t dataAddr)
+    {
+        writeDmaTag(rdram, addr, makeDmaTag(1u, 1u, 0u, false)); // CNT: GIF IMAGE tag.
+        addr += 16u;
+        writeU64(rdram, addr + 0u, makeGifTag(static_cast<uint16_t>(qwc), GIF_FMT_IMAGE, 0u, false));
+        writeU64(rdram, addr + 8u, 0ull);
+        addr += 16u;
+        writeDmaTag(rdram, addr, makeDmaTag(static_cast<uint16_t>(qwc), 3u, dataAddr, false)); // REF: image payload.
+        return addr + 16u;
+    }
+
     uint64_t makeGifTag(uint16_t nloop, uint8_t flg, uint8_t nreg, bool eop = true)
     {
         uint64_t tag = static_cast<uint64_t>(nloop & 0x7FFFu);
@@ -859,6 +905,112 @@ void register_ps2_memory_tests()
                 }
             }
             t.IsTrue(contentOk, "scratchpad alias chain payload should match scratchpad bytes");
+        });
+
+        tc.Run("GIF DMA chain REF keeps CT32 image data after paletted upload", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            GS gs;
+            gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+            std::vector<uint8_t> capturedGifPacket;
+            mem.setGifPacketCallback([&](const uint8_t *data, uint32_t sizeBytes)
+            {
+                capturedGifPacket.assign(data, data + sizeBytes);
+                gs.processGIFPacket(data, sizeBytes);
+            });
+
+            constexpr uint32_t kGifCh = 0x1000A000u;
+            constexpr uint32_t kChain = 0x00028000u;
+            constexpr uint32_t kT4Data = 0x00029000u;
+            constexpr uint32_t kCt32Data = 0x0002A000u;
+            constexpr uint32_t kT4Dbp = 0u;
+            constexpr uint32_t kCt32Dbp = 32u;
+            constexpr uint32_t kWidth = 16u;
+            constexpr uint32_t kHeight = 16u;
+            constexpr uint32_t kT4Bytes = kWidth * kHeight / 2u;
+            constexpr uint32_t kCt32Bytes = kWidth * kHeight * 4u;
+
+            uint8_t *rdram = mem.getRDRAM();
+            uint32_t pixel = 0u;
+            for (uint32_t i = 0; i < kT4Bytes; ++i)
+            {
+                const uint8_t lo = static_cast<uint8_t>(pixel & 0xFu);
+                const uint8_t hi = static_cast<uint8_t>((pixel + 1u) & 0xFu);
+                rdram[kT4Data + i] = static_cast<uint8_t>(lo | (hi << 4));
+                pixel += 2u;
+                if (pixel > 0xEu)
+                {
+                    pixel -= 0xEu;
+                }
+            }
+
+            uint32_t color = 0u;
+            for (uint32_t i = 0; i < kCt32Bytes; i += 4u)
+            {
+                rdram[kCt32Data + i + 0u] = static_cast<uint8_t>((color >> 0) & 0xFFu);
+                rdram[kCt32Data + i + 1u] = static_cast<uint8_t>((color >> 8) & 0xFFu);
+                rdram[kCt32Data + i + 2u] = static_cast<uint8_t>((color >> 16) & 0xFFu);
+                rdram[kCt32Data + i + 3u] = 0x80u;
+                color += 0xF1u;
+                if (color >= 0xFFFFFFu)
+                {
+                    color = 0u;
+                }
+            }
+
+            uint32_t chain = kChain;
+            chain = writeTextureUploadSetup(rdram, chain, kT4Dbp, GS_PSM_T4HL);
+            chain = writeTextureImageRef(rdram, chain, kT4Bytes / 16u, kT4Data);
+            chain = writeTextureUploadSetup(rdram, chain, kCt32Dbp, GS_PSM_CT32);
+            chain = writeTextureImageRef(rdram, chain, kCt32Bytes / 16u, kCt32Data);
+            writeDmaTag(rdram, chain, makeDmaTag(0u, 7u, 0u, false)); // END.
+
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x30u, kChain), "write GIF TADR should succeed");
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x00u, 0x104u), "write GIF CHCR STR|CHAIN should succeed");
+
+            mem.processPendingTransfers();
+
+            constexpr uint32_t kCt32PayloadOffset = 5u * 16u + 16u + kT4Bytes + 5u * 16u + 16u;
+            t.IsTrue(capturedGifPacket.size() >= kCt32PayloadOffset + kCt32Bytes,
+                     "flattened GIF chain should contain the full CT32 REF payload");
+            bool ct32PayloadOk = capturedGifPacket.size() >= kCt32PayloadOffset + kCt32Bytes;
+            for (uint32_t i = 0; i < kCt32Bytes && ct32PayloadOk; ++i)
+            {
+                if (capturedGifPacket[kCt32PayloadOffset + i] != rdram[kCt32Data + i])
+                {
+                    ct32PayloadOk = false;
+                    break;
+                }
+            }
+            t.IsTrue(ct32PayloadOk, "flattened GIF chain should preserve CT32 REF bytes after the T4 REF payload");
+
+            const uint32_t row1Off = GSPSMCT32::addrPSMCT32(kCt32Dbp, 1u, 0u, 1u);
+            uint32_t actualRow1X0 = 0u;
+            uint32_t expectedRow1X0 = 0u;
+            std::memcpy(&actualRow1X0, mem.getGSVRAM() + row1Off, sizeof(actualRow1X0));
+            std::memcpy(&expectedRow1X0, rdram + kCt32Data + kWidth * 4u, sizeof(expectedRow1X0));
+            t.Equals(actualRow1X0, expectedRow1X0, "CT32 row 1 must come from CT32 data, not the previous T4 REF payload");
+
+            bool ct32Ok = true;
+            for (uint32_t y = 0; y < kHeight && ct32Ok; ++y)
+            {
+                for (uint32_t x = 0; x < kWidth && ct32Ok; ++x)
+                {
+                    const uint32_t dstOff = GSPSMCT32::addrPSMCT32(kCt32Dbp, 1u, x, y);
+                    const uint32_t srcOff = kCt32Data + ((y * kWidth + x) * 4u);
+                    for (uint32_t c = 0; c < 4u; ++c)
+                    {
+                        if (mem.getGSVRAM()[dstOff + c] != rdram[srcOff + c])
+                        {
+                            ct32Ok = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            t.IsTrue(ct32Ok, "all CT32 pixels should survive a preceding paletted upload in the same GIF DMA chain");
         });
 
         tc.Run("VIF1 DMA DIRECT forwards payload to GIF callback and clears channel", [](TestCase &t)

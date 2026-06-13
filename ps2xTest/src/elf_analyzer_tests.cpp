@@ -44,6 +44,8 @@ void register_elf_analyzer_tests()
                      "AddIntcHandler2 kernel wrapper should be classified as library/runtime");
             t.IsTrue(analyzer.isLibrarySymbolNameForHeuristics("SetGsCrt"),
                      "SetGsCrt kernel wrapper should be classified as library/runtime");
+            t.IsTrue(analyzer.isLibrarySymbolNameForHeuristics("__sbprintf"),
+                     "optional stdio internals should be classified as library functions");
 
             t.IsFalse(analyzer.isLibrarySymbolNameForHeuristics("bhEne13_Brain"),
                       "named game function should not be classified as library");
@@ -62,6 +64,18 @@ void register_elf_analyzer_tests()
                      "double-underscore libm helpers should be active stubs only when the runtime knows them");
             t.IsTrue(FunctionClassifier::hasRuntimeHandler("__kernel_cosf"),
                      "runtime-known libm kernel helpers should resolve exactly");
+            t.IsTrue(FunctionClassifier::hasRuntimeHandler("_realloc_r"),
+                     "reentrant allocator aliases should resolve to runtime stubs");
+            t.IsTrue(FunctionClassifier::hasRuntimeHandler("__malloc_lock"),
+                     "newlib malloc locks should resolve to runtime stubs");
+            t.IsTrue(FunctionClassifier::hasRuntimeHandler("memclr"),
+                     "libdma memclr should resolve to a runtime stub");
+            t.IsTrue(FunctionClassifier::hasRuntimeHandler("__divdi3"),
+                     "libgcc 64-bit division should resolve to a runtime stub");
+            t.IsFalse(FunctionClassifier::hasRuntimeHandler("__sbprintf"),
+                      "optional stdio internals should not resolve as automatic runtime stubs");
+            t.IsFalse(FunctionClassifier::hasRuntimeHandler("__sprint"),
+                      "optional stdio internals should be TOML opt-in only");
             t.IsFalse(FunctionClassifier::hasRuntimeHandler("scePP1_Kick"),
                       "SDK functions without runtime handlers should not be active stubs"); });
 
