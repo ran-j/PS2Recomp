@@ -7,6 +7,7 @@
 #include "ps2_log.h"
 #include "ps2_syscalls.h"
 #include "runtime/ps2_memory.h"
+#include "runtime/ps2_gs_memory.h"
 #include <atomic>
 #include <algorithm>
 #include <cmath>
@@ -517,6 +518,7 @@ using namespace GSInternal;
 
 GS::GS()
 {
+    GSMem::InitLookupTables();
     reset();
 }
 
@@ -551,8 +553,6 @@ void GS::reset()
     m_trxpos = {};
     m_trxreg = {};
     m_trxdir = 3;
-    m_hwregX = 0;
-    m_hwregY = 0;
     m_vtxCount = 0;
     m_vtxIndex = 0;
     m_localToHostBuffer.clear();
@@ -1133,17 +1133,6 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
         }
     });
 
-    if (sizeBytes >= 16)
-    {
-        const uint64_t tagLo = loadLE64(data);
-        const uint8_t flg = static_cast<uint8_t>((tagLo >> 58) & 0x3);
-        if (flg == GIF_FMT_PACKED)
-        {
-            m_hwregX = 0;
-            m_hwregY = 0;
-        }
-    }
-
     uint32_t offset = 0;
     while (offset + 16 <= sizeBytes)
     {
@@ -1704,8 +1693,15 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
     case GS_REG_TRXDIR:
     {
         m_trxdir = static_cast<uint32_t>(value & 0x3);
-        m_hwregX = 0;
-        m_hwregY = 0;
+
+        // We need the transfer state to survive the call to performLocalTo*Transfer
+        // This is because transfers can be broken into multiple IMAGE tags and we
+        // don't want to start all over again from the initial state
+        // The transfer starts officially when TRXDIR is accessed
+        m_transferState.x = m_trxpos.dsax;
+        m_transferState.y = m_trxpos.dsay;
+        m_transferState.total_pixels = m_trxreg.rrw * m_trxreg.rrh;
+        m_transferState.copied_pixels = 0;
 
         if (m_trxdir == 2 && m_vram)
         {
@@ -2004,189 +2000,394 @@ void GS::vertexKick(bool drawing)
 
 void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
 {
+    // wrong direction set
     if (m_trxdir != 0 || !m_vram)
+    {
         return;
-
-    uint32_t dbp = m_bitbltbuf.dbp;
-    uint8_t dbw = m_bitbltbuf.dbw;
-    uint8_t dpsm = m_bitbltbuf.dpsm;
-
-    if (dbw == 0)
-        dbw = 1;
-    uint32_t base = dbp * 256u;
-    uint32_t bpp = bitsPerPixel(dpsm);
-    uint32_t stridePixels = static_cast<uint32_t>(dbw) * 64u;
-
-    uint32_t rrw = m_trxreg.rrw;
-    uint32_t rrh = m_trxreg.rrh;
-    uint32_t dsax = m_trxpos.dsax;
-    uint32_t dsay = m_trxpos.dsay;
-
-    if (bpp == 4)
-    {
-        uint32_t widthBlocks = (dbw != 0) ? static_cast<uint32_t>(dbw) : 1u;
-        uint32_t offset = 0;
-
-        // T4 image uploads can be split across multiple GIF IMAGE packets.
-        // Keep advancing from the previous HWREG position instead of restarting at (0, 0).
-        auto writeT4Nibble = [&](uint8_t nibble, uint8_t srcByte, uint32_t srcLo, uint32_t srcHi)
-        {
-            if (m_hwregY >= rrh)
-                return;
-
-            const uint32_t vx = dsax + m_hwregX;
-            const uint32_t vy = dsay + m_hwregY;
-            const uint32_t nibbleAddr = GSPSMT4::addrPSMT4(dbp, widthBlocks, vx, vy);
-            const uint32_t byteOff = nibbleAddr >> 1;
-
-            if (byteOff < m_vramSize)
-            {
-                const int shift = static_cast<int>((nibbleAddr & 1u) << 2);
-                uint8_t &b = m_vram[byteOff];
-                b = static_cast<uint8_t>((b & (0xF0u >> shift)) | ((nibble & 0x0Fu) << shift));
-            }
-            ++m_hwregX;
-            if (m_hwregX >= rrw)
-            {
-                m_hwregX = 0;
-                ++m_hwregY;
-            }
-        };
-
-        while (offset < sizeBytes && m_hwregY < rrh)
-        {
-            const uint8_t srcByte = data[offset++];
-            const uint32_t srcLo = srcByte & 0x0Fu;
-            const uint32_t srcHi = (srcByte >> 4) & 0x0Fu;
-            const uint32_t xBefore = m_hwregX;
-
-            writeT4Nibble(static_cast<uint8_t>(srcLo), srcByte, srcLo, srcHi);
-            if ((xBefore + 1u) < rrw && m_hwregY < rrh)
-            {
-                writeT4Nibble(static_cast<uint8_t>(srcHi), srcByte, srcLo, srcHi);
-            }
-        }
     }
-    else if (dpsm == GS_PSM_T8)
+
+    // no height and width means transfer is invalid
+    if (m_trxreg.rrw == 0 || m_trxreg.rrh == 0)
     {
-        uint32_t offset = 0;
-        while (offset < sizeBytes && m_hwregY < rrh)
+        return;
+    }
+
+    u32 dbp = m_bitbltbuf.dbp;
+    u8 dbw = std::max<u8>(m_bitbltbuf.dbw, 1u);
+    u8 dpsm = m_bitbltbuf.dpsm;
+
+    u32 rrw = m_trxreg.rrw;
+    u32 rrh = m_trxreg.rrh;
+    u32 dsax = m_trxpos.dsax;
+    u32 dsay = m_trxpos.dsay;
+
+    u32 data_offset = 0;
+
+    // remove the format branching from the loops
+    // TODO: fixup copypasta
+    switch (dpsm)
+    {
+    case GS_PSM_CT32:
+        while (data_offset < sizeBytes)
         {
-            uint32_t pixelsLeft = rrw - m_hwregX;
-            uint32_t pixelsToCopy = std::min<uint32_t>(pixelsLeft, sizeBytes - offset);
-            if (pixelsToCopy == 0)
+            u32 c;
+            std::memcpy(&c, &data[data_offset], sizeof(u32));
+
+            GSMem::WriteCT32(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
+
+            m_transferState.x++;
+            m_transferState.copied_pixels++;
+            data_offset += 4;
+
+            if ((m_transferState.copied_pixels % rrw) == 0)
             {
+                m_transferState.x = dsax;
+                m_transferState.y++;
+            }
+
+            if (m_transferState.copied_pixels >= m_transferState.total_pixels)
+            {
+                // deactivate the transfer
+                m_trxdir = 3;
+                m_transferState.total_pixels = 0;
                 break;
             }
-
-            for (uint32_t i = 0; i < pixelsToCopy; ++i)
-            {
-                const uint32_t vx = dsax + m_hwregX + i;
-                const uint32_t vy = dsay + m_hwregY;
-                const uint32_t dst = GSPSMT8::addrPSMT8(dbp, dbw, vx, vy);
-                if (dst < m_vramSize)
-                {
-                    m_vram[dst] = data[offset + i];
-                }
-            }
-
-            offset += pixelsToCopy;
-            m_hwregX += pixelsToCopy;
-            if (m_hwregX >= rrw)
-            {
-                m_hwregX = 0;
-                ++m_hwregY;
-            }
         }
-    }
-    else if (dpsm == GS_PSM_CT24 || dpsm == GS_PSM_Z24)
-    {
-        uint32_t transferBpp = 3;
+        break;
 
-        uint32_t offset = 0;
-        while (offset < sizeBytes && m_hwregY < rrh)
+    case GS_PSM_Z32:
+        while (data_offset < sizeBytes)
         {
-            uint32_t pixelsLeft = rrw - m_hwregX;
-            uint32_t srcBytesLeft = pixelsLeft * transferBpp;
-            uint32_t bytesAvail = sizeBytes - offset;
-            uint32_t pixelsToCopy = pixelsLeft;
-            if (srcBytesLeft > bytesAvail)
-                pixelsToCopy = bytesAvail / transferBpp;
+            u32 c;
+            std::memcpy(&c, &data[data_offset], sizeof(u32));
 
-            if (pixelsToCopy == 0)
+            GSMem::WriteZ32(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
+
+            m_transferState.x++;
+            m_transferState.copied_pixels++;
+            data_offset += 4;
+
+            if ((m_transferState.copied_pixels % rrw) == 0)
+            {
+                m_transferState.x = dsax;
+                m_transferState.y++;
+            }
+
+            if (m_transferState.copied_pixels >= m_transferState.total_pixels)
+            {
+                // deactivate the transfer
+                m_trxdir = 3;
+                m_transferState.total_pixels = 0;
                 break;
-
-            if (pixelsToCopy > 0)
-            {
-                for (uint32_t p = 0; p < pixelsToCopy; ++p)
-                {
-                    const uint32_t vx = dsax + m_hwregX + p;
-                    const uint32_t vy = dsay + m_hwregY;
-                    const uint32_t dstOff = GSPSMCT32::addrPSMCT32(dbp, dbw, vx, vy);
-                    if (dstOff + 4u <= m_vramSize)
-                    {
-                        m_vram[dstOff + 0u] = data[offset + p * 3u + 0u];
-                        m_vram[dstOff + 1u] = data[offset + p * 3u + 1u];
-                        m_vram[dstOff + 2u] = data[offset + p * 3u + 2u];
-                        m_vram[dstOff + 3u] = 0x80u;
-                    }
-                }
-            }
-
-            offset += pixelsToCopy * transferBpp;
-            m_hwregX += pixelsToCopy;
-            if (m_hwregX >= rrw)
-            {
-                m_hwregX = 0;
-                ++m_hwregY;
             }
         }
-    }
-    else
-    {
-        uint32_t bytesPerPixel = bpp / 8u;
-        if (bytesPerPixel == 0)
-            bytesPerPixel = 4;
-        uint32_t strideBytes = stridePixels * bytesPerPixel;
-        uint32_t rowBytes = rrw * bytesPerPixel;
+        break;
 
-        uint32_t offset = 0;
-        while (offset < sizeBytes && m_hwregY < rrh)
+    case GS_PSM_CT24:
+        while (data_offset < sizeBytes)
         {
-            uint32_t dstY = dsay + m_hwregY;
-            uint32_t pixelsLeft = rrw - m_hwregX;
-            uint32_t bytesLeft = pixelsLeft * bytesPerPixel;
-            uint32_t bytesAvail = sizeBytes - offset;
-            if (bytesLeft > bytesAvail)
-                bytesLeft = (bytesAvail / bytesPerPixel) * bytesPerPixel;
+            u32 c;
+            std::memcpy(&c, &data[data_offset], sizeof(u32));
 
-            uint32_t pixelsCopied = bytesLeft / bytesPerPixel;
-            if ((dpsm == GS_PSM_CT32 || dpsm == GS_PSM_Z32) && pixelsCopied > 0)
+            GSMem::WriteCT24(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
+
+            m_transferState.x++;
+            m_transferState.copied_pixels++;
+            data_offset += 3;
+
+            if ((m_transferState.copied_pixels % rrw) == 0)
             {
-                for (uint32_t p = 0; p < pixelsCopied; ++p)
-                {
-                    const uint32_t vx = dsax + m_hwregX + p;
-                    const uint32_t vy = dstY;
-                    const uint32_t dstOff = GSPSMCT32::addrPSMCT32(dbp, dbw, vx, vy);
-                    if (dstOff + 4u <= m_vramSize)
-                        std::memcpy(m_vram + dstOff, data + offset + p * 4u, 4u);
-                }
-            }
-            else
-            {
-                uint32_t dstOff = base + dstY * strideBytes + (dsax + m_hwregX) * bytesPerPixel;
-                if (dstOff + bytesLeft <= m_vramSize && bytesLeft > 0)
-                    std::memcpy(m_vram + dstOff, data + offset, bytesLeft);
+                m_transferState.x = dsax;
+                m_transferState.y++;
             }
 
-            offset += bytesLeft;
-            m_hwregX += pixelsCopied;
-            if (m_hwregX >= rrw)
+            if (m_transferState.copied_pixels >= m_transferState.total_pixels)
             {
-                m_hwregX = 0;
-                ++m_hwregY;
+                // deactivate the transfer
+                m_trxdir = 3;
+                m_transferState.total_pixels = 0;
+                break;
             }
         }
+        break;
+
+    case GS_PSM_Z24:
+        while (data_offset < sizeBytes)
+        {
+            u32 c;
+            std::memcpy(&c, &data[data_offset], sizeof(u32));
+
+            GSMem::WriteZ24(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
+
+            m_transferState.x++;
+            m_transferState.copied_pixels++;
+            data_offset += 3;
+
+            if ((m_transferState.copied_pixels % rrw) == 0)
+            {
+                m_transferState.x = dsax;
+                m_transferState.y++;
+            }
+
+            if (m_transferState.copied_pixels >= m_transferState.total_pixels)
+            {
+                // deactivate the transfer
+                m_trxdir = 3;
+                m_transferState.total_pixels = 0;
+                break;
+            }
+        }
+        break;
+
+    case GS_PSM_CT16:
+        while (data_offset < sizeBytes)
+        {
+            u16 c;
+            std::memcpy(&c, &data[data_offset], sizeof(u16));
+
+            GSMem::WriteCT16(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
+
+            m_transferState.x++;
+            m_transferState.copied_pixels++;
+            data_offset += 2;
+
+            if ((m_transferState.copied_pixels % rrw) == 0)
+            {
+                m_transferState.x = dsax;
+                m_transferState.y++;
+            }
+
+            if (m_transferState.copied_pixels >= m_transferState.total_pixels)
+            {
+                // deactivate the transfer
+                m_trxdir = 3;
+                m_transferState.total_pixels = 0;
+                break;
+            }
+        }
+        break;
+
+    case GS_PSM_Z16:
+        while (data_offset < sizeBytes)
+        {
+            u16 c;
+            std::memcpy(&c, &data[data_offset], sizeof(u16));
+
+            GSMem::WriteZ16(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
+
+            m_transferState.x++;
+            m_transferState.copied_pixels++;
+            data_offset += 2;
+
+            if ((m_transferState.copied_pixels % rrw) == 0)
+            {
+                m_transferState.x = dsax;
+                m_transferState.y++;
+            }
+
+            if (m_transferState.copied_pixels >= m_transferState.total_pixels)
+            {
+                // deactivate the transfer
+                m_trxdir = 3;
+                m_transferState.total_pixels = 0;
+                break;
+            }
+        }
+        break;
+
+    case GS_PSM_CT16S:
+        while (data_offset < sizeBytes)
+        {
+            u16 c;
+            std::memcpy(&c, &data[data_offset], sizeof(u16));
+
+            GSMem::WriteCT16S(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
+
+            m_transferState.x++;
+            m_transferState.copied_pixels++;
+            data_offset += 2;
+
+            if ((m_transferState.copied_pixels % rrw) == 0)
+            {
+                m_transferState.x = dsax;
+                m_transferState.y++;
+            }
+
+            if (m_transferState.copied_pixels >= m_transferState.total_pixels)
+            {
+                // deactivate the transfer
+                m_trxdir = 3;
+                m_transferState.total_pixels = 0;
+                break;
+            }
+        }
+        break;
+
+    case GS_PSM_Z16S:
+        while (data_offset < sizeBytes)
+        {
+            u16 c;
+            std::memcpy(&c, &data[data_offset], sizeof(u16));
+
+            GSMem::WriteZ16S(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
+
+            m_transferState.x++;
+            m_transferState.copied_pixels++;
+            data_offset += 2;
+
+            if ((m_transferState.copied_pixels % rrw) == 0)
+            {
+                m_transferState.x = dsax;
+                m_transferState.y++;
+            }
+
+            if (m_transferState.copied_pixels >= m_transferState.total_pixels)
+            {
+                // deactivate the transfer
+                m_trxdir = 3;
+                m_transferState.total_pixels = 0;
+                break;
+            }
+        }
+        break;
+
+    case GS_PSM_T8:
+        while (data_offset < sizeBytes)
+        {
+            u8 c = data[data_offset];
+
+            GSMem::WriteP8(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
+
+            m_transferState.x++;
+            m_transferState.copied_pixels++;
+            data_offset += 1;
+
+            if ((m_transferState.copied_pixels % rrw) == 0)
+            {
+                m_transferState.x = dsax;
+                m_transferState.y++;
+            }
+
+            if (m_transferState.copied_pixels >= m_transferState.total_pixels)
+            {
+                // deactivate the transfer
+                m_trxdir = 3;
+                m_transferState.total_pixels = 0;
+                break;
+            }
+        }
+        break;
+
+    case GS_PSM_T8H:
+        while (data_offset < sizeBytes)
+        {
+            u8 c = data[data_offset];
+
+            GSMem::WriteP8H(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
+
+            m_transferState.x++;
+            m_transferState.copied_pixels++;
+            data_offset += 1;
+
+            if ((m_transferState.copied_pixels % rrw) == 0)
+            {
+                m_transferState.x = dsax;
+                m_transferState.y++;
+            }
+
+            if (m_transferState.copied_pixels >= m_transferState.total_pixels)
+            {
+                // deactivate the transfer
+                m_trxdir = 3;
+                m_transferState.total_pixels = 0;
+                break;
+            }
+        }
+        break;
+    case GS_PSM_T4:
+        while (data_offset < sizeBytes)
+        {
+            u8 c0 = data[data_offset] & 0xF;
+            u8 c1 = (data[data_offset] >> 4) & 0xF;
+
+            GSMem::WriteP4(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c0);
+            GSMem::WriteP4(m_vram, dbp, dbw, m_transferState.x + 1, m_transferState.y, c1);
+
+            m_transferState.x += 2;
+            m_transferState.copied_pixels += 2;
+            data_offset += 1;
+
+            if ((m_transferState.copied_pixels % rrw) == 0)
+            {
+                m_transferState.x = dsax;
+                m_transferState.y++;
+            }
+
+            if (m_transferState.copied_pixels >= m_transferState.total_pixels)
+            {
+                // deactivate the transfer
+                m_trxdir = 3;
+                m_transferState.total_pixels = 0;
+                break;
+            }
+        }
+        break;
+    case GS_PSM_T4HL:
+        while (data_offset < sizeBytes)
+        {
+            u8 c0 = data[data_offset] & 0xF;
+            u8 c1 = (data[data_offset] >> 4) & 0xF;
+
+            GSMem::WriteP4HL(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c0);
+            GSMem::WriteP4HL(m_vram, dbp, dbw, m_transferState.x + 1, m_transferState.y, c1);
+
+            m_transferState.x += 2;
+            m_transferState.copied_pixels += 2;
+            data_offset += 1;
+
+            if ((m_transferState.copied_pixels % rrw) == 0)
+            {
+                m_transferState.x = dsax;
+                m_transferState.y++;
+            }
+
+            if (m_transferState.copied_pixels >= m_transferState.total_pixels)
+            {
+                // deactivate the transfer
+                m_trxdir = 3;
+                m_transferState.total_pixels = 0;
+                break;
+            }
+        }
+        break;
+    case GS_PSM_T4HH:
+        while (data_offset < sizeBytes)
+        {
+            u8 c0 = data[data_offset] & 0xF;
+            u8 c1 = (data[data_offset] >> 4) & 0xF;
+
+            GSMem::WriteP4HH(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c0);
+            GSMem::WriteP4HH(m_vram, dbp, dbw, m_transferState.x + 1, m_transferState.y, c1);
+
+            m_transferState.x += 2;
+            m_transferState.copied_pixels += 2;
+            data_offset += 1;
+
+            if ((m_transferState.copied_pixels % rrw) == 0)
+            {
+                m_transferState.x = dsax;
+                m_transferState.y++;
+            }
+
+            if (m_transferState.copied_pixels >= m_transferState.total_pixels)
+            {
+                // deactivate the transfer
+                m_trxdir = 3;
+                m_transferState.total_pixels = 0;
+                break;
+            }
+        }
+        break;
     }
 }
 

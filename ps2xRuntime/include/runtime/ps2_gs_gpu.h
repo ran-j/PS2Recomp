@@ -292,8 +292,14 @@ private:
     GSTrxPos m_trxpos{};
     GSTrxReg m_trxreg{};
     uint32_t m_trxdir = 3;
-    uint32_t m_hwregX = 0;
-    uint32_t m_hwregY = 0;
+
+    struct
+    {
+        uint32_t x{ 0 };
+        uint32_t y{ 0 };
+        uint32_t total_pixels{ 0 };
+        uint32_t copied_pixels{ 0 };
+    } m_transferState;
 
     static constexpr int kMaxVerts = 6;
     GSVertex m_vtxQueue[kMaxVerts];
