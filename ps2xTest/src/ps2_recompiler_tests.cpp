@@ -868,6 +868,26 @@ void register_ps2_recompiler_tests()
                      "memalign should resolve as a stub name");
             t.Equals(ps2_runtime_calls::resolveStubName("_memalign_r"), std::string_view{"memalign_r"},
                      "_memalign_r should resolve to the memalign_r stub");
+            t.Equals(ps2_runtime_calls::resolveStubName("_realloc_r"), std::string_view{"realloc_r"},
+                     "_realloc_r should resolve to the realloc_r stub");
+            t.Equals(ps2_runtime_calls::resolveStubName("malloc_extend_top"), std::string_view{"malloc_extend_top"},
+                     "malloc_extend_top should resolve as an allocator compatibility stub");
+            t.Equals(ps2_runtime_calls::resolveStubName("__malloc_lock"), std::string_view{"__malloc_lock"},
+                     "__malloc_lock should resolve as an allocator compatibility stub");
+            t.Equals(ps2_runtime_calls::resolveStubName("__malloc_unlock"), std::string_view{"__malloc_unlock"},
+                     "__malloc_unlock should resolve as an allocator compatibility stub");
+            t.Equals(ps2_runtime_calls::resolveStubName("memclr"), std::string_view{"memclr"},
+                     "memclr should resolve as a runtime stub");
+            t.Equals(ps2_runtime_calls::resolveStubName("__divdi3"), std::string_view{"__divdi3"},
+                     "__divdi3 should resolve as a runtime stub");
+            t.Equals(ps2_runtime_calls::resolveStubName("__mcmp"), std::string_view{},
+                     "__mcmp should be left for recompilation");
+            t.Equals(ps2_runtime_calls::resolveStubName("__sprint"), std::string_view{},
+                     "__sprint should be left for recompilation");
+            t.Equals(ps2_runtime_calls::resolveStubName("__sprint_r"), std::string_view{},
+                     "__sprint_r should be left for recompilation");
+            t.Equals(ps2_runtime_calls::resolveStubName("__sbprintf"), std::string_view{},
+                     "__sbprintf should be left for recompilation");
         });
 
         tc.Run("respect max length for .cpp filenames", [](TestCase& t) {

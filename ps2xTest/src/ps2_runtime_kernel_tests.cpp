@@ -614,6 +614,62 @@ void register_ps2_runtime_kernel_tests()
             t.IsTrue(reent != direct, "_memalign_r should allocate a distinct block");
         });
 
+        tc.Run("allocator compatibility stubs use the runtime guest heap", [](TestCase &t)
+        {
+            TestEnv env;
+
+            env.runtime.configureGuestHeap(0x00180010u, 0x00183010u);
+
+            setRegU32(env.ctx, 5, 0x20u);
+            ps2_stubs::malloc_r(env.rdram.data(), &env.ctx, &env.runtime);
+            const uint32_t initial = ::getRegU32(&env.ctx, 2);
+            t.IsTrue(initial != 0u, "_malloc_r should allocate guest memory");
+
+            writeGuestU32(env.rdram.data(), initial, 0xAABBCCDDu);
+
+            setRegU32(env.ctx, 5, initial);
+            setRegU32(env.ctx, 6, 0x80u);
+            ps2_stubs::realloc_r(env.rdram.data(), &env.ctx, &env.runtime);
+            const uint32_t grown = ::getRegU32(&env.ctx, 2);
+            t.IsTrue(grown != 0u, "_realloc_r should return a guest block");
+            t.Equals(readGuestU32(env.rdram.data(), grown), 0xAABBCCDDu,
+                     "_realloc_r should preserve existing guest bytes");
+
+            setRegU32(env.ctx, 5, grown);
+            ps2_stubs::free_r(env.rdram.data(), &env.ctx, &env.runtime);
+
+            setRegU32(env.ctx, 5, 0x100u);
+            ps2_stubs::malloc_extend_top(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(::getRegU32(&env.ctx, 2), 0u,
+                     "malloc_extend_top should be a safe runtime-owned heap no-op");
+
+            ps2_stubs::__malloc_lock(env.rdram.data(), &env.ctx, &env.runtime);
+            ps2_stubs::__malloc_unlock(env.rdram.data(), &env.ctx, &env.runtime);
+        });
+
+        tc.Run("libc helper stubs cover memclr and libgcc div", [](TestCase &t)
+        {
+            TestEnv env;
+
+            constexpr uint32_t kBuf = 0x5000u;
+            std::memset(env.rdram.data() + kBuf, 0xCD, 16u);
+            setRegU32(env.ctx, 4, kBuf);
+            setRegU32(env.ctx, 5, 12u);
+            ps2_stubs::memclr(env.rdram.data(), &env.ctx, &env.runtime);
+            for (uint32_t i = 0; i < 12u; ++i)
+            {
+                t.Equals(env.rdram[kBuf + i], static_cast<uint8_t>(0),
+                         "memclr should zero the requested byte range");
+            }
+            t.Equals(env.rdram[kBuf + 12u], static_cast<uint8_t>(0xCD),
+                     "memclr should not write past the requested byte range");
+
+            SET_GPR_S64(&env.ctx, 4, -9);
+            SET_GPR_S64(&env.ctx, 5, 2);
+            ps2_stubs::__divdi3(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), -4, "__divdi3 should divide signed 64-bit values");
+        });
+
         tc.Run("ReleaseAlarm aliases CancelAlarm and cache toggles succeed", [](TestCase &t)
         {
             TestEnv env;

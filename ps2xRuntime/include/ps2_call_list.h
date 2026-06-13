@@ -146,11 +146,15 @@
     X(reta0)                                  \
     X(calloc_r)                               \
     X(free_r)                                 \
+    X(realloc_r)                              \
     X(memalign_r)                             \
     X(malloc_r)                               \
+    X(malloc_extend_top)                      \
     X(malloc_trim_r)                          \
     X(mbtowc_r)                               \
     X(printf_r)                               \
+    X(__malloc_lock)                          \
+    X(__malloc_unlock)                        \
     X(abs)                                    \
     X(__ieee754_rem_pio2f)                    \
     X(__kernel_cosf)                          \
@@ -181,6 +185,7 @@
     X(lseek)                                  \
     X(malloc)                                 \
     X(memalign)                               \
+    X(memclr)                                 \
     X(memchr)                                 \
     X(memcmp)                                 \
     X(memcpy)                                 \
@@ -214,6 +219,7 @@
     X(vfprintf)                               \
     X(vsprintf)                               \
     X(write)                                  \
+    X(__divdi3)                               \
     /* PS2 native */                          \
     X(DmaAddr)                                \
     X(builtin_set_imask)                      \

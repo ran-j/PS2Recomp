@@ -39,6 +39,14 @@ namespace ps2_stubs
         }
     }
 
+    void realloc_r(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t oldGuestAddr = getRegU32(ctx, 5); // $a1
+        const uint32_t newSize = getRegU32(ctx, 6);      // $a2
+        const uint32_t guestAddr = runtime ? runtime->guestRealloc(oldGuestAddr, newSize) : 0u;
+        setReturnU32(ctx, guestAddr);
+    }
+
     void memalign_r(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const uint32_t alignment = getRegU32(ctx, 5); // $a1
@@ -54,9 +62,29 @@ namespace ps2_stubs
         setReturnU32(ctx, guestAddr);
     }
 
+    void malloc_extend_top(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        // newlib allocator internal. The runtime owns guest heap growth.
+        setReturnU32(ctx, 0u);
+    }
+
     void malloc_trim_r(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 0);
+    }
+
+    void __malloc_lock(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        (void)ctx;
+        (void)runtime;
+    }
+
+    void __malloc_unlock(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        (void)ctx;
+        (void)runtime;
     }
 
     void mbtowc_r(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
