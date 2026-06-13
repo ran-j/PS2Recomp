@@ -5,6 +5,7 @@
 #include "runtime/ps2_gs_psmct32.h"
 #include "runtime/ps2_gs_psmt4.h"
 #include "runtime/ps2_gs_psmt8.h"
+#include "runtime/ps2_gs_memory.h"
 #include "ps2_log.h"
 #include <atomic>
 #include <algorithm>
@@ -212,19 +213,30 @@ namespace
         return (index & 0xE7u) | ((index & 0x08u) << 1u) | ((index & 0x10u) >> 1u);
     }
 
+    // TODO: clut cache
     uint32_t resolveClutIndex(uint8_t index, uint8_t csm, uint8_t csa, uint8_t sourcePsm)
     {
         uint32_t clutIndex = static_cast<uint32_t>(index);
 
-        if (sourcePsm == GS_PSM_T4)
+        switch (sourcePsm)
+        {
+        case GS_PSM_T4:
+        case GS_PSM_T4HH:
+        case GS_PSM_T4HL:
         {
             clutIndex = (static_cast<uint32_t>(csa) << 4u) | (clutIndex & 0x0Fu);
+
             if (csm == 0u)
                 clutIndex = swizzleClutIndexCSM1(clutIndex);
         }
-        else if (sourcePsm == GS_PSM_T8 && csm == 0u)
-        {
-            clutIndex = swizzleClutIndexCSM1(clutIndex);
+        break;
+        case GS_PSM_T8:
+        case GS_PSM_T8H:
+            if (csm == 0)
+                clutIndex = swizzleClutIndexCSM1(clutIndex);
+            break;
+        default:
+            break;
         }
 
         return clutIndex;
@@ -605,24 +617,19 @@ uint32_t GSRasterizer::lookupCLUT(GS *gs,
     const uint32_t clutX = static_cast<uint32_t>(gs->m_texclut.cou) + (clutIndex & 0x0Fu);
     const uint32_t clutY = static_cast<uint32_t>(gs->m_texclut.cov) + (clutIndex >> 4);
 
-    if (cpsm == GS_PSM_CT32 || cpsm == GS_PSM_CT24)
-    {
-        const uint32_t off = GSPSMCT32::addrPSMCT32(cbp, clutWidth, clutX, clutY);
-        if (off + 4 > gs->m_vramSize)
-            return 0xFFFF00FFu;
-        uint32_t color;
-        std::memcpy(&color, gs->m_vram + off, 4);
-        return applyTexa(gs->m_texa, cpsm, color);
-    }
 
-    if (cpsm == GS_PSM_CT16 || cpsm == GS_PSM_CT16S)
+    switch (cpsm)
     {
-        uint32_t off = addrPSMCT16Family(cbp, clutWidth, cpsm, clutX, clutY);
-        if (off + 2 > gs->m_vramSize)
-            return 0xFFFF00FFu;
-        uint16_t c16;
-        std::memcpy(&c16, gs->m_vram + off, 2);
-        return applyTexa(gs->m_texa, cpsm, decodePSMCT16(c16));
+    case GS_PSM_CT32:
+        return applyTexa(gs->m_texa, cpsm, GSMem::ReadCT32(gs->m_vram, cbp, clutWidth, clutX, clutY));
+    case GS_PSM_CT24:
+        return applyTexa(gs->m_texa, cpsm, GSMem::ReadCT24(gs->m_vram, cbp, clutWidth, clutX, clutY));
+    case GS_PSM_CT16:
+        return applyTexa(gs->m_texa, cpsm, GSMem::ReadCT16(gs->m_vram, cbp, clutWidth, clutX, clutY));
+    case GS_PSM_CT16S:
+        return applyTexa(gs->m_texa, cpsm, GSMem::ReadCT16S(gs->m_vram, cbp, clutWidth, clutX, clutY));
+    default:
+        break;
     }
 
     return 0xFFFF00FFu;
@@ -654,27 +661,34 @@ uint32_t GSRasterizer::sampleTexture(GS *gs, float s, float t, float q, uint16_t
         sampleU = clampInt(sampleU, 0, texW - 1);
         sampleV = clampInt(sampleV, 0, texH - 1);
 
-        if (tex.psm == GS_PSM_CT32 || tex.psm == GS_PSM_CT24)
-            return applyTexa(gs->m_texa, tex.psm, readTexelPSMCT32(gs, tex.tbp0, tex.tbw, sampleU, sampleV));
-
-        if (tex.psm == GS_PSM_CT16 || tex.psm == GS_PSM_CT16S)
-            return applyTexa(gs->m_texa, tex.psm, readTexelPSMCT16(gs, tex.tbp0, tex.tbw, sampleU, sampleV));
-
-        if (tex.psm == GS_PSM_T4)
+        switch (tex.psm)
         {
-            uint32_t idx = readTexelPSMT4(gs, tex.tbp0, tex.tbw, sampleU, sampleV);
-            return lookupCLUT(gs, static_cast<uint8_t>(idx), tex.cbp, tex.cpsm, tex.csm, tex.csa, tex.psm);
-        }
-
-        if (tex.psm == GS_PSM_T8)
-        {
-            if (tex.tbw == 0)
-                return 0xFFFF00FFu;
-            uint32_t off = GSPSMT8::addrPSMT8(tex.tbp0, tex.tbw, static_cast<uint32_t>(sampleU), static_cast<uint32_t>(sampleV));
-            if (off >= gs->m_vramSize)
-                return 0xFFFF00FFu;
-            uint8_t idx = gs->m_vram[off];
-            return lookupCLUT(gs, idx, tex.cbp, tex.cpsm, tex.csm, tex.csa, tex.psm);
+        case GS_PSM_CT32:
+            return applyTexa(gs->m_texa, tex.psm, GSMem::ReadCT32(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV));
+        case GS_PSM_Z32:
+            return applyTexa(gs->m_texa, tex.psm, GSMem::ReadZ32(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV));
+        case GS_PSM_CT24:
+            return applyTexa(gs->m_texa, tex.psm, GSMem::ReadCT24(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV));
+        case GS_PSM_Z24:
+            return applyTexa(gs->m_texa, tex.psm, GSMem::ReadZ24(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV));
+        case GS_PSM_CT16:
+            return applyTexa(gs->m_texa, tex.psm, decodePSMCT16(GSMem::ReadCT16(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV)));
+        case GS_PSM_CT16S:
+            return applyTexa(gs->m_texa, tex.psm, decodePSMCT16(GSMem::ReadCT16S(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV)));
+        case GS_PSM_Z16:
+            return applyTexa(gs->m_texa, tex.psm, decodePSMCT16(GSMem::ReadZ16(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV)));
+        case GS_PSM_Z16S:
+            return applyTexa(gs->m_texa, tex.psm, decodePSMCT16(GSMem::ReadZ16S(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV)));
+        case GS_PSM_T8:
+            return lookupCLUT(gs, GSMem::ReadP8(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV), tex.cbp, tex.cpsm, tex.csm, tex.csa, tex.psm);
+        case GS_PSM_T8H:
+            return lookupCLUT(gs, GSMem::ReadP8H(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV), tex.cbp, tex.cpsm, tex.csm, tex.csa, tex.psm);
+        case GS_PSM_T4:
+            return lookupCLUT(gs, GSMem::ReadP4(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV), tex.cbp, tex.cpsm, tex.csm, tex.csa, tex.psm);
+        case GS_PSM_T4HL:
+            return lookupCLUT(gs, GSMem::ReadP4HL(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV), tex.cbp, tex.cpsm, tex.csm, tex.csa, tex.psm);
+        case GS_PSM_T4HH:
+            return lookupCLUT(gs, GSMem::ReadP4HH(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV), tex.cbp, tex.cpsm, tex.csm, tex.csa, tex.psm);
         }
 
         return 0xFFFF00FFu;
