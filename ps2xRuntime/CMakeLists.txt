@@ -371,16 +371,16 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebI
     EnableFastReleaseMode(ps2_runtime)
     EnableFastReleaseMode(ps2EntryRunner)
 
-    if(MSVC AND WIN32)
-        target_link_options(ps2EntryRunner PRIVATE
-            $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:/SUBSYSTEM:WINDOWS>
-            $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:/ENTRY:mainCRTStartup>
-        )
-    elseif(MINGW AND WIN32)
-        target_link_options(ps2EntryRunner PRIVATE
-            $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:-mwindows>
-        )
-    endif()
+    # if(MSVC AND WIN32)
+    #     target_link_options(ps2EntryRunner PRIVATE
+    #         $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:/SUBSYSTEM:WINDOWS>
+    #         $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:/ENTRY:mainCRTStartup>
+    #     )
+    # elseif(MINGW AND WIN32)
+    #     target_link_options(ps2EntryRunner PRIVATE
+    #         $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:-mwindows>
+    #     )
+    # endif()
  
 endif()
 
