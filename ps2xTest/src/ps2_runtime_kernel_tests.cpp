@@ -2,6 +2,7 @@
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
 #include "ps2_syscalls.h"
+#include "ps2_stubs.h"
 
 #include <chrono>
 #include <array>
@@ -558,7 +559,7 @@ void register_ps2_runtime_kernel_tests()
             t.Equals(getRegS32(env.ctx, 2), KE_OK, "DeleteThread should clean up the waiter thread");
         });
 
-        tc.Run("setup heap and allocator primitives track end-of-heap", [](TestCase &t)
+        tc.Run("setup heap configures limits and EndOfHeap reports the limit", [](TestCase &t)
         {
             TestEnv env;
 
@@ -569,16 +570,12 @@ void register_ps2_runtime_kernel_tests()
             t.Equals(heapBase, 0x00180010u, "SetupHeap should return configured base");
 
             t.IsTrue(callSyscall(0x3Eu, env.rdram.data(), &env.ctx, &env.runtime), "EndOfHeap syscall should dispatch");
-            const uint32_t heapEndBefore = static_cast<uint32_t>(getRegS32(env.ctx, 2));
-            t.Equals(heapEndBefore, heapBase, "EndOfHeap should start at heap base before allocation");
+            const uint32_t heapLimit = static_cast<uint32_t>(getRegS32(env.ctx, 2));
+            t.Equals(heapLimit, 0x00181010u, "EndOfHeap should report the upper limit of the configured heap");
 
             const uint32_t alignedAlloc = env.runtime.guestMalloc(0x20u, 64u);
             t.IsTrue(alignedAlloc != 0u, "guestMalloc should allocate inside configured heap");
             t.Equals(alignedAlloc & 0x3Fu, 0u, "guestMalloc should honor 64-byte alignment");
-
-            t.IsTrue(callSyscall(0x3Eu, env.rdram.data(), &env.ctx, &env.runtime), "EndOfHeap syscall should dispatch");
-            const uint32_t heapEndAfter = static_cast<uint32_t>(getRegS32(env.ctx, 2));
-            t.IsTrue(heapEndAfter >= alignedAlloc + 0x20u, "EndOfHeap should advance after allocation");
 
             env.runtime.guestFree(alignedAlloc);
 
@@ -593,6 +590,84 @@ void register_ps2_runtime_kernel_tests()
             env.runtime.guestFree(grown);
             const uint32_t reused = env.runtime.guestMalloc(0x80u, 16u);
             t.Equals(reused, heapBase, "guestFree should make the head block reusable");
+        });
+
+        tc.Run("memalign stubs allocate aligned guest memory", [](TestCase &t)
+        {
+            TestEnv env;
+
+            env.runtime.configureGuestHeap(0x00180010u, 0x00182010u);
+
+            setRegU32(env.ctx, 4, 128u);
+            setRegU32(env.ctx, 5, 0x40u);
+            ps2_stubs::memalign(env.rdram.data(), &env.ctx, &env.runtime);
+            const uint32_t direct = ::getRegU32(&env.ctx, 2);
+            t.IsTrue(direct != 0u, "memalign should return a guest address");
+            t.Equals(direct & 0x7Fu, 0u, "memalign should honor 128-byte alignment");
+
+            setRegU32(env.ctx, 5, 64u);
+            setRegU32(env.ctx, 6, 0x40u);
+            ps2_stubs::memalign_r(env.rdram.data(), &env.ctx, &env.runtime);
+            const uint32_t reent = ::getRegU32(&env.ctx, 2);
+            t.IsTrue(reent != 0u, "_memalign_r should return a guest address");
+            t.Equals(reent & 0x3Fu, 0u, "_memalign_r should honor 64-byte alignment");
+            t.IsTrue(reent != direct, "_memalign_r should allocate a distinct block");
+        });
+
+        tc.Run("allocator compatibility stubs use the runtime guest heap", [](TestCase &t)
+        {
+            TestEnv env;
+
+            env.runtime.configureGuestHeap(0x00180010u, 0x00183010u);
+
+            setRegU32(env.ctx, 5, 0x20u);
+            ps2_stubs::malloc_r(env.rdram.data(), &env.ctx, &env.runtime);
+            const uint32_t initial = ::getRegU32(&env.ctx, 2);
+            t.IsTrue(initial != 0u, "_malloc_r should allocate guest memory");
+
+            writeGuestU32(env.rdram.data(), initial, 0xAABBCCDDu);
+
+            setRegU32(env.ctx, 5, initial);
+            setRegU32(env.ctx, 6, 0x80u);
+            ps2_stubs::realloc_r(env.rdram.data(), &env.ctx, &env.runtime);
+            const uint32_t grown = ::getRegU32(&env.ctx, 2);
+            t.IsTrue(grown != 0u, "_realloc_r should return a guest block");
+            t.Equals(readGuestU32(env.rdram.data(), grown), 0xAABBCCDDu,
+                     "_realloc_r should preserve existing guest bytes");
+
+            setRegU32(env.ctx, 5, grown);
+            ps2_stubs::free_r(env.rdram.data(), &env.ctx, &env.runtime);
+
+            setRegU32(env.ctx, 5, 0x100u);
+            ps2_stubs::malloc_extend_top(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(::getRegU32(&env.ctx, 2), 0u,
+                     "malloc_extend_top should be a safe runtime-owned heap no-op");
+
+            ps2_stubs::__malloc_lock(env.rdram.data(), &env.ctx, &env.runtime);
+            ps2_stubs::__malloc_unlock(env.rdram.data(), &env.ctx, &env.runtime);
+        });
+
+        tc.Run("libc helper stubs cover memclr and libgcc div", [](TestCase &t)
+        {
+            TestEnv env;
+
+            constexpr uint32_t kBuf = 0x5000u;
+            std::memset(env.rdram.data() + kBuf, 0xCD, 16u);
+            setRegU32(env.ctx, 4, kBuf);
+            setRegU32(env.ctx, 5, 12u);
+            ps2_stubs::memclr(env.rdram.data(), &env.ctx, &env.runtime);
+            for (uint32_t i = 0; i < 12u; ++i)
+            {
+                t.Equals(env.rdram[kBuf + i], static_cast<uint8_t>(0),
+                         "memclr should zero the requested byte range");
+            }
+            t.Equals(env.rdram[kBuf + 12u], static_cast<uint8_t>(0xCD),
+                     "memclr should not write past the requested byte range");
+
+            SET_GPR_S64(&env.ctx, 4, -9);
+            SET_GPR_S64(&env.ctx, 5, 2);
+            ps2_stubs::__divdi3(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), -4, "__divdi3 should divide signed 64-bit values");
         });
 
         tc.Run("ReleaseAlarm aliases CancelAlarm and cache toggles succeed", [](TestCase &t)
@@ -665,6 +740,56 @@ void register_ps2_runtime_kernel_tests()
             t.IsTrue(callSyscall(0x3Cu, env.rdram.data(), &env.ctx, &env.runtime), "SetupThread syscall should dispatch");
             const uint32_t setupSp = static_cast<uint32_t>(getRegS32(env.ctx, 2));
             t.Equals(setupSp & 0xFu, 0u, "SetupThread should always return a 16-byte aligned stack pointer");
+        });
+
+        tc.Run("OSD config2 syscalls round-trip extended config", [](TestCase &t)
+        {
+            TestEnv env;
+            constexpr uint32_t kConfig2Addr = 0x00005000u;
+            constexpr uint32_t kConfig2OutAddr = 0x00005010u;
+            constexpr uint32_t kConfig1OutAddr = 0x00005020u;
+            constexpr uint32_t kInitialConfig1 =
+                (1u << 0) |  // SPDIF disabled
+                (1u << 4) |  // non-Japanese language flag
+                (1u << 13) | // OSD2
+                (1u << 16);  // English
+            constexpr uint32_t kConfig2Raw =
+                0xABu |        // format
+                (0xB0u << 8) | // daylightSaving=1, timeFormat=1, dateFormat=2
+                (2u << 16) |   // extended OSD version
+                (10u << 24);   // traditional Chinese
+
+            writeGuestU32(env.rdram.data(), K_PARAM_ADDR, kInitialConfig1);
+            setRegU32(env.ctx, 4, K_PARAM_ADDR);
+            t.IsTrue(callSyscall(0x4Au, env.rdram.data(), &env.ctx, &env.runtime),
+                     "SetOsdConfigParam syscall should dispatch");
+            t.Equals(getRegS32(env.ctx, 2), KE_OK, "SetOsdConfigParam should seed base OSD state");
+
+            writeGuestU32(env.rdram.data(), kConfig2Addr, kConfig2Raw);
+            setRegU32(env.ctx, 4, kConfig2Addr);
+            setRegU32(env.ctx, 5, 4u);
+            setRegU32(env.ctx, 6, 0u);
+            t.IsTrue(callSyscall(0x6Eu, env.rdram.data(), &env.ctx, &env.runtime),
+                     "SetOsdConfigParam2 syscall should dispatch");
+            t.Equals(getRegS32(env.ctx, 2), KE_OK, "SetOsdConfigParam2 should succeed");
+
+            writeGuestU32(env.rdram.data(), kConfig2OutAddr, 0xFFFFFFFFu);
+            setRegU32(env.ctx, 4, kConfig2OutAddr);
+            setRegU32(env.ctx, 5, 4u);
+            setRegU32(env.ctx, 6, 0u);
+            t.IsTrue(callSyscall(0x6Fu, env.rdram.data(), &env.ctx, &env.runtime),
+                     "GetOsdConfigParam2 syscall should dispatch");
+            t.Equals(getRegS32(env.ctx, 2), KE_OK, "GetOsdConfigParam2 should succeed");
+            const uint32_t readConfig2 = readGuestU32(env.rdram.data(), kConfig2OutAddr);
+            t.Equals(readConfig2, kConfig2Raw, "GetOsdConfigParam2 should round-trip the sanitized Config2Param bytes");
+            t.Equals((readConfig2 >> 12) & 1u, 1u, "Config2 daylightSaving should live at bit 12 for libosd callers");
+
+            setRegU32(env.ctx, 4, kConfig1OutAddr);
+            t.IsTrue(callSyscall(0x4Bu, env.rdram.data(), &env.ctx, &env.runtime),
+                     "GetOsdConfigParam syscall should dispatch after Config2 update");
+            const uint32_t readConfig1 = readGuestU32(env.rdram.data(), kConfig1OutAddr);
+            t.Equals((readConfig1 >> 13) & 0x7u, 2u, "SetOsdConfigParam2 should sync ConfigParam.version");
+            t.Equals((readConfig1 >> 16) & 0x1Fu, 10u, "SetOsdConfigParam2 should sync ConfigParam.language");
         });
 
         tc.Run("numeric syscall 0x83 finds matching table entry", [](TestCase &t)
@@ -962,6 +1087,60 @@ void register_ps2_runtime_kernel_tests()
             t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)),
                      kTableBase + 4u,
                      "Reentrant override dispatch should use builtin syscall implementation");
+
+            notifyRuntimeStop();
+        });
+
+        tc.Run("Copy syscall (0x5A) performs a memory copy", [](TestCase &t)
+        {
+            TestEnv env;
+            constexpr uint32_t kDestAddr = 0x00005000u;
+            constexpr uint32_t kSrcAddr = 0x00006000u;
+            constexpr uint32_t kSize = 16u;
+            constexpr uint32_t kValues[] = {
+                0x11223344u,
+                0x55667788u,
+                0x99AABBCCu,
+                0xDDEEFF00u
+            };
+
+            writeGuestWords(env.rdram.data(), kSrcAddr, kValues, std::size(kValues));
+            
+            setRegU32(env.ctx, 4, kDestAddr);
+            setRegU32(env.ctx, 5, kSrcAddr);
+            setRegU32(env.ctx, 6, kSize);
+
+            t.IsTrue(callSyscall(0x5Au, env.rdram.data(), &env.ctx, &env.runtime),
+                     "Copy syscall should dispatch");
+            
+            for (size_t i = 0; i < std::size(kValues); ++i)
+            {
+                uint32_t destVal = readGuestU32(env.rdram.data(), kDestAddr + static_cast<uint32_t>(i * sizeof(uint32_t)));
+                t.Equals(destVal, kValues[i], "Copy should correctly transfer bytes");
+            }
+        });
+
+        tc.Run("GetEntryAddress syscall (0x5B) returns handler from guest table", [](TestCase &t)
+        {
+            notifyRuntimeStop();
+            TestEnv env;
+            initializeGuestKernelState(env.rdram.data());
+
+            constexpr uint32_t kGuestSyscallTableGuestBase = 0x80011F80u;
+            constexpr uint32_t kSyscallIndex = 0x5Au;
+            constexpr uint32_t kExpectedHandler = 0x00383548u;
+            constexpr uint32_t kEntryPhysAddr = (kGuestSyscallTableGuestBase + (kSyscallIndex * 4u)) & 0x1FFFFFFFu;
+
+            writeGuestU32(env.rdram.data(), kEntryPhysAddr, kExpectedHandler);
+
+            setRegU32(env.ctx, 4, kSyscallIndex);
+
+            t.IsTrue(callSyscall(0x5Bu, env.rdram.data(), &env.ctx, &env.runtime),
+                     "GetEntryAddress syscall should dispatch");
+            
+            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)),
+                     kExpectedHandler,
+                     "GetEntryAddress should read and return the handler address from the table");
 
             notifyRuntimeStop();
         });

@@ -44,12 +44,21 @@ namespace ps2_stubs
             }
             return (offset < PS2_RAM_SIZE) ? (PS2_RAM_SIZE - offset) : 0u;
         }
+
     }
 
     void malloc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const uint32_t size = getRegU32(ctx, 4); // $a0
         const uint32_t guestAddr = runtime ? runtime->guestMalloc(size) : 0u;
+        setReturnU32(ctx, guestAddr);
+    }
+
+    void memalign(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t alignment = getRegU32(ctx, 4); // $a0
+        const uint32_t size = getRegU32(ctx, 5);      // $a1
+        const uint32_t guestAddr = runtime ? runtime->guestMalloc(size, alignment) : 0u;
         setReturnU32(ctx, guestAddr);
     }
 
@@ -155,6 +164,42 @@ namespace ps2_stubs
         }
 
         // returns dest pointer ($v0 = $a0)
+        ctx->r[2] = ctx->r[4];
+    }
+
+    void memclr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        uint32_t destAddr = getRegU32(ctx, 4); // $a0
+        uint32_t size = getRegU32(ctx, 5);     // $a1
+        size = sanitizeMemTransferSize(size, "memclr");
+
+        uint32_t written = 0u;
+        uint32_t curDst = destAddr;
+        while (written < size)
+        {
+            uint8_t *hostDest = getMemPtr(rdram, curDst);
+            if (!hostDest)
+            {
+                break;
+            }
+
+            uint32_t chunk = size - written;
+            chunk = std::min(chunk, guestContiguousBytes(curDst));
+            if (chunk == 0u)
+            {
+                break;
+            }
+
+            ::memset(hostDest, 0, chunk);
+            written += chunk;
+            curDst += chunk;
+        }
+
+        if (written != 0u)
+        {
+            ps2TraceGuestRangeWrite(rdram, destAddr, written, "memclr", ctx);
+        }
+
         ctx->r[2] = ctx->r[4];
     }
 
@@ -1129,4 +1174,22 @@ namespace ps2_stubs
 
         setReturnS32(ctx, ret);
     }
+
+    void __divdi3(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const int64_t num = GPR_S64(ctx, 4);
+        const int64_t den = GPR_S64(ctx, 5);
+        if (den == 0)
+        {
+            setReturnU64(ctx, 0u);
+            return;
+        }
+        if (num == std::numeric_limits<int64_t>::min() && den == -1)
+        {
+            setReturnU64(ctx, static_cast<uint64_t>(num));
+            return;
+        }
+        setReturnU64(ctx, static_cast<uint64_t>(num / den));
+    }
+
 }

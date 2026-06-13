@@ -72,12 +72,6 @@ namespace ps2recomp
 
         auto makeSelector = [&](const std::string &name, uint32_t start) -> std::string
         {
-            auto it = functionNameCounts.find(name);
-            if (it == functionNameCounts.end() || it->second <= 1)
-            {
-                return name;
-            }
-
             std::stringstream selector;
             selector << name << "@0x"
                      << std::hex << std::uppercase << std::setw(8) << std::setfill('0')

@@ -593,6 +593,20 @@ static uint32_t packOsdConfig(uint32_t spdifMode, uint32_t screenType, uint32_t 
     return raw;
 }
 
+static uint32_t packOsdConfig2(uint32_t format, uint32_t daylightSaving, uint32_t timeFormat,
+                               uint32_t dateFormat, uint32_t version, uint32_t language)
+{
+    const uint32_t flags =
+        ((daylightSaving & 0x1u) << 4) |
+        ((timeFormat & 0x1u) << 5) |
+        ((dateFormat & 0x3u) << 6);
+
+    return (format & 0xFFu) |
+           ((flags & 0xFFu) << 8) |
+           ((version & 0xFFu) << 16) |
+           ((language & 0xFFu) << 24);
+}
+
 static int decodeTimezoneOffset(uint32_t raw)
 {
     int tz = static_cast<int>((raw >> 21) & 0x7FF);
@@ -627,6 +641,42 @@ static uint32_t sanitizeOsdConfigRaw(uint32_t raw)
     return packOsdConfig(spdifMode, screenType, videoOutput, japLanguage, ps1drvConfig, version, language, tz);
 }
 
+static uint32_t sanitizeOsdConfig2Raw(uint32_t raw)
+{
+    const uint32_t format = raw & 0xFFu;
+    const uint32_t flags = (raw >> 8) & 0xFFu;
+    const uint32_t daylightSaving = (flags >> 4) & 0x1u;
+    const uint32_t timeFormat = (flags >> 5) & 0x1u;
+    uint32_t dateFormat = (flags >> 6) & 0x3u;
+    if (dateFormat > 2u)
+        dateFormat = 0u;
+
+    uint32_t version = (raw >> 16) & 0xFFu;
+    if (version > 2u)
+        version = 1u;
+
+    const uint32_t language = (raw >> 24) & 0xFFu;
+    return packOsdConfig2(format, daylightSaving, timeFormat, dateFormat, version, language);
+}
+
+static uint32_t syncOsdConfigRawVersionLanguage(uint32_t raw, uint32_t version, uint32_t language)
+{
+    raw &= ~((0x7u << 13) | (0x1Fu << 16));
+    raw |= (version & 0x7u) << 13;
+    raw |= (language & 0x1Fu) << 16;
+    return sanitizeOsdConfigRaw(raw);
+}
+
+static uint32_t makeReadableOsdConfig2RawLocked()
+{
+    const uint32_t version = (g_osd_config_raw >> 13) & 0x7u;
+    const uint32_t language = (g_osd_config_raw >> 16) & 0x1Fu;
+    uint32_t raw = g_osd_config2_raw & 0x0000FFFFu;
+    raw |= (version & 0xFFu) << 16;
+    raw |= (language & 0xFFu) << 24;
+    return sanitizeOsdConfig2Raw(raw);
+}
+
 static void ensureOsdConfigInitialized()
 {
     std::lock_guard<std::mutex> lock(g_osd_mutex);
@@ -642,6 +692,7 @@ static void ensureOsdConfigInitialized()
     uint32_t version = 1;  // OSD2
     uint32_t language = 1; // English
     g_osd_config_raw = packOsdConfig(spdifMode, screenType, videoOutput, japLanguage, ps1drvConfig, version, language, tz);
+    g_osd_config2_raw = packOsdConfig2(0, 0, 0, 0, version, language);
     g_osd_config_initialized = true;
 }
 

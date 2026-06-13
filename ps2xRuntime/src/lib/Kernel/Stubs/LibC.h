@@ -5,11 +5,13 @@
 namespace ps2_stubs
 {
     void malloc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void memalign(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void free(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void calloc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void realloc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void memcpy(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void memset(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void memclr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void memmove(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void memcmp(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void strcpy(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
@@ -57,4 +59,5 @@ namespace ps2_stubs
     void strcasecmp(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void vfprintf(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void vsprintf(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void __divdi3(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
 }
