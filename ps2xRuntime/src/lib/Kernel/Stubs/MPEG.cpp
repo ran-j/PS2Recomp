@@ -480,6 +480,7 @@ namespace ps2_stubs
         constexpr size_t kStartCodeNotFound = std::numeric_limits<size_t>::max();
         constexpr uint32_t kMpegCallbackDataSize = 0x20u;
         constexpr uint32_t kMpegCallbackMaxSteps = 0x4000u;
+        constexpr std::chrono::milliseconds kMpegGetPictureNoFrameWaitTimeout{64};
         constexpr std::chrono::milliseconds kMpegNoFrameEndTimeout{500};
         constexpr uint32_t kMpegMaxConsecutiveEmptyGetPicture = 60u;
 
@@ -1912,6 +1913,7 @@ namespace ps2_stubs
                     currentThreadInfo = it->second;
             }
 
+            const auto noFrameWaitStart = std::chrono::steady_clock::now();
             while (runtime &&
                    g_mpeg_stub_state.playbackByMpeg.find(mpegAddr) != g_mpeg_stub_state.playbackByMpeg.end() &&
                    getPlaybackState(mpegAddr).decodedFrames.empty() &&
@@ -1932,6 +1934,23 @@ namespace ps2_stubs
                 MpegPlaybackState &waitPlayback = playbackIt->second;
                 if (maybeFinishNoFrameStall(mpegAddr, waitPlayback))
                 {
+                    break;
+                }
+
+                if (!g_mpeg_stub_state.currentCdStreamEofSeen &&
+                    std::chrono::steady_clock::now() - noFrameWaitStart >= kMpegGetPictureNoFrameWaitTimeout)
+                {
+                    static uint32_t s_noFrameYieldLogCount = 0u;
+                    if (s_noFrameYieldLogCount < 16u)
+                    {
+                        std::cerr << "[MPEG:GetPicture:yield] mpeg=0x" << std::hex << mpegAddr
+                                  << std::dec << " generation=" << g_mpeg_stub_state.cdStreamGeneration
+                                  << " sawInput=" << waitPlayback.sawInput
+                                  << " served=" << waitPlayback.picturesServed
+                                  << " cdEof=" << g_mpeg_stub_state.currentCdStreamEofSeen
+                                  << std::endl;
+                        ++s_noFrameYieldLogCount;
+                    }
                     break;
                 }
             }
@@ -1999,7 +2018,7 @@ namespace ps2_stubs
         {
             writeDecodedFrameToGuest(rdram, imageAddr, frame);
         }
-        else if (!runtime && frameCount == 0u)
+        else if (frameCount == 0u)
         {
             writeBlankMpegFrame(rdram, imageAddr, width, height);
         }

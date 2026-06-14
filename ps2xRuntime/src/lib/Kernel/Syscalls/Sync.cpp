@@ -239,6 +239,7 @@ namespace ps2_syscalls
         int ret = KE_OK;
         int beforeCount = 0;
         int afterCount = 0;
+        bool wokeWaiter = false;
         {
             std::lock_guard<std::mutex> lock(sema->m);
             beforeCount = sema->count;
@@ -249,6 +250,7 @@ namespace ps2_syscalls
             else
             {
                 sema->count++;
+                wokeWaiter = sema->waiters > 0;
                 sema->cv.notify_one();
             }
             afterCount = sema->count;
@@ -266,6 +268,10 @@ namespace ps2_syscalls
         }
 
         setReturnS32(ctx, ret);
+        if (wokeWaiter)
+        {
+            yieldGuestExecutionAfterWake(runtime);
+        }
     }
 
     void iSignalSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -503,10 +509,12 @@ namespace ps2_syscalls
         }
 
         uint32_t newBits = 0u;
+        bool hadWaiters = false;
         {
             std::lock_guard<std::mutex> lock(info->m);
             info->bits |= bits;
             newBits = info->bits;
+            hadWaiters = info->waiters > 0;
         }
 
         static std::atomic<uint32_t> s_setEventFlagLogs{0};
@@ -521,6 +529,10 @@ namespace ps2_syscalls
         }
         info->cv.notify_all();
         setReturnS32(ctx, 0);
+        if (hadWaiters)
+        {
+            yieldGuestExecutionAfterWake(runtime);
+        }
     }
 
     void iSetEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

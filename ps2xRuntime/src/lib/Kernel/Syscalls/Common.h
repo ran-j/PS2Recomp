@@ -34,3 +34,12 @@ std::string translatePs2Path(const char *ps2Path);
 #include "Helpers/State.h"
 #include "Helpers/Loader.h"
 #include "Helpers/Runtime.h"
+
+namespace ps2_syscalls
+{
+    inline void yieldGuestExecutionAfterWake(PS2Runtime *runtime)
+    {
+        PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime);
+        std::this_thread::yield();
+    }
+}

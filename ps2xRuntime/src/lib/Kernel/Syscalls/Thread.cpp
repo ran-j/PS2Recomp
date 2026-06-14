@@ -885,6 +885,7 @@ namespace ps2_syscalls
 
         int newWakeupCount = 0;
         int statusAfter = THS_DORMANT;
+        bool wokeSleeper = false;
         {
             std::lock_guard<std::mutex> lock(info->m);
             if (info->status == THS_DORMANT)
@@ -906,6 +907,7 @@ namespace ps2_syscalls
                 info->waitId = 0;
                 info->wakeupCount++;
                 info->cv.notify_one();
+                wokeSleeper = true;
             }
             else
             {
@@ -926,6 +928,10 @@ namespace ps2_syscalls
                                               << std::endl);
         }
         setReturnS32(ctx, KE_OK);
+        if (wokeSleeper)
+        {
+            yieldGuestExecutionAfterWake(runtime);
+        }
     }
 
     void iWakeupThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1048,9 +1054,8 @@ namespace ps2_syscalls
             return;
         }
 
-        std::this_thread::yield();
-
         setReturnS32(ctx, KE_OK);
+        yieldGuestExecutionAfterWake(runtime);
     }
 
     void iRotateThreadReadyQueue(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1108,6 +1113,7 @@ namespace ps2_syscalls
         info->cv.notify_all();
         notifyThreadWaitObject(waitType, waitId);
         setReturnS32(ctx, KE_OK);
+        yieldGuestExecutionAfterWake(runtime);
     }
 
     void iReleaseWaitThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
