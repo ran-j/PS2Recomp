@@ -687,19 +687,19 @@ namespace ps2_syscalls
 
         const uint32_t heapBase = (heapBaseRaw + 0xFu) & ~0xFu;
 
-        // Silent Hill and other games often pass -1 (0xFFFFFFFF) to mean "rest of RAM".
-        static constexpr uint32_t kDefaultGuestHeapEnd = 0x01F00000u;
-        uint32_t heapLimit = kDefaultGuestHeapEnd;
+        // ps2sdk's default linker script passes _heap_size = -1 to mean "rest of RAM".
+        const uint32_t defaultGuestHeapEnd = runtime ? runtime->guestHeapLimit() : PS2_RAM_SIZE;
+        uint32_t heapLimit = defaultGuestHeapEnd;
 
         if (heapSize != 0u && heapSize != 0xFFFFFFFFu)
         {
             const uint64_t candidate = static_cast<uint64_t>(heapBase) + static_cast<uint64_t>(heapSize);
-            heapLimit = static_cast<uint32_t>(std::min<uint64_t>(candidate, kDefaultGuestHeapEnd));
+            heapLimit = static_cast<uint32_t>(std::min<uint64_t>(candidate, defaultGuestHeapEnd));
         }
 
         if (heapLimit <= heapBase)
         {
-            heapLimit = kDefaultGuestHeapEnd;
+            heapLimit = defaultGuestHeapEnd;
         }
 
         if (runtime)
@@ -726,11 +726,9 @@ namespace ps2_syscalls
     {
         (void)rdram;
 
-        static constexpr uint32_t kDefaultGuestHeapEnd = 0x01F00000u;
-
         const uint32_t ret = runtime
             ? runtime->guestHeapLimit()
-            : kDefaultGuestHeapEnd;
+            : PS2_RAM_SIZE;
 
         setReturnU32(ctx, ret);
     }

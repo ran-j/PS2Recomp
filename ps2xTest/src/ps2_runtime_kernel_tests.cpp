@@ -592,6 +592,39 @@ void register_ps2_runtime_kernel_tests()
             t.Equals(reused, heapBase, "guestFree should make the head block reusable");
         });
 
+        tc.Run("SetupHeap -1 size supports high ELF end addresses", [](TestCase &t)
+        {
+            TestEnv env;
+
+            constexpr uint32_t kDarkCloud2LikeEnd = 0x01F64E00u;
+            setRegU32(env.ctx, 4, kDarkCloud2LikeEnd);
+            setRegU32(env.ctx, 5, 0xFFFFFFFFu);
+            t.IsTrue(callSyscall(0x3Du, env.rdram.data(), &env.ctx, &env.runtime), "SetupHeap syscall should dispatch");
+            const uint32_t heapBase = static_cast<uint32_t>(getRegS32(env.ctx, 2));
+            t.Equals(heapBase, kDarkCloud2LikeEnd, "SetupHeap should preserve a high _end heap base");
+
+            t.IsTrue(callSyscall(0x3Eu, env.rdram.data(), &env.ctx, &env.runtime), "EndOfHeap syscall should dispatch");
+            const uint32_t heapLimit = static_cast<uint32_t>(getRegS32(env.ctx, 2));
+            t.Equals(heapLimit, PS2_RAM_SIZE, "EndOfHeap should report the full guest RAM limit");
+
+            const uint32_t alloc = env.runtime.guestMalloc(0x1000u, 16u);
+            t.IsTrue(alloc >= kDarkCloud2LikeEnd && alloc < PS2_RAM_SIZE,
+                     "guestMalloc should still have heap space above a high _end address");
+        });
+
+        tc.Run("handleSyscall falls back to v0 when encoded and v1 miss", [](TestCase &t)
+        {
+            TestEnv env;
+
+            env.runtime.configureGuestHeap(0x00180010u, 0x00182010u);
+            setRegU32(env.ctx, 2, 0x3Eu);
+            setRegU32(env.ctx, 3, 0u);
+            env.runtime.handleSyscall(env.rdram.data(), &env.ctx, 0xFFFFFu);
+
+            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)), 0x00182010u,
+                     "handleSyscall should try $v0 after an unrecognized encoded syscall and empty $v1");
+        });
+
         tc.Run("memalign stubs allocate aligned guest memory", [](TestCase &t)
         {
             TestEnv env;

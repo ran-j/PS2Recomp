@@ -87,7 +87,7 @@ namespace
     constexpr uint32_t kGuestHeapDefaultBase = 0x00100000u;
     constexpr uint32_t kGuestHeapDefaultAlignment = 16u;
     constexpr uint32_t kGuestHeapSafetyPad = 0x1000u;
-    constexpr uint32_t kGuestHeapHardLimit = 0x01F00000u;
+    constexpr uint32_t kGuestReservedMemoryFloor = 0x01F00000u;
 
     constexpr uint32_t COP0_CAUSE_EXCCODE_MASK = 0x0000007Cu;
     constexpr uint32_t COP0_CAUSE_BD = 0x80000000u;
@@ -550,10 +550,10 @@ PS2Runtime::PS2Runtime()
     m_guestHeapBlocks.clear();
     m_guestHeapBase = kGuestHeapDefaultBase;
     m_guestHeapEnd = kGuestHeapDefaultBase;
-    m_guestHeapLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
+    m_guestHeapLimit = PS2_RAM_SIZE;
     m_guestHeapSuggestedBase = kGuestHeapDefaultBase;
     m_guestHeapConfigured = false;
-    m_asyncCallbackStackFloor = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
+    m_asyncCallbackStackFloor = std::min(kGuestReservedMemoryFloor, PS2_RAM_SIZE);
     m_asyncCallbackStackTop = PS2_RAM_SIZE;
 }
 
@@ -872,17 +872,16 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
         std::lock_guard<std::mutex> lock(m_guestHeapMutex);
         if (!m_guestHeapConfigured)
         {
-            const uint32_t hardLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
-            m_guestHeapSuggestedBase = std::min(suggestedHeapBase, hardLimit);
+            m_guestHeapSuggestedBase = std::min(suggestedHeapBase, PS2_RAM_SIZE);
             m_guestHeapBase = m_guestHeapSuggestedBase;
             m_guestHeapEnd = m_guestHeapSuggestedBase;
-            m_guestHeapLimit = hardLimit;
+            m_guestHeapLimit = PS2_RAM_SIZE;
         }
     }
     {
         std::lock_guard<std::mutex> lock(m_asyncCallbackStackMutex);
-        const uint32_t hardLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
-        m_asyncCallbackStackFloor = std::min(std::max(hardLimit, suggestedHeapBase), PS2_RAM_SIZE);
+        const uint32_t reserveFloor = std::min(kGuestReservedMemoryFloor, PS2_RAM_SIZE);
+        m_asyncCallbackStackFloor = std::min(std::max(reserveFloor, suggestedHeapBase), PS2_RAM_SIZE);
         m_asyncCallbackStackTop = PS2_RAM_SIZE;
     }
 
@@ -1163,14 +1162,22 @@ void PS2Runtime::handleSyscall(uint8_t *rdram, R5900Context *ctx, uint32_t encod
                                  "This breaks the atomic basic block model and is structurally unsupported by the emulator.");
     }
 
-    const uint32_t syscallId = (encodedSyscallId != 0u)
-                                   ? encodedSyscallId
-                                   : getRegU32(ctx, 3); // $v1 / $3 is the EE kernel syscall number
+    const uint32_t v1 = getRegU32(ctx, 3); // $v1 / $3 is the usual EE kernel syscall number
+    const uint32_t v0 = getRegU32(ctx, 2); // For some reason some games are using $v0.
 
-    if (ps2_syscalls::dispatchNumericSyscall(syscallId, rdram, ctx, this))
+    auto trySyscall = [&](uint32_t id) -> bool
     {
+        return id != 0u && ps2_syscalls::dispatchNumericSyscall(id, rdram, ctx, this);
+    };
+
+    if (trySyscall(encodedSyscallId))
         return;
-    }
+
+    if (v1 != encodedSyscallId && trySyscall(v1))
+        return;
+
+    if (v0 != encodedSyscallId && v0 != v1 && trySyscall(v0))
+        return;
 
     // God help you
     ps2_syscalls::TODO(rdram, ctx, this, encodedSyscallId);
@@ -1312,16 +1319,14 @@ uint32_t PS2Runtime::clampGuestHeapBase(uint32_t guestBase) const
     {
         normalized &= PS2_RAM_MASK;
     }
-    const uint32_t hardLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
-    return std::min(normalized, hardLimit);
+    return std::min(normalized, PS2_RAM_SIZE);
 }
 
 uint32_t PS2Runtime::clampGuestHeapLimit(uint32_t guestLimit) const
 {
-    const uint32_t hardLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
-    if (guestLimit == 0u || guestLimit > hardLimit)
+    if (guestLimit == 0u || guestLimit > PS2_RAM_SIZE)
     {
-        return hardLimit;
+        return PS2_RAM_SIZE;
     }
     return guestLimit;
 }
@@ -1336,13 +1341,13 @@ void PS2Runtime::resetGuestHeapLocked(uint32_t guestBase, uint32_t guestLimit)
         base = alignGuestHeapValue(clampGuestHeapBase(fallbackBase), kGuestHeapDefaultAlignment);
     }
 
-    if (limit <= base)
+    if (limit < base)
     {
         base = alignGuestHeapValue(clampGuestHeapBase(m_guestHeapSuggestedBase), kGuestHeapDefaultAlignment);
         limit = clampGuestHeapLimit(0u);
     }
 
-    if (limit <= base)
+    if (limit < base)
     {
         base = 0u;
         limit = 0u;
@@ -1662,7 +1667,7 @@ uint32_t PS2Runtime::guestHeapEnd() const
 uint32_t PS2Runtime::guestHeapLimit() const
 {
     std::lock_guard<std::mutex> lock(m_guestHeapMutex);
-    return m_guestHeapConfigured ? m_guestHeapLimit : m_guestHeapSuggestedBase;
+    return m_guestHeapLimit;
 }
 
 uint32_t PS2Runtime::reserveAsyncCallbackStack(uint32_t size, uint32_t alignment)
