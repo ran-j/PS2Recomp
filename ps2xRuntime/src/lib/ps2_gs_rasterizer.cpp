@@ -25,13 +25,29 @@ namespace
         return (std::fabs(q) > 1.0e-8f) ? q : 1.0f;
     }
 
-    uint32_t decodePSMCT16(uint16_t pixel)
+    u16 Rgba8888ToRgba5551(u32 c)
     {
-        const uint32_t r = ((pixel >> 0) & 0x1Fu) << 3;
-        const uint32_t g = ((pixel >> 5) & 0x1Fu) << 3;
-        const uint32_t b = ((pixel >> 10) & 0x1Fu) << 3;
-        const uint32_t a = (pixel & 0x8000u) ? 0x80u : 0u;
-        return r | (g << 8) | (b << 16) | (a << 24);
+        uint32_t r = ((c >> 0)  & 0xFF) >> 3;
+        uint32_t g = ((c >> 8)  & 0xFF) >> 3;
+        uint32_t b = ((c >> 16) & 0xFF) >> 3;
+        uint32_t a = ((c >> 24) & 0xFF) >> 7;
+
+        return (r | (g << 5) | (b << 10) | (a << 15));
+    }
+
+    u32 Rgba5551ToRgba8888(u16 c)
+    {
+        u32 r = ((c >> 0)  & 0x1F) << 3;
+        u32 g = ((c >> 5)  & 0x1F) << 3;
+        u32 b = ((c >> 10) & 0x1F) << 3;
+        u32 a = ((c >> 15) & 0x01) << 7;
+
+        return (r | (g << 8) | (b << 16) | (a << 24));
+    }
+
+    u32 pack32(u8 r, u8 g, u8 b, u8 a)
+    {
+        return static_cast<u32>(r) | (g << 8) | (b << 16) | (a << 24);
     }
 
     uint32_t applyTexa(const GSTexaReg &texa, uint8_t psm, uint32_t texel)
@@ -62,14 +78,6 @@ namespace
         }
 
         return (texel & 0x00FFFFFFu) | (static_cast<uint32_t>(a) << 24);
-    }
-
-    uint16_t encodePSMCT16(uint8_t r, uint8_t g, uint8_t b, uint8_t a)
-    {
-        return static_cast<uint16_t>(((r >> 3) & 0x1Fu) |
-                                     (((g >> 3) & 0x1Fu) << 5) |
-                                     (((b >> 3) & 0x1Fu) << 10) |
-                                     ((a >= 0x40u) ? 0x8000u : 0u));
     }
 
     uint32_t addrPSMCT16Family(uint32_t basePtr, uint32_t width, uint8_t psm, uint32_t x, uint32_t y)
@@ -402,95 +410,72 @@ void GSRasterizer::drawPrimitive(GS *gs)
 void GSRasterizer::writePixel(GS *gs, int x, int y, uint8_t r, uint8_t g, uint8_t b, uint8_t a)
 {
     const auto &ctx = gs->activeContext();
+
     if (x < ctx.scissor.x0 || x > ctx.scissor.x1 ||
         y < ctx.scissor.y0 || y > ctx.scissor.y1)
         return;
 
     const AlphaTestResult alphaTest = classifyAlphaTest(ctx.test, a);
+
     if (!alphaTest.writeFramebuffer)
         return;
 
-    const uint32_t widthBlocks = (ctx.frame.fbw != 0u) ? ctx.frame.fbw : 1u;
-    const uint32_t bytesPerPixel =
-        (ctx.frame.psm == GS_PSM_CT16 || ctx.frame.psm == GS_PSM_CT16S) ? 2u : 4u;
+    u8* vram = gs->m_vram;
 
-    uint32_t off = 0u;
-    if (ctx.frame.psm == GS_PSM_CT32 || ctx.frame.psm == GS_PSM_CT24)
+    const u32 fbp  = GSInternal::framePageBaseToBlock(ctx.frame.fbp);
+    const u32 fbw  = std::max<u32>(ctx.frame.fbw, 1u);
+    const u32 fpsm = ctx.frame.psm;
+    const u32 fmsk = ctx.frame.fbmsk;
+
+    const bool alphaBlendEnabled = gs->m_prim.abe;
+    const bool destinationAlpha  = alphaTest.preserveDestinationAlpha;
+
+    // small optimization, avoid reading the framebuffer for simple draws
+    // TODO: only one address lookup for rmw
+    const bool frmw = (ctx.frame.fbmsk != 0) || alphaBlendEnabled || destinationAlpha;
+
+    u32 fbrgba = 0;
+    if (frmw)
     {
-        off = GSPSMCT32::addrPSMCT32(GSInternal::framePageBaseToBlock(ctx.frame.fbp),
-                                     widthBlocks,
-                                     static_cast<uint32_t>(x),
-                                     static_cast<uint32_t>(y));
-    }
-    else
-    {
-        off = addrPSMCT16Family(GSInternal::framePageBaseToBlock(ctx.frame.fbp),
-                                widthBlocks,
-                                ctx.frame.psm,
-                                static_cast<uint32_t>(x),
-                                static_cast<uint32_t>(y));
-    }
-
-    if (off + bytesPerPixel > gs->m_vramSize)
-        return;
-
-    PS2_IF_AGRESSIVE_LOGS({
-        const uint32_t pixelIndex = s_debugPixelCount.fetch_add(1, std::memory_order_relaxed);
-        if (pixelIndex < 32u)
+        switch (fpsm)
         {
-            std::cout << "[gs:pixel] idx=" << pixelIndex
-                      << " xy=(" << x << "," << y << ")"
-                      << " rgba=(" << static_cast<uint32_t>(r) << ","
-                      << static_cast<uint32_t>(g) << ","
-                      << static_cast<uint32_t>(b) << ","
-                      << static_cast<uint32_t>(a) << ")"
-                      << " fbp=" << ctx.frame.fbp
-                      << " fbw=" << ctx.frame.fbw
-                      << " psm=0x" << std::hex << static_cast<uint32_t>(ctx.frame.psm) << std::dec
-                      << " off=0x" << std::hex << off << std::dec
-                      << std::endl;
+        case GS_PSM_CT32:
+            fbrgba = GSMem::ReadCT32(vram, fbp, fbw, x, y);
+            break;
+        case GS_PSM_Z32:
+            fbrgba = GSMem::ReadZ32(vram, fbp, fbw, x, y);
+            break;
+        case GS_PSM_CT24:
+            fbrgba = GSMem::ReadCT24(vram, fbp, fbw, x, y);
+            break;
+        case GS_PSM_Z24:
+            fbrgba = GSMem::ReadZ24(vram, fbp, fbw, x, y);
+            break;
+        case GS_PSM_CT16:
+            fbrgba = Rgba5551ToRgba8888(GSMem::ReadCT16(vram, fbp, fbw, x, y));
+            break;
+        case GS_PSM_CT16S:
+            fbrgba = Rgba5551ToRgba8888(GSMem::ReadCT16S(vram, fbp, fbw, x, y));
+            break;
+        case GS_PSM_Z16:
+            fbrgba = Rgba5551ToRgba8888(GSMem::ReadZ16(vram, fbp, fbw, x, y));
+            break;
+        case GS_PSM_Z16S:
+            fbrgba = Rgba5551ToRgba8888(GSMem::ReadZ16S(vram, fbp, fbw, x, y));
+            break;
         }
-    });
+    }
 
-    PS2_IF_AGRESSIVE_LOGS({
-        if (ctx.frame.fbp == 150u &&
-            s_debugFbp150PixelCount.fetch_add(1u, std::memory_order_relaxed) < 32u)
-        {
-            std::cout << "[gs:fbp150-pixel]"
-                      << " xy=(" << x << "," << y << ")"
-                      << " rgba=(" << static_cast<uint32_t>(r) << ","
-                      << static_cast<uint32_t>(g) << ","
-                      << static_cast<uint32_t>(b) << ","
-                      << static_cast<uint32_t>(a) << ")"
-                      << " scissor=(" << ctx.scissor.x0
-                      << "," << ctx.scissor.y0
-                      << ")-(" << ctx.scissor.x1
-                      << "," << ctx.scissor.y1 << ")"
-                      << " off=0x" << std::hex << off << std::dec << std::endl;
-        }
-    });
-
-    const uint8_t srcR = r;
-    const uint8_t srcG = g;
-    const uint8_t srcB = b;
+    const u8 srcR = r;
+    const u8 srcG = g;
+    const u8 srcB = b;
 
     if (gs->m_prim.abe)
     {
-        uint32_t existing = 0u;
-        if (bytesPerPixel == 2u)
-        {
-            uint16_t packed = 0u;
-            std::memcpy(&packed, gs->m_vram + off, 2);
-            existing = decodePSMCT16(packed);
-        }
-        else
-        {
-            std::memcpy(&existing, gs->m_vram + off, 4);
-        }
-        uint8_t dr = existing & 0xFF;
-        uint8_t dg = (existing >> 8) & 0xFF;
-        uint8_t db = (existing >> 16) & 0xFF;
-        uint8_t da = (existing >> 24) & 0xFF;
+        uint8_t dr = fbrgba & 0xFF;
+        uint8_t dg = (fbrgba >> 8) & 0xFF;
+        uint8_t db = (fbrgba >> 16) & 0xFF;
+        uint8_t da = (fbrgba >> 24) & 0xFF;
 
         // PABE disables alpha blending when the source alpha MSB is clear.
         if (!(gs->m_pabe && (a & 0x80u) == 0u))
@@ -533,75 +518,45 @@ void GSRasterizer::writePixel(GS *gs, int x, int y, uint8_t r, uint8_t g, uint8_
         a = static_cast<uint8_t>(a | 0x80u);
     }
 
-    if (bytesPerPixel == 2u)
-    {
-        uint16_t pixel = encodePSMCT16(r, g, b, a);
-        if ((mask & 0xFFFFu) != 0u)
-        {
-            uint16_t existing = 0u;
-            std::memcpy(&existing, gs->m_vram + off, 2);
-            pixel = static_cast<uint16_t>((pixel & ~mask) | (existing & mask));
-        }
-        std::memcpy(gs->m_vram + off, &pixel, 2);
-        return;
-    }
-
-    uint32_t pixel = static_cast<uint32_t>(r) | (static_cast<uint32_t>(g) << 8) | (static_cast<uint32_t>(b) << 16) | (static_cast<uint32_t>(a) << 24);
+    u32 pixel = pack32(r, g, b, a);
 
     if (mask != 0)
     {
-        uint32_t existing;
-        std::memcpy(&existing, gs->m_vram + off, 4);
-        pixel = (pixel & ~mask) | (existing & mask);
+        pixel = (pixel & ~mask) | (fbrgba & mask);
     }
 
     if (alphaTest.preserveDestinationAlpha)
     {
-        uint32_t existing = 0u;
-        std::memcpy(&existing, gs->m_vram + off, 4);
-        pixel = (pixel & 0x00FFFFFFu) | (existing & 0xFF000000u);
+        pixel = (pixel & 0x00FFFFFFu) | (fbrgba & 0xFF000000u);
     }
 
-    std::memcpy(gs->m_vram + off, &pixel, 4);
-}
-
-uint32_t GSRasterizer::readTexelPSMCT32(GS *gs, uint32_t tbp0, uint32_t tbw, int texU, int texV)
-{
-    if (tbw == 0)
-        tbw = 1;
-    uint32_t off = GSPSMCT32::addrPSMCT32(tbp0, tbw, static_cast<uint32_t>(texU), static_cast<uint32_t>(texV));
-    if (off + 4 > gs->m_vramSize)
-        return 0xFFFF00FFu;
-    uint32_t texel;
-    std::memcpy(&texel, gs->m_vram + off, 4);
-    return texel;
-}
-
-uint32_t GSRasterizer::readTexelPSMCT16(GS *gs, uint32_t tbp0, uint32_t tbw, int texU, int texV)
-{
-    if (tbw == 0)
-        tbw = 1;
-    const uint8_t psm = gs->activeContext().tex0.psm;
-    uint32_t off = addrPSMCT16Family(tbp0, tbw, psm, static_cast<uint32_t>(texU), static_cast<uint32_t>(texV));
-    if (off + 2 > gs->m_vramSize)
-        return 0xFFFF00FFu;
-    uint16_t texel;
-    std::memcpy(&texel, gs->m_vram + off, 2);
-    return decodePSMCT16(texel);
-}
-
-uint32_t GSRasterizer::readTexelPSMT4(GS *gs, uint32_t tbp0, uint32_t tbw, int texU, int texV)
-{
-    if (tbw == 0)
-        tbw = 1;
-    uint32_t nibbleAddr = GSPSMT4::addrPSMT4(tbp0, tbw, static_cast<uint32_t>(texU), static_cast<uint32_t>(texV));
-    uint32_t byteOff = nibbleAddr >> 1;
-    if (byteOff >= gs->m_vramSize)
-        return 0;
-    uint8_t packed = gs->m_vram[byteOff];
-    uint32_t shift = (nibbleAddr & 1u) << 2;
-    uint32_t idx = (packed >> shift) & 0xFu;
-    return idx;
+    switch (fpsm)
+    {
+    case GS_PSM_CT32:
+        GSMem::WriteCT32(vram, fbp, fbw, x, y, pixel);
+        break;
+    case GS_PSM_Z32:
+        GSMem::WriteZ32(vram, fbp, fbw, x, y, pixel);
+        break;
+    case GS_PSM_CT24:
+        GSMem::WriteCT24(vram, fbp, fbw, x, y, pixel);
+        break;
+    case GS_PSM_Z24:
+        GSMem::WriteZ24(vram, fbp, fbw, x, y, pixel);
+        break;
+    case GS_PSM_CT16:
+        GSMem::WriteCT16(vram, fbp, fbw, x, y, Rgba8888ToRgba5551(pixel));
+        break;
+    case GS_PSM_CT16S:
+        GSMem::WriteCT16S(vram, fbp, fbw, x, y, Rgba8888ToRgba5551(pixel));
+        break;
+    case GS_PSM_Z16:
+        GSMem::WriteZ16(vram, fbp, fbw, x, y, Rgba8888ToRgba5551(pixel));
+        break;
+    case GS_PSM_Z16S:
+        GSMem::WriteZ16S(vram, fbp, fbw, x, y, Rgba8888ToRgba5551(pixel));
+        break;
+    }
 }
 
 uint32_t GSRasterizer::lookupCLUT(GS *gs,
@@ -672,13 +627,13 @@ uint32_t GSRasterizer::sampleTexture(GS *gs, float s, float t, float q, uint16_t
         case GS_PSM_Z24:
             return applyTexa(gs->m_texa, tex.psm, GSMem::ReadZ24(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV));
         case GS_PSM_CT16:
-            return applyTexa(gs->m_texa, tex.psm, decodePSMCT16(GSMem::ReadCT16(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV)));
+            return applyTexa(gs->m_texa, tex.psm, Rgba5551ToRgba8888(GSMem::ReadCT16(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV)));
         case GS_PSM_CT16S:
-            return applyTexa(gs->m_texa, tex.psm, decodePSMCT16(GSMem::ReadCT16S(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV)));
+            return applyTexa(gs->m_texa, tex.psm, Rgba5551ToRgba8888(GSMem::ReadCT16S(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV)));
         case GS_PSM_Z16:
-            return applyTexa(gs->m_texa, tex.psm, decodePSMCT16(GSMem::ReadZ16(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV)));
+            return applyTexa(gs->m_texa, tex.psm, Rgba5551ToRgba8888(GSMem::ReadZ16(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV)));
         case GS_PSM_Z16S:
-            return applyTexa(gs->m_texa, tex.psm, decodePSMCT16(GSMem::ReadZ16S(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV)));
+            return applyTexa(gs->m_texa, tex.psm, Rgba5551ToRgba8888(GSMem::ReadZ16S(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV)));
         case GS_PSM_T8:
             return lookupCLUT(gs, GSMem::ReadP8(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV), tex.cbp, tex.cpsm, tex.csm, tex.csa, tex.psm);
         case GS_PSM_T8H:
