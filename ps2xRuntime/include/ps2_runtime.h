@@ -576,6 +576,8 @@ public:
     inline const GS &gs() const { return m_gs; }
     inline GifArbiter &gifArbiter() { return m_gifArbiter; }
     inline const GifArbiter &gifArbiter() const { return m_gifArbiter; }
+    inline VU1Interpreter &vu0() { return m_vu0; }
+    inline const VU1Interpreter &vu0() const { return m_vu0; }
     inline VU1Interpreter &vu1() { return m_vu1; }
     inline const VU1Interpreter &vu1() const { return m_vu1; }
 
@@ -622,6 +624,7 @@ private:
     ps2_iop m_iop;
     PS2AudioBackend m_audioBackend;
     PSPadBackend m_padBackend;
+    VU1Interpreter m_vu0;
     VU1Interpreter m_vu1;
     R5900Context m_cpuContext;
     mutable std::recursive_mutex m_guestExecutionMutex;

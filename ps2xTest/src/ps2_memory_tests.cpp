@@ -173,6 +173,33 @@ void register_ps2_memory_tests()
             t.Equals(mem.read32(kScratchAliasAddr), 0xCAFEBABEu, "reads through 0xF000 scratchpad alias should see scratchpad bytes");
         });
 
+        tc.Run("VU0 code and data windows map through EE addresses", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kCodeAddr = PS2_VU0_CODE_BASE + 0x20u;
+            mem.write32(kCodeAddr, 0x11223344u);
+            t.Equals(mem.read32(kCodeAddr), 0x11223344u, "VU0 code readback should match written word");
+
+            uint32_t codeWord = 0u;
+            std::memcpy(&codeWord, mem.getVU0Code() + 0x20u, sizeof(codeWord));
+            t.Equals(codeWord, 0x11223344u, "VU0 code write should land in micro memory buffer");
+
+            constexpr uint32_t kDataAddr = PS2_VU0_DATA_BASE + 0x30u;
+            const __m128i value = _mm_set_epi32(0x44556677u, 0x01234567u, 0x89ABCDEFu, 0xCAFEBABEu);
+            mem.write128(kDataAddr, value);
+
+            alignas(16) uint32_t words[4]{};
+            const __m128i readback = mem.read128(kDataAddr);
+            _mm_storeu_si128(reinterpret_cast<__m128i *>(words), readback);
+
+            t.Equals(words[0], 0xCAFEBABEu, "VU0 data lane 0 should match");
+            t.Equals(words[1], 0x89ABCDEFu, "VU0 data lane 1 should match");
+            t.Equals(words[2], 0x01234567u, "VU0 data lane 2 should match");
+            t.Equals(words[3], 0x44556677u, "VU0 data lane 3 should match");
+        });
+
         tc.Run("fast memory helpers wrap safely at RAM boundary", [](TestCase &t)
         {
             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);

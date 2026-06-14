@@ -227,6 +227,83 @@ namespace
         return tlbRefill ? EXCEPTION_VECTOR_TLB_REFILL : EXCEPTION_VECTOR_GENERAL;
     }
 
+    void seedVu0IdleSuccess(R5900Context *ctx)
+    {
+        if (!ctx)
+        {
+            return;
+        }
+
+        ctx->vu0_clip_flags = 0;
+        ctx->vu0_clip_flags2 = 0;
+        ctx->vu0_mac_flags = 0;
+        ctx->vu0_status = 0;
+        ctx->vu0_q = 1.0f;
+        ctx->vu0_vpu_stat = 0;
+        ctx->vu0_vpu_stat2 = 0;
+    }
+
+    void copyVu0ContextToState(const R5900Context *ctx, VU1State &state)
+    {
+        std::memset(&state, 0, sizeof(state));
+
+        for (uint32_t i = 0; i < 32u; ++i)
+        {
+            _mm_storeu_ps(state.vf[i], ctx->vu0_vf[i]);
+        }
+        for (uint32_t i = 0; i < 16u; ++i)
+        {
+            state.vi[i] = static_cast<int16_t>(ctx->vi[i]);
+        }
+
+        _mm_storeu_ps(state.acc, ctx->vu0_acc);
+        state.q = ctx->vu0_q;
+        state.p = ctx->vu0_p;
+        state.i = ctx->vu0_i;
+        state.pc = ctx->vu0_pc;
+        state.mac = ctx->vu0_mac_flags;
+        state.clip = ctx->vu0_clip_flags;
+        state.status = ctx->vu0_status;
+        state.itop = ctx->vu0_itop;
+        state.xitop = ctx->vu0_xitop;
+
+        state.vf[0][0] = 0.0f;
+        state.vf[0][1] = 0.0f;
+        state.vf[0][2] = 0.0f;
+        state.vf[0][3] = 1.0f;
+        state.vi[0] = 0;
+    }
+
+    void copyVu0StateToContext(const VU1State &state, R5900Context *ctx)
+    {
+        for (uint32_t i = 0; i < 32u; ++i)
+        {
+            ctx->vu0_vf[i] = _mm_loadu_ps(state.vf[i]);
+        }
+        for (uint32_t i = 0; i < 16u; ++i)
+        {
+            ctx->vi[i] = static_cast<uint16_t>(state.vi[i]);
+        }
+
+        ctx->vu0_acc = _mm_loadu_ps(state.acc);
+        ctx->vu0_q = state.q;
+        ctx->vu0_p = state.p;
+        ctx->vu0_i = state.i;
+        ctx->vu0_mac_flags = state.mac;
+        ctx->vu0_clip_flags = state.clip;
+        ctx->vu0_clip_flags2 = state.clip;
+        ctx->vu0_status = static_cast<uint16_t>(state.status);
+        ctx->vu0_itop = state.itop;
+        ctx->vu0_xitop = state.xitop;
+        ctx->vu0_pc = state.pc;
+        ctx->vu0_tpc = state.pc;
+        ctx->vu0_vpu_stat = 0;
+        ctx->vu0_vpu_stat2 = 0;
+
+        ctx->vu0_vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
+        ctx->vi[0] = 0;
+    }
+
     void raiseCop0Exception(R5900Context *ctx, uint32_t exceptionCode, bool tlbRefill = false)
     {
         if (ctx->in_delay_slot)
@@ -673,6 +750,7 @@ bool PS2Runtime::syncCoreSubsystems()
                                                 m_gs, &m_memory, itop, 65536); });
     m_iop.init(rdram);
     m_iop.reset();
+    m_vu0.reset();
     m_vu1.reset();
 
     m_boundRdram = rdram;
@@ -1261,23 +1339,40 @@ void PS2Runtime::SignalException(R5900Context *ctx, PS2Exception exception)
 
 void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint32_t address)
 {
+    (void)rdram;
+
     static std::unordered_map<uint32_t, int> seen;
     int &count = seen[address];
     if (count < 3)
     {
         RUNTIME_LOG("[VU0] microprogram @0x" << std::hex << address
-                                             << " pc=0x" << ctx->pc
-                                             << " ra=0x" << static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0))
+                                             << " pc=0x" << (ctx ? ctx->pc : 0u)
+                                             << " ra=0x" << (ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0)) : 0u)
                                              << std::dec << std::endl);
     }
     ++count;
 
-    // Seed status so dependent code sees success.
-    ctx->vu0_clip_flags = 0;
-    ctx->vu0_clip_flags2 = 0;
-    ctx->vu0_mac_flags = 0;
-    ctx->vu0_status = 0;
-    ctx->vu0_q = 1.0f;
+    if (!ctx)
+    {
+        return;
+    }
+
+    uint8_t *const vu0Code = m_memory.getVU0Code();
+    uint8_t *const vu0Data = m_memory.getVU0Data();
+    const uint32_t startPC = address & ~0x7u;
+    if (!vu0Code || !vu0Data || startPC + 8u > PS2_VU0_CODE_SIZE)
+    {
+        seedVu0IdleSuccess(ctx);
+        return;
+    }
+
+    m_vu0.reset();
+    copyVu0ContextToState(ctx, m_vu0.state());
+    m_vu0.execute(vu0Code, PS2_VU0_CODE_SIZE,
+                  vu0Data, PS2_VU0_DATA_SIZE,
+                  m_gs, &m_memory,
+                  startPC, ctx->vu0_itop, 4096);
+    copyVu0StateToContext(m_vu0.state(), ctx);
 }
 
 void PS2Runtime::vu0StartMicroProgram(uint8_t *rdram, R5900Context *ctx, uint32_t address)

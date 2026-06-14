@@ -312,6 +312,10 @@ public:
     const uint8_t *getVU1Code() const { return m_vu1Code; }
     uint8_t *getVU1Data() { return m_vu1Data; }
     const uint8_t *getVU1Data() const { return m_vu1Data; }
+    uint8_t *getVU0Code() { return m_vu0Code; }
+    const uint8_t *getVU0Code() const { return m_vu0Code; }
+    uint8_t *getVU0Data() { return m_vu0Data; }
+    const uint8_t *getVU0Data() const { return m_vu0Data; }
 
     bool isPath3Masked() const { return m_path3Masked; }
     void flushMaskedPath3Packets(bool drainImmediately = true);
@@ -377,6 +381,8 @@ public:
     Vu1MscalCallback m_vu1MscalCallback;
     Vu1MscntCallback m_vu1MscntCallback;
 
+    uint8_t *m_vu0Code = nullptr;
+    uint8_t *m_vu0Data = nullptr;
     uint8_t *m_vu1Code = nullptr;
     uint8_t *m_vu1Data = nullptr;
     bool m_path3Masked = false;
@@ -405,6 +411,8 @@ public:
     bool isAddressInRegion(uint32_t address, const CodeRegion &region);
     void markModified(uint32_t address, uint32_t size);
     bool isScratchpad(uint32_t address) const;
+    uint8_t *mapVuMemory(uint32_t physAddr, uint32_t size, uint32_t &offset, uint32_t &limit);
+    const uint8_t *mapVuMemory(uint32_t physAddr, uint32_t size, uint32_t &offset, uint32_t &limit) const;
 };
 
 #endif // PS2_MEMORY_H

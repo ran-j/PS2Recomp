@@ -135,6 +135,16 @@ PS2Memory::~PS2Memory()
         delete[] m_vu1Data;
         m_vu1Data = nullptr;
     }
+    if (m_vu0Code)
+    {
+        delete[] m_vu0Code;
+        m_vu0Code = nullptr;
+    }
+    if (m_vu0Data)
+    {
+        delete[] m_vu0Data;
+        m_vu0Data = nullptr;
+    }
 
     if (iop_ram)
     {
@@ -151,6 +161,8 @@ bool PS2Memory::initialize(size_t ramSize)
         delete[] m_scratchpad;
         delete[] iop_ram;
         delete[] m_gsVRAM;
+        delete[] m_vu0Code;
+        delete[] m_vu0Data;
         delete[] m_vu1Code;
         delete[] m_vu1Data;
         m_rdram = nullptr;
@@ -158,6 +170,8 @@ bool PS2Memory::initialize(size_t ramSize)
         ps2SetScratchpadHostPtr(nullptr);
         iop_ram = nullptr;
         m_gsVRAM = nullptr;
+        m_vu0Code = nullptr;
+        m_vu0Data = nullptr;
         m_vu1Code = nullptr;
         m_vu1Data = nullptr;
     };
@@ -208,6 +222,11 @@ bool PS2Memory::initialize(size_t ramSize)
         m_gsVRAM = new uint8_t[PS2_GS_VRAM_SIZE];
         std::memset(m_gsVRAM, 0, PS2_GS_VRAM_SIZE);
 
+        m_vu0Code = new uint8_t[PS2_VU0_CODE_SIZE];
+        m_vu0Data = new uint8_t[PS2_VU0_DATA_SIZE];
+        std::memset(m_vu0Code, 0, PS2_VU0_CODE_SIZE);
+        std::memset(m_vu0Data, 0, PS2_VU0_DATA_SIZE);
+
         m_vu1Code = new uint8_t[PS2_VU1_CODE_SIZE];
         m_vu1Data = new uint8_t[PS2_VU1_DATA_SIZE];
         std::memset(m_vu1Code, 0, PS2_VU1_CODE_SIZE);
@@ -233,6 +252,44 @@ bool PS2Memory::initialize(size_t ramSize)
 bool PS2Memory::isScratchpad(uint32_t address) const
 {
     return ps2IsScratchpadAddress(address);
+}
+
+uint8_t *PS2Memory::mapVuMemory(uint32_t physAddr, uint32_t size, uint32_t &offset, uint32_t &limit)
+{
+    return const_cast<uint8_t *>(static_cast<const PS2Memory *>(this)->mapVuMemory(physAddr, size, offset, limit));
+}
+
+const uint8_t *PS2Memory::mapVuMemory(uint32_t physAddr, uint32_t size, uint32_t &offset, uint32_t &limit) const
+{
+    auto mapRange = [&](uint32_t base, uint32_t rangeSize, const uint8_t *ptr) -> const uint8_t *
+    {
+        if (!ptr || physAddr < base)
+        {
+            return nullptr;
+        }
+        const uint32_t local = physAddr - base;
+        if (local >= rangeSize || size > (rangeSize - local))
+        {
+            return nullptr;
+        }
+        offset = local;
+        limit = rangeSize;
+        return ptr;
+    };
+
+    if (const uint8_t *ptr = mapRange(PS2_VU0_CODE_BASE, PS2_VU0_CODE_SIZE, m_vu0Code))
+    {
+        return ptr;
+    }
+    if (const uint8_t *ptr = mapRange(PS2_VU0_DATA_BASE, PS2_VU0_DATA_SIZE, m_vu0Data))
+    {
+        return ptr;
+    }
+    if (const uint8_t *ptr = mapRange(PS2_VU1_CODE_BASE, PS2_VU1_CODE_SIZE, m_vu1Code))
+    {
+        return ptr;
+    }
+    return mapRange(PS2_VU1_DATA_BASE, PS2_VU1_DATA_SIZE, m_vu1Data);
 }
 
 uint32_t PS2Memory::translateAddress(uint32_t virtualAddress)
@@ -352,6 +409,13 @@ uint8_t PS2Memory::read8(uint32_t address)
     {
         return m_rdram[physAddr];
     }
+    uint32_t vuOffset = 0;
+    uint32_t vuLimit = 0;
+    if (const uint8_t *vuMem = mapVuMemory(physAddr, sizeof(uint8_t), vuOffset, vuLimit))
+    {
+        (void)vuLimit;
+        return vuMem[vuOffset];
+    }
     else if (physAddr >= PS2_IO_BASE && physAddr < PS2_IO_BASE + PS2_IO_SIZE)
     {
         uint32_t regAddr = physAddr & ~0x3;
@@ -380,6 +444,12 @@ uint16_t PS2Memory::read16(uint32_t address)
     if (physAddr < PS2_RAM_SIZE)
     {
         return loadScalar<uint16_t>(m_rdram, physAddr, PS2_RAM_SIZE, "read16 rdram", address);
+    }
+    uint32_t vuOffset = 0;
+    uint32_t vuLimit = 0;
+    if (const uint8_t *vuMem = mapVuMemory(physAddr, sizeof(uint16_t), vuOffset, vuLimit))
+    {
+        return loadScalar<uint16_t>(vuMem, vuOffset, vuLimit, "read16 vu", address);
     }
     else if (physAddr >= PS2_IO_BASE && physAddr < PS2_IO_BASE + PS2_IO_SIZE)
     {
@@ -420,6 +490,12 @@ uint32_t PS2Memory::read32(uint32_t address)
     {
         return loadScalar<uint32_t>(m_rdram, physAddr, PS2_RAM_SIZE, "read32 rdram", address);
     }
+    uint32_t vuOffset = 0;
+    uint32_t vuLimit = 0;
+    if (const uint8_t *vuMem = mapVuMemory(physAddr, sizeof(uint32_t), vuOffset, vuLimit))
+    {
+        return loadScalar<uint32_t>(vuMem, vuOffset, vuLimit, "read32 vu", address);
+    }
     else if (physAddr >= PS2_IO_BASE && physAddr < PS2_IO_BASE + PS2_IO_SIZE)
     {
         return readIORegister(physAddr);
@@ -451,6 +527,12 @@ uint64_t PS2Memory::read64(uint32_t address)
     if (physAddr < PS2_RAM_SIZE)
     {
         return loadScalar<uint64_t>(m_rdram, physAddr, PS2_RAM_SIZE, "read64 rdram", address);
+    }
+    uint32_t vuOffset = 0;
+    uint32_t vuLimit = 0;
+    if (const uint8_t *vuMem = mapVuMemory(physAddr, sizeof(uint64_t), vuOffset, vuLimit))
+    {
+        return loadScalar<uint64_t>(vuMem, vuOffset, vuLimit, "read64 vu", address);
     }
 
     // 64-bit IO read: compose from the two adjacent 32-bit IO register slots
@@ -484,6 +566,13 @@ __m128i PS2Memory::read128(uint32_t address)
         inRange(physAddr, sizeof(__m128i), PS2_RAM_SIZE, "read128 rdram", address);
         return _mm_loadu_si128(reinterpret_cast<__m128i *>(&m_rdram[physAddr]));
     }
+    uint32_t vuOffset = 0;
+    uint32_t vuLimit = 0;
+    if (const uint8_t *vuMem = mapVuMemory(physAddr, sizeof(__m128i), vuOffset, vuLimit))
+    {
+        inRange(vuOffset, sizeof(__m128i), vuLimit, "read128 vu", address);
+        return _mm_loadu_si128(reinterpret_cast<const __m128i *>(vuMem + vuOffset));
+    }
 
     // 128-bit reads are primarily for quad-word loads in the EE, which are only valid for RAM areas
     // Return zeroes for unsupported areas
@@ -503,7 +592,18 @@ void PS2Memory::write8(uint32_t address, uint8_t value)
     {
         m_rdram[physAddr] = value;
     }
-    else if (physAddr >= PS2_IO_BASE && physAddr < PS2_IO_BASE + PS2_IO_SIZE)
+    else
+    {
+        uint32_t vuOffset = 0;
+        uint32_t vuLimit = 0;
+        if (uint8_t *vuMem = mapVuMemory(physAddr, sizeof(uint8_t), vuOffset, vuLimit))
+        {
+            (void)vuLimit;
+            vuMem[vuOffset] = value;
+            return;
+        }
+    }
+    if (physAddr >= PS2_IO_BASE && physAddr < PS2_IO_BASE + PS2_IO_SIZE)
     {
         // IO registers - handle byte writes by modifying the appropriate byte in the word
         uint32_t regAddr = physAddr & ~0x3;
@@ -532,7 +632,17 @@ void PS2Memory::write16(uint32_t address, uint16_t value)
     {
         storeScalar<uint16_t>(m_rdram, physAddr, PS2_RAM_SIZE, value, "write16 rdram", address);
     }
-    else if (physAddr >= PS2_IO_BASE && physAddr < PS2_IO_BASE + PS2_IO_SIZE)
+    else
+    {
+        uint32_t vuOffset = 0;
+        uint32_t vuLimit = 0;
+        if (uint8_t *vuMem = mapVuMemory(physAddr, sizeof(uint16_t), vuOffset, vuLimit))
+        {
+            storeScalar<uint16_t>(vuMem, vuOffset, vuLimit, value, "write16 vu", address);
+            return;
+        }
+    }
+    if (physAddr >= PS2_IO_BASE && physAddr < PS2_IO_BASE + PS2_IO_SIZE)
     {
         uint32_t regAddr = physAddr & ~0x3;
         uint32_t shift = (physAddr & 2) * 8;
@@ -591,7 +701,17 @@ void PS2Memory::write32(uint32_t address, uint32_t value)
 
         storeScalar<uint32_t>(m_rdram, physAddr, PS2_RAM_SIZE, value, "write32 rdram", address);
     }
-    else if (physAddr >= PS2_IO_BASE && physAddr < PS2_IO_BASE + PS2_IO_SIZE)
+    else
+    {
+        uint32_t vuOffset = 0;
+        uint32_t vuLimit = 0;
+        if (uint8_t *vuMem = mapVuMemory(physAddr, sizeof(uint32_t), vuOffset, vuLimit))
+        {
+            storeScalar<uint32_t>(vuMem, vuOffset, vuLimit, value, "write32 vu", address);
+            return;
+        }
+    }
+    if (physAddr >= PS2_IO_BASE && physAddr < PS2_IO_BASE + PS2_IO_SIZE)
     {
         writeIORegister(physAddr, value);
     }
@@ -640,6 +760,16 @@ void PS2Memory::write64(uint32_t address, uint64_t value)
     }
     else
     {
+        uint32_t vuOffset = 0;
+        uint32_t vuLimit = 0;
+        if (uint8_t *vuMem = mapVuMemory(physAddr, sizeof(uint64_t), vuOffset, vuLimit))
+        {
+            storeScalar<uint64_t>(vuMem, vuOffset, vuLimit, value, "write64 vu", address);
+            return;
+        }
+    }
+    if (physAddr >= PS2_IO_BASE && physAddr < PS2_IO_BASE + PS2_IO_SIZE)
+    {
         write32(address, (uint32_t)value);
         write32(address + 4, (uint32_t)(value >> 32));
     }
@@ -667,6 +797,17 @@ void PS2Memory::write128(uint32_t address, __m128i value)
         _mm_storeu_si128(reinterpret_cast<__m128i *>(&m_rdram[physAddr]), value);
     }
     else
+    {
+        uint32_t vuOffset = 0;
+        uint32_t vuLimit = 0;
+        if (uint8_t *vuMem = mapVuMemory(physAddr, sizeof(__m128i), vuOffset, vuLimit))
+        {
+            inRange(vuOffset, sizeof(__m128i), vuLimit, "write128 vu", address);
+            _mm_storeu_si128(reinterpret_cast<__m128i *>(vuMem + vuOffset), value);
+            return;
+        }
+    }
+    if (physAddr >= PS2_IO_BASE && physAddr < PS2_IO_BASE + PS2_IO_SIZE)
     {
         // Non-RAM 128-bit stores are modeled as two 64-bit stores.
         uint64_t lo = _mm_extract_epi64(value, 0);

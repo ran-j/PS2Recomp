@@ -56,6 +56,38 @@ namespace
                static_cast<uint32_t>(imm);
     }
 
+    uint32_t makeVuLq(uint8_t dest, uint8_t targetVf, uint8_t baseVi, int16_t imm)
+    {
+        return (static_cast<uint32_t>(dest & 0xFu) << 21) |
+               (static_cast<uint32_t>(targetVf & 0x1Fu) << 16) |
+               (static_cast<uint32_t>(baseVi & 0x1Fu) << 11) |
+               (static_cast<uint32_t>(imm) & 0x7FFu);
+    }
+
+    uint32_t makeVuSq(uint8_t dest, uint8_t sourceVf, uint8_t baseVi, int16_t imm)
+    {
+        return (0x01u << 25) |
+               (static_cast<uint32_t>(dest & 0xFu) << 21) |
+               (static_cast<uint32_t>(baseVi & 0x1Fu) << 16) |
+               (static_cast<uint32_t>(sourceVf & 0x1Fu) << 11) |
+               (static_cast<uint32_t>(imm) & 0x7FFu);
+    }
+
+    uint32_t makeVuAdd(uint8_t dest, uint8_t fd, uint8_t fs, uint8_t ft)
+    {
+        return (static_cast<uint32_t>(dest & 0xFu) << 21) |
+               (static_cast<uint32_t>(ft & 0x1Fu) << 16) |
+               (static_cast<uint32_t>(fs & 0x1Fu) << 11) |
+               (static_cast<uint32_t>(fd & 0x1Fu) << 6) |
+               0x28u;
+    }
+
+    void writeVuInstructionPair(uint8_t *code, uint32_t pc, uint32_t lower, uint32_t upper)
+    {
+        std::memcpy(code + pc, &lower, sizeof(lower));
+        std::memcpy(code + pc + sizeof(lower), &upper, sizeof(upper));
+    }
+
     bool hasSignedRdWrite(const std::string &generated, uint8_t rd)
     {
         if (rd == 0u)
@@ -1239,6 +1271,42 @@ void register_ps2_runtime_expansion_tests()
             t.IsTrue((mem.vif1_regs.stat & (1u << 7)) == 0u, "MSCNT should toggle DBF back off");
             t.Equals(mem.vif1_regs.tops, 4u, "DBF=0 should make TOPS=BASE");
             t.Equals(mem.vif1_regs.itops, 0x21u, "MSCNT should refresh ITOPS from ITOP");
+        });
+
+        tc.Run("VU0 microprogram executes against VU0 code and data memory", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize should succeed");
+            t.IsTrue(runtime.syncCoreSubsystems(), "runtime core subsystems should bind");
+
+            uint8_t *const code = runtime.memory().getVU0Code();
+            uint8_t *const data = runtime.memory().getVU0Data();
+            std::memset(code, 0, PS2_VU0_CODE_SIZE);
+            std::memset(data, 0, PS2_VU0_DATA_SIZE);
+
+            const float input[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+            std::memcpy(data, input, sizeof(input));
+
+            constexpr uint32_t kVuNop = 0x0000003Fu;
+            constexpr uint32_t kVuEndNop = 0x4000003Fu;
+            writeVuInstructionPair(code, 0u, makeVuLq(0xFu, 1u, 0u, 0), kVuNop);
+            writeVuInstructionPair(code, 8u, 0u, makeVuAdd(0xFu, 2u, 1u, 1u));
+            writeVuInstructionPair(code, 16u, makeVuSq(0xFu, 2u, 0u, 1), kVuEndNop);
+
+            R5900Context ctx;
+            runtime.executeVU0Microprogram(runtime.memory().getRDRAM(), &ctx, 0u);
+
+            float output[4]{};
+            std::memcpy(output, data + 16u, sizeof(output));
+            t.Equals(output[0], 2.0f, "VU0 output x should be doubled");
+            t.Equals(output[1], 4.0f, "VU0 output y should be doubled");
+            t.Equals(output[2], 6.0f, "VU0 output z should be doubled");
+            t.Equals(output[3], 8.0f, "VU0 output w should be doubled");
+
+            alignas(16) float vf2[4]{};
+            _mm_storeu_ps(vf2, ctx.vu0_vf[2]);
+            t.Equals(vf2[0], 2.0f, "VU0 VF2.x should copy back to CPU context");
+            t.Equals(static_cast<uint32_t>(ctx.vi[0]), 0u, "VU0 VI0 should remain zero");
         });
 
         tc.Run("GS sprite draw applies XYOFFSET and fully-outside scissor should not render", [](TestCase &t)
