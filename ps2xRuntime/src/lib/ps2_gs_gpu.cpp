@@ -518,7 +518,73 @@ using namespace GSInternal;
 
 GS::GS()
 {
-    GSMem::InitLookupTables();
+    using namespace GSMem;
+
+    InitLookupTables();
+
+    for (usz i = 0; i < 0x3F; ++i)
+    {
+        switch (i)
+        {
+        case GS_PSM_CT32:
+            m_read_vram_funcs[i] = ReadCT32;
+            m_write_vram_funcs[i] = WriteCT32;
+            break;
+        case GS_PSM_CT24:
+            m_read_vram_funcs[i] = ReadCT24;
+            m_write_vram_funcs[i] = WriteCT24;
+            break;
+        case GS_PSM_CT16:
+            m_read_vram_funcs[i] = ReadCT16;
+            m_write_vram_funcs[i] = WriteCT16;
+            break;
+        case GS_PSM_CT16S:
+            m_read_vram_funcs[i] = ReadCT16S;
+            m_write_vram_funcs[i] = WriteCT16S;
+            break;
+        case GS_PSM_T8:
+            m_read_vram_funcs[i] = ReadP8;
+            m_write_vram_funcs[i] = WriteP8;
+            break;
+        case GS_PSM_T8H:
+            m_read_vram_funcs[i] = ReadP8H;
+            m_write_vram_funcs[i] = WriteP8H;
+            break;
+        case GS_PSM_T4:
+            m_read_vram_funcs[i] = ReadP4;
+            m_write_vram_funcs[i] = WriteP4;
+            break;
+        case GS_PSM_T4HH:
+            m_read_vram_funcs[i] = ReadP4HH;
+            m_write_vram_funcs[i] = WriteP4HH;
+            break;
+        case GS_PSM_T4HL:
+            m_read_vram_funcs[i] = ReadP4HL;
+            m_write_vram_funcs[i] = WriteP4HL;
+            break;
+        case GS_PSM_Z32:
+            m_read_vram_funcs[i] = ReadZ32;
+            m_write_vram_funcs[i] = WriteZ32;
+            break;
+        case GS_PSM_Z24:
+            m_read_vram_funcs[i] = ReadZ24;
+            m_write_vram_funcs[i] = WriteZ24;
+            break;
+        case GS_PSM_Z16:
+            m_read_vram_funcs[i] = ReadZ16;
+            m_write_vram_funcs[i] = WriteZ16;
+            break;
+        case GS_PSM_Z16S:
+            m_read_vram_funcs[i] = ReadZ16S;
+            m_write_vram_funcs[i] = WriteZ16S;
+            break;
+        default:
+            m_read_vram_funcs[i] = ReadNull;
+            m_write_vram_funcs[i] = WriteNull;
+            break;
+        }
+    }
+
     reset();
 }
 

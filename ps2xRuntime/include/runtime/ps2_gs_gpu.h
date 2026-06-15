@@ -1,11 +1,14 @@
 #ifndef PS2_GS_GPU_H
 #define PS2_GS_GPU_H
 
-#include "ps2_gs_rasterizer.h"
+#include <functional>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
 #include <vector>
+
+#include "ps2_gs_rasterizer.h"
+#include "ps2_gs_memory.h"
 
 enum GSPrimType : uint8_t
 {
@@ -249,6 +252,9 @@ public:
 
     void refreshDisplaySnapshot();
 
+    inline void WriteVram(u32 psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value);
+    inline u32 ReadVram(u32 psm, u32 base, u32 bw, u32 x, u32 y) const;
+
 private:
     void snapshotVRAM();
     void writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi);
@@ -324,6 +330,22 @@ private:
     size_t m_localToHostReadPos = 0;
 
     GSRasterizer m_rasterizer;
+
+    using WriteVramFunc = std::function<void(u8*, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t)>;
+    using ReadVramFunc = std::function<u32(u8*, u32, u32, u32, u32)>;
+
+    std::array<ReadVramFunc, 0x3F> m_read_vram_funcs{ };
+    std::array<WriteVramFunc, 0x3F> m_write_vram_funcs{ };
 };
+
+inline u32 GS::ReadVram(u32 psm, u32 base, u32 bw, u32 x, u32 y) const
+{
+    return m_read_vram_funcs[psm & 0x3F](m_vram, base, bw, x, y);
+}
+
+inline void GS::WriteVram(u32 psm, u32 base, u32 bw, u32 x, u32 y, u32 value)
+{
+    m_write_vram_funcs[psm & 0x3F](m_vram, base, bw, x, y, value);
+}
 
 #endif

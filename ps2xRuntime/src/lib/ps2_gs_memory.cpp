@@ -287,6 +287,10 @@ namespace GSMem
         PixelStorageTraits<P4HH>::Write(PageTableC32, data, bp, bw, x, y, value);
     }
 
+    void WriteNull(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    {
+    }
+
     u32 ReadCT32(u8* data, u32 bp, u32 bw, u32 x, u32 y)
     {
         return PixelStorageTraits<C32>::Read(PageTableC32, data, bp, bw, x, y);
@@ -350,6 +354,11 @@ namespace GSMem
     u32 ReadP4HH(u8* data, u32 bp, u32 bw, u32 x, u32 y)
     {
         return PixelStorageTraits<P4HH>::Read(PageTableC32, data, bp, bw, x, y);
+    }
+
+    u32 ReadNull(u8* data, u32 bp, u32 bw, u32 x, u32 y)
+    {
+        return 0;
     }
 }
 

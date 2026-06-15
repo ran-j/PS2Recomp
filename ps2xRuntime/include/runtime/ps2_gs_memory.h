@@ -553,6 +553,8 @@ namespace GSMem
 	void WriteP4HH(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
 	void WriteP4HL(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
 
+	void WriteNull(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
+
 	u32 ReadCT32(u8* data, u32 bp, u32 bw, u32 x, u32 y);
 	u32 ReadZ32(u8* data, u32 bp, u32 bw, u32 x, u32 y);
 
@@ -573,4 +575,6 @@ namespace GSMem
 	u32 ReadP4(u8* data, u32 bp, u32 bw, u32 x, u32 y);
 	u32 ReadP4HL(u8* data, u32 bp, u32 bw, u32 x, u32 y);
 	u32 ReadP4HH(u8* data, u32 bp, u32 bw, u32 x, u32 y);
+
+	u32 ReadNull(u8* data, u32 bp, u32 bw, u32 x, u32 y);
 }

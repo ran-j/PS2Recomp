@@ -437,32 +437,11 @@ void GSRasterizer::writePixel(GS *gs, int x, int y, uint8_t r, uint8_t g, uint8_
     u32 fbrgba = 0;
     if (frmw)
     {
-        switch (fpsm)
+        fbrgba = gs->ReadVram(fpsm, fbp, fbw, x, y);
+
+        if (bitsPerPixel(fpsm) == 16)
         {
-        case GS_PSM_CT32:
-            fbrgba = GSMem::ReadCT32(vram, fbp, fbw, x, y);
-            break;
-        case GS_PSM_Z32:
-            fbrgba = GSMem::ReadZ32(vram, fbp, fbw, x, y);
-            break;
-        case GS_PSM_CT24:
-            fbrgba = GSMem::ReadCT24(vram, fbp, fbw, x, y);
-            break;
-        case GS_PSM_Z24:
-            fbrgba = GSMem::ReadZ24(vram, fbp, fbw, x, y);
-            break;
-        case GS_PSM_CT16:
-            fbrgba = Rgba5551ToRgba8888(GSMem::ReadCT16(vram, fbp, fbw, x, y));
-            break;
-        case GS_PSM_CT16S:
-            fbrgba = Rgba5551ToRgba8888(GSMem::ReadCT16S(vram, fbp, fbw, x, y));
-            break;
-        case GS_PSM_Z16:
-            fbrgba = Rgba5551ToRgba8888(GSMem::ReadZ16(vram, fbp, fbw, x, y));
-            break;
-        case GS_PSM_Z16S:
-            fbrgba = Rgba5551ToRgba8888(GSMem::ReadZ16S(vram, fbp, fbw, x, y));
-            break;
+            fbrgba = Rgba5551ToRgba8888(fbrgba);
         }
     }
 
@@ -529,34 +508,14 @@ void GSRasterizer::writePixel(GS *gs, int x, int y, uint8_t r, uint8_t g, uint8_
     {
         pixel = (pixel & 0x00FFFFFFu) | (fbrgba & 0xFF000000u);
     }
-
-    switch (fpsm)
+    
+    // format conversion
+    if (bitsPerPixel(fpsm) == 16)
     {
-    case GS_PSM_CT32:
-        GSMem::WriteCT32(vram, fbp, fbw, x, y, pixel);
-        break;
-    case GS_PSM_Z32:
-        GSMem::WriteZ32(vram, fbp, fbw, x, y, pixel);
-        break;
-    case GS_PSM_CT24:
-        GSMem::WriteCT24(vram, fbp, fbw, x, y, pixel);
-        break;
-    case GS_PSM_Z24:
-        GSMem::WriteZ24(vram, fbp, fbw, x, y, pixel);
-        break;
-    case GS_PSM_CT16:
-        GSMem::WriteCT16(vram, fbp, fbw, x, y, Rgba8888ToRgba5551(pixel));
-        break;
-    case GS_PSM_CT16S:
-        GSMem::WriteCT16S(vram, fbp, fbw, x, y, Rgba8888ToRgba5551(pixel));
-        break;
-    case GS_PSM_Z16:
-        GSMem::WriteZ16(vram, fbp, fbw, x, y, Rgba8888ToRgba5551(pixel));
-        break;
-    case GS_PSM_Z16S:
-        GSMem::WriteZ16S(vram, fbp, fbw, x, y, Rgba8888ToRgba5551(pixel));
-        break;
+        pixel = Rgba8888ToRgba5551(pixel);
     }
+
+    gs->WriteVram(fpsm, fbp, fbw, x, y, pixel);
 }
 
 uint32_t GSRasterizer::lookupCLUT(GS *gs,
@@ -616,34 +575,26 @@ uint32_t GSRasterizer::sampleTexture(GS *gs, float s, float t, float q, uint16_t
         sampleU = clampInt(sampleU, 0, texW - 1);
         sampleV = clampInt(sampleV, 0, texH - 1);
 
+        u32 out = gs->ReadVram(tex.psm, tex.tbp0, tex.tbw, sampleU, sampleV);
+
         switch (tex.psm)
         {
         case GS_PSM_CT32:
-            return applyTexa(gs->m_texa, tex.psm, GSMem::ReadCT32(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV));
         case GS_PSM_Z32:
-            return applyTexa(gs->m_texa, tex.psm, GSMem::ReadZ32(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV));
         case GS_PSM_CT24:
-            return applyTexa(gs->m_texa, tex.psm, GSMem::ReadCT24(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV));
         case GS_PSM_Z24:
-            return applyTexa(gs->m_texa, tex.psm, GSMem::ReadZ24(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV));
+            return applyTexa(gs->m_texa, tex.psm, out);
         case GS_PSM_CT16:
-            return applyTexa(gs->m_texa, tex.psm, Rgba5551ToRgba8888(GSMem::ReadCT16(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV)));
         case GS_PSM_CT16S:
-            return applyTexa(gs->m_texa, tex.psm, Rgba5551ToRgba8888(GSMem::ReadCT16S(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV)));
         case GS_PSM_Z16:
-            return applyTexa(gs->m_texa, tex.psm, Rgba5551ToRgba8888(GSMem::ReadZ16(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV)));
         case GS_PSM_Z16S:
-            return applyTexa(gs->m_texa, tex.psm, Rgba5551ToRgba8888(GSMem::ReadZ16S(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV)));
+            return applyTexa(gs->m_texa, tex.psm, Rgba5551ToRgba8888(out));
         case GS_PSM_T8:
-            return lookupCLUT(gs, GSMem::ReadP8(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV), tex.cbp, tex.cpsm, tex.csm, tex.csa, tex.psm);
         case GS_PSM_T8H:
-            return lookupCLUT(gs, GSMem::ReadP8H(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV), tex.cbp, tex.cpsm, tex.csm, tex.csa, tex.psm);
         case GS_PSM_T4:
-            return lookupCLUT(gs, GSMem::ReadP4(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV), tex.cbp, tex.cpsm, tex.csm, tex.csa, tex.psm);
         case GS_PSM_T4HL:
-            return lookupCLUT(gs, GSMem::ReadP4HL(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV), tex.cbp, tex.cpsm, tex.csm, tex.csa, tex.psm);
         case GS_PSM_T4HH:
-            return lookupCLUT(gs, GSMem::ReadP4HH(gs->m_vram, tex.tbp0, tex.tbw, sampleU, sampleV), tex.cbp, tex.cpsm, tex.csm, tex.csa, tex.psm);
+            return lookupCLUT(gs, static_cast<u8>(out), tex.cbp, tex.cpsm, tex.csm, tex.csa, tex.psm);
         }
 
         return 0xFFFF00FFu;
