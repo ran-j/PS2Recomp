@@ -293,6 +293,8 @@ namespace ps2_syscalls
         throwIfTerminated(info);
         std::unique_lock<std::mutex> lock(sema->m);
         int ret = 0;
+        int countAfter = 0;
+        bool terminated = false;
 
         if (sema->count == 0)
         {
@@ -318,43 +320,60 @@ namespace ps2_syscalls
             }
 
             sema->waiters++;
-            {
-                PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime);
-                sema->cv.wait(lock, [&]()
-                              {
-                                  bool forced = info ? info->forceRelease.load() : false;
-                                  bool terminated = info ? info->terminated.load() : false;
-                                  return sema->count > 0 || sema->deleted || forced || terminated; //
-                              });
-            }
-            sema->waiters--;
-            if (sema->deleted)
-            {
-                ret = KE_WAIT_DELETE;
-            }
-
-            if (info)
-            {
-                std::lock_guard<std::mutex> tLock(info->m);
-                info->status = (info->suspendCount > 0) ? THS_SUSPEND : THS_RUN;
-                info->waitType = TSW_NONE;
-                info->waitId = 0;
-                if (info->forceRelease)
+            waitWithGuestExecutionReleasedUntilUnlocked(
+                runtime,
+                lock,
+                [&]()
                 {
-                    info->forceRelease = false;
-                    ret = KE_RELEASE_WAIT;
-                }
-            }
+                    sema->cv.wait(lock, [&]()
+                                  {
+                                      const bool forced = info ? info->forceRelease.load() : false;
+                                      const bool isTerminated = info ? info->terminated.load() : false;
+                                      return sema->count > 0 || sema->deleted || forced || isTerminated;
+                                  });
+                },
+                [&]()
+                {
+                    sema->waiters--;
+                    if (sema->deleted)
+                    {
+                        ret = KE_WAIT_DELETE;
+                    }
 
-            if (info && info->terminated.load())
-            {
-                throw ThreadExitException();
-            }
+                    if (info)
+                    {
+                        std::lock_guard<std::mutex> tLock(info->m);
+                        terminated = info->terminated.load();
+                        info->status = (info->suspendCount > 0) ? THS_SUSPEND : THS_RUN;
+                        info->waitType = TSW_NONE;
+                        info->waitId = 0;
+                        if (info->forceRelease)
+                        {
+                            info->forceRelease = false;
+                            ret = KE_RELEASE_WAIT;
+                        }
+                    }
+
+                    if (!terminated && ret == 0 && sema->count > 0)
+                    {
+                        sema->count--;
+                    }
+                    countAfter = sema->count;
+                });
         }
 
-        if (ret == 0 && sema->count > 0)
+        if (terminated)
         {
-            sema->count--;
+            throw ThreadExitException();
+        }
+
+        if (lock.owns_lock())
+        {
+            if (ret == 0 && sema->count > 0)
+            {
+                sema->count--;
+            }
+            countAfter = sema->count;
         }
 
         static std::atomic<uint32_t> s_waitSemaWakeLogs{0};
@@ -364,10 +383,13 @@ namespace ps2_syscalls
             RUNTIME_LOG("[WaitSema:wake] tid=" << g_currentThreadId
                                                << " sid=" << sid
                                                << " ret=" << ret
-                                               << " count=" << sema->count
+                                               << " count=" << countAfter
                                                << std::endl);
         }
-        lock.unlock();
+        if (lock.owns_lock())
+        {
+            lock.unlock();
+        }
         waitWhileSuspended(info, runtime);
         setReturnS32(ctx, ret);
     }
@@ -620,6 +642,37 @@ namespace ps2_syscalls
             return (info->bits & waitBits) == waitBits;
         };
 
+        bool waitedWithGuestRelease = false;
+        bool terminated = false;
+        uint32_t bitsAfter = info->bits;
+
+        auto finishEventFlagWaitLocked = [&]()
+        {
+            if (ret == KE_OK && info->deleted)
+            {
+                ret = KE_WAIT_DELETE;
+            }
+
+            if (ret == KE_OK)
+            {
+                if (resBitsPtr)
+                {
+                    *resBitsPtr = info->bits;
+                }
+
+                if (mode & WEF_CLEAR_ALL)
+                {
+                    info->bits = 0;
+                }
+                else if (mode & WEF_CLEAR)
+                {
+                    info->bits &= ~waitBits;
+                }
+            }
+
+            bitsAfter = info->bits;
+        };
+
         if (!satisfied())
         {
             static std::atomic<uint32_t> s_waitEventBlockLogs{0};
@@ -647,56 +700,51 @@ namespace ps2_syscalls
             }
 
             info->waiters++;
-            {
-                PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime);
-                info->cv.wait(lock, satisfied);
-            }
-            info->waiters--;
-
-            if (tInfo)
-            {
-                std::lock_guard<std::mutex> tLock(tInfo->m);
-                tInfo->status = (tInfo->suspendCount > 0) ? THS_SUSPEND : THS_RUN;
-                tInfo->waitType = TSW_NONE;
-                tInfo->waitId = 0;
-                if (tInfo->forceRelease)
+            waitedWithGuestRelease = true;
+            waitWithGuestExecutionReleasedUntilUnlocked(
+                runtime,
+                lock,
+                [&]()
                 {
-                    tInfo->forceRelease = false;
-                    ret = KE_RELEASE_WAIT;
-                }
-            }
+                    info->cv.wait(lock, satisfied);
+                },
+                [&]()
+                {
+                    info->waiters--;
 
-            if (tInfo && tInfo->terminated.load())
-            {
-                throw ThreadExitException();
-            }
+                    if (tInfo)
+                    {
+                        std::lock_guard<std::mutex> tLock(tInfo->m);
+                        terminated = tInfo->terminated.load();
+                        tInfo->status = (tInfo->suspendCount > 0) ? THS_SUSPEND : THS_RUN;
+                        tInfo->waitType = TSW_NONE;
+                        tInfo->waitId = 0;
+                        if (tInfo->forceRelease)
+                        {
+                            tInfo->forceRelease = false;
+                            ret = KE_RELEASE_WAIT;
+                        }
+                    }
+
+                    if (!terminated)
+                    {
+                        finishEventFlagWaitLocked();
+                    }
+                    else
+                    {
+                        bitsAfter = info->bits;
+                    }
+                });
         }
 
-        if (ret == KE_OK && info->deleted)
+        if (terminated)
         {
-            ret = KE_WAIT_DELETE;
+            throw ThreadExitException();
         }
 
-        if (ret == KE_OK && resBitsPtr)
+        if (!waitedWithGuestRelease)
         {
-            *resBitsPtr = info->bits;
-        }
-
-        if (ret == KE_OK)
-        {
-            if (resBitsPtr)
-            {
-                *resBitsPtr = info->bits;
-            }
-
-            if (mode & WEF_CLEAR_ALL)
-            {
-                info->bits = 0;
-            }
-            else if (mode & WEF_CLEAR)
-            {
-                info->bits &= ~waitBits;
-            }
+            finishEventFlagWaitLocked();
         }
 
         static std::atomic<uint32_t> s_waitEventWakeLogs{0};
@@ -706,12 +754,15 @@ namespace ps2_syscalls
             RUNTIME_LOG("[WaitEventFlag:wake] tid=" << g_currentThreadId
                                                     << " eid=" << eid
                                                     << " ret=" << ret
-                                                    << " bits=0x" << std::hex << info->bits
+                                                    << " bits=0x" << std::hex << bitsAfter
                                                     << std::dec
                                                     << std::endl);
         }
 
-        lock.unlock();
+        if (lock.owns_lock())
+        {
+            lock.unlock();
+        }
         waitWhileSuspended(tInfo, runtime);
         setReturnS32(ctx, ret);
     }

@@ -439,6 +439,132 @@ void register_ps2_sif_dma_tests()
                      "SJX DMA should copy the chunk payload into the emulated SJRMT ring");
         });
 
+        tc.Run("sceSifSetDma recognizes SJX DTX payloads from rotated EE work buffers", [](TestCase &t)
+        {
+            TestEnv env;
+            setRecvxDtxCompatLayout();
+
+            constexpr uint32_t kClientAddr = 0x00031000u;
+            constexpr uint32_t kDtxSid = 0x7D000000u;
+            constexpr uint32_t kRecvAddr = 0x00031100u;
+            constexpr uint32_t kSendAddr = 0x00031200u;
+            constexpr uint32_t kDescAddr = 0x00031300u;
+            constexpr uint32_t kRegisteredEeWorkAddr = 0x00031400u;
+            constexpr uint32_t kRegisteredIopWorkAddr = 0x00031800u;
+            constexpr uint32_t kAltEeWorkAddr = 0x00031C00u;
+            constexpr uint32_t kAltIopWorkAddr = 0x00032000u;
+            constexpr uint32_t kRingAddr = 0x00032400u;
+            constexpr uint32_t kChunkDataAddr = 0x00032500u;
+            constexpr uint32_t kRegisteredWorkLen = 0x100u;
+            constexpr uint32_t kAltWorkLen = 0x180u;
+            constexpr uint32_t kChunkLen = 12u;
+
+            ps2_syscalls::SifInitRpc(env.rdram.data(), &env.ctx, &env.runtime);
+
+            setRegU32(env.ctx, 4, kClientAddr);
+            setRegU32(env.ctx, 5, kDtxSid);
+            setRegU32(env.ctx, 6, 0u);
+            ps2_syscalls::SifBindRpc(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_OK, "SifBindRpc should bind the DTX sid");
+
+            writeGuestU32(env.rdram.data(), kSendAddr + 0x00u, 1u);
+            writeGuestU32(env.rdram.data(), kSendAddr + 0x04u, kRingAddr);
+            writeGuestU32(env.rdram.data(), kSendAddr + 0x08u, kRegisteredWorkLen);
+            setRegU32(env.ctx, 4, kClientAddr);
+            setRegU32(env.ctx, 5, 0x422u);
+            setRegU32(env.ctx, 6, 0u);
+            setRegU32(env.ctx, 7, kSendAddr);
+            setRegU32(env.ctx, 8, 12u);
+            setRegU32(env.ctx, 9, kRecvAddr);
+            setRegU32(env.ctx, 10, 4u);
+            setRegU32(env.ctx, 11, 0u);
+            ps2_syscalls::SifCallRpc(env.rdram.data(), &env.ctx, &env.runtime);
+            const uint32_t sjrmtHandle = readGuestU32(env.rdram.data(), kRecvAddr);
+            t.IsTrue(sjrmtHandle != 0u, "SJRMT_UNI_CREATE should return a handle");
+
+            writeGuestU32(env.rdram.data(), kSendAddr + 0x00u, 0u);
+            writeGuestU32(env.rdram.data(), kSendAddr + 0x04u, sjrmtHandle);
+            writeGuestU32(env.rdram.data(), kSendAddr + 0x08u, 1u);
+            writeGuestU32(env.rdram.data(), kSendAddr + 0x0Cu, 0x87654321u);
+            setRegU32(env.ctx, 4, kClientAddr);
+            setRegU32(env.ctx, 5, 0x400u);
+            setRegU32(env.ctx, 6, 0u);
+            setRegU32(env.ctx, 7, kSendAddr);
+            setRegU32(env.ctx, 8, 16u);
+            setRegU32(env.ctx, 9, kRecvAddr);
+            setRegU32(env.ctx, 10, 4u);
+            setRegU32(env.ctx, 11, 0u);
+            ps2_syscalls::SifCallRpc(env.rdram.data(), &env.ctx, &env.runtime);
+            const uint32_t sjxHandle = readGuestU32(env.rdram.data(), kRecvAddr);
+            t.IsTrue(sjxHandle != 0u, "SJX_CREATE should return a handle");
+
+            writeGuestU32(env.rdram.data(), kSendAddr + 0x00u, 0u);
+            writeGuestU32(env.rdram.data(), kSendAddr + 0x04u, kRegisteredEeWorkAddr);
+            writeGuestU32(env.rdram.data(), kSendAddr + 0x08u, kRegisteredIopWorkAddr);
+            writeGuestU32(env.rdram.data(), kSendAddr + 0x0Cu, kRegisteredWorkLen);
+            setRegU32(env.ctx, 4, kClientAddr);
+            setRegU32(env.ctx, 5, 2u);
+            setRegU32(env.ctx, 6, 0u);
+            setRegU32(env.ctx, 7, kSendAddr);
+            setRegU32(env.ctx, 8, 16u);
+            setRegU32(env.ctx, 9, kRecvAddr);
+            setRegU32(env.ctx, 10, 4u);
+            setRegU32(env.ctx, 11, 0u);
+            ps2_syscalls::SifCallRpc(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_OK, "DTX create should succeed");
+
+            std::memset(env.rdram.data() + kRegisteredEeWorkAddr, 0, kRegisteredWorkLen);
+            std::memset(env.rdram.data() + kRegisteredIopWorkAddr, 0, kRegisteredWorkLen);
+            std::memset(env.rdram.data() + kAltEeWorkAddr, 0, kAltWorkLen);
+            std::memset(env.rdram.data() + kAltIopWorkAddr, 0, kAltWorkLen);
+            std::memset(env.rdram.data() + kRingAddr, 0, kRegisteredWorkLen);
+            for (uint32_t i = 0; i < kChunkLen; ++i)
+            {
+                env.rdram[kChunkDataAddr + i] = static_cast<uint8_t>(0xC0u + i);
+            }
+
+            writeGuestU32(env.rdram.data(), kAltEeWorkAddr + 0x00u, 1u);
+            env.rdram[kAltEeWorkAddr + 0x10u] = 0u;
+            env.rdram[kAltEeWorkAddr + 0x11u] = 1u;
+            std::memcpy(env.rdram.data() + kAltEeWorkAddr + 0x12u, "\0\0", 2u);
+            writeGuestU32(env.rdram.data(), kAltEeWorkAddr + 0x14u, sjxHandle);
+            writeGuestU32(env.rdram.data(), kAltEeWorkAddr + 0x18u, kChunkDataAddr);
+            writeGuestU32(env.rdram.data(), kAltEeWorkAddr + 0x1Cu, kChunkLen);
+            writeGuestU32(env.rdram.data(), kAltEeWorkAddr + kAltWorkLen - sizeof(uint32_t), 9u);
+
+            const Ps2SifDmaTransfer desc{
+                kAltEeWorkAddr,
+                kAltIopWorkAddr,
+                static_cast<int32_t>(kAltWorkLen),
+                0};
+            std::memcpy(env.rdram.data() + kDescAddr, &desc, sizeof(desc));
+
+            setRegU32(env.ctx, 4, kDescAddr);
+            setRegU32(env.ctx, 5, 1u);
+            ps2_stubs::sceSifSetDma(env.rdram.data(), &env.ctx, &env.runtime);
+            t.IsTrue(getRegS32(env.ctx, 2) > 0, "sceSifSetDma should succeed for the rotated SJX transport");
+            t.Equals(env.rdram[kAltEeWorkAddr + 0x11u], static_cast<uint8_t>(0u),
+                     "rotated SJX DMA ack should rewrite the response line to room");
+            t.Equals(readGuestU32(env.rdram.data(), kAltEeWorkAddr + kAltWorkLen - sizeof(uint32_t)), 10u,
+                     "rotated SJX DMA ack should advance the alternate EE footer ticket");
+
+            writeGuestU32(env.rdram.data(), kSendAddr + 0x00u, sjrmtHandle);
+            writeGuestU32(env.rdram.data(), kSendAddr + 0x04u, 1u);
+            setRegU32(env.ctx, 4, kClientAddr);
+            setRegU32(env.ctx, 5, 0x429u);
+            setRegU32(env.ctx, 6, 0u);
+            setRegU32(env.ctx, 7, kSendAddr);
+            setRegU32(env.ctx, 8, 8u);
+            setRegU32(env.ctx, 9, kRecvAddr);
+            setRegU32(env.ctx, 10, 4u);
+            setRegU32(env.ctx, 11, 0u);
+            ps2_syscalls::SifCallRpc(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(readGuestU32(env.rdram.data(), kRecvAddr), kChunkLen,
+                     "rotated SJX DMA should make SJRMT report available data");
+            t.IsTrue(std::memcmp(env.rdram.data() + kRingAddr, env.rdram.data() + kChunkDataAddr, kChunkLen) == 0,
+                     "rotated SJX DMA should copy the chunk payload into the emulated SJRMT ring");
+        });
+
         tc.Run("sceSifSetDma lets active PS2RNA playback drain emulated SJRMT data", [](TestCase &t)
         {
             TestEnv env;

@@ -14,6 +14,42 @@ static void throwIfTerminated(const std::shared_ptr<ThreadInfo> &info)
     }
 }
 
+// Condition-variable waits in the EE runtime must release the global guest
+// execution mutex, but must not reacquire it while still holding the local
+// wait-object mutex. Reacquiring guest execution while holding a semaphore,
+// thread, event-flag, or vsync mutex can create an ABBA deadlock:
+//
+//   awakened thread: local wait mutex -> waiting for GuestExecutionScope
+//   running thread:  GuestExecutionScope -> waiting for local wait mutex
+//
+// This helper keeps guest execution released for the whole host wait and for
+// any post-wake bookkeeping that needs the local mutex, then unlocks the local
+// mutex before the GuestExecutionReleaseScope destructor reacquires guest code.
+template <typename Lock, typename WaitFn, typename FinishFn>
+static void waitWithGuestExecutionReleasedUntilUnlocked(PS2Runtime *runtime,
+                                                        Lock &lock,
+                                                        WaitFn waitFn,
+                                                        FinishFn finishFn)
+{
+    auto releaseGuestExecution = std::make_unique<PS2Runtime::GuestExecutionReleaseScope>(runtime);
+
+    waitFn();
+    finishFn();
+
+    if (lock.owns_lock())
+    {
+        lock.unlock();
+    }
+
+    releaseGuestExecution.reset();
+}
+
+template <typename Lock, typename WaitFn>
+static void waitWithGuestExecutionReleasedUntilUnlocked(PS2Runtime *runtime, Lock &lock, WaitFn waitFn)
+{
+    waitWithGuestExecutionReleasedUntilUnlocked(runtime, lock, waitFn, []() {});
+}
+
 static void waitWhileSuspended(const std::shared_ptr<ThreadInfo> &info, PS2Runtime *runtime = nullptr)
 {
     if (!info)
@@ -25,16 +61,29 @@ static void waitWhileSuspended(const std::shared_ptr<ThreadInfo> &info, PS2Runti
         info->status = THS_SUSPEND;
         info->waitType = TSW_NONE;
         info->waitId = 0;
-        {
-            PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime);
-            info->cv.wait(lock, [&]()
-                          { return info->suspendCount == 0 || info->terminated.load(); });
-        }
-        if (info->terminated.load())
+
+        bool terminated = false;
+        waitWithGuestExecutionReleasedUntilUnlocked(
+            runtime,
+            lock,
+            [&]()
+            {
+                info->cv.wait(lock, [&]()
+                              { return info->suspendCount == 0 || info->terminated.load(); });
+            },
+            [&]()
+            {
+                terminated = info->terminated.load();
+                if (!terminated)
+                {
+                    info->status = THS_RUN;
+                }
+            });
+
+        if (terminated)
         {
             throw ThreadExitException();
         }
-        info->status = THS_RUN;
     }
 }
 
@@ -766,4 +815,3 @@ static void ensureBootModeTable(uint8_t *rdram)
 
     g_bootmode_initialized = true;
 }
-

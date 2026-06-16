@@ -18,6 +18,7 @@
 #include <atomic>
 #include <array>
 #include <mutex>
+#include <condition_variable>
 #include <filesystem>
 #include <iostream>
 #include <iomanip>
@@ -515,6 +516,7 @@ public:
     uint32_t reserveAsyncCallbackStack(uint32_t size, uint32_t alignment = 16u);
     void dispatchLoop(uint8_t *rdram, R5900Context *ctx);
     bool shouldPreemptGuestExecution();
+    void yieldGuestExecutionAfterWake();
     void requestStop();
     bool isStopRequested() const;
     uint32_t guestExecutionWaiterCountForTesting() const
@@ -611,6 +613,7 @@ private:
     void leaveGuestExecution();
     uint32_t releaseGuestExecution();
     void reacquireGuestExecution(uint32_t depth);
+    void markGuestExecutionAcquired();
 
     void HandleIntegerOverflow(R5900Context *ctx);
 
@@ -629,6 +632,9 @@ private:
     R5900Context m_cpuContext;
     mutable std::recursive_mutex m_guestExecutionMutex;
     mutable std::atomic<uint32_t> m_guestExecutionWaiters{0u};
+    mutable std::mutex m_guestExecutionHandoffMutex;
+    mutable std::condition_variable m_guestExecutionHandoffCv;
+    std::atomic<uint64_t> m_guestExecutionHandoffEpoch{0u};
     mutable std::mutex m_guestHeapMutex;
     mutable std::mutex m_asyncCallbackStackMutex;
     std::vector<GuestHeapBlock> m_guestHeapBlocks;

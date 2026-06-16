@@ -396,12 +396,20 @@ namespace ps2_syscalls
         ensureInterruptWorkerRunning(rdram, runtime);
         std::unique_lock<std::mutex> lock(g_vsync_flag_mutex);
         uint64_t current = g_vsync_tick_counter;
-        {
-            PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime);
-            g_vsync_cv.wait(lock, [current, runtime]()
-                            { return g_vsync_tick_counter > current || (runtime != nullptr && runtime->isStopRequested()); });
-        }
-        return g_vsync_tick_counter;
+        uint64_t result = current;
+        waitWithGuestExecutionReleasedUntilUnlocked(
+            runtime,
+            lock,
+            [&]()
+            {
+                g_vsync_cv.wait(lock, [current, runtime]()
+                                { return g_vsync_tick_counter > current || (runtime != nullptr && runtime->isStopRequested()); });
+            },
+            [&]()
+            {
+                result = g_vsync_tick_counter;
+            });
+        return result;
     }
 
     void WaitVSyncTick(uint8_t *rdram, PS2Runtime *runtime)

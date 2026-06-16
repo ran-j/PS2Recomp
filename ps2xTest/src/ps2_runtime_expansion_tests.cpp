@@ -381,6 +381,43 @@ void register_ps2_runtime_expansion_tests()
                      "dispatchLoop should not execute guest code concurrently on one runtime");
         });
 
+        tc.Run("wake handoff lets a contending guest thread acquire before returning", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            std::atomic<bool> peerRan{false};
+            std::thread peer;
+            bool peerWaiting = false;
+            bool peerRanWhileMainHeld = false;
+            bool peerRanAfterHandoff = false;
+
+            {
+                PS2Runtime::GuestExecutionScope mainScope(&runtime);
+                peer = std::thread([&]()
+                {
+                    PS2Runtime::GuestExecutionScope peerScope(&runtime);
+                    peerRan.store(true, std::memory_order_release);
+                });
+
+                peerWaiting = waitUntil([&]()
+                {
+                    return runtime.guestExecutionWaiterCountForTesting() > 0u;
+                }, std::chrono::milliseconds(100));
+
+                peerRanWhileMainHeld = peerRan.load(std::memory_order_acquire);
+                runtime.yieldGuestExecutionAfterWake();
+                peerRanAfterHandoff = peerRan.load(std::memory_order_acquire);
+            }
+
+            if (peer.joinable())
+            {
+                peer.join();
+            }
+
+            t.IsTrue(peerWaiting, "peer guest thread should contend while the waker owns guest execution");
+            t.IsFalse(peerRanWhileMainHeld, "peer guest thread should not run before the waker yields execution");
+            t.IsTrue(peerRanAfterHandoff, "wake handoff should let the peer acquire guest execution before returning");
+        });
+
         tc.Run("guest preemption policy requests a dispatcher handoff when another guest thread contends", [](TestCase &t)
         {
             PS2Runtime runtime;
@@ -847,6 +884,8 @@ void register_ps2_runtime_expansion_tests()
             ps2_stubs::sceMpegGetPicture(rdram.data(), &pictureCtx, nullptr);
             t.Equals(Ps2FastRead32(rdram.data(), kMpegAddr + 0x00u), 16u,
                      "test stream should decode one frame before the pause");
+            t.Equals(Ps2FastRead32(rdram.data(), kMpegAddr + 0x08u), 0u,
+                     "first decoded frame should report frame index zero");
 
             std::this_thread::sleep_for(std::chrono::milliseconds(650));
 
@@ -855,6 +894,14 @@ void register_ps2_runtime_expansion_tests()
             ps2_stubs::sceMpegIsEnd(rdram.data(), &isEndCtx, nullptr);
             t.Equals(getRegS32(isEndCtx, 2), 0,
                      "a temporary demux pause must not end an active stream before CD EOF");
+
+            ps2_stubs::sceMpegGetPicture(rdram.data(), &pictureCtx, nullptr);
+            t.Equals(Ps2FastRead32(rdram.data(), kMpegAddr + 0x08u), 1u,
+                     "temporary non-EOF starvation should keep movie frame progress moving");
+
+            ps2_stubs::sceMpegGetPicture(rdram.data(), &pictureCtx, nullptr);
+            t.Equals(Ps2FastRead32(rdram.data(), kMpegAddr + 0x08u), 2u,
+                     "repeated temporary starvation should continue advancing from the held frame");
         });
 
         tc.Run("sceMpegGetPicture releases an old waiter when the CD stream restarts", [](TestCase &t)

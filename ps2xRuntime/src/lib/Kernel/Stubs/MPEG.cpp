@@ -432,6 +432,8 @@ namespace ps2_stubs
             std::vector<uint8_t> pssBuffer;
             std::vector<uint32_t> pssGuestAddrs;
             std::deque<MpegDecodedFrame> decodedFrames;
+            bool hasLastFrame = false;
+            MpegDecodedFrame lastFrame;
             std::unique_ptr<MpegFfmpegDecoder> decoder;
         };
 
@@ -1973,6 +1975,8 @@ namespace ps2_stubs
                 frameCount = playback.picturesServed;
                 playback.picturesServed += 1u;
                 playback.consecutiveEmptyGetPicture = 0u;
+                playback.lastFrame = frame;
+                playback.hasLastFrame = true;
                 haveFrame = true;
                 if (g_mpeg_stub_state.pictureTraceCount < 32u)
                 {
@@ -1986,6 +1990,31 @@ namespace ps2_stubs
                 if (!playback.decodedFrames.empty())
                 {
                     clearNoFrameStall(playback);
+                }
+            }
+            else if (!g_mpeg_stub_state.currentCdStreamEofSeen &&
+                     playback.sawInput &&
+                     playback.hasLastFrame &&
+                     playback.picturesServed > 0u &&
+                     !playback.streamEnded &&
+                     !playback.decoderFailed)
+            {
+                frame = playback.lastFrame;
+                width = static_cast<uint32_t>(frame.width);
+                height = static_cast<uint32_t>(frame.height);
+                frameCount = playback.picturesServed;
+                playback.picturesServed += 1u;
+                playback.consecutiveEmptyGetPicture = 0u;
+                haveFrame = true;
+
+                static uint32_t s_duplicateFrameLogCount = 0u;
+                if (s_duplicateFrameLogCount < 16u)
+                {
+                    std::cerr << "[MPEG:GetPicture:DUP] mpeg=0x" << std::hex << mpegAddr
+                              << std::dec << " generation=" << g_mpeg_stub_state.cdStreamGeneration
+                              << " frame=" << frameCount
+                              << " size=" << width << "x" << height << std::endl;
+                    ++s_duplicateFrameLogCount;
                 }
             }
             else

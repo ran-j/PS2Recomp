@@ -633,13 +633,17 @@ namespace ps2_syscalls
         }
         else
         {
-            // Block until the target thread actually finishes unwinding and becomes dormant
+            // Block until the target thread actually finishes unwinding and becomes dormant.
+            // Drop the thread mutex before reacquiring GuestExecutionScope to avoid lock inversion.
             std::unique_lock<std::mutex> lock(info->m);
-            {
-                PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime);
-                info->cv.wait(lock, [&]()
-                              { return !info->started && info->status == THS_DORMANT; });
-            }
+            waitWithGuestExecutionReleasedUntilUnlocked(
+                runtime,
+                lock,
+                [&]()
+                {
+                    info->cv.wait(lock, [&]()
+                                  { return !info->started && info->status == THS_DORMANT; });
+                });
         }
 
         setReturnS32(ctx, KE_OK);
@@ -673,16 +677,28 @@ namespace ps2_syscalls
         if (tid == g_currentThreadId)
         {
             std::unique_lock<std::mutex> lock(info->m);
-            {
-                PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime);
-                info->cv.wait(lock, [&]()
-                              { return info->suspendCount == 0 || info->terminated.load(); });
-            }
-            if (info->terminated.load())
+            bool terminated = false;
+            waitWithGuestExecutionReleasedUntilUnlocked(
+                runtime,
+                lock,
+                [&]()
+                {
+                    info->cv.wait(lock, [&]()
+                                  { return info->suspendCount == 0 || info->terminated.load(); });
+                },
+                [&]()
+                {
+                    terminated = info->terminated.load();
+                    if (!terminated)
+                    {
+                        info->status = THS_RUN;
+                    }
+                });
+
+            if (terminated)
             {
                 throw ThreadExitException();
             }
-            info->status = THS_RUN;
         }
 
         setReturnS32(ctx, KE_OK);
@@ -792,6 +808,8 @@ namespace ps2_syscalls
         throwIfTerminated(info);
 
         int ret = 0;
+        int wakeupCountAfter = 0;
+        bool terminated = false;
         std::unique_lock<std::mutex> lock(info->m);
 
         if (info->wakeupCount > 0)
@@ -801,6 +819,7 @@ namespace ps2_syscalls
             info->waitType = TSW_NONE;
             info->waitId = 0;
             ret = 0;
+            wakeupCountAfter = info->wakeupCount;
         }
         else
         {
@@ -819,32 +838,46 @@ namespace ps2_syscalls
             info->waitId = 0;
             info->forceRelease = false;
 
-            {
-                PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime);
-                info->cv.wait(lock, [&]()
-                              { return info->wakeupCount > 0 || info->forceRelease.load() || info->terminated.load(); });
-            }
+            waitWithGuestExecutionReleasedUntilUnlocked(
+                runtime,
+                lock,
+                [&]()
+                {
+                    info->cv.wait(lock, [&]()
+                                  { return info->wakeupCount > 0 || info->forceRelease.load() || info->terminated.load(); });
+                },
+                [&]()
+                {
+                    terminated = info->terminated.load();
+                    if (terminated)
+                    {
+                        return;
+                    }
 
-            if (info->terminated.load())
-            {
-                throw ThreadExitException();
-            }
+                    info->status = THS_RUN;
+                    info->waitType = TSW_NONE;
+                    info->waitId = 0;
 
-            info->status = THS_RUN;
-            info->waitType = TSW_NONE;
-            info->waitId = 0;
+                    if (info->forceRelease.load())
+                    {
+                        info->forceRelease = false;
+                        ret = KE_RELEASE_WAIT;
+                    }
+                    else
+                    {
+                        if (info->wakeupCount > 0)
+                        {
+                            info->wakeupCount--;
+                        }
+                        ret = 0;
+                    }
+                    wakeupCountAfter = info->wakeupCount;
+                });
+        }
 
-            if (info->forceRelease.load())
-            {
-                info->forceRelease = false;
-                ret = KE_RELEASE_WAIT;
-            }
-            else
-            {
-                if (info->wakeupCount > 0)
-                    info->wakeupCount--;
-                ret = 0;
-            }
+        if (terminated)
+        {
+            throw ThreadExitException();
         }
 
         static std::atomic<uint32_t> s_sleepWakeLogs{0};
@@ -853,11 +886,14 @@ namespace ps2_syscalls
         {
             RUNTIME_LOG("[SleepThread:wake] tid=" << g_currentThreadId
                                                   << " ret=" << ret
-                                                  << " wakeupCount=" << info->wakeupCount
+                                                  << " wakeupCount=" << wakeupCountAfter
                                                   << std::endl);
         }
 
-        lock.unlock();
+        if (lock.owns_lock())
+        {
+            lock.unlock();
+        }
         waitWhileSuspended(info, runtime);
         setReturnS32(ctx, ret);
     }

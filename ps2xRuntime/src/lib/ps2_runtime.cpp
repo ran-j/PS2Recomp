@@ -2001,6 +2001,7 @@ void PS2Runtime::enterGuestExecution()
     m_guestExecutionMutex.lock();
     m_guestExecutionWaiters.fetch_sub(1u, std::memory_order_acq_rel);
     ++g_guestExecutionDepths[this];
+    markGuestExecutionAcquired();
 }
 
 void PS2Runtime::leaveGuestExecution()
@@ -2050,6 +2051,36 @@ void PS2Runtime::reacquireGuestExecution(uint32_t depth)
         m_guestExecutionMutex.lock();
         m_guestExecutionWaiters.fetch_sub(1u, std::memory_order_acq_rel);
         ++heldDepth;
+        markGuestExecutionAcquired();
+    }
+}
+
+void PS2Runtime::markGuestExecutionAcquired()
+{
+    {
+        std::lock_guard<std::mutex> lock(m_guestExecutionHandoffMutex);
+        m_guestExecutionHandoffEpoch.fetch_add(1u, std::memory_order_acq_rel);
+    }
+    m_guestExecutionHandoffCv.notify_all();
+}
+
+void PS2Runtime::yieldGuestExecutionAfterWake()
+{
+    auto it = g_guestExecutionDepths.find(this);
+    if (it == g_guestExecutionDepths.end() || it->second == 0u)
+    {
+        std::this_thread::yield();
+        return;
+    }
+
+    const uint64_t handoffEpoch = m_guestExecutionHandoffEpoch.load(std::memory_order_acquire);
+    {
+        GuestExecutionReleaseScope releaseGuestExecution(this);
+        std::unique_lock<std::mutex> lock(m_guestExecutionHandoffMutex);
+        m_guestExecutionHandoffCv.wait_for(lock, std::chrono::milliseconds(2), [&]()
+        {
+            return m_guestExecutionHandoffEpoch.load(std::memory_order_acquire) != handoffEpoch;
+        });
     }
 }
 

@@ -39,7 +39,6 @@ namespace ps2_syscalls
 {
     inline void yieldGuestExecutionAfterWake(PS2Runtime *runtime)
     {
-        PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime);
-        std::this_thread::yield();
+        runtime->yieldGuestExecutionAfterWake();
     }
 }
