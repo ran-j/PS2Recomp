@@ -97,13 +97,13 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
             clearBit(PAD_LEFT);
         if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D))
             clearBit(PAD_RIGHT);
-        if (IsKeyDown(KEY_ENTER) || IsKeyDown(KEY_SPACE))
+        if (IsKeyDown(KEY_X) || IsKeyDown(KEY_SPACE))
             clearBit(PAD_CROSS);
-        if (IsKeyDown(KEY_ESCAPE))
+        if (IsKeyDown(KEY_C) || IsKeyDown(KEY_ESCAPE))
             clearBit(PAD_CIRCLE);
-        if (IsKeyDown(KEY_KP_0) || IsKeyDown(KEY_Z))
+        if (IsKeyDown(KEY_Z) || IsKeyDown(KEY_KP_0))
             clearBit(PAD_SQUARE);
-        if (IsKeyDown(KEY_KP_1) || IsKeyDown(KEY_X))
+        if (IsKeyDown(KEY_V) || IsKeyDown(KEY_KP_1))
             clearBit(PAD_TRIANGLE);
         if (IsKeyDown(KEY_Q))
             clearBit(PAD_L1);

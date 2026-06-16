@@ -17,7 +17,7 @@
 #define RUNTIME_LOG(x) do {} while(0)
 #endif
 
-#ifdef neverDone
+#ifdef AGRESSIVE_LOGS
 
 namespace ps2_log
 {

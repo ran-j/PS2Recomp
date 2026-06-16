@@ -9,6 +9,11 @@ option(PS2X_ENABLE_RUNNER_UNITY_BUILD "Build ps2EntryRunner with CMake unity bui
 set(PS2X_RUNNER_UNITY_BUILD_BATCH_SIZE 8 CACHE STRING "Unity build batch size for ps2EntryRunner")
 option(PS2X_ENABLE_SCCACHE "Use sccache as compiler launcher when available" ON)
 
+option(PS2X_ENABLE_RUNTIME_LOGS "Enable PS2 runtime logs" ON)
+option(PS2X_ENABLE_AGRESSIVE_LOGS "Enable very verbose/agressive PS2 runtime logs" OFF)
+option(PS2X_SHOW_WINDOWS_CONSOLE "Show a console window for ps2EntryRunner on Windows release builds" ON)
+
+
 if(PS2X_ENABLE_SCCACHE)
     find_program(PS2X_SCCACHE_PROGRAM sccache)
     if(PS2X_SCCACHE_PROGRAM)
@@ -301,6 +306,18 @@ add_library(ps2_runtime STATIC
     src/lib/games_database.cpp
 )
 
+if(PS2X_ENABLE_RUNTIME_LOGS)
+    target_compile_definitions(ps2_runtime PUBLIC
+        PS2_RUNTIME_LOGS=1
+    )
+endif()
+
+if(PS2X_ENABLE_AGRESSIVE_LOGS)
+    target_compile_definitions(ps2_runtime PUBLIC
+        AGRESSIVE_LOGS=1
+    )
+endif()
+
 file(GLOB_RECURSE KERNEL_SRC_FILES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/Kernel/*.cpp"
 )
@@ -372,16 +389,18 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebI
     EnableFastReleaseMode(ps2_runtime)
     EnableFastReleaseMode(ps2EntryRunner)
 
-    # if(MSVC AND WIN32)
-    #     target_link_options(ps2EntryRunner PRIVATE
-    #         $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:/SUBSYSTEM:WINDOWS>
-    #         $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:/ENTRY:mainCRTStartup>
-    #     )
-    # elseif(MINGW AND WIN32)
-    #     target_link_options(ps2EntryRunner PRIVATE
-    #         $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:-mwindows>
-    #     )
-    # endif()
+    if(WIN32 AND NOT PS2X_SHOW_WINDOWS_CONSOLE)
+        if(MSVC)
+            target_link_options(ps2EntryRunner PRIVATE
+                $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:/SUBSYSTEM:WINDOWS>
+                $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:/ENTRY:mainCRTStartup>
+            )
+        elseif(MINGW)
+            target_link_options(ps2EntryRunner PRIVATE
+                $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:-mwindows>
+            )
+        endif()
+    endif()
  
 endif()
 
