@@ -265,7 +265,8 @@ namespace ps2_syscalls
                                             << std::endl);
         }
 
-        setReturnS32(ctx, ret);
+        // EE kernel SignalSema returns the semaphore id on success (not 0).
+        setReturnS32(ctx, (ret == KE_OK) ? sid : ret);
     }
 
     void iSignalSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -363,7 +364,8 @@ namespace ps2_syscalls
         }
         lock.unlock();
         waitWhileSuspended(info, runtime);
-        setReturnS32(ctx, ret);
+        // EE kernel WaitSema returns the semaphore id on success (not 0).
+        setReturnS32(ctx, (ret == KE_OK) ? sid : ret);
     }
 
     void PollSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -380,7 +382,10 @@ namespace ps2_syscalls
         if (sema->count > 0)
         {
             sema->count--;
-            setReturnS32(ctx, KE_OK);
+            // EE kernel PollSema returns the semaphore id on success (not 0). Guest
+            // code uses this id as a try-lock token (e.g. `beq semaId, PollSema()`),
+            // so returning KE_OK would make those acquire-checks fail forever.
+            setReturnS32(ctx, sid);
             return;
         }
 
