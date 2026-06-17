@@ -412,8 +412,24 @@ PS2Runtime::GuestExecutionReleaseScope::GuestExecutionReleaseScope(PS2Runtime *r
     }
 }
 
+PS2Runtime::GuestExecutionReleaseScope::GuestExecutionReleaseScope(PS2Runtime *runtime,
+                                                                   std::unique_lock<std::mutex> &lock) noexcept
+    : m_runtime(runtime), m_lock(&lock)
+{
+    if (m_runtime)
+    {
+        m_depth = m_runtime->releaseGuestExecution();
+    }
+}
+
 PS2Runtime::GuestExecutionReleaseScope::~GuestExecutionReleaseScope()
 {
+    // Drop the guest-object mutex before reacquiring the run-token, so a thread parked for
+    // the run-token never holds a mutex a run-token holder might lock (which would deadlock).
+    if (m_lock && m_lock->owns_lock())
+    {
+        m_lock->unlock();
+    }
     if (m_runtime && m_depth != 0u)
     {
         m_runtime->reacquireGuestExecution(m_depth);

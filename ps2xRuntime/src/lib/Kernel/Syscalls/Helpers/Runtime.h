@@ -29,10 +29,11 @@ static void waitWhileSuspended(const std::shared_ptr<ThreadInfo> &info, PS2Runti
         info->waitType = TSW_NONE;
         info->waitId = 0;
         {
-            PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime);
+            PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime, lock);
             info->cv.wait(lock, [&]()
                           { return info->suspendCount == 0 || info->terminated.load(); });
         }
+        lock.lock(); // release scope dropped info->m; re-take it for the post-wait bookkeeping.
         if (info->terminated.load())
         {
             throw ThreadExitException();

@@ -604,10 +604,10 @@ namespace ps2_syscalls
             // Block until the target thread actually finishes unwinding and becomes dormant
             std::unique_lock<std::mutex> lock(info->m);
             {
-                PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime);
+                PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime, lock);
                 info->cv.wait(lock, [&]()
                               { return !info->started && info->status == THS_DORMANT; });
-            }
+            } // nothing after needs info->m, so it stays released (no re-lock).
         }
 
         setReturnS32(ctx, KE_OK);
@@ -642,10 +642,11 @@ namespace ps2_syscalls
         {
             std::unique_lock<std::mutex> lock(info->m);
             {
-                PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime);
+                PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime, lock);
                 info->cv.wait(lock, [&]()
                               { return info->suspendCount == 0 || info->terminated.load(); });
             }
+            lock.lock(); // release scope dropped info->m; re-take it for the post-wait bookkeeping.
             if (info->terminated.load())
             {
                 throw ThreadExitException();
@@ -788,10 +789,11 @@ namespace ps2_syscalls
             info->forceRelease = false;
 
             {
-                PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime);
+                PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime, lock);
                 info->cv.wait(lock, [&]()
                               { return info->wakeupCount > 0 || info->forceRelease.load() || info->terminated.load(); });
             }
+            lock.lock(); // release scope dropped info->m; re-take it for the post-wait bookkeeping.
 
             if (info->terminated.load())
             {

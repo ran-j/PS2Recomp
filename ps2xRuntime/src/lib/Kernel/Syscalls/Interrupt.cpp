@@ -397,10 +397,11 @@ namespace ps2_syscalls
         std::unique_lock<std::mutex> lock(g_vsync_flag_mutex);
         uint64_t current = g_vsync_tick_counter;
         {
-            PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime);
+            PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime, lock);
             g_vsync_cv.wait(lock, [current, runtime]()
                             { return g_vsync_tick_counter > current || (runtime != nullptr && runtime->isStopRequested()); });
         }
+        lock.lock(); // release scope dropped the vsync mutex; re-take it to read the counter.
         return g_vsync_tick_counter;
     }
 

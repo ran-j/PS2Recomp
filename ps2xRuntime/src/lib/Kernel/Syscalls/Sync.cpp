@@ -313,7 +313,7 @@ namespace ps2_syscalls
 
             sema->waiters++;
             {
-                PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime);
+                PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime, lock);
                 sema->cv.wait(lock, [&]()
                               {
                                   bool forced = info ? info->forceRelease.load() : false;
@@ -321,6 +321,7 @@ namespace ps2_syscalls
                                   return sema->count > 0 || sema->deleted || forced || terminated; //
                               });
             }
+            lock.lock(); // release scope dropped sema->m; re-take it for the post-wait bookkeeping.
             sema->waiters--;
             if (sema->deleted)
             {
@@ -636,9 +637,10 @@ namespace ps2_syscalls
 
             info->waiters++;
             {
-                PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime);
+                PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime, lock);
                 info->cv.wait(lock, satisfied);
             }
+            lock.lock(); // release scope dropped info->m; re-take it for the post-wait bookkeeping.
             info->waiters--;
 
             if (tInfo)

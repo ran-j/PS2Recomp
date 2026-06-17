@@ -470,6 +470,10 @@ public:
     {
     public:
         explicit GuestExecutionReleaseScope(PS2Runtime *runtime) noexcept;
+        // Owns the caller's guest-object unique_lock; the destructor unlocks it before
+        // reacquiring the run-token, so a blocking syscall never parks for the run-token
+        // while holding a guest-object mutex. The referenced lock must outlive this scope.
+        GuestExecutionReleaseScope(PS2Runtime *runtime, std::unique_lock<std::mutex> &lock) noexcept;
         ~GuestExecutionReleaseScope();
 
         GuestExecutionReleaseScope(const GuestExecutionReleaseScope &) = delete;
@@ -478,6 +482,7 @@ public:
     private:
         PS2Runtime *m_runtime = nullptr;
         uint32_t m_depth = 0u;
+        std::unique_lock<std::mutex> *m_lock = nullptr;
     };
 
     void registerFunction(uint32_t address, RecompiledFunction func);
