@@ -1414,24 +1414,25 @@ uint32_t PS2Runtime::allocateGuestBlockLocked(uint32_t size, uint32_t alignment)
 
         const uint64_t blockStart = block.addr;
         const uint64_t blockEnd = blockStart + static_cast<uint64_t>(block.size);
-        const uint32_t alignedAddr = alignGuestHeapValue(block.addr, normalizedAlignment);
-        if (alignedAddr < block.addr)
+        if (static_cast<uint64_t>(allocSize) > block.size)
         {
             continue;
         }
 
-        const uint64_t alignedStart = alignedAddr;
-        if (alignedStart > blockEnd)
+        // Allocate from the TOP of the free block (high addresses). The guest's own
+        // libc heap (configured by SetupHeap over the SAME region) grows up from the
+        // base and keeps its free-list control node there, so handing runtime-internal
+        // scratch (GS/Font GIF packets, thread stacks, ...) from the base used to
+        // clobber it. Allocating high keeps the two allocators clear of each other.
+        const uint64_t rawTop = blockEnd - static_cast<uint64_t>(allocSize);
+        const uint64_t alignedStart = rawTop & ~(static_cast<uint64_t>(normalizedAlignment) - 1u);
+        if (alignedStart < blockStart)
         {
             continue;
         }
 
+        const uint32_t alignedAddr = static_cast<uint32_t>(alignedStart);
         const uint64_t allocEnd = alignedStart + static_cast<uint64_t>(allocSize);
-        if (allocEnd > blockEnd)
-        {
-            continue;
-        }
-
         const uint32_t prefixSize = static_cast<uint32_t>(alignedStart - blockStart);
         const uint32_t suffixSize = static_cast<uint32_t>(blockEnd - allocEnd);
 
