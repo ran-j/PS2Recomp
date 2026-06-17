@@ -605,7 +605,7 @@ namespace
                     {
                         continue;
                     }
-                    const uint32_t candidate = section.address + offset + 8u; // skip delay slot
+                    uint32_t candidate = section.address + offset + 8u; // skip delay slot
                     if ((candidate & 0x3u) != 0u ||
                         starts.find(candidate) != starts.end() ||
                         branchTargets.find(candidate) != branchTargets.end())
@@ -617,14 +617,32 @@ namespace
                     {
                         continue;
                     }
-                    const uint32_t coff = candidate - cs->address;
+                    uint32_t coff = candidate - cs->address;
                     if (coff + 4 > cs->size)
                     {
                         continue;
                     }
                     uint32_t cw = 0;
                     std::memcpy(&cw, cs->data + coff, sizeof(uint32_t));
-                    if (cw == 0u) // inter-function padding nop; the real entry is found elsewhere
+                    // Skip a run of inter-function padding nops (word == 0) to reach the
+                    // real entry. A prologue-less indirect leaf (e.g. a 2-instruction
+                    // accessor reached via a function pointer) is often preceded by such
+                    // padding, so the instruction right after the delay slot is a nop and
+                    // the true entry sits a few words later. Bounded to avoid scanning data.
+                    uint32_t skipped = 0u;
+                    while (cw == 0u && skipped < 32u && (coff + 8u) <= cs->size)
+                    {
+                        candidate += 4u;
+                        coff += 4u;
+                        ++skipped;
+                        std::memcpy(&cw, cs->data + coff, sizeof(uint32_t));
+                    }
+                    if (cw == 0u)
+                    {
+                        continue;
+                    }
+                    if (starts.find(candidate) != starts.end() ||
+                        branchTargets.find(candidate) != branchTargets.end())
                     {
                         continue;
                     }
