@@ -541,6 +541,98 @@ namespace
             }
         }
 
+        // Generalization #2 (return-boundary split): the scans above still miss LEAF
+        // functions reached ONLY indirectly that do NOT begin with a stack-allocating
+        // prologue -- e.g. interrupt/vblank handlers handed by address to AddIntcHandler,
+        // or short callbacks. Such a function gets folded into its predecessor because no
+        // discovered start lands on its entry. Recover them structurally: the instruction
+        // after an unconditional `jr $ra` + its delay slot is unreachable by fall-through,
+        // so unless a branch targets it (a local label after a mid-function early return)
+        // it begins a new function. We first collect every intra-code branch/jump target
+        // so we never split at such a local label; over-approximating that set only makes
+        // the split MORE conservative (it can never truncate a real function), at the cost
+        // of occasionally missing an indirect entry.
+        {
+            std::unordered_set<uint32_t> branchTargets;
+            branchTargets.reserve(8192);
+            for (const auto &section : sections)
+            {
+                if (!section.isCode || !section.data || section.size < 4)
+                {
+                    continue;
+                }
+                for (uint32_t offset = 0; offset + 4 <= section.size; offset += 4)
+                {
+                    const uint32_t pc = section.address + offset;
+                    uint32_t raw = 0;
+                    std::memcpy(&raw, section.data + offset, sizeof(uint32_t));
+                    const uint32_t op = (raw >> 26) & 0x3F;
+
+                    if (op == 0x02u || op == 0x03u) // J / JAL (absolute)
+                    {
+                        const uint32_t target = ((pc + 4) & 0xF0000000u) | ((raw & 0x03FFFFFFu) << 2);
+                        branchTargets.insert(target);
+                    }
+                    else if (op == 0x01u ||                 // REGIMM (bltz/bgez/bltzal/...)
+                             (op >= 0x04u && op <= 0x07u) || // beq/bne/blez/bgtz
+                             (op >= 0x14u && op <= 0x17u))   // beql/bnel/blezl/bgtzl
+                    {
+                        const int32_t simm = static_cast<int16_t>(raw & 0xFFFFu);
+                        const uint32_t target = pc + 4u + (static_cast<uint32_t>(simm) << 2);
+                        branchTargets.insert(target);
+                    }
+                    else if ((op == 0x10u || op == 0x11u || op == 0x12u || op == 0x13u) &&
+                             (((raw >> 21) & 0x1Fu) == 0x08u)) // COPz BC (branch on coproc flag)
+                    {
+                        const int32_t simm = static_cast<int16_t>(raw & 0xFFFFu);
+                        const uint32_t target = pc + 4u + (static_cast<uint32_t>(simm) << 2);
+                        branchTargets.insert(target);
+                    }
+                }
+            }
+
+            for (const auto &section : sections)
+            {
+                if (!section.isCode || !section.data || section.size < 4)
+                {
+                    continue;
+                }
+                for (uint32_t offset = 0; offset + 4 <= section.size; offset += 4)
+                {
+                    uint32_t raw = 0;
+                    std::memcpy(&raw, section.data + offset, sizeof(uint32_t));
+                    if (raw != 0x03E00008u) // jr $ra
+                    {
+                        continue;
+                    }
+                    const uint32_t candidate = section.address + offset + 8u; // skip delay slot
+                    if ((candidate & 0x3u) != 0u ||
+                        starts.find(candidate) != starts.end() ||
+                        branchTargets.find(candidate) != branchTargets.end())
+                    {
+                        continue;
+                    }
+                    const ps2recomp::Section *cs = FindCodeSectionByAddress(sections, candidate);
+                    if (!cs || !cs->data)
+                    {
+                        continue;
+                    }
+                    const uint32_t coff = candidate - cs->address;
+                    if (coff + 4 > cs->size)
+                    {
+                        continue;
+                    }
+                    uint32_t cw = 0;
+                    std::memcpy(&cw, cs->data + coff, sizeof(uint32_t));
+                    if (cw == 0u) // inter-function padding nop; the real entry is found elsewhere
+                    {
+                        continue;
+                    }
+                    starts.insert(candidate);
+                }
+            }
+        }
+
         std::vector<uint32_t> sortedStarts(starts.begin(), starts.end());
         std::sort(sortedStarts.begin(), sortedStarts.end());
 
