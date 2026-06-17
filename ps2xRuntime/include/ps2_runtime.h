@@ -469,11 +469,10 @@ public:
     class GuestExecutionReleaseScope
     {
     public:
-        explicit GuestExecutionReleaseScope(PS2Runtime *runtime) noexcept;
         // Owns the caller's guest-object unique_lock; the destructor unlocks it before
         // reacquiring the run-token, so a blocking syscall never parks for the run-token
         // while holding a guest-object mutex. The referenced lock must outlive this scope.
-        GuestExecutionReleaseScope(PS2Runtime *runtime, std::unique_lock<std::mutex> &lock) noexcept;
+        explicit GuestExecutionReleaseScope(PS2Runtime *runtime, std::unique_lock<std::mutex> &lock) noexcept;
         ~GuestExecutionReleaseScope();
 
         GuestExecutionReleaseScope(const GuestExecutionReleaseScope &) = delete;

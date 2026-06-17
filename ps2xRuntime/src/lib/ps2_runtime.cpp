@@ -403,15 +403,6 @@ PS2Runtime::GuestExecutionScope::~GuestExecutionScope()
     }
 }
 
-PS2Runtime::GuestExecutionReleaseScope::GuestExecutionReleaseScope(PS2Runtime *runtime) noexcept
-    : m_runtime(runtime)
-{
-    if (m_runtime)
-    {
-        m_depth = m_runtime->releaseGuestExecution();
-    }
-}
-
 PS2Runtime::GuestExecutionReleaseScope::GuestExecutionReleaseScope(PS2Runtime *runtime,
                                                                    std::unique_lock<std::mutex> &lock) noexcept
     : m_runtime(runtime), m_lock(&lock)
