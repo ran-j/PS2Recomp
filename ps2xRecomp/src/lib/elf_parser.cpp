@@ -479,7 +479,28 @@ namespace
                 std::memcpy(&raw, section.data + offset, sizeof(uint32_t));
 
                 const uint32_t op = (raw >> 26) & 0x3F;
-                if (op != 0x03) // JAL
+
+                // JAL: the target is always a function entry.
+                // J (op 0x02): usually a local goto, but compilers emit TAIL CALLS as a
+                // plain `j func` once the frame is torn down. A `j` whose delay slot
+                // deallocates the stack frame (`addiu/daddiu $sp,$sp,+N`) is therefore a
+                // tail call to another function, not an in-function jump -- seed its
+                // target. (A local goto never restores $sp right before jumping.) This
+                // recovers prologue-less functions reached ONLY via tail call, which the
+                // codegen emits as lookupFunction(target) and would otherwise miss.
+                bool isFunctionTarget = (op == 0x03u);
+                if (op == 0x02u && (offset + 8u) <= section.size)
+                {
+                    uint32_t ds = 0;
+                    std::memcpy(&ds, section.data + offset + 4, sizeof(uint32_t));
+                    const uint32_t dshi = ds & 0xFFFF0000u; // addiu/daddiu $sp,$sp,imm
+                    if (((dshi == 0x27BD0000u) || (dshi == 0x67BD0000u)) &&
+                        ((ds & 0x8000u) == 0u) && ((ds & 0xFFFFu) != 0u))
+                    {
+                        isFunctionTarget = true;
+                    }
+                }
+                if (!isFunctionTarget)
                 {
                     continue;
                 }
