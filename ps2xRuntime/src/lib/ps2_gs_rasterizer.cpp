@@ -399,7 +399,7 @@ void GSRasterizer::drawPrimitive(GS *gs)
         const auto &ctx = gs->activeContext();
         int px = static_cast<int>(v.x) - (ctx.xyoffset.ofx >> 4);
         int py = static_cast<int>(v.y) - (ctx.xyoffset.ofy >> 4);
-        writePixel(gs, px, py, v.r, v.g, v.b, v.a);
+        writePixel(gs, px, py, static_cast<u32>(v.z), v.r, v.g, v.b, v.a);
         break;
     }
     default:
@@ -407,7 +407,7 @@ void GSRasterizer::drawPrimitive(GS *gs)
     }
 }
 
-void GSRasterizer::writePixel(GS *gs, int x, int y, uint8_t r, uint8_t g, uint8_t b, uint8_t a)
+void GSRasterizer::writePixel(GS *gs, int x, int y, int z, uint8_t r, uint8_t g, uint8_t b, uint8_t a)
 {
     const auto &ctx = gs->activeContext();
 
@@ -426,6 +426,8 @@ void GSRasterizer::writePixel(GS *gs, int x, int y, uint8_t r, uint8_t g, uint8_
     const u32 fbw  = std::max<u32>(ctx.frame.fbw, 1u);
     const u32 fpsm = ctx.frame.psm;
     const u32 fmsk = ctx.frame.fbmsk;
+    const u32 zbp = GSInternal::framePageBaseToBlock(ctx.zbuf.zbp);
+    const u32 zpsm = ctx.zbuf.psm;
 
     const bool alphaBlendEnabled = gs->m_prim.abe;
     const bool destinationAlpha  = alphaTest.preserveDestinationAlpha;
@@ -443,6 +445,31 @@ void GSRasterizer::writePixel(GS *gs, int x, int y, uint8_t r, uint8_t g, uint8_
         {
             fbrgba = Rgba5551ToRgba8888(fbrgba);
         }
+    }
+
+    uint ztest_method = (ctx.test >> 17) & 3;
+
+
+    bool zpass = false;
+    switch (ztest_method)
+    {
+    case 0:
+        zpass = false;
+        break;
+    case 1:
+        zpass = true;
+        break;
+    case 2:
+        zpass = z >= gs->ReadVram(zpsm, zbp, fbw, x, y);
+        break;
+    case 3:
+        zpass = z > gs->ReadVram(zpsm, zbp, fbw, x, y);
+        break;
+    }
+
+    if (!zpass)
+    {
+        return;
     }
 
     const u8 srcR = r;
@@ -489,7 +516,9 @@ void GSRasterizer::writePixel(GS *gs, int x, int y, uint8_t r, uint8_t g, uint8_
         }
     }
 
-    uint32_t mask = ctx.frame.fbmsk;
+    u32 fbmask = ctx.frame.fbmsk;
+    bool zmask = ctx.zbuf.zmask;
+
     if (!alphaTest.preserveDestinationAlpha &&
         (ctx.fba & 0x1ull) != 0ull &&
         ctx.frame.psm != GS_PSM_CT24)
@@ -499,9 +528,9 @@ void GSRasterizer::writePixel(GS *gs, int x, int y, uint8_t r, uint8_t g, uint8_
 
     u32 pixel = pack32(r, g, b, a);
 
-    if (mask != 0)
+    if (fbmask != 0)
     {
-        pixel = (pixel & ~mask) | (fbrgba & mask);
+        pixel = (pixel & ~fbmask) | (fbrgba & fbmask);
     }
 
     if (alphaTest.preserveDestinationAlpha)
@@ -516,6 +545,11 @@ void GSRasterizer::writePixel(GS *gs, int x, int y, uint8_t r, uint8_t g, uint8_
     }
 
     gs->WriteVram(fpsm, fbp, fbw, x, y, pixel);
+
+    if (!zmask)
+    {
+        gs->WriteVram(zpsm, zbp, fbw, x, y, z);
+    }
 }
 
 uint32_t GSRasterizer::lookupCLUT(GS *gs,
@@ -659,6 +693,7 @@ void GSRasterizer::drawSprite(GS *gs)
     int y0 = static_cast<int>(v0.y) - ofy;
     int x1 = static_cast<int>(v1.x) - ofx;
     int y1 = static_cast<int>(v1.y) - ofy;
+    u32 z1 = static_cast<u32>(v1.z);
 
     if (x0 > x1)
         std::swap(x0, x1);
@@ -774,7 +809,7 @@ void GSRasterizer::drawSprite(GS *gs)
                 uint8_t ta = static_cast<uint8_t>((texel >> 24) & 0xFF);
 
                 const TextureCombineResult color = combineTexture(tex, r, g, b, a, tr, tg, tb, ta);
-                writePixel(gs, x, y, color.r, color.g, color.b, color.a);
+                writePixel(gs, x, y, z1, color.r, color.g, color.b, color.a);
             }
         }
     }
@@ -782,7 +817,7 @@ void GSRasterizer::drawSprite(GS *gs)
     {
         for (int y = drawY0; y <= drawY1; ++y)
             for (int x = drawX0; x <= drawX1; ++x)
-                writePixel(gs, x, y, r, g, b, a);
+                writePixel(gs, x, y, z1, r, g, b, a);
     }
 }
 
@@ -834,6 +869,8 @@ void GSRasterizer::drawTriangle(GS *gs)
 
             if (w0 < -kEdgeEpsilon || w1 < -kEdgeEpsilon || w2 < -kEdgeEpsilon)
                 continue;
+
+            double z = v0.z * w0 + v1.z * w1 + v2.z * w2;
 
             uint8_t r, g, b, a;
             if (gs->m_prim.iip)
@@ -898,7 +935,7 @@ void GSRasterizer::drawTriangle(GS *gs)
                 a = color.a;
             }
 
-            writePixel(gs, x, y, r, g, b, a);
+            writePixel(gs, x, y, static_cast<u32>(z), r, g, b, a);
         }
     }
 }
@@ -947,7 +984,9 @@ void GSRasterizer::drawLine(GS *gs)
             a = v1.a;
         }
 
-        writePixel(gs, x0, y0, r, g, b, a);
+        double z = (v0.z + (v1.z - v0.z) * t);
+
+        writePixel(gs, x0, y0, static_cast<u32>(z), r, g, b, a);
 
         if (x0 == x1 && y0 == y1)
             break;

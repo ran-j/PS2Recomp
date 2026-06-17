@@ -9,7 +9,7 @@ class GSRasterizer
 {
 public:
     void drawPrimitive(GS *gs);
-    void writePixel(GS *gs, int x, int y, uint8_t r, uint8_t g, uint8_t b, uint8_t a);
+    void writePixel(GS *gs, int x, int y, int z, uint8_t r, uint8_t g, uint8_t b, uint8_t a);
     uint32_t sampleTexture(GS *gs, float s, float t, float q, uint16_t u, uint16_t v);
     uint32_t lookupCLUT(GS *gs, uint8_t index, uint32_t cbp, uint8_t cpsm, uint8_t csm, uint8_t csa, uint8_t sourcePsm);
 

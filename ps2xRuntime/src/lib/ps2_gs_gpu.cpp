@@ -1571,7 +1571,7 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
         GSVertex &vtx = m_vtxQueue[m_vtxCount % kMaxVerts];
         vtx.x = static_cast<float>(value & 0xFFFF) / 16.0f;
         vtx.y = static_cast<float>((value >> 16) & 0xFFFF) / 16.0f;
-        vtx.z = static_cast<float>((value >> 32) & 0xFFFFFF);
+        vtx.z = static_cast<double>((value >> 32) & 0xFFFFFF);
         vtx.fog = static_cast<uint8_t>((value >> 56) & 0xFF);
         vtx.r = m_curR;
         vtx.g = m_curG;
@@ -1591,7 +1591,7 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
         GSVertex &vtx = m_vtxQueue[m_vtxCount % kMaxVerts];
         vtx.x = static_cast<float>(value & 0xFFFF) / 16.0f;
         vtx.y = static_cast<float>((value >> 16) & 0xFFFF) / 16.0f;
-        vtx.z = static_cast<float>((value >> 32) & 0xFFFFFFFF);
+        vtx.z = static_cast<double>((value >> 32) & 0xFFFFFFFF);
         vtx.r = m_curR;
         vtx.g = m_curG;
         vtx.b = m_curB;
@@ -1721,7 +1721,9 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
     case GS_REG_ZBUF_2:
     {
         int ci = (regAddr == GS_REG_ZBUF_2) ? 1 : 0;
-        m_ctx[ci].zbuf = value;
+        m_ctx[ci].zbuf.zbp = value & 0xFF;
+        m_ctx[ci].zbuf.psm = ((value >> 24) & 0xF) | 0x30;
+        m_ctx[ci].zbuf.zmask = (value >> 32) & 1;
         break;
     }
     case GS_REG_FBA_1:

@@ -108,7 +108,9 @@ enum GSRegId : uint8_t
 
 struct GSVertex
 {
-    float x, y, z;
+    float x, y;
+    // double because float isnt accurate enough for values near UINT32_MAX
+    double z;
     uint8_t r, g, b, a;
     float q;
     float s, t;
@@ -122,6 +124,13 @@ struct GSFrameReg
     uint32_t fbw;
     uint8_t psm;
     uint32_t fbmsk;
+};
+
+struct GSZbufReg
+{
+    u32 zbp;
+    u8 psm;
+    bool zmask;
 };
 
 struct GSScissorReg
@@ -171,7 +180,7 @@ struct GSContext
     GSScissorReg scissor;
     GSTex0Reg tex0;
     GSXYOffsetReg xyoffset;
-    uint64_t zbuf;
+    GSZbufReg zbuf;
     uint64_t tex1;
     uint64_t clamp;
     uint64_t alpha;
