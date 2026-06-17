@@ -73,12 +73,16 @@ void VU1Interpreter::applyDestAcc(const float *result, uint8_t dest)
 void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                              uint8_t *vuData, uint32_t dataSize,
                              GS &gs, PS2Memory *memory,
-                             uint32_t startPC, uint32_t itop,
+                             uint32_t startPC, uint32_t top, uint32_t itop,
                              uint32_t maxCycles)
 {
-    m_state.pc = startPC;
+    m_state.pc = startPC & 0x3FFFu;
     m_state.ebit = false;
+    m_state.top = top;
     m_state.itop = itop;
+    m_state.branchPending = false;
+    m_state.branchTarget = 0;
+    m_state.branchDelay = 0;
     m_state.vf[0][0] = 0.0f;
     m_state.vf[0][1] = 0.0f;
     m_state.vf[0][2] = 0.0f;
@@ -89,9 +93,10 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
 void VU1Interpreter::resume(uint8_t *vuCode, uint32_t codeSize,
                             uint8_t *vuData, uint32_t dataSize,
                             GS &gs, PS2Memory *memory,
-                            uint32_t itop, uint32_t maxCycles)
+                            uint32_t top, uint32_t itop, uint32_t maxCycles)
 {
     m_state.ebit = false;
+    m_state.top = top;
     m_state.itop = itop;
     run(vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles);
 }
@@ -138,6 +143,21 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         if (nextPC >= codeSize)
             nextPC = 0;
         m_state.pc = nextPC;
+
+        // VU branch/jump has a delay slot. Branch handlers set a pending target;
+        // we execute one sequential instruction before committing the branch.
+        if (m_state.branchPending)
+        {
+            if (m_state.branchDelay == 0)
+            {
+                m_state.pc = m_state.branchTarget & 0x3FFFu;
+                m_state.branchPending = false;
+            }
+            else
+            {
+                --m_state.branchDelay;
+            }
+        }
 
         if (m_state.ebit)
             break;
@@ -827,8 +847,9 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
     {
         int16_t imm = IMM11(instr);
         uint32_t target = (m_state.pc + 8 + imm * 8) & 0x3FFF;
-        // Simplified branch delay: set PC so next iteration lands on target
-        m_state.pc = target - 8;
+        m_state.branchPending = true;
+        m_state.branchTarget = target;
+        m_state.branchDelay = 1;
         return;
     }
     case 0x21: // BAL (Branch and link)
@@ -838,14 +859,18 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
         uint32_t target = (m_state.pc + 8 + imm * 8) & 0x3FFF;
         if (it != 0)
             m_state.vi[it] = (int32_t)((m_state.pc + 16) / 8);
-        m_state.pc = target - 8;
+        m_state.branchPending = true;
+        m_state.branchTarget = target;
+        m_state.branchDelay = 1;
         return;
     }
     case 0x24: // JR
     {
         uint8_t is = LIS(instr);
         uint32_t target = ((uint32_t)(uint16_t)m_state.vi[is] * 8u) & 0x3FFF;
-        m_state.pc = target - 8;
+        m_state.branchPending = true;
+        m_state.branchTarget = target;
+        m_state.branchDelay = 1;
         return;
     }
     case 0x25: // JALR
@@ -855,7 +880,9 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
         uint32_t target = ((uint32_t)(uint16_t)m_state.vi[is] * 8u) & 0x3FFF;
         if (it != 0)
             m_state.vi[it] = (int32_t)((m_state.pc + 16) / 8);
-        m_state.pc = target - 8;
+        m_state.branchPending = true;
+        m_state.branchTarget = target;
+        m_state.branchDelay = 1;
         return;
     }
     case 0x28: // IBEQ
@@ -866,7 +893,9 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
         if ((int16_t)m_state.vi[is] == (int16_t)m_state.vi[it])
         {
             uint32_t target = (m_state.pc + 8 + imm * 8) & 0x3FFF;
-            m_state.pc = target - 8;
+            m_state.branchPending = true;
+        m_state.branchTarget = target;
+        m_state.branchDelay = 1;
         }
         return;
     }
@@ -878,7 +907,9 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
         if ((int16_t)m_state.vi[is] != (int16_t)m_state.vi[it])
         {
             uint32_t target = (m_state.pc + 8 + imm * 8) & 0x3FFF;
-            m_state.pc = target - 8;
+            m_state.branchPending = true;
+        m_state.branchTarget = target;
+        m_state.branchDelay = 1;
         }
         return;
     }
@@ -889,7 +920,9 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
         if ((int16_t)m_state.vi[is] < 0)
         {
             uint32_t target = (m_state.pc + 8 + imm * 8) & 0x3FFF;
-            m_state.pc = target - 8;
+            m_state.branchPending = true;
+        m_state.branchTarget = target;
+        m_state.branchDelay = 1;
         }
         return;
     }
@@ -900,7 +933,9 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
         if ((int16_t)m_state.vi[is] > 0)
         {
             uint32_t target = (m_state.pc + 8 + imm * 8) & 0x3FFF;
-            m_state.pc = target - 8;
+            m_state.branchPending = true;
+        m_state.branchTarget = target;
+        m_state.branchDelay = 1;
         }
         return;
     }
@@ -911,7 +946,9 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
         if ((int16_t)m_state.vi[is] <= 0)
         {
             uint32_t target = (m_state.pc + 8 + imm * 8) & 0x3FFF;
-            m_state.pc = target - 8;
+            m_state.branchPending = true;
+        m_state.branchTarget = target;
+        m_state.branchDelay = 1;
         }
         return;
     }
@@ -922,241 +959,22 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
         if ((int16_t)m_state.vi[is] >= 0)
         {
             uint32_t target = (m_state.pc + 8 + imm * 8) & 0x3FFF;
-            m_state.pc = target - 8;
+            m_state.branchPending = true;
+        m_state.branchTarget = target;
+        m_state.branchDelay = 1;
         }
         return;
     }
 
-    case 0x40: // Lower special (opcode in bits 5:0)
+    case 0x40: // Lower1 / lower special. Bit31 set; low 6 bits select integer or special op.
     {
-        uint8_t funct = instr & 0x3F;
-        uint8_t it = LIT(instr);
-        uint8_t is = LIS(instr);
-        uint8_t id = LID(instr);
-        uint8_t dest = (instr >> 21) & 0xF;
+        const uint8_t funct = instr & 0x3Fu;
+        const uint8_t it = LIT(instr);
+        const uint8_t is = LIS(instr);
+        const uint8_t id = LID(instr);
+        const uint8_t dest = (instr >> 21) & 0xF;
 
-        switch (funct)
-        {
-        case 0x30: // IADD
-            if (id != 0)
-                m_state.vi[id] = (int16_t)(m_state.vi[is] + m_state.vi[it]);
-            return;
-        case 0x31: // ISUB
-            if (id != 0)
-                m_state.vi[id] = (int16_t)(m_state.vi[is] - m_state.vi[it]);
-            return;
-        case 0x32: // IADDI
-        {
-            int16_t imm5 = (int16_t)((int32_t)((instr >> 6) & 0x1F) << 27 >> 27);
-            if (it != 0)
-                m_state.vi[it] = (int16_t)(m_state.vi[is] + imm5);
-            return;
-        }
-        case 0x34: // IAND
-            if (id != 0)
-                m_state.vi[id] = m_state.vi[is] & m_state.vi[it];
-            return;
-        case 0x35: // IOR
-            if (id != 0)
-                m_state.vi[id] = m_state.vi[is] | m_state.vi[it];
-            return;
-
-        case 0x3C: // Lower special2
-        {
-            uint8_t funct2 = (instr >> 6) & 0x1F;
-            switch (funct2)
-            {
-            case 0x00: // MOVE
-            {
-                float tmp[4];
-                std::memcpy(tmp, m_state.vf[is], 16);
-                applyDest(m_state.vf[it], tmp, dest);
-                return;
-            }
-            case 0x01: // MR32 (rotate right by 32 bits = shift xyzw -> yzwx)
-            {
-                float tmp[4] = {m_state.vf[is][1], m_state.vf[is][2], m_state.vf[is][3], m_state.vf[is][0]};
-                applyDest(m_state.vf[it], tmp, dest);
-                return;
-            }
-            case 0x03: // MFIR (Move From Integer Register)
-            {
-                float result[4];
-                int32_t val = (int32_t)(int16_t)(m_state.vi[is] & 0xFFFF);
-                std::memcpy(&result[0], &val, 4);
-                result[1] = result[0];
-                result[2] = result[0];
-                result[3] = result[0];
-                applyDest(m_state.vf[it], result, dest);
-                return;
-            }
-            case 0x04: // MTIR (Move To Integer Register)
-            {
-                int comp = 0;
-                if (dest & 0x8)
-                    comp = 0;
-                else if (dest & 0x4)
-                    comp = 1;
-                else if (dest & 0x2)
-                    comp = 2;
-                else
-                    comp = 3;
-                uint32_t fval;
-                std::memcpy(&fval, &m_state.vf[is][comp], 4);
-                if (it != 0)
-                    m_state.vi[it] = (int32_t)(int16_t)(fval & 0xFFFF);
-                return;
-            }
-            case 0x05: // RNEXT
-                return;
-            case 0x06: // RGET
-                return;
-            case 0x07: // RINIT
-                return;
-            case 0x10: // LQI (Load Quadword, post-increment)
-            {
-                uint32_t addr = ((uint32_t)(uint16_t)m_state.vi[is]) * 16u;
-                addr &= (dataSize - 1);
-                if (addr + 16 <= dataSize)
-                {
-                    float tmp[4];
-                    std::memcpy(tmp, vuData + addr, 16);
-                    applyDest(m_state.vf[it], tmp, dest);
-                }
-                if (is != 0)
-                    m_state.vi[is] = (int16_t)(m_state.vi[is] + 1);
-                return;
-            }
-            case 0x11: // SQI (Store Quadword, post-increment)
-            {
-                uint32_t addr = ((uint32_t)(uint16_t)m_state.vi[it]) * 16u;
-                addr &= (dataSize - 1);
-                if (addr + 16 <= dataSize)
-                {
-                    float tmp[4];
-                    std::memcpy(tmp, vuData + addr, 16);
-                    if (dest & 0x8)
-                        tmp[0] = m_state.vf[is][0];
-                    if (dest & 0x4)
-                        tmp[1] = m_state.vf[is][1];
-                    if (dest & 0x2)
-                        tmp[2] = m_state.vf[is][2];
-                    if (dest & 0x1)
-                        tmp[3] = m_state.vf[is][3];
-                    std::memcpy(vuData + addr, tmp, 16);
-                }
-                if (it != 0)
-                    m_state.vi[it] = (int16_t)(m_state.vi[it] + 1);
-                return;
-            }
-            case 0x12: // LQD (Load Quadword, pre-decrement)
-            {
-                if (is != 0)
-                    m_state.vi[is] = (int16_t)(m_state.vi[is] - 1);
-                uint32_t addr = ((uint32_t)(uint16_t)m_state.vi[is]) * 16u;
-                addr &= (dataSize - 1);
-                if (addr + 16 <= dataSize)
-                {
-                    float tmp[4];
-                    std::memcpy(tmp, vuData + addr, 16);
-                    applyDest(m_state.vf[it], tmp, dest);
-                }
-                return;
-            }
-            case 0x13: // SQD (Store Quadword, pre-decrement)
-            {
-                if (it != 0)
-                    m_state.vi[it] = (int16_t)(m_state.vi[it] - 1);
-                uint32_t addr = ((uint32_t)(uint16_t)m_state.vi[it]) * 16u;
-                addr &= (dataSize - 1);
-                if (addr + 16 <= dataSize)
-                {
-                    float tmp[4];
-                    std::memcpy(tmp, vuData + addr, 16);
-                    if (dest & 0x8)
-                        tmp[0] = m_state.vf[is][0];
-                    if (dest & 0x4)
-                        tmp[1] = m_state.vf[is][1];
-                    if (dest & 0x2)
-                        tmp[2] = m_state.vf[is][2];
-                    if (dest & 0x1)
-                        tmp[3] = m_state.vf[is][3];
-                    std::memcpy(vuData + addr, tmp, 16);
-                }
-                return;
-            }
-            case 0x14: // DIV
-            {
-                int fsf = (instr >> 21) & 0x3;
-                int ftf = (instr >> 23) & 0x3;
-                float num = m_state.vf[is][fsf];
-                float den = m_state.vf[it][ftf];
-                if (den != 0.0f)
-                    m_state.q = num / den;
-                else
-                    m_state.q = (num >= 0.0f) ? std::numeric_limits<float>::max() : -std::numeric_limits<float>::max();
-                return;
-            }
-            case 0x15: // SQRT
-            {
-                int ftf = (instr >> 23) & 0x3;
-                float val = m_state.vf[it][ftf];
-                m_state.q = std::sqrt(std::fabs(val));
-                return;
-            }
-            case 0x16: // RSQRT
-            {
-                int fsf = (instr >> 21) & 0x3;
-                int ftf = (instr >> 23) & 0x3;
-                float num = m_state.vf[is][fsf];
-                float den = std::sqrt(std::fabs(m_state.vf[it][ftf]));
-                if (den != 0.0f)
-                    m_state.q = num / den;
-                else
-                    m_state.q = std::numeric_limits<float>::max();
-                return;
-            }
-            case 0x17: // WAITQ
-                return;
-            case 0x18: // ESADD
-                return;
-            case 0x19: // ERSADD
-                return;
-            case 0x1B: // ELENG
-            {
-                float s = m_state.vf[is][0] * m_state.vf[is][0] + m_state.vf[is][1] * m_state.vf[is][1] + m_state.vf[is][2] * m_state.vf[is][2];
-                m_state.p = std::sqrt(s);
-                return;
-            }
-            case 0x1C: // ERCPR
-            {
-                int fsf = (instr >> 21) & 0x3;
-                float val = m_state.vf[is][fsf];
-                m_state.p = (val != 0.0f) ? (1.0f / val) : std::numeric_limits<float>::max();
-                return;
-            }
-            case 0x1D: // ERLENG
-            {
-                float s = m_state.vf[is][0] * m_state.vf[is][0] + m_state.vf[is][1] * m_state.vf[is][1] + m_state.vf[is][2] * m_state.vf[is][2];
-                float len = std::sqrt(s);
-                m_state.p = (len != 0.0f) ? (1.0f / len) : std::numeric_limits<float>::max();
-                return;
-            }
-            case 0x1E: // WAITP
-                return;
-            case 0x1A: // EATAN / EATANxy / EATANxz
-                return;
-            case 0x1F: // MFP (Move From P register)
-            {
-                float result[4] = {m_state.p, m_state.p, m_state.p, m_state.p};
-                applyDest(m_state.vf[it], result, dest);
-                return;
-            }
-            default:
-                return;
-            }
-        }
-        case 0x3D: // XGKICK - send GIF packet from VU1 data memory
+        auto doXgkick = [&]()
         {
             if (!vuData || dataSize < 16u)
                 return;
@@ -1254,19 +1072,288 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
                 else
                     gs.processGIFPacket(wrappedPacket.data(), totalBytes);
             }
+        };
+
+        switch (funct)
+        {
+        case 0x30: // IADD
+            if (id != 0)
+                m_state.vi[id] = (int16_t)(m_state.vi[is] + m_state.vi[it]);
+            return;
+        case 0x31: // ISUB
+            if (id != 0)
+                m_state.vi[id] = (int16_t)(m_state.vi[is] - m_state.vi[it]);
+            return;
+        case 0x32: // IADDI
+        {
+            int16_t imm5 = (int16_t)((int32_t)((instr >> 6) & 0x1F) << 27 >> 27);
+            if (it != 0)
+                m_state.vi[it] = (int16_t)(m_state.vi[is] + imm5);
             return;
         }
-        case 0x3E: // XTOP
-        {
-            if (it != 0)
-                m_state.vi[it] = (int32_t)m_state.itop;
+        case 0x34: // IAND
+            if (id != 0)
+                m_state.vi[id] = m_state.vi[is] & m_state.vi[it];
             return;
-        }
-        case 0x3F: // XITOP
-        {
-            if (it != 0)
-                m_state.vi[it] = (int32_t)m_state.itop;
+        case 0x35: // IOR
+            if (id != 0)
+                m_state.vi[id] = m_state.vi[is] | m_state.vi[it];
             return;
+
+        case 0x3C:
+        case 0x3D:
+        case 0x3E:
+        case 0x3F: // Lower1 special. Dobie decodes this as (instr & 3) | ((instr >> 4) & 0x7C).
+        {
+            const uint8_t funct2 = (uint8_t)((instr & 0x3u) | ((instr >> 4) & 0x7Cu));
+            switch (funct2)
+            {
+            case 0x30: // MOVE
+            {
+                float tmp[4];
+                std::memcpy(tmp, m_state.vf[is], 16);
+                applyDest(m_state.vf[it], tmp, dest);
+                return;
+            }
+            case 0x31: // MR32 (rotate right by 32 bits = shift xyzw -> yzwx)
+            {
+                float tmp[4] = {m_state.vf[is][1], m_state.vf[is][2], m_state.vf[is][3], m_state.vf[is][0]};
+                applyDest(m_state.vf[it], tmp, dest);
+                return;
+            }
+            case 0x34: // LQI (Load Quadword, post-increment)
+            {
+                uint32_t addr = ((uint32_t)(uint16_t)m_state.vi[is]) * 16u;
+                addr &= (dataSize - 1);
+                if (addr + 16 <= dataSize)
+                {
+                    float tmp[4];
+                    std::memcpy(tmp, vuData + addr, 16);
+                    applyDest(m_state.vf[it], tmp, dest);
+                }
+                if (is != 0)
+                    m_state.vi[is] = (int16_t)(m_state.vi[is] + 1);
+                return;
+            }
+            case 0x35: // SQI (Store Quadword, post-increment)
+            {
+                uint32_t addr = ((uint32_t)(uint16_t)m_state.vi[it]) * 16u;
+                addr &= (dataSize - 1);
+                if (addr + 16 <= dataSize)
+                {
+                    float tmp[4];
+                    std::memcpy(tmp, vuData + addr, 16);
+                    if (dest & 0x8)
+                        tmp[0] = m_state.vf[is][0];
+                    if (dest & 0x4)
+                        tmp[1] = m_state.vf[is][1];
+                    if (dest & 0x2)
+                        tmp[2] = m_state.vf[is][2];
+                    if (dest & 0x1)
+                        tmp[3] = m_state.vf[is][3];
+                    std::memcpy(vuData + addr, tmp, 16);
+                }
+                if (it != 0)
+                    m_state.vi[it] = (int16_t)(m_state.vi[it] + 1);
+                return;
+            }
+            case 0x36: // LQD (Load Quadword, pre-decrement)
+            {
+                if (is != 0)
+                    m_state.vi[is] = (int16_t)(m_state.vi[is] - 1);
+                uint32_t addr = ((uint32_t)(uint16_t)m_state.vi[is]) * 16u;
+                addr &= (dataSize - 1);
+                if (addr + 16 <= dataSize)
+                {
+                    float tmp[4];
+                    std::memcpy(tmp, vuData + addr, 16);
+                    applyDest(m_state.vf[it], tmp, dest);
+                }
+                return;
+            }
+            case 0x37: // SQD (Store Quadword, pre-decrement)
+            {
+                if (it != 0)
+                    m_state.vi[it] = (int16_t)(m_state.vi[it] - 1);
+                uint32_t addr = ((uint32_t)(uint16_t)m_state.vi[it]) * 16u;
+                addr &= (dataSize - 1);
+                if (addr + 16 <= dataSize)
+                {
+                    float tmp[4];
+                    std::memcpy(tmp, vuData + addr, 16);
+                    if (dest & 0x8)
+                        tmp[0] = m_state.vf[is][0];
+                    if (dest & 0x4)
+                        tmp[1] = m_state.vf[is][1];
+                    if (dest & 0x2)
+                        tmp[2] = m_state.vf[is][2];
+                    if (dest & 0x1)
+                        tmp[3] = m_state.vf[is][3];
+                    std::memcpy(vuData + addr, tmp, 16);
+                }
+                return;
+            }
+            case 0x38: // DIV
+            {
+                int fsf = (instr >> 21) & 0x3;
+                int ftf = (instr >> 23) & 0x3;
+                float num = m_state.vf[is][fsf];
+                float den = m_state.vf[it][ftf];
+                if (den != 0.0f)
+                    m_state.q = num / den;
+                else
+                    m_state.q = (num >= 0.0f) ? std::numeric_limits<float>::max() : -std::numeric_limits<float>::max();
+                return;
+            }
+            case 0x39: // SQRT
+            {
+                int ftf = (instr >> 23) & 0x3;
+                float val = m_state.vf[it][ftf];
+                m_state.q = std::sqrt(std::fabs(val));
+                return;
+            }
+            case 0x3A: // RSQRT
+            {
+                int fsf = (instr >> 21) & 0x3;
+                int ftf = (instr >> 23) & 0x3;
+                float num = m_state.vf[is][fsf];
+                float den = std::sqrt(std::fabs(m_state.vf[it][ftf]));
+                if (den != 0.0f)
+                    m_state.q = num / den;
+                else
+                    m_state.q = std::numeric_limits<float>::max();
+                return;
+            }
+            case 0x3B: // WAITQ
+                return;
+            case 0x3C: // MTIR (Move To Integer Register)
+            {
+                int comp = 0;
+                if (dest & 0x8)
+                    comp = 0;
+                else if (dest & 0x4)
+                    comp = 1;
+                else if (dest & 0x2)
+                    comp = 2;
+                else
+                    comp = 3;
+                uint32_t fval;
+                std::memcpy(&fval, &m_state.vf[is][comp], 4);
+                if (it != 0)
+                    m_state.vi[it] = (int32_t)(int16_t)(fval & 0xFFFF);
+                return;
+            }
+            case 0x3D: // MFIR (Move From Integer Register)
+            {
+                float result[4];
+                int32_t val = (int32_t)(int16_t)(m_state.vi[is] & 0xFFFF);
+                std::memcpy(&result[0], &val, 4);
+                result[1] = result[0];
+                result[2] = result[0];
+                result[3] = result[0];
+                applyDest(m_state.vf[it], result, dest);
+                return;
+            }
+            case 0x3E: // ILWR - integer load word from address in VI[is]
+            {
+                uint32_t addr = ((uint32_t)(uint16_t)m_state.vi[is]) * 16u;
+                addr &= (dataSize - 1);
+                if (addr + 16 <= dataSize)
+                {
+                    int comp = 0;
+                    if (dest & 0x8)
+                        comp = 0;
+                    else if (dest & 0x4)
+                        comp = 1;
+                    else if (dest & 0x2)
+                        comp = 2;
+                    else
+                        comp = 3;
+                    uint32_t v;
+                    std::memcpy(&v, vuData + addr + comp * 4, 4);
+                    if (it != 0)
+                        m_state.vi[it] = (int32_t)(int16_t)(v & 0xFFFF);
+                }
+                return;
+            }
+            case 0x3F: // ISWR - integer store word to address in VI[is]
+            {
+                uint32_t addr = ((uint32_t)(uint16_t)m_state.vi[is]) * 16u;
+                addr &= (dataSize - 1);
+                if (addr + 16 <= dataSize)
+                {
+                    uint32_t val = (uint32_t)(uint16_t)(m_state.vi[it] & 0xFFFF);
+                    if (dest & 0x8)
+                        std::memcpy(vuData + addr + 0, &val, 4);
+                    if (dest & 0x4)
+                        std::memcpy(vuData + addr + 4, &val, 4);
+                    if (dest & 0x2)
+                        std::memcpy(vuData + addr + 8, &val, 4);
+                    if (dest & 0x1)
+                        std::memcpy(vuData + addr + 12, &val, 4);
+                }
+                return;
+            }
+            case 0x40: // RNEXT
+                return;
+            case 0x41: // RGET
+                return;
+            case 0x42: // RINIT
+                return;
+            case 0x43: // RXOR
+                return;
+            case 0x64: // MFP (Move From P register)
+            {
+                float result[4] = {m_state.p, m_state.p, m_state.p, m_state.p};
+                applyDest(m_state.vf[it], result, dest);
+                return;
+            }
+            case 0x68: // XTOP - move current VIF1 TOP into VI register
+            {
+                if (it != 0)
+                    m_state.vi[it] = (int32_t)(m_state.top & 0x3FFu);
+                return;
+            }
+            case 0x69: // XITOP - move current VIF1 ITOP into VI register
+            {
+                if (it != 0)
+                    m_state.vi[it] = (int32_t)(m_state.itop & 0x3FFu);
+                return;
+            }
+            case 0x6C: // XGKICK - send GIF packet from VU1 data memory
+                doXgkick();
+                return;
+            case 0x70: // ESADD
+                return;
+            case 0x71: // ERSADD
+                return;
+            case 0x72: // ELENG
+            {
+                float s = m_state.vf[is][0] * m_state.vf[is][0] + m_state.vf[is][1] * m_state.vf[is][1] + m_state.vf[is][2] * m_state.vf[is][2];
+                m_state.p = std::sqrt(s);
+                return;
+            }
+            case 0x73: // ERLENG
+            {
+                float s = m_state.vf[is][0] * m_state.vf[is][0] + m_state.vf[is][1] * m_state.vf[is][1] + m_state.vf[is][2] * m_state.vf[is][2];
+                float len = std::sqrt(s);
+                m_state.p = (len != 0.0f) ? (1.0f / len) : std::numeric_limits<float>::max();
+                return;
+            }
+            case 0x7A: // ERCPR
+            {
+                int fsf = (instr >> 21) & 0x3;
+                float val = m_state.vf[is][fsf];
+                m_state.p = (val != 0.0f) ? (1.0f / val) : std::numeric_limits<float>::max();
+                return;
+            }
+            case 0x7B: // WAITP
+                return;
+            case 0x7D: // EATAN / EATANxy / EATANxz placeholder
+                return;
+            default:
+                return;
+            }
         }
         default:
             return;

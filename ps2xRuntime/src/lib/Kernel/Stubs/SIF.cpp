@@ -620,6 +620,32 @@ namespace ps2_stubs
 
         const uint32_t dmatAddr = getRegU32(ctx, 4);
         const uint32_t count = getRegU32(ctx, 5);
+
+        const uint32_t listAddr = getRegU32(ctx, 4);
+        std::cerr << "[sceSifSetDma:CALL] pc=0x" << std::hex << ctx->pc
+                  << " ra=0x" << getRegU32(ctx, 31)
+                  << " list=0x" << listAddr
+                  << " count=" << std::dec << count
+                  << std::endl;
+
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            const uint32_t desc = listAddr + i * 16;
+            const uint32_t src = READ32(desc + 0);
+            const uint32_t dst = READ32(desc + 4);
+            const uint32_t size = READ32(desc + 8);
+            const uint32_t attr = READ32(desc + 12);
+
+            std::cerr << "[sceSifSetDma:DESC] i=" << i
+                      << " src=0x" << std::hex << src
+                      << " dst=0x" << dst
+                      << " size=0x" << size
+                      << " attr=0x" << attr
+                      << " pc=0x" << ctx->pc
+                      << " ra=0x" << getRegU32(ctx, 31)
+                      << std::dec << std::endl;
+        }
+
         if (!dmatAddr || count == 0u || count > 32u)
         {
             setReturnS32(ctx, 0);

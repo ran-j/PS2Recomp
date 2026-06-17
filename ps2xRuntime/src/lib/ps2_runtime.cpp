@@ -264,8 +264,8 @@ namespace
         state.mac = ctx->vu0_mac_flags;
         state.clip = ctx->vu0_clip_flags;
         state.status = ctx->vu0_status;
+        state.top = ctx->vu0_top;
         state.itop = ctx->vu0_itop;
-        state.xitop = ctx->vu0_xitop;
 
         state.vf[0][0] = 0.0f;
         state.vf[0][1] = 0.0f;
@@ -293,8 +293,9 @@ namespace
         ctx->vu0_clip_flags = state.clip;
         ctx->vu0_clip_flags2 = state.clip;
         ctx->vu0_status = static_cast<uint16_t>(state.status);
+        ctx->vu0_top = state.top;
         ctx->vu0_itop = state.itop;
-        ctx->vu0_xitop = state.xitop;
+        ctx->vu0_xitop = state.itop;
         ctx->vu0_pc = state.pc;
         ctx->vu0_tpc = state.pc;
         ctx->vu0_vpu_stat = 0;
@@ -740,14 +741,14 @@ bool PS2Runtime::syncCoreSubsystems()
     m_gifArbiter.setProcessPacketFn([this](const uint8_t *data, uint32_t size)
                                     { m_gs.processGIFPacket(data, size); });
     m_memory.setGifArbiter(&m_gifArbiter);
-    m_memory.setVu1MscalCallback([this](uint32_t startPC, uint32_t itop)
+    m_memory.setVu1MscalCallback([this](uint32_t startPC, uint32_t top, uint32_t itop)
                                  { m_vu1.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
                                                  m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
-                                                 m_gs, &m_memory, startPC, itop, 65536); });
-    m_memory.setVu1MscntCallback([this](uint32_t itop)
+                                                 m_gs, &m_memory, startPC, top, itop, 65536); });
+    m_memory.setVu1MscntCallback([this](uint32_t top, uint32_t itop)
                                  { m_vu1.resume(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
                                                 m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
-                                                m_gs, &m_memory, itop, 65536); });
+                                                m_gs, &m_memory, top, itop, 65536); });
     m_iop.init(rdram);
     m_iop.reset();
     m_vu0.reset();
@@ -1371,7 +1372,7 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
     m_vu0.execute(vu0Code, PS2_VU0_CODE_SIZE,
                   vu0Data, PS2_VU0_DATA_SIZE,
                   m_gs, &m_memory,
-                  startPC, ctx->vu0_itop, 4096);
+                  startPC, ctx->vu0_top, ctx->vu0_itop, 4096);
     copyVu0StateToContext(m_vu0.state(), ctx);
 }
 

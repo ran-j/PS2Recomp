@@ -149,22 +149,23 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         }
         else if (opcode == VIF_OFFSET)
         {
-            const uint32_t oldTops = vif1_regs.tops & 0x3FFu;
+            // VIF double-buffer setup. OFFSET clears DBF and resets TOPS to BASE.
+            // Do not rewrite BASE from the previous TOPS value.
             vif1_regs.ofst = imm & 0x3FFu;
-            vif1_regs.base = oldTops;
+            vif1_regs.tops = vif1_regs.base & 0x3FFu;
             vif1_regs.stat &= ~(1u << 7); // clear DBF
-            recomputeVif1Tops();
             continue;
         }
         else if (opcode == VIF_BASE)
         {
+            // BASE only updates the base register. TOPS changes on OFFSET/MSCAL.
             vif1_regs.base = imm & 0x3FFu;
-            recomputeVif1Tops();
             continue;
         }
         else if (opcode == VIF_ITOP)
         {
-            vif1_regs.itop = imm & 0x3FFu;
+            // ITOP VIFcode writes pending ITOPS; VU XITOP observes it after MSCAL/MSCNT.
+            vif1_regs.itops = imm & 0x3FFu;
             continue;
         }
         else if (opcode == VIF_STMOD)
@@ -193,10 +194,23 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         }
         else if (opcode == VIF_MSCAL || opcode == VIF_MSCALF)
         {
-            vif1_regs.itops = vif1_regs.itop & 0x3FFu;
-            vif1_regs.stat ^= (1u << 7); // toggle DBF
-            recomputeVif1Tops();
             uint32_t startPC = (uint32_t)imm * 8u;
+
+            // Values visible to the VU program for this MSCAL.
+            // DobieStation semantics: ITOP = ITOPS; TOP = current TOPS;
+            // then TOPS/DBF are prepared for the next buffer.
+            const uint32_t runTop = vif1_regs.tops & 0x3FFu;
+            const uint32_t runItop = vif1_regs.itops & 0x3FFu;
+            vif1_regs.top = runTop;
+            vif1_regs.itop = runItop;
+
+            const bool dbf = (vif1_regs.stat & (1u << 7)) != 0u;
+            if (dbf)
+                vif1_regs.tops = vif1_regs.base & 0x3FFu;
+            else
+                vif1_regs.tops = (vif1_regs.base + vif1_regs.ofst) & 0x3FFu;
+            vif1_regs.stat ^= (1u << 7); // toggle DBF
+
             const uint32_t kickIndex = s_debugVu1KickCount.fetch_add(1, std::memory_order_relaxed);
             if (kickIndex < 48u)
             {
@@ -204,28 +218,41 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                                                 << " opcode=0x" << std::hex << static_cast<uint32_t>(opcode)
                                                 << " imm=0x" << imm
                                                 << " startPc=0x" << startPC
-                                                << " itop=0x" << vif1_regs.itop
+                                                << " top=0x" << runTop
+                                                << " itop=0x" << runItop
+                                                << " nextTops=0x" << vif1_regs.tops
                                                 << std::dec << std::endl);
             }
             if (m_vu1MscalCallback)
-                m_vu1MscalCallback(startPC, vif1_regs.itop);
+                m_vu1MscalCallback(startPC, runTop, runItop);
             continue;
         }
         else if (opcode == VIF_MSCNT)
         {
-            vif1_regs.itops = vif1_regs.itop & 0x3FFu;
+            const uint32_t runTop = vif1_regs.tops & 0x3FFu;
+            const uint32_t runItop = vif1_regs.itops & 0x3FFu;
+            vif1_regs.top = runTop;
+            vif1_regs.itop = runItop;
+
+            const bool dbf = (vif1_regs.stat & (1u << 7)) != 0u;
+            if (dbf)
+                vif1_regs.tops = vif1_regs.base & 0x3FFu;
+            else
+                vif1_regs.tops = (vif1_regs.base + vif1_regs.ofst) & 0x3FFu;
             vif1_regs.stat ^= (1u << 7); // toggle DBF
-            recomputeVif1Tops();
+
             const uint32_t kickIndex = s_debugVu1KickCount.fetch_add(1, std::memory_order_relaxed);
             if (kickIndex < 48u)
             {
                 RUNTIME_LOG("[vif1:mscnt] idx=" << kickIndex
-                                                << " itop=0x" << std::hex << vif1_regs.itop
+                                                << " top=0x" << std::hex << runTop
+                                                << " itop=0x" << runItop
+                                                << " nextTops=0x" << vif1_regs.tops
                                                 << " pc=resume"
                                                 << std::dec << std::endl);
             }
             if (m_vu1MscntCallback)
-                m_vu1MscntCallback(vif1_regs.itop);
+                m_vu1MscntCallback(runTop, runItop);
             continue;
         }
         else if (opcode == VIF_STMASK)
