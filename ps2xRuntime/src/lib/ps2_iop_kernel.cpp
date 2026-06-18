@@ -19,8 +19,10 @@ namespace
 
 IopKernel::IopKernel(PS2Memory *mem)
     : m_mem(mem), m_cpu(std::make_unique<IopCpu>(mem)), m_loader(mem),
-      m_heapTop(HEAP_BASE), m_curGp(0), m_nextTid(1), m_parked(false), m_logBudget(200)
+      m_heapTop(HEAP_BASE), m_curGp(0), m_nextTid(1), m_parked(false), m_curThread(-1),
+      m_logBudget(200)
 {
+    std::memset(m_iopSreg, 0, sizeof(m_iopSreg));
     m_loader.reset(MODULE_BASE);
     m_cpu->setImportHook([this](IopCpu &c, uint32_t addr) { return onImport(c, addr); });
     // IO hook: IOP hardware registers (SPU2/SSBUS/DMA) — accept silently for now.
@@ -271,38 +273,54 @@ bool IopKernel::kernelHle(IopCpu &c, const std::string &lib, uint16_t idx)
         {
             const uint32_t tid = R(4);
             const uint32_t arg = R(5);
-            Thread *th = nullptr;
-            for (auto &t : m_threads)
-                if (t.tid == tid)
-                    th = &t;
-            if (th)
+            int ti = -1;
+            for (size_t k = 0; k < m_threads.size(); ++k)
+                if (m_threads[k].tid == tid)
+                {
+                    ti = static_cast<int>(k);
+                    break;
+                }
+            if (ti >= 0)
             {
                 // Run the thread on its own stack until it returns or parks.
                 const IopCpu::State saved = m_cpu->saveState();
+                const uint32_t savedGp = m_curGp;
+                const int savedCur = m_curThread;
                 for (int i = 1; i < 32; ++i)
                     m_cpu->setGpr(i, 0);
-                m_cpu->setGpr(29, th->stackTop);
-                m_cpu->setGpr(28, th->gp);
+                m_cpu->setGpr(29, m_threads[ti].stackTop);
+                m_cpu->setGpr(28, m_threads[ti].gp);
                 m_cpu->setGpr(4, arg);
                 m_cpu->setGpr(31, PARK_SENTINEL);
-                m_cpu->setPC(th->entry);
+                m_cpu->setPC(m_threads[ti].entry);
                 m_cpu->setHaltPc(PARK_SENTINEL);
-                const uint32_t savedGp = m_curGp;
-                m_curGp = th->gp;
+                m_curGp = m_threads[ti].gp;
+                m_curThread = ti;
                 m_parked = false;
                 const uint32_t n = m_cpu->run(RUN_CAP);
+                const bool parked = m_parked;
+                if (parked)
+                {
+                    m_threads[ti].parked = true;
+                    m_threads[ti].savedState = m_cpu->saveState();
+                }
+                m_threads[ti].started = true;
                 if (m_logBudget)
                 {
                     std::cerr << "[iop:kernel] thread tid=" << tid << " entry=0x" << std::hex
-                              << th->entry << " stopPc=0x" << m_cpu->pc() << std::dec
-                              << " instrs=" << n << (m_parked ? " (parked)" : " (returned/capped)")
-                              << std::endl;
+                              << m_threads[ti].entry << " stopPc=0x" << m_cpu->pc() << std::dec
+                              << " instrs=" << n;
+                    if (parked)
+                        std::cerr << " (parked, waitSreg=0x" << std::hex << m_threads[ti].waitSreg << std::dec << ")";
+                    else
+                        std::cerr << " (returned/capped)";
+                    std::cerr << std::endl;
                     --m_logBudget;
                 }
                 m_cpu->restoreState(saved);
                 m_curGp = savedGp;
+                m_curThread = savedCur;
                 m_parked = false;
-                th->started = true;
             }
             ret(0);
             return true;
@@ -325,7 +343,52 @@ bool IopKernel::kernelHle(IopCpu &c, const std::string &lib, uint16_t idx)
     }
     if (lib == "sifcmd")
     {
-        if (idx == 17) // sceSifRegisterRpc(sd, sid, func, buf, cfunc, cbuf, qd)
+        switch (idx)
+        {
+        case 6: // sceSifGetSreg(idx) -- poll an IOP soft register
+        {
+            const uint16_t r = static_cast<uint16_t>(R(4) & 31u);
+            if (m_iopSreg[r] != 0u)
+            {
+                ret(m_iopSreg[r]);
+                return true;
+            }
+            // Not set yet: park this thread polling sreg r; it re-polls on resume.
+            if (m_curThread >= 0)
+            {
+                m_threads[m_curThread].waitSreg = r;
+                m_parked = true;
+                c.requestHalt();
+                return true; // leave PC at the stub so GetSreg re-runs on resume
+            }
+            ret(0);
+            return true;
+        }
+        case 7: // sceSifSetSreg(idx, val)
+            m_iopSreg[R(4) & 31u] = R(5);
+            ret(0);
+            return true;
+        case 12: // sceSifSendCmd(cid, packet, size, ...)
+        case 13: // isceSifSendCmd
+        {
+            if (R(4) == 0x80000001u) // SET_SREG back to the EE
+            {
+                const uint32_t pkt = R(5);
+                const uint16_t sidx = static_cast<uint16_t>(memb->iopRead32(pkt + 0x10u) & 31u);
+                const uint32_t sval = memb->iopRead32(pkt + 0x14u);
+                if (m_logBudget)
+                {
+                    std::cerr << "[iop:kernel] IOP SET_SREG -> EE sreg[" << sidx << "]=0x"
+                              << std::hex << sval << std::dec << std::endl;
+                    --m_logBudget;
+                }
+                if (m_eeSregWriter)
+                    m_eeSregWriter(sidx, sval);
+            }
+            ret(1);
+            return true;
+        }
+        case 17: // sceSifRegisterRpc(sd, sid, func, buf, cfunc, cbuf, qd)
         {
             RpcServer srv;
             srv.sid = R(5);
@@ -341,14 +404,15 @@ bool IopKernel::kernelHle(IopCpu &c, const std::string &lib, uint16_t idx)
             ret(R(4));
             return true;
         }
-        if (idx == 20 || idx == 22) // GetNextRequest / RpcLoop -> server blocks here
-        {
+        case 20: // sceSifGetNextRequest
+        case 22: // sceSifRpcLoop -> server blocks here
             m_parked = true;
             c.requestHalt();
             return true;
+        default:
+            ret(0);
+            return true;
         }
-        ret(0);
-        return true;
     }
 
     // Unknown kernel library/function: log once and return 0.
@@ -381,6 +445,70 @@ IopModule IopKernel::loadAndStart(const std::string &hostPath)
     return mod;
 }
 
+void IopKernel::resumeThread(size_t ti)
+{
+    if (ti >= m_threads.size() || !m_threads[ti].parked)
+        return;
+
+    const IopCpu::State saved = m_cpu->saveState();
+    const uint32_t savedGp = m_curGp;
+    const int savedCur = m_curThread;
+
+    m_cpu->restoreState(m_threads[ti].savedState);
+    m_cpu->setHaltPc(PARK_SENTINEL);
+    m_curGp = m_threads[ti].gp;
+    m_curThread = static_cast<int>(ti);
+    m_threads[ti].parked = false;
+    m_threads[ti].waitSreg = 0xFFFFu;
+    m_parked = false;
+
+    const uint32_t n = m_cpu->run(RUN_CAP);
+    const bool parked = m_parked;
+    if (parked)
+    {
+        m_threads[ti].parked = true;
+        m_threads[ti].savedState = m_cpu->saveState();
+    }
+    if (m_logBudget)
+    {
+        std::cerr << "[iop:kernel] resumed tid=" << m_threads[ti].tid
+                  << " stopPc=0x" << std::hex << m_cpu->pc() << std::dec
+                  << " instrs=" << n
+                  << (parked ? " (parked again)" : " (returned/capped)") << std::endl;
+        --m_logBudget;
+    }
+
+    m_cpu->restoreState(saved);
+    m_curGp = savedGp;
+    m_curThread = savedCur;
+    m_parked = false;
+}
+
+bool IopKernel::setIopSregAndResume(uint16_t idx, uint32_t val)
+{
+    if (idx < 32)
+        m_iopSreg[idx] = val;
+    bool woke = false;
+    // Resume any thread parked on this sreg (or on an unspecified one).
+    for (size_t k = 0; k < m_threads.size(); ++k)
+    {
+        if (m_threads[k].parked && (m_threads[k].waitSreg == idx || m_threads[k].waitSreg == 0xFFFFu))
+        {
+            resumeThread(k);
+            woke = true;
+        }
+    }
+    return woke;
+}
+
+bool IopKernel::hasParkedThread() const
+{
+    for (const auto &t : m_threads)
+        if (t.parked)
+            return true;
+    return false;
+}
+
 bool iopKernelTest(PS2Memory *mem)
 {
     const char *paths = std::getenv("PS2_IOP_KERNEL_TEST");
@@ -390,6 +518,13 @@ bool iopKernelTest(PS2Memory *mem)
         return false;
 
     IopKernel kernel(mem);
+    // When a loaded IOP module SET_SREGs back to the EE, log it (this is what a
+    // live run writes into the EE-side _sif_sreg mirror).
+    kernel.setEeSregWriter([](uint16_t idx, uint32_t val) {
+        std::cerr << "[iop:kernel] (-> EE mirror) sreg[" << idx << "]=0x" << std::hex << val
+                  << std::dec << std::endl;
+    });
+
     std::stringstream ss(paths);
     std::string path;
     bool any = false;
@@ -401,6 +536,16 @@ bool iopKernelTest(PS2Memory *mem)
         if (m.valid)
             any = true;
     }
+
+    // Simulate the EE completing its half of the audio handshake: set the IOP
+    // soft-register the AUDIO worker thread is polling, and resume it.
+    if (kernel.hasParkedThread())
+    {
+        std::cerr << "[iop:kernel] simulating EE -> IOP: SET_SREG iop[0x1f]=1, resuming parked thread(s)"
+                  << std::endl;
+        kernel.setIopSregAndResume(0x1Fu, 1u);
+    }
+
     std::cerr << "[iop:kernel] done. RPC servers registered: " << kernel.rpcServers().size();
     for (const auto &s : kernel.rpcServers())
         std::cerr << " sid=0x" << std::hex << s.sid << std::dec;
