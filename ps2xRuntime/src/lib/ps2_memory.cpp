@@ -3,6 +3,7 @@
 #include <atomic>
 #include <iostream>
 #include <cstring>
+#include <cstdlib>
 #include <stdexcept>
 #include <algorithm>
 #include <string>
@@ -220,6 +221,11 @@ bool PS2Memory::initialize(size_t ramSize)
         // Initialize DMA registers
         memset(dma_regs, 0, sizeof(dma_regs));
 
+        if (const char *st = std::getenv("PS2_IOP_SELFTEST"); st && *st && *st != '0')
+        {
+            iopSelfTest();
+        }
+
         return true;
     }
     catch (const std::exception &e)
@@ -228,6 +234,149 @@ bool PS2Memory::initialize(size_t ramSize)
         cleanup();
         return false;
     }
+}
+
+// ---- IOP RAM (2 MB) + SIF DMA (Marco 2) -------------------------------------
+
+uint32_t PS2Memory::iopRamOffset(uint32_t addr) const
+{
+    // KUSEG/KSEG0/KSEG1 all alias the same physical RAM on the R3000A.
+    const uint32_t phys = addr & 0x1FFFFFFFu;
+    return (phys < IOP_RAM_SIZE) ? phys : IOP_RAM_SIZE;
+}
+
+uint8_t PS2Memory::iopRead8(uint32_t addr) const
+{
+    if (!iop_ram)
+        return 0u;
+    const uint32_t off = iopRamOffset(addr);
+    return (off < IOP_RAM_SIZE) ? iop_ram[off] : 0u;
+}
+
+uint16_t PS2Memory::iopRead16(uint32_t addr) const
+{
+    if (!iop_ram)
+        return 0u;
+    const uint32_t off = iopRamOffset(addr);
+    if (off + sizeof(uint16_t) > IOP_RAM_SIZE)
+        return 0u;
+    uint16_t v;
+    std::memcpy(&v, iop_ram + off, sizeof(v));
+    return v;
+}
+
+uint32_t PS2Memory::iopRead32(uint32_t addr) const
+{
+    if (!iop_ram)
+        return 0u;
+    const uint32_t off = iopRamOffset(addr);
+    if (off + sizeof(uint32_t) > IOP_RAM_SIZE)
+        return 0u;
+    uint32_t v;
+    std::memcpy(&v, iop_ram + off, sizeof(v));
+    return v;
+}
+
+void PS2Memory::iopWrite8(uint32_t addr, uint8_t value)
+{
+    if (!iop_ram)
+        return;
+    const uint32_t off = iopRamOffset(addr);
+    if (off < IOP_RAM_SIZE)
+        iop_ram[off] = value;
+}
+
+void PS2Memory::iopWrite16(uint32_t addr, uint16_t value)
+{
+    if (!iop_ram)
+        return;
+    const uint32_t off = iopRamOffset(addr);
+    if (off + sizeof(uint16_t) <= IOP_RAM_SIZE)
+        std::memcpy(iop_ram + off, &value, sizeof(value));
+}
+
+void PS2Memory::iopWrite32(uint32_t addr, uint32_t value)
+{
+    if (!iop_ram)
+        return;
+    const uint32_t off = iopRamOffset(addr);
+    if (off + sizeof(uint32_t) <= IOP_RAM_SIZE)
+        std::memcpy(iop_ram + off, &value, sizeof(value));
+}
+
+uint32_t PS2Memory::sifDmaEEtoIOP(uint32_t eeAddr, uint32_t iopAddr, uint32_t bytes) // SIF1
+{
+    if (!m_rdram || !iop_ram || bytes == 0u)
+        return 0u;
+    const uint32_t eeOff = translateAddress(eeAddr);
+    const uint32_t iopOff = iopRamOffset(iopAddr);
+    if (eeOff >= PS2_RAM_SIZE || iopOff >= IOP_RAM_SIZE)
+        return 0u;
+    uint32_t n = bytes;
+    if (eeOff + n > PS2_RAM_SIZE)
+        n = PS2_RAM_SIZE - eeOff;
+    if (iopOff + n > IOP_RAM_SIZE)
+        n = IOP_RAM_SIZE - iopOff;
+    std::memcpy(iop_ram + iopOff, m_rdram + eeOff, n);
+    return n;
+}
+
+uint32_t PS2Memory::sifDmaIOPtoEE(uint32_t iopAddr, uint32_t eeAddr, uint32_t bytes) // SIF0
+{
+    if (!m_rdram || !iop_ram || bytes == 0u)
+        return 0u;
+    const uint32_t iopOff = iopRamOffset(iopAddr);
+    const uint32_t eeOff = translateAddress(eeAddr);
+    if (eeOff >= PS2_RAM_SIZE || iopOff >= IOP_RAM_SIZE)
+        return 0u;
+    uint32_t n = bytes;
+    if (iopOff + n > IOP_RAM_SIZE)
+        n = IOP_RAM_SIZE - iopOff;
+    if (eeOff + n > PS2_RAM_SIZE)
+        n = PS2_RAM_SIZE - eeOff;
+    std::memcpy(m_rdram + eeOff, iop_ram + iopOff, n);
+    return n;
+}
+
+bool PS2Memory::iopSelfTest()
+{
+    if (!iop_ram || !m_rdram)
+    {
+        std::cerr << "[iop:selftest] FAIL: memory not allocated" << std::endl;
+        return false;
+    }
+
+    bool ok = true;
+
+    // 1) Direct IOP RAM read/write + KSEG0 mirror aliasing.
+    iopWrite32(0x00001000u, 0xDEADBEEFu);
+    const bool rw = (iopRead32(0x00001000u) == 0xDEADBEEFu);
+    const bool kseg = (iopRead32(0x80001000u) == 0xDEADBEEFu) && (iopRead32(0xA0001000u) == 0xDEADBEEFu);
+    ok = ok && rw && kseg;
+
+    // 2) SIF round-trip: EE -> IOP (SIF1) then IOP -> EE (SIF0).
+    const uint32_t eeSrc = 0x00200000u, eeDst = 0x00201000u, iopMid = 0x00002000u;
+    for (uint32_t i = 0; i < 256u; ++i)
+        m_rdram[eeSrc + i] = static_cast<uint8_t>(i * 7u + 3u);
+    std::memset(m_rdram + eeDst, 0, 256u);
+    const uint32_t s1 = sifDmaEEtoIOP(eeSrc, iopMid, 256u);
+    const uint32_t s0 = sifDmaIOPtoEE(iopMid, eeDst, 256u);
+    const bool roundtrip = (s1 == 256u) && (s0 == 256u) && (std::memcmp(m_rdram + eeSrc, m_rdram + eeDst, 256u) == 0);
+    ok = ok && roundtrip;
+
+    // Clean up the scratch we scribbled so the guest starts from zeroed RAM.
+    iopWrite32(0x00001000u, 0u);
+    std::memset(iop_ram + 0x00002000u, 0, 256u);
+    std::memset(m_rdram + eeSrc, 0, 256u);
+    std::memset(m_rdram + eeDst, 0, 256u);
+
+    std::cerr << "[iop:selftest] iopRAM=2MB rw=" << (rw ? "PASS" : "FAIL")
+              << " kseg-mirror=" << (kseg ? "PASS" : "FAIL")
+              << " sif1(EE->IOP)=" << s1
+              << " sif0(IOP->EE)=" << s0
+              << " roundtrip=" << (roundtrip ? "PASS" : "FAIL")
+              << " => " << (ok ? "ALL PASS" : "FAIL") << std::endl;
+    return ok;
 }
 
 bool PS2Memory::isScratchpad(uint32_t address) const

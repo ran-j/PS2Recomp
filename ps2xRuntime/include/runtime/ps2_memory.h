@@ -270,6 +270,29 @@ public:
     uint8_t *getRDRAM() { return m_rdram; }
     uint8_t *getScratchpad() { return m_scratchpad; }
     uint8_t *getIOPRAM() { return iop_ram; }
+
+    // ---- IOP RAM (2 MB) + SIF DMA (Marco 2) ----------------------------------
+    // The IOP is a separate R3000A CPU with its own 2 MB RAM at IOP-physical
+    // 0x00000000-0x001FFFFF, a distinct address space from EE RDRAM. SIF0/SIF1
+    // DMA move data between the two. These are the substrate for the IOP core.
+    static constexpr uint32_t IOP_RAM_SIZE = 2u * 1024u * 1024u;
+    // Map an IOP virtual address to a RAM byte offset, stripping MIPS segment
+    // bits (KUSEG 0x0, KSEG0 0x80000000, KSEG1 0xA0000000 all alias the same
+    // RAM). Returns IOP_RAM_SIZE if the address is not within IOP RAM.
+    uint32_t iopRamOffset(uint32_t addr) const;
+    uint8_t  iopRead8(uint32_t addr) const;
+    uint16_t iopRead16(uint32_t addr) const;
+    uint32_t iopRead32(uint32_t addr) const;
+    void     iopWrite8(uint32_t addr, uint8_t value);
+    void     iopWrite16(uint32_t addr, uint16_t value);
+    void     iopWrite32(uint32_t addr, uint32_t value);
+    // SIF DMA between EE main RAM and IOP RAM; returns bytes actually copied.
+    // SIF1 path = EE -> IOP; SIF0 path = IOP -> EE.
+    uint32_t sifDmaEEtoIOP(uint32_t eeAddr, uint32_t iopAddr, uint32_t bytes); // SIF1
+    uint32_t sifDmaIOPtoEE(uint32_t iopAddr, uint32_t eeAddr, uint32_t bytes); // SIF0
+    // Foundation self-test (env PS2_IOP_SELFTEST=1): exercises IOP RAM + SIF DMA.
+    bool iopSelfTest();
+
     uint64_t dmaStartCount() const { return m_dmaStartCount.load(std::memory_order_relaxed); }
     uint64_t gifCopyCount() const { return m_gifCopyCount.load(std::memory_order_relaxed); }
     uint64_t gsWriteCount() const { return m_gsWriteCount.load(std::memory_order_relaxed); }
