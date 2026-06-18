@@ -4,6 +4,8 @@
 #include <cmath>
 #include <cstring>
 #include <bit>
+#include <atomic>
+#include <iostream>
 #if defined(_MSC_VER)
 #include <intrin.h>
 #elif defined(USE_SSE2NEON)
@@ -39,6 +41,150 @@ static inline int64_t Ps2ExtractEpi64(__m128i v, int index)
     {
         return _mm_extract_epi64(v, 1);
     }
+}
+
+
+static inline bool Ps2TraceCnkVu0ReadPc(uint32_t pc)
+{
+    switch (pc)
+    {
+    case 0x002D2BB0u: // njCnkCsUvh: lqc2 vf4, 0(t2)
+    case 0x002D2BB4u: // njCnkCsUvh: lqc2 vf5, 0x10(t2)
+    case 0x002D2BB8u: // njCnkCsUvh: lqc2 vf6, 0x20(t2)
+    case 0x002D2BBCu: // njCnkCsUvh: lqc2 vf7, 0x30(t2)
+    case 0x002D34A0u: // njCnkCsUvn: lqc2 vf4, 0(t2)
+    case 0x002D34A4u: // njCnkCsUvn: lqc2 vf5, 0x10(t2)
+    case 0x002D34A8u: // njCnkCsUvn: lqc2 vf6, 0x20(t2)
+    case 0x002D34ACu: // njCnkCsUvn: lqc2 vf7, 0x30(t2)
+        return true;
+    default:
+        return false;
+    }
+}
+
+static inline bool Ps2TraceCnkIndexReadPc(uint32_t pc)
+{
+    switch (pc)
+    {
+    case 0x002D2B90u: // njCnkCsUvh: ldl t0, 7(t4)
+    case 0x002D2B94u: // njCnkCsUvh: ldr t0, 0(t4)
+    case 0x002D2BE0u: // njCnkCsUvh: ldl t0, 7(t4)
+    case 0x002D2BE4u: // njCnkCsUvh: ldr t0, 0(t4)
+    case 0x002D3480u: // njCnkCsUvn: ldl t0, 7(t4)
+    case 0x002D3484u: // njCnkCsUvn: ldr t0, 0(t4)
+    case 0x002D34D0u: // njCnkCsUvn: ldl t0, 7(t4)
+    case 0x002D34D4u: // njCnkCsUvn: ldr t0, 0(t4)
+        return true;
+    default:
+        return false;
+    }
+}
+
+static inline void Ps2TraceCnkRead128Probe(const R5900Context *ctx, uint32_t addr, __m128i value)
+{
+    if (!ctx || !Ps2TraceCnkVu0ReadPc(ctx->pc))
+    {
+        return;
+    }
+
+    static std::atomic<uint32_t> s_count{0};
+    const uint32_t idx = s_count.fetch_add(1, std::memory_order_relaxed);
+    if (idx >= 2048u)
+    {
+        return;
+    }
+
+    alignas(16) uint32_t raw[4];
+    _mm_store_si128(reinterpret_cast<__m128i *>(raw), value);
+
+    const uint32_t t0lo = static_cast<uint32_t>(Ps2ExtractEpi32(ctx->r[8], 0));
+    const uint32_t t1lo = static_cast<uint32_t>(Ps2ExtractEpi32(ctx->r[9], 0));
+    const uint32_t t2lo = static_cast<uint32_t>(Ps2ExtractEpi32(ctx->r[10], 0));
+    const uint32_t t3lo = static_cast<uint32_t>(Ps2ExtractEpi32(ctx->r[11], 0));
+    const uint32_t t4lo = static_cast<uint32_t>(Ps2ExtractEpi32(ctx->r[12], 0));
+    const uint32_t t5lo = static_cast<uint32_t>(Ps2ExtractEpi32(ctx->r[13], 0));
+
+    std::cout << "[recomp:cnk-read128] idx=" << idx
+              << " pc=0x" << std::hex << ctx->pc
+              << " addr=0x" << addr
+              << " raw=(0x" << raw[0] << ",0x" << raw[1] << ",0x" << raw[2] << ",0x" << raw[3] << ")"
+              << " t0=0x" << t0lo
+              << " t1=0x" << t1lo
+              << " t2=0x" << t2lo
+              << " t3=0x" << t3lo
+              << " t4=0x" << t4lo
+              << " t5=0x" << t5lo
+              << std::dec << "\n";
+}
+
+static inline void Ps2TraceCnkRead64Probe(const R5900Context *ctx, uint32_t addr, uint64_t value)
+{
+    if (!ctx || !Ps2TraceCnkIndexReadPc(ctx->pc))
+    {
+        return;
+    }
+
+    static std::atomic<uint32_t> s_count{0};
+    const uint32_t idx = s_count.fetch_add(1, std::memory_order_relaxed);
+    if (idx >= 2048u)
+    {
+        return;
+    }
+
+    const uint64_t t0 = static_cast<uint64_t>(Ps2ExtractEpi64(ctx->r[8], 0));
+    const uint32_t t1lo = static_cast<uint32_t>(Ps2ExtractEpi32(ctx->r[9], 0));
+    const uint32_t t2lo = static_cast<uint32_t>(Ps2ExtractEpi32(ctx->r[10], 0));
+    const uint32_t t4lo = static_cast<uint32_t>(Ps2ExtractEpi32(ctx->r[12], 0));
+
+    std::cout << "[recomp:cnk-read64] idx=" << idx
+              << " pc=0x" << std::hex << ctx->pc
+              << " addr=0x" << addr
+              << " val=0x" << value
+              << " oldT0=0x" << t0
+              << " t1=0x" << t1lo
+              << " t2=0x" << t2lo
+              << " t4=0x" << t4lo
+              << std::dec << "\n";
+}
+
+
+static inline void Ps2TraceCnkSourceWriteProbe(const R5900Context *ctx, uint32_t addr, uint32_t size, uint64_t lo, uint64_t hi, const char *op)
+{
+    if (!ctx)
+    {
+        return;
+    }
+
+    // Source vertex table consumed by njCnkCsUvh in latest logs:
+    // t5 ~= 0x01d34e40, t2 source addresses through about 0x01d35370.
+    constexpr uint32_t kBegin = 0x01D34000u;
+    constexpr uint32_t kEnd = 0x01D36000u;
+    const uint32_t end = addr + size;
+    if (end <= kBegin || addr >= kEnd)
+    {
+        return;
+    }
+
+    static std::atomic<uint32_t> s_count{0};
+    const uint32_t idx = s_count.fetch_add(1, std::memory_order_relaxed);
+    if (idx >= 4096u)
+    {
+        return;
+    }
+
+    const uint32_t ra = static_cast<uint32_t>(Ps2ExtractEpi32(ctx->r[31], 0));
+    const uint32_t sp = static_cast<uint32_t>(Ps2ExtractEpi32(ctx->r[29], 0));
+
+    std::cout << "[recomp:cnk-src-write] idx=" << idx
+              << " op=" << op
+              << " pc=0x" << std::hex << ctx->pc
+              << " ra=0x" << ra
+              << " sp=0x" << sp
+              << " addr=0x" << addr
+              << " size=0x" << size
+              << " lo=0x" << lo
+              << " hi=0x" << hi
+              << std::dec << "\n";
 }
 
 static inline uint32_t ps2_clz32(uint32_t x)
@@ -343,15 +489,19 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
 
 #define READ64(addr) ([&]() -> uint64_t {                     \
     uint32_t _addr = (uint32_t)(addr);                        \
-    return PS2Runtime::isSpecialAddress(_addr)                \
+    uint64_t _value = PS2Runtime::isSpecialAddress(_addr)     \
         ? runtime->Load64(rdram, ctx, _addr)                  \
-        : FAST_READ64(_addr); }())
+        : FAST_READ64(_addr);                                \
+    Ps2TraceCnkRead64Probe(ctx, _addr, _value);               \
+    return _value; }())
 
 #define READ128(addr) ([&]() -> __m128i {                     \
     uint32_t _addr = (uint32_t)(addr);                        \
-    return PS2Runtime::isSpecialAddress(_addr)                \
+    __m128i _value = PS2Runtime::isSpecialAddress(_addr)      \
         ? runtime->Load128(rdram, ctx, _addr)                 \
-        : FAST_READ128(_addr); }())
+        : FAST_READ128(_addr);                               \
+    Ps2TraceCnkRead128Probe(ctx, _addr, _value);              \
+    return _value; }())
 
 #define WRITE8(addr, val)                                                            \
     do                                                                               \
@@ -388,6 +538,7 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
         else                                                                           \
         {                                                                              \
             ps2TraceGuestWrite(rdram, _addr, 4u, (uint32_t)(val), 0u, "WRITE32", ctx); \
+            Ps2TraceCnkSourceWriteProbe(ctx, _addr, 4u, (uint32_t)(val), 0u, "WRITE32"); \
             FAST_WRITE32(_addr, (val));                                                \
         }                                                                              \
     } while (0)
@@ -401,6 +552,7 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
         else                                                                           \
         {                                                                              \
             ps2TraceGuestWrite(rdram, _addr, 8u, (uint64_t)(val), 0u, "WRITE64", ctx); \
+            Ps2TraceCnkSourceWriteProbe(ctx, _addr, 8u, (uint64_t)(val), 0u, "WRITE64"); \
             FAST_WRITE64(_addr, (val));                                                \
         }                                                                              \
     } while (0)
@@ -417,6 +569,7 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
             const uint64_t _lo = static_cast<uint64_t>(PS2_EXTRACT_EPI64_0(_value)); \
             const uint64_t _hi = static_cast<uint64_t>(PS2_EXTRACT_EPI64_1(_value)); \
             ps2TraceGuestWrite(rdram, _addr, 16u, _lo, _hi, "WRITE128", ctx);        \
+            Ps2TraceCnkSourceWriteProbe(ctx, _addr, 16u, _lo, _hi, "WRITE128");       \
             FAST_WRITE128(_addr, _value);                                            \
         }                                                                            \
     } while (0)

@@ -15,6 +15,8 @@
 #include <iostream>
 #include <sstream>
 
+extern thread_local uint8_t g_ps2GifProbeCurrentPath;
+
 namespace
 {
     static constexpr uint32_t kDefaultDisplayWidth = 640u;
@@ -355,6 +357,12 @@ namespace
     std::atomic<uint32_t> s_debugTexaWriteCount{0};
     std::atomic<uint32_t> s_debugCvFontUploadCount{0};
     std::atomic<uint32_t> s_debugLocalCopyCount{0};
+    std::atomic<uint32_t> s_debugGsGifProbeCount{0};
+    std::atomic<uint32_t> s_debugGsRegProbeCount{0};
+    std::atomic<uint32_t> s_debugGsKickProbeCount{0};
+    std::atomic<uint32_t> s_debugGsPath1GifProbeCount{0};
+    std::atomic<uint32_t> s_debugGsPath1RegProbeCount{0};
+    std::atomic<uint32_t> s_debugGsPath1KickProbeCount{0};
 
     bool supportsFormatAwareLocalCopy(uint8_t psm)
     {
@@ -1157,7 +1165,36 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
     if (sizeBytes >= 16)
     {
         const uint64_t tagLo = loadLE64(data);
+        const uint64_t tagHi = loadLE64(data + 8);
+        const uint32_t nloop = static_cast<uint32_t>(tagLo & 0x7FFFu);
         const uint8_t flg = static_cast<uint8_t>((tagLo >> 58) & 0x3);
+        uint32_t nreg = static_cast<uint32_t>((tagLo >> 60) & 0xFu);
+        if (nreg == 0u)
+            nreg = 16u;
+
+        const uint8_t probePath = g_ps2GifProbeCurrentPath;
+        const uint32_t probeIndex = s_debugGsGifProbeCount.fetch_add(1, std::memory_order_relaxed);
+        const bool isPath1Probe = (probePath == 1u);
+        const uint32_t path1ProbeIndex = isPath1Probe ? s_debugGsPath1GifProbeCount.fetch_add(1, std::memory_order_relaxed) : 0u;
+        if (probeIndex < 4096u || (isPath1Probe && path1ProbeIndex < 512u))
+        {
+            RUNTIME_LOG((isPath1Probe ? "[gs:path1-gif-probe] idx=" : "[gs:gif-probe] idx=")
+                                               << (isPath1Probe ? path1ProbeIndex : probeIndex)
+                                               << " globalIdx=" << probeIndex
+                                               << " path=" << static_cast<uint32_t>(probePath)
+                                               << " size=" << sizeBytes
+                                               << " nloop=" << nloop
+                                               << " flg=" << static_cast<uint32_t>(flg)
+                                               << " nreg=" << nreg
+                                               << " eop=" << static_cast<uint32_t>((tagLo >> 15) & 1u)
+                                               << " pre=" << static_cast<uint32_t>((tagLo >> 46) & 1u)
+                                               << " prim=0x" << std::hex << static_cast<uint32_t>((tagLo >> 47) & 0x7FFu)
+                                               << " tagLo=0x" << tagLo
+                                               << " tagHi=0x" << tagHi
+                                               << std::dec
+                                               << std::endl);
+        }
+
         if (flg == GIF_FMT_PACKED)
         {
             m_hwregX = 0;
@@ -1487,6 +1524,27 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
                         << std::endl);
         }
     });
+
+    if (interestingReg)
+    {
+        const uint8_t probePath = g_ps2GifProbeCurrentPath;
+        const bool isPath1Probe = (probePath == 1u);
+        const uint32_t probeIndex = s_debugGsRegProbeCount.fetch_add(1, std::memory_order_relaxed);
+        const uint32_t path1ProbeIndex = isPath1Probe ? s_debugGsPath1RegProbeCount.fetch_add(1, std::memory_order_relaxed) : 0u;
+        if (probeIndex < 4096u || (isPath1Probe && path1ProbeIndex < 2048u))
+        {
+            RUNTIME_LOG((isPath1Probe ? "[gs:path1-reg-probe] idx=" : "[gs:reg-probe] idx=")
+                                               << (isPath1Probe ? path1ProbeIndex : probeIndex)
+                                               << " globalIdx=" << probeIndex
+                                               << " path=" << static_cast<uint32_t>(probePath)
+                                               << " reg=0x" << std::hex << static_cast<uint32_t>(regAddr)
+                                               << " value=0x" << value
+                                               << std::dec
+                                               << " prim=" << static_cast<uint32_t>(m_prim.type)
+                                               << " ctxt=" << static_cast<uint32_t>(m_prim.ctxt)
+                                               << std::endl);
+        }
+    }
 
     switch (regAddr)
     {
@@ -1947,6 +2005,31 @@ void GS::vertexKick(bool drawing)
 {
     ++m_vtxCount;
     ++m_vtxIndex;
+
+    {
+        const uint8_t probePath = g_ps2GifProbeCurrentPath;
+        const bool isPath1Probe = (probePath == 1u);
+        const uint32_t probeIndex = s_debugGsKickProbeCount.fetch_add(1, std::memory_order_relaxed);
+        const uint32_t path1ProbeIndex = isPath1Probe ? s_debugGsPath1KickProbeCount.fetch_add(1, std::memory_order_relaxed) : 0u;
+        if (probeIndex < 4096u || (isPath1Probe && path1ProbeIndex < 2048u))
+        {
+            RUNTIME_LOG((isPath1Probe ? "[gs:path1-kick-probe] idx=" : "[gs:kick-probe] idx=")
+                                                << (isPath1Probe ? path1ProbeIndex : probeIndex)
+                                                << " globalIdx=" << probeIndex
+                                                << " path=" << static_cast<uint32_t>(probePath)
+                                                << " drawing=" << static_cast<uint32_t>(drawing ? 1u : 0u)
+                                                << " prim=" << static_cast<uint32_t>(m_prim.type)
+                                                << " vtxCount=" << m_vtxCount
+                                                << " x=" << m_vtxQueue[(m_vtxCount - 1u) % kMaxVerts].x
+                                                << " y=" << m_vtxQueue[(m_vtxCount - 1u) % kMaxVerts].y
+                                                << " rgba=(" << static_cast<uint32_t>(m_vtxQueue[(m_vtxCount - 1u) % kMaxVerts].r)
+                                                << "," << static_cast<uint32_t>(m_vtxQueue[(m_vtxCount - 1u) % kMaxVerts].g)
+                                                << "," << static_cast<uint32_t>(m_vtxQueue[(m_vtxCount - 1u) % kMaxVerts].b)
+                                                << "," << static_cast<uint32_t>(m_vtxQueue[(m_vtxCount - 1u) % kMaxVerts].a)
+                                                << ")"
+                                                << std::endl);
+        }
+    }
 
     PS2_IF_AGRESSIVE_LOGS({
         const uint32_t debugIndex = s_debugGsVertexKickCount.fetch_add(1, std::memory_order_relaxed);

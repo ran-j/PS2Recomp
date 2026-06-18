@@ -1895,6 +1895,25 @@ namespace ps2_stubs
         uint32_t currentAddr = 0u;
         tryReadWordFromGuest(rdram, runtime, stateAddr, currentAddr);
         const uint32_t reservedAddr = reservePacketBuilderWords(rdram, runtime, stateAddr, wordCount);
+        const uint32_t byteCount = wordCount * 4u;
+        if (reservedAddr != 0u && byteCount != 0u)
+        {
+            ps2SetVifPacketWatch(reservedAddr, byteCount);
+            static uint32_t s_vifPacketWatchRangeLogCount = 0u;
+            if (s_vifPacketWatchRangeLogCount < 128u)
+            {
+                RUNTIME_LOG("[watch:vif-packet-arm] idx=" << s_vifPacketWatchRangeLogCount
+                                                          << " pc=0x" << std::hex << ctx->pc
+                                                          << " ra=0x" << getRegU32(ctx, 31)
+                                                          << " state=0x" << stateAddr
+                                                          << " current=0x" << currentAddr
+                                                          << " reserved=0x" << reservedAddr
+                                                          << " bytes=0x" << byteCount
+                                                          << " words=0x" << wordCount
+                                                          << std::dec << std::endl);
+                ++s_vifPacketWatchRangeLogCount;
+            }
+        }
         logVif1PacketStateOp("reserve", ctx, stateAddr, currentAddr, reservedAddr, wordCount);
         setReturnU32(ctx, reservedAddr);
     }

@@ -243,6 +243,85 @@ namespace
         ctx->vu0_vpu_stat2 = 0;
     }
 
+
+    std::atomic<uint32_t> s_debugVu0Mp188Count{0};
+
+    void vu0LogM128Raw(std::ostream &os, __m128 value)
+    {
+        alignas(16) uint32_t raw[4]{};
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(raw), _mm_castps_si128(value));
+        os << "(0x" << std::hex << raw[0]
+           << ",0x" << raw[1]
+           << ",0x" << raw[2]
+           << ",0x" << raw[3] << std::dec << ")";
+    }
+
+    void vu0LogFloat4Raw(std::ostream &os, const float value[4])
+    {
+        uint32_t raw[4]{};
+        std::memcpy(raw, value, sizeof(raw));
+        os << "(0x" << std::hex << raw[0]
+           << ",0x" << raw[1]
+           << ",0x" << raw[2]
+           << ",0x" << raw[3] << std::dec << ")";
+    }
+
+    void vu0LogMp188Context(const char *phase, uint32_t idx, uint32_t startPC, const R5900Context *ctx)
+    {
+        if (!ctx)
+        {
+            return;
+        }
+
+        const uint32_t ra = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0));
+        RUNTIME_LOG("[vu0:mp188-reg] idx=" << idx
+                    << " phase=" << phase
+                    << " start=0x" << std::hex << startPC
+                    << " callerPc=0x" << ctx->pc
+                    << " ra=0x" << ra
+                    << " q=" << std::dec << ctx->vu0_q
+                    << " i=" << ctx->vu0_i
+                    << " vf4raw=");
+        vu0LogM128Raw(std::cout, ctx->vu0_vf[4]);
+        RUNTIME_LOG(" vf5raw=");
+        vu0LogM128Raw(std::cout, ctx->vu0_vf[5]);
+        RUNTIME_LOG(" vf6raw=");
+        vu0LogM128Raw(std::cout, ctx->vu0_vf[6]);
+        RUNTIME_LOG(" vf7raw=");
+        vu0LogM128Raw(std::cout, ctx->vu0_vf[7]);
+        RUNTIME_LOG(" vf18raw=");
+        vu0LogM128Raw(std::cout, ctx->vu0_vf[18]);
+        RUNTIME_LOG(" accraw=");
+        vu0LogM128Raw(std::cout, ctx->vu0_acc);
+        RUNTIME_LOG(std::endl);
+    }
+
+    void vu0LogMp188State(const char *phase, uint32_t idx, uint32_t startPC, const VU1State &state, const R5900Context *ctx)
+    {
+        const uint32_t ra = ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0)) : 0u;
+        RUNTIME_LOG("[vu0:mp188-state] idx=" << idx
+                    << " phase=" << phase
+                    << " start=0x" << std::hex << startPC
+                    << " statePc=0x" << state.pc
+                    << " callerPc=0x" << (ctx ? ctx->pc : 0u)
+                    << " ra=0x" << ra
+                    << " q=" << std::dec << state.q
+                    << " i=" << state.i
+                    << " vf4raw=");
+        vu0LogFloat4Raw(std::cout, state.vf[4]);
+        RUNTIME_LOG(" vf5raw=");
+        vu0LogFloat4Raw(std::cout, state.vf[5]);
+        RUNTIME_LOG(" vf6raw=");
+        vu0LogFloat4Raw(std::cout, state.vf[6]);
+        RUNTIME_LOG(" vf7raw=");
+        vu0LogFloat4Raw(std::cout, state.vf[7]);
+        RUNTIME_LOG(" vf18raw=");
+        vu0LogFloat4Raw(std::cout, state.vf[18]);
+        RUNTIME_LOG(" accraw=");
+        vu0LogFloat4Raw(std::cout, state.acc);
+        RUNTIME_LOG(std::endl);
+    }
+
     void copyVu0ContextToState(const R5900Context *ctx, VU1State &state)
     {
         std::memset(&state, 0, sizeof(state));
@@ -264,7 +343,6 @@ namespace
         state.mac = ctx->vu0_mac_flags;
         state.clip = ctx->vu0_clip_flags;
         state.status = ctx->vu0_status;
-        state.top = ctx->vu0_top;
         state.itop = ctx->vu0_itop;
 
         state.vf[0][0] = 0.0f;
@@ -293,9 +371,7 @@ namespace
         ctx->vu0_clip_flags = state.clip;
         ctx->vu0_clip_flags2 = state.clip;
         ctx->vu0_status = static_cast<uint16_t>(state.status);
-        ctx->vu0_top = state.top;
         ctx->vu0_itop = state.itop;
-        ctx->vu0_xitop = state.itop;
         ctx->vu0_pc = state.pc;
         ctx->vu0_tpc = state.pc;
         ctx->vu0_vpu_stat = 0;
@@ -1361,19 +1437,49 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
     uint8_t *const vu0Code = m_memory.getVU0Code();
     uint8_t *const vu0Data = m_memory.getVU0Data();
     const uint32_t startPC = address & ~0x7u;
+
+    const bool traceMp188 = (startPC == 0x188u);
+    uint32_t traceIdx = 0u;
+    bool shouldTraceMp188 = false;
+    if (traceMp188)
+    {
+        traceIdx = s_debugVu0Mp188Count.fetch_add(1u);
+        shouldTraceMp188 = traceIdx < 2048u;
+        if (shouldTraceMp188)
+        {
+            vu0LogMp188Context("before", traceIdx, startPC, ctx);
+        }
+    }
+
     if (!vu0Code || !vu0Data || startPC + 8u > PS2_VU0_CODE_SIZE)
     {
         seedVu0IdleSuccess(ctx);
+        if (shouldTraceMp188)
+        {
+            vu0LogMp188Context("after-invalid", traceIdx, startPC, ctx);
+        }
         return;
     }
 
     m_vu0.reset();
     copyVu0ContextToState(ctx, m_vu0.state());
+    if (shouldTraceMp188)
+    {
+        vu0LogMp188State("copied-in", traceIdx, startPC, m_vu0.state(), ctx);
+    }
     m_vu0.execute(vu0Code, PS2_VU0_CODE_SIZE,
                   vu0Data, PS2_VU0_DATA_SIZE,
                   m_gs, &m_memory,
-                  startPC, ctx->vu0_top, ctx->vu0_itop, 4096);
+                  startPC, 0u, ctx->vu0_itop, 4096);
+    if (shouldTraceMp188)
+    {
+        vu0LogMp188State("executed", traceIdx, startPC, m_vu0.state(), ctx);
+    }
     copyVu0StateToContext(m_vu0.state(), ctx);
+    if (shouldTraceMp188)
+    {
+        vu0LogMp188Context("after", traceIdx, startPC, ctx);
+    }
 }
 
 void PS2Runtime::vu0StartMicroProgram(uint8_t *rdram, R5900Context *ctx, uint32_t address)

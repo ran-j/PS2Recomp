@@ -323,6 +323,8 @@ public:
     void submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool drainImmediately = true, bool path2DirectHl = false);
     void processGIFPacket(uint32_t srcPhysAddr, uint32_t qwCount);
     void processGIFPacket(const uint8_t *data, uint32_t sizeBytes);
+    void processVIF0Data(uint32_t srcPhysAddr, uint32_t sizeBytes);
+    void processVIF0Data(const uint8_t *data, uint32_t sizeBytes);
     void processVIF1Data(uint32_t srcPhysAddr, uint32_t sizeBytes);
     void processVIF1Data(const uint8_t *data, uint32_t sizeBytes);
     void processPendingTransfers();
@@ -398,6 +400,7 @@ public:
         std::vector<uint8_t> chainData;
     };
     std::vector<PendingTransfer> m_pendingGifTransfers;
+    std::vector<PendingTransfer> m_pendingVif0Transfers;
     std::vector<PendingTransfer> m_pendingVif1Transfers;
 
     struct CodeRegion
