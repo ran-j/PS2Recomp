@@ -3,6 +3,7 @@
 
 #include <cstring>
 #include <cstdint>
+#include <cstdlib>
 #include <vector>
 #include <unordered_map>
 #include <string>
@@ -204,18 +205,29 @@ inline void setReturnU64(R5900Context *ctx, uint64_t value)
     ctx->r[3] = _mm_set_epi64x(0, static_cast<int64_t>(static_cast<uint32_t>(value >> 32)));
 }
 
-inline constexpr uint32_t PS2_PATH_WATCH_ADDR = 0x01EFFFA0u;
+// Path write-watch base. Default DISABLED (0). Set env PS2_PATH_WATCH_ADDR=0xADDR (hex or dec)
+// to log every write touching a PS2_PATH_WATCH_BYTES window (pc/ra/value/byte-diff). Diagnostic.
+inline uint32_t ps2PathWatchInitBase()
+{
+    if (const char *e = std::getenv("PS2_PATH_WATCH_ADDR"); e && *e)
+    {
+        return static_cast<uint32_t>(std::strtoul(e, nullptr, 0));
+    }
+    return 0u; // disabled
+}
+inline uint32_t g_ps2PathWatchBase = ps2PathWatchInitBase();
 inline constexpr uint32_t PS2_PATH_WATCH_BYTES = 0x200u;
 inline constexpr uint32_t PS2_PATH_WATCH_MAX_LOGS = 4096u;
 inline std::atomic<uint32_t> g_ps2PathWatchLogCount{0};
 
 inline uint32_t ps2PathWatchPhysAddr()
 {
-    return PS2_PATH_WATCH_ADDR & PS2_RAM_MASK;
+    return g_ps2PathWatchBase & PS2_RAM_MASK;
 }
 
 inline bool ps2PathWatchIntersects(uint32_t writeAddr, uint32_t writeSize)
 {
+    if (g_ps2PathWatchBase == 0u) { return false; } // disabled (no env set)
     const uint64_t writeStart = writeAddr;
     const uint64_t writeEnd = writeStart + static_cast<uint64_t>(writeSize);
     const uint64_t watchStart = ps2PathWatchPhysAddr();
