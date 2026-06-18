@@ -1,6 +1,7 @@
 #include "runtime/ps2_memory.h"
 #include "ps2_log.h"
 #include <atomic>
+#include <chrono>
 #include <iostream>
 #include <cstring>
 #include <cstdlib>
@@ -8,6 +9,30 @@
 #include <algorithm>
 #include <string>
 #include <vector>
+
+namespace
+{
+// EE Timers (T0-T3) COUNT registers free-run at BUSCLK (147.456 MHz) / prescaler (MODE.CLKS).
+// The runtime returned 0 for them (frozen), so guest timer-wait loops and elapsed-time clocks
+// (e.g. read T0_COUNT, detect wrap, accumulate) never advanced. Derive a live 16-bit count from a
+// monotonic host steady_clock at the configured prescaler rate so guest timing progresses.
+uint32_t ps2EeTimerCount(uint32_t modeValue)
+{
+    static const std::chrono::steady_clock::time_point s_origin = std::chrono::steady_clock::now();
+    const int64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           std::chrono::steady_clock::now() - s_origin)
+                           .count();
+    int64_t hz;
+    switch (modeValue & 0x3u) // MODE.CLKS clock-select
+    {
+    case 0: hz = 147456000LL; break;       // BUSCLK
+    case 1: hz = 147456000LL / 16; break;  // BUSCLK/16
+    case 2: hz = 147456000LL / 256; break; // BUSCLK/256
+    default: hz = 15734LL; break;          // HBLANK (~NTSC line rate)
+    }
+    return static_cast<uint32_t>((ns * hz) / 1000000000LL) & 0xFFFFu;
+}
+} // namespace
 
 namespace
 {
@@ -1573,6 +1598,16 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
     }
     if (address >= 0x10000000 && address < 0x10010000)
     {
+        // EE Timer COUNT registers (T0-T3): return a live, advancing 16-bit count derived from
+        // host time at the prescaler the guest configured in the corresponding MODE register
+        // (stored on write). Previously frozen at 0 -> guest timer waits/elapsed clocks stalled.
+        if (address == 0x10000000u || address == 0x10000800u ||
+            address == 0x10001000u || address == 0x10001800u)
+        {
+            const uint32_t modeAddr = address + 0x10u;
+            const uint32_t mode = m_ioRegisters.count(modeAddr) ? m_ioRegisters[modeAddr] : 0u;
+            return ps2EeTimerCount(mode);
+        }
         if (address >= 0x10000000 && address < 0x10000100)
         {
             if ((address & 0xF) == 0x00)
