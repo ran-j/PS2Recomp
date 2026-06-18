@@ -817,6 +817,55 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
     {
         if ((address & 0xFF) == 0x00 && (value & 0x100))
         {
+            const uint32_t channelBase = address & 0xFFFFFF00u;
+
+            // Scratchpad (SPR) DMA channels 8 (fromSPR, 0x1000D000) and 9 (toSPR,
+            // 0x1000D400) copy between scratchpad and main RAM and then raise the
+            // channel's D_STAT completion bit. They run regardless of D_CTRL.DMAE:
+            // Freekstyle kicks SPR DMA with the DMAC-enable bit clear and then polls
+            // D_STAT.CIS8 forever (audio path at sub_001B35A0), so gating these on
+            // DMAE would hang. Other channels still honor DMAE below.
+            if (channelBase == 0x1000D000u || channelBase == 0x1000D400u)
+            {
+                const uint32_t spMadr = translateAddress(m_ioRegisters[channelBase + 0x10]);
+                const uint32_t spQwc = m_ioRegisters[channelBase + 0x20];
+                const uint32_t sadr = m_ioRegisters[channelBase + 0x80] & (PS2_SCRATCHPAD_SIZE - 1u);
+                m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
+                uint64_t bytes64 = static_cast<uint64_t>(spQwc) * 16ull;
+                if (spMadr < PS2_RAM_SIZE && bytes64 > 0u && m_scratchpad && m_rdram)
+                {
+                    uint32_t bytes = (bytes64 > PS2_RAM_SIZE) ? PS2_RAM_SIZE : static_cast<uint32_t>(bytes64);
+                    const bool fromSpr = (channelBase == 0x1000D000u);
+                    for (uint32_t i = 0; i < bytes; ++i)
+                    {
+                        const uint32_t sp = (sadr + i) & (PS2_SCRATCHPAD_SIZE - 1u);
+                        const uint32_t mp = spMadr + i;
+                        if (mp >= PS2_RAM_SIZE)
+                            break;
+                        if (fromSpr)
+                            m_rdram[mp] = m_scratchpad[sp];
+                        else
+                            m_scratchpad[sp] = m_rdram[mp];
+                    }
+                }
+
+                const uint32_t chBit = (channelBase == 0x1000D000u) ? 8u : 9u;
+                uint32_t dstat = m_ioRegisters.count(0x1000E010u) ? m_ioRegisters[0x1000E010u] : 0u;
+                dstat |= (1u << chBit);
+                const uint32_t st = dstat & 0x3FFu;
+                const uint32_t mk = (dstat >> 16) & 0x3FFu;
+                if ((st & mk) != 0u)
+                    dstat |= (1u << 31);
+                else
+                    dstat &= ~(1u << 31);
+                m_ioRegisters[0x1000E010u] = dstat;
+
+                // Signal completion: clear the STR (start) bit and the quadword count.
+                m_ioRegisters[channelBase + 0x00] = value & ~0x100u;
+                m_ioRegisters[channelBase + 0x20] = 0u;
+                return true;
+            }
+
             const auto dctrlIt = m_ioRegisters.find(0x1000E000u);
             const bool dmacEnabled = (dctrlIt == m_ioRegisters.end()) || ((dctrlIt->second & 0x1u) != 0u);
             if (!dmacEnabled)
@@ -824,7 +873,6 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                 return true;
             }
 
-            const uint32_t channelBase = address & 0xFFFFFF00;
             const uint32_t madr = m_ioRegisters[channelBase + 0x10];
             const uint32_t qwc = m_ioRegisters[channelBase + 0x20];
             m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);

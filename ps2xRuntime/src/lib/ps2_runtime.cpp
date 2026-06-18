@@ -2033,6 +2033,33 @@ void PS2Runtime::run()
         g_activeThreads.fetch_sub(1, std::memory_order_relaxed);
         gameThreadFinished.store(true, std::memory_order_release); });
 
+    // Optional PC watchdog (enable with env PS2_PC_WATCHDOG=1): logs the guest PC
+    // once a second so an external observer can tell whether execution is
+    // advancing or spinning on a wait loop. Diagnostic only; off by default.
+    std::thread watchdogThread;
+    {
+        const char *wdEnv = std::getenv("PS2_PC_WATCHDOG");
+        if (wdEnv && *wdEnv && *wdEnv != '0')
+        {
+            watchdogThread = std::thread([&]()
+                                         {
+                ThreadNaming::SetCurrentThreadName("PcWatchdog");
+                uint32_t last = 0xFFFFFFFFu;
+                int stuck = 0;
+                int t = 0;
+                while (!gameThreadFinished.load(std::memory_order_acquire) && !isStopRequested())
+                {
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                    const uint32_t pc = m_debugPc.load(std::memory_order_relaxed);
+                    const uint32_t ra = m_debugRa.load(std::memory_order_relaxed);
+                    stuck = (pc == last) ? (stuck + 1) : 0;
+                    last = pc;
+                    std::cerr << "[watchdog] t=" << (++t) << "s pc=0x" << std::hex << pc
+                              << " ra=0x" << ra << std::dec << " stuckSecs=" << stuck << std::endl;
+                } });
+        }
+    }
+
     ps2_syscalls::EnsureVSyncWorkerRunning(m_memory.getRDRAM(), this);
 
     uint64_t tick = 0;
@@ -2119,6 +2146,11 @@ void PS2Runtime::run()
             std::cerr << "[run] game thread did not stop within timeout; detaching" << std::endl;
             gameThread.detach();
         }
+    }
+
+    if (watchdogThread.joinable())
+    {
+        watchdogThread.join();
     }
 
     const auto workerDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);
