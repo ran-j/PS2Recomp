@@ -6,6 +6,7 @@
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_gs_gpu.h"
 #include "runtime/ps2_iop_cpu.h"
+#include "runtime/ps2_iop_loader.h"
 #include "ThreadNaming.h"
 #include "Kernel/Stubs/Audio.h"
 #include "Kernel/Stubs/GS.h"
@@ -2012,6 +2013,10 @@ void PS2Runtime::run()
         IopCpu iopCpu(&m_memory);
         iopCpu.selfTest();
     }
+
+    // Optional IRX loader self-test (env PS2_IOP_LOAD_TEST=<irx-path>[,<irx-path>...]):
+    // parse + relocate the real IRX modules into IOP RAM and log their layout.
+    iopLoaderSelfTest(&m_memory);
 
     // A blank image to use as a framebuffer
     Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLANK);
