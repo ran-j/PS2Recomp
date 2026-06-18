@@ -1840,6 +1840,41 @@ bool PS2Runtime::shouldPreemptGuestExecution()
     return true;
 }
 
+IopKernel *PS2Runtime::realIop()
+{
+    if (m_realIopInit)
+        return m_realIop.get();
+    m_realIopInit = true;
+
+    const char *en = std::getenv("PS2_IOP_REAL");
+    if (!en || !*en || *en == '0')
+        return nullptr;
+
+    m_realIop = std::make_unique<IopKernel>(&m_memory);
+
+    // A loaded IOP module's SET_SREG back to the EE writes the EE-side
+    // libsifcmd _sif_sreg[] mirror so the EE audio wait loop progresses.
+    uint8_t *rdram = m_memory.getRDRAM();
+    uint32_t base = 0u;
+    if (const char *b = std::getenv("PS2_SIF_EE_SREG_BASE"))
+        base = static_cast<uint32_t>(std::strtoul(b, nullptr, 0));
+    m_realIop->setEeSregWriter([rdram, base](uint16_t idx, uint32_t val) {
+        if (!rdram || base == 0u)
+            return;
+        const uint32_t addr = (base + static_cast<uint32_t>(idx) * 4u) & PS2_RAM_MASK;
+        std::memcpy(rdram + addr, &val, sizeof(val));
+    });
+
+    // Load the audio driver chain (libsd before audio so its export resolves).
+    std::string dir = "MODULES";
+    if (const char *d = std::getenv("PS2_IOP_MODULES"))
+        dir = d;
+    m_realIop->loadAndStart(dir + "/LIBSD.IRX");
+    m_realIop->loadAndStart(dir + "/AUDIO.IRX");
+    std::cerr << "[iop:real] kernel up; RPC servers=" << m_realIop->rpcServers().size() << std::endl;
+    return m_realIop.get();
+}
+
 uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
     try

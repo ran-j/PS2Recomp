@@ -430,6 +430,8 @@ struct PS2DtxCompatLayout
     }
 };
 
+class IopKernel; // real IOP (R3000A) HLE kernel; see runtime/ps2_iop_kernel.h
+
 class PS2Runtime
 {
 public:
@@ -581,6 +583,11 @@ public:
 
     inline ps2_iop &iop() { return m_iop; }
     inline const ps2_iop &iop() const { return m_iop; }
+
+    // Real IOP (R3000A) kernel, lazily created on first use when env PS2_IOP_REAL
+    // is set. Loads+starts the driver IRX from PS2_IOP_MODULES and routes the
+    // EE<->IOP SREG handshake through real code. Returns nullptr when disabled.
+    IopKernel *realIop();
     inline PS2AudioBackend &audioBackend() { return m_audioBackend; }
     inline const PS2AudioBackend &audioBackend() const { return m_audioBackend; }
     inline PSPadBackend &padBackend() { return m_padBackend; }
@@ -620,6 +627,8 @@ private:
     GifArbiter m_gifArbiter;
     GS m_gs;
     ps2_iop m_iop;
+    std::unique_ptr<IopKernel> m_realIop;
+    bool m_realIopInit = false;
     PS2AudioBackend m_audioBackend;
     PSPadBackend m_padBackend;
     VU1Interpreter m_vu1;

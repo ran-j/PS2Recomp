@@ -1,5 +1,6 @@
 #include "Common.h"
 #include "RPC.h"
+#include "runtime/ps2_iop_kernel.h"
 
 namespace ps2_syscalls
 {
@@ -2567,11 +2568,25 @@ namespace ps2_syscalls
             rpcCopyToRdram(rdram, destExtra, srcExtra, sizeExtra);
         }
 
-        // SIF_CMD_SET_SREG: drive the EE-side sreg mirror so EE poll loops that
-        // await an IOP reply can progress (see handleSifSetSreg).
+        // SIF_CMD_SET_SREG. With the real IOP enabled, route the EE's write to
+        // the running IOP (waking the AUDIO worker, which then SET_SREGs the EE
+        // mirror via its own code). Otherwise fall back to the Marco-1 echo shim.
         if (cid == 0x80000001u)
         {
-            handleSifSetSreg(rdram, packetAddr, packetSize, srcExtra);
+            IopKernel *kern = runtime ? runtime->realIop() : nullptr;
+            if (kern)
+            {
+                uint32_t index = 0u, value = 0u;
+                const uint32_t cands[3] = {packetSize, packetAddr, srcExtra};
+                if (decodeSetSregPacket(rdram, cands, 3, index, value))
+                {
+                    kern->setIopSregAndResume(static_cast<uint16_t>(index), value);
+                }
+            }
+            else
+            {
+                handleSifSetSreg(rdram, packetAddr, packetSize, srcExtra);
+            }
         }
 
         static int logCount = 0;
