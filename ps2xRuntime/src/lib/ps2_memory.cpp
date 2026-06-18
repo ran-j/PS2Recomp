@@ -1,8 +1,6 @@
 #include "runtime/ps2_memory.h"
-#include "ps2_runtime.h"
 #include "ps2_log.h"
 #include <atomic>
-#include <iostream>
 #include <cstring>
 #include <stdexcept>
 #include <algorithm>
@@ -11,28 +9,6 @@
 
 namespace
 {
-    std::atomic<uint32_t> s_vifDmaTagLogCount{0};
-    std::atomic<uint32_t> s_vifDmaAppendLogCount{0};
-
-    inline void logVifDmaFirstQw(const uint8_t *base, uint32_t phys, uint32_t maxSz, uint32_t bytes)
-    {
-        if (!base || phys >= maxSz || bytes == 0u)
-        {
-            return;
-        }
-        const uint32_t available = std::min<uint32_t>(16u, std::min<uint32_t>(bytes, maxSz - phys));
-        std::cout << " first=" << std::hex;
-        for (uint32_t i = 0; i < available; ++i)
-        {
-            std::cout << static_cast<uint32_t>(base[phys + i]);
-            if (i + 1u < available)
-            {
-                std::cout << '.';
-            }
-        }
-        std::cout << std::dec;
-    }
-
     inline void inRange(uint32_t offset, size_t bytes, size_t regionSize, const char *op, uint32_t address)
     {
         if (static_cast<uint64_t>(offset) + static_cast<uint64_t>(bytes) > static_cast<uint64_t>(regionSize))
@@ -1034,11 +1010,9 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     {
                         const uint64_t bytes64 = static_cast<uint64_t>(qwCount) * 16ull;
                         uint32_t bytes = (bytes64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu : static_cast<uint32_t>(bytes64);
-                        const uint32_t originalBytes = bytes;
                         const bool scratch = isScratchpad(srcAddr);
                         uint32_t src = 0;
                         src = translateAddress(srcAddr);
-                        const uint32_t originalPhys = src;
                         const uint8_t *base2;
                         uint32_t maxSz2;
                         if (scratch)
@@ -1050,30 +1024,6 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         {
                             base2 = m_rdram;
                             maxSz2 = PS2_RAM_SIZE;
-                        }
-
-                        if (channelBase == 0x10009000u && originalBytes != 0u)
-                        {
-                            const uint32_t logIndex = s_vifDmaAppendLogCount.fetch_add(1, std::memory_order_relaxed);
-                            if (logIndex < 256u)
-                            {
-                                auto flags = std::cout.flags();
-                                std::cout << "[vif1:dma-append] idx=" << std::dec << logIndex
-                                          << " kind=data"
-                                          << " srcAddr=0x" << std::hex << srcAddr
-                                          << " phys=0x" << originalPhys
-                                          << " qwc=0x" << qwCount
-                                          << " bytes=0x" << originalBytes
-                                          << " scratch=" << (scratch ? 1u : 0u);
-                                logVifDmaFirstQw(base2, originalPhys, maxSz2, originalBytes);
-                                std::cout.flags(flags);
-                                std::cout << std::endl;
-                            }
-
-                            if (!scratch)
-                            {
-                                ps2AddVifPacketWatchRange(srcAddr, originalBytes, "vif1-dma-data");
-                            }
                         }
 
                         while (bytes > 0)
@@ -1102,28 +1052,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         if (tagPhys + 16u > localMax)
                             return;
 
-                        // VIF1 packet helpers embed 8 bytes of VIF stream in the DMAtag's upper half.
-                        if (channelBase == 0x10009000u)
-                        {
-                            const uint32_t logIndex = s_vifDmaAppendLogCount.fetch_add(1, std::memory_order_relaxed);
-                            if (logIndex < 256u)
-                            {
-                                auto flags = std::cout.flags();
-                                std::cout << "[vif1:dma-append] idx=" << std::dec << logIndex
-                                          << " kind=compact-inline"
-                                          << " tagAddr=0x" << std::hex << localTagAddr
-                                          << " tagPhys=0x" << tagPhys
-                                          << " bytes=0x8"
-                                          << " scratch=" << (tagScratch ? 1u : 0u);
-                                logVifDmaFirstQw(localBase, tagPhys + 8u, localMax, 8u);
-                                std::cout.flags(flags);
-                                std::cout << std::endl;
-                            }
-                            if (!tagScratch)
-                            {
-                                ps2AddVifPacketWatchRange(localTagAddr + 8u, 8u, "vif1-dma-compact-inline");
-                            }
-                        }
+                        // VIF packet helpers embed 8 bytes of VIF stream in the DMAtag's upper half.
                         chainBuf.insert(chainBuf.end(), localBase + tagPhys + 8u, localBase + tagPhys + 16u);
                         appendData(localTagAddr + 16u, qwCount);
                     };
@@ -1164,27 +1093,6 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         uint32_t id = static_cast<uint32_t>((tag >> 28) & 0x7);
                         const bool irq = ((tag >> 31) & 0x1ull) != 0ull;
                         uint32_t addr = static_cast<uint32_t>((tag >> 32) & 0x7FFFFFFF);
-                        if (channelBase == 0x10009000u)
-                        {
-                            const uint32_t logIndex = s_vifDmaTagLogCount.fetch_add(1, std::memory_order_relaxed);
-                            if (logIndex < 256u)
-                            {
-                                uint64_t tagHi = 0u;
-                                std::memcpy(&tagHi, tp + 8u, sizeof(tagHi));
-                                auto flags = std::cout.flags();
-                                std::cout << "[vif1:dma-tag] idx=" << std::dec << logIndex
-                                          << " tagAddr=0x" << std::hex << currentTagAddr
-                                          << " phys=0x" << physTag
-                                          << " id=" << std::dec << id
-                                          << " qwc=" << tagQwc
-                                          << " addr=0x" << std::hex << addr
-                                          << " irq=" << (irq ? 1u : 0u)
-                                          << " tagHi=0x" << tagHi
-                                          << " scratch=" << (tagInSPR ? 1u : 0u)
-                                          << std::dec << std::endl;
-                                std::cout.flags(flags);
-                            }
-                        }
                         ++tagsProcessed;
 
                         uint32_t dataAddr = 0;
@@ -1279,15 +1187,6 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
                     if (!chainBuf.empty())
                     {
-                        if (channelBase == 0x10009000u)
-                        {
-                            auto flags = std::cout.flags();
-                            std::cout << "[vif1:dma-chain-built] bytes=0x" << std::hex << chainBuf.size()
-                                      << " tagNext=0x" << tagAddr
-                                      << " asp=" << std::dec << asp
-                                      << std::endl;
-                            std::cout.flags(flags);
-                        }
                         PendingTransfer pt;
                         pt.fromScratchpad = false;
                         pt.srcAddr = 0;

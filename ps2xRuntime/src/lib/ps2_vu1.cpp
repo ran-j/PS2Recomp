@@ -2,24 +2,11 @@
 #include "runtime/ps2_gs_gpu.h"
 #include "runtime/ps2_gif_arbiter.h"
 #include "runtime/ps2_memory.h"
-#include "ps2_log.h"
-#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
-#include <iostream>
 #include <limits>
 #include <vector>
-
-namespace
-{
-    std::atomic<uint32_t> s_debugVu1XgkickCount{0};
-    std::atomic<uint32_t> s_debugVu1StoreCount{0};
-    std::atomic<uint32_t> s_debugVu1UnknownUpperCount{0};
-    std::atomic<uint32_t> s_debugVu1UnknownLowerCount{0};
-    std::atomic<uint32_t> s_debugVu1LoadCount{0};
-    std::atomic<uint32_t> s_debugVu1TraceCount{0};
-}
 
 // Instruction field extraction helpers
 static inline uint8_t DEST(uint32_t i) { return (uint8_t)((i >> 21) & 0xF); }
@@ -173,148 +160,6 @@ static inline bool vuLowerShouldRunBeforeUpper(uint32_t upper, uint32_t lower)
 }
 
 
-static inline void vuLogStoreProbe(const char *opName,
-                                   uint32_t pc,
-                                   uint32_t addr,
-                                   uint8_t vfIndex,
-                                   uint8_t dest,
-                                   const float vf[4],
-                                   uint32_t lowerInstr,
-                                   uint32_t upperInstr)
-{
-    const uint32_t index = s_debugVu1StoreCount.fetch_add(1, std::memory_order_relaxed);
-    if (index >= 4096u)
-        return;
-
-    uint32_t raw[4] = {};
-    std::memcpy(raw, vf, sizeof(raw));
-    RUNTIME_LOG("[vu1:store-probe] idx=" << index
-                                           << " op=" << opName
-                                           << " pc=0x" << std::hex << pc
-                                           << " addr=0x" << addr
-                                           << " lower=0x" << lowerInstr
-                                           << " upper=0x" << upperInstr
-                                           << " vf=" << std::dec << static_cast<uint32_t>(vfIndex)
-                                           << " dest=0x" << std::hex << static_cast<uint32_t>(dest)
-                                           << " raw=(0x" << raw[0]
-                                           << ",0x" << raw[1]
-                                           << ",0x" << raw[2]
-                                           << ",0x" << raw[3] << ")"
-                                           << std::dec
-                                           << " f=(" << vf[0]
-                                           << "," << vf[1]
-                                           << "," << vf[2]
-                                           << "," << vf[3] << ")"
-                                           << std::endl);
-}
-
-
-static inline void vuLogLoadProbe(const char *opName,
-                                  uint32_t pc,
-                                  uint32_t addr,
-                                  uint8_t vfIndex,
-                                  uint8_t viIndex,
-                                  uint8_t dest,
-                                  const float loaded[4])
-{
-    const uint32_t index = s_debugVu1LoadCount.fetch_add(1, std::memory_order_relaxed);
-    if (index >= 4096u)
-        return;
-
-    uint32_t raw[4] = {};
-    std::memcpy(raw, loaded, sizeof(raw));
-    RUNTIME_LOG("[vu1:load-probe] idx=" << index
-                                          << " op=" << opName
-                                          << " pc=0x" << std::hex << pc
-                                          << " addr=0x" << addr
-                                          << " vf=" << std::dec << static_cast<uint32_t>(vfIndex)
-                                          << " vi=" << static_cast<uint32_t>(viIndex)
-                                          << " dest=0x" << std::hex << static_cast<uint32_t>(dest)
-                                          << " raw=(0x" << raw[0]
-                                          << ",0x" << raw[1]
-                                          << ",0x" << raw[2]
-                                          << ",0x" << raw[3] << ")"
-                                          << std::dec
-                                          << " f=(" << loaded[0]
-                                          << "," << loaded[1]
-                                          << "," << loaded[2]
-                                          << "," << loaded[3] << ")"
-                                          << std::endl);
-}
-
-static inline void vuLogTraceProbe(const char *phase,
-                                   uint32_t pc,
-                                   uint32_t lower,
-                                   uint32_t upper,
-                                   const VU1State &state)
-{
-    if (lower == 0u && upper == 0u)
-        return;
-    if (!((pc >= 0x000u && pc <= 0x2c0u) || (pc >= 0x430u && pc <= 0x470u)))
-        return;
-
-    const uint32_t index = s_debugVu1TraceCount.fetch_add(1, std::memory_order_relaxed);
-    if (index >= 4096u)
-        return;
-
-    uint32_t vf1[4] = {}, vf4[4] = {}, vf5[4] = {}, vf6[4] = {}, vf7[4] = {}, vf10[4] = {}, acc[4] = {};
-    uint32_t qRaw = 0, iRaw = 0;
-    std::memcpy(vf1, state.vf[1], sizeof(vf1));
-    std::memcpy(vf4, state.vf[4], sizeof(vf4));
-    std::memcpy(vf5, state.vf[5], sizeof(vf5));
-    std::memcpy(vf6, state.vf[6], sizeof(vf6));
-    std::memcpy(vf7, state.vf[7], sizeof(vf7));
-    std::memcpy(vf10, state.vf[10], sizeof(vf10));
-    std::memcpy(acc, state.acc, sizeof(acc));
-    std::memcpy(&qRaw, &state.q, sizeof(qRaw));
-    std::memcpy(&iRaw, &state.i, sizeof(iRaw));
-
-    RUNTIME_LOG("[vu1:trace-probe] idx=" << index
-                                           << " phase=" << phase
-                                           << " pc=0x" << std::hex << pc
-                                           << " lower=0x" << lower
-                                           << " upper=0x" << upper
-                                           << " qRaw=0x" << qRaw
-                                           << " iRaw=0x" << iRaw
-                                           << " vi=(" << std::dec
-                                           << state.vi[1] << "," << state.vi[2] << "," << state.vi[3] << "," << state.vi[4]
-                                           << "," << state.vi[5] << "," << state.vi[6] << "," << state.vi[7] << "," << state.vi[8]
-                                           << ") vf1raw=(0x" << std::hex << vf1[0] << ",0x" << vf1[1] << ",0x" << vf1[2] << ",0x" << vf1[3]
-                                           << ") vf4raw=(0x" << vf4[0] << ",0x" << vf4[1] << ",0x" << vf4[2] << ",0x" << vf4[3]
-                                           << ") vf5raw=(0x" << vf5[0] << ",0x" << vf5[1] << ",0x" << vf5[2] << ",0x" << vf5[3]
-                                           << ") vf6raw=(0x" << vf6[0] << ",0x" << vf6[1] << ",0x" << vf6[2] << ",0x" << vf6[3]
-                                           << ") vf7raw=(0x" << vf7[0] << ",0x" << vf7[1] << ",0x" << vf7[2] << ",0x" << vf7[3]
-                                           << ") vf10raw=(0x" << vf10[0] << ",0x" << vf10[1] << ",0x" << vf10[2] << ",0x" << vf10[3]
-                                           << ") accraw=(0x" << acc[0] << ",0x" << acc[1] << ",0x" << acc[2] << ",0x" << acc[3]
-                                           << ")" << std::dec << std::endl);
-}
-
-static inline void vuLogUnknownUpper(uint32_t pc, uint32_t instr, uint32_t op)
-{
-    const uint32_t index = s_debugVu1UnknownUpperCount.fetch_add(1, std::memory_order_relaxed);
-    if (index < 128u)
-    {
-        RUNTIME_LOG("[vu1:unknown-upper] idx=" << index
-                                                << " pc=0x" << std::hex << pc
-                                                << " instr=0x" << instr
-                                                << " op=0x" << op
-                                                << std::dec << std::endl);
-    }
-}
-
-static inline void vuLogUnknownLower(uint32_t pc, uint32_t instr, uint32_t op)
-{
-    const uint32_t index = s_debugVu1UnknownLowerCount.fetch_add(1, std::memory_order_relaxed);
-    if (index < 128u)
-    {
-        RUNTIME_LOG("[vu1:unknown-lower] idx=" << index
-                                                << " pc=0x" << std::hex << pc
-                                                << " instr=0x" << instr
-                                                << " op=0x" << op
-                                                << std::dec << std::endl);
-    }
-}
-
 VU1Interpreter::VU1Interpreter()
 {
     reset();
@@ -393,9 +238,6 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         std::memcpy(&lower, vuCode + m_state.pc, 4);
         std::memcpy(&upper, vuCode + m_state.pc + 4, 4);
 
-        const uint32_t tracePc = m_state.pc;
-        vuLogTraceProbe("before", tracePc, lower, upper, m_state);
-
         const bool iBit = ((upper >> 31) & 1u) != 0u;
         const bool eBit = ((upper >> 30) & 1u) != 0u;
         const bool mBit = ((upper >> 29) & 1u) != 0u;
@@ -423,8 +265,6 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             execUpper(upper);
             execLower(lower, vuData, dataSize, gs, memory, upper);
         }
-
-        vuLogTraceProbe("after", tracePc, lower, upper, m_state);
 
         // Enforce VF0 invariant
         m_state.vf[0][0] = 0.0f;
@@ -902,7 +742,6 @@ void VU1Interpreter::execUpper(uint32_t instr)
         case 0x30: // NOP
             return;
         default:
-            vuLogUnknownUpper(m_state.pc, instr, specialOp);
             return;
         }
     }
@@ -912,7 +751,6 @@ void VU1Interpreter::execUpper(uint32_t instr)
     case 0x32:
     case 0x33:
     default:
-        vuLogUnknownUpper(m_state.pc, instr, op);
         return;
     }
 }
@@ -943,7 +781,6 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
         {
             float tmp[4];
             std::memcpy(tmp, vuData + addr, 16);
-            vuLogLoadProbe("LQ", m_state.pc, addr, it, is, dest, tmp);
             applyDest(m_state.vf[it], tmp, dest);
         }
         return;
@@ -969,7 +806,6 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
             if (dest & 0x1)
                 tmp[3] = m_state.vf[is][3];
             std::memcpy(vuData + addr, tmp, 16);
-            vuLogStoreProbe("SQ", m_state.pc, addr, is, dest, m_state.vf[is], instr, upperInstr);
         }
         return;
     }
@@ -1315,37 +1151,6 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
             if (totalBytes == 0u)
                 return;
 
-            const uint32_t debugIndex = s_debugVu1XgkickCount.fetch_add(1, std::memory_order_relaxed);
-            if (debugIndex < 128u)
-            {
-                const uint64_t firstTagLo = read64Wrap(addr);
-                const uint64_t firstTagHi = read64Wrap(addr + 8u);
-                const uint32_t firstNloop = static_cast<uint32_t>(firstTagLo & 0x7FFFu);
-                const uint8_t firstFlg = static_cast<uint8_t>((firstTagLo >> 58) & 0x3u);
-                uint32_t firstNreg = static_cast<uint32_t>((firstTagLo >> 60) & 0xFu);
-                if (firstNreg == 0u)
-                    firstNreg = 16u;
-                const uint32_t firstEop = static_cast<uint32_t>((firstTagLo >> 15) & 1u);
-                const uint32_t firstPre = static_cast<uint32_t>((firstTagLo >> 46) & 1u);
-                const uint32_t firstPrim = static_cast<uint32_t>((firstTagLo >> 47) & 0x7FFu);
-                RUNTIME_LOG("[vu1:xgkick] idx=" << debugIndex
-                                                << " vi=" << static_cast<uint32_t>(viS)
-                                                << " viVal=0x" << std::hex << static_cast<uint32_t>(static_cast<uint16_t>(m_state.vi[viS]))
-                                                << " addr=0x" << addr
-                                                << " totalBytes=0x" << totalBytes
-                                                << " tagLo=0x" << firstTagLo
-                                                << " tagHi=0x" << firstTagHi
-                                                << std::dec
-                                                << " nloop=" << firstNloop
-                                                << " flg=" << static_cast<uint32_t>(firstFlg)
-                                                << " nreg=" << firstNreg
-                                                << " eop=" << firstEop
-                                                << " pre=" << firstPre
-                                                << " prim=0x" << std::hex << firstPrim << std::dec
-                                                << " wrap=" << static_cast<uint32_t>((addr + totalBytes > dataSize) ? 1u : 0u)
-                                                << std::endl);
-            }
-
             if (addr + totalBytes <= dataSize)
             {
                 if (memory)
@@ -1423,7 +1228,6 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
                 {
                     float tmp[4];
                     std::memcpy(tmp, vuData + addr, 16);
-                    vuLogLoadProbe("LQI", m_state.pc, addr, vfT, viS, dest, tmp);
                     applyDest(m_state.vf[vfT], tmp, dest);
                 }
                 if (viS != 0)
@@ -1447,7 +1251,6 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
                     if (dest & 0x1)
                         tmp[3] = m_state.vf[vfS][3];
                     std::memcpy(vuData + addr, tmp, 16);
-                    vuLogStoreProbe("SQI", m_state.pc, addr, vfS, dest, m_state.vf[vfS], instr, upperInstr);
                 }
                 if (viT != 0)
                     m_state.vi[viT] = (int16_t)(m_state.vi[viT] + 1);
@@ -1463,7 +1266,6 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
                 {
                     float tmp[4];
                     std::memcpy(tmp, vuData + addr, 16);
-                    vuLogLoadProbe("LQD", m_state.pc, addr, vfT, viS, dest, tmp);
                     applyDest(m_state.vf[vfT], tmp, dest);
                 }
                 return;
@@ -1487,7 +1289,6 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
                     if (dest & 0x1)
                         tmp[3] = m_state.vf[vfS][3];
                     std::memcpy(vuData + addr, tmp, 16);
-                    vuLogStoreProbe("SQD", m_state.pc, addr, vfS, dest, m_state.vf[vfS], instr, upperInstr);
                 }
                 return;
             }
@@ -1650,17 +1451,14 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
             case 0x7D: // EATAN / EATANxy / EATANxz placeholder
                 return;
             default:
-                vuLogUnknownLower(m_state.pc, instr, funct2);
                 return;
             }
         }
         default:
-            vuLogUnknownLower(m_state.pc, instr, funct);
             return;
         }
     }
     default:
-        vuLogUnknownLower(m_state.pc, instr, opHi);
         break;
     }
 }

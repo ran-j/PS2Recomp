@@ -1,8 +1,6 @@
 // Based on Blackline Interactive implementation
 #include "runtime/ps2_memory.h"
-#include <atomic>
 #include <cstring>
-#include "ps2_log.h"
 
 enum VIFCmd : uint8_t
 {
@@ -30,12 +28,6 @@ enum VIFCmd : uint8_t
 
 namespace
 {
-    std::atomic<uint32_t> s_debugVu1KickCount{0};
-    std::atomic<uint32_t> s_debugVif0OpcodeCount{0};
-    std::atomic<uint32_t> s_debugVif0MpgCount{0};
-    std::atomic<uint32_t> s_debugVif1OpcodeCount{0};
-    std::atomic<uint32_t> s_debugVif1UnpackProbeCount{0};
-    std::atomic<uint32_t> s_debugVif1UnpackWriteCount{0};
     constexpr uint8_t kGifFmtImage = 2u;
 
     uint32_t gifImageQwcFromTag(const uint8_t *data, uint32_t sizeBytes)
@@ -84,19 +76,6 @@ void PS2Memory::processVIF0Data(const uint8_t *data, uint32_t sizeBytes)
         const uint16_t imm = static_cast<uint16_t>(cmd & 0xFFFFu);
         const uint8_t num = static_cast<uint8_t>((cmd >> 16) & 0xFFu);
         const bool irq = (cmd & 0x80000000u) != 0u;
-
-        const uint32_t opcodeIndex = s_debugVif0OpcodeCount.fetch_add(1u, std::memory_order_relaxed);
-        if (opcodeIndex < 128u)
-        {
-            RUNTIME_LOG("[vif0:cmd] idx=" << opcodeIndex
-                                           << " opcode=0x" << std::hex << static_cast<uint32_t>(opcode)
-                                           << " imm=0x" << imm
-                                           << std::dec
-                                           << " num=" << static_cast<uint32_t>(num)
-                                           << " irq=" << static_cast<uint32_t>(irq ? 1u : 0u)
-                                           << " pos=0x" << std::hex << (pos - 4u)
-                                           << std::dec << std::endl);
-        }
 
         vif0_regs.code = cmd;
         vif0_regs.num = num;
@@ -169,27 +148,6 @@ void PS2Memory::processVIF0Data(const uint8_t *data, uint32_t sizeBytes)
                     copyBytes = PS2_VU0_CODE_SIZE - destAddr;
                 if (pos + copyBytes <= sizeBytes)
                     std::memcpy(m_vu0Code + destAddr, data + pos, copyBytes);
-            }
-
-            const uint32_t mpgIndex = s_debugVif0MpgCount.fetch_add(1u, std::memory_order_relaxed);
-            if (mpgIndex < 64u)
-            {
-                uint32_t lo = 0u;
-                uint32_t hi = 0u;
-                if (pos + 8u <= sizeBytes)
-                {
-                    std::memcpy(&lo, data + pos, sizeof(lo));
-                    std::memcpy(&hi, data + pos + 4u, sizeof(hi));
-                }
-                RUNTIME_LOG("[vif0:mpg] idx=" << mpgIndex
-                                               << " imm=0x" << std::hex << imm
-                                               << " dest=0x" << destAddr
-                                               << " num=" << std::dec << static_cast<uint32_t>(num)
-                                               << " instr=" << instructionCount
-                                               << " bytes=0x" << std::hex << mpgBytes
-                                               << " copied=0x" << copyBytes
-                                               << " first=(0x" << lo << ",0x" << hi << ")"
-                                               << std::dec << std::endl);
             }
 
             pos += mpgBytes;
@@ -273,10 +231,6 @@ void PS2Memory::processVIF0Data(const uint8_t *data, uint32_t sizeBytes)
         }
         else
         {
-            // Unknown/unsupported VIF0 command: stop to avoid desynchronising the packet parser.
-            RUNTIME_LOG("[vif0:unknown] opcode=0x" << std::hex << static_cast<uint32_t>(opcode)
-                                                    << " imm=0x" << imm
-                                                    << std::dec << std::endl);
             break;
         }
     }
@@ -300,14 +254,6 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 {
     if (!data || !m_gsVRAM || sizeBytes == 0u)
         return;
-
-    auto recomputeVif1Tops = [&]()
-    {
-        const bool dbf = (vif1_regs.stat & (1u << 7)) != 0u;
-        const uint32_t base = vif1_regs.base & 0x3FFu;
-        const uint32_t ofst = vif1_regs.ofst & 0x3FFu;
-        vif1_regs.tops = dbf ? ((base + ofst) & 0x3FFu) : base;
-    };
 
     uint32_t pos = 0;
 
@@ -352,18 +298,6 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         uint16_t imm = cmd & 0xFFFF;
         uint8_t num = (cmd >> 16) & 0xFF;
         const bool irq = (cmd & 0x80000000u) != 0u;
-
-        const uint32_t opcodeIndex = s_debugVif1OpcodeCount.fetch_add(1, std::memory_order_relaxed);
-        if (opcodeIndex < 160u)
-        {
-            RUNTIME_LOG("[vif1:cmd] idx=" << opcodeIndex
-                                          << " opcode=0x" << std::hex << static_cast<uint32_t>(opcode)
-                                          << " imm=0x" << imm
-                                          << std::dec
-                                          << " num=" << static_cast<uint32_t>(num)
-                                          << " irq=" << static_cast<uint32_t>(irq ? 1u : 0u)
-                                          << std::endl);
-        }
 
         // Track most-recent command for VIFn_CODE emulation.
         vif1_regs.code = cmd;
@@ -444,18 +378,6 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 vif1_regs.tops = (vif1_regs.base + vif1_regs.ofst) & 0x3FFu;
             vif1_regs.stat ^= (1u << 7); // toggle DBF
 
-            const uint32_t kickIndex = s_debugVu1KickCount.fetch_add(1, std::memory_order_relaxed);
-            if (kickIndex < 48u)
-            {
-                RUNTIME_LOG("[vif1:mscal] idx=" << kickIndex
-                                                << " opcode=0x" << std::hex << static_cast<uint32_t>(opcode)
-                                                << " imm=0x" << imm
-                                                << " startPc=0x" << startPC
-                                                << " top=0x" << runTop
-                                                << " itop=0x" << runItop
-                                                << " nextTops=0x" << vif1_regs.tops
-                                                << std::dec << std::endl);
-            }
             if (m_vu1MscalCallback)
                 m_vu1MscalCallback(startPC, runTop, runItop);
             continue;
@@ -474,16 +396,6 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 vif1_regs.tops = (vif1_regs.base + vif1_regs.ofst) & 0x3FFu;
             vif1_regs.stat ^= (1u << 7); // toggle DBF
 
-            const uint32_t kickIndex = s_debugVu1KickCount.fetch_add(1, std::memory_order_relaxed);
-            if (kickIndex < 48u)
-            {
-                RUNTIME_LOG("[vif1:mscnt] idx=" << kickIndex
-                                                << " top=0x" << std::hex << runTop
-                                                << " itop=0x" << runItop
-                                                << " nextTops=0x" << vif1_regs.tops
-                                                << " pc=resume"
-                                                << std::dec << std::endl);
-            }
             if (m_vu1MscntCallback)
                 m_vu1MscntCallback(runTop, runItop);
             continue;
@@ -625,41 +537,6 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 
             const bool zeroExtend = (imm & 0x4000u) != 0u;
 
-            const uint32_t unpackProbeIndex = s_debugVif1UnpackProbeCount.fetch_add(1, std::memory_order_relaxed);
-            const bool logThisUnpack = (unpackProbeIndex < 192u) && (opcode == 0x6Cu || opcode == 0x7Cu || opcode == 0x6Du || opcode == 0x7Du);
-            if (logThisUnpack)
-            {
-                uint32_t srcPreview[4] = {0u, 0u, 0u, 0u};
-                if (pos + 16u <= sizeBytes)
-                    std::memcpy(srcPreview, data + pos, 16u);
-                RUNTIME_LOG("[vif1:unpack-probe] idx=" << unpackProbeIndex
-                                                       << " opcode=0x" << std::hex << static_cast<uint32_t>(opcode)
-                                                       << " imm=0x" << imm
-                                                       << " num=" << std::dec << static_cast<uint32_t>(num)
-                                                       << " vn=" << static_cast<uint32_t>(vn)
-                                                       << " vl=" << static_cast<uint32_t>(vl)
-                                                       << " comps=" << components
-                                                       << " bits=" << bitsPerComponent
-                                                       << " bytesPerVector=" << bytesPerVector
-                                                       << " writeCount=" << writeVectorCount
-                                                       << " sourceCount=" << sourceVectorCount
-                                                       << " totalBytes=0x" << std::hex << totalBytes
-                                                       << " vuAddr=0x" << vuAddr
-                                                       << " tops=0x" << (vif1_regs.tops & 0x3FFu)
-                                                       << " cycle=0x" << vif1_regs.cycle
-                                                       << " cl=" << std::dec << cl
-                                                       << " wl=" << wl
-                                                       << " mode=" << (vif1_regs.mode & 3u)
-                                                       << " mask=" << maskEnable
-                                                       << " zeroExt=" << zeroExtend
-                                                       << " pos=0x" << std::hex << pos
-                                                       << " src0=(0x" << srcPreview[0]
-                                                       << ",0x" << srcPreview[1]
-                                                       << ",0x" << srcPreview[2]
-                                                       << ",0x" << srcPreview[3] << ")"
-                                                       << std::dec << std::endl);
-            }
-
             if (m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes)
             {
                 const uint8_t *srcBase = data + pos;
@@ -693,11 +570,9 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                     bool decoded = false;
 
                     const uint8_t *srcVec = nullptr;
-                    uint32_t usedSrcIndex = srcIndex;
                     if (sourceAvailable && srcIndex < sourceVectorCount)
                     {
                         srcVec = srcBase + srcIndex * bytesPerVector;
-                        usedSrcIndex = srcIndex;
                         ++srcIndex;
                         decoded = true;
                     }
@@ -854,43 +729,6 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                         }
 
                         lanes[field] = writeVal;
-                    }
-
-                    if (logThisUnpack)
-                    {
-                        const uint32_t writeProbeIndex = s_debugVif1UnpackWriteCount.fetch_add(1, std::memory_order_relaxed);
-                        if (writeProbeIndex < 768u)
-                        {
-                            uint32_t srcRaw[4] = {0u, 0u, 0u, 0u};
-                            if (decoded && srcVec)
-                            {
-                                const uint32_t copyBytes = (bytesPerVector < 16u) ? bytesPerVector : 16u;
-                                std::memcpy(srcRaw, srcVec, copyBytes);
-                            }
-                            RUNTIME_LOG("[vif1:unpack-write] idx=" << writeProbeIndex
-                                                                   << " up=" << unpackProbeIndex
-                                                                   << " opcode=0x" << std::hex << static_cast<uint32_t>(opcode)
-                                                                   << " wi=" << std::dec << writeIndex
-                                                                   << " src=" << usedSrcIndex
-                                                                   << " avail=" << sourceAvailable
-                                                                   << " decoded=" << decoded
-                                                                   << " cyclePos=" << cyclePos
-                                                                   << " destVec=0x" << std::hex << destVec
-                                                                   << " destOff=0x" << destOff
-                                                                   << " srcRaw=(0x" << srcRaw[0]
-                                                                   << ",0x" << srcRaw[1]
-                                                                   << ",0x" << srcRaw[2]
-                                                                   << ",0x" << srcRaw[3] << ")"
-                                                                   << " dec=(0x" << decompressed[0]
-                                                                   << ",0x" << decompressed[1]
-                                                                   << ",0x" << decompressed[2]
-                                                                   << ",0x" << decompressed[3] << ")"
-                                                                   << " out=(0x" << lanes[0]
-                                                                   << ",0x" << lanes[1]
-                                                                   << ",0x" << lanes[2]
-                                                                   << ",0x" << lanes[3] << ")"
-                                                                   << std::dec << std::endl);
-                        }
                     }
 
                     std::memcpy(m_vu1Data + destOff, lanes, sizeof(lanes));

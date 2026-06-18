@@ -9,7 +9,7 @@ option(PS2X_ENABLE_RUNNER_UNITY_BUILD "Build ps2EntryRunner with CMake unity bui
 set(PS2X_RUNNER_UNITY_BUILD_BATCH_SIZE 8 CACHE STRING "Unity build batch size for ps2EntryRunner")
 option(PS2X_ENABLE_SCCACHE "Use sccache as compiler launcher when available" ON)
 
-option(PS2X_ENABLE_RUNTIME_LOGS "Enable PS2 runtime logs" ON)
+option(PS2X_ENABLE_RUNTIME_LOGS "Enable PS2 runtime logs" OFF)
 option(PS2X_ENABLE_AGRESSIVE_LOGS "Enable very verbose/agressive PS2 runtime logs" OFF)
 option(PS2X_SHOW_WINDOWS_CONSOLE "Show a console window for ps2EntryRunner on Windows release builds" ON)
 

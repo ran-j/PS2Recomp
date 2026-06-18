@@ -593,24 +593,26 @@ namespace ps2_stubs
             return;
         }
 
-        if (g_padReadLogCount < 48)
-        {
-            const int gamepad = findFirstGamepad();
-            const bool gamepadStartPressed =
-                (gamepad >= 0) && IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_MIDDLE_RIGHT);
-            const bool startPressed = (data[2] != 0xFFu || data[3] != 0xFFu ||
-                                       IsKeyDown(KEY_ENTER) || gamepadStartPressed);
-            if (startPressed)
+        PS2_IF_AGRESSIVE_LOGS({
+            if (g_padReadLogCount < 48)
             {
-                const uint32_t guestButtons =
-                    (static_cast<uint32_t>(static_cast<uint8_t>(data[2] ^ 0xFFu)) << 8) |
-                    static_cast<uint32_t>(static_cast<uint8_t>(data[3] ^ 0xFFu));
-                std::printf("[padread] port=%d slot=%d data2=0x%02x data3=0x%02x guestButtons=0x%04x enter=%d gamepadStart=%d\n",
-                            port, slot, data[2], data[3], guestButtons,
-                            IsKeyDown(KEY_ENTER) ? 1 : 0, gamepadStartPressed ? 1 : 0);
-                ++g_padReadLogCount;
+                const int gamepad = findFirstGamepad();
+                const bool gamepadStartPressed =
+                    (gamepad >= 0) && IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_MIDDLE_RIGHT);
+                const bool startPressed = (data[2] != 0xFFu || data[3] != 0xFFu ||
+                                           IsKeyDown(KEY_ENTER) || gamepadStartPressed);
+                if (startPressed)
+                {
+                    const uint32_t guestButtons =
+                        (static_cast<uint32_t>(static_cast<uint8_t>(data[2] ^ 0xFFu)) << 8) |
+                        static_cast<uint32_t>(static_cast<uint8_t>(data[3] ^ 0xFFu));
+                    std::printf("[padread] port=%d slot=%d data2=0x%02x data3=0x%02x guestButtons=0x%04x enter=%d gamepadStart=%d\n",
+                                port, slot, data[2], data[3], guestButtons,
+                                IsKeyDown(KEY_ENTER) ? 1 : 0, gamepadStartPressed ? 1 : 0);
+                    ++g_padReadLogCount;
+                }
             }
-        }
+        });
 
         setReturnS32(ctx, 1);
     }

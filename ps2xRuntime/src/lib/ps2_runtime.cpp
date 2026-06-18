@@ -97,45 +97,6 @@ namespace
     constexpr uint32_t EXCEPTION_VECTOR_TLB_REFILL = 0x80000000u;
     constexpr uint32_t EXCEPTION_VECTOR_BOOT = 0xBFC00200u;
 
-    struct HostFrameProbePoint
-    {
-        uint32_t x;
-        uint32_t y;
-    };
-
-    constexpr HostFrameProbePoint kGhostProbePoints[] = {
-        {220u, 176u},
-        {260u, 208u},
-        {320u, 208u},
-        {260u, 240u},
-        {320u, 240u},
-        {260u, 272u},
-        {320u, 272u},
-    };
-
-    uint32_t sampleHostFramePixel(const std::vector<uint8_t> &pixels,
-                                  uint32_t width,
-                                  uint32_t height,
-                                  uint32_t x,
-                                  uint32_t y)
-    {
-        if (x >= width || y >= height)
-        {
-            return 0u;
-        }
-
-        const size_t offset = (static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)) * 4u;
-        if (offset + 4u > pixels.size())
-        {
-            return 0u;
-        }
-
-        return static_cast<uint32_t>(pixels[offset + 0u]) |
-               (static_cast<uint32_t>(pixels[offset + 1u]) << 8) |
-               (static_cast<uint32_t>(pixels[offset + 2u]) << 16) |
-               (static_cast<uint32_t>(pixels[offset + 3u]) << 24);
-    }
-
     struct DispatchHistory
     {
         std::array<uint32_t, 64> pcs{};
@@ -243,84 +204,6 @@ namespace
         ctx->vu0_vpu_stat2 = 0;
     }
 
-
-    std::atomic<uint32_t> s_debugVu0Mp188Count{0};
-
-    void vu0LogM128Raw(std::ostream &os, __m128 value)
-    {
-        alignas(16) uint32_t raw[4]{};
-        _mm_storeu_si128(reinterpret_cast<__m128i *>(raw), _mm_castps_si128(value));
-        os << "(0x" << std::hex << raw[0]
-           << ",0x" << raw[1]
-           << ",0x" << raw[2]
-           << ",0x" << raw[3] << std::dec << ")";
-    }
-
-    void vu0LogFloat4Raw(std::ostream &os, const float value[4])
-    {
-        uint32_t raw[4]{};
-        std::memcpy(raw, value, sizeof(raw));
-        os << "(0x" << std::hex << raw[0]
-           << ",0x" << raw[1]
-           << ",0x" << raw[2]
-           << ",0x" << raw[3] << std::dec << ")";
-    }
-
-    void vu0LogMp188Context(const char *phase, uint32_t idx, uint32_t startPC, const R5900Context *ctx)
-    {
-        if (!ctx)
-        {
-            return;
-        }
-
-        const uint32_t ra = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0));
-        RUNTIME_LOG("[vu0:mp188-reg] idx=" << idx
-                    << " phase=" << phase
-                    << " start=0x" << std::hex << startPC
-                    << " callerPc=0x" << ctx->pc
-                    << " ra=0x" << ra
-                    << " q=" << std::dec << ctx->vu0_q
-                    << " i=" << ctx->vu0_i
-                    << " vf4raw=");
-        vu0LogM128Raw(std::cout, ctx->vu0_vf[4]);
-        RUNTIME_LOG(" vf5raw=");
-        vu0LogM128Raw(std::cout, ctx->vu0_vf[5]);
-        RUNTIME_LOG(" vf6raw=");
-        vu0LogM128Raw(std::cout, ctx->vu0_vf[6]);
-        RUNTIME_LOG(" vf7raw=");
-        vu0LogM128Raw(std::cout, ctx->vu0_vf[7]);
-        RUNTIME_LOG(" vf18raw=");
-        vu0LogM128Raw(std::cout, ctx->vu0_vf[18]);
-        RUNTIME_LOG(" accraw=");
-        vu0LogM128Raw(std::cout, ctx->vu0_acc);
-        RUNTIME_LOG(std::endl);
-    }
-
-    void vu0LogMp188State(const char *phase, uint32_t idx, uint32_t startPC, const VU1State &state, const R5900Context *ctx)
-    {
-        const uint32_t ra = ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0)) : 0u;
-        RUNTIME_LOG("[vu0:mp188-state] idx=" << idx
-                    << " phase=" << phase
-                    << " start=0x" << std::hex << startPC
-                    << " statePc=0x" << state.pc
-                    << " callerPc=0x" << (ctx ? ctx->pc : 0u)
-                    << " ra=0x" << ra
-                    << " q=" << std::dec << state.q
-                    << " i=" << state.i
-                    << " vf4raw=");
-        vu0LogFloat4Raw(std::cout, state.vf[4]);
-        RUNTIME_LOG(" vf5raw=");
-        vu0LogFloat4Raw(std::cout, state.vf[5]);
-        RUNTIME_LOG(" vf6raw=");
-        vu0LogFloat4Raw(std::cout, state.vf[6]);
-        RUNTIME_LOG(" vf7raw=");
-        vu0LogFloat4Raw(std::cout, state.vf[7]);
-        RUNTIME_LOG(" vf18raw=");
-        vu0LogFloat4Raw(std::cout, state.vf[18]);
-        RUNTIME_LOG(" accraw=");
-        vu0LogFloat4Raw(std::cout, state.acc);
-        RUNTIME_LOG(std::endl);
-    }
 
     void copyVu0ContextToState(const R5900Context *ctx, VU1State &state)
     {
@@ -679,31 +562,6 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
                       << " size=" << width << "x" << height
                       << " preferred=" << static_cast<uint32_t>(usedPreferredDisplaySource ? 1u : 0u)
                       << std::endl;
-        }
-        static uint32_t s_probeDebugCount = 0u;
-        if (s_probeDebugCount < 32u ||
-            displayFbp != s_lastDisplayFbp ||
-            sourceFbp != s_lastSourceFbp ||
-            usedPreferredDisplaySource != s_lastPreferred)
-        {
-            std::cout << "[frame:probe] idx=" << s_probeDebugCount
-                      << " tick=" << currentTick
-                      << " displayFbp=" << displayFbp
-                      << " sourceFbp=" << sourceFbp
-                      << " preferred=" << static_cast<uint32_t>(usedPreferredDisplaySource ? 1u : 0u);
-            for (const auto &probe : kGhostProbePoints)
-            {
-                if (probe.x >= width || probe.y >= height)
-                {
-                    continue;
-                }
-
-                const uint32_t pixel = sampleHostFramePixel(s_scratch, width, height, probe.x, probe.y);
-                std::cout << " host[" << probe.x << "," << probe.y << "]=0x"
-                          << std::hex << pixel << std::dec;
-            }
-            std::cout << std::endl;
-            ++s_probeDebugCount;
         }
         ++s_uploadDebugCount;
     });
@@ -1418,17 +1276,6 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
 {
     (void)rdram;
 
-    static std::unordered_map<uint32_t, int> seen;
-    int &count = seen[address];
-    if (count < 3)
-    {
-        RUNTIME_LOG("[VU0] microprogram @0x" << std::hex << address
-                                             << " pc=0x" << (ctx ? ctx->pc : 0u)
-                                             << " ra=0x" << (ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0)) : 0u)
-                                             << std::dec << std::endl);
-    }
-    ++count;
-
     if (!ctx)
     {
         return;
@@ -1438,48 +1285,19 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
     uint8_t *const vu0Data = m_memory.getVU0Data();
     const uint32_t startPC = address & ~0x7u;
 
-    const bool traceMp188 = (startPC == 0x188u);
-    uint32_t traceIdx = 0u;
-    bool shouldTraceMp188 = false;
-    if (traceMp188)
-    {
-        traceIdx = s_debugVu0Mp188Count.fetch_add(1u);
-        shouldTraceMp188 = traceIdx < 2048u;
-        if (shouldTraceMp188)
-        {
-            vu0LogMp188Context("before", traceIdx, startPC, ctx);
-        }
-    }
-
     if (!vu0Code || !vu0Data || startPC + 8u > PS2_VU0_CODE_SIZE)
     {
         seedVu0IdleSuccess(ctx);
-        if (shouldTraceMp188)
-        {
-            vu0LogMp188Context("after-invalid", traceIdx, startPC, ctx);
-        }
         return;
     }
 
     m_vu0.reset();
     copyVu0ContextToState(ctx, m_vu0.state());
-    if (shouldTraceMp188)
-    {
-        vu0LogMp188State("copied-in", traceIdx, startPC, m_vu0.state(), ctx);
-    }
     m_vu0.execute(vu0Code, PS2_VU0_CODE_SIZE,
                   vu0Data, PS2_VU0_DATA_SIZE,
                   m_gs, &m_memory,
                   startPC, 0u, ctx->vu0_itop, 4096);
-    if (shouldTraceMp188)
-    {
-        vu0LogMp188State("executed", traceIdx, startPC, m_vu0.state(), ctx);
-    }
     copyVu0StateToContext(m_vu0.state(), ctx);
-    if (shouldTraceMp188)
-    {
-        vu0LogMp188Context("after", traceIdx, startPC, ctx);
-    }
 }
 
 void PS2Runtime::vu0StartMicroProgram(uint8_t *rdram, R5900Context *ctx, uint32_t address)
@@ -2087,13 +1905,15 @@ void PS2Runtime::dispatchLoop(uint8_t *rdram, R5900Context *ctx)
             const uint32_t ra = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0));
             const uint32_t sp = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0));
             const uint32_t gp = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[28], 0));
-            std::cerr << "[dispatch:pc-zero] from=0x" << std::hex << dispatchedPc
-                      << " fromRa=0x" << dispatchedRa
-                      << " ra=0x" << ra
-                      << " sp=0x" << sp
-                      << " gp=0x" << gp
-                      << " trace=" << formatDispatchHistory()
-                      << std::dec << std::endl;
+            PS2_IF_AGRESSIVE_LOGS({
+                std::cerr << "[dispatch:pc-zero] from=0x" << std::hex << dispatchedPc
+                          << " fromRa=0x" << dispatchedRa
+                          << " ra=0x" << ra
+                          << " sp=0x" << sp
+                          << " gp=0x" << gp
+                          << " trace=" << formatDispatchHistory()
+                          << std::dec << std::endl;
+            });
 
             // PC=0 means this guest thread returned (usually via jr $ra with RA=0).
             // Do not request a global runtime stop here: other guest threads may still run.

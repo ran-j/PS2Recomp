@@ -91,12 +91,14 @@ namespace ps2_stubs
             {
                 g_audio_stub_state.blockTransferActive = false;
             }
-            std::cerr << "[Audio:BlockTrans] active=" << g_audio_stub_state.blockTransferActive
-                      << " base=0x" << std::hex << g_audio_stub_state.currentBlockBase
-                      << " size=0x" << g_audio_stub_state.currentBlockSize
-                      << " pause=0x" << g_audio_stub_state.currentPauseBase
-                      << " offset=0x" << g_audio_stub_state.currentBlockOffset
-                      << std::dec << std::endl;
+            PS2_IF_AGRESSIVE_LOGS({
+                std::cerr << "[Audio:BlockTrans] active=" << g_audio_stub_state.blockTransferActive
+                          << " base=0x" << std::hex << g_audio_stub_state.currentBlockBase
+                          << " size=0x" << g_audio_stub_state.currentBlockSize
+                          << " pause=0x" << g_audio_stub_state.currentPauseBase
+                          << " offset=0x" << g_audio_stub_state.currentBlockOffset
+                          << std::dec << std::endl;
+            });
         }
         else if (cmd == kLibSdCmdBlockTransStatus &&
                  g_audio_stub_state.blockTransferActive &&
@@ -107,10 +109,12 @@ namespace ps2_stubs
                 g_audio_stub_state.currentBlockSize;
             if (g_audio_stub_state.blockStatusTraceCount < 32u)
             {
-                std::cerr << "[Audio:BlockStatus] position=0x" << std::hex << currentBlockPosition()
-                          << " offset=0x" << g_audio_stub_state.currentBlockOffset
-                          << " size=0x" << g_audio_stub_state.currentBlockSize
-                          << std::dec << std::endl;
+                PS2_IF_AGRESSIVE_LOGS({
+                    std::cerr << "[Audio:BlockStatus] position=0x" << std::hex << currentBlockPosition()
+                              << " offset=0x" << g_audio_stub_state.currentBlockOffset
+                              << " size=0x" << g_audio_stub_state.currentBlockSize
+                              << std::dec << std::endl;
+                });
                 ++g_audio_stub_state.blockStatusTraceCount;
             }
         }

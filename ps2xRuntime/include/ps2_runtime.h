@@ -210,161 +210,6 @@ inline constexpr uint32_t PS2_PATH_WATCH_BYTES = 0x200u;
 inline constexpr uint32_t PS2_PATH_WATCH_MAX_LOGS = 4096u;
 inline std::atomic<uint32_t> g_ps2PathWatchLogCount{0};
 
-
-inline constexpr uint32_t PS2_VIF_PACKET_WATCH_MAX_RANGES = 64u;
-inline constexpr uint32_t PS2_VIF_PACKET_WATCH_MAX_LOGS = 4096u;
-inline constexpr uint32_t PS2_VIF_PACKET_HARD_WATCH0_START = 0x00351800u;
-inline constexpr uint32_t PS2_VIF_PACKET_HARD_WATCH0_END = 0x00353300u;
-inline constexpr uint32_t PS2_VIF_PACKET_HARD_WATCH1_START = 0x00002000u; // scratchpad packet 0x70002000 alias after address masking
-inline constexpr uint32_t PS2_VIF_PACKET_HARD_WATCH1_END = 0x00002300u;
-inline constexpr uint32_t PS2_VIF_PACKET_WATCH_HARD_SLOT0 = 0xFFFFFFFEu;
-inline constexpr uint32_t PS2_VIF_PACKET_WATCH_HARD_SLOT1 = 0xFFFFFFFDu;
-inline std::atomic<uint32_t> g_ps2VifPacketWatchStarts[PS2_VIF_PACKET_WATCH_MAX_RANGES]{};
-inline std::atomic<uint32_t> g_ps2VifPacketWatchEnds[PS2_VIF_PACKET_WATCH_MAX_RANGES]{};
-inline std::atomic<uint32_t> g_ps2VifPacketWatchLogCount{0};
-
-inline bool ps2VifPacketWatchRangeIntersects(uint32_t writeAddr, uint32_t writeSize, uint32_t start, uint32_t end)
-{
-    if (writeSize == 0u || end <= start)
-    {
-        return false;
-    }
-    const uint64_t writeStart = writeAddr;
-    const uint64_t writeEnd = writeStart + static_cast<uint64_t>(writeSize);
-    return writeEnd > static_cast<uint64_t>(start) && writeStart < static_cast<uint64_t>(end);
-}
-
-inline uint32_t ps2VifPacketWatchFindRange(uint32_t writeAddr, uint32_t writeSize)
-{
-    if (ps2VifPacketWatchRangeIntersects(writeAddr, writeSize,
-                                         PS2_VIF_PACKET_HARD_WATCH0_START,
-                                         PS2_VIF_PACKET_HARD_WATCH0_END))
-    {
-        return PS2_VIF_PACKET_WATCH_HARD_SLOT0;
-    }
-    if (ps2VifPacketWatchRangeIntersects(writeAddr, writeSize,
-                                         PS2_VIF_PACKET_HARD_WATCH1_START,
-                                         PS2_VIF_PACKET_HARD_WATCH1_END))
-    {
-        return PS2_VIF_PACKET_WATCH_HARD_SLOT1;
-    }
-
-    for (uint32_t i = 0; i < PS2_VIF_PACKET_WATCH_MAX_RANGES; ++i)
-    {
-        const uint32_t start = g_ps2VifPacketWatchStarts[i].load(std::memory_order_relaxed);
-        const uint32_t end = g_ps2VifPacketWatchEnds[i].load(std::memory_order_relaxed);
-        if (ps2VifPacketWatchRangeIntersects(writeAddr, writeSize, start, end))
-        {
-            return i;
-        }
-    }
-    return 0xFFFFFFFFu;
-}
-
-inline void ps2AddVifPacketWatchRange(uint32_t guestAddr, uint32_t byteCount, const char *reason)
-{
-    if (byteCount == 0u)
-    {
-        return;
-    }
-
-    const uint32_t start = guestAddr & PS2_RAM_MASK;
-    uint64_t end64 = static_cast<uint64_t>(start) + static_cast<uint64_t>(byteCount);
-    if (end64 > static_cast<uint64_t>(PS2_RAM_SIZE))
-    {
-        end64 = static_cast<uint64_t>(PS2_RAM_SIZE);
-    }
-    const uint32_t end = static_cast<uint32_t>(end64);
-    if (end <= start)
-    {
-        return;
-    }
-
-    for (uint32_t i = 0; i < PS2_VIF_PACKET_WATCH_MAX_RANGES; ++i)
-    {
-        const uint32_t oldStart = g_ps2VifPacketWatchStarts[i].load(std::memory_order_relaxed);
-        const uint32_t oldEnd = g_ps2VifPacketWatchEnds[i].load(std::memory_order_relaxed);
-        if (oldStart == start && oldEnd == end)
-        {
-            return;
-        }
-    }
-
-    for (uint32_t i = 0; i < PS2_VIF_PACKET_WATCH_MAX_RANGES; ++i)
-    {
-        uint32_t expectedEnd = 0u;
-        if (g_ps2VifPacketWatchEnds[i].compare_exchange_strong(expectedEnd, end, std::memory_order_relaxed))
-        {
-            g_ps2VifPacketWatchStarts[i].store(start, std::memory_order_relaxed);
-            auto flags = std::cout.flags();
-            std::cout << "[watch:vif-source-arm] slot=" << std::dec << i
-                      << " start=0x" << std::hex << start
-                      << " end=0x" << end
-                      << " bytes=0x" << byteCount
-                      << " reason=" << (reason ? reason : "")
-                      << std::dec << std::endl;
-            std::cout.flags(flags);
-            return;
-        }
-    }
-}
-
-// Compatibility shim for the older vif_packet_watch probe in GS.cpp.
-// The newer implementation supports multiple ranges, so the old single-range
-// setter just adds another watched range.
-inline void ps2SetVifPacketWatch(uint32_t guestAddr, uint32_t byteCount)
-{
-    ps2AddVifPacketWatchRange(guestAddr, byteCount, "legacy-vif-packet-watch");
-}
-
-inline void ps2VifPacketWatchDumpRangePrefix(const uint8_t *rdram, uint32_t slot)
-{
-    if (!rdram)
-    {
-        return;
-    }
-
-    uint32_t start = 0u;
-    uint32_t end = 0u;
-    if (slot == PS2_VIF_PACKET_WATCH_HARD_SLOT0)
-    {
-        start = PS2_VIF_PACKET_HARD_WATCH0_START;
-        end = PS2_VIF_PACKET_HARD_WATCH0_END;
-    }
-    else if (slot == PS2_VIF_PACKET_WATCH_HARD_SLOT1)
-    {
-        start = PS2_VIF_PACKET_HARD_WATCH1_START;
-        end = PS2_VIF_PACKET_HARD_WATCH1_END;
-    }
-    else
-    {
-        if (slot >= PS2_VIF_PACKET_WATCH_MAX_RANGES)
-        {
-            return;
-        }
-        start = g_ps2VifPacketWatchStarts[slot].load(std::memory_order_relaxed);
-        end = g_ps2VifPacketWatchEnds[slot].load(std::memory_order_relaxed);
-    }
-    if (end <= start)
-    {
-        return;
-    }
-
-    auto flags = std::cout.flags();
-    std::cout << " rangeBuf=" << std::hex;
-    const uint32_t count = ((end - start) < 16u) ? (end - start) : 16u;
-    for (uint32_t i = 0; i < count; ++i)
-    {
-        const uint32_t addr = (start + i) & PS2_RAM_MASK;
-        std::cout << static_cast<uint32_t>(rdram[addr]);
-        if (i + 1u < count)
-        {
-            std::cout << '.';
-        }
-    }
-    std::cout.flags(flags);
-}
-
 inline uint32_t ps2PathWatchPhysAddr()
 {
     return PS2_PATH_WATCH_ADDR & PS2_RAM_MASK;
@@ -419,103 +264,13 @@ inline void ps2TraceGuestWrite(uint8_t *rdram,
                                const char *op,
                                const R5900Context *ctx)
 {
-    if (!rdram || size == 0u)
-    {
-        return;
-    }
-
-    const uint32_t writeAddr = guestAddr & PS2_RAM_MASK;
-    const uint32_t vifPacketWatchSlot = ps2VifPacketWatchFindRange(writeAddr, size);
-    if (vifPacketWatchSlot != 0xFFFFFFFFu)
-    {
-        const uint32_t logIndex = g_ps2VifPacketWatchLogCount.fetch_add(1, std::memory_order_relaxed);
-        if (logIndex < PS2_VIF_PACKET_WATCH_MAX_LOGS)
-        {
-            const uint32_t pc = ctx ? ctx->pc : 0u;
-            const uint32_t ra = ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0)) : 0u;
-            const uint32_t sp = ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0)) : 0u;
-            uint32_t rangeStart = 0u;
-            uint32_t rangeEnd = 0u;
-            if (vifPacketWatchSlot == PS2_VIF_PACKET_WATCH_HARD_SLOT0)
-            {
-                rangeStart = PS2_VIF_PACKET_HARD_WATCH0_START;
-                rangeEnd = PS2_VIF_PACKET_HARD_WATCH0_END;
-            }
-            else if (vifPacketWatchSlot == PS2_VIF_PACKET_WATCH_HARD_SLOT1)
-            {
-                rangeStart = PS2_VIF_PACKET_HARD_WATCH1_START;
-                rangeEnd = PS2_VIF_PACKET_HARD_WATCH1_END;
-            }
-            else
-            {
-                rangeStart = g_ps2VifPacketWatchStarts[vifPacketWatchSlot].load(std::memory_order_relaxed);
-                rangeEnd = g_ps2VifPacketWatchEnds[vifPacketWatchSlot].load(std::memory_order_relaxed);
-            }
-            auto flags = std::cout.flags();
-            std::cout << "[watch:vif-source-write] #" << (logIndex + 1u)
-                      << " slot=" << std::dec << vifPacketWatchSlot
-                      << " op=" << op
-                      << " addr=0x" << std::hex << writeAddr
-                      << " size=0x" << size
-                      << " pc=0x" << pc
-                      << " ra=0x" << ra
-                      << " sp=0x" << sp
-                      << " vLo=0x" << valueLo;
-            if (size > 8u)
-            {
-                std::cout << " vHi=0x" << valueHi;
-            }
-            std::cout << " range=0x" << rangeStart << "-0x" << rangeEnd;
-            ps2VifPacketWatchDumpRangePrefix(rdram, vifPacketWatchSlot);
-            std::cout.flags(flags);
-            std::cout << std::endl;
-        }
-    }
-    if (!ps2PathWatchIntersects(writeAddr, size))
-    {
-        return;
-    }
-
-    const uint32_t logIndex = g_ps2PathWatchLogCount.fetch_add(1, std::memory_order_relaxed);
-    if (logIndex >= PS2_PATH_WATCH_MAX_LOGS)
-    {
-        return;
-    }
-
-    const uint32_t watchAddr = ps2PathWatchPhysAddr();
-    const bool touchesFirstByte = (watchAddr >= writeAddr) && (watchAddr < writeAddr + size);
-    const uint8_t oldByte = rdram[watchAddr];
-    const uint8_t newByte = touchesFirstByte ? ps2PathWatchExtractByteFromWrite(writeAddr, watchAddr, valueLo, valueHi) : oldByte;
-
-    const uint32_t pc = ctx ? ctx->pc : 0u;
-    const uint32_t ra = ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0)) : 0u;
-    const uint32_t sp = ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0)) : 0u;
-
-    auto flags = std::cout.flags();
-    std::cout << "[watch:path-write] #" << (logIndex + 1u)
-              << " op=" << op
-              << " addr=0x" << std::hex << writeAddr
-              << " size=0x" << size
-              << " pc=0x" << pc
-              << " ra=0x" << ra
-              << " sp=0x" << sp
-              << " vLo=0x" << valueLo;
-    if (size > 8u)
-    {
-        std::cout << " vHi=0x" << valueHi;
-    }
-    if (touchesFirstByte)
-    {
-        std::cout << " firstByte:" << static_cast<uint32_t>(oldByte)
-                  << "->" << static_cast<uint32_t>(newByte);
-        if (oldByte != 0u && newByte == 0u)
-        {
-            std::cout << " (ZEROED)";
-        }
-    }
-    ps2PathWatchDumpPrefix(rdram);
-    std::cout.flags(flags);
-    std::cout << std::endl;
+    (void)rdram;
+    (void)guestAddr;
+    (void)size;
+    (void)valueLo;
+    (void)valueHi;
+    (void)op;
+    (void)ctx;
 }
 
 inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
@@ -524,81 +279,11 @@ inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
                                     const char *op,
                                     const R5900Context *ctx)
 {
-    if (!rdram || size == 0u)
-    {
-        return;
-    }
-
-    const uint32_t writeAddr = guestAddr & PS2_RAM_MASK;
-    const uint32_t vifPacketWatchSlot = ps2VifPacketWatchFindRange(writeAddr, size);
-    if (vifPacketWatchSlot != 0xFFFFFFFFu)
-    {
-        const uint32_t logIndex = g_ps2VifPacketWatchLogCount.fetch_add(1, std::memory_order_relaxed);
-        if (logIndex < PS2_VIF_PACKET_WATCH_MAX_LOGS)
-        {
-            const uint32_t pc = ctx ? ctx->pc : 0u;
-            const uint32_t ra = ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0)) : 0u;
-            const uint32_t sp = ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0)) : 0u;
-            uint32_t rangeStart = 0u;
-            uint32_t rangeEnd = 0u;
-            if (vifPacketWatchSlot == PS2_VIF_PACKET_WATCH_HARD_SLOT0)
-            {
-                rangeStart = PS2_VIF_PACKET_HARD_WATCH0_START;
-                rangeEnd = PS2_VIF_PACKET_HARD_WATCH0_END;
-            }
-            else if (vifPacketWatchSlot == PS2_VIF_PACKET_WATCH_HARD_SLOT1)
-            {
-                rangeStart = PS2_VIF_PACKET_HARD_WATCH1_START;
-                rangeEnd = PS2_VIF_PACKET_HARD_WATCH1_END;
-            }
-            else
-            {
-                rangeStart = g_ps2VifPacketWatchStarts[vifPacketWatchSlot].load(std::memory_order_relaxed);
-                rangeEnd = g_ps2VifPacketWatchEnds[vifPacketWatchSlot].load(std::memory_order_relaxed);
-            }
-            auto flags = std::cout.flags();
-            std::cout << "[watch:vif-source-range] #" << (logIndex + 1u)
-                      << " slot=" << std::dec << vifPacketWatchSlot
-                      << " op=" << op
-                      << " addr=0x" << std::hex << writeAddr
-                      << " size=0x" << size
-                      << " pc=0x" << pc
-                      << " ra=0x" << ra
-                      << " sp=0x" << sp
-                      << " range=0x" << rangeStart << "-0x" << rangeEnd;
-            ps2VifPacketWatchDumpRangePrefix(rdram, vifPacketWatchSlot);
-            std::cout.flags(flags);
-            std::cout << std::endl;
-        }
-    }
-    if (!ps2PathWatchIntersects(writeAddr, size))
-    {
-        return;
-    }
-
-    const uint32_t logIndex = g_ps2PathWatchLogCount.fetch_add(1, std::memory_order_relaxed);
-    if (logIndex >= PS2_PATH_WATCH_MAX_LOGS)
-    {
-        return;
-    }
-
-    const uint32_t pc = ctx ? ctx->pc : 0u;
-    const uint32_t ra = ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0)) : 0u;
-    const uint32_t sp = ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0)) : 0u;
-    const uint8_t firstByte = rdram[ps2PathWatchPhysAddr()];
-
-    auto flags = std::cout.flags();
-    std::cout << "[watch:path-range] #" << (logIndex + 1u)
-              << " op=" << op
-              << " addr=0x" << std::hex << writeAddr
-              << " size=0x" << size
-              << " pc=0x" << pc
-              << " ra=0x" << ra
-              << " sp=0x" << sp
-              << " firstByte=" << static_cast<uint32_t>(firstByte);
-    ps2PathWatchDumpPrefix(rdram);
-    std::cout.flags(flags);
-    std::cout << std::endl;
+    (void)rdram;
+    (void)guestAddr;
+    (void)size;
+    (void)op;
+    (void)ctx;
 }
 
 struct PS2SoundDriverCompatLayout
@@ -795,7 +480,7 @@ public:
                 return true;
             if (inRange(physAddr, PS2_GS_PRIV_REG_BASE, PS2_GS_PRIV_REG_SIZE))
                 return true;
-            if (physAddr >= PS2_VU0_CODE_BASE && physAddr < (PS2_VU1_DATA_BASE + PS2_VU1_DATA_SIZE))
+            if (physAddr >= PS2_VU0_DATA_BASE && physAddr < (PS2_VU1_CODE_BASE + PS2_VU1_CODE_SIZE))
                 return true;
             return false;
         };

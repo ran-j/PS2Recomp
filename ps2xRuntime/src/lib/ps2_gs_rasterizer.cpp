@@ -15,8 +15,6 @@
 #include <iostream>
 #include <sstream>
 
-extern thread_local uint8_t g_ps2GifProbeCurrentPath;
-
 using namespace GSInternal;
 
 namespace
@@ -94,8 +92,6 @@ namespace
     std::atomic<uint32_t> s_debugPixelCount{0};
     std::atomic<uint32_t> s_debugContext1PrimitiveCount{0};
     std::atomic<uint32_t> s_debugFbp150PixelCount{0};
-    std::atomic<uint32_t> s_debugPrimitiveProbeCount{0};
-    std::atomic<uint32_t> s_debugPath1PrimitiveProbeCount{0};
     bool passesAlphaTest(uint64_t testReg, uint8_t alpha)
     {
         if ((testReg & 0x1u) == 0u)
@@ -252,34 +248,6 @@ namespace
 void GSRasterizer::drawPrimitive(GS *gs)
 {
     const auto &ctx = gs->activeContext();
-    {
-        const uint8_t probePath = g_ps2GifProbeCurrentPath;
-        const bool isPath1Probe = (probePath == 1u);
-        const uint32_t probeIndex = s_debugPrimitiveProbeCount.fetch_add(1u, std::memory_order_relaxed);
-        const uint32_t path1ProbeIndex = isPath1Probe ? s_debugPath1PrimitiveProbeCount.fetch_add(1u, std::memory_order_relaxed) : 0u;
-        if (probeIndex < 2048u || (isPath1Probe && path1ProbeIndex < 2048u))
-        {
-            RUNTIME_LOG((isPath1Probe ? "[gs:path1-prim-probe] idx=" : "[gs:prim-probe] idx=")
-                                                << (isPath1Probe ? path1ProbeIndex : probeIndex)
-                                                << " globalIdx=" << probeIndex
-                                                << " path=" << static_cast<uint32_t>(probePath)
-                                                << " type=" << static_cast<uint32_t>(gs->m_prim.type)
-                                                << " tme=" << static_cast<uint32_t>(gs->m_prim.tme)
-                                                << " abe=" << static_cast<uint32_t>(gs->m_prim.abe)
-                                                << " fst=" << static_cast<uint32_t>(gs->m_prim.fst)
-                                                << " ctxt=" << static_cast<uint32_t>(gs->m_prim.ctxt)
-                                                << " fbp=" << ctx.frame.fbp
-                                                << " fbw=" << ctx.frame.fbw
-                                                << " psm=0x" << std::hex << static_cast<uint32_t>(ctx.frame.psm) << std::dec
-                                                << " scissor=(" << ctx.scissor.x0 << "," << ctx.scissor.y0
-                                                << ")-(" << ctx.scissor.x1 << "," << ctx.scissor.y1 << ")"
-                                                << " xyoffset=(" << (ctx.xyoffset.ofx >> 4) << "," << (ctx.xyoffset.ofy >> 4) << ")"
-                                                << " v0=(" << gs->m_vtxQueue[0].x << "," << gs->m_vtxQueue[0].y << ")"
-                                                << " v1=(" << gs->m_vtxQueue[1].x << "," << gs->m_vtxQueue[1].y << ")"
-                                                << " v2=(" << gs->m_vtxQueue[2].x << "," << gs->m_vtxQueue[2].y << ")"
-                                                << std::endl);
-        }
-    }
     PS2_IF_AGRESSIVE_LOGS({
         const uint32_t primitiveIndex = s_debugPrimitiveCount.fetch_add(1u, std::memory_order_relaxed);
         if (primitiveIndex < 64u)
