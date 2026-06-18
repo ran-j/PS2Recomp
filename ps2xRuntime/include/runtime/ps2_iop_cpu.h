@@ -47,6 +47,14 @@ public:
     using IoWriteFn = std::function<bool(uint32_t addr, uint32_t val)>;
     void setIoHooks(IoReadFn r, IoWriteFn w) { m_ioRead = std::move(r); m_ioWrite = std::move(w); }
 
+    // Import-stub hook: called with the current PC before each instruction. If
+    // the PC is an IRX import stub, the hook services the imported function as
+    // an HLE call (sets $v0, sets PC to $ra) and returns true so the CPU skips
+    // the stub body. This is how kernel imports (loadcore/thbase/sifcmd/...) are
+    // resolved without an IOP BIOS.
+    using ImportHook = std::function<bool(IopCpu &, uint32_t addr)>;
+    void setImportHook(ImportHook h) { m_importHook = std::move(h); }
+
     // IOP bus access (RAM + IO hook). Public so the loader/HLE can poke IOP RAM.
     uint8_t busRead8(uint32_t addr);
     uint16_t busRead16(uint32_t addr);
@@ -78,6 +86,7 @@ private:
     TrapFn m_trap;
     IoReadFn m_ioRead;
     IoWriteFn m_ioWrite;
+    ImportHook m_importHook;
 };
 
 #endif // PS2_IOP_CPU_H

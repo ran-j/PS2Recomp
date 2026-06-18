@@ -2018,6 +2018,10 @@ void PS2Runtime::run()
     // parse + relocate the real IRX modules into IOP RAM and log their layout.
     iopLoaderSelfTest(&m_memory);
 
+    // Optional IRX execution test (env PS2_IOP_RUN_TEST=<irx-path>): load then
+    // run module_start on the R3000A, tracing kernel imports (maps the HLE surface).
+    iopRunModuleTest(&m_memory);
+
     // A blank image to use as a framebuffer
     Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLANK);
     Texture2D frameTex = LoadTextureFromImage(blank);

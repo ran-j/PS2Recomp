@@ -1,11 +1,14 @@
 #include "runtime/ps2_iop_loader.h"
 #include "runtime/ps2_memory.h"
+#include "runtime/ps2_iop_cpu.h"
 
 #include <cstring>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <unordered_map>
+#include <map>
 
 namespace
 {
@@ -253,9 +256,26 @@ IopModule IopModuleLoader::loadImage(const uint8_t *data, size_t size, const std
         if (libname.empty())
             continue;
         if (magic == IMPORT_MAGIC)
+        {
             mod.imports.push_back(libname);
+            // Per-function stub entries (2 words each) follow the 0x14-byte
+            // header; each stub's 2nd word is `addiu $0,$0,index` (0x2400|idx).
+            for (uint32_t s = off + 0x14u; s + 8u <= loadMemsz; s += 8u)
+            {
+                const uint32_t w1 = rd32(iopram + base + s + 4u);
+                if ((w1 >> 16) != 0x2400u)
+                    break; // end of this library's stub list
+                IopImportStub st;
+                st.addr = base + s;
+                st.lib = libname;
+                st.index = static_cast<uint16_t>(w1 & 0xFFFFu);
+                mod.stubs.push_back(st);
+            }
+        }
         else
+        {
             mod.exports.push_back(libname);
+        }
     }
 
     mod.valid = true;
@@ -314,4 +334,82 @@ bool iopLoaderSelfTest(PS2Memory *mem)
         std::memset(mem->getIOPRAM() + 0x00100000u, 0,
                     (loader.allocTop() > 0x00100000u) ? (loader.allocTop() - 0x00100000u) : 0u);
     return any;
+}
+
+bool iopRunModuleTest(PS2Memory *mem)
+{
+    const char *path = std::getenv("PS2_IOP_RUN_TEST");
+    if (!path || !*path)
+        return false;
+    if (!mem || !mem->getIOPRAM())
+        return false;
+
+    IopModuleLoader loader(mem);
+    loader.reset(0x00100000u);
+    IopModule mod = loader.loadFile(path);
+    if (!mod.valid)
+    {
+        std::cerr << "[iop:run] load failed: " << path << std::endl;
+        return false;
+    }
+
+    // stub address -> (lib,index)
+    std::unordered_map<uint32_t, const IopImportStub *> stubMap;
+    for (const auto &s : mod.stubs)
+        stubMap[s.addr] = &s;
+
+    IopCpu cpu(mem);
+    cpu.reset();
+
+    std::map<std::string, uint32_t> callCounts;
+    uint32_t totalCalls = 0;
+    int logged = 0;
+
+    cpu.setImportHook([&](IopCpu &c, uint32_t addr) -> bool {
+        auto it = stubMap.find(addr);
+        if (it == stubMap.end())
+            return false;
+        const IopImportStub *s = it->second;
+        const std::string key = s->lib + "[" + std::to_string(s->index) + "]";
+        callCounts[key]++;
+        ++totalCalls;
+        if (logged < 48)
+        {
+            std::cerr << "[iop:run] import " << key
+                      << " ra=0x" << std::hex << c.gpr(31) << std::dec << std::endl;
+            ++logged;
+        }
+        c.setGpr(2, 0);        // $v0 = 0 (HLE stub return)
+        c.setPC(c.gpr(31));    // return to caller ($ra)
+        return true;
+    });
+
+    // Call frame for module_start(argc=0, argv=0).
+    const uint32_t sentinel = 0x00FFF000u;
+    const uint32_t stackTop = 0x001F0000u;
+    cpu.setGpr(29, stackTop); // $sp
+    cpu.setGpr(28, mod.gp);   // $gp
+    cpu.setGpr(4, 0);         // $a0 = argc
+    cpu.setGpr(5, 0);         // $a1 = argv
+    cpu.setGpr(31, sentinel); // $ra
+    cpu.setHaltPc(sentinel);
+    cpu.setPC(mod.entry);
+
+    const uint32_t retired = cpu.run(500000u);
+
+    std::cerr << "[iop:run] " << mod.name
+              << " entry=0x" << std::hex << mod.entry
+              << " stopPc=0x" << cpu.pc() << std::dec
+              << " instrs=" << retired
+              << " reachedSentinel=" << (cpu.pc() == sentinel ? "yes" : "no")
+              << " importCalls=" << totalCalls
+              << " v0=0x" << std::hex << cpu.gpr(2) << std::dec << std::endl;
+    std::cerr << "[iop:run] distinct imports called (" << callCounts.size() << "):";
+    for (const auto &kv : callCounts)
+        std::cerr << " " << kv.first << "x" << kv.second;
+    std::cerr << std::endl;
+
+    std::memset(mem->getIOPRAM() + 0x00100000u, 0,
+                (loader.allocTop() > 0x00100000u) ? (loader.allocTop() - 0x00100000u) : 0u);
+    return true;
 }

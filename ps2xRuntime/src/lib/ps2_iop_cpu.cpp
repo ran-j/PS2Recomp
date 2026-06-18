@@ -306,6 +306,14 @@ uint32_t IopCpu::run(uint32_t maxInstr)
             m_halted = true;
             break;
         }
+        if (m_importHook && m_importHook(*this, m_pc))
+        {
+            // The hook serviced an IRX import stub (set $v0, set PC to $ra).
+            ++m_instrCount;
+            if (m_halted)
+                break;
+            continue;
+        }
         execOne();
         if (m_halted)
             break;
