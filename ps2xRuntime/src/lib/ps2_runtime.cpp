@@ -7,6 +7,7 @@
 #include "runtime/ps2_gs_gpu.h"
 #include "runtime/ps2_iop_cpu.h"
 #include "runtime/ps2_iop_loader.h"
+#include "runtime/ps2_iop_kernel.h"
 #include "ThreadNaming.h"
 #include "Kernel/Stubs/Audio.h"
 #include "Kernel/Stubs/GS.h"
@@ -2021,6 +2022,10 @@ void PS2Runtime::run()
     // Optional IRX execution test (env PS2_IOP_RUN_TEST=<irx-path>): load then
     // run module_start on the R3000A, tracing kernel imports (maps the HLE surface).
     iopRunModuleTest(&m_memory);
+
+    // Optional IOP-kernel test (env PS2_IOP_KERNEL_TEST=<irx>[,<irx>...]): load +
+    // module_start each IRX through the HLE kernel, running real cross-module code.
+    iopKernelTest(&m_memory);
 
     // A blank image to use as a framebuffer
     Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLANK);

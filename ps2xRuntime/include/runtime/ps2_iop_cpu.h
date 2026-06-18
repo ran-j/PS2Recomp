@@ -28,6 +28,18 @@ public:
     uint32_t hi() const { return m_hi; }
     uint32_t lo() const { return m_lo; }
 
+    // Full architectural state, for save/restore around nested runs (the
+    // cooperative thread model runs a thread inside a caller's run()).
+    struct State
+    {
+        uint32_t gpr[32];
+        uint32_t hi;
+        uint32_t lo;
+        uint32_t pc;
+    };
+    State saveState() const;
+    void restoreState(const State &s);
+
     // Run up to maxInstr instructions, stopping early on: the halt-PC sentinel,
     // requestHalt(), or a trap with no handler. Returns instructions retired.
     uint32_t run(uint32_t maxInstr);

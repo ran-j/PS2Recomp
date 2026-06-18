@@ -295,6 +295,25 @@ void IopCpu::execOne()
     m_gpr[0] = 0; // $zero stays hard-wired to 0
 }
 
+IopCpu::State IopCpu::saveState() const
+{
+    State s;
+    std::memcpy(s.gpr, m_gpr, sizeof(m_gpr));
+    s.hi = m_hi;
+    s.lo = m_lo;
+    s.pc = m_pc;
+    return s;
+}
+
+void IopCpu::restoreState(const State &s)
+{
+    std::memcpy(m_gpr, s.gpr, sizeof(m_gpr));
+    m_hi = s.hi;
+    m_lo = s.lo;
+    m_pc = s.pc;
+    m_gpr[0] = 0;
+}
+
 uint32_t IopCpu::run(uint32_t maxInstr)
 {
     m_halted = false;
