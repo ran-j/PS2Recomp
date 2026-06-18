@@ -5,6 +5,7 @@
 #include "game_overrides.h"
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_gs_gpu.h"
+#include "runtime/ps2_iop_cpu.h"
 #include "ThreadNaming.h"
 #include "Kernel/Stubs/Audio.h"
 #include "Kernel/Stubs/GS.h"
@@ -2003,6 +2004,14 @@ void PS2Runtime::run()
     m_debugGp.store(static_cast<uint32_t>(_mm_extract_epi32(m_cpuContext.r[28], 0)), std::memory_order_relaxed);
 
     RUNTIME_LOG("Starting execution at address 0x" << std::hex << m_cpuContext.pc << std::dec);
+
+    // Optional R3000A IOP-core self-test (env PS2_IOP_CPU_SELFTEST=1): runs a
+    // hand-assembled program in (still-zeroed) IOP RAM before the guest starts.
+    if (const char *st = std::getenv("PS2_IOP_CPU_SELFTEST"); st && *st && *st != '0')
+    {
+        IopCpu iopCpu(&m_memory);
+        iopCpu.selfTest();
+    }
 
     // A blank image to use as a framebuffer
     Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLANK);
