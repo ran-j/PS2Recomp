@@ -4,6 +4,7 @@
 #include <cstring>
 #include <cstdint>
 #include <cstdlib>
+#include <chrono>
 #include <vector>
 #include <unordered_map>
 #include <string>
@@ -203,6 +204,33 @@ inline void setReturnU64(R5900Context *ctx, uint64_t value)
     // Keep both conventions: full 64-bit value in $v0 and high 32-bit in $v1.
     ctx->r[2] = _mm_set_epi64x(0, static_cast<int64_t>(value));
     ctx->r[3] = _mm_set_epi64x(0, static_cast<int64_t>(static_cast<uint32_t>(value >> 32)));
+}
+
+// EE COP0 Count is a free-running cycle counter that real hardware increments every CPU cycle.
+// The runtime never advanced it, so `mfc0 Count` returned a constant — any guest delay/timeout
+// loop of the form `t0=Count; while(Count-t0 < N){}` (or "wait until Count changes") spins
+// forever. Derive a live, monotonically-increasing value from a host steady_clock at the EE core
+// clock (~294.912 MHz). Count is per-CPU hardware (shared across guest threads), so a global
+// origin is correct; a guest `mtc0 Count` adjusts a global offset so reads stay consistent.
+inline std::atomic<int64_t> g_cop0CountOffset{0};
+inline uint32_t ps2Cop0CountRaw()
+{
+    static const std::chrono::steady_clock::time_point s_origin = std::chrono::steady_clock::now();
+    const int64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           std::chrono::steady_clock::now() - s_origin)
+                           .count();
+    // cycles = ns * 294.912e6 / 1e9 = ns * 294912 / 1000000
+    return static_cast<uint32_t>((ns * 294912LL) / 1000000LL);
+}
+inline uint32_t ps2GetCop0Count()
+{
+    return static_cast<uint32_t>(static_cast<int64_t>(ps2Cop0CountRaw()) +
+                                 g_cop0CountOffset.load(std::memory_order_relaxed));
+}
+inline void ps2SetCop0Count(uint32_t value)
+{
+    g_cop0CountOffset.store(static_cast<int64_t>(value) - static_cast<int64_t>(ps2Cop0CountRaw()),
+                            std::memory_order_relaxed);
 }
 
 // Path write-watch base. Default DISABLED (0). Set env PS2_PATH_WATCH_ADDR=0xADDR (hex or dec)

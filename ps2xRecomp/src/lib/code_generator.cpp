@@ -1690,7 +1690,9 @@ namespace ps2recomp
             case COP0_REG_BADVADDR:
                 return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_badvaddr);", rt);
             case COP0_REG_COUNT:
-                return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_count);", rt);
+                // EE Count is a free-running cycle counter; return a live host-time-derived value
+                // so guest delay/timeout loops progress (the raw ctx field was never advanced).
+                return fmt::format("ctx->cop0_count = ps2GetCop0Count(); SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_count);", rt);
             case COP0_REG_ENTRYHI:
                 return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_entryhi);", rt);
             case COP0_REG_COMPARE:
@@ -1740,7 +1742,8 @@ namespace ps2recomp
             case COP0_REG_BADVADDR:
                 return "// MTC0 to BADVADDR register ignored (read-only)";
             case COP0_REG_COUNT:
-                return fmt::format("ctx->cop0_count = GPR_U32(ctx, {});", rt);
+                // Guest reset of Count: re-base the live counter via a global offset.
+                return fmt::format("ctx->cop0_count = GPR_U32(ctx, {0}); ps2SetCop0Count(GPR_U32(ctx, {0}));", rt);
             case COP0_REG_ENTRYHI:
                 return fmt::format("ctx->cop0_entryhi = GPR_U32(ctx, {}) & 0xC00000FF;", rt);
             case COP0_REG_COMPARE:
