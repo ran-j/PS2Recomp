@@ -78,6 +78,14 @@ private:
     void runToHalt(uint32_t entry, uint32_t a0, uint32_t a1, uint32_t gp, const char *what);
     void resumeThread(size_t threadIdx);
 
+    // Cooperative scheduler (PS2_IOP_COOP): run one time-slice of thread ti
+    // (fresh from entry if !live, else resume savedState). Returns instrs run.
+    uint32_t runThreadSlice(size_t ti, uint32_t slice);
+    // Round-robin all started, not-yet-finished threads for a few rounds so a
+    // deferred streaming worker + its producer make progress in the "background"
+    // between EE RPC calls.
+    void runDeferredThreads();
+
     uint32_t sysAlloc(uint32_t size, uint32_t align = 0x100u);
 
     PS2Memory *m_mem;
@@ -107,11 +115,16 @@ private:
         bool parked = false;        // blocked, savedState valid
         uint16_t waitSreg = 0xFFFFu; // IOP sreg index it's polling (or 0xFFFF)
         IopCpu::State savedState{};  // context to resume from
+        // cooperative scheduler (PS2_IOP_COOP)
+        uint32_t startArg = 0;      // a0 for the first (deferred) run
+        bool finished = false;      // reached PARK_SENTINEL (returned)
+        bool live = false;          // savedState holds a resumable mid-run context
     };
     std::vector<Thread> m_threads;
     uint32_t m_nextTid;
     bool m_parked;       // set by blocking HLE (RpcLoop/SleepThread/GetSreg)
     int m_curThread;     // index in m_threads of the running thread, or -1
+    bool m_inRpc = false; // true while serviceRpc runs the server dispatcher inline
 
     uint32_t m_iopSreg[32]; // IOP-side soft registers
     EeSregWriteFn m_eeSregWriter;

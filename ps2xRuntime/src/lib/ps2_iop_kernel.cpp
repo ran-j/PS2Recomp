@@ -161,8 +161,10 @@ bool IopKernel::serviceRpc(uint32_t sid, uint32_t rpcNum,
     m_curGp = gp;
     m_curThread = -1;
     m_parked = false;
+    m_inRpc = true;
 
     const uint32_t n = m_cpu->run(RUN_CAP);
+    m_inRpc = false;
     const uint32_t resultPtr = m_cpu->gpr(2);
     const bool parked = m_parked;
 
@@ -180,6 +182,10 @@ bool IopKernel::serviceRpc(uint32_t sid, uint32_t rpcNum,
     m_parked = savedParked;
     m_curGp = savedGp;
     m_curThread = savedCur;
+
+    // Cooperative scheduler: let any deferred streaming worker + producer make
+    // background progress between EE RPC calls so the async load completes.
+    runDeferredThreads();
     return true;
 }
 
@@ -390,6 +396,25 @@ bool IopKernel::kernelHle(IopCpu &c, const std::string &lib, uint16_t idx)
                 }
             if (ti >= 0)
             {
+                // Async thread model (PS2_IOP_DEFERTHREAD): when a thread is
+                // StartThread'd from *inside* an EE->IOP RPC dispatch, register it
+                // as started but do NOT run it inline. The default inline model runs
+                // the new thread to completion/park immediately, which deadlocks an
+                // RPC whose handler spawns a streaming/worker thread that then
+                // busy-waits on a producer that cannot run concurrently. Deferring
+                // lets the dispatcher finish and return the load handle (async on
+                // real HW); the worker is advanced later by runDeferredThreads().
+                // Only deferred during RPC (m_inRpc) so module_start, which legitimately
+                // needs its init threads to run, is unaffected.
+                static const bool s_defer = std::getenv("PS2_IOP_DEFERTHREAD") != nullptr;
+                if (s_defer && m_inRpc)
+                {
+                    m_threads[ti].started = true;
+                    m_threads[ti].startArg = arg;
+                    m_threads[ti].live = false; // run fresh from entry on first slice
+                    ret(0);
+                    return true;
+                }
                 // Run the thread on its own stack until it returns or parks.
                 const IopCpu::State saved = m_cpu->saveState();
                 const uint32_t savedGp = m_curGp;
@@ -630,6 +655,94 @@ void IopKernel::resumeThread(size_t ti)
     m_curGp = savedGp;
     m_curThread = savedCur;
     m_parked = false;
+}
+
+uint32_t IopKernel::runThreadSlice(size_t ti, uint32_t slice)
+{
+    if (ti >= m_threads.size())
+        return 0;
+    Thread &t = m_threads[ti];
+    if (t.finished)
+        return 0;
+
+    const IopCpu::State saved = m_cpu->saveState();
+    const uint32_t savedGp = m_curGp;
+    const int savedCur = m_curThread;
+    const bool savedParked = m_parked;
+
+    if (t.live)
+    {
+        m_cpu->restoreState(t.savedState);
+    }
+    else
+    {
+        for (int i = 1; i < 32; ++i)
+            m_cpu->setGpr(i, 0);
+        m_cpu->setGpr(29, t.stackTop ? t.stackTop : MODSTART_STACKTOP);
+        m_cpu->setGpr(28, t.gp);
+        m_cpu->setGpr(4, t.startArg);
+        m_cpu->setGpr(31, PARK_SENTINEL);
+        m_cpu->setPC(t.entry);
+    }
+    m_cpu->setHaltPc(PARK_SENTINEL);
+    m_curGp = t.gp;
+    m_curThread = static_cast<int>(ti);
+    m_parked = false;
+
+    const uint32_t n = m_cpu->run(slice);
+    if (m_cpu->pc() == PARK_SENTINEL)
+    {
+        t.finished = true;
+        t.live = false;
+        t.parked = false;
+    }
+    else
+    {
+        t.savedState = m_cpu->saveState();
+        t.live = true;
+        t.parked = m_parked;
+    }
+
+    m_cpu->restoreState(saved);
+    m_curGp = savedGp;
+    m_curThread = savedCur;
+    m_parked = savedParked;
+    return n;
+}
+
+void IopKernel::runDeferredThreads()
+{
+    static const bool s_coop = std::getenv("PS2_IOP_COOP") != nullptr;
+    if (!s_coop)
+        return;
+    static const uint32_t slice = []
+    {
+        const char *e = std::getenv("PS2_IOP_COOP_SLICE");
+        return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 0)) : 300000u;
+    }();
+    static const int rounds = []
+    {
+        const char *e = std::getenv("PS2_IOP_COOP_ROUNDS");
+        return e ? std::atoi(e) : 8;
+    }();
+
+    for (int r = 0; r < rounds; ++r)
+    {
+        bool anyLive = false;
+        for (size_t k = 0; k < m_threads.size(); ++k)
+        {
+            const Thread &t = m_threads[k];
+            if (t.finished)
+                continue;
+            if (!t.started && !t.parked && !t.live)
+                continue;
+            runThreadSlice(k, slice);
+            if (!m_threads[k].finished)
+                anyLive = true;
+        }
+        if (!anyLive)
+            break;
+    }
 }
 
 bool IopKernel::setIopSregAndResume(uint16_t idx, uint32_t val)
