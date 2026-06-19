@@ -1883,107 +1883,123 @@ void GS::performLocalToLocalTransfer()
     if (!m_vram)
         return;
 
-    uint32_t sbp = m_bitbltbuf.sbp;
-    uint8_t sbw = m_bitbltbuf.sbw;
-    uint8_t spsm = m_bitbltbuf.spsm;
-    uint32_t dbp = m_bitbltbuf.dbp;
-    uint8_t dbw = m_bitbltbuf.dbw;
-    uint8_t dpsm = m_bitbltbuf.dpsm;
+    const u32 sbp = m_bitbltbuf.sbp;
+    const u8 sbw = m_bitbltbuf.sbw;
+    const u8 spsm = m_bitbltbuf.spsm;
+    const u32 dbp = m_bitbltbuf.dbp;
+    const u8 dbw = m_bitbltbuf.dbw;
+    const u8 dpsm = m_bitbltbuf.dpsm;
+    const u32 rrw = m_trxreg.rrw;
+    const u32 rrh = m_trxreg.rrh;
+    const u32 ssax = m_trxpos.ssax;
+    const u32 ssay = m_trxpos.ssay;
+    const u32 dsax = m_trxpos.dsax;
+    const u32 dsay = m_trxpos.dsay;
+    const u32 dir = m_trxpos.dir;
 
-    if (sbw == 0)
-        sbw = 1;
-    if (dbw == 0)
-        dbw = 1;
+    const u32 total_pixels = rrw * rrh;
 
-    const uint32_t rrw = m_trxreg.rrw;
-    const uint32_t rrh = m_trxreg.rrh;
-    const uint32_t ssax = m_trxpos.ssax;
-    const uint32_t ssay = m_trxpos.ssay;
-    const uint32_t dsax = m_trxpos.dsax;
-    const uint32_t dsay = m_trxpos.dsay;
-    const GSTransferTraversal traversal = decodeTransferTraversal(m_trxpos.dir);
-    const bool formatAware = (spsm == dpsm) && supportsFormatAwareLocalCopy(spsm);
-
-    if (rrw == 0u || rrh == 0u)
+    if (total_pixels == 0)
     {
+        m_trxdir = 3;
         return;
     }
 
-    PS2_IF_AGRESSIVE_LOGS({
-        if ((spsm == GS_PSM_T4 || dpsm == GS_PSM_T4) &&
-            s_debugLocalCopyCount.fetch_add(1u, std::memory_order_relaxed) < 96u)
-        {
-            RUNTIME_LOG("[gs:l2l] sbp=" << sbp
-                                        << " dbp=" << dbp
-                                        << " sbw=" << static_cast<uint32_t>(sbw)
-                                        << " dbw=" << static_cast<uint32_t>(dbw)
-                                        << " spsm=0x" << std::hex << static_cast<uint32_t>(spsm)
-                                        << " dpsm=0x" << static_cast<uint32_t>(dpsm) << std::dec
-                                        << " ss=(" << ssax << "," << ssay << ")"
-                                        << " ds=(" << dsax << "," << dsay << ")"
-                                        << " rr=(" << rrw << "," << rrh << ")"
-                                        << " dir=" << static_cast<uint32_t>(m_trxpos.dir)
-                                        << " formatAware=" << (formatAware ? 1 : 0) << std::endl);
-        }
-    });
-
-    if (formatAware)
+    // TODO: clean this up / optimize
+    switch (dir)
     {
-        for (uint32_t row = 0; row < rrh; ++row)
+    case 0: // left -> right top -> bottom
+    {
+        u32 pixel_count = 0;
+        while (pixel_count < total_pixels)
         {
-            const uint32_t srcY = transferCoord(ssay, rrh, row, traversal.reverseY);
-            const uint32_t dstY = transferCoord(dsay, rrh, row, traversal.reverseY);
-            for (uint32_t col = 0; col < rrw; ++col)
-            {
-                const uint32_t srcX = transferCoord(ssax, rrw, col, traversal.reverseX);
-                const uint32_t dstX = transferCoord(dsax, rrw, col, traversal.reverseX);
-                const uint32_t pixel =
-                    readTransferPixel(m_vram, m_vramSize, sbp, sbw, spsm, srcX, srcY);
-                writeTransferPixel(m_vram, m_vramSize, dbp, dbw, dpsm, dstX, dstY, pixel);
-            }
+            const u32 x = pixel_count % rrw;
+            const u32 y = pixel_count / rrw;
+
+            const u32 sx = x + ssax;
+            const u32 sy = y + ssay;
+            const u32 dx = x + dsax;
+            const u32 dy = y + dsay;
+
+            WriteVram(dpsm, dbp, dbw, dx, dy, ReadVram(spsm, sbp, sbw, sx, sy));
+
+            pixel_count++;
         }
     }
-    else
+    break;
+
+
+    // left -> right
+    // bottom -> top (invert y)
+    case 1:
     {
-        const uint32_t srcBase = sbp * 256u;
-        const uint32_t dstBase = dbp * 256u;
-        uint32_t srcBpp = bitsPerPixel(spsm) / 8u;
-        uint32_t dstBpp = bitsPerPixel(dpsm) / 8u;
-        if (srcBpp == 0)
-            srcBpp = 4;
-        if (dstBpp == 0)
-            dstBpp = 4;
-        const uint32_t srcStride = static_cast<uint32_t>(sbw) * 64u * srcBpp;
-        const uint32_t dstStride = static_cast<uint32_t>(dbw) * 64u * dstBpp;
-        const uint32_t copyBpp = (srcBpp < dstBpp) ? srcBpp : dstBpp;
-
-        uint8_t pixelBytes[4] = {};
-        for (uint32_t row = 0; row < rrh; ++row)
+        u32 pixel_count = 0;
+        while (pixel_count < total_pixels)
         {
-            const uint32_t srcY = transferCoord(ssay, rrh, row, traversal.reverseY);
-            const uint32_t dstY = transferCoord(dsay, rrh, row, traversal.reverseY);
-            for (uint32_t col = 0; col < rrw; ++col)
-            {
-                const uint32_t srcX = transferCoord(ssax, rrw, col, traversal.reverseX);
-                const uint32_t dstX = transferCoord(dsax, rrw, col, traversal.reverseX);
-                const uint32_t srcOff = srcBase + srcY * srcStride + srcX * srcBpp;
-                const uint32_t dstOff = dstBase + dstY * dstStride + dstX * dstBpp;
-                if (srcOff + copyBpp > m_vramSize || dstOff + copyBpp > m_vramSize)
-                {
-                    continue;
-                }
+            const u32 x = pixel_count % rrw;
+            const u32 y = rrh - (pixel_count / rrw) - 1;
 
-                std::memcpy(pixelBytes, m_vram + srcOff, copyBpp);
-                std::memcpy(m_vram + dstOff, pixelBytes, copyBpp);
-            }
+            const u32 sx = x + ssax;
+            const u32 sy = y + ssay;
+            const u32 dx = x + dsax;
+            const u32 dy = y + dsay;
+
+            WriteVram(dpsm, dbp, dbw, dx, dy, ReadVram(spsm, sbp, sbw, sx, sy));
+
+            pixel_count++;
         }
     }
+    break;
 
-    if (sbp == 0u && (dbp == 0u || dbp == 0x20u) && rrw >= 640u && rrh >= 512u)
+    // right -> left (invert x)
+    // top -> bottom
+    case 2:
     {
-        m_lastDisplayBaseBytes = (dbp == 0x20u) ? 8192u : 0u;
-        snapshotVRAM();
+        u32 pixel_count = 0;
+        while (pixel_count < total_pixels)
+        {
+            const u32 x = rrw - (pixel_count % rrw) - 1;
+            const u32 y = pixel_count / rrw;
+
+            const u32 sx = x + ssax;
+            const u32 sy = y + ssay;
+            const u32 dx = x + dsax;
+            const u32 dy = y + dsay;
+
+            WriteVram(dpsm, dbp, dbw, dx, dy, ReadVram(spsm, sbp, sbw, sx, sy));
+
+            pixel_count++;
+        }
     }
+    break;
+
+    // right to left (invert x)
+    // bottom to top (invert y)
+    case 3:
+    {
+        u32 pixel_count = 0;
+        while (pixel_count < total_pixels)
+        {
+            const u32 x = rrw - (pixel_count % rrw) - 1;
+            const u32 y = rrh - (pixel_count / rrw) - 1;
+
+            const u32 sx = x + ssax;
+            const u32 sy = y + ssay;
+            const u32 dx = x + dsax;
+            const u32 dy = y + dsay;
+
+            WriteVram(dpsm, dbp, dbw, dx, dy, ReadVram(spsm, sbp, sbw, sx, sy));
+
+            pixel_count++;
+        }
+    }
+    break;
+
+    default:
+        break;
+    }
+
+    m_trxdir = 3;
 }
 
 void GS::vertexKick(bool drawing)
