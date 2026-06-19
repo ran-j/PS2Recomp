@@ -112,6 +112,48 @@ namespace ps2recomp
                 }
             }
 
+            // Mid-asm hooks (XenonRecomp-style): [[midasm_hook]] arrays with { name, address, after }.
+            if (data.contains("midasm_hook") && data.at("midasm_hook").is_array())
+            {
+                const auto &hooks = data.at("midasm_hook").as_array();
+                for (const auto &hookNode : hooks)
+                {
+                    if (!hookNode.is_table() || !hookNode.contains("name") || !hookNode.contains("address"))
+                    {
+                        continue;
+                    }
+
+                    MidAsmHook hook{};
+                    hook.name = toml::find<std::string>(hookNode, "name");
+
+                    const auto &addressValue = hookNode.at("address");
+                    if (addressValue.is_string())
+                    {
+                        hook.address = std::stoul(addressValue.as_string(), nullptr, 0);
+                    }
+                    else if (addressValue.is_integer())
+                    {
+                        hook.address = static_cast<uint32_t>(addressValue.as_integer());
+                    }
+                    else
+                    {
+                        continue;
+                    }
+
+                    if (hookNode.contains("after") && hookNode.at("after").is_boolean())
+                    {
+                        hook.after = hookNode.at("after").as_boolean();
+                    }
+
+                    if (hook.name.empty() || hook.address == 0u)
+                    {
+                        continue;
+                    }
+
+                    config.midAsmHooks.push_back(std::move(hook));
+                }
+            }
+
             if (data.contains("mmio") && data.at("mmio").is_table())
             {
                 const auto &mmioTable = toml::find(data, "mmio").as_table();

@@ -155,6 +155,27 @@ namespace ps2recomp
         }
     }
 
+    void CodeGenerator::setMidAsmHooks(const std::vector<MidAsmHook> &hooks)
+    {
+        m_midAsmHooksBeforeByAddress.clear();
+        m_midAsmHooksAfterByAddress.clear();
+        for (const auto &hook : hooks)
+        {
+            if (hook.name.empty())
+            {
+                continue;
+            }
+            if (hook.after)
+            {
+                m_midAsmHooksAfterByAddress[hook.address] = hook.name;
+            }
+            else
+            {
+                m_midAsmHooksBeforeByAddress[hook.address] = hook.name;
+            }
+        }
+    }
+
     void CodeGenerator::setResumeEntryTargets(const std::unordered_map<uint32_t, std::vector<uint32_t>> &resumeTargetsByOwner)
     {
         m_resumeEntryTargetsByOwner = resumeTargetsByOwner;
@@ -1103,6 +1124,16 @@ namespace ps2recomp
                 ss << "label_" << std::hex << inst.address << std::dec << ":\n";
             }
 
+            if (auto hookIt = m_midAsmHooksBeforeByAddress.find(inst.address); hookIt != m_midAsmHooksBeforeByAddress.end())
+            {
+                // [midasm hook] run a user C++ function before this instruction. The hook may
+                // modify ctx/memory; if it sets ctx->pc away from this address it redirects
+                // control flow (we return so the dispatcher resumes at the new pc).
+                ss << fmt::format("    ctx->pc = 0x{:X}u;\n", inst.address);
+                ss << fmt::format("    {{ extern void {0}(uint8_t*, R5900Context*, PS2Runtime*); {0}(rdram, ctx, runtime); }}\n", hookIt->second);
+                ss << fmt::format("    if (ctx->pc != 0x{:X}u) {{ return; }}\n", inst.address);
+            }
+
             if (m_emitInstructionComments)
             {
                 ss << "    // 0x" << std::hex << inst.address << ": 0x" << inst.raw << std::dec;
@@ -1156,6 +1187,12 @@ namespace ps2recomp
                         ss << " // MMIO: 0x" << std::hex << inst.mmioAddress << std::dec;
                     }
                     ss << "\n";
+
+                    if (auto hookIt = m_midAsmHooksAfterByAddress.find(inst.address); hookIt != m_midAsmHooksAfterByAddress.end())
+                    {
+                        // [midasm hook, after] run a user C++ function after this (non-branch) instruction.
+                        ss << fmt::format("    {{ extern void {0}(uint8_t*, R5900Context*, PS2Runtime*); {0}(rdram, ctx, runtime); }}\n", hookIt->second);
+                    }
                 }
             }
             catch (const std::exception &e)
@@ -1520,9 +1557,12 @@ namespace ps2recomp
         case SPECIAL_SLTU:
             return fmt::format("SET_GPR_U64(ctx, {}, ((uint64_t)GPR_U64(ctx, {}) < (uint64_t)GPR_U64(ctx, {})) ? 1 : 0);", inst.rd, inst.rs, inst.rt);
         case SPECIAL_MOVZ:
-            return fmt::format("if (GPR_U64(ctx, {}) == 0) SET_GPR_VEC(ctx, {}, GPR_VEC(ctx, {}));", inst.rt, inst.rd, inst.rs);
+            // R5900 movz/movn are 64-bit (doubleword) conditional moves, like the other
+            // 64-bit ALU ops (daddu/or/...). Use SET_GPR_U64, NOT SET_GPR_VEC: a 128-bit
+            // copy would clobber rd's upper 64 bits with rs's upper 64 bits.
+            return fmt::format("if (GPR_U64(ctx, {}) == 0) SET_GPR_U64(ctx, {}, GPR_U64(ctx, {}));", inst.rt, inst.rd, inst.rs);
         case SPECIAL_MOVN:
-            return fmt::format("if (GPR_U64(ctx, {}) != 0) SET_GPR_VEC(ctx, {}, GPR_VEC(ctx, {}));", inst.rt, inst.rd, inst.rs);
+            return fmt::format("if (GPR_U64(ctx, {}) != 0) SET_GPR_U64(ctx, {}, GPR_U64(ctx, {}));", inst.rt, inst.rd, inst.rs);
         case SPECIAL_MFSA:
             return fmt::format("SET_GPR_U32(ctx, {}, ctx->sa);", inst.rd);
         case SPECIAL_MTSA:
@@ -1650,7 +1690,9 @@ namespace ps2recomp
             case COP0_REG_BADVADDR:
                 return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_badvaddr);", rt);
             case COP0_REG_COUNT:
-                return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_count);", rt);
+                // EE Count is a free-running cycle counter; return a live host-time-derived value
+                // so guest delay/timeout loops progress (the raw ctx field was never advanced).
+                return fmt::format("ctx->cop0_count = ps2GetCop0Count(); SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_count);", rt);
             case COP0_REG_ENTRYHI:
                 return fmt::format("SET_GPR_S32(ctx, {}, (int32_t)ctx->cop0_entryhi);", rt);
             case COP0_REG_COMPARE:
@@ -1700,7 +1742,8 @@ namespace ps2recomp
             case COP0_REG_BADVADDR:
                 return "// MTC0 to BADVADDR register ignored (read-only)";
             case COP0_REG_COUNT:
-                return fmt::format("ctx->cop0_count = GPR_U32(ctx, {});", rt);
+                // Guest reset of Count: re-base the live counter via a global offset.
+                return fmt::format("ctx->cop0_count = GPR_U32(ctx, {0}); ps2SetCop0Count(GPR_U32(ctx, {0}));", rt);
             case COP0_REG_ENTRYHI:
                 return fmt::format("ctx->cop0_entryhi = GPR_U32(ctx, {}) & 0xC00000FF;", rt);
             case COP0_REG_COMPARE:

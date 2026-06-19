@@ -1,12 +1,38 @@
 #include "runtime/ps2_memory.h"
 #include "ps2_log.h"
 #include <atomic>
+#include <chrono>
 #include <iostream>
 #include <cstring>
+#include <cstdlib>
 #include <stdexcept>
 #include <algorithm>
 #include <string>
 #include <vector>
+
+namespace
+{
+// EE Timers (T0-T3) COUNT registers free-run at BUSCLK (147.456 MHz) / prescaler (MODE.CLKS).
+// The runtime returned 0 for them (frozen), so guest timer-wait loops and elapsed-time clocks
+// (e.g. read T0_COUNT, detect wrap, accumulate) never advanced. Derive a live 16-bit count from a
+// monotonic host steady_clock at the configured prescaler rate so guest timing progresses.
+uint32_t ps2EeTimerCount(uint32_t modeValue)
+{
+    static const std::chrono::steady_clock::time_point s_origin = std::chrono::steady_clock::now();
+    const int64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           std::chrono::steady_clock::now() - s_origin)
+                           .count();
+    int64_t hz;
+    switch (modeValue & 0x3u) // MODE.CLKS clock-select
+    {
+    case 0: hz = 147456000LL; break;       // BUSCLK
+    case 1: hz = 147456000LL / 16; break;  // BUSCLK/16
+    case 2: hz = 147456000LL / 256; break; // BUSCLK/256
+    default: hz = 15734LL; break;          // HBLANK (~NTSC line rate)
+    }
+    return static_cast<uint32_t>((ns * hz) / 1000000000LL) & 0xFFFFu;
+}
+} // namespace
 
 namespace
 {
@@ -220,6 +246,11 @@ bool PS2Memory::initialize(size_t ramSize)
         // Initialize DMA registers
         memset(dma_regs, 0, sizeof(dma_regs));
 
+        if (const char *st = std::getenv("PS2_IOP_SELFTEST"); st && *st && *st != '0')
+        {
+            iopSelfTest();
+        }
+
         return true;
     }
     catch (const std::exception &e)
@@ -228,6 +259,149 @@ bool PS2Memory::initialize(size_t ramSize)
         cleanup();
         return false;
     }
+}
+
+// ---- IOP RAM (2 MB) + SIF DMA (Marco 2) -------------------------------------
+
+uint32_t PS2Memory::iopRamOffset(uint32_t addr) const
+{
+    // KUSEG/KSEG0/KSEG1 all alias the same physical RAM on the R3000A.
+    const uint32_t phys = addr & 0x1FFFFFFFu;
+    return (phys < IOP_RAM_SIZE) ? phys : IOP_RAM_SIZE;
+}
+
+uint8_t PS2Memory::iopRead8(uint32_t addr) const
+{
+    if (!iop_ram)
+        return 0u;
+    const uint32_t off = iopRamOffset(addr);
+    return (off < IOP_RAM_SIZE) ? iop_ram[off] : 0u;
+}
+
+uint16_t PS2Memory::iopRead16(uint32_t addr) const
+{
+    if (!iop_ram)
+        return 0u;
+    const uint32_t off = iopRamOffset(addr);
+    if (off + sizeof(uint16_t) > IOP_RAM_SIZE)
+        return 0u;
+    uint16_t v;
+    std::memcpy(&v, iop_ram + off, sizeof(v));
+    return v;
+}
+
+uint32_t PS2Memory::iopRead32(uint32_t addr) const
+{
+    if (!iop_ram)
+        return 0u;
+    const uint32_t off = iopRamOffset(addr);
+    if (off + sizeof(uint32_t) > IOP_RAM_SIZE)
+        return 0u;
+    uint32_t v;
+    std::memcpy(&v, iop_ram + off, sizeof(v));
+    return v;
+}
+
+void PS2Memory::iopWrite8(uint32_t addr, uint8_t value)
+{
+    if (!iop_ram)
+        return;
+    const uint32_t off = iopRamOffset(addr);
+    if (off < IOP_RAM_SIZE)
+        iop_ram[off] = value;
+}
+
+void PS2Memory::iopWrite16(uint32_t addr, uint16_t value)
+{
+    if (!iop_ram)
+        return;
+    const uint32_t off = iopRamOffset(addr);
+    if (off + sizeof(uint16_t) <= IOP_RAM_SIZE)
+        std::memcpy(iop_ram + off, &value, sizeof(value));
+}
+
+void PS2Memory::iopWrite32(uint32_t addr, uint32_t value)
+{
+    if (!iop_ram)
+        return;
+    const uint32_t off = iopRamOffset(addr);
+    if (off + sizeof(uint32_t) <= IOP_RAM_SIZE)
+        std::memcpy(iop_ram + off, &value, sizeof(value));
+}
+
+uint32_t PS2Memory::sifDmaEEtoIOP(uint32_t eeAddr, uint32_t iopAddr, uint32_t bytes) // SIF1
+{
+    if (!m_rdram || !iop_ram || bytes == 0u)
+        return 0u;
+    const uint32_t eeOff = translateAddress(eeAddr);
+    const uint32_t iopOff = iopRamOffset(iopAddr);
+    if (eeOff >= PS2_RAM_SIZE || iopOff >= IOP_RAM_SIZE)
+        return 0u;
+    uint32_t n = bytes;
+    if (eeOff + n > PS2_RAM_SIZE)
+        n = PS2_RAM_SIZE - eeOff;
+    if (iopOff + n > IOP_RAM_SIZE)
+        n = IOP_RAM_SIZE - iopOff;
+    std::memcpy(iop_ram + iopOff, m_rdram + eeOff, n);
+    return n;
+}
+
+uint32_t PS2Memory::sifDmaIOPtoEE(uint32_t iopAddr, uint32_t eeAddr, uint32_t bytes) // SIF0
+{
+    if (!m_rdram || !iop_ram || bytes == 0u)
+        return 0u;
+    const uint32_t iopOff = iopRamOffset(iopAddr);
+    const uint32_t eeOff = translateAddress(eeAddr);
+    if (eeOff >= PS2_RAM_SIZE || iopOff >= IOP_RAM_SIZE)
+        return 0u;
+    uint32_t n = bytes;
+    if (iopOff + n > IOP_RAM_SIZE)
+        n = IOP_RAM_SIZE - iopOff;
+    if (eeOff + n > PS2_RAM_SIZE)
+        n = PS2_RAM_SIZE - eeOff;
+    std::memcpy(m_rdram + eeOff, iop_ram + iopOff, n);
+    return n;
+}
+
+bool PS2Memory::iopSelfTest()
+{
+    if (!iop_ram || !m_rdram)
+    {
+        std::cerr << "[iop:selftest] FAIL: memory not allocated" << std::endl;
+        return false;
+    }
+
+    bool ok = true;
+
+    // 1) Direct IOP RAM read/write + KSEG0 mirror aliasing.
+    iopWrite32(0x00001000u, 0xDEADBEEFu);
+    const bool rw = (iopRead32(0x00001000u) == 0xDEADBEEFu);
+    const bool kseg = (iopRead32(0x80001000u) == 0xDEADBEEFu) && (iopRead32(0xA0001000u) == 0xDEADBEEFu);
+    ok = ok && rw && kseg;
+
+    // 2) SIF round-trip: EE -> IOP (SIF1) then IOP -> EE (SIF0).
+    const uint32_t eeSrc = 0x00200000u, eeDst = 0x00201000u, iopMid = 0x00002000u;
+    for (uint32_t i = 0; i < 256u; ++i)
+        m_rdram[eeSrc + i] = static_cast<uint8_t>(i * 7u + 3u);
+    std::memset(m_rdram + eeDst, 0, 256u);
+    const uint32_t s1 = sifDmaEEtoIOP(eeSrc, iopMid, 256u);
+    const uint32_t s0 = sifDmaIOPtoEE(iopMid, eeDst, 256u);
+    const bool roundtrip = (s1 == 256u) && (s0 == 256u) && (std::memcmp(m_rdram + eeSrc, m_rdram + eeDst, 256u) == 0);
+    ok = ok && roundtrip;
+
+    // Clean up the scratch we scribbled so the guest starts from zeroed RAM.
+    iopWrite32(0x00001000u, 0u);
+    std::memset(iop_ram + 0x00002000u, 0, 256u);
+    std::memset(m_rdram + eeSrc, 0, 256u);
+    std::memset(m_rdram + eeDst, 0, 256u);
+
+    std::cerr << "[iop:selftest] iopRAM=2MB rw=" << (rw ? "PASS" : "FAIL")
+              << " kseg-mirror=" << (kseg ? "PASS" : "FAIL")
+              << " sif1(EE->IOP)=" << s1
+              << " sif0(IOP->EE)=" << s0
+              << " roundtrip=" << (roundtrip ? "PASS" : "FAIL")
+              << " => " << (ok ? "ALL PASS" : "FAIL") << std::endl;
+    return ok;
 }
 
 bool PS2Memory::isScratchpad(uint32_t address) const
@@ -817,6 +991,55 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
     {
         if ((address & 0xFF) == 0x00 && (value & 0x100))
         {
+            const uint32_t channelBase = address & 0xFFFFFF00u;
+
+            // Scratchpad (SPR) DMA channels 8 (fromSPR, 0x1000D000) and 9 (toSPR,
+            // 0x1000D400) copy between scratchpad and main RAM and then raise the
+            // channel's D_STAT completion bit. They run regardless of D_CTRL.DMAE:
+            // Freekstyle kicks SPR DMA with the DMAC-enable bit clear and then polls
+            // D_STAT.CIS8 forever (audio path at sub_001B35A0), so gating these on
+            // DMAE would hang. Other channels still honor DMAE below.
+            if (channelBase == 0x1000D000u || channelBase == 0x1000D400u)
+            {
+                const uint32_t spMadr = translateAddress(m_ioRegisters[channelBase + 0x10]);
+                const uint32_t spQwc = m_ioRegisters[channelBase + 0x20];
+                const uint32_t sadr = m_ioRegisters[channelBase + 0x80] & (PS2_SCRATCHPAD_SIZE - 1u);
+                m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
+                uint64_t bytes64 = static_cast<uint64_t>(spQwc) * 16ull;
+                if (spMadr < PS2_RAM_SIZE && bytes64 > 0u && m_scratchpad && m_rdram)
+                {
+                    uint32_t bytes = (bytes64 > PS2_RAM_SIZE) ? PS2_RAM_SIZE : static_cast<uint32_t>(bytes64);
+                    const bool fromSpr = (channelBase == 0x1000D000u);
+                    for (uint32_t i = 0; i < bytes; ++i)
+                    {
+                        const uint32_t sp = (sadr + i) & (PS2_SCRATCHPAD_SIZE - 1u);
+                        const uint32_t mp = spMadr + i;
+                        if (mp >= PS2_RAM_SIZE)
+                            break;
+                        if (fromSpr)
+                            m_rdram[mp] = m_scratchpad[sp];
+                        else
+                            m_scratchpad[sp] = m_rdram[mp];
+                    }
+                }
+
+                const uint32_t chBit = (channelBase == 0x1000D000u) ? 8u : 9u;
+                uint32_t dstat = m_ioRegisters.count(0x1000E010u) ? m_ioRegisters[0x1000E010u] : 0u;
+                dstat |= (1u << chBit);
+                const uint32_t st = dstat & 0x3FFu;
+                const uint32_t mk = (dstat >> 16) & 0x3FFu;
+                if ((st & mk) != 0u)
+                    dstat |= (1u << 31);
+                else
+                    dstat &= ~(1u << 31);
+                m_ioRegisters[0x1000E010u] = dstat;
+
+                // Signal completion: clear the STR (start) bit and the quadword count.
+                m_ioRegisters[channelBase + 0x00] = value & ~0x100u;
+                m_ioRegisters[channelBase + 0x20] = 0u;
+                return true;
+            }
+
             const auto dctrlIt = m_ioRegisters.find(0x1000E000u);
             const bool dmacEnabled = (dctrlIt == m_ioRegisters.end()) || ((dctrlIt->second & 0x1u) != 0u);
             if (!dmacEnabled)
@@ -824,7 +1047,6 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                 return true;
             }
 
-            const uint32_t channelBase = address & 0xFFFFFF00;
             const uint32_t madr = m_ioRegisters[channelBase + 0x10];
             const uint32_t qwc = m_ioRegisters[channelBase + 0x20];
             m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
@@ -1376,6 +1598,16 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
     }
     if (address >= 0x10000000 && address < 0x10010000)
     {
+        // EE Timer COUNT registers (T0-T3): return a live, advancing 16-bit count derived from
+        // host time at the prescaler the guest configured in the corresponding MODE register
+        // (stored on write). Previously frozen at 0 -> guest timer waits/elapsed clocks stalled.
+        if (address == 0x10000000u || address == 0x10000800u ||
+            address == 0x10001000u || address == 0x10001800u)
+        {
+            const uint32_t modeAddr = address + 0x10u;
+            const uint32_t mode = m_ioRegisters.count(modeAddr) ? m_ioRegisters[modeAddr] : 0u;
+            return ps2EeTimerCount(mode);
+        }
         if (address >= 0x10000000 && address < 0x10000100)
         {
             if ((address & 0xF) == 0x00)

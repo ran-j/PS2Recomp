@@ -3,6 +3,8 @@
 
 #include <cstring>
 #include <cstdint>
+#include <cstdlib>
+#include <chrono>
 #include <vector>
 #include <unordered_map>
 #include <string>
@@ -204,18 +206,56 @@ inline void setReturnU64(R5900Context *ctx, uint64_t value)
     ctx->r[3] = _mm_set_epi64x(0, static_cast<int64_t>(static_cast<uint32_t>(value >> 32)));
 }
 
-inline constexpr uint32_t PS2_PATH_WATCH_ADDR = 0x01EFFFA0u;
+// EE COP0 Count is a free-running cycle counter that real hardware increments every CPU cycle.
+// The runtime never advanced it, so `mfc0 Count` returned a constant — any guest delay/timeout
+// loop of the form `t0=Count; while(Count-t0 < N){}` (or "wait until Count changes") spins
+// forever. Derive a live, monotonically-increasing value from a host steady_clock at the EE core
+// clock (~294.912 MHz). Count is per-CPU hardware (shared across guest threads), so a global
+// origin is correct; a guest `mtc0 Count` adjusts a global offset so reads stay consistent.
+inline std::atomic<int64_t> g_cop0CountOffset{0};
+inline uint32_t ps2Cop0CountRaw()
+{
+    static const std::chrono::steady_clock::time_point s_origin = std::chrono::steady_clock::now();
+    const int64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           std::chrono::steady_clock::now() - s_origin)
+                           .count();
+    // cycles = ns * 294.912e6 / 1e9 = ns * 294912 / 1000000
+    return static_cast<uint32_t>((ns * 294912LL) / 1000000LL);
+}
+inline uint32_t ps2GetCop0Count()
+{
+    return static_cast<uint32_t>(static_cast<int64_t>(ps2Cop0CountRaw()) +
+                                 g_cop0CountOffset.load(std::memory_order_relaxed));
+}
+inline void ps2SetCop0Count(uint32_t value)
+{
+    g_cop0CountOffset.store(static_cast<int64_t>(value) - static_cast<int64_t>(ps2Cop0CountRaw()),
+                            std::memory_order_relaxed);
+}
+
+// Path write-watch base. Default DISABLED (0). Set env PS2_PATH_WATCH_ADDR=0xADDR (hex or dec)
+// to log every write touching a PS2_PATH_WATCH_BYTES window (pc/ra/value/byte-diff). Diagnostic.
+inline uint32_t ps2PathWatchInitBase()
+{
+    if (const char *e = std::getenv("PS2_PATH_WATCH_ADDR"); e && *e)
+    {
+        return static_cast<uint32_t>(std::strtoul(e, nullptr, 0));
+    }
+    return 0u; // disabled
+}
+inline uint32_t g_ps2PathWatchBase = ps2PathWatchInitBase();
 inline constexpr uint32_t PS2_PATH_WATCH_BYTES = 0x200u;
 inline constexpr uint32_t PS2_PATH_WATCH_MAX_LOGS = 4096u;
 inline std::atomic<uint32_t> g_ps2PathWatchLogCount{0};
 
 inline uint32_t ps2PathWatchPhysAddr()
 {
-    return PS2_PATH_WATCH_ADDR & PS2_RAM_MASK;
+    return g_ps2PathWatchBase & PS2_RAM_MASK;
 }
 
 inline bool ps2PathWatchIntersects(uint32_t writeAddr, uint32_t writeSize)
 {
+    if (g_ps2PathWatchBase == 0u) { return false; } // disabled (no env set)
     const uint64_t writeStart = writeAddr;
     const uint64_t writeEnd = writeStart + static_cast<uint64_t>(writeSize);
     const uint64_t watchStart = ps2PathWatchPhysAddr();
@@ -430,6 +470,8 @@ struct PS2DtxCompatLayout
     }
 };
 
+class IopKernel; // real IOP (R3000A) HLE kernel; see runtime/ps2_iop_kernel.h
+
 class PS2Runtime
 {
 public:
@@ -581,6 +623,11 @@ public:
 
     inline ps2_iop &iop() { return m_iop; }
     inline const ps2_iop &iop() const { return m_iop; }
+
+    // Real IOP (R3000A) kernel, lazily created on first use when env PS2_IOP_REAL
+    // is set. Loads+starts the driver IRX from PS2_IOP_MODULES and routes the
+    // EE<->IOP SREG handshake through real code. Returns nullptr when disabled.
+    IopKernel *realIop();
     inline PS2AudioBackend &audioBackend() { return m_audioBackend; }
     inline const PS2AudioBackend &audioBackend() const { return m_audioBackend; }
     inline PSPadBackend &padBackend() { return m_padBackend; }
@@ -620,6 +667,8 @@ private:
     GifArbiter m_gifArbiter;
     GS m_gs;
     ps2_iop m_iop;
+    std::unique_ptr<IopKernel> m_realIop;
+    bool m_realIopInit = false;
     PS2AudioBackend m_audioBackend;
     PSPadBackend m_padBackend;
     VU1Interpreter m_vu1;

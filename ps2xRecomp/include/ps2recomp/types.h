@@ -130,6 +130,17 @@ namespace ps2recomp
         int32_t addend;
     };
 
+    // Mid-asm hook (XenonRecomp-style): emit a call to a user C++ function at a guest
+    // instruction address. The hook (void name(rdram, ctx, runtime)) may modify ctx/memory
+    // and, by setting ctx->pc away from the hooked address, redirect control flow (the
+    // recompiled function returns so the dispatcher resumes at the new pc).
+    struct MidAsmHook
+    {
+        uint32_t address; // guest instruction address to hook
+        std::string name; // C++ function name (provided by the runtime/runner)
+        bool after = false; // emit the call AFTER the instruction instead of before
+    };
+
     // Jump table entry
     struct JumpTableEntry
     {
@@ -183,6 +194,7 @@ namespace ps2recomp
         std::vector<std::string> stubImplementations;
         std::unordered_map<uint32_t, uint32_t> mmioByInstructionAddress;
         std::vector<JumpTable> jumpTables;
+        std::vector<MidAsmHook> midAsmHooks;
     };
 
 } // namespace ps2recomp

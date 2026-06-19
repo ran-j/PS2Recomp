@@ -479,7 +479,28 @@ namespace
                 std::memcpy(&raw, section.data + offset, sizeof(uint32_t));
 
                 const uint32_t op = (raw >> 26) & 0x3F;
-                if (op != 0x03) // JAL
+
+                // JAL: the target is always a function entry.
+                // J (op 0x02): usually a local goto, but compilers emit TAIL CALLS as a
+                // plain `j func` once the frame is torn down. A `j` whose delay slot
+                // deallocates the stack frame (`addiu/daddiu $sp,$sp,+N`) is therefore a
+                // tail call to another function, not an in-function jump -- seed its
+                // target. (A local goto never restores $sp right before jumping.) This
+                // recovers prologue-less functions reached ONLY via tail call, which the
+                // codegen emits as lookupFunction(target) and would otherwise miss.
+                bool isFunctionTarget = (op == 0x03u);
+                if (op == 0x02u && (offset + 8u) <= section.size)
+                {
+                    uint32_t ds = 0;
+                    std::memcpy(&ds, section.data + offset + 4, sizeof(uint32_t));
+                    const uint32_t dshi = ds & 0xFFFF0000u; // addiu/daddiu $sp,$sp,imm
+                    if (((dshi == 0x27BD0000u) || (dshi == 0x67BD0000u)) &&
+                        ((ds & 0x8000u) == 0u) && ((ds & 0xFFFFu) != 0u))
+                    {
+                        isFunctionTarget = true;
+                    }
+                }
+                if (!isFunctionTarget)
                 {
                     continue;
                 }
@@ -490,6 +511,163 @@ namespace
                 if (FindCodeSectionByAddress(sections, target))
                 {
                     starts.insert(target);
+                }
+            }
+        }
+
+        // Generalization: the JAL-only scan above misses functions reached ONLY
+        // indirectly (jalr through a function-pointer / C++ static-constructor / vtable
+        // table). Seed those by scanning every section for 4-aligned words holding a
+        // valid code-section address whose target begins with a stack-allocating prologue
+        // (addiu/daddiu $sp,$sp,-N). The prologue + code-range + alignment filters keep
+        // false positives negligible (instruction words decode to out-of-range values),
+        // while recovering indirectly-reachable entries such as static-ctor tables.
+        {
+            auto looksLikePrologue = [&](uint32_t addr) -> bool {
+                const ps2recomp::Section *s = FindCodeSectionByAddress(sections, addr);
+                if (!s || !s->data)
+                {
+                    return false;
+                }
+                const uint32_t off = addr - s->address;
+                if (off + 4 > s->size)
+                {
+                    return false;
+                }
+                uint32_t w = 0;
+                std::memcpy(&w, s->data + off, sizeof(uint32_t));
+                const uint32_t hi = w & 0xFFFF0000u; // addiu/daddiu $sp,$sp,imm
+                return ((hi == 0x27BD0000u) || (hi == 0x67BD0000u)) && ((w & 0x8000u) != 0u);
+            };
+
+            for (const auto &section : sections)
+            {
+                if (!section.data || section.size < 4)
+                {
+                    continue;
+                }
+                for (uint32_t offset = 0; offset + 4 <= section.size; offset += 4)
+                {
+                    uint32_t word = 0;
+                    std::memcpy(&word, section.data + offset, sizeof(uint32_t));
+                    if ((word & 0x3u) != 0u || starts.find(word) != starts.end())
+                    {
+                        continue;
+                    }
+                    if (FindCodeSectionByAddress(sections, word) && looksLikePrologue(word))
+                    {
+                        starts.insert(word);
+                    }
+                }
+            }
+        }
+
+        // Generalization #2 (return-boundary split): the scans above still miss LEAF
+        // functions reached ONLY indirectly that do NOT begin with a stack-allocating
+        // prologue -- e.g. interrupt/vblank handlers handed by address to AddIntcHandler,
+        // or short callbacks. Such a function gets folded into its predecessor because no
+        // discovered start lands on its entry. Recover them structurally: the instruction
+        // after an unconditional `jr $ra` + its delay slot is unreachable by fall-through,
+        // so unless a branch targets it (a local label after a mid-function early return)
+        // it begins a new function. We first collect every intra-code branch/jump target
+        // so we never split at such a local label; over-approximating that set only makes
+        // the split MORE conservative (it can never truncate a real function), at the cost
+        // of occasionally missing an indirect entry.
+        {
+            std::unordered_set<uint32_t> branchTargets;
+            branchTargets.reserve(8192);
+            for (const auto &section : sections)
+            {
+                if (!section.isCode || !section.data || section.size < 4)
+                {
+                    continue;
+                }
+                for (uint32_t offset = 0; offset + 4 <= section.size; offset += 4)
+                {
+                    const uint32_t pc = section.address + offset;
+                    uint32_t raw = 0;
+                    std::memcpy(&raw, section.data + offset, sizeof(uint32_t));
+                    const uint32_t op = (raw >> 26) & 0x3F;
+
+                    if (op == 0x02u || op == 0x03u) // J / JAL (absolute)
+                    {
+                        const uint32_t target = ((pc + 4) & 0xF0000000u) | ((raw & 0x03FFFFFFu) << 2);
+                        branchTargets.insert(target);
+                    }
+                    else if (op == 0x01u ||                 // REGIMM (bltz/bgez/bltzal/...)
+                             (op >= 0x04u && op <= 0x07u) || // beq/bne/blez/bgtz
+                             (op >= 0x14u && op <= 0x17u))   // beql/bnel/blezl/bgtzl
+                    {
+                        const int32_t simm = static_cast<int16_t>(raw & 0xFFFFu);
+                        const uint32_t target = pc + 4u + (static_cast<uint32_t>(simm) << 2);
+                        branchTargets.insert(target);
+                    }
+                    else if ((op == 0x10u || op == 0x11u || op == 0x12u || op == 0x13u) &&
+                             (((raw >> 21) & 0x1Fu) == 0x08u)) // COPz BC (branch on coproc flag)
+                    {
+                        const int32_t simm = static_cast<int16_t>(raw & 0xFFFFu);
+                        const uint32_t target = pc + 4u + (static_cast<uint32_t>(simm) << 2);
+                        branchTargets.insert(target);
+                    }
+                }
+            }
+
+            for (const auto &section : sections)
+            {
+                if (!section.isCode || !section.data || section.size < 4)
+                {
+                    continue;
+                }
+                for (uint32_t offset = 0; offset + 4 <= section.size; offset += 4)
+                {
+                    uint32_t raw = 0;
+                    std::memcpy(&raw, section.data + offset, sizeof(uint32_t));
+                    if (raw != 0x03E00008u) // jr $ra
+                    {
+                        continue;
+                    }
+                    uint32_t candidate = section.address + offset + 8u; // skip delay slot
+                    if ((candidate & 0x3u) != 0u ||
+                        starts.find(candidate) != starts.end() ||
+                        branchTargets.find(candidate) != branchTargets.end())
+                    {
+                        continue;
+                    }
+                    const ps2recomp::Section *cs = FindCodeSectionByAddress(sections, candidate);
+                    if (!cs || !cs->data)
+                    {
+                        continue;
+                    }
+                    uint32_t coff = candidate - cs->address;
+                    if (coff + 4 > cs->size)
+                    {
+                        continue;
+                    }
+                    uint32_t cw = 0;
+                    std::memcpy(&cw, cs->data + coff, sizeof(uint32_t));
+                    // Skip a run of inter-function padding nops (word == 0) to reach the
+                    // real entry. A prologue-less indirect leaf (e.g. a 2-instruction
+                    // accessor reached via a function pointer) is often preceded by such
+                    // padding, so the instruction right after the delay slot is a nop and
+                    // the true entry sits a few words later. Bounded to avoid scanning data.
+                    uint32_t skipped = 0u;
+                    while (cw == 0u && skipped < 32u && (coff + 8u) <= cs->size)
+                    {
+                        candidate += 4u;
+                        coff += 4u;
+                        ++skipped;
+                        std::memcpy(&cw, cs->data + coff, sizeof(uint32_t));
+                    }
+                    if (cw == 0u)
+                    {
+                        continue;
+                    }
+                    if (starts.find(candidate) != starts.end() ||
+                        branchTargets.find(candidate) != branchTargets.end())
+                    {
+                        continue;
+                    }
+                    starts.insert(candidate);
                 }
             }
         }
@@ -1046,13 +1224,20 @@ namespace ps2recomp
                           << " Ghidra function(s) with invalid ranges after section clamping." << std::endl;
             }
 
-            m_extraFunctions.erase(
-                std::remove_if(m_extraFunctions.begin(), m_extraFunctions.end(),
-                               [&](const Function &func)
-                               {
-                                   return IsAutoGeneratedName(func.name) && !mapStarts.contains(func.start);
-                               }),
-                m_extraFunctions.end());
+            // A small map is a SUPPLEMENT to heuristic (JAL) discovery: keep the
+            // auto-discovered functions and only ADD the explicitly-mapped ones
+            // (e.g. indirect-call targets the JAL scanner misses). Only a large
+            // (complete) Ghidra export replaces the heuristic set.
+            if (mapStarts.size() > 64)
+            {
+                m_extraFunctions.erase(
+                    std::remove_if(m_extraFunctions.begin(), m_extraFunctions.end(),
+                                   [&](const Function &func)
+                                   {
+                                       return IsAutoGeneratedName(func.name) && !mapStarts.contains(func.start);
+                                   }),
+                    m_extraFunctions.end());
+            }
 
             std::sort(m_extraFunctions.begin(), m_extraFunctions.end(),
                       [](const Function &a, const Function &b)

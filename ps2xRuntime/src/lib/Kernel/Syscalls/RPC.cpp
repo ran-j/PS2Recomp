@@ -1,5 +1,6 @@
 #include "Common.h"
 #include "RPC.h"
+#include "runtime/ps2_iop_kernel.h"
 
 namespace ps2_syscalls
 {
@@ -97,6 +98,83 @@ namespace ps2_syscalls
             }
             std::memcpy(ptr, &value, sizeof(value));
             return true;
+        }
+
+        // ---- SIF SET_SREG (cid 0x80000001) round-trip bridge -----------------
+        // The EE writes a soft-register destined for the IOP; on real hardware an
+        // IRX driver replies by writing the EE-side libsifcmd _sif_sreg[] mirror,
+        // which EE code then polls (e.g. Freekstyle's audio-init wait loop). With
+        // no IOP CPU yet, echo the written value straight into that EE mirror so
+        // the poll loops progress. The mirror base is game-specific (the address
+        // of libsifcmd's _sif_sreg[]); it is supplied via the env var
+        // PS2_SIF_EE_SREG_BASE (hex, 0/unset = disabled, the default). This is a
+        // deliberate temporary bridge that running the real IRX modules replaces.
+        uint32_t eeSregMirrorBase()
+        {
+            static const uint32_t base = []() -> uint32_t {
+                const char *s = std::getenv("PS2_SIF_EE_SREG_BASE");
+                if (!s || !*s)
+                {
+                    return 0u;
+                }
+                return static_cast<uint32_t>(std::strtoul(s, nullptr, 0));
+            }();
+            return base;
+        }
+
+        // Locate the 24-byte SET_SREG packet among the candidate argument
+        // registers (calling conventions vary per game) and read {index, value}
+        // from packet+0x10 / packet+0x14.
+        bool decodeSetSregPacket(const uint8_t *rdram,
+                                 const uint32_t *candidates, size_t count,
+                                 uint32_t &index, uint32_t &value)
+        {
+            for (size_t i = 0; i < count; ++i)
+            {
+                const uint32_t cand = candidates[i];
+                if (cand < 0x1000u || cand >= PS2_RAM_SIZE)
+                {
+                    continue; // not a plausible RAM pointer
+                }
+                uint32_t idx = 0u;
+                if (!readGuestU32(rdram, cand + 0x10u, idx) || idx >= 0x40u)
+                {
+                    continue; // sreg indices are 0..31
+                }
+                uint32_t val = 0u;
+                readGuestU32(rdram, cand + 0x14u, val);
+                index = idx;
+                value = val;
+                return true;
+            }
+            return false;
+        }
+
+        void handleSifSetSreg(uint8_t *rdram, uint32_t a1, uint32_t a2, uint32_t a3)
+        {
+            const uint32_t base = eeSregMirrorBase();
+            if (base == 0u)
+            {
+                return; // disabled unless a mirror base is configured
+            }
+            uint32_t index = 0u;
+            uint32_t value = 0u;
+            const uint32_t cands[3] = {a2, a1, a3};
+            if (!decodeSetSregPacket(rdram, cands, 3, index, value))
+            {
+                return;
+            }
+            writeGuestU32(rdram, base + index * 4u, value);
+
+            static int logCount = 0;
+            if (logCount < 32)
+            {
+                std::cerr << "[sif:set_sreg] index=0x" << std::hex << index
+                          << " value=0x" << value
+                          << " -> EEmirror[0x" << (base + index * 4u) << "]"
+                          << std::dec << std::endl;
+                ++logCount;
+            }
         }
 
         bool normalizeGuestLinearAddr(uint32_t addr, uint32_t &out)
@@ -1426,6 +1504,43 @@ namespace ps2_syscalls
             }
         }
 
+        // GoW 989snd sound-bank/asset-streaming server (sid 0x123456): route to the real
+        // IOP module (989NOMID.IRX) running on the IopKernel. Gated on realIop() being
+        // active (PS2_IOP_REAL=1 + PS2_IOP_LOAD=LIBSD.IRX,989NOMID.IRX). serviceRpc copies
+        // the EE send buffer into IOP RAM, runs the server function, and returns the result.
+        if (sid == 0x123456u)
+        {
+            IopKernel *kern = runtime ? runtime->realIop() : nullptr;
+            if (kern && !kern->rpcServers().empty())
+            {
+                std::vector<uint8_t> sendData(sendSize ? sendSize : 1u, 0u);
+                if (uint8_t *src = sendBuf ? getMemPtr(rdram, sendBuf) : nullptr)
+                    std::memcpy(sendData.data(), src, sendSize);
+                std::vector<uint8_t> recvData(recvSize ? recvSize : 1u, 0u);
+                const bool ok = kern->serviceRpc(0x123456u, rpcNum, sendData.data(), sendSize,
+                                                 recvData.data(), recvSize);
+                if (ok)
+                {
+                    if (uint8_t *dst = recvBuf ? getMemPtr(rdram, recvBuf) : nullptr)
+                        std::memcpy(dst, recvData.data(), recvSize);
+                    {
+                        std::lock_guard<std::mutex> lock(g_rpc_mutex);
+                        g_rpc_clients[clientPtr].busy = false;
+                    }
+                    static uint32_t gowRpcLog = 0;
+                    if (gowRpcLog < 32u)
+                    {
+                        std::cerr << "[iop:gow-rpc] serviced sid=0x123456 rpc=0x" << std::hex << rpcNum
+                                  << " recv0=0x" << (recvSize >= 4 ? *reinterpret_cast<uint32_t *>(recvData.data()) : 0u)
+                                  << std::dec << std::endl;
+                        ++gowRpcLog;
+                    }
+                    setReturnS32(ctx, 0);
+                    return;
+                }
+            }
+        }
+
         uint32_t serverPtr = client->server;
         t_SifRpcServerData *sd = serverPtr ? reinterpret_cast<t_SifRpcServerData *>(getMemPtr(rdram, serverPtr)) : nullptr;
 
@@ -2488,6 +2603,27 @@ namespace ps2_syscalls
         if (sizeExtra > 0 && srcExtra && destExtra)
         {
             rpcCopyToRdram(rdram, destExtra, srcExtra, sizeExtra);
+        }
+
+        // SIF_CMD_SET_SREG. With the real IOP enabled, route the EE's write to
+        // the running IOP (waking the AUDIO worker, which then SET_SREGs the EE
+        // mirror via its own code). Otherwise fall back to the Marco-1 echo shim.
+        if (cid == 0x80000001u)
+        {
+            IopKernel *kern = runtime ? runtime->realIop() : nullptr;
+            if (kern)
+            {
+                uint32_t index = 0u, value = 0u;
+                const uint32_t cands[3] = {packetSize, packetAddr, srcExtra};
+                if (decodeSetSregPacket(rdram, cands, 3, index, value))
+                {
+                    kern->setIopSregAndResume(static_cast<uint16_t>(index), value);
+                }
+            }
+            else
+            {
+                handleSifSetSreg(rdram, packetAddr, packetSize, srcExtra);
+            }
         }
 
         static int logCount = 0;

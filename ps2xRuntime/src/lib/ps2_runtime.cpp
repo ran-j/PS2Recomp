@@ -5,6 +5,9 @@
 #include "game_overrides.h"
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_gs_gpu.h"
+#include "runtime/ps2_iop_cpu.h"
+#include "runtime/ps2_iop_loader.h"
+#include "runtime/ps2_iop_kernel.h"
 #include "ThreadNaming.h"
 #include "Kernel/Stubs/Audio.h"
 #include "Kernel/Stubs/GS.h"
@@ -1414,24 +1417,25 @@ uint32_t PS2Runtime::allocateGuestBlockLocked(uint32_t size, uint32_t alignment)
 
         const uint64_t blockStart = block.addr;
         const uint64_t blockEnd = blockStart + static_cast<uint64_t>(block.size);
-        const uint32_t alignedAddr = alignGuestHeapValue(block.addr, normalizedAlignment);
-        if (alignedAddr < block.addr)
+        if (static_cast<uint64_t>(allocSize) > block.size)
         {
             continue;
         }
 
-        const uint64_t alignedStart = alignedAddr;
-        if (alignedStart > blockEnd)
+        // Allocate from the TOP of the free block (high addresses). The guest's own
+        // libc heap (configured by SetupHeap over the SAME region) grows up from the
+        // base and keeps its free-list control node there, so handing runtime-internal
+        // scratch (GS/Font GIF packets, thread stacks, ...) from the base used to
+        // clobber it. Allocating high keeps the two allocators clear of each other.
+        const uint64_t rawTop = blockEnd - static_cast<uint64_t>(allocSize);
+        const uint64_t alignedStart = rawTop & ~(static_cast<uint64_t>(normalizedAlignment) - 1u);
+        if (alignedStart < blockStart)
         {
             continue;
         }
 
+        const uint32_t alignedAddr = static_cast<uint32_t>(alignedStart);
         const uint64_t allocEnd = alignedStart + static_cast<uint64_t>(allocSize);
-        if (allocEnd > blockEnd)
-        {
-            continue;
-        }
-
         const uint32_t prefixSize = static_cast<uint32_t>(alignedStart - blockStart);
         const uint32_t suffixSize = static_cast<uint32_t>(blockEnd - allocEnd);
 
@@ -1836,6 +1840,57 @@ bool PS2Runtime::shouldPreemptGuestExecution()
     return true;
 }
 
+IopKernel *PS2Runtime::realIop()
+{
+    if (m_realIopInit)
+        return m_realIop.get();
+    m_realIopInit = true;
+
+    const char *en = std::getenv("PS2_IOP_REAL");
+    if (!en || !*en || *en == '0')
+        return nullptr;
+
+    m_realIop = std::make_unique<IopKernel>(&m_memory);
+
+    // A loaded IOP module's SET_SREG back to the EE writes the EE-side
+    // libsifcmd _sif_sreg[] mirror so the EE audio wait loop progresses.
+    uint8_t *rdram = m_memory.getRDRAM();
+    uint32_t base = 0u;
+    if (const char *b = std::getenv("PS2_SIF_EE_SREG_BASE"))
+        base = static_cast<uint32_t>(std::strtoul(b, nullptr, 0));
+    m_realIop->setEeSregWriter([rdram, base](uint16_t idx, uint32_t val) {
+        if (!rdram || base == 0u)
+            return;
+        const uint32_t addr = (base + static_cast<uint32_t>(idx) * 4u) & PS2_RAM_MASK;
+        std::memcpy(rdram + addr, &val, sizeof(val));
+    });
+
+    // Load the IOP driver chain. Default = the Freekstyle audio chain (libsd+audio).
+    // Override with PS2_IOP_LOAD=<irx>[,<irx>...] (loaded in order; e.g. for GoW:
+    // "LIBSD.IRX,989NOMID.IRX" — the 989snd sound/asset-streaming server, sid 0x123456).
+    std::string dir = "MODULES";
+    if (const char *d = std::getenv("PS2_IOP_MODULES"))
+        dir = d;
+    if (const char *list = std::getenv("PS2_IOP_LOAD"); list && *list)
+    {
+        std::stringstream ss(list);
+        std::string irx;
+        while (std::getline(ss, irx, ','))
+            if (!irx.empty())
+                m_realIop->loadAndStart(dir + "/" + irx);
+    }
+    else
+    {
+        m_realIop->loadAndStart(dir + "/LIBSD.IRX");
+        m_realIop->loadAndStart(dir + "/AUDIO.IRX");
+    }
+    std::cerr << "[iop:real] kernel up; RPC servers=" << m_realIop->rpcServers().size();
+    for (const auto &s : m_realIop->rpcServers())
+        std::cerr << " sid=0x" << std::hex << s.sid << std::dec;
+    std::cerr << std::endl;
+    return m_realIop.get();
+}
+
 uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
     try
@@ -2003,6 +2058,26 @@ void PS2Runtime::run()
 
     RUNTIME_LOG("Starting execution at address 0x" << std::hex << m_cpuContext.pc << std::dec);
 
+    // Optional R3000A IOP-core self-test (env PS2_IOP_CPU_SELFTEST=1): runs a
+    // hand-assembled program in (still-zeroed) IOP RAM before the guest starts.
+    if (const char *st = std::getenv("PS2_IOP_CPU_SELFTEST"); st && *st && *st != '0')
+    {
+        IopCpu iopCpu(&m_memory);
+        iopCpu.selfTest();
+    }
+
+    // Optional IRX loader self-test (env PS2_IOP_LOAD_TEST=<irx-path>[,<irx-path>...]):
+    // parse + relocate the real IRX modules into IOP RAM and log their layout.
+    iopLoaderSelfTest(&m_memory);
+
+    // Optional IRX execution test (env PS2_IOP_RUN_TEST=<irx-path>): load then
+    // run module_start on the R3000A, tracing kernel imports (maps the HLE surface).
+    iopRunModuleTest(&m_memory);
+
+    // Optional IOP-kernel test (env PS2_IOP_KERNEL_TEST=<irx>[,<irx>...]): load +
+    // module_start each IRX through the HLE kernel, running real cross-module code.
+    iopKernelTest(&m_memory);
+
     // A blank image to use as a framebuffer
     Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLANK);
     Texture2D frameTex = LoadTextureFromImage(blank);
@@ -2031,6 +2106,33 @@ void PS2Runtime::run()
         }
         g_activeThreads.fetch_sub(1, std::memory_order_relaxed);
         gameThreadFinished.store(true, std::memory_order_release); });
+
+    // Optional PC watchdog (enable with env PS2_PC_WATCHDOG=1): logs the guest PC
+    // once a second so an external observer can tell whether execution is
+    // advancing or spinning on a wait loop. Diagnostic only; off by default.
+    std::thread watchdogThread;
+    {
+        const char *wdEnv = std::getenv("PS2_PC_WATCHDOG");
+        if (wdEnv && *wdEnv && *wdEnv != '0')
+        {
+            watchdogThread = std::thread([&]()
+                                         {
+                ThreadNaming::SetCurrentThreadName("PcWatchdog");
+                uint32_t last = 0xFFFFFFFFu;
+                int stuck = 0;
+                int t = 0;
+                while (!gameThreadFinished.load(std::memory_order_acquire) && !isStopRequested())
+                {
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                    const uint32_t pc = m_debugPc.load(std::memory_order_relaxed);
+                    const uint32_t ra = m_debugRa.load(std::memory_order_relaxed);
+                    stuck = (pc == last) ? (stuck + 1) : 0;
+                    last = pc;
+                    std::cerr << "[watchdog] t=" << (++t) << "s pc=0x" << std::hex << pc
+                              << " ra=0x" << ra << std::dec << " stuckSecs=" << stuck << std::endl;
+                } });
+        }
+    }
 
     ps2_syscalls::EnsureVSyncWorkerRunning(m_memory.getRDRAM(), this);
 
@@ -2118,6 +2220,11 @@ void PS2Runtime::run()
             std::cerr << "[run] game thread did not stop within timeout; detaching" << std::endl;
             gameThread.detach();
         }
+    }
+
+    if (watchdogThread.joinable())
+    {
+        watchdogThread.join();
     }
 
     const auto workerDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);

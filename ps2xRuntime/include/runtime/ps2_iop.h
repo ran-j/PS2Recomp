@@ -8,6 +8,9 @@ class PS2Runtime;
 constexpr uint32_t IOP_SID_SNDDRV_COMMAND = 0x00000000u;
 constexpr uint32_t IOP_SID_SNDDRV_STATE = 0x00000001u;
 constexpr uint32_t IOP_SID_LIBSD = 0x80000701u;
+// cdvdman S-command RPC server. EE libcdvd routes sceCdReadDvdDualInfo (and other
+// S-commands) through this server; the result buffer's first word is the success flag.
+constexpr uint32_t IOP_SID_CDVD_SCMD = 0x80000593u;
 
 constexpr uint32_t IOP_RPC_SNDDRV_SUBMIT = 0x00000000u;
 constexpr uint32_t IOP_RPC_SNDDRV_GET_STATUS_ADDR = 0x00000012u;
