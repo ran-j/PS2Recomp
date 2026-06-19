@@ -772,7 +772,12 @@ void register_ps2_runtime_expansion_tests()
                 (1ull << 16) |  // FBW
                 (0ull << 24) |  // PSM CT32
                 (0ull << 32);   // FBMSK
+
+            const uint64_t zbuf1 = (1ull << 32);
+
             gs.writeRegister(GS_REG_FRAME_1, frame1);
+            gs.writeRegister(GS_REG_ZBUF_1, zbuf1);
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
 
             // XYOFFSET=1,1 pixels (16.4 fixed point).
             const uint64_t xyoffset = (16ull) | (16ull << 32);
@@ -827,9 +832,12 @@ void register_ps2_runtime_expansion_tests()
                 (1ull << 16) |  // FBW
                 (0ull << 24) |  // PSM CT32
                 (0ull << 32);   // FBMSK
+            const uint64_t zbuf1 = (1ull << 32);
             gs.writeRegister(GS_REG_FRAME_1, frame1);
+            gs.writeRegister(GS_REG_ZBUF_1, zbuf1);
             gs.writeRegister(GS_REG_SCISSOR_1, (0ull) | (4ull << 16) | (0ull << 32) | (4ull << 48));
             gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
 
             const uint32_t pxOff = frameOffsetBytes(1u, 1u, 1u);
             vram[pxOff + 0u] = 40u;
