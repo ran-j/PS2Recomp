@@ -11,6 +11,19 @@
 #include <thread>
 #include <vector>
 
+// g_currentThreadId is an `inline thread_local int` defined in the kernel's
+// internal State.h (ps2xRuntime/.../Kernel/Syscalls/Helpers/State.h, default 1).
+// Only sub-case H of the semaphore-return-value test reaches into it: the worker
+// thread sets its own guest tid so ReleaseWaitThread(tid) can target the exact
+// ThreadInfo that the worker's WaitSema put into THS_WAIT.
+//
+// ODR-safety: this declaration MUST stay byte-for-byte type-compatible with that
+// definition (`thread_local int`, same name, no namespace). It is an `extern`
+// declaration of an existing inline thread_local, NOT a second definition, so the
+// linker binds to the runtime's instance. If the runtime ever changes the type or
+// moves it into a namespace, update this line in lockstep or the build will break.
+extern thread_local int g_currentThreadId;
+
 using namespace ps2_syscalls;
 
 namespace
@@ -26,6 +39,9 @@ namespace
     constexpr int KE_DORMANT = -413;
     constexpr int KE_SEMA_ZERO = -419;
     constexpr int KE_SEMA_OVF = -420;
+    constexpr int KE_WAIT_DELETE = -425;
+    constexpr int KE_RELEASE_WAIT = -418;
+    constexpr uint32_t K_SEMA_WAIT_READY_ADDR = 0x1900u;
 
     constexpr int THS_SUSPEND = 0x08;
     constexpr int THS_WAITSUSPEND = 0x0C;
@@ -364,7 +380,7 @@ void register_ps2_runtime_kernel_tests()
 
             setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
             PollSema(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_OK, "PollSema should consume one available token");
+            t.Equals(getRegS32(env.ctx, 2), sid, "PollSema should return sid when consuming one available token");
 
             setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
             PollSema(env.rdram.data(), &env.ctx, &env.runtime);
@@ -372,11 +388,11 @@ void register_ps2_runtime_kernel_tests()
 
             setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
             SignalSema(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_OK, "SignalSema should increment count when below max");
+            t.Equals(getRegS32(env.ctx, 2), sid, "SignalSema should return sid when incrementing count below max");
 
             setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
             SignalSema(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_OK, "SignalSema should allow increment up to max");
+            t.Equals(getRegS32(env.ctx, 2), sid, "SignalSema should return sid when incrementing up to max");
 
             setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
             SignalSema(env.rdram.data(), &env.ctx, &env.runtime);
@@ -384,7 +400,7 @@ void register_ps2_runtime_kernel_tests()
 
             setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
             DeleteSema(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_OK, "DeleteSema should succeed for existing semaphore");
+            t.Equals(getRegS32(env.ctx, 2), sid, "DeleteSema should return sid for existing semaphore");
 
             setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
             PollSema(env.rdram.data(), &env.ctx, &env.runtime);
@@ -424,7 +440,303 @@ void register_ps2_runtime_kernel_tests()
 
             setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
             DeleteSema(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_OK, "DeleteSema should clean up legacy-decoded semaphore");
+            t.Equals(getRegS32(env.ctx, 2), sid, "DeleteSema should return sid for legacy-decoded semaphore");
+        });
+
+        tc.Run("semaphore syscalls return sid on success (EE BIOS convention)", [](TestCase &t)
+        {
+            // Sub-case A: CreateSema returns positive id (regression guard)
+            {
+                TestEnv env;
+                const uint32_t semaParam[6] = { 0u, 2u, 1u, 0u, 0x11u, 0u };
+                writeGuestWords(env.rdram.data(), K_PARAM_ADDR, semaParam, std::size(semaParam));
+                setRegU32(env.ctx, 4, K_PARAM_ADDR);
+                CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
+                const int32_t sid = getRegS32(env.ctx, 2);
+                t.IsTrue(sid > 0, "CreateSema should return positive semaphore id");
+            }
+
+            // Sub-case B: PollSema success returns sid
+            {
+                TestEnv env;
+                const uint32_t semaParam[6] = { 0u, 2u, 1u, 0u, 0u, 0u };
+                writeGuestWords(env.rdram.data(), K_PARAM_ADDR, semaParam, std::size(semaParam));
+                setRegU32(env.ctx, 4, K_PARAM_ADDR);
+                CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
+                const int32_t sid = getRegS32(env.ctx, 2);
+                t.IsTrue(sid > 0, "CreateSema should return positive id for PollSema test");
+
+                setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
+                PollSema(env.rdram.data(), &env.ctx, &env.runtime);
+                t.Equals(getRegS32(env.ctx, 2), sid, "PollSema success should return sid");
+
+                setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
+                PollSema(env.rdram.data(), &env.ctx, &env.runtime);
+                t.Equals(getRegS32(env.ctx, 2), KE_SEMA_ZERO, "PollSema should return KE_SEMA_ZERO when count exhausted");
+            }
+
+            // Sub-case C: SignalSema success returns sid + overflow returns KE_SEMA_OVF
+            {
+                TestEnv env;
+                const uint32_t semaParam[6] = { 0u, 1u, 0u, 0u, 0u, 0u };
+                writeGuestWords(env.rdram.data(), K_PARAM_ADDR, semaParam, std::size(semaParam));
+                setRegU32(env.ctx, 4, K_PARAM_ADDR);
+                CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
+                const int32_t sid = getRegS32(env.ctx, 2);
+                t.IsTrue(sid > 0, "CreateSema should return positive id for SignalSema test");
+
+                setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
+                SignalSema(env.rdram.data(), &env.ctx, &env.runtime);
+                t.Equals(getRegS32(env.ctx, 2), sid, "SignalSema success should return sid (count 0->1)");
+
+                setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
+                SignalSema(env.rdram.data(), &env.ctx, &env.runtime);
+                t.Equals(getRegS32(env.ctx, 2), KE_SEMA_OVF, "SignalSema should return KE_SEMA_OVF when count at max=1");
+            }
+
+            // Sub-case D: WaitSema success returns sid AND decrements count
+            {
+                TestEnv env;
+                const uint32_t semaParam[6] = { 0u, 2u, 1u, 0u, 0u, 0u };
+                writeGuestWords(env.rdram.data(), K_PARAM_ADDR, semaParam, std::size(semaParam));
+                setRegU32(env.ctx, 4, K_PARAM_ADDR);
+                CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
+                const int32_t sid = getRegS32(env.ctx, 2);
+                t.IsTrue(sid > 0, "CreateSema should return positive id for WaitSema test");
+
+                setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
+                WaitSema(env.rdram.data(), &env.ctx, &env.runtime);
+                t.Equals(getRegS32(env.ctx, 2), sid, "WaitSema success should return sid");
+
+                R5900Context statusCtx{};
+                setRegU32(statusCtx, 4, static_cast<uint32_t>(sid));
+                setRegU32(statusCtx, 5, K_STATUS_ADDR);
+                ReferSemaStatus(env.rdram.data(), &statusCtx, &env.runtime);
+                EeSemaStatus semaStatus{};
+                std::memcpy(&semaStatus, env.rdram.data() + K_STATUS_ADDR, sizeof(semaStatus));
+                t.Equals(semaStatus.count, 0, "WaitSema should decrement count to 0");
+            }
+
+            // Sub-case E: WaitSema delete-while-waiting returns KE_WAIT_DELETE
+            {
+                TestEnv env;
+                const uint32_t semaParam[6] = { 0u, 1u, 0u, 0u, 0u, 0u };
+                writeGuestWords(env.rdram.data(), K_PARAM_ADDR, semaParam, std::size(semaParam));
+                setRegU32(env.ctx, 4, K_PARAM_ADDR);
+                CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
+                const int32_t sid = getRegS32(env.ctx, 2);
+                t.IsTrue(sid > 0, "CreateSema should return positive id for delete-while-waiting test");
+
+                int32_t workerRet = 0;
+                writeGuestU32(env.rdram.data(), K_SEMA_WAIT_READY_ADDR, 0u);
+
+                std::thread worker([&]()
+                {
+                    R5900Context wctx{};
+                    setRegU32(wctx, 4, static_cast<uint32_t>(sid));
+                    writeGuestU32(env.rdram.data(), K_SEMA_WAIT_READY_ADDR, 1u);
+                    WaitSema(env.rdram.data(), &wctx, &env.runtime);
+                    workerRet = getRegS32(wctx, 2);
+                });
+
+                // Wait until the waiter has incremented waiter count (count=0, so it must block)
+                const bool waiterBlocking = waitUntil([&]()
+                {
+                    R5900Context statusCtx{};
+                    setRegU32(statusCtx, 4, static_cast<uint32_t>(sid));
+                    setRegU32(statusCtx, 5, K_STATUS_ADDR);
+                    ReferSemaStatus(env.rdram.data(), &statusCtx, &env.runtime);
+                    EeSemaStatus st{};
+                    std::memcpy(&st, env.rdram.data() + K_STATUS_ADDR, sizeof(st));
+                    return st.wait_threads >= 1;
+                }, std::chrono::milliseconds(500));
+                t.IsTrue(waiterBlocking, "worker thread should be blocking on WaitSema");
+
+                // Delete the semaphore while worker is waiting
+                setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
+                DeleteSema(env.rdram.data(), &env.ctx, &env.runtime);
+                t.Equals(getRegS32(env.ctx, 2), sid, "DeleteSema should return sid while thread is waiting");
+
+                worker.join();
+                t.Equals(workerRet, KE_WAIT_DELETE, "WaitSema should return KE_WAIT_DELETE when semaphore is deleted");
+            }
+
+            // Sub-case F: DeleteSema success returns sid
+            {
+                TestEnv env;
+                const uint32_t semaParam[6] = { 0u, 1u, 0u, 0u, 0u, 0u };
+                writeGuestWords(env.rdram.data(), K_PARAM_ADDR, semaParam, std::size(semaParam));
+                setRegU32(env.ctx, 4, K_PARAM_ADDR);
+                CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
+                const int32_t sid = getRegS32(env.ctx, 2);
+                t.IsTrue(sid > 0, "CreateSema should return positive id for DeleteSema test");
+
+                setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
+                DeleteSema(env.rdram.data(), &env.ctx, &env.runtime);
+                t.Equals(getRegS32(env.ctx, 2), sid, "DeleteSema success should return sid");
+            }
+
+            // Sub-case G: Invalid sid returns KE_UNKNOWN_SEMID for all four syscalls
+            {
+                TestEnv env;
+                constexpr uint32_t kBadSid = 0x7FFFu;
+
+                setRegU32(env.ctx, 4, kBadSid);
+                PollSema(env.rdram.data(), &env.ctx, &env.runtime);
+                t.Equals(getRegS32(env.ctx, 2), KE_UNKNOWN_SEMID, "PollSema should return KE_UNKNOWN_SEMID for invalid sid");
+
+                setRegU32(env.ctx, 4, kBadSid);
+                SignalSema(env.rdram.data(), &env.ctx, &env.runtime);
+                t.Equals(getRegS32(env.ctx, 2), KE_UNKNOWN_SEMID, "SignalSema should return KE_UNKNOWN_SEMID for invalid sid");
+
+                setRegU32(env.ctx, 4, kBadSid);
+                WaitSema(env.rdram.data(), &env.ctx, &env.runtime);
+                t.Equals(getRegS32(env.ctx, 2), KE_UNKNOWN_SEMID, "WaitSema should return KE_UNKNOWN_SEMID for invalid sid");
+
+                setRegU32(env.ctx, 4, kBadSid);
+                DeleteSema(env.rdram.data(), &env.ctx, &env.runtime);
+                t.Equals(getRegS32(env.ctx, 2), KE_UNKNOWN_SEMID, "DeleteSema should return KE_UNKNOWN_SEMID for invalid sid");
+            }
+
+            // Sub-case H: WaitSema force-released via ReleaseWaitThread returns KE_RELEASE_WAIT
+            // and the ret >= 0 guard must NOT consume a token (count stays 0, not -1).
+            {
+                // Use a tid the sequential allocator (range 2..0xFF) will never produce, so the
+                // worker's WaitSema creates a fresh ThreadInfo that ReleaseWaitThread can target.
+                // Prior tests leave stale entries at low tids (2, 3, ...), which would make
+                // ReleaseWaitThread find a non-waiting ThreadInfo and return KE_NOT_WAIT.
+                constexpr int kWorkerTid = 0x7FFE;
+                TestEnv env;
+                const uint32_t semaParam[6] = {0u, 2u, 0u, 0u, 0u, 0u};
+                writeGuestWords(env.rdram.data(), K_PARAM_ADDR, semaParam, 6);
+                setRegU32(env.ctx, 4, K_PARAM_ADDR);
+                CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
+                const int sid = getRegS32(env.ctx, 2);
+                t.IsTrue(sid > 0, "sub-case H: CreateSema must return positive sid");
+
+                writeGuestU32(env.rdram.data(), K_SEMA_WAIT_READY_ADDR, 0u);
+                int32_t workerRet = 0;
+
+                std::thread worker([&]() {
+                    g_currentThreadId = kWorkerTid;
+                    R5900Context wctx{};
+                    setRegU32(wctx, 4, static_cast<uint32_t>(sid));
+                    writeGuestU32(env.rdram.data(), K_SEMA_WAIT_READY_ADDR, 1u);
+                    WaitSema(env.rdram.data(), &wctx, &env.runtime);
+                    workerRet = getRegS32(wctx, 2);
+                });
+
+                // Wait until the worker is confirmed blocking in WaitSema.
+                const bool waiterBlocking = waitUntil([&]() {
+                    R5900Context statusCtx{};
+                    setRegU32(statusCtx, 4, static_cast<uint32_t>(sid));
+                    setRegU32(statusCtx, 5, K_STATUS_ADDR);
+                    ReferSemaStatus(env.rdram.data(), &statusCtx, &env.runtime);
+                    EeSemaStatus st{};
+                    std::memcpy(&st, env.rdram.data() + K_STATUS_ADDR, sizeof(st));
+                    return st.wait_threads >= 1;
+                }, std::chrono::milliseconds(500));
+                t.IsTrue(waiterBlocking, "sub-case H: worker must be blocking in WaitSema before force-release");
+
+                // Force-release the worker via ReleaseWaitThread.
+                setRegU32(env.ctx, 4, static_cast<uint32_t>(kWorkerTid));
+                ReleaseWaitThread(env.rdram.data(), &env.ctx, &env.runtime);
+                t.Equals(getRegS32(env.ctx, 2), KE_OK,
+                         "sub-case H: ReleaseWaitThread must succeed");
+
+                worker.join();
+                t.Equals(workerRet, KE_RELEASE_WAIT,
+                         "sub-case H: WaitSema force-released must return KE_RELEASE_WAIT, not sid");
+
+                // Assert the count was NOT decremented (core guard check: ret < 0 skips decrement).
+                {
+                    R5900Context statusCtx{};
+                    setRegU32(statusCtx, 4, static_cast<uint32_t>(sid));
+                    setRegU32(statusCtx, 5, K_STATUS_ADDR);
+                    ReferSemaStatus(env.rdram.data(), &statusCtx, &env.runtime);
+                    EeSemaStatus st{};
+                    std::memcpy(&st, env.rdram.data() + K_STATUS_ADDR, sizeof(st));
+                    t.Equals(st.count, 0, "sub-case H: force-released WaitSema must NOT consume a token (count must stay 0, not -1)");
+                }
+
+                // Prove token accounting is intact: signal once, poll twice (one token, clean).
+                setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
+                SignalSema(env.rdram.data(), &env.ctx, &env.runtime);
+                t.Equals(getRegS32(env.ctx, 2), sid,
+                         "sub-case H: SignalSema after force-release must return sid (count 0->1)");
+
+                setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
+                PollSema(env.rdram.data(), &env.ctx, &env.runtime);
+                t.Equals(getRegS32(env.ctx, 2), sid,
+                         "sub-case H: PollSema must consume the one token after force-release");
+
+                setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
+                PollSema(env.rdram.data(), &env.ctx, &env.runtime);
+                t.Equals(getRegS32(env.ctx, 2), KE_SEMA_ZERO,
+                         "sub-case H: count must be exactly 0 after single token consumed (not -1)");
+            }
+
+            // Sub-case I: blocking WaitSema woken by SignalSema returns sid (the DQ8 scenario).
+            // init=0 forces the worker to block; SignalSema uses cv.notify_one() (not
+            // ReleaseWaitThread), so the worker needs no g_currentThreadId identity.
+            {
+                TestEnv env;
+                const uint32_t semaParam[6] = {0u, 1u, 0u, 0u, 0u, 0u};
+                writeGuestWords(env.rdram.data(), K_PARAM_ADDR, semaParam, 6);
+                setRegU32(env.ctx, 4, K_PARAM_ADDR);
+                CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
+                const int sid = getRegS32(env.ctx, 2);
+                t.IsTrue(sid > 0, "sub-case I: CreateSema must return positive sid");
+
+                writeGuestU32(env.rdram.data(), K_SEMA_WAIT_READY_ADDR, 0u);
+                int32_t workerRet = 0;
+
+                std::thread worker([&]() {
+                    R5900Context wctx{};
+                    setRegU32(wctx, 4, static_cast<uint32_t>(sid));
+                    writeGuestU32(env.rdram.data(), K_SEMA_WAIT_READY_ADDR, 1u);
+                    WaitSema(env.rdram.data(), &wctx, &env.runtime);
+                    workerRet = getRegS32(wctx, 2);
+                });
+
+                // Confirm the worker is actually blocking (count==0 forces a block).
+                const bool waiterBlocking = waitUntil([&]() {
+                    R5900Context statusCtx{};
+                    setRegU32(statusCtx, 4, static_cast<uint32_t>(sid));
+                    setRegU32(statusCtx, 5, K_STATUS_ADDR);
+                    ReferSemaStatus(env.rdram.data(), &statusCtx, &env.runtime);
+                    EeSemaStatus st{};
+                    std::memcpy(&st, env.rdram.data() + K_STATUS_ADDR, sizeof(st));
+                    return st.wait_threads >= 1;
+                }, std::chrono::milliseconds(500));
+                t.IsTrue(waiterBlocking, "sub-case I: worker must be blocking in WaitSema before signal");
+
+                // Wake the worker; success path must return sid, not KE_OK.
+                setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
+                SignalSema(env.rdram.data(), &env.ctx, &env.runtime);
+                t.Equals(getRegS32(env.ctx, 2), sid,
+                         "sub-case I: SignalSema that wakes a waiter must return sid (count 0->1)");
+
+                worker.join();
+                t.Equals(workerRet, sid,
+                         "sub-case I: blocking WaitSema woken by signal must return sid, not KE_OK");
+
+                // Signal incremented to 1, the woken wait consumed it back to 0.
+                {
+                    R5900Context statusCtx{};
+                    setRegU32(statusCtx, 4, static_cast<uint32_t>(sid));
+                    setRegU32(statusCtx, 5, K_STATUS_ADDR);
+                    ReferSemaStatus(env.rdram.data(), &statusCtx, &env.runtime);
+                    EeSemaStatus st{};
+                    std::memcpy(&st, env.rdram.data() + K_STATUS_ADDR, sizeof(st));
+                    t.Equals(st.count, 0,
+                             "sub-case I: woken WaitSema must consume the signaled token (count back to 0)");
+                }
+            }
+
+            // Reset all global sema/thread state so no entries (e.g. the 0x7FFE ThreadInfo
+            // from sub-case H) leak into subsequent test cases.
+            notifyRuntimeStop();
         });
 
         tc.Run("WaitEventFlag preserves waitsuspend state when a suspended thread blocks", [](TestCase &t)
