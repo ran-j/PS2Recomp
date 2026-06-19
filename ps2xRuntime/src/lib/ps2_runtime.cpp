@@ -1865,13 +1865,29 @@ IopKernel *PS2Runtime::realIop()
         std::memcpy(rdram + addr, &val, sizeof(val));
     });
 
-    // Load the audio driver chain (libsd before audio so its export resolves).
+    // Load the IOP driver chain. Default = the Freekstyle audio chain (libsd+audio).
+    // Override with PS2_IOP_LOAD=<irx>[,<irx>...] (loaded in order; e.g. for GoW:
+    // "LIBSD.IRX,989NOMID.IRX" — the 989snd sound/asset-streaming server, sid 0x123456).
     std::string dir = "MODULES";
     if (const char *d = std::getenv("PS2_IOP_MODULES"))
         dir = d;
-    m_realIop->loadAndStart(dir + "/LIBSD.IRX");
-    m_realIop->loadAndStart(dir + "/AUDIO.IRX");
-    std::cerr << "[iop:real] kernel up; RPC servers=" << m_realIop->rpcServers().size() << std::endl;
+    if (const char *list = std::getenv("PS2_IOP_LOAD"); list && *list)
+    {
+        std::stringstream ss(list);
+        std::string irx;
+        while (std::getline(ss, irx, ','))
+            if (!irx.empty())
+                m_realIop->loadAndStart(dir + "/" + irx);
+    }
+    else
+    {
+        m_realIop->loadAndStart(dir + "/LIBSD.IRX");
+        m_realIop->loadAndStart(dir + "/AUDIO.IRX");
+    }
+    std::cerr << "[iop:real] kernel up; RPC servers=" << m_realIop->rpcServers().size();
+    for (const auto &s : m_realIop->rpcServers())
+        std::cerr << " sid=0x" << std::hex << s.sid << std::dec;
+    std::cerr << std::endl;
     return m_realIop.get();
 }
 

@@ -1504,6 +1504,43 @@ namespace ps2_syscalls
             }
         }
 
+        // GoW 989snd sound-bank/asset-streaming server (sid 0x123456): route to the real
+        // IOP module (989NOMID.IRX) running on the IopKernel. Gated on realIop() being
+        // active (PS2_IOP_REAL=1 + PS2_IOP_LOAD=LIBSD.IRX,989NOMID.IRX). serviceRpc copies
+        // the EE send buffer into IOP RAM, runs the server function, and returns the result.
+        if (sid == 0x123456u)
+        {
+            IopKernel *kern = runtime ? runtime->realIop() : nullptr;
+            if (kern && !kern->rpcServers().empty())
+            {
+                std::vector<uint8_t> sendData(sendSize ? sendSize : 1u, 0u);
+                if (uint8_t *src = sendBuf ? getMemPtr(rdram, sendBuf) : nullptr)
+                    std::memcpy(sendData.data(), src, sendSize);
+                std::vector<uint8_t> recvData(recvSize ? recvSize : 1u, 0u);
+                const bool ok = kern->serviceRpc(0x123456u, rpcNum, sendData.data(), sendSize,
+                                                 recvData.data(), recvSize);
+                if (ok)
+                {
+                    if (uint8_t *dst = recvBuf ? getMemPtr(rdram, recvBuf) : nullptr)
+                        std::memcpy(dst, recvData.data(), recvSize);
+                    {
+                        std::lock_guard<std::mutex> lock(g_rpc_mutex);
+                        g_rpc_clients[clientPtr].busy = false;
+                    }
+                    static uint32_t gowRpcLog = 0;
+                    if (gowRpcLog < 32u)
+                    {
+                        std::cerr << "[iop:gow-rpc] serviced sid=0x123456 rpc=0x" << std::hex << rpcNum
+                                  << " recv0=0x" << (recvSize >= 4 ? *reinterpret_cast<uint32_t *>(recvData.data()) : 0u)
+                                  << std::dec << std::endl;
+                        ++gowRpcLog;
+                    }
+                    setReturnS32(ctx, 0);
+                    return;
+                }
+            }
+        }
+
         uint32_t serverPtr = client->server;
         t_SifRpcServerData *sd = serverPtr ? reinterpret_cast<t_SifRpcServerData *>(getMemPtr(rdram, serverPtr)) : nullptr;
 

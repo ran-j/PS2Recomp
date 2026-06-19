@@ -43,6 +43,16 @@ public:
     };
     const std::vector<RpcServer> &rpcServers() const { return m_rpcServers; }
 
+    // ---- EE -> IOP RPC service (Marco 5b) ----
+    // Service an EE RPC by invoking the registered server function synchronously,
+    // following the SIF-RPC server signature `void *func(int fno, void *buf, int size)`:
+    // copies sendData (sendSize bytes) into the server's IOP receive buffer, calls
+    // func(rpcNum, buf, sendSize), then copies recvSize bytes from the returned result
+    // pointer back into recvData. Returns false if no server is registered for sid.
+    bool serviceRpc(uint32_t sid, uint32_t rpcNum,
+                    const uint8_t *sendData, uint32_t sendSize,
+                    uint8_t *recvData, uint32_t recvSize);
+
     // ---- EE <-> IOP SREG bridge (Step 3b) ----
     // The EE sets an IOP soft-register (its SET_SREG to the IOP) and any IOP
     // thread parked polling that sreg is resumed. Returns true if a thread woke.

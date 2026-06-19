@@ -119,6 +119,70 @@ void IopKernel::runToHalt(uint32_t entry, uint32_t a0, uint32_t a1, uint32_t gp,
     m_curGp = savedGp;
 }
 
+bool IopKernel::serviceRpc(uint32_t sid, uint32_t rpcNum,
+                           const uint8_t *sendData, uint32_t sendSize,
+                           uint8_t *recvData, uint32_t recvSize)
+{
+    const RpcServer *srv = nullptr;
+    for (const auto &s : m_rpcServers)
+        if (s.sid == sid)
+        {
+            srv = &s;
+            break;
+        }
+    if (!srv || !srv->func)
+        return false;
+
+    // Place the EE send data into the server's IOP receive buffer (or a scratch alloc).
+    uint32_t iopBuf = srv->buf;
+    if (!iopBuf)
+        iopBuf = sysAlloc(sendSize < 0x400u ? 0x400u : sendSize);
+    if (sendData)
+        for (uint32_t i = 0; i < sendSize; ++i)
+            m_mem->iopWrite8(iopBuf + i, sendData[i]);
+
+    const uint32_t gp = gpForAddr(m_modules, srv->func);
+
+    const IopCpu::State saved = m_cpu->saveState();
+    const bool savedParked = m_parked;
+    const uint32_t savedGp = m_curGp;
+    const int savedCur = m_curThread;
+
+    for (int i = 1; i < 32; ++i)
+        m_cpu->setGpr(i, 0);
+    m_cpu->setGpr(29, MODSTART_STACKTOP);
+    m_cpu->setGpr(28, gp);
+    m_cpu->setGpr(4, rpcNum);   // fno
+    m_cpu->setGpr(5, iopBuf);   // buf (holds the EE send data)
+    m_cpu->setGpr(6, sendSize); // size
+    m_cpu->setGpr(31, PARK_SENTINEL);
+    m_cpu->setPC(srv->func);
+    m_cpu->setHaltPc(PARK_SENTINEL);
+    m_curGp = gp;
+    m_curThread = -1;
+    m_parked = false;
+
+    const uint32_t n = m_cpu->run(RUN_CAP);
+    const uint32_t resultPtr = m_cpu->gpr(2);
+    const bool parked = m_parked;
+
+    std::cerr << "[iop:kernel] serviceRpc sid=0x" << std::hex << sid << " rpc=0x" << rpcNum
+              << " buf=0x" << iopBuf << " -> v0=0x" << resultPtr << std::dec
+              << " instrs=" << n
+              << (parked ? " (parked)" : (m_cpu->pc() == PARK_SENTINEL ? " (returned)" : " (capped)"))
+              << std::endl;
+
+    if (resultPtr && recvData)
+        for (uint32_t i = 0; i < recvSize; ++i)
+            recvData[i] = m_mem->iopRead8(resultPtr + i);
+
+    m_cpu->restoreState(saved);
+    m_parked = savedParked;
+    m_curGp = savedGp;
+    m_curThread = savedCur;
+    return true;
+}
+
 // ---- kernel HLE -------------------------------------------------------------
 
 bool IopKernel::kernelHle(IopCpu &c, const std::string &lib, uint16_t idx)
@@ -336,6 +400,29 @@ bool IopKernel::kernelHle(IopCpu &c, const std::string &lib, uint16_t idx)
         ret((idx == 4) ? m_nextTid++ : 0u);
         return true;
     }
+    if (lib == "stdio")
+    {
+        // printf/Kprintf family (idx 4..7): print the format string so module
+        // diagnostics (e.g. why an RPC request is rejected) are visible. Varargs
+        // are not expanded; %-specifiers are left literal.
+        if (idx >= 4 && idx <= 8)
+        {
+            std::string s;
+            for (uint32_t k = 0; k < 256u; ++k)
+            {
+                const uint8_t ch = memb->iopRead8(R(4) + k);
+                if (!ch) break;
+                s += static_cast<char>(ch);
+            }
+            std::cerr << "[iop:stdio] " << s;
+            if (s.find('%') != std::string::npos)
+                std::cerr << "   [args a1=0x" << std::hex << R(5) << " a2=0x" << R(6)
+                          << " a3=0x" << R(7) << std::dec << "]";
+            std::cerr << std::endl;
+        }
+        ret(0);
+        return true;
+    }
     if (lib == "sifman")
     {
         ret((idx == 7) ? 1u : 0u); // sceSifSetDma -> fake transfer id
@@ -550,6 +637,35 @@ bool iopKernelTest(PS2Memory *mem)
     for (const auto &s : kernel.rpcServers())
         std::cerr << " sid=0x" << std::hex << s.sid << std::dec;
     std::cerr << std::endl;
+
+    // Marco 5b probe: send a synthetic GoW asset-load request (rpc=0x68 "SMPD") to
+    // server 0x123456 and observe what the server function does (which cdvdman/ioman
+    // calls it makes). Gated on env PS2_IOP_RPC_PROBE=1.
+    if (std::getenv("PS2_IOP_RPC_PROBE"))
+    {
+        for (const auto &s : kernel.rpcServers())
+        {
+            if (s.sid != 0x123456u)
+                continue;
+            uint8_t recv[12] = {0};
+            auto probe = [&](uint32_t fno, uint32_t *pkt, uint32_t words) {
+                std::vector<uint8_t> send(words * 4u);
+                std::memcpy(send.data(), pkt, words * 4u);
+                std::cerr << "[iop:kernel] RPC_PROBE rpc=0x" << std::hex << fno << std::dec << std::endl;
+                kernel.serviceRpc(0x123456u, fno, send.data(), words * 4u, recv, sizeof(recv));
+                std::cerr << "[iop:kernel] RPC_PROBE recv=[" << std::hex
+                          << *reinterpret_cast<uint32_t *>(recv) << ","
+                          << *reinterpret_cast<uint32_t *>(recv + 4) << ","
+                          << *reinterpret_cast<uint32_t *>(recv + 8) << "]" << std::dec << std::endl;
+            };
+            // 1) rpc=0x0 init (workbuf), 2) rpc=0x68 "SMPD" load.
+            uint32_t init[2] = {0x0030a1c0u, 0u};
+            probe(0x0u, init, 2);
+            uint32_t ld[10] = {0x534D5044u, 1u, 0x1cu, 0u, 0x004533c0u, 0x20u, 0x00453440u, 0x280u, 0u, 0u};
+            probe(0x68u, ld, 10);
+            break;
+        }
+    }
 
     if (any)
         std::memset(mem->getIOPRAM() + 0x00010000u, 0, 0x001D0000u);
