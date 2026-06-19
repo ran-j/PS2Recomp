@@ -183,6 +183,50 @@ bool IopKernel::serviceRpc(uint32_t sid, uint32_t rpcNum,
     return true;
 }
 
+uint32_t IopKernel::cdRead(uint32_t lsn, uint32_t nsec, uint32_t iopBuf)
+{
+    if (!m_cdImageTried)
+    {
+        m_cdImageTried = true;
+        if (const char *path = std::getenv("PS2_CD_IMAGE"); path && *path)
+        {
+            auto f = std::make_unique<std::ifstream>(path, std::ios::binary);
+            if (f->is_open())
+            {
+                m_cdImage = std::move(f);
+                std::cerr << "[iop:cdvd] disc image: " << path << std::endl;
+            }
+            else
+                std::cerr << "[iop:cdvd] FAILED to open PS2_CD_IMAGE=" << path << std::endl;
+        }
+        else
+            std::cerr << "[iop:cdvd] PS2_CD_IMAGE not set; sceCdRead returns empty" << std::endl;
+    }
+    if (!m_cdImage)
+        return 0;
+
+    const uint64_t off = static_cast<uint64_t>(lsn) * 2048ull;
+    const uint32_t bytes = nsec * 2048u;
+    std::vector<uint8_t> sec(bytes);
+    m_cdImage->clear();
+    m_cdImage->seekg(static_cast<std::streamoff>(off));
+    m_cdImage->read(reinterpret_cast<char *>(sec.data()), bytes);
+    const uint32_t got = static_cast<uint32_t>(m_cdImage->gcount());
+    for (uint32_t i = 0; i < got; ++i)
+        m_mem->iopWrite8(iopBuf + i, sec[i]);
+
+    static uint32_t cdLog = 0;
+    if (cdLog < 24)
+    {
+        std::cerr << "[iop:cdvd] sceCdRead lsn=0x" << std::hex << lsn << " nsec=" << std::dec << nsec
+                  << " -> iopBuf=0x" << std::hex << iopBuf << " got=" << std::dec << got
+                  << std::hex << " [" << (got>=4?*reinterpret_cast<uint32_t*>(sec.data()):0u) << "]"
+                  << std::dec << std::endl;
+        ++cdLog;
+    }
+    return got;
+}
+
 // ---- kernel HLE -------------------------------------------------------------
 
 bool IopKernel::kernelHle(IopCpu &c, const std::string &lib, uint16_t idx)
@@ -422,6 +466,23 @@ bool IopKernel::kernelHle(IopCpu &c, const std::string &lib, uint16_t idx)
         }
         ret(0);
         return true;
+    }
+    if (lib == "cdvdman")
+    {
+        // Disc reads for an IOP file/streaming driver. Standard cdvdman export order:
+        // 4 sceCdInit, 6 sceCdRead(lsn,sectors,buf,mode), 8 sceCdGetError, 11 sceCdSync,
+        // 12 sceCdGetDiskType. Reads come from the disc image (env PS2_CD_IMAGE).
+        switch (idx)
+        {
+        case 6: // sceCdRead(lsn, sectors, buf, mode) -> 1 on success
+            cdRead(R(4), R(5), R(6));
+            ret(1);
+            return true;
+        case 8:  ret(0);    return true; // sceCdGetError -> 0 (no error)
+        case 11: ret(0);    return true; // sceCdSync(mode) -> 0 (idle/complete)
+        case 12: ret(0x14); return true; // sceCdGetDiskType -> SCECdPS2DVD
+        default: ret(1);    return true; // sceCdInit/Standby/Seek/Stop/... -> ok
+        }
     }
     if (lib == "sifman")
     {

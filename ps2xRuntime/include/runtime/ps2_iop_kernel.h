@@ -5,6 +5,7 @@
 #include "runtime/ps2_iop_cpu.h"
 
 #include <cstdint>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <string>
@@ -69,6 +70,11 @@ public:
 private:
     bool onImport(IopCpu &c, uint32_t stubAddr);
     bool kernelHle(IopCpu &c, const std::string &lib, uint16_t idx);
+
+    // cdvdman backend: read `nsec` 2048-byte sectors from the disc image (env
+    // PS2_CD_IMAGE, e.g. the GoW ISO) starting at sector `lsn` into IOP RAM at
+    // `iopBuf`. Returns bytes read. Lazily opens the image on first use.
+    uint32_t cdRead(uint32_t lsn, uint32_t nsec, uint32_t iopBuf);
     void runToHalt(uint32_t entry, uint32_t a0, uint32_t a1, uint32_t gp, const char *what);
     void resumeThread(size_t threadIdx);
 
@@ -114,6 +120,10 @@ private:
 
     uint32_t m_logBudget;
     std::unordered_set<std::string> m_hleLogged; // dedupe per-(lib,idx) HLE logging
+
+    // cdvdman disc-image backend (opened lazily from env PS2_CD_IMAGE).
+    std::unique_ptr<std::ifstream> m_cdImage;
+    bool m_cdImageTried = false;
 };
 
 // Env-driven test (PS2_IOP_KERNEL_TEST=<irx>[,<irx>...]): load+start each IRX
