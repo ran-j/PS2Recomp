@@ -107,42 +107,6 @@ namespace
         return frame.fbw != 0u || dw != 0u || dh != 0u || magh != 0u;
     }
 
-    struct GSTransferTraversal
-    {
-        bool reverseX = false;
-        bool reverseY = false;
-    };
-
-    GSTransferTraversal decodeTransferTraversal(uint8_t dir)
-    {
-        GSTransferTraversal traversal{};
-        switch (dir & 0x3u)
-        {
-        case 1u:
-            traversal.reverseY = true;
-            break;
-        case 2u:
-            traversal.reverseX = true;
-            break;
-        case 3u:
-            traversal.reverseX = true;
-            traversal.reverseY = true;
-            break;
-        default:
-            break;
-        }
-        return traversal;
-    }
-
-    uint32_t transferCoord(uint32_t start, uint32_t extent, uint32_t index, bool reverse)
-    {
-        if (reverse && extent != 0u)
-        {
-            return start + (extent - 1u - index);
-        }
-        return start + index;
-    }
-
     struct GSPmodeState
     {
         bool enableCrt1 = false;
@@ -356,162 +320,6 @@ namespace
     std::atomic<uint32_t> s_debugTexaWriteCount{0};
     std::atomic<uint32_t> s_debugCvFontUploadCount{0};
     std::atomic<uint32_t> s_debugLocalCopyCount{0};
-
-    bool supportsFormatAwareLocalCopy(uint8_t psm)
-    {
-        switch (psm)
-        {
-        case GS_PSM_CT32:
-        case GS_PSM_Z32:
-        case GS_PSM_CT24:
-        case GS_PSM_Z24:
-        case GS_PSM_CT16:
-        case GS_PSM_CT16S:
-        case GS_PSM_Z16:
-        case GS_PSM_Z16S:
-        case GS_PSM_T8:
-        case GS_PSM_T4:
-            return true;
-        default:
-            return false;
-        }
-    }
-
-    uint32_t readTransferPixel(const uint8_t *vram,
-                               uint32_t vramSize,
-                               uint32_t basePtr,
-                               uint8_t widthBlocks,
-                               uint8_t psm,
-                               uint32_t x,
-                               uint32_t y)
-    {
-        const uint32_t width = (widthBlocks != 0u) ? static_cast<uint32_t>(widthBlocks) : 1u;
-        const uint32_t base = basePtr * 256u;
-
-        switch (psm)
-        {
-        case GS_PSM_CT32:
-        case GS_PSM_Z32:
-        {
-            const uint32_t off = GSPSMCT32::addrPSMCT32(basePtr, width, x, y);
-            if (off + 4u > vramSize)
-                return 0u;
-            uint32_t value = 0u;
-            std::memcpy(&value, vram + off, sizeof(value));
-            return value;
-        }
-        case GS_PSM_CT24:
-        case GS_PSM_Z24:
-        {
-            const uint32_t off = GSPSMCT32::addrPSMCT32(basePtr, width, x, y);
-            if (off + 3u > vramSize)
-                return 0u;
-            return static_cast<uint32_t>(vram[off + 0u]) |
-                   (static_cast<uint32_t>(vram[off + 1u]) << 8) |
-                   (static_cast<uint32_t>(vram[off + 2u]) << 16);
-        }
-        case GS_PSM_CT16:
-        case GS_PSM_CT16S:
-        case GS_PSM_Z16:
-        case GS_PSM_Z16S:
-        {
-            const uint32_t off = addrPSMCT16Family(basePtr, width, psm, x, y);
-            if (off + 2u > vramSize)
-                return 0u;
-            uint16_t value = 0u;
-            std::memcpy(&value, vram + off, sizeof(value));
-            return value;
-        }
-        case GS_PSM_T8:
-        {
-            const uint32_t off = GSPSMT8::addrPSMT8(basePtr, width, x, y);
-            return (off < vramSize) ? vram[off] : 0u;
-        }
-        case GS_PSM_T4:
-        {
-            const uint32_t nibbleAddr = GSPSMT4::addrPSMT4(basePtr, width, x, y);
-            const uint32_t byteOff = nibbleAddr >> 1;
-            if (byteOff >= vramSize)
-                return 0u;
-            const int shift = static_cast<int>((nibbleAddr & 1u) << 2);
-            return static_cast<uint32_t>((vram[byteOff] >> shift) & 0x0Fu);
-        }
-        default:
-            return 0u;
-        }
-    }
-
-    void writeTransferPixel(uint8_t *vram,
-                            uint32_t vramSize,
-                            uint32_t basePtr,
-                            uint8_t widthBlocks,
-                            uint8_t psm,
-                            uint32_t x,
-                            uint32_t y,
-                            uint32_t value)
-    {
-        const uint32_t width = (widthBlocks != 0u) ? static_cast<uint32_t>(widthBlocks) : 1u;
-        const uint32_t base = basePtr * 256u;
-
-        switch (psm)
-        {
-        case GS_PSM_CT32:
-        case GS_PSM_Z32:
-        {
-            const uint32_t off = GSPSMCT32::addrPSMCT32(basePtr, width, x, y);
-            if (off + 4u > vramSize)
-                return;
-            std::memcpy(vram + off, &value, sizeof(value));
-            return;
-        }
-        case GS_PSM_CT24:
-        case GS_PSM_Z24:
-        {
-            const uint32_t off = GSPSMCT32::addrPSMCT32(basePtr, width, x, y);
-            if (off + 3u > vramSize)
-                return;
-            vram[off + 0u] = static_cast<uint8_t>(value & 0xFFu);
-            vram[off + 1u] = static_cast<uint8_t>((value >> 8) & 0xFFu);
-            vram[off + 2u] = static_cast<uint8_t>((value >> 16) & 0xFFu);
-            return;
-        }
-        case GS_PSM_CT16:
-        case GS_PSM_CT16S:
-        case GS_PSM_Z16:
-        case GS_PSM_Z16S:
-        {
-            const uint32_t off = addrPSMCT16Family(basePtr, width, psm, x, y);
-            if (off + 2u > vramSize)
-                return;
-            const uint16_t value16 = static_cast<uint16_t>(value & 0xFFFFu);
-            std::memcpy(vram + off, &value16, sizeof(value16));
-            return;
-        }
-        case GS_PSM_T8:
-        {
-            const uint32_t off = GSPSMT8::addrPSMT8(basePtr, width, x, y);
-            if (off < vramSize)
-                vram[off] = static_cast<uint8_t>(value & 0xFFu);
-            return;
-        }
-        case GS_PSM_T4:
-        {
-            const uint32_t nibbleAddr = GSPSMT4::addrPSMT4(basePtr, width, x, y);
-            const uint32_t byteOff = nibbleAddr >> 1;
-            if (byteOff >= vramSize)
-                return;
-            const uint8_t nibble = static_cast<uint8_t>(value & 0x0Fu);
-            uint8_t &dst = vram[byteOff];
-            if ((nibbleAddr & 1u) != 0u)
-                dst = static_cast<uint8_t>((dst & 0x0Fu) | (nibble << 4));
-            else
-                dst = static_cast<uint8_t>((dst & 0xF0u) | nibble);
-            return;
-        }
-        default:
-            return;
-        }
-    }
 }
 
 using namespace GSInternal;
@@ -735,17 +543,23 @@ bool GS::copyFrameToHostRgbaUnlocked(const GSFrameReg &frame,
                 {
                     const uint32_t srcX = sourceOriginX + x;
                     const uint32_t srcY = sourceOriginY + y;
-                    const uint32_t srcOff = GSPSMCT32::addrPSMCT32(basePtr, fbwBlocks, srcX, srcY);
-                    if (srcOff + srcPixelBytes > m_vramSize)
+
+                    const u32 c = ReadVram(frame.psm, basePtr, fbwBlocks, srcX, srcY);
+
+                    const u32 r = c & 0xFF;
+                    const u32 g = (c >> 8) & 0xFF;
+                    const u32 b = (c >> 16) & 0xFF;
+
+                    u32 a = 0xFF;
+                    if (preserveAlpha && frame.psm != GS_PSM_CT24)
                     {
-                        return false;
+                        a = (c >> 24) & 0xFF;
                     }
 
-                    dstRow[x * 4u + 0u] = m_vram[srcOff + 0u];
-                    dstRow[x * 4u + 1u] = m_vram[srcOff + 1u];
-                    dstRow[x * 4u + 2u] = m_vram[srcOff + 2u];
-                    dstRow[x * 4u + 3u] =
-                        (preserveAlpha && frame.psm != GS_PSM_CT24) ? m_vram[srcOff + 3u] : 255u;
+                    dstRow[x * 4u + 0u] = r;
+                    dstRow[x * 4u + 1u] = g;
+                    dstRow[x * 4u + 2u] = b;
+                    dstRow[x * 4u + 3u] = a;
                 }
             }
             return true;
@@ -787,21 +601,16 @@ bool GS::copyFrameToHostRgbaUnlocked(const GSFrameReg &frame,
                 {
                     const uint32_t srcX = sourceOriginX + x;
                     const uint32_t srcY = sourceOriginY + y;
-                    const uint32_t srcOff = addrPSMCT16Family(basePtr, fbwBlocks, frame.psm, srcX, srcY);
-                    if (srcOff + sizeof(uint16_t) > m_vramSize)
-                    {
-                        return false;
-                    }
 
-                    uint16_t pixel = 0u;
-                    std::memcpy(&pixel, m_vram + srcOff, sizeof(pixel));
-                    const uint32_t r = pixel & 31u;
-                    const uint32_t g = (pixel >> 5) & 31u;
-                    const uint32_t b = (pixel >> 10) & 31u;
+                    const u16 c = ReadVram(frame.psm, basePtr, fbwBlocks, srcX, srcY);
+
+                    const uint32_t r = c & 31u;
+                    const uint32_t g = (c >> 5) & 31u;
+                    const uint32_t b = (c >> 10) & 31u;
                     dst[x * 4u + 0u] = static_cast<uint8_t>((r << 3) | (r >> 2));
                     dst[x * 4u + 1u] = static_cast<uint8_t>((g << 3) | (g >> 2));
                     dst[x * 4u + 2u] = static_cast<uint8_t>((b << 3) | (b >> 2));
-                    dst[x * 4u + 3u] = preserveAlpha ? ((pixel & 0x8000u) ? 0x80u : 0x00u) : 255u;
+                    dst[x * 4u + 3u] = preserveAlpha ? ((c & 0x8000u) ? 0x80u : 0x00u) : 255u;
                 }
             }
             return true;
