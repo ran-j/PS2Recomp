@@ -2288,118 +2288,66 @@ void GS::performLocalToHostToBuffer()
 {
     m_localToHostBuffer.clear();
     m_localToHostReadPos = 0;
+
     if (!m_vram)
         return;
 
     uint32_t sbp = m_bitbltbuf.sbp;
-    uint8_t sbw = m_bitbltbuf.sbw;
+    uint8_t sbw = std::max<u8>(m_bitbltbuf.sbw, 1u);
     uint8_t spsm = m_bitbltbuf.spsm;
-
-    if (sbw == 0)
-        sbw = 1;
-    uint32_t base = sbp * 256u;
-    uint32_t bpp = bitsPerPixel(spsm);
-    uint32_t stridePixels = static_cast<uint32_t>(sbw) * 64u;
-
     uint32_t rrw = m_trxreg.rrw;
     uint32_t rrh = m_trxreg.rrh;
     uint32_t ssax = m_trxpos.ssax;
     uint32_t ssay = m_trxpos.ssay;
 
-    if (bpp == 4)
-    {
-        uint32_t rowBytes = (rrw + 1u) / 2u;
-        if (rowBytes == 0)
-            rowBytes = 1;
-        m_localToHostBuffer.reserve(rowBytes * rrh);
-        uint32_t widthBlocks = static_cast<uint32_t>(sbw);
-        for (uint32_t y = 0; y < rrh; ++y)
-        {
-            for (uint32_t x = 0; x < rrw; ++x)
-            {
-                uint32_t vx = ssax + x;
-                uint32_t vy = ssay + y;
-                uint32_t nibbleAddr = GSPSMT4::addrPSMT4(sbp, widthBlocks, vx, vy);
-                uint32_t byteOff = nibbleAddr >> 1;
-                uint8_t nibble = 0;
-                if (byteOff < m_vramSize)
-                {
-                    int shift = static_cast<int>((nibbleAddr & 1u) << 2);
-                    nibble = static_cast<uint8_t>((m_vram[byteOff] >> shift) & 0x0Fu);
-                }
-                if (x & 1u)
-                    m_localToHostBuffer.back() = static_cast<uint8_t>((m_localToHostBuffer.back() & 0x0Fu) | (nibble << 4));
-                else
-                    m_localToHostBuffer.push_back(nibble);
-            }
-        }
-    }
-    else if (spsm == GS_PSM_T8)
-    {
-        m_localToHostBuffer.reserve(rrw * rrh);
-        for (uint32_t y = 0; y < rrh; ++y)
-        {
-            for (uint32_t x = 0; x < rrw; ++x)
-            {
-                const uint32_t src = GSPSMT8::addrPSMT8(sbp, sbw, ssax + x, ssay + y);
-                m_localToHostBuffer.push_back((src < m_vramSize) ? m_vram[src] : 0u);
-            }
-        }
-    }
-    else if (spsm == GS_PSM_CT24 || spsm == GS_PSM_Z24)
-    {
-        uint32_t transferBpp = 3;
-        m_localToHostBuffer.reserve(rrw * rrh * transferBpp);
+    u32 bpp = GSMem::BitsPerPixel(static_cast<GSMem::PixelStorageMode>(spsm));
 
-        for (uint32_t y = 0; y < rrh; ++y)
-        {
-            for (uint32_t x = 0; x < rrw; ++x)
-            {
-                uint32_t srcOff = GSPSMCT32::addrPSMCT32(sbp, sbw, ssax + x, ssay + y);
-                if (srcOff + 4 <= m_vramSize)
-                {
-                    m_localToHostBuffer.push_back(m_vram[srcOff + 0]);
-                    m_localToHostBuffer.push_back(m_vram[srcOff + 1]);
-                    m_localToHostBuffer.push_back(m_vram[srcOff + 2]);
-                }
-            }
-        }
-    }
-    else
-    {
-        uint32_t bytesPerPixel = bpp / 8u;
-        if (bytesPerPixel == 0)
-            bytesPerPixel = 4;
-        uint32_t strideBytes = stridePixels * bytesPerPixel;
-        uint32_t rowBytes = rrw * bytesPerPixel;
-        m_localToHostBuffer.reserve(rowBytes * rrh);
+    u32 pixel_total = rrw * rrh;
+    u32 bytes_total = (pixel_total * bpp) / 8;
 
-        for (uint32_t y = 0; y < rrh; ++y)
+    m_localToHostBuffer.reserve(bytes_total);
+
+    u32 pixel_count = 0;
+    while (pixel_count < pixel_total)
+    {
+        const u32 x = pixel_count % rrw;
+        const u32 y = pixel_count / rrw;
+
+        const u32 v = ReadVram(spsm, sbp, sbw, x + ssax, y + ssay);
+
+        switch (bpp)
         {
-            if (spsm == GS_PSM_CT32 || spsm == GS_PSM_Z32)
-            {
-                for (uint32_t x = 0; x < rrw; ++x)
-                {
-                    const uint32_t srcOff = GSPSMCT32::addrPSMCT32(sbp, sbw, ssax + x, ssay + y);
-                    if (srcOff + 4u <= m_vramSize)
-                    {
-                        m_localToHostBuffer.push_back(m_vram[srcOff + 0u]);
-                        m_localToHostBuffer.push_back(m_vram[srcOff + 1u]);
-                        m_localToHostBuffer.push_back(m_vram[srcOff + 2u]);
-                        m_localToHostBuffer.push_back(m_vram[srcOff + 3u]);
-                    }
-                }
-            }
-            else
-            {
-                uint32_t srcOff = base + (ssay + y) * strideBytes + ssax * bytesPerPixel;
-                if (srcOff + rowBytes <= m_vramSize)
-                {
-                    for (uint32_t i = 0; i < rowBytes; ++i)
-                        m_localToHostBuffer.push_back(m_vram[srcOff + i]);
-                }
-            }
+        case 32:
+            m_localToHostBuffer.push_back(v & 0xFF);
+            m_localToHostBuffer.push_back((v >> 8) & 0xFF);
+            m_localToHostBuffer.push_back((v >> 16) & 0xFF);
+            m_localToHostBuffer.push_back((v >> 24) & 0xFF);
+            break;
+        case 24:
+            m_localToHostBuffer.push_back(v & 0xFF);
+            m_localToHostBuffer.push_back((v >> 8) & 0xFF);
+            m_localToHostBuffer.push_back((v >> 16) & 0xFF);
+            break;
+        case 16:
+            m_localToHostBuffer.push_back(v & 0xFF);
+            m_localToHostBuffer.push_back((v >> 16) & 0xFF);
+            break;
+        case 8:
+            m_localToHostBuffer.push_back(v);
+            break;
+        case 4:
+        {
+            const u32 v2 = ReadVram(spsm, sbp, sbw, x + ssax + 1, y + ssay);
+
+            m_localToHostBuffer.push_back(v | ((v2 & 0xF) << 4));
+            pixel_count++;
+            break;
         }
+        default:
+            break;
+        }
+
+        pixel_count++;
     }
 }
 
