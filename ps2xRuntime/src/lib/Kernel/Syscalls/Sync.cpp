@@ -348,7 +348,7 @@ namespace ps2_syscalls
             }
         }
 
-        if (ret >= 0 && sema->count > 0)
+        if (ret == sid && sema->count > 0)
         {
             sema->count--;
         }
