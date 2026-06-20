@@ -208,12 +208,9 @@ namespace
         return count;
     }
 
-    bool clearFramebufferRect(uint8_t *vram,
-                              uint32_t vramSize,
-                              const GSContext &ctx,
-                              uint32_t rgba)
+    bool clearFramebufferRect(GS* gs, const GSContext &ctx, uint32_t rgba)
     {
-        if (!vram || vramSize == 0u || ctx.frame.fbw == 0u)
+        if (ctx.frame.fbw == 0u)
         {
             return false;
         }
@@ -224,16 +221,20 @@ namespace
             return false;
         }
 
-        const int x0 = std::max<int>(0, ctx.scissor.x0);
-        const int x1 = std::max<int>(x0, ctx.scissor.x1);
-        const int y0 = std::max<int>(0, ctx.scissor.y0);
-        const int y1 = std::max<int>(y0, ctx.scissor.y1);
-        const uint32_t base = ctx.frame.fbp * 8192u;
+        const u32 x0 = static_cast<u32>(std::max<int>(0, ctx.scissor.x0));
+        const u32 x1 = static_cast<u32>(std::max<int>(x0, ctx.scissor.x1));
+        const u32 y0 = static_cast<u32>(std::max<int>(0, ctx.scissor.y0));
+        const u32 y1 = static_cast<u32>(std::max<int>(y0, ctx.scissor.y1));
 
         uint8_t r = static_cast<uint8_t>(rgba & 0xFFu);
         uint8_t g = static_cast<uint8_t>((rgba >> 8) & 0xFFu);
         uint8_t b = static_cast<uint8_t>((rgba >> 16) & 0xFFu);
         uint8_t a = static_cast<uint8_t>((rgba >> 24) & 0xFFu);
+
+        u32 fbp = GSInternal::framePageBaseToBlock(ctx.frame.fbp);
+        u32 fbw = std::max<u32>(ctx.frame.fbw, 1u);
+        u32 fpsm = ctx.frame.psm;
+
         if ((ctx.fba & 0x1ull) != 0ull && ctx.frame.psm != GS_PSM_CT24)
         {
             a = static_cast<uint8_t>(a | 0x80u);
@@ -246,30 +247,18 @@ namespace
                 (static_cast<uint32_t>(g) << 8) |
                 (static_cast<uint32_t>(b) << 16) |
                 (static_cast<uint32_t>(a) << 24);
-            const uint32_t widthBlocks = (ctx.frame.fbw != 0u) ? ctx.frame.fbw : 1u;
 
             for (int y = y0; y <= y1; ++y)
             {
                 for (int x = x0; x <= x1; ++x)
                 {
-                    const uint32_t off =
-                        GSPSMCT32::addrPSMCT32(GSInternal::framePageBaseToBlock(ctx.frame.fbp),
-                                               widthBlocks,
-                                               static_cast<uint32_t>(x),
-                                               static_cast<uint32_t>(y));
-                    if (off + 4u > vramSize)
-                    {
-                        return true;
-                    }
-
                     uint32_t pixel = srcPixel;
                     if (ctx.frame.fbmsk != 0u)
                     {
-                        uint32_t existing = 0u;
-                        std::memcpy(&existing, vram + off, sizeof(existing));
-                        pixel = (pixel & ~ctx.frame.fbmsk) | (existing & ctx.frame.fbmsk);
+                        const u32 c = gs->ReadVram(fpsm, fbp, fbw, x, y);
+                        pixel = (pixel & ~ctx.frame.fbmsk) | (c & ctx.frame.fbmsk);
                     }
-                    std::memcpy(vram + off, &pixel, sizeof(pixel));
+                    gs->WriteVram(fpsm, fbp, fbw, x, y, pixel);
                 }
             }
             return true;
@@ -286,24 +275,13 @@ namespace
             {
                 for (int x = x0; x <= x1; ++x)
                 {
-                    const uint32_t off = addrPSMCT16Family(basePtr,
-                                                           widthBlocks,
-                                                           ctx.frame.psm,
-                                                           static_cast<uint32_t>(x),
-                                                           static_cast<uint32_t>(y));
-                    if (off + 2u > vramSize)
-                    {
-                        return true;
-                    }
-
                     uint16_t pixel = srcPixel;
                     if (mask != 0u)
                     {
-                        uint16_t existing = 0u;
-                        std::memcpy(&existing, vram + off, sizeof(existing));
-                        pixel = static_cast<uint16_t>((pixel & ~mask) | (existing & mask));
+                        const u16 c = gs->ReadVram(fpsm, fbp, fbw, x, y);
+                        pixel = static_cast<uint16_t>((pixel & ~mask) | (c & mask));
                     }
-                    std::memcpy(vram + off, &pixel, sizeof(pixel));
+                    gs->WriteVram(fpsm, fbp, fbw, x, y, pixel);
                 }
             }
             return true;
@@ -2354,13 +2332,13 @@ void GS::performLocalToHostToBuffer()
 bool GS::clearFramebufferContext(uint32_t contextIndex, uint32_t rgba)
 {
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
-    return clearFramebufferRect(m_vram, m_vramSize, m_ctx[(contextIndex != 0u) ? 1 : 0], rgba);
+    return clearFramebufferRect(this, m_ctx[(contextIndex != 0u) ? 1 : 0], rgba);
 }
 
 bool GS::clearActiveFramebuffer(uint32_t rgba)
 {
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
-    return clearFramebufferRect(m_vram, m_vramSize, activeContext(), rgba);
+    return clearFramebufferRect(this, activeContext(), rgba);
 }
 
 uint32_t GS::consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
