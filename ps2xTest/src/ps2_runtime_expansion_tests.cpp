@@ -950,7 +950,7 @@ void register_ps2_runtime_expansion_tests()
                         R5900Context pollCtx{};
                         setRegU32(pollCtx, 4, static_cast<uint32_t>(sid));
                         PollSema(rdram.data(), &pollCtx, &runtime);
-                        if (getRegS32(pollCtx, 2) == KE_OK)
+                        if (getRegS32(pollCtx, 2) == sid)
                         {
                             pollOkCount.fetch_add(1, std::memory_order_relaxed);
                         }
@@ -971,7 +971,7 @@ void register_ps2_runtime_expansion_tests()
                         R5900Context signalCtx{};
                         setRegU32(signalCtx, 4, static_cast<uint32_t>(sid));
                         SignalSema(rdram.data(), &signalCtx, &runtime);
-                        if (getRegS32(signalCtx, 2) == KE_OK)
+                        if (getRegS32(signalCtx, 2) == sid)
                         {
                             signalOkCount.fetch_add(1, std::memory_order_relaxed);
                         }
