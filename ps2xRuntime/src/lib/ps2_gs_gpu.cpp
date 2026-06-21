@@ -31,23 +31,6 @@ namespace
                                      ((a >= 0x40u) ? 0x8000u : 0u));
     }
 
-    uint32_t addrPSMCT16Family(uint32_t basePtr, uint32_t width, uint8_t psm, uint32_t x, uint32_t y)
-    {
-        switch (psm)
-        {
-        case GS_PSM_CT16:
-            return GSPSMCT16::addrPSMCT16(basePtr, width, x, y);
-        case GS_PSM_CT16S:
-            return GSPSMCT16::addrPSMCT16S(basePtr, width, x, y);
-        case GS_PSM_Z16:
-            return GSPSMCT16::addrPSMZ16(basePtr, width, x, y);
-        case GS_PSM_Z16S:
-            return GSPSMCT16::addrPSMZ16S(basePtr, width, x, y);
-        default:
-            return 0u;
-        }
-    }
-
     static inline uint64_t loadLE64(const uint8_t *p)
     {
         uint64_t v;
