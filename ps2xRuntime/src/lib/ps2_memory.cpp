@@ -1163,13 +1163,16 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             break;
                         }
 
+                        const bool compactVifLocalTag =
+                            (channelBase == 0x10009000u || channelBase == 0x10008000u) &&
+                            (id == 1u || id == 2u || id == 5u || id == 6u || id == 7u);
+                        if (compactVifLocalTag)
+                            appendCompactVif1TagData(currentTagAddr, 0u);
+
                         if (hasPayload)
                         {
-                            const bool compactVif1LocalPayload =
-                                (channelBase == 0x10009000u || channelBase == 0x10008000u) &&
-                                (id == 1u || id == 2u || id == 5u || id == 6u || id == 7u);
-                            if (compactVif1LocalPayload)
-                                appendCompactVif1TagData(currentTagAddr, tagQwc);
+                            if (compactVifLocalTag)
+                                appendData(currentTagAddr + 16u, tagQwc);
                             else
                                 appendData(dataAddr, tagQwc);
                         }

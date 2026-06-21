@@ -1149,6 +1149,34 @@ void register_ps2_memory_tests()
                      "compact VIF1 chain should clear the STR bit after drain");
         });
 
+        tc.Run("VIF1 DMA chain preserves compact tag high bytes when qwc is zero", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kVif1Ch = 0x10009000u;
+            constexpr uint32_t kTag = 0x00025100u;
+
+            uint8_t *rdram = mem.getRDRAM();
+            std::memset(rdram + kTag, 0, 16u);
+
+            const uint64_t endTag = makeDmaTag(0u, 7u, 0u, false);
+            std::memcpy(rdram + kTag, &endTag, sizeof(endTag));
+
+            const uint32_t itopCmd = makeVifCmd(0x04u, 0u, 0x44u);
+            std::memcpy(rdram + kTag + 12u, &itopCmd, sizeof(itopCmd));
+
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kTag), "write VIF1 TADR should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x104u), "write VIF1 CHCR STR|CHAIN should succeed");
+
+            mem.processPendingTransfers();
+
+            t.Equals(mem.vif1_regs.itops, 0x44u,
+                     "qwc-zero compact VIF1 chain should still process high-half VIFcodes");
+            t.IsTrue((mem.readIORegister(kVif1Ch + 0x00u) & 0x100u) == 0u,
+                     "qwc-zero compact VIF1 chain should clear the STR bit after drain");
+        });
+
         tc.Run("VIF1 packet builders keep chain qwc live before terminate", [](TestCase &t)
         {
             PS2Memory mem;

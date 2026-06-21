@@ -2,10 +2,14 @@
 #include "ps2_runtime.h"
 #include "ps2_syscalls.h"
 #include "ps2_stubs.h"
+#include "runtime/ps2_iop.h"
 
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <string>
 #include <vector>
 
 using namespace ps2_syscalls;
@@ -129,6 +133,31 @@ namespace
         std::memcpy(rdram + addr, &value, sizeof(value));
     }
 
+    struct ScopedTempDir
+    {
+        std::filesystem::path path;
+
+        explicit ScopedTempDir(const std::string &name)
+        {
+            path = std::filesystem::temp_directory_path() /
+                   ("ps2recomp_" + name + "_" + std::to_string(reinterpret_cast<std::uintptr_t>(this)));
+            std::filesystem::remove_all(path);
+            std::filesystem::create_directories(path);
+        }
+
+        ~ScopedTempDir()
+        {
+            std::error_code ec;
+            std::filesystem::remove_all(path, ec);
+        }
+    };
+
+    void writeFile(const std::filesystem::path &path, const std::vector<uint8_t> &data)
+    {
+        std::ofstream out(path, std::ios::binary);
+        out.write(reinterpret_cast<const char *>(data.data()), static_cast<std::streamsize>(data.size()));
+    }
+
     template <typename T>
     void writeGuestStruct(uint8_t *rdram, uint32_t addr, const T &value)
     {
@@ -238,6 +267,83 @@ void register_ps2_sif_rpc_tests()
             setRegU32(env.ctx, 4, kClientAddr);
             SifCheckStatRpc(env.rdram.data(), &env.ctx, &env.runtime);
             t.Equals(getRegS32(env.ctx, 2), 0, "SifCheckStatRpc should report not busy after synchronous completion");
+        });
+
+        tc.Run("Fatal Frame SDRDRV RPC initializes header and loads body archives", [](TestCase &t)
+        {
+            TestEnv env;
+            ScopedTempDir temp("fatal_frame_sdrdrv");
+
+            std::vector<uint8_t> header(64u, 0);
+            const char headerPayload[] = "img-header";
+            std::memcpy(header.data(), headerPayload, sizeof(headerPayload) - 1u);
+            writeFile(temp.path / "img_hd.bin", header);
+
+            constexpr uint32_t kSectorSize = 2048u;
+            std::vector<uint8_t> body(kSectorSize * 2u, 0);
+            const char bodyPayload[] = "archive-data";
+            std::memcpy(body.data() + kSectorSize, bodyPayload, sizeof(bodyPayload) - 1u);
+            writeFile(temp.path / "img_bd.bin", body);
+
+            const PS2Runtime::IoPaths oldPaths = PS2Runtime::getIoPaths();
+            PS2Runtime::IoPaths ioPaths;
+            ioPaths.elfDirectory = temp.path;
+            ioPaths.hostRoot = temp.path;
+            ioPaths.cdRoot = temp.path;
+            ioPaths.mcRoot = temp.path / "mc0";
+            PS2Runtime::setIoPaths(ioPaths);
+
+            constexpr uint32_t kSendAddr = 0x00030000u;
+            constexpr uint32_t kRecvAddr = 0x00031000u;
+            constexpr uint32_t kDstAddr = 0x00032000u;
+            constexpr uint32_t kImgHeaderAddr = 0x012F0000u;
+            constexpr uint32_t kLoadId = 3u;
+
+            std::array<uint32_t, 8> commands{};
+            commands[0] = 0x0Eu;
+            commands[2] = 1u; // lbn
+            commands[3] = sizeof(bodyPayload) - 1u;
+            commands[4] = kDstAddr;
+            commands[6] = kLoadId;
+            std::memcpy(env.rdram.data() + kSendAddr, commands.data(), commands.size() * sizeof(uint32_t));
+            std::memset(env.rdram.data() + kRecvAddr, 0xCC, 0x180u);
+
+            env.runtime.iop().init(env.rdram.data());
+            uint32_t resultPtr = 0u;
+            bool signalNowait = true;
+            const bool initHandled = env.runtime.iop().handleRPC(&env.runtime,
+                                                                 IOP_SID_FATAL_FRAME_SDRDRV,
+                                                                 0u,
+                                                                 0u,
+                                                                 0u,
+                                                                 kRecvAddr,
+                                                                 0x180u,
+                                                                 resultPtr,
+                                                                 signalNowait);
+            t.IsTrue(initHandled, "Fatal Frame SDRDRV init RPC should be handled");
+            t.Equals(std::memcmp(env.rdram.data() + kImgHeaderAddr, "img-header", 10), 0,
+                     "SDRDRV init RPC should load img_hd.bin into the arrangement table");
+
+            signalNowait = true;
+            const bool handled = env.runtime.iop().handleRPC(&env.runtime,
+                                                             IOP_SID_FATAL_FRAME_SDRDRV,
+                                                             1u,
+                                                             kSendAddr,
+                                                             static_cast<uint32_t>(commands.size() * sizeof(uint32_t)),
+                                                             kRecvAddr,
+                                                             0x180u,
+                                                             resultPtr,
+                                                             signalNowait);
+
+            PS2Runtime::setIoPaths(oldPaths);
+
+            t.IsTrue(handled, "Fatal Frame SDRDRV SID should be handled");
+            t.Equals(resultPtr, kRecvAddr, "SDRDRV RPC should return recv buffer");
+            t.IsFalse(signalNowait, "SDRDRV RPC should not request special nowait signaling");
+            t.Equals(std::memcmp(env.rdram.data() + kDstAddr, "archive-data", 12), 0,
+                     "SDRDRV load command should copy bytes from img_bd.bin by LBN");
+            t.Equals(env.rdram[kRecvAddr + 0x6Cu + (kLoadId * 8u)], static_cast<uint8_t>(0),
+                     "SDRDRV load status should report completed");
         });
 
         tc.Run("bind before register creates placeholder then remaps", [](TestCase &t)
