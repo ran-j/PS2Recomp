@@ -619,6 +619,7 @@ void register_ps2_gs_tests()
             gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
 
             gs.writeRegister(GS_REG_FRAME_1, (1ull << 16)); // FBW=1, PSMCT32, FBP=0
+            gs.writeRegister(GS_REG_ZBUF_1, (1ull << 32));
             gs.writeRegister(GS_REG_SCISSOR_1, 0ull);
             gs.writeRegister(GS_REG_ALPHA_1, 0x6000000064ull);
             gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
@@ -668,8 +669,9 @@ void register_ps2_gs_tests()
             gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
 
             gs.writeRegister(GS_REG_FRAME_1, (1ull << 16));
+            gs.writeRegister(GS_REG_ZBUF_1, (1ull) << 32);
             gs.writeRegister(GS_REG_SCISSOR_1, 0ull);
-            gs.writeRegister(GS_REG_TEST_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
 
             gs.writeRegister(GS_REG_PRIM, static_cast<uint64_t>(GS_PRIM_POINT));
             gs.writeRegister(GS_REG_FBA_1, 0ull);
@@ -704,6 +706,7 @@ void register_ps2_gs_tests()
                 (0ull << 0) |
                 (1ull << 16) |
                 (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kZbuf1 = (1ull << 32);
             constexpr uint64_t kScissor1 =
                 (0ull << 0) |
                 (1ull << 16) |
@@ -713,6 +716,7 @@ void register_ps2_gs_tests()
                 (150ull << 0) |
                 (1ull << 16) |
                 (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kZbuf2 = (1ull << 32);
             constexpr uint64_t kScissor2 = 0ull;
             constexpr uint64_t kTex0_2 =
                 (0ull << 0) |
@@ -737,17 +741,19 @@ void register_ps2_gs_tests()
                 (16ull << 16);
 
             gs.writeRegister(GS_REG_FRAME_1, kFrame1);
+            gs.writeRegister(GS_REG_ZBUF_1, kZbuf1);
             gs.writeRegister(GS_REG_SCISSOR_1, kScissor1);
             gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
-            gs.writeRegister(GS_REG_TEST_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
             gs.writeRegister(GS_REG_PRIM, kPointPrim);
             gs.writeRegister(GS_REG_RGBAQ, kSourceColor);
             gs.writeRegister(GS_REG_XYZ2, kPointXyz);
 
             gs.writeRegister(GS_REG_FRAME_2, kFrame2);
+            gs.writeRegister(GS_REG_ZBUF_2, kZbuf2);
             gs.writeRegister(GS_REG_SCISSOR_2, kScissor2);
             gs.writeRegister(GS_REG_XYOFFSET_2, 0ull);
-            gs.writeRegister(GS_REG_TEST_2, 0ull);
+            gs.writeRegister(GS_REG_TEST_2, 0x30000ull);
             gs.writeRegister(GS_REG_TEX0_2, kTex0_2);
             gs.writeRegister(GS_REG_PRIM, kCopyPrim);
             gs.writeRegister(GS_REG_RGBAQ, 0x80808080ull);
@@ -772,6 +778,7 @@ void register_ps2_gs_tests()
                 (150ull << 0) |
                 (1ull << 16) |
                 (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kZbuf = (1ull << 32);
             constexpr uint64_t kScissor =
                 (0ull << 0) |
                 (3ull << 16) |
@@ -812,9 +819,10 @@ void register_ps2_gs_tests()
             }
 
             gs.writeRegister(GS_REG_FRAME_1, kFrame);
+            gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
             gs.writeRegister(GS_REG_SCISSOR_1, kScissor);
             gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
-            gs.writeRegister(GS_REG_TEST_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
             gs.writeRegister(GS_REG_ALPHA_1, 0ull);
             gs.writeRegister(GS_REG_TEX0_1, kTex0);
             gs.writeRegister(GS_REG_TEX1_1, 0ull);
@@ -944,6 +952,7 @@ void register_ps2_gs_tests()
                 150ull |
                 (10ull << 16) |
                 (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kZbuf2 = (1ull << 32);
             constexpr uint64_t kScissor2 =
                 (0ull << 0) |
                 (639ull << 16) |
@@ -983,6 +992,7 @@ void register_ps2_gs_tests()
                 ((8ull + (480ull * 16ull)) << 16);
 
             gs.writeRegister(GS_REG_FRAME_2, kFrame2);
+            gs.writeRegister(GS_REG_ZBUF_2, kZbuf2);
             gs.writeRegister(GS_REG_SCISSOR_2, kScissor2);
             gs.writeRegister(GS_REG_XYOFFSET_2, kXYOffset2);
             gs.writeRegister(GS_REG_ALPHA_2, kAlpha2);
@@ -1131,6 +1141,7 @@ void register_ps2_gs_tests()
                 150ull |
                 (10ull << 16) |
                 (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kZbuf2 = (static_cast<uint64_t>(1) << 32);
             constexpr uint64_t kScissor2 =
                 (0ull << 0) |
                 (639ull << 16) |
@@ -1170,6 +1181,7 @@ void register_ps2_gs_tests()
                 ((8ull + (480ull * 16ull)) << 16);
 
             gs.writeRegister(GS_REG_FRAME_2, kFrame2);
+            gs.writeRegister(GS_REG_ZBUF_2, kZbuf2);
             gs.writeRegister(GS_REG_SCISSOR_2, kScissor2);
             gs.writeRegister(GS_REG_XYOFFSET_2, kXYOffset2);
             gs.writeRegister(GS_REG_ALPHA_2, kAlpha2);
@@ -1601,6 +1613,7 @@ void register_ps2_gs_tests()
                 (0ull << 0) |
                 (1ull << 16) |
                 (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kZbuf = (1ull << 32);
             constexpr uint64_t kScissor =
                 (0ull << 0) |
                 (4ull << 16) |
@@ -1659,9 +1672,10 @@ void register_ps2_gs_tests()
                 std::memcpy(vram.data() + clutOff, &sample.color, sizeof(sample.color));
 
                 gs.writeRegister(GS_REG_FRAME_1, kFrame);
+                gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
                 gs.writeRegister(GS_REG_SCISSOR_1, kScissor);
                 gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
-                gs.writeRegister(GS_REG_TEST_1, 0ull);
+                gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
                 gs.writeRegister(GS_REG_ALPHA_1, 0ull);
                 gs.writeRegister(GS_REG_TEX0_1, kTex0);
                 gs.writeRegister(GS_REG_TEX1_1, 0ull);
@@ -2271,6 +2285,7 @@ void register_ps2_gs_tests()
                 (0ull << 0) |
                 (1ull << 16) |
                 (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kZbuf = (1ull << 32);
             constexpr uint64_t kTex0 =
                 (static_cast<uint64_t>(kTexTbp) << 0) |
                 (1ull << 14) |
@@ -2300,9 +2315,10 @@ void register_ps2_gs_tests()
             std::memcpy(vram.data() + expectedClutOff, &kExpectedColor, sizeof(kExpectedColor));
 
             gs.writeRegister(GS_REG_FRAME_1, kFrameReg);
+            gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
             gs.writeRegister(GS_REG_SCISSOR_1, 0ull);
             gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
-            gs.writeRegister(GS_REG_TEST_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
             gs.writeRegister(GS_REG_ALPHA_1, 0ull);
             gs.writeRegister(GS_REG_TEX0_1, kTex0);
             gs.writeRegister(GS_REG_PRIM, kPrim);
@@ -2330,6 +2346,7 @@ void register_ps2_gs_tests()
                 (0ull << 0) |
                 (1ull << 16) |
                 (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kZbuf = (1ull << 32);
             constexpr uint64_t kTex0 =
                 (static_cast<uint64_t>(kTexTbp) << 0) |
                 (1ull << 14) |
@@ -2380,9 +2397,10 @@ void register_ps2_gs_tests()
             gs.processGIFPacket(packet.data(), static_cast<uint32_t>(packet.size()));
 
             gs.writeRegister(GS_REG_FRAME_1, kFrameReg);
+            gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
             gs.writeRegister(GS_REG_SCISSOR_1, 0ull);
             gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
-            gs.writeRegister(GS_REG_TEST_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
             gs.writeRegister(GS_REG_ALPHA_1, 0ull);
             gs.writeRegister(GS_REG_TEX0_1, kTex0);
             gs.writeRegister(GS_REG_PRIM, kPrim);
@@ -2411,6 +2429,7 @@ void register_ps2_gs_tests()
                 (0ull << 0) |
                 (1ull << 16) |
                 (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kZbuf = (1ull << 32);
             constexpr uint64_t kTex0 =
                 (static_cast<uint64_t>(kTexTbp) << 0) |
                 (1ull << 14) |
@@ -2443,9 +2462,10 @@ void register_ps2_gs_tests()
             std::memcpy(vram.data() + expectedClutOff, &kExpectedColor, sizeof(kExpectedColor));
 
             gs.writeRegister(GS_REG_FRAME_1, kFrameReg);
+            gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
             gs.writeRegister(GS_REG_SCISSOR_1, 0ull);
             gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
-            gs.writeRegister(GS_REG_TEST_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
             gs.writeRegister(GS_REG_ALPHA_1, 0ull);
             gs.writeRegister(GS_REG_TEX0_1, kTex0);
             gs.writeRegister(GS_REG_TEX2_1, kTex2);
@@ -2474,6 +2494,7 @@ void register_ps2_gs_tests()
                 (0ull << 0) |
                 (1ull << 16) |
                 (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kZbuf = (1ull << 32);
             constexpr uint64_t kTex0 =
                 (static_cast<uint64_t>(kTexTbp) << 0) |
                 (1ull << 14) |
@@ -2505,9 +2526,10 @@ void register_ps2_gs_tests()
             std::memcpy(vram.data() + expectedClutOff, &kExpectedColor, sizeof(kExpectedColor));
 
             gs.writeRegister(GS_REG_FRAME_1, kFrameReg);
+            gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
             gs.writeRegister(GS_REG_SCISSOR_1, 0ull);
             gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
-            gs.writeRegister(GS_REG_TEST_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
             gs.writeRegister(GS_REG_ALPHA_1, 0ull);
             gs.writeRegister(GS_REG_TEX0_1, kTex0);
             gs.writeRegister(GS_REG_TEXCLUT, kTexClut);
@@ -2535,6 +2557,7 @@ void register_ps2_gs_tests()
                 (0ull << 0) |
                 (1ull << 16) |
                 (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kZbuf = (1ull << 32);
             constexpr uint64_t kScissor =
                 (0ull << 0) |
                 (1ull << 16) |
@@ -2572,9 +2595,10 @@ void register_ps2_gs_tests()
             vram[blackOff + 3u] = 0x00u;
 
             gs.writeRegister(GS_REG_FRAME_1, kFrameReg);
+            gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
             gs.writeRegister(GS_REG_SCISSOR_1, kScissor);
             gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
-            gs.writeRegister(GS_REG_TEST_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
             gs.writeRegister(GS_REG_ALPHA_1, 0ull);
             gs.writeRegister(GS_REG_TEX0_1, kTex0);
             gs.writeRegister(GS_REG_TEXA, kTexa);
@@ -2610,6 +2634,7 @@ void register_ps2_gs_tests()
                 (0ull << 0) |
                 (1ull << 16) |
                 (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kZbuf = (1ull << 32);
             constexpr uint64_t kScissor =
                 (0ull << 0) |
                 (0ull << 16) |
@@ -2642,9 +2667,10 @@ void register_ps2_gs_tests()
             std::memcpy(vram.data() + texOff, &kTexturePixel, sizeof(kTexturePixel));
 
             gs.writeRegister(GS_REG_FRAME_1, kFrameReg);
+            gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
             gs.writeRegister(GS_REG_SCISSOR_1, kScissor);
             gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
-            gs.writeRegister(GS_REG_TEST_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
             gs.writeRegister(GS_REG_ALPHA_1, 0ull);
             gs.writeRegister(GS_REG_TEX0_1, kTex0);
             gs.writeRegister(GS_REG_PRIM, kPrim);
@@ -2670,6 +2696,7 @@ void register_ps2_gs_tests()
                 (0ull << 0) |
                 (1ull << 16) |
                 (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kZbuf = (1ull << 32);
             constexpr uint64_t kScissor =
                 (0ull << 0) |
                 (0ull << 16) |
@@ -2702,9 +2729,10 @@ void register_ps2_gs_tests()
             std::memcpy(vram.data() + texOff, &kTexturePixel, sizeof(kTexturePixel));
 
             gs.writeRegister(GS_REG_FRAME_1, kFrameReg);
+            gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
             gs.writeRegister(GS_REG_SCISSOR_1, kScissor);
             gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
-            gs.writeRegister(GS_REG_TEST_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
             gs.writeRegister(GS_REG_ALPHA_1, 0ull);
             gs.writeRegister(GS_REG_TEX0_1, kTex0);
             gs.writeRegister(GS_REG_PRIM, kPrim);
@@ -2730,6 +2758,7 @@ void register_ps2_gs_tests()
                 (0ull << 0) |
                 (1ull << 16) |
                 (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kZbuf = (1ull << 32);
             constexpr uint64_t kScissor =
                 (0ull << 0) |
                 (0ull << 16) |
@@ -2762,9 +2791,10 @@ void register_ps2_gs_tests()
             std::memcpy(vram.data() + texOff, &kTexturePixel, sizeof(kTexturePixel));
 
             gs.writeRegister(GS_REG_FRAME_1, kFrameReg);
+            gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
             gs.writeRegister(GS_REG_SCISSOR_1, kScissor);
             gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
-            gs.writeRegister(GS_REG_TEST_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
             gs.writeRegister(GS_REG_ALPHA_1, 0ull);
             gs.writeRegister(GS_REG_TEX0_1, kTex0);
             gs.writeRegister(GS_REG_PRIM, kPrim);
@@ -2793,6 +2823,7 @@ void register_ps2_gs_tests()
                     (0ull << 0) |
                     (1ull << 16) |
                     (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+                constexpr uint64_t kZbuf = (1ull << 32);
                 constexpr uint64_t kScissor =
                     (0ull << 0) |
                     (4ull << 16) |
@@ -2835,9 +2866,10 @@ void register_ps2_gs_tests()
                 };
 
                 gs.writeRegister(GS_REG_FRAME_1, kFrame);
+                gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
                 gs.writeRegister(GS_REG_SCISSOR_1, kScissor);
                 gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
-                gs.writeRegister(GS_REG_TEST_1, 0ull);
+                gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
                 gs.writeRegister(GS_REG_ALPHA_1, 0ull);
                 gs.writeRegister(GS_REG_TEX0_1, kTex0);
                 gs.writeRegister(GS_REG_TEX1_1, tex1Reg);
@@ -2881,6 +2913,7 @@ void register_ps2_gs_tests()
                 (0ull << 0) |
                 (1ull << 16) |
                 (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kZbuf = (1ull << 32);
             constexpr uint64_t kScissor =
                 (0ull << 0) |
                 (0ull << 16) |
@@ -2890,7 +2923,8 @@ void register_ps2_gs_tests()
                 1ull |                  // ATE
                 (5ull << 1) |          // ATST = GEQUAL
                 (0x80ull << 4) |       // AREF
-                (1ull << 12);          // AFAIL = FB_ONLY
+                (1ull << 12) |          // AFAIL = FB_ONLY
+                (1ull << 17);          // ZTST = ALWAYS
             constexpr uint64_t kPrim =
                 static_cast<uint64_t>(GS_PRIM_POINT);
             constexpr uint64_t kRgbaq =
@@ -2901,6 +2935,7 @@ void register_ps2_gs_tests()
                 (0x3F800000ull << 32); // q = 1.0f
 
             gs.writeRegister(GS_REG_FRAME_1, kFrame);
+            gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
             gs.writeRegister(GS_REG_SCISSOR_1, kScissor);
             gs.writeRegister(GS_REG_TEST_1, kTest);
             gs.writeRegister(GS_REG_PRIM, kPrim);
@@ -2923,16 +2958,18 @@ void register_ps2_gs_tests()
                 (0ull << 0) |
                 (1ull << 16) |
                 (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kZbuf = (1ull << 32);
             constexpr uint64_t kScissor =
                 (0ull << 0) |
                 (0ull << 16) |
                 (0ull << 32) |
                 (0ull << 48);
             constexpr uint64_t kTest =
-                1ull |                  // ATE
-                (5ull << 1) |          // ATST = GEQUAL
-                (0x80ull << 4) |       // AREF
-                (3ull << 12);          // AFAIL = RGB_ONLY
+                1ull |                // ATE
+                (5ull << 1) |         // ATST = GEQUAL
+                (0x80ull << 4) |      // AREF
+                (3ull << 12) |        // AFAIL = RGB_ONLY
+                (1ull << 17);         // ZTST = ALWAYS
             constexpr uint64_t kPrim =
                 static_cast<uint64_t>(GS_PRIM_POINT);
             constexpr uint64_t kRgbaq =
@@ -2946,6 +2983,7 @@ void register_ps2_gs_tests()
             std::memcpy(vram.data(), &kExisting, sizeof(kExisting));
 
             gs.writeRegister(GS_REG_FRAME_1, kFrame);
+            gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
             gs.writeRegister(GS_REG_SCISSOR_1, kScissor);
             gs.writeRegister(GS_REG_TEST_1, kTest);
             gs.writeRegister(GS_REG_PRIM, kPrim);
@@ -2968,6 +3006,7 @@ void register_ps2_gs_tests()
                 (0ull << 0) |
                 (1ull << 16) |
                 (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kZbuf = (1ull << 32);
             constexpr uint64_t kScissor =
                 (0ull << 0) |
                 (31ull << 16) |
@@ -2988,9 +3027,10 @@ void register_ps2_gs_tests()
             };
 
             gs.writeRegister(GS_REG_FRAME_1, kFrame);
+            gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
             gs.writeRegister(GS_REG_SCISSOR_1, kScissor);
             gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
-            gs.writeRegister(GS_REG_TEST_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
             gs.writeRegister(GS_REG_PRIM, kPrim);
             gs.writeRegister(GS_REG_RGBAQ, kRgbaq);
             gs.writeRegister(GS_REG_XYZF2, makeXyzf(102u, 102u));
