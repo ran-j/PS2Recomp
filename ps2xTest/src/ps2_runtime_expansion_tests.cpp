@@ -8,7 +8,6 @@
 #include "ps2_syscalls.h"
 #include "ps2_stubs.h"
 #include "runtime/ps2_gs_gpu.h"
-#include "runtime/ps2_gs_psmct32.h"
 #include "ps2_runtime_macros.h"
 #include "Stubs/MPEG.h"
 #include "Stubs/CD.h"
@@ -116,7 +115,7 @@ namespace
 
     uint32_t frameOffsetBytes(uint32_t x, uint32_t y, uint32_t fbw)
     {
-        return GSPSMCT32::addrPSMCT32(0u, (fbw != 0u) ? fbw : 1u, x, y);
+        return GSMem::LookupPixelAddressCT32(0u, (fbw != 0u) ? fbw : 1u, x, y) * 4;
     }
 
     void testRuntimeWorkerLoop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
