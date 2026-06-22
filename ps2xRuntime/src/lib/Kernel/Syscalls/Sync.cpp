@@ -218,7 +218,8 @@ namespace ps2_syscalls
         }
         sema->cv.notify_all();
 
-        setReturnS32(ctx, KE_OK);
+        // PS2 EE BIOS returns sid on success.
+        setReturnS32(ctx, sid);
     }
 
     void iDeleteSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -236,7 +237,8 @@ namespace ps2_syscalls
             return;
         }
 
-        int ret = KE_OK;
+        // PS2 EE BIOS returns sid on success; KE_SEMA_OVF overrides on overflow.
+        int ret = sid;
         int beforeCount = 0;
         int afterCount = 0;
         bool wokeWaiter = false;
@@ -291,10 +293,14 @@ namespace ps2_syscalls
 
         auto info = ensureCurrentThreadInfo(ctx);
         throwIfTerminated(info);
+
         std::unique_lock<std::mutex> lock(sema->m);
-        int ret = 0;
-        int countAfter = 0;
+
+        // PS2 EE BIOS returns sid on success.
+        int ret = sid;
+        int countAfter = sema->count;
         bool terminated = false;
+        bool consumed = false;
 
         if (sema->count == 0)
         {
@@ -354,9 +360,10 @@ namespace ps2_syscalls
                         }
                     }
 
-                    if (!terminated && ret == 0 && sema->count > 0)
+                    if (!terminated && ret == sid && sema->count > 0)
                     {
                         sema->count--;
+                        consumed = true;
                     }
                     countAfter = sema->count;
                 });
@@ -367,11 +374,12 @@ namespace ps2_syscalls
             throw ThreadExitException();
         }
 
-        if (lock.owns_lock())
+        if (!consumed && lock.owns_lock())
         {
-            if (ret == 0 && sema->count > 0)
+            if (ret == sid && sema->count > 0)
             {
                 sema->count--;
+                consumed = true;
             }
             countAfter = sema->count;
         }
@@ -408,7 +416,7 @@ namespace ps2_syscalls
         if (sema->count > 0)
         {
             sema->count--;
-            setReturnS32(ctx, KE_OK);
+            setReturnS32(ctx, sid);  // PS2 EE BIOS returns sid on success.
             return;
         }
 

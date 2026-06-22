@@ -485,7 +485,7 @@ void register_ps2_sif_rpc_tests()
 
             setRegU32(env.ctx, 4, static_cast<uint32_t>(semaId));
             PollSema(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_OK, "nowait rpc should signal completion sema");
+            t.Equals(getRegS32(env.ctx, 2), semaId, "nowait rpc should signal completion sema");
 
             std::memset(env.rdram.data() + kRecvAddr, 0, 16u);
             setRegU32(env.ctx, 4, kClientAddr);
@@ -505,7 +505,7 @@ void register_ps2_sif_rpc_tests()
 
             setRegU32(env.ctx, 4, static_cast<uint32_t>(semaId));
             PollSema(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_OK, "each nowait rpc should signal completion sema");
+            t.Equals(getRegS32(env.ctx, 2), semaId, "each nowait rpc should signal completion sema");
 
             std::memset(env.rdram.data() + kRecvAddr, 0, 16u);
             setRegU32(env.ctx, 4, kClientAddr);
