@@ -2,7 +2,6 @@
 #include "GS.h"
 #include "ps2_log.h"
 #include "runtime/ps2_gs_common.h"
-#include "runtime/ps2_gs_psmct16.h"
 
 namespace ps2_stubs
 {

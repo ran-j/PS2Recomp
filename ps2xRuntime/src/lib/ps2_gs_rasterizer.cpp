@@ -1,10 +1,6 @@
 #include "runtime/ps2_gs_rasterizer.h"
 #include "runtime/ps2_gs_gpu.h"
 #include "runtime/ps2_gs_common.h"
-#include "runtime/ps2_gs_psmct16.h"
-#include "runtime/ps2_gs_psmct32.h"
-#include "runtime/ps2_gs_psmt4.h"
-#include "runtime/ps2_gs_psmt8.h"
 #include "runtime/ps2_gs_memory.h"
 #include "ps2_log.h"
 #include <atomic>

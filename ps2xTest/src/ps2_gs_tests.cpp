@@ -3,7 +3,6 @@
 #include "ps2_runtime.h"
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
-#include "runtime/ps2_gs_psmct32.h"
 #include "runtime/ps2_gs_gpu.h"
 #include "Stubs/Helpers/Support.h"
 #include "Stubs/GS.h"
