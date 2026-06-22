@@ -255,10 +255,10 @@ namespace GSMem
 		static constexpr usz BitOffset();
 
 		// writes the pixel
-		static constexpr void Write(const PageLookupTableT& table, u8* data, u32 block, u32 bw, u32 x, u32 y, PackedT value);
+		static constexpr void Write(u8* data, u32 address, PackedT value);
 
 		// reads the pixel
-		static constexpr auto Read(const PageLookupTableT& table, u8* data, u32 block, u32 bw, u32 x, u32 y) -> PackedT;
+		static constexpr auto Read(u8* data, u32 address) -> PackedT;
 
 		static_assert(BlocksPerPage() == BLOCKS_PER_PAGE);
 		static_assert(IsValidPsm(psm));
@@ -455,10 +455,9 @@ namespace GSMem
 	}
 
 	template<PixelStorageMode psm>
-	constexpr void PixelStorageTraits<psm>::Write(const PageLookupTableT& table, u8* data, u32 block, u32 bw, u32 x, u32 y, PackedT value)
+	constexpr void PixelStorageTraits<psm>::Write(u8* data, u32 address, PackedT value)
 	{
-		const u32 pixel_addr = Address(table, block, bw, x, y);
-		const u32 bits = pixel_addr * UnpackedBitWidth(psm) + BitOffset();
+		const u32 bits = address * UnpackedBitWidth(psm) + BitOffset();
 		const u32 byte_addr = (bits / 8) & (MEMORY_SIZE - sizeof(PackedT));
 		const u32 shift = bits % 8;
 
@@ -498,10 +497,9 @@ namespace GSMem
 	}
 
 	template<PixelStorageMode psm>
-	constexpr auto PixelStorageTraits<psm>::Read(const PageLookupTableT& table, u8* data, u32 block, u32 bw, u32 x, u32 y) -> PackedT
+	constexpr auto PixelStorageTraits<psm>::Read(u8* data, u32 address) -> PackedT
 	{
-		const u32 pixel_addr = Address(table, block, bw, x, y);
-		const u32 bits = pixel_addr * UnpackedBitWidth(psm) + BitOffset();
+		const u32 bits = address * UnpackedBitWidth(psm) + BitOffset();
 		const u32 byte_addr = (bits / 8) & (MEMORY_SIZE - sizeof(PackedT));
 		const u32 shift = bits % 8;
 
@@ -535,46 +533,80 @@ namespace GSMem
 
 	void InitLookupTables();
 
-	void WriteCT32(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
-	void WriteZ32(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
+	// Look up a pixel address (address of the pixel, not the byte)
+	u32 LookupPixelAddressCT32(u32 bp, u32 bw, u32 x, u32 y);
+	u32 LookupPixelAddressCT16(u32 bp, u32 bw, u32 x, u32 y);
+	u32 LookupPixelAddressCT16S(u32 bp, u32 bw, u32 x, u32 y);
+	u32 LookupPixelAddressZ32(u32 bp, u32 bw, u32 x, u32 y);
+	u32 LookupPixelAddressZ16(u32 bp, u32 bw, u32 x, u32 y);
+	u32 LookupPixelAddressZ16S(u32 bp, u32 bw, u32 x, u32 y);
+	u32 LookupPixelAddressP8(u32 bp, u32 bw, u32 x, u32 y);
+	u32 LookupPixelAddressP4(u32 bp, u32 bw, u32 x, u32 y);
+	u32 LookupPixelAddressNull(u32 bp, u32 bw, u32 x, u32 y);
 
-	void WriteCT24(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
-	void WriteZ24(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
+	// read value at pixel address
+	// returned values are unpacked
+	u32 ReadPixelAddressCT32(u8* data, u32 address);
+	u32 ReadPixelAddressCT24(u8* data, u32 address);
+	u32 ReadPixelAddressCT16(u8* data, u32 address);
+	u32 ReadPixelAddressCT16S(u8* data, u32 address);
+	u32 ReadPixelAddressZ32(u8* data, u32 address);
+	u32 ReadPixelAddressZ24(u8* data, u32 address);
+	u32 ReadPixelAddressZ16(u8* data, u32 address);
+	u32 ReadPixelAddressZ16S(u8* data, u32 address);
+	u32 ReadPixelAddressP8(u8* data, u32 address);
+	u32 ReadPixelAddressP8H(u8* data, u32 address);
+	u32 ReadPixelAddressP4(u8* data, u32 address);
+	u32 ReadPixelAddressP4HH(u8* data, u32 address);
+	u32 ReadPixelAddressP4HL(u8* data, u32 address);
+	u32 ReadPixelAddressNull(u8* data, u32 address);
 
-	void WriteCT16(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
-	void WriteCT16S(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
-	void WriteZ16(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
-	void WriteZ16S(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
+	// write value at pixel address
+	// provided value should be unpacked
+	void WritePixelAddressCT32(u8* data, u32 address, u32 value);
+	void WritePixelAddressCT24(u8* data, u32 address, u32 value);
+	void WritePixelAddressCT16(u8* data, u32 address, u32 value);
+	void WritePixelAddressCT16S(u8* data, u32 address, u32 value);
+	void WritePixelAddressZ32(u8* data, u32 address, u32 value);
+	void WritePixelAddressZ24(u8* data, u32 address, u32 value);
+	void WritePixelAddressZ16(u8* data, u32 address, u32 value);
+	void WritePixelAddressZ16S(u8* data, u32 address, u32 value);
+	void WritePixelAddressP8(u8* data, u32 address, u32 value);
+	void WritePixelAddressP8H(u8* data, u32 address, u32 value);
+	void WritePixelAddressP4(u8* data, u32 address, u32 value);
+	void WritePixelAddressP4HH(u8* data, u32 address, u32 value);
+	void WritePixelAddressP4HL(u8* data, u32 address, u32 value);
+	void WritePixelAddressNull(u8* data, u32 address, u32 value);
 
-	void WriteP8(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
-	void WriteP8H(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
+	// address + read helper
+	u32 ReadPixelCT32(u8* data, u32 bp, u32 bw, u32 x, u32 y);
+	u32 ReadPixelCT24(u8* data, u32 bp, u32 bw, u32 x, u32 y);
+	u32 ReadPixelCT16(u8* data, u32 bp, u32 bw, u32 x, u32 y);
+	u32 ReadPixelCT16S(u8* data, u32 bp, u32 bw, u32 x, u32 y);
+	u32 ReadPixelZ32(u8* data, u32 bp, u32 bw, u32 x, u32 y);
+	u32 ReadPixelZ24(u8* data, u32 bp, u32 bw, u32 x, u32 y);
+	u32 ReadPixelZ16(u8* data, u32 bp, u32 bw, u32 x, u32 y);
+	u32 ReadPixelZ16S(u8* data, u32 bp, u32 bw, u32 x, u32 y);
+	u32 ReadPixelP8(u8* data, u32 bp, u32 bw, u32 x, u32 y);
+	u32 ReadPixelP8H(u8* data, u32 bp, u32 bw, u32 x, u32 y);
+	u32 ReadPixelP4(u8* data, u32 bp, u32 bw, u32 x, u32 y);
+	u32 ReadPixelP4HL(u8* data, u32 bp, u32 bw, u32 x, u32 y);
+	u32 ReadPixelP4HH(u8* data, u32 bp, u32 bw, u32 x, u32 y);
+	u32 ReadPixelNull(u8* data, u32 bp, u32 bw, u32 x, u32 y);
 
-	void WriteP4(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
-	void WriteP4HH(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
-	void WriteP4HL(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
-
-	void WriteNull(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
-
-	u32 ReadCT32(u8* data, u32 bp, u32 bw, u32 x, u32 y);
-	u32 ReadZ32(u8* data, u32 bp, u32 bw, u32 x, u32 y);
-
-	u32 ReadCT24(u8* data, u32 bp, u32 bw, u32 x, u32 y);
-	u32 ReadZ24(u8* data, u32 bp, u32 bw, u32 x, u32 y);
-
-	u32 ReadCT24(u8* data, u32 bp, u32 bw, u32 x, u32 y);
-	u32 ReadZ24(u8* data, u32 bp, u32 bw, u32 x, u32 y);
-
-	u32 ReadCT16(u8* data, u32 bp, u32 bw, u32 x, u32 y);
-	u32 ReadCT16S(u8* data, u32 bp, u32 bw, u32 x, u32 y);
-	u32 ReadZ16(u8* data, u32 bp, u32 bw, u32 x, u32 y);
-	u32 ReadZ16S(u8* data, u32 bp, u32 bw, u32 x, u32 y);
-
-	u32 ReadP8(u8* data, u32 bp, u32 bw, u32 x, u32 y);
-	u32 ReadP8H(u8* data, u32 bp, u32 bw, u32 x, u32 y);
-
-	u32 ReadP4(u8* data, u32 bp, u32 bw, u32 x, u32 y);
-	u32 ReadP4HL(u8* data, u32 bp, u32 bw, u32 x, u32 y);
-	u32 ReadP4HH(u8* data, u32 bp, u32 bw, u32 x, u32 y);
-
-	u32 ReadNull(u8* data, u32 bp, u32 bw, u32 x, u32 y);
+	// address + write helper
+	void WritePixelCT32(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
+	void WritePixelCT24(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
+	void WritePixelCT16(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
+	void WritePixelCT16S(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
+	void WritePixelZ32(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
+	void WritePixelZ24(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
+	void WritePixelZ16(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
+	void WritePixelZ16S(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
+	void WritePixelP8(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
+	void WritePixelP8H(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
+	void WritePixelP4(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
+	void WritePixelP4HH(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
+	void WritePixelP4HL(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
+	void WritePixelNull(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
 }

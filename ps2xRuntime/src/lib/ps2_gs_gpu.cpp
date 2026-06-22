@@ -353,60 +353,102 @@ GS::GS()
         switch (i)
         {
         case GS_PSM_CT32:
-            m_read_vram_funcs[i] = ReadCT32;
-            m_write_vram_funcs[i] = WriteCT32;
+            m_pixel_address_funcs[i] = LookupPixelAddressCT32;
+            m_read_address_funcs[i]  = ReadPixelAddressCT32;
+            m_write_address_funcs[i] = WritePixelAddressCT32;
+            m_read_pixel_funcs[i]    = ReadPixelCT32;
+            m_write_pixel_funcs[i]   = WritePixelCT32;
             break;
         case GS_PSM_CT24:
-            m_read_vram_funcs[i] = ReadCT24;
-            m_write_vram_funcs[i] = WriteCT24;
+            m_pixel_address_funcs[i] = LookupPixelAddressCT32;
+            m_read_address_funcs[i]  = ReadPixelAddressCT24;
+            m_write_address_funcs[i] = WritePixelAddressCT24;
+            m_read_pixel_funcs[i]    = ReadPixelCT24;
+            m_write_pixel_funcs[i]   = WritePixelCT24;
             break;
         case GS_PSM_CT16:
-            m_read_vram_funcs[i] = ReadCT16;
-            m_write_vram_funcs[i] = WriteCT16;
+            m_pixel_address_funcs[i] = LookupPixelAddressCT16;
+            m_read_address_funcs[i]  = ReadPixelAddressCT16;
+            m_write_address_funcs[i] = WritePixelAddressCT16;
+            m_read_pixel_funcs[i]    = ReadPixelCT16;
+            m_write_pixel_funcs[i]   = WritePixelCT16;
             break;
         case GS_PSM_CT16S:
-            m_read_vram_funcs[i] = ReadCT16S;
-            m_write_vram_funcs[i] = WriteCT16S;
+            m_pixel_address_funcs[i] = LookupPixelAddressCT16S;
+            m_read_address_funcs[i]  = ReadPixelAddressCT16S;
+            m_write_address_funcs[i] = WritePixelAddressCT16S;
+            m_read_pixel_funcs[i]    = ReadPixelCT16S;
+            m_write_pixel_funcs[i]   = WritePixelCT16S;
             break;
         case GS_PSM_T8:
-            m_read_vram_funcs[i] = ReadP8;
-            m_write_vram_funcs[i] = WriteP8;
+            m_pixel_address_funcs[i] = LookupPixelAddressP8;
+            m_read_address_funcs[i]  = ReadPixelAddressP8;
+            m_write_address_funcs[i] = WritePixelAddressP8;
+            m_read_pixel_funcs[i]     = ReadPixelP8;
+            m_write_pixel_funcs[i]    = WritePixelP8;
             break;
         case GS_PSM_T8H:
-            m_read_vram_funcs[i] = ReadP8H;
-            m_write_vram_funcs[i] = WriteP8H;
+            m_pixel_address_funcs[i] = LookupPixelAddressCT32;
+            m_read_address_funcs[i]  = ReadPixelAddressP8H;
+            m_write_address_funcs[i] = WritePixelAddressP8H;
+            m_read_pixel_funcs[i]    = ReadPixelP8H;
+            m_write_pixel_funcs[i]   = WritePixelP8H;
             break;
         case GS_PSM_T4:
-            m_read_vram_funcs[i] = ReadP4;
-            m_write_vram_funcs[i] = WriteP4;
+            m_pixel_address_funcs[i] = LookupPixelAddressP4;
+            m_read_address_funcs[i]  = ReadPixelAddressP4;
+            m_write_address_funcs[i] = WritePixelAddressP4;
+            m_read_pixel_funcs[i]    = ReadPixelP4;
+            m_write_pixel_funcs[i]   = WritePixelP4;
             break;
         case GS_PSM_T4HH:
-            m_read_vram_funcs[i] = ReadP4HH;
-            m_write_vram_funcs[i] = WriteP4HH;
+            m_pixel_address_funcs[i] = LookupPixelAddressCT32;
+            m_read_address_funcs[i]  = ReadPixelAddressP4HH;
+            m_write_address_funcs[i] = WritePixelAddressP4HH;
+            m_read_pixel_funcs[i]    = ReadPixelP4HH;
+            m_write_pixel_funcs[i]   = WritePixelP4HH;
             break;
         case GS_PSM_T4HL:
-            m_read_vram_funcs[i] = ReadP4HL;
-            m_write_vram_funcs[i] = WriteP4HL;
+            m_pixel_address_funcs[i] = LookupPixelAddressCT32;
+            m_read_address_funcs[i]  = ReadPixelAddressP4HL;
+            m_write_address_funcs[i] = WritePixelAddressP4HL;
+            m_read_pixel_funcs[i]    = ReadPixelP4HL;
+            m_write_pixel_funcs[i]   = WritePixelP4HL;
             break;
         case GS_PSM_Z32:
-            m_read_vram_funcs[i] = ReadZ32;
-            m_write_vram_funcs[i] = WriteZ32;
+            m_pixel_address_funcs[i] = LookupPixelAddressZ32;
+            m_read_address_funcs[i]  = ReadPixelAddressZ32;
+            m_write_address_funcs[i] = WritePixelAddressZ32;
+            m_read_pixel_funcs[i]    = ReadPixelZ32;
+            m_write_pixel_funcs[i]   = WritePixelZ32;
             break;
         case GS_PSM_Z24:
-            m_read_vram_funcs[i] = ReadZ24;
-            m_write_vram_funcs[i] = WriteZ24;
+            m_pixel_address_funcs[i] = LookupPixelAddressZ32;
+            m_read_address_funcs[i]  = ReadPixelAddressZ24;
+            m_write_address_funcs[i] = WritePixelAddressZ24;
+            m_read_pixel_funcs[i]    = ReadPixelZ24;
+            m_write_pixel_funcs[i]   = WritePixelZ24;
             break;
         case GS_PSM_Z16:
-            m_read_vram_funcs[i] = ReadZ16;
-            m_write_vram_funcs[i] = WriteZ16;
+            m_pixel_address_funcs[i] = LookupPixelAddressZ16;
+            m_read_address_funcs[i]  = ReadPixelAddressZ16;
+            m_write_address_funcs[i] = WritePixelAddressZ16;
+            m_read_pixel_funcs[i]    = ReadPixelZ16;
+            m_write_pixel_funcs[i]   = WritePixelZ16;
             break;
         case GS_PSM_Z16S:
-            m_read_vram_funcs[i] = ReadZ16S;
-            m_write_vram_funcs[i] = WriteZ16S;
+            m_pixel_address_funcs[i] = LookupPixelAddressZ16S;
+            m_read_address_funcs[i]  = ReadPixelAddressZ16S;
+            m_write_address_funcs[i] = WritePixelAddressZ16S;
+            m_read_pixel_funcs[i]    = ReadPixelZ16S;
+            m_write_pixel_funcs[i]   = WritePixelZ16S;
             break;
         default:
-            m_read_vram_funcs[i] = ReadNull;
-            m_write_vram_funcs[i] = WriteNull;
+            m_pixel_address_funcs[i] = LookupPixelAddressNull;
+            m_read_address_funcs[i]  = ReadPixelAddressNull;
+            m_write_address_funcs[i] = WritePixelAddressNull;
+            m_read_pixel_funcs[i]    = ReadPixelNull;
+            m_write_pixel_funcs[i]   = WritePixelNull;
             break;
         }
     }
@@ -2340,7 +2382,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
             u32 c;
             std::memcpy(&c, &data[data_offset], sizeof(u32));
 
-            GSMem::WriteCT32(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
+            GSMem::WritePixelCT32(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
 
             m_transferState.x++;
             m_transferState.copied_pixels++;
@@ -2368,7 +2410,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
             u32 c;
             std::memcpy(&c, &data[data_offset], sizeof(u32));
 
-            GSMem::WriteZ32(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
+            GSMem::WritePixelZ32(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
 
             m_transferState.x++;
             m_transferState.copied_pixels++;
@@ -2396,7 +2438,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
             u32 c;
             std::memcpy(&c, &data[data_offset], sizeof(u32));
 
-            GSMem::WriteCT24(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
+            GSMem::WritePixelCT24(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
 
             m_transferState.x++;
             m_transferState.copied_pixels++;
@@ -2424,7 +2466,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
             u32 c;
             std::memcpy(&c, &data[data_offset], sizeof(u32));
 
-            GSMem::WriteZ24(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
+            GSMem::WritePixelZ24(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
 
             m_transferState.x++;
             m_transferState.copied_pixels++;
@@ -2452,7 +2494,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
             u16 c;
             std::memcpy(&c, &data[data_offset], sizeof(u16));
 
-            GSMem::WriteCT16(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
+            GSMem::WritePixelCT16(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
 
             m_transferState.x++;
             m_transferState.copied_pixels++;
@@ -2480,7 +2522,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
             u16 c;
             std::memcpy(&c, &data[data_offset], sizeof(u16));
 
-            GSMem::WriteZ16(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
+            GSMem::WritePixelZ16(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
 
             m_transferState.x++;
             m_transferState.copied_pixels++;
@@ -2508,7 +2550,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
             u16 c;
             std::memcpy(&c, &data[data_offset], sizeof(u16));
 
-            GSMem::WriteCT16S(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
+            GSMem::WritePixelCT16S(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
 
             m_transferState.x++;
             m_transferState.copied_pixels++;
@@ -2536,7 +2578,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
             u16 c;
             std::memcpy(&c, &data[data_offset], sizeof(u16));
 
-            GSMem::WriteZ16S(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
+            GSMem::WritePixelZ16S(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
 
             m_transferState.x++;
             m_transferState.copied_pixels++;
@@ -2563,7 +2605,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
         {
             u8 c = data[data_offset];
 
-            GSMem::WriteP8(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
+            GSMem::WritePixelP8(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
 
             m_transferState.x++;
             m_transferState.copied_pixels++;
@@ -2590,7 +2632,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
         {
             u8 c = data[data_offset];
 
-            GSMem::WriteP8H(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
+            GSMem::WritePixelP8H(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
 
             m_transferState.x++;
             m_transferState.copied_pixels++;
@@ -2617,8 +2659,8 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
             u8 c0 = data[data_offset] & 0xF;
             u8 c1 = (data[data_offset] >> 4) & 0xF;
 
-            GSMem::WriteP4(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c0);
-            GSMem::WriteP4(m_vram, dbp, dbw, m_transferState.x + 1, m_transferState.y, c1);
+            GSMem::WritePixelP4(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c0);
+            GSMem::WritePixelP4(m_vram, dbp, dbw, m_transferState.x + 1, m_transferState.y, c1);
 
             m_transferState.x += 2;
             m_transferState.copied_pixels += 2;
@@ -2645,8 +2687,8 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
             u8 c0 = data[data_offset] & 0xF;
             u8 c1 = (data[data_offset] >> 4) & 0xF;
 
-            GSMem::WriteP4HL(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c0);
-            GSMem::WriteP4HL(m_vram, dbp, dbw, m_transferState.x + 1, m_transferState.y, c1);
+            GSMem::WritePixelP4HL(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c0);
+            GSMem::WritePixelP4HL(m_vram, dbp, dbw, m_transferState.x + 1, m_transferState.y, c1);
 
             m_transferState.x += 2;
             m_transferState.copied_pixels += 2;
@@ -2673,8 +2715,8 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
             u8 c0 = data[data_offset] & 0xF;
             u8 c1 = (data[data_offset] >> 4) & 0xF;
 
-            GSMem::WriteP4HH(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c0);
-            GSMem::WriteP4HH(m_vram, dbp, dbw, m_transferState.x + 1, m_transferState.y, c1);
+            GSMem::WritePixelP4HH(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c0);
+            GSMem::WritePixelP4HH(m_vram, dbp, dbw, m_transferState.x + 1, m_transferState.y, c1);
 
             m_transferState.x += 2;
             m_transferState.copied_pixels += 2;

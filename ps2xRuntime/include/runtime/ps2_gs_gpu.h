@@ -460,21 +460,27 @@ private:
 
     GSRasterizer m_rasterizer;
 
-    using WriteVramFunc = std::function<void(u8*, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t)>;
-    using ReadVramFunc = std::function<u32(u8*, u32, u32, u32, u32)>;
+    using WritePixelFunc = std::function<void(u8*, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t)>;
+    using ReadPixelFunc = std::function<u32(u8*, u32, u32, u32, u32)>;
+    using PixelAddressFunction = std::function<u32(u32, u32, u32, u32)>;
+    using ReadAddressFunction = std::function<u32(u8*, u32)>;
+    using WriteAddressFunction = std::function<void(u8*, u32, u32)>;
 
-    std::array<ReadVramFunc, 0x3F> m_read_vram_funcs{ };
-    std::array<WriteVramFunc, 0x3F> m_write_vram_funcs{ };
+    std::array<ReadPixelFunc, 0x3F> m_read_pixel_funcs{ };
+    std::array<WritePixelFunc, 0x3F> m_write_pixel_funcs{ };
+    std::array<PixelAddressFunction, 0x3F> m_pixel_address_funcs{ };
+    std::array<ReadAddressFunction, 0x3F> m_read_address_funcs{ };
+    std::array<WriteAddressFunction, 0x3F> m_write_address_funcs{ };
 };
 
 inline u32 GS::ReadVram(u32 psm, u32 base, u32 bw, u32 x, u32 y) const
 {
-    return m_read_vram_funcs[psm & 0x3F](m_vram, base, bw, x, y);
+    return m_read_pixel_funcs[psm & 0x3F](m_vram, base, bw, x, y);
 }
 
 inline void GS::WriteVram(u32 psm, u32 base, u32 bw, u32 x, u32 y, u32 value)
 {
-    m_write_vram_funcs[psm & 0x3F](m_vram, base, bw, x, y, value);
+    m_write_pixel_funcs[psm & 0x3F](m_vram, base, bw, x, y, value);
 }
 
 #endif

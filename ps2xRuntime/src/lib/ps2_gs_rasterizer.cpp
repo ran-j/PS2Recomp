@@ -569,13 +569,13 @@ uint32_t GSRasterizer::lookupCLUT(GS *gs,
     switch (cpsm)
     {
     case GS_PSM_CT32:
-        return applyTexa(gs->m_texa, cpsm, GSMem::ReadCT32(gs->m_vram, cbp, clutWidth, clutX, clutY));
+        return applyTexa(gs->m_texa, cpsm, GSMem::ReadPixelCT32(gs->m_vram, cbp, clutWidth, clutX, clutY));
     case GS_PSM_CT24:
-        return applyTexa(gs->m_texa, cpsm, GSMem::ReadCT24(gs->m_vram, cbp, clutWidth, clutX, clutY));
+        return applyTexa(gs->m_texa, cpsm, GSMem::ReadPixelCT24(gs->m_vram, cbp, clutWidth, clutX, clutY));
     case GS_PSM_CT16:
-        return applyTexa(gs->m_texa, cpsm, Rgba5551ToRgba8888(GSMem::ReadCT16(gs->m_vram, cbp, clutWidth, clutX, clutY)));
+        return applyTexa(gs->m_texa, cpsm, Rgba5551ToRgba8888(GSMem::ReadPixelCT16(gs->m_vram, cbp, clutWidth, clutX, clutY)));
     case GS_PSM_CT16S:
-        return applyTexa(gs->m_texa, cpsm, Rgba5551ToRgba8888(GSMem::ReadCT16S(gs->m_vram, cbp, clutWidth, clutX, clutY)));
+        return applyTexa(gs->m_texa, cpsm, Rgba5551ToRgba8888(GSMem::ReadPixelCT16S(gs->m_vram, cbp, clutWidth, clutX, clutY)));
     default:
         break;
     }

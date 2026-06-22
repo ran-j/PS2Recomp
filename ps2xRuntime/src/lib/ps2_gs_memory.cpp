@@ -222,143 +222,355 @@ namespace GSMem
         PixelStorageTraits<P4>::InitPageLookupTable(PageTableP4, BlockTableP4, ColumnTable4);
     }
 
-    void WriteCT32(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    u32 LookupPixelAddressCT32(u32 bp, u32 bw, u32 x, u32 y)
     {
-        PixelStorageTraits<C32>::Write(PageTableC32, data, bp, bw, x, y, value);
+        return PixelStorageTraits<C32>::Address(PageTableC32, bp, bw, x, y);
     }
 
-    void WriteCT24(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    u32 LookupPixelAddressCT16(u32 bp, u32 bw, u32 x, u32 y)
     {
-        PixelStorageTraits<C24>::Write(PageTableC32, data, bp, bw, x, y, value);
+        return PixelStorageTraits<C16>::Address(PageTableC16, bp, bw, x, y);
     }
 
-    void WriteZ32(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    u32 LookupPixelAddressCT16S(u32 bp, u32 bw, u32 x, u32 y)
     {
-        PixelStorageTraits<Z32>::Write(PageTableZ32, data, bp, bw, x, y, value);
+        return PixelStorageTraits<C16S>::Address(PageTableC16S, bp, bw, x, y);
     }
 
-    void WriteZ24(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    u32 LookupPixelAddressZ32(u32 bp, u32 bw, u32 x, u32 y)
     {
-        PixelStorageTraits<Z24>::Write(PageTableZ32, data, bp, bw, x, y, value);
+        return PixelStorageTraits<Z32>::Address(PageTableZ32, bp, bw, x, y);
     }
 
-    void WriteCT16(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    u32 LookupPixelAddressZ16(u32 bp, u32 bw, u32 x, u32 y)
     {
-        PixelStorageTraits<C16>::Write(PageTableC16, data, bp, bw, x, y, value);
+        return PixelStorageTraits<Z16>::Address(PageTableZ16, bp, bw, x, y);
     }
 
-    void WriteCT16S(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    u32 LookupPixelAddressZ16S(u32 bp, u32 bw, u32 x, u32 y)
     {
-        PixelStorageTraits<C16S>::Write(PageTableC16S, data, bp, bw, x, y, value);
+        return PixelStorageTraits<Z16S>::Address(PageTableZ16S, bp, bw, x, y);
     }
 
-    void WriteZ16(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    u32 LookupPixelAddressP8(u32 bp, u32 bw, u32 x, u32 y)
     {
-        PixelStorageTraits<Z16>::Write(PageTableZ16, data, bp, bw, x, y, value);
+        return PixelStorageTraits<P8>::Address(PageTableP8, bp, bw, x, y);
     }
 
-    void WriteZ16S(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    u32 LookupPixelAddressP4(u32 bp, u32 bw, u32 x, u32 y)
     {
-        PixelStorageTraits<Z16S>::Write(PageTableZ16S, data, bp, bw, x, y, value);
+        return PixelStorageTraits<P4>::Address(PageTableP4, bp, bw, x, y);
     }
 
-    void WriteP8(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
-    {
-        PixelStorageTraits<P8>::Write(PageTableP8, data, bp, bw, x, y, value);
-    }
-
-    void WriteP8H(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
-    {
-        PixelStorageTraits<P8H>::Write(PageTableC32, data, bp, bw, x, y, value);
-    }
-
-    void WriteP4(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
-    {
-        PixelStorageTraits<P4>::Write(PageTableP4, data, bp, bw, x, y, value);
-    }
-
-    void WriteP4HL(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
-    {
-        PixelStorageTraits<P4HL>::Write(PageTableC32, data, bp, bw, x, y, value);
-    }
-
-    void WriteP4HH(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
-    {
-        PixelStorageTraits<P4HH>::Write(PageTableC32, data, bp, bw, x, y, value);
-    }
-
-    void WriteNull(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
-    {
-    }
-
-    u32 ReadCT32(u8* data, u32 bp, u32 bw, u32 x, u32 y)
-    {
-        return PixelStorageTraits<C32>::Read(PageTableC32, data, bp, bw, x, y);
-    }
-
-    u32 ReadZ32(u8* data, u32 bp, u32 bw, u32 x, u32 y)
-    {
-        return PixelStorageTraits<Z32>::Read(PageTableZ32, data, bp, bw, x, y);
-    }
-
-    u32 ReadCT24(u8* data, u32 bp, u32 bw, u32 x, u32 y)
-    {
-        return PixelStorageTraits<C24>::Read(PageTableC32, data, bp, bw, x, y);
-    }
-
-    u32 ReadZ24(u8* data, u32 bp, u32 bw, u32 x, u32 y)
-    {
-        return PixelStorageTraits<Z24>::Read(PageTableZ32, data, bp, bw, x, y);
-    }
-
-    u32 ReadCT16(u8* data, u32 bp, u32 bw, u32 x, u32 y)
-    {
-        return PixelStorageTraits<C16>::Read(PageTableC16, data, bp, bw, x, y);
-    }
-
-    u32 ReadCT16S(u8* data, u32 bp, u32 bw, u32 x, u32 y)
-    {
-        return PixelStorageTraits<C16S>::Read(PageTableC16S, data, bp, bw, x, y);
-    }
-
-    u32 ReadZ16(u8* data, u32 bp, u32 bw, u32 x, u32 y)
-    {
-        return PixelStorageTraits<Z16>::Read(PageTableZ16, data, bp, bw, x, y);
-    }
-
-    u32 ReadZ16S(u8* data, u32 bp, u32 bw, u32 x, u32 y)
-    {
-        return PixelStorageTraits<Z16S>::Read(PageTableZ16S, data, bp, bw, x, y);
-    }
-
-    u32 ReadP8(u8* data, u32 bp, u32 bw, u32 x, u32 y)
-    {
-        return PixelStorageTraits<P8>::Read(PageTableP8, data, bp, bw, x, y);
-    }
-
-    u32 ReadP8H(u8* data, u32 bp, u32 bw, u32 x, u32 y)
-    {
-        return PixelStorageTraits<P8H>::Read(PageTableC32, data, bp, bw, x, y);
-    }
-
-    u32 ReadP4(u8* data, u32 bp, u32 bw, u32 x, u32 y)
-    {
-        return PixelStorageTraits<P4>::Read(PageTableP4, data, bp, bw, x, y);
-    }
-
-    u32 ReadP4HL(u8* data, u32 bp, u32 bw, u32 x, u32 y)
-    {
-        return PixelStorageTraits<P4HL>::Read(PageTableC32, data, bp, bw, x, y);
-    }
-
-    u32 ReadP4HH(u8* data, u32 bp, u32 bw, u32 x, u32 y)
-    {
-        return PixelStorageTraits<P4HH>::Read(PageTableC32, data, bp, bw, x, y);
-    }
-
-    u32 ReadNull(u8* data, u32 bp, u32 bw, u32 x, u32 y)
+    u32 LookupPixelAddressNull(u32 bp, u32 bw, u32 x, u32 y)
     {
         return 0;
+    }
+
+    u32 ReadPixelAddressCT32(u8* data, u32 address)
+    {
+        return static_cast<u32>(PixelStorageTraits<C32>::Read(data, address));
+    }
+
+    u32 ReadPixelAddressCT24(u8* data, u32 address)
+    {
+        return static_cast<u32>(PixelStorageTraits<C24>::Read(data, address));
+    }
+
+    u32 ReadPixelAddressCT16(u8* data, u32 address)
+    {
+        return static_cast<u32>(PixelStorageTraits<C16>::Read(data, address));
+    }
+
+    u32 ReadPixelAddressCT16S(u8* data, u32 address)
+    {
+        return static_cast<u32>(PixelStorageTraits<C16S>::Read(data, address));
+    }
+
+    u32 ReadPixelAddressZ32(u8* data, u32 address)
+    {
+        return static_cast<u32>(PixelStorageTraits<Z32>::Read(data, address));
+    }
+
+    u32 ReadPixelAddressZ24(u8* data, u32 address)
+    {
+        return static_cast<u32>(PixelStorageTraits<Z24>::Read(data, address));
+    }
+
+    u32 ReadPixelAddressZ16(u8* data, u32 address)
+    {
+        return static_cast<u32>(PixelStorageTraits<Z16>::Read(data, address));
+    }
+
+    u32 ReadPixelAddressZ16S(u8* data, u32 address)
+    {
+        return static_cast<u32>(PixelStorageTraits<Z16S>::Read(data, address));
+    }
+
+    u32 ReadPixelAddressP8(u8* data, u32 address)
+    {
+        return static_cast<u32>(PixelStorageTraits<P8>::Read(data, address));
+    }
+
+    u32 ReadPixelAddressP8H(u8* data, u32 address)
+    {
+        return static_cast<u32>(PixelStorageTraits<P8H>::Read(data, address));
+    }
+
+    u32 ReadPixelAddressP4(u8* data, u32 address)
+    {
+        return static_cast<u32>(PixelStorageTraits<P4>::Read(data, address));
+    }
+
+    u32 ReadPixelAddressP4HH(u8* data, u32 address)
+    {
+        return static_cast<u32>(PixelStorageTraits<P4HH>::Read(data, address));
+    }
+
+    u32 ReadPixelAddressP4HL(u8* data, u32 address)
+    {
+        return static_cast<u32>(PixelStorageTraits<P4HL>::Read(data, address));
+    }
+
+    u32 ReadPixelAddressNull(u8* data, u32 address)
+    {
+        return static_cast<u32>(0);
+    }
+
+    void WritePixelAddressCT32(u8* data, u32 address, u32 value)
+    {
+        using Traits = PixelStorageTraits<C32>;
+
+        Traits::Write(data, address, static_cast<Traits::PackedT>(value));
+    }
+
+    void WritePixelAddressCT24(u8* data, u32 address, u32 value)
+    {
+        using Traits = PixelStorageTraits<C24>;
+
+        Traits::Write(data, address, static_cast<Traits::PackedT>(value));
+    }
+
+    void WritePixelAddressCT16(u8* data, u32 address, u32 value)
+    {
+        using Traits = PixelStorageTraits<C16>;
+
+        Traits::Write(data, address, static_cast<Traits::PackedT>(value));
+    }
+
+    void WritePixelAddressCT16S(u8* data, u32 address, u32 value)
+    {
+        using Traits = PixelStorageTraits<C16S>;
+
+        Traits::Write(data, address, static_cast<Traits::PackedT>(value));
+    }
+
+    void WritePixelAddressZ32(u8* data, u32 address, u32 value)
+    {
+        using Traits = PixelStorageTraits<Z32>;
+
+        Traits::Write(data, address, static_cast<Traits::PackedT>(value));
+    }
+
+    void WritePixelAddressZ24(u8* data, u32 address, u32 value)
+    {
+        using Traits = PixelStorageTraits<Z24>;
+
+        Traits::Write(data, address, static_cast<Traits::PackedT>(value));
+    }
+
+    void WritePixelAddressZ16(u8* data, u32 address, u32 value)
+    {
+        using Traits = PixelStorageTraits<Z16>;
+
+        Traits::Write(data, address, static_cast<Traits::PackedT>(value));
+    }
+
+    void WritePixelAddressZ16S(u8* data, u32 address, u32 value)
+    {
+        using Traits = PixelStorageTraits<Z16S>;
+
+        Traits::Write(data, address, static_cast<Traits::PackedT>(value));
+    }
+
+    void WritePixelAddressP8(u8* data, u32 address, u32 value)
+    {
+        using Traits = PixelStorageTraits<P8>;
+
+        Traits::Write(data, address, static_cast<Traits::PackedT>(value));
+    }
+
+    void WritePixelAddressP8H(u8* data, u32 address, u32 value)
+    {
+        using Traits = PixelStorageTraits<P8H>;
+
+        Traits::Write(data, address, static_cast<Traits::PackedT>(value));
+    }
+
+    void WritePixelAddressP4(u8* data, u32 address, u32 value)
+    {
+        using Traits = PixelStorageTraits<P4>;
+
+        Traits::Write(data, address, static_cast<Traits::PackedT>(value));
+    }
+
+    void WritePixelAddressP4HH(u8* data, u32 address, u32 value)
+    {
+        using Traits = PixelStorageTraits<P4HH>;
+
+        Traits::Write(data, address, static_cast<Traits::PackedT>(value));
+    }
+
+    void WritePixelAddressP4HL(u8* data, u32 address, u32 value)
+    {
+        using Traits = PixelStorageTraits<P4HL>;
+
+        Traits::Write(data, address, static_cast<Traits::PackedT>(value));
+    }
+
+    void WritePixelAddressNull(u8* data, u32 address, u32 value)
+    {
+
+    }
+
+    u32 ReadPixelCT32(u8* data, u32 bp, u32 bw, u32 x, u32 y)
+    {
+        return ReadPixelAddressCT32(data, LookupPixelAddressCT32(bp, bw, x, y));
+    }
+
+    u32 ReadPixelCT24(u8* data, u32 bp, u32 bw, u32 x, u32 y)
+    {
+        return ReadPixelAddressCT24(data, LookupPixelAddressCT32(bp, bw, x, y));
+    }
+
+    u32 ReadPixelCT16(u8* data, u32 bp, u32 bw, u32 x, u32 y)
+    {
+        return ReadPixelAddressCT16(data, LookupPixelAddressCT16(bp, bw, x, y));
+    }
+
+    u32 ReadPixelCT16S(u8* data, u32 bp, u32 bw, u32 x, u32 y)
+    {
+        return ReadPixelAddressCT16S(data, LookupPixelAddressCT16S(bp, bw, x, y));
+    }
+
+    u32 ReadPixelZ32(u8* data, u32 bp, u32 bw, u32 x, u32 y)
+    {
+        return ReadPixelAddressZ32(data, LookupPixelAddressZ32(bp, bw, x, y));
+    }
+
+    u32 ReadPixelZ24(u8* data, u32 bp, u32 bw, u32 x, u32 y)
+    {
+        return ReadPixelAddressZ24(data, LookupPixelAddressZ32(bp, bw, x, y));
+    }
+
+    u32 ReadPixelZ16(u8* data, u32 bp, u32 bw, u32 x, u32 y)
+    {
+        return ReadPixelAddressZ16(data, LookupPixelAddressZ16(bp, bw, x, y));
+    }
+
+    u32 ReadPixelZ16S(u8* data, u32 bp, u32 bw, u32 x, u32 y)
+    {
+        return ReadPixelAddressZ16S(data, LookupPixelAddressZ16S(bp, bw, x, y));
+    }
+
+    u32 ReadPixelP8(u8* data, u32 bp, u32 bw, u32 x, u32 y)
+    {
+        return ReadPixelAddressP8(data, LookupPixelAddressP8(bp, bw, x, y));
+    }
+
+    u32 ReadPixelP8H(u8* data, u32 bp, u32 bw, u32 x, u32 y)
+    {
+        return ReadPixelAddressP8H(data, LookupPixelAddressCT32(bp, bw, x, y));
+    }
+
+    u32 ReadPixelP4(u8* data, u32 bp, u32 bw, u32 x, u32 y)
+    {
+        return ReadPixelAddressP4(data, LookupPixelAddressP4(bp, bw, x, y));
+    }
+
+    u32 ReadPixelP4HL(u8* data, u32 bp, u32 bw, u32 x, u32 y)
+    {
+        return ReadPixelAddressP4HL(data, LookupPixelAddressCT32(bp, bw, x, y));
+    }
+
+    u32 ReadPixelP4HH(u8* data, u32 bp, u32 bw, u32 x, u32 y)
+    {
+        return ReadPixelAddressP4HH(data, LookupPixelAddressCT32(bp, bw, x, y));
+    }
+
+    u32 ReadPixelNull(u8* data, u32 bp, u32 bw, u32 x, u32 y)
+    {
+        return 0;
+    }
+
+    void WritePixelCT32(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    {
+        WritePixelAddressCT32(data, LookupPixelAddressCT32(bp, bw, x, y), value);
+    }
+
+    void WritePixelCT24(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    {
+        WritePixelAddressCT24(data, LookupPixelAddressCT32(bp, bw, x, y), value);
+    }
+
+    void WritePixelCT16(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    {
+        WritePixelAddressCT16(data, LookupPixelAddressCT16(bp, bw, x, y), value);
+    }
+
+    void WritePixelCT16S(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    {
+        WritePixelAddressCT16S(data, LookupPixelAddressCT16S(bp, bw, x, y), value);
+    }
+
+    void WritePixelZ32(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    {
+        WritePixelAddressZ32(data, LookupPixelAddressZ32(bp, bw, x, y), value);
+    }
+
+    void WritePixelZ24(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    {
+        WritePixelAddressZ24(data, LookupPixelAddressZ32(bp, bw, x, y), value);
+    }
+
+    void WritePixelZ16(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    {
+        WritePixelAddressZ16(data, LookupPixelAddressZ16(bp, bw, x, y), value);
+    }
+
+    void WritePixelZ16S(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    {
+        WritePixelAddressZ16S(data, LookupPixelAddressZ16S(bp, bw, x, y), value);
+    }
+
+    void WritePixelP8(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    {
+        WritePixelAddressP8(data, LookupPixelAddressP8(bp, bw, x, y), value);
+    }
+
+    void WritePixelP8H(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    {
+        WritePixelAddressP8H(data, LookupPixelAddressCT32(bp, bw, x, y), value);
+    }
+
+    void WritePixelP4(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    {
+        WritePixelAddressP4(data, LookupPixelAddressP4(bp, bw, x, y), value);
+    }
+
+    void WritePixelP4HL(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    {
+        WritePixelAddressP4HL(data, LookupPixelAddressCT32(bp, bw, x, y), value);
+    }
+
+    void WritePixelP4HH(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    {
+        WritePixelAddressP4HH(data, LookupPixelAddressCT32(bp, bw, x, y), value);
+    }
+
+    void WritePixelNull(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
+    {
+
     }
 }
 
