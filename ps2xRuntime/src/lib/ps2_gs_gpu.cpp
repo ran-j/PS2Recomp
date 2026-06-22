@@ -1100,8 +1100,8 @@ void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
         break;
     }
     case 0x03:
-        m_curU = static_cast<uint16_t>(lo & 0xFFFFu);
-        m_curV = static_cast<uint16_t>((lo >> 32) & 0xFFFFu);
+        m_curU = static_cast<uint16_t>(lo & 0x3FFFu);
+        m_curV = static_cast<uint16_t>((lo >> 32) & 0x3FFFu);
         break;
     case 0x04:
     {
@@ -1530,7 +1530,7 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
     case GS_REG_ZBUF_2:
     {
         int ci = (regAddr == GS_REG_ZBUF_2) ? 1 : 0;
-        m_ctx[ci].zbuf.zbp = value & 0xFF;
+        m_ctx[ci].zbuf.zbp = value & 0x1FF;
         m_ctx[ci].zbuf.psm = ((value >> 24) & 0xF) | 0x30;
         m_ctx[ci].zbuf.zmask = (value >> 32) & 1;
         break;
@@ -2330,7 +2330,7 @@ void GS::performLocalToHostToBuffer()
             break;
         case 16:
             m_localToHostBuffer.push_back(v & 0xFF);
-            m_localToHostBuffer.push_back((v >> 16) & 0xFF);
+            m_localToHostBuffer.push_back((v >> 8) & 0xFF);
             break;
         case 8:
             m_localToHostBuffer.push_back(v);

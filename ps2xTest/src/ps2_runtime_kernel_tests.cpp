@@ -53,7 +53,7 @@ namespace
 
     constexpr uint32_t K_EVENT_WAIT_READY_ADDR = 0x1800u;
     constexpr uint32_t K_EVENT_WAIT_GATE_ADDR = 0x1804u;
-    constexpr uint32_t K_SEMA_WAIT_READY_ADDR = 0x1810u;
+    constexpr uint32_t K_TERMINATE_SEMA_WAIT_READY_ADDR = 0x1810u;
 
     struct EeThreadStatus
     {
@@ -223,7 +223,7 @@ namespace
             return;
         }
 
-        writeGuestU32(rdram, K_SEMA_WAIT_READY_ADDR, 1u);
+        writeGuestU32(rdram, K_TERMINATE_SEMA_WAIT_READY_ADDR, 1u);
         WaitSema(rdram, ctx, runtime);
         ctx->pc = 0u;
     }
@@ -920,7 +920,7 @@ void register_ps2_runtime_kernel_tests()
                 0u
             };
 
-            writeGuestU32(env.rdram.data(), K_SEMA_WAIT_READY_ADDR, 0u);
+            writeGuestU32(env.rdram.data(), K_TERMINATE_SEMA_WAIT_READY_ADDR, 0u);
             writeGuestWords(env.rdram.data(), K_PARAM_ADDR, threadParam, std::size(threadParam));
             setRegU32(env.ctx, 4, K_PARAM_ADDR);
             CreateThread(env.rdram.data(), &env.ctx, &env.runtime);
@@ -937,7 +937,7 @@ void register_ps2_runtime_kernel_tests()
 
             const bool waiting = waitUntil([&]()
             {
-                if (readGuestU32(env.rdram.data(), K_SEMA_WAIT_READY_ADDR) != 1u)
+                if (readGuestU32(env.rdram.data(), K_TERMINATE_SEMA_WAIT_READY_ADDR) != 1u)
                 {
                     return false;
                 }
@@ -983,7 +983,7 @@ void register_ps2_runtime_kernel_tests()
 
             setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
             DeleteSema(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_OK, "DeleteSema should clean up the waiter semaphore");
+            t.Equals(getRegS32(env.ctx, 2), sid, "DeleteSema should return sid while cleaning up the waiter semaphore");
         });
 
         tc.Run("setup heap and allocator primitives track end-of-heap", [](TestCase &t)
