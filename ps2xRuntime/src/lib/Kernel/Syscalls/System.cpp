@@ -45,7 +45,10 @@ namespace ps2_syscalls
             imr = runtime->memory().gs().imr;
         }
 
-        RUNTIME_LOG("PS2 GsGetIMR: Returning IMR=0x" << std::hex << imr << std::dec);
+        RUNTIME_LOG("PS2 GsGetIMR: Returning IMR=0x" << std::hex << imr
+                                                     << " pc=0x" << ctx->pc
+                                                     << " ra=0x" << getRegU32(ctx, 31)
+                                                     << std::dec << std::endl);
 
         setReturnU64(ctx, imr); // Return in $v0/$v1
     }
@@ -57,14 +60,20 @@ namespace ps2_syscalls
 
     void GsPutIMR(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        uint64_t newImr = getRegU32(ctx, 4) | ((uint64_t)getRegU32(ctx, 5) << 32); // $a0 = lower 32 bits, $a1 = upper 32 bits
+        const uint64_t newImr = GPR_U64(ctx, 4);
         uint64_t oldImr = 0;
         if (runtime)
         {
             oldImr = runtime->memory().gs().imr;
             runtime->memory().gs().imr = newImr;
         }
-        RUNTIME_LOG("PS2 GsPutIMR: Setting IMR=0x" << std::hex << newImr << std::dec);
+        RUNTIME_LOG("PS2 GsPutIMR: " << " new=0x" << newImr
+                                     << " a0_64=0x" << GPR_U64(ctx, 4)
+                                     << " a0_32=0x" << getRegU32(ctx, 4)
+                                     << " a1_32=0x" << getRegU32(ctx, 5)
+                                     << " pc=0x" << ctx->pc
+                                     << " ra=0x" << getRegU32(ctx, 31)
+                                     << std::dec << std::endl);
         setReturnU64(ctx, oldImr);
     }
 
@@ -689,7 +698,7 @@ namespace ps2_syscalls
     void SetupHeap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const uint32_t heapBaseRaw = getRegU32(ctx, 4); // $a0
-        const uint32_t heapSize = getRegU32(ctx, 5); // $a1 (optional size)
+        const uint32_t heapSize = getRegU32(ctx, 5);    // $a1 (optional size)
 
         const uint32_t heapBase = (heapBaseRaw + 0xFu) & ~0xFu;
 
@@ -737,8 +746,8 @@ namespace ps2_syscalls
         static constexpr uint32_t kDefaultGuestHeapEnd = 0x01F00000u;
 
         const uint32_t ret = runtime
-            ? runtime->guestHeapLimit()
-            : kDefaultGuestHeapEnd;
+                                 ? runtime->guestHeapLimit()
+                                 : kDefaultGuestHeapEnd;
 
         setReturnU32(ctx, ret);
     }
