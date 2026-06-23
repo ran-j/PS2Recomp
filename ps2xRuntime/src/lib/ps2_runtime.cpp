@@ -621,6 +621,23 @@ PS2Runtime::PS2Runtime()
     m_asyncCallbackStackTop = PS2_RAM_SIZE;
 }
 
+void PS2Runtime::setDebugUiCallbacks(DebugUiCallback initCallback,
+                                      DebugUiCallback drawCallback,
+                                      DebugUiCallback shutdownCallback,
+                                      void *userData)
+{
+    if (m_debugUiInitialized && m_debugUiShutdownCallback)
+    {
+        m_debugUiShutdownCallback(*this, m_debugUiUserData);
+        m_debugUiInitialized = false;
+    }
+
+    m_debugUiInitCallback = initCallback;
+    m_debugUiDrawCallback = drawCallback;
+    m_debugUiShutdownCallback = shutdownCallback;
+    m_debugUiUserData = userData;
+}
+
 PS2Runtime::~PS2Runtime()
 {
     try
@@ -637,6 +654,12 @@ PS2Runtime::~PS2Runtime()
             m_audioBackend.setAudioReady(false);
         }
 #endif
+        if (m_debugUiInitialized && m_debugUiShutdownCallback)
+        {
+            m_debugUiShutdownCallback(*this, m_debugUiUserData);
+            m_debugUiInitialized = false;
+        }
+
         if (IsWindowReady())
         {
             CloseWindow();
@@ -718,6 +741,11 @@ bool PS2Runtime::initialize(const char *title)
         m_audioBackend.setAudioReady(IsAudioDeviceReady());
 #endif
         SetTargetFPS(60);
+        if (m_debugUiInitCallback)
+        {
+            m_debugUiInitCallback(*this, m_debugUiUserData);
+            m_debugUiInitialized = true;
+        }
 
         return true;
     }
@@ -2277,6 +2305,10 @@ void PS2Runtime::run()
             dstWidth,
             dstHeight};
         DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+        if (m_debugUiInitialized && m_debugUiDrawCallback)
+        {
+            m_debugUiDrawCallback(*this, m_debugUiUserData);
+        }
         EndDrawing();
 
         if (WindowShouldClose())
@@ -2338,6 +2370,11 @@ void PS2Runtime::run()
         ps2_syscalls::detachAllGuestHostThreads();
     }
 
+    if (m_debugUiInitialized && m_debugUiShutdownCallback)
+    {
+        m_debugUiShutdownCallback(*this, m_debugUiUserData);
+        m_debugUiInitialized = false;
+    }
     UnloadTexture(frameTex);
     CloseWindow();
 

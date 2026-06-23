@@ -379,6 +379,12 @@ public:
     bool loadELF(const std::string &elfPath);
     void run();
 
+    using DebugUiCallback = void (*)(PS2Runtime &runtime, void *userData);
+    void setDebugUiCallbacks(DebugUiCallback initCallback,
+                             DebugUiCallback drawCallback,
+                             DebugUiCallback shutdownCallback,
+                             void *userData);
+
     using RecompiledFunction = void (*)(uint8_t *, R5900Context *, PS2Runtime *);
 
     class GuestExecutionScope
@@ -575,6 +581,11 @@ private:
 
     std::unordered_map<uint32_t, RecompiledFunction> m_functionTable;
     std::atomic<bool> m_stopRequested{false};
+    DebugUiCallback m_debugUiInitCallback = nullptr;
+    DebugUiCallback m_debugUiDrawCallback = nullptr;
+    DebugUiCallback m_debugUiShutdownCallback = nullptr;
+    void *m_debugUiUserData = nullptr;
+    bool m_debugUiInitialized = false;
 
 public:
     // TODO remove this later
