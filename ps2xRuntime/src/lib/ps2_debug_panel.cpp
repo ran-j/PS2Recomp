@@ -6,6 +6,7 @@
 #include "Kernel/Syscalls/Helpers/State.h"
 #include "Kernel/Stubs/CD.h"
 #include "Kernel/Stubs/MemoryCard.h"
+#include "Kernel/Stubs/Pad.h"
 #include "runtime/ps2_iop.h"
 
 #if defined(PS2X_ENABLE_DEBUG_UI) && !defined(PLATFORM_VITA)
@@ -84,6 +85,78 @@ namespace
         default:
             return "";
         }
+    }
+
+    std::string pressedPadButtons(uint16_t activeLowButtons)
+    {
+        struct ButtonName
+        {
+            uint16_t mask;
+            const char *name;
+        };
+        static constexpr ButtonName buttons[] = {
+            {1u << 0, "Select"},
+            {1u << 1, "L3"},
+            {1u << 2, "R3"},
+            {1u << 3, "Start"},
+            {1u << 4, "Up"},
+            {1u << 5, "Right"},
+            {1u << 6, "Down"},
+            {1u << 7, "Left"},
+            {1u << 8, "L2"},
+            {1u << 9, "R2"},
+            {1u << 10, "L1"},
+            {1u << 11, "R1"},
+            {1u << 12, "Triangle"},
+            {1u << 13, "Circle"},
+            {1u << 14, "Cross"},
+            {1u << 15, "Square"},
+        };
+
+        std::string out;
+        for (const ButtonName &button : buttons)
+        {
+            if ((activeLowButtons & button.mask) == 0u)
+            {
+                if (!out.empty())
+                {
+                    out += ", ";
+                }
+                out += button.name;
+            }
+        }
+        return out.empty() ? std::string("none") : out;
+    }
+
+    std::string rpcDebugFlags(uint32_t flags)
+    {
+        struct FlagName
+        {
+            uint32_t mask;
+            const char *name;
+        };
+        static constexpr FlagName names[] = {
+            {kSifRpcDebugFlagNowait, "nowait"},
+            {kSifRpcDebugFlagHandledByHle, "hle"},
+            {kSifRpcDebugFlagCallback, "callback"},
+            {kSifRpcDebugFlagMissingClient, "bad-client"},
+            {kSifRpcDebugFlagServerDispatch, "server"},
+            {kSifRpcDebugFlagDtx, "dtx"},
+        };
+
+        std::string out;
+        for (const FlagName &name : names)
+        {
+            if ((flags & name.mask) != 0u)
+            {
+                if (!out.empty())
+                {
+                    out += ",";
+                }
+                out += name.name;
+            }
+        }
+        return out;
     }
 
     template <typename T>
@@ -794,6 +867,224 @@ namespace
                     dtxSjrmtCount);
     }
 
+    void drawRpcHistoryTab()
+    {
+        std::vector<SifRpcDebugEvent> events;
+        uint64_t nextSeq = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_rpc_mutex);
+            nextSeq = g_sif_rpc_debug_next_seq;
+            events.reserve(kSifRpcDebugHistoryCount);
+            for (size_t i = 0; i < kSifRpcDebugHistoryCount; ++i)
+            {
+                const SifRpcDebugEvent &event = g_sif_rpc_debug_history[i];
+                if (event.seq != 0u)
+                {
+                    events.push_back(event);
+                }
+            }
+        }
+        std::sort(events.begin(), events.end(), [](const SifRpcDebugEvent &a, const SifRpcDebugEvent &b)
+                  { return a.seq > b.seq; });
+
+        ImGui::Text("RPC events: %zu captured, nextSeq=%llu", events.size(), static_cast<unsigned long long>(nextSeq));
+        ImGui::TextDisabled("Ring buffer fed by SifInitRpc/SifBindRpc/SifRegisterRpc/SifCallRpc.");
+
+        static bool onlyCalls = false;
+        static bool hideBindNoise = false;
+        ImGui::Checkbox("Only CallRpc", &onlyCalls);
+        ImGui::SameLine();
+        ImGui::Checkbox("Hide bind/register/init", &hideBindNoise);
+
+        if (ImGui::BeginTable("rpc_history", 20,
+                              ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable |
+                                  ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp,
+                              ImVec2(0, 360)))
+        {
+            ImGui::TableSetupColumn("Seq");
+            ImGui::TableSetupColumn("Op");
+            ImGui::TableSetupColumn("TID");
+            ImGui::TableSetupColumn("PC");
+            ImGui::TableSetupColumn("RA");
+            ImGui::TableSetupColumn("SID");
+            ImGui::TableSetupColumn("Name");
+            ImGui::TableSetupColumn("Rpc#");
+            ImGui::TableSetupColumn("Client");
+            ImGui::TableSetupColumn("Server");
+            ImGui::TableSetupColumn("Send");
+            ImGui::TableSetupColumn("SSize");
+            ImGui::TableSetupColumn("Recv");
+            ImGui::TableSetupColumn("RSize");
+            ImGui::TableSetupColumn("ResultPtr");
+            ImGui::TableSetupColumn("Mode");
+            ImGui::TableSetupColumn("EndFunc");
+            ImGui::TableSetupColumn("EndParam");
+            ImGui::TableSetupColumn("Sema");
+            ImGui::TableSetupColumn("Flags");
+            ImGui::TableHeadersRow();
+
+            for (const SifRpcDebugEvent &event : events)
+            {
+                const char *op = event.op ? event.op : "";
+                if (onlyCalls && std::strcmp(op, "CallRpc") != 0)
+                {
+                    continue;
+                }
+                if (hideBindNoise && std::strcmp(op, "CallRpc") != 0)
+                {
+                    continue;
+                }
+
+                const std::string flags = rpcDebugFlags(event.flags);
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::Text("%llu", static_cast<unsigned long long>(event.seq));
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(op);
+                ImGui::TableNextColumn();
+                ImGui::Text("%u", event.threadId);
+                ImGui::TableNextColumn();
+                ImGui::Text("0x%08X", event.pc);
+                ImGui::TableNextColumn();
+                ImGui::Text("0x%08X", event.ra);
+                ImGui::TableNextColumn();
+                ImGui::Text("0x%08X", event.sid);
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(iopRpcSidName(event.sid));
+                ImGui::TableNextColumn();
+                ImGui::Text("0x%08X", event.rpcNum);
+                ImGui::TableNextColumn();
+                ImGui::Text("0x%08X", event.clientPtr);
+                ImGui::TableNextColumn();
+                ImGui::Text("0x%08X", event.serverPtr);
+                ImGui::TableNextColumn();
+                ImGui::Text("0x%08X", event.sendBuf);
+                ImGui::TableNextColumn();
+                ImGui::Text("%u", event.sendSize);
+                ImGui::TableNextColumn();
+                ImGui::Text("0x%08X", event.recvBuf);
+                ImGui::TableNextColumn();
+                ImGui::Text("%u", event.recvSize);
+                ImGui::TableNextColumn();
+                ImGui::Text("0x%08X", event.resultPtr);
+                ImGui::TableNextColumn();
+                ImGui::Text("0x%08X", event.mode);
+                ImGui::TableNextColumn();
+                ImGui::Text("0x%08X", event.endFunc);
+                ImGui::TableNextColumn();
+                ImGui::Text("0x%08X", event.endParam);
+                ImGui::TableNextColumn();
+                ImGui::Text("0x%08X", event.semaId);
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(flags.c_str());
+            }
+            ImGui::EndTable();
+        }
+    }
+
+    void drawPadBytes(const uint8_t *data, size_t size)
+    {
+        char bytes[3 * 32 + 1]{};
+        const size_t count = std::min<size_t>(size, 32u);
+        for (size_t i = 0; i < count; ++i)
+        {
+            std::snprintf(bytes + (i * 3), sizeof(bytes) - (i * 3), "%02X ", data[i]);
+        }
+        ImGui::TextUnformatted(bytes);
+    }
+
+    void drawPadTab()
+    {
+        const ps2_stubs::PadDebugSnapshot snapshot = ps2_stubs::getPadDebugSnapshot();
+
+        ImGui::SeparatorText("PAD global state");
+        ImGui::Text("override=%u readLogCount=%d", snapshot.overrideEnabled ? 1u : 0u, snapshot.readLogCount);
+        ImGui::SameLine();
+        ImGui::Text("override buttons=0x%04X lx=%u ly=%u rx=%u ry=%u",
+                    snapshot.overrideButtons,
+                    snapshot.overrideLx,
+                    snapshot.overrideLy,
+                    snapshot.overrideRx,
+                    snapshot.overrideRy);
+        ImGui::Text("override pressed: %s", pressedPadButtons(snapshot.overrideButtons).c_str());
+
+        if (ImGui::BeginTable("pad_ports", 15, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable))
+        {
+            ImGui::TableSetupColumn("Port");
+            ImGui::TableSetupColumn("Slot");
+            ImGui::TableSetupColumn("Open");
+            ImGui::TableSetupColumn("Mode");
+            ImGui::TableSetupColumn("Pressure");
+            ImGui::TableSetupColumn("Req");
+            ImGui::TableSetupColumn("DMA");
+            ImGui::TableSetupColumn("Read#");
+            ImGui::TableSetupColumn("ReadAddr");
+            ImGui::TableSetupColumn("Source");
+            ImGui::TableSetupColumn("Buttons raw");
+            ImGui::TableSetupColumn("Pressed");
+            ImGui::TableSetupColumn("LX/LY");
+            ImGui::TableSetupColumn("RX/RY");
+            ImGui::TableSetupColumn("Mask");
+            ImGui::TableHeadersRow();
+
+            for (size_t port = 0; port < ps2_stubs::kPadDebugPortCount; ++port)
+            {
+                for (size_t slot = 0; slot < ps2_stubs::kPadDebugSlotCount; ++slot)
+                {
+                    const ps2_stubs::PadDebugPortSnapshot &row = snapshot.ports[port][slot];
+                    ImGui::TableNextRow();
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%zu", port);
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%zu", slot);
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%u", row.open ? 1u : 0u);
+                    ImGui::TableNextColumn();
+                    ImGui::TextUnformatted(row.analogMode ? "analog" : "digital");
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%u", row.pressureEnabled ? 1u : 0u);
+                    ImGui::TableNextColumn();
+                    ImGui::Text("0x%08X", row.reqState);
+                    ImGui::TableNextColumn();
+                    ImGui::Text("0x%08X", row.dmaAddr);
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%u", row.readCount);
+                    ImGui::TableNextColumn();
+                    ImGui::Text("0x%08X", row.lastReadDataAddr);
+                    ImGui::TableNextColumn();
+                    ImGui::TextUnformatted(row.lastUsedOverride ? "override" : (row.lastUsedBackend ? "backend" : "fallback"));
+                    ImGui::TableNextColumn();
+                    ImGui::Text("0x%04X", row.lastButtons);
+                    ImGui::TableNextColumn();
+                    ImGui::TextUnformatted(pressedPadButtons(row.lastButtons).c_str());
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%u/%u", row.lx, row.ly);
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%u/%u", row.rx, row.ry);
+                    ImGui::TableNextColumn();
+                    ImGui::Text("0x%04X", row.buttonMask);
+                }
+            }
+            ImGui::EndTable();
+        }
+
+        ImGui::SeparatorText("Last scePadRead bytes");
+        for (size_t port = 0; port < ps2_stubs::kPadDebugPortCount; ++port)
+        {
+            for (size_t slot = 0; slot < ps2_stubs::kPadDebugSlotCount; ++slot)
+            {
+                const ps2_stubs::PadDebugPortSnapshot &row = snapshot.ports[port][slot];
+                ImGui::Text("port=%zu slot=%zu ok=%u data:", port, slot, row.lastReadOk ? 1u : 0u);
+                ImGui::SameLine();
+                drawPadBytes(row.lastData, ps2_stubs::kPadDebugDataSize);
+            }
+        }
+
+        ImGui::SeparatorText("PS2 active-low button layout");
+        ImGui::TextUnformatted("byte[2:3] raw is active-low: 0 means pressed, 1 means released.");
+        ImGui::TextUnformatted("bits: Select,L3,R3,Start,Up,Right,Down,Left,L2,R2,L1,R1,Triangle,Circle,Cross,Square");
+    }
+
     void drawGsTab(PS2Runtime &runtime)
     {
         GSRegisters &regs = runtime.memory().gs();
@@ -1169,6 +1460,16 @@ void PS2DebugPanel::draw(PS2Runtime &runtime)
             if (ImGui::BeginTabItem("IOP/SIF"))
             {
                 drawIopTab(runtime);
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("RPC History"))
+            {
+                drawRpcHistoryTab();
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("PAD"))
+            {
+                drawPadTab();
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("File/CD"))

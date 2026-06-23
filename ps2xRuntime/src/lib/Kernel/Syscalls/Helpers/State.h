@@ -1,3 +1,6 @@
+#include <cstddef>
+#include <cstdint>
+
 inline std::unordered_map<int, FILE *> g_fileDescriptors;
 inline int g_nextFd = 3; // Start after stdin, stdout, stderr
 
@@ -341,6 +344,38 @@ struct RpcClientState
     uint32_t sid = 0;
 };
 
+struct SifRpcDebugEvent
+{
+    uint64_t seq = 0;
+    const char *op = "";
+    uint32_t pc = 0;
+    uint32_t ra = 0;
+    uint32_t threadId = 0;
+    uint32_t sid = 0;
+    uint32_t rpcNum = 0;
+    uint32_t clientPtr = 0;
+    uint32_t serverPtr = 0;
+    uint32_t sendBuf = 0;
+    uint32_t sendSize = 0;
+    uint32_t recvBuf = 0;
+    uint32_t recvSize = 0;
+    uint32_t resultPtr = 0;
+    uint32_t mode = 0;
+    uint32_t endFunc = 0;
+    uint32_t endParam = 0;
+    uint32_t semaId = 0;
+    uint32_t flags = 0;
+    int32_t result = 0;
+};
+
+static constexpr size_t kSifRpcDebugHistoryCount = 256u;
+static constexpr uint32_t kSifRpcDebugFlagNowait = 1u << 0;
+static constexpr uint32_t kSifRpcDebugFlagHandledByHle = 1u << 1;
+static constexpr uint32_t kSifRpcDebugFlagCallback = 1u << 2;
+static constexpr uint32_t kSifRpcDebugFlagMissingClient = 1u << 3;
+static constexpr uint32_t kSifRpcDebugFlagServerDispatch = 1u << 4;
+static constexpr uint32_t kSifRpcDebugFlagDtx = 1u << 5;
+
 struct SoundDriverRpcState
 {
     uintptr_t ownerRuntime = 0;
@@ -356,6 +391,8 @@ struct SoundDriverRpcState
 
 inline std::unordered_map<uint32_t, RpcServerState> g_rpc_servers;
 inline std::unordered_map<uint32_t, RpcClientState> g_rpc_clients;
+inline SifRpcDebugEvent g_sif_rpc_debug_history[kSifRpcDebugHistoryCount]{};
+inline uint64_t g_sif_rpc_debug_next_seq = 0;
 inline std::mutex g_rpc_mutex;
 inline std::recursive_mutex g_sif_call_rpc_mutex;
 inline bool g_rpc_initialized = false;
