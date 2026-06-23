@@ -65,6 +65,45 @@ else()
         GIT_PROGRESS TRUE
     )
     FetchContent_MakeAvailable(raylib)
+
+    FetchContent_Declare(
+        imgui
+        GIT_REPOSITORY https://github.com/ocornut/imgui.git
+        GIT_TAG        "docking"
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_GetProperties(imgui)
+    if(NOT imgui_POPULATED)
+        FetchContent_Populate(imgui)
+    endif()
+    set(PS2X_IMGUI_SOURCE_DIR "${imgui_SOURCE_DIR}")
+
+    add_library(imgui STATIC
+        "${PS2X_IMGUI_SOURCE_DIR}/imgui.cpp"
+        "${PS2X_IMGUI_SOURCE_DIR}/imgui_draw.cpp"
+        "${PS2X_IMGUI_SOURCE_DIR}/imgui_tables.cpp"
+        "${PS2X_IMGUI_SOURCE_DIR}/imgui_widgets.cpp"
+        "${PS2X_IMGUI_SOURCE_DIR}/imgui_demo.cpp"
+    )
+    target_include_directories(imgui PUBLIC "${PS2X_IMGUI_SOURCE_DIR}")
+
+    FetchContent_Declare(
+        rlImGui
+        GIT_REPOSITORY https://github.com/raylib-extras/rlImGui.git
+        GIT_TAG        "Raylib_5_5"
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_GetProperties(rlImGui)
+    if(NOT rlimgui_POPULATED)
+        FetchContent_Populate(rlImGui)
+    endif()
+    set(PS2X_RLIMGUI_SOURCE_DIR "${rlimgui_SOURCE_DIR}")
+
+    add_library(rlImGui STATIC
+        "${PS2X_RLIMGUI_SOURCE_DIR}/rlImGui.cpp"
+    )
+    target_include_directories(rlImGui PUBLIC "${PS2X_RLIMGUI_SOURCE_DIR}")
+    target_link_libraries(rlImGui PUBLIC raylib imgui)
 endif()
 
 add_library(ps2_host_backend INTERFACE)
@@ -371,6 +410,14 @@ target_link_libraries(ps2EntryRunner
     PRIVATE
     ps2_runtime
 )
+
+if(NOT PS2X_IS_VITA)
+    target_sources(ps2EntryRunner PRIVATE
+        src/lib/ps2_debug_panel.cpp
+    )
+    target_link_libraries(ps2EntryRunner PRIVATE rlImGui imgui)
+    target_compile_definitions(ps2EntryRunner PRIVATE PS2X_ENABLE_DEBUG_UI=1)
+endif()
 
 ps2x_stage_ffmpeg_runtime_dlls(ps2EntryRunner)
 
