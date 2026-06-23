@@ -2,8 +2,41 @@
 
 #include "ps2_stubs.h"
 
+#include <array>
+#include <cstdint>
+#include <filesystem>
+#include <string>
+#include <vector>
+
 namespace ps2_stubs
 {
+
+    struct MemoryCardDebugOpenFile
+    {
+        int32_t fd = 0;
+        int32_t port = 0;
+        std::filesystem::path hostPath;
+    };
+
+    struct MemoryCardDebugPort
+    {
+        int32_t port = 0;
+        std::string currentDir;
+        bool formatted = false;
+        std::filesystem::path rootPath;
+    };
+
+    struct MemoryCardDebugSnapshot
+    {
+        int32_t nextFd = 0;
+        int32_t lastCmd = 0;
+        int32_t lastResult = 0;
+        int32_t cvFileCursor = 0;
+        std::array<MemoryCardDebugPort, 2> ports{};
+        std::vector<MemoryCardDebugOpenFile> openFiles;
+    };
+
+    MemoryCardDebugSnapshot getMemoryCardDebugSnapshot();
     void sceMcChangeThreadPriority(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceMcChdir(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceMcClose(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);

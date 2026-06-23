@@ -456,6 +456,40 @@ const uint8_t *GS::lockDisplaySnapshot(uint32_t &outSize)
     return m_displaySnapshot.data();
 }
 
+GSDebugSnapshot GS::getDebugSnapshot() const
+{
+    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+
+    GSDebugSnapshot snapshot{};
+    snapshot.ctx[0] = m_ctx[0];
+    snapshot.ctx[1] = m_ctx[1];
+    snapshot.prim = m_prim;
+    snapshot.texa = m_texa;
+    snapshot.texclut = m_texclut;
+    snapshot.bitbltbuf = m_bitbltbuf;
+    snapshot.trxpos = m_trxpos;
+    snapshot.trxreg = m_trxreg;
+    snapshot.trxdir = m_trxdir;
+    snapshot.transferX = m_transferState.x;
+    snapshot.transferY = m_transferState.y;
+    snapshot.transferTotalPixels = m_transferState.total_pixels;
+    snapshot.transferCopiedPixels = m_transferState.copied_pixels;
+    snapshot.lastDisplayBaseBytes = m_lastDisplayBaseBytes;
+    snapshot.preferredDisplaySourceFrame = m_preferredDisplaySourceFrame;
+    snapshot.preferredDisplayDestFbp = m_preferredDisplayDestFbp;
+    snapshot.hasPreferredDisplaySource = m_hasPreferredDisplaySource;
+    snapshot.hostPresentationWidth = m_hostPresentationWidth;
+    snapshot.hostPresentationHeight = m_hostPresentationHeight;
+    snapshot.hostPresentationDisplayFbp = m_hostPresentationDisplayFbp;
+    snapshot.hostPresentationSourceFbp = m_hostPresentationSourceFbp;
+    snapshot.hostPresentationUsedPreferred = m_hostPresentationUsedPreferred;
+    snapshot.hasHostPresentationFrame = m_hasHostPresentationFrame;
+    snapshot.localToHostPendingBytes = (m_localToHostReadPos < m_localToHostBuffer.size())
+                                           ? (m_localToHostBuffer.size() - m_localToHostReadPos)
+                                           : 0u;
+    return snapshot;
+}
+
 bool GS::getPreferredDisplaySource(GSFrameReg &outSource, uint32_t &outDestFbp) const
 {
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);

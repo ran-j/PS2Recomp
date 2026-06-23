@@ -1,6 +1,8 @@
 #ifndef PS2_GS_GPU_H
 #define PS2_GS_GPU_H
 
+#include <array>
+#include <cstddef>
 #include <functional>
 #include <cstdint>
 #include <cstring>
@@ -223,6 +225,33 @@ struct GSTrxReg
     uint16_t rrw, rrh;
 };
 
+struct GSDebugSnapshot
+{
+    GSContext ctx[2]{};
+    GSPrimReg prim{};
+    GSTexaReg texa{};
+    GSTexClutReg texclut{};
+    GSBitBltBuf bitbltbuf{};
+    GSTrxPos trxpos{};
+    GSTrxReg trxreg{};
+    uint32_t trxdir = 0;
+    uint32_t transferX = 0;
+    uint32_t transferY = 0;
+    uint32_t transferTotalPixels = 0;
+    uint32_t transferCopiedPixels = 0;
+    uint32_t lastDisplayBaseBytes = 0;
+    GSFrameReg preferredDisplaySourceFrame{};
+    uint32_t preferredDisplayDestFbp = 0;
+    bool hasPreferredDisplaySource = false;
+    uint32_t hostPresentationWidth = 0;
+    uint32_t hostPresentationHeight = 0;
+    uint32_t hostPresentationDisplayFbp = 0;
+    uint32_t hostPresentationSourceFbp = 0;
+    bool hostPresentationUsedPreferred = false;
+    bool hasHostPresentationFrame = false;
+    size_t localToHostPendingBytes = 0;
+};
+
 class GSRasterizer;
 
 class GS
@@ -246,6 +275,7 @@ public:
     {
         return m_ctx[(index != 0) ? 1 : 0].frame;
     }
+    GSDebugSnapshot getDebugSnapshot() const;
     bool getPreferredDisplaySource(GSFrameReg &outSource, uint32_t &outDestFbp) const;
     void latchHostPresentationFrame();
     bool tryLatchHostPresentationFrame();

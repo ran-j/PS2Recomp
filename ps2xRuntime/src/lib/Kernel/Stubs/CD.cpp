@@ -9,6 +9,44 @@ namespace ps2_stubs
         uint32_t g_cdStReadTraceCount = 0u;
     }
 
+
+    CdDebugSnapshot getCdDebugSnapshot()
+    {
+        CdDebugSnapshot snapshot{};
+        snapshot.initialized = g_cdInitialized;
+        snapshot.lastError = g_lastCdError;
+        snapshot.mode = g_cdMode;
+        snapshot.streamingLbn = g_cdStreamingLbn;
+        snapshot.streamingEndLbn = g_cdStreamingEndLbn;
+        snapshot.nextPseudoLbn = g_nextPseudoLbn;
+        snapshot.imageSizeBytes = g_cdImageSizeBytes;
+        snapshot.imageSizeValid = g_cdImageSizeValid;
+        snapshot.cdRoot = getCdRootPath();
+        snapshot.cdImage = getCdImagePath();
+        snapshot.imageSizePath = g_cdImageSizePath;
+        snapshot.leafIndexRoot = g_cdLeafIndexRoot;
+        snapshot.leafIndexBuilt = g_cdLeafIndexBuilt;
+        snapshot.leafIndexCount = g_cdLeafIndex.size();
+        snapshot.loosePathIndexCount = g_cdLoosePathIndex.size();
+
+        snapshot.files.reserve(g_cdFilesByKey.size());
+        for (const auto &[key, entry] : g_cdFilesByKey)
+        {
+            CdDebugFileEntry row{};
+            row.key = key;
+            row.hostPath = entry.hostPath;
+            row.sizeBytes = entry.sizeBytes;
+            row.baseLbn = entry.baseLbn;
+            row.sectors = entry.sectors;
+            snapshot.files.push_back(std::move(row));
+        }
+        std::sort(snapshot.files.begin(), snapshot.files.end(), [](const CdDebugFileEntry &a, const CdDebugFileEntry &b)
+        {
+            return a.baseLbn < b.baseLbn;
+        });
+        return snapshot;
+    }
+
     void sceCdRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const uint32_t a0 = getRegU32(ctx, 4); // usually lbn
