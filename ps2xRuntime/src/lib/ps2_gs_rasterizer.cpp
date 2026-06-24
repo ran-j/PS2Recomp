@@ -573,9 +573,9 @@ uint32_t GSRasterizer::lookupCLUT(GS *gs,
     case GS_PSM_CT24:
         return applyTexa(gs->m_texa, cpsm, GSMem::ReadCT24(gs->m_vram, cbp, clutWidth, clutX, clutY));
     case GS_PSM_CT16:
-        return applyTexa(gs->m_texa, cpsm, GSMem::ReadCT16(gs->m_vram, cbp, clutWidth, clutX, clutY));
+        return applyTexa(gs->m_texa, cpsm, Rgba5551ToRgba8888(GSMem::ReadCT16(gs->m_vram, cbp, clutWidth, clutX, clutY)));
     case GS_PSM_CT16S:
-        return applyTexa(gs->m_texa, cpsm, GSMem::ReadCT16S(gs->m_vram, cbp, clutWidth, clutX, clutY));
+        return applyTexa(gs->m_texa, cpsm, Rgba5551ToRgba8888(GSMem::ReadCT16S(gs->m_vram, cbp, clutWidth, clutX, clutY)));
     default:
         break;
     }
@@ -935,7 +935,7 @@ void GSRasterizer::drawTriangle(GS *gs)
                 a = color.a;
             }
 
-            writePixel(gs, x, y, static_cast<u32>(z), r, g, b, a);
+            writePixel(gs, x, y, static_cast<u32>(z + 0.5), r, g, b, a);
         }
     }
 }
