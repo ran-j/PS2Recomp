@@ -1607,8 +1607,8 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
     }
     case GS_REG_UV:
     {
-        m_curU = static_cast<uint16_t>(value & 0xFFFFu);
-        m_curV = static_cast<uint16_t>((value >> 16) & 0xFFFFu);
+        m_curU = static_cast<uint16_t>(value & 0x3FFFu);
+        m_curV = static_cast<uint16_t>((value >> 16) & 0x3FFFu);
         break;
     }
     case GS_REG_XYZF2:
