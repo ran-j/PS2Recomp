@@ -19,8 +19,12 @@ struct VU1State
     uint32_t clip;
     uint32_t status;
     bool ebit;
-    uint32_t itop;
-    uint32_t xitop;
+    uint32_t top;   // VIF1 TOP visible to VU1 XTOP
+    uint32_t itop;  // VIF1 ITOP visible to VU1 XITOP
+
+    bool branchPending;
+    uint32_t branchTarget;
+    uint32_t branchDelay;
 };
 
 class VU1Interpreter
@@ -33,13 +37,13 @@ public:
     void execute(uint8_t *vuCode, uint32_t codeSize,
                  uint8_t *vuData, uint32_t dataSize,
                  GS &gs, PS2Memory *memory = nullptr,
-                 uint32_t startPC = 0, uint32_t itop = 0,
+                 uint32_t startPC = 0, uint32_t top = 0, uint32_t itop = 0,
                  uint32_t maxCycles = 65536);
 
     void resume(uint8_t *vuCode, uint32_t codeSize,
                 uint8_t *vuData, uint32_t dataSize,
                 GS &gs, PS2Memory *memory = nullptr,
-                uint32_t itop = 0, uint32_t maxCycles = 65536);
+                uint32_t top = 0, uint32_t itop = 0, uint32_t maxCycles = 65536);
 
     VU1State &state() { return m_state; }
     const VU1State &state() const { return m_state; }

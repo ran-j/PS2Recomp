@@ -464,6 +464,40 @@ namespace ps2_stubs
         }
     }
 
+
+    MemoryCardDebugSnapshot getMemoryCardDebugSnapshot()
+    {
+        MemoryCardDebugSnapshot snapshot{};
+        std::lock_guard<std::mutex> lock(g_mcStateMutex);
+        snapshot.nextFd = g_mcNextFd;
+        snapshot.lastCmd = g_mcLastCmd;
+        snapshot.lastResult = g_mcLastResult;
+        snapshot.cvFileCursor = g_cvMcFileCursor;
+
+        for (size_t i = 0; i < g_mcPorts.size(); ++i)
+        {
+            snapshot.ports[i].port = static_cast<int32_t>(i);
+            snapshot.ports[i].currentDir = g_mcPorts[i].currentDir;
+            snapshot.ports[i].formatted = g_mcPorts[i].formatted;
+            snapshot.ports[i].rootPath = getMcRootPath(static_cast<int32_t>(i));
+        }
+
+        snapshot.openFiles.reserve(g_mcFiles.size());
+        for (const auto &[fd, file] : g_mcFiles)
+        {
+            MemoryCardDebugOpenFile row{};
+            row.fd = fd;
+            row.port = file.port;
+            row.hostPath = file.hostPath;
+            snapshot.openFiles.push_back(std::move(row));
+        }
+        std::sort(snapshot.openFiles.begin(), snapshot.openFiles.end(), [](const MemoryCardDebugOpenFile &a, const MemoryCardDebugOpenFile &b)
+        {
+            return a.fd < b.fd;
+        });
+        return snapshot;
+    }
+
     void sceMcChangeThreadPriority(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 0);

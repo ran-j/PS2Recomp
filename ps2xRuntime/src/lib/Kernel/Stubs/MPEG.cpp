@@ -5,6 +5,7 @@ extern "C"
 {
 #include <libavcodec/avcodec.h>
 #include <libavutil/error.h>
+#include <libavutil/log.h>
 #include <libswscale/swscale.h>
 }
 
@@ -34,6 +35,14 @@ namespace ps2_stubs
                 return "unknown FFmpeg error";
             }
             return std::string(buffer.data());
+        }
+
+        void configureFfmpegLogLevel()
+        {
+            static std::once_flag s_once;
+            std::call_once(s_once, [] {
+                av_log_set_level(ps2_log::agressive_logs_enabled ? AV_LOG_WARNING : AV_LOG_ERROR);
+            });
         }
 
         class MpegFfmpegDecoder
@@ -114,12 +123,14 @@ namespace ps2_stubs
 
                 if (shouldLog)
                 {
-                    std::cerr << "[MPEG:feed] inSize=" << size
-                              << " parsed=" << totalParsed
-                              << " packets=" << totalPacketsSent
-                              << " newFrames=" << (frames.size() - framesBefore)
-                              << " totalFrames=" << frames.size()
-                              << std::endl;
+                    PS2_IF_AGRESSIVE_LOGS({
+                        std::cerr << "[MPEG:feed] inSize=" << size
+                                  << " parsed=" << totalParsed
+                                  << " packets=" << totalPacketsSent
+                                  << " newFrames=" << (frames.size() - framesBefore)
+                                  << " totalFrames=" << frames.size()
+                                  << std::endl;
+                    });
                 }
 
                 return true;
@@ -204,6 +215,8 @@ namespace ps2_stubs
                 {
                     return true;
                 }
+
+                configureFfmpegLogLevel();
 
                 const AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_MPEG2VIDEO);
                 if (!codec)
@@ -740,14 +753,16 @@ namespace ps2_stubs
             static uint32_t s_noFrameEofLogCount = 0u;
             if (s_noFrameEofLogCount < 16u)
             {
-                std::cerr << "[MPEG:no-frame-eof] mpeg=0x" << std::hex << mpegAddr
-                          << std::dec << " served=" << playback.picturesServed
-                          << " sawInput=" << playback.sawInput
-                          << " cdEof=" << cdStreamEofSeen
-                          << " reason="
-                          << (stallByNoFrame ? "no-frame" : "consecutive")
-                          << " consecutiveEmpty=" << playback.consecutiveEmptyGetPicture
-                          << std::endl;
+                PS2_IF_AGRESSIVE_LOGS({
+                    std::cerr << "[MPEG:no-frame-eof] mpeg=0x" << std::hex << mpegAddr
+                              << std::dec << " served=" << playback.picturesServed
+                              << " sawInput=" << playback.sawInput
+                              << " cdEof=" << cdStreamEofSeen
+                              << " reason="
+                              << (stallByNoFrame ? "no-frame" : "consecutive")
+                              << " consecutiveEmpty=" << playback.consecutiveEmptyGetPicture
+                              << std::endl;
+                });
                 ++s_noFrameEofLogCount;
             }
             return true;
@@ -763,17 +778,19 @@ namespace ps2_stubs
             const uint32_t feedEsIdx = g_mpeg_stub_state.feedEsTraceCount++;
             if (feedEsIdx < 32u)
             {
-                char hexBuf[16] = {};
-                for (size_t i = 0; i < std::min<size_t>(4u, size); ++i)
-                {
-                    ::snprintf(hexBuf + i * 2, 3, "%02x", data[i]);
-                }
-                std::cerr << "[MPEG:feedES] #" << feedEsIdx
-                          << " size=" << size
-                          << " first4=" << hexBuf
-                          << " decoderFailed=" << playback.decoderFailed
-                          << " waitSeq=" << playback.waitingForVideoSequenceHeader
-                          << std::endl;
+                PS2_IF_AGRESSIVE_LOGS({
+                    char hexBuf[16] = {};
+                    for (size_t i = 0; i < std::min<size_t>(4u, size); ++i)
+                    {
+                        ::snprintf(hexBuf + i * 2, 3, "%02x", data[i]);
+                    }
+                    std::cerr << "[MPEG:feedES] #" << feedEsIdx
+                              << " size=" << size
+                              << " first4=" << hexBuf
+                              << " decoderFailed=" << playback.decoderFailed
+                              << " waitSeq=" << playback.waitingForVideoSequenceHeader
+                              << std::endl;
+                });
             }
 
             playback.sawInput = true;
@@ -1501,8 +1518,10 @@ namespace ps2_stubs
         {
             playback = makeFreshPlaybackStatePreservingConfig(playback);
         }
-        std::cerr << "[MPEG:CdStreamStart] generation=" << g_mpeg_stub_state.cdStreamGeneration
-                  << " reopened=" << g_mpeg_stub_state.playbackByMpeg.size() << std::endl;
+        PS2_IF_AGRESSIVE_LOGS({
+            std::cerr << "[MPEG:CdStreamStart] generation=" << g_mpeg_stub_state.cdStreamGeneration
+                      << " reopened=" << g_mpeg_stub_state.playbackByMpeg.size() << std::endl;
+        });
         g_mpeg_cv.notify_all();
     }
 
@@ -1527,7 +1546,9 @@ namespace ps2_stubs
             static uint32_t s_eofLogCount = 0u;
             if (s_eofLogCount < 8u)
             {
-                std::cerr << "[MPEG:CdStreamEof] finalized active MPEG playback" << std::endl;
+                PS2_IF_AGRESSIVE_LOGS({
+                    std::cerr << "[MPEG:CdStreamEof] finalized active MPEG playback" << std::endl;
+                });
                 ++s_eofLogCount;
             }
             g_mpeg_cv.notify_all();
@@ -1767,13 +1788,15 @@ namespace ps2_stubs
 
         if (traceIdx < 32u)
         {
-            std::cerr << "[MPEG:DemuxPss] mpeg=0x" << std::hex << mpegAddr
-                      << " data=0x" << dataAddr << std::dec
-                      << " bytes=" << byteCount
-                      << " consumed=" << consumed
-                      << " decoded=" << decodedCount
-                      << " callbacks=" << callbackEvents.size()
-                      << std::endl;
+            PS2_IF_AGRESSIVE_LOGS({
+                std::cerr << "[MPEG:DemuxPss] mpeg=0x" << std::hex << mpegAddr
+                          << " data=0x" << dataAddr << std::dec
+                          << " bytes=" << byteCount
+                          << " consumed=" << consumed
+                          << " decoded=" << decodedCount
+                          << " callbacks=" << callbackEvents.size()
+                          << std::endl;
+            });
         }
 
         dispatchStreamCallbacksUnlocked(rdram, ctx, runtime, callbackEvents);
@@ -1786,10 +1809,12 @@ namespace ps2_stubs
         const uint32_t entryIdx = s_demuxRingEntryCount.fetch_add(1u, std::memory_order_relaxed);
         if (entryIdx < 4u)
         {
-            std::cerr << "[MPEG:DemuxPssRing:ENTER] call #" << entryIdx
-                      << " pc=0x" << std::hex << ctx->pc
-                      << " ra=0x" << getRegU32(ctx, 31)
-                      << std::dec << std::endl;
+            PS2_IF_AGRESSIVE_LOGS({
+                std::cerr << "[MPEG:DemuxPssRing:ENTER] call #" << entryIdx
+                          << " pc=0x" << std::hex << ctx->pc
+                          << " ra=0x" << getRegU32(ctx, 31)
+                          << std::dec << std::endl;
+            });
         }
 
         const uint32_t mpegAddr = getRegU32(ctx, 4);
@@ -1823,14 +1848,16 @@ namespace ps2_stubs
 
         if (traceIdx < 32u)
         {
-            std::cerr << "[MPEG:DemuxPssRing] mpeg=0x" << std::hex << mpegAddr
-                      << " data=0x" << dataAddr
-                      << " ring=0x" << ringBaseAddr << std::dec
-                      << " avail=" << availableBytes
-                      << " consumed=" << consumed
-                      << " decoded=" << decodedCount
-                      << " callbacks=" << callbackEvents.size()
-                      << std::endl;
+            PS2_IF_AGRESSIVE_LOGS({
+                std::cerr << "[MPEG:DemuxPssRing] mpeg=0x" << std::hex << mpegAddr
+                          << " data=0x" << dataAddr
+                          << " ring=0x" << ringBaseAddr << std::dec
+                          << " avail=" << availableBytes
+                          << " consumed=" << consumed
+                          << " decoded=" << decodedCount
+                          << " callbacks=" << callbackEvents.size()
+                          << std::endl;
+            });
         }
 
         dispatchStreamCallbacksUnlocked(rdram, ctx, runtime, callbackEvents);
@@ -1898,11 +1925,13 @@ namespace ps2_stubs
                 playback.consecutiveEmptyGetPicture++;
                 if (g_mpeg_stub_state.getPictureWaitTraceCount < 32u)
                 {
-                    std::cerr << "[MPEG:GetPicture] waiting for frames, mpeg=0x" << std::hex << mpegAddr
-                              << std::dec << " ended=" << playback.streamEnded
-                              << " failed=" << playback.decoderFailed
-                              << " sawInput=" << playback.sawInput
-                              << " consec=" << playback.consecutiveEmptyGetPicture << std::endl;
+                    PS2_IF_AGRESSIVE_LOGS({
+                        std::cerr << "[MPEG:GetPicture] waiting for frames, mpeg=0x" << std::hex << mpegAddr
+                                  << std::dec << " ended=" << playback.streamEnded
+                                  << " failed=" << playback.decoderFailed
+                                  << " sawInput=" << playback.sawInput
+                                  << " consec=" << playback.consecutiveEmptyGetPicture << std::endl;
+                    });
                     ++g_mpeg_stub_state.getPictureWaitTraceCount;
                 }
             }
@@ -1945,12 +1974,14 @@ namespace ps2_stubs
                     static uint32_t s_noFrameYieldLogCount = 0u;
                     if (s_noFrameYieldLogCount < 16u)
                     {
-                        std::cerr << "[MPEG:GetPicture:yield] mpeg=0x" << std::hex << mpegAddr
-                                  << std::dec << " generation=" << g_mpeg_stub_state.cdStreamGeneration
-                                  << " sawInput=" << waitPlayback.sawInput
-                                  << " served=" << waitPlayback.picturesServed
-                                  << " cdEof=" << g_mpeg_stub_state.currentCdStreamEofSeen
-                                  << std::endl;
+                        PS2_IF_AGRESSIVE_LOGS({
+                            std::cerr << "[MPEG:GetPicture:yield] mpeg=0x" << std::hex << mpegAddr
+                                      << std::dec << " generation=" << g_mpeg_stub_state.cdStreamGeneration
+                                      << " sawInput=" << waitPlayback.sawInput
+                                      << " served=" << waitPlayback.picturesServed
+                                      << " cdEof=" << g_mpeg_stub_state.currentCdStreamEofSeen
+                                      << std::endl;
+                        });
                         ++s_noFrameYieldLogCount;
                     }
                     break;
@@ -1980,11 +2011,13 @@ namespace ps2_stubs
                 haveFrame = true;
                 if (g_mpeg_stub_state.pictureTraceCount < 32u)
                 {
-                    std::cerr << "[MPEG:GetPicture:FRAME] mpeg=0x" << std::hex << mpegAddr
-                              << std::dec << " generation=" << g_mpeg_stub_state.cdStreamGeneration
-                              << " frame=" << frameCount
-                              << " queued=" << playback.decodedFrames.size()
-                              << " size=" << width << "x" << height << std::endl;
+                    PS2_IF_AGRESSIVE_LOGS({
+                        std::cerr << "[MPEG:GetPicture:FRAME] mpeg=0x" << std::hex << mpegAddr
+                                  << std::dec << " generation=" << g_mpeg_stub_state.cdStreamGeneration
+                                  << " frame=" << frameCount
+                                  << " queued=" << playback.decodedFrames.size()
+                                  << " size=" << width << "x" << height << std::endl;
+                    });
                     ++g_mpeg_stub_state.pictureTraceCount;
                 }
                 if (!playback.decodedFrames.empty())
@@ -2010,10 +2043,12 @@ namespace ps2_stubs
                 static uint32_t s_duplicateFrameLogCount = 0u;
                 if (s_duplicateFrameLogCount < 16u)
                 {
-                    std::cerr << "[MPEG:GetPicture:DUP] mpeg=0x" << std::hex << mpegAddr
-                              << std::dec << " generation=" << g_mpeg_stub_state.cdStreamGeneration
-                              << " frame=" << frameCount
-                              << " size=" << width << "x" << height << std::endl;
+                    PS2_IF_AGRESSIVE_LOGS({
+                        std::cerr << "[MPEG:GetPicture:DUP] mpeg=0x" << std::hex << mpegAddr
+                                  << std::dec << " generation=" << g_mpeg_stub_state.cdStreamGeneration
+                                  << " frame=" << frameCount
+                                  << " size=" << width << "x" << height << std::endl;
+                    });
                     ++s_duplicateFrameLogCount;
                 }
             }
@@ -2096,10 +2131,12 @@ namespace ps2_stubs
 
         if (g_mpeg_stub_state.isEndTraceCount < 16u)
         {
-            std::cerr << "[MPEG:IsEnd] mpeg=0x" << std::hex << mpegAddr << std::dec
-                      << " ended=" << ended
-                      << " frames=" << playback.decodedFrames.size()
-                      << " sawInput=" << playback.sawInput << std::endl;
+            PS2_IF_AGRESSIVE_LOGS({
+                std::cerr << "[MPEG:IsEnd] mpeg=0x" << std::hex << mpegAddr << std::dec
+                          << " ended=" << ended
+                          << " frames=" << playback.decodedFrames.size()
+                          << " sawInput=" << playback.sawInput << std::endl;
+            });
             ++g_mpeg_stub_state.isEndTraceCount;
         }
 

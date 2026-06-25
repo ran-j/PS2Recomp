@@ -111,14 +111,16 @@ namespace
         return tag;
     }
 
-    uint32_t makeVuLowerSpecial(uint8_t funct, uint8_t is, uint8_t it = 0u, uint8_t id = 0u, uint8_t dest = 0u)
+    uint32_t makeVuLowerSpecial(uint8_t specialOp, uint8_t is, uint8_t it = 0u, uint8_t id = 0u, uint8_t dest = 0u)
     {
         return (0x40u << 25) |
                (static_cast<uint32_t>(dest & 0xFu) << 21) |
                (static_cast<uint32_t>(it & 0x1Fu) << 16) |
                (static_cast<uint32_t>(is & 0x1Fu) << 11) |
                (static_cast<uint32_t>(id & 0x1Fu) << 6) |
-               static_cast<uint32_t>(funct & 0x3Fu);
+               (static_cast<uint32_t>(specialOp & 0x7Cu) << 4) |
+               static_cast<uint32_t>(specialOp & 0x3u) |
+               0x3Cu;
     }
 }
 
@@ -648,13 +650,20 @@ void register_ps2_memory_tests()
             PS2Memory mem;
             t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
 
+            mem.vif1_regs.base = 0x120u;
             mem.vif1_regs.tops = 0x120u;
             mem.vif1_regs.stat = (1u << 7); // DBF=1 before OFFSET
 
-            std::vector<std::pair<uint32_t, uint32_t>> mscalCalls;
-            mem.setVu1MscalCallback([&](uint32_t startPC, uint32_t itop)
+            struct MscalCall
             {
-                mscalCalls.emplace_back(startPC, itop);
+                uint32_t startPC;
+                uint32_t top;
+                uint32_t itop;
+            };
+            std::vector<MscalCall> mscalCalls;
+            mem.setVu1MscalCallback([&](uint32_t startPC, uint32_t top, uint32_t itop)
+            {
+                mscalCalls.push_back({startPC, top, itop});
             });
 
             const uint32_t offsetCmd = makeVifCmd(0x02u, 0u, 0x0022u);
@@ -667,18 +676,20 @@ void register_ps2_memory_tests()
             const uint32_t baseCmd = makeVifCmd(0x03u, 0u, 0x0030u);
             mem.processVIF1Data(reinterpret_cast<const uint8_t *>(&baseCmd), sizeof(baseCmd));
             t.Equals(mem.vif1_regs.base, 0x30u, "BASE should update BASE register");
-            t.Equals(mem.vif1_regs.tops, 0x30u, "DBF=0 keeps TOPS equal to BASE");
+            t.Equals(mem.vif1_regs.tops, 0x120u, "BASE should not rewrite current TOPS");
 
             const uint32_t itopCmd = makeVifCmd(0x04u, 0u, 0x0044u);
             mem.processVIF1Data(reinterpret_cast<const uint8_t *>(&itopCmd), sizeof(itopCmd));
-            t.Equals(mem.vif1_regs.itop, 0x44u, "ITOP should update ITOP register");
+            t.Equals(mem.vif1_regs.itops, 0x44u, "ITOP VIFcode should update pending ITOPS register");
 
             const uint32_t mscalCmd = makeVifCmd(0x14u, 0u, 0x0003u);
             mem.processVIF1Data(reinterpret_cast<const uint8_t *>(&mscalCmd), sizeof(mscalCmd));
             t.Equals(mscalCalls.size(), static_cast<size_t>(1u), "MSCAL should invoke callback once");
-            t.Equals(mscalCalls[0].first, 0x18u, "MSCAL callback startPC should be IMMEDIATE*8");
-            t.Equals(mscalCalls[0].second, 0x44u, "MSCAL callback should receive current ITOP");
-            t.Equals(mem.vif1_regs.itops, 0x44u, "MSCAL should latch ITOPS from ITOP");
+            t.Equals(mscalCalls[0].startPC, 0x18u, "MSCAL callback startPC should be IMMEDIATE*8");
+            t.Equals(mscalCalls[0].top, 0x120u, "MSCAL callback should receive current TOPS");
+            t.Equals(mscalCalls[0].itop, 0x44u, "MSCAL callback should receive pending ITOPS");
+            t.Equals(mem.vif1_regs.top, 0x120u, "MSCAL should latch TOP from TOPS");
+            t.Equals(mem.vif1_regs.itop, 0x44u, "MSCAL should latch ITOP from ITOPS");
             t.IsTrue((mem.vif1_regs.stat & (1u << 7)) != 0u, "MSCAL should toggle DBF");
             t.Equals(mem.vif1_regs.tops, 0x52u, "DBF=1 should set TOPS to BASE+OFST");
 
@@ -1138,6 +1149,34 @@ void register_ps2_memory_tests()
                      "compact VIF1 chain should clear the STR bit after drain");
         });
 
+        tc.Run("VIF1 DMA chain preserves compact tag high bytes when qwc is zero", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kVif1Ch = 0x10009000u;
+            constexpr uint32_t kTag = 0x00025100u;
+
+            uint8_t *rdram = mem.getRDRAM();
+            std::memset(rdram + kTag, 0, 16u);
+
+            const uint64_t endTag = makeDmaTag(0u, 7u, 0u, false);
+            std::memcpy(rdram + kTag, &endTag, sizeof(endTag));
+
+            const uint32_t itopCmd = makeVifCmd(0x04u, 0u, 0x44u);
+            std::memcpy(rdram + kTag + 12u, &itopCmd, sizeof(itopCmd));
+
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kTag), "write VIF1 TADR should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x104u), "write VIF1 CHCR STR|CHAIN should succeed");
+
+            mem.processPendingTransfers();
+
+            t.Equals(mem.vif1_regs.itops, 0x44u,
+                     "qwc-zero compact VIF1 chain should still process high-half VIFcodes");
+            t.IsTrue((mem.readIORegister(kVif1Ch + 0x00u) & 0x100u) == 0u,
+                     "qwc-zero compact VIF1 chain should clear the STR bit after drain");
+        });
+
         tc.Run("VIF1 packet builders keep chain qwc live before terminate", [](TestCase &t)
         {
             PS2Memory mem;
@@ -1511,7 +1550,7 @@ void register_ps2_memory_tests()
                 vuData[i] = static_cast<uint8_t>(0xC0u + i);
             }
 
-            const uint32_t lower = makeVuLowerSpecial(0x3Du, 1u);
+            const uint32_t lower = makeVuLowerSpecial(0x6Cu, 1u);
             std::memcpy(vuCode + 0u, &lower, sizeof(lower));
             const uint32_t upper = 0u;
             std::memcpy(vuCode + 4u, &upper, sizeof(upper));
@@ -1524,6 +1563,7 @@ void register_ps2_memory_tests()
                         PS2_VU1_DATA_SIZE,
                         gs,
                         &mem,
+                        0u,
                         0u,
                         0u,
                         1u);
@@ -1696,7 +1736,7 @@ void register_ps2_memory_tests()
             std::memset(vuCode, 0, PS2_VU1_CODE_SIZE);
             std::memset(vuData, 0, PS2_VU1_DATA_SIZE);
 
-            const uint32_t lower = makeVuLowerSpecial(0x3Du, 0u);
+            const uint32_t lower = makeVuLowerSpecial(0x6Cu, 0u);
             std::memcpy(vuCode + 0u, &lower, sizeof(lower));
             const uint32_t upper = 0u;
             std::memcpy(vuCode + 4u, &upper, sizeof(upper));
@@ -1711,7 +1751,7 @@ void register_ps2_memory_tests()
             }
 
             VU1Interpreter vu1;
-            mem.setVu1MscalCallback([&](uint32_t startPC, uint32_t itop)
+            mem.setVu1MscalCallback([&](uint32_t startPC, uint32_t top, uint32_t itop)
             {
                 vu1.execute(vuCode,
                             PS2_VU1_CODE_SIZE,
@@ -1720,6 +1760,7 @@ void register_ps2_memory_tests()
                             gs,
                             &mem,
                             startPC,
+                            top,
                             itop,
                             1u);
             });

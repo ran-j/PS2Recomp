@@ -2,8 +2,44 @@
 
 #include "ps2_stubs.h"
 
+#include <cstdint>
+#include <filesystem>
+#include <string>
+#include <vector>
+
 namespace ps2_stubs
 {
+
+    struct CdDebugFileEntry
+    {
+        std::string key;
+        std::filesystem::path hostPath;
+        uint32_t sizeBytes = 0;
+        uint32_t baseLbn = 0;
+        uint32_t sectors = 0;
+    };
+
+    struct CdDebugSnapshot
+    {
+        bool initialized = false;
+        int32_t lastError = 0;
+        uint32_t mode = 0;
+        uint32_t streamingLbn = 0;
+        uint32_t streamingEndLbn = 0;
+        uint32_t nextPseudoLbn = 0;
+        uint64_t imageSizeBytes = 0;
+        bool imageSizeValid = false;
+        std::filesystem::path cdRoot;
+        std::filesystem::path cdImage;
+        std::filesystem::path imageSizePath;
+        std::filesystem::path leafIndexRoot;
+        bool leafIndexBuilt = false;
+        size_t leafIndexCount = 0;
+        size_t loosePathIndexCount = 0;
+        std::vector<CdDebugFileEntry> files;
+    };
+
+    CdDebugSnapshot getCdDebugSnapshot();
     void sceCdRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceCdSync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceCdGetError(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);

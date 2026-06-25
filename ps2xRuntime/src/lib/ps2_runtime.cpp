@@ -97,45 +97,6 @@ namespace
     constexpr uint32_t EXCEPTION_VECTOR_TLB_REFILL = 0x80000000u;
     constexpr uint32_t EXCEPTION_VECTOR_BOOT = 0xBFC00200u;
 
-    struct HostFrameProbePoint
-    {
-        uint32_t x;
-        uint32_t y;
-    };
-
-    constexpr HostFrameProbePoint kGhostProbePoints[] = {
-        {220u, 176u},
-        {260u, 208u},
-        {320u, 208u},
-        {260u, 240u},
-        {320u, 240u},
-        {260u, 272u},
-        {320u, 272u},
-    };
-
-    uint32_t sampleHostFramePixel(const std::vector<uint8_t> &pixels,
-                                  uint32_t width,
-                                  uint32_t height,
-                                  uint32_t x,
-                                  uint32_t y)
-    {
-        if (x >= width || y >= height)
-        {
-            return 0u;
-        }
-
-        const size_t offset = (static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)) * 4u;
-        if (offset + 4u > pixels.size())
-        {
-            return 0u;
-        }
-
-        return static_cast<uint32_t>(pixels[offset + 0u]) |
-               (static_cast<uint32_t>(pixels[offset + 1u]) << 8) |
-               (static_cast<uint32_t>(pixels[offset + 2u]) << 16) |
-               (static_cast<uint32_t>(pixels[offset + 3u]) << 24);
-    }
-
     struct DispatchHistory
     {
         std::array<uint32_t, 64> pcs{};
@@ -243,6 +204,7 @@ namespace
         ctx->vu0_vpu_stat2 = 0;
     }
 
+
     void copyVu0ContextToState(const R5900Context *ctx, VU1State &state)
     {
         std::memset(&state, 0, sizeof(state));
@@ -265,7 +227,6 @@ namespace
         state.clip = ctx->vu0_clip_flags;
         state.status = ctx->vu0_status;
         state.itop = ctx->vu0_itop;
-        state.xitop = ctx->vu0_xitop;
 
         state.vf[0][0] = 0.0f;
         state.vf[0][1] = 0.0f;
@@ -294,7 +255,6 @@ namespace
         ctx->vu0_clip_flags2 = state.clip;
         ctx->vu0_status = static_cast<uint16_t>(state.status);
         ctx->vu0_itop = state.itop;
-        ctx->vu0_xitop = state.xitop;
         ctx->vu0_pc = state.pc;
         ctx->vu0_tpc = state.pc;
         ctx->vu0_vpu_stat = 0;
@@ -603,31 +563,6 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
                       << " preferred=" << static_cast<uint32_t>(usedPreferredDisplaySource ? 1u : 0u)
                       << std::endl;
         }
-        static uint32_t s_probeDebugCount = 0u;
-        if (s_probeDebugCount < 32u ||
-            displayFbp != s_lastDisplayFbp ||
-            sourceFbp != s_lastSourceFbp ||
-            usedPreferredDisplaySource != s_lastPreferred)
-        {
-            std::cout << "[frame:probe] idx=" << s_probeDebugCount
-                      << " tick=" << currentTick
-                      << " displayFbp=" << displayFbp
-                      << " sourceFbp=" << sourceFbp
-                      << " preferred=" << static_cast<uint32_t>(usedPreferredDisplaySource ? 1u : 0u);
-            for (const auto &probe : kGhostProbePoints)
-            {
-                if (probe.x >= width || probe.y >= height)
-                {
-                    continue;
-                }
-
-                const uint32_t pixel = sampleHostFramePixel(s_scratch, width, height, probe.x, probe.y);
-                std::cout << " host[" << probe.x << "," << probe.y << "]=0x"
-                          << std::hex << pixel << std::dec;
-            }
-            std::cout << std::endl;
-            ++s_probeDebugCount;
-        }
         ++s_uploadDebugCount;
     });
     s_lastDisplayFbp = displayFbp;
@@ -686,6 +621,23 @@ PS2Runtime::PS2Runtime()
     m_asyncCallbackStackTop = PS2_RAM_SIZE;
 }
 
+void PS2Runtime::setDebugUiCallbacks(DebugUiCallback initCallback,
+                                      DebugUiCallback drawCallback,
+                                      DebugUiCallback shutdownCallback,
+                                      void *userData)
+{
+    if (m_debugUiInitialized && m_debugUiShutdownCallback)
+    {
+        m_debugUiShutdownCallback(*this, m_debugUiUserData);
+        m_debugUiInitialized = false;
+    }
+
+    m_debugUiInitCallback = initCallback;
+    m_debugUiDrawCallback = drawCallback;
+    m_debugUiShutdownCallback = shutdownCallback;
+    m_debugUiUserData = userData;
+}
+
 PS2Runtime::~PS2Runtime()
 {
     try
@@ -702,6 +654,12 @@ PS2Runtime::~PS2Runtime()
             m_audioBackend.setAudioReady(false);
         }
 #endif
+        if (m_debugUiInitialized && m_debugUiShutdownCallback)
+        {
+            m_debugUiShutdownCallback(*this, m_debugUiUserData);
+            m_debugUiInitialized = false;
+        }
+
         if (IsWindowReady())
         {
             CloseWindow();
@@ -740,14 +698,14 @@ bool PS2Runtime::syncCoreSubsystems()
     m_gifArbiter.setProcessPacketFn([this](const uint8_t *data, uint32_t size)
                                     { m_gs.processGIFPacket(data, size); });
     m_memory.setGifArbiter(&m_gifArbiter);
-    m_memory.setVu1MscalCallback([this](uint32_t startPC, uint32_t itop)
+    m_memory.setVu1MscalCallback([this](uint32_t startPC, uint32_t top, uint32_t itop)
                                  { m_vu1.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
                                                  m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
-                                                 m_gs, &m_memory, startPC, itop, 65536); });
-    m_memory.setVu1MscntCallback([this](uint32_t itop)
+                                                 m_gs, &m_memory, startPC, top, itop, 65536); });
+    m_memory.setVu1MscntCallback([this](uint32_t top, uint32_t itop)
                                  { m_vu1.resume(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
                                                 m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
-                                                m_gs, &m_memory, itop, 65536); });
+                                                m_gs, &m_memory, top, itop, 65536); });
     m_iop.init(rdram);
     m_iop.reset();
     m_vu0.reset();
@@ -783,6 +741,11 @@ bool PS2Runtime::initialize(const char *title)
         m_audioBackend.setAudioReady(IsAudioDeviceReady());
 #endif
         SetTargetFPS(60);
+        if (m_debugUiInitCallback)
+        {
+            m_debugUiInitCallback(*this, m_debugUiUserData);
+            m_debugUiInitialized = true;
+        }
 
         return true;
     }
@@ -1341,17 +1304,6 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
 {
     (void)rdram;
 
-    static std::unordered_map<uint32_t, int> seen;
-    int &count = seen[address];
-    if (count < 3)
-    {
-        RUNTIME_LOG("[VU0] microprogram @0x" << std::hex << address
-                                             << " pc=0x" << (ctx ? ctx->pc : 0u)
-                                             << " ra=0x" << (ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0)) : 0u)
-                                             << std::dec << std::endl);
-    }
-    ++count;
-
     if (!ctx)
     {
         return;
@@ -1360,6 +1312,7 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
     uint8_t *const vu0Code = m_memory.getVU0Code();
     uint8_t *const vu0Data = m_memory.getVU0Data();
     const uint32_t startPC = address & ~0x7u;
+
     if (!vu0Code || !vu0Data || startPC + 8u > PS2_VU0_CODE_SIZE)
     {
         seedVu0IdleSuccess(ctx);
@@ -1371,7 +1324,7 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
     m_vu0.execute(vu0Code, PS2_VU0_CODE_SIZE,
                   vu0Data, PS2_VU0_DATA_SIZE,
                   m_gs, &m_memory,
-                  startPC, ctx->vu0_itop, 4096);
+                  startPC, 0u, ctx->vu0_itop, 4096);
     copyVu0StateToContext(m_vu0.state(), ctx);
 }
 
@@ -1980,13 +1933,15 @@ void PS2Runtime::dispatchLoop(uint8_t *rdram, R5900Context *ctx)
             const uint32_t ra = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0));
             const uint32_t sp = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0));
             const uint32_t gp = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[28], 0));
-            std::cerr << "[dispatch:pc-zero] from=0x" << std::hex << dispatchedPc
-                      << " fromRa=0x" << dispatchedRa
-                      << " ra=0x" << ra
-                      << " sp=0x" << sp
-                      << " gp=0x" << gp
-                      << " trace=" << formatDispatchHistory()
-                      << std::dec << std::endl;
+            PS2_IF_AGRESSIVE_LOGS({
+                std::cerr << "[dispatch:pc-zero] from=0x" << std::hex << dispatchedPc
+                          << " fromRa=0x" << dispatchedRa
+                          << " ra=0x" << ra
+                          << " sp=0x" << sp
+                          << " gp=0x" << gp
+                          << " trace=" << formatDispatchHistory()
+                          << std::dec << std::endl;
+            });
 
             // PC=0 means this guest thread returned (usually via jr $ra with RA=0).
             // Do not request a global runtime stop here: other guest threads may still run.
@@ -2350,6 +2305,10 @@ void PS2Runtime::run()
             dstWidth,
             dstHeight};
         DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+        if (m_debugUiInitialized && m_debugUiDrawCallback)
+        {
+            m_debugUiDrawCallback(*this, m_debugUiUserData);
+        }
         EndDrawing();
 
         if (WindowShouldClose())
@@ -2411,6 +2370,11 @@ void PS2Runtime::run()
         ps2_syscalls::detachAllGuestHostThreads();
     }
 
+    if (m_debugUiInitialized && m_debugUiShutdownCallback)
+    {
+        m_debugUiShutdownCallback(*this, m_debugUiUserData);
+        m_debugUiInitialized = false;
+    }
     UnloadTexture(frameTex);
     CloseWindow();
 

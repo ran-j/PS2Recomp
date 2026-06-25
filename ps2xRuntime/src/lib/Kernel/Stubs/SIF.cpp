@@ -430,10 +430,12 @@ namespace ps2_stubs
             static uint32_t warnCount = 0;
             if (warnCount < 32u)
             {
-                std::cerr << "sceSifGetOtherData copy failed src=0x" << std::hex << srcAddr
-                          << " dst=0x" << dstAddr
-                          << " size=0x" << size
-                          << std::dec << std::endl;
+                PS2_IF_AGRESSIVE_LOGS({
+                    std::cerr << "sceSifGetOtherData copy failed src=0x" << std::hex << srcAddr
+                              << " dst=0x" << dstAddr
+                              << " size=0x" << size
+                              << std::dec << std::endl;
+                });
                 ++warnCount;
             }
             setReturnS32(ctx, -1);
@@ -473,13 +475,15 @@ namespace ps2_stubs
         }
         if (shouldLog)
         {
-            auto flags = std::cerr.flags();
-            std::cerr << "[sceSifGetReg] reg=0x" << std::hex << reg
-                      << " value=0x" << value
-                      << " pc=0x" << (ctx ? ctx->pc : 0u)
-                      << " ra=0x" << (ctx ? getRegU32(ctx, 31) : 0u)
-                      << std::dec << std::endl;
-            std::cerr.flags(flags);
+            PS2_IF_AGRESSIVE_LOGS({
+                auto flags = std::cerr.flags();
+                std::cerr << "[sceSifGetReg] reg=0x" << std::hex << reg
+                          << " value=0x" << value
+                          << " pc=0x" << (ctx ? ctx->pc : 0u)
+                          << " ra=0x" << (ctx ? getRegU32(ctx, 31) : 0u)
+                          << std::dec << std::endl;
+                std::cerr.flags(flags);
+            });
         }
         setReturnU32(ctx, value);
     }
@@ -620,6 +624,34 @@ namespace ps2_stubs
 
         const uint32_t dmatAddr = getRegU32(ctx, 4);
         const uint32_t count = getRegU32(ctx, 5);
+
+        const uint32_t listAddr = getRegU32(ctx, 4);
+        PS2_IF_AGRESSIVE_LOGS({
+            std::cerr << "[sceSifSetDma:CALL] pc=0x" << std::hex << ctx->pc
+                      << " ra=0x" << getRegU32(ctx, 31)
+                      << " list=0x" << listAddr
+                      << " count=" << std::dec << count
+                      << std::endl;
+
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                const uint32_t desc = listAddr + i * 16;
+                const uint32_t src = READ32(desc + 0);
+                const uint32_t dst = READ32(desc + 4);
+                const uint32_t size = READ32(desc + 8);
+                const uint32_t attr = READ32(desc + 12);
+
+                std::cerr << "[sceSifSetDma:DESC] i=" << i
+                          << " src=0x" << std::hex << src
+                          << " dst=0x" << dst
+                          << " size=0x" << size
+                          << " attr=0x" << attr
+                          << " pc=0x" << ctx->pc
+                          << " ra=0x" << getRegU32(ctx, 31)
+                          << std::dec << std::endl;
+            }
+        });
+
         if (!dmatAddr || count == 0u || count > 32u)
         {
             setReturnS32(ctx, 0);
@@ -685,9 +717,11 @@ namespace ps2_stubs
             static uint32_t warnCount = 0;
             if (warnCount < 32u)
             {
-                std::cerr << "sceSifSetDma failed dmat=0x" << std::hex << dmatAddr
-                          << " count=0x" << count
-                          << std::dec << std::endl;
+                PS2_IF_AGRESSIVE_LOGS({
+                    std::cerr << "sceSifSetDma failed dmat=0x" << std::hex << dmatAddr
+                              << " count=0x" << count
+                              << std::dec << std::endl;
+                });
                 ++warnCount;
             }
             setReturnS32(ctx, 0);
@@ -726,14 +760,16 @@ namespace ps2_stubs
         }
         if (shouldLog)
         {
-            auto flags = std::cerr.flags();
-            std::cerr << "[sceSifSetReg] reg=0x" << std::hex << reg
-                      << " prev=0x" << prev
-                      << " value=0x" << value
-                      << " pc=0x" << (ctx ? ctx->pc : 0u)
-                      << " ra=0x" << (ctx ? getRegU32(ctx, 31) : 0u)
-                      << std::dec << std::endl;
-            std::cerr.flags(flags);
+            PS2_IF_AGRESSIVE_LOGS({
+                auto flags = std::cerr.flags();
+                std::cerr << "[sceSifSetReg] reg=0x" << std::hex << reg
+                          << " prev=0x" << prev
+                          << " value=0x" << value
+                          << " pc=0x" << (ctx ? ctx->pc : 0u)
+                          << " ra=0x" << (ctx ? getRegU32(ctx, 31) : 0u)
+                          << std::dec << std::endl;
+                std::cerr.flags(flags);
+            });
         }
         setReturnU32(ctx, prev);
     }

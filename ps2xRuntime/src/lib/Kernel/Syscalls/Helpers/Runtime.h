@@ -452,14 +452,16 @@ static bool rpcInvokeFunction(uint8_t *rdram, R5900Context *ctx, PS2Runtime *run
     const uint32_t logIndex = s_rpcInvokeFailureLogs.fetch_add(1u, std::memory_order_relaxed);
     if (logIndex < kMaxRpcInvokeFailureLogs)
     {
-        std::cerr << "[SyscallOverride:invoke-failed]"
-                  << " func=0x" << std::hex << funcAddr
-                  << " exitPc=0x" << tmp.pc
-                  << " ra=0x" << getRegU32(&tmp, 31)
-                  << std::dec
-                  << " steps=" << steps
-                  << " reason=" << rpcInvokeExitReasonName(exitReason)
-                  << std::endl;
+        PS2_IF_AGRESSIVE_LOGS({
+            std::cerr << "[SyscallOverride:invoke-failed]"
+                      << " func=0x" << std::hex << funcAddr
+                      << " exitPc=0x" << tmp.pc
+                      << " ra=0x" << getRegU32(&tmp, 31)
+                      << std::dec
+                      << " steps=" << steps
+                      << " reason=" << rpcInvokeExitReasonName(exitReason)
+                      << std::endl;
+        });
     }
 
     return false;

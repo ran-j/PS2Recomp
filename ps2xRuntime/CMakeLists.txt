@@ -9,7 +9,7 @@ option(PS2X_ENABLE_RUNNER_UNITY_BUILD "Build ps2EntryRunner with CMake unity bui
 set(PS2X_RUNNER_UNITY_BUILD_BATCH_SIZE 8 CACHE STRING "Unity build batch size for ps2EntryRunner")
 option(PS2X_ENABLE_SCCACHE "Use sccache as compiler launcher when available" ON)
 
-option(PS2X_ENABLE_RUNTIME_LOGS "Enable PS2 runtime logs" ON)
+option(PS2X_ENABLE_RUNTIME_LOGS "Enable PS2 runtime logs" OFF)
 option(PS2X_ENABLE_AGRESSIVE_LOGS "Enable very verbose/agressive PS2 runtime logs" OFF)
 option(PS2X_SHOW_WINDOWS_CONSOLE "Show a console window for ps2EntryRunner on Windows release builds" ON)
 
@@ -65,6 +65,45 @@ else()
         GIT_PROGRESS TRUE
     )
     FetchContent_MakeAvailable(raylib)
+
+    FetchContent_Declare(
+        imgui
+        GIT_REPOSITORY https://github.com/ocornut/imgui.git
+        GIT_TAG        "docking"
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_GetProperties(imgui)
+    if(NOT imgui_POPULATED)
+        FetchContent_Populate(imgui)
+    endif()
+    set(PS2X_IMGUI_SOURCE_DIR "${imgui_SOURCE_DIR}")
+
+    add_library(imgui STATIC
+        "${PS2X_IMGUI_SOURCE_DIR}/imgui.cpp"
+        "${PS2X_IMGUI_SOURCE_DIR}/imgui_draw.cpp"
+        "${PS2X_IMGUI_SOURCE_DIR}/imgui_tables.cpp"
+        "${PS2X_IMGUI_SOURCE_DIR}/imgui_widgets.cpp"
+        "${PS2X_IMGUI_SOURCE_DIR}/imgui_demo.cpp"
+    )
+    target_include_directories(imgui PUBLIC "${PS2X_IMGUI_SOURCE_DIR}")
+
+    FetchContent_Declare(
+        rlImGui
+        GIT_REPOSITORY https://github.com/raylib-extras/rlImGui.git
+        GIT_TAG        "Raylib_5_5"
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_GetProperties(rlImGui)
+    if(NOT rlimgui_POPULATED)
+        FetchContent_Populate(rlImGui)
+    endif()
+    set(PS2X_RLIMGUI_SOURCE_DIR "${rlimgui_SOURCE_DIR}")
+
+    add_library(rlImGui STATIC
+        "${PS2X_RLIMGUI_SOURCE_DIR}/rlImGui.cpp"
+    )
+    target_include_directories(rlImGui PUBLIC "${PS2X_RLIMGUI_SOURCE_DIR}")
+    target_link_libraries(rlImGui PUBLIC raylib imgui)
 endif()
 
 add_library(ps2_host_backend INTERFACE)
@@ -294,6 +333,7 @@ add_library(ps2_runtime STATIC
     src/lib/ps2_audio.cpp
     src/lib/ps2_audio_vag.cpp
     src/lib/ps2_gs_gpu.cpp
+    src/lib/ps2_gs_memory.cpp
     src/lib/ps2_gs_rasterizer.cpp
     src/lib/ps2_iop.cpp
     src/lib/ps2_iop_audio.cpp
@@ -370,6 +410,14 @@ target_link_libraries(ps2EntryRunner
     PRIVATE
     ps2_runtime
 )
+
+if(NOT PS2X_IS_VITA)
+    target_sources(ps2EntryRunner PRIVATE
+        src/lib/ps2_debug_panel.cpp
+    )
+    target_link_libraries(ps2EntryRunner PRIVATE rlImGui imgui)
+    target_compile_definitions(ps2EntryRunner PRIVATE PS2X_ENABLE_DEBUG_UI=1)
+endif()
 
 ps2x_stage_ffmpeg_runtime_dlls(ps2EntryRunner)
 

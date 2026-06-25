@@ -1,7 +1,6 @@
 #include "runtime/ps2_memory.h"
 #include "ps2_log.h"
 #include <atomic>
-#include <iostream>
 #include <cstring>
 #include <stdexcept>
 #include <algorithm>
@@ -970,7 +969,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
             const uint32_t qwc = m_ioRegisters[channelBase + 0x20];
             m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
 
-            if ((channelBase == 0x1000A000 || channelBase == 0x10009000) && m_gsVRAM)
+            if ((channelBase == 0x1000A000u || channelBase == 0x10009000u || channelBase == 0x10008000u) &&
+                (m_gsVRAM || channelBase == 0x10008000u))
             {
                 auto enqueueTransfer = [&](uint32_t srcAddr, uint32_t qwCount)
                 {
@@ -981,10 +981,12 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     pt.fromScratchpad = scratch;
                     pt.srcAddr = srcAddr;
                     pt.qwc = qwCount;
-                    if (channelBase == 0x1000A000)
+                    if (channelBase == 0x1000A000u)
                         m_pendingGifTransfers.push_back(pt);
-                    else if (channelBase == 0x10009000)
+                    else if (channelBase == 0x10009000u)
                         m_pendingVif1Transfers.push_back(pt);
+                    else if (channelBase == 0x10008000u)
+                        m_pendingVif0Transfers.push_back(pt);
                 };
 
                 uint32_t chcr = value;
@@ -1009,8 +1011,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         const uint64_t bytes64 = static_cast<uint64_t>(qwCount) * 16ull;
                         uint32_t bytes = (bytes64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu : static_cast<uint32_t>(bytes64);
                         const bool scratch = isScratchpad(srcAddr);
-                        uint32_t src = 0; 
-                        src = translateAddress(srcAddr); 
+                        uint32_t src = 0;
+                        src = translateAddress(srcAddr);
                         const uint8_t *base2;
                         uint32_t maxSz2;
                         if (scratch)
@@ -1023,6 +1025,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             base2 = m_rdram;
                             maxSz2 = PS2_RAM_SIZE;
                         }
+
                         while (bytes > 0)
                         {
                             if (src >= maxSz2)
@@ -1049,7 +1052,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         if (tagPhys + 16u > localMax)
                             return;
 
-                        // VIF1 packet helpers embed 8 bytes of VIF stream in the DMAtag's upper half.
+                        // VIF packet helpers embed 8 bytes of VIF stream in the DMAtag's upper half.
                         chainBuf.insert(chainBuf.end(), localBase + tagPhys + 8u, localBase + tagPhys + 16u);
                         appendData(localTagAddr + 16u, qwCount);
                     };
@@ -1160,13 +1163,16 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             break;
                         }
 
+                        const bool compactVifLocalTag =
+                            (channelBase == 0x10009000u || channelBase == 0x10008000u) &&
+                            (id == 1u || id == 2u || id == 5u || id == 6u || id == 7u);
+                        if (compactVifLocalTag)
+                            appendCompactVif1TagData(currentTagAddr, 0u);
+
                         if (hasPayload)
                         {
-                            const bool compactVif1LocalPayload =
-                                (channelBase == 0x10009000u) &&
-                                (id == 1u || id == 2u || id == 5u || id == 6u || id == 7u);
-                            if (compactVif1LocalPayload)
-                                appendCompactVif1TagData(currentTagAddr, tagQwc);
+                            if (compactVifLocalTag)
+                                appendData(currentTagAddr + 16u, tagQwc);
                             else
                                 appendData(dataAddr, tagQwc);
                         }
@@ -1193,9 +1199,13 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         {
                             m_pendingGifTransfers.push_back(std::move(pt));
                         }
-                        else if (channelBase == 0x10009000)
+                        else if (channelBase == 0x10009000u)
                         {
                             m_pendingVif1Transfers.push_back(std::move(pt));
+                        }
+                        else if (channelBase == 0x10008000u)
+                        {
+                            m_pendingVif0Transfers.push_back(std::move(pt));
                         }
                     }
                     // else if (channelBase == 0x10009000u)
@@ -1301,6 +1311,64 @@ void PS2Memory::processPendingTransfers()
     }
     m_pendingGifTransfers.clear();
 
+    const bool hadVif0 = !m_pendingVif0Transfers.empty();
+    for (auto &p : m_pendingVif0Transfers)
+    {
+        if (!p.chainData.empty())
+        {
+            processVIF0Data(p.chainData.data(), static_cast<uint32_t>(p.chainData.size()));
+        }
+        else if (p.qwc > 0)
+        {
+            uint32_t srcPhys = 0;
+            const uint64_t bytes64 = static_cast<uint64_t>(p.qwc) * 16ull;
+            uint32_t sizeBytes = (bytes64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu : static_cast<uint32_t>(bytes64);
+            try
+            {
+                srcPhys = translateAddress(p.srcAddr);
+            }
+            catch (const std::exception &)
+            {
+                continue;
+            }
+            if (p.fromScratchpad)
+            {
+                uint32_t bytesLeft = sizeBytes;
+                while (bytesLeft > 0)
+                {
+                    if (srcPhys >= PS2_SCRATCHPAD_SIZE)
+                        srcPhys = 0;
+                    uint32_t chunk = bytesLeft;
+                    if (srcPhys + chunk > PS2_SCRATCHPAD_SIZE)
+                        chunk = PS2_SCRATCHPAD_SIZE - srcPhys;
+                    if (chunk == 0)
+                        break;
+                    processVIF0Data(m_scratchpad + srcPhys, chunk);
+                    bytesLeft -= chunk;
+                    srcPhys += chunk;
+                }
+            }
+            else
+            {
+                uint32_t bytesLeft = sizeBytes;
+                while (bytesLeft > 0)
+                {
+                    if (srcPhys >= PS2_RAM_SIZE)
+                        srcPhys = 0;
+                    uint32_t chunk = bytesLeft;
+                    if (srcPhys + chunk > PS2_RAM_SIZE)
+                        chunk = PS2_RAM_SIZE - srcPhys;
+                    if (chunk == 0)
+                        break;
+                    processVIF0Data(srcPhys, chunk);
+                    bytesLeft -= chunk;
+                    srcPhys += chunk;
+                }
+            }
+        }
+    }
+    m_pendingVif0Transfers.clear();
+
     const bool hadVif1 = !m_pendingVif1Transfers.empty();
     for (auto &p : m_pendingVif1Transfers)
     {
@@ -1363,6 +1431,7 @@ void PS2Memory::processPendingTransfers()
         m_gifArbiter->drain();
 
     static constexpr uint32_t GIF_CHANNEL = 0x1000A000;
+    static constexpr uint32_t VIF0_CHANNEL = 0x10008000;
     static constexpr uint32_t VIF1_CHANNEL = 0x10009000;
     static constexpr uint32_t D_STAT = 0x1000E010u;
 
@@ -1386,6 +1455,12 @@ void PS2Memory::processPendingTransfers()
         raiseDStatChannel(2u); // GIF channel
         m_ioRegisters[GIF_CHANNEL + 0x00] &= ~0x100u;
         m_ioRegisters[GIF_CHANNEL + 0x20] = 0;
+    }
+    if (hadVif0)
+    {
+        raiseDStatChannel(0u); // VIF0 channel
+        m_ioRegisters[VIF0_CHANNEL + 0x00] &= ~0x100u;
+        m_ioRegisters[VIF0_CHANNEL + 0x20] = 0;
     }
     if (hadVif1)
     {

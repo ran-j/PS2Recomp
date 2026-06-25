@@ -1288,17 +1288,20 @@ void register_ps2_runtime_expansion_tests()
 
             mem.vif1_regs.base = 4u;
             mem.vif1_regs.ofst = 2u;
-            mem.vif1_regs.itop = 0x21u;
+            mem.vif1_regs.tops = 4u;
+            mem.vif1_regs.itops = 0x21u;
             mem.vif1_regs.stat &= ~(1u << 7); // DBF = 0
 
             uint32_t callbackPc = 0xFFFFFFFFu;
+            uint32_t callbackTop = 0xFFFFFFFFu;
             uint32_t callbackItop = 0xFFFFFFFFu;
             uint32_t callbackCount = 0u;
-            mem.setVu1MscalCallback([&](uint32_t startPC, uint32_t itop)
+            mem.setVu1MscalCallback([&](uint32_t startPC, uint32_t top, uint32_t itop)
             {
                 callbackPc = startPC;
+                callbackTop = top;
                 callbackItop = itop;
-                callbackCount++;
+                ++callbackCount;
             });
 
             const uint32_t mscal = makeVifCmd(0x14u, 0u, 3u); // start PC = 3 * 8
@@ -1306,8 +1309,10 @@ void register_ps2_runtime_expansion_tests()
 
             t.Equals(callbackCount, 1u, "MSCAL should invoke VU1 callback exactly once");
             t.Equals(callbackPc, 24u, "MSCAL should pass startPC=imm*8");
-            t.Equals(callbackItop, 0x21u, "MSCAL callback should receive current ITOP");
-            t.Equals(mem.vif1_regs.itops, 0x21u, "MSCAL should latch ITOPS from ITOP");
+            t.Equals(callbackTop, 4u, "MSCAL callback should receive current TOPS");
+            t.Equals(callbackItop, 0x21u, "MSCAL callback should receive pending ITOPS");
+            t.Equals(mem.vif1_regs.top, 4u, "MSCAL should latch TOP from TOPS");
+            t.Equals(mem.vif1_regs.itop, 0x21u, "MSCAL should latch ITOP from ITOPS");
             t.IsTrue((mem.vif1_regs.stat & (1u << 7)) != 0u, "MSCAL should toggle DBF on");
             t.Equals(mem.vif1_regs.tops, 6u, "DBF=1 should make TOPS=BASE+OFST");
 
@@ -1317,7 +1322,8 @@ void register_ps2_runtime_expansion_tests()
             t.Equals(callbackCount, 1u, "MSCNT should not invoke MSCAL callback");
             t.IsTrue((mem.vif1_regs.stat & (1u << 7)) == 0u, "MSCNT should toggle DBF back off");
             t.Equals(mem.vif1_regs.tops, 4u, "DBF=0 should make TOPS=BASE");
-            t.Equals(mem.vif1_regs.itops, 0x21u, "MSCNT should refresh ITOPS from ITOP");
+            t.Equals(mem.vif1_regs.top, 6u, "MSCNT should latch TOP from current TOPS before toggling");
+            t.Equals(mem.vif1_regs.itop, 0x21u, "MSCNT should keep latching ITOP from ITOPS");
         });
 
         tc.Run("VU0 microprogram executes against VU0 code and data memory", [](TestCase &t)
@@ -1367,7 +1373,12 @@ void register_ps2_runtime_expansion_tests()
                 (1ull << 16) |  // FBW
                 (0ull << 24) |  // PSM CT32
                 (0ull << 32);   // FBMSK
+
+            const uint64_t zbuf1 = (1ull << 32);
+
             gs.writeRegister(GS_REG_FRAME_1, frame1);
+            gs.writeRegister(GS_REG_ZBUF_1, zbuf1);
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
 
             // XYOFFSET=1,1 pixels (16.4 fixed point).
             const uint64_t xyoffset = (16ull) | (16ull << 32);
@@ -1422,9 +1433,12 @@ void register_ps2_runtime_expansion_tests()
                 (1ull << 16) |  // FBW
                 (0ull << 24) |  // PSM CT32
                 (0ull << 32);   // FBMSK
+            const uint64_t zbuf1 = (1ull << 32);
             gs.writeRegister(GS_REG_FRAME_1, frame1);
+            gs.writeRegister(GS_REG_ZBUF_1, zbuf1);
             gs.writeRegister(GS_REG_SCISSOR_1, (0ull) | (4ull << 16) | (0ull << 32) | (4ull << 48));
             gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
 
             const uint32_t pxOff = frameOffsetBytes(1u, 1u, 1u);
             vram[pxOff + 0u] = 40u;
@@ -1537,7 +1551,7 @@ void register_ps2_runtime_expansion_tests()
                         R5900Context pollCtx{};
                         setRegU32(pollCtx, 4, static_cast<uint32_t>(sid));
                         PollSema(rdram.data(), &pollCtx, &runtime);
-                        if (getRegS32(pollCtx, 2) == KE_OK)
+                        if (getRegS32(pollCtx, 2) == sid)
                         {
                             pollOkCount.fetch_add(1, std::memory_order_relaxed);
                         }
@@ -1558,7 +1572,7 @@ void register_ps2_runtime_expansion_tests()
                         R5900Context signalCtx{};
                         setRegU32(signalCtx, 4, static_cast<uint32_t>(sid));
                         SignalSema(rdram.data(), &signalCtx, &runtime);
-                        if (getRegS32(signalCtx, 2) == KE_OK)
+                        if (getRegS32(signalCtx, 2) == sid)
                         {
                             signalOkCount.fetch_add(1, std::memory_order_relaxed);
                         }

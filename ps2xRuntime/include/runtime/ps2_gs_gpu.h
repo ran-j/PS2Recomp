@@ -1,11 +1,16 @@
 #ifndef PS2_GS_GPU_H
 #define PS2_GS_GPU_H
 
-#include "ps2_gs_rasterizer.h"
+#include <array>
+#include <cstddef>
+#include <functional>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
 #include <vector>
+
+#include "ps2_gs_rasterizer.h"
+#include "ps2_gs_memory.h"
 
 enum GSPrimType : uint8_t
 {
@@ -105,7 +110,9 @@ enum GSRegId : uint8_t
 
 struct GSVertex
 {
-    float x, y, z;
+    float x, y;
+    // double because float isnt accurate enough for values near UINT32_MAX
+    double z;
     uint8_t r, g, b, a;
     float q;
     float s, t;
@@ -119,6 +126,13 @@ struct GSFrameReg
     uint32_t fbw;
     uint8_t psm;
     uint32_t fbmsk;
+};
+
+struct GSZbufReg
+{
+    u32 zbp;
+    u8 psm;
+    bool zmask;
 };
 
 struct GSScissorReg
@@ -168,7 +182,7 @@ struct GSContext
     GSScissorReg scissor;
     GSTex0Reg tex0;
     GSXYOffsetReg xyoffset;
-    uint64_t zbuf;
+    GSZbufReg zbuf;
     uint64_t tex1;
     uint64_t clamp;
     uint64_t alpha;
@@ -211,6 +225,88 @@ struct GSTrxReg
     uint16_t rrw, rrh;
 };
 
+struct GSDebugSnapshot
+{
+    GSContext ctx[2]{};
+    GSPrimReg prim{};
+    GSTexaReg texa{};
+    GSTexClutReg texclut{};
+    GSBitBltBuf bitbltbuf{};
+    GSTrxPos trxpos{};
+    GSTrxReg trxreg{};
+    uint32_t trxdir = 0;
+    uint32_t transferX = 0;
+    uint32_t transferY = 0;
+    uint32_t transferTotalPixels = 0;
+    uint32_t transferCopiedPixels = 0;
+    uint32_t lastDisplayBaseBytes = 0;
+    GSFrameReg preferredDisplaySourceFrame{};
+    uint32_t preferredDisplayDestFbp = 0;
+    bool hasPreferredDisplaySource = false;
+    uint32_t hostPresentationWidth = 0;
+    uint32_t hostPresentationHeight = 0;
+    uint32_t hostPresentationDisplayFbp = 0;
+    uint32_t hostPresentationSourceFbp = 0;
+    bool hostPresentationUsedPreferred = false;
+    bool hasHostPresentationFrame = false;
+    size_t localToHostPendingBytes = 0;
+};
+
+enum class GSDebugEventKind : uint8_t
+{
+    GifTag = 0,
+    Register = 1,
+    Draw = 2,
+    Transfer = 3,
+    Present = 4,
+};
+
+struct GSDebugHistoryEntry
+{
+    uint64_t seq = 0;
+    uint64_t vsyncTick = 0;
+    uint32_t frameIndex = 0;
+    GSDebugEventKind kind = GSDebugEventKind::Register;
+
+    uint8_t reg = 0;
+    uint64_t regValue = 0;
+
+    uint32_t gifSizeBytes = 0;
+    uint32_t gifNloop = 0;
+    uint8_t gifFlg = 0;
+    uint8_t gifNreg = 0;
+
+    GSPrimReg prim{};
+    GSFrameReg frame{};
+    GSZbufReg zbuf{};
+    GSTex0Reg tex0{};
+    GSScissorReg scissor{};
+    uint64_t test = 0;
+    uint64_t alpha = 0;
+
+    uint32_t vertexCount = 0;
+    float xMin = 0.0f;
+    float xMax = 0.0f;
+    float yMin = 0.0f;
+    float yMax = 0.0f;
+    double zMin = 0.0;
+    double zMax = 0.0;
+    uint8_t aMin = 0;
+    uint8_t aMax = 0;
+
+    GSBitBltBuf bitbltbuf{};
+    GSTrxPos trxpos{};
+    GSTrxReg trxreg{};
+    uint32_t trxdir = 0;
+    uint32_t transferPixels = 0;
+
+    uint32_t displayFbp = 0;
+    uint32_t sourceFbp = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    bool usedPreferred = false;
+};
+
 class GSRasterizer;
 
 class GS
@@ -234,6 +330,11 @@ public:
     {
         return m_ctx[(index != 0) ? 1 : 0].frame;
     }
+    GSDebugSnapshot getDebugSnapshot() const;
+    std::vector<GSDebugHistoryEntry> getDebugHistory() const;
+    void clearDebugHistory();
+    bool isDebugHistoryPaused() const;
+    void setDebugHistoryPaused(bool paused);
     bool getPreferredDisplaySource(GSFrameReg &outSource, uint32_t &outDestFbp) const;
     void latchHostPresentationFrame();
     bool tryLatchHostPresentationFrame();
@@ -250,11 +351,22 @@ public:
 
     void refreshDisplaySnapshot();
 
+    inline void WriteVram(u32 psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value);
+    inline u32 ReadVram(u32 psm, u32 base, u32 bw, u32 x, u32 y) const;
+
 private:
     void snapshotVRAM();
     void writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi);
     void vertexKick(bool drawing);
     void latchHostPresentationFrameUnlocked();
+
+    void recordDebugEventUnlocked(GSDebugHistoryEntry entry);
+    GSDebugHistoryEntry makeDebugEventUnlocked(GSDebugEventKind kind) const;
+    void recordGifTagDebugEventUnlocked(uint32_t sizeBytes, uint32_t nloop, uint8_t flg, uint32_t nreg);
+    void recordRegisterDebugEventUnlocked(uint8_t regAddr, uint64_t value);
+    void recordDrawDebugEventUnlocked(int vertexCount);
+    void recordTransferDebugEventUnlocked();
+    void recordPresentDebugEventUnlocked(uint32_t displayFbp, uint32_t sourceFbp, uint32_t width, uint32_t height, bool usedPreferred);
 
     void processImageData(const uint8_t *data, uint32_t sizeBytes);
     void performLocalToLocalTransfer();
@@ -294,8 +406,14 @@ private:
     GSTrxPos m_trxpos{};
     GSTrxReg m_trxreg{};
     uint32_t m_trxdir = 3;
-    uint32_t m_hwregX = 0;
-    uint32_t m_hwregY = 0;
+
+    struct
+    {
+        uint32_t x{ 0 };
+        uint32_t y{ 0 };
+        uint32_t total_pixels{ 0 };
+        uint32_t copied_pixels{ 0 };
+    } m_transferState;
 
     static constexpr int kMaxVerts = 6;
     GSVertex m_vtxQueue[kMaxVerts];
@@ -319,7 +437,32 @@ private:
     std::vector<uint8_t> m_localToHostBuffer;
     size_t m_localToHostReadPos = 0;
 
+    static constexpr size_t kDebugHistoryCapacity = 512;
+    std::array<GSDebugHistoryEntry, kDebugHistoryCapacity> m_debugHistory{};
+    size_t m_debugHistoryWrite = 0;
+    size_t m_debugHistoryCount = 0;
+    uint64_t m_debugNextSeq = 1;
+    uint32_t m_debugFrameIndex = 0;
+    uint64_t m_debugLastVsyncTick = UINT64_MAX;
+    bool m_debugHistoryPaused = false;
+
     GSRasterizer m_rasterizer;
+
+    using WriteVramFunc = std::function<void(u8*, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t)>;
+    using ReadVramFunc = std::function<u32(u8*, u32, u32, u32, u32)>;
+
+    std::array<ReadVramFunc, 0x3F> m_read_vram_funcs{ };
+    std::array<WriteVramFunc, 0x3F> m_write_vram_funcs{ };
 };
+
+inline u32 GS::ReadVram(u32 psm, u32 base, u32 bw, u32 x, u32 y) const
+{
+    return m_read_vram_funcs[psm & 0x3F](m_vram, base, bw, x, y);
+}
+
+inline void GS::WriteVram(u32 psm, u32 base, u32 bw, u32 x, u32 y, u32 value)
+{
+    m_write_vram_funcs[psm & 0x3F](m_vram, base, bw, x, y, value);
+}
 
 #endif
