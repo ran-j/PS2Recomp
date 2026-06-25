@@ -1,6 +1,8 @@
-#include <cstddef>
-#include <cstdint>
-
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+
 inline std::unordered_map<int, FILE *> g_fileDescriptors;
 inline int g_nextFd = 3; // Start after stdin, stdout, stderr
 
@@ -681,4 +683,3 @@ inline std::unordered_map<int32_t, SifModuleRecord> g_sif_modules_by_id;
 inline std::unordered_map<std::string, int32_t> g_sif_module_id_by_path;
 inline int32_t g_next_sif_module_id = 1;
 inline uint32_t g_sif_module_log_count = 0;
-

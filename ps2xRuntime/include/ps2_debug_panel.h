@@ -17,9 +17,7 @@ public:
 private:
     bool m_initialized = false;
     bool m_visible = true;
-    bool m_showImGuiDemo = false;
     bool m_showRegisters = true;
-    bool m_showMemoryDump = true;
     unsigned int m_memoryAddress = 0x00100000u;
     unsigned int m_memoryBytes = 0x100u;
 };

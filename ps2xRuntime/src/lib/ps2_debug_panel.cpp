@@ -1,6 +1,7 @@
 #include "ps2_debug_panel.h"
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
+#include "ps2_log.h"
 
 #include <unordered_set>
 #include "Kernel/Syscalls/Helpers/State.h"
@@ -21,6 +22,8 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <exception>
 #include <iomanip>
 #include <mutex>
 #include <sstream>
@@ -200,6 +203,135 @@ namespace
         }
     }
 
+    const char *gsDebugEventKindName(GSDebugEventKind kind)
+    {
+        switch (kind)
+        {
+        case GSDebugEventKind::GifTag:
+            return "GIF";
+        case GSDebugEventKind::Register:
+            return "REG";
+        case GSDebugEventKind::Draw:
+            return "DRAW";
+        case GSDebugEventKind::Transfer:
+            return "XFER";
+        case GSDebugEventKind::Present:
+            return "PRESENT";
+        default:
+            return "?";
+        }
+    }
+
+    const char *gifFormatName(uint8_t flg)
+    {
+        switch (flg)
+        {
+        case GIF_FMT_PACKED:
+            return "PACKED";
+        case GIF_FMT_REGLIST:
+            return "REGLIST";
+        case GIF_FMT_IMAGE:
+            return "IMAGE";
+        case GIF_FMT_DISABLED:
+            return "DISABLED";
+        default:
+            return "?";
+        }
+    }
+
+    const char *gsRegName(uint8_t reg)
+    {
+        switch (reg)
+        {
+        case GS_REG_PRIM:
+            return "PRIM";
+        case GS_REG_RGBAQ:
+            return "RGBAQ";
+        case GS_REG_ST:
+            return "ST";
+        case GS_REG_UV:
+            return "UV";
+        case GS_REG_XYZF2:
+            return "XYZF2";
+        case GS_REG_XYZ2:
+            return "XYZ2";
+        case GS_REG_TEX0_1:
+            return "TEX0_1";
+        case GS_REG_TEX0_2:
+            return "TEX0_2";
+        case GS_REG_CLAMP_1:
+            return "CLAMP_1";
+        case GS_REG_CLAMP_2:
+            return "CLAMP_2";
+        case GS_REG_XYZF3:
+            return "XYZF3";
+        case GS_REG_XYZ3:
+            return "XYZ3";
+        case GS_REG_TEX1_1:
+            return "TEX1_1";
+        case GS_REG_TEX1_2:
+            return "TEX1_2";
+        case GS_REG_TEX2_1:
+            return "TEX2_1";
+        case GS_REG_TEX2_2:
+            return "TEX2_2";
+        case GS_REG_XYOFFSET_1:
+            return "XYOFFSET_1";
+        case GS_REG_XYOFFSET_2:
+            return "XYOFFSET_2";
+        case GS_REG_PRMODECONT:
+            return "PRMODECONT";
+        case GS_REG_PRMODE:
+            return "PRMODE";
+        case GS_REG_TEXCLUT:
+            return "TEXCLUT";
+        case GS_REG_TEXA:
+            return "TEXA";
+        case GS_REG_SCISSOR_1:
+            return "SCISSOR_1";
+        case GS_REG_SCISSOR_2:
+            return "SCISSOR_2";
+        case GS_REG_ALPHA_1:
+            return "ALPHA_1";
+        case GS_REG_ALPHA_2:
+            return "ALPHA_2";
+        case GS_REG_TEST_1:
+            return "TEST_1";
+        case GS_REG_TEST_2:
+            return "TEST_2";
+        case GS_REG_FBA_1:
+            return "FBA_1";
+        case GS_REG_FBA_2:
+            return "FBA_2";
+        case GS_REG_FRAME_1:
+            return "FRAME_1";
+        case GS_REG_FRAME_2:
+            return "FRAME_2";
+        case GS_REG_ZBUF_1:
+            return "ZBUF_1";
+        case GS_REG_ZBUF_2:
+            return "ZBUF_2";
+        case GS_REG_BITBLTBUF:
+            return "BITBLTBUF";
+        case GS_REG_TRXPOS:
+            return "TRXPOS";
+        case GS_REG_TRXREG:
+            return "TRXREG";
+        case GS_REG_TRXDIR:
+            return "TRXDIR";
+        case GS_REG_HWREG:
+            return "HWREG";
+        case GS_REG_SIGNAL:
+            return "SIGNAL";
+        case GS_REG_FINISH:
+            return "FINISH";
+        case GS_REG_LABEL:
+            return "LABEL";
+        default:
+            return "?";
+        }
+    }
+
     void textHex32(const char *label, uint32_t value)
     {
         ImGui::Text("%s: 0x%08X", label, value);
@@ -212,7 +344,17 @@ namespace
 
     uint32_t readGuestU32NoThrow(uint8_t *rdram, uint32_t addr)
     {
+        if (!rdram || addr == 0u)
+        {
+            return 0u;
+        }
+
         uint8_t *ptr = getMemPtr(rdram, addr);
+        if (!ptr)
+        {
+            return 0u;
+        }
+
         uint32_t value = 0u;
         std::memcpy(&value, ptr, sizeof(value));
         return value;
@@ -231,6 +373,226 @@ namespace
     {
         const std::string value = pathToString(path);
         ImGui::Text("%s: %s", label, value.c_str());
+    }
+
+    std::filesystem::path makeDebugDumpPath(const char *name, uint32_t frameIndex)
+    {
+        static uint32_t s_dumpCounter = 0u;
+        std::filesystem::path dir = std::filesystem::current_path() / "ps2_debug_dumps";
+        std::filesystem::create_directories(dir);
+
+        char fileName[128]{};
+        std::snprintf(fileName,
+                      sizeof(fileName),
+                      "%s_frame_%08X_%04u.txt",
+                      name,
+                      frameIndex,
+                      ++s_dumpCounter);
+        return dir / fileName;
+    }
+
+    void dumpGsContext(std::ostream &out, const char *label, const GSContext &ctx)
+    {
+        out << label << "\n";
+        out << "  FRAME  fbp=" << ctx.frame.fbp
+            << " fbw=" << static_cast<unsigned int>(ctx.frame.fbw)
+            << " psm=0x" << std::hex << static_cast<unsigned int>(ctx.frame.psm)
+            << " fbmsk=0x" << ctx.frame.fbmsk << std::dec << "\n";
+        out << "  ZBUF   zbp=" << ctx.zbuf.zbp
+            << " psm=0x" << std::hex << static_cast<unsigned int>(ctx.zbuf.psm) << std::dec
+            << " zmask=" << (ctx.zbuf.zmask ? 1u : 0u) << "\n";
+        out << "  SCISSOR x=" << ctx.scissor.x0 << ".." << ctx.scissor.x1
+            << " y=" << ctx.scissor.y0 << ".." << ctx.scissor.y1 << "\n";
+        out << "  TEX0   tbp0=" << ctx.tex0.tbp0
+            << " tbw=" << static_cast<unsigned int>(ctx.tex0.tbw)
+            << " psm=0x" << std::hex << static_cast<unsigned int>(ctx.tex0.psm) << std::dec
+            << " size=" << (1u << ctx.tex0.tw) << "x" << (1u << ctx.tex0.th)
+            << " tcc=" << static_cast<unsigned int>(ctx.tex0.tcc)
+            << " tfx=" << static_cast<unsigned int>(ctx.tex0.tfx)
+            << " cbp=" << ctx.tex0.cbp
+            << " cpsm=0x" << std::hex << static_cast<unsigned int>(ctx.tex0.cpsm) << std::dec
+            << " csm=" << static_cast<unsigned int>(ctx.tex0.csm)
+            << " csa=" << static_cast<unsigned int>(ctx.tex0.csa)
+            << " cld=" << static_cast<unsigned int>(ctx.tex0.cld) << "\n";
+        out << "  XYOFFSET ofx=" << ctx.xyoffset.ofx << " ofy=" << ctx.xyoffset.ofy << "\n";
+        out << "  TEST   0x" << std::hex << std::setw(16) << std::setfill('0') << ctx.test << std::setfill(' ') << std::dec
+            << " ATE=" << ((ctx.test >> 0) & 1ull)
+            << " ATST=" << ((ctx.test >> 1) & 7ull)
+            << " AREF=0x" << std::hex << ((ctx.test >> 4) & 0xffull) << std::dec
+            << " AFAIL=" << ((ctx.test >> 12) & 3ull)
+            << " DATE=" << ((ctx.test >> 14) & 1ull)
+            << " DATM=" << ((ctx.test >> 15) & 1ull)
+            << " ZTE=" << ((ctx.test >> 16) & 1ull)
+            << " ZTST=" << ((ctx.test >> 17) & 3ull) << "\n";
+        out << "  ALPHA  0x" << std::hex << std::setw(16) << std::setfill('0') << ctx.alpha << std::setfill(' ') << std::dec << "\n";
+        out << "  TEX1   0x" << std::hex << std::setw(16) << std::setfill('0') << ctx.tex1 << std::setfill(' ') << std::dec << "\n";
+        out << "  CLAMP  0x" << std::hex << std::setw(16) << std::setfill('0') << ctx.clamp << std::setfill(' ') << std::dec << "\n";
+        out << "  FBA    0x" << std::hex << std::setw(16) << std::setfill('0') << ctx.fba << std::setfill(' ') << std::dec << "\n";
+    }
+
+    bool writeGsDebugDump(const std::filesystem::path &path,
+                          const GSRegisters &regs,
+                          const GSDebugSnapshot &gs,
+                          const std::vector<GSDebugHistoryEntry> &history,
+                          bool currentFrameOnly,
+                          bool drawsOnly,
+                          uint32_t latestFrame,
+                          std::string &error)
+    {
+        try
+        {
+            std::filesystem::create_directories(path.parent_path());
+            std::ofstream out(path, std::ios::out | std::ios::trunc);
+            if (!out)
+            {
+                error = "failed to open output file";
+                return false;
+            }
+
+            out << "PS2 Runtime GS debug dump\n";
+            out << "path: " << path.string() << "\n";
+            out << "latestFrame: " << latestFrame << "\n";
+            out << "filters: currentFrameOnly=" << (currentFrameOnly ? 1u : 0u)
+                << " drawsOnly=" << (drawsOnly ? 1u : 0u) << "\n\n";
+
+            out << "[GS private registers]\n";
+            out << std::hex << std::setfill('0');
+            out << "PMODE    0x" << std::setw(16) << regs.pmode << "\n";
+            out << "SMODE2   0x" << std::setw(16) << regs.smode2 << "\n";
+            out << "DISPFB1  0x" << std::setw(16) << regs.dispfb1 << "\n";
+            out << "DISPLAY1 0x" << std::setw(16) << regs.display1 << "\n";
+            out << "DISPFB2  0x" << std::setw(16) << regs.dispfb2 << "\n";
+            out << "DISPLAY2 0x" << std::setw(16) << regs.display2 << "\n";
+            out << "BGCOLOR  0x" << std::setw(16) << regs.bgcolor << "\n";
+            out << "CSR      0x" << std::setw(16) << regs.csr << "\n";
+            out << "IMR      0x" << std::setw(16) << regs.imr << "\n";
+            out << "BUSDIR   0x" << std::setw(16) << regs.busdir << "\n";
+            out << "SIGLBLID 0x" << std::setw(16) << regs.siglblid << "\n\n";
+            out << std::dec << std::setfill(' ');
+
+            out << "[GS draw state]\n";
+            out << "PRIM type=" << primTypeName(gs.prim.type)
+                << " iip=" << gs.prim.iip
+                << " tme=" << gs.prim.tme
+                << " fge=" << gs.prim.fge
+                << " abe=" << gs.prim.abe
+                << " aa1=" << gs.prim.aa1
+                << " fst=" << gs.prim.fst
+                << " ctxt=" << gs.prim.ctxt
+                << " fix=" << gs.prim.fix << "\n";
+            out << "TEXA ta0=0x" << std::hex << static_cast<unsigned int>(gs.texa.ta0) << std::dec
+                << " aem=" << (gs.texa.aem ? 1u : 0u)
+                << " ta1=0x" << std::hex << static_cast<unsigned int>(gs.texa.ta1) << std::dec
+                << " TEXCLUT cbw=" << gs.texclut.cbw
+                << " cou=" << gs.texclut.cou
+                << " cov=" << gs.texclut.cov << "\n";
+            out << "BITBLT sbp=" << gs.bitbltbuf.sbp
+                << " sbw=" << gs.bitbltbuf.sbw
+                << " spsm=0x" << std::hex << static_cast<unsigned int>(gs.bitbltbuf.spsm) << std::dec
+                << " dbp=" << gs.bitbltbuf.dbp
+                << " dbw=" << gs.bitbltbuf.dbw
+                << " dpsm=0x" << std::hex << static_cast<unsigned int>(gs.bitbltbuf.dpsm) << std::dec << "\n";
+            out << "TRXPOS ss=(" << gs.trxpos.ssax << "," << gs.trxpos.ssay << ")"
+                << " ds=(" << gs.trxpos.dsax << "," << gs.trxpos.dsay << ")"
+                << " dir=" << gs.trxpos.dir
+                << " TRXREG=" << gs.trxreg.rrw << "x" << gs.trxreg.rrh
+                << " TRXDIR=" << gs.trxdir
+                << " copied=" << gs.transferCopiedPixels << "/" << gs.transferTotalPixels
+                << " at=(" << gs.transferX << "," << gs.transferY << ")\n";
+            out << "Host presentation has=" << (gs.hasHostPresentationFrame ? 1u : 0u)
+                << " size=" << gs.hostPresentationWidth << "x" << gs.hostPresentationHeight
+                << " displayFbp=" << gs.hostPresentationDisplayFbp
+                << " sourceFbp=" << gs.hostPresentationSourceFbp
+                << " preferred=" << (gs.hostPresentationUsedPreferred ? 1u : 0u)
+                << " lastDisplayBaseBytes=0x" << std::hex << gs.lastDisplayBaseBytes << std::dec
+                << " localToHostPending=" << gs.localToHostPendingBytes << "\n";
+            out << "Preferred source has=" << (gs.hasPreferredDisplaySource ? 1u : 0u)
+                << " frame fbp=" << gs.preferredDisplaySourceFrame.fbp
+                << " fbw=" << gs.preferredDisplaySourceFrame.fbw
+                << " psm=0x" << std::hex << static_cast<unsigned int>(gs.preferredDisplaySourceFrame.psm) << std::dec
+                << " destFbp=" << gs.preferredDisplayDestFbp << "\n\n";
+
+            out << "[GS context state]\n";
+            dumpGsContext(out, "Context 0", gs.ctx[0]);
+            dumpGsContext(out, "Context 1", gs.ctx[1]);
+            out << "\n";
+
+            out << "[GS history]\n";
+            out << "seq\tframe\ttick\tkind\tprim\tctx\tframe\tzbuf\ttest\talpha\ttex0\txy\tz\ta\tdetail\tpresent\n";
+            for (auto it = history.rbegin(); it != history.rend(); ++it)
+            {
+                const GSDebugHistoryEntry &row = *it;
+                if (currentFrameOnly && row.frameIndex != latestFrame)
+                {
+                    continue;
+                }
+                if (drawsOnly && row.kind != GSDebugEventKind::Draw)
+                {
+                    continue;
+                }
+
+                out << row.seq << '\t'
+                    << row.frameIndex << '\t'
+                    << row.vsyncTick << '\t'
+                    << gsDebugEventKindName(row.kind) << '\t'
+                    << primTypeName(row.prim.type) << '\t'
+                    << (row.prim.ctxt ? 1u : 0u) << '\t'
+                    << "fbp=" << row.frame.fbp << "/fbw=" << static_cast<unsigned int>(row.frame.fbw) << "/psm=0x" << std::hex << static_cast<unsigned int>(row.frame.psm) << std::dec << '\t'
+                    << "zbp=" << row.zbuf.zbp << "/psm=0x" << std::hex << static_cast<unsigned int>(row.zbuf.psm) << std::dec << "/m=" << (row.zbuf.zmask ? 1u : 0u) << '\t'
+                    << "0x" << std::hex << row.test << std::dec << '\t'
+                    << "0x" << std::hex << row.alpha << std::dec << '\t'
+                    << "tbp=" << row.tex0.tbp0 << "/psm=0x" << std::hex << static_cast<unsigned int>(row.tex0.psm) << std::dec << "/size=" << (1u << row.tex0.tw) << "x" << (1u << row.tex0.th) << "/cbp=" << row.tex0.cbp << '\t';
+
+                if (row.kind == GSDebugEventKind::Draw)
+                {
+                    out << row.xMin << ".." << row.xMax << "/" << row.yMin << ".." << row.yMax << '\t'
+                        << row.zMin << ".." << row.zMax << '\t'
+                        << static_cast<unsigned int>(row.aMin) << ".." << static_cast<unsigned int>(row.aMax) << '\t';
+                }
+                else
+                {
+                    out << "-\t-\t-\t";
+                }
+
+                if (row.kind == GSDebugEventKind::GifTag)
+                {
+                    out << gifFormatName(row.gifFlg) << " nloop=" << row.gifNloop << " nreg=" << row.gifNreg << " size=" << row.gifSizeBytes;
+                }
+                else if (row.kind == GSDebugEventKind::Register)
+                {
+                    out << gsRegName(row.reg) << "(0x" << std::hex << static_cast<unsigned int>(row.reg) << ")=0x" << row.regValue << std::dec;
+                }
+                else if (row.kind == GSDebugEventKind::Transfer)
+                {
+                    out << "TRXDIR=" << row.trxdir << " " << row.trxreg.rrw << "x" << row.trxreg.rrh
+                        << " pix=" << row.transferPixels << " sbp=" << row.bitbltbuf.sbp << " dbp=" << row.bitbltbuf.dbp;
+                }
+                else
+                {
+                    out << "-";
+                }
+                out << '\t';
+                if (row.kind == GSDebugEventKind::Present)
+                {
+                    out << row.width << "x" << row.height
+                        << " display=" << row.displayFbp
+                        << " source=" << row.sourceFbp
+                        << " pref=" << (row.usedPreferred ? 1u : 0u);
+                }
+                else
+                {
+                    out << "-";
+                }
+                out << '\n';
+            }
+
+            return true;
+        }
+        catch (const std::exception &ex)
+        {
+            error = ex.what();
+            return false;
+        }
     }
 
     void drawGsContext(const char *label, const GSContext &ctx)
@@ -1154,6 +1516,180 @@ namespace
 
         drawGsContext("Context 0", gs.ctx[0]);
         drawGsContext("Context 1", gs.ctx[1]);
+
+        ImGui::SeparatorText("GS history");
+        bool gsHistoryPaused = runtime.gs().isDebugHistoryPaused();
+        std::vector<GSDebugHistoryEntry> history = runtime.gs().getDebugHistory();
+        uint32_t latestFrame = 0u;
+        if (!history.empty())
+        {
+            latestFrame = history.back().frameIndex;
+        }
+
+        static bool s_gsHistoryCurrentFrameOnly = false;
+        static bool s_gsHistoryDrawsOnly = false;
+        static std::string s_lastGsDumpPath;
+        static std::string s_lastGsDumpError;
+
+        ImGui::Text("Ring entries: %zu / 512%s", history.size(), gsHistoryPaused ? " (paused)" : "");
+        ImGui::SameLine();
+        if (ImGui::Button("Clear GS history"))
+        {
+            runtime.gs().clearDebugHistory();
+            history.clear();
+            latestFrame = 0u;
+        }
+        ImGui::SameLine();
+        if (ImGui::Checkbox("Pause capture", &gsHistoryPaused))
+        {
+            runtime.gs().setDebugHistoryPaused(gsHistoryPaused);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Dump GS TXT"))
+        {
+            s_lastGsDumpError.clear();
+            const std::filesystem::path dumpPath = makeDebugDumpPath("gs_history", latestFrame);
+            if (writeGsDebugDump(dumpPath, regs, gs, history, s_gsHistoryCurrentFrameOnly, s_gsHistoryDrawsOnly, latestFrame, s_lastGsDumpError))
+            {
+                s_lastGsDumpPath = dumpPath.string();
+                ImGui::SetClipboardText(s_lastGsDumpPath.c_str());
+            }
+            else
+            {
+                s_lastGsDumpPath.clear();
+            }
+        }
+        if (gsHistoryPaused)
+        {
+            ImGui::SameLine();
+            ImGui::TextDisabled("history capture stopped");
+        }
+
+        ImGui::Checkbox("Current frame only", &s_gsHistoryCurrentFrameOnly);
+        ImGui::SameLine();
+        ImGui::Checkbox("Draws only", &s_gsHistoryDrawsOnly);
+        if (!s_lastGsDumpPath.empty())
+        {
+            ImGui::TextDisabled("Last dump copied to clipboard: %s", s_lastGsDumpPath.c_str());
+        }
+        if (!s_lastGsDumpError.empty())
+        {
+            ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "Dump failed: %s", s_lastGsDumpError.c_str());
+        }
+
+        if (ImGui::BeginTable("gs_history", 16, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY | ImGuiTableFlags_ScrollX, ImVec2(0, 260)))
+        {
+            ImGui::TableSetupColumn("Seq");
+            ImGui::TableSetupColumn("Frame");
+            ImGui::TableSetupColumn("Tick");
+            ImGui::TableSetupColumn("Kind");
+            ImGui::TableSetupColumn("Prim");
+            ImGui::TableSetupColumn("Ctx");
+            ImGui::TableSetupColumn("FBP/PSM");
+            ImGui::TableSetupColumn("ZBP/PSM");
+            ImGui::TableSetupColumn("TEST");
+            ImGui::TableSetupColumn("ALPHA");
+            ImGui::TableSetupColumn("TEX0");
+            ImGui::TableSetupColumn("XY");
+            ImGui::TableSetupColumn("Z");
+            ImGui::TableSetupColumn("A");
+            ImGui::TableSetupColumn("GIF/REG/XFER");
+            ImGui::TableSetupColumn("Present");
+            ImGui::TableHeadersRow();
+
+            for (auto it = history.rbegin(); it != history.rend(); ++it)
+            {
+                const GSDebugHistoryEntry &row = *it;
+                if (s_gsHistoryCurrentFrameOnly && row.frameIndex != latestFrame)
+                {
+                    continue;
+                }
+                if (s_gsHistoryDrawsOnly && row.kind != GSDebugEventKind::Draw)
+                {
+                    continue;
+                }
+
+                const uint64_t test = row.test;
+                const uint64_t alpha = row.alpha;
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::Text("%llu", static_cast<unsigned long long>(row.seq));
+                ImGui::TableNextColumn();
+                ImGui::Text("%u", row.frameIndex);
+                ImGui::TableNextColumn();
+                ImGui::Text("%llu", static_cast<unsigned long long>(row.vsyncTick));
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(gsDebugEventKindName(row.kind));
+                ImGui::TableNextColumn();
+                ImGui::Text("%s", primTypeName(row.prim.type));
+                ImGui::TableNextColumn();
+                ImGui::Text("%u", row.prim.ctxt ? 1u : 0u);
+                ImGui::TableNextColumn();
+                ImGui::Text("%u/%u/0x%02X", row.frame.fbp, row.frame.fbw, row.frame.psm);
+                ImGui::TableNextColumn();
+                ImGui::Text("%u/0x%02X m=%u", row.zbuf.zbp, row.zbuf.psm, row.zbuf.zmask ? 1u : 0u);
+                ImGui::TableNextColumn();
+                ImGui::Text("ATE=%llu ATST=%llu AREF=%02llX AFAIL=%llu ZTE=%llu ZTST=%llu",
+                            (test >> 0) & 1ull,
+                            (test >> 1) & 7ull,
+                            (test >> 4) & 0xffull,
+                            (test >> 12) & 3ull,
+                            (test >> 16) & 1ull,
+                            (test >> 17) & 3ull);
+                ImGui::TableNextColumn();
+                ImGui::Text("0x%016llX", static_cast<unsigned long long>(alpha));
+                ImGui::TableNextColumn();
+                ImGui::Text("tbp=%u psm=0x%02X %ux%u cbp=%u cpsm=0x%02X",
+                            row.tex0.tbp0,
+                            row.tex0.psm,
+                            1u << row.tex0.tw,
+                            1u << row.tex0.th,
+                            row.tex0.cbp,
+                            row.tex0.cpsm);
+                ImGui::TableNextColumn();
+                if (row.kind == GSDebugEventKind::Draw)
+                    ImGui::Text("%.1f..%.1f / %.1f..%.1f", row.xMin, row.xMax, row.yMin, row.yMax);
+                else
+                    ImGui::TextUnformatted("-");
+                ImGui::TableNextColumn();
+                if (row.kind == GSDebugEventKind::Draw)
+                    ImGui::Text("%.0f..%.0f", row.zMin, row.zMax);
+                else
+                    ImGui::TextUnformatted("-");
+                ImGui::TableNextColumn();
+                if (row.kind == GSDebugEventKind::Draw)
+                    ImGui::Text("%u..%u", row.aMin, row.aMax);
+                else
+                    ImGui::TextUnformatted("-");
+                ImGui::TableNextColumn();
+                if (row.kind == GSDebugEventKind::GifTag)
+                {
+                    ImGui::Text("%s nloop=%u nreg=%u size=%u", gifFormatName(row.gifFlg), row.gifNloop, row.gifNreg, row.gifSizeBytes);
+                }
+                else if (row.kind == GSDebugEventKind::Register)
+                {
+                    ImGui::Text("%s(0x%02X)=0x%016llX", gsRegName(row.reg), row.reg, static_cast<unsigned long long>(row.regValue));
+                }
+                else if (row.kind == GSDebugEventKind::Transfer)
+                {
+                    ImGui::Text("TRXDIR=%u %ux%u pix=%u sbp=%u dbp=%u", row.trxdir, row.trxreg.rrw, row.trxreg.rrh, row.transferPixels, row.bitbltbuf.sbp, row.bitbltbuf.dbp);
+                }
+                else
+                {
+                    ImGui::TextUnformatted("-");
+                }
+                ImGui::TableNextColumn();
+                if (row.kind == GSDebugEventKind::Present)
+                {
+                    ImGui::Text("%ux%u display=%u source=%u pref=%u", row.width, row.height, row.displayFbp, row.sourceFbp, row.usedPreferred ? 1u : 0u);
+                }
+                else
+                {
+                    ImGui::TextUnformatted("-");
+                }
+            }
+            ImGui::EndTable();
+        }
     }
 
     void drawFileCdTab(PS2Runtime &runtime)
@@ -1384,6 +1920,195 @@ namespace
             ImGui::EndTable();
         }
     }
+
+    bool writeRuntimeLogDump(const std::filesystem::path &path,
+                             const std::vector<ps2_log::RuntimeLogEntry> &entries,
+                             ImGuiTextFilter *filter,
+                             std::string &error)
+    {
+        try
+        {
+            std::ofstream out(path, std::ios::out | std::ios::trunc);
+            if (!out.is_open())
+            {
+                error = "failed to open dump path";
+                return false;
+            }
+
+            out << "PS2 runtime log dump\n";
+            out << "entries=" << entries.size() << "\n";
+            out << "filter=" << (filter && filter->IsActive() ? filter->InputBuf : "<none>") << "\n";
+            out << "ps2_log_txt=" << ps2_log::log_path() << "\n";
+            out << "\n";
+            out << "seq\ttext\n";
+
+            for (const ps2_log::RuntimeLogEntry &entry : entries)
+            {
+                if (filter && filter->IsActive() && !filter->PassFilter(entry.text.c_str()))
+                {
+                    continue;
+                }
+                out << entry.seq << '\t' << entry.text;
+                if (entry.text.empty() || entry.text.back() != '\n')
+                {
+                    out << '\n';
+                }
+            }
+            return true;
+        }
+        catch (const std::exception &e)
+        {
+            error = e.what();
+            return false;
+        }
+    }
+
+    void drawLogsTab()
+    {
+        static ImGuiTextFilter s_logFilter;
+        static bool s_autoScroll = true;
+        static bool s_wrapText = false;
+        static bool s_latestFirst = false;
+        static std::string s_lastLogDumpPath;
+        static std::string s_lastLogDumpError;
+
+        bool paused = ps2_log::is_runtime_log_paused();
+        std::vector<ps2_log::RuntimeLogEntry> entries = ps2_log::snapshot_runtime_log_entries();
+
+        ImGui::SeparatorText("Runtime log ring buffer");
+        ImGui::Text("Entries: %zu / %zu%s", entries.size(), ps2_log::kMaxRuntimeLogEntries, paused ? " (paused)" : "");
+        ImGui::TextDisabled("Captures RUNTIME_LOG(...) calls. Direct std::cerr/std::cout writes are still console-only unless routed through RUNTIME_LOG.");
+        ImGui::TextDisabled("Aggressive call trace file: %s", ps2_log::log_path().c_str());
+
+        if (ImGui::Button("Clear logs"))
+        {
+            ps2_log::clear_runtime_log_entries();
+            entries.clear();
+        }
+        ImGui::SameLine();
+        if (ImGui::Checkbox("Pause capture", &paused))
+        {
+            ps2_log::set_runtime_log_paused(paused);
+        }
+        ImGui::SameLine();
+        ImGui::Checkbox("Auto-scroll", &s_autoScroll);
+        ImGui::SameLine();
+        ImGui::Checkbox("Wrap", &s_wrapText);
+        ImGui::SameLine();
+        ImGui::Checkbox("Latest first", &s_latestFirst);
+
+        s_logFilter.Draw("Filter", 260.0f);
+        ImGui::SameLine();
+        if (ImGui::Button("Copy visible"))
+        {
+            std::ostringstream out;
+            auto appendEntry = [&](const ps2_log::RuntimeLogEntry &entry)
+            {
+                if (s_logFilter.IsActive() && !s_logFilter.PassFilter(entry.text.c_str()))
+                {
+                    return;
+                }
+                out << entry.seq << '\t' << entry.text;
+                if (entry.text.empty() || entry.text.back() != '\n')
+                {
+                    out << '\n';
+                }
+            };
+
+            if (s_latestFirst)
+            {
+                for (auto it = entries.rbegin(); it != entries.rend(); ++it)
+                {
+                    appendEntry(*it);
+                }
+            }
+            else
+            {
+                for (const ps2_log::RuntimeLogEntry &entry : entries)
+                {
+                    appendEntry(entry);
+                }
+            }
+            const std::string text = out.str();
+            ImGui::SetClipboardText(text.c_str());
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Dump logs TXT"))
+        {
+            s_lastLogDumpError.clear();
+            const std::filesystem::path dumpPath = makeDebugDumpPath("runtime_log", 0u);
+            if (writeRuntimeLogDump(dumpPath, entries, &s_logFilter, s_lastLogDumpError))
+            {
+                s_lastLogDumpPath = dumpPath.string();
+                ImGui::SetClipboardText(s_lastLogDumpPath.c_str());
+            }
+            else
+            {
+                s_lastLogDumpPath.clear();
+            }
+        }
+
+        if (!s_lastLogDumpPath.empty())
+        {
+            ImGui::TextDisabled("Last dump: %s", s_lastLogDumpPath.c_str());
+        }
+        if (!s_lastLogDumpError.empty())
+        {
+            ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "Dump failed: %s", s_lastLogDumpError.c_str());
+        }
+
+        ImGui::Separator();
+        const ImGuiTableFlags tableFlags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY | ImGuiTableFlags_ScrollX;
+        if (ImGui::BeginTable("runtime_logs", 2, tableFlags, ImVec2(0, 430)))
+        {
+            ImGui::TableSetupColumn("Seq", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+            ImGui::TableSetupColumn("Text", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableHeadersRow();
+
+            auto drawEntry = [&](const ps2_log::RuntimeLogEntry &entry)
+            {
+                if (s_logFilter.IsActive() && !s_logFilter.PassFilter(entry.text.c_str()))
+                {
+                    return;
+                }
+
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::Text("%llu", static_cast<unsigned long long>(entry.seq));
+                ImGui::TableNextColumn();
+                if (s_wrapText)
+                {
+                    ImGui::TextWrapped("%s", entry.text.c_str());
+                }
+                else
+                {
+                    ImGui::TextUnformatted(entry.text.c_str());
+                }
+            };
+
+            if (s_latestFirst)
+            {
+                for (auto it = entries.rbegin(); it != entries.rend(); ++it)
+                {
+                    drawEntry(*it);
+                }
+            }
+            else
+            {
+                for (const ps2_log::RuntimeLogEntry &entry : entries)
+                {
+                    drawEntry(entry);
+                }
+            }
+
+            if (s_autoScroll && !s_latestFirst && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4.0f)
+            {
+                ImGui::SetScrollHereY(1.0f);
+            }
+            ImGui::EndTable();
+        }
+    }
+
 #endif
 }
 
@@ -1430,13 +2155,11 @@ void PS2DebugPanel::draw(PS2Runtime &runtime)
     rlImGuiBegin();
 
     ImGui::SetNextWindowSize(ImVec2(780.0f, 620.0f), ImGuiCond_FirstUseEver);
-    if (ImGui::Begin("PS2 Runtime Debugger", &m_visible, ImGuiWindowFlags_MenuBar))
+    if (ImGui::Begin("Runtime Debugger", &m_visible, ImGuiWindowFlags_MenuBar))
     {
         if (ImGui::BeginMenuBar())
         {
             ImGui::MenuItem("Registers", nullptr, &m_showRegisters);
-            ImGui::MenuItem("Memory dump", nullptr, &m_showMemoryDump);
-            ImGui::MenuItem("ImGui demo", nullptr, &m_showImGuiDemo);
             ImGui::EndMenuBar();
         }
 
@@ -1487,6 +2210,11 @@ void PS2DebugPanel::draw(PS2Runtime &runtime)
                 drawIoTab(runtime);
                 ImGui::EndTabItem();
             }
+            if (ImGui::BeginTabItem("Logs"))
+            {
+                drawLogsTab();
+                ImGui::EndTabItem();
+            }
             if (ImGui::BeginTabItem("Memory"))
             {
                 uint32_t bytes = m_memoryBytes;
@@ -1510,11 +2238,6 @@ void PS2DebugPanel::draw(PS2Runtime &runtime)
         }
     }
     ImGui::End();
-
-    if (m_showImGuiDemo)
-    {
-        ImGui::ShowDemoWindow(&m_showImGuiDemo);
-    }
 
     rlImGuiEnd();
 #else
