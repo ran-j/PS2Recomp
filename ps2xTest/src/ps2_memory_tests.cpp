@@ -9,8 +9,10 @@
 #include "Stubs/GS.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <thread>
 #include <vector>
 
 namespace
@@ -159,6 +161,29 @@ void register_ps2_memory_tests()
             t.Equals(mem.translateAddress(0x30105678u), 0x00105678u, "0x3010 accelerated alias should map to RAM");
             t.Equals(mem.translateAddress(PS2_SCRATCHPAD_BASE + 0x123u), 0x123u, "scratchpad base should translate to local offset");
             t.Equals(mem.translateAddress(PS2_SCRATCHPAD_ALIAS_BASE + 0x123u), 0x123u, "0xF000 scratchpad alias should translate to local offset");
+        });
+
+        tc.Run("EE timer0 count advances while enabled and can be reset", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kTimer0Count = 0x10000000u;
+            constexpr uint32_t kTimer0Mode = 0x10000010u;
+            constexpr uint32_t kTimer0Compare = 0x10000020u;
+
+            t.IsTrue(mem.writeIORegister(kTimer0Count, 0u), "timer count reset write should succeed");
+            t.IsTrue(mem.writeIORegister(kTimer0Compare, 1u), "timer compare write should succeed");
+            t.IsTrue(mem.writeIORegister(kTimer0Mode, 0x283u), "timer mode write should be retained");
+            t.Equals(mem.readIORegister(kTimer0Mode), 0x283u, "timer mode should be readable");
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(3));
+            const uint32_t firstCount = mem.readIORegister(kTimer0Count);
+            t.IsTrue(firstCount > 0u, "enabled timer count should advance from host time");
+
+            t.IsTrue(mem.writeIORegister(kTimer0Count, 0u), "timer count second reset should succeed");
+            const uint32_t resetCount = mem.readIORegister(kTimer0Count);
+            t.IsTrue(resetCount <= firstCount, "timer reset should restart the count window");
         });
 
         tc.Run("scratchpad alias accesses the same bytes as base", [](TestCase &t)
@@ -1246,6 +1271,31 @@ void register_ps2_memory_tests()
                 }
             }
             t.IsTrue(payloadOk, "live VIF1 packet payload should reach the GIF callback");
+        });
+
+        tc.Run("VIF1 DMA chain latches terminal tag bits in CHCR", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kVif1Ch = 0x10009000u;
+            constexpr uint32_t kTag0 = 0x00027400u;
+            constexpr uint32_t kTag1 = kTag0 + 0x20u;
+
+            uint8_t *rdram = mem.getRDRAM();
+            writeDmaTag(rdram, kTag0, makeDmaTag(1u, 1u, 0u, false)); // CNT
+            std::memset(rdram + kTag0 + 0x10u, 0, 0x10u);
+            writeDmaTag(rdram, kTag1, makeDmaTag(0u, 7u, 0u, false)); // END
+
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kTag0), "write VIF1 TADR should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x185u), "write VIF1 CHCR chain start should succeed");
+
+            mem.processPendingTransfers();
+
+            const uint32_t chcr = mem.readIORegister(kVif1Ch + 0x00u);
+            t.Equals(chcr & 0x100u, 0u, "VIF1 STR should clear after DMA chain drain");
+            t.Equals(chcr & 0x70000000u, 0x70000000u, "VIF1 CHCR should expose the terminal END tag id");
+            t.IsTrue((mem.readIORegister(0x1000E010u) & 0x2u) != 0u, "VIF1 DMA completion should raise D_STAT channel bit");
         });
 
         tc.Run("GIF DMA chain CALL sources payload from TADR+16", [](TestCase &t)

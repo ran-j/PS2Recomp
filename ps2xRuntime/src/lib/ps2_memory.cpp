@@ -1,6 +1,7 @@
 #include "runtime/ps2_memory.h"
 #include "ps2_log.h"
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <stdexcept>
 #include <algorithm>
@@ -85,6 +86,28 @@ namespace
         default:
             return nullptr;
         }
+    }
+
+    constexpr uint32_t kEeTimer0Count = 0x10000000u;
+    constexpr uint32_t kEeTimer0Mode = 0x10000010u;
+    constexpr uint32_t kEeTimer0Compare = 0x10000020u;
+    constexpr uint32_t kEeTimer0Hold = 0x10000030u;
+    constexpr uint32_t kEeTimerModeCue = 1u << 7;
+    constexpr uint64_t kEeTimer0TicksPerSecond = 15720ull;
+    constexpr uint64_t kNanosecondsPerSecond = 1000000000ull;
+
+    inline bool isEeTimer0Register(uint32_t address)
+    {
+        return address == kEeTimer0Count ||
+               address == kEeTimer0Mode ||
+               address == kEeTimer0Compare ||
+               address == kEeTimer0Hold;
+    }
+
+    inline uint64_t steadyClockNs()
+    {
+        using namespace std::chrono;
+        return static_cast<uint64_t>(duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count());
     }
 
 }
@@ -181,11 +204,17 @@ bool PS2Memory::initialize(size_t ramSize)
     m_gifCopyCount.store(0, std::memory_order_relaxed);
     m_gsWriteCount.store(0, std::memory_order_relaxed);
     m_vifWriteCount.store(0, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(m_completedDmacMutex);
+        m_completedDmacCauses.clear();
+    }
     m_codeRegions.clear();
     m_path3Masked = false;
     m_path3MaskedFifo.clear();
     m_vif1PendingPath2ImageQwc = 0u;
     m_vif1PendingPath2DirectHl = false;
+    m_timer0LastHostNs = 0;
+    m_timer0FractionNs = 0;
 
     try
     {
@@ -245,6 +274,39 @@ bool PS2Memory::initialize(size_t ramSize)
         std::cerr << "Error initializing PS2 memory: " << e.what() << std::endl;
         cleanup();
         return false;
+    }
+}
+
+void PS2Memory::updateEeTimer0Counter()
+{
+    const uint64_t nowNs = steadyClockNs();
+    if (m_timer0LastHostNs == 0u)
+    {
+        m_timer0LastHostNs = nowNs;
+        return;
+    }
+
+    const uint32_t mode = m_ioRegisters.count(kEeTimer0Mode) ? m_ioRegisters[kEeTimer0Mode] : 0u;
+    if ((mode & kEeTimerModeCue) == 0u)
+    {
+        m_timer0LastHostNs = nowNs;
+        m_timer0FractionNs = 0u;
+        return;
+    }
+
+    const uint64_t elapsedNs = nowNs - m_timer0LastHostNs;
+    m_timer0LastHostNs = nowNs;
+    if (elapsedNs == 0u)
+    {
+        return;
+    }
+
+    const uint64_t scaled = elapsedNs * kEeTimer0TicksPerSecond + m_timer0FractionNs;
+    const uint64_t ticks = scaled / kNanosecondsPerSecond;
+    m_timer0FractionNs = scaled % kNanosecondsPerSecond;
+    if (ticks != 0u)
+    {
+        m_ioRegisters[kEeTimer0Count] = m_ioRegisters[kEeTimer0Count] + static_cast<uint32_t>(ticks);
     }
 }
 
@@ -819,6 +881,26 @@ void PS2Memory::write128(uint32_t address, __m128i value)
 
 bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 {
+    if (isEeTimer0Register(address))
+    {
+        if (address == kEeTimer0Count)
+        {
+            m_ioRegisters[address] = value;
+            m_timer0LastHostNs = steadyClockNs();
+            m_timer0FractionNs = 0u;
+            return true;
+        }
+
+        updateEeTimer0Counter();
+        m_ioRegisters[address] = value;
+        m_timer0LastHostNs = steadyClockNs();
+        if (address == kEeTimer0Mode)
+        {
+            m_timer0FractionNs = 0u;
+        }
+        return true;
+    }
+
     if (isGsPrivReg(address))
     {
         m_ioRegisters[address] = value;
@@ -1058,6 +1140,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     };
 
                     int tagsProcessed = 0;
+                    uint32_t lastTagUpper = (chcr >> 16) & 0xFFFFu;
 
                     while (tagsProcessed < kMaxChainTags)
                     {
@@ -1093,6 +1176,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         uint32_t id = static_cast<uint32_t>((tag >> 28) & 0x7);
                         const bool irq = ((tag >> 31) & 0x1ull) != 0ull;
                         uint32_t addr = static_cast<uint32_t>((tag >> 32) & 0x7FFFFFFF);
+                        lastTagUpper = static_cast<uint32_t>((tag >> 16) & 0xFFFFu);
                         ++tagsProcessed;
 
                         uint32_t dataAddr = 0;
@@ -1186,6 +1270,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     m_ioRegisters[channelBase + 0x40] = asr0;
                     m_ioRegisters[channelBase + 0x50] = asr1;
                     chcr = (chcr & ~(0x3u << 4)) | ((asp & 0x3u) << 4);
+                    chcr = (chcr & 0x0000FFFFu) | (lastTagUpper << 16);
                     m_ioRegisters[channelBase + 0x00] = chcr;
 
                     if (!chainBuf.empty())
@@ -1453,21 +1538,38 @@ void PS2Memory::processPendingTransfers()
     if (hadGif)
     {
         raiseDStatChannel(2u); // GIF channel
+        queueCompletedDmacCause(2u);
         m_ioRegisters[GIF_CHANNEL + 0x00] &= ~0x100u;
         m_ioRegisters[GIF_CHANNEL + 0x20] = 0;
     }
     if (hadVif0)
     {
         raiseDStatChannel(0u); // VIF0 channel
+        queueCompletedDmacCause(0u);
         m_ioRegisters[VIF0_CHANNEL + 0x00] &= ~0x100u;
         m_ioRegisters[VIF0_CHANNEL + 0x20] = 0;
     }
     if (hadVif1)
     {
         raiseDStatChannel(1u); // VIF1 channel
+        queueCompletedDmacCause(1u);
         m_ioRegisters[VIF1_CHANNEL + 0x00] &= ~0x100u;
         m_ioRegisters[VIF1_CHANNEL + 0x20] = 0;
     }
+}
+
+void PS2Memory::queueCompletedDmacCause(uint32_t cause)
+{
+    std::lock_guard<std::mutex> lock(m_completedDmacMutex);
+    m_completedDmacCauses.push_back(cause);
+}
+
+std::vector<uint32_t> PS2Memory::consumeCompletedDmacCauses()
+{
+    std::lock_guard<std::mutex> lock(m_completedDmacMutex);
+    std::vector<uint32_t> causes;
+    causes.swap(m_completedDmacCauses);
+    return causes;
 }
 
 void PS2Memory::flushMaskedPath3Packets(bool drainImmediately)
@@ -1594,9 +1696,14 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
     {
         if (address >= 0x10000000 && address < 0x10000100)
         {
-            if ((address & 0xF) == 0x00)
+            if (isEeTimer0Register(address))
             {
-                return 0;
+                if (address == kEeTimer0Count)
+                {
+                    updateEeTimer0Counter();
+                }
+                auto timerIt = m_ioRegisters.find(address);
+                return timerIt != m_ioRegisters.end() ? timerIt->second : 0u;
             }
         }
 

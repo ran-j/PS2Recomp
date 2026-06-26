@@ -2,11 +2,11 @@
 
 #include <cstdint>
 
-namespace ps2_iop_dbcman
+namespace ps2_iop_sdrdrv
 {
     void reset();
 
-    bool handleDbcManRpc(uint8_t *rdram,
+    bool handleSdrdrvRpc(uint8_t *rdram,
                          uint32_t sid,
                          uint32_t rpcNum,
                          uint32_t sendBufAddr,

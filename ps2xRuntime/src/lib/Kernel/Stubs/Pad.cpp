@@ -11,6 +11,7 @@ namespace ps2_stubs
         constexpr int32_t kPadTypeDigital = 4;
         constexpr int32_t kPadTypeDualShock = 7;
         constexpr int32_t kPadStateDisconnected = 0;
+        constexpr int32_t kPadStateExecCmd = 5;
         constexpr int32_t kPadStateStable = 6;
         constexpr size_t kPadPortCount = 2;
         constexpr size_t kPadSlotCount = 1;
@@ -52,6 +53,7 @@ namespace ps2_stubs
             uint16_t buttonMask = 0xFFFFu;
             uint32_t dmaAddr = 0u;
             uint32_t reqState = 0u;
+            uint32_t transientState = 0u;
             PadInputState lastInput{};
             uint8_t lastData[32]{};
             uint32_t readCount = 0u;
@@ -219,6 +221,12 @@ namespace ps2_stubs
             portState.buttonMask = 0xFFFFu;
             portState.dmaAddr = dmaAddr;
             portState.reqState = 0u;
+            portState.transientState = 0u;
+        }
+
+        void queueExecCmdStateLocked(PadPortState &portState)
+        {
+            portState.transientState = static_cast<uint32_t>(kPadStateExecCmd);
         }
 
         uint8_t pressureValue(const PadInputState &state, const PadPortState &portState, uint16_t mask)
@@ -357,6 +365,7 @@ namespace ps2_stubs
 
         portState->pressureEnabled = true;
         portState->reqState = 0u;
+        queueExecCmdStateLocked(*portState);
         setReturnS32(ctx, 1);
     }
 
@@ -374,6 +383,7 @@ namespace ps2_stubs
 
         portState->pressureEnabled = false;
         portState->reqState = 0u;
+        queueExecCmdStateLocked(*portState);
         setReturnS32(ctx, 1);
     }
 
@@ -445,9 +455,22 @@ namespace ps2_stubs
         (void)rdram;
         (void)runtime;
         std::lock_guard<std::mutex> lock(g_padStateMutex);
-        const PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
-                                                                 static_cast<int>(getRegU32(ctx, 5)));
-        setReturnS32(ctx, (portState && portState->open) ? kPadStateStable : kPadStateDisconnected);
+        PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
+                                                           static_cast<int>(getRegU32(ctx, 5)));
+        int32_t state = kPadStateDisconnected;
+        if (portState && portState->open)
+        {
+            if (portState->transientState != 0u)
+            {
+                state = static_cast<int32_t>(portState->transientState);
+                portState->transientState = 0u;
+            }
+            else
+            {
+                state = kPadStateStable;
+            }
+        }
+        setReturnS32(ctx, state);
     }
 
     void scePadInfoAct(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -568,6 +591,7 @@ namespace ps2_stubs
         portState->open = false;
         portState->pressureEnabled = false;
         portState->reqState = 0u;
+        portState->transientState = 0u;
         setReturnS32(ctx, 1);
     }
 
@@ -591,6 +615,7 @@ namespace ps2_stubs
         portState->buttonMask = 0xFFFFu;
         portState->dmaAddr = dmaAddr;
         portState->reqState = 0u;
+        portState->transientState = 0u;
         if (dmaStr)
         {
             std::memset(dmaStr, 0, 32);
@@ -683,6 +708,7 @@ namespace ps2_stubs
         {
             portState->buttonMask = static_cast<uint16_t>(getRegU32(ctx, 6));
             portState->reqState = 0u;
+            queueExecCmdStateLocked(*portState);
         }
         setReturnS32(ctx, 1);
     }
@@ -702,6 +728,7 @@ namespace ps2_stubs
 
         portState->analogMode = (getRegU32(ctx, 6) != 0u);
         portState->reqState = 0u;
+        queueExecCmdStateLocked(*portState);
         setReturnS32(ctx, 1);
     }
 
@@ -715,6 +742,7 @@ namespace ps2_stubs
         if (portState && portState->open)
         {
             portState->reqState = static_cast<uint32_t>(getRegU32(ctx, 6) ? 1u : 0u);
+            queueExecCmdStateLocked(*portState);
         }
         setReturnS32(ctx, 1);
     }
@@ -753,6 +781,10 @@ namespace ps2_stubs
         else if (state == 1)
         {
             text = "FINDPAD";
+        }
+        else if (state == 5)
+        {
+            text = "EXECCMD";
         }
         else if (state == 0)
         {

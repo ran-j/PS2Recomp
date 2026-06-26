@@ -291,6 +291,16 @@ namespace
         ps2_syscalls::setDtxCompatLayout(layout);
     }
 
+    void applyLotrSoundRpcCompat(PS2Runtime &runtime)
+    {
+        (void)runtime;
+
+        PS2SoundDriverCompatLayout layout{};
+        layout.completionCallbacks = {0x001FFD70u, 0u, 0u, 0u};
+        ps2_syscalls::setSoundDriverCompatLayout(layout);
+    }
+
     PS2_REGISTER_GAME_OVERRIDE("RECVX sound-driver compat", "slus_201.84", 0u, 0u, &applyRecvxSoundDriverCompat);
     PS2_REGISTER_GAME_OVERRIDE("RECVX DTX compat", "slus_201.84", 0u, 0u, &applyRecvxDtxCompat);
+    PS2_REGISTER_GAME_OVERRIDE("LotR sound RPC compat", "SLUS_205.78", 0u, 0u, &applyLotrSoundRpcCompat);
 }

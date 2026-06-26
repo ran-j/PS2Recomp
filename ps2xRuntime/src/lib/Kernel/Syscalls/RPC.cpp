@@ -2396,23 +2396,30 @@ namespace ps2_syscalls
 
         if (endFunc)
         {
-            bool callbackInvoked = rpcInvokeFunction(rdram, ctx, runtime, endFunc, endParam, 0, 0, 0, nullptr);
-            callbackInvokedForDebug = callbackInvoked;
-
-            if (!callbackInvoked && endFunc >= 0x10000u)
-            {
-                const uint32_t normalizedEndFunc = endFunc - 0x10000u;
-                if (runtime->hasFunction(normalizedEndFunc))
-                {
-                    callbackInvoked = rpcInvokeFunction(rdram, ctx, runtime, normalizedEndFunc, endParam, 0, 0, 0, nullptr);
-                    callbackInvokedForDebug = callbackInvokedForDebug || callbackInvoked;
-                }
-            }
-
             PS2SoundDriverCompatLayout soundCompat{};
             {
                 std::lock_guard<std::mutex> lock(g_rpc_mutex);
                 soundCompat = g_soundDriverCompatLayout;
+            }
+
+            const bool hleCompletedEndCallback = handledByIop && soundCompat.matchesCompletionCallback(endFunc);
+            bool callbackInvoked = hleCompletedEndCallback;
+            callbackInvokedForDebug = hleCompletedEndCallback;
+
+            if (!hleCompletedEndCallback)
+            {
+                callbackInvoked = rpcInvokeFunction(rdram, ctx, runtime, endFunc, endParam, 0, 0, 0, nullptr);
+                callbackInvokedForDebug = callbackInvoked;
+
+                if (!callbackInvoked && endFunc >= 0x10000u)
+                {
+                    const uint32_t normalizedEndFunc = endFunc - 0x10000u;
+                    if (runtime->hasFunction(normalizedEndFunc))
+                    {
+                        callbackInvoked = rpcInvokeFunction(rdram, ctx, runtime, normalizedEndFunc, endParam, 0, 0, 0, nullptr);
+                        callbackInvokedForDebug = callbackInvokedForDebug || callbackInvoked;
+                    }
+                }
             }
 
             if (soundCompat.matchesCompletionCallback(endFunc))

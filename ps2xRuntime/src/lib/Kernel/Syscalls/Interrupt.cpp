@@ -278,7 +278,19 @@ namespace ps2_syscalls
         }
     }
 
-    static uint64_t signalVSyncFlag(uint8_t *rdram)
+    static void updateGsCsrFieldForVSync(PS2Runtime *runtime, uint64_t tickValue)
+    {
+        if (!runtime)
+        {
+            return;
+        }
+
+        constexpr uint64_t kGsCsrFieldMask = 0x2000ull;
+        uint64_t &csr = runtime->memory().gs().csr;
+        csr = (csr & ~kGsCsrFieldMask) | ((tickValue & 1ull) ? kGsCsrFieldMask : 0ull);
+    }
+
+    static uint64_t signalVSyncFlag(uint8_t *rdram, PS2Runtime *runtime)
     {
         VSyncFlagRegistration reg{};
         uint64_t tickValue = 0u;
@@ -289,6 +301,7 @@ namespace ps2_syscalls
         }
 
         g_vsync_cv.notify_all();
+        updateGsCsrFieldForVSync(runtime, tickValue);
 
         if (reg.flagAddr != 0u)
         {
@@ -333,7 +346,7 @@ namespace ps2_syscalls
 
             for (int i = 0; i < ticksToProcess; ++i)
             {
-                const uint64_t tickValue = signalVSyncFlag(rdram);
+                const uint64_t tickValue = signalVSyncFlag(rdram, runtime);
                 ps2_stubs::dispatchGsSyncVCallback(rdram, runtime, tickValue);
                 dispatchIntcHandlersForCause(rdram, runtime, kIntcVblankStart);
                 std::this_thread::sleep_for(std::chrono::microseconds(500));

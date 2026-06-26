@@ -1365,6 +1365,14 @@ void PS2Runtime::handleBreak(uint8_t *rdram, R5900Context *ctx)
     raiseCop0Exception(ctx, EXCEPTION_BREAKPOINT);
 }
 
+void PS2Runtime::drainCompletedDmacHandlers(uint8_t *rdram)
+{
+    for (uint32_t cause : m_memory.consumeCompletedDmacCauses())
+    {
+        ps2_syscalls::dispatchDmacHandlersForCause(rdram, this, cause);
+    }
+}
+
 void PS2Runtime::handleTrap(uint8_t *rdram, R5900Context *ctx)
 {
     raiseCop0Exception(ctx, EXCEPTION_TRAP);
@@ -2150,6 +2158,7 @@ void PS2Runtime::Store32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
     try
     {
         m_memory.write32(vaddr, value);
+        drainCompletedDmacHandlers(rdram);
     }
     catch (const std::exception &)
     {
@@ -2269,7 +2278,7 @@ void PS2Runtime::run()
                 const uint32_t dbgGp = m_debugGp.load(std::memory_order_relaxed);
                 const int activeThreads = g_activeThreads.load(std::memory_order_relaxed);
 
-                std::cout << "[run:tick] tick=" << tick
+                RUNTIME_LOG("[run:tick] tick=" << tick
                           << " pc=0x" << std::hex << dbgPc
                           << " ra=0x" << dbgRa
                           << " sp=0x" << dbgSp
@@ -2282,7 +2291,7 @@ void PS2Runtime::run()
                           << " gif=" << curGif
                           << " gsw=" << curGs
                           << " vif=" << curVif
-                          << std::endl;
+                          << std::endl);
             }
         });
         uint32_t presentWidth = FB_WIDTH;

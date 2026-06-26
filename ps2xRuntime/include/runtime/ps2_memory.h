@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <atomic>
 #include <iostream>
+#include <mutex>
 
 #include "ps2_gif_arbiter.h"
 #if defined(_MSC_VER)
@@ -328,6 +329,7 @@ public:
     void processVIF1Data(uint32_t srcPhysAddr, uint32_t sizeBytes);
     void processVIF1Data(const uint8_t *data, uint32_t sizeBytes);
     void processPendingTransfers();
+    std::vector<uint32_t> consumeCompletedDmacCauses();
 
     int pollDmaRegisters();
 
@@ -402,6 +404,8 @@ public:
     std::vector<PendingTransfer> m_pendingGifTransfers;
     std::vector<PendingTransfer> m_pendingVif0Transfers;
     std::vector<PendingTransfer> m_pendingVif1Transfers;
+    std::mutex m_completedDmacMutex;
+    std::vector<uint32_t> m_completedDmacCauses;
 
     struct CodeRegion
     {
@@ -416,6 +420,10 @@ public:
     bool isScratchpad(uint32_t address) const;
     uint8_t *mapVuMemory(uint32_t physAddr, uint32_t size, uint32_t &offset, uint32_t &limit);
     const uint8_t *mapVuMemory(uint32_t physAddr, uint32_t size, uint32_t &offset, uint32_t &limit) const;
+    void updateEeTimer0Counter();
+    void queueCompletedDmacCause(uint32_t cause);
+    uint64_t m_timer0LastHostNs = 0;
+    uint64_t m_timer0FractionNs = 0;
 };
 
 #endif // PS2_MEMORY_H

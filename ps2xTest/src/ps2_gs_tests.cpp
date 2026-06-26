@@ -31,6 +31,11 @@ namespace
         ctx.r[reg] = _mm_set_epi64x(0, static_cast<int64_t>(value));
     }
 
+    void setRegU64(R5900Context &ctx, int reg, uint64_t value)
+    {
+        ctx.r[reg] = _mm_set_epi64x(0, static_cast<int64_t>(value));
+    }
+
     uint32_t getRegU32Test(const R5900Context &ctx, int reg)
     {
         return ::getRegU32(&ctx, reg);
@@ -359,8 +364,7 @@ void register_ps2_gs_tests()
             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
             R5900Context ctx{};
 
-            setRegU32(ctx, 4, 0x11112222u); // new IMR low
-            setRegU32(ctx, 5, 0x33334444u); // new IMR high
+            setRegU64(ctx, 4, 0x3333444411112222ull);
             GsPutIMR(rdram.data(), &ctx, &runtime);
 
             const uint64_t oldImr = getReturnU64(ctx);

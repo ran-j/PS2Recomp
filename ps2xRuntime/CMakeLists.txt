@@ -13,13 +13,14 @@ option(PS2X_ENABLE_RUNTIME_LOGS "Enable PS2 runtime logs" OFF)
 option(PS2X_ENABLE_AGRESSIVE_LOGS "Enable very verbose/agressive PS2 runtime logs" OFF)
 option(PS2X_SHOW_WINDOWS_CONSOLE "Show a console window for ps2EntryRunner on Windows release builds" ON)
 
-
 if(PS2X_ENABLE_SCCACHE)
     find_program(PS2X_SCCACHE_PROGRAM sccache)
+
     if(PS2X_SCCACHE_PROGRAM)
         if(CMAKE_C_COMPILER)
             set(CMAKE_C_COMPILER_LAUNCHER "${PS2X_SCCACHE_PROGRAM}")
         endif()
+
         set(CMAKE_CXX_COMPILER_LAUNCHER "${PS2X_SCCACHE_PROGRAM}")
         message(STATUS "Using sccache: ${PS2X_SCCACHE_PROGRAM}")
     else()
@@ -30,8 +31,9 @@ endif()
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/ReleaseMode.cmake")
 
 set(PS2X_IS_VITA OFF)
+
 if((CMAKE_C_COMPILER MATCHES "arm-vita-eabi") OR
-   (CMAKE_CXX_COMPILER MATCHES "arm-vita-eabi"))
+    (CMAKE_CXX_COMPILER MATCHES "arm-vita-eabi"))
     set(PS2X_IS_VITA ON)
 endif()
 
@@ -47,6 +49,7 @@ if(PS2X_IS_VITA)
     endif()
 
     set(PS2X_VITASDK "$ENV{VITASDK}")
+
     if(NOT EXISTS "${PS2X_VITASDK}/share/vita.cmake")
         message(FATAL_ERROR "Could not find vita.cmake under ${PS2X_VITASDK}/share.")
     endif()
@@ -69,13 +72,15 @@ else()
     FetchContent_Declare(
         imgui
         GIT_REPOSITORY https://github.com/ocornut/imgui.git
-        GIT_TAG        "docking"
-        GIT_SHALLOW    TRUE
+        GIT_TAG "docking"
+        GIT_SHALLOW TRUE
     )
     FetchContent_GetProperties(imgui)
+
     if(NOT imgui_POPULATED)
         FetchContent_Populate(imgui)
     endif()
+
     set(PS2X_IMGUI_SOURCE_DIR "${imgui_SOURCE_DIR}")
 
     add_library(imgui STATIC
@@ -90,13 +95,15 @@ else()
     FetchContent_Declare(
         rlImGui
         GIT_REPOSITORY https://github.com/raylib-extras/rlImGui.git
-        GIT_TAG        "Raylib_5_5"
-        GIT_SHALLOW    TRUE
+        GIT_TAG "Raylib_5_5"
+        GIT_SHALLOW TRUE
     )
     FetchContent_GetProperties(rlImGui)
+
     if(NOT rlimgui_POPULATED)
         FetchContent_Populate(rlImGui)
     endif()
+
     set(PS2X_RLIMGUI_SOURCE_DIR "${rlimgui_SOURCE_DIR}")
 
     add_library(rlImGui STATIC
@@ -109,6 +116,7 @@ endif()
 add_library(ps2_host_backend INTERFACE)
 
 set(PS2X_DEFAULT_BOOT_ELF_DEFINE "")
+
 if(PS2X_DEFAULT_BOOT_ELF)
     set(PS2X_DEFAULT_BOOT_ELF_DEFINE "${PS2X_DEFAULT_BOOT_ELF}")
     string(REPLACE "\\" "\\\\" PS2X_DEFAULT_BOOT_ELF_DEFINE "${PS2X_DEFAULT_BOOT_ELF_DEFINE}")
@@ -151,13 +159,15 @@ if(PS2X_IS_VITA)
     set(PS2X_VITA_INCLUDE_DIRS
         "${PS2X_VITA_PREFIX}/include"
     )
+
     foreach(PS2X_VITA_OPTIONAL_INCLUDE_DIR IN ITEMS
-            "${PS2X_VITA_PREFIX}/include/raylib"
-            "${PS2X_VITA_PREFIX}/include/SDL2")
+        "${PS2X_VITA_PREFIX}/include/raylib"
+        "${PS2X_VITA_PREFIX}/include/SDL2")
         if(EXISTS "${PS2X_VITA_OPTIONAL_INCLUDE_DIR}")
             list(APPEND PS2X_VITA_INCLUDE_DIRS "${PS2X_VITA_OPTIONAL_INCLUDE_DIR}")
         endif()
     endforeach()
+
     if(PS2X_VITA_EXTRA_INCLUDE_DIRS)
         list(APPEND PS2X_VITA_INCLUDE_DIRS ${PS2X_VITA_EXTRA_INCLUDE_DIRS})
     endif()
@@ -179,15 +189,18 @@ if(PS2X_IS_VITA)
             PATHS "${PS2X_VITA_LIBRARY_DIR}"
             NO_DEFAULT_PATH
         )
+
         if(NOT ${out_var})
             message(FATAL_ERROR
                 "Could not find Vita library '${library_name}' under ${PS2X_VITA_LIBRARY_DIR}. "
                 "Install Quenom/raylib-5.5-vita and its SDL2/PVR dependencies into VitaSDK first.")
         endif()
+
         set(${out_var} "${${out_var}}" PARENT_SCOPE)
     endfunction()
 
     set(PS2X_VITA_RESOLVED_LIBRARIES "")
+
     foreach(PS2X_VITA_LIBRARY_NAME IN LISTS PS2X_VITA_REQUIRED_LIBRARY_NAMES)
         ps2x_find_vita_library(PS2X_VITA_LIBRARY_PATH "${PS2X_VITA_LIBRARY_NAME}")
         list(APPEND PS2X_VITA_RESOLVED_LIBRARIES "${PS2X_VITA_LIBRARY_PATH}")
@@ -208,15 +221,15 @@ endif()
 if(WIN32)
     include(ExternalProject)
 
-    set(FFMPEG_PREBUILT_TAG  "n7.1-241205")
+    set(FFMPEG_PREBUILT_TAG "n7.1-241205")
     set(FFMPEG_PREBUILT_URL
         "https://github.com/System233/ffmpeg-msvc-prebuilt/releases/download/${FFMPEG_PREBUILT_TAG}/ffmpeg-${FFMPEG_PREBUILT_TAG}-lgpl-amd64-shared.zip")
 
     set(FFMPEG_PREFIX_DIR "${CMAKE_BINARY_DIR}/ThirdParty/ffmpeg-prefix")
     set(FFMPEG_SOURCE_DIR "${FFMPEG_PREFIX_DIR}/src/ffmpeg_external")
     set(FFMPEG_INCLUDE_DIR "${FFMPEG_SOURCE_DIR}/include")
-    set(FFMPEG_LIB_DIR     "${FFMPEG_SOURCE_DIR}/bin")
-    set(FFMPEG_BIN_DIR     "${FFMPEG_SOURCE_DIR}/bin")
+    set(FFMPEG_LIB_DIR "${FFMPEG_SOURCE_DIR}/bin")
+    set(FFMPEG_BIN_DIR "${FFMPEG_SOURCE_DIR}/bin")
 
     ExternalProject_Add(ffmpeg_external
         URL "${FFMPEG_PREBUILT_URL}"
@@ -226,11 +239,11 @@ if(WIN32)
         BUILD_COMMAND ""
         INSTALL_COMMAND ""
         BUILD_BYPRODUCTS
-            "${FFMPEG_LIB_DIR}/avcodec.lib"
-            "${FFMPEG_LIB_DIR}/avformat.lib"
-            "${FFMPEG_LIB_DIR}/avutil.lib"
-            "${FFMPEG_LIB_DIR}/swresample.lib"
-            "${FFMPEG_LIB_DIR}/swscale.lib"
+        "${FFMPEG_LIB_DIR}/avcodec.lib"
+        "${FFMPEG_LIB_DIR}/avformat.lib"
+        "${FFMPEG_LIB_DIR}/avutil.lib"
+        "${FFMPEG_LIB_DIR}/swresample.lib"
+        "${FFMPEG_LIB_DIR}/swscale.lib"
     )
 
     # Link against the import libraries shipped with the Windows DLLs.
@@ -320,9 +333,9 @@ function(ps2x_stage_ffmpeg_runtime_dlls target_name)
     add_custom_command(
         TARGET ${target_name} POST_BUILD
         COMMAND "${CMAKE_COMMAND}"
-            "-Dsource_dir=${PS2X_FFMPEG_BIN_DIR}"
-            "-Ddest_dir=$<TARGET_FILE_DIR:${target_name}>"
-            -P "${PS2X_COPY_FFMPEG_DLLS_SCRIPT}"
+        "-Dsource_dir=${PS2X_FFMPEG_BIN_DIR}"
+        "-Ddest_dir=$<TARGET_FILE_DIR:${target_name}>"
+        -P "${PS2X_COPY_FFMPEG_DLLS_SCRIPT}"
         VERBATIM
     )
 endfunction()
@@ -338,6 +351,8 @@ add_library(ps2_runtime STATIC
     src/lib/ps2_iop.cpp
     src/lib/ps2_iop_audio.cpp
     src/lib/ps2_iop_dbcman.cpp
+    src/lib/ps2_iop_sdrdrv.cpp
+    src/lib/ps2_iop_cl.cpp
     src/lib/ps2_memory.cpp
     src/lib/ps2_pad.cpp
     src/lib/ps2_runtime.cpp
@@ -449,7 +464,6 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebI
             )
         endif()
     endif()
- 
 endif()
 
 # Work around WinAPI vs raylib symbol clash for CloseWindow on x64
