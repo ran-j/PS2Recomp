@@ -14,7 +14,7 @@ extern "C"
 #include <deque>
 #include <memory>
 
-#include "../Syscalls/Helpers/State.h"
+#include "Kernel/Syscalls/Helpers/State.h"
 
 namespace ps2_stubs
 {

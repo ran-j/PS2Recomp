@@ -45,12 +45,9 @@ namespace
     }
 }
 
-
 void PS2Memory::processVIF0Data(uint32_t srcPhys, uint32_t sizeBytes)
 {
-    if (!m_rdram || sizeBytes == 0u)
-        return;
-    if (srcPhys >= PS2_RAM_SIZE)
+    if (sizeBytes == 0u || srcPhys >= PS2_RAM_SIZE)
         return;
 
     const uint64_t requestedEnd = static_cast<uint64_t>(srcPhys) + static_cast<uint64_t>(sizeBytes);
@@ -62,7 +59,7 @@ void PS2Memory::processVIF0Data(uint32_t srcPhys, uint32_t sizeBytes)
 
 void PS2Memory::processVIF0Data(const uint8_t *data, uint32_t sizeBytes)
 {
-    if (!data || sizeBytes == 0u)
+    if (sizeBytes == 0u)
         return;
 
     uint32_t pos = 0;
@@ -163,19 +160,30 @@ void PS2Memory::processVIF0Data(const uint8_t *data, uint32_t sizeBytes)
             int bitsPerComponent = 32;
             switch (vl)
             {
-            case 0: bitsPerComponent = 32; break;
-            case 1: bitsPerComponent = 16; break;
-            case 2: bitsPerComponent = 8; break;
-            case 3: bitsPerComponent = (vn == 3u) ? 4 : 16; break;
-            default: break;
+            case 0:
+                bitsPerComponent = 32;
+                break;
+            case 1:
+                bitsPerComponent = 16;
+                break;
+            case 2:
+                bitsPerComponent = 8;
+                break;
+            case 3:
+                bitsPerComponent = (vn == 3u) ? 4 : 16;
+                break;
+            default:
+                break;
             }
             const int bitsPerVector = (vl == 3u && vn == 3u) ? 16 : (components * bitsPerComponent);
             uint32_t bytesPerVector = static_cast<uint32_t>((bitsPerVector + 7) / 8);
             const uint32_t writeVectorCount = (num == 0u) ? 256u : static_cast<uint32_t>(num);
             uint32_t cl = vif0_regs.cycle & 0xFFu;
             uint32_t wl = (vif0_regs.cycle >> 8) & 0xFFu;
-            if (cl == 0u) cl = 1u;
-            if (wl == 0u) wl = 1u;
+            if (cl == 0u)
+                cl = 1u;
+            if (wl == 0u)
+                wl = 1u;
             uint32_t sourceVectorCount = writeVectorCount;
             if (cl < wl)
             {
@@ -200,7 +208,7 @@ void PS2Memory::processVIF0Data(const uint8_t *data, uint32_t sizeBytes)
                     const uint32_t cyclePos = writeIndex % wl;
                     const bool sourceAvailable = (cl >= wl) || (cyclePos < cl);
                     uint32_t destVec = (cl >= wl) ? ((vuAddr + (writeIndex / wl) * cl + cyclePos) & 0x3FFu)
-                                                   : ((vuAddr + writeIndex) & 0x3FFu);
+                                                  : ((vuAddr + writeIndex) & 0x3FFu);
                     const uint32_t destOff = destVec * 16u;
                     if (destOff + 16u > PS2_VU0_DATA_SIZE)
                     {
@@ -238,9 +246,7 @@ void PS2Memory::processVIF0Data(const uint8_t *data, uint32_t sizeBytes)
 
 void PS2Memory::processVIF1Data(uint32_t srcPhys, uint32_t sizeBytes)
 {
-    if (!m_rdram || !m_gsVRAM || sizeBytes == 0u)
-        return;
-    if (srcPhys >= PS2_RAM_SIZE)
+    if (sizeBytes == 0u || srcPhys >= PS2_RAM_SIZE)
         return;
 
     const uint64_t requestedEnd = static_cast<uint64_t>(srcPhys) + static_cast<uint64_t>(sizeBytes);
@@ -252,7 +258,7 @@ void PS2Memory::processVIF1Data(uint32_t srcPhys, uint32_t sizeBytes)
 
 void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 {
-    if (!data || !m_gsVRAM || sizeBytes == 0u)
+    if (sizeBytes == 0u)
         return;
 
     uint32_t pos = 0;

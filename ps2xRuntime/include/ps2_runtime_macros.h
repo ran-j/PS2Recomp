@@ -41,7 +41,6 @@ static inline int64_t Ps2ExtractEpi64(__m128i v, int index)
     }
 }
 
-
 static inline uint32_t ps2_clz32(uint32_t x)
 {
     return static_cast<uint32_t>(std::countl_zero(x));

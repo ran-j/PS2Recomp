@@ -1304,11 +1304,6 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
 {
     (void)rdram;
 
-    if (!ctx)
-    {
-        return;
-    }
-
     uint8_t *const vu0Code = m_memory.getVU0Code();
     uint8_t *const vu0Data = m_memory.getVU0Data();
     const uint32_t startPC = address & ~0x7u;

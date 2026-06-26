@@ -207,43 +207,10 @@ inline void setReturnU64(R5900Context *ctx, uint64_t value)
 
 inline constexpr uint32_t PS2_PATH_WATCH_ADDR = 0x01EFFFA0u;
 inline constexpr uint32_t PS2_PATH_WATCH_BYTES = 0x200u;
-inline constexpr uint32_t PS2_PATH_WATCH_MAX_LOGS = 4096u;
-inline std::atomic<uint32_t> g_ps2PathWatchLogCount{0};
 
 inline uint32_t ps2PathWatchPhysAddr()
 {
     return PS2_PATH_WATCH_ADDR & PS2_RAM_MASK;
-}
-
-inline bool ps2PathWatchIntersects(uint32_t writeAddr, uint32_t writeSize)
-{
-    const uint64_t writeStart = writeAddr;
-    const uint64_t writeEnd = writeStart + static_cast<uint64_t>(writeSize);
-    const uint64_t watchStart = ps2PathWatchPhysAddr();
-    const uint64_t watchEnd = watchStart + static_cast<uint64_t>(PS2_PATH_WATCH_BYTES);
-    return writeEnd > watchStart && writeStart < watchEnd;
-}
-
-inline void ps2PathWatchDumpPrefix(const uint8_t *rdram)
-{
-    if (!rdram)
-    {
-        return;
-    }
-
-    const uint32_t base = ps2PathWatchPhysAddr();
-    auto flags = std::cout.flags();
-    std::cout << " buf=" << std::hex;
-    for (uint32_t i = 0; i < 16u; ++i)
-    {
-        const uint32_t addr = (base + i) & PS2_RAM_MASK;
-        std::cout << static_cast<uint32_t>(rdram[addr]);
-        if (i + 1u < 16u)
-        {
-            std::cout << '.';
-        }
-    }
-    std::cout.flags(flags);
 }
 
 inline uint8_t ps2PathWatchExtractByteFromWrite(uint32_t writeAddr, uint32_t watchAddr, uint64_t valueLo, uint64_t valueHi)
@@ -271,6 +238,7 @@ inline void ps2TraceGuestWrite(uint8_t *rdram,
     (void)valueHi;
     (void)op;
     (void)ctx;
+    // TODO we dont need this anymore so on next release it will be deleted
 }
 
 inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
@@ -284,6 +252,7 @@ inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
     (void)size;
     (void)op;
     (void)ctx;
+    // TODO we dont need this anymore so on next release it will be deleted
 }
 
 struct PS2SoundDriverCompatLayout
@@ -589,13 +558,12 @@ private:
     bool m_debugUiInitialized = false;
 
 public:
-    // TODO remove this later
     std::atomic<uint32_t> m_debugPc{0};
     std::atomic<uint32_t> m_debugRa{0};
     std::atomic<uint32_t> m_debugSp{0};
     std::atomic<uint32_t> m_debugGp{0};
-private:
 
+private:
     struct LoadedModule
     {
         std::string name;
