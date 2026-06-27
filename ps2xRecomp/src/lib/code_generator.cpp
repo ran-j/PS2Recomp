@@ -1,5 +1,6 @@
 #include "ps2recomp/code_generator.h"
 #include "ps2recomp/control_flow_emitter.h"
+#include "ps2recomp/control_flow_utils.h"
 #include "ps2recomp/instructions.h"
 #include "ps2recomp/ps2_recompiler.h"
 #include "ps2recomp/r5900_decoder.h"
@@ -35,11 +36,6 @@ namespace ps2recomp
 
 namespace ps2recomp
 {
-    static uint32_t buildAbsoluteJumpTarget(uint32_t address, uint32_t target)
-    {
-        return ((address + 4) & 0xF0000000u) | (target << 2);
-    }
-
     static Instruction makeSyntheticDelaySlot(uint32_t address)
     {
         Instruction inst{};
@@ -567,6 +563,13 @@ namespace ps2recomp
             }
 
             if (needsIndirectFallback) {
+                std::cerr << "[control-flow] unresolved JR/JALR in function " << function.name << " at 0x" << std::hex;
+                for (const Instruction *jrInst : indirectJumps)
+                {
+                    std::cerr << jrInst->address << " ";
+                }
+                std::cerr << "promoting " << std::dec << instructionAddresses.size() << " fallback entries" << std::endl;
+
                 for (uint32_t addr : instructionAddresses)
                 {
                     if (addr >= function.start && addr < function.end)

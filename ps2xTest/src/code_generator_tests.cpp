@@ -1225,6 +1225,10 @@ void register_code_generator_tests()
                      "internal JAL return address should still be emitted as a label");
             t.IsTrue(generated.find("        return;") != std::string::npos,
                      "JR $31 should return to the dispatcher/runtime after setting ctx->pc");
+            t.IsTrue(generated.find("PS2Runtime::GuestBranchKind::Return") != std::string::npos,
+                     "JR $31 should use the Return branch kind for precise diagnostics");
+            t.IsTrue(generated.find("\"JR $ra\"") != std::string::npos,
+                     "JR $31 should pass a return-specific debug name");
         });
 
         tc.Run("trailing JR $31 without decoded delay slot still emits return flow", [](TestCase &t) {
@@ -1253,6 +1257,8 @@ void register_code_generator_tests()
                      "truncated trailing JR should still include the internal return label");
             t.IsTrue(generated.find("// JR $31 - Handled by branch logic") == std::string::npos,
                      "truncated trailing JR must not degrade to comment-only output");
+            t.IsTrue(generated.find("PS2Runtime::GuestBranchKind::Return") != std::string::npos,
+                     "truncated JR $31 should still use return diagnostics");
         });
 
         tc.Run("unresolved JR non-RA uses dispatcher resume entries without broad local switch", [](TestCase &t) {
@@ -1288,6 +1294,8 @@ void register_code_generator_tests()
                      "owner resume switch should include internal fallback labels");
             t.IsTrue(generated.find("ctx->pc = jumpTarget;") != std::string::npos,
                      "unresolved JR should hand the dynamic target back through ctx->pc");
+            t.IsTrue(generated.find("PS2Runtime::GuestBranchKind::IndirectJump") != std::string::npos,
+                     "unresolved non-RA JR should use indirect-jump diagnostics");
         });
 
         tc.Run("configured jump table addresses drive JR dispatch targets", [](TestCase &t) {

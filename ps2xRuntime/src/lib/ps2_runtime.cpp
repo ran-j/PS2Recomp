@@ -1178,28 +1178,41 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     ctx->pc = targetPc;
     const bool isCall = (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall);
 
+    if (kind == GuestBranchKind::Return)
+    {
+        if (!hasFunction(targetPc))
+        {
+            reportMissingFunction(rdram, ctx, targetPc, sourcePc, kind, debugName);
+        }
+
+        // A JR $ra return must unwind to the caller/outer dispatcher with ctx->pc
+        // left on the return address. Do not execute the return target from inside
+        // the callee; that would turn a return into a nested dispatch.
+        ctx->pc = targetPc;
+        return false;
+    }
+
     if (!hasFunction(targetPc))
     {
         reportMissingFunction(rdram, ctx, targetPc, sourcePc, kind, debugName);
 
         const MissingFunctionPolicy policy = missingFunctionPolicy();
-        
+
         if (policy == MissingFunctionPolicy::SkipCallDebug && isCall)
         {
             ctx->pc = fallthroughPc;
             return true;
         }
-        
-        
+
         if (policy == MissingFunctionPolicy::ContinueToTarget)
         {
             ctx->pc = targetPc;
             return true;
         }
-        
+
         return false;
     }
-    
+
     RecompiledFunction targetFn = lookupFunction(targetPc);
     const uint32_t entryPc = ctx->pc;
     targetFn(rdram, ctx, this);

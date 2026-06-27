@@ -64,8 +64,10 @@ namespace ps2recomp
         void emitConditionalBranch();
         void emitFallbackInstruction();
 
+        bool emitDirectFunctionJumpIfAvailable(uint32_t target, StaticBranchKind kind, std::string_view indent);
         void emitExternalJumpDispatch(uint32_t target, StaticBranchKind kind, std::string_view indent);
         void emitExternalRegisterCallDispatch(std::string_view jumpTargetExpression, std::string_view indent);
+        void emitExternalRegisterJumpDispatch(std::string_view jumpTargetExpression, RegisterBranchKind kind, uint8_t rsReg, std::string_view indent);
         void emitRuntimeBranchDispatch(std::string_view targetExpression,
                                        uint32_t sourcePc,
                                        uint32_t returnPc,

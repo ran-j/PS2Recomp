@@ -1,5 +1,6 @@
 #include "ps2recomp/control_flow_emitter.h"
 
+#include "ps2recomp/control_flow_utils.h"
 #include "ps2recomp/instructions.h"
 #include "ps2recomp/r5900_decoder.h"
 #include "ps2_runtime_calls.h"
@@ -10,14 +11,6 @@
 
 namespace ps2recomp
 {
-    namespace
-    {
-        uint32_t buildAbsoluteJumpTarget(uint32_t address, uint32_t target)
-        {
-            return ((address + 4u) & 0xF0000000u) | (target << 2);
-        }
-    }
-
     ControlFlowEmitter::ControlFlowEmitter(CodeGenerator &generator,
                                            const Instruction &branchInst,
                                            const Instruction &delaySlot,
@@ -48,11 +41,7 @@ namespace ps2recomp
 
     bool ControlFlowEmitter::hasRealDelaySlot() const
     {
-        return !(m_delaySlot.opcode == OPCODE_SPECIAL &&
-                 m_delaySlot.function == SPECIAL_SLL &&
-                 m_delaySlot.rd == 0u &&
-                 m_delaySlot.rt == 0u &&
-                 m_delaySlot.sa == 0u);
+        return !isGuestNop(m_delaySlot);
     }
 
     bool ControlFlowEmitter::isCallLikeEdge() const
@@ -210,6 +199,23 @@ namespace ps2recomp
         m_ss << fmt::format("{}}}\n", indent);
     }
 
+    bool ControlFlowEmitter::emitDirectFunctionJumpIfAvailable(uint32_t target, StaticBranchKind kind, std::string_view indent)
+    {
+        if (kind != StaticBranchKind::Jump)
+        {
+            return false;
+        }
+
+        const std::string functionName = m_gen.getFunctionName(target);
+        if (functionName.empty())
+        {
+            return false;
+        }
+
+        m_ss << indent << functionName << "(rdram, ctx, runtime); return;\n";
+        return true;
+    }
+
     void ControlFlowEmitter::emitExternalJumpDispatch(uint32_t target, StaticBranchKind kind, std::string_view indent)
     {
         const bool isCall = kind == StaticBranchKind::Call;
@@ -229,6 +235,21 @@ namespace ps2recomp
                                   fallthroughPc(),
                                   "IndirectCall",
                                   "JALR",
+                                  indent,
+                                  true);
+    }
+
+    void ControlFlowEmitter::emitExternalRegisterJumpDispatch(std::string_view jumpTargetExpression,
+                                                              RegisterBranchKind kind,
+                                                              uint8_t rsReg,
+                                                              std::string_view indent)
+    {
+        const bool isReturn = kind == RegisterBranchKind::Jump && rsReg == 31u;
+        emitRuntimeBranchDispatch(jumpTargetExpression,
+                                  branchPc(),
+                                  0u,
+                                  isReturn ? "Return" : "IndirectJump",
+                                  isReturn ? "JR $ra" : "JR",
                                   indent,
                                   true);
     }
@@ -293,6 +314,11 @@ namespace ps2recomp
             return;
         }
 
+        if (emitDirectFunctionJumpIfAvailable(target, kind, "    "))
+        {
+            return;
+        }
+
         emitExternalJumpDispatch(target, kind, "    ");
     }
 
@@ -326,7 +352,7 @@ namespace ps2recomp
 
         if (kind == RegisterBranchKind::Jump)
         {
-            m_ss << "        return;\n";
+            emitExternalRegisterJumpDispatch("jumpTarget", kind, rsReg, "        ");
         }
         else
         {
