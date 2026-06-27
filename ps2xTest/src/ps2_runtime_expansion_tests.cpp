@@ -217,6 +217,28 @@ namespace
         }
     }
 
+<<<<<<< HEAD
+    void testGuestBranchImplicitReturnHandler(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        if (ctx)
+        {
+            setRegU32(*ctx, 2, 0x00FACE42u);
+            // Leave ctx->pc at the entry point. dispatchGuestBranch should convert
+            // unchanged call PC into the supplied fallthrough PC for call-like edges.
+        }
+    }
+
+    void testGuestBranchTransferHandler(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        if (ctx)
+        {
+            setRegU32(*ctx, 2, 0x00BEEFu);
+            ctx->pc = 0x33330000u;
+        }
+    }
+
+=======
+>>>>>>> 8c8a97af655061ee2640a29247a29d41ae611a11
     constexpr uint32_t kAsyncCounterAddr = 0x2400u;
 
     void testWaitForAsyncCounter(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
@@ -476,7 +498,11 @@ void register_ps2_runtime_expansion_tests()
                      "first guest worker should observe that the runtime requested preemption under contention");
         });
 
+<<<<<<< HEAD
+        tc.Run("lookupFunction rejects internal resume PCs without exact registration", [](TestCase &t)
+=======
         tc.Run("lookupFunction aliases internal resume PCs to nearest owner", [](TestCase &t)
+>>>>>>> 8c8a97af655061ee2640a29247a29d41ae611a11
         {
             PS2Runtime runtime;
             runtime.registerFunction(0x1000u, &testResumeOwnerFallbackHandler);
@@ -487,11 +513,21 @@ void register_ps2_runtime_expansion_tests()
             auto fn = runtime.lookupFunction(ctx.pc);
             fn(nullptr, &ctx, &runtime);
 
+<<<<<<< HEAD
+            t.Equals(::getRegU32(&ctx, 2), 0u,
+                     "unregistered resume PC should not alias to the nearest owner");
+            t.IsTrue(runtime.isStopRequested(),
+                     "missing exact dispatch target should request runtime stop");
+        });
+
+        tc.Run("lookupFunction rejects final-function PCs inside code regions without exact registration", [](TestCase &t)
+=======
             t.Equals(::getRegU32(&ctx, 2), 0x00ABC123u,
                      "internal resume PC should dispatch to its owner function");
         });
 
         tc.Run("lookupFunction aliases final-function resume PCs inside code regions", [](TestCase &t)
+>>>>>>> 8c8a97af655061ee2640a29247a29d41ae611a11
         {
             PS2Runtime runtime;
             runtime.memory().registerCodeRegion(0x2000u, 0x2100u);
@@ -502,8 +538,88 @@ void register_ps2_runtime_expansion_tests()
             auto fn = runtime.lookupFunction(ctx.pc);
             fn(nullptr, &ctx, &runtime);
 
+<<<<<<< HEAD
+            t.Equals(::getRegU32(&ctx, 2), 0u,
+                     "code-region membership alone should not alias to the previous function");
+            t.IsTrue(runtime.isStopRequested(),
+                     "missing exact final-function target should request runtime stop");
+        });
+
+        tc.Run("dispatchGuestBranch call normalizes unchanged callee PC to fallthrough", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            runtime.registerFunction(0x3000u, &testGuestBranchImplicitReturnHandler);
+
+            R5900Context ctx{};
+            ctx.pc = 0x2000u;
+
+            const bool returnedToFallthrough = runtime.dispatchGuestBranch(
+                nullptr,
+                &ctx,
+                0x3000u,
+                0x2000u,
+                0x2008u,
+                PS2Runtime::GuestBranchKind::IndirectCall,
+                "test-jalr");
+
+            t.IsTrue(returnedToFallthrough,
+                     "call-like dispatch should report true when it resumes at fallthrough");
+            t.Equals(ctx.pc, 0x2008u,
+                     "unchanged callee PC should be converted to call fallthrough");
+            t.Equals(::getRegU32(&ctx, 2), 0x00FACE42u,
+                     "callee should still execute normally");
+        });
+
+        tc.Run("dispatchGuestBranch call returns false when callee transfers elsewhere", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            runtime.registerFunction(0x3100u, &testGuestBranchTransferHandler);
+
+            R5900Context ctx{};
+            ctx.pc = 0x2000u;
+
+            const bool returnedToFallthrough = runtime.dispatchGuestBranch(
+                nullptr,
+                &ctx,
+                0x3100u,
+                0x2000u,
+                0x2008u,
+                PS2Runtime::GuestBranchKind::IndirectCall,
+                "test-jalr-transfer");
+
+            t.IsFalse(returnedToFallthrough,
+                      "call-like dispatch should stop caller flow when callee transfers elsewhere");
+            t.Equals(ctx.pc, 0x33330000u,
+                     "callee transfer PC should be preserved");
+        });
+
+        tc.Run("dispatchGuestBranch rejects missing exact targets", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            runtime.registerFunction(0x3200u, &testGuestBranchImplicitReturnHandler);
+
+            R5900Context ctx{};
+            ctx.pc = 0x2000u;
+
+            const bool returnedToFallthrough = runtime.dispatchGuestBranch(
+                nullptr,
+                &ctx,
+                0x3210u,
+                0x2000u,
+                0x2008u,
+                PS2Runtime::GuestBranchKind::IndirectCall,
+                "test-missing");
+
+            t.IsFalse(returnedToFallthrough,
+                      "missing target should not resume caller flow");
+            t.IsTrue(runtime.isStopRequested(),
+                     "missing exact target should request runtime stop");
+            t.Equals(ctx.pc, 0x3210u,
+                     "missing target should remain visible in ctx->pc for diagnostics");
+=======
             t.Equals(::getRegU32(&ctx, 2), 0x00ABC123u,
                      "last function should own resumable PCs within its code region");
+>>>>>>> 8c8a97af655061ee2640a29247a29d41ae611a11
         });
 
         tc.Run("vblank intc handlers can preempt serialized guest execution", [](TestCase &t)

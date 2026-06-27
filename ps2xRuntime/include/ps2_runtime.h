@@ -356,6 +356,30 @@ public:
 
     using RecompiledFunction = void (*)(uint8_t *, R5900Context *, PS2Runtime *);
 
+    enum class GuestBranchKind
+    {
+        DirectJump,
+        DirectCall,
+        IndirectJump,
+        IndirectCall,
+        Return,
+    };
+
+    enum class MissingFunctionPolicy : uint32_t
+    {
+        // Strict mode for tests/CI: log the bad target and request the runtime to stop.
+        Stop = 0,
+
+        // Debug mode: log once, leave ctx->pc on the bad target, and let the caller unwind.
+        ContinueToTarget = 1,
+
+        // Debug mode: same as ContinueToTarget, but triggers a debugger break once on MSVC.
+        BreakOnce = 2,
+
+        // Escape hatch only: skip missing calls by returning to fallthrough (it can hide guest bugs)
+        SkipCallDebug = 3,
+    };
+
     class GuestExecutionScope
     {
     public:
@@ -386,6 +410,22 @@ public:
     void registerFunction(uint32_t address, RecompiledFunction func);
     RecompiledFunction lookupFunction(uint32_t address);
     bool hasFunction(uint32_t address) const;
+    bool dispatchGuestBranch(uint8_t *rdram,
+                             R5900Context *ctx,
+                             uint32_t targetPc,
+                             uint32_t sourcePc,
+                             uint32_t fallthroughPc,
+                             GuestBranchKind kind,
+                             const char *debugName);
+    void reportMissingFunction(uint8_t *rdram,
+                               R5900Context *ctx,
+                               uint32_t targetPc,
+                               uint32_t sourcePc,
+                               GuestBranchKind kind,
+                               const char *debugName);
+    void setMissingFunctionPolicy(MissingFunctionPolicy policy);
+    MissingFunctionPolicy missingFunctionPolicy() const;
+    void resetMissingFunctionReportOnce();
 
     static const IoPaths &getIoPaths();
     static void setIoPaths(const IoPaths &paths);
@@ -550,6 +590,8 @@ private:
     uint32_t m_asyncCallbackStackTop = PS2_RAM_SIZE;
 
     std::unordered_map<uint32_t, RecompiledFunction> m_functionTable;
+    std::atomic<uint32_t> m_missingFunctionPolicy{static_cast<uint32_t>(MissingFunctionPolicy::ContinueToTarget)};
+    std::atomic<bool> m_missingFunctionReported{false};
     std::atomic<bool> m_stopRequested{false};
     DebugUiCallback m_debugUiInitCallback = nullptr;
     DebugUiCallback m_debugUiDrawCallback = nullptr;
