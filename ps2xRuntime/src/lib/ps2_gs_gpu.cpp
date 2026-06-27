@@ -420,6 +420,12 @@ void GS::reset()
     m_hostPresentationUsedPreferred = false;
     m_hasHostPresentationFrame = false;
 
+    m_debugHistoryWrite = 0;
+    m_debugHistoryCount = 0;
+    m_debugNextSeq = 1;
+    m_debugFrameIndex = 0;
+    m_debugLastVsyncTick = UINT64_MAX;
+
     for (int i = 0; i < 2; ++i)
     {
         m_ctx[i].frame.fbw = 10;
@@ -454,6 +460,225 @@ const uint8_t *GS::lockDisplaySnapshot(uint32_t &outSize)
 
     outSize = static_cast<uint32_t>(m_displaySnapshot.size());
     return m_displaySnapshot.data();
+}
+
+GSDebugSnapshot GS::getDebugSnapshot() const
+{
+    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+
+    GSDebugSnapshot snapshot{};
+    snapshot.ctx[0] = m_ctx[0];
+    snapshot.ctx[1] = m_ctx[1];
+    snapshot.prim = m_prim;
+    snapshot.texa = m_texa;
+    snapshot.texclut = m_texclut;
+    snapshot.bitbltbuf = m_bitbltbuf;
+    snapshot.trxpos = m_trxpos;
+    snapshot.trxreg = m_trxreg;
+    snapshot.trxdir = m_trxdir;
+    snapshot.transferX = m_transferState.x;
+    snapshot.transferY = m_transferState.y;
+    snapshot.transferTotalPixels = m_transferState.total_pixels;
+    snapshot.transferCopiedPixels = m_transferState.copied_pixels;
+    snapshot.lastDisplayBaseBytes = m_lastDisplayBaseBytes;
+    snapshot.preferredDisplaySourceFrame = m_preferredDisplaySourceFrame;
+    snapshot.preferredDisplayDestFbp = m_preferredDisplayDestFbp;
+    snapshot.hasPreferredDisplaySource = m_hasPreferredDisplaySource;
+    snapshot.hostPresentationWidth = m_hostPresentationWidth;
+    snapshot.hostPresentationHeight = m_hostPresentationHeight;
+    snapshot.hostPresentationDisplayFbp = m_hostPresentationDisplayFbp;
+    snapshot.hostPresentationSourceFbp = m_hostPresentationSourceFbp;
+    snapshot.hostPresentationUsedPreferred = m_hostPresentationUsedPreferred;
+    snapshot.hasHostPresentationFrame = m_hasHostPresentationFrame;
+    snapshot.localToHostPendingBytes = (m_localToHostReadPos < m_localToHostBuffer.size())
+                                           ? (m_localToHostBuffer.size() - m_localToHostReadPos)
+                                           : 0u;
+    return snapshot;
+}
+
+
+std::vector<GSDebugHistoryEntry> GS::getDebugHistory() const
+{
+    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+
+    std::vector<GSDebugHistoryEntry> out;
+    out.reserve(m_debugHistoryCount);
+    const size_t first = (m_debugHistoryWrite + kDebugHistoryCapacity - m_debugHistoryCount) % kDebugHistoryCapacity;
+    for (size_t i = 0; i < m_debugHistoryCount; ++i)
+    {
+        out.push_back(m_debugHistory[(first + i) % kDebugHistoryCapacity]);
+    }
+    return out;
+}
+
+void GS::clearDebugHistory()
+{
+    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    m_debugHistoryWrite = 0;
+    m_debugHistoryCount = 0;
+    m_debugNextSeq = 1;
+    m_debugFrameIndex = 0;
+    m_debugLastVsyncTick = UINT64_MAX;
+}
+
+bool GS::isDebugHistoryPaused() const
+{
+    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    return m_debugHistoryPaused;
+}
+
+void GS::setDebugHistoryPaused(bool paused)
+{
+    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    m_debugHistoryPaused = paused;
+}
+
+GSDebugHistoryEntry GS::makeDebugEventUnlocked(GSDebugEventKind kind) const
+{
+    GSDebugHistoryEntry entry{};
+    entry.kind = kind;
+    entry.prim = m_prim;
+    const uint32_t ci = m_prim.ctxt ? 1u : 0u;
+    entry.frame = m_ctx[ci].frame;
+    entry.zbuf = m_ctx[ci].zbuf;
+    entry.tex0 = m_ctx[ci].tex0;
+    entry.scissor = m_ctx[ci].scissor;
+    entry.test = m_ctx[ci].test;
+    entry.alpha = m_ctx[ci].alpha;
+    entry.bitbltbuf = m_bitbltbuf;
+    entry.trxpos = m_trxpos;
+    entry.trxreg = m_trxreg;
+    entry.trxdir = m_trxdir;
+    entry.transferPixels = m_transferState.total_pixels;
+    return entry;
+}
+
+void GS::recordDebugEventUnlocked(GSDebugHistoryEntry entry)
+{
+    if (m_debugHistoryPaused)
+    {
+        return;
+    }
+
+    const uint64_t tick = ps2_syscalls::GetCurrentVSyncTick();
+    if (m_debugLastVsyncTick == UINT64_MAX)
+    {
+        m_debugLastVsyncTick = tick;
+    }
+    else if (tick != m_debugLastVsyncTick)
+    {
+        ++m_debugFrameIndex;
+        m_debugLastVsyncTick = tick;
+    }
+
+    entry.seq = m_debugNextSeq++;
+    entry.vsyncTick = tick;
+    entry.frameIndex = m_debugFrameIndex;
+
+    m_debugHistory[m_debugHistoryWrite] = entry;
+    m_debugHistoryWrite = (m_debugHistoryWrite + 1u) % kDebugHistoryCapacity;
+    if (m_debugHistoryCount < kDebugHistoryCapacity)
+    {
+        ++m_debugHistoryCount;
+    }
+}
+
+void GS::recordGifTagDebugEventUnlocked(uint32_t sizeBytes, uint32_t nloop, uint8_t flg, uint32_t nreg)
+{
+    GSDebugHistoryEntry entry = makeDebugEventUnlocked(GSDebugEventKind::GifTag);
+    entry.gifSizeBytes = sizeBytes;
+    entry.gifNloop = nloop;
+    entry.gifFlg = flg;
+    entry.gifNreg = static_cast<uint8_t>(std::min<uint32_t>(nreg, 16u));
+    recordDebugEventUnlocked(entry);
+}
+
+void GS::recordRegisterDebugEventUnlocked(uint8_t regAddr, uint64_t value)
+{
+    switch (regAddr)
+    {
+    case GS_REG_PRIM:
+    case GS_REG_TEX0_1:
+    case GS_REG_TEX0_2:
+    case GS_REG_TEX2_1:
+    case GS_REG_TEX2_2:
+    case GS_REG_TEXA:
+    case GS_REG_TEXCLUT:
+    case GS_REG_FRAME_1:
+    case GS_REG_FRAME_2:
+    case GS_REG_ZBUF_1:
+    case GS_REG_ZBUF_2:
+    case GS_REG_ALPHA_1:
+    case GS_REG_ALPHA_2:
+    case GS_REG_TEST_1:
+    case GS_REG_TEST_2:
+    case GS_REG_SCISSOR_1:
+    case GS_REG_SCISSOR_2:
+    case GS_REG_XYOFFSET_1:
+    case GS_REG_XYOFFSET_2:
+    case GS_REG_BITBLTBUF:
+    case GS_REG_TRXPOS:
+    case GS_REG_TRXREG:
+    case GS_REG_TRXDIR:
+        break;
+    default:
+        return;
+    }
+
+    GSDebugHistoryEntry entry = makeDebugEventUnlocked(GSDebugEventKind::Register);
+    entry.reg = regAddr;
+    entry.regValue = value;
+    recordDebugEventUnlocked(entry);
+}
+
+void GS::recordDrawDebugEventUnlocked(int vertexCount)
+{
+    if (vertexCount <= 0)
+    {
+        return;
+    }
+
+    GSDebugHistoryEntry entry = makeDebugEventUnlocked(GSDebugEventKind::Draw);
+    entry.vertexCount = static_cast<uint32_t>(vertexCount);
+
+    const int count = std::min(vertexCount, kMaxVerts);
+    entry.xMin = entry.xMax = m_vtxQueue[0].x;
+    entry.yMin = entry.yMax = m_vtxQueue[0].y;
+    entry.zMin = entry.zMax = m_vtxQueue[0].z;
+    entry.aMin = entry.aMax = m_vtxQueue[0].a;
+
+    for (int i = 1; i < count; ++i)
+    {
+        const GSVertex &v = m_vtxQueue[i];
+        entry.xMin = std::min(entry.xMin, v.x);
+        entry.xMax = std::max(entry.xMax, v.x);
+        entry.yMin = std::min(entry.yMin, v.y);
+        entry.yMax = std::max(entry.yMax, v.y);
+        entry.zMin = std::min(entry.zMin, v.z);
+        entry.zMax = std::max(entry.zMax, v.z);
+        entry.aMin = std::min(entry.aMin, v.a);
+        entry.aMax = std::max(entry.aMax, v.a);
+    }
+
+    recordDebugEventUnlocked(entry);
+}
+
+void GS::recordTransferDebugEventUnlocked()
+{
+    GSDebugHistoryEntry entry = makeDebugEventUnlocked(GSDebugEventKind::Transfer);
+    entry.transferPixels = m_transferState.total_pixels;
+    recordDebugEventUnlocked(entry);
+}
+
+void GS::recordPresentDebugEventUnlocked(uint32_t displayFbp, uint32_t sourceFbp, uint32_t width, uint32_t height, bool usedPreferred)
+{
+    GSDebugHistoryEntry entry = makeDebugEventUnlocked(GSDebugEventKind::Present);
+    entry.displayFbp = displayFbp;
+    entry.sourceFbp = sourceFbp;
+    entry.width = width;
+    entry.height = height;
+    entry.usedPreferred = usedPreferred;
+    recordDebugEventUnlocked(entry);
 }
 
 bool GS::getPreferredDisplaySource(GSFrameReg &outSource, uint32_t &outDestFbp) const
@@ -501,7 +726,12 @@ bool GS::copyFrameToHostRgbaUnlocked(const GSFrameReg &frame,
         return false;
     }
 
-    outPixels.assign(kHostFrameWidth * kHostFrameHeight * 4u, 0u);
+    outPixels.resize(kHostFrameWidth * kHostFrameHeight * 4u);
+    auto failCopy = [&outPixels]() -> bool
+    {
+        outPixels.clear();
+        return false;
+    };
 
     const uint32_t baseBytes = frameBaseIsPages ? (frame.fbp * 8192u) : (frame.fbp * 256u);
     const uint32_t basePtr = frameBaseIsPages ? GSInternal::framePageBaseToBlock(frame.fbp) : frame.fbp;
@@ -554,7 +784,7 @@ bool GS::copyFrameToHostRgbaUnlocked(const GSFrameReg &frame,
                 const uint32_t srcOff = baseBytes + (srcY * strideBytes) + (srcX * srcPixelBytes);
                 if (srcOff + srcPixelBytes > m_vramSize)
                 {
-                    return false;
+                    return failCopy();
                 }
 
                 dstRow[x * 4u + 0u] = m_vram[srcOff + 0u];
@@ -605,7 +835,7 @@ bool GS::copyFrameToHostRgbaUnlocked(const GSFrameReg &frame,
                 const uint32_t srcOff = baseBytes + (srcY * strideBytes) + (srcX * 2u);
                 if (srcOff + sizeof(uint16_t) > m_vramSize)
                 {
-                    return false;
+                    return failCopy();
                 }
 
                 uint16_t pixel = 0u;
@@ -622,13 +852,29 @@ bool GS::copyFrameToHostRgbaUnlocked(const GSFrameReg &frame,
         return true;
     }
 
-    return false;
+    return failCopy();
 }
 
 void GS::latchHostPresentationFrame()
 {
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    latchHostPresentationFrameUnlocked();
+}
 
+bool GS::tryLatchHostPresentationFrame()
+{
+    if (!m_stateMutex.try_lock())
+    {
+        return false;
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(m_stateMutex, std::adopt_lock);
+    latchHostPresentationFrameUnlocked();
+    return true;
+}
+
+void GS::latchHostPresentationFrameUnlocked()
+{
     if (!m_privRegs || !m_vram || m_vramSize == 0u)
     {
         m_hostPresentationFrame.clear();
@@ -856,6 +1102,11 @@ void GS::latchHostPresentationFrame()
             m_hostPresentationSourceFbp = selectedFrame1.fbp;
             m_hostPresentationUsedPreferred = false;
             m_hasHostPresentationFrame = true;
+            recordPresentDebugEventUnlocked(m_hostPresentationDisplayFbp,
+                                            m_hostPresentationSourceFbp,
+                                            m_hostPresentationWidth,
+                                            m_hostPresentationHeight,
+                                            m_hostPresentationUsedPreferred);
             return;
         }
     }
@@ -894,6 +1145,11 @@ void GS::latchHostPresentationFrame()
     m_hostPresentationSourceFbp = selectedFrame.fbp;
     m_hostPresentationUsedPreferred = usedPreferred;
     m_hasHostPresentationFrame = true;
+    recordPresentDebugEventUnlocked(m_hostPresentationDisplayFbp,
+                                    m_hostPresentationSourceFbp,
+                                    m_hostPresentationWidth,
+                                    m_hostPresentationHeight,
+                                    m_hostPresentationUsedPreferred);
 }
 
 bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
@@ -928,7 +1184,7 @@ bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
         *outUsedPreferred = m_hostPresentationUsedPreferred;
 
     const size_t packedRowBytes = static_cast<size_t>(outWidth) * 4u;
-    outPixels.assign(packedRowBytes * static_cast<size_t>(outHeight), 0u);
+    outPixels.resize(packedRowBytes * static_cast<size_t>(outHeight));
     if (outWidth != 0u && outHeight != 0u)
     {
         const size_t sourceRowBytes = static_cast<size_t>(kHostFrameWidth) * 4u;
@@ -986,6 +1242,7 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
         }
     });
 
+
     uint32_t offset = 0;
     while (offset + 16 <= sizeBytes)
     {
@@ -1000,6 +1257,8 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
         uint32_t nreg = static_cast<uint32_t>((tagLo >> 60) & 0xF);
         if (nreg == 0)
             nreg = 16;
+
+        recordGifTagDebugEventUnlocked(sizeBytes, nloop, flg, nreg);
 
         bool pre = ((tagLo >> 46) & 1) != 0;
         if (pre)
@@ -1078,8 +1337,8 @@ void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
         break;
     }
     case 0x03:
-        m_curU = static_cast<uint16_t>(lo & 0xFFFFu);
-        m_curV = static_cast<uint16_t>((lo >> 32) & 0xFFFFu);
+        m_curU = static_cast<uint16_t>(lo & 0x3FFFu);
+        m_curV = static_cast<uint16_t>((lo >> 32) & 0x3FFFu);
         break;
     case 0x04:
     {
@@ -1566,6 +1825,7 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
         {
             performLocalToHostToBuffer();
         }
+        recordTransferDebugEventUnlocked();
         break;
     }
     case GS_REG_HWREG:
@@ -1663,6 +1923,8 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
     default:
         break;
     }
+
+    recordRegisterDebugEventUnlocked(regAddr, value);
 }
 
 void GS::performLocalToLocalTransfer()
@@ -1841,6 +2103,7 @@ void GS::vertexKick(bool drawing)
         return;
 
     m_rasterizer.drawPrimitive(this);
+    recordDrawDebugEventUnlocked(needed);
 
     switch (m_prim.type)
     {

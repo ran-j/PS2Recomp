@@ -195,6 +195,49 @@ void register_pad_input_tests()
             t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(0), "closed port should return DISCONNECTED after close");
         });
 
+        tc.Run("pad command state reports EXECCMD once before returning STABLE", [](TestCase &t)
+               {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);
+            R5900Context ctx;
+
+            ps2_stubs::scePadInit(rdram.data(), &ctx, nullptr);
+            openPadPort(ctx, rdram);
+
+            setRegU32(ctx, 4, 0u);
+            setRegU32(ctx, 5, 0u);
+            setRegU32(ctx, 6, 1u);
+            setRegU32(ctx, 7, 3u);
+            ps2_stubs::scePadSetMainMode(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(1), "scePadSetMainMode should succeed");
+
+            setRegU32(ctx, 4, 0u);
+            setRegU32(ctx, 5, 0u);
+            ps2_stubs::scePadGetState(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(5), "first state after mode command should be EXECCMD");
+
+            setRegU32(ctx, 4, 0u);
+            setRegU32(ctx, 5, 0u);
+            ps2_stubs::scePadGetState(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(6), "second state after mode command should return STABLE");
+
+            setRegU32(ctx, 4, 0u);
+            setRegU32(ctx, 5, 0u);
+            ps2_stubs::scePadEnterPressMode(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(1), "scePadEnterPressMode should succeed");
+
+            setRegU32(ctx, 4, 0u);
+            setRegU32(ctx, 5, 0u);
+            ps2_stubs::scePadGetState(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(5), "first state after press-mode command should be EXECCMD");
+
+            setRegU32(ctx, 4, 0u);
+            setRegU32(ctx, 5, 0u);
+            ps2_stubs::scePadGetState(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(6), "second state after press-mode command should return STABLE");
+
+            closePadPort(ctx, rdram);
+        });
+
         tc.Run("pad info and mode helpers return consistent values", [](TestCase &t)
                {
             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);

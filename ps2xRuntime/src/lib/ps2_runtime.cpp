@@ -97,45 +97,6 @@ namespace
     constexpr uint32_t EXCEPTION_VECTOR_TLB_REFILL = 0x80000000u;
     constexpr uint32_t EXCEPTION_VECTOR_BOOT = 0xBFC00200u;
 
-    struct HostFrameProbePoint
-    {
-        uint32_t x;
-        uint32_t y;
-    };
-
-    constexpr HostFrameProbePoint kGhostProbePoints[] = {
-        {220u, 176u},
-        {260u, 208u},
-        {320u, 208u},
-        {260u, 240u},
-        {320u, 240u},
-        {260u, 272u},
-        {320u, 272u},
-    };
-
-    uint32_t sampleHostFramePixel(const std::vector<uint8_t> &pixels,
-                                  uint32_t width,
-                                  uint32_t height,
-                                  uint32_t x,
-                                  uint32_t y)
-    {
-        if (x >= width || y >= height)
-        {
-            return 0u;
-        }
-
-        const size_t offset = (static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)) * 4u;
-        if (offset + 4u > pixels.size())
-        {
-            return 0u;
-        }
-
-        return static_cast<uint32_t>(pixels[offset + 0u]) |
-               (static_cast<uint32_t>(pixels[offset + 1u]) << 8) |
-               (static_cast<uint32_t>(pixels[offset + 2u]) << 16) |
-               (static_cast<uint32_t>(pixels[offset + 3u]) << 24);
-    }
-
     struct DispatchHistory
     {
         std::array<uint32_t, 64> pcs{};
@@ -145,6 +106,8 @@ namespace
 
     thread_local DispatchHistory g_dispatchHistory;
     thread_local std::unordered_map<PS2Runtime *, uint32_t> g_guestExecutionDepths;
+    std::mutex g_functionStartsMutex;
+    std::unordered_map<const PS2Runtime *, std::vector<uint32_t>> g_functionStartsByRuntime;
 
     void pushDispatchPc(uint32_t pc)
     {
@@ -223,6 +186,82 @@ namespace
             return EXCEPTION_VECTOR_BOOT;
         }
         return tlbRefill ? EXCEPTION_VECTOR_TLB_REFILL : EXCEPTION_VECTOR_GENERAL;
+    }
+
+    void seedVu0IdleSuccess(R5900Context *ctx)
+    {
+        if (!ctx)
+        {
+            return;
+        }
+
+        ctx->vu0_clip_flags = 0;
+        ctx->vu0_clip_flags2 = 0;
+        ctx->vu0_mac_flags = 0;
+        ctx->vu0_status = 0;
+        ctx->vu0_q = 1.0f;
+        ctx->vu0_vpu_stat = 0;
+        ctx->vu0_vpu_stat2 = 0;
+    }
+
+
+    void copyVu0ContextToState(const R5900Context *ctx, VU1State &state)
+    {
+        std::memset(&state, 0, sizeof(state));
+
+        for (uint32_t i = 0; i < 32u; ++i)
+        {
+            _mm_storeu_ps(state.vf[i], ctx->vu0_vf[i]);
+        }
+        for (uint32_t i = 0; i < 16u; ++i)
+        {
+            state.vi[i] = static_cast<int16_t>(ctx->vi[i]);
+        }
+
+        _mm_storeu_ps(state.acc, ctx->vu0_acc);
+        state.q = ctx->vu0_q;
+        state.p = ctx->vu0_p;
+        state.i = ctx->vu0_i;
+        state.pc = ctx->vu0_pc;
+        state.mac = ctx->vu0_mac_flags;
+        state.clip = ctx->vu0_clip_flags;
+        state.status = ctx->vu0_status;
+        state.itop = ctx->vu0_itop;
+
+        state.vf[0][0] = 0.0f;
+        state.vf[0][1] = 0.0f;
+        state.vf[0][2] = 0.0f;
+        state.vf[0][3] = 1.0f;
+        state.vi[0] = 0;
+    }
+
+    void copyVu0StateToContext(const VU1State &state, R5900Context *ctx)
+    {
+        for (uint32_t i = 0; i < 32u; ++i)
+        {
+            ctx->vu0_vf[i] = _mm_loadu_ps(state.vf[i]);
+        }
+        for (uint32_t i = 0; i < 16u; ++i)
+        {
+            ctx->vi[i] = static_cast<uint16_t>(state.vi[i]);
+        }
+
+        ctx->vu0_acc = _mm_loadu_ps(state.acc);
+        ctx->vu0_q = state.q;
+        ctx->vu0_p = state.p;
+        ctx->vu0_i = state.i;
+        ctx->vu0_mac_flags = state.mac;
+        ctx->vu0_clip_flags = state.clip;
+        ctx->vu0_clip_flags2 = state.clip;
+        ctx->vu0_status = static_cast<uint16_t>(state.status);
+        ctx->vu0_itop = state.itop;
+        ctx->vu0_pc = state.pc;
+        ctx->vu0_tpc = state.pc;
+        ctx->vu0_vpu_stat = 0;
+        ctx->vu0_vpu_stat2 = 0;
+
+        ctx->vu0_vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
+        ctx->vi[0] = 0;
     }
 
     void raiseCop0Exception(R5900Context *ctx, uint32_t exceptionCode, bool tlbRefill = false)
@@ -357,6 +396,34 @@ namespace
         return 0u;
     }
 
+    void clearFunctionStarts(const PS2Runtime *runtime)
+    {
+        std::lock_guard<std::mutex> lock(g_functionStartsMutex);
+        g_functionStartsByRuntime.erase(runtime);
+    }
+
+    std::vector<uint32_t> snapshotFunctionStarts(const PS2Runtime *runtime)
+    {
+        std::lock_guard<std::mutex> lock(g_functionStartsMutex);
+        auto it = g_functionStartsByRuntime.find(runtime);
+        if (it == g_functionStartsByRuntime.end())
+        {
+            return {};
+        }
+        return it->second;
+    }
+
+    void registerFunctionStart(const PS2Runtime *runtime, uint32_t address)
+    {
+        std::lock_guard<std::mutex> lock(g_functionStartsMutex);
+        auto &starts = g_functionStartsByRuntime[runtime];
+        auto insertPos = std::lower_bound(starts.begin(), starts.end(), address);
+        if (insertPos == starts.end() || *insertPos != address)
+        {
+            starts.insert(insertPos, address);
+        }
+    }
+
     std::string readGuestPrintableString(const uint8_t *rdram, uint32_t addr, size_t maxLen)
     {
         std::string out;
@@ -429,22 +496,39 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     static bool s_lastPreferred = false;
     static uint32_t s_lastWidth = 0u;
     static uint32_t s_lastHeight = 0u;
+    static bool s_hasUploadedFrame = false;
+    static std::vector<uint8_t> s_scratch;
+    static std::vector<uint8_t> s_uploadBuffer(DEFAULT_FB_SIZE, 0u);
 
     const uint64_t currentTick = ps2_syscalls::GetCurrentVSyncTick();
-    if (!s_hasLatchedInitialFrame || currentTick != s_lastPresentationTick)
+    bool latchedThisCall = false;
+    if (!s_hasLatchedInitialFrame)
     {
         rt->gs().latchHostPresentationFrame();
         s_lastPresentationTick = currentTick;
         s_hasLatchedInitialFrame = true;
+        latchedThisCall = true;
+    }
+    else if (currentTick != s_lastPresentationTick && rt->gs().tryLatchHostPresentationFrame())
+    {
+        s_lastPresentationTick = currentTick;
+        latchedThisCall = true;
     }
 
-    std::vector<uint8_t> scratch;
+    if (!latchedThisCall && s_hasUploadedFrame)
+    {
+        outWidth = (s_lastWidth != 0u) ? s_lastWidth : FB_WIDTH;
+        outHeight = (s_lastHeight != 0u) ? s_lastHeight : DEFAULT_DISPLAY_HEIGHT;
+        return;
+    }
+
+    s_scratch.clear();
     uint32_t width = 0u;
     uint32_t height = 0u;
     uint32_t displayFbp = 0u;
     uint32_t sourceFbp = 0u;
     bool usedPreferredDisplaySource = false;
-    if (!rt->gs().copyLatchedHostPresentationFrame(scratch,
+    if (!rt->gs().copyLatchedHostPresentationFrame(s_scratch,
                                                    width,
                                                    height,
                                                    &displayFbp,
@@ -456,6 +540,9 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
         UnloadImage(blank);
         outWidth = FB_WIDTH;
         outHeight = DEFAULT_DISPLAY_HEIGHT;
+        s_lastWidth = outWidth;
+        s_lastHeight = outHeight;
+        s_hasUploadedFrame = true;
         return;
     }
 
@@ -476,31 +563,6 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
                       << " preferred=" << static_cast<uint32_t>(usedPreferredDisplaySource ? 1u : 0u)
                       << std::endl;
         }
-        static uint32_t s_probeDebugCount = 0u;
-        if (s_probeDebugCount < 32u ||
-            displayFbp != s_lastDisplayFbp ||
-            sourceFbp != s_lastSourceFbp ||
-            usedPreferredDisplaySource != s_lastPreferred)
-        {
-            std::cout << "[frame:probe] idx=" << s_probeDebugCount
-                      << " tick=" << currentTick
-                      << " displayFbp=" << displayFbp
-                      << " sourceFbp=" << sourceFbp
-                      << " preferred=" << static_cast<uint32_t>(usedPreferredDisplaySource ? 1u : 0u);
-            for (const auto &probe : kGhostProbePoints)
-            {
-                if (probe.x >= width || probe.y >= height)
-                {
-                    continue;
-                }
-
-                const uint32_t pixel = sampleHostFramePixel(scratch, width, height, probe.x, probe.y);
-                std::cout << " host[" << probe.x << "," << probe.y << "]=0x"
-                          << std::hex << pixel << std::dec;
-            }
-            std::cout << std::endl;
-            ++s_probeDebugCount;
-        }
         ++s_uploadDebugCount;
     });
     s_lastDisplayFbp = displayFbp;
@@ -509,8 +571,8 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     s_lastWidth = width;
     s_lastHeight = height;
 
-    std::vector<uint8_t> uploadBuffer(DEFAULT_FB_SIZE, 0u);
-    if (!scratch.empty() && width != 0u && height != 0u)
+    std::fill(s_uploadBuffer.begin(), s_uploadBuffer.end(), 0u);
+    if (!s_scratch.empty() && width != 0u && height != 0u)
     {
         const uint32_t copyWidth = std::min<uint32_t>(width, FB_WIDTH);
         const uint32_t copyHeight = std::min<uint32_t>(height, FB_HEIGHT);
@@ -521,18 +583,19 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
         {
             const size_t srcOffset = static_cast<size_t>(y) * srcRowBytes;
             const size_t dstOffset = static_cast<size_t>(y) * dstRowBytes;
-            if (srcOffset + copyRowBytes > scratch.size() ||
-                dstOffset + copyRowBytes > uploadBuffer.size())
+            if (srcOffset + copyRowBytes > s_scratch.size() ||
+                dstOffset + copyRowBytes > s_uploadBuffer.size())
             {
                 break;
             }
-            std::memcpy(uploadBuffer.data() + dstOffset, scratch.data() + srcOffset, copyRowBytes);
+            std::memcpy(s_uploadBuffer.data() + dstOffset, s_scratch.data() + srcOffset, copyRowBytes);
         }
     }
 
-    UpdateTexture(tex, uploadBuffer.data());
+    UpdateTexture(tex, s_uploadBuffer.data());
     outWidth = width;
     outHeight = height;
+    s_hasUploadedFrame = true;
 }
 
 PS2Runtime::PS2Runtime()
@@ -545,6 +608,7 @@ PS2Runtime::PS2Runtime()
     // Stack pointer (SP) and global pointer (GP) will be set by the loaded ELF
 
     m_functionTable.clear();
+    clearFunctionStarts(this);
 
     m_loadedModules.clear();
     m_guestHeapBlocks.clear();
@@ -555,6 +619,23 @@ PS2Runtime::PS2Runtime()
     m_guestHeapConfigured = false;
     m_asyncCallbackStackFloor = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
     m_asyncCallbackStackTop = PS2_RAM_SIZE;
+}
+
+void PS2Runtime::setDebugUiCallbacks(DebugUiCallback initCallback,
+                                      DebugUiCallback drawCallback,
+                                      DebugUiCallback shutdownCallback,
+                                      void *userData)
+{
+    if (m_debugUiInitialized && m_debugUiShutdownCallback)
+    {
+        m_debugUiShutdownCallback(*this, m_debugUiUserData);
+        m_debugUiInitialized = false;
+    }
+
+    m_debugUiInitCallback = initCallback;
+    m_debugUiDrawCallback = drawCallback;
+    m_debugUiShutdownCallback = shutdownCallback;
+    m_debugUiUserData = userData;
 }
 
 PS2Runtime::~PS2Runtime()
@@ -573,6 +654,12 @@ PS2Runtime::~PS2Runtime()
             m_audioBackend.setAudioReady(false);
         }
 #endif
+        if (m_debugUiInitialized && m_debugUiShutdownCallback)
+        {
+            m_debugUiShutdownCallback(*this, m_debugUiUserData);
+            m_debugUiInitialized = false;
+        }
+
         if (IsWindowReady())
         {
             CloseWindow();
@@ -581,6 +668,7 @@ PS2Runtime::~PS2Runtime()
         m_loadedModules.clear();
 
         m_functionTable.clear();
+        clearFunctionStarts(this);
     }
     catch (const std::exception &e)
     {
@@ -610,16 +698,17 @@ bool PS2Runtime::syncCoreSubsystems()
     m_gifArbiter.setProcessPacketFn([this](const uint8_t *data, uint32_t size)
                                     { m_gs.processGIFPacket(data, size); });
     m_memory.setGifArbiter(&m_gifArbiter);
-    m_memory.setVu1MscalCallback([this](uint32_t startPC, uint32_t itop)
+    m_memory.setVu1MscalCallback([this](uint32_t startPC, uint32_t top, uint32_t itop)
                                  { m_vu1.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
                                                  m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
-                                                 m_gs, &m_memory, startPC, itop, 65536); });
-    m_memory.setVu1MscntCallback([this](uint32_t itop)
+                                                 m_gs, &m_memory, startPC, top, itop, 65536); });
+    m_memory.setVu1MscntCallback([this](uint32_t top, uint32_t itop)
                                  { m_vu1.resume(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
                                                 m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
-                                                m_gs, &m_memory, itop, 65536); });
+                                                m_gs, &m_memory, top, itop, 65536); });
     m_iop.init(rdram);
     m_iop.reset();
+    m_vu0.reset();
     m_vu1.reset();
 
     m_boundRdram = rdram;
@@ -652,6 +741,11 @@ bool PS2Runtime::initialize(const char *title)
         m_audioBackend.setAudioReady(IsAudioDeviceReady());
 #endif
         SetTargetFPS(60);
+        if (m_debugUiInitCallback)
+        {
+            m_debugUiInitCallback(*this, m_debugUiUserData);
+            m_debugUiInitialized = true;
+        }
 
         return true;
     }
@@ -957,6 +1051,7 @@ void PS2Runtime::configureIoPathsFromElf(const std::string &elfPath)
 
 void PS2Runtime::registerFunction(uint32_t address, RecompiledFunction func)
 {
+    registerFunctionStart(this, address);
     m_functionTable[address] = func;
 }
 
@@ -981,7 +1076,89 @@ PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
         return it->second;
     }
 
-    std::cerr << "Warning: Function at address 0x" << std::hex << address << std::dec << " not found" << std::endl;
+    const std::vector<uint32_t> functionStarts = snapshotFunctionStarts(this);
+    auto aliasOwner = [&](uint32_t ownerAddress) -> RecompiledFunction
+    {
+        auto owner = m_functionTable.find(ownerAddress);
+        if (owner == m_functionTable.end())
+        {
+            return nullptr;
+        }
+
+        auto ownerStart = std::lower_bound(functionStarts.begin(), functionStarts.end(), ownerAddress);
+        if (ownerStart == functionStarts.end() || *ownerStart != ownerAddress)
+        {
+            return nullptr;
+        }
+
+        auto nextStart = ownerStart;
+        ++nextStart;
+        if (nextStart != functionStarts.end())
+        {
+            if (address >= *nextStart)
+            {
+                return nullptr;
+            }
+        }
+        else if (!m_memory.isCodeAddress(address))
+        {
+            return nullptr;
+        }
+
+        return owner->second;
+    };
+
+    if (!functionStarts.empty())
+    {
+        const DispatchHistory &history = g_dispatchHistory;
+        const uint32_t count = history.wrapped ? static_cast<uint32_t>(history.pcs.size()) : history.next;
+        for (uint32_t step = 1u; step <= count; ++step)
+        {
+            const uint32_t idx = (history.next + static_cast<uint32_t>(history.pcs.size()) - step) %
+                                 static_cast<uint32_t>(history.pcs.size());
+            const uint32_t previousPc = history.pcs[idx];
+            if (previousPc == address)
+            {
+                continue;
+            }
+            if (RecompiledFunction owner = aliasOwner(previousPc))
+            {
+                return owner;
+            }
+        }
+
+        auto nextStart = std::upper_bound(functionStarts.begin(), functionStarts.end(), address);
+        if (nextStart != functionStarts.begin())
+        {
+            auto ownerStart = nextStart;
+            --ownerStart;
+            if (RecompiledFunction owner = aliasOwner(*ownerStart))
+            {
+                return owner;
+            }
+        }
+    }
+
+    std::cerr << "Warning: Function at address 0x" << std::hex << address;
+    if (!functionStarts.empty())
+    {
+        auto nextStart = std::upper_bound(functionStarts.begin(), functionStarts.end(), address);
+        if (nextStart != functionStarts.begin())
+        {
+            auto ownerStart = nextStart;
+            --ownerStart;
+            std::cerr << " nearestStart=0x" << *ownerStart;
+        }
+        if (nextStart != functionStarts.end())
+        {
+            std::cerr << " nextStart=0x" << *nextStart;
+        }
+        else
+        {
+            std::cerr << " nextStart=<end>";
+        }
+    }
+    std::cerr << std::dec << " not found" << std::endl;
 
     static RecompiledFunction defaultFunction = [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
@@ -1125,23 +1302,25 @@ void PS2Runtime::SignalException(R5900Context *ctx, PS2Exception exception)
 
 void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint32_t address)
 {
-    static std::unordered_map<uint32_t, int> seen;
-    int &count = seen[address];
-    if (count < 3)
-    {
-        RUNTIME_LOG("[VU0] microprogram @0x" << std::hex << address
-                                             << " pc=0x" << ctx->pc
-                                             << " ra=0x" << static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0))
-                                             << std::dec << std::endl);
-    }
-    ++count;
+    (void)rdram;
 
-    // Seed status so dependent code sees success.
-    ctx->vu0_clip_flags = 0;
-    ctx->vu0_clip_flags2 = 0;
-    ctx->vu0_mac_flags = 0;
-    ctx->vu0_status = 0;
-    ctx->vu0_q = 1.0f;
+    uint8_t *const vu0Code = m_memory.getVU0Code();
+    uint8_t *const vu0Data = m_memory.getVU0Data();
+    const uint32_t startPC = address & ~0x7u;
+
+    if (!vu0Code || !vu0Data || startPC + 8u > PS2_VU0_CODE_SIZE)
+    {
+        seedVu0IdleSuccess(ctx);
+        return;
+    }
+
+    m_vu0.reset();
+    copyVu0ContextToState(ctx, m_vu0.state());
+    m_vu0.execute(vu0Code, PS2_VU0_CODE_SIZE,
+                  vu0Data, PS2_VU0_DATA_SIZE,
+                  m_gs, &m_memory,
+                  startPC, 0u, ctx->vu0_itop, 4096);
+    copyVu0StateToContext(m_vu0.state(), ctx);
 }
 
 void PS2Runtime::vu0StartMicroProgram(uint8_t *rdram, R5900Context *ctx, uint32_t address)
@@ -1179,6 +1358,14 @@ void PS2Runtime::handleSyscall(uint8_t *rdram, R5900Context *ctx, uint32_t encod
 void PS2Runtime::handleBreak(uint8_t *rdram, R5900Context *ctx)
 {
     raiseCop0Exception(ctx, EXCEPTION_BREAKPOINT);
+}
+
+void PS2Runtime::drainCompletedDmacHandlers(uint8_t *rdram)
+{
+    for (uint32_t cause : m_memory.consumeCompletedDmacCauses())
+    {
+        ps2_syscalls::dispatchDmacHandlersForCause(rdram, this, cause);
+    }
 }
 
 void PS2Runtime::handleTrap(uint8_t *rdram, R5900Context *ctx)
@@ -1749,13 +1936,15 @@ void PS2Runtime::dispatchLoop(uint8_t *rdram, R5900Context *ctx)
             const uint32_t ra = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0));
             const uint32_t sp = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0));
             const uint32_t gp = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[28], 0));
-            std::cerr << "[dispatch:pc-zero] from=0x" << std::hex << dispatchedPc
-                      << " fromRa=0x" << dispatchedRa
-                      << " ra=0x" << ra
-                      << " sp=0x" << sp
-                      << " gp=0x" << gp
-                      << " trace=" << formatDispatchHistory()
-                      << std::dec << std::endl;
+            PS2_IF_AGRESSIVE_LOGS({
+                std::cerr << "[dispatch:pc-zero] from=0x" << std::hex << dispatchedPc
+                          << " fromRa=0x" << dispatchedRa
+                          << " ra=0x" << ra
+                          << " sp=0x" << sp
+                          << " gp=0x" << gp
+                          << " trace=" << formatDispatchHistory()
+                          << std::dec << std::endl;
+            });
 
             // PC=0 means this guest thread returned (usually via jr $ra with RA=0).
             // Do not request a global runtime stop here: other guest threads may still run.
@@ -1770,6 +1959,7 @@ void PS2Runtime::enterGuestExecution()
     m_guestExecutionMutex.lock();
     m_guestExecutionWaiters.fetch_sub(1u, std::memory_order_acq_rel);
     ++g_guestExecutionDepths[this];
+    markGuestExecutionAcquired();
 }
 
 void PS2Runtime::leaveGuestExecution()
@@ -1819,6 +2009,36 @@ void PS2Runtime::reacquireGuestExecution(uint32_t depth)
         m_guestExecutionMutex.lock();
         m_guestExecutionWaiters.fetch_sub(1u, std::memory_order_acq_rel);
         ++heldDepth;
+        markGuestExecutionAcquired();
+    }
+}
+
+void PS2Runtime::markGuestExecutionAcquired()
+{
+    {
+        std::lock_guard<std::mutex> lock(m_guestExecutionHandoffMutex);
+        m_guestExecutionHandoffEpoch.fetch_add(1u, std::memory_order_acq_rel);
+    }
+    m_guestExecutionHandoffCv.notify_all();
+}
+
+void PS2Runtime::yieldGuestExecutionAfterWake()
+{
+    auto it = g_guestExecutionDepths.find(this);
+    if (it == g_guestExecutionDepths.end() || it->second == 0u)
+    {
+        std::this_thread::yield();
+        return;
+    }
+
+    const uint64_t handoffEpoch = m_guestExecutionHandoffEpoch.load(std::memory_order_acquire);
+    {
+        GuestExecutionReleaseScope releaseGuestExecution(this);
+        std::unique_lock<std::mutex> lock(m_guestExecutionHandoffMutex);
+        m_guestExecutionHandoffCv.wait_for(lock, std::chrono::milliseconds(2), [&]()
+        {
+            return m_guestExecutionHandoffEpoch.load(std::memory_order_acquire) != handoffEpoch;
+        });
     }
 }
 
@@ -1933,6 +2153,7 @@ void PS2Runtime::Store32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
     try
     {
         m_memory.write32(vaddr, value);
+        drainCompletedDmacHandlers(rdram);
     }
     catch (const std::exception &)
     {
@@ -2052,7 +2273,7 @@ void PS2Runtime::run()
                 const uint32_t dbgGp = m_debugGp.load(std::memory_order_relaxed);
                 const int activeThreads = g_activeThreads.load(std::memory_order_relaxed);
 
-                std::cout << "[run:tick] tick=" << tick
+                RUNTIME_LOG("[run:tick] tick=" << tick
                           << " pc=0x" << std::hex << dbgPc
                           << " ra=0x" << dbgRa
                           << " sp=0x" << dbgSp
@@ -2065,7 +2286,7 @@ void PS2Runtime::run()
                           << " gif=" << curGif
                           << " gsw=" << curGs
                           << " vif=" << curVif
-                          << std::endl;
+                          << std::endl);
             }
         });
         uint32_t presentWidth = FB_WIDTH;
@@ -2088,6 +2309,10 @@ void PS2Runtime::run()
             dstWidth,
             dstHeight};
         DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+        if (m_debugUiInitialized && m_debugUiDrawCallback)
+        {
+            m_debugUiDrawCallback(*this, m_debugUiUserData);
+        }
         EndDrawing();
 
         if (WindowShouldClose())
@@ -2149,6 +2374,11 @@ void PS2Runtime::run()
         ps2_syscalls::detachAllGuestHostThreads();
     }
 
+    if (m_debugUiInitialized && m_debugUiShutdownCallback)
+    {
+        m_debugUiShutdownCallback(*this, m_debugUiUserData);
+        m_debugUiInitialized = false;
+    }
     UnloadTexture(frameTex);
     CloseWindow();
 

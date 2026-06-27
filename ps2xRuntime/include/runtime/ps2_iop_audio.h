@@ -7,9 +7,17 @@ class PS2Runtime;
 
 namespace ps2_iop_audio
 {
-void handleLibSdRpc(PS2Runtime *runtime, uint32_t sid, uint32_t rpcNum,
-                    const uint8_t *sendBuf, uint32_t sendSize,
-                    uint8_t *recvBuf, uint32_t recvSize);
+    void reset();
+
+    bool handleLibSdRpc(uint8_t* rdram,
+        PS2Runtime* runtime,
+        uint32_t sid,
+        uint32_t rpcNum,
+        uint32_t sendBufAddr,
+        uint32_t sendSize,
+        uint32_t recvBufAddr,
+        uint32_t recvSize,
+        uint32_t& resultPtr);
 }
 
 #endif

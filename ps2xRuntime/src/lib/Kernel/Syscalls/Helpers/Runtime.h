@@ -1,13 +1,10 @@
-namespace
+struct ThreadExitException final : public std::exception
 {
-    struct ThreadExitException final : public std::exception
+    const char *what() const noexcept override
     {
-        const char *what() const noexcept override
-        {
-            return "PS2 Thread Exit";
-        }
-    };
-}
+        return "PS2 Thread Exit";
+    }
+};
 
 static void throwIfTerminated(const std::shared_ptr<ThreadInfo> &info)
 {
@@ -15,6 +12,42 @@ static void throwIfTerminated(const std::shared_ptr<ThreadInfo> &info)
     {
         throw ThreadExitException();
     }
+}
+
+// Condition-variable waits in the EE runtime must release the global guest
+// execution mutex, but must not reacquire it while still holding the local
+// wait-object mutex. Reacquiring guest execution while holding a semaphore,
+// thread, event-flag, or vsync mutex can create an ABBA deadlock:
+//
+//   awakened thread: local wait mutex -> waiting for GuestExecutionScope
+//   running thread:  GuestExecutionScope -> waiting for local wait mutex
+//
+// This helper keeps guest execution released for the whole host wait and for
+// any post-wake bookkeeping that needs the local mutex, then unlocks the local
+// mutex before the GuestExecutionReleaseScope destructor reacquires guest code.
+template <typename Lock, typename WaitFn, typename FinishFn>
+static void waitWithGuestExecutionReleasedUntilUnlocked(PS2Runtime *runtime,
+                                                        Lock &lock,
+                                                        WaitFn waitFn,
+                                                        FinishFn finishFn)
+{
+    auto releaseGuestExecution = std::make_unique<PS2Runtime::GuestExecutionReleaseScope>(runtime);
+
+    waitFn();
+    finishFn();
+
+    if (lock.owns_lock())
+    {
+        lock.unlock();
+    }
+
+    releaseGuestExecution.reset();
+}
+
+template <typename Lock, typename WaitFn>
+static void waitWithGuestExecutionReleasedUntilUnlocked(PS2Runtime *runtime, Lock &lock, WaitFn waitFn)
+{
+    waitWithGuestExecutionReleasedUntilUnlocked(runtime, lock, waitFn, []() {});
 }
 
 static void waitWhileSuspended(const std::shared_ptr<ThreadInfo> &info, PS2Runtime *runtime = nullptr)
@@ -28,16 +61,29 @@ static void waitWhileSuspended(const std::shared_ptr<ThreadInfo> &info, PS2Runti
         info->status = THS_SUSPEND;
         info->waitType = TSW_NONE;
         info->waitId = 0;
-        {
-            PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime);
-            info->cv.wait(lock, [&]()
-                          { return info->suspendCount == 0 || info->terminated.load(); });
-        }
-        if (info->terminated.load())
+
+        bool terminated = false;
+        waitWithGuestExecutionReleasedUntilUnlocked(
+            runtime,
+            lock,
+            [&]()
+            {
+                info->cv.wait(lock, [&]()
+                              { return info->suspendCount == 0 || info->terminated.load(); });
+            },
+            [&]()
+            {
+                terminated = info->terminated.load();
+                if (!terminated)
+                {
+                    info->status = THS_RUN;
+                }
+            });
+
+        if (terminated)
         {
             throw ThreadExitException();
         }
-        info->status = THS_RUN;
     }
 }
 
@@ -406,14 +452,16 @@ static bool rpcInvokeFunction(uint8_t *rdram, R5900Context *ctx, PS2Runtime *run
     const uint32_t logIndex = s_rpcInvokeFailureLogs.fetch_add(1u, std::memory_order_relaxed);
     if (logIndex < kMaxRpcInvokeFailureLogs)
     {
-        std::cerr << "[SyscallOverride:invoke-failed]"
-                  << " func=0x" << std::hex << funcAddr
-                  << " exitPc=0x" << tmp.pc
-                  << " ra=0x" << getRegU32(&tmp, 31)
-                  << std::dec
-                  << " steps=" << steps
-                  << " reason=" << rpcInvokeExitReasonName(exitReason)
-                  << std::endl;
+        PS2_IF_AGRESSIVE_LOGS({
+            std::cerr << "[SyscallOverride:invoke-failed]"
+                      << " func=0x" << std::hex << funcAddr
+                      << " exitPc=0x" << tmp.pc
+                      << " ra=0x" << getRegU32(&tmp, 31)
+                      << std::dec
+                      << " steps=" << steps
+                      << " reason=" << rpcInvokeExitReasonName(exitReason)
+                      << std::endl;
+        });
     }
 
     return false;
@@ -769,4 +817,3 @@ static void ensureBootModeTable(uint8_t *rdram)
 
     g_bootmode_initialized = true;
 }
-

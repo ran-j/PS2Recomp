@@ -36,6 +36,11 @@ FetchContent_Declare(
     GIT_SHALLOW    TRUE
 )
 
+set(SDL_TEST OFF CACHE BOOL "" FORCE)
+set(SDL_TESTS OFF CACHE BOOL "" FORCE)
+set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+set(SDL_STATIC ON CACHE BOOL "" FORCE)
+
 FetchContent_Declare(
     SDL2
     GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
@@ -127,6 +132,10 @@ target_link_libraries(ps2xStudio PRIVATE
 
 if(WIN32)
     target_link_libraries(ps2xStudio PRIVATE SDL2::SDL2main)
+endif()
+
+if(COMMAND ps2x_stage_ffmpeg_runtime_dlls)
+    ps2x_stage_ffmpeg_runtime_dlls(ps2xStudio)
 endif()
 
 include("${CMAKE_SOURCE_DIR}/ps2xRuntime/cmake/ReleaseMode.cmake")

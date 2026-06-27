@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <atomic>
 #include <iostream>
+#include <mutex>
 
 #include "ps2_gif_arbiter.h"
 #if defined(_MSC_VER)
@@ -303,15 +304,19 @@ public:
     void setGifPacketCallback(GifPacketCallback cb) { m_gifPacketCallback = std::move(cb); }
     void setGifArbiter(GifArbiter *arbiter) { m_gifArbiter = arbiter; }
 
-    using Vu1MscalCallback = std::function<void(uint32_t startPC, uint32_t itop)>;
+    using Vu1MscalCallback = std::function<void(uint32_t startPC, uint32_t top, uint32_t itop)>;
     void setVu1MscalCallback(Vu1MscalCallback cb) { m_vu1MscalCallback = std::move(cb); }
-    using Vu1MscntCallback = std::function<void(uint32_t itop)>;
+    using Vu1MscntCallback = std::function<void(uint32_t top, uint32_t itop)>;
     void setVu1MscntCallback(Vu1MscntCallback cb) { m_vu1MscntCallback = std::move(cb); }
 
     uint8_t *getVU1Code() { return m_vu1Code; }
     const uint8_t *getVU1Code() const { return m_vu1Code; }
     uint8_t *getVU1Data() { return m_vu1Data; }
     const uint8_t *getVU1Data() const { return m_vu1Data; }
+    uint8_t *getVU0Code() { return m_vu0Code; }
+    const uint8_t *getVU0Code() const { return m_vu0Code; }
+    uint8_t *getVU0Data() { return m_vu0Data; }
+    const uint8_t *getVU0Data() const { return m_vu0Data; }
 
     bool isPath3Masked() const { return m_path3Masked; }
     void flushMaskedPath3Packets(bool drainImmediately = true);
@@ -319,9 +324,12 @@ public:
     void submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool drainImmediately = true, bool path2DirectHl = false);
     void processGIFPacket(uint32_t srcPhysAddr, uint32_t qwCount);
     void processGIFPacket(const uint8_t *data, uint32_t sizeBytes);
+    void processVIF0Data(uint32_t srcPhysAddr, uint32_t sizeBytes);
+    void processVIF0Data(const uint8_t *data, uint32_t sizeBytes);
     void processVIF1Data(uint32_t srcPhysAddr, uint32_t sizeBytes);
     void processVIF1Data(const uint8_t *data, uint32_t sizeBytes);
     void processPendingTransfers();
+    std::vector<uint32_t> consumeCompletedDmacCauses();
 
     int pollDmaRegisters();
 
@@ -377,6 +385,8 @@ public:
     Vu1MscalCallback m_vu1MscalCallback;
     Vu1MscntCallback m_vu1MscntCallback;
 
+    uint8_t *m_vu0Code = nullptr;
+    uint8_t *m_vu0Data = nullptr;
     uint8_t *m_vu1Code = nullptr;
     uint8_t *m_vu1Data = nullptr;
     bool m_path3Masked = false;
@@ -392,7 +402,10 @@ public:
         std::vector<uint8_t> chainData;
     };
     std::vector<PendingTransfer> m_pendingGifTransfers;
+    std::vector<PendingTransfer> m_pendingVif0Transfers;
     std::vector<PendingTransfer> m_pendingVif1Transfers;
+    std::mutex m_completedDmacMutex;
+    std::vector<uint32_t> m_completedDmacCauses;
 
     struct CodeRegion
     {
@@ -405,6 +418,12 @@ public:
     bool isAddressInRegion(uint32_t address, const CodeRegion &region);
     void markModified(uint32_t address, uint32_t size);
     bool isScratchpad(uint32_t address) const;
+    uint8_t *mapVuMemory(uint32_t physAddr, uint32_t size, uint32_t &offset, uint32_t &limit);
+    const uint8_t *mapVuMemory(uint32_t physAddr, uint32_t size, uint32_t &offset, uint32_t &limit) const;
+    void updateEeTimer0Counter();
+    void queueCompletedDmacCause(uint32_t cause);
+    uint64_t m_timer0LastHostNs = 0;
+    uint64_t m_timer0FractionNs = 0;
 };
 
 #endif // PS2_MEMORY_H

@@ -8,7 +8,9 @@ namespace ps2_stubs
         constexpr uint32_t kLibSdCmdSetParam = 0x8010u;
         constexpr uint32_t kLibSdCmdBlockTrans = 0x80D0u;
         constexpr uint32_t kLibSdCmdBlockTransAlt = 0x80E0u;
+        constexpr uint32_t kLibSdCmdBlockTransStatus = 0x80F0u;
         constexpr uint32_t kAudioPositionMask = 0x00FFFFFFu;
+        constexpr uint32_t kAudioTransferUnit = 1024u;
 
         struct AudioStubState
         {
@@ -16,6 +18,9 @@ namespace ps2_stubs
             uint32_t currentBlockBase = 0u;
             uint32_t currentBlockSize = 0u;
             uint32_t currentPauseBase = 0u;
+            uint32_t currentBlockOffset = 0u;
+            uint32_t blockStatusTraceCount = 0u;
+            bool blockTransferActive = false;
         };
 
         std::mutex g_audio_stub_mutex;
@@ -24,6 +29,12 @@ namespace ps2_stubs
         void resetAudioStubStateUnlocked()
         {
             g_audio_stub_state = {};
+        }
+
+        uint32_t currentBlockPosition()
+        {
+            return (g_audio_stub_state.currentBlockBase + g_audio_stub_state.currentBlockOffset) &
+                   kAudioPositionMask;
         }
     }
 
@@ -61,17 +72,50 @@ namespace ps2_stubs
 
         if (cmd == kLibSdCmdBlockTrans || cmd == kLibSdCmdBlockTransAlt)
         {
-            if (arg4 != 0u)
+            if (arg4 != 0u && arg5 != 0u)
             {
                 g_audio_stub_state.currentBlockBase = arg4 & kAudioPositionMask;
-            }
-            if (arg5 != 0u)
-            {
                 g_audio_stub_state.currentBlockSize = arg5;
+                g_audio_stub_state.currentPauseBase =
+                    ((arg6 != 0u) ? arg6 : arg4) & kAudioPositionMask;
+
+                const uint32_t pauseOffset =
+                    (g_audio_stub_state.currentPauseBase - g_audio_stub_state.currentBlockBase) &
+                    kAudioPositionMask;
+                g_audio_stub_state.currentBlockOffset =
+                    (pauseOffset < g_audio_stub_state.currentBlockSize) ? pauseOffset : 0u;
+                g_audio_stub_state.blockStatusTraceCount = 0u;
+                g_audio_stub_state.blockTransferActive = true;
             }
-            if (arg6 != 0u)
+            else
             {
-                g_audio_stub_state.currentPauseBase = arg6 & kAudioPositionMask;
+                g_audio_stub_state.blockTransferActive = false;
+            }
+            PS2_IF_AGRESSIVE_LOGS({
+                std::cerr << "[Audio:BlockTrans] active=" << g_audio_stub_state.blockTransferActive
+                          << " base=0x" << std::hex << g_audio_stub_state.currentBlockBase
+                          << " size=0x" << g_audio_stub_state.currentBlockSize
+                          << " pause=0x" << g_audio_stub_state.currentPauseBase
+                          << " offset=0x" << g_audio_stub_state.currentBlockOffset
+                          << std::dec << std::endl;
+            });
+        }
+        else if (cmd == kLibSdCmdBlockTransStatus &&
+                 g_audio_stub_state.blockTransferActive &&
+                 g_audio_stub_state.currentBlockSize != 0u)
+        {
+            g_audio_stub_state.currentBlockOffset =
+                (g_audio_stub_state.currentBlockOffset + kAudioTransferUnit) %
+                g_audio_stub_state.currentBlockSize;
+            if (g_audio_stub_state.blockStatusTraceCount < 32u)
+            {
+                PS2_IF_AGRESSIVE_LOGS({
+                    std::cerr << "[Audio:BlockStatus] position=0x" << std::hex << currentBlockPosition()
+                              << " offset=0x" << g_audio_stub_state.currentBlockOffset
+                              << " size=0x" << g_audio_stub_state.currentBlockSize
+                              << std::dec << std::endl;
+                });
+                ++g_audio_stub_state.blockStatusTraceCount;
             }
         }
         else if (cmd == kLibSdCmdSetParam)
@@ -81,9 +125,7 @@ namespace ps2_stubs
         }
 
         // Some games only sample the low 24 bits of the reported SPU transfer head.
-        // Returning the last configured transfer base keeps the ring-buffer math
-        // stable without emulating SPU DMA progress.
-        setReturnU32(ctx, g_audio_stub_state.currentBlockBase & kAudioPositionMask);
+        setReturnU32(ctx, currentBlockPosition());
     }
 
     void sceSdRemoteInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

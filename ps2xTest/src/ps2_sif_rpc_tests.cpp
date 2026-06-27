@@ -2,10 +2,15 @@
 #include "ps2_runtime.h"
 #include "ps2_syscalls.h"
 #include "ps2_stubs.h"
+#include "runtime/ps2_iop.h"
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <string>
 #include <vector>
 
 using namespace ps2_syscalls;
@@ -109,6 +114,16 @@ namespace
         ps2_syscalls::setDtxCompatLayout(layout);
     }
 
+    std::atomic<uint32_t> g_lotrSoundCallbackHits{0u};
+
+    void lotrSoundEndCallbackShouldNotRun(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        (void)runtime;
+        ++g_lotrSoundCallbackHits;
+        ctx->pc = ::getRegU32(ctx, 31);
+    }
+
     void setRegU32(R5900Context &ctx, int reg, uint32_t value)
     {
         ctx.r[reg] = _mm_set_epi64x(0, static_cast<int64_t>(value));
@@ -127,6 +142,31 @@ namespace
     void writeGuestU32(uint8_t *rdram, uint32_t addr, uint32_t value)
     {
         std::memcpy(rdram + addr, &value, sizeof(value));
+    }
+
+    struct ScopedTempDir
+    {
+        std::filesystem::path path;
+
+        explicit ScopedTempDir(const std::string &name)
+        {
+            path = std::filesystem::temp_directory_path() /
+                   ("ps2recomp_" + name + "_" + std::to_string(reinterpret_cast<std::uintptr_t>(this)));
+            std::filesystem::remove_all(path);
+            std::filesystem::create_directories(path);
+        }
+
+        ~ScopedTempDir()
+        {
+            std::error_code ec;
+            std::filesystem::remove_all(path, ec);
+        }
+    };
+
+    void writeFile(const std::filesystem::path &path, const std::vector<uint8_t> &data)
+    {
+        std::ofstream out(path, std::ios::binary);
+        out.write(reinterpret_cast<const char *>(data.data()), static_cast<std::streamsize>(data.size()));
     }
 
     template <typename T>
@@ -238,6 +278,263 @@ void register_ps2_sif_rpc_tests()
             setRegU32(env.ctx, 4, kClientAddr);
             SifCheckStatRpc(env.rdram.data(), &env.ctx, &env.runtime);
             t.Equals(getRegS32(env.ctx, 2), 0, "SifCheckStatRpc should report not busy after synchronous completion");
+        });
+
+        tc.Run("Fatal Frame SDRDRV RPC initializes header and loads body archives", [](TestCase &t)
+        {
+            TestEnv env;
+            ScopedTempDir temp("fatal_frame_sdrdrv");
+
+            std::vector<uint8_t> header(64u, 0);
+            const char headerPayload[] = "img-header";
+            std::memcpy(header.data(), headerPayload, sizeof(headerPayload) - 1u);
+            writeFile(temp.path / "img_hd.bin", header);
+
+            constexpr uint32_t kSectorSize = 2048u;
+            std::vector<uint8_t> body(kSectorSize * 2u, 0);
+            const char bodyPayload[] = "archive-data";
+            std::memcpy(body.data() + kSectorSize, bodyPayload, sizeof(bodyPayload) - 1u);
+            writeFile(temp.path / "img_bd.bin", body);
+
+            const PS2Runtime::IoPaths oldPaths = PS2Runtime::getIoPaths();
+            PS2Runtime::IoPaths ioPaths;
+            ioPaths.elfDirectory = temp.path;
+            ioPaths.hostRoot = temp.path;
+            ioPaths.cdRoot = temp.path;
+            ioPaths.mcRoot = temp.path / "mc0";
+            PS2Runtime::setIoPaths(ioPaths);
+
+            constexpr uint32_t kSendAddr = 0x00030000u;
+            constexpr uint32_t kRecvAddr = 0x00031000u;
+            constexpr uint32_t kDstAddr = 0x00032000u;
+            constexpr uint32_t kImgHeaderAddr = 0x012F0000u;
+            constexpr uint32_t kLoadId = 3u;
+
+            std::array<uint32_t, 8> commands{};
+            commands[0] = 0x0Eu;
+            commands[2] = 1u; // lbn
+            commands[3] = sizeof(bodyPayload) - 1u;
+            commands[4] = kDstAddr;
+            commands[6] = kLoadId;
+            std::memcpy(env.rdram.data() + kSendAddr, commands.data(), commands.size() * sizeof(uint32_t));
+            std::memset(env.rdram.data() + kRecvAddr, 0xCC, 0x180u);
+
+            env.runtime.iop().init(env.rdram.data());
+            uint32_t resultPtr = 0u;
+            bool signalNowait = true;
+            const bool initHandled = env.runtime.iop().handleRPC(&env.runtime,
+                                                                 IOP_SID_FATAL_FRAME_SDRDRV,
+                                                                 0u,
+                                                                 0u,
+                                                                 0u,
+                                                                 kRecvAddr,
+                                                                 0x180u,
+                                                                 resultPtr,
+                                                                 signalNowait);
+            t.IsTrue(initHandled, "Fatal Frame SDRDRV init RPC should be handled");
+            t.Equals(std::memcmp(env.rdram.data() + kImgHeaderAddr, "img-header", 10), 0,
+                     "SDRDRV init RPC should load img_hd.bin into the arrangement table");
+
+            signalNowait = true;
+            const bool handled = env.runtime.iop().handleRPC(&env.runtime,
+                                                             IOP_SID_FATAL_FRAME_SDRDRV,
+                                                             1u,
+                                                             kSendAddr,
+                                                             static_cast<uint32_t>(commands.size() * sizeof(uint32_t)),
+                                                             kRecvAddr,
+                                                             0x180u,
+                                                             resultPtr,
+                                                             signalNowait);
+
+            PS2Runtime::setIoPaths(oldPaths);
+
+            t.IsTrue(handled, "Fatal Frame SDRDRV SID should be handled");
+            t.Equals(resultPtr, kRecvAddr, "SDRDRV RPC should return recv buffer");
+            t.IsFalse(signalNowait, "SDRDRV RPC should not request special nowait signaling");
+            t.Equals(std::memcmp(env.rdram.data() + kDstAddr, "archive-data", 12), 0,
+                     "SDRDRV load command should copy bytes from img_bd.bin by LBN");
+            t.Equals(env.rdram[kRecvAddr + 0x6Cu + (kLoadId * 8u)], static_cast<uint8_t>(0),
+                     "SDRDRV load status should report completed");
+        });
+
+        tc.Run("LotR ClFile RPC opens reads and reports EOF", [](TestCase &t)
+        {
+            TestEnv env;
+            ScopedTempDir temp("lotr_clfile_rpc");
+
+            const std::vector<uint8_t> payload = {'a', 'b', 'c'};
+            const std::vector<uint8_t> loadPayload = {'x', 'y', 'z', '!'};
+            writeFile(temp.path / "boot.cfg", payload);
+            writeFile(temp.path / "load.bin", loadPayload);
+
+            const PS2Runtime::IoPaths oldPaths = PS2Runtime::getIoPaths();
+            PS2Runtime::IoPaths ioPaths;
+            ioPaths.elfDirectory = temp.path;
+            ioPaths.hostRoot = temp.path;
+            ioPaths.cdRoot = temp.path;
+            ioPaths.mcRoot = temp.path / "mc0";
+            PS2Runtime::setIoPaths(ioPaths);
+
+            constexpr uint32_t kSendAddr = 0x00036000u;
+            constexpr uint32_t kRecvAddr = 0x00037000u;
+            constexpr uint32_t kDstAddr = 0x00038000u;
+
+            env.runtime.iop().init(env.rdram.data());
+
+            auto callClFileRpc = [&](uint32_t rpcNum, uint32_t sendSize) {
+                uint32_t resultPtr = 0u;
+                bool signalNowait = true;
+                const bool handled = env.runtime.iop().handleRPC(&env.runtime,
+                                                                 IOP_SID_LOTR_CLFILE,
+                                                                 rpcNum,
+                                                                 kSendAddr,
+                                                                 sendSize,
+                                                                 kRecvAddr,
+                                                                 0x40u,
+                                                                 resultPtr,
+                                                                 signalNowait);
+                t.IsTrue(handled, "LotR ClFile SID should be handled");
+                t.Equals(resultPtr, kRecvAddr, "ClFile RPC should return recv buffer");
+                t.IsFalse(signalNowait, "ClFile RPC should not request special nowait signaling");
+            };
+
+            std::memset(env.rdram.data() + kSendAddr, 0, 0x100u);
+            std::memcpy(env.rdram.data() + kSendAddr, "boot.cfg", 9u);
+            std::memset(env.rdram.data() + kRecvAddr, 0xAA, 0x40u);
+            callClFileRpc(0x08u, 0x100u);
+
+            t.Equals(readGuestStruct<uint32_t>(env.rdram.data(), kRecvAddr + 0u), 0u,
+                     "open should report success status");
+            const uint32_t handle = readGuestStruct<uint32_t>(env.rdram.data(), kRecvAddr + 4u);
+            t.IsTrue(handle != 0u, "open should return a non-zero remote file handle");
+
+            std::memset(env.rdram.data() + kSendAddr, 0, 0x100u);
+            std::memcpy(env.rdram.data() + kSendAddr, "missing.cfg", 12u);
+            std::memset(env.rdram.data() + kRecvAddr, 0xAA, 0x40u);
+            callClFileRpc(0x08u, 0x100u);
+            t.Equals(readGuestStruct<uint32_t>(env.rdram.data(), kRecvAddr + 4u), 0u,
+                     "missing file open should not manufacture a handle from path bytes");
+
+            constexpr uint32_t kLoadDstAddr = 0x00039000u;
+            std::memset(env.rdram.data() + kSendAddr, 0, 0x110u);
+            std::memcpy(env.rdram.data() + kSendAddr, "load.bin", 9u);
+            writeGuestU32(env.rdram.data(), kSendAddr + 0x100u, static_cast<uint32_t>(loadPayload.size()));
+            writeGuestU32(env.rdram.data(), kSendAddr + 0x104u, kLoadDstAddr);
+            std::memset(env.rdram.data() + kLoadDstAddr, 0xCC, 0x20u);
+            callClFileRpc(0x01u, 0x110u);
+
+            t.Equals(readGuestStruct<uint32_t>(env.rdram.data(), kRecvAddr + 0u), 5u,
+                     "direct load should report a queued load result");
+            const uint32_t loadHandle = readGuestStruct<uint32_t>(env.rdram.data(), kRecvAddr + 4u);
+            t.IsTrue(loadHandle >= 3u, "direct load should return a status handle usable by getStatus");
+            t.Equals(std::memcmp(env.rdram.data() + kLoadDstAddr, loadPayload.data(), loadPayload.size()), 0,
+                     "direct load should copy file bytes into the requested guest destination");
+
+            writeGuestU32(env.rdram.data(), kSendAddr, loadHandle);
+            callClFileRpc(0x05u, 0u);
+            writeGuestU32(env.rdram.data(), kSendAddr, loadHandle);
+            callClFileRpc(0x03u, sizeof(uint32_t));
+            t.Equals(readGuestStruct<uint32_t>(env.rdram.data(), kRecvAddr + 0u), 7u,
+                     "direct load getStatus should report completed");
+
+            writeGuestU32(env.rdram.data(), kSendAddr, loadHandle);
+            callClFileRpc(0x06u, sizeof(uint32_t));
+            t.Equals(readGuestStruct<uint32_t>(env.rdram.data(), kRecvAddr + 4u),
+                     static_cast<uint32_t>(loadPayload.size()),
+                     "direct load getSize should report the loaded host file size");
+
+            writeGuestU32(env.rdram.data(), kSendAddr, loadHandle);
+            callClFileRpc(0x09u, sizeof(uint32_t));
+
+            if (handle != 0u)
+            {
+                std::array<uint32_t, 4> readPacket = {handle, 2u, kDstAddr, 0u};
+                writeGuestStruct(env.rdram.data(), kSendAddr, readPacket);
+                std::memset(env.rdram.data() + kDstAddr, 0, 8u);
+                callClFileRpc(0x0Au, static_cast<uint32_t>(readPacket.size() * sizeof(uint32_t)));
+                t.Equals(readGuestStruct<uint32_t>(env.rdram.data(), kRecvAddr + 4u), 2u,
+                         "first read should report actual byte count");
+                t.Equals(std::memcmp(env.rdram.data() + kDstAddr, "ab", 2), 0,
+                         "first read should copy file bytes into guest destination");
+
+                writeGuestStruct(env.rdram.data(), kSendAddr, readPacket);
+                std::memset(env.rdram.data() + kDstAddr, 0, 8u);
+                callClFileRpc(0x0Au, static_cast<uint32_t>(readPacket.size() * sizeof(uint32_t)));
+                t.Equals(readGuestStruct<uint32_t>(env.rdram.data(), kRecvAddr + 4u), 1u,
+                         "short read should report remaining byte count");
+                t.Equals(std::memcmp(env.rdram.data() + kDstAddr, "c", 1), 0,
+                         "short read should copy remaining file byte");
+
+                writeGuestStruct(env.rdram.data(), kSendAddr, readPacket);
+                std::memset(env.rdram.data() + kDstAddr, 0xCC, 8u);
+                callClFileRpc(0x0Au, static_cast<uint32_t>(readPacket.size() * sizeof(uint32_t)));
+                t.Equals(readGuestStruct<uint32_t>(env.rdram.data(), kRecvAddr + 4u), 0u,
+                         "EOF read should report zero bytes");
+
+                writeGuestU32(env.rdram.data(), kSendAddr, handle);
+                callClFileRpc(0x09u, sizeof(uint32_t));
+            }
+
+            PS2Runtime::setIoPaths(oldPaths);
+        });
+
+        tc.Run("LotR sound RPC completes HLE callback without invoking guest loop", [](TestCase &t)
+        {
+            TestEnv env;
+
+            constexpr uint32_t kClientAddr = 0x00039000u;
+            constexpr uint32_t kSemaParamAddr = 0x00039100u;
+            constexpr uint32_t kSendAddr = 0x0003A000u;
+            constexpr uint32_t kRecvAddr = 0x0003C000u;
+            constexpr uint32_t kEndFunc = 0x001FFD70u;
+
+            PS2SoundDriverCompatLayout layout{};
+            layout.completionCallbacks = {kEndFunc, 0u, 0u, 0u};
+            ps2_syscalls::setSoundDriverCompatLayout(layout);
+
+            env.runtime.registerFunction(kEndFunc, lotrSoundEndCallbackShouldNotRun);
+            g_lotrSoundCallbackHits = 0u;
+
+            SifInitRpc(env.rdram.data(), &env.ctx, &env.runtime);
+
+            const uint32_t semaParam[6] = {0u, 1u, 0u, 0u, 0u, 0u};
+            std::memcpy(env.rdram.data() + kSemaParamAddr, semaParam, sizeof(semaParam));
+            setRegU32(env.ctx, 4, kSemaParamAddr);
+            CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
+            const int32_t semaId = getRegS32(env.ctx, 2);
+            t.IsTrue(semaId > 0, "CreateSema should return a positive semaphore id");
+
+            setRegU32(env.ctx, 4, kClientAddr);
+            setRegU32(env.ctx, 5, IOP_SID_LOTR_SOUND);
+            setRegU32(env.ctx, 6, 0u);
+            SifBindRpc(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_OK, "SifBindRpc should succeed for LotR sound SID");
+
+            writeGuestU32(env.rdram.data(), kSendAddr, 3u);
+            std::memset(env.rdram.data() + kRecvAddr, 0xAA, 0x2000u);
+            setRegU32(env.ctx, 4, kClientAddr);
+            setRegU32(env.ctx, 5, 0u);
+            setRegU32(env.ctx, 6, K_SIF_RPC_MODE_NOWAIT);
+            setRegU32(env.ctx, 7, kSendAddr);
+            setRegU32(env.ctx, 8, 0x2000u);
+            setRegU32(env.ctx, 9, kRecvAddr);
+            setRegU32(env.ctx, 10, 0x2000u);
+            setRegU32(env.ctx, 11, kEndFunc);
+            setRegU32(env.ctx, 29, K_STACK_ADDR);
+            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x00u, static_cast<uint32_t>(semaId));
+            SifCallRpc(env.rdram.data(), &env.ctx, &env.runtime);
+
+            t.Equals(getRegS32(env.ctx, 2), KE_OK, "SifCallRpc should succeed for LotR sound RPC");
+            t.Equals(g_lotrSoundCallbackHits.load(), 0u,
+                     "HLE-completed LotR sound callback should not invoke the guest callback");
+            t.Equals(readGuestStruct<uint32_t>(env.rdram.data(), kRecvAddr + 0u), 0u,
+                     "LotR sound response should report no active stream records");
+            t.IsTrue(readGuestStruct<uint32_t>(env.rdram.data(), kRecvAddr + 4u) != 0u,
+                     "LotR sound response should advance the IOP update counter");
+
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(semaId));
+            PollSema(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), semaId, "LotR sound callback completion should signal the sema");
         });
 
         tc.Run("bind before register creates placeholder then remaps", [](TestCase &t)

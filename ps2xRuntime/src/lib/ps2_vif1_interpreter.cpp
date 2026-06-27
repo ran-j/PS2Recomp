@@ -1,8 +1,6 @@
 // Based on Blackline Interactive implementation
 #include "runtime/ps2_memory.h"
-#include <atomic>
 #include <cstring>
-#include "ps2_log.h"
 
 enum VIFCmd : uint8_t
 {
@@ -30,8 +28,6 @@ enum VIFCmd : uint8_t
 
 namespace
 {
-    std::atomic<uint32_t> s_debugVu1KickCount{0};
-    std::atomic<uint32_t> s_debugVif1OpcodeCount{0};
     constexpr uint8_t kGifFmtImage = 2u;
 
     uint32_t gifImageQwcFromTag(const uint8_t *data, uint32_t sizeBytes)
@@ -49,11 +45,208 @@ namespace
     }
 }
 
+void PS2Memory::processVIF0Data(uint32_t srcPhys, uint32_t sizeBytes)
+{
+    if (sizeBytes == 0u || srcPhys >= PS2_RAM_SIZE)
+        return;
+
+    const uint64_t requestedEnd = static_cast<uint64_t>(srcPhys) + static_cast<uint64_t>(sizeBytes);
+    if (requestedEnd > static_cast<uint64_t>(PS2_RAM_SIZE))
+        sizeBytes = PS2_RAM_SIZE - srcPhys;
+
+    processVIF0Data(m_rdram + srcPhys, sizeBytes);
+}
+
+void PS2Memory::processVIF0Data(const uint8_t *data, uint32_t sizeBytes)
+{
+    if (sizeBytes == 0u)
+        return;
+
+    uint32_t pos = 0;
+    while (pos + 4 <= sizeBytes)
+    {
+        uint32_t cmd = 0u;
+        std::memcpy(&cmd, data + pos, sizeof(cmd));
+        pos += 4u;
+
+        const uint8_t opcode = static_cast<uint8_t>((cmd >> 24) & 0x7Fu);
+        const uint16_t imm = static_cast<uint16_t>(cmd & 0xFFFFu);
+        const uint8_t num = static_cast<uint8_t>((cmd >> 16) & 0xFFu);
+        const bool irq = (cmd & 0x80000000u) != 0u;
+
+        vif0_regs.code = cmd;
+        vif0_regs.num = num;
+        if (irq)
+            vif0_regs.stat |= (1u << 11);
+
+        if (opcode == VIF_NOP)
+        {
+            continue;
+        }
+        else if (opcode == VIF_STCYCL)
+        {
+            vif0_regs.cycle = imm;
+            continue;
+        }
+        else if (opcode == VIF_ITOP)
+        {
+            vif0_regs.itops = imm & 0x3FFu;
+            continue;
+        }
+        else if (opcode == VIF_STMOD)
+        {
+            vif0_regs.mode = imm & 3u;
+            continue;
+        }
+        else if (opcode == VIF_MARK)
+        {
+            vif0_regs.mark = imm;
+            vif0_regs.stat |= (1u << 6);
+            continue;
+        }
+        else if (opcode == VIF_FLUSHE || opcode == VIF_FLUSH || opcode == VIF_FLUSHA)
+        {
+            continue;
+        }
+        else if (opcode == VIF_STMASK)
+        {
+            if (pos + 4u > sizeBytes)
+                break;
+            std::memcpy(&vif0_regs.mask, data + pos, sizeof(vif0_regs.mask));
+            pos += 4u;
+            continue;
+        }
+        else if (opcode == VIF_STROW)
+        {
+            if (pos + 16u > sizeBytes)
+                break;
+            std::memcpy(vif0_regs.row, data + pos, 16u);
+            pos += 16u;
+            continue;
+        }
+        else if (opcode == VIF_STCOL)
+        {
+            if (pos + 16u > sizeBytes)
+                break;
+            std::memcpy(vif0_regs.col, data + pos, 16u);
+            pos += 16u;
+            continue;
+        }
+        else if (opcode == VIF_MPG)
+        {
+            const uint32_t destAddr = static_cast<uint32_t>(imm & 0x1FFu) * 8u;
+            const uint32_t instructionCount = (num == 0u) ? 256u : static_cast<uint32_t>(num);
+            const uint32_t mpgBytes = instructionCount * 8u;
+            uint32_t copyBytes = 0u;
+            if (m_vu0Code && destAddr < PS2_VU0_CODE_SIZE && mpgBytes > 0u)
+            {
+                copyBytes = mpgBytes;
+                if (destAddr + copyBytes > PS2_VU0_CODE_SIZE)
+                    copyBytes = PS2_VU0_CODE_SIZE - destAddr;
+                if (pos + copyBytes <= sizeBytes)
+                    std::memcpy(m_vu0Code + destAddr, data + pos, copyBytes);
+            }
+
+            pos += mpgBytes;
+            if (pos > sizeBytes)
+                break;
+            continue;
+        }
+        else if ((opcode & 0x60u) == 0x60u)
+        {
+            const uint8_t vn = static_cast<uint8_t>((opcode >> 2) & 0x3u);
+            const uint8_t vl = static_cast<uint8_t>(opcode & 0x3u);
+            const int components = static_cast<int>(vn) + 1;
+            int bitsPerComponent = 32;
+            switch (vl)
+            {
+            case 0:
+                bitsPerComponent = 32;
+                break;
+            case 1:
+                bitsPerComponent = 16;
+                break;
+            case 2:
+                bitsPerComponent = 8;
+                break;
+            case 3:
+                bitsPerComponent = (vn == 3u) ? 4 : 16;
+                break;
+            default:
+                break;
+            }
+            const int bitsPerVector = (vl == 3u && vn == 3u) ? 16 : (components * bitsPerComponent);
+            uint32_t bytesPerVector = static_cast<uint32_t>((bitsPerVector + 7) / 8);
+            const uint32_t writeVectorCount = (num == 0u) ? 256u : static_cast<uint32_t>(num);
+            uint32_t cl = vif0_regs.cycle & 0xFFu;
+            uint32_t wl = (vif0_regs.cycle >> 8) & 0xFFu;
+            if (cl == 0u)
+                cl = 1u;
+            if (wl == 0u)
+                wl = 1u;
+            uint32_t sourceVectorCount = writeVectorCount;
+            if (cl < wl)
+            {
+                const uint32_t fullBlocks = writeVectorCount / wl;
+                uint32_t remainder = writeVectorCount % wl;
+                if (remainder > cl)
+                    remainder = cl;
+                sourceVectorCount = fullBlocks * cl + remainder;
+            }
+            uint32_t totalBytes = sourceVectorCount * bytesPerVector;
+            totalBytes = (totalBytes + 3u) & ~3u;
+
+            if (m_vu0Data && pos + totalBytes <= sizeBytes && vl == 0u)
+            {
+                uint32_t vuAddr = static_cast<uint32_t>(imm & 0x3FFu);
+                if ((imm & 0x8000u) != 0u)
+                    vuAddr = (vuAddr + (vif0_regs.tops & 0x3FFu)) & 0x3FFu;
+                const uint8_t *srcBase = data + pos;
+                uint32_t srcIndex = 0u;
+                for (uint32_t writeIndex = 0; writeIndex < writeVectorCount; ++writeIndex)
+                {
+                    const uint32_t cyclePos = writeIndex % wl;
+                    const bool sourceAvailable = (cl >= wl) || (cyclePos < cl);
+                    uint32_t destVec = (cl >= wl) ? ((vuAddr + (writeIndex / wl) * cl + cyclePos) & 0x3FFu)
+                                                  : ((vuAddr + writeIndex) & 0x3FFu);
+                    const uint32_t destOff = destVec * 16u;
+                    if (destOff + 16u > PS2_VU0_DATA_SIZE)
+                    {
+                        if (sourceAvailable && srcIndex < sourceVectorCount)
+                            ++srcIndex;
+                        continue;
+                    }
+                    if (!sourceAvailable || srcIndex >= sourceVectorCount)
+                        continue;
+                    const uint8_t *srcVec = srcBase + srcIndex * bytesPerVector;
+                    ++srcIndex;
+                    uint32_t lanes[4] = {0u, 0u, 0u, 0u};
+                    std::memcpy(lanes, m_vu0Data + destOff, sizeof(lanes));
+                    const uint32_t limit = (components > 4) ? 4u : static_cast<uint32_t>(components);
+                    for (uint32_t c = 0; c < limit; ++c)
+                    {
+                        uint32_t scalar = 0u;
+                        std::memcpy(&scalar, srcVec + c * 4u, sizeof(scalar));
+                        lanes[c] = scalar;
+                    }
+                    _mm_storeu_si128(reinterpret_cast<__m128i *>(m_vu0Data + destOff), _mm_loadu_si128(reinterpret_cast<const __m128i *>(lanes)));
+                }
+            }
+            pos += totalBytes;
+            if (pos > sizeBytes)
+                break;
+            continue;
+        }
+        else
+        {
+            break;
+        }
+    }
+}
+
 void PS2Memory::processVIF1Data(uint32_t srcPhys, uint32_t sizeBytes)
 {
-    if (!m_rdram || !m_gsVRAM || sizeBytes == 0u)
-        return;
-    if (srcPhys >= PS2_RAM_SIZE)
+    if (sizeBytes == 0u || srcPhys >= PS2_RAM_SIZE)
         return;
 
     const uint64_t requestedEnd = static_cast<uint64_t>(srcPhys) + static_cast<uint64_t>(sizeBytes);
@@ -65,16 +258,8 @@ void PS2Memory::processVIF1Data(uint32_t srcPhys, uint32_t sizeBytes)
 
 void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 {
-    if (!data || !m_gsVRAM || sizeBytes == 0u)
+    if (sizeBytes == 0u)
         return;
-
-    auto recomputeVif1Tops = [&]()
-    {
-        const bool dbf = (vif1_regs.stat & (1u << 7)) != 0u;
-        const uint32_t base = vif1_regs.base & 0x3FFu;
-        const uint32_t ofst = vif1_regs.ofst & 0x3FFu;
-        vif1_regs.tops = dbf ? ((base + ofst) & 0x3FFu) : base;
-    };
 
     uint32_t pos = 0;
 
@@ -120,18 +305,6 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         uint8_t num = (cmd >> 16) & 0xFF;
         const bool irq = (cmd & 0x80000000u) != 0u;
 
-        const uint32_t opcodeIndex = s_debugVif1OpcodeCount.fetch_add(1, std::memory_order_relaxed);
-        if (opcodeIndex < 160u)
-        {
-            RUNTIME_LOG("[vif1:cmd] idx=" << opcodeIndex
-                                          << " opcode=0x" << std::hex << static_cast<uint32_t>(opcode)
-                                          << " imm=0x" << imm
-                                          << std::dec
-                                          << " num=" << static_cast<uint32_t>(num)
-                                          << " irq=" << static_cast<uint32_t>(irq ? 1u : 0u)
-                                          << std::endl);
-        }
-
         // Track most-recent command for VIFn_CODE emulation.
         vif1_regs.code = cmd;
         vif1_regs.num = num;
@@ -149,22 +322,23 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         }
         else if (opcode == VIF_OFFSET)
         {
-            const uint32_t oldTops = vif1_regs.tops & 0x3FFu;
+            // VIF double-buffer setup. OFFSET clears DBF and resets TOPS to BASE.
+            // Do not rewrite BASE from the previous TOPS value.
             vif1_regs.ofst = imm & 0x3FFu;
-            vif1_regs.base = oldTops;
+            vif1_regs.tops = vif1_regs.base & 0x3FFu;
             vif1_regs.stat &= ~(1u << 7); // clear DBF
-            recomputeVif1Tops();
             continue;
         }
         else if (opcode == VIF_BASE)
         {
+            // BASE only updates the base register. TOPS changes on OFFSET/MSCAL.
             vif1_regs.base = imm & 0x3FFu;
-            recomputeVif1Tops();
             continue;
         }
         else if (opcode == VIF_ITOP)
         {
-            vif1_regs.itop = imm & 0x3FFu;
+            // ITOP VIFcode writes pending ITOPS; VU XITOP observes it after MSCAL/MSCNT.
+            vif1_regs.itops = imm & 0x3FFu;
             continue;
         }
         else if (opcode == VIF_STMOD)
@@ -193,39 +367,43 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         }
         else if (opcode == VIF_MSCAL || opcode == VIF_MSCALF)
         {
-            vif1_regs.itops = vif1_regs.itop & 0x3FFu;
-            vif1_regs.stat ^= (1u << 7); // toggle DBF
-            recomputeVif1Tops();
             uint32_t startPC = (uint32_t)imm * 8u;
-            const uint32_t kickIndex = s_debugVu1KickCount.fetch_add(1, std::memory_order_relaxed);
-            if (kickIndex < 48u)
-            {
-                RUNTIME_LOG("[vif1:mscal] idx=" << kickIndex
-                                                << " opcode=0x" << std::hex << static_cast<uint32_t>(opcode)
-                                                << " imm=0x" << imm
-                                                << " startPc=0x" << startPC
-                                                << " itop=0x" << vif1_regs.itop
-                                                << std::dec << std::endl);
-            }
+
+            // Values visible to the VU program for this MSCAL.
+            // DobieStation semantics: ITOP = ITOPS; TOP = current TOPS;
+            // then TOPS/DBF are prepared for the next buffer.
+            const uint32_t runTop = vif1_regs.tops & 0x3FFu;
+            const uint32_t runItop = vif1_regs.itops & 0x3FFu;
+            vif1_regs.top = runTop;
+            vif1_regs.itop = runItop;
+
+            const bool dbf = (vif1_regs.stat & (1u << 7)) != 0u;
+            if (dbf)
+                vif1_regs.tops = vif1_regs.base & 0x3FFu;
+            else
+                vif1_regs.tops = (vif1_regs.base + vif1_regs.ofst) & 0x3FFu;
+            vif1_regs.stat ^= (1u << 7); // toggle DBF
+
             if (m_vu1MscalCallback)
-                m_vu1MscalCallback(startPC, vif1_regs.itop);
+                m_vu1MscalCallback(startPC, runTop, runItop);
             continue;
         }
         else if (opcode == VIF_MSCNT)
         {
-            vif1_regs.itops = vif1_regs.itop & 0x3FFu;
+            const uint32_t runTop = vif1_regs.tops & 0x3FFu;
+            const uint32_t runItop = vif1_regs.itops & 0x3FFu;
+            vif1_regs.top = runTop;
+            vif1_regs.itop = runItop;
+
+            const bool dbf = (vif1_regs.stat & (1u << 7)) != 0u;
+            if (dbf)
+                vif1_regs.tops = vif1_regs.base & 0x3FFu;
+            else
+                vif1_regs.tops = (vif1_regs.base + vif1_regs.ofst) & 0x3FFu;
             vif1_regs.stat ^= (1u << 7); // toggle DBF
-            recomputeVif1Tops();
-            const uint32_t kickIndex = s_debugVu1KickCount.fetch_add(1, std::memory_order_relaxed);
-            if (kickIndex < 48u)
-            {
-                RUNTIME_LOG("[vif1:mscnt] idx=" << kickIndex
-                                                << " itop=0x" << std::hex << vif1_regs.itop
-                                                << " pc=resume"
-                                                << std::dec << std::endl);
-            }
+
             if (m_vu1MscntCallback)
-                m_vu1MscntCallback(vif1_regs.itop);
+                m_vu1MscntCallback(runTop, runItop);
             continue;
         }
         else if (opcode == VIF_STMASK)
@@ -364,6 +542,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 vuAddr = (vuAddr + (vif1_regs.tops & 0x3FFu)) & 0x3FFu;
 
             const bool zeroExtend = (imm & 0x4000u) != 0u;
+
             if (m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes)
             {
                 const uint8_t *srcBase = data + pos;

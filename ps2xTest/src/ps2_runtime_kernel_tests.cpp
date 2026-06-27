@@ -8,6 +8,7 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <sstream>
 #include <thread>
 #include <vector>
 
@@ -43,13 +44,16 @@ namespace
     constexpr int KE_RELEASE_WAIT = -418;
     constexpr uint32_t K_SEMA_WAIT_READY_ADDR = 0x1900u;
 
+    constexpr int THS_WAIT = 0x04;
     constexpr int THS_SUSPEND = 0x08;
     constexpr int THS_WAITSUSPEND = 0x0C;
     constexpr int THS_DORMANT = 0x10;
+    constexpr uint32_t TSW_SEMA = 2u;
     constexpr uint32_t TSW_EVENT = 3u;
 
     constexpr uint32_t K_EVENT_WAIT_READY_ADDR = 0x1800u;
     constexpr uint32_t K_EVENT_WAIT_GATE_ADDR = 0x1804u;
+    constexpr uint32_t K_TERMINATE_SEMA_WAIT_READY_ADDR = 0x1810u;
 
     struct EeThreadStatus
     {
@@ -209,6 +213,18 @@ namespace
         setRegU32(*ctx, 6, 1u);
         setRegU32(*ctx, 7, 0u);
         WaitEventFlag(rdram, ctx, runtime);
+        ctx->pc = 0u;
+    }
+
+    void waitSemaUntilTerminatedHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (!rdram || !ctx)
+        {
+            return;
+        }
+
+        writeGuestU32(rdram, K_TERMINATE_SEMA_WAIT_READY_ADDR, 1u);
+        WaitSema(rdram, ctx, runtime);
         ctx->pc = 0u;
     }
 
@@ -871,7 +887,106 @@ void register_ps2_runtime_kernel_tests()
             t.Equals(getRegS32(env.ctx, 2), KE_OK, "DeleteThread should clean up the waiter thread");
         });
 
-        tc.Run("setup heap configures limits and EndOfHeap reports the limit", [](TestCase &t)
+        tc.Run("TerminateThread unwinds semaphore wait as a normal thread exit", [](TestCase &t)
+        {
+            TestEnv env;
+
+            constexpr uint32_t kWaitThreadEntry = 0x00261000u;
+            const uint32_t semaParam[6] = {
+                0u,
+                1u,
+                0u,
+                0u,
+                0u,
+                0u
+            };
+            writeGuestWords(env.rdram.data(), K_PARAM_ADDR, semaParam, std::size(semaParam));
+
+            R5900Context createSemaCtx{};
+            setRegU32(createSemaCtx, 4, K_PARAM_ADDR);
+            CreateSema(env.rdram.data(), &createSemaCtx, &env.runtime);
+            const int32_t sid = getRegS32(createSemaCtx, 2);
+            t.IsTrue(sid > 0, "CreateSema should create a zero-count semaphore");
+
+            env.runtime.registerFunction(kWaitThreadEntry, &waitSemaUntilTerminatedHandler);
+
+            const uint32_t threadParam[7] = {
+                0u,
+                kWaitThreadEntry,
+                0x00312000u,
+                0x00000800u,
+                0x00120000u,
+                6u,
+                0u
+            };
+
+            writeGuestU32(env.rdram.data(), K_TERMINATE_SEMA_WAIT_READY_ADDR, 0u);
+            writeGuestWords(env.rdram.data(), K_PARAM_ADDR, threadParam, std::size(threadParam));
+            setRegU32(env.ctx, 4, K_PARAM_ADDR);
+            CreateThread(env.rdram.data(), &env.ctx, &env.runtime);
+            const int32_t tid = getRegS32(env.ctx, 2);
+            t.IsTrue(tid >= 2, "CreateThread should return a valid semaphore waiter thread id");
+
+            std::ostringstream capturedErr;
+            std::streambuf *oldErr = std::cerr.rdbuf(capturedErr.rdbuf());
+
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(tid));
+            setRegU32(env.ctx, 5, static_cast<uint32_t>(sid));
+            StartThread(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_OK, "StartThread should launch the semaphore waiter");
+
+            const bool waiting = waitUntil([&]()
+            {
+                if (readGuestU32(env.rdram.data(), K_TERMINATE_SEMA_WAIT_READY_ADDR) != 1u)
+                {
+                    return false;
+                }
+
+                R5900Context statusCtx{};
+                setRegU32(statusCtx, 4, static_cast<uint32_t>(tid));
+                setRegU32(statusCtx, 5, K_STATUS_ADDR);
+                ReferThreadStatus(env.rdram.data(), &statusCtx, &env.runtime);
+                if (getRegS32(statusCtx, 2) != KE_OK)
+                {
+                    return false;
+                }
+
+                EeThreadStatus status{};
+                std::memcpy(&status, env.rdram.data() + K_STATUS_ADDR, sizeof(status));
+                return status.status == THS_WAIT && status.waitType == TSW_SEMA;
+            }, std::chrono::milliseconds(200));
+            t.IsTrue(waiting, "worker should block inside WaitSema before termination");
+
+            R5900Context terminateCtx{};
+            setRegU32(terminateCtx, 4, static_cast<uint32_t>(tid));
+            TerminateThread(env.rdram.data(), &terminateCtx, &env.runtime);
+            t.Equals(getRegS32(terminateCtx, 2), KE_OK, "TerminateThread should join the semaphore waiter");
+
+            std::cerr.rdbuf(oldErr);
+            const std::string errText = capturedErr.str();
+            t.IsTrue(errText.find("PS2 Thread Exit") == std::string::npos,
+                     "thread-exit exceptions from Sync.cpp should be caught as normal exits");
+
+            R5900Context dormantCtx{};
+            setRegU32(dormantCtx, 4, static_cast<uint32_t>(tid));
+            setRegU32(dormantCtx, 5, K_STATUS_ADDR);
+            ReferThreadStatus(env.rdram.data(), &dormantCtx, &env.runtime);
+            t.Equals(getRegS32(dormantCtx, 2), KE_OK, "terminated waiter should still have readable status");
+
+            EeThreadStatus dormantStatus{};
+            std::memcpy(&dormantStatus, env.rdram.data() + K_STATUS_ADDR, sizeof(dormantStatus));
+            t.Equals(dormantStatus.status, THS_DORMANT, "terminated waiter should become dormant");
+
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(tid));
+            DeleteThread(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_OK, "DeleteThread should clean up the terminated waiter");
+
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
+            DeleteSema(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), sid, "DeleteSema should return sid while cleaning up the waiter semaphore");
+        });
+
+        tc.Run("setup heap and allocator primitives track end-of-heap", [](TestCase &t)
         {
             TestEnv env;
 

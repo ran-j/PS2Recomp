@@ -18,6 +18,7 @@
 #include <atomic>
 #include <array>
 #include <mutex>
+#include <condition_variable>
 #include <filesystem>
 #include <iostream>
 #include <iomanip>
@@ -206,43 +207,10 @@ inline void setReturnU64(R5900Context *ctx, uint64_t value)
 
 inline constexpr uint32_t PS2_PATH_WATCH_ADDR = 0x01EFFFA0u;
 inline constexpr uint32_t PS2_PATH_WATCH_BYTES = 0x200u;
-inline constexpr uint32_t PS2_PATH_WATCH_MAX_LOGS = 4096u;
-inline std::atomic<uint32_t> g_ps2PathWatchLogCount{0};
 
 inline uint32_t ps2PathWatchPhysAddr()
 {
     return PS2_PATH_WATCH_ADDR & PS2_RAM_MASK;
-}
-
-inline bool ps2PathWatchIntersects(uint32_t writeAddr, uint32_t writeSize)
-{
-    const uint64_t writeStart = writeAddr;
-    const uint64_t writeEnd = writeStart + static_cast<uint64_t>(writeSize);
-    const uint64_t watchStart = ps2PathWatchPhysAddr();
-    const uint64_t watchEnd = watchStart + static_cast<uint64_t>(PS2_PATH_WATCH_BYTES);
-    return writeEnd > watchStart && writeStart < watchEnd;
-}
-
-inline void ps2PathWatchDumpPrefix(const uint8_t *rdram)
-{
-    if (!rdram)
-    {
-        return;
-    }
-
-    const uint32_t base = ps2PathWatchPhysAddr();
-    auto flags = std::cout.flags();
-    std::cout << " buf=" << std::hex;
-    for (uint32_t i = 0; i < 16u; ++i)
-    {
-        const uint32_t addr = (base + i) & PS2_RAM_MASK;
-        std::cout << static_cast<uint32_t>(rdram[addr]);
-        if (i + 1u < 16u)
-        {
-            std::cout << '.';
-        }
-    }
-    std::cout.flags(flags);
 }
 
 inline uint8_t ps2PathWatchExtractByteFromWrite(uint32_t writeAddr, uint32_t watchAddr, uint64_t valueLo, uint64_t valueHi)
@@ -263,57 +231,14 @@ inline void ps2TraceGuestWrite(uint8_t *rdram,
                                const char *op,
                                const R5900Context *ctx)
 {
-    if (!rdram || size == 0u)
-    {
-        return;
-    }
-
-    const uint32_t writeAddr = guestAddr & PS2_RAM_MASK;
-    if (!ps2PathWatchIntersects(writeAddr, size))
-    {
-        return;
-    }
-
-    const uint32_t logIndex = g_ps2PathWatchLogCount.fetch_add(1, std::memory_order_relaxed);
-    if (logIndex >= PS2_PATH_WATCH_MAX_LOGS)
-    {
-        return;
-    }
-
-    const uint32_t watchAddr = ps2PathWatchPhysAddr();
-    const bool touchesFirstByte = (watchAddr >= writeAddr) && (watchAddr < writeAddr + size);
-    const uint8_t oldByte = rdram[watchAddr];
-    const uint8_t newByte = touchesFirstByte ? ps2PathWatchExtractByteFromWrite(writeAddr, watchAddr, valueLo, valueHi) : oldByte;
-
-    const uint32_t pc = ctx ? ctx->pc : 0u;
-    const uint32_t ra = ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0)) : 0u;
-    const uint32_t sp = ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0)) : 0u;
-
-    auto flags = std::cout.flags();
-    std::cout << "[watch:path-write] #" << (logIndex + 1u)
-              << " op=" << op
-              << " addr=0x" << std::hex << writeAddr
-              << " size=0x" << size
-              << " pc=0x" << pc
-              << " ra=0x" << ra
-              << " sp=0x" << sp
-              << " vLo=0x" << valueLo;
-    if (size > 8u)
-    {
-        std::cout << " vHi=0x" << valueHi;
-    }
-    if (touchesFirstByte)
-    {
-        std::cout << " firstByte:" << static_cast<uint32_t>(oldByte)
-                  << "->" << static_cast<uint32_t>(newByte);
-        if (oldByte != 0u && newByte == 0u)
-        {
-            std::cout << " (ZEROED)";
-        }
-    }
-    ps2PathWatchDumpPrefix(rdram);
-    std::cout.flags(flags);
-    std::cout << std::endl;
+    (void)rdram;
+    (void)guestAddr;
+    (void)size;
+    (void)valueLo;
+    (void)valueHi;
+    (void)op;
+    (void)ctx;
+    // TODO we dont need this anymore so on next release it will be deleted
 }
 
 inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
@@ -322,40 +247,12 @@ inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
                                     const char *op,
                                     const R5900Context *ctx)
 {
-    if (!rdram || size == 0u)
-    {
-        return;
-    }
-
-    const uint32_t writeAddr = guestAddr & PS2_RAM_MASK;
-    if (!ps2PathWatchIntersects(writeAddr, size))
-    {
-        return;
-    }
-
-    const uint32_t logIndex = g_ps2PathWatchLogCount.fetch_add(1, std::memory_order_relaxed);
-    if (logIndex >= PS2_PATH_WATCH_MAX_LOGS)
-    {
-        return;
-    }
-
-    const uint32_t pc = ctx ? ctx->pc : 0u;
-    const uint32_t ra = ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0)) : 0u;
-    const uint32_t sp = ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0)) : 0u;
-    const uint8_t firstByte = rdram[ps2PathWatchPhysAddr()];
-
-    auto flags = std::cout.flags();
-    std::cout << "[watch:path-range] #" << (logIndex + 1u)
-              << " op=" << op
-              << " addr=0x" << std::hex << writeAddr
-              << " size=0x" << size
-              << " pc=0x" << pc
-              << " ra=0x" << ra
-              << " sp=0x" << sp
-              << " firstByte=" << static_cast<uint32_t>(firstByte);
-    ps2PathWatchDumpPrefix(rdram);
-    std::cout.flags(flags);
-    std::cout << std::endl;
+    (void)rdram;
+    (void)guestAddr;
+    (void)size;
+    (void)op;
+    (void)ctx;
+    // TODO we dont need this anymore so on next release it will be deleted
 }
 
 struct PS2SoundDriverCompatLayout
@@ -451,6 +348,12 @@ public:
     bool loadELF(const std::string &elfPath);
     void run();
 
+    using DebugUiCallback = void (*)(PS2Runtime &runtime, void *userData);
+    void setDebugUiCallbacks(DebugUiCallback initCallback,
+                             DebugUiCallback drawCallback,
+                             DebugUiCallback shutdownCallback,
+                             void *userData);
+
     using RecompiledFunction = void (*)(uint8_t *, R5900Context *, PS2Runtime *);
 
     class GuestExecutionScope
@@ -514,7 +417,9 @@ public:
     uint32_t guestHeapLimit() const;
     uint32_t reserveAsyncCallbackStack(uint32_t size, uint32_t alignment = 16u);
     void dispatchLoop(uint8_t *rdram, R5900Context *ctx);
+    void drainCompletedDmacHandlers(uint8_t *rdram);
     bool shouldPreemptGuestExecution();
+    void yieldGuestExecutionAfterWake();
     void requestStop();
     bool isStopRequested() const;
     uint32_t guestExecutionWaiterCountForTesting() const
@@ -551,7 +456,7 @@ public:
                 return true;
             if (inRange(physAddr, PS2_GS_PRIV_REG_BASE, PS2_GS_PRIV_REG_SIZE))
                 return true;
-            if (physAddr >= PS2_VU0_CODE_BASE && physAddr < (PS2_VU1_DATA_BASE + PS2_VU1_DATA_SIZE))
+            if (physAddr >= PS2_VU0_DATA_BASE && physAddr < (PS2_VU1_CODE_BASE + PS2_VU1_CODE_SIZE))
                 return true;
             return false;
         };
@@ -576,6 +481,8 @@ public:
     inline const GS &gs() const { return m_gs; }
     inline GifArbiter &gifArbiter() { return m_gifArbiter; }
     inline const GifArbiter &gifArbiter() const { return m_gifArbiter; }
+    inline VU1Interpreter &vu0() { return m_vu0; }
+    inline const VU1Interpreter &vu0() const { return m_vu0; }
     inline VU1Interpreter &vu1() { return m_vu1; }
     inline const VU1Interpreter &vu1() const { return m_vu1; }
 
@@ -609,6 +516,7 @@ private:
     void leaveGuestExecution();
     uint32_t releaseGuestExecution();
     void reacquireGuestExecution(uint32_t depth);
+    void markGuestExecutionAcquired();
 
     void HandleIntegerOverflow(R5900Context *ctx);
 
@@ -622,10 +530,14 @@ private:
     ps2_iop m_iop;
     PS2AudioBackend m_audioBackend;
     PSPadBackend m_padBackend;
+    VU1Interpreter m_vu0;
     VU1Interpreter m_vu1;
     R5900Context m_cpuContext;
     mutable std::recursive_mutex m_guestExecutionMutex;
     mutable std::atomic<uint32_t> m_guestExecutionWaiters{0u};
+    mutable std::mutex m_guestExecutionHandoffMutex;
+    mutable std::condition_variable m_guestExecutionHandoffCv;
+    std::atomic<uint64_t> m_guestExecutionHandoffEpoch{0u};
     mutable std::mutex m_guestHeapMutex;
     mutable std::mutex m_asyncCallbackStackMutex;
     std::vector<GuestHeapBlock> m_guestHeapBlocks;
@@ -639,13 +551,19 @@ private:
 
     std::unordered_map<uint32_t, RecompiledFunction> m_functionTable;
     std::atomic<bool> m_stopRequested{false};
+    DebugUiCallback m_debugUiInitCallback = nullptr;
+    DebugUiCallback m_debugUiDrawCallback = nullptr;
+    DebugUiCallback m_debugUiShutdownCallback = nullptr;
+    void *m_debugUiUserData = nullptr;
+    bool m_debugUiInitialized = false;
 
-    // TODO remove this later
+public:
     std::atomic<uint32_t> m_debugPc{0};
     std::atomic<uint32_t> m_debugRa{0};
     std::atomic<uint32_t> m_debugSp{0};
     std::atomic<uint32_t> m_debugGp{0};
 
+private:
     struct LoadedModule
     {
         std::string name;

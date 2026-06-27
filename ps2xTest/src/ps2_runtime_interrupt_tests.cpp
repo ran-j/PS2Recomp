@@ -1,6 +1,7 @@
 #include "MiniTest.h"
 #include "ps2_runtime.h"
 #include "ps2_syscalls.h"
+#include "Stubs/DMA.h"
 
 #include <atomic>
 #include <chrono>
@@ -47,6 +48,9 @@ namespace
     std::atomic<uint32_t> g_vblankStartHits{0u};
     std::atomic<uint32_t> g_vblankEndHits{0u};
     std::atomic<uint32_t> g_lastIntcArg{0u};
+    std::atomic<uint32_t> g_dmacSendHits{0u};
+    std::atomic<uint32_t> g_dmacSendLastCause{0u};
+    std::atomic<uint32_t> g_dmacSendLastChcr{0u};
 
     void setRegU32(R5900Context &ctx, int reg, uint32_t value)
     {
@@ -66,6 +70,25 @@ namespace
     void writeGuestU32(uint8_t *rdram, uint32_t addr, uint32_t value)
     {
         std::memcpy(rdram + addr, &value, sizeof(value));
+    }
+
+    void writeGuestU64(uint8_t *rdram, uint32_t addr, uint64_t value)
+    {
+        std::memcpy(rdram + addr, &value, sizeof(value));
+    }
+
+    uint64_t makeDmaTag(uint16_t qwc, uint8_t id, uint32_t addr, bool irq = false)
+    {
+        return static_cast<uint64_t>(qwc) |
+               (static_cast<uint64_t>(id & 0x7u) << 28) |
+               (irq ? (1ull << 31) : 0ull) |
+               (static_cast<uint64_t>(addr & 0x7FFFFFFFu) << 32);
+    }
+
+    void writeDmaTag(uint8_t *rdram, uint32_t tagAddr, uint64_t tagLo)
+    {
+        std::memset(rdram + tagAddr, 0, 16);
+        std::memcpy(rdram + tagAddr, &tagLo, sizeof(tagLo));
     }
 
     uint32_t readGuestU32(const uint8_t *rdram, uint32_t addr)
@@ -123,6 +146,36 @@ namespace
 
         ctx->pc = 0u;
     }
+
+    void testDmacSendHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+
+        const uint32_t cause = getRegU32(ctx, 4);
+        g_dmacSendHits.fetch_add(1u, std::memory_order_relaxed);
+        g_dmacSendLastCause.store(cause, std::memory_order_relaxed);
+
+        uint32_t channelBase = 0u;
+        if (cause == 0u)
+        {
+            channelBase = 0x10008000u;
+        }
+        else if (cause == 1u)
+        {
+            channelBase = 0x10009000u;
+        }
+        else if (cause == 2u)
+        {
+            channelBase = 0x1000A000u;
+        }
+
+        if (runtime && channelBase != 0u)
+        {
+            g_dmacSendLastChcr.store(runtime->memory().readIORegister(channelBase + 0x00u), std::memory_order_relaxed);
+        }
+
+        ctx->pc = 0u;
+    }
 }
 
 void register_ps2_runtime_interrupt_tests()
@@ -163,6 +216,39 @@ void register_ps2_runtime_interrupt_tests()
             }, std::chrono::milliseconds(300));
             t.IsTrue(secondTickSeen, "VSync tick should continue to advance");
             t.IsTrue(readGuestU64(env.rdram.data(), kTickAddr) > firstTick, "tick should be monotonic");
+
+            cleanupRuntime(env);
+        });
+
+        tc.Run("VSync worker updates GS CSR FIELD bit for MMIO polling loops", [](TestCase &t)
+        {
+            notifyRuntimeStop();
+            TestEnv env;
+            t.IsTrue(env.runtime.memory().initialize(), "runtime memory initialize should succeed");
+
+            constexpr uint32_t kFlagAddr = 0x1080u;
+            constexpr uint32_t kTickAddr = 0x1090u;
+            constexpr uint64_t kGsCsrFieldMask = 0x2000ull;
+
+            env.runtime.memory().gs().csr = 0x3ull;
+
+            R5900Context ctx{};
+            setRegU32(ctx, 4, kFlagAddr);
+            setRegU32(ctx, 5, kTickAddr);
+            t.IsTrue(callSyscall(0x73u, env.rdram.data(), &ctx, &env.runtime), "SetVSyncFlag syscall should dispatch");
+
+            const uint64_t initialField = env.runtime.memory().gs().csr & kGsCsrFieldMask;
+            const bool firstFieldFlip = waitUntil([&]() {
+                return (env.runtime.memory().gs().csr & kGsCsrFieldMask) != initialField;
+            }, std::chrono::milliseconds(300));
+            t.IsTrue(firstFieldFlip, "VSync worker should toggle GS CSR FIELD for direct CSR polling");
+            t.Equals(env.runtime.memory().gs().csr & 0x3ull, 0x3ull, "VSync FIELD update should preserve CSR status bits");
+
+            const uint64_t fieldAfterFirstFlip = env.runtime.memory().gs().csr & kGsCsrFieldMask;
+            const bool secondFieldFlip = waitUntil([&]() {
+                return (env.runtime.memory().gs().csr & kGsCsrFieldMask) != fieldAfterFirstFlip;
+            }, std::chrono::milliseconds(300));
+            t.IsTrue(secondFieldFlip, "VSync worker should keep alternating GS CSR FIELD");
 
             cleanupRuntime(env);
         });
@@ -247,6 +333,102 @@ void register_ps2_runtime_interrupt_tests()
             const uint32_t lastArg = g_lastIntcArg.load(std::memory_order_relaxed);
             t.IsTrue(lastArg == 0xCAFE0002u || lastArg == 0xCAFE0003u,
                      "handler should receive configured argument value");
+
+            cleanupRuntime(env);
+        });
+
+        tc.Run("sceDmaSend dispatches completed VIF1 DMAC handler with latched END tag", [](TestCase &t)
+        {
+            notifyRuntimeStop();
+            TestEnv env;
+            t.IsTrue(env.runtime.memory().initialize(), "runtime memory initialize should succeed");
+
+            constexpr uint32_t kHandlerAddr = 0x00ABD100u;
+            constexpr uint32_t kVif1Ch = 0x10009000u;
+            constexpr uint32_t kTag0 = 0x00028000u;
+            constexpr uint32_t kTag1 = kTag0 + 0x20u;
+
+            uint8_t *rdram = env.runtime.memory().getRDRAM();
+            writeDmaTag(rdram, kTag0, makeDmaTag(1u, 1u, 0u, false)); // CNT
+            writeGuestU64(rdram, kTag0 + 0x10u, 0u);
+            writeGuestU64(rdram, kTag0 + 0x18u, 0u);
+            writeDmaTag(rdram, kTag1, makeDmaTag(0u, 7u, 0u, false)); // END
+
+            g_dmacSendHits.store(0u, std::memory_order_relaxed);
+            g_dmacSendLastCause.store(0u, std::memory_order_relaxed);
+            g_dmacSendLastChcr.store(0u, std::memory_order_relaxed);
+            env.runtime.registerFunction(kHandlerAddr, &testDmacSendHandler);
+
+            R5900Context addCtx{};
+            setRegU32(addCtx, 4, 1u);
+            setRegU32(addCtx, 5, kHandlerAddr);
+            setRegU32(addCtx, 6, 0u);
+            setRegU32(addCtx, 7, 0u);
+            ps2_syscalls::AddDmacHandler(rdram, &addCtx, &env.runtime);
+            t.IsTrue(getRegS32(addCtx, 2) > 0, "AddDmacHandler should register VIF1 handler");
+
+            R5900Context enableCtx{};
+            setRegU32(enableCtx, 4, 1u);
+            ps2_syscalls::EnableDmac(rdram, &enableCtx, &env.runtime);
+            t.Equals(getRegS32(enableCtx, 2), KE_OK, "EnableDmac should enable VIF1 cause");
+
+            R5900Context sendCtx{};
+            setRegU32(sendCtx, 4, kVif1Ch);
+            setRegU32(sendCtx, 5, kTag0);
+            ps2_stubs::sceDmaSend(rdram, &sendCtx, &env.runtime);
+
+            t.Equals(getRegS32(sendCtx, 2), 0, "sceDmaSend should succeed");
+            t.Equals(g_dmacSendHits.load(std::memory_order_relaxed), 1u, "sceDmaSend should dispatch the VIF1 DMAC handler");
+            t.Equals(g_dmacSendLastCause.load(std::memory_order_relaxed), 1u, "DMAC handler should observe VIF1 cause");
+            t.Equals(g_dmacSendLastChcr.load(std::memory_order_relaxed) & 0x100u, 0u, "handler should see VIF1 STR cleared");
+            t.Equals(g_dmacSendLastChcr.load(std::memory_order_relaxed) & 0x70000000u, 0x70000000u, "handler should see the latched END tag id");
+
+            cleanupRuntime(env);
+        });
+
+        tc.Run("MMIO VIF1 chain completion dispatches DMAC handler after CHCR store", [](TestCase &t)
+        {
+            notifyRuntimeStop();
+            TestEnv env;
+            t.IsTrue(env.runtime.memory().initialize(), "runtime memory initialize should succeed");
+
+            constexpr uint32_t kHandlerAddr = 0x00ABD180u;
+            constexpr uint32_t kVif1Ch = 0x10009000u;
+            constexpr uint32_t kTag0 = 0x00028200u;
+            constexpr uint32_t kTag1 = kTag0 + 0x20u;
+
+            uint8_t *rdram = env.runtime.memory().getRDRAM();
+            writeDmaTag(rdram, kTag0, makeDmaTag(1u, 1u, 0u, false)); // CNT
+            writeGuestU64(rdram, kTag0 + 0x10u, 0u);
+            writeGuestU64(rdram, kTag0 + 0x18u, 0u);
+            writeDmaTag(rdram, kTag1, makeDmaTag(0u, 7u, 0u, false)); // END
+
+            g_dmacSendHits.store(0u, std::memory_order_relaxed);
+            g_dmacSendLastCause.store(0u, std::memory_order_relaxed);
+            g_dmacSendLastChcr.store(0u, std::memory_order_relaxed);
+            env.runtime.registerFunction(kHandlerAddr, &testDmacSendHandler);
+
+            R5900Context addCtx{};
+            setRegU32(addCtx, 4, 1u);
+            setRegU32(addCtx, 5, kHandlerAddr);
+            setRegU32(addCtx, 6, 0u);
+            setRegU32(addCtx, 7, 0u);
+            ps2_syscalls::AddDmacHandler(rdram, &addCtx, &env.runtime);
+            t.IsTrue(getRegS32(addCtx, 2) > 0, "AddDmacHandler should register VIF1 handler");
+
+            R5900Context enableCtx{};
+            setRegU32(enableCtx, 4, 1u);
+            ps2_syscalls::EnableDmac(rdram, &enableCtx, &env.runtime);
+            t.Equals(getRegS32(enableCtx, 2), KE_OK, "EnableDmac should enable VIF1 cause");
+
+            R5900Context storeCtx{};
+            env.runtime.Store32(rdram, &storeCtx, kVif1Ch + 0x30u, kTag0);
+            env.runtime.Store32(rdram, &storeCtx, kVif1Ch + 0x00u, 0x185u);
+
+            t.Equals(g_dmacSendHits.load(std::memory_order_relaxed), 1u, "CHCR store should dispatch the VIF1 DMAC handler");
+            t.Equals(g_dmacSendLastCause.load(std::memory_order_relaxed), 1u, "DMAC handler should observe VIF1 cause");
+            t.Equals(g_dmacSendLastChcr.load(std::memory_order_relaxed) & 0x100u, 0u, "handler should see VIF1 STR cleared");
+            t.Equals(g_dmacSendLastChcr.load(std::memory_order_relaxed) & 0x70000000u, 0x70000000u, "handler should see the latched END tag id");
 
             cleanupRuntime(env);
         });

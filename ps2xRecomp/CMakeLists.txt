@@ -20,7 +20,7 @@ FetchContent_MakeAvailable(elfio)
 FetchContent_Declare(
     toml11
     GIT_REPOSITORY https://github.com/ToruNiina/toml11.git
-    GIT_TAG master
+    GIT_TAG v4.4.0
 )
 FetchContent_MakeAvailable(toml11)
 
@@ -31,13 +31,6 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(fmt)
  
-FetchContent_Declare(
-    libdwarf
-    GIT_REPOSITORY https://github.com/davea42/libdwarf-code.git
-    GIT_TAG v2.2.0
-    GIT_SHALLOW TRUE
-)
-
 FetchContent_Declare(
     libdwarf
     GIT_REPOSITORY https://github.com/davea42/libdwarf-code.git

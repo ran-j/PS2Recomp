@@ -1,6 +1,9 @@
 #include "ps2_runtime.h"
 #include "register_functions.h"
 #include "games_database.h"
+#if defined(PS2X_ENABLE_DEBUG_UI) && !defined(PLATFORM_VITA)
+#include "ps2_debug_panel.h"
+#endif
 
 #ifdef _DEBUG
 #include "ps2_log.h"
@@ -114,6 +117,26 @@ int main(int argc, char *argv[])
         }
 
         PS2Runtime runtime;
+#if defined(PS2X_ENABLE_DEBUG_UI) && !defined(PLATFORM_VITA)
+        // This hook is to prevent leak rlimgui deps to recompiler etc
+        PS2DebugPanel debugPanel;
+        runtime.setDebugUiCallbacks(
+            [](PS2Runtime &rt, void *userData)
+            {
+                (void)rt;
+                static_cast<PS2DebugPanel *>(userData)->initialize();
+            },
+            [](PS2Runtime &rt, void *userData)
+            {
+                static_cast<PS2DebugPanel *>(userData)->draw(rt);
+            },
+            [](PS2Runtime &rt, void *userData)
+            {
+                (void)rt;
+                static_cast<PS2DebugPanel *>(userData)->shutdown();
+            },
+            &debugPanel);
+#endif
         if (!runtime.initialize(windowTitle.c_str()))
         {
             std::cerr << "Failed to initialize PS2 runtime" << std::endl;

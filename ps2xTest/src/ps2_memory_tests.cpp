@@ -9,8 +9,10 @@
 #include "Stubs/GS.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <thread>
 #include <vector>
 
 namespace
@@ -111,14 +113,16 @@ namespace
         return tag;
     }
 
-    uint32_t makeVuLowerSpecial(uint8_t funct, uint8_t is, uint8_t it = 0u, uint8_t id = 0u, uint8_t dest = 0u)
+    uint32_t makeVuLowerSpecial(uint8_t specialOp, uint8_t is, uint8_t it = 0u, uint8_t id = 0u, uint8_t dest = 0u)
     {
         return (0x40u << 25) |
                (static_cast<uint32_t>(dest & 0xFu) << 21) |
                (static_cast<uint32_t>(it & 0x1Fu) << 16) |
                (static_cast<uint32_t>(is & 0x1Fu) << 11) |
                (static_cast<uint32_t>(id & 0x1Fu) << 6) |
-               static_cast<uint32_t>(funct & 0x3Fu);
+               (static_cast<uint32_t>(specialOp & 0x7Cu) << 4) |
+               static_cast<uint32_t>(specialOp & 0x3u) |
+               0x3Cu;
     }
 }
 
@@ -159,6 +163,29 @@ void register_ps2_memory_tests()
             t.Equals(mem.translateAddress(PS2_SCRATCHPAD_ALIAS_BASE + 0x123u), 0x123u, "0xF000 scratchpad alias should translate to local offset");
         });
 
+        tc.Run("EE timer0 count advances while enabled and can be reset", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kTimer0Count = 0x10000000u;
+            constexpr uint32_t kTimer0Mode = 0x10000010u;
+            constexpr uint32_t kTimer0Compare = 0x10000020u;
+
+            t.IsTrue(mem.writeIORegister(kTimer0Count, 0u), "timer count reset write should succeed");
+            t.IsTrue(mem.writeIORegister(kTimer0Compare, 1u), "timer compare write should succeed");
+            t.IsTrue(mem.writeIORegister(kTimer0Mode, 0x283u), "timer mode write should be retained");
+            t.Equals(mem.readIORegister(kTimer0Mode), 0x283u, "timer mode should be readable");
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(3));
+            const uint32_t firstCount = mem.readIORegister(kTimer0Count);
+            t.IsTrue(firstCount > 0u, "enabled timer count should advance from host time");
+
+            t.IsTrue(mem.writeIORegister(kTimer0Count, 0u), "timer count second reset should succeed");
+            const uint32_t resetCount = mem.readIORegister(kTimer0Count);
+            t.IsTrue(resetCount <= firstCount, "timer reset should restart the count window");
+        });
+
         tc.Run("scratchpad alias accesses the same bytes as base", [](TestCase &t)
         {
             PS2Memory mem;
@@ -171,6 +198,33 @@ void register_ps2_memory_tests()
             mem.write32(kScratchAliasAddr, 0xCAFEBABEu);
             t.Equals(mem.read32(kScratchAddr), 0xCAFEBABEu, "writes through 0xF000 scratchpad alias should land in scratchpad");
             t.Equals(mem.read32(kScratchAliasAddr), 0xCAFEBABEu, "reads through 0xF000 scratchpad alias should see scratchpad bytes");
+        });
+
+        tc.Run("VU0 code and data windows map through EE addresses", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kCodeAddr = PS2_VU0_CODE_BASE + 0x20u;
+            mem.write32(kCodeAddr, 0x11223344u);
+            t.Equals(mem.read32(kCodeAddr), 0x11223344u, "VU0 code readback should match written word");
+
+            uint32_t codeWord = 0u;
+            std::memcpy(&codeWord, mem.getVU0Code() + 0x20u, sizeof(codeWord));
+            t.Equals(codeWord, 0x11223344u, "VU0 code write should land in micro memory buffer");
+
+            constexpr uint32_t kDataAddr = PS2_VU0_DATA_BASE + 0x30u;
+            const __m128i value = _mm_set_epi32(0x44556677u, 0x01234567u, 0x89ABCDEFu, 0xCAFEBABEu);
+            mem.write128(kDataAddr, value);
+
+            alignas(16) uint32_t words[4]{};
+            const __m128i readback = mem.read128(kDataAddr);
+            _mm_storeu_si128(reinterpret_cast<__m128i *>(words), readback);
+
+            t.Equals(words[0], 0xCAFEBABEu, "VU0 data lane 0 should match");
+            t.Equals(words[1], 0x89ABCDEFu, "VU0 data lane 1 should match");
+            t.Equals(words[2], 0x01234567u, "VU0 data lane 2 should match");
+            t.Equals(words[3], 0x44556677u, "VU0 data lane 3 should match");
         });
 
         tc.Run("fast memory helpers wrap safely at RAM boundary", [](TestCase &t)
@@ -621,13 +675,20 @@ void register_ps2_memory_tests()
             PS2Memory mem;
             t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
 
+            mem.vif1_regs.base = 0x120u;
             mem.vif1_regs.tops = 0x120u;
             mem.vif1_regs.stat = (1u << 7); // DBF=1 before OFFSET
 
-            std::vector<std::pair<uint32_t, uint32_t>> mscalCalls;
-            mem.setVu1MscalCallback([&](uint32_t startPC, uint32_t itop)
+            struct MscalCall
             {
-                mscalCalls.emplace_back(startPC, itop);
+                uint32_t startPC;
+                uint32_t top;
+                uint32_t itop;
+            };
+            std::vector<MscalCall> mscalCalls;
+            mem.setVu1MscalCallback([&](uint32_t startPC, uint32_t top, uint32_t itop)
+            {
+                mscalCalls.push_back({startPC, top, itop});
             });
 
             const uint32_t offsetCmd = makeVifCmd(0x02u, 0u, 0x0022u);
@@ -640,18 +701,20 @@ void register_ps2_memory_tests()
             const uint32_t baseCmd = makeVifCmd(0x03u, 0u, 0x0030u);
             mem.processVIF1Data(reinterpret_cast<const uint8_t *>(&baseCmd), sizeof(baseCmd));
             t.Equals(mem.vif1_regs.base, 0x30u, "BASE should update BASE register");
-            t.Equals(mem.vif1_regs.tops, 0x30u, "DBF=0 keeps TOPS equal to BASE");
+            t.Equals(mem.vif1_regs.tops, 0x120u, "BASE should not rewrite current TOPS");
 
             const uint32_t itopCmd = makeVifCmd(0x04u, 0u, 0x0044u);
             mem.processVIF1Data(reinterpret_cast<const uint8_t *>(&itopCmd), sizeof(itopCmd));
-            t.Equals(mem.vif1_regs.itop, 0x44u, "ITOP should update ITOP register");
+            t.Equals(mem.vif1_regs.itops, 0x44u, "ITOP VIFcode should update pending ITOPS register");
 
             const uint32_t mscalCmd = makeVifCmd(0x14u, 0u, 0x0003u);
             mem.processVIF1Data(reinterpret_cast<const uint8_t *>(&mscalCmd), sizeof(mscalCmd));
             t.Equals(mscalCalls.size(), static_cast<size_t>(1u), "MSCAL should invoke callback once");
-            t.Equals(mscalCalls[0].first, 0x18u, "MSCAL callback startPC should be IMMEDIATE*8");
-            t.Equals(mscalCalls[0].second, 0x44u, "MSCAL callback should receive current ITOP");
-            t.Equals(mem.vif1_regs.itops, 0x44u, "MSCAL should latch ITOPS from ITOP");
+            t.Equals(mscalCalls[0].startPC, 0x18u, "MSCAL callback startPC should be IMMEDIATE*8");
+            t.Equals(mscalCalls[0].top, 0x120u, "MSCAL callback should receive current TOPS");
+            t.Equals(mscalCalls[0].itop, 0x44u, "MSCAL callback should receive pending ITOPS");
+            t.Equals(mem.vif1_regs.top, 0x120u, "MSCAL should latch TOP from TOPS");
+            t.Equals(mem.vif1_regs.itop, 0x44u, "MSCAL should latch ITOP from ITOPS");
             t.IsTrue((mem.vif1_regs.stat & (1u << 7)) != 0u, "MSCAL should toggle DBF");
             t.Equals(mem.vif1_regs.tops, 0x52u, "DBF=1 should set TOPS to BASE+OFST");
 
@@ -1111,6 +1174,34 @@ void register_ps2_memory_tests()
                      "compact VIF1 chain should clear the STR bit after drain");
         });
 
+        tc.Run("VIF1 DMA chain preserves compact tag high bytes when qwc is zero", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kVif1Ch = 0x10009000u;
+            constexpr uint32_t kTag = 0x00025100u;
+
+            uint8_t *rdram = mem.getRDRAM();
+            std::memset(rdram + kTag, 0, 16u);
+
+            const uint64_t endTag = makeDmaTag(0u, 7u, 0u, false);
+            std::memcpy(rdram + kTag, &endTag, sizeof(endTag));
+
+            const uint32_t itopCmd = makeVifCmd(0x04u, 0u, 0x44u);
+            std::memcpy(rdram + kTag + 12u, &itopCmd, sizeof(itopCmd));
+
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kTag), "write VIF1 TADR should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x104u), "write VIF1 CHCR STR|CHAIN should succeed");
+
+            mem.processPendingTransfers();
+
+            t.Equals(mem.vif1_regs.itops, 0x44u,
+                     "qwc-zero compact VIF1 chain should still process high-half VIFcodes");
+            t.IsTrue((mem.readIORegister(kVif1Ch + 0x00u) & 0x100u) == 0u,
+                     "qwc-zero compact VIF1 chain should clear the STR bit after drain");
+        });
+
         tc.Run("VIF1 packet builders keep chain qwc live before terminate", [](TestCase &t)
         {
             PS2Memory mem;
@@ -1180,6 +1271,31 @@ void register_ps2_memory_tests()
                 }
             }
             t.IsTrue(payloadOk, "live VIF1 packet payload should reach the GIF callback");
+        });
+
+        tc.Run("VIF1 DMA chain latches terminal tag bits in CHCR", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kVif1Ch = 0x10009000u;
+            constexpr uint32_t kTag0 = 0x00027400u;
+            constexpr uint32_t kTag1 = kTag0 + 0x20u;
+
+            uint8_t *rdram = mem.getRDRAM();
+            writeDmaTag(rdram, kTag0, makeDmaTag(1u, 1u, 0u, false)); // CNT
+            std::memset(rdram + kTag0 + 0x10u, 0, 0x10u);
+            writeDmaTag(rdram, kTag1, makeDmaTag(0u, 7u, 0u, false)); // END
+
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kTag0), "write VIF1 TADR should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x185u), "write VIF1 CHCR chain start should succeed");
+
+            mem.processPendingTransfers();
+
+            const uint32_t chcr = mem.readIORegister(kVif1Ch + 0x00u);
+            t.Equals(chcr & 0x100u, 0u, "VIF1 STR should clear after DMA chain drain");
+            t.Equals(chcr & 0x70000000u, 0x70000000u, "VIF1 CHCR should expose the terminal END tag id");
+            t.IsTrue((mem.readIORegister(0x1000E010u) & 0x2u) != 0u, "VIF1 DMA completion should raise D_STAT channel bit");
         });
 
         tc.Run("GIF DMA chain CALL sources payload from TADR+16", [](TestCase &t)
@@ -1484,7 +1600,7 @@ void register_ps2_memory_tests()
                 vuData[i] = static_cast<uint8_t>(0xC0u + i);
             }
 
-            const uint32_t lower = makeVuLowerSpecial(0x3Du, 1u);
+            const uint32_t lower = makeVuLowerSpecial(0x6Cu, 1u);
             std::memcpy(vuCode + 0u, &lower, sizeof(lower));
             const uint32_t upper = 0u;
             std::memcpy(vuCode + 4u, &upper, sizeof(upper));
@@ -1497,6 +1613,7 @@ void register_ps2_memory_tests()
                         PS2_VU1_DATA_SIZE,
                         gs,
                         &mem,
+                        0u,
                         0u,
                         0u,
                         1u);
@@ -1669,7 +1786,7 @@ void register_ps2_memory_tests()
             std::memset(vuCode, 0, PS2_VU1_CODE_SIZE);
             std::memset(vuData, 0, PS2_VU1_DATA_SIZE);
 
-            const uint32_t lower = makeVuLowerSpecial(0x3Du, 0u);
+            const uint32_t lower = makeVuLowerSpecial(0x6Cu, 0u);
             std::memcpy(vuCode + 0u, &lower, sizeof(lower));
             const uint32_t upper = 0u;
             std::memcpy(vuCode + 4u, &upper, sizeof(upper));
@@ -1684,7 +1801,7 @@ void register_ps2_memory_tests()
             }
 
             VU1Interpreter vu1;
-            mem.setVu1MscalCallback([&](uint32_t startPC, uint32_t itop)
+            mem.setVu1MscalCallback([&](uint32_t startPC, uint32_t top, uint32_t itop)
             {
                 vu1.execute(vuCode,
                             PS2_VU1_CODE_SIZE,
@@ -1693,6 +1810,7 @@ void register_ps2_memory_tests()
                             gs,
                             &mem,
                             startPC,
+                            top,
                             itop,
                             1u);
             });

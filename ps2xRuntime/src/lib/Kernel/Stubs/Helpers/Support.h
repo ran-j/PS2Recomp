@@ -26,6 +26,7 @@ namespace
     int32_t g_lastCdError = 0;
     uint32_t g_cdMode = 0;
     uint32_t g_cdStreamingLbn = 0;
+    uint32_t g_cdStreamingEndLbn = 0xFFFFFFFFu;
     bool g_cdInitialized = false;
 
     constexpr uint32_t kIopHeapBase = 0x01A00000;
@@ -495,6 +496,30 @@ namespace
         }
 
         return false;
+    }
+
+    bool findRegisteredCdFileForLbn(uint32_t lbn, CdFileEntry &entryOut)
+    {
+        for (const auto &[key, entry] : g_cdFilesByKey)
+        {
+            const uint32_t endLbn = entry.baseLbn + entry.sectors;
+            if (lbn >= entry.baseLbn && lbn < endLbn)
+            {
+                entryOut = entry;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    uint32_t cdStreamingEndLbnForStart(uint32_t lbn)
+    {
+        CdFileEntry entry{};
+        if (findRegisteredCdFileForLbn(lbn, entry))
+        {
+            return entry.baseLbn + entry.sectors;
+        }
+        return 0xFFFFFFFFu;
     }
 
     bool writeCdSearchResult(uint8_t *rdram, uint32_t fileAddr, const std::string &ps2Path, const CdFileEntry &entry)
@@ -1354,37 +1379,61 @@ namespace
         mem.writeIORegister(channelBase + 0x00u, chcr);
         mem.processPendingTransfers();
 
-        std::lock_guard<std::mutex> lock(g_dmaStubMutex);
-        g_dmaPendingPolls[channelBase] = 1;
-        if (g_dmaStubLogCount < kMaxDmaStubLogs)
+        std::vector<uint32_t> completedCauses = mem.consumeCompletedDmacCauses();
+        if (completedCauses.empty() && (mem.readIORegister(channelBase + 0x00u) & 0x100u) == 0u)
         {
-            RUNTIME_LOG("[sceDmaSend] ch=0x" << std::hex << channelBase
-                      << " madr=0x" << madr
-                      << " qwc=0x" << qwc
-                      << " tadr=0x" << tadr
-                      << " chcr=0x" << chcr << std::dec << std::endl);
-
-            if (!preferNormalCount && (channelBase == 0x10009000u || channelBase == 0x1000A000u))
+            if (channelBase == 0x10008000u)
             {
-                if (const uint8_t *tagPtr = getConstMemPtr(rdram, tadr))
-                {
-                    uint64_t tagLo = 0u;
-                    std::memcpy(&tagLo, tagPtr, sizeof(tagLo));
-                    uint32_t w2 = 0u;
-                    uint32_t w3 = 0u;
-                    std::memcpy(&w2, tagPtr + 8u, sizeof(w2));
-                    std::memcpy(&w3, tagPtr + 12u, sizeof(w3));
-                    RUNTIME_LOG("[sceDmaSend:head] ch=0x" << std::hex << channelBase
-                              << " tagQwc=0x" << static_cast<uint32_t>(tagLo & 0xFFFFu)
-                              << " id=0x" << static_cast<uint32_t>((tagLo >> 28u) & 0x7u)
-                              << " irq=0x" << static_cast<uint32_t>((tagLo >> 31u) & 0x1u)
-                              << " addr=0x" << static_cast<uint32_t>((tagLo >> 32u) & 0x7FFFFFFFu)
-                              << " w2=0x" << w2
-                              << " w3=0x" << w3
-                              << std::dec << std::endl);
-                }
+                completedCauses.push_back(0u);
             }
-            ++g_dmaStubLogCount;
+            else if (channelBase == 0x10009000u)
+            {
+                completedCauses.push_back(1u);
+            }
+            else if (channelBase == 0x1000A000u)
+            {
+                completedCauses.push_back(2u);
+            }
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(g_dmaStubMutex);
+            g_dmaPendingPolls[channelBase] = 1;
+            if (g_dmaStubLogCount < kMaxDmaStubLogs)
+            {
+                RUNTIME_LOG("[sceDmaSend] ch=0x" << std::hex << channelBase
+                          << " madr=0x" << madr
+                          << " qwc=0x" << qwc
+                          << " tadr=0x" << tadr
+                          << " chcr=0x" << chcr << std::dec << std::endl);
+
+                if (!preferNormalCount && (channelBase == 0x10009000u || channelBase == 0x1000A000u))
+                {
+                    if (const uint8_t *tagPtr = getConstMemPtr(rdram, tadr))
+                    {
+                        uint64_t tagLo = 0u;
+                        std::memcpy(&tagLo, tagPtr, sizeof(tagLo));
+                        uint32_t w2 = 0u;
+                        uint32_t w3 = 0u;
+                        std::memcpy(&w2, tagPtr + 8u, sizeof(w2));
+                        std::memcpy(&w3, tagPtr + 12u, sizeof(w3));
+                        RUNTIME_LOG("[sceDmaSend:head] ch=0x" << std::hex << channelBase
+                                  << " tagQwc=0x" << static_cast<uint32_t>(tagLo & 0xFFFFu)
+                                  << " id=0x" << static_cast<uint32_t>((tagLo >> 28u) & 0x7u)
+                                  << " irq=0x" << static_cast<uint32_t>((tagLo >> 31u) & 0x1u)
+                                  << " addr=0x" << static_cast<uint32_t>((tagLo >> 32u) & 0x7FFFFFFFu)
+                                  << " w2=0x" << w2
+                                  << " w3=0x" << w3
+                                  << std::dec << std::endl);
+                    }
+                }
+                ++g_dmaStubLogCount;
+            }
+        }
+
+        for (const uint32_t completedCause : completedCauses)
+        {
+            ps2_syscalls::dispatchDmacHandlersForCause(rdram, runtime, completedCause);
         }
 
         return 0;

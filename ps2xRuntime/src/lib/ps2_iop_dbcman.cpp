@@ -1,14 +1,19 @@
 #include "runtime/ps2_iop_dbcman.h"
 #include "runtime/ps2_memory.h"
+
 #include <cstring>
 #include <iostream>
 
 namespace
 {
-    constexpr uint32_t IOP_SID_DBCMAN = 0x80001300u;
-    constexpr uint32_t DBCMAN_RPC_CHECK_VERSION = 0x80001363u;
+    constexpr uint32_t kDbcManSid = 0x80001300u;
+    constexpr uint32_t kRpcCheckVersion = 0x80001363u;
+    constexpr uint32_t kDbcManVersion = 0x0320u;
+    constexpr uint32_t kMaxUnknownRpcLogs = 32u;
 
-    static bool writeIopU32(uint8_t *rdram, uint32_t addr, uint32_t value)
+    uint32_t g_unknownRpcLogCount = 0u;
+
+    bool writeGuestU32(uint8_t *rdram, uint32_t addr, uint32_t value)
     {
         uint8_t *ptr = getMemPtr(rdram, addr);
         if (!ptr)
@@ -19,10 +24,25 @@ namespace
         std::memcpy(ptr, &value, sizeof(value));
         return true;
     }
+
+    void writeVersionResponse(uint8_t *rdram, uint32_t recvBufAddr, uint32_t recvSize)
+    {
+        const uint32_t words = recvSize / sizeof(uint32_t);
+        const uint32_t count = words < 4u ? words : 4u;
+        for (uint32_t index = 0; index < count; ++index)
+        {
+            writeGuestU32(rdram, recvBufAddr + (index * sizeof(uint32_t)), kDbcManVersion);
+        }
+    }
 }
 
 namespace ps2_iop_dbcman
 {
+    void reset()
+    {
+        g_unknownRpcLogCount = 0u;
+    }
+
     bool handleDbcManRpc(uint8_t *rdram,
                          uint32_t sid,
                          uint32_t rpcNum,
@@ -32,37 +52,26 @@ namespace ps2_iop_dbcman
                          uint32_t recvSize,
                          uint32_t &resultPtr)
     {
-        if (sid != IOP_SID_DBCMAN)
+        if (sid != kDbcManSid)
         {
             return false;
         }
 
+        resultPtr = recvBufAddr;
         if (recvBufAddr == 0u || recvSize == 0u)
         {
-            resultPtr = recvBufAddr;
             return true;
         }
 
         switch (rpcNum)
         {
-        case DBCMAN_RPC_CHECK_VERSION:
-        {
-            // TODO move this to compile flag
-            //  libdbc expects dbcman.irx version 3.20
-            constexpr uint32_t DBCMAN_VERSION = 0x0320;
-
-            writeIopU32(rdram, recvBufAddr + 0x00u, DBCMAN_VERSION);
-            writeIopU32(rdram, recvBufAddr + 0x04u, DBCMAN_VERSION);
-            writeIopU32(rdram, recvBufAddr + 0x08u, DBCMAN_VERSION);
-            writeIopU32(rdram, recvBufAddr + 0x0Cu, DBCMAN_VERSION);
-
-            resultPtr = recvBufAddr;
+        case kRpcCheckVersion:
+            // libdbc expects dbcman.irx version 3.20.
+            writeVersionResponse(rdram, recvBufAddr, recvSize);
             return true;
-        }
+
         default:
-        {
-            static uint32_t dbcLogCount = 0;
-            if (dbcLogCount < 32)
+            if (g_unknownRpcLogCount < kMaxUnknownRpcLogs)
             {
                 std::cerr << "[DBCMAN:stub]"
                           << " sid=0x" << std::hex << sid
@@ -72,12 +81,9 @@ namespace ps2_iop_dbcman
                           << " recv=0x" << recvBufAddr
                           << " recvSize=0x" << recvSize
                           << std::dec << std::endl;
-                ++dbcLogCount;
+                ++g_unknownRpcLogCount;
             }
-
-            resultPtr = recvBufAddr;
             return true;
-        }
         }
     }
 }

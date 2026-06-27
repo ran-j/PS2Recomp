@@ -17,22 +17,6 @@ namespace ps2_stubs
         uint32_t g_gs_sync_v_callback_stack_base = 0u;
         uint32_t g_gs_sync_v_callback_stack_top = 0u;
         uint32_t g_gs_sync_v_callback_bad_pc_logs = 0u;
-        struct GsDebugProbePoint
-        {
-            uint32_t x;
-            uint32_t y;
-        };
-
-        constexpr GsDebugProbePoint kGhostProbePoints[] = {
-            {220u, 176u},
-            {260u, 208u},
-            {320u, 208u},
-            {260u, 240u},
-            {320u, 240u},
-            {260u, 272u},
-            {320u, 272u},
-        };
-
         uint64_t makeClearPrim(bool useContext2)
         {
             return static_cast<uint64_t>(GS_PRIM_SPRITE) |
@@ -131,142 +115,9 @@ namespace ps2_stubs
             return {stack0, stack1, stack2};
         }
 
-        bool sampleFramebufferPixel(uint8_t *vram,
-                                    uint32_t vramSize,
-                                    uint32_t fbp,
-                                    uint32_t fbw,
-                                    uint32_t psm,
-                                    uint32_t x,
-                                    uint32_t y,
-                                    uint32_t &outPixel)
-        {
-            if (!vram || fbw == 0u)
-            {
-                return false;
-            }
-
-            const uint32_t bytesPerPixel =
-                (psm == GS_PSM_CT16 || psm == GS_PSM_CT16S) ? 2u : (psm == GS_PSM_CT32 || psm == GS_PSM_CT24) ? 4u
-                                                                                                              : 0u;
-            if (bytesPerPixel == 0u)
-            {
-                return false;
-            }
-
-            const uint32_t widthBlocks = (fbw != 0u) ? fbw : 1u;
-            const uint32_t strideBytes = fbw * 64u * bytesPerPixel;
-            const uint32_t baseBytes = fbp * 8192u;
-            uint32_t offset = baseBytes + (y * strideBytes) + (x * bytesPerPixel);
-            if (psm == GS_PSM_CT16)
-            {
-                offset = GSPSMCT16::addrPSMCT16(GSInternal::framePageBaseToBlock(fbp), widthBlocks, x, y);
-            }
-            else if (psm == GS_PSM_CT16S)
-            {
-                offset = GSPSMCT16::addrPSMCT16S(GSInternal::framePageBaseToBlock(fbp), widthBlocks, x, y);
-            }
-            if (offset + bytesPerPixel > vramSize)
-            {
-                return false;
-            }
-
-            if (bytesPerPixel == 4u)
-            {
-                std::memcpy(&outPixel, vram + offset, sizeof(outPixel));
-                if (psm == GS_PSM_CT24)
-                {
-                    outPixel |= 0xFF000000u;
-                }
-                return true;
-            }
-
-            uint16_t packed = 0u;
-            std::memcpy(&packed, vram + offset, sizeof(packed));
-            const uint32_t r = ((packed >> 0) & 0x1Fu) << 3;
-            const uint32_t g = ((packed >> 5) & 0x1Fu) << 3;
-            const uint32_t b = ((packed >> 10) & 0x1Fu) << 3;
-            const uint32_t a = (packed & 0x8000u) ? 0x80u : 0x00u;
-            outPixel = r | (g << 8) | (b << 16) | (a << 24);
-            return true;
-        }
-
-        bool sampleFrameRegPixel(PS2Runtime *runtime,
-                                 uint64_t frameReg,
-                                 uint32_t x,
-                                 uint32_t y,
-                                 uint32_t &outPixel)
-        {
-            if (!runtime)
-            {
-                return false;
-            }
-
-            const uint32_t fbp = static_cast<uint32_t>(frameReg & 0x1FFu);
-            const uint32_t fbw = static_cast<uint32_t>((frameReg >> 16) & 0x3Fu);
-            const uint32_t psm = static_cast<uint32_t>((frameReg >> 24) & 0x3Fu);
-            return sampleFramebufferPixel(runtime->memory().getGSVRAM(), PS2_GS_VRAM_SIZE, fbp, fbw, psm, x, y, outPixel);
-        }
-
-        bool sampleDispFbPixel(PS2Runtime *runtime,
-                               uint64_t dispfb,
-                               uint32_t x,
-                               uint32_t y,
-                               uint32_t &outPixel)
-        {
-            if (!runtime)
-            {
-                return false;
-            }
-
-            const uint32_t fbp = static_cast<uint32_t>(dispfb & 0x1FFu);
-            const uint32_t fbw = static_cast<uint32_t>((dispfb >> 9) & 0x3Fu);
-            const uint32_t psm = static_cast<uint32_t>((dispfb >> 15) & 0x1Fu);
-            return sampleFramebufferPixel(runtime->memory().getGSVRAM(), PS2_GS_VRAM_SIZE, fbp, fbw, psm, x, y, outPixel);
-        }
-
-        void logSwapProbeStage(PS2Runtime *runtime,
-                               const char *stage,
-                               uint32_t which,
-                               uint64_t drawFrameReg,
-                               uint64_t dispfb,
-                               bool hasClearPacket)
-        {
-            static uint32_t s_swapProbeCount = 0u;
-            if (!runtime || s_swapProbeCount >= 24u)
-            {
-                return;
-            }
-
-            PS2_IF_AGRESSIVE_LOGS({
-                RUNTIME_LOG("[gs:probe] stage=" << stage
-                                                << " which=" << which
-                                                << " clear=" << static_cast<uint32_t>(hasClearPacket ? 1u : 0u));
-
-                for (const auto &probe : kGhostProbePoints)
-                {
-                    uint32_t page0Pixel = 0u;
-                    uint32_t page150Pixel = 0u;
-                    const bool havePage0 = sampleFrameRegPixel(runtime, drawFrameReg, probe.x, probe.y, page0Pixel);
-                    const bool havePage150 = sampleDispFbPixel(runtime, dispfb, probe.x, probe.y, page150Pixel);
-                    if (havePage0)
-                    {
-                        RUNTIME_LOG(" p0[" << probe.x << "," << probe.y << "]=0x"
-                                           << std::hex << page0Pixel << std::dec);
-                    }
-                    if (havePage150)
-                    {
-                        RUNTIME_LOG(" p150[" << probe.x << "," << probe.y << "]=0x"
-                                             << std::hex << page150Pixel << std::dec);
-                    }
-                }
-                RUNTIME_LOG(std::endl);
-                ++s_swapProbeCount;
-            });
-        }
-
         void applyGsClearPacket(PS2Runtime *runtime, const GsClearMem &clear)
         {
-            if (!runtime || !runtime->syncCoreSubsystems() || !hasSeededGsClearPacket(clear))
+            if (!runtime->syncCoreSubsystems() || !hasSeededGsClearPacket(clear))
             {
                 return;
             }
@@ -281,30 +132,6 @@ namespace ps2_stubs
 
         void refreshPacketBuilderPendingCount(uint8_t *rdram, PS2Runtime *runtime, uint32_t stateAddr);
         void writePacketBuilderCurrent(uint8_t *rdram, PS2Runtime *runtime, uint32_t stateAddr, uint32_t currentAddr);
-        void logVif1PacketStateOp(const char *op,
-                                  R5900Context *ctx,
-                                  uint32_t stateAddr,
-                                  uint32_t currentAddr,
-                                  uint32_t aux0,
-                                  uint32_t aux1)
-        {
-            static uint32_t s_vif1PacketOpLogCount = 0u;
-            if (s_vif1PacketOpLogCount >= 96u)
-            {
-                return;
-            }
-
-            RUNTIME_LOG("[vif1:packet] idx=" << s_vif1PacketOpLogCount
-                                             << " op=" << op
-                                             << " pc=0x" << std::hex << ctx->pc
-                                             << " ra=0x" << getRegU32(ctx, 31)
-                                             << " state=0x" << stateAddr
-                                             << " current=0x" << currentAddr
-                                             << " aux0=0x" << aux0
-                                             << " aux1=0x" << aux1
-                                             << std::dec << std::endl);
-            ++s_vif1PacketOpLogCount;
-        }
 
         void initPacketBuilderState(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
@@ -826,10 +653,12 @@ namespace ps2_stubs
             static uint32_t s_missingCallbackLogCount = 0u;
             if (s_missingCallbackLogCount < 32u)
             {
-                std::cerr << "[sceGsSyncVCallback:missing] cb=0x" << std::hex << callback
-                          << " gp=0x" << gp
-                          << " tick=0x" << callbackTick
-                          << std::dec << std::endl;
+                PS2_IF_AGRESSIVE_LOGS({
+                    std::cerr << "[sceGsSyncVCallback:missing] cb=0x" << std::hex << callback
+                              << " gp=0x" << gp
+                              << " tick=0x" << callbackTick
+                              << std::dec << std::endl;
+                });
                 ++s_missingCallbackLogCount;
             }
             return;
@@ -864,11 +693,13 @@ namespace ps2_stubs
             const bool shouldLogDispatch = (s_dispatchLogCount < 64u);
             if (shouldLogDispatch)
             {
-                RUNTIME_LOG("[sceGsSyncVCallback:dispatch] cb=0x" << std::hex << callback
-                                                                  << " gp=0x" << gp
-                                                                  << " sp=0x" << getRegU32(&callbackCtx, 29)
-                                                                  << " tick=0x" << callbackTick
-                                                                  << std::dec << std::endl);
+                PS2_IF_AGRESSIVE_LOGS({
+                    RUNTIME_LOG("[sceGsSyncVCallback:dispatch] cb=0x" << std::hex << callback
+                                                                      << " gp=0x" << gp
+                                                                      << " sp=0x" << getRegU32(&callbackCtx, 29)
+                                                                      << " tick=0x" << callbackTick
+                                                                      << std::dec << std::endl);
+                });
             }
 
             uint32_t steps = 0u;
@@ -900,11 +731,13 @@ namespace ps2_stubs
 
             if (shouldLogDispatch)
             {
-                RUNTIME_LOG("[sceGsSyncVCallback:return] cb=0x" << std::hex << callback
-                                                                << " finalPc=0x" << callbackCtx.pc
-                                                                << " ra=0x" << getRegU32(&callbackCtx, 31)
-                                                                << " steps=0x" << steps
-                                                                << std::dec << std::endl);
+                PS2_IF_AGRESSIVE_LOGS({
+                    RUNTIME_LOG("[sceGsSyncVCallback:return] cb=0x" << std::hex << callback
+                                                                    << " finalPc=0x" << callbackCtx.pc
+                                                                    << " ra=0x" << getRegU32(&callbackCtx, 31)
+                                                                    << " steps=0x" << steps
+                                                                    << std::dec << std::endl);
+                });
                 ++s_dispatchLogCount;
             }
         }
@@ -1470,11 +1303,6 @@ namespace ps2_stubs
             return;
         }
 
-        const bool hasClearPacket = (which == 0u) ? hasSeededGsClearPacket(db.clear0)
-                                                  : hasSeededGsClearPacket(db.clear1);
-        const uint64_t debugDrawFrameReg = (which == 0u) ? db.draw01.frame1.value
-                                                         : db.draw11.frame1.value;
-
         applyGsDispEnv(runtime, db.disp[which]);
         static uint32_t s_swapDbuffLogCount = 0u;
         if (s_swapDbuffLogCount < 32u)
@@ -1483,17 +1311,18 @@ namespace ps2_stubs
             const uint32_t clearContext = (which == 0u)
                                               ? static_cast<uint32_t>((db.clear0.prim.value >> 9) & 0x1u)
                                               : static_cast<uint32_t>((db.clear1.prim.value >> 9) & 0x1u);
-            RUNTIME_LOG("[gs:swapdbuff] which=" << which
-                                                << " env=0x" << std::hex << envAddr
-                                                << " dispfb=0x" << db.disp[which].dispfb
-                                                << " display=0x" << db.disp[which].display
-                                                << " pmode=0x" << db.disp[which].pmode
-                                                << " dispFbp=" << dispFbp
-                                                << " clearCtxt=" << clearContext
-                                                << std::dec << std::endl);
+            PS2_IF_AGRESSIVE_LOGS({
+                RUNTIME_LOG("[gs:swapdbuff] which=" << which
+                                                    << " env=0x" << std::hex << envAddr
+                                                    << " dispfb=0x" << db.disp[which].dispfb
+                                                    << " display=0x" << db.disp[which].display
+                                                    << " pmode=0x" << db.disp[which].pmode
+                                                    << " dispFbp=" << dispFbp
+                                                    << " clearCtxt=" << clearContext
+                                                    << std::dec << std::endl);
+            });
             ++s_swapDbuffLogCount;
         }
-        logSwapProbeStage(runtime, "swap-pre", which, debugDrawFrameReg, db.disp[which].dispfb, hasClearPacket);
         if (which == 0u)
         {
             applyGsRegPairs(runtime, reinterpret_cast<const GsRegPairMem *>(&db.draw01), 8u);
@@ -1502,10 +1331,8 @@ namespace ps2_stubs
             {
                 const uint32_t clearContext = static_cast<uint32_t>((db.clear0.prim.value >> 9) & 0x1u);
                 runtime->gs().clearFramebufferContext(clearContext, static_cast<uint32_t>(db.clear0.rgbaq.value));
-                logSwapProbeStage(runtime, "swap-post-clear", which, db.draw01.frame1.value, db.disp[which].dispfb, true);
             }
             applyGsClearPacket(runtime, db.clear0);
-            logSwapProbeStage(runtime, "swap-post", which, db.draw01.frame1.value, db.disp[which].dispfb, hasClearPacket);
         }
         else
         {
@@ -1515,10 +1342,8 @@ namespace ps2_stubs
             {
                 const uint32_t clearContext = static_cast<uint32_t>((db.clear1.prim.value >> 9) & 0x1u);
                 runtime->gs().clearFramebufferContext(clearContext, static_cast<uint32_t>(db.clear1.rgbaq.value));
-                logSwapProbeStage(runtime, "swap-post-clear", which, db.draw11.frame1.value, db.disp[which].dispfb, true);
             }
             applyGsClearPacket(runtime, db.clear1);
-            logSwapProbeStage(runtime, "swap-post", which, db.draw11.frame1.value, db.disp[which].dispfb, hasClearPacket);
         }
 
         setReturnS32(ctx, static_cast<int32_t>(which ^ 1u));
@@ -1651,13 +1476,15 @@ namespace ps2_stubs
         static uint32_t s_syncVCallbackLogCount = 0u;
         if (s_syncVCallbackLogCount < 128u)
         {
-            RUNTIME_LOG("[sceGsSyncVCallback:set] new=0x" << std::hex << newCallback
-                                                          << " old=0x" << oldCallback
-                                                          << " callerPc=0x" << callerPc
-                                                          << " callerRa=0x" << callerRa
-                                                          << " gp=0x" << gp
-                                                          << " sp=0x" << sp
-                                                          << std::dec << std::endl);
+            PS2_IF_AGRESSIVE_LOGS({
+                RUNTIME_LOG("[sceGsSyncVCallback:set] new=0x" << std::hex << newCallback
+                                                              << " old=0x" << oldCallback
+                                                              << " callerPc=0x" << callerPc
+                                                              << " callerRa=0x" << callerRa
+                                                              << " gp=0x" << gp
+                                                              << " sp=0x" << sp
+                                                              << std::dec << std::endl);
+            });
             ++s_syncVCallbackLogCount;
         }
 
@@ -1798,8 +1625,6 @@ namespace ps2_stubs
             return;
         }
 
-        logVif1PacketStateOp("close-direct", ctx, stateAddr, currentAddr, openAddr, qwordCount);
-
         tagWord += qwordCount;
         writeGuestU32(rdram, runtime, stateAddr + 12u, 0u);
         writeGuestU32(rdram, runtime, openAddr, tagWord);
@@ -1866,7 +1691,6 @@ namespace ps2_stubs
         writeGuestU32(rdram, runtime, currentAddr, tagWord);
         writePacketBuilderCurrent(rdram, runtime, stateAddr, currentAddr + 4u);
         writeGuestU32(rdram, runtime, stateAddr + 12u, currentAddr);
-        logVif1PacketStateOp("open-direct", ctx, stateAddr, currentAddr + 4u, currentAddr, tagWord);
     }
 
     void sceVif1PkOpenGifTag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1887,7 +1711,6 @@ namespace ps2_stubs
         uint32_t currentAddr = 0u;
         tryReadWordFromGuest(rdram, runtime, stateAddr, currentAddr);
         const uint32_t reservedAddr = reservePacketBuilderWords(rdram, runtime, stateAddr, wordCount);
-        logVif1PacketStateOp("reserve", ctx, stateAddr, currentAddr, reservedAddr, wordCount);
         setReturnU32(ctx, reservedAddr);
     }
 

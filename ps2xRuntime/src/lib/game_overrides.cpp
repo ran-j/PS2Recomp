@@ -178,7 +178,6 @@ namespace ps2_game_overrides
     {
         ps2_syscalls::clearSoundDriverCompatLayout();
         ps2_syscalls::clearDtxCompatLayout();
-        ps2_stubs::clearMpegCompatLayout();
 
         std::vector<Descriptor> descriptors;
         {
@@ -292,22 +291,16 @@ namespace
         ps2_syscalls::setDtxCompatLayout(layout);
     }
 
-    void applyRecvxMpegCompat(PS2Runtime &runtime)
+    void applyLotrSoundRpcCompat(PS2Runtime &runtime)
     {
         (void)runtime;
 
-        // this is temporary so ignore for now
-        PS2MpegCompatLayout layout{};
-        layout.mpegObjectAddr = 0x01E27140u;
-        layout.videoStateAddr = 0x01E271E8u;
-        layout.movieStateAddr = 0x01E21914u;
-        layout.syntheticFramesBeforeEnd = 1u;
-        layout.finishedVideoStateValue = 3u;
-        layout.finishedMovieStateValue = 3u;
-        ps2_stubs::setMpegCompatLayout(layout);
+        PS2SoundDriverCompatLayout layout{};
+        layout.completionCallbacks = {0x001FFD70u, 0u, 0u, 0u};
+        ps2_syscalls::setSoundDriverCompatLayout(layout);
     }
 
     PS2_REGISTER_GAME_OVERRIDE("RECVX sound-driver compat", "slus_201.84", 0u, 0u, &applyRecvxSoundDriverCompat);
     PS2_REGISTER_GAME_OVERRIDE("RECVX DTX compat", "slus_201.84", 0u, 0u, &applyRecvxDtxCompat);
-    PS2_REGISTER_GAME_OVERRIDE("RECVX MPEG compat", "slus_201.84", 0u, 0u, &applyRecvxMpegCompat);
+    PS2_REGISTER_GAME_OVERRIDE("LotR sound RPC compat", "SLUS_205.78", 0u, 0u, &applyLotrSoundRpcCompat);
 }

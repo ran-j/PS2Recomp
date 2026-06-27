@@ -1,9 +1,19 @@
 #ifndef PS2_LOG_H
 #define PS2_LOG_H
 
+#include <algorithm>
+#include <deque>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <filesystem>
+#include <mutex>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#ifndef PS2_RUNTIME_LOGS
+#define PS2_RUNTIME_LOGS 1
+#endif
 
 #if defined(AGRESSIVE_LOGS)
 #define PS2_AGRESSIVE_LOGS_ENABLED 1
@@ -11,13 +21,113 @@
 #define PS2_AGRESSIVE_LOGS_ENABLED 0
 #endif
 
-#if defined(_DEBUG)
-#define RUNTIME_LOG(x) do { std::cout << x; } while (0)
+namespace ps2_log
+{
+struct RuntimeLogEntry
+{
+    uint64_t seq = 0;
+    std::string text;
+};
+
+inline constexpr size_t kMaxRuntimeLogEntries = 4096;
+
+inline std::mutex &runtime_log_mutex()
+{
+    static std::mutex m;
+    return m;
+}
+
+inline std::deque<RuntimeLogEntry> &runtime_log_entries()
+{
+    static std::deque<RuntimeLogEntry> entries;
+    return entries;
+}
+
+inline uint64_t &runtime_log_next_seq()
+{
+    static uint64_t seq = 1;
+    return seq;
+}
+
+inline bool &runtime_log_paused()
+{
+    static bool paused = false;
+    return paused;
+}
+
+inline void set_runtime_log_paused(bool paused)
+{
+    std::lock_guard<std::mutex> lock(runtime_log_mutex());
+    runtime_log_paused() = paused;
+}
+
+inline bool is_runtime_log_paused()
+{
+    std::lock_guard<std::mutex> lock(runtime_log_mutex());
+    return runtime_log_paused();
+}
+
+inline void append_runtime_log_text(const std::string &text)
+{
+    if (text.empty())
+    {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(runtime_log_mutex());
+    if (runtime_log_paused())
+    {
+        return;
+    }
+
+    auto &entries = runtime_log_entries();
+    RuntimeLogEntry entry{};
+    entry.seq = runtime_log_next_seq()++;
+    entry.text = text;
+    entries.push_back(std::move(entry));
+
+    while (entries.size() > kMaxRuntimeLogEntries)
+    {
+        entries.pop_front();
+    }
+}
+
+inline std::vector<RuntimeLogEntry> snapshot_runtime_log_entries()
+{
+    std::lock_guard<std::mutex> lock(runtime_log_mutex());
+    const auto &entries = runtime_log_entries();
+    return std::vector<RuntimeLogEntry>(entries.begin(), entries.end());
+}
+
+inline void clear_runtime_log_entries()
+{
+    std::lock_guard<std::mutex> lock(runtime_log_mutex());
+    runtime_log_entries().clear();
+}
+}
+
+#if defined(PS2_RUNTIME_LOGS) || defined(AGRESSIVE_LOGS)
+#define RUNTIME_LOG(x)                                                                                                  \
+    do                                                                                                                  \
+    {                                                                                                                   \
+        std::ostringstream _ps2_runtime_log_stream;                                                                     \
+        _ps2_runtime_log_stream << x;                                                                                   \
+        const std::string _ps2_runtime_log_text = _ps2_runtime_log_stream.str();                                        \
+        if (_ps2_runtime_log_text.empty())                                                                            \
+        {                                                                                                               \
+            std::cout.flush();                                                                                          \
+        }                                                                                                               \
+        else                                                                                                            \
+        {                                                                                                               \
+            std::cout << _ps2_runtime_log_text;                                                                         \
+            ps2_log::append_runtime_log_text(_ps2_runtime_log_text);                                                    \
+        }                                                                                                               \
+    } while (0)
 #else
 #define RUNTIME_LOG(x) do {} while(0)
 #endif
 
-#ifdef neverDone
+#ifdef AGRESSIVE_LOGS
 
 namespace ps2_log
 {
@@ -82,6 +192,10 @@ inline void print_saved_location()
 namespace ps2_log
 {
 inline constexpr bool agressive_logs_enabled = false;
+inline std::string log_path()
+{
+    return (std::filesystem::current_path() / "ps2_log.txt").string();
+}
 inline void print_saved_location() {}
 }
 #define PS_LOG_ENTRY(name) ((void)0)

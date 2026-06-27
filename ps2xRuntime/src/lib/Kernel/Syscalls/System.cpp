@@ -45,7 +45,10 @@ namespace ps2_syscalls
             imr = runtime->memory().gs().imr;
         }
 
-        RUNTIME_LOG("PS2 GsGetIMR: Returning IMR=0x" << std::hex << imr << std::dec);
+        RUNTIME_LOG("PS2 GsGetIMR: Returning IMR=0x" << std::hex << imr
+                                                     << " pc=0x" << ctx->pc
+                                                     << " ra=0x" << getRegU32(ctx, 31)
+                                                     << std::dec << std::endl);
 
         setReturnU64(ctx, imr); // Return in $v0/$v1
     }
@@ -57,14 +60,20 @@ namespace ps2_syscalls
 
     void GsPutIMR(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        uint64_t newImr = getRegU32(ctx, 4) | ((uint64_t)getRegU32(ctx, 5) << 32); // $a0 = lower 32 bits, $a1 = upper 32 bits
+        const uint64_t newImr = GPR_U64(ctx, 4);
         uint64_t oldImr = 0;
         if (runtime)
         {
             oldImr = runtime->memory().gs().imr;
             runtime->memory().gs().imr = newImr;
         }
-        RUNTIME_LOG("PS2 GsPutIMR: Setting IMR=0x" << std::hex << newImr << std::dec);
+        RUNTIME_LOG("PS2 GsPutIMR: " << " new=0x" << newImr
+                                     << " a0_64=0x" << GPR_U64(ctx, 4)
+                                     << " a0_32=0x" << getRegU32(ctx, 4)
+                                     << " a1_32=0x" << getRegU32(ctx, 5)
+                                     << " pc=0x" << ctx->pc
+                                     << " ra=0x" << getRegU32(ctx, 31)
+                                     << std::dec << std::endl);
         setReturnU64(ctx, oldImr);
     }
 
@@ -434,12 +443,14 @@ namespace ps2_syscalls
             const uint32_t logIndex = s_reentrantLogs.fetch_add(1u, std::memory_order_relaxed);
             if (logIndex < kMaxReentrantLogs)
             {
-                std::cerr << "[SyscallOverride:reentrant]"
-                          << " syscall=0x" << std::hex << syscallNumber
-                          << " handler=0x" << handler
-                          << " pc=0x" << ctx->pc
-                          << " ra=0x" << getRegU32(ctx, 31)
-                          << std::dec << std::endl;
+                PS2_IF_AGRESSIVE_LOGS({
+                    std::cerr << "[SyscallOverride:reentrant]"
+                              << " syscall=0x" << std::hex << syscallNumber
+                              << " handler=0x" << handler
+                              << " pc=0x" << ctx->pc
+                              << " ra=0x" << getRegU32(ctx, 31)
+                              << std::dec << std::endl;
+                });
             }
             return false;
         }
@@ -490,23 +501,25 @@ namespace ps2_syscalls
                 const uint32_t builtinMinus20c = (builtinRet != 0u) ? (builtinRet - 0x20Cu) : 0u;
                 const uint32_t builtinMinus168 = (builtinRet != 0u) ? (builtinRet - 0x168u) : 0u;
 
-                std::cerr << "[Syscall83:override]"
-                          << " handler=0x" << std::hex << handler
-                          << " invoked=" << (invoked ? "true" : "false")
-                          << " pc=0x" << overridePc
-                          << " ra=0x" << overrideRa
-                          << " a0=0x" << overrideA0
-                          << " a1=0x" << overrideA1
-                          << " a2=0x" << overrideA2
-                          << " a3=0x" << overrideA3
-                          << " guestRet=0x" << retV0
-                          << " builtinRet=0x" << builtinRet
-                          << " guest-20c=0x" << guestMinus20c
-                          << " builtin-20c=0x" << builtinMinus20c
-                          << " guest-168=0x" << guestMinus168
-                          << " builtin-168=0x" << builtinMinus168
-                          << " match=" << (mismatch ? "false" : "true")
-                          << std::dec << std::endl;
+                PS2_IF_AGRESSIVE_LOGS({
+                    std::cerr << "[Syscall83:override]"
+                              << " handler=0x" << std::hex << handler
+                              << " invoked=" << (invoked ? "true" : "false")
+                              << " pc=0x" << overridePc
+                              << " ra=0x" << overrideRa
+                              << " a0=0x" << overrideA0
+                              << " a1=0x" << overrideA1
+                              << " a2=0x" << overrideA2
+                              << " a3=0x" << overrideA3
+                              << " guestRet=0x" << retV0
+                              << " builtinRet=0x" << builtinRet
+                              << " guest-20c=0x" << guestMinus20c
+                              << " builtin-20c=0x" << builtinMinus20c
+                              << " guest-168=0x" << guestMinus168
+                              << " builtin-168=0x" << builtinMinus168
+                              << " match=" << (mismatch ? "false" : "true")
+                              << std::dec << std::endl;
+                });
             }
         }
 
@@ -517,12 +530,14 @@ namespace ps2_syscalls
             const uint32_t logIndex = s_fallbackLogs.fetch_add(1u, std::memory_order_relaxed);
             if (logIndex < kMaxFallbackLogs)
             {
-                std::cerr << "[SyscallOverride:fallback]"
-                          << " syscall=0x" << std::hex << syscallNumber
-                          << " handler=0x" << handler
-                          << " pc=0x" << ctx->pc
-                          << " ra=0x" << getRegU32(ctx, 31)
-                          << std::dec << std::endl;
+                PS2_IF_AGRESSIVE_LOGS({
+                    std::cerr << "[SyscallOverride:fallback]"
+                              << " syscall=0x" << std::hex << syscallNumber
+                              << " handler=0x" << handler
+                              << " pc=0x" << ctx->pc
+                              << " ra=0x" << getRegU32(ctx, 31)
+                              << std::dec << std::endl;
+                });
             }
             return false;
         }
@@ -683,7 +698,7 @@ namespace ps2_syscalls
     void SetupHeap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const uint32_t heapBaseRaw = getRegU32(ctx, 4); // $a0
-        const uint32_t heapSize = getRegU32(ctx, 5); // $a1 (optional size)
+        const uint32_t heapSize = getRegU32(ctx, 5);    // $a1 (optional size)
 
         const uint32_t heapBase = (heapBaseRaw + 0xFu) & ~0xFu;
 
@@ -706,13 +721,15 @@ namespace ps2_syscalls
         {
             runtime->configureGuestHeap(heapBase, heapLimit);
 
-            std::cerr << "[SetupHeap]"
-                      << " base=0x" << std::hex << heapBaseRaw
-                      << " alignedBase=0x" << heapBase
-                      << " size=0x" << heapSize
-                      << " runtimeBase=0x" << runtime->guestHeapBase()
-                      << " runtimeEnd=0x" << runtime->guestHeapEnd()
-                      << std::dec << std::endl;
+            PS2_IF_AGRESSIVE_LOGS({
+                std::cerr << "[SetupHeap]"
+                          << " base=0x" << std::hex << heapBaseRaw
+                          << " alignedBase=0x" << heapBase
+                          << " size=0x" << heapSize
+                          << " runtimeBase=0x" << runtime->guestHeapBase()
+                          << " runtimeEnd=0x" << runtime->guestHeapEnd()
+                          << std::dec << std::endl;
+            });
 
             setReturnU32(ctx, runtime->guestHeapBase());
             return;
@@ -729,8 +746,8 @@ namespace ps2_syscalls
         static constexpr uint32_t kDefaultGuestHeapEnd = 0x01F00000u;
 
         const uint32_t ret = runtime
-            ? runtime->guestHeapLimit()
-            : kDefaultGuestHeapEnd;
+                                 ? runtime->guestHeapLimit()
+                                 : kDefaultGuestHeapEnd;
 
         setReturnU32(ctx, ret);
     }
@@ -840,6 +857,11 @@ namespace ps2_syscalls
                                           const FindAddressMatchSample *matches,
                                           uint32_t matchCount)
     {
+        if constexpr (!ps2_log::agressive_logs_enabled)
+        {
+            return;
+        }
+
         static std::atomic<uint32_t> s_findAddressHitLogs{0u};
         static std::atomic<uint32_t> s_findAddressMissLogs{0u};
         constexpr uint32_t kMaxFindAddressHitLogs = 16u;

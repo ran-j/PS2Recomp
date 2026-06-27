@@ -5,6 +5,8 @@
 namespace ps2_stubs
 {
     void resetMpegStubState();
+    void notifyMpegCdStreamStart();
+    void notifyMpegCdStreamEof();
     void sceMpegFlush(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceMpegAddBs(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceMpegAddCallback(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);

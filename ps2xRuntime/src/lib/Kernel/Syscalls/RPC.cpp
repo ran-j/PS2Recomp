@@ -20,6 +20,28 @@ namespace ps2_syscalls
         constexpr uint32_t kSoundDriverGuestPoolBase = 0x00120000u;
         constexpr uint32_t kSoundDriverGuestPoolLimit = 0x00200000u;
 
+        SifRpcDebugEvent makeRpcDebugEvent(const char *op, R5900Context *ctx)
+        {
+            SifRpcDebugEvent event{};
+            event.op = op;
+            event.pc = ctx ? ctx->pc : 0u;
+            event.ra = ctx ? getRegU32(ctx, 31) : 0u;
+            event.threadId = static_cast<uint32_t>(g_currentThreadId);
+            return event;
+        }
+
+        void pushSifRpcDebugEventLocked(SifRpcDebugEvent event)
+        {
+            event.seq = ++g_sif_rpc_debug_next_seq;
+            g_sif_rpc_debug_history[event.seq % kSifRpcDebugHistoryCount] = event;
+        }
+
+        void pushSifRpcDebugEvent(SifRpcDebugEvent event)
+        {
+            std::lock_guard<std::mutex> lock(g_rpc_mutex);
+            pushSifRpcDebugEventLocked(event);
+        }
+
         void resetDtxRpcStateUnlocked()
         {
             g_dtx_remote_by_id.clear();
@@ -676,6 +698,167 @@ namespace ps2_syscalls
                    state.wkSize == sizeBytes;
         }
 
+        bool dtxHasReadableRange(const uint8_t *rdram, uint32_t addr, uint32_t len)
+        {
+            if (len == 0u)
+            {
+                return true;
+            }
+            if (addr > (addr + len - 1u))
+            {
+                return false;
+            }
+            return getConstMemPtr(rdram, addr) && getConstMemPtr(rdram, addr + len - 1u);
+        }
+
+        bool dtxReadValidCommandCount(const uint8_t *rdram, uint32_t workAddr, uint32_t workSize,
+                                      uint32_t &commandCount)
+        {
+            constexpr uint32_t kDtxHeaderSize = 16u;
+            constexpr uint32_t kDtxCommandSize = 16u;
+
+            commandCount = 0u;
+            if (workSize < 64u || !readGuestU32(rdram, workAddr, commandCount))
+            {
+                return false;
+            }
+            if (commandCount == 0u || commandCount > 128u)
+            {
+                return false;
+            }
+
+            const uint64_t commandBytes = static_cast<uint64_t>(commandCount) * kDtxCommandSize;
+            const uint64_t requiredBytes = kDtxHeaderSize + commandBytes + sizeof(uint32_t);
+            return requiredBytes <= workSize;
+        }
+
+        bool dtxLooksLikeSjxPayloadLocked(const uint8_t *rdram, uint32_t workAddr, uint32_t workSize)
+        {
+            constexpr uint32_t kSjxHeaderSize = 16u;
+            constexpr uint32_t kSjxCommandSize = 16u;
+
+            uint32_t commandCount = 0u;
+            if (!dtxReadValidCommandCount(rdram, workAddr, workSize, commandCount))
+            {
+                return false;
+            }
+
+            for (uint32_t i = 0; i < commandCount; ++i)
+            {
+                const uint32_t cmdAddr = workAddr + kSjxHeaderSize + (i * kSjxCommandSize);
+                const uint8_t *cmdPtr = getConstMemPtr(rdram, cmdAddr);
+                if (!cmdPtr)
+                {
+                    break;
+                }
+
+                const uint8_t cmdNo = cmdPtr[0];
+                const uint8_t cmdLine = cmdPtr[1];
+                uint16_t cmdXid = 0u;
+                uint32_t sjxHandle = 0u;
+                uint32_t chunkDataAddr = 0u;
+                uint32_t chunkLen = 0u;
+                std::memcpy(&cmdXid, cmdPtr + 2u, sizeof(cmdXid));
+                std::memcpy(&sjxHandle, cmdPtr + 4u, sizeof(sjxHandle));
+                std::memcpy(&chunkDataAddr, cmdPtr + 8u, sizeof(chunkDataAddr));
+                std::memcpy(&chunkLen, cmdPtr + 12u, sizeof(chunkLen));
+
+                if (cmdNo != 0u || chunkLen == 0u || !dtxHasReadableRange(rdram, chunkDataAddr, chunkLen))
+                {
+                    continue;
+                }
+
+                auto sjxIt = g_dtx_sjx_by_handle.find(sjxHandle);
+                if (sjxIt == g_dtx_sjx_by_handle.end())
+                {
+                    continue;
+                }
+
+                const DtxSjxState &sjx = sjxIt->second;
+                if (sjx.xid != 0u && sjx.xid != cmdXid)
+                {
+                    continue;
+                }
+                if (cmdLine != sjx.line)
+                {
+                    continue;
+                }
+                if (g_dtx_sjrmt_by_handle.find(sjx.dstSjHandle) == g_dtx_sjrmt_by_handle.end())
+                {
+                    continue;
+                }
+
+                return true;
+            }
+
+            return false;
+        }
+
+        bool dtxLooksLikePs2RnaPayloadLocked(const uint8_t *rdram, uint32_t workAddr, uint32_t workSize)
+        {
+            constexpr uint32_t kPs2RnaHeaderSize = 16u;
+            constexpr uint32_t kPs2RnaCommandSize = 16u;
+
+            uint32_t commandCount = 0u;
+            if (!dtxReadValidCommandCount(rdram, workAddr, workSize, commandCount))
+            {
+                return false;
+            }
+
+            for (uint32_t i = 0; i < commandCount; ++i)
+            {
+                const uint32_t cmdAddr = workAddr + kPs2RnaHeaderSize + (i * kPs2RnaCommandSize);
+                const uint8_t *cmdPtr = getConstMemPtr(rdram, cmdAddr);
+                if (!cmdPtr)
+                {
+                    break;
+                }
+
+                uint16_t cmdNo = 0u;
+                uint32_t rnaHandle = 0u;
+                std::memcpy(&cmdNo, cmdPtr, sizeof(cmdNo));
+                std::memcpy(&rnaHandle, cmdPtr + 4u, sizeof(rnaHandle));
+
+                if (cmdNo <= 5u && g_dtx_ps2rna_by_handle.find(rnaHandle) != g_dtx_ps2rna_by_handle.end())
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        bool dtxInferTransferFromPayloadLocked(const uint8_t *rdram, uint32_t srcAddr, uint32_t dstAddr,
+                                               uint32_t sizeBytes, DtxTransferState &out)
+        {
+            if (g_dtx_transfer_by_id.empty())
+            {
+                return false;
+            }
+
+            if (dtxLooksLikeSjxPayloadLocked(rdram, srcAddr, sizeBytes))
+            {
+                out = {};
+                out.dtxId = 0u;
+                out.eeWorkAddr = srcAddr;
+                out.iopWorkAddr = dstAddr;
+                out.wkSize = sizeBytes;
+                return true;
+            }
+
+            if (dtxLooksLikePs2RnaPayloadLocked(rdram, srcAddr, sizeBytes))
+            {
+                out = {};
+                out.dtxId = 1u;
+                out.eeWorkAddr = srcAddr;
+                out.iopWorkAddr = dstAddr;
+                out.wkSize = sizeBytes;
+                return true;
+            }
+
+            return false;
+        }
+
         bool dtxCopyBytes(uint8_t *rdram, uint32_t dstAddr, uint32_t srcAddr, uint32_t len)
         {
             for (uint32_t i = 0; i < len; ++i)
@@ -942,6 +1125,7 @@ namespace ps2_syscalls
 
         DtxTransferState matched{};
         bool found = false;
+        bool inferredPayload = false;
         {
             std::lock_guard<std::mutex> lock(g_dtx_rpc_mutex);
             if (!g_dtxCompatLayout.isConfigured())
@@ -957,10 +1141,17 @@ namespace ps2_syscalls
                     break;
                 }
             }
+            if (!found && dtxInferTransferFromPayloadLocked(rdram, normalizedSrc, normalizedDst, sizeBytes, matched))
+            {
+                found = true;
+                inferredPayload = true;
+            }
         }
 
         if (!found)
         {
+            const uint8_t *missPtr = getConstMemPtr(rdram, normalizedSrc);
+
             static uint32_t dtxMissLogCount = 0u;
             if (dtxMissLogCount < 64u)
             {
@@ -968,6 +1159,7 @@ namespace ps2_syscalls
                 uint32_t sampleDtxId = 0u;
                 uint32_t sampleSrc = 0u;
                 uint32_t sampleSize = 0u;
+
                 {
                     std::lock_guard<std::mutex> lock(g_dtx_rpc_mutex);
                     knownTransfers = static_cast<uint32_t>(g_dtx_transfer_by_id.size());
@@ -980,19 +1172,31 @@ namespace ps2_syscalls
                     }
                 }
 
-                if (knownTransfers != 0u)
+                if (missPtr)
                 {
-                    RUNTIME_LOG("[sceSifSetDma:DTX_MISS] src=0x" << std::hex << normalizedSrc
-                                                                 << " dst=0x" << normalizedDst
-                                                                 << " size=0x" << sizeBytes
-                                                                 << " known=" << std::dec << knownTransfers
-                                                                 << " sampleDtxId=0x" << std::hex << sampleDtxId
-                                                                 << " sampleSrc=0x" << sampleSrc
-                                                                 << " sampleSize=0x" << sampleSize
-                                                                 << std::dec << std::endl);
-                    ++dtxMissLogCount;
+                    RUNTIME_LOG("[sceSifSetDma:DTX_MISS_DUMP] src=0x" << std::hex << normalizedSrc
+                                                                      << " dst=0x" << normalizedDst
+                                                                      << " size=0x" << sizeBytes
+                                                                      << " known=" << std::dec << knownTransfers
+                                                                      << " sampleDtxId=0x" << std::hex << sampleDtxId
+                                                                      << " sampleSrc=0x" << sampleSrc
+                                                                      << " sampleSize=0x" << sampleSize
+                                                                      << " first="
+                                                                      << std::setw(2) << std::setfill('0') << static_cast<int>(missPtr[0]) << " "
+                                                                      << std::setw(2) << static_cast<int>(missPtr[1]) << " "
+                                                                      << std::setw(2) << static_cast<int>(missPtr[2]) << " "
+                                                                      << std::setw(2) << static_cast<int>(missPtr[3]) << " "
+                                                                      << std::setw(2) << static_cast<int>(missPtr[4]) << " "
+                                                                      << std::setw(2) << static_cast<int>(missPtr[5]) << " "
+                                                                      << std::setw(2) << static_cast<int>(missPtr[6]) << " "
+                                                                      << std::setw(2) << static_cast<int>(missPtr[7])
+                                                                      << std::setfill(' ')
+                                                                      << std::dec << std::endl);
                 }
+
+                ++dtxMissLogCount;
             }
+
             return;
         }
 
@@ -1023,6 +1227,10 @@ namespace ps2_syscalls
                                                           << " size=0x" << matched.wkSize
                                                           << " ticket=0x" << ticketNo
                                                           << "->0x" << (ticketNo + 1u));
+            if (inferredPayload)
+            {
+                RUNTIME_LOG(" inferred=1");
+            }
             if (matched.dtxId == 0u)
             {
                 uint32_t totalData = 0u;
@@ -1170,6 +1378,11 @@ namespace ps2_syscalls
             g_rpc_packet_index = 0;
             g_rpc_server_index = 0;
             g_rpc_active_queue = 0;
+            g_sif_rpc_debug_next_seq = 0;
+            for (size_t i = 0; i < kSifRpcDebugHistoryCount; ++i)
+            {
+                g_sif_rpc_debug_history[i] = SifRpcDebugEvent{};
+            }
             resetDtxRpcStateUnlocked();
             g_soundDriverRpcState.initialized = false;
             g_rpc_initialized = true;
@@ -1180,6 +1393,10 @@ namespace ps2_syscalls
             resetDtxRpcStateUnlocked();
             g_soundDriverRpcState.initialized = false;
         }
+
+        SifRpcDebugEvent event = makeRpcDebugEvent("InitRpc", ctx);
+        event.result = 0;
+        pushSifRpcDebugEventLocked(event);
         setReturnS32(ctx, 0);
     }
 
@@ -1193,6 +1410,13 @@ namespace ps2_syscalls
 
         if (!client)
         {
+            SifRpcDebugEvent event = makeRpcDebugEvent("BindRpc", ctx);
+            event.clientPtr = clientPtr;
+            event.sid = rpcId;
+            event.mode = mode;
+            event.flags = kSifRpcDebugFlagMissingClient;
+            event.result = -1;
+            pushSifRpcDebugEvent(event);
             setReturnS32(ctx, -1);
             return;
         }
@@ -1251,6 +1475,13 @@ namespace ps2_syscalls
             client->cbuf = 0;
         }
 
+        SifRpcDebugEvent event = makeRpcDebugEvent("BindRpc", ctx);
+        event.clientPtr = clientPtr;
+        event.serverPtr = serverPtr;
+        event.sid = rpcId;
+        event.mode = mode;
+        event.result = 0;
+        pushSifRpcDebugEvent(event);
         setReturnS32(ctx, 0);
     }
 
@@ -1388,6 +1619,20 @@ namespace ps2_syscalls
 
         if (!client)
         {
+            SifRpcDebugEvent event = makeRpcDebugEvent("CallRpc", ctx);
+            event.clientPtr = clientPtr;
+            event.rpcNum = rpcNum;
+            event.sid = boundSidHint;
+            event.mode = mode;
+            event.sendBuf = sendBuf;
+            event.sendSize = sendSize;
+            event.recvBuf = recvBuf;
+            event.recvSize = recvSize;
+            event.endFunc = endFunc;
+            event.endParam = endParam;
+            event.flags = kSifRpcDebugFlagMissingClient | ((mode & kSifRpcModeNowait) ? kSifRpcDebugFlagNowait : 0u);
+            event.result = -1;
+            pushSifRpcDebugEvent(event);
             setReturnS32(ctx, -1);
             return;
         }
@@ -1448,6 +1693,8 @@ namespace ps2_syscalls
 
         uint32_t resultPtr = 0;
         bool handled = false;
+        bool handledByIop = false;
+        bool callbackInvokedForDebug = false;
 
         auto readRpcU32 = [&](uint32_t addr, uint32_t &out) -> bool
         {
@@ -1492,6 +1739,7 @@ namespace ps2_syscalls
                                          iopSignalNowaitCompletion))
             {
                 handled = true;
+                handledByIop = true;
                 resultPtr = iopResultPtr;
                 if (iopSignalNowaitCompletion && (mode & kSifRpcModeNowait) != 0u)
                 {
@@ -2148,21 +2396,30 @@ namespace ps2_syscalls
 
         if (endFunc)
         {
-            bool callbackInvoked = rpcInvokeFunction(rdram, ctx, runtime, endFunc, endParam, 0, 0, 0, nullptr);
-
-            if (!callbackInvoked && endFunc >= 0x10000u)
-            {
-                const uint32_t normalizedEndFunc = endFunc - 0x10000u;
-                if (runtime->hasFunction(normalizedEndFunc))
-                {
-                    callbackInvoked = rpcInvokeFunction(rdram, ctx, runtime, normalizedEndFunc, endParam, 0, 0, 0, nullptr);
-                }
-            }
-
             PS2SoundDriverCompatLayout soundCompat{};
             {
                 std::lock_guard<std::mutex> lock(g_rpc_mutex);
                 soundCompat = g_soundDriverCompatLayout;
+            }
+
+            const bool hleCompletedEndCallback = handledByIop && soundCompat.matchesCompletionCallback(endFunc);
+            bool callbackInvoked = hleCompletedEndCallback;
+            callbackInvokedForDebug = hleCompletedEndCallback;
+
+            if (!hleCompletedEndCallback)
+            {
+                callbackInvoked = rpcInvokeFunction(rdram, ctx, runtime, endFunc, endParam, 0, 0, 0, nullptr);
+                callbackInvokedForDebug = callbackInvoked;
+
+                if (!callbackInvoked && endFunc >= 0x10000u)
+                {
+                    const uint32_t normalizedEndFunc = endFunc - 0x10000u;
+                    if (runtime->hasFunction(normalizedEndFunc))
+                    {
+                        callbackInvoked = rpcInvokeFunction(rdram, ctx, runtime, normalizedEndFunc, endParam, 0, 0, 0, nullptr);
+                        callbackInvokedForDebug = callbackInvokedForDebug || callbackInvoked;
+                    }
+                }
             }
 
             if (soundCompat.matchesCompletionCallback(endFunc))
@@ -2222,6 +2479,28 @@ namespace ps2_syscalls
             g_rpc_clients[clientPtr].busy = false;
         }
 
+        SifRpcDebugEvent event = makeRpcDebugEvent("CallRpc", ctx);
+        event.clientPtr = clientPtr;
+        event.serverPtr = serverPtr;
+        event.sid = sid;
+        event.rpcNum = rpcNum;
+        event.mode = mode;
+        event.sendBuf = sendBuf;
+        event.sendSize = sendSize;
+        event.recvBuf = recvBuf;
+        event.recvSize = recvSize;
+        event.resultPtr = resultPtr;
+        event.endFunc = endFunc;
+        event.endParam = endParam;
+        event.semaId = client ? static_cast<uint32_t>(client->hdr.sema_id) : 0u;
+        event.flags = ((mode & kSifRpcModeNowait) ? kSifRpcDebugFlagNowait : 0u) |
+                      (handledByIop ? kSifRpcDebugFlagHandledByHle : 0u) |
+                      (callbackInvokedForDebug ? kSifRpcDebugFlagCallback : 0u) |
+                      ((sd && sd->func) ? kSifRpcDebugFlagServerDispatch : 0u) |
+                      ((isDtxSid || isDtxUrpc) ? kSifRpcDebugFlagDtx : 0u);
+        event.result = 0;
+        pushSifRpcDebugEvent(event);
+
         setReturnS32(ctx, 0);
     }
 
@@ -2243,6 +2522,16 @@ namespace ps2_syscalls
         t_SifRpcServerData *sd = reinterpret_cast<t_SifRpcServerData *>(getMemPtr(rdram, sdPtr));
         if (!sd)
         {
+            SifRpcDebugEvent event = makeRpcDebugEvent("RegisterRpc", ctx);
+            event.serverPtr = sdPtr;
+            event.sid = sid;
+            event.sendBuf = buf;
+            event.recvBuf = cbuf;
+            event.resultPtr = qd;
+            event.endFunc = cfunc;
+            event.flags = kSifRpcDebugFlagMissingClient;
+            event.result = -1;
+            pushSifRpcDebugEvent(event);
             setReturnS32(ctx, -1);
             return;
         }
@@ -2315,6 +2604,15 @@ namespace ps2_syscalls
         }
 
         RUNTIME_LOG("[SifRegisterRpc] sid=0x" << std::hex << sid << " sd=0x" << sdPtr << std::dec);
+        SifRpcDebugEvent event = makeRpcDebugEvent("RegisterRpc", ctx);
+        event.serverPtr = sdPtr;
+        event.sid = sid;
+        event.sendBuf = buf;
+        event.recvBuf = cbuf;
+        event.resultPtr = qd;
+        event.endFunc = cfunc;
+        event.result = 0;
+        pushSifRpcDebugEvent(event);
         setReturnS32(ctx, 0);
     }
 
