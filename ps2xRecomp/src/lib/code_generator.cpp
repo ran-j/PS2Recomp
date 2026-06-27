@@ -4,6 +4,7 @@
 #include "ps2recomp/instructions.h"
 #include "ps2recomp/ps2_recompiler.h"
 #include "ps2recomp/r5900_decoder.h"
+#include "ps2recomp/recompiler_reporter.h"
 #include "ps2recomp/types.h"
 #include "ps2_runtime_calls.h"
 #include <fmt/format.h>
@@ -175,6 +176,11 @@ namespace ps2recomp
     void CodeGenerator::setEmitInstructionComments(bool emitInstructionComments)
     {
         m_emitInstructionComments = emitInstructionComments;
+    }
+
+    void CodeGenerator::setReporter(RecompilerReporter *reporter)
+    {
+        m_reporter = reporter;
     }
 
     std::string CodeGenerator::getFunctionName(uint32_t address) const
@@ -563,12 +569,16 @@ namespace ps2recomp
             }
 
             if (needsIndirectFallback) {
-                std::cerr << "[control-flow] unresolved JR/JALR in function " << function.name << " at 0x" << std::hex;
-                for (const Instruction *jrInst : indirectJumps)
+                if (m_reporter)
                 {
-                    std::cerr << jrInst->address << " ";
+                    std::vector<uint32_t> jumpAddresses;
+                    jumpAddresses.reserve(indirectJumps.size());
+                    for (const Instruction *jrInst : indirectJumps)
+                    {
+                        jumpAddresses.push_back(jrInst->address);
+                    }
+                    m_reporter->recordIndirectFallbackPromotion(function.name, jumpAddresses, instructionAddresses.size());
                 }
-                std::cerr << "promoting " << std::dec << instructionAddresses.size() << " fallback entries" << std::endl;
 
                 for (uint32_t addr : instructionAddresses)
                 {
@@ -592,9 +602,11 @@ namespace ps2recomp
         const bool &useHeaders)
     {
         std::stringstream ss;
+        m_currentFunctionName = function.name;
 
         if (useHeaders)
         {
+            ss << "#include <stdexcept>\n";
             ss << "#include \"ps2_runtime_macros.h\"\n";
             ss << "#include \"ps2_runtime.h\"\n";
             ss << "#include \"ps2_recompiled_functions.h\"\n";
@@ -718,12 +730,12 @@ namespace ps2recomp
             }
             catch (const std::exception &e)
             {
-                std::cerr << "Error in CodeGenerator::generateFunction while translating instruction\n"
-                          << "  Function: " << function.name << "\n"
-                          << "  Start: 0x" << std::hex << function.start << "\n"
-                          << "  Instruction address: 0x" << inst.address << "\n"
-                          << "  Raw: 0x" << inst.raw << "\n"
-                          << "  What: " << e.what() << std::endl;
+                if (m_reporter)
+                {
+                    std::ostringstream msg;
+                    msg << "translation failed: " << e.what() << " raw=0x" << std::hex << inst.raw;
+                    m_reporter->errorAt("codegen", function.name, inst.address, msg.str());
+                }
 
                 throw;
             }
@@ -731,6 +743,17 @@ namespace ps2recomp
 
         ss << "}\n";
         return ss.str();
+    }
+
+    std::string CodeGenerator::emitUnhandledInstruction(const Instruction &inst, const std::string &message)
+    {
+        if (m_reporter)
+        {
+            m_reporter->recordUnhandledInstruction(m_currentFunctionName, inst.address, inst.raw, message);
+        }
+
+        return fmt::format("throw std::runtime_error(\"{} at 0x{:X} raw=0x{:08X}\");",
+                           message, inst.address, inst.raw);
     }
 
     std::string CodeGenerator::translateInstruction(const Instruction &inst)
@@ -971,7 +994,7 @@ namespace ps2recomp
                 "ctx->llbit = 0; ctx->lladdr = 0; }}",
                 inst.rs, inst.simmediate, inst.rt, inst.rt, inst.rt);
         default:
-            return fmt::format("// Unhandled opcode: 0x{:X}", inst.opcode);
+            return emitUnhandledInstruction(inst, fmt::format("Unhandled opcode: 0x{:X}", inst.opcode));
         }
     }
 
@@ -1138,7 +1161,7 @@ namespace ps2recomp
         case SPECIAL_TNE:
             return fmt::format("if (GPR_U64(ctx, {}) != GPR_U64(ctx, {})) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.rt);
         default:
-            return fmt::format("// Unhandled SPECIAL instruction: 0x{:X}", inst.function);
+            return emitUnhandledInstruction(inst, fmt::format("Unhandled SPECIAL instruction: 0x{:X}", inst.function));
         }
     }
 
@@ -1176,7 +1199,7 @@ namespace ps2recomp
         case REGIMM_TNEI:
             return fmt::format("if (GPR_S64(ctx, {}) != (int64_t)(int32_t){}) {{ runtime->handleTrap(rdram, ctx); }}", inst.rs, inst.simmediate);
         default:
-            return fmt::format("// Unhandled REGIMM instruction: 0x{:X}", inst.rt);
+            return emitUnhandledInstruction(inst, fmt::format("Unhandled REGIMM instruction: 0x{:X}", inst.rt));
         }
     }
 
@@ -1320,11 +1343,11 @@ namespace ps2recomp
             case COP0_CO_DI:
                 return fmt::format("ctx->cop0_status &= ~0x10000; // Disable interrupts");
             default:
-                return fmt::format("// Unhandled COP0 CO-OP: 0x{:X}", function);
+                return emitUnhandledInstruction(inst, fmt::format("Unhandled COP0 CO-OP: 0x{:X}", function));
             }
         }
         default:
-            return fmt::format("// Unhandled COP0 instruction format: 0x{:X}", format);
+            return emitUnhandledInstruction(inst, fmt::format("Unhandled COP0 instruction format: 0x{:X}", format));
         }
     }
 
@@ -1441,7 +1464,7 @@ namespace ps2recomp
             case COP1_S_C_NGT:
                 return fmt::format("ctx->fcr31 = (FPU_C_NGT_S(ctx->f[{}], ctx->f[{}])) ? (ctx->fcr31 | 0x800000) : (ctx->fcr31 & ~0x800000);", fs, ft);
             default:
-                return fmt::format("// Unhandled FPU.S instruction: function 0x{:X}", function);
+                return emitUnhandledInstruction(inst, fmt::format("Unhandled FPU.S instruction: function 0x{:X}", function));
             }
         case COP1_W:
             switch (function)
@@ -1449,10 +1472,10 @@ namespace ps2recomp
             case COP1_W_CVT_S:
                 return fmt::format("{{ int32_t tmp; std::memcpy(&tmp, &ctx->f[{}], sizeof(tmp)); ctx->f[{}] = FPU_CVT_S_W(tmp); }}", fs, fd);
             default:
-                return fmt::format("// Unhandled FPU.W instruction: function 0x{:X}", function);
+                return emitUnhandledInstruction(inst, fmt::format("Unhandled FPU.W instruction: function 0x{:X}", function));
             }
         default:
-            return fmt::format("// Unhandled FPU instruction: format 0x{:X}, function 0x{:X}", format, function);
+            return emitUnhandledInstruction(inst, fmt::format("Unhandled FPU instruction: format 0x{:X}, function 0x{:X}", format, function));
         }
     }
 
@@ -1572,7 +1595,7 @@ namespace ps2recomp
         case MMI_PMTHL:
             return translatePMTHLInstruction(inst);
         default:
-            return fmt::format("// Unhandled MMI instruction: function 0x{:X}", function);
+            return emitUnhandledInstruction(inst, fmt::format("Unhandled MMI instruction: function 0x{:X}", function));
         }
     }
 
@@ -1640,7 +1663,7 @@ namespace ps2recomp
         case MMI0_PPAC5:
             return translatePPAC5(inst);
         default:
-            return fmt::format("// Unhandled MMI0 instruction: function 0x{:X}", subfunc);
+            return emitUnhandledInstruction(inst, fmt::format("Unhandled MMI0 instruction: function 0x{:X}", subfunc));
         }
     }
 
@@ -1691,7 +1714,7 @@ namespace ps2recomp
         case MMI1_QFSRV:
             return translateQFSRV(inst);
         default:
-            return fmt::format("// Unhandled MMI1 instruction: function 0x{:X}", subfunc);
+            return emitUnhandledInstruction(inst, fmt::format("Unhandled MMI1 instruction: function 0x{:X}", subfunc));
         }
     }
 
@@ -1748,7 +1771,7 @@ namespace ps2recomp
         case MMI2_PROT3W:
             return translatePROT3W(inst);
         default:
-            return fmt::format("// Unhandled MMI2 instruction: function 0x{:X}", subfunc);
+            return emitUnhandledInstruction(inst, fmt::format("Unhandled MMI2 instruction: function 0x{:X}", subfunc));
         }
     }
 
@@ -1787,7 +1810,7 @@ namespace ps2recomp
         case MMI3_PEXCW:
             return translatePEXCW(inst);
         default:
-            return fmt::format("// Unhandled MMI3 instruction: function 0x{:X}", subfunc);
+            return emitUnhandledInstruction(inst, fmt::format("Unhandled MMI3 instruction: function 0x{:X}", subfunc));
         }
     }
 
@@ -1807,7 +1830,7 @@ namespace ps2recomp
         case PMFHL_SH:
             return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PMFHL_SH(ctx->hi, ctx->lo));", inst.rd);
         default:
-            return fmt::format("// Unhandled PMFHL instruction: function 0x{:X}", subfunc);
+            return emitUnhandledInstruction(inst, fmt::format("Unhandled PMFHL instruction: function 0x{:X}", subfunc));
         }
     }
 
@@ -1819,7 +1842,7 @@ namespace ps2recomp
         case PMFHL_LW:
             return fmt::format("{{ __m128i val = GPR_VEC(ctx, {}); ctx->lo = _mm_extract_epi32(val, 0); ctx->hi = _mm_extract_epi32(val, 1); }}", inst.rs);
         default:
-            return fmt::format("// Unhandled PMTHL instruction: function 0x{:X}", subfunc);
+            return emitUnhandledInstruction(inst, fmt::format("Unhandled PMTHL instruction: function 0x{:X}", subfunc));
         }
     }
 
@@ -2145,7 +2168,7 @@ namespace ps2recomp
                 case VU0_S2_VRXOR:
                     return translateVU_VRXOR(inst);
                 default:
-                    return fmt::format("// Unhandled VU0 Special2 function: 0x{:X}", vu_func);
+                    return emitUnhandledInstruction(inst, fmt::format("Unhandled VU0 Special2 function: 0x{:X}", vu_func));
                 }
             }
 
@@ -2242,11 +2265,11 @@ namespace ps2recomp
             case VU0_S1_VMSUBi:
                 return translateVU_VMSUBi(inst);
             default:
-                return fmt::format("// Unhandled VU0 Special1 function: 0x{:X}", special1_func);
+                return emitUnhandledInstruction(inst, fmt::format("Unhandled VU0 Special1 function: 0x{:X}", special1_func));
             }
         }
         default:
-            return fmt::format("// Unhandled COP2 format: 0x{:X}", format);
+            return emitUnhandledInstruction(inst, fmt::format("Unhandled COP2 format: 0x{:X}", format));
         }
     }
 

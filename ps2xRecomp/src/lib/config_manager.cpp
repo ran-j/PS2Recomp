@@ -1,4 +1,5 @@
 #include "ps2recomp/config_manager.h"
+#include "ps2recomp/recompiler_reporter.h"
 #include <toml.hpp>
 #include <fstream>
 #include <iostream>
@@ -18,13 +19,21 @@ namespace ps2recomp
 
     ConfigManager::~ConfigManager() = default;
 
+    void ConfigManager::setReporter(RecompilerReporter *reporter)
+    {
+        m_reporter = reporter;
+    }
+
     RecompilerConfig ConfigManager::loadConfig() const
     {
         RecompilerConfig config;
 
         try
         {
-            std::cout << "Parsing toml file: " << m_configPath << std::endl;
+            if (m_reporter)
+            {
+                m_reporter->info("config", "Parsing toml file: " + m_configPath);
+            }
             auto data = toml::parse(m_configPath);
             const auto &general = toml::find(data, "general");
 
@@ -43,8 +52,13 @@ namespace ps2recomp
                 std::thread::hardware_concurrency() * 2);
             if (configuredOutputWorkers != clampedOutputWorkers)
             {
-                std::cerr << "Warning: output_worker_threads value " << configuredOutputWorkers
-                          << " is out of range; clamped to " << clampedOutputWorkers << "." << std::endl;
+                if (m_reporter)
+                {
+                    std::ostringstream msg;
+                    msg << "output_worker_threads value " << configuredOutputWorkers
+                        << " is out of range; clamped to " << clampedOutputWorkers << ".";
+                    m_reporter->warning("config", msg.str());
+                }
             }
             config.outputWorkerThreads = static_cast<uint32_t>(clampedOutputWorkers);
             config.patchSyscalls = toml::find_or<bool>(general, "patch_syscalls", config.patchSyscalls);
@@ -236,7 +250,10 @@ namespace ps2recomp
         }
         catch (const std::exception &e)
         {
-            std::cerr << "Error parsing configuration file: " << e.what() << std::endl;
+            if (m_reporter)
+            {
+                m_reporter->error("config", std::string("Error parsing configuration file: ") + e.what());
+            }
             throw;
         }
 

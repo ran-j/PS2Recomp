@@ -6,6 +6,8 @@
 
 namespace ps2recomp
 {
+    class RecompilerReporter;
+
     class ConfigManager
     {
     public:
@@ -14,9 +16,11 @@ namespace ps2recomp
 
         RecompilerConfig loadConfig() const;
         void saveConfig(const RecompilerConfig &config) const;
+        void setReporter(RecompilerReporter *reporter);
 
     private:
         std::string m_configPath;
+        RecompilerReporter *m_reporter = nullptr;
     };
 
 }

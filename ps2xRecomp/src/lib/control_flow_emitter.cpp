@@ -245,11 +245,26 @@ namespace ps2recomp
                                                               std::string_view indent)
     {
         const bool isReturn = kind == RegisterBranchKind::Jump && rsReg == 31u;
+
+        if (isReturn)
+        {
+            m_ss << indent << "#if defined(PS2X_STRICT_RETURN_DIAGNOSTICS) && PS2X_STRICT_RETURN_DIAGNOSTICS\n";
+            m_ss << indent << "(void)runtime->dispatchGuestBranch(rdram, ctx, " << jumpTargetExpression
+                 << ", 0x" << fmt::format("{:X}", branchPc())
+                 << "u, 0u, PS2Runtime::GuestBranchKind::Return, \"JR $ra\");\n";
+            m_ss << indent << "return;\n";
+            m_ss << indent << "#else\n";
+            m_ss << indent << "ctx->pc = " << jumpTargetExpression << ";\n";
+            m_ss << indent << "return;\n";
+            m_ss << indent << "#endif\n";
+            return;
+        }
+
         emitRuntimeBranchDispatch(jumpTargetExpression,
                                   branchPc(),
                                   0u,
-                                  isReturn ? "Return" : "IndirectJump",
-                                  isReturn ? "JR $ra" : "JR",
+                                  "IndirectJump",
+                                  "JR",
                                   indent,
                                   true);
     }
