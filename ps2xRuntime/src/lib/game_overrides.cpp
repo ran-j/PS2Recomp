@@ -170,8 +170,7 @@ namespace ps2_game_overrides
             return false;
         }
 
-        runtime.registerFunction(address, resolved.value());
-        return true;
+        return runtime.replaceFunction(address, resolved.value());
     }
 
     void applyMatching(PS2Runtime &runtime, const std::string &elfPath, uint32_t entry)

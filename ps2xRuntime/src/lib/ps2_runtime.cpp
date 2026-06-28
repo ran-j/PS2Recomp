@@ -106,8 +106,6 @@ namespace
 
     thread_local DispatchHistory g_dispatchHistory;
     thread_local std::unordered_map<PS2Runtime *, uint32_t> g_guestExecutionDepths;
-    std::mutex g_functionStartsMutex;
-    std::unordered_map<const PS2Runtime *, std::vector<uint32_t>> g_functionStartsByRuntime;
 
     void pushDispatchPc(uint32_t pc)
     {
@@ -295,33 +293,6 @@ namespace
         return paths;
     }
 
-    void clearFunctionStarts(const PS2Runtime *runtime)
-    {
-        std::lock_guard<std::mutex> lock(g_functionStartsMutex);
-        g_functionStartsByRuntime.erase(runtime);
-    }
-
-    std::vector<uint32_t> snapshotFunctionStarts(const PS2Runtime *runtime)
-    {
-        std::lock_guard<std::mutex> lock(g_functionStartsMutex);
-        auto it = g_functionStartsByRuntime.find(runtime);
-        if (it == g_functionStartsByRuntime.end())
-        {
-            return {};
-        }
-        return it->second;
-    }
-
-    void registerFunctionStart(const PS2Runtime *runtime, uint32_t address)
-    {
-        std::lock_guard<std::mutex> lock(g_functionStartsMutex);
-        auto &starts = g_functionStartsByRuntime[runtime];
-        auto insertPos = std::lower_bound(starts.begin(), starts.end(), address);
-        if (insertPos == starts.end() || *insertPos != address)
-        {
-            starts.insert(insertPos, address);
-        }
-    }
 
     std::string readGuestPrintableString(const uint8_t *rdram, uint32_t addr, size_t maxLen)
     {
@@ -506,9 +477,6 @@ PS2Runtime::PS2Runtime()
 
     // Stack pointer (SP) and global pointer (GP) will be set by the loaded ELF
 
-    m_functionTable.clear();
-    clearFunctionStarts(this);
-
     m_loadedModules.clear();
     m_guestHeapBlocks.clear();
     m_guestHeapBase = kGuestHeapDefaultBase;
@@ -566,8 +534,6 @@ PS2Runtime::~PS2Runtime()
 
         m_loadedModules.clear();
 
-        m_functionTable.clear();
-        clearFunctionStarts(this);
     }
     catch (const std::exception &e)
     {
@@ -948,21 +914,51 @@ void PS2Runtime::configureIoPathsFromElf(const std::string &elfPath)
     setIoPaths(paths);
 }
 
-void PS2Runtime::registerFunction(uint32_t address, RecompiledFunction func)
+namespace
 {
-    registerFunctionStart(this, address);
-    m_functionTable[address] = func;
+    bool generatedFunctionTableSlot(uint32_t address, uint32_t &slot)
+    {
+        if ((address & 3u) != 0u || g_ps2RecompiledFunctionTableSlotCount == 0u)
+        {
+            return false;
+        }
+
+        if (address < g_ps2RecompiledFunctionTableBase || address >= g_ps2RecompiledFunctionTableEnd)
+        {
+            return false;
+        }
+
+        const uint32_t offset = address - g_ps2RecompiledFunctionTableBase;
+        slot = offset >> 2;
+        return slot < g_ps2RecompiledFunctionTableSlotCount;
+    }
+}
+
+bool PS2Runtime::replaceFunction(uint32_t address, RecompiledFunction func)
+{
+    uint32_t slot = 0u;
+    if (!generatedFunctionTableSlot(address, slot))
+    {
+        std::cerr << "[function-table] cannot replace guest PC 0x" << std::hex << address
+                  << ": outside generated dense table [0x" << g_ps2RecompiledFunctionTableBase
+                  << ", 0x" << g_ps2RecompiledFunctionTableEnd << ")"
+                  << std::dec << std::endl;
+        return false;
+    }
+
+    g_ps2RecompiledFunctionTable[slot] = func;
+    return true;
+}
+
+bool PS2Runtime::registerFunction(uint32_t address, RecompiledFunction func)
+{
+    return replaceFunction(address, func);
 }
 
 bool PS2Runtime::hasFunction(uint32_t address) const
 {
-    auto it = m_functionTable.find(address);
-    if (it != m_functionTable.end())
-    {
-        return true;
-    }
-
-    return false;
+    uint32_t slot = 0u;
+    return generatedFunctionTableSlot(address, slot) && g_ps2RecompiledFunctionTable[slot] != nullptr;
 }
 
 const char *describeGuestBranchKind(PS2Runtime::GuestBranchKind kind)
@@ -988,35 +984,20 @@ PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
 {
     pushDispatchPc(address);
 
-    auto it = m_functionTable.find(address);
-    if (it != m_functionTable.end())
+    uint32_t slot = 0u;
+    if (generatedFunctionTableSlot(address, slot))
     {
-        return it->second;
-    }
-
-    std::cerr << "Error: No exact recompiled function for guest PC 0x" << std::hex << address;
-
-    const std::vector<uint32_t> functionStarts = snapshotFunctionStarts(this);
-    if (!functionStarts.empty())
-    {
-        auto nextStart = std::upper_bound(functionStarts.begin(), functionStarts.end(), address);
-        if (nextStart != functionStarts.begin())
+        RecompiledFunction fn = g_ps2RecompiledFunctionTable[slot];
+        if (fn != nullptr)
         {
-            auto ownerStart = nextStart;
-            --ownerStart;
-            std::cerr << " nearestStart=0x" << *ownerStart;
-        }
-        if (nextStart != functionStarts.end())
-        {
-            std::cerr << " nextStart=0x" << *nextStart;
-        }
-        else
-        {
-            std::cerr << " nextStart=<end>";
+            return fn;
         }
     }
 
-    std::cerr << " codeRegion=" << (m_memory.isCodeAddress(address) ? "yes" : "no")
+    std::cerr << "Error: No exact recompiled function for guest PC 0x" << std::hex << address
+              << " tableBase=0x" << g_ps2RecompiledFunctionTableBase
+              << " tableEnd=0x" << g_ps2RecompiledFunctionTableEnd
+              << " codeRegion=" << (m_memory.isCodeAddress(address) ? "yes" : "no")
               << " trace=" << formatDispatchHistory()
               << std::dec << std::endl;
 

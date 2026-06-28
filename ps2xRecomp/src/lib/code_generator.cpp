@@ -241,7 +241,7 @@ namespace ps2recomp
         std::unordered_set<uint32_t> instructionAddresses;
         instructionAddresses.reserve(instructions.size());
         bool hasIndirectRegisterJump = false;
-        std::vector<const Instruction*> indirectJumps;
+        std::vector<const Instruction *> indirectJumps;
 
         auto isExecutableAddress = [&](uint32_t address) -> bool
         {
@@ -395,63 +395,80 @@ namespace ps2recomp
         if (hasIndirectRegisterJump)
         {
             bool needsIndirectFallback = false;
-            for (const Instruction* jrInst : indirectJumps) {
+            for (const Instruction *jrInst : indirectJumps)
+            {
                 if (jrInst->function == SPECIAL_JALR)
                 {
                     queueResumeEntryTarget(jrInst->address + 8u);
                 }
 
                 bool foundTable = false;
-                
+
                 uint32_t jrReg = jrInst->rs;
-                
+
                 int lwIndex = -1;
                 uint32_t baseReg = 0;
                 int32_t lwOffset = 0;
-                
-                auto it = std::find_if(instructions.begin(), instructions.end(), [&](const Instruction& inst) { return inst.address == jrInst->address; });
-                if (it != instructions.end()) {
+
+                auto it = std::find_if(instructions.begin(), instructions.end(), [&](const Instruction &inst)
+                                       { return inst.address == jrInst->address; });
+                if (it != instructions.end())
+                {
                     int jrIndex = std::distance(instructions.begin(), it);
-                    for (int i = jrIndex - 1; i >= 0 && i >= jrIndex - 20; --i) {
-                        const auto& inst = instructions[i];
-                        if ((inst.opcode == OPCODE_LW || inst.opcode == OPCODE_LWU) && inst.rt == jrReg) {
+                    for (int i = jrIndex - 1; i >= 0 && i >= jrIndex - 20; --i)
+                    {
+                        const auto &inst = instructions[i];
+                        if ((inst.opcode == OPCODE_LW || inst.opcode == OPCODE_LWU) && inst.rt == jrReg)
+                        {
                             lwIndex = i;
                             baseReg = inst.rs;
                             lwOffset = inst.simmediate;
                             break;
                         }
                     }
-                    
-                    if (lwIndex != -1) {
+
+                    if (lwIndex != -1)
+                    {
                         int adduIndex = -1;
                         uint32_t tableBaseReg = 0;
                         uint32_t indexReg = 0;
-                        for (int i = lwIndex - 1; i >= 0 && i >= lwIndex - 10; --i) {
-                            const auto& inst = instructions[i];
-                            if (inst.opcode == OPCODE_SPECIAL && inst.function == SPECIAL_ADDU && inst.rd == baseReg) {
+                        for (int i = lwIndex - 1; i >= 0 && i >= lwIndex - 10; --i)
+                        {
+                            const auto &inst = instructions[i];
+                            if (inst.opcode == OPCODE_SPECIAL && inst.function == SPECIAL_ADDU && inst.rd == baseReg)
+                            {
                                 adduIndex = i;
-                                tableBaseReg = inst.rs;  
+                                tableBaseReg = inst.rs;
                                 indexReg = inst.rt;
                                 break;
                             }
                         }
-                        
+
                         uint32_t tableAddress = 0;
                         bool foundTableAddress = false;
 
-                        if (adduIndex != -1) {
-                            for (int i = adduIndex - 1; i >= 0 && i >= adduIndex - 20; --i) {
-                                const auto& inst = instructions[i];
-                                if (inst.opcode == OPCODE_LUI) {
-                                    if (inst.rt == tableBaseReg || inst.rt == indexReg) {
+                        if (adduIndex != -1)
+                        {
+                            for (int i = adduIndex - 1; i >= 0 && i >= adduIndex - 20; --i)
+                            {
+                                const auto &inst = instructions[i];
+                                if (inst.opcode == OPCODE_LUI)
+                                {
+                                    if (inst.rt == tableBaseReg || inst.rt == indexReg)
+                                    {
                                         uint32_t high = inst.immediate << 16;
                                         uint32_t low = 0;
-                                        for (int j = i + 1; j < adduIndex; ++j) {
-                                            const auto& lowInst = instructions[j];
-                                            if (lowInst.rs == inst.rt && lowInst.rt == inst.rt) {
-                                                if (lowInst.opcode == OPCODE_ADDIU) {
+                                        for (int j = i + 1; j < adduIndex; ++j)
+                                        {
+                                            const auto &lowInst = instructions[j];
+                                            if (lowInst.rs == inst.rt && lowInst.rt == inst.rt)
+                                            {
+                                                if (lowInst.opcode == OPCODE_ADDIU)
+                                                {
                                                     low = (uint32_t)lowInst.simmediate;
-                                                } else if (lowInst.opcode == OPCODE_ORI) {
+                                                }
+                                                else if (lowInst.opcode == OPCODE_ORI)
+                                                {
                                                     low = lowInst.immediate;
                                                 }
                                             }
@@ -463,8 +480,9 @@ namespace ps2recomp
                                 }
                             }
                         }
-                        
-                        if (foundTableAddress) {
+
+                        if (foundTableAddress)
+                        {
                             tableAddress += lwOffset;
 
                             const auto configuredTableIt = m_configJumpTableTargetsByAddress.find(tableAddress);
@@ -499,45 +517,58 @@ namespace ps2recomp
                             }
 
                             uint32_t unshiftedIndexReg = 0;
-                            for (int i = adduIndex - 1; i >= 0 && i >= adduIndex - 10; --i) {
-                                const auto& inst = instructions[i];
-                                if (inst.opcode == OPCODE_SPECIAL && inst.function == SPECIAL_SLL && (inst.rd == tableBaseReg || inst.rd == indexReg)) {
+                            for (int i = adduIndex - 1; i >= 0 && i >= adduIndex - 10; --i)
+                            {
+                                const auto &inst = instructions[i];
+                                if (inst.opcode == OPCODE_SPECIAL && inst.function == SPECIAL_SLL && (inst.rd == tableBaseReg || inst.rd == indexReg))
+                                {
                                     unshiftedIndexReg = inst.rt;
                                     break;
                                 }
                             }
 
                             uint32_t numCases = 0;
-                            if (unshiftedIndexReg != 0) {
-                                for (int i = adduIndex - 1; i >= 0 && i >= adduIndex - 30; --i) {
-                                    const auto& inst = instructions[i];
-                                    if ((inst.opcode == OPCODE_SLTIU || inst.opcode == OPCODE_SLTI) && inst.rs == unshiftedIndexReg) {
-                                        numCases = inst.immediate; 
+                            if (unshiftedIndexReg != 0)
+                            {
+                                for (int i = adduIndex - 1; i >= 0 && i >= adduIndex - 30; --i)
+                                {
+                                    const auto &inst = instructions[i];
+                                    if ((inst.opcode == OPCODE_SLTIU || inst.opcode == OPCODE_SLTI) && inst.rs == unshiftedIndexReg)
+                                    {
+                                        numCases = inst.immediate;
                                         break;
                                     }
                                 }
                             }
-                            
-                            if (!foundTable && numCases > 0 && numCases <= 1000) {
-                                const Section* rodata = nullptr;
-                                for (const auto& sec : m_sections) {
-                                    if (tableAddress >= sec.address && tableAddress < sec.address + sec.size) {
+
+                            if (!foundTable && numCases > 0 && numCases <= 1000)
+                            {
+                                const Section *rodata = nullptr;
+                                for (const auto &sec : m_sections)
+                                {
+                                    if (tableAddress >= sec.address && tableAddress < sec.address + sec.size)
+                                    {
                                         rodata = &sec;
                                         break;
                                     }
                                 }
 
-                                if (rodata && rodata->data) {
+                                if (rodata && rodata->data)
+                                {
                                     std::vector<uint32_t> jrTargets;
                                     bool validJumpTable = true;
                                     std::unordered_set<uint32_t> uniqueTargets;
-                                    for (uint32_t i = 0; i < numCases; ++i) {
+                                    for (uint32_t i = 0; i < numCases; ++i)
+                                    {
                                         uint32_t addr = tableAddress + i * 4;
-                                        if (addr >= rodata->address && addr + 4 <= rodata->address + rodata->size) {
+                                        if (addr >= rodata->address && addr + 4 <= rodata->address + rodata->size)
+                                        {
                                             uint32_t target = 0;
                                             std::memcpy(&target, rodata->data + (addr - rodata->address), 4);
-                                            if (target >= function.start && target < function.end && instructionAddresses.contains(target)) {
-                                                if (!uniqueTargets.contains(target)) {
+                                            if (target >= function.start && target < function.end && instructionAddresses.contains(target))
+                                            {
+                                                if (!uniqueTargets.contains(target))
+                                                {
                                                     jrTargets.push_back(target);
                                                     uniqueTargets.insert(target);
                                                 }
@@ -546,14 +577,18 @@ namespace ps2recomp
                                             {
                                                 queueExternalEntryTarget(target);
                                             }
-                                        } else {
+                                        }
+                                        else
+                                        {
                                             validJumpTable = false;
                                             break;
                                         }
                                     }
-                                    if (validJumpTable && !jrTargets.empty()) {
+                                    if (validJumpTable && !jrTargets.empty())
+                                    {
                                         result.jumpTableTargets[jrInst->address] = jrTargets;
-                                        for (uint32_t t : jrTargets) {
+                                        for (uint32_t t : jrTargets)
+                                        {
                                             result.entryPoints.insert(t);
                                         }
                                         foundTable = true;
@@ -563,12 +598,14 @@ namespace ps2recomp
                         }
                     }
                 }
-                if (!foundTable) {
+                if (!foundTable)
+                {
                     needsIndirectFallback = true;
                 }
             }
 
-            if (needsIndirectFallback) {
+            if (needsIndirectFallback)
+            {
                 if (m_reporter)
                 {
                     std::vector<uint32_t> jumpAddresses;
@@ -633,7 +670,7 @@ namespace ps2recomp
             analysisResult.entryPoints.insert(target);
         }
 
-        const std::unordered_set<uint32_t>& internalTargets = analysisResult.entryPoints;
+        const std::unordered_set<uint32_t> &internalTargets = analysisResult.entryPoints;
         ss << "// Function: " << function.name << "\n";
         ss << "// Address: 0x" << std::hex << function.start << " - 0x" << function.end << std::dec << "\n";
 
@@ -655,7 +692,8 @@ namespace ps2recomp
             ss << "    switch (ctx->pc) {\n";
             for (uint32_t target : resumeTargets)
             {
-                ss << "        case 0x" << std::hex << target << "u: goto label_" << target << ";\n" << std::dec;
+                ss << "        case 0x" << std::hex << target << "u: goto label_" << target << ";\n"
+                   << std::dec;
             }
             ss << "        default: break;\n";
             ss << "    }\n\n";
@@ -677,7 +715,8 @@ namespace ps2recomp
             {
                 ss << "    // 0x" << std::hex << inst.address << ": 0x" << inst.raw << std::dec;
                 std::string disassembly = R5900Decoder::disassembleInstruction(inst);
-                if (!disassembly.empty()) {
+                if (!disassembly.empty())
+                {
                     ss << "  " << disassembly;
                 }
                 ss << "\n";
@@ -2973,7 +3012,6 @@ namespace ps2recomp
                            vfd, vfd);
     }
 
-
     std::string CodeGenerator::translateVU_VOPMSUB(const Instruction &inst)
     {
         uint8_t vfd = inst.sa;
@@ -2990,8 +3028,6 @@ namespace ps2recomp
                            (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x8) ? -1 : 0,
                            vfd, vfd);
     }
-
-
 
     std::string CodeGenerator::translateVU_VADDq(const Instruction &inst)
     {
@@ -3020,8 +3056,6 @@ namespace ps2recomp
                            (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x8) ? -1 : 0,
                            vfd, vfd);
     }
-
-
 
     std::string CodeGenerator::translateVU_VMSUB(const Instruction &inst)
     {
@@ -3055,8 +3089,6 @@ namespace ps2recomp
                            vfd, vfd);
     }
 
-
-
     std::string CodeGenerator::translateVU_VSUBi(const Instruction &inst)
     {
         uint8_t vfd = inst.sa;
@@ -3084,7 +3116,6 @@ namespace ps2recomp
                            (dest_mask & 0x4) ? -1 : 0, (dest_mask & 0x8) ? -1 : 0,
                            vfd, vfd);
     }
-
 
     std::string CodeGenerator::translateVU_VMSUBq(const Instruction &inst)
     {
@@ -3485,37 +3516,40 @@ namespace ps2recomp
     std::string CodeGenerator::generateFunctionRegistration(const std::vector<Function> &functions,
                                                             const std::map<uint32_t, std::string> &stubs)
     {
-        std::stringstream ss;
+        (void)stubs;
 
+        std::vector<std::pair<uint32_t, std::string>> entries;
         std::unordered_set<uint32_t> registeredAddresses;
-        auto emitRegistration = [&](uint32_t address, const std::string &name)
+
+        auto addEntry = [&](uint32_t address, const std::string &name)
         {
+            if (name.empty())
+            {
+                return;
+            }
+            if ((address & 3u) != 0u)
+            {
+                std::ostringstream oss;
+                oss << "Unaligned function table entry for " << name << " at 0x" << std::hex << address;
+
+                if (m_reporter)
+                {
+                    m_reporter->errorAt("function-table", name, address, oss.str());
+                }
+
+                throw std::runtime_error(oss.str());
+            }
             if (!registeredAddresses.insert(address).second)
             {
                 return;
             }
-
-            ss << "    runtime.registerFunction(0x" << std::hex << address << std::dec
-               << ", " << name << ");\n";
+            entries.emplace_back(address, name);
         };
-
-        // Begin function
-        ss << "#include \"ps2_runtime.h\"\n";
-        ss << "#include \"ps2_recompiled_functions.h\"\n";
-        ss << "#include \"ps2_stubs.h\"\n";
-        ss << "#include \"ps2_recompiled_stubs.h\"//this will give duplicated erros because runtime maybe has it define already, just delete the TODOS ones\n";
-        ss << "#include \"ps2_syscalls.h\"\n\n";
-
-        // Registration function
-        ss << "void registerAllFunctions(PS2Runtime& runtime) {\n";
 
         std::vector<std::pair<uint32_t, std::string>> normalFunctions;
         std::vector<std::pair<uint32_t, std::string>> stubFunctions;
         std::vector<std::pair<uint32_t, std::string>> systemCallFunctions;
         std::vector<std::pair<uint32_t, std::string>> libraryFunctions;
-
-        uint32_t libBaseAddr = 0x00110000;
-        uint32_t libOffset = 0;
 
         for (const auto &function : functions)
         {
@@ -3548,7 +3582,6 @@ namespace ps2recomp
 
         if (m_bootstrapInfo.valid)
         {
-            ss << "    // Register ELF entry function\n";
             std::string entryTarget = m_bootstrapInfo.entryName;
             if (entryTarget.empty())
             {
@@ -3558,17 +3591,14 @@ namespace ps2recomp
             {
                 throw std::runtime_error("No entry function name available for registration.");
             }
-            emitRegistration(m_bootstrapInfo.entry, entryTarget);
-            ss << "\n";
+            addEntry(m_bootstrapInfo.entry, entryTarget);
         }
 
-        ss << "    // Register recompiled functions\n";
-        for (const auto &[first, second] : normalFunctions)
+        for (const auto &[address, name] : normalFunctions)
         {
-            emitRegistration(first, second);
+            addEntry(address, name);
         }
 
-        ss << "\n    // Register resumable entry points\n";
         for (const auto &[ownerStart, targets] : m_resumeEntryTargetsByOwner)
         {
             const std::string ownerName = getFunctionName(ownerStart);
@@ -3579,28 +3609,60 @@ namespace ps2recomp
 
             for (uint32_t target : targets)
             {
-                emitRegistration(target, ownerName);
+                addEntry(target, ownerName);
             }
         }
 
-        ss << "\n    // Register stub functions\n";
-        for (const auto &[first, second] : stubFunctions)
+        for (const auto &[address, name] : stubFunctions)
         {
-            emitRegistration(first, second);
+            addEntry(address, name);
+        }
+        for (const auto &[address, name] : systemCallFunctions)
+        {
+            addEntry(address, name);
+        }
+        for (const auto &[address, name] : libraryFunctions)
+        {
+            addEntry(address, name);
         }
 
-        ss << "\n    // Register system call stubs\n";
-        for (const auto &[first, second] : systemCallFunctions)
+        std::sort(entries.begin(), entries.end(), [](const auto &a, const auto &b)
+                  { return a.first < b.first; });
+
+        uint32_t tableBase = 0u;
+        uint32_t tableEnd = 0u;
+        uint32_t slotCount = 0u;
+        if (!entries.empty())
         {
-            emitRegistration(first, second);
+            tableBase = entries.front().first & ~3u;
+            tableEnd = (entries.back().first + 4u + 3u) & ~3u;
+            slotCount = (tableEnd - tableBase) >> 2;
         }
 
-        ss << "\n    // Register library stubs\n";
-        for (const auto &[first, second] : libraryFunctions)
-        {
-            emitRegistration(first, second);
-        }
+        std::stringstream ss;
+        ss << "#include \"ps2_runtime.h\"\n";
+        ss << "#include \"ps2_recompiled_functions.h\"\n";
+        ss << "#include \"ps2_stubs.h\"\n";
+        ss << "#include \"ps2_recompiled_stubs.h\"//this will give duplicated erros because runtime maybe has it define already, just delete the TODOS ones\n";
+        ss << "#include \"ps2_syscalls.h\"\n\n";
 
+        ss << "extern const uint32_t g_ps2RecompiledFunctionTableBase = 0x" << std::hex << tableBase << "u;\n";
+        ss << "extern const uint32_t g_ps2RecompiledFunctionTableEnd = 0x" << std::hex << tableEnd << "u;\n";
+        ss << "extern const uint32_t g_ps2RecompiledFunctionTableSlotCount = " << std::dec << slotCount << "u;\n";
+        ss << "PS2Runtime::RecompiledFunction g_ps2RecompiledFunctionTable[" << std::dec << (slotCount == 0u ? 1u : slotCount) << "u] = {};\n\n";
+
+        ss << "namespace {\n";
+        ss << "struct GeneratedFunctionTableInitializer {\n";
+        ss << "    GeneratedFunctionTableInitializer() {\n";
+        for (const auto &[address, name] : entries)
+        {
+            const uint32_t slot = (address - tableBase) >> 2;
+            ss << "        g_ps2RecompiledFunctionTable[" << std::dec << slot << "] = " << name
+               << "; // 0x" << std::hex << address << std::dec << "\n";
+        }
+        ss << "    }\n";
+        ss << "};\n";
+        ss << "static const GeneratedFunctionTableInitializer g_generatedFunctionTableInitializer;\n";
         ss << "}\n";
 
         return ss.str();

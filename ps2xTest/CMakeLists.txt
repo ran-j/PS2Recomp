@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Static library with test logic (no main), used by ps2xStudio
 add_library(ps2_test_lib STATIC
+    src/test_function_table.cpp
     src/code_generator_tests.cpp
     src/r5900_decoder_tests.cpp
     src/elf_analyzer_tests.cpp
