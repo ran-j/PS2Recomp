@@ -2057,15 +2057,10 @@ namespace ps2recomp
             return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PSUBB(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
         case MMI0_PCGTB:
             return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PCGTB(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
-        // thouse 2 require SSE4.1 now TODO implement  on SSE2
         case MMI0_PADDSW:
-            return fmt::format("SET_GPR_VEC(ctx, {}, _mm_min_epi32(_mm_max_epi32(_mm_add_epi32(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})), "
-                               "_mm_set1_epi32(INT32_MIN)), _mm_set1_epi32(INT32_MAX)));",
-                               rd, rs, rt);
+            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PADDSW(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
         case MMI0_PSUBSW:
-            return fmt::format("SET_GPR_VEC(ctx, {}, _mm_min_epi32(_mm_max_epi32(_mm_sub_epi32(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})), "
-                               "_mm_set1_epi32(INT32_MIN)), _mm_set1_epi32(INT32_MAX)));",
-                               rd, rs, rt);
+            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PSUBSW(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
         case MMI0_PEXTLW:
             return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PEXTLW(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
         case MMI0_PPACW:
