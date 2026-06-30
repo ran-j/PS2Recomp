@@ -1,4 +1,4 @@
-#include "ps2recomp/control_flow_emitter.h"
+#include "ps2recomp/Emitters/control_flow_emitter.h"
 
 #include "ps2recomp/control_flow_utils.h"
 #include "ps2recomp/instructions.h"
