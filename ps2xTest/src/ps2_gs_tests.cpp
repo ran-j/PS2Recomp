@@ -13,6 +13,7 @@
 #include <cstring>
 #include <thread>
 #include <vector>
+#include <array>
 
 using namespace ps2_syscalls;
 
@@ -3333,6 +3334,163 @@ void register_ps2_gs_tests()
             runtime.requestStop();
             notifyRuntimeStop();
             ps2_stubs::resetGsSyncVCallbackState();
+        });
+
+        tc.Run("32 bit block read to linear buffer extracts the correct data", [](TestCase& t)
+        {
+            std::vector<uint8_t> vram( PS2_GS_VRAM_SIZE, 0u );
+
+            GSMem::InitLookupTables();
+
+            // 32 bit block is 8x8
+            for (u32 y = 0; y < 8; ++y)
+            for (u32 x = 0; x < 8; ++x)
+            {
+                const u32 v = x | (y << 16);
+
+                GSMem::WritePixelCT32(vram.data(), 0, 1, x, y, v);
+            }
+
+            std::vector<u8> out( 8 * 8 * 4, 0 );
+            GSMem::ReadBlockToLinearBuffer32(out.data(), 8 * 4, vram.data(), 0);
+
+            bool equal = true;
+            for (u32 y = 0; y < 8; ++y)
+            for (u32 x = 0; x < 8; ++x)
+            {
+                usz word = ((static_cast<usz>(y) * 8) + x) * 4;
+
+                u8 r = out[word + 0];
+                u8 g = out[word + 1];
+                u8 b = out[word + 2];
+                u8 a = out[word + 3];
+
+                u32 packed = r | (g << 8) | (b << 16) | (a << 24);
+                u32 expected = x | (y << 16);
+
+                if (packed != expected)
+                {
+                    equal = false;
+                    break;
+                }
+            }
+
+            t.IsTrue(equal, "Value should match input");
+        });
+
+        tc.Run("16 bit block read to linear buffer extracts the correct data", [](TestCase& t)
+        {
+            std::vector<uint8_t> vram( PS2_GS_VRAM_SIZE, 0u );
+
+            GSMem::InitLookupTables();
+
+            // 16 bit block is 16x8
+            for (u32 y = 0; y < 8; ++y)
+            for (u32 x = 0; x < 16; ++x)
+            {
+                const u16 v = x | (y << 8);
+
+                GSMem::WritePixelCT16(vram.data(), 0, 1, x, y, v);
+            }
+
+            std::vector<u8> out( 8 * 16 * 2, 0 );
+            GSMem::ReadBlockToLinearBuffer16(out.data(), 16 * 2, vram.data(), 0);
+
+            bool equal = true;
+            for (u32 y = 0; y < 8; ++y)
+            for (u32 x = 0; x < 16; ++x)
+            {
+                usz half = ((static_cast<usz>(y) * 16) + x) * 2;
+
+                u8 h = out[half + 0];
+                u8 l = out[half + 1];
+
+                u16 packed = h | (l << 8);
+                u16 expected = x | (y << 8);
+
+                if (packed != expected)
+                {
+                    equal = false;
+                    break;
+                }
+            }
+
+            t.IsTrue(equal, "Value should match input");
+        });
+
+        tc.Run("8 bit block read to linear buffer extracts the correct data", [](TestCase& t)
+        {
+            std::vector<uint8_t> vram( PS2_GS_VRAM_SIZE, 0u );
+
+            GSMem::InitLookupTables();
+
+            // 8 bit block is 16x16
+            for (u32 y = 0; y < 16; ++y)
+            for (u32 x = 0; x < 16; ++x)
+            {
+                const u8 v = (y << 4) | x;
+
+                GSMem::WritePixelP8(vram.data(), 0, 1, x, y, v);
+            }
+
+            std::vector<u8> out( 16 * 16, 0 );
+            GSMem::ReadBlockToLinearBuffer8(out.data(), 16, vram.data(), 0);
+
+            bool equal = true;
+            for (u32 y = 0; y < 16; ++y)
+            for (u32 x = 0; x < 16; ++x)
+            {
+                usz byte = ((static_cast<usz>(y) * 16) + x);
+
+                u8 b = out[byte];
+                u8 expected = (y << 4) | x;
+
+                if (b != expected)
+                {
+                    equal = false;
+                    break;
+                }
+            }
+
+            t.IsTrue(equal, "Value should match input");
+        });
+
+        tc.Run("4 bit block read to linear buffer extracts the correct data", [](TestCase& t)
+        {
+            std::vector<uint8_t> vram( PS2_GS_VRAM_SIZE, 0u );
+
+            GSMem::InitLookupTables();
+
+            // 4 bit block is 32x16
+            for (u32 y = 0; y < 16; ++y)
+            for (u32 x = 0; x < 32; ++x)
+            {
+                const u8 v = ((y & 3) << 2) | (x & 3);
+
+                GSMem::WritePixelP4(vram.data(), 0, 1, x, y, v);
+            }
+
+            std::vector<u8> out( 32 * 16, 0 );
+            GSMem::ReadBlockToLinearBuffer4(out.data(), 32, vram.data(), 0);
+
+            bool equal = true;
+            for (u32 y = 0; y < 16; ++y)
+            for (u32 x = 0; x < 32; ++x)
+            {
+                usz byte = ((static_cast<usz>(y) * 32) + x);
+
+                u8 b = out[byte];
+                u8 expected = ((y & 3) << 2) | (x & 3);
+
+                if (b != expected)
+                {
+                    printf("(%d, %d) expected: 0x%X, actual: 0x%X\n", x, y, expected, b);
+                    equal = false;
+                    break;
+                }
+            }
+
+            t.IsTrue(equal, "Value should match input");
         });
     });
 }

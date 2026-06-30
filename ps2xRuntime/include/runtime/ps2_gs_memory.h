@@ -609,4 +609,25 @@ namespace GSMem
 	void WritePixelP4HH(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
 	void WritePixelP4HL(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
 	void WritePixelNull(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
+
+	// readout block
+	// note: column layout is the same between CT32/Z32, etc
+	void ReadBlockToLinearBuffer32(u8* output, u32 pitch, const u8* data, u32 block_addr);
+	void ReadBlockToLinearBuffer16(u8* output, u32 pitch, const u8* data, u32 block_addr);
+	void ReadBlockToLinearBuffer8(u8* output, u32 pitch, const u8* data, u32 block_addr);
+	void ReadBlockToLinearBuffer4(u8* output, u32 pitch, const u8* data, u32 block_addr); // note: unpacks to 8 bit unscaled
+
+	// readout page
+	// note: no 24/8H/4HL/4HH as those are alias formats
+	void ReadPageToLinearBufferCT32(u8* output, u32 pitch, const u8* data, u32 bp);
+	void ReadPageToLinearBufferCT16(u8* output, u32 pitch, const u8* data, u32 bp);
+	void ReadPageToLinearBufferCT16S(u8* output, u32 pitch, const u8* data, u32 bp);
+	void ReadPageToLinearBufferZ32(u8* output, u32 pitch, const u8* data, u32 bp);
+	void ReadPageToLinearBufferZ16(u8* output, u32 pitch, const u8* data, u32 bp);
+	void ReadPageToLinearBufferZ16S(u8* output, u32 pitch, const u8* data, u32 bp);
+	void ReadPageToLinearBufferP8(u8* output, u32 pitch, const u8* data, u32 bp);
+	void ReadPageToLinearBufferP4(u8* output, u32 pitch, const u8* data, u32 bp);
+
+	// read out multiple pages
+	void ReadToLinearBufferCT32(u8* output, u32 pitch, const u8* data, u32 bp, u32 bw, const Extent2D extent);
 }
