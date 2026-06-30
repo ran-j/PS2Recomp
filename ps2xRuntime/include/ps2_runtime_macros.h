@@ -550,6 +550,7 @@ inline __m128i ps2_u64_to_epi64_pair(uint64_t value)
 #define PS2_PMFHL_SH(hi, lo) _mm_shufflehi_epi16(_mm_shufflelo_epi16(_mm_packs_epi32(ps2_u64_to_epi64_pair(lo), ps2_u64_to_epi64_pair(hi)), _MM_SHUFFLE(3, 1, 2, 0)), _MM_SHUFFLE(3, 1, 2, 0))
 
 // FPU (COP1) operations
+#define FPU_SET_ACC(ctx, res) (ctx->f_acc = res)
 #define FPU_ADD_S(a, b) ((float)(a) + (float)(b))
 #define FPU_SUB_S(a, b) ((float)(a) - (float)(b))
 #define FPU_MUL_S(a, b) ((float)(a) * (float)(b))
