@@ -403,9 +403,9 @@ void register_code_generator_tests()
         std::string registration = gen.generateFunctionRegistration({func}, {});
         printGeneratedCode("resume entry targets register to the owner wrapper", registration);
 
-        t.IsTrue(registration.find("runtime.registerFunction(0x7008, resume_owner_0x7000);") != std::string::npos,
+        t.IsTrue(registration.find("g_ps2RecompiledFunctionTable[2] = resume_owner_0x7000; // 0x7008") != std::string::npos,
                  "resume entry pc should register to the owner wrapper");
-        t.IsTrue(registration.find("runtime.registerFunction(0x700c, resume_owner_0x7000);") != std::string::npos,
+        t.IsTrue(registration.find("g_ps2RecompiledFunctionTable[3] = resume_owner_0x7000; // 0x700c") != std::string::npos,
                  "multiple resume pcs should register to the same owner wrapper");
     });
 
@@ -450,7 +450,7 @@ void register_code_generator_tests()
         std::string registration = gen.generateFunctionRegistration({owner}, {});
         printGeneratedCode("external mid-function entry can register to the owner wrapper", registration);
 
-        t.IsTrue(registration.find("runtime.registerFunction(0x5004, owner_0x5000);") != std::string::npos,
+        t.IsTrue(registration.find("g_ps2RecompiledFunctionTable[1] = owner_0x5000; // 0x5004") != std::string::npos,
                  "mid-function external entry should register back to the owner wrapper");
     });
 

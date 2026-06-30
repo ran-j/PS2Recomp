@@ -14,16 +14,21 @@ namespace ps2recomp
 
     inline bool isGuestNop(const Instruction &inst) noexcept
     {
-        if (inst.raw == 0u)
-        {
-            return true;
-        }
+        const bool sllZero =
+            inst.opcode == OPCODE_SPECIAL &&
+            inst.function == SPECIAL_SLL &&
+            inst.rd == 0u &&
+            inst.rt == 0u &&
+            inst.sa == 0u;
 
         // Some tests and decoded streams represent a no-op as addiu $zero, $zero, 0.
-        return inst.opcode == OPCODE_ADDIU &&
-               inst.rs == 0u &&
-               inst.rt == 0u &&
-               static_cast<int16_t>(inst.simmediate) == 0;
+        const bool addiuZero =
+            inst.opcode == OPCODE_ADDIU &&
+            inst.rs == 0u &&
+            inst.rt == 0u &&
+            static_cast<int16_t>(inst.simmediate) == 0;
+
+        return sllZero || addiuZero;
     }
 }
 
