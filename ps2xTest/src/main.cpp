@@ -15,9 +15,12 @@ void register_ps2_sif_rpc_tests();
 void register_ps2_sif_dma_tests();
 void register_ps2_recompiler_tests();
 void register_ps2_runtime_expansion_tests();
+void reset_ps2_test_function_table();
 
 int main()
 {
+    MiniTest::BeforeEach(reset_ps2_test_function_table);
+
     register_code_generator_tests();
     register_r5900_decoder_tests();
     register_elf_analyzer_tests();

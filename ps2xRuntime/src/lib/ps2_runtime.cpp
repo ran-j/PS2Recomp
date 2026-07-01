@@ -1051,7 +1051,8 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
 
     auto readGuestU32At = [rdram](uint32_t addr, uint32_t &out) -> bool
     {
-        if (addr > PS2_RAM_SIZE - sizeof(uint32_t))
+        // TODO this !rdram exist only because of test fix those test later
+        if (!rdram || addr > PS2_RAM_SIZE - sizeof(uint32_t))
         {
             out = 0u;
             return false;
