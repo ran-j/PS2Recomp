@@ -588,7 +588,7 @@ uint32_t GSRasterizer::sampleTexture(GS *gs, float s, float t, float q, uint16_t
         sampleU = clampInt(sampleU, 0, texW - 1);
         sampleV = clampInt(sampleV, 0, texH - 1);
 
-        u32 out = gs->ReadVram(tex.psm, tex.tbp0, tex.tbw, sampleU, sampleV);
+        u32 out = gs->ReadTexturePageCache(tex.psm, tex.tbp0, tex.tbw, sampleU, sampleV);
 
         switch (tex.psm)
         {

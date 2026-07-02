@@ -2050,6 +2050,8 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
         m_pabe = (value & 1u) != 0u;
         break;
     case GS_REG_TEXFLUSH:
+        InvalidateTexturePageCache();
+        break;
     case GS_REG_SCANMSK:
     case GS_REG_FOGCOL:
     case GS_REG_DIMX:
@@ -2827,4 +2829,179 @@ uint32_t GS::consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
     std::memcpy(dst, m_localToHostBuffer.data() + m_localToHostReadPos, toCopy);
     m_localToHostReadPos += toCopy;
     return static_cast<uint32_t>(toCopy);
+}
+
+u32 GS::ReadTexturePageCache(u32 psm, u32 tbp0, u32 tbw, u32 u, u32 v)
+{
+    // we fill these as 32bit since they are aliases
+    switch (psm)
+    {
+    case GS_PSM_CT32:
+    case GS_PSM_CT24:
+    case GS_PSM_T8H:
+    case GS_PSM_T4HH:
+    case GS_PSM_T4HL:
+        psm = GS_PSM_CT32;
+        break;
+    case GS_PSM_Z32:
+    case GS_PSM_Z24:
+        psm = GS_PSM_Z32;
+        break;
+    default:
+        break;
+    }
+
+    u32 page_width2;
+    u32 page_height2;
+    u32 bytes_per_pixel;
+    u32 pitch;
+
+    // TODO: add to templates
+    switch (psm)
+    {
+    case GS_PSM_CT32:
+    case GS_PSM_CT24:
+    case GS_PSM_T8H:
+    case GS_PSM_T4HH:
+    case GS_PSM_T4HL:
+    case GS_PSM_Z32:
+    case GS_PSM_Z24:
+        page_width2 = 6;
+        page_height2 = 5;
+        bytes_per_pixel = 4;
+        pitch = 256;
+        break;
+    case GS_PSM_CT16:
+    case GS_PSM_CT16S:
+    case GS_PSM_Z16:
+    case GS_PSM_Z16S:
+        page_width2 = 6;
+        page_height2 = 6;
+        bytes_per_pixel = 2;
+        pitch = 128;
+        break;
+    case GS_PSM_T8:
+        page_width2 = 7;
+        page_height2 = 6;
+        bytes_per_pixel = 1;
+        pitch = 128;
+        break;
+    case GS_PSM_T4:
+        page_width2 = 7;
+        page_height2 = 7;
+        bytes_per_pixel = 1; // 4 bit is a special case that is expanded
+        pitch = 128;
+        break;
+    default:
+        return 0;
+    }
+
+    const u32 page_width = 1u << page_width2;
+    const u32 page_height = 1u << page_height2;
+
+    // TODO: I can replace the log2 math with divides
+    const u32 pages_per_row = std::max(1u, (tbw * 64u) >> page_width2);
+    const u32 page_id = (v >> page_height2) * pages_per_row + (u >> page_width2);
+    const u32 block_id = (tbp0 + page_id * 32u) & 0x3FFF;
+
+    const bool needs_reload =
+        !m_texture_page_cache.valid ||
+        m_texture_page_cache.base_block != block_id ||
+        m_texture_page_cache.psm != psm;
+
+    if (needs_reload)
+    {
+        ReloadTexturePageCache(psm, block_id);
+    }
+
+    const u32 off = (v & (page_height - 1)) * pitch + (u & (page_width - 1)) * bytes_per_pixel;
+    const u8* ptr = &m_texture_page_cache.buffer[off];
+
+    switch (bytes_per_pixel)
+    {
+    case 4:
+    {
+        u32 v;
+        memcpy(&v, ptr, 4);
+        return v;
+    }
+    case 2:
+    {
+        u16 v;
+        memcpy(&v, ptr, 2);
+        return v;
+    }
+    break;
+    default:
+        break;
+    }
+
+    return static_cast<u32>(*ptr);
+}
+
+void GS::ReloadTexturePageCache(u32 psm, u32 base_block)
+{
+    u8* dst = m_texture_page_cache.buffer.data();
+
+    switch (psm)
+    {
+    case GS_PSM_CT32:
+    case GS_PSM_CT24:
+    case GS_PSM_T8H:
+    case GS_PSM_T4HH:
+    case GS_PSM_T4HL:
+        GSMem::ReadPageToLinearBufferCT32(dst, 256, m_vram, base_block);
+        break;
+    case GS_PSM_Z32:
+    case GS_PSM_Z24:
+        GSMem::ReadPageToLinearBufferZ32(dst, 256, m_vram, base_block);
+        break;
+    case GS_PSM_CT16:
+        GSMem::ReadPageToLinearBufferCT16(dst, 128, m_vram, base_block);
+        break;
+    case GS_PSM_CT16S:
+        GSMem::ReadPageToLinearBufferCT16S(dst, 128, m_vram, base_block);
+        break;
+    case GS_PSM_Z16:
+        GSMem::ReadPageToLinearBufferZ16(dst, 128, m_vram, base_block);
+        break;
+    case GS_PSM_Z16S:
+        GSMem::ReadPageToLinearBufferZ16S(dst, 128, m_vram, base_block);
+        break;
+    case GS_PSM_T8:
+        GSMem::ReadPageToLinearBufferP8(dst, 128, m_vram, base_block);
+        break;
+    case GS_PSM_T4:
+        GSMem::ReadPageToLinearBufferP4(dst, 128, m_vram, base_block);
+        break;
+    default:
+        return;
+    }
+
+    // we fill these as 32bit since they are aliases
+    switch (psm)
+    {
+    case GS_PSM_CT32:
+    case GS_PSM_CT24:
+    case GS_PSM_T8H:
+    case GS_PSM_T4HH:
+    case GS_PSM_T4HL:
+        psm = GS_PSM_CT32;
+        break;
+    case GS_PSM_Z32:
+    case GS_PSM_Z24:
+        psm = GS_PSM_Z32;
+        break;
+    default:
+        break;
+    }
+
+    m_texture_page_cache.base_block = base_block;
+    m_texture_page_cache.psm = psm;
+    m_texture_page_cache.valid = true;
+}
+
+void GS::InvalidateTexturePageCache()
+{
+    m_texture_page_cache.valid = false;
 }

@@ -309,6 +309,19 @@ struct GSDebugHistoryEntry
 
 class GSRasterizer;
 
+struct TexturePageCache
+{
+    // 16KB because T4 is expanded to 8bit (double the size)
+    std::array<u8, 16_kb> buffer{ };
+
+    // read only
+    bool valid{ false };
+
+    // keys
+    u32 base_block{ 0 };
+    u32 psm{ 0 };
+};
+
 class GS
 {
     friend class GSRasterizer;
@@ -362,6 +375,11 @@ public:
 
     inline void WriteVram(u32 psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value);
     inline u32 ReadVram(u32 psm, u32 base, u32 bw, u32 x, u32 y) const;
+
+    // texture page cache
+    u32 ReadTexturePageCache(u32 psm, u32 tbp0, u32 tbw, u32 u, u32 v);
+    void ReloadTexturePageCache(u32 psm, u32 base_block);
+    void InvalidateTexturePageCache();
 
 private:
     void snapshotVRAM();
@@ -471,6 +489,8 @@ private:
     std::array<PixelAddressFunction, 0x3F> m_pixel_address_funcs{ };
     std::array<ReadAddressFunction, 0x3F> m_read_address_funcs{ };
     std::array<WriteAddressFunction, 0x3F> m_write_address_funcs{ };
+
+    TexturePageCache m_texture_page_cache{ };
 };
 
 inline u32 GS::ReadVram(u32 psm, u32 base, u32 bw, u32 x, u32 y) const
