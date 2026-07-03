@@ -2,6 +2,7 @@
 #include "ps2_runtime.h"
 #include "ps2_syscalls.h"
 #include "Stubs/DMA.h"
+#include "runtime/ps2_gs_gpu.h"
 
 #include <atomic>
 #include <chrono>
@@ -249,6 +250,126 @@ void register_ps2_runtime_interrupt_tests()
                 return (env.runtime.memory().gs().csr & kGsCsrFieldMask) != fieldAfterFirstFlip;
             }, std::chrono::milliseconds(300));
             t.IsTrue(secondFieldFlip, "VSync worker should keep alternating GS CSR FIELD");
+
+            cleanupRuntime(env);
+        });
+
+        // Regression test for the GS CSR data race: a two-writer word-level
+        // lost-update guard. Pre-fix, every CSR update was a plain (non-atomic)
+        // 64-bit load-modify-store of the WHOLE word, so two threads that own
+        // logically disjoint bits could still clobber each other: thread A's
+        // read-modify-write of the word can overwrite thread B's bit with the
+        // stale value A loaded before B's update landed.
+        //
+        // Two racer threads with disjoint bit ownership run concurrently:
+        //   - racer A owns SIGNAL (bit 0): sets it via the GIF register path
+        //     (GS_REG_SIGNAL) then W1C-clears ONLY bit 0 via the MMIO write path;
+        //   - racer B owns FINISH (bit 1): same protocol with GS_REG_FINISH and
+        //     a W1C write of only bit 1.
+        // Each racer checks only its own bit after each half-op. With the fix
+        // (std::atomic CSR, every update a single atomic RMW) each racer is the
+        // sole writer of its bit, so its bit deterministically reflects its own
+        // last operation: zero anomalies are possible. Pre-fix, the racers'
+        // whole-word W1C RMWs constantly interleave and lose each other's
+        // set/clear, lighting up the anomaly counters.
+        //
+        // Why racer-vs-racer instead of racer-vs-vsync: the vsync worker (which
+        // motivated the fix) writes CSR only once per ~16.7ms tick, a window far
+        // too narrow to hit deterministically in a bounded test. The corrupting
+        // mechanism -- a non-atomic whole-word RMW clobbering a concurrently
+        // written disjoint bit -- is identical, so guarding it with two
+        // high-frequency writers also guards the vsync FIELD interleaving. The
+        // real vsync worker still runs throughout (started via the same
+        // SetVSyncFlag syscall production uses) and its FIELD (bit 13) toggling
+        // is asserted when at least two ticks were observed.
+        tc.Run("Disjoint-bit GS CSR writers (SIGNAL vs FINISH vs vsync FIELD) never lose word-level updates", [](TestCase &t)
+        {
+            notifyRuntimeStop();
+            TestEnv env;
+            t.IsTrue(env.runtime.memory().initialize(), "runtime memory initialize should succeed");
+
+            constexpr uint32_t kFlagAddr = 0x1180u;
+            constexpr uint32_t kTickAddr = 0x1190u;
+            constexpr uint64_t kGsCsrFieldMask = 0x2000ull;
+            constexpr uint32_t kCsrAddr = PS2_GS_PRIV_REG_BASE + 0x1000u;
+            constexpr uint32_t kIterations = 80000u;
+
+            GS gs;
+            gs.init(env.runtime.memory().getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE),
+                    &env.runtime.memory().gs());
+
+            // Drive the real vsync worker via the same syscall path production
+            // code uses; it runs on its own thread and toggles CSR.FIELD once
+            // per tick via updateGsCsrFieldForVSync.
+            R5900Context ctx{};
+            setRegU32(ctx, 4, kFlagAddr);
+            setRegU32(ctx, 5, kTickAddr);
+            t.IsTrue(callSyscall(0x73u, env.rdram.data(), &ctx, &env.runtime), "SetVSyncFlag syscall should dispatch");
+            const uint64_t tickBefore = GetCurrentVSyncTick();
+
+            std::atomic<uint32_t> setAnomaliesA{0u}, clearAnomaliesA{0u};
+            std::atomic<uint32_t> setAnomaliesB{0u}, clearAnomaliesB{0u};
+            std::atomic<uint32_t> racersDone{0u};
+
+            // ownBit: the single CSR status bit this racer exclusively owns.
+            // Each iteration: raise the bit via the GIF register-write path,
+            // verify it reads back set, W1C-clear only that bit via the guest
+            // MMIO path, verify it reads back clear. The other racer and the
+            // vsync worker never touch this bit, so under atomic RMWs both
+            // checks are exact -- any anomaly is a lost word-level update.
+            auto racerBody = [&](uint8_t gifReg, uint64_t gifValue, uint64_t ownBit,
+                                 std::atomic<uint32_t> &setAnomalies, std::atomic<uint32_t> &clearAnomalies) {
+                for (uint32_t i = 0; i < kIterations; ++i)
+                {
+                    gs.writeRegister(gifReg, gifValue);
+                    if ((env.runtime.memory().gs().csr.load() & ownBit) == 0ull)
+                    {
+                        setAnomalies.fetch_add(1u, std::memory_order_relaxed);
+                    }
+
+                    env.runtime.memory().write64(kCsrAddr, ownBit);
+                    if ((env.runtime.memory().gs().csr.load() & ownBit) != 0ull)
+                    {
+                        clearAnomalies.fetch_add(1u, std::memory_order_relaxed);
+                    }
+                }
+                racersDone.fetch_add(1u, std::memory_order_relaxed);
+            };
+
+            const uint64_t signalValue = (0xFFFFFFFFull << 32) | 0x11223344ull;
+            std::thread racerA(racerBody, GS_REG_SIGNAL, signalValue, 0x1ull,
+                               std::ref(setAnomaliesA), std::ref(clearAnomaliesA));
+            std::thread racerB(racerBody, GS_REG_FINISH, 0ull, 0x2ull,
+                               std::ref(setAnomaliesB), std::ref(clearAnomaliesB));
+
+            // While the racers hammer bits 0..1, watch for CSR.FIELD (bit 13)
+            // flips from the vsync worker. Polling ends when both racers finish,
+            // so this adds no fixed wall-clock cost.
+            const uint64_t initialField = env.runtime.memory().gs().csr.load() & kGsCsrFieldMask;
+            bool fieldFlipped = false;
+            while (racersDone.load(std::memory_order_relaxed) < 2u)
+            {
+                if ((env.runtime.memory().gs().csr.load() & kGsCsrFieldMask) != initialField)
+                {
+                    fieldFlipped = true;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+
+            racerA.join();
+            racerB.join();
+            const uint64_t ticksElapsed = GetCurrentVSyncTick() - tickBefore;
+
+            t.Equals(setAnomaliesA.load(), 0u, "racer A: SIGNAL set must never be lost to a concurrent whole-word CSR RMW");
+            t.Equals(clearAnomaliesA.load(), 0u, "racer A: SIGNAL W1C-clear must never be lost to a concurrent whole-word CSR RMW");
+            t.Equals(setAnomaliesB.load(), 0u, "racer B: FINISH set must never be lost to a concurrent whole-word CSR RMW");
+            t.Equals(clearAnomaliesB.load(), 0u, "racer B: FINISH W1C-clear must never be lost to a concurrent whole-word CSR RMW");
+            t.Equals(env.runtime.memory().gs().csr.load() & 0x3ull, 0x0ull,
+                     "final CSR status bits must match both racers' ledgers (last op on each bit was a clear)");
+            if (ticksElapsed >= 2u)
+            {
+                t.IsTrue(fieldFlipped, "VSync worker should toggle GS CSR FIELD while the racers run");
+            }
 
             cleanupRuntime(env);
         });
