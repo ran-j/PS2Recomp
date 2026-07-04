@@ -429,17 +429,22 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
 // Packed Add with Signed Saturation Word (PADDSW)
 inline __m128i ps2_paddsw(__m128i a, __m128i b)
 {
-    #if defined(__SSE4_1__)
-    return _mm_min_epi32(_mm_max_epi32(_mm_add_epi32(a, b), _mm_set1_epi32(INT32_MIN)), _mm_set1_epi32(INT32_MAX));
-    #else
+
     __m128i sum = _mm_add_epi32(a, b);
     // Check for over/underflow. Clamp to either INT32_MIN/INT32_MAX.
     __m128i overflow = _mm_and_si128(_mm_xor_si128(a, sum),
                                      _mm_xor_si128(b, sum));
-    // Extract both sum and input signs.
+    // Extract input sign.
     overflow = _mm_srai_epi32(overflow, 31);
     __m128i input_sign = _mm_srai_epi32(a, 31);
     // Select saturation value based on overflow sign.
+    #if defined(__SSE4_1__)
+    __m128i sat = _mm_blendv_epi8(
+        _mm_set1_epi32(INT32_MAX),
+        _mm_set1_epi32(INT32_MIN),
+        input_sign);
+    return _mm_blendv_epi8(sum, sat, overflow);
+    #else
     __m128i sat = _mm_or_si128(_mm_and_si128(input_sign, _mm_set1_epi32(INT32_MIN)),
                                _mm_andnot_si128(input_sign, _mm_set1_epi32(INT32_MAX)));
     return _mm_or_si128(_mm_and_si128(overflow, sat),
@@ -451,17 +456,21 @@ inline __m128i ps2_paddsw(__m128i a, __m128i b)
 // Packed Subtract with Signed Saturation Word (PSUBSW)
 inline __m128i ps2_psubsw(__m128i a, __m128i b)
 {
-    #if defined(__SSE4_1__)
-    return _mm_min_epi32(_mm_max_epi32(_mm_sub_epi32(a, b), _mm_set1_epi32(INT32_MIN)), _mm_set1_epi32(INT32_MAX));
-    #else
     __m128i diff = _mm_sub_epi32(a, b);
     // Check for over/underflow. Clamp to either INT32_MIN/INT32_MAX.
     __m128i overflow = _mm_and_si128(_mm_xor_si128(a, b),
                                      _mm_xor_si128(a, diff));
-    // Extract both difference and input signs.
+    // Extract input sign.
     overflow = _mm_srai_epi32(overflow, 31);
     __m128i input_sign = _mm_srai_epi32(a, 31);
     // Select saturation value based on overflow sign.
+    #if defined(__SSE4_1__)
+    __m128i sat = _mm_blendv_epi8(
+        _mm_set1_epi32(INT32_MAX),
+        _mm_set1_epi32(INT32_MIN),
+        input_sign);
+    return _mm_blendv_epi8(diff, sat, overflow);
+    #else
     __m128i sat = _mm_or_si128(_mm_and_si128(input_sign, _mm_set1_epi32(INT32_MIN)),
                                _mm_andnot_si128(input_sign, _mm_set1_epi32(INT32_MAX)));
     return _mm_or_si128(_mm_and_si128(overflow, sat),
