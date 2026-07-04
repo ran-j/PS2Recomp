@@ -3,11 +3,14 @@
 
 #include "code_generator.h"
 #include "config_manager.h"
+#include "recompiler_reporter.h"
 #include <string>
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
 #include <filesystem>
+#include <memory>
+#include <map>
 
 namespace ps2recomp
 {
@@ -30,6 +33,7 @@ namespace ps2recomp
         bool initialize();
         bool recompile();
         void generateOutput();
+        void printReport() const;
 
         static StubTarget resolveStubTarget(const std::string& name);
         static size_t DiscoverAdditionalEntryPoints(
@@ -48,6 +52,7 @@ namespace ps2recomp
         std::unique_ptr<R5900Decoder> m_decoder;
         std::unique_ptr<CodeGenerator> m_codeGenerator;
         RecompilerConfig m_config;
+        RecompilerReporter m_reporter;
 
         std::vector<Function> m_functions;
         std::vector<Symbol> m_symbols;

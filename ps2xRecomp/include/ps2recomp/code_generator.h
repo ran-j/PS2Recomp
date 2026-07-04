@@ -7,6 +7,7 @@
 #include <map>
 #include <unordered_map>
 #include <unordered_set>
+#include "ps2recomp/control_flow_analyzer.h"
 
 namespace ps2recomp
 {
@@ -16,6 +17,7 @@ namespace ps2recomp
 	struct Function;
 	struct Symbol;
 	struct Section;
+    class RecompilerReporter;
 
 	extern const std::unordered_set<std::string> kKeywords;
 
@@ -35,13 +37,7 @@ namespace ps2recomp
             std::string entryName;
         };
 
-        struct AnalysisResult {
-            std::unordered_set<uint32_t> entryPoints;
-            std::unordered_set<uint32_t> externalEntryPoints;
-            std::unordered_set<uint32_t> resumeEntryPoints;
-            std::unordered_set<uint32_t> indirectFallbackEntryPoints;
-            std::unordered_map<uint32_t, std::vector<uint32_t>> jumpTableTargets;
-        };
+        using AnalysisResult = ControlFlowAnalysisResult;
 
         std::string generateFunction(const Function &function, const std::vector<Instruction> &instructions, const bool &useHeaders);
         std::string generateFunctionRegistration(const std::vector<Function> &functions, const std::map<uint32_t, std::string> &stubs);
@@ -54,6 +50,7 @@ namespace ps2recomp
         void setConfiguredJumpTables(const std::vector<JumpTable> &jumpTables);
         void setResumeEntryTargets(const std::unordered_map<uint32_t, std::vector<uint32_t>> &resumeTargetsByOwner);
         void setEmitInstructionComments(bool emitInstructionComments);
+        void setReporter(RecompilerReporter *reporter);
 
         AnalysisResult collectInternalBranchTargets(const Function &function,
                                                   const std::vector<Instruction> &instructions,
@@ -68,8 +65,11 @@ namespace ps2recomp
         const std::vector<Section>& m_sections;
         BootstrapInfo m_bootstrapInfo;
         bool m_emitInstructionComments = true;
+        RecompilerReporter *m_reporter = nullptr;
+        std::string m_currentFunctionName;
 
         std::string translateInstruction(const Instruction &inst);
+        std::string emitUnhandledInstruction(const Instruction &inst, const std::string &message);
         std::string translateMMIInstruction(const Instruction &inst);
         std::string translateVUInstruction(const Instruction &inst);
         std::string translateFPUInstruction(const Instruction &inst);

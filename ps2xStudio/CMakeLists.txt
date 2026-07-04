@@ -111,6 +111,10 @@ file(GLOB_RECURSE STUDIO_HEADERS "include/*.hpp")
 
 add_executable(ps2xStudio ${STUDIO_SOURCES} ${STUDIO_HEADERS})
 
+if(TARGET ps2_test_function_table)
+    target_sources(ps2xStudio PRIVATE $<TARGET_OBJECTS:ps2_test_function_table>)
+endif()
+
 target_include_directories(ps2xStudio PRIVATE 
     include
     ${CMAKE_CURRENT_SOURCE_DIR}/../ps2xAnalyzer/include

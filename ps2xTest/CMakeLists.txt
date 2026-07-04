@@ -6,6 +6,14 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Static library with test logic (no main), used by ps2xStudio
+add_library(ps2_test_function_table OBJECT
+    src/test_function_table.cpp
+)
+
+target_include_directories(ps2_test_function_table PRIVATE
+    ${CMAKE_SOURCE_DIR}/ps2xRuntime/include
+)
+
 add_library(ps2_test_lib STATIC
     src/code_generator_tests.cpp
     src/r5900_decoder_tests.cpp
@@ -37,6 +45,7 @@ target_link_libraries(ps2_test_lib PRIVATE
 
 add_executable(ps2x_tests
     src/main.cpp
+    $<TARGET_OBJECTS:ps2_test_function_table>
 )
 
 option(PRINT_GENERATED_CODE "Print generated code in tests" OFF)

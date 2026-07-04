@@ -28,16 +28,19 @@ int main(int argc, char *argv[])
         if (!recompiler.initialize())
         {
             std::cerr << "Failed to initialize recompiler\n";
+            recompiler.printReport();
             return 1;
         }
 
         if (!recompiler.recompile())
         {
             std::cerr << "Recompilation failed\n";
+            recompiler.printReport();
             return 1;
         }
 
         recompiler.generateOutput();
+        recompiler.printReport();
 
         std::cout << "Recompilation completed successfully\n";
         return 0;

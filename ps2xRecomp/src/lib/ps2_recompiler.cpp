@@ -100,6 +100,7 @@ namespace ps2recomp
 
         void writeCombinedOutputPreamble(std::ostream &output)
         {
+            output << "#include <stdexcept>\n";
             output << "#include \"ps2_recompiled_functions.h\"\n\n";
             output << "#include \"ps2_runtime_macros.h\"\n";
             output << "#include \"ps2_runtime.h\"\n";
@@ -728,14 +729,21 @@ namespace ps2recomp
     PS2Recompiler::PS2Recompiler(const std::string &configPath)
         : m_configManager(configPath)
     {
+        m_configManager.setReporter(&m_reporter);
     }
 
     PS2Recompiler::~PS2Recompiler() = default;
+
+    void PS2Recompiler::printReport() const
+    {
+        m_reporter.printSummary(std::cout);
+    }
 
     bool PS2Recompiler::initialize()
     {
         try
         {
+            m_reporter.progress("parsing config");
             m_config = m_configManager.loadConfig();
             m_skipFunctions.clear();
             m_skipFunctionStarts.clear();
@@ -771,20 +779,24 @@ namespace ps2recomp
                         if (bindingIt != m_stubHandlerBindingsByStart.end() &&
                             bindingIt->second != selector.name)
                         {
-                            std::cerr << "Warning: Multiple stub handler bindings for 0x"
-                                      << std::hex << *selector.start << std::dec
-                                      << " (keeping latest '" << selector.name
-                                      << "', previous '" << bindingIt->second << "')" << std::endl;
+                            std::ostringstream msg;
+                            msg << "Multiple stub handler bindings for 0x"
+                                << std::hex << *selector.start
+                                << " (keeping latest '" << selector.name
+                                << "', previous '" << bindingIt->second << "')";
+                            m_reporter.warning("config", msg.str());
                         }
                         m_stubHandlerBindingsByStart[*selector.start] = selector.name;
                     }
                 }
             }
 
+            m_reporter.progress("parsing ELF");
             m_elfParser = std::make_unique<ElfParser>(m_config.inputPath);
+            m_elfParser->setReporter(&m_reporter);
             if (!m_elfParser->parse())
             {
-                std::cerr << "Failed to parse ELF file: " << m_config.inputPath << std::endl;
+                m_reporter.error("elf", "Failed to parse ELF file: " + m_config.inputPath);
                 return false;
             }
 
@@ -800,14 +812,18 @@ namespace ps2recomp
 
             if (m_functions.empty())
             {
-                std::cerr << "No functions found in ELF file." << std::endl;
+                m_reporter.error("elf", "No functions found in ELF file.");
                 return false;
             }
 
             {
                 m_bootstrapInfo = {};
                 uint32_t entry = m_elfParser->getEntryPoint();
-                std::cout << "ELF entry point: 0x" << std::hex << entry << std::dec << std::endl;
+                {
+                    std::ostringstream msg;
+                    msg << "ELF entry point: 0x" << std::hex << entry;
+                    m_reporter.info("elf", msg.str());
+                }
                 uint32_t bssStart = std::numeric_limits<uint32_t>::max();
                 uint32_t bssEnd = 0;
                 for (const auto &sec : m_sections)
@@ -831,12 +847,16 @@ namespace ps2recomp
 
                 if (bssStart != std::numeric_limits<uint32_t>::max())
                 {
-                    std::cout << "BSS range: 0x" << std::hex << bssStart << " - 0x" << bssEnd
-                              << " (size 0x" << (bssEnd - bssStart) << "), gp=0x" << gp << std::dec << std::endl;
+                    std::ostringstream msg;
+                    msg << "BSS range: 0x" << std::hex << bssStart << " - 0x" << bssEnd
+                        << " (size 0x" << (bssEnd - bssStart) << "), gp=0x" << gp;
+                    m_reporter.info("elf", msg.str());
                 }
                 else
                 {
-                    std::cout << "No BSS found, gp=0x" << std::hex << gp << std::dec << std::endl;
+                    std::ostringstream msg;
+                    msg << "No BSS found, gp=0x" << std::hex << gp;
+                    m_reporter.info("elf", msg.str());
                 }
 
                 if (entry != 0)
@@ -857,13 +877,19 @@ namespace ps2recomp
                 }
             }
 
-            std::cout << "Extracted " << m_functions.size() << " functions, "
-                      << m_symbols.size() << " symbols, "
-                      << m_sections.size() << " sections, "
-                      << m_relocations.size() << " relocations." << std::endl;
+            m_reporter.recordDiscovered(m_functions.size(), m_symbols.size(), m_sections.size(), m_relocations.size());
+            {
+                std::ostringstream msg;
+                msg << "extracted " << m_functions.size() << " functions, "
+                    << m_symbols.size() << " symbols, "
+                    << m_sections.size() << " sections, "
+                    << m_relocations.size() << " relocations";
+                m_reporter.progress(msg.str());
+            }
 
             m_decoder = std::make_unique<R5900Decoder>();
             m_codeGenerator = std::make_unique<CodeGenerator>(m_symbols, m_sections);
+            m_codeGenerator->setReporter(&m_reporter);
             std::unordered_map<uint32_t, std::string> relocationCallNames;
             relocationCallNames.reserve(m_relocations.size());
             for (const auto &reloc : m_relocations)
@@ -876,10 +902,11 @@ namespace ps2recomp
                 auto inserted = relocationCallNames.emplace(reloc.offset, reloc.symbolName);
                 if (!inserted.second && inserted.first->second != reloc.symbolName)
                 {
-                    std::cerr << "Warning: multiple relocation symbols at 0x"
-                              << std::hex << reloc.offset << std::dec
-                              << " (keeping '" << inserted.first->second
-                              << "', ignoring '" << reloc.symbolName << "')" << std::endl;
+                    std::ostringstream msg;
+                    msg << "multiple relocation symbols at 0x" << std::hex << reloc.offset
+                        << " (keeping '" << inserted.first->second
+                        << "', ignoring '" << reloc.symbolName << "')";
+                    m_reporter.warning("relocation", msg.str());
                 }
             }
             m_codeGenerator->setRelocationCallNames(relocationCallNames);
@@ -893,7 +920,7 @@ namespace ps2recomp
         }
         catch (const std::exception &e)
         {
-            std::cerr << "Error during initialization: " << e.what() << std::endl;
+            m_reporter.error("initialize", e.what());
             return false;
         }
     }
@@ -902,43 +929,55 @@ namespace ps2recomp
     {
         try
         {
-            std::cout << "Recompiling " << m_functions.size() << " functions..." << std::endl;
+            {
+                std::ostringstream msg;
+                msg << "recompiling " << m_functions.size() << " functions";
+                m_reporter.progress(msg.str());
+            }
 
             size_t processedCount = 0;
             size_t failedCount = 0;
             for (auto &function : m_functions)
             {
-                std::cout << "processing function: " << function.name << std::endl;
+                m_reporter.recordFunctionProcessed();
 
                 if (isStubFunction(function))
                 {
                     function.isStub = true;
                     function.isSkipped = false;
+                    m_reporter.recordFunctionStubbed();
                     continue;
                 }
 
                 if (shouldSkipFunction(function))
                 {
-                    std::cout << "Skipping function (runtime TODO wrapper): " << function.name << std::endl;
                     function.isSkipped = true;
                     function.isStub = false;
+                    m_reporter.recordFunctionSkipped();
                     continue;
                 }
 
                 if (!decodeFunction(function))
                 {
                     ++failedCount;
-                    std::cerr << "Skipping function due decode failure: " << function.name << std::endl;
+                    m_reporter.recordDecodeFailure();
+                    m_reporter.recordFunctionSkipped();
+                    m_reporter.warningAt("decode", function.name, function.start, "Skipping function due decode failure");
                     function.isSkipped = true;
                     continue;
                 }
 
                 function.isRecompiled = true;
+                m_reporter.recordFunctionRecompiled();
 #if _DEBUG
                 processedCount++;
                 if (processedCount % 100 == 0)
                 {
-                    std::cout << "Processed " << processedCount << " functions." << std::endl;
+                    {
+                        std::ostringstream msg;
+                        msg << "processed " << processedCount << " functions";
+                        m_reporter.progress(msg.str());
+                    }
                 }
 #endif
             }
@@ -947,15 +986,17 @@ namespace ps2recomp
 
             if (failedCount > 0)
             {
-                std::cerr << "Recompile completed with " << failedCount << " function(s) skipped due decode issues." << std::endl;
+                std::ostringstream msg;
+                msg << "Recompile completed with " << failedCount << " function(s) skipped due decode issues.";
+                m_reporter.warning("decode", msg.str());
             }
 
-            std::cout << "Recompilation completed successfully." << std::endl;
+            m_reporter.progress("recompilation pass completed");
             return true;
         }
         catch (const std::exception &e)
         {
-            std::cerr << "Error during recompilation: " << e.what() << std::endl;
+            m_reporter.error("recompile", e.what());
             return false;
         }
     }
@@ -1084,7 +1125,10 @@ namespace ps2recomp
                 }
             }
 
-            generateFunctionHeader();
+            if (!generateFunctionHeader())
+            {
+                throw std::runtime_error("Failed to generate function header");
+            }
 
             std::vector<const Function *> outputFunctions;
             outputFunctions.reserve(m_functions.size());
@@ -1096,10 +1140,16 @@ namespace ps2recomp
                 }
             }
 
+            m_reporter.recordGeneratedFunctions(outputFunctions.size());
+
             const size_t outputWorkerCount = m_config.lowMemoryMode ? 1 : resolveOutputWorkerCount(m_config.outputWorkerThreads);
             if (outputFunctions.size() > 1 && outputWorkerCount > 1)
             {
-                std::cout << "Generating function output with " << outputWorkerCount << " worker(s)." << std::endl;
+                {
+                    std::ostringstream msg;
+                    msg << "generating function output with " << outputWorkerCount << " worker(s)";
+                    m_reporter.progress(msg.str());
+                }
             }
 
             const auto &generatedStubs = m_generatedStubs;
@@ -1133,10 +1183,11 @@ namespace ps2recomp
                 }
                 catch (const std::exception &e)
                 {
-                    std::cerr << "Error generating code for function "
-                              << function.name << " (start 0x"
-                              << std::hex << function.start << std::dec << "): "
-                              << e.what() << std::endl;
+                    {
+                        std::ostringstream msg;
+                        msg << "Error generating code: " << e.what();
+                        m_reporter.errorAt("codegen", function.name, function.start, msg.str());
+                    }
                     throw;
                 }
             };
@@ -1347,7 +1398,11 @@ namespace ps2recomp
                     throw std::runtime_error("Failed to finish combined output: " + outputPath.string());
                 }
 
-                std::cout << "Wrote recompiled to combined output to: " << outputPath << std::endl;
+                {
+                    std::ostringstream msg;
+                    msg << "wrote combined output to " << outputPath;
+                    m_reporter.progress(msg.str());
+                }
             }
             else
             {
@@ -1524,7 +1579,11 @@ namespace ps2recomp
                     }
                 }
 
-                std::cout << "Wrote individual function files to: " << m_config.outputPath << std::endl;
+                {
+                    std::ostringstream msg;
+                    msg << "wrote individual function files to " << m_config.outputPath;
+                    m_reporter.progress(msg.str());
+                }
             }
 
             m_decodedFunctions.clear();
@@ -1537,13 +1596,22 @@ namespace ps2recomp
             {
                 throw std::runtime_error("Failed to write function registration file: " + registerPath.string());
             }
-            std::cout << "Generated function registration file: " << registerPath << std::endl;
+            {
+                std::ostringstream msg;
+                msg << "generated function registration file: " << registerPath;
+                m_reporter.progress(msg.str());
+            }
 
-            generateStubHeader();
+            if (!generateStubHeader())
+            {
+                throw std::runtime_error("Failed to generate stub header");
+            }
         }
         catch (const std::exception &e)
         {
-            std::cerr << "Error during output generation: " << e.what() << std::endl;
+            m_reporter.error("output", e.what());
+            m_reporter.printSummary(std::cout);
+            throw;
         }
     }
 
@@ -1588,12 +1656,16 @@ namespace ps2recomp
             fs::path headerPath = fs::path(m_config.outputPath) / "ps2_recompiled_stubs.h";
             writeToFile(headerPath.string(), ss.str());
 
-            std::cout << "Generated generating header file: " << headerPath << std::endl;
+            {
+                std::ostringstream msg;
+                msg << "generated stub header file: " << headerPath;
+                m_reporter.progress(msg.str());
+            }
             return true;
         }
         catch (const std::exception &e)
         {
-            std::cerr << "Error generating stub header: " << e.what() << std::endl;
+            m_reporter.error("stub-header", e.what());
             return false;
         }
     }
@@ -1628,12 +1700,16 @@ namespace ps2recomp
             fs::path headerPath = fs::path(m_config.outputPath) / "ps2_recompiled_functions.h";
             writeToFile(headerPath.string(), ss.str());
 
-            std::cout << "Generated function header file: " << headerPath << std::endl;
+            {
+                std::ostringstream msg;
+                msg << "generated function header file: " << headerPath;
+                m_reporter.progress(msg.str());
+            }
             return true;
         }
         catch (const std::exception &e)
         {
-            std::cerr << "Error generating function header: " << e.what() << std::endl;
+            m_reporter.error("function-header", e.what());
             return false;
         }
     }
@@ -1757,10 +1833,13 @@ namespace ps2recomp
 
         if (totalTargets > 0u)
         {
-            std::cout << "Collected " << totalTargets
-                      << " resumable entry point(s) across "
-                      << m_resumeEntryTargetsByOwner.size()
-                      << " owner function(s)." << std::endl;
+            m_reporter.recordAdditionalEntryPoints(totalTargets);
+            std::ostringstream msg;
+            msg << "collected " << totalTargets
+                << " resumable entry point(s) across "
+                << m_resumeEntryTargetsByOwner.size()
+                << " owner function(s)";
+            m_reporter.progress(msg.str());
         }
     }
 
@@ -1778,9 +1857,11 @@ namespace ps2recomp
             {
                 if (!m_elfParser->isValidAddress(address))
                 {
-                    std::cerr << "Invalid address: 0x" << std::hex << address << std::dec
-                              << " in function: " << function.name
-                              << " (truncating decode)" << std::endl;
+                    {
+                        std::ostringstream msg;
+                        msg << "Invalid address 0x" << std::hex << address << " (truncating decode)";
+                        m_reporter.warningAt("decode", function.name, address, msg.str());
+                    }
                     truncated = true;
                     break;
                 }
@@ -1797,13 +1878,21 @@ namespace ps2recomp
                         try
                         {
                             rawInstruction = std::stoul(patchIt->second, nullptr, 0);
-                            std::cout << "Applied patch at 0x" << std::hex << address << std::dec << std::endl;
+                            {
+                                std::ostringstream msg;
+                                msg << "Applied patch at 0x" << std::hex << address;
+                                m_reporter.info("patch", msg.str());
+                            }
                         }
                         catch (const std::exception &e)
                         {
-                            std::cerr << "Invalid patch value at 0x" << std::hex << address << std::dec
-                                      << " (" << patchIt->second << "): " << e.what()
-                                      << ". Using original instruction." << std::endl;
+                            {
+                                std::ostringstream msg;
+                                msg << "Invalid patch value at 0x" << std::hex << address
+                                    << " (" << patchIt->second << "): " << e.what()
+                                    << ". Using original instruction.";
+                                m_reporter.warningAt("patch", function.name, address, msg.str());
+                            }
                         }
                     }
                 }
@@ -1821,9 +1910,11 @@ namespace ps2recomp
             }
             catch (const std::exception &e)
             {
-                std::cerr << "Error decoding instruction at 0x" << std::hex << address << std::dec
-                          << " in function: " << function.name << ": " << e.what()
-                          << " (truncating decode)" << std::endl;
+                {
+                    std::ostringstream msg;
+                    msg << "Error decoding instruction: " << e.what() << " (truncating decode)";
+                    m_reporter.warningAt("decode", function.name, address, msg.str());
+                }
                 truncated = true;
                 break;
             }
@@ -1831,8 +1922,11 @@ namespace ps2recomp
 
         if (instructions.empty())
         {
-            std::cerr << "No decodable instructions found for function: " << function.name
-                      << " (0x" << std::hex << function.start << ")" << std::dec << std::endl;
+            {
+                std::ostringstream msg;
+                msg << "No decodable instructions found at 0x" << std::hex << function.start;
+                m_reporter.warningAt("decode", function.name, function.start, msg.str());
+            }
             return false;
         }
 
@@ -1875,7 +1969,7 @@ namespace ps2recomp
         std::ofstream file(path);
         if (!file)
         {
-            std::cerr << "Failed to open file for writing: " << path << std::endl;
+            m_reporter.error("file", "Failed to open file for writing: " + path);
             return false;
         }
 
@@ -1934,7 +2028,7 @@ namespace ps2recomp
     {
         if (maxLength == 0)
         {
-            std::cerr << "clampFilenameLength::maxLength must be greater than 0" << std::endl;
+            // Keep this static helper side-effect free; callers validate arguments.
             //Better go over the limit than create files with an empty path
             return baseName + extension;
         }

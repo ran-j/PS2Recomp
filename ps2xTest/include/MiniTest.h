@@ -107,11 +107,17 @@ class MiniTest
 {
 private:
     inline static std::map<std::string, TestCaseCallback> m_cases;
+    inline static TestBeforeCallback m_beforeEach;
 
 public:
     static void Case(const std::string& caseName, const TestCaseCallback& fn)
     {
         m_cases[caseName] = fn;
+    }
+
+    static void BeforeEach(const TestBeforeCallback& fn)
+    {
+        m_beforeEach = fn;
     }
 
     static int Run()
@@ -141,6 +147,11 @@ public:
 
                 totalTests++;
                 testCase.ClearFailures();
+
+                if (m_beforeEach)
+                {
+                    m_beforeEach();
+                }
 
                 if (testCase.m_beforeEach)
                 {

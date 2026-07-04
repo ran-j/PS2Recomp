@@ -13,6 +13,7 @@ namespace ps2recomp
         struct Section;
         struct Function;
         struct Symbol;
+        class RecompilerReporter;
 
         class ElfParser
         {
@@ -36,6 +37,7 @@ namespace ps2recomp
                 uint32_t getSectionAddress(const std::string &sectionName) const;
                 uint32_t getSectionSize(const std::string &sectionName) const;
                 uint32_t getEntryPoint() const;
+                void setReporter(RecompilerReporter *reporter);
                 void debugAddress(uint32_t address) const;
 
         private:
@@ -47,6 +49,7 @@ namespace ps2recomp
                 std::vector<Relocation> m_relocations;
                 std::vector<Function> m_extraFunctions;
                 bool m_hasLoadedGhidraMap = false;
+                RecompilerReporter *m_reporter = nullptr;
                 std::unordered_set<uint32_t> m_ghidraMapStarts;
 
                 void loadSections();

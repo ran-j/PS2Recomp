@@ -83,6 +83,10 @@ namespace
             return "LIBSD";
         case IOP_SID_FATAL_FRAME_SDRDRV:
             return "Fatal Frame SDRDRV";
+        case IOP_SID_LOTR_CLFILE:
+            return "LOTR CL";
+        case IOP_SID_LOTR_SOUND:
+            return "LOTR Sound";
         case 0x80001300u:
             return "DBCMAN";
         default:
@@ -1085,6 +1089,8 @@ namespace
                 {"SNDDRV state", IOP_SID_SNDDRV_STATE, false},
                 {"LIBSD", IOP_SID_LIBSD, false},
                 {"Fatal Frame SDRDRV", IOP_SID_FATAL_FRAME_SDRDRV, false},
+                {"LOTR SOUND", IOP_SID_LOTR_SOUND, false},
+                {"LOTR CLFILE", IOP_SID_LOTR_CLFILE, false},
                 {"DBCMAN", 0x80001300u, false},
                 {"DTX compat", dtxLayout.rpcSid, true},
             };

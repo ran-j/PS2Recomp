@@ -106,8 +106,6 @@ namespace
 
     thread_local DispatchHistory g_dispatchHistory;
     thread_local std::unordered_map<PS2Runtime *, uint32_t> g_guestExecutionDepths;
-    std::mutex g_functionStartsMutex;
-    std::unordered_map<const PS2Runtime *, std::vector<uint32_t>> g_functionStartsByRuntime;
 
     void pushDispatchPc(uint32_t pc)
     {
@@ -144,41 +142,6 @@ namespace
         return oss.str();
     }
 
-    uint32_t selectDispatchRecoveryPc(const PS2Runtime *runtime)
-    {
-        const DispatchHistory &h = g_dispatchHistory;
-        const uint32_t count = h.wrapped ? static_cast<uint32_t>(h.pcs.size()) : h.next;
-        if (count == 0u)
-        {
-            return 0u;
-        }
-
-        uint32_t firstHigh = 0u;
-        for (uint32_t step = 1u; step <= count; ++step)
-        {
-            const uint32_t idx = (h.next + h.pcs.size() - step) % static_cast<uint32_t>(h.pcs.size());
-            const uint32_t pc = h.pcs[idx];
-            if (pc < 0x00100000u)
-            {
-                continue;
-            }
-            if (runtime && !runtime->hasFunction(pc))
-            {
-                continue;
-            }
-
-            if (firstHigh == 0u)
-            {
-                firstHigh = pc;
-                continue;
-            }
-
-            return pc;
-        }
-
-        return firstHigh;
-    }
-
     uint32_t selectExceptionVector(const R5900Context *ctx, bool tlbRefill)
     {
         if (ctx->cop0_status & COP0_STATUS_BEV)
@@ -203,7 +166,6 @@ namespace
         ctx->vu0_vpu_stat = 0;
         ctx->vu0_vpu_stat2 = 0;
     }
-
 
     void copyVu0ContextToState(const R5900Context *ctx, VU1State &state)
     {
@@ -331,98 +293,6 @@ namespace
         return paths;
     }
 
-    uint32_t readGuestU32Wrapped(const uint8_t *rdram, uint32_t addr)
-    {
-        if (!rdram)
-        {
-            return 0;
-        }
-
-        uint32_t value = 0;
-        value |= static_cast<uint32_t>(rdram[(addr + 0u) & PS2_RAM_MASK]) << 0;
-        value |= static_cast<uint32_t>(rdram[(addr + 1u) & PS2_RAM_MASK]) << 8;
-        value |= static_cast<uint32_t>(rdram[(addr + 2u) & PS2_RAM_MASK]) << 16;
-        value |= static_cast<uint32_t>(rdram[(addr + 3u) & PS2_RAM_MASK]) << 24;
-        return value;
-    }
-
-    uint64_t readGuestU64Wrapped(const uint8_t *rdram, uint32_t addr)
-    {
-        const uint64_t lo = readGuestU32Wrapped(rdram, addr);
-        const uint64_t hi = readGuestU32Wrapped(rdram, addr + 4u);
-        return lo | (hi << 32);
-    }
-
-    uint32_t selectStackRecoveryPc(const uint8_t *rdram, const R5900Context *ctx, const PS2Runtime *runtime)
-    {
-        if (!rdram || !ctx || !runtime)
-        {
-            return 0u;
-        }
-
-        const uint32_t sp = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0));
-        constexpr uint32_t kScanBytes = 0x200u;
-
-        for (uint32_t offset = 0u; offset < kScanBytes; offset += 8u)
-        {
-            const uint32_t slotAddr = sp + offset;
-            const uint32_t ra32 = static_cast<uint32_t>(readGuestU64Wrapped(rdram, slotAddr));
-            if (ra32 < 0x00100000u)
-            {
-                continue;
-            }
-            if (!runtime->hasFunction(ra32))
-            {
-                continue;
-            }
-            return ra32;
-        }
-
-        for (uint32_t offset = 0u; offset < kScanBytes; offset += 4u)
-        {
-            const uint32_t slotAddr = sp + offset;
-            const uint32_t ra32 = readGuestU32Wrapped(rdram, slotAddr);
-            if (ra32 < 0x00100000u)
-            {
-                continue;
-            }
-            if (!runtime->hasFunction(ra32))
-            {
-                continue;
-            }
-            return ra32;
-        }
-
-        return 0u;
-    }
-
-    void clearFunctionStarts(const PS2Runtime *runtime)
-    {
-        std::lock_guard<std::mutex> lock(g_functionStartsMutex);
-        g_functionStartsByRuntime.erase(runtime);
-    }
-
-    std::vector<uint32_t> snapshotFunctionStarts(const PS2Runtime *runtime)
-    {
-        std::lock_guard<std::mutex> lock(g_functionStartsMutex);
-        auto it = g_functionStartsByRuntime.find(runtime);
-        if (it == g_functionStartsByRuntime.end())
-        {
-            return {};
-        }
-        return it->second;
-    }
-
-    void registerFunctionStart(const PS2Runtime *runtime, uint32_t address)
-    {
-        std::lock_guard<std::mutex> lock(g_functionStartsMutex);
-        auto &starts = g_functionStartsByRuntime[runtime];
-        auto insertPos = std::lower_bound(starts.begin(), starts.end(), address);
-        if (insertPos == starts.end() || *insertPos != address)
-        {
-            starts.insert(insertPos, address);
-        }
-    }
 
     std::string readGuestPrintableString(const uint8_t *rdram, uint32_t addr, size_t maxLen)
     {
@@ -607,9 +477,6 @@ PS2Runtime::PS2Runtime()
 
     // Stack pointer (SP) and global pointer (GP) will be set by the loaded ELF
 
-    m_functionTable.clear();
-    clearFunctionStarts(this);
-
     m_loadedModules.clear();
     m_guestHeapBlocks.clear();
     m_guestHeapBase = kGuestHeapDefaultBase;
@@ -622,9 +489,9 @@ PS2Runtime::PS2Runtime()
 }
 
 void PS2Runtime::setDebugUiCallbacks(DebugUiCallback initCallback,
-                                      DebugUiCallback drawCallback,
-                                      DebugUiCallback shutdownCallback,
-                                      void *userData)
+                                     DebugUiCallback drawCallback,
+                                     DebugUiCallback shutdownCallback,
+                                     void *userData)
 {
     if (m_debugUiInitialized && m_debugUiShutdownCallback)
     {
@@ -667,8 +534,6 @@ PS2Runtime::~PS2Runtime()
 
         m_loadedModules.clear();
 
-        m_functionTable.clear();
-        clearFunctionStarts(this);
     }
     catch (const std::exception &e)
     {
@@ -930,7 +795,7 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
 
         if (ph.flags & 0x1u) // PF_X
         {
-            const uint64_t execEnd = static_cast<uint64_t>(ph.vaddr) + static_cast<uint64_t>(ph.memsz);
+            const uint64_t execEnd = static_cast<uint64_t>(ph.vaddr) + static_cast<uint64_t>(ph.filesz);
             if (execEnd <= std::numeric_limits<uint32_t>::max())
             {
                 m_memory.registerCodeRegion(ph.vaddr, static_cast<uint32_t>(execEnd));
@@ -1049,243 +914,305 @@ void PS2Runtime::configureIoPathsFromElf(const std::string &elfPath)
     setIoPaths(paths);
 }
 
-void PS2Runtime::registerFunction(uint32_t address, RecompiledFunction func)
+namespace
 {
-    registerFunctionStart(this, address);
-    m_functionTable[address] = func;
+    bool generatedFunctionTableSlot(uint32_t address, uint32_t &slot)
+    {
+        if ((address & 3u) != 0u || g_ps2RecompiledFunctionTableSlotCount == 0u)
+        {
+            return false;
+        }
+
+        if (address < g_ps2RecompiledFunctionTableBase || address >= g_ps2RecompiledFunctionTableEnd)
+        {
+            return false;
+        }
+
+        const uint32_t offset = address - g_ps2RecompiledFunctionTableBase;
+        slot = offset >> 2;
+        return slot < g_ps2RecompiledFunctionTableSlotCount;
+    }
+}
+
+bool PS2Runtime::replaceFunction(uint32_t address, RecompiledFunction func)
+{
+    uint32_t slot = 0u;
+    if (!generatedFunctionTableSlot(address, slot))
+    {
+        std::cerr << "[function-table] cannot replace guest PC 0x" << std::hex << address
+                  << ": outside generated dense table [0x" << g_ps2RecompiledFunctionTableBase
+                  << ", 0x" << g_ps2RecompiledFunctionTableEnd << ")"
+                  << std::dec << std::endl;
+        return false;
+    }
+
+    g_ps2RecompiledFunctionTable[slot] = func;
+    return true;
+}
+
+bool PS2Runtime::registerFunction(uint32_t address, RecompiledFunction func)
+{
+    return replaceFunction(address, func);
 }
 
 bool PS2Runtime::hasFunction(uint32_t address) const
 {
-    auto it = m_functionTable.find(address);
-    if (it != m_functionTable.end())
-    {
-        return true;
-    }
+    uint32_t slot = 0u;
+    return generatedFunctionTableSlot(address, slot) && g_ps2RecompiledFunctionTable[slot] != nullptr;
+}
 
-    return false;
+const char *describeGuestBranchKind(PS2Runtime::GuestBranchKind kind)
+{
+    switch (kind)
+    {
+    case PS2Runtime::GuestBranchKind::DirectJump:
+        return "DirectJump";
+    case PS2Runtime::GuestBranchKind::DirectCall:
+        return "DirectCall";
+    case PS2Runtime::GuestBranchKind::IndirectJump:
+        return "IndirectJump";
+    case PS2Runtime::GuestBranchKind::IndirectCall:
+        return "IndirectCall";
+    case PS2Runtime::GuestBranchKind::Return:
+        return "Return";
+    default:
+        return "Unknown";
+    }
 }
 
 PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
 {
     pushDispatchPc(address);
 
-    auto it = m_functionTable.find(address);
-    if (it != m_functionTable.end())
+    uint32_t slot = 0u;
+    if (generatedFunctionTableSlot(address, slot))
     {
-        return it->second;
+        RecompiledFunction fn = g_ps2RecompiledFunctionTable[slot];
+        if (fn != nullptr)
+        {
+            return fn;
+        }
     }
 
-    const std::vector<uint32_t> functionStarts = snapshotFunctionStarts(this);
-    auto aliasOwner = [&](uint32_t ownerAddress) -> RecompiledFunction
+    std::cerr << "Error: No exact recompiled function for guest PC 0x" << std::hex << address
+              << " tableBase=0x" << g_ps2RecompiledFunctionTableBase
+              << " tableEnd=0x" << g_ps2RecompiledFunctionTableEnd
+              << " codeRegion=" << (m_memory.isCodeAddress(address) ? "yes" : "no")
+              << " trace=" << formatDispatchHistory()
+              << std::dec << std::endl;
+
+    static RecompiledFunction missingFunction = [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        auto owner = m_functionTable.find(ownerAddress);
-        if (owner == m_functionTable.end())
-        {
-            return nullptr;
-        }
-
-        auto ownerStart = std::lower_bound(functionStarts.begin(), functionStarts.end(), ownerAddress);
-        if (ownerStart == functionStarts.end() || *ownerStart != ownerAddress)
-        {
-            return nullptr;
-        }
-
-        auto nextStart = ownerStart;
-        ++nextStart;
-        if (nextStart != functionStarts.end())
-        {
-            if (address >= *nextStart)
-            {
-                return nullptr;
-            }
-        }
-        else if (!m_memory.isCodeAddress(address))
-        {
-            return nullptr;
-        }
-
-        return owner->second;
+        const uint32_t badPc = ctx->pc;
+        runtime->reportMissingFunction(rdram,
+                                       ctx,
+                                       badPc,
+                                       0u,
+                                       PS2Runtime::GuestBranchKind::IndirectJump,
+                                       "dispatch");
     };
 
-    if (!functionStarts.empty())
+    return missingFunction;
+}
+
+void PS2Runtime::setMissingFunctionPolicy(MissingFunctionPolicy policy)
+{
+    m_missingFunctionPolicy.store(static_cast<uint32_t>(policy), std::memory_order_release);
+}
+
+PS2Runtime::MissingFunctionPolicy PS2Runtime::missingFunctionPolicy() const
+{
+    return static_cast<MissingFunctionPolicy>(m_missingFunctionPolicy.load(std::memory_order_acquire));
+}
+
+void PS2Runtime::resetMissingFunctionReportOnce()
+{
+    m_missingFunctionReported.store(false, std::memory_order_release);
+}
+
+void PS2Runtime::reportMissingFunction(uint8_t *rdram,
+                                       R5900Context *ctx,
+                                       uint32_t targetPc,
+                                       uint32_t sourcePc,
+                                       GuestBranchKind kind,
+                                       const char *debugName)
+{
+    const MissingFunctionPolicy policy = missingFunctionPolicy();
+    const bool firstReport = !m_missingFunctionReported.exchange(true, std::memory_order_acq_rel);
+
+    const uint32_t pc = ctx->pc;
+    const uint32_t ra = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0));
+    const uint32_t sp = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0));
+    const uint32_t gp = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[28], 0));
+    const uint32_t a0 = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[4], 0));
+    const uint32_t a1 = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[5], 0));
+    const uint32_t v0 = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[2], 0));
+    const uint32_t v1 = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[3], 0));
+
+    auto readGuestU32At = [rdram](uint32_t addr, uint32_t &out) -> bool
     {
-        const DispatchHistory &history = g_dispatchHistory;
-        const uint32_t count = history.wrapped ? static_cast<uint32_t>(history.pcs.size()) : history.next;
-        for (uint32_t step = 1u; step <= count; ++step)
+        // TODO this !rdram exist only because of test fix those test later
+        if (!rdram || addr > PS2_RAM_SIZE - sizeof(uint32_t))
         {
-            const uint32_t idx = (history.next + static_cast<uint32_t>(history.pcs.size()) - step) %
-                                 static_cast<uint32_t>(history.pcs.size());
-            const uint32_t previousPc = history.pcs[idx];
-            if (previousPc == address)
-            {
-                continue;
-            }
-            if (RecompiledFunction owner = aliasOwner(previousPc))
-            {
-                return owner;
-            }
+            out = 0u;
+            return false;
         }
 
-        auto nextStart = std::upper_bound(functionStarts.begin(), functionStarts.end(), address);
-        if (nextStart != functionStarts.begin())
-        {
-            auto ownerStart = nextStart;
-            --ownerStart;
-            if (RecompiledFunction owner = aliasOwner(*ownerStart))
-            {
-                return owner;
-            }
-        }
-    }
+        std::memcpy(&out, rdram + addr, sizeof(uint32_t));
+        return true;
+    };
 
-    std::cerr << "Warning: Function at address 0x" << std::hex << address;
-    if (!functionStarts.empty())
+    auto readGuestU32Offset = [&readGuestU32At](uint32_t base, uint32_t offset, uint32_t &out) -> bool
     {
-        auto nextStart = std::upper_bound(functionStarts.begin(), functionStarts.end(), address);
-        if (nextStart != functionStarts.begin())
+        if (base > PS2_RAM_SIZE - sizeof(uint32_t) || offset > PS2_RAM_SIZE - sizeof(uint32_t) - base)
         {
-            auto ownerStart = nextStart;
-            --ownerStart;
-            std::cerr << " nearestStart=0x" << *ownerStart;
+            out = 0u;
+            return false;
         }
-        if (nextStart != functionStarts.end())
-        {
-            std::cerr << " nextStart=0x" << *nextStart;
-        }
-        else
-        {
-            std::cerr << " nextStart=<end>";
-        }
-    }
-    std::cerr << std::dec << " not found" << std::endl;
 
-    static RecompiledFunction defaultFunction = [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        return readGuestU32At(base + offset, out);
+    };
+
+    uint32_t a0Word0 = 0u;
+    uint32_t a0Word4 = 0u;
+    uint32_t a0Word8 = 0u;
+    uint32_t a0WordC = 0u;
+    const bool a0Readable =
+        readGuestU32Offset(a0, 0x00u, a0Word0) &&
+        readGuestU32Offset(a0, 0x04u, a0Word4) &&
+        readGuestU32Offset(a0, 0x08u, a0Word8) &&
+        readGuestU32Offset(a0, 0x0cu, a0WordC);
+
+    uint32_t vtableSlot0 = 0u;
+    uint32_t vtableSlot4 = 0u;
+    uint32_t vtableSlot8 = 0u;
+    uint32_t vtableSlotC = 0u;
+    const bool vtableReadable =
+        a0Readable && a0Word0 != 0u &&
+        readGuestU32Offset(a0Word0, 0x00u, vtableSlot0) &&
+        readGuestU32Offset(a0Word0, 0x04u, vtableSlot4) &&
+        readGuestU32Offset(a0Word0, 0x08u, vtableSlot8) &&
+        readGuestU32Offset(a0Word0, 0x0cu, vtableSlotC);
+
+    if (firstReport)
     {
-        const uint32_t ra = ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0)) : 0u;
-        const uint32_t sp = ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0)) : 0u;
-        const uint32_t gp = ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[28], 0)) : 0u;
-        const uint32_t a0 = ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[4], 0)) : 0u;
-        const uint32_t a1 = ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[5], 0)) : 0u;
-        const uint32_t v0 = ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[2], 0)) : 0u;
-        const uint32_t v1 = ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[3], 0)) : 0u;
-
-        if (ctx && runtime)
-        {
-            thread_local uint32_t s_recoverCount = 0u;
-            thread_local bool s_loggedContext = false;
-            const uint32_t pc = ctx->pc;
-            const bool hasPcFunction = runtime->hasFunction(pc);
-
-            if (!hasPcFunction && s_recoverCount < 8192u)
-            {
-                if (!s_loggedContext)
-                {
-                    std::ostringstream stackDump;
-                    if (rdram)
-                    {
-                        stackDump << " [stack]";
-                        for (uint32_t off = 0u; off < 0x40u; off += 4u)
-                        {
-                            const uint32_t slot = readGuestU32Wrapped(rdram, sp + off);
-                            stackDump << " +" << std::hex << off << "=0x" << slot;
-                        }
-                    }
-                    std::cerr << "[dispatch:first-bad-pc] bad=0x" << std::hex << pc
-                              << " ra=0x" << ra
-                              << " sp=0x" << sp
-                              << " gp=0x" << gp
-                              << " v0=0x" << v0
-                              << " v1=0x" << v1
-                              << " a0=0x" << a0
-                              << " a1=0x" << a1
-                              << " trace=" << formatDispatchHistory()
-                              << stackDump.str()
-                              << std::dec << std::endl;
-                    s_loggedContext = true;
-                }
-
-                uint32_t recoveryPc = 0u;
-                if (ra != 0u && runtime->hasFunction(ra))
-                {
-                    recoveryPc = ra;
-                }
-
-                if (recoveryPc == 0u)
-                {
-                    recoveryPc = selectStackRecoveryPc(rdram, ctx, runtime);
-                }
-
-                if (recoveryPc == 0u)
-                {
-                    recoveryPc = selectDispatchRecoveryPc(runtime);
-                }
-
-                if (recoveryPc != 0u && recoveryPc != pc)
-                {
-                    if (s_recoverCount < 256u)
-                    {
-                        std::cerr << "[dispatch:recover-pc] bad=0x" << std::hex << pc
-                                  << " ra=0x" << ra
-                                  << " fallback=0x" << recoveryPc
-                                  << " sp=0x" << sp
-                                  << std::dec << std::endl;
-                    }
-                    ++s_recoverCount;
-                    ctx->pc = recoveryPc;
-                    return;
-                }
-            }
-
-            if (hasPcFunction)
-            {
-                s_recoverCount = 0u;
-                s_loggedContext = false;
-            }
-            else if (pc < 0x00100000u && ra == pc && s_recoverCount < 4096u)
-            {
-                uint32_t recoveryPc = selectStackRecoveryPc(rdram, ctx, runtime);
-                if (recoveryPc == 0u)
-                {
-                    recoveryPc = selectDispatchRecoveryPc(runtime);
-                }
-                if (recoveryPc != 0u && recoveryPc != pc)
-                {
-                    if (s_recoverCount < 128u)
-                    {
-                        std::cerr << "[dispatch:recover-low-pc] bad=0x" << std::hex << pc
-                                  << " ra=0x" << ra
-                                  << " fallback=0x" << recoveryPc
-                                  << " sp=0x" << sp
-                                  << std::dec << std::endl;
-                    }
-                    ++s_recoverCount;
-                    ctx->pc = recoveryPc;
-                    return;
-                }
-            }
-        }
-
         std::ostringstream oss;
-        oss << "Error: Called unimplemented function at address 0x" << std::hex << (ctx ? ctx->pc : 0u)
+        oss << "[guest-branch:missing-target] kind=" << describeGuestBranchKind(kind)
+            << " op=" << (debugName ? debugName : "<unknown>")
+            << " source=0x" << std::hex << sourcePc
+            << " target=0x" << targetPc
+            << " pc=0x" << pc
             << " ra=0x" << ra
             << " sp=0x" << sp
             << " gp=0x" << gp
             << " a0=0x" << a0
-            << " hostTid=" << std::this_thread::get_id()
-            << " pcTrace=" << formatDispatchHistory()
+            << " a1=0x" << a1
+            << " v0=0x" << v0
+            << " v1=0x" << v1
+            << " a0Readable=" << (a0Readable ? "yes" : "no")
+            << " a0[0]=0x" << a0Word0
+            << " a0[4]=0x" << a0Word4
+            << " a0[8]=0x" << a0Word8
+            << " a0[c]=0x" << a0WordC
+            << " vtableReadable=" << (vtableReadable ? "yes" : "no")
+            << " vtbl[0]=0x" << vtableSlot0
+            << " vtbl[4]=0x" << vtableSlot4
+            << " vtbl[8]=0x" << vtableSlot8
+            << " vtbl[c]=0x" << vtableSlotC
+            << " codeRegion=" << (m_memory.isCodeAddress(targetPc) ? "yes" : "no")
+            << " policy=" << static_cast<uint32_t>(policy)
+            << " trace=" << formatDispatchHistory()
             << std::dec;
 
-        static std::mutex s_defaultFnLogMutex;
+        static std::mutex s_missingFunctionLogMutex;
         {
-            std::lock_guard<std::mutex> lock(s_defaultFnLogMutex);
+            std::lock_guard<std::mutex> lock(s_missingFunctionLogMutex);
             std::cerr << oss.str() << std::endl;
         }
+    }
 
-        runtime->requestStop();
-    };
+    if (firstReport && policy == MissingFunctionPolicy::BreakOnce)
+    {
+#if defined(_MSC_VER)
+        __debugbreak();
+#endif // TODO others breakpoints
+    }
 
-    return defaultFunction;
+    if (ctx)
+    {
+        ctx->pc = targetPc;
+    }
+
+    if (policy == MissingFunctionPolicy::Stop)
+    {
+        requestStop();
+    }
+}
+
+bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
+                                     R5900Context *ctx,
+                                     uint32_t targetPc,
+                                     uint32_t sourcePc,
+                                     uint32_t fallthroughPc,
+                                     GuestBranchKind kind,
+                                     const char *debugName)
+{
+    ctx->pc = targetPc;
+    const bool isCall = (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall);
+
+    if (kind == GuestBranchKind::Return)
+    {
+        if (!hasFunction(targetPc))
+        {
+            reportMissingFunction(rdram, ctx, targetPc, sourcePc, kind, debugName);
+        }
+
+        // Prevent nested dispatch.
+        ctx->pc = targetPc;
+        return false;
+    }
+
+    if (!hasFunction(targetPc))
+    {
+        reportMissingFunction(rdram, ctx, targetPc, sourcePc, kind, debugName);
+
+        const MissingFunctionPolicy policy = missingFunctionPolicy();
+
+        if (policy == MissingFunctionPolicy::SkipCallDebug && isCall)
+        {
+            ctx->pc = fallthroughPc;
+            return true;
+        }
+
+        if (policy == MissingFunctionPolicy::ContinueToTarget)
+        {
+            ctx->pc = targetPc;
+            return true;
+        }
+
+        return false;
+    }
+
+    RecompiledFunction targetFn = lookupFunction(targetPc);
+    const uint32_t entryPc = ctx->pc;
+    targetFn(rdram, ctx, this);
+
+    if (isStopRequested() || ctx->pc == 0u)
+    {
+        return false;
+    }
+
+    if (!isCall)
+    {
+        return false;
+    }
+
+    if (ctx->pc == entryPc)
+    {
+        ctx->pc = fallthroughPc;
+    }
+
+    return ctx->pc == fallthroughPc;
 }
 
 void PS2Runtime::SignalException(R5900Context *ctx, PS2Exception exception)
@@ -2036,9 +1963,7 @@ void PS2Runtime::yieldGuestExecutionAfterWake()
         GuestExecutionReleaseScope releaseGuestExecution(this);
         std::unique_lock<std::mutex> lock(m_guestExecutionHandoffMutex);
         m_guestExecutionHandoffCv.wait_for(lock, std::chrono::milliseconds(2), [&]()
-        {
-            return m_guestExecutionHandoffEpoch.load(std::memory_order_acquire) != handoffEpoch;
-        });
+                                           { return m_guestExecutionHandoffEpoch.load(std::memory_order_acquire) != handoffEpoch; });
     }
 }
 
@@ -2274,19 +2199,19 @@ void PS2Runtime::run()
                 const int activeThreads = g_activeThreads.load(std::memory_order_relaxed);
 
                 RUNTIME_LOG("[run:tick] tick=" << tick
-                          << " pc=0x" << std::hex << dbgPc
-                          << " ra=0x" << dbgRa
-                          << " sp=0x" << dbgSp
-                          << " gp=0x" << dbgGp
-                          << " dispfb1=0x" << gs.dispfb1
-                          << " display1=0x" << gs.display1
-                          << std::dec
-                          << " activeThreads=" << activeThreads
-                          << " dma=" << curDma
-                          << " gif=" << curGif
-                          << " gsw=" << curGs
-                          << " vif=" << curVif
-                          << std::endl);
+                                               << " pc=0x" << std::hex << dbgPc
+                                               << " ra=0x" << dbgRa
+                                               << " sp=0x" << dbgSp
+                                               << " gp=0x" << dbgGp
+                                               << " dispfb1=0x" << gs.dispfb1
+                                               << " display1=0x" << gs.display1
+                                               << std::dec
+                                               << " activeThreads=" << activeThreads
+                                               << " dma=" << curDma
+                                               << " gif=" << curGif
+                                               << " gsw=" << curGs
+                                               << " vif=" << curVif
+                                               << std::endl);
             }
         });
         uint32_t presentWidth = FB_WIDTH;
