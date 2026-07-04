@@ -433,6 +433,58 @@ void register_ps2_runtime_interrupt_tests()
             cleanupRuntime(env);
         });
 
+        tc.Run("native GIF DMA MMIO kick dispatches completed DMAC handler", [](TestCase &t)
+        {
+            notifyRuntimeStop();
+            TestEnv env;
+            t.IsTrue(env.runtime.memory().initialize(), "runtime memory initialize should succeed");
+
+            constexpr uint32_t kHandlerAddr = 0x00ABD1C0u;
+            constexpr uint32_t kDStat = 0x1000E010u;
+            constexpr uint32_t kDPcr = 0x1000E020u;
+            constexpr uint32_t kTag0 = 0x00028400u;
+
+            uint8_t *rdram = env.runtime.memory().getRDRAM();
+            writeDmaTag(rdram, kTag0, makeDmaTag(1u, 7u, 0u, false)); // END
+            writeGuestU64(rdram, kTag0 + 0x10u, 0x1122334455667788ull);
+            writeGuestU64(rdram, kTag0 + 0x18u, 0x99AABBCCDDEEFF00ull);
+
+            g_dmacSendHits.store(0u, std::memory_order_relaxed);
+            g_dmacSendLastCause.store(0u, std::memory_order_relaxed);
+            g_dmacSendLastChcr.store(0u, std::memory_order_relaxed);
+            env.runtime.registerFunction(kHandlerAddr, &testDmacSendHandler);
+
+            R5900Context addCtx{};
+            setRegU32(addCtx, 4, 2u);
+            setRegU32(addCtx, 5, kHandlerAddr);
+            setRegU32(addCtx, 6, 0u);
+            setRegU32(addCtx, 7, 0u);
+            ps2_syscalls::AddDmacHandler(rdram, &addCtx, &env.runtime);
+            t.IsTrue(getRegS32(addCtx, 2) > 0, "AddDmacHandler should register GIF handler");
+
+            R5900Context enableCtx{};
+            setRegU32(enableCtx, 4, 2u);
+            ps2_syscalls::EnableDmac(rdram, &enableCtx, &env.runtime);
+            t.Equals(getRegS32(enableCtx, 2), KE_OK, "EnableDmac should enable GIF cause");
+
+            R5900Context kickCtx{};
+            env.runtime.kickGifDmaChainFromMMIO(rdram, &kickCtx, 4u, 4u, kTag0, 0x105u);
+
+            t.Equals(env.runtime.memory().readIORegister(kDPcr), 4u, "native GIF kick should preserve D_PCR write");
+            t.IsTrue((env.runtime.memory().readIORegister(kDStat) & (1u << 2)) != 0u,
+                     "native GIF kick should raise D_STAT GIF completion status");
+            t.Equals(g_dmacSendHits.load(std::memory_order_relaxed), 1u,
+                     "native GIF kick should dispatch the GIF DMAC handler");
+            t.Equals(g_dmacSendLastCause.load(std::memory_order_relaxed), 2u,
+                     "DMAC handler should observe GIF cause");
+            t.Equals(g_dmacSendLastChcr.load(std::memory_order_relaxed) & 0x100u, 0u,
+                     "handler should see GIF STR cleared");
+            t.Equals(g_dmacSendLastChcr.load(std::memory_order_relaxed) & 0x70000000u, 0x70000000u,
+                     "handler should see the latched END tag id");
+
+            cleanupRuntime(env);
+        });
+
         tc.Run("negative interrupt-safe EE syscall ids dispatch", [](TestCase &t)
         {
             notifyRuntimeStop();

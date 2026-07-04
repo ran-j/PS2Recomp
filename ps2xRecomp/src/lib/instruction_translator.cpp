@@ -4,42 +4,145 @@
 #include "ps2recomp/instructions.h"
 #include "ps2recomp/types.h"
 #include "ps2recomp/control_flow_utils.h"
+#include "runtime/ps2_address.h"
 
 #include <fmt/format.h>
-#include <sstream>
-#include <cmath>
-
 
 namespace ps2recomp
 {
+    namespace
+    {
+        std::string addressLiteral(uint32_t address)
+        {
+            return fmt::format("0x{:X}u", address);
+        }
+
+        uint32_t memoryAccessSize(int width)
+        {
+            return static_cast<uint32_t>(width / 8);
+        }
+
+        std::string memoryValueType(int width)
+        {
+            switch (width)
+            {
+            case 8:
+                return "uint8_t";
+            case 16:
+                return "uint16_t";
+            case 32:
+                return "uint32_t";
+            case 64:
+                return "uint64_t";
+            default:
+                return "";
+            }
+        }
+
+        std::string genFastWrite(int width, uint32_t address, const std::string &val)
+        {
+            const std::string addr = addressLiteral(address);
+            if (width == 128)
+            {
+                return fmt::format(
+                    "do {{ __m128i _value = ({}); "
+                    "const uint64_t _lo = static_cast<uint64_t>(PS2_EXTRACT_EPI64_0(_value)); "
+                    "const uint64_t _hi = static_cast<uint64_t>(PS2_EXTRACT_EPI64_1(_value)); "
+                    "ps2TraceGuestWrite(rdram, {}, 16u, _lo, _hi, \"WRITE128\", ctx); "
+                    "FAST_WRITE128({}, _value); }} while (0)",
+                    val, addr, addr);
+            }
+
+            const std::string valueType = memoryValueType(width);
+            return fmt::format(
+                "do {{ {} _value = static_cast<{}>({}); "
+                "ps2TraceGuestWrite(rdram, {}, {}u, _value, 0u, \"WRITE{}\", ctx); "
+                "FAST_WRITE{}({}, _value); }} while (0)",
+                valueType, valueType, val, addr, memoryAccessSize(width), width, width, addr);
+        }
+    }
+
     InstructionTranslator::InstructionTranslator(CodeGenerator &codeGenerator)
         : m_codeGenerator(codeGenerator)
     {
     }
 
-    std::string InstructionTranslator::translate(const Instruction &inst)
+    MemoryAccessHint InstructionTranslator::effectiveMemoryHintFor(const Instruction &inst, const MemoryAccessHint &memoryHint) const
+    {
+        MemoryAccessHint effectiveMemoryHint = memoryHint;
+        if (inst.isMmio)
+        {
+            effectiveMemoryHint.hasAddress = true;
+            effectiveMemoryHint.address = inst.mmioAddress;
+        }
+
+        return effectiveMemoryHint;
+    }
+
+    std::string InstructionTranslator::translateMemoryRead(const Instruction &inst,
+                                                           const MemoryAccessHint &memoryHint,
+                                                           int width,
+                                                           const std::string &addr) const
+    {
+        if (memoryHint.hasAddress)
+        {
+            const uint32_t resolvedAddress = memoryHint.address;
+            const std::string resolvedAddressExpr = addressLiteral(resolvedAddress);
+            if (inst.isMmio || Ps2IsSpecialAddress(resolvedAddress))
+            {
+                return fmt::format("runtime->Load{}(rdram, ctx, {})", width, resolvedAddressExpr);
+            }
+            return fmt::format("FAST_READ{}({})", width, resolvedAddressExpr);
+        }
+
+        if (inst.isMmio)
+        {
+            return fmt::format("runtime->Load{}(rdram, ctx, {})", width, addr);
+        }
+        return fmt::format("READ{}({})", width, addr);
+    }
+
+    std::string InstructionTranslator::translateMemoryWrite(const Instruction &inst,
+                                                            const MemoryAccessHint &memoryHint,
+                                                            int width,
+                                                            const std::string &addr,
+                                                            const std::string &value) const
+    {
+        if (memoryHint.hasAddress)
+        {
+            const uint32_t resolvedAddress = memoryHint.address;
+            const std::string resolvedAddressExpr = addressLiteral(resolvedAddress);
+            if (inst.isMmio || Ps2IsSpecialAddress(resolvedAddress))
+            {
+                return fmt::format("runtime->Store{}(rdram, ctx, {}, {})", width, resolvedAddressExpr, value);
+            }
+            return genFastWrite(width, resolvedAddress, value);
+        }
+
+        if (inst.isMmio)
+        {
+            return fmt::format("runtime->Store{}(rdram, ctx, {}, {})", width, addr, value);
+        }
+        return fmt::format("WRITE{}({}, {})", width, addr, value);
+    }
+
+    std::string InstructionTranslator::translate(const Instruction &inst, const MemoryAccessHint &memoryHint)
     {
         if (inst.isMMI)
         {
             return m_codeGenerator.translateMMIInstruction(inst);
         }
 
+        const MemoryAccessHint effectiveMemoryHint = effectiveMemoryHintFor(inst, memoryHint);
+
         auto genRead = [&](int width, const std::string &addr)
         {
-            if (inst.isMmio)
-            {
-                return fmt::format("runtime->Load{}(rdram, ctx, {})", width, addr);
-            }
-            return fmt::format("READ{}({})", width, addr);
+            return translateMemoryRead(inst, effectiveMemoryHint, width, addr);
         };
 
         auto genWrite = [&](int width, const std::string &addr, const std::string &val)
         {
-            if (inst.isMmio)
-            {
-                return fmt::format("runtime->Store{}(rdram, ctx, {}, {})", width, addr, val);
-            }
-            return fmt::format("WRITE{}({}, {})", width, addr, val);
+            return translateMemoryWrite(inst, effectiveMemoryHint, width, addr, val);
         };
 
         switch (inst.opcode)

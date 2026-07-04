@@ -1,4 +1,6 @@
 #include "runtime/ps2_memory.h"
+#include "runtime/ps2_address.h"
+#include "runtime/ps2_gs_gpu.h"
 #include "ps2_log.h"
 #include <atomic>
 #include <chrono>
@@ -36,7 +38,12 @@ namespace
 
     inline bool isGsPrivReg(uint32_t addr)
     {
-        return addr >= PS2_GS_PRIV_REG_BASE && addr < PS2_GS_PRIV_REG_BASE + PS2_GS_PRIV_REG_SIZE;
+        return Ps2AddressInRange(addr, PS2_GS_PRIV_REG_BASE, PS2_GS_PRIV_REG_SIZE);
+    }
+
+    inline bool isIoRegister(uint32_t addr)
+    {
+        return Ps2AddressInRange(addr, PS2_IO_BASE, PS2_IO_SIZE);
     }
 
     inline uint64_t *gsRegPtr(GSRegisters &gs, uint32_t addr)
@@ -108,6 +115,42 @@ namespace
     {
         using namespace std::chrono;
         return static_cast<uint64_t>(duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count());
+    }
+
+    struct DmaTagView
+    {
+        uint16_t qwc = 0;
+        uint8_t id = 0;
+        bool irq = false;
+        uint32_t addr = 0;
+        uint32_t upper = 0;
+    };
+
+    inline DmaTagView decodeDmaTag(uint64_t tag)
+    {
+        DmaTagView out{};
+        out.qwc = static_cast<uint16_t>(tag & 0xFFFFu);
+        out.id = static_cast<uint8_t>((tag >> 28u) & 0x7u);
+        out.irq = ((tag >> 31u) & 0x1ull) != 0ull;
+        out.addr = static_cast<uint32_t>((tag >> 32u) & 0x7FFFFFFFu);
+        out.upper = static_cast<uint32_t>((tag >> 16u) & 0xFFFFu);
+        return out;
+    }
+
+    inline uint32_t gifTagNloop(uint64_t tagLo)
+    {
+        return static_cast<uint32_t>(tagLo & 0x7FFFu);
+    }
+
+    inline uint8_t gifTagFlg(uint64_t tagLo)
+    {
+        return static_cast<uint8_t>((tagLo >> 58u) & 0x3u);
+    }
+
+    inline uint32_t gifTagNreg(uint64_t tagLo)
+    {
+        uint32_t nreg = static_cast<uint32_t>((tagLo >> 60u) & 0xFu);
+        return nreg == 0u ? 16u : nreg;
     }
 
 }
@@ -363,15 +406,15 @@ uint32_t PS2Memory::translateAddress(uint32_t virtualAddress)
     // EE uncached aliases of main RAM (per PS2 memory map):
     //   0x20000000-0x3FFFFFFF -> 32MB mirror of RDRAM
     // This includes the accelerated window rooted at 0x30100000.
-    if (virtualAddress >= 0x20000000u && virtualAddress < 0x40000000u)
+    if (Ps2IsUncachedRamMirrorAddress(virtualAddress))
     {
         return virtualAddress & PS2_RAM_MASK;
     }
 
     // KSEG0/KSEG1 direct-mapped window.
-    if (virtualAddress >= 0x80000000 && virtualAddress < 0xC0000000)
+    if (Ps2IsKseg01Address(virtualAddress))
     {
-        return virtualAddress & 0x1FFFFFFF;
+        return Ps2DirectMappedPhysicalAddress(virtualAddress);
     }
 
     // In this runtime, low segments are treated as physical-style addresses already.
@@ -381,7 +424,7 @@ uint32_t PS2Memory::translateAddress(uint32_t virtualAddress)
     }
 
     // KSEG2/KSEG3 are TLB mapped.
-    if (virtualAddress >= 0xC0000000)
+    if (Ps2IsKseg23Address(virtualAddress))
     {
         for (const auto &entry : m_tlbEntries)
         {
@@ -477,7 +520,7 @@ uint8_t PS2Memory::read8(uint32_t address)
         (void)vuLimit;
         return vuMem[vuOffset];
     }
-    else if (physAddr >= PS2_IO_BASE && physAddr < PS2_IO_BASE + PS2_IO_SIZE)
+    else if (isIoRegister(physAddr))
     {
         uint32_t regAddr = physAddr & ~0x3;
         uint32_t value = readIORegister(regAddr);
@@ -512,7 +555,7 @@ uint16_t PS2Memory::read16(uint32_t address)
     {
         return loadScalar<uint16_t>(vuMem, vuOffset, vuLimit, "read16 vu", address);
     }
-    else if (physAddr >= PS2_IO_BASE && physAddr < PS2_IO_BASE + PS2_IO_SIZE)
+    else if (isIoRegister(physAddr))
     {
         uint32_t regAddr = physAddr & ~0x3;
         uint32_t value = readIORegister(regAddr);
@@ -557,7 +600,7 @@ uint32_t PS2Memory::read32(uint32_t address)
     {
         return loadScalar<uint32_t>(vuMem, vuOffset, vuLimit, "read32 vu", address);
     }
-    else if (physAddr >= PS2_IO_BASE && physAddr < PS2_IO_BASE + PS2_IO_SIZE)
+    else if (isIoRegister(physAddr))
     {
         return readIORegister(physAddr);
     }
@@ -598,7 +641,7 @@ uint64_t PS2Memory::read64(uint32_t address)
 
     // 64-bit IO read: compose from the two adjacent 32-bit IO register slots
     // to avoid any side-effects from read32 handlers.
-    if (address >= PS2_IO_BASE && address < (PS2_IO_BASE + PS2_IO_SIZE))
+    if (isIoRegister(address))
     {
         uint32_t lo = m_ioRegisters.count(address) ? m_ioRegisters[address] : 0u;
         uint32_t hi = m_ioRegisters.count(address + 4) ? m_ioRegisters[address + 4] : 0u;
@@ -664,7 +707,7 @@ void PS2Memory::write8(uint32_t address, uint8_t value)
             return;
         }
     }
-    if (physAddr >= PS2_IO_BASE && physAddr < PS2_IO_BASE + PS2_IO_SIZE)
+    if (isIoRegister(physAddr))
     {
         // IO registers - handle byte writes by modifying the appropriate byte in the word
         uint32_t regAddr = physAddr & ~0x3;
@@ -703,7 +746,7 @@ void PS2Memory::write16(uint32_t address, uint16_t value)
             return;
         }
     }
-    if (physAddr >= PS2_IO_BASE && physAddr < PS2_IO_BASE + PS2_IO_SIZE)
+    if (isIoRegister(physAddr))
     {
         uint32_t regAddr = physAddr & ~0x3;
         uint32_t shift = (physAddr & 2) * 8;
@@ -772,7 +815,7 @@ void PS2Memory::write32(uint32_t address, uint32_t value)
             return;
         }
     }
-    if (physAddr >= PS2_IO_BASE && physAddr < PS2_IO_BASE + PS2_IO_SIZE)
+    if (isIoRegister(physAddr))
     {
         writeIORegister(physAddr, value);
     }
@@ -829,7 +872,7 @@ void PS2Memory::write64(uint32_t address, uint64_t value)
             return;
         }
     }
-    if (physAddr >= PS2_IO_BASE && physAddr < PS2_IO_BASE + PS2_IO_SIZE)
+    if (isIoRegister(physAddr))
     {
         write32(address, (uint32_t)value);
         write32(address + 4, (uint32_t)(value >> 32));
@@ -868,7 +911,7 @@ void PS2Memory::write128(uint32_t address, __m128i value)
             return;
         }
     }
-    if (physAddr >= PS2_IO_BASE && physAddr < PS2_IO_BASE + PS2_IO_SIZE)
+    if (isIoRegister(physAddr))
     {
         // Non-RAM 128-bit stores are modeled as two 64-bit stores.
         uint64_t lo = _mm_extract_epi64(value, 0);
@@ -1652,6 +1695,278 @@ void PS2Memory::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
         submitGifPacket(GifPathId::Path3, data, sizeBytes);
     else if (m_gifPacketCallback && data && sizeBytes >= 16)
         m_gifPacketCallback(data, sizeBytes);
+}
+
+bool PS2Memory::tryProcessNativeGifImageUploadChain(GS &gs, uint32_t tadr, uint32_t chcr)
+{
+    static constexpr uint32_t GIF_CHANNEL = 0x1000A000u;
+    static constexpr uint32_t D_STAT = 0x1000E010u;
+    static constexpr uint32_t D_CTRL = 0x1000E000u;
+
+    if (!m_rdram || !m_gsVRAM || m_path3Masked)
+        return false;
+    if (m_gifArbiter && !m_gifArbiter->empty())
+        return false;
+    if ((chcr & 0x100u) == 0u || ((chcr >> 2u) & 0x3u) != 1u)
+        return false;
+    if ((chcr & (1u << 7u)) != 0u || ((chcr >> 4u) & 0x3u) != 0u)
+        return false;
+
+    const auto dctrlIt = m_ioRegisters.find(D_CTRL);
+    if (dctrlIt != m_ioRegisters.end() && ((dctrlIt->second & 0x1u) == 0u))
+        return false;
+
+    auto resolveContiguous = [&](uint32_t guestAddr, uint32_t bytes, const uint8_t *&out) -> bool
+    {
+        try
+        {
+            const bool scratch = isScratchpad(guestAddr);
+            const uint32_t phys = translateAddress(guestAddr);
+            const uint8_t *base = scratch ? m_scratchpad : m_rdram;
+            const uint32_t limit = scratch ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
+            if (!base || phys > limit || bytes > limit - phys)
+                return false;
+            out = base + phys;
+            return true;
+        }
+        catch (const std::exception &)
+        {
+            return false;
+        }
+    };
+
+    auto loadDmaTagAt = [&](uint32_t guestAddr, DmaTagView &out) -> bool
+    {
+        const uint8_t *ptr = nullptr;
+        if (!resolveContiguous(guestAddr, 16u, ptr))
+            return false;
+        out = decodeDmaTag(loadScalar<uint64_t>(ptr, 0u, 16u, "native gif dma tag", guestAddr));
+        return true;
+    };
+
+    auto decodeSetupPayload = [&](const uint8_t *payload, uint64_t (&regs)[4]) -> bool
+    {
+        const uint64_t tagLo = loadScalar<uint64_t>(payload, 0u, 80u, "native gif setup tag", 0u);
+        const uint64_t tagHi = loadScalar<uint64_t>(payload, 8u, 80u, "native gif setup regs", 0u);
+        if (gifTagNloop(tagLo) != 4u ||
+            gifTagFlg(tagLo) != GIF_FMT_PACKED ||
+            gifTagNreg(tagLo) != 1u ||
+            (tagHi & 0xFull) != 0x0Eull)
+        {
+            return false;
+        }
+
+        static constexpr uint8_t kExpectedRegs[4] = {
+            GS_REG_BITBLTBUF,
+            GS_REG_TRXPOS,
+            GS_REG_TRXREG,
+            GS_REG_TRXDIR,
+        };
+
+        uint32_t offset = 16u;
+        for (uint32_t i = 0; i < 4u; ++i)
+        {
+            regs[i] = loadScalar<uint64_t>(payload, offset, 80u, "native gif setup value", 0u);
+            const uint64_t reg = loadScalar<uint64_t>(payload, offset + 8u, 80u, "native gif setup register", 0u);
+            if ((reg & 0xFFu) != kExpectedRegs[i])
+                return false;
+            offset += 16u;
+        }
+
+        const uint32_t trxdirMode = static_cast<uint32_t>(regs[3] & 0x3ull);
+        const uint32_t rrw = static_cast<uint32_t>(regs[2] & 0xFFFull);
+        const uint32_t rrh = static_cast<uint32_t>((regs[2] >> 32u) & 0xFFFull);
+        return trxdirMode == 0u && rrw != 0u && rrh != 0u;
+    };
+
+    DmaTagView setupTag{};
+    if (!loadDmaTagAt(tadr, setupTag) ||
+        setupTag.id != 1u ||
+        setupTag.qwc != 5u ||
+        setupTag.irq)
+    {
+        return false;
+    }
+
+    const uint8_t *setupPayload = nullptr;
+    const uint32_t setupPayloadAddr = tadr + 16u;
+    if (!resolveContiguous(setupPayloadAddr, 5u * 16u, setupPayload))
+        return false;
+
+    uint64_t setupRegs[4] = {};
+    if (!decodeSetupPayload(setupPayload, setupRegs))
+        return false;
+
+    uint32_t imageTagDmaAddr = setupPayloadAddr + 5u * 16u;
+    DmaTagView imageTagDma{};
+    if (!loadDmaTagAt(imageTagDmaAddr, imageTagDma) ||
+        imageTagDma.id != 1u ||
+        imageTagDma.qwc != 1u ||
+        imageTagDma.irq)
+    {
+        return false;
+    }
+
+    const uint8_t *imageGifTag = nullptr;
+    if (!resolveContiguous(imageTagDmaAddr + 16u, 16u, imageGifTag))
+        return false;
+
+    const uint64_t imageTagLo = loadScalar<uint64_t>(imageGifTag, 0u, 16u, "native gif image tag", imageTagDmaAddr + 16u);
+    if (gifTagFlg(imageTagLo) != GIF_FMT_IMAGE)
+        return false;
+
+    const uint32_t imageQwc = gifTagNloop(imageTagLo);
+    if (imageQwc == 0u)
+        return false;
+
+    const uint64_t imageBytes64 = static_cast<uint64_t>(imageQwc) * 16ull;
+    if (imageBytes64 > 0xFFFFFFFFull)
+        return false;
+    const uint32_t imageBytes = static_cast<uint32_t>(imageBytes64);
+
+    const uint32_t payloadTagAddr = imageTagDmaAddr + 32u;
+    DmaTagView payloadTag{};
+    if (!loadDmaTagAt(payloadTagAddr, payloadTag) ||
+        payloadTag.qwc != imageQwc ||
+        payloadTag.irq)
+    {
+        return false;
+    }
+
+    uint32_t imageDataAddr = 0u;
+    uint32_t finalTadr = payloadTagAddr;
+    uint32_t lastTagUpper = payloadTag.upper;
+    if (payloadTag.id == 3u || payloadTag.id == 4u)
+    {
+        imageDataAddr = payloadTag.addr;
+        const uint32_t terminalTagAddr = payloadTagAddr + 16u;
+        DmaTagView terminalTag{};
+        if (!loadDmaTagAt(terminalTagAddr, terminalTag) ||
+            terminalTag.qwc != 0u ||
+            terminalTag.irq ||
+            (terminalTag.id != 0u && terminalTag.id != 7u))
+        {
+            return false;
+        }
+        finalTadr = (terminalTag.id == 0u) ? (terminalTagAddr + 16u) : terminalTagAddr;
+        lastTagUpper = terminalTag.upper;
+    }
+    else if (payloadTag.id == 7u)
+    {
+        imageDataAddr = payloadTagAddr + 16u;
+        finalTadr = payloadTagAddr;
+    }
+    else
+    {
+        return false;
+    }
+
+    const uint8_t *imageData = nullptr;
+    if (!resolveContiguous(imageDataAddr, imageBytes, imageData))
+        return false;
+
+    m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
+    m_seenGifCopy = true;
+    m_gifCopyCount.fetch_add(1, std::memory_order_relaxed);
+    gs.uploadImageNative(setupRegs[0], setupRegs[1], setupRegs[2], setupRegs[3], imageData, imageBytes);
+
+    m_ioRegisters[GIF_CHANNEL + 0x30u] = finalTadr;
+    m_ioRegisters[GIF_CHANNEL + 0x40u] = 0u;
+    m_ioRegisters[GIF_CHANNEL + 0x50u] = 0u;
+    m_ioRegisters[GIF_CHANNEL + 0x00u] = ((chcr & 0x0000FFFFu) | (lastTagUpper << 16u)) & ~0x100u;
+    m_ioRegisters[GIF_CHANNEL + 0x20u] = 0u;
+
+    uint32_t dstat = m_ioRegisters.count(D_STAT) ? m_ioRegisters[D_STAT] : 0u;
+    dstat |= (1u << 2u);
+    const uint32_t status = dstat & 0x3FFu;
+    const uint32_t mask = (dstat >> 16u) & 0x3FFu;
+    if ((status & mask) != 0u)
+        dstat |= (1u << 31u);
+    else
+        dstat &= ~(1u << 31u);
+    m_ioRegisters[D_STAT] = dstat;
+    queueCompletedDmacCause(2u);
+    return true;
+}
+
+bool PS2Memory::tryProcessNativeGifPackedChain(GS &gs, uint32_t tadr, uint32_t chcr)
+{
+    static constexpr uint32_t GIF_CHANNEL = 0x1000A000u;
+    static constexpr uint32_t D_STAT = 0x1000E010u;
+    static constexpr uint32_t D_CTRL = 0x1000E000u;
+
+    if (!m_rdram || !m_gsVRAM || m_path3Masked)
+        return false;
+    if (m_gifArbiter && !m_gifArbiter->empty())
+        return false;
+    if ((chcr & 0x100u) == 0u || ((chcr >> 2u) & 0x3u) != 1u)
+        return false;
+    if ((chcr & (1u << 7u)) != 0u || ((chcr >> 4u) & 0x3u) != 0u)
+        return false;
+
+    const auto dctrlIt = m_ioRegisters.find(D_CTRL);
+    if (dctrlIt != m_ioRegisters.end() && ((dctrlIt->second & 0x1u) == 0u))
+        return false;
+
+    auto resolveContiguous = [&](uint32_t guestAddr, uint32_t bytes, const uint8_t *&out) -> bool
+    {
+        try
+        {
+            const bool scratch = isScratchpad(guestAddr);
+            const uint32_t phys = translateAddress(guestAddr);
+            const uint8_t *base = scratch ? m_scratchpad : m_rdram;
+            const uint32_t limit = scratch ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
+            if (!base || phys > limit || bytes > limit - phys)
+                return false;
+            out = base + phys;
+            return true;
+        }
+        catch (const std::exception &)
+        {
+            return false;
+        }
+    };
+
+    const uint8_t *tagPtr = nullptr;
+    if (!resolveContiguous(tadr, 16u, tagPtr))
+        return false;
+
+    const DmaTagView tag = decodeDmaTag(loadScalar<uint64_t>(tagPtr, 0u, 16u, "native packed gif dma tag", tadr));
+    if (tag.id != 7u || tag.qwc == 0u || tag.irq)
+        return false;
+
+    const uint64_t payloadBytes64 = static_cast<uint64_t>(tag.qwc) * 16ull;
+    if (payloadBytes64 > 0xFFFFFFFFull)
+        return false;
+    const uint32_t payloadBytes = static_cast<uint32_t>(payloadBytes64);
+
+    const uint8_t *payload = nullptr;
+    if (!resolveContiguous(tadr + 16u, payloadBytes, payload))
+        return false;
+    if (!gs.processNativePackedGIFPacket(payload, payloadBytes))
+        return false;
+
+    m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
+    m_seenGifCopy = true;
+    m_gifCopyCount.fetch_add(1, std::memory_order_relaxed);
+
+    m_ioRegisters[GIF_CHANNEL + 0x30u] = tadr;
+    m_ioRegisters[GIF_CHANNEL + 0x40u] = 0u;
+    m_ioRegisters[GIF_CHANNEL + 0x50u] = 0u;
+    m_ioRegisters[GIF_CHANNEL + 0x00u] = ((chcr & 0x0000FFFFu) | (tag.upper << 16u)) & ~0x100u;
+    m_ioRegisters[GIF_CHANNEL + 0x20u] = 0u;
+
+    uint32_t dstat = m_ioRegisters.count(D_STAT) ? m_ioRegisters[D_STAT] : 0u;
+    dstat |= (1u << 2u);
+    const uint32_t status = dstat & 0x3FFu;
+    const uint32_t mask = (dstat >> 16u) & 0x3FFu;
+    if ((status & mask) != 0u)
+        dstat |= (1u << 31u);
+    else
+        dstat &= ~(1u << 31u);
+    m_ioRegisters[D_STAT] = dstat;
+    queueCompletedDmacCause(2u);
+    return true;
 }
 
 int PS2Memory::pollDmaRegisters()

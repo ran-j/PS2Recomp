@@ -80,6 +80,12 @@ namespace ps2recomp
         }
     };
 
+    struct MemoryAccessHint
+    {
+        bool hasAddress = false;
+        uint32_t address = 0;
+    };
+
     // Function information
     struct Function
     {

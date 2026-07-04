@@ -321,6 +321,13 @@ public:
     void reset();
 
     void processGIFPacket(const uint8_t *data, uint32_t sizeBytes);
+    bool processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes);
+    void uploadImageNative(uint64_t bitbltbuf,
+                           uint64_t trxpos,
+                           uint64_t trxreg,
+                           uint64_t trxdir,
+                           const uint8_t *data,
+                           uint32_t sizeBytes);
     void writeRegister(uint8_t regAddr, uint64_t value);
 
     const uint8_t *lockDisplaySnapshot(uint32_t &outSize);
@@ -346,6 +353,8 @@ public:
                                           bool *outUsedPreferred = nullptr) const;
     bool clearFramebufferContext(uint32_t contextIndex, uint32_t rgba);
     bool clearActiveFramebuffer(uint32_t rgba);
+    uint64_t nativeImageUploadCount() const { return m_nativeImageUploadCount; }
+    uint64_t nativePackedGIFPacketCount() const { return m_nativePackedGIFPacketCount; }
 
     uint32_t consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes);
 
@@ -369,6 +378,7 @@ private:
     void recordPresentDebugEventUnlocked(uint32_t displayFbp, uint32_t sourceFbp, uint32_t width, uint32_t height, bool usedPreferred);
 
     void processImageData(const uint8_t *data, uint32_t sizeBytes);
+    bool tryProcessNativeImageUploadPacket(const uint8_t *data, uint32_t sizeBytes);
     void performLocalToLocalTransfer();
     void performLocalToHostToBuffer();
     bool copyFrameToHostRgbaUnlocked(const GSFrameReg &frame,
@@ -433,6 +443,8 @@ private:
     uint32_t m_hostPresentationSourceFbp = 0;
     bool m_hostPresentationUsedPreferred = false;
     bool m_hasHostPresentationFrame = false;
+    uint64_t m_nativeImageUploadCount = 0;
+    uint64_t m_nativePackedGIFPacketCount = 0;
 
     std::vector<uint8_t> m_localToHostBuffer;
     size_t m_localToHostReadPos = 0;

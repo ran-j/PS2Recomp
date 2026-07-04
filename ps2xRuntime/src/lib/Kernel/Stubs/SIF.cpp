@@ -1,6 +1,7 @@
 #include "Common.h"
 #include "SIF.h"
 #include "../Syscalls/RPC.h"
+#include "runtime/ps2_address.h"
 
 #include <map>
 
@@ -186,22 +187,22 @@ namespace ps2_stubs
 
         bool isCopyableGuestAddress(uint32_t addr)
         {
-            if (addr >= PS2_SCRATCHPAD_BASE && addr < (PS2_SCRATCHPAD_BASE + PS2_SCRATCHPAD_SIZE))
+            if (Ps2AddressInRange(addr, PS2_SCRATCHPAD_BASE, PS2_SCRATCHPAD_SIZE))
             {
                 return true;
             }
 
-            if (addr < 0x20000000u)
+            if (addr < PS2_EE_UNCACHED_RAM_MIRROR_BASE)
             {
                 return true;
             }
 
-            if (addr >= 0x20000000u && addr < 0x40000000u)
+            if (Ps2IsUncachedRamMirrorAddress(addr))
             {
                 return true;
             }
 
-            if (addr >= 0x80000000u && addr < 0xC0000000u)
+            if (Ps2IsKseg01Address(addr))
             {
                 return true;
             }
