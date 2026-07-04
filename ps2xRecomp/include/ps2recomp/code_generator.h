@@ -72,6 +72,7 @@ namespace ps2recomp
         RecompilerReporter *m_reporter = nullptr;
         std::string m_currentFunctionName;
 
+        std::string translateInstruction(const Instruction &inst);
         std::string translateInstruction(const Instruction &inst, const MemoryAccessHint &memoryHint);
         std::string emitUnhandledInstruction(const Instruction &inst, const std::string &message);
         std::string translateMMIInstruction(const Instruction &inst);
