@@ -223,11 +223,6 @@ namespace ps2recomp
 
     CodeGenerator::~CodeGenerator() = default;
 
-    std::string CodeGenerator::translateInstruction(const Instruction &inst)
-    {
-        return InstructionTranslator(*this).translate(inst, {});
-    }
-
     std::string CodeGenerator::translateInstruction(const Instruction &inst, const MemoryAccessHint &memoryHint)
     {
         return InstructionTranslator(*this).translate(inst, memoryHint);
