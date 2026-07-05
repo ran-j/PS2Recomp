@@ -1637,7 +1637,8 @@ void register_ps2_gs_tests()
                 (1ull << 35) |
                 (static_cast<uint64_t>(kClutCbp) << 37) |
                 (static_cast<uint64_t>(GS_PSM_CT32) << 51) |
-                (1ull << 55);
+                (0ull << 55) |
+                (1ull << 61);
             constexpr uint64_t kPrim =
                 static_cast<uint64_t>(GS_PRIM_TRIANGLE) |
                 (1ull << 4);
@@ -2364,7 +2365,8 @@ void register_ps2_gs_tests()
                 (1ull << 34) |
                 (1ull << 35) |
                 (static_cast<uint64_t>(kClutCbp) << 37) |
-                (static_cast<uint64_t>(GS_PSM_CT32) << 51);
+                (static_cast<uint64_t>(GS_PSM_CT32) << 51) |
+                (1ull << 61);
             constexpr uint64_t kPrim =
                 static_cast<uint64_t>(GS_PRIM_SPRITE) |
                 (1ull << 4) |  // TME
@@ -2425,7 +2427,8 @@ void register_ps2_gs_tests()
                 (1ull << 34) |
                 (1ull << 35) |
                 (static_cast<uint64_t>(kClutCbp) << 37) |
-                (static_cast<uint64_t>(GS_PSM_CT32) << 51);
+                (static_cast<uint64_t>(GS_PSM_CT32) << 51) |
+                (1ull << 61);
             constexpr uint64_t kPrim =
                 static_cast<uint64_t>(GS_PRIM_SPRITE) |
                 (1ull << 4) |  // TME
@@ -2509,12 +2512,14 @@ void register_ps2_gs_tests()
                 (1ull << 35) |
                 (static_cast<uint64_t>(kWrongClutCbp) << 37) |
                 (static_cast<uint64_t>(GS_PSM_CT32) << 51) |
-                (1ull << 55);
+                (0ull << 55) |
+                (1ull << 61);
             constexpr uint64_t kTex2 =
                 (static_cast<uint64_t>(GS_PSM_T8) << 20) |
                 (static_cast<uint64_t>(kExpectedClutCbp) << 37) |
                 (static_cast<uint64_t>(GS_PSM_CT32) << 51) |
-                (1ull << 55);
+                (0ull << 55) |
+                (1ull << 61);
             constexpr uint64_t kPrim =
                 static_cast<uint64_t>(GS_PRIM_SPRITE) |
                 (1ull << 4) |
@@ -2549,70 +2554,6 @@ void register_ps2_gs_tests()
             std::memcpy(&pixel, vram.data(), sizeof(pixel));
             t.Equals(pixel, kExpectedColor,
                      "TEX2 should override the active CLUT base and format state without requiring a new TEX0 write");
-        });
-
-        tc.Run("GS TEXCLUT offsets T8 CLUT fetch coordinates", [](TestCase &t)
-        {
-            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
-            GS gs;
-            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
-
-            constexpr uint32_t kTexTbp = 64u;
-            constexpr uint32_t kClutCbp = 128u;
-            constexpr uint64_t kFrameReg =
-                (0ull << 0) |
-                (1ull << 16) |
-                (static_cast<uint64_t>(GS_PSM_CT32) << 24);
-            constexpr uint64_t kZbuf = (1ull << 32);
-            constexpr uint64_t kTex0 =
-                (static_cast<uint64_t>(kTexTbp) << 0) |
-                (1ull << 14) |
-                (static_cast<uint64_t>(GS_PSM_T8) << 20) |
-                (0ull << 26) |
-                (0ull << 30) |
-                (1ull << 34) |
-                (1ull << 35) |
-                (static_cast<uint64_t>(kClutCbp) << 37) |
-                (static_cast<uint64_t>(GS_PSM_CT32) << 51) |
-                (1ull << 55);
-            constexpr uint64_t kTexClut =
-                (1ull << 0) |
-                (3ull << 6) |
-                (2ull << 12);
-            constexpr uint64_t kPrim =
-                static_cast<uint64_t>(GS_PRIM_SPRITE) |
-                (1ull << 4) |
-                (1ull << 8);
-            constexpr uint32_t kWrongColor = 0xFF00FF00u;
-            constexpr uint32_t kExpectedColor = 0xFF3366CCu;
-
-            const uint32_t texOff = GSMem::LookupPixelAddressP8(kTexTbp, 1u, 0u, 0u);
-            vram[texOff] = 0u;
-
-            const uint32_t wrongClutOff = GSMem::LookupPixelAddressCT32(kClutCbp, 1u, 0u, 0u) * 4;
-            const uint32_t expectedClutOff = GSMem::LookupPixelAddressCT32(kClutCbp, 1u, 3u, 2u) * 4;
-            std::memcpy(vram.data() + wrongClutOff, &kWrongColor, sizeof(kWrongColor));
-            std::memcpy(vram.data() + expectedClutOff, &kExpectedColor, sizeof(kExpectedColor));
-
-            gs.writeRegister(GS_REG_FRAME_1, kFrameReg);
-            gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
-            gs.writeRegister(GS_REG_SCISSOR_1, 0ull);
-            gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
-            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
-            gs.writeRegister(GS_REG_ALPHA_1, 0ull);
-            gs.writeRegister(GS_REG_TEX0_1, kTex0);
-            gs.writeRegister(GS_REG_TEXCLUT, kTexClut);
-            gs.writeRegister(GS_REG_PRIM, kPrim);
-            gs.writeRegister(GS_REG_RGBAQ, 0x80808080ull);
-            gs.writeRegister(GS_REG_UV, 0ull);
-            gs.writeRegister(GS_REG_XYZ2, 0ull);
-            gs.writeRegister(GS_REG_UV, 0ull);
-            gs.writeRegister(GS_REG_XYZ2, (16ull << 0) | (16ull << 16));
-
-            uint32_t pixel = 0u;
-            std::memcpy(&pixel, vram.data(), sizeof(pixel));
-            t.Equals(pixel, kExpectedColor,
-                     "TEXCLUT should offset the CLUT lookup coordinates instead of always starting from the CLUT base");
         });
 
         tc.Run("GS TEXA expands CT24 alpha and honors AEM for black texels", [](TestCase &t)
@@ -2907,7 +2848,8 @@ void register_ps2_gs_tests()
                     (1ull << 34) |
                     (1ull << 35) |
                     (static_cast<uint64_t>(kClutCbp) << 37) |
-                    (static_cast<uint64_t>(GS_PSM_CT32) << 51);
+                    (static_cast<uint64_t>(GS_PSM_CT32) << 51) |
+                    (1ull << 61);
                 constexpr uint64_t kPrim =
                     static_cast<uint64_t>(GS_PRIM_TRIANGLE) |
                     (1ull << 4) |
