@@ -1879,6 +1879,8 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
         t.csm = static_cast<uint8_t>((value >> 55) & 0x1);
         t.csa = static_cast<uint8_t>((value >> 56) & 0x1F);
         t.cld = static_cast<uint8_t>((value >> 61) & 0x7);
+
+        ReloadClutCache(t.psm, t.cpsm, t.cbp, t.csm, t.csa, t.cld);
         break;
     }
     case GS_REG_CLAMP_1:
@@ -1909,6 +1911,8 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
         t.csm = static_cast<uint8_t>((value >> 55) & 0x1);
         t.csa = static_cast<uint8_t>((value >> 56) & 0x1F);
         t.cld = static_cast<uint8_t>((value >> 61) & 0x7);
+
+        ReloadClutCache(t.psm, t.cpsm, t.cbp, t.csm, t.csa, t.cld);
         break;
     }
     case GS_REG_XYOFFSET_1:
@@ -3004,4 +3008,170 @@ void GS::ReloadTexturePageCache(u32 psm, u32 base_block)
 void GS::InvalidateTexturePageCache()
 {
     m_texture_page_cache.valid = false;
+}
+
+u32 GS::ReadClutCache(u32 psm, u8 index, u32 csa)
+{
+
+    switch (psm)
+    {
+    case GS_PSM_CT32:
+    case GS_PSM_CT24:
+    {
+        u32 v;
+        memcpy(&v, &m_clut_cache[(csa *  16 * 4) + (index * 4)], 4);
+
+        return v;
+    }
+    break;
+
+    case GS_PSM_CT16:
+    case GS_PSM_CT16S:
+    {
+        u16 v;
+        memcpy(&v, &m_clut_cache[(csa * 16 * 2) + (index * 2)], 2);
+
+        return static_cast<u32>(v);
+    }
+    break;
+
+    default:
+        break;
+    }
+
+    return 0;
+}
+
+void GS::ReloadClutCacheCSM1(u32 psm, u32 cpsm, u32 cbp, u32 csa)
+{
+    const u32 cbpp = GSMem::BitsPerPixel(static_cast<GSMem::PixelStorageMode>(cpsm));
+    const u32 tbpp = GSMem::BitsPerPixel(static_cast<GSMem::PixelStorageMode>(psm));
+
+    const u32 clut_bytes_per_pixel = cbpp / 8;
+
+    // offset into the clut buffer
+    const u32 offset = csa * 16;
+
+    // number of entries for this load
+    const u32 entries = 1 << tbpp;
+
+    // total entries in the cache
+    const u32 total_cache_entries = 1024 / clut_bytes_per_pixel;
+
+    const u32 total_entries = std::min(total_cache_entries, entries + offset);
+
+    u32 cache_addr = static_cast<u32>(csa) * 16 * clut_bytes_per_pixel;
+    switch (tbpp)
+    {
+    case 4:
+        for (u32 i = offset; i < total_entries; ++i)
+        {
+            u32 x = i & 7;
+            u32 y = (i / 8) & 1;
+
+            const u32 value = ReadVram(cpsm, cbp, 1, x, y);
+            memcpy(&m_clut_cache[cache_addr & 0x3FF], &value, clut_bytes_per_pixel);
+
+            cache_addr += clut_bytes_per_pixel;
+        }
+        break;
+
+    case 8:
+        for (u32 i = offset; i < total_entries; ++i)
+        {
+            u32 x = i & 7;
+            if (i & 0x10)
+            {
+                x += 8;
+            }
+
+            u32 y = (i & 0xE0) / 16;
+            if (i & 0x8)
+            {
+                y++;
+            }
+
+            const u32 value = ReadVram(cpsm, cbp, 1, x, y);
+            memcpy(&m_clut_cache[cache_addr & 0x3FF], &value, clut_bytes_per_pixel);
+
+            cache_addr += clut_bytes_per_pixel;
+        }
+        break;
+
+    default:
+        break;
+    }
+}
+
+void GS::ReloadClutCacheCSM2(u32 psm, u32 cbp)
+{
+    const u32 tbpp = GSMem::BitsPerPixel(static_cast<GSMem::PixelStorageMode>(psm));
+    const u32 entries = 1 << tbpp;
+
+    const u32 uoffset = m_texclut.cou * 16;
+    const u32 voffset = m_texclut.cov;
+
+    const u32 cbw = m_texclut.cbw;
+
+    for (usz i = 0; i < entries; ++i)
+    {
+        u32 x = (static_cast<u32>(uoffset) * 16) + i;
+
+        u16 value = ReadVram(GS_PSM_CT16, cbp, cbw, x, m_texclut.cov);
+
+        memcpy(&m_clut_cache[(i * 2) & 0x3FF], &value, 2);
+    }
+}
+
+void GS::ReloadClutCache(u32 psm, u32 cpsm, u32 cbp, u8 csm, u8 csa, u8 cld)
+{
+    bool load = false;
+
+    switch (cld)
+    {
+    case 0x1:
+        load = true;
+        break;
+    case 0x2:
+        load = true;
+        m_cbp0 = cbp;
+        break;
+    case 0x3:
+        load = true;
+        m_cbp1 = cbp;
+        break;
+    case 0x4:
+        if (cbp != m_cbp0)
+        {
+            load = true;
+            m_cbp0 = cbp;
+        }
+        break;
+    case 0x5:
+        if (cbp != m_cbp1)
+        {
+            load = true;
+            m_cbp1 = cbp;
+        }
+        break;
+    default:
+        break;
+    }
+
+    if (!load)
+    {
+        return;
+    }
+
+    switch (csm)
+    {
+    case 0:
+        ReloadClutCacheCSM1(psm, cpsm, cbp, csa);
+        break;
+    case 1:
+        ReloadClutCacheCSM2(psm, cbp);
+        break;
+    default:
+        break;
+    }
 }

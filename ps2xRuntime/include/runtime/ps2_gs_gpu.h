@@ -381,6 +381,12 @@ public:
     void ReloadTexturePageCache(u32 psm, u32 base_block);
     void InvalidateTexturePageCache();
 
+    // clut cache
+    u32 ReadClutCache(u32 psm, u8 index, u32 csa);
+    void ReloadClutCacheCSM1(u32 psm, u32 cpsm, u32 cbp, u32 csa);
+    void ReloadClutCacheCSM2(u32 psm, u32 cbp);
+    void ReloadClutCache(u32 psm, u32 cpsm, u32 cbp, u8 csm, u8 csa, u8 cld);
+
 private:
     void snapshotVRAM();
     void writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi);
@@ -491,6 +497,10 @@ private:
     std::array<WriteAddressFunction, 0x3F> m_write_address_funcs{ };
 
     TexturePageCache m_texture_page_cache{ };
+    std::array<u8, 1_kb> m_clut_cache{ };
+
+    u32 m_cbp0{ 0 };
+    u32 m_cbp1{ 0 };
 };
 
 inline u32 GS::ReadVram(u32 psm, u32 base, u32 bw, u32 x, u32 y) const

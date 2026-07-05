@@ -607,7 +607,7 @@ uint32_t GSRasterizer::sampleTexture(GS *gs, float s, float t, float q, uint16_t
         case GS_PSM_T4:
         case GS_PSM_T4HL:
         case GS_PSM_T4HH:
-            return lookupCLUT(gs, static_cast<u8>(out), tex.cbp, tex.cpsm, tex.csm, tex.csa, tex.psm);
+            return applyTexa(gs->m_texa, tex.psm, gs->ReadClutCache(tex.cpsm, static_cast<u8>(out), tex.csa));
         }
 
         return 0xFFFF00FFu;
