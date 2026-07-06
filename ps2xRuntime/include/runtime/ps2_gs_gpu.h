@@ -11,6 +11,8 @@
 
 #include "ps2_gs_rasterizer.h"
 #include "ps2_gs_memory.h"
+#include "ps2_gs_gpr.h"
+#include "types.h"
 
 enum GSPrimType : uint8_t
 {
@@ -120,109 +122,55 @@ struct GSVertex
     uint8_t fog;
 };
 
-struct GSFrameReg
-{
-    uint32_t fbp;
-    uint32_t fbw;
-    uint8_t psm;
-    uint32_t fbmsk;
-};
-
-struct GSZbufReg
-{
-    u32 zbp;
-    u8 psm;
-    bool zmask;
-};
-
-struct GSScissorReg
-{
-    uint16_t x0, x1, y0, y1;
-};
-
-struct GSTex0Reg
-{
-    uint32_t tbp0;
-    uint8_t tbw;
-    uint8_t psm;
-    uint8_t tw;
-    uint8_t th;
-    uint8_t tcc;
-    uint8_t tfx;
-    uint32_t cbp;
-    uint8_t cpsm;
-    uint8_t csm;
-    uint8_t csa;
-    uint8_t cld;
-};
-
-struct GSXYOffsetReg
-{
-    uint16_t ofx;
-    uint16_t ofy;
-};
-
-struct GSTexaReg
-{
-    uint8_t ta0;
-    bool aem;
-    uint8_t ta1;
-};
-
-struct GSTexClutReg
-{
-    uint8_t cbw;
-    uint8_t cou;
-    uint16_t cov;
-};
-
 struct GSContext
 {
-    GSFrameReg frame;
-    GSScissorReg scissor;
-    GSTex0Reg tex0;
-    GSXYOffsetReg xyoffset;
-    GSZbufReg zbuf;
-    uint64_t tex1;
-    uint64_t clamp;
-    uint64_t alpha;
-    uint64_t test;
-    uint64_t fba;
+    GSAlphaReg alpha{ };
+    GSClampReg clamp{ };
+    GSFbaReg fba{ };
+    GSFrameReg frame{ };
+    GSMipTbp1Reg miptbp1{ };
+    GSMipTbp2Reg miptbp2{ };
+    GSScissorReg scissor{ };
+    GSTestReg test{ };
+    GSTex0Reg tex0{ };
+    GSTex1Reg tex1{ };
+    GSTex2Reg tex2{ };
+    GSXYOffsetReg xyoffset{ };
+    GSZbufReg zbuf{ };
 };
 
-struct GSPrimReg
+struct GSGpr
 {
-    GSPrimType type;
-    bool iip;
-    bool tme;
-    bool fge;
-    bool abe;
-    bool aa1;
-    bool fst;
-    bool ctxt;
-    bool fix;
-};
+    GSBitBltBufReg bitbltbuf{ };
+    GSColClampReg colclamp{ };
+    GSDimxReg dimx{ };
+    GSDtheReg dthe{ };
+    GSFinishReg finish{ };
+    GSFogReg fog{ };
+    GSFogColReg fogcol{ };
+    GSHwReg hwreg{ };
+    GSLabelReg label{ };
+    GSPabeReg pabe{ };
+    GSPrimReg prim{ };
+    GSPrmodeReg prmode{ };
+    GSPremodeContReg prmodecont{ };
+    GSRgbaqReg rgbaq{ };
+    GSScanMskReg scanmsk{ };
+    GSSignalReg signal{ };
+    GSStReg st{ };
+    GSTexaReg texa{ };
+    GSTexClutReg texclut{ };
+    GSTexFlushReg texflush{ };
+    GSTrxDirReg trxdir{ };
+    GSTrxPosReg trxpos{ };
+    GSTrxReg trxreg{ };
+    GSUvReg uv{ };
+    GSXYZReg xyz2{ };
+    GSXYZReg xyz3{ };
+    GSXYZFReg xyzf2{ };
+    GSXYZFReg xyzf3{ };
 
-struct GSBitBltBuf
-{
-    uint32_t sbp;
-    uint8_t sbw;
-    uint8_t spsm;
-    uint32_t dbp;
-    uint8_t dbw;
-    uint8_t dpsm;
-};
-
-struct GSTrxPos
-{
-    uint16_t ssax, ssay;
-    uint16_t dsax, dsay;
-    uint8_t dir;
-};
-
-struct GSTrxReg
-{
-    uint16_t rrw, rrh;
+    std::array<GSContext, 2> ctx{ };
 };
 
 struct GSDebugSnapshot
@@ -231,8 +179,8 @@ struct GSDebugSnapshot
     GSPrimReg prim{};
     GSTexaReg texa{};
     GSTexClutReg texclut{};
-    GSBitBltBuf bitbltbuf{};
-    GSTrxPos trxpos{};
+    GSBitBltBufReg bitbltbuf{};
+    GSTrxPosReg trxpos{};
     GSTrxReg trxreg{};
     uint32_t trxdir = 0;
     uint32_t transferX = 0;
@@ -294,8 +242,8 @@ struct GSDebugHistoryEntry
     uint8_t aMin = 0;
     uint8_t aMax = 0;
 
-    GSBitBltBuf bitbltbuf{};
-    GSTrxPos trxpos{};
+    GSBitBltBufReg bitbltbuf{};
+    GSTrxPosReg trxpos{};
     GSTrxReg trxreg{};
     uint32_t trxdir = 0;
     uint32_t transferPixels = 0;
@@ -348,7 +296,7 @@ public:
     uint32_t getLastDisplayBaseBytes() const;
     const GSFrameReg &getContextFrame(int index) const
     {
-        return m_ctx[(index != 0) ? 1 : 0].frame;
+        return m_registers.ctx[(index != 0) ? 1 : 0].frame;
     }
     GSDebugSnapshot getDebugSnapshot() const;
     std::vector<GSDebugHistoryEntry> getDebugHistory() const;
@@ -417,29 +365,15 @@ private:
 
     GSContext &activeContext();
 
+    inline void EndTransfer();
+
+private:
     uint8_t *m_vram = nullptr;
     uint32_t m_vramSize = 0;
     struct GSRegisters *m_privRegs = nullptr;
     mutable std::recursive_mutex m_stateMutex;
 
-    GSContext m_ctx[2];
-    GSPrimReg m_prim{};
-
-    uint8_t m_curR = 0x80, m_curG = 0x80, m_curB = 0x80, m_curA = 0x80;
-    float m_curQ = 1.0f;
-    float m_curS = 0.0f, m_curT = 0.0f;
-    uint16_t m_curU = 0, m_curV = 0;
-    uint8_t m_curFog = 0;
-
-    bool m_prmodecont = true;
-    bool m_pabe = false;
-    GSTexaReg m_texa{0u, false, 0u};
-    GSTexClutReg m_texclut{0u, 0u, 0u};
-
-    GSBitBltBuf m_bitbltbuf{};
-    GSTrxPos m_trxpos{};
-    GSTrxReg m_trxreg{};
-    uint32_t m_trxdir = 3;
+    GSGpr m_registers{ };
 
     struct
     {
@@ -511,6 +445,12 @@ inline u32 GS::ReadVram(u32 psm, u32 base, u32 bw, u32 x, u32 y) const
 inline void GS::WriteVram(u32 psm, u32 base, u32 bw, u32 x, u32 y, u32 value)
 {
     m_write_pixel_funcs[psm & 0x3F](m_vram, base, bw, x, y, value);
+}
+
+inline void GS::EndTransfer()
+{
+    m_registers.trxdir.xdir = 3;
+    m_transferState = { };
 }
 
 #endif
