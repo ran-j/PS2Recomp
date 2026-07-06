@@ -75,8 +75,10 @@ namespace
             return &gs.extwrite;
         case 0x00E0:
             return &gs.bgcolor;
-        case 0x1000:
-            return &gs.csr;
+        // CSR (offset 0x1000) is intentionally not handled here: it is
+        // std::atomic<uint64_t> and no longer converts to uint64_t*. Callers must
+        // check for offset 0x1000 themselves and go through writeCsrHalf/
+        // writeCsrFull/gs.csr.load() instead of gsRegPtr().
         case 0x1010:
             return &gs.imr;
         case 0x1040:
@@ -86,6 +88,50 @@ namespace
         default:
             return nullptr;
         }
+    }
+
+    constexpr uint32_t kGsCsrRegOffset = 0x1000u;
+
+    // Atomically apply a 32-bit write to one half (off=0 low dword, off=4 high
+    // dword) of the GS CSR register. Bits 0..1 of the low dword (SIGNAL/FINISH) are
+    // write-one-to-clear; everything else is a plain merge. Uses compare_exchange
+    // so the whole read-modify-write is a single atomic step -- this register is
+    // also touched by the vsync worker (FIELD bit) and the GIF (SIGNAL/FINISH) on
+    // other threads, so a load-then-store here would race with them.
+    inline void writeCsrHalf(std::atomic<uint64_t> &csr, uint32_t off, uint32_t value)
+    {
+        constexpr uint32_t kW1cMask = 0x3u;
+        uint64_t expected = csr.load();
+        uint64_t desired;
+        do
+        {
+            if (off == 0u)
+            {
+                uint32_t oldLow = static_cast<uint32_t>(expected & 0xFFFFFFFFull);
+                uint32_t mergedLow = (oldLow & kW1cMask) | (value & ~kW1cMask);
+                desired = (expected & 0xFFFFFFFF00000000ull) | static_cast<uint64_t>(mergedLow);
+                desired &= ~static_cast<uint64_t>(value & kW1cMask);
+            }
+            else
+            {
+                uint64_t mask = 0xFFFFFFFFull << (off * 8u);
+                desired = (expected & ~mask) | (static_cast<uint64_t>(value) << (off * 8u));
+            }
+        } while (!csr.compare_exchange_weak(expected, desired));
+    }
+
+    // Same as writeCsrHalf but for a full 64-bit CSR write (bits 0..1 are still
+    // write-one-to-clear against the current value).
+    inline void writeCsrFull(std::atomic<uint64_t> &csr, uint64_t value)
+    {
+        constexpr uint64_t kW1cMask = 0x3ull;
+        uint64_t expected = csr.load();
+        uint64_t desired;
+        do
+        {
+            desired = (expected & kW1cMask) | (value & ~kW1cMask);
+            desired &= ~(value & kW1cMask);
+        } while (!csr.compare_exchange_weak(expected, desired));
     }
 
     constexpr uint32_t kEeTimer0Count = 0x10000000u;
@@ -241,6 +287,9 @@ bool PS2Memory::initialize(size_t ramSize)
 
         // Initialize GS registers
         memset(&gs_regs, 0, sizeof(gs_regs));
+        // memset zero-fills std::atomic<uint64_t>::csr's bytes, which is not itself
+        // a guaranteed-valid atomic store; make the zero-initialization explicit.
+        gs_regs.csr.store(0);
         gs_regs.dispfb1 = (0ULL << 0) | (10ULL << 9) | (0ULL << 15) | (0ULL << 32) | (0ULL << 43);
         gs_regs.display1 = (0ULL << 0) | (0ULL << 12) | (0ULL << 23) | (0ULL << 27) | (639ULL << 32) | (447ULL << 44);
         gs_regs.dispfb2 = gs_regs.dispfb1;
@@ -532,10 +581,16 @@ uint32_t PS2Memory::read32(uint32_t address)
 
     if (isGsPrivReg(address))
     {
+        uint32_t off = address & 7;
+        const uint32_t regOff = (address - PS2_GS_PRIV_REG_BASE) & ~0x7u;
+        if (regOff == kGsCsrRegOffset)
+        {
+            uint64_t val = gs_regs.csr.load();
+            return (uint32_t)(val >> (off * 8));
+        }
         uint64_t *reg = gsRegPtr(gs_regs, address);
         if (!reg)
             return 0;
-        uint32_t off = address & 7;
         uint64_t val = *reg;
         return (uint32_t)(val >> (off * 8));
     }
@@ -574,6 +629,11 @@ uint64_t PS2Memory::read64(uint32_t address)
 
     if (isGsPrivReg(address))
     {
+        const uint32_t regOff = (address - PS2_GS_PRIV_REG_BASE) & ~0x7u;
+        if (regOff == kGsCsrRegOffset)
+        {
+            return gs_regs.csr.load();
+        }
         uint64_t *reg = gsRegPtr(gs_regs, address);
         return reg ? *reg : 0;
     }
@@ -722,28 +782,19 @@ void PS2Memory::write32(uint32_t address, uint32_t value)
 
     if (isGsPrivReg(address))
     {
-        uint64_t *reg = gsRegPtr(gs_regs, address);
-        if (reg)
+        uint32_t off = address & 7;
+        const uint32_t regOff = (address - PS2_GS_PRIV_REG_BASE) & ~0x7u;
+        if (regOff == kGsCsrRegOffset)
         {
-            uint32_t off = address & 7;
-            const uint32_t regOff = (address - PS2_GS_PRIV_REG_BASE) & ~0x7u;
-            if (regOff == 0x1000u && off == 0u)
-            {
-                // CSR low dword: bits 0..1 are write-one-to-clear status bits.
-                constexpr uint32_t kW1cMask = 0x3u;
-                uint64_t current = *reg;
-                uint32_t oldLow = static_cast<uint32_t>(current & 0xFFFFFFFFull);
-                uint32_t mergedLow = (oldLow & kW1cMask) | (value & ~kW1cMask);
-                current = (current & 0xFFFFFFFF00000000ull) | static_cast<uint64_t>(mergedLow);
-                current &= ~static_cast<uint64_t>(value & kW1cMask);
-                *reg = current;
-            }
-            else
-            {
-                uint64_t mask = 0xFFFFFFFFULL << (off * 8);
-                uint64_t newVal = (*reg & ~mask) | ((uint64_t)value << (off * 8));
-                *reg = newVal;
-            }
+            // CSR: bits 0..1 of the low dword are write-one-to-clear status bits.
+            // Done as a single atomic RMW -- see writeCsrHalf's comment.
+            writeCsrHalf(gs_regs.csr, off, value);
+        }
+        else if (uint64_t *reg = gsRegPtr(gs_regs, address))
+        {
+            uint64_t mask = 0xFFFFFFFFULL << (off * 8);
+            uint64_t newVal = (*reg & ~mask) | ((uint64_t)value << (off * 8));
+            *reg = newVal;
         }
         return;
     }
@@ -787,22 +838,16 @@ void PS2Memory::write64(uint32_t address, uint64_t value)
 
     if (isGsPrivReg(address))
     {
-        uint64_t *reg = gsRegPtr(gs_regs, address);
-        if (reg)
+        const uint32_t regOff = (address - PS2_GS_PRIV_REG_BASE) & ~0x7u;
+        if (regOff == kGsCsrRegOffset)
         {
-            const uint32_t regOff = (address - PS2_GS_PRIV_REG_BASE) & ~0x7u;
-            if (regOff == 0x1000u)
-            {
-                // CSR: bits 0..1 are write-one-to-clear status bits.
-                constexpr uint64_t kW1cMask = 0x3ull;
-                uint64_t next = (*reg & kW1cMask) | (value & ~kW1cMask);
-                next &= ~(value & kW1cMask);
-                *reg = next;
-            }
-            else
-            {
-                *reg = value;
-            }
+            // CSR: bits 0..1 are write-one-to-clear status bits. Done as a single
+            // atomic RMW -- see writeCsrFull's comment.
+            writeCsrFull(gs_regs.csr, value);
+        }
+        else if (uint64_t *reg = gsRegPtr(gs_regs, address))
+        {
+            *reg = value;
         }
         return;
     }
@@ -903,26 +948,20 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
     if (isGsPrivReg(address))
     {
+        // NB: unreachable from write8/16/32/64 today since those all funnel IO
+        // register writes through addresses in PS2_IO_BASE's range, which is
+        // disjoint from PS2_GS_PRIV_REG_BASE; kept correct for direct callers.
         m_ioRegisters[address] = value;
-        if (uint64_t *reg = gsRegPtr(gs_regs, address))
+        const uint32_t off = address & 7u;
+        const uint32_t regOff = (address - PS2_GS_PRIV_REG_BASE) & ~0x7u;
+        if (regOff == kGsCsrRegOffset)
         {
-            const uint32_t off = address & 7u;
-            const uint32_t regOff = (address - PS2_GS_PRIV_REG_BASE) & ~0x7u;
-            if (regOff == 0x1000u && off == 0u)
-            {
-                constexpr uint32_t kW1cMask = 0x3u;
-                uint64_t current = *reg;
-                uint32_t oldLow = static_cast<uint32_t>(current & 0xFFFFFFFFull);
-                uint32_t mergedLow = (oldLow & kW1cMask) | (value & ~kW1cMask);
-                current = (current & 0xFFFFFFFF00000000ull) | static_cast<uint64_t>(mergedLow);
-                current &= ~static_cast<uint64_t>(value & kW1cMask);
-                *reg = current;
-            }
-            else
-            {
-                const uint64_t mask = 0xFFFFFFFFull << (off * 8u);
-                *reg = (*reg & ~mask) | (static_cast<uint64_t>(value) << (off * 8u));
-            }
+            writeCsrHalf(gs_regs.csr, off, value);
+        }
+        else if (uint64_t *reg = gsRegPtr(gs_regs, address))
+        {
+            const uint64_t mask = 0xFFFFFFFFull << (off * 8u);
+            *reg = (*reg & ~mask) | (static_cast<uint64_t>(value) << (off * 8u));
         }
         m_gsWriteCount.fetch_add(1, std::memory_order_relaxed);
         return true;
@@ -1663,9 +1702,16 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
 {
     if (isGsPrivReg(address))
     {
+        // NB: unreachable from read8/16/32/64 today, same reasoning as the write
+        // path above; kept correct for direct callers.
+        const uint32_t off = address & 7u;
+        const uint32_t regOff = (address - PS2_GS_PRIV_REG_BASE) & ~0x7u;
+        if (regOff == kGsCsrRegOffset)
+        {
+            return static_cast<uint32_t>((gs_regs.csr.load() >> (off * 8u)) & 0xFFFFFFFFull);
+        }
         if (uint64_t *reg = gsRegPtr(gs_regs, address))
         {
-            const uint32_t off = address & 7u;
             return static_cast<uint32_t>((*reg >> (off * 8u)) & 0xFFFFFFFFull);
         }
         return 0u;

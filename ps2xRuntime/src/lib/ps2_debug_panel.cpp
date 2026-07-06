@@ -468,7 +468,7 @@ namespace
             out << "DISPFB2  0x" << std::setw(16) << regs.dispfb2 << "\n";
             out << "DISPLAY2 0x" << std::setw(16) << regs.display2 << "\n";
             out << "BGCOLOR  0x" << std::setw(16) << regs.bgcolor << "\n";
-            out << "CSR      0x" << std::setw(16) << regs.csr << "\n";
+            out << "CSR      0x" << std::setw(16) << regs.csr.load() << "\n";
             out << "IMR      0x" << std::setw(16) << regs.imr << "\n";
             out << "BUSDIR   0x" << std::setw(16) << regs.busdir << "\n";
             out << "SIGLBLID 0x" << std::setw(16) << regs.siglblid << "\n\n";
@@ -1485,7 +1485,7 @@ namespace
             row64("DISPFB2", regs.dispfb2);
             row64("DISPLAY2", regs.display2);
             row64("BGCOLOR", regs.bgcolor);
-            row64("CSR", regs.csr);
+            row64("CSR", regs.csr.load());
             row64("IMR", regs.imr);
             row64("BUSDIR", regs.busdir);
             row64("SIGLBLID", regs.siglblid);

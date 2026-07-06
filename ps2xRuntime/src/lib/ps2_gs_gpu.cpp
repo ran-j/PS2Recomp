@@ -1878,14 +1878,14 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
             uint32_t lo = static_cast<uint32_t>(m_privRegs->siglblid & 0xFFFFFFFF);
             lo = (lo & ~mask) | (id & mask);
             m_privRegs->siglblid = (m_privRegs->siglblid & 0xFFFFFFFF00000000ULL) | lo;
-            m_privRegs->csr |= 0x1;
+            m_privRegs->csr.fetch_or(0x1);
         }
         break;
     }
     case GS_REG_FINISH:
     {
         if (m_privRegs)
-            m_privRegs->csr |= 0x2;
+            m_privRegs->csr.fetch_or(0x2);
         break;
     }
     case GS_REG_LABEL:

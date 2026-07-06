@@ -202,13 +202,21 @@ struct GSRegisters
     uint64_t extdata;  // External data
     uint64_t extwrite; // External write
     uint64_t bgcolor;  // Background color
-    uint64_t csr;      // Status
+    // Status. Concurrency contract: the vsync worker thread toggles the FIELD bit
+    // (bit 13) once per tick; guest threads issue write-one-to-clear writes against
+    // the SIGNAL/FINISH status bits (0..1) via the MMIO path; the GIF sets SIGNAL
+    // and FINISH from yet another thread. All three interleave, so this register
+    // must be updated with atomic RMWs only (no load-then-store pairs anywhere).
+    std::atomic<uint64_t> csr;
     uint64_t imr;      // Interrupt mask
     uint64_t busdir;   // Bus direction
     uint64_t siglblid; // Signal label ID
 };
 static_assert(sizeof(GSRegisters) == (19u * sizeof(uint64_t)), "GSRegisters layout changed unexpectedly");
 static_assert(alignof(GSRegisters) == alignof(uint64_t), "GSRegisters alignment must remain 64-bit");
+// CSR is written by the vsync worker while guest threads concurrently read/write it
+// (MMIO) and the GIF sets SIGNAL/FINISH; a lock-free atomic keeps that path wait-free.
+static_assert(std::atomic<uint64_t>::is_always_lock_free, "GS CSR atomic must be lock-free on all supported targets");
 
 // PS2 VIF (VPU Interface) registers
 struct VIFRegisters
