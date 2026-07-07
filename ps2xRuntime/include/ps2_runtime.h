@@ -342,6 +342,25 @@ constexpr uint32_t kAsyncCallbackStackTop = 0x00100000u;
 // running a handler there would corrupt live guest frames.
 constexpr uint32_t kAsyncCallbackFallbackSp = kAsyncCallbackStackTop - 0x10u;
 
+// Encapsulates the async-callback stack pool's carve state. The floor is a
+// compile-time constant (nothing ever moves it); `top` is the only runtime
+// state — the downward-carving cursor — and is what loadELF() re-arms on
+// each load via reset(). See the pool layout comment in ps2_runtime.cpp for
+// the disjointness rationale.
+struct KernelStackPool
+{
+    static constexpr uint32_t floor = kAsyncCallbackStackFloor;
+    uint32_t top = kAsyncCallbackStackTop;
+
+    void reset() { top = kAsyncCallbackStackTop; }
+
+    // Carves an aligned [base, top) region of `size` bytes off the top of the
+    // pool and returns the guest $sp (top - 0x10) for it, or 0 if the pool is
+    // exhausted. `size` must already be alignGuestHeapValue()-rounded by the
+    // caller; `align` is normalized here via PS2Runtime::normalizeGuestHeapAlignment.
+    uint32_t carve(uint32_t size, uint32_t align);
+};
+
 class PS2Runtime
 {
 public:
@@ -574,9 +593,8 @@ private:
     // Async callback stack pool [floor, top): kernel-reserved guest memory,
     // carved downward. See the pool layout comment in ps2_runtime.cpp (near
     // kAsyncCallbackStackFloor's namespace-level block) for the full
-    // disjointness rationale. loadELF() re-arms these on each load.
-    uint32_t m_asyncCallbackStackFloor = kAsyncCallbackStackFloor;
-    uint32_t m_asyncCallbackStackTop = kAsyncCallbackStackTop;
+    // disjointness rationale. loadELF() re-arms this on each load.
+    KernelStackPool m_asyncCallbackStack;
 
     std::atomic<uint32_t> m_missingFunctionPolicy{static_cast<uint32_t>(MissingFunctionPolicy::ContinueToTarget)};
     std::atomic<bool> m_missingFunctionReported{false};

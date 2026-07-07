@@ -473,8 +473,8 @@ PS2Runtime::PS2Runtime()
     m_guestHeapLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
     m_guestHeapSuggestedBase = kGuestHeapDefaultBase;
     m_guestHeapConfigured = false;
-    // m_asyncCallbackStackFloor/Top keep their kernel-pool default member
-    // initializers here; loadELF() re-arms them for the pool's next load
+    // m_asyncCallbackStack (KernelStackPool) keeps its kernel-pool default
+    // member initializer here; loadELF() re-arms it for the pool's next load
     // (see the layout comment at kAsyncCallbackStackFloor).
 
     // Claim the reserved main-thread identity (tid 1 — see State.h's
@@ -849,8 +849,7 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
         std::lock_guard<std::mutex> lock(m_asyncCallbackStackMutex);
         // Re-arm the kernel pool for this load (see the layout comment at
         // kAsyncCallbackStackFloor); a prior run may have carved it down.
-        m_asyncCallbackStackFloor = kAsyncCallbackStackFloor;
-        m_asyncCallbackStackTop = kAsyncCallbackStackTop;
+        m_asyncCallbackStack.reset();
     }
 
     LoadedModule module;
@@ -1792,6 +1791,44 @@ uint32_t PS2Runtime::guestHeapLimit() const
     return m_guestHeapConfigured ? m_guestHeapLimit : m_guestHeapSuggestedBase;
 }
 
+// Carve arithmetic lifted verbatim out of reserveAsyncCallbackStack(). Two
+// clamps present in the pre-encapsulation version were confirmed dead and
+// dropped here rather than ported:
+//   - `if (top > PS2_RAM_SIZE) top = PS2_RAM_SIZE;` — top starts at
+//     kAsyncCallbackStackTop (0x00100000) and every successful carve strictly
+//     decreases it (base < top is required to succeed), so top can never
+//     approach PS2_RAM_SIZE (0x02000000); the branch never fired.
+//   - the per-call `top &= ~(kGuestHeapDefaultAlignment - 1u)` re-align —
+//     top starts 16-aligned (0x00100000) and every stored top is a `base`
+//     that was itself masked to `align`, which normalizeGuestHeapAlignment()
+//     guarantees is a power of two >= kGuestHeapDefaultAlignment (16); a
+//     value aligned to a multiple of 16 is already 16-aligned, so the
+//     re-align was always a no-op.
+uint32_t KernelStackPool::carve(uint32_t size, uint32_t align)
+{
+    if (top <= size)
+    {
+        return 0u;
+    }
+
+    uint32_t base = top - size;
+    base &= ~(align - 1u);
+    if (base < floor || base >= top)
+    {
+        return 0u;
+    }
+
+    const uint32_t reservedTop = top;
+    top = base;
+    // One line per reservation (a handful per boot): permanent evidence of
+    // where host-dispatched callback stacks live, so any future overlap with
+    // guest memory is visible in the boot log.
+    std::cerr << "[async-stack] reserved [0x" << std::hex << base
+              << ", 0x" << reservedTop << ") stackTop=0x" << (reservedTop - 0x10u)
+              << std::dec << '\n';
+    return reservedTop - 0x10u;
+}
+
 uint32_t PS2Runtime::reserveAsyncCallbackStack(uint32_t size, uint32_t alignment)
 {
     if (size == 0u)
@@ -1807,33 +1844,7 @@ uint32_t PS2Runtime::reserveAsyncCallbackStack(uint32_t size, uint32_t alignment
     }
 
     std::lock_guard<std::mutex> lock(m_asyncCallbackStackMutex);
-    uint32_t top = m_asyncCallbackStackTop;
-    if (top > PS2_RAM_SIZE)
-    {
-        top = PS2_RAM_SIZE;
-    }
-    top &= ~(kGuestHeapDefaultAlignment - 1u);
-
-    if (top <= allocSize)
-    {
-        return 0u;
-    }
-
-    uint32_t base = top - allocSize;
-    base &= ~(normalizedAlignment - 1u);
-    if (base < m_asyncCallbackStackFloor || base >= top)
-    {
-        return 0u;
-    }
-
-    m_asyncCallbackStackTop = base;
-    // One line per reservation (a handful per boot): permanent evidence of
-    // where host-dispatched callback stacks live, so any future overlap with
-    // guest memory is visible in the boot log.
-    std::cerr << "[async-stack] reserved [0x" << std::hex << base
-              << ", 0x" << top << ") stackTop=0x" << (top - 0x10u)
-              << std::dec << '\n';
-    return top - 0x10u;
+    return m_asyncCallbackStack.carve(allocSize, normalizedAlignment);
 }
 
 void PS2Runtime::dispatchLoop(uint8_t *rdram, R5900Context *ctx)
