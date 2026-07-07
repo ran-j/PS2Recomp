@@ -155,6 +155,11 @@ namespace ps2recomp
         m_emitInstructionComments = emitInstructionComments;
     }
 
+    void CodeGenerator::setGiantFunctionInstructionThreshold(uint32_t threshold)
+    {
+        m_giantFunctionInstructionThreshold = threshold;
+    }
+
     void CodeGenerator::setReporter(RecompilerReporter *reporter)
     {
         m_reporter = reporter;

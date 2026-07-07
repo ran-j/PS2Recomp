@@ -11,7 +11,10 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
+#include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 using namespace ps2recomp;
@@ -145,6 +148,55 @@ static bool writeMinimalMipsElfWithJalFallbackTarget(const std::filesystem::path
     };
     text->set_data(reinterpret_cast<const char *>(textWords.data()),
                    static_cast<ELFIO::Elf_Word>(textWords.size() * sizeof(uint32_t)));
+
+    ELFIO::segment *textSegment = writer.segments.add();
+    textSegment->set_type(ELFIO::PT_LOAD);
+    textSegment->set_flags(ELFIO::PF_R | ELFIO::PF_X);
+    textSegment->set_align(0x1000);
+    textSegment->add_section_index(text->get_index(), text->get_addr_align());
+
+    return writer.save(elfPath.string());
+}
+
+static bool writeMinimalMipsElfWithGiantFunction(const std::filesystem::path &elfPath)
+{
+    ELFIO::elfio writer;
+    writer.create(ELFIO::ELFCLASS32, ELFIO::ELFDATA2LSB);
+    writer.set_os_abi(ELFIO::ELFOSABI_NONE);
+    writer.set_type(ELFIO::ET_EXEC);
+    writer.set_machine(ELFIO::EM_MIPS);
+    writer.set_entry(0x00100000u);
+
+    ELFIO::section *text = writer.sections.add(".text");
+    text->set_type(ELFIO::SHT_PROGBITS);
+    text->set_flags(ELFIO::SHF_ALLOC | ELFIO::SHF_EXECINSTR);
+    text->set_addr_align(4);
+    text->set_address(0x00100000u);
+
+    // 20 nop words followed by "jr $ra" and its delay-slot nop: ~22 instructions,
+    // comfortably above a threshold of 10.
+    std::vector<uint32_t> textWords(20, 0x00000000u);
+    textWords.push_back(0x03E00008u); // jr $ra
+    textWords.push_back(0x00000000u); // delay slot nop
+    text->set_data(reinterpret_cast<const char *>(textWords.data()),
+                   static_cast<ELFIO::Elf_Word>(textWords.size() * sizeof(uint32_t)));
+
+    ELFIO::section *strtab = writer.sections.add(".strtab");
+    strtab->set_type(ELFIO::SHT_STRTAB);
+    strtab->set_addr_align(1);
+
+    ELFIO::section *symtab = writer.sections.add(".symtab");
+    symtab->set_type(ELFIO::SHT_SYMTAB);
+    symtab->set_info(1);
+    symtab->set_link(strtab->get_index());
+    symtab->set_addr_align(4);
+    symtab->set_entry_size(writer.get_default_entry_size(ELFIO::SHT_SYMTAB));
+
+    ELFIO::symbol_section_accessor symbols(writer, symtab);
+    ELFIO::string_section_accessor strings(strtab);
+    symbols.add_symbol(strings, "", 0, 0, ELFIO::STB_LOCAL, ELFIO::STT_NOTYPE, 0, ELFIO::SHN_UNDEF);
+    symbols.add_symbol(strings, "giant_func", text->get_address(), text->get_size(),
+                       ELFIO::STB_GLOBAL, ELFIO::STT_FUNC, 0, text->get_index());
 
     ELFIO::segment *textSegment = writer.segments.add();
     textSegment->set_type(ELFIO::PT_LOAD);
@@ -742,6 +794,137 @@ void register_ps2_recompiler_tests()
             std::filesystem::remove(configPath, removeError);
         });
 
+        tc.Run("giant-function pipeline emits O1 attribute and writes oversized_tus manifest", [](TestCase &t) {
+            const auto uniqueSuffix = std::to_string(
+                static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+
+            const std::filesystem::path elfPath =
+                std::filesystem::temp_directory_path() / ("ps2recomp-giant-func-" + uniqueSuffix + ".elf");
+            const std::filesystem::path outDir =
+                std::filesystem::temp_directory_path() / ("ps2recomp-giant-func-out-" + uniqueSuffix);
+            const std::filesystem::path configPath =
+                std::filesystem::temp_directory_path() / ("ps2recomp-giant-func-" + uniqueSuffix + ".toml");
+
+            std::error_code createDirError;
+            std::filesystem::create_directories(outDir, createDirError);
+
+            const bool writeOk = writeMinimalMipsElfWithGiantFunction(elfPath);
+            t.IsTrue(writeOk, "temporary ELF with a giant function should be generated");
+            if (!writeOk)
+            {
+                return;
+            }
+
+            std::ofstream configFile(configPath);
+            t.IsTrue(static_cast<bool>(configFile), "temp config file should be writable");
+            if (!configFile)
+            {
+                std::error_code removeError;
+                std::filesystem::remove(elfPath, removeError);
+                return;
+            }
+
+            configFile << "[general]\n";
+            configFile << "input = \"" << elfPath.generic_string() << "\"\n";
+            configFile << "output = \"" << outDir.generic_string() << "\"\n";
+            configFile << "single_file_output = false\n";
+            configFile << "giant_function_instruction_threshold = 10\n";
+            configFile.close();
+
+            PS2Recompiler recomp(configPath.string());
+            const bool initOk = recomp.initialize();
+            t.IsTrue(initOk, "recompiler should initialize on the synthetic ELF");
+            bool recompileOk = false;
+            if (initOk)
+            {
+                recompileOk = recomp.recompile();
+                t.IsTrue(recompileOk, "recompile pass should succeed");
+            }
+
+            if (initOk && recompileOk)
+            {
+                recomp.generateOutput();
+
+                const std::filesystem::path manifestPath = outDir / "oversized_tus.txt";
+                std::ifstream manifestFile(manifestPath);
+                t.IsTrue(static_cast<bool>(manifestFile), "oversized_tus.txt manifest should be written");
+
+                if (manifestFile)
+                {
+                    std::stringstream manifestBuffer;
+                    manifestBuffer << manifestFile.rdbuf();
+                    const std::string manifestContents = manifestBuffer.str();
+
+                    t.IsTrue(!manifestContents.empty(), "manifest should not be empty");
+                    t.IsTrue(manifestContents.find("giant_func") != std::string::npos,
+                              "manifest should reference the giant function's TU");
+                    t.IsTrue(manifestContents.find(".cpp") != std::string::npos,
+                              "manifest should list a .cpp translation unit");
+
+                    std::istringstream manifestLines(manifestContents);
+                    std::string tuFilename;
+                    while (std::getline(manifestLines, tuFilename))
+                    {
+                        while (!tuFilename.empty() &&
+                               (tuFilename.back() == '\r' || tuFilename.back() == '\n' || tuFilename.back() == ' '))
+                        {
+                            tuFilename.pop_back();
+                        }
+                        if (!tuFilename.empty())
+                        {
+                            break;
+                        }
+                    }
+
+                    t.IsTrue(!tuFilename.empty(), "manifest should contain a non-empty TU filename on its first line");
+
+                    if (!tuFilename.empty())
+                    {
+                        const std::filesystem::path tuPath = outDir / tuFilename;
+                        std::ifstream tuFile(tuPath);
+                        t.IsTrue(static_cast<bool>(tuFile),
+                                  "the emitted translation unit named by the manifest should exist");
+
+                        if (tuFile)
+                        {
+                            std::stringstream tuBuffer;
+                            tuBuffer << tuFile.rdbuf();
+                            const std::string tuContents = tuBuffer.str();
+
+                            // The recompiler always renames functions to "<sanitized>_0x<start>"
+                            // in generateOutput() (see PS2Recompiler::generateOutput's makeName
+                            // lambda), and getOutputPath() reuses that same renamed identifier
+                            // as the file stem. So the manifest's TU filename stem (without the
+                            // ".cpp" extension) is exactly the emitted function's identifier --
+                            // derive it from there instead of hardcoding "giant_func".
+                            std::string expectedIdentifier = tuFilename;
+                            const std::string cppExtension = ".cpp";
+                            if (expectedIdentifier.size() >= cppExtension.size() &&
+                                expectedIdentifier.compare(expectedIdentifier.size() - cppExtension.size(),
+                                                            cppExtension.size(), cppExtension) == 0)
+                            {
+                                expectedIdentifier.erase(expectedIdentifier.size() - cppExtension.size());
+                            }
+
+                            const std::string expectedAttributeAndDefinition =
+                                "__attribute__((optimize(\"O1\")))\n#endif\nvoid " + expectedIdentifier + "(";
+                            t.IsTrue(tuContents.find(expectedAttributeAndDefinition) != std::string::npos,
+                                      "the emitted giant-function TU must carry the O1 attribute immediately "
+                                      "before its definition");
+                            t.IsTrue(tuContents.find("#if defined(__GNUC__) && !defined(__clang__)") !=
+                                          std::string::npos,
+                                      "the emitted TU must carry the GCC-only guard for the O1 attribute");
+                        }
+                    }
+                }
+            }
+
+            std::error_code removeError;
+            std::filesystem::remove(elfPath, removeError);
+            std::filesystem::remove(configPath, removeError);
+            std::filesystem::remove_all(outDir, removeError);
+        });
+
         tc.Run("elf parser ignores STT_FUNC symbols in non-executable sections", [](TestCase &t) {
             const auto uniqueSuffix = std::to_string(
                 static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -895,7 +1078,37 @@ void register_ps2_recompiler_tests()
             t.IsTrue(PS2Recompiler::ClampFilenameLength("ReallyLongFunctionNameReallyLongFunctionNameReallyLongFunctionName_0x12345678",".cpp",50).length() <= 50,"Function name must be max 50 characters");
 
             t.IsTrue(PS2Recompiler::ClampFilenameLength("ReallyLongFunctionNameReallyLongFunctionNameReallyLongFunctionName_0x12345678", ".cpp", 50).rfind("0x12345678") != std::string::npos, "Function name must mantain the function address at the end, if present");
-            
+
+        });
+
+        tc.Run("oversized TU manifest lists only functions past the threshold", [](TestCase &t) {
+            std::vector<std::pair<std::string, size_t>> counts = {
+                {"small_0x1000.cpp", 5},
+                {"giant_0x2000.cpp", 100},
+                {"medium_0x3000.cpp", 10},
+            };
+            std::vector<std::string> result = PS2Recompiler::ComputeOversizedTranslationUnits(counts, 10);
+            t.Equals(result.size(), static_cast<std::size_t>(1), "only the one past-threshold TU is listed");
+            t.IsTrue(!result.empty() && result[0] == "giant_0x2000.cpp", "the giant TU filename is listed");
+        });
+
+        tc.Run("oversized TU manifest collapses single-file duplicates", [](TestCase &t) {
+            std::vector<std::pair<std::string, size_t>> counts = {
+                {"ps2_recompiled_functions.cpp", 5},
+                {"ps2_recompiled_functions.cpp", 100},
+                {"ps2_recompiled_functions.cpp", 200},
+            };
+            std::vector<std::string> result = PS2Recompiler::ComputeOversizedTranslationUnits(counts, 10);
+            t.Equals(result.size(), static_cast<std::size_t>(1), "single-file mode collapses to one manifest entry");
+            t.IsTrue(!result.empty() && result[0] == "ps2_recompiled_functions.cpp", "the combined TU name is listed");
+        });
+
+        tc.Run("oversized TU manifest is empty when threshold disabled", [](TestCase &t) {
+            std::vector<std::pair<std::string, size_t>> counts = {
+                {"giant_0x2000.cpp", 100},
+            };
+            std::vector<std::string> result = PS2Recompiler::ComputeOversizedTranslationUnits(counts, 0);
+            t.IsTrue(result.empty(), "threshold 0 disables the manifest and yields no entries");
         });
     });
 }

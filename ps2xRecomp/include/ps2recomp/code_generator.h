@@ -50,6 +50,7 @@ namespace ps2recomp
         void setConfiguredJumpTables(const std::vector<JumpTable> &jumpTables);
         void setResumeEntryTargets(const std::unordered_map<uint32_t, std::vector<uint32_t>> &resumeTargetsByOwner);
         void setEmitInstructionComments(bool emitInstructionComments);
+        void setGiantFunctionInstructionThreshold(uint32_t threshold);
         void setReporter(RecompilerReporter *reporter);
 
         AnalysisResult collectInternalBranchTargets(const Function &function,
@@ -65,6 +66,7 @@ namespace ps2recomp
         const std::vector<Section>& m_sections;
         BootstrapInfo m_bootstrapInfo;
         bool m_emitInstructionComments = true;
+        uint32_t m_giantFunctionInstructionThreshold = 0;
         RecompilerReporter *m_reporter = nullptr;
         std::string m_currentFunctionName;
 

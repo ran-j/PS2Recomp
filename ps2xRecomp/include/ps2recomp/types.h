@@ -173,6 +173,7 @@ namespace ps2recomp
         std::string outputPath;
         std::string ghidraMapPath;
         bool singleFileOutput = false;
+        uint32_t giantFunctionInstructionThreshold = 0; // 0 = disabled; functions with more decoded instructions than this get reduced optimization
         bool lowMemoryMode = false;
         uint32_t outputWorkerThreads = 0;
         bool patchSyscalls = false;
