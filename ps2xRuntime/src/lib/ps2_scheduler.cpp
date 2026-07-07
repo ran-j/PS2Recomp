@@ -794,13 +794,13 @@ ps2sched::BlockResult ps2sched::block_current()
         // AsyncGuestScope) called a blocking syscall. We cannot park a host
         // worker on the fiber scheduler. Report whether this worker actually holds
         // the guest token so the caller only drops/reacquires a token it owns.
-        bool ownsToken;
-        {
-            std::lock_guard<std::mutex> lk(g_sched_mutex);
-            ownsToken = g_guest_token_held_by_host && tls_holds_guest_token;
-        }
-        return ownsToken ? BlockResult::NonFiberOwner
-                         : BlockResult::NonFiberNoTok;
+        // tls_holds_guest_token and g_guest_token_held_by_host are set/cleared
+        // together under g_sched_mutex in async_guest_begin/async_guest_end, so
+        // on THIS thread tls_holds_guest_token==true already implies
+        // g_guest_token_held_by_host==true. No need to re-read the global or
+        // take the lock.
+        return tls_holds_guest_token ? BlockResult::NonFiberOwner
+                                     : BlockResult::NonFiberNoTok;
     }
     bool throwTerminate = false;
     bool wokenInWindow  = false;
@@ -1113,16 +1113,10 @@ bool ps2sched::yield_point()
     }
 
     // 3. Higher-priority fiber ready -> cooperative yield (enqueue Ready first).
-    bool yield = false;
-    {
-        std::lock_guard<std::mutex> lk(g_sched_mutex);
-        if (g_run_queue && g_run_queue->priority < fc->priority)
-        {
-            enqueue_locked(fc);
-            yield = true;
-        }
-    }
-    if (yield) ps2fiber_yield();
+    // Same logic as the standalone maybe_yield(): fc here is the same current
+    // fiber maybe_yield() would reload from tls_current_fiber, and it is
+    // already known non-null above, so behavior is identical.
+    maybe_yield();
 
     // 4. A host worker is parked in async_guest_begin() waiting for the guest
     // token -> cooperatively yield so it can run. The executor-side half of
