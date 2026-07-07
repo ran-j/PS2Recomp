@@ -1,6 +1,11 @@
 #include <algorithm>
 #include <cctype>
 
+namespace ps2_syscalls
+{
+    void raisePendingIntc(uint32_t cause);
+}
+
 namespace
 {
     constexpr uint32_t kCdSectorSize = 2048;
@@ -1434,6 +1439,14 @@ namespace
         for (const uint32_t completedCause : completedCauses)
         {
             ps2_syscalls::dispatchDmacHandlersForCause(rdram, runtime, completedCause);
+        }
+
+        // Defer cause-5 (VIF1 completion) to the next drain: sce libdma registers
+        // the handler only after the kick returns. Raised unconditionally per kick --
+        // a deliberate over-approximation; an unconsumed raise ages out harmlessly.
+        if (channelBase == 0x10009000u) // VIF1
+        {
+            ps2_syscalls::raisePendingIntc(5u);
         }
 
         return 0;
