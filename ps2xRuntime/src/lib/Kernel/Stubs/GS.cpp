@@ -1050,7 +1050,9 @@ namespace ps2_stubs
         }
 
         const uint32_t fbw = std::max<uint32_t>(1u, (w + 63u) / 64u);
-        const uint64_t pmode = makePmode(1u, 1u, 0u, 0u, 0u, 0x80u);
+        // Seed read circuit 2 only (EN2): the swap path programs DISPFB2/DISPLAY2 and
+        // never circuit 1, so enabling EN1 would advertise a circuit it never drives.
+        const uint64_t pmode = makePmode(0u, 1u, 0u, 0u, 0u, 0x80u);
         const uint64_t smode2 =
             (static_cast<uint64_t>(g_gparam.interlace & 0x1u) << 0) |
             (static_cast<uint64_t>(g_gparam.ffmode & 0x1u) << 1);
@@ -1121,7 +1123,9 @@ namespace ps2_stubs
         }
 
         const uint32_t fbw = std::max<uint32_t>(1u, (w + 63u) / 64u);
-        const uint64_t pmode = makePmode(1u, 1u, 0u, 0u, 0u, 0x80u);
+        // Seed read circuit 2 only (EN2): the swap path programs DISPFB2/DISPLAY2 and
+        // never circuit 1, so enabling EN1 would advertise a circuit it never drives.
+        const uint64_t pmode = makePmode(0u, 1u, 0u, 0u, 0u, 0x80u);
         const uint64_t smode2 =
             (static_cast<uint64_t>(g_gparam.interlace & 0x1u) << 0) |
             (static_cast<uint64_t>(g_gparam.ffmode & 0x1u) << 1);
