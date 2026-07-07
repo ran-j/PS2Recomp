@@ -1,4 +1,5 @@
 #include "runtime/ps2_vu1.h"
+#include "runtime/ps2_memory.h"
 #include "ps2_vu1_detail.h"
 
 #include <cstring>
@@ -35,6 +36,68 @@ void VU1Interpreter::applyDest(float *dst, const float *result, uint8_t dest)
 void VU1Interpreter::applyDestAcc(const float *result, uint8_t dest)
 {
     applyDest(m_state.acc, result, dest);
+}
+
+VU1Interpreter::DecodedInstructionPair VU1Interpreter::decodeInstructionPair(const uint8_t *vuCode, uint32_t pc) const
+{
+    DecodedInstructionPair decoded;
+    std::memcpy(&decoded.lower, vuCode + pc, sizeof(decoded.lower));
+    std::memcpy(&decoded.upper, vuCode + pc + sizeof(decoded.lower), sizeof(decoded.upper));
+
+    decoded.iBit = ((decoded.upper >> 31) & 1u) != 0u;
+    decoded.eBit = ((decoded.upper >> 30) & 1u) != 0u;
+    decoded.lowerBeforeUpper = !decoded.iBit && vuLowerShouldRunBeforeUpper(decoded.upper, decoded.lower);
+    return decoded;
+}
+
+void VU1Interpreter::rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t codeSize,
+                                             const PS2Memory *memory, uint64_t generation)
+{
+    const uint32_t pairCount = codeSize / 8u;
+    m_decodedCodeCache.resize(pairCount);
+    for (uint32_t i = 0; i < pairCount; ++i)
+    {
+        m_decodedCodeCache[i] = decodeInstructionPair(vuCode, i * 8u);
+    }
+
+    m_cachedVuCode = vuCode;
+    m_cachedMemory = memory;
+    m_cachedCodeSize = codeSize;
+    m_cachedCodeGeneration = generation;
+    m_decodedCodeCacheValid = true;
+}
+
+VU1Interpreter::DecodedInstructionPair VU1Interpreter::getDecodedInstructionPairForPc(const uint8_t *vuCode,
+                                                                                      uint32_t codeSize,
+                                                                                      PS2Memory *memory,
+                                                                                      uint32_t pc)
+{
+    // Only 8-byte aligned VU instruction pairs can use the decode cache.
+    if ((pc & 7u) != 0u)
+    {
+        return decodeInstructionPair(vuCode, pc);
+    }
+
+    const bool trackedVu1Code = vuCode == memory->getVU1Code();
+    if (!trackedVu1Code)
+    {
+        return decodeInstructionPair(vuCode, pc);
+    }
+
+    const uint64_t generation = memory->getVU1CodeGeneration();
+    const bool rebuild =
+        !m_decodedCodeCacheValid ||
+        m_cachedVuCode != vuCode ||
+        m_cachedMemory != memory ||
+        m_cachedCodeSize != codeSize ||
+        m_cachedCodeGeneration != generation;
+
+    if (rebuild)
+    {
+        rebuildDecodedCodeCache(vuCode, codeSize, memory, generation);
+    }
+
+    return m_decodedCodeCache[pc / 8u];
 }
 
 void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
@@ -77,36 +140,28 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         if (m_state.pc + 8 > codeSize)
             break;
 
-        uint32_t lower, upper;
-        std::memcpy(&lower, vuCode + m_state.pc, 4);
-        std::memcpy(&upper, vuCode + m_state.pc + 4, 4);
-
-        const bool iBit = ((upper >> 31) & 1u) != 0u;
-        const bool eBit = ((upper >> 30) & 1u) != 0u;
-        const bool mBit = ((upper >> 29) & 1u) != 0u;
-        (void)mBit;
+        const DecodedInstructionPair decoded = getDecodedInstructionPairForPc(vuCode, codeSize, memory, m_state.pc);
 
         // LOI is controlled by the upper I-bit.  The lower word is the float immediate.
         // DobieStation executes the upper instruction first, then commits lower into I.
-        const bool loi = iBit;
-        if (loi)
+        if (decoded.iBit)
         {
             // LOI is special: the upper instruction sees the old I value, then LOI loads I.
-            execUpper(upper);
-            std::memcpy(&m_state.i, &lower, 4);
+            execUpper(decoded.upper);
+            std::memcpy(&m_state.i, &decoded.lower, sizeof(decoded.lower));
         }
-        else if (vuLowerShouldRunBeforeUpper(upper, lower))
+        else if (decoded.lowerBeforeUpper)
         {
             // VU upper/lower execute as a pair.  If the upper op writes a VF register
             // that the lower op reads or also writes, Dobie runs the lower side first
             // so it observes the old VF value and the upper write has priority.
-            execLower(lower, vuData, dataSize, gs, memory, upper);
-            execUpper(upper);
+            execLower(decoded.lower, vuData, dataSize, gs, memory, decoded.upper);
+            execUpper(decoded.upper);
         }
         else
         {
-            execUpper(upper);
-            execLower(lower, vuData, dataSize, gs, memory, upper);
+            execUpper(decoded.upper);
+            execLower(decoded.lower, vuData, dataSize, gs, memory, decoded.upper);
         }
 
         // Enforce VF0 invariant
@@ -140,7 +195,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         if (m_state.ebit)
             break;
 
-        if (eBit)
+        if (decoded.eBit)
             m_state.ebit = true;
     }
 }

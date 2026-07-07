@@ -127,6 +127,26 @@ namespace
         std::memcpy(code + pc + sizeof(lower), &upper, sizeof(upper));
     }
 
+    uint64_t packVuInstructionPair(uint32_t lower, uint32_t upper)
+    {
+        return static_cast<uint64_t>(lower) | (static_cast<uint64_t>(upper) << 32);
+    }
+
+    void appendU32(std::vector<uint8_t> &bytes, uint32_t value)
+    {
+        const uint8_t *src = reinterpret_cast<const uint8_t *>(&value);
+        bytes.insert(bytes.end(), src, src + sizeof(value));
+    }
+
+    void uploadVu1Mpg(PS2Memory &mem, uint16_t instructionAddress, uint32_t lower, uint32_t upper)
+    {
+        std::vector<uint8_t> packet;
+        appendU32(packet, makeVifCmd(0x4Au, 1u, instructionAddress));
+        appendU32(packet, lower);
+        appendU32(packet, upper);
+        mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+    }
+
     void writeVuQword(uint8_t *data, uint32_t qwordIndex, const float values[4])
     {
         std::memcpy(data + qwordIndex * 16u, values, sizeof(float) * 4u);
@@ -343,6 +363,52 @@ void register_ps2_vu1_tests()
 
             vu1.resume(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 1u);
             t.Equals(vu1.state().q, 5.0f, "SQRT should write square root of selected FT component into Q");
+        });
+
+        tc.Run("MPG upload invalidates cached VU1 decode before MSCAL", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+            VU1Interpreter vu1;
+            fx.mem.setVu1MscalCallback([&](uint32_t startPC, uint32_t top, uint32_t itop)
+            {
+                vu1.execute(fx.code,
+                            PS2_VU1_CODE_SIZE,
+                            fx.data,
+                            PS2_VU1_DATA_SIZE,
+                            fx.gs,
+                            &fx.mem,
+                            startPC,
+                            top,
+                            itop,
+                            1u);
+            });
+
+            uploadVu1Mpg(fx.mem, 0u, makeVuIaddiu(1u, 0u, 1), kVuUpperNop);
+            const uint32_t firstMscal = makeVifCmd(0x14u, 0u, 0u);
+            fx.mem.processVIF1Data(reinterpret_cast<const uint8_t *>(&firstMscal), sizeof(firstMscal));
+            t.Equals(vu1.state().vi[1], 1, "first MSCAL should execute the first uploaded program");
+
+            uploadVu1Mpg(fx.mem, 0u, makeVuIaddiu(1u, 0u, 2), kVuUpperNop);
+            const uint32_t secondMscal = makeVifCmd(0x14u, 0u, 0u);
+            fx.mem.processVIF1Data(reinterpret_cast<const uint8_t *>(&secondMscal), sizeof(secondMscal));
+            t.Equals(vu1.state().vi[1], 2, "second MSCAL should see the MPG-updated instruction");
+        });
+
+        tc.Run("direct VU1 code writes invalidate cached decode", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+            VU1Interpreter vu1;
+            fx.mem.write64(PS2_VU1_CODE_BASE, packVuInstructionPair(makeVuIaddiu(1u, 0u, 1), kVuUpperNop));
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 0u, 1u);
+            t.Equals(vu1.state().vi[1], 1, "first execution should use the original direct write");
+
+            fx.mem.write64(PS2_VU1_CODE_BASE, packVuInstructionPair(makeVuIaddiu(1u, 0u, 2), kVuUpperNop));
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 0u, 1u);
+            t.Equals(vu1.state().vi[1], 2, "second execution should rebuild decode after the direct write");
         });
 
         tc.Run("XGKICK sends a VU memory GIF packet through PATH1", [](TestCase &t)
