@@ -240,6 +240,25 @@ inline std::atomic<bool> g_alarm_stop_flag{false};
 // Protected by g_alarm_mutex.
 inline bool g_alarm_worker_running{false};
 inline std::atomic<int> g_activeThreads{0};
+
+// Mint/consume pair for ThreadInfo::activeCounted (see the field comment
+// above). MINT bumps g_activeThreads FIRST, then publishes the token with
+// release, so a consumer observing activeCounted==true is guaranteed to also
+// see the matching +1. CONSUME is the sole arbiter for a given token: the
+// exchange(false) only the winner of the true->false transition performs the
+// matching fetch_sub, so concurrent consumers (e.g. on_fiber_exit racing
+// notifyRuntimeStop over the same shared_ptr) can never double-decrement.
+static inline void mintActiveToken(const std::shared_ptr<ThreadInfo> &info)
+{
+    g_activeThreads.fetch_add(1, std::memory_order_relaxed);
+    info->activeCounted.store(true, std::memory_order_release);
+}
+static inline void consumeActiveToken(const std::shared_ptr<ThreadInfo> &info)
+{
+    if (info && info->activeCounted.exchange(false, std::memory_order_acq_rel))
+        g_activeThreads.fetch_sub(1, std::memory_order_release);
+}
+
 inline std::mutex g_fd_mutex;
 
 struct RpcServerState

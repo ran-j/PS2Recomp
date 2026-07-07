@@ -152,6 +152,45 @@ static std::shared_ptr<ThreadInfo> ensureCurrentThreadInfo(R5900Context *ctx)
     return info;
 }
 
+// Resolves tid==0 (TH_SELF) to g_currentThreadId, looks up the corresponding
+// ThreadInfo, and writes the appropriate error return on failure. Callers
+// pass tid by reference so the resolved (non-zero) id is visible afterward.
+// Shared prologue for syscalls that operate on "self or an explicit tid":
+// TerminateThread, SuspendThread, ResumeThread, ReferThreadStatus,
+// CancelWakeupThread, ChangeThreadPriority. Do NOT use for syscalls with
+// different tid==0 semantics (WakeupThread, ReleaseWaitThread, the
+// i-prefixed variants, RotateThreadReadyQueue).
+static std::shared_ptr<ThreadInfo> resolveSelfOrThread(R5900Context *ctx, int &tid)
+{
+    if (tid == 0)
+    {
+        if (g_currentThreadId == -1)
+        {
+            setReturnS32(ctx, KE_ILLEGAL_THID);
+            return nullptr;
+        }
+        tid = g_currentThreadId;
+    }
+    auto info = (tid == g_currentThreadId) ? ensureCurrentThreadInfo(ctx) : lookupThreadInfo(tid);
+    if (!info)
+        setReturnS32(ctx, KE_UNKNOWN_THID);
+    return info;
+}
+
+// Marks a thread as exiting itself (caller holds info.m). Shared by
+// ExitThread and ExitDeleteThread only. TerminateThread must NOT route
+// through this: it intentionally sets only terminated/forceRelease and
+// leaves waitType/waitId/wakeupCount observable via ReferThreadStatus until
+// the target's own wait loop clears them.
+static void markSelfExitingLocked(ThreadInfo &info)
+{
+    info.terminated = true;
+    info.forceRelease = true;
+    info.waitType = TSW_NONE;
+    info.waitId = 0;
+    info.wakeupCount = 0;
+}
+
 static std::shared_ptr<SemaInfo> lookupSemaInfo(int sid)
 {
     std::lock_guard<std::mutex> lock(g_sema_map_mutex);

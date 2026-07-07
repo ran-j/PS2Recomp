@@ -94,12 +94,11 @@ namespace ps2_syscalls
         // null the g_threads entry was already removed by whoever also took the
         // token (notifyRuntimeStop reaping residual guest threads, or
         // ExitDeleteThread erasing its own entry), so this exit must NOT
-        // decrement again. When `info` is present the atomic exchange is the
-        // sole arbiter: a concurrent notifyRuntimeStop() holding the same
-        // shared_ptr races here and exactly one side wins the true->false
-        // transition and performs the single fetch_sub.
-        if (info && info->activeCounted.exchange(false, std::memory_order_acq_rel))
-            g_activeThreads.fetch_sub(1, std::memory_order_release);
+        // decrement again. When `info` is present consumeActiveToken's atomic
+        // exchange is the sole arbiter: a concurrent notifyRuntimeStop() holding
+        // the same shared_ptr races here and exactly one side wins the
+        // true->false transition and performs the single fetch_sub.
+        consumeActiveToken(info);
     }
 
     static std::once_flag s_fiber_exit_hook_once;
@@ -387,13 +386,9 @@ namespace ps2_syscalls
         }
 
         ensureFiberExitHookRegistered();
-        // Mint this thread's active-thread token. Order matters: bump the
-        // counter FIRST, then publish the token with release. A consumer that
-        // observes activeCounted==true is therefore guaranteed to also see the
-        // matching +1, so the exchange/fetch_sub in a consumer can never run
-        // ahead of this fetch_add and transiently drive g_activeThreads negative.
-        g_activeThreads.fetch_add(1, std::memory_order_relaxed);
-        info->activeCounted.store(true, std::memory_order_release);
+        // Mint this thread's active-thread token (see mintActiveToken for the
+        // memory-ordering rationale).
+        mintActiveToken(info);
 
         // Create the fiber and enqueue it Ready. Throws on allocation failure or if the scheduler is shutting down; the catch below reports it as KE_NO_MEMORY.
         try
@@ -406,10 +401,10 @@ namespace ps2_syscalls
         catch (const std::exception& e)
         {
             // Undo the g_activeThreads increment and reset thread state. Consume
-            // the token we just minted; the exchange guards against a concurrent
-            // notifyRuntimeStop() that reaped this same ThreadInfo.
-            if (info->activeCounted.exchange(false, std::memory_order_acq_rel))
-                g_activeThreads.fetch_sub(1, std::memory_order_release);
+            // the token we just minted; consumeActiveToken's exchange guards
+            // against a concurrent notifyRuntimeStop() that reaped this same
+            // ThreadInfo.
+            consumeActiveToken(info);
             {
                 std::lock_guard<std::mutex> lock(info->m);
                 info->started = false;
@@ -442,11 +437,7 @@ namespace ps2_syscalls
         if (info)
         {
             std::lock_guard<std::mutex> lock(info->m);
-            info->terminated = true;
-            info->forceRelease = true;
-            info->waitType = TSW_NONE;
-            info->waitId = 0;
-            info->wakeupCount = 0;
+            markSelfExitingLocked(*info);
         }
         throw ThreadExitException();
     }
@@ -459,11 +450,7 @@ namespace ps2_syscalls
         if (info)
         {
             std::lock_guard<std::mutex> lock(info->m);
-            info->terminated = true;
-            info->forceRelease = true;
-            info->waitType = TSW_NONE;
-            info->waitId = 0;
-            info->wakeupCount = 0;
+            markSelfExitingLocked(*info);
         }
         {
             std::lock_guard<std::mutex> lock(g_thread_map_mutex);
@@ -473,30 +460,15 @@ namespace ps2_syscalls
         // after this throw will see a null ThreadInfo and skip the token consume.
         // Consume the active-thread token here instead, so g_activeThreads is
         // decremented exactly once for this started thread.
-        if (info && info->activeCounted.exchange(false, std::memory_order_acq_rel))
-            g_activeThreads.fetch_sub(1, std::memory_order_release);
+        consumeActiveToken(info);
         throw ThreadExitException();
     }
 
     void TerminateThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         int tid = static_cast<int>(getRegU32(ctx, 4));
-        if (tid == 0)
-        {
-            if (g_currentThreadId == -1)
-            {
-                setReturnS32(ctx, KE_ILLEGAL_THID);
-                return;
-            }
-            tid = g_currentThreadId;
-        }
-
-        auto info = (tid == g_currentThreadId) ? ensureCurrentThreadInfo(ctx) : lookupThreadInfo(tid);
-        if (!info)
-        {
-            setReturnS32(ctx, KE_UNKNOWN_THID);
-            return;
-        }
+        auto info = resolveSelfOrThread(ctx, tid);
+        if (!info) return;
 
         {
             std::lock_guard<std::mutex> lock(info->m);
@@ -526,22 +498,8 @@ namespace ps2_syscalls
     void SuspendThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         int tid = static_cast<int>(getRegU32(ctx, 4));
-        if (tid == 0)
-        {
-            if (g_currentThreadId == -1)
-            {
-                setReturnS32(ctx, KE_ILLEGAL_THID);
-                return;
-            }
-            tid = g_currentThreadId;
-        }
-
-        auto info = (tid == g_currentThreadId) ? ensureCurrentThreadInfo(ctx) : lookupThreadInfo(tid);
-        if (!info)
-        {
-            setReturnS32(ctx, KE_UNKNOWN_THID);
-            return;
-        }
+        auto info = resolveSelfOrThread(ctx, tid);
+        if (!info) return;
 
         {
             std::lock_guard<std::mutex> lock(info->m);
@@ -581,22 +539,8 @@ namespace ps2_syscalls
     void ResumeThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         int tid = static_cast<int>(getRegU32(ctx, 4));
-        if (tid == 0)
-        {
-            if (g_currentThreadId == -1)
-            {
-                setReturnS32(ctx, KE_ILLEGAL_THID);
-                return;
-            }
-            tid = g_currentThreadId;
-        }
-
-        auto info = (tid == g_currentThreadId) ? ensureCurrentThreadInfo(ctx) : lookupThreadInfo(tid);
-        if (!info)
-        {
-            setReturnS32(ctx, KE_UNKNOWN_THID);
-            return;
-        }
+        auto info = resolveSelfOrThread(ctx, tid);
+        if (!info) return;
 
         {
             std::lock_guard<std::mutex> lock(info->m);
@@ -653,22 +597,8 @@ namespace ps2_syscalls
         int tid = static_cast<int>(getRegU32(ctx, 4));
         uint32_t statusAddr = getRegU32(ctx, 5);
 
-        if (tid == 0) // TH_SELF
-        {
-            if (g_currentThreadId == -1)
-            {
-                setReturnS32(ctx, KE_ILLEGAL_THID);
-                return;
-            }
-            tid = g_currentThreadId;
-        }
-
-        auto info = (tid == g_currentThreadId) ? ensureCurrentThreadInfo(ctx) : lookupThreadInfo(tid);
-        if (!info)
-        {
-            setReturnS32(ctx, KE_UNKNOWN_THID);
-            return;
-        }
+        auto info = resolveSelfOrThread(ctx, tid);
+        if (!info) return;
 
         ee_thread_status_t *status = reinterpret_cast<ee_thread_status_t *>(getMemPtr(rdram, statusAddr));
         if (!status)
@@ -884,22 +814,8 @@ namespace ps2_syscalls
     void CancelWakeupThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         int tid = static_cast<int>(getRegU32(ctx, 4));
-        if (tid == 0)
-        {
-            if (g_currentThreadId == -1)
-            {
-                setReturnS32(ctx, KE_ILLEGAL_THID);
-                return;
-            }
-            tid = g_currentThreadId;
-        }
-
-        auto info = (tid == g_currentThreadId) ? ensureCurrentThreadInfo(ctx) : lookupThreadInfo(tid);
-        if (!info)
-        {
-            setReturnS32(ctx, KE_UNKNOWN_THID);
-            return;
-        }
+        auto info = resolveSelfOrThread(ctx, tid);
+        if (!info) return;
 
         int previous = 0;
         {
@@ -940,22 +856,8 @@ namespace ps2_syscalls
         int tid = static_cast<int>(getRegU32(ctx, 4));
         int newPrio = static_cast<int>(getRegU32(ctx, 5));
 
-        if (tid == 0)
-        {
-            if (g_currentThreadId == -1)
-            {
-                setReturnS32(ctx, KE_ILLEGAL_THID);
-                return;
-            }
-            tid = g_currentThreadId;
-        }
-
-        auto info = (tid == g_currentThreadId) ? ensureCurrentThreadInfo(ctx) : lookupThreadInfo(tid);
-        if (!info)
-        {
-            setReturnS32(ctx, KE_UNKNOWN_THID);
-            return;
-        }
+        auto info = resolveSelfOrThread(ctx, tid);
+        if (!info) return;
 
         {
             std::lock_guard<std::mutex> lock(info->m);

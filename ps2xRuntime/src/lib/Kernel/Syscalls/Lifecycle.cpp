@@ -67,10 +67,7 @@ namespace ps2_syscalls
         // cleared above) and skips its own decrement.
         for (const auto &[tid, threadInfo] : threads)
         {
-            if (threadInfo->activeCounted.exchange(false, std::memory_order_acq_rel))
-            {
-                g_activeThreads.fetch_sub(1, std::memory_order_release);
-            }
+            consumeActiveToken(threadInfo);
         }
         // -1 is the "not a guest fiber" sentinel: a host thread running
         // notifyRuntimeStop must never be mistaken for a real guest thread id
