@@ -3275,15 +3275,69 @@ void register_ps2_gs_tests()
             setRegU32(resetCtx, 5, 1u);
             setRegU32(resetCtx, 6, 2u);
             setRegU32(resetCtx, 7, 1u);
+            // sceGsResetGraph(mode=0) is what captures the field base (see
+            // GS.cpp resetGsSyncVState / g_gs_sync_v_base_tick). Bracket it
+            // with tick samples so we know whether the vsync worker (a
+            // free-running wall-clock timer, independent of this thread) ticked
+            // over while this call was doing its own work. On a loaded/virtualized
+            // CI runner that call can itself take long enough for a tick to land
+            // inside it, which shifts the base and makes any hardcoded absolute
+            // field expectation unanswerable -- only the relative parity checks
+            // below remain valid in that case.
+            const uint64_t tickPreSetup = ps2_syscalls::GetCurrentVSyncTick();
             ps2_stubs::sceGsResetGraph(rdram.data(), &resetCtx, &runtime);
+            const uint64_t tickPostSetup = ps2_syscalls::GetCurrentVSyncTick();
+            const bool baseUnambiguous = (tickPreSetup == tickPostSetup);
 
             R5900Context sync0{};
             ps2_stubs::sceGsSyncV(rdram.data(), &sync0, &runtime);
-            t.Equals(static_cast<int32_t>(getRegU32Test(sync0, 2)), 0, "first interlaced sceGsSyncV should report even field");
+            // Sample the vsync tick this call consumed as close to the call as
+            // possible. The vsync worker (ps2xRuntime/.../Interrupt.cpp,
+            // interruptWorkerMain) free-runs on a wall-clock timer
+            // (kVblankPeriod, ~16.6ms) independent of this thread, and
+            // WaitForNextVSyncTick's contract is only "returns a tick strictly
+            // after the one you started on" -- not "exactly one tick later".
+            // On a loaded/virtualized CI runner (observed on windows-msvc) THIS
+            // test thread -- not the worker -- can be descheduled for longer
+            // than one vsync period between the two sceGsSyncV calls below, in
+            // which case the second call legitimately consumes tick N+2 (or
+            // later) instead of N+1, and a hardcoded "must be odd" expectation
+            // is simply wrong. Deriving the expected field from the observed
+            // tick keeps this assertion correct under that jitter while still
+            // catching real regressions in the field-parity logic.
+            const uint64_t tick0 = ps2_syscalls::GetCurrentVSyncTick();
+            const int32_t field0 = static_cast<int32_t>(getRegU32Test(sync0, 2));
+            if (baseUnambiguous)
+            {
+                t.Equals(field0, 0, "first interlaced sceGsSyncV should report even field");
+            }
 
             R5900Context sync1{};
             ps2_stubs::sceGsSyncV(rdram.data(), &sync1, &runtime);
-            t.Equals(static_cast<int32_t>(getRegU32Test(sync1, 2)), 1, "second interlaced sceGsSyncV should report odd field");
+            const uint64_t tick1 = ps2_syscalls::GetCurrentVSyncTick();
+            const int32_t field1 = static_cast<int32_t>(getRegU32Test(sync1, 2));
+
+            // Liveness: the second call must have actually waited for a new
+            // tick, not replayed the one the first call already consumed.
+            t.IsTrue(tick1 > tick0,
+                     "second sceGsSyncV should consume a strictly later vsync tick than the first");
+
+            // getGsSyncVFieldForTick's field is (tick - base - 1) & 1, which is
+            // linear in the tick number, so the expected field for tick1 is
+            // field0 XOR'd with the parity of however many ticks actually
+            // elapsed. This holds exactly whether one tick elapsed (the common,
+            // fully-loaded-CI-free case) or several (a stalled runner).
+            const int32_t expectedField1 = field0 ^ static_cast<int32_t>((tick1 - tick0) & 1u);
+            t.Equals(field1, expectedField1,
+                     "second interlaced sceGsSyncV field should match the parity of the tick it actually consumed");
+
+            // Keep full strength under normal timing: when the base was
+            // unambiguous (so field0 == 0 is known-good) and exactly one tick
+            // elapsed between the two syncs, the field must flip to odd.
+            if (baseUnambiguous && tick1 - tick0 == 1u)
+            {
+                t.Equals(field1, 1, "second interlaced sceGsSyncV should report odd field when exactly one tick elapsed");
+            }
 
             R5900Context resetProgCtx{};
             setRegU32(resetProgCtx, 4, 0u);

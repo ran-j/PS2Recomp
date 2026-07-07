@@ -1,6 +1,7 @@
 #include "ps2_syscalls.h"
 #include "ps2_log.h"
 #include "ps2_runtime.h"
+#include "ps2_scheduler.h"
 #include "runtime/ps2_iop_audio.h"
 #include "ps2_runtime_macros.h"
 #include "ps2_stubs.h"
@@ -35,11 +36,3 @@ std::string translatePs2Path(const char *ps2Path);
 #include "Helpers/State.h"
 #include "Helpers/Loader.h"
 #include "Helpers/Runtime.h"
-
-namespace ps2_syscalls
-{
-    inline void yieldGuestExecutionAfterWake(PS2Runtime *runtime)
-    {
-        runtime->yieldGuestExecutionAfterWake();
-    }
-}

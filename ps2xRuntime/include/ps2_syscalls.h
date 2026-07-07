@@ -32,8 +32,6 @@ namespace ps2_syscalls
     void initializeGuestKernelState(uint8_t *rdram);
     void TODO(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t encodedSyscallId);
     void notifyRuntimeStop();
-    void joinAllGuestHostThreads();
-    void detachAllGuestHostThreads();
     void resetSoundDriverRpcState();
     void setSoundDriverCompatLayout(const PS2SoundDriverCompatLayout &layout);
     void clearSoundDriverCompatLayout();

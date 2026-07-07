@@ -1,5 +1,6 @@
 #include "Common.h"
 #include "Thread.h"
+#include "ps2_scheduler_internal.h"
 
 namespace ps2_syscalls
 {
@@ -12,26 +13,6 @@ namespace ps2_syscalls
         else
         {
             info.status = THS_SUSPEND;
-        }
-    }
-
-    static void notifyThreadWaitObject(int waitType, int waitId)
-    {
-        if (waitType == TSW_SEMA)
-        {
-            auto sema = lookupSemaInfo(waitId);
-            if (sema)
-            {
-                sema->cv.notify_all();
-            }
-        }
-        else if (waitType == TSW_EVENT)
-        {
-            auto eventFlag = lookupEventFlagInfo(waitId);
-            if (eventFlag)
-            {
-                eventFlag->cv.notify_all();
-            }
         }
     }
 
@@ -66,6 +47,66 @@ namespace ps2_syscalls
             {
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // on_fiber_exit — called by fiber_trampoline (via g_fiber_exit_hook)
+    // after dispatchLoop returns.  Runs exit handlers and resets ThreadInfo.
+    // -----------------------------------------------------------------------
+    static void on_fiber_exit(int tid, uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+    {
+        auto info = lookupThreadInfo(tid);
+
+        runExitHandlersForThread(tid, rdram, ctx, runtime);
+
+        uint32_t detachedAutoStack = 0;
+        if (info) {
+            std::lock_guard<std::mutex> lock(info->m);
+            info->started = false;
+            info->status = THS_DORMANT;
+            info->waitType = TSW_NONE;
+            info->waitId = 0;
+            info->wakeupCount = 0;
+            info->suspendCount = 0;
+            info->forceRelease = false;
+            info->terminated = false;
+        }
+
+        bool stillRegistered = false;
+        {
+            std::lock_guard<std::mutex> lock(g_thread_map_mutex);
+            stillRegistered = (g_threads.find(tid) != g_threads.end());
+        }
+        if (!stillRegistered && info) {
+            std::lock_guard<std::mutex> lock(info->m);
+            if (info->ownsStack && info->stack != 0) {
+                detachedAutoStack = info->stack;
+                info->stack = 0;
+                info->stackSize = 0;
+                info->ownsStack = false;
+            }
+        }
+        if (detachedAutoStack != 0 && runtime) {
+            runtime->guestFree(detachedAutoStack);
+        }
+
+        // Consume this thread's active-thread token exactly once. If `info` is
+        // null the g_threads entry was already removed by whoever also took the
+        // token (notifyRuntimeStop reaping residual guest threads, or
+        // ExitDeleteThread erasing its own entry), so this exit must NOT
+        // decrement again. When `info` is present the atomic exchange is the
+        // sole arbiter: a concurrent notifyRuntimeStop() holding the same
+        // shared_ptr races here and exactly one side wins the true->false
+        // transition and performs the single fetch_sub.
+        if (info && info->activeCounted.exchange(false, std::memory_order_acq_rel))
+            g_activeThreads.fetch_sub(1, std::memory_order_release);
+    }
+
+    static std::once_flag s_fiber_exit_hook_once;
+    static void ensureFiberExitHookRegistered() {
+        std::call_once(s_fiber_exit_hook_once, [](){
+            g_fiber_exit_hook = on_fiber_exit;
+        });
     }
 
     void FlushCache(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -211,13 +252,6 @@ namespace ps2_syscalls
             g_threads[id] = info;
         }
 
-        RUNTIME_LOG("[CreateThread] id=" << id
-                                         << " entry=0x" << std::hex << info->entry
-                                         << " stack=0x" << info->stack
-                                         << " size=0x" << info->stackSize
-                                         << " gp=0x" << info->gp
-                                         << " prio=" << std::dec << info->priority << std::endl);
-
         setReturnS32(ctx, id);
     }
 
@@ -293,7 +327,8 @@ namespace ps2_syscalls
 
         if (!runtime || !runtime->hasFunction(info->entry))
         {
-            std::cerr << "[StartThread] entry 0x" << std::hex << info->entry << std::dec << " is not registered" << std::endl;
+            std::cerr << "[StartThread] entry 0x" << std::hex << info->entry << std::dec
+                      << " is not registered" << std::endl;
             setReturnS32(ctx, KE_ERROR);
             return;
         }
@@ -302,8 +337,6 @@ namespace ps2_syscalls
             setReturnS32(ctx, KE_ERROR);
             return;
         }
-
-        joinHostThreadById(tid);
 
         const uint32_t callerSp = getRegU32(ctx, 29);
         const uint32_t callerGp = getRegU32(ctx, 28);
@@ -332,224 +365,78 @@ namespace ps2_syscalls
                 {
                     info->stack = autoStack;
                     info->ownsStack = true;
-                    RUNTIME_LOG("[StartThread] id=" << tid
-                                                    << " auto-stack=0x" << std::hex << autoStack
-                                                    << " size=0x" << info->stackSize << std::dec << std::endl);
                 }
             }
-
             if (info->stack != 0 && info->stackSize == 0)
             {
-                // Some games leave size zero in the thread param even though a stack
-                // buffer is supplied; use a conservative default instead of caller SP.
                 info->stackSize = 0x800u;
             }
         }
 
+        uint32_t threadSp = callerSp;
+        if (info->stack)
+        {
+            const uint32_t stackSize = (info->stackSize != 0) ? info->stackSize : 0x800u;
+            threadSp = (info->stack + stackSize) & ~0xFu;
+        }
+        uint32_t threadGp = info->gp;
+        const uint32_t normalizedGp = threadGp & 0x1FFFFFFFu;
+        if (threadGp == 0 || normalizedGp < 0x10000u || normalizedGp >= PS2_RAM_SIZE)
+        {
+            threadGp = callerGp;
+        }
+
+        ensureFiberExitHookRegistered();
+        // Mint this thread's active-thread token. Order matters: bump the
+        // counter FIRST, then publish the token with release. A consumer that
+        // observes activeCounted==true is therefore guaranteed to also see the
+        // matching +1, so the exchange/fetch_sub in a consumer can never run
+        // ahead of this fetch_add and transiently drive g_activeThreads negative.
         g_activeThreads.fetch_add(1, std::memory_order_relaxed);
+        info->activeCounted.store(true, std::memory_order_release);
+
+        // Create the fiber and enqueue it Ready. Throws on allocation failure or if the scheduler is shutting down; the catch below reports it as KE_NO_MEMORY.
         try
         {
-            std::thread worker([=]() mutable
-                               {
-            {
-                std::string name = "PS2Thread_" + std::to_string(tid);
-                ThreadNaming::SetCurrentThreadName(name);
-            }
-            R5900Context threadCtxCopy{};
-            R5900Context *threadCtx = &threadCtxCopy;
-
-            {
-                std::lock_guard<std::mutex> lock(info->m);
-                info->status = THS_RUN;
-            }
-
-            uint32_t threadSp = callerSp;
-            if (info->stack)
-            {
-                const uint32_t stackSize = (info->stackSize != 0) ? info->stackSize : 0x800u;
-                threadSp = (info->stack + stackSize) & ~0xFu;
-            }
-            uint32_t threadGp = info->gp;
-            const uint32_t normalizedGp = threadGp & 0x1FFFFFFFu;
-            if (threadGp == 0 || normalizedGp < 0x10000u || normalizedGp >= PS2_RAM_SIZE)
-            {
-                threadGp = callerGp;
-            }
-
-            SET_GPR_U32(threadCtx, 29, threadSp);
-            SET_GPR_U32(threadCtx, 28, threadGp);
-            SET_GPR_U32(threadCtx, 4, info->arg);
-            SET_GPR_U32(threadCtx, 31, 0);
-            threadCtx->pc = info->entry;
-
-            g_currentThreadId = tid;
-
-            RUNTIME_LOG("[StartThread] id=" << tid
-                      << " entry=0x" << std::hex << info->entry
-                      << " sp=0x" << GPR_U32(threadCtx, 29)
-                      << " gp=0x" << GPR_U32(threadCtx, 28)
-                      << " arg=0x" << info->arg << std::dec << std::endl);
-
-            bool exited = false;
-            try
-            {
-                uint32_t lastPc = 0xFFFFFFFFu;
-                uint32_t samePcCount = 0;
-                constexpr uint32_t kSamePcYieldMask = 0xFFu;
-                constexpr uint32_t kSamePcWarnInterval = 0x20000u;
-                uint64_t stepCount = 0u;
-
-                while (runtime && !runtime->isStopRequested())
-                {
-                    ++stepCount;
-                    if (info->terminated.load(std::memory_order_relaxed))
-                    {
-                        throw ThreadExitException();
-                    }
-
-                    waitWhileSuspended(info, runtime);
-
-                    const uint32_t pc = threadCtx->pc;
-                    info->currentPc.store(pc, std::memory_order_relaxed);
-                    if (pc == 0u)
-                    {
-                        break;
-                    }
-
-                    if ((stepCount & 0x1FFFFFu) == 0u)
-                    {
-                        RUNTIME_LOG("[StartThread] id=" << tid
-                                  << " heartbeat pc=0x" << std::hex << pc
-                                  << " ra=0x" << GPR_U32(threadCtx, 31)
-                                  << " sp=0x" << GPR_U32(threadCtx, 29)
-                                  << " gp=0x" << GPR_U32(threadCtx, 28)
-                                  << std::dec << std::endl);
-                    }
-
-                    if (pc == lastPc)
-                    {
-                        ++samePcCount;
-                        if ((samePcCount & kSamePcYieldMask) == 0u)
-                        {
-                            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                        }
-                        if (samePcCount > kSamePcWarnInterval)
-                        {
-                            // If a thread is spinning for an extremely long time (e.g. idle thread),
-                            // force a 1ms sleep to prevent host CPU starvation.
-                            if ((samePcCount % (kSamePcWarnInterval * 8u)) == 0u)
-                            {
-                                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                            }
-                            else if ((samePcCount % (kSamePcWarnInterval)) == 0u)
-                            {
-                                std::this_thread::yield();
-                            }
-                        }
-                    }
-                    else
-                    {
-                        samePcCount = 0;
-                        lastPc = pc;
-                    }
-
-                    PS2Runtime::RecompiledFunction step = runtime->lookupFunction(pc);
-                    if (!step)
-                    {
-                        std::cerr << "[StartThread] id=" << tid << " missing function for pc=0x"
-                                  << std::hex << pc << std::dec << std::endl;
-                        throw ThreadExitException();
-                    }
-                    {
-                        PS2Runtime::GuestExecutionScope guestExecution(runtime);
-                        step(rdram, threadCtx, runtime);
-                    }
-                }
-            }
-            catch (const ThreadExitException &)
-            {
-                exited = true;
-            }
-            catch (const std::exception &e)
-            {
-                std::cerr << "[StartThread] id=" << tid << " exception: " << e.what() << std::endl;
-            }
-
-            if (!exited)
-            {
-                RUNTIME_LOG("[StartThread] id=" << tid << " returned (pc=0x"
-                          << std::hex << threadCtx->pc << std::dec << ")" << std::endl);
-            }
-
-            runExitHandlersForThread(tid, rdram, threadCtx, runtime);
-
-            uint32_t detachedAutoStack = 0;
+            ps2sched::create_fiber(tid,
+                                   info->currentPriority > 0 ? info->currentPriority
+                                                             : static_cast<int>(info->priority),
+                                   info->entry, threadSp, threadGp, arg, runtime, rdram);
+        }
+        catch (const std::exception& e)
+        {
+            // Undo the g_activeThreads increment and reset thread state. Consume
+            // the token we just minted; the exchange guards against a concurrent
+            // notifyRuntimeStop() that reaped this same ThreadInfo.
+            if (info->activeCounted.exchange(false, std::memory_order_acq_rel))
+                g_activeThreads.fetch_sub(1, std::memory_order_release);
             {
                 std::lock_guard<std::mutex> lock(info->m);
                 info->started = false;
-                info->status = THS_DORMANT;
-                info->waitType = TSW_NONE;
-                info->waitId = 0;
-                info->wakeupCount = 0;
-                info->suspendCount = 0;
-                info->forceRelease = false;
-                info->terminated = false;
+                info->status  = THS_DORMANT;
             }
-
-            bool stillRegistered = false;
-            {
-                std::lock_guard<std::mutex> lock(g_thread_map_mutex);
-                stillRegistered = (g_threads.find(tid) != g_threads.end());
-            }
-            if (!stillRegistered)
-            {
-                // ExitDeleteThread removes the record immediately; reclaim auto stack here.
-                std::lock_guard<std::mutex> lock(info->m);
-                if (info->ownsStack && info->stack != 0)
-                {
-                    detachedAutoStack = info->stack;
-                    info->stack = 0;
-                    info->stackSize = 0;
-                    info->ownsStack = false;
-                }
-            }
-
-            if (detachedAutoStack != 0 && runtime)
-            {
-                runtime->guestFree(detachedAutoStack);
-            }
-
-            // Notify anybody waiting for termination (like TerminateThread)
-            info->cv.notify_all();
-
-            g_activeThreads.fetch_sub(1, std::memory_order_relaxed); });
-            registerHostThread(tid, std::move(worker));
-        }
-        catch (const std::exception &e)
-        {
-            std::cerr << "[StartThread] failed to spawn host thread for tid=" << tid << ": " << e.what() << std::endl;
-            g_activeThreads.fetch_sub(1, std::memory_order_relaxed);
-            std::lock_guard<std::mutex> lock(info->m);
-            info->started = false;
-            info->status = THS_DORMANT;
-            info->waitType = TSW_NONE;
-            info->waitId = 0;
-            info->wakeupCount = 0;
-            info->suspendCount = 0;
-            info->forceRelease = false;
-            info->terminated = false;
-            setReturnS32(ctx, KE_ERROR);
+            std::cerr << "[StartThread] create_fiber failed: " << e.what() << std::endl;
+            setReturnS32(ctx, KE_NO_MEMORY);
             return;
         }
 
+        // Update ThreadInfo status to READY now that the fiber is enqueued.
+        // Guard against a race where TerminateThread ran between create_fiber
+        // and here: if the thread was already transitioned to THS_DORMANT by
+        // the terminate path, do not revert it to THS_READY.
+        {
+            std::lock_guard<std::mutex> lock(info->m);
+            if (info->status != THS_DORMANT)
+                info->status = THS_READY;
+        }
+
+        // Yield if the new thread has higher or equal priority.
+        ps2sched::maybe_yield();
         setReturnS32(ctx, KE_OK);
     }
 
     void ExitThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        RUNTIME_LOG("[ExitThread] Game requested thread exit! PC=0x" << std::hex << ctx->pc
-                                                                     << " RA=0x" << getRegU32(ctx, 31) << std::dec << " tid=" << g_currentThreadId << std::endl);
-
         runExitHandlersForThread(g_currentThreadId, rdram, ctx, runtime);
         auto info = ensureCurrentThreadInfo(ctx);
         if (info)
@@ -561,19 +448,12 @@ namespace ps2_syscalls
             info->waitId = 0;
             info->wakeupCount = 0;
         }
-        if (info)
-        {
-            info->cv.notify_all();
-        }
         throw ThreadExitException();
     }
 
     void ExitDeleteThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         int tid = g_currentThreadId;
-        RUNTIME_LOG("[ExitDeleteThread] Game requested thread exit & delete! PC=0x" << std::hex << ctx->pc
-                                                                                    << " RA=0x" << getRegU32(ctx, 31) << std::dec << " tid=" << tid << std::endl);
-
         runExitHandlersForThread(tid, rdram, ctx, runtime);
         auto info = ensureCurrentThreadInfo(ctx);
         if (info)
@@ -585,14 +465,16 @@ namespace ps2_syscalls
             info->waitId = 0;
             info->wakeupCount = 0;
         }
-        if (info)
-        {
-            info->cv.notify_all();
-        }
         {
             std::lock_guard<std::mutex> lock(g_thread_map_mutex);
             g_threads.erase(tid);
         }
+        // We just erased our own g_threads entry, so the on_fiber_exit that runs
+        // after this throw will see a null ThreadInfo and skip the token consume.
+        // Consume the active-thread token here instead, so g_activeThreads is
+        // decremented exactly once for this started thread.
+        if (info && info->activeCounted.exchange(false, std::memory_order_acq_rel))
+            g_activeThreads.fetch_sub(1, std::memory_order_release);
         throw ThreadExitException();
     }
 
@@ -600,7 +482,14 @@ namespace ps2_syscalls
     {
         int tid = static_cast<int>(getRegU32(ctx, 4));
         if (tid == 0)
+        {
+            if (g_currentThreadId == -1)
+            {
+                setReturnS32(ctx, KE_ILLEGAL_THID);
+                return;
+            }
             tid = g_currentThreadId;
+        }
 
         auto info = (tid == g_currentThreadId) ? ensureCurrentThreadInfo(ctx) : lookupThreadInfo(tid);
         if (!info)
@@ -609,8 +498,6 @@ namespace ps2_syscalls
             return;
         }
 
-        int waitType = TSW_NONE;
-        int waitId = 0;
         {
             std::lock_guard<std::mutex> lock(info->m);
             if (info->status == THS_DORMANT)
@@ -618,13 +505,9 @@ namespace ps2_syscalls
                 setReturnS32(ctx, KE_DORMANT);
                 return;
             }
-            waitType = info->waitType;
-            waitId = info->waitId;
             info->terminated = true;
             info->forceRelease = true;
         }
-        info->cv.notify_all();
-        notifyThreadWaitObject(waitType, waitId);
 
         if (tid == g_currentThreadId)
         {
@@ -633,17 +516,8 @@ namespace ps2_syscalls
         }
         else
         {
-            // Block until the target thread actually finishes unwinding and becomes dormant.
-            // Drop the thread mutex before reacquiring GuestExecutionScope to avoid lock inversion.
-            std::unique_lock<std::mutex> lock(info->m);
-            waitWithGuestExecutionReleasedUntilUnlocked(
-                runtime,
-                lock,
-                [&]()
-                {
-                    info->cv.wait(lock, [&]()
-                                  { return !info->started && info->status == THS_DORMANT; });
-                });
+            ps2sched::request_terminate(tid);
+            ps2sched::join_fiber(tid);
         }
 
         setReturnS32(ctx, KE_OK);
@@ -653,7 +527,14 @@ namespace ps2_syscalls
     {
         int tid = static_cast<int>(getRegU32(ctx, 4));
         if (tid == 0)
+        {
+            if (g_currentThreadId == -1)
+            {
+                setReturnS32(ctx, KE_ILLEGAL_THID);
+                return;
+            }
             tid = g_currentThreadId;
+        }
 
         auto info = (tid == g_currentThreadId) ? ensureCurrentThreadInfo(ctx) : lookupThreadInfo(tid);
         if (!info)
@@ -672,33 +553,26 @@ namespace ps2_syscalls
             info->suspendCount++;
             applySuspendStatusLocked(*info);
         }
-        info->cv.notify_all();
 
         if (tid == g_currentThreadId)
         {
-            std::unique_lock<std::mutex> lock(info->m);
-            bool terminated = false;
-            waitWithGuestExecutionReleasedUntilUnlocked(
-                runtime,
-                lock,
-                [&]()
-                {
-                    info->cv.wait(lock, [&]()
-                                  { return info->suspendCount == 0 || info->terminated.load(); });
-                },
-                [&]()
-                {
-                    terminated = info->terminated.load();
-                    if (!terminated)
-                    {
-                        info->status = THS_RUN;
-                    }
-                });
-
-            if (terminated)
+            // Drive the scheduler gate through fc->suspendCount via
+            // suspend_self(), NOT block_current() directly. suspend_self()
+            // increments FiberContext::suspendCount and parks the fiber; the
+            // matching ResumeThread -> clear_suspend() zeroes it and re-
+            // enqueues when it reaches 0. info->suspendCount (incremented above)
+            // remains the PS2-visible count for status reporting.
+            if (info->terminated.load()) throw ThreadExitException();
+            ps2sched::suspend_self(); // parks until clear_suspend() wakes us
+            if (info->terminated.load()) throw ThreadExitException();
             {
-                throw ThreadExitException();
+                std::lock_guard<std::mutex> lock(info->m);
+                info->status = THS_RUN;
             }
+        }
+        else
+        {
+            ps2sched::suspend_other(tid);
         }
 
         setReturnS32(ctx, KE_OK);
@@ -708,7 +582,14 @@ namespace ps2_syscalls
     {
         int tid = static_cast<int>(getRegU32(ctx, 4));
         if (tid == 0)
+        {
+            if (g_currentThreadId == -1)
+            {
+                setReturnS32(ctx, KE_ILLEGAL_THID);
+                return;
+            }
             tid = g_currentThreadId;
+        }
 
         auto info = (tid == g_currentThreadId) ? ensureCurrentThreadInfo(ctx) : lookupThreadInfo(tid);
         if (!info)
@@ -742,7 +623,23 @@ namespace ps2_syscalls
                 }
             }
         }
-        info->cv.notify_all();
+
+        // ThreadInfo::suspendCount is the PS2-visible nesting count.
+        // FiberContext::suspendCount is the scheduler parking gate. When the
+        // PS2 count reaches 0 the thread must run again, so force the scheduler
+        // gate to 0 in one shot (handles nested SuspendThread correctly).
+        {
+            int sc;
+            {
+                std::lock_guard<std::mutex> lock(info->m);
+                sc = info->suspendCount;
+            }
+            if (sc == 0) {
+                ps2sched::clear_suspend(tid); // fc->suspendCount = 0 + wake if Blocked
+                ps2sched::maybe_yield();
+            }
+        }
+
         setReturnS32(ctx, KE_OK);
     }
 
@@ -758,6 +655,11 @@ namespace ps2_syscalls
 
         if (tid == 0) // TH_SELF
         {
+            if (g_currentThreadId == -1)
+            {
+                setReturnS32(ctx, KE_ILLEGAL_THID);
+                return;
+            }
             tid = g_currentThreadId;
         }
 
@@ -798,18 +700,43 @@ namespace ps2_syscalls
 
     void SleepThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        auto info = ensureCurrentThreadInfo(ctx);
-        if (!info)
+        // Guest identity is keyed off g_currentThreadId, NOT fiber-ness (see
+        // WaitSema/WaitEventFlag in Sync.cpp for the full rationale). onFiber
+        // remains the gate only for the genuinely scheduler-only parts below
+        // (arm_park / the fiber wait loop's parking); a non-fiber thread
+        // carrying a real guest tid (g_currentThreadId != -1) still gets
+        // THS_WAIT bookkeeping via a ThreadInfo, so it is targetable by
+        // WakeupThread/ReleaseWaitThread, and takes the bounded-backoff retry
+        // loop below instead of parking, re-checking wakeupCount exactly like
+        // the fiber path.
+        const bool onFiber = (ps2fiber_current() != nullptr);
+        std::shared_ptr<ThreadInfo> info =
+            (g_currentThreadId != -1) ? ensureCurrentThreadInfo(ctx) : nullptr;
+        if (onFiber && !info)
         {
+            // A real fiber must have a ThreadInfo; failure to create one is a
+            // genuine error.
             setReturnS32(ctx, KE_UNKNOWN_THID);
             return;
         }
 
-        throwIfTerminated(info);
+        throwIfTerminated(info); // null-safe
 
         int ret = 0;
-        int wakeupCountAfter = 0;
-        bool terminated = false;
+
+        if (!info)
+        {
+            // Fully borrowed host worker (g_currentThreadId == -1): PS2
+            // interrupt context cannot sleep on a PS2 thread it does not own.
+            // There is no ThreadInfo / wakeupCount to consult. Park-and-retry
+            // once with bounded backoff, then return OK so the worker does
+            // not livelock the emulator.
+            ps2sched::BlockResult br = ps2sched::block_current();
+            nonFiberBlockBackoff(br);
+            setReturnS32(ctx, 0);
+            return;
+        }
+
         std::unique_lock<std::mutex> lock(info->m);
 
         if (info->wakeupCount > 0)
@@ -819,82 +746,74 @@ namespace ps2_syscalls
             info->waitType = TSW_NONE;
             info->waitId = 0;
             ret = 0;
-            wakeupCountAfter = info->wakeupCount;
         }
         else
         {
-            static std::atomic<uint32_t> s_sleepBlockLogs{0};
-            const uint32_t sleepBlockLog = s_sleepBlockLogs.fetch_add(1, std::memory_order_relaxed);
-            if (sleepBlockLog < 256u)
-            {
-                RUNTIME_LOG("[SleepThread:block] tid=" << g_currentThreadId
-                                                       << " pc=0x" << std::hex << ctx->pc
-                                                       << " ra=0x" << getRegU32(ctx, 31)
-                                                       << std::dec << std::endl);
-            }
-
             info->status = THS_WAIT;
             info->waitType = TSW_SLEEP;
             info->waitId = 0;
             info->forceRelease = false;
 
-            waitWithGuestExecutionReleasedUntilUnlocked(
-                runtime,
-                lock,
-                [&]()
+            NonFiberBackoff nfBackoff; // unused for fibers; ramps for non-fiber waiters
+
+            for (;;)
+            {
+                // Drop info->m before ANY scheduler operation so g_sched_mutex is
+                // never nested under info->m.
+                lock.unlock();
+                // Arm on every iteration: block_current() consumes wake_pending,
+                // so a wake arriving in the new publish/arm window would be missed
+                // if we skipped re-arming on subsequent iterations.
+                if (onFiber)
                 {
-                    info->cv.wait(lock, [&]()
-                                  { return info->wakeupCount > 0 || info->forceRelease.load() || info->terminated.load(); });
-                },
-                [&]()
+                    ps2sched::arm_park();
+                }
+                const ps2sched::BlockResult br = ps2sched::block_current();
+
+                // Non-fiber (but identified) waiter: bounded exponential backoff
+                // so a never-satisfied condition cannot busy-spin the CPU.
+                if (br == ps2sched::BlockResult::NonFiberOwner ||
+                    br == ps2sched::BlockResult::NonFiberNoTok)
                 {
-                    terminated = info->terminated.load();
-                    if (terminated)
-                    {
-                        return;
-                    }
+                    nfBackoff.step(br);
+                }
 
-                    info->status = THS_RUN;
-                    info->waitType = TSW_NONE;
-                    info->waitId = 0;
+                lock.lock();
 
-                    if (info->forceRelease.load())
-                    {
-                        info->forceRelease = false;
-                        ret = KE_RELEASE_WAIT;
-                    }
-                    else
-                    {
-                        if (info->wakeupCount > 0)
-                        {
-                            info->wakeupCount--;
-                        }
-                        ret = 0;
-                    }
-                    wakeupCountAfter = info->wakeupCount;
-                });
+                // 1. Terminate wins unconditionally (shutdown / TerminateThread).
+                if (info->terminated.load())
+                    throw ThreadExitException();
+
+                // 2. ReleaseWaitThread forced us out of the wait.
+                if (info->forceRelease.load())
+                {
+                    info->forceRelease = false;
+                    ret = KE_RELEASE_WAIT;
+                    break;
+                }
+
+                // 3. Genuine WakeupThread: a permit is available.
+                if (info->wakeupCount > 0)
+                {
+                    --info->wakeupCount;
+                    ret = 0;
+                    break;
+                }
+
+                // 4. Spurious wake (e.g. ResumeThread / clear_suspend with no
+                //    pending wakeup): stay asleep. Re-affirm wait state and loop.
+                info->status = THS_WAIT;
+                info->waitType = TSW_SLEEP;
+                info->waitId = 0;
+            }
+
+            info->status = THS_RUN;
+            info->waitType = TSW_NONE;
+            info->waitId = 0;
         }
 
-        if (terminated)
-        {
-            throw ThreadExitException();
-        }
-
-        static std::atomic<uint32_t> s_sleepWakeLogs{0};
-        const uint32_t sleepWakeLog = s_sleepWakeLogs.fetch_add(1, std::memory_order_relaxed);
-        if (sleepWakeLog < 256u)
-        {
-            RUNTIME_LOG("[SleepThread:wake] tid=" << g_currentThreadId
-                                                  << " ret=" << ret
-                                                  << " wakeupCount=" << wakeupCountAfter
-                                                  << std::endl);
-        }
-
-        if (lock.owns_lock())
-        {
-            lock.unlock();
-        }
-        waitWhileSuspended(info, runtime);
+        lock.unlock();
+        waitWhileSuspended(info);
         setReturnS32(ctx, ret);
     }
 
@@ -919,9 +838,7 @@ namespace ps2_syscalls
             return;
         }
 
-        int newWakeupCount = 0;
-        int statusAfter = THS_DORMANT;
-        bool wokeSleeper = false;
+        bool wasWaiting = false;
         {
             std::lock_guard<std::mutex> lock(info->m);
             if (info->status == THS_DORMANT)
@@ -931,6 +848,7 @@ namespace ps2_syscalls
             }
             if (info->status == THS_WAIT && info->waitType == TSW_SLEEP)
             {
+                wasWaiting = true;
                 if (info->suspendCount > 0)
                 {
                     info->status = THS_SUSPEND;
@@ -942,32 +860,20 @@ namespace ps2_syscalls
                 info->waitType = TSW_NONE;
                 info->waitId = 0;
                 info->wakeupCount++;
-                info->cv.notify_one();
-                wokeSleeper = true;
             }
             else
             {
                 info->wakeupCount++;
             }
-            newWakeupCount = info->wakeupCount;
-            statusAfter = info->status;
         }
 
-        static std::atomic<uint32_t> s_wakeupLogs{0};
-        const uint32_t wakeupLog = s_wakeupLogs.fetch_add(1, std::memory_order_relaxed);
-        if (wakeupLog < 256u)
-        {
-            RUNTIME_LOG("[WakeupThread] tid=" << g_currentThreadId
-                                              << " target=" << tid
-                                              << " status=" << statusAfter
-                                              << " wakeupCount=" << newWakeupCount
-                                              << std::endl);
+        // If the thread was sleeping, make it ready and yield if higher priority.
+        if (wasWaiting) {
+            ps2sched::make_ready(tid);
+            ps2sched::maybe_yield();
         }
+
         setReturnS32(ctx, KE_OK);
-        if (wokeSleeper)
-        {
-            yieldGuestExecutionAfterWake(runtime);
-        }
     }
 
     void iWakeupThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -979,7 +885,14 @@ namespace ps2_syscalls
     {
         int tid = static_cast<int>(getRegU32(ctx, 4));
         if (tid == 0)
+        {
+            if (g_currentThreadId == -1)
+            {
+                setReturnS32(ctx, KE_ILLEGAL_THID);
+                return;
+            }
             tid = g_currentThreadId;
+        }
 
         auto info = (tid == g_currentThreadId) ? ensureCurrentThreadInfo(ctx) : lookupThreadInfo(tid);
         if (!info)
@@ -1028,7 +941,14 @@ namespace ps2_syscalls
         int newPrio = static_cast<int>(getRegU32(ctx, 5));
 
         if (tid == 0)
+        {
+            if (g_currentThreadId == -1)
+            {
+                setReturnS32(ctx, KE_ILLEGAL_THID);
+                return;
+            }
             tid = g_currentThreadId;
+        }
 
         auto info = (tid == g_currentThreadId) ? ensureCurrentThreadInfo(ctx) : lookupThreadInfo(tid);
         if (!info)
@@ -1058,6 +978,9 @@ namespace ps2_syscalls
             info->currentPriority = newPrio;
         }
 
+        ps2sched::update_priority(tid, newPrio);
+        ps2sched::maybe_yield();
+
         setReturnS32(ctx, KE_OK);
     }
 
@@ -1068,10 +991,14 @@ namespace ps2_syscalls
 
     void RotateThreadReadyQueue(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        static int logCount = 0;
         int prio = static_cast<int>(getRegU32(ctx, 4));
         if (prio == 0)
         {
+            if (g_currentThreadId == -1)
+            {
+                setReturnS32(ctx, KE_ILLEGAL_THID);
+                return;
+            }
             auto current = ensureCurrentThreadInfo(ctx);
             if (current)
             {
@@ -1079,19 +1006,17 @@ namespace ps2_syscalls
                 prio = (current->currentPriority > 0) ? current->currentPriority : 1;
             }
         }
-        if (logCount < 16)
-        {
-            RUNTIME_LOG("[RotateThreadReadyQueue] prio=" << prio);
-            ++logCount;
-        }
         if (prio <= 0 || prio >= 128)
         {
             setReturnS32(ctx, KE_ILLEGAL_PRIORITY);
             return;
         }
 
+        // Rotate the equal-priority group in the fiber run queue.
+        ps2sched::rotate_ready_queue(prio);
+        ps2sched::maybe_yield();
+
         setReturnS32(ctx, KE_OK);
-        yieldGuestExecutionAfterWake(runtime);
     }
 
     void iRotateThreadReadyQueue(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1116,16 +1041,12 @@ namespace ps2_syscalls
         }
 
         bool wasWaiting = false;
-        int waitType = 0;
-        int waitId = 0;
 
         {
             std::lock_guard<std::mutex> lock(info->m);
             if (info->status == THS_WAIT || info->status == THS_WAITSUSPEND)
             {
                 wasWaiting = true;
-                waitType = info->waitType;
-                waitId = info->waitId;
                 info->forceRelease = true;
                 info->waitType = TSW_NONE;
                 info->waitId = 0;
@@ -1146,10 +1067,11 @@ namespace ps2_syscalls
             return;
         }
 
-        info->cv.notify_all();
-        notifyThreadWaitObject(waitType, waitId);
+        // Make the released thread ready and yield if it has higher priority.
+        ps2sched::make_ready(tid);
+        ps2sched::maybe_yield();
+
         setReturnS32(ctx, KE_OK);
-        yieldGuestExecutionAfterWake(runtime);
     }
 
     void iReleaseWaitThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

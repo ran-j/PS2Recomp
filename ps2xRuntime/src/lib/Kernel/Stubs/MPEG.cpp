@@ -1282,23 +1282,25 @@ namespace ps2_stubs
                 return;
             }
 
-            thread_local PS2Runtime *s_callbackStackRuntime = nullptr;
-            thread_local uint32_t s_callbackStackTop = 0u;
-            if (s_callbackStackRuntime != runtime || s_callbackStackTop == 0u)
-            {
-                constexpr uint32_t kCallbackStackSize = 0x4000u;
-                s_callbackStackRuntime = runtime;
-                s_callbackStackTop = runtime->reserveAsyncCallbackStack(kCallbackStackSize, 16u);
-            }
+            // Per-invocation scratch stack (fresh guest-heap region, RAII-freed
+            // on every return below): MPEG stream callbacks run inline on the
+            // calling fiber and the body can yield at a back-edge, so a shared
+            // stack would be clobbered by another fiber dispatching a callback
+            // or by this fiber re-entering via a nested MPEG syscall. Mirrors
+            // the cbData reservation this function already frees on return.
+            constexpr uint32_t kCallbackStackSize = 0x4000u;
+            GuestScratchStack callbackStack(runtime, kCallbackStackSize);
 
-            const uint32_t cbDataAddr = runtime->guestMalloc(kMpegCallbackDataSize, 16u);
+            // RAII like the scratch stack above: a ThreadExitException from a
+            // callback step must not leak the callback-data reservation.
+            GuestScratchStack cbData(runtime, kMpegCallbackDataSize);
+            const uint32_t cbDataAddr = cbData.base();
             if (cbDataAddr == 0u)
             {
                 return;
             }
             if (!writeMpegCallbackData(rdram, cbDataAddr, event))
             {
-                runtime->guestFree(cbDataAddr);
                 return;
             }
 
@@ -1307,7 +1309,9 @@ namespace ps2_stubs
             SET_GPR_U32(&callbackCtx, 5, cbDataAddr);
             SET_GPR_U32(&callbackCtx, 6, callback.data);
             SET_GPR_U32(&callbackCtx, 7, 0u);
-            SET_GPR_U32(&callbackCtx, 29, (s_callbackStackTop != 0u) ? s_callbackStackTop : (PS2_RAM_SIZE - 0x10u));
+            // Failure fallback: kernel-pool top, not inside the guest's own
+            // main stack (see kAsyncCallbackFallbackSp).
+            SET_GPR_U32(&callbackCtx, 29, callbackStack.valid() ? callbackStack.top() : kAsyncCallbackFallbackSp);
             SET_GPR_U32(&callbackCtx, 31, 0u);
             callbackCtx.pc = callback.func;
 
@@ -1351,8 +1355,6 @@ namespace ps2_stubs
                     ++stepLimitLogCount;
                 }
             }
-
-            runtime->guestFree(cbDataAddr);
         }
 
         void dispatchStreamCallbacks(uint8_t *rdram,

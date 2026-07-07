@@ -28,6 +28,7 @@ add_library(ps2_test_lib STATIC
     src/ps2_sif_dma_tests.cpp
     src/ps2_recompiler_tests.cpp
     src/ps2_runtime_expansion_tests.cpp
+    src/ps2_scheduler_workload_regression_tests.cpp
 )
 
 target_include_directories(ps2_test_lib PRIVATE
@@ -35,6 +36,7 @@ target_include_directories(ps2_test_lib PRIVATE
     ${CMAKE_SOURCE_DIR}/ps2xRecomp/include
     ${CMAKE_SOURCE_DIR}/ps2xAnalyzer/include
     ${CMAKE_SOURCE_DIR}/ps2xRuntime/include
+    ${CMAKE_SOURCE_DIR}/ps2xRuntime/src/lib
 )
 
 target_link_libraries(ps2_test_lib PRIVATE

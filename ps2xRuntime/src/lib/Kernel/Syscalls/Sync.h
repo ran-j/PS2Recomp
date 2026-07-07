@@ -32,4 +32,18 @@ namespace ps2_syscalls
     void iCancelAlarm(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void ReleaseAlarm(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void iReleaseAlarm(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+
+    // Alarm worker lifecycle. ensureAlarmWorkerRunning() lazily starts a
+    // joinable worker thread. stopAlarmWorker() requests stop, wakes it, and
+    // joins it. stopAlarmWorker() is called from notifyRuntimeStop().
+    void ensureAlarmWorkerRunning();
+    void stopAlarmWorker();
+    // Signal-only variant: sets the stop flag and wakes the worker but does
+    // NOT join. For callers on the guest executor thread (a fiber calling
+    // requestStop): joining there can deadlock against the alarm worker
+    // blocked in AsyncGuestScope/async_guest_begin(), whose wait predicate
+    // (g_running_fiber == nullptr) cannot become true while the joining fiber
+    // is itself the running fiber. The join happens later in
+    // scheduler_shutdown() on the main thread (stopAlarmWorker is idempotent).
+    void signalAlarmWorkerStop();
 }
