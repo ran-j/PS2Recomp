@@ -23,6 +23,7 @@
 #include <iomanip>
 
 #include "ps2_log.h"
+#include "runtime/ps2_address.h"
 #include "runtime/ps2_gif_arbiter.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_gs_gpu.h"
@@ -480,36 +481,16 @@ public:
     void Store32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint32_t value);
     void Store64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint64_t value);
     void Store128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, __m128i value);
+    void kickGifDmaChainFromMMIO(uint8_t *rdram,
+                                 R5900Context *ctx,
+                                 uint32_t dPcrValue,
+                                 uint32_t dStatValue,
+                                 uint32_t tadr,
+                                 uint32_t chcr);
 
     static inline bool isSpecialAddress(uint32_t addr)
     {
-        auto inRange = [](uint32_t value, uint32_t base, uint32_t size) -> bool
-        {
-            return (value - base) < size;
-        };
-
-        auto isPhysicalSpecial = [&](uint32_t physAddr) -> bool
-        {
-            if (inRange(physAddr, PS2_BIOS_BASE, PS2_BIOS_SIZE))
-                return true;
-            if (inRange(physAddr, PS2_SCRATCHPAD_BASE, PS2_SCRATCHPAD_SIZE))
-                return true;
-            if (inRange(physAddr, PS2_IO_BASE, PS2_IO_SIZE))
-                return true;
-            if (inRange(physAddr, PS2_GS_PRIV_REG_BASE, PS2_GS_PRIV_REG_SIZE))
-                return true;
-            if (physAddr >= PS2_VU0_DATA_BASE && physAddr < (PS2_VU1_CODE_BASE + PS2_VU1_CODE_SIZE))
-                return true;
-            return false;
-        };
-
-        // KSEG2/KSEG3 (TLB mapped)
-        if (addr >= 0xC0000000u)
-            return true;
-
-        // KSEG0/KSEG1 aliases → physical
-        const uint32_t physAddr = (addr >= 0x80000000u) ? (addr & 0x1FFFFFFFu) : addr;
-        return isPhysicalSpecial(physAddr);
+        return Ps2IsSpecialAddress(addr);
     }
 
 public:

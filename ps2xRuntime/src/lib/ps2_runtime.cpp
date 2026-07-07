@@ -2114,6 +2114,40 @@ void PS2Runtime::Store128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, __m
     }
 }
 
+void PS2Runtime::kickGifDmaChainFromMMIO(uint8_t *rdram,
+                                         R5900Context *ctx,
+                                         uint32_t dPcrValue,
+                                         uint32_t dStatValue,
+                                         uint32_t tadr,
+                                         uint32_t chcr)
+{
+    constexpr uint32_t D_PCR = 0x1000E020u;
+    constexpr uint32_t D_STAT = 0x1000E010u;
+    constexpr uint32_t GIF_TADR = 0x1000A030u;
+    constexpr uint32_t GIF_CHCR = 0x1000A000u;
+
+    ps2TraceGuestWrite(rdram, D_PCR, 4u, dPcrValue, 0u, "WRITE32", ctx);
+    m_memory.writeIORegister(D_PCR, dPcrValue);
+    ps2TraceGuestWrite(rdram, D_STAT, 4u, dStatValue, 0u, "WRITE32", ctx);
+    m_memory.writeIORegister(D_STAT, dStatValue);
+    ps2TraceGuestWrite(rdram, GIF_TADR, 4u, tadr, 0u, "WRITE32", ctx);
+    m_memory.writeIORegister(GIF_TADR, tadr);
+    ps2TraceGuestWrite(rdram, GIF_CHCR, 4u, chcr, 0u, "WRITE32", ctx);
+    if (m_memory.tryProcessNativeGifImageUploadChain(m_gs, tadr, chcr))
+    {
+        drainCompletedDmacHandlers(rdram);
+        return;
+    }
+    if (m_memory.tryProcessNativeGifPackedChain(m_gs, tadr, chcr))
+    {
+        drainCompletedDmacHandlers(rdram);
+        return;
+    }
+    m_memory.writeIORegister(GIF_CHCR, chcr);
+    m_memory.processPendingTransfers();
+    drainCompletedDmacHandlers(rdram);
+}
+
 void PS2Runtime::requestStop()
 {
     m_stopRequested.store(true, std::memory_order_relaxed);

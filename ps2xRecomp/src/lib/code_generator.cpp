@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <cstring>
 #include <unordered_set>
+#include <utility>
 #include <unordered_map>
 #include <iostream>
 #include <cctype>
@@ -209,11 +210,27 @@ namespace ps2recomp
         return emitter.emit();
     }
 
+    std::string CodeGenerator::handleBranchDelaySlots(
+        const Instruction &branchInst,
+        const Instruction &delaySlot,
+        const Function &function,
+        const AnalysisResult &analysisResult,
+        std::string delaySlotOverride)
+    {
+        ControlFlowEmitter emitter(*this, branchInst, delaySlot, function, analysisResult, std::move(delaySlotOverride));
+        return emitter.emit();
+    }
+
     CodeGenerator::~CodeGenerator() = default;
 
     std::string CodeGenerator::translateInstruction(const Instruction &inst)
     {
-        return InstructionTranslator(*this).translate(inst);
+        return InstructionTranslator(*this).translate(inst, {});
+    }
+
+    std::string CodeGenerator::translateInstruction(const Instruction &inst, const MemoryAccessHint &memoryHint)
+    {
+        return InstructionTranslator(*this).translate(inst, memoryHint);
     }
 
     std::string CodeGenerator::translateSpecialInstruction(const Instruction &inst)
