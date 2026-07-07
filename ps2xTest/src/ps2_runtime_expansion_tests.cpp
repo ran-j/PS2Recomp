@@ -496,10 +496,7 @@ void register_ps2_runtime_expansion_tests()
                 t.IsTrue(tid > 0, "serialized-guest worker should start");
             }
 
-            const bool allDone = waitUntil([&]()
-            {
-                return g_activeThreads.load(std::memory_order_relaxed) == 0;
-            }, std::chrono::milliseconds(2000));
+            const bool allDone = drainedWithin(std::chrono::milliseconds(2000));
             t.IsTrue(allDone, "all serialized-guest workers should finish");
 
             t.Equals(gSerializedGuestActive.load(std::memory_order_acquire), 0,
@@ -1612,17 +1609,10 @@ void register_ps2_runtime_expansion_tests()
             runtime.registerFunction(kEntry, &testRuntimeWorkerLoop);
             std::memcpy(rdram.data() + kThreadParamAddr, threadParam, sizeof(threadParam));
 
-            R5900Context createCtx{};
-            setRegU32(createCtx, 4, kThreadParamAddr);
-            CreateThread(rdram.data(), &createCtx, &runtime);
-            const int32_t tid = getRegS32(createCtx, 2);
+            const int32_t tid = callSyscall(runtime, rdram, ps2_syscalls::CreateThread, kThreadParamAddr);
             t.IsTrue(tid > 0, "CreateThread should succeed for teardown-join test");
 
-            R5900Context startCtx{};
-            setRegU32(startCtx, 4, static_cast<uint32_t>(tid));
-            setRegU32(startCtx, 5, 0u);
-            StartThread(rdram.data(), &startCtx, &runtime);
-            t.Equals(getRegS32(startCtx, 2), KE_OK, "StartThread should launch worker");
+            t.Equals(callSyscall(runtime, rdram, ps2_syscalls::StartThread, static_cast<uint32_t>(tid), 0u), KE_OK, "StartThread should launch worker");
 
             const bool started = waitUntil([&]()
             {
@@ -1650,10 +1640,7 @@ void register_ps2_runtime_expansion_tests()
             // not by anything under test. Generous headroom avoids false failures
             // when the host machine is under heavy load (e.g. running this whole
             // suite back-to-back many times in a stress loop).
-            const bool drained = waitUntil([&]()
-            {
-                return g_activeThreads.load(std::memory_order_acquire) == 0;
-            }, std::chrono::milliseconds(5000));
+            const bool drained = drainedWithin(std::chrono::milliseconds(5000));
             t.IsTrue(drained, "requestStop should drain all guest worker threads");
 
             ps2sched::scheduler_shutdown();
@@ -1677,10 +1664,7 @@ void register_ps2_runtime_expansion_tests()
             };
             std::memcpy(rdram.data() + kParamAddr, semaParam, sizeof(semaParam));
 
-            R5900Context createCtx{};
-            setRegU32(createCtx, 4, kParamAddr);
-            CreateSema(rdram.data(), &createCtx, &runtime);
-            const int32_t sid = getRegS32(createCtx, 2);
+            const int32_t sid = callSyscall(runtime, rdram, ps2_syscalls::CreateSema, kParamAddr);
             t.IsTrue(sid > 0, "CreateSema should return a valid sid");
 
             std::atomic<int32_t> pollOkCount{0};
@@ -1694,10 +1678,7 @@ void register_ps2_runtime_expansion_tests()
                 {
                     for (int i = 0; i < 64; ++i)
                     {
-                        R5900Context pollCtx{};
-                        setRegU32(pollCtx, 4, static_cast<uint32_t>(sid));
-                        PollSema(rdram.data(), &pollCtx, &runtime);
-                        if (getRegS32(pollCtx, 2) == sid)
+                        if (callSyscall(runtime, rdram, ps2_syscalls::PollSema, static_cast<uint32_t>(sid)) == sid)
                         {
                             pollOkCount.fetch_add(1, std::memory_order_relaxed);
                         }
@@ -1715,10 +1696,7 @@ void register_ps2_runtime_expansion_tests()
                 {
                     for (int i = 0; i < 64; ++i)
                     {
-                        R5900Context signalCtx{};
-                        setRegU32(signalCtx, 4, static_cast<uint32_t>(sid));
-                        SignalSema(rdram.data(), &signalCtx, &runtime);
-                        if (getRegS32(signalCtx, 2) == sid)
+                        if (callSyscall(runtime, rdram, ps2_syscalls::SignalSema, static_cast<uint32_t>(sid)) == sid)
                         {
                             signalOkCount.fetch_add(1, std::memory_order_relaxed);
                         }
@@ -1749,11 +1727,7 @@ void register_ps2_runtime_expansion_tests()
                      "contended SignalSema should observe successful releases");
 
             constexpr uint32_t kStatusAddr = 0x2100u;
-            R5900Context referCtx{};
-            setRegU32(referCtx, 4, static_cast<uint32_t>(sid));
-            setRegU32(referCtx, 5, kStatusAddr);
-            ReferSemaStatus(rdram.data(), &referCtx, &runtime);
-            t.Equals(getRegS32(referCtx, 2), KE_OK, "ReferSemaStatus should succeed after contention");
+            t.Equals(callSyscall(runtime, rdram, ps2_syscalls::ReferSemaStatus, static_cast<uint32_t>(sid), kStatusAddr), KE_OK, "ReferSemaStatus should succeed after contention");
 
             int32_t finalCount = 0;
             std::memcpy(&finalCount, rdram.data() + kStatusAddr + 0u, sizeof(finalCount));
@@ -1773,10 +1747,7 @@ void register_ps2_runtime_expansion_tests()
             const uint32_t eventParam[3] = {0u, 0u, 0u};
             std::memcpy(rdram.data() + kEventParamAddr, eventParam, sizeof(eventParam));
 
-            R5900Context createCtx{};
-            setRegU32(createCtx, 4, kEventParamAddr);
-            CreateEventFlag(rdram.data(), &createCtx, &runtime);
-            const int32_t eid = getRegS32(createCtx, 2);
+            const int32_t eid = callSyscall(runtime, rdram, ps2_syscalls::CreateEventFlag, kEventParamAddr);
             t.IsTrue(eid > 0, "CreateEventFlag should return a valid id");
 
             std::atomic<bool> waiterDone{false};
@@ -1813,10 +1784,7 @@ void register_ps2_runtime_expansion_tests()
                 try
                 {
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                    R5900Context setCtx{};
-                    setRegU32(setCtx, 4, static_cast<uint32_t>(eid));
-                    setRegU32(setCtx, 5, 0x1u);
-                    SetEventFlag(rdram.data(), &setCtx, &runtime);
+                    callSyscall(runtime, rdram, ps2_syscalls::SetEventFlag, static_cast<uint32_t>(eid), 0x1u);
                 }
                 catch (...)
                 {
@@ -1829,10 +1797,7 @@ void register_ps2_runtime_expansion_tests()
                 try
                 {
                     std::this_thread::sleep_for(std::chrono::milliseconds(15));
-                    R5900Context setCtx{};
-                    setRegU32(setCtx, 4, static_cast<uint32_t>(eid));
-                    setRegU32(setCtx, 5, 0x2u);
-                    SetEventFlag(rdram.data(), &setCtx, &runtime);
+                    callSyscall(runtime, rdram, ps2_syscalls::SetEventFlag, static_cast<uint32_t>(eid), 0x2u);
                 }
                 catch (...)
                 {
@@ -1869,9 +1834,7 @@ void register_ps2_runtime_expansion_tests()
             t.IsTrue((waiterBits.load(std::memory_order_relaxed) & 0x3u) == 0x3u,
                      "WaitEventFlag result bits should include both concurrently-set bits");
 
-            R5900Context deleteCtx{};
-            setRegU32(deleteCtx, 4, static_cast<uint32_t>(eid));
-            DeleteEventFlag(rdram.data(), &deleteCtx, &runtime);
+            callSyscall(runtime, rdram, ps2_syscalls::DeleteEventFlag, static_cast<uint32_t>(eid));
             runtime.requestStop();
         });
 
@@ -2088,10 +2051,7 @@ void register_scheduler_tests()
             const bool workerBlocked = waitUntil([&]()
             {
                 constexpr uint32_t kStatusAddr = 0x2C00u;
-                R5900Context refCtx{};
-                setRegU32(refCtx, 4, static_cast<uint32_t>(sid));
-                setRegU32(refCtx, 5, kStatusAddr);
-                ps2_syscalls::ReferSemaStatus(rdram.data(), &refCtx, &runtime);
+                callSyscall(runtime, rdram, ps2_syscalls::ReferSemaStatus, static_cast<uint32_t>(sid), kStatusAddr);
                 int32_t waitThreads = 0;
                 std::memcpy(&waitThreads, rdram.data() + kStatusAddr + 12u, sizeof(waitThreads));
                 return waitThreads >= 1;
@@ -2101,20 +2061,14 @@ void register_scheduler_tests()
 
             // Signal sid from the host thread — the pool will pick up the worker fiber.
             {
-                R5900Context sigCtx{};
-                setRegU32(sigCtx, 4, static_cast<uint32_t>(sid));
-                ps2_syscalls::SignalSema(rdram.data(), &sigCtx, &runtime);
-                t.Equals(getRegS32(sigCtx, 2), sid, "WaitSema test: SignalSema(sid) should return sid");
+                t.Equals(callSyscall(runtime, rdram, ps2_syscalls::SignalSema, static_cast<uint32_t>(sid)), sid, "WaitSema test: SignalSema(sid) should return sid");
             }
 
             // Wait until the worker signals done_sid (i.e., its WaitSema returned).
             const bool workerDone = waitUntil([&]()
             {
                 constexpr uint32_t kStatusAddr = 0x2C80u;
-                R5900Context refCtx{};
-                setRegU32(refCtx, 4, static_cast<uint32_t>(doneSid));
-                setRegU32(refCtx, 5, kStatusAddr);
-                ps2_syscalls::ReferSemaStatus(rdram.data(), &refCtx, &runtime);
+                callSyscall(runtime, rdram, ps2_syscalls::ReferSemaStatus, static_cast<uint32_t>(doneSid), kStatusAddr);
                 int32_t count = 0;
                 std::memcpy(&count, rdram.data() + kStatusAddr + 0u, sizeof(count)); // current count field (offset 0 in ee_sema_t)
                 return count >= 1;
@@ -2130,10 +2084,7 @@ void register_scheduler_tests()
             }
 
             // Wait for the worker fiber to finish.
-            const bool finished = waitUntil([&]()
-            {
-                return g_activeThreads.load(std::memory_order_acquire) <= 0;
-            }, std::chrono::milliseconds(1000));
+            const bool finished = drainedWithin(std::chrono::milliseconds(1000));
             t.IsTrue(finished, "WaitSema test: worker fiber should finish within 1s");
 
             deleteSchedSema(rdram.data(), &runtime, sid);
@@ -2178,10 +2129,7 @@ void register_scheduler_tests()
             const bool workerBlocked = waitUntil([&]()
             {
                 constexpr uint32_t kStatusAddr = 0x2C00u;
-                R5900Context refCtx{};
-                setRegU32(refCtx, 4, static_cast<uint32_t>(blockSid));
-                setRegU32(refCtx, 5, kStatusAddr);
-                ps2_syscalls::ReferSemaStatus(rdram.data(), &refCtx, &runtime);
+                callSyscall(runtime, rdram, ps2_syscalls::ReferSemaStatus, static_cast<uint32_t>(blockSid), kStatusAddr);
                 int32_t waitThreads = 0;
                 std::memcpy(&waitThreads, rdram.data() + kStatusAddr + 12u, sizeof(waitThreads));
                 return waitThreads >= 1;
@@ -2193,10 +2141,7 @@ void register_scheduler_tests()
 
             // Terminate the worker fiber.
             {
-                R5900Context termCtx{};
-                setRegU32(termCtx, 4, static_cast<uint32_t>(workerTid));
-                ps2_syscalls::TerminateThread(rdram.data(), &termCtx, &runtime);
-                t.Equals(getRegS32(termCtx, 2), KE_OK, "TerminateThread should return KE_OK");
+                t.Equals(callSyscall(runtime, rdram, ps2_syscalls::TerminateThread, static_cast<uint32_t>(workerTid)), KE_OK, "TerminateThread should return KE_OK");
             }
 
             // g_activeThreads should decrement as the fiber unwinds.
@@ -2262,10 +2207,7 @@ void register_scheduler_tests()
             const bool allBlocked = waitUntil([&]()
             {
                 constexpr uint32_t kStatusAddr = 0x2D00u;
-                R5900Context refCtx{};
-                setRegU32(refCtx, 4, static_cast<uint32_t>(sid));
-                setRegU32(refCtx, 5, kStatusAddr);
-                ps2_syscalls::ReferSemaStatus(rdram.data(), &refCtx, &runtime);
+                callSyscall(runtime, rdram, ps2_syscalls::ReferSemaStatus, static_cast<uint32_t>(sid), kStatusAddr);
                 int32_t waiters = 0;
                 std::memcpy(&waiters, rdram.data() + kStatusAddr + 12u, sizeof(waiters));
                 return waiters >= kNumWorkers;
@@ -2275,10 +2217,7 @@ void register_scheduler_tests()
 
             // DeleteSema: marks deleted, wakes all N blocked fibers via make_ready.
             {
-                R5900Context delCtx{};
-                setRegU32(delCtx, 4, static_cast<uint32_t>(sid));
-                ps2_syscalls::DeleteSema(rdram.data(), &delCtx, &runtime);
-                t.Equals(getRegS32(delCtx, 2), sid, "DeleteSema should return sid");
+                t.Equals(callSyscall(runtime, rdram, ps2_syscalls::DeleteSema, static_cast<uint32_t>(sid)), sid, "DeleteSema should return sid");
             }
 
             // Wait until all N workers have signalled done_sid (count == N).
@@ -2303,18 +2242,12 @@ void register_scheduler_tests()
 
             // PollSema on the deleted id should return KE_UNKNOWN_SEMID.
             {
-                R5900Context laterCtx{};
-                setRegU32(laterCtx, 4, static_cast<uint32_t>(sid));
-                ps2_syscalls::PollSema(rdram.data(), &laterCtx, &runtime);
-                t.Equals(getRegS32(laterCtx, 2), KE_UNKNOWN_SEMID,
+                t.Equals(callSyscall(runtime, rdram, ps2_syscalls::PollSema, static_cast<uint32_t>(sid)), KE_UNKNOWN_SEMID,
                          "PollSema on a deleted sema id should return KE_UNKNOWN_SEMID");
             }
 
             // Wait for all fibers to finish and clean up.
-            const bool finished = waitUntil([&]()
-            {
-                return g_activeThreads.load(std::memory_order_acquire) <= 0;
-            }, std::chrono::milliseconds(2000));
+            const bool finished = drainedWithin(std::chrono::milliseconds(2000));
             t.IsTrue(finished, "DeleteSema test: all fibers should finish within 2s");
 
             deleteSchedSema(rdram.data(), &runtime, doneSid);
@@ -2734,10 +2667,7 @@ void register_scheduler_protocol_tests()
                 return;
             }
 
-            {
-                int32_t v = goSid;
-                std::memcpy(rdram.data() + kSlotGoSid, &v, 4);
-            }
+            rdramWrite32(rdram, kSlotGoSid, static_cast<uint32_t>(goSid));
             rdramSeqReset(rdram);
             std::memset(rdram.data() + kRunLog, 0, 32u);
 
@@ -2767,8 +2697,7 @@ void register_scheduler_protocol_tests()
             ps2sched::async_guest_begin();
             for (int i = 0; i < 3; ++i)
             {
-                R5900Context sc{}; setRegU32(sc, 4, static_cast<uint32_t>(goSid));
-                ps2_syscalls::SignalSema(rdram.data(), &sc, &runtime);
+                callSyscall(runtime, rdram, ps2_syscalls::SignalSema, static_cast<uint32_t>(goSid));
             }
             ps2sched::async_guest_end();
 
@@ -2781,7 +2710,7 @@ void register_scheduler_protocol_tests()
             t.Equals(log[1], tidB, "T1: prio 10 runs second");
             t.Equals(log[2], tidC, "T1: prio 20 runs last");
 
-            waitUntil([&](){ return g_activeThreads.load() == 0; }, std::chrono::milliseconds(1000));
+            drainedWithin(std::chrono::milliseconds(1000));
             deleteSchedSema(rdram.data(), &runtime, goSid);
         });
 
@@ -2803,10 +2732,7 @@ void register_scheduler_protocol_tests()
                 return;
             }
 
-            {
-                int32_t v = goSid;
-                std::memcpy(rdram.data() + kSlotGoSid, &v, 4);
-            }
+            rdramWrite32(rdram, kSlotGoSid, static_cast<uint32_t>(goSid));
             rdramSeqReset(rdram);
             std::memset(rdram.data() + kRunLog, 0, 16u);
 
@@ -2826,8 +2752,7 @@ void register_scheduler_protocol_tests()
             ps2sched::async_guest_begin();
             for (int i = 0; i < 2; ++i)
             {
-                R5900Context sc{}; setRegU32(sc, 4, static_cast<uint32_t>(goSid));
-                ps2_syscalls::SignalSema(rdram.data(), &sc, &runtime);
+                callSyscall(runtime, rdram, ps2_syscalls::SignalSema, static_cast<uint32_t>(goSid));
             }
             ps2sched::async_guest_end();
 
@@ -2839,7 +2764,7 @@ void register_scheduler_protocol_tests()
             t.Equals(log[0], tidA, "T2: A (created first) runs first");
             t.Equals(log[1], tidB, "T2: B (created second) runs second");
 
-            waitUntil([&](){ return g_activeThreads.load() == 0; }, std::chrono::milliseconds(1000));
+            drainedWithin(std::chrono::milliseconds(1000));
             deleteSchedSema(rdram.data(), &runtime, goSid);
         });
 
@@ -2867,8 +2792,7 @@ void register_scheduler_protocol_tests()
 
             // Rotate [A,B,C] -> [B,C,A] while executor is locked out
             {
-                R5900Context sc{}; setRegU32(sc, 4, 10u);
-                ps2_syscalls::RotateThreadReadyQueue(rdram.data(), &sc, &runtime);
+                callSyscall(runtime, rdram, ps2_syscalls::RotateThreadReadyQueue, 10u);
             }
 
             // Release executor
@@ -2883,7 +2807,7 @@ void register_scheduler_protocol_tests()
             t.Equals(log[1], tidC, "T3: C runs second after rotate");
             t.Equals(log[2], tidA, "T3: A runs last (moved to tail)");
 
-            waitUntil([&](){ return g_activeThreads.load() == 0; }, std::chrono::milliseconds(1000));
+            drainedWithin(std::chrono::milliseconds(1000));
         });
 
         // ------------------------------------------------------------------
@@ -2910,10 +2834,7 @@ void register_scheduler_protocol_tests()
             const int32_t tidY = startSchedWorker(rdram.data(), &runtime, 0x00630000u, 10, 0x00530000u, 0x2000u);
             t.IsTrue(tidX > 0, "T4: X started"); t.IsTrue(tidY > 0, "T4: Y started");
 
-            {
-                int32_t v = tidX;
-                std::memcpy(rdram.data() + kSlotTidParam, &v, 4);
-            }
+            rdramWrite32(rdram, kSlotTidParam, static_cast<uint32_t>(tidX));
 
             // Release executor: Y runs first (prio 10), calls ChangeThreadPriority(X, 5),
             // X bumped to prio=5 (higher than Y=10), Y yields 500x -> X preempts
@@ -2924,7 +2845,7 @@ void register_scheduler_protocol_tests()
             t.IsTrue(allDone, "T4: both fibers completed");
 
             // Wait for both fibers to exit naturally.
-            waitUntil([&](){ return g_activeThreads.load() == 0; }, std::chrono::milliseconds(1000));
+            drainedWithin(std::chrono::milliseconds(1000));
 
             int32_t log[2] = {};
             std::memcpy(log, rdram.data() + kRunLog, 8);
@@ -2963,9 +2884,7 @@ void register_scheduler_protocol_tests()
             t.IsTrue(started, "T5: fiber started");
 
             {
-                R5900Context sc{}; setRegU32(sc, 4, static_cast<uint32_t>(tid));
-                ps2_syscalls::SuspendThread(rdram.data(), &sc, &runtime);
-                t.Equals(getRegS32(sc, 2), KE_OK, "T5: SuspendThread returned KE_OK");
+                t.Equals(callSyscall(runtime, rdram, ps2_syscalls::SuspendThread, static_cast<uint32_t>(tid)), KE_OK, "T5: SuspendThread returned KE_OK");
             }
 
             // Wait for THS_SUSPEND status AND for the progress counter to stop
@@ -2992,9 +2911,7 @@ void register_scheduler_protocol_tests()
             t.Equals(cBefore, cAfter, "T5: counter not advancing while suspended");
 
             {
-                R5900Context sc{}; setRegU32(sc, 4, static_cast<uint32_t>(tid));
-                ps2_syscalls::ResumeThread(rdram.data(), &sc, &runtime);
-                t.Equals(getRegS32(sc, 2), KE_OK, "T5: ResumeThread returned KE_OK");
+                t.Equals(callSyscall(runtime, rdram, ps2_syscalls::ResumeThread, static_cast<uint32_t>(tid)), KE_OK, "T5: ResumeThread returned KE_OK");
             }
 
             const bool advanced = waitUntil([&]()
@@ -3004,7 +2921,7 @@ void register_scheduler_protocol_tests()
             t.IsTrue(advanced, "T5: progress resumes after ResumeThread");
 
             gStopFlag.store(1u, std::memory_order_release);
-            waitUntil([&](){ return g_activeThreads.load() == 0; }, std::chrono::milliseconds(1000));
+            drainedWithin(std::chrono::milliseconds(1000));
         });
 
         // ------------------------------------------------------------------
@@ -3029,15 +2946,11 @@ void register_scheduler_protocol_tests()
             }
 
             {
-                int32_t w = workSid, d = doneSid;
-                std::memcpy(rdram.data() + kSlotWorkSid, &w, 4);
-                std::memcpy(rdram.data() + kSlotDoneSid, &d, 4);
+                rdramWrite32(rdram, kSlotWorkSid, static_cast<uint32_t>(workSid));
+                rdramWrite32(rdram, kSlotDoneSid, static_cast<uint32_t>(doneSid));
             }
             rdramSeqReset(rdram);
-            {
-                int32_t bad = -9999;
-                std::memcpy(rdram.data() + kResultBase, &bad, 4);
-            }
+            rdramWrite32(rdram, kResultBase, static_cast<uint32_t>(-9999));
 
             const int32_t tid = startSchedWorker(rdram.data(), &runtime, 0x00650000u, 10, 0x00550000u, 0x2000u);
             t.IsTrue(tid > 0, "T6: fiber started");
@@ -3049,9 +2962,7 @@ void register_scheduler_protocol_tests()
             t.IsTrue(blocked, "T6: fiber blocked on workSid");
 
             {
-                R5900Context sc{}; setRegU32(sc, 4, static_cast<uint32_t>(tid));
-                ps2_syscalls::SuspendThread(rdram.data(), &sc, &runtime);
-                t.Equals(getRegS32(sc, 2), KE_OK, "T6: SuspendThread returned KE_OK");
+                t.Equals(callSyscall(runtime, rdram, ps2_syscalls::SuspendThread, static_cast<uint32_t>(tid)), KE_OK, "T6: SuspendThread returned KE_OK");
             }
 
             const bool isSuspended = waitUntil([&]()
@@ -3063,9 +2974,7 @@ void register_scheduler_protocol_tests()
             t.IsTrue(isSuspended, "T6: fiber reached THS_WAITSUSPEND");
 
             {
-                R5900Context sc{}; setRegU32(sc, 4, static_cast<uint32_t>(workSid));
-                ps2_syscalls::SignalSema(rdram.data(), &sc, &runtime);
-                t.Equals(getRegS32(sc, 2), workSid, "T6: SignalSema returned workSid");
+                t.Equals(callSyscall(runtime, rdram, ps2_syscalls::SignalSema, static_cast<uint32_t>(workSid)), workSid, "T6: SignalSema returned workSid");
             }
 
             // Wait to confirm fiber did NOT consume it
@@ -3074,9 +2983,7 @@ void register_scheduler_protocol_tests()
             t.Equals(getSemaCount(rdram, &runtime, workSid), 1, "T6: permit not consumed while suspended");
 
             {
-                R5900Context sc{}; setRegU32(sc, 4, static_cast<uint32_t>(tid));
-                ps2_syscalls::ResumeThread(rdram.data(), &sc, &runtime);
-                t.Equals(getRegS32(sc, 2), KE_OK, "T6: ResumeThread returned KE_OK");
+                t.Equals(callSyscall(runtime, rdram, ps2_syscalls::ResumeThread, static_cast<uint32_t>(tid)), KE_OK, "T6: ResumeThread returned KE_OK");
             }
 
             const bool woke = waitUntil([&](){ return rdramSeq(rdram) >= 1u; }, std::chrono::milliseconds(1000));
@@ -3087,7 +2994,7 @@ void register_scheduler_protocol_tests()
                 t.Equals(ret, workSid, "T6: WaitSema returned workSid after resume");
             }
 
-            waitUntil([&](){ return g_activeThreads.load() == 0; }, std::chrono::milliseconds(1000));
+            drainedWithin(std::chrono::milliseconds(1000));
             deleteSchedSema(rdram.data(), &runtime, workSid);
             deleteSchedSema(rdram.data(), &runtime, doneSid);
         });
@@ -3114,15 +3021,11 @@ void register_scheduler_protocol_tests()
             }
 
             {
-                int32_t w = workSid, d = doneSid;
-                std::memcpy(rdram.data() + kSlotWorkSid, &w, 4);
-                std::memcpy(rdram.data() + kSlotDoneSid, &d, 4);
+                rdramWrite32(rdram, kSlotWorkSid, static_cast<uint32_t>(workSid));
+                rdramWrite32(rdram, kSlotDoneSid, static_cast<uint32_t>(doneSid));
             }
             rdramSeqReset(rdram);
-            {
-                int32_t bad = -9999;
-                std::memcpy(rdram.data() + kResultBase, &bad, 4);
-            }
+            rdramWrite32(rdram, kResultBase, static_cast<uint32_t>(-9999));
 
             const int32_t tid = startSchedWorker(rdram.data(), &runtime, 0x00660000u, 10, 0x00560000u, 0x2000u);
             t.IsTrue(tid > 0, "T7: waiter fiber started");
@@ -3143,16 +3046,13 @@ void register_scheduler_protocol_tests()
             {
                 for (int i = 0; i < 200 && pollOK.load() == 0; ++i)
                 {
-                    R5900Context sc{}; setRegU32(sc, 4, static_cast<uint32_t>(workSid));
-                    ps2_syscalls::PollSema(rdram.data(), &sc, &runtime);
-                    if (getRegS32(sc, 2) == workSid)
+                    if (callSyscall(runtime, rdram, ps2_syscalls::PollSema, static_cast<uint32_t>(workSid)) == workSid)
                         pollOK.store(1);
                 }
             });
 
             {
-                R5900Context sc{}; setRegU32(sc, 4, static_cast<uint32_t>(workSid));
-                ps2_syscalls::SignalSema(rdram.data(), &sc, &runtime);
+                callSyscall(runtime, rdram, ps2_syscalls::SignalSema, static_cast<uint32_t>(workSid));
             }
 
             poller.join();
@@ -3177,9 +3077,7 @@ void register_scheduler_protocol_tests()
                 while (releaseRet != KE_OK &&
                        std::chrono::steady_clock::now() < releaseDeadline)
                 {
-                    R5900Context sc{}; setRegU32(sc, 4, static_cast<uint32_t>(tid));
-                    ps2_syscalls::ReleaseWaitThread(rdram.data(), &sc, &runtime);
-                    releaseRet = getRegS32(sc, 2);
+                    releaseRet = callSyscall(runtime, rdram, ps2_syscalls::ReleaseWaitThread, static_cast<uint32_t>(tid));
                     if (releaseRet != KE_OK)
                         std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
@@ -3199,7 +3097,7 @@ void register_scheduler_protocol_tests()
             t.IsTrue(getSemaCount(rdram, &runtime, workSid) >= 0, "T7: sema count never negative");
             t.Equals(getSemaCount(rdram, &runtime, workSid), 0, "T7: permit fully consumed, none left over");
 
-            waitUntil([&](){ return g_activeThreads.load() == 0; }, std::chrono::milliseconds(1000));
+            drainedWithin(std::chrono::milliseconds(1000));
             deleteSchedSema(rdram.data(), &runtime, workSid);
             deleteSchedSema(rdram.data(), &runtime, doneSid);
         });
@@ -3237,7 +3135,7 @@ void register_scheduler_protocol_tests()
             t.IsTrue(started, "T8: fiber starts after async_guest_end");
 
             gStopFlag.store(1u, std::memory_order_release);
-            waitUntil([&](){ return g_activeThreads.load() == 0; }, std::chrono::milliseconds(1000));
+            drainedWithin(std::chrono::milliseconds(1000));
         });
 
         // ------------------------------------------------------------------
@@ -3275,7 +3173,7 @@ void register_scheduler_protocol_tests()
             t.IsTrue(started, "T9: fiber starts after RAII scope released token on exception");
 
             gStopFlag.store(1u, std::memory_order_release);
-            waitUntil([&](){ return g_activeThreads.load() == 0; }, std::chrono::milliseconds(1000));
+            drainedWithin(std::chrono::milliseconds(1000));
         });
 
         // ------------------------------------------------------------------
@@ -3301,10 +3199,7 @@ void register_scheduler_protocol_tests()
                 return;
             }
 
-            {
-                int32_t d = doneSid;
-                std::memcpy(rdram.data() + kSlotDoneSid, &d, 4);
-            }
+            rdramWrite32(rdram, kSlotDoneSid, static_cast<uint32_t>(doneSid));
             rdramSeqReset(rdram);
 
             const int32_t tid = startSchedWorker(rdram.data(), &runtime, 0x00690000u, 10, 0x00590000u, 0x2000u);
@@ -3322,9 +3217,7 @@ void register_scheduler_protocol_tests()
             // from an ISR). This sets wakeupCount++ and unblocks the fiber.
             std::thread foreign([&]()
             {
-                R5900Context sc{};
-                setRegU32(sc, 4, static_cast<uint32_t>(tid));
-                ps2_syscalls::WakeupThread(rdram.data(), &sc, &runtime);
+                callSyscall(runtime, rdram, ps2_syscalls::WakeupThread, static_cast<uint32_t>(tid));
             });
             foreign.join();
 
@@ -3336,7 +3229,7 @@ void register_scheduler_protocol_tests()
                 t.Equals(log0, tid, "T10: correct fiber woke");
             }
 
-            waitUntil([&](){ return g_activeThreads.load() == 0; }, std::chrono::milliseconds(1000));
+            drainedWithin(std::chrono::milliseconds(1000));
             deleteSchedSema(rdram.data(), &runtime, doneSid);
         });
 
@@ -3358,10 +3251,7 @@ void register_scheduler_protocol_tests()
                 return;
             }
 
-            {
-                int32_t d = doneSid;
-                std::memcpy(rdram.data() + kSlotDoneSid, &d, 4);
-            }
+            rdramWrite32(rdram, kSlotDoneSid, static_cast<uint32_t>(doneSid));
             rdramSeqReset(rdram);
             gT11TokenLo.store(0u, std::memory_order_release);
             gT11TokenHi.store(0u, std::memory_order_release);
@@ -3387,9 +3277,7 @@ void register_scheduler_protocol_tests()
                                     static_cast<uint64_t>(gT11TokenLo.load(std::memory_order_acquire));
 
             {
-                R5900Context sc{}; setRegU32(sc, 4, static_cast<uint32_t>(tid));
-                ps2_syscalls::SuspendThread(rdram.data(), &sc, &runtime);
-                t.Equals(getRegS32(sc, 2), KE_OK, "T11: SuspendThread returned KE_OK");
+                t.Equals(callSyscall(runtime, rdram, ps2_syscalls::SuspendThread, static_cast<uint32_t>(tid)), KE_OK, "T11: SuspendThread returned KE_OK");
             }
 
             const bool isSuspended = waitUntil([&]()
@@ -3413,9 +3301,7 @@ void register_scheduler_protocol_tests()
             }
 
             {
-                R5900Context sc{}; setRegU32(sc, 4, static_cast<uint32_t>(tid));
-                ps2_syscalls::ResumeThread(rdram.data(), &sc, &runtime);
-                t.Equals(getRegS32(sc, 2), KE_OK, "T11: ResumeThread returned KE_OK");
+                t.Equals(callSyscall(runtime, rdram, ps2_syscalls::ResumeThread, static_cast<uint32_t>(tid)), KE_OK, "T11: ResumeThread returned KE_OK");
             }
 
             // After ResumeThread the fiber should RE-PARK inside SleepThread
@@ -3432,15 +3318,13 @@ void register_scheduler_protocol_tests()
 
             // A genuine WakeupThread must now release the fiber.
             {
-                R5900Context sc{}; setRegU32(sc, 4, static_cast<uint32_t>(tid));
-                ps2_syscalls::WakeupThread(rdram.data(), &sc, &runtime);
-                t.Equals(getRegS32(sc, 2), KE_OK, "T11: WakeupThread returned KE_OK");
+                t.Equals(callSyscall(runtime, rdram, ps2_syscalls::WakeupThread, static_cast<uint32_t>(tid)), KE_OK, "T11: WakeupThread returned KE_OK");
             }
 
             const bool woke = waitUntil([&](){ return rdramSeq(rdram) >= 1u; }, std::chrono::milliseconds(1000));
             t.IsTrue(woke, "T11: fiber woke after WakeupThread");
 
-            waitUntil([&](){ return g_activeThreads.load() == 0; }, std::chrono::milliseconds(1000));
+            drainedWithin(std::chrono::milliseconds(1000));
             deleteSchedSema(rdram.data(), &runtime, doneSid);
         });
 
@@ -3466,15 +3350,11 @@ void register_scheduler_protocol_tests()
             }
 
             {
-                int32_t w = workSid, d = doneSid;
-                std::memcpy(rdram.data() + kSlotWorkSid, &w, 4);
-                std::memcpy(rdram.data() + kSlotDoneSid, &d, 4);
+                rdramWrite32(rdram, kSlotWorkSid, static_cast<uint32_t>(workSid));
+                rdramWrite32(rdram, kSlotDoneSid, static_cast<uint32_t>(doneSid));
             }
             rdramSeqReset(rdram);
-            {
-                int32_t bad = -9999;
-                std::memcpy(rdram.data() + kResultBase, &bad, 4);
-            }
+            rdramWrite32(rdram, kResultBase, static_cast<uint32_t>(-9999));
 
             const int32_t tid = startSchedWorker(rdram.data(), &runtime, 0x006B0000u, 10, 0x005B0000u, 0x2000u);
             t.IsTrue(tid > 0, "T12: fiber started");
@@ -3486,8 +3366,7 @@ void register_scheduler_protocol_tests()
             t.IsTrue(blocked, "T12: fiber blocked on workSid");
 
             {
-                R5900Context sc{}; setRegU32(sc, 4, static_cast<uint32_t>(workSid));
-                ps2_syscalls::SignalSema(rdram.data(), &sc, &runtime);
+                callSyscall(runtime, rdram, ps2_syscalls::SignalSema, static_cast<uint32_t>(workSid));
             }
 
             const bool done = waitUntil([&](){ return rdramSeq(rdram) >= 1u; }, std::chrono::milliseconds(1000));
@@ -3500,7 +3379,7 @@ void register_scheduler_protocol_tests()
             }
             t.Equals(getSemaCount(rdram, &runtime, workSid), 0, "T12: permit consumed");
 
-            waitUntil([&](){ return g_activeThreads.load() == 0; }, std::chrono::milliseconds(1000));
+            drainedWithin(std::chrono::milliseconds(1000));
             deleteSchedSema(rdram.data(), &runtime, workSid);
             deleteSchedSema(rdram.data(), &runtime, doneSid);
         });
@@ -3523,10 +3402,7 @@ void register_scheduler_protocol_tests()
                 return;
             }
 
-            {
-                int32_t d = doneSid;
-                std::memcpy(rdram.data() + kSlotDoneSid, &d, 4);
-            }
+            rdramWrite32(rdram, kSlotDoneSid, static_cast<uint32_t>(doneSid));
             rdramSeqReset(rdram);
 
             const int32_t tid = startSchedWorker(rdram.data(), &runtime, 0x006C0000u, 10, 0x005C0000u, 0x2000u);
@@ -3550,9 +3426,7 @@ void register_scheduler_protocol_tests()
             t.IsTrue(sleeping, "T13: fiber is in SleepThread");
 
             {
-                R5900Context sc{}; setRegU32(sc, 4, static_cast<uint32_t>(tid));
-                ps2_syscalls::WakeupThread(rdram.data(), &sc, &runtime);
-                t.Equals(getRegS32(sc, 2), KE_OK, "T13: WakeupThread returned KE_OK");
+                t.Equals(callSyscall(runtime, rdram, ps2_syscalls::WakeupThread, static_cast<uint32_t>(tid)), KE_OK, "T13: WakeupThread returned KE_OK");
             }
 
             const bool woke = waitUntil([&](){ return rdramSeq(rdram) >= 1u; }, std::chrono::milliseconds(1000));
@@ -3563,7 +3437,7 @@ void register_scheduler_protocol_tests()
                 t.Equals(log0, tid, "T13: correct fiber woke");
             }
 
-            waitUntil([&](){ return g_activeThreads.load() == 0; }, std::chrono::milliseconds(1000));
+            drainedWithin(std::chrono::milliseconds(1000));
             deleteSchedSema(rdram.data(), &runtime, doneSid);
         });
 
@@ -3586,10 +3460,7 @@ void register_scheduler_protocol_tests()
                 return;
             }
 
-            {
-                int32_t w = workSid;
-                std::memcpy(rdram.data() + kSlotWorkSid, &w, 4);
-            }
+            rdramWrite32(rdram, kSlotWorkSid, static_cast<uint32_t>(workSid));
             rdramSeqReset(rdram);
 
             const int32_t workerTid = startSchedWorker(rdram.data(), &runtime, 0x006D0000u, 10, 0x005D0000u, 0x2000u);
@@ -3601,15 +3472,12 @@ void register_scheduler_protocol_tests()
             }, std::chrono::milliseconds(500));
             t.IsTrue(blocked, "T14: worker blocked on workSid");
 
-            {
-                int32_t v = workerTid;
-                std::memcpy(rdram.data() + kSlotTidParam, &v, 4);
-            }
+            rdramWrite32(rdram, kSlotTidParam, static_cast<uint32_t>(workerTid));
 
             const int32_t killerTid = startSchedWorker(rdram.data(), &runtime, 0x006D8000u, 5, 0x005D2000u, 0x2000u);
             t.IsTrue(killerTid > 0, "T14: killer started");
 
-            const bool allDone = waitUntil([&](){ return g_activeThreads.load() == 0; }, std::chrono::milliseconds(3000));
+            const bool allDone = drainedWithin(std::chrono::milliseconds(3000));
             t.IsTrue(allDone, "T14: both worker and killer finished");
             t.IsTrue(rdramSeq(rdram) >= 1u, "T14: killer logged after join_fiber returned");
 
@@ -3634,10 +3502,7 @@ void register_scheduler_protocol_tests()
                 return;
             }
 
-            {
-                int32_t w = workSid;
-                std::memcpy(rdram.data() + kSlotWorkSid, &w, 4);
-            }
+            rdramWrite32(rdram, kSlotWorkSid, static_cast<uint32_t>(workSid));
 
             const int32_t tid1 = startSchedWorker(rdram.data(), &runtime, 0x006E0000u, 10, 0x005E0000u, 0x2000u);
             const int32_t tid2 = startSchedWorker(rdram.data(), &runtime, 0x006E0000u, 10, 0x005E2000u, 0x2000u);
@@ -3685,15 +3550,11 @@ void register_scheduler_protocol_tests()
             }
 
             {
-                int32_t e = eid, d = doneSid;
-                std::memcpy(rdram.data() + kSlotEid,    &e, 4);
-                std::memcpy(rdram.data() + kSlotDoneSid, &d, 4);
+                rdramWrite32(rdram, kSlotEid, static_cast<uint32_t>(eid));
+                rdramWrite32(rdram, kSlotDoneSid, static_cast<uint32_t>(doneSid));
             }
             rdramSeqReset(rdram);
-            {
-                int32_t bad = -9999;
-                std::memcpy(rdram.data() + kResultBase, &bad, 4);
-            }
+            rdramWrite32(rdram, kResultBase, static_cast<uint32_t>(-9999));
             rdramWrite32(rdram, kSlotResBits, 0u);
 
             const int32_t tid = startSchedWorker(rdram.data(), &runtime, 0x006F0000u, 10, 0x005F0000u, 0x2000u);
@@ -3707,8 +3568,7 @@ void register_scheduler_protocol_tests()
 
             // Partial set — AND not satisfied
             {
-                R5900Context sc{}; setRegU32(sc, 4, static_cast<uint32_t>(eid)); setRegU32(sc, 5, 0x1u);
-                ps2_syscalls::SetEventFlag(rdram.data(), &sc, &runtime);
+                callSyscall(runtime, rdram, ps2_syscalls::SetEventFlag, static_cast<uint32_t>(eid), 0x1u);
             }
 
             // Fiber may briefly dequeue and re-block; wait for it to re-block
@@ -3722,8 +3582,7 @@ void register_scheduler_protocol_tests()
 
             // Complete set
             {
-                R5900Context sc{}; setRegU32(sc, 4, static_cast<uint32_t>(eid)); setRegU32(sc, 5, 0x2u);
-                ps2_syscalls::SetEventFlag(rdram.data(), &sc, &runtime);
+                callSyscall(runtime, rdram, ps2_syscalls::SetEventFlag, static_cast<uint32_t>(eid), 0x2u);
             }
 
             const bool completed = waitUntil([&](){ return rdramSeq(rdram) >= 1u; }, std::chrono::milliseconds(1000));
@@ -3740,7 +3599,7 @@ void register_scheduler_protocol_tests()
                 t.IsTrue((resBits & 0x3u) == 0x3u, "T16: result bits include all waited bits");
             }
 
-            waitUntil([&](){ return g_activeThreads.load() == 0; }, std::chrono::milliseconds(1000));
+            drainedWithin(std::chrono::milliseconds(1000));
             deleteSchedEvf(rdram, &runtime, eid);
             deleteSchedSema(rdram.data(), &runtime, doneSid);
         });
@@ -3768,9 +3627,8 @@ void register_scheduler_protocol_tests()
             }
 
             {
-                int32_t e = eid, d = doneSid;
-                std::memcpy(rdram.data() + kSlotEid,    &e, 4);
-                std::memcpy(rdram.data() + kSlotDoneSid, &d, 4);
+                rdramWrite32(rdram, kSlotEid, static_cast<uint32_t>(eid));
+                rdramWrite32(rdram, kSlotDoneSid, static_cast<uint32_t>(doneSid));
             }
             rdramSeqReset(rdram);
             for (int i = 0; i < 3; ++i)
@@ -3805,12 +3663,10 @@ void register_scheduler_protocol_tests()
 
             // eid is now invalid
             {
-                R5900Context sc{}; setRegU32(sc, 4, static_cast<uint32_t>(eid)); setRegU32(sc, 5, kReferScratch);
-                ps2_syscalls::ReferEventFlagStatus(rdram.data(), &sc, &runtime);
-                t.IsTrue(getRegS32(sc, 2) < 0, "T17: deleted evf returns error on Refer");
+                t.IsTrue(callSyscall(runtime, rdram, ps2_syscalls::ReferEventFlagStatus, static_cast<uint32_t>(eid), kReferScratch) < 0, "T17: deleted evf returns error on Refer");
             }
 
-            waitUntil([&](){ return g_activeThreads.load() == 0; }, std::chrono::milliseconds(2000));
+            drainedWithin(std::chrono::milliseconds(2000));
             deleteSchedSema(rdram.data(), &runtime, doneSid);
         });
 
@@ -3836,9 +3692,8 @@ void register_scheduler_protocol_tests()
             }
 
             {
-                int32_t w = workSid, d = doneSid;
-                std::memcpy(rdram.data() + kSlotWorkSid, &w, 4);
-                std::memcpy(rdram.data() + kSlotDoneSid, &d, 4);
+                rdramWrite32(rdram, kSlotWorkSid, static_cast<uint32_t>(workSid));
+                rdramWrite32(rdram, kSlotDoneSid, static_cast<uint32_t>(doneSid));
             }
             rdramSeqReset(rdram);
             for (int i = 0; i < 3; ++i)
@@ -3859,9 +3714,7 @@ void register_scheduler_protocol_tests()
             t.IsTrue(allBlocked, "T18: all 3 blocked on workSid");
 
             {
-                R5900Context sc{}; setRegU32(sc, 4, static_cast<uint32_t>(workSid));
-                ps2_syscalls::DeleteSema(rdram.data(), &sc, &runtime);
-                t.Equals(getRegS32(sc, 2), workSid, "T18: DeleteSema returned workSid");
+                t.Equals(callSyscall(runtime, rdram, ps2_syscalls::DeleteSema, static_cast<uint32_t>(workSid)), workSid, "T18: DeleteSema returned workSid");
             }
 
             const bool allDone = waitUntil([&](){ return rdramSeq(rdram) >= 3u; }, std::chrono::milliseconds(2000));
@@ -3877,12 +3730,10 @@ void register_scheduler_protocol_tests()
 
             // workSid is now invalid
             {
-                R5900Context sc{}; setRegU32(sc, 4, static_cast<uint32_t>(workSid));
-                ps2_syscalls::PollSema(rdram.data(), &sc, &runtime);
-                t.IsTrue(getRegS32(sc, 2) < 0, "T18: deleted sema returns error on Poll");
+                t.IsTrue(callSyscall(runtime, rdram, ps2_syscalls::PollSema, static_cast<uint32_t>(workSid)) < 0, "T18: deleted sema returns error on Poll");
             }
 
-            waitUntil([&](){ return g_activeThreads.load() == 0; }, std::chrono::milliseconds(2000));
+            drainedWithin(std::chrono::milliseconds(2000));
             deleteSchedSema(rdram.data(), &runtime, doneSid);
         });
 
@@ -3909,7 +3760,7 @@ void register_scheduler_protocol_tests()
                 const int32_t tid = startSchedWorker(rdram.data(), &runtime, 0x00720000u, 10, stackAddr, 0x2000u);
                 t.IsTrue(tid > 0, std::string("T19: fiber ") + std::to_string(i) + " started");
 
-                const bool drained = waitUntil([&](){ return g_activeThreads.load() == 0; }, std::chrono::milliseconds(1000));
+                const bool drained = drainedWithin(std::chrono::milliseconds(1000));
                 t.IsTrue(drained, std::string("T19: fiber ") + std::to_string(i) + " exited and g_activeThreads returned to 0");
             }
 
@@ -4084,8 +3935,8 @@ void register_scheduler_race_tests()
                 return;
             }
 
-            std::memcpy(rdram.data() + kRSlotWorkSid, &workSid, 4);
-            std::memcpy(rdram.data() + kRSlotDoneSid, &doneSid, 4);
+            rdramWrite32(rdram, kRSlotWorkSid, static_cast<uint32_t>(workSid));
+            rdramWrite32(rdram, kRSlotDoneSid, static_cast<uint32_t>(doneSid));
             gRProgress.store(0u, std::memory_order_release);
             gRTokenLo.store(0u, std::memory_order_release);
             gRTokenHi.store(0u, std::memory_order_release);
@@ -4128,16 +3979,11 @@ void register_scheduler_race_tests()
             {
                 for (int i = 0; i < kRounds; ++i)
                 {
-                    R5900Context sc{};
-                    setRegU32(sc, 4, static_cast<uint32_t>(workSid));
-                    ps2_syscalls::SignalSema(rdram.data(), &sc, &runtime);
-                    while (getRegS32(sc, 2) != workSid)
+                    int32_t sigRet = callSyscall(runtime, rdram, ps2_syscalls::SignalSema, static_cast<uint32_t>(workSid));
+                    while (sigRet != workSid)
                     {
                         std::this_thread::yield();
-                        R5900Context sc2{};
-                        setRegU32(sc2, 4, static_cast<uint32_t>(workSid));
-                        ps2_syscalls::SignalSema(rdram.data(), &sc2, &runtime);
-                        sc = sc2;
+                        sigRet = callSyscall(runtime, rdram, ps2_syscalls::SignalSema, static_cast<uint32_t>(workSid));
                     }
                 }
             });
@@ -4155,10 +4001,7 @@ void register_scheduler_race_tests()
             t.IsTrue(reached, "R1: fiber completed all 500 park/wake rounds (no lost wakeup)");
 
             // Drain: fiber signals doneSid and exits.
-            const bool finished = waitUntil([&]()
-            {
-                return g_activeThreads.load(std::memory_order_acquire) == 0;
-            }, std::chrono::milliseconds(2000));
+            const bool finished = drainedWithin(std::chrono::milliseconds(2000));
             t.IsTrue(finished, "R1: worker fiber exits cleanly (g_activeThreads==0)");
 
             deleteSchedSema(rdram.data(), &runtime, workSid);
@@ -4191,10 +4034,7 @@ void register_scheduler_race_tests()
                 try
                 {
                     ps2sched::async_guest_begin();
-                    R5900Context sc{};
-                    setRegU32(sc, 4, static_cast<uint32_t>(blockSid));
-                    ps2_syscalls::WaitSema(rdram.data(), &sc, &runtime);
-                    waitRet.store(getRegS32(sc, 2), std::memory_order_release);
+                    waitRet.store(callSyscall(runtime, rdram, ps2_syscalls::WaitSema, static_cast<uint32_t>(blockSid)), std::memory_order_release);
                     ps2sched::async_guest_end();
                 }
                 catch (...)
@@ -4209,9 +4049,7 @@ void register_scheduler_race_tests()
             // then feed it a permit so the Mesa re-check returns blockSid.
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
             {
-                R5900Context sc{};
-                setRegU32(sc, 4, static_cast<uint32_t>(blockSid));
-                ps2_syscalls::SignalSema(rdram.data(), &sc, &runtime);
+                callSyscall(runtime, rdram, ps2_syscalls::SignalSema, static_cast<uint32_t>(blockSid));
             }
 
             const bool returned = waitUntil([&]()
@@ -4239,7 +4077,7 @@ void register_scheduler_race_tests()
             }, std::chrono::milliseconds(2000));
             t.IsTrue(ran, "R2: scheduler still healthy — fiber runs after the non-fiber block");
 
-            waitUntil([&](){ return g_activeThreads.load() == 0; }, std::chrono::milliseconds(2000));
+            drainedWithin(std::chrono::milliseconds(2000));
             deleteSchedSema(rdram.data(), &runtime, blockSid);
         });
 
@@ -4270,12 +4108,7 @@ void register_scheduler_race_tests()
             // thread with no intervening sleep, so stop is requested within a
             // handful of microseconds -- many orders of magnitude below 3.84s
             // even under heavy TSan instrumentation.
-            R5900Context sc{};
-            setRegU32(sc, 4, 60000u);       // ticks = 60000 (~3.84s); see rationale above
-            setRegU32(sc, 5, 0x00732000u);  // handler entry
-            setRegU32(sc, 6, 0u);           // arg
-            ps2_syscalls::SetAlarm(rdram.data(), &sc, &runtime);
-            const int32_t alarmId = getRegS32(sc, 2);
+            const int32_t alarmId = callSyscall(runtime, rdram, ps2_syscalls::SetAlarm, 60000u, 0x00732000u, 0u);
             t.IsTrue(alarmId > 0, "R3: SetAlarm queued an alarm and started the worker");
 
             // Immediately stop the worker — must return promptly (joins, does not spin).
@@ -4327,9 +4160,7 @@ void register_scheduler_race_tests()
 
             // Wake the sleeping exit handler from the host.
             {
-                R5900Context sc{};
-                setRegU32(sc, 4, static_cast<uint32_t>(tid));
-                ps2_syscalls::WakeupThread(rdram.data(), &sc, &runtime);
+                callSyscall(runtime, rdram, ps2_syscalls::WakeupThread, static_cast<uint32_t>(tid));
             }
 
             // Handler should complete and the fiber should finish.
@@ -4339,10 +4170,7 @@ void register_scheduler_race_tests()
             }, std::chrono::milliseconds(2000));
             t.IsTrue(handlerDone, "R4: blocking exit handler resumed and ran to completion");
 
-            const bool drained = waitUntil([&]()
-            {
-                return g_activeThreads.load(std::memory_order_acquire) == 0;
-            }, std::chrono::milliseconds(2000));
+            const bool drained = drainedWithin(std::chrono::milliseconds(2000));
             t.IsTrue(drained, "R4: fiber freed cleanly after exit handler finished (no double-free/leak)");
 
         });
@@ -4384,17 +4212,11 @@ void register_scheduler_race_tests()
             };
             auto suspend = [&]()
             {
-                R5900Context sc{};
-                setRegU32(sc, 4, static_cast<uint32_t>(tid));
-                ps2_syscalls::SuspendThread(rdram.data(), &sc, &runtime);
-                return getRegS32(sc, 2);
+                return callSyscall(runtime, rdram, ps2_syscalls::SuspendThread, static_cast<uint32_t>(tid));
             };
             auto resume = [&]()
             {
-                R5900Context sc{};
-                setRegU32(sc, 4, static_cast<uint32_t>(tid));
-                ps2_syscalls::ResumeThread(rdram.data(), &sc, &runtime);
-                return getRegS32(sc, 2);
+                return callSyscall(runtime, rdram, ps2_syscalls::ResumeThread, static_cast<uint32_t>(tid));
             };
 
             // Suspend twice (nested).
@@ -4423,7 +4245,7 @@ void register_scheduler_race_tests()
             {
                 gStopFlag.store(1u, std::memory_order_release);
             }
-            waitUntil([&](){ return g_activeThreads.load() == 0; }, std::chrono::milliseconds(2000));
+            drainedWithin(std::chrono::milliseconds(2000));
 
         });
 
@@ -4528,9 +4350,7 @@ void register_scheduler_stress_tests()
             {
                 if (gR6Done.load(std::memory_order_acquire) != 0u) break;
 
-                R5900Context wc{};
-                setRegU32(wc, 4, static_cast<uint32_t>(tid));
-                ps2_syscalls::WakeupThread(rdram.data(), &wc, &runtime);
+                callSyscall(runtime, rdram, ps2_syscalls::WakeupThread, static_cast<uint32_t>(tid));
                 // No sleep, no THS_WAIT confirmation — keep the loop as tight as possible so
                 // wakeups race against the fiber's arm_park -> block_current transition.
             }
@@ -4547,10 +4367,7 @@ void register_scheduler_stress_tests()
             t.Equals(counter, 500u, "R6: fiber should have returned from SleepThread exactly 500 times");
 
             // Fiber should have exited and decremented g_activeThreads.
-            const bool drained = waitUntil([&]()
-            {
-                return g_activeThreads.load(std::memory_order_acquire) <= 0;
-            }, std::chrono::milliseconds(1000));
+            const bool drained = drainedWithin(std::chrono::milliseconds(1000));
             t.IsTrue(drained, "R6: sleep-loop fiber should exit and drain g_activeThreads");
 
         });
@@ -4603,10 +4420,7 @@ void register_scheduler_stress_tests()
                 {
                     g_currentThreadId = -1; // non-fiber host worker (matches IRQ/alarm workers)
                     ps2sched::async_guest_begin();   // acquire the guest token (AsyncGuestScope-equivalent)
-                    R5900Context wc{};
-                    setRegU32(wc, 4, static_cast<uint32_t>(workSid));
-                    ps2_syscalls::WaitSema(rdram.data(), &wc, &runtime); // count=0 -> borrowed-worker block/retry path
-                    workerRet.store(getRegS32(wc, 2), std::memory_order_release);
+                    workerRet.store(callSyscall(runtime, rdram, ps2_syscalls::WaitSema, static_cast<uint32_t>(workSid)), std::memory_order_release);  // count=0 -> borrowed-worker block/retry path
                     ps2sched::async_guest_end();     // release the guest token
                 }
                 catch (...)
@@ -4632,9 +4446,7 @@ void register_scheduler_stress_tests()
                 // Deadlock escape hatch so we don't hang the whole test binary on failure:
                 // signal the sema from this (main) thread to release the borrowed worker,
                 // then join. The assertion below still records the failure.
-                R5900Context sc{};
-                setRegU32(sc, 4, static_cast<uint32_t>(workSid));
-                ps2_syscalls::SignalSema(rdram.data(), &sc, &runtime);
+                callSyscall(runtime, rdram, ps2_syscalls::SignalSema, static_cast<uint32_t>(workSid));
             }
 
             if (borrowedWorker.joinable())
@@ -4651,10 +4463,7 @@ void register_scheduler_stress_tests()
             t.Equals(signalled, 1u, "R7: the fiber (not the main thread) should have produced the permit");
 
             // Everything should drain.
-            const bool drained = waitUntil([&]()
-            {
-                return g_activeThreads.load(std::memory_order_acquire) <= 0;
-            }, std::chrono::milliseconds(1000));
+            const bool drained = drainedWithin(std::chrono::milliseconds(1000));
             t.IsTrue(drained, "R7: signalling fiber should exit and drain g_activeThreads");
 
             deleteSchedSema(rdram.data(), &runtime, workSid);
@@ -4741,10 +4550,7 @@ void register_scheduler_vsync_priority_tests()
             {
                 return;
             }
-            {
-                int32_t v = workSid;
-                std::memcpy(rdram.data() + kS1SlotWorkSid, &v, 4);
-            }
+            rdramWrite32(rdram, kS1SlotWorkSid, static_cast<uint32_t>(workSid));
 
             // Start fiber A (the vsync waiter). WaitForNextVSyncTick calls
             // EnsureVSyncWorkerRunning internally.
@@ -4780,18 +4586,12 @@ void register_scheduler_vsync_priority_tests()
             // it (join_fiber). A unwinds out of WaitForNextVSyncTick; the wake path
             // removes A's tid from g_vsync_waitList before signaling B.
             {
-                R5900Context termCtx{};
-                setRegU32(termCtx, 4, static_cast<uint32_t>(tidA));
-                ps2_syscalls::TerminateThread(rdram.data(), &termCtx, &runtime);
-                t.Equals(getRegS32(termCtx, 2), KE_OK, "S1: TerminateThread(A) returns KE_OK");
+                t.Equals(callSyscall(runtime, rdram, ps2_syscalls::TerminateThread, static_cast<uint32_t>(tidA)), KE_OK, "S1: TerminateThread(A) returns KE_OK");
             }
 
             // Wait for A to finish (TerminateThread joined it, but g_activeThreads
             // decrement may trail slightly).
-            const bool aGone = waitUntil([&]()
-            {
-                return g_activeThreads.load(std::memory_order_acquire) == 0;
-            }, std::chrono::milliseconds(1000));
+            const bool aGone = drainedWithin(std::chrono::milliseconds(1000));
             t.IsTrue(aGone, "S1: fiber A finished after TerminateThread");
 
             // A's tid must no longer be in g_vsync_waitList.
@@ -4832,11 +4632,9 @@ void register_scheduler_vsync_priority_tests()
 
             // Cleanup: signal the sema so B can unwind cleanly, then shut down.
             {
-                R5900Context sigCtx{};
-                setRegU32(sigCtx, 4, static_cast<uint32_t>(workSid));
-                ps2_syscalls::SignalSema(rdram.data(), &sigCtx, &runtime);
+                callSyscall(runtime, rdram, ps2_syscalls::SignalSema, static_cast<uint32_t>(workSid));
             }
-            waitUntil([&](){ return g_activeThreads.load() == 0; }, std::chrono::milliseconds(1000));
+            drainedWithin(std::chrono::milliseconds(1000));
 
             deleteSchedSema(rdram.data(), &runtime, workSid);
             ps2sched::scheduler_shutdown(); // joins the vsync worker via stopInterruptWorker()
@@ -4873,11 +4671,7 @@ void register_scheduler_vsync_priority_tests()
             // Change A's priority from 20 to 5 while A is queued Ready.
             // Expected new order: [A(5), C(10), B(15)].
             {
-                R5900Context sc{};
-                setRegU32(sc, 4, static_cast<uint32_t>(tidA));
-                setRegU32(sc, 5, 5u);
-                ps2_syscalls::ChangeThreadPriority(rdram.data(), &sc, &runtime);
-                t.Equals(getRegS32(sc, 2), KE_OK, "S2: ChangeThreadPriority(A,5) returns KE_OK");
+                t.Equals(callSyscall(runtime, rdram, ps2_syscalls::ChangeThreadPriority, static_cast<uint32_t>(tidA), 5u), KE_OK, "S2: ChangeThreadPriority(A,5) returns KE_OK");
             }
 
             // Release the executor; fibers now run in the re-sorted priority order.
@@ -4893,7 +4687,7 @@ void register_scheduler_vsync_priority_tests()
             t.Equals(log[1], tidC, "S2: C (prio 10) runs second");
             t.Equals(log[2], tidB, "S2: B (prio 15) runs last");
 
-            waitUntil([&](){ return g_activeThreads.load() == 0; }, std::chrono::milliseconds(1000));
+            drainedWithin(std::chrono::milliseconds(1000));
         });
 
     }); // MiniTest::Case("SchedulerVSyncAndPriority")
@@ -5062,14 +4856,13 @@ void register_scheduler_lifecycle_tests()
 
             // Sentinels: -1 means "not written yet" so we can tell the fiber actually ran.
             gU1FiberOnExec.store(-1, std::memory_order_release);
-            { int32_t init = -1; std::memcpy(rdram.data() + kU1SlotHostOnExec,  &init, 4); }
+            rdramWrite32(rdram, kU1SlotHostOnExec, static_cast<uint32_t>(-1));
 
             // Host-thread side: a plain std::thread is NOT the guest executor thread,
             // so ps2fiber_on_executor_thread() must return false there.
             std::thread hostProbe([&]()
             {
-                const int32_t r = ps2fiber_on_executor_thread() ? 1 : 0;
-                std::memcpy(rdram.data() + kU1SlotHostOnExec, &r, 4);
+                rdramWrite32(rdram, kU1SlotHostOnExec, ps2fiber_on_executor_thread() ? 1u : 0u);
             });
             hostProbe.join();
 
@@ -5084,7 +4877,7 @@ void register_scheduler_lifecycle_tests()
             }, std::chrono::milliseconds(2000));
             t.IsTrue(fiberWrote, "U1: probe fiber recorded its on-executor result");
 
-            waitUntil([&](){ return g_activeThreads.load() == 0; }, std::chrono::milliseconds(1000));
+            drainedWithin(std::chrono::milliseconds(1000));
 
             const int32_t fiberSaw = gU1FiberOnExec.load(std::memory_order_acquire);
             int32_t hostSaw = -1;
@@ -5119,7 +4912,7 @@ void register_scheduler_lifecycle_tests()
             runtime.registerFunction(0x00770000u, &stepU2TargetYieldLoop);
 
             gU2Spinning.store(0u, std::memory_order_release);
-            { int32_t neg = -1; std::memcpy(rdram.data() + kU2SlotJoinerPrio, &neg, 4); }
+            rdramWrite32(rdram, kU2SlotJoinerPrio, static_cast<uint32_t>(-1));
 
             // Lock the executor so no fibers run until we are ready.
             ps2sched::async_guest_begin();
@@ -5130,12 +4923,12 @@ void register_scheduler_lifecycle_tests()
             // (prio 61) so that B (prio 60) runs while A waits.
             const int32_t tidB = startSchedWorker(rdram.data(), &runtime, 0x00770000u, 60, 0x004E0000u, 0x2000u);
             t.IsTrue(tidB > 0, "U2: target B started");
-            { int32_t v = tidB; std::memcpy(rdram.data() + kU2SlotTargetTid, &v, 4); }
+            rdramWrite32(rdram, kU2SlotTargetTid, static_cast<uint32_t>(tidB));
 
             // Start joiner A (prio 50). A immediately calls TerminateThread(B) -> join_fiber(B).
             const int32_t tidA = startSchedWorker(rdram.data(), &runtime, 0x00768000u, 50, 0x004DC000u, 0x2000u);
             t.IsTrue(tidA > 0, "U2: joiner A started");
-            { int32_t v = tidA; std::memcpy(rdram.data() + kU2SlotJoinerTid, &v, 4); }
+            rdramWrite32(rdram, kU2SlotJoinerTid, static_cast<uint32_t>(tidA));
 
             // Start reprio thread BEFORE releasing the executor so it is already
             // spinning when B sets kU2SlotSpinning=1. Use a tight spin (no sleep)
@@ -5152,10 +4945,7 @@ void register_scheduler_lifecycle_tests()
                     if (s == 1u) break;
                 }
                 if (s != 1u) return;
-                R5900Context sc{};
-                setRegU32(sc, 4, static_cast<uint32_t>(tidA));
-                setRegU32(sc, 5, 10u);
-                ps2_syscalls::ChangeThreadPriority(rdram.data(), &sc, &runtime);
+                callSyscall(runtime, rdram, ps2_syscalls::ChangeThreadPriority, static_cast<uint32_t>(tidA), 10u);
             });
 
             // Wait until reprio is spinning before releasing the executor.
@@ -5167,10 +4957,7 @@ void register_scheduler_lifecycle_tests()
             ps2sched::async_guest_end();
 
             // Wait for both fibers to drain (A finishes after the join returns and it logs prio).
-            const bool drained = waitUntil([&]()
-            {
-                return g_activeThreads.load(std::memory_order_acquire) == 0;
-            }, std::chrono::milliseconds(4000));
+            const bool drained = drainedWithin(std::chrono::milliseconds(4000));
             reprio.join();
             t.IsTrue(drained, "U2: both fibers finished");
 
@@ -5201,8 +4988,8 @@ void register_scheduler_lifecycle_tests()
             {
                 return;
             }
-            { int32_t v = workSid; std::memcpy(rdram.data() + kU3SlotWorkSid, &v, 4); }
-            { uint32_t z = 0u;    std::memcpy(rdram.data() + kU3SlotExitRan,  &z, 4); }
+            rdramWrite32(rdram, kU3SlotWorkSid, static_cast<uint32_t>(workSid));
+            rdramWrite32(rdram, kU3SlotExitRan, static_cast<uint32_t>(0u));
 
             const int32_t workerTid = startSchedWorker(rdram.data(), &runtime, 0x00778000u, 10, 0x004E4000u, 0x2000u);
             t.IsTrue(workerTid > 0, "U3: worker started");
@@ -5216,16 +5003,10 @@ void register_scheduler_lifecycle_tests()
             // Terminate from the host: request_terminate wakes the worker, it unwinds via
             // ThreadExitException, fiber_trampoline runs the exit hook -> our handler.
             {
-                R5900Context termCtx{};
-                setRegU32(termCtx, 4, static_cast<uint32_t>(workerTid));
-                ps2_syscalls::TerminateThread(rdram.data(), &termCtx, &runtime);
-                t.Equals(getRegS32(termCtx, 2), KE_OK, "U3: TerminateThread returns KE_OK");
+                t.Equals(callSyscall(runtime, rdram, ps2_syscalls::TerminateThread, static_cast<uint32_t>(workerTid)), KE_OK, "U3: TerminateThread returns KE_OK");
             }
 
-            const bool drained = waitUntil([&]()
-            {
-                return g_activeThreads.load(std::memory_order_acquire) == 0;
-            }, std::chrono::milliseconds(3000));
+            const bool drained = drainedWithin(std::chrono::milliseconds(3000));
             t.IsTrue(drained, "U3: g_activeThreads reached 0 after termination");
 
             uint32_t exitRan = 0u;
@@ -5253,7 +5034,7 @@ void register_scheduler_lifecycle_tests()
             {
                 return;
             }
-            { int32_t v = workSid; std::memcpy(rdram.data() + kU4SlotWorkSid, &v, 4); }
+            rdramWrite32(rdram, kU4SlotWorkSid, static_cast<uint32_t>(workSid));
             std::memset(rdram.data() + kU4BodyBase, 0, kU4FiberCount * 4);
             std::memset(rdram.data() + kU4HookBase, 0, kU4FiberCount * 4);
 
@@ -5463,10 +5244,7 @@ void register_scheduler_borrowed_worker_tests()
                 {
                     g_currentThreadId = -1; // non-fiber host worker
                     ps2sched::async_guest_begin();
-                    R5900Context wc{};
-                    setRegU32(wc, 4, static_cast<uint32_t>(workSid));
-                    ps2_syscalls::WaitSema(rdram.data(), &wc, &runtime);
-                    workerRet.store(getRegS32(wc, 2), std::memory_order_release);
+                    workerRet.store(callSyscall(runtime, rdram, ps2_syscalls::WaitSema, static_cast<uint32_t>(workSid)), std::memory_order_release);
                     ps2sched::async_guest_end();
                 }
                 catch (...)
@@ -5486,9 +5264,7 @@ void register_scheduler_borrowed_worker_tests()
             {
                 // Escape hatch so a regression does not hang the whole binary; the
                 // assertions below still record the failure.
-                R5900Context sc{};
-                setRegU32(sc, 4, static_cast<uint32_t>(workSid));
-                ps2_syscalls::SignalSema(rdram.data(), &sc, &runtime);
+                callSyscall(runtime, rdram, ps2_syscalls::SignalSema, static_cast<uint32_t>(workSid));
             }
             if (borrowedWorker.joinable()) borrowedWorker.join();
 
@@ -5508,10 +5284,7 @@ void register_scheduler_borrowed_worker_tests()
                          "W1: borrowed worker created no g_threads[-1] entry");
             }
 
-            const bool drained = waitUntil([&]()
-            {
-                return g_activeThreads.load(std::memory_order_acquire) <= 0;
-            }, std::chrono::milliseconds(1000));
+            const bool drained = drainedWithin(std::chrono::milliseconds(1000));
             t.IsTrue(drained, "W1: producer fiber drained g_activeThreads");
 
             deleteSchedSema(rdram.data(), &runtime, workSid);
@@ -5543,10 +5316,7 @@ void register_scheduler_borrowed_worker_tests()
             // The fiber runs its body (registers the handler, returns), then the trampoline
             // drives on_fiber_exit -> our handler -> ExitThread (throws). The exit hook
             // is wrapped in try/catch, so a throwing handler must not crash the process.
-            const bool drained = waitUntil([&]()
-            {
-                return g_activeThreads.load(std::memory_order_acquire) == 0;
-            }, std::chrono::milliseconds(3000));
+            const bool drained = drainedWithin(std::chrono::milliseconds(3000));
             t.IsTrue(drained, "W2: fiber cleaned up despite ExitThread thrown from its exit handler");
 
             uint32_t bodyRan = 0u, sentinel = 0u;
@@ -5766,19 +5536,14 @@ void register_scheduler_window_tests()
                     uint32_t iters = 0u;
                     while (std::chrono::steady_clock::now() < deadline && iters < 200000u)
                     {
-                        R5900Context sc{};
-                        setRegU32(sc, 4, static_cast<uint32_t>(sid));
-                        ps2_syscalls::SignalSema(rdram.data(), &sc, &runtime);
-                        const int32_t sret = getRegS32(sc, 2);
+                        const int32_t sret = callSyscall(runtime, rdram, ps2_syscalls::SignalSema, static_cast<uint32_t>(sid));
                         signalsSent.fetch_add(1, std::memory_order_relaxed);
 
                         // If the permit is still outstanding (waiter has not consumed it),
                         // drain it so the next SignalSema is a fresh 0->1 transition.
                         if (sret == sid)
                         {
-                            R5900Context pc{};
-                            setRegU32(pc, 4, static_cast<uint32_t>(sid));
-                            ps2_syscalls::PollSema(rdram.data(), &pc, &runtime);
+                            callSyscall(runtime, rdram, ps2_syscalls::PollSema, static_cast<uint32_t>(sid));
                         }
                         ++iters;
                     }
@@ -5809,9 +5574,7 @@ void register_scheduler_window_tests()
             // waiter parked between iterations wakes, sees the stop flag, and returns.
             gX1StopFlag.store(1u, std::memory_order_release);
             {
-                R5900Context sc{};
-                setRegU32(sc, 4, static_cast<uint32_t>(sid));
-                ps2_syscalls::SignalSema(rdram.data(), &sc, &runtime);
+                callSyscall(runtime, rdram, ps2_syscalls::SignalSema, static_cast<uint32_t>(sid));
             }
 
             const bool exited = waitUntil([&]()
@@ -5820,10 +5583,7 @@ void register_scheduler_window_tests()
             }, std::chrono::milliseconds(3000));
             t.IsTrue(exited, "X1: waiter fiber observed stop flag and exited");
 
-            const bool drained = waitUntil([&]()
-            {
-                return g_activeThreads.load(std::memory_order_acquire) <= 0;
-            }, std::chrono::milliseconds(3000));
+            const bool drained = drainedWithin(std::chrono::milliseconds(3000));
             t.IsTrue(drained, "X1: waiter fiber drained g_activeThreads");
 
             // Reported for visibility; not asserted as a hard number (cooperative
@@ -5910,9 +5670,7 @@ void register_scheduler_window_tests()
                         // Each successful wake must make it across the CV to the executor.
                         // Wait (bounded) until the fiber's wake count catches up so we
                         // exercise one notify at a time against live CV contention.
-                        R5900Context sc{};
-                        setRegU32(sc, 4, static_cast<uint32_t>(sid));
-                        ps2_syscalls::SignalSema(rdram.data(), &sc, &runtime);
+                        callSyscall(runtime, rdram, ps2_syscalls::SignalSema, static_cast<uint32_t>(sid));
 
                         const uint32_t target = i + 1u;
                         const bool advanced = waitUntil([&]()
@@ -5963,10 +5721,7 @@ void register_scheduler_window_tests()
             }, std::chrono::milliseconds(3000));
             t.IsTrue(exited, "X2: executor fiber completed its 64-wake loop and exited");
 
-            const bool drained = waitUntil([&]()
-            {
-                return g_activeThreads.load(std::memory_order_acquire) <= 0;
-            }, std::chrono::milliseconds(3000));
+            const bool drained = drainedWithin(std::chrono::milliseconds(3000));
             t.IsTrue(drained, "X2: executor fiber drained g_activeThreads");
 
             deleteSchedSema(rdram.data(), &runtime, sid);
@@ -6116,10 +5871,7 @@ void register_scheduler_sleep_resume_tests()
 
             // Step 2: suspend the sleeping fiber; it must transition to THS_WAITSUSPEND.
             {
-                R5900Context sc{};
-                setRegU32(sc, 4, static_cast<uint32_t>(tid));
-                ps2_syscalls::SuspendThread(rdram.data(), &sc, &runtime);
-                t.Equals(getRegS32(sc, 2), KE_OK, "Y1: SuspendThread returned KE_OK");
+                t.Equals(callSyscall(runtime, rdram, ps2_syscalls::SuspendThread, static_cast<uint32_t>(tid)), KE_OK, "Y1: SuspendThread returned KE_OK");
             }
 
             const bool suspended = waitUntil([&]()
@@ -6133,10 +5885,7 @@ void register_scheduler_sleep_resume_tests()
             // Step 3: ResumeThread clears the suspend gate but provides NO wakeupCount permit.
             // The Mesa loop inside SleepThread must re-park.
             {
-                R5900Context sc{};
-                setRegU32(sc, 4, static_cast<uint32_t>(tid));
-                ps2_syscalls::ResumeThread(rdram.data(), &sc, &runtime);
-                t.Equals(getRegS32(sc, 2), KE_OK, "Y1: ResumeThread returned KE_OK");
+                t.Equals(callSyscall(runtime, rdram, ps2_syscalls::ResumeThread, static_cast<uint32_t>(tid)), KE_OK, "Y1: ResumeThread returned KE_OK");
             }
 
             // Step 4: wait generously, then assert the fiber did NOT exit SleepThread.
@@ -6158,10 +5907,7 @@ void register_scheduler_sleep_resume_tests()
 
             // Step 5: a genuine WakeupThread must now release the fiber from SleepThread.
             {
-                R5900Context sc{};
-                setRegU32(sc, 4, static_cast<uint32_t>(tid));
-                ps2_syscalls::WakeupThread(rdram.data(), &sc, &runtime);
-                t.Equals(getRegS32(sc, 2), KE_OK, "Y1: WakeupThread returned KE_OK");
+                t.Equals(callSyscall(runtime, rdram, ps2_syscalls::WakeupThread, static_cast<uint32_t>(tid)), KE_OK, "Y1: WakeupThread returned KE_OK");
             }
 
             const bool woke = waitUntil([&]()
@@ -6175,7 +5921,7 @@ void register_scheduler_sleep_resume_tests()
                 t.Equals(sleepRet, KE_OK, "Y1: SleepThread returned KE_OK on genuine wakeup");
             }
 
-            waitUntil([&](){ return g_activeThreads.load() == 0; }, std::chrono::milliseconds(1000));
+            drainedWithin(std::chrono::milliseconds(1000));
         });
 
     }); // MiniTest::Case("SchedulerSleepResume")
@@ -6292,11 +6038,8 @@ void register_scheduler_borrowed_guard_tests()
                     {
                         g_currentThreadId = -1; // borrowed host worker: no PS2 thread identity
                         ps2sched::async_guest_begin();
-                        R5900Context ctx{};
-                        setRegU32(ctx, 4, c.a0); // $a0 = 0 (TH_SELF / self-target)
-                        setRegU32(ctx, 5, c.a1); // $a1 = extra arg (e.g. new priority)
-                        c.fn(rdram.data(), &ctx, &runtime);
-                        retVal.store(getRegS32(ctx, 2), std::memory_order_release);
+                        // c.a0 = $a0 = 0 (TH_SELF / self-target); c.a1 = $a1 = extra arg (e.g. new priority)
+                        retVal.store(callSyscall(runtime, rdram, c.fn, c.a0, c.a1), std::memory_order_release);
                         ps2sched::async_guest_end();
                     }
                     catch (...)
@@ -6352,14 +6095,10 @@ void register_scheduler_sema_delete_tests()
             }
 
             // Publish the sema id and reset result slots before starting fibers.
-            {
-                int32_t v = workSid;
-                std::memcpy(rdram.data() + kY4WorkSid, &v, 4);
-            }
+            rdramWrite32(rdram, kY4WorkSid, static_cast<uint32_t>(workSid));
             for (int i = 0; i < kN; ++i)
             {
-                int32_t bad = -9999;
-                std::memcpy(rdram.data() + kY4RetBase + static_cast<uint32_t>(i) * 4u, &bad, 4);
+                rdramWrite32(rdram, kY4RetBase + static_cast<uint32_t>(i) * 4u, static_cast<uint32_t>(-9999));
             }
             gY4SlotCounter.store(0, std::memory_order_relaxed);
 
@@ -6388,17 +6127,11 @@ void register_scheduler_sema_delete_tests()
 
             // DeleteSema: must drain the pair-based waitList and wake all N with KE_WAIT_DELETE.
             {
-                R5900Context dc{};
-                setRegU32(dc, 4, static_cast<uint32_t>(workSid));
-                ps2_syscalls::DeleteSema(rdram.data(), &dc, &runtime);
-                t.Equals(getRegS32(dc, 2), workSid, "Y4a: DeleteSema returned workSid");
+                t.Equals(callSyscall(runtime, rdram, ps2_syscalls::DeleteSema, static_cast<uint32_t>(workSid)), workSid, "Y4a: DeleteSema returned workSid");
             }
 
             // All N fibers must finish.
-            const bool drained = waitUntil([&]()
-            {
-                return g_activeThreads.load(std::memory_order_acquire) == 0;
-            }, std::chrono::milliseconds(2000));
+            const bool drained = drainedWithin(std::chrono::milliseconds(2000));
             t.IsTrue(drained, "Y4a: all N fibers exited after DeleteSema");
 
             // Every recorded return value must be KE_WAIT_DELETE.
@@ -6445,8 +6178,7 @@ void register_scheduler_sema_delete_tests()
             }, std::chrono::milliseconds(1000));
             t.IsTrue(tokenWritten, "Y4b: token fiber published its token");
 
-            waitUntil([&](){ return g_activeThreads.load() == 0; },
-                      std::chrono::milliseconds(1000));
+            drainedWithin(std::chrono::milliseconds(1000));
 
             const uint32_t tokenLo = gY4bTokenLo.load(std::memory_order_acquire);
             const uint32_t tokenHi = gY4bTokenHi.load(std::memory_order_acquire);
@@ -6477,11 +6209,8 @@ void register_scheduler_sema_delete_tests()
             if (!sleeperSleeping)
             {
                 // Kick the sleeper out so we can clean up.
-                R5900Context sc{};
-                setRegU32(sc, 4, static_cast<uint32_t>(sleeperTid));
-                ps2_syscalls::WakeupThread(rdram.data(), &sc, &runtime);
-                waitUntil([&](){ return g_activeThreads.load() == 0; },
-                          std::chrono::milliseconds(1000));
+                callSyscall(runtime, rdram, ps2_syscalls::WakeupThread, static_cast<uint32_t>(sleeperTid));
+                drainedWithin(std::chrono::milliseconds(1000));
                 return;
             }
 
@@ -6514,10 +6243,7 @@ void register_scheduler_sema_delete_tests()
             // Sanity: a valid WakeupThread DOES reach the sleeper, proving it was genuinely
             // reachable and the stale wake was specifically rejected (not an inert no-op).
             {
-                R5900Context sc{};
-                setRegU32(sc, 4, static_cast<uint32_t>(sleeperTid));
-                ps2_syscalls::WakeupThread(rdram.data(), &sc, &runtime);
-                t.Equals(getRegS32(sc, 2), KE_OK, "Y4b: WakeupThread returned KE_OK");
+                t.Equals(callSyscall(runtime, rdram, ps2_syscalls::WakeupThread, static_cast<uint32_t>(sleeperTid)), KE_OK, "Y4b: WakeupThread returned KE_OK");
             }
 
             const bool woke = waitUntil([&]()
@@ -6526,7 +6252,7 @@ void register_scheduler_sema_delete_tests()
             }, std::chrono::milliseconds(1000));
             t.IsTrue(woke, "Y4b: sleeper woke normally after a valid WakeupThread");
 
-            waitUntil([&](){ return g_activeThreads.load() == 0; }, std::chrono::milliseconds(1000));
+            drainedWithin(std::chrono::milliseconds(1000));
         });
 
     }); // MiniTest::Case("SchedulerSemaDelete")
@@ -6587,9 +6313,7 @@ void register_scheduler_tid_reuse_tests()
 
                         // Wait for the executor to run the fiber to completion (outside
                         // the guest scope so the executor can hold the token).
-                        const bool exited = waitUntil(
-                            [&](){ return g_activeThreads.load() == 0; },
-                            std::chrono::milliseconds(500));
+                        const bool exited = drainedWithin(std::chrono::milliseconds(500));
                         if (!exited)
                         {
                             break; // timed out — assertion below will catch it
@@ -6598,9 +6322,7 @@ void register_scheduler_tid_reuse_tests()
                         // Delete the dormant thread so CreateThread can reuse the tid
                         // on the next iteration, exercising the same-tid recycle path.
                         ps2sched::async_guest_begin();
-                        R5900Context dc{};
-                        setRegU32(dc, 4, static_cast<uint32_t>(tid));
-                        ps2_syscalls::DeleteThread(rdram.data(), &dc, &runtime);
+                        callSyscall(runtime, rdram, ps2_syscalls::DeleteThread, static_cast<uint32_t>(tid));
                         ps2sched::async_guest_end();
                     }
                 }
@@ -6626,8 +6348,7 @@ void register_scheduler_tid_reuse_tests()
             t.Equals(static_cast<int>(completions), kCycles,
                      "Z1: all fibers ran to completion (kZ1Done == kCycles)");
 
-            waitUntil([&](){ return g_activeThreads.load() == 0; },
-                      std::chrono::milliseconds(1000));
+            drainedWithin(std::chrono::milliseconds(1000));
         });
 
     }); // MiniTest::Case("SchedulerTidReuse")
@@ -6936,15 +6657,10 @@ void register_scheduler_evf_mode_tests()
                 return;
             }
 
-            {
-                int32_t e = eid;
-                std::memcpy(rdram.data() + kAASlotEid, &e, 4);
-            }
-            uint32_t zero = 0u;
+            rdramWrite32(rdram, kAASlotEid, static_cast<uint32_t>(eid));
             gAASeq.store(0u, std::memory_order_release);
-            std::memcpy(rdram.data() + kAASlotResBits, &zero, 4);
-            int32_t bad = -9999;
-            std::memcpy(rdram.data() + kAASlotResult, &bad, 4);
+            rdramWrite32(rdram, kAASlotResBits, 0u);
+            rdramWrite32(rdram, kAASlotResult, static_cast<uint32_t>(-9999));
 
             const int32_t tid = startSchedWorker(rdram.data(), &runtime,
                                                  0x00808000u, 10,
@@ -6965,10 +6681,7 @@ void register_scheduler_evf_mode_tests()
 
             // Set ONLY bit 0x1 — OR-mode should be satisfied immediately
             {
-                R5900Context sc{};
-                setRegU32(sc, 4, static_cast<uint32_t>(eid));
-                setRegU32(sc, 5, 0x1u);
-                ps2_syscalls::SetEventFlag(rdram.data(), &sc, &runtime);
+                callSyscall(runtime, rdram, ps2_syscalls::SetEventFlag, static_cast<uint32_t>(eid), 0x1u);
             }
 
             // Fiber must complete without re-blocking
@@ -6996,7 +6709,7 @@ void register_scheduler_evf_mode_tests()
                 t.Equals(seq, 1u, "AA1: sequence incremented exactly once (no re-block)");
             }
 
-            waitUntil([&](){ return g_activeThreads.load() == 0; }, std::chrono::milliseconds(1000));
+            drainedWithin(std::chrono::milliseconds(1000));
             deleteSchedEvf(rdram, &runtime, eid);
         });
 
@@ -7019,15 +6732,10 @@ void register_scheduler_evf_mode_tests()
                 return;
             }
 
-            {
-                int32_t e = eid;
-                std::memcpy(rdram.data() + kAASlotEid, &e, 4);
-            }
-            uint32_t zero = 0u;
+            rdramWrite32(rdram, kAASlotEid, static_cast<uint32_t>(eid));
             gAASeq.store(0u, std::memory_order_release);
-            std::memcpy(rdram.data() + kAASlotResBits, &zero, 4);
-            int32_t bad = -9999;
-            std::memcpy(rdram.data() + kAASlotResult, &bad, 4);
+            rdramWrite32(rdram, kAASlotResBits, 0u);
+            rdramWrite32(rdram, kAASlotResult, static_cast<uint32_t>(-9999));
 
             // The initBits=0xF already has bits 0x3 set, so the fiber will satisfy
             // the AND condition immediately on entry and WEF_CLEAR_ALL must clear all bits.
@@ -7059,7 +6767,7 @@ void register_scheduler_evf_mode_tests()
                 t.Equals(currBits, 0u, "AA2: WEF_CLEAR_ALL cleared all bits to zero");
             }
 
-            waitUntil([&](){ return g_activeThreads.load() == 0; }, std::chrono::milliseconds(1000));
+            drainedWithin(std::chrono::milliseconds(1000));
             deleteSchedEvf(rdram, &runtime, eid);
         });
 
@@ -7088,9 +6796,8 @@ void register_scheduler_evf_mode_tests()
             }
 
             {
-                int32_t e = eid, d = doneSid;
-                std::memcpy(rdram.data() + kSlotEid,     &e, 4);
-                std::memcpy(rdram.data() + kSlotDoneSid, &d, 4);
+                rdramWrite32(rdram, kSlotEid, static_cast<uint32_t>(eid));
+                rdramWrite32(rdram, kSlotDoneSid, static_cast<uint32_t>(doneSid));
             }
             rdramSeqReset(rdram);
             for (int i = 0; i < 2; ++i)
@@ -7124,7 +6831,7 @@ void register_scheduler_evf_mode_tests()
                          std::string("AA4: fiber ") + std::to_string(i) + " received KE_WAIT_DELETE");
             }
 
-            waitUntil([&](){ return g_activeThreads.load() == 0; }, std::chrono::milliseconds(2000));
+            drainedWithin(std::chrono::milliseconds(2000));
 
             // Now probe the deleted EVF id: WaitEventFlag must return KE_UNKNOWN_EVFID immediately
             {
@@ -7159,15 +6866,10 @@ void register_scheduler_evf_mode_tests()
                 return;
             }
 
-            {
-                int32_t e = eid;
-                std::memcpy(rdram.data() + kAASlotEid, &e, 4);
-            }
-            uint32_t zero = 0u;
+            rdramWrite32(rdram, kAASlotEid, static_cast<uint32_t>(eid));
             gAASeq.store(0u, std::memory_order_release);
-            std::memcpy(rdram.data() + kAASlotResBits, &zero, 4);
-            int32_t bad = -9999;
-            std::memcpy(rdram.data() + kAASlotResult, &bad, 4);
+            rdramWrite32(rdram, kAASlotResBits, 0u);
+            rdramWrite32(rdram, kAASlotResult, static_cast<uint32_t>(-9999));
 
             const int32_t tid = startSchedWorker(rdram.data(), &runtime,
                                                  0x00840000u, 10,
@@ -7187,10 +6889,7 @@ void register_scheduler_evf_mode_tests()
 
             // Set only bit 0x1 — OR-mode is satisfied, WEF_CLEAR should clear only bit 0x1
             {
-                R5900Context sc{};
-                setRegU32(sc, 4, static_cast<uint32_t>(eid));
-                setRegU32(sc, 5, 0x1u);
-                ps2_syscalls::SetEventFlag(rdram.data(), &sc, &runtime);
+                callSyscall(runtime, rdram, ps2_syscalls::SetEventFlag, static_cast<uint32_t>(eid), 0x1u);
             }
 
             const bool completed = waitUntil([&]()
@@ -7214,7 +6913,7 @@ void register_scheduler_evf_mode_tests()
                 t.IsTrue((currBits & 0x1u) == 0u, "AA13: WEF_CLEAR cleared the matched bit 0x1");
             }
 
-            waitUntil([&](){ return g_activeThreads.load() == 0; }, std::chrono::milliseconds(1000));
+            drainedWithin(std::chrono::milliseconds(1000));
             deleteSchedEvf(rdram, &runtime, eid);
         });
 
@@ -7249,10 +6948,7 @@ void register_scheduler_shutdown_fiber_tests()
                 return;
             }
 
-            {
-                int32_t e = eid;
-                std::memcpy(rdram.data() + kAASlotEid, &e, 4);
-            }
+            rdramWrite32(rdram, kAASlotEid, static_cast<uint32_t>(eid));
             uint32_t zero = 0u;
             gAASeq.store(0u, std::memory_order_release);
 
@@ -7346,9 +7042,7 @@ void register_scheduler_join_host_tests()
                     // Signal the fiber to stop spinning first so it can exit
                     gAAWoken.store(1u, std::memory_order_release);
 
-                    R5900Context tc{};
-                    setRegU32(tc, 4, static_cast<uint32_t>(tid));
-                    ps2_syscalls::TerminateThread(rdram.data(), &tc, &runtime);
+                    callSyscall(runtime, rdram, ps2_syscalls::TerminateThread, static_cast<uint32_t>(tid));
                 }
                 catch (...)
                 {
@@ -7454,10 +7148,7 @@ void register_scheduler_reinit_tests()
             }, std::chrono::milliseconds(1000));
             t.IsTrue(cycle1Done, "AA8: cycle1: both fibers exited");
 
-            const bool cycle1Drained = waitUntil([&]()
-            {
-                return g_activeThreads.load(std::memory_order_acquire) == 0;
-            }, std::chrono::milliseconds(1000));
+            const bool cycle1Drained = drainedWithin(std::chrono::milliseconds(1000));
             t.IsTrue(cycle1Drained, "AA8: cycle1: g_activeThreads drained to 0");
 
             ps2sched::scheduler_shutdown();
@@ -7489,10 +7180,7 @@ void register_scheduler_reinit_tests()
             }, std::chrono::milliseconds(1000));
             t.IsTrue(cycle2Done, "AA8: cycle2: fiber exited");
 
-            const bool cycle2Drained = waitUntil([&]()
-            {
-                return g_activeThreads.load(std::memory_order_acquire) == 0;
-            }, std::chrono::milliseconds(1000));
+            const bool cycle2Drained = drainedWithin(std::chrono::milliseconds(1000));
             t.IsTrue(cycle2Drained, "AA8: cycle2: g_activeThreads drained to 0");
 
             ps2sched::scheduler_shutdown();
@@ -7524,8 +7212,7 @@ void register_scheduler_join_priority_tests()
             uint32_t zero = 0u;
             gAAStarted.store(0u, std::memory_order_release);
             gAASeq.store(0u, std::memory_order_release);
-            int32_t bad = -9999;
-            std::memcpy(rdram.data() + kAASlotResult, &bad, 4);
+            rdramWrite32(rdram, kAASlotResult, static_cast<uint32_t>(-9999));
 
             // Start target first (prio 50)
             const int32_t targetTid = startSchedWorker(rdram.data(), &runtime,
@@ -7538,10 +7225,7 @@ void register_scheduler_join_priority_tests()
             }
 
             // Store target tid in kAASlotEid so stepAA9Joiner can read it
-            {
-                int32_t tv = targetTid;
-                std::memcpy(rdram.data() + kAASlotEid, &tv, 4);
-            }
+            rdramWrite32(rdram, kAASlotEid, static_cast<uint32_t>(targetTid));
 
             // Wait for target to signal it started
             const bool targetStarted = waitUntil([&]()
@@ -7574,7 +7258,7 @@ void register_scheduler_join_priority_tests()
                 t.Equals(finalPrio, 10, "AA9: joiner priority restored to original 10 after join");
             }
 
-            waitUntil([&](){ return g_activeThreads.load() == 0; }, std::chrono::milliseconds(1000));
+            drainedWithin(std::chrono::milliseconds(1000));
         });
 
     }); // MiniTest::Case("SchedulerJoinPriority")
@@ -7892,7 +7576,7 @@ void register_scheduler_park_window_tests()
                 t.IsTrue(woken != 0u, "AA10: fiber observed WokenInWindow result from block_current");
             }
 
-            waitUntil([&](){ return g_activeThreads.load() == 0; }, std::chrono::milliseconds(1000));
+            drainedWithin(std::chrono::milliseconds(1000));
         });
 
         // ------------------------------------------------------------------
@@ -7942,9 +7626,7 @@ void register_scheduler_park_window_tests()
             {
                 try
                 {
-                    R5900Context tcx{};
-                    setRegU32(tcx, 4, static_cast<uint32_t>(tid));
-                    ps2_syscalls::TerminateThread(rdram.data(), &tcx, &runtime);
+                    callSyscall(runtime, rdram, ps2_syscalls::TerminateThread, static_cast<uint32_t>(tid));
                 }
                 catch (...) { hostThrew.store(true, std::memory_order_release); }
                 hostDone.store(true, std::memory_order_release);
@@ -8042,10 +7724,7 @@ void register_scheduler_park_window_tests()
                     const auto retryDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);
                     for (;;)
                     {
-                        R5900Context rc{};
-                        setRegU32(rc, 4, static_cast<uint32_t>(tid));
-                        ps2_syscalls::ResumeThread(rdram.data(), &rc, &runtime);
-                        if (getRegS32(rc, 2) == KE_OK) break;
+                        if (callSyscall(runtime, rdram, ps2_syscalls::ResumeThread, static_cast<uint32_t>(tid)) == KE_OK) break;
                         if (std::chrono::steady_clock::now() > retryDeadline) break;
                     }
                 }
@@ -8061,7 +7740,7 @@ void register_scheduler_park_window_tests()
                      "T-DEF2a: every SuspendThread/ResumeThread pair completed promptly");
 
             waitUntil([&]() { return gDef2aDone.load(std::memory_order_acquire) != 0u; }, std::chrono::milliseconds(2000));
-            waitUntil([&](){ return g_activeThreads.load() == 0; }, std::chrono::milliseconds(1000));
+            drainedWithin(std::chrono::milliseconds(1000));
         });
 
         // ------------------------------------------------------------------
@@ -8108,7 +7787,7 @@ void register_scheduler_park_window_tests()
             }, std::chrono::milliseconds(2000));
             t.IsTrue(returned, "T-DEF2b: suspend_self() returned promptly instead of parking forever");
 
-            waitUntil([&](){ return g_activeThreads.load() == 0; }, std::chrono::milliseconds(1000));
+            drainedWithin(std::chrono::milliseconds(1000));
         });
 
         // ------------------------------------------------------------------
@@ -8237,9 +7916,8 @@ void register_scheduler_fiber_ptr_tests()
 
             runtime.registerFunction(0x00838000u, &stepRecordFiberPtr);
 
-            uint32_t zero = 0u;
             gAAStarted.store(0u, std::memory_order_release);
-            std::memcpy(rdram.data() + kAAFiberPtrSlot, &zero, 4);
+            rdramWrite32(rdram, kAAFiberPtrSlot, 0u);
             gAAWoken.store(0u, std::memory_order_release);
             gAASeq.store(0u, std::memory_order_release);
 
@@ -8278,7 +7956,7 @@ void register_scheduler_fiber_ptr_tests()
             t.IsTrue(ptrOnResume != 0u, "AA11: ps2fiber_current() was non-null after resume");
             t.Equals(ptrOnEntry, ptrOnResume, "AA11: ps2fiber_current() is the same pointer before and after yield");
 
-            waitUntil([&](){ return g_activeThreads.load() == 0; }, std::chrono::milliseconds(1000));
+            drainedWithin(std::chrono::milliseconds(1000));
         });
 
     }); // MiniTest::Case("SchedulerFiberPtr")

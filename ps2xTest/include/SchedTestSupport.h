@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <thread>
 #include <vector>
 
@@ -90,6 +91,30 @@ namespace ps2x_test
         {
             return rdramRead32(rdram, addr) >= want;
         }, timeout);
+    }
+
+    // Note: no shared rdramWrite32 is added here. ps2_runtime_expansion_tests.cpp
+    // already has a file-local rdramWrite32 (same signature/behavior), and
+    // ps2_scheduler_workload_regression_tests.cpp independently defines its own
+    // too; both already do `using namespace ps2x_test;`, so promoting either
+    // one to this header would make `rdramWrite32(...)` ambiguous at every
+    // call site outside its defining anonymous namespace. Each file keeps
+    // reusing its own existing local helper instead of duplicating a new one.
+
+    // Marshals a 0-3-arg / reg4..6-in, reg2-out syscall call: binds up to
+    // three MIPS-ABI argument registers, invokes the syscall, and reads back
+    // its return value, collapsing the ctx/setRegU32/call/getRegS32 ritual
+    // duplicated across scheduler test bodies into a single call.
+    using SyscallFn = void (*)(uint8_t *, R5900Context *, PS2Runtime *);
+    inline int32_t callSyscall(PS2Runtime &rt, std::vector<uint8_t> &ram, SyscallFn fn,
+                                uint32_t a0, uint32_t a1 = 0, uint32_t a2 = 0)
+    {
+        R5900Context ctx{};
+        setRegU32(ctx, 4, a0);
+        setRegU32(ctx, 5, a1);
+        setRegU32(ctx, 6, a2);
+        fn(ram.data(), &ctx, &rt);
+        return getRegS32(ctx, 2);
     }
 
     // Hands out a fresh, disjoint worker-stack base of `size` bytes on every
