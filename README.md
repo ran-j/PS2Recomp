@@ -99,6 +99,7 @@ Main fields in `config.toml`:
 * `general.patch_cache`: apply configured patches to CACHE instructions.
 * `general.stubs`: names to force as stubs. Also accepts `handler@0xADDRESS` to bind a stripped function address directly to a runtime syscall/stub handler. Includes generic handlers `ret0`, `ret1`, `reta0`.
 * `general.skip`: names to force as skipped wrappers.
+* `general.external_call_target_manifests`: optional array of `external_call_targets.txt` paths emitted by other recompile invocations (e.g. a separately recompiled overlay); their call targets that land inside this invocation's functions are registered as additional entry points. Each invocation writes its own `external_call_targets.txt` into `general.output`.
 * `patches.instructions`: raw instruction replacements by address.
 
 Address binding for stripped ELFs:
