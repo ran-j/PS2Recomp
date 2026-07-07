@@ -1,5 +1,6 @@
 #include "ThreadExit.h"
 #include "ps2_scheduler.h"
+#include <algorithm>
 #include <chrono>
 #include <mutex>
 #include <thread>
@@ -21,6 +22,55 @@ static inline void wakeWaiters(std::mutex &m, std::vector<std::pair<int, ps2sche
     for (const auto &[tid, token] : waiters)
     {
         ps2sched::enqueue_external_wakeup_validated(tid, token);
+    }
+}
+
+// Publishes the calling thread (g_currentThreadId + its current fiber token)
+// to `waitList`. Must be called under the owning object's mutex, AFTER the
+// caller has decided to block, so a concurrent Signal/Set/Delete that
+// enumerates the list is serialized against this insert (see WaitSema for
+// the full publish-before-arm rationale). Pairs with unpublishWaiter below.
+static inline void publishWaiter(std::vector<std::pair<int, ps2sched::FiberToken>> &waitList)
+{
+    waitList.emplace_back(g_currentThreadId, ps2sched::current_fiber_token());
+}
+
+// Removes the calling thread's entry from `waitList` if still present — a
+// Signal/Set/Delete may already have popped it while we were parked. Must be
+// called under the owning object's mutex, paired with publishWaiter above.
+static inline void unpublishWaiter(std::vector<std::pair<int, ps2sched::FiberToken>> &waitList)
+{
+    auto it = std::find_if(waitList.begin(), waitList.end(),
+        [](const std::pair<int, ps2sched::FiberToken> &e) { return e.first == g_currentThreadId; });
+    if (it != waitList.end())
+    {
+        waitList.erase(it);
+    }
+}
+
+// The "deleting" sibling of wakeWaiters: also marks the object deleted under
+// the same critical section as the swap (wakeWaiters deliberately does NOT do
+// this — SetEventFlag/SignalSema's copy-based wake path, where waiters
+// re-check and self-remove, must not touch `deleted` this way). Used by the
+// two Delete* tails, which otherwise share this exact shape: lock, mark
+// deleted, swap the wait-list out, unlock, drain with validated external
+// wakeups, then yield once if anyone was actually woken.
+template <typename WaitableObject>
+static inline void markDeletedAndWake(WaitableObject &obj)
+{
+    std::vector<std::pair<int, ps2sched::FiberToken>> waiters;
+    {
+        std::lock_guard<std::mutex> lk(obj.m);
+        obj.deleted = true;
+        waiters.swap(obj.waitList);
+    }
+    for (const auto &[tid, token] : waiters)
+    {
+        ps2sched::enqueue_external_wakeup_validated(tid, token);
+    }
+    if (!waiters.empty())
+    {
+        ps2sched::maybe_yield();
     }
 }
 
@@ -109,6 +159,60 @@ static void throwIfTerminated(const std::shared_ptr<ThreadInfo> &info)
     {
         throw ThreadExitException();
     }
+}
+
+// Checks-and-clears info->forceRelease under info->m in one step, returning
+// whether a release was actually pending. Null-safe: a borrowed worker
+// (info == nullptr) never has forceRelease to consume, so this simply
+// returns false — folding in the `if (!info) return false;` guard every
+// call site otherwise had to repeat.
+static inline bool consumeForceRelease(const std::shared_ptr<ThreadInfo> &info)
+{
+    if (!info)
+    {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(info->m);
+    if (info->forceRelease)
+    {
+        info->forceRelease = false;
+        return true;
+    }
+    return false;
+}
+
+// Transitions `info` into THS_WAIT/THS_WAITSUSPEND for the given wait
+// type/id and clears forceRelease. This is the ONE safe place to clear
+// forceRelease unconditionally: ReleaseWaitThread only ever sets it while
+// observing status == WAIT/WAITSUSPEND, and that transition (plus the clear)
+// happens atomically under info->m here, so a stale true left over from a
+// prior, unrelated wait cannot leak into this one. No-op for a borrowed
+// worker (info == nullptr). Pairs with clearThreadWaiting below.
+static inline void setThreadWaiting(const std::shared_ptr<ThreadInfo> &info, int waitType, int waitId)
+{
+    if (!info)
+    {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(info->m);
+    info->status = (info->suspendCount > 0) ? THS_WAITSUSPEND : THS_WAIT;
+    info->waitType = waitType;
+    info->waitId = waitId;
+    info->forceRelease = false;
+}
+
+// Reverses setThreadWaiting: returns `info` to THS_RUN/THS_SUSPEND and clears
+// wait bookkeeping. No-op for a borrowed worker (info == nullptr).
+static inline void clearThreadWaiting(const std::shared_ptr<ThreadInfo> &info)
+{
+    if (!info)
+    {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(info->m);
+    info->status = (info->suspendCount > 0) ? THS_SUSPEND : THS_RUN;
+    info->waitType = TSW_NONE;
+    info->waitId = 0;
 }
 
 // Waiting is done via arm_park()/block_current(), which already

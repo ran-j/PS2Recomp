@@ -212,21 +212,9 @@ namespace ps2_syscalls
             g_semas.erase(it);
         }
 
-        // Collect all waiting threads, then wake each with token validation.
-        std::vector<std::pair<int, ps2sched::FiberToken>> waiters;
-        {
-            std::lock_guard<std::mutex> lk(sema->m);
-            sema->deleted = true;
-            waiters.swap(sema->waitList);
-        }
-        for (const auto& [tid, token] : waiters)
-        {
-            ps2sched::enqueue_external_wakeup_validated(tid, token);
-        }
-        if (!waiters.empty())
-        {
-            ps2sched::maybe_yield();
-        }
+        // Mark deleted, drain the wait-list, and wake every waiter with a
+        // validated external wakeup.
+        markDeletedAndWake(*sema);
 
         // PS2 EE BIOS returns sid on success.
         setReturnS32(ctx, sid);
@@ -335,14 +323,7 @@ namespace ps2_syscalls
             // here, so a stale true left over from a prior, unrelated wait on
             // this ThreadInfo cannot leak into this wait, and nothing can race
             // the clear itself.
-            if (info)
-            {
-                std::lock_guard<std::mutex> tLock(info->m);
-                info->status = (info->suspendCount > 0) ? THS_WAITSUSPEND : THS_WAIT;
-                info->waitType = TSW_SEMA;
-                info->waitId = sid;
-                info->forceRelease = false;
-            }
+            setThreadWaiting(info, TSW_SEMA, sid);
 
             for (;;)
             {
@@ -355,22 +336,10 @@ namespace ps2_syscalls
                 // unconditionally here would silently clobber that pending
                 // release, so consume it and take the same released-exit path
                 // as the post-wake check.
-                if (info)
+                if (consumeForceRelease(info))
                 {
-                    bool release = false;
-                    {
-                        std::lock_guard<std::mutex> tLock(info->m);
-                        if (info->forceRelease)
-                        {
-                            info->forceRelease = false;
-                            release = true;
-                        }
-                    }
-                    if (release)
-                    {
-                        ret = KE_RELEASE_WAIT;
-                        break;
-                    }
+                    ret = KE_RELEASE_WAIT;
+                    break;
                 }
 
                 // sema->waiters is a plain count of every thread genuinely
@@ -407,7 +376,7 @@ namespace ps2_syscalls
                     // object mutex. A SignalSema that fires in the publish/arm
                     // window sees g_running_fiber == this fiber and records
                     // wake_pending (consumed by block_current).
-                    sema->waitList.emplace_back(g_currentThreadId, ps2sched::current_fiber_token());
+                    publishWaiter(sema->waitList);
                 }
 
                 // Drop sema->m BEFORE any scheduler operation.
@@ -429,10 +398,7 @@ namespace ps2_syscalls
                 // increment above.
                 if (info)
                 {
-                    auto& wl = sema->waitList;
-                    auto it = std::find_if(wl.begin(), wl.end(),
-                        [](const std::pair<int, ps2sched::FiberToken>& e){ return e.first == g_currentThreadId; });
-                    if (it != wl.end()) wl.erase(it);
+                    unpublishWaiter(sema->waitList);
                 }
                 sema->waiters--;
 
@@ -443,22 +409,10 @@ namespace ps2_syscalls
                     break;
                 }
 
-                if (info)
+                if (consumeForceRelease(info))
                 {
-                    bool release = false;
-                    {
-                        std::lock_guard<std::mutex> tLock(info->m);
-                        if (info->forceRelease)
-                        {
-                            info->forceRelease = false;
-                            release = true;
-                        }
-                    }
-                    if (release)
-                    {
-                        ret = KE_RELEASE_WAIT;
-                        break;
-                    }
+                    ret = KE_RELEASE_WAIT;
+                    break;
                 }
 
                 if (info && info->terminated.load())
@@ -482,13 +436,7 @@ namespace ps2_syscalls
 
         // Reset thread status on all non-exception exit paths (fast path, slow path success,
         // and error breaks). The throw-ThreadExitException path unwinds without reaching here.
-        if (info)
-        {
-            std::lock_guard<std::mutex> tLock(info->m);
-            info->status = (info->suspendCount > 0) ? THS_SUSPEND : THS_RUN;
-            info->waitType = TSW_NONE;
-            info->waitId = 0;
-        }
+        clearThreadWaiting(info);
 
         lock.unlock();
         waitWhileSuspended(info);
@@ -612,20 +560,9 @@ namespace ps2_syscalls
             return;
         }
 
-        std::vector<std::pair<int, ps2sched::FiberToken>> evfWaiters;
-        {
-            std::lock_guard<std::mutex> lk(info->m);
-            info->deleted = true;
-            evfWaiters.swap(info->waitList);
-        }
-        for (const auto& [tid, token] : evfWaiters)
-        {
-            ps2sched::enqueue_external_wakeup_validated(tid, token);
-        }
-        if (!evfWaiters.empty())
-        {
-            ps2sched::maybe_yield();
-        }
+        // Mark deleted, drain the wait-list, and wake every waiter with a
+        // validated external wakeup.
+        markDeletedAndWake(*info);
         setReturnS32(ctx, 0);
     }
 
@@ -760,203 +697,92 @@ namespace ps2_syscalls
 
         if (!satisfied())
         {
-            if (!onFiber)
+            // Mesa-style re-block loop, unified for fiber and non-fiber
+            // (borrowed-worker) callers alike — mirrors WaitSema's slow path
+            // exactly (see WaitSema for the full publish-before-arm and
+            // forceRelease-clearing rationale). SetEventFlag wakes ALL
+            // waiters, including ones whose AND-mode bits are only partially
+            // satisfied, so we re-check satisfied() on every wake and
+            // re-publish to the wait-list if still unmet.
+            //
+            // A thread with a valid guest identity (tInfo != nullptr) also
+            // publishes itself to info->waitList and keeps its ThreadInfo
+            // status in THS_WAIT/THS_WAITSUSPEND for the duration, so
+            // ReferEventFlagStatus's numThreads count and ReleaseWaitThread's
+            // target lookup both see it, whether or not it is a real fiber.
+            // Off-fiber, current_fiber_token() is FiberToken{}; SetEventFlag's
+            // wake fan-out tolerates FiberToken{} (enqueue_external_wakeup_validated
+            // drops it): this waiter doesn't need the wake, it re-polls every
+            // backoff step. A true borrowed worker (tInfo == nullptr) never
+            // publishes and relies solely on satisfied() re-checks.
+            setThreadWaiting(tInfo, TSW_EVENT, eid);
+
+            NonFiberBackoff nfBackoff; // unused for fibers; ramps for borrowed workers
+
+            for (;;)
             {
-                // Non-fiber path (IRQ/alarm worker, or — since tInfo is now keyed
-                // off g_currentThreadId rather than onFiber — any host thread
-                // carrying a real guest tid, e.g. a raw std::thread standing in
-                // for a guest thread in tests): Mesa-style re-block loop,
-                // mirroring WaitSema's non-fiber handling. We cannot park a host
-                // worker on the fiber scheduler, so bounded exponential backoff
-                // (NonFiberBackoff) stands in for arm_park/block_current's real
-                // parking, re-checking satisfied() under info->m every iteration.
-                //
-                // A thread with a valid guest identity (tInfo != nullptr) also
-                // publishes itself to info->waitList and keeps its ThreadInfo
-                // status in THS_WAIT/THS_WAITSUSPEND for the duration, so
-                // ReferEventFlagStatus's numThreads count and ReleaseWaitThread's
-                // target lookup both see it — matching WaitSema. Off-fiber,
-                // current_fiber_token() is FiberToken{}; SetEventFlag's wake fan-out
-                // tolerates FiberToken{} (enqueue_external_wakeup_validated drops it):
-                // this waiter doesn't need the wake, it re-polls every backoff
-                // step. A true borrowed worker (tInfo == nullptr) never publishes
-                // and relies solely on satisfied() re-checks, same as before.
+                // Retry-check: consume a forceRelease that raced in since the
+                // last iteration decided to re-block (see WaitSema).
+                if (consumeForceRelease(tInfo))
+                {
+                    ret = KE_RELEASE_WAIT;
+                    break;
+                }
+
+                // info->waiters counts every thread genuinely blocked here —
+                // fiber, non-fiber-with-identity, or fully borrowed
+                // (g_currentThreadId == -1) — so ReferEventFlagStatus's
+                // numThreads and the EA_MULTI exclusivity gate above are
+                // accurate for all of them (mirrors WaitSema's sema->waiters).
+                info->waiters++;
                 if (tInfo)
                 {
-                    std::lock_guard<std::mutex> tLock(tInfo->m);
-                    tInfo->status = (tInfo->suspendCount > 0) ? THS_WAITSUSPEND : THS_WAIT;
-                    tInfo->waitType = TSW_EVENT;
-                    tInfo->waitId = eid;
-                    tInfo->forceRelease = false;
+                    // Publish under info->m; arm_park (fiber-only, inside
+                    // nfBackoff.wait) runs AFTER we drop info->m below.
+                    publishWaiter(info->waitList);
                 }
 
-                NonFiberBackoff nfBackoff;
-                for (;;)
-                {
-                    if (tInfo)
-                    {
-                        bool release = false;
-                        {
-                            std::lock_guard<std::mutex> tLock(tInfo->m);
-                            if (tInfo->forceRelease)
-                            {
-                                tInfo->forceRelease = false;
-                                release = true;
-                            }
-                        }
-                        if (release)
-                        {
-                            ret = KE_RELEASE_WAIT;
-                            break;
-                        }
-                    }
+                // Drop info->m BEFORE any scheduler operation.
+                lock.unlock();
+                const ps2sched::BlockResult br = nfBackoff.wait(onFiber);
 
-                    // info->waiters counts every thread genuinely blocked here —
-                    // fiber, non-fiber-with-identity, or fully borrowed
-                    // (g_currentThreadId == -1) — so ReferEventFlagStatus's
-                    // numThreads and the EA_MULTI exclusivity gate above are
-                    // accurate for all of them. It carries no identity, so unlike
-                    // waitList it has no tid-aliasing hazard and is safe to bump
-                    // unconditionally (mirrors WaitSema's sema->waiters).
-                    info->waiters++;
-                    if (tInfo)
-                    {
-                        info->waitList.emplace_back(g_currentThreadId, ps2sched::current_fiber_token());
-                    }
-
-                    lock.unlock();
-                    const ps2sched::BlockResult br = nfBackoff.wait(false);
-                    lock.lock();
-
-                    if (tInfo)
-                    {
-                        auto &wl = info->waitList;
-                        auto it = std::find_if(wl.begin(), wl.end(),
-                            [](const std::pair<int, ps2sched::FiberToken>& e){ return e.first == g_currentThreadId; });
-                        if (it != wl.end()) wl.erase(it);
-                    }
-                    info->waiters--;
-
-                    if (tInfo)
-                    {
-                        std::lock_guard<std::mutex> tLock(tInfo->m);
-                        if (tInfo->forceRelease)
-                        {
-                            tInfo->forceRelease = false;
-                            ret = KE_RELEASE_WAIT;
-                        }
-                    }
-
-                    if (tInfo && tInfo->terminated.load())
-                    {
-                        throw ThreadExitException();
-                    }
-
-                    if (ret != KE_OK || info->deleted || satisfied())
-                        break;
-                }
+                // === Woke up here ===
+                lock.lock();
 
                 if (tInfo)
                 {
-                    std::lock_guard<std::mutex> tLock(tInfo->m);
-                    tInfo->status = (tInfo->suspendCount > 0) ? THS_SUSPEND : THS_RUN;
-                    tInfo->waitType = TSW_NONE;
-                    tInfo->waitId = 0;
+                    unpublishWaiter(info->waitList);
                 }
-            }
-            else
-            {
-                // Mesa-style re-block loop for fibers. SetEventFlag wakes ALL
-                // waiters including those that waited AND bits that were only
-                // partially satisfied; re-check the condition on every wake and
-                // re-publish to the wait-list if still unsatisfied.
-                for (;;)
+                info->waiters--;
+
+                // Wake reasons that abort the wait outright:
+                if (info->deleted)
                 {
-                    // Update thread wait state, unless a ReleaseWaitThread already
-                    // raced in since our last check. Status flips back to RUN/SUSPEND
-                    // at the bottom of every iteration (below) and only becomes WAIT
-                    // again right here, so in principle no legitimate forceRelease
-                    // can be pending at this exact point (see WaitSema for the
-                    // general hazard this guards against). Check-and-consume first
-                    // anyway, defensively: if it is somehow already set, take the
-                    // same released-exit path as the post-wake check below instead
-                    // of blindly clearing it and re-parking.
-                    bool release = false;
-                    if (tInfo)
-                    {
-                        std::lock_guard<std::mutex> tLock(tInfo->m);
-                        if (tInfo->forceRelease)
-                        {
-                            tInfo->forceRelease = false;
-                            release = true;
-                        }
-                        else
-                        {
-                            tInfo->status = (tInfo->suspendCount > 0) ? THS_WAITSUSPEND : THS_WAIT;
-                            tInfo->waitType = TSW_EVENT;
-                            tInfo->waitId = eid;
-                        }
-                    }
-                    if (release)
-                    {
-                        ret = KE_RELEASE_WAIT;
-                        break;
-                    }
-
-                    // Publish under info->m; arm_park after unlock (no nested locks).
-                    info->waiters++;
-                    info->waitList.emplace_back(g_currentThreadId, ps2sched::current_fiber_token());
-
-                    // UNLOCK before any scheduler operation.
-                    lock.unlock();
-                    ps2sched::arm_park();
-                    const ps2sched::BlockResult br = ps2sched::block_current();
-                    if (br != ps2sched::BlockResult::Parked &&
-                        br != ps2sched::BlockResult::WokenInWindow)
-                    {
-                        std::fprintf(stderr,
-                            "FATAL [WaitEventFlag]: unexpected NonFiber result in fiber Mesa loop\n");
-                        std::terminate();
-                    }
-
-                    lock.lock();
-
-                    // Remove self from wait-list (re-added at top of loop if not satisfied).
-                    {
-                        auto &wl = info->waitList;
-                        auto it = std::find_if(wl.begin(), wl.end(),
-                            [](const std::pair<int, ps2sched::FiberToken>& e){ return e.first == g_currentThreadId; });
-                        if (it != wl.end()) wl.erase(it);
-                        info->waiters--;
-                    }
-
-                    if (tInfo)
-                    {
-                        std::lock_guard<std::mutex> tLock(tInfo->m);
-                        tInfo->status = (tInfo->suspendCount > 0) ? THS_SUSPEND : THS_RUN;
-                        tInfo->waitType = TSW_NONE;
-                        tInfo->waitId = 0;
-                        if (tInfo->forceRelease)
-                        {
-                            tInfo->forceRelease = false;
-                            ret = KE_RELEASE_WAIT;
-                        }
-                    }
-
-                    if (tInfo && tInfo->terminated.load())
-                    {
-                        throw ThreadExitException();
-                    }
-
-                    // Exit if forceRelease/terminate/delete broke us out, OR
-                    // if the condition is now satisfied.
-                    if (ret != KE_OK || info->deleted || satisfied())
-                        break;
-
-                    // Spurious wake (SetEventFlag set only a subset of AND bits):
-                    // loop back to re-publish and re-block.
+                    ret = KE_WAIT_DELETE;
+                    break;
                 }
+
+                if (consumeForceRelease(tInfo))
+                {
+                    ret = KE_RELEASE_WAIT;
+                    break;
+                }
+
+                if (tInfo && tInfo->terminated.load())
+                {
+                    throw ThreadExitException();
+                }
+
+                if (satisfied())
+                {
+                    ret = KE_OK;
+                    break;
+                }
+                // Spurious wake (SetEventFlag set only a subset of AND bits):
+                // loop back to re-publish and re-block.
             }
+
+            clearThreadWaiting(tInfo);
         }
 
         if (ret == KE_OK && info->deleted)
