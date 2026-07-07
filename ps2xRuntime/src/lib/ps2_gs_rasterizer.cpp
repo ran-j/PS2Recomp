@@ -6,6 +6,7 @@
 #include "runtime/ps2_gs_psmt4.h"
 #include "runtime/ps2_gs_psmt8.h"
 #include "runtime/ps2_gs_memory.h"
+#include "runtime/ps2_diag.h"
 #include "ps2_log.h"
 #include <atomic>
 #include <algorithm>
@@ -14,6 +15,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <set>
 #include <sstream>
 
 using namespace GSInternal;
@@ -544,11 +546,115 @@ void GSRasterizer::writePixel(GS *gs, int x, int y, int z, uint8_t r, uint8_t g,
         pixel = Rgba8888ToRgba5551(pixel);
     }
 
+    if (ps2_diag::enabled())
+    {
+        // [gs:pixels]: sampled after scissor/alpha/z rejection, right at the
+        // point a pixel is actually committed to VRAM. One sample per 2M
+        // writes -- this is a hot path, so keep it to a single gate check
+        // plus a counter increment when disabled has already short-circuited.
+        static std::atomic<uint64_t> s_pixelSampleCount{0};
+        const uint64_t n = s_pixelSampleCount.fetch_add(1, std::memory_order_relaxed);
+        if (ps2_diag::should_log(n, 0, 2000000))
+        {
+            RUNTIME_LOG("[gs:pixels] n=" << n
+                                        << " x=" << x << " y=" << y
+                                        << " r=" << static_cast<uint32_t>(r)
+                                        << " g=" << static_cast<uint32_t>(g)
+                                        << " b=" << static_cast<uint32_t>(b)
+                                        << " a=" << static_cast<uint32_t>(a)
+                                        << " fbp=0x" << std::hex << ctx.frame.fbp
+                                        << " psm=0x" << static_cast<uint32_t>(ctx.frame.psm)
+                                        << std::dec
+                                        << " tme=" << static_cast<uint32_t>(gs->m_prim.tme ? 1u : 0u));
+        }
+    }
+
     gs->WriteVram(fpsm, fbp, fbw, x, y, pixel);
 
     if (!zmask)
     {
         gs->WriteVram(zpsm, zbp, fbw, x, y, z);
+    }
+}
+
+uint32_t GSRasterizer::readClutRgba(GS *gs, uint32_t cbp, uint8_t cpsm, uint32_t clutWidth, uint32_t x, uint32_t y)
+{
+    switch (cpsm)
+    {
+    case GS_PSM_CT32:
+        return applyTexa(gs->m_texa, cpsm, GSMem::ReadCT32(gs->m_vram, cbp, clutWidth, x, y));
+    case GS_PSM_CT24:
+        return applyTexa(gs->m_texa, cpsm, GSMem::ReadCT24(gs->m_vram, cbp, clutWidth, x, y));
+    case GS_PSM_CT16:
+        return applyTexa(gs->m_texa, cpsm, Rgba5551ToRgba8888(GSMem::ReadCT16(gs->m_vram, cbp, clutWidth, x, y)));
+    case GS_PSM_CT16S:
+        return applyTexa(gs->m_texa, cpsm, Rgba5551ToRgba8888(GSMem::ReadCT16S(gs->m_vram, cbp, clutWidth, x, y)));
+    default:
+        break;
+    }
+
+    return 0xFFFF00FFu;
+}
+
+// [gs:clut-dump]: on the first sample of each distinct (cbp, cpsm, csa)
+// triple, dump every logical CLUT entry the running texture format could
+// reference. CRITICAL: for CSM1 (csm == 0) each logical index must be
+// swizzled via swizzleClutIndexCSM1 (through resolveClutIndex, which already
+// applies it) BEFORE being split into (x = idx & 0xF, y = idx >> 4) --
+// entries 8-15 of each 32-entry block read the wrong VRAM bytes otherwise.
+// CSM2 (csm == 1, linear) must NOT be swizzled.
+void GSRasterizer::dumpClutIfNew(GS *gs, uint32_t cbp, uint8_t cpsm, uint8_t csm, uint8_t csa, uint8_t sourcePsm)
+{
+    uint32_t entryCount = 0;
+    switch (sourcePsm)
+    {
+    case GS_PSM_T4:
+    case GS_PSM_T4HL:
+    case GS_PSM_T4HH:
+        entryCount = 16u;
+        break;
+    case GS_PSM_T8:
+    case GS_PSM_T8H:
+        entryCount = 256u;
+        break;
+    default:
+        return; // not an indexed/palette texture, nothing to dump
+    }
+
+    // Include csm (addressing mode) and sourcePsm (index width) so a distinct
+    // palette view under the same (cbp,cpsm,csa) is not deduped away.
+    const uint64_t key = (static_cast<uint64_t>(cbp) << 24) |
+                          (static_cast<uint64_t>(cpsm) << 16) |
+                          (static_cast<uint64_t>(csa) << 8) |
+                          (static_cast<uint64_t>(csm) << 7) |
+                          static_cast<uint64_t>(sourcePsm & 0x7Fu);
+
+    static std::set<uint64_t> s_seenClutKeys;
+    if (!s_seenClutKeys.insert(key).second)
+    {
+        return; // already dumped this (cbp, cpsm, csa, csm, sourcePsm) view
+    }
+
+    const uint32_t clutWidth = (gs->m_texclut.cbw != 0u) ? static_cast<uint32_t>(gs->m_texclut.cbw) : 1u;
+
+    RUNTIME_LOG("[gs:clut-dump] cbp=0x" << std::hex << cbp
+                                        << " cpsm=0x" << static_cast<uint32_t>(cpsm)
+                                        << " csm=" << std::dec << static_cast<uint32_t>(csm)
+                                        << " csa=" << static_cast<uint32_t>(csa)
+                                        << " entries=" << entryCount);
+
+    for (uint32_t i = 0; i < entryCount; ++i)
+    {
+        const uint32_t clutIndex = resolveClutIndex(static_cast<uint8_t>(i), csm, csa, sourcePsm);
+        const uint32_t clutX = static_cast<uint32_t>(gs->m_texclut.cou) + (clutIndex & 0x0Fu);
+        const uint32_t clutY = static_cast<uint32_t>(gs->m_texclut.cov) + (clutIndex >> 4);
+        const uint32_t rgba = readClutRgba(gs, cbp, cpsm, clutWidth, clutX, clutY);
+
+        RUNTIME_LOG("[gs:clut-dump]   idx=" << i
+                                            << " r=" << (rgba & 0xFFu)
+                                            << " g=" << ((rgba >> 8) & 0xFFu)
+                                            << " b=" << ((rgba >> 16) & 0xFFu)
+                                            << " a=" << ((rgba >> 24) & 0xFFu));
     }
 }
 
@@ -560,27 +666,17 @@ uint32_t GSRasterizer::lookupCLUT(GS *gs,
                                   uint8_t csa,
                                   uint8_t sourcePsm)
 {
+    if (ps2_diag::enabled())
+    {
+        dumpClutIfNew(gs, cbp, cpsm, csm, csa, sourcePsm);
+    }
+
     const uint32_t clutIndex = resolveClutIndex(index, csm, csa, sourcePsm);
     const uint32_t clutWidth = (gs->m_texclut.cbw != 0u) ? static_cast<uint32_t>(gs->m_texclut.cbw) : 1u;
     const uint32_t clutX = static_cast<uint32_t>(gs->m_texclut.cou) + (clutIndex & 0x0Fu);
     const uint32_t clutY = static_cast<uint32_t>(gs->m_texclut.cov) + (clutIndex >> 4);
 
-
-    switch (cpsm)
-    {
-    case GS_PSM_CT32:
-        return applyTexa(gs->m_texa, cpsm, GSMem::ReadCT32(gs->m_vram, cbp, clutWidth, clutX, clutY));
-    case GS_PSM_CT24:
-        return applyTexa(gs->m_texa, cpsm, GSMem::ReadCT24(gs->m_vram, cbp, clutWidth, clutX, clutY));
-    case GS_PSM_CT16:
-        return applyTexa(gs->m_texa, cpsm, Rgba5551ToRgba8888(GSMem::ReadCT16(gs->m_vram, cbp, clutWidth, clutX, clutY)));
-    case GS_PSM_CT16S:
-        return applyTexa(gs->m_texa, cpsm, Rgba5551ToRgba8888(GSMem::ReadCT16S(gs->m_vram, cbp, clutWidth, clutX, clutY)));
-    default:
-        break;
-    }
-
-    return 0xFFFF00FFu;
+    return readClutRgba(gs, cbp, cpsm, clutWidth, clutX, clutY);
 }
 
 uint32_t GSRasterizer::sampleTexture(GS *gs, float s, float t, float q, uint16_t u, uint16_t v)

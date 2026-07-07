@@ -1,5 +1,6 @@
 #include "Common.h"
 #include "System.h"
+#include "runtime/ps2_diag.h"
 
 namespace ps2_stubs
 {
@@ -26,6 +27,20 @@ namespace ps2_stubs
 
     void exit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        if (ps2_diag::enabled())
+        {
+            static std::atomic<uint64_t> s_exitCount{0};
+            const uint64_t n = s_exitCount.fetch_add(1, std::memory_order_relaxed);
+            if (ps2_diag::should_log(n, 8, 0))
+            {
+                RUNTIME_LOG("[exit] n=" << n
+                                        << " pc=0x" << std::hex << ctx->pc
+                                        << " ra=0x" << getRegU32(ctx, 31)
+                                        << " a0=0x" << getRegU32(ctx, 4)
+                                        << std::dec);
+            }
+        }
+
         if (runtime)
         {
             runtime->requestStop();

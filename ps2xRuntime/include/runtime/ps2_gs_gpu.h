@@ -2,6 +2,7 @@
 #define PS2_GS_GPU_H
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <functional>
 #include <cstdint>
@@ -349,6 +350,14 @@ public:
 
     uint32_t consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes);
 
+    // Draw-activity counters consumed by the [gs-activity] probe. Relaxed
+    // atomics; the writer-side updates are gated on ps2_diag::enabled() so
+    // they cost nothing on the draw path when diagnostics are off. These
+    // accessors read them from the run-loop thread (values may be stale).
+    uint64_t drawStatPrims() const { return m_statPrims.load(std::memory_order_relaxed); }
+    uint64_t drawStatImageBytes() const { return m_statImageBytes.load(std::memory_order_relaxed); }
+    uint32_t drawStatLastFbp() const { return m_statLastDrawFbp.load(std::memory_order_relaxed); }
+
     void refreshDisplaySnapshot();
 
     inline void WriteVram(u32 psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value);
@@ -453,6 +462,13 @@ private:
 
     std::array<ReadVramFunc, 0x3F> m_read_vram_funcs{ };
     std::array<WriteVramFunc, 0x3F> m_write_vram_funcs{ };
+
+    // Draw-activity stats for the [gs-activity] probe. Relaxed atomics whose
+    // updates are gated on ps2_diag::enabled() (see ps2_gs_gpu.cpp), so the
+    // draw/transfer hot paths incur no locked RMW when diagnostics are off.
+    std::atomic<uint64_t> m_statPrims{0};
+    std::atomic<uint64_t> m_statImageBytes{0};
+    std::atomic<uint32_t> m_statLastDrawFbp{0};
 };
 
 inline u32 GS::ReadVram(u32 psm, u32 base, u32 bw, u32 x, u32 y) const
