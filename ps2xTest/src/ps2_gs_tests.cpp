@@ -771,6 +771,90 @@ void register_ps2_gs_tests()
                      "CT32 primitives should land in the same local-memory layout that later CT32 texture sampling expects");
         });
 
+        tc.Run("GS PRIM honors PRMODECONT for attribute bits", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            gs.writeRegister(GS_REG_PRMODECONT, 0ull);
+            gs.writeRegister(GS_REG_PRMODE, 0x10ull);
+            gs.writeRegister(GS_REG_PRIM, static_cast<uint64_t>(GS_PRIM_SPRITE));
+            t.IsTrue(gs.getDebugSnapshot().prim.tme,
+                     "PRMODECONT=0: PRIM write must not clobber TME held from PRMODE");
+
+            gs.writeRegister(GS_REG_PRMODECONT, 1ull);
+            gs.writeRegister(GS_REG_PRIM, static_cast<uint64_t>(GS_PRIM_SPRITE));
+            t.IsFalse(gs.getDebugSnapshot().prim.tme,
+                      "PRMODECONT=1: PRIM write attribute bits take effect, TME cleared");
+        });
+
+        tc.Run("GS textured present honors PRMODECONT-held TME", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            constexpr uint32_t kSrcFbp = 0u;
+            constexpr uint32_t kDstFbp = 10u;
+            constexpr uint32_t kFbw = 1u;
+            constexpr uint32_t kSourceColor = 0x80AABBCCu;
+            constexpr uint32_t kFlatSpriteColor = 0x80112233u;
+
+            constexpr uint64_t kFrame =
+                (static_cast<uint64_t>(kDstFbp) << 0) |
+                (static_cast<uint64_t>(kFbw) << 16) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kZbuf = (1ull << 32);
+            constexpr uint64_t kScissor = 0ull;
+            constexpr uint64_t kTex0 =
+                (static_cast<uint64_t>(kSrcFbp) << 0) |
+                (static_cast<uint64_t>(kFbw) << 14) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 20) |
+                (0ull << 26) |
+                (0ull << 30) |
+                (1ull << 34) |
+                (1ull << 35);
+            constexpr uint64_t kXyz1 =
+                (static_cast<uint64_t>(1u << 4) << 0) |
+                (static_cast<uint64_t>(1u << 4) << 16);
+            constexpr uint64_t kUv1 =
+                (static_cast<uint64_t>(1u * 16u) << 0) |
+                (static_cast<uint64_t>(1u * 16u) << 16);
+
+            // Seed the source framebuffer directly with a texel that is clearly
+            // distinct from the flat sprite color below.
+            writeReferenceFramePSMCT32Pixel(vram, kSrcFbp, kFbw, 0u, 0u, kSourceColor);
+
+            gs.writeRegister(GS_REG_FRAME_1, kFrame);
+            gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
+            gs.writeRegister(GS_REG_SCISSOR_1, kScissor);
+            gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
+            gs.writeRegister(GS_REG_ALPHA_1, 0ull);
+            gs.writeRegister(GS_REG_TEX0_1, kTex0);
+            gs.writeRegister(GS_REG_TEX1_1, 0ull);
+
+            // TME and FST are supplied entirely by PRMODE while PRMODECONT=0;
+            // the PRIM write below carries a bare SPRITE type with all
+            // attribute bits zero, mirroring how a game leaves PRIM's upper
+            // bits untouched between draws once PRMODECONT gating is active.
+            gs.writeRegister(GS_REG_PRMODECONT, 0ull);
+            gs.writeRegister(GS_REG_PRMODE, 0x110ull);
+            gs.writeRegister(GS_REG_PRIM, static_cast<uint64_t>(GS_PRIM_SPRITE));
+            gs.writeRegister(GS_REG_RGBAQ, static_cast<uint64_t>(kFlatSpriteColor));
+            gs.writeRegister(GS_REG_UV, 0ull);
+            gs.writeRegister(GS_REG_XYZ2, 0ull);
+            gs.writeRegister(GS_REG_UV, kUv1);
+            gs.writeRegister(GS_REG_XYZ2, kXyz1);
+
+            const uint32_t dstPixel = readReferenceFramePSMCT32Pixel(vram, kDstFbp, kFbw, 0u, 0u);
+            t.Equals(dstPixel, kSourceColor,
+                     "PRMODECONT=0 sprite copy must sample the source texture (TME held from PRMODE)");
+            t.IsFalse(dstPixel == kFlatSpriteColor,
+                      "PRMODECONT=0 sprite copy must not fall back to the flat RGBAQ color");
+        });
+
         tc.Run("FST sprite 1:1 CT32 copies preserve source texels at the right and bottom edges", [](TestCase &t)
         {
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);

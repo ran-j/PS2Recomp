@@ -1572,15 +1572,22 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
     {
     case GS_REG_PRIM:
     {
+        // GS User's Manual PRMODECONT (AC) semantics: TYPE (bits 0-2) always
+        // comes from PRIM, but the attribute bits (bits 3-10) come from PRIM
+        // only when PRMODECONT=1; when PRMODECONT=0 they are held from the last
+        // PRMODE write (mirrors the gate already present in case GS_REG_PRMODE).
         m_prim.type = static_cast<GSPrimType>(value & 0x7);
-        m_prim.iip = ((value >> 3) & 1) != 0;
-        m_prim.tme = ((value >> 4) & 1) != 0;
-        m_prim.fge = ((value >> 5) & 1) != 0;
-        m_prim.abe = ((value >> 6) & 1) != 0;
-        m_prim.aa1 = ((value >> 7) & 1) != 0;
-        m_prim.fst = ((value >> 8) & 1) != 0;
-        m_prim.ctxt = ((value >> 9) & 1) != 0;
-        m_prim.fix = ((value >> 10) & 1) != 0;
+        if (m_prmodecont)
+        {
+            m_prim.iip  = ((value >> 3) & 1) != 0;
+            m_prim.tme  = ((value >> 4) & 1) != 0;
+            m_prim.fge  = ((value >> 5) & 1) != 0;
+            m_prim.abe  = ((value >> 6) & 1) != 0;
+            m_prim.aa1  = ((value >> 7) & 1) != 0;
+            m_prim.fst  = ((value >> 8) & 1) != 0;
+            m_prim.ctxt = ((value >> 9) & 1) != 0;
+            m_prim.fix  = ((value >> 10) & 1) != 0;
+        }
         m_vtxCount = 0;
         m_vtxIndex = 0;
         break;
