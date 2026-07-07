@@ -3175,6 +3175,87 @@ void register_ps2_gs_tests()
             }
         });
 
+        tc.Run("sceGifPkRefLoadImage seeds A+D GIFtag nloop once (no double-count)", [](TestCase &t)
+        {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            PS2Runtime runtime;
+            R5900Context ctx{};
+
+            constexpr uint32_t stateAddr = 0x1000u;
+            constexpr uint32_t baseAddr = 0x2000u;
+            constexpr uint32_t spAddr = 0x8000u;
+
+            setRegU32(ctx, 4, stateAddr);
+            setRegU32(ctx, 5, baseAddr);
+            ps2_stubs::sceGifPkInit(rdram.data(), &ctx, &runtime);
+
+            setRegU32(ctx, 29, spAddr);
+            const uint32_t width = 16u;
+            const uint32_t height = 1u;
+            std::memcpy(rdram.data() + spAddr, &width, sizeof(width));
+            std::memcpy(rdram.data() + spAddr + 8u, &height, sizeof(height));
+
+            const uint32_t dbp = 0x3fc0u;
+            const uint32_t dpsm = 0u;
+            const uint32_t dbw = 1u;
+            const uint32_t dataAddr = 0u;
+            const uint32_t dsax = 0u;
+            const uint32_t dsay = 0u;
+
+            setRegU32(ctx, 4, stateAddr);
+            setRegU32(ctx, 5, dbp);
+            setRegU32(ctx, 6, dpsm);
+            setRegU32(ctx, 7, dbw);
+            setRegU32(ctx, 8, dataAddr);
+            setRegU32(ctx, 9, 0u); // qwcRemaining: setup only, no image body
+            setRegU32(ctx, 10, dsax);
+            setRegU32(ctx, 11, dsay);
+            ps2_stubs::sceGifPkRefLoadImage(rdram.data(), &ctx, &runtime);
+
+            uint64_t tagLo = 0u;
+            uint64_t tagHi = 0u;
+            std::memcpy(&tagLo, rdram.data() + baseAddr + 16u, sizeof(tagLo));
+            std::memcpy(&tagHi, rdram.data() + baseAddr + 24u, sizeof(tagHi));
+            t.Equals(tagLo, static_cast<uint64_t>(0x1000000000000004ULL),
+                      "header GIFtag lo must be nloop=4 nreg=1 A+D eop=0 (double-count would give ...0008)");
+            t.Equals(tagHi, static_cast<uint64_t>(0xEULL),
+                      "header GIFtag hi must be A+D register descriptor 0xE");
+
+            uint64_t reg1Desc = 0u;
+            uint64_t reg2Desc = 0u;
+            uint64_t reg3Desc = 0u;
+            uint64_t reg4Desc = 0u;
+            std::memcpy(&reg1Desc, rdram.data() + baseAddr + 32u + 0u * 16u + 8u, sizeof(reg1Desc));
+            std::memcpy(&reg2Desc, rdram.data() + baseAddr + 32u + 1u * 16u + 8u, sizeof(reg2Desc));
+            std::memcpy(&reg3Desc, rdram.data() + baseAddr + 32u + 2u * 16u + 8u, sizeof(reg3Desc));
+            std::memcpy(&reg4Desc, rdram.data() + baseAddr + 32u + 3u * 16u + 8u, sizeof(reg4Desc));
+            t.Equals(reg1Desc, static_cast<uint64_t>(0x50ULL), "first register qword should be BITBLTBUF (0x50)");
+            t.Equals(reg2Desc, static_cast<uint64_t>(0x51ULL), "second register qword should be TRXPOS (0x51)");
+            t.Equals(reg3Desc, static_cast<uint64_t>(0x52ULL), "third register qword should be TRXREG (0x52)");
+            t.Equals(reg4Desc, static_cast<uint64_t>(0x53ULL), "fourth register qword should be TRXDIR (0x53)");
+
+            uint64_t reg1Payload = 0u;
+            uint64_t reg2Payload = 0u;
+            uint64_t reg3Payload = 0u;
+            uint64_t reg4Payload = 0u;
+            std::memcpy(&reg1Payload, rdram.data() + baseAddr + 32u + 0u * 16u + 0u, sizeof(reg1Payload));
+            std::memcpy(&reg2Payload, rdram.data() + baseAddr + 32u + 1u * 16u + 0u, sizeof(reg2Payload));
+            std::memcpy(&reg3Payload, rdram.data() + baseAddr + 32u + 2u * 16u + 0u, sizeof(reg3Payload));
+            std::memcpy(&reg4Payload, rdram.data() + baseAddr + 32u + 3u * 16u + 0u, sizeof(reg4Payload));
+            // BITBLTBUF: dbp=0x3fc0 (bits 32-45), dbw=1 (bits 48-53), dpsm=0 (bits 56-61).
+            t.Equals(reg1Payload, static_cast<uint64_t>(0x00013FC000000000ULL),
+                      "BITBLTBUF payload must encode dbp=0x3fc0, dbw=1, dpsm=0");
+            // TRXPOS: dsax=0, dsay=0.
+            t.Equals(reg2Payload, static_cast<uint64_t>(0x0ULL),
+                      "TRXPOS payload must encode dsax=0, dsay=0");
+            // TRXREG: width=16 (bits 0-31), height=1 (bits 32-63).
+            t.Equals(reg3Payload, static_cast<uint64_t>(0x0000000100000010ULL),
+                      "TRXREG payload must encode width=16, height=1");
+            // TRXDIR: host-to-local transfer, dir=0.
+            t.Equals(reg4Payload, static_cast<uint64_t>(0x0ULL),
+                      "TRXDIR payload must encode dir=0 (host-to-local)");
+        });
+
         tc.Run("sceGsResetGraph frees its temporary GIF packet", [](TestCase &t)
         {
             PS2Runtime runtime;
