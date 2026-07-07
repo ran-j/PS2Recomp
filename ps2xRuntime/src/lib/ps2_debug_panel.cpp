@@ -75,10 +75,6 @@ namespace
     {
         switch (sid)
         {
-        case IOP_SID_SNDDRV_COMMAND:
-            return "SNDDRV command";
-        case IOP_SID_SNDDRV_STATE:
-            return "SNDDRV state";
         case IOP_SID_LIBSD:
             return "LIBSD";
         case IOP_SID_FATAL_FRAME_SDRDRV:
@@ -1085,8 +1081,6 @@ namespace
                 bool dynamic;
             };
             const ServiceRow services[] = {
-                {"SNDDRV command", IOP_SID_SNDDRV_COMMAND, false},
-                {"SNDDRV state", IOP_SID_SNDDRV_STATE, false},
                 {"LIBSD", IOP_SID_LIBSD, false},
                 {"Fatal Frame SDRDRV", IOP_SID_FATAL_FRAME_SDRDRV, false},
                 {"LOTR SOUND", IOP_SID_LOTR_SOUND, false},

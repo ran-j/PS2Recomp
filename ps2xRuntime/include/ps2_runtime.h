@@ -265,6 +265,33 @@ struct PS2SoundDriverCompatLayout
     std::array<uint32_t, 4> completionCallbacks{};
     std::array<uint32_t, 2> clearBusyCallbacks{};
 
+    // Service ids (0 = unused; a driver muxing everything on one SID sets both equal).
+    // 0 is the "unused" sentinel, so a service or fno that is literally 0 can't be
+    // expressed -- a deliberate tradeoff (real SIF-RPC services are nonzero).
+    uint32_t commandSid = 0;   // service id carrying the submit-command-buffer subcommand
+    uint32_t stateSid   = 0;   // service id carrying the status/addr-table queries
+
+    // Subcommand (rpcNum -> semantic) mapping. 0 = that semantic is unused.
+    uint32_t submitFno        = 0;  // submit-command-buffer
+    uint32_t getStatusFno     = 0;  // return statusAddr
+    uint32_t getAddrTableFno  = 0;  // return addrTableAddr
+    uint32_t streamOpenFno    = 0;  // write streamReadyValue to streamStateAddr
+    uint32_t channelConfigFno = 0;  // set channelAllocFlagTableAddr[channel]=1 (channel from send word 0 if <16)
+    uint32_t stopFno          = 0;  // write 1 to stopCompletionFlagAddr
+    uint32_t benignStatusValue = 0xffffff9bu; // recv[0] for an unknown fno on a served SID
+
+    // Addresses/values the stream/channel/stop subcommands operate on.
+    uint32_t streamStateAddr = 0;
+    uint32_t streamReadyValue = 0;
+    uint32_t channelAllocFlagTableAddr = 0;
+    uint32_t stopCompletionFlagAddr = 0;
+
+    [[nodiscard]] bool servesSid(uint32_t sid) const
+    {
+        return (commandSid != 0u && sid == commandSid) ||
+               (stateSid != 0u && sid == stateSid);
+    }
+
     [[nodiscard]] bool hasChecksumTables() const
     {
         return primarySeCheckAddr != 0u || primaryMidiCheckAddr != 0u ||

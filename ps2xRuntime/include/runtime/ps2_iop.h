@@ -5,16 +5,10 @@
 
 class PS2Runtime;
 
-constexpr uint32_t IOP_SID_SNDDRV_COMMAND = 0x00000000u;
-constexpr uint32_t IOP_SID_SNDDRV_STATE = 0x00000001u;
 constexpr uint32_t IOP_SID_LOTR_CLFILE = 0x0000FF01u;
 constexpr uint32_t IOP_SID_LOTR_SOUND = 0x00012345u;
 constexpr uint32_t IOP_SID_LIBSD = 0x80000701u;
 constexpr uint32_t IOP_SID_FATAL_FRAME_SDRDRV = 0x19740512u;
-
-constexpr uint32_t IOP_RPC_SNDDRV_SUBMIT = 0x00000000u;
-constexpr uint32_t IOP_RPC_SNDDRV_GET_STATUS_ADDR = 0x00000012u;
-constexpr uint32_t IOP_RPC_SNDDRV_GET_ADDR_TABLE = 0x00000013u;
 
 class ps2_iop
 {

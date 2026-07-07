@@ -2,6 +2,7 @@
 #include "ps2_runtime.h"
 #include "ps2_syscalls.h"
 #include "ps2_stubs.h"
+#include "game_overrides.h"
 
 #include <array>
 #include <cstdint>
@@ -898,6 +899,8 @@ void register_ps2_sif_dma_tests()
             PS2SoundDriverCompatLayout compat{};
             compat.primarySeCheckAddr = kPrimarySeCheckAddr;
             compat.primaryMidiCheckAddr = kPrimaryMidiCheckAddr;
+            compat.stateSid = 1u;
+            compat.getStatusFno = 0x12u;
             ps2_syscalls::setSoundDriverCompatLayout(compat);
 
             constexpr uint32_t kClientAddr = 0x00023500u;
@@ -947,6 +950,84 @@ void register_ps2_sif_dma_tests()
                      "live midi_sum for the active bank should not be clobbered by compat check arrays");
         });
 
+        tc.Run("RE:CVX sound-driver override provisions status pool for sceSifGetOtherData backfill", [](TestCase &t)
+        {
+            // Real-path guard for the RE:CVX override: with the layout supplied only by
+            // applyMatching, drives the actual SifCallRpc(getStatus) -> sceSifGetOtherData
+            // path and asserts the check-array -> status backfill ran.
+            TestEnv env;
+
+            constexpr uint32_t kRdAddr = 0x00024300u;
+            constexpr uint32_t kDstAddr = 0x00024400u;
+            constexpr uint32_t kSize = 0x42u;
+            constexpr uint32_t kPrimarySeCheckAddr = 0x01E0EF10u;   // matches the RE:CVX override
+            constexpr uint32_t kPrimaryMidiCheckAddr = 0x01E0EF20u; // matches the RE:CVX override
+            constexpr uint32_t kMidiSumOffset = 0x1Eu;
+            constexpr uint32_t kSeSumOffset = 0x26u;
+            constexpr uint32_t kLiveBank = 0u;
+            constexpr uint32_t kPendingBank = 1u;
+
+            // Provision the layout via the real RE:CVX game override (elf slus_201.84).
+            ps2_game_overrides::applyMatching(env.runtime, "slus_201.84", 0u);
+
+            constexpr uint32_t kClientAddr = 0x00024500u;
+            constexpr uint32_t kRecvAddr = 0x00024600u;
+            constexpr uint32_t kSid = 1u;
+
+            ps2_syscalls::SifInitRpc(env.rdram.data(), &env.ctx, &env.runtime);
+            setRegU32(env.ctx, 4, kClientAddr);
+            setRegU32(env.ctx, 5, kSid);
+            setRegU32(env.ctx, 6, 0u);
+            ps2_syscalls::SifBindRpc(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_OK, "SifBindRpc should succeed for sound-driver sid");
+
+            setRegU32(env.ctx, 4, kClientAddr);
+            setRegU32(env.ctx, 5, 0x12u);
+            setRegU32(env.ctx, 6, 0u);
+            setRegU32(env.ctx, 7, 0u);
+            setRegU32(env.ctx, 8, 0u);
+            setRegU32(env.ctx, 9, kRecvAddr);
+            setRegU32(env.ctx, 10, 4u);
+            setRegU32(env.ctx, 11, 0u);
+            ps2_syscalls::SifCallRpc(env.rdram.data(), &env.ctx, &env.runtime);
+            const uint32_t kSrcAddr = readGuestU32(env.rdram.data(), kRecvAddr);
+
+            // The override must have provisioned a nonzero status pool address; if
+            // stateSid/getStatusFno are unset the getStatus RPC is unhandled and this is 0.
+            t.IsTrue(kSrcAddr != 0u,
+                     "getStatus RPC (served only via the migrated override) must return a nonzero status address");
+
+            std::memset(env.rdram.data() + kDstAddr, 0, kSize);
+            std::memset(env.rdram.data() + kRdAddr, 0, sizeof(SifRpcReceiveData));
+
+            writeGuestS16(env.rdram.data(), kSrcAddr + kSeSumOffset + (kLiveBank * 2u), static_cast<int16_t>(0x1111));
+            writeGuestS16(env.rdram.data(), kSrcAddr + kMidiSumOffset + (kLiveBank * 2u), static_cast<int16_t>(0x2222));
+
+            writeGuestS16(env.rdram.data(), kPrimarySeCheckAddr + (kPendingBank * 2u), static_cast<int16_t>(0x3333));
+            writeGuestS16(env.rdram.data(), kPrimaryMidiCheckAddr + (kPendingBank * 2u), static_cast<int16_t>(0x4444));
+
+            setRegU32(env.ctx, 4, kRdAddr);
+            setRegU32(env.ctx, 5, kSrcAddr);
+            setRegU32(env.ctx, 6, kDstAddr);
+            setRegU32(env.ctx, 7, kSize);
+            ps2_stubs::sceSifGetOtherData(env.rdram.data(), &env.ctx, &env.runtime);
+
+            t.Equals(getRegS32(env.ctx, 2), 0,
+                     "sceSifGetOtherData should succeed for sound-status transfer");
+            t.Equals(readGuestS16(env.rdram.data(), kDstAddr + kSeSumOffset + (kLiveBank * 2u)),
+                     static_cast<int16_t>(0x1111),
+                     "existing live se_sum values should remain intact");
+            t.Equals(readGuestS16(env.rdram.data(), kDstAddr + kMidiSumOffset + (kLiveBank * 2u)),
+                     static_cast<int16_t>(0x2222),
+                     "existing live midi_sum values should remain intact");
+            t.Equals(readGuestS16(env.rdram.data(), kDstAddr + kSeSumOffset + (kPendingBank * 2u)),
+                     static_cast<int16_t>(0x3333),
+                     "zero se_sum slots should backfill from the override's compat tables (proves the status pool was provisioned)");
+            t.Equals(readGuestS16(env.rdram.data(), kDstAddr + kMidiSumOffset + (kPendingBank * 2u)),
+                     static_cast<int16_t>(0x4444),
+                     "zero midi_sum slots should backfill from the override's compat tables (proves the status pool was provisioned)");
+        });
+
         tc.Run("sceSifGetOtherData backfills zero sound-status sums for later banks", [](TestCase &t)
         {
             TestEnv env;
@@ -964,6 +1045,8 @@ void register_ps2_sif_dma_tests()
             PS2SoundDriverCompatLayout compat{};
             compat.primarySeCheckAddr = kPrimarySeCheckAddr;
             compat.primaryMidiCheckAddr = kPrimaryMidiCheckAddr;
+            compat.stateSid = 1u;
+            compat.getStatusFno = 0x12u;
             ps2_syscalls::setSoundDriverCompatLayout(compat);
 
             constexpr uint32_t kClientAddr = 0x00023900u;

@@ -267,6 +267,14 @@ namespace
         layout.busyFlagAddr = 0x01E212C8u;
         layout.completionCallbacks = {0x002EAC20u, 0x002EAC30u, 0x002FAC20u, 0x002FAC30u};
         layout.clearBusyCallbacks = {0x002EAC30u, 0x002FAC30u};
+
+        // SID + subcommand (fno) numbers RE:CVX's sound driver speaks; carried per-game
+        // so its getStatus RPC provisions the status/addr-table pool the
+        // sceSifGetOtherData checksum backfill depends on. The submit path (SID 0 /
+        // fno 0, never a live service) is intentionally left unconfigured.
+        layout.stateSid = 1u;
+        layout.getStatusFno = 0x12u;
+        layout.getAddrTableFno = 0x13u;
         ps2_syscalls::setSoundDriverCompatLayout(layout);
     }
 

@@ -539,14 +539,30 @@ namespace ps2_syscalls
                 return false;
             }
 
-            if (sid == IOP_SID_SNDDRV_COMMAND && rpcNum == IOP_RPC_SNDDRV_SUBMIT)
+            PS2SoundDriverCompatLayout compat{};
+            {
+                std::lock_guard<std::mutex> lock(g_rpc_mutex);
+                compat = g_soundDriverCompatLayout;
+            }
+
+            if (compat.commandSid == 0u && compat.stateSid == 0u)
+            {
+                return false;
+            }
+
+            if (!compat.servesSid(sid))
+            {
+                return false;
+            }
+
+            if (compat.submitFno != 0u && rpcNum == compat.submitFno)
             {
                 handleSoundDriverCommandBuffer(rdram, runtime, sendBuf, sendSize);
                 return true;
             }
 
-            if (sid == IOP_SID_SNDDRV_STATE &&
-                (rpcNum == IOP_RPC_SNDDRV_GET_STATUS_ADDR || rpcNum == IOP_RPC_SNDDRV_GET_ADDR_TABLE))
+            if ((compat.getStatusFno != 0u && rpcNum == compat.getStatusFno) ||
+                (compat.getAddrTableFno != 0u && rpcNum == compat.getAddrTableFno))
             {
                 uint32_t responseWord = 0u;
                 {
@@ -556,8 +572,8 @@ namespace ps2_syscalls
                         return false;
                     }
                     responseWord =
-                        (rpcNum == IOP_RPC_SNDDRV_GET_STATUS_ADDR) ? g_soundDriverRpcState.statusAddr
-                                                                   : g_soundDriverRpcState.addrTableAddr;
+                        (rpcNum == compat.getStatusFno) ? g_soundDriverRpcState.statusAddr
+                                                        : g_soundDriverRpcState.addrTableAddr;
                 }
 
                 if (recvBuf && recvSize >= sizeof(uint32_t))
@@ -572,6 +588,77 @@ namespace ps2_syscalls
 
                 signalNowaitCompletion = true;
                 return true;
+            }
+
+            if (compat.streamOpenFno != 0u && rpcNum == compat.streamOpenFno)
+            {
+                {
+                    std::lock_guard<std::mutex> lock(g_rpc_mutex);
+                    if (compat.streamStateAddr != 0u)
+                    {
+                        (void)writeGuestU32(rdram, compat.streamStateAddr, compat.streamReadyValue);
+                    }
+                }
+
+                if (recvBuf && recvSize >= sizeof(uint32_t))
+                {
+                    (void)writeGuestU32(rdram, recvBuf, 0u);
+                    resultPtr = recvBuf;
+                }
+
+                signalNowaitCompletion = true;
+                return true;
+            }
+
+            if (compat.channelConfigFno != 0u && rpcNum == compat.channelConfigFno)
+            {
+                uint32_t channel = 0u;
+                if (sendBuf != 0u)
+                {
+                    (void)readGuestU32(rdram, sendBuf, channel);
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(g_rpc_mutex);
+                    if (compat.channelAllocFlagTableAddr != 0u && channel < 16u)
+                    {
+                        (void)writeGuestU32(rdram, compat.channelAllocFlagTableAddr + channel * sizeof(uint32_t), 1u);
+                    }
+                }
+
+                if (recvBuf && recvSize >= sizeof(uint32_t))
+                {
+                    (void)writeGuestU32(rdram, recvBuf, 0u);
+                    resultPtr = recvBuf;
+                }
+
+                signalNowaitCompletion = true;
+                return true;
+            }
+
+            if (compat.stopFno != 0u && rpcNum == compat.stopFno)
+            {
+                {
+                    std::lock_guard<std::mutex> lock(g_rpc_mutex);
+                    if (compat.stopCompletionFlagAddr != 0u)
+                    {
+                        (void)writeGuestU32(rdram, compat.stopCompletionFlagAddr, 1u);
+                    }
+                }
+
+                if (recvBuf && recvSize >= sizeof(uint32_t))
+                {
+                    (void)writeGuestU32(rdram, recvBuf, 0u);
+                    resultPtr = recvBuf;
+                }
+
+                signalNowaitCompletion = true;
+                return true;
+            }
+
+            if (recvBuf && recvSize >= sizeof(uint32_t))
+            {
+                (void)writeGuestU32(rdram, recvBuf, compat.benignStatusValue);
             }
 
             return false;
