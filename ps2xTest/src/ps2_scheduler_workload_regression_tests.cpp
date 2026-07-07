@@ -58,10 +58,8 @@ namespace
         rdramWrite32Raw(rdram.data(), addr, val);
     }
 
-    uint32_t rdramRead32(const std::vector<uint8_t> &rdram, uint32_t addr)
-    {
-        return rdramRead32Raw(rdram.data(), addr);
-    }
+    // rdramRead32 (vector-based) now lives in SchedTestSupport.h, shared with
+    // the poll helpers there (waitForWord/waitForWordAtLeast/drainedWithin).
 
     // Create a semaphore via CreateSema (EE layout: count, max_count, init_count).
     int32_t createSchedSema(uint8_t *rdram, PS2Runtime *runtime, int initCount, int maxCount)
@@ -596,80 +594,54 @@ void register_scheduler_token_handoff_tests()
             runtime.registerFunction(0x00700000u, &stepPingA);
             runtime.registerFunction(0x00700100u, &stepPingB);
 
-            const int32_t sidX = createSchedSema(rdram.data(), &runtime, 1, 1); // seeded permit
-            const int32_t sidY = createSchedSema(rdram.data(), &runtime, 0, 1);
-            t.IsTrue(sidX > 0 && sidY > 0, "H1: semas created");
-            if (sidX <= 0 || sidY <= 0)
+            SemaPair semas(rdram.data(), &runtime, createSchedSema, deleteSchedSema,
+                           1, 1, 0, 1); // sidX seeded permit, sidY empty
+            t.IsTrue(semas.a() > 0 && semas.b() > 0, "H1: semas created");
+            if (semas.a() <= 0 || semas.b() <= 0)
             {
                 return;
             }
+            const int32_t sidX = semas.a();
+            const int32_t sidY = semas.b();
             rdramWrite32(rdram, kThStop, 0u);
             rdramWrite32(rdram, kThSidX, static_cast<uint32_t>(sidX));
             rdramWrite32(rdram, kThSidY, static_cast<uint32_t>(sidY));
             rdramWrite32(rdram, kThCount, 0u);
 
             const int32_t tidA = startSchedWorker(rdram.data(), &runtime,
-                                                  0x00700000u, 10, 0x00510000u, 0x2000u);
+                                                  0x00700000u, 10, nextWorkerStackBase(0x2000u), 0x2000u);
             const int32_t tidB = startSchedWorker(rdram.data(), &runtime,
-                                                  0x00700100u, 10, 0x00514000u, 0x2000u);
+                                                  0x00700100u, 10, nextWorkerStackBase(0x2000u), 0x2000u);
             t.IsTrue(tidA > 0 && tidB > 0, "H1: ping-pong fibers started");
             if (tidA <= 0 || tidB <= 0)
             {
                 rdramWrite32(rdram, kThStop, 1u);
                 signalSchedSema(rdram.data(), &runtime, sidX);
                 signalSchedSema(rdram.data(), &runtime, sidY);
-                deleteSchedSema(rdram.data(), &runtime, sidX);
-                deleteSchedSema(rdram.data(), &runtime, sidY);
                 return;
             }
 
             // Wait until the ping-pong is demonstrably live.
-            const bool spinning = waitUntil([&]()
-            {
-                return rdramRead32(rdram, kThCount) >= 3u;
-            }, std::chrono::milliseconds(2000));
+            const bool spinning = waitForWordAtLeast(rdram, kThCount, 3u, std::chrono::milliseconds(2000));
             t.IsTrue(spinning, "H1: ping-pong fibers are running");
 
             // Host worker (interrupt-worker shape): parks for the guest token.
-            std::atomic<bool> tokenAcquired{false};
-            std::atomic<bool> workerDone{false};
-            std::thread worker([&]()
-            {
-                g_currentThreadId = -1; // non-fiber host worker
-                ps2sched::async_guest_begin();
-                tokenAcquired.store(true, std::memory_order_release);
-                ps2sched::async_guest_end();
-                workerDone.store(true, std::memory_order_release);
-            });
+            ParkedHostWorker worker;
 
             // THE regression assertion: the worker must win the token while the
             // fibers are still ping-ponging (bounded wait — a starved worker
             // fails here instead of hanging the binary).
-            const bool acquiredWhileBusy = waitUntil([&]()
-            {
-                return tokenAcquired.load(std::memory_order_acquire);
-            }, std::chrono::milliseconds(3000));
+            const bool acquiredWhileBusy = worker.wonTokenWithin(std::chrono::milliseconds(3000));
 
             // Escape hatch + orderly teardown (runs regardless of the verdict:
             // once the fibers exit, the executor idles and the worker's
-            // async_guest_begin proceeds, so join() below cannot hang).
+            // async_guest_begin proceeds, so the destructor's join cannot hang).
             rdramWrite32(rdram, kThStop, 1u);
             signalSchedSema(rdram.data(), &runtime, sidX);
             signalSchedSema(rdram.data(), &runtime, sidY);
 
-            const bool drained = waitUntil([&]()
-            {
-                return g_activeThreads.load(std::memory_order_acquire) <= 0;
-            }, std::chrono::milliseconds(3000));
-
-            const bool workerFinished = waitUntil([&]()
-            {
-                return workerDone.load(std::memory_order_acquire);
-            }, std::chrono::milliseconds(3000));
-            if (worker.joinable())
-            {
-                worker.join();
-            }
+            const bool drained = drainedWithin(std::chrono::milliseconds(3000));
+            const bool workerFinished = worker.finishedWithin(std::chrono::milliseconds(3000));
 
             t.IsTrue(acquiredWhileBusy,
                      "H1: parked host worker acquired the guest token while fibers were busy "
@@ -679,9 +651,6 @@ void register_scheduler_token_handoff_tests()
 
             const uint32_t loops = rdramRead32(rdram, kThCount);
             t.IsTrue(loops >= 3u, "H1: guest made progress during the test");
-
-            deleteSchedSema(rdram.data(), &runtime, sidX);
-            deleteSchedSema(rdram.data(), &runtime, sidY);
         });
         tc.Run("H2: spinning fiber yields at yield_point when a host worker is parked", [](TestCase &t)
         {
@@ -694,54 +663,29 @@ void register_scheduler_token_handoff_tests()
             rdramWrite32(rdram, kThCount, 0u);
 
             const int32_t tid = startSchedWorker(rdram.data(), &runtime,
-                                                 0x00700200u, 10, 0x00518000u, 0x2000u);
+                                                 0x00700200u, 10, nextWorkerStackBase(0x2000u), 0x2000u);
             t.IsTrue(tid > 0, "H2: spin fiber started");
             if (tid <= 0)
             {
                 return;
             }
 
-            const bool spinning = waitUntil([&]()
-            {
-                return rdramRead32(rdram, kThCount) >= 1000u;
-            }, std::chrono::milliseconds(2000));
+            const bool spinning = waitForWordAtLeast(rdram, kThCount, 1000u, std::chrono::milliseconds(2000));
             t.IsTrue(spinning, "H2: fiber is spinning through yield_point samples");
 
-            std::atomic<bool> tokenAcquired{false};
-            std::atomic<bool> workerDone{false};
-            std::thread worker([&]()
-            {
-                g_currentThreadId = -1; // non-fiber host worker
-                ps2sched::async_guest_begin();
-                tokenAcquired.store(true, std::memory_order_release);
-                ps2sched::async_guest_end();
-                workerDone.store(true, std::memory_order_release);
-            });
+            ParkedHostWorker worker;
 
             // THE regression assertion: without yield_point step 4 the fiber
             // never leaves ps2fiber_resume, so the worker cannot win the token
             // while the spin is live (bounded wait; escape hatch below).
-            const bool acquiredWhileSpinning = waitUntil([&]()
-            {
-                return tokenAcquired.load(std::memory_order_acquire);
-            }, std::chrono::milliseconds(3000));
+            const bool acquiredWhileSpinning = worker.wonTokenWithin(std::chrono::milliseconds(3000));
 
             // Escape hatch + teardown: end the spin; the fiber exits, the
             // executor idles, and the parked worker (if still parked) proceeds.
             rdramWrite32(rdram, kThStop, 1u);
 
-            const bool drained = waitUntil([&]()
-            {
-                return g_activeThreads.load(std::memory_order_acquire) <= 0;
-            }, std::chrono::milliseconds(3000));
-            const bool workerFinished = waitUntil([&]()
-            {
-                return workerDone.load(std::memory_order_acquire);
-            }, std::chrono::milliseconds(3000));
-            if (worker.joinable())
-            {
-                worker.join();
-            }
+            const bool drained = drainedWithin(std::chrono::milliseconds(3000));
+            const bool workerFinished = worker.finishedWithin(std::chrono::milliseconds(3000));
 
             t.IsTrue(acquiredWhileSpinning,
                      "H2: parked host worker acquired the token while the fiber was spinning "
@@ -761,52 +705,27 @@ void register_scheduler_token_handoff_tests()
             rdramWrite32(rdram, kThCount, 0u);
 
             const int32_t tid = startSchedWorker(rdram.data(), &runtime,
-                                                 0x00700300u, 10, 0x0051C000u, 0x2000u);
+                                                 0x00700300u, 10, nextWorkerStackBase(0x2000u), 0x2000u);
             t.IsTrue(tid > 0, "H3: cross-dispatch fiber started");
             if (tid <= 0)
             {
                 return;
             }
 
-            const bool spinning = waitUntil([&]()
-            {
-                return rdramRead32(rdram, kThCount) >= 1000u;
-            }, std::chrono::milliseconds(2000));
+            const bool spinning = waitForWordAtLeast(rdram, kThCount, 1000u, std::chrono::milliseconds(2000));
             t.IsTrue(spinning, "H3: fiber is spinning across function dispatches");
 
-            std::atomic<bool> tokenAcquired{false};
-            std::atomic<bool> workerDone{false};
-            std::thread worker([&]()
-            {
-                g_currentThreadId = -1; // non-fiber host worker
-                ps2sched::async_guest_begin();
-                tokenAcquired.store(true, std::memory_order_release);
-                ps2sched::async_guest_end();
-                workerDone.store(true, std::memory_order_release);
-            });
+            ParkedHostWorker worker;
 
             // THE regression assertion: the function bodies never call the
             // back-edge hook, so only the dispatch-loop preempt can yield.
-            const bool acquiredWhileSpinning = waitUntil([&]()
-            {
-                return tokenAcquired.load(std::memory_order_acquire);
-            }, std::chrono::milliseconds(3000));
+            const bool acquiredWhileSpinning = worker.wonTokenWithin(std::chrono::milliseconds(3000));
 
             // Escape hatch + teardown.
             rdramWrite32(rdram, kThStop, 1u);
 
-            const bool drained = waitUntil([&]()
-            {
-                return g_activeThreads.load(std::memory_order_acquire) <= 0;
-            }, std::chrono::milliseconds(3000));
-            const bool workerFinished = waitUntil([&]()
-            {
-                return workerDone.load(std::memory_order_acquire);
-            }, std::chrono::milliseconds(3000));
-            if (worker.joinable())
-            {
-                worker.join();
-            }
+            const bool drained = drainedWithin(std::chrono::milliseconds(3000));
+            const bool workerFinished = worker.finishedWithin(std::chrono::milliseconds(3000));
 
             t.IsTrue(acquiredWhileSpinning,
                      "H3: parked host worker acquired the token during a cross-dispatch spin "
@@ -841,11 +760,11 @@ void register_scheduler_rpc_loop_park_tests()
 
             // RPC server first (it runs first and, unfixed, never lets go).
             const int32_t serverTid = startSchedWorker(rdram.data(), &runtime,
-                                                       0x00700500u, 10, 0x00520000u, 0x2000u);
+                                                       0x00700500u, 10, nextWorkerStackBase(0x2000u), 0x2000u);
             // Probe fiber at the SAME priority: only a genuine park (not a
             // priority preempt) can let it run.
             const int32_t probeTid = startSchedWorker(rdram.data(), &runtime,
-                                                      0x00700600u, 10, 0x00524000u, 0x2000u);
+                                                      0x00700600u, 10, nextWorkerStackBase(0x2000u), 0x2000u);
             t.IsTrue(serverTid > 0 && probeTid > 0, "R1: both fibers started");
             if (serverTid <= 0 || probeTid <= 0)
             {
@@ -855,10 +774,7 @@ void register_scheduler_rpc_loop_park_tests()
             // THE regression assertion: the probe fiber runs within bounded
             // time, i.e. the RPC server fiber parked in SleepThread instead of
             // re-entering the stub forever.
-            const bool probeRan = waitUntil([&]()
-            {
-                return rdramRead32(rdram, kThFlag) == 1u;
-            }, std::chrono::milliseconds(3000));
+            const bool probeRan = waitForWord(rdram, kThFlag, 1u, std::chrono::milliseconds(3000));
 
             t.IsTrue(probeRan,
                      "R1: equal-priority fiber ran while sceSifRpcLoop was active "
@@ -906,7 +822,7 @@ void register_scheduler_guest_context_stop_tests()
             EnsureVSyncWorkerRunning(rdram.data(), &runtime);
 
             const int32_t tid = startSchedWorker(rdram.data(), &runtime,
-                                                 0x00700700u, 10, 0x00528000u, 0x2000u);
+                                                 0x00700700u, 10, nextWorkerStackBase(0x2000u), 0x2000u);
             t.IsTrue(tid > 0, "G1: fiber started");
             if (tid <= 0)
             {
@@ -917,10 +833,7 @@ void register_scheduler_guest_context_stop_tests()
             // calls requestStop() from guest context, and RETURNS (writing the
             // flag). Unfixed, notifyRuntimeStop joins the parked worker from
             // the fiber and wedges before the flag write.
-            const bool stopReturned = waitUntil([&]()
-            {
-                return rdramRead32(rdram, kThFlag) == 1u;
-            }, std::chrono::milliseconds(5000));
+            const bool stopReturned = waitForWord(rdram, kThFlag, 1u, std::chrono::milliseconds(5000));
 
             t.IsTrue(stopReturned,
                      "G1: requestStop() invoked on the guest executor returned "
@@ -936,10 +849,7 @@ void register_scheduler_guest_context_stop_tests()
                 return;
             }
 
-            const bool drained = waitUntil([&]()
-            {
-                return g_activeThreads.load(std::memory_order_acquire) <= 0;
-            }, std::chrono::milliseconds(3000));
+            const bool drained = drainedWithin(std::chrono::milliseconds(3000));
             t.IsTrue(drained, "G1: fiber drained after guest-context stop");
 
             // Main-thread shutdown performs the real joins (idempotent stops).
@@ -1044,25 +954,19 @@ void register_scheduler_dmac_guest_dispatch_tests()
             // unconditional AsyncGuestScope this std::terminate()s the
             // process - a loud bounded failure, never a hang.
             const int32_t tid = startSchedWorker(rdram.data(), &runtime,
-                                                 0x00700900u, 10, 0x0052C000u, 0x2000u);
+                                                 0x00700900u, 10, nextWorkerStackBase(0x2000u), 0x2000u);
             t.IsTrue(tid > 0, "M1: dispatching fiber started");
             if (tid <= 0)
             {
                 return;
             }
 
-            const bool done = waitUntil([&]()
-            {
-                return rdramRead32(rdram, kThFlag) == 1u;
-            }, std::chrono::milliseconds(3000));
+            const bool done = waitForWord(rdram, kThFlag, 1u, std::chrono::milliseconds(3000));
             t.IsTrue(done, "M1: guest-context dispatch returned");
             t.Equals(rdramRead32(rdram, kThSent), 1u,
                      "M1: handler ran exactly once from guest context");
 
-            const bool drained = waitUntil([&]()
-            {
-                return g_activeThreads.load(std::memory_order_acquire) <= 0;
-            }, std::chrono::milliseconds(3000));
+            const bool drained = drainedWithin(std::chrono::milliseconds(3000));
             t.IsTrue(drained, "M1: fiber drained");
 
             // Host-thread path must still borrow the token and work: dispatch
@@ -1123,13 +1027,15 @@ void register_scheduler_recovery_isolation_tests()
 
             // Both semas start at 0: A signals B then waits on A; B waits on B
             // then signals A - a one-shot ping-pong handoff, not a loop.
-            const int32_t sidA = createSchedSema(rdram.data(), &runtime, 0, 1);
-            const int32_t sidB = createSchedSema(rdram.data(), &runtime, 0, 1);
-            t.IsTrue(sidA > 0 && sidB > 0, "R1: semas created");
-            if (sidA <= 0 || sidB <= 0)
+            SemaPair semas(rdram.data(), &runtime, createSchedSema, deleteSchedSema,
+                           0, 1, 0, 1);
+            t.IsTrue(semas.a() > 0 && semas.b() > 0, "R1: semas created");
+            if (semas.a() <= 0 || semas.b() <= 0)
             {
                 return;
             }
+            const int32_t sidA = semas.a();
+            const int32_t sidB = semas.b();
             rdramWrite32(rdram, kRiSidA, static_cast<uint32_t>(sidA));
             rdramWrite32(rdram, kRiSidB, static_cast<uint32_t>(sidB));
             rdramWrite32(rdram, kRiAForeign, 0u);
@@ -1138,21 +1044,16 @@ void register_scheduler_recovery_isolation_tests()
             rdramWrite32(rdram, kRiBOwn, 0u);
 
             const int32_t tidA = startSchedWorker(rdram.data(), &runtime,
-                                                  kEntryA, 10, 0x00530000u, 0x2000u);
+                                                  kEntryA, 10, nextWorkerStackBase(0x2000u), 0x2000u);
             const int32_t tidB = startSchedWorker(rdram.data(), &runtime,
-                                                  kEntryB, 10, 0x00534000u, 0x2000u);
+                                                  kEntryB, 10, nextWorkerStackBase(0x2000u), 0x2000u);
             t.IsTrue(tidA > 0 && tidB > 0, "R1: both fibers started");
             if (tidA <= 0 || tidB <= 0)
             {
-                deleteSchedSema(rdram.data(), &runtime, sidA);
-                deleteSchedSema(rdram.data(), &runtime, sidB);
                 return;
             }
 
-            const bool drained = waitUntil([&]()
-            {
-                return g_activeThreads.load(std::memory_order_acquire) <= 0;
-            }, std::chrono::milliseconds(3000));
+            const bool drained = drainedWithin(std::chrono::milliseconds(3000));
             t.IsTrue(drained, "R1: both fibers completed the handoff and exited");
 
             // THE regression assertions: under the shared thread_local, A and
@@ -1166,9 +1067,6 @@ void register_scheduler_recovery_isolation_tests()
                      "R1: fiber A's trace must contain fiber A's own marker");
             t.Equals(rdramRead32(rdram, kRiBOwn), 1u,
                      "R1: fiber B's trace must contain fiber B's own marker");
-
-            deleteSchedSema(rdram.data(), &runtime, sidA);
-            deleteSchedSema(rdram.data(), &runtime, sidB);
         });
 
         tc.Run("R2: dispatch-trace ring is fresh after genuine tid reuse", [](TestCase &t)
@@ -1199,10 +1097,7 @@ void register_scheduler_recovery_isolation_tests()
                 return;
             }
 
-            const bool drained1 = waitUntil([&]()
-            {
-                return g_activeThreads.load(std::memory_order_acquire) <= 0;
-            }, std::chrono::milliseconds(3000));
+            const bool drained1 = drainedWithin(std::chrono::milliseconds(3000));
             t.IsTrue(drained1, "R2: fiber 1 fully torn down (FiberContext destroyed)");
 
             // Force GENUINE tid reuse: erase T1 from the kernel thread map
@@ -1225,10 +1120,7 @@ void register_scheduler_recovery_isolation_tests()
                                                 kEntryReuse, 10, 0x0053C000u, 0x2000u);
             t.Equals(T2, T1, "R2: tid genuinely recycled (not merely a fresh, different tid)");
 
-            const bool drained2 = waitUntil([&]()
-            {
-                return g_activeThreads.load(std::memory_order_acquire) <= 0;
-            }, std::chrono::milliseconds(3000));
+            const bool drained2 = drainedWithin(std::chrono::milliseconds(3000));
             t.IsTrue(drained2, "R2: fiber 2 (reused tid) completed");
 
             // THE regression assertion: under the shared thread_local, fiber 2
@@ -1307,22 +1199,21 @@ void register_scheduler_stack_isolation_tests()
             { R5900Context s{}; setRegU32(s,4,kSysB); setRegU32(s,5,kInvB);
               ps2_syscalls::SetSyscall(rdram.data(), &s, &runtime); }
 
-            const int32_t sidA = createSchedSema(rdram.data(), &runtime, 0, 1);
-            const int32_t sidB = createSchedSema(rdram.data(), &runtime, 0, 1);
-            t.IsTrue(sidA > 0 && sidB > 0, "I1: semas created");
-            rdramWrite32(rdram, kSiSemA, static_cast<uint32_t>(sidA));
-            rdramWrite32(rdram, kSiSemB, static_cast<uint32_t>(sidB));
+            SemaPair semas(rdram.data(), &runtime, createSchedSema, deleteSchedSema,
+                           0, 1, 0, 1);
+            t.IsTrue(semas.a() > 0 && semas.b() > 0, "I1: semas created");
+            rdramWrite32(rdram, kSiSemA, static_cast<uint32_t>(semas.a()));
+            rdramWrite32(rdram, kSiSemB, static_cast<uint32_t>(semas.b()));
             rdramWrite32(rdram, kSiSysA, kSysA);
             rdramWrite32(rdram, kSiSysB, kSysB);
             rdramWrite32(rdram, kSiTopA, 0u);
             rdramWrite32(rdram, kSiTopB, 0u);
 
-            const int32_t tidA = startSchedWorker(rdram.data(), &runtime, kEntryA, 10, 0x00540000u, 0x2000u);
-            const int32_t tidB = startSchedWorker(rdram.data(), &runtime, kEntryB, 10, 0x00544000u, 0x2000u);
+            const int32_t tidA = startSchedWorker(rdram.data(), &runtime, kEntryA, 10, nextWorkerStackBase(0x2000u), 0x2000u);
+            const int32_t tidB = startSchedWorker(rdram.data(), &runtime, kEntryB, 10, nextWorkerStackBase(0x2000u), 0x2000u);
             t.IsTrue(tidA > 0 && tidB > 0, "I1: both fibers started");
 
-            const bool drained = waitUntil([&]{ return g_activeThreads.load(std::memory_order_acquire) <= 0; },
-                                           std::chrono::milliseconds(3000));
+            const bool drained = drainedWithin(std::chrono::milliseconds(3000));
             t.IsTrue(drained, "I1: both fibers completed the handoff and exited");
 
             const uint32_t topA = rdramRead32(rdram, kSiTopA);
@@ -1336,8 +1227,6 @@ void register_scheduler_stack_isolation_tests()
               ps2_syscalls::SetSyscall(rdram.data(), &s, &runtime); }
             { R5900Context s{}; setRegU32(s,4,kSysB); setRegU32(s,5,0u);
               ps2_syscalls::SetSyscall(rdram.data(), &s, &runtime); }
-            deleteSchedSema(rdram.data(), &runtime, sidA);
-            deleteSchedSema(rdram.data(), &runtime, sidB);
         });
 
         // I2 --- B3: two fibers interleaving through inline DMAC dispatch must
@@ -1364,19 +1253,18 @@ void register_scheduler_stack_isolation_tests()
               ps2_syscalls::AddDmacHandler(rdram.data(), &a, &runtime); hidB = getRegS32(a, 2); }
             t.IsTrue(hidA > 0 && hidB > 0, "I2: DMAC handlers registered");
 
-            const int32_t sidA = createSchedSema(rdram.data(), &runtime, 0, 1);
-            const int32_t sidB = createSchedSema(rdram.data(), &runtime, 0, 1);
-            rdramWrite32(rdram, kSiSemA, static_cast<uint32_t>(sidA));
-            rdramWrite32(rdram, kSiSemB, static_cast<uint32_t>(sidB));
+            SemaPair semas(rdram.data(), &runtime, createSchedSema, deleteSchedSema,
+                           0, 1, 0, 1);
+            rdramWrite32(rdram, kSiSemA, static_cast<uint32_t>(semas.a()));
+            rdramWrite32(rdram, kSiSemB, static_cast<uint32_t>(semas.b()));
             rdramWrite32(rdram, kSiDmacTopA, 0u);
             rdramWrite32(rdram, kSiDmacTopB, 0u);
 
-            const int32_t tidA = startSchedWorker(rdram.data(), &runtime, kEntryA, 10, 0x00548000u, 0x2000u);
-            const int32_t tidB = startSchedWorker(rdram.data(), &runtime, kEntryB, 10, 0x0054C000u, 0x2000u);
+            const int32_t tidA = startSchedWorker(rdram.data(), &runtime, kEntryA, 10, nextWorkerStackBase(0x2000u), 0x2000u);
+            const int32_t tidB = startSchedWorker(rdram.data(), &runtime, kEntryB, 10, nextWorkerStackBase(0x2000u), 0x2000u);
             t.IsTrue(tidA > 0 && tidB > 0, "I2: both fibers started");
 
-            const bool drained = waitUntil([&]{ return g_activeThreads.load(std::memory_order_acquire) <= 0; },
-                                           std::chrono::milliseconds(3000));
+            const bool drained = drainedWithin(std::chrono::milliseconds(3000));
             t.IsTrue(drained, "I2: both fibers completed dispatch and exited");
 
             const uint32_t topA = rdramRead32(rdram, kSiDmacTopA);
@@ -1390,8 +1278,6 @@ void register_scheduler_stack_isolation_tests()
               ps2_syscalls::RemoveDmacHandler(rdram.data(), &r, &runtime); }
             { R5900Context r{}; setRegU32(r,4,6u); setRegU32(r,5,static_cast<uint32_t>(hidB));
               ps2_syscalls::RemoveDmacHandler(rdram.data(), &r, &runtime); }
-            deleteSchedSema(rdram.data(), &runtime, sidA);
-            deleteSchedSema(rdram.data(), &runtime, sidB);
         });
 
         // I3 --- shared-mechanism contract (stands in for B4). dispatchGuest-
@@ -1449,14 +1335,16 @@ void register_scheduler_override_isolation_tests()
                 g_syscall_overrides[kOvSyscall] = kOvHandler;
             }
 
-            const int32_t sidStartB  = createSchedSema(rdram.data(), &runtime, 0, 1);
-            const int32_t sidResumeA = createSchedSema(rdram.data(), &runtime, 0, 1);
-            t.IsTrue(sidStartB > 0 && sidResumeA > 0, "O1: semas created");
-            if (sidStartB <= 0 || sidResumeA <= 0)
+            SemaPair semas(rdram.data(), &runtime, createSchedSema, deleteSchedSema,
+                           0, 1, 0, 1);
+            t.IsTrue(semas.a() > 0 && semas.b() > 0, "O1: semas created");
+            if (semas.a() <= 0 || semas.b() <= 0)
             {
                 { std::lock_guard<std::mutex> lk(g_syscall_override_mutex); g_syscall_overrides.erase(kOvSyscall); }
                 return;
             }
+            const int32_t sidStartB  = semas.a();
+            const int32_t sidResumeA = semas.b();
             rdramWrite32(rdram, kOvSidStartB,  static_cast<uint32_t>(sidStartB));
             rdramWrite32(rdram, kOvSidResumeA, static_cast<uint32_t>(sidResumeA));
             rdramWrite32(rdram, kOvAEntered, 0u);
@@ -1464,22 +1352,17 @@ void register_scheduler_override_isolation_tests()
             rdramWrite32(rdram, kOvBRan,     0u);
 
             const int32_t tidA = startSchedWorker(rdram.data(), &runtime,
-                                                  kOvEntryA, 10, 0x00550000u, 0x2000u);
+                                                  kOvEntryA, 10, nextWorkerStackBase(0x2000u), 0x2000u);
             const int32_t tidB = startSchedWorker(rdram.data(), &runtime,
-                                                  kOvEntryB, 10, 0x00554000u, 0x2000u);
+                                                  kOvEntryB, 10, nextWorkerStackBase(0x2000u), 0x2000u);
             t.IsTrue(tidA > 0 && tidB > 0, "O1: both fibers started");
             if (tidA <= 0 || tidB <= 0)
             {
-                deleteSchedSema(rdram.data(), &runtime, sidStartB);
-                deleteSchedSema(rdram.data(), &runtime, sidResumeA);
                 { std::lock_guard<std::mutex> lk(g_syscall_override_mutex); g_syscall_overrides.erase(kOvSyscall); }
                 return;
             }
 
-            const bool drained = waitUntil([&]()
-            {
-                return g_activeThreads.load(std::memory_order_acquire) <= 0;
-            }, std::chrono::milliseconds(3000));
+            const bool drained = drainedWithin(std::chrono::milliseconds(3000));
             // A timeout here means the PARK mechanism failed (WaitSema nested in
             // the override invoke) — NOT the B2 guard. Debug the park, not the fix.
             t.IsTrue(drained, "O1: both fibers completed the handoff and exited");
@@ -1496,8 +1379,6 @@ void register_scheduler_override_isolation_tests()
             t.Equals(rdramRead32(rdram, kOvBRan), 1u,
                      "O1: fiber B's own override must run while fiber A is parked inside the same syscall's override");
 
-            deleteSchedSema(rdram.data(), &runtime, sidStartB);
-            deleteSchedSema(rdram.data(), &runtime, sidResumeA);
             { std::lock_guard<std::mutex> lk(g_syscall_override_mutex); g_syscall_overrides.erase(kOvSyscall); }
         });
     }); // MiniTest::Case("SchedulerOverrideIsolation")
@@ -1556,15 +1437,15 @@ void register_scheduler_join_starvation_tests()
             runtime.registerFunction(kEntryJoiner, &stepJoinStarveJoiner);
 
             // One permit circulates X -> Y -> X, keeping the prio-10 level hot.
-            const int32_t sidX = createSchedSema(rdram.data(), &runtime, 1, 1);
-            const int32_t sidY = createSchedSema(rdram.data(), &runtime, 0, 1);
-            t.IsTrue(sidX > 0 && sidY > 0, "J1: ping-pong semas created");
-            if (sidX <= 0 || sidY <= 0)
+            SemaPair semas(rdram.data(), &runtime, createSchedSema, deleteSchedSema,
+                           1, 1, 0, 1); // sidX seeded permit, sidY empty
+            t.IsTrue(semas.a() > 0 && semas.b() > 0, "J1: ping-pong semas created");
+            if (semas.a() <= 0 || semas.b() <= 0)
             {
-                deleteSchedSema(rdram.data(), &runtime, sidX);
-                deleteSchedSema(rdram.data(), &runtime, sidY);
                 return;
             }
+            const int32_t sidX = semas.a();
+            const int32_t sidY = semas.b();
             rdramWrite32(rdram, kThSidX, static_cast<uint32_t>(sidX));
             rdramWrite32(rdram, kThSidY, static_cast<uint32_t>(sidY));
             rdramWrite32(rdram, kThStop, 0u);
@@ -1574,38 +1455,29 @@ void register_scheduler_join_starvation_tests()
             rdramWrite32(rdram, kJsTargetTid, 0u);
 
             // Pingers first (prio 10), then confirm the level is circulating.
-            const int32_t tidS1 = startSchedWorker(rdram.data(), &runtime, kEntryPingA, 10, 0x00560000u, 0x2000u);
-            const int32_t tidS2 = startSchedWorker(rdram.data(), &runtime, kEntryPingB, 10, 0x00562000u, 0x2000u);
+            const int32_t tidS1 = startSchedWorker(rdram.data(), &runtime, kEntryPingA, 10, nextWorkerStackBase(0x2000u), 0x2000u);
+            const int32_t tidS2 = startSchedWorker(rdram.data(), &runtime, kEntryPingB, 10, nextWorkerStackBase(0x2000u), 0x2000u);
             t.IsTrue(tidS1 > 0 && tidS2 > 0, "J1: ping-pong pair started");
 
-            const bool pingLive = waitUntil([&]()
-            {
-                return rdramRead32(rdram, kThCount) >= 3u;
-            }, std::chrono::milliseconds(1000));
+            const bool pingLive = waitForWordAtLeast(rdram, kThCount, 3u, std::chrono::milliseconds(1000));
             t.IsTrue(pingLive, "J1: prio-10 ping-pong is circulating");
 
             // Target B (prio 10) — never self-exits; killed by A's Terminate.
-            const int32_t tidB = startSchedWorker(rdram.data(), &runtime, kEntryTarget, 10, 0x00564000u, 0x2000u);
+            const int32_t tidB = startSchedWorker(rdram.data(), &runtime, kEntryTarget, 10, nextWorkerStackBase(0x2000u), 0x2000u);
             t.IsTrue(tidB > 0, "J1: target fiber started");
-            const bool bRunning = waitUntil([&]()
-            {
-                return rdramRead32(rdram, kJsBStarted) == 1u;
-            }, std::chrono::milliseconds(1000));
+            const bool bRunning = waitForWord(rdram, kJsBStarted, 1u, std::chrono::milliseconds(1000));
             t.IsTrue(bRunning, "J1: target fiber is running");
 
             // Joiner A (prio 5) terminates B; join_fiber floors A to B's level.
             rdramWrite32(rdram, kJsTargetTid, static_cast<uint32_t>(tidB));
-            const int32_t tidA = startSchedWorker(rdram.data(), &runtime, kEntryJoiner, 5, 0x00566000u, 0x2000u);
+            const int32_t tidA = startSchedWorker(rdram.data(), &runtime, kEntryJoiner, 5, nextWorkerStackBase(0x2000u), 0x2000u);
             t.IsTrue(tidA > 0, "J1: joiner fiber started");
 
             // THE regression assertion: TerminateThread(B) returns within a
             // bounded number of scheduler rounds. Buggy (+1 floor): A is
             // stranded below the pingers and this never flips -> timeout ->
             // FAIL (binary still exits; teardown below quiesces everything).
-            const bool joinReturned = waitUntil([&]()
-            {
-                return rdramRead32(rdram, kJsJoinReturned) == 1u;
-            }, std::chrono::milliseconds(3000));
+            const bool joinReturned = waitForWord(rdram, kJsJoinReturned, 1u, std::chrono::milliseconds(3000));
             t.IsTrue(joinReturned,
                      "J1: TerminateThread(target) returned — join floor must be the "
                      "target's own priority level, not target+1");
@@ -1622,14 +1494,8 @@ void register_scheduler_join_starvation_tests()
                 signalSchedSema(rdram.data(), &runtime, sidX);
                 signalSchedSema(rdram.data(), &runtime, sidY);
             }
-            const bool drained = waitUntil([&]()
-            {
-                return g_activeThreads.load(std::memory_order_acquire) <= 0;
-            }, std::chrono::milliseconds(3000));
+            const bool drained = drainedWithin(std::chrono::milliseconds(3000));
             t.IsTrue(drained, "J1: all fibers quiesced after teardown");
-
-            deleteSchedSema(rdram.data(), &runtime, sidX);
-            deleteSchedSema(rdram.data(), &runtime, sidY);
         });
     }); // MiniTest::Case("SchedulerJoinStarvation")
 }
