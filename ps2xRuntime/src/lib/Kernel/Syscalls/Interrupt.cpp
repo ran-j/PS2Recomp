@@ -17,7 +17,7 @@ namespace ps2_syscalls
         std::mutex g_irq_worker_mutex;
         std::condition_variable g_irq_worker_cv;
         std::mutex g_vsync_flag_mutex;
-        std::vector<std::pair<int, uint64_t>> g_vsync_waitList;
+        std::vector<std::pair<int, ps2sched::FiberToken>> g_vsync_waitList;
         std::atomic<bool> g_irq_worker_stop{false};
         std::atomic<bool> g_irq_worker_running{false};
         std::thread g_irq_worker_thread; // joinable worker handle so stopInterruptWorker() can join it
@@ -433,9 +433,9 @@ namespace ps2_syscalls
         ensureInterruptWorkerRunning(rdram, runtime);
 
         // Opaque identity of the fiber that is about to park. Non-fiber host
-        // workers get token 0 and never publish to the wait-list.
-        const uint64_t selfToken = ps2sched::current_fiber_token();
-        const bool onFiber = (selfToken != 0u);
+        // workers get token FiberToken{} and never publish to the wait-list.
+        const ps2sched::FiberToken selfToken = ps2sched::current_fiber_token();
+        const bool onFiber = (selfToken != ps2sched::FiberToken{});
 
         // Snapshot the tick we are waiting to advance past. A non-fiber worker
         // never publishes to g_vsync_waitList (it cannot park), so it cannot
@@ -502,7 +502,7 @@ namespace ps2_syscalls
                     std::lock_guard<std::mutex> clLock(g_vsync_flag_mutex);
                     auto &wl = g_vsync_waitList;
                     auto it = std::find_if(wl.begin(), wl.end(),
-                                           [selfToken](const std::pair<int, uint64_t> &e)
+                                           [selfToken](const std::pair<int, ps2sched::FiberToken> &e)
                                            { return e.second == selfToken; });
                     if (it != wl.end()) wl.erase(it);
                 }
@@ -518,7 +518,7 @@ namespace ps2_syscalls
         std::lock_guard<std::mutex> lock(g_vsync_flag_mutex);
         auto &wl = g_vsync_waitList;
         auto it = std::find_if(wl.begin(), wl.end(),
-                               [selfToken](const std::pair<int, uint64_t> &e)
+                               [selfToken](const std::pair<int, ps2sched::FiberToken> &e)
                                { return e.second == selfToken; });
         if (it != wl.end())
         {

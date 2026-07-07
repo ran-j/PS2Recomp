@@ -79,8 +79,11 @@ void (*g_fiber_exit_hook)(int tid, uint8_t* rdram, R5900Context* ctx, PS2Runtime
 
 // Stop callback — set by scheduler_set_stop_callback(); invoked by
 // scheduler_shutdown() before joining g_guest_thread. Read/written under
-// g_sched_mutex. nullptr-safe.
-static void (*g_request_runtime_stop_fn)() = nullptr;
+// g_sched_mutex. nullptr-safe. g_request_runtime_stop_ctx is passed back to
+// the callback unmodified, letting the caller carry its own context instead
+// of relying on a file-static (e.g. PS2Runtime::run()'s `this`).
+static void (*g_request_runtime_stop_fn)(void*) = nullptr;
+static void* g_request_runtime_stop_ctx = nullptr;
 
 static constexpr size_t kFiberStackBytes = 1024 * 1024; // 1 MiB
 
@@ -447,10 +450,11 @@ void ps2sched::scheduler_init()
     g_guest_thread = std::thread(guest_executor_main);
 }
 
-void ps2sched::scheduler_set_stop_callback(void (*fn)())
+void ps2sched::scheduler_set_stop_callback(void (*fn)(void*), void* ctx)
 {
     std::lock_guard<std::mutex> lk(g_sched_mutex);
     g_request_runtime_stop_fn = fn;
+    g_request_runtime_stop_ctx = fn ? ctx : nullptr;
 }
 
 void ps2sched::scheduler_shutdown()
@@ -501,12 +505,14 @@ void ps2sched::scheduler_shutdown()
     // between dispatched functions. Invoked OUTSIDE g_sched_mutex: the callback
     // runs runtime.requestStopFlagOnly(), which sets its own atomic and must not
     // nest under g_sched_mutex.
-    void (*stopFn)() = nullptr;
+    void (*stopFn)(void*) = nullptr;
+    void* stopCtx = nullptr;
     {
         std::lock_guard<std::mutex> lk(g_sched_mutex);
-        stopFn = g_request_runtime_stop_fn;
+        stopFn  = g_request_runtime_stop_fn;
+        stopCtx = g_request_runtime_stop_ctx;
     }
-    if (stopFn) stopFn();
+    if (stopFn) stopFn(stopCtx);
 
     if (g_guest_thread.joinable()) g_guest_thread.join();
 
@@ -792,15 +798,10 @@ ps2sched::BlockResult ps2sched::block_current()
     {
         // A borrowed IRQ/alarm/RPC worker (running guest code under
         // AsyncGuestScope) called a blocking syscall. We cannot park a host
-        // worker on the fiber scheduler. Report whether this worker actually holds
-        // the guest token so the caller only drops/reacquires a token it owns.
-        // tls_holds_guest_token and g_guest_token_held_by_host are set/cleared
-        // together under g_sched_mutex in async_guest_begin/async_guest_end, so
-        // on THIS thread tls_holds_guest_token==true already implies
-        // g_guest_token_held_by_host==true. No need to re-read the global or
-        // take the lock.
-        return tls_holds_guest_token ? BlockResult::NonFiberOwner
-                                     : BlockResult::NonFiberNoTok;
+        // worker on the fiber scheduler. Whether this worker actually holds the
+        // guest token (and so must drop/reacquire it around its backoff pause)
+        // is answered separately by holds_guest_token().
+        return BlockResult::NonFiber;
     }
     bool throwTerminate = false;
     bool wokenInWindow  = false;
@@ -862,6 +863,15 @@ ps2sched::BlockResult ps2sched::block_current()
     return BlockResult::Parked;
 }
 
+// True on a host (non-fiber) worker thread that currently holds the guest
+// token. Always false on a fiber (fibers never call async_guest_begin — see
+// on_guest_execution_slot's abort guard). Just reads tls_holds_guest_token,
+// which async_guest_begin/async_guest_end set/clear under g_sched_mutex.
+bool ps2sched::holds_guest_token()
+{
+    return tls_holds_guest_token;
+}
+
 // make_ready (suspendCount gate)
 void ps2sched::make_ready(int tid)
 {
@@ -893,10 +903,10 @@ static inline uint64_t make_fiber_token(const FiberContext* fc)
            static_cast<uint64_t>(static_cast<uint32_t>(fc->tid));
 }
 
-uint64_t ps2sched::current_fiber_token()
+ps2sched::FiberToken ps2sched::current_fiber_token()
 {
     FiberContext* fc = tls_current_fiber;
-    return fc ? make_fiber_token(fc) : 0u;
+    return static_cast<FiberToken>(fc ? make_fiber_token(fc) : 0u);
 }
 
 ::DispatchHistory& ps2sched::current_dispatch_history() noexcept
@@ -925,7 +935,7 @@ uint64_t ps2sched::current_fiber_token()
     return s_nonFiberOverrideState;
 }
 
-void ps2sched::enqueue_external_wakeup_validated(int tid, uint64_t token)
+void ps2sched::enqueue_external_wakeup_validated(int tid, FiberToken token)
 {
     {
         std::lock_guard<std::mutex> lk(g_sched_mutex);
@@ -936,8 +946,8 @@ void ps2sched::enqueue_external_wakeup_validated(int tid, uint64_t token)
         // WaitForNextVSyncTick has the same publish/arm window as WaitSema, so a
         // tick that fires while the fiber is still Running must reach wake_locked.
         if (fc != nullptr &&
-            token != 0u &&
-            make_fiber_token(fc) == token &&
+            token != FiberToken{} &&
+            make_fiber_token(fc) == static_cast<uint64_t>(token) &&
             fc->suspendCount.load(std::memory_order_relaxed) == 0)
         {
             wake_locked(fc);

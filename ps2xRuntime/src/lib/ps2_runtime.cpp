@@ -2112,10 +2112,6 @@ void PS2Runtime::HandleIntegerOverflow(R5900Context *ctx)
     raiseCop0Exception(ctx, EXCEPTION_INTEGER_OVERFLOW);
 }
 
-// Trampoline pointer used by the scheduler stop callback (non-capturing lambda).
-// Set in run() before scheduler_init(); cleared after scheduler_shutdown() returns.
-static PS2Runtime* g_stopRuntime = nullptr;
-
 void PS2Runtime::run()
 {
     m_stopRequested.store(false, std::memory_order_relaxed);
@@ -2143,8 +2139,7 @@ void PS2Runtime::run()
 
     // Initialize the fiber/pool scheduler.
     ps2sched::scheduler_init();
-    g_stopRuntime = this;
-    ps2sched::scheduler_set_stop_callback(+[]{ if (g_stopRuntime) g_stopRuntime->requestStopFlagOnly(); });
+    ps2sched::scheduler_set_stop_callback(+[](void* p) { static_cast<PS2Runtime*>(p)->requestStopFlagOnly(); }, this);
 
     // Create the main guest fiber (tid=1).
     uint8_t *rdram = m_memory.getRDRAM();
@@ -2229,8 +2224,7 @@ void PS2Runtime::run()
 
     // Signal all guest fibers to stop and join the pool threads.
     ps2sched::scheduler_shutdown();
-    ps2sched::scheduler_set_stop_callback(nullptr);
-    g_stopRuntime = nullptr;
+    ps2sched::scheduler_set_stop_callback(nullptr, nullptr);
 
     if (m_debugUiInitialized && m_debugUiShutdownCallback)
     {

@@ -661,8 +661,8 @@ namespace ps2_syscalls
             // There is no ThreadInfo / wakeupCount to consult. Park-and-retry
             // once with bounded backoff, then return OK so the worker does
             // not livelock the emulator.
-            ps2sched::BlockResult br = ps2sched::block_current();
-            nonFiberBlockBackoff(br);
+            ps2sched::block_current();
+            nonFiberBlockBackoff();
             setReturnS32(ctx, 0);
             return;
         }

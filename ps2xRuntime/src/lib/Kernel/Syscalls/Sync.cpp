@@ -213,7 +213,7 @@ namespace ps2_syscalls
         }
 
         // Collect all waiting threads, then wake each with token validation.
-        std::vector<std::pair<int,uint64_t>> waiters;
+        std::vector<std::pair<int, ps2sched::FiberToken>> waiters;
         {
             std::lock_guard<std::mutex> lk(sema->m);
             sema->deleted = true;
@@ -250,7 +250,7 @@ namespace ps2_syscalls
         // PS2 EE BIOS returns sid on success; KE_SEMA_OVF overrides on overflow.
         int ret = sid;
         int wokenTid = 0;
-        uint64_t wokenToken = 0;
+        ps2sched::FiberToken wokenToken{};
         {
             std::unique_lock<std::mutex> lock(sema->m);
             if (sema->count >= sema->maxCount)
@@ -390,8 +390,8 @@ namespace ps2_syscalls
                 // target lookup and SignalSema/DeleteSema's targeted wakeup see a
                 // non-fiber host thread carrying a real guest tid (e.g. a raw
                 // std::thread standing in for a guest thread in tests). Off-fiber,
-                // current_fiber_token() is 0; SignalSema/DeleteSema's
-                // enqueue_external_wakeup_validated drops token==0 entries, so
+                // current_fiber_token() is FiberToken{}; SignalSema/DeleteSema's
+                // enqueue_external_wakeup_validated drops FiberToken{} entries, so
                 // publishing here is harmless for such a waiter — it doesn't need
                 // the wake, it re-polls via the backoff loop below. A fully
                 // borrowed host worker (info==nullptr) would alias every other
@@ -431,7 +431,7 @@ namespace ps2_syscalls
                 {
                     auto& wl = sema->waitList;
                     auto it = std::find_if(wl.begin(), wl.end(),
-                        [](const std::pair<int,uint64_t>& e){ return e.first == g_currentThreadId; });
+                        [](const std::pair<int, ps2sched::FiberToken>& e){ return e.first == g_currentThreadId; });
                     if (it != wl.end()) wl.erase(it);
                 }
                 sema->waiters--;
@@ -612,7 +612,7 @@ namespace ps2_syscalls
             return;
         }
 
-        std::vector<std::pair<int,uint64_t>> evfWaiters;
+        std::vector<std::pair<int, ps2sched::FiberToken>> evfWaiters;
         {
             std::lock_guard<std::mutex> lk(info->m);
             info->deleted = true;
@@ -646,7 +646,7 @@ namespace ps2_syscalls
             return;
         }
 
-        std::vector<std::pair<int,uint64_t>> setEvfWaiters;
+        std::vector<std::pair<int, ps2sched::FiberToken>> setEvfWaiters;
         {
             std::unique_lock<std::mutex> lock(info->m);
             info->bits |= bits;
@@ -776,8 +776,8 @@ namespace ps2_syscalls
                 // status in THS_WAIT/THS_WAITSUSPEND for the duration, so
                 // ReferEventFlagStatus's numThreads count and ReleaseWaitThread's
                 // target lookup both see it — matching WaitSema. Off-fiber,
-                // current_fiber_token() is 0; SetEventFlag's wake fan-out
-                // tolerates token==0 (enqueue_external_wakeup_validated drops it):
+                // current_fiber_token() is FiberToken{}; SetEventFlag's wake fan-out
+                // tolerates FiberToken{} (enqueue_external_wakeup_validated drops it):
                 // this waiter doesn't need the wake, it re-polls every backoff
                 // step. A true borrowed worker (tInfo == nullptr) never publishes
                 // and relies solely on satisfied() re-checks, same as before.
@@ -832,7 +832,7 @@ namespace ps2_syscalls
                     {
                         auto &wl = info->waitList;
                         auto it = std::find_if(wl.begin(), wl.end(),
-                            [](const std::pair<int,uint64_t>& e){ return e.first == g_currentThreadId; });
+                            [](const std::pair<int, ps2sched::FiberToken>& e){ return e.first == g_currentThreadId; });
                         if (it != wl.end()) wl.erase(it);
                     }
                     info->waiters--;
@@ -925,7 +925,7 @@ namespace ps2_syscalls
                     {
                         auto &wl = info->waitList;
                         auto it = std::find_if(wl.begin(), wl.end(),
-                            [](const std::pair<int,uint64_t>& e){ return e.first == g_currentThreadId; });
+                            [](const std::pair<int, ps2sched::FiberToken>& e){ return e.first == g_currentThreadId; });
                         if (it != wl.end()) wl.erase(it);
                         info->waiters--;
                     }

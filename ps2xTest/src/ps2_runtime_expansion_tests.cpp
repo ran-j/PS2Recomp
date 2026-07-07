@@ -2585,7 +2585,7 @@ namespace
     // same SleepThread/record/signal sequence as stepSleepRecordSignal.
     static void stepSleepRecordSignalPublishToken(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        const uint64_t tok = ps2sched::current_fiber_token();
+        const uint64_t tok = static_cast<uint64_t>(ps2sched::current_fiber_token());
         gT11TokenLo.store(static_cast<uint32_t>(tok & 0xFFFFFFFFu), std::memory_order_relaxed);
         gT11TokenHi.store(static_cast<uint32_t>(tok >> 32u), std::memory_order_release);
         stepSleepRecordSignal(rdram, ctx, runtime);
@@ -3400,7 +3400,7 @@ void register_scheduler_protocol_tests()
             }, std::chrono::milliseconds(500));
             t.IsTrue(isSuspended, "T11: fiber reached THS_WAITSUSPEND");
 
-            std::thread foreign([&](){ ps2sched::enqueue_external_wakeup_validated(tid, token); });
+            std::thread foreign([&](){ ps2sched::enqueue_external_wakeup_validated(tid, static_cast<ps2sched::FiberToken>(token)); });
             foreign.join();
 
             std::this_thread::sleep_for(std::chrono::milliseconds(40));
@@ -3982,7 +3982,7 @@ namespace
         std::memcpy(&workSid, rdram + kRSlotWorkSid, 4);
         std::memcpy(&doneSid, rdram + kRSlotDoneSid, 4);
 
-        const uint64_t tok = ps2sched::current_fiber_token();
+        const uint64_t tok = static_cast<uint64_t>(ps2sched::current_fiber_token());
         gRTokenLo.store(static_cast<uint32_t>(tok & 0xFFFFFFFFu), std::memory_order_relaxed);
         gRTokenHi.store(static_cast<uint32_t>(tok >> 32u), std::memory_order_release);
 
@@ -4118,7 +4118,7 @@ void register_scheduler_race_tests()
             {
                 while (!stopWakers.load(std::memory_order_acquire))
                 {
-                    ps2sched::enqueue_external_wakeup_validated(tid, token); // safe no-op unless genuinely Blocked
+                    ps2sched::enqueue_external_wakeup_validated(tid, static_cast<ps2sched::FiberToken>(token)); // safe no-op unless genuinely Blocked
                 }
             });
 
@@ -6048,7 +6048,7 @@ namespace
     // -----------------------------------------------------------------------
     static void stepY4bPublishTokenThenExit(uint8_t *rdram, R5900Context *ctx, PS2Runtime * /*runtime*/)
     {
-        const uint64_t tok = ps2sched::current_fiber_token();
+        const uint64_t tok = static_cast<uint64_t>(ps2sched::current_fiber_token());
         const uint32_t lo = static_cast<uint32_t>(tok & 0xFFFFFFFFu);
         const uint32_t hi = static_cast<uint32_t>(tok >> 32u);
         gY4bTokenLo.store(lo, std::memory_order_relaxed);
@@ -6493,7 +6493,7 @@ void register_scheduler_sema_delete_tests()
             // The scheduler must detect the generation mismatch and drop it.
             std::thread foreignWaker([&]()
             {
-                ps2sched::enqueue_external_wakeup_validated(sleeperTid, wrongToken);
+                ps2sched::enqueue_external_wakeup_validated(sleeperTid, static_cast<ps2sched::FiberToken>(wrongToken));
             });
             foreignWaker.join();
 

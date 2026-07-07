@@ -24,6 +24,16 @@ struct SyscallOverrideStack;          // defined in ps2_syscall_override_state.h
 
 namespace ps2sched
 {
+    // Opaque identity token for a fiber, encoding its generation + tid (see
+    // current_fiber_token()). A distinct type (rather than a bare uint64_t)
+    // keeps a raw fiber-token bit pattern from being silently accepted wherever
+    // a uint64_t is expected. Only ever compared for equality, default-
+    // constructed (FiberToken{} — the "no fiber" sentinel), or passed back to
+    // enqueue_external_wakeup_validated. Code that genuinely needs the
+    // underlying bits (e.g. constructing/validating generation+tid) casts
+    // explicitly; the bit layout and validation logic are unchanged.
+    enum class FiberToken : uint64_t {};
+
     // --- Lifecycle ---
 
     // Initialise global scheduler state and create the single guest executor
@@ -37,8 +47,11 @@ namespace ps2sched
     // Register a callback that scheduler_shutdown() invokes once, just before
     // joining the guest executor thread. The runtime sets this to request a
     // stop so dispatchLoop's while(!isStopRequested()) exits between dispatched
-    // functions. Pass nullptr to clear. May be called before scheduler_init().
-    void scheduler_set_stop_callback(void (*fn)());
+    // functions. `ctx` is passed back to `fn` unmodified (letting the callback
+    // carry its own context instead of relying on a file-static). Pass
+    // fn==nullptr to clear (ctx is ignored in that case). May be called before
+    // scheduler_init().
+    void scheduler_set_stop_callback(void (*fn)(void*), void* ctx);
 
     // --- Thread lifecycle (called from Thread.cpp / Lifecycle.cpp) ---
 
@@ -76,18 +89,26 @@ namespace ps2sched
         Parked,        // a fiber actually parked and was later resumed by a waker.
         WokenInWindow, // a fiber: a wakeup arrived in the arm/publish window; do
                        //   not park. Caller re-checks its wait condition.
-        NonFiberOwner, // a borrowed host worker that HOLDS the guest token: caller
-                       //   must async_guest_end()/yield/async_guest_begin(), then
-                       //   re-check.
-        NonFiberNoTok  // a borrowed host worker that does NOT hold the token:
-                       //   caller just yields the host thread and re-checks; it
-                       //   must NOT touch the guest token.
+        NonFiber       // a borrowed host worker (not a fiber): caller cannot park
+                       //   on the fiber scheduler and must yield the host thread
+                       //   and re-check. Whether it must also drop/reacquire the
+                       //   guest token around that yield is a SEPARATE question,
+                       //   answered by holds_guest_token() (below), not by this
+                       //   result.
     };
 
     // Park the currently-running fiber. Caller MUST have called arm_park() first
     // and then published itself to the object wait-list. The fiber must release any
-    // object mutexes BEFORE calling this. See BlockResult for the four outcomes.
+    // object mutexes BEFORE calling this. See BlockResult for the three outcomes.
     BlockResult block_current();
+
+    // True iff the calling OS thread is a borrowed host worker that currently
+    // holds the guest token (acquired via async_guest_begin(), not yet released
+    // via async_guest_end()). Always false on a fiber. Callers that get
+    // BlockResult::NonFiber from block_current() use this to decide whether they
+    // must drop/reacquire the guest token around their backoff pause — dropping
+    // a token this thread does not hold would be a bug.
+    bool holds_guest_token();
 
     // Wake a blocked fiber from within another fiber (from a guest thread).
     // Gated on suspendCount == 0.
@@ -98,12 +119,12 @@ namespace ps2sched
     // (from current_fiber_token()). The token encodes the fiber's generation, so
     // a recycled tid whose new fiber has a different generation will not match
     // and the stale wakeup is dropped. Validation happens under g_sched_mutex.
-    void enqueue_external_wakeup_validated(int tid, uint64_t token);
+    void enqueue_external_wakeup_validated(int tid, FiberToken token);
 
-    // Opaque identity token for the fiber currently running on this thread, or 0
-    // if not on a fiber. Encodes generation + tid. Only ever compared for
-    // equality / passed back to enqueue_external_wakeup_validated.
-    uint64_t current_fiber_token();
+    // Opaque identity token for the fiber currently running on this thread, or
+    // FiberToken{} if not on a fiber. Encodes generation + tid. Only ever
+    // compared for equality / passed back to enqueue_external_wakeup_validated.
+    FiberToken current_fiber_token();
 
     // Yield if a higher-priority fiber is ready. Enqueues self Ready BEFORE
     // yielding, so the fiber is never 'Running but off-queue'.

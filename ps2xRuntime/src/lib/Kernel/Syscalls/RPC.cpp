@@ -612,7 +612,7 @@ namespace ps2_syscalls
 
             bool signaled = false;
             int wokenTid = 0;
-            uint64_t wokenToken = 0;
+            ps2sched::FiberToken wokenToken{};
             {
                 std::lock_guard<std::mutex> lock(sema->m);
                 if (!sema->deleted && sema->count < sema->maxCount)

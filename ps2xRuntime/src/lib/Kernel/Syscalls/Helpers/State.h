@@ -168,7 +168,7 @@ struct SemaInfo
     // Wait list of blocked guest threads. Each entry is {tid, generation token}
     // where the token was captured via ps2sched::current_fiber_token() at push
     // time. Protected by m; never hold m across a scheduling yield.
-    std::vector<std::pair<int, uint64_t>> waitList;
+    std::vector<std::pair<int, ps2sched::FiberToken>> waitList;
 };
 
 struct EventFlagInfo
@@ -181,7 +181,7 @@ struct EventFlagInfo
     bool deleted = false;
     std::mutex m;
     // See SemaInfo::waitList.
-    std::vector<std::pair<int, uint64_t>> waitList;
+    std::vector<std::pair<int, ps2sched::FiberToken>> waitList;
 };
 
 struct AlarmInfo

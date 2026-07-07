@@ -11,9 +11,9 @@
 // shape: callers whose critical section also mutates other state alongside
 // the swap (e.g. marking the object deleted) must keep doing that inline
 // instead of calling this, so the lock is still held across both writes.
-static inline void wakeWaiters(std::mutex &m, std::vector<std::pair<int, uint64_t>> &list)
+static inline void wakeWaiters(std::mutex &m, std::vector<std::pair<int, ps2sched::FiberToken>> &list)
 {
-    std::vector<std::pair<int, uint64_t>> waiters;
+    std::vector<std::pair<int, ps2sched::FiberToken>> waiters;
     {
         std::lock_guard<std::mutex> lk(m);
         waiters.swap(list);
@@ -24,21 +24,21 @@ static inline void wakeWaiters(std::mutex &m, std::vector<std::pair<int, uint64_
     }
 }
 
-// Drops the guest token around `pause` if `br` indicates this worker actually
-// owns it (NonFiberOwner), reacquiring it afterward; otherwise just runs
+// Drops the guest token around `pause` if this worker actually holds it
+// (holds_guest_token()), reacquiring it afterward; otherwise just runs
 // `pause`. This is the one place that knows the async_guest_end/begin
 // bracketing for a non-fiber wait pause — both NonFiberBackoff::step's sleep
 // and nonFiberBlockBackoff's yield route through it.
 template <typename PauseFn>
-static inline void withGuestTokenDropped(ps2sched::BlockResult br, PauseFn pause)
+static inline void withGuestTokenDropped(PauseFn pause)
 {
-    if (br == ps2sched::BlockResult::NonFiberOwner)
+    if (ps2sched::holds_guest_token())
     {
         ps2sched::async_guest_end();
         pause();
         ps2sched::async_guest_begin();
     }
-    else // NonFiberNoTok (or, defensively, any non-Parked non-fiber result)
+    else
     {
         pause();
     }
@@ -65,10 +65,9 @@ struct NonFiberBackoff
             ps2sched::arm_park();
         }
         const ps2sched::BlockResult br = ps2sched::block_current();
-        if (br == ps2sched::BlockResult::NonFiberOwner ||
-            br == ps2sched::BlockResult::NonFiberNoTok)
+        if (br == ps2sched::BlockResult::NonFiber)
         {
-            step(br);
+            step();
         }
         return br;
     }
@@ -76,9 +75,9 @@ struct NonFiberBackoff
 private:
     // Sleeps this worker once with exponential backoff. The syscall's Mesa loop
     // decides whether to re-check its wait condition and loop again.
-    void step(ps2sched::BlockResult br)
+    void step()
     {
-        withGuestTokenDropped(br, [&] { std::this_thread::sleep_for(delay); });
+        withGuestTokenDropped([&] { std::this_thread::sleep_for(delay); });
 
         // delay self-clamps at the 1ms cap below, so no separate spins < kMaxSpins
         // guard is needed to keep it from overflowing past the cap.
@@ -99,9 +98,9 @@ private:
 
 // One-shot: drop/reacquire token (if owned) and yield once. SleepThread for
 // a borrowed worker has no wait-list to re-check, so it does not loop.
-inline void nonFiberBlockBackoff(ps2sched::BlockResult br)
+inline void nonFiberBlockBackoff()
 {
-    withGuestTokenDropped(br, [] { std::this_thread::yield(); });
+    withGuestTokenDropped([] { std::this_thread::yield(); });
 }
 
 static void throwIfTerminated(const std::shared_ptr<ThreadInfo> &info)
