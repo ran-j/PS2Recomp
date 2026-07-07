@@ -413,20 +413,9 @@ namespace ps2_syscalls
                 // Drop sema->m BEFORE any scheduler operation.
                 lock.unlock();
 
-                if (onFiber)
-                {
-                    ps2sched::arm_park();
-                }
-
-                const ps2sched::BlockResult br = ps2sched::block_current();
-
                 // Non-fiber (borrowed host worker) path: bounded exponential backoff
                 // so a never-satisfied condition cannot busy-spin the CPU.
-                if (br == ps2sched::BlockResult::NonFiberOwner ||
-                    br == ps2sched::BlockResult::NonFiberNoTok)
-                {
-                    nfBackoff.step(br);
-                }
+                const ps2sched::BlockResult br = nfBackoff.wait(onFiber);
 
                 // === Woke up here ===
                 lock.lock();
@@ -836,8 +825,7 @@ namespace ps2_syscalls
                     }
 
                     lock.unlock();
-                    const ps2sched::BlockResult br = ps2sched::block_current();
-                    nfBackoff.step(br);
+                    const ps2sched::BlockResult br = nfBackoff.wait(false);
                     lock.lock();
 
                     if (tInfo)

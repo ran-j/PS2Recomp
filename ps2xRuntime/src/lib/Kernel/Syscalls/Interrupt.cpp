@@ -460,8 +460,7 @@ namespace ps2_syscalls
             NonFiberBackoff nfBackoff;
             for (;;)
             {
-                const ps2sched::BlockResult br = ps2sched::block_current();
-                nfBackoff.step(br);
+                const ps2sched::BlockResult br = nfBackoff.wait(false);
 
                 std::lock_guard<std::mutex> lock(g_vsync_flag_mutex);
                 if (g_vsync_tick_counter != entryTick)
@@ -481,11 +480,12 @@ namespace ps2_syscalls
             std::lock_guard<std::mutex> lock(g_vsync_flag_mutex);
             g_vsync_waitList.emplace_back(g_currentThreadId, selfToken);
         }
-        ps2sched::arm_park();
-
         // Block the current fiber; signalVSyncFlag calls the validated wakeup
-        // from the IRQ worker thread to wake us.
-        const ps2sched::BlockResult br = ps2sched::block_current();
+        // from the IRQ worker thread to wake us. onFiber is always true here
+        // (the !onFiber path above already returned), so wait() never runs a
+        // backoff step for this park.
+        NonFiberBackoff nfBackoff;
+        const ps2sched::BlockResult br = nfBackoff.wait(true);
 
         // A fiber woken from a real park (Parked) may have been woken by
         // scheduler_shutdown / TerminateThread rather than a vsync tick. If so,

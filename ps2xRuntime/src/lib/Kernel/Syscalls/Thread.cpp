@@ -694,19 +694,10 @@ namespace ps2_syscalls
                 // Arm on every iteration: block_current() consumes wake_pending,
                 // so a wake arriving in the new publish/arm window would be missed
                 // if we skipped re-arming on subsequent iterations.
-                if (onFiber)
-                {
-                    ps2sched::arm_park();
-                }
-                const ps2sched::BlockResult br = ps2sched::block_current();
-
+                //
                 // Non-fiber (but identified) waiter: bounded exponential backoff
                 // so a never-satisfied condition cannot busy-spin the CPU.
-                if (br == ps2sched::BlockResult::NonFiberOwner ||
-                    br == ps2sched::BlockResult::NonFiberNoTok)
-                {
-                    nfBackoff.step(br);
-                }
+                const ps2sched::BlockResult br = nfBackoff.wait(onFiber);
 
                 lock.lock();
 

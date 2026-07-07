@@ -24,6 +24,26 @@ static inline void wakeWaiters(std::mutex &m, std::vector<std::pair<int, uint64_
     }
 }
 
+// Drops the guest token around `pause` if `br` indicates this worker actually
+// owns it (NonFiberOwner), reacquiring it afterward; otherwise just runs
+// `pause`. This is the one place that knows the async_guest_end/begin
+// bracketing for a non-fiber wait pause — both NonFiberBackoff::step's sleep
+// and nonFiberBlockBackoff's yield route through it.
+template <typename PauseFn>
+static inline void withGuestTokenDropped(ps2sched::BlockResult br, PauseFn pause)
+{
+    if (br == ps2sched::BlockResult::NonFiberOwner)
+    {
+        ps2sched::async_guest_end();
+        pause();
+        ps2sched::async_guest_begin();
+    }
+    else // NonFiberNoTok (or, defensively, any non-Parked non-fiber result)
+    {
+        pause();
+    }
+}
+
 // Bounded backoff for a borrowed host worker that hit a blocking syscall.
 // Translates a non-fiber BlockResult into the correct token handling, then
 // sleeps with exponential backoff (1us -> 1ms cap). After kMaxSpins iterations
@@ -35,36 +55,44 @@ struct NonFiberBackoff
     int spins = 0;
     std::chrono::microseconds delay{1};
 
+    // arm_park (only for a real fiber) + block_current, then, if the wake was
+    // a non-fiber result, one backoff step. Never runs step() for a Parked
+    // (fiber) wake, since a fiber's block_current already did the real park.
+    ps2sched::BlockResult wait(bool onFiber)
+    {
+        if (onFiber)
+        {
+            ps2sched::arm_park();
+        }
+        const ps2sched::BlockResult br = ps2sched::block_current();
+        if (br == ps2sched::BlockResult::NonFiberOwner ||
+            br == ps2sched::BlockResult::NonFiberNoTok)
+        {
+            step(br);
+        }
+        return br;
+    }
+
+private:
     // Sleeps this worker once with exponential backoff. The syscall's Mesa loop
     // decides whether to re-check its wait condition and loop again.
     void step(ps2sched::BlockResult br)
     {
-        // Drop/reacquire the guest token only if we actually own it.
-        if (br == ps2sched::BlockResult::NonFiberOwner)
-        {
-            ps2sched::async_guest_end();
-            std::this_thread::sleep_for(delay);
-            ps2sched::async_guest_begin();
-        }
-        else // NonFiberNoTok (or, defensively, any non-Parked non-fiber result)
-        {
-            std::this_thread::sleep_for(delay);
-        }
+        withGuestTokenDropped(br, [&] { std::this_thread::sleep_for(delay); });
+
+        // delay self-clamps at the 1ms cap below, so no separate spins < kMaxSpins
+        // guard is needed to keep it from overflowing past the cap.
+        delay = std::min(delay * 2, std::chrono::microseconds(1000));
 
         constexpr int kMaxSpins = 50;
-        if (spins == kMaxSpins)
+        // Fires exactly once, the iteration spins reaches kMaxSpins, then spins
+        // freezes at kMaxSpins so this can never become true again.
+        if (spins < kMaxSpins && ++spins == kMaxSpins)
         {
             std::fprintf(stderr,
                 "[ps2sched] WARNING: borrowed host worker has blocked on a guest "
                 "condition for %d retries; capping backoff at 1ms (possible "
                 "interrupt-context deadlock)\n", kMaxSpins);
-        }
-        if (spins < kMaxSpins)
-        {
-            ++spins;
-            delay *= 2;
-            if (delay > std::chrono::microseconds(1000))
-                delay = std::chrono::microseconds(1000);
         }
     }
 };
@@ -73,16 +101,7 @@ struct NonFiberBackoff
 // a borrowed worker has no wait-list to re-check, so it does not loop.
 inline void nonFiberBlockBackoff(ps2sched::BlockResult br)
 {
-    if (br == ps2sched::BlockResult::NonFiberOwner)
-    {
-        ps2sched::async_guest_end();
-        std::this_thread::yield();
-        ps2sched::async_guest_begin();
-    }
-    else
-    {
-        std::this_thread::yield();
-    }
+    withGuestTokenDropped(br, [] { std::this_thread::yield(); });
 }
 
 static void throwIfTerminated(const std::shared_ptr<ThreadInfo> &info)
