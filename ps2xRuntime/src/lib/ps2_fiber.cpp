@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <new>
+#include <utility>
 
 // Abort if a fiber context switch is attempted off the guest executor thread.
 // Used by the backends (ucontext, SceFiber, Win32 Fibers) where exactly one
@@ -23,33 +24,117 @@ static inline void ps2fiber_require_executor_thread(const char* who)
     }
 }
 
+// The fiber currently running on this thread, or nullptr. PS2Fiber* is the
+// same opaque pointer type across all four backends (only the struct it
+// points to differs per backend), so the TLS slot and its accessor are
+// defined once here instead of once per backend.
+static thread_local PS2Fiber* tls_current_fiber_ptr = nullptr;
+
+PS2Fiber* ps2fiber_current()
+{
+    return tls_current_fiber_ptr;
+}
+
+#if !defined(PS2X_FIBER_PTHREAD)
+// ucontext, SceFiber, and Win32 Fibers backends: no separate OS thread to
+// outlive the PS2Fiber, so the executor relies on FiberContext::state ==
+// Finished instead of polling this function. (The pthread backend below has
+// a real per-fiber OS thread that can already be dead when polled, so it
+// defines its own ps2fiber_finished under its branch.)
+bool ps2fiber_finished(PS2Fiber* /*f*/)
+{
+    return false;
+}
+#endif
+
+#if !defined(PLATFORM_VITA) && !defined(_WIN32)
+// ============================================================================
+// Shared guard-paged stack allocator — ucontext and pthread backends only.
+// Both are POSIX mmap/mprotect based; Vita and Win32 use their own
+// platform-native stack allocation and are excluded here.
+// ============================================================================
+#include <sys/mman.h>
+#include <unistd.h> // sysconf(_SC_PAGESIZE)
+
+// Owns an mmap'd stack with a single low guard page (PROT_NONE) below the
+// usable region, so a stack overflow faults instead of silently corrupting
+// adjacent memory. Move-only; unmaps on destruction.
+struct GuardedStack
+{
+    uint8_t* base   = nullptr; // mmap base (guard page first)
+    size_t   total  = 0;       // total mapping incl. guard page
+    size_t   usable = 0;       // usable stack size (page-rounded)
+
+    uint8_t* stack() const { return base + total - usable; } // region above the low guard page
+
+    // Allocate `want` bytes of usable stack (rounded up to a page) plus one
+    // low guard page below it. Returns false on failure; *out is untouched.
+    static bool make(size_t want, GuardedStack& out)
+    {
+        long pageQuery = sysconf(_SC_PAGESIZE);
+        const size_t page = (pageQuery > 0) ? static_cast<size_t>(pageQuery) : 4096u;
+        size_t usable = (want + page - 1) & ~(page - 1);
+        size_t total  = usable + page; // 1 guard page at low address
+
+        void* base = mmap(nullptr, total, PROT_READ | PROT_WRITE,
+                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (base == MAP_FAILED)
+        {
+            std::fprintf(stderr, "[ps2fiber] mmap failed\n");
+            return false;
+        }
+        if (mprotect(base, page, PROT_NONE) != 0)
+        {
+            munmap(base, total);
+            std::fprintf(stderr, "[ps2fiber] mprotect guard failed\n");
+            return false;
+        }
+
+        out.base   = static_cast<uint8_t*>(base);
+        out.total  = total;
+        out.usable = usable;
+        return true;
+    }
+
+    GuardedStack() = default;
+    GuardedStack(GuardedStack&& o) noexcept { *this = std::move(o); }
+    GuardedStack& operator=(GuardedStack&& o) noexcept
+    {
+        if (this != &o)
+        {
+            if (base) munmap(base, total);
+            base = o.base; total = o.total; usable = o.usable;
+            o.base = nullptr; o.total = 0; o.usable = 0;
+        }
+        return *this;
+    }
+    GuardedStack(const GuardedStack&) = delete;
+    GuardedStack& operator=(const GuardedStack&) = delete;
+    ~GuardedStack() { if (base) munmap(base, total); }
+};
+#endif // !PLATFORM_VITA && !_WIN32
+
 #if !defined(PLATFORM_VITA) && !defined(PS2X_FIBER_PTHREAD) && !defined(_WIN32)
 // ============================================================================
 // POSIX path — ucontext_t
 // ============================================================================
 #include <ucontext.h>
-#include <sys/mman.h>
-#include <unistd.h> // sysconf(_SC_PAGESIZE)
 #include <cerrno>
 #include <cstring>
 
 static_assert(sizeof(void*) == 8, "ucontext pointer split requires exactly 64-bit pointers (LP64)");
 static_assert(sizeof(unsigned int) == 4, "makecontext int args must be 32 bits");
 
-// Per-guest-executor-thread state. These are thread_local but in practice
-// only ever touched by the single g_guest_thread.
+// Per-guest-executor-thread state. This is thread_local but in practice only
+// ever touched by the single g_guest_thread.
 static thread_local ucontext_t tls_guest_main_ctx;
-static thread_local PS2Fiber*  tls_current_fiber_ptr = nullptr;
 
 struct PS2Fiber
 {
-    ucontext_t ctx;
-    uint8_t*   map_base  = nullptr; // mmap base (guard page first)
-    size_t     map_size  = 0;       // total mapping incl. guard page
-    uint8_t*   stack     = nullptr; // usable stack region (after guard page)
-    size_t     stackSize = 0;
-    void     (*fn)(void*) = nullptr;
-    void*      arg = nullptr;
+    ucontext_t   ctx;
+    GuardedStack stack;
+    void       (*fn)(void*) = nullptr;
+    void*        arg = nullptr;
 };
 
 // makecontext can only pass int-sized arguments portably. Split the 64-bit
@@ -70,48 +155,26 @@ static void ps2fiber_trampoline(unsigned int self_hi, unsigned int self_lo)
 PS2Fiber* ps2fiber_alloc(void (*fn)(void*), void* arg, size_t stack_bytes)
 {
     if (stack_bytes == 0) { std::fprintf(stderr, "ps2fiber_alloc: zero stack size\n"); return nullptr; }
-    long pageQuery = sysconf(_SC_PAGESIZE);
-    const size_t page = (pageQuery > 0) ? static_cast<size_t>(pageQuery) : 4096u;
-    size_t usable = (stack_bytes + page - 1) & ~(page - 1);
-    size_t total = usable + page; // 1 guard page at low address
-
-    void* base = mmap(nullptr, total, PROT_READ | PROT_WRITE,
-                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (base == MAP_FAILED)
-    {
-        std::fprintf(stderr, "[ps2fiber] mmap failed\n");
-        return nullptr;
-    }
-    if (mprotect(base, page, PROT_NONE) != 0)
-    {
-        munmap(base, total);
-        std::fprintf(stderr, "[ps2fiber] mprotect guard failed\n");
-        return nullptr;
-    }
 
     PS2Fiber* f = new (std::nothrow) PS2Fiber();
-    if (!f)
+    if (!f) return nullptr;
+
+    if (!GuardedStack::make(stack_bytes, f->stack))
     {
-        munmap(base, total);
+        delete f;
         return nullptr;
     }
-
-    f->map_base  = static_cast<uint8_t*>(base);
-    f->map_size  = total;
-    f->stack     = static_cast<uint8_t*>(base) + page;
-    f->stackSize = usable;
     f->fn  = fn;
     f->arg = arg;
 
     if (getcontext(&f->ctx) != 0)
     {
         std::fprintf(stderr, "[ps2fiber] getcontext failed: %s\n", std::strerror(errno));
-        munmap(base, total);
-        delete f;
+        delete f; // GuardedStack destructor unmaps the stack
         return nullptr;
     }
-    f->ctx.uc_stack.ss_sp   = f->stack;
-    f->ctx.uc_stack.ss_size = f->stackSize;
+    f->ctx.uc_stack.ss_sp   = f->stack.stack();
+    f->ctx.uc_stack.ss_size = f->stack.usable;
     f->ctx.uc_link          = nullptr; // trampoline never returns via link
 
     uintptr_t raw = reinterpret_cast<uintptr_t>(f);
@@ -124,8 +187,7 @@ PS2Fiber* ps2fiber_alloc(void (*fn)(void*), void* arg, size_t stack_bytes)
 void ps2fiber_free(PS2Fiber* f)
 {
     if (!f) return;
-    if (f->map_base) munmap(f->map_base, f->map_size);
-    delete f;
+    delete f; // GuardedStack destructor unmaps the stack
 }
 
 void ps2fiber_resume(PS2Fiber* f)
@@ -163,18 +225,6 @@ void ps2fiber_yield()
     tls_current_fiber_ptr = self;
 }
 
-PS2Fiber* ps2fiber_current()
-{
-    return tls_current_fiber_ptr;
-}
-
-bool ps2fiber_finished(PS2Fiber* /*f*/)
-{
-    // ucontext backend: no separate OS thread to outlive the PS2Fiber. The
-    // executor relies on FiberContext::state == Finished instead.
-    return false;
-}
-
 #elif defined(PLATFORM_VITA) && !defined(PS2X_FIBER_PTHREAD)
 // ============================================================================
 // SceFiber backend — Vita (PLATFORM_VITA and not PS2X_FIBER_PTHREAD)
@@ -182,11 +232,6 @@ bool ps2fiber_finished(PS2Fiber* /*f*/)
 #include <psp2/fiber.h>
 #include <psp2/kernel/sysmem.h> // sceKernelAllocMemBlock/GetMemBlockBase/FreeMemBlock
 #include "ps2_scheduler.h" // extern thread_local int g_currentThreadId
-
-static thread_local PS2Fiber* tls_current_fiber_ptr = nullptr;
-// Set by ps2fiber_resume immediately before sceFiberRun so the fiber entry
-// can recover its PS2Fiber* without relying on the 32-bit argOnRunTo alone.
-static thread_local PS2Fiber* tls_pending_self = nullptr;
 
 struct PS2Fiber
 {
@@ -201,8 +246,9 @@ struct PS2Fiber
 
 static void ps2fiber_entry(SceUInt32 /*argOnInitialize*/, SceUInt32 /*argOnRunTo*/)
 {
-    PS2Fiber* self = tls_pending_self;
-    tls_current_fiber_ptr = self;
+    // ps2fiber_resume already sets tls_current_fiber_ptr = f immediately
+    // before sceFiberRun on this same thread, so it's already set here.
+    PS2Fiber* self = tls_current_fiber_ptr;
     g_currentThreadId = self->tid;
     self->fn(self->arg);
     // fn returned — hand control back to the thread. The entry must not return.
@@ -275,7 +321,6 @@ void ps2fiber_set_tid(PS2Fiber* f, int tid)
 void ps2fiber_resume(PS2Fiber* f)
 {
     ps2fiber_require_executor_thread("ps2fiber_resume");
-    tls_pending_self = f;
     PS2Fiber* prev = tls_current_fiber_ptr;
     tls_current_fiber_ptr = f;
     SceInt32 rc = sceFiberRun(&f->fiber, 0, nullptr);
@@ -302,18 +347,6 @@ void ps2fiber_yield()
     tls_current_fiber_ptr = self;
 }
 
-PS2Fiber* ps2fiber_current()
-{
-    return tls_current_fiber_ptr;
-}
-
-bool ps2fiber_finished(PS2Fiber* /*f*/)
-{
-    // SceFiber backend: matches ucontext semantics — the scheduler relies on
-    // FiberContext::state == Finished rather than polling this function.
-    return false;
-}
-
 void ps2fiber_free(PS2Fiber* f)
 {
     if (!f) return;
@@ -338,11 +371,7 @@ void ps2fiber_free(PS2Fiber* f)
 #endif
 #include <pthread.h>
 #include <semaphore.h>
-#include <sys/mman.h>
-#include <unistd.h>
 #include "ps2_scheduler.h" // extern thread_local int g_currentThreadId
-
-static thread_local PS2Fiber* tls_current_fiber_ptr = nullptr;
 
 struct PS2Fiber
 {
@@ -355,8 +384,7 @@ struct PS2Fiber
     std::atomic<bool> finished{false}; // fn returned; written on the fiber thread and read on the executor, so must be atomic
     std::atomic<bool> ever_resumed{false}; // set by ps2fiber_resume; distinguishes "never resumed" (free is legal) from "parked mid-run" (free is a caller bug)
     std::atomic<bool> abandoned{false}; // set by ps2fiber_free when freeing a never-resumed fiber; tells the worker to exit without running fn
-    uint8_t*  map_base   = nullptr; // mmap base (guard page first); freed after pthread_join
-    size_t    map_size   = 0;       // total mapping incl. guard page
+    GuardedStack stack; // guard-paged stack backing `thread`; unmapped after pthread_join
     // Guest thread id for this fiber. Set by the scheduler via
     // ps2fiber_set_tid() after alloc; published onto the fiber's own pthread in
     // ps2fiber_thread_main so blocking syscalls see the right g_currentThreadId.
@@ -399,25 +427,12 @@ PS2Fiber* ps2fiber_alloc(void (*fn)(void*), void* arg, size_t stack_bytes)
 
     // Allocate our own stack with an explicit guard page at the low address so
     // a stack overflow faults (SIGSEGV) rather than silently corrupting memory.
-    long pg_long = sysconf(_SC_PAGESIZE);
-    size_t page   = (pg_long > 0) ? static_cast<size_t>(pg_long) : 4096u;
-    size_t usable = stack_bytes ? stack_bytes : (512 * 1024); // smaller on Vita
-    size_t total  = usable + page;
-    void* base = mmap(nullptr, total, PROT_READ | PROT_WRITE,
-                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (base == MAP_FAILED)
+    size_t want = stack_bytes ? stack_bytes : (512 * 1024); // smaller on Vita
+    if (!GuardedStack::make(want, f->stack))
     {
         delete f;
         return nullptr;
     }
-    if (mprotect(base, page, PROT_NONE) != 0)
-    {
-        munmap(base, total);
-        delete f;
-        return nullptr;
-    }
-    f->map_base = static_cast<uint8_t*>(base);
-    f->map_size = total;
 
     sem_init(&f->resume_sem, 0, 0);
     sem_init(&f->yield_sem,  0, 0);
@@ -425,18 +440,20 @@ PS2Fiber* ps2fiber_alloc(void (*fn)(void*), void* arg, size_t stack_bytes)
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     // Belt-and-suspenders: ask pthread to set its own guard too (may be a no-op
-    // on some platforms, but the mmap guard above is the authoritative one).
+    // on some platforms, but the mmap guard in GuardedStack::make is the
+    // authoritative one).
+    long pg_long = sysconf(_SC_PAGESIZE);
+    size_t page   = (pg_long > 0) ? static_cast<size_t>(pg_long) : 4096u;
     pthread_attr_setguardsize(&attr, page);
     // Hand our pre-allocated, guard-paged stack to pthread.
-    pthread_attr_setstack(&attr, static_cast<uint8_t*>(base) + page, usable);
+    pthread_attr_setstack(&attr, f->stack.stack(), f->stack.usable);
     int rc = pthread_create(&f->thread, &attr, ps2fiber_thread_main, f);
     pthread_attr_destroy(&attr);
     if (rc != 0)
     {
         sem_destroy(&f->resume_sem);
         sem_destroy(&f->yield_sem);
-        munmap(base, total);
-        delete f;
+        delete f; // GuardedStack destructor unmaps the stack
         return nullptr;
     }
     f->started = true;
@@ -461,11 +478,6 @@ void ps2fiber_yield()
     if (!self) { std::abort(); }
     sem_post(&self->yield_sem);  // hand back to executor
     sem_wait(&self->resume_sem); // wait for next resume
-}
-
-PS2Fiber* ps2fiber_current()
-{
-    return tls_current_fiber_ptr;
 }
 
 bool ps2fiber_finished(PS2Fiber* f)
@@ -499,10 +511,10 @@ void ps2fiber_free(PS2Fiber* f)
         }
     }
     if (f->started) pthread_join(f->thread, nullptr); // joinable: no leak
-    // Unmap our guard-paged stack only after the thread is fully joined (exited).
-    if (f->map_base) munmap(f->map_base, f->map_size);
     sem_destroy(&f->resume_sem);
     sem_destroy(&f->yield_sem);
+    // GuardedStack destructor (in ~PS2Fiber via delete below) unmaps the
+    // guard-paged stack — only now that the thread is fully joined (exited).
     delete f;
 }
 
@@ -518,10 +530,9 @@ void ps2fiber_free(PS2Fiber* f)
 #endif
 #include <windows.h>
 
-// Per-guest-executor-thread state. These are thread_local but in practice
-// only ever touched by the single g_guest_thread.
-static thread_local LPVOID    tls_guest_main_fiber  = nullptr; // executor's own fiber (the "main context")
-static thread_local PS2Fiber* tls_current_fiber_ptr = nullptr;
+// Per-guest-executor-thread state. This is thread_local but in practice only
+// ever touched by the single g_guest_thread.
+static thread_local LPVOID tls_guest_main_fiber = nullptr; // executor's own fiber (the "main context")
 
 struct PS2Fiber
 {
@@ -655,19 +666,6 @@ void ps2fiber_yield()
     tls_current_fiber_ptr = nullptr;
     SwitchToFiber(tls_guest_main_fiber);
     tls_current_fiber_ptr = self;
-}
-
-PS2Fiber* ps2fiber_current()
-{
-    return tls_current_fiber_ptr;
-}
-
-bool ps2fiber_finished(PS2Fiber* /*f*/)
-{
-    // Win32 Fibers backend: matches ucontext semantics — no separate OS thread
-    // to outlive the PS2Fiber, so the executor relies on
-    // FiberContext::state == Finished instead of polling this function.
-    return false;
 }
 
 #else
