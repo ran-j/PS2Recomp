@@ -1043,7 +1043,7 @@ void register_ps2_memory_tests()
             bool pixelsOk = true;
             for (uint32_t x = 0; x < 4u && pixelsOk; ++x)
             {
-                const uint32_t dstOff = GSPSMCT32::addrPSMCT32(0u, 1u, x, 0u);
+                const uint32_t dstOff = GSMem::LookupPixelAddressCT32(0u, 1u, x, 0u) * 4;
                 const uint32_t srcOff = kPixels + x * 4u;
                 for (uint32_t c = 0; c < 4u; ++c)
                 {
