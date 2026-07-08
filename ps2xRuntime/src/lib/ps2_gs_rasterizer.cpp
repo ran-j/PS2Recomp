@@ -394,6 +394,7 @@ void GSRasterizer::writePixel(GS *gs, int x, int y, int z, uint8_t r, uint8_t g,
 
     const auto prim = gs->m_registers.prim;
     const auto pabe = gs->m_registers.pabe;
+    const auto colclamp = gs->m_registers.colclamp;
 
     const auto scissor = ctx.scissor;
     const auto frame = ctx.frame;
@@ -461,10 +462,6 @@ void GSRasterizer::writePixel(GS *gs, int x, int y, int z, uint8_t r, uint8_t g,
         return;
     }
 
-    const u8 srcR = r;
-    const u8 srcG = g;
-    const u8 srcB = b;
-
     if (prim.abe)
     {
         uint8_t dr = fbrgba & 0xFF;
@@ -475,12 +472,11 @@ void GSRasterizer::writePixel(GS *gs, int x, int y, int z, uint8_t r, uint8_t g,
         // PABE disables alpha blending when the source alpha MSB is clear.
         if (!(pabe.pabe && (a & 0x80u) == 0u))
         {
-            uint64_t alphaReg = alpha.data;
-            uint8_t asel = alphaReg & 3;
-            uint8_t bsel = (alphaReg >> 2) & 3;
-            uint8_t csel = (alphaReg >> 4) & 3;
-            uint8_t dsel = (alphaReg >> 6) & 3;
-            uint8_t fix = static_cast<uint8_t>((alphaReg >> 32) & 0xFF);
+            uint8_t asel = alpha.a;
+            uint8_t bsel = alpha.b;
+            uint8_t csel = alpha.c;
+            uint8_t dsel = alpha.d;
+            uint8_t fix = alpha.fix;
 
             auto pickRGB = [&](uint8_t sel, int cs, int cd) -> int
             {
@@ -493,15 +489,22 @@ void GSRasterizer::writePixel(GS *gs, int x, int y, int z, uint8_t r, uint8_t g,
             int cAlpha = (csel == 0) ? a : (csel == 1) ? da
                                                        : fix;
 
-            r = clampU8(((pickRGB(asel, r, dr) - pickRGB(bsel, r, dr)) * cAlpha >> 7) + pickRGB(dsel, r, dr));
-            g = clampU8(((pickRGB(asel, g, dg) - pickRGB(bsel, g, dg)) * cAlpha >> 7) + pickRGB(dsel, g, dg));
-            b = clampU8(((pickRGB(asel, b, db) - pickRGB(bsel, b, db)) * cAlpha >> 7) + pickRGB(dsel, b, db));
-        }
-        else
-        {
-            r = srcR;
-            g = srcG;
-            b = srcB;
+            int br = ((pickRGB(asel, r, dr) - pickRGB(bsel, r, dr)) * cAlpha >> 7) + pickRGB(dsel, r, dr);
+            int bg = ((pickRGB(asel, g, dg) - pickRGB(bsel, g, dg)) * cAlpha >> 7) + pickRGB(dsel, g, dg);
+            int bb = ((pickRGB(asel, b, db) - pickRGB(bsel, b, db)) * cAlpha >> 7) + pickRGB(dsel, b, db);
+
+            if (colclamp.clamp)
+            {
+                r = clampU8(br);
+                g = clampU8(bg);
+                b = clampU8(bb);
+            }
+            else
+            {
+                r &= 0xFF;
+                g &= 0xFF;
+                b &= 0xFF;
+            }
         }
     }
 

@@ -1910,7 +1910,10 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
         break;
     case GS_REG_DIMX:
     case GS_REG_DTHE:
+        break;
     case GS_REG_COLCLAMP:
+        m_registers.colclamp.data = value;
+        break;
     case GS_REG_MIPTBP1_1:
     case GS_REG_MIPTBP1_2:
     case GS_REG_MIPTBP2_1:
