@@ -1,7 +1,7 @@
 #include "MiniTest.h"
 #include "runtime/ps2_gif_arbiter.h"
 #include "runtime/ps2_gs_gpu.h"
-#include "runtime/ps2_gs_psmct32.h"
+#include "runtime/ps2_gs_memory.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_vu1.h"
 
@@ -543,7 +543,7 @@ void register_ps2_vu1_tests()
             bool imageOk = true;
             for (uint32_t x = 0; x < 4u && imageOk; ++x)
             {
-                const uint32_t off = GSPSMCT32::addrPSMCT32(0u, 1u, x, 0u);
+                const uint32_t off = GSMem::LookupPixelAddressCT32(0u, 1u, x, 0u);
                 for (uint32_t c = 0; c < 4u; ++c)
                 {
                     if (vramOut[off + c] != static_cast<uint8_t>(0x90u + x * 4u + c))
