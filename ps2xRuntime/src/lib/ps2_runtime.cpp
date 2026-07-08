@@ -371,21 +371,14 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     static std::vector<uint8_t> s_uploadBuffer(DEFAULT_FB_SIZE, 0u);
 
     const uint64_t currentTick = ps2_syscalls::GetCurrentVSyncTick();
-    bool latchedThisCall = false;
-    if (!s_hasLatchedInitialFrame)
+    const bool needsLatch = !s_hasLatchedInitialFrame || currentTick != s_lastPresentationTick;
+    if (needsLatch)
     {
         rt->gs().latchHostPresentationFrame();
         s_lastPresentationTick = currentTick;
         s_hasLatchedInitialFrame = true;
-        latchedThisCall = true;
     }
-    else if (currentTick != s_lastPresentationTick && rt->gs().tryLatchHostPresentationFrame())
-    {
-        s_lastPresentationTick = currentTick;
-        latchedThisCall = true;
-    }
-
-    if (!latchedThisCall && s_hasUploadedFrame)
+    else if (s_hasUploadedFrame)
     {
         outWidth = (s_lastWidth != 0u) ? s_lastWidth : FB_WIDTH;
         outHeight = (s_lastHeight != 0u) ? s_lastHeight : DEFAULT_DISPLAY_HEIGHT;

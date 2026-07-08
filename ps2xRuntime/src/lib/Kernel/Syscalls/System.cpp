@@ -857,11 +857,9 @@ namespace ps2_syscalls
                                           const FindAddressMatchSample *matches,
                                           uint32_t matchCount)
     {
-        if constexpr (!ps2_log::agressive_logs_enabled)
-        {
-            return;
-        }
-
+#if !AGRESSIVE_LOGS
+        return;
+#else
         static std::atomic<uint32_t> s_findAddressHitLogs{0u};
         static std::atomic<uint32_t> s_findAddressMissLogs{0u};
         constexpr uint32_t kMaxFindAddressHitLogs = 16u;
@@ -942,6 +940,7 @@ namespace ps2_syscalls
             std::cerr << std::dec;
         }
         std::cerr << std::endl;
+#endif
     }
 
     // 0x83 FindAddress:

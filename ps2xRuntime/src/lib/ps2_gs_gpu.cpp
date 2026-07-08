@@ -642,6 +642,11 @@ void GS::recordDebugEventUnlocked(GSDebugHistoryEntry entry)
 
 void GS::recordGifTagDebugEventUnlocked(uint32_t sizeBytes, uint32_t nloop, uint8_t flg, uint32_t nreg)
 {
+    if (m_debugHistoryPaused)
+    {
+        return;
+    }
+
     GSDebugHistoryEntry entry = makeDebugEventUnlocked(GSDebugEventKind::GifTag);
     entry.gifSizeBytes = sizeBytes;
     entry.gifNloop = nloop;
@@ -652,6 +657,11 @@ void GS::recordGifTagDebugEventUnlocked(uint32_t sizeBytes, uint32_t nloop, uint
 
 void GS::recordRegisterDebugEventUnlocked(uint8_t regAddr, uint64_t value)
 {
+    if (m_debugHistoryPaused)
+    {
+        return;
+    }
+
     switch (regAddr)
     {
     case GS_REG_PRIM:
@@ -690,6 +700,11 @@ void GS::recordRegisterDebugEventUnlocked(uint8_t regAddr, uint64_t value)
 
 void GS::recordDrawDebugEventUnlocked(int vertexCount)
 {
+    if (m_debugHistoryPaused)
+    {
+        return;
+    }
+
     if (vertexCount <= 0)
     {
         return;
@@ -722,6 +737,11 @@ void GS::recordDrawDebugEventUnlocked(int vertexCount)
 
 void GS::recordTransferDebugEventUnlocked()
 {
+    if (m_debugHistoryPaused)
+    {
+        return;
+    }
+
     GSDebugHistoryEntry entry = makeDebugEventUnlocked(GSDebugEventKind::Transfer);
     entry.transferPixels = m_transferState.total_pixels;
     recordDebugEventUnlocked(entry);
@@ -729,6 +749,11 @@ void GS::recordTransferDebugEventUnlocked()
 
 void GS::recordPresentDebugEventUnlocked(uint32_t displayFbp, uint32_t sourceFbp, uint32_t width, uint32_t height, bool usedPreferred)
 {
+    if (m_debugHistoryPaused)
+    {
+        return;
+    }
+
     GSDebugHistoryEntry entry = makeDebugEventUnlocked(GSDebugEventKind::Present);
     entry.displayFbp = displayFbp;
     entry.sourceFbp = sourceFbp;
@@ -916,18 +941,6 @@ void GS::latchHostPresentationFrame()
 {
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     latchHostPresentationFrameUnlocked();
-}
-
-bool GS::tryLatchHostPresentationFrame()
-{
-    if (!m_stateMutex.try_lock())
-    {
-        return false;
-    }
-
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex, std::adopt_lock);
-    latchHostPresentationFrameUnlocked();
-    return true;
 }
 
 void GS::latchHostPresentationFrameUnlocked()
