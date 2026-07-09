@@ -367,16 +367,24 @@ struct SifRpcDebugEvent
     uint32_t endParam = 0;
     uint32_t semaId = 0;
     uint32_t flags = 0;
+    uint32_t sendPreviewSize = 0;
+    uint32_t recvPreviewSize = 0;
+    uint8_t sendPreview[16]{};
+    uint8_t recvPreview[16]{};
     int32_t result = 0;
 };
 
 static constexpr size_t kSifRpcDebugHistoryCount = 256u;
+static constexpr size_t kSifRpcDebugPreviewBytes = 16u;
 static constexpr uint32_t kSifRpcDebugFlagNowait = 1u << 0;
 static constexpr uint32_t kSifRpcDebugFlagHandledByHle = 1u << 1;
 static constexpr uint32_t kSifRpcDebugFlagCallback = 1u << 2;
 static constexpr uint32_t kSifRpcDebugFlagMissingClient = 1u << 3;
 static constexpr uint32_t kSifRpcDebugFlagServerDispatch = 1u << 4;
 static constexpr uint32_t kSifRpcDebugFlagDtx = 1u << 5;
+static constexpr uint32_t kSifRpcDebugFlagUnhandled = 1u << 6;
+static constexpr uint32_t kSifRpcDebugFlagFallbackCopy = 1u << 7;
+static constexpr uint32_t kSifRpcDebugFlagFallbackZero = 1u << 8;
 
 struct SoundDriverRpcState
 {

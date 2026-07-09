@@ -42,6 +42,120 @@ namespace ps2_syscalls
             pushSifRpcDebugEventLocked(event);
         }
 
+        void fillRpcDebugPreview(const uint8_t *rdram, uint32_t addr, uint32_t size, uint8_t *preview, uint32_t &previewSize)
+        {
+            previewSize = 0u;
+            if (!rdram || !addr || !preview || size == 0u)
+            {
+                return;
+            }
+
+            const uint32_t count = std::min<uint32_t>(size, static_cast<uint32_t>(kSifRpcDebugPreviewBytes));
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                const uint8_t *ptr = getConstMemPtr(rdram, addr + i);
+                if (!ptr)
+                {
+                    break;
+                }
+                preview[i] = *ptr;
+                ++previewSize;
+            }
+        }
+
+        std::string formatRpcTraceBytes(const uint8_t *bytes, uint32_t count)
+        {
+            std::string out;
+            if (!bytes || count == 0u)
+            {
+                return out;
+            }
+
+            char item[4] = {};
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                std::snprintf(item, sizeof(item), "%02X", bytes[i]);
+                if (!out.empty())
+                {
+                    out.push_back(' ');
+                }
+                out += item;
+            }
+            return out;
+        }
+
+#ifndef PS2X_ENABLE_IOP_RPC_TRACE
+#define PS2X_ENABLE_IOP_RPC_TRACE 1
+#endif
+
+#if PS2X_ENABLE_IOP_RPC_TRACE
+        std::string loadedIopModuleTraceSummary()
+        {
+            std::lock_guard<std::mutex> lock(g_sif_module_mutex);
+            std::string out;
+            uint32_t count = 0u;
+            for (const auto &entry : g_sif_modules_by_id)
+            {
+                const SifModuleRecord &module = entry.second;
+                if (!module.loaded)
+                {
+                    continue;
+                }
+
+                if (!out.empty())
+                {
+                    out += "; ";
+                }
+                out += module.pathKey.empty() ? module.path : module.pathKey;
+                ++count;
+                if (count >= 6u)
+                {
+                    break;
+                }
+            }
+            return out;
+        }
+
+        void logUnhandledRpcTrace(const SifRpcDebugEvent &event)
+        {
+            static std::unordered_set<uint64_t> loggedSignatures;
+            if (std::strcmp(event.op ? event.op : "", "CallRpc") != 0)
+            {
+                return;
+            }
+
+            uint64_t signature = 1469598103934665603ull;
+            auto mixSignature = [&](uint32_t value)
+            {
+                signature ^= static_cast<uint64_t>(value);
+                signature *= 1099511628211ull;
+            };
+            mixSignature(event.sid);
+            mixSignature(event.rpcNum);
+            mixSignature(event.sendSize);
+            mixSignature(event.recvSize);
+            if (!loggedSignatures.insert(signature).second || loggedSignatures.size() > 128u)
+            {
+                return;
+            }
+
+            const std::string modules = loadedIopModuleTraceSummary();
+            std::cerr << "[IOP/RPC trace:unhandled]"
+                      << " sid=0x" << std::hex << event.sid
+                      << " rpc=0x" << event.rpcNum
+                      << " pc=0x" << event.pc
+                      << " ra=0x" << event.ra
+                      << " send=0x" << event.sendBuf << "/" << std::dec << event.sendSize
+                      << " recv=0x" << std::hex << event.recvBuf << "/" << std::dec << event.recvSize
+                      << " sendBytes=[" << formatRpcTraceBytes(event.sendPreview, event.sendPreviewSize) << "]"
+                      << " loadedModules=[" << modules << "]"
+                      << " suggested=\"[[iop_rpc]] sid = \\\"0x" << std::hex << event.sid
+                      << "\\\" rpc = \\\"0x" << event.rpcNum
+                      << "\\\" response = \\\"" << (event.recvSize == 0u ? "ack" : "zero_recv") << "\\\"\""
+                      << std::dec << std::endl;
+        }
+#endif
+
         void resetDtxRpcStateUnlocked()
         {
             g_dtx_remote_by_id.clear();
@@ -1695,6 +1809,8 @@ namespace ps2_syscalls
         bool handled = false;
         bool handledByIop = false;
         bool callbackInvokedForDebug = false;
+        bool fallbackCopiedSendToRecv = false;
+        bool fallbackZeroedRecv = false;
 
         auto readRpcU32 = [&](uint32_t addr, uint32_t &out) -> bool
         {
@@ -2331,10 +2447,12 @@ namespace ps2_syscalls
             {
                 size_t copySize = (sendSize < recvSize) ? sendSize : recvSize;
                 rpcCopyToRdram(rdram, recvBuf, sendBuf, copySize);
+                fallbackCopiedSendToRecv = true;
             }
             else if (!handled)
             {
                 rpcZeroRdram(rdram, recvBuf, recvSize);
+                fallbackZeroedRecv = true;
             }
         }
 
@@ -2497,8 +2615,19 @@ namespace ps2_syscalls
                       (handledByIop ? kSifRpcDebugFlagHandledByHle : 0u) |
                       (callbackInvokedForDebug ? kSifRpcDebugFlagCallback : 0u) |
                       ((sd && sd->func) ? kSifRpcDebugFlagServerDispatch : 0u) |
-                      ((isDtxSid || isDtxUrpc) ? kSifRpcDebugFlagDtx : 0u);
+                      ((isDtxSid || isDtxUrpc) ? kSifRpcDebugFlagDtx : 0u) |
+                      (!handled ? kSifRpcDebugFlagUnhandled : 0u) |
+                      (fallbackCopiedSendToRecv ? kSifRpcDebugFlagFallbackCopy : 0u) |
+                      (fallbackZeroedRecv ? kSifRpcDebugFlagFallbackZero : 0u);
+        fillRpcDebugPreview(rdram, sendBuf, sendSize, event.sendPreview, event.sendPreviewSize);
+        fillRpcDebugPreview(rdram, recvBuf, recvSize, event.recvPreview, event.recvPreviewSize);
         event.result = 0;
+#if PS2X_ENABLE_IOP_RPC_TRACE
+        if ((event.flags & kSifRpcDebugFlagUnhandled) != 0u)
+        {
+            logUnhandledRpcTrace(event);
+        }
+#endif
         pushSifRpcDebugEvent(event);
 
         setReturnS32(ctx, 0);

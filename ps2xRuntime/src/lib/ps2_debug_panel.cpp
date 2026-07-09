@@ -153,6 +153,9 @@ namespace
             {kSifRpcDebugFlagMissingClient, "bad-client"},
             {kSifRpcDebugFlagServerDispatch, "server"},
             {kSifRpcDebugFlagDtx, "dtx"},
+            {kSifRpcDebugFlagUnhandled, "unhandled"},
+            {kSifRpcDebugFlagFallbackCopy, "fallback-copy"},
+            {kSifRpcDebugFlagFallbackZero, "fallback-zero"},
         };
 
         std::string out;
@@ -168,6 +171,48 @@ namespace
             }
         }
         return out;
+    }
+
+    std::string rpcPreviewBytes(const uint8_t *bytes, uint32_t count)
+    {
+        if (!bytes || count == 0u)
+        {
+            return "";
+        }
+
+        std::string out;
+        char item[4] = {};
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            std::snprintf(item, sizeof(item), "%02X", bytes[i]);
+            if (!out.empty())
+            {
+                out.push_back(' ');
+            }
+            out += item;
+        }
+        return out;
+    }
+
+    std::string rpcMockSuggestion(const SifRpcDebugEvent &event)
+    {
+        const char *response = "zero_recv";
+        if (event.recvSize == 0u)
+        {
+            response = "ack";
+        }
+        else if (event.recvSize == sizeof(uint32_t))
+        {
+            response = "return_u32";
+        }
+
+        std::ostringstream out;
+        out << "[[iop_rpc]] sid = \"0x"
+            << std::hex << std::setw(8) << std::setfill('0') << event.sid
+            << "\" rpc = \"0x"
+            << std::setw(8) << event.rpcNum
+            << "\" response = \"" << response << "\"";
+        return out.str();
     }
 
     template <typename T>
@@ -1269,6 +1314,69 @@ namespace
         ImGui::Checkbox("Only CallRpc", &onlyCalls);
         ImGui::SameLine();
         ImGui::Checkbox("Hide bind/register/init", &hideBindNoise);
+
+        ImGui::SeparatorText("IOP/RPC tracer");
+        ImGui::TextDisabled("Unhandled rows are RPC calls that no HLE service or EE server callback consumed; the runtime used copy/zero fallback.");
+        static bool tracerOnlyUnhandled = true;
+        ImGui::Checkbox("Only unhandled", &tracerOnlyUnhandled);
+        if (ImGui::BeginTable("iop_rpc_tracer", 10,
+                              ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable |
+                                  ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp,
+                              ImVec2(0, 220)))
+        {
+            ImGui::TableSetupColumn("Seq");
+            ImGui::TableSetupColumn("SID");
+            ImGui::TableSetupColumn("Name");
+            ImGui::TableSetupColumn("Rpc#");
+            ImGui::TableSetupColumn("PC");
+            ImGui::TableSetupColumn("Send");
+            ImGui::TableSetupColumn("Recv");
+            ImGui::TableSetupColumn("Send[0..15]");
+            ImGui::TableSetupColumn("Recv[0..15]");
+            ImGui::TableSetupColumn("Suggested mock");
+            ImGui::TableHeadersRow();
+
+            for (const SifRpcDebugEvent &event : events)
+            {
+                const char *op = event.op ? event.op : "";
+                if (std::strcmp(op, "CallRpc") != 0)
+                {
+                    continue;
+                }
+                const bool unhandled = (event.flags & kSifRpcDebugFlagUnhandled) != 0u;
+                if (tracerOnlyUnhandled && !unhandled)
+                {
+                    continue;
+                }
+
+                const std::string sendPreview = rpcPreviewBytes(event.sendPreview, event.sendPreviewSize);
+                const std::string recvPreview = rpcPreviewBytes(event.recvPreview, event.recvPreviewSize);
+                const std::string suggestion = rpcMockSuggestion(event);
+
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::Text("%llu", static_cast<unsigned long long>(event.seq));
+                ImGui::TableNextColumn();
+                ImGui::Text("0x%08X", event.sid);
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(iopRpcSidName(event.sid));
+                ImGui::TableNextColumn();
+                ImGui::Text("0x%08X", event.rpcNum);
+                ImGui::TableNextColumn();
+                ImGui::Text("0x%08X", event.pc);
+                ImGui::TableNextColumn();
+                ImGui::Text("0x%08X/%u", event.sendBuf, event.sendSize);
+                ImGui::TableNextColumn();
+                ImGui::Text("0x%08X/%u", event.recvBuf, event.recvSize);
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(sendPreview.c_str());
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(recvPreview.c_str());
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(suggestion.c_str());
+            }
+            ImGui::EndTable();
+        }
 
         if (ImGui::BeginTable("rpc_history", 20,
                               ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable |
