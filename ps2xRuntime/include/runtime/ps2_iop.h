@@ -9,6 +9,10 @@ constexpr uint32_t IOP_SID_SNDDRV_COMMAND = 0x00000000u;
 constexpr uint32_t IOP_SID_SNDDRV_STATE = 0x00000001u;
 constexpr uint32_t IOP_SID_LOTR_CLFILE = 0x0000FF01u;
 constexpr uint32_t IOP_SID_LOTR_SOUND = 0x00012345u;
+// ps2sdk libmc binds SIO2 memory-card RPC to 0x80000400 and DEV9 memory-card RPC to 0x80000480.
+// Source: https://github.com/ps2dev/ps2sdk/blob/master/ee/rpc/memorycard/src/libmc.c
+constexpr uint32_t IOP_SID_MCSERV = 0x80000400u;
+constexpr uint32_t IOP_SID_MCSERV_DEV9 = 0x80000480u;
 constexpr uint32_t IOP_SID_LIBSD = 0x80000701u;
 constexpr uint32_t IOP_SID_FATAL_FRAME_SDRDRV = 0x19740512u;
 

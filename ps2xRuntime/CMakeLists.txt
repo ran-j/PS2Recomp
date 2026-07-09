@@ -352,6 +352,7 @@ add_library(ps2_runtime STATIC
     src/lib/ps2_iop.cpp
     src/lib/ps2_iop_audio.cpp
     src/lib/ps2_iop_dbcman.cpp
+    src/lib/ps2_iop_memorycard.cpp
     src/lib/ps2_iop_sdrdrv.cpp
     src/lib/ps2_iop_cl.cpp
     src/lib/ps2_memory.cpp

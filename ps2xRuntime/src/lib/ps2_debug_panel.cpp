@@ -87,6 +87,10 @@ namespace
             return "LOTR CL";
         case IOP_SID_LOTR_SOUND:
             return "LOTR Sound";
+        case IOP_SID_MCSERV:
+            return "MCSERV";
+        case IOP_SID_MCSERV_DEV9:
+            return "MCSERV DEV9";
         case 0x80001300u:
             return "DBCMAN";
         default:
@@ -1089,6 +1093,8 @@ namespace
                 {"SNDDRV state", IOP_SID_SNDDRV_STATE, false},
                 {"LIBSD", IOP_SID_LIBSD, false},
                 {"Fatal Frame SDRDRV", IOP_SID_FATAL_FRAME_SDRDRV, false},
+                {"MCSERV", IOP_SID_MCSERV, false},
+                {"MCSERV DEV9", IOP_SID_MCSERV_DEV9, false},
                 {"LOTR SOUND", IOP_SID_LOTR_SOUND, false},
                 {"LOTR CLFILE", IOP_SID_LOTR_CLFILE, false},
                 {"DBCMAN", 0x80001300u, false},

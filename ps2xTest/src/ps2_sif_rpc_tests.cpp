@@ -78,12 +78,26 @@ namespace
         uint32_t end;
         uint32_t next;
     };
+
+    struct McDescParam
+    {
+        int32_t fd;
+        int32_t port;
+        int32_t slot;
+        int32_t size;
+        int32_t offset;
+        int32_t origin;
+        uint32_t buffer;
+        uint32_t param;
+        uint8_t data[16];
+    };
     #pragma pack(pop)
 
     static_assert(sizeof(SifRpcHeader) == 0x10u, "Unexpected SifRpcHeader size.");
     static_assert(sizeof(SifRpcClientData) == 0x28u, "Unexpected SifRpcClientData size.");
     static_assert(sizeof(SifRpcServerData) == 0x44u, "Unexpected SifRpcServerData size.");
     static_assert(sizeof(SifRpcDataQueue) == 0x18u, "Unexpected SifRpcDataQueue size.");
+    static_assert(sizeof(McDescParam) == 0x30u, "Unexpected McDescParam size.");
 
     struct TestEnv
     {
@@ -355,6 +369,81 @@ void register_ps2_sif_rpc_tests()
                      "SDRDRV load command should copy bytes from img_bd.bin by LBN");
             t.Equals(env.rdram[kRecvAddr + 0x6Cu + (kLoadId * 8u)], static_cast<uint8_t>(0),
                      "SDRDRV load status should report completed");
+        });
+
+        tc.Run("MCSERV RPC init and get info report a formatted PS2 card", [](TestCase &t)
+        {
+            TestEnv env;
+            ScopedTempDir temp("mcserv_rpc");
+
+            const PS2Runtime::IoPaths oldPaths = PS2Runtime::getIoPaths();
+            PS2Runtime::IoPaths ioPaths;
+            ioPaths.elfDirectory = temp.path;
+            ioPaths.hostRoot = temp.path;
+            ioPaths.cdRoot = temp.path;
+            ioPaths.mcRoot = temp.path / "mc0";
+            PS2Runtime::setIoPaths(ioPaths);
+
+            constexpr uint32_t kSendAddr = 0x00034000u;
+            constexpr uint32_t kRecvAddr = 0x00035000u;
+            constexpr uint32_t kEndParamAddr = 0x00036000u;
+
+            env.runtime.iop().init(env.rdram.data());
+
+            uint32_t resultPtr = 0u;
+            bool signalNowait = true;
+            const bool initHandled = env.runtime.iop().handleRPC(&env.runtime,
+                                                                 IOP_SID_MCSERV,
+                                                                 0xFEu,
+                                                                 kSendAddr,
+                                                                 sizeof(McDescParam),
+                                                                 kRecvAddr,
+                                                                 12u,
+                                                                 resultPtr,
+                                                                 signalNowait);
+            t.IsTrue(initHandled, "MCSERV init RPC should be handled");
+            t.Equals(resultPtr, kRecvAddr, "MCSERV init should return recv buffer");
+            t.IsFalse(signalNowait, "MCSERV init should not request special nowait signaling");
+            t.Equals(readGuestStruct<int32_t>(env.rdram.data(), kRecvAddr + 0u), 0,
+                     "MCSERV init result should succeed");
+            t.IsTrue(readGuestStruct<uint32_t>(env.rdram.data(), kRecvAddr + 4u) >= 0x205u,
+                     "MCSERV init should expose a supported mcserv version");
+            t.IsTrue(readGuestStruct<uint32_t>(env.rdram.data(), kRecvAddr + 8u) >= 0x206u,
+                     "MCSERV init should expose a supported mcman version");
+
+            McDescParam getInfo{};
+            getInfo.port = 0;
+            getInfo.slot = 0;
+            getInfo.size = 1;   // formatted requested by XMCSERV libmc
+            getInfo.offset = 1; // free clusters requested by XMCSERV libmc
+            getInfo.origin = 1; // type requested by XMCSERV libmc
+            getInfo.param = kEndParamAddr;
+            writeGuestStruct(env.rdram.data(), kSendAddr, getInfo);
+            std::memset(env.rdram.data() + kRecvAddr, 0xCC, 12u);
+            std::memset(env.rdram.data() + kEndParamAddr, 0xCC, 192u);
+
+            signalNowait = true;
+            const bool getInfoHandled = env.runtime.iop().handleRPC(&env.runtime,
+                                                                    IOP_SID_MCSERV,
+                                                                    0x01u,
+                                                                    kSendAddr,
+                                                                    sizeof(McDescParam),
+                                                                    kRecvAddr,
+                                                                    4u,
+                                                                    resultPtr,
+                                                                    signalNowait);
+
+            PS2Runtime::setIoPaths(oldPaths);
+
+            t.IsTrue(getInfoHandled, "MCSERV get info RPC should be handled");
+            t.Equals(readGuestStruct<int32_t>(env.rdram.data(), kRecvAddr), 0,
+                     "get info result should succeed");
+            t.Equals(readGuestStruct<int32_t>(env.rdram.data(), kEndParamAddr + 0u), 2,
+                     "get info should report PS2 card type");
+            t.Equals(readGuestStruct<int32_t>(env.rdram.data(), kEndParamAddr + 4u), 0x2000,
+                     "get info should report free clusters");
+            t.Equals(readGuestStruct<int32_t>(env.rdram.data(), kEndParamAddr + 144u), 1,
+                     "get info should report formatted card");
         });
 
         tc.Run("LotR ClFile RPC opens reads and reports EOF", [](TestCase &t)

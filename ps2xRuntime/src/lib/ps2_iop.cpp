@@ -2,6 +2,7 @@
 #include "runtime/ps2_iop_audio.h"
 #include "runtime/ps2_iop_cl.h"
 #include "runtime/ps2_iop_dbcman.h"
+#include "runtime/ps2_iop_memorycard.h"
 #include "runtime/ps2_iop_sdrdrv.h"
 #include "runtime/ps2_memory.h"
 #include "ps2_runtime.h"
@@ -21,6 +22,7 @@ void ps2_iop::reset()
 {
     ps2_iop_cl::reset();
     ps2_iop_dbcman::reset();
+    ps2_iop_memorycard::reset();
     ps2_iop_sdrdrv::reset();
 }
 
@@ -72,6 +74,20 @@ bool ps2_iop::handleRPC(PS2Runtime *runtime,
                                       recvBufAddr,
                                       recvSize,
                                       resultPtr))
+    {
+        return true;
+    }
+
+    if (ps2_iop_memorycard::handleMemoryCardRpc(m_rdram,
+                                                runtime,
+                                                sid,
+                                                rpcNum,
+                                                sendBufAddr,
+                                                sendSize,
+                                                recvBufAddr,
+                                                recvSize,
+                                                resultPtr,
+                                                signalNowaitCompletion))
     {
         return true;
     }
