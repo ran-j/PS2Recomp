@@ -344,7 +344,6 @@ public:
     void setDebugHistoryPaused(bool paused);
     bool getPreferredDisplaySource(GSFrameReg &outSource, uint32_t &outDestFbp) const;
     void latchHostPresentationFrame();
-    bool tryLatchHostPresentationFrame();
     bool copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
                                           uint32_t &outWidth,
                                           uint32_t &outHeight,
@@ -456,7 +455,7 @@ private:
     uint64_t m_debugNextSeq = 1;
     uint32_t m_debugFrameIndex = 0;
     uint64_t m_debugLastVsyncTick = UINT64_MAX;
-    bool m_debugHistoryPaused = false;
+    bool m_debugHistoryPaused = true;
 
     GSRasterizer m_rasterizer;
 

@@ -12,13 +12,11 @@
 #include <vector>
 
 #ifndef PS2_RUNTIME_LOGS
-#define PS2_RUNTIME_LOGS 1
+#define PS2_RUNTIME_LOGS 0
 #endif
 
-#if defined(AGRESSIVE_LOGS)
-#define PS2_AGRESSIVE_LOGS_ENABLED 1
-#else
-#define PS2_AGRESSIVE_LOGS_ENABLED 0
+#ifndef AGRESSIVE_LOGS
+#define AGRESSIVE_LOGS 0
 #endif
 
 namespace ps2_log
@@ -106,7 +104,7 @@ inline void clear_runtime_log_entries()
 }
 }
 
-#if defined(PS2_RUNTIME_LOGS) || defined(AGRESSIVE_LOGS)
+#if PS2_RUNTIME_LOGS || AGRESSIVE_LOGS
 #define RUNTIME_LOG(x)                                                                                                  \
     do                                                                                                                  \
     {                                                                                                                   \
@@ -127,12 +125,10 @@ inline void clear_runtime_log_entries()
 #define RUNTIME_LOG(x) do {} while(0)
 #endif
 
-#ifdef AGRESSIVE_LOGS
+#if AGRESSIVE_LOGS
 
 namespace ps2_log
 {
-inline constexpr bool agressive_logs_enabled = PS2_AGRESSIVE_LOGS_ENABLED != 0;
-
 inline std::string log_path()
 {
     static std::string path;
@@ -181,17 +177,13 @@ inline void print_saved_location()
 #define PS2_IF_AGRESSIVE_LOGS(code) \
     do                              \
     {                               \
-        if constexpr (ps2_log::agressive_logs_enabled) \
-        {                           \
-            code;                   \
-        }                           \
+        code;                       \
     } while (0)
 
 #else
 
 namespace ps2_log
 {
-inline constexpr bool agressive_logs_enabled = false;
 inline std::string log_path()
 {
     return (std::filesystem::current_path() / "ps2_log.txt").string();

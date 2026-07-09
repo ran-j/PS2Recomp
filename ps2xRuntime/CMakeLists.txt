@@ -373,6 +373,7 @@ endif()
 if(PS2X_ENABLE_AGRESSIVE_LOGS)
     target_compile_definitions(ps2_runtime PUBLIC
         AGRESSIVE_LOGS=1
+        PS2_FUNCTION_LOG_TRACKER=1
     )
 endif()
 
