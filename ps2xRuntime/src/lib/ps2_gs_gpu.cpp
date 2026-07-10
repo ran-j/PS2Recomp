@@ -1,9 +1,5 @@
 #include "runtime/ps2_gs_gpu.h"
 #include "runtime/ps2_gs_common.h"
-#include "runtime/ps2_gs_psmct16.h"
-#include "runtime/ps2_gs_psmct32.h"
-#include "runtime/ps2_gs_psmt4.h"
-#include "runtime/ps2_gs_psmt8.h"
 #include "ps2_log.h"
 #include "ps2_syscalls.h"
 #include "runtime/ps2_memory.h"
@@ -29,23 +25,6 @@ namespace
                                      (((g >> 3) & 0x1Fu) << 5) |
                                      (((b >> 3) & 0x1Fu) << 10) |
                                      ((a >= 0x40u) ? 0x8000u : 0u));
-    }
-
-    uint32_t addrPSMCT16Family(uint32_t basePtr, uint32_t width, uint8_t psm, uint32_t x, uint32_t y)
-    {
-        switch (psm)
-        {
-        case GS_PSM_CT16:
-            return GSPSMCT16::addrPSMCT16(basePtr, width, x, y);
-        case GS_PSM_CT16S:
-            return GSPSMCT16::addrPSMCT16S(basePtr, width, x, y);
-        case GS_PSM_Z16:
-            return GSPSMCT16::addrPSMZ16(basePtr, width, x, y);
-        case GS_PSM_Z16S:
-            return GSPSMCT16::addrPSMZ16S(basePtr, width, x, y);
-        default:
-            return 0u;
-        }
     }
 
     static inline uint64_t loadLE64(const uint8_t *p)
@@ -292,7 +271,7 @@ namespace
         u32 fbw = std::max<u32>(ctx.frame.fbw, 1u);
         u32 fpsm = ctx.frame.psm;
 
-        if ((ctx.fba & 0x1ull) != 0ull && ctx.frame.psm != GS_PSM_CT24)
+        if (ctx.fba.fba && ctx.frame.psm != GS_PSM_CT24)
         {
             a = static_cast<uint8_t>(a | 0x80u);
         }
@@ -370,60 +349,102 @@ GS::GS()
         switch (i)
         {
         case GS_PSM_CT32:
-            m_read_vram_funcs[i] = ReadCT32;
-            m_write_vram_funcs[i] = WriteCT32;
+            m_pixel_address_funcs[i] = LookupPixelAddressCT32;
+            m_read_address_funcs[i]  = ReadPixelAddressCT32;
+            m_write_address_funcs[i] = WritePixelAddressCT32;
+            m_read_pixel_funcs[i]    = ReadPixelCT32;
+            m_write_pixel_funcs[i]   = WritePixelCT32;
             break;
         case GS_PSM_CT24:
-            m_read_vram_funcs[i] = ReadCT24;
-            m_write_vram_funcs[i] = WriteCT24;
+            m_pixel_address_funcs[i] = LookupPixelAddressCT32;
+            m_read_address_funcs[i]  = ReadPixelAddressCT24;
+            m_write_address_funcs[i] = WritePixelAddressCT24;
+            m_read_pixel_funcs[i]    = ReadPixelCT24;
+            m_write_pixel_funcs[i]   = WritePixelCT24;
             break;
         case GS_PSM_CT16:
-            m_read_vram_funcs[i] = ReadCT16;
-            m_write_vram_funcs[i] = WriteCT16;
+            m_pixel_address_funcs[i] = LookupPixelAddressCT16;
+            m_read_address_funcs[i]  = ReadPixelAddressCT16;
+            m_write_address_funcs[i] = WritePixelAddressCT16;
+            m_read_pixel_funcs[i]    = ReadPixelCT16;
+            m_write_pixel_funcs[i]   = WritePixelCT16;
             break;
         case GS_PSM_CT16S:
-            m_read_vram_funcs[i] = ReadCT16S;
-            m_write_vram_funcs[i] = WriteCT16S;
+            m_pixel_address_funcs[i] = LookupPixelAddressCT16S;
+            m_read_address_funcs[i]  = ReadPixelAddressCT16S;
+            m_write_address_funcs[i] = WritePixelAddressCT16S;
+            m_read_pixel_funcs[i]    = ReadPixelCT16S;
+            m_write_pixel_funcs[i]   = WritePixelCT16S;
             break;
         case GS_PSM_T8:
-            m_read_vram_funcs[i] = ReadP8;
-            m_write_vram_funcs[i] = WriteP8;
+            m_pixel_address_funcs[i] = LookupPixelAddressP8;
+            m_read_address_funcs[i]  = ReadPixelAddressP8;
+            m_write_address_funcs[i] = WritePixelAddressP8;
+            m_read_pixel_funcs[i]     = ReadPixelP8;
+            m_write_pixel_funcs[i]    = WritePixelP8;
             break;
         case GS_PSM_T8H:
-            m_read_vram_funcs[i] = ReadP8H;
-            m_write_vram_funcs[i] = WriteP8H;
+            m_pixel_address_funcs[i] = LookupPixelAddressCT32;
+            m_read_address_funcs[i]  = ReadPixelAddressP8H;
+            m_write_address_funcs[i] = WritePixelAddressP8H;
+            m_read_pixel_funcs[i]    = ReadPixelP8H;
+            m_write_pixel_funcs[i]   = WritePixelP8H;
             break;
         case GS_PSM_T4:
-            m_read_vram_funcs[i] = ReadP4;
-            m_write_vram_funcs[i] = WriteP4;
+            m_pixel_address_funcs[i] = LookupPixelAddressP4;
+            m_read_address_funcs[i]  = ReadPixelAddressP4;
+            m_write_address_funcs[i] = WritePixelAddressP4;
+            m_read_pixel_funcs[i]    = ReadPixelP4;
+            m_write_pixel_funcs[i]   = WritePixelP4;
             break;
         case GS_PSM_T4HH:
-            m_read_vram_funcs[i] = ReadP4HH;
-            m_write_vram_funcs[i] = WriteP4HH;
+            m_pixel_address_funcs[i] = LookupPixelAddressCT32;
+            m_read_address_funcs[i]  = ReadPixelAddressP4HH;
+            m_write_address_funcs[i] = WritePixelAddressP4HH;
+            m_read_pixel_funcs[i]    = ReadPixelP4HH;
+            m_write_pixel_funcs[i]   = WritePixelP4HH;
             break;
         case GS_PSM_T4HL:
-            m_read_vram_funcs[i] = ReadP4HL;
-            m_write_vram_funcs[i] = WriteP4HL;
+            m_pixel_address_funcs[i] = LookupPixelAddressCT32;
+            m_read_address_funcs[i]  = ReadPixelAddressP4HL;
+            m_write_address_funcs[i] = WritePixelAddressP4HL;
+            m_read_pixel_funcs[i]    = ReadPixelP4HL;
+            m_write_pixel_funcs[i]   = WritePixelP4HL;
             break;
         case GS_PSM_Z32:
-            m_read_vram_funcs[i] = ReadZ32;
-            m_write_vram_funcs[i] = WriteZ32;
+            m_pixel_address_funcs[i] = LookupPixelAddressZ32;
+            m_read_address_funcs[i]  = ReadPixelAddressZ32;
+            m_write_address_funcs[i] = WritePixelAddressZ32;
+            m_read_pixel_funcs[i]    = ReadPixelZ32;
+            m_write_pixel_funcs[i]   = WritePixelZ32;
             break;
         case GS_PSM_Z24:
-            m_read_vram_funcs[i] = ReadZ24;
-            m_write_vram_funcs[i] = WriteZ24;
+            m_pixel_address_funcs[i] = LookupPixelAddressZ32;
+            m_read_address_funcs[i]  = ReadPixelAddressZ24;
+            m_write_address_funcs[i] = WritePixelAddressZ24;
+            m_read_pixel_funcs[i]    = ReadPixelZ24;
+            m_write_pixel_funcs[i]   = WritePixelZ24;
             break;
         case GS_PSM_Z16:
-            m_read_vram_funcs[i] = ReadZ16;
-            m_write_vram_funcs[i] = WriteZ16;
+            m_pixel_address_funcs[i] = LookupPixelAddressZ16;
+            m_read_address_funcs[i]  = ReadPixelAddressZ16;
+            m_write_address_funcs[i] = WritePixelAddressZ16;
+            m_read_pixel_funcs[i]    = ReadPixelZ16;
+            m_write_pixel_funcs[i]   = WritePixelZ16;
             break;
         case GS_PSM_Z16S:
-            m_read_vram_funcs[i] = ReadZ16S;
-            m_write_vram_funcs[i] = WriteZ16S;
+            m_pixel_address_funcs[i] = LookupPixelAddressZ16S;
+            m_read_address_funcs[i]  = ReadPixelAddressZ16S;
+            m_write_address_funcs[i] = WritePixelAddressZ16S;
+            m_read_pixel_funcs[i]    = ReadPixelZ16S;
+            m_write_pixel_funcs[i]   = WritePixelZ16S;
             break;
         default:
-            m_read_vram_funcs[i] = ReadNull;
-            m_write_vram_funcs[i] = WriteNull;
+            m_pixel_address_funcs[i] = LookupPixelAddressNull;
+            m_read_address_funcs[i]  = ReadPixelAddressNull;
+            m_write_address_funcs[i] = WritePixelAddressNull;
+            m_read_pixel_funcs[i]    = ReadPixelNull;
+            m_write_pixel_funcs[i]   = WritePixelNull;
             break;
         }
     }
@@ -442,26 +463,6 @@ void GS::init(uint8_t *vram, uint32_t vramSize, GSRegisters *privRegs)
 void GS::reset()
 {
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
-    std::memset(m_ctx, 0, sizeof(m_ctx));
-    m_prim = {};
-    m_curR = 0x80;
-    m_curG = 0x80;
-    m_curB = 0x80;
-    m_curA = 0x80;
-    m_curQ = 1.0f;
-    m_curS = 0.0f;
-    m_curT = 0.0f;
-    m_curU = 0;
-    m_curV = 0;
-    m_curFog = 0;
-    m_prmodecont = true;
-    m_pabe = false;
-    m_texa = {0u, false, 0u};
-    m_texclut = {0u, 0u, 0u};
-    m_bitbltbuf = {};
-    m_trxpos = {};
-    m_trxreg = {};
-    m_trxdir = 3;
     m_vtxCount = 0;
     m_vtxIndex = 0;
     m_localToHostBuffer.clear();
@@ -476,24 +477,16 @@ void GS::reset()
     m_hostPresentationSourceFbp = 0u;
     m_hostPresentationUsedPreferred = false;
     m_hasHostPresentationFrame = false;
-
     m_debugHistoryWrite = 0;
     m_debugHistoryCount = 0;
     m_debugNextSeq = 1;
     m_debugFrameIndex = 0;
     m_debugLastVsyncTick = UINT64_MAX;
-
-    for (int i = 0; i < 2; ++i)
-    {
-        m_ctx[i].frame.fbw = 10;
-        m_ctx[i].scissor = {0, 639, 0, 447};
-        m_ctx[i].xyoffset = {0, 0};
-    }
 }
 
 GSContext &GS::activeContext()
 {
-    return m_ctx[m_prim.ctxt ? 1 : 0];
+    return m_registers.ctx[m_registers.prim.ctxt];
 }
 
 void GS::snapshotVRAM()
@@ -524,15 +517,15 @@ GSDebugSnapshot GS::getDebugSnapshot() const
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
 
     GSDebugSnapshot snapshot{};
-    snapshot.ctx[0] = m_ctx[0];
-    snapshot.ctx[1] = m_ctx[1];
-    snapshot.prim = m_prim;
-    snapshot.texa = m_texa;
-    snapshot.texclut = m_texclut;
-    snapshot.bitbltbuf = m_bitbltbuf;
-    snapshot.trxpos = m_trxpos;
-    snapshot.trxreg = m_trxreg;
-    snapshot.trxdir = m_trxdir;
+    snapshot.ctx[0] = m_registers.ctx[0];
+    snapshot.ctx[1] = m_registers.ctx[1];
+    snapshot.prim = m_registers.prim;
+    snapshot.texa = m_registers.texa;
+    snapshot.texclut = m_registers.texclut;
+    snapshot.bitbltbuf = m_registers.bitbltbuf;
+    snapshot.trxpos = m_registers.trxpos;
+    snapshot.trxreg = m_registers.trxreg;
+    snapshot.trxdir = m_registers.trxdir.data;
     snapshot.transferX = m_transferState.x;
     snapshot.transferY = m_transferState.y;
     snapshot.transferTotalPixels = m_transferState.total_pixels;
@@ -594,18 +587,18 @@ GSDebugHistoryEntry GS::makeDebugEventUnlocked(GSDebugEventKind kind) const
 {
     GSDebugHistoryEntry entry{};
     entry.kind = kind;
-    entry.prim = m_prim;
-    const uint32_t ci = m_prim.ctxt ? 1u : 0u;
-    entry.frame = m_ctx[ci].frame;
-    entry.zbuf = m_ctx[ci].zbuf;
-    entry.tex0 = m_ctx[ci].tex0;
-    entry.scissor = m_ctx[ci].scissor;
-    entry.test = m_ctx[ci].test;
-    entry.alpha = m_ctx[ci].alpha;
-    entry.bitbltbuf = m_bitbltbuf;
-    entry.trxpos = m_trxpos;
-    entry.trxreg = m_trxreg;
-    entry.trxdir = m_trxdir;
+    entry.prim = m_registers.prim;
+    const uint32_t ci = m_registers.prim.ctxt ? 1u : 0u;
+    entry.frame = m_registers.ctx[ci].frame;
+    entry.zbuf = m_registers.ctx[ci].zbuf;
+    entry.tex0 = m_registers.ctx[ci].tex0;
+    entry.scissor = m_registers.ctx[ci].scissor;
+    entry.test = m_registers.ctx[ci].test.data;
+    entry.alpha = m_registers.ctx[ci].alpha.data;
+    entry.bitbltbuf = m_registers.bitbltbuf;
+    entry.trxpos = m_registers.trxpos;
+    entry.trxreg = m_registers.trxreg;
+    entry.trxdir = m_registers.trxdir.data;
     entry.transferPixels = m_transferState.total_pixels;
     return entry;
 }
@@ -1028,7 +1021,7 @@ void GS::latchHostPresentationFrameUnlocked()
         {
             for (int contextIndex = 0; contextIndex < 2; ++contextIndex)
             {
-                const GSFrameReg &candidate = m_ctx[contextIndex].frame;
+                const GSFrameReg &candidate = m_registers.ctx[contextIndex].frame;
                 if (candidate.fbp == selectedFrame.fbp &&
                     candidate.fbw == selectedFrame.fbw &&
                     candidate.psm == selectedFrame.psm)
@@ -1323,7 +1316,7 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
         uint64_t tagHi = loadLE64(data + offset + 8);
         offset += 16;
 
-        m_curQ = 1.0f;
+        m_registers.rgbaq.q = 1.0f;
 
         uint32_t nloop = static_cast<uint32_t>(tagLo & 0x7FFF);
         uint8_t flg = static_cast<uint8_t>((tagLo >> 58) & 0x3);
@@ -1395,7 +1388,7 @@ bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 
     const bool processed = visitPackedGifPacket(data, sizeBytes, [&](const PackedGifPacketTag &tag)
     {
-        m_curQ = 1.0f;
+        m_registers.rgbaq.q = 1.0f;
 
         recordGifTagDebugEventUnlocked(sizeBytes, tag.nloop, GIF_FMT_PACKED, tag.nreg);
 
@@ -1522,165 +1515,141 @@ void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
         writeRegister(GS_REG_PRIM, lo & 0x7FF);
         break;
     case 0x01:
-        m_curR = static_cast<uint8_t>(lo & 0xFF);
-        m_curG = static_cast<uint8_t>((lo >> 32) & 0xFF);
-        m_curB = static_cast<uint8_t>(hi & 0xFF);
-        m_curA = static_cast<uint8_t>((hi >> 32) & 0xFF);
+    {
+        GSRgbaqReg& rgbaq = m_registers.rgbaq;
+        rgbaq.r = static_cast<uint8_t>(lo & 0xFF);
+        rgbaq.g = static_cast<uint8_t>((lo >> 32) & 0xFF);
+        rgbaq.b = static_cast<uint8_t>(hi & 0xFF);
+        rgbaq.a = static_cast<uint8_t>((hi >> 32) & 0xFF);
         break;
+    }
     case 0x02:
     {
+        GSStReg& st = m_registers.st;
+        GSRgbaqReg& rgbaq = m_registers.rgbaq;
+
         uint32_t sBits = static_cast<uint32_t>(lo & 0xFFFFFFFF);
         uint32_t tBits = static_cast<uint32_t>((lo >> 32) & 0xFFFFFFFF);
         uint32_t qBits = static_cast<uint32_t>(hi & 0xFFFFFFFF);
-        std::memcpy(&m_curS, &sBits, 4);
-        std::memcpy(&m_curT, &tBits, 4);
-        std::memcpy(&m_curQ, &qBits, 4);
-        if (m_curQ == 0.0f)
-            m_curQ = 1.0f;
+
+        st.s = std::bit_cast<f32>(sBits);
+        st.t = std::bit_cast<f32>(tBits);
+        rgbaq.q = std::bit_cast<f32>(qBits);
+
+        if (rgbaq.q == 0.0f)
+            rgbaq.q = 1.0f;
         break;
     }
     case 0x03:
-        m_curU = static_cast<uint16_t>(lo & 0x3FFFu);
-        m_curV = static_cast<uint16_t>((lo >> 32) & 0x3FFFu);
+    {
+        GSUvReg& uv = m_registers.uv;
+        uv.u = static_cast<uint16_t>(lo & 0xFFFFu);
+        uv.v = static_cast<uint16_t>((lo >> 32) & 0xFFFFu);
         break;
+    }
     case 0x04:
     {
+        const auto rgbaq = m_registers.rgbaq;
+        const auto st = m_registers.st;
+        const auto uv = m_registers.uv;
+
         uint16_t x = static_cast<uint16_t>(lo & 0xFFFF);
         uint16_t y = static_cast<uint16_t>((lo >> 32) & 0xFFFF);
         uint32_t z = static_cast<uint32_t>((hi >> 4) & 0xFFFFFF);
         uint8_t f = static_cast<uint8_t>((hi >> 36) & 0xFF);
         bool adk = ((hi >> 47) & 1) != 0;
-        PS2_IF_AGRESSIVE_LOGS({
-            const uint32_t debugIndex = s_debugGsPackedVertexCount.fetch_add(1, std::memory_order_relaxed);
-            if (debugIndex < 64u)
-            {
-                RUNTIME_LOG("[gs:packed-xyzf] idx=" << debugIndex
-                                                    << " x=" << x
-                                                    << " y=" << y
-                                                    << " z=0x" << std::hex << z
-                                                    << std::dec
-                                                    << " fog=" << static_cast<uint32_t>(f)
-                                                    << " kick=" << static_cast<uint32_t>(!adk ? 1u : 0u)
-                                                    << " prim=" << static_cast<uint32_t>(m_prim.type)
-                                                    << std::endl);
-            }
-        });
         GSVertex &vtx = m_vtxQueue[m_vtxCount % kMaxVerts];
         vtx.x = static_cast<float>(x) / 16.0f;
         vtx.y = static_cast<float>(y) / 16.0f;
         vtx.z = static_cast<float>(z);
-        vtx.r = m_curR;
-        vtx.g = m_curG;
-        vtx.b = m_curB;
-        vtx.a = m_curA;
-        vtx.q = m_curQ;
-        vtx.s = m_curS;
-        vtx.t = m_curT;
-        vtx.u = m_curU;
-        vtx.v = m_curV;
+        vtx.r = rgbaq.r;
+        vtx.g = rgbaq.g;
+        vtx.b = rgbaq.b;
+        vtx.a = rgbaq.a;
+        vtx.q = rgbaq.q;
+        vtx.s = st.s;
+        vtx.t = st.t;
+        vtx.u = uv.u;
+        vtx.v = uv.v;
         vtx.fog = f;
         vertexKick(!adk);
         break;
     }
     case 0x05:
     {
+        const auto rgbaq = m_registers.rgbaq;
+        const auto st = m_registers.st;
+        const auto uv = m_registers.uv;
+        const auto fog = m_registers.fog;
+
         uint16_t x = static_cast<uint16_t>(lo & 0xFFFF);
         uint16_t y = static_cast<uint16_t>((lo >> 32) & 0xFFFF);
         uint32_t z = static_cast<uint32_t>(hi & 0xFFFFFFFF);
         bool adk = ((hi >> 47) & 1) != 0;
-        PS2_IF_AGRESSIVE_LOGS({
-            const uint32_t debugIndex = s_debugGsPackedVertexCount.fetch_add(1, std::memory_order_relaxed);
-            if (debugIndex < 64u)
-            {
-                RUNTIME_LOG("[gs:packed-xyz] idx=" << debugIndex
-                                                   << " x=" << x
-                                                   << " y=" << y
-                                                   << " z=0x" << std::hex << z
-                                                   << std::dec
-                                                   << " kick=" << static_cast<uint32_t>(!adk ? 1u : 0u)
-                                                   << " prim=" << static_cast<uint32_t>(m_prim.type)
-                                                   << std::endl);
-            }
-        });
         GSVertex &vtx = m_vtxQueue[m_vtxCount % kMaxVerts];
         vtx.x = static_cast<float>(x) / 16.0f;
         vtx.y = static_cast<float>(y) / 16.0f;
         vtx.z = static_cast<float>(z);
-        vtx.r = m_curR;
-        vtx.g = m_curG;
-        vtx.b = m_curB;
-        vtx.a = m_curA;
-        vtx.q = m_curQ;
-        vtx.s = m_curS;
-        vtx.t = m_curT;
-        vtx.u = m_curU;
-        vtx.v = m_curV;
-        vtx.fog = m_curFog;
+        vtx.r = rgbaq.r;
+        vtx.g = rgbaq.g;
+        vtx.b = rgbaq.b;
+        vtx.a = rgbaq.a;
+        vtx.q = rgbaq.q;
+        vtx.s = st.s;
+        vtx.t = st.t;
+        vtx.u = uv.u;
+        vtx.v = uv.v;
+        vtx.fog = fog.f;
         vertexKick(!adk);
         break;
     }
     case 0x0A:
-        m_curFog = static_cast<uint8_t>((hi >> 36) & 0xFF);
+        m_registers.fog.f = static_cast<uint8_t>((hi >> 36) & 0xFF);
         break;
     case 0x0C:
     {
-        PS2_IF_AGRESSIVE_LOGS({
-            const uint32_t debugIndex = s_debugGsPackedVertexCount.fetch_add(1, std::memory_order_relaxed);
-            if (debugIndex < 64u)
-            {
-                RUNTIME_LOG("[gs:packed-xyzf3] idx=" << debugIndex
-                                                     << " x=" << static_cast<uint32_t>(lo & 0xFFFFu)
-                                                     << " y=" << static_cast<uint32_t>((lo >> 32) & 0xFFFFu)
-                                                     << " kick=0"
-                                                     << " prim=" << static_cast<uint32_t>(m_prim.type)
-                                                     << std::endl);
-            }
-        });
+        const auto rgbaq = m_registers.rgbaq;
+        const auto st = m_registers.st;
+        const auto uv = m_registers.uv;
+
         GSVertex &vtx = m_vtxQueue[m_vtxCount % kMaxVerts];
         vtx.x = static_cast<float>(lo & 0xFFFF) / 16.0f;
         vtx.y = static_cast<float>((lo >> 32) & 0xFFFF) / 16.0f;
         vtx.z = static_cast<float>((hi >> 4) & 0xFFFFFF);
-        vtx.r = m_curR;
-        vtx.g = m_curG;
-        vtx.b = m_curB;
-        vtx.a = m_curA;
-        vtx.q = m_curQ;
-        vtx.s = m_curS;
-        vtx.t = m_curT;
-        vtx.u = m_curU;
-        vtx.v = m_curV;
+        vtx.r = rgbaq.r;
+        vtx.g = rgbaq.g;
+        vtx.b = rgbaq.b;
+        vtx.a = rgbaq.a;
+        vtx.q = rgbaq.q;
+        vtx.s = st.s;
+        vtx.t = st.t;
+        vtx.u = uv.u;
+        vtx.v = uv.v;
         vtx.fog = static_cast<uint8_t>((hi >> 36) & 0xFF);
         vertexKick(false);
         break;
     }
     case 0x0D:
     {
-        PS2_IF_AGRESSIVE_LOGS({
-            const uint32_t debugIndex = s_debugGsPackedVertexCount.fetch_add(1, std::memory_order_relaxed);
-            if (debugIndex < 64u)
-            {
-                RUNTIME_LOG("[gs:packed-xyz3] idx=" << debugIndex
-                                                    << " x=" << static_cast<uint32_t>(lo & 0xFFFFu)
-                                                    << " y=" << static_cast<uint32_t>((lo >> 32) & 0xFFFFu)
-                                                    << " kick=0"
-                                                    << " prim=" << static_cast<uint32_t>(m_prim.type)
-                                                    << std::endl);
-            }
-        });
+        const auto rgbaq = m_registers.rgbaq;
+        const auto st = m_registers.st;
+        const auto uv = m_registers.uv;
+        const auto fog = m_registers.fog;
+
         GSVertex &vtx = m_vtxQueue[m_vtxCount % kMaxVerts];
         vtx.x = static_cast<float>(lo & 0xFFFF) / 16.0f;
         vtx.y = static_cast<float>((lo >> 32) & 0xFFFF) / 16.0f;
         vtx.z = static_cast<float>(hi & 0xFFFFFFFF);
-        vtx.r = m_curR;
-        vtx.g = m_curG;
-        vtx.b = m_curB;
-        vtx.a = m_curA;
-        vtx.q = m_curQ;
-        vtx.s = m_curS;
-        vtx.t = m_curT;
-        vtx.u = m_curU;
-        vtx.v = m_curV;
-        vtx.fog = m_curFog;
+        vtx.r = rgbaq.r;
+        vtx.g = rgbaq.g;
+        vtx.b = rgbaq.b;
+        vtx.a = rgbaq.a;
+        vtx.q = rgbaq.q;
+        vtx.s = st.s;
+        vtx.t = st.t;
+        vtx.u = uv.u;
+        vtx.v = uv.v;
+        vtx.fog = fog.f;
         vertexKick(false);
         break;
     }
@@ -1701,156 +1670,83 @@ void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
 void GS::writeRegister(uint8_t regAddr, uint64_t value)
 {
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
-    const bool interestingReg =
-        regAddr == GS_REG_PRIM ||
-        regAddr == GS_REG_RGBAQ ||
-        regAddr == GS_REG_ST ||
-        regAddr == GS_REG_UV ||
-        regAddr == GS_REG_XYZ2 ||
-        regAddr == GS_REG_XYZ3 ||
-        regAddr == GS_REG_XYZF2 ||
-        regAddr == GS_REG_XYZF3 ||
-        regAddr == GS_REG_TEX0_1 ||
-        regAddr == GS_REG_TEX0_2 ||
-        regAddr == GS_REG_TEX2_1 ||
-        regAddr == GS_REG_TEX2_2 ||
-        regAddr == GS_REG_TEXCLUT ||
-        regAddr == GS_REG_TEXA ||
-        regAddr == GS_REG_XYOFFSET_1 ||
-        regAddr == GS_REG_XYOFFSET_2 ||
-        regAddr == GS_REG_SCISSOR_1 ||
-        regAddr == GS_REG_SCISSOR_2 ||
-        regAddr == GS_REG_FRAME_1 ||
-        regAddr == GS_REG_FRAME_2 ||
-        regAddr == GS_REG_ALPHA_1 ||
-        regAddr == GS_REG_ALPHA_2 ||
-        regAddr == GS_REG_TEST_1 ||
-        regAddr == GS_REG_TEST_2 ||
-        regAddr == GS_REG_BITBLTBUF ||
-        regAddr == GS_REG_TRXPOS ||
-        regAddr == GS_REG_TRXREG ||
-        regAddr == GS_REG_TRXDIR;
-
-    PS2_IF_AGRESSIVE_LOGS({
-        if (interestingReg)
-        {
-            const uint32_t debugIndex = s_debugGsRegisterCount.fetch_add(1, std::memory_order_relaxed);
-            if (debugIndex < 128u)
-            {
-                RUNTIME_LOG("[gs:reg] idx=" << debugIndex
-                                            << " reg=0x" << std::hex << static_cast<uint32_t>(regAddr)
-                                            << " value=0x" << value
-                                            << std::dec
-                                            << std::endl);
-            }
-        }
-    });
-
-    const bool isCopyRelevantReg =
-        regAddr == GS_REG_PRIM ||
-        regAddr == GS_REG_TEX0_2 ||
-        regAddr == GS_REG_TEX1_2 ||
-        regAddr == GS_REG_ALPHA_2 ||
-        regAddr == GS_REG_TEST_2 ||
-        regAddr == GS_REG_PABE ||
-        regAddr == GS_REG_FRAME_2 ||
-        regAddr == GS_REG_XYOFFSET_2 ||
-        regAddr == GS_REG_SCISSOR_2;
-    PS2_IF_AGRESSIVE_LOGS({
-        if (isCopyRelevantReg &&
-            s_debugCopyRegCount.fetch_add(1u, std::memory_order_relaxed) < 64u)
-        {
-            RUNTIME_LOG("[gs:copy-reg] reg=0x"
-                        << std::hex << static_cast<uint32_t>(regAddr)
-                        << " value=0x" << value
-                        << std::dec
-                        << " primCtxt=" << static_cast<uint32_t>(m_prim.ctxt)
-                        << " ctx0fbp=" << m_ctx[0].frame.fbp
-                        << " ctx1fbp=" << m_ctx[1].frame.fbp
-                        << std::endl);
-        }
-    });
 
     switch (regAddr)
     {
     case GS_REG_PRIM:
     {
-        m_prim.type = static_cast<GSPrimType>(value & 0x7);
-        m_prim.iip = ((value >> 3) & 1) != 0;
-        m_prim.tme = ((value >> 4) & 1) != 0;
-        m_prim.fge = ((value >> 5) & 1) != 0;
-        m_prim.abe = ((value >> 6) & 1) != 0;
-        m_prim.aa1 = ((value >> 7) & 1) != 0;
-        m_prim.fst = ((value >> 8) & 1) != 0;
-        m_prim.ctxt = ((value >> 9) & 1) != 0;
-        m_prim.fix = ((value >> 10) & 1) != 0;
+        m_registers.prim.data = value;
         m_vtxCount = 0;
         m_vtxIndex = 0;
         break;
     }
     case GS_REG_RGBAQ:
     {
-        m_curR = static_cast<uint8_t>(value & 0xFF);
-        m_curG = static_cast<uint8_t>((value >> 8) & 0xFF);
-        m_curB = static_cast<uint8_t>((value >> 16) & 0xFF);
-        m_curA = static_cast<uint8_t>((value >> 24) & 0xFF);
-        uint32_t qBits = static_cast<uint32_t>((value >> 32) & 0xFFFFFFFF);
-        std::memcpy(&m_curQ, &qBits, 4);
-        if (m_curQ == 0.0f)
-            m_curQ = 1.0f;
+        m_registers.rgbaq.data = value;
+
+        if (m_registers.rgbaq.q == 0.0f)
+        {
+            m_registers.rgbaq.q = 1.0f;
+        }
         break;
     }
     case GS_REG_ST:
     {
-        uint32_t sBits = static_cast<uint32_t>(value & 0xFFFFFFFF);
-        uint32_t tBits = static_cast<uint32_t>((value >> 32) & 0xFFFFFFFF);
-        std::memcpy(&m_curS, &sBits, 4);
-        std::memcpy(&m_curT, &tBits, 4);
+        m_registers.st.data = value;
         break;
     }
     case GS_REG_UV:
     {
-        m_curU = static_cast<uint16_t>(value & 0x3FFFu);
-        m_curV = static_cast<uint16_t>((value >> 16) & 0x3FFFu);
+        m_registers.uv.data = value;
         break;
     }
     case GS_REG_XYZF2:
     case GS_REG_XYZF3:
     {
         GSVertex &vtx = m_vtxQueue[m_vtxCount % kMaxVerts];
+
+        const GSRgbaqReg rgbaq = m_registers.rgbaq;
+        const GSStReg st = m_registers.st;
+        const GSUvReg uv = m_registers.uv;
+
         vtx.x = static_cast<float>(value & 0xFFFF) / 16.0f;
         vtx.y = static_cast<float>((value >> 16) & 0xFFFF) / 16.0f;
         vtx.z = static_cast<double>((value >> 32) & 0xFFFFFF);
         vtx.fog = static_cast<uint8_t>((value >> 56) & 0xFF);
-        vtx.r = m_curR;
-        vtx.g = m_curG;
-        vtx.b = m_curB;
-        vtx.a = m_curA;
-        vtx.q = m_curQ;
-        vtx.s = m_curS;
-        vtx.t = m_curT;
-        vtx.u = m_curU;
-        vtx.v = m_curV;
+        vtx.r = rgbaq.r;
+        vtx.g = rgbaq.g;
+        vtx.b = rgbaq.b;
+        vtx.a = rgbaq.a;
+        vtx.q = rgbaq.q;
+        vtx.s = st.s;
+        vtx.t = st.t;
+        vtx.u = uv.u;
+        vtx.v = uv.v;
         vertexKick(regAddr == GS_REG_XYZF2);
         break;
     }
     case GS_REG_XYZ2:
     case GS_REG_XYZ3:
     {
+        const GSRgbaqReg rgbaq = m_registers.rgbaq;
+        const GSStReg st = m_registers.st;
+        const GSUvReg uv = m_registers.uv;
+        const GSFogReg fog = m_registers.fog;
+
         GSVertex &vtx = m_vtxQueue[m_vtxCount % kMaxVerts];
         vtx.x = static_cast<float>(value & 0xFFFF) / 16.0f;
         vtx.y = static_cast<float>((value >> 16) & 0xFFFF) / 16.0f;
         vtx.z = static_cast<double>((value >> 32) & 0xFFFFFFFF);
-        vtx.r = m_curR;
-        vtx.g = m_curG;
-        vtx.b = m_curB;
-        vtx.a = m_curA;
-        vtx.q = m_curQ;
-        vtx.s = m_curS;
-        vtx.t = m_curT;
-        vtx.u = m_curU;
-        vtx.v = m_curV;
-        vtx.fog = m_curFog;
+        vtx.r = rgbaq.r;
+        vtx.g = rgbaq.g;
+        vtx.b = rgbaq.b;
+        vtx.a = rgbaq.a;
+        vtx.q = rgbaq.q;
+        vtx.s = st.s;
+        vtx.t = st.t;
+        vtx.u = uv.u;
+        vtx.v = uv.v;
+        vtx.fog = fog.f;
         vertexKick(regAddr == GS_REG_XYZ2);
         break;
     }
@@ -1858,173 +1754,147 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
     case GS_REG_TEX0_2:
     {
         int ci = (regAddr == GS_REG_TEX0_2) ? 1 : 0;
-        auto &t = m_ctx[ci].tex0;
-        t.tbp0 = static_cast<uint32_t>(value & 0x3FFF);
-        t.tbw = static_cast<uint8_t>((value >> 14) & 0x3F);
-        t.psm = static_cast<uint8_t>((value >> 20) & 0x3F);
-        t.tw = static_cast<uint8_t>((value >> 26) & 0xF);
-        t.th = static_cast<uint8_t>((value >> 30) & 0xF);
-        t.tcc = static_cast<uint8_t>((value >> 34) & 0x1);
-        t.tfx = static_cast<uint8_t>((value >> 35) & 0x3);
-        t.cbp = static_cast<uint32_t>((value >> 37) & 0x3FFF);
-        t.cpsm = static_cast<uint8_t>((value >> 51) & 0xF);
-        t.csm = static_cast<uint8_t>((value >> 55) & 0x1);
-        t.csa = static_cast<uint8_t>((value >> 56) & 0x1F);
-        t.cld = static_cast<uint8_t>((value >> 61) & 0x7);
+
+        m_registers.ctx[ci].tex0.data = value;
+
+        GSTex0Reg tex0{ };
+        tex0.data = value;
+
+        ReloadClutCache(tex0.psm, tex0.cpsm, tex0.cbp, tex0.csm, tex0.csa, tex0.cld);
         break;
     }
     case GS_REG_CLAMP_1:
     case GS_REG_CLAMP_2:
     {
         int ci = (regAddr == GS_REG_CLAMP_2) ? 1 : 0;
-        m_ctx[ci].clamp = value;
+
+        m_registers.ctx[ci].clamp.data = value;
         break;
     }
     case GS_REG_FOG:
-        m_curFog = static_cast<uint8_t>((value >> 56) & 0xFF);
+        m_registers.fog.data = value;
         break;
     case GS_REG_TEX1_1:
     case GS_REG_TEX1_2:
     {
         int ci = (regAddr == GS_REG_TEX1_2) ? 1 : 0;
-        m_ctx[ci].tex1 = value;
+        m_registers.ctx[ci].tex1.data = value;
         break;
     }
     case GS_REG_TEX2_1:
     case GS_REG_TEX2_2:
     {
         int ci = (regAddr == GS_REG_TEX2_2) ? 1 : 0;
-        auto &t = m_ctx[ci].tex0;
-        t.psm = static_cast<uint8_t>((value >> 20) & 0x3F);
-        t.cbp = static_cast<uint32_t>((value >> 37) & 0x3FFF);
-        t.cpsm = static_cast<uint8_t>((value >> 51) & 0xF);
-        t.csm = static_cast<uint8_t>((value >> 55) & 0x1);
-        t.csa = static_cast<uint8_t>((value >> 56) & 0x1F);
-        t.cld = static_cast<uint8_t>((value >> 61) & 0x7);
+
+        constexpr u64 mask = 0x0000001FFC0FFFFF;
+
+        m_registers.ctx[ci].tex0.data = (m_registers.ctx[ci].tex0.data & mask) | (value & ~mask);
+        m_registers.ctx[ci].tex2.data = value;
+
+        const auto tex0 = m_registers.ctx[ci].tex0;
+
+        ReloadClutCache(tex0.psm, tex0.cpsm, tex0.cbp, tex0.csm, tex0.csa, tex0.cld);
         break;
     }
     case GS_REG_XYOFFSET_1:
     case GS_REG_XYOFFSET_2:
     {
         int ci = (regAddr == GS_REG_XYOFFSET_2) ? 1 : 0;
-        m_ctx[ci].xyoffset.ofx = static_cast<uint16_t>(value & 0xFFFF);
-        m_ctx[ci].xyoffset.ofy = static_cast<uint16_t>((value >> 32) & 0xFFFF);
+
+        m_registers.ctx[ci].xyoffset.data = value;
         break;
     }
     case GS_REG_PRMODECONT:
-        m_prmodecont = (value & 1) != 0;
+        m_registers.prmodecont.data = value;
         break;
     case GS_REG_PRMODE:
-        if (!m_prmodecont)
-        {
-            m_prim.iip = ((value >> 3) & 1) != 0;
-            m_prim.tme = ((value >> 4) & 1) != 0;
-            m_prim.fge = ((value >> 5) & 1) != 0;
-            m_prim.abe = ((value >> 6) & 1) != 0;
-            m_prim.aa1 = ((value >> 7) & 1) != 0;
-            m_prim.fst = ((value >> 8) & 1) != 0;
-            m_prim.ctxt = ((value >> 9) & 1) != 0;
-            m_prim.fix = ((value >> 10) & 1) != 0;
-        }
+        m_registers.prmode.data = value;
         break;
     case GS_REG_TEXCLUT:
-        m_texclut.cbw = static_cast<uint8_t>(value & 0x3Fu);
-        m_texclut.cou = static_cast<uint8_t>((value >> 6) & 0x3Fu);
-        m_texclut.cov = static_cast<uint16_t>((value >> 12) & 0x3FFu);
+        m_registers.texclut.data = value;
         break;
     case GS_REG_SCISSOR_1:
     case GS_REG_SCISSOR_2:
     {
         int ci = (regAddr == GS_REG_SCISSOR_2) ? 1 : 0;
-        m_ctx[ci].scissor.x0 = static_cast<uint16_t>(value & 0x7FF);
-        m_ctx[ci].scissor.x1 = static_cast<uint16_t>((value >> 16) & 0x7FF);
-        m_ctx[ci].scissor.y0 = static_cast<uint16_t>((value >> 32) & 0x7FF);
-        m_ctx[ci].scissor.y1 = static_cast<uint16_t>((value >> 48) & 0x7FF);
+
+        m_registers.ctx[ci].scissor.data = value;
         break;
     }
     case GS_REG_ALPHA_1:
     case GS_REG_ALPHA_2:
     {
         int ci = (regAddr == GS_REG_ALPHA_2) ? 1 : 0;
-        m_ctx[ci].alpha = value;
+
+        m_registers.ctx[ci].alpha.data = value;
         break;
     }
     case GS_REG_TEST_1:
     case GS_REG_TEST_2:
     {
         int ci = (regAddr == GS_REG_TEST_2) ? 1 : 0;
-        m_ctx[ci].test = value;
+
+        m_registers.ctx[ci].test.data = value;
         break;
     }
     case GS_REG_FRAME_1:
     case GS_REG_FRAME_2:
     {
         int ci = (regAddr == GS_REG_FRAME_2) ? 1 : 0;
-        m_ctx[ci].frame.fbp = static_cast<uint32_t>(value & 0x1FF);
-        m_ctx[ci].frame.fbw = static_cast<uint32_t>((value >> 16) & 0x3F);
-        m_ctx[ci].frame.psm = static_cast<uint8_t>((value >> 24) & 0x3F);
-        m_ctx[ci].frame.fbmsk = static_cast<uint32_t>((value >> 32) & 0xFFFFFFFF);
+
+        m_registers.ctx[ci].frame.data = value;
         break;
     }
     case GS_REG_ZBUF_1:
     case GS_REG_ZBUF_2:
     {
         int ci = (regAddr == GS_REG_ZBUF_2) ? 1 : 0;
-        m_ctx[ci].zbuf.zbp = value & 0x1FF;
-        m_ctx[ci].zbuf.psm = ((value >> 24) & 0xF) | 0x30;
-        m_ctx[ci].zbuf.zmask = (value >> 32) & 1;
+
+        m_registers.ctx[ci].zbuf.data = value;
         break;
     }
     case GS_REG_FBA_1:
     case GS_REG_FBA_2:
     {
         int ci = (regAddr == GS_REG_FBA_2) ? 1 : 0;
-        m_ctx[ci].fba = value;
+        m_registers.ctx[ci].fba.data = value;
         break;
     }
     case GS_REG_BITBLTBUF:
     {
-        m_bitbltbuf.sbp = static_cast<uint32_t>(value & 0x3FFF);
-        m_bitbltbuf.sbw = static_cast<uint8_t>((value >> 16) & 0x3F);
-        m_bitbltbuf.spsm = static_cast<uint8_t>((value >> 24) & 0x3F);
-        m_bitbltbuf.dbp = static_cast<uint32_t>((value >> 32) & 0x3FFF);
-        m_bitbltbuf.dbw = static_cast<uint8_t>((value >> 48) & 0x3F);
-        m_bitbltbuf.dpsm = static_cast<uint8_t>((value >> 56) & 0x3F);
+        m_registers.bitbltbuf.data = value;
         break;
     }
     case GS_REG_TRXPOS:
     {
-        m_trxpos.ssax = static_cast<uint16_t>(value & 0x7FF);
-        m_trxpos.ssay = static_cast<uint16_t>((value >> 16) & 0x7FF);
-        m_trxpos.dsax = static_cast<uint16_t>((value >> 32) & 0x7FF);
-        m_trxpos.dsay = static_cast<uint16_t>((value >> 48) & 0x7FF);
-        m_trxpos.dir = static_cast<uint8_t>((value >> 59) & 0x3);
+        m_registers.trxpos.data = value;
         break;
     }
     case GS_REG_TRXREG:
     {
-        m_trxreg.rrw = static_cast<uint16_t>(value & 0xFFF);
-        m_trxreg.rrh = static_cast<uint16_t>((value >> 32) & 0xFFF);
+        m_registers.trxreg.data = value;
         break;
     }
     case GS_REG_TRXDIR:
     {
-        m_trxdir = static_cast<uint32_t>(value & 0x3);
+        m_registers.trxdir.data = value;
 
         // We need the transfer state to survive the call to performLocalTo*Transfer
         // This is because transfers can be broken into multiple IMAGE tags and we
         // don't want to start all over again from the initial state
         // The transfer starts officially when TRXDIR is accessed
-        m_transferState.x = m_trxpos.dsax;
-        m_transferState.y = m_trxpos.dsay;
-        m_transferState.total_pixels = m_trxreg.rrw * m_trxreg.rrh;
+        m_transferState.x = m_registers.trxpos.dsax;
+        m_transferState.y = m_registers.trxpos.dsay;
+        m_transferState.total_pixels = m_registers.trxreg.rrw * m_registers.trxreg.rrh;
         m_transferState.copied_pixels = 0;
 
-        if (m_trxdir == 2 && m_vram)
+        const auto xdir = m_registers.trxdir.xdir;
+
+        if (xdir == 2 && m_vram)
         {
             performLocalToLocalTransfer();
         }
-        else if (m_trxdir == 1 && m_vram)
+        else if (xdir == 1 && m_vram)
         {
             performLocalToHostToBuffer();
         }
@@ -2039,14 +1909,24 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
         break;
     }
     case GS_REG_PABE:
-        m_pabe = (value & 1u) != 0u;
+        m_registers.pabe.data = value;
         break;
     case GS_REG_TEXFLUSH:
+        m_registers.texflush.data = value;
+        InvalidateTexturePageCache();
+        break;
     case GS_REG_SCANMSK:
+        m_registers.scanmsk.data = value;
+        break;
     case GS_REG_FOGCOL:
+        m_registers.fogcol.data = value;
+        break;
     case GS_REG_DIMX:
     case GS_REG_DTHE:
+        break;
     case GS_REG_COLCLAMP:
+        m_registers.colclamp.data = value;
+        break;
     case GS_REG_MIPTBP1_1:
     case GS_REG_MIPTBP1_2:
     case GS_REG_MIPTBP2_1:
@@ -2054,22 +1934,7 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
         break;
     case GS_REG_TEXA:
     {
-        m_texa.ta0 = static_cast<uint8_t>(value & 0xFFu);
-        m_texa.aem = ((value >> 15) & 0x1u) != 0u;
-        m_texa.ta1 = static_cast<uint8_t>((value >> 32) & 0xFFu);
-        PS2_IF_AGRESSIVE_LOGS({
-            const uint32_t texaIndex = s_debugTexaWriteCount.fetch_add(1u, std::memory_order_relaxed);
-            if (texaIndex < 24u)
-            {
-                RUNTIME_LOG("[gs:texa] idx=" << texaIndex
-                                             << " value=0x" << std::hex << value
-                                             << " ta0=0x" << ((value >> 0) & 0xFFu)
-                                             << " aem=" << ((value >> 15) & 0x1u)
-                                             << " ta1=0x" << ((value >> 32) & 0xFFu)
-                                             << std::dec
-                                             << std::endl);
-            }
-        });
+        m_registers.texa.data = value;
         break;
     }
     case GS_REG_SIGNAL:
@@ -2135,25 +2000,29 @@ void GS::performLocalToLocalTransfer()
     if (!m_vram)
         return;
 
-    const u32 sbp = m_bitbltbuf.sbp;
-    const u8 sbw = m_bitbltbuf.sbw;
-    const u8 spsm = m_bitbltbuf.spsm;
-    const u32 dbp = m_bitbltbuf.dbp;
-    const u8 dbw = m_bitbltbuf.dbw;
-    const u8 dpsm = m_bitbltbuf.dpsm;
-    const u32 rrw = m_trxreg.rrw;
-    const u32 rrh = m_trxreg.rrh;
-    const u32 ssax = m_trxpos.ssax;
-    const u32 ssay = m_trxpos.ssay;
-    const u32 dsax = m_trxpos.dsax;
-    const u32 dsay = m_trxpos.dsay;
-    const u32 dir = m_trxpos.dir;
+    const GSBitBltBufReg bitbltbuf = m_registers.bitbltbuf;
+    const GSTrxReg trxreg = m_registers.trxreg;
+    const GSTrxPosReg trxpos = m_registers.trxpos;
+
+    const u32 sbp = bitbltbuf.sbp;
+    const u8 sbw = bitbltbuf.sbw;
+    const u8 spsm = bitbltbuf.spsm;
+    const u32 dbp = bitbltbuf.dbp;
+    const u8 dbw = bitbltbuf.dbw;
+    const u8 dpsm = bitbltbuf.dpsm;
+    const u32 rrw = trxreg.rrw;
+    const u32 rrh = trxreg.rrh;
+    const u32 ssax = trxpos.ssax;
+    const u32 ssay = trxpos.ssay;
+    const u32 dsax = trxpos.dsax;
+    const u32 dsay = trxpos.dsay;
+    const u32 dir = trxpos.dir;
 
     const u32 total_pixels = rrw * rrh;
 
     if (total_pixels == 0)
     {
-        m_trxdir = 3;
+        EndTransfer();
         return;
     }
 
@@ -2251,7 +2120,7 @@ void GS::performLocalToLocalTransfer()
         break;
     }
 
-    m_trxdir = 3;
+    EndTransfer();
 }
 
 void GS::vertexKick(bool drawing)
@@ -2274,8 +2143,10 @@ void GS::vertexKick(bool drawing)
     if (!drawing)
         return;
 
+    const GSPrimReg prim = m_registers.prim;
+
     int needed = 0;
-    switch (m_prim.type)
+    switch (prim.prim)
     {
     case GS_PRIM_POINT:
         needed = 1;
@@ -2308,7 +2179,7 @@ void GS::vertexKick(bool drawing)
     m_rasterizer.drawPrimitive(this);
     recordDrawDebugEventUnlocked(needed);
 
-    switch (m_prim.type)
+    switch (prim.prim)
     {
     case GS_PRIM_LINE:
     case GS_PRIM_TRIANGLE:
@@ -2337,26 +2208,36 @@ void GS::vertexKick(bool drawing)
 
 void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
 {
-    // wrong direction set
-    if (m_trxdir != 0 || !m_vram)
+    if (!m_vram)
     {
         return;
     }
 
-    // no height and width means transfer is invalid
-    if (m_trxreg.rrw == 0 || m_trxreg.rrh == 0)
+    const auto bitbltbuf = m_registers.bitbltbuf;
+    const auto trxreg = m_registers.trxreg;
+    const auto trxpos = m_registers.trxpos;
+    const auto trxdir = m_registers.trxdir;
+
+    const u32 dbp = bitbltbuf.dbp;
+    const u8 dbw = std::max<u8>(bitbltbuf.dbw, 1u);
+    const u8 dpsm = bitbltbuf.dpsm;
+
+    const u32 rrw = trxreg.rrw;
+    const u32 rrh = trxreg.rrh;
+    const u32 dsax = trxpos.dsax;
+    const u32 dsay = trxpos.dsay;
+
+    const auto xdir = trxdir.xdir;
+
+    if (xdir != 0)
     {
         return;
     }
 
-    u32 dbp = m_bitbltbuf.dbp;
-    u8 dbw = std::max<u8>(m_bitbltbuf.dbw, 1u);
-    u8 dpsm = m_bitbltbuf.dpsm;
-
-    u32 rrw = m_trxreg.rrw;
-    u32 rrh = m_trxreg.rrh;
-    u32 dsax = m_trxpos.dsax;
-    u32 dsay = m_trxpos.dsay;
+    if (rrw == 0 || rrh == 0)
+    {
+        return;
+    }
 
     u32 data_offset = 0;
 
@@ -2370,7 +2251,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
             u32 c;
             std::memcpy(&c, &data[data_offset], sizeof(u32));
 
-            GSMem::WriteCT32(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
+            GSMem::WritePixelCT32(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
 
             m_transferState.x++;
             m_transferState.copied_pixels++;
@@ -2384,9 +2265,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
 
             if (m_transferState.copied_pixels >= m_transferState.total_pixels)
             {
-                // deactivate the transfer
-                m_trxdir = 3;
-                m_transferState.total_pixels = 0;
+                EndTransfer();
                 break;
             }
         }
@@ -2398,7 +2277,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
             u32 c;
             std::memcpy(&c, &data[data_offset], sizeof(u32));
 
-            GSMem::WriteZ32(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
+            GSMem::WritePixelZ32(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
 
             m_transferState.x++;
             m_transferState.copied_pixels++;
@@ -2412,9 +2291,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
 
             if (m_transferState.copied_pixels >= m_transferState.total_pixels)
             {
-                // deactivate the transfer
-                m_trxdir = 3;
-                m_transferState.total_pixels = 0;
+                EndTransfer();
                 break;
             }
         }
@@ -2426,7 +2303,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
             u32 c;
             std::memcpy(&c, &data[data_offset], sizeof(u32));
 
-            GSMem::WriteCT24(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
+            GSMem::WritePixelCT24(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
 
             m_transferState.x++;
             m_transferState.copied_pixels++;
@@ -2440,9 +2317,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
 
             if (m_transferState.copied_pixels >= m_transferState.total_pixels)
             {
-                // deactivate the transfer
-                m_trxdir = 3;
-                m_transferState.total_pixels = 0;
+                EndTransfer();
                 break;
             }
         }
@@ -2454,7 +2329,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
             u32 c;
             std::memcpy(&c, &data[data_offset], sizeof(u32));
 
-            GSMem::WriteZ24(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
+            GSMem::WritePixelZ24(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
 
             m_transferState.x++;
             m_transferState.copied_pixels++;
@@ -2468,9 +2343,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
 
             if (m_transferState.copied_pixels >= m_transferState.total_pixels)
             {
-                // deactivate the transfer
-                m_trxdir = 3;
-                m_transferState.total_pixels = 0;
+                EndTransfer();
                 break;
             }
         }
@@ -2482,7 +2355,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
             u16 c;
             std::memcpy(&c, &data[data_offset], sizeof(u16));
 
-            GSMem::WriteCT16(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
+            GSMem::WritePixelCT16(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
 
             m_transferState.x++;
             m_transferState.copied_pixels++;
@@ -2496,9 +2369,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
 
             if (m_transferState.copied_pixels >= m_transferState.total_pixels)
             {
-                // deactivate the transfer
-                m_trxdir = 3;
-                m_transferState.total_pixels = 0;
+                EndTransfer();
                 break;
             }
         }
@@ -2510,7 +2381,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
             u16 c;
             std::memcpy(&c, &data[data_offset], sizeof(u16));
 
-            GSMem::WriteZ16(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
+            GSMem::WritePixelZ16(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
 
             m_transferState.x++;
             m_transferState.copied_pixels++;
@@ -2524,9 +2395,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
 
             if (m_transferState.copied_pixels >= m_transferState.total_pixels)
             {
-                // deactivate the transfer
-                m_trxdir = 3;
-                m_transferState.total_pixels = 0;
+                EndTransfer();
                 break;
             }
         }
@@ -2538,7 +2407,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
             u16 c;
             std::memcpy(&c, &data[data_offset], sizeof(u16));
 
-            GSMem::WriteCT16S(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
+            GSMem::WritePixelCT16S(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
 
             m_transferState.x++;
             m_transferState.copied_pixels++;
@@ -2552,9 +2421,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
 
             if (m_transferState.copied_pixels >= m_transferState.total_pixels)
             {
-                // deactivate the transfer
-                m_trxdir = 3;
-                m_transferState.total_pixels = 0;
+                EndTransfer();
                 break;
             }
         }
@@ -2566,7 +2433,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
             u16 c;
             std::memcpy(&c, &data[data_offset], sizeof(u16));
 
-            GSMem::WriteZ16S(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
+            GSMem::WritePixelZ16S(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
 
             m_transferState.x++;
             m_transferState.copied_pixels++;
@@ -2580,9 +2447,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
 
             if (m_transferState.copied_pixels >= m_transferState.total_pixels)
             {
-                // deactivate the transfer
-                m_trxdir = 3;
-                m_transferState.total_pixels = 0;
+                EndTransfer();
                 break;
             }
         }
@@ -2593,7 +2458,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
         {
             u8 c = data[data_offset];
 
-            GSMem::WriteP8(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
+            GSMem::WritePixelP8(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
 
             m_transferState.x++;
             m_transferState.copied_pixels++;
@@ -2607,9 +2472,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
 
             if (m_transferState.copied_pixels >= m_transferState.total_pixels)
             {
-                // deactivate the transfer
-                m_trxdir = 3;
-                m_transferState.total_pixels = 0;
+                EndTransfer();
                 break;
             }
         }
@@ -2620,7 +2483,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
         {
             u8 c = data[data_offset];
 
-            GSMem::WriteP8H(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
+            GSMem::WritePixelP8H(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c);
 
             m_transferState.x++;
             m_transferState.copied_pixels++;
@@ -2634,9 +2497,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
 
             if (m_transferState.copied_pixels >= m_transferState.total_pixels)
             {
-                // deactivate the transfer
-                m_trxdir = 3;
-                m_transferState.total_pixels = 0;
+                EndTransfer();
                 break;
             }
         }
@@ -2647,8 +2508,8 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
             u8 c0 = data[data_offset] & 0xF;
             u8 c1 = (data[data_offset] >> 4) & 0xF;
 
-            GSMem::WriteP4(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c0);
-            GSMem::WriteP4(m_vram, dbp, dbw, m_transferState.x + 1, m_transferState.y, c1);
+            GSMem::WritePixelP4(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c0);
+            GSMem::WritePixelP4(m_vram, dbp, dbw, m_transferState.x + 1, m_transferState.y, c1);
 
             m_transferState.x += 2;
             m_transferState.copied_pixels += 2;
@@ -2662,9 +2523,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
 
             if (m_transferState.copied_pixels >= m_transferState.total_pixels)
             {
-                // deactivate the transfer
-                m_trxdir = 3;
-                m_transferState.total_pixels = 0;
+                EndTransfer();
                 break;
             }
         }
@@ -2675,8 +2534,8 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
             u8 c0 = data[data_offset] & 0xF;
             u8 c1 = (data[data_offset] >> 4) & 0xF;
 
-            GSMem::WriteP4HL(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c0);
-            GSMem::WriteP4HL(m_vram, dbp, dbw, m_transferState.x + 1, m_transferState.y, c1);
+            GSMem::WritePixelP4HL(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c0);
+            GSMem::WritePixelP4HL(m_vram, dbp, dbw, m_transferState.x + 1, m_transferState.y, c1);
 
             m_transferState.x += 2;
             m_transferState.copied_pixels += 2;
@@ -2690,9 +2549,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
 
             if (m_transferState.copied_pixels >= m_transferState.total_pixels)
             {
-                // deactivate the transfer
-                m_trxdir = 3;
-                m_transferState.total_pixels = 0;
+                EndTransfer();
                 break;
             }
         }
@@ -2703,8 +2560,8 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
             u8 c0 = data[data_offset] & 0xF;
             u8 c1 = (data[data_offset] >> 4) & 0xF;
 
-            GSMem::WriteP4HH(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c0);
-            GSMem::WriteP4HH(m_vram, dbp, dbw, m_transferState.x + 1, m_transferState.y, c1);
+            GSMem::WritePixelP4HH(m_vram, dbp, dbw, m_transferState.x, m_transferState.y, c0);
+            GSMem::WritePixelP4HH(m_vram, dbp, dbw, m_transferState.x + 1, m_transferState.y, c1);
 
             m_transferState.x += 2;
             m_transferState.copied_pixels += 2;
@@ -2718,9 +2575,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
 
             if (m_transferState.copied_pixels >= m_transferState.total_pixels)
             {
-                // deactivate the transfer
-                m_trxdir = 3;
-                m_transferState.total_pixels = 0;
+                EndTransfer();
                 break;
             }
         }
@@ -2736,13 +2591,17 @@ void GS::performLocalToHostToBuffer()
     if (!m_vram)
         return;
 
-    uint32_t sbp = m_bitbltbuf.sbp;
-    uint8_t sbw = std::max<u8>(m_bitbltbuf.sbw, 1u);
-    uint8_t spsm = m_bitbltbuf.spsm;
-    uint32_t rrw = m_trxreg.rrw;
-    uint32_t rrh = m_trxreg.rrh;
-    uint32_t ssax = m_trxpos.ssax;
-    uint32_t ssay = m_trxpos.ssay;
+    const auto bitbltbuf = m_registers.bitbltbuf;
+    const auto trxreg = m_registers.trxreg;
+    const auto trxpos = m_registers.trxpos;
+
+    uint32_t sbp = bitbltbuf.sbp;
+    uint8_t sbw = std::max<u8>(bitbltbuf.sbw, 1u);
+    uint8_t spsm = bitbltbuf.spsm;
+    uint32_t rrw = trxreg.rrw;
+    uint32_t rrh = trxreg.rrh;
+    uint32_t ssax = trxpos.ssax;
+    uint32_t ssay = trxpos.ssay;
 
     u32 bpp = GSMem::BitsPerPixel(static_cast<GSMem::PixelStorageMode>(spsm));
 
@@ -2798,7 +2657,7 @@ void GS::performLocalToHostToBuffer()
 bool GS::clearFramebufferContext(uint32_t contextIndex, uint32_t rgba)
 {
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
-    return clearFramebufferRect(this, m_ctx[(contextIndex != 0u) ? 1 : 0], rgba);
+    return clearFramebufferRect(this, m_registers.ctx[(contextIndex != 0u) ? 1 : 0], rgba);
 }
 
 bool GS::clearActiveFramebuffer(uint32_t rgba)
@@ -2819,4 +2678,347 @@ uint32_t GS::consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
     std::memcpy(dst, m_localToHostBuffer.data() + m_localToHostReadPos, toCopy);
     m_localToHostReadPos += toCopy;
     return static_cast<uint32_t>(toCopy);
+}
+
+u32 GS::ReadTexturePageCache(u32 psm, u32 tbp0, u32 tbw, u32 u, u32 v)
+{
+    // we fill these as 32bit since they are aliases
+    switch (psm)
+    {
+    case GS_PSM_CT32:
+    case GS_PSM_CT24:
+    case GS_PSM_T8H:
+    case GS_PSM_T4HH:
+    case GS_PSM_T4HL:
+        psm = GS_PSM_CT32;
+        break;
+    case GS_PSM_Z32:
+    case GS_PSM_Z24:
+        psm = GS_PSM_Z32;
+        break;
+    default:
+        break;
+    }
+
+    u32 page_width2;
+    u32 page_height2;
+    u32 bytes_per_pixel;
+    u32 pitch;
+
+    // TODO: add to templates
+    switch (psm)
+    {
+    case GS_PSM_CT32:
+    case GS_PSM_CT24:
+    case GS_PSM_T8H:
+    case GS_PSM_T4HH:
+    case GS_PSM_T4HL:
+    case GS_PSM_Z32:
+    case GS_PSM_Z24:
+        page_width2 = 6;
+        page_height2 = 5;
+        bytes_per_pixel = 4;
+        pitch = 256;
+        break;
+    case GS_PSM_CT16:
+    case GS_PSM_CT16S:
+    case GS_PSM_Z16:
+    case GS_PSM_Z16S:
+        page_width2 = 6;
+        page_height2 = 6;
+        bytes_per_pixel = 2;
+        pitch = 128;
+        break;
+    case GS_PSM_T8:
+        page_width2 = 7;
+        page_height2 = 6;
+        bytes_per_pixel = 1;
+        pitch = 128;
+        break;
+    case GS_PSM_T4:
+        page_width2 = 7;
+        page_height2 = 7;
+        bytes_per_pixel = 1; // 4 bit is a special case that is expanded
+        pitch = 128;
+        break;
+    default:
+        return 0;
+    }
+
+    const u32 page_width = 1u << page_width2;
+    const u32 page_height = 1u << page_height2;
+
+    // TODO: I can replace the log2 math with divides
+    const u32 pages_per_row = std::max(1u, (tbw * 64u) >> page_width2);
+    const u32 page_id = (v >> page_height2) * pages_per_row + (u >> page_width2);
+    const u32 block_id = (tbp0 + page_id * 32u) & 0x3FFF;
+
+    const bool needs_reload =
+        !m_texture_page_cache.valid ||
+        m_texture_page_cache.base_block != block_id ||
+        m_texture_page_cache.psm != psm;
+
+    if (needs_reload)
+    {
+        ReloadTexturePageCache(psm, block_id);
+    }
+
+    const u32 off = (v & (page_height - 1)) * pitch + (u & (page_width - 1)) * bytes_per_pixel;
+    const u8* ptr = &m_texture_page_cache.buffer[off];
+
+    switch (bytes_per_pixel)
+    {
+    case 4:
+    {
+        u32 v;
+        memcpy(&v, ptr, 4);
+        return v;
+    }
+    case 2:
+    {
+        u16 v;
+        memcpy(&v, ptr, 2);
+        return v;
+    }
+    break;
+    default:
+        break;
+    }
+
+    return static_cast<u32>(*ptr);
+}
+
+void GS::ReloadTexturePageCache(u32 psm, u32 base_block)
+{
+    u8* dst = m_texture_page_cache.buffer.data();
+
+    switch (psm)
+    {
+    case GS_PSM_CT32:
+    case GS_PSM_CT24:
+    case GS_PSM_T8H:
+    case GS_PSM_T4HH:
+    case GS_PSM_T4HL:
+        GSMem::ReadPageToLinearBufferCT32(dst, 256, m_vram, base_block);
+        break;
+    case GS_PSM_Z32:
+    case GS_PSM_Z24:
+        GSMem::ReadPageToLinearBufferZ32(dst, 256, m_vram, base_block);
+        break;
+    case GS_PSM_CT16:
+        GSMem::ReadPageToLinearBufferCT16(dst, 128, m_vram, base_block);
+        break;
+    case GS_PSM_CT16S:
+        GSMem::ReadPageToLinearBufferCT16S(dst, 128, m_vram, base_block);
+        break;
+    case GS_PSM_Z16:
+        GSMem::ReadPageToLinearBufferZ16(dst, 128, m_vram, base_block);
+        break;
+    case GS_PSM_Z16S:
+        GSMem::ReadPageToLinearBufferZ16S(dst, 128, m_vram, base_block);
+        break;
+    case GS_PSM_T8:
+        GSMem::ReadPageToLinearBufferP8(dst, 128, m_vram, base_block);
+        break;
+    case GS_PSM_T4:
+        GSMem::ReadPageToLinearBufferP4(dst, 128, m_vram, base_block);
+        break;
+    default:
+        return;
+    }
+
+    // we fill these as 32bit since they are aliases
+    switch (psm)
+    {
+    case GS_PSM_CT32:
+    case GS_PSM_CT24:
+    case GS_PSM_T8H:
+    case GS_PSM_T4HH:
+    case GS_PSM_T4HL:
+        psm = GS_PSM_CT32;
+        break;
+    case GS_PSM_Z32:
+    case GS_PSM_Z24:
+        psm = GS_PSM_Z32;
+        break;
+    default:
+        break;
+    }
+
+    m_texture_page_cache.base_block = base_block;
+    m_texture_page_cache.psm = psm;
+    m_texture_page_cache.valid = true;
+}
+
+void GS::InvalidateTexturePageCache()
+{
+    m_texture_page_cache.valid = false;
+}
+
+u32 GS::ReadClutCache(u32 psm, u8 index, u32 csa)
+{
+
+    switch (psm)
+    {
+    case GS_PSM_CT32:
+    case GS_PSM_CT24:
+    {
+        u32 v;
+        memcpy(&v, &m_clut_cache[(csa *  16 * 4) + (index * 4)], 4);
+
+        return v;
+    }
+    break;
+
+    case GS_PSM_CT16:
+    case GS_PSM_CT16S:
+    {
+        u16 v;
+        memcpy(&v, &m_clut_cache[(csa * 16 * 2) + (index * 2)], 2);
+
+        return static_cast<u32>(v);
+    }
+    break;
+
+    default:
+        break;
+    }
+
+    return 0;
+}
+
+void GS::ReloadClutCacheCSM1(u32 psm, u32 cpsm, u32 cbp, u32 csa)
+{
+    const u32 cbpp = GSMem::BitsPerPixel(static_cast<GSMem::PixelStorageMode>(cpsm));
+    const u32 tbpp = GSMem::BitsPerPixel(static_cast<GSMem::PixelStorageMode>(psm));
+
+    const u32 clut_bytes_per_pixel = cbpp / 8;
+
+    // offset into the clut buffer
+    const u32 offset = csa * 16;
+
+    // number of entries for this load
+    const u32 entries = 1 << tbpp;
+
+    // total entries in the cache
+    const u32 total_cache_entries = 1024 / clut_bytes_per_pixel;
+
+    const u32 total_entries = std::min(total_cache_entries, entries + offset);
+
+    u32 cache_addr = static_cast<u32>(csa) * 16 * clut_bytes_per_pixel;
+    switch (tbpp)
+    {
+    case 4:
+        for (u32 i = offset; i < total_entries; ++i)
+        {
+            u32 x = i & 7;
+            u32 y = (i / 8) & 1;
+
+            const u32 value = ReadVram(cpsm, cbp, 1, x, y);
+            memcpy(&m_clut_cache[cache_addr & 0x3FF], &value, clut_bytes_per_pixel);
+
+            cache_addr += clut_bytes_per_pixel;
+        }
+        break;
+
+    case 8:
+        for (u32 i = offset; i < total_entries; ++i)
+        {
+            u32 x = i & 7;
+            if (i & 0x10)
+            {
+                x += 8;
+            }
+
+            u32 y = (i & 0xE0) / 16;
+            if (i & 0x8)
+            {
+                y++;
+            }
+
+            const u32 value = ReadVram(cpsm, cbp, 1, x, y);
+            memcpy(&m_clut_cache[cache_addr & 0x3FF], &value, clut_bytes_per_pixel);
+
+            cache_addr += clut_bytes_per_pixel;
+        }
+        break;
+
+    default:
+        break;
+    }
+}
+
+void GS::ReloadClutCacheCSM2(u32 psm, u32 cbp)
+{
+    const auto texclut = m_registers.texclut;
+
+    const u32 tbpp = GSMem::BitsPerPixel(static_cast<GSMem::PixelStorageMode>(psm));
+    const u32 entries = 1 << tbpp;
+
+    const u32 uoffset = texclut.cou * 16;
+    const u32 voffset = texclut.cov;
+
+    const u32 cbw = texclut.cbw;
+
+    for (usz i = 0; i < entries; ++i)
+    {
+        u32 x = (static_cast<u32>(uoffset) * 16) + i;
+
+        u16 value = ReadVram(GS_PSM_CT16, cbp, cbw, x, texclut.cov);
+
+        memcpy(&m_clut_cache[(i * 2) & 0x3FF], &value, 2);
+    }
+}
+
+void GS::ReloadClutCache(u32 psm, u32 cpsm, u32 cbp, u8 csm, u8 csa, u8 cld)
+{
+    bool load = false;
+
+    switch (cld)
+    {
+    case 0x1:
+        load = true;
+        break;
+    case 0x2:
+        load = true;
+        m_cbp0 = cbp;
+        break;
+    case 0x3:
+        load = true;
+        m_cbp1 = cbp;
+        break;
+    case 0x4:
+        if (cbp != m_cbp0)
+        {
+            load = true;
+            m_cbp0 = cbp;
+        }
+        break;
+    case 0x5:
+        if (cbp != m_cbp1)
+        {
+            load = true;
+            m_cbp1 = cbp;
+        }
+        break;
+    default:
+        break;
+    }
+
+    if (!load)
+    {
+        return;
+    }
+
+    switch (csm)
+    {
+    case 0:
+        ReloadClutCacheCSM1(psm, cpsm, cbp, csa);
+        break;
+    case 1:
+        ReloadClutCacheCSM2(psm, cbp);
+        break;
+    default:
+        break;
+    }
 }

@@ -1,7 +1,7 @@
 #include "MiniTest.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_gs_gpu.h"
-#include "runtime/ps2_gs_psmct32.h"
+#include "runtime/ps2_vu1.h"
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
 #include "Stubs/DMA.h"
@@ -1043,7 +1043,7 @@ void register_ps2_memory_tests()
             bool pixelsOk = true;
             for (uint32_t x = 0; x < 4u && pixelsOk; ++x)
             {
-                const uint32_t dstOff = GSPSMCT32::addrPSMCT32(0u, 1u, x, 0u);
+                const uint32_t dstOff = GSMem::LookupPixelAddressCT32(0u, 1u, x, 0u) * 4;
                 const uint32_t srcOff = kPixels + x * 4u;
                 for (uint32_t c = 0; c < 4u; ++c)
                 {
@@ -1200,7 +1200,7 @@ void register_ps2_memory_tests()
             }
             t.IsTrue(ct32PayloadOk, "flattened GIF chain should preserve CT32 REF bytes after the T4 REF payload");
 
-            const uint32_t row1Off = GSPSMCT32::addrPSMCT32(kCt32Dbp, 1u, 0u, 1u);
+            const uint32_t row1Off = GSMem::LookupPixelAddressCT32(kCt32Dbp, 1u, 0u, 1u) * 4;
             uint32_t actualRow1X0 = 0u;
             uint32_t expectedRow1X0 = 0u;
             std::memcpy(&actualRow1X0, mem.getGSVRAM() + row1Off, sizeof(actualRow1X0));
@@ -1212,7 +1212,7 @@ void register_ps2_memory_tests()
             {
                 for (uint32_t x = 0; x < kWidth && ct32Ok; ++x)
                 {
-                    const uint32_t dstOff = GSPSMCT32::addrPSMCT32(kCt32Dbp, 1u, x, y);
+                    const uint32_t dstOff = GSMem::LookupPixelAddressCT32(kCt32Dbp, 1u, x, y) * 4;
                     const uint32_t srcOff = kCt32Data + ((y * kWidth + x) * 4u);
                     for (uint32_t c = 0; c < 4u; ++c)
                     {
@@ -1775,7 +1775,7 @@ void register_ps2_memory_tests()
             bool imageOk = true;
             for (uint32_t x = 0; x < 4u && imageOk; ++x)
             {
-                const uint32_t off = GSPSMCT32::addrPSMCT32(0u, 1u, x, 0u);
+                const uint32_t off = GSMem::LookupPixelAddressCT32(0u, 1u, x, 0u) * 4;
                 for (uint32_t c = 0; c < 4u; ++c)
                 {
                     if (vramOut[off + c] != static_cast<uint8_t>(0x70u + x * 4u + c))
@@ -1828,7 +1828,7 @@ void register_ps2_memory_tests()
             bool imageOk = true;
             for (uint32_t x = 0; x < 4u && imageOk; ++x)
             {
-                const uint32_t off = GSPSMCT32::addrPSMCT32(0u, 1u, x, 0u);
+                const uint32_t off = GSMem::LookupPixelAddressCT32(0u, 1u, x, 0u) * 4;
                 for (uint32_t c = 0; c < 4u; ++c)
                 {
                     if (vramOut[off + c] != static_cast<uint8_t>(0xA0u + x * 4u + c))

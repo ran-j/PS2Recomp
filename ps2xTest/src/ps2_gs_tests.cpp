@@ -4,9 +4,6 @@
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
 #include "runtime/ps2_gs_gpu.h"
-#include "runtime/ps2_gs_psmct32.h"
-#include "runtime/ps2_gs_psmt4.h"
-#include "runtime/ps2_gs_psmt8.h"
 #include "Stubs/Helpers/Support.h"
 #include "Stubs/GS.h"
 
@@ -16,6 +13,7 @@
 #include <cstring>
 #include <thread>
 #include <vector>
+#include <array>
 
 using namespace ps2_syscalls;
 
@@ -109,7 +107,7 @@ namespace
 
     void writePSMT4Texel(std::vector<uint8_t> &vram, uint32_t tbp, uint32_t tbw, uint32_t x, uint32_t y, uint8_t index)
     {
-        const uint32_t nibbleAddr = GSPSMT4::addrPSMT4(tbp, tbw, x, y);
+        const uint32_t nibbleAddr = GSMem::LookupPixelAddressP4(tbp, tbw, x, y);
         const uint32_t byteOff = nibbleAddr >> 1;
         uint8_t &packed = vram[byteOff];
         if ((nibbleAddr & 1u) != 0u)
@@ -1143,7 +1141,7 @@ void register_ps2_gs_tests()
             constexpr uint32_t kSourceTbp0 = 64u;
             constexpr uint32_t kSourcePixelRow1 = 0x00665544u;
             constexpr uint32_t kDisplayPixelRow1 = 0x00CCBBAAu;
-            const uint32_t swizzledSourceOff = GSPSMCT32::addrPSMCT32(kSourceTbp0, 10u, 0u, 1u);
+            const uint32_t swizzledSourceOff = GSMem::LookupPixelAddressCT32(kSourceTbp0, 10u, 0u, 1u) * 4;
             std::memcpy(vram.data() + swizzledSourceOff, &kSourcePixelRow1, sizeof(kSourcePixelRow1));
             writeReferenceFramePSMCT32Pixel(vram, 150u, 10u, 0u, 1u, kDisplayPixelRow1);
 
@@ -1561,29 +1559,29 @@ void register_ps2_gs_tests()
             constexpr uint32_t kBaseBlock = 0u;
             constexpr uint32_t kWidth = 2u; // One 128x128 PSMT4 page.
 
-            t.Equals(GSPSMT4::addrPSMT4(kBaseBlock, kWidth, 0u, 0u), 0u,
+            t.Equals(GSMem::LookupPixelAddressP4(kBaseBlock, kWidth, 0u, 0u), 0u,
                      "PSMT4 origin should map to nibble offset 0");
-            t.Equals(GSPSMT4::addrPSMT4(kBaseBlock, kWidth, 1u, 0u), 8u,
+            t.Equals(GSMem::LookupPixelAddressP4(kBaseBlock, kWidth, 1u, 0u), 8u,
                      "PSMT4 x=1 should advance to the next packed nibble group");
-            t.Equals(GSPSMT4::addrPSMT4(kBaseBlock, kWidth, 0u, 1u), 16u,
+            t.Equals(GSMem::LookupPixelAddressP4(kBaseBlock, kWidth, 0u, 1u), 16u,
                      "PSMT4 second source row should follow the manual's row packing");
-            t.Equals(GSPSMT4::addrPSMT4(kBaseBlock, kWidth, 0u, 2u), 65u,
+            t.Equals(GSMem::LookupPixelAddressP4(kBaseBlock, kWidth, 0u, 2u), 65u,
                      "PSMT4 third source row should include the manual's odd-row permutation");
-            t.Equals(GSPSMT4::addrPSMT4(kBaseBlock, kWidth, 0u, 3u), 81u,
+            t.Equals(GSMem::LookupPixelAddressP4(kBaseBlock, kWidth, 0u, 3u), 81u,
                      "PSMT4 fourth source row should stay in the first block's manual column layout");
-            t.Equals(GSPSMT4::addrPSMT4(kBaseBlock, kWidth, 31u, 15u), 511u,
+            t.Equals(GSMem::LookupPixelAddressP4(kBaseBlock, kWidth, 31u, 15u), 511u,
                      "PSMT4 final texel in the first 32x16 block should land at the end of the block");
-            t.Equals(GSPSMT4::addrPSMT4(kBaseBlock, kWidth, 32u, 0u), 1024u,
+            t.Equals(GSMem::LookupPixelAddressP4(kBaseBlock, kWidth, 32u, 0u), 1024u,
                      "PSMT4 x=32 should advance to the next swizzled block in the page");
-            t.Equals(GSPSMT4::addrPSMT4(kBaseBlock, kWidth, 32u, 16u), 1536u,
+            t.Equals(GSMem::LookupPixelAddressP4(kBaseBlock, kWidth, 32u, 16u), 1536u,
                      "PSMT4 x=32,y=16 should follow the manual's second block-row permutation");
-            t.Equals(GSPSMT4::addrPSMT4(kBaseBlock, kWidth, 64u, 0u), 4096u,
+            t.Equals(GSMem::LookupPixelAddressP4(kBaseBlock, kWidth, 64u, 0u), 4096u,
                      "PSMT4 x=64 should advance to the third swizzled block column in the page");
-            t.Equals(GSPSMT4::addrPSMT4(kBaseBlock, kWidth, 96u, 112u), 15872u,
+            t.Equals(GSMem::LookupPixelAddressP4(kBaseBlock, kWidth, 96u, 112u), 15872u,
                      "PSMT4 bottom-right block origin should match the manual's page permutation");
-            t.Equals(GSPSMT4::addrPSMT4(kBaseBlock, kWidth, 127u, 127u), 16383u,
+            t.Equals(GSMem::LookupPixelAddressP4(kBaseBlock, kWidth, 127u, 127u), 16383u,
                      "PSMT4 final texel in a 128x128 page should land at the end of the page");
-            t.Equals(GSPSMT4::addrPSMT4(kBaseBlock, kWidth, 128u, 0u), 16384u,
+            t.Equals(GSMem::LookupPixelAddressP4(kBaseBlock, kWidth, 128u, 0u), 16384u,
                      "PSMT4 x=128 should advance to the next page of nibble addresses");
         });
 
@@ -1609,7 +1607,7 @@ void register_ps2_gs_tests()
             {
                 const uint32_t x = coord[0];
                 const uint32_t y = coord[1];
-                t.Equals(GSPSMT4::addrPSMT4(kBaseBlock, kWidth, x, y),
+                t.Equals(GSMem::LookupPixelAddressP4(kBaseBlock, kWidth, x, y),
                          referenceAddrPSMT4(kBaseBlock, kWidth, x, y),
                          "PSMT4 512x512 atlas mapping should match the GS manual for every sampled page boundary");
             }
@@ -1639,7 +1637,8 @@ void register_ps2_gs_tests()
                 (1ull << 35) |
                 (static_cast<uint64_t>(kClutCbp) << 37) |
                 (static_cast<uint64_t>(GS_PSM_CT32) << 51) |
-                (1ull << 55);
+                (0ull << 55) |
+                (1ull << 61);
             constexpr uint64_t kPrim =
                 static_cast<uint64_t>(GS_PRIM_TRIANGLE) |
                 (1ull << 4);
@@ -1712,29 +1711,29 @@ void register_ps2_gs_tests()
             constexpr uint32_t kBaseBlock = 0u;
             constexpr uint32_t kWidth = 2u; // One 128x64 PSMT8 page.
 
-            t.Equals(GSPSMT8::addrPSMT8(kBaseBlock, kWidth, 0u, 0u), 0u,
+            t.Equals(GSMem::LookupPixelAddressP8(kBaseBlock, kWidth, 0u, 0u), 0u,
                      "PSMT8 origin should map to byte offset 0");
-            t.Equals(GSPSMT8::addrPSMT8(kBaseBlock, kWidth, 1u, 0u), 4u,
+            t.Equals(GSMem::LookupPixelAddressP8(kBaseBlock, kWidth, 1u, 0u), 4u,
                      "PSMT8 x=1 should follow Veronica's Conv8to32 byte interleave");
-            t.Equals(GSPSMT8::addrPSMT8(kBaseBlock, kWidth, 0u, 1u), 8u,
+            t.Equals(GSMem::LookupPixelAddressP8(kBaseBlock, kWidth, 0u, 1u), 8u,
                      "PSMT8 second source row should land on the next Conv8to32 row stride");
-            t.Equals(GSPSMT8::addrPSMT8(kBaseBlock, kWidth, 0u, 2u), 33u,
+            t.Equals(GSMem::LookupPixelAddressP8(kBaseBlock, kWidth, 0u, 2u), 33u,
                      "PSMT8 third source row should preserve Veronica's odd-row shuffle");
-            t.Equals(GSPSMT8::addrPSMT8(kBaseBlock, kWidth, 0u, 3u), 41u,
+            t.Equals(GSMem::LookupPixelAddressP8(kBaseBlock, kWidth, 0u, 3u), 41u,
                      "PSMT8 fourth source row should preserve Veronica's alternating block rows");
-            t.Equals(GSPSMT8::addrPSMT8(kBaseBlock, kWidth, 15u, 15u), 255u,
+            t.Equals(GSMem::LookupPixelAddressP8(kBaseBlock, kWidth, 15u, 15u), 255u,
                      "PSMT8 final texel in the first 16x16 block should end at byte 255");
-            t.Equals(GSPSMT8::addrPSMT8(kBaseBlock, kWidth, 16u, 0u), 256u,
+            t.Equals(GSMem::LookupPixelAddressP8(kBaseBlock, kWidth, 16u, 0u), 256u,
                      "PSMT8 x=16 should advance to the next 16x16 block");
-            t.Equals(GSPSMT8::addrPSMT8(kBaseBlock, kWidth, 16u, 16u), 768u,
+            t.Equals(GSMem::LookupPixelAddressP8(kBaseBlock, kWidth, 16u, 16u), 768u,
                      "PSMT8 x=16,y=16 should include both block-column and block-row offsets");
-            t.Equals(GSPSMT8::addrPSMT8(kBaseBlock, kWidth, 32u, 0u), 1024u,
+            t.Equals(GSMem::LookupPixelAddressP8(kBaseBlock, kWidth, 32u, 0u), 1024u,
                      "PSMT8 x=32 should advance to the third block column in the page");
-            t.Equals(GSPSMT8::addrPSMT8(kBaseBlock, kWidth, 64u, 0u), 4096u,
+            t.Equals(GSMem::LookupPixelAddressP8(kBaseBlock, kWidth, 64u, 0u), 4096u,
                      "PSMT8 x=64 should advance to the second page half");
-            t.Equals(GSPSMT8::addrPSMT8(kBaseBlock, kWidth, 96u, 48u), 7680u,
+            t.Equals(GSMem::LookupPixelAddressP8(kBaseBlock, kWidth, 96u, 48u), 7680u,
                      "PSMT8 lower-right interior block should follow Veronica's page permutation");
-            t.Equals(GSPSMT8::addrPSMT8(kBaseBlock, kWidth, 127u, 63u), 8191u,
+            t.Equals(GSMem::LookupPixelAddressP8(kBaseBlock, kWidth, 127u, 63u), 8191u,
                      "PSMT8 final texel in a 128x64 page should land at the final byte");
         });
 
@@ -2246,7 +2245,7 @@ void register_ps2_gs_tests()
             {
                 for (uint32_t x = 0; x < kTexWidth; ++x)
                 {
-                    const uint32_t texelOff = GSPSMT8::addrPSMT8(kTexTbp, kTexTbw, x, y);
+                    const uint32_t texelOff = GSMem::LookupPixelAddressP8(kTexTbp, kTexTbw, x, y);
                     got = vram[texelOff];
                     expected = source[y * kTexWidth + x];
                     if (got != expected)
@@ -2366,7 +2365,8 @@ void register_ps2_gs_tests()
                 (1ull << 34) |
                 (1ull << 35) |
                 (static_cast<uint64_t>(kClutCbp) << 37) |
-                (static_cast<uint64_t>(GS_PSM_CT32) << 51);
+                (static_cast<uint64_t>(GS_PSM_CT32) << 51) |
+                (1ull << 61);
             constexpr uint64_t kPrim =
                 static_cast<uint64_t>(GS_PRIM_SPRITE) |
                 (1ull << 4) |  // TME
@@ -2374,14 +2374,14 @@ void register_ps2_gs_tests()
             constexpr uint32_t kExpectedColor = 0x800000FFu; // RGBA = (255,0,0,128)
             constexpr uint32_t kWrongColor = 0x8000FF00u;    // RGBA = (0,255,0,128)
 
-            const uint32_t texNibbleAddr = GSPSMT4::addrPSMT4(kTexTbp, 1u, 0u, 0u);
+            const uint32_t texNibbleAddr = GSMem::LookupPixelAddressP4(kTexTbp, 1u, 0u, 0u);
             const uint32_t texByteOff = texNibbleAddr >> 1;
             vram[texByteOff] = static_cast<uint8_t>((vram[texByteOff] & 0xF0u) | 0x08u);
 
             // Veronica uploads CSM1 CLUT rows with a 64-pixel GS stride, so logical entry 8
             // resolves to row 1, column 0 after the CSM1 swizzle.
-            const uint32_t wrongClutOff = GSPSMCT32::addrPSMCT32(kClutCbp, 1u, 8u, 0u);
-            const uint32_t expectedClutOff = GSPSMCT32::addrPSMCT32(kClutCbp, 1u, 0u, 1u);
+            const uint32_t wrongClutOff = GSMem::LookupPixelAddressCT32(kClutCbp, 1u, 8u, 0u) * 4;
+            const uint32_t expectedClutOff = GSMem::LookupPixelAddressCT32(kClutCbp, 1u, 0u, 1u) * 4;
             std::memcpy(vram.data() + wrongClutOff, &kWrongColor, sizeof(kWrongColor));
             std::memcpy(vram.data() + expectedClutOff, &kExpectedColor, sizeof(kExpectedColor));
 
@@ -2427,7 +2427,8 @@ void register_ps2_gs_tests()
                 (1ull << 34) |
                 (1ull << 35) |
                 (static_cast<uint64_t>(kClutCbp) << 37) |
-                (static_cast<uint64_t>(GS_PSM_CT32) << 51);
+                (static_cast<uint64_t>(GS_PSM_CT32) << 51) |
+                (1ull << 61);
             constexpr uint64_t kPrim =
                 static_cast<uint64_t>(GS_PRIM_SPRITE) |
                 (1ull << 4) |  // TME
@@ -2444,7 +2445,7 @@ void register_ps2_gs_tests()
                 (2ull << 32);
             constexpr uint32_t kExpectedColor = 0x80FFFFFFu;
 
-            const uint32_t texOff = GSPSMT8::addrPSMT8(kTexTbp, 1u, 0u, 0u);
+            const uint32_t texOff = GSMem::LookupPixelAddressP8(kTexTbp, 1u, 0u, 0u);
             vram[texOff] = 8u;
 
             std::vector<uint32_t> clut(32u, 0u);
@@ -2511,12 +2512,14 @@ void register_ps2_gs_tests()
                 (1ull << 35) |
                 (static_cast<uint64_t>(kWrongClutCbp) << 37) |
                 (static_cast<uint64_t>(GS_PSM_CT32) << 51) |
-                (1ull << 55);
+                (0ull << 55) |
+                (1ull << 61);
             constexpr uint64_t kTex2 =
                 (static_cast<uint64_t>(GS_PSM_T8) << 20) |
                 (static_cast<uint64_t>(kExpectedClutCbp) << 37) |
                 (static_cast<uint64_t>(GS_PSM_CT32) << 51) |
-                (1ull << 55);
+                (0ull << 55) |
+                (1ull << 61);
             constexpr uint64_t kPrim =
                 static_cast<uint64_t>(GS_PRIM_SPRITE) |
                 (1ull << 4) |
@@ -2524,11 +2527,11 @@ void register_ps2_gs_tests()
             constexpr uint32_t kWrongColor = 0xFF00FF00u;
             constexpr uint32_t kExpectedColor = 0xFF0000FFu;
 
-            const uint32_t texOff = GSPSMT8::addrPSMT8(kTexTbp, 1u, 0u, 0u);
+            const uint32_t texOff = GSMem::LookupPixelAddressP8(kTexTbp, 1u, 0u, 0u);
             vram[texOff] = 8u;
 
-            const uint32_t wrongClutOff = GSPSMCT32::addrPSMCT32(kWrongClutCbp, 1u, 8u, 0u);
-            const uint32_t expectedClutOff = GSPSMCT32::addrPSMCT32(kExpectedClutCbp, 1u, 8u, 0u);
+            const uint32_t wrongClutOff = GSMem::LookupPixelAddressCT32(kWrongClutCbp, 1u, 8u, 0u) * 4;
+            const uint32_t expectedClutOff = GSMem::LookupPixelAddressCT32(kExpectedClutCbp, 1u, 8u, 0u) * 4;
             std::memcpy(vram.data() + wrongClutOff, &kWrongColor, sizeof(kWrongColor));
             std::memcpy(vram.data() + expectedClutOff, &kExpectedColor, sizeof(kExpectedColor));
 
@@ -2551,70 +2554,6 @@ void register_ps2_gs_tests()
             std::memcpy(&pixel, vram.data(), sizeof(pixel));
             t.Equals(pixel, kExpectedColor,
                      "TEX2 should override the active CLUT base and format state without requiring a new TEX0 write");
-        });
-
-        tc.Run("GS TEXCLUT offsets T8 CLUT fetch coordinates", [](TestCase &t)
-        {
-            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
-            GS gs;
-            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
-
-            constexpr uint32_t kTexTbp = 64u;
-            constexpr uint32_t kClutCbp = 128u;
-            constexpr uint64_t kFrameReg =
-                (0ull << 0) |
-                (1ull << 16) |
-                (static_cast<uint64_t>(GS_PSM_CT32) << 24);
-            constexpr uint64_t kZbuf = (1ull << 32);
-            constexpr uint64_t kTex0 =
-                (static_cast<uint64_t>(kTexTbp) << 0) |
-                (1ull << 14) |
-                (static_cast<uint64_t>(GS_PSM_T8) << 20) |
-                (0ull << 26) |
-                (0ull << 30) |
-                (1ull << 34) |
-                (1ull << 35) |
-                (static_cast<uint64_t>(kClutCbp) << 37) |
-                (static_cast<uint64_t>(GS_PSM_CT32) << 51) |
-                (1ull << 55);
-            constexpr uint64_t kTexClut =
-                (1ull << 0) |
-                (3ull << 6) |
-                (2ull << 12);
-            constexpr uint64_t kPrim =
-                static_cast<uint64_t>(GS_PRIM_SPRITE) |
-                (1ull << 4) |
-                (1ull << 8);
-            constexpr uint32_t kWrongColor = 0xFF00FF00u;
-            constexpr uint32_t kExpectedColor = 0xFF3366CCu;
-
-            const uint32_t texOff = GSPSMT8::addrPSMT8(kTexTbp, 1u, 0u, 0u);
-            vram[texOff] = 0u;
-
-            const uint32_t wrongClutOff = GSPSMCT32::addrPSMCT32(kClutCbp, 1u, 0u, 0u);
-            const uint32_t expectedClutOff = GSPSMCT32::addrPSMCT32(kClutCbp, 1u, 3u, 2u);
-            std::memcpy(vram.data() + wrongClutOff, &kWrongColor, sizeof(kWrongColor));
-            std::memcpy(vram.data() + expectedClutOff, &kExpectedColor, sizeof(kExpectedColor));
-
-            gs.writeRegister(GS_REG_FRAME_1, kFrameReg);
-            gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
-            gs.writeRegister(GS_REG_SCISSOR_1, 0ull);
-            gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
-            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
-            gs.writeRegister(GS_REG_ALPHA_1, 0ull);
-            gs.writeRegister(GS_REG_TEX0_1, kTex0);
-            gs.writeRegister(GS_REG_TEXCLUT, kTexClut);
-            gs.writeRegister(GS_REG_PRIM, kPrim);
-            gs.writeRegister(GS_REG_RGBAQ, 0x80808080ull);
-            gs.writeRegister(GS_REG_UV, 0ull);
-            gs.writeRegister(GS_REG_XYZ2, 0ull);
-            gs.writeRegister(GS_REG_UV, 0ull);
-            gs.writeRegister(GS_REG_XYZ2, (16ull << 0) | (16ull << 16));
-
-            uint32_t pixel = 0u;
-            std::memcpy(&pixel, vram.data(), sizeof(pixel));
-            t.Equals(pixel, kExpectedColor,
-                     "TEXCLUT should offset the CLUT lookup coordinates instead of always starting from the CLUT base");
         });
 
         tc.Run("GS TEXA expands CT24 alpha and honors AEM for black texels", [](TestCase &t)
@@ -2653,13 +2592,13 @@ void register_ps2_gs_tests()
             constexpr uint32_t kExpectedRed = 0x550000FFu;
             constexpr uint32_t kExpectedBlack = 0x00000000u;
 
-            const uint32_t redOff = GSPSMCT32::addrPSMCT32(kTexTbp, 1u, 0u, 0u);
+            const uint32_t redOff = GSMem::LookupPixelAddressCT32(kTexTbp, 1u, 0u, 0u) * 4;
             vram[redOff + 0u] = 0xFFu;
             vram[redOff + 1u] = 0x00u;
             vram[redOff + 2u] = 0x00u;
             vram[redOff + 3u] = 0x00u;
 
-            const uint32_t blackOff = GSPSMCT32::addrPSMCT32(kTexTbp, 1u, 1u, 0u);
+            const uint32_t blackOff = GSMem::LookupPixelAddressCT32(kTexTbp, 1u, 1u, 0u) * 4;
             vram[blackOff + 0u] = 0x00u;
             vram[blackOff + 1u] = 0x00u;
             vram[blackOff + 2u] = 0x00u;
@@ -2734,7 +2673,7 @@ void register_ps2_gs_tests()
                 (0x56u << 16) |
                 (0x44u << 24);
 
-            const uint32_t texOff = GSPSMCT32::addrPSMCT32(kTexTbp, 1u, 0u, 0u);
+            const uint32_t texOff = GSMem::LookupPixelAddressCT32(kTexTbp, 1u, 0u, 0u) * 4;
             std::memcpy(vram.data() + texOff, &kTexturePixel, sizeof(kTexturePixel));
 
             gs.writeRegister(GS_REG_FRAME_1, kFrameReg);
@@ -2796,7 +2735,7 @@ void register_ps2_gs_tests()
                 (0x80u << 16) |
                 (0x30u << 24);
 
-            const uint32_t texOff = GSPSMCT32::addrPSMCT32(kTexTbp, 1u, 0u, 0u);
+            const uint32_t texOff = GSMem::LookupPixelAddressCT32(kTexTbp, 1u, 0u, 0u) * 4;
             std::memcpy(vram.data() + texOff, &kTexturePixel, sizeof(kTexturePixel));
 
             gs.writeRegister(GS_REG_FRAME_1, kFrameReg);
@@ -2858,7 +2797,7 @@ void register_ps2_gs_tests()
                 (0x80u << 16) |
                 (0x10u << 24);
 
-            const uint32_t texOff = GSPSMCT32::addrPSMCT32(kTexTbp, 1u, 0u, 0u);
+            const uint32_t texOff = GSMem::LookupPixelAddressCT32(kTexTbp, 1u, 0u, 0u) * 4;
             std::memcpy(vram.data() + texOff, &kTexturePixel, sizeof(kTexturePixel));
 
             gs.writeRegister(GS_REG_FRAME_1, kFrameReg);
@@ -2909,7 +2848,8 @@ void register_ps2_gs_tests()
                     (1ull << 34) |
                     (1ull << 35) |
                     (static_cast<uint64_t>(kClutCbp) << 37) |
-                    (static_cast<uint64_t>(GS_PSM_CT32) << 51);
+                    (static_cast<uint64_t>(GS_PSM_CT32) << 51) |
+                    (1ull << 61);
                 constexpr uint64_t kPrim =
                     static_cast<uint64_t>(GS_PRIM_TRIANGLE) |
                     (1ull << 4) |
@@ -3336,6 +3276,163 @@ void register_ps2_gs_tests()
             runtime.requestStop();
             notifyRuntimeStop();
             ps2_stubs::resetGsSyncVCallbackState();
+        });
+
+        tc.Run("32 bit block read to linear buffer extracts the correct data", [](TestCase& t)
+        {
+            std::vector<uint8_t> vram( PS2_GS_VRAM_SIZE, 0u );
+
+            GSMem::InitLookupTables();
+
+            // 32 bit block is 8x8
+            for (u32 y = 0; y < 8; ++y)
+            for (u32 x = 0; x < 8; ++x)
+            {
+                const u32 v = x | (y << 16);
+
+                GSMem::WritePixelCT32(vram.data(), 0, 1, x, y, v);
+            }
+
+            std::vector<u8> out( 8 * 8 * 4, 0 );
+            GSMem::ReadBlockToLinearBuffer32(out.data(), 8 * 4, vram.data(), 0);
+
+            bool equal = true;
+            for (u32 y = 0; y < 8; ++y)
+            for (u32 x = 0; x < 8; ++x)
+            {
+                usz word = ((static_cast<usz>(y) * 8) + x) * 4;
+
+                u8 r = out[word + 0];
+                u8 g = out[word + 1];
+                u8 b = out[word + 2];
+                u8 a = out[word + 3];
+
+                u32 packed = r | (g << 8) | (b << 16) | (a << 24);
+                u32 expected = x | (y << 16);
+
+                if (packed != expected)
+                {
+                    equal = false;
+                    break;
+                }
+            }
+
+            t.IsTrue(equal, "Value should match input");
+        });
+
+        tc.Run("16 bit block read to linear buffer extracts the correct data", [](TestCase& t)
+        {
+            std::vector<uint8_t> vram( PS2_GS_VRAM_SIZE, 0u );
+
+            GSMem::InitLookupTables();
+
+            // 16 bit block is 16x8
+            for (u32 y = 0; y < 8; ++y)
+            for (u32 x = 0; x < 16; ++x)
+            {
+                const u16 v = x | (y << 8);
+
+                GSMem::WritePixelCT16(vram.data(), 0, 1, x, y, v);
+            }
+
+            std::vector<u8> out( 8 * 16 * 2, 0 );
+            GSMem::ReadBlockToLinearBuffer16(out.data(), 16 * 2, vram.data(), 0);
+
+            bool equal = true;
+            for (u32 y = 0; y < 8; ++y)
+            for (u32 x = 0; x < 16; ++x)
+            {
+                usz half = ((static_cast<usz>(y) * 16) + x) * 2;
+
+                u8 h = out[half + 0];
+                u8 l = out[half + 1];
+
+                u16 packed = h | (l << 8);
+                u16 expected = x | (y << 8);
+
+                if (packed != expected)
+                {
+                    equal = false;
+                    break;
+                }
+            }
+
+            t.IsTrue(equal, "Value should match input");
+        });
+
+        tc.Run("8 bit block read to linear buffer extracts the correct data", [](TestCase& t)
+        {
+            std::vector<uint8_t> vram( PS2_GS_VRAM_SIZE, 0u );
+
+            GSMem::InitLookupTables();
+
+            // 8 bit block is 16x16
+            for (u32 y = 0; y < 16; ++y)
+            for (u32 x = 0; x < 16; ++x)
+            {
+                const u8 v = (y << 4) | x;
+
+                GSMem::WritePixelP8(vram.data(), 0, 1, x, y, v);
+            }
+
+            std::vector<u8> out( 16 * 16, 0 );
+            GSMem::ReadBlockToLinearBuffer8(out.data(), 16, vram.data(), 0);
+
+            bool equal = true;
+            for (u32 y = 0; y < 16; ++y)
+            for (u32 x = 0; x < 16; ++x)
+            {
+                usz byte = ((static_cast<usz>(y) * 16) + x);
+
+                u8 b = out[byte];
+                u8 expected = (y << 4) | x;
+
+                if (b != expected)
+                {
+                    equal = false;
+                    break;
+                }
+            }
+
+            t.IsTrue(equal, "Value should match input");
+        });
+
+        tc.Run("4 bit block read to linear buffer extracts the correct data", [](TestCase& t)
+        {
+            std::vector<uint8_t> vram( PS2_GS_VRAM_SIZE, 0u );
+
+            GSMem::InitLookupTables();
+
+            // 4 bit block is 32x16
+            for (u32 y = 0; y < 16; ++y)
+            for (u32 x = 0; x < 32; ++x)
+            {
+                const u8 v = ((y & 3) << 2) | (x & 3);
+
+                GSMem::WritePixelP4(vram.data(), 0, 1, x, y, v);
+            }
+
+            std::vector<u8> out( 32 * 16, 0 );
+            GSMem::ReadBlockToLinearBuffer4(out.data(), 32, vram.data(), 0);
+
+            bool equal = true;
+            for (u32 y = 0; y < 16; ++y)
+            for (u32 x = 0; x < 32; ++x)
+            {
+                usz byte = ((static_cast<usz>(y) * 32) + x);
+
+                u8 b = out[byte];
+                u8 expected = ((y & 3) << 2) | (x & 3);
+
+                if (b != expected)
+                {
+                    printf("(%d, %d) expected: 0x%X, actual: 0x%X\n", x, y, expected, b);
+                    equal = false;
+                    break;
+                }
+            }
+
+            t.IsTrue(equal, "Value should match input");
         });
     });
 }

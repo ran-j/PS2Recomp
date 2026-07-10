@@ -184,7 +184,7 @@ namespace
         return true;
     }
 
-    const char *primTypeName(GSPrimType type)
+    const char *primTypeName(u64 type)
     {
         switch (type)
         {
@@ -404,7 +404,7 @@ namespace
             << " fbmsk=0x" << ctx.frame.fbmsk << std::dec << "\n";
         out << "  ZBUF   zbp=" << ctx.zbuf.zbp
             << " psm=0x" << std::hex << static_cast<unsigned int>(ctx.zbuf.psm) << std::dec
-            << " zmask=" << (ctx.zbuf.zmask ? 1u : 0u) << "\n";
+            << " zmask=" << (ctx.zbuf.zmsk ? 1u : 0u) << "\n";
         out << "  SCISSOR x=" << ctx.scissor.x0 << ".." << ctx.scissor.x1
             << " y=" << ctx.scissor.y0 << ".." << ctx.scissor.y1 << "\n";
         out << "  TEX0   tbp0=" << ctx.tex0.tbp0
@@ -419,19 +419,19 @@ namespace
             << " csa=" << static_cast<unsigned int>(ctx.tex0.csa)
             << " cld=" << static_cast<unsigned int>(ctx.tex0.cld) << "\n";
         out << "  XYOFFSET ofx=" << ctx.xyoffset.ofx << " ofy=" << ctx.xyoffset.ofy << "\n";
-        out << "  TEST   0x" << std::hex << std::setw(16) << std::setfill('0') << ctx.test << std::setfill(' ') << std::dec
-            << " ATE=" << ((ctx.test >> 0) & 1ull)
-            << " ATST=" << ((ctx.test >> 1) & 7ull)
-            << " AREF=0x" << std::hex << ((ctx.test >> 4) & 0xffull) << std::dec
-            << " AFAIL=" << ((ctx.test >> 12) & 3ull)
-            << " DATE=" << ((ctx.test >> 14) & 1ull)
-            << " DATM=" << ((ctx.test >> 15) & 1ull)
-            << " ZTE=" << ((ctx.test >> 16) & 1ull)
-            << " ZTST=" << ((ctx.test >> 17) & 3ull) << "\n";
-        out << "  ALPHA  0x" << std::hex << std::setw(16) << std::setfill('0') << ctx.alpha << std::setfill(' ') << std::dec << "\n";
-        out << "  TEX1   0x" << std::hex << std::setw(16) << std::setfill('0') << ctx.tex1 << std::setfill(' ') << std::dec << "\n";
-        out << "  CLAMP  0x" << std::hex << std::setw(16) << std::setfill('0') << ctx.clamp << std::setfill(' ') << std::dec << "\n";
-        out << "  FBA    0x" << std::hex << std::setw(16) << std::setfill('0') << ctx.fba << std::setfill(' ') << std::dec << "\n";
+        out << "  TEST   0x" << std::hex << std::setw(16) << std::setfill('0') << ctx.test.data << std::setfill(' ') << std::dec
+            << " ATE=" << ctx.test.ate
+            << " ATST=" << ctx.test.atst
+            << " AREF=0x" << std::hex << ctx.test.aref << std::dec
+            << " AFAIL=" << ctx.test.afail
+            << " DATE=" << ctx.test.date
+            << " DATM=" << ctx.test.datm
+            << " ZTE=" << ctx.test.zte
+            << " ZTST=" << ctx.test.ztst << "\n";
+        out << "  ALPHA  0x" << std::hex << std::setw(16) << std::setfill('0') << ctx.alpha.data << std::setfill(' ') << std::dec << "\n";
+        out << "  TEX1   0x" << std::hex << std::setw(16) << std::setfill('0') << ctx.tex1.data << std::setfill(' ') << std::dec << "\n";
+        out << "  CLAMP  0x" << std::hex << std::setw(16) << std::setfill('0') << ctx.clamp.data << std::setfill(' ') << std::dec << "\n";
+        out << "  FBA    0x" << std::hex << std::setw(16) << std::setfill('0') << ctx.fba.data << std::setfill(' ') << std::dec << "\n";
     }
 
     bool writeGsDebugDump(const std::filesystem::path &path,
@@ -475,7 +475,7 @@ namespace
             out << std::dec << std::setfill(' ');
 
             out << "[GS draw state]\n";
-            out << "PRIM type=" << primTypeName(gs.prim.type)
+            out << "PRIM type=" << primTypeName(gs.prim.prim)
                 << " iip=" << gs.prim.iip
                 << " tme=" << gs.prim.tme
                 << " fge=" << gs.prim.fge
@@ -539,10 +539,10 @@ namespace
                     << row.frameIndex << '\t'
                     << row.vsyncTick << '\t'
                     << gsDebugEventKindName(row.kind) << '\t'
-                    << primTypeName(row.prim.type) << '\t'
+                    << primTypeName(row.prim.prim) << '\t'
                     << (row.prim.ctxt ? 1u : 0u) << '\t'
                     << "fbp=" << row.frame.fbp << "/fbw=" << static_cast<unsigned int>(row.frame.fbw) << "/psm=0x" << std::hex << static_cast<unsigned int>(row.frame.psm) << std::dec << '\t'
-                    << "zbp=" << row.zbuf.zbp << "/psm=0x" << std::hex << static_cast<unsigned int>(row.zbuf.psm) << std::dec << "/m=" << (row.zbuf.zmask ? 1u : 0u) << '\t'
+                    << "zbp=" << row.zbuf.zbp << "/psm=0x" << std::hex << static_cast<unsigned int>(row.zbuf.psm) << std::dec << "/m=" << (row.zbuf.zmsk ? 1u : 0u) << '\t'
                     << "0x" << std::hex << row.test << std::dec << '\t'
                     << "0x" << std::hex << row.alpha << std::dec << '\t'
                     << "tbp=" << row.tex0.tbp0 << "/psm=0x" << std::hex << static_cast<unsigned int>(row.tex0.psm) << std::dec << "/size=" << (1u << row.tex0.tw) << "x" << (1u << row.tex0.th) << "/cbp=" << row.tex0.cbp << '\t';
@@ -614,7 +614,7 @@ namespace
         ImGui::Text("ZBUF  zbp=%u psm=0x%02X zmask=%u",
                     ctx.zbuf.zbp,
                     static_cast<unsigned int>(ctx.zbuf.psm),
-                    ctx.zbuf.zmask ? 1u : 0u);
+                    ctx.zbuf.zmsk ? 1u : 0u);
         ImGui::Text("SCISSOR x=%u..%u y=%u..%u",
                     ctx.scissor.x0,
                     ctx.scissor.x1,
@@ -634,21 +634,21 @@ namespace
                     static_cast<unsigned int>(ctx.tex0.csa),
                     static_cast<unsigned int>(ctx.tex0.cld));
         ImGui::Text("XYOFFSET ofx=%u ofy=%u", ctx.xyoffset.ofx, ctx.xyoffset.ofy);
-        textHex64("TEST", ctx.test);
+        textHex64("TEST", ctx.test.data);
         ImGui::SameLine();
         ImGui::Text("ATE=%llu ATST=%llu AREF=0x%02llX AFAIL=%llu DATE=%llu DATM=%llu ZTE=%llu ZTST=%llu",
-                    (ctx.test >> 0) & 1ull,
-                    (ctx.test >> 1) & 7ull,
-                    (ctx.test >> 4) & 0xffull,
-                    (ctx.test >> 12) & 3ull,
-                    (ctx.test >> 14) & 1ull,
-                    (ctx.test >> 15) & 1ull,
-                    (ctx.test >> 16) & 1ull,
-                    (ctx.test >> 17) & 3ull);
-        textHex64("ALPHA", ctx.alpha);
-        textHex64("TEX1", ctx.tex1);
-        textHex64("CLAMP", ctx.clamp);
-        textHex64("FBA", ctx.fba);
+                    ctx.test.ate,
+                    ctx.test.atst,
+                    ctx.test.aref,
+                    ctx.test.afail,
+                    ctx.test.date,
+                    ctx.test.datm,
+                    ctx.test.zte,
+                    ctx.test.ztst);
+        textHex64("ALPHA", ctx.alpha.data);
+        textHex64("TEX1", ctx.tex1.data);
+        textHex64("CLAMP", ctx.clamp.data);
+        textHex64("FBA", ctx.fba.data);
         ImGui::TreePop();
     }
 
@@ -1494,7 +1494,7 @@ namespace
 
         ImGui::SeparatorText("GS draw state");
         ImGui::Text("PRIM type=%s iip=%u tme=%u fge=%u abe=%u aa1=%u fst=%u ctxt=%u fix=%u",
-                    primTypeName(gs.prim.type), gs.prim.iip, gs.prim.tme, gs.prim.fge, gs.prim.abe,
+                    primTypeName(gs.prim.prim), gs.prim.iip, gs.prim.tme, gs.prim.fge, gs.prim.abe,
                     gs.prim.aa1, gs.prim.fst, gs.prim.ctxt, gs.prim.fix);
         ImGui::Text("TEXA ta0=0x%02X aem=%u ta1=0x%02X | TEXCLUT cbw=%u cou=%u cov=%u",
                     gs.texa.ta0, gs.texa.aem ? 1u : 0u, gs.texa.ta1, gs.texclut.cbw, gs.texclut.cou, gs.texclut.cov);
@@ -1627,13 +1627,13 @@ namespace
                 ImGui::TableNextColumn();
                 ImGui::TextUnformatted(gsDebugEventKindName(row.kind));
                 ImGui::TableNextColumn();
-                ImGui::Text("%s", primTypeName(row.prim.type));
+                ImGui::Text("%s", primTypeName(row.prim.prim));
                 ImGui::TableNextColumn();
                 ImGui::Text("%u", row.prim.ctxt ? 1u : 0u);
                 ImGui::TableNextColumn();
                 ImGui::Text("%u/%u/0x%02X", row.frame.fbp, row.frame.fbw, row.frame.psm);
                 ImGui::TableNextColumn();
-                ImGui::Text("%u/0x%02X m=%u", row.zbuf.zbp, row.zbuf.psm, row.zbuf.zmask ? 1u : 0u);
+                ImGui::Text("%u/0x%02X m=%u", row.zbuf.zbp, row.zbuf.psm, row.zbuf.zmsk ? 1u : 0u);
                 ImGui::TableNextColumn();
                 ImGui::Text("ATE=%llu ATST=%llu AREF=%02llX AFAIL=%llu ZTE=%llu ZTST=%llu",
                             (test >> 0) & 1ull,
