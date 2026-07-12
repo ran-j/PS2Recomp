@@ -103,9 +103,12 @@ namespace ps2recomp
            << std::dec;
         ss << "\n";
 
+        bool lastInstructionWasControlFlow = false;
+
         for (size_t i = 0; i < instructions.size(); ++i)
         {
             const Instruction &inst = instructions[i];
+            lastInstructionWasControlFlow = inst.hasDelaySlot;
 
             if (internalTargets.contains(inst.address))
             {
@@ -221,6 +224,19 @@ namespace ps2recomp
 
                 throw;
             }
+        }
+
+        // If the function's last instruction is not a branch/jump (no delay
+        // slot), execution "falls off the end" without ctx->pc ever being
+        // updated past that instruction's own address (every non-branch
+        // instruction sets ctx->pc to its own address, not the next one).
+        // dispatchLoop would then call this exact function again forever.
+        // Advance ctx->pc to the function's end so dispatchLoop's next
+        // lookup resumes at the following function instead of spinning.
+        if (!instructions.empty() && !lastInstructionWasControlFlow)
+        {
+            ss << "    ctx->pc = 0x" << std::hex << function.end << "u;\n"
+               << std::dec;
         }
 
         ss << "}\n";
