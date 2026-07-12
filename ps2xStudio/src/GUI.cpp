@@ -17,6 +17,7 @@ static TextEditor ghidra_editor;
 static TextEditor log_editor;  // TextEditor for logs - supports text selection
 static bool editors_initialized = false;
 static bool show_settings_window = false;
+static bool show_help_window = false;
 static bool config_editor_needs_sync = false;
 static size_t last_log_version = 0;
 static bool s_wantsQuit = false;
@@ -70,6 +71,40 @@ bool GUI::WantsQuit() {
     return s_wantsQuit;
 }
 
+// ---- Help Window ----
+static void DrawHelpWindow(StudioState& state) {
+    if (!show_help_window) return;
+
+    ImGui::SetNextWindowSize(ImVec2(600, 350), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Help / About", &show_help_window)) {
+        if (ImGui::GetIO().Fonts->Fonts.Size > 0) {
+            ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[0]);
+            ImGui::TextColored(ImVec4(0.0f, 0.6f, 1.0f, 1.0f), "PS2Recomp Studio");
+            ImGui::PopFont();
+        } else {
+            ImGui::TextColored(ImVec4(0.0f, 0.6f, 1.0f, 1.0f), "PS2Recomp Studio");
+        }
+        ImGui::Separator();
+        ImGui::Spacing();
+        ImGui::TextWrapped("This application is a graphical interface for analyzing and recompiling PlayStation 2 (PS2) ELF executables.");
+        ImGui::Spacing();
+        ImGui::TextWrapped("How to use:");
+        ImGui::BulletText("Load an ELF file (File -> Open ELF...)");
+        ImGui::BulletText("Run Analysis (Tools -> Analyze or F5) to decode the binary");
+        ImGui::BulletText("Optionally import a Ghidra CSV (File -> Import Ghidra CSV...) to name functions");
+        ImGui::BulletText("Review functions in the Explorer and set overrides (e.g. Stub, Skip, Force Recompile)");
+        ImGui::BulletText("Set an output directory (File -> Set Output Directory...)");
+        ImGui::BulletText("Run Recompilation (Tools -> Recompile or F7) to generate C++ code");
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        if (ImGui::Button("Close", ImVec2(120, 0))) {
+            show_help_window = false;
+        }
+    }
+    ImGui::End();
+}
+
 // ---- Settings Window ----
 static void DrawSettingsWindow(StudioState& state) {
     if (!show_settings_window) return;
@@ -78,9 +113,9 @@ static void DrawSettingsWindow(StudioState& state) {
     if (ImGui::Begin("Settings", &show_settings_window)) {
 
         if (ImGui::CollapsingHeader("Theme", ImGuiTreeNodeFlags_DefaultOpen)) {
-            const char* themes[] = { "Dark", "Light", "Custom" };
+            const char* themes[] = { "Dark", "Light", "Custom", "PS2" };
             int current = static_cast<int>(state.settings.theme);
-            if (ImGui::Combo("Theme Mode", &current, themes, 3)) {
+            if (ImGui::Combo("Theme Mode", &current, themes, 4)) {
                 state.settings.theme = static_cast<ThemeMode>(current);
                 StyleManager::ApplyTheme(state.settings.theme, state.settings);
             }
@@ -328,6 +363,13 @@ void GUI::DrawStudio(StudioState& state) {
             ImGui::EndMenu();
         }
 
+        if (ImGui::BeginMenu("Help")) {
+            if (ImGui::MenuItem("About / How to use")) {
+                show_help_window = true;
+            }
+            ImGui::EndMenu();
+        }
+
         // Show output path in menu bar
         std::string pathDisplay = state.GetEffectiveOutputPath();
         float pathWidth = ImGui::CalcTextSize(pathDisplay.c_str()).x;
@@ -364,6 +406,7 @@ void GUI::DrawStudio(StudioState& state) {
     }
 
     DrawSettingsWindow(state);
+    DrawHelpWindow(state);
 
     // ---- Explorer Panel ----
     ImGui::Begin("Explorer");
