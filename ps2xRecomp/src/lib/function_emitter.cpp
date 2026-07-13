@@ -103,9 +103,12 @@ namespace ps2recomp
            << std::dec;
         ss << "\n";
 
+        bool lastInstructionWasControlFlow = false;
+
         for (size_t i = 0; i < instructions.size(); ++i)
         {
             const Instruction &inst = instructions[i];
+            lastInstructionWasControlFlow = inst.hasDelaySlot;
 
             if (internalTargets.contains(inst.address))
             {
@@ -221,6 +224,13 @@ namespace ps2recomp
 
                 throw;
             }
+        }
+
+        // Fallthrough with no terminating branch: advance ctx->pc past the function so dispatchLoop doesn't re-call it forever.
+        if (!instructions.empty() && !lastInstructionWasControlFlow)
+        {
+            ss << "    ctx->pc = 0x" << std::hex << function.end << "u;\n"
+               << std::dec;
         }
 
         ss << "}\n";

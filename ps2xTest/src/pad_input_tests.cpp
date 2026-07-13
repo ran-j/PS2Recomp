@@ -258,7 +258,7 @@ void register_pad_input_tests()
             setRegU32(ctx, 6, 1);
             setRegU32(ctx, 7, 0);
             ps2_stubs::scePadInfoMode(rdram.data(), &ctx, nullptr);
-            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(7), "scePadInfoMode CURID should return DualShock");
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(4), "scePadInfoMode CURID should return digital at open");
 
             setRegU32(ctx, 4, 0u);
             setRegU32(ctx, 5, 0u);
@@ -299,6 +299,57 @@ void register_pad_input_tests()
             setRegU32(ctx, 7, 0u);
             ps2_stubs::scePadInfoMode(rdram.data(), &ctx, nullptr);
             t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(7), "mode table entry should return DualShock in analog mode");
+
+            closePadPort(ctx, rdram);
+        });
+
+        tc.Run("pads open in digital mode and switch to analog on scePadSetMainMode", [](TestCase &t)
+               {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);
+            R5900Context ctx;
+
+            ps2_stubs::scePadInit(rdram.data(), &ctx, nullptr);
+            openPadPort(ctx, rdram);
+
+            setRegU32(ctx, 4, 0u);
+            setRegU32(ctx, 5, 0u);
+            ps2_stubs::scePadGetState(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(6), "freshly opened port should report STABLE");
+
+            setRegU32(ctx, 4, 0u);
+            setRegU32(ctx, 5, 0u);
+            setRegU32(ctx, 6, 1);
+            setRegU32(ctx, 7, 0);
+            ps2_stubs::scePadInfoMode(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(4), "scePadInfoMode CURID should return digital at open");
+
+            runPadRead(ctx, rdram);
+            const uint8_t *data = rdram.data() + kPadDataAddr;
+            t.Equals(data[1], static_cast<uint8_t>(0x41), "mode byte should be 0x41 (digital) at open");
+
+            setRegU32(ctx, 4, 0u);
+            setRegU32(ctx, 5, 0u);
+            setRegU32(ctx, 6, 1);
+            setRegU32(ctx, 7, 3);
+            ps2_stubs::scePadSetMainMode(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(1), "scePadSetMainMode should succeed switching to analog");
+
+            setRegU32(ctx, 4, 0u);
+            setRegU32(ctx, 5, 0u);
+            setRegU32(ctx, 6, 1);
+            setRegU32(ctx, 7, 0);
+            ps2_stubs::scePadInfoMode(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(7), "scePadInfoMode CURID should return analog after SetMainMode");
+
+            // scePadSetMainMode queues a one-shot EXECCMD transient state; pump scePadGetState
+            // once so the port settles back to STABLE before reading, mirroring the existing
+            // "pad command state reports EXECCMD once before returning STABLE" test.
+            setRegU32(ctx, 4, 0u);
+            setRegU32(ctx, 5, 0u);
+            ps2_stubs::scePadGetState(rdram.data(), &ctx, nullptr);
+
+            runPadRead(ctx, rdram);
+            t.Equals(data[1], static_cast<uint8_t>(0x73), "mode byte should be 0x73 (analog) after SetMainMode");
 
             closePadPort(ctx, rdram);
         });
