@@ -226,13 +226,7 @@ namespace ps2recomp
             }
         }
 
-        // If the function's last instruction is not a branch/jump (no delay
-        // slot), execution "falls off the end" without ctx->pc ever being
-        // updated past that instruction's own address (every non-branch
-        // instruction sets ctx->pc to its own address, not the next one).
-        // dispatchLoop would then call this exact function again forever.
-        // Advance ctx->pc to the function's end so dispatchLoop's next
-        // lookup resumes at the following function instead of spinning.
+        // Fallthrough with no terminating branch: advance ctx->pc past the function so dispatchLoop doesn't re-call it forever.
         if (!instructions.empty() && !lastInstructionWasControlFlow)
         {
             ss << "    ctx->pc = 0x" << std::hex << function.end << "u;\n"
