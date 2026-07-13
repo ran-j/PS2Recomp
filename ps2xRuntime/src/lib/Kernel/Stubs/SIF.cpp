@@ -1,6 +1,7 @@
 #include "Common.h"
 #include "SIF.h"
 #include "../Syscalls/RPC.h"
+#include "../../ps2_iop_transport.h"
 #include "runtime/ps2_address.h"
 
 #include <map>
@@ -397,8 +398,6 @@ namespace ps2_stubs
 
     void sceSifGetOtherData(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        (void)runtime;
-
         const uint32_t rdAddr = getRegU32(ctx, 4);
         const uint32_t srcAddr = getRegU32(ctx, 5);
         const uint32_t dstAddr = getRegU32(ctx, 6);
@@ -424,7 +423,16 @@ namespace ps2_stubs
             return;
         }
 
-        ps2_syscalls::prepareSoundDriverStatusTransfer(rdram, srcAddr, size);
+        if (runtime)
+        {
+            PS2IopTransport::notifyTransfer(runtime, rdram, {
+                ps2x::iop::SifTransferKind::GetOtherData,
+                ps2x::iop::SifTransferPhase::BeforeCopy,
+                srcAddr,
+                dstAddr,
+                size,
+            });
+        }
 
         if (!copyGuestByteRange(rdram, dstAddr, srcAddr, size))
         {
@@ -451,7 +459,16 @@ namespace ps2_stubs
             std::memcpy(rd + 0x18u, &size, sizeof(size));
         }
 
-        ps2_syscalls::finalizeSoundDriverStatusTransfer(rdram, srcAddr, dstAddr, size);
+        if (runtime)
+        {
+            PS2IopTransport::notifyTransfer(runtime, rdram, {
+                ps2x::iop::SifTransferKind::GetOtherData,
+                ps2x::iop::SifTransferPhase::AfterCopy,
+                srcAddr,
+                dstAddr,
+                size,
+            });
+        }
 
         setReturnS32(ctx, 0);
     }
@@ -621,8 +638,6 @@ namespace ps2_stubs
 
     void sceSifSetDma(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        (void)runtime;
-
         const uint32_t dmatAddr = getRegU32(ctx, 4);
         const uint32_t count = getRegU32(ctx, 5);
 
@@ -699,17 +714,31 @@ namespace ps2_stubs
             for (uint32_t i = 0; i < pendingCount; ++i)
             {
                 const Ps2SifDmaTransfer &xfer = pending[i];
+                if (runtime)
+                {
+                    PS2IopTransport::notifyTransfer(runtime, rdram, {
+                        ps2x::iop::SifTransferKind::SetDma,
+                        ps2x::iop::SifTransferPhase::BeforeCopy,
+                        xfer.src,
+                        xfer.dest,
+                        static_cast<uint32_t>(xfer.size),
+                    });
+                }
                 if (!copyGuestByteRange(rdram, xfer.dest, xfer.src, static_cast<uint32_t>(xfer.size)))
                 {
                     ok = false;
                     break;
                 }
-
-                ps2_syscalls::noteDtxSifDmaTransfer(
-                    rdram,
-                    xfer.src,
-                    xfer.dest,
-                    static_cast<uint32_t>(xfer.size));
+                if (runtime)
+                {
+                    PS2IopTransport::notifyTransfer(runtime, rdram, {
+                        ps2x::iop::SifTransferKind::SetDma,
+                        ps2x::iop::SifTransferPhase::AfterCopy,
+                        xfer.src,
+                        xfer.dest,
+                        static_cast<uint32_t>(xfer.size),
+                    });
+                }
             }
         }
 

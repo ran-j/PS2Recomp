@@ -6,21 +6,44 @@ namespace ps2_stubs
     namespace
     {
         constexpr uint32_t kLibSdCmdSetParam = 0x8010u;
-        constexpr uint32_t kLibSdCmdBlockTrans = 0x80D0u;
-        constexpr uint32_t kLibSdCmdBlockTransAlt = 0x80E0u;
-        constexpr uint32_t kLibSdCmdBlockTransStatus = 0x80F0u;
+        constexpr uint32_t kLibSdCmdVoiceTrans = 0x80D0u;
+        constexpr uint32_t kLibSdCmdBlockTrans = 0x80E0u;
+        constexpr uint32_t kLibSdCmdVoiceTransStatus = 0x80F0u;
+        constexpr uint32_t kLibSdCmdBlockTransStatus = 0x8100u;
         constexpr uint32_t kAudioPositionMask = 0x00FFFFFFu;
         constexpr uint32_t kAudioTransferUnit = 1024u;
+        constexpr uint32_t kLibSdCoreCount = 2u;
+        constexpr uint32_t kLibSdTransModeIo = 0x08u;
+        constexpr uint32_t kLibSdTransDirectionMask = 0x03u;
+        constexpr uint32_t kLibSdTransStop = 0x02u;
+        constexpr uint32_t kLibSdTransLoop = 0x10u;
+
+        struct VoiceTransferState
+        {
+            uint32_t sourceAddress = 0u;
+            uint32_t destinationAddress = 0u;
+            uint32_t size = 0u;
+            uint16_t mode = 0u;
+            bool completed = true;
+        };
+
+        struct BlockTransferState
+        {
+            uint32_t base = 0u;
+            uint32_t size = 0u;
+            uint32_t pauseBase = 0u;
+            uint32_t offset = 0u;
+            uint32_t statusTraceCount = 0u;
+            uint16_t mode = 0u;
+            bool active = false;
+            bool loop = false;
+        };
 
         struct AudioStubState
         {
             bool initialized = false;
-            uint32_t currentBlockBase = 0u;
-            uint32_t currentBlockSize = 0u;
-            uint32_t currentPauseBase = 0u;
-            uint32_t currentBlockOffset = 0u;
-            uint32_t blockStatusTraceCount = 0u;
-            bool blockTransferActive = false;
+            std::array<VoiceTransferState, kLibSdCoreCount> voiceTransfers{};
+            std::array<BlockTransferState, kLibSdCoreCount> blockTransfers{};
         };
 
         std::mutex g_audio_stub_mutex;
@@ -31,10 +54,12 @@ namespace ps2_stubs
             g_audio_stub_state = {};
         }
 
-        uint32_t currentBlockPosition()
+        uint32_t currentBlockStatus(const BlockTransferState &transfer)
         {
-            return (g_audio_stub_state.currentBlockBase + g_audio_stub_state.currentBlockOffset) &
-                   kAudioPositionMask;
+            const uint32_t position = (transfer.base + transfer.offset) & kAudioPositionMask;
+            const uint32_t halfSize = transfer.size / 2u;
+            const uint32_t bank = (transfer.loop && halfSize != 0u && transfer.offset >= halfSize) ? 1u : 0u;
+            return (bank << 24u) | position;
         }
     }
 
@@ -69,63 +94,104 @@ namespace ps2_stubs
 
         std::lock_guard<std::mutex> lock(g_audio_stub_mutex);
         g_audio_stub_state.initialized = true;
+        const uint32_t core = cmdArg0 & (kLibSdCoreCount - 1u);
+        VoiceTransferState &voiceTransfer = g_audio_stub_state.voiceTransfers[core];
+        BlockTransferState &blockTransfer = g_audio_stub_state.blockTransfers[core];
+        uint32_t returnValue = 0u;
 
-        if (cmd == kLibSdCmdBlockTrans || cmd == kLibSdCmdBlockTransAlt)
+        if (cmd == kLibSdCmdVoiceTrans)
         {
-            if (arg4 != 0u && arg5 != 0u)
-            {
-                g_audio_stub_state.currentBlockBase = arg4 & kAudioPositionMask;
-                g_audio_stub_state.currentBlockSize = arg5;
-                g_audio_stub_state.currentPauseBase =
-                    ((arg6 != 0u) ? arg6 : arg4) & kAudioPositionMask;
+            voiceTransfer.sourceAddress = arg4;
+            voiceTransfer.destinationAddress = arg5;
+            voiceTransfer.size = arg6;
+            voiceTransfer.mode = static_cast<uint16_t>(cmdArg1);
+            voiceTransfer.completed = true;
 
-                const uint32_t pauseOffset =
-                    (g_audio_stub_state.currentPauseBase - g_audio_stub_state.currentBlockBase) &
-                    kAudioPositionMask;
-                g_audio_stub_state.currentBlockOffset =
-                    (pauseOffset < g_audio_stub_state.currentBlockSize) ? pauseOffset : 0u;
-                g_audio_stub_state.blockStatusTraceCount = 0u;
-                g_audio_stub_state.blockTransferActive = true;
-            }
-            else
-            {
-                g_audio_stub_state.blockTransferActive = false;
-            }
+            // sceSdVoiceTrans returns the transferred byte count for DMA
+            // mode and zero for its synchronous programmed-I/O mode.
+            returnValue = ((voiceTransfer.mode & kLibSdTransModeIo) != 0u)
+                              ? 0u
+                              : voiceTransfer.size;
+
             PS2_IF_AGRESSIVE_LOGS({
-                std::cerr << "[Audio:BlockTrans] active=" << g_audio_stub_state.blockTransferActive
-                          << " base=0x" << std::hex << g_audio_stub_state.currentBlockBase
-                          << " size=0x" << g_audio_stub_state.currentBlockSize
-                          << " pause=0x" << g_audio_stub_state.currentPauseBase
-                          << " offset=0x" << g_audio_stub_state.currentBlockOffset
+                std::cerr << "[Audio:VoiceTrans] core=" << core
+                          << " src=0x" << std::hex << voiceTransfer.sourceAddress
+                          << " dest=0x" << voiceTransfer.destinationAddress
+                          << " size=0x" << voiceTransfer.size
+                          << " mode=0x" << voiceTransfer.mode
                           << std::dec << std::endl;
             });
         }
-        else if (cmd == kLibSdCmdBlockTransStatus &&
-                 g_audio_stub_state.blockTransferActive &&
-                 g_audio_stub_state.currentBlockSize != 0u)
+        else if (cmd == kLibSdCmdBlockTrans)
         {
-            g_audio_stub_state.currentBlockOffset =
-                (g_audio_stub_state.currentBlockOffset + kAudioTransferUnit) %
-                g_audio_stub_state.currentBlockSize;
-            if (g_audio_stub_state.blockStatusTraceCount < 32u)
+            const uint32_t direction = cmdArg1 & kLibSdTransDirectionMask;
+            if (direction == kLibSdTransStop)
             {
-                PS2_IF_AGRESSIVE_LOGS({
-                    std::cerr << "[Audio:BlockStatus] position=0x" << std::hex << currentBlockPosition()
-                              << " offset=0x" << g_audio_stub_state.currentBlockOffset
-                              << " size=0x" << g_audio_stub_state.currentBlockSize
-                              << std::dec << std::endl;
-                });
-                ++g_audio_stub_state.blockStatusTraceCount;
+                returnValue = currentBlockStatus(blockTransfer);
+                blockTransfer = {};
             }
+            else if (arg4 != 0u && arg5 != 0u)
+            {
+                blockTransfer.base = arg4 & kAudioPositionMask;
+                blockTransfer.size = arg5;
+                blockTransfer.pauseBase =
+                    ((arg6 != 0u) ? arg6 : arg4) & kAudioPositionMask;
+                blockTransfer.mode = static_cast<uint16_t>(cmdArg1);
+                blockTransfer.loop = (cmdArg1 & kLibSdTransLoop) != 0u;
+
+                const uint32_t pauseOffset =
+                    (blockTransfer.pauseBase - blockTransfer.base) & kAudioPositionMask;
+                blockTransfer.offset = (pauseOffset < blockTransfer.size) ? pauseOffset : 0u;
+                blockTransfer.statusTraceCount = 0u;
+                blockTransfer.active = true;
+                returnValue = 0u;
+            }
+            else
+            {
+                returnValue = std::numeric_limits<uint32_t>::max();
+            }
+
+            PS2_IF_AGRESSIVE_LOGS({
+                std::cerr << "[Audio:BlockTrans] core=" << core
+                          << " active=" << blockTransfer.active
+                          << " base=0x" << std::hex << blockTransfer.base
+                          << " size=0x" << blockTransfer.size
+                          << " pause=0x" << blockTransfer.pauseBase
+                          << " offset=0x" << blockTransfer.offset
+                          << std::dec << std::endl;
+            });
+        }
+        else if (cmd == kLibSdCmdVoiceTransStatus)
+        {
+            returnValue = voiceTransfer.completed ? 1u : 0u;
+        }
+        else if (cmd == kLibSdCmdBlockTransStatus)
+        {
+            if (blockTransfer.active && blockTransfer.size != 0u)
+            {
+                blockTransfer.offset = (blockTransfer.offset + kAudioTransferUnit) % blockTransfer.size;
+                if (blockTransfer.statusTraceCount < 32u)
+                {
+                    PS2_IF_AGRESSIVE_LOGS({
+                        std::cerr << "[Audio:BlockStatus] core=" << core
+                                  << " status=0x" << std::hex << currentBlockStatus(blockTransfer)
+                                  << " offset=0x" << blockTransfer.offset
+                                  << " size=0x" << blockTransfer.size
+                                  << std::dec << std::endl;
+                    });
+                    ++blockTransfer.statusTraceCount;
+                }
+            }
+            returnValue = currentBlockStatus(blockTransfer);
         }
         else if (cmd == kLibSdCmdSetParam)
         {
             (void)cmdArg0;
             (void)cmdArg1;
+            returnValue = 0u;
         }
 
-        // Some games only sample the low 24 bits of the reported SPU transfer head.
-        setReturnU32(ctx, currentBlockPosition());
+        setReturnU32(ctx, returnValue);
     }
 
     void sceSdRemoteInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
