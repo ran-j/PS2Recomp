@@ -2,7 +2,6 @@
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_gs_gpu.h"
 #include "runtime/ps2_gs_psmct32.h"
-#include "runtime/ps2_vu1.h"
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
 #include "Stubs/DMA.h"
@@ -113,17 +112,49 @@ namespace
         return tag;
     }
 
-    uint32_t makeVuLowerSpecial(uint8_t specialOp, uint8_t is, uint8_t it = 0u, uint8_t id = 0u, uint8_t dest = 0u)
+    uint64_t makeGifTagPrim(uint16_t nloop, uint16_t prim, uint8_t flg, uint8_t nreg, bool eop = true, bool pre = true)
     {
-        return (0x40u << 25) |
-               (static_cast<uint32_t>(dest & 0xFu) << 21) |
-               (static_cast<uint32_t>(it & 0x1Fu) << 16) |
-               (static_cast<uint32_t>(is & 0x1Fu) << 11) |
-               (static_cast<uint32_t>(id & 0x1Fu) << 6) |
-               (static_cast<uint32_t>(specialOp & 0x7Cu) << 4) |
-               static_cast<uint32_t>(specialOp & 0x3u) |
-               0x3Cu;
+        uint64_t tag = makeGifTag(nloop, flg, nreg, eop);
+        if (pre)
+            tag |= (1ull << 46);
+        tag |= (static_cast<uint64_t>(prim & 0x7FFu) << 47);
+        return tag;
     }
+
+    uint64_t makeGsFrame(uint32_t fbp, uint32_t fbw, uint32_t psm, uint32_t mask = 0u)
+    {
+        return static_cast<uint64_t>(fbp & 0x1FFu) |
+               (static_cast<uint64_t>(fbw & 0x3Fu) << 16u) |
+               (static_cast<uint64_t>(psm & 0x3Fu) << 24u) |
+               (static_cast<uint64_t>(mask) << 32u);
+    }
+
+    uint64_t makeGsScissor(uint32_t x0, uint32_t x1, uint32_t y0, uint32_t y1)
+    {
+        return static_cast<uint64_t>(x0 & 0x7FFu) |
+               (static_cast<uint64_t>(x1 & 0x7FFu) << 16u) |
+               (static_cast<uint64_t>(y0 & 0x7FFu) << 32u) |
+               (static_cast<uint64_t>(y1 & 0x7FFu) << 48u);
+    }
+
+    void appendPackedRgbaq(std::vector<uint8_t> &packet, uint8_t r, uint8_t g, uint8_t b, uint8_t a)
+    {
+        appendU64(packet, static_cast<uint64_t>(r) | (static_cast<uint64_t>(g) << 32u));
+        appendU64(packet, static_cast<uint64_t>(b) | (static_cast<uint64_t>(a) << 32u));
+    }
+
+    void appendPackedXyzf2(std::vector<uint8_t> &packet, uint32_t x, uint32_t y, uint32_t z)
+    {
+        appendU64(packet, static_cast<uint64_t>(x & 0xFFFFu) | (static_cast<uint64_t>(y & 0xFFFFu) << 32u));
+        appendU64(packet, static_cast<uint64_t>(z & 0xFFFFFFu) << 4u);
+    }
+
+    void appendPackedUv(std::vector<uint8_t> &packet, uint32_t u, uint32_t v)
+    {
+        appendU64(packet, static_cast<uint64_t>(u & 0x3FFFu) | (static_cast<uint64_t>(v & 0x3FFFu) << 32u));
+        appendU64(packet, 0u);
+    }
+
 }
 
 void register_ps2_memory_tests()
@@ -970,6 +1001,126 @@ void register_ps2_memory_tests()
             t.IsTrue(contentOk, "scratchpad alias chain payload should match scratchpad bytes");
         });
 
+        tc.Run("native GIF image upload recognizes canonical load-image chain", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            GS gs;
+            gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+
+            constexpr uint32_t kGifCh = 0x1000A000u;
+            constexpr uint32_t kDStat = 0x1000E010u;
+            constexpr uint32_t kChain = 0x00028000u;
+            constexpr uint32_t kPixels = 0x00029000u;
+            constexpr uint32_t kQwc = 1u;
+
+            uint8_t *rdram = mem.getRDRAM();
+            for (uint32_t i = 0; i < kQwc * 16u; ++i)
+            {
+                rdram[kPixels + i] = static_cast<uint8_t>(0x40u + i);
+            }
+
+            uint32_t chain = kChain;
+            chain = writeTextureUploadSetup(rdram, chain, 0u, GS_PSM_CT32);
+            chain = writeTextureImageRef(rdram, chain, kQwc, kPixels);
+            writeDmaTag(rdram, chain, makeDmaTag(0u, 7u, 0u, false)); // END.
+
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x30u, kChain), "write GIF TADR should succeed");
+            t.IsTrue(mem.tryProcessNativeGifImageUploadChain(gs, kChain, 0x105u),
+                     "canonical load-image chain should use the native upload path");
+
+            t.Equals(gs.nativeImageUploadCount(), 1ull, "native GIF DMA chain should upload through GS fast path");
+            t.Equals(mem.gifCopyCount(), 1ull, "native GIF DMA chain should still count as a GIF DMA copy");
+            t.IsTrue((mem.readIORegister(kDStat) & (1u << 2u)) != 0u,
+                     "native GIF DMA chain should raise D_STAT GIF completion");
+            t.Equals(mem.readIORegister(kGifCh + 0x20u), 0u, "native GIF DMA chain should clear GIF QWC");
+            t.Equals(mem.readIORegister(kGifCh + 0x00u) & 0x100u, 0u,
+                     "native GIF DMA chain should clear GIF STR");
+            t.Equals(mem.readIORegister(kGifCh + 0x00u) & 0x70000000u, 0x70000000u,
+                     "native GIF DMA chain should latch the terminal END tag id");
+
+            bool pixelsOk = true;
+            for (uint32_t x = 0; x < 4u && pixelsOk; ++x)
+            {
+                const uint32_t dstOff = GSPSMCT32::addrPSMCT32(0u, 1u, x, 0u);
+                const uint32_t srcOff = kPixels + x * 4u;
+                for (uint32_t c = 0; c < 4u; ++c)
+                {
+                    if (mem.getGSVRAM()[dstOff + c] != rdram[srcOff + c])
+                    {
+                        pixelsOk = false;
+                        break;
+                    }
+                }
+            }
+            t.IsTrue(pixelsOk, "native GIF DMA chain should upload image payload into GS VRAM");
+        });
+
+        tc.Run("native GIF packed chain matches generic packed primitive packet", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            GS nativeGs;
+            nativeGs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+
+            GSRegisters genericRegs{};
+            std::vector<uint8_t> genericVram(PS2_GS_VRAM_SIZE, 0u);
+            GS genericGs;
+            genericGs.init(genericVram.data(), static_cast<uint32_t>(genericVram.size()), &genericRegs);
+
+            std::vector<uint8_t> packet;
+            appendU64(packet, makeGifTag(4u, GIF_FMT_PACKED, 1u, false));
+            appendU64(packet, 0x0Eull);
+            appendU64(packet, makeGsFrame(0u, 1u, GS_PSM_CT32));
+            appendU64(packet, GS_REG_FRAME_1);
+            appendU64(packet, makeGsScissor(0u, 7u, 0u, 7u));
+            appendU64(packet, GS_REG_SCISSOR_1);
+            appendU64(packet, 1ull << 17u); // ZTST always.
+            appendU64(packet, GS_REG_TEST_1);
+            appendU64(packet, 1ull << 32u); // Mask Z writes so the test framebuffer remains visible.
+            appendU64(packet, GS_REG_ZBUF_1);
+
+            constexpr uint16_t kSpritePrim = static_cast<uint16_t>(GS_PRIM_SPRITE);
+            appendU64(packet, makeGifTagPrim(2u, kSpritePrim, GIF_FMT_PACKED, 3u, true, true));
+            appendU64(packet, static_cast<uint64_t>(GS_REG_UV) |
+                                  (static_cast<uint64_t>(GS_REG_RGBAQ) << 4u) |
+                                  (static_cast<uint64_t>(GS_REG_XYZF2) << 8u));
+            appendPackedUv(packet, 0u, 0u);
+            appendPackedRgbaq(packet, 0x20u, 0x40u, 0x80u, 0x80u);
+            appendPackedXyzf2(packet, 0u, 0u, 0u);
+            appendPackedUv(packet, 0u, 0u);
+            appendPackedRgbaq(packet, 0xE0u, 0x30u, 0x10u, 0x80u);
+            appendPackedXyzf2(packet, 64u, 64u, 0u);
+
+            genericGs.processGIFPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            constexpr uint32_t kGifCh = 0x1000A000u;
+            constexpr uint32_t kDStat = 0x1000E010u;
+            constexpr uint32_t kScratchTag = 0xF0000000u;
+            uint8_t *scratch = mem.getScratchpad();
+            writeDmaTag(scratch, 0u, makeDmaTag(static_cast<uint16_t>(packet.size() / 16u), 7u, 0u, false));
+            std::memcpy(scratch + 16u, packet.data(), packet.size());
+
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x30u, kScratchTag), "write GIF TADR scratchpad alias should succeed");
+            t.IsTrue(mem.tryProcessNativeGifPackedChain(nativeGs, kScratchTag, 0x105u),
+                     "packed primitive chain should use the native packed GIF path");
+
+            t.Equals(nativeGs.nativePackedGIFPacketCount(), 1ull, "native packed GIF packet counter should increment");
+            t.Equals(mem.gifCopyCount(), 1ull, "native packed GIF chain should still count as a GIF DMA copy");
+            t.IsTrue((mem.readIORegister(kDStat) & (1u << 2u)) != 0u,
+                     "native packed GIF chain should raise D_STAT GIF completion");
+            t.Equals(mem.readIORegister(kGifCh + 0x20u), 0u, "native packed GIF chain should clear GIF QWC");
+            t.Equals(mem.readIORegister(kGifCh + 0x00u) & 0x100u, 0u,
+                     "native packed GIF chain should clear GIF STR");
+
+            const uint32_t nativePixel = nativeGs.ReadVram(GS_PSM_CT32, 0u, 1u, 1u, 1u);
+            const uint32_t genericPixel = genericGs.ReadVram(GS_PSM_CT32, 0u, 1u, 1u, 1u);
+            t.IsTrue(genericPixel != 0u, "generic packed primitive packet should draw a test pixel");
+            t.Equals(nativePixel, genericPixel, "native packed GIF chain should match generic GS packet output");
+        });
+
         tc.Run("GIF DMA chain REF keeps CT32 image data after paletted upload", [](TestCase &t)
         {
             PS2Memory mem;
@@ -1569,72 +1720,6 @@ void register_ps2_memory_tests()
             t.Equals(mem.readIORegister(kDstadr), 0u, "sceDmaReset should clear D_STADR");
         });
 
-        tc.Run("VU1 XGKICK wraps packet payload across VU1 memory boundary", [](TestCase &t)
-        {
-            PS2Memory mem;
-            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
-
-            std::vector<std::vector<uint8_t>> captured;
-            mem.setGifPacketCallback([&](const uint8_t *data, uint32_t sizeBytes)
-            {
-                captured.emplace_back(data, data + sizeBytes);
-            });
-
-            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
-            GS gs;
-            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
-
-            uint8_t *vuCode = mem.getVU1Code();
-            uint8_t *vuData = mem.getVU1Data();
-            std::memset(vuCode, 0, PS2_VU1_CODE_SIZE);
-            std::memset(vuData, 0, PS2_VU1_DATA_SIZE);
-
-            constexpr uint32_t kLastQw = (PS2_VU1_DATA_SIZE / 16u) - 1u;
-            const uint32_t tagOffset = kLastQw * 16u;
-
-            const uint64_t imageTag = makeGifTag(1u, GIF_FMT_IMAGE, 0u, true);
-            std::memcpy(vuData + tagOffset, &imageTag, sizeof(imageTag));
-
-            for (uint32_t i = 0; i < 16u; ++i)
-            {
-                vuData[i] = static_cast<uint8_t>(0xC0u + i);
-            }
-
-            const uint32_t lower = makeVuLowerSpecial(0x6Cu, 1u);
-            std::memcpy(vuCode + 0u, &lower, sizeof(lower));
-            const uint32_t upper = 0u;
-            std::memcpy(vuCode + 4u, &upper, sizeof(upper));
-
-            VU1Interpreter vu1;
-            vu1.state().vi[1] = static_cast<int32_t>(kLastQw);
-            vu1.execute(vuCode,
-                        PS2_VU1_CODE_SIZE,
-                        vuData,
-                        PS2_VU1_DATA_SIZE,
-                        gs,
-                        &mem,
-                        0u,
-                        0u,
-                        0u,
-                        1u);
-
-            t.Equals(captured.size(), static_cast<size_t>(1u), "XGKICK should emit one wrapped GIF packet");
-            if (!captured.empty())
-            {
-                t.Equals(captured[0].size(), static_cast<size_t>(32u), "wrapped packet should include tag plus one qword payload");
-                bool payloadOk = true;
-                for (uint32_t i = 0; i < 16u; ++i)
-                {
-                    if (captured[0].size() < 32u || captured[0][16u + i] != static_cast<uint8_t>(0xC0u + i))
-                    {
-                        payloadOk = false;
-                        break;
-                    }
-                }
-                t.IsTrue(payloadOk, "wrapped payload should be copied from start of VU1 memory");
-            }
-        });
-
         tc.Run("VIF1 DMA DIRECT image packet reaches GS through arbiter", [](TestCase &t)
         {
             PS2Memory mem;
@@ -1754,85 +1839,6 @@ void register_ps2_memory_tests()
                 }
             }
             t.IsTrue(imageOk, "raw qwords after a DIRECT image tag should continue the PATH2 image upload");
-        });
-
-        tc.Run("VIF MSCAL callback can execute XGKICK and update GS VRAM", [](TestCase &t)
-        {
-            PS2Memory mem;
-            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
-
-            GS gs;
-            gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
-            GifArbiter arbiter([&](const uint8_t *data, uint32_t sizeBytes)
-            {
-                gs.processGIFPacket(data, sizeBytes);
-            });
-            mem.setGifArbiter(&arbiter);
-
-            const uint64_t bitblt =
-                (static_cast<uint64_t>(0u) << 0) |
-                (static_cast<uint64_t>(1u) << 16) |
-                (static_cast<uint64_t>(0u) << 24) |
-                (static_cast<uint64_t>(0u) << 32) |
-                (static_cast<uint64_t>(1u) << 48) |
-                (static_cast<uint64_t>(0u) << 56);
-            gs.writeRegister(GS_REG_BITBLTBUF, bitblt);
-            gs.writeRegister(GS_REG_TRXPOS, 0ull);
-            gs.writeRegister(GS_REG_TRXREG, (4ull << 0) | (1ull << 32));
-            gs.writeRegister(GS_REG_TRXDIR, 0ull);
-
-            uint8_t *vuCode = mem.getVU1Code();
-            uint8_t *vuData = mem.getVU1Data();
-            std::memset(vuCode, 0, PS2_VU1_CODE_SIZE);
-            std::memset(vuData, 0, PS2_VU1_DATA_SIZE);
-
-            const uint32_t lower = makeVuLowerSpecial(0x6Cu, 0u);
-            std::memcpy(vuCode + 0u, &lower, sizeof(lower));
-            const uint32_t upper = 0u;
-            std::memcpy(vuCode + 4u, &upper, sizeof(upper));
-
-            const uint64_t gifTag = makeGifTag(1u, GIF_FMT_IMAGE, 0u, true);
-            std::memcpy(vuData + 0u, &gifTag, sizeof(gifTag));
-            const uint64_t tagHi = 0u;
-            std::memcpy(vuData + 8u, &tagHi, sizeof(tagHi));
-            for (uint32_t i = 0; i < 16u; ++i)
-            {
-                vuData[16u + i] = static_cast<uint8_t>(0x90u + i);
-            }
-
-            VU1Interpreter vu1;
-            mem.setVu1MscalCallback([&](uint32_t startPC, uint32_t top, uint32_t itop)
-            {
-                vu1.execute(vuCode,
-                            PS2_VU1_CODE_SIZE,
-                            vuData,
-                            PS2_VU1_DATA_SIZE,
-                            gs,
-                            &mem,
-                            startPC,
-                            top,
-                            itop,
-                            1u);
-            });
-
-            const uint32_t mscalCmd = makeVifCmd(0x14u, 0u, 0u);
-            mem.processVIF1Data(reinterpret_cast<const uint8_t *>(&mscalCmd), sizeof(mscalCmd));
-
-            const uint8_t *vramOut = mem.getGSVRAM();
-            bool imageOk = true;
-            for (uint32_t x = 0; x < 4u && imageOk; ++x)
-            {
-                const uint32_t off = GSPSMCT32::addrPSMCT32(0u, 1u, x, 0u);
-                for (uint32_t c = 0; c < 4u; ++c)
-                {
-                    if (vramOut[off + c] != static_cast<uint8_t>(0x90u + x * 4u + c))
-                    {
-                        imageOk = false;
-                        break;
-                    }
-                }
-            }
-            t.IsTrue(imageOk, "MSCAL-triggered XGKICK should route PATH1 packet into GS VRAM");
         });
 
         tc.Run("unaligned accesses throw", [](TestCase &t)

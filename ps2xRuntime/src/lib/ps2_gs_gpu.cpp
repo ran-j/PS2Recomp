@@ -55,6 +55,63 @@ namespace
         return v;
     }
 
+    struct PackedGifPacketTag
+    {
+        uint64_t lo = 0u;
+        uint64_t hi = 0u;
+        uint32_t payloadOffset = 0u;
+        uint32_t nloop = 0u;
+        uint32_t nreg = 0u;
+        uint8_t regs[16]{};
+    };
+
+    template <typename Visitor>
+    bool visitPackedGifPacket(const uint8_t *data, uint32_t sizeBytes, Visitor &&visitor)
+    {
+        uint32_t offset = 0u;
+        while (offset + 16u <= sizeBytes)
+        {
+            PackedGifPacketTag tag{};
+            tag.lo = loadLE64(data + offset);
+            tag.hi = loadLE64(data + offset + 8u);
+
+            const uint8_t flg = static_cast<uint8_t>((tag.lo >> 58u) & 0x3u);
+            if (flg != GIF_FMT_PACKED)
+                return false;
+
+            tag.nloop = static_cast<uint32_t>(tag.lo & 0x7FFFu);
+            tag.nreg = static_cast<uint32_t>((tag.lo >> 60u) & 0xFu);
+            if (tag.nreg == 0u)
+                tag.nreg = 16u;
+
+            const uint64_t payloadBytes64 =
+                static_cast<uint64_t>(tag.nloop) * static_cast<uint64_t>(tag.nreg) * 16ull;
+            if (payloadBytes64 > 0xFFFFFFFFull)
+                return false;
+
+            offset += 16u;
+            const uint32_t payloadBytes = static_cast<uint32_t>(payloadBytes64);
+            if (payloadBytes > sizeBytes - offset)
+                return false;
+
+            tag.payloadOffset = offset;
+            for (uint32_t i = 0u; i < tag.nreg; ++i)
+                tag.regs[i] = static_cast<uint8_t>((tag.hi >> (i * 4u)) & 0xFu);
+
+            if (!visitor(tag))
+                return false;
+
+            offset += payloadBytes;
+        }
+
+        return offset == sizeBytes;
+    }
+
+    bool validatePackedGifPacket(const uint8_t *data, uint32_t sizeBytes)
+    {
+        return visitPackedGifPacket(data, sizeBytes, [](const PackedGifPacketTag &) { return true; });
+    }
+
     void decodeDisplaySize(uint64_t display64, uint32_t &outWidth, uint32_t &outHeight)
     {
         const uint32_t dx = static_cast<uint32_t>((display64 >> 0) & 0x0FFFu);
@@ -585,6 +642,11 @@ void GS::recordDebugEventUnlocked(GSDebugHistoryEntry entry)
 
 void GS::recordGifTagDebugEventUnlocked(uint32_t sizeBytes, uint32_t nloop, uint8_t flg, uint32_t nreg)
 {
+    if (m_debugHistoryPaused)
+    {
+        return;
+    }
+
     GSDebugHistoryEntry entry = makeDebugEventUnlocked(GSDebugEventKind::GifTag);
     entry.gifSizeBytes = sizeBytes;
     entry.gifNloop = nloop;
@@ -595,6 +657,11 @@ void GS::recordGifTagDebugEventUnlocked(uint32_t sizeBytes, uint32_t nloop, uint
 
 void GS::recordRegisterDebugEventUnlocked(uint8_t regAddr, uint64_t value)
 {
+    if (m_debugHistoryPaused)
+    {
+        return;
+    }
+
     switch (regAddr)
     {
     case GS_REG_PRIM:
@@ -633,6 +700,11 @@ void GS::recordRegisterDebugEventUnlocked(uint8_t regAddr, uint64_t value)
 
 void GS::recordDrawDebugEventUnlocked(int vertexCount)
 {
+    if (m_debugHistoryPaused)
+    {
+        return;
+    }
+
     if (vertexCount <= 0)
     {
         return;
@@ -665,6 +737,11 @@ void GS::recordDrawDebugEventUnlocked(int vertexCount)
 
 void GS::recordTransferDebugEventUnlocked()
 {
+    if (m_debugHistoryPaused)
+    {
+        return;
+    }
+
     GSDebugHistoryEntry entry = makeDebugEventUnlocked(GSDebugEventKind::Transfer);
     entry.transferPixels = m_transferState.total_pixels;
     recordDebugEventUnlocked(entry);
@@ -672,6 +749,11 @@ void GS::recordTransferDebugEventUnlocked()
 
 void GS::recordPresentDebugEventUnlocked(uint32_t displayFbp, uint32_t sourceFbp, uint32_t width, uint32_t height, bool usedPreferred)
 {
+    if (m_debugHistoryPaused)
+    {
+        return;
+    }
+
     GSDebugHistoryEntry entry = makeDebugEventUnlocked(GSDebugEventKind::Present);
     entry.displayFbp = displayFbp;
     entry.sourceFbp = sourceFbp;
@@ -859,18 +941,6 @@ void GS::latchHostPresentationFrame()
 {
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     latchHostPresentationFrameUnlocked();
-}
-
-bool GS::tryLatchHostPresentationFrame()
-{
-    if (!m_stateMutex.try_lock())
-    {
-        return false;
-    }
-
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex, std::adopt_lock);
-    latchHostPresentationFrameUnlocked();
-    return true;
 }
 
 void GS::latchHostPresentationFrameUnlocked()
@@ -1221,6 +1291,9 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
     if (!data || sizeBytes < 16 || !m_vram)
         return;
 
+    if (tryProcessNativeImageUploadPacket(data, sizeBytes))
+        return;
+
     PS2_IF_AGRESSIVE_LOGS({
         const uint32_t packetIndex = s_debugGifPacketCount.fetch_add(1, std::memory_order_relaxed);
         if (packetIndex < 48u)
@@ -1309,6 +1382,136 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
             offset += imageBytes;
         }
     }
+}
+
+bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
+{
+    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    if (!data || sizeBytes < 16u || !m_vram)
+        return false;
+
+    if (!validatePackedGifPacket(data, sizeBytes))
+        return false;
+
+    const bool processed = visitPackedGifPacket(data, sizeBytes, [&](const PackedGifPacketTag &tag)
+    {
+        m_curQ = 1.0f;
+
+        recordGifTagDebugEventUnlocked(sizeBytes, tag.nloop, GIF_FMT_PACKED, tag.nreg);
+
+        const bool pre = ((tag.lo >> 46u) & 1u) != 0u;
+        if (pre)
+            writeRegister(GS_REG_PRIM, (tag.lo >> 47u) & 0x7FFu);
+
+        uint32_t offset = tag.payloadOffset;
+        for (uint32_t loop = 0u; loop < tag.nloop; ++loop)
+        {
+            for (uint32_t r = 0u; r < tag.nreg; ++r)
+            {
+                const uint64_t lo = loadLE64(data + offset);
+                const uint64_t hi = loadLE64(data + offset + 8u);
+                offset += 16u;
+                writeRegisterPacked(tag.regs[r], lo, hi);
+            }
+        }
+
+        return true;
+    });
+
+    if (!processed)
+        return false;
+
+    ++m_nativePackedGIFPacketCount;
+    return true;
+}
+
+void GS::uploadImageNative(uint64_t bitbltbuf,
+                           uint64_t trxpos,
+                           uint64_t trxreg,
+                           uint64_t trxdir,
+                           const uint8_t *data,
+                           uint32_t sizeBytes)
+{
+    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    if (!data || sizeBytes == 0 || !m_vram)
+        return;
+
+    writeRegister(GS_REG_BITBLTBUF, bitbltbuf);
+    writeRegister(GS_REG_TRXPOS, trxpos);
+    writeRegister(GS_REG_TRXREG, trxreg);
+    writeRegister(GS_REG_TRXDIR, trxdir);
+    processImageData(data, sizeBytes);
+    ++m_nativeImageUploadCount;
+}
+
+bool GS::tryProcessNativeImageUploadPacket(const uint8_t *data, uint32_t sizeBytes)
+{
+    constexpr uint32_t kSetupRegisters = 4u;
+    constexpr uint32_t kPackedAdPayloadBytes = kSetupRegisters * 16u;
+    constexpr uint64_t kPackedAdDescriptor = 0x0Eull;
+
+    if (!data || sizeBytes < 16u + kPackedAdPayloadBytes + 16u)
+        return false;
+
+    const uint64_t setupTagLo = loadLE64(data);
+    const uint64_t setupTagHi = loadLE64(data + 8u);
+    const uint32_t setupNloop = static_cast<uint32_t>(setupTagLo & 0x7FFFu);
+    const uint8_t setupFlg = static_cast<uint8_t>((setupTagLo >> 58u) & 0x3u);
+    uint32_t setupNreg = static_cast<uint32_t>((setupTagLo >> 60u) & 0xFu);
+    if (setupNreg == 0u)
+        setupNreg = 16u;
+
+    if (setupNloop != kSetupRegisters ||
+        setupFlg != GIF_FMT_PACKED ||
+        setupNreg != 1u ||
+        (setupTagHi & 0xFull) != kPackedAdDescriptor)
+    {
+        return false;
+    }
+
+    uint64_t regs[kSetupRegisters] = {};
+    uint32_t offset = 16u;
+    constexpr uint8_t expectedRegs[kSetupRegisters] = {
+        GS_REG_BITBLTBUF,
+        GS_REG_TRXPOS,
+        GS_REG_TRXREG,
+        GS_REG_TRXDIR,
+    };
+
+    for (uint32_t i = 0; i < kSetupRegisters; ++i)
+    {
+        regs[i] = loadLE64(data + offset);
+        const uint64_t reg = loadLE64(data + offset + 8u);
+        if ((reg & 0xFFu) != expectedRegs[i])
+            return false;
+        offset += 16u;
+    }
+
+    const uint32_t trxdirMode = static_cast<uint32_t>(regs[3] & 0x3ull);
+    const uint32_t rrw = static_cast<uint32_t>(regs[2] & 0xFFFull);
+    const uint32_t rrh = static_cast<uint32_t>((regs[2] >> 32u) & 0xFFFull);
+    if (trxdirMode != 0u || rrw == 0u || rrh == 0u)
+        return false;
+
+    if (offset + 16u > sizeBytes)
+        return false;
+
+    const uint64_t imageTagLo = loadLE64(data + offset);
+    const uint8_t imageFlg = static_cast<uint8_t>((imageTagLo >> 58u) & 0x3u);
+    const uint32_t imageNloop = static_cast<uint32_t>(imageTagLo & 0x7FFFu);
+    if (imageFlg != GIF_FMT_IMAGE || imageNloop == 0u)
+        return false;
+
+    offset += 16u;
+    const uint64_t imageBytes64 = static_cast<uint64_t>(imageNloop) * 16ull;
+    if (imageBytes64 > 0xFFFFFFFFull)
+        return false;
+    const uint32_t imageBytes = static_cast<uint32_t>(imageBytes64);
+    if (offset + imageBytes != sizeBytes)
+        return false;
+
+    uploadImageNative(regs[0], regs[1], regs[2], regs[3], data + offset, imageBytes);
+    return true;
 }
 
 void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
