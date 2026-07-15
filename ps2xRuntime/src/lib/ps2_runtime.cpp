@@ -565,8 +565,9 @@ PS2Runtime::~PS2Runtime()
     try
     {
         requestStop();
-        // Fiber pool is cleaned up by scheduler_shutdown() in run().
-        ps2_syscalls::detachAllGuestHostThreads();
+        // Fiber pool is cleaned up by scheduler_shutdown() in run(); there is
+        // no longer a g_hostThreads map to detach (superseded by the fiber
+        // scheduler), so no detachAllGuestHostThreads() call is needed here.
         m_iopSubsystem.reset();
         m_iopHost.reset();
 #if defined(PLATFORM_VITA)
