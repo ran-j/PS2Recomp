@@ -14,6 +14,7 @@ namespace ps2recomp
 	struct JumpTableEntry;
     struct JumpTable;
 	struct Instruction;
+    struct MemoryAccessHint;
 	struct Function;
 	struct Symbol;
 	struct Section;
@@ -43,6 +44,9 @@ namespace ps2recomp
         std::string generateFunctionRegistration(const std::vector<Function> &functions, const std::map<uint32_t, std::string> &stubs);
         std::string handleBranchDelaySlots(const Instruction &branchInst, const Instruction &delaySlot,
                                            const Function &function, const AnalysisResult &analysisResult);
+        std::string handleBranchDelaySlots(const Instruction &branchInst, const Instruction &delaySlot,
+                                           const Function &function, const AnalysisResult &analysisResult,
+                                           std::string delaySlotOverride);
 
         void setRenamedFunctions(const std::unordered_map<uint32_t, std::string> &renames);
         void setBootstrapInfo(const BootstrapInfo &info);
@@ -69,6 +73,7 @@ namespace ps2recomp
         std::string m_currentFunctionName;
 
         std::string translateInstruction(const Instruction &inst);
+        std::string translateInstruction(const Instruction &inst, const MemoryAccessHint &memoryHint);
         std::string emitUnhandledInstruction(const Instruction &inst, const std::string &message);
         std::string translateMMIInstruction(const Instruction &inst);
         std::string translateVUInstruction(const Instruction &inst);

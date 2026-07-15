@@ -41,7 +41,11 @@ namespace ps2_stubs
         {
             static std::once_flag s_once;
             std::call_once(s_once, [] {
-                av_log_set_level(ps2_log::agressive_logs_enabled ? AV_LOG_WARNING : AV_LOG_ERROR);
+#if AGRESSIVE_LOGS
+                av_log_set_level(AV_LOG_WARNING);
+#else
+                av_log_set_level(AV_LOG_ERROR);
+#endif
             });
         }
 

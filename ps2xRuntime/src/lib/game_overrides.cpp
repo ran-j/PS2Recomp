@@ -5,10 +5,8 @@
 #include "ps2_syscalls.h"
 #include "ps2_log.h"
 #include <algorithm>
-#include <array>
 #include <cctype>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
 #include <mutex>
 #include <optional>
@@ -60,57 +58,6 @@ namespace
         return leaf.string();
     }
 
-    uint32_t crc32Update(uint32_t crc, const uint8_t *data, size_t size)
-    {
-        static std::array<uint32_t, 256> table = []()
-        {
-            std::array<uint32_t, 256> values{};
-            for (uint32_t i = 0; i < 256u; ++i)
-            {
-                uint32_t c = i;
-                for (int bit = 0; bit < 8; ++bit)
-                {
-                    c = (c & 1u) ? (0xEDB88320u ^ (c >> 1u)) : (c >> 1u);
-                }
-                values[i] = c;
-            }
-            return values;
-        }();
-
-        uint32_t out = crc;
-        for (size_t i = 0; i < size; ++i)
-        {
-            out = table[(out ^ data[i]) & 0xFFu] ^ (out >> 8u);
-        }
-        return out;
-    }
-
-    bool computeFileCrc32(const std::string &path, uint32_t &crcOut)
-    {
-        std::ifstream file(path, std::ios::binary);
-        if (!file.is_open())
-        {
-            return false;
-        }
-
-        std::array<uint8_t, 4096> chunk{};
-        uint32_t crc = 0xFFFFFFFFu;
-
-        while (file.good())
-        {
-            file.read(reinterpret_cast<char *>(chunk.data()), static_cast<std::streamsize>(chunk.size()));
-            const std::streamsize got = file.gcount();
-            if (got <= 0)
-            {
-                break;
-            }
-            crc = crc32Update(crc, chunk.data(), static_cast<size_t>(got));
-        }
-
-        crcOut = ~crc;
-        return true;
-    }
-
     std::optional<PS2Runtime::RecompiledFunction> resolveHandlerByName(std::string_view handlerName)
     {
         const std::string_view resolvedSyscall = ps2_runtime_calls::resolveSyscallName(handlerName);
@@ -140,7 +87,6 @@ namespace
         return std::nullopt;
     }
 }
-
 namespace ps2_game_overrides
 {
     AutoRegister::AutoRegister(const Descriptor &descriptor)
@@ -173,10 +119,12 @@ namespace ps2_game_overrides
         return runtime.replaceFunction(address, resolved.value());
     }
 
-    void applyMatching(PS2Runtime &runtime, const std::string &elfPath, uint32_t entry)
+    void applyMatching(PS2Runtime &runtime,
+                       const std::string &elfPath,
+                       uint32_t entry,
+                       uint32_t fileCrc32,
+                       bool fileCrcValid)
     {
-        ps2_syscalls::clearSoundDriverCompatLayout();
-        ps2_syscalls::clearDtxCompatLayout();
 
         std::vector<Descriptor> descriptors;
         {
@@ -190,10 +138,6 @@ namespace ps2_game_overrides
         }
 
         const std::string elfName = basenameFromPath(elfPath);
-        uint32_t fileCrc32 = 0u;
-        bool fileCrcComputed = false;
-        bool fileCrcValid = false;
-
         size_t appliedCount = 0;
         for (const Descriptor &descriptor : descriptors)
         {
@@ -217,16 +161,6 @@ namespace ps2_game_overrides
 
             if (descriptor.crc32 != 0u)
             {
-                if (!fileCrcComputed)
-                {
-                    fileCrcComputed = true;
-                    fileCrcValid = computeFileCrc32(elfPath, fileCrc32);
-                    if (!fileCrcValid)
-                    {
-                        std::cerr << "[game_overrides] failed to compute CRC32 for '" << elfPath << "'" << std::endl;
-                    }
-                }
-
                 if (!fileCrcValid || fileCrc32 != descriptor.crc32)
                 {
                     continue;
@@ -246,68 +180,4 @@ namespace ps2_game_overrides
             RUNTIME_LOG("[game_overrides] applied " << appliedCount << " matching override(s).");
         }
     }
-}
-
-namespace
-{
-    void applyRecvxSoundDriverCompat(PS2Runtime &runtime)
-    {
-        (void)runtime;
-
-        // Trying to explain a bit of Resident Evil Code: Veronica X sound-driver guest globals.
-        // Update these guest addresses/callback PCs when porting the override to another build:
-        // - checksum tables back the SE/MIDI status values mirrored through the snddrv RPC stubs
-        // - busyFlagAddr is the guest-side "work in progress" word cleared on completion
-        // - completion/clearBusy callbacks are guest PCs reached when async snddrv work finishes
-        PS2SoundDriverCompatLayout layout{};
-        layout.primarySeCheckAddr = 0x01E0EF10u;
-        layout.primaryMidiCheckAddr = 0x01E0EF20u;
-        layout.fallbackSeCheckAddr = 0x01E1EF10u;
-        layout.fallbackMidiCheckAddr = 0x01E1EF20u;
-        layout.busyFlagAddr = 0x01E212C8u;
-        layout.completionCallbacks = {0x002EAC20u, 0x002EAC30u, 0x002FAC20u, 0x002FAC30u};
-        layout.clearBusyCallbacks = {0x002EAC30u, 0x002FAC30u};
-
-        // SID + subcommand (fno) numbers RE:CVX's sound driver speaks; carried per-game
-        // so its getStatus RPC provisions the status/addr-table pool the
-        // sceSifGetOtherData checksum backfill depends on. The submit path (SID 0 /
-        // fno 0, never a live service) is intentionally left unconfigured.
-        layout.stateSid = 1u;
-        layout.getStatusFno = 0x12u;
-        layout.getAddrTableFno = 0x13u;
-        ps2_syscalls::setSoundDriverCompatLayout(layout);
-    }
-
-    void applyRecvxDtxCompat(PS2Runtime &runtime)
-    {
-        (void)runtime;
-
-        // Trying to explain abit of Resident Evil Code: Veronica X DTX guest layout.
-        // Update these guest values when porting the middleware override to another build:
-        // - rpcSid identifies the DTX RPC service the guest binds/registers
-        // - urpc object/table addresses back the SJX/PS2RNA/SJRMT command tables
-        // - dispatcherFuncAddr is the guest-side DTX RPC handler used for URPC dispatch
-        PS2DtxCompatLayout layout{};
-        layout.rpcSid = 0x7D000000u;
-        layout.urpcObjBase = 0x01F18000u;
-        layout.urpcObjLimit = 0x01F1FF00u;
-        layout.urpcObjStride = 0x20u;
-        layout.urpcFnTableBase = 0x0034FED0u;
-        layout.urpcObjTableBase = 0x0034FFD0u;
-        layout.dispatcherFuncAddr = 0x002FABC0u;
-        ps2_syscalls::setDtxCompatLayout(layout);
-    }
-
-    void applyLotrSoundRpcCompat(PS2Runtime &runtime)
-    {
-        (void)runtime;
-
-        PS2SoundDriverCompatLayout layout{};
-        layout.completionCallbacks = {0x001FFD70u, 0u, 0u, 0u};
-        ps2_syscalls::setSoundDriverCompatLayout(layout);
-    }
-
-    PS2_REGISTER_GAME_OVERRIDE("RECVX sound-driver compat", "slus_201.84", 0u, 0u, &applyRecvxSoundDriverCompat);
-    PS2_REGISTER_GAME_OVERRIDE("RECVX DTX compat", "slus_201.84", 0u, 0u, &applyRecvxDtxCompat);
-    PS2_REGISTER_GAME_OVERRIDE("LotR sound RPC compat", "SLUS_205.78", 0u, 0u, &applyLotrSoundRpcCompat);
 }

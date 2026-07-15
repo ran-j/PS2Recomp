@@ -10,6 +10,8 @@
 #include "Kernel/Stubs/GS.h"
 #include "Kernel/Stubs/MPEG.h"
 #include "ps2_host_backend.h"
+#include "ps2_iop_host.h"
+#include "ps2x/iop/iop_subsystem.h"
 
 #include <iostream>
 #include <fstream>
@@ -106,6 +108,48 @@ namespace
 
     thread_local DispatchHistory g_dispatchHistory;
     thread_local std::unordered_map<PS2Runtime *, uint32_t> g_guestExecutionDepths;
+
+    bool computeFileCrc32(const std::string &path, uint32_t &crcOut)
+    {
+        std::ifstream file(path, std::ios::binary);
+        if (!file.is_open())
+        {
+            return false;
+        }
+
+        static const std::array<uint32_t, 256> table = []
+        {
+            std::array<uint32_t, 256> values{};
+            for (uint32_t i = 0; i < values.size(); ++i)
+            {
+                uint32_t value = i;
+                for (uint32_t bit = 0; bit < 8; ++bit)
+                {
+                    value = (value & 1u) ? (0xEDB88320u ^ (value >> 1u)) : (value >> 1u);
+                }
+                values[i] = value;
+            }
+            return values;
+        }();
+
+        uint32_t crc = 0xFFFFFFFFu;
+        std::array<uint8_t, 16 * 1024> buffer{};
+        while (file.good())
+        {
+            file.read(reinterpret_cast<char *>(buffer.data()), static_cast<std::streamsize>(buffer.size()));
+            const std::streamsize count = file.gcount();
+            for (std::streamsize i = 0; i < count; ++i)
+            {
+                crc = table[(crc ^ buffer[static_cast<size_t>(i)]) & 0xFFu] ^ (crc >> 8u);
+            }
+        }
+        if (file.bad())
+        {
+            return false;
+        }
+        crcOut = ~crc;
+        return true;
+    }
 
     void pushDispatchPc(uint32_t pc)
     {
@@ -293,7 +337,6 @@ namespace
         return paths;
     }
 
-
     std::string readGuestPrintableString(const uint8_t *rdram, uint32_t addr, size_t maxLen)
     {
         std::string out;
@@ -371,21 +414,14 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     static std::vector<uint8_t> s_uploadBuffer(DEFAULT_FB_SIZE, 0u);
 
     const uint64_t currentTick = ps2_syscalls::GetCurrentVSyncTick();
-    bool latchedThisCall = false;
-    if (!s_hasLatchedInitialFrame)
+    const bool needsLatch = !s_hasLatchedInitialFrame || currentTick != s_lastPresentationTick;
+    if (needsLatch)
     {
         rt->gs().latchHostPresentationFrame();
         s_lastPresentationTick = currentTick;
         s_hasLatchedInitialFrame = true;
-        latchedThisCall = true;
     }
-    else if (currentTick != s_lastPresentationTick && rt->gs().tryLatchHostPresentationFrame())
-    {
-        s_lastPresentationTick = currentTick;
-        latchedThisCall = true;
-    }
-
-    if (!latchedThisCall && s_hasUploadedFrame)
+    else if (s_hasUploadedFrame)
     {
         outWidth = (s_lastWidth != 0u) ? s_lastWidth : FB_WIDTH;
         outHeight = (s_lastHeight != 0u) ? s_lastHeight : DEFAULT_DISPLAY_HEIGHT;
@@ -470,6 +506,17 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
 
 PS2Runtime::PS2Runtime()
 {
+    m_iopHost = std::make_unique<PS2IopHostAdapter>(*this);
+    m_iopSubsystem = std::make_unique<ps2x::iop::IopSubsystem>(*m_iopHost);
+#if defined(PS2X_IOP_ENABLE_PLUGINS) && PS2X_IOP_ENABLE_PLUGINS && \
+    !defined(PLATFORM_VITA) && (defined(_WIN32) || defined(__linux__))
+    if (const char *applicationDirectory = GetApplicationDirectory();
+        applicationDirectory && applicationDirectory[0] != '\0')
+    {
+        m_iopSubsystem->setPluginSearchPaths({std::filesystem::path(applicationDirectory) / "iop_plugins"});
+    }
+#endif
+
     std::memset(&m_cpuContext, 0, sizeof(m_cpuContext));
 
     // R0 is always zero in MIPS
@@ -511,6 +558,8 @@ PS2Runtime::~PS2Runtime()
     {
         requestStop();
         ps2_syscalls::detachAllGuestHostThreads();
+        m_iopSubsystem.reset();
+        m_iopHost.reset();
 #if defined(PLATFORM_VITA)
         m_audioBackend.stopAll();
         m_audioBackend.setAudioReady(false);
@@ -533,7 +582,6 @@ PS2Runtime::~PS2Runtime()
         }
 
         m_loadedModules.clear();
-
     }
     catch (const std::exception &e)
     {
@@ -543,6 +591,39 @@ PS2Runtime::~PS2Runtime()
     {
         std::cerr << "[~PS2Runtime] cleanup exception: unknown" << std::endl;
     }
+}
+
+void PS2Runtime::setIopPluginSearchPaths(std::vector<std::filesystem::path> paths)
+{
+    m_iopSubsystem->setPluginSearchPaths(std::move(paths));
+}
+
+ps2x::iop::RpcAbi PS2Runtime::selectIopRpcAbi(const ps2x::iop::RpcAbiRequest &request) const
+{
+    return m_iopSubsystem->selectRpcAbi(request);
+}
+
+ps2x::iop::RpcResult PS2Runtime::handleIopRpc(uint8_t *rdram, R5900Context *ctx, ps2x::iop::RpcRequest request)
+{
+    auto scope = m_iopHost->enterCall(ctx, rdram);
+    request.callToken = scope.token();
+    return m_iopSubsystem->handleRpc(request);
+}
+
+void PS2Runtime::notifyIopSifTransfer(uint8_t *rdram, const ps2x::iop::SifTransfer &transfer)
+{
+    auto scope = m_iopHost->enterCall(nullptr, rdram);
+    m_iopSubsystem->onSifTransfer(transfer);
+}
+
+void PS2Runtime::resetIop()
+{
+    m_iopSubsystem->reset();
+}
+
+ps2x::iop::DebugSnapshot PS2Runtime::iopDebugSnapshot() const
+{
+    return m_iopSubsystem->debugSnapshot();
 }
 
 bool PS2Runtime::syncCoreSubsystems()
@@ -571,8 +652,7 @@ bool PS2Runtime::syncCoreSubsystems()
                                  { m_vu1.resume(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
                                                 m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
                                                 m_gs, &m_memory, top, itop, 65536); });
-    m_iop.init(rdram);
-    m_iop.reset();
+    resetIop();
     m_vu0.reset();
     m_vu1.reset();
 
@@ -596,7 +676,15 @@ bool PS2Runtime::initialize(const char *title)
             std::cerr << "Failed to bind runtime core subsystems" << std::endl;
             return false;
         }
-
+#if defined(PS2X_IOP_ENABLE_PLUGINS) && PS2X_IOP_ENABLE_PLUGINS && \
+    !defined(PLATFORM_VITA) && (defined(_WIN32) || defined(__linux__))
+        std::string pluginError;
+        if (!m_iopSubsystem->loadPlugins(&pluginError))
+        {
+            std::cerr << "Failed to load IOP plugins: " << pluginError << std::endl;
+            return false;
+        }
+#endif
 #if defined(PLATFORM_VITA)
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
 #else
@@ -853,7 +941,28 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
 
     m_loadedModules.push_back(module);
 
-    ps2_game_overrides::applyMatching(*this, elfPath, m_cpuContext.pc);
+    uint32_t elfCrc32 = 0u;
+    const bool elfCrc32Valid = computeFileCrc32(elfPath, elfCrc32);
+    if (!elfCrc32Valid)
+    {
+        std::cerr << "[ps2xIOP] failed to compute ELF CRC32 for '" << elfPath << "'" << std::endl;
+    }
+    ps2x::iop::GameIdentity identity;
+    identity.elfName = module.name;
+    identity.entryPoint = m_cpuContext.pc;
+    identity.crc32 = elfCrc32;
+    std::string iopError;
+    if (!m_iopSubsystem->configure(identity, &iopError))
+    {
+        std::cerr << "[ps2xIOP] failed to configure profile: " << iopError << std::endl;
+        return false;
+    }
+
+    ps2_game_overrides::applyMatching(*this,
+                                      elfPath,
+                                      m_cpuContext.pc,
+                                      elfCrc32,
+                                      elfCrc32Valid);
 
     RUNTIME_LOG("ELF file loaded successfully. Entry point: 0x" << std::hex << m_cpuContext.pc << std::dec);
     return true;
@@ -2114,6 +2223,40 @@ void PS2Runtime::Store128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, __m
     }
 }
 
+void PS2Runtime::kickGifDmaChainFromMMIO(uint8_t *rdram,
+                                         R5900Context *ctx,
+                                         uint32_t dPcrValue,
+                                         uint32_t dStatValue,
+                                         uint32_t tadr,
+                                         uint32_t chcr)
+{
+    constexpr uint32_t D_PCR = 0x1000E020u;
+    constexpr uint32_t D_STAT = 0x1000E010u;
+    constexpr uint32_t GIF_TADR = 0x1000A030u;
+    constexpr uint32_t GIF_CHCR = 0x1000A000u;
+
+    ps2TraceGuestWrite(rdram, D_PCR, 4u, dPcrValue, 0u, "WRITE32", ctx);
+    m_memory.writeIORegister(D_PCR, dPcrValue);
+    ps2TraceGuestWrite(rdram, D_STAT, 4u, dStatValue, 0u, "WRITE32", ctx);
+    m_memory.writeIORegister(D_STAT, dStatValue);
+    ps2TraceGuestWrite(rdram, GIF_TADR, 4u, tadr, 0u, "WRITE32", ctx);
+    m_memory.writeIORegister(GIF_TADR, tadr);
+    ps2TraceGuestWrite(rdram, GIF_CHCR, 4u, chcr, 0u, "WRITE32", ctx);
+    if (m_memory.tryProcessNativeGifImageUploadChain(m_gs, tadr, chcr))
+    {
+        drainCompletedDmacHandlers(rdram);
+        return;
+    }
+    if (m_memory.tryProcessNativeGifPackedChain(m_gs, tadr, chcr))
+    {
+        drainCompletedDmacHandlers(rdram);
+        return;
+    }
+    m_memory.writeIORegister(GIF_CHCR, chcr);
+    m_memory.processPendingTransfers();
+    drainCompletedDmacHandlers(rdram);
+}
+
 void PS2Runtime::requestStop()
 {
     m_stopRequested.store(true, std::memory_order_relaxed);
@@ -2134,7 +2277,7 @@ void PS2Runtime::run()
 {
     m_stopRequested.store(false, std::memory_order_relaxed);
     ps2_stubs::resetSifState();
-    ps2_syscalls::resetSoundDriverRpcState();
+    resetIop();
     ps2_stubs::resetAudioStubState();
     ps2_stubs::resetGsSyncVCallbackState();
     ps2_stubs::resetMpegStubState();
