@@ -91,6 +91,7 @@ if(PS2X_BUILD_RECOMP)
 endif()
 
 if(PS2X_BUILD_RUNTIME)
+    add_subdirectory("ps2xIOP")
     add_subdirectory("ps2xRuntime")
 endif()
 

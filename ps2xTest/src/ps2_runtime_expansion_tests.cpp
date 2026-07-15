@@ -1224,18 +1224,18 @@ void register_ps2_runtime_expansion_tests()
             setRegU32(blockTransCtx, 4, 1u);
             setRegU32(blockTransCtx, 5, 0x80E0u);
             setRegU32(blockTransCtx, 6, 1u);
-            setRegU32(blockTransCtx, 7, 2u);
+            setRegU32(blockTransCtx, 7, 0x13u);
             std::memcpy(rdram.data() + blockTransSp + 0x10u, "\x40\x23\x01\x00", 4u);
             std::memcpy(rdram.data() + blockTransSp + 0x14u, "\x00\x30\x00\x00", 4u);
             std::memcpy(rdram.data() + blockTransSp + 0x18u, "\x40\x27\x01\x00", 4u);
             ps2_stubs::sceSdRemote(rdram.data(), &blockTransCtx, nullptr);
-            t.Equals(getRegU32(&blockTransCtx, 2), 0x00012740u,
-                     "sceSdRemote block transfer should resume from the configured IOP pause position");
+            t.Equals(getRegU32(&blockTransCtx, 2), 0u,
+                     "sceSdRemote block-transfer start should report libsd success");
 
             R5900Context statusCtx{};
             setRegU32(statusCtx, 29, blockTransSp);
             setRegU32(statusCtx, 4, 1u);
-            setRegU32(statusCtx, 5, 0x80F0u);
+            setRegU32(statusCtx, 5, 0x8100u);
             setRegU32(statusCtx, 6, 1u);
             setRegU32(statusCtx, 7, 0u);
             std::memset(rdram.data() + blockTransSp + 0x10u, 0, 12u);
@@ -1257,8 +1257,122 @@ void register_ps2_runtime_expansion_tests()
             setRegU32(setParamCtx, 6, 0x0F81u);
             setRegU32(setParamCtx, 7, 0u);
             ps2_stubs::sceSdRemote(rdram.data(), &setParamCtx, nullptr);
-            t.Equals(getRegU32(&setParamCtx, 2), 0x00012740u,
+            t.Equals(getRegU32(&setParamCtx, 2), 0u,
                      "sceSdRemote set-param calls should not trap or disturb the movie audio state");
+        });
+
+        tc.Run("sceSdRemote isolates voice transfers from block streaming state", [](TestCase &t)
+        {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            constexpr uint32_t kStackAddr = 0x00100000u;
+            constexpr uint32_t kBlockBase = 0x00012340u;
+            constexpr uint32_t kBlockSize = 0x00003000u;
+            constexpr uint32_t kBlockPause = 0x00012740u;
+
+            R5900Context initCtx{};
+            ps2_stubs::sceSdRemoteInit(rdram.data(), &initCtx, nullptr);
+
+            R5900Context blockCtx{};
+            setRegU32(blockCtx, 29, kStackAddr);
+            setRegU32(blockCtx, 4, 1u);
+            setRegU32(blockCtx, 5, 0x80E0u);
+            setRegU32(blockCtx, 6, 1u);
+            setRegU32(blockCtx, 7, 0x13u);
+            setRegU32(blockCtx, 8, kBlockBase);
+            setRegU32(blockCtx, 9, kBlockSize);
+            setRegU32(blockCtx, 10, kBlockPause);
+            ps2_stubs::sceSdRemote(rdram.data(), &blockCtx, nullptr);
+
+            R5900Context blockStatusCtx{};
+            setRegU32(blockStatusCtx, 29, kStackAddr);
+            setRegU32(blockStatusCtx, 4, 1u);
+            setRegU32(blockStatusCtx, 5, 0x8100u);
+            setRegU32(blockStatusCtx, 6, 1u);
+            setRegU32(blockStatusCtx, 7, 0u);
+            ps2_stubs::sceSdRemote(rdram.data(), &blockStatusCtx, nullptr);
+            t.Equals(getRegU32(&blockStatusCtx, 2), 0x00012B40u,
+                     "initial block-status poll should advance the streaming ring");
+
+            R5900Context voiceCtx{};
+            setRegU32(voiceCtx, 29, kStackAddr);
+            setRegU32(voiceCtx, 4, 1u);
+            setRegU32(voiceCtx, 5, 0x80D0u);
+            setRegU32(voiceCtx, 6, 0u);
+            setRegU32(voiceCtx, 7, 0u);
+            setRegU32(voiceCtx, 8, 0x00022000u);
+            setRegU32(voiceCtx, 9, 0x00004000u);
+            setRegU32(voiceCtx, 10, 0x00000800u);
+            ps2_stubs::sceSdRemote(rdram.data(), &voiceCtx, nullptr);
+            t.Equals(getRegU32(&voiceCtx, 2), 0x00000800u,
+                     "DMA voice transfer should report its transferred byte count");
+
+            R5900Context voiceStatusCtx{};
+            setRegU32(voiceStatusCtx, 29, kStackAddr);
+            setRegU32(voiceStatusCtx, 4, 1u);
+            setRegU32(voiceStatusCtx, 5, 0x80F0u);
+            setRegU32(voiceStatusCtx, 6, 0u);
+            setRegU32(voiceStatusCtx, 7, 1u);
+            ps2_stubs::sceSdRemote(rdram.data(), &voiceStatusCtx, nullptr);
+            t.Equals(getRegU32(&voiceStatusCtx, 2), 1u,
+                     "voice-transfer status should complete independently from block position");
+
+            ps2_stubs::sceSdRemote(rdram.data(), &blockStatusCtx, nullptr);
+            t.Equals(getRegU32(&blockStatusCtx, 2), 0x00012F40u,
+                     "voice transfer should not replace or advance the block-streaming ring");
+        });
+
+        tc.Run("sceSdRemote keeps block cursors and loop banks isolated per core", [](TestCase &t)
+        {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            constexpr uint32_t kStackAddr = 0x00100000u;
+
+            R5900Context initCtx{};
+            ps2_stubs::sceSdRemoteInit(rdram.data(), &initCtx, nullptr);
+
+            auto remote = [&](uint32_t command,
+                              uint32_t core,
+                              uint32_t mode,
+                              uint32_t arg4 = 0u,
+                              uint32_t arg5 = 0u,
+                              uint32_t arg6 = 0u)
+            {
+                R5900Context ctx{};
+                setRegU32(ctx, 29, kStackAddr);
+                setRegU32(ctx, 4, 1u);
+                setRegU32(ctx, 5, command);
+                setRegU32(ctx, 6, core);
+                setRegU32(ctx, 7, mode);
+                setRegU32(ctx, 8, arg4);
+                setRegU32(ctx, 9, arg5);
+                setRegU32(ctx, 10, arg6);
+                ps2_stubs::sceSdRemote(rdram.data(), &ctx, nullptr);
+                return getRegU32(&ctx, 2);
+            };
+
+            t.Equals(remote(0x80E0u, 0u, 0x10u, 0x00010000u, 0x00001000u, 0x00010000u), 0u,
+                     "core 0 block stream should start successfully");
+            t.Equals(remote(0x80E0u, 1u, 0x13u, 0x00020000u, 0x00002000u, 0x00020800u), 0u,
+                     "core 1 block stream should start independently");
+
+            t.Equals(remote(0x8100u, 0u, 0u), 0x00010400u,
+                     "core 0 status should advance only the core 0 cursor");
+            t.Equals(remote(0x8100u, 1u, 0u), 0x00020C00u,
+                     "core 1 status should retain its independent pause position");
+            t.Equals(remote(0x8100u, 0u, 0u), 0x01010800u,
+                     "loop status should expose the second buffer in the high byte");
+
+            t.Equals(remote(0x80E0u, 0u, 0x02u), 0x01010800u,
+                     "block STOP should return the final core 0 cursor");
+            t.Equals(remote(0x8100u, 0u, 0u), 0u,
+                     "stopped block status should no longer expose a live cursor");
+            t.Equals(remote(0x8100u, 1u, 0u), 0x01021000u,
+                     "stopping core 0 should not stop or advance core 1");
+
+            ps2_stubs::sceSdRemoteInit(rdram.data(), &initCtx, nullptr);
+            t.Equals(remote(0x8100u, 1u, 0u), 0u,
+                     "sceSdRemoteInit should reset block state for both cores");
+            t.Equals(remote(0x80F0u, 1u, 0u), 1u,
+                     "sceSdRemoteInit should restore idle voice status to complete");
         });
          
         tc.Run("IPU init skips missing optional helper instead of dispatching the default trap", [](TestCase &t)
