@@ -556,7 +556,7 @@ void GSRasterizer::writePixel(GS *gs, int x, int y, int z, uint8_t r, uint8_t g,
         const uint64_t n = s_pixelSampleCount.fetch_add(1, std::memory_order_relaxed);
         if (ps2_diag::should_log(n, 0, 2000000))
         {
-            RUNTIME_LOG("[gs:pixels] n=" << n
+            PS2X_DIAG_LOG("[gs:pixels] n=" << n
                                         << " x=" << x << " y=" << y
                                         << " r=" << static_cast<uint32_t>(r)
                                         << " g=" << static_cast<uint32_t>(g)
@@ -637,7 +637,7 @@ void GSRasterizer::dumpClutIfNew(GS *gs, uint32_t cbp, uint8_t cpsm, uint8_t csm
 
     const uint32_t clutWidth = (gs->m_texclut.cbw != 0u) ? static_cast<uint32_t>(gs->m_texclut.cbw) : 1u;
 
-    RUNTIME_LOG("[gs:clut-dump] cbp=0x" << std::hex << cbp
+    PS2X_DIAG_LOG("[gs:clut-dump] cbp=0x" << std::hex << cbp
                                         << " cpsm=0x" << static_cast<uint32_t>(cpsm)
                                         << " csm=" << std::dec << static_cast<uint32_t>(csm)
                                         << " csa=" << static_cast<uint32_t>(csa)
@@ -650,7 +650,7 @@ void GSRasterizer::dumpClutIfNew(GS *gs, uint32_t cbp, uint8_t cpsm, uint8_t csm
         const uint32_t clutY = static_cast<uint32_t>(gs->m_texclut.cov) + (clutIndex >> 4);
         const uint32_t rgba = readClutRgba(gs, cbp, cpsm, clutWidth, clutX, clutY);
 
-        RUNTIME_LOG("[gs:clut-dump]   idx=" << i
+        PS2X_DIAG_LOG("[gs:clut-dump]   idx=" << i
                                             << " r=" << (rgba & 0xFFu)
                                             << " g=" << ((rgba >> 8) & 0xFFu)
                                             << " b=" << ((rgba >> 16) & 0xFFu)

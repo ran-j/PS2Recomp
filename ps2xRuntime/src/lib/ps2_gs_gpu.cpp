@@ -1411,7 +1411,7 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
             if (ps2_diag::should_log(n, 32, 5000))
             {
                 const uint32_t eop = static_cast<uint32_t>((tagLo >> 15) & 1u);
-                RUNTIME_LOG("[gs:giftag] n=" << n
+                PS2X_DIAG_LOG("[gs:giftag] n=" << n
                                              << " lo=0x" << std::hex << tagLo
                                              << " hi=0x" << tagHi
                                              << std::dec
@@ -1615,7 +1615,7 @@ void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
         const uint64_t n = s_packedHist[regDesc].fetch_add(1, std::memory_order_relaxed) + 1;
         if ((n % 200000u) == 0u)
         {
-            RUNTIME_LOG("[gs:packed] reg=0x" << std::hex << static_cast<uint32_t>(regDesc)
+            PS2X_DIAG_LOG("[gs:packed] reg=0x" << std::hex << static_cast<uint32_t>(regDesc)
                                               << std::dec
                                               << " count=" << n);
         }
@@ -1799,7 +1799,7 @@ void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
             const uint64_t n = s_adCount.fetch_add(1, std::memory_order_relaxed);
             if (ps2_diag::should_log(n, 32, 1000))
             {
-                RUNTIME_LOG("[gs:ad] n=" << n
+                PS2X_DIAG_LOG("[gs:ad] n=" << n
                                          << " addr=0x" << std::hex << static_cast<uint32_t>(addr)
                                          << " data=0x" << lo
                                          << std::dec
@@ -2283,7 +2283,7 @@ void GS::performLocalToLocalTransfer()
         const uint64_t n = s_l2lCount.fetch_add(1, std::memory_order_relaxed);
         if (ps2_diag::should_log(n, 16, 600))
         {
-            RUNTIME_LOG("[gs:l2l] n=" << n
+            PS2X_DIAG_LOG("[gs:l2l] n=" << n
                                       << " src.bp=0x" << std::hex << sbp
                                       << " src.psm=0x" << static_cast<uint32_t>(spsm)
                                       << " src.bw=" << std::dec << static_cast<uint32_t>(sbw)
@@ -2458,7 +2458,7 @@ void GS::vertexKick(bool drawing)
         if (drawCtx.frame.fbp != s_prevDrawFbp)
         {
             const int ctxIndex = m_prim.ctxt ? 1 : 0;
-            RUNTIME_LOG("[gs:frame-change] prim=" << static_cast<uint32_t>(m_prim.type)
+            PS2X_DIAG_LOG("[gs:frame-change] prim=" << static_cast<uint32_t>(m_prim.type)
                                                    << " ctx=" << ctxIndex
                                                    << " frame.fbp=0x" << std::hex << drawCtx.frame.fbp
                                                    << " frame.fbw=" << std::dec << drawCtx.frame.fbw
@@ -2520,7 +2520,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
         const bool dbpChanged = (m_bitbltbuf.dbp != s_prevImageDbp);
         if (ps2_diag::should_log(n, 16, 600) || dbpChanged)
         {
-            RUNTIME_LOG("[gs:image] n=" << n
+            PS2X_DIAG_LOG("[gs:image] n=" << n
                                         << " dbp=0x" << std::hex << m_bitbltbuf.dbp
                                         << " dpsm=0x" << static_cast<uint32_t>(m_bitbltbuf.dpsm)
                                         << " dbw=" << std::dec << static_cast<uint32_t>(m_bitbltbuf.dbw)

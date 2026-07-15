@@ -221,7 +221,7 @@ inline void pollWatches(const uint8_t *rdram)
                     pcSuffix = pcStream.str();
                 }
 
-                RUNTIME_LOG("[watch] " << w.label
+                PS2X_DIAG_LOG("[watch] " << w.label
                                        << " 0x" << std::hex << w.addr
                                        << ": 0x" << w.prevValue
                                        << " -> 0x" << current

@@ -2331,7 +2331,7 @@ void PS2Runtime::run()
     if (const size_t armed = ps2_watch::armWatchesFromEnv(std::getenv("PS2X_WATCH")))
     {
         ps2_diag::set_enabled(true);
-        RUNTIME_LOG("[watch] armed " << armed << " guest-memory watch(es) from PS2X_WATCH");
+        PS2X_DIAG_LOG("[watch] armed " << armed << " guest-memory watch(es) from PS2X_WATCH");
     }
 
     // A blank image to use as a framebuffer
@@ -2443,7 +2443,7 @@ void PS2Runtime::run()
                 // torn (values from slightly different instants). This is a
                 // human-read diagnostic headline, not a consistent snapshot — a torn
                 // read is acceptable and never affects control flow.
-                RUNTIME_LOG("[gs-activity] frame=" << s_activityFrame
+                PS2X_DIAG_LOG("[gs-activity] frame=" << s_activityFrame
                                                    << " dma=" << curDma
                                                    << " gif=" << curGif
                                                    << " gsw=" << curGsw

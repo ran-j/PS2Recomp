@@ -125,6 +125,31 @@ inline void clear_runtime_log_entries()
 #define RUNTIME_LOG(x) do {} while(0)
 #endif
 
+// Unlike RUNTIME_LOG, this is NOT gated by PS2_RUNTIME_LOGS/AGRESSIVE_LOGS: it
+// always compiles in. Used exclusively by the PS2X_DIAG-gated observability
+// probes ([gs:*], [watch], clut-dump, ...), which already pay for their own
+// runtime gate (ps2_diag::enabled() / g_writeWatchActive) at each call site --
+// making the log statement itself depend on a *second*, build-time-only gate
+// would mean PS2X_DIAG=1 silently produces no output in a default (non
+// PS2X_ENABLE_RUNTIME_LOGS) build, defeating the point of an opt-in,
+// env-var-driven diagnostics layer.
+#define PS2X_DIAG_LOG(x)                                                                                                  \
+    do                                                                                                                    \
+    {                                                                                                                     \
+        std::ostringstream _ps2_diag_log_stream;                                                                          \
+        _ps2_diag_log_stream << x;                                                                                        \
+        const std::string _ps2_diag_log_text = _ps2_diag_log_stream.str();                                               \
+        if (_ps2_diag_log_text.empty())                                                                                   \
+        {                                                                                                                 \
+            std::cout.flush();                                                                                           \
+        }                                                                                                                 \
+        else                                                                                                              \
+        {                                                                                                                 \
+            std::cout << _ps2_diag_log_text;                                                                              \
+            ps2_log::append_runtime_log_text(_ps2_diag_log_text);                                                         \
+        }                                                                                                                 \
+    } while (0)
+
 #if AGRESSIVE_LOGS
 
 namespace ps2_log

@@ -1886,7 +1886,7 @@ namespace
             const uint64_t n = s_dispEnvCount.fetch_add(1, std::memory_order_relaxed);
             if (ps2_diag::should_log(n, 8, 600))
             {
-                RUNTIME_LOG("[gs:dispenv] n=" << n
+                PS2X_DIAG_LOG("[gs:dispenv] n=" << n
                                               << " pmode=0x" << std::hex << env.pmode
                                               << " smode2=0x" << env.smode2
                                               << " dispfb=0x" << env.dispfb

@@ -1,6 +1,10 @@
 #ifndef PS2RECOMP_ELF_PARSER_H
 #define PS2RECOMP_ELF_PARSER_H
 
+// <cstdint> must come before <elfio/elfio.hpp>: that header uses uint16_t /
+// uint32_t / uint64_t without including <cstdint> itself, and newer libstdc++
+// versions no longer pull those in transitively.
+#include <cstdint>
 #include <elfio/elfio.hpp>
 #include <string>
 #include <vector>

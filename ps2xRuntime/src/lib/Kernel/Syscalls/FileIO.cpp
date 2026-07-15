@@ -104,7 +104,7 @@ namespace ps2_syscalls
             const uint64_t n = s_fioOpenCount.fetch_add(1, std::memory_order_relaxed);
             if (ps2_diag::should_log(n, 16, 200))
             {
-                RUNTIME_LOG("[fioOpen] n=" << n
+                PS2X_DIAG_LOG("[fioOpen] n=" << n
                                            << " ps2Path='" << ps2Path << "'"
                                            << " hostPath='" << hostPath << "'");
             }
@@ -253,7 +253,7 @@ namespace ps2_syscalls
             const uint64_t n = s_fioReadCount.fetch_add(1, std::memory_order_relaxed);
             if (ps2_diag::should_log(n, 16, 200))
             {
-                RUNTIME_LOG("[fioRead] n=" << n
+                PS2X_DIAG_LOG("[fioRead] n=" << n
                                            << " fd=" << ps2Fd
                                            << " requested=" << size
                                            << " actual=" << bytesRead);

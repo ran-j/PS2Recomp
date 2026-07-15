@@ -33,7 +33,7 @@ namespace ps2_stubs
             const uint64_t n = s_exitCount.fetch_add(1, std::memory_order_relaxed);
             if (ps2_diag::should_log(n, 8, 0))
             {
-                RUNTIME_LOG("[exit] n=" << n
+                PS2X_DIAG_LOG("[exit] n=" << n
                                         << " pc=0x" << std::hex << ctx->pc
                                         << " ra=0x" << getRegU32(ctx, 31)
                                         << " a0=0x" << getRegU32(ctx, 4)

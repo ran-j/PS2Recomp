@@ -1368,7 +1368,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                     }
                                 }
 
-                                RUNTIME_LOG("[dma:chain] n=" << n
+                                PS2X_DIAG_LOG("[dma:chain] n=" << n
                                                              << " chan=0x" << std::hex << channelBase
                                                              << " tagAddr=0x" << currentTagAddr
                                                              << " tag=0x" << tag
