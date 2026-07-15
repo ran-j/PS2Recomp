@@ -21,15 +21,25 @@
 #include <filesystem>
 #include <iostream>
 #include <iomanip>
+#include <memory>
 
 #include "ps2_log.h"
+#include "runtime/ps2_address.h"
 #include "runtime/ps2_gif_arbiter.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_gs_gpu.h"
-#include "runtime/ps2_iop.h"
 #include "runtime/ps2_vu1.h"
 #include "runtime/ps2_audio.h"
 #include "runtime/ps2_pad.h"
+#include "ps2x/iop/iop_types.h"
+
+namespace ps2x::iop
+{
+    class IopSubsystem;
+}
+
+class PS2IopHostAdapter;
+class PS2IopTransport;
 
 enum PS2Exception
 {
@@ -127,7 +137,7 @@ struct alignas(16) R5900Context
 
     // FPU registers (COP1)
     float f[32];
-    float f_acc; // FPU accumulator
+    float f_acc;    // FPU accumulator
     uint32_t fcr31; // Control/status register
 
     R5900Context()
@@ -255,78 +265,6 @@ inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
     // TODO we dont need this anymore so on next release it will be deleted
 }
 
-struct PS2SoundDriverCompatLayout
-{
-    uint32_t primarySeCheckAddr = 0;
-    uint32_t primaryMidiCheckAddr = 0;
-    uint32_t fallbackSeCheckAddr = 0;
-    uint32_t fallbackMidiCheckAddr = 0;
-    uint32_t busyFlagAddr = 0;
-    std::array<uint32_t, 4> completionCallbacks{};
-    std::array<uint32_t, 2> clearBusyCallbacks{};
-
-    [[nodiscard]] bool hasChecksumTables() const
-    {
-        return primarySeCheckAddr != 0u || primaryMidiCheckAddr != 0u ||
-               fallbackSeCheckAddr != 0u || fallbackMidiCheckAddr != 0u;
-    }
-
-    [[nodiscard]] bool matchesCompletionCallback(uint32_t addr) const
-    {
-        for (const uint32_t candidate : completionCallbacks)
-        {
-            if (candidate != 0u && candidate == addr)
-            {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    [[nodiscard]] bool matchesClearBusyCallback(uint32_t addr) const
-    {
-        for (const uint32_t candidate : clearBusyCallbacks)
-        {
-            if (candidate != 0u && candidate == addr)
-            {
-                return true;
-            }
-        }
-        return false;
-    }
-};
-
-struct PS2DtxCompatLayout
-{
-    uint32_t rpcSid = 0;
-    uint32_t urpcObjBase = 0;
-    uint32_t urpcObjLimit = 0;
-    uint32_t urpcObjStride = 0x20u;
-    uint32_t urpcFnTableBase = 0;
-    uint32_t urpcObjTableBase = 0;
-    uint32_t dispatcherFuncAddr = 0;
-
-    [[nodiscard]] bool isConfigured() const
-    {
-        return rpcSid != 0u;
-    }
-
-    [[nodiscard]] bool hasUrpcObjectRange() const
-    {
-        return urpcObjBase != 0u && urpcObjLimit > urpcObjBase && urpcObjStride != 0u;
-    }
-
-    [[nodiscard]] bool hasUrpcTables() const
-    {
-        return urpcFnTableBase != 0u && urpcObjTableBase != 0u;
-    }
-
-    [[nodiscard]] bool isUrpcRpc(uint32_t sid, uint32_t rpcNum) const
-    {
-        return isConfigured() && sid == rpcSid && rpcNum >= 0x400u && rpcNum < 0x500u;
-    }
-};
-
 class PS2Runtime
 {
 public:
@@ -347,6 +285,9 @@ public:
     bool syncCoreSubsystems();
     bool loadELF(const std::string &elfPath);
     void run();
+
+    void setIopPluginSearchPaths(std::vector<std::filesystem::path> paths);
+    [[nodiscard]] ps2x::iop::DebugSnapshot iopDebugSnapshot() const;
 
     using DebugUiCallback = void (*)(PS2Runtime &runtime, void *userData);
     void setDebugUiCallbacks(DebugUiCallback initCallback,
@@ -480,36 +421,16 @@ public:
     void Store32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint32_t value);
     void Store64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint64_t value);
     void Store128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, __m128i value);
+    void kickGifDmaChainFromMMIO(uint8_t *rdram,
+                                 R5900Context *ctx,
+                                 uint32_t dPcrValue,
+                                 uint32_t dStatValue,
+                                 uint32_t tadr,
+                                 uint32_t chcr);
 
     static inline bool isSpecialAddress(uint32_t addr)
     {
-        auto inRange = [](uint32_t value, uint32_t base, uint32_t size) -> bool
-        {
-            return (value - base) < size;
-        };
-
-        auto isPhysicalSpecial = [&](uint32_t physAddr) -> bool
-        {
-            if (inRange(physAddr, PS2_BIOS_BASE, PS2_BIOS_SIZE))
-                return true;
-            if (inRange(physAddr, PS2_SCRATCHPAD_BASE, PS2_SCRATCHPAD_SIZE))
-                return true;
-            if (inRange(physAddr, PS2_IO_BASE, PS2_IO_SIZE))
-                return true;
-            if (inRange(physAddr, PS2_GS_PRIV_REG_BASE, PS2_GS_PRIV_REG_SIZE))
-                return true;
-            if (physAddr >= PS2_VU0_DATA_BASE && physAddr < (PS2_VU1_CODE_BASE + PS2_VU1_CODE_SIZE))
-                return true;
-            return false;
-        };
-
-        // KSEG2/KSEG3 (TLB mapped)
-        if (addr >= 0xC0000000u)
-            return true;
-
-        // KSEG0/KSEG1 aliases → physical
-        const uint32_t physAddr = (addr >= 0x80000000u) ? (addr & 0x1FFFFFFFu) : addr;
-        return isPhysicalSpecial(physAddr);
+        return Ps2IsSpecialAddress(addr);
     }
 
 public:
@@ -528,8 +449,6 @@ public:
     inline VU1Interpreter &vu1() { return m_vu1; }
     inline const VU1Interpreter &vu1() const { return m_vu1; }
 
-    inline ps2_iop &iop() { return m_iop; }
-    inline const ps2_iop &iop() const { return m_iop; }
     inline PS2AudioBackend &audioBackend() { return m_audioBackend; }
     inline const PS2AudioBackend &audioBackend() const { return m_audioBackend; }
     inline PSPadBackend &padBackend() { return m_padBackend; }
@@ -562,14 +481,21 @@ private:
 
     void HandleIntegerOverflow(R5900Context *ctx);
 
+    [[nodiscard]] ps2x::iop::RpcAbi selectIopRpcAbi(const ps2x::iop::RpcAbiRequest &request) const;
+    [[nodiscard]] ps2x::iop::RpcResult handleIopRpc(uint8_t *rdram, R5900Context *ctx, ps2x::iop::RpcRequest request);
+    void notifyIopSifTransfer(uint8_t *rdram, const ps2x::iop::SifTransfer &transfer);
+    void resetIop();
+
     friend class GuestExecutionScope;
     friend class GuestExecutionReleaseScope;
+    friend class PS2IopTransport;
 
 private:
     PS2Memory m_memory;
     GifArbiter m_gifArbiter;
     GS m_gs;
-    ps2_iop m_iop;
+    std::unique_ptr<PS2IopHostAdapter> m_iopHost;
+    std::unique_ptr<ps2x::iop::IopSubsystem> m_iopSubsystem;
     PS2AudioBackend m_audioBackend;
     PSPadBackend m_padBackend;
     VU1Interpreter m_vu0;

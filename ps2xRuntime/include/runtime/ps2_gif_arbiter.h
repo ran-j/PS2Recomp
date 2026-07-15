@@ -33,6 +33,7 @@ public:
     void submit(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl = false);
 
     void drain();
+    bool empty() const { return m_queue.empty(); }
 
 private:
     ProcessPacketFn m_processFn;

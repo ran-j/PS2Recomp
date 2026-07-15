@@ -1,11 +1,15 @@
 #include "MiniTest.h"
 #include "ps2_runtime.h"
+#include "ps2_iop_transport.h"
 #include "ps2_syscalls.h"
 #include "ps2_stubs.h"
 
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <stdexcept>
+#include <string>
+#include <string_view>
 #include <vector>
 
 namespace ps2_stubs
@@ -26,24 +30,19 @@ namespace
         TestEnv() : rdram(PS2_RAM_SIZE, 0u)
         {
             ps2_stubs::resetSifState();
-            ps2_syscalls::resetSoundDriverRpcState();
-            ps2_syscalls::clearSoundDriverCompatLayout();
-            ps2_syscalls::clearDtxCompatLayout();
             std::memset(&ctx, 0, sizeof(ctx));
         }
     };
 
-    void setRecvxDtxCompatLayout()
+    void configureProfile(TestEnv &env, std::string_view elfName)
     {
-        PS2DtxCompatLayout layout{};
-        layout.rpcSid = 0x7D000000u;
-        layout.urpcObjBase = 0x01F18000u;
-        layout.urpcObjLimit = 0x01F1FF00u;
-        layout.urpcObjStride = 0x20u;
-        layout.urpcFnTableBase = 0x0034FED0u;
-        layout.urpcObjTableBase = 0x0034FFD0u;
-        layout.dispatcherFuncAddr = 0x002FABC0u;
-        ps2_syscalls::setDtxCompatLayout(layout);
+        std::string error;
+        const bool configured = PS2IopTransport::configureForTesting(
+            &env.runtime, {std::string(elfName), 0u, 0u}, &error);
+        if (!configured)
+        {
+            throw std::runtime_error("failed to configure test IOP profile: " + error);
+        }
     }
 
     #pragma pack(push, 1)
@@ -259,7 +258,7 @@ void register_ps2_sif_dma_tests()
         tc.Run("sceSifSetDma acknowledges DTX work-buffer transfers by advancing the EE footer ticket", [](TestCase &t)
         {
             TestEnv env;
-            setRecvxDtxCompatLayout();
+            configureProfile(env, "slus_201.84");
 
             constexpr uint32_t kClientAddr = 0x0002D000u;
             constexpr uint32_t kDtxSid = 0x7D000000u;
@@ -321,7 +320,7 @@ void register_ps2_sif_dma_tests()
         tc.Run("sceSifSetDma applies SJX DTX payloads into the emulated SJRMT data ring", [](TestCase &t)
         {
             TestEnv env;
-            setRecvxDtxCompatLayout();
+            configureProfile(env, "slus_201.84");
 
             constexpr uint32_t kClientAddr = 0x0002E000u;
             constexpr uint32_t kDtxSid = 0x7D000000u;
@@ -442,7 +441,7 @@ void register_ps2_sif_dma_tests()
         tc.Run("sceSifSetDma recognizes SJX DTX payloads from rotated EE work buffers", [](TestCase &t)
         {
             TestEnv env;
-            setRecvxDtxCompatLayout();
+            configureProfile(env, "slus_201.84");
 
             constexpr uint32_t kClientAddr = 0x00031000u;
             constexpr uint32_t kDtxSid = 0x7D000000u;
@@ -568,7 +567,7 @@ void register_ps2_sif_dma_tests()
         tc.Run("sceSifSetDma lets active PS2RNA playback drain emulated SJRMT data", [](TestCase &t)
         {
             TestEnv env;
-            setRecvxDtxCompatLayout();
+            configureProfile(env, "slus_201.84");
 
             constexpr uint32_t kClientAddr = 0x0002F000u;
             constexpr uint32_t kDtxSid = 0x7D000000u;
@@ -885,6 +884,7 @@ void register_ps2_sif_dma_tests()
         tc.Run("sceSifGetOtherData preserves live sound-status sums when compat backfill is enabled", [](TestCase &t)
         {
             TestEnv env;
+            configureProfile(env, "slus_201.84");
 
             constexpr uint32_t kRdAddr = 0x00023300u;
             constexpr uint32_t kDstAddr = 0x00023400u;
@@ -894,11 +894,6 @@ void register_ps2_sif_dma_tests()
             constexpr uint32_t kMidiSumOffset = 0x1Eu;
             constexpr uint32_t kSeSumOffset = 0x26u;
             constexpr uint32_t kBank = 1u;
-
-            PS2SoundDriverCompatLayout compat{};
-            compat.primarySeCheckAddr = kPrimarySeCheckAddr;
-            compat.primaryMidiCheckAddr = kPrimaryMidiCheckAddr;
-            ps2_syscalls::setSoundDriverCompatLayout(compat);
 
             constexpr uint32_t kClientAddr = 0x00023500u;
             constexpr uint32_t kRecvAddr = 0x00023600u;
@@ -950,6 +945,7 @@ void register_ps2_sif_dma_tests()
         tc.Run("sceSifGetOtherData backfills zero sound-status sums for later banks", [](TestCase &t)
         {
             TestEnv env;
+            configureProfile(env, "slus_201.84");
 
             constexpr uint32_t kRdAddr = 0x00023700u;
             constexpr uint32_t kDstAddr = 0x00023800u;
@@ -960,11 +956,6 @@ void register_ps2_sif_dma_tests()
             constexpr uint32_t kSeSumOffset = 0x26u;
             constexpr uint32_t kLiveBank = 0u;
             constexpr uint32_t kPendingBank = 1u;
-
-            PS2SoundDriverCompatLayout compat{};
-            compat.primarySeCheckAddr = kPrimarySeCheckAddr;
-            compat.primaryMidiCheckAddr = kPrimaryMidiCheckAddr;
-            ps2_syscalls::setSoundDriverCompatLayout(compat);
 
             constexpr uint32_t kClientAddr = 0x00023900u;
             constexpr uint32_t kRecvAddr = 0x00023A00u;
