@@ -1,8 +1,8 @@
 #include "MiniTest.h"
 #include "ps2_runtime.h"
+#include "ps2_iop_transport.h"
 #include "ps2_syscalls.h"
 #include "ps2_stubs.h"
-#include "runtime/ps2_iop.h"
 
 #include <array>
 #include <atomic>
@@ -11,6 +11,8 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <string_view>
+#include <stdexcept>
 #include <vector>
 
 using namespace ps2_syscalls;
@@ -27,6 +29,16 @@ namespace
 
     constexpr uint32_t K_SIF_RPC_MODE_NOWAIT = 0x01u;
     constexpr uint32_t K_STACK_ADDR = 0x00100000u;
+    constexpr uint32_t IOP_SID_SNDDRV_COMMAND = 0x00000000u;
+    constexpr uint32_t IOP_SID_SNDDRV_STATE = 0x00000001u;
+    constexpr uint32_t IOP_SID_LOTR_CLFILE = 0x0000FF01u;
+    constexpr uint32_t IOP_SID_LOTR_SOUND = 0x00012345u;
+    constexpr uint32_t IOP_SID_MCSERV = 0x80000400u;
+    constexpr uint32_t IOP_SID_LIBSD = 0x80000701u;
+    constexpr uint32_t IOP_SID_FATAL_FRAME_SDRDRV = 0x19740512u;
+    constexpr uint32_t IOP_RPC_SNDDRV_SUBMIT = 0x00000000u;
+    constexpr uint32_t IOP_RPC_SNDDRV_GET_STATUS_ADDR = 0x00000012u;
+    constexpr uint32_t IOP_RPC_SNDDRV_GET_ADDR_TABLE = 0x00000013u;
 
     #pragma pack(push, 1)
     struct SifRpcHeader
@@ -78,12 +90,26 @@ namespace
         uint32_t end;
         uint32_t next;
     };
+
+    struct McDescParam
+    {
+        int32_t fd;
+        int32_t port;
+        int32_t slot;
+        int32_t size;
+        int32_t offset;
+        int32_t origin;
+        uint32_t buffer;
+        uint32_t param;
+        uint8_t data[16];
+    };
     #pragma pack(pop)
 
     static_assert(sizeof(SifRpcHeader) == 0x10u, "Unexpected SifRpcHeader size.");
     static_assert(sizeof(SifRpcClientData) == 0x28u, "Unexpected SifRpcClientData size.");
     static_assert(sizeof(SifRpcServerData) == 0x44u, "Unexpected SifRpcServerData size.");
     static_assert(sizeof(SifRpcDataQueue) == 0x18u, "Unexpected SifRpcDataQueue size.");
+    static_assert(sizeof(McDescParam) == 0x30u, "Unexpected McDescParam size.");
 
     struct TestEnv
     {
@@ -94,33 +120,76 @@ namespace
         TestEnv() : rdram(PS2_RAM_SIZE, 0)
         {
             ps2_stubs::resetSifState();
-            ps2_syscalls::resetSoundDriverRpcState();
-            ps2_syscalls::clearSoundDriverCompatLayout();
-            ps2_syscalls::clearDtxCompatLayout();
             std::memset(&ctx, 0, sizeof(ctx));
         }
     };
 
-    void setRecvxDtxCompatLayout()
+    void configureProfile(TestEnv &env, std::string_view elfName)
     {
-        PS2DtxCompatLayout layout{};
-        layout.rpcSid = 0x7D000000u;
-        layout.urpcObjBase = 0x01F18000u;
-        layout.urpcObjLimit = 0x01F1FF00u;
-        layout.urpcObjStride = 0x20u;
-        layout.urpcFnTableBase = 0x0034FED0u;
-        layout.urpcObjTableBase = 0x0034FFD0u;
-        layout.dispatcherFuncAddr = 0x002FABC0u;
-        ps2_syscalls::setDtxCompatLayout(layout);
+        std::string error;
+        const bool configured = PS2IopTransport::configureForTesting(
+            &env.runtime, {std::string(elfName), 0u, 0u}, &error);
+        if (!configured)
+        {
+            throw std::runtime_error("failed to configure test IOP profile: " + error);
+        }
+    }
+
+    ps2x::iop::RpcResult callIop(TestEnv &env,
+                                 uint32_t sid,
+                                 uint32_t function,
+                                 uint32_t sendAddress,
+                                 uint32_t sendSize,
+                                 uint32_t receiveAddress,
+                                 uint32_t receiveSize)
+    {
+        ps2x::iop::RpcRequest request{};
+        request.sid = sid;
+        request.function = function;
+        request.send = {sendAddress, sendSize};
+        request.receive = {receiveAddress, receiveSize};
+        return PS2IopTransport::handleRpc(
+            &env.runtime, env.rdram.data(), &env.ctx, std::move(request));
     }
 
     std::atomic<uint32_t> g_lotrSoundCallbackHits{0u};
+    std::atomic<uint32_t> g_recvxSoundCallbackHits{0u};
+    std::atomic<uint32_t> g_dtxDispatcherHits{0u};
+    std::atomic<uint32_t> g_dtxDispatcherRpcNum{0u};
+    std::atomic<uint32_t> g_dtxDispatcherSendBuf{0u};
+    std::atomic<uint32_t> g_dtxDispatcherSendSize{0u};
+
+    constexpr uint32_t K_DTX_DISPATCH_RESULT_ADDR = 0x0002D800u;
+    constexpr uint32_t K_DTX_DISPATCH_RESULT_MARKER = 0xD15CA7C1u;
 
     void lotrSoundEndCallbackShouldNotRun(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         (void)rdram;
         (void)runtime;
         ++g_lotrSoundCallbackHits;
+        ctx->pc = ::getRegU32(ctx, 31);
+    }
+
+    void recvxSoundEndCallbackShouldNotRun(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        (void)runtime;
+        ++g_recvxSoundCallbackHits;
+        ctx->pc = ::getRegU32(ctx, 31);
+    }
+
+    void recvxDtxDispatcher(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)runtime;
+        ++g_dtxDispatcherHits;
+        g_dtxDispatcherRpcNum = ::getRegU32(ctx, 4);
+        g_dtxDispatcherSendBuf = ::getRegU32(ctx, 5);
+        g_dtxDispatcherSendSize = ::getRegU32(ctx, 6);
+
+        std::memcpy(rdram + K_DTX_DISPATCH_RESULT_ADDR,
+                    &K_DTX_DISPATCH_RESULT_MARKER,
+                    sizeof(K_DTX_DISPATCH_RESULT_MARKER));
+        ctx->r[2] = _mm_set_epi64x(0, static_cast<int64_t>(K_DTX_DISPATCH_RESULT_ADDR));
         ctx->pc = ::getRegU32(ctx, 31);
     }
 
@@ -283,6 +352,7 @@ void register_ps2_sif_rpc_tests()
         tc.Run("Fatal Frame SDRDRV RPC initializes header and loads body archives", [](TestCase &t)
         {
             TestEnv env;
+            configureProfile(env, "SLUS_203.88");
             ScopedTempDir temp("fatal_frame_sdrdrv");
 
             std::vector<uint8_t> header(64u, 0);
@@ -319,47 +389,146 @@ void register_ps2_sif_rpc_tests()
             std::memcpy(env.rdram.data() + kSendAddr, commands.data(), commands.size() * sizeof(uint32_t));
             std::memset(env.rdram.data() + kRecvAddr, 0xCC, 0x180u);
 
-            env.runtime.iop().init(env.rdram.data());
-            uint32_t resultPtr = 0u;
-            bool signalNowait = true;
-            const bool initHandled = env.runtime.iop().handleRPC(&env.runtime,
-                                                                 IOP_SID_FATAL_FRAME_SDRDRV,
-                                                                 0u,
-                                                                 0u,
-                                                                 0u,
-                                                                 kRecvAddr,
-                                                                 0x180u,
-                                                                 resultPtr,
-                                                                 signalNowait);
-            t.IsTrue(initHandled, "Fatal Frame SDRDRV init RPC should be handled");
+            const ps2x::iop::RpcResult initResult =
+                callIop(env, IOP_SID_FATAL_FRAME_SDRDRV, 0u,
+                        0u, 0u, kRecvAddr, 0x180u);
+            t.IsTrue(initResult.handled, "Fatal Frame SDRDRV init RPC should be handled");
             t.Equals(std::memcmp(env.rdram.data() + kImgHeaderAddr, "img-header", 10), 0,
                      "SDRDRV init RPC should load img_hd.bin into the arrangement table");
 
-            signalNowait = true;
-            const bool handled = env.runtime.iop().handleRPC(&env.runtime,
-                                                             IOP_SID_FATAL_FRAME_SDRDRV,
-                                                             1u,
-                                                             kSendAddr,
-                                                             static_cast<uint32_t>(commands.size() * sizeof(uint32_t)),
-                                                             kRecvAddr,
-                                                             0x180u,
-                                                             resultPtr,
-                                                             signalNowait);
+            const ps2x::iop::RpcResult result =
+                callIop(env, IOP_SID_FATAL_FRAME_SDRDRV, 1u,
+                        kSendAddr,
+                        static_cast<uint32_t>(commands.size() * sizeof(uint32_t)),
+                        kRecvAddr, 0x180u);
 
             PS2Runtime::setIoPaths(oldPaths);
 
-            t.IsTrue(handled, "Fatal Frame SDRDRV SID should be handled");
-            t.Equals(resultPtr, kRecvAddr, "SDRDRV RPC should return recv buffer");
-            t.IsFalse(signalNowait, "SDRDRV RPC should not request special nowait signaling");
+            t.IsTrue(result.handled, "Fatal Frame SDRDRV SID should be handled");
+            t.Equals(result.resultAddress, kRecvAddr, "SDRDRV RPC should return recv buffer");
+            t.IsFalse(result.signalNowaitCompletion, "SDRDRV RPC should not request special nowait signaling");
             t.Equals(std::memcmp(env.rdram.data() + kDstAddr, "archive-data", 12), 0,
                      "SDRDRV load command should copy bytes from img_bd.bin by LBN");
             t.Equals(env.rdram[kRecvAddr + 0x6Cu + (kLoadId * 8u)], static_cast<uint8_t>(0),
                      "SDRDRV load status should report completed");
         });
 
+        tc.Run("MCSERV RPC init and get info report a formatted PS2 card", [](TestCase &t)
+        {
+            TestEnv env;
+            ScopedTempDir temp("mcserv_rpc");
+
+            const PS2Runtime::IoPaths oldPaths = PS2Runtime::getIoPaths();
+            PS2Runtime::IoPaths ioPaths;
+            ioPaths.elfDirectory = temp.path;
+            ioPaths.hostRoot = temp.path;
+            ioPaths.cdRoot = temp.path;
+            ioPaths.mcRoot = temp.path / "mc0";
+            PS2Runtime::setIoPaths(ioPaths);
+
+            constexpr uint32_t kSendAddr = 0x00034000u;
+            constexpr uint32_t kRecvAddr = 0x00035000u;
+            constexpr uint32_t kEndParamAddr = 0x00036000u;
+
+            const ps2x::iop::RpcResult initResult =
+                callIop(env, IOP_SID_MCSERV, 0xFEu,
+                        kSendAddr, sizeof(McDescParam), kRecvAddr, 12u);
+            t.IsTrue(initResult.handled, "MCSERV init RPC should be handled");
+            t.Equals(initResult.resultAddress, kRecvAddr, "MCSERV init should return recv buffer");
+            t.IsFalse(initResult.signalNowaitCompletion, "MCSERV init should not request special nowait signaling");
+            t.Equals(readGuestStruct<int32_t>(env.rdram.data(), kRecvAddr + 0u), 0,
+                     "MCSERV init result should succeed");
+            t.IsTrue(readGuestStruct<uint32_t>(env.rdram.data(), kRecvAddr + 4u) >= 0x205u,
+                     "MCSERV init should expose a supported mcserv version");
+            t.IsTrue(readGuestStruct<uint32_t>(env.rdram.data(), kRecvAddr + 8u) >= 0x206u,
+                     "MCSERV init should expose a supported mcman version");
+
+            McDescParam getInfo{};
+            getInfo.port = 0;
+            getInfo.slot = 0;
+            getInfo.size = 1;   // formatted requested by XMCSERV libmc
+            getInfo.offset = 1; // free clusters requested by XMCSERV libmc
+            getInfo.origin = 1; // type requested by XMCSERV libmc
+            getInfo.param = kEndParamAddr;
+            writeGuestStruct(env.rdram.data(), kSendAddr, getInfo);
+            std::memset(env.rdram.data() + kRecvAddr, 0xCC, 12u);
+            std::memset(env.rdram.data() + kEndParamAddr, 0xCC, 192u);
+
+            const ps2x::iop::RpcResult getInfoResult =
+                callIop(env, IOP_SID_MCSERV, 0x01u,
+                        kSendAddr, sizeof(McDescParam), kRecvAddr, 4u);
+
+            PS2Runtime::setIoPaths(oldPaths);
+
+            t.IsTrue(getInfoResult.handled, "MCSERV get info RPC should be handled");
+            t.Equals(readGuestStruct<int32_t>(env.rdram.data(), kRecvAddr), 0,
+                     "get info result should succeed");
+            t.Equals(readGuestStruct<int32_t>(env.rdram.data(), kEndParamAddr + 0u), 2,
+                     "get info should report PS2 card type");
+            t.Equals(readGuestStruct<int32_t>(env.rdram.data(), kEndParamAddr + 4u), 0x2000,
+                     "get info should report free clusters");
+            t.Equals(readGuestStruct<int32_t>(env.rdram.data(), kEndParamAddr + 144u), 1,
+                     "get info should report formatted card");
+        });
+
+        tc.Run("DBCMAN version RPC returns the 3.20 compatibility response", [](TestCase &t)
+        {
+            TestEnv env;
+
+            constexpr uint32_t kDbcManSid = 0x80001300u;
+            constexpr uint32_t kCheckVersionRpc = 0x80001363u;
+            constexpr uint32_t kRecvAddr = 0x00035A00u;
+            constexpr uint32_t kDbcManVersion = 0x0320u;
+
+            std::memset(env.rdram.data() + kRecvAddr, 0xCC, 16u);
+            const ps2x::iop::RpcResult result =
+                callIop(env, kDbcManSid, kCheckVersionRpc,
+                        0u, 0u, kRecvAddr, 16u);
+
+            t.IsTrue(result.handled, "DBCMAN check-version RPC should be handled");
+            t.Equals(result.resultAddress, kRecvAddr, "DBCMAN check-version RPC should return the receive buffer");
+            t.IsFalse(result.signalNowaitCompletion, "DBCMAN check-version RPC should not request special nowait signaling");
+            for (uint32_t index = 0u; index < 4u; ++index)
+            {
+                t.Equals(readGuestStruct<uint32_t>(env.rdram.data(), kRecvAddr + (index * 4u)),
+                         kDbcManVersion,
+                         "DBCMAN should repeat version 3.20 across the response words");
+            }
+        });
+
+        tc.Run("LIBSD RPC routes through the IOP audio service", [](TestCase &t)
+        {
+            TestEnv env;
+
+            constexpr uint32_t kSetVoiceRpc = 0x8010u;
+            constexpr uint32_t kSendAddr = 0x00035B00u;
+            constexpr uint32_t kRecvAddr = 0x00035C00u;
+
+            std::array<uint32_t, 5> command{};
+            command[0] = 3u;          // voice index
+            command[2] = 0x1000u;    // neutral pitch
+            command[3] = 0x00120000u; // plausible sample address
+            writeGuestStruct(env.rdram.data(), kSendAddr, command);
+            std::memset(env.rdram.data() + kRecvAddr, 0xA5, 16u);
+            const ps2x::iop::RpcResult result =
+                callIop(env, IOP_SID_LIBSD, kSetVoiceRpc,
+                        kSendAddr, static_cast<uint32_t>(sizeof(command)),
+                        kRecvAddr, 16u);
+
+            t.IsTrue(result.handled, "LIBSD SID should be handled by the IOP audio service");
+            t.Equals(result.resultAddress, kRecvAddr, "LIBSD should return the audio backend receive buffer");
+            t.IsFalse(result.signalNowaitCompletion, "LIBSD should not request special nowait signaling");
+            for (uint32_t index = 0u; index < 16u; ++index)
+            {
+                t.Equals(env.rdram[kRecvAddr + index], static_cast<uint8_t>(0xA5),
+                         "LIBSD should preserve the backend-owned response buffer");
+            }
+        });
+
         tc.Run("LotR ClFile RPC opens reads and reports EOF", [](TestCase &t)
         {
             TestEnv env;
+            configureProfile(env, "SLUS_205.78");
             ScopedTempDir temp("lotr_clfile_rpc");
 
             const std::vector<uint8_t> payload = {'a', 'b', 'c'};
@@ -379,23 +548,13 @@ void register_ps2_sif_rpc_tests()
             constexpr uint32_t kRecvAddr = 0x00037000u;
             constexpr uint32_t kDstAddr = 0x00038000u;
 
-            env.runtime.iop().init(env.rdram.data());
-
             auto callClFileRpc = [&](uint32_t rpcNum, uint32_t sendSize) {
-                uint32_t resultPtr = 0u;
-                bool signalNowait = true;
-                const bool handled = env.runtime.iop().handleRPC(&env.runtime,
-                                                                 IOP_SID_LOTR_CLFILE,
-                                                                 rpcNum,
-                                                                 kSendAddr,
-                                                                 sendSize,
-                                                                 kRecvAddr,
-                                                                 0x40u,
-                                                                 resultPtr,
-                                                                 signalNowait);
-                t.IsTrue(handled, "LotR ClFile SID should be handled");
-                t.Equals(resultPtr, kRecvAddr, "ClFile RPC should return recv buffer");
-                t.IsFalse(signalNowait, "ClFile RPC should not request special nowait signaling");
+                const ps2x::iop::RpcResult result =
+                    callIop(env, IOP_SID_LOTR_CLFILE, rpcNum,
+                            kSendAddr, sendSize, kRecvAddr, 0x40u);
+                t.IsTrue(result.handled, "LotR ClFile SID should be handled");
+                t.Equals(result.resultAddress, kRecvAddr, "ClFile RPC should return recv buffer");
+                t.IsFalse(result.signalNowaitCompletion, "ClFile RPC should not request special nowait signaling");
             };
 
             std::memset(env.rdram.data() + kSendAddr, 0, 0x100u);
@@ -481,16 +640,13 @@ void register_ps2_sif_rpc_tests()
         tc.Run("LotR sound RPC completes HLE callback without invoking guest loop", [](TestCase &t)
         {
             TestEnv env;
+            configureProfile(env, "SLUS_205.78");
 
             constexpr uint32_t kClientAddr = 0x00039000u;
             constexpr uint32_t kSemaParamAddr = 0x00039100u;
             constexpr uint32_t kSendAddr = 0x0003A000u;
             constexpr uint32_t kRecvAddr = 0x0003C000u;
             constexpr uint32_t kEndFunc = 0x001FFD70u;
-
-            PS2SoundDriverCompatLayout layout{};
-            layout.completionCallbacks = {kEndFunc, 0u, 0u, 0u};
-            ps2_syscalls::setSoundDriverCompatLayout(layout);
 
             env.runtime.registerFunction(kEndFunc, lotrSoundEndCallbackShouldNotRun);
             g_lotrSoundCallbackHits = 0u;
@@ -535,6 +691,80 @@ void register_ps2_sif_rpc_tests()
             setRegU32(env.ctx, 4, static_cast<uint32_t>(semaId));
             PollSema(env.rdram.data(), &env.ctx, &env.runtime);
             t.Equals(getRegS32(env.ctx, 2), semaId, "LotR sound callback completion should signal the sema");
+        });
+
+        tc.Run("RECVX sound callbacks complete in HLE and only clear busy on designated callbacks", [](TestCase &t)
+        {
+            TestEnv env;
+            configureProfile(env, "slus_201.84");
+
+            constexpr uint32_t kClientAddr = 0x0003D000u;
+            constexpr uint32_t kSemaParamAddr = 0x0003D100u;
+            constexpr uint32_t kCompletionOnlyCallback = 0x002EAC20u;
+            constexpr uint32_t kClearBusyCallback = 0x002EAC30u;
+            constexpr uint32_t kBusyFlagAddr = 0x01E212C8u;
+
+            env.runtime.registerFunction(kCompletionOnlyCallback, recvxSoundEndCallbackShouldNotRun);
+            env.runtime.registerFunction(kClearBusyCallback, recvxSoundEndCallbackShouldNotRun);
+            g_recvxSoundCallbackHits = 0u;
+
+            SifInitRpc(env.rdram.data(), &env.ctx, &env.runtime);
+
+            const uint32_t semaParam[6] = {0u, 1u, 0u, 0u, 0u, 0u};
+            std::memcpy(env.rdram.data() + kSemaParamAddr, semaParam, sizeof(semaParam));
+            setRegU32(env.ctx, 4, kSemaParamAddr);
+            CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
+            const int32_t semaId = getRegS32(env.ctx, 2);
+            t.IsTrue(semaId > 0, "CreateSema should return a positive semaphore id");
+
+            setRegU32(env.ctx, 4, kClientAddr);
+            setRegU32(env.ctx, 5, IOP_SID_SNDDRV_COMMAND);
+            setRegU32(env.ctx, 6, 0u);
+            SifBindRpc(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_OK, "SifBindRpc should succeed for RECVX snddrv command SID");
+
+            auto callSoundDriver = [&](uint32_t endFunc) {
+                setRegU32(env.ctx, 4, kClientAddr);
+                setRegU32(env.ctx, 5, IOP_RPC_SNDDRV_SUBMIT);
+                setRegU32(env.ctx, 6, K_SIF_RPC_MODE_NOWAIT);
+                setRegU32(env.ctx, 7, 0u);
+                setRegU32(env.ctx, 8, 0u);
+                setRegU32(env.ctx, 9, 0u);
+                setRegU32(env.ctx, 10, 0u);
+                setRegU32(env.ctx, 11, endFunc);
+                setRegU32(env.ctx, 29, K_STACK_ADDR);
+                writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x00u, static_cast<uint32_t>(semaId));
+
+                SifCallRpc(env.rdram.data(), &env.ctx, &env.runtime);
+                t.Equals(getRegS32(env.ctx, 2), KE_OK, "RECVX snddrv submission should complete");
+            };
+
+            constexpr uint32_t kBusyBeforeCompletion = 0x11111111u;
+            writeGuestU32(env.rdram.data(), kBusyFlagAddr, kBusyBeforeCompletion);
+            callSoundDriver(kCompletionOnlyCallback);
+
+            t.Equals(g_recvxSoundCallbackHits.load(), 0u,
+                     "recognized RECVX completion callback should not execute guest code");
+            t.Equals(readGuestStruct<uint32_t>(env.rdram.data(), kBusyFlagAddr), kBusyBeforeCompletion,
+                     "completion-only callback should preserve the RECVX busy flag");
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(semaId));
+            PollSema(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), semaId, "completion-only callback should signal its semaphore");
+
+            writeGuestU32(env.rdram.data(), kBusyFlagAddr, 0x22222222u);
+            callSoundDriver(kClearBusyCallback);
+
+            t.Equals(g_recvxSoundCallbackHits.load(), 0u,
+                     "recognized RECVX clear-busy callback should not execute guest code");
+            t.Equals(readGuestStruct<uint32_t>(env.rdram.data(), kBusyFlagAddr), 0u,
+                     "designated RECVX callback should clear the guest busy flag");
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(semaId));
+            PollSema(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), semaId, "clear-busy callback should signal its semaphore");
+
+            setRegU32(env.ctx, 4, kClientAddr);
+            SifCheckStatRpc(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), 0, "RECVX snddrv client should no longer be RPC-busy");
         });
 
         tc.Run("bind before register creates placeholder then remaps", [](TestCase &t)
@@ -625,6 +855,7 @@ void register_ps2_sif_rpc_tests()
         tc.Run("snddrv state RPC returns stable buffers and signals sema", [](TestCase &t)
         {
             TestEnv env;
+            configureProfile(env, "slus_201.84");
 
             constexpr uint32_t kClientAddr = 0x00028000u;
             constexpr uint32_t kSemaParamAddr = 0x00028100u;
@@ -716,6 +947,7 @@ void register_ps2_sif_rpc_tests()
         tc.Run("snddrv state RPC returns low guest sound-driver addresses", [](TestCase &t)
         {
             TestEnv env;
+            configureProfile(env, "slus_201.84");
 
             constexpr uint32_t kClientAddr = 0x00028300u;
             constexpr uint32_t kSemaParamAddr = 0x00028400u;
@@ -857,10 +1089,91 @@ void register_ps2_sif_rpc_tests()
                      "recv payload should match stack-selected transfer size");
         });
 
+        tc.Run("DTX URPC uses the guest dispatcher only when its function-table slot is registered", [](TestCase &t)
+        {
+            TestEnv env;
+            configureProfile(env, "slus_201.84");
+
+            constexpr uint32_t kClientAddr = 0x0002C000u;
+            constexpr uint32_t kDtxSid = 0x7D000000u;
+            constexpr uint32_t kSendAddr = 0x0002C100u;
+            constexpr uint32_t kRecvAddr = 0x0002C200u;
+            constexpr uint32_t kUrpcCommand = 7u;
+            constexpr uint32_t kRpcNum = 0x400u | kUrpcCommand;
+            constexpr uint32_t kFnTableSlot = 0x0033FED0u + (kUrpcCommand * sizeof(uint32_t));
+            constexpr uint32_t kObjTableSlot = 0x0033FFD0u + (kUrpcCommand * sizeof(uint32_t));
+            constexpr uint32_t kWrongFnTableSlot = 0x0034FED0u + (kUrpcCommand * sizeof(uint32_t));
+            constexpr uint32_t kWrongObjTableSlot = 0x0034FFD0u + (kUrpcCommand * sizeof(uint32_t));
+            constexpr uint32_t kDispatcherAddr = 0x002FABC0u;
+            constexpr uint32_t kRegisteredHandlerAddr = 0x002FADE0u;
+            constexpr uint32_t kRegisteredObjectAddr = 0x01F18100u;
+            constexpr uint32_t kFallbackValue = 0x13579BDFu;
+
+            g_dtxDispatcherHits = 0u;
+            g_dtxDispatcherRpcNum = 0u;
+            g_dtxDispatcherSendBuf = 0u;
+            g_dtxDispatcherSendSize = 0u;
+            env.runtime.registerFunction(kDispatcherAddr, recvxDtxDispatcher);
+
+            SifInitRpc(env.rdram.data(), &env.ctx, &env.runtime);
+
+            setRegU32(env.ctx, 4, kClientAddr);
+            setRegU32(env.ctx, 5, kDtxSid);
+            setRegU32(env.ctx, 6, 0u);
+            SifBindRpc(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_OK, "SifBindRpc should succeed for DTX dispatcher test");
+
+            writeGuestU32(env.rdram.data(), kSendAddr + 0u, kFallbackValue);
+            writeGuestU32(env.rdram.data(), kSendAddr + 4u, 0x2468ACE0u);
+
+            auto callUrpc = [&]() {
+                setRegU32(env.ctx, 4, kClientAddr);
+                setRegU32(env.ctx, 5, kRpcNum);
+                setRegU32(env.ctx, 6, 0u);
+                setRegU32(env.ctx, 7, kSendAddr);
+                setRegU32(env.ctx, 8, 8u);
+                setRegU32(env.ctx, 9, kRecvAddr);
+                setRegU32(env.ctx, 10, sizeof(uint32_t));
+                setRegU32(env.ctx, 11, 0u);
+                setRegU32(env.ctx, 29, K_STACK_ADDR);
+                writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x00u, 0u);
+
+                SifCallRpc(env.rdram.data(), &env.ctx, &env.runtime);
+                t.Equals(getRegS32(env.ctx, 2), KE_OK, "DTX URPC should complete");
+            };
+
+            writeGuestU32(env.rdram.data(), kFnTableSlot, 0u);
+            writeGuestU32(env.rdram.data(), kObjTableSlot, kRegisteredObjectAddr);
+            writeGuestU32(env.rdram.data(), kWrongFnTableSlot, kRegisteredHandlerAddr);
+            writeGuestU32(env.rdram.data(), kWrongObjTableSlot, kRegisteredObjectAddr);
+            writeGuestU32(env.rdram.data(), kRecvAddr, 0u);
+            callUrpc();
+
+            t.Equals(g_dtxDispatcherHits.load(), 0u,
+                     "empty DTX function-table slot should use fallback emulation");
+            t.Equals(readGuestStruct<uint32_t>(env.rdram.data(), kRecvAddr), kFallbackValue,
+                     "fallback DTX emulation should return the first send word for an unknown command");
+
+            writeGuestU32(env.rdram.data(), kFnTableSlot, kRegisteredHandlerAddr);
+            writeGuestU32(env.rdram.data(), kRecvAddr, 0u);
+            callUrpc();
+
+            t.Equals(g_dtxDispatcherHits.load(), 1u,
+                     "registered DTX function-table slot should enter the guest dispatcher");
+            t.Equals(g_dtxDispatcherRpcNum.load(), kRpcNum,
+                     "DTX dispatcher should receive the full URPC number");
+            t.Equals(g_dtxDispatcherSendBuf.load(), kSendAddr,
+                     "DTX dispatcher should receive the send-buffer address");
+            t.Equals(g_dtxDispatcherSendSize.load(), 8u,
+                     "DTX dispatcher should receive the send-buffer size");
+            t.Equals(readGuestStruct<uint32_t>(env.rdram.data(), kRecvAddr), K_DTX_DISPATCH_RESULT_MARKER,
+                     "SifCallRpc should copy the dispatcher result into the receive buffer");
+        });
+
         tc.Run("SifCallRpc prefers stack ABI for DTX URPC when both packs look plausible", [](TestCase &t)
         {
             TestEnv env;
-            setRecvxDtxCompatLayout();
+            configureProfile(env, "slus_201.84");
 
             constexpr uint32_t kClientAddr = 0x0002B000u;
             constexpr uint32_t kDtxSid = 0x7D000000u;

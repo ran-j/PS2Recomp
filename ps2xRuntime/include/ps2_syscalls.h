@@ -34,11 +34,6 @@ namespace ps2_syscalls
     void notifyRuntimeStop();
     void joinAllGuestHostThreads();
     void detachAllGuestHostThreads();
-    void resetSoundDriverRpcState();
-    void setSoundDriverCompatLayout(const PS2SoundDriverCompatLayout &layout);
-    void clearSoundDriverCompatLayout();
-    void setDtxCompatLayout(const PS2DtxCompatLayout &layout);
-    void clearDtxCompatLayout();
     void EnsureVSyncWorkerRunning(uint8_t *rdram, PS2Runtime *runtime);
     uint64_t GetCurrentVSyncTick();
     uint64_t WaitForNextVSyncTick(uint8_t *rdram, PS2Runtime *runtime);
