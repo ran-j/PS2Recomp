@@ -1,5 +1,6 @@
 #include "MiniTest.h"
 #include "ps2x/iop/iop_subsystem.h"
+#include "module_factories.h"
 
 #include <algorithm>
 #include <array>
@@ -7,6 +8,7 @@
 #include <cstring>
 #include <filesystem>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -598,6 +600,152 @@ void register_ps2_iop_tests()
             }
             t.Equals(metricValue(*service, "open_files"), uint64_t{0},
                      "reset should clear the CLFILE handle registry");
+        });
+
+        tc.Run("TSNDDRV honors per-game SID and subcommand parameterization", [](TestCase &t)
+        {
+            // A title whose sound driver muxes submit+status on a single, non-RE:CVX
+            // SID with its own subcommand numbering should still work: the SID/fno
+            // mapping is bindings-driven, not hardcoded per the RE:CVX defaults.
+            FakeIopHost host(0x02000000u);
+
+            ps2x::iop::detail::TsnddrvBindings bindings{};
+            bindings.serviceName = "Synthetic TSNDDRV";
+            bindings.arena = {0x00120000u, 0x00200000u, 0x100u, 0x100u, 0x1000u,
+                              0x4000u, 0x18000u, 0x40000u};
+            bindings.checksumCandidates = {{0x01E0EF10u, 0x01E0EF20u}};
+            bindings.commandSid = 0x80007701u;
+            bindings.stateSid = 0x80007701u; // muxed on one sid
+            bindings.submitFunction = 0x30u;
+            bindings.getStatusFunction = 0x31u;
+            bindings.getAddrTableFunction = 0x32u;
+
+            auto service = ps2x::iop::detail::createTsnddrvService(host, bindings);
+            t.Equals(service->sids().size(), size_t{1},
+                     "a muxed command/state sid should register exactly once");
+            t.Equals(service->sids()[0], bindings.commandSid,
+                     "the single registered sid should be the configured mux sid");
+
+            ps2x::iop::RpcRequest statusRequest{};
+            statusRequest.sid = bindings.stateSid;
+            statusRequest.function = bindings.getStatusFunction;
+            statusRequest.receive = {0x1000u, sizeof(uint32_t)};
+            t.IsTrue(service->handleRpc(statusRequest).handled,
+                     "the custom getStatus fno on the custom sid should be handled");
+            const uint32_t statusAddress = host.readWord(0x1000u);
+            t.IsTrue(statusAddress != 0u,
+                     "a custom-parameterized TSNDDRV should still allocate a status buffer");
+
+            ps2x::iop::RpcRequest wrongSidRequest{};
+            wrongSidRequest.sid = 1u; // RE:CVX's default state sid, not this game's
+            wrongSidRequest.function = bindings.getStatusFunction;
+            wrongSidRequest.receive = {0x1004u, sizeof(uint32_t)};
+            t.IsFalse(service->handleRpc(wrongSidRequest).handled,
+                      "a request for a different game's sid should not be served");
+        });
+
+        tc.Run("TSNDDRV serves optional streamOpen/channelConfig/stop subcommands when configured", [](TestCase &t)
+        {
+            FakeIopHost host(0x02000000u);
+
+            ps2x::iop::detail::TsnddrvBindings bindings{};
+            bindings.serviceName = "Synthetic TSNDDRV extras";
+            bindings.arena = {0x00120000u, 0x00200000u, 0x100u, 0x100u, 0x1000u,
+                              0x4000u, 0x18000u, 0x40000u};
+            bindings.checksumCandidates = {{0x01E0EF10u, 0x01E0EF20u}};
+            bindings.commandSid = 0x80007702u;
+            bindings.stateSid = 0x80007703u;
+            bindings.streamOpenFunction = 0x40u;
+            bindings.channelConfigFunction = 0x41u;
+            bindings.stopFunction = 0x42u;
+            bindings.streamStateAddress = 0x00051000u;
+            bindings.streamReadyValue = 3u;
+            bindings.channelAllocFlagTableAddress = 0x00051100u;
+            bindings.stopCompletionFlagAddress = 0x00051200u;
+
+            auto service = ps2x::iop::detail::createTsnddrvService(host, bindings);
+
+            ps2x::iop::RpcRequest streamOpen{};
+            streamOpen.sid = bindings.commandSid;
+            streamOpen.function = bindings.streamOpenFunction;
+            streamOpen.receive = {0x1000u, sizeof(uint32_t)};
+            const ps2x::iop::RpcResult streamResult = service->handleRpc(streamOpen);
+            t.IsTrue(streamResult.handled, "streamOpen should be handled");
+            t.IsTrue(streamResult.signalNowaitCompletion,
+                     "streamOpen should signal nowait completion");
+            t.Equals(host.readWord(bindings.streamStateAddress), bindings.streamReadyValue,
+                     "streamOpen should write streamReadyValue to streamStateAddress");
+            t.Equals(host.readWord(0x1000u), 0u,
+                     "streamOpen should hand back a zeroed status word");
+
+            constexpr uint32_t kChannel = 5u;
+            host.writeWord(0x1100u, kChannel);
+            ps2x::iop::RpcRequest channelConfig{};
+            channelConfig.sid = bindings.stateSid;
+            channelConfig.function = bindings.channelConfigFunction;
+            channelConfig.send = {0x1100u, sizeof(uint32_t)};
+            channelConfig.receive = {0x1104u, sizeof(uint32_t)};
+            t.IsTrue(service->handleRpc(channelConfig).handled, "channelConfig should be handled");
+            t.Equals(host.readWord(bindings.channelAllocFlagTableAddress + kChannel * sizeof(uint32_t)),
+                     1u,
+                     "channelConfig should mark the requested channel allocated");
+
+            ps2x::iop::RpcRequest stop{};
+            stop.sid = bindings.commandSid;
+            stop.function = bindings.stopFunction;
+            stop.receive = {0x1108u, sizeof(uint32_t)};
+            t.IsTrue(service->handleRpc(stop).handled, "stop should be handled");
+            t.Equals(host.readWord(bindings.stopCompletionFlagAddress), 1u,
+                     "stop should write 1 to stopCompletionFlagAddress");
+
+            ps2x::iop::RpcRequest unknown{};
+            unknown.sid = bindings.commandSid;
+            unknown.function = 0x77u;
+            unknown.receive = {0x110Cu, sizeof(uint32_t)};
+            const ps2x::iop::RpcResult unknownResult = service->handleRpc(unknown);
+            t.IsFalse(unknownResult.handled,
+                      "an unrecognized subcommand should not be marked handled, so a "
+                      "guest-registered server function at this sid can still run");
+            t.Equals(host.readWord(0x110Cu), bindings.benignStatusValue,
+                     "an unrecognized subcommand on a served sid should get a benign status word");
+        });
+
+        tc.Run("TSNDDRV bindings validation rejects ambiguous subcommand numbering", [](TestCase &t)
+        {
+            FakeIopHost host;
+            ps2x::iop::detail::TsnddrvBindings bindings{};
+            bindings.serviceName = "Invalid TSNDDRV";
+            bindings.arena = {0x00120000u, 0x00200000u, 0x100u, 0x100u, 0x1000u,
+                              0x4000u, 0x18000u, 0x40000u};
+            bindings.checksumCandidates = {{0x01E0EF10u, 0x01E0EF20u}};
+            bindings.getStatusFunction = 0x12u;
+            bindings.getAddrTableFunction = 0x12u; // collides with getStatusFunction
+
+            bool threw = false;
+            try
+            {
+                (void)ps2x::iop::detail::createTsnddrvService(host, bindings);
+            }
+            catch (const std::invalid_argument &)
+            {
+                threw = true;
+            }
+            t.IsTrue(threw, "colliding getStatus/getAddrTable functions should be rejected");
+
+            bindings.getAddrTableFunction = 0x13u;
+            bindings.submitFunction = 0x20u;
+            bindings.streamOpenFunction = bindings.submitFunction; // collides with submitFunction
+            threw = false;
+            try
+            {
+                (void)ps2x::iop::detail::createTsnddrvService(host, bindings);
+            }
+            catch (const std::invalid_argument &)
+            {
+                threw = true;
+            }
+            t.IsTrue(threw,
+                     "an optional subcommand colliding with submitFunction should be rejected");
         });
 
 #if defined(PS2X_TEST_IOP_PLUGIN_DIR)
