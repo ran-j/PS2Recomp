@@ -12,6 +12,7 @@ This project statically recompiles PS2 ELF binaries into C++ and provides a runt
 * `ps2xAnalyzer`: scans ELF/functions and writes TOML config (`stubs`, `skip`, instruction patches).
 * `ps2xRecomp`: reads TOML + ELF, decodes R5900 instructions, and generates C++ output.
 * `ps2xRuntime`: hosts memory, function registration, syscall dispatch, and hardware stubs.
+* `ps2xIOP`: portable, instance-owned IOP HLE services, game profiles, and the C plugin ABI.
 
 ### Features
 
@@ -155,13 +156,16 @@ To execute the recompiled code.
 * Some syscall dispatcher with common kernel IDs.
 * Basic GS/VU/file/system stubs.
 * Foundation to expand and port your game.
+* `ps2xIOP` profile selection and optional `.dll`/`.so` discovery for game-specific IOP HLE.
+
+See [IOP HLE profiles and plugins](ps2xIOP/README.md) for the service boundary and external plugin workflow.
 
 ### Game Override Hooks
 
 Game overrides are runtime-side, build-scoped patch modules.
- 
-A game override is C++ code that runs during `loadELF` and can replace function bindings by address for one specific game build. This is separate from recompilation output and separate from global runtime stubs/syscalls. 
- 
+
+A game override is C++ code that runs during `loadELF` and can replace EE function bindings by address for one specific game build. IOP RPC/DMA behavior belongs in a `ps2xIOP` profile instead. This is separate from recompilation output and separate from global runtime stubs/syscalls.
+
 API:
 
 * Header: `ps2xRuntime/include/game_overrides.h`

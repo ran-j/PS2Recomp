@@ -19,7 +19,8 @@ namespace ps2recomp
                            const Instruction &branchInst,
                            const Instruction &delaySlot,
                            const Function &function,
-                           const CodeGenerator::AnalysisResult &analysisResult);
+                           const CodeGenerator::AnalysisResult &analysisResult,
+                           std::string delaySlotOverride = {});
 
         std::string emit();
 
@@ -41,6 +42,7 @@ namespace ps2recomp
         const Instruction &m_delaySlot;
         const Function &m_function;
         const CodeGenerator::AnalysisResult &m_analysisResult;
+        std::string m_delaySlotOverride;
         std::stringstream m_ss;
 
         uint32_t branchPc() const;

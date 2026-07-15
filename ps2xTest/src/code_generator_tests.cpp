@@ -35,6 +35,50 @@ static Instruction makeNop(uint32_t address)
     return inst;
 }
 
+static uint32_t signExtend16(uint16_t value)
+{
+    return static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(value)));
+}
+
+static Instruction makeIType(uint32_t address, uint32_t opcode, uint8_t rs, uint8_t rt, uint16_t immediate)
+{
+    Instruction inst{};
+    inst.address = address;
+    inst.opcode = opcode;
+    inst.rs = rs;
+    inst.rt = rt;
+    inst.immediate = immediate;
+    inst.simmediate = signExtend16(immediate);
+    inst.raw = (opcode << 26) | (static_cast<uint32_t>(rs) << 21) |
+               (static_cast<uint32_t>(rt) << 16) | immediate;
+    return inst;
+}
+
+static Instruction makeLui(uint32_t address, uint8_t rt, uint16_t immediate)
+{
+    return makeIType(address, OPCODE_LUI, 0, rt, immediate);
+}
+
+static Instruction makeOri(uint32_t address, uint8_t rt, uint8_t rs, uint16_t immediate)
+{
+    return makeIType(address, OPCODE_ORI, rs, rt, immediate);
+}
+
+static Instruction makeAddiu(uint32_t address, uint8_t rt, uint8_t rs, uint16_t immediate)
+{
+    return makeIType(address, OPCODE_ADDIU, rs, rt, immediate);
+}
+
+static Instruction makeLw(uint32_t address, uint8_t rt, uint8_t rs, uint16_t immediate)
+{
+    return makeIType(address, OPCODE_LW, rs, rt, immediate);
+}
+
+static Instruction makeSw(uint32_t address, uint8_t rt, uint8_t rs, uint16_t immediate)
+{
+    return makeIType(address, OPCODE_SW, rs, rt, immediate);
+}
+
 static std::string readFileFromCandidates(const std::vector<std::string> &candidates)
 {
     for (const auto &path : candidates)
@@ -150,6 +194,130 @@ void register_code_generator_tests()
 
         t.IsTrue(generated.find("SET_GPR_S32(ctx, 10, (int32_t)result);") != std::string::npos,
                  "MULT1 should write low product to rd on R5900");
+    });
+
+    tc.Run("constant MMIO store emits direct runtime store", [](TestCase &t) {
+        Function func;
+        func.name = "mmio_store";
+        func.start = 0x1000;
+        func.end = 0x1010;
+        func.isRecompiled = true;
+
+        std::vector<Instruction> instructions;
+        instructions.push_back(makeLui(0x1000, 1, 0x1000));
+        instructions.push_back(makeOri(0x1004, 1, 1, 0xE020));
+        instructions.push_back(makeSw(0x1008, 2, 1, 0));
+
+        CodeGenerator gen({}, {});
+        std::string generated = gen.generateFunction(func, instructions, false);
+        printGeneratedCode("constant MMIO store emits direct runtime store", generated);
+
+        t.IsTrue(generated.find("runtime->Store32(rdram, ctx, 0x1000E020u, GPR_U32(ctx, 2));") != std::string::npos,
+                 "constant MMIO SW should emit a direct runtime Store32");
+        t.IsTrue(generated.find("WRITE32(ADD32(GPR_U32(ctx, 1)") == std::string::npos,
+                 "constant MMIO SW should not go through WRITE32 address classification");
+    });
+
+    tc.Run("constant RDRAM load and store emit fast memory access", [](TestCase &t) {
+        Function func;
+        func.name = "rdram_access";
+        func.start = 0x2000;
+        func.end = 0x2014;
+        func.isRecompiled = true;
+
+        std::vector<Instruction> instructions;
+        instructions.push_back(makeLui(0x2000, 1, 0x0012));
+        instructions.push_back(makeOri(0x2004, 1, 1, 0x3450));
+        instructions.push_back(makeLw(0x2008, 3, 1, 0x0010));
+        instructions.push_back(makeSw(0x200C, 4, 1, 0x0014));
+
+        CodeGenerator gen({}, {});
+        std::string generated = gen.generateFunction(func, instructions, false);
+        printGeneratedCode("constant RDRAM load and store emit fast memory access", generated);
+
+        t.IsTrue(generated.find("SET_GPR_S32(ctx, 3, (int32_t)FAST_READ32(0x123460u));") != std::string::npos,
+                 "constant RDRAM LW should emit FAST_READ32 with the resolved address");
+        t.IsTrue(generated.find("FAST_WRITE32(0x123464u, _value);") != std::string::npos,
+                 "constant RDRAM SW should emit FAST_WRITE32 with the resolved address");
+        t.IsTrue(generated.find("READ32(ADD32(GPR_U32(ctx, 1)") == std::string::npos,
+                 "constant RDRAM LW should not go through READ32 address classification");
+        t.IsTrue(generated.find("WRITE32(ADD32(GPR_U32(ctx, 1)") == std::string::npos,
+                 "constant RDRAM SW should not go through WRITE32 address classification");
+    });
+
+    tc.Run("known GIF DMA MMIO sequence emits native kick helper", [](TestCase &t) {
+        Function func;
+        func.name = "gif_dma_kick";
+        func.start = 0x3000;
+        func.end = 0x3030;
+        func.isRecompiled = true;
+
+        std::vector<Instruction> instructions;
+        instructions.push_back(makeAddiu(0x3000, 2, 0, 4));
+        instructions.push_back(makeLui(0x3004, 1, 0x1000));
+        instructions.push_back(makeOri(0x3008, 1, 1, 0xE020));
+        instructions.push_back(makeSw(0x300C, 2, 1, 0));
+        instructions.push_back(makeLui(0x3010, 1, 0x1000));
+        instructions.push_back(makeOri(0x3014, 1, 1, 0xE010));
+        instructions.push_back(makeSw(0x3018, 2, 1, 0));
+        instructions.push_back(makeLui(0x301C, 1, 0x1000));
+        instructions.push_back(makeOri(0x3020, 1, 1, 0xA030));
+        instructions.push_back(makeSw(0x3024, 4, 1, 0));
+        instructions.push_back(makeAddiu(0x3028, 5, 0, 0x0105));
+        instructions.push_back(makeAddiu(0x302C, 1, 1, 0xFFD0));
+        instructions.push_back(makeSw(0x3030, 5, 1, 0));
+
+        CodeGenerator gen({}, {});
+        std::string generated = gen.generateFunction(func, instructions, false);
+        printGeneratedCode("known GIF DMA MMIO sequence emits native kick helper", generated);
+
+        t.IsTrue(generated.find("uint32_t gifDmaKickValue_3024_2 = GPR_U32(ctx, 4);") != std::string::npos,
+                 "dynamic GIF TADR source should be captured when the store is coalesced");
+        t.IsTrue(generated.find("runtime->kickGifDmaChainFromMMIO(rdram, ctx, 0x4u, 0x4u, gifDmaKickValue_3024_2, 0x105u);") != std::string::npos,
+                 "known GIF DMA MMIO stores should coalesce into the native kick helper");
+        t.IsTrue(generated.find("runtime->Store32(rdram, ctx, 0x1000E020u") == std::string::npos,
+                 "coalesced D_PCR store should not remain as an individual Store32");
+        t.IsTrue(generated.find("runtime->Store32(rdram, ctx, 0x1000A000u") == std::string::npos,
+                 "coalesced GIF CHCR store should not remain as an individual Store32");
+    });
+
+    tc.Run("GIF DMA kick coalesces when CHCR store is a return delay slot", [](TestCase &t) {
+        Function func;
+        func.name = "loadImage_like";
+        func.start = 0x2E7C90;
+        func.end = 0x2E7CC8;
+        func.isRecompiled = true;
+
+        std::vector<Instruction> instructions;
+        instructions.push_back(makeBranch(0x2E7C90, 2));
+        instructions.push_back(makeLui(0x2E7C94, 5, 0x1000));
+        instructions.push_back(makeLui(0x2E7C98, 5, 0x1000));
+        instructions.push_back(makeAddiu(0x2E7C9C, 6, 0, 4));
+        instructions.push_back(makeOri(0x2E7CA0, 3, 5, 0xE020));
+        instructions.push_back(makeSw(0x2E7CA4, 6, 3, 0));
+        instructions.push_back(makeOri(0x2E7CA8, 3, 5, 0xE010));
+        instructions.push_back(makeSw(0x2E7CAC, 6, 3, 0));
+        instructions.push_back(makeOri(0x2E7CB0, 3, 5, 0xA030));
+        instructions.push_back(makeSw(0x2E7CB4, 4, 3, 0));
+        instructions.push_back(makeAddiu(0x2E7CB8, 4, 0, 0x0105));
+        instructions.push_back(makeOri(0x2E7CBC, 3, 5, 0xA000));
+        instructions.push_back(makeJr(0x2E7CC0, 31));
+        instructions.push_back(makeSw(0x2E7CC4, 4, 3, 0));
+
+        CodeGenerator gen({}, {});
+        std::string generated = gen.generateFunction(func, instructions, false);
+        printGeneratedCode("GIF DMA kick coalesces when CHCR store is a return delay slot", generated);
+
+        t.IsTrue(generated.find("label_2e7c9c:") != std::string::npos,
+                 "test should cover a branch target inside the GIF DMA setup");
+        t.IsTrue(generated.find("uint32_t gifDmaKickValue_2e7cb4_2 = GPR_U32(ctx, 4);") != std::string::npos,
+                 "TADR value should be captured before a0 is reused for CHCR");
+        t.IsTrue(generated.find("ctx->in_delay_slot = true;") != std::string::npos,
+                 "coalesced helper should still run as the return delay slot");
+        t.IsTrue(generated.find("runtime->kickGifDmaChainFromMMIO(rdram, ctx, 0x4u, 0x4u, gifDmaKickValue_2e7cb4_2, 0x105u);") != std::string::npos,
+                 "loadImage-like GIF DMA stores should coalesce into the native kick helper");
+        t.IsTrue(generated.find("WRITE32(ADD32(GPR_U32(ctx, 3), 0), GPR_U32(ctx, 4));") == std::string::npos,
+                 "coalesced delay-slot CHCR store should not remain as an individual WRITE32");
     });
 
         tc.Run("emits labels and gotos for internal branches", [](TestCase &t) {

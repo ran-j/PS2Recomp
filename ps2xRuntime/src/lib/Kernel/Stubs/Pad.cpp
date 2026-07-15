@@ -45,7 +45,7 @@ namespace ps2_stubs
         struct PadPortState
         {
             bool open = false;
-            bool analogMode = true;
+            bool analogMode = false;  // real pads power up DIGITAL (CURID=4, mode 0x41)
             bool pressureEnabled = false;
             bool lastUsedOverride = false;
             bool lastUsedBackend = false;
@@ -216,7 +216,7 @@ namespace ps2_stubs
         void initializePadPortLocked(PadPortState &portState, uint32_t dmaAddr)
         {
             portState.open = true;
-            portState.analogMode = true;
+            portState.analogMode = false;  // real pads open DIGITAL
             portState.pressureEnabled = false;
             portState.buttonMask = 0xFFFFu;
             portState.dmaAddr = dmaAddr;
@@ -610,7 +610,7 @@ namespace ps2_stubs
         }
 
         portState->open = true;
-        portState->analogMode = true;
+        portState->analogMode = false;     // real pads open DIGITAL
         portState->pressureEnabled = false;
         portState->buttonMask = 0xFFFFu;
         portState->dmaAddr = dmaAddr;

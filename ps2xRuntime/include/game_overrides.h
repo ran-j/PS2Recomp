@@ -27,7 +27,7 @@ namespace ps2_game_overrides
     };
 
     void registerDescriptor(const Descriptor &descriptor);
-    void applyMatching(PS2Runtime &runtime, const std::string &elfPath, uint32_t entry);
+    void applyMatching(PS2Runtime &runtime, const std::string &elfPath, uint32_t entry, uint32_t crc32, bool crc32Valid);
 
     // Runtime helper for game-specific modules:
     // bind an address to an existing syscall/stub handler by name.

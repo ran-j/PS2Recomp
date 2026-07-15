@@ -1,5 +1,6 @@
 #include "ps2recomp/Emitters/function_emitter.h"
 #include "ps2recomp/code_generator.h"
+#include "ps2recomp/gif_dma_kick_analyzer.h"
 #include "ps2recomp/instructions.h"
 #include "ps2recomp/r5900_decoder.h"
 #include "ps2recomp/recompiler_reporter.h"
@@ -69,6 +70,8 @@ namespace ps2recomp
         }
 
         const std::unordered_set<uint32_t> &internalTargets = analysisResult.entryPoints;
+        ConstantRegisterState constantRegisters;
+        GifDmaKickPlan gifDmaKickPlan{};
         ss << "// Function: " << function.name << "\n";
         ss << "// Address: 0x" << std::hex << function.start << " - 0x" << function.end << std::dec << "\n";
 
@@ -117,12 +120,16 @@ namespace ps2recomp
            << std::dec;
         ss << "\n";
 
+        bool lastInstructionWasControlFlow = false;
+
         for (size_t i = 0; i < instructions.size(); ++i)
         {
             const Instruction &inst = instructions[i];
+            lastInstructionWasControlFlow = inst.hasDelaySlot;
 
             if (internalTargets.contains(inst.address))
             {
+                constantRegisters.clear();
                 ss << "label_" << std::hex << inst.address << std::dec << ":\n";
             }
 
@@ -162,24 +169,65 @@ namespace ps2recomp
                         ss << "label_" << std::hex << delaySlot->address << std::dec << ":\n";
                     }
 
-                    ss << cg.handleBranchDelaySlots(inst, *delaySlot, function, analysisResult);
+                    if (gifDmaKickPlan.valid &&
+                        gifDmaKickPlan.completesInDelaySlot &&
+                        gifDmaKickPlan.branchIndex == i &&
+                        hasDecodedDelaySlot)
+                    {
+                        ss << cg.handleBranchDelaySlots(
+                            inst,
+                            *delaySlot,
+                            function,
+                            analysisResult,
+                            gifDmaDelaySlotOverride(*delaySlot, gifDmaKickPlan, cg.m_emitInstructionComments));
+                        gifDmaKickPlan = {};
+                    }
+                    else
+                    {
+                        ss << cg.handleBranchDelaySlots(inst, *delaySlot, function, analysisResult);
+                    }
 
                     if (hasDecodedDelaySlot)
                     {
                         ++i; // Skip delay slot instruction (handled inside branch logic)
                     }
+                    constantRegisters.clear();
                 }
                 else
                 {
+                    if (!gifDmaKickPlan.valid)
+                    {
+                        gifDmaKickPlan = tryBuildGifDmaKickPlan(instructions, i, constantRegisters, internalTargets);
+                    }
+
+                    if (gifDmaKickPlan.suppresses(i))
+                    {
+                        const size_t slot = gifDmaKickPlan.slotFor(i);
+                        emitGifDmaCapture(ss, gifDmaKickPlan, slot, "    ");
+
+                        if (gifDmaKickPlan.completesAt(i))
+                        {
+                            ss << "    ctx->pc = 0x" << std::hex << inst.address << "u;\n"
+                               << std::dec;
+                            ss << "    " << gifDmaKickCall(gifDmaKickPlan) << "\n";
+                            gifDmaKickPlan = {};
+                        }
+
+                        updateConstantRegisters(inst, constantRegisters);
+                        continue;
+                    }
+
                     ss << "    ctx->pc = 0x" << std::hex << inst.address << "u;\n"
                        << std::dec;
-
-                    ss << "    " << cg.translateInstruction(inst);
+                    const MemoryAccessHint memoryHint = resolveMemoryAccessHint(inst, constantRegisters);
+                    ss << "    " << cg.translateInstruction(inst, memoryHint);
                     if (inst.isMmio)
                     {
                         ss << " // MMIO: 0x" << std::hex << inst.mmioAddress << std::dec;
                     }
                     ss << "\n";
+
+                    updateConstantRegisters(inst, constantRegisters);
                 }
             }
             catch (const std::exception &e)
@@ -193,6 +241,13 @@ namespace ps2recomp
 
                 throw;
             }
+        }
+
+        // Fallthrough with no terminating branch: advance ctx->pc past the function so dispatchLoop doesn't re-call it forever.
+        if (!instructions.empty() && !lastInstructionWasControlFlow)
+        {
+            ss << "    ctx->pc = 0x" << std::hex << function.end << "u;\n"
+               << std::dec;
         }
 
         ss << "}\n";
