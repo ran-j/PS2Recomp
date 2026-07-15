@@ -3,6 +3,8 @@
 
 #include <string>
 
+#include "ps2recomp/types.h"
+
 namespace ps2recomp
 {
     struct Instruction;
@@ -12,9 +14,20 @@ namespace ps2recomp
     {
     public:
         explicit InstructionTranslator(CodeGenerator &codeGenerator);
-        std::string translate(const Instruction &inst);
+        std::string translate(const Instruction &inst, const MemoryAccessHint &memoryHint);
 
     private:
+        MemoryAccessHint effectiveMemoryHintFor(const Instruction &inst, const MemoryAccessHint &memoryHint) const;
+        std::string translateMemoryRead(const Instruction &inst,
+                                        const MemoryAccessHint &memoryHint,
+                                        int width,
+                                        const std::string &addr) const;
+        std::string translateMemoryWrite(const Instruction &inst,
+                                         const MemoryAccessHint &memoryHint,
+                                         int width,
+                                         const std::string &addr,
+                                         const std::string &value) const;
+
         CodeGenerator &m_codeGenerator;
     };
 }

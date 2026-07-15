@@ -887,8 +887,10 @@ void GSRasterizer::drawSprite(GS *gs)
                 uint32_t texel = 0xFFFF00FFu;
                 if (gs->m_prim.fst)
                 {
-                    const uint16_t sampleU = static_cast<uint16_t>(clampInt(static_cast<int>(std::lround(texUf * 16.0f)), 0, 0xFFFF));
-                    const uint16_t sampleV = static_cast<uint16_t>(clampInt(static_cast<int>(std::lround(texVf * 16.0f)), 0, 0xFFFF));
+                    const int fixedU = static_cast<int>((texUf * 16.0f) + 0.5f);
+                    const int fixedV = static_cast<int>((texVf * 16.0f) + 0.5f);
+                    const uint16_t sampleU = static_cast<uint16_t>(clampInt(fixedU, 0, 0xFFFF));
+                    const uint16_t sampleV = static_cast<uint16_t>(clampInt(fixedV, 0, 0xFFFF));
                     texel = sampleTexture(gs, 0.0f, 0.0f, 1.0f, sampleU, sampleV);
                 }
                 else

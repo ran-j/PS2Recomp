@@ -504,7 +504,10 @@ namespace ps2_stubs
                             sizeof(words));
             writePacketBuilderCurrent(rdram, runtime, stateAddr, packetAddr + 16u);
 
-            const uint64_t giftag[2] = {makeGiftagAplusD(4u), 0xEULL};
+            // Seed an open A+D tag (nloop=0, EOP clear): closePacketGifTag adds the true
+            // appended qword count, so a pre-set nloop would double-count. Open variant
+            // (not makeGiftagAplusD) because that always sets EOP on this chained tag.
+            const uint64_t giftag[2] = {makeGiftagAplusDOpen(0u), 0xEULL};
             uint32_t currentAddr = packetAddr + 16u;
             writeGuestBytes(rdram, runtime, currentAddr, reinterpret_cast<const uint8_t *>(giftag), sizeof(giftag));
             writePacketBuilderCurrent(rdram, runtime, stateAddr, currentAddr + 16u);

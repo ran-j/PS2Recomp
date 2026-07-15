@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <fmt/format.h>
 #include <sstream>
+#include <utility>
 
 namespace ps2recomp
 {
@@ -15,12 +16,14 @@ namespace ps2recomp
                                            const Instruction &branchInst,
                                            const Instruction &delaySlot,
                                            const Function &function,
-                                           const CodeGenerator::AnalysisResult &analysisResult)
+                                           const CodeGenerator::AnalysisResult &analysisResult,
+                                           std::string delaySlotOverride)
         : m_gen(generator),
           m_branchInst(branchInst),
           m_delaySlot(delaySlot),
           m_function(function),
-          m_analysisResult(analysisResult)
+          m_analysisResult(analysisResult),
+          m_delaySlotOverride(std::move(delaySlotOverride))
     {
     }
 
@@ -41,7 +44,7 @@ namespace ps2recomp
 
     bool ControlFlowEmitter::hasRealDelaySlot() const
     {
-        return !isGuestNop(m_delaySlot);
+        return !m_delaySlotOverride.empty() || !isGuestNop(m_delaySlot);
     }
 
     bool ControlFlowEmitter::isCallLikeEdge() const
@@ -98,6 +101,11 @@ namespace ps2recomp
         if (!hasRealDelaySlot())
         {
             return {};
+        }
+
+        if (!m_delaySlotOverride.empty())
+        {
+            return m_delaySlotOverride;
         }
 
         std::string code;
