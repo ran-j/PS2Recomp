@@ -4,6 +4,7 @@
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
 #include "runtime/ps2_gs_gpu.h"
+#include "runtime/ps2_gs_memory.h"
 #include "runtime/ps2_gs_psmct32.h"
 #include "runtime/ps2_gs_psmt4.h"
 #include "runtime/ps2_gs_psmt8.h"
@@ -63,6 +64,12 @@ namespace
         const size_t pos = dst.size();
         dst.resize(pos + sizeof(uint64_t));
         std::memcpy(dst.data() + pos, &value, sizeof(uint64_t));
+    }
+
+    void appendGifAd(std::vector<uint8_t> &dst, uint64_t value, uint64_t reg)
+    {
+        appendU64(dst, value);
+        appendU64(dst, reg);
     }
 
     template <typename Predicate>
@@ -2060,6 +2067,67 @@ void register_ps2_gs_tests()
             t.IsTrue(same, "GIF IMAGE transfer should write payload bytes into GS VRAM");
         });
 
+        tc.Run("GIF load-image packet uses native upload fast path", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            const uint64_t bitblt =
+                (static_cast<uint64_t>(0u) << 0) |
+                (static_cast<uint64_t>(1u) << 16) |
+                (static_cast<uint64_t>(0u) << 24) |
+                (static_cast<uint64_t>(0u) << 32) |
+                (static_cast<uint64_t>(1u) << 48) |
+                (static_cast<uint64_t>(0u) << 56);
+            const uint64_t trxpos = 0ull;
+            const uint64_t trxreg = (2ull << 0) | (2ull << 32);
+            const uint64_t trxdir = 0ull;
+
+            const uint8_t payload[16] = {
+                0x10u, 0x11u, 0x12u, 0x13u,
+                0x20u, 0x21u, 0x22u, 0x23u,
+                0x30u, 0x31u, 0x32u, 0x33u,
+                0x40u, 0x41u, 0x42u, 0x43u,
+            };
+
+            std::vector<uint8_t> packet;
+            appendU64(packet, makeGifTag(4u, GIF_FMT_PACKED, 1u, false));
+            appendU64(packet, 0x0Eull);
+            appendGifAd(packet, bitblt, GS_REG_BITBLTBUF);
+            appendGifAd(packet, trxpos, GS_REG_TRXPOS);
+            appendGifAd(packet, trxreg, GS_REG_TRXREG);
+            appendGifAd(packet, trxdir, GS_REG_TRXDIR);
+            appendU64(packet, makeGifTag(1u, GIF_FMT_IMAGE, 0u, true));
+            appendU64(packet, 0ull);
+            packet.insert(packet.end(), payload, payload + sizeof(payload));
+
+            gs.processGIFPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            t.Equals(gs.nativeImageUploadCount(), 1ull, "load-image packet should use the native image upload fast path");
+
+            bool same = true;
+            for (uint32_t y = 0; y < 2u && same; ++y)
+            {
+                for (uint32_t x = 0; x < 2u; ++x)
+                {
+                    const uint32_t pixelIndex = y * 2u + x;
+                    const uint32_t off = referenceAddrPSMCT32(0u, 1u, x, y);
+                    for (uint32_t c = 0; c < 4u; ++c)
+                    {
+                        if (vram[off + c] != payload[pixelIndex * 4u + c])
+                        {
+                            same = false;
+                            break;
+                        }
+                    }
+                    if (!same)
+                        break;
+                }
+            }
+            t.IsTrue(same, "native load-image upload should preserve pixel payload");
+        });
+
         tc.Run("GS local-to-host transfer supports partial incremental reads", [](TestCase &t)
         {
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
@@ -3318,6 +3386,87 @@ void register_ps2_gs_tests()
             }
         });
 
+        tc.Run("sceGifPkRefLoadImage seeds A+D GIFtag nloop once (no double-count)", [](TestCase &t)
+        {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            PS2Runtime runtime;
+            R5900Context ctx{};
+
+            constexpr uint32_t stateAddr = 0x1000u;
+            constexpr uint32_t baseAddr = 0x2000u;
+            constexpr uint32_t spAddr = 0x8000u;
+
+            setRegU32(ctx, 4, stateAddr);
+            setRegU32(ctx, 5, baseAddr);
+            ps2_stubs::sceGifPkInit(rdram.data(), &ctx, &runtime);
+
+            setRegU32(ctx, 29, spAddr);
+            const uint32_t width = 16u;
+            const uint32_t height = 1u;
+            std::memcpy(rdram.data() + spAddr, &width, sizeof(width));
+            std::memcpy(rdram.data() + spAddr + 8u, &height, sizeof(height));
+
+            const uint32_t dbp = 0x3fc0u;
+            const uint32_t dpsm = 0u;
+            const uint32_t dbw = 1u;
+            const uint32_t dataAddr = 0u;
+            const uint32_t dsax = 0u;
+            const uint32_t dsay = 0u;
+
+            setRegU32(ctx, 4, stateAddr);
+            setRegU32(ctx, 5, dbp);
+            setRegU32(ctx, 6, dpsm);
+            setRegU32(ctx, 7, dbw);
+            setRegU32(ctx, 8, dataAddr);
+            setRegU32(ctx, 9, 0u); // qwcRemaining: setup only, no image body
+            setRegU32(ctx, 10, dsax);
+            setRegU32(ctx, 11, dsay);
+            ps2_stubs::sceGifPkRefLoadImage(rdram.data(), &ctx, &runtime);
+
+            uint64_t tagLo = 0u;
+            uint64_t tagHi = 0u;
+            std::memcpy(&tagLo, rdram.data() + baseAddr + 16u, sizeof(tagLo));
+            std::memcpy(&tagHi, rdram.data() + baseAddr + 24u, sizeof(tagHi));
+            t.Equals(tagLo, static_cast<uint64_t>(0x1000000000000004ULL),
+                      "header GIFtag lo must be nloop=4 nreg=1 A+D eop=0 (double-count would give ...0008)");
+            t.Equals(tagHi, static_cast<uint64_t>(0xEULL),
+                      "header GIFtag hi must be A+D register descriptor 0xE");
+
+            uint64_t reg1Desc = 0u;
+            uint64_t reg2Desc = 0u;
+            uint64_t reg3Desc = 0u;
+            uint64_t reg4Desc = 0u;
+            std::memcpy(&reg1Desc, rdram.data() + baseAddr + 32u + 0u * 16u + 8u, sizeof(reg1Desc));
+            std::memcpy(&reg2Desc, rdram.data() + baseAddr + 32u + 1u * 16u + 8u, sizeof(reg2Desc));
+            std::memcpy(&reg3Desc, rdram.data() + baseAddr + 32u + 2u * 16u + 8u, sizeof(reg3Desc));
+            std::memcpy(&reg4Desc, rdram.data() + baseAddr + 32u + 3u * 16u + 8u, sizeof(reg4Desc));
+            t.Equals(reg1Desc, static_cast<uint64_t>(0x50ULL), "first register qword should be BITBLTBUF (0x50)");
+            t.Equals(reg2Desc, static_cast<uint64_t>(0x51ULL), "second register qword should be TRXPOS (0x51)");
+            t.Equals(reg3Desc, static_cast<uint64_t>(0x52ULL), "third register qword should be TRXREG (0x52)");
+            t.Equals(reg4Desc, static_cast<uint64_t>(0x53ULL), "fourth register qword should be TRXDIR (0x53)");
+
+            uint64_t reg1Payload = 0u;
+            uint64_t reg2Payload = 0u;
+            uint64_t reg3Payload = 0u;
+            uint64_t reg4Payload = 0u;
+            std::memcpy(&reg1Payload, rdram.data() + baseAddr + 32u + 0u * 16u + 0u, sizeof(reg1Payload));
+            std::memcpy(&reg2Payload, rdram.data() + baseAddr + 32u + 1u * 16u + 0u, sizeof(reg2Payload));
+            std::memcpy(&reg3Payload, rdram.data() + baseAddr + 32u + 2u * 16u + 0u, sizeof(reg3Payload));
+            std::memcpy(&reg4Payload, rdram.data() + baseAddr + 32u + 3u * 16u + 0u, sizeof(reg4Payload));
+            // BITBLTBUF: dbp=0x3fc0 (bits 32-45), dbw=1 (bits 48-53), dpsm=0 (bits 56-61).
+            t.Equals(reg1Payload, static_cast<uint64_t>(0x00013FC000000000ULL),
+                      "BITBLTBUF payload must encode dbp=0x3fc0, dbw=1, dpsm=0");
+            // TRXPOS: dsax=0, dsay=0.
+            t.Equals(reg2Payload, static_cast<uint64_t>(0x0ULL),
+                      "TRXPOS payload must encode dsax=0, dsay=0");
+            // TRXREG: width=16 (bits 0-31), height=1 (bits 32-63).
+            t.Equals(reg3Payload, static_cast<uint64_t>(0x0000000100000010ULL),
+                      "TRXREG payload must encode width=16, height=1");
+            // TRXDIR: host-to-local transfer, dir=0.
+            t.Equals(reg4Payload, static_cast<uint64_t>(0x0ULL),
+                      "TRXDIR payload must encode dir=0 (host-to-local)");
+        });
+
         tc.Run("sceGsResetGraph frees its temporary GIF packet", [](TestCase &t)
         {
             PS2Runtime runtime;
@@ -3412,6 +3561,477 @@ void register_ps2_gs_tests()
             runtime.requestStop();
             notifyRuntimeStop();
             ps2_stubs::resetGsSyncVCallbackState();
+        });
+
+        tc.Run("GS T4HL/T4HH shared-plane upload preserves both index planes via RMW", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            constexpr uint32_t kDbp = 64u;
+            constexpr uint32_t kDbw = 1u;
+            constexpr uint32_t kRrw = 8u;
+            constexpr uint32_t kRrh = 8u;
+            constexpr uint64_t kRect = (static_cast<uint64_t>(kRrw) << 0) | (static_cast<uint64_t>(kRrh) << 32);
+
+            // Two independent, differing index patterns for the T4HL and T4HH planes.
+            auto indexA = [](uint32_t x, uint32_t y) -> uint8_t
+            {
+                return static_cast<uint8_t>((x * 3u + y * 5u + 1u) & 0xFu);
+            };
+            auto indexB = [](uint32_t x, uint32_t y) -> uint8_t
+            {
+                return static_cast<uint8_t>((x * 7u + y * 2u + 9u) & 0xFu);
+            };
+
+            auto buildPacked = [&](const auto &indexFn) -> std::vector<uint8_t>
+            {
+                std::vector<uint8_t> packed((kRrw * kRrh) / 2u, 0u);
+                for (uint32_t y = 0; y < kRrh; ++y)
+                {
+                    for (uint32_t x = 0; x < kRrw; x += 2u)
+                    {
+                        const uint8_t lo = indexFn(x, y) & 0xFu;
+                        const uint8_t hi = indexFn(x + 1u, y) & 0xFu;
+                        packed[(y * kRrw + x) / 2u] = static_cast<uint8_t>(lo | (hi << 4));
+                    }
+                }
+                return packed;
+            };
+
+            const std::vector<uint8_t> packedA = buildPacked(indexA);
+            const std::vector<uint8_t> packedB = buildPacked(indexB);
+
+            constexpr uint64_t kUploadHLBitblt =
+                (static_cast<uint64_t>(kDbp) << 32) |
+                (static_cast<uint64_t>(kDbw) << 48) |
+                (static_cast<uint64_t>(GS_PSM_T4HL) << 56);
+            constexpr uint64_t kUploadHHBitblt =
+                (static_cast<uint64_t>(kDbp) << 32) |
+                (static_cast<uint64_t>(kDbw) << 48) |
+                (static_cast<uint64_t>(GS_PSM_T4HH) << 56);
+
+            gs.writeRegister(GS_REG_BITBLTBUF, kUploadHLBitblt);
+            gs.writeRegister(GS_REG_TRXPOS, 0ull);
+            gs.writeRegister(GS_REG_TRXREG, kRect);
+            gs.writeRegister(GS_REG_TRXDIR, 0ull);
+
+            std::vector<uint8_t> packetA;
+            appendU64(packetA, makeGifTag(static_cast<uint16_t>(packedA.size() / 16u), GIF_FMT_IMAGE, 0u, true));
+            appendU64(packetA, 0ull);
+            packetA.insert(packetA.end(), packedA.begin(), packedA.end());
+            gs.processGIFPacket(packetA.data(), static_cast<uint32_t>(packetA.size()));
+
+            gs.writeRegister(GS_REG_BITBLTBUF, kUploadHHBitblt);
+            gs.writeRegister(GS_REG_TRXPOS, 0ull);
+            gs.writeRegister(GS_REG_TRXREG, kRect);
+            gs.writeRegister(GS_REG_TRXDIR, 0ull);
+
+            std::vector<uint8_t> packetB;
+            appendU64(packetB, makeGifTag(static_cast<uint16_t>(packedB.size() / 16u), GIF_FMT_IMAGE, 0u, true));
+            appendU64(packetB, 0ull);
+            packetB.insert(packetB.end(), packedB.begin(), packedB.end());
+            gs.processGIFPacket(packetB.data(), static_cast<uint32_t>(packetB.size()));
+
+            bool planesMatch = true;
+            bool memReadersMatch = true;
+            for (uint32_t y = 0; y < kRrh; ++y)
+            {
+                for (uint32_t x = 0; x < kRrw; ++x)
+                {
+                    const uint32_t off = GSPSMCT32::addrPSMCT32(kDbp, kDbw, x, y);
+                    uint32_t word = 0u;
+                    std::memcpy(&word, vram.data() + off, sizeof(word));
+
+                    const uint8_t expectedA = indexA(x, y);
+                    const uint8_t expectedB = indexB(x, y);
+                    const uint8_t gotA = static_cast<uint8_t>((word >> 24) & 0xFu);
+                    const uint8_t gotB = static_cast<uint8_t>((word >> 28) & 0xFu);
+                    if (gotA != expectedA || gotB != expectedB)
+                        planesMatch = false;
+
+                    const uint32_t memA = GSMem::ReadP4HL(vram.data(), kDbp, kDbw, x, y);
+                    const uint32_t memB = GSMem::ReadP4HH(vram.data(), kDbp, kDbw, x, y);
+                    if (memA != expectedA || memB != expectedB)
+                        memReadersMatch = false;
+                }
+            }
+            t.IsTrue(planesMatch,
+                     "T4HL and T4HH uploads to the same shared CT32 word must not clobber each other's nibble");
+            t.IsTrue(memReadersMatch,
+                     "GSMem::ReadP4HL/ReadP4HH should agree with the raw shared-word nibble extraction");
+
+            // --- T8H coverage: full-byte upload, round-trip via GSMem::ReadP8H, and the
+            // --- clobber interaction when a later T4HL nibble upload lands on the same word.
+
+            constexpr uint32_t kDbpT8H = 128u;
+            constexpr uint32_t kDbwT8H = 1u;
+
+            // Full 0..255 range so both nibbles of the uploaded byte vary independently.
+            auto byteT8H = [](uint32_t x, uint32_t y) -> uint8_t
+            {
+                return static_cast<uint8_t>((x * 11u + y * 13u + 7u) & 0xFFu);
+            };
+
+            std::vector<uint8_t> packedT8H(kRrw * kRrh, 0u);
+            for (uint32_t y = 0; y < kRrh; ++y)
+            {
+                for (uint32_t x = 0; x < kRrw; ++x)
+                {
+                    packedT8H[y * kRrw + x] = byteT8H(x, y);
+                }
+            }
+
+            constexpr uint64_t kUploadT8HBitblt =
+                (static_cast<uint64_t>(kDbpT8H) << 32) |
+                (static_cast<uint64_t>(kDbwT8H) << 48) |
+                (static_cast<uint64_t>(GS_PSM_T8H) << 56);
+
+            gs.writeRegister(GS_REG_BITBLTBUF, kUploadT8HBitblt);
+            gs.writeRegister(GS_REG_TRXPOS, 0ull);
+            gs.writeRegister(GS_REG_TRXREG, kRect);
+            gs.writeRegister(GS_REG_TRXDIR, 0ull);
+
+            std::vector<uint8_t> packetT8H;
+            appendU64(packetT8H, makeGifTag(static_cast<uint16_t>(packedT8H.size() / 16u), GIF_FMT_IMAGE, 0u, true));
+            appendU64(packetT8H, 0ull);
+            packetT8H.insert(packetT8H.end(), packedT8H.begin(), packedT8H.end());
+            gs.processGIFPacket(packetT8H.data(), static_cast<uint32_t>(packetT8H.size()));
+
+            bool t8hByteMatches = true;
+            bool t8hMemReaderMatches = true;
+            for (uint32_t y = 0; y < kRrh; ++y)
+            {
+                for (uint32_t x = 0; x < kRrw; ++x)
+                {
+                    const uint32_t off = GSPSMCT32::addrPSMCT32(kDbpT8H, kDbwT8H, x, y);
+                    uint32_t word = 0u;
+                    std::memcpy(&word, vram.data() + off, sizeof(word));
+
+                    const uint8_t expected = byteT8H(x, y);
+                    const uint8_t got = static_cast<uint8_t>((word >> 24) & 0xFFu);
+                    if (got != expected)
+                        t8hByteMatches = false;
+
+                    const uint32_t memByte = GSMem::ReadP8H(vram.data(), kDbpT8H, kDbwT8H, x, y);
+                    if (memByte != expected)
+                        t8hMemReaderMatches = false;
+                }
+            }
+            t.IsTrue(t8hByteMatches,
+                     "T8H upload must land the full byte in bits 24-31 of the shared CT32 word");
+            t.IsTrue(t8hMemReaderMatches,
+                     "GSMem::ReadP8H should agree with the raw shared-word byte extraction after a T8H upload");
+
+            // Clobber interaction: upload a T8H byte plane, then upload a T4HL nibble plane to
+            // the same shared word. WriteP4HL's nibble RMW should overwrite bits 24-27 with the
+            // new nibble while preserving bits 28-31 (the T8H byte's high nibble).
+            constexpr uint32_t kDbpMix = 192u;
+            constexpr uint32_t kDbwMix = 1u;
+
+            auto byteMix = [](uint32_t x, uint32_t y) -> uint8_t
+            {
+                return static_cast<uint8_t>((x * 7u + y * 5u + 3u) & 0xFFu);
+            };
+            auto nibbleN = [](uint32_t x, uint32_t y) -> uint8_t
+            {
+                return static_cast<uint8_t>((x * 3u + y + 1u) & 0xFu);
+            };
+
+            std::vector<uint8_t> packedMixT8H(kRrw * kRrh, 0u);
+            for (uint32_t y = 0; y < kRrh; ++y)
+            {
+                for (uint32_t x = 0; x < kRrw; ++x)
+                {
+                    packedMixT8H[y * kRrw + x] = byteMix(x, y);
+                }
+            }
+
+            constexpr uint64_t kUploadMixT8HBitblt =
+                (static_cast<uint64_t>(kDbpMix) << 32) |
+                (static_cast<uint64_t>(kDbwMix) << 48) |
+                (static_cast<uint64_t>(GS_PSM_T8H) << 56);
+
+            gs.writeRegister(GS_REG_BITBLTBUF, kUploadMixT8HBitblt);
+            gs.writeRegister(GS_REG_TRXPOS, 0ull);
+            gs.writeRegister(GS_REG_TRXREG, kRect);
+            gs.writeRegister(GS_REG_TRXDIR, 0ull);
+
+            std::vector<uint8_t> packetMixT8H;
+            appendU64(packetMixT8H,
+                      makeGifTag(static_cast<uint16_t>(packedMixT8H.size() / 16u), GIF_FMT_IMAGE, 0u, true));
+            appendU64(packetMixT8H, 0ull);
+            packetMixT8H.insert(packetMixT8H.end(), packedMixT8H.begin(), packedMixT8H.end());
+            gs.processGIFPacket(packetMixT8H.data(), static_cast<uint32_t>(packetMixT8H.size()));
+
+            std::vector<uint8_t> packedMixNibble((kRrw * kRrh) / 2u, 0u);
+            for (uint32_t y = 0; y < kRrh; ++y)
+            {
+                for (uint32_t x = 0; x < kRrw; x += 2u)
+                {
+                    const uint8_t lo = nibbleN(x, y) & 0xFu;
+                    const uint8_t hi = nibbleN(x + 1u, y) & 0xFu;
+                    packedMixNibble[(y * kRrw + x) / 2u] = static_cast<uint8_t>(lo | (hi << 4));
+                }
+            }
+
+            constexpr uint64_t kUploadMixHLBitblt =
+                (static_cast<uint64_t>(kDbpMix) << 32) |
+                (static_cast<uint64_t>(kDbwMix) << 48) |
+                (static_cast<uint64_t>(GS_PSM_T4HL) << 56);
+
+            gs.writeRegister(GS_REG_BITBLTBUF, kUploadMixHLBitblt);
+            gs.writeRegister(GS_REG_TRXPOS, 0ull);
+            gs.writeRegister(GS_REG_TRXREG, kRect);
+            gs.writeRegister(GS_REG_TRXDIR, 0ull);
+
+            std::vector<uint8_t> packetMixNibble;
+            appendU64(packetMixNibble,
+                      makeGifTag(static_cast<uint16_t>(packedMixNibble.size() / 16u), GIF_FMT_IMAGE, 0u, true));
+            appendU64(packetMixNibble, 0ull);
+            packetMixNibble.insert(packetMixNibble.end(), packedMixNibble.begin(), packedMixNibble.end());
+            gs.processGIFPacket(packetMixNibble.data(), static_cast<uint32_t>(packetMixNibble.size()));
+
+            bool mixClobberMatches = true;
+            for (uint32_t y = 0; y < kRrh; ++y)
+            {
+                for (uint32_t x = 0; x < kRrw; ++x)
+                {
+                    const uint32_t off = GSPSMCT32::addrPSMCT32(kDbpMix, kDbwMix, x, y);
+                    uint32_t word = 0u;
+                    std::memcpy(&word, vram.data() + off, sizeof(word));
+
+                    const uint8_t gotLow = static_cast<uint8_t>((word >> 24) & 0xFu);
+                    const uint8_t gotHigh = static_cast<uint8_t>((word >> 28) & 0xFu);
+                    const uint8_t expectedLow = nibbleN(x, y);
+                    const uint8_t expectedHigh = static_cast<uint8_t>((byteMix(x, y) >> 4) & 0xFu);
+                    if (gotLow != expectedLow || gotHigh != expectedHigh)
+                        mixClobberMatches = false;
+                }
+            }
+            t.IsTrue(mixClobberMatches,
+                     "T4HL nibble upload over a T8H byte must overwrite bits 24-27 with the nibble and preserve "
+                     "bits 28-31 from the T8H byte's high nibble");
+        });
+
+        tc.Run("GS T4HL/T4HH sampling reads only its own plane through independent CLUTs", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            constexpr uint32_t kTexTbp = 64u;
+            constexpr uint32_t kClutCbpA = 128u;
+            constexpr uint32_t kClutCbpB = 192u;
+            constexpr uint8_t kIndexA = 4u; // T4HL plane index at the sampled texel (0..7 -> identity swizzle)
+            constexpr uint8_t kIndexB = 0u; // T4HH plane index at the sampled texel; must differ from kIndexA
+
+            // Shared CT32 word at texel (0,0): T4HL nibble occupies bits 24-27, T4HH bits 28-31.
+            const uint32_t sharedWordOff = GSPSMCT32::addrPSMCT32(kTexTbp, 1u, 0u, 0u);
+            const uint32_t sharedWord =
+                (static_cast<uint32_t>(kIndexB) << 28) | (static_cast<uint32_t>(kIndexA) << 24);
+            std::memcpy(vram.data() + sharedWordOff, &sharedWord, sizeof(sharedWord));
+
+            constexpr uint32_t kExpectedColorA = 0x800000FFu; // RGBA = (255,0,0,128)
+            constexpr uint32_t kExpectedColorB = 0x8000FF00u; // RGBA = (0,255,0,128)
+            constexpr uint32_t kDistractorColor = 0x800000AAu;
+
+            // Place each plane's expected color at its own CLUT's entry for the sampled index.
+            const uint32_t clutAOff = GSPSMCT32::addrPSMCT32(kClutCbpA, 1u, kIndexA, 0u);
+            const uint32_t clutBOff = GSPSMCT32::addrPSMCT32(kClutCbpB, 1u, kIndexB, 0u);
+            std::memcpy(vram.data() + clutAOff, &kExpectedColorA, sizeof(kExpectedColorA));
+            std::memcpy(vram.data() + clutBOff, &kExpectedColorB, sizeof(kExpectedColorB));
+
+            // Seed distractor entries at the *other* plane's index in each CLUT so that a
+            // cross-plane nibble read (a bug reading the wrong plane, or the wrong CLUT) would
+            // resolve to a non-matching color instead of accidentally matching by coincidence.
+            const uint32_t clutADistractorOff = GSPSMCT32::addrPSMCT32(kClutCbpA, 1u, kIndexB, 0u);
+            const uint32_t clutBDistractorOff = GSPSMCT32::addrPSMCT32(kClutCbpB, 1u, kIndexA, 0u);
+            std::memcpy(vram.data() + clutADistractorOff, &kDistractorColor, sizeof(kDistractorColor));
+            std::memcpy(vram.data() + clutBDistractorOff, &kDistractorColor, sizeof(kDistractorColor));
+
+            constexpr uint64_t kFrameReg =
+                (0ull << 0) |
+                (1ull << 16) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kZbuf = (1ull << 32);
+            constexpr uint64_t kPrim =
+                static_cast<uint64_t>(GS_PRIM_SPRITE) |
+                (1ull << 4) |  // TME
+                (1ull << 8);   // FST
+
+            const uint64_t kTex0HL =
+                (static_cast<uint64_t>(kTexTbp) << 0) |
+                (1ull << 14) |
+                (static_cast<uint64_t>(GS_PSM_T4HL) << 20) |
+                (0ull << 26) |
+                (0ull << 30) |
+                (1ull << 34) |
+                (1ull << 35) |
+                (static_cast<uint64_t>(kClutCbpA) << 37) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 51);
+
+            gs.writeRegister(GS_REG_FRAME_1, kFrameReg);
+            gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
+            gs.writeRegister(GS_REG_SCISSOR_1, 0ull);
+            gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
+            gs.writeRegister(GS_REG_ALPHA_1, 0ull);
+            gs.writeRegister(GS_REG_TEX0_1, kTex0HL);
+            gs.writeRegister(GS_REG_PRIM, kPrim);
+            gs.writeRegister(GS_REG_RGBAQ, 0x80808080ull);
+            gs.writeRegister(GS_REG_UV, 0ull);
+            gs.writeRegister(GS_REG_XYZ2, 0ull);
+            gs.writeRegister(GS_REG_UV, 0ull);
+            gs.writeRegister(GS_REG_XYZ2, 0ull);
+
+            uint32_t pixelHL = 0u;
+            std::memcpy(&pixelHL, vram.data(), sizeof(pixelHL));
+            t.Equals(pixelHL, kExpectedColorA,
+                     "T4HL sampling should resolve through its own CLUT plane, unaffected by the co-resident T4HH nibble");
+
+            const uint64_t kTex0HH =
+                (static_cast<uint64_t>(kTexTbp) << 0) |
+                (1ull << 14) |
+                (static_cast<uint64_t>(GS_PSM_T4HH) << 20) |
+                (0ull << 26) |
+                (0ull << 30) |
+                (1ull << 34) |
+                (1ull << 35) |
+                (static_cast<uint64_t>(kClutCbpB) << 37) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 51);
+
+            gs.writeRegister(GS_REG_TEX0_1, kTex0HH);
+            gs.writeRegister(GS_REG_UV, 0ull);
+            gs.writeRegister(GS_REG_XYZ2, 0ull);
+            gs.writeRegister(GS_REG_UV, 0ull);
+            gs.writeRegister(GS_REG_XYZ2, 0ull);
+
+            uint32_t pixelHH = 0u;
+            std::memcpy(&pixelHH, vram.data(), sizeof(pixelHH));
+            t.Equals(pixelHH, kExpectedColorB,
+                     "T4HH sampling should resolve through its own CLUT plane, unaffected by the co-resident T4HL nibble");
+        });
+
+        tc.Run("GS T4HL upload deactivates the transfer at total_pixels and discards excess bytes", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            constexpr uint32_t kDbw = 1u;
+            constexpr uint32_t kRrw = 8u;
+            constexpr uint32_t kRrh = 8u;
+            constexpr uint64_t kRect = (static_cast<uint64_t>(kRrw) << 0) | (static_cast<uint64_t>(kRrh) << 32);
+
+            auto buildPacked = [&](const auto &indexFn) -> std::vector<uint8_t>
+            {
+                std::vector<uint8_t> packed((kRrw * kRrh) / 2u, 0u);
+                for (uint32_t y = 0; y < kRrh; ++y)
+                {
+                    for (uint32_t x = 0; x < kRrw; x += 2u)
+                    {
+                        const uint8_t lo = indexFn(x, y) & 0xFu;
+                        const uint8_t hi = indexFn(x + 1u, y) & 0xFu;
+                        packed[(y * kRrw + x) / 2u] = static_cast<uint8_t>(lo | (hi << 4));
+                    }
+                }
+                return packed;
+            };
+
+            // --- First transfer: an ~8x oversized IMAGE payload (256 bytes / 16 qwords) for a
+            // rect that only needs 32 bytes (64 texels). The first 32 bytes carry a known
+            // pattern; the remaining 224 bytes are a 0xFF sentinel that must be discarded.
+            constexpr uint32_t kDbp1 = 0u;
+            constexpr uint64_t kUploadBitblt1 =
+                (static_cast<uint64_t>(kDbp1) << 32) |
+                (static_cast<uint64_t>(kDbw) << 48) |
+                (static_cast<uint64_t>(GS_PSM_T4HL) << 56);
+
+            auto indexPattern1 = [](uint32_t x, uint32_t y) -> uint8_t
+            {
+                return static_cast<uint8_t>((x + y * 3u + 2u) & 0xFu);
+            };
+            const std::vector<uint8_t> packed1 = buildPacked(indexPattern1);
+            t.Equals(packed1.size(), static_cast<size_t>(32), "sanity: packed rect should be 32 bytes (64 texels)");
+
+            gs.writeRegister(GS_REG_BITBLTBUF, kUploadBitblt1);
+            gs.writeRegister(GS_REG_TRXPOS, 0ull);
+            gs.writeRegister(GS_REG_TRXREG, kRect);
+            gs.writeRegister(GS_REG_TRXDIR, 0ull);
+
+            constexpr uint32_t kOversizedBytes = 256u; // 16 qwords, 8x the required 32 bytes
+            std::vector<uint8_t> packet;
+            appendU64(packet, makeGifTag(static_cast<uint16_t>(kOversizedBytes / 16u), GIF_FMT_IMAGE, 0u, true));
+            appendU64(packet, 0ull);
+            const size_t payloadOffset = packet.size();
+            packet.resize(payloadOffset + kOversizedBytes, 0xFFu);
+            std::memcpy(packet.data() + payloadOffset, packed1.data(), packed1.size());
+            gs.processGIFPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            const GSDebugSnapshot snap1 = gs.getDebugSnapshot();
+            t.Equals(snap1.transferCopiedPixels, 64u, "T4HL transfer should stop after copying exactly rrw*rrh texels");
+            t.Equals(snap1.trxdir, 3u, "T4HL transfer should deactivate (trxdir=3) once total_pixels is reached");
+
+            bool pattern1Ok = true;
+            for (uint32_t y = 0; y < kRrh; ++y)
+            {
+                for (uint32_t x = 0; x < kRrw; ++x)
+                {
+                    const uint32_t off = GSPSMCT32::addrPSMCT32(kDbp1, kDbw, x, y);
+                    uint32_t word = 0u;
+                    std::memcpy(&word, vram.data() + off, sizeof(word));
+                    if (((word >> 24) & 0xFu) != indexPattern1(x, y))
+                        pattern1Ok = false;
+                }
+            }
+            t.IsTrue(pattern1Ok,
+                     "the first 64 texels of the oversized T4HL transfer should match the known pattern; sentinel bytes must not leak in");
+
+            // --- Second, correctly-sized transfer to a different DBP: proves the discarded
+            // excess bytes from the first transfer were not mis-accounted into later state.
+            constexpr uint32_t kDbp2 = 128u;
+            constexpr uint64_t kUploadBitblt2 =
+                (static_cast<uint64_t>(kDbp2) << 32) |
+                (static_cast<uint64_t>(kDbw) << 48) |
+                (static_cast<uint64_t>(GS_PSM_T4HL) << 56);
+
+            auto indexPattern2 = [](uint32_t x, uint32_t y) -> uint8_t
+            {
+                return static_cast<uint8_t>((x * 5u + y + 3u) & 0xFu);
+            };
+            const std::vector<uint8_t> packed2 = buildPacked(indexPattern2);
+
+            gs.writeRegister(GS_REG_BITBLTBUF, kUploadBitblt2);
+            gs.writeRegister(GS_REG_TRXPOS, 0ull);
+            gs.writeRegister(GS_REG_TRXREG, kRect);
+            gs.writeRegister(GS_REG_TRXDIR, 0ull);
+
+            std::vector<uint8_t> packet2;
+            appendU64(packet2, makeGifTag(static_cast<uint16_t>(packed2.size() / 16u), GIF_FMT_IMAGE, 0u, true));
+            appendU64(packet2, 0ull);
+            packet2.insert(packet2.end(), packed2.begin(), packed2.end());
+            gs.processGIFPacket(packet2.data(), static_cast<uint32_t>(packet2.size()));
+
+            const GSDebugSnapshot snap2 = gs.getDebugSnapshot();
+            t.Equals(snap2.transferCopiedPixels, 64u, "second, correctly-sized T4HL transfer should copy exactly rrw*rrh texels");
+            t.Equals(snap2.trxdir, 3u, "second T4HL transfer should also deactivate cleanly");
+
+            bool pattern2Ok = true;
+            for (uint32_t y = 0; y < kRrh; ++y)
+            {
+                for (uint32_t x = 0; x < kRrw; ++x)
+                {
+                    const uint32_t off = GSPSMCT32::addrPSMCT32(kDbp2, kDbw, x, y);
+                    uint32_t word = 0u;
+                    std::memcpy(&word, vram.data() + off, sizeof(word));
+                    if (((word >> 24) & 0xFu) != indexPattern2(x, y))
+                        pattern2Ok = false;
+                }
+            }
+            t.IsTrue(pattern2Ok,
+                     "second T4HL transfer to a different DBP should be byte-correct, proving the discarded excess bytes from the first transfer did not leak into subsequent transfer state");
         });
     });
 }

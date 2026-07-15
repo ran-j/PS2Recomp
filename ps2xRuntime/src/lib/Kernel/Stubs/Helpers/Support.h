@@ -1673,6 +1673,14 @@ namespace
                (static_cast<uint64_t>(1u) << 60);
     }
 
+    // Like makeGiftagAplusD but leaves EOP (bit 15) clear, for a chained/open
+    // A+D tag whose nloop is finalized later by closePacketGifTag.
+    static uint64_t makeGiftagAplusDOpen(uint32_t nloop)
+    {
+        return (static_cast<uint64_t>(nloop & 0x7FFFu) << 0) |
+               (static_cast<uint64_t>(1u) << 60);
+    }
+
     static uint32_t readStackU32(uint8_t *rdram, R5900Context *ctx, uint32_t offset)
     {
         uint32_t sp = getRegU32(ctx, 29);

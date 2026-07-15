@@ -367,29 +367,23 @@ struct SifRpcDebugEvent
     uint32_t endParam = 0;
     uint32_t semaId = 0;
     uint32_t flags = 0;
+    uint32_t sendPreviewSize = 0;
+    uint32_t recvPreviewSize = 0;
+    uint8_t sendPreview[16]{};
+    uint8_t recvPreview[16]{};
     int32_t result = 0;
 };
 
 static constexpr size_t kSifRpcDebugHistoryCount = 256u;
+static constexpr size_t kSifRpcDebugPreviewBytes = 16u;
 static constexpr uint32_t kSifRpcDebugFlagNowait = 1u << 0;
 static constexpr uint32_t kSifRpcDebugFlagHandledByHle = 1u << 1;
 static constexpr uint32_t kSifRpcDebugFlagCallback = 1u << 2;
 static constexpr uint32_t kSifRpcDebugFlagMissingClient = 1u << 3;
 static constexpr uint32_t kSifRpcDebugFlagServerDispatch = 1u << 4;
-static constexpr uint32_t kSifRpcDebugFlagDtx = 1u << 5;
-
-struct SoundDriverRpcState
-{
-    uintptr_t ownerRuntime = 0;
-    bool initialized = false;
-    uint32_t storageBaseAddr = 0;
-    uint32_t storageSize = 0;
-    uint32_t statusAddr = 0;
-    uint32_t addrTableAddr = 0;
-    uint32_t hdBaseAddr = 0;
-    uint32_t sqBaseAddr = 0;
-    uint32_t dataBaseAddr = 0;
-};
+static constexpr uint32_t kSifRpcDebugFlagUnhandled = 1u << 6;
+static constexpr uint32_t kSifRpcDebugFlagFallbackCopy = 1u << 7;
+static constexpr uint32_t kSifRpcDebugFlagFallbackZero = 1u << 8;
 
 inline std::unordered_map<uint32_t, RpcServerState> g_rpc_servers;
 inline std::unordered_map<uint32_t, RpcClientState> g_rpc_clients;
@@ -402,138 +396,6 @@ inline uint32_t g_rpc_next_id = 1;
 inline uint32_t g_rpc_packet_index = 0;
 inline uint32_t g_rpc_server_index = 0;
 inline uint32_t g_rpc_active_queue = 0;
-inline SoundDriverRpcState g_soundDriverRpcState;
-inline PS2SoundDriverCompatLayout g_soundDriverCompatLayout;
-inline PS2DtxCompatLayout g_dtxCompatLayout;
-inline std::mutex g_dtx_rpc_mutex;
-inline std::unordered_map<uint32_t, uint32_t> g_dtx_remote_by_id;
-inline uint32_t g_dtx_next_urpc_obj = 0u;
-
-struct DtxTransferState
-{
-    uint32_t dtxId = 0;
-    uint32_t remoteHandle = 0;
-    uint32_t eeWorkAddr = 0;
-    uint32_t iopWorkAddr = 0;
-    uint32_t wkSize = 0;
-};
-
-inline std::unordered_map<uint32_t, DtxTransferState> g_dtx_transfer_by_id;
-
-struct DtxSjxState
-{
-    uint32_t handle = 0;
-    uint32_t srcSjHandle = 0;
-    uint32_t dstSjHandle = 0;
-    uint32_t line = 0;
-    uint32_t eeObjAddr = 0;
-    uint16_t xid = 0;
-};
-
-inline std::unordered_map<uint32_t, DtxSjxState> g_dtx_sjx_by_handle;
-
-struct DtxPs2RnaState
-{
-    uint32_t handle = 0;
-    uint32_t maxChannels = 0;
-    uint32_t sjHandle0 = 0;
-    uint32_t sjHandle1 = 0;
-    uint32_t channelCount = 0;
-    uint32_t sampleFreq = 0;
-    uint32_t volume = 0;
-    bool playEnabled = false;
-};
-
-inline std::unordered_map<uint32_t, DtxPs2RnaState> g_dtx_ps2rna_by_handle;
-
-struct DtxSjrmtState
-{
-    uint32_t handle = 0;
-    uint32_t mode = 0;
-    uint32_t wkAddr = 0;
-    uint32_t wkSize = 0;
-    uint32_t readPos = 0;
-    uint32_t writePos = 0;
-    uint32_t roomBytes = 0;
-    uint32_t dataBytes = 0;
-    uint32_t uuid0 = 0;
-    uint32_t uuid1 = 0;
-    uint32_t uuid2 = 0;
-    uint32_t uuid3 = 0;
-};
-
-inline std::unordered_map<uint32_t, DtxSjrmtState> g_dtx_sjrmt_by_handle;
-
-static uint32_t dtxNormalizeSjrmtCapacity(uint32_t requestedBytes)
-{
-    if (requestedBytes == 0u || requestedBytes > 0x01000000u)
-    {
-        return 0x4000u;
-    }
-    return requestedBytes;
-}
-
-static uint32_t dtxAllocUrpcHandleLocked()
-{
-    const PS2DtxCompatLayout &layout = g_dtxCompatLayout;
-    if (!layout.hasUrpcObjectRange())
-    {
-        return 0u;
-    }
-
-    if (g_dtx_next_urpc_obj < layout.urpcObjBase || g_dtx_next_urpc_obj >= layout.urpcObjLimit)
-    {
-        g_dtx_next_urpc_obj = layout.urpcObjBase;
-    }
-
-    for (uint32_t i = 0; i < 4096u; ++i)
-    {
-        uint32_t candidate = g_dtx_next_urpc_obj;
-        g_dtx_next_urpc_obj += layout.urpcObjStride;
-        if (g_dtx_next_urpc_obj < layout.urpcObjBase || g_dtx_next_urpc_obj >= layout.urpcObjLimit)
-        {
-            g_dtx_next_urpc_obj = layout.urpcObjBase;
-        }
-
-        if (candidate < layout.urpcObjBase || candidate >= layout.urpcObjLimit)
-        {
-            continue;
-        }
-
-        if (g_dtx_sjrmt_by_handle.find(candidate) != g_dtx_sjrmt_by_handle.end())
-        {
-            continue;
-        }
-
-        if (g_dtx_sjx_by_handle.find(candidate) != g_dtx_sjx_by_handle.end())
-        {
-            continue;
-        }
-
-        if (g_dtx_ps2rna_by_handle.find(candidate) != g_dtx_ps2rna_by_handle.end())
-        {
-            continue;
-        }
-
-        bool inUseByDtxRemote = false;
-        for (const auto &entry : g_dtx_remote_by_id)
-        {
-            if (entry.second == candidate)
-            {
-                inUseByDtxRemote = true;
-                break;
-            }
-        }
-
-        if (!inUseByDtxRemote)
-        {
-            return candidate;
-        }
-    }
-
-    return layout.urpcObjBase;
-}
-
 struct ExitHandlerEntry
 {
     uint32_t func = 0;
