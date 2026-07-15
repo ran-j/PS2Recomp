@@ -5,6 +5,7 @@
 namespace ps2_stubs
 {
     void resetGsSyncVCallbackState();
+    uint64_t lastGsSyncVConsumedTick();
     void dispatchGsSyncVCallback(uint8_t *rdram, PS2Runtime *runtime, uint64_t tick);
     void sceGifPkAddGsAD(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceGifPkAddGsData(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);

@@ -10,6 +10,7 @@ namespace ps2_stubs
     {
         std::mutex g_gs_sync_v_mutex;
         uint64_t g_gs_sync_v_base_tick = 0u;
+        uint64_t g_gs_sync_v_last_tick = 0u;
         std::mutex g_gs_sync_v_callback_mutex;
         uint32_t g_gs_sync_v_callback_func = 0u;
         uint32_t g_gs_sync_v_callback_gp = 0u;
@@ -602,6 +603,20 @@ namespace ps2_stubs
     {
         std::lock_guard<std::mutex> lock(g_gs_sync_v_mutex);
         g_gs_sync_v_base_tick = ps2_syscalls::GetCurrentVSyncTick();
+        g_gs_sync_v_last_tick = 0u;
+    }
+
+    // Test-observability accessor: returns the exact vsync tick that the most
+    // recent sceGsSyncV call consumed (the value WaitForNextVSyncTick returned
+    // inside that call, recorded atomically with the field computation). Tests
+    // must use this instead of re-sampling GetCurrentVSyncTick() after the call
+    // returns: the vsync worker free-runs on a wall clock, so a post-call
+    // re-sample can observe a later tick than the one the call actually waited
+    // on, and the slop's parity is not stable across calls on a loaded runner.
+    uint64_t lastGsSyncVConsumedTick()
+    {
+        std::lock_guard<std::mutex> lock(g_gs_sync_v_mutex);
+        return g_gs_sync_v_last_tick;
     }
 
     static int32_t getGsSyncVFieldForTick(uint64_t tick)
@@ -1454,6 +1469,15 @@ namespace ps2_stubs
     void sceGsSyncV(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const uint64_t tick = ps2_syscalls::WaitForNextVSyncTick(rdram, runtime);
+        // Record the exact tick this call consumed, atomically with (and from
+        // the same value as) the field computed below, so tests can cross-check
+        // the reported field against the real consumed tick without racing the
+        // free-running vsync worker. Released before getGsSyncVFieldForTick,
+        // which takes the same (non-recursive) mutex.
+        {
+            std::lock_guard<std::mutex> lock(g_gs_sync_v_mutex);
+            g_gs_sync_v_last_tick = tick;
+        }
         if (g_gparam.interlace != 0u)
         {
             setReturnS32(ctx, getGsSyncVFieldForTick(tick));

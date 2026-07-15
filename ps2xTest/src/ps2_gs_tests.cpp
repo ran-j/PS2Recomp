@@ -3373,21 +3373,27 @@ void register_ps2_gs_tests()
 
             R5900Context sync0{};
             ps2_stubs::sceGsSyncV(rdram.data(), &sync0, &runtime);
-            // Sample the vsync tick this call consumed as close to the call as
-            // possible. The vsync worker (ps2xRuntime/.../Interrupt.cpp,
-            // interruptWorkerMain) free-runs on a wall-clock timer
-            // (kVblankPeriod, ~16.6ms) independent of this thread, and
-            // WaitForNextVSyncTick's contract is only "returns a tick strictly
-            // after the one you started on" -- not "exactly one tick later".
-            // On a loaded/virtualized CI runner (observed on windows-msvc) THIS
-            // test thread -- not the worker -- can be descheduled for longer
-            // than one vsync period between the two sceGsSyncV calls below, in
-            // which case the second call legitimately consumes tick N+2 (or
-            // later) instead of N+1, and a hardcoded "must be odd" expectation
-            // is simply wrong. Deriving the expected field from the observed
-            // tick keeps this assertion correct under that jitter while still
-            // catching real regressions in the field-parity logic.
-            const uint64_t tick0 = ps2_syscalls::GetCurrentVSyncTick();
+            // Read the EXACT vsync tick this call consumed. sceGsSyncV records
+            // it (GS.cpp, g_gs_sync_v_last_tick) atomically with the field it
+            // computes, from the same tick WaitForNextVSyncTick returned. We
+            // must NOT re-sample GetCurrentVSyncTick() here: the vsync worker
+            // (ps2xRuntime/.../Interrupt.cpp, interruptWorkerMain) free-runs on
+            // a wall-clock timer (kVblankPeriod, ~16.6ms) independent of this
+            // thread, so a post-call re-sample can observe a LATER tick than the
+            // one the call actually waited on. On a loaded/virtualized CI runner
+            // (observed on windows-msvc) that slop differed in parity between the
+            // two calls, which broke the XOR cross-check below even though the
+            // field logic was correct. Reading the recorded consumed tick removes
+            // that race entirely.
+            //
+            // Note WaitForNextVSyncTick's contract is only "returns a tick
+            // strictly after the one you started on" -- not "exactly one tick
+            // later". If this thread is descheduled for more than one vsync
+            // period between the two sceGsSyncV calls, the second legitimately
+            // consumes tick N+2 (or later); deriving the expected field from the
+            // actual consumed-tick delta below keeps the assertion correct under
+            // that jitter while still catching real field-parity regressions.
+            const uint64_t tick0 = ps2_stubs::lastGsSyncVConsumedTick();
             const int32_t field0 = static_cast<int32_t>(getRegU32Test(sync0, 2));
             if (baseUnambiguous)
             {
@@ -3396,7 +3402,7 @@ void register_ps2_gs_tests()
 
             R5900Context sync1{};
             ps2_stubs::sceGsSyncV(rdram.data(), &sync1, &runtime);
-            const uint64_t tick1 = ps2_syscalls::GetCurrentVSyncTick();
+            const uint64_t tick1 = ps2_stubs::lastGsSyncVConsumedTick();
             const int32_t field1 = static_cast<int32_t>(getRegU32Test(sync1, 2));
 
             // Liveness: the second call must have actually waited for a new
