@@ -1810,10 +1810,19 @@ void register_ps2_runtime_expansion_tests()
                       "PollSema worker thread should not throw");
             t.IsFalse(signalerThrew.load(std::memory_order_acquire),
                       "SignalSema worker thread should not throw");
-            t.IsTrue(pollOkCount.load(std::memory_order_relaxed) > 0,
+            const int32_t pollOk = pollOkCount.load(std::memory_order_relaxed);
+            const int32_t signalOk = signalOkCount.load(std::memory_order_relaxed);
+            t.IsTrue(pollOk > 0,
                      "contended PollSema should observe at least one successful acquire");
-            t.IsTrue(signalOkCount.load(std::memory_order_relaxed) > 0,
-                     "contended SignalSema should observe successful releases");
+            // SignalSema only returns success while the counter has headroom
+            // (count < max_count). With init_count == max_count == 1 the counter
+            // starts full, so the signaler can only succeed after the poller has
+            // drained it. Whether that interleaving happens is up to the host
+            // scheduler, so signalOk is NOT guaranteed to be > 0 and must not be
+            // asserted directly (doing so made this test flaky under CI load).
+            // The meaningful stability property under contention is that no
+            // acquire/release is ever lost or double-applied, which the
+            // conservation invariant below verifies.
 
             constexpr uint32_t kStatusAddr = 0x2100u;
             R5900Context referCtx{};
@@ -1825,6 +1834,12 @@ void register_ps2_runtime_expansion_tests()
             int32_t finalCount = 0;
             std::memcpy(&finalCount, rdram.data() + kStatusAddr + 0u, sizeof(finalCount));
             t.IsTrue(finalCount >= 0 && finalCount <= 1, "semaphore count should remain within [0, max_count]");
+            // Conservation invariant: starting from init_count (1), every
+            // successful poll decrements and every successful signal increments
+            // the counter under the semaphore mutex. This holds for any thread
+            // interleaving; if contention had corrupted the count it would not.
+            t.Equals(finalCount, 1 - pollOk + signalOk,
+                     "semaphore count must account for every successful acquire/release under contention");
 
             runtime.requestStop();
             notifyRuntimeStop();
