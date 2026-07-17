@@ -403,6 +403,7 @@ public:
     void drainCompletedDmacHandlers(uint8_t *rdram);
     bool shouldPreemptGuestExecution();
     void yieldGuestExecutionAfterWake();
+    void waitForGuestExecutionHandoff();
     void requestStop();
     bool isStopRequested() const;
     uint32_t guestExecutionWaiterCountForTesting() const

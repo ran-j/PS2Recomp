@@ -39,6 +39,12 @@ if((CMAKE_C_COMPILER MATCHES "arm-vita-eabi") OR
     set(PS2X_IS_VITA ON)
 endif()
 
+set(PS2X_IS_ANDROID OFF)
+
+if(ANDROID)
+    set(PS2X_IS_ANDROID ON)
+endif()
+
 option(PS2X_VITA_CREATE_PACKAGE "Create Vita eboot/vpk targets" ON)
 set(PS2X_VITA_APP_NAME "PS2 Retro X" CACHE STRING "Display name for the Vita bubble")
 set(PS2X_VITA_TITLEID "RANJ00001" CACHE STRING "9-character Vita title id")
@@ -63,6 +69,10 @@ else()
     set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
     set(BUILD_GAMES OFF CACHE BOOL "" FORCE)
 
+    if(PS2X_IS_ANDROID)
+        set(PLATFORM "Android" CACHE STRING "" FORCE)
+    endif()
+
     FetchContent_Declare(
         raylib
         GIT_REPOSITORY "https://github.com/raysan5/raylib.git"
@@ -71,6 +81,7 @@ else()
     )
     FetchContent_MakeAvailable(raylib)
 
+    if(NOT PS2X_IS_ANDROID)
     FetchContent_Declare(
         imgui
         GIT_REPOSITORY https://github.com/ocornut/imgui.git
@@ -113,6 +124,7 @@ else()
     )
     target_include_directories(rlImGui PUBLIC "${PS2X_RLIMGUI_SOURCE_DIR}")
     target_link_libraries(rlImGui PUBLIC raylib imgui)
+    endif() # NOT PS2X_IS_ANDROID
 endif()
 
 add_library(ps2_host_backend INTERFACE)
@@ -218,9 +230,24 @@ if(PS2X_IS_VITA)
     )
 else()
     target_link_libraries(ps2_host_backend INTERFACE raylib)
+
+    if(PS2X_IS_ANDROID)
+        target_link_libraries(ps2_host_backend INTERFACE log android)
+    endif()
 endif()
 
-if(WIN32)
+if(PS2X_IS_ANDROID)
+    set(PS2X_ENABLE_FFMPEG_DEFAULT OFF)
+else()
+    set(PS2X_ENABLE_FFMPEG_DEFAULT ON)
+endif()
+
+option(PS2X_ENABLE_FFMPEG "Enable FFmpeg-backed MPEG video decoding" ${PS2X_ENABLE_FFMPEG_DEFAULT})
+
+if(NOT PS2X_ENABLE_FFMPEG)
+    message(STATUS "FFmpeg disabled; MPEG video decode falls back to stub frames")
+    add_library(ffmpeg INTERFACE)
+elseif(WIN32)
     include(ExternalProject)
 
     set(FFMPEG_PREBUILT_TAG "n7.1-241205")
@@ -390,6 +417,10 @@ if(PS2X_STRICT_RETURN_DIAGNOSTICS)
     )
 endif()
 
+target_compile_definitions(ps2_runtime PRIVATE
+    PS2X_HAS_FFMPEG=$<BOOL:${PS2X_ENABLE_FFMPEG}>
+)
+
 file(GLOB_RECURSE KERNEL_SRC_FILES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/Kernel/*.cpp"
 )
@@ -411,9 +442,17 @@ elseif(EXISTS "${ROOT_MAIN_CPP}")
     list(APPEND RUNNER_SRC_FILES "${ROOT_MAIN_CPP}")
 endif()
 
-add_executable(ps2EntryRunner
-    ${RUNNER_SRC_FILES}
-)
+if(PS2X_IS_ANDROID)
+    add_library(ps2EntryRunner SHARED
+        ${RUNNER_SRC_FILES}
+    )
+
+    target_link_options(ps2EntryRunner PRIVATE "-Wl,--undefined=ANativeActivity_onCreate")
+else()
+    add_executable(ps2EntryRunner
+        ${RUNNER_SRC_FILES}
+    )
+endif()
 
 if(PS2X_ENABLE_RUNNER_UNITY_BUILD)
     set_target_properties(ps2EntryRunner PROPERTIES
@@ -443,7 +482,7 @@ target_link_libraries(ps2EntryRunner
     ps2_runtime
 )
 
-if(NOT PS2X_IS_VITA)
+if(NOT PS2X_IS_VITA AND NOT PS2X_IS_ANDROID)
     target_sources(ps2EntryRunner PRIVATE
         src/lib/ps2_debug_panel.cpp
     )
@@ -494,7 +533,7 @@ install(TARGETS ps2_runtime ps2EntryRunner
     ARCHIVE DESTINATION lib
 )
 
-if(WIN32)
+if(WIN32 AND PS2X_ENABLE_FFMPEG)
     install(DIRECTORY "${FFMPEG_BIN_DIR}/"
         DESTINATION bin
         FILES_MATCHING

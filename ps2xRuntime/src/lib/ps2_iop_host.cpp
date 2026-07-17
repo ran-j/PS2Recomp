@@ -159,6 +159,8 @@ bool PS2IopHostAdapter::writeGuest(uint32_t address, const void *source, size_t 
     }
     if (size != 0)
     {
+        uint8_t *const rdram = m_activeRdram ? m_activeRdram : m_runtime.memory().getRDRAM();
+        ps2TraceGuestRangeWrite(rdram, address, static_cast<uint32_t>(size), "IopHost::writeGuest", nullptr);
         std::memcpy(destination, source, size);
     }
     return true;
@@ -173,6 +175,8 @@ bool PS2IopHostAdapter::zeroGuest(uint32_t address, size_t size)
     }
     if (size != 0)
     {
+        uint8_t *const rdram = m_activeRdram ? m_activeRdram : m_runtime.memory().getRDRAM();
+        ps2TraceGuestRangeWrite(rdram, address, static_cast<uint32_t>(size), "IopHost::zeroGuest", nullptr);
         std::memset(destination, 0, size);
     }
     return true;

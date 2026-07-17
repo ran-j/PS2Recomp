@@ -11,7 +11,7 @@
 namespace GSMem
 {
 	constexpr usz MEMORY_SIZE = 4_mb;
-	constexpr usz PAGE_SIZE = 8_kb;
+	constexpr usz GS_PAGE_SIZE = 8_kb;
 
 	// these are all the same regardless of storage mode
 	constexpr usz BLOCKS_PER_PAGE = 32;

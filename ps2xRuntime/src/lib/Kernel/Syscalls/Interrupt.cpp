@@ -175,8 +175,7 @@ namespace ps2_syscalls
                     {
                         break;
                     }
-                    // Interrupt handlers must be able to preempt a guest thread that is
-                    // spinning on interrupt-produced state, such as a vblank counter.
+                    PS2Runtime::GuestExecutionScope guestExecution(runtime);
                     step(rdram, &irqCtx, runtime);
                 }
             }
@@ -259,6 +258,7 @@ namespace ps2_syscalls
                     {
                         break;
                     }
+                    PS2Runtime::GuestExecutionScope guestExecution(runtime);
                     step(rdram, &irqCtx, runtime);
                 }
             }
@@ -304,6 +304,7 @@ namespace ps2_syscalls
         {
             std::lock_guard<std::mutex> lock(g_vsync_flag_mutex);
             reg = g_vsync_registration;
+            g_vsync_registration = {};
             tickValue = ++g_vsync_tick_counter;
         }
 

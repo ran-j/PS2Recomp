@@ -1,6 +1,11 @@
 #include "Common.h"
 #include "MPEG.h"
 
+#if !defined(PS2X_HAS_FFMPEG)
+#define PS2X_HAS_FFMPEG 1
+#endif
+
+#if PS2X_HAS_FFMPEG
 extern "C"
 {
 #include <libavcodec/avcodec.h>
@@ -8,6 +13,7 @@ extern "C"
 #include <libavutil/log.h>
 #include <libswscale/swscale.h>
 }
+#endif
 
 #include <chrono>
 #include <condition_variable>
@@ -27,6 +33,7 @@ namespace ps2_stubs
             std::vector<uint8_t> rgba;
         };
 
+#if PS2X_HAS_FFMPEG
         std::string ffmpegErrorString(int err)
         {
             std::array<char, AV_ERROR_MAX_STRING_SIZE> buffer{};
@@ -419,6 +426,30 @@ namespace ps2_stubs
             bool m_drained = false;
             bool m_seenKeyframe = false;
         };
+#else
+        // TODO
+        class MpegFfmpegDecoder
+        {
+        public:
+            bool feed(const uint8_t *, size_t, std::deque<MpegDecodedFrame> &)
+            {
+                static bool s_warnedNoFfmpeg = false;
+                if (!s_warnedNoFfmpeg)
+                {
+                    std::cerr << "[MPEG] runtime built without FFmpeg; MPEG video decode is disabled." << std::endl;
+                    s_warnedNoFfmpeg = true;
+                }
+                return false;
+            }
+
+            bool flush(std::deque<MpegDecodedFrame> &)
+            {
+                return true;
+            }
+
+            void reset() {}
+        };
+#endif
 
         struct MpegRegisteredCallback
         {

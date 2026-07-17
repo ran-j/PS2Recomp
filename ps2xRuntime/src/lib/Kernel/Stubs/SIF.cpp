@@ -256,6 +256,8 @@ namespace ps2_stubs
                 return true;
             }
 
+            ps2TraceGuestRangeWrite(rdram, dstAddr, sizeBytes, "sifCopyGuestByteRange", nullptr);
+
             const uint64_t srcBegin = srcAddr;
             const uint64_t srcEnd = srcBegin + static_cast<uint64_t>(sizeBytes);
             const uint64_t dstBegin = dstAddr;

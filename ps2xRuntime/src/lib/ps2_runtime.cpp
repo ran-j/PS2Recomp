@@ -1967,6 +1967,8 @@ void PS2Runtime::dispatchLoop(uint8_t *rdram, R5900Context *ctx)
             fn(rdram, ctx, this);
         }
 
+        waitForGuestExecutionHandoff();
+
         if (ctx->pc == 0u)
         {
             const uint32_t ra = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0));
@@ -2056,6 +2058,20 @@ void PS2Runtime::markGuestExecutionAcquired()
         m_guestExecutionHandoffEpoch.fetch_add(1u, std::memory_order_acq_rel);
     }
     m_guestExecutionHandoffCv.notify_all();
+}
+
+void PS2Runtime::waitForGuestExecutionHandoff()
+{
+    // This is a workaround and at the worst case can stall for 2ms
+    if (m_guestExecutionWaiters.load(std::memory_order_acquire) == 0u)
+    {
+        return;
+    }
+
+    const uint64_t handoffEpoch = m_guestExecutionHandoffEpoch.load(std::memory_order_acquire);
+    std::unique_lock<std::mutex> lock(m_guestExecutionHandoffMutex);
+    m_guestExecutionHandoffCv.wait_for(lock, std::chrono::milliseconds(2), [&]()
+                                       { return m_guestExecutionHandoffEpoch.load(std::memory_order_acquire) != handoffEpoch; });
 }
 
 void PS2Runtime::yieldGuestExecutionAfterWake()

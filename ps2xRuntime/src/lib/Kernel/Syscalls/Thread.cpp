@@ -464,6 +464,7 @@ namespace ps2_syscalls
                         PS2Runtime::GuestExecutionScope guestExecution(runtime);
                         step(rdram, threadCtx, runtime);
                     }
+                    runtime->waitForGuestExecutionHandoff();
                 }
             }
             catch (const ThreadExitException &)
