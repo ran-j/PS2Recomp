@@ -322,6 +322,36 @@ namespace
         ctx->pc = 0u;
     }
 
+    // A minimal decodable program-stream packet (PES header + one MPEG-1 video
+    // sequence), shared by the host-feed MPEG tests below. Returns a fresh
+    // mutable copy each call so callers may slice/consume it freely.
+    std::vector<uint8_t> makeMpegHostFeedTestPacket()
+    {
+        static const std::vector<uint8_t> es = {
+            0x00u, 0x00u, 0x01u, 0xB3u, 0x01u, 0x00u, 0x10u, 0x12u, 0xFFu, 0xFFu, 0xE0u, 0x18u,
+            0x00u, 0x00u, 0x01u, 0xB5u, 0x14u, 0x8Au, 0x00u, 0x01u, 0x00u, 0x17u, 0x00u, 0x00u,
+            0x01u, 0xB8u, 0x00u, 0x08u, 0x00u, 0x40u, 0x00u, 0x00u, 0x01u, 0x00u, 0x00u, 0x0Fu,
+            0xFFu, 0xF8u, 0x00u, 0x00u, 0x01u, 0xB5u, 0x8Fu, 0xFFu, 0xF3u, 0x41u, 0x80u, 0x00u,
+            0x00u, 0x01u, 0x01u, 0x13u, 0xF8u, 0x7Du, 0x29u, 0x48u, 0x88u, 0x00u, 0x00u, 0x01u,
+            0xB3u, 0x01u, 0x00u, 0x10u, 0x12u, 0xFFu, 0xFFu, 0xE0u, 0x18u, 0x00u, 0x00u, 0x01u,
+            0xB5u, 0x14u, 0x8Au, 0x00u, 0x01u, 0x00u, 0x17u, 0x00u, 0x00u, 0x01u, 0xB8u, 0x00u,
+            0x08u, 0x00u, 0xC0u, 0x00u, 0x00u, 0x01u, 0x00u, 0x00u, 0x0Fu, 0xFFu, 0xF8u, 0x00u,
+            0x00u, 0x01u, 0xB5u, 0x8Fu, 0xFFu, 0xF3u, 0x41u, 0x80u, 0x00u, 0x00u, 0x01u, 0x01u,
+            0x13u, 0xF8u, 0x7Du, 0x29u, 0x48u, 0x88u, 0x00u, 0x00u, 0x01u, 0xB3u, 0x01u, 0x00u,
+            0x10u, 0x12u, 0xFFu, 0xFFu, 0xE0u, 0x18u, 0x00u, 0x00u, 0x01u, 0xB5u, 0x14u, 0x8Au,
+            0x00u, 0x01u, 0x00u, 0x17u, 0x00u, 0x00u, 0x01u, 0xB8u, 0x00u, 0x08u, 0x01u, 0x40u,
+            0x00u, 0x00u, 0x01u, 0x00u, 0x00u, 0x0Fu, 0xFFu, 0xF8u, 0x00u, 0x00u, 0x01u, 0xB5u,
+            0x8Fu, 0xFFu, 0xF3u, 0x41u, 0x80u, 0x00u, 0x00u, 0x01u, 0x01u, 0x13u, 0xF8u, 0x7Du,
+            0x29u, 0x48u, 0x88u};
+
+        std::vector<uint8_t> packet = {
+            0x00u, 0x00u, 0x01u, 0xE0u,
+            0x00u, static_cast<uint8_t>(es.size() + 3u),
+            0x80u, 0x00u, 0x00u};
+        packet.insert(packet.end(), es.begin(), es.end());
+        return packet;
+    }
+
 }
 
 void register_ps2_runtime_expansion_tests()
@@ -1135,6 +1165,325 @@ void register_ps2_runtime_expansion_tests()
             ps2_stubs::sceMpegGetPicture(rdram.data(), &pictureCtx, nullptr);
             t.Equals(Ps2FastRead32(rdram.data(), kMpegAddr + 0x08u), 2u,
                      "repeated temporary starvation should continue advancing from the held frame");
+        });
+
+        tc.Run("host-fed CD stream decodes without a guest demux call", [](TestCase &t)
+        {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            ps2_stubs::resetMpegStubState();
+
+            constexpr uint32_t kMpegAddr = 0x00123000u;
+            constexpr uint32_t kWorkAddr = 0x00140000u;
+            constexpr uint32_t kImageAddr = 0x00160000u;
+
+            R5900Context createCtx{};
+            setRegU32(createCtx, 4, kMpegAddr);
+            setRegU32(createCtx, 5, kWorkAddr);
+            setRegU32(createCtx, 6, 0x2000u);
+            ps2_stubs::sceMpegCreate(rdram.data(), &createCtx, nullptr);
+            t.IsTrue(::getRegU32(&createCtx, 2) != 0u,
+                     "sceMpegCreate should return a nonzero handle");
+
+            ps2_stubs::notifyMpegCdStreamStart();
+
+            const std::vector<uint8_t> packet = makeMpegHostFeedTestPacket();
+
+            const size_t consumed = ps2_stubs::feedMpegCdStreamBytes(packet.data(), packet.size());
+            t.Equals(consumed, packet.size(),
+                     "feedMpegCdStreamBytes should report the whole packet consumed");
+
+            ps2_stubs::notifyMpegCdStreamEof();
+
+            t.Equals(ps2_stubs::feedMpegCdStreamBytes(packet.data(), packet.size()), static_cast<size_t>(0u),
+                     "feedMpegCdStreamBytes after CD EOF should be a no-op");
+
+            R5900Context pictureCtx{};
+            setRegU32(pictureCtx, 4, kMpegAddr);
+            setRegU32(pictureCtx, 5, kImageAddr);
+            ps2_stubs::sceMpegGetPicture(rdram.data(), &pictureCtx, nullptr);
+
+            t.Equals(Ps2FastRead32(rdram.data(), kMpegAddr + 0x00u), 16u,
+                     "host-fed stream should decode to the expected frame width");
+            t.Equals(Ps2FastRead32(rdram.data(), kMpegAddr + 0x08u), 0u,
+                     "host-fed stream should report frame index zero");
+        });
+
+        tc.Run("host feed staged before a decoder opens reaches the later-created decoder", [](TestCase &t)
+        {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            ps2_stubs::resetMpegStubState();
+
+            constexpr uint32_t kMpegAddr = 0x00123000u;
+            constexpr uint32_t kWorkAddr = 0x00140000u;
+            constexpr uint32_t kImageAddr = 0x00160000u;
+
+            ps2_stubs::notifyMpegCdStreamStart();
+
+            const std::vector<uint8_t> packet = makeMpegHostFeedTestPacket();
+            const size_t consumed = ps2_stubs::feedMpegCdStreamBytes(packet.data(), packet.size());
+            t.Equals(consumed, packet.size(),
+                     "feed before any decoder exists should still report the stream as active (staged, not dropped)");
+
+            R5900Context createCtx{};
+            setRegU32(createCtx, 4, kMpegAddr);
+            setRegU32(createCtx, 5, kWorkAddr);
+            setRegU32(createCtx, 6, 0x2000u);
+            ps2_stubs::sceMpegCreate(rdram.data(), &createCtx, nullptr);
+            t.IsTrue(::getRegU32(&createCtx, 2) != 0u,
+                     "sceMpegCreate should return a nonzero handle");
+
+            ps2_stubs::notifyMpegCdStreamEof();
+
+            R5900Context pictureCtx{};
+            setRegU32(pictureCtx, 4, kMpegAddr);
+            setRegU32(pictureCtx, 5, kImageAddr);
+            ps2_stubs::sceMpegGetPicture(rdram.data(), &pictureCtx, nullptr);
+
+            t.Equals(Ps2FastRead32(rdram.data(), kMpegAddr + 0x00u), 16u,
+                     "the later-created decoder should decode the staged prefix");
+            t.Equals(Ps2FastRead32(rdram.data(), kMpegAddr + 0x08u), 0u,
+                     "first decoded frame should report frame index zero");
+        });
+
+        tc.Run("host feed split across a packet boundary decodes", [](TestCase &t)
+        {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            ps2_stubs::resetMpegStubState();
+
+            constexpr uint32_t kMpegAddr = 0x00123000u;
+            constexpr uint32_t kWorkAddr = 0x00140000u;
+            constexpr uint32_t kImageAddr = 0x00160000u;
+
+            R5900Context createCtx{};
+            setRegU32(createCtx, 4, kMpegAddr);
+            setRegU32(createCtx, 5, kWorkAddr);
+            setRegU32(createCtx, 6, 0x2000u);
+            ps2_stubs::sceMpegCreate(rdram.data(), &createCtx, nullptr);
+            t.IsTrue(::getRegU32(&createCtx, 2) != 0u,
+                     "sceMpegCreate should return a nonzero handle");
+
+            ps2_stubs::notifyMpegCdStreamStart();
+
+            const std::vector<uint8_t> packet = makeMpegHostFeedTestPacket();
+            constexpr size_t kSplitAt = 40; // inside the PES payload (payload starts at byte 9)
+            const size_t firstConsumed = ps2_stubs::feedMpegCdStreamBytes(packet.data(), kSplitAt);
+            t.Equals(firstConsumed, kSplitAt,
+                     "first half of a split feed should be routed to the open decoder");
+            const size_t secondConsumed = ps2_stubs::feedMpegCdStreamBytes(
+                packet.data() + kSplitAt, packet.size() - kSplitAt);
+            t.Equals(secondConsumed, packet.size() - kSplitAt,
+                     "second half of a split feed should be routed to the open decoder");
+
+            ps2_stubs::notifyMpegCdStreamEof();
+
+            R5900Context pictureCtx{};
+            setRegU32(pictureCtx, 4, kMpegAddr);
+            setRegU32(pictureCtx, 5, kImageAddr);
+            ps2_stubs::sceMpegGetPicture(rdram.data(), &pictureCtx, nullptr);
+
+            t.Equals(Ps2FastRead32(rdram.data(), kMpegAddr + 0x00u), 16u,
+                     "a packet split across two host feeds should still decode");
+        });
+
+        tc.Run("host feed decodes across a CD-stream restart", [](TestCase &t)
+        {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            ps2_stubs::resetMpegStubState();
+
+            constexpr uint32_t kMpegAddr = 0x00123000u;
+            constexpr uint32_t kWorkAddr = 0x00140000u;
+            constexpr uint32_t kImageAddr = 0x00160000u;
+
+            R5900Context createCtx{};
+            setRegU32(createCtx, 4, kMpegAddr);
+            setRegU32(createCtx, 5, kWorkAddr);
+            setRegU32(createCtx, 6, 0x2000u);
+            ps2_stubs::sceMpegCreate(rdram.data(), &createCtx, nullptr);
+            t.IsTrue(::getRegU32(&createCtx, 2) != 0u,
+                     "sceMpegCreate should return a nonzero handle");
+
+            ps2_stubs::notifyMpegCdStreamStart();
+            const std::vector<uint8_t> packetGen1 = makeMpegHostFeedTestPacket();
+            ps2_stubs::feedMpegCdStreamBytes(packetGen1.data(), packetGen1.size());
+            ps2_stubs::notifyMpegCdStreamEof();
+
+            R5900Context pictureCtx{};
+            setRegU32(pictureCtx, 4, kMpegAddr);
+            setRegU32(pictureCtx, 5, kImageAddr);
+            ps2_stubs::sceMpegGetPicture(rdram.data(), &pictureCtx, nullptr);
+            t.Equals(Ps2FastRead32(rdram.data(), kMpegAddr + 0x00u), 16u,
+                     "generation 1 host-fed stream should decode");
+
+            ps2_stubs::notifyMpegCdStreamStart();
+            const std::vector<uint8_t> packetGen2 = makeMpegHostFeedTestPacket();
+            ps2_stubs::feedMpegCdStreamBytes(packetGen2.data(), packetGen2.size());
+            ps2_stubs::notifyMpegCdStreamEof();
+
+            ps2_stubs::sceMpegGetPicture(rdram.data(), &pictureCtx, nullptr);
+            t.Equals(Ps2FastRead32(rdram.data(), kMpegAddr + 0x00u), 16u,
+                     "generation 2 host-fed stream should decode after a restart");
+        });
+
+        tc.Run("host feed staging is bounded and recovers after overflow", [](TestCase &t)
+        {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            ps2_stubs::resetMpegStubState();
+
+            constexpr uint32_t kMpegAddr = 0x00123000u;
+            constexpr uint32_t kWorkAddr = 0x00140000u;
+            constexpr uint32_t kImageAddr = 0x00160000u;
+
+            ps2_stubs::notifyMpegCdStreamStart();
+
+            const std::vector<uint8_t> packet = makeMpegHostFeedTestPacket();
+            ps2_stubs::feedMpegCdStreamBytes(packet.data(), packet.size());
+
+            const std::vector<uint8_t> junk(ps2_stubs::kMpegHostFeedStageCapBytes + 1u, 0xAAu);
+            ps2_stubs::feedMpegCdStreamBytes(junk.data(), junk.size());
+
+            R5900Context createCtx{};
+            setRegU32(createCtx, 4, kMpegAddr);
+            setRegU32(createCtx, 5, kWorkAddr);
+            setRegU32(createCtx, 6, 0x2000u);
+            ps2_stubs::sceMpegCreate(rdram.data(), &createCtx, nullptr);
+            t.IsTrue(::getRegU32(&createCtx, 2) != 0u,
+                     "sceMpegCreate should return a nonzero handle");
+
+            ps2_stubs::notifyMpegCdStreamEof();
+
+            R5900Context pictureCtx{};
+            setRegU32(pictureCtx, 4, kMpegAddr);
+            setRegU32(pictureCtx, 5, kImageAddr);
+            ps2_stubs::sceMpegGetPicture(rdram.data(), &pictureCtx, nullptr);
+            t.Equals(Ps2FastRead32(rdram.data(), kMpegAddr + 0x00u), 320u,
+                     "overflow should discard the staged prefix; with nothing decodable, width should stay the "
+                     "safe seeded default instead of the fed stream's real width");
+
+            // Delete the generation-1 decoder so the recovery leg's feed genuinely has no
+            // open decoder to route to and exercises staging again, rather than routing live
+            // to a decoder that notifyMpegCdStreamStart would otherwise carry over.
+            R5900Context deleteCtx{};
+            setRegU32(deleteCtx, 4, kMpegAddr);
+            ps2_stubs::sceMpegDelete(rdram.data(), &deleteCtx, nullptr);
+
+            // Recovery leg: the overflow flag is per generation, so a fresh generation
+            // stages and decodes normally again.
+            ps2_stubs::notifyMpegCdStreamStart();
+            const std::vector<uint8_t> packetGen2 = makeMpegHostFeedTestPacket();
+            ps2_stubs::feedMpegCdStreamBytes(packetGen2.data(), packetGen2.size());
+
+            R5900Context createCtx2{};
+            setRegU32(createCtx2, 4, kMpegAddr);
+            setRegU32(createCtx2, 5, kWorkAddr);
+            setRegU32(createCtx2, 6, 0x2000u);
+            ps2_stubs::sceMpegCreate(rdram.data(), &createCtx2, nullptr);
+            t.IsTrue(::getRegU32(&createCtx2, 2) != 0u,
+                     "sceMpegCreate should return a nonzero handle for the recovery decoder");
+
+            ps2_stubs::notifyMpegCdStreamEof();
+            ps2_stubs::sceMpegGetPicture(rdram.data(), &pictureCtx, nullptr);
+            t.Equals(Ps2FastRead32(rdram.data(), kMpegAddr + 0x00u), 16u,
+                     "the overflow flag should clear per generation so the next generation stages and decodes normally");
+        });
+
+        tc.Run("host feed staged before EOF is discarded, not resurrected after EOF", [](TestCase &t)
+        {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            ps2_stubs::resetMpegStubState();
+
+            constexpr uint32_t kMpegAddr = 0x00123000u;
+            constexpr uint32_t kWorkAddr = 0x00140000u;
+            constexpr uint32_t kImageAddr = 0x00160000u;
+
+            ps2_stubs::notifyMpegCdStreamStart();
+
+            const std::vector<uint8_t> packet = makeMpegHostFeedTestPacket();
+            ps2_stubs::feedMpegCdStreamBytes(packet.data(), packet.size());
+
+            ps2_stubs::notifyMpegCdStreamEof();
+
+            R5900Context createCtx{};
+            setRegU32(createCtx, 4, kMpegAddr);
+            setRegU32(createCtx, 5, kWorkAddr);
+            setRegU32(createCtx, 6, 0x2000u);
+            ps2_stubs::sceMpegCreate(rdram.data(), &createCtx, nullptr);
+            t.IsTrue(::getRegU32(&createCtx, 2) != 0u,
+                     "sceMpegCreate should return a nonzero handle");
+
+            R5900Context pictureCtx{};
+            setRegU32(pictureCtx, 4, kMpegAddr);
+            setRegU32(pictureCtx, 5, kImageAddr);
+            ps2_stubs::sceMpegGetPicture(rdram.data(), &pictureCtx, nullptr);
+            t.Equals(Ps2FastRead32(rdram.data(), kMpegAddr + 0x00u), 320u,
+                     "the stage should be discarded at EOF; a post-EOF decoder must not replay a dead generation's "
+                     "prefix (width should stay the safe seeded default, not the fed stream's real width)");
+        });
+
+        tc.Run("feedMpegCdStreamBytes before a CD stream start is a no-op", [](TestCase &t)
+        {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            ps2_stubs::resetMpegStubState();
+
+            constexpr uint32_t kMpegAddr = 0x00123000u;
+            constexpr uint32_t kWorkAddr = 0x00140000u;
+
+            R5900Context createCtx{};
+            setRegU32(createCtx, 4, kMpegAddr);
+            setRegU32(createCtx, 5, kWorkAddr);
+            setRegU32(createCtx, 6, 0x2000u);
+            ps2_stubs::sceMpegCreate(rdram.data(), &createCtx, nullptr);
+            t.IsTrue(::getRegU32(&createCtx, 2) != 0u,
+                     "sceMpegCreate should return a nonzero handle");
+
+            const std::vector<uint8_t> packet = {
+                0x00u, 0x00u, 0x01u, 0xE0u, 0x00u, 0x04u, 0x80u, 0x00u, 0x00u, 0xAAu};
+
+            t.Equals(ps2_stubs::feedMpegCdStreamBytes(packet.data(), packet.size()), static_cast<size_t>(0u),
+                     "feedMpegCdStreamBytes with no active CD stream (handle exists but generation 0) should not consume bytes");
+        });
+
+        tc.Run("host feed fans out to every open decoder and reports the input range once", [](TestCase &t)
+        {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            ps2_stubs::resetMpegStubState();
+
+            constexpr uint32_t kMpegA = 0x00123000u;
+            constexpr uint32_t kWorkA = 0x00140000u;
+            constexpr uint32_t kMpegB = 0x00133000u;
+            constexpr uint32_t kWorkB = 0x00150000u;
+
+            R5900Context createCtxA{};
+            setRegU32(createCtxA, 4, kMpegA);
+            setRegU32(createCtxA, 5, kWorkA);
+            setRegU32(createCtxA, 6, 0x2000u);
+            ps2_stubs::sceMpegCreate(rdram.data(), &createCtxA, nullptr);
+            t.IsTrue(::getRegU32(&createCtxA, 2) != 0u,
+                     "sceMpegCreate should return a nonzero handle for decoder A");
+
+            R5900Context createCtxB{};
+            setRegU32(createCtxB, 4, kMpegB);
+            setRegU32(createCtxB, 5, kWorkB);
+            setRegU32(createCtxB, 6, 0x2000u);
+            ps2_stubs::sceMpegCreate(rdram.data(), &createCtxB, nullptr);
+            t.IsTrue(::getRegU32(&createCtxB, 2) != 0u,
+                     "sceMpegCreate should return a nonzero handle for decoder B");
+
+            ps2_stubs::notifyMpegCdStreamStart();
+
+            const std::vector<uint8_t> programEnd = {0x00u, 0x00u, 0x01u, 0xB9u};
+            const size_t consumed = ps2_stubs::feedMpegCdStreamBytes(programEnd.data(), programEnd.size());
+            t.Equals(consumed, programEnd.size(),
+                     "feedMpegCdStreamBytes should report the input range once, not per decoder");
+
+            R5900Context isEndCtxA{};
+            setRegU32(isEndCtxA, 4, kMpegA);
+            ps2_stubs::sceMpegIsEnd(rdram.data(), &isEndCtxA, nullptr);
+            t.Equals(getRegS32(isEndCtxA, 2), 1, "decoder A should have received the fed bytes");
+
+            R5900Context isEndCtxB{};
+            setRegU32(isEndCtxB, 4, kMpegB);
+            ps2_stubs::sceMpegIsEnd(rdram.data(), &isEndCtxB, nullptr);
+            t.Equals(getRegS32(isEndCtxB, 2), 1, "decoder B should have received the fed bytes");
         });
 
         tc.Run("sceMpegGetPicture releases an old waiter when the CD stream restarts", [](TestCase &t)
