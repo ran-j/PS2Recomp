@@ -1044,19 +1044,95 @@ void ps2sched::clear_suspend(int tid)
 
 void ps2sched::rotate_ready_queue(int priority)
 {
-    std::lock_guard<std::mutex> lk(g_sched_mutex);
-    FiberContext** pp = &g_run_queue;
-    while (*pp && (*pp)->priority != priority)
-        pp = &(*pp)->next;
-    if (!*pp) return;
-    FiberContext* victim = *pp; // first node at this priority
-    *pp = victim->next;
-    victim->next = nullptr;
-    FiberContext** ins = pp; // re-insert after the last node at this priority
-    while (*ins && (*ins)->priority == priority)
-        ins = &(*ins)->next;
-    victim->next = *ins;
-    *ins = victim;
+    // RotateThreadReadyQueue primitive. The RUNNING fiber is not in g_run_queue
+    // (the executor pops it before resuming), yet on real hardware the running
+    // thread IS the head of its priority's ready queue. Three cases:
+    //
+    //  1. A fiber caller whose own priority == `priority` is the head of that
+    //     ready ring: it moves to the tail of its group and YIELDS, but only if
+    //     another fiber at that priority or better is runnable; if nothing at
+    //     this priority or better is runnable it returns WITHOUT yielding (no
+    //     pointless context switch). This self-enqueue is required, not
+    //     incidental: maybe_yield() preempts only for a STRICTLY higher-priority
+    //     fiber, so nothing else ever round-robins the caller against its
+    //     equals. This is the whole point of the syscall -- the standard PS2
+    //     idle/yield-thread idiom, a guest "yield to my equals" primitive.
+    //  2. A fiber caller rotating a DIFFERENT priority than its own moves that
+    //     group's head node to the tail and does NOT yield HERE. The syscall can
+    //     still yield: the wrapper's trailing maybe_yield() (Thread.cpp) preempts
+    //     this caller for a STRICTLY higher-priority fiber -- via the wrapper,
+    //     never through this function.
+    //  3. A caller with NO current fiber (tls_current_fiber == nullptr) -- a
+    //     host-borrowed worker running under AsyncGuestScope -- cannot match the
+    //     caller-is-head case, so it just rotates the requested group WITHOUT
+    //     yielding. It is the ONLY caller guaranteed not to yield regardless of
+    //     run-queue state: the wrapper's maybe_yield() is likewise a no-op when
+    //     tls_current_fiber == nullptr (its !fc early return). The branch below
+    //     turns solely on tls_current_fiber, not on interrupt-vs-thread context.
+    //
+    // Interrupt-context / EE-fidelity note: an interrupt/DMAC handler can run
+    // INLINE on a fiber (see dispatchDmacHandlersForCause), and
+    // iRotateThreadReadyQueue is a direct alias of the base syscall, so an
+    // in-handler caller at its own priority with a runnable peer takes case 1
+    // and YIELDS mid-handler. This IS an EE-fidelity deviation: real EE
+    // i-prefixed handlers defer any reschedule to interrupt exit and never
+    // context-switch mid-handler, whereas this inline-on-fiber path reschedules
+    // to an equal-priority peer before the handler returns. It is pinned rather
+    // than merely asserted: the SchedulerProtocol suite drives an
+    // inline-DMAC-dispatched handler that calls RotateThreadReadyQueue at its own
+    // priority with a queued equal-priority peer and checks the switch is
+    // crash/deadlock-safe and deterministic -- the peer runs to completion, then
+    // the handler resumes and returns on its still-live per-invocation scratch
+    // stack. Inline handler dispatch reserves that fresh scratch stack precisely
+    // to tolerate a handler body yielding at a back-edge, the same mechanism the
+    // other back-edge yield paths rely on; the mid-handler switch is a bounded
+    // extension of it, now covered by test.
+    FiberContext* self = tls_current_fiber;
+    bool yieldSelf = false;
+    {
+        std::lock_guard<std::mutex> lk(g_sched_mutex);
+
+        if (self != nullptr && self->priority == priority)
+        {
+            // Caller is the head of this group. Only actually hand the CPU over
+            // if somebody else can run at this priority or better; otherwise a
+            // requeue+switch would just resume us and burn fiber switches.
+            // self is not in g_run_queue (the executor pops the running fiber
+            // before resuming it), and the queue is priority-ordered, so a
+            // runnable peer at this priority or better exists iff the head is.
+            const bool peerAtPriorityOrBetterRunnable =
+                (g_run_queue != nullptr && g_run_queue->priority <= priority);
+            if (peerAtPriorityOrBetterRunnable)
+            {
+                enqueue_locked(self); // tail of our priority group, state=Ready
+                yieldSelf = true;
+            }
+            // The remaining same-priority nodes keep their relative order, which
+            // is exactly head->tail rotation with the caller as head.
+        }
+        else
+        {
+            // Rotating a group we are not part of: move that group's head node
+            // to the tail. No reschedule of the caller.
+            FiberContext** pp = &g_run_queue;
+            while (*pp && (*pp)->priority != priority)
+                pp = &(*pp)->next;
+            if (!*pp) return;
+            FiberContext* victim = *pp; // first node at this priority
+            *pp = victim->next;
+            victim->next = nullptr;
+            FiberContext** ins = pp; // re-insert after the last node at this priority
+            while (*ins && (*ins)->priority == priority)
+                ins = &(*ins)->next;
+            victim->next = *ins;
+            *ins = victim;
+        }
+    }
+
+    if (yieldSelf)
+    {
+        ps2fiber_yield(); // executor sees Ready+queued and reschedules us later
+    }
 }
 
 void ps2sched::async_guest_begin()

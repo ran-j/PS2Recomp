@@ -142,6 +142,14 @@ namespace ps2sched
     void clear_suspend(int tid);
 
     // Rotate the equal-priority group in the run queue (RotateThreadReadyQueue).
+    // rotate_ready_queue() is the primitive the RotateThreadReadyQueue syscall
+    // wrapper calls before its own trailing maybe_yield() (Thread.cpp). A fiber
+    // caller at its own priority is the head of that ready ring: it moves to the
+    // tail of its group and yields, but only when another fiber at that priority
+    // or better is runnable. A fiber caller rotating a different priority, or a
+    // host-borrowed worker with no current fiber, rotates the requested group
+    // without yielding here. See the definition in ps2_scheduler.cpp for the
+    // full case analysis, including the interrupt-context / EE-fidelity notes.
     void rotate_ready_queue(int priority);
 
     // --- Async guest-code borrow ---
