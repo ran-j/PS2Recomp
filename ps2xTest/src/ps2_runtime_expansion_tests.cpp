@@ -2370,7 +2370,7 @@ void register_scheduler_tests()
 }
 
 // ---------------------------------------------------------------------------
-// Scheduler protocol tests — 19-test suite
+// Scheduler protocol tests
 // ---------------------------------------------------------------------------
 
 namespace
@@ -2532,7 +2532,7 @@ namespace
     }
 
     // -----------------------------------------------------------------------
-    // Step functions for the 19 protocol tests
+    // Step functions for the protocol tests
     // All use the atomic gSeq counter (release/acquire) to publish per-step
     // -----------------------------------------------------------------------
 
@@ -2754,10 +2754,111 @@ namespace
         ctx->pc = 0u;
     }
 
+    // stepRotateOwnPrioThenLog: yield to equal-priority peers via
+    // RotateThreadReadyQueue(0) (0 => caller's own priority), then log self.
+    // Pre-fix the rotate never moved the caller, so the caller kept the
+    // executor and logged before any equal-priority peer ran.
+    static void stepRotateOwnPrioThenLog(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        R5900Context sc{};
+        setRegU32(sc, 4, 0u); // prio 0 => use caller's own current priority
+        ps2_syscalls::RotateThreadReadyQueue(rdram, &sc, runtime);
+        const uint32_t seq = gSeq.load(std::memory_order_relaxed);
+        int32_t tid = g_currentThreadId;
+        std::memcpy(rdram + kRunLog + seq * 4, &tid, 4);
+        gSeq.fetch_add(1u, std::memory_order_release); // RMW: preserves release-sequence chaining
+        ctx->pc = 0u;
+    }
+
+    // stepSpinForHostWorkerThenRotate: exercise the peerAtPriorityOrBetterRunnable==false
+    // short-circuit. This fiber is the ONLY fiber at its priority, so
+    // RotateThreadReadyQueue(ownPriority) must NOT requeue+yield -- it returns and
+    // the caller keeps running. To make the (absent) yield observable, a host
+    // worker is parked in async_guest_begin() first: if the rotate wrongly
+    // yielded, the executor's fairness deferral would hand the guest token to that
+    // worker, which would then log BEFORE this caller. With the short-circuit
+    // intact the caller logs first and only then does the worker get the token.
+    static void stepSpinForHostWorkerThenRotate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gStartedFlag.store(1u, std::memory_order_release);
+        // Wait until the host worker has entered async_guest_begin() and parked,
+        // so it is a candidate for the executor's fairness handoff the instant we
+        // yield. host_token_waiters() is a lock-free atomic load; spinning here is
+        // safe because this fiber owns the single executor slot.
+        while (ps2sched::host_token_waiters() == 0)
+        {
+            std::this_thread::yield();
+        }
+        R5900Context sc{};
+        setRegU32(sc, 4, 0u); // prio 0 => caller's own current priority
+        ps2_syscalls::RotateThreadReadyQueue(rdram, &sc, runtime);
+        const uint32_t seq = gSeq.load(std::memory_order_relaxed);
+        int32_t tid = g_currentThreadId;
+        std::memcpy(rdram + kRunLog + seq * 4, &tid, 4);
+        gSeq.fetch_add(1u, std::memory_order_release); // RMW: preserves release-sequence chaining
+        ctx->pc = 0u;
+    }
+
+    // stepSpinForHostWorkerThenRotateForeign: case-2 pin. This fiber (prio 10)
+    // rotates a DIFFERENT priority group (20) than its own. rotate_ready_queue's
+    // case 2 must NOT requeue+yield the caller -- only a caller at its OWN
+    // priority takes the yield path. Same host-worker lever as T3c/T3d: if the
+    // caller wrongly yielded, the parked worker would get the guest token and log
+    // first.
+    static void stepSpinForHostWorkerThenRotateForeign(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gStartedFlag.store(1u, std::memory_order_release);
+        while (ps2sched::host_token_waiters() == 0)
+        {
+            std::this_thread::yield();
+        }
+        R5900Context sc{};
+        setRegU32(sc, 4, 20u); // rotate the prio-20 group -- foreign to this prio-10 caller
+        ps2_syscalls::RotateThreadReadyQueue(rdram, &sc, runtime);
+        const uint32_t seq = gSeq.load(std::memory_order_relaxed);
+        int32_t tid = g_currentThreadId;
+        std::memcpy(rdram + kRunLog + seq * 4, &tid, 4);
+        gSeq.fetch_add(1u, std::memory_order_release); // RMW: preserves release-sequence chaining
+        ctx->pc = 0u;
+    }
+
+    // T3f: the inline-interrupt-handler case-1 pin. A DMAC handler dispatched
+    // INLINE on a fiber (is_guest_thread() true) calls RotateThreadReadyQueue at
+    // its own priority with an equal-priority peer queued. Case 1 requeues the
+    // caller and yields MID-HANDLER; the peer runs to completion, then the
+    // handler resumes on its still-live per-invocation scratch stack and returns.
+    // This is the EE-fidelity deviation the review flagged: exercised here so it
+    // is a tested behaviour, not an untested assertion. Private DMAC cause so it
+    // cannot collide with the workload suite's cause-5/6 handlers.
+    static constexpr uint32_t kT3fDmacCause = 3u;
+
+    // Fiber A entry: dispatch the DMAC handler inline on this fiber, then exit.
+    static void stepDispatchInlineDmac(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        ps2_syscalls::dispatchDmacHandlersForCause(rdram, runtime, kT3fDmacCause);
+        ctx->pc = 0u;
+    }
+
+    // Runs AS the inline DMAC handler on fiber A. Rotate A's own priority group
+    // (prio 0 => caller's current priority) with equal-priority peer B queued:
+    // case 1 requeues A and yields mid-handler. B runs and exits, then A resumes
+    // HERE (inside runHandlers, scratch stack still live) and logs its own tid.
+    static void stepHandlerRotateOwnPrioThenLog(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        R5900Context sc{};
+        setRegU32(sc, 4, 0u); // prio 0 => caller's own current priority (A = 10)
+        ps2_syscalls::RotateThreadReadyQueue(rdram, &sc, runtime);
+        const uint32_t seq = gSeq.load(std::memory_order_relaxed);
+        int32_t tid = g_currentThreadId; // still A's tid: same fiber, inline dispatch
+        std::memcpy(rdram + kRunLog + seq * 4, &tid, 4);
+        gSeq.fetch_add(1u, std::memory_order_release); // RMW: preserves release-sequence chaining
+        ctx->pc = 0u; // handler returns
+    }
+
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
-// 19-test scheduler protocol suite
+// scheduler protocol suite
 // ---------------------------------------------------------------------------
 void register_scheduler_protocol_tests()
 {
@@ -2922,6 +3023,324 @@ void register_scheduler_protocol_tests()
             t.Equals(log[2], tidA, "T3: A runs last (moved to tail)");
 
             drainedWithin(std::chrono::milliseconds(1000));
+        });
+
+        // ------------------------------------------------------------------
+        // Test 3b: RotateThreadReadyQueue(ownPriority) yields to an
+        // equal-priority peer (the caller is the head of its own ring).
+        // Pre-fix the caller never moved and monopolised the N=1 executor;
+        // it would log first here (livelock), failing this test.
+        // ------------------------------------------------------------------
+        tc.Run("RotateThreadReadyQueue(ownPriority) yields to an equal-priority peer", [](TestCase &t)
+        {
+            SchedFixture fx;
+            PS2Runtime &runtime = fx.runtime;
+            std::vector<uint8_t> &rdram = fx.rdram;
+
+            runtime.registerFunction(0x00622000u, &stepRotateOwnPrioThenLog);
+            runtime.registerFunction(0x00620000u, &stepLogAndExit);
+
+            rdramSeqReset(rdram);
+            std::memset(rdram.data() + kRunLog, 0, 32u);
+
+            // Lock out the executor so both fibers are Ready before either runs.
+            ps2sched::async_guest_begin();
+
+            // A (head, prio 10) rotates its own priority group then logs.
+            // B (prio 10) just logs. Both created at the same priority; A first
+            // so A is the ready-queue head.
+            const int32_t tidA = startSchedWorker(rdram.data(), &runtime, 0x00622000u, 10, 0x00520000u, 0x2000u);
+            const int32_t tidB = startSchedWorker(rdram.data(), &runtime, 0x00620000u, 10, 0x00522000u, 0x2000u);
+            t.IsTrue(tidA > 0, "T3b: A started");
+            t.IsTrue(tidB > 0, "T3b: B started");
+
+            // Release executor: A runs first, RotateThreadReadyQueue(own prio)
+            // must move A to the tail and yield to B.
+            ps2sched::async_guest_end();
+
+            const bool allDone = waitUntil([&](){ return rdramSeq(rdram) >= 2u; }, std::chrono::milliseconds(2000));
+            t.IsTrue(allDone, "T3b: both fibers logged");
+
+            int32_t log[2] = {};
+            std::memcpy(log, rdram.data() + kRunLog, 8);
+            t.Equals(log[0], tidB, "T3b: B runs first (A yielded its group head)");
+            t.Equals(log[1], tidA, "T3b: A runs last (rotated to tail)");
+
+            drainedWithin(std::chrono::milliseconds(1000));
+        });
+
+        // ------------------------------------------------------------------
+        // Test 3c: RotateThreadReadyQueue(ownPriority) does NOT requeue+yield
+        // when the caller is alone at its priority (peerAtPriorityOrBetterRunnable==false).
+        // A lone fiber calls the syscall while a host worker is parked in
+        // async_guest_begin(). The short-circuit means the caller keeps the slot,
+        // logs, and finishes BEFORE the parked worker is granted the token. If the
+        // guard were removed the rotate would yield, the executor would hand the
+        // token to the worker (fairness), and the worker would log first -- the
+        // "always requeue+yield" regression this pins.
+        // ------------------------------------------------------------------
+        tc.Run("RotateThreadReadyQueue(ownPriority) does not yield when caller is alone at its priority", [](TestCase &t)
+        {
+            SchedFixture fx;
+            PS2Runtime &runtime = fx.runtime;
+            std::vector<uint8_t> &rdram = fx.rdram;
+
+            static constexpr int32_t kHostWorkerMark = 0x00A5A5A5;
+
+            runtime.registerFunction(0x00626000u, &stepSpinForHostWorkerThenRotate);
+
+            rdramSeqReset(rdram);
+            std::memset(rdram.data() + kRunLog, 0, 32u);
+            gStartedFlag.store(0u, std::memory_order_release);
+
+            // A (prio 10) is the only fiber. Start it and let it run up to the
+            // spin, at which point it owns the single executor slot.
+            const int32_t tidA = startSchedWorker(rdram.data(), &runtime, 0x00626000u, 10, 0x00526000u, 0x2000u);
+            t.IsTrue(tidA > 0, "T3c: A started");
+
+            const bool running = waitUntil([&]()
+            {
+                return gStartedFlag.load(std::memory_order_acquire) != 0u;
+            }, std::chrono::milliseconds(2000));
+            t.IsTrue(running, "T3c: A is running (owns the executor slot)");
+
+            // Park a host worker in async_guest_begin(): it cannot get the token
+            // while A owns the slot, so it waits. Its presence is what A's rotate
+            // would wrongly yield to if the short-circuit were removed. When it
+            // finally gets the token it logs a sentinel and releases.
+            std::thread worker([&]()
+            {
+                ps2sched::async_guest_begin();
+                const uint32_t seq = gSeq.load(std::memory_order_relaxed);
+                int32_t mark = kHostWorkerMark;
+                std::memcpy(rdram.data() + kRunLog + seq * 4, &mark, 4);
+                gSeq.fetch_add(1u, std::memory_order_release);
+                ps2sched::async_guest_end();
+            });
+
+            const bool bothLogged = waitUntil([&]()
+            {
+                return rdramSeq(rdram) >= 2u;
+            }, std::chrono::milliseconds(2000));
+            t.IsTrue(bothLogged, "T3c: caller and host worker both logged");
+
+            worker.join();
+
+            int32_t log[2] = {};
+            std::memcpy(log, rdram.data() + kRunLog, 8);
+            t.Equals(log[0], tidA, "T3c: lone caller logs first (no requeue+yield)");
+            t.Equals(log[1], kHostWorkerMark, "T3c: parked host worker logs only after the caller finishes");
+
+            drainedWithin(std::chrono::milliseconds(1000));
+        });
+
+        // ------------------------------------------------------------------
+        // Test 3d: RotateThreadReadyQueue(ownPriority) does NOT yield to a
+        // strictly-LOWER-priority ready fiber. The caller is alone at its own
+        // priority, but a worse-priority fiber is Ready in the queue. The
+        // peerAtPriorityOrBetterRunnable guard must still short-circuit: it is
+        // the "at this priority OR BETTER" clause -- not merely "the queue is
+        // non-empty" -- that this pins. Weakening the guard to a bare non-null
+        // g_run_queue check passes T3, T3b and T3c but fails here. Same
+        // host-worker lever as T3c: a wrongful yield hands the guest token to
+        // the parked worker (executor fairness), which then logs first.
+        // ------------------------------------------------------------------
+        tc.Run("RotateThreadReadyQueue(ownPriority) does not yield to a strictly-lower-priority ready fiber", [](TestCase &t)
+        {
+            SchedFixture fx;
+            PS2Runtime &runtime = fx.runtime;
+            std::vector<uint8_t> &rdram = fx.rdram;
+
+            static constexpr int32_t kHostWorkerMark = 0x00A5A5A5;
+
+            runtime.registerFunction(0x00628000u, &stepSpinForHostWorkerThenRotate);
+            runtime.registerFunction(0x00620000u, &stepLogAndExit);
+
+            rdramSeqReset(rdram);
+            std::memset(rdram.data() + kRunLog, 0, 32u);
+            gStartedFlag.store(0u, std::memory_order_release);
+
+            // A (prio 10) is the only fiber at its priority. Start it and let it
+            // run up to the spin, at which point it owns the single executor slot.
+            const int32_t tidA = startSchedWorker(rdram.data(), &runtime, 0x00628000u, 10, 0x00528000u, 0x2000u);
+            t.IsTrue(tidA > 0, "T3d: A started");
+
+            const bool running = waitUntil([&]()
+            {
+                return gStartedFlag.load(std::memory_order_acquire) != 0u;
+            }, std::chrono::milliseconds(2000));
+            t.IsTrue(running, "T3d: A is running (owns the executor slot)");
+
+            // B (prio 20 -- strictly WORSE than A's 10) is Ready in the run queue
+            // but cannot run while A owns the slot. It is the strictly-lower-
+            // priority fiber A must NOT yield to. Started only after A is confirmed
+            // running, so the executor (parked inside A's spin) leaves B queued.
+            const int32_t tidB = startSchedWorker(rdram.data(), &runtime, 0x00620000u, 20, 0x00522000u, 0x2000u);
+            t.IsTrue(tidB > 0, "T3d: B started (lower priority, Ready)");
+
+            // Park a host worker in async_guest_begin(): its presence is what A's
+            // rotate would wrongly yield to if the guard decayed to bare non-null.
+            std::thread worker([&]()
+            {
+                ps2sched::async_guest_begin();
+                const uint32_t seq = gSeq.load(std::memory_order_relaxed);
+                int32_t mark = kHostWorkerMark;
+                std::memcpy(rdram.data() + kRunLog + seq * 4, &mark, 4);
+                gSeq.fetch_add(1u, std::memory_order_release);
+                ps2sched::async_guest_end();
+            });
+
+            const bool allLogged = waitUntil([&]()
+            {
+                return rdramSeq(rdram) >= 3u;
+            }, std::chrono::milliseconds(2000));
+            t.IsTrue(allLogged, "T3d: caller, host worker and B all logged");
+
+            worker.join();
+
+            int32_t log[3] = {};
+            std::memcpy(log, rdram.data() + kRunLog, 12);
+            t.Equals(log[0], tidA, "T3d: lone-at-priority caller logs first (no yield to a worse-priority fiber)");
+            t.Equals(log[1], kHostWorkerMark, "T3d: parked host worker logs only after the caller finishes");
+            t.Equals(log[2], tidB, "T3d: the worse-priority fiber runs last");
+
+            drainedWithin(std::chrono::milliseconds(1000));
+        });
+
+        // ------------------------------------------------------------------
+        // Test 3e: RotateThreadReadyQueue(foreignPriority) rotates the target
+        // group head-to-tail but does NOT yield the calling fiber. Pins the
+        // case-1 entry guard's priority-equality conjunct: only a caller AT ITS
+        // OWN priority takes the yield path. Dropping `self->priority == priority`
+        // from the guard (so any fiber caller yields) passes T3/T3b/T3c/T3d --
+        // none has a foreign-priority fiber caller -- but fails here. Same
+        // host-worker lever as T3c/T3d: a wrongful yield hands the guest token to
+        // the parked worker, which then logs before the caller.
+        // ------------------------------------------------------------------
+        tc.Run("RotateThreadReadyQueue(foreignPriority) rotates the target group without yielding the caller", [](TestCase &t)
+        {
+            SchedFixture fx;
+            PS2Runtime &runtime = fx.runtime;
+            std::vector<uint8_t> &rdram = fx.rdram;
+
+            static constexpr int32_t kHostWorkerMark = 0x00A5A5A5;
+
+            runtime.registerFunction(0x0062A000u, &stepSpinForHostWorkerThenRotateForeign);
+            runtime.registerFunction(0x00620000u, &stepLogAndExit);
+
+            rdramSeqReset(rdram);
+            std::memset(rdram.data() + kRunLog, 0, 32u);
+            gStartedFlag.store(0u, std::memory_order_release);
+
+            // A (prio 10) is the only fiber at its priority. Run it up to the
+            // spin, at which point it owns the single executor slot.
+            const int32_t tidA = startSchedWorker(rdram.data(), &runtime, 0x0062A000u, 10, 0x0052A000u, 0x2000u);
+            t.IsTrue(tidA > 0, "T3e: A started");
+
+            const bool running = waitUntil([&]()
+            {
+                return gStartedFlag.load(std::memory_order_acquire) != 0u;
+            }, std::chrono::milliseconds(2000));
+            t.IsTrue(running, "T3e: A is running (owns the executor slot)");
+
+            // C, D (prio 20) form the FOREIGN group A rotates. Started only after
+            // A is confirmed running so the executor (parked in A's spin) leaves
+            // them queued. Creation order C then D -> group [C, D].
+            const int32_t tidC = startSchedWorker(rdram.data(), &runtime, 0x00620000u, 20, 0x0052C000u, 0x2000u);
+            const int32_t tidD = startSchedWorker(rdram.data(), &runtime, 0x00620000u, 20, 0x0052E000u, 0x2000u);
+            t.IsTrue(tidC > 0, "T3e: C started");
+            t.IsTrue(tidD > 0, "T3e: D started");
+
+            // Park a host worker: its presence is what A's rotate would wrongly
+            // yield to if the entry guard dropped the priority-equality conjunct.
+            std::thread worker([&]()
+            {
+                ps2sched::async_guest_begin();
+                const uint32_t seq = gSeq.load(std::memory_order_relaxed);
+                int32_t mark = kHostWorkerMark;
+                std::memcpy(rdram.data() + kRunLog + seq * 4, &mark, 4);
+                gSeq.fetch_add(1u, std::memory_order_release);
+                ps2sched::async_guest_end();
+            });
+
+            const bool allLogged = waitUntil([&]()
+            {
+                return rdramSeq(rdram) >= 4u;
+            }, std::chrono::milliseconds(2000));
+            t.IsTrue(allLogged, "T3e: caller, host worker and both group fibers logged");
+
+            worker.join();
+
+            int32_t log[4] = {};
+            std::memcpy(log, rdram.data() + kRunLog, 16);
+            t.Equals(log[0], tidA, "T3e: foreign-priority caller logs first (no yield)");
+            t.Equals(log[1], kHostWorkerMark, "T3e: parked host worker logs only after the caller finishes");
+            t.Equals(log[2], tidD, "T3e: rotated group head-to-tail (D now runs first)");
+            t.Equals(log[3], tidC, "T3e: original head C moved to tail runs last");
+
+            drainedWithin(std::chrono::milliseconds(1000));
+        });
+
+        // ------------------------------------------------------------------
+        // Test 3f: RotateThreadReadyQueue(ownPriority) from INSIDE an inline
+        // DMAC handler. The is_guest_thread() dispatch branch runs the handler
+        // on the calling fiber; case 1 yields mid-handler to an equal-priority
+        // peer. Pins that this EE-fidelity deviation is crash/deadlock-safe and
+        // deterministic: the peer runs first, then the handler resumes on its
+        // still-live scratch stack and returns. Reverting the caller-is-head
+        // rotation (old single-loop body) makes A log before B and fails this,
+        // exactly as it does T3b.
+        // ------------------------------------------------------------------
+        tc.Run("RotateThreadReadyQueue(ownPriority) from an inline DMAC handler yields to an equal-priority peer and resumes safely", [](TestCase &t)
+        {
+            SchedFixture fx;
+            PS2Runtime &runtime = fx.runtime;
+            std::vector<uint8_t> &rdram = fx.rdram;
+
+            constexpr uint32_t kEntryA   = 0x00624000u; // A: inline-dispatch entry
+            constexpr uint32_t kHandlerA = 0x00626000u; // A's DMAC handler body
+
+            runtime.registerFunction(kEntryA,     &stepDispatchInlineDmac);
+            runtime.registerFunction(kHandlerA,   &stepHandlerRotateOwnPrioThenLog);
+            runtime.registerFunction(0x00620000u, &stepLogAndExit); // B: log + exit
+
+            // Register the handler on the private cause; AddDmacHandler enables it.
+            int32_t hid = -1;
+            { R5900Context a{}; setRegU32(a, 4, kT3fDmacCause); setRegU32(a, 5, kHandlerA);
+              setRegU32(a, 6, 0u); setRegU32(a, 7, 0u);
+              ps2_syscalls::AddDmacHandler(rdram.data(), &a, &runtime); hid = getRegS32(a, 2); }
+            t.IsTrue(hid > 0, "T3f: inline DMAC handler registered");
+
+            rdramSeqReset(rdram);
+            std::memset(rdram.data() + kRunLog, 0, 32u);
+
+            // Lock out the executor so both fibers are Ready before either runs,
+            // and so NO host worker lingers to contend for the token at the yield.
+            ps2sched::async_guest_begin();
+
+            // A (head, prio 10) dispatches inline then its handler rotates+yields.
+            // B (prio 10) just logs. A created first => A is the ready-queue head.
+            const int32_t tidA = startSchedWorker(rdram.data(), &runtime, kEntryA,     10, 0x00524000u, 0x2000u);
+            const int32_t tidB = startSchedWorker(rdram.data(), &runtime, 0x00620000u, 10, 0x00526000u, 0x2000u);
+            t.IsTrue(tidA > 0, "T3f: A started");
+            t.IsTrue(tidB > 0, "T3f: B started");
+
+            ps2sched::async_guest_end(); // release: A runs, dispatches inline, handler yields to B
+
+            const bool allDone = waitUntil([&](){ return rdramSeq(rdram) >= 2u; }, std::chrono::milliseconds(2000));
+            t.IsTrue(allDone, "T3f: peer and caller both logged (no deadlock)");
+
+            int32_t log[2] = {};
+            std::memcpy(log, rdram.data() + kRunLog, 8);
+            t.Equals(log[0], tidB, "T3f: equal-priority peer runs first (caller yielded mid-handler)");
+            t.Equals(log[1], tidA, "T3f: caller resumes after the peer and returns from the handler");
+
+            const bool drained = drainedWithin(std::chrono::milliseconds(1000));
+            t.IsTrue(drained, "T3f: both fibers completed and the executor drained (mid-handler switch is crash/deadlock-safe)");
+
+            // Cleanup the process-global DMAC handler so later suites are clean.
+            { R5900Context r{}; setRegU32(r, 4, kT3fDmacCause); setRegU32(r, 5, static_cast<uint32_t>(hid));
+              ps2_syscalls::RemoveDmacHandler(rdram.data(), &r, &runtime); }
         });
 
         // ------------------------------------------------------------------
