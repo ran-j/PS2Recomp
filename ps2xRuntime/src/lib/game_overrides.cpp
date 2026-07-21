@@ -1,5 +1,22 @@
 #include "game_overrides.h"
 #include "ps2_runtime.h"
+// TEMP: experimental test override for SLPS_204.14 (Taiko no Tatsujin JP)
+// investigating an infinite busy-wait polling *(0x322880) at 0x1d2600.
+// Force that getter to return 1 to see if the game proceeds past the wait.
+// Remove or replace once the real signaling mechanism is understood.
+namespace
+{
+    void ApplyTaikoInvestigationOverride(PS2Runtime &runtime)
+    {
+        // CONFIRMED still needed (tested 2026-07-21 session 4): even with the SIF
+        // WaitSema completion fix in place, thread 2 (entry=0x1d0660) still never runs
+        // and *(0x322880) is never set naturally. Disabling this override reproduces the
+        // original hang, just slightly later (mid-way through the SIF handshake instead
+        // of before it). Keep this in place.
+        ps2_game_overrides::bindAddressHandler(runtime, 0x1D2600u, "ret1");
+    }
+}
+PS2_REGISTER_GAME_OVERRIDE("TaikoInvestigation_ForceFlag322880", "SLPS_204.14.elf", 0x100134u, 0u, ApplyTaikoInvestigationOverride);
 #include "ps2_runtime_calls.h"
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
