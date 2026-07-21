@@ -1123,7 +1123,8 @@ namespace ps2_stubs
                             const uint8_t *data,
                             size_t size,
                             uint32_t guestAddr,
-                            std::vector<MpegStreamCallbackEvent> &callbackEvents)
+                            std::vector<MpegStreamCallbackEvent> &callbackEvents,
+                            bool trackGuestAddrs = true)
         {
             if (!data || size == 0)
             {
@@ -1153,10 +1154,13 @@ namespace ps2_stubs
             playback.sawInput = true;
 
             playback.pssBuffer.insert(playback.pssBuffer.end(), data, data + size);
-            playback.pssGuestAddrs.reserve(playback.pssGuestAddrs.size() + size);
-            for (size_t i = 0; i < size; ++i)
+            if (trackGuestAddrs)
             {
-                playback.pssGuestAddrs.push_back(guestAddr + static_cast<uint32_t>(i));
+                playback.pssGuestAddrs.reserve(playback.pssGuestAddrs.size() + size);
+                for (size_t i = 0; i < size; ++i)
+                {
+                    playback.pssGuestAddrs.push_back(guestAddr + static_cast<uint32_t>(i));
+                }
             }
             processPssBuffer(mpegAddr, playback, callbackEvents);
             if (!playback.decodedFrames.empty())
@@ -1557,6 +1561,43 @@ namespace ps2_stubs
             }
             g_mpeg_cv.notify_all();
         }
+    }
+
+    size_t feedMpegCdStreamBytes(const uint8_t *data, size_t size)
+    {
+        if (!data || size == 0u)
+        {
+            return 0u;
+        }
+
+        size_t routedCount = 0u;
+        {
+            std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+
+            // Active only between notifyMpegCdStreamStart() and notifyMpegCdStreamEof().
+            const bool cdStreamActive =
+                g_mpeg_stub_state.cdStreamGeneration != 0u &&
+                !g_mpeg_stub_state.currentCdStreamEofSeen;
+            if (!cdStreamActive)
+            {
+                return 0u;
+            }
+
+            // Host-fed data carries no guest addresses, so no callback event is queued.
+            // TODO(host-feed callbacks): queue on MpegPlaybackState for a guest syscall to drain.
+            std::vector<MpegStreamCallbackEvent> callbackEvents;
+            for (auto &[mpegAddr, playback] : g_mpeg_stub_state.playbackByMpeg)
+            {
+                if (playback.cdStreamGeneration != g_mpeg_stub_state.cdStreamGeneration)
+                {
+                    continue;
+                }
+                appendPssBytes(mpegAddr, playback, data, size, 0u, callbackEvents, false);
+                ++routedCount;
+            }
+        }
+        g_mpeg_cv.notify_all();
+        return routedCount != 0u ? size : 0u;
     }
 
     void sceMpegFlush(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

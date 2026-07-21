@@ -7,6 +7,12 @@ namespace ps2_stubs
     void resetMpegStubState();
     void notifyMpegCdStreamStart();
     void notifyMpegCdStreamEof();
+    // Push `size` bytes of the active CD movie stream's program-stream/PES data
+    // into the guest-driven MPEG decoder from host memory. Must be bracketed by
+    // notifyMpegCdStreamStart()/notifyMpegCdStreamEof(). Returns `size` once the
+    // bytes are routed to the open decoder(s), or 0 when no CD stream is active.
+    // Thread-safe; stream callbacks are not dispatched on this path.
+    size_t feedMpegCdStreamBytes(const uint8_t *data, size_t size);
     void sceMpegFlush(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceMpegAddBs(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceMpegAddCallback(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
