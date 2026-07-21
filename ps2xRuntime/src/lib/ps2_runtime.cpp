@@ -5,6 +5,7 @@
 #include "game_overrides.h"
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_gs_gpu.h"
+#include "runtime/present_layout.h"
 #include "ThreadNaming.h"
 #include "Kernel/Stubs/Audio.h"
 #include "Kernel/Stubs/GS.h"
@@ -2367,15 +2368,19 @@ void PS2Runtime::run()
         const float srcHeight = static_cast<float>(std::max<uint32_t>(1u, presentHeight));
         const float screenWidth = static_cast<float>(GetScreenWidth());
         const float screenHeight = static_cast<float>(GetScreenHeight());
-        const float scale = std::min(screenWidth / srcWidth, screenHeight / srcHeight);
-        const float dstWidth = srcWidth * scale;
-        const float dstHeight = srcHeight * scale;
+        // Present the guest's display region -- the full display width (FB_WIDTH)
+        // at the current decoded height -- fit into the window with its aspect
+        // preserved. The decoded buffer, whatever its column count, is stretched
+        // across the full region via srcRect, so a narrow (e.g. 512-column)
+        // buffer fills the display exactly as a 640-column one does instead of
+        // being pillarboxed at its own column count; the region itself is
+        // letterboxed rather than stretched when the window's shape differs
+        // (a resized desktop window, or the 960x544 Vita window vs. 640x448).
         const Rectangle srcRect{0.0f, 0.0f, srcWidth, srcHeight};
-        const Rectangle dstRect{
-            (screenWidth - dstWidth) * 0.5f,
-            (screenHeight - dstHeight) * 0.5f,
-            dstWidth,
-            dstHeight};
+        const PresentLayout::PresentRect dst =
+            PresentLayout::computePresentDstRect(static_cast<float>(FB_WIDTH), srcHeight,
+                                               screenWidth, screenHeight);
+        const Rectangle dstRect{dst.x, dst.y, dst.width, dst.height};
         DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
         if (m_debugUiInitialized && m_debugUiDrawCallback)
         {
