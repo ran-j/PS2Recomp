@@ -166,6 +166,8 @@ namespace ps2_stubs
             }
 
             writePacketBuilderCurrent(rdram, runtime, stateAddr, currentAddr);
+            // Finalize the pending DMAtag QWC exactly once here; see refreshPacketBuilderPendingCount.
+            refreshPacketBuilderPendingCount(rdram, runtime, stateAddr);
             writeGuestBytes(rdram,
                             runtime,
                             stateAddr + 8u,
@@ -235,6 +237,14 @@ namespace ps2_stubs
                             sizeof(temp));
         }
 
+        // Finalizes the pending block's outer DMAtag QWC exactly once, here at
+        // close. Real hardware's DMAC reads a source-chain tag's QWC from memory
+        // at tag fetch (kick time, after close), not at append time -- and guest
+        // libraries that link their own packet builder terminate a block by
+        // ADDING their qword count onto a zero-seeded QWC field, so setting it
+        // eagerly per append would make that add land on a non-zero value and
+        // double the count. Shared by the sceGifPk* and sceVif1Pk* builder
+        // families, which populate the same outer-DMAtag QWC slot.
         void refreshPacketBuilderPendingCount(uint8_t *rdram, PS2Runtime *runtime, uint32_t stateAddr)
         {
             uint32_t currentAddr = 0u;
@@ -264,10 +274,10 @@ namespace ps2_stubs
             writeGuestU32(rdram, runtime, pendingCountAddr, countWord);
         }
 
+        // Advances the write cursor only; does not touch the QWC (see refreshPacketBuilderPendingCount).
         void writePacketBuilderCurrent(uint8_t *rdram, PS2Runtime *runtime, uint32_t stateAddr, uint32_t currentAddr)
         {
             writeGuestU32(rdram, runtime, stateAddr, currentAddr);
-            refreshPacketBuilderPendingCount(rdram, runtime, stateAddr);
         }
 
         uint32_t reservePacketBuilderWords(uint8_t *rdram, PS2Runtime *runtime, uint32_t stateAddr, uint32_t wordCount)

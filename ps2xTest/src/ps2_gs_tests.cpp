@@ -3324,6 +3324,102 @@ void register_ps2_gs_tests()
                       "TRXDIR payload must encode dir=0 (host-to-local)");
         });
 
+        tc.Run("GIF packet-builder appends leave the pending CNT DMAtag QWC untouched until close", [](TestCase &t)
+        {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            PS2Runtime runtime;
+            R5900Context ctx{};
+
+            constexpr uint32_t stateAddr = 0x1000u;
+            constexpr uint32_t baseAddr = 0x2000u;
+
+            setRegU32(ctx, 4, stateAddr);
+            setRegU32(ctx, 5, baseAddr);
+            ps2_stubs::sceGifPkInit(rdram.data(), &ctx, &runtime);
+
+            // Open a CNT DMAtag at baseAddr with a zero-seeded QWC field.
+            setRegU32(ctx, 4, stateAddr);
+            setRegU32(ctx, 5, 0u); // count word
+            setRegU32(ctx, 6, 0u); // extra word
+            setRegU32(ctx, 7, 0u); // tag low; sceGifPkCnt ORs in the CNT id, QWC stays 0
+            ps2_stubs::sceGifPkCnt(rdram.data(), &ctx, &runtime);
+
+            uint32_t pendingCountAddr = 0u;
+            std::memcpy(&pendingCountAddr, rdram.data() + stateAddr + 8u, sizeof(pendingCountAddr));
+            t.Equals(pendingCountAddr, baseAddr,
+                     "sceGifPkCnt should record the pending DMAtag address at stateAddr+8");
+
+            uint32_t seededTagLo = 0u;
+            std::memcpy(&seededTagLo, rdram.data() + baseAddr, sizeof(seededTagLo));
+            t.Equals(seededTagLo & 0xFFFFu, 0u, "CNT DMAtag QWC field must start zero-seeded");
+
+            // Append three A+D register qwords (16 bytes each) onto the open block.
+            for (uint32_t i = 0u; i < 3u; ++i)
+            {
+                setRegU32(ctx, 4, stateAddr);
+                setRegU32(ctx, 5, 0x50u + i); // register descriptor (value irrelevant to QWC)
+                setRegU64(ctx, 6, 0u);        // register payload
+                ps2_stubs::sceGifPkAddGsAD(rdram.data(), &ctx, &runtime);
+            }
+
+            uint32_t currentAddr = 0u;
+            std::memcpy(&currentAddr, rdram.data() + stateAddr, sizeof(currentAddr));
+            t.Equals(currentAddr, baseAddr + 16u + 3u * 16u,
+                     "three A+D appends should advance the write cursor by three quadwords past the DMAtag");
+
+            // The pending DMAtag's QWC must still be ZERO mid-block. Finalizing
+            // the count is the block-close's job (terminatePacketBuilderState, or
+            // a guest's own terminate), not the per-append cursor advance. An
+            // eager per-append refresh would show 3 here and, against a guest
+            // terminate that adds onto this field, double the real count.
+            uint32_t midBlockTagLo = 0u;
+            std::memcpy(&midBlockTagLo, rdram.data() + baseAddr, sizeof(midBlockTagLo));
+            t.Equals(midBlockTagLo, 0x10000000u,
+                     "pending CNT DMAtag must remain id=CNT with QWC=0 mid-block; appends must not patch it");
+        });
+
+        tc.Run("GIF packet-builder finalizes the CNT DMAtag QWC once at close, to the true qword count", [](TestCase &t)
+        {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            PS2Runtime runtime;
+            R5900Context ctx{};
+
+            constexpr uint32_t stateAddr = 0x1000u;
+            constexpr uint32_t baseAddr = 0x2000u;
+
+            setRegU32(ctx, 4, stateAddr);
+            setRegU32(ctx, 5, baseAddr);
+            ps2_stubs::sceGifPkInit(rdram.data(), &ctx, &runtime);
+
+            setRegU32(ctx, 4, stateAddr);
+            setRegU32(ctx, 5, 0u);
+            setRegU32(ctx, 6, 0u);
+            setRegU32(ctx, 7, 0u);
+            ps2_stubs::sceGifPkCnt(rdram.data(), &ctx, &runtime);
+
+            for (uint32_t i = 0u; i < 3u; ++i)
+            {
+                setRegU32(ctx, 4, stateAddr);
+                setRegU32(ctx, 5, 0x50u + i);
+                setRegU64(ctx, 6, 0u);
+                ps2_stubs::sceGifPkAddGsAD(rdram.data(), &ctx, &runtime);
+            }
+
+            // Close the block through our own terminate path.
+            setRegU32(ctx, 4, stateAddr);
+            ps2_stubs::sceGifPkTerminate(rdram.data(), &ctx, &runtime);
+
+            uint32_t finalTagLo = 0u;
+            std::memcpy(&finalTagLo, rdram.data() + baseAddr, sizeof(finalTagLo));
+            t.Equals(finalTagLo, 0x10000003u,
+                     "closing the block must finalize the CNT DMAtag to id=CNT with QWC=3, leaving the rest of the word untouched");
+
+            // stateAddr+8 (the pending-count slot) must be cleared after close.
+            uint32_t pendingAfterClose = 0u;
+            std::memcpy(&pendingAfterClose, rdram.data() + stateAddr + 8u, sizeof(pendingAfterClose));
+            t.Equals(pendingAfterClose, 0u, "terminate must clear the pending-count slot at stateAddr+8");
+        });
+
         tc.Run("sceGsResetGraph frees its temporary GIF packet", [](TestCase &t)
         {
             PS2Runtime runtime;

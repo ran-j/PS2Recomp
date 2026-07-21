@@ -1353,7 +1353,7 @@ void register_ps2_memory_tests()
                      "qwc-zero compact VIF1 chain should clear the STR bit after drain");
         });
 
-        tc.Run("VIF1 packet builders keep chain qwc live before terminate", [](TestCase &t)
+        tc.Run("VIF1 packet builders finalize chain qwc at terminate", [](TestCase &t)
         {
             PS2Memory mem;
             t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
@@ -1394,9 +1394,17 @@ void register_ps2_memory_tests()
             setRegU32(ctx, 4, kStateAddr);
             ps2_stubs::sceVif1PkCloseDirectCode(rdram, &ctx, nullptr);
 
+            // Close the outer chain the way a real title does before kicking the
+            // DMA: the DMAC reads a CNT tag's QWC from memory when it fetches the
+            // tag, so the builder must finalize that field at terminate. (The QWC
+            // is filled in at close, not incrementally as data is appended.)
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, kStateAddr);
+            ps2_stubs::sceVif1PkTerminate(rdram, &ctx, nullptr);
+
             uint32_t dmaTagWord = 0u;
             std::memcpy(&dmaTagWord, rdram + kBaseAddr, sizeof(dmaTagWord));
-            t.Equals(dmaTagWord & 0xFFFFu, 1u, "live packet head qwc should reflect one qword before terminate");
+            t.Equals(dmaTagWord, 0x10000001u, "packet head tag should be id=CNT with QWC=1 after terminate");
 
             std::vector<std::vector<uint8_t>> captured;
             mem.setGifPacketCallback([&](const uint8_t *data, uint32_t sizeBytes)
@@ -1409,8 +1417,8 @@ void register_ps2_memory_tests()
 
             mem.processPendingTransfers();
 
-            t.Equals(captured.size(), static_cast<size_t>(1u), "live VIF1 packet should emit one GIF packet");
-            t.Equals(captured[0].size(), static_cast<size_t>(16u), "live VIF1 packet should emit one qword");
+            t.Equals(captured.size(), static_cast<size_t>(1u), "terminated VIF1 packet should emit one GIF packet");
+            t.Equals(captured[0].size(), static_cast<size_t>(16u), "terminated VIF1 packet should emit one qword");
 
             bool payloadOk = true;
             for (uint32_t i = 0; i < 16u; ++i)
@@ -1421,7 +1429,7 @@ void register_ps2_memory_tests()
                     break;
                 }
             }
-            t.IsTrue(payloadOk, "live VIF1 packet payload should reach the GIF callback");
+            t.IsTrue(payloadOk, "terminated VIF1 packet payload should reach the GIF callback");
         });
 
         tc.Run("VIF1 DMA chain latches terminal tag bits in CHCR", [](TestCase &t)
