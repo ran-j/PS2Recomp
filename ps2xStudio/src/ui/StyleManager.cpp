@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <iostream>
 #include <algorithm>
+#include "rlImGui.h"
 
 namespace StyleManager {
 
@@ -37,7 +38,9 @@ void SetupFonts(AppSettings& settings) {
         loadedFont = io.Fonts->AddFontDefault(&config);
     }
 
-    // Font atlas will be built automatically by the backend
+    // Re-initialize rlImGui fonts (adds FontAwesome) and rebuild
+    rlImGuiEndInitImGui();
+    io.Fonts->Build();
 }
 
 void ApplyDarkTheme() {
@@ -142,6 +145,57 @@ void ApplyLightTheme() {
     colors[ImGuiCol_NavHighlight]           = accentMain;
 }
 
+void ApplyPS2Theme() {
+    if (ImGui::GetCurrentContext() == nullptr) return;
+
+    ImGuiStyle& style = ImGui::GetStyle();
+    ImVec4* colors = style.Colors;
+
+    const ImVec4 bgBase       = ImVec4(0.00f, 0.00f, 0.05f, 1.00f);
+    const ImVec4 bgPanel      = ImVec4(0.02f, 0.02f, 0.10f, 1.00f);
+    const ImVec4 bgInput      = ImVec4(0.04f, 0.04f, 0.15f, 1.00f);
+    const ImVec4 accentMain   = ImVec4(0.10f, 0.50f, 1.00f, 1.00f);
+    const ImVec4 accentHover  = ImVec4(0.30f, 0.70f, 1.00f, 1.00f);
+    const ImVec4 accentActive = ImVec4(0.05f, 0.35f, 0.85f, 1.00f);
+    const ImVec4 textBright   = ImVec4(0.90f, 0.95f, 1.00f, 1.00f);
+    const ImVec4 textDim      = ImVec4(0.50f, 0.60f, 0.80f, 1.00f);
+
+    colors[ImGuiCol_Text]                   = textBright;
+    colors[ImGuiCol_TextDisabled]           = textDim;
+    colors[ImGuiCol_WindowBg]               = bgBase;
+    colors[ImGuiCol_ChildBg]                = bgPanel;
+    colors[ImGuiCol_PopupBg]                = ImVec4(0.00f, 0.00f, 0.08f, 0.95f);
+    colors[ImGuiCol_Border]                 = ImVec4(0.20f, 0.30f, 0.60f, 0.50f);
+    colors[ImGuiCol_TitleBg]                = ImVec4(0.00f, 0.00f, 0.08f, 1.00f);
+    colors[ImGuiCol_TitleBgActive]          = ImVec4(0.05f, 0.10f, 0.25f, 1.00f);
+    colors[ImGuiCol_MenuBarBg]              = ImVec4(0.00f, 0.00f, 0.08f, 1.00f);
+    colors[ImGuiCol_ScrollbarBg]            = bgBase;
+    colors[ImGuiCol_ScrollbarGrab]          = ImVec4(0.10f, 0.20f, 0.40f, 1.00f);
+    colors[ImGuiCol_ScrollbarGrabHovered]   = ImVec4(0.20f, 0.35f, 0.60f, 1.00f);
+    colors[ImGuiCol_ScrollbarGrabActive]    = ImVec4(0.30f, 0.50f, 0.80f, 1.00f);
+    colors[ImGuiCol_CheckMark]              = accentMain;
+    colors[ImGuiCol_SliderGrab]             = accentMain;
+    colors[ImGuiCol_SliderGrabActive]       = accentActive;
+    colors[ImGuiCol_Button]                 = ImVec4(0.05f, 0.15f, 0.35f, 1.00f);
+    colors[ImGuiCol_ButtonHovered]          = accentHover;
+    colors[ImGuiCol_ButtonActive]           = accentActive;
+    colors[ImGuiCol_Header]                 = ImVec4(0.05f, 0.15f, 0.35f, 1.00f);
+    colors[ImGuiCol_HeaderHovered]          = ImVec4(0.15f, 0.30f, 0.60f, 1.00f);
+    colors[ImGuiCol_HeaderActive]           = ImVec4(0.25f, 0.45f, 0.80f, 1.00f);
+    colors[ImGuiCol_FrameBg]                = bgInput;
+    colors[ImGuiCol_FrameBgHovered]         = ImVec4(0.10f, 0.20f, 0.40f, 1.00f);
+    colors[ImGuiCol_FrameBgActive]          = ImVec4(0.15f, 0.30f, 0.50f, 1.00f);
+    colors[ImGuiCol_Tab]                    = ImVec4(0.02f, 0.02f, 0.10f, 1.00f);
+    colors[ImGuiCol_TabHovered]             = ImVec4(0.10f, 0.25f, 0.50f, 1.00f);
+    colors[ImGuiCol_TabActive]              = ImVec4(0.05f, 0.15f, 0.35f, 1.00f);
+    colors[ImGuiCol_TabUnfocused]           = ImVec4(0.00f, 0.00f, 0.05f, 1.00f);
+    colors[ImGuiCol_TabUnfocusedActive]     = ImVec4(0.02f, 0.02f, 0.10f, 1.00f);
+    colors[ImGuiCol_DockingPreview]         = accentMain;
+    colors[ImGuiCol_DockingEmptyBg]         = bgBase;
+    colors[ImGuiCol_TextSelectedBg]         = ImVec4(0.10f, 0.50f, 1.00f, 0.50f);
+    colors[ImGuiCol_NavHighlight]           = accentMain;
+}
+
 void ApplyCustomTheme(AppSettings& settings) {
     if (ImGui::GetCurrentContext() == nullptr) return;
 
@@ -193,6 +247,9 @@ void ApplyTheme(ThemeMode mode, AppSettings& settings) {
             break;
         case ThemeMode::Light:
             ApplyLightTheme();
+            break;
+        case ThemeMode::PS2:
+            ApplyPS2Theme();
             break;
         case ThemeMode::Custom:
             ApplyDarkTheme();
