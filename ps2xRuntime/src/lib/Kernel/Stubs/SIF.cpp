@@ -3,6 +3,7 @@
 #include "../Syscalls/RPC.h"
 #include "../../ps2_iop_transport.h"
 #include "runtime/ps2_address.h"
+#include "../Syscalls/Helpers/State.h"
 
 #include <map>
 
@@ -290,6 +291,124 @@ namespace ps2_stubs
                 *dst = *src;
             }
             return true;
+        }
+
+        // Best-effort completion signal for raw "queued SIF command" transfers: a
+        // sceSifSetDma descriptor with dst==0 carries a SifCmdHeader{psize,dsize,dest,cid,opt}
+        // (matching real PS2SDK's low-level sceSifSendCmd wire format) instead of naming a
+        // real copy destination. Neither ps2_stubs::sceSifSendCmd nor ps2_syscalls::sceSifSendCmd
+        // ever run for this path -- games frequently inline the header-building logic as plain
+        // MIPS and call sceSifSetDma directly, bypassing both hooks -- and the transfer-observer
+        // hook (onSifTransfer) is void and cannot request a semaphore signal. With nothing to
+        // complete it, a caller that WaitSema()s on the command's completion hangs forever.
+        //
+        // Live PCSX2 ground-truth captures against Taiko no Tatsujin (SLPS-20414) showed this
+        // exact 0x40-byte packet shape resolves on real hardware every time, and that the
+        // waiting semaphore's id is reachable via packet+0x1C -> client struct -> struct+0x08.
+        // This is a heuristic validated for that one game/packet-size, not a general SIF_CMD
+        // implementation, so it is scoped tightly (exact size match) and fails silently (falls
+        // back to the pre-existing hang behavior) if the pointer chain doesn't resolve to a
+        // live semaphore -- it must never mis-signal an unrelated semaphore.
+        //
+        // The "client struct" this resolves to is itself one slot of a fixed 32-entry x 0x40-byte
+        // pool (found via static analysis of FUN_001d2f70/0x1d2f70's allocator: scans the pool for
+        // a slot whose +0x10 field has bit0 clear, marks it used, returns its address; the sibling
+        // release routine FUN_001d3018/0x1d3018 clears bit0 of +0x10 and zeroes +0x18). On real
+        // hardware the async completion path (the one WaitSema takes, since our sceSifSetDma always
+        // reports success/non-zero) is expected to run a real IOP-response callback that releases
+        // the slot -- our heuristic only signals the semaphore and skips that callback entirely, so
+        // every "success" leaked one pool slot. After 32 leaked cycles the pool is permanently
+        // exhausted for every other subsystem that shares it (confirmed empirically: our from-fix
+        // audio-init burst does ~35 cycles, `FUN_001d2f70`'s allocator always then reports
+        // "all slots busy", and its sibling function that would call FUN_001d3018 is invoked ZERO
+        // times in a full run -- this was the root cause of the post-SIF-fix hang in FUN_001A8448).
+        // So: release the slot ourselves here too, mirroring FUN_001d3018 exactly.
+        void trySignalEmbeddedSifCmdSema(uint8_t *rdram, uint32_t srcAddr, uint32_t sizeBytes)
+        {
+            if (!rdram || sizeBytes != 0x40u)
+            {
+                return;
+            }
+
+            const uint8_t *clientPtrBytes = getConstMemPtr(rdram, srcAddr + 0x1Cu);
+            if (!clientPtrBytes)
+            {
+                return;
+            }
+            uint32_t clientAddr = 0u;
+            std::memcpy(&clientAddr, clientPtrBytes, sizeof(clientAddr));
+            if (clientAddr == 0u)
+            {
+                return;
+            }
+
+            const uint8_t *semaIdBytes = getConstMemPtr(rdram, clientAddr + 0x08u);
+            if (!semaIdBytes)
+            {
+                return;
+            }
+            uint32_t semaIdRaw = 0u;
+            std::memcpy(&semaIdRaw, semaIdBytes, sizeof(semaIdRaw));
+            if (semaIdRaw == 0u || semaIdRaw > 0xFFFFu)
+            {
+                return;
+            }
+
+            std::shared_ptr<SemaInfo> sema;
+            {
+                std::lock_guard<std::mutex> lock(g_sema_map_mutex);
+                auto it = g_semas.find(static_cast<int>(semaIdRaw));
+                if (it != g_semas.end())
+                {
+                    sema = it->second;
+                }
+            }
+            if (!sema)
+            {
+                return;
+            }
+
+            bool signaled = false;
+            {
+                std::lock_guard<std::mutex> lock(sema->m);
+                if (!sema->deleted && sema->count < sema->maxCount)
+                {
+                    sema->count++;
+                    signaled = true;
+                }
+            }
+
+            if (signaled)
+            {
+                sema->cv.notify_one();
+
+                // Release the pool slot -- mirrors FUN_001d3018/0x1d3018 exactly (clear bit0 of
+                // +0x10, zero +0x18) so the next FUN_001d2f70/0x1d2f70 allocation can reuse it.
+                // Confirmed via live instrumentation that the packet buffer itself (srcAddr) IS
+                // the pool slot (FUN_001d2f70's arrayBase resolved to this exact packet's base
+                // address family, 0x40 bytes apart per packet/slot, and srcAddr+0x10 already
+                // holds the pool's own status encoding, e.g. 0x00000005 = bit0 set + alloc-order
+                // tag) -- NOT the srcAddr+0x1C "client" struct used for the semaphore id above.
+                // Releasing the wrong address here previously left the pool exhausting anyway.
+                if (uint8_t *statusPtr = getMemPtr(rdram, srcAddr + 0x10u))
+                {
+                    uint32_t status = 0u;
+                    std::memcpy(&status, statusPtr, sizeof(status));
+                    status &= ~1u;
+                    std::memcpy(statusPtr, &status, sizeof(status));
+                }
+                if (uint8_t *fieldPtr = getMemPtr(rdram, srcAddr + 0x18u))
+                {
+                    uint32_t zero = 0u;
+                    std::memcpy(fieldPtr, &zero, sizeof(zero));
+                }
+
+                PS2_IF_AGRESSIVE_LOGS({
+                    std::cerr << "[sceSifSetDma:cmd-heuristic] signaled sema=" << semaIdRaw
+                              << " src=0x" << std::hex << srcAddr
+                              << " released_slot=0x" << srcAddr << std::dec << std::endl;
+                });
+            }
         }
     }
 
@@ -702,7 +821,12 @@ namespace ps2_stubs
                 ok = false;
                 break;
             }
-            if (!canCopyGuestByteRange(rdram, xfer.dest, xfer.src, sizeBytes))
+            // dest==0 is the real hardware convention for a queued SIF_CMD packet (see
+            // trySignalEmbeddedSifCmdSema above), not a real copy target -- address 0 is
+            // otherwise a "valid" low-RAM address per isCopyableGuestAddress, so without this
+            // check the code below would silently copy the command packet into guest RAM
+            // address 0 instead of routing it as a command.
+            if (xfer.dest != 0u && !canCopyGuestByteRange(rdram, xfer.dest, xfer.src, sizeBytes))
             {
                 ok = false;
                 break;
@@ -726,7 +850,13 @@ namespace ps2_stubs
                         static_cast<uint32_t>(xfer.size),
                     });
                 }
-                if (!copyGuestByteRange(rdram, xfer.dest, xfer.src, static_cast<uint32_t>(xfer.size)))
+                if (xfer.dest == 0u)
+                {
+                    // Queued SIF_CMD packet: nothing to copy. Best-effort signal any
+                    // completion semaphore this specific packet shape is known to carry.
+                    trySignalEmbeddedSifCmdSema(rdram, xfer.src, static_cast<uint32_t>(xfer.size));
+                }
+                else if (!copyGuestByteRange(rdram, xfer.dest, xfer.src, static_cast<uint32_t>(xfer.size)))
                 {
                     ok = false;
                     break;
