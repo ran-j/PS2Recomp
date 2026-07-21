@@ -1,5 +1,6 @@
 #include "Common.h"
 #include "MPEG.h"
+#include "MPEG_internal.h"
 
 extern "C"
 {
@@ -9,12 +10,14 @@ extern "C"
 #include <libswscale/swscale.h>
 }
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <memory>
 
 #include "Syscalls/Helpers/State.h"
+#include "Syscalls/Interrupt.h"
 
 namespace ps2_stubs
 {
@@ -61,6 +64,25 @@ namespace ps2_stubs
 
             MpegFfmpegDecoder(const MpegFfmpegDecoder &) = delete;
             MpegFfmpegDecoder &operator=(const MpegFfmpegDecoder &) = delete;
+
+            // The decoded stream's frame rate (AVCodecContext::framerate), populated
+            // once the MPEG-2 sequence header has been parsed. Returns false (leaving
+            // num/den untouched) until it is known; callers fall back to a default.
+            bool getFrameRate(int &num, int &den) const
+            {
+                if (!m_codecCtx)
+                {
+                    return false;
+                }
+                const AVRational fr = m_codecCtx->framerate;
+                if (fr.num <= 0 || fr.den <= 0)
+                {
+                    return false;
+                }
+                num = fr.num;
+                den = fr.den;
+                return true;
+            }
 
             bool feed(const uint8_t *data, size_t size, std::deque<MpegDecodedFrame> &frames)
             {
@@ -451,6 +473,15 @@ namespace ps2_stubs
             std::deque<MpegDecodedFrame> decodedFrames;
             bool hasLastFrame = false;
             MpegDecodedFrame lastFrame;
+            // Frame-rate pacing state (see mpegFrameDueTick / sceMpegGetPicture). Captured the
+            // first time this handle serves a real decoded frame; frame N is then due at
+            // baseVsyncTick + floor(N * kMpegPacingVsyncHz * fpsDen / fpsNum).
+            bool baseVsyncSet = false;
+            uint64_t baseVsyncTick = 0u;
+            uint64_t nextPacingFrameIndex = 0u;
+            int fpsNum = 30000; // NTSC video rate 30000/1001 (29.97 fps) until the
+            int fpsDen = 1001;  // decoder reports the stream's real rate.
+            bool fpsKnown = false; // set once a valid in-range rate has been latched.
             std::unique_ptr<MpegFfmpegDecoder> decoder;
         };
 
@@ -484,6 +515,43 @@ namespace ps2_stubs
         std::mutex g_mpeg_stub_mutex;
         std::condition_variable g_mpeg_cv;
         MpegStubState g_mpeg_stub_state;
+
+        // Rate of the emulator's vsync tick worker: GetCurrentVSyncTick() advances once per
+        // kVblankPeriod (~16667us == 60Hz), a fixed rate independent of the guest's NTSC/PAL
+        // display mode. Pacing converts a movie frame index to a due tick with this rate, so a
+        // park's real duration is frameIndex * fpsDen / fpsNum seconds regardless of display mode
+        // -- PAL content (e.g. 25fps) is paced correctly because the stream's own frame rate
+        // drives the math.
+        constexpr uint64_t kMpegPacingVsyncHz = 60u;
+        // Compile-time link to the vsync worker's authoritative period (kVblankPeriod, now
+        // exported from Interrupt.h): retuning the worker without revisiting this rate breaks the
+        // build. A window rather than equality because 16667us is ~1/60s but not its exact
+        // reciprocal (60 * 16667us = 1000020us, 20us over one second).
+        static_assert(
+            kMpegPacingVsyncHz * ps2_syscalls::interrupt_state::kVblankPeriod.count() >= 999000 &&
+            kMpegPacingVsyncHz * ps2_syscalls::interrupt_state::kVblankPeriod.count() <= 1001000,
+            "kMpegPacingVsyncHz must track the vsync worker's kVblankPeriod (Interrupt.h)");
+
+        // Lower bound of the frame-rate plausibility gate (mpegFrameRateIsSane): a stream slower
+        // than this is rejected as garbage. Named here rather than left a literal in the gate so
+        // the park-cap coupling below asserts against the SAME floor the gate enforces.
+        constexpr int kMpegMinSaneFps = 10;
+        // Upper bound of the same gate: a stream faster than this is rejected as garbage. Named
+        // alongside the floor so the gate reads against two constants and neither bound can drift
+        // to a bare literal in the comparison.
+        constexpr int kMpegMaxSaneFps = 120;
+
+        // Hard ceiling on a single sceMpegGetPicture pacing park (defense in depth: even a
+        // bogus stream rate can never stall one GetPicture call more than a few vblanks). See
+        // mpegParkUntilDueTick.
+        constexpr uint64_t kMpegPacingMaxParkVsyncTicks = 8u;
+        // The cap must cover the widest per-frame spacing a *sane* stream can produce, or a slow-
+        // but-in-range movie has its legitimate park silently clipped and plays too fast. The
+        // slowest sane stream (kMpegMinSaneFps) spaces frames kMpegPacingVsyncHz / kMpegMinSaneFps
+        // ticks apart, so the cap must be at least that. This ties the gate floor and the park
+        // cap -- two constants that would otherwise drift apart unnoticed.
+        static_assert(kMpegPacingMaxParkVsyncTicks * kMpegMinSaneFps >= kMpegPacingVsyncHz,
+                      "pacing park cap must cover the slowest sane stream's per-frame spacing");
 
         // TODO this resolution should follow runtime resolution
         constexpr uint32_t kStubMovieWidth = 320u;
@@ -1506,6 +1574,24 @@ namespace ps2_stubs
         g_mpeg_cv.notify_all();
     }
 
+    bool mpegLatchedFrameRate(uint32_t mpegAddr, int &num, int &den)
+    {
+        std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+        const auto it = g_mpeg_stub_state.playbackByMpeg.find(mpegAddr);
+        if (it == g_mpeg_stub_state.playbackByMpeg.end())
+        {
+            return false;
+        }
+        const auto &playback = it->second;
+        if (!playback.fpsKnown)
+        {
+            return false;
+        }
+        num = playback.fpsNum;
+        den = playback.fpsDen;
+        return true;
+    }
+
     void notifyMpegCdStreamStart()
     {
         std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
@@ -1909,6 +1995,53 @@ namespace ps2_stubs
         setReturnU32(ctx, getPlaybackState(mpegAddr).decodeMode);
     }
 
+    bool mpegFrameRateIsSane(int num, int den)
+    {
+        // Accept only plausible movie frame rates (10..120 fps). A garbage-low rate would make
+        // each frame's due tick enormous; a garbage-high rate would collapse pacing. Anything
+        // outside the range is rejected so the caller keeps the default NTSC fallback.
+        // This is a plausibility gate, not a correctness one: an interlaced field rate like 59.94
+        // (interlaced MPEG-2) would pass and double-pace -- but PS2 FMVs are overwhelmingly
+        // 29.97/25 fps, so the frame-rate read is trusted rather than field/frame-disambiguated.
+        if (num <= 0 || den <= 0)
+        {
+            return false;
+        }
+        const int64_t n = num;
+        const int64_t d = den;
+        return n >= kMpegMinSaneFps * d && n <= kMpegMaxSaneFps * d;
+    }
+
+    uint64_t mpegFrameDueTick(uint64_t baseTick, uint64_t frameIndex, uint64_t vsyncHz,
+                              int fpsNum, int fpsDen)
+    {
+        if (fpsNum <= 0 || fpsDen <= 0)
+        {
+            return baseTick;
+        }
+        return baseTick +
+               (frameIndex * vsyncHz * static_cast<uint64_t>(fpsDen)) /
+                   static_cast<uint64_t>(fpsNum);
+    }
+
+    void mpegParkUntilDueTick(uint8_t *rdram, PS2Runtime *runtime, uint64_t dueTick)
+    {
+        // No lock held across the park (caller released g_mpeg_stub_mutex first). Hard-cap a
+        // single park at kMpegPacingMaxParkVsyncTicks so one GetPicture call can never block
+        // more than a few vblanks even if the due tick is pathological -- pacing meters
+        // delivery, it must never stall the guest. Break out on shutdown so parking never
+        // wedges runtime teardown: without the isStopRequested() guard, once the tick counter
+        // stops advancing at shutdown WaitForNextVSyncTick would return immediately every
+        // iteration and this loop would spin instead of exiting.
+        const uint64_t nowTick = ps2_syscalls::GetCurrentVSyncTick();
+        const uint64_t cappedDueTick = std::min(dueTick, nowTick + kMpegPacingMaxParkVsyncTicks);
+        while (runtime && !runtime->isStopRequested() &&
+               ps2_syscalls::GetCurrentVSyncTick() < cappedDueTick)
+        {
+            (void)ps2_syscalls::WaitForNextVSyncTick(rdram, runtime);
+        }
+    }
+
     void sceMpegGetPicture(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const uint32_t mpegAddr = getRegU32(ctx, 4);
@@ -1918,6 +2051,8 @@ namespace ps2_stubs
         uint32_t frameCount = 0u;
         bool haveFrame = false;
         MpegDecodedFrame frame;
+        bool shouldPace = false;
+        uint64_t pacingDueTick = 0u;
         {
             PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime);
             std::unique_lock<std::mutex> lock(g_mpeg_stub_mutex);
@@ -2013,6 +2148,39 @@ namespace ps2_stubs
                 playback.lastFrame = frame;
                 playback.hasLastFrame = true;
                 haveFrame = true;
+                // Frame-rate pacing: meter real decoded frames to the stream's own frame rate,
+                // so host decode (far faster than real IPU delivery) does not drain the
+                // elementary stream across a handful of calls. Reserved here under
+                // g_mpeg_stub_mutex; the actual park runs after the lock is released.
+                if (!playback.baseVsyncSet)
+                {
+                    playback.baseVsyncSet = true;
+                    playback.baseVsyncTick = ps2_syscalls::GetCurrentVSyncTick();
+                }
+                // Latch the stream's real frame rate on the first VALID, in-range read
+                // (AVCodecContext::framerate is populated once the MPEG-2 sequence header is
+                // parsed). Re-read on later served frames until it is known, so a not-yet-
+                // populated rate on the first frame never pins the handle to the fallback
+                // forever; out-of-range rates are rejected as garbage.
+                if (!playback.fpsKnown)
+                {
+                    int detectedNum = 0;
+                    int detectedDen = 0;
+                    if (playback.decoder &&
+                        playback.decoder->getFrameRate(detectedNum, detectedDen) &&
+                        mpegFrameRateIsSane(detectedNum, detectedDen))
+                    {
+                        playback.fpsNum = detectedNum;
+                        playback.fpsDen = detectedDen;
+                        playback.fpsKnown = true;
+                    }
+                }
+                pacingDueTick = mpegFrameDueTick(playback.baseVsyncTick,
+                                                 playback.nextPacingFrameIndex++,
+                                                 kMpegPacingVsyncHz,
+                                                 playback.fpsNum,
+                                                 playback.fpsDen);
+                shouldPace = true;
                 if (g_mpeg_stub_state.pictureTraceCount < 32u)
                 {
                     PS2_IF_AGRESSIVE_LOGS({
@@ -2063,6 +2231,18 @@ namespace ps2_stubs
                 height = playback.height;
                 frameCount = playback.picturesServed;
             }
+        }
+
+        // Park AFTER the lock/scope above closes, mirroring sceGsSyncV (which calls
+        // WaitForNextVSyncTick with no enclosing release scope): the park must not run while
+        // g_mpeg_stub_mutex is held, or a multi-vblank wait would block stream-feed callbacks and
+        // other handles. Nesting it back inside the scope would NOT double-release --
+        // releaseGuestExecution is idempotent (a depth-0 release is a no-op; see ps2_runtime.cpp):
+        // WaitForNextVSyncTick's own per-wait release/reacquire only does real handoff work when
+        // guest execution is actually held on entry. Do not "tidy" the park into the block above.
+        if (shouldPace)
+        {
+            mpegParkUntilDueTick(rdram, runtime, pacingDueTick);
         }
 
         mpegGuestWrite32(rdram, mpegAddr + 0x00u, width);

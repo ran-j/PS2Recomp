@@ -9,7 +9,6 @@ namespace ps2_syscalls
     {
         constexpr uint32_t kIntcVblankStart = 2u;
         constexpr uint32_t kIntcVblankEnd = 3u;
-        constexpr auto kVblankPeriod = std::chrono::microseconds(16667);
         constexpr int kMaxCatchupTicks = 4;
 
         std::mutex g_irq_handler_mutex;
