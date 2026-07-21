@@ -509,6 +509,195 @@ void register_ps2_runtime_io_tests()
             t.Equals(readGuestS32(test.rdram.data(), formatAddr), 0, "sceMcGetInfo should report an unformatted card after sceMcUnformat");
         });
 
+        tc.Run("sceMcGetInfo accepts a non-zero slot on an in-range port", [](TestCase &t)
+        {
+            TestContext test;
+
+            constexpr uint32_t typeAddr = GUEST_BUFFER_AREA_START + 0x900;
+            constexpr uint32_t freeAddr = GUEST_BUFFER_AREA_START + 0x904;
+            constexpr uint32_t formatAddr = GUEST_BUFFER_AREA_START + 0x908;
+
+            // Establish a known-formatted card on port 0 via slot 0 (accepted
+            // by any predicate), so this test does not depend on global
+            // memory-card state left behind by earlier cases.
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 4, 0u);
+            setRegU32(test.ctx, 5, 0u);
+            ps2_stubs::sceMcFormat(test.rdram.data(), &test.ctx, nullptr);
+            int32_t cmd = 0;
+            t.Equals(syncMc(test.rdram, &cmd), 0, "sceMcFormat should format port 0");
+
+            // A multitap addresses several slots per port; probing slot 1 on
+            // an in-range port must succeed and report that port's card.
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 4, 0u);   // port 0
+            setRegU32(test.ctx, 5, 1u);   // slot 1
+            setRegU32(test.ctx, 6, typeAddr);
+            setRegU32(test.ctx, 7, freeAddr);
+            setRegU32(test.ctx, 29, GUEST_STACK_AREA_START);
+            writeStackArg(test.rdram, test.ctx, 0u, formatAddr);
+            ps2_stubs::sceMcGetInfo(test.rdram.data(), &test.ctx, nullptr);
+
+            t.Equals(syncMc(test.rdram, &cmd), 0, "an in-range port must succeed for a non-zero slot");
+            t.Equals(cmd, 0x01, "sceMcSync should report GETINFO as the last command");
+            t.Equals(readGuestS32(test.rdram.data(), typeAddr), 2, "a non-zero slot should still report a PS2 memory card");
+            t.Equals(readGuestS32(test.rdram.data(), formatAddr), 1, "a non-zero slot should still report the formatted card");
+        });
+
+        tc.Run("sceMcGetInfo rejects a negative slot", [](TestCase &t)
+        {
+            TestContext test;
+
+            constexpr uint32_t typeAddr = GUEST_BUFFER_AREA_START + 0x900;
+            constexpr uint32_t freeAddr = GUEST_BUFFER_AREA_START + 0x904;
+            constexpr uint32_t formatAddr = GUEST_BUFFER_AREA_START + 0x908;
+
+            // A guest passing slot 0xFFFFFFFF arrives as int32_t -1; the lower
+            // bound must reject it with "no entry" (-4), even on an in-range
+            // port. This -4 can come only from the slot guard, whatever card
+            // state the process-global g_mcPorts happens to hold: for an
+            // in-range port the only other results sceMcGetInfo produces are
+            // success (0, formatted) and sceMcResNoFormat (-2, unformatted),
+            // both distinct from the guard's -4. So this also pins that the
+            // guard fires before any card-state logic -- a future reorder that
+            // consulted card state first would yield 0 or -2 and be caught.
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 4, 0u);            // port 0
+            setRegU32(test.ctx, 5, 0xFFFFFFFFu);   // slot -1
+            setRegU32(test.ctx, 6, typeAddr);
+            setRegU32(test.ctx, 7, freeAddr);
+            setRegU32(test.ctx, 29, GUEST_STACK_AREA_START);
+            writeStackArg(test.rdram, test.ctx, 0u, formatAddr);
+            ps2_stubs::sceMcGetInfo(test.rdram.data(), &test.ctx, nullptr);
+
+            int32_t cmd = 0;
+            t.Equals(syncMc(test.rdram, &cmd), -4, "a negative slot must report sceMcResNoEntry");
+            t.Equals(readGuestS32(test.rdram.data(), typeAddr), 0, "a negative slot must not report a card type");
+        });
+
+        tc.Run("sceMcGetInfo still rejects an out-of-range or negative port", [](TestCase &t)
+        {
+            TestContext test;
+
+            constexpr uint32_t typeAddr = GUEST_BUFFER_AREA_START + 0x900;
+            constexpr uint32_t freeAddr = GUEST_BUFFER_AREA_START + 0x904;
+            constexpr uint32_t formatAddr = GUEST_BUFFER_AREA_START + 0x908;
+
+            // Widening the slot check must not weaken the port bound: only
+            // ports 0 and 1 are emulated (g_mcPorts has two entries). Port 2
+            // (above the range) and port -1 (below it) must both fail.
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 4, 2u);   // out-of-range port
+            setRegU32(test.ctx, 5, 0u);   // slot 0
+            setRegU32(test.ctx, 6, typeAddr);
+            setRegU32(test.ctx, 7, freeAddr);
+            setRegU32(test.ctx, 29, GUEST_STACK_AREA_START);
+            writeStackArg(test.rdram, test.ctx, 0u, formatAddr);
+            ps2_stubs::sceMcGetInfo(test.rdram.data(), &test.ctx, nullptr);
+
+            int32_t cmd = 0;
+            t.Equals(syncMc(test.rdram, &cmd), -4, "an out-of-range port must still report sceMcResNoEntry");
+            t.Equals(readGuestS32(test.rdram.data(), typeAddr), 0, "an out-of-range port must not report a card type");
+
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 4, 0xFFFFFFFFu);   // port -1
+            setRegU32(test.ctx, 5, 0u);            // slot 0
+            setRegU32(test.ctx, 6, typeAddr);
+            setRegU32(test.ctx, 7, freeAddr);
+            setRegU32(test.ctx, 29, GUEST_STACK_AREA_START);
+            writeStackArg(test.rdram, test.ctx, 0u, formatAddr);
+            ps2_stubs::sceMcGetInfo(test.rdram.data(), &test.ctx, nullptr);
+
+            t.Equals(syncMc(test.rdram, &cmd), -4, "a negative port must also report sceMcResNoEntry");
+            t.Equals(readGuestS32(test.rdram.data(), typeAddr), 0, "a negative port must not report a card type");
+        });
+
+        tc.Run("sceMcOpen reaches the save flow at a non-zero slot", [](TestCase &t)
+        {
+            TestContext test;
+
+            const uint32_t dirAddr = GUEST_STRING_AREA_START + 0x400;
+            const uint32_t fileAddr = GUEST_STRING_AREA_START + 0x500;
+            const uint32_t writeBufAddr = GUEST_BUFFER_AREA_START + 0x300;
+            const uint32_t readBufAddr = GUEST_BUFFER_AREA_START + 0x500;
+            const std::string payload = "slot1 save flow";
+
+            writeGuestString(test.rdram.data(), dirAddr, "/SAVEDATA");
+            writeGuestString(test.rdram.data(), fileAddr, "/SAVEDATA/slot1.bin");
+            std::memcpy(test.rdram.data() + writeBufAddr, payload.data(), payload.size());
+
+            // Setup on port 0 through slot 0 (accepted by any predicate): a
+            // known-formatted card and the parent directory, so the test does
+            // not depend on global memory-card state left by earlier cases and
+            // fails only at the slot-1 open under the old predicate.
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 4, 0u);
+            setRegU32(test.ctx, 5, 0u);
+            ps2_stubs::sceMcFormat(test.rdram.data(), &test.ctx, nullptr);
+            int32_t cmd = 0;
+            t.Equals(syncMc(test.rdram, &cmd), 0, "sceMcFormat should format port 0");
+
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 4, 0u);
+            setRegU32(test.ctx, 5, 0u);
+            setRegU32(test.ctx, 6, dirAddr);
+            ps2_stubs::sceMcMkdir(test.rdram.data(), &test.ctx, nullptr);
+            t.Equals(syncMc(test.rdram, &cmd), 0, "sceMcMkdir should create the save directory");
+
+            // Headline flow: the title reaches its save file through the
+            // directly addressed slot 1. sceMcOpen is the only source of a
+            // memory-card descriptor, so if the slot guard rejects it the whole
+            // save/load chain is unreachable. Open at slot 1 must yield a
+            // usable descriptor.
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 4, 0u);   // port 0
+            setRegU32(test.ctx, 5, 1u);   // slot 1
+            setRegU32(test.ctx, 6, fileAddr);
+            setRegU32(test.ctx, 7, PS2_FIO_O_RDWR | PS2_FIO_O_CREAT | PS2_FIO_O_TRUNC);
+            ps2_stubs::sceMcOpen(test.rdram.data(), &test.ctx, nullptr);
+
+            const int32_t fd = syncMc(test.rdram, &cmd);
+            t.IsTrue(fd > 0, "sceMcOpen at slot 1 must return a usable descriptor");
+            t.Equals(cmd, 0x02, "sceMcSync should report OPEN as the last command");
+
+            // With the descriptor in hand the fd-based ops carry the save
+            // through: write the payload, rewind, read it back.
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 4, static_cast<uint32_t>(fd));
+            setRegU32(test.ctx, 5, writeBufAddr);
+            setRegU32(test.ctx, 6, static_cast<uint32_t>(payload.size()));
+            ps2_stubs::sceMcWrite(test.rdram.data(), &test.ctx, nullptr);
+            t.Equals(syncMc(test.rdram, &cmd), static_cast<int32_t>(payload.size()),
+                     "sceMcWrite should persist the full payload through the slot 1 descriptor");
+
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 4, static_cast<uint32_t>(fd));
+            setRegU32(test.ctx, 5, 0u);
+            setRegU32(test.ctx, 6, PS2_FIO_SEEK_SET);
+            ps2_stubs::sceMcSeek(test.rdram.data(), &test.ctx, nullptr);
+            t.Equals(syncMc(test.rdram, &cmd), 0, "sceMcSeek should rewind the slot 1 descriptor");
+
+            std::memset(test.rdram.data() + readBufAddr, 0, payload.size());
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 4, static_cast<uint32_t>(fd));
+            setRegU32(test.ctx, 5, readBufAddr);
+            setRegU32(test.ctx, 6, static_cast<uint32_t>(payload.size()));
+            ps2_stubs::sceMcRead(test.rdram.data(), &test.ctx, nullptr);
+            t.Equals(syncMc(test.rdram, &cmd), static_cast<int32_t>(payload.size()),
+                     "sceMcRead should return the full payload through the slot 1 descriptor");
+
+            std::string readback(reinterpret_cast<const char *>(test.rdram.data() + readBufAddr), payload.size());
+            t.Equals(readback, payload, "the save written at slot 1 should round-trip byte for byte");
+
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 4, static_cast<uint32_t>(fd));
+            ps2_stubs::sceMcClose(test.rdram.data(), &test.ctx, nullptr);
+            t.Equals(syncMc(test.rdram, &cmd), 0, "sceMcClose should release the slot 1 descriptor");
+
+            const std::filesystem::path hostPath = test.paths.mcRoot / "SAVEDATA" / "slot1.bin";
+            t.IsTrue(std::filesystem::exists(hostPath), "the slot 1 save should land in the port's card under mcRoot");
+        });
+
         tc.Run("sceMcEnd resets libmc state so sync reports no active command", [](TestCase &t)
         {
             TestContext test;
