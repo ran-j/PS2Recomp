@@ -239,6 +239,8 @@ namespace ps2_stubs
 
     void sceCdInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        RUNTIME_LOG("[DIAG:sceCdInit] mode=0x" << std::hex << getRegU32(ctx, 4)
+                    << " ra=0x" << getRegU32(ctx, 31) << std::dec);
         g_cdInitialized = true;
         g_lastCdError = 0;
         setReturnS32(ctx, 1);

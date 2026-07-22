@@ -113,6 +113,7 @@ namespace ps2_syscalls
         uint32_t paramAddr = getRegU32(ctx, 4); // $a0
         if (paramAddr == 0u)
         {
+            RUNTIME_LOG("[CreateSema:FAIL] reason=null-param ra=0x" << std::hex << getRegU32(ctx, 31) << std::dec);
             setReturnS32(ctx, KE_ERROR);
             return;
         }
@@ -130,6 +131,9 @@ namespace ps2_syscalls
 
         if (availableWords < 3u)
         {
+            RUNTIME_LOG("[CreateSema:FAIL] reason=too-few-words paramAddr=0x" << std::hex << paramAddr
+                        << " availableWords=" << std::dec << availableWords
+                        << " ra=0x" << std::hex << getRegU32(ctx, 31) << std::dec);
             setReturnS32(ctx, KE_ERROR);
             return;
         }
@@ -191,7 +195,8 @@ namespace ps2_syscalls
 
             g_semas.emplace(id, info);
         }
-        RUNTIME_LOG("[CreateSema] id=" << id << " init=" << init << " max=" << max);
+        RUNTIME_LOG("[CreateSema] id=" << id << " init=" << init << " max=" << max
+                    << " ra=0x" << std::hex << getRegU32(ctx, 31) << std::dec);
         setReturnS32(ctx, id);
     }
 
