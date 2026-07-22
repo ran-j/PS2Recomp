@@ -9,6 +9,10 @@
 #include "Kernel/Stubs/Audio.h"
 #include "Kernel/Stubs/GS.h"
 #include "Kernel/Stubs/MPEG.h"
+#include <unordered_set>
+#include <unordered_map>
+#include <queue>
+#include "Kernel/Syscalls/Helpers/State.h"
 #include "ps2_host_backend.h"
 #include "ps2_iop_host.h"
 #include "ps2x/iop/iop_subsystem.h"
@@ -1153,12 +1157,19 @@ PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
         }
     }
 
-    std::cerr << "Error: No exact recompiled function for guest PC 0x" << std::hex << address
-              << " tableBase=0x" << g_ps2RecompiledFunctionTableBase
-              << " tableEnd=0x" << g_ps2RecompiledFunctionTableEnd
-              << " codeRegion=" << (m_memory.isCodeAddress(address) ? "yes" : "no")
-              << " trace=" << formatDispatchHistory()
-              << std::dec << std::endl;
+    {
+        static std::atomic<uint32_t> s_missingLookupLogCount{0u};
+        const uint32_t logIndex = s_missingLookupLogCount.fetch_add(1u, std::memory_order_relaxed);
+        if (logIndex < 20u)
+        {
+            std::cerr << "Error: No exact recompiled function for guest PC 0x" << std::hex << address
+                      << " tableBase=0x" << g_ps2RecompiledFunctionTableBase
+                      << " tableEnd=0x" << g_ps2RecompiledFunctionTableEnd
+                      << " codeRegion=" << (m_memory.isCodeAddress(address) ? "yes" : "no")
+                      << " trace=" << formatDispatchHistory()
+                      << std::dec << std::endl;
+        }
+    }
 
     static RecompiledFunction missingFunction = [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
@@ -1319,6 +1330,20 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     ctx->pc = targetPc;
     const bool isCall = (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall);
 
+    const bool isIndirect = (kind == GuestBranchKind::IndirectCall || kind == GuestBranchKind::IndirectJump ||
+                              kind == GuestBranchKind::Return);
+    if (targetPc == 0xFFFFFFFFu ||
+        (isIndirect && targetPc >= 0x100134u && targetPc < 0x100380u))
+    {
+        std::cerr << "[DIAG:badtarget] targetPc=0x" << std::hex << targetPc << " source=0x" << sourcePc
+                  << " fallthrough=0x" << fallthroughPc << " kind=" << describeGuestBranchKind(kind)
+                  << " op=" << (debugName ? debugName : "<null>")
+                  << " a0=0x" << GPR_U32(ctx, 4) << " a1=0x" << GPR_U32(ctx, 5)
+                  << " v0=0x" << GPR_U32(ctx, 2) << " ra=0x" << GPR_U32(ctx, 31)
+                  << " sp=0x" << GPR_U32(ctx, 29)
+                  << std::dec << std::endl;
+    }
+
     if (kind == GuestBranchKind::Return)
     {
         if (!hasFunction(targetPc))
@@ -1355,6 +1380,53 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     RecompiledFunction targetFn = lookupFunction(targetPc);
     const uint32_t entryPc = ctx->pc;
     targetFn(rdram, ctx, this);
+
+    // A callee can legitimately leave ctx->pc at an internal resume label
+    // instead of the fallthrough we expect here: Ghidra sometimes splits one
+    // continuous piece of guest code into several recompiled functions (tail
+    // calls, jump tables, branch targets not recognized as their own entry
+    // point), and the generated switch(ctx->pc){...} re-entry dispatcher on
+    // whichever function ctx->pc now belongs to handles resuming from there.
+    // As long as ctx->pc still resolves to SOME recompiled function, treat
+    // this as "still mid-flight, not actually returned" and keep re-driving
+    // whatever's there -- not necessarily targetFn itself: targetFn may have
+    // *tail-called* (plain C++ call, not through dispatchGuestBranch) into a
+    // different function that itself needs resuming, in which case ctx->pc
+    // belongs to that other function, not targetFn, and checking against
+    // targetFn specifically would give up too early. Mirrors the intent of
+    // the fix upstream proposed in ran-j/PS2Recomp PR #115/#117 (never
+    // merged), generalized to not assume the resuming function is always the
+    // one originally dispatched to.
+    if (isCall)
+    {
+        int guardCounter = 0;
+        while (!isStopRequested() && ctx->pc != 0u && ctx->pc != fallthroughPc && hasFunction(ctx->pc))
+        {
+            if (++guardCounter > 100000)
+            {
+                // Runaway resume loop -- bail out to the existing mismatch
+                // handling below rather than spin forever. NOTE: ctx->pc being
+                // the same resume PC across iterations is NOT by itself a
+                // sign of no progress -- a callee with a cooperative-
+                // preemption loop (shouldPreemptGuestExecution() bailing at
+                // its own loop-back label) legitimately reports the exact
+                // same resume PC on every bail while still making real
+                // forward progress in its own registers/loop counters each
+                // time it's re-driven. Only a very large iteration count
+                // without ever reaching fallthroughPc counts as runaway here.
+                break;
+            }
+            RecompiledFunction resumeFn = lookupFunction(ctx->pc);
+            resumeFn(rdram, ctx, this);
+            if (ctx->pc >= 0x100134u && ctx->pc < 0x100380u)
+            {
+                std::cerr << "[DIAG:badtarget-resume] landed pc=0x" << std::hex << ctx->pc
+                          << " fallthrough=0x" << fallthroughPc << " originalTargetPc=0x" << targetPc
+                          << " ra=0x" << GPR_U32(ctx, 31) << " sp=0x" << GPR_U32(ctx, 29)
+                          << std::dec << std::endl;
+            }
+        }
+    }
 
     if (isStopRequested() || ctx->pc == 0u)
     {
@@ -2021,6 +2093,15 @@ void PS2Runtime::dispatchLoop(uint8_t *rdram, R5900Context *ctx)
 
         waitForGuestExecutionHandoff(handoffBaseline);
 
+        if ((dispatchedPc < 0x100134u || dispatchedPc >= 0x100380u) && ctx->pc >= 0x100134u && ctx->pc < 0x100380u)
+        {
+            std::cerr << "[DIAG:dispatchLoop-badjump] dispatchedPc=0x" << std::hex << dispatchedPc
+                      << " dispatchedRa=0x" << dispatchedRa << " landed pc=0x" << ctx->pc
+                      << " ra=0x" << static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0))
+                      << " sp=0x" << static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0))
+                      << std::dec << std::endl;
+        }
+
         if (ctx->pc == 0u)
         {
             const uint32_t ra = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0));
@@ -2493,6 +2574,19 @@ void PS2Runtime::run()
                                                << " gsw=" << curGs
                                                << " vif=" << curVif
                                                << std::endl);
+                {
+                    std::lock_guard<std::mutex> lock(g_thread_map_mutex);
+                    std::ostringstream oss;
+                    oss << "[run:threads]";
+                    for (const auto &[tid, info] : g_threads)
+                    {
+                        if (!info) { continue; }
+                        oss << " tid=" << tid << ":pc=0x" << std::hex << info->currentPc.load(std::memory_order_relaxed)
+                            << ":status=0x" << info->status << ":wt=" << std::dec << info->waitType
+                            << ":wid=" << info->waitId;
+                    }
+                    RUNTIME_LOG(oss.str() << std::endl);
+                }
             }
         });
         uint32_t presentWidth = FB_WIDTH;
