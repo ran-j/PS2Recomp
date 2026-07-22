@@ -6,6 +6,7 @@
 #include "../Syscalls/Helpers/State.h"
 
 #include <map>
+#include <atomic>
 
 namespace ps2_stubs
 {
@@ -70,7 +71,13 @@ namespace ps2_stubs
         constexpr uint32_t kSifRegMainAddr = 0x80000000u;
         constexpr uint32_t kSifRegSubAddr = 0x80000001u;
         constexpr uint32_t kSifRegMsCom = 0x80000002u;
-        constexpr uint32_t kSifBootReadyMask = 0x00020000u;
+        // Bit 17 (0x20000) alone leaves FUN_001d8fc0/0x1d8fc0's own readiness check (confirmed via
+        // disassembly: `lui $v1,4; and $v0,$v0,$v1` -- tests bit 18, 0x40000) permanently unsigned,
+        // which sub_00189500/0x189500 polls in a tight, undelayed retry loop with no other subsystem
+        // ever getting a turn. OR in bit 18 as well so both known consumers of this "boot status"
+        // register see it as ready, instead of replacing the value and risking whatever already
+        // depends on bit 17 alone.
+        constexpr uint32_t kSifBootReadyMask = 0x00020000u | 0x00040000u;
 
         void seedDefaultSifRegsLocked()
         {
@@ -401,6 +408,21 @@ namespace ps2_stubs
                 {
                     uint32_t zero = 0u;
                     std::memcpy(fieldPtr, &zero, sizeof(zero));
+                }
+
+                // Some callers (e.g. FUN_001d3550/0x1d3550, used by the audio-tick poll-with-delay
+                // loop at 0x1d7b90) don't block on the semaphore directly -- they poll a "response
+                // ready" flag at clientAddr+0x24 (cleared by the caller right before sending) and
+                // never see it become nonzero on our fully-synchronous sceSifSetDma, since nothing
+                // else in the runtime ever writes it. Real hardware's async IOP reply would set
+                // this; confirmed live (200-sample capture) this field stays 0 across 100+ already-
+                // successful signal cycles for this exact clientAddr. Best-effort, mirrors the
+                // signal-only philosophy above: only touches memory once we know a live semaphore
+                // was actually there.
+                if (uint8_t *readyPtr = getMemPtr(rdram, clientAddr + 0x24u))
+                {
+                    uint32_t ready = 1u;
+                    std::memcpy(readyPtr, &ready, sizeof(ready));
                 }
 
                 PS2_IF_AGRESSIVE_LOGS({
@@ -903,7 +925,17 @@ namespace ps2_stubs
     void sceSifSetReg(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const uint32_t reg = getRegU32(ctx, 4);
-        const uint32_t value = getRegU32(ctx, 5);
+        uint32_t value = getRegU32(ctx, 5);
+        // The game itself (re-)writes reg 4 (boot status) with only bit 17 (0x20000) set as part of
+        // its own normal init sequence, overwriting our seeded value. Real hardware's async IOP reply
+        // would later OR in bit 18 (0x40000, confirmed via disassembly of FUN_001d8fc0/0x1d8fc0:
+        // `lui $v1,4; and $v0,$v0,$v1`) once IOP-side init completes; our synchronous runtime has no
+        // such later update, so FUN_00189500's poll loop spins forever. Force bit 18 on every write to
+        // this register so it's never lost, instead of only seeding it once at reset.
+        if (reg == kSifRegBootStatus)
+        {
+            value |= 0x00040000u;
+        }
         uint32_t prev = 0u;
         bool shouldLog = false;
         {
