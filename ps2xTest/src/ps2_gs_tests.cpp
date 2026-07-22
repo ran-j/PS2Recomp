@@ -3359,13 +3359,44 @@ void register_ps2_gs_tests()
             setRegU32(resetCtx, 7, 1u);
             ps2_stubs::sceGsResetGraph(rdram.data(), &resetCtx, &runtime);
 
+            // interlaced reset already done above; base is the value the field parity is anchored to.
+            const uint64_t base = ps2_stubs::gsSyncVBaseTick();
+
             R5900Context sync0{};
             ps2_stubs::sceGsSyncV(rdram.data(), &sync0, &runtime);
-            t.Equals(static_cast<int32_t>(getRegU32Test(sync0, 2)), 0, "first interlaced sceGsSyncV should report even field");
+            const uint64_t tick0 = ps2_stubs::lastGsSyncVConsumedTick();
+            const int32_t field0 = static_cast<int32_t>(getRegU32Test(sync0, 2));
 
             R5900Context sync1{};
             ps2_stubs::sceGsSyncV(rdram.data(), &sync1, &runtime);
-            t.Equals(static_cast<int32_t>(getRegU32Test(sync1, 2)), 1, "second interlaced sceGsSyncV should report odd field");
+            const uint64_t tick1 = ps2_stubs::lastGsSyncVConsumedTick();
+            const int32_t field1 = static_cast<int32_t>(getRegU32Test(sync1, 2));
+
+            // Liveness.
+            t.IsTrue(tick1 > tick0, "each interlaced sceGsSyncV must consume a strictly newer vblank tick");
+
+            // Golden field: mirrors getGsSyncVFieldForTick exactly, incl. the tick<=base clause.
+            auto expectedField = [base](uint64_t tick) -> int32_t {
+                if (tick <= base) return 0;
+                return static_cast<int32_t>((tick - base - 1u) & 1u);
+            };
+
+            // Gap-aware absolute assertions — computed from measured gaps, never an assumed gap==1.
+            t.Equals(field0, expectedField(tick0),
+                     "first interlaced field must match its consumed tick's parity relative to the reset base");
+            t.Equals(field1, expectedField(tick1),
+                     "second interlaced field must match its consumed tick's parity relative to the reset base");
+
+            // Relative XOR cross-check — alternation pinned independently of absolute phase.
+            t.Equals(field0 ^ field1, static_cast<int32_t>((tick1 - tick0) & 1u),
+                     "consecutive interlaced fields differ iff an odd number of vblanks elapsed between them");
+
+            // Literal hardware anchor, asserted ONLY under the nominal gaps (base->tick0==1, delta==1).
+            if (tick0 == base + 1u && tick1 - tick0 == 1u)
+            {
+                t.Equals(field0, 0, "first interlaced sceGsSyncV should report even field");
+                t.Equals(field1, 1, "second interlaced sceGsSyncV should report odd field");
+            }
 
             R5900Context resetProgCtx{};
             setRegU32(resetProgCtx, 4, 0u);
