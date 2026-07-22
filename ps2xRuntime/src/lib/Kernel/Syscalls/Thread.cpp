@@ -216,7 +216,9 @@ namespace ps2_syscalls
                                          << " stack=0x" << info->stack
                                          << " size=0x" << info->stackSize
                                          << " gp=0x" << info->gp
-                                         << " prio=" << std::dec << info->priority << std::endl);
+                                         << " prio=" << std::dec << info->priority
+                                         << " ra=0x" << std::hex << getRegU32(ctx, 31)
+                                         << " cop0_status=0x" << ctx->cop0_status << std::dec << std::endl);
 
         setReturnS32(ctx, id);
     }
@@ -381,6 +383,11 @@ namespace ps2_syscalls
             SET_GPR_U32(threadCtx, 4, info->arg);
             SET_GPR_U32(threadCtx, 31, 0);
             threadCtx->pc = info->entry;
+            // Match the main context's boot-time IE fix (ps2_runtime.cpp::run()):
+            // real hardware's kernel starts new threads with Status.IE already
+            // set, since only the one-time BIOS/IPL boot (which this recomp
+            // doesn't execute) is responsible for setting it from scratch.
+            threadCtx->cop0_status |= 0x00000001u;
 
             g_currentThreadId = tid;
 
@@ -792,6 +799,9 @@ namespace ps2_syscalls
         status->waitId = info->waitId;
         status->wakeupCount = info->wakeupCount;
         setReturnS32(ctx, KE_OK);
+        RUNTIME_LOG("[ReferThreadStatus] tid=" << tid << " status=0x" << std::hex << info->status
+                                                << " stack=0x" << info->stack << " stackSize=0x" << info->stackSize
+                                                << " ra=0x" << getRegU32(ctx, 31) << std::dec << std::endl);
     }
 
     void iReferThreadStatus(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

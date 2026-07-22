@@ -133,6 +133,16 @@ namespace ps2_syscalls
                       { return a.order < b.order; });
         }
 
+        if (cause == kIntcVblankStart)
+        {
+            static std::atomic<uint32_t> s_vblankDispatchLogs{0};
+            const uint32_t n = s_vblankDispatchLogs.fetch_add(1, std::memory_order_relaxed);
+            if (n < 4000u)
+            {
+                RUNTIME_LOG("[INTC:vblankDispatch] n=" << n << " handlerCount=" << handlers.size() << std::endl);
+            }
+        }
+
         for (const IrqHandlerInfo &info : handlers)
         {
             if (!runtime->hasFunction(info.handler))
@@ -160,6 +170,7 @@ namespace ps2_syscalls
             try
             {
                 R5900Context irqCtx{};
+                irqCtx.cop0_status |= 0x00000001u; // match main/thread contexts' IE fix
                 SET_GPR_U32(&irqCtx, 28, info.gp);
                 SET_GPR_U32(&irqCtx, 29, getAsyncHandlerStackTop(runtime));
                 SET_GPR_U32(&irqCtx, 31, 0u);
@@ -172,6 +183,7 @@ namespace ps2_syscalls
                 bool reschedulePending = false;
                 uint64_t handoffBaseline = 0u;
                 uint32_t steps = 0u;
+                while (irqCtx.pc != 0u && runtime && !runtime->isStopRequested())
                 {
                     PS2Runtime::GuestExecutionScope guestExecution(runtime);
                     PS2Runtime::DeferredGuestYieldScope deferYield(reschedulePending);
@@ -200,6 +212,18 @@ namespace ps2_syscalls
                 if (reschedulePending && !runtime->isStopRequested())
                 {
                     runtime->waitForGuestExecutionHandoff(handoffBaseline);
+                }
+
+                if (cause == kIntcVblankStart)
+                {
+                    static std::atomic<uint32_t> s_vblankDoneLogs{0};
+                    const uint32_t n2 = s_vblankDoneLogs.fetch_add(1, std::memory_order_relaxed);
+                    if (n2 < 4000u)
+                    {
+                        RUNTIME_LOG("[INTC:vblankHandlerDone] n=" << n2 << " steps=" << steps
+                                                                  << " finalPc=0x" << std::hex << irqCtx.pc << std::dec
+                                                                  << std::endl);
+                    }
                 }
             }
             catch (const ThreadExitException &)

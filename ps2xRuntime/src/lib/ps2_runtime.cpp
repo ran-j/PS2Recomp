@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <chrono>
@@ -1022,6 +1023,19 @@ void PS2Runtime::configureIoPathsFromElf(const std::string &elfPath)
         paths.mcRoot = paths.elfDirectory / "mc0";
     }
 
+    // Nothing else sets IoPaths::cdImage -- without this, sceCd's "streaming
+    // from a real disc image" path (imageValid/registered leaf index/etc.)
+    // stays permanently uninitialized even when a real dumped .iso is
+    // available, since the extracted-files host root alone doesn't give the
+    // CDVD layer a sector-addressable image to stream from.
+    if (const char *cdImageEnv = std::getenv("PS2X_CD_IMAGE"))
+    {
+        if (cdImageEnv[0] != '\0')
+        {
+            paths.cdImage = normalizeAbsolutePath(std::filesystem::path(cdImageEnv));
+        }
+    }
+
     setIoPaths(paths);
 }
 
@@ -1091,6 +1105,31 @@ const char *describeGuestBranchKind(PS2Runtime::GuestBranchKind kind)
     }
 }
 
+namespace
+{
+    // Manual triage stubs for indirect (JALR) call targets that land outside the
+    // dense generated function table's range entirely (e.g. inside the ~468KB
+    // region 0x24193C-0x2B6B14 that looks like data/assets and was deliberately
+    // left unrecompiled -- see analysis/config.toml's `stubs` list, which was
+    // meant to drive this but never actually got wired up: FunctionTableEmitter
+    // ignores its `stubs` parameter entirely, `(void)stubs;` in
+    // function_table_emitter.cpp, confirmed 2026-07-22). `replaceFunction`/
+    // `bindAddressHandler` can't help either since they require an in-range
+    // table slot. This map is the actual, working mechanism for these
+    // out-of-range addresses -- add entries here as new ones are discovered.
+    const std::unordered_map<uint32_t, PS2Runtime::RecompiledFunction> &outOfRangeStubs()
+    {
+        static const std::unordered_map<uint32_t, PS2Runtime::RecompiledFunction> table = {
+            // 2026-07-22 overnight session: reached live after the sub_00104638
+            // texture-decompress override unblocked the earlier 0x104a40 halt --
+            // game created new threads/semaphores before landing here via an
+            // indirect call.
+            {0x297100u, &ps2_stubs::ret0},
+        };
+        return table;
+    }
+}
+
 PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
 {
     pushDispatchPc(address);
@@ -1102,6 +1141,15 @@ PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
         if (fn != nullptr)
         {
             return fn;
+        }
+    }
+
+    {
+        const auto &stubs = outOfRangeStubs();
+        auto it = stubs.find(address);
+        if (it != stubs.end())
+        {
+            return it->second;
         }
     }
 
@@ -2366,6 +2414,15 @@ void PS2Runtime::run()
     m_cpuContext.r[4] = _mm_setzero_si128();
     m_cpuContext.r[5] = _mm_setzero_si128();
     m_cpuContext.r[29] = _mm_set_epi64x(0, static_cast<int64_t>(PS2_RAM_SIZE - 0x10u));
+    // Real PS2 BIOS/IPL sets COP0 Status.IE (bit0) before ever handing control
+    // to the game's ELF entry point; this recomp skips the real BIOS/IPL, so it
+    // must replicate that one-time setup itself. Game code never sets IE
+    // directly (only the EE-specific EIE/bit16 gate via ei/di), so leaving
+    // IE=0 here permanently blocks anything gated on "were interrupts
+    // enabled" -- confirmed via live diagnostics this is why StartThread was
+    // never reached for any game-created thread (FUN_001d0430, called right
+    // after CreateThread, unconditionally bails out when Status.IE==0).
+    m_cpuContext.cop0_status |= 0x00000001u;
     m_debugPc.store(m_cpuContext.pc, std::memory_order_relaxed);
     m_debugRa.store(static_cast<uint32_t>(_mm_extract_epi32(m_cpuContext.r[31], 0)), std::memory_order_relaxed);
     m_debugSp.store(static_cast<uint32_t>(_mm_extract_epi32(m_cpuContext.r[29], 0)), std::memory_order_relaxed);
