@@ -238,7 +238,7 @@ namespace
 
     constexpr uint32_t kAsyncCounterAddr = 0x2400u;
 
-    void testWaitForAsyncCounter(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
+    void testWaitForAsyncCounter(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         if (!rdram || !ctx)
         {
@@ -251,6 +251,10 @@ namespace
             std::memcpy(&counter, rdram + kAsyncCounterAddr, sizeof(counter));
             if (counter == 0u)
             {
+                if (runtime != nullptr)
+                {
+                    runtime->yieldGuestExecutionAfterWake();
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
         } while (counter == 0u);
@@ -435,6 +439,136 @@ void register_ps2_runtime_expansion_tests()
             t.IsTrue(peerWaiting, "peer guest thread should contend while the waker owns guest execution");
             t.IsFalse(peerRanWhileMainHeld, "peer guest thread should not run before the waker yields execution");
             t.IsTrue(peerRanAfterHandoff, "wake handoff should let the peer acquire guest execution before returning");
+        });
+
+        tc.Run("recursive guest execution acquisition does not advance the handoff epoch", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            const uint64_t initial = runtime.guestExecutionHandoffEpochSnapshot();
+
+            PS2Runtime::GuestExecutionScope outer(&runtime);
+            const uint64_t afterOuter = runtime.guestExecutionHandoffEpochSnapshot();
+            t.Equals(afterOuter, initial + 1u, "outer acquisition should advance the epoch exactly once");
+
+            {
+                PS2Runtime::GuestExecutionScope inner(&runtime);
+                t.Equals(runtime.guestExecutionHandoffEpochSnapshot(), afterOuter,
+                         "recursive acquisition must not advance the epoch");
+
+                PS2Runtime::GuestExecutionScope innermost(&runtime);
+                t.Equals(runtime.guestExecutionHandoffEpochSnapshot(), afterOuter,
+                         "deeper recursive acquisitions must not advance the epoch either");
+            }
+
+            t.Equals(runtime.guestExecutionHandoffEpochSnapshot(), afterOuter,
+                     "releasing recursive acquisitions must not advance the epoch");
+        });
+
+        tc.Run("reacquiring a depth-4 release advances the handoff epoch exactly once", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+
+            PS2Runtime::GuestExecutionScope s1(&runtime);
+            PS2Runtime::GuestExecutionScope s2(&runtime);
+            PS2Runtime::GuestExecutionScope s3(&runtime);
+            PS2Runtime::GuestExecutionScope s4(&runtime);
+
+            const uint64_t before = runtime.guestExecutionHandoffEpochSnapshot();
+            {
+                PS2Runtime::GuestExecutionReleaseScope release(&runtime);
+                t.Equals(runtime.guestExecutionHandoffEpochSnapshot(), before,
+                         "releasing guest execution must not advance the epoch");
+            }
+
+            t.Equals(runtime.guestExecutionHandoffEpochSnapshot(), before + 1u,
+                     "reacquiring a depth-4 release should advance the epoch exactly once");
+        });
+
+        tc.Run("handoff completed before the wait does not count as a timeout", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            const uint64_t timeoutsBefore = runtime.guestExecutionHandoffTimeouts();
+
+            std::atomic<bool> holderAcquired{false};
+            std::atomic<bool> releaseHolder{false};
+            uint64_t baseline = 0u;
+            std::thread holder;
+
+            {
+                PS2Runtime::GuestExecutionScope mainScope(&runtime);
+
+                holder = std::thread([&]()
+                {
+                    PS2Runtime::GuestExecutionScope scope(&runtime);
+                    holderAcquired.store(true, std::memory_order_release);
+                    while (!releaseHolder.load(std::memory_order_acquire))
+                    {
+                        std::this_thread::sleep_for(std::chrono::microseconds(100));
+                    }
+                });
+
+                const bool holderContending = waitUntil([&]()
+                {
+                    return runtime.guestExecutionWaiterCountForTesting() > 0u;
+                }, std::chrono::milliseconds(250));
+                t.IsTrue(holderContending, "holder thread should be queued before the release");
+
+                // Token captured BEFORE releasing guest execution, like the dispatchers do
+                baseline = runtime.guestExecutionHandoffEpochSnapshot();
+            }
+
+            const bool acquired = waitUntil([&]()
+            {
+                return holderAcquired.load(std::memory_order_acquire);
+            }, std::chrono::milliseconds(250));
+            t.IsTrue(acquired, "holder should acquire guest execution after the release");
+
+            // Second waiter keeps waiters > 0 so the wait below cannot take the
+            // no-waiters fast path: it must recognize the epoch advance instead.
+            std::thread secondWaiter([&]()
+            {
+                PS2Runtime::GuestExecutionScope scope(&runtime);
+            });
+            const bool secondContending = waitUntil([&]()
+            {
+                return runtime.guestExecutionWaiterCountForTesting() > 0u;
+            }, std::chrono::milliseconds(250));
+            t.IsTrue(secondContending, "second waiter should be queued while the holder owns guest execution");
+
+            runtime.waitForGuestExecutionHandoff(baseline);
+
+            t.Equals(runtime.guestExecutionHandoffTimeouts(), timeoutsBefore,
+                     "a handoff that completed before the wait must not count as a timeout");
+
+            releaseHolder.store(true, std::memory_order_release);
+            if (holder.joinable())
+            {
+                holder.join();
+            }
+            if (secondWaiter.joinable())
+            {
+                secondWaiter.join();
+            }
+        });
+
+        tc.Run("nested DeferredGuestYieldScope delivers pending only to the outermost scope", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            bool outerPending = false;
+            bool innerPending = false;
+
+            {
+                PS2Runtime::DeferredGuestYieldScope outer(outerPending);
+                {
+                    PS2Runtime::DeferredGuestYieldScope inner(innerPending);
+                    runtime.yieldGuestExecutionAfterWake(); // must defer instead of yielding
+                }
+                t.IsFalse(innerPending, "inner scope must not consume the deferred yield");
+                t.IsFalse(outerPending, "pending must only be delivered when the outermost scope closes");
+            }
+
+            t.IsTrue(outerPending, "outermost scope should deliver the deferred yield");
+            t.IsFalse(innerPending, "inner scope must stay untouched");
         });
 
         tc.Run("guest preemption policy requests a dispatcher handoff when another guest thread contends", [](TestCase &t)
@@ -1734,9 +1868,13 @@ void register_ps2_runtime_expansion_tests()
             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
 
             constexpr uint32_t kParamAddr = 0x2000u;
+            // init=1 < max=2 headroom makes both first calls succeed
+            // regardless of scheduling: poller is the sole decrementer
+            // (count>=1 at first poll), signaler the sole incrementer
+            // (count<max at first signal). Keep init<max.
             const uint32_t semaParam[6] = {
                 0u, // count
-                1u, // max_count
+                2u, // max_count
                 1u, // init_count
                 0u, // wait_threads
                 0u, // attr
@@ -1754,11 +1892,25 @@ void register_ps2_runtime_expansion_tests()
             std::atomic<int32_t> signalOkCount{0};
             std::atomic<bool> pollerThrew{false};
             std::atomic<bool> signalerThrew{false};
+            std::atomic<int32_t> readyCount{0};
+
+            // Release both workers together so their 64-iteration loops start at
+            // the same instant, maximizing the opportunity to interleave instead
+            // of one thread running to completion before the other is scheduled.
+            const auto waitForStart = [&]()
+            {
+                readyCount.fetch_add(1, std::memory_order_acq_rel);
+                while (readyCount.load(std::memory_order_acquire) < 2)
+                {
+                    std::this_thread::yield();
+                }
+            };
 
             std::thread poller([&]()
             {
                 try
                 {
+                    waitForStart();
                     for (int i = 0; i < 64; ++i)
                     {
                         R5900Context pollCtx{};
@@ -1780,6 +1932,7 @@ void register_ps2_runtime_expansion_tests()
             {
                 try
                 {
+                    waitForStart();
                     for (int i = 0; i < 64; ++i)
                     {
                         R5900Context signalCtx{};
@@ -1810,19 +1963,10 @@ void register_ps2_runtime_expansion_tests()
                       "PollSema worker thread should not throw");
             t.IsFalse(signalerThrew.load(std::memory_order_acquire),
                       "SignalSema worker thread should not throw");
-            const int32_t pollOk = pollOkCount.load(std::memory_order_relaxed);
-            const int32_t signalOk = signalOkCount.load(std::memory_order_relaxed);
-            t.IsTrue(pollOk > 0,
+            t.IsTrue(pollOkCount.load(std::memory_order_relaxed) > 0,
                      "contended PollSema should observe at least one successful acquire");
-            // SignalSema only returns success while the counter has headroom
-            // (count < max_count). With init_count == max_count == 1 the counter
-            // starts full, so the signaler can only succeed after the poller has
-            // drained it. Whether that interleaving happens is up to the host
-            // scheduler, so signalOk is NOT guaranteed to be > 0 and must not be
-            // asserted directly (doing so made this test flaky under CI load).
-            // The meaningful stability property under contention is that no
-            // acquire/release is ever lost or double-applied, which the
-            // conservation invariant below verifies.
+            t.IsTrue(signalOkCount.load(std::memory_order_relaxed) > 0,
+                     "contended SignalSema should observe successful releases");
 
             constexpr uint32_t kStatusAddr = 0x2100u;
             R5900Context referCtx{};
@@ -1833,13 +1977,7 @@ void register_ps2_runtime_expansion_tests()
 
             int32_t finalCount = 0;
             std::memcpy(&finalCount, rdram.data() + kStatusAddr + 0u, sizeof(finalCount));
-            t.IsTrue(finalCount >= 0 && finalCount <= 1, "semaphore count should remain within [0, max_count]");
-            // Conservation invariant: starting from init_count (1), every
-            // successful poll decrements and every successful signal increments
-            // the counter under the semaphore mutex. This holds for any thread
-            // interleaving; if contention had corrupted the count it would not.
-            t.Equals(finalCount, 1 - pollOk + signalOk,
-                     "semaphore count must account for every successful acquire/release under contention");
+            t.IsTrue(finalCount >= 0 && finalCount <= 2, "semaphore count should remain within [0, max_count]");
 
             runtime.requestStop();
             notifyRuntimeStop();

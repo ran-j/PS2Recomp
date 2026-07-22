@@ -89,12 +89,6 @@ namespace
         std::memset(&ctx, 0, sizeof(ctx));
     }
 
-    void writeStackArg(std::vector<uint8_t> &rdram, R5900Context &ctx, uint32_t slotIndex, uint32_t value)
-    {
-        const uint32_t sp = ::getRegU32(&ctx, 29);
-        writeGuestU32(rdram.data(), sp + 16u + slotIndex * sizeof(uint32_t), value);
-    }
-
     int32_t syncMc(std::vector<uint8_t> &rdram, int32_t *cmdOut = nullptr)
     {
         R5900Context syncCtx{};
@@ -446,9 +440,9 @@ void register_ps2_runtime_io_tests()
             setRegU32(test.ctx, 5, 0u);
             setRegU32(test.ctx, 6, patternAddr);
             setRegU32(test.ctx, 7, 0u);
-            setRegU32(test.ctx, 29, GUEST_STACK_AREA_START);
-            writeStackArg(test.rdram, test.ctx, 0u, 8u);
-            writeStackArg(test.rdram, test.ctx, 1u, GUEST_MC_TABLE_ADDR);
+            // EE n32 ABI: arguments 5 and 6 travel in $t0/$t1
+            setRegU32(test.ctx, 8, 8u);
+            setRegU32(test.ctx, 9, GUEST_MC_TABLE_ADDR);
 
             ps2_stubs::sceMcGetDir(test.rdram.data(), &test.ctx, nullptr);
 
@@ -480,8 +474,8 @@ void register_ps2_runtime_io_tests()
             setRegU32(test.ctx, 5, 0u);
             setRegU32(test.ctx, 6, typeAddr);
             setRegU32(test.ctx, 7, freeAddr);
-            setRegU32(test.ctx, 29, GUEST_STACK_AREA_START);
-            writeStackArg(test.rdram, test.ctx, 0u, formatAddr);
+            // EE n32 ABI: the fifth argument travels in $t0
+            setRegU32(test.ctx, 8, formatAddr);
             ps2_stubs::sceMcGetInfo(test.rdram.data(), &test.ctx, nullptr);
 
             int32_t cmd = 0;
@@ -501,8 +495,7 @@ void register_ps2_runtime_io_tests()
             setRegU32(test.ctx, 5, 0u);
             setRegU32(test.ctx, 6, typeAddr);
             setRegU32(test.ctx, 7, freeAddr);
-            setRegU32(test.ctx, 29, GUEST_STACK_AREA_START);
-            writeStackArg(test.rdram, test.ctx, 0u, formatAddr);
+            setRegU32(test.ctx, 8, formatAddr);
             ps2_stubs::sceMcGetInfo(test.rdram.data(), &test.ctx, nullptr);
 
             t.Equals(syncMc(test.rdram, &cmd), -2, "unformatted cards should report sceMcResNoFormat through sceMcSync");
@@ -533,8 +526,15 @@ void register_ps2_runtime_io_tests()
             ps2_stubs::sceMcEnd(test.rdram.data(), &test.ctx, nullptr);
             t.Equals(getRegS32(&test.ctx, 2), 0, "sceMcEnd should succeed");
 
-            t.Equals(syncMc(test.rdram, &cmd), 0, "sceMcSync should report cleared result after sceMcEnd");
-            t.Equals(cmd, 0, "sceMcEnd should clear the last active libmc command");
+            // libmc semantics: with no async command pending, sceMcSync returns -1
+            // and leaves the cmd/result out-parameters untouched.
+            R5900Context syncCtx{};
+            setRegU32(syncCtx, 4, 0u);
+            setRegU32(syncCtx, 5, GUEST_MC_SYNC_CMD_ADDR);
+            setRegU32(syncCtx, 6, GUEST_MC_SYNC_RESULT_ADDR);
+            ps2_stubs::sceMcSync(test.rdram.data(), &syncCtx, nullptr);
+            t.Equals(getRegS32(&syncCtx, 2), -1,
+                     "sceMcSync after sceMcEnd should report that no command is active");
         });
 
         tc.Run("sceIoctl cmd1 updates wait flag state", [](TestCase &t)

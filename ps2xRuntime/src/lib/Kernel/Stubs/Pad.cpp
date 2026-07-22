@@ -618,6 +618,7 @@ namespace ps2_stubs
         portState->transientState = 0u;
         if (dmaStr)
         {
+            ps2TraceGuestRangeWrite(rdram, dmaAddr, 32u, "scePadPortOpen", ctx);
             std::memset(dmaStr, 0, 32);
         }
         setReturnS32(ctx, 1);
@@ -635,6 +636,7 @@ namespace ps2_stubs
             return;
         }
 
+        ps2TraceGuestRangeWrite(rdram, dataAddr, 32u, "scePadRead", ctx);
         if (!readPadPortData(port, slot, runtime, data, dataAddr))
         {
             setReturnS32(ctx, 0);

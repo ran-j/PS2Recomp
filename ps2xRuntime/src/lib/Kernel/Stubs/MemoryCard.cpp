@@ -85,14 +85,27 @@ namespace ps2_stubs
         std::mutex g_mcStateMutex;
         int32_t g_mcNextFd = 1;
         int32_t g_mcLastCmd = 0;
+        bool g_mcCommandPending = false;
         int32_t g_mcLastResult = 0;
         std::unordered_map<int32_t, McOpenFile> g_mcFiles;
         std::array<McPortState, 2> g_mcPorts{};
         int32_t g_cvMcFileCursor = 0;
-        constexpr int32_t kCvMcFreeCapacityBytes = 0x01000000;
-        constexpr int32_t kCvMcSaveCapacityBytes = 0x00080000;
-        constexpr int32_t kCvMcConfigCapacityBytes = 0x00008000;
-        constexpr int32_t kCvMcIconCapacityBytes = 0x00004000;
+
+        constexpr int32_t kCvMcSaveFileBytes = 0x838;
+        constexpr int32_t kCvMcConfigFileBytes = 0x34;
+        constexpr int32_t kCvMcIconInfoBytes = 0x3C4;
+        constexpr int32_t kCvMcIconFileBytes = 0xB3F8;
+
+        constexpr int32_t cvMcKilobytes(int32_t bytes)
+        {
+            return (bytes + 1023) / 1024;
+        }
+
+        constexpr int32_t kCvMcRequiredFreeKb =
+            cvMcKilobytes(kCvMcSaveFileBytes) * 15 +
+            cvMcKilobytes(kCvMcConfigFileBytes) +
+            cvMcKilobytes(kCvMcIconInfoBytes) +
+            cvMcKilobytes(kCvMcIconFileBytes) + 11;
 
         bool isValidMcPortSlot(int32_t port, int32_t slot)
         {
@@ -351,6 +364,7 @@ namespace ps2_stubs
         {
             g_mcLastCmd = cmd;
             g_mcLastResult = result;
+            g_mcCommandPending = true;
         }
 
         void closeMcFilesLocked()
@@ -464,7 +478,6 @@ namespace ps2_stubs
         }
     }
 
-
     MemoryCardDebugSnapshot getMemoryCardDebugSnapshot()
     {
         MemoryCardDebugSnapshot snapshot{};
@@ -492,9 +505,7 @@ namespace ps2_stubs
             snapshot.openFiles.push_back(std::move(row));
         }
         std::sort(snapshot.openFiles.begin(), snapshot.openFiles.end(), [](const MemoryCardDebugOpenFile &a, const MemoryCardDebugOpenFile &b)
-        {
-            return a.fd < b.fd;
-        });
+                  { return a.fd < b.fd; });
         return snapshot;
     }
 
@@ -544,6 +555,8 @@ namespace ps2_stubs
             setMcCommandResultLocked(kMcCmdChdir, result);
         }
 
+        RUNTIME_LOG("[MC] Chdir port=" << port << " '" << requestedDir
+                                       << "' -> result=" << result << " cwd='" << currentDir << "'");
         writeMcCString(rdram, currentDirAddr, currentDir);
         setReturnS32(ctx, 0);
     }
@@ -624,6 +637,7 @@ namespace ps2_stubs
             g_mcNextFd = 1;
             g_mcLastCmd = 0;
             g_mcLastResult = 0;
+            g_mcCommandPending = false;
             for (McPortState &state : g_mcPorts)
             {
                 state.currentDir = "/";
@@ -685,8 +699,8 @@ namespace ps2_stubs
         const int32_t port = static_cast<int32_t>(getRegU32(ctx, 4));
         const int32_t slot = static_cast<int32_t>(getRegU32(ctx, 5));
         const std::string rawPath = readPs2CStringBounded(rdram, getRegU32(ctx, 6), kMcMaxPathLen);
-        const int32_t maxEntries = static_cast<int32_t>(readStackU32(rdram, ctx, 16));
-        const uint32_t tableAddr = readStackU32(rdram, ctx, 20);
+        const int32_t maxEntries = static_cast<int32_t>(getRegU32(ctx, 8));
+        const uint32_t tableAddr = getRegU32(ctx, 9);
 
         std::vector<SceMcTblGetDir> entries;
         int32_t result = kMcResultNoEntry;
@@ -828,12 +842,18 @@ namespace ps2_stubs
 
             setMcCommandResultLocked(kMcCmdGetDir, result);
         }
+        RUNTIME_LOG("[MC] GetDir port=" << port << " '" << rawPath
+                                        << "' maxent=" << maxEntries << " -> result=" << result);
         setReturnS32(ctx, 0);
     }
 
     void sceMcGetEntSpace(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        setReturnS32(ctx, 1024);
+        {
+            std::lock_guard<std::mutex> lock(g_mcStateMutex);
+            setMcCommandResultLocked(kMcCmdGetEntSpace, 1024);
+        }
+        setReturnS32(ctx, 0);
     }
 
     void sceMcGetInfo(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -842,7 +862,7 @@ namespace ps2_stubs
         const int32_t slot = static_cast<int32_t>(getRegU32(ctx, 5));
         const uint32_t typePtr = getRegU32(ctx, 6);
         const uint32_t freePtr = getRegU32(ctx, 7);
-        const uint32_t formatPtr = readStackU32(rdram, ctx, 16);
+        const uint32_t formatPtr = getRegU32(ctx, 8);
 
         int32_t cardType = 0;
         int32_t freeBlocks = 0;
@@ -885,6 +905,9 @@ namespace ps2_stubs
             }
         }
 
+        RUNTIME_LOG("[MC] GetInfo port=" << port << " type=" << cardType
+                                         << " free=" << freeBlocks << " format=" << format
+                                         << " result=" << result);
         setReturnS32(ctx, 0);
     }
 
@@ -901,6 +924,7 @@ namespace ps2_stubs
             g_mcNextFd = 1;
             g_mcLastCmd = 0;
             g_mcLastResult = 0;
+            g_mcCommandPending = false;
             for (McPortState &state : g_mcPorts)
             {
                 state.currentDir = "/";
@@ -1172,11 +1196,24 @@ namespace ps2_stubs
         const uint32_t resultPtr = getRegU32(ctx, 6);
         int32_t cmd = 0;
         int32_t result = 0;
+        bool hadPending = false;
         {
             std::lock_guard<std::mutex> lock(g_mcStateMutex);
+            hadPending = g_mcCommandPending;
+            g_mcCommandPending = false;
             cmd = g_mcLastCmd;
             result = g_mcLastResult;
         }
+
+        // libmc semantics: -1 means no async operation was executing; games rely
+        // on it to tell idle polling apart from command completion.
+        if (!hadPending)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        RUNTIME_LOG("[MC] Sync cmd=" << cmd << " result=" << result);
 
         if (cmdPtr != 0u)
         {
@@ -1366,7 +1403,7 @@ namespace ps2_stubs
 
     void mcGetConfigCapacitySize(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        setReturnS32(ctx, kCvMcConfigCapacityBytes);
+        setReturnS32(ctx, kCvMcConfigFileBytes);
     }
 
     void mcGetFileSelectWindowCursol(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1376,17 +1413,17 @@ namespace ps2_stubs
 
     void mcGetFreeCapacitySize(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        setReturnS32(ctx, kCvMcFreeCapacityBytes);
+        setReturnS32(ctx, kCvMcRequiredFreeKb);
     }
 
     void mcGetIconCapacitySize(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        setReturnS32(ctx, kCvMcIconCapacityBytes);
+        setReturnS32(ctx, kCvMcIconInfoBytes);
     }
 
     void mcGetIconFileCapacitySize(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        setReturnS32(ctx, kCvMcIconCapacityBytes);
+        setReturnS32(ctx, kCvMcIconFileBytes);
     }
 
     void mcGetPortSelectDirInfo(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1396,7 +1433,7 @@ namespace ps2_stubs
 
     void mcGetSaveFileCapacitySize(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        setReturnS32(ctx, kCvMcSaveCapacityBytes);
+        setReturnS32(ctx, kCvMcSaveFileBytes);
     }
 
     void mcGetStringEnd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

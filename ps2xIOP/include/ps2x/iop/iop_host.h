@@ -49,7 +49,7 @@ namespace ps2x::iop
     struct MemoryCardRequest
     {
         MemoryCardOperation operation = MemoryCardOperation::Init;
-        // The fifth argument is carried at sp + 16 by the EE ABI
+        // The fifth argument is carried in $t0 by the EE n32 ABI
         std::array<uint32_t, 5> arguments{};
     };
 

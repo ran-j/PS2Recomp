@@ -108,6 +108,8 @@ namespace
 
     thread_local DispatchHistory g_dispatchHistory;
     thread_local std::unordered_map<PS2Runtime *, uint32_t> g_guestExecutionDepths;
+    thread_local uint32_t g_deferredGuestYieldDepth = 0u;
+    thread_local bool g_deferredGuestYieldPending = false;
 
     bool computeFileCrc32(const std::string &path, uint32_t &crcOut)
     {
@@ -1962,10 +1964,14 @@ void PS2Runtime::dispatchLoop(uint8_t *rdram, R5900Context *ctx)
         const uint32_t dispatchedPc = pc;
         const uint32_t dispatchedRa = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0));
 
+        uint64_t handoffBaseline = 0u;
         {
             GuestExecutionScope guestExecution(this);
             fn(rdram, ctx, this);
+            handoffBaseline = guestExecutionHandoffEpochSnapshot();
         }
+
+        waitForGuestExecutionHandoff(handoffBaseline);
 
         if (ctx->pc == 0u)
         {
@@ -1991,10 +1997,19 @@ void PS2Runtime::dispatchLoop(uint8_t *rdram, R5900Context *ctx)
 
 void PS2Runtime::enterGuestExecution()
 {
+    uint32_t &depth = g_guestExecutionDepths[this];
+
+    if (depth != 0u)
+    {
+        m_guestExecutionMutex.lock();
+        ++depth;
+        return;
+    }
+
     m_guestExecutionWaiters.fetch_add(1u, std::memory_order_acq_rel);
     m_guestExecutionMutex.lock();
     m_guestExecutionWaiters.fetch_sub(1u, std::memory_order_acq_rel);
-    ++g_guestExecutionDepths[this];
+    depth = 1u;
     markGuestExecutionAcquired();
 }
 
@@ -2039,13 +2054,22 @@ void PS2Runtime::reacquireGuestExecution(uint32_t depth)
     }
 
     uint32_t &heldDepth = g_guestExecutionDepths[this];
-    for (uint32_t i = 0; i < depth; ++i)
+    uint32_t remaining = depth;
+
+    if (heldDepth == 0u)
     {
         m_guestExecutionWaiters.fetch_add(1u, std::memory_order_acq_rel);
         m_guestExecutionMutex.lock();
         m_guestExecutionWaiters.fetch_sub(1u, std::memory_order_acq_rel);
-        ++heldDepth;
+        heldDepth = 1u;
         markGuestExecutionAcquired();
+        --remaining;
+    }
+
+    for (uint32_t i = 0; i < remaining; ++i)
+    {
+        m_guestExecutionMutex.lock();
+        ++heldDepth;
     }
 }
 
@@ -2058,8 +2082,65 @@ void PS2Runtime::markGuestExecutionAcquired()
     m_guestExecutionHandoffCv.notify_all();
 }
 
+void PS2Runtime::waitForGuestExecutionHandoff()
+{
+    waitForGuestExecutionHandoff(guestExecutionHandoffEpochSnapshot());
+}
+
+void PS2Runtime::waitForGuestExecutionHandoff(uint64_t baselineEpoch)
+{
+    // Lock-free fast path
+    if (m_guestExecutionWaiters.load(std::memory_order_acquire) == 0u)
+    {
+        return;
+    }
+
+    std::unique_lock<std::mutex> lock(m_guestExecutionHandoffMutex);
+
+    if (m_guestExecutionWaiters.load(std::memory_order_acquire) == 0u)
+    {
+        return;
+    }
+
+    const bool handedOff = m_guestExecutionHandoffCv.wait_for(
+        lock,
+        std::chrono::milliseconds(2),
+        [&]()
+        {
+            return m_guestExecutionWaiters.load(std::memory_order_acquire) == 0u ||
+                   m_guestExecutionHandoffEpoch.load(std::memory_order_relaxed) != baselineEpoch ||
+                   isStopRequested();
+        });
+
+    if (!handedOff)
+    {
+        m_guestExecutionHandoffTimeouts.fetch_add(1u, std::memory_order_relaxed);
+    }
+}
+
+PS2Runtime::DeferredGuestYieldScope::DeferredGuestYieldScope(bool &pendingOut) noexcept
+    : m_pendingOut(pendingOut)
+{
+    ++g_deferredGuestYieldDepth;
+}
+
+PS2Runtime::DeferredGuestYieldScope::~DeferredGuestYieldScope()
+{
+    if (--g_deferredGuestYieldDepth == 0u && g_deferredGuestYieldPending)
+    {
+        g_deferredGuestYieldPending = false;
+        m_pendingOut = true;
+    }
+}
+
 void PS2Runtime::yieldGuestExecutionAfterWake()
 {
+    if (g_deferredGuestYieldDepth != 0u)
+    {
+        g_deferredGuestYieldPending = true;
+        return;
+    }
+
     auto it = g_guestExecutionDepths.find(this);
     if (it == g_guestExecutionDepths.end() || it->second == 0u)
     {

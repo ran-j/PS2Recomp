@@ -201,7 +201,7 @@ void register_ps2_runtime_interrupt_tests()
 {
     MiniTest::Case("PS2RuntimeInterrupt", [](TestCase &tc)
     {
-        tc.Run("SetVSyncFlag updates guest flag and monotonic tick", [](TestCase &t)
+        tc.Run("SetVSyncFlag arms a one-shot vblank notification", [](TestCase &t)
         {
             notifyRuntimeStop();
             TestEnv env;
@@ -229,12 +229,23 @@ void register_ps2_runtime_interrupt_tests()
             const uint64_t firstTick = readGuestU64(env.rdram.data(), kTickAddr);
             t.IsTrue(firstTick > 0u, "First observed VSync tick should be positive");
             t.Equals(readGuestU32(env.rdram.data(), kFlagAddr), 1u, "VSync worker should set flag to one");
+ 
+            const bool tickRewritten = waitUntil([&]() {
+                return readGuestU64(env.rdram.data(), kTickAddr) != firstTick;
+            }, std::chrono::milliseconds(100));
+            t.IsTrue(!tickRewritten, "consumed registration should not be written again");
 
-            const bool secondTickSeen = waitUntil([&]() {
+            // Re-arming registers a fresh one-shot notification.
+            writeGuestU32(env.rdram.data(), kFlagAddr, 0u);
+            R5900Context rearmCtx{};
+            setRegU32(rearmCtx, 4, kFlagAddr);
+            setRegU32(rearmCtx, 5, kTickAddr);
+            t.IsTrue(callSyscall(0x73u, env.rdram.data(), &rearmCtx, &env.runtime), "SetVSyncFlag re-arm should dispatch");
+            const bool rearmedTickSeen = waitUntil([&]() {
                 return readGuestU64(env.rdram.data(), kTickAddr) > firstTick;
             }, std::chrono::milliseconds(300));
-            t.IsTrue(secondTickSeen, "VSync tick should continue to advance");
-            t.IsTrue(readGuestU64(env.rdram.data(), kTickAddr) > firstTick, "tick should be monotonic");
+            t.IsTrue(rearmedTickSeen, "re-armed registration should observe a later tick");
+            t.Equals(readGuestU32(env.rdram.data(), kFlagAddr), 1u, "re-armed registration should set flag to one");
 
             cleanupRuntime(env);
         });

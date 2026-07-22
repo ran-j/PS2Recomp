@@ -1,6 +1,11 @@
 #include "Common.h"
 #include "MPEG.h"
 
+#if !defined(PS2X_HAS_FFMPEG)
+#define PS2X_HAS_FFMPEG 1
+#endif
+
+#if PS2X_HAS_FFMPEG
 extern "C"
 {
 #include <libavcodec/avcodec.h>
@@ -8,6 +13,7 @@ extern "C"
 #include <libavutil/log.h>
 #include <libswscale/swscale.h>
 }
+#endif
 
 #include <chrono>
 #include <condition_variable>
@@ -27,6 +33,7 @@ namespace ps2_stubs
             std::vector<uint8_t> rgba;
         };
 
+#if PS2X_HAS_FFMPEG
         std::string ffmpegErrorString(int err)
         {
             std::array<char, AV_ERROR_MAX_STRING_SIZE> buffer{};
@@ -419,6 +426,30 @@ namespace ps2_stubs
             bool m_drained = false;
             bool m_seenKeyframe = false;
         };
+#else
+        // TODO
+        class MpegFfmpegDecoder
+        {
+        public:
+            bool feed(const uint8_t *, size_t, std::deque<MpegDecodedFrame> &)
+            {
+                static bool s_warnedNoFfmpeg = false;
+                if (!s_warnedNoFfmpeg)
+                {
+                    std::cerr << "[MPEG] runtime built without FFmpeg; MPEG video decode is disabled." << std::endl;
+                    s_warnedNoFfmpeg = true;
+                }
+                return false;
+            }
+
+            bool flush(std::deque<MpegDecodedFrame> &)
+            {
+                return true;
+            }
+
+            void reset() {}
+        };
+#endif
 
         struct MpegRegisteredCallback
         {
@@ -1316,33 +1347,42 @@ namespace ps2_stubs
             callbackCtx.pc = callback.func;
 
             uint32_t steps = 0u;
-            while (callbackCtx.pc != 0u && !runtime->isStopRequested() && steps < kMpegCallbackMaxSteps)
+            bool reschedulePending = false;
+            uint64_t handoffBaseline = 0u;
             {
-                if (!runtime->hasFunction(callbackCtx.pc))
+                PS2Runtime::GuestExecutionScope guestExecution(runtime);
+                PS2Runtime::DeferredGuestYieldScope deferYield(reschedulePending);
+
+                while (callbackCtx.pc != 0u && !runtime->isStopRequested() && steps < kMpegCallbackMaxSteps)
                 {
-                    static uint32_t badPcLogCount = 0u;
-                    if (badPcLogCount < 16u)
+                    if (!runtime->hasFunction(callbackCtx.pc))
                     {
-                        std::cerr << "[MPEG:callback:bad-pc] cb=0x" << std::hex << callback.func
-                                  << " pc=0x" << callbackCtx.pc
-                                  << " ra=0x" << getRegU32(&callbackCtx, 31)
-                                  << std::dec << std::endl;
-                        ++badPcLogCount;
+                        static uint32_t badPcLogCount = 0u;
+                        if (badPcLogCount < 16u)
+                        {
+                            std::cerr << "[MPEG:callback:bad-pc] cb=0x" << std::hex << callback.func
+                                      << " pc=0x" << callbackCtx.pc
+                                      << " ra=0x" << getRegU32(&callbackCtx, 31)
+                                      << std::dec << std::endl;
+                            ++badPcLogCount;
+                        }
+                        break;
                     }
-                    break;
-                }
 
-                PS2Runtime::RecompiledFunction step = runtime->lookupFunction(callbackCtx.pc);
-                if (!step)
-                {
-                    break;
-                }
+                    PS2Runtime::RecompiledFunction step = runtime->lookupFunction(callbackCtx.pc);
+                    if (!step)
+                    {
+                        break;
+                    }
 
-                {
-                    PS2Runtime::GuestExecutionScope guestExecution(runtime);
                     step(rdram, &callbackCtx, runtime);
+                    ++steps;
                 }
-                ++steps;
+                handoffBaseline = runtime->guestExecutionHandoffEpochSnapshot();
+            }
+            if (reschedulePending && !runtime->isStopRequested())
+            {
+                runtime->waitForGuestExecutionHandoff(handoffBaseline);
             }
 
             if (steps >= kMpegCallbackMaxSteps)
