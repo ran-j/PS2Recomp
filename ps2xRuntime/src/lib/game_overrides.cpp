@@ -14,6 +14,22 @@ namespace
         // original hang, just slightly later (mid-way through the SIF handshake instead
         // of before it). Keep this in place.
         ps2_game_overrides::bindAddressHandler(runtime, 0x1D2600u, "ret1");
+
+        // EXPERIMENTAL (2026-07-22 overnight session, attempt 2): overriding FUN_001894d0
+        // (0x1894d0) to skip the whole "subsystem 7" chain did NOT stop the game from halting
+        // at 0x104a40 -- live capture showed identical behavior, meaning the call chain
+        // (gap_00100548 -> FUN_00100a68(a1=1) -> FUN_00189410(a0=7) -> FUN_001894d0) traced
+        // this session is apparently NOT the actual path reaching sub_00104638 (or there's a
+        // second, separate path). Reverted that attempt. Instead, directly override
+        // sub_00104638 itself -- the function whose negative return (-1) is what the caller at
+        // 0x104a1c checks (`bgezl $v0,0x104780`) before falling into the fatal `b $+0` loop at
+        // 0x104a40. Forcing it to return 0 (success) unconditionally means whatever tried to
+        // decompress a TIM2 texture from an empty/uninitialized source buffer will "succeed"
+        // with garbage/zeroed output instead of halting -- likely a corrupted or blank texture
+        // rather than correct graphics, but should let execution continue past this point
+        // instead of hanging forever, which is strictly more informative for continued
+        // investigation. Not a real fix -- purely a diagnostic probe to see what's downstream.
+        ps2_game_overrides::bindAddressHandler(runtime, 0x104638u, "ret0");
     }
 }
 PS2_REGISTER_GAME_OVERRIDE("TaikoInvestigation_ForceFlag322880", "SLPS_204.14.elf", 0x100134u, 0u, ApplyTaikoInvestigationOverride);
