@@ -546,6 +546,14 @@ if(PS2X_FIBER_PTHREAD)
     # Threads::Threads already linked above for all non-Vita builds.
 endif()
 
+if(PS2X_IS_ANDROID)
+    # Bionic libc implements no getcontext/makecontext/swapcontext on any ABI,
+    # so the default POSIX ucontext fiber backend cannot link on Android;
+    # route it to the pthread backend above instead (Bionic-available
+    # primitives only, already fully wired into the scheduler).
+    target_compile_definitions(ps2_runtime PUBLIC PS2X_FIBER_PTHREAD)
+endif()
+
 target_link_libraries(ps2EntryRunner
     PRIVATE
     ps2_runtime

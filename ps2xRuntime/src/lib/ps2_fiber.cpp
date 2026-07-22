@@ -1,5 +1,6 @@
-// Backend dispatch: PLATFORM_VITA -> SceFiber; PS2X_FIBER_PTHREAD -> pthread semaphore;
-// _WIN32 -> Win32 Fibers; else -> POSIX ucontext
+// Backend dispatch: PLATFORM_VITA -> SceFiber; PS2X_FIBER_PTHREAD (also selected for
+// Android, whose Bionic libc lacks ucontext) -> pthread semaphore; _WIN32 -> Win32
+// Fibers; else -> POSIX ucontext
 #include "ps2_fiber.h"
 #include <atomic>
 #include <cstdint>
