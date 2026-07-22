@@ -1,6 +1,8 @@
 #include <algorithm>
 #include <cctype>
 
+#include "runtime/ps2_diag.h"
+
 namespace
 {
     constexpr uint32_t kCdSectorSize = 2048;
@@ -1878,6 +1880,22 @@ namespace
 
     static void applyGsDispEnv(PS2Runtime *runtime, const GsDispEnvMem &env)
     {
+        if (ps2_diag::enabled())
+        {
+            static std::atomic<uint64_t> s_dispEnvCount{0};
+            const uint64_t n = s_dispEnvCount.fetch_add(1, std::memory_order_relaxed);
+            if (ps2_diag::should_log(n, 8, 600))
+            {
+                PS2X_DIAG_LOG("[gs:dispenv] n=" << n
+                                              << " pmode=0x" << std::hex << env.pmode
+                                              << " smode2=0x" << env.smode2
+                                              << " dispfb=0x" << env.dispfb
+                                              << " display=0x" << env.display
+                                              << " bgcolor=0x" << env.bgcolor
+                                              << std::dec);
+            }
+        }
+
         if (!runtime || !runtime->syncCoreSubsystems())
             return;
         auto &regs = runtime->memory().gs();

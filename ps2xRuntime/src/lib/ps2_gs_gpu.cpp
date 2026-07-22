@@ -8,6 +8,7 @@
 #include "ps2_syscalls.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_gs_memory.h"
+#include "runtime/ps2_diag.h"
 #include <atomic>
 #include <algorithm>
 #include <cmath>
@@ -355,6 +356,78 @@ namespace
     std::atomic<uint32_t> s_debugTexaWriteCount{0};
     std::atomic<uint32_t> s_debugCvFontUploadCount{0};
     std::atomic<uint32_t> s_debugLocalCopyCount{0};
+
+    // Mirrors the set of register addresses GS::writeRegister actually
+    // handles (i.e. every non-default case label there). Used only to tag
+    // [gs:ad] diagnostic lines whose address doesn't match anything known.
+    bool isKnownGsRegister(uint8_t regAddr)
+    {
+        switch (regAddr)
+        {
+        case GS_REG_PRIM:
+        case GS_REG_RGBAQ:
+        case GS_REG_ST:
+        case GS_REG_UV:
+        case GS_REG_XYZF2:
+        case GS_REG_XYZF3:
+        case GS_REG_XYZ2:
+        case GS_REG_XYZ3:
+        case GS_REG_TEX0_1:
+        case GS_REG_TEX0_2:
+        case GS_REG_CLAMP_1:
+        case GS_REG_CLAMP_2:
+        case GS_REG_FOG:
+        case GS_REG_TEX1_1:
+        case GS_REG_TEX1_2:
+        case GS_REG_TEX2_1:
+        case GS_REG_TEX2_2:
+        case GS_REG_XYOFFSET_1:
+        case GS_REG_XYOFFSET_2:
+        case GS_REG_PRMODECONT:
+        case GS_REG_PRMODE:
+        case GS_REG_TEXCLUT:
+        case GS_REG_SCISSOR_1:
+        case GS_REG_SCISSOR_2:
+        case GS_REG_ALPHA_1:
+        case GS_REG_ALPHA_2:
+        case GS_REG_TEST_1:
+        case GS_REG_TEST_2:
+        case GS_REG_FRAME_1:
+        case GS_REG_FRAME_2:
+        case GS_REG_ZBUF_1:
+        case GS_REG_ZBUF_2:
+        case GS_REG_FBA_1:
+        case GS_REG_FBA_2:
+        case GS_REG_BITBLTBUF:
+        case GS_REG_TRXPOS:
+        case GS_REG_TRXREG:
+        case GS_REG_TRXDIR:
+        case GS_REG_HWREG:
+        case GS_REG_PABE:
+        case GS_REG_TEXFLUSH:
+        case GS_REG_SCANMSK:
+        case GS_REG_FOGCOL:
+        case GS_REG_DIMX:
+        case GS_REG_DTHE:
+        case GS_REG_COLCLAMP:
+        case GS_REG_MIPTBP1_1:
+        case GS_REG_MIPTBP1_2:
+        case GS_REG_MIPTBP2_1:
+        case GS_REG_MIPTBP2_2:
+        case GS_REG_TEXA:
+        case GS_REG_SIGNAL:
+        case GS_REG_FINISH:
+        case GS_REG_LABEL:
+        case 0x59:
+        case 0x5a:
+        case 0x5b:
+        case 0x5c:
+        case 0x5f:
+            return true;
+        default:
+            return false;
+        }
+    }
 }
 
 using namespace GSInternal;
@@ -1331,6 +1404,25 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
         if (nreg == 0)
             nreg = 16;
 
+        if (ps2_diag::enabled())
+        {
+            static std::atomic<uint64_t> s_giftagCount{0};
+            const uint64_t n = s_giftagCount.fetch_add(1, std::memory_order_relaxed);
+            if (ps2_diag::should_log(n, 32, 5000))
+            {
+                const uint32_t eop = static_cast<uint32_t>((tagLo >> 15) & 1u);
+                PS2X_DIAG_LOG("[gs:giftag] n=" << n
+                                             << " lo=0x" << std::hex << tagLo
+                                             << " hi=0x" << tagHi
+                                             << std::dec
+                                             << " nloop=" << nloop
+                                             << " eop=" << eop
+                                             << " flg=" << static_cast<uint32_t>(flg)
+                                             << " nreg=" << nreg
+                                             << std::endl);
+            }
+        }
+
         recordGifTagDebugEventUnlocked(sizeBytes, nloop, flg, nreg);
 
         bool pre = ((tagLo >> 46) & 1) != 0;
@@ -1516,6 +1608,19 @@ bool GS::tryProcessNativeImageUploadPacket(const uint8_t *data, uint32_t sizeByt
 
 void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
 {
+    if (ps2_diag::enabled())
+    {
+        // [gs:packed] histogram: one line per descriptor every 200000 hits.
+        static std::atomic<uint64_t> s_packedHist[256]{};
+        const uint64_t n = s_packedHist[regDesc].fetch_add(1, std::memory_order_relaxed) + 1;
+        if ((n % 200000u) == 0u)
+        {
+            PS2X_DIAG_LOG("[gs:packed] reg=0x" << std::hex << static_cast<uint32_t>(regDesc)
+                                              << std::dec
+                                              << " count=" << n);
+        }
+    }
+
     switch (regDesc)
     {
     case 0x00:
@@ -1687,6 +1792,21 @@ void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
     case 0x0E:
     {
         uint8_t addr = static_cast<uint8_t>(hi & 0xFF);
+
+        if (ps2_diag::enabled())
+        {
+            static std::atomic<uint64_t> s_adCount{0};
+            const uint64_t n = s_adCount.fetch_add(1, std::memory_order_relaxed);
+            if (ps2_diag::should_log(n, 32, 1000))
+            {
+                PS2X_DIAG_LOG("[gs:ad] n=" << n
+                                         << " addr=0x" << std::hex << static_cast<uint32_t>(addr)
+                                         << " data=0x" << lo
+                                         << std::dec
+                                         << (isKnownGsRegister(addr) ? "" : " UNKNOWN"));
+            }
+        }
+
         writeRegister(addr, lo);
         break;
     }
@@ -2157,6 +2277,23 @@ void GS::performLocalToLocalTransfer()
         return;
     }
 
+    if (ps2_diag::enabled())
+    {
+        static std::atomic<uint64_t> s_l2lCount{0};
+        const uint64_t n = s_l2lCount.fetch_add(1, std::memory_order_relaxed);
+        if (ps2_diag::should_log(n, 16, 600))
+        {
+            PS2X_DIAG_LOG("[gs:l2l] n=" << n
+                                      << " src.bp=0x" << std::hex << sbp
+                                      << " src.psm=0x" << static_cast<uint32_t>(spsm)
+                                      << " src.bw=" << std::dec << static_cast<uint32_t>(sbw)
+                                      << " dst.bp=0x" << std::hex << dbp
+                                      << " dst.psm=0x" << static_cast<uint32_t>(dpsm)
+                                      << " dst.bw=" << std::dec << static_cast<uint32_t>(dbw)
+                                      << " w=" << rrw << " h=" << rrh);
+        }
+    }
+
     // TODO: clean this up / optimize
     switch (dir)
     {
@@ -2305,6 +2442,37 @@ void GS::vertexKick(bool drawing)
     if (m_vtxCount < needed)
         return;
 
+    if (ps2_diag::enabled())
+    {
+        // Draw-activity stats consumed by the [gs-activity] probe. Gated so
+        // the draw-dispatch hot path pays nothing (no locked RMW) when
+        // diagnostics are off; the reader on the run-loop thread accepts the
+        // relaxed-atomic staleness.
+        const GSContext &drawCtx = activeContext();
+        m_statPrims.fetch_add(1, std::memory_order_relaxed);
+        m_statLastDrawFbp.store(drawCtx.frame.fbp, std::memory_order_relaxed);
+
+        // [gs:frame-change]: unthrottled — FBP changes are rare and are the
+        // single most useful signal for spotting render-target thrash.
+        static uint32_t s_prevDrawFbp = 0xFFFFFFFFu;
+        if (drawCtx.frame.fbp != s_prevDrawFbp)
+        {
+            const int ctxIndex = m_prim.ctxt ? 1 : 0;
+            PS2X_DIAG_LOG("[gs:frame-change] prim=" << static_cast<uint32_t>(m_prim.type)
+                                                   << " ctx=" << ctxIndex
+                                                   << " frame.fbp=0x" << std::hex << drawCtx.frame.fbp
+                                                   << " frame.fbw=" << std::dec << drawCtx.frame.fbw
+                                                   << " frame.psm=0x" << std::hex << static_cast<uint32_t>(drawCtx.frame.psm)
+                                                   << " tex0.tbp=0x" << drawCtx.tex0.tbp0
+                                                   << " tex0.tbw=" << std::dec << static_cast<uint32_t>(drawCtx.tex0.tbw)
+                                                   << " tex0.psm=0x" << std::hex << static_cast<uint32_t>(drawCtx.tex0.psm)
+                                                   << std::dec
+                                                   << " tme=" << static_cast<uint32_t>(m_prim.tme ? 1u : 0u)
+                                                   << " prmodecont=" << static_cast<uint32_t>(m_prmodecont ? 1u : 0u));
+            s_prevDrawFbp = drawCtx.frame.fbp;
+        }
+    }
+
     m_rasterizer.drawPrimitive(this);
     recordDrawDebugEventUnlocked(needed);
 
@@ -2337,6 +2505,32 @@ void GS::vertexKick(bool drawing)
 
 void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
 {
+    if (ps2_diag::enabled())
+    {
+        // Image-transfer byte counter consumed by the [gs-activity] probe;
+        // gated so the transfer path pays nothing when diagnostics are off.
+        m_statImageBytes.fetch_add(sizeBytes, std::memory_order_relaxed);
+
+        // [gs:image]: first-N verbose + every-600th, PLUS always when the
+        // destination BITBLTBUF.DBP changes (this is the probe that exposed
+        // an 8x over-transfer bug, so `sizeBytes` matters here).
+        static std::atomic<uint64_t> s_imageCount{0};
+        static uint32_t s_prevImageDbp = 0xFFFFFFFFu;
+        const uint64_t n = s_imageCount.fetch_add(1, std::memory_order_relaxed);
+        const bool dbpChanged = (m_bitbltbuf.dbp != s_prevImageDbp);
+        if (ps2_diag::should_log(n, 16, 600) || dbpChanged)
+        {
+            PS2X_DIAG_LOG("[gs:image] n=" << n
+                                        << " dbp=0x" << std::hex << m_bitbltbuf.dbp
+                                        << " dpsm=0x" << static_cast<uint32_t>(m_bitbltbuf.dpsm)
+                                        << " dbw=" << std::dec << static_cast<uint32_t>(m_bitbltbuf.dbw)
+                                        << " trxreg=" << m_trxreg.rrw << "x" << m_trxreg.rrh
+                                        << " sizeBytes=" << sizeBytes
+                                        << (dbpChanged ? " (DBP CHANGED)" : ""));
+        }
+        s_prevImageDbp = m_bitbltbuf.dbp;
+    }
+
     // wrong direction set
     if (m_trxdir != 0 || !m_vram)
     {

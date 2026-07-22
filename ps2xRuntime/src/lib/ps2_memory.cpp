@@ -2,9 +2,11 @@
 #include "runtime/ps2_address.h"
 #include "runtime/ps2_gs_gpu.h"
 #include "ps2_log.h"
+#include "runtime/ps2_diag.h"
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <sstream>
 #include <stdexcept>
 #include <algorithm>
 #include <string>
@@ -1338,6 +1340,49 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             hasPayload = false;
                             endChain = true;
                             break;
+                        }
+
+                        if (ps2_diag::enabled())
+                        {
+                            static std::atomic<uint64_t> s_dmaChainCount{0};
+                            const uint64_t n = s_dmaChainCount.fetch_add(1, std::memory_order_relaxed);
+                            if (ps2_diag::should_log(n, 32, 2000))
+                            {
+                                std::ostringstream dataPreview;
+                                if (hasPayload)
+                                {
+                                    try
+                                    {
+                                        const bool dataInSPR = isScratchpad(dataAddr);
+                                        const uint32_t physData = translateAddress(dataAddr);
+                                        const uint8_t *dataBase = dataInSPR ? m_scratchpad : m_rdram;
+                                        const uint32_t dataMax = dataInSPR ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
+                                        const uint64_t data0 = loadScalar<uint64_t>(dataBase, physData, dataMax,
+                                                                                    "dma chain data preview", dataAddr);
+                                        dataPreview << " data0=0x" << std::hex << data0 << std::dec;
+                                    }
+                                    catch (...)
+                                    {
+                                        // Best-effort preview only; never let a bad/unmapped
+                                        // dataAddr affect the probe or the DMA walk itself.
+                                    }
+                                }
+
+                                PS2X_DIAG_LOG("[dma:chain] n=" << n
+                                                             << " chan=0x" << std::hex << channelBase
+                                                             << " tagAddr=0x" << currentTagAddr
+                                                             << " tag=0x" << tag
+                                                             << std::dec
+                                                             << " id=" << id
+                                                             << " qwc=" << tagQwc
+                                                             << " irq=" << irq
+                                                             << " addr=0x" << std::hex << addr
+                                                             << " dataAddr=0x" << dataAddr
+                                                             << std::dec
+                                                             << " end=" << endChain
+                                                             << dataPreview.str()
+                                                             << std::endl);
+                            }
                         }
 
                         const bool compactVifLocalTag =
