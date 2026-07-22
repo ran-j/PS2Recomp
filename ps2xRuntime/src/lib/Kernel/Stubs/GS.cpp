@@ -931,6 +931,7 @@ namespace ps2_stubs
         mem.writeIORegister(GIF_CHANNEL + 0x00u, CHCR_STR_MODE0);
         mem.processPendingTransfers();
 
+        ps2TraceGuestRangeWrite(rdram, dstAddr, totalImageBytes, "sceGsExecStoreImage", ctx);
         runtime->gs().consumeLocalToHostBytes(dst, totalImageBytes);
         runtime->guestFree(pktAddr);
 

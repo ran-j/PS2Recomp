@@ -277,6 +277,7 @@ namespace ps2_syscalls
         {
             std::lock_guard<std::mutex> lock(g_vsync_flag_mutex);
             reg = g_vsync_registration;
+            g_vsync_registration = {};
             tickValue = ++g_vsync_tick_counter;
         }
 

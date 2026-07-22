@@ -159,6 +159,8 @@ bool PS2IopHostAdapter::writeGuest(uint32_t address, const void *source, size_t 
     }
     if (size != 0)
     {
+        uint8_t *const rdram = m_activeRdram ? m_activeRdram : m_runtime.memory().getRDRAM();
+        ps2TraceGuestRangeWrite(rdram, address, static_cast<uint32_t>(size), "IopHost::writeGuest", nullptr);
         std::memcpy(destination, source, size);
     }
     return true;
@@ -173,6 +175,8 @@ bool PS2IopHostAdapter::zeroGuest(uint32_t address, size_t size)
     }
     if (size != 0)
     {
+        uint8_t *const rdram = m_activeRdram ? m_activeRdram : m_runtime.memory().getRDRAM();
+        ps2TraceGuestRangeWrite(rdram, address, static_cast<uint32_t>(size), "IopHost::zeroGuest", nullptr);
         std::memset(destination, 0, size);
     }
     return true;
@@ -432,29 +436,12 @@ int32_t PS2IopHostAdapter::memoryCard(const ps2x::iop::MemoryCardRequest &reques
         setRegU32(&context, static_cast<int>(4 + i), request.arguments[i]);
     }
 
-    uint32_t stackAddress = 0u;
-    if (request.arguments[4] != 0u)
-    {
-        stackAddress = allocateGuest(32u, 16u);
-        if (stackAddress == 0u ||
-            !writeGuest(stackAddress + 16u, &request.arguments[4], sizeof(uint32_t)))
-        {
-            if (stackAddress != 0u)
-            {
-                freeGuest(stackAddress);
-            }
-            return -1;
-        }
-        setRegU32(&context, 29, stackAddress);
-    }
+    // EE n32 ABI: the fifth argument travels in $t0, matching the sceMc* stubs.
+    setRegU32(&context, 8, request.arguments[4]);
 
     handler(m_activeRdram ? m_activeRdram : m_runtime.memory().getRDRAM(),
             &context,
             &m_runtime);
-    if (stackAddress != 0u)
-    {
-        freeGuest(stackAddress);
-    }
     return ps2_stubs::getMemoryCardDebugSnapshot().lastResult;
 }
 

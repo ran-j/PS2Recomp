@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <thread>
 
 inline std::unordered_map<int, FILE *> g_fileDescriptors;
 inline int g_nextFd = 3; // Start after stdin, stdout, stderr
