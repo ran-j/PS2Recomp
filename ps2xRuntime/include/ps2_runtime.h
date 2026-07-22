@@ -348,6 +348,19 @@ public:
         uint32_t m_depth = 0u;
     };
 
+    class DeferredGuestYieldScope
+    {
+    public:
+        explicit DeferredGuestYieldScope(bool &pendingOut) noexcept;
+        ~DeferredGuestYieldScope();
+
+        DeferredGuestYieldScope(const DeferredGuestYieldScope &) = delete;
+        DeferredGuestYieldScope &operator=(const DeferredGuestYieldScope &) = delete;
+
+    private:
+        bool &m_pendingOut;
+    };
+
     bool replaceFunction(uint32_t address, RecompiledFunction func);
     // TODO remove this later need to update all tests
     bool registerFunction(uint32_t address, RecompiledFunction func);
@@ -399,16 +412,31 @@ public:
     uint32_t guestHeapEnd() const;
     uint32_t guestHeapLimit() const;
     uint32_t reserveAsyncCallbackStack(uint32_t size, uint32_t alignment = 16u);
+
     void dispatchLoop(uint8_t *rdram, R5900Context *ctx);
+
     void drainCompletedDmacHandlers(uint8_t *rdram);
+
     bool shouldPreemptGuestExecution();
     void yieldGuestExecutionAfterWake();
     void waitForGuestExecutionHandoff();
+    void waitForGuestExecutionHandoff(uint64_t baselineEpoch);
+    uint64_t guestExecutionHandoffEpochSnapshot() const
+    {
+        return m_guestExecutionHandoffEpoch.load(std::memory_order_acquire);
+    }
+
     void requestStop();
     bool isStopRequested() const;
+
     uint32_t guestExecutionWaiterCountForTesting() const
     {
         return m_guestExecutionWaiters.load(std::memory_order_acquire);
+    }
+
+    uint64_t guestExecutionHandoffTimeouts() const
+    {
+        return m_guestExecutionHandoffTimeouts.load(std::memory_order_relaxed);
     }
 
     uint8_t Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr);
@@ -507,6 +535,7 @@ private:
     mutable std::mutex m_guestExecutionHandoffMutex;
     mutable std::condition_variable m_guestExecutionHandoffCv;
     std::atomic<uint64_t> m_guestExecutionHandoffEpoch{0u};
+    std::atomic<uint64_t> m_guestExecutionHandoffTimeouts{0u};
     mutable std::mutex m_guestHeapMutex;
     mutable std::mutex m_asyncCallbackStackMutex;
     std::vector<GuestHeapBlock> m_guestHeapBlocks;

@@ -4,8 +4,6 @@
 
 namespace GSMem
 {
-    using enum PixelStorageMode;
-
     using C32Traits  = PixelStorageTraits<C32>;
     using Z32Traits  = PixelStorageTraits<Z32>;
     using C16Traits  = PixelStorageTraits<C16>;

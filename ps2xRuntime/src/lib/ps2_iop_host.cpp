@@ -436,29 +436,11 @@ int32_t PS2IopHostAdapter::memoryCard(const ps2x::iop::MemoryCardRequest &reques
         setRegU32(&context, static_cast<int>(4 + i), request.arguments[i]);
     }
 
-    uint32_t stackAddress = 0u;
-    if (request.arguments[4] != 0u)
-    {
-        stackAddress = allocateGuest(32u, 16u);
-        if (stackAddress == 0u ||
-            !writeGuest(stackAddress + 16u, &request.arguments[4], sizeof(uint32_t)))
-        {
-            if (stackAddress != 0u)
-            {
-                freeGuest(stackAddress);
-            }
-            return -1;
-        }
-        setRegU32(&context, 29, stackAddress);
-    }
+    setRegU32(&context, 8, request.arguments[4]);
 
     handler(m_activeRdram ? m_activeRdram : m_runtime.memory().getRDRAM(),
             &context,
             &m_runtime);
-    if (stackAddress != 0u)
-    {
-        freeGuest(stackAddress);
-    }
     return ps2_stubs::getMemoryCardDebugSnapshot().lastResult;
 }
 

@@ -11,6 +11,7 @@ namespace ps2_syscalls
         constexpr uint32_t kIntcVblankEnd = 3u;
         constexpr auto kVblankPeriod = std::chrono::microseconds(16667);
         constexpr int kMaxCatchupTicks = 4;
+        constexpr uint32_t kMaxIrqHandlerSteps = 4096u;
 
         std::mutex g_irq_handler_mutex;
         std::mutex g_irq_worker_mutex;
@@ -168,15 +169,37 @@ namespace ps2_syscalls
                 SET_GPR_U32(&irqCtx, 7, 0u);
                 irqCtx.pc = info.handler;
 
-                while (irqCtx.pc != 0u && runtime && !runtime->isStopRequested())
+                bool reschedulePending = false;
+                uint64_t handoffBaseline = 0u;
+                uint32_t steps = 0u;
                 {
-                    PS2Runtime::RecompiledFunction step = runtime->lookupFunction(irqCtx.pc);
-                    if (!step)
-                    {
-                        break;
-                    }
                     PS2Runtime::GuestExecutionScope guestExecution(runtime);
-                    step(rdram, &irqCtx, runtime);
+                    PS2Runtime::DeferredGuestYieldScope deferYield(reschedulePending);
+
+                    while (irqCtx.pc != 0u && runtime && !runtime->isStopRequested() && steps < kMaxIrqHandlerSteps)
+                    {
+                        PS2Runtime::RecompiledFunction step = runtime->lookupFunction(irqCtx.pc);
+                        if (!step)
+                        {
+                            break;
+                        }
+                        step(rdram, &irqCtx, runtime);
+                        ++steps;
+                    }
+                    handoffBaseline = runtime->guestExecutionHandoffEpochSnapshot();
+                }
+                if (steps >= kMaxIrqHandlerSteps)
+                {
+                    static uint32_t s_stepLimitLogCount = 0u;
+                    if (s_stepLimitLogCount < 16u)
+                    {
+                        std::cerr << "[INTC:step-limit] handler=0x" << std::hex << info.handler << " pc=0x" << irqCtx.pc << std::dec << std::endl;
+                        ++s_stepLimitLogCount;
+                    }
+                }
+                if (reschedulePending && !runtime->isStopRequested())
+                {
+                    runtime->waitForGuestExecutionHandoff(handoffBaseline);
                 }
             }
             catch (const ThreadExitException &)
@@ -251,15 +274,39 @@ namespace ps2_syscalls
                 SET_GPR_U32(&irqCtx, 7, 0u);
                 irqCtx.pc = info.handler;
 
-                while (irqCtx.pc != 0u && runtime && !runtime->isStopRequested())
+                bool reschedulePending = false;
+                uint64_t handoffBaseline = 0u;
+                uint32_t steps = 0u;
                 {
-                    PS2Runtime::RecompiledFunction step = runtime->lookupFunction(irqCtx.pc);
-                    if (!step)
-                    {
-                        break;
-                    }
                     PS2Runtime::GuestExecutionScope guestExecution(runtime);
-                    step(rdram, &irqCtx, runtime);
+                    PS2Runtime::DeferredGuestYieldScope deferYield(reschedulePending);
+
+                    while (irqCtx.pc != 0u && runtime && !runtime->isStopRequested() &&
+                           steps < kMaxIrqHandlerSteps)
+                    {
+                        PS2Runtime::RecompiledFunction step = runtime->lookupFunction(irqCtx.pc);
+                        if (!step)
+                        {
+                            break;
+                        }
+                        step(rdram, &irqCtx, runtime);
+                        ++steps;
+                    }
+                    handoffBaseline = runtime->guestExecutionHandoffEpochSnapshot();
+                }
+                if (steps >= kMaxIrqHandlerSteps)
+                {
+                    static uint32_t s_stepLimitLogCount = 0u;
+                    if (s_stepLimitLogCount < 16u)
+                    {
+                        std::cerr << "[DMAC:step-limit] handler=0x" << std::hex << info.handler
+                                  << " pc=0x" << irqCtx.pc << std::dec << std::endl;
+                        ++s_stepLimitLogCount;
+                    }
+                }
+                if (reschedulePending && !runtime->isStopRequested())
+                {
+                    runtime->waitForGuestExecutionHandoff(handoffBaseline);
                 }
             }
             catch (const ThreadExitException &)
@@ -354,9 +401,20 @@ namespace ps2_syscalls
 
             for (int i = 0; i < ticksToProcess; ++i)
             {
-                const uint64_t tickValue = signalVSyncFlag(rdram, runtime);
-                ps2_stubs::dispatchGsSyncVCallback(rdram, runtime, tickValue);
-                dispatchIntcHandlersForCause(rdram, runtime, kIntcVblankStart);
+                bool reschedulePending = false;
+                uint64_t handoffBaseline = 0u;
+                {
+                    PS2Runtime::GuestExecutionScope guestExecution(runtime);
+                    PS2Runtime::DeferredGuestYieldScope deferYield(reschedulePending);
+                    const uint64_t tickValue = signalVSyncFlag(rdram, runtime);
+                    ps2_stubs::dispatchGsSyncVCallback(rdram, runtime, tickValue);
+                    dispatchIntcHandlersForCause(rdram, runtime, kIntcVblankStart);
+                    handoffBaseline = runtime->guestExecutionHandoffEpochSnapshot();
+                }
+                if (reschedulePending && !runtime->isStopRequested())
+                {
+                    runtime->waitForGuestExecutionHandoff(handoffBaseline);
+                }
                 std::this_thread::sleep_for(std::chrono::microseconds(500));
                 dispatchIntcHandlersForCause(rdram, runtime, kIntcVblankEnd);
             }

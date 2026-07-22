@@ -6,7 +6,8 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(PS2X_ENABLE_RUNNER_UNITY_BUILD "Build ps2EntryRunner with CMake unity build" ON)
-set(PS2X_RUNNER_UNITY_BUILD_BATCH_SIZE 8 CACHE STRING "Unity build batch size for ps2EntryRunner")
+set(PS2X_RUNNER_UNITY_BUILD_BATCH_SIZE 32 CACHE STRING "Unity build batch size for ps2EntryRunner")
+option(PS2X_ENABLE_RUNNER_PCH "Precompile the heavy runtime headers for ps2EntryRunner" ON)
 option(PS2X_ENABLE_SCCACHE "Use sccache as compiler launcher when available" ON)
 
 option(PS2X_ENABLE_RUNTIME_LOGS "Enable PS2 runtime logs" OFF)
@@ -168,6 +169,8 @@ if(PS2X_IS_VITA)
         libIMGEGL_stub_weak
         libgpu_es4_ext_stub_weak
         libGLESv2_stub_weak
+        libGL_stub_weak
+        libGLESv1_CM_stub_weak
     )
 
     set(PS2X_VITA_INCLUDE_DIRS
@@ -198,19 +201,21 @@ if(PS2X_IS_VITA)
 
     function(ps2x_find_vita_library out_var library_name)
         string(MAKE_C_IDENTIFIER "${library_name}" library_id)
-        find_library(${out_var}
+        set(cache_var "PS2X_VITA_LIB_${library_id}")
+
+        find_library(${cache_var}
             NAMES "${library_name}" "${library_name}.a" "lib${library_name}.a"
             PATHS "${PS2X_VITA_LIBRARY_DIR}"
             NO_DEFAULT_PATH
         )
 
-        if(NOT ${out_var})
+        if(NOT ${cache_var})
             message(FATAL_ERROR
                 "Could not find Vita library '${library_name}' under ${PS2X_VITA_LIBRARY_DIR}. "
                 "Install Quenom/raylib-5.5-vita and its SDL2/PVR dependencies into VitaSDK first.")
         endif()
 
-        set(${out_var} "${${out_var}}" PARENT_SCOPE)
+        set(${out_var} "${${cache_var}}" PARENT_SCOPE)
     endfunction()
 
     set(PS2X_VITA_RESOLVED_LIBRARIES "")
@@ -461,6 +466,28 @@ if(PS2X_ENABLE_RUNNER_UNITY_BUILD)
     )
 endif()
 
+if(PS2X_ENABLE_RUNNER_PCH)
+    set(PS2X_RUNNER_PCH_HEADERS
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/ps2_runtime_macros.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/ps2_runtime.h"
+    )
+
+    foreach(PS2X_RUNNER_GENERATED_HEADER IN ITEMS
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/ps2_recompiled_functions.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/ps2_recompiled_stubs.h")
+        if(EXISTS "${PS2X_RUNNER_GENERATED_HEADER}")
+            list(APPEND PS2X_RUNNER_PCH_HEADERS "${PS2X_RUNNER_GENERATED_HEADER}")
+        endif()
+    endforeach()
+
+    list(APPEND PS2X_RUNNER_PCH_HEADERS
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/ps2_syscalls.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/ps2_stubs.h"
+    )
+
+    target_precompile_headers(ps2EntryRunner PRIVATE ${PS2X_RUNNER_PCH_HEADERS})
+endif()
+
 if(PS2X_DEFAULT_BOOT_ELF_DEFINE)
     target_compile_definitions(ps2EntryRunner PRIVATE
         PS2X_DEFAULT_BOOT_ELF="${PS2X_DEFAULT_BOOT_ELF_DEFINE}"
@@ -493,13 +520,33 @@ endif()
 ps2x_stage_ffmpeg_runtime_dlls(ps2EntryRunner)
 
 if(PS2X_IS_VITA)
-    set(VITA_MKSFOEX_FLAGS "${VITA_MKSFOEX_FLAGS} -d PARENTAL_LEVEL=1")
+    set(VITA_MKSFOEX_FLAGS "${VITA_MKSFOEX_FLAGS} -d PARENTAL_LEVEL=1") 
+    set(VITA_MKSFOEX_FLAGS "${VITA_MKSFOEX_FLAGS} -d ATTRIBUTE2=12")
 
     if(PS2X_VITA_CREATE_PACKAGE)
+        set(PS2X_VITA_VPK_FILES "")
+
+        foreach(PS2X_VITA_MODULE IN ITEMS
+            libgpu_es4_ext.suprx
+            libIMGEGL.suprx
+            libGLESv2.suprx
+            libpvrPSP2_WSEGL.suprx
+            libGL.suprx)
+            set(PS2X_VITA_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/vita/module/${PS2X_VITA_MODULE}")
+
+            if(EXISTS "${PS2X_VITA_MODULE_PATH}")
+                list(APPEND PS2X_VITA_VPK_FILES FILE "${PS2X_VITA_MODULE_PATH}" "module/${PS2X_VITA_MODULE}")
+            else()
+                message(WARNING
+                    "Missing ${PS2X_VITA_MODULE_PATH}; the vpk will rely on ur0:data/external/ for it")
+            endif()
+        endforeach()
+
         vita_create_self(eboot.bin ps2EntryRunner UNSAFE)
         vita_create_vpk(ps2EntryRunner.vpk ${PS2X_VITA_TITLEID} eboot.bin
             VERSION ${PS2X_VITA_VERSION}
             NAME ${PS2X_VITA_APP_NAME}
+            ${PS2X_VITA_VPK_FILES}
         )
     endif()
 endif()
@@ -525,6 +572,20 @@ endif()
 # Work around WinAPI vs raylib symbol clash for CloseWindow on x64
 if(MSVC)
     target_link_options(ps2EntryRunner PRIVATE "/FORCE:MULTIPLE")
+endif()
+
+# Vita: Work around for GCC 10's LTO plugin
+if(PS2X_IS_VITA)
+    target_link_options(ps2EntryRunner PRIVATE "-Wl,--allow-multiple-definition")
+    target_sources(ps2EntryRunner PRIVATE src/lib/ps2_vita_runtime.cpp)
+    set_source_files_properties(src/lib/ps2_vita_runtime.cpp PROPERTIES
+        SKIP_UNITY_BUILD_INCLUSION TRUE
+        COMPILE_OPTIONS "-fno-lto"
+    )
+endif()
+
+if(PS2X_IS_ANDROID)
+    target_sources(ps2EntryRunner PRIVATE src/lib/ps2_android_runtime.cpp)
 endif()
 
 install(TARGETS ps2_runtime ps2EntryRunner

@@ -460,11 +460,13 @@ namespace ps2_syscalls
                                   << std::hex << pc << std::dec << std::endl;
                         throw ThreadExitException();
                     }
+                    uint64_t handoffBaseline = 0u;
                     {
                         PS2Runtime::GuestExecutionScope guestExecution(runtime);
                         step(rdram, threadCtx, runtime);
+                        handoffBaseline = runtime->guestExecutionHandoffEpochSnapshot();
                     }
-                    runtime->waitForGuestExecutionHandoff();
+                    runtime->waitForGuestExecutionHandoff(handoffBaseline);
                 }
             }
             catch (const ThreadExitException &)

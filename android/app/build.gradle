@@ -24,6 +24,7 @@ android {
                         '-DPS2X_BUILD_TEST=OFF',
                         '-DPS2X_BUILD_STUDIO=OFF',
                         '-DPS2X_ENABLE_SCCACHE=OFF',
+                        '-DPS2X_RUNNER_UNITY_BUILD_BATCH_SIZE=32',
                         '-DANDROID_CPP_FEATURES=rtti exceptions',
                         "-DPS2X_DEFAULT_BOOT_ELF=${ps2xBootElf}"
                 targets 'ps2EntryRunner'

@@ -38,19 +38,32 @@ namespace GSMem
 		Max = 0x3F // 6 bits of values
 	};
 
+
+	inline constexpr PixelStorageMode C32 = PixelStorageMode::C32;
+	inline constexpr PixelStorageMode C24 = PixelStorageMode::C24;
+	inline constexpr PixelStorageMode C16 = PixelStorageMode::C16;
+	inline constexpr PixelStorageMode C16S = PixelStorageMode::C16S;
+	inline constexpr PixelStorageMode P8 = PixelStorageMode::P8;
+	inline constexpr PixelStorageMode P4 = PixelStorageMode::P4;
+	inline constexpr PixelStorageMode P8H = PixelStorageMode::P8H;
+	inline constexpr PixelStorageMode P4HL = PixelStorageMode::P4HL;
+	inline constexpr PixelStorageMode P4HH = PixelStorageMode::P4HH;
+	inline constexpr PixelStorageMode Z32 = PixelStorageMode::Z32;
+	inline constexpr PixelStorageMode Z24 = PixelStorageMode::Z24;
+	inline constexpr PixelStorageMode Z16 = PixelStorageMode::Z16;
+	inline constexpr PixelStorageMode Z16S = PixelStorageMode::Z16S;
+
 	struct Extent2D
 	{
 		u32 x{ 0 };
 		u32 y{ 0 };
 	};
 
-	template<typename T, Extent2D Extent>
-	using LookupTable = std::array<std::array<T, Extent.x>, Extent.y>;
+	template<typename T, usz Width, usz Height>
+	using LookupTable = std::array<std::array<T, Width>, Height>;
 
 	constexpr bool IsValidPsm(PixelStorageMode psm)
 	{
-		using enum PixelStorageMode;
-
 		switch (psm)
 		{
 		case C32:
@@ -75,8 +88,6 @@ namespace GSMem
 	// Bits per pixel in unpacked format (GS memory)
 	constexpr usz UnpackedBitWidth(PixelStorageMode psm)
 	{
-		using enum PixelStorageMode;
-
 		switch (psm)
 		{
 		case C32:
@@ -104,8 +115,6 @@ namespace GSMem
 	// bits per pixel (packed width)
 	constexpr usz BitsPerPixel(PixelStorageMode psm)
 	{
-		using enum PixelStorageMode;
-
 		switch (psm)
 		{
 		case C32:
@@ -135,8 +144,6 @@ namespace GSMem
 
 	constexpr bool IsDepth(PixelStorageMode psm)
 	{
-		using enum PixelStorageMode;
-
 		switch (psm)
 		{
 		case Z16:
@@ -158,8 +165,6 @@ namespace GSMem
 
 	constexpr bool IsPaletted(PixelStorageMode psm)
 	{
-		using enum PixelStorageMode;
-
 		switch (psm)
 		{
 		case P8:
@@ -209,8 +214,6 @@ namespace GSMem
 	template<PixelStorageMode psm>
 	struct PixelStorageTraits
 	{
-		using enum PixelStorageMode;
-
 		// page extent, in units of pixels
 		static constexpr Extent2D PageExtent();
 
@@ -229,9 +232,9 @@ namespace GSMem
 		// pixel count in a page
 		static constexpr usz PixelsPerPage();
 
-		using BlockLookupTableT = LookupTable<u8, BlockExtent()>;
-		using ColumnLookupTableT = LookupTable<u16, ColumnExtent()>;
-		using PageLookupTableT = std::array<LookupTable<u16, PageExtent()>, BlocksPerPage()>;
+		using BlockLookupTableT = LookupTable<u8, BlockExtent().x, BlockExtent().y>;
+		using ColumnLookupTableT = LookupTable<u16, ColumnExtent().x, ColumnExtent().y>;
+		using PageLookupTableT = std::array<LookupTable<u16, PageExtent().x, PageExtent().y>, BlocksPerPage()>;
 
 		// calculates the column offset
 		static constexpr usz ColumnId(const ColumnLookupTableT& table, u32 x, u32 y);

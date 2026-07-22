@@ -70,7 +70,7 @@ namespace ps2x::iop::detail
                 .responseCounterOffset = 4u,
                 .zeroReceiveBuffer = true,
                 .signalNowaitCompletion = true,
-                .suppressedCompletionCallbacks = {},
+                .suppressedCompletionCallbacks = {0x001FFD70u},
             };
         }
 
