@@ -19,6 +19,21 @@ option(PS2X_BUILD_ANALYZER "Build ps2xAnalyzer" ON)
 option(PS2X_BUILD_TEST "Build ps2xTest" ON)
 option(PS2X_BUILD_STUDIO "Build ps2xStudio" ON)
 
+# Sanitizer flags must apply to EVERY target that links ps2_runtime (including
+# ps2x_tests in a sibling directory), so they are set here at the root rather
+# than inside ps2xRuntime/. PS2X_SANITIZE=thread additionally requires
+# PS2X_FIBER_PTHREAD=ON, validated in ps2xRuntime/CMakeLists.txt.
+set(PS2X_SANITIZE "" CACHE STRING "Sanitizer to enable: thread, address, or empty")
+set_property(CACHE PS2X_SANITIZE PROPERTY STRINGS "" thread address)
+if(PS2X_SANITIZE)
+    if(MSVC)
+        add_compile_options(/fsanitize=${PS2X_SANITIZE})
+    else()
+        add_compile_options(-fsanitize=${PS2X_SANITIZE} -fno-omit-frame-pointer -g)
+        add_link_options(-fsanitize=${PS2X_SANITIZE})
+    endif()
+endif()
+
 if(ANDROID)
     message(STATUS "Android target detected, building runtime only")
     set(PS2X_BUILD_RECOMP OFF)

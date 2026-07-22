@@ -1,0 +1,13 @@
+# ThreadSanitizer suppressions for ps2x_tests.
+#
+# Usage:
+#   TSAN_OPTIONS="suppressions=$PWD/ps2xTest/tsan.supp" ./ps2x_tests
+#
+# The vsync flag/tick words and the GS CSR vsync field model memory-mapped
+# PS2 hardware: the interrupt worker stores them and guest/test code polls
+# the same words raw, with no interlock — exactly as on real hardware. This
+# is a data race under the C++ memory model and is left unsynchronized
+# intentionally; see the comment in signalVSyncFlag
+# (ps2xRuntime/src/lib/Kernel/Syscalls/Interrupt.cpp) for the full rationale.
+race:signalVSyncFlag
+race:updateGsCsrFieldForVSync

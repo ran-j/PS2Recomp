@@ -132,6 +132,7 @@ To execute the recompiled code.
 * Guest memory model and function dispatch table.
 * Some syscall dispatcher with common kernel IDs.
 * Basic GS/VU/file/system stubs.
+* Multi-platform cooperative fiber scheduler.
 * Foundation to expand and port your game.
 * `ps2xIOP` profile selection and optional `.dll`/`.so` discovery for game-specific IOP HLE.
 

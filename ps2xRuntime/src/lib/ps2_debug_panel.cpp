@@ -698,7 +698,6 @@ namespace
         const uint32_t gp = runtime.m_debugGp.load(std::memory_order_relaxed);
 
         ImGui::Text("Runtime: %s", runtime.isStopRequested() ? "stop requested" : "running");
-        ImGui::Text("Guest execution waiters: %u", runtime.guestExecutionWaiterCountForTesting());
         ImGui::Separator();
         textHex32("PC", pc);
         ImGui::SameLine();

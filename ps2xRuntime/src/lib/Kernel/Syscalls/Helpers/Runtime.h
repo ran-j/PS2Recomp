@@ -1,10 +1,157 @@
-struct ThreadExitException final : public std::exception
+#include "ThreadExit.h"
+#include "ps2_scheduler.h"
+#include <algorithm>
+#include <chrono>
+#include <mutex>
+#include <thread>
+#include <utility>
+#include <vector>
+
+// Swaps a wait-list out from under its mutex and delivers a validated external
+// wakeup to every waiter that was on it. This is ONLY the pure swap-and-drain
+// shape: callers whose critical section also mutates other state alongside
+// the swap (e.g. marking the object deleted) must keep doing that inline
+// instead of calling this, so the lock is still held across both writes.
+static inline void wakeWaiters(std::mutex &m, std::vector<std::pair<int, ps2sched::FiberToken>> &list)
 {
-    const char *what() const noexcept override
+    std::vector<std::pair<int, ps2sched::FiberToken>> waiters;
     {
-        return "PS2 Thread Exit";
+        std::lock_guard<std::mutex> lk(m);
+        waiters.swap(list);
+    }
+    for (const auto &[tid, token] : waiters)
+    {
+        ps2sched::enqueue_external_wakeup_validated(tid, token);
+    }
+}
+
+// Publishes the calling thread (g_currentThreadId + its current fiber token)
+// to `waitList`. Must be called under the owning object's mutex, AFTER the
+// caller has decided to block, so a concurrent Signal/Set/Delete that
+// enumerates the list is serialized against this insert (see WaitSema for
+// the full publish-before-arm rationale). Pairs with unpublishWaiter below.
+static inline void publishWaiter(std::vector<std::pair<int, ps2sched::FiberToken>> &waitList)
+{
+    waitList.emplace_back(g_currentThreadId, ps2sched::current_fiber_token());
+}
+
+// Removes the calling thread's entry from `waitList` if still present — a
+// Signal/Set/Delete may already have popped it while we were parked. Must be
+// called under the owning object's mutex, paired with publishWaiter above.
+static inline void unpublishWaiter(std::vector<std::pair<int, ps2sched::FiberToken>> &waitList)
+{
+    auto it = std::find_if(waitList.begin(), waitList.end(),
+        [](const std::pair<int, ps2sched::FiberToken> &e) { return e.first == g_currentThreadId; });
+    if (it != waitList.end())
+    {
+        waitList.erase(it);
+    }
+}
+
+// The "deleting" sibling of wakeWaiters: also marks the object deleted under
+// the same critical section as the swap (wakeWaiters deliberately does NOT do
+// this — SetEventFlag/SignalSema's copy-based wake path, where waiters
+// re-check and self-remove, must not touch `deleted` this way). Used by the
+// two Delete* tails, which otherwise share this exact shape: lock, mark
+// deleted, swap the wait-list out, unlock, drain with validated external
+// wakeups, then yield once if anyone was actually woken.
+template <typename WaitableObject>
+static inline void markDeletedAndWake(WaitableObject &obj)
+{
+    std::vector<std::pair<int, ps2sched::FiberToken>> waiters;
+    {
+        std::lock_guard<std::mutex> lk(obj.m);
+        obj.deleted = true;
+        waiters.swap(obj.waitList);
+    }
+    for (const auto &[tid, token] : waiters)
+    {
+        ps2sched::enqueue_external_wakeup_validated(tid, token);
+    }
+    if (!waiters.empty())
+    {
+        ps2sched::maybe_yield();
+    }
+}
+
+// Drops the guest token around `pause` if this worker actually holds it
+// (holds_guest_token()), reacquiring it afterward; otherwise just runs
+// `pause`. This is the one place that knows the async_guest_end/begin
+// bracketing for a non-fiber wait pause — both NonFiberBackoff::step's sleep
+// and nonFiberBlockBackoff's yield route through it.
+template <typename PauseFn>
+static inline void withGuestTokenDropped(PauseFn pause)
+{
+    if (ps2sched::holds_guest_token())
+    {
+        ps2sched::async_guest_end();
+        pause();
+        ps2sched::async_guest_begin();
+    }
+    else
+    {
+        pause();
+    }
+}
+
+// Bounded backoff for a borrowed host worker that hit a blocking syscall.
+// Translates a non-fiber BlockResult into the correct token handling, then
+// sleeps with exponential backoff (1us -> 1ms cap). After kMaxSpins iterations
+// it logs ONCE and keeps sleeping at the cap so a self-deadlocked interrupt
+// handler cannot busy-spin the CPU or starve the guest executor. State is held
+// in a per-call counter object so each blocking site ramps independently.
+struct NonFiberBackoff
+{
+    int spins = 0;
+    std::chrono::microseconds delay{1};
+
+    // arm_park (only for a real fiber) + block_current, then, if the wake was
+    // a non-fiber result, one backoff step. Never runs step() for a Parked
+    // (fiber) wake, since a fiber's block_current already did the real park.
+    ps2sched::BlockResult wait(bool onFiber)
+    {
+        if (onFiber)
+        {
+            ps2sched::arm_park();
+        }
+        const ps2sched::BlockResult br = ps2sched::block_current();
+        if (br == ps2sched::BlockResult::NonFiber)
+        {
+            step();
+        }
+        return br;
+    }
+
+private:
+    // Sleeps this worker once with exponential backoff. The syscall's Mesa loop
+    // decides whether to re-check its wait condition and loop again.
+    void step()
+    {
+        withGuestTokenDropped([&] { std::this_thread::sleep_for(delay); });
+
+        // delay self-clamps at the 1ms cap below, so no separate spins < kMaxSpins
+        // guard is needed to keep it from overflowing past the cap.
+        delay = std::min(delay * 2, std::chrono::microseconds(1000));
+
+        constexpr int kMaxSpins = 50;
+        // Fires exactly once, the iteration spins reaches kMaxSpins, then spins
+        // freezes at kMaxSpins so this can never become true again.
+        if (spins < kMaxSpins && ++spins == kMaxSpins)
+        {
+            std::fprintf(stderr,
+                "[ps2sched] WARNING: borrowed host worker has blocked on a guest "
+                "condition for %d retries; capping backoff at 1ms (possible "
+                "interrupt-context deadlock)\n", kMaxSpins);
+        }
     }
 };
+
+// One-shot: drop/reacquire token (if owned) and yield once. SleepThread for
+// a borrowed worker has no wait-list to re-check, so it does not loop.
+inline void nonFiberBlockBackoff()
+{
+    withGuestTokenDropped([] { std::this_thread::yield(); });
+}
 
 static void throwIfTerminated(const std::shared_ptr<ThreadInfo> &info)
 {
@@ -14,76 +161,77 @@ static void throwIfTerminated(const std::shared_ptr<ThreadInfo> &info)
     }
 }
 
-// Condition-variable waits in the EE runtime must release the global guest
-// execution mutex, but must not reacquire it while still holding the local
-// wait-object mutex. Reacquiring guest execution while holding a semaphore,
-// thread, event-flag, or vsync mutex can create an ABBA deadlock:
-//
-//   awakened thread: local wait mutex -> waiting for GuestExecutionScope
-//   running thread:  GuestExecutionScope -> waiting for local wait mutex
-//
-// This helper keeps guest execution released for the whole host wait and for
-// any post-wake bookkeeping that needs the local mutex, then unlocks the local
-// mutex before the GuestExecutionReleaseScope destructor reacquires guest code.
-template <typename Lock, typename WaitFn, typename FinishFn>
-static void waitWithGuestExecutionReleasedUntilUnlocked(PS2Runtime *runtime,
-                                                        Lock &lock,
-                                                        WaitFn waitFn,
-                                                        FinishFn finishFn)
-{
-    auto releaseGuestExecution = std::make_unique<PS2Runtime::GuestExecutionReleaseScope>(runtime);
-
-    waitFn();
-    finishFn();
-
-    if (lock.owns_lock())
-    {
-        lock.unlock();
-    }
-
-    releaseGuestExecution.reset();
-}
-
-template <typename Lock, typename WaitFn>
-static void waitWithGuestExecutionReleasedUntilUnlocked(PS2Runtime *runtime, Lock &lock, WaitFn waitFn)
-{
-    waitWithGuestExecutionReleasedUntilUnlocked(runtime, lock, waitFn, []() {});
-}
-
-static void waitWhileSuspended(const std::shared_ptr<ThreadInfo> &info, PS2Runtime *runtime = nullptr)
+// Checks-and-clears info->forceRelease under info->m in one step, returning
+// whether a release was actually pending. Null-safe: a borrowed worker
+// (info == nullptr) never has forceRelease to consume, so this simply
+// returns false — folding in the `if (!info) return false;` guard every
+// call site otherwise had to repeat.
+static inline bool consumeForceRelease(const std::shared_ptr<ThreadInfo> &info)
 {
     if (!info)
-        return;
-
-    std::unique_lock<std::mutex> lock(info->m);
-    if (info->suspendCount > 0)
     {
-        info->status = THS_SUSPEND;
-        info->waitType = TSW_NONE;
-        info->waitId = 0;
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(info->m);
+    if (info->forceRelease)
+    {
+        info->forceRelease = false;
+        return true;
+    }
+    return false;
+}
 
-        bool terminated = false;
-        waitWithGuestExecutionReleasedUntilUnlocked(
-            runtime,
-            lock,
-            [&]()
-            {
-                info->cv.wait(lock, [&]()
-                              { return info->suspendCount == 0 || info->terminated.load(); });
-            },
-            [&]()
-            {
-                terminated = info->terminated.load();
-                if (!terminated)
-                {
-                    info->status = THS_RUN;
-                }
-            });
+// Transitions `info` into THS_WAIT/THS_WAITSUSPEND for the given wait
+// type/id and clears forceRelease. This is the ONE safe place to clear
+// forceRelease unconditionally: ReleaseWaitThread only ever sets it while
+// observing status == WAIT/WAITSUSPEND, and that transition (plus the clear)
+// happens atomically under info->m here, so a stale true left over from a
+// prior, unrelated wait cannot leak into this one. No-op for a borrowed
+// worker (info == nullptr). Pairs with clearThreadWaiting below.
+static inline void setThreadWaiting(const std::shared_ptr<ThreadInfo> &info, int waitType, int waitId)
+{
+    if (!info)
+    {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(info->m);
+    info->status = (info->suspendCount > 0) ? THS_WAITSUSPEND : THS_WAIT;
+    info->waitType = waitType;
+    info->waitId = waitId;
+    info->forceRelease = false;
+}
 
-        if (terminated)
-        {
-            throw ThreadExitException();
-        }
+// Reverses setThreadWaiting: returns `info` to THS_RUN/THS_SUSPEND and clears
+// wait bookkeeping. No-op for a borrowed worker (info == nullptr).
+static inline void clearThreadWaiting(const std::shared_ptr<ThreadInfo> &info)
+{
+    if (!info)
+    {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(info->m);
+    info->status = (info->suspendCount > 0) ? THS_SUSPEND : THS_RUN;
+    info->waitType = TSW_NONE;
+    info->waitId = 0;
+}
+
+// Waiting is done via arm_park()/block_current(), which already
+// cooperatively yields to other fibers/borrowed host workers, so no explicit
+// guest-execution release/reacquire step is needed.
+static void waitWhileSuspended(const std::shared_ptr<ThreadInfo> &info)
+{
+    if (!info) return;
+    while (info->suspendCount > 0 && !info->terminated.load()) {
+        // arm_park() before publishing to any wait-list so a concurrent
+        // clear_suspend that fires between publish and block_current sees
+        // wake_pending rather than missing the wakeup.
+        ps2sched::arm_park();
+        ps2sched::block_current();
+    }
+    if (info->terminated.load()) { throw ThreadExitException(); }
+    if (info->suspendCount == 0) {
+        std::lock_guard<std::mutex> lock(info->m);
+        info->status = THS_RUN;
     }
 }
 
@@ -126,6 +274,45 @@ static std::shared_ptr<ThreadInfo> ensureCurrentThreadInfo(R5900Context *ctx)
     return info;
 }
 
+// Resolves tid==0 (TH_SELF) to g_currentThreadId, looks up the corresponding
+// ThreadInfo, and writes the appropriate error return on failure. Callers
+// pass tid by reference so the resolved (non-zero) id is visible afterward.
+// Shared prologue for syscalls that operate on "self or an explicit tid":
+// TerminateThread, SuspendThread, ResumeThread, ReferThreadStatus,
+// CancelWakeupThread, ChangeThreadPriority. Do NOT use for syscalls with
+// different tid==0 semantics (WakeupThread, ReleaseWaitThread, the
+// i-prefixed variants, RotateThreadReadyQueue).
+static std::shared_ptr<ThreadInfo> resolveSelfOrThread(R5900Context *ctx, int &tid)
+{
+    if (tid == 0)
+    {
+        if (g_currentThreadId == -1)
+        {
+            setReturnS32(ctx, KE_ILLEGAL_THID);
+            return nullptr;
+        }
+        tid = g_currentThreadId;
+    }
+    auto info = (tid == g_currentThreadId) ? ensureCurrentThreadInfo(ctx) : lookupThreadInfo(tid);
+    if (!info)
+        setReturnS32(ctx, KE_UNKNOWN_THID);
+    return info;
+}
+
+// Marks a thread as exiting itself (caller holds info.m). Shared by
+// ExitThread and ExitDeleteThread only. TerminateThread must NOT route
+// through this: it intentionally sets only terminated/forceRelease and
+// leaves waitType/waitId/wakeupCount observable via ReferThreadStatus until
+// the target's own wait loop clears them.
+static void markSelfExitingLocked(ThreadInfo &info)
+{
+    info.terminated = true;
+    info.forceRelease = true;
+    info.waitType = TSW_NONE;
+    info.waitId = 0;
+    info.wakeupCount = 0;
+}
+
 static std::shared_ptr<SemaInfo> lookupSemaInfo(int sid)
 {
     std::lock_guard<std::mutex> lock(g_sema_map_mutex);
@@ -162,96 +349,6 @@ static std::chrono::microseconds alarmTicksToDuration(uint16_t ticks)
     return std::chrono::microseconds(clampedTicks * kAlarmTickUsec);
 }
 
-static void ensureAlarmWorkerRunning()
-{
-    std::call_once(g_alarm_worker_once, []()
-                   { std::thread([]()
-                                 {
-            for (;;)
-            {
-                std::shared_ptr<AlarmInfo> readyAlarm;
-                {
-                    std::unique_lock<std::mutex> lock(g_alarm_mutex);
-                    while (!readyAlarm)
-                    {
-                        if (g_alarms.empty())
-                        {
-                            g_alarm_cv.wait(lock);
-                            continue;
-                        }
-
-                        auto nextIt = std::min_element(g_alarms.begin(), g_alarms.end(),
-                                                       [](const auto &a, const auto &b)
-                                                       {
-                                                           return a.second->dueAt < b.second->dueAt;
-                                                       });
-                        if (nextIt == g_alarms.end())
-                        {
-                            g_alarm_cv.wait(lock);
-                            continue;
-                        }
-
-                        const auto now = std::chrono::steady_clock::now();
-                        if (nextIt->second->dueAt > now)
-                        {
-                            g_alarm_cv.wait_until(lock, nextIt->second->dueAt);
-                            continue;
-                        }
-
-                        readyAlarm = nextIt->second;
-                        g_alarms.erase(nextIt);
-                    }
-                }
-
-                if (!readyAlarm || !readyAlarm->runtime || !readyAlarm->rdram || !readyAlarm->handler)
-                {
-                    continue;
-                }
-                if (!readyAlarm->runtime->hasFunction(readyAlarm->handler))
-                {
-                    continue;
-                }
-
-                try
-                {
-                    constexpr uint32_t kAlarmCallbackStackSize = 0x4000u;
-                    thread_local PS2Runtime *s_alarmStackRuntime = nullptr;
-                    thread_local uint32_t s_alarmStackTop = 0u;
-                    if (s_alarmStackRuntime != readyAlarm->runtime || s_alarmStackTop == 0u)
-                    {
-                        s_alarmStackRuntime = readyAlarm->runtime;
-                        s_alarmStackTop = readyAlarm->runtime->reserveAsyncCallbackStack(kAlarmCallbackStackSize, 16u);
-                    }
-
-                    R5900Context callbackCtx{};
-                    setRegU32(&callbackCtx, 28, readyAlarm->gp);
-                    setRegU32(&callbackCtx, 29,
-                              (s_alarmStackTop != 0u) ? s_alarmStackTop : (PS2_RAM_SIZE - 0x10u));
-                    setRegU32(&callbackCtx, 31, 0);
-                    setRegU32(&callbackCtx, 4, static_cast<uint32_t>(readyAlarm->id));
-                    setRegU32(&callbackCtx, 5, static_cast<uint32_t>(readyAlarm->ticks));
-                    setRegU32(&callbackCtx, 6, readyAlarm->commonArg);
-                    setRegU32(&callbackCtx, 7, 0);
-                    callbackCtx.pc = readyAlarm->handler;
-
-                    PS2Runtime::RecompiledFunction func = readyAlarm->runtime->lookupFunction(readyAlarm->handler);
-                    func(readyAlarm->rdram, &callbackCtx, readyAlarm->runtime);
-                }
-                catch (const ThreadExitException &)
-                {
-                }
-                catch (const std::exception &e)
-                {
-                    static int alarmExceptionLogs = 0;
-                    if (alarmExceptionLogs < 8)
-                    {
-                        std::cerr << "[SetAlarm] callback exception: " << e.what() << std::endl;
-                        ++alarmExceptionLogs;
-                    }
-                }
-            } })
-                         .detach(); });
-}
 
 static void rpcCopyToRdram(uint8_t *rdram, uint32_t dst, uint32_t src, size_t size)
 {
@@ -359,6 +456,11 @@ static const char *rpcInvokeExitReasonName(RpcInvokeExitReason reason)
     }
 }
 
+// rpcInvokeFunction runs on the CALLING FIBER (the guest thread that issued
+// the RPC syscall), not on a worker thread. Do NOT wrap calls to this in
+// AsyncGuestScope — the calling fiber already holds the guest execution slot.
+// If, in the future, RPC server dispatch is moved to a dedicated worker thread,
+// that worker must wrap its guest invocation in AsyncGuestScope.
 static bool rpcInvokeFunction(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime,
                               uint32_t funcAddr, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t *outV0)
 {
@@ -375,22 +477,17 @@ static bool rpcInvokeFunction(uint8_t *rdram, R5900Context *ctx, PS2Runtime *run
     setRegU32(&tmp, 6, a2);
     setRegU32(&tmp, 7, a3);
 
-    thread_local uint32_t s_rpcInvokeStackBase = 0u;
-    thread_local uint32_t s_rpcInvokeStackTop = 0u;
-    if (s_rpcInvokeStackTop == 0u)
+    // Per-invocation scratch stack: a fresh guest-heap region reserved for the
+    // duration of THIS invoke and released by RAII on every return path below
+    // (and on a ThreadExitException thrown out of the invoke loop). Isolates
+    // interleaving fibers — the N=1 executor runs them all on one OS thread —
+    // AND same-fiber re-entry: a nested override or an exit-handler invoke gets
+    // its own stack and never clobbers the outer frame.
+    GuestScratchStack invokeStack(runtime, kRpcInvokeStackSize);
+    if (invokeStack.valid())
     {
-        const uint32_t stackBase = runtime->guestMalloc(kRpcInvokeStackSize, 16u);
-        if (stackBase != 0u)
-        {
-            s_rpcInvokeStackBase = stackBase;
-            s_rpcInvokeStackTop = (stackBase + kRpcInvokeStackSize) & ~0xFu;
-        }
+        setRegU32(&tmp, 29, invokeStack.top());
     }
-    if (s_rpcInvokeStackTop != 0u)
-    {
-        setRegU32(&tmp, 29, s_rpcInvokeStackTop);
-    }
-    (void)s_rpcInvokeStackBase;
 
     setRegU32(&tmp, 31, kRpcInvokeReturnSentinel);
     tmp.pc = funcAddr;
@@ -421,10 +518,7 @@ static bool rpcInvokeFunction(uint8_t *rdram, R5900Context *ctx, PS2Runtime *run
         }
 
         PS2Runtime::RecompiledFunction func = runtime->lookupFunction(pc);
-        {
-            PS2Runtime::GuestExecutionScope guestExecution(runtime);
-            func(rdram, &tmp, runtime);
-        }
+        func(rdram, &tmp, runtime);
         ++steps;
     }
 

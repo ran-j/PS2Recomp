@@ -24,6 +24,7 @@
 #include <memory>
 
 #include "ps2_log.h"
+#include "ps2_scheduler.h"
 #include "runtime/ps2_address.h"
 #include "runtime/ps2_gif_arbiter.h"
 #include "runtime/ps2_memory.h"
@@ -265,6 +266,38 @@ inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
     // TODO we dont need this anymore so on next release it will be deleted
 }
 
+// Async callback stack pool [floor, top): kernel-reserved guest memory. See
+// the pool layout comment in ps2_runtime.cpp for why this range is disjoint
+// from every other guest allocation.
+constexpr uint32_t kAsyncCallbackStackFloor = 0x00080000u;
+constexpr uint32_t kAsyncCallbackStackTop = 0x00100000u;
+
+// $sp for a host-dispatched guest callback that could not get a stack out of
+// the async-callback pool (pool exhausted or runtime unavailable). Top of the
+// kernel-reserved pool, NOT PS2_RAM_SIZE-0x10 — that address is inside the
+// guest's own main stack (games place it at top-of-RAM via SetupThread), and
+// running a handler there would corrupt live guest frames.
+constexpr uint32_t kAsyncCallbackFallbackSp = kAsyncCallbackStackTop - 0x10u;
+
+// Encapsulates the async-callback stack pool's carve state. The floor is a
+// compile-time constant (nothing ever moves it); `top` is the only runtime
+// state — the downward-carving cursor — and is what loadELF() re-arms on
+// each load via reset(). See the pool layout comment in ps2_runtime.cpp for
+// the disjointness rationale.
+struct KernelStackPool
+{
+    static constexpr uint32_t floor = kAsyncCallbackStackFloor;
+    uint32_t top = kAsyncCallbackStackTop;
+
+    void reset() { top = kAsyncCallbackStackTop; }
+
+    // Carves an aligned [base, top) region of `size` bytes off the top of the
+    // pool and returns the guest $sp (top - 0x10) for it, or 0 if the pool is
+    // exhausted. `size` must already be alignGuestHeapValue()-rounded by the
+    // caller; `align` is normalized here via PS2Runtime::normalizeGuestHeapAlignment.
+    uint32_t carve(uint32_t size, uint32_t align);
+};
+
 class PS2Runtime
 {
 public:
@@ -321,44 +354,30 @@ public:
         SkipCallDebug = 3,
     };
 
+    // No-op RAII guards. Only one fiber ever executes guest code at a time
+    // under the N=1 cooperative scheduler, and exclusion between the fiber
+    // executor and borrowed host worker threads is provided by
+    // ps2sched::async_guest_begin/async_guest_end (AsyncGuestScope). Kept as
+    // no-ops only so code that still references them (MPEG/IPU decoder stubs)
+    // compiles unchanged.
     class GuestExecutionScope
     {
     public:
-        explicit GuestExecutionScope(PS2Runtime *runtime) noexcept;
-        ~GuestExecutionScope();
+        explicit GuestExecutionScope(PS2Runtime *) noexcept {}
+        ~GuestExecutionScope() = default;
 
         GuestExecutionScope(const GuestExecutionScope &) = delete;
         GuestExecutionScope &operator=(const GuestExecutionScope &) = delete;
-
-    private:
-        PS2Runtime *m_runtime = nullptr;
     };
 
     class GuestExecutionReleaseScope
     {
     public:
-        explicit GuestExecutionReleaseScope(PS2Runtime *runtime) noexcept;
-        ~GuestExecutionReleaseScope();
+        explicit GuestExecutionReleaseScope(PS2Runtime *) noexcept {}
+        ~GuestExecutionReleaseScope() = default;
 
         GuestExecutionReleaseScope(const GuestExecutionReleaseScope &) = delete;
         GuestExecutionReleaseScope &operator=(const GuestExecutionReleaseScope &) = delete;
-
-    private:
-        PS2Runtime *m_runtime = nullptr;
-        uint32_t m_depth = 0u;
-    };
-
-    class DeferredGuestYieldScope
-    {
-    public:
-        explicit DeferredGuestYieldScope(bool &pendingOut) noexcept;
-        ~DeferredGuestYieldScope();
-
-        DeferredGuestYieldScope(const DeferredGuestYieldScope &) = delete;
-        DeferredGuestYieldScope &operator=(const DeferredGuestYieldScope &) = delete;
-
-    private:
-        bool &m_pendingOut;
     };
 
     bool replaceFunction(uint32_t address, RecompiledFunction func);
@@ -382,6 +401,12 @@ public:
     void setMissingFunctionPolicy(MissingFunctionPolicy policy);
     MissingFunctionPolicy missingFunctionPolicy() const;
     void resetMissingFunctionReportOnce();
+
+    // Test/diagnostic seam: formats the dispatch-trace ring owned by whichever
+    // fiber (or per-OS-thread fallback) is executing on the calling thread.
+    // MUST only be called from inside a running fiber's step function — from
+    // any other thread it returns the non-fiber fallback, not a fiber's trace.
+    std::string debugCurrentDispatchTrace() const;
 
     static const IoPaths &getIoPaths();
     static void setIoPaths(const IoPaths &paths);
@@ -412,32 +437,12 @@ public:
     uint32_t guestHeapEnd() const;
     uint32_t guestHeapLimit() const;
     uint32_t reserveAsyncCallbackStack(uint32_t size, uint32_t alignment = 16u);
-
     void dispatchLoop(uint8_t *rdram, R5900Context *ctx);
-
     void drainCompletedDmacHandlers(uint8_t *rdram);
-
     bool shouldPreemptGuestExecution();
-    void yieldGuestExecutionAfterWake();
-    void waitForGuestExecutionHandoff();
-    void waitForGuestExecutionHandoff(uint64_t baselineEpoch);
-    uint64_t guestExecutionHandoffEpochSnapshot() const
-    {
-        return m_guestExecutionHandoffEpoch.load(std::memory_order_acquire);
-    }
-
     void requestStop();
+    void requestStopFlagOnly();
     bool isStopRequested() const;
-
-    uint32_t guestExecutionWaiterCountForTesting() const
-    {
-        return m_guestExecutionWaiters.load(std::memory_order_acquire);
-    }
-
-    uint64_t guestExecutionHandoffTimeouts() const
-    {
-        return m_guestExecutionHandoffTimeouts.load(std::memory_order_relaxed);
-    }
 
     uint8_t Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr);
     uint16_t Load16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr);
@@ -502,11 +507,6 @@ private:
     uint32_t allocateGuestBlockLocked(uint32_t size, uint32_t alignment);
     void freeGuestBlockLocked(uint32_t guestAddr);
     void coalesceGuestHeapLocked();
-    void enterGuestExecution();
-    void leaveGuestExecution();
-    uint32_t releaseGuestExecution();
-    void reacquireGuestExecution(uint32_t depth);
-    void markGuestExecutionAcquired();
 
     void HandleIntegerOverflow(R5900Context *ctx);
 
@@ -530,12 +530,6 @@ private:
     VU1Interpreter m_vu0;
     VU1Interpreter m_vu1;
     R5900Context m_cpuContext;
-    mutable std::recursive_mutex m_guestExecutionMutex;
-    mutable std::atomic<uint32_t> m_guestExecutionWaiters{0u};
-    mutable std::mutex m_guestExecutionHandoffMutex;
-    mutable std::condition_variable m_guestExecutionHandoffCv;
-    std::atomic<uint64_t> m_guestExecutionHandoffEpoch{0u};
-    std::atomic<uint64_t> m_guestExecutionHandoffTimeouts{0u};
     mutable std::mutex m_guestHeapMutex;
     mutable std::mutex m_asyncCallbackStackMutex;
     std::vector<GuestHeapBlock> m_guestHeapBlocks;
@@ -544,8 +538,11 @@ private:
     uint32_t m_guestHeapLimit = PS2_RAM_SIZE;
     uint32_t m_guestHeapSuggestedBase = 0x00100000u;
     bool m_guestHeapConfigured = false;
-    uint32_t m_asyncCallbackStackFloor = 0x01F00000u;
-    uint32_t m_asyncCallbackStackTop = PS2_RAM_SIZE;
+    // Async callback stack pool [floor, top): kernel-reserved guest memory,
+    // carved downward. See the pool layout comment in ps2_runtime.cpp (near
+    // kAsyncCallbackStackFloor's namespace-level block) for the full
+    // disjointness rationale. loadELF() re-arms this on each load.
+    KernelStackPool m_asyncCallbackStack;
 
     std::atomic<uint32_t> m_missingFunctionPolicy{static_cast<uint32_t>(MissingFunctionPolicy::ContinueToTarget)};
     std::atomic<bool> m_missingFunctionReported{false};
@@ -557,6 +554,9 @@ private:
     bool m_debugUiInitialized = false;
 
 public:
+    // Live snapshot of the currently-dispatching guest thread's PC/RA/SP/GP,
+    // updated from PS2Runtime::dispatchLoop() on every step. Read by the
+    // debug UI (ps2_debug_panel.cpp); independent of the threading backend.
     std::atomic<uint32_t> m_debugPc{0};
     std::atomic<uint32_t> m_debugRa{0};
     std::atomic<uint32_t> m_debugSp{0};
@@ -574,6 +574,51 @@ private:
     std::vector<LoadedModule> m_loadedModules;
     uint8_t *m_boundRdram = nullptr;
     uint8_t *m_boundGSVram = nullptr;
+};
+
+// One-shot per-invocation guest scratch stack for running recompiled guest code
+// inline on the calling fiber (RPC/override invoke, inline DMAC handlers, MPEG
+// stream callbacks). Reserves a fresh guest-heap region on construction and
+// releases it on destruction, so two fibers interleaving through the same path
+// — or one fiber re-entering it — always run on DISJOINT stacks. RAII release
+// also fires on the ThreadExitException unwind used for cooperative fiber
+// teardown, so a killed fiber cannot leak.
+class GuestScratchStack
+{
+public:
+    GuestScratchStack(PS2Runtime *runtime, uint32_t size)
+        : m_runtime(runtime)
+    {
+        if (m_runtime != nullptr && size != 0u)
+        {
+            m_base = m_runtime->guestMalloc(size, 16u);
+            if (m_base != 0u)
+            {
+                m_top = (m_base + size) & ~0xFu;
+            }
+        }
+    }
+    ~GuestScratchStack()
+    {
+        if (m_runtime != nullptr && m_base != 0u)
+        {
+            m_runtime->guestFree(m_base);
+        }
+    }
+    GuestScratchStack(const GuestScratchStack &)            = delete;
+    GuestScratchStack &operator=(const GuestScratchStack &) = delete;
+
+    // Aligned guest $sp for the reserved stack; 0 if the reservation failed.
+    uint32_t top() const { return m_top; }
+    bool     valid() const { return m_top != 0u; }
+    // Reservation base; 0 if the reservation failed. Callers that need a flat
+    // scratch BUFFER (not a stack) use this instead of top().
+    uint32_t base() const { return m_base; }
+
+private:
+    PS2Runtime *m_runtime = nullptr;
+    uint32_t    m_base    = 0u;
+    uint32_t    m_top     = 0u;
 };
 
 // Generated by ps2xRecomp in ps2xRuntime/src/runner/register_functions.cpp.

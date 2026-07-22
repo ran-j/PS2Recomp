@@ -31,9 +31,16 @@ struct ThreadInfo
     std::atomic<uint32_t> currentPc{0};
 
     std::mutex m;
-    std::condition_variable cv;
     std::atomic<bool> forceRelease{false};
     std::atomic<bool> terminated{false};
+    // Set true when StartThread mints this thread's g_activeThreads token
+    // (fetch_add). Cleared by exactly ONE consumer via exchange(true->false):
+    // on_fiber_exit for a normal exit, ExitDeleteThread when it removes its own
+    // g_threads entry, notifyRuntimeStop when it reaps residual guest threads,
+    // or StartThread's own create_fiber failure path. Whoever wins the exchange
+    // performs the single matching fetch_sub: one token per started thread,
+    // exactly one decrement.
+    std::atomic<bool> activeCounted{false};
 };
 
 // Thread status
@@ -53,6 +60,7 @@ struct ThreadInfo
 // Common kernel-like error codes used by thread/event/alarm syscalls.
 constexpr int KE_OK = 0;
 constexpr int KE_ERROR = -1;
+constexpr int KE_NO_MEMORY = -400;
 constexpr int KE_ILLEGAL_PRIORITY = -403;
 constexpr int KE_ILLEGAL_MODE = -405;
 constexpr int KE_ILLEGAL_THID = -406;
@@ -158,7 +166,10 @@ struct SemaInfo
     int waiters = 0;
     bool deleted = false;
     std::mutex m;
-    std::condition_variable cv;
+    // Wait list of blocked guest threads. Each entry is {tid, generation token}
+    // where the token was captured via ps2sched::current_fiber_token() at push
+    // time. Protected by m; never hold m across a scheduling yield.
+    std::vector<std::pair<int, ps2sched::FiberToken>> waitList;
 };
 
 struct EventFlagInfo
@@ -170,7 +181,8 @@ struct EventFlagInfo
     int waiters = 0;
     bool deleted = false;
     std::mutex m;
-    std::condition_variable cv;
+    // See SemaInfo::waitList.
+    std::vector<std::pair<int, ps2sched::FiberToken>> waitList;
 };
 
 struct AlarmInfo
@@ -206,10 +218,8 @@ static constexpr uint32_t kFioSoIXOth = 0x0001;
 
 inline std::unordered_map<int, std::shared_ptr<ThreadInfo>> g_threads;
 inline int g_nextThreadId = 2; // Reserve 1 for the main thread
-inline thread_local int g_currentThreadId = 1;
+extern thread_local int g_currentThreadId;
 inline std::mutex g_thread_map_mutex;
-inline std::unordered_map<int, std::thread> g_hostThreads;
-inline std::mutex g_host_thread_mutex;
 
 inline std::unordered_map<int, std::shared_ptr<SemaInfo>> g_semas;
 inline int g_nextSemaId = 1;
@@ -221,118 +231,36 @@ inline std::unordered_map<int, std::shared_ptr<AlarmInfo>> g_alarms;
 inline int g_nextAlarmId = 1;
 inline std::mutex g_alarm_mutex;
 inline std::condition_variable g_alarm_cv;
-inline std::once_flag g_alarm_worker_once;
+// Stop mechanism. g_alarm_thread is joinable so stopAlarmWorker() can join it
+// before rdram/runtime are destroyed.
+inline std::thread g_alarm_thread;
+inline std::atomic<bool> g_alarm_stop_flag{false};
+// Plain resettable flag (not once-only) so stopAlarmWorker() can clear it and
+// allow ensureAlarmWorkerRunning() to restart the thread in a subsequent
+// scheduler cycle (e.g. repeated init/shutdown in the test suite).
+// Protected by g_alarm_mutex.
+inline bool g_alarm_worker_running{false};
 inline std::atomic<int> g_activeThreads{0};
+
+// Mint/consume pair for ThreadInfo::activeCounted (see the field comment
+// above). MINT bumps g_activeThreads FIRST, then publishes the token with
+// release, so a consumer observing activeCounted==true is guaranteed to also
+// see the matching +1. CONSUME is the sole arbiter for a given token: the
+// exchange(false) only the winner of the true->false transition performs the
+// matching fetch_sub, so concurrent consumers (e.g. on_fiber_exit racing
+// notifyRuntimeStop over the same shared_ptr) can never double-decrement.
+static inline void mintActiveToken(const std::shared_ptr<ThreadInfo> &info)
+{
+    g_activeThreads.fetch_add(1, std::memory_order_relaxed);
+    info->activeCounted.store(true, std::memory_order_release);
+}
+static inline void consumeActiveToken(const std::shared_ptr<ThreadInfo> &info)
+{
+    if (info && info->activeCounted.exchange(false, std::memory_order_acq_rel))
+        g_activeThreads.fetch_sub(1, std::memory_order_release);
+}
+
 inline std::mutex g_fd_mutex;
-
-static void registerHostThread(int tid, std::thread worker)
-{
-    std::thread stale;
-    {
-        std::lock_guard<std::mutex> lock(g_host_thread_mutex);
-        auto it = g_hostThreads.find(tid);
-        if (it != g_hostThreads.end())
-        {
-            stale = std::move(it->second);
-            g_hostThreads.erase(it);
-        }
-        g_hostThreads.emplace(tid, std::move(worker));
-    }
-
-    if (stale.joinable())
-    {
-        if (stale.get_id() == std::this_thread::get_id())
-        {
-            stale.detach();
-        }
-        else
-        {
-            stale.join();
-        }
-    }
-}
-
-static void joinHostThreadById(int tid)
-{
-    std::thread worker;
-    {
-        std::lock_guard<std::mutex> lock(g_host_thread_mutex);
-        auto it = g_hostThreads.find(tid);
-        if (it != g_hostThreads.end())
-        {
-            worker = std::move(it->second);
-            g_hostThreads.erase(it);
-        }
-    }
-
-    if (!worker.joinable())
-    {
-        return;
-    }
-
-    if (worker.get_id() == std::this_thread::get_id())
-    {
-        worker.detach();
-    }
-    else
-    {
-        worker.join();
-    }
-}
-
-static void joinAllHostThreads()
-{
-    std::vector<std::thread> workers;
-    {
-        std::lock_guard<std::mutex> lock(g_host_thread_mutex);
-        workers.reserve(g_hostThreads.size());
-        const std::thread::id selfId = std::this_thread::get_id();
-        for (auto it = g_hostThreads.begin(); it != g_hostThreads.end();)
-        {
-            std::thread &worker = it->second;
-            if (worker.joinable() && worker.get_id() == selfId)
-            {
-                ++it;
-                continue;
-            }
-
-            workers.push_back(std::move(worker));
-            it = g_hostThreads.erase(it);
-        }
-    }
-
-    for (auto &worker : workers)
-    {
-        if (!worker.joinable())
-        {
-            continue;
-        }
-        worker.join();
-    }
-}
-
-static void detachAllHostThreads()
-{
-    std::vector<std::thread> workers;
-    {
-        std::lock_guard<std::mutex> lock(g_host_thread_mutex);
-        workers.reserve(g_hostThreads.size());
-        for (auto &entry : g_hostThreads)
-        {
-            workers.push_back(std::move(entry.second));
-        }
-        g_hostThreads.clear();
-    }
-
-    for (auto &worker : workers)
-    {
-        if (!worker.joinable())
-        {
-            continue;
-        }
-        worker.detach();
-    }
-}
 
 struct RpcServerState
 {

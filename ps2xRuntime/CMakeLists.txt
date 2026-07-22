@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(PS2Runtime VERSION 0.1.0 LANGUAGES CXX)
+project(PS2Runtime VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -9,6 +9,10 @@ option(PS2X_ENABLE_RUNNER_UNITY_BUILD "Build ps2EntryRunner with CMake unity bui
 set(PS2X_RUNNER_UNITY_BUILD_BATCH_SIZE 32 CACHE STRING "Unity build batch size for ps2EntryRunner")
 option(PS2X_ENABLE_RUNNER_PCH "Precompile the heavy runtime headers for ps2EntryRunner" ON)
 option(PS2X_ENABLE_SCCACHE "Use sccache as compiler launcher when available" ON)
+option(PS2X_FIBER_PTHREAD "Build the pthread fiber backend on a non-Vita host (for TSan/ASan testing)" OFF)
+# PS2X_SANITIZE is declared and applied in the top-level CMakeLists.txt so the
+# flags reach every target that links ps2_runtime (ps2x_tests lives in a
+# sibling directory). Only the backend-compatibility validation lives here.
 
 option(PS2X_ENABLE_RUNTIME_LOGS "Enable PS2 runtime logs" OFF)
 option(PS2X_ENABLE_AGRESSIVE_LOGS "Enable very verbose/agressive PS2 runtime logs" OFF)
@@ -126,6 +130,10 @@ else()
     target_include_directories(rlImGui PUBLIC "${PS2X_RLIMGUI_SOURCE_DIR}")
     target_link_libraries(rlImGui PUBLIC raylib imgui)
     endif() # NOT PS2X_IS_ANDROID
+endif()
+
+if(PS2X_SANITIZE STREQUAL "thread" AND NOT PS2X_FIBER_PTHREAD)
+    message(FATAL_ERROR "PS2X_SANITIZE=thread requires PS2X_FIBER_PTHREAD=ON; the ucontext backend is not TSan-compatible because TSan does not instrument swapcontext.")
 endif()
 
 add_library(ps2_host_backend INTERFACE)
@@ -386,6 +394,7 @@ add_library(ps2_runtime STATIC
     src/lib/ps2_memory.cpp
     src/lib/ps2_pad.cpp
     src/lib/ps2_runtime.cpp
+    src/lib/ps2_scheduler.cpp
     src/lib/ps2_vif1_interpreter.cpp
     src/lib/vu/ps2_vu1_core.cpp
     src/lib/vu/ps2_vu1_upper.cpp
@@ -432,6 +441,12 @@ file(GLOB_RECURSE KERNEL_SRC_FILES CONFIGURE_DEPENDS
 
 target_sources(ps2_runtime PRIVATE
     ${KERNEL_SRC_FILES}
+)
+
+# Fiber backend (ucontext on POSIX; SceFiber on Vita; Win32 Fibers on Windows;
+# pthread under PS2X_FIBER_PTHREAD for Linux TSan testing)
+target_sources(ps2_runtime PRIVATE
+    src/lib/ps2_fiber.cpp
 )
 
 file(GLOB RUNNER_SRC_FILES CONFIGURE_DEPENDS
@@ -503,7 +518,42 @@ target_include_directories(ps2_runtime PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/lib/Kernel
 )
 
+# Private include dir so Kernel/Syscalls/*.cpp can reach ps2_scheduler_internal.h
+# and ps2_fiber.h without relative path hacks.
+target_include_directories(ps2_runtime PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/lib
+)
+
 target_link_libraries(ps2_runtime PUBLIC ps2_host_backend ffmpeg ps2_iop)
+
+# ps2_scheduler.cpp and ps2_fiber.cpp use std::thread/std::mutex/std::atomic
+# which require pthread on Linux. Link explicitly so the dependency is not
+# implicit via raylib (ps2_host_backend). The Vita toolchain provides its own
+# pthread; the ucontext default build on Linux also needs it.
+if(NOT PS2X_IS_VITA)
+    find_package(Threads REQUIRED)
+    target_link_libraries(ps2_runtime PUBLIC Threads::Threads)
+endif()
+
+if(PS2X_FIBER_PTHREAD)
+    if(PS2X_IS_VITA)
+        message(FATAL_ERROR "PS2X_FIBER_PTHREAD is a non-Vita test flag; do not combine with the Vita toolchain")
+    endif()
+    if(WIN32)
+        message(FATAL_ERROR "PS2X_FIBER_PTHREAD requires POSIX <pthread.h>/<semaphore.h>; Windows uses the native Win32 Fibers backend instead")
+    endif()
+    target_compile_definitions(ps2_runtime PUBLIC PS2X_FIBER_PTHREAD)
+    # Threads::Threads already linked above for all non-Vita builds.
+endif()
+
+if(PS2X_IS_ANDROID)
+    # Bionic libc implements no getcontext/makecontext/swapcontext on any ABI,
+    # so the default POSIX ucontext fiber backend cannot link on Android;
+    # route it to the pthread backend above instead (Bionic-available
+    # primitives only, already fully wired into the scheduler).
+    target_compile_definitions(ps2_runtime PUBLIC PS2X_FIBER_PTHREAD)
+endif()
+
 target_link_libraries(ps2EntryRunner
     PRIVATE
     ps2_runtime
