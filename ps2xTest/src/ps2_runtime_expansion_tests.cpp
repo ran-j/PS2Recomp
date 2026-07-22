@@ -1868,9 +1868,13 @@ void register_ps2_runtime_expansion_tests()
             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
 
             constexpr uint32_t kParamAddr = 0x2000u;
+            // init=1 < max=2 headroom makes both first calls succeed
+            // regardless of scheduling: poller is the sole decrementer
+            // (count>=1 at first poll), signaler the sole incrementer
+            // (count<max at first signal). Keep init<max.
             const uint32_t semaParam[6] = {
                 0u, // count
-                1u, // max_count
+                2u, // max_count
                 1u, // init_count
                 0u, // wait_threads
                 0u, // attr
@@ -1888,11 +1892,25 @@ void register_ps2_runtime_expansion_tests()
             std::atomic<int32_t> signalOkCount{0};
             std::atomic<bool> pollerThrew{false};
             std::atomic<bool> signalerThrew{false};
+            std::atomic<int32_t> readyCount{0};
+
+            // Release both workers together so their 64-iteration loops start at
+            // the same instant, maximizing the opportunity to interleave instead
+            // of one thread running to completion before the other is scheduled.
+            const auto waitForStart = [&]()
+            {
+                readyCount.fetch_add(1, std::memory_order_acq_rel);
+                while (readyCount.load(std::memory_order_acquire) < 2)
+                {
+                    std::this_thread::yield();
+                }
+            };
 
             std::thread poller([&]()
             {
                 try
                 {
+                    waitForStart();
                     for (int i = 0; i < 64; ++i)
                     {
                         R5900Context pollCtx{};
@@ -1914,6 +1932,7 @@ void register_ps2_runtime_expansion_tests()
             {
                 try
                 {
+                    waitForStart();
                     for (int i = 0; i < 64; ++i)
                     {
                         R5900Context signalCtx{};
@@ -1958,7 +1977,7 @@ void register_ps2_runtime_expansion_tests()
 
             int32_t finalCount = 0;
             std::memcpy(&finalCount, rdram.data() + kStatusAddr + 0u, sizeof(finalCount));
-            t.IsTrue(finalCount >= 0 && finalCount <= 1, "semaphore count should remain within [0, max_count]");
+            t.IsTrue(finalCount >= 0 && finalCount <= 2, "semaphore count should remain within [0, max_count]");
 
             runtime.requestStop();
             notifyRuntimeStop();
