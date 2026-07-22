@@ -860,7 +860,10 @@ void register_ps2_sif_rpc_tests()
             constexpr uint32_t kClientAddr = 0x00028000u;
             constexpr uint32_t kSemaParamAddr = 0x00028100u;
             constexpr uint32_t kRecvAddr = 0x00028200u;
-            constexpr uint32_t kSid = IOP_SID_SNDDRV_STATE;
+            constexpr uint32_t kStateSid = 1u;
+            constexpr uint32_t kGetStatusFno = 0x12u;
+            constexpr uint32_t kGetAddrTableFno = 0x13u;
+            constexpr uint32_t kSid = kStateSid;
 
             SifInitRpc(env.rdram.data(), &env.ctx, &env.runtime);
 
@@ -891,7 +894,7 @@ void register_ps2_sif_rpc_tests()
 
             std::memset(env.rdram.data() + kRecvAddr, 0, 16u);
             setRegU32(env.ctx, 4, kClientAddr);
-            setRegU32(env.ctx, 5, IOP_RPC_SNDDRV_GET_STATUS_ADDR);
+            setRegU32(env.ctx, 5, kGetStatusFno);
             setRegU32(env.ctx, 6, K_SIF_RPC_MODE_NOWAIT);
             setRegU32(env.ctx, 7, 0u);
             setRegU32(env.ctx, 8, 0u);
@@ -911,7 +914,7 @@ void register_ps2_sif_rpc_tests()
 
             std::memset(env.rdram.data() + kRecvAddr, 0, 16u);
             setRegU32(env.ctx, 4, kClientAddr);
-            setRegU32(env.ctx, 5, IOP_RPC_SNDDRV_GET_ADDR_TABLE);
+            setRegU32(env.ctx, 5, kGetAddrTableFno);
             setRegU32(env.ctx, 6, K_SIF_RPC_MODE_NOWAIT);
             setRegU32(env.ctx, 7, 0u);
             setRegU32(env.ctx, 8, 0u);
@@ -931,7 +934,7 @@ void register_ps2_sif_rpc_tests()
 
             std::memset(env.rdram.data() + kRecvAddr, 0, 16u);
             setRegU32(env.ctx, 4, kClientAddr);
-            setRegU32(env.ctx, 5, IOP_RPC_SNDDRV_GET_STATUS_ADDR);
+            setRegU32(env.ctx, 5, kGetStatusFno);
             setRegU32(env.ctx, 6, K_SIF_RPC_MODE_NOWAIT);
             setRegU32(env.ctx, 7, 0u);
             setRegU32(env.ctx, 8, 0u);
@@ -952,7 +955,10 @@ void register_ps2_sif_rpc_tests()
             constexpr uint32_t kClientAddr = 0x00028300u;
             constexpr uint32_t kSemaParamAddr = 0x00028400u;
             constexpr uint32_t kRecvAddr = 0x00028500u;
-            constexpr uint32_t kSid = IOP_SID_SNDDRV_STATE;
+            constexpr uint32_t kStateSid = 1u;
+            constexpr uint32_t kGetStatusFno = 0x12u;
+            constexpr uint32_t kGetAddrTableFno = 0x13u;
+            constexpr uint32_t kSid = kStateSid;
 
             SifInitRpc(env.rdram.data(), &env.ctx, &env.runtime);
 
@@ -975,7 +981,7 @@ void register_ps2_sif_rpc_tests()
             writeGuestStruct(env.rdram.data(), kClientAddr, client);
 
             setRegU32(env.ctx, 4, kClientAddr);
-            setRegU32(env.ctx, 5, IOP_RPC_SNDDRV_GET_STATUS_ADDR);
+            setRegU32(env.ctx, 5, kGetStatusFno);
             setRegU32(env.ctx, 6, K_SIF_RPC_MODE_NOWAIT);
             setRegU32(env.ctx, 7, 0u);
             setRegU32(env.ctx, 8, 0u);
@@ -990,7 +996,7 @@ void register_ps2_sif_rpc_tests()
                      "rpc 0x12 should return a low guest address like an IOP pointer");
 
             setRegU32(env.ctx, 4, kClientAddr);
-            setRegU32(env.ctx, 5, IOP_RPC_SNDDRV_GET_ADDR_TABLE);
+            setRegU32(env.ctx, 5, kGetAddrTableFno);
             setRegU32(env.ctx, 6, K_SIF_RPC_MODE_NOWAIT);
             setRegU32(env.ctx, 7, 0u);
             setRegU32(env.ctx, 8, 0u);

@@ -3,6 +3,7 @@
 #include "ps2_iop_transport.h"
 #include "ps2_syscalls.h"
 #include "ps2_stubs.h"
+#include "game_overrides.h"
 
 #include <array>
 #include <cstdint>

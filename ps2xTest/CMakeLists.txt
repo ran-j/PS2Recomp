@@ -66,6 +66,7 @@ target_include_directories(ps2_test_lib PRIVATE
     ${CMAKE_SOURCE_DIR}/ps2xAnalyzer/include
     ${CMAKE_SOURCE_DIR}/ps2xRuntime/include
     ${CMAKE_SOURCE_DIR}/ps2xRuntime/src/lib
+    ${CMAKE_SOURCE_DIR}/ps2xIOP/src
 )
 
 target_link_libraries(ps2_test_lib PRIVATE
