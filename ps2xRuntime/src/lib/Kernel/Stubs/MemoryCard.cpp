@@ -109,7 +109,11 @@ namespace ps2_stubs
 
         bool isValidMcPortSlot(int32_t port, int32_t slot)
         {
-            return port >= 0 && port < static_cast<int32_t>(g_mcPorts.size()) && slot == 0;
+            // Backing state is per port (g_mcPorts); a slot indexes no state,
+            // so any non-negative slot maps onto the port's single card.
+            // A negative slot is not a valid address and is rejected.
+            return port >= 0 && port < static_cast<int32_t>(g_mcPorts.size()) &&
+                   slot >= 0;
         }
 
         std::filesystem::path getMcRootPath(int32_t port)
