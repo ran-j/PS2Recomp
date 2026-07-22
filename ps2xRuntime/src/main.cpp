@@ -15,8 +15,52 @@
 #include <algorithm>
 #include <cstdlib>
 
+#if defined(__ANDROID__)
+#include <android/log.h>
+#include <unistd.h>
+#include <thread>
+#include <cstdio>
+#include <cstring>
+#endif
+
 namespace
 {
+#if defined(__ANDROID__)
+    void redirectStdioToLogcat()
+    {
+        static int pipeFds[2];
+        if (pipe(pipeFds) != 0)
+        {
+            return;
+        }
+
+        setvbuf(stdout, nullptr, _IOLBF, 0);
+        setvbuf(stderr, nullptr, _IONBF, 0);
+        dup2(pipeFds[1], STDOUT_FILENO);
+        dup2(pipeFds[1], STDERR_FILENO);
+
+        std::thread([]()
+                    {
+                        FILE *reader = fdopen(pipeFds[0], "r");
+                        if (!reader)
+                        {
+                            return;
+                        }
+                        char line[1024];
+                        while (fgets(line, sizeof(line), reader))
+                        {
+                            size_t len = std::strlen(line);
+                            if (len > 0 && line[len - 1] == '\n')
+                            {
+                                line[len - 1] = '\0';
+                            }
+                            __android_log_write(ANDROID_LOG_INFO, "ps2x", line);
+                        }
+                    })
+            .detach();
+    }
+#endif
+
     void setupTerminateLogger() // to help on release build crashs
     {
         std::set_terminate([]()
@@ -91,6 +135,9 @@ namespace
 
 int main(int argc, char *argv[])
 {
+#if defined(__ANDROID__)
+    redirectStdioToLogcat();
+#endif
     setupTerminateLogger();
 
     try

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application
+        android:label="PS2 Recomp"
+        android:hasCode="false"
+        android:isGame="true">
+
+        <activity
+            android:name="android.app.NativeActivity"
+            android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|navigation"
+            android:screenOrientation="landscape"
+            android:exported="true">
+
+            <!-- Runner shared library built by ps2xRuntime/CMakeLists.txt -->
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="ps2EntryRunner" />
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>

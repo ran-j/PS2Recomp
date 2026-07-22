@@ -258,6 +258,8 @@ static void rpcCopyToRdram(uint8_t *rdram, uint32_t dst, uint32_t src, size_t si
     if (!rdram || size == 0)
         return;
 
+    ps2TraceGuestRangeWrite(rdram, dst, static_cast<uint32_t>(size), "rpcCopyToRdram", nullptr);
+
     constexpr size_t kMaxRpcTransferBytes = 1u * 1024u * 1024u;
     const size_t clampedSize = std::min(size, kMaxRpcTransferBytes);
     if (clampedSize != size)
@@ -291,6 +293,8 @@ static void rpcZeroRdram(uint8_t *rdram, uint32_t dst, size_t size)
 {
     if (!rdram || size == 0)
         return;
+
+    ps2TraceGuestRangeWrite(rdram, dst, static_cast<uint32_t>(size), "rpcZeroRdram", nullptr);
 
     constexpr size_t kMaxRpcTransferBytes = 1u * 1024u * 1024u;
     const size_t clampedSize = std::min(size, kMaxRpcTransferBytes);

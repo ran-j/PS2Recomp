@@ -238,7 +238,7 @@ namespace
 
     constexpr uint32_t kAsyncCounterAddr = 0x2400u;
 
-    void testWaitForAsyncCounter(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
+    void testWaitForAsyncCounter(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         if (!rdram || !ctx)
         {
@@ -251,6 +251,10 @@ namespace
             std::memcpy(&counter, rdram + kAsyncCounterAddr, sizeof(counter));
             if (counter == 0u)
             {
+                if (runtime != nullptr)
+                {
+                    runtime->yieldGuestExecutionAfterWake();
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
         } while (counter == 0u);
@@ -435,6 +439,136 @@ void register_ps2_runtime_expansion_tests()
             t.IsTrue(peerWaiting, "peer guest thread should contend while the waker owns guest execution");
             t.IsFalse(peerRanWhileMainHeld, "peer guest thread should not run before the waker yields execution");
             t.IsTrue(peerRanAfterHandoff, "wake handoff should let the peer acquire guest execution before returning");
+        });
+
+        tc.Run("recursive guest execution acquisition does not advance the handoff epoch", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            const uint64_t initial = runtime.guestExecutionHandoffEpochSnapshot();
+
+            PS2Runtime::GuestExecutionScope outer(&runtime);
+            const uint64_t afterOuter = runtime.guestExecutionHandoffEpochSnapshot();
+            t.Equals(afterOuter, initial + 1u, "outer acquisition should advance the epoch exactly once");
+
+            {
+                PS2Runtime::GuestExecutionScope inner(&runtime);
+                t.Equals(runtime.guestExecutionHandoffEpochSnapshot(), afterOuter,
+                         "recursive acquisition must not advance the epoch");
+
+                PS2Runtime::GuestExecutionScope innermost(&runtime);
+                t.Equals(runtime.guestExecutionHandoffEpochSnapshot(), afterOuter,
+                         "deeper recursive acquisitions must not advance the epoch either");
+            }
+
+            t.Equals(runtime.guestExecutionHandoffEpochSnapshot(), afterOuter,
+                     "releasing recursive acquisitions must not advance the epoch");
+        });
+
+        tc.Run("reacquiring a depth-4 release advances the handoff epoch exactly once", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+
+            PS2Runtime::GuestExecutionScope s1(&runtime);
+            PS2Runtime::GuestExecutionScope s2(&runtime);
+            PS2Runtime::GuestExecutionScope s3(&runtime);
+            PS2Runtime::GuestExecutionScope s4(&runtime);
+
+            const uint64_t before = runtime.guestExecutionHandoffEpochSnapshot();
+            {
+                PS2Runtime::GuestExecutionReleaseScope release(&runtime);
+                t.Equals(runtime.guestExecutionHandoffEpochSnapshot(), before,
+                         "releasing guest execution must not advance the epoch");
+            }
+
+            t.Equals(runtime.guestExecutionHandoffEpochSnapshot(), before + 1u,
+                     "reacquiring a depth-4 release should advance the epoch exactly once");
+        });
+
+        tc.Run("handoff completed before the wait does not count as a timeout", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            const uint64_t timeoutsBefore = runtime.guestExecutionHandoffTimeouts();
+
+            std::atomic<bool> holderAcquired{false};
+            std::atomic<bool> releaseHolder{false};
+            uint64_t baseline = 0u;
+            std::thread holder;
+
+            {
+                PS2Runtime::GuestExecutionScope mainScope(&runtime);
+
+                holder = std::thread([&]()
+                {
+                    PS2Runtime::GuestExecutionScope scope(&runtime);
+                    holderAcquired.store(true, std::memory_order_release);
+                    while (!releaseHolder.load(std::memory_order_acquire))
+                    {
+                        std::this_thread::sleep_for(std::chrono::microseconds(100));
+                    }
+                });
+
+                const bool holderContending = waitUntil([&]()
+                {
+                    return runtime.guestExecutionWaiterCountForTesting() > 0u;
+                }, std::chrono::milliseconds(250));
+                t.IsTrue(holderContending, "holder thread should be queued before the release");
+
+                // Token captured BEFORE releasing guest execution, like the dispatchers do
+                baseline = runtime.guestExecutionHandoffEpochSnapshot();
+            }
+
+            const bool acquired = waitUntil([&]()
+            {
+                return holderAcquired.load(std::memory_order_acquire);
+            }, std::chrono::milliseconds(250));
+            t.IsTrue(acquired, "holder should acquire guest execution after the release");
+
+            // Second waiter keeps waiters > 0 so the wait below cannot take the
+            // no-waiters fast path: it must recognize the epoch advance instead.
+            std::thread secondWaiter([&]()
+            {
+                PS2Runtime::GuestExecutionScope scope(&runtime);
+            });
+            const bool secondContending = waitUntil([&]()
+            {
+                return runtime.guestExecutionWaiterCountForTesting() > 0u;
+            }, std::chrono::milliseconds(250));
+            t.IsTrue(secondContending, "second waiter should be queued while the holder owns guest execution");
+
+            runtime.waitForGuestExecutionHandoff(baseline);
+
+            t.Equals(runtime.guestExecutionHandoffTimeouts(), timeoutsBefore,
+                     "a handoff that completed before the wait must not count as a timeout");
+
+            releaseHolder.store(true, std::memory_order_release);
+            if (holder.joinable())
+            {
+                holder.join();
+            }
+            if (secondWaiter.joinable())
+            {
+                secondWaiter.join();
+            }
+        });
+
+        tc.Run("nested DeferredGuestYieldScope delivers pending only to the outermost scope", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            bool outerPending = false;
+            bool innerPending = false;
+
+            {
+                PS2Runtime::DeferredGuestYieldScope outer(outerPending);
+                {
+                    PS2Runtime::DeferredGuestYieldScope inner(innerPending);
+                    runtime.yieldGuestExecutionAfterWake(); // must defer instead of yielding
+                }
+                t.IsFalse(innerPending, "inner scope must not consume the deferred yield");
+                t.IsFalse(outerPending, "pending must only be delivered when the outermost scope closes");
+            }
+
+            t.IsTrue(outerPending, "outermost scope should deliver the deferred yield");
+            t.IsFalse(innerPending, "inner scope must stay untouched");
         });
 
         tc.Run("guest preemption policy requests a dispatcher handoff when another guest thread contends", [](TestCase &t)

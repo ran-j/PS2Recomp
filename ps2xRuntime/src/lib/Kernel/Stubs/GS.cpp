@@ -706,30 +706,42 @@ namespace ps2_stubs
             }
 
             uint32_t steps = 0u;
-            while (callbackCtx.pc != 0u && !runtime->isStopRequested() && steps < 1024u)
+            bool reschedulePending = false;
+            uint64_t handoffBaseline = 0u;
             {
-                if (!runtime->hasFunction(callbackCtx.pc))
-                {
-                    if (g_gs_sync_v_callback_bad_pc_logs < 16u)
-                    {
-                        std::cerr << "[sceGsSyncVCallback:bad-pc] pc=0x" << std::hex << callbackCtx.pc
-                                  << " ra=0x" << getRegU32(&callbackCtx, 31)
-                                  << " sp=0x" << getRegU32(&callbackCtx, 29)
-                                  << " gp=0x" << getRegU32(&callbackCtx, 28)
-                                  << std::dec << std::endl;
-                        ++g_gs_sync_v_callback_bad_pc_logs;
-                    }
-                    callbackCtx.pc = 0u;
-                    break;
-                }
+                PS2Runtime::GuestExecutionScope guestExecution(runtime);
+                PS2Runtime::DeferredGuestYieldScope deferYield(reschedulePending);
 
-                auto step = runtime->lookupFunction(callbackCtx.pc);
-                if (!step)
+                while (callbackCtx.pc != 0u && !runtime->isStopRequested() && steps < 1024u)
                 {
-                    break;
+                    if (!runtime->hasFunction(callbackCtx.pc))
+                    {
+                        if (g_gs_sync_v_callback_bad_pc_logs < 16u)
+                        {
+                            std::cerr << "[sceGsSyncVCallback:bad-pc] pc=0x" << std::hex << callbackCtx.pc
+                                      << " ra=0x" << getRegU32(&callbackCtx, 31)
+                                      << " sp=0x" << getRegU32(&callbackCtx, 29)
+                                      << " gp=0x" << getRegU32(&callbackCtx, 28)
+                                      << std::dec << std::endl;
+                            ++g_gs_sync_v_callback_bad_pc_logs;
+                        }
+                        callbackCtx.pc = 0u;
+                        break;
+                    }
+
+                    auto step = runtime->lookupFunction(callbackCtx.pc);
+                    if (!step)
+                    {
+                        break;
+                    }
+                    ++steps;
+                    step(rdram, &callbackCtx, runtime);
                 }
-                ++steps;
-                step(rdram, &callbackCtx, runtime);
+                handoffBaseline = runtime->guestExecutionHandoffEpochSnapshot();
+            }
+            if (reschedulePending && !runtime->isStopRequested())
+            {
+                runtime->waitForGuestExecutionHandoff(handoffBaseline);
             }
 
             if (shouldLogDispatch)
@@ -909,6 +921,7 @@ namespace ps2_stubs
         mem.writeIORegister(GIF_CHANNEL + 0x00u, CHCR_STR_MODE0);
         mem.processPendingTransfers();
 
+        ps2TraceGuestRangeWrite(rdram, dstAddr, totalImageBytes, "sceGsExecStoreImage", ctx);
         runtime->gs().consumeLocalToHostBytes(dst, totalImageBytes);
         runtime->guestFree(pktAddr);
 

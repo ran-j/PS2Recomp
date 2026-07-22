@@ -196,6 +196,10 @@ namespace ps2_syscalls
             std::lock_guard<std::mutex> lock(g_sys_fd_mutex);
             bytesRead = fread(hostBuf, 1, size, fp);
         }
+        if (bytesRead > 0)
+        {
+            ps2TraceGuestRangeWrite(rdram, bufAddr, static_cast<uint32_t>(bytesRead), "fioRead", ctx);
+        }
 
         if (bytesRead < size && ferror(fp))
         {
