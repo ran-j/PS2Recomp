@@ -1687,6 +1687,81 @@ void register_code_generator_tests()
             t.Equals(PS2Recompiler::resolveStubTarget("_DefinitelyNotARealCall"), StubTarget::Unknown,
                      "unknown names must still stay unknown");
         });
-    
+
+        tc.Run("giant function past threshold emits guarded O1 attribute", [](TestCase &t) {
+            const int count = 20;
+            Function func;
+            func.name = "giant_fn";
+            func.start = 0x1000;
+            func.end = 0x1000 + 4 * count;
+            func.isRecompiled = true;
+            func.isStub = false;
+
+            std::vector<Instruction> instructions;
+            for (int i = 0; i < count; ++i)
+            {
+                instructions.push_back(makeNop(0x1000 + 4 * i));
+            }
+
+            CodeGenerator gen({}, {});
+            gen.setGiantFunctionInstructionThreshold(10);
+            std::string generated = gen.generateFunction(func, instructions, false);
+            printGeneratedCode("giant function past threshold emits guarded O1 attribute", generated);
+
+            t.IsTrue(generated.find("#if defined(__GNUC__) && !defined(__clang__)") != std::string::npos,
+                     "giant function should be guarded to real GCC only");
+            t.IsTrue(generated.find("__attribute__((optimize(\"O1\")))") != std::string::npos,
+                     "giant function should be emitted with a reduced optimization attribute");
+            t.IsTrue(generated.find("__attribute__((optimize(\"O1\")))\n#endif\nvoid ") != std::string::npos,
+                     "the O1 attribute must sit immediately before the function definition so it attaches to it");
+        });
+
+        tc.Run("function below threshold does not emit O1 attribute", [](TestCase &t) {
+            const int count = 5;
+            Function func;
+            func.name = "small_fn";
+            func.start = 0x1000;
+            func.end = 0x1000 + 4 * count;
+            func.isRecompiled = true;
+            func.isStub = false;
+
+            std::vector<Instruction> instructions;
+            for (int i = 0; i < count; ++i)
+            {
+                instructions.push_back(makeNop(0x1000 + 4 * i));
+            }
+
+            CodeGenerator gen({}, {});
+            gen.setGiantFunctionInstructionThreshold(10);
+            std::string generated = gen.generateFunction(func, instructions, false);
+            printGeneratedCode("function below threshold does not emit O1 attribute", generated);
+
+            t.IsTrue(generated.find("__attribute__((optimize(") == std::string::npos,
+                     "function below threshold should not receive the reduced optimization attribute");
+        });
+
+        tc.Run("threshold disabled leaves output free of O1 attribute", [](TestCase &t) {
+            const int count = 20;
+            Function func;
+            func.name = "giant_fn_disabled";
+            func.start = 0x1000;
+            func.end = 0x1000 + 4 * count;
+            func.isRecompiled = true;
+            func.isStub = false;
+
+            std::vector<Instruction> instructions;
+            for (int i = 0; i < count; ++i)
+            {
+                instructions.push_back(makeNop(0x1000 + 4 * i));
+            }
+
+            CodeGenerator gen({}, {});
+            std::string generated = gen.generateFunction(func, instructions, false);
+            printGeneratedCode("threshold disabled leaves output free of O1 attribute", generated);
+
+            t.IsTrue(generated.find("__attribute__((optimize(") == std::string::npos,
+                     "disabled threshold should never emit the reduced optimization attribute");
+        });
+
     });
 }

@@ -20,6 +20,7 @@
 #include <limits>
 #include <functional>
 #include <thread>
+#include <utility>
 
 namespace fs = std::filesystem;
 
@@ -913,6 +914,7 @@ namespace ps2recomp
             m_codeGenerator->setBootstrapInfo(m_bootstrapInfo);
             m_codeGenerator->setConfiguredJumpTables(m_config.jumpTables);
             m_codeGenerator->setEmitInstructionComments(true);
+            m_codeGenerator->setGiantFunctionInstructionThreshold(m_config.giantFunctionInstructionThreshold);
 
             fs::create_directories(m_config.outputPath);
 
@@ -1586,6 +1588,52 @@ namespace ps2recomp
                 }
             }
 
+            // Emit oversized_tus.txt: one output-dir-relative TU filename per line
+            // (deduplicated), listing translation units that contain a function past
+            // the giant-function threshold. A downstream build reads this to compile
+            // just those TUs at -O1 (e.g. set_source_files_properties(... COMPILE_OPTIONS -O1)).
+            // In single_file_output mode this is the single combined TU (whole-program -O1).
+            if (m_config.giantFunctionInstructionThreshold != 0)
+            {
+                std::vector<std::pair<std::string, size_t>> translationUnitInstructionCounts;
+                translationUnitInstructionCounts.reserve(outputFunctions.size());
+                for (const Function *function : outputFunctions)
+                {
+                    auto decodedIt = decodedFunctions.find(function->start);
+                    if (decodedIt == decodedFunctions.end())
+                    {
+                        continue;
+                    }
+
+                    std::string translationUnitName = m_config.singleFileOutput
+                        ? std::string("ps2_recompiled_functions.cpp")
+                        : getOutputPath(*function).filename().string();
+                    translationUnitInstructionCounts.emplace_back(std::move(translationUnitName), decodedIt->second.size());
+                }
+
+                std::vector<std::string> oversizedTus = ComputeOversizedTranslationUnits(
+                    translationUnitInstructionCounts, m_config.giantFunctionInstructionThreshold);
+
+                std::ostringstream manifest;
+                for (const std::string &name : oversizedTus)
+                {
+                    manifest << name << "\n";
+                }
+
+                fs::path manifestPath = fs::path(m_config.outputPath) / "oversized_tus.txt";
+                if (!writeToFile(manifestPath.string(), manifest.str()))
+                {
+                    throw std::runtime_error("Failed to write oversized TU manifest: " + manifestPath.string());
+                }
+
+                {
+                    std::ostringstream msg;
+                    msg << "wrote oversized TU manifest (" << oversizedTus.size()
+                        << " entries) to " << manifestPath;
+                    m_reporter.progress(msg.str());
+                }
+            }
+
             m_decodedFunctions.clear();
 
             std::string registerFunctions = m_codeGenerator->generateFunctionRegistration(m_functions, m_generatedStubs);
@@ -1977,6 +2025,27 @@ namespace ps2recomp
         file.close();
 
         return true;
+    }
+
+    std::vector<std::string> PS2Recompiler::ComputeOversizedTranslationUnits(
+        const std::vector<std::pair<std::string, size_t>>& translationUnitInstructionCounts,
+        uint32_t instructionThreshold)
+    {
+        std::vector<std::string> oversizedTus;
+        if (instructionThreshold == 0)
+        {
+            return oversizedTus;
+        }
+
+        std::unordered_set<std::string> seen;
+        for (const auto &entry : translationUnitInstructionCounts)
+        {
+            if (entry.second > instructionThreshold && seen.insert(entry.first).second)
+            {
+                oversizedTus.push_back(entry.first);
+            }
+        }
+        return oversizedTus;
     }
 
     std::filesystem::path PS2Recompiler::getOutputPath(const Function &function) const

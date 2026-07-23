@@ -83,6 +83,23 @@ namespace ps2recomp
             sanitizedName = nameBuilder.str();
         }
 
+        const bool isGiantFunction =
+            cg.m_giantFunctionInstructionThreshold != 0 &&
+            instructions.size() > cg.m_giantFunctionInstructionThreshold;
+        if (isGiantFunction)
+        {
+            ss << "// Giant function: " << instructions.size()
+               << " instructions exceeds threshold " << cg.m_giantFunctionInstructionThreshold << ".\n";
+            ss << "// Compiled at -O1 only to keep build time bounded. GCC's manual documents\n";
+            ss << "// the optimize attribute as \"used for debugging purposes only\" and \"not\n";
+            ss << "// suitable in production code\". Separately, as a practical matter, a\n";
+            ss << "// per-function optimize attribute may not survive LTO; that failure mode is\n";
+            ss << "// benign -- the function then falls back to the TU's optimization level,\n";
+            ss << "// with no correctness impact.\n";
+            ss << "#if defined(__GNUC__) && !defined(__clang__)\n";
+            ss << "__attribute__((optimize(\"O1\")))\n";
+            ss << "#endif\n";
+        }
         ss << "void " << sanitizedName << "(uint8_t* rdram, R5900Context* ctx, PS2Runtime *runtime) {\n";
         ss << "#ifdef PS2_FUNCTION_LOG_TRACKER\n";
         ss << "    PS_LOG_ENTRY(\"" << sanitizedName << "\");\n";
