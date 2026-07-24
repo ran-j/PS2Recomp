@@ -155,6 +155,53 @@ static bool writeMinimalMipsElfWithJalFallbackTarget(const std::filesystem::path
     return writer.save(elfPath.string());
 }
 
+static bool writeMinimalMipsElfWithSizedFunctionSymbol(
+    const std::filesystem::path &elfPath,
+    const std::string &symbolName,
+    uint32_t symbolSize)
+{
+    ELFIO::elfio writer;
+    writer.create(ELFIO::ELFCLASS32, ELFIO::ELFDATA2LSB);
+    writer.set_os_abi(ELFIO::ELFOSABI_NONE);
+    writer.set_type(ELFIO::ET_EXEC);
+    writer.set_machine(ELFIO::EM_MIPS);
+    writer.set_entry(0x00100000u);
+
+    ELFIO::section *text = writer.sections.add(".text");
+    text->set_type(ELFIO::SHT_PROGBITS);
+    text->set_flags(ELFIO::SHF_ALLOC | ELFIO::SHF_EXECINSTR);
+    text->set_addr_align(4);
+    text->set_address(0x00100000u);
+    const std::array<uint32_t, 16> textWords = {};
+    text->set_data(reinterpret_cast<const char *>(textWords.data()),
+                   static_cast<ELFIO::Elf_Word>(textWords.size() * sizeof(uint32_t)));
+
+    ELFIO::section *strtab = writer.sections.add(".strtab");
+    strtab->set_type(ELFIO::SHT_STRTAB);
+    strtab->set_addr_align(1);
+
+    ELFIO::section *symtab = writer.sections.add(".symtab");
+    symtab->set_type(ELFIO::SHT_SYMTAB);
+    symtab->set_info(1);
+    symtab->set_link(strtab->get_index());
+    symtab->set_addr_align(4);
+    symtab->set_entry_size(writer.get_default_entry_size(ELFIO::SHT_SYMTAB));
+
+    ELFIO::symbol_section_accessor symbols(writer, symtab);
+    ELFIO::string_section_accessor strings(strtab);
+    symbols.add_symbol(strings, "", 0, 0, ELFIO::STB_LOCAL, ELFIO::STT_NOTYPE, 0, ELFIO::SHN_UNDEF);
+    symbols.add_symbol(strings, symbolName.c_str(), text->get_address(), symbolSize,
+                       ELFIO::STB_GLOBAL, ELFIO::STT_FUNC, 0, text->get_index());
+
+    ELFIO::segment *textSegment = writer.segments.add();
+    textSegment->set_type(ELFIO::PT_LOAD);
+    textSegment->set_flags(ELFIO::PF_R | ELFIO::PF_X);
+    textSegment->set_align(0x1000);
+    textSegment->add_section_index(text->get_index(), text->get_addr_align());
+
+    return writer.save(elfPath.string());
+}
+
 void register_ps2_recompiler_tests()
 {
     MiniTest::Case("PS2Recompiler", [](TestCase &tc)
@@ -845,6 +892,178 @@ void register_ps2_recompiler_tests()
                 { return fn.start == 0x00100010u; });
             t.IsFalse(stillHasFallbackOnlyStart,
                       "fallback-only function starts should be removed once ghidra map is loaded");
+
+            std::error_code removeError;
+            std::filesystem::remove(elfPath, removeError);
+            std::filesystem::remove(mapPath, removeError);
+        });
+
+        tc.Run("auto-named ghidra bounds override larger auto symbol ranges", [](TestCase &t) {
+            const auto uniqueSuffix = std::to_string(
+                static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+            const std::filesystem::path elfPath =
+                std::filesystem::temp_directory_path() / ("ps2recomp-ghidra-auto-bound-" + uniqueSuffix + ".elf");
+            const std::filesystem::path mapPath =
+                std::filesystem::temp_directory_path() / ("ps2recomp-ghidra-auto-bound-" + uniqueSuffix + ".csv");
+
+            const bool writeOk =
+                writeMinimalMipsElfWithSizedFunctionSymbol(elfPath, "sub_00100000", 0x30u);
+            t.IsTrue(writeOk, "temporary ELF should be generated");
+            if (!writeOk)
+            {
+                return;
+            }
+
+            ElfParser parser(elfPath.string());
+            const bool parseOk = parser.parse();
+            t.IsTrue(parseOk, "generated ELF should parse");
+
+            std::ofstream mapFile(mapPath);
+            t.IsTrue(static_cast<bool>(mapFile), "ghidra map file should be writable");
+            if (mapFile)
+            {
+                mapFile << "name,start,end,size\n";
+                mapFile << "FUN_00100000,0x00100000,0x00100010,0x10\n";
+                mapFile << "FUN_00100020,0x00100020,0x00100028,0x8\n";
+                mapFile.close();
+            }
+
+            if (parseOk && mapFile)
+            {
+                const bool mapLoaded = parser.loadGhidraFunctionMap(mapPath.string());
+                t.IsTrue(mapLoaded, "ghidra map should load");
+
+                const auto functions = parser.extractFunctions();
+                const auto firstIt = std::find_if(
+                    functions.begin(), functions.end(),
+                    [](const Function &fn)
+                    { return fn.start == 0x00100000u; });
+                const auto secondIt = std::find_if(
+                    functions.begin(), functions.end(),
+                    [](const Function &fn)
+                    { return fn.start == 0x00100020u; });
+
+                t.IsTrue(firstIt != functions.end(), "first ghidra function should exist");
+                if (firstIt != functions.end())
+                {
+                    t.Equals(firstIt->end, 0x00100010u,
+                             "explicit ghidra end must override a larger same-start auto symbol");
+                }
+
+                t.IsTrue(secondIt != functions.end(),
+                         "adjacent ghidra function after a gap must not be swallowed by the larger symbol range");
+                if (secondIt != functions.end())
+                {
+                    t.Equals(secondIt->end, 0x00100028u,
+                             "adjacent ghidra function should retain its explicit end");
+                }
+            }
+
+            std::error_code removeError;
+            std::filesystem::remove(elfPath, removeError);
+            std::filesystem::remove(mapPath, removeError);
+        });
+
+        tc.Run("sub-named ghidra bounds override larger auto symbol ranges", [](TestCase &t) {
+            const auto uniqueSuffix = std::to_string(
+                static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+            const std::filesystem::path elfPath =
+                std::filesystem::temp_directory_path() / ("ps2recomp-ghidra-sub-bound-" + uniqueSuffix + ".elf");
+            const std::filesystem::path mapPath =
+                std::filesystem::temp_directory_path() / ("ps2recomp-ghidra-sub-bound-" + uniqueSuffix + ".csv");
+
+            const bool writeOk =
+                writeMinimalMipsElfWithSizedFunctionSymbol(elfPath, "FUN_00100000", 0x30u);
+            t.IsTrue(writeOk, "temporary ELF should be generated");
+            if (!writeOk)
+            {
+                return;
+            }
+
+            ElfParser parser(elfPath.string());
+            const bool parseOk = parser.parse();
+            t.IsTrue(parseOk, "generated ELF should parse");
+
+            std::ofstream mapFile(mapPath);
+            t.IsTrue(static_cast<bool>(mapFile), "ghidra map file should be writable");
+            if (mapFile)
+            {
+                mapFile << "name,start,end,size\n";
+                mapFile << "sub_00100000,0x00100000,0x00100010,0x10\n";
+                mapFile.close();
+            }
+
+            if (parseOk && mapFile)
+            {
+                const bool mapLoaded = parser.loadGhidraFunctionMap(mapPath.string());
+                t.IsTrue(mapLoaded, "ghidra map should load");
+
+                const auto functions = parser.extractFunctions();
+                const auto entryIt = std::find_if(
+                    functions.begin(), functions.end(),
+                    [](const Function &fn)
+                    { return fn.start == 0x00100000u; });
+                t.IsTrue(entryIt != functions.end(), "sub-named ghidra function should exist");
+                if (entryIt != functions.end())
+                {
+                    t.Equals(entryIt->end, 0x00100010u,
+                             "explicit sub_ ghidra end must override a larger same-start auto symbol");
+                }
+            }
+
+            std::error_code removeError;
+            std::filesystem::remove(elfPath, removeError);
+            std::filesystem::remove(mapPath, removeError);
+        });
+
+        tc.Run("ghidra bounds retain useful same-start symbol names", [](TestCase &t) {
+            const auto uniqueSuffix = std::to_string(
+                static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+            const std::filesystem::path elfPath =
+                std::filesystem::temp_directory_path() / ("ps2recomp-ghidra-named-bound-" + uniqueSuffix + ".elf");
+            const std::filesystem::path mapPath =
+                std::filesystem::temp_directory_path() / ("ps2recomp-ghidra-named-bound-" + uniqueSuffix + ".csv");
+
+            const bool writeOk =
+                writeMinimalMipsElfWithSizedFunctionSymbol(elfPath, "GameInit", 0x30u);
+            t.IsTrue(writeOk, "temporary ELF should be generated");
+            if (!writeOk)
+            {
+                return;
+            }
+
+            ElfParser parser(elfPath.string());
+            const bool parseOk = parser.parse();
+            t.IsTrue(parseOk, "generated ELF should parse");
+
+            std::ofstream mapFile(mapPath);
+            t.IsTrue(static_cast<bool>(mapFile), "ghidra map file should be writable");
+            if (mapFile)
+            {
+                mapFile << "name,start,end,size\n";
+                mapFile << "FUN_00100000,0x00100000,0x00100010,0x10\n";
+                mapFile.close();
+            }
+
+            if (parseOk && mapFile)
+            {
+                const bool mapLoaded = parser.loadGhidraFunctionMap(mapPath.string());
+                t.IsTrue(mapLoaded, "ghidra map should load");
+
+                const auto functions = parser.extractFunctions();
+                const auto entryIt = std::find_if(
+                    functions.begin(), functions.end(),
+                    [](const Function &fn)
+                    { return fn.start == 0x00100000u; });
+                t.IsTrue(entryIt != functions.end(), "same-start function should exist");
+                if (entryIt != functions.end())
+                {
+                    t.Equals(entryIt->name, std::string("GameInit"),
+                             "useful ELF symbol name should win over an autogenerated ghidra name");
+                    t.Equals(entryIt->end, 0x00100010u,
+                             "ghidra boundary should win independently of name precedence");
+                }
+            }
 
             std::error_code removeError;
             std::filesystem::remove(elfPath, removeError);

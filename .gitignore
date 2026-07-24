@@ -11,6 +11,8 @@ build
 *.log
 *.tlog
 *.ipch
+*.iso
+/iso/
 
 # Now we can place the dump code here and test while expand the Runtime
 ps2xRuntime/include/ps2_recompiled_functions.h

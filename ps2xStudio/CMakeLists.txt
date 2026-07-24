@@ -136,6 +136,15 @@ target_link_libraries(ps2xStudio PRIVATE
 
 if(WIN32)
     target_link_libraries(ps2xStudio PRIVATE SDL2::SDL2main)
+
+    # SDL is built as a shared library, so stage the matching configuration's
+    # runtime DLL beside Studio (SDL2d.dll for Debug, SDL2.dll for Release).
+    add_custom_command(TARGET ps2xStudio POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:SDL2::SDL2>
+            $<TARGET_FILE_DIR:ps2xStudio>
+        VERBATIM
+    )
 endif()
 
 if(COMMAND ps2x_stage_ffmpeg_runtime_dlls)

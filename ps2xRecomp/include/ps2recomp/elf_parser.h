@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace ps2recomp
@@ -51,6 +52,7 @@ namespace ps2recomp
                 bool m_hasLoadedGhidraMap = false;
                 RecompilerReporter *m_reporter = nullptr;
                 std::unordered_set<uint32_t> m_ghidraMapStarts;
+                std::unordered_map<uint32_t, uint32_t> m_ghidraMapEndByStart;
 
                 void loadSections();
                 void loadSymbols();
