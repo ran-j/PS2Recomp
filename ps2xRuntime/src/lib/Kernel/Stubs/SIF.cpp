@@ -250,12 +250,15 @@ namespace ps2_stubs
                     continue;
                 }
 
+                uint32_t sid = 0u;
                 {
                     std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
-                    if (g_rawSifRpcClients.find(client) == g_rawSifRpcClients.end())
+                    const auto clientIt = g_rawSifRpcClients.find(client);
+                    if (clientIt == g_rawSifRpcClients.end())
                     {
                         continue;
                     }
+                    sid = clientIt->second;
                 }
 
                 uint32_t function = 0u;
@@ -295,10 +298,7 @@ namespace ps2_stubs
                 ps2x::iop::RpcRequest request{};
                 request.clientAddress = client;
                 request.serverAddress = kRawSifRpcServerToken;
-                {
-                    std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
-                    request.sid = g_rawSifRpcClients.at(client);
-                }
+                request.sid = sid;
                 request.function = function;
                 request.mode = mode;
                 request.send = {sendAddress, sendSize};
