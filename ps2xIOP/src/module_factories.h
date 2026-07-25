@@ -147,6 +147,7 @@ namespace ps2x::iop::detail
 
     std::unique_ptr<IopService> createDbcmanService(IopHost &host);
     std::unique_ptr<IopService> createLibSdService(IopHost &host);
+    std::unique_ptr<IopService> createLoadFileService(IopHost &host);
     std::unique_ptr<IopService> createMcservService(IopHost &host);
     std::unique_ptr<IopService> createTsnddrvService(IopHost &host, TsnddrvBindings bindings);
     std::unique_ptr<IopService> createCriDtxService(IopHost &host, CriDtxBindings bindings);

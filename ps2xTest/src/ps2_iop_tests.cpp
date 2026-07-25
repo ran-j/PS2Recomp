@@ -371,6 +371,55 @@ void register_ps2_iop_tests()
             t.IsTrue(snapshot.activeProvider.empty(), "an unmatched game should not report a profile provider");
         });
 
+        tc.Run("LOADFILE reports the compatible version and tracks HLE modules", [](TestCase &t)
+        {
+            FakeIopHost host;
+            ps2x::iop::IopSubsystem subsystem(host);
+            std::string error;
+            t.IsTrue(subsystem.configure({"unmatched.elf", 0u, 0u}, &error),
+                     "LOADFILE should be available as a core service");
+
+            constexpr uint32_t kReceive = 0x100u;
+            ps2x::iop::RpcRequest request{};
+            request.sid = 0x80000006u;
+            request.function = 0xFFu;
+            request.receive = {kReceive, 4u};
+            t.IsTrue(subsystem.handleRpc(request).handled,
+                     "LOADFILE GET_VERSION should be handled");
+            t.Equals(host.readWord(kReceive), 0x30333432u,
+                     "LOADFILE should report the compatible ROM version");
+
+            constexpr uint32_t kSend = 0x200u;
+            constexpr std::string_view kPath = "cdrom0:\\IOP\\SIO2MAN.IRX;1";
+            t.IsTrue(host.writeGuest(kSend + 8u, kPath.data(), kPath.size() + 1u),
+                     "the module path should fit in fake guest memory");
+            request.function = 0u;
+            request.send = {kSend, 0x200u};
+            request.receive = {kReceive, 8u};
+            t.IsTrue(subsystem.handleRpc(request).handled,
+                     "LOADFILE MOD_LOAD should be handled");
+            t.Equals(host.readWord(kReceive), 1u,
+                     "the first known HLE module should receive module ID one");
+            t.Equals(host.readWord(kReceive + 4u), 0u,
+                     "a known HLE module should report successful startup");
+
+            t.IsTrue(subsystem.handleRpc(request).handled,
+                     "loading an already active HLE module should remain successful");
+            t.Equals(host.readWord(kReceive), 1u,
+                     "an already active module should preserve its module ID");
+
+            const ps2x::iop::DebugSnapshot snapshot = subsystem.debugSnapshot();
+            const ps2x::iop::DebugService *service = findService(snapshot, "LOADFILE");
+            t.IsNotNull(service, "the core service snapshot should include LOADFILE");
+            if (service)
+            {
+                t.Equals(metricValue(*service, "loaded_modules"), uint64_t{1},
+                         "LOADFILE should count unique loaded modules");
+                t.Equals(metricValue(*service, "load_calls"), uint64_t{2},
+                         "LOADFILE should count successful load calls");
+            }
+        });
+
         tc.Run("built-in profiles select by ELF basename and keep core services active", [](TestCase &t)
         {
             FakeIopHost host;
