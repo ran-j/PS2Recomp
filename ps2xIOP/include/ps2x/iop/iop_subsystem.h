@@ -28,6 +28,7 @@ namespace ps2x::iop
         void reset();
 
         [[nodiscard]] RpcAbi selectRpcAbi(const RpcAbiRequest &request) const;
+        [[nodiscard]] bool handlesSid(uint32_t sid) const;
         [[nodiscard]] RpcResult handleRpc(const RpcRequest &request);
         void onSifTransfer(const SifTransfer &transfer);
 

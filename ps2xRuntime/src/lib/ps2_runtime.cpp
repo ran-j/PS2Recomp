@@ -605,6 +605,11 @@ ps2x::iop::RpcAbi PS2Runtime::selectIopRpcAbi(const ps2x::iop::RpcAbiRequest &re
     return m_iopSubsystem->selectRpcAbi(request);
 }
 
+bool PS2Runtime::iopHandlesSid(uint32_t sid) const
+{
+    return m_iopSubsystem && m_iopSubsystem->handlesSid(sid);
+}
+
 ps2x::iop::RpcResult PS2Runtime::handleIopRpc(uint8_t *rdram, R5900Context *ctx, ps2x::iop::RpcRequest request)
 {
     auto scope = m_iopHost->enterCall(ctx, rdram);

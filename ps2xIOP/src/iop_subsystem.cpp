@@ -287,6 +287,12 @@ namespace ps2x::iop
         return it->second->handleRpc(request);
     }
 
+    bool IopSubsystem::handlesSid(uint32_t sid) const
+    {
+        const auto it = m_impl->routes.find(sid);
+        return it != m_impl->routes.end() && it->second != nullptr;
+    }
+
     void IopSubsystem::onSifTransfer(const SifTransfer &transfer)
     {
         for (auto &service : m_impl->coreServices)

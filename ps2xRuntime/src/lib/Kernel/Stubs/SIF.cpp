@@ -58,6 +58,7 @@ namespace ps2_stubs
         std::unordered_map<uint32_t, uint32_t> g_sifRegs;
         std::unordered_map<uint32_t, uint32_t> g_sifSregs;
         std::unordered_map<uint32_t, uint32_t> g_sifCmdHandlers;
+        std::unordered_map<uint32_t, uint32_t> g_rawSifRpcClients;
         std::map<uint32_t, uint32_t> g_sifHeapAllocations;
         uint32_t g_sifCmdBuffer = 0u;
         uint32_t g_sifSysCmdBuffer = 0u;
@@ -76,6 +77,7 @@ namespace ps2_stubs
             g_sifRegs.clear();
             g_sifSregs.clear();
             g_sifCmdHandlers.clear();
+            g_rawSifRpcClients.clear();
             g_sifCmdBuffer = 0u;
             g_sifSysCmdBuffer = 0u;
             g_sifCmdInitialized = false;
@@ -101,6 +103,234 @@ namespace ps2_stubs
             default:
                 return false;
             }
+        }
+
+        constexpr uint32_t kSifRpcEndCommand = 0x80000008u;
+        constexpr uint32_t kSifRpcBindCommand = 0x80000009u;
+        constexpr uint32_t kSifRpcCallCommand = 0x8000000Au;
+        constexpr uint32_t kRawSifRpcServerToken = 0x00010000u;
+
+        bool copyGuestByteRange(uint8_t *rdram,
+                                uint32_t dstAddr,
+                                uint32_t srcAddr,
+                                uint32_t sizeBytes);
+
+        bool readGuestU32(uint8_t *rdram, uint32_t address, uint32_t &value)
+        {
+            const uint8_t *source = getConstMemPtr(rdram, address);
+            if (!source)
+            {
+                return false;
+            }
+            std::memcpy(&value, source, sizeof(value));
+            return true;
+        }
+
+        bool writeGuestU32(uint8_t *rdram, uint32_t address, uint32_t value)
+        {
+            uint8_t *destination = getMemPtr(rdram, address);
+            if (!destination)
+            {
+                return false;
+            }
+            std::memcpy(destination, &value, sizeof(value));
+            return true;
+        }
+
+        uint32_t rawSifRpcReceiveBuffer(uint8_t *rdram)
+        {
+            uint32_t receivePointerAddress = 0u;
+            {
+                std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
+                const auto it = g_sifRegs.find(kSifRegSubAddr);
+                if (it == g_sifRegs.end())
+                {
+                    return 0u;
+                }
+                receivePointerAddress = it->second;
+            }
+
+            uint32_t receiveAddress = 0u;
+            return readGuestU32(rdram, receivePointerAddress, receiveAddress)
+                       ? receiveAddress
+                       : 0u;
+        }
+
+        bool writeRawSifRpcEnd(uint8_t *rdram,
+                               uint32_t recordId,
+                               uint32_t packetAddress,
+                               uint32_t rpcId,
+                               uint32_t client,
+                               uint32_t requestCommand,
+                               uint32_t server)
+        {
+            const uint32_t responseAddress = rawSifRpcReceiveBuffer(rdram);
+            const uint32_t normalizedResponseAddress = responseAddress & PS2_RAM_MASK;
+            uint8_t *response = getMemPtr(rdram, responseAddress);
+            if (!response || responseAddress == 0u ||
+                normalizedResponseAddress > PS2_RAM_SIZE - 0x30u)
+            {
+                return false;
+            }
+
+            std::memset(response, 0, 0x30u);
+            return writeGuestU32(rdram, responseAddress, 0x30u) &&
+                   writeGuestU32(rdram, responseAddress + 0x08u, kSifRpcEndCommand) &&
+                   writeGuestU32(rdram, responseAddress + 0x10u, recordId) &&
+                   writeGuestU32(rdram, responseAddress + 0x14u, packetAddress) &&
+                   writeGuestU32(rdram, responseAddress + 0x18u, rpcId) &&
+                   writeGuestU32(rdram, responseAddress + 0x1Cu, client) &&
+                   writeGuestU32(rdram, responseAddress + 0x20u, requestCommand) &&
+                   writeGuestU32(rdram, responseAddress + 0x24u, server);
+        }
+
+        bool dispatchRawSifRpc(uint8_t *rdram,
+                               R5900Context *ctx,
+                               PS2Runtime *runtime,
+                               const Ps2SifDmaTransfer *transfers,
+                               uint32_t transferCount)
+        {
+            if (!runtime)
+            {
+                return false;
+            }
+
+            for (uint32_t index = 0; index < transferCount; ++index)
+            {
+                const Ps2SifDmaTransfer &packetTransfer = transfers[index];
+                if (packetTransfer.size < 0x40 || (packetTransfer.attr & 0x4) == 0)
+                {
+                    continue;
+                }
+
+                uint32_t packetSize = 0u;
+                uint32_t command = 0u;
+                if (!readGuestU32(rdram, packetTransfer.src, packetSize) ||
+                    !readGuestU32(rdram, packetTransfer.src + 0x08u, command) ||
+                    (packetSize & 0xFFu) != 0x40u)
+                {
+                    continue;
+                }
+
+                uint32_t recordId = 0u;
+                uint32_t packetAddress = 0u;
+                uint32_t rpcId = 0u;
+                uint32_t client = 0u;
+                if (!readGuestU32(rdram, packetTransfer.src + 0x10u, recordId) ||
+                    !readGuestU32(rdram, packetTransfer.src + 0x14u, packetAddress) ||
+                    !readGuestU32(rdram, packetTransfer.src + 0x18u, rpcId) ||
+                    !readGuestU32(rdram, packetTransfer.src + 0x1Cu, client))
+                {
+                    continue;
+                }
+
+                if (command == kSifRpcBindCommand)
+                {
+                    uint32_t sid = 0u;
+                    if (!readGuestU32(rdram, packetTransfer.src + 0x20u, sid) ||
+                        !PS2IopTransport::handlesSid(runtime, sid))
+                    {
+                        continue;
+                    }
+                    {
+                        std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
+                        g_rawSifRpcClients[client] = sid;
+                    }
+                    return writeRawSifRpcEnd(rdram,
+                                             recordId,
+                                             packetAddress,
+                                             rpcId,
+                                             client,
+                                             command,
+                                             kRawSifRpcServerToken);
+                }
+
+                if (command != kSifRpcCallCommand)
+                {
+                    continue;
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
+                    if (g_rawSifRpcClients.find(client) == g_rawSifRpcClients.end())
+                    {
+                        continue;
+                    }
+                }
+
+                uint32_t function = 0u;
+                uint32_t sendSize = 0u;
+                uint32_t receiveAddress = 0u;
+                uint32_t receiveSize = 0u;
+                uint32_t mode = 0u;
+                if (!readGuestU32(rdram, packetTransfer.src + 0x20u, function) ||
+                    !readGuestU32(rdram, packetTransfer.src + 0x24u, sendSize) ||
+                    !readGuestU32(rdram, packetTransfer.src + 0x28u, receiveAddress) ||
+                    !readGuestU32(rdram, packetTransfer.src + 0x2Cu, receiveSize) ||
+                    !readGuestU32(rdram, packetTransfer.src + 0x30u, mode))
+                {
+                    continue;
+                }
+
+                uint32_t sendAddress = 0u;
+                if (sendSize != 0u)
+                {
+                    for (uint32_t payloadIndex = 0; payloadIndex < transferCount; ++payloadIndex)
+                    {
+                        const Ps2SifDmaTransfer &payload = transfers[payloadIndex];
+                        if (payloadIndex != index &&
+                            payload.size == static_cast<int32_t>(sendSize) &&
+                            (payload.attr & 0x4) == 0)
+                        {
+                            sendAddress = payload.src;
+                            break;
+                        }
+                    }
+                    if (sendAddress == 0u)
+                    {
+                        continue;
+                    }
+                }
+
+                ps2x::iop::RpcRequest request{};
+                request.clientAddress = client;
+                request.serverAddress = kRawSifRpcServerToken;
+                {
+                    std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
+                    request.sid = g_rawSifRpcClients.at(client);
+                }
+                request.function = function;
+                request.mode = mode;
+                request.send = {sendAddress, sendSize};
+                request.receive = {receiveAddress, receiveSize};
+
+                const ps2x::iop::RpcResult result =
+                    PS2IopTransport::handleRpc(runtime, rdram, ctx, request);
+                if (!result.handled)
+                {
+                    continue;
+                }
+                if (receiveAddress != 0u && receiveSize != 0u &&
+                    result.resultAddress != 0u &&
+                    result.resultAddress != receiveAddress)
+                {
+                    if (!copyGuestByteRange(rdram,
+                                            receiveAddress,
+                                            result.resultAddress,
+                                            receiveSize))
+                    {
+                        continue;
+                    }
+                }
+                return writeRawSifRpcEnd(rdram,
+                                         recordId,
+                                         packetAddress,
+                                         rpcId,
+                                         client,
+                                         command,
+                                         0u);
+            }
+            return false;
         }
 
         struct SifStateInitializer
@@ -742,6 +972,11 @@ namespace ps2_stubs
                     });
                 }
             }
+        }
+
+        if (ok)
+        {
+            (void)dispatchRawSifRpc(rdram, ctx, runtime, pending.data(), pendingCount);
         }
 
         if (!ok)

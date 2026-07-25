@@ -167,6 +167,117 @@ void register_ps2_sif_dma_tests()
             t.IsTrue(getRegS32(env.ctx, 2) < 0, "sceSifDmaStat should be negative when transfer is complete");
         });
 
+        tc.Run("sceSifSetDma routes raw LOADFILE bind and calls through the IOP subsystem", [](TestCase &t)
+        {
+            TestEnv env;
+            configureProfile(env, "unmatched.elf");
+
+            constexpr uint32_t kDescriptorAddress = 0x00025000u;
+            constexpr uint32_t kPacketAddress = 0x00025100u;
+            constexpr uint32_t kPayloadAddress = 0x00025200u;
+            constexpr uint32_t kReceivePointerAddress = 0x00025400u;
+            constexpr uint32_t kInboundAddress = 0x00025500u;
+            constexpr uint32_t kClientAddress = 0x00025600u;
+            constexpr uint32_t kResultAddress = 0x00025700u;
+            constexpr uint32_t kSid = 0x80000006u;
+            constexpr uint32_t kBindCommand = 0x80000009u;
+            constexpr uint32_t kCallCommand = 0x8000000Au;
+            constexpr uint32_t kEndCommand = 0x80000008u;
+            constexpr uint32_t kSifSubAddressRegister = 0x80000001u;
+
+            writeGuestU32(env.rdram.data(), kReceivePointerAddress, kInboundAddress);
+            setRegU32(env.ctx, 4, kSifSubAddressRegister);
+            setRegU32(env.ctx, 5, kReceivePointerAddress);
+            ps2_stubs::sceSifSetReg(env.rdram.data(), &env.ctx, &env.runtime);
+
+            const auto writePacketHeader = [&](uint32_t command, uint32_t rpcId)
+            {
+                std::memset(env.rdram.data() + kPacketAddress, 0, 0x40u);
+                writeGuestU32(env.rdram.data(), kPacketAddress, 0x40u);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x08u, command);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x10u, 0xA5000000u | rpcId);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x14u, 0x20310000u + rpcId * 0x40u);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x18u, rpcId);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x1Cu, kClientAddress);
+            };
+            const auto invokeDma = [&](uint32_t descriptorCount)
+            {
+                setRegU32(env.ctx, 4, kDescriptorAddress);
+                setRegU32(env.ctx, 5, descriptorCount);
+                ps2_stubs::sceSifSetDma(env.rdram.data(), &env.ctx, &env.runtime);
+                t.IsTrue(getRegS32(env.ctx, 2) > 0,
+                         "raw SIF RPC DMA should return a completed transfer ID");
+            };
+
+            writePacketHeader(kBindCommand, 1u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x20u, kSid);
+            const Ps2SifDmaTransfer bindDescriptor{
+                kPacketAddress, 0u, 0x40, 0x44};
+            std::memcpy(env.rdram.data() + kDescriptorAddress,
+                        &bindDescriptor,
+                        sizeof(bindDescriptor));
+            invokeDma(1u);
+
+            t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x08u),
+                     kEndCommand,
+                     "a supported raw RPC_BIND should emit RPC_END");
+            t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x20u),
+                     kBindCommand,
+                     "the bind completion should identify RPC_BIND");
+            t.IsTrue(readGuestU32(env.rdram.data(), kInboundAddress + 0x24u) != 0u,
+                     "a supported raw RPC_BIND should return a server token");
+
+            std::memset(env.rdram.data() + kResultAddress, 0, 8u);
+            writePacketHeader(kCallCommand, 2u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x20u, 0xFFu);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x24u, 0u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x28u, kResultAddress);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x2Cu, 4u);
+            const Ps2SifDmaTransfer versionDescriptor{
+                kPacketAddress, 0u, 0x40, 0x44};
+            std::memcpy(env.rdram.data() + kDescriptorAddress,
+                        &versionDescriptor,
+                        sizeof(versionDescriptor));
+            invokeDma(1u);
+
+            t.Equals(readGuestU32(env.rdram.data(), kResultAddress),
+                     0x30333432u,
+                     "raw LOADFILE GET_VERSION should return the compatible version");
+            t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x20u),
+                     kCallCommand,
+                     "the version completion should identify RPC_CALL");
+
+            std::memset(env.rdram.data() + kPayloadAddress, 0, 0x200u);
+            constexpr std::string_view kModulePath = "cdrom0:\\IOP\\SIO2MAN.IRX;1";
+            std::memcpy(env.rdram.data() + kPayloadAddress + 8u,
+                        kModulePath.data(),
+                        kModulePath.size() + 1u);
+            std::memset(env.rdram.data() + kResultAddress, 0, 8u);
+            writePacketHeader(kCallCommand, 3u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x20u, 0u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x24u, 0x200u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x28u, kResultAddress);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x2Cu, 8u);
+            const std::array<Ps2SifDmaTransfer, 2> loadDescriptors{{
+                {kPayloadAddress, 0u, 0x200, 0},
+                {kPacketAddress, 0u, 0x40, 0x44},
+            }};
+            std::memcpy(env.rdram.data() + kDescriptorAddress,
+                        loadDescriptors.data(),
+                        sizeof(loadDescriptors));
+            invokeDma(2u);
+
+            t.Equals(readGuestU32(env.rdram.data(), kResultAddress),
+                     1u,
+                     "raw LOADFILE MOD_LOAD should return the first module ID");
+            t.Equals(readGuestU32(env.rdram.data(), kResultAddress + 4u),
+                     0u,
+                     "raw LOADFILE MOD_LOAD should report successful startup");
+            t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x18u),
+                     3u,
+                     "the module-load completion should preserve the raw RPC ID");
+        });
+
         tc.Run("isceSifSetDma and isceSifSetDChain alias the SIF DMA helpers", [](TestCase &t)
         {
             TestEnv env;

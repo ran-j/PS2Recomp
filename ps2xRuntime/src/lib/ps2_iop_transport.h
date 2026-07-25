@@ -37,6 +37,11 @@ public:
                    : ps2x::iop::RpcResult{};
     }
 
+    [[nodiscard]] static bool handlesSid(const PS2Runtime *runtime, uint32_t sid)
+    {
+        return runtime && runtime->iopHandlesSid(sid);
+    }
+
     static void notifyTransfer(
         PS2Runtime *runtime,
         uint8_t *rdram,
