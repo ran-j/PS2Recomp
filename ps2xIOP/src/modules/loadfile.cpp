@@ -45,13 +45,14 @@ namespace ps2x::iop::detail
 
         bool isHleModule(std::string_view name)
         {
-            static constexpr std::array<std::string_view, 7> modules{
+            static constexpr std::array<std::string_view, 8> modules{
                 "SIO2MAN.IRX",
                 "PADMAN.IRX",
                 "MCMAN.IRX",
                 "MCSERV.IRX",
                 "LIBSD.IRX",
                 "SDRDRV.IRX",
+                "KCEJEAST.IRX",
                 "LIBSD",
             };
             return std::find(modules.begin(), modules.end(), name) != modules.end();

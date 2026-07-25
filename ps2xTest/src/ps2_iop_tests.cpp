@@ -408,14 +408,26 @@ void register_ps2_iop_tests()
             t.Equals(host.readWord(kReceive), 1u,
                      "an already active module should preserve its module ID");
 
+            constexpr std::string_view kOptionalPath = "cdrom0:\\IOP\\KCEJEAST.IRX;1";
+            t.IsTrue(host.writeGuest(kSend + 8u,
+                                     kOptionalPath.data(),
+                                     kOptionalPath.size() + 1u),
+                     "the optional module path should fit in fake guest memory");
+            t.IsTrue(subsystem.handleRpc(request).handled,
+                     "LOADFILE should handle the game's optional HLE module");
+            t.Equals(host.readWord(kReceive), 2u,
+                     "the optional HLE module should receive the next module ID");
+            t.Equals(host.readWord(kReceive + 4u), 0u,
+                     "the optional HLE module should report successful startup");
+
             const ps2x::iop::DebugSnapshot snapshot = subsystem.debugSnapshot();
             const ps2x::iop::DebugService *service = findService(snapshot, "LOADFILE");
             t.IsNotNull(service, "the core service snapshot should include LOADFILE");
             if (service)
             {
-                t.Equals(metricValue(*service, "loaded_modules"), uint64_t{1},
+                t.Equals(metricValue(*service, "loaded_modules"), uint64_t{2},
                          "LOADFILE should count unique loaded modules");
-                t.Equals(metricValue(*service, "load_calls"), uint64_t{2},
+                t.Equals(metricValue(*service, "load_calls"), uint64_t{3},
                          "LOADFILE should count successful load calls");
             }
         });
