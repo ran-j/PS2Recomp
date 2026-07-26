@@ -2589,6 +2589,15 @@ namespace ps2recomp
                     sawAddiuV1Syscall = true;
                     continue;
                 }
+                // A later write to $v1 that is not itself the 0x20 materialization
+                // (e.g. a second addiu $v1,... with a different immediate) means the
+                // 0x20 seen earlier no longer holds by the time any subsequent syscall
+                // runs - reset before checking, mirroring the inline scan's clobber
+                // check in Step 2.
+                if (sawAddiuV1Syscall && mayClobber(inst, kThreadEntryRegV1))
+                {
+                    sawAddiuV1Syscall = false;
+                }
                 if (sawAddiuV1Syscall && isSyscallInstruction(inst))
                 {
                     isWrapper = true;

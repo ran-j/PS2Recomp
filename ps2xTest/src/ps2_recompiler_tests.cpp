@@ -2567,6 +2567,92 @@ void register_ps2_recompiler_tests()
             t.Equals(result.size(), static_cast<size_t>(0), "a wrapper using a non-CreateThread syscall number should be ignored");
         });
 
+        tc.Run("data-embedded thread entries: wrapper scan resets on a later $v1 clobber", [](TestCase &t) {
+            // Negative case (maintainer's exact sequence): addiu $v1,$zero,0x20;
+            // addiu $v1,$zero,0x21; syscall. The second addiu overwrites $v1 with
+            // 0x21 before the syscall runs, so this is not a CreateThread wrapper -
+            // the actual syscall number is 0x21. Pin: removing the
+            // sawAddiuV1Syscall = false reset makes this test fail (it would then be
+            // misclassified as a wrapper and the jal below would produce a result).
+            constexpr uint32_t wrapperStart = 0x00100200u;
+            constexpr uint32_t callerStart = 0x00100000u;
+            constexpr uint32_t jalAddr = callerStart + 8u;
+
+            std::unordered_map<uint32_t, std::vector<Instruction>> decoded = {
+                {wrapperStart, {
+                    makeAddiu(wrapperStart, 3, 0, 0x20),
+                    makeAddiu(wrapperStart + 4u, 3, 0, 0x21), // clobbers $v1 with a different immediate
+                    makeSyscall(wrapperStart + 8u),
+                    makeJrRa(wrapperStart + 12u),
+                }},
+                {callerStart, {
+                    makeNopLike(callerStart),
+                    makeLui(callerStart + 4u, 4, 0x0030),
+                    makeAbsJump(jalAddr, wrapperStart, OPCODE_JAL),
+                    makeAddiu(jalAddr + 4u, 4, 4, 0x1234),
+                }},
+            };
+
+            std::unordered_map<uint32_t, uint32_t> fakeMemory = {
+                {0x00301234u, 0u},
+                {0x00301238u, 0x00280000u},
+            };
+            auto isValid = [&](uint32_t addr) { return fakeMemory.count(addr) != 0u; };
+            auto readWord = [&](uint32_t addr) { return fakeMemory.at(addr); };
+
+            const std::vector<uint32_t> result =
+                PS2Recompiler::DiscoverDataEmbeddedThreadEntries(decoded, isValid, readWord);
+
+            t.Equals(result.size(), static_cast<size_t>(0),
+                     "a $v1 clobber between the 0x20 materialization and the syscall must not be classified as "
+                     "a CreateThread wrapper");
+        });
+
+        tc.Run("data-embedded thread entries: wrapper scan reset is conditional on a $v1 write (positive half-guard)", [](TestCase &t) {
+            // Positive half-guard: addiu $v1,$zero,0x20; addiu $a1,$zero,1; syscall.
+            // The intervening instruction writes $a1, not $v1, so the 0x20
+            // materialization is still live and this IS a legitimate wrapper. Catches
+            // a mutation that makes the reset unconditional (fires on every
+            // non-materialization instruction, not just a $v1 write), which would
+            // drop this wrapper too.
+            constexpr uint32_t wrapperStart = 0x00100200u;
+            constexpr uint32_t callerStart = 0x00100000u;
+            constexpr uint32_t jalAddr = callerStart + 8u;
+
+            std::unordered_map<uint32_t, std::vector<Instruction>> decoded = {
+                {wrapperStart, {
+                    makeAddiu(wrapperStart, 3, 0, 0x20),
+                    makeAddiu(wrapperStart + 4u, 5, 0, 1), // writes $a1, not $v1 - must not reset
+                    makeSyscall(wrapperStart + 8u),
+                    makeJrRa(wrapperStart + 12u),
+                }},
+                {callerStart, {
+                    makeNopLike(callerStart),
+                    makeLui(callerStart + 4u, 4, 0x0030),
+                    makeAbsJump(jalAddr, wrapperStart, OPCODE_JAL),
+                    makeAddiu(jalAddr + 4u, 4, 4, 0x1234),
+                }},
+            };
+
+            const uint32_t paramAddress = 0x00301234u;
+            std::unordered_map<uint32_t, uint32_t> fakeMemory = {
+                {paramAddress, 0u},
+                {paramAddress + 4u, 0x00280000u},
+            };
+            auto isValid = [&](uint32_t addr) { return fakeMemory.count(addr) != 0u; };
+            auto readWord = [&](uint32_t addr) { return fakeMemory.at(addr); };
+
+            const std::vector<uint32_t> result =
+                PS2Recompiler::DiscoverDataEmbeddedThreadEntries(decoded, isValid, readWord);
+
+            t.Equals(result.size(), static_cast<size_t>(1),
+                     "an intervening write to a register other than $v1 must not reset the wrapper scan");
+            if (result.size() == 1)
+            {
+                t.Equals(result[0], 0x00280000u, "thread entry pointer should resolve through the legitimate wrapper");
+            }
+        });
+
         tc.Run("data-embedded thread entries: zero entry pointer is filtered out", [](TestCase &t) {
             constexpr uint32_t wrapperStart = 0x00100200u;
             constexpr uint32_t callerStart = 0x00100000u;
