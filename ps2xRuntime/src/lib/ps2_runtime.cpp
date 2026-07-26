@@ -524,6 +524,10 @@ PS2Runtime::PS2Runtime()
     // R0 is always zero in MIPS
     m_cpuContext.r[0] = _mm_set1_epi32(0);
 
+    // vf0 is hardwired to (0,0,0,1) on VU0 hardware; the memset above cleared
+    // the constructor's pin, so repin it here, mirroring r0.
+    m_cpuContext.vu0_vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
+
     // Stack pointer (SP) and global pointer (GP) will be set by the loaded ELF
 
     m_loadedModules.clear();

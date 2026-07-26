@@ -2244,5 +2244,28 @@ void register_ps2_runtime_expansion_tests()
             std::memcpy(&directCmd, rdram.data() + kBaseAddr + 12u, sizeof(directCmd));
             t.Equals(directCmd, 0x50000001u, "sceVif1PkCloseDirectCode should store a 1-QW DIRECT length");
         });
+
+        tc.Run("R5900Context constructor pins vf0 to hardware (0,0,0,1)", [](TestCase &t)
+        {
+            R5900Context ctx;                       // default constructor is under test
+            alignas(16) float vf0[4]{};
+            _mm_storeu_ps(vf0, ctx.vu0_vf[0]);      // vf0[0..3] = x,y,z,w
+            t.Equals(vf0[0], 0.0f, "vf0.x must be 0");
+            t.Equals(vf0[1], 0.0f, "vf0.y must be 0");
+            t.Equals(vf0[2], 0.0f, "vf0.z must be 0");
+            t.Equals(vf0[3], 1.0f, "vf0.w must be 1 (VU0 hardware homogeneous constant)");
+        });
+
+        tc.Run("PS2Runtime's own CPU context has vf0 pinned to hardware (0,0,0,1)", [](TestCase &t)
+        {
+            PS2Runtime runtime;                     // runtime constructor's memset/repin is under test
+            const R5900Context &ctx = runtime.cpu();
+            alignas(16) float vf0[4]{};
+            _mm_storeu_ps(vf0, ctx.vu0_vf[0]);      // vf0[0..3] = x,y,z,w
+            t.Equals(vf0[0], 0.0f, "runtime vf0.x must be 0");
+            t.Equals(vf0[1], 0.0f, "runtime vf0.y must be 0");
+            t.Equals(vf0[2], 0.0f, "runtime vf0.z must be 0");
+            t.Equals(vf0[3], 1.0f, "runtime vf0.w must be 1 (VU0 hardware homogeneous constant)");
+        });
     });
 }
