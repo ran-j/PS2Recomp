@@ -136,25 +136,27 @@ namespace
     {
         bool writeFramebuffer;
         bool preserveDestinationAlpha;
+        bool writeDepth;
     };
 
     AlphaTestResult classifyAlphaTest(uint64_t testReg, uint8_t alpha)
     {
         const bool pass = passesAlphaTest(testReg, alpha);
         if (pass)
-            return {true, false};
+            return {true, false, true};
 
         // TEST.AFAIL controls what happens when the alpha comparison fails.
         switch (static_cast<uint8_t>((testReg >> 12) & 0x3u))
         {
         case 1: // FB_ONLY
-            return {true, false};
-        case 3: // RGB_ONLY
-            return {true, true};
-        case 0: // KEEP
+            return {true, false, false};
         case 2: // ZB_ONLY
+            return {false, false, true};
+        case 3: // RGB_ONLY
+            return {true, true, false};
+        case 0: // KEEP
         default:
-            return {false, false};
+            return {false, false, false};
         }
     }
 
@@ -417,7 +419,7 @@ void GSRasterizer::writePixel(GS *gs, int x, int y, int z, uint8_t r, uint8_t g,
 
     const AlphaTestResult alphaTest = classifyAlphaTest(ctx.test, a);
 
-    if (!alphaTest.writeFramebuffer)
+    if (!alphaTest.writeFramebuffer && !alphaTest.writeDepth)
         return;
 
     u8* vram = gs->m_vram;
@@ -544,9 +546,12 @@ void GSRasterizer::writePixel(GS *gs, int x, int y, int z, uint8_t r, uint8_t g,
         pixel = Rgba8888ToRgba5551(pixel);
     }
 
-    gs->WriteVram(fpsm, fbp, fbw, x, y, pixel);
+    if (alphaTest.writeFramebuffer)
+    {
+        gs->WriteVram(fpsm, fbp, fbw, x, y, pixel);
+    }
 
-    if (!zmask)
+    if (alphaTest.writeDepth && !zmask)
     {
         gs->WriteVram(zpsm, zbp, fbw, x, y, z);
     }
