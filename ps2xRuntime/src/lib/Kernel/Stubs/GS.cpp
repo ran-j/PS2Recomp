@@ -989,34 +989,36 @@ namespace ps2_stubs
 
             if (runtime)
             {
-                uint32_t pktAddr = runtime->guestMalloc(128u, 16u);
+                // PMODE/SMODE2 are privileged registers, not GIF A+D drawing registers:
+                // their old A+D addresses 0x41/0x42 alias SCISSOR_2/ALPHA_1, so route them
+                // straight to privileged state (as applyGsDispEnv does) instead.
+                runtime->memory().gs().pmode = pmode;
+                runtime->memory().gs().smode2 = smode2;
+
+                uint32_t pktAddr = runtime->guestMalloc(96u, 16u);
                 if (pktAddr != 0u)
                 {
                     uint8_t *pkt = getMemPtr(rdram, pktAddr);
                     if (pkt)
                     {
                         uint64_t *q = reinterpret_cast<uint64_t *>(pkt);
-                        q[0] = makeGiftagAplusD(7u);
+                        q[0] = makeGiftagAplusD(5u);
                         q[1] = 0xEULL;
-                        q[2] = pmode;
-                        q[3] = 0x41ULL;
-                        q[4] = smode2;
-                        q[5] = 0x42ULL;
+                        q[2] = dispfb;
+                        q[3] = 0x59ULL;
+                        q[4] = display;
+                        q[5] = 0x5aULL;
                         q[6] = dispfb;
-                        q[7] = 0x59ULL;
+                        q[7] = 0x5bULL;
                         q[8] = display;
-                        q[9] = 0x5aULL;
-                        q[10] = dispfb;
-                        q[11] = 0x5bULL;
-                        q[12] = display;
-                        q[13] = 0x5cULL;
-                        q[14] = bgcolor;
-                        q[15] = 0x5fULL;
+                        q[9] = 0x5cULL;
+                        q[10] = bgcolor;
+                        q[11] = 0x5fULL;
                         constexpr uint32_t GIF_CHANNEL = 0x1000A000;
                         constexpr uint32_t CHCR_STR_MODE0 = 0x101u;
                         auto &mem = runtime->memory();
                         mem.writeIORegister(GIF_CHANNEL + 0x10u, pktAddr);
-                        mem.writeIORegister(GIF_CHANNEL + 0x20u, 8u);
+                        mem.writeIORegister(GIF_CHANNEL + 0x20u, 6u);
                         mem.writeIORegister(GIF_CHANNEL + 0x00u, CHCR_STR_MODE0);
                         mem.processPendingTransfers();
                         runtime->guestFree(pktAddr);

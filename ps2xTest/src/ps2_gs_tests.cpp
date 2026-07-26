@@ -3343,6 +3343,60 @@ void register_ps2_gs_tests()
                                     "sceGsResetGraph should free its temporary GIF packet");
         });
 
+        tc.Run("sceGsResetGraph writes PMODE/SMODE2 to privileged state without clobbering the drawing context", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+            // Bind the GS core to guest memory up front (the same one-time bind
+            // sceGsResetGraph triggers internally via syncCoreSubsystems()) so that
+            // seeding the drawing context below survives the call under test —
+            // otherwise the lazy first-time bind would reset the context we seeded.
+            t.IsTrue(runtime.syncCoreSubsystems(), "runtime core subsystems should sync");
+
+            constexpr uint16_t kScissorX0 = 0x111;
+            constexpr uint16_t kScissorX1 = 0x222;
+            constexpr uint16_t kScissorY0 = 0x333;
+            constexpr uint16_t kScissorY1 = 0x444;
+            const uint64_t kScissorSentinel = static_cast<uint64_t>(kScissorX0) |
+                                               (static_cast<uint64_t>(kScissorX1) << 16) |
+                                               (static_cast<uint64_t>(kScissorY0) << 32) |
+                                               (static_cast<uint64_t>(kScissorY1) << 48);
+            constexpr uint64_t kAlphaSentinel = 0x1122334455667788ULL;
+
+            // Seed the drawing context directly through the same register addresses
+            // sceGsResetGraph's old (buggy) A+D packet used for PMODE/SMODE2.
+            runtime.gs().writeRegister(0x41, kScissorSentinel);
+            runtime.gs().writeRegister(0x42, kAlphaSentinel);
+
+            // Poison privileged state so a positive assertion below is meaningful.
+            runtime.memory().gs().pmode = 0;
+            runtime.memory().gs().smode2 = 0;
+
+            // Use the runtime's own guest memory (not a disconnected local buffer):
+            // the temporary GIF packet sceGsResetGraph builds and kicks is read back
+            // by the DMA engine through runtime memory, so the packet writer and the
+            // DMA reader must share the same backing storage for the kick to have any
+            // observable effect on GS context state.
+            uint8_t *const rdram = runtime.memory().getRDRAM();
+            R5900Context ctx{};
+            setRegU32(ctx, 4, 0u);
+            setRegU32(ctx, 5, 1u);
+            setRegU32(ctx, 6, 2u);
+            setRegU32(ctx, 7, 1u);
+            ps2_stubs::sceGsResetGraph(rdram, &ctx, &runtime);
+
+            t.Equals(runtime.memory().gs().pmode, makePmode(1, 0, 0, 0, 0, 0x80),
+                     "sceGsResetGraph writes PMODE to privileged state");
+            t.Equals(runtime.memory().gs().smode2, static_cast<uint64_t>((1u & 1u) | ((1u & 1u) << 1)),
+                     "sceGsResetGraph writes SMODE2 to privileged state");
+
+            GSDebugSnapshot snap = runtime.gs().getDebugSnapshot();
+            t.IsTrue(snap.ctx[1].scissor.x0 == kScissorX0 && snap.ctx[1].scissor.x1 == kScissorX1 &&
+                     snap.ctx[1].scissor.y0 == kScissorY0 && snap.ctx[1].scissor.y1 == kScissorY1,
+                     "sceGsResetGraph leaves SCISSOR_2 untouched");
+            t.Equals(snap.ctx[0].alpha, kAlphaSentinel, "sceGsResetGraph leaves ALPHA_1 untouched");
+        });
+
         tc.Run("sceGsSyncV waits on VBlank and reports interlaced field parity", [](TestCase &t)
         {
             notifyRuntimeStop();
