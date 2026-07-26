@@ -594,6 +594,49 @@ void register_ps2_gs_tests()
                      "sceGsSwapDBuffDc should honor a clear packet seeded from register-based trailing args");
         });
 
+        tc.Run("sceGsSetDefDBuff decodes trailing args from the recompiler register ABI", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            constexpr uint32_t kEnvAddr = 0x9000u;
+            constexpr uint32_t kStackAddr = 0xC00u;
+            constexpr uint32_t kZbuf1ValOffset = 0x60u + 0x10u;
+            constexpr uint32_t kTest1ValOffset = 0x60u + 0x70u;
+
+            R5900Context ctx{};
+            setRegU32(ctx, 4, kEnvAddr);
+            setRegU32(ctx, 5, 0u);
+            setRegU32(ctx, 6, 640u);
+            setRegU32(ctx, 7, 448u);
+            setRegU32(ctx, 8, 2u);  // ztest
+            setRegU32(ctx, 9, 1u);  // zpsm
+            setRegU32(ctx, 10, 1u); // clear
+            setRegU32(ctx, 29, kStackAddr);
+
+            const uint32_t kStackZtest = 1u;
+            std::memcpy(rdram.data() + kStackAddr + 16u, &kStackZtest, sizeof(kStackZtest));
+            const uint32_t kStackZpsm = 0xEu;
+            std::memcpy(rdram.data() + kStackAddr + 20u, &kStackZpsm, sizeof(kStackZpsm));
+            const uint32_t kStackClear = 1u;
+            std::memcpy(rdram.data() + kStackAddr + 24u, &kStackClear, sizeof(kStackClear));
+
+            std::memset(rdram.data() + kEnvAddr, 0xCD, 0x330u);
+
+            ps2_stubs::sceGsSetDefDBuff(rdram.data(), &ctx, &runtime);
+
+            uint64_t zbuf1 = 0u;
+            std::memcpy(&zbuf1, rdram.data() + kEnvAddr + kZbuf1ValOffset, sizeof(zbuf1));
+            uint64_t test1 = 0u;
+            std::memcpy(&test1, rdram.data() + kEnvAddr + kTest1ValOffset, sizeof(test1));
+
+            t.Equals((zbuf1 >> 24) & 0xFull, 1ull,
+                     "sceGsSetDefDBuff should seed ZBUF PSM from the register-passed zpsm argument, not caller stack bytes");
+            t.Equals((test1 >> 17) & 0x3ull, 2ull,
+                     "sceGsSetDefDBuff should seed TEST from the register-passed ztest argument, not caller stack bytes");
+        });
+
         tc.Run("clearFramebufferContext clears the requested context even if another context is active", [](TestCase &t)
         {
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
