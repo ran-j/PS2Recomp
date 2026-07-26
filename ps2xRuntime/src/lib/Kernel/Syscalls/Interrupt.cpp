@@ -284,12 +284,7 @@ namespace ps2_syscalls
             const int ran = dispatchAndCountIntcHandlersForCause(rdram, runtime, cause);
             if (ran > 0)
             {
-                // Level-triggered by design: delivery clears the single pending
-                // bit. If another raise of this same cause lands mid-drain
-                // (between the dispatch above and this fetch_and), the two raises
-                // collapse into one delivery. Accepted under the
-                // level-triggered design -- a set bit means "at least one pending",
-                // not a count -- a deliberate tradeoff, not a lost-wakeup bug.
+                // Level-triggered: concurrent same-cause raises collapse into one delivery (intentional).
                 g_pending_intc_causes.fetch_and(~bit, std::memory_order_acq_rel);
                 PS2_IF_AGRESSIVE_LOGS({
                     static std::atomic<uint32_t> s_deliverLogCount{0u};

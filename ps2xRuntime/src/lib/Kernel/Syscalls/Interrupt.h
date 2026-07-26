@@ -29,7 +29,7 @@ namespace ps2_syscalls
         extern uint64_t g_vsync_tick_counter;
         extern VSyncFlagRegistration g_vsync_registration;
         extern std::atomic<uint32_t> g_pending_intc_causes;
-        constexpr int64_t kPendingIntcMaxAgeNs = 2'000'000'000; // ~2 s wall-clock (see Q1)
+        constexpr int64_t kPendingIntcMaxAgeNs = 2'000'000'000; // ~2 s wall-clock
     }
 
     void dispatchDmacHandlersForCause(uint8_t *rdram, PS2Runtime *runtime, uint32_t cause);

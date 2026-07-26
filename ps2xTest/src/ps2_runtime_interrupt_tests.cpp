@@ -560,7 +560,8 @@ void register_ps2_runtime_interrupt_tests()
             g_pendingIntcLastCause.store(0xFFFFFFFFu, std::memory_order_relaxed);
 
             // Kick before registering: sce libdma only registers the cause-5
-            // handler after the kick returns, so this is the DQ8 boot order.
+            // handler after the kick returns -- the typical sce-libdma
+            // kick-before-register order.
             R5900Context sendCtx{};
             setRegU32(sendCtx, 4, kVif1Ch);
             setRegU32(sendCtx, 5, kTag0);
