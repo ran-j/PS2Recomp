@@ -2724,40 +2724,6 @@ namespace ps2recomp
             }
             size_t walkStart = std::max(blockStart, windowStart);
 
-            // --- Optional dominance hardening: a forward jal/j from elsewhere in the
-            // owner function whose absolute target lands inside [walkStart, windowEnd]
-            // is a join point the backward-only scan above cannot see - the "block" it
-            // found would then have more than one entry, so state resolved before the
-            // join cannot be trusted to dominate the call. Move walkStart forward to
-            // the join (over-invalidation - the safe direction: this can only lose a
-            // candidate, never let a stale value survive). Self-contained and
-            // independently removable without affecting the required backward-only
-            // core above.
-            {
-                const uint32_t walkStartAddress = instructions[walkStart].address;
-                const uint32_t windowEndAddress = instructions[windowEnd].address;
-                for (const Instruction &candidate : instructions)
-                {
-                    if (candidate.opcode != OPCODE_J && candidate.opcode != OPCODE_JAL)
-                    {
-                        continue;
-                    }
-                    const uint32_t joinTarget = buildAbsoluteJumpTarget(candidate.address, candidate.target);
-                    if (joinTarget <= walkStartAddress || joinTarget > windowEndAddress)
-                    {
-                        continue;
-                    }
-                    for (size_t j = walkStart; j <= windowEnd; ++j)
-                    {
-                        if (instructions[j].address == joinTarget)
-                        {
-                            walkStart = std::max(walkStart, j);
-                            break;
-                        }
-                    }
-                }
-            }
-
             std::unordered_map<uint32_t, uint32_t> resolved;
             auto invalidate = [&resolved](uint32_t reg)
             {
