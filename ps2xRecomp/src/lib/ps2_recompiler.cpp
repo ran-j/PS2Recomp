@@ -927,7 +927,7 @@ namespace ps2recomp
         }
     }
 
-    bool PS2Recompiler::recompile()
+    bool PS2Recompiler::recompile(bool emitManifestOnly)
     {
         try
         {
@@ -984,7 +984,23 @@ namespace ps2recomp
 #endif
             }
 
-            loadExternalCallTargetManifests();
+            // Emission depends only on this unit's own decoded functions and sections,
+            // never on any ingested manifest - every unit's emitted manifest is a
+            // fixpoint after one emission pass, independent of build order. Emit
+            // unconditionally, then in analysis-only mode stop before ingesting any
+            // sibling manifest so a multi-unit clean build can run every unit's
+            // analysis phase first without any sibling manifest existing yet.
+            emitExternalCallTargetManifest();
+            if (emitManifestOnly)
+            {
+                m_reporter.progress("analysis phase complete (manifest emitted)");
+                return true;
+            }
+
+            if (!loadExternalCallTargetManifests())
+            {
+                return false;
+            }
             discoverAdditionalEntryPoints();
 
             if (failedCount > 0)
@@ -1717,7 +1733,7 @@ namespace ps2recomp
         }
     }
 
-    void PS2Recompiler::loadExternalCallTargetManifests()
+    bool PS2Recompiler::loadExternalCallTargetManifests()
     {
         m_ingestedExternalCallTargets.clear();
 
@@ -1727,8 +1743,12 @@ namespace ps2recomp
             std::ifstream manifestFile(manifestPath);
             if (!manifestFile)
             {
-                m_reporter.warning("external-call-targets", "Failed to open manifest for reading: " + manifestPath);
-                continue;
+                // The two-phase build (recompile(true) for every unit, then
+                // recompile(false) for every unit) removes any legitimate reason for a
+                // configured manifest to be missing by generate time, so this is a hard
+                // error rather than a warn-and-continue.
+                m_reporter.error("external-call-targets", "Failed to open manifest for reading: " + manifestPath);
+                return false;
             }
 
             const std::vector<uint32_t> parsed = ParseCallTargetManifest(manifestFile);
@@ -1742,6 +1762,7 @@ namespace ps2recomp
         std::sort(merged.begin(), merged.end());
         merged.erase(std::unique(merged.begin(), merged.end()), merged.end());
         m_ingestedExternalCallTargets = std::move(merged);
+        return true;
     }
 
     std::vector<uint32_t> PS2Recompiler::CollectExternalCallTargets(
@@ -2026,8 +2047,6 @@ namespace ps2recomp
                 << " owner function(s)";
             m_reporter.progress(msg.str());
         }
-
-        emitExternalCallTargetManifest();
     }
 
     bool PS2Recompiler::decodeFunction(Function &function)

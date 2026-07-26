@@ -396,6 +396,133 @@ static bool writeThreadEntryDataElf(const std::filesystem::path &elfPath)
     return writer.save(elfPath.string());
 }
 
+// Builds a fixture ELF with a single "caller" function [callerStart, callerStart+0x10)
+// that JALs to jalTarget - an address that lies entirely outside every section of
+// this ELF (that is the point: it exists only in a sibling unit's ELF). Pairs with
+// writeContainerOnlyElf (the callee side) to build a genuine two-ELF cross-unit
+// regression: this unit's own CollectExternalCallTargets sees a jal landing outside
+// every one of its own sections, which the pre-fix inclusion gate dropped.
+static bool writeJalToForeignTargetElf(const std::filesystem::path &elfPath,
+                                        uint32_t callerStart,
+                                        uint32_t jalTarget)
+{
+    ELFIO::elfio writer;
+    writer.create(ELFIO::ELFCLASS32, ELFIO::ELFDATA2LSB);
+    writer.set_os_abi(ELFIO::ELFOSABI_NONE);
+    writer.set_type(ELFIO::ET_EXEC);
+    writer.set_machine(ELFIO::EM_MIPS);
+    writer.set_entry(callerStart);
+
+    ELFIO::section *text = writer.sections.add(".text");
+    text->set_type(ELFIO::SHT_PROGBITS);
+    text->set_flags(ELFIO::SHF_ALLOC | ELFIO::SHF_EXECINSTR);
+    text->set_addr_align(4);
+    text->set_address(callerStart);
+
+    const uint32_t jalWord = (static_cast<uint32_t>(OPCODE_JAL) << 26) | ((jalTarget >> 2) & 0x03FFFFFFu);
+    const std::array<uint32_t, 4> textWords = {
+        jalWord,     // jal jalTarget
+        0x00000000u, // nop (delay slot)
+        0x03E00008u, // jr $ra
+        0x00000000u  // nop (delay slot)
+    };
+    text->set_data(reinterpret_cast<const char *>(textWords.data()),
+                   static_cast<ELFIO::Elf_Word>(textWords.size() * sizeof(uint32_t)));
+
+    ELFIO::section *strtab = writer.sections.add(".strtab");
+    strtab->set_type(ELFIO::SHT_STRTAB);
+    strtab->set_addr_align(1);
+
+    ELFIO::section *symtab = writer.sections.add(".symtab");
+    symtab->set_type(ELFIO::SHT_SYMTAB);
+    symtab->set_info(1);
+    symtab->set_link(strtab->get_index());
+    symtab->set_addr_align(4);
+    symtab->set_entry_size(writer.get_default_entry_size(ELFIO::SHT_SYMTAB));
+
+    ELFIO::symbol_section_accessor symbols(writer, symtab);
+    ELFIO::string_section_accessor strings(strtab);
+    symbols.add_symbol(strings, "", 0, 0, ELFIO::STB_LOCAL, ELFIO::STT_NOTYPE, 0, ELFIO::SHN_UNDEF);
+    symbols.add_symbol(strings, "caller_fn", callerStart,
+                       static_cast<ELFIO::Elf_Xword>(textWords.size() * sizeof(uint32_t)),
+                       ELFIO::STB_GLOBAL, ELFIO::STT_FUNC, 0, text->get_index());
+
+    ELFIO::segment *textSegment = writer.segments.add();
+    textSegment->set_type(ELFIO::PT_LOAD);
+    textSegment->set_flags(ELFIO::PF_R | ELFIO::PF_X);
+    textSegment->set_align(0x1000);
+    textSegment->add_section_index(text->get_index(), text->get_addr_align());
+
+    return writer.save(elfPath.string());
+}
+
+// Builds a fixture ELF with a single container_fn [containerStart, containerEnd),
+// NOP-filled and jr $ra-terminated like writeContainerOnlyElf, except word index 0
+// is a jal to foreignJalTarget (assumed to land outside every section of this ELF,
+// i.e. inside a sibling unit) instead of a nop. This unit therefore both exposes a
+// mid-body target (containerStart+8, a real decoded instruction boundary that is not
+// the function head) for a sibling to call into, AND itself calls into a sibling's
+// mid-body target - used to build the mutually-calling two-phase multi-unit test.
+static bool writeMutualCallElf(const std::filesystem::path &elfPath,
+                                uint32_t containerStart,
+                                uint32_t containerEnd,
+                                uint32_t foreignJalTarget)
+{
+    ELFIO::elfio writer;
+    writer.create(ELFIO::ELFCLASS32, ELFIO::ELFDATA2LSB);
+    writer.set_os_abi(ELFIO::ELFOSABI_NONE);
+    writer.set_type(ELFIO::ET_EXEC);
+    writer.set_machine(ELFIO::EM_MIPS);
+    writer.set_entry(containerStart);
+
+    ELFIO::section *text = writer.sections.add(".text");
+    text->set_type(ELFIO::SHT_PROGBITS);
+    text->set_flags(ELFIO::SHF_ALLOC | ELFIO::SHF_EXECINSTR);
+    text->set_addr_align(4);
+    text->set_address(containerStart);
+
+    const uint32_t size = containerEnd - containerStart;
+    const size_t wordCount = size / sizeof(uint32_t);
+    if (wordCount < 4)
+    {
+        return false;
+    }
+    const uint32_t jalWord = (static_cast<uint32_t>(OPCODE_JAL) << 26) | ((foreignJalTarget >> 2) & 0x03FFFFFFu);
+    std::vector<uint32_t> textWords(wordCount, 0x00000000u); // NOP-fill the whole body
+    textWords[0] = jalWord;                                  // jal foreignJalTarget
+    // textWords[1] stays the delay-slot nop; textWords[2] (containerStart+8) is the
+    // mid-body target this unit exposes to a sibling.
+    textWords[wordCount - 2] = 0x03E00008u; // jr $ra
+    textWords[wordCount - 1] = 0x00000000u; // nop (delay slot)
+    text->set_data(reinterpret_cast<const char *>(textWords.data()),
+                   static_cast<ELFIO::Elf_Word>(textWords.size() * sizeof(uint32_t)));
+
+    ELFIO::section *strtab = writer.sections.add(".strtab");
+    strtab->set_type(ELFIO::SHT_STRTAB);
+    strtab->set_addr_align(1);
+
+    ELFIO::section *symtab = writer.sections.add(".symtab");
+    symtab->set_type(ELFIO::SHT_SYMTAB);
+    symtab->set_info(1);
+    symtab->set_link(strtab->get_index());
+    symtab->set_addr_align(4);
+    symtab->set_entry_size(writer.get_default_entry_size(ELFIO::SHT_SYMTAB));
+
+    ELFIO::symbol_section_accessor symbols(writer, symtab);
+    ELFIO::string_section_accessor strings(strtab);
+    symbols.add_symbol(strings, "", 0, 0, ELFIO::STB_LOCAL, ELFIO::STT_NOTYPE, 0, ELFIO::SHN_UNDEF);
+    symbols.add_symbol(strings, "container_fn", containerStart, size,
+                       ELFIO::STB_GLOBAL, ELFIO::STT_FUNC, 0, text->get_index());
+
+    ELFIO::segment *textSegment = writer.segments.add();
+    textSegment->set_type(ELFIO::PT_LOAD);
+    textSegment->set_flags(ELFIO::PF_R | ELFIO::PF_X);
+    textSegment->set_align(0x1000);
+    textSegment->add_section_index(text->get_index(), text->get_addr_align());
+
+    return writer.save(elfPath.string());
+}
+
 // Returns every line of `content` containing `needle` - used to inspect the emitted
 // register_functions.cpp function-table initializer, whose lines look like:
 //   g_ps2RecompiledFunctionTable[<slot>] = <ownerName>; // 0x<address>
@@ -1353,6 +1480,426 @@ void register_ps2_recompiler_tests()
                          "container head 0x100000 should still be registered without a manifest (sanity)");
                 t.IsTrue(targetLines.empty(),
                          "without a manifest, 0x100008 must NOT be registered - this reproduces the original bug");
+            }
+
+            std::error_code removeError;
+            std::filesystem::remove_all(workDir, removeError);
+        });
+
+        // Headline two-ELF cross-unit regression: drives two REAL, independent
+        // PS2Recompiler instances (A and B) over two separate ELF fixtures with no
+        // shared address space overlap in intent - A's jal target T exists only
+        // inside B and lies entirely outside every section of A. Proves the full
+        // chain: A's analysis phase emits T (Fix 1, the permissive collector) into
+        // A's manifest, independent of build order relative to B; B then ingests
+        // A's manifest and registers T into its own owning function.
+        tc.Run("two-ELF: A emits T, B ingests T", [](TestCase &t) {
+            const auto uniqueSuffix = std::to_string(
+                static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+            const std::filesystem::path workDir =
+                std::filesystem::temp_directory_path() / ("ps2recomp-two-elf-" + uniqueSuffix);
+            std::error_code mkdirError;
+            std::filesystem::create_directories(workDir, mkdirError);
+            t.IsTrue(!mkdirError, "work directory should be created");
+
+            constexpr uint32_t callerStart = 0x00300000u;    // A's own base range
+            constexpr uint32_t containerStart = 0x00100000u; // B's own base range
+            constexpr uint32_t containerEnd = 0x00100018u;   // container_fn: 6 NOP-filled words, jr $ra tail
+            constexpr uint32_t targetT = 0x00100008u;        // T: inside B, not B's head, not any of A's own sections
+
+            const std::filesystem::path elfAPath = workDir / "a.elf";
+            const std::filesystem::path elfBPath = workDir / "b.elf";
+            const bool wroteA = writeJalToForeignTargetElf(elfAPath, callerStart, targetT);
+            const bool wroteB = writeContainerOnlyElf(elfBPath, containerStart, containerEnd);
+            t.IsTrue(wroteA, "ELF A fixture should be generated");
+            t.IsTrue(wroteB, "ELF B fixture should be generated");
+            if (!wroteA || !wroteB)
+            {
+                std::error_code cleanupError;
+                std::filesystem::remove_all(workDir, cleanupError);
+                return;
+            }
+
+            const std::filesystem::path outA = workDir / "out_a";
+            const std::filesystem::path outAAgain = workDir / "out_a_again";
+            const std::filesystem::path outB = workDir / "out_b";
+            const std::filesystem::path outBNoManifest = workDir / "out_b_no_manifest";
+
+            const std::filesystem::path configAPath = workDir / "a.toml";
+            {
+                std::ofstream cfg(configAPath);
+                t.IsTrue(static_cast<bool>(cfg), "config A should be writable");
+                cfg << "[general]\n";
+                cfg << "input = \"" << elfAPath.generic_string() << "\"\n";
+                cfg << "output = \"" << outA.generic_string() << "\"\n";
+            }
+            const std::filesystem::path configAAgainPath = workDir / "a_again.toml";
+            {
+                std::ofstream cfg(configAAgainPath);
+                t.IsTrue(static_cast<bool>(cfg), "config A (again) should be writable");
+                cfg << "[general]\n";
+                cfg << "input = \"" << elfAPath.generic_string() << "\"\n";
+                cfg << "output = \"" << outAAgain.generic_string() << "\"\n";
+            }
+
+            // --- Analysis phase for A, run once, then again after B's own analysis
+            // phase runs in between - proves emission is order-independent (it depends
+            // only on A's own decoded functions/sections, never on any sibling).
+            {
+                PS2Recompiler recompilerA(configAPath.string());
+                t.IsTrue(recompilerA.initialize(), "A: initialize() should succeed");
+                t.IsTrue(recompilerA.recompile(true), "A: analysis-phase recompile(true) should succeed");
+            }
+
+            const std::filesystem::path configBAnalysisPath = workDir / "b_analysis.toml";
+            const std::filesystem::path outBAnalysis = workDir / "out_b_analysis";
+            {
+                std::ofstream cfg(configBAnalysisPath);
+                t.IsTrue(static_cast<bool>(cfg), "config B (analysis) should be writable");
+                cfg << "[general]\n";
+                cfg << "input = \"" << elfBPath.generic_string() << "\"\n";
+                cfg << "output = \"" << outBAnalysis.generic_string() << "\"\n";
+            }
+            {
+                PS2Recompiler recompilerBAnalysis(configBAnalysisPath.string());
+                t.IsTrue(recompilerBAnalysis.initialize(), "B: initialize() should succeed for its own analysis phase");
+                t.IsTrue(recompilerBAnalysis.recompile(true), "B: analysis-phase recompile(true) should succeed");
+            }
+
+            {
+                PS2Recompiler recompilerAAgain(configAAgainPath.string());
+                t.IsTrue(recompilerAAgain.initialize(), "A (again): initialize() should succeed");
+                t.IsTrue(recompilerAAgain.recompile(true), "A (again): analysis-phase recompile(true) should succeed");
+            }
+
+            const std::filesystem::path manifestAPath = outA / "external_call_targets.txt";
+            const std::filesystem::path manifestAAgainPath = outAAgain / "external_call_targets.txt";
+            std::ifstream manifestAFile(manifestAPath, std::ios::binary);
+            std::ifstream manifestAAgainFile(manifestAAgainPath, std::ios::binary);
+            t.IsTrue(static_cast<bool>(manifestAFile), "A's manifest should be written");
+            t.IsTrue(static_cast<bool>(manifestAAgainFile), "A's manifest (again) should be written");
+            std::ostringstream manifestAStream;
+            std::ostringstream manifestAAgainStream;
+            manifestAStream << manifestAFile.rdbuf();
+            manifestAAgainStream << manifestAAgainFile.rdbuf();
+            const std::string manifestAContent = manifestAStream.str();
+            const std::string manifestAAgainContent = manifestAAgainStream.str();
+
+            t.IsTrue(manifestAContent.find("0x00100008") != std::string::npos,
+                     "A's emitted manifest must contain T (0x00100008), which lies outside every section of A - "
+                     "this is the case Fix 1's permissive collector restores");
+            t.Equals(manifestAContent, manifestAAgainContent,
+                     "A's emitted manifest must be byte-identical whether A's analysis runs before or after "
+                     "B's analysis - emission depends only on A's own decoded functions/sections");
+
+            // --- B ingests A's manifest and registers T into its own owning unit.
+            const std::filesystem::path configBPath = workDir / "b.toml";
+            {
+                std::ofstream cfg(configBPath);
+                t.IsTrue(static_cast<bool>(cfg), "config B should be writable");
+                cfg << "[general]\n";
+                cfg << "input = \"" << elfBPath.generic_string() << "\"\n";
+                cfg << "output = \"" << outB.generic_string() << "\"\n";
+                cfg << "external_call_target_manifests = [\"" << manifestAPath.generic_string() << "\"]\n";
+            }
+            {
+                PS2Recompiler recompilerB(configBPath.string());
+                t.IsTrue(recompilerB.initialize(), "B: initialize() should succeed");
+                t.IsTrue(recompilerB.recompile(false), "B: generate-phase recompile(false) should succeed");
+                recompilerB.generateOutput();
+
+                const std::filesystem::path registerPath = outB / "register_functions.cpp";
+                std::ifstream registerFile(registerPath);
+                t.IsTrue(static_cast<bool>(registerFile), "B's register_functions.cpp should be written");
+                std::ostringstream contentStream;
+                contentStream << registerFile.rdbuf();
+                const std::string content = contentStream.str();
+
+                const auto headLines = findLinesContaining(content, "// 0x100000");
+                const auto targetLines = findLinesContaining(content, "// 0x100008");
+
+                t.IsTrue(!headLines.empty(), "B's container head 0x100000 should be registered (sanity)");
+                t.IsTrue(!targetLines.empty(),
+                         "T (0x100008) must be registered in B once B ingests A's manifest");
+
+                if (!headLines.empty() && !targetLines.empty())
+                {
+                    const std::string headOwner = extractOwnerNameFromRegistrationLine(headLines.front());
+                    const std::string targetOwner = extractOwnerNameFromRegistrationLine(targetLines.front());
+                    t.Equals(targetOwner, headOwner,
+                             "T must resolve to the SAME owner name as B's container head, proving dispatch "
+                             "resumes into B's owning unit");
+                }
+            }
+
+            // --- Negative arm: B with no manifest configured must not discover T -
+            // nothing in B's own fixture can discover a mid-body target on its own.
+            const std::filesystem::path configBNoManifestPath = workDir / "b_no_manifest.toml";
+            {
+                std::ofstream cfg(configBNoManifestPath);
+                t.IsTrue(static_cast<bool>(cfg), "config B (no manifest) should be writable");
+                cfg << "[general]\n";
+                cfg << "input = \"" << elfBPath.generic_string() << "\"\n";
+                cfg << "output = \"" << outBNoManifest.generic_string() << "\"\n";
+            }
+            {
+                PS2Recompiler recompilerBNoManifest(configBNoManifestPath.string());
+                t.IsTrue(recompilerBNoManifest.initialize(), "B (no manifest): initialize() should succeed");
+                t.IsTrue(recompilerBNoManifest.recompile(false), "B (no manifest): recompile(false) should succeed");
+                recompilerBNoManifest.generateOutput();
+
+                const std::filesystem::path registerPath = outBNoManifest / "register_functions.cpp";
+                std::ifstream registerFile(registerPath);
+                t.IsTrue(static_cast<bool>(registerFile), "B's register_functions.cpp should be written");
+                std::ostringstream contentStream;
+                contentStream << registerFile.rdbuf();
+                const std::string content = contentStream.str();
+
+                const auto targetLines = findLinesContaining(content, "// 0x100008");
+                t.IsTrue(targetLines.empty(),
+                         "without A's manifest, T (0x100008) must NOT be registered - reproduces the original "
+                         "cross-unit gap");
+            }
+
+            std::error_code removeError;
+            std::filesystem::remove_all(workDir, removeError);
+        });
+
+        tc.Run("missing configured manifest hard-fails at generate time", [](TestCase &t) {
+            const auto uniqueSuffix = std::to_string(
+                static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+            const std::filesystem::path workDir =
+                std::filesystem::temp_directory_path() / ("ps2recomp-missing-manifest-" + uniqueSuffix);
+            std::error_code mkdirError;
+            std::filesystem::create_directories(workDir, mkdirError);
+            t.IsTrue(!mkdirError, "work directory should be created");
+
+            const std::filesystem::path elfPath = workDir / "fixture.elf";
+            const bool wroteElf = writeContainerOnlyElf(elfPath, 0x00100000u, 0x00100018u);
+            t.IsTrue(wroteElf, "fixture ELF should be generated");
+            if (!wroteElf)
+            {
+                std::error_code cleanupError;
+                std::filesystem::remove_all(workDir, cleanupError);
+                return;
+            }
+
+            const std::filesystem::path missingManifestPath = workDir / "does_not_exist.txt";
+            const std::filesystem::path outDir = workDir / "out";
+            const std::filesystem::path configPath = workDir / "config.toml";
+            {
+                std::ofstream cfg(configPath);
+                t.IsTrue(static_cast<bool>(cfg), "config should be writable");
+                cfg << "[general]\n";
+                cfg << "input = \"" << elfPath.generic_string() << "\"\n";
+                cfg << "output = \"" << outDir.generic_string() << "\"\n";
+                cfg << "external_call_target_manifests = [\"" << missingManifestPath.generic_string() << "\"]\n";
+            }
+
+            PS2Recompiler recompiler(configPath.string());
+            t.IsTrue(recompiler.initialize(), "initialize() should succeed");
+            t.IsFalse(recompiler.recompile(false),
+                      "recompile(false) must hard-fail when a configured manifest cannot be opened");
+
+            std::error_code removeError;
+            std::filesystem::remove_all(workDir, removeError);
+        });
+
+        tc.Run("existing (even empty) configured manifest does not hard-fail", [](TestCase &t) {
+            const auto uniqueSuffix = std::to_string(
+                static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+            const std::filesystem::path workDir =
+                std::filesystem::temp_directory_path() / ("ps2recomp-empty-manifest-" + uniqueSuffix);
+            std::error_code mkdirError;
+            std::filesystem::create_directories(workDir, mkdirError);
+            t.IsTrue(!mkdirError, "work directory should be created");
+
+            const std::filesystem::path elfPath = workDir / "fixture.elf";
+            const bool wroteElf = writeContainerOnlyElf(elfPath, 0x00100000u, 0x00100018u);
+            t.IsTrue(wroteElf, "fixture ELF should be generated");
+            if (!wroteElf)
+            {
+                std::error_code cleanupError;
+                std::filesystem::remove_all(workDir, cleanupError);
+                return;
+            }
+
+            const std::filesystem::path emptyManifestPath = workDir / "empty_manifest.txt";
+            {
+                std::ofstream manifestFile(emptyManifestPath);
+                t.IsTrue(static_cast<bool>(manifestFile), "empty manifest file should be writable");
+            }
+
+            const std::filesystem::path outDir = workDir / "out";
+            const std::filesystem::path configPath = workDir / "config.toml";
+            {
+                std::ofstream cfg(configPath);
+                t.IsTrue(static_cast<bool>(cfg), "config should be writable");
+                cfg << "[general]\n";
+                cfg << "input = \"" << elfPath.generic_string() << "\"\n";
+                cfg << "output = \"" << outDir.generic_string() << "\"\n";
+                cfg << "external_call_target_manifests = [\"" << emptyManifestPath.generic_string() << "\"]\n";
+            }
+
+            PS2Recompiler recompiler(configPath.string());
+            t.IsTrue(recompiler.initialize(), "initialize() should succeed");
+            t.IsTrue(recompiler.recompile(false),
+                     "recompile(false) must NOT hard-fail when a configured manifest exists (even if empty) - "
+                     "this half-guard catches a mutation that makes the hard-fail unconditional");
+
+            std::error_code removeError;
+            std::filesystem::remove_all(workDir, removeError);
+        });
+
+        tc.Run("analysis phase never hard-fails on a missing sibling manifest", [](TestCase &t) {
+            const auto uniqueSuffix = std::to_string(
+                static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+            const std::filesystem::path workDir =
+                std::filesystem::temp_directory_path() / ("ps2recomp-analysis-safe-" + uniqueSuffix);
+            std::error_code mkdirError;
+            std::filesystem::create_directories(workDir, mkdirError);
+            t.IsTrue(!mkdirError, "work directory should be created");
+
+            const std::filesystem::path elfAPath = workDir / "a.elf";
+            const bool wroteA = writeContainerOnlyElf(elfAPath, 0x00100000u, 0x00100018u);
+            t.IsTrue(wroteA, "ELF A fixture should be generated");
+            if (!wroteA)
+            {
+                std::error_code cleanupError;
+                std::filesystem::remove_all(workDir, cleanupError);
+                return;
+            }
+
+            // B's manifest has not been emitted anywhere in this test - it is a sibling
+            // that simply has not run its own analysis phase yet.
+            const std::filesystem::path notYetEmittedBManifestPath = workDir / "b_out" / "external_call_targets.txt";
+
+            const std::filesystem::path outA = workDir / "out_a";
+            const std::filesystem::path configAPath = workDir / "a.toml";
+            {
+                std::ofstream cfg(configAPath);
+                t.IsTrue(static_cast<bool>(cfg), "config A should be writable");
+                cfg << "[general]\n";
+                cfg << "input = \"" << elfAPath.generic_string() << "\"\n";
+                cfg << "output = \"" << outA.generic_string() << "\"\n";
+                cfg << "external_call_target_manifests = [\"" << notYetEmittedBManifestPath.generic_string() << "\"]\n";
+            }
+
+            PS2Recompiler recompilerA(configAPath.string());
+            t.IsTrue(recompilerA.initialize(), "A: initialize() should succeed");
+            t.IsTrue(recompilerA.recompile(true),
+                     "A: analysis-phase recompile(true) must succeed even though its configured sibling "
+                     "manifest does not exist yet - the split makes the hard-fail safe");
+
+            const std::filesystem::path manifestAPath = outA / "external_call_targets.txt";
+            std::ifstream manifestAFile(manifestAPath);
+            t.IsTrue(static_cast<bool>(manifestAFile), "A's own manifest should still be emitted");
+
+            std::error_code removeError;
+            std::filesystem::remove_all(workDir, removeError);
+        });
+
+        tc.Run("two-phase clean build of mutually-calling units", [](TestCase &t) {
+            const auto uniqueSuffix = std::to_string(
+                static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+            const std::filesystem::path workDir =
+                std::filesystem::temp_directory_path() / ("ps2recomp-mutual-two-phase-" + uniqueSuffix);
+            std::error_code mkdirError;
+            std::filesystem::create_directories(workDir, mkdirError);
+            t.IsTrue(!mkdirError, "work directory should be created");
+
+            constexpr uint32_t containerStartA = 0x00100000u;
+            constexpr uint32_t containerEndA = 0x00100020u;
+            constexpr uint32_t targetA = 0x00100008u; // A's mid-body target, exposed to B
+
+            constexpr uint32_t containerStartB = 0x00200000u;
+            constexpr uint32_t containerEndB = 0x00200020u;
+            constexpr uint32_t targetB = 0x00200008u; // B's mid-body target, exposed to A
+
+            const std::filesystem::path elfAPath = workDir / "a.elf";
+            const std::filesystem::path elfBPath = workDir / "b.elf";
+            const bool wroteA = writeMutualCallElf(elfAPath, containerStartA, containerEndA, targetB);
+            const bool wroteB = writeMutualCallElf(elfBPath, containerStartB, containerEndB, targetA);
+            t.IsTrue(wroteA, "ELF A fixture should be generated");
+            t.IsTrue(wroteB, "ELF B fixture should be generated");
+            if (!wroteA || !wroteB)
+            {
+                std::error_code cleanupError;
+                std::filesystem::remove_all(workDir, cleanupError);
+                return;
+            }
+
+            const std::filesystem::path outA = workDir / "out_a";
+            const std::filesystem::path outB = workDir / "out_b";
+            const std::filesystem::path manifestAPath = outA / "external_call_targets.txt";
+            const std::filesystem::path manifestBPath = outB / "external_call_targets.txt";
+
+            const std::filesystem::path configAPath = workDir / "a.toml";
+            {
+                std::ofstream cfg(configAPath);
+                t.IsTrue(static_cast<bool>(cfg), "config A should be writable");
+                cfg << "[general]\n";
+                cfg << "input = \"" << elfAPath.generic_string() << "\"\n";
+                cfg << "output = \"" << outA.generic_string() << "\"\n";
+                cfg << "external_call_target_manifests = [\"" << manifestBPath.generic_string() << "\"]\n";
+            }
+            const std::filesystem::path configBPath = workDir / "b.toml";
+            {
+                std::ofstream cfg(configBPath);
+                t.IsTrue(static_cast<bool>(cfg), "config B should be writable");
+                cfg << "[general]\n";
+                cfg << "input = \"" << elfBPath.generic_string() << "\"\n";
+                cfg << "output = \"" << outB.generic_string() << "\"\n";
+                cfg << "external_call_target_manifests = [\"" << manifestAPath.generic_string() << "\"]\n";
+            }
+
+            // --- Phase 1: analysis phase for both units, neither sibling manifest
+            // exists yet at the time either analysis phase runs.
+            {
+                PS2Recompiler recompilerA(configAPath.string());
+                t.IsTrue(recompilerA.initialize(), "A: initialize() should succeed");
+                t.IsTrue(recompilerA.recompile(true), "A: phase 1 recompile(true) should succeed");
+            }
+            {
+                PS2Recompiler recompilerB(configBPath.string());
+                t.IsTrue(recompilerB.initialize(), "B: initialize() should succeed");
+                t.IsTrue(recompilerB.recompile(true), "B: phase 1 recompile(true) should succeed");
+            }
+
+            std::ifstream manifestAFile(manifestAPath);
+            std::ifstream manifestBFile(manifestBPath);
+            t.IsTrue(static_cast<bool>(manifestAFile), "A's manifest should exist after phase 1");
+            t.IsTrue(static_cast<bool>(manifestBFile), "B's manifest should exist after phase 1");
+
+            // --- Phase 2: generate phase for both units, each now ingesting the
+            // other's phase-1 manifest with no missing-manifest failure.
+            {
+                PS2Recompiler recompilerA(configAPath.string());
+                t.IsTrue(recompilerA.initialize(), "A: initialize() should succeed for phase 2");
+                t.IsTrue(recompilerA.recompile(false), "A: phase 2 recompile(false) should succeed");
+                recompilerA.generateOutput();
+
+                std::ifstream registerFile(outA / "register_functions.cpp");
+                t.IsTrue(static_cast<bool>(registerFile), "A's register_functions.cpp should be written");
+                std::ostringstream contentStream;
+                contentStream << registerFile.rdbuf();
+                const auto targetLines = findLinesContaining(contentStream.str(), "// 0x100008");
+                t.IsTrue(!targetLines.empty(),
+                         "A must register its own mid-body target 0x100008 once it ingests B's manifest");
+            }
+            {
+                PS2Recompiler recompilerB(configBPath.string());
+                t.IsTrue(recompilerB.initialize(), "B: initialize() should succeed for phase 2");
+                t.IsTrue(recompilerB.recompile(false), "B: phase 2 recompile(false) should succeed");
+                recompilerB.generateOutput();
+
+                std::ifstream registerFile(outB / "register_functions.cpp");
+                t.IsTrue(static_cast<bool>(registerFile), "B's register_functions.cpp should be written");
+                std::ostringstream contentStream;
+                contentStream << registerFile.rdbuf();
+                const auto targetLines = findLinesContaining(contentStream.str(), "// 0x200008");
+                t.IsTrue(!targetLines.empty(),
+                         "B must register its own mid-body target 0x200008 once it ingests A's manifest");
             }
 
             std::error_code removeError;

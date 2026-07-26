@@ -33,7 +33,13 @@ namespace ps2recomp
         ~PS2Recompiler();
 
         bool initialize();
-        bool recompile();
+        // emitManifestOnly: run only the input-independent analysis phase (decode +
+        // emit this unit's external_call_targets.txt) and return before ingesting any
+        // sibling manifest or discovering entry points. Used to drive a two-phase
+        // multi-unit build: run every unit with emitManifestOnly=true first (any
+        // order), then run every unit normally so every configured sibling manifest
+        // is guaranteed to already exist.
+        bool recompile(bool emitManifestOnly = false);
         void generateOutput();
         void printReport() const;
 
@@ -100,7 +106,10 @@ namespace ps2recomp
 
         bool decodeFunction(Function &function);
         void discoverAdditionalEntryPoints();
-        void loadExternalCallTargetManifests();
+        // Returns false (after reporting an error) when a configured manifest path
+        // cannot be opened - there is no legitimate reason for a configured manifest
+        // to be missing once every unit's analysis phase has run.
+        bool loadExternalCallTargetManifests();
         void emitExternalCallTargetManifest();
         bool shouldSkipFunction(const Function &function) const;
         bool isStubFunction(const Function &function) const;

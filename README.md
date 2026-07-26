@@ -101,6 +101,8 @@ Main fields in `config.toml`:
 * `general.stubs`: names to force as stubs. Also accepts `handler@0xADDRESS` to bind a stripped function address directly to a runtime syscall/stub handler. Includes generic handlers `ret0`, `ret1`, `reta0`.
 * `general.skip`: names to force as skipped wrappers.
 * `general.external_call_target_manifests`: optional array of `external_call_targets.txt` paths emitted by other recompile invocations (e.g. a separately recompiled overlay); their call targets that land inside this invocation's functions are registered as additional entry points. Each invocation writes its own `external_call_targets.txt` into `general.output`, and the emitted candidates include targets outside the emitting unit's own sections entirely (cross-ELF/overlay calls) - the emitting unit cannot know the callee unit's layout, so the ingesting unit is authoritative about which candidates actually resolve.
+
+For a multi-unit build (each unit listing one or more of the others in `external_call_target_manifests`), run every unit twice: first with `ps2recomp <config.toml> --emit-manifest-only` for every unit (any order - manifest emission depends only on that unit's own decoded functions, not on any sibling), then run every unit normally (`ps2recomp <config.toml>`) so every configured sibling manifest already exists. A configured manifest that is still missing at generate time is a hard error.
 * `patches.instructions`: raw instruction replacements by address.
 
 Address binding for stripped ELFs:
