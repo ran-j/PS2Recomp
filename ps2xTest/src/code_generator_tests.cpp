@@ -156,6 +156,34 @@ void register_code_generator_tests()
 {
     MiniTest::Case("CodeGenerator", [](TestCase &tc)
                    {
+    tc.Run("SYSCALL publishes its continuation before entering the runtime", [](TestCase &t) {
+        Function func;
+        func.name = "syscall_resume";
+        func.start = 0x9000;
+        func.end = 0x9008;
+        func.isRecompiled = true;
+
+        Instruction syscall{};
+        syscall.address = 0x9000;
+        syscall.opcode = OPCODE_SPECIAL;
+        syscall.function = SPECIAL_SYSCALL;
+        syscall.raw = (0x44u << 6) | SPECIAL_SYSCALL;
+
+        Instruction after = makeNop(0x9004);
+
+        CodeGenerator gen({}, {});
+        const std::string generated = gen.generateFunction(func, {syscall, after}, false);
+        const size_t continuation = generated.find("ctx->pc = 0x9004u;");
+        const size_t dispatch = generated.find("runtime->handleSyscall(rdram, ctx, 0x44u);");
+
+        t.IsTrue(continuation != std::string::npos,
+                 "generated syscall must publish the next guest PC");
+        t.IsTrue(dispatch != std::string::npos,
+                 "generated syscall must still dispatch the encoded syscall");
+        t.IsTrue(continuation < dispatch,
+                 "the continuation PC must be visible before a syscall can transfer to the scheduler");
+    });
+
     tc.Run("R5900 MULT writes rd when rd is non-zero", [](TestCase &t) {
         CodeGenerator gen({}, {});
 
@@ -1174,6 +1202,35 @@ void register_code_generator_tests()
                      "JAL should pass call-site and fallthrough PCs to the runtime helper");
         });
 
+        tc.Run("JAL to a resolved syscall publishes fallthrough before the handler", [](TestCase &t) {
+            Function func;
+            func.name = "jal_syscall_resume";
+            func.start = 0xA040;
+            func.end = 0xA048;
+            func.isRecompiled = true;
+
+            Symbol target;
+            target.name = "GetThreadId";
+            target.address = 0xB040;
+            target.isFunction = true;
+
+            CodeGenerator gen({target}, {});
+            gen.setRelocationCallNames({{0xA040u, "GetThreadId"}});
+            const std::string generated = gen.generateFunction(
+                func, {makeJal(0xA040, 0xB040), makeNop(0xA044)}, false);
+            const size_t continuation = generated.find("ctx->pc = 0xA048u;");
+            const size_t handler = generated.find("ps2_syscalls::GetThreadId(rdram, ctx, runtime);");
+
+            t.IsTrue(continuation != std::string::npos,
+                     "a resolved HLE JAL should publish its fallthrough PC");
+            t.IsTrue(handler != std::string::npos,
+                     "the resolved syscall handler should still be called directly");
+            t.IsTrue(continuation < handler,
+                     "the fallthrough must be restart-safe before a blocking HLE handler runs");
+            t.IsTrue(generated.find("__entryPc") == std::string::npos,
+                     "resolved HLE calls must not retain the unchanged-PC compatibility guard");
+        });
+
         tc.Run("trailing JAL without decoded delay slot still emits call flow", [](TestCase &t) {
             Function func;
             func.name = "jal_truncated";
@@ -1317,8 +1374,8 @@ void register_code_generator_tests()
                      "mid-function backward loop head should be re-enterable after returning to the dispatcher");
             t.IsTrue(generated.find("ctx->pc = 0x1104u;") != std::string::npos,
                      "backward internal branch should preserve the loop target in ctx->pc");
-            t.IsTrue(generated.find("if (runtime->shouldPreemptGuestExecution()) {") != std::string::npos,
-                     "backward internal branch should consult the runtime preemption policy before re-entering the loop");
+            t.IsTrue(generated.find("if (runtime->eeCheckpointDue()) {") != std::string::npos,
+                     "backward internal branch should consult the EE event checkpoint before re-entering the loop");
             t.IsTrue(generated.find("return;") != std::string::npos,
                      "backward internal branch should return to the dispatcher when the runtime preemption policy requests it");
             t.IsTrue(generated.find("runtime->cooperativeGuestYield();") == std::string::npos,

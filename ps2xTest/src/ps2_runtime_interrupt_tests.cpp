@@ -1,8 +1,7 @@
 #include "MiniTest.h"
 #include "ps2_runtime.h"
 #include "ps2_syscalls.h"
-#include "Stubs/DMA.h"
-#include "runtime/ps2_gs_gpu.h"
+#include "runtime/ee_scheduler.h"
 
 #include <atomic>
 #include <chrono>
@@ -46,12 +45,32 @@ namespace
         }
     };
 
-    std::atomic<uint32_t> g_vblankStartHits{0u};
-    std::atomic<uint32_t> g_vblankEndHits{0u};
     std::atomic<uint32_t> g_lastIntcArg{0u};
-    std::atomic<uint32_t> g_dmacSendHits{0u};
-    std::atomic<uint32_t> g_dmacSendLastCause{0u};
-    std::atomic<uint32_t> g_dmacSendLastChcr{0u};
+    constexpr uint32_t kIdleVSyncWaitPc = 0x00160000u;
+    constexpr uint32_t kVSyncWaitPc = 0x00160100u;
+    constexpr uint32_t kVSyncResumePc = 0x00160110u;
+    constexpr uint32_t kIrqWaitPc = 0x00160200u;
+    constexpr uint32_t kIrqResumePc = 0x00160210u;
+    constexpr uint32_t kIntcHandlerPc = 0x00160220u;
+    constexpr uint32_t kISemaWaitPc = 0x00160300u;
+    constexpr uint32_t kISemaResumePc = 0x00160310u;
+    constexpr uint32_t kISemaDriverPc = 0x00160320u;
+    constexpr uint32_t kISemaHandlerPc = 0x00160330u;
+    constexpr uint32_t kEventWaitPc = 0x00160400u;
+    constexpr uint32_t kEventResumePc = 0x00160410u;
+    constexpr uint32_t kEventProducerPc = 0x00160420u;
+
+    constexpr uint32_t kVSyncFlagAddr = 0x1800u;
+    constexpr uint32_t kVSyncTickAddr = 0x1810u;
+    constexpr uint32_t kEventResultAddr = 0x1820u;
+
+    std::vector<int> g_dispatchTrace;
+    int g_testSemaphoreId = 0;
+    int g_testEventFlagId = 0;
+    int32_t g_resumedResult = 0;
+    uint32_t g_vsyncFlag = 0;
+    uint64_t g_vsyncTick = 0;
+    uint64_t g_vsyncCsr = 0;
 
     void setRegU32(R5900Context &ctx, int reg, uint32_t value)
     {
@@ -71,25 +90,6 @@ namespace
     void writeGuestU32(uint8_t *rdram, uint32_t addr, uint32_t value)
     {
         std::memcpy(rdram + addr, &value, sizeof(value));
-    }
-
-    void writeGuestU64(uint8_t *rdram, uint32_t addr, uint64_t value)
-    {
-        std::memcpy(rdram + addr, &value, sizeof(value));
-    }
-
-    uint64_t makeDmaTag(uint16_t qwc, uint8_t id, uint32_t addr, bool irq = false)
-    {
-        return static_cast<uint64_t>(qwc) |
-               (static_cast<uint64_t>(id & 0x7u) << 28) |
-               (irq ? (1ull << 31) : 0ull) |
-               (static_cast<uint64_t>(addr & 0x7FFFFFFFu) << 32);
-    }
-
-    void writeDmaTag(uint8_t *rdram, uint32_t tagAddr, uint64_t tagLo)
-    {
-        std::memset(rdram + tagAddr, 0, 16);
-        std::memcpy(rdram + tagAddr, &tagLo, sizeof(tagLo));
     }
 
     uint32_t readGuestU32(const uint8_t *rdram, uint32_t addr)
@@ -124,58 +124,128 @@ namespace
     void cleanupRuntime(TestEnv &env)
     {
         env.runtime.requestStop();
-        notifyRuntimeStop();
     }
 
-    void testIntcHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void idleVSyncWait(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        (void)rdram;
-        (void)runtime;
+        WaitVSyncTick(rdram, ctx, runtime, -1);
+    }
 
-        const uint32_t cause = getRegU32(ctx, 4);
-        const uint32_t arg = getRegU32(ctx, 5);
-        g_lastIntcArg.store(arg, std::memory_order_relaxed);
+    void schedulerVSyncWait(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        EeScheduler &scheduler = runtime->eeScheduler();
+        scheduler.setVSyncFlag(kVSyncFlagAddr, kVSyncTickAddr);
+        ctx->pc = kVSyncResumePc;
+        scheduler.waitVSync(scheduler.currentVSyncTick());
+    }
 
-        if (cause == 2u)
-        {
-            g_vblankStartHits.fetch_add(1u, std::memory_order_relaxed);
-        }
-        else if (cause == 3u)
-        {
-            g_vblankEndHits.fetch_add(1u, std::memory_order_relaxed);
-        }
+    void schedulerVSyncResume(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_vsyncFlag = readGuestU32(rdram, kVSyncFlagAddr);
+        g_vsyncTick = readGuestU64(rdram, kVSyncTickAddr);
+        g_vsyncCsr = runtime->memory().gs().csr.load(std::memory_order_acquire);
+        g_resumedResult = getRegS32(*ctx, 2);
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
 
+    void schedulerIntcHandler(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        g_dispatchTrace.push_back(2);
+        g_lastIntcArg.store(getRegU32(ctx, 5), std::memory_order_relaxed);
         ctx->pc = 0u;
     }
 
-    void testDmacSendHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void schedulerIrqWait(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
     {
-        (void)rdram;
+        g_dispatchTrace.push_back(1);
+        EeScheduler &scheduler = runtime->eeScheduler();
+        scheduler.addIrqHandler(false, 2u, kIntcHandlerPc, true, 0xCAFEu, 0u, 0u);
+        ctx->pc = kIrqResumePc;
+        scheduler.waitVSync(scheduler.currentVSyncTick());
+    }
 
-        const uint32_t cause = getRegU32(ctx, 4);
-        g_dmacSendHits.fetch_add(1u, std::memory_order_relaxed);
-        g_dmacSendLastCause.store(cause, std::memory_order_relaxed);
-
-        uint32_t channelBase = 0u;
-        if (cause == 0u)
-        {
-            channelBase = 0x10008000u;
-        }
-        else if (cause == 1u)
-        {
-            channelBase = 0x10009000u;
-        }
-        else if (cause == 2u)
-        {
-            channelBase = 0x1000A000u;
-        }
-
-        if (runtime && channelBase != 0u)
-        {
-            g_dmacSendLastChcr.store(runtime->memory().readIORegister(channelBase + 0x00u), std::memory_order_relaxed);
-        }
-
+    void schedulerIrqResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_dispatchTrace.push_back(3);
         ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
+    void schedulerISemaHandler(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_dispatchTrace.push_back(3);
+        runtime->eeScheduler().signalSemaphore(g_testSemaphoreId, true);
+        g_dispatchTrace.push_back(4);
+        ctx->pc = 0u;
+    }
+
+    void schedulerISemaDriver(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_dispatchTrace.push_back(2);
+        ctx->pc = 0u;
+        runtime->eeScheduler().dispatchIrq(true, 5u);
+    }
+
+    void schedulerISemaWait(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_dispatchTrace.push_back(1);
+        EeScheduler &scheduler = runtime->eeScheduler();
+        g_testSemaphoreId = scheduler.createSemaphore(0, 1, 0u, 0u);
+        scheduler.addIrqHandler(true, 5u, kISemaHandlerPc, true, 0u, 0u, 0u);
+
+        EeThreadCreateParams driver{};
+        driver.entry = kISemaDriverPc;
+        driver.stack = 0x1C000u;
+        driver.stackSize = 0x1000u;
+        driver.priority = 10;
+        const int driverId = scheduler.createThread(driver);
+        scheduler.startThread(driverId, 0u, *ctx, false);
+
+        ctx->pc = kISemaResumePc;
+        scheduler.waitSemaphore(g_testSemaphoreId);
+    }
+
+    void schedulerISemaResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_dispatchTrace.push_back(5);
+        g_resumedResult = getRegS32(*ctx, 2);
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
+    void schedulerEventProducer(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_dispatchTrace.push_back(2);
+        ctx->pc = 0u;
+        runtime->eeScheduler().setEventFlag(g_testEventFlagId, 0x6u, false);
+        runtime->eeScheduler().transferIfRequested(false);
+    }
+
+    void schedulerEventWait(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_dispatchTrace.push_back(1);
+        EeScheduler &scheduler = runtime->eeScheduler();
+        g_testEventFlagId = scheduler.createEventFlag(0u, 0u, 0u);
+
+        EeThreadCreateParams producer{};
+        producer.entry = kEventProducerPc;
+        producer.stack = 0x1D000u;
+        producer.stackSize = 0x1000u;
+        producer.priority = 10;
+        const int producerId = scheduler.createThread(producer);
+        scheduler.startThread(producerId, 0u, *ctx, false);
+
+        ctx->pc = kEventResumePc;
+        scheduler.waitEventFlag(g_testEventFlagId, 0x2u, WEF_OR | WEF_CLEAR, kEventResultAddr);
+    }
+
+    void schedulerEventResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_dispatchTrace.push_back(3);
+        g_resumedResult = getRegS32(*ctx, 2);
+        ctx->pc = 0u;
+        runtime->requestStop();
     }
 }
 
@@ -183,443 +253,8 @@ void register_ps2_runtime_interrupt_tests()
 {
     MiniTest::Case("PS2RuntimeInterrupt", [](TestCase &tc)
     {
-        tc.Run("SetVSyncFlag arms a one-shot vblank notification", [](TestCase &t)
-        {
-            notifyRuntimeStop();
-            TestEnv env;
-
-            constexpr uint32_t kFlagAddr = 0x1000u;
-            constexpr uint32_t kTickAddr = 0x1010u;
-
-            writeGuestU32(env.rdram.data(), kFlagAddr, 0xDEADBEEFu);
-            writeGuestU32(env.rdram.data(), kTickAddr + 0u, 0xAAAAAAAAu);
-            writeGuestU32(env.rdram.data(), kTickAddr + 4u, 0xBBBBBBBBu);
-
-            R5900Context ctx{};
-            setRegU32(ctx, 4, kFlagAddr);
-            setRegU32(ctx, 5, kTickAddr);
-            t.IsTrue(callSyscall(0x73u, env.rdram.data(), &ctx, &env.runtime), "SetVSyncFlag syscall should dispatch");
-            t.Equals(getRegS32(ctx, 2), KE_OK, "SetVSyncFlag should return KE_OK");
-            t.Equals(readGuestU32(env.rdram.data(), kFlagAddr), 0u, "SetVSyncFlag should reset flag to zero");
-            t.Equals(readGuestU64(env.rdram.data(), kTickAddr), 0ull, "SetVSyncFlag should reset tick counter to zero");
-
-            const bool firstTickSeen = waitUntil([&]() {
-                return readGuestU64(env.rdram.data(), kTickAddr) > 0u;
-            }, std::chrono::milliseconds(300));
-            t.IsTrue(firstTickSeen, "VSync worker should update tick value");
-
-            const uint64_t firstTick = readGuestU64(env.rdram.data(), kTickAddr);
-            t.IsTrue(firstTick > 0u, "First observed VSync tick should be positive");
-            t.Equals(readGuestU32(env.rdram.data(), kFlagAddr), 1u, "VSync worker should set flag to one");
- 
-            const bool tickRewritten = waitUntil([&]() {
-                return readGuestU64(env.rdram.data(), kTickAddr) != firstTick;
-            }, std::chrono::milliseconds(100));
-            t.IsTrue(!tickRewritten, "consumed registration should not be written again");
-
-            // Re-arming registers a fresh one-shot notification.
-            writeGuestU32(env.rdram.data(), kFlagAddr, 0u);
-            R5900Context rearmCtx{};
-            setRegU32(rearmCtx, 4, kFlagAddr);
-            setRegU32(rearmCtx, 5, kTickAddr);
-            t.IsTrue(callSyscall(0x73u, env.rdram.data(), &rearmCtx, &env.runtime), "SetVSyncFlag re-arm should dispatch");
-            const bool rearmedTickSeen = waitUntil([&]() {
-                return readGuestU64(env.rdram.data(), kTickAddr) > firstTick;
-            }, std::chrono::milliseconds(300));
-            t.IsTrue(rearmedTickSeen, "re-armed registration should observe a later tick");
-            t.Equals(readGuestU32(env.rdram.data(), kFlagAddr), 1u, "re-armed registration should set flag to one");
-
-            cleanupRuntime(env);
-        });
-
-        tc.Run("VSync worker updates GS CSR FIELD bit for MMIO polling loops", [](TestCase &t)
-        {
-            notifyRuntimeStop();
-            TestEnv env;
-            t.IsTrue(env.runtime.memory().initialize(), "runtime memory initialize should succeed");
-
-            constexpr uint32_t kFlagAddr = 0x1080u;
-            constexpr uint32_t kTickAddr = 0x1090u;
-            constexpr uint64_t kGsCsrFieldMask = 0x2000ull;
-
-            env.runtime.memory().gs().csr = 0x3ull;
-
-            R5900Context ctx{};
-            setRegU32(ctx, 4, kFlagAddr);
-            setRegU32(ctx, 5, kTickAddr);
-            t.IsTrue(callSyscall(0x73u, env.rdram.data(), &ctx, &env.runtime), "SetVSyncFlag syscall should dispatch");
-
-            const uint64_t initialField = env.runtime.memory().gs().csr & kGsCsrFieldMask;
-            const bool firstFieldFlip = waitUntil([&]() {
-                return (env.runtime.memory().gs().csr & kGsCsrFieldMask) != initialField;
-            }, std::chrono::milliseconds(300));
-            t.IsTrue(firstFieldFlip, "VSync worker should toggle GS CSR FIELD for direct CSR polling");
-            t.Equals(env.runtime.memory().gs().csr & 0x3ull, 0x3ull, "VSync FIELD update should preserve CSR status bits");
-
-            const uint64_t fieldAfterFirstFlip = env.runtime.memory().gs().csr & kGsCsrFieldMask;
-            const bool secondFieldFlip = waitUntil([&]() {
-                return (env.runtime.memory().gs().csr & kGsCsrFieldMask) != fieldAfterFirstFlip;
-            }, std::chrono::milliseconds(300));
-            t.IsTrue(secondFieldFlip, "VSync worker should keep alternating GS CSR FIELD");
-
-            cleanupRuntime(env);
-        });
-
-        // Regression test for the GS CSR data race: a two-writer word-level
-        // lost-update guard. Pre-fix, every CSR update was a plain (non-atomic)
-        // 64-bit load-modify-store of the WHOLE word, so two threads that own
-        // logically disjoint bits could still clobber each other: thread A's
-        // read-modify-write of the word can overwrite thread B's bit with the
-        // stale value A loaded before B's update landed.
-        //
-        // Two racer threads with disjoint bit ownership run concurrently:
-        //   - racer A owns SIGNAL (bit 0): sets it via the GIF register path
-        //     (GS_REG_SIGNAL) then W1C-clears ONLY bit 0 via the MMIO write path;
-        //   - racer B owns FINISH (bit 1): same protocol with GS_REG_FINISH and
-        //     a W1C write of only bit 1.
-        // Each racer checks only its own bit after each half-op. With the fix
-        // (std::atomic CSR, every update a single atomic RMW) each racer is the
-        // sole writer of its bit, so its bit deterministically reflects its own
-        // last operation: zero anomalies are possible. Pre-fix, the racers'
-        // whole-word W1C RMWs constantly interleave and lose each other's
-        // set/clear, lighting up the anomaly counters.
-        //
-        // Why racer-vs-racer instead of racer-vs-vsync: the vsync worker (which
-        // motivated the fix) writes CSR only once per ~16.7ms tick, a window far
-        // too narrow to hit deterministically in a bounded test. The corrupting
-        // mechanism -- a non-atomic whole-word RMW clobbering a concurrently
-        // written disjoint bit -- is identical, so guarding it with two
-        // high-frequency writers also guards the vsync FIELD interleaving. The
-        // real vsync worker still runs throughout (started via the same
-        // SetVSyncFlag syscall production uses) and its FIELD (bit 13) toggling
-        // is asserted when at least two ticks were observed.
-        tc.Run("Disjoint-bit GS CSR writers (SIGNAL vs FINISH vs vsync FIELD) never lose word-level updates", [](TestCase &t)
-        {
-            notifyRuntimeStop();
-            TestEnv env;
-            t.IsTrue(env.runtime.memory().initialize(), "runtime memory initialize should succeed");
-
-            constexpr uint32_t kFlagAddr = 0x1180u;
-            constexpr uint32_t kTickAddr = 0x1190u;
-            constexpr uint64_t kGsCsrFieldMask = 0x2000ull;
-            constexpr uint32_t kCsrAddr = PS2_GS_PRIV_REG_BASE + 0x1000u;
-            constexpr uint32_t kIterations = 80000u;
-
-            GS gs;
-            gs.init(env.runtime.memory().getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE),
-                    &env.runtime.memory().gs());
-
-            // Drive the real vsync worker via the same syscall path production
-            // code uses; it runs on its own thread and toggles CSR.FIELD once
-            // per tick via updateGsCsrFieldForVSync.
-            R5900Context ctx{};
-            setRegU32(ctx, 4, kFlagAddr);
-            setRegU32(ctx, 5, kTickAddr);
-            t.IsTrue(callSyscall(0x73u, env.rdram.data(), &ctx, &env.runtime), "SetVSyncFlag syscall should dispatch");
-            const uint64_t tickBefore = GetCurrentVSyncTick();
-
-            std::atomic<uint32_t> setAnomaliesA{0u}, clearAnomaliesA{0u};
-            std::atomic<uint32_t> setAnomaliesB{0u}, clearAnomaliesB{0u};
-            std::atomic<uint32_t> racersDone{0u};
-
-            // ownBit: the single CSR status bit this racer exclusively owns.
-            // Each iteration: raise the bit via the GIF register-write path,
-            // verify it reads back set, W1C-clear only that bit via the guest
-            // MMIO path, verify it reads back clear. The other racer and the
-            // vsync worker never touch this bit, so under atomic RMWs both
-            // checks are exact -- any anomaly is a lost word-level update.
-            auto racerBody = [&](uint8_t gifReg, uint64_t gifValue, uint64_t ownBit,
-                                 std::atomic<uint32_t> &setAnomalies, std::atomic<uint32_t> &clearAnomalies) {
-                for (uint32_t i = 0; i < kIterations; ++i)
-                {
-                    gs.writeRegister(gifReg, gifValue);
-                    if ((env.runtime.memory().gs().csr.load() & ownBit) == 0ull)
-                    {
-                        setAnomalies.fetch_add(1u, std::memory_order_relaxed);
-                    }
-
-                    env.runtime.memory().write64(kCsrAddr, ownBit);
-                    if ((env.runtime.memory().gs().csr.load() & ownBit) != 0ull)
-                    {
-                        clearAnomalies.fetch_add(1u, std::memory_order_relaxed);
-                    }
-                }
-                racersDone.fetch_add(1u, std::memory_order_relaxed);
-            };
-
-            const uint64_t signalValue = (0xFFFFFFFFull << 32) | 0x11223344ull;
-            std::thread racerA(racerBody, GS_REG_SIGNAL, signalValue, 0x1ull,
-                               std::ref(setAnomaliesA), std::ref(clearAnomaliesA));
-            std::thread racerB(racerBody, GS_REG_FINISH, 0ull, 0x2ull,
-                               std::ref(setAnomaliesB), std::ref(clearAnomaliesB));
-
-            // While the racers hammer bits 0..1, watch for CSR.FIELD (bit 13)
-            // flips from the vsync worker. Polling ends when both racers finish,
-            // so this adds no fixed wall-clock cost.
-            const uint64_t initialField = env.runtime.memory().gs().csr.load() & kGsCsrFieldMask;
-            bool fieldFlipped = false;
-            while (racersDone.load(std::memory_order_relaxed) < 2u)
-            {
-                if ((env.runtime.memory().gs().csr.load() & kGsCsrFieldMask) != initialField)
-                {
-                    fieldFlipped = true;
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-
-            racerA.join();
-            racerB.join();
-            const uint64_t ticksElapsed = GetCurrentVSyncTick() - tickBefore;
-
-            t.Equals(setAnomaliesA.load(), 0u, "racer A: SIGNAL set must never be lost to a concurrent whole-word CSR RMW");
-            t.Equals(clearAnomaliesA.load(), 0u, "racer A: SIGNAL W1C-clear must never be lost to a concurrent whole-word CSR RMW");
-            t.Equals(setAnomaliesB.load(), 0u, "racer B: FINISH set must never be lost to a concurrent whole-word CSR RMW");
-            t.Equals(clearAnomaliesB.load(), 0u, "racer B: FINISH W1C-clear must never be lost to a concurrent whole-word CSR RMW");
-            t.Equals(env.runtime.memory().gs().csr.load() & 0x3ull, 0x0ull,
-                     "final CSR status bits must match both racers' ledgers (last op on each bit was a clear)");
-            if (ticksElapsed >= 2u)
-            {
-                t.IsTrue(fieldFlipped, "VSync worker should toggle GS CSR FIELD while the racers run");
-            }
-
-            cleanupRuntime(env);
-        });
-
-        tc.Run("INTC VBLANK handlers respect EnableIntc and DisableIntc masks", [](TestCase &t)
-        {
-            notifyRuntimeStop();
-            TestEnv env;
-
-            g_vblankStartHits.store(0u, std::memory_order_relaxed);
-            g_vblankEndHits.store(0u, std::memory_order_relaxed);
-            g_lastIntcArg.store(0u, std::memory_order_relaxed);
-
-            constexpr uint32_t kFlagAddr = 0x1100u;
-            constexpr uint32_t kTickAddr = 0x1110u;
-            constexpr uint32_t kHandlerAddr = 0x00ABC100u;
-
-            env.runtime.registerFunction(kHandlerAddr, &testIntcHandler);
-
-            R5900Context addStart{};
-            setRegU32(addStart, 4, 2u); // VBLANK start
-            setRegU32(addStart, 5, kHandlerAddr);
-            setRegU32(addStart, 6, 0u);
-            setRegU32(addStart, 7, 0xCAFE0002u);
-            setRegU32(addStart, 28, 0x12340000u);
-            setRegU32(addStart, 29, 0x001FFFE0u);
-            t.IsTrue(callSyscall(0x10u, env.rdram.data(), &addStart, &env.runtime), "AddIntcHandler syscall should dispatch");
-            t.IsTrue(getRegS32(addStart, 2) > 0, "AddIntcHandler for cause 2 should return handler id");
-
-            R5900Context addEnd{};
-            setRegU32(addEnd, 4, 3u); // VBLANK end
-            setRegU32(addEnd, 5, kHandlerAddr);
-            setRegU32(addEnd, 6, 0u);
-            setRegU32(addEnd, 7, 0xCAFE0003u);
-            setRegU32(addEnd, 28, 0x12340000u);
-            setRegU32(addEnd, 29, 0x001FFFE0u);
-            t.IsTrue(callSyscall(0x10u, env.rdram.data(), &addEnd, &env.runtime), "AddIntcHandler syscall should dispatch");
-            t.IsTrue(getRegS32(addEnd, 2) > 0, "AddIntcHandler for cause 3 should return handler id");
-
-            R5900Context vsyncCtx{};
-            setRegU32(vsyncCtx, 4, kFlagAddr);
-            setRegU32(vsyncCtx, 5, kTickAddr);
-            t.IsTrue(callSyscall(0x73u, env.rdram.data(), &vsyncCtx, &env.runtime), "SetVSyncFlag syscall should dispatch");
-            t.Equals(getRegS32(vsyncCtx, 2), KE_OK, "SetVSyncFlag should succeed");
-
-            const bool startSeen = waitUntil([&]() {
-                return g_vblankStartHits.load(std::memory_order_relaxed) > 0u;
-            }, std::chrono::milliseconds(400));
-            const bool endSeen = waitUntil([&]() {
-                return g_vblankEndHits.load(std::memory_order_relaxed) > 0u;
-            }, std::chrono::milliseconds(400));
-
-            t.IsTrue(startSeen, "VBLANK start handler should fire while cause 2 is enabled");
-            t.IsTrue(endSeen, "VBLANK end handler should fire while cause 3 is enabled");
-
-            R5900Context disableStart{};
-            setRegU32(disableStart, 4, 2u);
-            t.IsTrue(callSyscall(0x15u, env.rdram.data(), &disableStart, &env.runtime), "DisableIntc syscall should dispatch");
-            t.Equals(getRegS32(disableStart, 2), KE_OK, "DisableIntc should return KE_OK");
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(40));
-            const uint32_t startAfterDisable = g_vblankStartHits.load(std::memory_order_relaxed);
-            const uint32_t endAfterDisable = g_vblankEndHits.load(std::memory_order_relaxed);
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(80));
-            const uint32_t startLater = g_vblankStartHits.load(std::memory_order_relaxed);
-            const uint32_t endLater = g_vblankEndHits.load(std::memory_order_relaxed);
-
-            t.Equals(startLater, startAfterDisable, "cause 2 handler count should stop increasing while cause 2 is disabled");
-            t.IsTrue(endLater > endAfterDisable, "cause 3 handler should keep firing while still enabled");
-
-            R5900Context enableStart{};
-            setRegU32(enableStart, 4, 2u);
-            t.IsTrue(callSyscall(0x14u, env.rdram.data(), &enableStart, &env.runtime), "EnableIntc syscall should dispatch");
-            t.Equals(getRegS32(enableStart, 2), KE_OK, "EnableIntc should return KE_OK");
-
-            const bool startResumed = waitUntil([&]() {
-                return g_vblankStartHits.load(std::memory_order_relaxed) > startLater;
-            }, std::chrono::milliseconds(300));
-            t.IsTrue(startResumed, "cause 2 handler should resume after re-enable");
-
-            const uint32_t lastArg = g_lastIntcArg.load(std::memory_order_relaxed);
-            t.IsTrue(lastArg == 0xCAFE0002u || lastArg == 0xCAFE0003u,
-                     "handler should receive configured argument value");
-
-            cleanupRuntime(env);
-        });
-
-        tc.Run("sceDmaSend dispatches completed VIF1 DMAC handler with latched END tag", [](TestCase &t)
-        {
-            notifyRuntimeStop();
-            TestEnv env;
-            t.IsTrue(env.runtime.memory().initialize(), "runtime memory initialize should succeed");
-
-            constexpr uint32_t kHandlerAddr = 0x00ABD100u;
-            constexpr uint32_t kVif1Ch = 0x10009000u;
-            constexpr uint32_t kTag0 = 0x00028000u;
-            constexpr uint32_t kTag1 = kTag0 + 0x20u;
-
-            uint8_t *rdram = env.runtime.memory().getRDRAM();
-            writeDmaTag(rdram, kTag0, makeDmaTag(1u, 1u, 0u, false)); // CNT
-            writeGuestU64(rdram, kTag0 + 0x10u, 0u);
-            writeGuestU64(rdram, kTag0 + 0x18u, 0u);
-            writeDmaTag(rdram, kTag1, makeDmaTag(0u, 7u, 0u, false)); // END
-
-            g_dmacSendHits.store(0u, std::memory_order_relaxed);
-            g_dmacSendLastCause.store(0u, std::memory_order_relaxed);
-            g_dmacSendLastChcr.store(0u, std::memory_order_relaxed);
-            env.runtime.registerFunction(kHandlerAddr, &testDmacSendHandler);
-
-            R5900Context addCtx{};
-            setRegU32(addCtx, 4, 1u);
-            setRegU32(addCtx, 5, kHandlerAddr);
-            setRegU32(addCtx, 6, 0u);
-            setRegU32(addCtx, 7, 0u);
-            ps2_syscalls::AddDmacHandler(rdram, &addCtx, &env.runtime);
-            t.IsTrue(getRegS32(addCtx, 2) > 0, "AddDmacHandler should register VIF1 handler");
-
-            R5900Context enableCtx{};
-            setRegU32(enableCtx, 4, 1u);
-            ps2_syscalls::EnableDmac(rdram, &enableCtx, &env.runtime);
-            t.Equals(getRegS32(enableCtx, 2), KE_OK, "EnableDmac should enable VIF1 cause");
-
-            R5900Context sendCtx{};
-            setRegU32(sendCtx, 4, kVif1Ch);
-            setRegU32(sendCtx, 5, kTag0);
-            ps2_stubs::sceDmaSend(rdram, &sendCtx, &env.runtime);
-
-            t.Equals(getRegS32(sendCtx, 2), 0, "sceDmaSend should succeed");
-            t.Equals(g_dmacSendHits.load(std::memory_order_relaxed), 1u, "sceDmaSend should dispatch the VIF1 DMAC handler");
-            t.Equals(g_dmacSendLastCause.load(std::memory_order_relaxed), 1u, "DMAC handler should observe VIF1 cause");
-            t.Equals(g_dmacSendLastChcr.load(std::memory_order_relaxed) & 0x100u, 0u, "handler should see VIF1 STR cleared");
-            t.Equals(g_dmacSendLastChcr.load(std::memory_order_relaxed) & 0x70000000u, 0x70000000u, "handler should see the latched END tag id");
-
-            cleanupRuntime(env);
-        });
-
-        tc.Run("MMIO VIF1 chain completion dispatches DMAC handler after CHCR store", [](TestCase &t)
-        {
-            notifyRuntimeStop();
-            TestEnv env;
-            t.IsTrue(env.runtime.memory().initialize(), "runtime memory initialize should succeed");
-
-            constexpr uint32_t kHandlerAddr = 0x00ABD180u;
-            constexpr uint32_t kVif1Ch = 0x10009000u;
-            constexpr uint32_t kTag0 = 0x00028200u;
-            constexpr uint32_t kTag1 = kTag0 + 0x20u;
-
-            uint8_t *rdram = env.runtime.memory().getRDRAM();
-            writeDmaTag(rdram, kTag0, makeDmaTag(1u, 1u, 0u, false)); // CNT
-            writeGuestU64(rdram, kTag0 + 0x10u, 0u);
-            writeGuestU64(rdram, kTag0 + 0x18u, 0u);
-            writeDmaTag(rdram, kTag1, makeDmaTag(0u, 7u, 0u, false)); // END
-
-            g_dmacSendHits.store(0u, std::memory_order_relaxed);
-            g_dmacSendLastCause.store(0u, std::memory_order_relaxed);
-            g_dmacSendLastChcr.store(0u, std::memory_order_relaxed);
-            env.runtime.registerFunction(kHandlerAddr, &testDmacSendHandler);
-
-            R5900Context addCtx{};
-            setRegU32(addCtx, 4, 1u);
-            setRegU32(addCtx, 5, kHandlerAddr);
-            setRegU32(addCtx, 6, 0u);
-            setRegU32(addCtx, 7, 0u);
-            ps2_syscalls::AddDmacHandler(rdram, &addCtx, &env.runtime);
-            t.IsTrue(getRegS32(addCtx, 2) > 0, "AddDmacHandler should register VIF1 handler");
-
-            R5900Context enableCtx{};
-            setRegU32(enableCtx, 4, 1u);
-            ps2_syscalls::EnableDmac(rdram, &enableCtx, &env.runtime);
-            t.Equals(getRegS32(enableCtx, 2), KE_OK, "EnableDmac should enable VIF1 cause");
-
-            R5900Context storeCtx{};
-            env.runtime.Store32(rdram, &storeCtx, kVif1Ch + 0x30u, kTag0);
-            env.runtime.Store32(rdram, &storeCtx, kVif1Ch + 0x00u, 0x185u);
-
-            t.Equals(g_dmacSendHits.load(std::memory_order_relaxed), 1u, "CHCR store should dispatch the VIF1 DMAC handler");
-            t.Equals(g_dmacSendLastCause.load(std::memory_order_relaxed), 1u, "DMAC handler should observe VIF1 cause");
-            t.Equals(g_dmacSendLastChcr.load(std::memory_order_relaxed) & 0x100u, 0u, "handler should see VIF1 STR cleared");
-            t.Equals(g_dmacSendLastChcr.load(std::memory_order_relaxed) & 0x70000000u, 0x70000000u, "handler should see the latched END tag id");
-
-            cleanupRuntime(env);
-        });
-
-        tc.Run("native GIF DMA MMIO kick dispatches completed DMAC handler", [](TestCase &t)
-        {
-            notifyRuntimeStop();
-            TestEnv env;
-            t.IsTrue(env.runtime.memory().initialize(), "runtime memory initialize should succeed");
-
-            constexpr uint32_t kHandlerAddr = 0x00ABD1C0u;
-            constexpr uint32_t kDStat = 0x1000E010u;
-            constexpr uint32_t kDPcr = 0x1000E020u;
-            constexpr uint32_t kTag0 = 0x00028400u;
-
-            uint8_t *rdram = env.runtime.memory().getRDRAM();
-            writeDmaTag(rdram, kTag0, makeDmaTag(1u, 7u, 0u, false)); // END
-            writeGuestU64(rdram, kTag0 + 0x10u, 0x1122334455667788ull);
-            writeGuestU64(rdram, kTag0 + 0x18u, 0x99AABBCCDDEEFF00ull);
-
-            g_dmacSendHits.store(0u, std::memory_order_relaxed);
-            g_dmacSendLastCause.store(0u, std::memory_order_relaxed);
-            g_dmacSendLastChcr.store(0u, std::memory_order_relaxed);
-            env.runtime.registerFunction(kHandlerAddr, &testDmacSendHandler);
-
-            R5900Context addCtx{};
-            setRegU32(addCtx, 4, 2u);
-            setRegU32(addCtx, 5, kHandlerAddr);
-            setRegU32(addCtx, 6, 0u);
-            setRegU32(addCtx, 7, 0u);
-            ps2_syscalls::AddDmacHandler(rdram, &addCtx, &env.runtime);
-            t.IsTrue(getRegS32(addCtx, 2) > 0, "AddDmacHandler should register GIF handler");
-
-            R5900Context enableCtx{};
-            setRegU32(enableCtx, 4, 2u);
-            ps2_syscalls::EnableDmac(rdram, &enableCtx, &env.runtime);
-            t.Equals(getRegS32(enableCtx, 2), KE_OK, "EnableDmac should enable GIF cause");
-
-            R5900Context kickCtx{};
-            env.runtime.kickGifDmaChainFromMMIO(rdram, &kickCtx, 4u, 4u, kTag0, 0x105u);
-
-            t.Equals(env.runtime.memory().readIORegister(kDPcr), 4u, "native GIF kick should preserve D_PCR write");
-            t.IsTrue((env.runtime.memory().readIORegister(kDStat) & (1u << 2)) != 0u,
-                     "native GIF kick should raise D_STAT GIF completion status");
-            t.Equals(g_dmacSendHits.load(std::memory_order_relaxed), 1u,
-                     "native GIF kick should dispatch the GIF DMAC handler");
-            t.Equals(g_dmacSendLastCause.load(std::memory_order_relaxed), 2u,
-                     "DMAC handler should observe GIF cause");
-            t.Equals(g_dmacSendLastChcr.load(std::memory_order_relaxed) & 0x100u, 0u,
-                     "handler should see GIF STR cleared");
-            t.Equals(g_dmacSendLastChcr.load(std::memory_order_relaxed) & 0x70000000u, 0x70000000u,
-                     "handler should see the latched END tag id");
-
-            cleanupRuntime(env);
-        });
-
         tc.Run("negative interrupt-safe EE syscall ids dispatch", [](TestCase &t)
         {
-            notifyRuntimeStop();
             TestEnv env;
 
             constexpr uint32_t kEventParamAddr = 0x1200u;
@@ -684,97 +319,8 @@ void register_ps2_runtime_interrupt_tests()
             cleanupRuntime(env);
         });
 
-        tc.Run("WaitEventFlag blocks and wakes when SetEventFlag publishes bits", [](TestCase &t)
-        {
-            notifyRuntimeStop();
-            TestEnv env;
-
-            constexpr uint32_t kParamAddr = 0x1200u;
-            constexpr uint32_t kResBitsAddr = 0x1300u;
-
-            const uint32_t eventParam[3] = {
-                0u, // attr
-                0u, // option
-                0u  // init bits
-            };
-            std::memcpy(env.rdram.data() + kParamAddr, eventParam, sizeof(eventParam));
-
-            R5900Context createCtx{};
-            setRegU32(createCtx, 4, kParamAddr);
-            CreateEventFlag(env.rdram.data(), &createCtx, &env.runtime);
-            const int32_t eid = getRegS32(createCtx, 2);
-            t.IsTrue(eid > 0, "CreateEventFlag should return a valid id");
-
-            writeGuestU32(env.rdram.data(), kResBitsAddr, 0u);
-
-            std::atomic<bool> waiterDone{false};
-            std::atomic<bool> waiterThrew{false};
-            std::atomic<int32_t> waiterRet{0x7FFFFFFF};
-            std::atomic<uint32_t> waiterResBits{0u};
-
-            std::thread waiter([&]()
-            {
-                try
-                {
-                    R5900Context waitCtx{};
-                    setRegU32(waitCtx, 4, static_cast<uint32_t>(eid));
-                    setRegU32(waitCtx, 5, 0x4u);      // wait bits
-                    setRegU32(waitCtx, 6, WEF_OR);    // OR mode
-                    setRegU32(waitCtx, 7, kResBitsAddr);
-                    WaitEventFlag(env.rdram.data(), &waitCtx, &env.runtime);
-                    waiterRet.store(getRegS32(waitCtx, 2), std::memory_order_relaxed);
-                    waiterResBits.store(readGuestU32(env.rdram.data(), kResBitsAddr), std::memory_order_relaxed);
-                }
-                catch (...)
-                {
-                    waiterThrew.store(true, std::memory_order_release);
-                }
-
-                waiterDone.store(true, std::memory_order_release);
-            });
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-            t.IsFalse(waiterDone.load(std::memory_order_acquire), "WaitEventFlag should block before matching bits are set");
-
-            R5900Context signalCtx{};
-            setRegU32(signalCtx, 4, static_cast<uint32_t>(eid));
-            setRegU32(signalCtx, 5, 0x4u);
-            SetEventFlag(env.rdram.data(), &signalCtx, &env.runtime);
-            t.Equals(getRegS32(signalCtx, 2), KE_OK, "SetEventFlag should succeed");
-
-            const bool woke = waitUntil([&]() {
-                return waiterDone.load(std::memory_order_acquire);
-            }, std::chrono::milliseconds(300));
-            if (!woke)
-            {
-                // Force unblock for deterministic test cleanup.
-                R5900Context deleteCtx{};
-                setRegU32(deleteCtx, 4, static_cast<uint32_t>(eid));
-                DeleteEventFlag(env.rdram.data(), &deleteCtx, &env.runtime);
-            }
-
-            if (waiter.joinable())
-            {
-                waiter.join();
-            }
-
-            t.IsFalse(waiterThrew.load(std::memory_order_acquire),
-                      "WaitEventFlag waiter thread should not throw");
-            t.IsTrue(woke, "WaitEventFlag should wake after SetEventFlag publishes matching bits");
-            t.Equals(waiterRet.load(std::memory_order_relaxed), KE_OK, "waiter should return KE_OK");
-            t.IsTrue((waiterResBits.load(std::memory_order_relaxed) & 0x4u) != 0u,
-                     "waiter result bits should include published bit");
-
-            R5900Context deleteCtx{};
-            setRegU32(deleteCtx, 4, static_cast<uint32_t>(eid));
-            DeleteEventFlag(env.rdram.data(), &deleteCtx, &env.runtime);
-
-            cleanupRuntime(env);
-        });
-
         tc.Run("PollEventFlag WEF_CLEAR clears only matched bits", [](TestCase &t)
         {
-            notifyRuntimeStop();
             TestEnv env;
 
             constexpr uint32_t kParamAddr = 0x1400u;
@@ -830,60 +376,146 @@ void register_ps2_runtime_interrupt_tests()
             cleanupRuntime(env);
         });
 
-        tc.Run("WaitVSyncTick returns when runtime stop is requested", [](TestCase &t)
+        tc.Run("VBlank deadline resumes the waiter and publishes flag tick and FIELD atomically", [](TestCase &t)
         {
-            notifyRuntimeStop();
             TestEnv env;
+            t.IsTrue(env.runtime.memory().initialize(), "runtime memory initialize should succeed");
+            env.runtime.registerFunction(kVSyncWaitPc, schedulerVSyncWait);
+            env.runtime.registerFunction(kVSyncResumePc, schedulerVSyncResume);
 
-            std::atomic<bool> waiterDone{false};
-            std::atomic<bool> waiterThrew{false};
-            std::thread waiter([&]()
+            g_resumedResult = -1;
+            g_vsyncFlag = 0u;
+            g_vsyncTick = 0u;
+            g_vsyncCsr = 0u;
+            R5900Context mainContext{};
+            mainContext.pc = kVSyncWaitPc;
+            env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+            env.runtime.eeScheduler().run();
+
+            t.Equals(g_vsyncFlag, 1u, "VBlank start should set the registered guest flag");
+            t.Equals(g_vsyncTick, 1ull, "the first centralized VBlank deadline should publish tick one");
+            t.Equals(g_resumedResult, 0, "the first VBlank field should return even-field parity");
+            t.Equals(g_vsyncCsr & 0x2000ull, 0x2000ull,
+                     "the first VBlank should publish GS CSR.FIELD before resuming guest code");
+        });
+
+        tc.Run("VBlank IRQ invocation completes before the resumed base context", [](TestCase &t)
+        {
+            TestEnv env;
+            env.runtime.registerFunction(kIrqWaitPc, schedulerIrqWait);
+            env.runtime.registerFunction(kIrqResumePc, schedulerIrqResume);
+            env.runtime.registerFunction(kIntcHandlerPc, schedulerIntcHandler);
+
+            g_dispatchTrace.clear();
+            g_lastIntcArg.store(0u, std::memory_order_relaxed);
+            R5900Context mainContext{};
+            mainContext.pc = kIrqWaitPc;
+            env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+            env.runtime.eeScheduler().run();
+
+            const std::vector<int> expected{1, 2, 3};
+            t.IsTrue(g_dispatchTrace == expected,
+                     "the dispatcher should run wait, IRQ frame, then the resumed base context in exact order");
+            t.Equals(g_lastIntcArg.load(std::memory_order_relaxed), 0xCAFEu,
+                     "the IRQ frame should receive its registered argument");
+        });
+
+        tc.Run("iSignalSema defers selection until IRQ return", [](TestCase &t)
+        {
+            TestEnv env;
+            env.runtime.registerFunction(kISemaWaitPc, schedulerISemaWait);
+            env.runtime.registerFunction(kISemaResumePc, schedulerISemaResume);
+            env.runtime.registerFunction(kISemaDriverPc, schedulerISemaDriver);
+            env.runtime.registerFunction(kISemaHandlerPc, schedulerISemaHandler);
+
+            g_dispatchTrace.clear();
+            g_resumedResult = -1;
+            R5900Context mainContext{};
+            mainContext.pc = kISemaWaitPc;
+            env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+            env.runtime.eeScheduler().run();
+
+            const std::vector<int> expected{1, 2, 3, 4, 5};
+            t.IsTrue(g_dispatchTrace == expected,
+                     "iSignalSema should make the waiter ready but finish the IRQ frame before selecting it");
+            t.Equals(g_resumedResult, g_testSemaphoreId,
+                     "the resumed waiter should receive the semaphore id from the direct FIFO handoff");
+            const EeSemaphore *semaphore = env.runtime.eeScheduler().semaphore(g_testSemaphoreId);
+            t.IsTrue(semaphore != nullptr, "the signaled semaphore should still exist");
+            if (semaphore)
+            {
+                t.Equals(semaphore->count, 0, "direct handoff must not increment the semaphore count");
+                t.Equals(static_cast<uint32_t>(semaphore->waiters.size()), 0u,
+                         "the awakened waiter must be removed from the semaphore queue");
+            }
+        });
+
+        tc.Run("event-flag completion writes observed bits before strict-priority resume", [](TestCase &t)
+        {
+            TestEnv env;
+            env.runtime.registerFunction(kEventWaitPc, schedulerEventWait);
+            env.runtime.registerFunction(kEventResumePc, schedulerEventResume);
+            env.runtime.registerFunction(kEventProducerPc, schedulerEventProducer);
+
+            g_dispatchTrace.clear();
+            g_resumedResult = -1;
+            R5900Context mainContext{};
+            mainContext.pc = kEventWaitPc;
+            env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+            env.runtime.eeScheduler().run();
+
+            const std::vector<int> expected{1, 2, 3};
+            t.IsTrue(g_dispatchTrace == expected,
+                     "the higher-priority event waiter should resume at the producer scheduling point");
+            t.Equals(g_resumedResult, KE_OK, "the resumed event waiter should receive KE_OK");
+            t.Equals(readGuestU32(env.rdram.data(), kEventResultAddr), 0x6u,
+                     "the event output should contain the bits observed before clear mode is applied");
+            const EeEventFlag *flag = env.runtime.eeScheduler().eventFlag(g_testEventFlagId);
+            t.IsTrue(flag != nullptr, "the event flag should still exist");
+            if (flag)
+            {
+                t.Equals(flag->bits, 0x4u, "WEF_CLEAR should remove only the requested matched bit");
+            }
+        });
+
+        tc.Run("scheduler stop wakes an idle VSync wait without a timeout", [](TestCase &t)
+        {
+            TestEnv env;
+            env.runtime.registerFunction(kIdleVSyncWaitPc, idleVSyncWait);
+
+            R5900Context mainContext{};
+            mainContext.pc = kIdleVSyncWaitPc;
+            std::atomic<bool> schedulerDone{false};
+            std::atomic<bool> schedulerThrew{false};
+            std::thread gameThread([&]()
             {
                 try
                 {
-                    WaitVSyncTick(env.rdram.data(), &env.runtime);
+                    env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+                    env.runtime.eeScheduler().run();
                 }
                 catch (...)
                 {
-                    waiterThrew.store(true, std::memory_order_release);
+                    schedulerThrew.store(true, std::memory_order_release);
                 }
-                waiterDone.store(true, std::memory_order_release);
+                schedulerDone.store(true, std::memory_order_release);
             });
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-            env.runtime.requestStop();
-
-            bool wokeOnStop = waitUntil([&]() {
-                return waiterDone.load(std::memory_order_acquire);
+            const bool becameIdle = waitUntil([&]() {
+                const EeKernelSnapshot snapshot = env.runtime.eeScheduler().snapshot();
+                return snapshot.runningThreadId == 0 &&
+                       !snapshot.threads.empty() &&
+                       snapshot.threads.front().waitReason == EeWaitReason::VSync;
             }, std::chrono::milliseconds(80));
 
-            if (!wokeOnStop)
-            {
-                // Fallback wake-up for deterministic cleanup: one extra tick on fresh runtime.
-                TestEnv wakeEnv;
-                R5900Context setCtx{};
-                constexpr uint32_t kWakeFlagAddr = 0x1500u;
-                constexpr uint32_t kWakeTickAddr = 0x1510u;
-                setRegU32(setCtx, 4, kWakeFlagAddr);
-                setRegU32(setCtx, 5, kWakeTickAddr);
-                (void)callSyscall(0x73u, wakeEnv.rdram.data(), &setCtx, &wakeEnv.runtime);
-                (void)waitUntil([&]() {
-                    return readGuestU64(wakeEnv.rdram.data(), kWakeTickAddr) > 0u;
-                }, std::chrono::milliseconds(300));
-                wakeEnv.runtime.requestStop();
-                wokeOnStop = waitUntil([&]() {
-                    return waiterDone.load(std::memory_order_acquire);
-                }, std::chrono::milliseconds(80));
-            }
+            env.runtime.requestStop();
+            gameThread.join();
 
-            if (waiter.joinable())
-            {
-                waiter.join();
-            }
-
-            t.IsFalse(waiterThrew.load(std::memory_order_acquire),
-                      "WaitVSyncTick waiter thread should not throw");
-            t.IsTrue(wokeOnStop, "WaitVSyncTick waiter should unblock when runtime is stopping");
+            t.IsTrue(becameIdle, "VSync wait should leave the sole guest thread waiting");
+            t.IsTrue(schedulerDone.load(std::memory_order_acquire),
+                     "requestStop should wake the scheduler's event wait");
+            t.IsFalse(schedulerThrew.load(std::memory_order_acquire),
+                      "the scheduler stop path should not throw");
 
             cleanupRuntime(env);
         });

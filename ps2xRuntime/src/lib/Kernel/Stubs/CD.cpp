@@ -573,7 +573,7 @@ namespace ps2_stubs
             }
             if (hitStreamEnd || g_cdStreamingLbn == g_cdStreamingEndLbn)
             {
-                notifyMpegCdStreamEof();
+                notifyMpegCdStreamEof(runtime);
             }
         }
         else
@@ -582,7 +582,7 @@ namespace ps2_stubs
             {
                 std::memset(rdram + offset, 0, requestedBytes);
             }
-            notifyMpegCdStreamEof();
+            notifyMpegCdStreamEof(runtime);
         }
 
         if (int32_t *err = reinterpret_cast<int32_t *>(getMemPtr(rdram, errAddr)); err)
@@ -635,7 +635,7 @@ namespace ps2_stubs
         g_cdStreamingEndLbn = cdStreamingEndLbnForStart(g_cdStreamingLbn);
         g_cdStReadTraceCount = 0u;
 
-        notifyMpegCdStreamStart();
+        notifyMpegCdStreamStart(runtime);
 
         std::cerr << "[sceCdStStart] lbn=0x" << std::hex << g_cdStreamingLbn
                   << " endLbn=0x" << g_cdStreamingEndLbn << std::dec << std::endl;
@@ -649,7 +649,7 @@ namespace ps2_stubs
 
     void sceCdStStop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        notifyMpegCdStreamEof();
+        notifyMpegCdStreamEof(runtime);
         setReturnS32(ctx, 1);
     }
 

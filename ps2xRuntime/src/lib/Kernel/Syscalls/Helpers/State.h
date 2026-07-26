@@ -2,39 +2,9 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <thread>
 
 inline std::unordered_map<int, FILE *> g_fileDescriptors;
 inline int g_nextFd = 3; // Start after stdin, stdout, stderr
-
-struct ThreadInfo
-{
-    uint32_t entry = 0;
-    uint32_t stack = 0;
-    uint32_t stackSize = 0;
-    uint32_t gp = 0;
-    uint32_t priority = 0;
-    uint32_t attr = 0;
-    uint32_t option = 0;
-    uint32_t arg = 0;
-    bool started = false;
-    bool ownsStack = false;
-    uint32_t tlsBase = 0;
-
-    // Thread Status
-    int status = 0x10; // THS_DORMANT
-    int waitType = 0;  // TSW_NONE
-    int waitId = 0;
-    int wakeupCount = 0;
-    int currentPriority = 0;
-    int suspendCount = 0;
-    std::atomic<uint32_t> currentPc{0};
-
-    std::mutex m;
-    std::condition_variable cv;
-    std::atomic<bool> forceRelease{false};
-    std::atomic<bool> terminated{false};
-};
 
 // Thread status
 #define THS_RUN 0x01
@@ -138,6 +108,24 @@ struct ee_thread_status_t
     uint32_t wakeupCount; // 0x2C
 };
 
+// PS2SDK EE kernel.h t_ee_thread. CreateThread consumes this full 0x24-byte
+// descriptor; it is not the attr-first IOP thread descriptor.
+struct ee_thread_t
+{
+    int status;
+    uint32_t func;
+    uint32_t stack;
+    int stack_size;
+    uint32_t gp_reg;
+    int initial_priority;
+    int current_priority;
+    uint32_t attr;
+    uint32_t option;
+};
+
+static_assert(sizeof(ee_thread_t) == 0x24u);
+static_assert(sizeof(ee_thread_status_t) == 0x30u);
+
 struct ee_sema_t
 {
     int count;
@@ -148,43 +136,7 @@ struct ee_sema_t
     uint32_t option;
 };
 
-struct SemaInfo
-{
-    int count = 0;
-    int maxCount = 0;
-    int initCount = 0;
-    uint32_t attr = 0;
-    uint32_t option = 0;
-    int waiters = 0;
-    bool deleted = false;
-    std::mutex m;
-    std::condition_variable cv;
-};
-
-struct EventFlagInfo
-{
-    uint32_t attr = 0;
-    uint32_t option = 0;
-    uint32_t initBits = 0;
-    uint32_t bits = 0;
-    int waiters = 0;
-    bool deleted = false;
-    std::mutex m;
-    std::condition_variable cv;
-};
-
-struct AlarmInfo
-{
-    int id = 0;
-    uint16_t ticks = 0;
-    uint32_t handler = 0;
-    uint32_t commonArg = 0;
-    uint32_t gp = 0;
-    uint32_t sp = 0;
-    uint8_t *rdram = nullptr;
-    PS2Runtime *runtime = nullptr;
-    std::chrono::steady_clock::time_point dueAt;
-};
+static_assert(sizeof(ee_sema_t) == 0x18u);
 
 struct io_stat_t
 {
@@ -204,135 +156,7 @@ static constexpr uint32_t kFioSoIROth = 0x0004;
 static constexpr uint32_t kFioSoIWOth = 0x0002;
 static constexpr uint32_t kFioSoIXOth = 0x0001;
 
-inline std::unordered_map<int, std::shared_ptr<ThreadInfo>> g_threads;
-inline int g_nextThreadId = 2; // Reserve 1 for the main thread
-inline thread_local int g_currentThreadId = 1;
-inline std::mutex g_thread_map_mutex;
-inline std::unordered_map<int, std::thread> g_hostThreads;
-inline std::mutex g_host_thread_mutex;
-
-inline std::unordered_map<int, std::shared_ptr<SemaInfo>> g_semas;
-inline int g_nextSemaId = 1;
-inline std::mutex g_sema_map_mutex;
-inline std::unordered_map<int, std::shared_ptr<EventFlagInfo>> g_eventFlags;
-inline int g_nextEventFlagId = 1;
-inline std::mutex g_event_flag_map_mutex;
-inline std::unordered_map<int, std::shared_ptr<AlarmInfo>> g_alarms;
-inline int g_nextAlarmId = 1;
-inline std::mutex g_alarm_mutex;
-inline std::condition_variable g_alarm_cv;
-inline std::once_flag g_alarm_worker_once;
-inline std::atomic<int> g_activeThreads{0};
 inline std::mutex g_fd_mutex;
-
-static void registerHostThread(int tid, std::thread worker)
-{
-    std::thread stale;
-    {
-        std::lock_guard<std::mutex> lock(g_host_thread_mutex);
-        auto it = g_hostThreads.find(tid);
-        if (it != g_hostThreads.end())
-        {
-            stale = std::move(it->second);
-            g_hostThreads.erase(it);
-        }
-        g_hostThreads.emplace(tid, std::move(worker));
-    }
-
-    if (stale.joinable())
-    {
-        if (stale.get_id() == std::this_thread::get_id())
-        {
-            stale.detach();
-        }
-        else
-        {
-            stale.join();
-        }
-    }
-}
-
-static void joinHostThreadById(int tid)
-{
-    std::thread worker;
-    {
-        std::lock_guard<std::mutex> lock(g_host_thread_mutex);
-        auto it = g_hostThreads.find(tid);
-        if (it != g_hostThreads.end())
-        {
-            worker = std::move(it->second);
-            g_hostThreads.erase(it);
-        }
-    }
-
-    if (!worker.joinable())
-    {
-        return;
-    }
-
-    if (worker.get_id() == std::this_thread::get_id())
-    {
-        worker.detach();
-    }
-    else
-    {
-        worker.join();
-    }
-}
-
-static void joinAllHostThreads()
-{
-    std::vector<std::thread> workers;
-    {
-        std::lock_guard<std::mutex> lock(g_host_thread_mutex);
-        workers.reserve(g_hostThreads.size());
-        const std::thread::id selfId = std::this_thread::get_id();
-        for (auto it = g_hostThreads.begin(); it != g_hostThreads.end();)
-        {
-            std::thread &worker = it->second;
-            if (worker.joinable() && worker.get_id() == selfId)
-            {
-                ++it;
-                continue;
-            }
-
-            workers.push_back(std::move(worker));
-            it = g_hostThreads.erase(it);
-        }
-    }
-
-    for (auto &worker : workers)
-    {
-        if (!worker.joinable())
-        {
-            continue;
-        }
-        worker.join();
-    }
-}
-
-static void detachAllHostThreads()
-{
-    std::vector<std::thread> workers;
-    {
-        std::lock_guard<std::mutex> lock(g_host_thread_mutex);
-        workers.reserve(g_hostThreads.size());
-        for (auto &entry : g_hostThreads)
-        {
-            workers.push_back(std::move(entry.second));
-        }
-        g_hostThreads.clear();
-    }
-
-    for (auto &worker : workers)
-    {
-        if (!worker.joinable())
-        {
-            continue;
-        }
-        worker.detach();
-    }
-}
 
 struct RpcServerState
 {
@@ -397,23 +221,10 @@ inline uint32_t g_rpc_next_id = 1;
 inline uint32_t g_rpc_packet_index = 0;
 inline uint32_t g_rpc_server_index = 0;
 inline uint32_t g_rpc_active_queue = 0;
-struct ExitHandlerEntry
-{
-    uint32_t func = 0;
-    uint32_t arg = 0;
-};
-
-inline std::mutex g_exit_handler_mutex;
-inline std::unordered_map<int, std::vector<ExitHandlerEntry>> g_exit_handlers;
-
 inline std::mutex g_bootmode_mutex;
 inline bool g_bootmode_initialized = false;
 inline uint32_t g_bootmode_pool_offset = 0;
 inline std::unordered_map<uint8_t, uint32_t> g_bootmode_addresses;
-
-inline std::mutex g_syscall_override_mutex;
-inline std::unordered_map<uint32_t, uint32_t> g_syscall_overrides;
-inline std::unordered_set<uint32_t> g_syscall_mirror_addrs;
 
 static constexpr uint32_t kGuestSyscallTableGuestBase = 0x80011F80u;
 static constexpr uint32_t kGuestSyscallTablePhysBase = kGuestSyscallTableGuestBase & 0x1FFFFFFFu;

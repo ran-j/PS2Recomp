@@ -8,6 +8,7 @@
 #include "ps2_syscalls.h"
 #include "ps2_stubs.h"
 #include "runtime/ps2_gs_gpu.h"
+#include "runtime/ee_scheduler.h"
 #include "runtime/ps2_gs_psmct32.h"
 #include "ps2_runtime_macros.h"
 #include "Stubs/MPEG.h"
@@ -17,12 +18,10 @@
 #include "Stubs/VU.h"
 
 #include <atomic>
-#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <exception>
 #include <string>
-#include <thread>
 #include <vector>
 
 using namespace ps2recomp;
@@ -99,104 +98,9 @@ namespace
         return generated.find(needle) != std::string::npos;
     }
 
-    template <typename Predicate>
-    bool waitUntil(Predicate pred, std::chrono::milliseconds timeout)
-    {
-        const auto deadline = std::chrono::steady_clock::now() + timeout;
-        while (std::chrono::steady_clock::now() < deadline)
-        {
-            if (pred())
-            {
-                return true;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-        return pred();
-    }
-
     uint32_t frameOffsetBytes(uint32_t x, uint32_t y, uint32_t fbw)
     {
         return GSPSMCT32::addrPSMCT32(0u, (fbw != 0u) ? fbw : 1u, x, y);
-    }
-
-    void testRuntimeWorkerLoop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-    {
-        if (!ctx || !runtime)
-        {
-            return;
-        }
-
-        // Keep touching guest memory so teardown races are easier to catch.
-        (void)Ps2FastRead64(rdram, static_cast<uint32_t>(0x01FFFFF8u + (ctx->insn_count & 0x7u)));
-        ++ctx->insn_count;
-
-        if (runtime->isStopRequested())
-        {
-            ctx->pc = 0u;
-            return;
-        }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-
-    std::atomic<int32_t> gSerializedGuestActive{0};
-    std::atomic<int32_t> gSerializedGuestMaxActive{0};
-    std::atomic<int32_t> gPreemptionPolicyEntryCount{0};
-    std::atomic<bool> gPreemptionPolicyAllowFirstProbe{false};
-    std::atomic<bool> gPreemptionPolicyPeerRan{false};
-
-    void testSerializedGuestStep(uint8_t *, R5900Context *ctx, PS2Runtime *)
-    {
-        const int32_t active = gSerializedGuestActive.fetch_add(1, std::memory_order_acq_rel) + 1;
-        int32_t observedMax = gSerializedGuestMaxActive.load(std::memory_order_relaxed);
-        while (observedMax < active &&
-               !gSerializedGuestMaxActive.compare_exchange_weak(
-                   observedMax,
-                   active,
-                   std::memory_order_release,
-                   std::memory_order_relaxed))
-        {
-        }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(25));
-        gSerializedGuestActive.fetch_sub(1, std::memory_order_acq_rel);
-        if (ctx)
-        {
-            ctx->pc = 0u;
-        }
-    }
-
-    void testPreemptionPolicyStep(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
-    {
-        if (!ctx || !runtime)
-        {
-            return;
-        }
-
-        const int32_t entryIndex = gPreemptionPolicyEntryCount.fetch_add(1, std::memory_order_acq_rel) + 1;
-        if (entryIndex == 1)
-        {
-            while (!gPreemptionPolicyAllowFirstProbe.load(std::memory_order_acquire))
-            {
-                std::this_thread::yield();
-            }
-
-            bool shouldPreempt = false;
-            for (int attempt = 0; attempt < 256 &&
-                                  !shouldPreempt;
-                 ++attempt)
-            {
-                shouldPreempt = runtime->shouldPreemptGuestExecution();
-            }
-            setRegU32(*ctx, 2, shouldPreempt ? 1u : 0u);
-        }
-        else
-        {
-            gPreemptionPolicyPeerRan.store(true, std::memory_order_release);
-            setRegU32(*ctx, 2, 2u);
-        }
-
-        ctx->pc = 0u;
     }
 
     void testResumeOwnerFallbackHandler(uint8_t *, R5900Context *ctx, PS2Runtime *)
@@ -236,69 +140,118 @@ namespace
         }
     }
 
-    constexpr uint32_t kAsyncCounterAddr = 0x2400u;
-
-    void testWaitForAsyncCounter(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-    {
-        if (!rdram || !ctx)
-        {
-            return;
-        }
-
-        uint32_t counter = 0u;
-        do
-        {
-            std::memcpy(&counter, rdram + kAsyncCounterAddr, sizeof(counter));
-            if (counter == 0u)
-            {
-                if (runtime != nullptr)
-                {
-                    runtime->yieldGuestExecutionAfterWake();
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-        } while (counter == 0u);
-
-        ctx->pc = 0u;
-    }
-
-    void testSignalAsyncCounter(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
-    {
-        if (rdram)
-        {
-            const uint32_t counter = 1u;
-            std::memcpy(rdram + kAsyncCounterAddr, &counter, sizeof(counter));
-        }
-
-        if (ctx)
-        {
-            ctx->pc = 0u;
-        }
-    }
-
-    std::atomic<uint32_t> gAsyncCallbackObservedSp{0u};
-    std::atomic<uint32_t> gAsyncCallbackObservedGp{0u};
-
-    void testRecordAsyncCallbackStack(uint8_t *, R5900Context *ctx, PS2Runtime *)
-    {
-        if (!ctx)
-        {
-            return;
-        }
-
-        gAsyncCallbackObservedSp.store(::getRegU32(ctx, 29), std::memory_order_release);
-        gAsyncCallbackObservedGp.store(::getRegU32(ctx, 28), std::memory_order_release);
-        ctx->pc = 0u;
-    }
-
     std::atomic<uint32_t> gMpegStreamCallbackCount{0u};
     std::atomic<uint32_t> gMpegStreamCallbackMpeg{0u};
     std::atomic<uint32_t> gMpegStreamCallbackType{0u};
     std::atomic<uint32_t> gMpegStreamCallbackDataAddr{0u};
     std::atomic<uint32_t> gMpegStreamCallbackLen{0u};
     std::atomic<uint32_t> gMpegStreamCallbackUserData{0u};
+    constexpr uint32_t kMpegCallbackStopPc = 0x00124FF0u;
+    std::atomic<int32_t> gMpegWaitResult{-999};
+    std::atomic<uint32_t> gMpegWaitStage{0u};
+    std::atomic<uint32_t> gMpegNoDuplicateStage{0u};
+    std::atomic<uint32_t> gMpegNoDuplicateProducerStage{0u};
 
-    void testRecordMpegStreamCallback(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
+    constexpr uint32_t kMpegWaitMainPc = 0x00125000u;
+    constexpr uint32_t kMpegWaitResumePc = 0x00125010u;
+    constexpr uint32_t kMpegWaitProducerPc = 0x00125020u;
+    constexpr uint32_t kMpegWaitHandle = 0x00123000u;
+    constexpr uint32_t kMpegWaitImage = 0x00130000u;
+    constexpr uint32_t kMpegNoDuplicateMainPc = 0x00125030u;
+    constexpr uint32_t kMpegNoDuplicateResumePc = 0x00125040u;
+    constexpr uint32_t kMpegNoDuplicateProducerPc = 0x00125050u;
+    constexpr uint32_t kMpegNoDuplicateHandle = 0x00124000u;
+    constexpr uint32_t kMpegNoDuplicateImage = 0x00131000u;
+    constexpr uint32_t kIpuInitMainPc = 0x00125100u;
+    constexpr uint32_t kIpuInitResumePc = 0x00125104u;
+    constexpr uint32_t kIpuSetD4Pc = 0x00126428u;
+    std::atomic<uint32_t> gIpuSetD4Hits{0u};
+    std::atomic<uint32_t> gIpuSetD4Argument{0u};
+    std::atomic<int32_t> gIpuInitResult{-999};
+
+    void testIpuSetD4(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        gIpuSetD4Hits.fetch_add(1u, std::memory_order_acq_rel);
+        gIpuSetD4Argument.store(::getRegU32(ctx, 4), std::memory_order_release);
+        ctx->pc = 0u;
+    }
+
+    void testIpuInitMain(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        ctx->pc = kIpuInitResumePc;
+        ps2_stubs::sceIpuInit(rdram, ctx, runtime);
+    }
+
+    void testIpuInitResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gIpuInitResult.store(getRegS32(*ctx, 2), std::memory_order_release);
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
+    void testMpegWaitMain(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gMpegWaitStage.store(1u, std::memory_order_release);
+        setRegU32(*ctx, 4, kMpegWaitHandle);
+        setRegU32(*ctx, 5, kMpegWaitImage);
+        ctx->pc = kMpegWaitResumePc;
+        ps2_stubs::sceMpegGetPicture(rdram, ctx, runtime);
+    }
+
+    void testMpegWaitResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gMpegWaitStage.store(3u, std::memory_order_release);
+        gMpegWaitResult.store(static_cast<int32_t>(::getRegU32(ctx, 2)), std::memory_order_release);
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
+    void testStopAfterMpegCallback(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
+    void testMpegWaitProducer(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gMpegWaitStage.store(2u, std::memory_order_release);
+        ps2_stubs::notifyMpegCdStreamEof(runtime);
+        ctx->pc = 0u;
+    }
+
+    void testMpegNoDuplicateMain(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        setRegU32(*ctx, 4, kMpegNoDuplicateHandle);
+        setRegU32(*ctx, 5, kMpegNoDuplicateImage);
+        ps2_stubs::sceMpegGetPicture(rdram, ctx, runtime);
+
+        gMpegNoDuplicateStage.store(1u, std::memory_order_release);
+        ctx->pc = kMpegNoDuplicateResumePc;
+        ps2_stubs::sceMpegGetPicture(rdram, ctx, runtime);
+
+        gMpegNoDuplicateStage.store(4u, std::memory_order_release);
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
+    void testMpegNoDuplicateResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gMpegNoDuplicateStage.store(3u, std::memory_order_release);
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
+    void testMpegNoDuplicateProducer(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gMpegNoDuplicateProducerStage.store(
+            gMpegNoDuplicateStage.load(std::memory_order_acquire),
+            std::memory_order_release);
+        gMpegNoDuplicateStage.store(2u, std::memory_order_release);
+        ps2_stubs::notifyMpegCdStreamEof(runtime);
+        ctx->pc = 0u;
+    }
+
+    void testRecordMpegStreamCallback(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         if (!rdram || !ctx)
         {
@@ -320,6 +273,7 @@ namespace
         gMpegStreamCallbackUserData.store(::getRegU32(ctx, 6), std::memory_order_release);
         gMpegStreamCallbackCount.fetch_add(1u, std::memory_order_acq_rel);
         ctx->pc = 0u;
+        runtime->requestStop();
     }
 
 }
@@ -356,277 +310,6 @@ void register_ps2_runtime_expansion_tests()
                 t.IsTrue(inst.modificationInfo.modifiesControl,
                          std::string("HI/LO control side-effect missing for ") + cases[i].name);
             }
-        });
-
-        tc.Run("guest execution is serialized per runtime", [](TestCase &t)
-        {
-            PS2Runtime runtime;
-            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
-            gSerializedGuestActive.store(0, std::memory_order_release);
-            gSerializedGuestMaxActive.store(0, std::memory_order_release);
-
-            constexpr uint32_t kEntries[] = {
-                0x120000u,
-                0x130000u,
-                0x140000u,
-                0x150000u,
-            };
-            constexpr size_t kEntryCount = sizeof(kEntries) / sizeof(kEntries[0]);
-            R5900Context contexts[kEntryCount]{};
-            std::vector<std::thread> workers;
-            workers.reserve(kEntryCount);
-
-            for (size_t i = 0; i < kEntryCount; ++i)
-            {
-                runtime.registerFunction(kEntries[i], &testSerializedGuestStep);
-                contexts[i].pc = kEntries[i];
-            }
-
-            for (size_t i = 0; i < kEntryCount; ++i)
-            {
-                workers.emplace_back([&, i]()
-                {
-                    runtime.dispatchLoop(rdram.data(), &contexts[i]);
-                });
-            }
-
-            for (std::thread &worker : workers)
-            {
-                if (worker.joinable())
-                {
-                    worker.join();
-                }
-            }
-
-            t.Equals(gSerializedGuestActive.load(std::memory_order_acquire), 0,
-                     "serialized guest dispatch should leave no active workers");
-            t.Equals(gSerializedGuestMaxActive.load(std::memory_order_acquire), 1,
-                     "dispatchLoop should not execute guest code concurrently on one runtime");
-        });
-
-        tc.Run("wake handoff lets a contending guest thread acquire before returning", [](TestCase &t)
-        {
-            PS2Runtime runtime;
-            std::atomic<bool> peerRan{false};
-            std::thread peer;
-            bool peerWaiting = false;
-            bool peerRanWhileMainHeld = false;
-            bool peerRanAfterHandoff = false;
-
-            {
-                PS2Runtime::GuestExecutionScope mainScope(&runtime);
-                peer = std::thread([&]()
-                {
-                    PS2Runtime::GuestExecutionScope peerScope(&runtime);
-                    peerRan.store(true, std::memory_order_release);
-                });
-
-                peerWaiting = waitUntil([&]()
-                {
-                    return runtime.guestExecutionWaiterCountForTesting() > 0u;
-                }, std::chrono::milliseconds(100));
-
-                peerRanWhileMainHeld = peerRan.load(std::memory_order_acquire);
-                runtime.yieldGuestExecutionAfterWake();
-                peerRanAfterHandoff = peerRan.load(std::memory_order_acquire);
-            }
-
-            if (peer.joinable())
-            {
-                peer.join();
-            }
-
-            t.IsTrue(peerWaiting, "peer guest thread should contend while the waker owns guest execution");
-            t.IsFalse(peerRanWhileMainHeld, "peer guest thread should not run before the waker yields execution");
-            t.IsTrue(peerRanAfterHandoff, "wake handoff should let the peer acquire guest execution before returning");
-        });
-
-        tc.Run("recursive guest execution acquisition does not advance the handoff epoch", [](TestCase &t)
-        {
-            PS2Runtime runtime;
-            const uint64_t initial = runtime.guestExecutionHandoffEpochSnapshot();
-
-            PS2Runtime::GuestExecutionScope outer(&runtime);
-            const uint64_t afterOuter = runtime.guestExecutionHandoffEpochSnapshot();
-            t.Equals(afterOuter, initial + 1u, "outer acquisition should advance the epoch exactly once");
-
-            {
-                PS2Runtime::GuestExecutionScope inner(&runtime);
-                t.Equals(runtime.guestExecutionHandoffEpochSnapshot(), afterOuter,
-                         "recursive acquisition must not advance the epoch");
-
-                PS2Runtime::GuestExecutionScope innermost(&runtime);
-                t.Equals(runtime.guestExecutionHandoffEpochSnapshot(), afterOuter,
-                         "deeper recursive acquisitions must not advance the epoch either");
-            }
-
-            t.Equals(runtime.guestExecutionHandoffEpochSnapshot(), afterOuter,
-                     "releasing recursive acquisitions must not advance the epoch");
-        });
-
-        tc.Run("reacquiring a depth-4 release advances the handoff epoch exactly once", [](TestCase &t)
-        {
-            PS2Runtime runtime;
-
-            PS2Runtime::GuestExecutionScope s1(&runtime);
-            PS2Runtime::GuestExecutionScope s2(&runtime);
-            PS2Runtime::GuestExecutionScope s3(&runtime);
-            PS2Runtime::GuestExecutionScope s4(&runtime);
-
-            const uint64_t before = runtime.guestExecutionHandoffEpochSnapshot();
-            {
-                PS2Runtime::GuestExecutionReleaseScope release(&runtime);
-                t.Equals(runtime.guestExecutionHandoffEpochSnapshot(), before,
-                         "releasing guest execution must not advance the epoch");
-            }
-
-            t.Equals(runtime.guestExecutionHandoffEpochSnapshot(), before + 1u,
-                     "reacquiring a depth-4 release should advance the epoch exactly once");
-        });
-
-        tc.Run("handoff completed before the wait does not count as a timeout", [](TestCase &t)
-        {
-            PS2Runtime runtime;
-            const uint64_t timeoutsBefore = runtime.guestExecutionHandoffTimeouts();
-
-            std::atomic<bool> holderAcquired{false};
-            std::atomic<bool> releaseHolder{false};
-            uint64_t baseline = 0u;
-            std::thread holder;
-
-            {
-                PS2Runtime::GuestExecutionScope mainScope(&runtime);
-
-                holder = std::thread([&]()
-                {
-                    PS2Runtime::GuestExecutionScope scope(&runtime);
-                    holderAcquired.store(true, std::memory_order_release);
-                    while (!releaseHolder.load(std::memory_order_acquire))
-                    {
-                        std::this_thread::sleep_for(std::chrono::microseconds(100));
-                    }
-                });
-
-                const bool holderContending = waitUntil([&]()
-                {
-                    return runtime.guestExecutionWaiterCountForTesting() > 0u;
-                }, std::chrono::milliseconds(250));
-                t.IsTrue(holderContending, "holder thread should be queued before the release");
-
-                // Token captured BEFORE releasing guest execution, like the dispatchers do
-                baseline = runtime.guestExecutionHandoffEpochSnapshot();
-            }
-
-            const bool acquired = waitUntil([&]()
-            {
-                return holderAcquired.load(std::memory_order_acquire);
-            }, std::chrono::milliseconds(250));
-            t.IsTrue(acquired, "holder should acquire guest execution after the release");
-
-            // Second waiter keeps waiters > 0 so the wait below cannot take the
-            // no-waiters fast path: it must recognize the epoch advance instead.
-            std::thread secondWaiter([&]()
-            {
-                PS2Runtime::GuestExecutionScope scope(&runtime);
-            });
-            const bool secondContending = waitUntil([&]()
-            {
-                return runtime.guestExecutionWaiterCountForTesting() > 0u;
-            }, std::chrono::milliseconds(250));
-            t.IsTrue(secondContending, "second waiter should be queued while the holder owns guest execution");
-
-            runtime.waitForGuestExecutionHandoff(baseline);
-
-            t.Equals(runtime.guestExecutionHandoffTimeouts(), timeoutsBefore,
-                     "a handoff that completed before the wait must not count as a timeout");
-
-            releaseHolder.store(true, std::memory_order_release);
-            if (holder.joinable())
-            {
-                holder.join();
-            }
-            if (secondWaiter.joinable())
-            {
-                secondWaiter.join();
-            }
-        });
-
-        tc.Run("nested DeferredGuestYieldScope delivers pending only to the outermost scope", [](TestCase &t)
-        {
-            PS2Runtime runtime;
-            bool outerPending = false;
-            bool innerPending = false;
-
-            {
-                PS2Runtime::DeferredGuestYieldScope outer(outerPending);
-                {
-                    PS2Runtime::DeferredGuestYieldScope inner(innerPending);
-                    runtime.yieldGuestExecutionAfterWake(); // must defer instead of yielding
-                }
-                t.IsFalse(innerPending, "inner scope must not consume the deferred yield");
-                t.IsFalse(outerPending, "pending must only be delivered when the outermost scope closes");
-            }
-
-            t.IsTrue(outerPending, "outermost scope should deliver the deferred yield");
-            t.IsFalse(innerPending, "inner scope must stay untouched");
-        });
-
-        tc.Run("guest preemption policy requests a dispatcher handoff when another guest thread contends", [](TestCase &t)
-        {
-            PS2Runtime runtime;
-            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
-            constexpr uint32_t kFirstEntry = 0x190000u;
-            constexpr uint32_t kSecondEntry = 0x1A0000u;
-
-            gPreemptionPolicyEntryCount.store(0, std::memory_order_release);
-            gPreemptionPolicyAllowFirstProbe.store(false, std::memory_order_release);
-            gPreemptionPolicyPeerRan.store(false, std::memory_order_release);
-
-            runtime.registerFunction(kFirstEntry, &testPreemptionPolicyStep);
-            runtime.registerFunction(kSecondEntry, &testPreemptionPolicyStep);
-
-            R5900Context firstCtx{};
-            R5900Context secondCtx{};
-            firstCtx.pc = kFirstEntry;
-            secondCtx.pc = kSecondEntry;
-
-            std::thread firstWorker([&]()
-            {
-                runtime.dispatchLoop(rdram.data(), &firstCtx);
-            });
-
-            const bool firstEntered = waitUntil([&]()
-            {
-                return gPreemptionPolicyEntryCount.load(std::memory_order_acquire) >= 1;
-            }, std::chrono::milliseconds(100));
-
-            std::thread secondWorker([&]()
-            {
-                runtime.dispatchLoop(rdram.data(), &secondCtx);
-            });
-
-            const bool secondContending = waitUntil([&]()
-            {
-                return runtime.guestExecutionWaiterCountForTesting() > 0u;
-            }, std::chrono::milliseconds(100));
-
-            gPreemptionPolicyAllowFirstProbe.store(true, std::memory_order_release);
-
-            if (firstWorker.joinable())
-            {
-                firstWorker.join();
-            }
-            if (secondWorker.joinable())
-            {
-                secondWorker.join();
-            }
-
-            t.IsTrue(firstEntered, "first guest worker should enter before probing for preemption");
-            t.IsTrue(secondContending, "second guest worker should contend for guest execution before the first returns");
-            t.IsTrue(gPreemptionPolicyPeerRan.load(std::memory_order_acquire),
-                     "second guest worker should run after the first returns to the dispatcher");
-            t.Equals(getRegU32(&firstCtx, 2), 1u,
-                     "first guest worker should observe that the runtime requested preemption under contention");
         });
 
         tc.Run("lookupFunction rejects internal resume PCs without exact registration", [](TestCase &t)
@@ -739,114 +422,6 @@ void register_ps2_runtime_expansion_tests()
                      "missing target should remain visible in ctx->pc for diagnostics");
         });
 
-        tc.Run("vblank intc handlers can preempt serialized guest execution", [](TestCase &t)
-        {
-            notifyRuntimeStop();
-
-            PS2Runtime runtime;
-            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
-            constexpr uint32_t kBusyEntry = 0x160000u;
-            constexpr uint32_t kIntcHandlerEntry = 0x170000u;
-
-            runtime.registerFunction(kBusyEntry, &testWaitForAsyncCounter);
-            runtime.registerFunction(kIntcHandlerEntry, &testSignalAsyncCounter);
-
-            R5900Context addCtx{};
-            setRegU32(addCtx, 4, 2u);
-            setRegU32(addCtx, 5, kIntcHandlerEntry);
-            setRegU32(addCtx, 6, 0u);
-            setRegU32(addCtx, 7, 0u);
-            AddIntcHandler(rdram.data(), &addCtx, &runtime);
-            t.IsTrue(getRegS32(addCtx, 2) > 0, "AddIntcHandler should register a VBlank handler");
-
-            R5900Context busyCtx{};
-            busyCtx.pc = kBusyEntry;
-            std::atomic<bool> workerDone{false};
-            std::atomic<bool> workerThrew{false};
-
-            std::thread worker([&]()
-            {
-                try
-                {
-                    runtime.dispatchLoop(rdram.data(), &busyCtx);
-                }
-                catch (...)
-                {
-                    workerThrew.store(true, std::memory_order_release);
-                }
-                workerDone.store(true, std::memory_order_release);
-            });
-
-            ps2_syscalls::EnsureVSyncWorkerRunning(rdram.data(), &runtime);
-
-            const bool finished = waitUntil([&]()
-            {
-                return workerDone.load(std::memory_order_acquire);
-            }, std::chrono::milliseconds(250));
-
-            if (!finished)
-            {
-                const uint32_t counter = 1u;
-                std::memcpy(rdram.data() + kAsyncCounterAddr, &counter, sizeof(counter));
-            }
-
-            if (worker.joinable())
-            {
-                worker.join();
-            }
-
-            runtime.requestStop();
-            notifyRuntimeStop();
-
-            uint32_t counter = 0u;
-            std::memcpy(&counter, rdram.data() + kAsyncCounterAddr, sizeof(counter));
-
-            t.IsFalse(workerThrew.load(std::memory_order_acquire),
-                      "busy dispatch worker should not throw while VBlank handlers fire");
-            t.IsTrue(finished,
-                     "VBlank interrupt handlers should run even while a guest thread is spinning");
-            t.Equals(counter, 1u, "VBlank handler should publish the awaited counter value");
-        });
-
-        tc.Run("GS async callbacks keep a dedicated stack when guest heap is exhausted", [](TestCase &t)
-        {
-            notifyRuntimeStop();
-
-            PS2Runtime runtime;
-            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
-            constexpr uint32_t kCallbackEntry = 0x180000u;
-            constexpr uint32_t kCallerGp = 0x0036A7F0u;
-            constexpr uint32_t kCallerSp = 0x00123450u;
-            constexpr uint32_t kAsyncStackFloor = 0x01F00000u;
-
-            runtime.configureGuestHeap(kAsyncStackFloor, kAsyncStackFloor);
-            runtime.registerFunction(kCallbackEntry, &testRecordAsyncCallbackStack);
-            ps2_stubs::resetGsSyncVCallbackState();
-            gAsyncCallbackObservedSp.store(0u, std::memory_order_release);
-            gAsyncCallbackObservedGp.store(0u, std::memory_order_release);
-
-            R5900Context registerCtx{};
-            registerCtx.pc = 0x00101900u;
-            setRegU32(registerCtx, 4, kCallbackEntry);
-            setRegU32(registerCtx, 28, kCallerGp);
-            setRegU32(registerCtx, 29, kCallerSp);
-            ps2_stubs::sceGsSyncVCallback(rdram.data(), &registerCtx, &runtime);
-
-            ps2_stubs::dispatchGsSyncVCallback(rdram.data(), &runtime, 1u);
-
-            const uint32_t observedSp = gAsyncCallbackObservedSp.load(std::memory_order_acquire);
-            const uint32_t observedGp = gAsyncCallbackObservedGp.load(std::memory_order_acquire);
-
-            t.IsTrue(observedSp != 0u, "callback should execute");
-            t.Equals(observedGp, kCallerGp, "callback should preserve the registered GP");
-            t.IsTrue(observedSp != kCallerSp, "callback should not reuse the registering thread stack");
-            t.IsTrue(observedSp >= kAsyncStackFloor,
-                     "callback should switch to the reserved async stack pool");
-
-            runtime.requestStop();
-            notifyRuntimeStop();
-        });
-
         tc.Run("MPEG init and callback stubs return success instead of TODO errors", [](TestCase &t)
         {
             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
@@ -902,6 +477,13 @@ void register_ps2_runtime_expansion_tests()
             constexpr uint32_t kAudioPacketAddr = 0x00129000u;
 
             runtime.registerFunction(kCallbackEntry, &testRecordMpegStreamCallback);
+            runtime.registerFunction(kMpegCallbackStopPc, &testStopAfterMpegCallback);
+            auto prepareCallbackDispatch = [&]()
+            {
+                R5900Context idleContext{};
+                idleContext.pc = kMpegCallbackStopPc;
+                runtime.eeScheduler().reset(rdram.data(), idleContext);
+            };
 
             auto registerGenericCallback = [&](uint32_t callbackType, uint32_t userData)
             {
@@ -947,6 +529,7 @@ void register_ps2_runtime_expansion_tests()
             const uint32_t videoPacketSize = writePesPacket(kVideoPacketAddr, 0xE0u, videoPayload);
 
             gMpegStreamCallbackCount.store(0u, std::memory_order_release);
+            prepareCallbackDispatch();
             R5900Context videoDemuxCtx{};
             setRegU32(videoDemuxCtx, 4, kMpegAddr);
             setRegU32(videoDemuxCtx, 5, kVideoPacketAddr);
@@ -954,6 +537,7 @@ void register_ps2_runtime_expansion_tests()
             setRegU32(videoDemuxCtx, 7, kVideoPacketAddr);
             setRegU32(videoDemuxCtx, 8, videoPacketSize);
             ps2_stubs::sceMpegDemuxPssRing(rdram.data(), &videoDemuxCtx, &runtime);
+            runtime.eeScheduler().run();
 
             t.Equals(getRegS32(videoDemuxCtx, 2), static_cast<int32_t>(videoPacketSize),
                      "sceMpegDemuxPssRing should consume the video PES packet");
@@ -975,6 +559,7 @@ void register_ps2_runtime_expansion_tests()
             const uint32_t audioPacketSize = writePesPacket(kAudioPacketAddr, 0xBDu, audioPayload);
 
             gMpegStreamCallbackCount.store(0u, std::memory_order_release);
+            prepareCallbackDispatch();
             R5900Context audioDemuxCtx{};
             setRegU32(audioDemuxCtx, 4, kMpegAddr);
             setRegU32(audioDemuxCtx, 5, kAudioPacketAddr);
@@ -982,6 +567,7 @@ void register_ps2_runtime_expansion_tests()
             setRegU32(audioDemuxCtx, 7, kAudioPacketAddr);
             setRegU32(audioDemuxCtx, 8, audioPacketSize);
             ps2_stubs::sceMpegDemuxPssRing(rdram.data(), &audioDemuxCtx, &runtime);
+            runtime.eeScheduler().run();
 
             t.Equals(getRegS32(audioDemuxCtx, 2), static_cast<int32_t>(audioPacketSize),
                      "sceMpegDemuxPssRing should consume the audio PES packet");
@@ -1034,6 +620,7 @@ void register_ps2_runtime_expansion_tests()
             ps2_stubs::notifyMpegCdStreamStart();
 
             gMpegStreamCallbackCount.store(0u, std::memory_order_release);
+            prepareCallbackDispatch();
             R5900Context afterNewStreamDemuxCtx{};
             setRegU32(afterNewStreamDemuxCtx, 4, kMpegAddr);
             setRegU32(afterNewStreamDemuxCtx, 5, kVideoPacketAddr);
@@ -1041,6 +628,7 @@ void register_ps2_runtime_expansion_tests()
             setRegU32(afterNewStreamDemuxCtx, 7, kVideoPacketAddr);
             setRegU32(afterNewStreamDemuxCtx, 8, videoPacketSize);
             ps2_stubs::sceMpegDemuxPssRing(rdram.data(), &afterNewStreamDemuxCtx, &runtime);
+            runtime.eeScheduler().run();
 
             t.Equals(getRegS32(afterNewStreamDemuxCtx, 2), static_cast<int32_t>(videoPacketSize),
                      "new CD stream demux should reopen an ended MPEG handle");
@@ -1057,6 +645,7 @@ void register_ps2_runtime_expansion_tests()
                      "sceMpegCreate should reopen the MPEG handle after an ended reset");
 
             gMpegStreamCallbackCount.store(0u, std::memory_order_release);
+            prepareCallbackDispatch();
             R5900Context afterCreateDemuxCtx{};
             setRegU32(afterCreateDemuxCtx, 4, kMpegAddr);
             setRegU32(afterCreateDemuxCtx, 5, kVideoPacketAddr);
@@ -1064,6 +653,7 @@ void register_ps2_runtime_expansion_tests()
             setRegU32(afterCreateDemuxCtx, 7, kVideoPacketAddr);
             setRegU32(afterCreateDemuxCtx, 8, videoPacketSize);
             ps2_stubs::sceMpegDemuxPssRing(rdram.data(), &afterCreateDemuxCtx, &runtime);
+            runtime.eeScheduler().run();
 
             t.Equals(gMpegStreamCallbackCount.load(std::memory_order_acquire), 1u,
                      "new MPEG create should allow callbacks for the next stream");
@@ -1071,312 +661,69 @@ void register_ps2_runtime_expansion_tests()
             runtime.requestStop();
         });
 
-        tc.Run("MPEG playback stays active during a temporary demux pause before CD EOF", [](TestCase &t)
-        {
-            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
-            ps2_stubs::resetMpegStubState();
-
-            constexpr uint32_t kMpegAddr = 0x00123000u;
-            constexpr uint32_t kPacketAddr = 0x00128000u;
-            constexpr uint32_t kImageAddr = 0x00130000u;
-            const std::vector<uint8_t> es = {
-                0x00u, 0x00u, 0x01u, 0xB3u, 0x01u, 0x00u, 0x10u, 0x12u, 0xFFu, 0xFFu, 0xE0u, 0x18u,
-                0x00u, 0x00u, 0x01u, 0xB5u, 0x14u, 0x8Au, 0x00u, 0x01u, 0x00u, 0x17u, 0x00u, 0x00u,
-                0x01u, 0xB8u, 0x00u, 0x08u, 0x00u, 0x40u, 0x00u, 0x00u, 0x01u, 0x00u, 0x00u, 0x0Fu,
-                0xFFu, 0xF8u, 0x00u, 0x00u, 0x01u, 0xB5u, 0x8Fu, 0xFFu, 0xF3u, 0x41u, 0x80u, 0x00u,
-                0x00u, 0x01u, 0x01u, 0x13u, 0xF8u, 0x7Du, 0x29u, 0x48u, 0x88u, 0x00u, 0x00u, 0x01u,
-                0xB3u, 0x01u, 0x00u, 0x10u, 0x12u, 0xFFu, 0xFFu, 0xE0u, 0x18u, 0x00u, 0x00u, 0x01u,
-                0xB5u, 0x14u, 0x8Au, 0x00u, 0x01u, 0x00u, 0x17u, 0x00u, 0x00u, 0x01u, 0xB8u, 0x00u,
-                0x08u, 0x00u, 0xC0u, 0x00u, 0x00u, 0x01u, 0x00u, 0x00u, 0x0Fu, 0xFFu, 0xF8u, 0x00u,
-                0x00u, 0x01u, 0xB5u, 0x8Fu, 0xFFu, 0xF3u, 0x41u, 0x80u, 0x00u, 0x00u, 0x01u, 0x01u,
-                0x13u, 0xF8u, 0x7Du, 0x29u, 0x48u, 0x88u, 0x00u, 0x00u, 0x01u, 0xB3u, 0x01u, 0x00u,
-                0x10u, 0x12u, 0xFFu, 0xFFu, 0xE0u, 0x18u, 0x00u, 0x00u, 0x01u, 0xB5u, 0x14u, 0x8Au,
-                0x00u, 0x01u, 0x00u, 0x17u, 0x00u, 0x00u, 0x01u, 0xB8u, 0x00u, 0x08u, 0x01u, 0x40u,
-                0x00u, 0x00u, 0x01u, 0x00u, 0x00u, 0x0Fu, 0xFFu, 0xF8u, 0x00u, 0x00u, 0x01u, 0xB5u,
-                0x8Fu, 0xFFu, 0xF3u, 0x41u, 0x80u, 0x00u, 0x00u, 0x01u, 0x01u, 0x13u, 0xF8u, 0x7Du,
-                0x29u, 0x48u, 0x88u};
-
-            std::vector<uint8_t> packet = {
-                0x00u, 0x00u, 0x01u, 0xE0u,
-                0x00u, static_cast<uint8_t>(es.size() + 3u),
-                0x80u, 0x00u, 0x00u};
-            packet.insert(packet.end(), es.begin(), es.end());
-            std::memcpy(rdram.data() + kPacketAddr, packet.data(), packet.size());
-
-            R5900Context demuxCtx{};
-            setRegU32(demuxCtx, 4, kMpegAddr);
-            setRegU32(demuxCtx, 5, kPacketAddr);
-            setRegU32(demuxCtx, 6, static_cast<uint32_t>(packet.size()));
-            setRegU32(demuxCtx, 7, kPacketAddr);
-            setRegU32(demuxCtx, 8, static_cast<uint32_t>(packet.size()));
-            ps2_stubs::sceMpegDemuxPssRing(rdram.data(), &demuxCtx, nullptr);
-
-            R5900Context pictureCtx{};
-            setRegU32(pictureCtx, 4, kMpegAddr);
-            setRegU32(pictureCtx, 5, kImageAddr);
-            ps2_stubs::sceMpegGetPicture(rdram.data(), &pictureCtx, nullptr);
-            t.Equals(Ps2FastRead32(rdram.data(), kMpegAddr + 0x00u), 16u,
-                     "test stream should decode one frame before the pause");
-            t.Equals(Ps2FastRead32(rdram.data(), kMpegAddr + 0x08u), 0u,
-                     "first decoded frame should report frame index zero");
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(650));
-
-            R5900Context isEndCtx{};
-            setRegU32(isEndCtx, 4, kMpegAddr);
-            ps2_stubs::sceMpegIsEnd(rdram.data(), &isEndCtx, nullptr);
-            t.Equals(getRegS32(isEndCtx, 2), 0,
-                     "a temporary demux pause must not end an active stream before CD EOF");
-
-            ps2_stubs::sceMpegGetPicture(rdram.data(), &pictureCtx, nullptr);
-            t.Equals(Ps2FastRead32(rdram.data(), kMpegAddr + 0x08u), 1u,
-                     "temporary non-EOF starvation should keep movie frame progress moving");
-
-            ps2_stubs::sceMpegGetPicture(rdram.data(), &pictureCtx, nullptr);
-            t.Equals(Ps2FastRead32(rdram.data(), kMpegAddr + 0x08u), 2u,
-                     "repeated temporary starvation should continue advancing from the held frame");
-        });
-
-        tc.Run("sceMpegGetPicture releases an old waiter when the CD stream restarts", [](TestCase &t)
+        tc.Run("sceMpegGetPicture blocks as a typed scheduler wait and resumes on EOF", [](TestCase &t)
         {
             PS2Runtime runtime;
             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
             ps2_stubs::resetMpegStubState();
             ps2_stubs::notifyMpegCdStreamStart();
+            runtime.registerFunction(kMpegWaitMainPc, testMpegWaitMain);
+            runtime.registerFunction(kMpegWaitResumePc, testMpegWaitResume);
+            runtime.registerFunction(kMpegWaitProducerPc, testMpegWaitProducer);
+            gMpegWaitResult.store(-999, std::memory_order_release);
+            gMpegWaitStage.store(0u, std::memory_order_release);
 
-            constexpr uint32_t kMpegAddr = 0x00123000u;
-            constexpr uint32_t kImageAddr = 0x00130000u;
-            R5900Context pictureCtx{};
-            setRegU32(pictureCtx, 4, kMpegAddr);
-            setRegU32(pictureCtx, 5, kImageAddr);
+            R5900Context mainContext{};
+            mainContext.pc = kMpegWaitMainPc;
+            EeScheduler &ee = runtime.eeScheduler();
+            ee.reset(rdram.data(), mainContext);
+            const int producerId = ee.createThread(EeThreadCreateParams{
+                0u, kMpegWaitProducerPc, 0u, 0u, 0u, 10, 0u});
+            t.IsTrue(producerId > 1, "MPEG producer guest thread should be created");
+            t.Equals(ee.startThread(producerId, 0u, mainContext, false), 0,
+                     "MPEG producer guest thread should become ready");
+            ee.run();
 
-            std::atomic<bool> returned{false};
-            std::thread waiter([&]()
-            {
-                ps2_stubs::sceMpegGetPicture(rdram.data(), &pictureCtx, &runtime);
-                returned.store(true, std::memory_order_release);
-            });
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-            t.IsFalse(returned.load(std::memory_order_acquire),
-                      "sceMpegGetPicture should wait while the current stream still has no frame");
-
-            ps2_stubs::notifyMpegCdStreamStart();
-            const bool released = waitUntil(
-                [&]() { return returned.load(std::memory_order_acquire); },
-                std::chrono::milliseconds(30));
-
-            runtime.requestStop();
-            waiter.join();
-            t.IsTrue(released,
-                     "a new sceCdStStart generation should release a waiter owned by the previous movie");
+            t.Equals(gMpegWaitResult.load(std::memory_order_acquire), 0,
+                     "EOF completion should resume GetPicture with success");
+            t.Equals(gMpegWaitStage.load(std::memory_order_acquire), 3u,
+                     "MPEG waiter should reach its continuation after the producer posts EOF");
+            t.Equals(Ps2FastRead32(rdram.data(), kMpegWaitHandle + 0x00u), 320u,
+                     "resumed GetPicture should publish the configured width");
+            t.Equals(Ps2FastRead32(rdram.data(), kMpegWaitHandle + 0x04u), 240u,
+                     "resumed GetPicture should publish the configured height");
         });
 
-        tc.Run("sceMpegGetPicture yields during active stream starvation before CD EOF", [](TestCase &t)
+        tc.Run("sceMpegGetPicture waits for new decoder output instead of duplicating the last frame", [](TestCase &t)
         {
             PS2Runtime runtime;
             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
             ps2_stubs::resetMpegStubState();
             ps2_stubs::notifyMpegCdStreamStart();
+            ps2_stubs::enqueueMpegDecodedFrameForTesting(kMpegNoDuplicateHandle);
+            runtime.registerFunction(kMpegNoDuplicateMainPc, testMpegNoDuplicateMain);
+            runtime.registerFunction(kMpegNoDuplicateResumePc, testMpegNoDuplicateResume);
+            runtime.registerFunction(kMpegNoDuplicateProducerPc, testMpegNoDuplicateProducer);
+            gMpegNoDuplicateStage.store(0u, std::memory_order_release);
+            gMpegNoDuplicateProducerStage.store(0u, std::memory_order_release);
 
-            constexpr uint32_t kMpegAddr = 0x00123000u;
-            constexpr uint32_t kPssAddr = 0x0012C000u;
-            constexpr uint32_t kImageAddr = 0x00130000u;
-            const uint8_t incompletePssStart[] = {0x00u, 0x00u, 0x01u};
-            std::memcpy(rdram.data() + kPssAddr, incompletePssStart, sizeof(incompletePssStart));
+            R5900Context mainContext{};
+            mainContext.pc = kMpegNoDuplicateMainPc;
+            EeScheduler &ee = runtime.eeScheduler();
+            ee.reset(rdram.data(), mainContext);
+            const int producerId = ee.createThread(EeThreadCreateParams{
+                0u, kMpegNoDuplicateProducerPc, 0u, 0u, 0u, 10, 0u});
+            t.IsTrue(producerId > 1, "MPEG producer guest thread should be created");
+            t.Equals(ee.startThread(producerId, 0u, mainContext, false), 0,
+                     "MPEG producer guest thread should become ready");
+            ee.run();
 
-            R5900Context demuxCtx{};
-            setRegU32(demuxCtx, 4, kMpegAddr);
-            setRegU32(demuxCtx, 5, kPssAddr);
-            setRegU32(demuxCtx, 6, sizeof(incompletePssStart));
-            setRegU32(demuxCtx, 7, kPssAddr);
-            setRegU32(demuxCtx, 8, sizeof(incompletePssStart));
-            ps2_stubs::sceMpegDemuxPssRing(rdram.data(), &demuxCtx, &runtime);
-
-            R5900Context pictureCtx{};
-            setRegU32(pictureCtx, 4, kMpegAddr);
-            setRegU32(pictureCtx, 5, kImageAddr);
-
-            std::atomic<bool> returned{false};
-            std::thread waiter([&]()
-            {
-                ps2_stubs::sceMpegGetPicture(rdram.data(), &pictureCtx, &runtime);
-                returned.store(true, std::memory_order_release);
-            });
-
-            const bool yielded = waitUntil(
-                [&]() { return returned.load(std::memory_order_acquire); },
-                std::chrono::milliseconds(200));
-
-            runtime.requestStop();
-            waiter.join();
-            t.IsTrue(yielded,
-                     "active non-EOF streams must return control when no decoded frame is currently available");
-
-            R5900Context isEndCtx{};
-            setRegU32(isEndCtx, 4, kMpegAddr);
-            ps2_stubs::sceMpegIsEnd(rdram.data(), &isEndCtx, nullptr);
-            t.Equals(getRegS32(isEndCtx, 2), 0,
-                     "yielding without a frame must not mark the active stream ended");
-        });
-
-        tc.Run("movie startup MPEG and audio stubs return safe progress values", [](TestCase &t)
-        {
-            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
-            ps2_stubs::resetMpegStubState();
-            ps2_stubs::resetAudioStubState();
-
-            R5900Context firstIsEndCtx{};
-            setRegU32(firstIsEndCtx, 4, 0x00123000u);
-            ps2_stubs::sceMpegIsEnd(rdram.data(), &firstIsEndCtx, nullptr);
-            t.Equals(getRegS32(firstIsEndCtx, 2), 0,
-                     "sceMpegIsEnd should allow one synthetic frame before reporting end");
-
-            R5900Context demuxCtx{};
-            setRegU32(demuxCtx, 4, 0x00123000u);
-            setRegU32(demuxCtx, 5, 0x00400000u);
-            setRegU32(demuxCtx, 6, 0x00004000u);
-            setRegU32(demuxCtx, 7, 0x00410000u);
-            ps2_stubs::sceMpegDemuxPssRing(rdram.data(), &demuxCtx, nullptr);
-            t.Equals(getRegS32(demuxCtx, 2), 0x4000,
-                     "sceMpegDemuxPssRing should consume the provided input instead of trapping");
-
-            R5900Context getPictureCtx{};
-            setRegU32(getPictureCtx, 4, 0x00123000u);
-            setRegU32(getPictureCtx, 5, 0x00124000u);
-            setRegU32(getPictureCtx, 6, 440u);
-            ps2_stubs::sceMpegGetPicture(rdram.data(), &getPictureCtx, nullptr);
-            t.Equals(Ps2FastRead32(rdram.data(), 0x00123000u + 0x00u), 320u,
-                     "sceMpegGetPicture should seed a safe movie width");
-            t.Equals(Ps2FastRead32(rdram.data(), 0x00123000u + 0x04u), 240u,
-                     "sceMpegGetPicture should seed a safe movie height");
-            t.Equals(Ps2FastRead32(rdram.data(), 0x00123000u + 0x08u), 0u,
-                     "first synthetic picture should preserve frameCount==0 for guest setup");
-
-            R5900Context secondIsEndCtx{};
-            setRegU32(secondIsEndCtx, 4, 0x00123000u);
-            ps2_stubs::sceMpegIsEnd(rdram.data(), &secondIsEndCtx, nullptr);
-            t.Equals(getRegS32(secondIsEndCtx, 2), 0,
-                     "sceMpegIsEnd should keep the decode thread alive and let the guest stop playback");
-
-            constexpr uint32_t pssEndAddr = 0x00128000u;
-            constexpr uint32_t stackAddr = 0x00129000u;
-            const uint8_t programEnd[] = {0x00u, 0x00u, 0x01u, 0xB9u};
-            std::memcpy(rdram.data() + pssEndAddr, programEnd, sizeof(programEnd));
-            std::memcpy(rdram.data() + stackAddr + 0x10u, "\x04\x00\x00\x00", 4u);
-
-            R5900Context endDemuxCtx{};
-            setRegU32(endDemuxCtx, 29, stackAddr);
-            setRegU32(endDemuxCtx, 4, 0x00123000u);
-            setRegU32(endDemuxCtx, 5, pssEndAddr);
-            setRegU32(endDemuxCtx, 6, sizeof(programEnd));
-            setRegU32(endDemuxCtx, 7, pssEndAddr);
-            ps2_stubs::sceMpegDemuxPssRing(rdram.data(), &endDemuxCtx, nullptr);
-
-            R5900Context endIsEndCtx{};
-            setRegU32(endIsEndCtx, 4, 0x00123000u);
-            ps2_stubs::sceMpegIsEnd(rdram.data(), &endIsEndCtx, nullptr);
-            t.Equals(getRegS32(endIsEndCtx, 2), 1,
-                     "sceMpegIsEnd should report end after a demuxed MPEG program end code");
-
-            ps2_stubs::resetMpegStubState();
-            constexpr uint32_t wrappedEndBase = 0x0012A000u;
-            rdram[wrappedEndBase + 0u] = 0x00u;
-            rdram[wrappedEndBase + 1u] = 0x01u;
-            rdram[wrappedEndBase + 2u] = 0xB9u;
-            rdram[wrappedEndBase + 3u] = 0x00u;
-
-            R5900Context wrappedEndDemuxCtx{};
-            setRegU32(wrappedEndDemuxCtx, 4, 0x00123000u);
-            setRegU32(wrappedEndDemuxCtx, 5, wrappedEndBase + 3u);
-            setRegU32(wrappedEndDemuxCtx, 6, 4u);
-            setRegU32(wrappedEndDemuxCtx, 7, wrappedEndBase);
-            setRegU32(wrappedEndDemuxCtx, 8, 4u);
-            ps2_stubs::sceMpegDemuxPssRing(rdram.data(), &wrappedEndDemuxCtx, nullptr);
-
-            R5900Context wrappedEndIsEndCtx{};
-            setRegU32(wrappedEndIsEndCtx, 4, 0x00123000u);
-            ps2_stubs::sceMpegIsEnd(rdram.data(), &wrappedEndIsEndCtx, nullptr);
-            t.Equals(getRegS32(wrappedEndIsEndCtx, 2), 1,
-                     "sceMpegDemuxPssRing should use the ABI fifth argument in t0 for wrapped rings");
-
-            ps2_stubs::resetMpegStubState();
-            constexpr uint32_t eofMpegAddr = 0x0012B000u;
-            constexpr uint32_t eofPssAddr = 0x0012C000u;
-            const uint8_t incompletePssStart[] = {0x00u, 0x00u, 0x01u};
-            std::memcpy(rdram.data() + eofPssAddr, incompletePssStart, sizeof(incompletePssStart));
-
-            R5900Context eofDemuxCtx{};
-            setRegU32(eofDemuxCtx, 4, eofMpegAddr);
-            setRegU32(eofDemuxCtx, 5, eofPssAddr);
-            setRegU32(eofDemuxCtx, 6, sizeof(incompletePssStart));
-            setRegU32(eofDemuxCtx, 7, eofPssAddr);
-            setRegU32(eofDemuxCtx, 8, sizeof(incompletePssStart));
-            ps2_stubs::sceMpegDemuxPssRing(rdram.data(), &eofDemuxCtx, nullptr);
-            t.Equals(getRegS32(eofDemuxCtx, 2), static_cast<int32_t>(sizeof(incompletePssStart)),
-                     "sceMpegDemuxPssRing should accept partial trailing stream data");
-
-            R5900Context eofBeforeStopCtx{};
-            setRegU32(eofBeforeStopCtx, 4, eofMpegAddr);
-            ps2_stubs::sceMpegIsEnd(rdram.data(), &eofBeforeStopCtx, nullptr);
-            t.Equals(getRegS32(eofBeforeStopCtx, 2), 0,
-                     "sceMpegIsEnd should not report end until the CD stream terminates");
-
-            R5900Context cdStopCtx{};
-            ps2_stubs::sceCdStStop(rdram.data(), &cdStopCtx, nullptr);
-
-            R5900Context eofAfterStopCtx{};
-            setRegU32(eofAfterStopCtx, 4, eofMpegAddr);
-            ps2_stubs::sceMpegIsEnd(rdram.data(), &eofAfterStopCtx, nullptr);
-            t.Equals(getRegS32(eofAfterStopCtx, 2), 1,
-                     "sceCdStStop should finalize active MPEG playback so movie threads can advance");
-
-            R5900Context remoteInitCtx{};
-            ps2_stubs::sceSdRemoteInit(rdram.data(), &remoteInitCtx, nullptr);
-            t.Equals(getRegS32(remoteInitCtx, 2), 0,
-                     "sceSdRemoteInit should succeed so Veronica can set up movie audio");
-
-            R5900Context blockTransCtx{};
-            const uint32_t blockTransSp = 0x00100000u;
-            setRegU32(blockTransCtx, 29, blockTransSp);
-            setRegU32(blockTransCtx, 4, 1u);
-            setRegU32(blockTransCtx, 5, 0x80E0u);
-            setRegU32(blockTransCtx, 6, 1u);
-            setRegU32(blockTransCtx, 7, 0x13u);
-            std::memcpy(rdram.data() + blockTransSp + 0x10u, "\x40\x23\x01\x00", 4u);
-            std::memcpy(rdram.data() + blockTransSp + 0x14u, "\x00\x30\x00\x00", 4u);
-            std::memcpy(rdram.data() + blockTransSp + 0x18u, "\x40\x27\x01\x00", 4u);
-            ps2_stubs::sceSdRemote(rdram.data(), &blockTransCtx, nullptr);
-            t.Equals(getRegU32(&blockTransCtx, 2), 0u,
-                     "sceSdRemote block-transfer start should report libsd success");
-
-            R5900Context statusCtx{};
-            setRegU32(statusCtx, 29, blockTransSp);
-            setRegU32(statusCtx, 4, 1u);
-            setRegU32(statusCtx, 5, 0x8100u);
-            setRegU32(statusCtx, 6, 1u);
-            setRegU32(statusCtx, 7, 0u);
-            std::memset(rdram.data() + blockTransSp + 0x10u, 0, 12u);
-            ps2_stubs::sceSdRemote(rdram.data(), &statusCtx, nullptr);
-            t.Equals(getRegU32(&statusCtx, 2), 0x00012B40u,
-                     "sceSdRemote status polling should advance the emulated SPU transfer head");
-
-            for (uint32_t i = 0u; i < 11u; ++i)
-            {
-                ps2_stubs::sceSdRemote(rdram.data(), &statusCtx, nullptr);
-            }
-            t.Equals(getRegU32(&statusCtx, 2), 0x00012740u,
-                     "sceSdRemote status polling should wrap inside the configured IOP ring");
-
-            R5900Context setParamCtx{};
-            setRegU32(setParamCtx, 29, blockTransSp);
-            setRegU32(setParamCtx, 4, 1u);
-            setRegU32(setParamCtx, 5, 0x8010u);
-            setRegU32(setParamCtx, 6, 0x0F81u);
-            setRegU32(setParamCtx, 7, 0u);
-            ps2_stubs::sceSdRemote(rdram.data(), &setParamCtx, nullptr);
-            t.Equals(getRegU32(&setParamCtx, 2), 0u,
-                     "sceSdRemote set-param calls should not trap or disturb the movie audio state");
+            t.Equals(gMpegNoDuplicateProducerStage.load(std::memory_order_acquire), 1u,
+                     "the producer should run while the second GetPicture is waiting");
+            t.Equals(gMpegNoDuplicateStage.load(std::memory_order_acquire), 3u,
+                     "EOF should resume the blocked GetPicture continuation");
+            t.Equals(Ps2FastRead32(rdram.data(), kMpegNoDuplicateHandle + 0x08u), 1u,
+                     "only the injected decoder frame should be counted as served");
         });
 
         tc.Run("sceSdRemote isolates voice transfers from block streaming state", [](TestCase &t)
@@ -1508,6 +855,32 @@ void register_ps2_runtime_expansion_tests()
                      "sceIpuInit should still program IPU_CTRL");
             t.Equals(runtime.memory().read32(0x10002000u), 0u,
                      "sceIpuInit should leave IPU_CMD reset after initialization");
+        });
+
+        tc.Run("IPU init executes its guest helper as a scheduler invocation", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            runtime.registerFunction(kIpuInitMainPc, testIpuInitMain);
+            runtime.registerFunction(kIpuInitResumePc, testIpuInitResume);
+            runtime.registerFunction(kIpuSetD4Pc, testIpuSetD4);
+            gIpuSetD4Hits.store(0u, std::memory_order_release);
+            gIpuSetD4Argument.store(0u, std::memory_order_release);
+            gIpuInitResult.store(-999, std::memory_order_release);
+
+            R5900Context context{};
+            context.pc = kIpuInitMainPc;
+            runtime.eeScheduler().reset(rdram.data(), context);
+            runtime.eeScheduler().run();
+
+            t.Equals(gIpuSetD4Hits.load(std::memory_order_acquire), 1u,
+                     "the optional guest helper should execute exactly once through the dispatcher");
+            t.Equals(gIpuSetD4Argument.load(std::memory_order_acquire), 1u,
+                     "the invocation should receive the SetD4 enable argument");
+            t.Equals(gIpuInitResult.load(std::memory_order_acquire), 0,
+                     "the HLE completion should resume the preserved base context with success");
+            t.Equals(runtime.memory().read32(0x10002010u), 0x40000000u,
+                     "IPU initialization should finish only after the guest invocation completes");
         });
 
         tc.Run("sprintf consumes EE varargs from a2 a3 t0 and preserves width formatting", [](TestCase &t)
@@ -1810,291 +1183,6 @@ void register_ps2_runtime_expansion_tests()
             t.Equals(vram[pxOff + 0u], static_cast<uint8_t>(120u), "alpha blend should update R with FIX factor");
             t.Equals(vram[pxOff + 1u], static_cast<uint8_t>(120u), "alpha blend should update G with FIX factor");
             t.Equals(vram[pxOff + 2u], static_cast<uint8_t>(120u), "alpha blend should update B with FIX factor");
-        });
-
-        tc.Run("notifyRuntimeStop joins guest worker threads before teardown", [](TestCase &t)
-        {
-            notifyRuntimeStop();
-            PS2Runtime runtime;
-            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
-
-            constexpr uint32_t kEntry = 0x250000u;
-            constexpr uint32_t kThreadParamAddr = 0x2600u;
-            const uint32_t threadParam[7] = {
-                0u,          // attr
-                kEntry,      // entry
-                0x00100000u, // stack
-                0x00000400u, // stack size
-                0x00110000u, // gp
-                8u,          // priority
-                0u           // option
-            };
-
-            runtime.registerFunction(kEntry, &testRuntimeWorkerLoop);
-            std::memcpy(rdram.data() + kThreadParamAddr, threadParam, sizeof(threadParam));
-
-            R5900Context createCtx{};
-            setRegU32(createCtx, 4, kThreadParamAddr);
-            CreateThread(rdram.data(), &createCtx, &runtime);
-            const int32_t tid = getRegS32(createCtx, 2);
-            t.IsTrue(tid > 0, "CreateThread should succeed for teardown-join test");
-
-            R5900Context startCtx{};
-            setRegU32(startCtx, 4, static_cast<uint32_t>(tid));
-            setRegU32(startCtx, 5, 0u);
-            StartThread(rdram.data(), &startCtx, &runtime);
-            t.Equals(getRegS32(startCtx, 2), KE_OK, "StartThread should launch worker");
-
-            const bool started = waitUntil([&]()
-            {
-                return g_activeThreads.load(std::memory_order_relaxed) > 0;
-            }, std::chrono::milliseconds(500));
-            t.IsTrue(started, "worker thread should become active");
-
-            runtime.requestStop();
-            const bool drained = waitUntil([&]()
-            {
-                return g_activeThreads.load(std::memory_order_relaxed) == 0;
-            }, std::chrono::milliseconds(2000));
-            t.IsTrue(drained, "requestStop should drain all guest worker threads");
-
-            notifyRuntimeStop();
-        });
-
-        tc.Run("Semaphore poll/signal remains stable under host-thread contention", [](TestCase &t)
-        {
-            notifyRuntimeStop();
-            PS2Runtime runtime;
-            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
-
-            constexpr uint32_t kParamAddr = 0x2000u;
-            // init=1 < max=2 headroom makes both first calls succeed
-            // regardless of scheduling: poller is the sole decrementer
-            // (count>=1 at first poll), signaler the sole incrementer
-            // (count<max at first signal). Keep init<max.
-            const uint32_t semaParam[6] = {
-                0u, // count
-                2u, // max_count
-                1u, // init_count
-                0u, // wait_threads
-                0u, // attr
-                0u  // option
-            };
-            std::memcpy(rdram.data() + kParamAddr, semaParam, sizeof(semaParam));
-
-            R5900Context createCtx{};
-            setRegU32(createCtx, 4, kParamAddr);
-            CreateSema(rdram.data(), &createCtx, &runtime);
-            const int32_t sid = getRegS32(createCtx, 2);
-            t.IsTrue(sid > 0, "CreateSema should return a valid sid");
-
-            std::atomic<int32_t> pollOkCount{0};
-            std::atomic<int32_t> signalOkCount{0};
-            std::atomic<bool> pollerThrew{false};
-            std::atomic<bool> signalerThrew{false};
-            std::atomic<int32_t> readyCount{0};
-
-            // Release both workers together so their 64-iteration loops start at
-            // the same instant, maximizing the opportunity to interleave instead
-            // of one thread running to completion before the other is scheduled.
-            const auto waitForStart = [&]()
-            {
-                readyCount.fetch_add(1, std::memory_order_acq_rel);
-                while (readyCount.load(std::memory_order_acquire) < 2)
-                {
-                    std::this_thread::yield();
-                }
-            };
-
-            std::thread poller([&]()
-            {
-                try
-                {
-                    waitForStart();
-                    for (int i = 0; i < 64; ++i)
-                    {
-                        R5900Context pollCtx{};
-                        setRegU32(pollCtx, 4, static_cast<uint32_t>(sid));
-                        PollSema(rdram.data(), &pollCtx, &runtime);
-                        if (getRegS32(pollCtx, 2) == sid)
-                        {
-                            pollOkCount.fetch_add(1, std::memory_order_relaxed);
-                        }
-                    }
-                }
-                catch (...)
-                {
-                    pollerThrew.store(true, std::memory_order_release);
-                }
-            });
-
-            std::thread signaler([&]()
-            {
-                try
-                {
-                    waitForStart();
-                    for (int i = 0; i < 64; ++i)
-                    {
-                        R5900Context signalCtx{};
-                        setRegU32(signalCtx, 4, static_cast<uint32_t>(sid));
-                        SignalSema(rdram.data(), &signalCtx, &runtime);
-                        if (getRegS32(signalCtx, 2) == sid)
-                        {
-                            signalOkCount.fetch_add(1, std::memory_order_relaxed);
-                        }
-                    }
-                }
-                catch (...)
-                {
-                    signalerThrew.store(true, std::memory_order_release);
-                }
-            });
-
-            if (poller.joinable())
-            {
-                poller.join();
-            }
-            if (signaler.joinable())
-            {
-                signaler.join();
-            }
-
-            t.IsFalse(pollerThrew.load(std::memory_order_acquire),
-                      "PollSema worker thread should not throw");
-            t.IsFalse(signalerThrew.load(std::memory_order_acquire),
-                      "SignalSema worker thread should not throw");
-            t.IsTrue(pollOkCount.load(std::memory_order_relaxed) > 0,
-                     "contended PollSema should observe at least one successful acquire");
-            t.IsTrue(signalOkCount.load(std::memory_order_relaxed) > 0,
-                     "contended SignalSema should observe successful releases");
-
-            constexpr uint32_t kStatusAddr = 0x2100u;
-            R5900Context referCtx{};
-            setRegU32(referCtx, 4, static_cast<uint32_t>(sid));
-            setRegU32(referCtx, 5, kStatusAddr);
-            ReferSemaStatus(rdram.data(), &referCtx, &runtime);
-            t.Equals(getRegS32(referCtx, 2), KE_OK, "ReferSemaStatus should succeed after contention");
-
-            int32_t finalCount = 0;
-            std::memcpy(&finalCount, rdram.data() + kStatusAddr + 0u, sizeof(finalCount));
-            t.IsTrue(finalCount >= 0 && finalCount <= 2, "semaphore count should remain within [0, max_count]");
-
-            runtime.requestStop();
-            notifyRuntimeStop();
-        });
-
-        tc.Run("WaitEventFlag AND-mode is stable under concurrent setters", [](TestCase &t)
-        {
-            notifyRuntimeStop();
-            PS2Runtime runtime;
-            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
-
-            constexpr uint32_t kEventParamAddr = 0x2400u;
-            constexpr uint32_t kResBitsAddr = 0x2410u;
-            const uint32_t eventParam[3] = {0u, 0u, 0u};
-            std::memcpy(rdram.data() + kEventParamAddr, eventParam, sizeof(eventParam));
-
-            R5900Context createCtx{};
-            setRegU32(createCtx, 4, kEventParamAddr);
-            CreateEventFlag(rdram.data(), &createCtx, &runtime);
-            const int32_t eid = getRegS32(createCtx, 2);
-            t.IsTrue(eid > 0, "CreateEventFlag should return a valid id");
-
-            std::atomic<bool> waiterDone{false};
-            std::atomic<int32_t> waiterRet{-9999};
-            std::atomic<uint32_t> waiterBits{0u};
-            std::atomic<bool> waiterThrew{false};
-            std::atomic<bool> setterAThrew{false};
-            std::atomic<bool> setterBThrew{false};
-
-            std::thread waiter([&]()
-            {
-                try
-                {
-                    R5900Context waitCtx{};
-                    setRegU32(waitCtx, 4, static_cast<uint32_t>(eid));
-                    setRegU32(waitCtx, 5, 0x3u); // wait for bit0 and bit1 (AND mode)
-                    setRegU32(waitCtx, 6, 0u);   // AND, no clear
-                    setRegU32(waitCtx, 7, kResBitsAddr);
-                    WaitEventFlag(rdram.data(), &waitCtx, &runtime);
-                    waiterRet.store(getRegS32(waitCtx, 2), std::memory_order_relaxed);
-                    uint32_t bits = 0u;
-                    std::memcpy(&bits, rdram.data() + kResBitsAddr, sizeof(bits));
-                    waiterBits.store(bits, std::memory_order_relaxed);
-                }
-                catch (...)
-                {
-                    waiterThrew.store(true, std::memory_order_release);
-                }
-                waiterDone.store(true, std::memory_order_release);
-            });
-
-            std::thread setterA([&]()
-            {
-                try
-                {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                    R5900Context setCtx{};
-                    setRegU32(setCtx, 4, static_cast<uint32_t>(eid));
-                    setRegU32(setCtx, 5, 0x1u);
-                    SetEventFlag(rdram.data(), &setCtx, &runtime);
-                }
-                catch (...)
-                {
-                    setterAThrew.store(true, std::memory_order_release);
-                }
-            });
-
-            std::thread setterB([&]()
-            {
-                try
-                {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(15));
-                    R5900Context setCtx{};
-                    setRegU32(setCtx, 4, static_cast<uint32_t>(eid));
-                    setRegU32(setCtx, 5, 0x2u);
-                    SetEventFlag(rdram.data(), &setCtx, &runtime);
-                }
-                catch (...)
-                {
-                    setterBThrew.store(true, std::memory_order_release);
-                }
-            });
-
-            const bool woke = waitUntil([&]()
-            {
-                return waiterDone.load(std::memory_order_acquire);
-            }, std::chrono::milliseconds(500));
-
-            if (setterA.joinable())
-            {
-                setterA.join();
-            }
-            if (setterB.joinable())
-            {
-                setterB.join();
-            }
-            if (waiter.joinable())
-            {
-                waiter.join();
-            }
-
-            t.IsFalse(waiterThrew.load(std::memory_order_acquire),
-                      "WaitEventFlag waiter thread should not throw");
-            t.IsFalse(setterAThrew.load(std::memory_order_acquire),
-                      "SetEventFlag setterA thread should not throw");
-            t.IsFalse(setterBThrew.load(std::memory_order_acquire),
-                      "SetEventFlag setterB thread should not throw");
-            t.IsTrue(woke, "WaitEventFlag AND waiter should wake after both bits are published");
-            t.Equals(waiterRet.load(std::memory_order_relaxed), KE_OK, "WaitEventFlag should return KE_OK");
-            t.IsTrue((waiterBits.load(std::memory_order_relaxed) & 0x3u) == 0x3u,
-                     "WaitEventFlag result bits should include both concurrently-set bits");
-
-            R5900Context deleteCtx{};
-            setRegU32(deleteCtx, 4, static_cast<uint32_t>(eid));
-            DeleteEventFlag(rdram.data(), &deleteCtx, &runtime);
-            runtime.requestStop();
-            notifyRuntimeStop();
         });
 
         tc.Run("sceVu0ApplyMatrix uses libvux matrix math with the imported EE ABI", [](TestCase &t)

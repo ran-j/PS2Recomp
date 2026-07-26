@@ -3,6 +3,7 @@
 #include "ps2_iop_transport.h"
 #include "ps2_syscalls.h"
 #include "ps2_stubs.h"
+#include "runtime/ee_scheduler.h"
 
 #include <array>
 #include <cstdint>
@@ -112,6 +113,13 @@ namespace
     uint32_t g_dmacHandlerValue = 0u;
     uint32_t g_dmacHandlerLastCause = 0u;
     uint32_t g_dmacHandlerLastArg = 0u;
+    int32_t g_sifDmaResult = 0;
+
+    constexpr uint32_t kSchedulerSifDmaEntryPc = 0x00101000u;
+    constexpr uint32_t kSchedulerSifDmaResumePc = 0x00101010u;
+    constexpr uint32_t kSchedulerSifDmaHandlerPc = 0x00101020u;
+    constexpr uint32_t kSchedulerSifDmaDescAddr = 0x00020300u;
+    constexpr uint32_t kSchedulerSifDmaHandlerArg = 0x12345678u;
 
     void testDmacHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
@@ -123,6 +131,28 @@ namespace
             writeGuestU32(rdram, g_dmacHandlerWriteAddr, g_dmacHandlerValue);
         }
         ctx->pc = 0u;
+    }
+
+    void schedulerSifDmaEntry(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        runtime->eeScheduler().addIrqHandler(true,
+                                             5u,
+                                             kSchedulerSifDmaHandlerPc,
+                                             true,
+                                             kSchedulerSifDmaHandlerArg,
+                                             0u,
+                                             0u);
+        setRegU32(*ctx, 4, kSchedulerSifDmaDescAddr);
+        setRegU32(*ctx, 5, 1u);
+        ctx->pc = kSchedulerSifDmaResumePc;
+        ps2_stubs::sceSifSetDma(rdram, ctx, runtime);
+    }
+
+    void schedulerSifDmaResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_sifDmaResult = getRegS32(*ctx, 2);
+        ctx->pc = 0u;
+        runtime->requestStop();
     }
 }
 
@@ -205,30 +235,18 @@ void register_ps2_sif_dma_tests()
         {
             TestEnv env;
 
-            constexpr uint32_t kDescAddr = 0x00020300u;
             constexpr uint32_t kSrcAddr = 0x00020400u;
             constexpr uint32_t kDstAddr = 0x00020500u;
-            constexpr uint32_t kHandlerAddr = 0x00100000u;
             constexpr uint32_t kHandlerWriteAddr = 0x00020600u;
-            constexpr uint32_t kHandlerArg = 0x12345678u;
 
             g_dmacHandlerWriteAddr = kHandlerWriteAddr;
             g_dmacHandlerValue = 0xCAFEBABEu;
             g_dmacHandlerLastCause = 0u;
             g_dmacHandlerLastArg = 0u;
-            env.runtime.registerFunction(kHandlerAddr, &testDmacHandler);
-
-            setRegU32(env.ctx, 4, 5u);
-            setRegU32(env.ctx, 5, kHandlerAddr);
-            setRegU32(env.ctx, 6, 0u);
-            setRegU32(env.ctx, 7, kHandlerArg);
-            ps2_syscalls::AddDmacHandler(env.rdram.data(), &env.ctx, &env.runtime);
-            const int32_t handlerId = getRegS32(env.ctx, 2);
-            t.IsTrue(handlerId > 0, "AddDmacHandler should register a handler");
-
-            setRegU32(env.ctx, 4, 5u);
-            ps2_syscalls::EnableDmac(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), 0, "EnableDmac should succeed");
+            g_sifDmaResult = 0;
+            env.runtime.registerFunction(kSchedulerSifDmaEntryPc, schedulerSifDmaEntry);
+            env.runtime.registerFunction(kSchedulerSifDmaResumePc, schedulerSifDmaResume);
+            env.runtime.registerFunction(kSchedulerSifDmaHandlerPc, testDmacHandler);
 
             std::array<uint8_t, 16> payload{};
             for (size_t i = 0; i < payload.size(); ++i)
@@ -242,17 +260,19 @@ void register_ps2_sif_dma_tests()
                 kDstAddr,
                 static_cast<int32_t>(payload.size()),
                 0};
-            std::memcpy(env.rdram.data() + kDescAddr, &desc, sizeof(desc));
+            std::memcpy(env.rdram.data() + kSchedulerSifDmaDescAddr, &desc, sizeof(desc));
 
-            setRegU32(env.ctx, 4, kDescAddr);
-            setRegU32(env.ctx, 5, 1u);
-            ps2_stubs::sceSifSetDma(env.rdram.data(), &env.ctx, &env.runtime);
+            R5900Context mainContext{};
+            mainContext.pc = kSchedulerSifDmaEntryPc;
+            env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+            env.runtime.eeScheduler().run();
 
-            t.IsTrue(getRegS32(env.ctx, 2) > 0, "sceSifSetDma should still report success");
+            t.IsTrue(g_sifDmaResult > 0, "sceSifSetDma should still report success");
             t.Equals(readGuestU32(env.rdram.data(), kHandlerWriteAddr), g_dmacHandlerValue,
-                     "sceSifSetDma should invoke registered DMAC handlers");
+                     "the scheduler should execute the queued DMAC invocation");
             t.Equals(g_dmacHandlerLastCause, 5u, "DMAC handler should observe cause 5");
-            t.Equals(g_dmacHandlerLastArg, kHandlerArg, "DMAC handler should receive registered argument");
+            t.Equals(g_dmacHandlerLastArg, kSchedulerSifDmaHandlerArg,
+                     "DMAC handler should receive registered argument");
         });
 
         tc.Run("sceSifSetDma acknowledges DTX work-buffer transfers by advancing the EE footer ticket", [](TestCase &t)

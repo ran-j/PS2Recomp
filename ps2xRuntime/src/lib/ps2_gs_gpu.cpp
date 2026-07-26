@@ -617,7 +617,7 @@ void GS::recordDebugEventUnlocked(GSDebugHistoryEntry entry)
         return;
     }
 
-    const uint64_t tick = ps2_syscalls::GetCurrentVSyncTick();
+    const uint64_t tick = m_privRegs ? m_privRegs->vsyncTick.load(std::memory_order_acquire) : 0u;
     if (m_debugLastVsyncTick == UINT64_MAX)
     {
         m_debugLastVsyncTick = tick;
@@ -960,7 +960,7 @@ void GS::latchHostPresentationFrameUnlocked()
     const GSPmodeState pmode = decodePmode(m_privRegs->pmode);
     const GSSmode2State smode2 = decodeSMode2(m_privRegs->smode2);
     const bool applyFieldMode = smode2.interlaced && !smode2.frameMode;
-    const bool oddField = (ps2_syscalls::GetCurrentVSyncTick() & 1ull) != 0ull;
+    const bool oddField = (m_privRegs->vsyncTick.load(std::memory_order_acquire) & 1ull) != 0ull;
     const GSFrameReg displayFrame1 = decodeDisplayFrame(m_privRegs->dispfb1);
     const GSFrameReg displayFrame2 = decodeDisplayFrame(m_privRegs->dispfb2);
     const GSDisplayReadOrigin displayOrigin1 = decodeDisplayReadOrigin(m_privRegs->dispfb1);

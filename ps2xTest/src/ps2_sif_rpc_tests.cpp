@@ -1,8 +1,10 @@
 #include "MiniTest.h"
 #include "ps2_runtime.h"
+#include "ps2_runtime_macros.h"
 #include "ps2_iop_transport.h"
 #include "ps2_syscalls.h"
 #include "ps2_stubs.h"
+#include "runtime/ee_scheduler.h"
 
 #include <array>
 #include <atomic>
@@ -161,6 +163,13 @@ namespace
 
     constexpr uint32_t K_DTX_DISPATCH_RESULT_ADDR = 0x0002D800u;
     constexpr uint32_t K_DTX_DISPATCH_RESULT_MARKER = 0xD15CA7C1u;
+    constexpr uint32_t K_DTX_SCHEDULER_CALL = 0x00102000u;
+    constexpr uint32_t K_DTX_SCHEDULER_RESUME = 0x00102010u;
+    uint32_t g_schedulerRpcClient = 0u;
+    uint32_t g_schedulerRpcNumber = 0u;
+    uint32_t g_schedulerRpcSend = 0u;
+    uint32_t g_schedulerRpcReceive = 0u;
+    uint32_t g_schedulerRpcResult = 0u;
 
     void lotrSoundEndCallbackShouldNotRun(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
@@ -176,6 +185,27 @@ namespace
         (void)runtime;
         ++g_recvxSoundCallbackHits;
         ctx->pc = ::getRegU32(ctx, 31);
+    }
+
+    void schedulerDtxRpcCall(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        SET_GPR_U32(ctx, 4, g_schedulerRpcClient);
+        SET_GPR_U32(ctx, 5, g_schedulerRpcNumber);
+        SET_GPR_U32(ctx, 6, 0u);
+        SET_GPR_U32(ctx, 7, g_schedulerRpcSend);
+        SET_GPR_U32(ctx, 8, 8u);
+        SET_GPR_U32(ctx, 9, g_schedulerRpcReceive);
+        SET_GPR_U32(ctx, 10, sizeof(uint32_t));
+        SET_GPR_U32(ctx, 11, 0u);
+        ctx->pc = K_DTX_SCHEDULER_RESUME;
+        SifCallRpc(rdram, ctx, runtime);
+    }
+
+    void schedulerDtxRpcResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_schedulerRpcResult = ::getRegU32(ctx, 2);
+        ctx->pc = 0u;
+        runtime->requestStop();
     }
 
     void recvxDtxDispatcher(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1156,7 +1186,22 @@ void register_ps2_sif_rpc_tests()
 
             writeGuestU32(env.rdram.data(), kFnTableSlot, kRegisteredHandlerAddr);
             writeGuestU32(env.rdram.data(), kRecvAddr, 0u);
-            callUrpc();
+            env.runtime.registerFunction(K_DTX_SCHEDULER_CALL, schedulerDtxRpcCall);
+            env.runtime.registerFunction(K_DTX_SCHEDULER_RESUME, schedulerDtxRpcResume);
+            g_schedulerRpcClient = kClientAddr;
+            g_schedulerRpcNumber = kRpcNum;
+            g_schedulerRpcSend = kSendAddr;
+            g_schedulerRpcReceive = kRecvAddr;
+            g_schedulerRpcResult = static_cast<uint32_t>(-1);
+            R5900Context mainContext{};
+            mainContext.pc = K_DTX_SCHEDULER_CALL;
+            setRegU32(mainContext, 29, K_STACK_ADDR);
+            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x00u, 0u);
+            env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+            env.runtime.eeScheduler().run();
+
+            t.Equals(g_schedulerRpcResult, static_cast<uint32_t>(KE_OK),
+                     "DTX URPC should resume its base context with KE_OK");
 
             t.Equals(g_dtxDispatcherHits.load(), 1u,
                      "registered DTX function-table slot should enter the guest dispatcher");

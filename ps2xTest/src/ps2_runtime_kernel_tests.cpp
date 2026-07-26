@@ -3,27 +3,15 @@
 #include "ps2_runtime_macros.h"
 #include "ps2_syscalls.h"
 #include "ps2_stubs.h"
+#include "runtime/ee_scheduler.h"
 
-#include <chrono>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <sstream>
 #include <thread>
 #include <vector>
-
-// g_currentThreadId is an `inline thread_local int` defined in the kernel's
-// internal State.h (ps2xRuntime/.../Kernel/Syscalls/Helpers/State.h, default 1).
-// Only sub-case H of the semaphore-return-value test reaches into it: the worker
-// thread sets its own guest tid so ReleaseWaitThread(tid) can target the exact
-// ThreadInfo that the worker's WaitSema put into THS_WAIT.
-//
-// ODR-safety: this declaration MUST stay byte-for-byte type-compatible with that
-// definition (`thread_local int`, same name, no namespace). It is an `extern`
-// declaration of an existing inline thread_local, NOT a second definition, so the
-// linker binds to the runtime's instance. If the runtime ever changes the type or
-// moves it into a namespace, update this line in lockstep or the build will break.
-extern thread_local int g_currentThreadId;
 
 using namespace ps2_syscalls;
 
@@ -51,11 +39,7 @@ namespace
     constexpr uint32_t TSW_SEMA = 2u;
     constexpr uint32_t TSW_EVENT = 3u;
 
-    constexpr uint32_t K_EVENT_WAIT_READY_ADDR = 0x1800u;
-    constexpr uint32_t K_EVENT_WAIT_GATE_ADDR = 0x1804u;
-    constexpr uint32_t K_TERMINATE_SEMA_WAIT_READY_ADDR = 0x1810u;
-
-    struct EeThreadStatus
+    struct EeThreadStatusAbi
     {
         int32_t status;
         uint32_t func;
@@ -71,6 +55,19 @@ namespace
         uint32_t wakeupCount;
     };
 
+    struct EeThreadCreateAbi
+    {
+        int32_t status;
+        uint32_t func;
+        uint32_t stack;
+        int32_t stack_size;
+        uint32_t gp_reg;
+        int32_t initial_priority;
+        int32_t current_priority;
+        uint32_t attr;
+        uint32_t option;
+    };
+
     struct EeSemaStatus
     {
         int32_t count;
@@ -81,7 +78,8 @@ namespace
         uint32_t option;
     };
 
-    static_assert(sizeof(EeThreadStatus) == 0x30u, "Unexpected ee_thread_status_t size.");
+    static_assert(sizeof(EeThreadStatusAbi) == 0x30u, "Unexpected ee_thread_status_t size.");
+    static_assert(sizeof(EeThreadCreateAbi) == 0x24u, "Unexpected ee_thread_t size.");
     static_assert(sizeof(EeSemaStatus) == 0x18u, "Unexpected ee_sema_t size.");
 
     void setRegU32(R5900Context &ctx, int reg, uint32_t value)
@@ -112,21 +110,6 @@ namespace
         uint32_t value = 0;
         std::memcpy(&value, rdram + addr, sizeof(value));
         return value;
-    }
-
-    template <typename Predicate>
-    bool waitUntil(Predicate pred, std::chrono::milliseconds timeout)
-    {
-        const auto deadline = std::chrono::steady_clock::now() + timeout;
-        while (std::chrono::steady_clock::now() < deadline)
-        {
-            if (pred())
-            {
-                return true;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-        return pred();
     }
 
     bool callSyscall(uint32_t syscallNumber, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -189,47 +172,363 @@ namespace
         ctx->pc = ::getRegU32(ctx, 31);
     }
 
-    void waitEventAfterSuspendHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    constexpr uint32_t K_OVERRIDE_ENTRY = 0x300500u;
+    constexpr uint32_t K_OVERRIDE_RESUME = 0x300504u;
+    constexpr uint32_t K_OVERRIDE_BLOCK_ENTRY = 0x300510u;
+    constexpr uint32_t K_OVERRIDE_BLOCK_HANDLER = 0x300520u;
+    constexpr uint32_t K_OVERRIDE_BLOCK_HANDLER_RESUME = 0x300524u;
+    constexpr uint32_t K_OVERRIDE_BLOCK_DRIVER = 0x300530u;
+    constexpr uint32_t K_OVERRIDE_BLOCK_BASE_RESUME = 0x300540u;
+    constexpr uint32_t K_EXIT_MAIN = 0x300600u;
+    constexpr uint32_t K_EXIT_HANDLER_A = 0x300610u;
+    constexpr uint32_t K_EXIT_HANDLER_B = 0x300620u;
+    constexpr uint32_t K_EXIT_OBSERVER = 0x300630u;
+    uint32_t gOverrideSyscall = 0u;
+    R5900Context gOverrideResult{};
+    std::vector<int> gInvocationTrace;
+
+    void schedulerOverrideEntry(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        if (!rdram || !ctx)
-        {
-            return;
-        }
+        ctx->pc = K_OVERRIDE_RESUME;
+        runtime->handleSyscall(rdram, ctx, gOverrideSyscall);
+    }
 
-        writeGuestU32(rdram, K_EVENT_WAIT_READY_ADDR, 1u);
-        while (readGuestU32(rdram, K_EVENT_WAIT_GATE_ADDR) == 0u)
-        {
-            if (runtime && runtime->isStopRequested())
-            {
-                ctx->pc = 0u;
-                return;
-            }
-            std::this_thread::yield();
-        }
+    void schedulerOverrideResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gOverrideResult = *ctx;
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
 
-        const uint32_t eid = ::getRegU32(ctx, 4);
-        setRegU32(*ctx, 4, eid);
-        setRegU32(*ctx, 5, 0x4u);
-        setRegU32(*ctx, 6, 1u);
-        setRegU32(*ctx, 7, 0u);
-        WaitEventFlag(rdram, ctx, runtime);
+    void schedulerBlockingOverrideEntry(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gInvocationTrace.push_back(1);
+        EeThreadCreateParams driver{};
+        driver.entry = K_OVERRIDE_BLOCK_DRIVER;
+        driver.stack = 0x1E000u;
+        driver.stackSize = 0x1000u;
+        driver.priority = 10;
+        const int driverId = runtime->eeScheduler().createThread(driver);
+        runtime->eeScheduler().startThread(driverId, 0u, *ctx, false);
+        ctx->pc = K_OVERRIDE_BLOCK_BASE_RESUME;
+        runtime->handleSyscall(rdram, ctx, gOverrideSyscall);
+    }
+
+    void schedulerBlockingOverrideHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gInvocationTrace.push_back(2);
+        ctx->pc = K_OVERRIDE_BLOCK_HANDLER_RESUME;
+        SleepThread(rdram, ctx, runtime);
+    }
+
+    void schedulerBlockingOverrideHandlerResume(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        gInvocationTrace.push_back(4);
+        setReturnU32(ctx, 0xB10C0EDu);
         ctx->pc = 0u;
     }
 
-    void waitSemaUntilTerminatedHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void schedulerBlockingOverrideDriver(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
     {
-        if (!rdram || !ctx)
-        {
-            return;
-        }
-
-        writeGuestU32(rdram, K_TERMINATE_SEMA_WAIT_READY_ADDR, 1u);
-        WaitSema(rdram, ctx, runtime);
+        gInvocationTrace.push_back(3);
         ctx->pc = 0u;
+        runtime->eeScheduler().wakeupThread(EeScheduler::kMainThreadId, false);
+        runtime->eeScheduler().transferIfRequested(false);
+    }
+
+    void schedulerBlockingOverrideBaseResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gInvocationTrace.push_back(5);
+        gOverrideResult = *ctx;
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
+    void schedulerExitHandlerA(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        gInvocationTrace.push_back(getRegS32(*ctx, 4));
+        ctx->pc = 0u;
+    }
+
+    void schedulerExitHandlerB(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        gInvocationTrace.push_back(getRegS32(*ctx, 4));
+        ctx->pc = 0u;
+    }
+
+    void schedulerExitObserver(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const GuestThread *main = runtime->eeScheduler().thread(EeScheduler::kMainThreadId);
+        gInvocationTrace.push_back(main && main->status == EeThreadStatus::Dormant ? 40 : -40);
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
+    void schedulerExitMain(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gInvocationTrace.push_back(10);
+        EeThreadCreateParams observer{};
+        observer.entry = K_EXIT_OBSERVER;
+        observer.stack = 0x1F000u;
+        observer.stackSize = 0x1000u;
+        observer.priority = 10;
+        const int observerId = runtime->eeScheduler().createThread(observer);
+        runtime->eeScheduler().startThread(observerId, 0u, *ctx, false);
+        runtime->addEeExitHandler(EeScheduler::kMainThreadId, K_EXIT_HANDLER_A, 20u);
+        runtime->addEeExitHandler(EeScheduler::kMainThreadId, K_EXIT_HANDLER_B, 30u);
+        ExitThread(rdram, ctx, runtime);
     }
 
     void alarmNoopHandler(uint8_t *, R5900Context *ctx, PS2Runtime *)
     {
+        ctx->pc = 0u;
+    }
+
+    constexpr uint32_t K_SCHED_MAIN = 0x300000u;
+    constexpr uint32_t K_SCHED_A = 0x300100u;
+    constexpr uint32_t K_SCHED_A_RESUME = 0x300104u;
+    constexpr uint32_t K_SCHED_B = 0x300200u;
+    constexpr uint32_t K_SCHED_B_RESUME = 0x300204u;
+    constexpr uint32_t K_SCHED_HIGH = 0x300300u;
+    constexpr uint32_t K_SCHED_SIGNAL = 0x300400u;
+    constexpr uint32_t K_SCHED_SIGNAL_RESUME = 0x300404u;
+
+    std::vector<int> *gSchedulerTrace = nullptr;
+    int gSchedulerCreatedId = 0;
+    int gSchedulerSemaphoreId = 0;
+    int gSchedulerWaitResultA = 0;
+    int gSchedulerWaitResultB = 0;
+    std::atomic<int> gGuestActive{0};
+    std::atomic<int> gGuestMaxActive{0};
+    std::atomic<size_t> gGuestExecutorHash{0u};
+    std::atomic<bool> gGuestExecutorMismatch{false};
+    std::atomic<bool> gGuestExecutingFlagMissing{false};
+
+    struct GuestExecutionProbe
+    {
+        explicit GuestExecutionProbe(PS2Runtime *runtime)
+        {
+            const int active = gGuestActive.fetch_add(1, std::memory_order_acq_rel) + 1;
+            int maximum = gGuestMaxActive.load(std::memory_order_acquire);
+            while (active > maximum &&
+                   !gGuestMaxActive.compare_exchange_weak(maximum, active, std::memory_order_acq_rel))
+            {
+            }
+            const size_t hash = std::hash<std::thread::id>{}(std::this_thread::get_id());
+            size_t expected = 0u;
+            if (!gGuestExecutorHash.compare_exchange_strong(expected, hash, std::memory_order_acq_rel) &&
+                expected != hash)
+            {
+                gGuestExecutorMismatch.store(true, std::memory_order_release);
+            }
+            if (!runtime->eeScheduler().isExecutingGuest())
+            {
+                gGuestExecutingFlagMissing.store(true, std::memory_order_release);
+            }
+        }
+
+        ~GuestExecutionProbe()
+        {
+            gGuestActive.fetch_sub(1, std::memory_order_acq_rel);
+        }
+    };
+
+    void schedulerMainExit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        GuestExecutionProbe probe(runtime);
+        gSchedulerTrace->push_back(1);
+        ExitThread(rdram, ctx, runtime);
+    }
+
+    void schedulerTraceA(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        GuestExecutionProbe probe(runtime);
+        gSchedulerTrace->push_back(10);
+        ctx->pc = 0u;
+        if (gSchedulerTrace->size() >= 4u)
+        {
+            runtime->requestStop();
+        }
+    }
+
+    void schedulerTraceB(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        GuestExecutionProbe probe(runtime);
+        gSchedulerTrace->push_back(20);
+        ctx->pc = 0u;
+        if (gSchedulerTrace->size() >= 4u)
+        {
+            runtime->requestStop();
+        }
+    }
+
+    void schedulerRotateA(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gSchedulerTrace->push_back(10);
+        ctx->pc = K_SCHED_A_RESUME;
+        setRegU32(*ctx, 4, 5u);
+        RotateThreadReadyQueue(rdram, ctx, runtime);
+    }
+
+    void schedulerRotateAResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gSchedulerTrace->push_back(11);
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
+    void schedulerPreemptLow(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gSchedulerTrace->push_back(30);
+        ctx->pc = K_SCHED_A_RESUME;
+        setRegU32(*ctx, 4, static_cast<uint32_t>(gSchedulerCreatedId));
+        setRegU32(*ctx, 5, 0u);
+        StartThread(rdram, ctx, runtime);
+    }
+
+    void schedulerPreemptLowResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gSchedulerTrace->push_back(31);
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
+    void schedulerHigh(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        gSchedulerTrace->push_back(5);
+        ctx->pc = 0u;
+    }
+
+    void schedulerWaitA(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (ctx->pc == K_SCHED_A)
+        {
+            gSchedulerTrace->push_back(10);
+            ctx->pc = K_SCHED_A_RESUME;
+            setRegU32(*ctx, 4, static_cast<uint32_t>(gSchedulerSemaphoreId));
+            WaitSema(rdram, ctx, runtime);
+            return;
+        }
+        gSchedulerWaitResultA = getRegS32(*ctx, 2);
+        gSchedulerTrace->push_back(11);
+        ctx->pc = 0u;
+    }
+
+    void schedulerWaitB(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (ctx->pc == K_SCHED_B)
+        {
+            gSchedulerTrace->push_back(20);
+            ctx->pc = K_SCHED_B_RESUME;
+            setRegU32(*ctx, 4, static_cast<uint32_t>(gSchedulerSemaphoreId));
+            WaitSema(rdram, ctx, runtime);
+            return;
+        }
+        gSchedulerWaitResultB = getRegS32(*ctx, 2);
+        gSchedulerTrace->push_back(21);
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
+    void schedulerSignalTwice(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (ctx->pc == K_SCHED_SIGNAL)
+        {
+            gSchedulerTrace->push_back(30);
+            ctx->pc = K_SCHED_SIGNAL_RESUME;
+            setRegU32(*ctx, 4, static_cast<uint32_t>(gSchedulerSemaphoreId));
+            SignalSema(rdram, ctx, runtime);
+            return;
+        }
+        gSchedulerTrace->push_back(31);
+        setRegU32(*ctx, 4, static_cast<uint32_t>(gSchedulerSemaphoreId));
+        SignalSema(rdram, ctx, runtime);
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
+    constexpr uint32_t K_EVENT_FIFO_MAIN = 0x301000u;
+    constexpr uint32_t K_EVENT_FIFO_A = 0x301010u;
+    constexpr uint32_t K_EVENT_FIFO_A_RESUME = 0x301014u;
+    constexpr uint32_t K_EVENT_FIFO_B = 0x301020u;
+    constexpr uint32_t K_EVENT_FIFO_B_RESUME = 0x301024u;
+    constexpr uint32_t K_EVENT_FIFO_SIGNAL = 0x301030u;
+    constexpr uint32_t K_EVENT_FIFO_SIGNAL_AGAIN = 0x301034u;
+    constexpr uint32_t K_EVENT_FIFO_DONE = 0x301038u;
+    constexpr uint32_t K_EVENT_FIFO_RESULT_A = 0x1A00u;
+    constexpr uint32_t K_EVENT_FIFO_RESULT_B = 0x1A04u;
+    constexpr uint32_t WEF_OR = 0x01u;
+    constexpr uint32_t WEF_CLEAR = 0x10u;
+    constexpr uint32_t WEF_CLEAR_ALL = 0x20u;
+    int gEventFifoId = 0;
+    std::vector<int> gEventFifoTrace;
+
+    void schedulerEventFifoWaitA(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (ctx->pc == K_EVENT_FIFO_A)
+        {
+            gEventFifoTrace.push_back(1);
+            ctx->pc = K_EVENT_FIFO_A_RESUME;
+            runtime->eeScheduler().waitEventFlag(gEventFifoId, 1u, WEF_OR | WEF_CLEAR,
+                                                  K_EVENT_FIFO_RESULT_A);
+        }
+        gEventFifoTrace.push_back(4);
+        ctx->pc = 0u;
+    }
+
+    void schedulerEventFifoWaitB(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (ctx->pc == K_EVENT_FIFO_B)
+        {
+            gEventFifoTrace.push_back(2);
+            ctx->pc = K_EVENT_FIFO_B_RESUME;
+            runtime->eeScheduler().waitEventFlag(gEventFifoId, 1u, WEF_OR | WEF_CLEAR,
+                                                  K_EVENT_FIFO_RESULT_B);
+        }
+        gEventFifoTrace.push_back(6);
+        ctx->pc = 0u;
+    }
+
+    void schedulerEventFifoSignal(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gEventFifoTrace.push_back(3);
+        ctx->pc = K_EVENT_FIFO_SIGNAL_AGAIN;
+        runtime->eeScheduler().setEventFlag(gEventFifoId, 1u, false);
+        runtime->eeScheduler().transferIfRequested(false);
+    }
+
+    void schedulerEventFifoSignalAgain(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gEventFifoTrace.push_back(5);
+        ctx->pc = K_EVENT_FIFO_DONE;
+        runtime->eeScheduler().setEventFlag(gEventFifoId, 1u, false);
+        runtime->eeScheduler().transferIfRequested(false);
+    }
+
+    void schedulerEventFifoDone(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gEventFifoTrace.push_back(7);
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
+    void schedulerEventFifoMain(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        EeScheduler &scheduler = runtime->eeScheduler();
+        gEventFifoId = scheduler.createEventFlag(0u, 0x02u, 0u);
+        const auto create = [&](uint32_t entry, uint32_t stack, int priority)
+        {
+            EeThreadCreateParams params{};
+            params.entry = entry;
+            params.stack = stack;
+            params.stackSize = 0x800u;
+            params.priority = priority;
+            const int id = scheduler.createThread(params);
+            scheduler.startThread(id, 0u, *ctx, false);
+        };
+        create(K_EVENT_FIFO_A, 0x21000u, 5);
+        create(K_EVENT_FIFO_B, 0x22000u, 5);
+        create(K_EVENT_FIFO_SIGNAL, 0x23000u, 10);
         ctx->pc = 0u;
     }
 
@@ -250,740 +549,321 @@ void register_ps2_runtime_kernel_tests()
 {
     MiniTest::Case("PS2RuntimeKernel", [](TestCase &tc)
     {
-        tc.Run("thread create/refer/delete follows EE status layout", [](TestCase &t)
+        tc.Run("CreateThread and CreateSema decode the exact PS2SDK EE layouts", [](TestCase &t)
         {
             TestEnv env;
+            EeThreadCreateAbi threadParam{};
+            threadParam.status = 0x11111111;
+            threadParam.func = K_SCHED_HIGH;
+            threadParam.stack = 0x00018000u;
+            threadParam.stack_size = 0x1000;
+            threadParam.gp_reg = 0x00123400u;
+            threadParam.initial_priority = 37;
+            threadParam.current_priority = 99;
+            threadParam.attr = 0xABCDEF01u;
+            threadParam.option = 0x10203040u;
+            std::memcpy(env.rdram.data() + K_PARAM_ADDR, &threadParam, sizeof(threadParam));
 
-            const uint32_t threadParam[7] = {
-                0x00000002u, // attr
-                0x00200000u, // entry
-                0x00300000u, // stack
-                0x00000800u, // stack size
-                0x00120000u, // gp
-                5u,          // initial priority
-                0xABCD0001u  // option
-            };
-
-            writeGuestWords(env.rdram.data(), K_PARAM_ADDR, threadParam, std::size(threadParam));
             setRegU32(env.ctx, 4, K_PARAM_ADDR);
             CreateThread(env.rdram.data(), &env.ctx, &env.runtime);
+            const int threadId = getRegS32(env.ctx, 2);
+            const GuestThread *thread = env.runtime.eeScheduler().thread(threadId);
+            t.IsTrue(threadId >= 2 && thread != nullptr, "the EE descriptor should create a guest thread");
+            t.Equals(thread->entry, threadParam.func, "func must be decoded from offset 0x04");
+            t.Equals(thread->stack, threadParam.stack, "stack must be decoded from offset 0x08");
+            t.Equals(thread->stackSize, static_cast<uint32_t>(threadParam.stack_size),
+                     "stack_size must be decoded from offset 0x0C");
+            t.Equals(thread->gp, threadParam.gp_reg, "gp_reg must be decoded from offset 0x10");
+            t.Equals(thread->initialPriority, threadParam.initial_priority,
+                     "initial_priority must be decoded from offset 0x14");
+            t.Equals(thread->currentPriority, threadParam.initial_priority,
+                     "a new thread starts at its initial priority, not the status-only current_priority field");
+            t.Equals(thread->attr, threadParam.attr, "attr must be decoded from offset 0x1C");
+            t.Equals(thread->option, threadParam.option, "option must be decoded from offset 0x20");
+            t.IsTrue(thread->status == EeThreadStatus::Dormant, "a newly created EE thread must be dormant");
 
-            const int32_t tid = getRegS32(env.ctx, 2);
-            t.IsTrue(tid >= 2, "CreateThread should return a valid non-main thread id");
-
-            setRegU32(env.ctx, 4, static_cast<uint32_t>(tid));
-            setRegU32(env.ctx, 5, K_STATUS_ADDR);
-            ReferThreadStatus(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_OK, "ReferThreadStatus should succeed for created thread");
-
-            EeThreadStatus status{};
-            std::memcpy(&status, env.rdram.data() + K_STATUS_ADDR, sizeof(status));
-            t.Equals(status.status, THS_DORMANT, "new thread should be dormant before StartThread");
-            t.Equals(status.func, threadParam[1], "status.func should match entry");
-            t.Equals(status.stack, threadParam[2], "status.stack should match configured stack");
-            t.Equals(status.stack_size, static_cast<int32_t>(threadParam[3]), "status.stack_size should match thread param");
-            t.Equals(status.gp_reg, threadParam[4], "status.gp_reg should match configured gp");
-            t.Equals(status.initial_priority, 5, "status.initial_priority should match thread param");
-            t.Equals(status.current_priority, 5, "status.current_priority should start at initial priority");
-            t.Equals(status.attr, threadParam[0], "status.attr should match thread param");
-            t.Equals(status.option, threadParam[6], "status.option should match thread param");
-
-            setRegU32(env.ctx, 4, static_cast<uint32_t>(tid));
-            DeleteThread(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_OK, "DeleteThread should succeed for dormant thread");
-
-            setRegU32(env.ctx, 4, static_cast<uint32_t>(tid));
-            setRegU32(env.ctx, 5, K_STATUS_ADDR);
-            ReferThreadStatus(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_UNKNOWN_THID, "deleted thread id should no longer be referable");
-        });
-
-        tc.Run("start thread validates target and entry registration", [](TestCase &t)
-        {
-            TestEnv env;
-
-            const uint32_t threadParam[7] = {
-                0u,
-                0x00250000u, // entry not registered in runtime
-                0x00300000u,
-                0x00000400u,
-                0x00110000u,
-                8u,
-                0u
-            };
-
-            writeGuestWords(env.rdram.data(), K_PARAM_ADDR, threadParam, std::size(threadParam));
-            setRegU32(env.ctx, 4, K_PARAM_ADDR);
+            setRegU32(env.ctx, 4, PS2_RAM_SIZE - static_cast<uint32_t>(sizeof(EeThreadCreateAbi)) + 4u);
             CreateThread(env.rdram.data(), &env.ctx, &env.runtime);
-            const int32_t tid = getRegS32(env.ctx, 2);
-            t.IsTrue(tid >= 2, "CreateThread should return an id before StartThread check");
+            t.Equals(getRegS32(env.ctx, 2), KE_ERROR,
+                     "the entire EE descriptor must fit in a valid guest range");
 
-            setRegU32(env.ctx, 4, static_cast<uint32_t>(tid));
-            setRegU32(env.ctx, 5, 0x12345678u);
-            StartThread(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_ERROR, "StartThread should fail when entry is not registered");
-
-            setRegU32(env.ctx, 4, static_cast<uint32_t>(tid));
-            setRegU32(env.ctx, 5, K_STATUS_ADDR);
-            ReferThreadStatus(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_OK, "ReferThreadStatus should still succeed after failed StartThread");
-
-            EeThreadStatus status{};
-            std::memcpy(&status, env.rdram.data() + K_STATUS_ADDR, sizeof(status));
-            t.Equals(status.status, THS_DORMANT, "thread should remain dormant when StartThread fails early");
-
-            setRegU32(env.ctx, 4, static_cast<uint32_t>(tid));
-            DeleteThread(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_OK, "DeleteThread should clean up failed-start thread");
-        });
-
-        tc.Run("thread id and wakeup guard rails match kernel-style errors", [](TestCase &t)
-        {
-            TestEnv env;
-
-            GetThreadId(env.rdram.data(), &env.ctx, &env.runtime);
-            const int32_t selfTid = getRegS32(env.ctx, 2);
-            t.IsTrue(selfTid > 0, "GetThreadId should return a positive thread id");
-
-            setRegU32(env.ctx, 4, 0u);
-            WakeupThread(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_ILLEGAL_THID, "WakeupThread(TH_SELF/0) should be illegal");
-
-            setRegU32(env.ctx, 4, static_cast<uint32_t>(selfTid));
-            WakeupThread(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_ILLEGAL_THID, "WakeupThread(self) should be illegal");
-
-            setRegU32(env.ctx, 4, 0u);
-            iCancelWakeupThread(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_ILLEGAL_THID, "iCancelWakeupThread(0) should be illegal");
-
-            setRegU32(env.ctx, 4, 0u);
-            CancelWakeupThread(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_OK, "CancelWakeupThread(TH_SELF) should return previous count (0)");
-        });
-
-        tc.Run("semaphore EE layout covers poll, signal overflow, and status", [](TestCase &t)
-        {
-            TestEnv env;
-
-            const uint32_t semaParam[6] = {
-                0u,          // count (unused by runtime decode)
-                2u,          // max_count
-                1u,          // init_count
-                0u,          // wait_threads
-                0x11u,       // attr
-                0x00202020u  // option
-            };
-
-            writeGuestWords(env.rdram.data(), K_PARAM_ADDR, semaParam, std::size(semaParam));
+            EeSemaStatus semaParam{};
+            semaParam.count = 91;
+            semaParam.max_count = 7;
+            semaParam.init_count = 3;
+            semaParam.wait_threads = 82;
+            semaParam.attr = 0x55667788u;
+            semaParam.option = 0x99AABBCCu;
+            std::memcpy(env.rdram.data() + K_PARAM_ADDR, &semaParam, sizeof(semaParam));
             setRegU32(env.ctx, 4, K_PARAM_ADDR);
             CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
-            const int32_t sid = getRegS32(env.ctx, 2);
-            t.IsTrue(sid > 0, "CreateSema should return positive semaphore id");
-
-            setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
-            setRegU32(env.ctx, 5, K_STATUS_ADDR);
-            ReferSemaStatus(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_OK, "ReferSemaStatus should succeed for valid semaphore");
-
-            EeSemaStatus semaStatus{};
-            std::memcpy(&semaStatus, env.rdram.data() + K_STATUS_ADDR, sizeof(semaStatus));
-            t.Equals(semaStatus.count, 1, "initial semaphore count should match init_count");
-            t.Equals(semaStatus.max_count, 2, "max_count should match CreateSema params");
-            t.Equals(semaStatus.init_count, 1, "init_count should be preserved");
-            t.Equals(semaStatus.attr, semaParam[4], "attr should be preserved");
-            t.Equals(semaStatus.option, semaParam[5], "option should be preserved");
-
-            setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
-            PollSema(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), sid, "PollSema should return sid when consuming one available token");
-
-            setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
-            PollSema(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_SEMA_ZERO, "PollSema should fail when count is zero");
-
-            setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
-            SignalSema(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), sid, "SignalSema should return sid when incrementing count below max");
-
-            setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
-            SignalSema(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), sid, "SignalSema should return sid when incrementing up to max");
-
-            setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
-            SignalSema(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_SEMA_OVF, "SignalSema should report overflow at max_count");
-
-            setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
-            DeleteSema(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), sid, "DeleteSema should return sid for existing semaphore");
-
-            setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
-            PollSema(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_UNKNOWN_SEMID, "deleted semaphore id should be rejected");
+            const int semaId = getRegS32(env.ctx, 2);
+            const EeSemaphore *semaphore = env.runtime.eeScheduler().semaphore(semaId);
+            t.IsTrue(semaId > 0 && semaphore != nullptr, "the EE semaphore descriptor should create an object");
+            t.Equals(semaphore->count, semaParam.init_count,
+                     "CreateSema must use init_count at offset 0x08, not the status count field");
+            t.Equals(semaphore->maxCount, semaParam.max_count, "max_count must be decoded from offset 0x04");
+            t.Equals(semaphore->attr, semaParam.attr, "semaphore attr must be decoded from offset 0x10");
+            t.Equals(semaphore->option, semaParam.option, "semaphore option must be decoded from offset 0x14");
         });
 
-        tc.Run("semaphore legacy layout decode remains supported", [](TestCase &t)
+        tc.Run("EE scheduler selects absolute priority then FIFO", [](TestCase &t)
         {
             TestEnv env;
+            std::vector<int> trace;
+            gSchedulerTrace = &trace;
+            gGuestActive.store(0, std::memory_order_release);
+            gGuestMaxActive.store(0, std::memory_order_release);
+            gGuestExecutorHash.store(0u, std::memory_order_release);
+            gGuestExecutorMismatch.store(false, std::memory_order_release);
+            gGuestExecutingFlagMissing.store(false, std::memory_order_release);
+            env.runtime.registerFunction(K_SCHED_MAIN, schedulerMainExit);
+            env.runtime.registerFunction(K_SCHED_A, schedulerTraceA);
+            env.runtime.registerFunction(K_SCHED_B, schedulerTraceB);
 
-            const uint32_t legacyParam[6] = {
-                0x7u,        // attr
-                0x1234u,     // legacy option / ee max_count
-                3u,          // init
-                4u,          // max
-                0u,          // ee attr (ignored if legacy selected)
-                0x1FFFFFFFu  // ee option (invalid guest pointer to bias decode toward legacy)
-            };
-            writeGuestWords(env.rdram.data(), K_PARAM_ADDR, legacyParam, std::size(legacyParam));
+            env.ctx.pc = K_SCHED_MAIN;
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.reset(env.rdram.data(), env.ctx);
+            const int lowA = ee.createThread(EeThreadCreateParams{0, K_SCHED_A, 0x20000u, 0x800u, 0, 20, 0});
+            const int highA = ee.createThread(EeThreadCreateParams{0, K_SCHED_A, 0x21000u, 0x800u, 0, 5, 0});
+            const int highB = ee.createThread(EeThreadCreateParams{0, K_SCHED_B, 0x22000u, 0x800u, 0, 5, 0});
+            ee.startThread(lowA, 0, env.ctx, false);
+            ee.startThread(highA, 0, env.ctx, false);
+            ee.startThread(highB, 0, env.ctx, false);
+            ee.run();
 
-            setRegU32(env.ctx, 4, K_PARAM_ADDR);
-            CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
-            const int32_t sid = getRegS32(env.ctx, 2);
-            t.IsTrue(sid > 0, "CreateSema should still accept legacy-style parameter blocks");
-
-            setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
-            setRegU32(env.ctx, 5, K_STATUS_ADDR);
-            ReferSemaStatus(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_OK, "ReferSemaStatus should succeed for legacy-decoded semaphore");
-
-            EeSemaStatus semaStatus{};
-            std::memcpy(&semaStatus, env.rdram.data() + K_STATUS_ADDR, sizeof(semaStatus));
-            t.Equals(semaStatus.count, 3, "legacy init_count should map to runtime count");
-            t.Equals(semaStatus.max_count, 4, "legacy max_count should map to runtime max");
-            t.Equals(semaStatus.attr, 0x7u, "legacy attr should be preserved");
-            t.Equals(semaStatus.option, 0x1234u, "legacy option should be preserved");
-
-            setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
-            DeleteSema(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), sid, "DeleteSema should return sid for legacy-decoded semaphore");
+            t.Equals(trace.size(), size_t{4}, "all runnable contexts should execute once");
+            t.Equals(trace[0], 1, "main priority zero executes first");
+            t.Equals(trace[1], 10, "first priority-5 thread preserves FIFO order");
+            t.Equals(trace[2], 20, "second priority-5 thread follows FIFO order");
+            t.Equals(trace[3], 10, "priority-20 thread executes only after priority-5 queue drains");
+            t.Equals(gGuestMaxActive.load(std::memory_order_acquire), 1,
+                     "there must never be two simultaneous guest executions");
+            t.IsFalse(gGuestExecutorMismatch.load(std::memory_order_acquire),
+                      "all EE guest functions must execute on the single scheduler host thread");
+            t.IsFalse(gGuestExecutingFlagMissing.load(std::memory_order_acquire),
+                      "the scheduler must publish guest execution only around the active guest call");
         });
 
-        tc.Run("semaphore syscalls return sid on success (EE BIOS convention)", [](TestCase &t)
-        {
-            // Sub-case A: CreateSema returns positive id (regression guard)
-            {
-                TestEnv env;
-                const uint32_t semaParam[6] = { 0u, 2u, 1u, 0u, 0x11u, 0u };
-                writeGuestWords(env.rdram.data(), K_PARAM_ADDR, semaParam, std::size(semaParam));
-                setRegU32(env.ctx, 4, K_PARAM_ADDR);
-                CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
-                const int32_t sid = getRegS32(env.ctx, 2);
-                t.IsTrue(sid > 0, "CreateSema should return positive semaphore id");
-            }
-
-            // Sub-case B: PollSema success returns sid
-            {
-                TestEnv env;
-                const uint32_t semaParam[6] = { 0u, 2u, 1u, 0u, 0u, 0u };
-                writeGuestWords(env.rdram.data(), K_PARAM_ADDR, semaParam, std::size(semaParam));
-                setRegU32(env.ctx, 4, K_PARAM_ADDR);
-                CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
-                const int32_t sid = getRegS32(env.ctx, 2);
-                t.IsTrue(sid > 0, "CreateSema should return positive id for PollSema test");
-
-                setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
-                PollSema(env.rdram.data(), &env.ctx, &env.runtime);
-                t.Equals(getRegS32(env.ctx, 2), sid, "PollSema success should return sid");
-
-                setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
-                PollSema(env.rdram.data(), &env.ctx, &env.runtime);
-                t.Equals(getRegS32(env.ctx, 2), KE_SEMA_ZERO, "PollSema should return KE_SEMA_ZERO when count exhausted");
-            }
-
-            // Sub-case C: SignalSema success returns sid + overflow returns KE_SEMA_OVF
-            {
-                TestEnv env;
-                const uint32_t semaParam[6] = { 0u, 1u, 0u, 0u, 0u, 0u };
-                writeGuestWords(env.rdram.data(), K_PARAM_ADDR, semaParam, std::size(semaParam));
-                setRegU32(env.ctx, 4, K_PARAM_ADDR);
-                CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
-                const int32_t sid = getRegS32(env.ctx, 2);
-                t.IsTrue(sid > 0, "CreateSema should return positive id for SignalSema test");
-
-                setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
-                SignalSema(env.rdram.data(), &env.ctx, &env.runtime);
-                t.Equals(getRegS32(env.ctx, 2), sid, "SignalSema success should return sid (count 0->1)");
-
-                setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
-                SignalSema(env.rdram.data(), &env.ctx, &env.runtime);
-                t.Equals(getRegS32(env.ctx, 2), KE_SEMA_OVF, "SignalSema should return KE_SEMA_OVF when count at max=1");
-            }
-
-            // Sub-case D: WaitSema success returns sid AND decrements count
-            {
-                TestEnv env;
-                const uint32_t semaParam[6] = { 0u, 2u, 1u, 0u, 0u, 0u };
-                writeGuestWords(env.rdram.data(), K_PARAM_ADDR, semaParam, std::size(semaParam));
-                setRegU32(env.ctx, 4, K_PARAM_ADDR);
-                CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
-                const int32_t sid = getRegS32(env.ctx, 2);
-                t.IsTrue(sid > 0, "CreateSema should return positive id for WaitSema test");
-
-                setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
-                WaitSema(env.rdram.data(), &env.ctx, &env.runtime);
-                t.Equals(getRegS32(env.ctx, 2), sid, "WaitSema success should return sid");
-
-                R5900Context statusCtx{};
-                setRegU32(statusCtx, 4, static_cast<uint32_t>(sid));
-                setRegU32(statusCtx, 5, K_STATUS_ADDR);
-                ReferSemaStatus(env.rdram.data(), &statusCtx, &env.runtime);
-                EeSemaStatus semaStatus{};
-                std::memcpy(&semaStatus, env.rdram.data() + K_STATUS_ADDR, sizeof(semaStatus));
-                t.Equals(semaStatus.count, 0, "WaitSema should decrement count to 0");
-            }
-
-            // Sub-case E: WaitSema delete-while-waiting returns KE_WAIT_DELETE
-            {
-                TestEnv env;
-                const uint32_t semaParam[6] = { 0u, 1u, 0u, 0u, 0u, 0u };
-                writeGuestWords(env.rdram.data(), K_PARAM_ADDR, semaParam, std::size(semaParam));
-                setRegU32(env.ctx, 4, K_PARAM_ADDR);
-                CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
-                const int32_t sid = getRegS32(env.ctx, 2);
-                t.IsTrue(sid > 0, "CreateSema should return positive id for delete-while-waiting test");
-
-                int32_t workerRet = 0;
-                writeGuestU32(env.rdram.data(), K_SEMA_WAIT_READY_ADDR, 0u);
-
-                std::thread worker([&]()
-                {
-                    R5900Context wctx{};
-                    setRegU32(wctx, 4, static_cast<uint32_t>(sid));
-                    writeGuestU32(env.rdram.data(), K_SEMA_WAIT_READY_ADDR, 1u);
-                    WaitSema(env.rdram.data(), &wctx, &env.runtime);
-                    workerRet = getRegS32(wctx, 2);
-                });
-
-                // Wait until the waiter has incremented waiter count (count=0, so it must block)
-                const bool waiterBlocking = waitUntil([&]()
-                {
-                    R5900Context statusCtx{};
-                    setRegU32(statusCtx, 4, static_cast<uint32_t>(sid));
-                    setRegU32(statusCtx, 5, K_STATUS_ADDR);
-                    ReferSemaStatus(env.rdram.data(), &statusCtx, &env.runtime);
-                    EeSemaStatus st{};
-                    std::memcpy(&st, env.rdram.data() + K_STATUS_ADDR, sizeof(st));
-                    return st.wait_threads >= 1;
-                }, std::chrono::milliseconds(500));
-                t.IsTrue(waiterBlocking, "worker thread should be blocking on WaitSema");
-
-                // Delete the semaphore while worker is waiting
-                setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
-                DeleteSema(env.rdram.data(), &env.ctx, &env.runtime);
-                t.Equals(getRegS32(env.ctx, 2), sid, "DeleteSema should return sid while thread is waiting");
-
-                worker.join();
-                t.Equals(workerRet, KE_WAIT_DELETE, "WaitSema should return KE_WAIT_DELETE when semaphore is deleted");
-            }
-
-            // Sub-case F: DeleteSema success returns sid
-            {
-                TestEnv env;
-                const uint32_t semaParam[6] = { 0u, 1u, 0u, 0u, 0u, 0u };
-                writeGuestWords(env.rdram.data(), K_PARAM_ADDR, semaParam, std::size(semaParam));
-                setRegU32(env.ctx, 4, K_PARAM_ADDR);
-                CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
-                const int32_t sid = getRegS32(env.ctx, 2);
-                t.IsTrue(sid > 0, "CreateSema should return positive id for DeleteSema test");
-
-                setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
-                DeleteSema(env.rdram.data(), &env.ctx, &env.runtime);
-                t.Equals(getRegS32(env.ctx, 2), sid, "DeleteSema success should return sid");
-            }
-
-            // Sub-case G: Invalid sid returns KE_UNKNOWN_SEMID for all four syscalls
-            {
-                TestEnv env;
-                constexpr uint32_t kBadSid = 0x7FFFu;
-
-                setRegU32(env.ctx, 4, kBadSid);
-                PollSema(env.rdram.data(), &env.ctx, &env.runtime);
-                t.Equals(getRegS32(env.ctx, 2), KE_UNKNOWN_SEMID, "PollSema should return KE_UNKNOWN_SEMID for invalid sid");
-
-                setRegU32(env.ctx, 4, kBadSid);
-                SignalSema(env.rdram.data(), &env.ctx, &env.runtime);
-                t.Equals(getRegS32(env.ctx, 2), KE_UNKNOWN_SEMID, "SignalSema should return KE_UNKNOWN_SEMID for invalid sid");
-
-                setRegU32(env.ctx, 4, kBadSid);
-                WaitSema(env.rdram.data(), &env.ctx, &env.runtime);
-                t.Equals(getRegS32(env.ctx, 2), KE_UNKNOWN_SEMID, "WaitSema should return KE_UNKNOWN_SEMID for invalid sid");
-
-                setRegU32(env.ctx, 4, kBadSid);
-                DeleteSema(env.rdram.data(), &env.ctx, &env.runtime);
-                t.Equals(getRegS32(env.ctx, 2), KE_UNKNOWN_SEMID, "DeleteSema should return KE_UNKNOWN_SEMID for invalid sid");
-            }
-
-            // Sub-case H: WaitSema force-released via ReleaseWaitThread returns KE_RELEASE_WAIT
-            // and the ret >= 0 guard must NOT consume a token (count stays 0, not -1).
-            {
-                // Use a tid the sequential allocator (range 2..0xFF) will never produce, so the
-                // worker's WaitSema creates a fresh ThreadInfo that ReleaseWaitThread can target.
-                // Prior tests leave stale entries at low tids (2, 3, ...), which would make
-                // ReleaseWaitThread find a non-waiting ThreadInfo and return KE_NOT_WAIT.
-                constexpr int kWorkerTid = 0x7FFE;
-                TestEnv env;
-                const uint32_t semaParam[6] = {0u, 2u, 0u, 0u, 0u, 0u};
-                writeGuestWords(env.rdram.data(), K_PARAM_ADDR, semaParam, 6);
-                setRegU32(env.ctx, 4, K_PARAM_ADDR);
-                CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
-                const int sid = getRegS32(env.ctx, 2);
-                t.IsTrue(sid > 0, "sub-case H: CreateSema must return positive sid");
-
-                writeGuestU32(env.rdram.data(), K_SEMA_WAIT_READY_ADDR, 0u);
-                int32_t workerRet = 0;
-
-                std::thread worker([&]() {
-                    g_currentThreadId = kWorkerTid;
-                    R5900Context wctx{};
-                    setRegU32(wctx, 4, static_cast<uint32_t>(sid));
-                    writeGuestU32(env.rdram.data(), K_SEMA_WAIT_READY_ADDR, 1u);
-                    WaitSema(env.rdram.data(), &wctx, &env.runtime);
-                    workerRet = getRegS32(wctx, 2);
-                });
-
-                // Wait until the worker is confirmed blocking in WaitSema.
-                const bool waiterBlocking = waitUntil([&]() {
-                    R5900Context statusCtx{};
-                    setRegU32(statusCtx, 4, static_cast<uint32_t>(sid));
-                    setRegU32(statusCtx, 5, K_STATUS_ADDR);
-                    ReferSemaStatus(env.rdram.data(), &statusCtx, &env.runtime);
-                    EeSemaStatus st{};
-                    std::memcpy(&st, env.rdram.data() + K_STATUS_ADDR, sizeof(st));
-                    return st.wait_threads >= 1;
-                }, std::chrono::milliseconds(500));
-                t.IsTrue(waiterBlocking, "sub-case H: worker must be blocking in WaitSema before force-release");
-
-                // Force-release the worker via ReleaseWaitThread.
-                setRegU32(env.ctx, 4, static_cast<uint32_t>(kWorkerTid));
-                ReleaseWaitThread(env.rdram.data(), &env.ctx, &env.runtime);
-                t.Equals(getRegS32(env.ctx, 2), KE_OK,
-                         "sub-case H: ReleaseWaitThread must succeed");
-
-                worker.join();
-                t.Equals(workerRet, KE_RELEASE_WAIT,
-                         "sub-case H: WaitSema force-released must return KE_RELEASE_WAIT, not sid");
-
-                // Assert the count was NOT decremented (core guard check: ret < 0 skips decrement).
-                {
-                    R5900Context statusCtx{};
-                    setRegU32(statusCtx, 4, static_cast<uint32_t>(sid));
-                    setRegU32(statusCtx, 5, K_STATUS_ADDR);
-                    ReferSemaStatus(env.rdram.data(), &statusCtx, &env.runtime);
-                    EeSemaStatus st{};
-                    std::memcpy(&st, env.rdram.data() + K_STATUS_ADDR, sizeof(st));
-                    t.Equals(st.count, 0, "sub-case H: force-released WaitSema must NOT consume a token (count must stay 0, not -1)");
-                }
-
-                // Prove token accounting is intact: signal once, poll twice (one token, clean).
-                setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
-                SignalSema(env.rdram.data(), &env.ctx, &env.runtime);
-                t.Equals(getRegS32(env.ctx, 2), sid,
-                         "sub-case H: SignalSema after force-release must return sid (count 0->1)");
-
-                setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
-                PollSema(env.rdram.data(), &env.ctx, &env.runtime);
-                t.Equals(getRegS32(env.ctx, 2), sid,
-                         "sub-case H: PollSema must consume the one token after force-release");
-
-                setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
-                PollSema(env.rdram.data(), &env.ctx, &env.runtime);
-                t.Equals(getRegS32(env.ctx, 2), KE_SEMA_ZERO,
-                         "sub-case H: count must be exactly 0 after single token consumed (not -1)");
-            }
-
-            // Sub-case I: blocking WaitSema woken by SignalSema returns sid (the DQ8 scenario).
-            // init=0 forces the worker to block; SignalSema uses cv.notify_one() (not
-            // ReleaseWaitThread), so the worker needs no g_currentThreadId identity.
-            {
-                TestEnv env;
-                const uint32_t semaParam[6] = {0u, 1u, 0u, 0u, 0u, 0u};
-                writeGuestWords(env.rdram.data(), K_PARAM_ADDR, semaParam, 6);
-                setRegU32(env.ctx, 4, K_PARAM_ADDR);
-                CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
-                const int sid = getRegS32(env.ctx, 2);
-                t.IsTrue(sid > 0, "sub-case I: CreateSema must return positive sid");
-
-                writeGuestU32(env.rdram.data(), K_SEMA_WAIT_READY_ADDR, 0u);
-                int32_t workerRet = 0;
-
-                std::thread worker([&]() {
-                    R5900Context wctx{};
-                    setRegU32(wctx, 4, static_cast<uint32_t>(sid));
-                    writeGuestU32(env.rdram.data(), K_SEMA_WAIT_READY_ADDR, 1u);
-                    WaitSema(env.rdram.data(), &wctx, &env.runtime);
-                    workerRet = getRegS32(wctx, 2);
-                });
-
-                // Confirm the worker is actually blocking (count==0 forces a block).
-                const bool waiterBlocking = waitUntil([&]() {
-                    R5900Context statusCtx{};
-                    setRegU32(statusCtx, 4, static_cast<uint32_t>(sid));
-                    setRegU32(statusCtx, 5, K_STATUS_ADDR);
-                    ReferSemaStatus(env.rdram.data(), &statusCtx, &env.runtime);
-                    EeSemaStatus st{};
-                    std::memcpy(&st, env.rdram.data() + K_STATUS_ADDR, sizeof(st));
-                    return st.wait_threads >= 1;
-                }, std::chrono::milliseconds(500));
-                t.IsTrue(waiterBlocking, "sub-case I: worker must be blocking in WaitSema before signal");
-
-                // Wake the worker; success path must return sid, not KE_OK.
-                setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
-                SignalSema(env.rdram.data(), &env.ctx, &env.runtime);
-                t.Equals(getRegS32(env.ctx, 2), sid,
-                         "sub-case I: SignalSema that wakes a waiter must return sid (count 0->1)");
-
-                worker.join();
-                t.Equals(workerRet, sid,
-                         "sub-case I: blocking WaitSema woken by signal must return sid, not KE_OK");
-
-                // Signal incremented to 1, the woken wait consumed it back to 0.
-                {
-                    R5900Context statusCtx{};
-                    setRegU32(statusCtx, 4, static_cast<uint32_t>(sid));
-                    setRegU32(statusCtx, 5, K_STATUS_ADDR);
-                    ReferSemaStatus(env.rdram.data(), &statusCtx, &env.runtime);
-                    EeSemaStatus st{};
-                    std::memcpy(&st, env.rdram.data() + K_STATUS_ADDR, sizeof(st));
-                    t.Equals(st.count, 0,
-                             "sub-case I: woken WaitSema must consume the signaled token (count back to 0)");
-                }
-            }
-
-            // Reset all global sema/thread state so no entries (e.g. the 0x7FFE ThreadInfo
-            // from sub-case H) leak into subsequent test cases.
-            notifyRuntimeStop();
-        });
-
-        tc.Run("WaitEventFlag preserves waitsuspend state when a suspended thread blocks", [](TestCase &t)
+        tc.Run("thread lifecycle, nested suspend, WAIT-SUSPEND, and wakeup count are centralized", [](TestCase &t)
         {
             TestEnv env;
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.reset(env.rdram.data(), env.ctx);
+            ee.bindMainContextForSyscall(env.ctx, env.rdram.data());
 
-            constexpr uint32_t kEventParamAddr = 0x1600u;
-            constexpr uint32_t kWaitThreadEntry = 0x00260000u;
+            const int id = ee.createThread(EeThreadCreateParams{0u, K_SCHED_HIGH, 0x24000u, 0x800u,
+                                                                 0u, 20, 0u});
+            t.Equals(ee.startThread(id, 0xCAFEu, env.ctx, false), KE_OK, "StartThread should make a dormant thread ready");
+            t.IsTrue(ee.thread(id)->status == EeThreadStatus::Ready, "started thread should be in one ready queue");
+            t.Equals(ee.suspendThread(id, false), KE_OK, "first suspend should remove the ready thread");
+            t.Equals(ee.suspendThread(id, false), KE_OK, "nested suspend should increment suspendCount");
+            t.IsTrue(ee.thread(id)->status == EeThreadStatus::Suspended && ee.thread(id)->suspendCount == 2,
+                     "nested suspension should have one suspended membership and count two");
+            t.Equals(ee.resumeThread(id, false), KE_OK, "first resume should only decrement the nested count");
+            t.IsTrue(ee.thread(id)->status == EeThreadStatus::Suspended && ee.thread(id)->suspendCount == 1,
+                     "one outstanding suspend keeps the thread suspended");
+            t.Equals(ee.resumeThread(id, false), KE_OK, "final resume should restore readiness");
+            t.IsTrue(ee.thread(id)->status == EeThreadStatus::Ready && ee.thread(id)->suspendCount == 0,
+                     "final resume should enqueue the thread exactly once");
 
-            const uint32_t eventParam[3] = {
-                0u,
-                0u,
-                0u
-            };
-            std::memcpy(env.rdram.data() + kEventParamAddr, eventParam, sizeof(eventParam));
-            writeGuestU32(env.rdram.data(), K_EVENT_WAIT_READY_ADDR, 0u);
-            writeGuestU32(env.rdram.data(), K_EVENT_WAIT_GATE_ADDR, 0u);
+            t.Equals(ee.wakeupThread(id, false), KE_OK, "wakeup against a non-sleeping thread should accumulate");
+            t.Equals(ee.wakeupThread(id, false), KE_OK, "a second wakeup should accumulate independently");
+            t.Equals(ee.cancelWakeup(id), 2, "CancelWakeupThread should return and clear the exact accumulated count");
+            t.Equals(ee.cancelWakeup(id), 0, "the wakeup count should remain cleared");
 
-            R5900Context createEventCtx{};
-            setRegU32(createEventCtx, 4, kEventParamAddr);
-            CreateEventFlag(env.rdram.data(), &createEventCtx, &env.runtime);
-            const int32_t eid = getRegS32(createEventCtx, 2);
-            t.IsTrue(eid > 0, "CreateEventFlag should return a valid event id");
+            uint32_t ownedStack = 0u;
+            t.Equals(ee.terminateThread(id, ownedStack, false), KE_OK,
+                     "TerminateThread should remove a ready thread and make it dormant");
+            t.IsTrue(ee.thread(id)->status == EeThreadStatus::Dormant, "terminated thread should be dormant");
+            t.Equals(ee.deleteThread(id, ownedStack), KE_OK, "a dormant thread record should be deletable");
+            t.IsTrue(ee.thread(id) == nullptr, "deleted thread must leave every scheduler collection");
 
-            env.runtime.registerFunction(kWaitThreadEntry, &waitEventAfterSuspendHandler);
-
-            const uint32_t threadParam[7] = {
-                0u,
-                kWaitThreadEntry,
-                0x00310000u,
-                0x00000800u,
-                0x00120000u,
-                6u,
-                0u
-            };
-
-            writeGuestWords(env.rdram.data(), K_PARAM_ADDR, threadParam, std::size(threadParam));
-            setRegU32(env.ctx, 4, K_PARAM_ADDR);
-            CreateThread(env.rdram.data(), &env.ctx, &env.runtime);
-            const int32_t tid = getRegS32(env.ctx, 2);
-            t.IsTrue(tid >= 2, "CreateThread should return a valid worker thread id");
-
-            setRegU32(env.ctx, 4, static_cast<uint32_t>(tid));
-            setRegU32(env.ctx, 5, static_cast<uint32_t>(eid));
-            StartThread(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_OK, "StartThread should launch the event waiter");
-
-            const bool ready = waitUntil([&]()
+            bool slept = false;
+            try
             {
-                return readGuestU32(env.rdram.data(), K_EVENT_WAIT_READY_ADDR) == 1u;
-            }, std::chrono::milliseconds(200));
-            t.IsTrue(ready, "waiter thread should reach the suspend gate before blocking");
-
-            setRegU32(env.ctx, 4, static_cast<uint32_t>(tid));
-            SuspendThread(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_OK, "SuspendThread should succeed for the running waiter");
-
-            writeGuestU32(env.rdram.data(), K_EVENT_WAIT_GATE_ADDR, 1u);
-
-            const bool waiting = waitUntil([&]()
+                ee.sleepCurrent();
+            }
+            catch (const EeDispatcherTransfer &)
             {
-                R5900Context statusCtx{};
-                setRegU32(statusCtx, 4, static_cast<uint32_t>(tid));
-                setRegU32(statusCtx, 5, K_STATUS_ADDR);
-                ReferThreadStatus(env.rdram.data(), &statusCtx, &env.runtime);
-                if (getRegS32(statusCtx, 2) != KE_OK)
-                {
-                    return false;
-                }
-
-                EeThreadStatus status{};
-                std::memcpy(&status, env.rdram.data() + K_STATUS_ADDR, sizeof(status));
-                return status.waitType == TSW_EVENT;
-            }, std::chrono::milliseconds(200));
-            t.IsTrue(waiting, "waiter thread should block on the event flag");
-
-            EeThreadStatus waitingStatus{};
-            std::memcpy(&waitingStatus, env.rdram.data() + K_STATUS_ADDR, sizeof(waitingStatus));
-            t.Equals(waitingStatus.status, THS_WAITSUSPEND,
-                     "event-flag wait should report THS_WAITSUSPEND when the thread is already suspended");
-
-            R5900Context signalCtx{};
-            setRegU32(signalCtx, 4, static_cast<uint32_t>(eid));
-            setRegU32(signalCtx, 5, 0x4u);
-            SetEventFlag(env.rdram.data(), &signalCtx, &env.runtime);
-            t.Equals(getRegS32(signalCtx, 2), KE_OK, "SetEventFlag should wake the waiting thread");
-
-            const bool suspended = waitUntil([&]()
-            {
-                R5900Context statusCtx{};
-                setRegU32(statusCtx, 4, static_cast<uint32_t>(tid));
-                setRegU32(statusCtx, 5, K_STATUS_ADDR);
-                ReferThreadStatus(env.rdram.data(), &statusCtx, &env.runtime);
-                if (getRegS32(statusCtx, 2) != KE_OK)
-                {
-                    return false;
-                }
-
-                EeThreadStatus status{};
-                std::memcpy(&status, env.rdram.data() + K_STATUS_ADDR, sizeof(status));
-                return status.status == THS_SUSPEND && status.waitType == 0u;
-            }, std::chrono::milliseconds(200));
-            t.IsTrue(suspended, "after wake, a still-suspended waiter should move to THS_SUSPEND");
-
-            setRegU32(env.ctx, 4, static_cast<uint32_t>(tid));
-            ResumeThread(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_OK, "ResumeThread should release the waiter after the event is set");
-
-            const bool dormant = waitUntil([&]()
-            {
-                R5900Context statusCtx{};
-                setRegU32(statusCtx, 4, static_cast<uint32_t>(tid));
-                setRegU32(statusCtx, 5, K_STATUS_ADDR);
-                ReferThreadStatus(env.rdram.data(), &statusCtx, &env.runtime);
-                if (getRegS32(statusCtx, 2) != KE_OK)
-                {
-                    return false;
-                }
-
-                EeThreadStatus status{};
-                std::memcpy(&status, env.rdram.data() + K_STATUS_ADDR, sizeof(status));
-                return status.status == THS_DORMANT;
-            }, std::chrono::milliseconds(200));
-            t.IsTrue(dormant, "waiter thread should return to dormant after the event is signaled and resumed");
-
-            setRegU32(env.ctx, 4, static_cast<uint32_t>(eid));
-            DeleteEventFlag(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_OK, "DeleteEventFlag should clean up the test event flag");
-
-            setRegU32(env.ctx, 4, static_cast<uint32_t>(tid));
-            DeleteThread(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_OK, "DeleteThread should clean up the waiter thread");
+                slept = true;
+            }
+            t.IsTrue(slept && ee.thread(EeScheduler::kMainThreadId)->status == EeThreadStatus::Waiting,
+                     "SleepThread should transfer the running context into a typed wait");
+            t.Equals(ee.suspendThread(EeScheduler::kMainThreadId, false), KE_OK,
+                     "suspending a waiter should produce WAIT-SUSPEND");
+            t.IsTrue(ee.thread(EeScheduler::kMainThreadId)->status == EeThreadStatus::WaitingSuspended,
+                     "the sleeping context should remain in its wait object while suspended");
+            t.Equals(ee.wakeupThread(EeScheduler::kMainThreadId, false), KE_OK,
+                     "waking WAIT-SUSPEND should complete the wait without enqueueing yet");
+            t.IsTrue(ee.thread(EeScheduler::kMainThreadId)->status == EeThreadStatus::Suspended,
+                     "completed WAIT-SUSPEND should become plain suspended");
+            t.Equals(ee.resumeThread(EeScheduler::kMainThreadId, false), KE_OK,
+                     "resuming the final suspend should make the completed waiter ready");
+            t.IsTrue(ee.thread(EeScheduler::kMainThreadId)->status == EeThreadStatus::Ready,
+                     "the resumed waiter should re-enter its priority queue once");
         });
 
-        tc.Run("TerminateThread unwinds semaphore wait as a normal thread exit", [](TestCase &t)
+        tc.Run("semaphore signal, delete, and release complete blocked contexts with exact results", [](TestCase &t)
+        {
+            const auto blockMain = [](TestEnv &env, int &semaId)
+            {
+                EeScheduler &ee = env.runtime.eeScheduler();
+                ee.reset(env.rdram.data(), env.ctx);
+                ee.bindMainContextForSyscall(env.ctx, env.rdram.data());
+                semaId = ee.createSemaphore(0, 1, 0u, 0u);
+                try
+                {
+                    ee.waitSemaphore(semaId);
+                }
+                catch (const EeDispatcherTransfer &)
+                {
+                }
+            };
+
+            TestEnv signaled;
+            int signalId = 0;
+            blockMain(signaled, signalId);
+            t.Equals(signaled.runtime.eeScheduler().signalSemaphore(signalId, false), signalId,
+                     "SignalSema should transfer directly to the FIFO waiter");
+            t.Equals(getRegS32(signaled.runtime.eeScheduler().thread(1)->context, 2), signalId,
+                     "the resumed semaphore waiter should receive the semaphore id");
+            t.Equals(signaled.runtime.eeScheduler().semaphore(signalId)->count, 0,
+                     "direct semaphore handoff must not increment count");
+
+            TestEnv deleted;
+            int deleteId = 0;
+            blockMain(deleted, deleteId);
+            t.Equals(deleted.runtime.eeScheduler().deleteSemaphore(deleteId, false), deleteId,
+                     "DeleteSema should remove the semaphore object");
+            t.Equals(getRegS32(deleted.runtime.eeScheduler().thread(1)->context, 2), KE_WAIT_DELETE,
+                     "DeleteSema should resume its waiter with KE_WAIT_DELETE");
+            t.IsTrue(deleted.runtime.eeScheduler().semaphore(deleteId) == nullptr,
+                     "deleted semaphore must no longer own a waiter queue");
+
+            TestEnv released;
+            int releaseId = 0;
+            blockMain(released, releaseId);
+            t.Equals(released.runtime.eeScheduler().releaseWait(EeScheduler::kMainThreadId, false), KE_OK,
+                     "ReleaseWaitThread should detach the context from its wait object");
+            t.Equals(getRegS32(released.runtime.eeScheduler().thread(1)->context, 2), KE_RELEASE_WAIT,
+                     "released waiter should resume with KE_RELEASE_WAIT");
+            t.Equals(released.runtime.eeScheduler().semaphore(releaseId)->waiters.size(), size_t{0},
+                     "ReleaseWaitThread must remove the exact semaphore waiter");
+        });
+
+        tc.Run("event waiters are FIFO and clear modes apply before testing the next waiter", [](TestCase &t)
         {
             TestEnv env;
+            env.runtime.registerFunction(K_EVENT_FIFO_MAIN, schedulerEventFifoMain);
+            env.runtime.registerFunction(K_EVENT_FIFO_A, schedulerEventFifoWaitA);
+            env.runtime.registerFunction(K_EVENT_FIFO_A_RESUME, schedulerEventFifoWaitA);
+            env.runtime.registerFunction(K_EVENT_FIFO_B, schedulerEventFifoWaitB);
+            env.runtime.registerFunction(K_EVENT_FIFO_B_RESUME, schedulerEventFifoWaitB);
+            env.runtime.registerFunction(K_EVENT_FIFO_SIGNAL, schedulerEventFifoSignal);
+            env.runtime.registerFunction(K_EVENT_FIFO_SIGNAL_AGAIN, schedulerEventFifoSignalAgain);
+            env.runtime.registerFunction(K_EVENT_FIFO_DONE, schedulerEventFifoDone);
+            gEventFifoTrace.clear();
+            env.ctx.pc = K_EVENT_FIFO_MAIN;
+            env.runtime.eeScheduler().reset(env.rdram.data(), env.ctx);
+            env.runtime.eeScheduler().run();
 
-            constexpr uint32_t kWaitThreadEntry = 0x00261000u;
-            const uint32_t semaParam[6] = {
-                0u,
-                1u,
-                0u,
-                0u,
-                0u,
-                0u
-            };
-            writeGuestWords(env.rdram.data(), K_PARAM_ADDR, semaParam, std::size(semaParam));
+            const std::vector<int> expected{1, 2, 3, 4, 5, 6, 7};
+            t.IsTrue(gEventFifoTrace == expected,
+                     "the first clear waiter must consume the first signal before the second FIFO waiter is tested");
+            t.Equals(readGuestU32(env.rdram.data(), K_EVENT_FIFO_RESULT_A), 1u,
+                     "first waiter should receive its pre-clear observed bits");
+            t.Equals(readGuestU32(env.rdram.data(), K_EVENT_FIFO_RESULT_B), 1u,
+                     "second waiter should require and receive the second signal");
+            t.Equals(env.runtime.eeScheduler().eventFlag(gEventFifoId)->bits, 0u,
+                     "both WEF_CLEAR completions should consume their matched bit");
 
-            R5900Context createSemaCtx{};
-            setRegU32(createSemaCtx, 4, K_PARAM_ADDR);
-            CreateSema(env.rdram.data(), &createSemaCtx, &env.runtime);
-            const int32_t sid = getRegS32(createSemaCtx, 2);
-            t.IsTrue(sid > 0, "CreateSema should create a zero-count semaphore");
+            const int clearAllId = env.runtime.eeScheduler().createEventFlag(0x7u, 0x02u, 0u);
+            uint32_t observed = 0u;
+            t.Equals(env.runtime.eeScheduler().pollEventFlag(clearAllId, 0x2u, WEF_OR | WEF_CLEAR_ALL, observed), KE_OK,
+                     "WEF_CLEAR_ALL poll should complete when any requested bit is present");
+            t.Equals(observed, 0x7u, "event result should contain the bits observed before clearing");
+            t.Equals(env.runtime.eeScheduler().eventFlag(clearAllId)->bits, 0u,
+                     "WEF_CLEAR_ALL should clear the entire event pattern");
+        });
 
-            env.runtime.registerFunction(kWaitThreadEntry, &waitSemaUntilTerminatedHandler);
+        tc.Run("RotateThreadReadyQueue is the only same-priority rotation", [](TestCase &t)
+        {
+            TestEnv env;
+            std::vector<int> trace;
+            gSchedulerTrace = &trace;
+            env.runtime.registerFunction(K_SCHED_MAIN, schedulerMainExit);
+            env.runtime.registerFunction(K_SCHED_A, schedulerRotateA);
+            env.runtime.registerFunction(K_SCHED_A_RESUME, schedulerRotateAResume);
+            env.runtime.registerFunction(K_SCHED_B, schedulerTraceB);
+            env.ctx.pc = K_SCHED_MAIN;
 
-            const uint32_t threadParam[7] = {
-                0u,
-                kWaitThreadEntry,
-                0x00312000u,
-                0x00000800u,
-                0x00120000u,
-                6u,
-                0u
-            };
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.reset(env.rdram.data(), env.ctx);
+            const int first = ee.createThread(EeThreadCreateParams{0, K_SCHED_A, 0x20000u, 0x800u, 0, 5, 0});
+            const int second = ee.createThread(EeThreadCreateParams{0, K_SCHED_B, 0x21000u, 0x800u, 0, 5, 0});
+            ee.startThread(first, 0, env.ctx, false);
+            ee.startThread(second, 0, env.ctx, false);
+            ee.run();
 
-            writeGuestU32(env.rdram.data(), K_TERMINATE_SEMA_WAIT_READY_ADDR, 0u);
-            writeGuestWords(env.rdram.data(), K_PARAM_ADDR, threadParam, std::size(threadParam));
-            setRegU32(env.ctx, 4, K_PARAM_ADDR);
-            CreateThread(env.rdram.data(), &env.ctx, &env.runtime);
-            const int32_t tid = getRegS32(env.ctx, 2);
-            t.IsTrue(tid >= 2, "CreateThread should return a valid semaphore waiter thread id");
+            const std::vector<int> expected{1, 10, 20, 11};
+            t.IsTrue(trace == expected, "explicit rotation should move the current head behind its FIFO peer");
+        });
 
-            std::ostringstream capturedErr;
-            std::streambuf *oldErr = std::cerr.rdbuf(capturedErr.rdbuf());
+        tc.Run("starting a strictly higher-priority thread preempts immediately", [](TestCase &t)
+        {
+            TestEnv env;
+            std::vector<int> trace;
+            gSchedulerTrace = &trace;
+            env.runtime.registerFunction(K_SCHED_MAIN, schedulerMainExit);
+            env.runtime.registerFunction(K_SCHED_A, schedulerPreemptLow);
+            env.runtime.registerFunction(K_SCHED_A_RESUME, schedulerPreemptLowResume);
+            env.runtime.registerFunction(K_SCHED_HIGH, schedulerHigh);
+            env.ctx.pc = K_SCHED_MAIN;
 
-            setRegU32(env.ctx, 4, static_cast<uint32_t>(tid));
-            setRegU32(env.ctx, 5, static_cast<uint32_t>(sid));
-            StartThread(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_OK, "StartThread should launch the semaphore waiter");
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.reset(env.rdram.data(), env.ctx);
+            const int low = ee.createThread(EeThreadCreateParams{0, K_SCHED_A, 0x20000u, 0x800u, 0, 20, 0});
+            gSchedulerCreatedId = ee.createThread(EeThreadCreateParams{0, K_SCHED_HIGH, 0x21000u, 0x800u, 0, 5, 0});
+            ee.startThread(low, 0, env.ctx, false);
+            ee.run();
 
-            const bool waiting = waitUntil([&]()
-            {
-                if (readGuestU32(env.rdram.data(), K_TERMINATE_SEMA_WAIT_READY_ADDR) != 1u)
-                {
-                    return false;
-                }
+            const std::vector<int> expected{1, 30, 5, 31};
+            t.IsTrue(trace == expected, "higher priority should run before the starter continues");
+        });
 
-                R5900Context statusCtx{};
-                setRegU32(statusCtx, 4, static_cast<uint32_t>(tid));
-                setRegU32(statusCtx, 5, K_STATUS_ADDR);
-                ReferThreadStatus(env.rdram.data(), &statusCtx, &env.runtime);
-                if (getRegS32(statusCtx, 2) != KE_OK)
-                {
-                    return false;
-                }
+        tc.Run("semaphore waiters are FIFO and signal transfers one token directly", [](TestCase &t)
+        {
+            TestEnv env;
+            std::vector<int> trace;
+            gSchedulerTrace = &trace;
+            gSchedulerWaitResultA = 0;
+            gSchedulerWaitResultB = 0;
+            env.runtime.registerFunction(K_SCHED_MAIN, schedulerMainExit);
+            env.runtime.registerFunction(K_SCHED_A, schedulerWaitA);
+            env.runtime.registerFunction(K_SCHED_A_RESUME, schedulerWaitA);
+            env.runtime.registerFunction(K_SCHED_B, schedulerWaitB);
+            env.runtime.registerFunction(K_SCHED_B_RESUME, schedulerWaitB);
+            env.runtime.registerFunction(K_SCHED_SIGNAL, schedulerSignalTwice);
+            env.runtime.registerFunction(K_SCHED_SIGNAL_RESUME, schedulerSignalTwice);
+            env.ctx.pc = K_SCHED_MAIN;
 
-                EeThreadStatus status{};
-                std::memcpy(&status, env.rdram.data() + K_STATUS_ADDR, sizeof(status));
-                return status.status == THS_WAIT && status.waitType == TSW_SEMA;
-            }, std::chrono::milliseconds(200));
-            t.IsTrue(waiting, "worker should block inside WaitSema before termination");
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.reset(env.rdram.data(), env.ctx);
+            gSchedulerSemaphoreId = ee.createSemaphore(0, 1, 0, 0);
+            const int waiterA = ee.createThread(EeThreadCreateParams{0, K_SCHED_A, 0x20000u, 0x800u, 0, 5, 0});
+            const int waiterB = ee.createThread(EeThreadCreateParams{0, K_SCHED_B, 0x21000u, 0x800u, 0, 5, 0});
+            const int signaler = ee.createThread(EeThreadCreateParams{0, K_SCHED_SIGNAL, 0x22000u, 0x800u, 0, 20, 0});
+            ee.startThread(waiterA, 0, env.ctx, false);
+            ee.startThread(waiterB, 0, env.ctx, false);
+            ee.startThread(signaler, 0, env.ctx, false);
+            ee.run();
 
-            R5900Context terminateCtx{};
-            setRegU32(terminateCtx, 4, static_cast<uint32_t>(tid));
-            TerminateThread(env.rdram.data(), &terminateCtx, &env.runtime);
-            t.Equals(getRegS32(terminateCtx, 2), KE_OK, "TerminateThread should join the semaphore waiter");
-
-            std::cerr.rdbuf(oldErr);
-            const std::string errText = capturedErr.str();
-            t.IsTrue(errText.find("PS2 Thread Exit") == std::string::npos,
-                     "thread-exit exceptions from Sync.cpp should be caught as normal exits");
-
-            R5900Context dormantCtx{};
-            setRegU32(dormantCtx, 4, static_cast<uint32_t>(tid));
-            setRegU32(dormantCtx, 5, K_STATUS_ADDR);
-            ReferThreadStatus(env.rdram.data(), &dormantCtx, &env.runtime);
-            t.Equals(getRegS32(dormantCtx, 2), KE_OK, "terminated waiter should still have readable status");
-
-            EeThreadStatus dormantStatus{};
-            std::memcpy(&dormantStatus, env.rdram.data() + K_STATUS_ADDR, sizeof(dormantStatus));
-            t.Equals(dormantStatus.status, THS_DORMANT, "terminated waiter should become dormant");
-
-            setRegU32(env.ctx, 4, static_cast<uint32_t>(tid));
-            DeleteThread(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_OK, "DeleteThread should clean up the terminated waiter");
-
-            setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
-            DeleteSema(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), sid, "DeleteSema should return sid while cleaning up the waiter semaphore");
+            const std::vector<int> expected{1, 10, 20, 30, 11, 31, 21};
+            t.IsTrue(trace == expected, "each signal should wake exactly the FIFO head");
+            t.Equals(gSchedulerWaitResultA, gSchedulerSemaphoreId, "first waiter receives sid on resume");
+            t.Equals(gSchedulerWaitResultB, gSchedulerSemaphoreId, "second waiter receives sid on resume");
+            t.Equals(ee.semaphore(gSchedulerSemaphoreId)->count, 0, "direct handoff must not increment count");
         });
 
         tc.Run("setup heap and allocator primitives track end-of-heap", [](TestCase &t)
@@ -1288,12 +1168,11 @@ void register_ps2_runtime_kernel_tests()
 
         tc.Run("SetSyscall mirrors guest kernel table entries into low memory", [](TestCase &t)
         {
-            notifyRuntimeStop();
             TestEnv env;
-            initializeGuestKernelState(env.rdram.data());
+            initializeGuestKernelState(env.rdram.data(), &env.runtime);
 
             constexpr uint32_t kGuestSyscallTableGuestBase = 0x80011F80u;
-            constexpr uint32_t kSyscallIndex = 0x83u;
+            constexpr uint32_t kSyscallIndex = 0x82u;
             constexpr uint32_t kHandler = 0x00383548u;
             constexpr uint32_t kExpectedGuestAddr = kGuestSyscallTableGuestBase + (kSyscallIndex * 4u);
             constexpr uint32_t kExpectedPhysAddr = kExpectedGuestAddr & 0x1FFFFFFFu;
@@ -1317,15 +1196,12 @@ void register_ps2_runtime_kernel_tests()
             t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)),
                      kExpectedGuestAddr,
                      "FindAddress should discover mirrored SetSyscall entries in low guest memory");
-
-            notifyRuntimeStop();
         });
 
         tc.Run("SetSyscall honors signed kernel-table offsets", [](TestCase &t)
         {
-            notifyRuntimeStop();
             TestEnv env;
-            initializeGuestKernelState(env.rdram.data());
+            initializeGuestKernelState(env.rdram.data(), &env.runtime);
 
             constexpr uint32_t kPatchIndex = 0xFFFFC402u;
             constexpr uint32_t kHandler = 0xDEADBEEFu;
@@ -1342,40 +1218,55 @@ void register_ps2_runtime_kernel_tests()
             t.Equals(mirrored,
                      kHandler,
                      "SetSyscall should treat the syscall index as a signed offset from the kernel table base");
-
-            notifyRuntimeStop();
         });
 
-        tc.Run("guest kernel syscall mirror resets between runs", [](TestCase &t)
+        tc.Run("guest kernel syscall overrides and mirrors are isolated per runtime", [](TestCase &t)
         {
-            notifyRuntimeStop();
-            TestEnv env;
-            initializeGuestKernelState(env.rdram.data());
+            TestEnv first;
+            TestEnv second;
+            initializeGuestKernelState(first.rdram.data(), &first.runtime);
+            initializeGuestKernelState(second.rdram.data(), &second.runtime);
 
             constexpr uint32_t kGuestSyscallTableGuestBase = 0x80011F80u;
             constexpr uint32_t kGuestSyscallTableProbeBase = 0x000002F0u;
             constexpr uint32_t kSyscallIndex = 0x5Au;
-            constexpr uint32_t kHandler = 0x00383510u;
+            constexpr uint32_t kFirstHandler = 0x00383510u;
+            constexpr uint32_t kSecondHandler = 0x00383520u;
             constexpr uint32_t kEntryPhysAddr = (kGuestSyscallTableGuestBase + (kSyscallIndex * 4u)) & 0x1FFFFFFFu;
 
-            setRegU32(env.ctx, 4, kSyscallIndex);
-            setRegU32(env.ctx, 5, kHandler);
-            t.IsTrue(callSyscall(0x74u, env.rdram.data(), &env.ctx, &env.runtime),
-                     "SetSyscall syscall should dispatch");
+            setRegU32(first.ctx, 4, kSyscallIndex);
+            setRegU32(first.ctx, 5, kFirstHandler);
+            t.IsTrue(callSyscall(0x74u, first.rdram.data(), &first.ctx, &first.runtime),
+                     "SetSyscall should install the first runtime's override");
 
-            notifyRuntimeStop();
-            initializeGuestKernelState(env.rdram.data());
+            uint32_t firstHandler = 0u;
+            uint32_t secondHandler = 0u;
+            t.IsTrue(first.runtime.findEeSyscallOverride(kSyscallIndex, firstHandler),
+                     "the first runtime should own its override");
+            t.IsFalse(second.runtime.findEeSyscallOverride(kSyscallIndex, secondHandler),
+                      "a different runtime must not observe the first runtime's override");
 
-            uint32_t mirrored = 1u;
-            std::memcpy(&mirrored, env.rdram.data() + kEntryPhysAddr, sizeof(mirrored));
-            t.Equals(mirrored,
-                     0u,
-                     "Initializing guest kernel state should clear stale mirrored syscall entries");
+            setRegU32(second.ctx, 4, kSyscallIndex);
+            setRegU32(second.ctx, 5, kSecondHandler);
+            t.IsTrue(callSyscall(0x74u, second.rdram.data(), &second.ctx, &second.runtime),
+                     "SetSyscall should install an independent second-runtime override");
+
+            uint32_t firstMirrored = 0u;
+            uint32_t secondMirrored = 0u;
+            std::memcpy(&firstMirrored, first.rdram.data() + kEntryPhysAddr, sizeof(firstMirrored));
+            std::memcpy(&secondMirrored, second.rdram.data() + kEntryPhysAddr, sizeof(secondMirrored));
+            t.Equals(firstMirrored, kFirstHandler, "the first runtime should retain its own mirror value");
+            t.Equals(secondMirrored, kSecondHandler, "the second runtime should publish only its own mirror value");
+
+            initializeGuestKernelState(first.rdram.data(), &first.runtime);
+            std::memcpy(&firstMirrored, first.rdram.data() + kEntryPhysAddr, sizeof(firstMirrored));
+            t.Equals(firstMirrored, kFirstHandler,
+                     "reinitializing one runtime should rebuild its mirror from its instance-owned overrides");
 
             uint32_t probeHi = 0u;
             uint32_t probeLo = 0u;
-            std::memcpy(&probeHi, env.rdram.data() + kGuestSyscallTableProbeBase + 0u, sizeof(probeHi));
-            std::memcpy(&probeLo, env.rdram.data() + kGuestSyscallTableProbeBase + 8u, sizeof(probeLo));
+            std::memcpy(&probeHi, first.rdram.data() + kGuestSyscallTableProbeBase + 0u, sizeof(probeHi));
+            std::memcpy(&probeLo, first.rdram.data() + kGuestSyscallTableProbeBase + 8u, sizeof(probeLo));
             t.Equals(probeHi,
                      kGuestSyscallTableGuestBase >> 16,
                      "Guest kernel initialization should seed the syscall table probe high word");
@@ -1384,112 +1275,101 @@ void register_ps2_runtime_kernel_tests()
                      "Guest kernel initialization should seed the syscall table probe low word");
         });
 
-        tc.Run("SetSyscall override dispatches guest handlers that return through the sentinel", [](TestCase &t)
+        tc.Run("SetSyscall override runs as a scheduler invocation", [](TestCase &t)
         {
-            notifyRuntimeStop();
             TestEnv env;
             constexpr uint32_t kSyscallIndex = 0x91u;
             constexpr uint32_t kHandler = 0x00200000u;
 
             env.runtime.registerFunction(kHandler, overrideReturnHandler);
-            setRegU32(env.ctx, 4, kSyscallIndex);
-            setRegU32(env.ctx, 5, kHandler);
-            t.IsTrue(callSyscall(0x74u, env.rdram.data(), &env.ctx, &env.runtime),
-                     "SetSyscall syscall should dispatch");
+            env.runtime.registerFunction(K_OVERRIDE_ENTRY, schedulerOverrideEntry);
+            env.runtime.registerFunction(K_OVERRIDE_RESUME, schedulerOverrideResume);
+            env.runtime.setEeSyscallOverride(env.rdram.data(), kSyscallIndex, kHandler);
 
-            setRegU32(env.ctx, 4, 7u);
-            setRegU32(env.ctx, 5, 5u);
-            t.IsTrue(callSyscall(kSyscallIndex, env.rdram.data(), &env.ctx, &env.runtime),
-                     "Overridden syscall should dispatch through guest handler");
-            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)),
+            gOverrideSyscall = kSyscallIndex;
+            R5900Context mainContext{};
+            mainContext.pc = K_OVERRIDE_ENTRY;
+            setRegU32(mainContext, 4, 7u);
+            setRegU32(mainContext, 5, 5u);
+            env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+            env.runtime.eeScheduler().run();
+
+            t.Equals(static_cast<uint32_t>(getRegS32(gOverrideResult, 2)),
                      12u,
-                     "Successful override dispatch should propagate guest handler return value");
-
-            notifyRuntimeStop();
+                     "the completed invocation should propagate the guest handler return value");
         });
 
         tc.Run("SetSyscall override preserves KSEG argument sign extension", [](TestCase &t)
         {
-            notifyRuntimeStop();
             TestEnv env;
             constexpr uint32_t kSyscallIndex = 0x92u;
             constexpr uint32_t kHandler = 0x00200030u;
 
             env.runtime.registerFunction(kHandler, overrideKsegCompareHandler);
-            setRegU32(env.ctx, 4, kSyscallIndex);
-            setRegU32(env.ctx, 5, kHandler);
-            t.IsTrue(callSyscall(0x74u, env.rdram.data(), &env.ctx, &env.runtime),
-                     "SetSyscall syscall should dispatch");
+            env.runtime.registerFunction(K_OVERRIDE_ENTRY, schedulerOverrideEntry);
+            env.runtime.registerFunction(K_OVERRIDE_RESUME, schedulerOverrideResume);
+            env.runtime.setEeSyscallOverride(env.rdram.data(), kSyscallIndex, kHandler);
 
-            setRegU32(env.ctx, 4, 0x80000000u);
-            setRegU32(env.ctx, 5, 0x80080000u);
-            t.IsTrue(callSyscall(kSyscallIndex, env.rdram.data(), &env.ctx, &env.runtime),
-                     "Override syscall should invoke the guest handler");
-            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)),
+            gOverrideSyscall = kSyscallIndex;
+            R5900Context mainContext{};
+            mainContext.pc = K_OVERRIDE_ENTRY;
+            setRegU32(mainContext, 4, 0x80000000u);
+            setRegU32(mainContext, 5, 0x80080000u);
+            env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+            env.runtime.eeScheduler().run();
+
+            t.Equals(static_cast<uint32_t>(getRegS32(gOverrideResult, 2)),
                      0x80000004u,
                      "Override invocation should preserve KSEG ordering after 32-bit guest writes");
-
-            notifyRuntimeStop();
         });
 
         tc.Run("SetSyscall override preserves upper 64 bits when writing 32-bit args", [](TestCase &t)
         {
-            notifyRuntimeStop();
             TestEnv env;
             constexpr uint32_t kSyscallIndex = 0x93u;
             constexpr uint32_t kHandler = 0x00200040u;
 
             env.runtime.registerFunction(kHandler, overridePreserveUpper64Handler);
-            setRegU32(env.ctx, 4, kSyscallIndex);
-            setRegU32(env.ctx, 5, kHandler);
-            t.IsTrue(callSyscall(0x74u, env.rdram.data(), &env.ctx, &env.runtime),
-                     "SetSyscall syscall should dispatch");
+            env.runtime.registerFunction(K_OVERRIDE_ENTRY, schedulerOverrideEntry);
+            env.runtime.registerFunction(K_OVERRIDE_RESUME, schedulerOverrideResume);
+            env.runtime.setEeSyscallOverride(env.rdram.data(), kSyscallIndex, kHandler);
 
-            env.ctx.r[4] = _mm_set_epi64x(static_cast<int64_t>(K_EXPECTED_UPPER64),
-                                          static_cast<int64_t>(static_cast<int32_t>(0x80000000u)));
-            t.IsTrue(callSyscall(kSyscallIndex, env.rdram.data(), &env.ctx, &env.runtime),
-                     "Override syscall should invoke the guest handler");
-            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)),
+            gOverrideSyscall = kSyscallIndex;
+            R5900Context mainContext{};
+            mainContext.pc = K_OVERRIDE_ENTRY;
+            mainContext.r[4] = _mm_set_epi64x(static_cast<int64_t>(K_EXPECTED_UPPER64),
+                                               static_cast<int64_t>(static_cast<int32_t>(0x80000000u)));
+            env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+            env.runtime.eeScheduler().run();
+
+            t.Equals(static_cast<uint32_t>(getRegS32(gOverrideResult, 2)),
                      1u,
                      "Override invocation should preserve the upper 64 bits of 128-bit GPRs when setting 32-bit args");
-
-            notifyRuntimeStop();
         });
 
-        tc.Run("broken syscall overrides fall back to builtin handlers", [](TestCase &t)
+        tc.Run("an override that branches to an invalid PC completes without builtin fallback", [](TestCase &t)
         {
-            notifyRuntimeStop();
             TestEnv env;
             constexpr uint32_t kHandler = 0x00200010u;
-            constexpr uint32_t kTableBase = 0x00002000u;
-            constexpr uint32_t kValues[] = {
-                0x11111111u,
-                0x11223344u,
-                0x55555555u
-            };
 
             env.runtime.registerFunction(kHandler, overrideBrokenHandler);
-            setRegU32(env.ctx, 4, 0x83u);
-            setRegU32(env.ctx, 5, kHandler);
-            t.IsTrue(callSyscall(0x74u, env.rdram.data(), &env.ctx, &env.runtime),
-                     "SetSyscall syscall should dispatch");
+            env.runtime.registerFunction(K_OVERRIDE_ENTRY, schedulerOverrideEntry);
+            env.runtime.registerFunction(K_OVERRIDE_RESUME, schedulerOverrideResume);
+            env.runtime.setEeSyscallOverride(env.rdram.data(), 0x83u, kHandler);
 
-            writeGuestWords(env.rdram.data(), kTableBase, kValues, std::size(kValues));
-            setRegU32(env.ctx, 4, kTableBase);
-            setRegU32(env.ctx, 5, kTableBase + static_cast<uint32_t>(sizeof(kValues)));
-            setRegU32(env.ctx, 6, 0x11223344u);
-            t.IsTrue(callSyscall(0x83u, env.rdram.data(), &env.ctx, &env.runtime),
-                     "Builtin syscall should still dispatch when override exits abnormally");
-            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)),
-                     kTableBase + 4u,
-                     "Abnormal override exits should fall back to the builtin syscall implementation");
+            gOverrideSyscall = 0x83u;
+            R5900Context mainContext{};
+            mainContext.pc = K_OVERRIDE_ENTRY;
+            env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+            env.runtime.eeScheduler().run();
 
-            notifyRuntimeStop();
+            t.Equals(static_cast<uint32_t>(getRegS32(gOverrideResult, 2)),
+                     0xDEADBEEFu,
+                     "the dispatcher should preserve the invocation result and never call the builtin as a fallback");
         });
 
-        tc.Run("reentrant syscall overrides fall back to builtin handlers", [](TestCase &t)
+        tc.Run("reentrant override invokes the underlying builtin inside its invocation frame", [](TestCase &t)
         {
-            notifyRuntimeStop();
             TestEnv env;
             constexpr uint32_t kHandler = 0x00200020u;
             constexpr uint32_t kTableBase = 0x00003000u;
@@ -1500,22 +1380,67 @@ void register_ps2_runtime_kernel_tests()
             };
 
             env.runtime.registerFunction(kHandler, overrideRecursiveFindAddressHandler);
-            setRegU32(env.ctx, 4, 0x83u);
-            setRegU32(env.ctx, 5, kHandler);
-            t.IsTrue(callSyscall(0x74u, env.rdram.data(), &env.ctx, &env.runtime),
-                     "SetSyscall syscall should dispatch");
+            env.runtime.registerFunction(K_OVERRIDE_ENTRY, schedulerOverrideEntry);
+            env.runtime.registerFunction(K_OVERRIDE_RESUME, schedulerOverrideResume);
+            env.runtime.setEeSyscallOverride(env.rdram.data(), 0x83u, kHandler);
 
             writeGuestWords(env.rdram.data(), kTableBase, kValues, std::size(kValues));
-            setRegU32(env.ctx, 4, kTableBase);
-            setRegU32(env.ctx, 5, kTableBase + static_cast<uint32_t>(sizeof(kValues)));
-            setRegU32(env.ctx, 6, 0x11223344u);
-            t.IsTrue(callSyscall(0x83u, env.rdram.data(), &env.ctx, &env.runtime),
-                     "Reentrant override should resolve through builtin fallback");
-            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)),
-                     kTableBase + 4u,
-                     "Reentrant override dispatch should use builtin syscall implementation");
+            gOverrideSyscall = 0x83u;
+            R5900Context mainContext{};
+            mainContext.pc = K_OVERRIDE_ENTRY;
+            setRegU32(mainContext, 4, kTableBase);
+            setRegU32(mainContext, 5, kTableBase + static_cast<uint32_t>(sizeof(kValues)));
+            setRegU32(mainContext, 6, 0x11223344u);
+            env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+            env.runtime.eeScheduler().run();
 
-            notifyRuntimeStop();
+            t.Equals(static_cast<uint32_t>(getRegS32(gOverrideResult, 2)),
+                     kTableBase + 4u,
+                     "only the recursive call should bypass the active override frame and reach the builtin");
+        });
+
+        tc.Run("a syscall invocation can block and resume without losing its base context", [](TestCase &t)
+        {
+            TestEnv env;
+            constexpr uint32_t kSyscallIndex = 0x94u;
+            env.runtime.registerFunction(K_OVERRIDE_BLOCK_ENTRY, schedulerBlockingOverrideEntry);
+            env.runtime.registerFunction(K_OVERRIDE_BLOCK_HANDLER, schedulerBlockingOverrideHandler);
+            env.runtime.registerFunction(K_OVERRIDE_BLOCK_HANDLER_RESUME, schedulerBlockingOverrideHandlerResume);
+            env.runtime.registerFunction(K_OVERRIDE_BLOCK_DRIVER, schedulerBlockingOverrideDriver);
+            env.runtime.registerFunction(K_OVERRIDE_BLOCK_BASE_RESUME, schedulerBlockingOverrideBaseResume);
+            env.runtime.setEeSyscallOverride(env.rdram.data(), kSyscallIndex, K_OVERRIDE_BLOCK_HANDLER);
+
+            gOverrideSyscall = kSyscallIndex;
+            gInvocationTrace.clear();
+            R5900Context mainContext{};
+            mainContext.pc = K_OVERRIDE_BLOCK_ENTRY;
+            env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+            env.runtime.eeScheduler().run();
+
+            const std::vector<int> expected{1, 2, 3, 4, 5};
+            t.IsTrue(gInvocationTrace == expected,
+                     "the sleeping invocation should yield to the driver, resume its own frame, then restore the base frame");
+            t.Equals(static_cast<uint32_t>(getRegS32(gOverrideResult, 2)), 0xB10C0EDu,
+                     "the invocation result should reach the preserved base context after the wait");
+        });
+
+        tc.Run("exit handlers run as ordered invocation frames before the thread becomes dormant", [](TestCase &t)
+        {
+            TestEnv env;
+            env.runtime.registerFunction(K_EXIT_MAIN, schedulerExitMain);
+            env.runtime.registerFunction(K_EXIT_HANDLER_A, schedulerExitHandlerA);
+            env.runtime.registerFunction(K_EXIT_HANDLER_B, schedulerExitHandlerB);
+            env.runtime.registerFunction(K_EXIT_OBSERVER, schedulerExitObserver);
+
+            gInvocationTrace.clear();
+            R5900Context mainContext{};
+            mainContext.pc = K_EXIT_MAIN;
+            env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+            env.runtime.eeScheduler().run();
+
+            const std::vector<int> expected{10, 20, 30, 40};
+            t.IsTrue(gInvocationTrace == expected,
+                     "exit handlers should retain registration order and complete before another guest thread observes dormancy");
         });
 
         tc.Run("Copy syscall (0x5A) performs a memory copy", [](TestCase &t)
@@ -1549,9 +1474,8 @@ void register_ps2_runtime_kernel_tests()
 
         tc.Run("GetEntryAddress syscall (0x5B) returns handler from guest table", [](TestCase &t)
         {
-            notifyRuntimeStop();
             TestEnv env;
-            initializeGuestKernelState(env.rdram.data());
+            initializeGuestKernelState(env.rdram.data(), &env.runtime);
 
             constexpr uint32_t kGuestSyscallTableGuestBase = 0x80011F80u;
             constexpr uint32_t kSyscallIndex = 0x5Au;
@@ -1568,8 +1492,6 @@ void register_ps2_runtime_kernel_tests()
             t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)),
                      kExpectedHandler,
                      "GetEntryAddress should read and return the handler address from the table");
-
-            notifyRuntimeStop();
         });
     });
 }

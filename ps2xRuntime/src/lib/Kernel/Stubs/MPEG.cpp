@@ -1,5 +1,6 @@
 #include "Common.h"
 #include "MPEG.h"
+#include "runtime/ee_scheduler.h"
 
 #if !defined(PS2X_HAS_FFMPEG)
 #define PS2X_HAS_FFMPEG 1
@@ -15,8 +16,6 @@ extern "C"
 }
 #endif
 
-#include <chrono>
-#include <condition_variable>
 #include <deque>
 #include <memory>
 
@@ -472,16 +471,11 @@ namespace ps2_stubs
             bool streamEnded = false;
             bool decoderFailed = false;
             uint64_t cdStreamGeneration = 0u;
-            bool noFrameStallArmed = false;
-            std::chrono::steady_clock::time_point noFrameStallStart{};
-            uint32_t consecutiveEmptyGetPicture = 0u;
             bool waitingForVideoSequenceHeader = true;
             std::vector<uint8_t> videoSequenceSyncBuffer;
             std::vector<uint8_t> pssBuffer;
             std::vector<uint32_t> pssGuestAddrs;
             std::deque<MpegDecodedFrame> decodedFrames;
-            bool hasLastFrame = false;
-            MpegDecodedFrame lastFrame;
             std::unique_ptr<MpegFfmpegDecoder> decoder;
         };
 
@@ -513,7 +507,7 @@ namespace ps2_stubs
         };
 
         std::mutex g_mpeg_stub_mutex;
-        std::condition_variable g_mpeg_cv;
+        constexpr uint32_t kMpegPictureWaitType = 1u;
         MpegStubState g_mpeg_stub_state;
 
         // TODO this resolution should follow runtime resolution
@@ -529,10 +523,6 @@ namespace ps2_stubs
         constexpr uint8_t kMpegPrivateStream1 = 0xBDu;
         constexpr size_t kStartCodeNotFound = std::numeric_limits<size_t>::max();
         constexpr uint32_t kMpegCallbackDataSize = 0x20u;
-        constexpr uint32_t kMpegCallbackMaxSteps = 0x4000u;
-        constexpr std::chrono::milliseconds kMpegGetPictureNoFrameWaitTimeout{64};
-        constexpr std::chrono::milliseconds kMpegNoFrameEndTimeout{500};
-        constexpr uint32_t kMpegMaxConsecutiveEmptyGetPicture = 60u;
 
         uint32_t align16(uint32_t value)
         {
@@ -732,77 +722,6 @@ namespace ps2_stubs
             }
         }
 
-        void clearNoFrameStall(MpegPlaybackState &playback)
-        {
-            playback.noFrameStallArmed = false;
-            playback.noFrameStallStart = {};
-        }
-
-        void finishPlaybackStream(uint32_t mpegAddr, MpegPlaybackState &playback);
-
-        bool maybeFinishNoFrameStall(uint32_t mpegAddr, MpegPlaybackState &playback)
-        {
-            if (playback.streamEnded || playback.decoderFailed || !playback.decodedFrames.empty())
-            {
-                clearNoFrameStall(playback);
-                playback.consecutiveEmptyGetPicture = 0u;
-                return false;
-            }
-
-            if (!playback.sawInput || playback.picturesServed == 0u)
-            {
-                return false;
-            }
-
-            const auto now = std::chrono::steady_clock::now();
-            const bool cdStreamEofSeen = g_mpeg_stub_state.currentCdStreamEofSeen;
-
-            bool stallByNoFrame = false;
-            if (cdStreamEofSeen)
-            {
-                if (!playback.noFrameStallArmed)
-                {
-                    playback.noFrameStallArmed = true;
-                    playback.noFrameStallStart = now;
-                }
-                else if (now - playback.noFrameStallStart >= kMpegNoFrameEndTimeout)
-                {
-                    stallByNoFrame = true;
-                }
-            }
-            else
-            {
-                clearNoFrameStall(playback);
-            }
-
-            const bool stallByConsecutive =
-                cdStreamEofSeen && (playback.consecutiveEmptyGetPicture >= kMpegMaxConsecutiveEmptyGetPicture);
-
-            if (!stallByNoFrame && !stallByConsecutive)
-            {
-                return false;
-            }
-
-            finishPlaybackStream(mpegAddr, playback);
-
-            static uint32_t s_noFrameEofLogCount = 0u;
-            if (s_noFrameEofLogCount < 16u)
-            {
-                PS2_IF_AGRESSIVE_LOGS({
-                    std::cerr << "[MPEG:no-frame-eof] mpeg=0x" << std::hex << mpegAddr
-                              << std::dec << " served=" << playback.picturesServed
-                              << " sawInput=" << playback.sawInput
-                              << " cdEof=" << cdStreamEofSeen
-                              << " reason="
-                              << (stallByNoFrame ? "no-frame" : "consecutive")
-                              << " consecutiveEmpty=" << playback.consecutiveEmptyGetPicture
-                              << std::endl;
-                });
-                ++s_noFrameEofLogCount;
-            }
-            return true;
-        }
-
         void feedElementaryStream(MpegPlaybackState &playback, const uint8_t *data, size_t size)
         {
             if (!data || size == 0)
@@ -890,10 +809,6 @@ namespace ps2_stubs
 
             playback.videoSequenceSyncBuffer.clear();
             flushDecoderIfEnded(playback);
-            if (!playback.decodedFrames.empty())
-            {
-                clearNoFrameStall(playback);
-            }
         }
 
         void erasePssPrefix(MpegPlaybackState &playback, size_t count)
@@ -1190,10 +1105,6 @@ namespace ps2_stubs
                 playback.pssGuestAddrs.push_back(guestAddr + static_cast<uint32_t>(i));
             }
             processPssBuffer(mpegAddr, playback, callbackEvents);
-            if (!playback.decodedFrames.empty())
-            {
-                clearNoFrameStall(playback);
-            }
         }
 
         size_t appendGuestBytes(uint32_t mpegAddr,
@@ -1317,15 +1228,6 @@ namespace ps2_stubs
                 return;
             }
 
-            thread_local PS2Runtime *s_callbackStackRuntime = nullptr;
-            thread_local uint32_t s_callbackStackTop = 0u;
-            if (s_callbackStackRuntime != runtime || s_callbackStackTop == 0u)
-            {
-                constexpr uint32_t kCallbackStackSize = 0x4000u;
-                s_callbackStackRuntime = runtime;
-                s_callbackStackTop = runtime->reserveAsyncCallbackStack(kCallbackStackSize, 16u);
-            }
-
             const uint32_t cbDataAddr = runtime->guestMalloc(kMpegCallbackDataSize, 16u);
             if (cbDataAddr == 0u)
             {
@@ -1342,61 +1244,18 @@ namespace ps2_stubs
             SET_GPR_U32(&callbackCtx, 5, cbDataAddr);
             SET_GPR_U32(&callbackCtx, 6, callback.data);
             SET_GPR_U32(&callbackCtx, 7, 0u);
-            SET_GPR_U32(&callbackCtx, 29, (s_callbackStackTop != 0u) ? s_callbackStackTop : (PS2_RAM_SIZE - 0x10u));
+            SET_GPR_U32(&callbackCtx, 29, 0u);
             SET_GPR_U32(&callbackCtx, 31, 0u);
             callbackCtx.pc = callback.func;
 
-            uint32_t steps = 0u;
-            bool reschedulePending = false;
-            uint64_t handoffBaseline = 0u;
+            GuestInvocation invocation{};
+            invocation.kind = GuestInvocationKind::RpcCallback;
+            invocation.context = callbackCtx;
+            invocation.onComplete = [runtime, cbDataAddr](const R5900Context &, R5900Context &)
             {
-                PS2Runtime::GuestExecutionScope guestExecution(runtime);
-                PS2Runtime::DeferredGuestYieldScope deferYield(reschedulePending);
-
-                while (callbackCtx.pc != 0u && !runtime->isStopRequested() && steps < kMpegCallbackMaxSteps)
-                {
-                    if (!runtime->hasFunction(callbackCtx.pc))
-                    {
-                        static uint32_t badPcLogCount = 0u;
-                        if (badPcLogCount < 16u)
-                        {
-                            std::cerr << "[MPEG:callback:bad-pc] cb=0x" << std::hex << callback.func
-                                      << " pc=0x" << callbackCtx.pc
-                                      << " ra=0x" << getRegU32(&callbackCtx, 31)
-                                      << std::dec << std::endl;
-                            ++badPcLogCount;
-                        }
-                        break;
-                    }
-
-                    PS2Runtime::RecompiledFunction step = runtime->lookupFunction(callbackCtx.pc);
-                    if (!step)
-                    {
-                        break;
-                    }
-
-                    step(rdram, &callbackCtx, runtime);
-                    ++steps;
-                }
-                handoffBaseline = runtime->guestExecutionHandoffEpochSnapshot();
-            }
-            if (reschedulePending && !runtime->isStopRequested())
-            {
-                runtime->waitForGuestExecutionHandoff(handoffBaseline);
-            }
-
-            if (steps >= kMpegCallbackMaxSteps)
-            {
-                static uint32_t stepLimitLogCount = 0u;
-                if (stepLimitLogCount < 16u)
-                {
-                    std::cerr << "[MPEG:callback:step-limit] cb=0x" << std::hex << callback.func
-                              << " pc=0x" << callbackCtx.pc << std::dec << std::endl;
-                    ++stepLimitLogCount;
-                }
-            }
-
-            runtime->guestFree(cbDataAddr);
+                runtime->guestFree(cbDataAddr);
+            };
+            runtime->eeScheduler().queueInvocation(std::move(invocation));
         }
 
         void dispatchStreamCallbacks(uint8_t *rdram,
@@ -1428,7 +1287,6 @@ namespace ps2_stubs
                 return;
             }
 
-            PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime);
             dispatchStreamCallbacks(rdram, ctx, runtime, events);
         }
 
@@ -1543,11 +1401,27 @@ namespace ps2_stubs
     {
         std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
         resetMpegStubStateUnlocked();
-        g_mpeg_cv.notify_all();
     }
 
-    void notifyMpegCdStreamStart()
+    void enqueueMpegDecodedFrameForTesting(uint32_t mpegAddr)
     {
+        constexpr int kTestFrameWidth = 16;
+        constexpr int kTestFrameHeight = 16;
+
+        MpegDecodedFrame frame;
+        frame.width = kTestFrameWidth;
+        frame.height = kTestFrameHeight;
+        frame.rgba.resize(static_cast<size_t>(kTestFrameWidth * kTestFrameHeight * 4), 0x80u);
+
+        std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+        MpegPlaybackState &playback = getPlaybackState(mpegAddr);
+        playback.sawInput = true;
+        playback.decodedFrames.push_back(std::move(frame));
+    }
+
+    void notifyMpegCdStreamStart(PS2Runtime *runtime)
+    {
+        (void)runtime;
         std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
         ++g_mpeg_stub_state.cdStreamGeneration;
         g_mpeg_stub_state.currentCdStreamEofSeen = false;
@@ -1566,23 +1440,26 @@ namespace ps2_stubs
             std::cerr << "[MPEG:CdStreamStart] generation=" << g_mpeg_stub_state.cdStreamGeneration
                       << " reopened=" << g_mpeg_stub_state.playbackByMpeg.size() << std::endl;
         });
-        g_mpeg_cv.notify_all();
     }
 
-    void notifyMpegCdStreamEof()
+    void notifyMpegCdStreamEof(PS2Runtime *runtime)
     {
-        std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
-        g_mpeg_stub_state.currentCdStreamEofSeen = true;
+        std::vector<uint32_t> completedMpegIds;
         bool changed = false;
-        for (auto &[mpegAddr, playback] : g_mpeg_stub_state.playbackByMpeg)
         {
-            if (!playback.sawInput || playback.streamEnded)
+            std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+            g_mpeg_stub_state.currentCdStreamEofSeen = true;
+            for (auto &[mpegAddr, playback] : g_mpeg_stub_state.playbackByMpeg)
             {
-                continue;
-            }
+                completedMpegIds.push_back(mpegAddr);
+                if (!playback.sawInput || playback.streamEnded)
+                {
+                    continue;
+                }
 
-            finishPlaybackStream(mpegAddr, playback);
-            changed = true;
+                finishPlaybackStream(mpegAddr, playback);
+                changed = true;
+            }
         }
 
         if (changed)
@@ -1595,52 +1472,58 @@ namespace ps2_stubs
                 });
                 ++s_eofLogCount;
             }
-            g_mpeg_cv.notify_all();
+        }
+        if (runtime)
+        {
+            for (const uint32_t mpegAddr : completedMpegIds)
+            {
+                runtime->eeScheduler().completeExternalWait(kMpegPictureWaitType, mpegAddr, KE_OK);
+            }
         }
     }
 
     void sceMpegFlush(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         (void)rdram;
-        (void)runtime;
-
         const uint32_t mpegAddr = getRegU32(ctx, 4);
-        std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
-        MpegPlaybackState &playback = getPlaybackState(mpegAddr);
-        if (playback.decoder)
         {
-            playback.decoder->flush(playback.decodedFrames);
+            std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+            MpegPlaybackState &playback = getPlaybackState(mpegAddr);
+            if (playback.decoder)
+            {
+                playback.decoder->flush(playback.decodedFrames);
+            }
         }
-        g_mpeg_cv.notify_all();
+        runtime->eeScheduler().completeExternalWait(kMpegPictureWaitType, mpegAddr, KE_OK);
         setReturnS32(ctx, 0);
     }
 
     void sceMpegAddBs(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        (void)runtime;
-
         const uint32_t mpegAddr = getRegU32(ctx, 4);
         const uint32_t dataAddr = getRegU32(ctx, 5);
         const uint32_t byteCount = getRegU32(ctx, 6);
 
-        std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
-        MpegPlaybackState &playback = getPlaybackState(mpegAddr);
         size_t copied = 0u;
-        while (copied < byteCount)
         {
-            const uint32_t curAddr = dataAddr + static_cast<uint32_t>(copied);
-            const uint32_t offset = curAddr & PS2_RAM_MASK;
-            const size_t chunk = std::min<size_t>(static_cast<size_t>(byteCount) - copied, PS2_RAM_SIZE - offset);
-            const uint8_t *src = getConstMemPtr(rdram, curAddr);
-            if (!src || chunk == 0u)
+            std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+            MpegPlaybackState &playback = getPlaybackState(mpegAddr);
+            while (copied < byteCount)
             {
-                break;
+                const uint32_t curAddr = dataAddr + static_cast<uint32_t>(copied);
+                const uint32_t offset = curAddr & PS2_RAM_MASK;
+                const size_t chunk = std::min<size_t>(static_cast<size_t>(byteCount) - copied, PS2_RAM_SIZE - offset);
+                const uint8_t *src = getConstMemPtr(rdram, curAddr);
+                if (!src || chunk == 0u)
+                {
+                    break;
+                }
+                feedElementaryStream(playback, src, chunk);
+                copied += chunk;
             }
-            feedElementaryStream(playback, src, chunk);
-            copied += chunk;
         }
 
-        g_mpeg_cv.notify_all();
+        runtime->eeScheduler().completeExternalWait(kMpegPictureWaitType, mpegAddr, KE_OK);
         setReturnS32(ctx, static_cast<int32_t>(copied));
     }
 
@@ -1801,12 +1684,14 @@ namespace ps2_stubs
     void sceMpegDelete(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         (void)rdram;
-        (void)runtime;
 
         const uint32_t mpegAddr = getRegU32(ctx, 4);
-        std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
-        g_mpeg_stub_state.callbacksByMpeg.erase(mpegAddr);
-        g_mpeg_stub_state.playbackByMpeg.erase(mpegAddr);
+        {
+            std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+            g_mpeg_stub_state.callbacksByMpeg.erase(mpegAddr);
+            g_mpeg_stub_state.playbackByMpeg.erase(mpegAddr);
+        }
+        runtime->eeScheduler().completeExternalWait(kMpegPictureWaitType, mpegAddr, KE_WAIT_DELETE);
         setReturnU32(ctx, 0u);
     }
 
@@ -1821,14 +1706,13 @@ namespace ps2_stubs
         size_t decodedCount = 0u;
         uint32_t traceIdx = 0u;
         {
-            PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime);
             std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
             MpegPlaybackState &playback = getPlaybackState(mpegAddr);
             consumed = appendGuestBytes(mpegAddr, playback, rdram, dataAddr, byteCount, callbackEvents);
             decodedCount = playback.decodedFrames.size();
             traceIdx = g_mpeg_stub_state.demuxPssTraceCount++;
         }
-        g_mpeg_cv.notify_all();
+        runtime->eeScheduler().completeExternalWait(kMpegPictureWaitType, mpegAddr, KE_OK);
 
         if (traceIdx < 32u)
         {
@@ -1872,8 +1756,6 @@ namespace ps2_stubs
         size_t decodedCount = 0u;
         uint32_t traceIdx = 0u;
         {
-            // This prevents an ABBA deadlock with sceMpegGetPicture on thread 5, need investigation on other games
-            PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime);
             std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
             MpegPlaybackState &playback = getPlaybackState(mpegAddr);
             consumed = appendGuestRingBytes(
@@ -1888,7 +1770,7 @@ namespace ps2_stubs
             decodedCount = playback.decodedFrames.size();
             traceIdx = g_mpeg_stub_state.demuxRingTraceCount++;
         }
-        g_mpeg_cv.notify_all();
+        runtime->eeScheduler().completeExternalWait(kMpegPictureWaitType, mpegAddr, KE_OK);
 
         if (traceIdx < 32u)
         {
@@ -1959,84 +1841,36 @@ namespace ps2_stubs
         bool haveFrame = false;
         MpegDecodedFrame frame;
         {
-            PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime);
             std::unique_lock<std::mutex> lock(g_mpeg_stub_mutex);
             MpegPlaybackState &playback = getPlaybackState(mpegAddr);
-            const uint64_t waitCdStreamGeneration = g_mpeg_stub_state.cdStreamGeneration;
-
-            if (playback.decodedFrames.empty())
+            if (playback.decodedFrames.empty() &&
+                !g_mpeg_stub_state.currentCdStreamEofSeen &&
+                !playback.streamEnded &&
+                !playback.decoderFailed)
             {
-                playback.consecutiveEmptyGetPicture++;
                 if (g_mpeg_stub_state.getPictureWaitTraceCount < 32u)
                 {
                     PS2_IF_AGRESSIVE_LOGS({
                         std::cerr << "[MPEG:GetPicture] waiting for frames, mpeg=0x" << std::hex << mpegAddr
                                   << std::dec << " ended=" << playback.streamEnded
                                   << " failed=" << playback.decoderFailed
-                                  << " sawInput=" << playback.sawInput
-                                  << " consec=" << playback.consecutiveEmptyGetPicture << std::endl;
+                                  << " sawInput=" << playback.sawInput << std::endl;
                     });
                     ++g_mpeg_stub_state.getPictureWaitTraceCount;
                 }
-            }
-
-            std::shared_ptr<ThreadInfo> currentThreadInfo = nullptr;
-            {
-                std::lock_guard<std::mutex> mapLock(g_thread_map_mutex);
-                auto it = g_threads.find(g_currentThreadId);
-                if (it != g_threads.end())
-                    currentThreadInfo = it->second;
-            }
-
-            const auto noFrameWaitStart = std::chrono::steady_clock::now();
-            while (runtime &&
-                   g_mpeg_stub_state.playbackByMpeg.find(mpegAddr) != g_mpeg_stub_state.playbackByMpeg.end() &&
-                   getPlaybackState(mpegAddr).decodedFrames.empty() &&
-                   !getPlaybackState(mpegAddr).streamEnded &&
-                   !getPlaybackState(mpegAddr).decoderFailed &&
-                   g_mpeg_stub_state.cdStreamGeneration == waitCdStreamGeneration &&
-                   !runtime->isStopRequested() &&
-                   (!currentThreadInfo || !currentThreadInfo->terminated.load(std::memory_order_relaxed)))
-            {
-                g_mpeg_cv.wait_for(lock, std::chrono::milliseconds(8));
-
-                auto playbackIt = g_mpeg_stub_state.playbackByMpeg.find(mpegAddr);
-                if (playbackIt == g_mpeg_stub_state.playbackByMpeg.end())
-                {
-                    break;
-                }
-
-                MpegPlaybackState &waitPlayback = playbackIt->second;
-                if (maybeFinishNoFrameStall(mpegAddr, waitPlayback))
-                {
-                    break;
-                }
-
-                if (!g_mpeg_stub_state.currentCdStreamEofSeen &&
-                    std::chrono::steady_clock::now() - noFrameWaitStart >= kMpegGetPictureNoFrameWaitTimeout)
-                {
-                    static uint32_t s_noFrameYieldLogCount = 0u;
-                    if (s_noFrameYieldLogCount < 16u)
+                lock.unlock();
+                runtime->eeScheduler().waitExternal(
+                    EeWaitReason::Mpeg,
+                    kMpegPictureWaitType,
+                    mpegAddr,
+                    [rdram, runtime](R5900Context &resumeContext)
                     {
-                        PS2_IF_AGRESSIVE_LOGS({
-                            std::cerr << "[MPEG:GetPicture:yield] mpeg=0x" << std::hex << mpegAddr
-                                      << std::dec << " generation=" << g_mpeg_stub_state.cdStreamGeneration
-                                      << " sawInput=" << waitPlayback.sawInput
-                                      << " served=" << waitPlayback.picturesServed
-                                      << " cdEof=" << g_mpeg_stub_state.currentCdStreamEofSeen
-                                      << std::endl;
-                        });
-                        ++s_noFrameYieldLogCount;
-                    }
-                    break;
-                }
-            }
-
-            if (g_mpeg_stub_state.playbackByMpeg.find(mpegAddr) == g_mpeg_stub_state.playbackByMpeg.end())
-            {
-                // The MPEG decoder was deleted while we were waiting.
-                setReturnS32(ctx, -1);
-                return;
+                        if (static_cast<int32_t>(getRegU32(&resumeContext, 2)) < 0)
+                        {
+                            return;
+                        }
+                        sceMpegGetPicture(rdram, &resumeContext, runtime);
+                    });
             }
 
             if (!playback.decodedFrames.empty())
@@ -2049,9 +1883,6 @@ namespace ps2_stubs
                 height = playback.height;
                 frameCount = playback.picturesServed;
                 playback.picturesServed += 1u;
-                playback.consecutiveEmptyGetPicture = 0u;
-                playback.lastFrame = frame;
-                playback.hasLastFrame = true;
                 haveFrame = true;
                 if (g_mpeg_stub_state.pictureTraceCount < 32u)
                 {
@@ -2064,41 +1895,9 @@ namespace ps2_stubs
                     });
                     ++g_mpeg_stub_state.pictureTraceCount;
                 }
-                if (!playback.decodedFrames.empty())
-                {
-                    clearNoFrameStall(playback);
-                }
-            }
-            else if (!g_mpeg_stub_state.currentCdStreamEofSeen &&
-                     playback.sawInput &&
-                     playback.hasLastFrame &&
-                     playback.picturesServed > 0u &&
-                     !playback.streamEnded &&
-                     !playback.decoderFailed)
-            {
-                frame = playback.lastFrame;
-                width = static_cast<uint32_t>(frame.width);
-                height = static_cast<uint32_t>(frame.height);
-                frameCount = playback.picturesServed;
-                playback.picturesServed += 1u;
-                playback.consecutiveEmptyGetPicture = 0u;
-                haveFrame = true;
-
-                static uint32_t s_duplicateFrameLogCount = 0u;
-                if (s_duplicateFrameLogCount < 16u)
-                {
-                    PS2_IF_AGRESSIVE_LOGS({
-                        std::cerr << "[MPEG:GetPicture:DUP] mpeg=0x" << std::hex << mpegAddr
-                                  << std::dec << " generation=" << g_mpeg_stub_state.cdStreamGeneration
-                                  << " frame=" << frameCount
-                                  << " size=" << width << "x" << height << std::endl;
-                    });
-                    ++s_duplicateFrameLogCount;
-                }
             }
             else
             {
-                maybeFinishNoFrameStall(mpegAddr, playback);
                 width = playback.width;
                 height = playback.height;
                 frameCount = playback.picturesServed;
@@ -2147,8 +1946,6 @@ namespace ps2_stubs
     void sceMpegInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         (void)rdram;
-        (void)runtime;
-
         std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
         const uint64_t cdStreamGeneration = g_mpeg_stub_state.cdStreamGeneration;
         const bool currentCdStreamEofSeen = g_mpeg_stub_state.currentCdStreamEofSeen;
@@ -2156,21 +1953,17 @@ namespace ps2_stubs
         g_mpeg_stub_state.initialized = true;
         g_mpeg_stub_state.cdStreamGeneration = cdStreamGeneration;
         g_mpeg_stub_state.currentCdStreamEofSeen = currentCdStreamEofSeen;
-        g_mpeg_cv.notify_all();
         setReturnU32(ctx, 0u);
     }
 
     void sceMpegIsEnd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         (void)rdram;
-        // runtime used below for GuestExecutionReleaseScope
         const uint32_t mpegAddr = getRegU32(ctx, 4);
 
-        PS2Runtime::GuestExecutionReleaseScope releaseGuestExecution(runtime);
         std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
         g_mpeg_stub_state.initialized = true;
         MpegPlaybackState &playback = getPlaybackState(mpegAddr);
-        maybeFinishNoFrameStall(mpegAddr, playback);
         const bool ended = playback.streamEnded || (playback.decoderFailed && playback.sawInput);
 
         if (g_mpeg_stub_state.isEndTraceCount < 16u)

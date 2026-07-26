@@ -17,11 +17,10 @@
 #include <atomic>
 #include <array>
 #include <mutex>
-#include <condition_variable>
 #include <filesystem>
-#include <iostream>
-#include <iomanip>
 #include <memory>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "ps2_log.h"
 #include "runtime/ps2_address.h"
@@ -40,6 +39,8 @@ namespace ps2x::iop
 
 class PS2IopHostAdapter;
 class PS2IopTransport;
+class EeScheduler;
+struct EeEvent;
 
 enum PS2Exception
 {
@@ -248,7 +249,6 @@ inline void ps2TraceGuestWrite(uint8_t *rdram,
     (void)valueHi;
     (void)op;
     (void)ctx;
-    // TODO we dont need this anymore so on next release it will be deleted
 }
 
 inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
@@ -262,7 +262,6 @@ inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
     (void)size;
     (void)op;
     (void)ctx;
-    // TODO we dont need this anymore so on next release it will be deleted
 }
 
 class PS2Runtime
@@ -321,46 +320,6 @@ public:
         SkipCallDebug = 3,
     };
 
-    class GuestExecutionScope
-    {
-    public:
-        explicit GuestExecutionScope(PS2Runtime *runtime) noexcept;
-        ~GuestExecutionScope();
-
-        GuestExecutionScope(const GuestExecutionScope &) = delete;
-        GuestExecutionScope &operator=(const GuestExecutionScope &) = delete;
-
-    private:
-        PS2Runtime *m_runtime = nullptr;
-    };
-
-    class GuestExecutionReleaseScope
-    {
-    public:
-        explicit GuestExecutionReleaseScope(PS2Runtime *runtime) noexcept;
-        ~GuestExecutionReleaseScope();
-
-        GuestExecutionReleaseScope(const GuestExecutionReleaseScope &) = delete;
-        GuestExecutionReleaseScope &operator=(const GuestExecutionReleaseScope &) = delete;
-
-    private:
-        PS2Runtime *m_runtime = nullptr;
-        uint32_t m_depth = 0u;
-    };
-
-    class DeferredGuestYieldScope
-    {
-    public:
-        explicit DeferredGuestYieldScope(bool &pendingOut) noexcept;
-        ~DeferredGuestYieldScope();
-
-        DeferredGuestYieldScope(const DeferredGuestYieldScope &) = delete;
-        DeferredGuestYieldScope &operator=(const DeferredGuestYieldScope &) = delete;
-
-    private:
-        bool &m_pendingOut;
-    };
-
     bool replaceFunction(uint32_t address, RecompiledFunction func);
     // TODO remove this later need to update all tests
     bool registerFunction(uint32_t address, RecompiledFunction func);
@@ -413,31 +372,27 @@ public:
     uint32_t guestHeapLimit() const;
     uint32_t reserveAsyncCallbackStack(uint32_t size, uint32_t alignment = 16u);
 
-    void dispatchLoop(uint8_t *rdram, R5900Context *ctx);
-
     void drainCompletedDmacHandlers(uint8_t *rdram);
-
-    bool shouldPreemptGuestExecution();
-    void yieldGuestExecutionAfterWake();
-    void waitForGuestExecutionHandoff();
-    void waitForGuestExecutionHandoff(uint64_t baselineEpoch);
-    uint64_t guestExecutionHandoffEpochSnapshot() const
-    {
-        return m_guestExecutionHandoffEpoch.load(std::memory_order_acquire);
-    }
 
     void requestStop();
     bool isStopRequested() const;
 
-    uint32_t guestExecutionWaiterCountForTesting() const
-    {
-        return m_guestExecutionWaiters.load(std::memory_order_acquire);
-    }
+    EeScheduler &eeScheduler();
+    const EeScheduler &eeScheduler() const;
+    void postEeEvent(EeEvent event);
+    bool eeCheckpointDue() const noexcept;
 
-    uint64_t guestExecutionHandoffTimeouts() const
+    struct EeExitHandlerRegistration
     {
-        return m_guestExecutionHandoffTimeouts.load(std::memory_order_relaxed);
-    }
+        uint32_t function = 0;
+        uint32_t argument = 0;
+    };
+    void addEeExitHandler(int threadId, uint32_t function, uint32_t argument);
+    std::vector<EeExitHandlerRegistration> takeEeExitHandlers(int threadId);
+    void removeEeExitHandlers(int threadId);
+    bool findEeSyscallOverride(uint32_t syscallNumber, uint32_t &handler) const;
+    void setEeSyscallOverride(uint8_t *rdram, uint32_t syscallNumber, uint32_t handler);
+    void initializeEeKernelState(uint8_t *rdram);
 
     uint8_t Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr);
     uint16_t Load16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr);
@@ -502,12 +457,6 @@ private:
     uint32_t allocateGuestBlockLocked(uint32_t size, uint32_t alignment);
     void freeGuestBlockLocked(uint32_t guestAddr);
     void coalesceGuestHeapLocked();
-    void enterGuestExecution();
-    void leaveGuestExecution();
-    uint32_t releaseGuestExecution();
-    void reacquireGuestExecution(uint32_t depth);
-    void markGuestExecutionAcquired();
-
     void HandleIntegerOverflow(R5900Context *ctx);
 
     [[nodiscard]] ps2x::iop::RpcAbi selectIopRpcAbi(const ps2x::iop::RpcAbiRequest &request) const;
@@ -515,9 +464,8 @@ private:
     void notifyIopSifTransfer(uint8_t *rdram, const ps2x::iop::SifTransfer &transfer);
     void resetIop();
 
-    friend class GuestExecutionScope;
-    friend class GuestExecutionReleaseScope;
     friend class PS2IopTransport;
+    friend class EeScheduler;
 
 private:
     PS2Memory m_memory;
@@ -530,12 +478,11 @@ private:
     VU1Interpreter m_vu0;
     VU1Interpreter m_vu1;
     R5900Context m_cpuContext;
-    mutable std::recursive_mutex m_guestExecutionMutex;
-    mutable std::atomic<uint32_t> m_guestExecutionWaiters{0u};
-    mutable std::mutex m_guestExecutionHandoffMutex;
-    mutable std::condition_variable m_guestExecutionHandoffCv;
-    std::atomic<uint64_t> m_guestExecutionHandoffEpoch{0u};
-    std::atomic<uint64_t> m_guestExecutionHandoffTimeouts{0u};
+    std::unique_ptr<EeScheduler> m_eeScheduler;
+    mutable std::mutex m_eeKernelStateMutex;
+    std::unordered_map<int, std::vector<EeExitHandlerRegistration>> m_eeExitHandlers;
+    std::unordered_map<uint32_t, uint32_t> m_eeSyscallOverrides;
+    std::unordered_set<uint32_t> m_eeSyscallMirrorAddresses;
     mutable std::mutex m_guestHeapMutex;
     mutable std::mutex m_asyncCallbackStackMutex;
     std::vector<GuestHeapBlock> m_guestHeapBlocks;

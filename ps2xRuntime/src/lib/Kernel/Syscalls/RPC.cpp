@@ -6,13 +6,13 @@ namespace ps2_syscalls
 {
     namespace
     {
-        SifRpcDebugEvent makeRpcDebugEvent(const char *op, R5900Context *ctx)
+        SifRpcDebugEvent makeRpcDebugEvent(const char *op, R5900Context *ctx, PS2Runtime *runtime)
         {
             SifRpcDebugEvent event{};
             event.op = op;
             event.pc = ctx ? ctx->pc : 0u;
             event.ra = ctx ? getRegU32(ctx, 31) : 0u;
-            event.threadId = static_cast<uint32_t>(g_currentThreadId);
+            event.threadId = runtime ? static_cast<uint32_t>(runtime->eeScheduler().currentThreadId()) : 0u;
             return event;
         }
 
@@ -139,34 +139,13 @@ namespace ps2_syscalls
         }
 #endif
 
-        bool signalRpcCompletionSema(uint32_t semaId)
+        bool signalRpcCompletionSema(PS2Runtime *runtime, uint32_t semaId)
         {
-            if (semaId == 0u || semaId > 0xFFFFu)
+            if (!runtime || semaId == 0u || semaId > 0xFFFFu)
             {
                 return false;
             }
-
-            auto sema = lookupSemaInfo(static_cast<int>(semaId));
-            if (!sema)
-            {
-                return false;
-            }
-
-            bool signaled = false;
-            {
-                std::lock_guard<std::mutex> lock(sema->m);
-                if (!sema->deleted && sema->count < sema->maxCount)
-                {
-                    sema->count++;
-                    signaled = true;
-                }
-            }
-
-            if (signaled)
-            {
-                sema->cv.notify_one();
-            }
-            return signaled;
+            return runtime->eeScheduler().signalSemaphore(static_cast<int>(semaId), true) >= 0;
         }
 
     } // namespace
@@ -261,7 +240,7 @@ namespace ps2_syscalls
             RUNTIME_LOG("[SifInitRpc] Initialized");
         }
 
-        SifRpcDebugEvent event = makeRpcDebugEvent("InitRpc", ctx);
+        SifRpcDebugEvent event = makeRpcDebugEvent("InitRpc", ctx, runtime);
         event.result = 0;
         pushSifRpcDebugEventLocked(event);
         setReturnS32(ctx, 0);
@@ -277,7 +256,7 @@ namespace ps2_syscalls
 
         if (!client)
         {
-            SifRpcDebugEvent event = makeRpcDebugEvent("BindRpc", ctx);
+            SifRpcDebugEvent event = makeRpcDebugEvent("BindRpc", ctx, runtime);
             event.clientPtr = clientPtr;
             event.sid = rpcId;
             event.mode = mode;
@@ -342,7 +321,7 @@ namespace ps2_syscalls
             client->cbuf = 0;
         }
 
-        SifRpcDebugEvent event = makeRpcDebugEvent("BindRpc", ctx);
+        SifRpcDebugEvent event = makeRpcDebugEvent("BindRpc", ctx, runtime);
         event.clientPtr = clientPtr;
         event.serverPtr = serverPtr;
         event.sid = rpcId;
@@ -473,7 +452,7 @@ namespace ps2_syscalls
         auto *client = reinterpret_cast<t_SifRpcClientData *>(getMemPtr(rdram, clientPtr));
         if (!client)
         {
-            SifRpcDebugEvent event = makeRpcDebugEvent("CallRpc", ctx);
+            SifRpcDebugEvent event = makeRpcDebugEvent("CallRpc", ctx, runtime);
             event.clientPtr = clientPtr;
             event.sid = sidHint;
             event.rpcNum = rpcNum;
@@ -535,24 +514,12 @@ namespace ps2_syscalls
             }
         }
 
-        uint32_t resultPointer = 0u;
-        bool handled = false;
-        bool handledByIop = false;
-        bool serverDispatched = false;
-        bool callbackCompleted = false;
-        bool copiedFallback = false;
-        bool zeroedFallback = false;
         ps2x::iop::RpcResult iopResult{};
-
-        const auto completionSemaphore = [&]()
+        uint32_t completionSemaphore = static_cast<uint32_t>(client->hdr.sema_id);
+        if (completionSemaphore == 0xFFFFFFFFu || completionSemaphore == 0u)
         {
-            uint32_t semaphore = static_cast<uint32_t>(client->hdr.sema_id);
-            if (semaphore == 0xFFFFFFFFu || semaphore == 0u)
-            {
-                semaphore = endParameter;
-            }
-            return semaphore;
-        };
+            completionSemaphore = endParameter;
+        }
 
         {
             ps2x::iop::RpcRequest request{};
@@ -569,171 +536,162 @@ namespace ps2_syscalls
             request.endParameter = endParameter;
 
             iopResult = PS2IopTransport::handleRpc(runtime, rdram, ctx, request);
-            handled = iopResult.handled;
-            handledByIop = iopResult.handled;
-            resultPointer = iopResult.resultAddress;
 
             if (iopResult.signalNowaitCompletion &&
                 (mode & kSifRpcModeNowait) != 0u)
             {
-                (void)signalRpcCompletionSema(completionSemaphore());
+                (void)signalRpcCompletionSema(runtime, completionSemaphore);
             }
             if (iopResult.signalCompletion)
             {
-                (void)signalRpcCompletionSema(completionSemaphore());
+                (void)signalRpcCompletionSema(runtime, completionSemaphore);
             }
         }
 
-        if (server && server->func != 0u && iopResult.serverDispatchPolicy != ps2x::iop::ServerDispatchPolicy::Suppress)
+        uint32_t guestFunction = iopResult.guestFunction;
+        uint32_t guestA0 = iopResult.guestArguments[0];
+        uint32_t guestA1 = iopResult.guestArguments[1];
+        uint32_t guestA2 = iopResult.guestArguments[2];
+        uint32_t guestA3 = iopResult.guestArguments[3];
+        uint32_t guestDefaultResult = iopResult.guestDefaultResultAddress;
+        if (guestFunction == 0u && server && server->func != 0u &&
+            iopResult.serverDispatchPolicy != ps2x::iop::ServerDispatchPolicy::Suppress)
         {
-            uint32_t serverResult = 0u;
-            serverDispatched = rpcInvokeFunction(rdram,
-                                                 ctx,
-                                                 runtime,
-                                                 server->func,
-                                                 rpcNum,
-                                                 server->buf,
-                                                 sendSize,
-                                                 0u,
-                                                 &serverResult);
-            if (serverDispatched)
+            guestFunction = server->func;
+            guestA0 = rpcNum;
+            guestA1 = server->buf;
+            guestA2 = sendSize;
+            guestDefaultResult = server->buf != 0u ? server->buf : receiveBuffer;
+        }
+        const bool serverDispatched = guestFunction != 0u && runtime->hasFunction(guestFunction);
+
+        auto finishCall = [=](const R5900Context *guestResult, R5900Context &parent)
+        {
+            bool handled = iopResult.handled;
+            uint32_t resultPointer = iopResult.resultAddress;
+            bool copiedFallback = false;
+            bool zeroedFallback = false;
+            if (guestResult)
             {
                 handled = true;
-                resultPointer = serverResult;
-                if (resultPointer == 0u && server->buf != 0u)
-                {
-                    resultPointer = server->buf;
-                }
+                resultPointer = getRegU32(guestResult, 2);
                 if (resultPointer == 0u)
                 {
-                    resultPointer = receiveBuffer;
+                    resultPointer = guestDefaultResult;
                 }
             }
-        }
 
-        if (receiveBuffer != 0u && receiveSize != 0u)
-        {
-            if (handled && resultPointer != 0u && resultPointer != receiveBuffer)
+            if (receiveBuffer != 0u && receiveSize != 0u)
             {
-                rpcCopyToRdram(rdram,
-                               receiveBuffer,
-                               resultPointer,
-                               receiveSize);
-            }
-            else if (!handled && sendBuf != 0u && sendSize != 0u && sendBuf != receiveBuffer)
-            {
-                const uint32_t copySize = std::min(sendSize, receiveSize);
-                rpcCopyToRdram(rdram, receiveBuffer, sendBuf, copySize);
-                copiedFallback = true;
-            }
-            else if (!handled)
-            {
-                rpcZeroRdram(rdram, receiveBuffer, receiveSize);
-                zeroedFallback = true;
-            }
-        }
-
-        if (endFunction != 0u)
-        {
-            if (iopResult.callbackPolicy == ps2x::iop::CallbackPolicy::Suppress)
-            {
-                callbackCompleted = true;
-            }
-            else
-            {
-                callbackCompleted = rpcInvokeFunction(rdram,
-                                                      ctx,
-                                                      runtime,
-                                                      endFunction,
-                                                      endParameter,
-                                                      0u,
-                                                      0u,
-                                                      0u,
-                                                      nullptr);
-                if (!callbackCompleted && endFunction >= 0x10000u)
+                if (handled && resultPointer != 0u && resultPointer != receiveBuffer)
                 {
-                    const uint32_t normalizedEndFunction = endFunction - 0x10000u;
-                    if (runtime->hasFunction(normalizedEndFunction))
-                    {
-                        callbackCompleted = rpcInvokeFunction(
-                            rdram,
-                            ctx,
-                            runtime,
-                            normalizedEndFunction,
-                            endParameter,
-                            0u,
-                            0u,
-                            0u,
-                            nullptr);
-                    }
+                    rpcCopyToRdram(rdram, receiveBuffer, resultPointer, receiveSize);
                 }
-            }
-
-            if (!callbackCompleted)
-            {
-                const bool signaled = signalRpcCompletionSema(completionSemaphore());
-                static uint32_t unresolvedCallbackWarnings = 0u;
-                if (unresolvedCallbackWarnings < 32u)
+                else if (!handled && sendBuf != 0u && sendSize != 0u && sendBuf != receiveBuffer)
                 {
-                    std::cerr
-                        << "[SifCallRpc] unresolved end callback endFunc=0x"
-                        << std::hex << endFunction
-                        << " semaId=0x" << completionSemaphore()
-                        << " fallbackSignal=" << std::dec
-                        << (signaled ? 1 : 0) << std::endl;
-                    ++unresolvedCallbackWarnings;
+                    rpcCopyToRdram(rdram, receiveBuffer, sendBuf, std::min(sendSize, receiveSize));
+                    copiedFallback = true;
+                }
+                else if (!handled)
+                {
+                    rpcZeroRdram(rdram, receiveBuffer, receiveSize);
+                    zeroedFallback = true;
                 }
             }
-        }
 
-        {
-            std::lock_guard<std::mutex> lock(g_rpc_mutex);
-            g_rpc_clients[clientPtr].busy = false;
-        }
-
-        SifRpcDebugEvent event = makeRpcDebugEvent("CallRpc", ctx);
-        event.clientPtr = clientPtr;
-        event.serverPtr = serverPtr;
-        event.sid = sid;
-        event.rpcNum = rpcNum;
-        event.mode = mode;
-        event.sendBuf = sendBuf;
-        event.sendSize = sendSize;
-        event.recvBuf = receiveBuffer;
-        event.recvSize = receiveSize;
-        event.resultPtr = resultPointer;
-        event.endFunc = endFunction;
-        event.endParam = endParameter;
-        event.semaId = static_cast<uint32_t>(client->hdr.sema_id);
-        event.flags =
-            ((mode & kSifRpcModeNowait) ? kSifRpcDebugFlagNowait : 0u) |
-            (handledByIop ? kSifRpcDebugFlagHandledByHle : 0u) |
-            (callbackCompleted ? kSifRpcDebugFlagCallback : 0u) |
-            (serverDispatched ? kSifRpcDebugFlagServerDispatch : 0u) |
-            (!handled ? kSifRpcDebugFlagUnhandled : 0u) |
-            (copiedFallback ? kSifRpcDebugFlagFallbackCopy : 0u) |
-            (zeroedFallback ? kSifRpcDebugFlagFallbackZero : 0u);
-        fillRpcDebugPreview(rdram,
-                            sendBuf,
-                            sendSize,
-                            event.sendPreview,
-                            event.sendPreviewSize);
-        fillRpcDebugPreview(rdram,
-                            receiveBuffer,
-                            receiveSize,
-                            event.recvPreview,
-                            event.recvPreviewSize);
-        event.result = 0;
-
+            auto completeClient = [=](R5900Context &base, bool callbackCompleted)
+            {
+                {
+                    std::lock_guard<std::mutex> lock(g_rpc_mutex);
+                    g_rpc_clients[clientPtr].busy = false;
+                }
+                SifRpcDebugEvent event = makeRpcDebugEvent("CallRpc", &base, runtime);
+                event.clientPtr = clientPtr;
+                event.serverPtr = serverPtr;
+                event.sid = sid;
+                event.rpcNum = rpcNum;
+                event.mode = mode;
+                event.sendBuf = sendBuf;
+                event.sendSize = sendSize;
+                event.recvBuf = receiveBuffer;
+                event.recvSize = receiveSize;
+                event.resultPtr = resultPointer;
+                event.endFunc = endFunction;
+                event.endParam = endParameter;
+                event.semaId = completionSemaphore;
+                event.flags =
+                    ((mode & kSifRpcModeNowait) ? kSifRpcDebugFlagNowait : 0u) |
+                    (iopResult.handled ? kSifRpcDebugFlagHandledByHle : 0u) |
+                    (callbackCompleted ? kSifRpcDebugFlagCallback : 0u) |
+                    (serverDispatched ? kSifRpcDebugFlagServerDispatch : 0u) |
+                    (!handled ? kSifRpcDebugFlagUnhandled : 0u) |
+                    (copiedFallback ? kSifRpcDebugFlagFallbackCopy : 0u) |
+                    (zeroedFallback ? kSifRpcDebugFlagFallbackZero : 0u);
+                fillRpcDebugPreview(rdram, sendBuf, sendSize, event.sendPreview, event.sendPreviewSize);
+                fillRpcDebugPreview(rdram, receiveBuffer, receiveSize, event.recvPreview, event.recvPreviewSize);
+                event.result = 0;
 #if PS2X_ENABLE_IOP_RPC_TRACE
-        if ((event.flags & kSifRpcDebugFlagUnhandled) != 0u)
-        {
-            logUnhandledRpcTrace(event);
-        }
+                if ((event.flags & kSifRpcDebugFlagUnhandled) != 0u)
+                {
+                    logUnhandledRpcTrace(event);
+                }
 #endif
-        pushSifRpcDebugEvent(event);
+                pushSifRpcDebugEvent(event);
+            };
 
-        setReturnS32(ctx, 0);
+            setReturnS32(&parent, 0);
+            if (endFunction == 0u || iopResult.callbackPolicy == ps2x::iop::CallbackPolicy::Suppress)
+            {
+                completeClient(parent, endFunction != 0u);
+                return;
+            }
+
+            uint32_t callbackFunction = endFunction;
+            if (!runtime->hasFunction(callbackFunction) && callbackFunction >= 0x10000u &&
+                runtime->hasFunction(callbackFunction - 0x10000u))
+            {
+                callbackFunction -= 0x10000u;
+            }
+            if (!runtime->hasFunction(callbackFunction))
+            {
+                (void)signalRpcCompletionSema(runtime, completionSemaphore);
+                completeClient(parent, false);
+                return;
+            }
+
+            GuestInvocation callback{};
+            callback.kind = GuestInvocationKind::RpcCallback;
+            callback.context = parent;
+            callback.context.pc = callbackFunction;
+            SET_GPR_U32(&callback.context, 4, endParameter);
+            SET_GPR_U32(&callback.context, 29, runtime->eeScheduler().invocationStackTop());
+            SET_GPR_U32(&callback.context, 31, 0u);
+            callback.onComplete = [completeClient](const R5900Context &, R5900Context &base)
+            {
+                completeClient(base, true);
+            };
+            runtime->eeScheduler().invokeCurrent(std::move(callback));
+        };
+
+        if (serverDispatched)
+        {
+            GuestInvocation invocation{};
+            invocation.kind = GuestInvocationKind::RpcCallback;
+            invocation.context = *ctx;
+            invocation.context.pc = guestFunction;
+            SET_GPR_U32(&invocation.context, 4, guestA0);
+            SET_GPR_U32(&invocation.context, 5, guestA1);
+            SET_GPR_U32(&invocation.context, 6, guestA2);
+            SET_GPR_U32(&invocation.context, 7, guestA3);
+            SET_GPR_U32(&invocation.context, 29, runtime->eeScheduler().invocationStackTop());
+            SET_GPR_U32(&invocation.context, 31, 0u);
+            invocation.onComplete = [finishCall](const R5900Context &completed, R5900Context &parent)
+            {
+                finishCall(&completed, parent);
+            };
+            runtime->eeScheduler().invokeCurrent(std::move(invocation));
+        }
+        finishCall(nullptr, *ctx);
     }
 
     void SifRegisterRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -754,7 +712,7 @@ namespace ps2_syscalls
         t_SifRpcServerData *sd = reinterpret_cast<t_SifRpcServerData *>(getMemPtr(rdram, sdPtr));
         if (!sd)
         {
-            SifRpcDebugEvent event = makeRpcDebugEvent("RegisterRpc", ctx);
+            SifRpcDebugEvent event = makeRpcDebugEvent("RegisterRpc", ctx, runtime);
             event.serverPtr = sdPtr;
             event.sid = sid;
             event.sendBuf = buf;
@@ -836,7 +794,7 @@ namespace ps2_syscalls
         }
 
         RUNTIME_LOG("[SifRegisterRpc] sid=0x" << std::hex << sid << " sd=0x" << sdPtr << std::dec);
-        SifRpcDebugEvent event = makeRpcDebugEvent("RegisterRpc", ctx);
+        SifRpcDebugEvent event = makeRpcDebugEvent("RegisterRpc", ctx, runtime);
         event.serverPtr = sdPtr;
         event.sid = sid;
         event.sendBuf = buf;

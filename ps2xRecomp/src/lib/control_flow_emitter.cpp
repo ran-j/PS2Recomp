@@ -177,7 +177,7 @@ namespace ps2recomp
         m_ss << fmt::format("{}ctx->pc = 0x{:X}u;\n", indent, target);
         if (target <= sourcePc && !isCallLikeEdge())
         {
-            m_ss << fmt::format("{}if (runtime->shouldPreemptGuestExecution()) {{\n", indent);
+            m_ss << fmt::format("{}if (runtime->eeCheckpointDue()) {{\n", indent);
             m_ss << fmt::format("{}    return;\n", indent);
             m_ss << fmt::format("{}}}\n", indent);
         }
@@ -296,10 +296,16 @@ namespace ps2recomp
         const std::string_view handlerName = isSyscall ? resolvedSyscallName : resolvedStubName;
 
         m_ss << indent << "{\n";
-        m_ss << indent << "    const uint32_t __entryPc = ctx->pc;\n";
+        if (kind == StaticBranchKind::Call)
+        {
+            m_ss << fmt::format("{}    ctx->pc = 0x{:X}u;\n", indent, fallthroughPc());
+        }
+        else
+        {
+            m_ss << indent << "    ctx->pc = getRegU32(ctx, 31);\n";
+        }
         m_ss << indent << "    " << (isSyscall ? "ps2_syscalls::" : "ps2_stubs::")
              << handlerName << "(rdram, ctx, runtime);\n";
-        m_ss << indent << "    if (ctx->pc == __entryPc) { ctx->pc = getRegU32(ctx, 31); }\n";
         m_ss << indent << "}\n";
 
         if (kind == StaticBranchKind::Jump)
