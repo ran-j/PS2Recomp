@@ -28,12 +28,32 @@ namespace ps2_syscalls
         VSyncFlagRegistration g_vsync_registration{};
 
         std::atomic<uint32_t> g_pending_intc_causes{0u};              // bitmask, one pending bit per cause
-        std::atomic<uint32_t> g_pending_intc_age[32] = {};            // drain ticks since raise, per cause
-        // The age entries are atomic because raisePendingIntc (any thread) resets
-        // an age while the interrupt worker thread increments it in drainPendingIntc.
+        std::atomic<int64_t> g_pending_intc_raise_ns[32] = {}; // steady_clock ns at last raise, per cause
+        // The raise-timestamp entries are atomic because raisePendingIntc (any
+        // thread) stores a fresh timestamp while the interrupt worker thread
+        // reads it in drainPendingIntc.
     }
 
     using namespace interrupt_state;
+
+    namespace
+    {
+        SteadyNowFn g_pendingIntcNowFn{}; // empty = real clock
+
+        int64_t now_ns()
+        {
+            const auto tp = g_pendingIntcNowFn ? g_pendingIntcNowFn()
+                                                : std::chrono::steady_clock::now();
+            return std::chrono::duration_cast<std::chrono::nanoseconds>(
+                       tp.time_since_epoch())
+                .count();
+        }
+    }
+
+    void setPendingIntcClockForTest(SteadyNowFn fn)
+    {
+        g_pendingIntcNowFn = std::move(fn);
+    }
 
     static void writeGuestU32NoThrow(uint8_t *rdram, uint32_t addr, uint32_t value)
     {
@@ -237,10 +257,10 @@ namespace ps2_syscalls
         }
 
         const uint32_t bit = 1u << cause;
+        g_pending_intc_raise_ns[cause].store(now_ns(), std::memory_order_relaxed); // every raise
         const uint32_t prev = g_pending_intc_causes.fetch_or(bit, std::memory_order_acq_rel);
         if ((prev & bit) == 0u)
         {
-            g_pending_intc_age[cause].store(0u, std::memory_order_relaxed); // fresh raise: age restarts
             PS2_IF_AGRESSIVE_LOGS({
                 static std::atomic<uint32_t> s_raiseLogCount{0u};
                 const uint32_t logIndex = s_raiseLogCount.fetch_add(1u, std::memory_order_relaxed);
@@ -271,7 +291,6 @@ namespace ps2_syscalls
                 // level-triggered design -- a set bit means "at least one pending",
                 // not a count -- a deliberate tradeoff, not a lost-wakeup bug.
                 g_pending_intc_causes.fetch_and(~bit, std::memory_order_acq_rel);
-                g_pending_intc_age[cause].store(0u, std::memory_order_relaxed);
                 PS2_IF_AGRESSIVE_LOGS({
                     static std::atomic<uint32_t> s_deliverLogCount{0u};
                     const uint32_t logIndex = s_deliverLogCount.fetch_add(1u, std::memory_order_relaxed);
@@ -281,18 +300,21 @@ namespace ps2_syscalls
                     }
                 });
             }
-            else if (g_pending_intc_age[cause].fetch_add(1u, std::memory_order_relaxed) + 1u > kPendingIntcMaxAgeTicks)
+            else
             {
-                g_pending_intc_causes.fetch_and(~bit, std::memory_order_acq_rel);
-                g_pending_intc_age[cause].store(0u, std::memory_order_relaxed);
-                PS2_IF_AGRESSIVE_LOGS({
-                    static std::atomic<uint32_t> s_dropLogCount{0u};
-                    const uint32_t logIndex = s_dropLogCount.fetch_add(1u, std::memory_order_relaxed);
-                    if (logIndex < 16u || (logIndex % 256u) == 0u)
-                    {
-                        RUNTIME_LOG("[INTC:drop] cause=" << cause << " aged out with no registered/enabled handler");
-                    }
-                });
+                const int64_t age = now_ns() - g_pending_intc_raise_ns[cause].load(std::memory_order_relaxed);
+                if (age > kPendingIntcMaxAgeNs)
+                {
+                    g_pending_intc_causes.fetch_and(~bit, std::memory_order_acq_rel);
+                    PS2_IF_AGRESSIVE_LOGS({
+                        static std::atomic<uint32_t> s_dropLogCount{0u};
+                        const uint32_t logIndex = s_dropLogCount.fetch_add(1u, std::memory_order_relaxed);
+                        if (logIndex < 16u || (logIndex % 256u) == 0u)
+                        {
+                            RUNTIME_LOG("[INTC:drop] cause=" << cause << " aged out with no registered/enabled handler");
+                        }
+                    });
+                }
             }
         }
     }
@@ -313,10 +335,11 @@ namespace ps2_syscalls
             g_enabled_dmac_mask = 0xFFFFFFFFu;
         }
         g_pending_intc_causes.store(0u, std::memory_order_release);
-        for (auto &age : g_pending_intc_age)
+        for (auto &ts : g_pending_intc_raise_ns)
         {
-            age.store(0u, std::memory_order_relaxed);
+            ts.store(0, std::memory_order_relaxed);
         }
+        setPendingIntcClockForTest(nullptr); // a leaked fake clock would leak into the next test
     }
 
     void dispatchDmacHandlersForCause(uint8_t *rdram, PS2Runtime *runtime, uint32_t cause)
