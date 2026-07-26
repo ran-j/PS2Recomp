@@ -2381,33 +2381,181 @@ namespace ps2recomp
             return inst.opcode == OPCODE_SPECIAL && inst.function == SPECIAL_SYSCALL;
         }
 
-        // Simplified "who writes this register" model shared by the $v1 clobber check
-        // and the $a0 constant-propagation walk below: for I-type opcodes the written
-        // register is rt, for OPCODE_SPECIAL it is rd. $zero is never considered written.
-        // J-type instructions (j/jal) are excluded: the decoder unconditionally populates
-        // rs/rt/rd from the raw instruction bits (see R5900Decoder::decodeInstruction),
-        // but for a 26-bit jump target those bit positions are part of the target, not a
-        // register field, so treating them as a register write would be spurious.
-        uint32_t writtenRegisterOrZero(const Instruction &inst)
+        // A small fixed-capacity set of GPR numbers, used instead of a heap-allocating
+        // container since mayWriteGprs never needs to report more than two registers.
+        struct GprWriteSet
         {
-            if (inst.opcode == OPCODE_J || inst.opcode == OPCODE_JAL)
+            uint32_t regs[2] = {0u, 0u};
+            uint8_t count = 0u;
+
+            void add(uint32_t reg)
             {
-                return 0u;
+                if (reg != 0u && count < 2u)
+                {
+                    regs[count++] = reg;
+                }
             }
-            if (inst.opcode == OPCODE_SPECIAL)
+
+            const uint32_t *begin() const { return regs; }
+            const uint32_t *end() const { return regs + count; }
+        };
+
+        // Conservative superset of the GPRs `inst` may write, keyed off opcode (+
+        // SPECIAL function) rather than the decoder-derived modifiesGPR/isStore/...
+        // booleans: the unit-test fixtures build Instructions by hand and populate
+        // only raw fields, so deriving from opcode keeps unit-test and real-ELF
+        // behavior identical. Only $v1 and $a0 are ever tracked by callers of this
+        // helper, so this need not be a disassembler-complete def model - it only has
+        // to never miss a write to one of those two registers (soundness target: a
+        // tracked register must never falsely survive a clobber; over-invalidating is
+        // always safe and only costs a missed entry).
+        GprWriteSet mayWriteGprs(const Instruction &inst)
+        {
+            GprWriteSet result;
+
+            switch (inst.opcode)
             {
-                return inst.rd;
+            // Stores (including coprocessor stores) read rt, they don't write it;
+            // CACHE/PREF and coprocessor loads that target a coprocessor register
+            // (not a GPR) write nothing tracked; branches and jumps/calls write
+            // nothing tracked ($ra=31 for jal/…AL REGIMM variants is untracked).
+            case OPCODE_SB:
+            case OPCODE_SH:
+            case OPCODE_SWL:
+            case OPCODE_SW:
+            case OPCODE_SDL:
+            case OPCODE_SDR:
+            case OPCODE_SWR:
+            case OPCODE_SC:
+            case OPCODE_SCD:
+            case OPCODE_SQ:
+            case OPCODE_SD:
+            case OPCODE_SWC1:
+            case OPCODE_SWC2:
+            case OPCODE_SDC1:
+            case OPCODE_SDC2: // SQC2 aliases SDC2 (same enum value)
+            case OPCODE_CACHE:
+            case OPCODE_PREF:
+            case OPCODE_LWC1:
+            case OPCODE_LWC2:
+            case OPCODE_LDC1:
+            case OPCODE_LDC2: // LQC2 aliases LDC2 (same enum value)
+            case OPCODE_BEQ:
+            case OPCODE_BNE:
+            case OPCODE_BLEZ:
+            case OPCODE_BGTZ:
+            case OPCODE_BEQL:
+            case OPCODE_BNEL:
+            case OPCODE_BLEZL:
+            case OPCODE_BGTZL:
+            case OPCODE_REGIMM:
+            case OPCODE_J:
+            case OPCODE_JAL:
+                return result;
+
+            // I-type ALU and GPR loads write rt.
+            case OPCODE_ADDI:
+            case OPCODE_ADDIU:
+            case OPCODE_SLTI:
+            case OPCODE_SLTIU:
+            case OPCODE_ANDI:
+            case OPCODE_ORI:
+            case OPCODE_XORI:
+            case OPCODE_LUI:
+            case OPCODE_DADDI:
+            case OPCODE_DADDIU:
+            case OPCODE_LB:
+            case OPCODE_LH:
+            case OPCODE_LWL:
+            case OPCODE_LW:
+            case OPCODE_LBU:
+            case OPCODE_LHU:
+            case OPCODE_LWR:
+            case OPCODE_LWU:
+            case OPCODE_LD:
+            case OPCODE_LDL:
+            case OPCODE_LDR:
+            case OPCODE_LL:
+            case OPCODE_LLD:
+            case OPCODE_LQ:
+                result.add(inst.rt);
+                return result;
+
+            case OPCODE_SPECIAL:
+                // JR/JALR/SYSCALL/BREAK/SYNC write nothing tracked (JALR's rd is a
+                // link register, conventionally $ra=31, untracked). Every other
+                // SPECIAL form (arithmetic/logical/shift/move) writes rd; the forms
+                // that write HI/LO/SA or nothing instead (MULT/DIV/MTHI/MTLO/MTSA,
+                // traps, …) encode rd=0 in valid encodings, so {rd} degenerates to
+                // {} naturally.
+                if (inst.function == SPECIAL_JR || inst.function == SPECIAL_JALR ||
+                    inst.function == SPECIAL_SYSCALL || inst.function == SPECIAL_BREAK ||
+                    inst.function == SPECIAL_SYNC)
+                {
+                    return result;
+                }
+                result.add(inst.rd);
+                return result;
+
+            case OPCODE_COP0:
+            case OPCODE_COP1:
+            case OPCODE_COP2:
+            case OPCODE_MMI:
+                // Unknown/complex: an MFC*/CFC*/QMFC2 writes GPR rt; other forms
+                // (e.g. mtc1, which only reads rt) do not. Rather than sub-decode
+                // fmt, conservatively invalidate both rt and rd - the safe direction
+                // (a missed entry, never a false survival).
+                result.add(inst.rt);
+                result.add(inst.rd);
+                return result;
+
+            default:
+                return result;
             }
-            return inst.rt;
         }
 
-        bool writesTrackedRegister(const Instruction &inst, uint32_t reg)
+        bool mayClobber(const Instruction &inst, uint32_t reg)
         {
             if (reg == 0u)
             {
                 return false;
             }
-            return writtenRegisterOrZero(inst) == reg;
+            for (uint32_t written : mayWriteGprs(inst))
+            {
+                if (written == reg)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // True for instructions that transfer control - used to bound the
+        // constant-propagation walk and the $v1 back-scan to a single basic block, so
+        // neither can cross a branch/jump and trust register state that does not
+        // dominate the site being analyzed.
+        bool isControlTransfer(const Instruction &inst)
+        {
+            switch (inst.opcode)
+            {
+            case OPCODE_J:
+            case OPCODE_JAL:
+            case OPCODE_BEQ:
+            case OPCODE_BNE:
+            case OPCODE_BLEZ:
+            case OPCODE_BGTZ:
+            case OPCODE_BEQL:
+            case OPCODE_BNEL:
+            case OPCODE_BLEZL:
+            case OPCODE_BGTZL:
+            case OPCODE_REGIMM:
+                return true;
+            case OPCODE_SPECIAL:
+                return inst.function == SPECIAL_JR || inst.function == SPECIAL_JALR ||
+                       inst.function == SPECIAL_SYSCALL || inst.function == SPECIAL_BREAK;
+            default:
+                return false;
+            }
         }
 
         struct ThreadCreateCallSite
@@ -2496,7 +2644,16 @@ namespace ps2recomp
                         foundAddiuV1 = true;
                         break;
                     }
-                    if (writesTrackedRegister(prior, kThreadEntryRegV1))
+                    // A branch/jump between the candidate materialization and the
+                    // syscall means the materialization does not dominate this site -
+                    // stop without accepting it (this instruction is also excluded
+                    // from the block, so it can't be the found materialization even
+                    // if it happened to match isAddiuV1SyscallImm).
+                    if (isControlTransfer(prior))
+                    {
+                        break;
+                    }
+                    if (mayClobber(prior, kThreadEntryRegV1))
                     {
                         break;
                     }
@@ -2532,6 +2689,66 @@ namespace ps2recomp
             const size_t windowStart =
                 (site.index >= kThreadConstantScanWindow) ? site.index - kThreadConstantScanWindow : 0u;
 
+            // Restrict the walk to the call site's basic block (+ the retained delay
+            // slot in windowEnd): scan backward from immediately before the call for
+            // the nearest preceding control transfer. A basic block has no interior
+            // control transfer, so a jal/inline syscall can never sit mid-block - a
+            // resolved $a0 structurally cannot survive across an unrelated call, and
+            // the walk never crosses a branch/jump it doesn't dominate.
+            size_t blockStart = windowStart;
+            if (site.index > 0u)
+            {
+                size_t k = site.index - 1u;
+                while (true)
+                {
+                    if (isControlTransfer(instructions[k]))
+                    {
+                        blockStart = k + 2u; // block begins after the terminator's delay slot
+                        break;
+                    }
+                    if (k <= windowStart)
+                    {
+                        break;
+                    }
+                    --k;
+                }
+            }
+            size_t walkStart = std::max(blockStart, windowStart);
+
+            // --- Optional dominance hardening: a forward jal/j from elsewhere in the
+            // owner function whose absolute target lands inside [walkStart, windowEnd]
+            // is a join point the backward-only scan above cannot see - the "block" it
+            // found would then have more than one entry, so state resolved before the
+            // join cannot be trusted to dominate the call. Move walkStart forward to
+            // the join (over-invalidation - the safe direction: this can only lose a
+            // candidate, never let a stale value survive). Self-contained and
+            // independently removable without affecting the required backward-only
+            // core above.
+            {
+                const uint32_t walkStartAddress = instructions[walkStart].address;
+                const uint32_t windowEndAddress = instructions[windowEnd].address;
+                for (const Instruction &candidate : instructions)
+                {
+                    if (candidate.opcode != OPCODE_J && candidate.opcode != OPCODE_JAL)
+                    {
+                        continue;
+                    }
+                    const uint32_t joinTarget = buildAbsoluteJumpTarget(candidate.address, candidate.target);
+                    if (joinTarget <= walkStartAddress || joinTarget > windowEndAddress)
+                    {
+                        continue;
+                    }
+                    for (size_t j = walkStart; j <= windowEnd; ++j)
+                    {
+                        if (instructions[j].address == joinTarget)
+                        {
+                            walkStart = std::max(walkStart, j);
+                            break;
+                        }
+                    }
+                }
+            }
+
             std::unordered_map<uint32_t, uint32_t> resolved;
             auto invalidate = [&resolved](uint32_t reg)
             {
@@ -2541,7 +2758,7 @@ namespace ps2recomp
                 }
             };
 
-            for (size_t idx = windowStart; idx <= windowEnd; ++idx)
+            for (size_t idx = walkStart; idx <= windowEnd; ++idx)
             {
                 const Instruction &inst = instructions[idx];
 
@@ -2581,7 +2798,10 @@ namespace ps2recomp
                     }
                 }
 
-                invalidate(writtenRegisterOrZero(inst));
+                for (uint32_t reg : mayWriteGprs(inst))
+                {
+                    invalidate(reg);
+                }
             }
 
             auto a0It = resolved.find(kThreadEntryRegA0);

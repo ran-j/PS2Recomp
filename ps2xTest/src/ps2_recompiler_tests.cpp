@@ -130,6 +130,49 @@ static Instruction makeLw(uint32_t address, uint32_t rt, uint32_t rs)
     return inst;
 }
 
+static Instruction makeSw(uint32_t address, uint32_t rt, uint32_t rs)
+{
+    Instruction inst{};
+    inst.address = address;
+    inst.opcode = OPCODE_SW;
+    inst.rt = rt;
+    inst.rs = rs;
+    inst.isStore = true;
+    inst.raw = (OPCODE_SW << 26) | (rs << 21) | (rt << 16);
+    return inst;
+}
+
+static Instruction makeBeq(uint32_t address, uint32_t rs, uint32_t rt, uint32_t target)
+{
+    Instruction inst{};
+    inst.address = address;
+    inst.opcode = OPCODE_BEQ;
+    inst.rs = rs;
+    inst.rt = rt;
+    // Test-fixture convention (shared with makeAbsJump): store the branch target the
+    // same way a J-type target is stored, since this scan's helpers never resolve a
+    // conditional branch's real PC-relative target.
+    inst.target = (target >> 2) & 0x03FFFFFFu;
+    inst.isBranch = true;
+    inst.hasDelaySlot = true;
+    inst.raw = (OPCODE_BEQ << 26) | (rs << 21) | (rt << 16);
+    return inst;
+}
+
+// fmt is the COP "sub-opcode" field (bits 25-21, decoded into rs); rt is the GPR
+// operand. Used to build e.g. an `mtc1 $a0,$fN` (opcode=OPCODE_COP1, fmt=COP1_MT,
+// rt=4), which only READS rt.
+static Instruction makeCopMove(uint32_t address, uint32_t opcode, uint32_t fmt, uint32_t rt)
+{
+    Instruction inst{};
+    inst.address = address;
+    inst.opcode = opcode;
+    inst.rs = fmt;
+    inst.rt = rt;
+    inst.raw = (opcode << 26) | (fmt << 21) | (rt << 16);
+    return inst;
+}
+
 static Function makeFunction(const std::string &name, uint32_t start, uint32_t end)
 {
     Function fn{};
@@ -2291,6 +2334,205 @@ void register_ps2_recompiler_tests()
                 PS2Recompiler::DiscoverDataEmbeddedThreadEntries(decoded, isValid, readWord);
 
             t.Equals(result.size(), static_cast<size_t>(0), "a clobbered $a0 with no re-materialization should not resolve");
+        });
+
+        tc.Run("data-embedded thread entries: store between materialization and call does not clobber $a0", [](TestCase &t) {
+            // Maintainer's exact sequence: lui $a0,hi(P); sw $a0,0($sp); jal
+            // CreateThread; addiu $a0,$a0,lo(P) (delay slot). A store reads its rt
+            // operand, it does not write it - sw $a0 must not erase the $a0 the lui
+            // just resolved. Strong pin for "stores don't clobber rt": mutating SW to
+            // {rt} in mayWriteGprs makes this test fail.
+            constexpr uint32_t wrapperStart = 0x00100200u;
+            constexpr uint32_t callerStart = 0x00100000u;
+            constexpr uint32_t jalAddr = callerStart + 12u;
+
+            std::unordered_map<uint32_t, std::vector<Instruction>> decoded = {
+                {wrapperStart, {
+                    makeAddiu(wrapperStart, 3, 0, 0x20),
+                    makeSyscall(wrapperStart + 4u),
+                    makeJrRa(wrapperStart + 8u),
+                }},
+                {callerStart, {
+                    makeNopLike(callerStart),
+                    makeLui(callerStart + 4u, 4, 0x0030),
+                    makeSw(callerStart + 8u, 4, 29), // sw $a0, 0($sp) - reads $a0, does not clobber it
+                    makeAbsJump(jalAddr, wrapperStart, OPCODE_JAL),
+                    makeAddiu(jalAddr + 4u, 4, 4, 0x1234), // delay slot: addiu $a0,$a0,lo(P)
+                }},
+            };
+
+            const uint32_t paramAddress = 0x00301234u;
+            std::unordered_map<uint32_t, uint32_t> fakeMemory = {
+                {paramAddress, 0u},
+                {paramAddress + 4u, 0x00280000u},
+            };
+            auto isValid = [&](uint32_t addr) { return fakeMemory.count(addr) != 0u; };
+            auto readWord = [&](uint32_t addr) { return fakeMemory.at(addr); };
+
+            const std::vector<uint32_t> result =
+                PS2Recompiler::DiscoverDataEmbeddedThreadEntries(decoded, isValid, readWord);
+
+            t.Equals(result.size(), static_cast<size_t>(1),
+                     "a store of $a0 between materialization and the call must not erase the resolved $a0");
+            if (result.size() == 1)
+            {
+                t.Equals(result[0], 0x00280000u, "thread entry pointer should still resolve through the store");
+            }
+        });
+
+        tc.Run("data-embedded thread entries: unrelated jal between materialization and CreateThread is not resolved", [](TestCase &t) {
+            // Negative case: lui $a0,hi(P); addiu $a0,$a0,lo(P); jal unrelated_fn;
+            // nop; addiu $v1,$zero,0x20; syscall. $a0 is fully resolved before the
+            // unrelated call, but the unrelated jal is a control transfer sitting
+            // between the materialization and the CreateThread invocation, so it
+            // cannot dominate - the basic-block restriction, not mayWriteGprs
+            // (a jal writes only $ra=31, untracked), is what must drop this. Pin:
+            // removing the isControlTransfer backward-scan (walking the full window
+            // instead) makes this test fail.
+            constexpr uint32_t callerStart = 0x00101000u;
+            constexpr uint32_t unrelatedFn = 0x00109000u;
+
+            std::unordered_map<uint32_t, std::vector<Instruction>> decoded = {
+                {callerStart, {
+                    makeLui(callerStart, 4, 0x0040),               // lui $a0, 0x0040
+                    makeAddiu(callerStart + 4u, 4, 4, 0x0100),     // addiu $a0,$a0,0x0100 -> $a0 = P (fully resolved)
+                    makeAbsJump(callerStart + 8u, unrelatedFn, OPCODE_JAL), // jal unrelated_fn
+                    makeNopLike(callerStart + 12u),                // delay slot
+                    makeAddiu(callerStart + 16u, 3, 0, 0x20),      // addiu $v1,$zero,0x20
+                    makeSyscall(callerStart + 20u),
+                }},
+            };
+
+            const uint32_t paramAddress = 0x00400100u;
+            std::unordered_map<uint32_t, uint32_t> fakeMemory = {
+                {paramAddress, 0u},
+                {paramAddress + 4u, 0x00450000u},
+            };
+            auto isValid = [&](uint32_t addr) { return fakeMemory.count(addr) != 0u; };
+            auto readWord = [&](uint32_t addr) { return fakeMemory.at(addr); };
+
+            const std::vector<uint32_t> result =
+                PS2Recompiler::DiscoverDataEmbeddedThreadEntries(decoded, isValid, readWord);
+
+            t.Equals(result.size(), static_cast<size_t>(0),
+                     "an unrelated call sitting between the materialization and CreateThread must not let the "
+                     "stale $a0 survive - the basic-block restriction must drop it");
+        });
+
+        tc.Run("data-embedded thread entries: strong load-clobber pin", [](TestCase &t) {
+            // lui $a0,hi(P); lw $a0,0($t0); jal CreateThread; addiu $a0,$a0,0 (delay
+            // slot). hi(P) alone (0x00300000) IS a valid param address in fakeMemory
+            // and the delay-slot addiu's immediate is 0, so if LW failed to
+            // invalidate $a0 the stale lui-only value would survive unchanged and
+            // still resolve - unlike the existing weak "clobbered $a0" test (whose
+            // lui-only value is not a valid param either way), this assertion truly
+            // depends on LW invalidating $a0. Pin: mutating LW to {} in mayWriteGprs
+            // makes this test fail.
+            constexpr uint32_t wrapperStart = 0x00100200u;
+            constexpr uint32_t callerStart = 0x00102000u;
+            constexpr uint32_t jalAddr = callerStart + 12u;
+
+            std::unordered_map<uint32_t, std::vector<Instruction>> decoded = {
+                {wrapperStart, {
+                    makeAddiu(wrapperStart, 3, 0, 0x20),
+                    makeSyscall(wrapperStart + 4u),
+                    makeJrRa(wrapperStart + 8u),
+                }},
+                {callerStart, {
+                    makeNopLike(callerStart),
+                    makeLui(callerStart + 4u, 4, 0x0030),     // lui $a0, 0x0030 -> $a0 = 0x00300000 (a valid param on its own)
+                    makeLw(callerStart + 8u, 4, 6),           // lw $a0, 0($t0) - must invalidate $a0
+                    makeAbsJump(jalAddr, wrapperStart, OPCODE_JAL),
+                    makeAddiu(jalAddr + 4u, 4, 4, 0x0000),    // delay slot: addiu $a0,$a0,0
+                }},
+            };
+
+            const uint32_t paramAddress = 0x00300000u;
+            std::unordered_map<uint32_t, uint32_t> fakeMemory = {
+                {paramAddress, 0u},
+                {paramAddress + 4u, 0x00280000u},
+            };
+            auto isValid = [&](uint32_t addr) { return fakeMemory.count(addr) != 0u; };
+            auto readWord = [&](uint32_t addr) { return fakeMemory.at(addr); };
+
+            const std::vector<uint32_t> result =
+                PS2Recompiler::DiscoverDataEmbeddedThreadEntries(decoded, isValid, readWord);
+
+            t.Equals(result.size(), static_cast<size_t>(0),
+                     "the reloaded $a0 must not resolve through a load that invalidated it, even though the "
+                     "pre-load lui-only value happens to be a valid param address on its own");
+        });
+
+        tc.Run("data-embedded thread entries: mtc1 reading $a0 is a documented safe-direction false negative", [](TestCase &t) {
+            // The conservative COP0/COP1/COP2/MMI {rt,rd} invalidation intentionally
+            // reproduces a false negative here: mtc1 $a0,$f0 only READS $a0, but the
+            // helper cannot distinguish that from an MFC1-style GPR write without
+            // sub-decoding fmt, so it invalidates $a0 anyway. This is the accepted,
+            // safe-direction tradeoff (over-invalidation only costs a missed entry,
+            // never a false survival) - documented here as a guard on that class of
+            // mayWriteGprs, not one of the strong pins.
+            constexpr uint32_t callerStart = 0x00103000u;
+
+            std::unordered_map<uint32_t, std::vector<Instruction>> decoded = {
+                {callerStart, {
+                    makeLui(callerStart, 4, 0x0050),               // lui $a0, 0x0050
+                    makeAddiu(callerStart + 4u, 4, 4, 0x0060),     // addiu $a0,$a0,0x0060 -> $a0 = P (fully resolved)
+                    makeCopMove(callerStart + 8u, OPCODE_COP1, COP1_MT, 4), // mtc1 $a0, $f0 - reads $a0 only
+                    makeAddiu(callerStart + 12u, 3, 0, 0x20),      // addiu $v1,$zero,0x20
+                    makeSyscall(callerStart + 16u),
+                }},
+            };
+
+            const uint32_t paramAddress = 0x00500060u;
+            std::unordered_map<uint32_t, uint32_t> fakeMemory = {
+                {paramAddress, 0u},
+                {paramAddress + 4u, 0x00550000u},
+            };
+            auto isValid = [&](uint32_t addr) { return fakeMemory.count(addr) != 0u; };
+            auto readWord = [&](uint32_t addr) { return fakeMemory.at(addr); };
+
+            const std::vector<uint32_t> result =
+                PS2Recompiler::DiscoverDataEmbeddedThreadEntries(decoded, isValid, readWord);
+
+            t.Equals(result.size(), static_cast<size_t>(0),
+                     "the conservative COP invalidation is expected to miss this entry - documented false negative, "
+                     "the safe direction");
+        });
+
+        tc.Run("data-embedded thread entries: branch between materialization and inline CreateThread is a block boundary", [](TestCase &t) {
+            // A real branch is itself a block terminator: even though a branch writes
+            // nothing tracked, positioning one between the materialization and a
+            // same-block inline CreateThread must still fail to resolve, because the
+            // basic-block restriction stops the backward scan at the branch. Doubles
+            // as a block-boundary check distinct from the unrelated-jal negative
+            // above (which pins the mechanism via an unconditional jal).
+            constexpr uint32_t callerStart = 0x00104000u;
+
+            std::unordered_map<uint32_t, std::vector<Instruction>> decoded = {
+                {callerStart, {
+                    makeLui(callerStart, 4, 0x0060),                 // lui $a0, 0x0060
+                    makeAddiu(callerStart + 4u, 4, 4, 0x0070),       // addiu $a0,$a0,0x0070 -> $a0 = P (fully resolved)
+                    makeBeq(callerStart + 8u, 0, 0, callerStart + 0x100), // beq $zero,$zero,elsewhere
+                    makeNopLike(callerStart + 12u),                  // delay slot
+                    makeAddiu(callerStart + 16u, 3, 0, 0x20),        // addiu $v1,$zero,0x20
+                    makeSyscall(callerStart + 20u),
+                }},
+            };
+
+            const uint32_t paramAddress = 0x00600070u;
+            std::unordered_map<uint32_t, uint32_t> fakeMemory = {
+                {paramAddress, 0u},
+                {paramAddress + 4u, 0x00650000u},
+            };
+            auto isValid = [&](uint32_t addr) { return fakeMemory.count(addr) != 0u; };
+            auto readWord = [&](uint32_t addr) { return fakeMemory.at(addr); };
+
+            const std::vector<uint32_t> result =
+                PS2Recompiler::DiscoverDataEmbeddedThreadEntries(decoded, isValid, readWord);
+
+            t.Equals(result.size(), static_cast<size_t>(0),
+                     "a branch between the materialization and the call is a block boundary, even inline "
+                     "within the same function");
         });
 
         tc.Run("data-embedded thread entries: wrapper with wrong syscall number is not registered", [](TestCase &t) {
