@@ -151,6 +151,10 @@ namespace
     std::atomic<uint32_t> gMpegWaitStage{0u};
     std::atomic<uint32_t> gMpegNoDuplicateStage{0u};
     std::atomic<uint32_t> gMpegNoDuplicateProducerStage{0u};
+    std::atomic<uint32_t> gMpegPacingStage{0u};
+    std::atomic<uint32_t> gMpegPacingFirstProducerStage{0u};
+    std::atomic<uint32_t> gMpegPacingSecondProducerStage{0u};
+    std::atomic<uint64_t> gMpegPacingResumeTick{0u};
 
     constexpr uint32_t kMpegWaitMainPc = 0x00125000u;
     constexpr uint32_t kMpegWaitResumePc = 0x00125010u;
@@ -162,6 +166,13 @@ namespace
     constexpr uint32_t kMpegNoDuplicateProducerPc = 0x00125050u;
     constexpr uint32_t kMpegNoDuplicateHandle = 0x00124000u;
     constexpr uint32_t kMpegNoDuplicateImage = 0x00131000u;
+    constexpr uint32_t kMpegPacingMainPc = 0x00125060u;
+    constexpr uint32_t kMpegPacingAfterFirstPc = 0x00125070u;
+    constexpr uint32_t kMpegPacingAfterSecondPc = 0x00125080u;
+    constexpr uint32_t kMpegPacingFirstProducerPc = 0x00125090u;
+    constexpr uint32_t kMpegPacingSecondProducerPc = 0x001250A0u;
+    constexpr uint32_t kMpegPacingHandle = 0x00124800u;
+    constexpr uint32_t kMpegPacingImage = 0x00132000u;
     constexpr uint32_t kIpuInitMainPc = 0x00125100u;
     constexpr uint32_t kIpuInitResumePc = 0x00125104u;
     constexpr uint32_t kIpuSetD4Pc = 0x00126428u;
@@ -248,6 +259,51 @@ namespace
             std::memory_order_release);
         gMpegNoDuplicateStage.store(2u, std::memory_order_release);
         ps2_stubs::notifyMpegCdStreamEof(runtime);
+        ctx->pc = 0u;
+    }
+
+    void testMpegPacingMain(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        setRegU32(*ctx, 4, kMpegPacingHandle);
+        setRegU32(*ctx, 5, kMpegPacingImage);
+        ctx->pc = kMpegPacingAfterFirstPc;
+        ps2_stubs::sceMpegGetPicture(rdram, ctx, runtime);
+    }
+
+    void testMpegPacingAfterFirst(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gMpegPacingStage.store(1u, std::memory_order_release);
+        setRegU32(*ctx, 4, kMpegPacingHandle);
+        setRegU32(*ctx, 5, kMpegPacingImage);
+        ctx->pc = kMpegPacingAfterSecondPc;
+        ps2_stubs::sceMpegGetPicture(rdram, ctx, runtime);
+    }
+
+    void testMpegPacingAfterSecond(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gMpegPacingResumeTick.store(
+            runtime->eeScheduler().currentVSyncTick(),
+            std::memory_order_release);
+        gMpegPacingStage.store(3u, std::memory_order_release);
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
+    void testMpegPacingFirstProducer(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gMpegPacingFirstProducerStage.store(
+            gMpegPacingStage.load(std::memory_order_acquire),
+            std::memory_order_release);
+        runtime->eeScheduler().postEvent(EeEvent{EeEventType::VBlankStart, 0u, 0u});
+        ctx->pc = 0u;
+    }
+
+    void testMpegPacingSecondProducer(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gMpegPacingSecondProducerStage.store(
+            gMpegPacingStage.load(std::memory_order_acquire),
+            std::memory_order_release);
+        runtime->eeScheduler().postEvent(EeEvent{EeEventType::VBlankStart, 0u, 0u});
         ctx->pc = 0u;
     }
 
@@ -694,6 +750,66 @@ void register_ps2_runtime_expansion_tests()
                      "resumed GetPicture should publish the configured height");
         });
 
+        tc.Run("CD EOF becomes visible only after the final guest MPEG demux", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            ps2_stubs::resetMpegStubState();
+            ps2_stubs::notifyMpegCdStreamStart();
+
+            constexpr uint32_t kMpegAddr = 0x00126000u;
+            constexpr uint32_t kPacketAddr = 0x00127000u;
+            const std::vector<uint8_t> finalPacket = {
+                0x00u, 0x00u, 0x01u, 0xE0u,
+                0x00u, 0x04u,
+                0x80u, 0x00u, 0x00u,
+                0x00u};
+            std::memcpy(rdram.data() + kPacketAddr, finalPacket.data(), finalPacket.size());
+
+            ps2_stubs::notifyMpegCdStreamDataProduced(
+                static_cast<uint32_t>(finalPacket.size()), true);
+
+            R5900Context beforeDemuxCtx{};
+            setRegU32(beforeDemuxCtx, 4, kMpegAddr);
+            ps2_stubs::sceMpegIsEnd(rdram.data(), &beforeDemuxCtx, &runtime);
+            t.Equals(getRegS32(beforeDemuxCtx, 2), 0,
+                     "physical CD EOF must not end MPEG before the final guest buffer is demuxed");
+
+            constexpr uint32_t kFirstPartSize = 5u;
+            R5900Context firstDemuxCtx{};
+            setRegU32(firstDemuxCtx, 4, kMpegAddr);
+            setRegU32(firstDemuxCtx, 5, kPacketAddr);
+            setRegU32(firstDemuxCtx, 6, kFirstPartSize);
+            setRegU32(firstDemuxCtx, 7, kPacketAddr);
+            setRegU32(firstDemuxCtx, 8, static_cast<uint32_t>(finalPacket.size()));
+            ps2_stubs::sceMpegDemuxPssRing(rdram.data(), &firstDemuxCtx, &runtime);
+            t.Equals(getRegS32(firstDemuxCtx, 2), static_cast<int32_t>(kFirstPartSize),
+                     "the partial final MPEG buffer should be consumed");
+
+            R5900Context midwayCtx{};
+            setRegU32(midwayCtx, 4, kMpegAddr);
+            ps2_stubs::sceMpegIsEnd(rdram.data(), &midwayCtx, &runtime);
+            t.Equals(getRegS32(midwayCtx, 2), 0,
+                     "a partial final MPEG demux must keep physical CD EOF pending");
+
+            const uint32_t remainingSize = static_cast<uint32_t>(finalPacket.size()) - kFirstPartSize;
+            R5900Context finalDemuxCtx{};
+            setRegU32(finalDemuxCtx, 4, kMpegAddr);
+            setRegU32(finalDemuxCtx, 5, kPacketAddr + kFirstPartSize);
+            setRegU32(finalDemuxCtx, 6, remainingSize);
+            setRegU32(finalDemuxCtx, 7, kPacketAddr);
+            setRegU32(finalDemuxCtx, 8, static_cast<uint32_t>(finalPacket.size()));
+            ps2_stubs::sceMpegDemuxPssRing(rdram.data(), &finalDemuxCtx, &runtime);
+            t.Equals(getRegS32(finalDemuxCtx, 2), static_cast<int32_t>(remainingSize),
+                     "the final guest MPEG bytes should be consumed before EOF is committed");
+
+            R5900Context afterDemuxCtx{};
+            setRegU32(afterDemuxCtx, 4, kMpegAddr);
+            ps2_stubs::sceMpegIsEnd(rdram.data(), &afterDemuxCtx, &runtime);
+            t.Equals(getRegS32(afterDemuxCtx, 2), 1,
+                     "MPEG should end after the pending final guest buffer is demuxed");
+        });
+
         tc.Run("sceMpegGetPicture waits for new decoder output instead of duplicating the last frame", [](TestCase &t)
         {
             PS2Runtime runtime;
@@ -724,6 +840,76 @@ void register_ps2_runtime_expansion_tests()
                      "EOF should resume the blocked GetPicture continuation");
             t.Equals(Ps2FastRead32(rdram.data(), kMpegNoDuplicateHandle + 0x08u), 1u,
                      "only the injected decoder frame should be counted as served");
+        });
+
+        tc.Run("sceMpegGetPicture resumes its HLE operation at the MPEG frame cadence", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            ps2_stubs::resetMpegStubState();
+            ps2_stubs::notifyMpegCdStreamStart();
+
+            constexpr uint32_t kSequencePacketAddr = 0x00127000u;
+            const std::vector<uint8_t> sequencePacket = {
+                0x00u, 0x00u, 0x01u, 0xE0u,
+                0x00u, 0x0Bu,
+                0x80u, 0x00u, 0x00u,
+                0x00u, 0x00u, 0x01u, 0xB3u,
+                0x14u, 0x01u, 0x60u, 0x14u};
+            std::memcpy(
+                rdram.data() + kSequencePacketAddr,
+                sequencePacket.data(),
+                sequencePacket.size());
+
+            R5900Context demuxContext{};
+            runtime.eeScheduler().reset(rdram.data(), demuxContext);
+            setRegU32(demuxContext, 4, kMpegPacingHandle);
+            setRegU32(demuxContext, 5, kSequencePacketAddr);
+            setRegU32(demuxContext, 6, static_cast<uint32_t>(sequencePacket.size()));
+            setRegU32(demuxContext, 7, kSequencePacketAddr);
+            setRegU32(demuxContext, 8, static_cast<uint32_t>(sequencePacket.size()));
+            ps2_stubs::sceMpegDemuxPssRing(rdram.data(), &demuxContext, &runtime);
+            t.Equals(
+                getRegS32(demuxContext, 2),
+                static_cast<int32_t>(sequencePacket.size()),
+                "the 29.97 fps MPEG sequence header should be consumed");
+
+            ps2_stubs::enqueueMpegDecodedFrameForTesting(kMpegPacingHandle);
+            ps2_stubs::enqueueMpegDecodedFrameForTesting(kMpegPacingHandle);
+            runtime.registerFunction(kMpegPacingMainPc, testMpegPacingMain);
+            runtime.registerFunction(kMpegPacingAfterFirstPc, testMpegPacingAfterFirst);
+            runtime.registerFunction(kMpegPacingAfterSecondPc, testMpegPacingAfterSecond);
+            runtime.registerFunction(kMpegPacingFirstProducerPc, testMpegPacingFirstProducer);
+            runtime.registerFunction(kMpegPacingSecondProducerPc, testMpegPacingSecondProducer);
+            gMpegPacingStage.store(0u, std::memory_order_release);
+            gMpegPacingFirstProducerStage.store(0u, std::memory_order_release);
+            gMpegPacingSecondProducerStage.store(0u, std::memory_order_release);
+            gMpegPacingResumeTick.store(0u, std::memory_order_release);
+
+            R5900Context mainContext{};
+            mainContext.pc = kMpegPacingMainPc;
+            EeScheduler &ee = runtime.eeScheduler();
+            ee.reset(rdram.data(), mainContext);
+            const int firstProducerId = ee.createThread(EeThreadCreateParams{
+                0u, kMpegPacingFirstProducerPc, 0u, 0u, 0u, 10, 0u});
+            const int secondProducerId = ee.createThread(EeThreadCreateParams{
+                0u, kMpegPacingSecondProducerPc, 0u, 0u, 0u, 11, 0u});
+            t.IsTrue(firstProducerId > 1 && secondProducerId > firstProducerId,
+                     "two VSync producer guest threads should be created");
+            t.Equals(ee.startThread(firstProducerId, 0u, mainContext, false), 0,
+                     "the first VSync producer should become ready");
+            t.Equals(ee.startThread(secondProducerId, 0u, mainContext, false), 0,
+                     "the second VSync producer should become ready");
+            ee.run();
+
+            t.Equals(gMpegPacingFirstProducerStage.load(std::memory_order_acquire), 1u,
+                     "the second GetPicture should wait before the first VSync");
+            t.Equals(gMpegPacingSecondProducerStage.load(std::memory_order_acquire), 1u,
+                     "29.97 fps must still be waiting after one 59.94 Hz VSync");
+            t.Equals(gMpegPacingResumeTick.load(std::memory_order_acquire), 2ull,
+                     "the pending GetPicture should complete after two VSync ticks");
+            t.Equals(gMpegPacingStage.load(std::memory_order_acquire), 3u,
+                     "VSync completion must re-enter GetPicture before its guest continuation");
         });
 
         tc.Run("sceSdRemote isolates voice transfers from block streaming state", [](TestCase &t)

@@ -571,10 +571,9 @@ namespace ps2_stubs
             {
                 std::memset(rdram + offset + bytes, 0, requestedBytes - bytes);
             }
-            if (hitStreamEnd || g_cdStreamingLbn == g_cdStreamingEndLbn)
-            {
-                notifyMpegCdStreamEof(runtime);
-            }
+            notifyMpegCdStreamDataProduced(
+                static_cast<uint32_t>(bytes),
+                hitStreamEnd || g_cdStreamingLbn == g_cdStreamingEndLbn);
         }
         else
         {

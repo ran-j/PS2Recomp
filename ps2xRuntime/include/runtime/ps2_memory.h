@@ -204,8 +204,6 @@ struct GSRegisters
     uint64_t extdata;  // External data
     uint64_t extwrite; // External write
     uint64_t bgcolor;  // Background color
-    // Status remains atomic because the renderer/UI can observe it while the
-    // single EE executor updates SIGNAL, FINISH and FIELD.
     std::atomic<uint64_t> csr;
     std::atomic<uint64_t> vsyncTick;
     uint64_t imr;      // Interrupt mask

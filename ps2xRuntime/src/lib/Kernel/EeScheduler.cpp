@@ -1004,10 +1004,8 @@ int EeScheduler::cancelAlarm(int id)
     {
         std::lock_guard lock(m_eventMutex);
         std::erase_if(m_deadlines, [id](const ScheduledEvent &scheduled)
-                      {
-                          return scheduled.event.type == EeEventType::Alarm &&
-                                 scheduled.event.id == static_cast<uint32_t>(id);
-                      });
+                      { return scheduled.event.type == EeEventType::Alarm &&
+                               scheduled.event.id == static_cast<uint32_t>(id); });
         updateNextDeadline();
     }
     return KE_OK;
@@ -1235,9 +1233,12 @@ uint32_t EeScheduler::setGsVSyncCallback(uint32_t callback, uint32_t gp, uint32_
     return previous;
 }
 
-[[noreturn]] void EeScheduler::waitVSync(uint64_t afterTick, int fixedResult)
+[[noreturn]] void EeScheduler::waitVSync(uint64_t afterTick, int fixedResult, std::function<void(R5900Context &)> completion)
 {
-    blockCurrent(EeWaitState{EeWaitReason::VSync, EeVSyncWait{afterTick, fixedResult}});
+    blockCurrent(EeWaitState{
+        EeWaitReason::VSync,
+        EeVSyncWait{afterTick, fixedResult},
+        std::move(completion)});
 }
 
 void EeScheduler::completeVSync(uint64_t tick)
@@ -1438,10 +1439,10 @@ void EeScheduler::publishSnapshot()
     for (const auto &[id, item] : m_eventFlags)
     {
         next.eventFlags.push_back(EeEventFlagSnapshot{id,
-                                                     item.bits,
-                                                     item.initBits,
-                                                     item.attr,
-                                                     static_cast<uint32_t>(item.waiters.size())});
+                                                      item.bits,
+                                                      item.initBits,
+                                                      item.attr,
+                                                      static_cast<uint32_t>(item.waiters.size())});
     }
     std::sort(next.eventFlags.begin(), next.eventFlags.end(), [](const auto &left, const auto &right)
               { return left.id < right.id; });
@@ -1686,8 +1687,7 @@ void EeScheduler::processDueDeadlines()
                   {
                       return left.event.id < right.event.id;
                   }
-                  return left.sequence < right.sequence;
-              });
+                  return left.sequence < right.sequence; });
     for (ScheduledEvent &scheduled : due)
     {
         if (scheduled.event.type == EeEventType::VBlankStart)
@@ -1806,7 +1806,7 @@ void EeScheduler::finishEventWaiters(EeEventFlag &flag, bool interruptSafe)
 bool EeScheduler::eventCondition(uint32_t current, uint32_t requested, uint32_t mode)
 {
     return (mode & WEF_OR) != 0u ? (current & requested) != 0u
-                                : (current & requested) == requested;
+                                 : (current & requested) == requested;
 }
 
 int EeScheduler::waitObjectId(const EeWaitState &wait)

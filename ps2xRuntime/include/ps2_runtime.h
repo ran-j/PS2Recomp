@@ -249,6 +249,7 @@ inline void ps2TraceGuestWrite(uint8_t *rdram,
     (void)valueHi;
     (void)op;
     (void)ctx;
+    // TODO we dont need this anymore so on next release it will be deleted
 }
 
 inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
@@ -262,6 +263,7 @@ inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
     (void)size;
     (void)op;
     (void)ctx;
+    // TODO we dont need this anymore so on next release it will be deleted
 }
 
 class PS2Runtime
