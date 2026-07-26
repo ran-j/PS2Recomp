@@ -1441,10 +1441,11 @@ namespace
             ps2_syscalls::dispatchDmacHandlersForCause(rdram, runtime, completedCause);
         }
 
-        // Defer cause-5 (VIF1 completion) to the next drain: sce libdma registers
-        // the handler only after the kick returns. Raised unconditionally per kick --
-        // a deliberate over-approximation; an unconsumed raise ages out harmlessly.
-        if (channelBase == 0x10009000u) // VIF1
+        // VIF1 INTC cause 5 is asserted by a VIFcode I bit, decoded during the
+        // processPendingTransfers() parse above. Raise only when such an edge was
+        // actually seen. Delivery stays deferred to the next drain: sce libdma
+        // registers the cause-5 handler after this kick returns.
+        if (mem.consumeVif1InterruptEdges() != 0u)
         {
             ps2_syscalls::raisePendingIntc(5u);
         }

@@ -9,6 +9,7 @@
 #include "Kernel/Stubs/Audio.h"
 #include "Kernel/Stubs/GS.h"
 #include "Kernel/Stubs/MPEG.h"
+#include "Kernel/Syscalls/Interrupt.h"
 #include "ps2_host_backend.h"
 #include "ps2_iop_host.h"
 #include "ps2x/iop/iop_subsystem.h"
@@ -1403,6 +1404,15 @@ void PS2Runtime::drainCompletedDmacHandlers(uint8_t *rdram)
     for (uint32_t cause : m_memory.consumeCompletedDmacCauses())
     {
         ps2_syscalls::dispatchDmacHandlersForCause(rdram, this, cause);
+    }
+
+    // Catch-all for VIF1 I-bit edges parsed outside submitDmaSend's own
+    // consume (GS/Font/GIF-chain paths that call processVIF1Data within the
+    // frame) so they get delivered here instead of leaking into a later,
+    // unrelated submitDmaSend kick.
+    if (m_memory.consumeVif1InterruptEdges() != 0u)
+    {
+        ps2_syscalls::raisePendingIntc(5u);
     }
 }
 

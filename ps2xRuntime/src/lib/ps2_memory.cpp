@@ -297,6 +297,7 @@ bool PS2Memory::initialize(size_t ramSize)
         std::lock_guard<std::mutex> lock(m_completedDmacMutex);
         m_completedDmacCauses.clear();
     }
+    m_vif1InterruptEdges.store(0u, std::memory_order_relaxed);
     m_codeRegions.clear();
     m_path3Masked = false;
     m_path3MaskedFifo.clear();
@@ -1663,6 +1664,11 @@ std::vector<uint32_t> PS2Memory::consumeCompletedDmacCauses()
     std::vector<uint32_t> causes;
     causes.swap(m_completedDmacCauses);
     return causes;
+}
+
+uint32_t PS2Memory::consumeVif1InterruptEdges()
+{
+    return m_vif1InterruptEdges.exchange(0u, std::memory_order_relaxed);
 }
 
 void PS2Memory::flushMaskedPath3Packets(bool drainImmediately)

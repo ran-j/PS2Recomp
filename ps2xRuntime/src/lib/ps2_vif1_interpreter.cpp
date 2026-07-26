@@ -309,7 +309,11 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         vif1_regs.code = cmd;
         vif1_regs.num = num;
         if (irq)
+        {
             vif1_regs.stat |= (1u << 11); // INT
+            // Record the VIF1 INT edge for the deferred cause-5 raise.
+            m_vif1InterruptEdges.fetch_add(1u, std::memory_order_relaxed);
+        }
 
         if (opcode == VIF_NOP)
         {
