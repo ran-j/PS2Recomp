@@ -113,6 +113,18 @@ namespace ps2recomp
         m_counters.generatedFunctions += count;
     }
 
+    void RecompilerReporter::recordCorrectnessCriticalGuestFallback()
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        ++m_counters.correctnessCriticalGuestFallbacks;
+    }
+
+    void RecompilerReporter::recordCorrectnessCriticalFailure()
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        ++m_counters.correctnessCriticalFailures;
+    }
+
     void RecompilerReporter::recordIndirectFallbackPromotion(const std::string &functionName,
                                                              const std::vector<uint32_t> &jumpAddresses,
                                                              size_t promotedEntryCount)
@@ -183,6 +195,8 @@ namespace ps2recomp
         os << "Indirect fallback promotions: " << m_counters.indirectFallbackPromotions
            << " (" << m_counters.indirectFallbackEntries << " fallback entries)" << std::endl;
         os << "Unhandled instructions: " << m_counters.unhandledInstructions << std::endl;
+        os << "Correctness-critical guest fallbacks: " << m_counters.correctnessCriticalGuestFallbacks
+           << ", failures: " << m_counters.correctnessCriticalFailures << std::endl;
 
         size_t warnings = 0;
         size_t errors = 0;

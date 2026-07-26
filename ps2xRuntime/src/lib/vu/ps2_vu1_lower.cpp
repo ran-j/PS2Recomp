@@ -157,28 +157,32 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
     }
     case 0x14: // FSEQ
     {
-        uint16_t imm12 = instr & 0xFFF;
-        if (1 != 0)
-            m_state.vi[1] = ((m_state.status & 0xFFF) == imm12) ? 1 : 0;
+        const uint8_t it = VIT(instr);
+        const uint16_t imm12 = static_cast<uint16_t>((((instr >> 21) & 0x1u) << 11) | (instr & 0x7FFu));
+        if (it != 0)
+            m_state.vi[it] = ((m_state.status & 0xFFFu) == imm12) ? 1 : 0;
         return;
     }
     case 0x15: // FSSET
     {
-        m_state.status = (instr >> 6) & 0xFC0;
+        const uint16_t imm12 = static_cast<uint16_t>((((instr >> 21) & 0x1u) << 11) | (instr & 0x7FFu));
+        queueFsset(imm12);
         return;
     }
     case 0x16: // FSAND
     {
-        uint16_t imm12 = instr & 0xFFF;
-        if (1 != 0)
-            m_state.vi[1] = (int32_t)(m_state.status & imm12);
+        const uint8_t it = VIT(instr);
+        const uint16_t imm12 = static_cast<uint16_t>((((instr >> 21) & 0x1u) << 11) | (instr & 0x7FFu));
+        if (it != 0)
+            m_state.vi[it] = static_cast<int32_t>((m_state.status & 0xFFFu) & imm12);
         return;
     }
     case 0x17: // FSOR
     {
-        uint16_t imm12 = instr & 0xFFF;
-        if (1 != 0)
-            m_state.vi[1] = ((m_state.status | imm12) == 0xFFF) ? 1 : 0;
+        const uint8_t it = VIT(instr);
+        const uint16_t imm12 = static_cast<uint16_t>((((instr >> 21) & 0x1u) << 11) | (instr & 0x7FFu));
+        if (it != 0)
+            m_state.vi[it] = static_cast<int32_t>((m_state.status & 0xFFFu) | imm12);
         return;
     }
     case 0x18: // FMAND

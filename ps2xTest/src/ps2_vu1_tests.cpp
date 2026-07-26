@@ -7,11 +7,12 @@
 
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 namespace
 {
-    constexpr uint32_t kVuUpperNop = 0u;
+    constexpr uint32_t kVuUpperNop = 0x000002FFu;
 
     struct Vu1Fixture
     {
@@ -79,6 +80,21 @@ namespace
                (static_cast<uint32_t>(fs & 0x1Fu) << 11) |
                (static_cast<uint32_t>(fd & 0x1Fu) << 6) |
                static_cast<uint32_t>(op & 0x3Fu);
+    }
+
+    uint32_t makeVuFlagImmediate(uint8_t opcode, uint8_t targetVi, uint16_t immediate)
+    {
+        return (static_cast<uint32_t>(opcode & 0x7Fu) << 25) |
+               (static_cast<uint32_t>((immediate >> 11) & 0x1u) << 21) |
+               (static_cast<uint32_t>(targetVi & 0xFu) << 16) |
+               static_cast<uint32_t>(immediate & 0x7FFu);
+    }
+
+    uint32_t makeVuFlagRegister(uint8_t opcode, uint8_t targetVi, uint8_t sourceVi)
+    {
+        return (static_cast<uint32_t>(opcode & 0x7Fu) << 25) |
+               (static_cast<uint32_t>(targetVi & 0xFu) << 16) |
+               (static_cast<uint32_t>(sourceVi & 0xFu) << 11);
     }
 
     uint32_t makeVuLq(uint8_t dest, uint8_t targetVf, uint8_t baseVi, int16_t imm)
@@ -554,6 +570,153 @@ void register_ps2_vu1_tests()
                 }
             }
             t.IsTrue(imageOk, "MSCAL-triggered XGKICK should route PATH1 packet into GS VRAM");
+        });
+
+        tc.Run("standalone VU1 code honors the nullable PS2Memory API", [](TestCase &t)
+        {
+            std::vector<uint8_t> code(8u, 0u);
+            std::vector<uint8_t> data(16u, 0u);
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            VU1Interpreter vu1;
+            vu1.execute(code.data(), static_cast<uint32_t>(code.size()),
+                        data.data(), static_cast<uint32_t>(data.size()),
+                        gs, nullptr, 0u, 0u, 0u, 1u);
+
+            t.Equals(vu1.state().pc, 0u,
+                     "external code should execute and wrap without dereferencing a null memory tracker");
+        });
+
+        tc.Run("VU1 status-immediate ops decode IMM12 and their target VI", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+            writeVuInstructionPair(fx.code, 0u,
+                                   makeVuFlagImmediate(0x14u, 5u, 0x812u),
+                                   kVuUpperNop);
+            writeVuInstructionPair(fx.code, 8u,
+                                   makeVuFlagImmediate(0x16u, 6u, 0x810u),
+                                   kVuUpperNop);
+            writeVuInstructionPair(fx.code, 16u,
+                                   makeVuFlagImmediate(0x17u, 7u, 0x040u),
+                                   kVuUpperNop);
+
+            VU1Interpreter vu1;
+            vu1.state().status = 0x812u;
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
+                        fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
+                        0u, 0u, 0u, 3u);
+
+            t.Equals(vu1.state().vi[5], 1,
+                     "FSEQ should compare all 12 immediate bits and write IT");
+            t.Equals(vu1.state().vi[6], 0x810,
+                     "FSAND should return the masked 12-bit status in IT");
+            t.Equals(vu1.state().vi[7], 0x852,
+                     "FSOR should return the 12-bit OR value rather than a boolean");
+            t.Equals(vu1.state().vi[1], 0,
+                     "status-immediate ops should not hardcode VI1");
+        });
+
+        tc.Run("VU1 FSSET enters the four-cycle flag pipeline", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+            writeVuInstructionPair(fx.code, 0u,
+                                   makeVuFlagImmediate(0x15u, 0u, 0xA80u),
+                                   kVuUpperNop);
+
+            VU1Interpreter vu1;
+            vu1.state().status = 0x015u;
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
+                        fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
+                        0u, 0u, 0u, 4u);
+            t.Equals(vu1.state().status, 0x015u,
+                     "FSSET should not be visible before four cycles elapse");
+
+            vu1.resume(fx.code, PS2_VU1_CODE_SIZE,
+                       fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
+                       0u, 0u, 1u);
+            t.Equals(vu1.state().status, 0xA95u,
+                     "FSSET should replace sticky bits while preserving current and D/I bits");
+        });
+
+        tc.Run("VU1 FMAC flags respect destination lanes and become visible after four cycles", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+            writeVuInstructionPair(fx.code, 0u, 0u,
+                                   makeVuUpper(0x28u, 0xAu, 2u, 1u, 3u));
+            writeVuInstructionPair(fx.code, 8u,
+                                   makeVuFlagRegister(0x1Au, 6u, 7u),
+                                   kVuUpperNop);
+            writeVuInstructionPair(fx.code, 32u,
+                                   makeVuFlagRegister(0x18u, 4u, 5u),
+                                   kVuUpperNop);
+
+            VU1Interpreter vu1;
+            vu1.state().vf[1][0] = 1.0f;
+            vu1.state().vf[1][2] = -3.0f;
+            vu1.state().vf[2][0] = -1.0f;
+            vu1.state().vf[2][2] = 1.0f;
+            vu1.state().vi[5] = 0xFFFF;
+            vu1.state().vi[7] = 0;
+
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
+                        fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
+                        0u, 0u, 0u, 4u);
+
+            t.Equals(vu1.state().mac, 0u,
+                     "FMAC flags should remain hidden during the first four issue cycles");
+            t.Equals(vu1.state().vi[6], 1,
+                     "FMEQ before the commit cycle should observe the old MAC flags");
+
+            vu1.resume(fx.code, PS2_VU1_CODE_SIZE,
+                       fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
+                       0u, 0u, 1u);
+
+            t.Equals(vu1.state().mac, 0x28u,
+                     "ADD.xz should report zero on x and sign on z only");
+            t.Equals(vu1.state().status, 0xC3u,
+                     "FMAC commit should update current Z/S and accumulate their sticky bits");
+            t.Equals(vu1.state().vi[4], 0x28,
+                     "FMAND on the commit cycle should observe the new MAC flags");
+        });
+
+        tc.Run("VU1 FMAC normalizes overflow and underflow while reporting O and U", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+            writeVuInstructionPair(fx.code, 0u, 0u,
+                                   makeVuUpper(0x2Au, 0xFu, 2u, 1u, 3u));
+
+            VU1Interpreter vu1;
+            vu1.state().vf[1][0] = std::numeric_limits<float>::max();
+            vu1.state().vf[1][1] = std::numeric_limits<float>::denorm_min();
+            vu1.state().vf[1][2] = -2.0f;
+            vu1.state().vf[1][3] = 0.0f;
+            vu1.state().vf[2][0] = 2.0f;
+            vu1.state().vf[2][1] = 1.0f;
+            vu1.state().vf[2][2] = 1.0f;
+            vu1.state().vf[2][3] = 1.0f;
+
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
+                        fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
+                        0u, 0u, 0u, 5u);
+
+            t.Equals(vu1.state().mac, 0x8425u,
+                     "MUL should report x overflow, y underflow+zero, z sign and w zero");
+            t.Equals(vu1.state().status, 0x3CFu,
+                     "current and sticky status should summarize Z/S/U/O");
+            t.Equals(vu1.state().vf[3][0], std::numeric_limits<float>::max(),
+                     "overflow should saturate to maximum finite magnitude");
+            t.Equals(vu1.state().vf[3][1], 0.0f,
+                     "denormal output should flush to zero");
         });
     });
 }

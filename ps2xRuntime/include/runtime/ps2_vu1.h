@@ -59,6 +59,16 @@ private:
         bool lowerBeforeUpper = false;
     };
 
+    struct FlagPipelineEntry
+    {
+        uint32_t mac = 0;
+        uint32_t status = 0;
+        bool valid = false;
+        bool writesSticky = false;
+    };
+
+    static constexpr uint32_t kFlagPipelineLatency = 4u;
+
     VU1State m_state;
     std::vector<DecodedInstructionPair> m_decodedCodeCache;
     const uint8_t *m_cachedVuCode = nullptr;
@@ -66,6 +76,11 @@ private:
     uint32_t m_cachedCodeSize = 0;
     uint64_t m_cachedCodeGeneration = 0;
     bool m_decodedCodeCacheValid = false;
+    FlagPipelineEntry m_flagPipeline[kFlagPipelineLatency]{};
+    FlagPipelineEntry m_pendingFlagUpdate{};
+    uint32_t m_flagPipelineHead = 0;
+    uint32_t m_workingMac = 0;
+    uint32_t m_workingStatus = 0;
 
     void run(uint8_t *vuCode, uint32_t codeSize,
              uint8_t *vuData, uint32_t dataSize,
@@ -82,6 +97,15 @@ private:
 
     void applyDest(float *dst, const float *result, uint8_t dest);
     void applyDestAcc(const float *result, uint8_t dest);
+    void applyFmacDest(float *dst, float *result, uint8_t dest);
+    void applyFmacDestAcc(float *result, uint8_t dest);
+    void updateFmacFlags(float *result, uint8_t dest);
+    void queueFsset(uint16_t immediate);
+    void beginFlagPipelineCycle();
+    void endFlagPipelineCycle();
+    void flushFlagPipeline();
+    void commitFlagPipelineEntry(FlagPipelineEntry &entry);
+    bool hasPendingFlagPipelineEntries() const;
     float broadcast(const float *vf, uint8_t bc);
 };
 

@@ -15,6 +15,7 @@ option(PS2X_ENABLE_AGRESSIVE_LOGS "Enable very verbose/agressive PS2 runtime log
 option(PS2X_ENABLE_IOP_RPC_TRACE "Log unhandled IOP/SIF RPC trace suggestions" ON)
 option(PS2X_STRICT_RETURN_DIAGNOSTICS "Route generated JR $ra returns through runtime branch diagnostics" OFF)
 option(PS2X_SHOW_WINDOWS_CONSOLE "Show a console window for ps2EntryRunner on Windows release builds" ON)
+option(PS2X_ENABLE_DEBUG_UI "Build the desktop runtime debug UI" ON)
 
 if(PS2X_ENABLE_SCCACHE)
     find_program(PS2X_SCCACHE_PROGRAM sccache)
@@ -82,50 +83,50 @@ else()
     )
     FetchContent_MakeAvailable(raylib)
 
-    if(NOT PS2X_IS_ANDROID)
-    FetchContent_Declare(
-        imgui
-        GIT_REPOSITORY https://github.com/ocornut/imgui.git
-        GIT_TAG "docking"
-        GIT_SHALLOW TRUE
-    )
-    FetchContent_GetProperties(imgui)
+    if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_ANDROID)
+        FetchContent_Declare(
+            imgui
+            GIT_REPOSITORY https://github.com/ocornut/imgui.git
+            GIT_TAG "v1.92.7-docking"
+            GIT_SHALLOW TRUE
+        )
+        FetchContent_GetProperties(imgui)
 
-    if(NOT imgui_POPULATED)
-        FetchContent_Populate(imgui)
+        if(NOT imgui_POPULATED)
+            FetchContent_Populate(imgui)
+        endif()
+
+        set(PS2X_IMGUI_SOURCE_DIR "${imgui_SOURCE_DIR}")
+
+        add_library(imgui STATIC
+            "${PS2X_IMGUI_SOURCE_DIR}/imgui.cpp"
+            "${PS2X_IMGUI_SOURCE_DIR}/imgui_draw.cpp"
+            "${PS2X_IMGUI_SOURCE_DIR}/imgui_tables.cpp"
+            "${PS2X_IMGUI_SOURCE_DIR}/imgui_widgets.cpp"
+            "${PS2X_IMGUI_SOURCE_DIR}/imgui_demo.cpp"
+        )
+        target_include_directories(imgui PUBLIC "${PS2X_IMGUI_SOURCE_DIR}")
+
+        FetchContent_Declare(
+            rlImGui
+            GIT_REPOSITORY https://github.com/raylib-extras/rlImGui.git
+            GIT_TAG "Raylib_5_5"
+            GIT_SHALLOW TRUE
+        )
+        FetchContent_GetProperties(rlImGui)
+
+        if(NOT rlimgui_POPULATED)
+            FetchContent_Populate(rlImGui)
+        endif()
+
+        set(PS2X_RLIMGUI_SOURCE_DIR "${rlimgui_SOURCE_DIR}")
+
+        add_library(rlImGui STATIC
+            "${PS2X_RLIMGUI_SOURCE_DIR}/rlImGui.cpp"
+        )
+        target_include_directories(rlImGui PUBLIC "${PS2X_RLIMGUI_SOURCE_DIR}")
+        target_link_libraries(rlImGui PUBLIC raylib imgui)
     endif()
-
-    set(PS2X_IMGUI_SOURCE_DIR "${imgui_SOURCE_DIR}")
-
-    add_library(imgui STATIC
-        "${PS2X_IMGUI_SOURCE_DIR}/imgui.cpp"
-        "${PS2X_IMGUI_SOURCE_DIR}/imgui_draw.cpp"
-        "${PS2X_IMGUI_SOURCE_DIR}/imgui_tables.cpp"
-        "${PS2X_IMGUI_SOURCE_DIR}/imgui_widgets.cpp"
-        "${PS2X_IMGUI_SOURCE_DIR}/imgui_demo.cpp"
-    )
-    target_include_directories(imgui PUBLIC "${PS2X_IMGUI_SOURCE_DIR}")
-
-    FetchContent_Declare(
-        rlImGui
-        GIT_REPOSITORY https://github.com/raylib-extras/rlImGui.git
-        GIT_TAG "Raylib_5_5"
-        GIT_SHALLOW TRUE
-    )
-    FetchContent_GetProperties(rlImGui)
-
-    if(NOT rlimgui_POPULATED)
-        FetchContent_Populate(rlImGui)
-    endif()
-
-    set(PS2X_RLIMGUI_SOURCE_DIR "${rlimgui_SOURCE_DIR}")
-
-    add_library(rlImGui STATIC
-        "${PS2X_RLIMGUI_SOURCE_DIR}/rlImGui.cpp"
-    )
-    target_include_directories(rlImGui PUBLIC "${PS2X_RLIMGUI_SOURCE_DIR}")
-    target_link_libraries(rlImGui PUBLIC raylib imgui)
-    endif() # NOT PS2X_IS_ANDROID
 endif()
 
 add_library(ps2_host_backend INTERFACE)
@@ -509,7 +510,7 @@ target_link_libraries(ps2EntryRunner
     ps2_runtime
 )
 
-if(NOT PS2X_IS_VITA AND NOT PS2X_IS_ANDROID)
+if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_VITA AND NOT PS2X_IS_ANDROID)
     target_sources(ps2EntryRunner PRIVATE
         src/lib/ps2_debug_panel.cpp
     )

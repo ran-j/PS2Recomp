@@ -297,6 +297,57 @@ namespace
         t.Equals(probe, expectedBase, message);
         runtime.guestFree(probe);
     }
+
+    struct GsPixelTestResult
+    {
+        uint32_t framebuffer = 0u;
+        uint32_t depth = 0u;
+    };
+
+    GsPixelTestResult drawGsPixelForTests(uint8_t framePsm,
+                                          uint64_t testReg,
+                                          bool zmask,
+                                          uint32_t initialFramebuffer,
+                                          uint32_t initialDepth,
+                                          uint8_t sourceAlpha)
+    {
+        constexpr uint32_t kFrameBlock = 0u;
+        constexpr uint32_t kDepthBlock = 32u;
+        constexpr uint32_t kSourceDepth = 0x22222222u;
+
+        std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+        GS gs;
+        gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+        gs.WriteVram(framePsm, kFrameBlock, 1u, 0u, 0u, initialFramebuffer);
+        gs.WriteVram(GS_PSM_Z32, kDepthBlock, 1u, 0u, 0u, initialDepth);
+
+        const uint64_t frame =
+            (1ull << 16) |
+            (static_cast<uint64_t>(framePsm) << 24);
+        const uint64_t zbuf =
+            1ull |
+            (static_cast<uint64_t>(zmask ? 1u : 0u) << 32);
+        const uint64_t rgbaq =
+            (0x12ull << 0) |
+            (0x34ull << 8) |
+            (0x56ull << 16) |
+            (static_cast<uint64_t>(sourceAlpha) << 24) |
+            (0x3F800000ull << 32);
+
+        gs.writeRegister(GS_REG_FRAME_1, frame);
+        gs.writeRegister(GS_REG_ZBUF_1, zbuf);
+        gs.writeRegister(GS_REG_SCISSOR_1, 0ull);
+        gs.writeRegister(GS_REG_TEST_1, testReg);
+        gs.writeRegister(GS_REG_PRIM, static_cast<uint64_t>(GS_PRIM_POINT));
+        gs.writeRegister(GS_REG_RGBAQ, rgbaq);
+        gs.writeRegister(GS_REG_XYZ2, static_cast<uint64_t>(kSourceDepth) << 32);
+
+        return {
+            gs.ReadVram(framePsm, kFrameBlock, 1u, 0u, 0u),
+            gs.ReadVram(GS_PSM_Z32, kDepthBlock, 1u, 0u, 0u),
+        };
+    }
 }
 
 void register_ps2_gs_tests()
@@ -2975,97 +3026,158 @@ void register_ps2_gs_tests()
                      "linear filtering should preserve the shared opaque alpha from the CLUT entries");
         });
 
-        tc.Run("GS alpha test AFAIL framebuffer-only still writes the pixel", [](TestCase &t)
+        tc.Run("GS alpha-test AFAIL independently masks framebuffer and depth", [](TestCase &t)
         {
-            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
-            GS gs;
-            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
-
-            constexpr uint64_t kFrame =
-                (0ull << 0) |
-                (1ull << 16) |
-                (static_cast<uint64_t>(GS_PSM_CT32) << 24);
-            constexpr uint64_t kZbuf = (1ull << 32);
-            constexpr uint64_t kScissor =
-                (0ull << 0) |
-                (0ull << 16) |
-                (0ull << 32) |
-                (0ull << 48);
-            constexpr uint64_t kTest =
+            constexpr uint32_t kInitialFramebuffer = 0xAB030201u;
+            constexpr uint32_t kInitialDepth = 0x11111111u;
+            constexpr uint64_t kTestBase =
                 1ull |                  // ATE
-                (5ull << 1) |          // ATST = GEQUAL
+                (5ull << 1) |           // ATST = GEQUAL
                 (0x80ull << 4) |       // AREF
-                (1ull << 12) |          // AFAIL = FB_ONLY
+                (1ull << 16) |         // ZTE
                 (1ull << 17);          // ZTST = ALWAYS
-            constexpr uint64_t kPrim =
-                static_cast<uint64_t>(GS_PRIM_POINT);
-            constexpr uint64_t kRgbaq =
-                (0x12ull << 0) |
-                (0x34ull << 8) |
-                (0x56ull << 16) |
-                (0x00ull << 24) |
-                (0x3F800000ull << 32); // q = 1.0f
 
-            gs.writeRegister(GS_REG_FRAME_1, kFrame);
-            gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
-            gs.writeRegister(GS_REG_SCISSOR_1, kScissor);
-            gs.writeRegister(GS_REG_TEST_1, kTest);
-            gs.writeRegister(GS_REG_PRIM, kPrim);
-            gs.writeRegister(GS_REG_RGBAQ, kRgbaq);
-            gs.writeRegister(GS_REG_XYZ2, 0ull);
+            const GsPixelTestResult keep =
+                drawGsPixelForTests(GS_PSM_CT32, kTestBase | (0ull << 12), false,
+                                    kInitialFramebuffer, kInitialDepth, 0x00u);
+            t.Equals(keep.framebuffer, kInitialFramebuffer,
+                     "AFAIL=KEEP should preserve the framebuffer");
+            t.Equals(keep.depth, kInitialDepth,
+                     "AFAIL=KEEP should preserve depth");
 
-            uint32_t pixel = 0u;
-            std::memcpy(&pixel, vram.data(), sizeof(pixel));
-            t.Equals(pixel, 0x00563412u,
-                     "AFAIL=FB_ONLY should still update the framebuffer when the alpha test fails");
+            const GsPixelTestResult framebufferOnly =
+                drawGsPixelForTests(GS_PSM_CT32, kTestBase | (1ull << 12), false,
+                                    kInitialFramebuffer, kInitialDepth, 0x00u);
+            t.Equals(framebufferOnly.framebuffer, 0x00563412u,
+                     "AFAIL=FB_ONLY should update RGBA");
+            t.Equals(framebufferOnly.depth, kInitialDepth,
+                     "AFAIL=FB_ONLY should preserve depth");
+
+            const GsPixelTestResult depthOnly =
+                drawGsPixelForTests(GS_PSM_CT32, kTestBase | (2ull << 12), false,
+                                    kInitialFramebuffer, kInitialDepth, 0x00u);
+            t.Equals(depthOnly.framebuffer, kInitialFramebuffer,
+                     "AFAIL=ZB_ONLY should preserve the framebuffer");
+            t.Equals(depthOnly.depth, 0x22222222u,
+                     "AFAIL=ZB_ONLY should update depth");
+
+            const GsPixelTestResult rgbOnly =
+                drawGsPixelForTests(GS_PSM_CT32, kTestBase | (3ull << 12), false,
+                                    kInitialFramebuffer, kInitialDepth, 0x00u);
+            t.Equals(rgbOnly.framebuffer, 0xAB563412u,
+                     "AFAIL=RGB_ONLY should preserve destination alpha on CT32");
+            t.Equals(rgbOnly.depth, kInitialDepth,
+                     "AFAIL=RGB_ONLY should preserve depth");
         });
 
-        tc.Run("GS alpha test AFAIL RGB-only preserves destination alpha", [](TestCase &t)
+        tc.Run("GS RGB_ONLY falls back to FB_ONLY outside CT32", [](TestCase &t)
         {
-            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
-            GS gs;
-            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
-
-            constexpr uint64_t kFrame =
-                (0ull << 0) |
-                (1ull << 16) |
-                (static_cast<uint64_t>(GS_PSM_CT32) << 24);
-            constexpr uint64_t kZbuf = (1ull << 32);
-            constexpr uint64_t kScissor =
-                (0ull << 0) |
-                (0ull << 16) |
-                (0ull << 32) |
-                (0ull << 48);
+            constexpr uint32_t kInitialDepth = 0x11111111u;
             constexpr uint64_t kTest =
-                1ull |                // ATE
-                (5ull << 1) |         // ATST = GEQUAL
-                (0x80ull << 4) |      // AREF
-                (3ull << 12) |        // AFAIL = RGB_ONLY
-                (1ull << 17);         // ZTST = ALWAYS
-            constexpr uint64_t kPrim =
-                static_cast<uint64_t>(GS_PRIM_POINT);
-            constexpr uint64_t kRgbaq =
-                (0x12ull << 0) |
-                (0x34ull << 8) |
-                (0x56ull << 16) |
-                (0x00ull << 24) |
-                (0x3F800000ull << 32); // q = 1.0f
-            constexpr uint32_t kExisting = 0xAB030201u;
+                1ull |
+                (5ull << 1) |
+                (0x80ull << 4) |
+                (3ull << 12) |
+                (1ull << 16) |
+                (1ull << 17);
 
-            std::memcpy(vram.data(), &kExisting, sizeof(kExisting));
+            const GsPixelTestResult ct24 =
+                drawGsPixelForTests(GS_PSM_CT24, kTest, false,
+                                    0x00030201u, kInitialDepth, 0x00u);
+            t.Equals(ct24.framebuffer, 0x00563412u,
+                     "RGB_ONLY should write the full CT24 framebuffer pixel");
+            t.Equals(ct24.depth, kInitialDepth,
+                     "RGB_ONLY-as-FB_ONLY should preserve CT24 depth");
 
-            gs.writeRegister(GS_REG_FRAME_1, kFrame);
-            gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
-            gs.writeRegister(GS_REG_SCISSOR_1, kScissor);
-            gs.writeRegister(GS_REG_TEST_1, kTest);
-            gs.writeRegister(GS_REG_PRIM, kPrim);
-            gs.writeRegister(GS_REG_RGBAQ, kRgbaq);
-            gs.writeRegister(GS_REG_XYZ2, 0ull);
+            const GsPixelTestResult ct16 =
+                drawGsPixelForTests(GS_PSM_CT16, kTest, false,
+                                    0x8001u, kInitialDepth, 0x00u);
+            t.Equals(ct16.framebuffer, 0x28C2u,
+                     "RGB_ONLY should write RGB and alpha for CT16");
+            t.Equals(ct16.depth, kInitialDepth,
+                     "RGB_ONLY-as-FB_ONLY should preserve CT16 depth");
+        });
 
-            uint32_t pixel = 0u;
-            std::memcpy(&pixel, vram.data(), sizeof(pixel));
-            t.Equals(pixel, 0xAB563412u,
-                     "AFAIL=RGB_ONLY should update RGB while preserving destination alpha");
+        tc.Run("GS ZMSK suppresses depth without suppressing framebuffer writes", [](TestCase &t)
+        {
+            constexpr uint64_t kTest =
+                1ull |
+                (5ull << 1) |
+                (0x80ull << 4) |
+                (1ull << 16) |
+                (1ull << 17);
+            const GsPixelTestResult result =
+                drawGsPixelForTests(GS_PSM_CT32, kTest, true,
+                                    0xAB030201u, 0x11111111u, 0x80u);
+
+            t.Equals(result.framebuffer, 0x80563412u,
+                     "a passing alpha test should write the framebuffer");
+            t.Equals(result.depth, 0x11111111u,
+                     "ZMSK should preserve depth");
+        });
+
+        tc.Run("GS DATE and DATM inspect the framebuffer-format alpha bit", [](TestCase &t)
+        {
+            constexpr uint32_t kInitialDepth = 0x11111111u;
+            constexpr uint64_t kTestBase =
+                (1ull << 14) |          // DATE
+                (1ull << 16) |          // ZTE
+                (1ull << 17);           // ZTST = ALWAYS
+
+            const GsPixelTestResult ct32ZeroPass =
+                drawGsPixelForTests(GS_PSM_CT32, kTestBase, false,
+                                    0x00030201u, kInitialDepth, 0x80u);
+            t.Equals(ct32ZeroPass.framebuffer, 0x80563412u,
+                     "DATM=0 should accept a clear CT32 alpha bit");
+            t.Equals(ct32ZeroPass.depth, 0x22222222u,
+                     "a passing CT32 DATE should allow depth");
+
+            const GsPixelTestResult ct32OneFail =
+                drawGsPixelForTests(GS_PSM_CT32, kTestBase, false,
+                                    0x80030201u, kInitialDepth, 0x80u);
+            t.Equals(ct32OneFail.framebuffer, 0x80030201u,
+                     "DATM=0 should reject a set CT32 alpha bit");
+            t.Equals(ct32OneFail.depth, kInitialDepth,
+                     "a failing CT32 DATE should reject depth");
+
+            const GsPixelTestResult ct32OnePass =
+                drawGsPixelForTests(GS_PSM_CT32, kTestBase | (1ull << 15), false,
+                                    0x80030201u, kInitialDepth, 0x80u);
+            t.Equals(ct32OnePass.framebuffer, 0x80563412u,
+                     "DATM=1 should accept a set CT32 alpha bit");
+
+            const GsPixelTestResult ct16ZeroPass =
+                drawGsPixelForTests(GS_PSM_CT16, kTestBase, false,
+                                    0x0001u, kInitialDepth, 0x80u);
+            t.Equals(ct16ZeroPass.framebuffer, 0xA8C2u,
+                     "DATM=0 should accept a clear CT16 alpha bit");
+
+            const GsPixelTestResult ct16OneFail =
+                drawGsPixelForTests(GS_PSM_CT16, kTestBase, false,
+                                    0x8001u, kInitialDepth, 0x80u);
+            t.Equals(ct16OneFail.framebuffer, 0x8001u,
+                     "DATM=0 should reject a set CT16 alpha bit");
+            t.Equals(ct16OneFail.depth, kInitialDepth,
+                     "a failing CT16 DATE should reject depth");
+
+            const GsPixelTestResult ct16OnePass =
+                drawGsPixelForTests(GS_PSM_CT16, kTestBase | (1ull << 15), false,
+                                    0x8001u, kInitialDepth, 0x80u);
+            t.Equals(ct16OnePass.framebuffer, 0xA8C2u,
+                     "DATM=1 should accept a set CT16 alpha bit");
+
+            const GsPixelTestResult ct24DatmZero =
+                drawGsPixelForTests(GS_PSM_CT24, kTestBase, false,
+                                    0x00030201u, kInitialDepth, 0x80u);
+            const GsPixelTestResult ct24DatmOne =
+                drawGsPixelForTests(GS_PSM_CT24, kTestBase | (1ull << 15), false,
+                                    0x00030201u, kInitialDepth, 0x80u);
+            t.Equals(ct24DatmZero.framebuffer, 0x00563412u,
+                     "CT24 DATE should pass for DATM=0");
+            t.Equals(ct24DatmOne.framebuffer, 0x00563412u,
+                     "CT24 DATE should pass for DATM=1");
+            t.Equals(ct24DatmOne.depth, 0x22222222u,
+                     "CT24 DATE should not block depth");
         });
 
         tc.Run("GS triangle fan subpixel quad fills rows without interior holes", [](TestCase &t)

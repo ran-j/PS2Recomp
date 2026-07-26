@@ -132,29 +132,67 @@ namespace
         }
     }
 
-    struct AlphaTestResult
+    struct PixelWriteMask
     {
-        bool writeFramebuffer;
-        bool preserveDestinationAlpha;
+        bool writeRgb = true;
+        bool writeAlpha = true;
+        bool writeDepth = true;
+
+        bool writesFramebuffer() const
+        {
+            return writeRgb || writeAlpha;
+        }
+
+        bool writesAnything() const
+        {
+            return writesFramebuffer() || writeDepth;
+        }
     };
 
-    AlphaTestResult classifyAlphaTest(uint64_t testReg, uint8_t alpha)
+    PixelWriteMask classifyAlphaTest(uint64_t testReg, uint8_t alpha, uint8_t framePsm)
     {
         const bool pass = passesAlphaTest(testReg, alpha);
         if (pass)
-            return {true, false};
+            return {};
 
         // TEST.AFAIL controls what happens when the alpha comparison fails.
         switch (static_cast<uint8_t>((testReg >> 12) & 0x3u))
         {
         case 1: // FB_ONLY
-            return {true, false};
-        case 3: // RGB_ONLY
-            return {true, true};
-        case 0: // KEEP
+            return {true, true, false};
         case 2: // ZB_ONLY
+            return {false, false, true};
+        case 3: // RGB_ONLY
+            // RGB_ONLY is only distinct for RGBA32. The GS treats it as
+            // FB_ONLY for RGB24 and RGBA16 framebuffers.
+            if (framePsm == GS_PSM_CT32)
+                return {true, false, false};
+            return {true, true, false};
+        case 0: // KEEP
         default:
-            return {false, false};
+            return {false, false, false};
+        }
+    }
+
+    bool passesDestinationAlphaTest(uint64_t testReg, uint8_t framePsm, uint32_t rawFramebufferPixel)
+    {
+        const bool date = ((testReg >> 14) & 0x1u) != 0u;
+        if (!date)
+            return true;
+
+        const bool datm = ((testReg >> 15) & 0x1u) != 0u;
+        switch (framePsm)
+        {
+        case GS_PSM_CT32:
+            return (((rawFramebufferPixel >> 31) & 0x1u) != 0u) == datm;
+        case GS_PSM_CT16:
+        case GS_PSM_CT16S:
+            return (((rawFramebufferPixel >> 15) & 0x1u) != 0u) == datm;
+        case GS_PSM_CT24:
+            // RGB24 has no destination alpha, so DATE always passes.
+            return true;
+        default:
+            return true;
         }
     }
 
@@ -415,37 +453,50 @@ void GSRasterizer::writePixel(GS *gs, int x, int y, int z, uint8_t r, uint8_t g,
         y < ctx.scissor.y0 || y > ctx.scissor.y1)
         return;
 
-    const AlphaTestResult alphaTest = classifyAlphaTest(ctx.test, a);
-
-    if (!alphaTest.writeFramebuffer)
-        return;
-
-    u8* vram = gs->m_vram;
-
     const u32 fbp  = GSInternal::framePageBaseToBlock(ctx.frame.fbp);
     const u32 fbw  = std::max<u32>(ctx.frame.fbw, 1u);
     const u32 fpsm = ctx.frame.psm;
-    const u32 fmsk = ctx.frame.fbmsk;
     const u32 zbp = GSInternal::framePageBaseToBlock(ctx.zbuf.zbp);
     const u32 zpsm = ctx.zbuf.psm;
 
+    const PixelWriteMask writeMask = classifyAlphaTest(ctx.test, a, static_cast<uint8_t>(fpsm));
+    if (!writeMask.writesAnything())
+        return;
+
     const bool alphaBlendEnabled = gs->m_prim.abe;
-    const bool destinationAlpha  = alphaTest.preserveDestinationAlpha;
+    const bool preserveDestinationAlpha =
+        writeMask.writeRgb && !writeMask.writeAlpha && fpsm == GS_PSM_CT32;
+    const bool destinationAlphaTestNeedsRead =
+        ((ctx.test >> 14) & 0x1u) != 0u &&
+        (fpsm == GS_PSM_CT32 || fpsm == GS_PSM_CT16 || fpsm == GS_PSM_CT16S);
 
     // small optimization, avoid reading the framebuffer for simple draws
     // TODO: only one address lookup for rmw
-    const bool frmw = (ctx.frame.fbmsk != 0) || alphaBlendEnabled || destinationAlpha;
+    const bool frmw =
+        destinationAlphaTestNeedsRead ||
+        (writeMask.writesFramebuffer() &&
+         ((ctx.frame.fbmsk != 0) || alphaBlendEnabled || preserveDestinationAlpha));
 
+    u32 rawFramebufferPixel = 0;
     u32 fbrgba = 0;
     if (frmw)
     {
-        fbrgba = gs->ReadVram(fpsm, fbp, fbw, x, y);
+        rawFramebufferPixel = gs->ReadVram(fpsm, fbp, fbw, x, y);
+        fbrgba = rawFramebufferPixel;
 
         if (bitsPerPixel(fpsm) == 16)
         {
             fbrgba = Rgba5551ToRgba8888(fbrgba);
         }
+        else if (fpsm == GS_PSM_CT24)
+        {
+            // The GS supplies 0x80 as destination alpha for RGB24 blending.
+            fbrgba |= 0x80000000u;
+        }
     }
+
+    if (!passesDestinationAlphaTest(ctx.test, static_cast<uint8_t>(fpsm), rawFramebufferPixel))
+        return;
 
     uint ztest_method = (ctx.test >> 17) & 3;
 
@@ -472,81 +523,81 @@ void GSRasterizer::writePixel(GS *gs, int x, int y, int z, uint8_t r, uint8_t g,
         return;
     }
 
-    const u8 srcR = r;
-    const u8 srcG = g;
-    const u8 srcB = b;
-
-    if (gs->m_prim.abe)
+    if (writeMask.writesFramebuffer())
     {
-        uint8_t dr = fbrgba & 0xFF;
-        uint8_t dg = (fbrgba >> 8) & 0xFF;
-        uint8_t db = (fbrgba >> 16) & 0xFF;
-        uint8_t da = (fbrgba >> 24) & 0xFF;
+        const u8 srcR = r;
+        const u8 srcG = g;
+        const u8 srcB = b;
 
-        // PABE disables alpha blending when the source alpha MSB is clear.
-        if (!(gs->m_pabe && (a & 0x80u) == 0u))
+        if (gs->m_prim.abe)
         {
-            uint64_t alphaReg = ctx.alpha;
-            uint8_t asel = alphaReg & 3;
-            uint8_t bsel = (alphaReg >> 2) & 3;
-            uint8_t csel = (alphaReg >> 4) & 3;
-            uint8_t dsel = (alphaReg >> 6) & 3;
-            uint8_t fix = static_cast<uint8_t>((alphaReg >> 32) & 0xFF);
+            uint8_t dr = fbrgba & 0xFF;
+            uint8_t dg = (fbrgba >> 8) & 0xFF;
+            uint8_t db = (fbrgba >> 16) & 0xFF;
+            uint8_t da = (fbrgba >> 24) & 0xFF;
 
-            auto pickRGB = [&](uint8_t sel, int cs, int cd) -> int
+            // PABE disables alpha blending when the source alpha MSB is clear.
+            if (!(gs->m_pabe && (a & 0x80u) == 0u))
             {
-                if (sel == 0)
-                    return cs;
-                if (sel == 1)
-                    return cd;
-                return 0;
-            };
-            int cAlpha = (csel == 0) ? a : (csel == 1) ? da
-                                                       : fix;
+                uint64_t alphaReg = ctx.alpha;
+                uint8_t asel = alphaReg & 3;
+                uint8_t bsel = (alphaReg >> 2) & 3;
+                uint8_t csel = (alphaReg >> 4) & 3;
+                uint8_t dsel = (alphaReg >> 6) & 3;
+                uint8_t fix = static_cast<uint8_t>((alphaReg >> 32) & 0xFF);
 
-            r = clampU8(((pickRGB(asel, r, dr) - pickRGB(bsel, r, dr)) * cAlpha >> 7) + pickRGB(dsel, r, dr));
-            g = clampU8(((pickRGB(asel, g, dg) - pickRGB(bsel, g, dg)) * cAlpha >> 7) + pickRGB(dsel, g, dg));
-            b = clampU8(((pickRGB(asel, b, db) - pickRGB(bsel, b, db)) * cAlpha >> 7) + pickRGB(dsel, b, db));
+                auto pickRGB = [&](uint8_t sel, int cs, int cd) -> int
+                {
+                    if (sel == 0)
+                        return cs;
+                    if (sel == 1)
+                        return cd;
+                    return 0;
+                };
+                int cAlpha = (csel == 0) ? a : (csel == 1) ? da
+                                                           : fix;
+
+                r = clampU8(((pickRGB(asel, r, dr) - pickRGB(bsel, r, dr)) * cAlpha >> 7) + pickRGB(dsel, r, dr));
+                g = clampU8(((pickRGB(asel, g, dg) - pickRGB(bsel, g, dg)) * cAlpha >> 7) + pickRGB(dsel, g, dg));
+                b = clampU8(((pickRGB(asel, b, db) - pickRGB(bsel, b, db)) * cAlpha >> 7) + pickRGB(dsel, b, db));
+            }
+            else
+            {
+                r = srcR;
+                g = srcG;
+                b = srcB;
+            }
         }
-        else
+
+        if (writeMask.writeAlpha &&
+            (ctx.fba & 0x1ull) != 0ull &&
+            ctx.frame.psm != GS_PSM_CT24)
         {
-            r = srcR;
-            g = srcG;
-            b = srcB;
+            a = static_cast<uint8_t>(a | 0x80u);
         }
+
+        u32 pixel = pack32(r, g, b, a);
+
+        if (ctx.frame.fbmsk != 0)
+        {
+            pixel = (pixel & ~ctx.frame.fbmsk) | (fbrgba & ctx.frame.fbmsk);
+        }
+
+        if (preserveDestinationAlpha)
+        {
+            pixel = (pixel & 0x00FFFFFFu) | (fbrgba & 0xFF000000u);
+        }
+
+        // format conversion
+        if (bitsPerPixel(fpsm) == 16)
+        {
+            pixel = Rgba8888ToRgba5551(pixel);
+        }
+
+        gs->WriteVram(fpsm, fbp, fbw, x, y, pixel);
     }
 
-    u32 fbmask = ctx.frame.fbmsk;
-    bool zmask = ctx.zbuf.zmask;
-
-    if (!alphaTest.preserveDestinationAlpha &&
-        (ctx.fba & 0x1ull) != 0ull &&
-        ctx.frame.psm != GS_PSM_CT24)
-    {
-        a = static_cast<uint8_t>(a | 0x80u);
-    }
-
-    u32 pixel = pack32(r, g, b, a);
-
-    if (fbmask != 0)
-    {
-        pixel = (pixel & ~fbmask) | (fbrgba & fbmask);
-    }
-
-    if (alphaTest.preserveDestinationAlpha)
-    {
-        pixel = (pixel & 0x00FFFFFFu) | (fbrgba & 0xFF000000u);
-    }
-    
-    // format conversion
-    if (bitsPerPixel(fpsm) == 16)
-    {
-        pixel = Rgba8888ToRgba5551(pixel);
-    }
-
-    gs->WriteVram(fpsm, fbp, fbw, x, y, pixel);
-
-    if (!zmask)
+    if (writeMask.writeDepth && !ctx.zbuf.zmask)
     {
         gs->WriteVram(zpsm, zbp, fbw, x, y, z);
     }
