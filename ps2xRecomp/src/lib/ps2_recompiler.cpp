@@ -1751,11 +1751,16 @@ namespace ps2recomp
     {
         std::vector<uint32_t> externalTargets;
 
-        auto isInsideExecutableSection = [&](uint32_t address) -> bool
+        // Excludes only the caller's own data/bss - not its code sections. The caller
+        // cannot know a callee unit's section layout, so emission must not filter on
+        // the caller's own code sections; the one real garbage source (a mis-decoded
+        // jal landing in this unit's own data/bss) is still worth dropping. The
+        // ingesting unit's findContainingFunction is the authoritative filter.
+        auto isInsideCallerDataSection = [&](uint32_t address) -> bool
         {
             for (const auto &section : sections)
             {
-                if (!section.isCode)
+                if (section.isCode || !(section.isData || section.isBSS))
                 {
                     continue;
                 }
@@ -1795,12 +1800,12 @@ namespace ps2recomp
                 }
 
                 const uint32_t target = buildAbsoluteJumpTarget(inst.address, inst.target);
-                if (!isInsideExecutableSection(target))
+                if (isInsideRecompiledFunction(target))
                 {
                     continue;
                 }
 
-                if (isInsideRecompiledFunction(target))
+                if (isInsideCallerDataSection(target))
                 {
                     continue;
                 }

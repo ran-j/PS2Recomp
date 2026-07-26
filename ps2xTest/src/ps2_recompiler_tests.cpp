@@ -1453,7 +1453,7 @@ void register_ps2_recompiler_tests()
             }
         });
 
-        tc.Run("collect external call targets: excludes targets outside any executable section", [](TestCase &t) {
+        tc.Run("collect external call targets: foreign/overlay target outside all sections IS collected", [](TestCase &t) {
             std::vector<Section> sections = {
                 {".text", 0x1000u, 0x100000u - 0x1000u, 0u, true, false, false, true, nullptr}
             };
@@ -1471,8 +1471,37 @@ void register_ps2_recompiler_tests()
             const std::vector<uint32_t> targets =
                 PS2Recompiler::CollectExternalCallTargets(decodedFunctions, functions, sections);
 
+            t.Equals(targets.size(), static_cast<size_t>(1),
+                     "a jal target past the end of every section of this unit is a candidate cross-unit/overlay "
+                     "target and must be collected - the emitting unit cannot know the callee unit's layout");
+            if (!targets.empty())
+            {
+                t.Equals(targets[0], 0x300000u,
+                         "the collected target should be the foreign/overlay address itself");
+            }
+        });
+
+        tc.Run("collect external call targets: target inside the caller's own data section is excluded", [](TestCase &t) {
+            std::vector<Section> sections = {
+                {".text", 0x1000u, 0x100000u - 0x1000u, 0u, true, false, false, true, nullptr},
+                {".data", 0x200000u, 0x10000u, 0u, false, true, false, false, nullptr}
+            };
+
+            std::vector<Function> functions = {
+                makeFunction("functionA", 0x1000u, 0x1020u)
+            };
+
+            std::unordered_map<uint32_t, std::vector<Instruction>> decodedFunctions;
+            decodedFunctions[0x1000u] = {
+                makeAbsJump(0x1000u, 0x200008u, OPCODE_JAL),
+                makeNopLike(0x1004u)
+            };
+
+            const std::vector<uint32_t> targets =
+                PS2Recompiler::CollectExternalCallTargets(decodedFunctions, functions, sections);
+
             t.Equals(targets.size(), static_cast<size_t>(0),
-                     "a jal target past the end of every code section should not be collected");
+                     "a jal landing inside the caller's own data section is garbage and must be dropped");
         });
 
         tc.Run("collect external call targets: duplicates collapse and results are sorted", [](TestCase &t) {

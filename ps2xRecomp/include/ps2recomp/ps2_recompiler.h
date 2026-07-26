@@ -61,9 +61,13 @@ namespace ps2recomp
             const std::function<bool(uint32_t)> &isValidAddress,
             const std::function<uint32_t(uint32_t)> &readWord);
 
-        // Collects jal/j targets that fall in executable sections but outside every
-        // recompiled local function range - candidate cross-unit call targets to
-        // publish in the external call-target manifest. Sorted and de-duplicated.
+        // Collects jal/j targets that fall outside every recompiled local function
+        // range and outside this unit's own data/bss sections - candidate cross-unit
+        // call targets (including cross-ELF/overlay targets outside every one of this
+        // unit's sections) to publish in the external call-target manifest. The
+        // caller cannot know a callee unit's section layout, so this is a permissive
+        // collector: the ingesting unit's findContainingFunction is the authoritative
+        // filter. Sorted and de-duplicated.
         static std::vector<uint32_t> CollectExternalCallTargets(
             const std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions,
             const std::vector<Function> &functions,
