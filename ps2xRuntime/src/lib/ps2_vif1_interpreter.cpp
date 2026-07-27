@@ -265,37 +265,6 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 
     while (pos + 4 <= sizeBytes)
     {
-        if (m_vif1PendingPath2ImageQwc != 0u)
-        {
-            const uint32_t availableQw = (sizeBytes - pos) / 16u;
-            if (availableQw == 0u)
-            {
-                break;
-            }
-
-            const uint32_t chunkQw = std::min<uint32_t>(m_vif1PendingPath2ImageQwc, availableQw);
-            std::vector<uint8_t> imagePacket(16u + static_cast<size_t>(chunkQw) * 16u, 0u);
-            const uint64_t imageTag =
-                static_cast<uint64_t>(chunkQw & 0x7FFFu) |
-                ((m_vif1PendingPath2ImageQwc == chunkQw) ? (1ull << 15) : 0ull) |
-                (static_cast<uint64_t>(kGifFmtImage) << 58);
-            std::memcpy(imagePacket.data(), &imageTag, sizeof(imageTag));
-            std::memcpy(imagePacket.data() + 16u, data + pos, static_cast<size_t>(chunkQw) * 16u);
-            submitGifPacket(GifPathId::Path2,
-                            imagePacket.data(),
-                            static_cast<uint32_t>(imagePacket.size()),
-                            true,
-                            m_vif1PendingPath2DirectHl);
-
-            pos += chunkQw * 16u;
-            m_vif1PendingPath2ImageQwc -= chunkQw;
-            if (m_vif1PendingPath2ImageQwc == 0u)
-            {
-                m_vif1PendingPath2DirectHl = false;
-            }
-            continue;
-        }
-
         uint32_t cmd;
         memcpy(&cmd, data + pos, 4);
         pos += 4;
@@ -468,16 +437,51 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             if (qwCount > 0)
             {
                 const bool directHl = (opcode == VIF_DIRECTHL);
-                submitGifPacket(GifPathId::Path2, data + pos, qwCount * 16, true, directHl);
+                uint32_t chunkPos = pos;
+                uint32_t remainingQw = qwCount;
 
-                const uint32_t imageQw = gifImageQwcFromTag(data + pos, qwCount * 16u);
-                if (imageQw != 0u)
+                // A pending PATH2 image continuation from an earlier DIRECT/DIRECTHL is
+                // satisfied out of the FRONT of this packet's own payload, before any of
+                // it is reinterpreted as a fresh GIF tag. This keeps any vifcodes between
+                // the two DIRECTs (NOP padding, etc.) from being misread as image data.
+                if (m_vif1PendingPath2ImageQwc != 0u)
                 {
-                    const uint32_t inlineImageQw = (qwCount > 0u) ? (qwCount - 1u) : 0u;
-                    if (imageQw > inlineImageQw)
+                    const uint32_t chunkQw = std::min<uint32_t>(m_vif1PendingPath2ImageQwc, remainingQw);
+                    std::vector<uint8_t> imagePacket(16u + static_cast<size_t>(chunkQw) * 16u, 0u);
+                    const uint64_t imageTag =
+                        static_cast<uint64_t>(chunkQw & 0x7FFFu) |
+                        ((m_vif1PendingPath2ImageQwc == chunkQw) ? (1ull << 15) : 0ull) |
+                        (static_cast<uint64_t>(kGifFmtImage) << 58);
+                    std::memcpy(imagePacket.data(), &imageTag, sizeof(imageTag));
+                    std::memcpy(imagePacket.data() + 16u, data + chunkPos, static_cast<size_t>(chunkQw) * 16u);
+                    submitGifPacket(GifPathId::Path2,
+                                    imagePacket.data(),
+                                    static_cast<uint32_t>(imagePacket.size()),
+                                    true,
+                                    m_vif1PendingPath2DirectHl);
+
+                    chunkPos += chunkQw * 16u;
+                    remainingQw -= chunkQw;
+                    m_vif1PendingPath2ImageQwc -= chunkQw;
+                    if (m_vif1PendingPath2ImageQwc == 0u)
                     {
-                        m_vif1PendingPath2ImageQwc = imageQw - inlineImageQw;
-                        m_vif1PendingPath2DirectHl = directHl;
+                        m_vif1PendingPath2DirectHl = false;
+                    }
+                }
+
+                if (remainingQw > 0u)
+                {
+                    submitGifPacket(GifPathId::Path2, data + chunkPos, remainingQw * 16, true, directHl);
+
+                    const uint32_t imageQw = gifImageQwcFromTag(data + chunkPos, remainingQw * 16u);
+                    if (imageQw != 0u)
+                    {
+                        const uint32_t inlineImageQw = remainingQw - 1u;
+                        if (imageQw > inlineImageQw)
+                        {
+                            m_vif1PendingPath2ImageQwc = imageQw - inlineImageQw;
+                            m_vif1PendingPath2DirectHl = directHl;
+                        }
                     }
                 }
             }
