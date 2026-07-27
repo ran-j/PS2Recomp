@@ -80,8 +80,9 @@ private:
     void execUpper(uint32_t instr);
     void execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSize, GS &gs, PS2Memory *memory, uint32_t upperInstr);
 
-    void applyDest(float *dst, const float *result, uint8_t dest);
+    void writeDestMasked(float *dst, const float *result, uint8_t dest);
     void applyDestAcc(const float *result, uint8_t dest);
+    void computeFmacFlags(const float *result, uint8_t dest);
     float broadcast(const float *vf, uint8_t bc);
 };
 

@@ -35,7 +35,7 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
         {
             float tmp[4];
             std::memcpy(tmp, vuData + addr, 16);
-            applyDest(m_state.vf[it], tmp, dest);
+            writeDestMasked(m_state.vf[it], tmp, dest);
         }
         return;
     }
@@ -164,7 +164,11 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
     }
     case 0x15: // FSSET
     {
-        m_state.status = (instr >> 6) & 0xFC0;
+        // Immediate extraction sourced from PCSX2 pcsx2/VUops.cpp _vuFSSET:
+        // imm12 = ((instr>>21)&1)<<11 | (instr&0x7FF). FSSET only ever writes the sticky
+        // half (bits 11:6); the live half (bits 5:0) is left as whatever the last FMAC set.
+        uint32_t imm12 = (((instr >> 21) & 0x1u) << 11) | (instr & 0x7FFu);
+        m_state.status = (imm12 & 0xFC0u) | (m_state.status & 0x3Fu);
         return;
     }
     case 0x16: // FSAND
@@ -181,7 +185,17 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
             m_state.vi[1] = ((m_state.status | imm12) == 0xFFF) ? 1 : 0;
         return;
     }
-    case 0x18: // FMAND
+    case 0x18: // FMEQ
+    {
+        // Lower-op table sourced from PCSX2 pcsx2/VUops.cpp _LOWER_OPCODE[128]: 0x18=FMEQ,
+        // 0x19 unassigned, 0x1A=FMAND, 0x1B=FMOR, 0x1C=FCGET.
+        uint8_t it = VIT(instr);
+        uint8_t is = VIS(instr);
+        if (it != 0)
+            m_state.vi[it] = ((m_state.mac & 0xFFFF) == (uint32_t)(uint16_t)m_state.vi[is]) ? 1 : 0;
+        return;
+    }
+    case 0x1A: // FMAND
     {
         uint8_t it = VIT(instr);
         uint8_t is = VIS(instr);
@@ -189,20 +203,19 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
             m_state.vi[it] = (int32_t)(m_state.mac & (uint32_t)(uint16_t)m_state.vi[is]);
         return;
     }
-    case 0x1A: // FMEQ
-    {
-        uint8_t it = VIT(instr);
-        uint8_t is = VIS(instr);
-        if (it != 0)
-            m_state.vi[it] = ((m_state.mac & 0xFFFF) == (uint32_t)(uint16_t)m_state.vi[is]) ? 1 : 0;
-        return;
-    }
-    case 0x1C: // FMOR
+    case 0x1B: // FMOR
     {
         uint8_t it = VIT(instr);
         uint8_t is = VIS(instr);
         if (it != 0)
             m_state.vi[it] = (int32_t)(m_state.mac | (uint32_t)(uint16_t)m_state.vi[is]);
+        return;
+    }
+    case 0x1C: // FCGET
+    {
+        uint8_t it = VIT(instr);
+        if (it != 0)
+            m_state.vi[it] = (int32_t)(m_state.clip & 0xFFFu);
         return;
     }
     case 0x20: // B (unconditional branch)
@@ -465,13 +478,13 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
             {
                 float tmp[4];
                 std::memcpy(tmp, m_state.vf[vfS], 16);
-                applyDest(m_state.vf[vfT], tmp, dest);
+                writeDestMasked(m_state.vf[vfT], tmp, dest);
                 return;
             }
             case 0x31: // MR32 (rotate right by 32 bits = shift xyzw -> yzwx)
             {
                 float tmp[4] = {m_state.vf[vfS][1], m_state.vf[vfS][2], m_state.vf[vfS][3], m_state.vf[vfS][0]};
-                applyDest(m_state.vf[vfT], tmp, dest);
+                writeDestMasked(m_state.vf[vfT], tmp, dest);
                 return;
             }
             case 0x34: // LQI (Load Quadword, post-increment)
@@ -482,7 +495,7 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
                 {
                     float tmp[4];
                     std::memcpy(tmp, vuData + addr, 16);
-                    applyDest(m_state.vf[vfT], tmp, dest);
+                    writeDestMasked(m_state.vf[vfT], tmp, dest);
                 }
                 if (viS != 0)
                     m_state.vi[viS] = (int16_t)(m_state.vi[viS] + 1);
@@ -520,7 +533,7 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
                 {
                     float tmp[4];
                     std::memcpy(tmp, vuData + addr, 16);
-                    applyDest(m_state.vf[vfT], tmp, dest);
+                    writeDestMasked(m_state.vf[vfT], tmp, dest);
                 }
                 return;
             }
@@ -604,7 +617,7 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
                 result[1] = result[0];
                 result[2] = result[0];
                 result[3] = result[0];
-                applyDest(m_state.vf[vfT], result, dest);
+                writeDestMasked(m_state.vf[vfT], result, dest);
                 return;
             }
             case 0x3E: // ILWR - integer load word from address in VI[is]
@@ -658,7 +671,7 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
             case 0x64: // MFP (Move From P register)
             {
                 float result[4] = {m_state.p, m_state.p, m_state.p, m_state.p};
-                applyDest(m_state.vf[vfT], result, dest);
+                writeDestMasked(m_state.vf[vfT], result, dest);
                 return;
             }
             case 0x68: // XTOP - move current VIF1 TOP into VI register

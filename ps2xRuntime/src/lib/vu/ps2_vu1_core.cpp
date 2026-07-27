@@ -21,7 +21,7 @@ float VU1Interpreter::broadcast(const float *vf, uint8_t bc)
     return vf[bc & 3];
 }
 
-void VU1Interpreter::applyDest(float *dst, const float *result, uint8_t dest)
+void VU1Interpreter::writeDestMasked(float *dst, const float *result, uint8_t dest)
 {
     if (dest & 0x8)
         dst[0] = result[0]; // x
@@ -35,7 +35,72 @@ void VU1Interpreter::applyDest(float *dst, const float *result, uint8_t dest)
 
 void VU1Interpreter::applyDestAcc(const float *result, uint8_t dest)
 {
-    applyDest(m_state.acc, result, dest);
+    // ACC-writers are FMAC ops: MAC reflects the FMAC result whether it targets vf or acc.
+    computeFmacFlags(result, dest);
+    writeDestMasked(m_state.acc, result, dest);
+}
+
+// MAC bit layout sourced from PCSX2 pcsx2/VUflags.cpp (VU_MAC_UPDATE / VU_STAT_UPDATE):
+// nibbles from low to high are Z[3:0], S[7:4], U[11:8], O[15:12]; within each nibble the
+// bit order is x,y,z,w from high to low (x uses shift 3, y shift 2, z shift 1, w shift 0).
+// Z is set for +/-0.0f or a denormal (an underflow PCSX2 flushes to zero, raising both U
+// and Z together); S mirrors the IEEE754 sign bit unconditionally; U is a nonzero denormal;
+// O is an exponent field of all ones (inf or NaN).
+// Lanes outside DEST are not evaluated and read 0 in every group, matching PCSX2's per-lane
+// VU_MACx/y/z/w_CLEAR calls for lanes the FMAC op did not write.
+void VU1Interpreter::computeFmacFlags(const float *result, uint8_t dest)
+{
+    static const uint8_t kLaneDestBit[4] = {0x8u, 0x4u, 0x2u, 0x1u}; // x, y, z, w
+    uint32_t mac = 0u;
+
+    for (int c = 0; c < 4; ++c)
+    {
+        if ((dest & kLaneDestBit[c]) == 0u)
+            continue;
+
+        uint32_t bits;
+        std::memcpy(&bits, &result[c], sizeof(bits));
+        const uint32_t exp = (bits >> 23) & 0xFFu;
+        const int shift = 3 - c;
+
+        if (bits & 0x80000000u)
+            mac |= (0x0010u << shift); // S
+
+        if (result[c] == 0.0f)
+        {
+            mac |= (0x0001u << shift); // Z
+        }
+        else if (exp == 0u)
+        {
+            mac |= (0x0101u << shift); // U + Z: a denormal is an underflow PCSX2 flushes to zero
+        }
+        else if (exp == 0xFFu)
+        {
+            mac |= (0x1000u << shift); // O
+        }
+    }
+
+    m_state.mac = mac;
+
+    // STATUS folds MAC the way PCSX2's VU_STAT_UPDATE does: a live bit is set if ANY dest
+    // lane raised that condition this instruction. The live half is bits[3:0] (Z,S,U,O in
+    // that order) and is replaced whole every FMAC; the sticky half is bits[9:6] and only
+    // ever accumulates (OR), matching how FSOR/FSAND read "has this ever happened". Bits
+    // 4,5,10,11 (I/D, live and sticky) are not modelled here and stay zero.
+    uint32_t live = 0u;
+    if (mac & 0x000Fu)
+        live |= 0x1u; // Z
+    if (mac & 0x00F0u)
+        live |= 0x2u; // S
+    if (mac & 0x0F00u)
+        live |= 0x4u; // U
+    if (mac & 0xF000u)
+        live |= 0x8u; // O
+
+    const uint32_t stickyPrev = (m_state.status >> 6) & 0xFu;
+    const uint32_t sticky = stickyPrev | live;
+
+    m_state.status = (live & 0x3Fu) | ((sticky & 0x3Fu) << 6);
 }
 
 VU1Interpreter::DecodedInstructionPair VU1Interpreter::decodeInstructionPair(const uint8_t *vuCode, uint32_t pc) const
