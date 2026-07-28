@@ -276,6 +276,53 @@ void register_ps2_sif_dma_tests()
             t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x18u),
                      3u,
                      "the module-load completion should preserve the raw RPC ID");
+
+            // Duelists reaches this core service after its IOP module loader and
+            // uses raw RPC sequence 28 for the observed readiness poll.
+            constexpr uint32_t kDiskReadySid = 0x8000059Au;
+            constexpr uint32_t kDiskReadyClientAddress = 0x00025800u;
+            constexpr uint32_t kDiskReadyModeAddress = 0x00025900u;
+            constexpr uint32_t kDiskReadyComplete = 2u;
+            writePacketHeader(kBindCommand, 27u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x1Cu, kDiskReadyClientAddress);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x20u, kDiskReadySid);
+            std::memcpy(env.rdram.data() + kDescriptorAddress,
+                        &bindDescriptor,
+                        sizeof(bindDescriptor));
+            invokeDma(1u);
+
+            t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x20u),
+                     kBindCommand,
+                     "the Disk Ready bind completion should identify RPC_BIND");
+            t.IsTrue(readGuestU32(env.rdram.data(), kInboundAddress + 0x24u) != 0u,
+                     "the Disk Ready raw RPC_BIND should return a server token");
+
+            writeGuestU32(env.rdram.data(), kDiskReadyModeAddress, 0u);
+            writeGuestU32(env.rdram.data(), kResultAddress, 0xFFFFFFFFu);
+            writePacketHeader(kCallCommand, 28u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x1Cu, kDiskReadyClientAddress);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x20u, 0u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x24u, 4u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x28u, kResultAddress);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x2Cu, 4u);
+            const std::array<Ps2SifDmaTransfer, 2> diskReadyDescriptors{{
+                {kDiskReadyModeAddress, 0u, 4, 0},
+                {kPacketAddress, 0u, 0x40, 0x44},
+            }};
+            std::memcpy(env.rdram.data() + kDescriptorAddress,
+                        diskReadyDescriptors.data(),
+                        sizeof(diskReadyDescriptors));
+            invokeDma(2u);
+
+            t.Equals(readGuestU32(env.rdram.data(), kResultAddress),
+                     kDiskReadyComplete,
+                     "raw CD/DVD Disk Ready should report the standard complete status");
+            t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x18u),
+                     28u,
+                     "the Disk Ready completion should preserve raw RPC sequence 28");
+            t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x20u),
+                     kCallCommand,
+                     "the Disk Ready completion should identify RPC_CALL");
         });
 
         tc.Run("isceSifSetDma and isceSifSetDChain alias the SIF DMA helpers", [](TestCase &t)

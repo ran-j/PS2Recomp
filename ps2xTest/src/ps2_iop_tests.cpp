@@ -432,6 +432,47 @@ void register_ps2_iop_tests()
             }
         });
 
+        tc.Run("CD/DVD Disk Ready reports complete across repeated polls", [](TestCase &t)
+        {
+            FakeIopHost host;
+            ps2x::iop::IopSubsystem subsystem(host);
+            std::string error;
+            t.IsTrue(subsystem.configure({"unmatched.elf", 0u, 0u}, &error),
+                     "the CD/DVD Disk Ready service should be available as a core service");
+
+            constexpr uint32_t kSend = 0x300u;
+            constexpr uint32_t kReceive = 0x400u;
+            constexpr uint32_t kDiskReadySid = 0x8000059Au;
+            constexpr uint32_t kDiskReadyComplete = 2u;
+            t.IsTrue(host.writeWord(kSend, 0u),
+                     "the zero-mode Disk Ready request should fit in fake guest memory");
+
+            ps2x::iop::RpcRequest request{};
+            request.sid = kDiskReadySid;
+            request.function = 0u;
+            request.send = {kSend, 4u};
+            request.receive = {kReceive, 4u};
+
+            for (uint32_t poll = 0u; poll < 3u; ++poll)
+            {
+                host.writeWord(kReceive, 0xFFFFFFFFu);
+                const ps2x::iop::RpcResult result = subsystem.handleRpc(request);
+                t.IsTrue(result.handled,
+                         "CD/DVD Disk Ready function zero should handle every poll");
+                t.Equals(host.readWord(kReceive), kDiskReadyComplete,
+                         "CD/DVD Disk Ready should report the standard complete status");
+            }
+
+            const ps2x::iop::DebugSnapshot snapshot = subsystem.debugSnapshot();
+            const ps2x::iop::DebugService *service = findService(snapshot, "CD/DVD Disk Ready");
+            t.IsNotNull(service, "the core service snapshot should include CD/DVD Disk Ready");
+            if (service)
+            {
+                t.Equals(metricValue(*service, "disk_ready_calls"), uint64_t{3},
+                         "CD/DVD Disk Ready should count repeated polls");
+            }
+        });
+
         tc.Run("built-in profiles select by ELF basename and keep core services active", [](TestCase &t)
         {
             FakeIopHost host;

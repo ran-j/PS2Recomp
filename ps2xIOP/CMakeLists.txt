@@ -9,6 +9,7 @@ add_library(ps2_iop STATIC
     src/builtin_profiles.cpp
     src/plugin_loader.cpp
     src/modules/dbcman.cpp
+    src/modules/cdvd.cpp
     src/modules/libsd.cpp
     src/modules/loadfile.cpp
     src/modules/mcserv.cpp
