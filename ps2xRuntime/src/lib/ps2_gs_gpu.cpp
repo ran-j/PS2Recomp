@@ -365,7 +365,7 @@ GS::GS()
 
     InitLookupTables();
 
-    for (usz i = 0; i < 0x3F; ++i)
+    for (usz i = 0; i < m_read_vram_funcs.size(); ++i)
     {
         switch (i)
         {

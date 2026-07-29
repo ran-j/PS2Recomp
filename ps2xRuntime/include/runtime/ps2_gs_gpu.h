@@ -462,8 +462,9 @@ private:
     using WriteVramFunc = std::function<void(u8*, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t)>;
     using ReadVramFunc = std::function<u32(u8*, u32, u32, u32, u32)>;
 
-    std::array<ReadVramFunc, 0x3F> m_read_vram_funcs{ };
-    std::array<WriteVramFunc, 0x3F> m_write_vram_funcs{ };
+    static constexpr size_t kPsmHandlerCount = 1u << 6u;
+    std::array<ReadVramFunc, kPsmHandlerCount> m_read_vram_funcs{ };
+    std::array<WriteVramFunc, kPsmHandlerCount> m_write_vram_funcs{ };
 };
 
 inline u32 GS::ReadVram(u32 psm, u32 base, u32 bw, u32 x, u32 y) const

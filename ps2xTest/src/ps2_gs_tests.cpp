@@ -1608,6 +1608,20 @@ void register_ps2_gs_tests()
             t.Equals(regs.display2, display2, "A+D should write GS DISPLAY2");
         });
 
+        tc.Run("reserved PSM 0x3F uses null VRAM handlers", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0xA5u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            t.Equals(gs.ReadVram(0x3Fu, 0u, 1u, 0u, 0u), 0u,
+                     "reserved PSM reads should use the null handler");
+
+            gs.WriteVram(0x3Fu, 0u, 1u, 0u, 0u, 0x0005180Bu);
+            t.Equals(static_cast<uint32_t>(vram[0]), 0xA5u,
+                     "reserved PSM writes should leave VRAM unchanged");
+        });
+
         tc.Run("PSMT4 address mapping matches GS manual layout", [](TestCase &t)
         {
             constexpr uint32_t kBaseBlock = 0u;
