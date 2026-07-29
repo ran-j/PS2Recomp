@@ -12,6 +12,7 @@ add_library(ps2_iop STATIC
     src/modules/cdvd.cpp
     src/modules/cdvd_search_file.cpp
     src/modules/libsd.cpp
+    src/modules/padman.cpp
     src/modules/loadfile.cpp
     src/modules/mcserv.cpp
     src/modules/tsnddrv.cpp

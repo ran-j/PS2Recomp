@@ -384,6 +384,107 @@ void register_ps2_iop_tests()
             t.IsTrue(snapshot.activeProvider.empty(), "an unmatched game should not report a profile provider");
         });
 
+        tc.Run("PADMAN core service advertises both XPAD endpoints without fabricating calls", [](TestCase &t)
+        {
+            constexpr uint32_t kCommandSid = 0x80000100u;
+            constexpr uint32_t kConnectionSid = 0x80000101u;
+            constexpr uint32_t kSend = 0x100u;
+            constexpr uint32_t kReceive = 0x200u;
+
+            FakeIopHost host;
+            ps2x::iop::IopSubsystem subsystem(host);
+            std::string error;
+            t.IsTrue(subsystem.configure({"unmatched.elf", 0u, 0u}, &error),
+                     "PADMAN should be available as a core service");
+            t.IsTrue(subsystem.handlesSid(kCommandSid),
+                     "PADMAN command endpoint should be bindable");
+            t.IsTrue(subsystem.handlesSid(kConnectionSid),
+                     "PADMAN connection endpoint should be bindable");
+
+            const DebugSnapshot initialSnapshot = subsystem.debugSnapshot();
+            const DebugService *padman = findService(initialSnapshot, "PADMAN");
+            t.IsTrue(padman != nullptr, "PADMAN should have one shared debug service identity");
+            if (padman)
+            {
+                t.Equals(padman->sids.size(), static_cast<size_t>(2u),
+                         "shared PADMAN service should advertise exactly two SIDs");
+                t.IsTrue(std::find(padman->sids.begin(), padman->sids.end(), kCommandSid) != padman->sids.end(),
+                         "shared PADMAN service should advertise the command SID");
+                t.IsTrue(std::find(padman->sids.begin(), padman->sids.end(), kConnectionSid) != padman->sids.end(),
+                         "shared PADMAN service should advertise the connection SID");
+            }
+
+            t.IsTrue(host.writeWord(kSend, 0x01u), "test should write an unsupported PADMAN OPEN command");
+            t.IsTrue(host.writeWord(kReceive, 0xA5A5A5A5u), "test should seed the receive buffer");
+
+            RpcRequest unsupported{};
+            unsupported.sid = kCommandSid;
+            unsupported.function = 1u;
+            unsupported.send = {kSend, 128u};
+            unsupported.receive = {kReceive, 128u};
+            t.IsFalse(subsystem.handleRpc(unsupported).handled,
+                      "PADMAN must not fabricate success for an unsupported command");
+            t.Equals(host.readWord(kReceive), 0xA5A5A5A5u,
+                     "rejected PADMAN command must leave the receive buffer unchanged");
+
+            RpcRequest malformed = unsupported;
+            malformed.sid = kConnectionSid;
+            malformed.function = 2u;
+            malformed.send = {kSend, 0u};
+            t.IsFalse(subsystem.handleRpc(malformed).handled,
+                      "malformed PADMAN call should remain visibly unhandled");
+            t.Equals(host.audioCalls, 0u,
+                     "PADMAN endpoints must not be routed to the audio backend");
+
+            const DebugSnapshot finalSnapshot = subsystem.debugSnapshot();
+            padman = findService(finalSnapshot, "PADMAN");
+            t.IsTrue(padman != nullptr, "PADMAN debug service should remain present");
+            if (padman)
+            {
+                t.Equals(metricValue(*padman, "rejected_calls"), uint64_t{2},
+                         "both calls should share one PADMAN rejection counter");
+                t.Equals(metricValue(*padman, "malformed_calls"), uint64_t{1},
+                         "wrong function and empty send buffer should count as malformed");
+                t.Equals(metricValue(*padman, "last_sid"), static_cast<uint64_t>(kConnectionSid),
+                         "shared PADMAN state should record calls from the companion SID");
+            }
+            t.Equals(host.logs.size(), static_cast<size_t>(2u),
+                     "each rejected PADMAN call should produce a visible diagnostic");
+
+            t.IsTrue(host.writeWord(kSend, 0x10u), "test should write PADMAN INIT");
+            t.IsTrue(host.writeWord(kReceive, 0xA5A5A5A5u), "test should reseed the INIT response");
+            RpcRequest initialize{};
+            initialize.sid = kCommandSid;
+            initialize.function = 1u;
+            initialize.send = {kSend, 0x80u};
+            initialize.receive = {kReceive, 0x80u};
+            const RpcResult initResult = subsystem.handleRpc(initialize);
+            t.IsTrue(initResult.handled, "typed PADMAN INIT should be handled");
+            t.Equals(initResult.resultAddress, kReceive,
+                     "INIT should return its receive buffer");
+            t.Equals(host.readWord(kReceive + 0x0Cu), 1u,
+                     "INIT should report successful PADMAN initialization");
+
+            t.IsTrue(host.writeWord(kSend, 0x12u), "test should write PADMAN GET_MODVER");
+            t.IsTrue(host.writeWord(kReceive, 0xA5A5A5A5u), "test should reseed the response");
+            RpcRequest getVersion{};
+            getVersion.sid = kCommandSid;
+            getVersion.function = 1u;
+            getVersion.send = {kSend, 0x80u};
+            getVersion.receive = {kReceive, 0x80u};
+            const RpcResult versionResult = subsystem.handleRpc(getVersion);
+            t.IsTrue(versionResult.handled, "typed PADMAN GET_MODVER should be handled");
+            t.Equals(versionResult.resultAddress, kReceive,
+                     "GET_MODVER should return its receive buffer");
+            t.Equals(host.readWord(kReceive + 0x0Cu), 0x00000422u,
+                     "GET_MODVER should report a PADMAN 4.22-compatible version");
+
+            RpcRequest wrongSize = getVersion;
+            wrongSize.receive.size = 0x7Cu;
+            t.IsFalse(subsystem.handleRpc(wrongSize).handled,
+                      "GET_MODVER with a non-128-byte response must remain rejected");
+        });
+
         tc.Run("LOADFILE reports the compatible version and tracks HLE modules", [](TestCase &t)
         {
             FakeIopHost host;

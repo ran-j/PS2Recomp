@@ -1352,5 +1352,118 @@ void register_ps2_sif_dma_tests()
             t.Equals(readGuestU32(env.rdram.data(), kRdAddr + 0x10u), 0x11111111u,
                      "failed sceSifGetOtherData should not overwrite rd metadata");
         });
+
+        tc.Run("raw PADMAN phase-one services bind with independent routing", [](TestCase &t)
+        {
+            TestEnv env;
+            configureProfile(env, "SLUS_205.15");
+
+            constexpr uint32_t kDescriptorAddress = 0x00026000u;
+            constexpr uint32_t kPacketAddress = 0x00026100u;
+            constexpr uint32_t kReceivePointerAddress = 0x00026200u;
+            constexpr uint32_t kInboundAddress = 0x00026300u;
+            constexpr uint32_t kRpcBufferAddress = 0x00026400u;
+            constexpr uint32_t kPadmanClientAddress = 0x00315980u;
+            constexpr uint32_t kPadmanExtClientAddress = 0x003159A8u;
+            constexpr uint32_t kPadmanSid = 0x80000100u;
+            constexpr uint32_t kPadmanExtSid = 0x80000101u;
+            constexpr uint32_t kBindCommand = 0x80000009u;
+            constexpr uint32_t kCallCommand = 0x8000000Au;
+            constexpr uint32_t kSifSubAddressRegister = 0x80000001u;
+
+            writeGuestU32(env.rdram.data(), kReceivePointerAddress, kInboundAddress);
+            setRegU32(env.ctx, 4, kSifSubAddressRegister);
+            setRegU32(env.ctx, 5, kReceivePointerAddress);
+            ps2_stubs::sceSifSetReg(env.rdram.data(), &env.ctx, &env.runtime);
+
+            const auto bind = [&](uint32_t sid, uint32_t clientAddress, uint32_t sequence)
+            {
+                std::memset(env.rdram.data() + kPacketAddress, 0, 0x40u);
+                writeGuestU32(env.rdram.data(), kPacketAddress, 0x40u);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x08u, kBindCommand);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x10u, 0xA5000000u | sequence);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x14u, 0x20310000u + sequence * 0x40u);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x18u, sequence);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x1Cu, clientAddress);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x20u, sid);
+
+                const Ps2SifDmaTransfer descriptor{
+                    kPacketAddress, 0u, 0x40, 0x44};
+                std::memcpy(env.rdram.data() + kDescriptorAddress,
+                            &descriptor,
+                            sizeof(descriptor));
+
+                setRegU32(env.ctx, 4, kDescriptorAddress);
+                setRegU32(env.ctx, 5, 1u);
+                ps2_stubs::sceSifSetDma(env.rdram.data(), &env.ctx, &env.runtime);
+                t.IsTrue(getRegS32(env.ctx, 2) > 0,
+                         "raw PADMAN bind should complete through SIF DMA");
+                t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x18u),
+                         sequence,
+                         "PADMAN bind completion should preserve the RPC sequence");
+                t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x20u),
+                         kBindCommand,
+                         "PADMAN bind completion should identify RPC_BIND");
+                return readGuestU32(env.rdram.data(), kInboundAddress + 0x24u);
+            };
+
+            const uint32_t padmanServer =
+                bind(kPadmanSid, kPadmanClientAddress, 0x30u);
+            const uint32_t padmanExtServer =
+                bind(kPadmanExtSid, kPadmanExtClientAddress, 0x31u);
+
+            t.IsTrue(padmanServer != 0u,
+                     "SID 0x80000100 should return a valid server token");
+            t.IsTrue(padmanExtServer != 0u,
+                     "SID 0x80000101 should return a valid server token");
+            t.IsTrue(padmanServer != padmanExtServer,
+                     "the two PADMAN SIDs should route to distinct server tokens");
+
+            const auto call = [&](uint32_t command, uint32_t sequence)
+            {
+                std::memset(env.rdram.data() + kRpcBufferAddress, 0, 0x80u);
+                writeGuestU32(env.rdram.data(), kRpcBufferAddress, command);
+
+                std::memset(env.rdram.data() + kPacketAddress, 0, 0x40u);
+                writeGuestU32(env.rdram.data(), kPacketAddress, 0x40u);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x08u, kCallCommand);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x10u, 0xA5000000u | sequence);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x14u, 0x20310000u + sequence * 0x40u);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x18u, sequence);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x1Cu, kPadmanClientAddress);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x20u, 1u);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x24u, 0x80u);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x28u, kRpcBufferAddress);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x2Cu, 0x80u);
+
+                const std::array<Ps2SifDmaTransfer, 2> descriptors{{
+                    {kRpcBufferAddress, 0u, 0x80, 0},
+                    {kPacketAddress, 0u, 0x40, 0x44},
+                }};
+                std::memcpy(env.rdram.data() + kDescriptorAddress,
+                            descriptors.data(),
+                            sizeof(descriptors));
+
+                setRegU32(env.ctx, 4, kDescriptorAddress);
+                setRegU32(env.ctx, 5, 2u);
+                ps2_stubs::sceSifSetDma(env.rdram.data(), &env.ctx, &env.runtime);
+                t.IsTrue(getRegS32(env.ctx, 2) > 0,
+                         "raw PADMAN call should complete through SIF DMA");
+                t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x18u),
+                         sequence,
+                         "PADMAN call completion should preserve the RPC sequence");
+                t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x20u),
+                         kCallCommand,
+                         "PADMAN call completion should identify RPC_CALL");
+                return readGuestU32(env.rdram.data(), kRpcBufferAddress + 0x0Cu);
+            };
+
+            t.Equals(call(0x12u, 0x32u),
+                     0x00000422u,
+                     "raw PADMAN GET_MODVER should report module version 4.22 at +0x0c");
+            t.Equals(call(0x10u, 0x33u),
+                     1u,
+                     "raw PADMAN INIT should report success at +0x0c");
+        });
     });
 }
