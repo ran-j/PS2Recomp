@@ -1216,7 +1216,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         }
                     };
 
-                    auto appendCompactVif1TagData = [&](uint32_t localTagAddr, uint32_t qwCount)
+                    auto appendVifTagData = [&](uint32_t localTagAddr)
                     {
                         uint32_t tagPhys = 0u;
                         const bool tagScratch = isScratchpad(localTagAddr);
@@ -1229,7 +1229,6 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
                         // VIF packet helpers embed 8 bytes of VIF stream in the DMAtag's upper half.
                         chainBuf.insert(chainBuf.end(), localBase + tagPhys + 8u, localBase + tagPhys + 16u);
-                        appendData(localTagAddr + 16u, qwCount);
                     };
 
                     int tagsProcessed = 0;
@@ -1340,15 +1339,17 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             break;
                         }
 
-                        const bool compactVifLocalTag =
-                            (channelBase == 0x10009000u || channelBase == 0x10008000u) &&
-                            (id == 1u || id == 2u || id == 5u || id == 6u || id == 7u);
-                        if (compactVifLocalTag)
-                            appendCompactVif1TagData(currentTagAddr, 0u);
+                        const bool vifChannel =
+                            channelBase == 0x10009000u || channelBase == 0x10008000u;
+                        const bool localPayloadTag =
+                            id == 1u || id == 2u || id == 5u || id == 6u || id == 7u;
+                        const bool tagTransferEnabled = (chcr & 0x40u) != 0u;
+                        if (vifChannel && tagTransferEnabled)
+                            appendVifTagData(currentTagAddr);
 
                         if (hasPayload)
                         {
-                            if (compactVifLocalTag)
+                            if (vifChannel && localPayloadTag)
                                 appendData(currentTagAddr + 16u, tagQwc);
                             else
                                 appendData(dataAddr, tagQwc);

@@ -53,6 +53,14 @@ namespace ps2x::iop
         std::array<uint32_t, 5> arguments{};
     };
 
+    struct CdFileInfo
+    {
+        uint32_t lsn = 0u;
+        uint32_t size = 0u;
+        std::array<uint8_t, 8> date{};
+        std::string name;
+    };
+
     class IopHost
     {
     public:
@@ -70,6 +78,7 @@ namespace ps2x::iop
 
         virtual std::string hostPath(HostPathKind kind) const = 0;
         virtual std::string translateGuestPath(std::string_view path) const = 0;
+        virtual bool searchCdFile(std::string_view path, CdFileInfo &file) = 0;
         virtual uint64_t openHostFile(std::string_view path) = 0;
         virtual bool hostFileSize(uint64_t handle, uint64_t &size) const = 0;
         virtual bool readHostFile(uint64_t handle,

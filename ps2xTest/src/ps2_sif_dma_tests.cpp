@@ -323,6 +323,163 @@ void register_ps2_sif_dma_tests()
             t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x20u),
                      kCallCommand,
                      "the Disk Ready completion should identify RPC_CALL");
+
+            // The next Duelists boot boundary binds Search File with raw RPC
+            // sequence 19, then issues the standard legacy 0x124-byte request.
+            constexpr uint32_t kSearchFileSid = 0x80000597u;
+            constexpr uint32_t kSearchFileClientAddress = 0x003158C0u;
+            constexpr uint32_t kSearchFilePacketAddress = 0x00025A00u;
+            constexpr uint32_t kSearchFileResultAddress = 0x00025C00u;
+            constexpr uint32_t kSearchFileEntryAddress = 0x00025D00u;
+            constexpr uint32_t kSearchFilePacketSize = 0x124u;
+            constexpr std::string_view kMissingBootPath = "cdrom0:\\SYSTEM.CNF;1";
+
+            writePacketHeader(kBindCommand, 19u);
+            writeGuestU32(env.rdram.data(),
+                          kPacketAddress + 0x1Cu,
+                          kSearchFileClientAddress);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x20u, kSearchFileSid);
+            std::memcpy(env.rdram.data() + kDescriptorAddress,
+                        &bindDescriptor,
+                        sizeof(bindDescriptor));
+            invokeDma(1u);
+
+            t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x18u),
+                     19u,
+                     "the Search File bind completion should preserve Duelists sequence 19");
+            t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x20u),
+                     kBindCommand,
+                     "the Search File bind completion should identify RPC_BIND");
+            t.IsTrue(readGuestU32(env.rdram.data(), kInboundAddress + 0x24u) != 0u,
+                     "the Search File raw RPC_BIND should return a server token");
+
+            std::memset(env.rdram.data() + kSearchFilePacketAddress,
+                        0,
+                        kSearchFilePacketSize);
+            std::memcpy(env.rdram.data() + kSearchFilePacketAddress + 0x20u,
+                        kMissingBootPath.data(),
+                        kMissingBootPath.size() + 1u);
+            writeGuestU32(env.rdram.data(),
+                          kSearchFilePacketAddress + 0x120u,
+                          kSearchFileEntryAddress);
+            writeGuestU32(env.rdram.data(), kSearchFileResultAddress, 0xFFFFFFFFu);
+
+            writePacketHeader(kCallCommand, 20u);
+            writeGuestU32(env.rdram.data(),
+                          kPacketAddress + 0x1Cu,
+                          kSearchFileClientAddress);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x20u, 0u);
+            writeGuestU32(env.rdram.data(),
+                          kPacketAddress + 0x24u,
+                          kSearchFilePacketSize);
+            writeGuestU32(env.rdram.data(),
+                          kPacketAddress + 0x28u,
+                          kSearchFileResultAddress);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x2Cu, 4u);
+            const std::array<Ps2SifDmaTransfer, 2> searchFileDescriptors{{
+                {kSearchFilePacketAddress, 0u,
+                 static_cast<int32_t>(kSearchFilePacketSize), 0},
+                {kPacketAddress, 0u, 0x40, 0x44},
+            }};
+            std::memcpy(env.rdram.data() + kDescriptorAddress,
+                        searchFileDescriptors.data(),
+                        sizeof(searchFileDescriptors));
+            invokeDma(2u);
+
+            t.Equals(readGuestU32(env.rdram.data(), kSearchFileResultAddress),
+                     0u,
+                     "raw Search File should complete with not-found when no disc root is configured");
+            t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x18u),
+                     20u,
+                     "the Search File call completion should preserve its raw RPC sequence");
+            t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x20u),
+                     kCallCommand,
+                     "the Search File call completion should identify RPC_CALL");
+
+            // Duelists next binds MCSERV at raw RPC sequence 0xd5 and starts
+            // it with the standard 48-byte function-0xfe request.
+            constexpr uint32_t kMcservSid = 0x80000400u;
+            constexpr uint32_t kMcservClientAddress = 0x00315C40u;
+            constexpr uint32_t kMcservPayloadAddress = 0x00025E00u;
+            constexpr uint32_t kMcservResultAddress = 0x00025F00u;
+            constexpr uint32_t kMcservBindRpc = 0xD5u;
+            constexpr uint32_t kMcservCallRpc = 0xD6u;
+            constexpr uint32_t kMcservInitFunction = 0xFEu;
+            constexpr uint32_t kMcservPayloadSize = 48u;
+            constexpr uint32_t kMcservResultSize = 12u;
+
+            writePacketHeader(kBindCommand, kMcservBindRpc);
+            writeGuestU32(env.rdram.data(),
+                          kPacketAddress + 0x1Cu,
+                          kMcservClientAddress);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x20u, kMcservSid);
+            std::memcpy(env.rdram.data() + kDescriptorAddress,
+                        &bindDescriptor,
+                        sizeof(bindDescriptor));
+            invokeDma(1u);
+
+            t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x08u),
+                     kEndCommand,
+                     "the MCSERV bind should emit RPC_END");
+            t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x18u),
+                     kMcservBindRpc,
+                     "the MCSERV bind completion should preserve Duelists sequence 0xd5");
+            t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x20u),
+                     kBindCommand,
+                     "the MCSERV bind completion should identify RPC_BIND");
+            t.IsTrue(readGuestU32(env.rdram.data(), kInboundAddress + 0x24u) != 0u,
+                     "the MCSERV raw RPC_BIND should return a server token");
+
+            std::memset(env.rdram.data() + kMcservPayloadAddress,
+                        0,
+                        kMcservPayloadSize);
+            std::memset(env.rdram.data() + kMcservResultAddress,
+                        0xFF,
+                        kMcservResultSize);
+            writePacketHeader(kCallCommand, kMcservCallRpc);
+            writeGuestU32(env.rdram.data(),
+                          kPacketAddress + 0x1Cu,
+                          kMcservClientAddress);
+            writeGuestU32(env.rdram.data(),
+                          kPacketAddress + 0x20u,
+                          kMcservInitFunction);
+            writeGuestU32(env.rdram.data(),
+                          kPacketAddress + 0x24u,
+                          kMcservPayloadSize);
+            writeGuestU32(env.rdram.data(),
+                          kPacketAddress + 0x28u,
+                          kMcservResultAddress);
+            writeGuestU32(env.rdram.data(),
+                          kPacketAddress + 0x2Cu,
+                          kMcservResultSize);
+            const std::array<Ps2SifDmaTransfer, 2> mcservInitDescriptors{{
+                {kMcservPayloadAddress, 0u,
+                 static_cast<int32_t>(kMcservPayloadSize), 0},
+                {kPacketAddress, 0u, 0x40, 0x44},
+            }};
+            std::memcpy(env.rdram.data() + kDescriptorAddress,
+                        mcservInitDescriptors.data(),
+                        sizeof(mcservInitDescriptors));
+            invokeDma(2u);
+
+            t.Equals(readGuestU32(env.rdram.data(), kMcservResultAddress),
+                     0u,
+                     "raw MCSERV init should report success");
+            t.Equals(readGuestU32(env.rdram.data(), kMcservResultAddress + 4u),
+                     0x0205u,
+                     "raw MCSERV init should report MCSERV version 0x205");
+            t.Equals(readGuestU32(env.rdram.data(), kMcservResultAddress + 8u),
+                     0x0206u,
+                     "raw MCSERV init should report MCMAN version 0x206");
+            t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x08u),
+                     kEndCommand,
+                     "the MCSERV init completion should emit RPC_END");
+            t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x18u),
+                     kMcservCallRpc,
+                     "the MCSERV init completion should preserve its raw RPC sequence");
+            t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x20u),
+                     kCallCommand,
+                     "the MCSERV init completion should identify RPC_CALL");
         });
 
         tc.Run("isceSifSetDma and isceSifSetDChain alias the SIF DMA helpers", [](TestCase &t)

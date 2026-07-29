@@ -1304,7 +1304,7 @@ void register_ps2_memory_tests()
             });
 
             t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kTag), "write VIF1 TADR should succeed");
-            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x104u), "write VIF1 CHCR STR|CHAIN should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x144u), "write VIF1 CHCR STR|CHAIN|TTE should succeed");
 
             mem.processPendingTransfers();
 
@@ -1343,7 +1343,7 @@ void register_ps2_memory_tests()
             std::memcpy(rdram + kTag + 12u, &itopCmd, sizeof(itopCmd));
 
             t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kTag), "write VIF1 TADR should succeed");
-            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x104u), "write VIF1 CHCR STR|CHAIN should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x144u), "write VIF1 CHCR STR|CHAIN|TTE should succeed");
 
             mem.processPendingTransfers();
 
@@ -1351,6 +1351,53 @@ void register_ps2_memory_tests()
                      "qwc-zero compact VIF1 chain should still process high-half VIFcodes");
             t.IsTrue((mem.readIORegister(kVif1Ch + 0x00u) & 0x100u) == 0u,
                      "qwc-zero compact VIF1 chain should clear the STR bit after drain");
+        });
+
+        tc.Run("VIF1 DMA REF processes tag high VIFcodes before referenced payload", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kVif1Ch = 0x10009000u;
+            constexpr uint32_t kRefTag = 0x00025200u;
+            constexpr uint32_t kEndTag = kRefTag + 16u;
+            constexpr uint32_t kRefData = 0x00025300u;
+
+            uint8_t *rdram = mem.getRDRAM();
+            std::memset(rdram + kRefTag, 0, 32u);
+            std::memset(rdram + kRefData, 0, 16u);
+
+            const uint64_t refTag = makeDmaTag(1u, 3u, kRefData, false);
+            const uint64_t endTag = makeDmaTag(0u, 7u, 0u, false);
+            std::memcpy(rdram + kRefTag, &refTag, sizeof(refTag));
+            std::memcpy(rdram + kEndTag, &endTag, sizeof(endTag));
+
+            // VIF1 executes the two VIFcodes embedded in every tag's upper
+            // 64 bits even though REF sources its qword payload elsewhere.
+            const uint32_t itopCmd = makeVifCmd(0x04u, 0u, 0x66u);
+            std::memcpy(rdram + kRefTag + 12u, &itopCmd, sizeof(itopCmd));
+
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kRefTag),
+                     "write VIF1 REF TADR should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x104u),
+                     "write VIF1 REF CHCR STR|CHAIN should succeed");
+
+            mem.processPendingTransfers();
+
+            t.Equals(mem.vif1_regs.itops, 0u,
+                     "REF tag high-half VIFcodes should remain gated when TTE is clear");
+
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kRefTag),
+                     "rewrite VIF1 REF TADR for the TTE transfer");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x144u),
+                     "write VIF1 REF CHCR STR|CHAIN|TTE should succeed");
+
+            mem.processPendingTransfers();
+
+            t.Equals(mem.vif1_regs.itops, 0x66u,
+                     "REF tag high-half VIFcodes should execute when TTE is set");
+            t.IsTrue((mem.readIORegister(kVif1Ch + 0x00u) & 0x100u) == 0u,
+                     "REF followed by END should clear the VIF1 STR bit");
         });
 
         tc.Run("VIF1 packet builders keep chain qwc live before terminate", [](TestCase &t)
@@ -1405,7 +1452,7 @@ void register_ps2_memory_tests()
             });
 
             t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kBaseAddr), "write VIF1 TADR should succeed");
-            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x104u), "write VIF1 CHCR STR|CHAIN should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x144u), "write VIF1 CHCR STR|CHAIN|TTE should succeed");
 
             mem.processPendingTransfers();
 

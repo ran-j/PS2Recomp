@@ -150,6 +150,18 @@ namespace
             return "translated/" + std::string(path);
         }
 
+        bool searchCdFile(std::string_view path, CdFileInfo &file) override
+        {
+            const auto found = cdFiles.find(std::string(path));
+            if (found == cdFiles.end())
+            {
+                file = {};
+                return false;
+            }
+            file = found->second;
+            return true;
+        }
+
         uint64_t openHostFile(std::string_view path) override
         {
             const auto file = hostFileContents.find(std::string(path));
@@ -291,6 +303,7 @@ namespace
         uint64_t lastCallToken = 0u;
         std::vector<uint32_t> lastGuestArguments;
         std::vector<std::pair<LogLevel, std::string>> logs;
+        std::unordered_map<std::string, CdFileInfo> cdFiles;
         std::unordered_map<std::string, std::vector<uint8_t>> hostFileContents;
         std::unordered_map<uint64_t, std::string> openHostFiles;
         std::vector<uint64_t> closedHostFileHandles;
@@ -470,6 +483,98 @@ void register_ps2_iop_tests()
             {
                 t.Equals(metricValue(*service, "disk_ready_calls"), uint64_t{3},
                          "CD/DVD Disk Ready should count repeated polls");
+            }
+        });
+
+        tc.Run("CD/DVD Search File resolves the standard legacy request packet", [](TestCase &t)
+        {
+            FakeIopHost host;
+            ps2x::iop::IopSubsystem subsystem(host);
+            std::string error;
+            t.IsTrue(subsystem.configure({"unmatched.elf", 0u, 0u}, &error),
+                     "the CD/DVD Search File service should be available as a core service");
+
+            constexpr uint32_t kSend = 0x500u;
+            constexpr uint32_t kReceive = 0x700u;
+            constexpr uint32_t kFile = 0x800u;
+            constexpr uint32_t kSearchFileSid = 0x80000597u;
+            constexpr uint32_t kLegacyPacketSize = 0x124u;
+            constexpr std::string_view kPath = "cdrom0:\\SYSTEM.CNF;1";
+            host.cdFiles.emplace(std::string(kPath),
+                                 CdFileInfo{0x00123456u,
+                                            4097u,
+                                            {1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u},
+                                            "SYSTEM.CNF"});
+
+            t.IsTrue(host.writeGuest(kSend + 0x20u, kPath.data(), kPath.size() + 1u),
+                     "the Search File path should fit in the standard request packet");
+            t.IsTrue(host.writeWord(kSend + 0x120u, kFile),
+                     "the Search File destination should fit in the standard request packet");
+            t.IsTrue(host.writeWord(kReceive, 0xFFFFFFFFu),
+                     "the Search File result should fit in fake guest memory");
+
+            ps2x::iop::RpcRequest request{};
+            request.sid = kSearchFileSid;
+            request.function = 0u;
+            request.send = {kSend, kLegacyPacketSize};
+            request.receive = {kReceive, 4u};
+
+            const ps2x::iop::RpcResult result = subsystem.handleRpc(request);
+            t.IsTrue(result.handled, "CD/DVD Search File function zero should be handled");
+            t.Equals(host.readWord(kReceive), 1u,
+                     "CD/DVD Search File should report a found extracted-disc file");
+            t.Equals(host.readWord(kFile), 0x00123456u,
+                     "the returned sceCdlFILE should preserve the host resolver LSN");
+            t.Equals(host.readWord(kFile + 4u), 4097u,
+                     "the returned sceCdlFILE should contain the host byte size");
+
+            std::array<char, 16> returnedName{};
+            t.IsTrue(host.readGuest(kFile + 8u, returnedName.data(), returnedName.size()),
+                     "the returned sceCdlFILE name should fit in fake guest memory");
+            t.Equals(std::string(returnedName.data()), std::string("SYSTEM.CNF"),
+                     "the returned filename should omit the ISO version suffix");
+
+            host.writeWord(kReceive, 0xFFFFFFFFu);
+            constexpr std::string_view kMissingPath = "cdrom0:\\MISSING.BIN;1";
+            t.IsTrue(host.writeGuest(kSend + 0x20u,
+                                     kMissingPath.data(),
+                                     kMissingPath.size() + 1u),
+                     "the missing Search File path should fit in the request packet");
+            t.IsTrue(subsystem.handleRpc(request).handled,
+                     "a missing file should still produce a completed Search File RPC");
+            t.Equals(host.readWord(kReceive), 0u,
+                     "CD/DVD Search File should report zero for a missing file");
+
+            constexpr uint32_t kLayeredPacketSize = 0x128u;
+            constexpr uint32_t kLayeredFile = 0x900u;
+            host.cdFiles[std::string(kPath)] =
+                CdFileInfo{0x00123457u, 4097u, {}, "SYSTEM.CNF"};
+            t.IsTrue(host.writeGuest(kSend + 0x20u,
+                                     kPath.data(),
+                                     kPath.size() + 1u),
+                     "the layered Search File path should remain at offset 0x20");
+            t.IsTrue(host.writeWord(kSend + 0x120u, 0u),
+                     "the layered Search File request should include a layer word");
+            t.IsTrue(host.writeWord(kSend + 0x124u, kLayeredFile),
+                     "the layered Search File destination should follow the layer word");
+            request.send.size = kLayeredPacketSize;
+            t.IsTrue(subsystem.handleRpc(request).handled,
+                     "the layered Search File request should be handled");
+            t.Equals(host.readWord(kReceive), 1u,
+                     "the layered Search File request should resolve its path");
+            t.Equals(host.readWord(kLayeredFile), 0x00123457u,
+                     "the layered Search File request should write to its destination");
+
+            const ps2x::iop::DebugSnapshot snapshot = subsystem.debugSnapshot();
+            const ps2x::iop::DebugService *service =
+                findService(snapshot, "CD/DVD Search File");
+            t.IsNotNull(service, "the core service snapshot should include CD/DVD Search File");
+            if (service)
+            {
+                t.Equals(metricValue(*service, "search_calls"), uint64_t{3},
+                         "CD/DVD Search File should count found and missing requests");
+                t.Equals(metricValue(*service, "search_hits"), uint64_t{2},
+                         "CD/DVD Search File should count resolved files");
             }
         });
 

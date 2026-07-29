@@ -5,10 +5,15 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace ps2_stubs
 {
+    bool resolveCdFile(std::string_view path,
+                       uint32_t &lsn,
+                       uint32_t &size,
+                       std::string &name);
 
     struct CdDebugFileEntry
     {

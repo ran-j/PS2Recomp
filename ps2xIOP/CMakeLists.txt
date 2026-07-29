@@ -10,6 +10,7 @@ add_library(ps2_iop STATIC
     src/plugin_loader.cpp
     src/modules/dbcman.cpp
     src/modules/cdvd.cpp
+    src/modules/cdvd_search_file.cpp
     src/modules/libsd.cpp
     src/modules/loadfile.cpp
     src/modules/mcserv.cpp

@@ -17,6 +17,13 @@ namespace ps2x::iop::detail
         uint32_t readyStatus = 2u;
     };
 
+    struct CdvdSearchFileBindings
+    {
+        std::string serviceName = "CD/DVD Search File";
+        uint32_t sid = 0x80000597u;
+        uint32_t searchFunction = 0u;
+    };
+
     struct CriDtxBindings
     {
         std::string serviceName;
@@ -155,6 +162,7 @@ namespace ps2x::iop::detail
 
     std::unique_ptr<IopService> createDbcmanService(IopHost &host);
     std::unique_ptr<IopService> createCdvdService(IopHost &host, CdvdBindings bindings);
+    std::unique_ptr<IopService> createCdvdSearchFileService(IopHost &host, CdvdSearchFileBindings bindings);
     std::unique_ptr<IopService> createLibSdService(IopHost &host);
     std::unique_ptr<IopService> createLoadFileService(IopHost &host);
     std::unique_ptr<IopService> createMcservService(IopHost &host);

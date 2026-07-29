@@ -59,6 +59,7 @@ public:
 
     std::string hostPath(ps2x::iop::HostPathKind kind) const override;
     std::string translateGuestPath(std::string_view path) const override;
+    bool searchCdFile(std::string_view path, ps2x::iop::CdFileInfo &file) override;
     uint64_t openHostFile(std::string_view path) override;
     bool hostFileSize(uint64_t handle, uint64_t &size) const override;
     bool readHostFile(uint64_t handle,

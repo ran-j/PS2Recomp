@@ -3,6 +3,7 @@
 #include "ps2_runtime.h"
 #include "ps2_stubs.h"
 #include "runtime/ps2_memory.h"
+#include "Kernel/Stubs/CD.h"
 #include "Kernel/Stubs/MemoryCard.h"
 #include "Kernel/Syscalls/Common.h"
 
@@ -262,6 +263,13 @@ std::string PS2IopHostAdapter::hostPath(ps2x::iop::HostPathKind kind) const
 std::string PS2IopHostAdapter::translateGuestPath(std::string_view path) const
 {
     return translatePs2Path(std::string(path).c_str());
+}
+
+bool PS2IopHostAdapter::searchCdFile(std::string_view path,
+                                    ps2x::iop::CdFileInfo &file)
+{
+    file = {};
+    return ps2_stubs::resolveCdFile(path, file.lsn, file.size, file.name);
 }
 
 uint64_t PS2IopHostAdapter::openHostFile(std::string_view path)

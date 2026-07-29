@@ -9,6 +9,23 @@ namespace ps2_stubs
         uint32_t g_cdStReadTraceCount = 0u;
     }
 
+    bool resolveCdFile(std::string_view path,
+                       uint32_t &lsn,
+                       uint32_t &size,
+                       std::string &name)
+    {
+        CdFileEntry entry;
+        if (!registerCdFile(std::string(path), entry))
+        {
+            return false;
+        }
+
+        lsn = entry.baseLbn;
+        size = entry.sizeBytes;
+        std::filesystem::path leafPath(normalizeCdPathNoPrefix(std::string(path)));
+        name = stripIsoVersionSuffix(leafPath.filename().string());
+        return true;
+    }
 
     CdDebugSnapshot getCdDebugSnapshot()
     {
