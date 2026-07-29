@@ -291,6 +291,11 @@ bool PS2Memory::initialize(size_t ramSize)
     m_seenGifCopy = false;
     m_dmaStartCount.store(0, std::memory_order_relaxed);
     m_gifCopyCount.store(0, std::memory_order_relaxed);
+    for (uint32_t path = 0; path < 4u; ++path)
+    {
+        m_gifPathPacketCount[path].store(0, std::memory_order_relaxed);
+        m_gifPathByteCount[path].store(0, std::memory_order_relaxed);
+    }
     m_gsWriteCount.store(0, std::memory_order_relaxed);
     m_vifWriteCount.store(0, std::memory_order_relaxed);
     {
@@ -1694,6 +1699,13 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t 
 {
     if (!data || sizeBytes < 16)
         return;
+
+    const uint32_t pathIndex = static_cast<uint32_t>(pathId);
+    if (pathIndex <= 3u)
+    {
+        m_gifPathPacketCount[pathIndex].fetch_add(1u, std::memory_order_relaxed);
+        m_gifPathByteCount[pathIndex].fetch_add(sizeBytes, std::memory_order_relaxed);
+    }
 
     if (pathId == GifPathId::Path3)
     {

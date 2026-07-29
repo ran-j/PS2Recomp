@@ -250,6 +250,10 @@ struct GSDebugSnapshot
     bool hostPresentationUsedPreferred = false;
     bool hasHostPresentationFrame = false;
     size_t localToHostPendingBytes = 0;
+    uint64_t gifPacketCount = 0;
+    uint64_t gifTagCount = 0;
+    uint64_t drawCount = 0;
+    uint64_t transferCount = 0;
 };
 
 enum class GSDebugEventKind : uint8_t
@@ -444,6 +448,10 @@ private:
     bool m_hasHostPresentationFrame = false;
     uint64_t m_nativeImageUploadCount = 0;
     uint64_t m_nativePackedGIFPacketCount = 0;
+    uint64_t m_gifPacketCount = 0;
+    uint64_t m_gifTagCount = 0;
+    uint64_t m_drawCount = 0;
+    uint64_t m_transferCount = 0;
 
     std::vector<uint8_t> m_localToHostBuffer;
     size_t m_localToHostReadPos = 0;

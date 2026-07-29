@@ -463,12 +463,19 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
             width != s_lastWidth ||
             height != s_lastHeight)
         {
+            const GSDebugSnapshot gsDebug = rt->gs().getDebugSnapshot();
             std::cout << "[frame:upload] idx=" << s_uploadDebugCount
                       << " tick=" << currentTick
                       << " displayFbp=" << displayFbp
                       << " sourceFbp=" << sourceFbp
                       << " size=" << width << "x" << height
                       << " preferred=" << static_cast<uint32_t>(usedPreferredDisplaySource ? 1u : 0u)
+                      << " gifPath1=" << rt->memory().gifPathPacketCount(GifPathId::Path1)
+                      << " gifPath3=" << rt->memory().gifPathPacketCount(GifPathId::Path3)
+                      << " gifPackets=" << gsDebug.gifPacketCount
+                      << " gifTags=" << gsDebug.gifTagCount
+                      << " gsDraws=" << gsDebug.drawCount
+                      << " gsTransfers=" << gsDebug.transferCount
                       << std::endl;
         }
         ++s_uploadDebugCount;
@@ -2420,6 +2427,13 @@ void PS2Runtime::run()
                 uint64_t curGif = m_memory.gifCopyCount();
                 uint64_t curGs = m_memory.gsWriteCount();
                 uint64_t curVif = m_memory.vifWriteCount();
+                uint64_t curVifCmd = m_memory.vif1CommandCount();
+                uint64_t curMscal = m_memory.vu1MscalCount();
+                uint64_t curMscnt = m_memory.vu1MscntCount();
+                uint64_t curVuRuns = m_vu1.runCount();
+                uint64_t curVuPairs = m_vu1.instructionPairCount();
+                uint64_t curXgkick = m_vu1.xgkickCount();
+                const auto vuStop = static_cast<uint32_t>(m_vu1.lastStopReason());
                 const GSRegisters &gs = m_memory.gs();
                 const uint32_t dbgPc = m_debugPc.load(std::memory_order_relaxed);
                 const uint32_t dbgRa = m_debugRa.load(std::memory_order_relaxed);
@@ -2440,6 +2454,22 @@ void PS2Runtime::run()
                                                << " gif=" << curGif
                                                << " gsw=" << curGs
                                                << " vif=" << curVif
+                                               << " vifcmd=" << curVifCmd
+                                               << " mscal=" << curMscal
+                                               << " mscnt=" << curMscnt
+                                               << " vurun=" << curVuRuns
+                                               << " vupair=" << curVuPairs
+                                               << " xgkick=" << curXgkick
+                                               << " vustop=" << vuStop
+                                               << " vulastpc=0x" << std::hex << m_vu1.lastExecutedPc()
+                                               << " vulower=0x" << m_vu1.lastLowerInstruction()
+                                               << " vuupper=0x" << m_vu1.lastUpperInstruction()
+                                               << std::dec
+                                               << " vuunsup_u=" << m_vu1.unsupportedUpperCount()
+                                               << " vuunsup_l=" << m_vu1.unsupportedLowerCount()
+                                               << " vulast_unsup_u=0x" << std::hex << m_vu1.lastUnsupportedUpper()
+                                               << " vulast_unsup_l=0x" << m_vu1.lastUnsupportedLower()
+                                               << std::dec
                                                << std::endl);
             }
         });

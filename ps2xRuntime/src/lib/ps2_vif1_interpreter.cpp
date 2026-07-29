@@ -304,6 +304,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         uint16_t imm = cmd & 0xFFFF;
         uint8_t num = (cmd >> 16) & 0xFF;
         const bool irq = (cmd & 0x80000000u) != 0u;
+        m_vif1CommandCount.fetch_add(1, std::memory_order_relaxed);
 
         // Track most-recent command for VIFn_CODE emulation.
         vif1_regs.code = cmd;
@@ -367,6 +368,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         }
         else if (opcode == VIF_MSCAL || opcode == VIF_MSCALF)
         {
+            m_vu1MscalCount.fetch_add(1, std::memory_order_relaxed);
             uint32_t startPC = (uint32_t)imm * 8u;
 
             // Values visible to the VU program for this MSCAL.
@@ -390,6 +392,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         }
         else if (opcode == VIF_MSCNT)
         {
+            m_vu1MscntCount.fetch_add(1, std::memory_order_relaxed);
             const uint32_t runTop = vif1_regs.tops & 0x3FFu;
             const uint32_t runItop = vif1_regs.itops & 0x3FFu;
             vif1_regs.top = runTop;

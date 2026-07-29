@@ -459,6 +459,15 @@ void register_ps2_vu1_tests()
                         0u,
                         0u,
                         1u);
+            t.Equals(vu1.runCount(), uint64_t{1}, "VU telemetry should count execution runs");
+            t.Equals(vu1.instructionPairCount(), uint64_t{1}, "VU telemetry should count executed instruction pairs");
+            t.Equals(vu1.xgkickCount(), uint64_t{1}, "VU telemetry should count XGKICK instructions");
+            t.Equals(static_cast<uint32_t>(vu1.lastStopReason()),
+                     static_cast<uint32_t>(VU1Interpreter::StopReason::CycleLimit),
+                     "bounded VU execution should report the cycle limit");
+            t.Equals(vu1.lastExecutedPc(), 0u, "VU telemetry should retain the last executed PC");
+            t.Equals(vu1.lastLowerInstruction(), lower, "VU telemetry should retain the last lower instruction");
+            t.Equals(vu1.lastUpperInstruction(), upper, "VU telemetry should retain the last upper instruction");
 
             t.Equals(captured.size(), static_cast<size_t>(1u), "XGKICK should emit one wrapped GIF packet");
             if (!captured.empty())
@@ -475,6 +484,30 @@ void register_ps2_vu1_tests()
                 }
                 t.IsTrue(payloadOk, "wrapped payload should be copied from start of VU1 memory");
             }
+        });
+
+        tc.Run("VU telemetry records unsupported instruction words", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+            constexpr uint32_t unsupportedLower = 0xFE000000u;
+            constexpr uint32_t unsupportedUpper = 0x00000030u;
+            std::memcpy(fx.code + 0u, &unsupportedLower, sizeof(unsupportedLower));
+            std::memcpy(fx.code + 4u, &unsupportedUpper, sizeof(unsupportedUpper));
+
+            VU1Interpreter vu1;
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                        fx.gs, &fx.mem, 0u, 0u, 0u, 1u);
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                        fx.gs, &fx.mem, 0u, 0u, 0u, 1u);
+
+            t.Equals(vu1.runCount(), uint64_t{2}, "VU run telemetry should remain cumulative across MSCAL-style executes");
+            t.Equals(vu1.instructionPairCount(), uint64_t{2}, "VU pair telemetry should remain cumulative across runs");
+            t.Equals(vu1.unsupportedLowerCount(), uint64_t{2}, "unsupported lower telemetry should remain cumulative");
+            t.Equals(vu1.unsupportedUpperCount(), uint64_t{2}, "unsupported upper telemetry should remain cumulative");
+            t.Equals(vu1.lastUnsupportedLower(), unsupportedLower, "unsupported lower word should be retained");
+            t.Equals(vu1.lastUnsupportedUpper(), unsupportedUpper, "unsupported upper word should be retained");
         });
 
         tc.Run("MSCAL can start a VU1 XGKICK program and update GS VRAM", [](TestCase &t)

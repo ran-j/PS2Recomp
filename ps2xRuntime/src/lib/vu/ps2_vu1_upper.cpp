@@ -444,6 +444,7 @@ void VU1Interpreter::execUpper(uint32_t instr)
         case 0x30: // NOP
             return;
         default:
+            recordUnsupportedUpper(instr);
             return;
         }
     }
@@ -453,6 +454,7 @@ void VU1Interpreter::execUpper(uint32_t instr)
     case 0x32:
     case 0x33:
     default:
+        recordUnsupportedUpper(instr);
         return;
     }
 }

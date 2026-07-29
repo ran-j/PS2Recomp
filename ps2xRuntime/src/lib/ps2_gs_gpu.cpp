@@ -476,6 +476,12 @@ void GS::reset()
     m_hostPresentationSourceFbp = 0u;
     m_hostPresentationUsedPreferred = false;
     m_hasHostPresentationFrame = false;
+    m_nativeImageUploadCount = 0;
+    m_nativePackedGIFPacketCount = 0;
+    m_gifPacketCount = 0;
+    m_gifTagCount = 0;
+    m_drawCount = 0;
+    m_transferCount = 0;
 
     m_debugHistoryWrite = 0;
     m_debugHistoryCount = 0;
@@ -550,6 +556,10 @@ GSDebugSnapshot GS::getDebugSnapshot() const
     snapshot.localToHostPendingBytes = (m_localToHostReadPos < m_localToHostBuffer.size())
                                            ? (m_localToHostBuffer.size() - m_localToHostReadPos)
                                            : 0u;
+    snapshot.gifPacketCount = m_gifPacketCount;
+    snapshot.gifTagCount = m_gifTagCount;
+    snapshot.drawCount = m_drawCount;
+    snapshot.transferCount = m_transferCount;
     return snapshot;
 }
 
@@ -642,6 +652,7 @@ void GS::recordDebugEventUnlocked(GSDebugHistoryEntry entry)
 
 void GS::recordGifTagDebugEventUnlocked(uint32_t sizeBytes, uint32_t nloop, uint8_t flg, uint32_t nreg)
 {
+    ++m_gifTagCount;
     if (m_debugHistoryPaused)
     {
         return;
@@ -700,6 +711,8 @@ void GS::recordRegisterDebugEventUnlocked(uint8_t regAddr, uint64_t value)
 
 void GS::recordDrawDebugEventUnlocked(int vertexCount)
 {
+    if (vertexCount > 0)
+        ++m_drawCount;
     if (m_debugHistoryPaused)
     {
         return;
@@ -737,6 +750,7 @@ void GS::recordDrawDebugEventUnlocked(int vertexCount)
 
 void GS::recordTransferDebugEventUnlocked()
 {
+    ++m_transferCount;
     if (m_debugHistoryPaused)
     {
         return;
@@ -1291,6 +1305,7 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
     if (!data || sizeBytes < 16 || !m_vram)
         return;
 
+    ++m_gifPacketCount;
     if (tryProcessNativeImageUploadPacket(data, sizeBytes))
         return;
 
@@ -1393,6 +1408,7 @@ bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
     if (!validatePackedGifPacket(data, sizeBytes))
         return false;
 
+    ++m_gifPacketCount;
     const bool processed = visitPackedGifPacket(data, sizeBytes, [&](const PackedGifPacketTag &tag)
     {
         m_curQ = 1.0f;

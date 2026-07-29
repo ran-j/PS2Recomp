@@ -1531,6 +1531,10 @@ void register_ps2_gs_tests()
 
             t.Equals(regs.dispfb1, dispfb1, "A+D should write GS DISPFB1");
             t.Equals(regs.display1, display1, "A+D should write GS DISPLAY1");
+            const GSDebugSnapshot debug = gs.getDebugSnapshot();
+            t.Equals(debug.gifPacketCount, 1ull, "GS telemetry should count the packet");
+            t.Equals(debug.gifTagCount, 1ull, "GS telemetry should count its GIF tag while history is paused");
+            t.Equals(debug.drawCount, 0ull, "register-only packet should not count as a draw");
         });
 
         tc.Run("GIF PACKED A+D writes DISPFB2 and DISPLAY2 privileged registers", [](TestCase &t)

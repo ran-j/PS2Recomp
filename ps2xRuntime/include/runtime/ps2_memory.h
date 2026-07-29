@@ -283,8 +283,21 @@ public:
     uint8_t *getIOPRAM() { return iop_ram; }
     uint64_t dmaStartCount() const { return m_dmaStartCount.load(std::memory_order_relaxed); }
     uint64_t gifCopyCount() const { return m_gifCopyCount.load(std::memory_order_relaxed); }
+    uint64_t gifPathPacketCount(GifPathId pathId) const
+    {
+        const uint32_t index = static_cast<uint32_t>(pathId);
+        return (index <= 3u) ? m_gifPathPacketCount[index].load(std::memory_order_relaxed) : 0u;
+    }
+    uint64_t gifPathByteCount(GifPathId pathId) const
+    {
+        const uint32_t index = static_cast<uint32_t>(pathId);
+        return (index <= 3u) ? m_gifPathByteCount[index].load(std::memory_order_relaxed) : 0u;
+    }
     uint64_t gsWriteCount() const { return m_gsWriteCount.load(std::memory_order_relaxed); }
     uint64_t vifWriteCount() const { return m_vifWriteCount.load(std::memory_order_relaxed); }
+    uint64_t vif1CommandCount() const { return m_vif1CommandCount.load(std::memory_order_relaxed); }
+    uint64_t vu1MscalCount() const { return m_vu1MscalCount.load(std::memory_order_relaxed); }
+    uint64_t vu1MscntCount() const { return m_vu1MscntCount.load(std::memory_order_relaxed); }
     uint64_t getVU1CodeGeneration() const { return m_vu1CodeGeneration.load(std::memory_order_relaxed); }
 
     // Read/write memory
@@ -370,8 +383,13 @@ public:
     bool m_seenGifCopy;
     std::atomic<uint64_t> m_dmaStartCount{0};
     std::atomic<uint64_t> m_gifCopyCount{0};
+    std::atomic<uint64_t> m_gifPathPacketCount[4]{};
+    std::atomic<uint64_t> m_gifPathByteCount[4]{};
     std::atomic<uint64_t> m_gsWriteCount{0};
     std::atomic<uint64_t> m_vifWriteCount{0};
+    std::atomic<uint64_t> m_vif1CommandCount{0};
+    std::atomic<uint64_t> m_vu1MscalCount{0};
+    std::atomic<uint64_t> m_vu1MscntCount{0};
     std::atomic<uint64_t> m_vu1CodeGeneration{0};
     // I/O registers
     std::unordered_map<uint32_t, uint32_t> m_ioRegisters;

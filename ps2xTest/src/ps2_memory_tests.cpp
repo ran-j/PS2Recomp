@@ -1353,6 +1353,23 @@ void register_ps2_memory_tests()
                      "qwc-zero compact VIF1 chain should clear the STR bit after drain");
         });
 
+        tc.Run("GIF path telemetry counts submitted packets and bytes", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            const std::vector<uint8_t> path1(16u, 0x11u);
+            const std::vector<uint8_t> path3(32u, 0x33u);
+            mem.submitGifPacket(GifPathId::Path1, path1.data(), static_cast<uint32_t>(path1.size()));
+            mem.submitGifPacket(GifPathId::Path3, path3.data(), static_cast<uint32_t>(path3.size()));
+
+            t.Equals(mem.gifPathPacketCount(GifPathId::Path1), 1ull, "PATH1 packet count should be recorded");
+            t.Equals(mem.gifPathByteCount(GifPathId::Path1), 16ull, "PATH1 byte count should be recorded");
+            t.Equals(mem.gifPathPacketCount(GifPathId::Path3), 1ull, "PATH3 packet count should be recorded");
+            t.Equals(mem.gifPathByteCount(GifPathId::Path3), 32ull, "PATH3 byte count should be recorded");
+            t.Equals(mem.gifPathPacketCount(GifPathId::Path2), 0ull, "unused PATH2 should remain zero");
+        });
+
         tc.Run("VIF1 DMA REF processes tag high VIFcodes before referenced payload", [](TestCase &t)
         {
             PS2Memory mem;

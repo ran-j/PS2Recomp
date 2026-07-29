@@ -1655,6 +1655,8 @@ void register_ps2_runtime_expansion_tests()
             mem.processVIF1Data(reinterpret_cast<const uint8_t *>(&mscal), sizeof(mscal));
 
             t.Equals(callbackCount, 1u, "MSCAL should invoke VU1 callback exactly once");
+            t.Equals(mem.vif1CommandCount(), uint64_t{1}, "VIF telemetry should count decoded commands");
+            t.Equals(mem.vu1MscalCount(), uint64_t{1}, "VIF telemetry should count MSCAL dispatches");
             t.Equals(callbackPc, 24u, "MSCAL should pass startPC=imm*8");
             t.Equals(callbackTop, 4u, "MSCAL callback should receive current TOPS");
             t.Equals(callbackItop, 0x21u, "MSCAL callback should receive pending ITOPS");
@@ -1667,6 +1669,8 @@ void register_ps2_runtime_expansion_tests()
             mem.processVIF1Data(reinterpret_cast<const uint8_t *>(&mscnt), sizeof(mscnt));
 
             t.Equals(callbackCount, 1u, "MSCNT should not invoke MSCAL callback");
+            t.Equals(mem.vif1CommandCount(), uint64_t{2}, "VIF telemetry should include MSCNT");
+            t.Equals(mem.vu1MscntCount(), uint64_t{1}, "VIF telemetry should count MSCNT resumes");
             t.IsTrue((mem.vif1_regs.stat & (1u << 7)) == 0u, "MSCNT should toggle DBF back off");
             t.Equals(mem.vif1_regs.tops, 4u, "DBF=0 should make TOPS=BASE");
             t.Equals(mem.vif1_regs.top, 6u, "MSCNT should latch TOP from current TOPS before toggling");

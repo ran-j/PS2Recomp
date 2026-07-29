@@ -14,6 +14,17 @@ void VU1Interpreter::reset()
     std::memset(&m_state, 0, sizeof(m_state));
     m_state.vf[0][3] = 1.0f; // VF0.w = 1.0
     m_state.q = 1.0f;
+    m_runCount = 0;
+    m_instructionPairCount = 0;
+    m_xgkickCount = 0;
+    m_lastStopReason = StopReason::None;
+    m_lastExecutedPc = 0;
+    m_lastLowerInstruction = 0;
+    m_lastUpperInstruction = 0;
+    m_unsupportedUpperCount = 0;
+    m_unsupportedLowerCount = 0;
+    m_lastUnsupportedUpper = 0;
+    m_lastUnsupportedLower = 0;
 }
 
 float VU1Interpreter::broadcast(const float *vf, uint8_t bc)
@@ -117,6 +128,10 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
     m_state.vf[0][1] = 0.0f;
     m_state.vf[0][2] = 0.0f;
     m_state.vf[0][3] = 1.0f;
+    m_lastStopReason = StopReason::None;
+    m_lastExecutedPc = 0;
+    m_lastLowerInstruction = 0;
+    m_lastUpperInstruction = 0;
     run(vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles);
 }
 
@@ -135,12 +150,21 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                          uint8_t *vuData, uint32_t dataSize,
                          GS &gs, PS2Memory *memory, uint32_t maxCycles)
 {
+    ++m_runCount;
+    m_lastStopReason = StopReason::CycleLimit;
     for (uint32_t cycle = 0; cycle < maxCycles; ++cycle)
     {
         if (m_state.pc + 8 > codeSize)
+        {
+            m_lastStopReason = StopReason::PcOutOfRange;
             break;
+        }
 
         const DecodedInstructionPair decoded = getDecodedInstructionPairForPc(vuCode, codeSize, memory, m_state.pc);
+        m_lastExecutedPc = m_state.pc;
+        m_lastLowerInstruction = decoded.lower;
+        m_lastUpperInstruction = decoded.upper;
+        ++m_instructionPairCount;
 
         // LOI is controlled by the upper I-bit.  The lower word is the float immediate.
         // DobieStation executes the upper instruction first, then commits lower into I.
@@ -193,9 +217,24 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         }
 
         if (m_state.ebit)
+        {
+            m_lastStopReason = StopReason::EndBit;
             break;
+        }
 
         if (decoded.eBit)
             m_state.ebit = true;
     }
+}
+
+void VU1Interpreter::recordUnsupportedUpper(uint32_t instr)
+{
+    ++m_unsupportedUpperCount;
+    m_lastUnsupportedUpper = instr;
+}
+
+void VU1Interpreter::recordUnsupportedLower(uint32_t instr)
+{
+    ++m_unsupportedLowerCount;
+    m_lastUnsupportedLower = instr;
 }

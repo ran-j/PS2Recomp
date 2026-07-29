@@ -674,6 +674,7 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
                 return;
             }
             case 0x6C: // XGKICK - send GIF packet from VU1 data memory
+                ++m_xgkickCount;
                 doXgkick();
                 return;
             case 0x70: // ESADD
@@ -705,14 +706,17 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
             case 0x7D: // EATAN / EATANxy / EATANxz placeholder
                 return;
             default:
+                recordUnsupportedLower(instr);
                 return;
             }
         }
         default:
+            recordUnsupportedLower(instr);
             return;
         }
     }
     default:
+        recordUnsupportedLower(instr);
         break;
     }
 }

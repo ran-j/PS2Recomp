@@ -31,6 +31,14 @@ struct VU1State
 class VU1Interpreter
 {
 public:
+    enum class StopReason : uint8_t
+    {
+        None,
+        EndBit,
+        PcOutOfRange,
+        CycleLimit
+    };
+
     VU1Interpreter();
 
     void reset();
@@ -48,6 +56,17 @@ public:
 
     VU1State &state() { return m_state; }
     const VU1State &state() const { return m_state; }
+    uint64_t runCount() const { return m_runCount; }
+    uint64_t instructionPairCount() const { return m_instructionPairCount; }
+    uint64_t xgkickCount() const { return m_xgkickCount; }
+    StopReason lastStopReason() const { return m_lastStopReason; }
+    uint32_t lastExecutedPc() const { return m_lastExecutedPc; }
+    uint32_t lastLowerInstruction() const { return m_lastLowerInstruction; }
+    uint32_t lastUpperInstruction() const { return m_lastUpperInstruction; }
+    uint64_t unsupportedUpperCount() const { return m_unsupportedUpperCount; }
+    uint64_t unsupportedLowerCount() const { return m_unsupportedLowerCount; }
+    uint32_t lastUnsupportedUpper() const { return m_lastUnsupportedUpper; }
+    uint32_t lastUnsupportedLower() const { return m_lastUnsupportedLower; }
 
 private:
     struct DecodedInstructionPair
@@ -66,6 +85,17 @@ private:
     uint32_t m_cachedCodeSize = 0;
     uint64_t m_cachedCodeGeneration = 0;
     bool m_decodedCodeCacheValid = false;
+    uint64_t m_runCount = 0;
+    uint64_t m_instructionPairCount = 0;
+    uint64_t m_xgkickCount = 0;
+    StopReason m_lastStopReason = StopReason::None;
+    uint32_t m_lastExecutedPc = 0;
+    uint32_t m_lastLowerInstruction = 0;
+    uint32_t m_lastUpperInstruction = 0;
+    uint64_t m_unsupportedUpperCount = 0;
+    uint64_t m_unsupportedLowerCount = 0;
+    uint32_t m_lastUnsupportedUpper = 0;
+    uint32_t m_lastUnsupportedLower = 0;
 
     void run(uint8_t *vuCode, uint32_t codeSize,
              uint8_t *vuData, uint32_t dataSize,
@@ -79,6 +109,8 @@ private:
 
     void execUpper(uint32_t instr);
     void execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSize, GS &gs, PS2Memory *memory, uint32_t upperInstr);
+    void recordUnsupportedUpper(uint32_t instr);
+    void recordUnsupportedLower(uint32_t instr);
 
     void applyDest(float *dst, const float *result, uint8_t dest);
     void applyDestAcc(const float *result, uint8_t dest);
