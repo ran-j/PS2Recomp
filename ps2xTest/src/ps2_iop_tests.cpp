@@ -414,7 +414,7 @@ void register_ps2_iop_tests()
                          "shared PADMAN service should advertise the connection SID");
             }
 
-            t.IsTrue(host.writeWord(kSend, 0x01u), "test should write an unsupported PADMAN OPEN command");
+            t.IsTrue(host.writeWord(kSend, 0x11u), "test should write an unsupported PADMAN command");
             t.IsTrue(host.writeWord(kReceive, 0xA5A5A5A5u), "test should seed the receive buffer");
 
             RpcRequest unsupported{};
@@ -483,6 +483,45 @@ void register_ps2_iop_tests()
             wrongSize.receive.size = 0x7Cu;
             t.IsFalse(subsystem.handleRpc(wrongSize).handled,
                       "GET_MODVER with a non-128-byte response must remain rejected");
+
+            constexpr uint32_t kPadArea = 0x400u;
+            t.IsTrue(host.writeWord(kSend + 0x00u, 0x01u), "test should write PADMAN OPEN");
+            t.IsTrue(host.writeWord(kSend + 0x04u, 0u), "test should select port zero");
+            t.IsTrue(host.writeWord(kSend + 0x08u, 0u), "test should select slot zero");
+            t.IsTrue(host.writeWord(kSend + 0x10u, kPadArea), "test should provide an aligned pad area");
+            RpcRequest open = getVersion;
+            const RpcResult openResult = subsystem.handleRpc(open);
+            t.IsTrue(openResult.handled, "valid typed PADMAN OPEN should be handled");
+            t.Equals(host.readWord(kReceive + 0x0Cu), 1u,
+                     "OPEN should report success");
+            t.Equals(host.readWord(kReceive + 0x14u), kPadArea,
+                     "OPEN should return the initialized pad area");
+            t.Equals(static_cast<uint32_t>(host.memory[kPadArea + 1u]), 0x41u,
+                     "OPEN should initialize a digital pad packet");
+            t.Equals(static_cast<uint32_t>(host.memory[kPadArea + 2u]), 0xFFu,
+                     "OPEN should initialize all buttons released");
+            t.Equals(static_cast<uint32_t>(host.memory[kPadArea + 112u]), 6u,
+                     "OPEN should initialize the first XPAD half stable");
+            t.Equals(static_cast<uint32_t>(host.memory[kPadArea + 0x80u + 112u]), 6u,
+                     "OPEN should initialize the second XPAD half stable");
+
+            RpcRequest invalidOpen = open;
+            t.IsTrue(host.writeWord(kSend + 0x10u, kPadArea + 1u),
+                     "test should provide a misaligned pad area");
+            t.IsFalse(subsystem.handleRpc(invalidOpen).handled,
+                      "misaligned PADMAN OPEN must remain rejected");
+
+            subsystem.reset();
+            const DebugSnapshot resetSnapshot = subsystem.debugSnapshot();
+            const DebugService *resetPadman = findService(resetSnapshot, "PADMAN");
+            t.IsTrue(resetPadman != nullptr, "PADMAN should remain registered after reset");
+            if (resetPadman)
+            {
+                t.Equals(metricValue(*resetPadman, "open_count"), uint64_t{0},
+                         "PADMAN reset should clear session counters");
+                t.Equals(metricValue(*resetPadman, "port0_open"), uint64_t{0},
+                         "PADMAN reset should close tracked port sessions");
+            }
         });
 
         tc.Run("LOADFILE reports the compatible version and tracks HLE modules", [](TestCase &t)
@@ -711,6 +750,222 @@ void register_ps2_iop_tests()
                      "reload should destroy services from the previous profile");
             t.IsNotNull(findService(snapshot, "SDRDRV"),
                         "Fatal Frame profile should expose SDRDRV");
+        });
+
+        tc.Run("Duelists profile binds its observed custom RPC without fabricating behavior", [](TestCase &t)
+        {
+            constexpr uint32_t kSid = 0x05730601u;
+            constexpr uint32_t kSend = 0x1200u;
+            constexpr uint32_t kReceive = 0x1300u;
+            constexpr uint32_t kSentinel = 0xA5A55A5Au;
+
+            FakeIopHost host;
+            ps2x::iop::IopSubsystem subsystem(host);
+            std::string error;
+            t.IsTrue(subsystem.configure({"SLUS_205.15", 0u, 0u}, &error),
+                     "Duelists profile should configure by ELF basename");
+            t.Equals(subsystem.debugSnapshot().activeProfile,
+                     std::string("duelists-of-the-roses-us"),
+                     "Duelists ELF should select its isolated profile");
+            t.IsTrue(subsystem.handlesSid(kSid),
+                     "the observed Duelists custom service should be bindable");
+
+            t.IsTrue(host.writeWord(kSend + 0u, 0x11111111u),
+                     "first diagnostic request word should be writable");
+            t.IsTrue(host.writeWord(kSend + 4u, 0x22222222u),
+                     "second diagnostic request word should be writable");
+            t.IsTrue(host.writeWord(kReceive, kSentinel),
+                     "receive sentinel should be writable");
+
+            ps2x::iop::RpcRequest request{};
+            request.sid = kSid;
+            request.function = 7u;
+            request.send = {kSend, 8u};
+            request.receive = {kReceive, sizeof(uint32_t)};
+            t.IsFalse(subsystem.handleRpc(request).handled,
+                      "uncharacterized Duelists calls must remain rejected");
+            t.Equals(host.readWord(kReceive), kSentinel,
+                     "the bind-only service must leave receive memory unchanged");
+
+            const ps2x::iop::DebugSnapshot snapshot = subsystem.debugSnapshot();
+            const ps2x::iop::DebugService *service =
+                findService(snapshot, "Duelists custom RPC probe");
+            t.IsNotNull(service, "Duelists diagnostics should appear in the debug snapshot");
+            if (service)
+            {
+                t.Equals(metricValue(*service, "rejected_calls"), uint64_t{1},
+                         "the probe should count observed calls");
+                t.Equals(metricValue(*service, "last_function"), uint64_t{7},
+                         "the probe should capture the function");
+                t.Equals(metricValue(*service, "last_send_size"), uint64_t{8},
+                         "the probe should capture the send size");
+                t.Equals(metricValue(*service, "last_receive_size"), uint64_t{4},
+                         "the probe should capture the receive size");
+                t.Equals(metricValue(*service, "last_word_0"), uint64_t{0x11111111u},
+                         "the probe should capture the first request word");
+                t.Equals(metricValue(*service, "last_word_1"), uint64_t{0x22222222u},
+                         "the probe should capture the second request word");
+            }
+
+            for (uint32_t offset = 0u; offset < 0x10u; offset += sizeof(uint32_t))
+            {
+                t.IsTrue(host.writeWord(kReceive + offset, kSentinel),
+                         "typed response sentinel should be writable");
+            }
+            request.function = 0xF005u;
+            request.send.size = 0x40u;
+            request.receive.size = 0x10u;
+            t.IsTrue(subsystem.handleRpc(request).handled,
+                     "the observed F005 envelope should be handled");
+            for (uint32_t offset = 0u; offset < 0x10u; offset += sizeof(uint32_t))
+            {
+                t.Equals(host.readWord(kReceive + offset), 0u,
+                         "F005 should zero exactly its typed response");
+            }
+
+            t.IsTrue(host.writeWord(kReceive + 0x10u, kSentinel),
+                     "memory after the typed response should be writable");
+            request.receive.size = 0x0Cu;
+            t.IsFalse(subsystem.handleRpc(request).handled,
+                      "F005 with the wrong receive size must remain rejected");
+            t.Equals(host.readWord(kReceive + 0x10u), kSentinel,
+                     "F005 must not write beyond its exact response");
+
+            constexpr uint32_t kArenaToken = 0x000C1800u;
+            t.IsTrue(host.writeWord(kSend + 4u, kArenaToken),
+                     "F002 arena token should be writable");
+            for (uint32_t offset = 0u; offset < 0x10u; offset += sizeof(uint32_t))
+            {
+                t.IsTrue(host.writeWord(kReceive + offset, kSentinel),
+                         "F002 response sentinel should be writable");
+            }
+            request.function = 0xF002u;
+            request.receive.size = 0x10u;
+            t.IsTrue(subsystem.handleRpc(request).handled,
+                     "the observed F002 envelope should be handled");
+            t.Equals(host.readWord(kReceive), kArenaToken,
+                     "F002 should return its nonzero arena token");
+            t.Equals(host.readWord(kReceive + 4u), 0u,
+                     "F002 should zero the remainder of its response");
+
+            t.IsTrue(host.writeWord(kSend + 4u, 0u),
+                     "zero F002 arena token should be writable");
+            t.IsFalse(subsystem.handleRpc(request).handled,
+                      "F002 must reject a zero arena token");
+
+            constexpr uint32_t kSelfToken = 0x00400080u;
+            constexpr uint32_t kRegistrationPointer = 0x00005010u;
+            t.IsTrue(host.writeWord(kSend + 0u, kSelfToken),
+                     "5F10 self token should be writable");
+            t.IsTrue(host.writeWord(kSend + 4u, 11u),
+                     "5F10 registration index should be writable");
+            t.IsTrue(host.writeWord(kSend + 8u, kRegistrationPointer),
+                     "5F10 registration pointer should be writable");
+            request.function = 0x5F10u;
+            t.IsTrue(subsystem.handleRpc(request).handled,
+                     "the observed 5F10 registration envelope should be handled");
+            t.Equals(host.readWord(kReceive), 0u,
+                     "5F10 should return a zeroed response");
+
+            t.IsTrue(host.writeWord(kSend + 4u, 12u),
+                     "out-of-range 5F10 index should be writable");
+            t.IsFalse(subsystem.handleRpc(request).handled,
+                      "5F10 must reject indexes outside its 12-entry registry");
+            t.IsTrue(host.writeWord(kSend + 0u, kSelfToken + 4u),
+                     "mismatched 5F10 self token should be writable");
+            t.IsTrue(host.writeWord(kSend + 4u, 0u),
+                     "valid 5F10 index should be writable");
+            t.IsFalse(subsystem.handleRpc(request).handled,
+                      "5F10 must reject a mismatched established self token");
+            t.IsTrue(host.writeWord(kSend + 0u, kSelfToken),
+                     "valid 5F10 self token should be restorable");
+            t.IsTrue(host.writeWord(kSend + 8u, 0u),
+                     "zero 5F10 pointer should be writable");
+            t.IsFalse(subsystem.handleRpc(request).handled,
+                      "5F10 must reject a zero registration pointer");
+
+            constexpr uint32_t kRangeBase = 0x00150000u;
+            constexpr uint32_t kRangeSize = 0x00038000u;
+            t.IsTrue(host.writeWord(kSend + 0u, kSelfToken),
+                     "5F12 self token should be writable");
+            t.IsTrue(host.writeWord(kSend + 4u, kRangeBase),
+                     "5F12 range base should be writable");
+            t.IsTrue(host.writeWord(kSend + 8u, kRangeSize),
+                     "5F12 range size should be writable");
+            request.function = 0x5F12u;
+            t.IsTrue(subsystem.handleRpc(request).handled,
+                     "the observed 5F12 range envelope should be handled");
+            t.Equals(host.readWord(kReceive), 0u,
+                     "5F12 should return a zeroed response");
+
+            t.IsTrue(host.writeWord(kSend + 4u, 0xFFFFFFF0u),
+                     "overflowing 5F12 base should be writable");
+            t.IsTrue(host.writeWord(kSend + 8u, 0x20u),
+                     "overflowing 5F12 size should be writable");
+            t.IsFalse(subsystem.handleRpc(request).handled,
+                      "5F12 must reject a range that overflows uint32");
+            t.IsTrue(host.writeWord(kSend + 4u, kRangeBase),
+                     "valid 5F12 base should be restorable");
+            t.IsTrue(host.writeWord(kSend + 8u, 0u),
+                     "zero 5F12 size should be writable");
+            t.IsFalse(subsystem.handleRpc(request).handled,
+                      "5F12 must reject a zero-size range");
+            t.IsTrue(host.writeWord(kSend + 4u, 0u),
+                     "zero 5F12 base should be writable");
+            t.IsTrue(host.writeWord(kSend + 8u, kRangeSize),
+                     "valid 5F12 size should be restorable");
+            t.IsFalse(subsystem.handleRpc(request).handled,
+                      "5F12 must reject a zero-base range");
+
+            const ps2x::iop::DebugSnapshot handledSnapshot = subsystem.debugSnapshot();
+            service = findService(handledSnapshot, "Duelists custom RPC probe");
+            if (service)
+            {
+                t.Equals(metricValue(*service, "handled_calls"), uint64_t{4},
+                         "the probe should count all typed calls");
+                t.Equals(metricValue(*service, "f002_calls"), uint64_t{1},
+                         "the probe should count typed F002 calls");
+                t.Equals(metricValue(*service, "registration_count"), uint64_t{1},
+                         "the probe should count valid 5F10 registrations");
+                t.Equals(metricValue(*service, "last_registration_index"), uint64_t{11},
+                         "the probe should retain the last valid registration index");
+                t.Equals(metricValue(*service, "last_registration_pointer"),
+                         uint64_t{kRegistrationPointer},
+                         "the probe should retain the last valid registration pointer");
+                t.Equals(metricValue(*service, "range_registration_count"), uint64_t{1},
+                         "the probe should count valid 5F12 range registrations");
+                t.Equals(metricValue(*service, "registered_range_base"), uint64_t{kRangeBase},
+                         "the probe should retain the registered range base");
+                t.Equals(metricValue(*service, "registered_range_size"), uint64_t{kRangeSize},
+                         "the probe should retain the registered range size");
+                t.Equals(metricValue(*service, "rejected_calls"), uint64_t{9},
+                         "the probe should retain rejected-call diagnostics");
+            }
+
+            subsystem.reset();
+            const ps2x::iop::DebugSnapshot resetSnapshot = subsystem.debugSnapshot();
+            service = findService(resetSnapshot, "Duelists custom RPC probe");
+            if (service)
+            {
+                t.Equals(metricValue(*service, "handled_calls"), uint64_t{0},
+                         "reset should clear typed call counters");
+                t.Equals(metricValue(*service, "registration_count"), uint64_t{0},
+                         "reset should clear registration counters");
+                t.Equals(metricValue(*service, "range_registration_count"), uint64_t{0},
+                         "reset should clear range counters");
+                t.Equals(metricValue(*service, "self_token"), uint64_t{0},
+                         "reset should clear the established self token");
+                t.Equals(metricValue(*service, "registered_range_size"), uint64_t{0},
+                         "reset should clear the registered range");
+            }
+
+            FakeIopHost otherHost;
+            ps2x::iop::IopSubsystem otherSubsystem(otherHost);
+            error.clear();
+            t.IsTrue(otherSubsystem.configure({"SLUS_203.88", 0u, 0u}, &error),
+                     "another built-in profile should configure");
+            t.IsFalse(otherSubsystem.handlesSid(kSid),
+                      "the Duelists custom SID must not leak into other profiles");
         });
 
         tc.Run("two subsystem instances isolate profile state and reset deterministically", [](TestCase &t)

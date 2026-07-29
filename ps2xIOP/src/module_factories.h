@@ -172,4 +172,5 @@ namespace ps2x::iop::detail
     std::unique_ptr<IopService> createClFileService(IopHost &host, ClFileBindings bindings);
     std::unique_ptr<IopService> createSoundUpdateStubService(IopHost &host, SoundUpdateStubBindings bindings);
     std::unique_ptr<IopService> createSdrdrvService(IopHost &host, SdrdrvBindings bindings);
+    std::unique_ptr<IopService> createDuelistsRpcProbeService(IopHost &host);
 }

@@ -20,6 +20,7 @@ add_library(ps2_iop STATIC
     src/modules/clfile.cpp
     src/modules/sound_update_stub.cpp
     src/modules/sdrdrv.cpp
+    src/modules/duelists_rpc_probe.cpp
 )
 
 target_compile_features(ps2_iop PUBLIC cxx_std_20)

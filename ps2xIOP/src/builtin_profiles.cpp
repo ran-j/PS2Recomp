@@ -138,6 +138,18 @@ namespace ps2x::iop::detail
         });
 
         profiles.push_back({
+            "duelists-of-the-roses-us",
+            "builtin",
+            {.elfName = "SLUS_205.15"},
+            [](IopHost &host, const GameIdentity &)
+            {
+                ServiceList services;
+                services.emplace_back(createDuelistsRpcProbeService(host));
+                return services;
+            },
+        });
+
+        profiles.push_back({
             "fatal-frame-us",
             "builtin",
             {.elfName = "SLUS_203.88"},
