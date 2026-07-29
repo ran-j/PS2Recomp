@@ -182,7 +182,7 @@ namespace
             }
 
             bool shouldPreempt = false;
-            for (int attempt = 0; attempt < 256 &&
+            for (int attempt = 0; attempt < 2048 &&
                                   !shouldPreempt;
                  ++attempt)
             {
@@ -569,6 +569,30 @@ void register_ps2_runtime_expansion_tests()
 
             t.IsTrue(outerPending, "outermost scope should deliver the deferred yield");
             t.IsFalse(innerPending, "inner scope must stay untouched");
+        });
+
+        tc.Run("guest preemption policy amortizes uncontended back-edge checks", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            uint32_t firstPreemptionCall = 0u;
+
+            // Use a fresh host thread so this assertion starts with a fresh
+            // thread-local back-edge counter.
+            std::thread worker([&]()
+            {
+                for (uint32_t call = 1u; call <= 32768u; ++call)
+                {
+                    if (runtime.shouldPreemptGuestExecution())
+                    {
+                        firstPreemptionCall = call;
+                        break;
+                    }
+                }
+            });
+            worker.join();
+
+            t.Equals(firstPreemptionCall, 16384u,
+                     "uncontended parser loops should amortize dispatcher handoffs across many back edges");
         });
 
         tc.Run("guest preemption policy requests a dispatcher handoff when another guest thread contends", [](TestCase &t)

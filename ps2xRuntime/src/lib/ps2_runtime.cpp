@@ -2159,9 +2159,12 @@ void PS2Runtime::yieldGuestExecutionAfterWake()
 
 bool PS2Runtime::shouldPreemptGuestExecution()
 {
+    constexpr uint32_t kContendedYieldInterval = 1024u;
+    constexpr uint32_t kUncontendedYieldInterval = 16384u;
+
     thread_local uint32_t s_backEdgeYieldCounter = 0u;
     const uint32_t waiterCount = m_guestExecutionWaiters.load(std::memory_order_acquire);
-    const uint32_t yieldInterval = (waiterCount != 0u) ? 64u : 100u;
+    const uint32_t yieldInterval = (waiterCount != 0u) ? kContendedYieldInterval : kUncontendedYieldInterval;
     if (++s_backEdgeYieldCounter < yieldInterval)
     {
         return false;
