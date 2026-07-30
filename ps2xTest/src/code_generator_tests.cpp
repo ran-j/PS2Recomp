@@ -143,6 +143,22 @@ static Instruction makeJr(uint32_t address, uint8_t rs)
     return inst;
 }
 
+static Instruction makeVu0Special2(uint8_t vuFunc, uint8_t fsReg, uint8_t ftReg, uint8_t fsf, uint8_t ftf)
+{
+    Instruction inst{};
+    inst.opcode = OPCODE_COP2;
+    inst.rs = COP2_CO;
+    inst.rd = fsReg;
+    inst.rt = ftReg;
+    // Special2 ops decode as function >= 0x3C with the op rebuilt from raw bits 10-6 and 1-0;
+    // this is the inverse of that decode and must stay in step with it.
+    inst.function = 0x3C;
+    inst.raw = ((static_cast<uint32_t>(vuFunc) >> 2) << 6) | (vuFunc & 0x3);
+    inst.vectorInfo.fsf = fsf;
+    inst.vectorInfo.ftf = ftf;
+    return inst;
+}
+
 static void printGeneratedCode(const std::string& name, const std::string& code)
 {
 #ifdef PRINT_GENERATED_CODE
@@ -1074,6 +1090,21 @@ void register_code_generator_tests()
             t.IsTrue(out.find("ctx->vu0_vf[7]") != std::string::npos, "S1 ft should come from rt");
             t.IsTrue(out.find("ctx->vu0_vf[3]") != std::string::npos, "S1 fd should come from sa");
             t.IsTrue(out.find("ctx->vu0_vf[27]") == std::string::npos, "S1 must not use rs(format) as register index");
+        });
+
+        tc.Run("VRSQRT emits exactly the statements that read fs and ft from their own register and selector", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+
+            t.Equals(gen.translateInstruction(makeVu0Special2(VU0_S2_VRSQRT, 11, 7, 1, 2)),
+                     "{ float fs = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[11], ctx->vu0_vf[11], _MM_SHUFFLE(0,0,0,1))); "
+                     "float ft = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[7], ctx->vu0_vf[7], _MM_SHUFFLE(0,0,0,2))); "
+                     "ctx->vu0_q = (ft > 0.0f) ? (fs / sqrtf(ft)) : 0.0f; }",
+                     "VRSQRT should emit exactly this text for fs=11/fsf=1, ft=7/ftf=2");
+            t.Equals(gen.translateInstruction(makeVu0Special2(VU0_S2_VRSQRT, 24, 5, 3, 0)),
+                     "{ float fs = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[24], ctx->vu0_vf[24], _MM_SHUFFLE(0,0,0,3))); "
+                     "float ft = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[5], ctx->vu0_vf[5], _MM_SHUFFLE(0,0,0,0))); "
+                     "ctx->vu0_q = (ft > 0.0f) ? (fs / sqrtf(ft)) : 0.0f; }",
+                     "VRSQRT should emit exactly this text for fs=24/fsf=3, ft=5/ftf=0");
         });
 
         tc.Run("VU0 S1 q/i forms keep mask and use sa as destination", [](TestCase &t) {
