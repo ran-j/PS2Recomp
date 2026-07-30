@@ -1526,7 +1526,7 @@ void register_ps2_sif_dma_tests()
             }
         });
 
-        tc.Run("raw Duelists F005 call preserves its observed SIF framing", [](TestCase &t)
+        tc.Run("raw Duelists typed calls preserve their observed SIF framing", [](TestCase &t)
         {
             TestEnv env;
             configureProfile(env, "SLUS_205.15");
@@ -1868,6 +1868,47 @@ void register_ps2_sif_dma_tests()
             t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x20u),
                      kCallCommand,
                      "Duelists F003 completion should identify RPC_CALL");
+
+            constexpr uint32_t k5002Sequence = 0x3Du;
+            writeGuestU32(env.rdram.data(), kSendAddress + 0x00u,
+                          kRegistrationSelfToken);
+            writeGuestU32(env.rdram.data(), kSendAddress + 0x04u, 0x00000002u);
+            writeGuestU32(env.rdram.data(), kSendAddress + 0x08u, 0x00001000u);
+            writeGuestU32(env.rdram.data(), kSendAddress + 0x0Cu, 0xFFFFF000u);
+            writeGuestU32(env.rdram.data(), kReceiveAddress - 4u, kGuard);
+            std::memset(env.rdram.data() + kReceiveAddress, 0xCC, 0x10u);
+            writeGuestU32(env.rdram.data(), kReceiveAddress + 0x10u, kGuard);
+
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x10u,
+                          0xA5000000u | k5002Sequence);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x14u,
+                          0x20310000u + k5002Sequence * 0x40u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x18u, k5002Sequence);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x20u, 0x5002u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x30u, 1u);
+            std::memcpy(env.rdram.data() + kDescriptorAddress,
+                        callDescriptors.data(),
+                        sizeof(callDescriptors));
+            invokeDma(2u);
+
+            for (uint32_t offset = 0u; offset < 0x10u; offset += 4u)
+            {
+                t.Equals(readGuestU32(env.rdram.data(), kReceiveAddress + offset),
+                         0u,
+                         "Duelists 5002 should return its idle audio status");
+            }
+            t.Equals(readGuestU32(env.rdram.data(), kReceiveAddress - 4u),
+                     kGuard,
+                     "Duelists 5002 should preserve memory before the response");
+            t.Equals(readGuestU32(env.rdram.data(), kReceiveAddress + 0x10u),
+                     kGuard,
+                     "Duelists 5002 should preserve memory after the response");
+            t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x18u),
+                     k5002Sequence,
+                     "Duelists 5002 completion should preserve the RPC sequence");
+            t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x20u),
+                     kCallCommand,
+                     "Duelists 5002 completion should identify RPC_CALL");
         });
 
         tc.Run("raw FILEIO core service binds at the observed Duelists boundary", [](TestCase &t)

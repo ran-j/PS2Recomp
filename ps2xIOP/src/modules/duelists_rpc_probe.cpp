@@ -35,6 +35,7 @@ namespace ps2x::iop::detail
                 m_registrationCount = 0u;
                 m_rangeRegistrationCount = 0u;
                 m_function5000Calls = 0u;
+                m_function5002Calls = 0u;
                 m_function5005Calls = 0u;
                 m_f003Calls = 0u;
                 m_rejectedCalls = 0u;
@@ -211,6 +212,42 @@ namespace ps2x::iop::detail
                     }
                 }
 
+                const bool structurallyValid5002 =
+                    request.function == k5002Function &&
+                    request.mode == kNowaitMode &&
+                    validTypedEnvelope &&
+                    wordsReadable &&
+                    readableWords >= 1u &&
+                    words[0] != 0u &&
+                    (words[0] & (kSelfTokenAlignment - 1u)) == 0u;
+                if (structurallyValid5002)
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    if (m_selfToken != 0u && words[0] == m_selfToken)
+                    {
+                        // KCEJEAST returns:
+                        // {auto-DMA volume, packed process statuses,
+                        //  auto-DMA status, auto-DMA volume}.
+                        // None of the characterized commands before the first
+                        // 5002 query changes the zero-initialized status.
+                        const std::array<uint32_t, 4> idleStatus{};
+                        if (m_host.writeGuest(request.receive.address,
+                                              idleStatus.data(),
+                                              sizeof(idleStatus)))
+                        {
+                            ++m_handledCalls;
+                            ++m_function5002Calls;
+                            recordRequest(request, words, wordsReadable);
+
+                            RpcResult result;
+                            result.handled = true;
+                            result.resultAddress = request.receive.address;
+                            result.signalNowaitCompletion = true;
+                            return result;
+                        }
+                    }
+                }
+
                 const bool structurallyValid5005 =
                     request.function == k5005Function &&
                     request.mode == kNowaitMode &&
@@ -309,6 +346,7 @@ namespace ps2x::iop::detail
                 metrics.push_back({"registration_count", m_registrationCount, false});
                 metrics.push_back({"range_registration_count", m_rangeRegistrationCount, false});
                 metrics.push_back({"function_5000_calls", m_function5000Calls, false});
+                metrics.push_back({"function_5002_calls", m_function5002Calls, false});
                 metrics.push_back({"function_5005_calls", m_function5005Calls, false});
                 metrics.push_back({"last_5005_argument_0", m_last5005Argument0, true});
                 metrics.push_back({"last_5005_argument_1", m_last5005Argument1, true});
@@ -354,6 +392,7 @@ namespace ps2x::iop::detail
             static constexpr uint32_t k5F10Function = 0x5F10u;
             static constexpr uint32_t k5F12Function = 0x5F12u;
             static constexpr uint32_t k5000Function = 0x5000u;
+            static constexpr uint32_t k5002Function = 0x5002u;
             static constexpr uint32_t k5005Function = 0x5005u;
             static constexpr uint32_t kF003Function = 0xF003u;
             static constexpr uint32_t kTypedSendSize = 0x40u;
@@ -369,6 +408,7 @@ namespace ps2x::iop::detail
             uint64_t m_registrationCount = 0u;
             uint64_t m_rangeRegistrationCount = 0u;
             uint64_t m_function5000Calls = 0u;
+            uint64_t m_function5002Calls = 0u;
             uint64_t m_function5005Calls = 0u;
             uint64_t m_f003Calls = 0u;
             uint64_t m_rejectedCalls = 0u;

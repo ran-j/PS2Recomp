@@ -1041,6 +1041,51 @@ void register_ps2_iop_tests()
                      "mismatched 5000 must leave receive memory untouched");
 
             t.IsTrue(host.writeWord(kSend + 0u, kSelfToken),
+                     "5002 self token should be writable");
+            t.IsTrue(host.writeWord(kSend + 4u, 0x00000002u),
+                     "5002 stale first trailing word should be writable");
+            t.IsTrue(host.writeWord(kSend + 8u, 0x00001000u),
+                     "5002 stale second trailing word should be writable");
+            t.IsTrue(host.writeWord(kSend + 12u, 0xFFFFF000u),
+                     "5002 stale third trailing word should be writable");
+            for (uint32_t offset = 0u; offset < 0x10u; offset += sizeof(uint32_t))
+            {
+                t.IsTrue(host.writeWord(kReceive + offset, kSentinel),
+                         "5002 response sentinel should be writable");
+            }
+            request.function = 0x5002u;
+            request.mode = 1u;
+            const RpcResult function5002Result = subsystem.handleRpc(request);
+            t.IsTrue(function5002Result.handled,
+                     "the exact NOWAIT 5002 envelope should be handled");
+            t.IsTrue(function5002Result.signalNowaitCompletion,
+                     "5002 should request NOWAIT completion signaling");
+            t.Equals(function5002Result.resultAddress, kReceive,
+                     "5002 should return its receive buffer");
+            for (uint32_t offset = 0u; offset < 0x10u; offset += sizeof(uint32_t))
+            {
+                t.Equals(host.readWord(kReceive + offset), 0u,
+                         "5002 should return the characterized idle audio status");
+            }
+            t.Equals(host.readWord(kReceive + 0x10u), kSentinel,
+                     "5002 must not write beyond its response");
+
+            t.IsTrue(host.writeWord(kReceive, kSentinel),
+                     "malformed 5002 receive sentinel should be writable");
+            request.mode = 0u;
+            t.IsFalse(subsystem.handleRpc(request).handled,
+                      "5002 must reject a non-NOWAIT call");
+            t.Equals(host.readWord(kReceive), kSentinel,
+                     "malformed 5002 must leave receive memory untouched");
+            request.mode = 1u;
+            t.IsTrue(host.writeWord(kSend, kSelfToken + 0x40u),
+                     "mismatched aligned 5002 self token should be writable");
+            t.IsFalse(subsystem.handleRpc(request).handled,
+                      "5002 must reject a mismatched stable self token");
+            t.Equals(host.readWord(kReceive), kSentinel,
+                     "mismatched 5002 must leave receive memory untouched");
+
+            t.IsTrue(host.writeWord(kSend + 0u, kSelfToken),
                      "5005 self token should be writable");
             t.IsTrue(host.writeWord(kSend + 4u, 0x80u),
                      "5005 first opaque argument should be writable");
@@ -1140,7 +1185,7 @@ void register_ps2_iop_tests()
             service = findService(handledSnapshot, "Duelists custom RPC probe");
             if (service)
             {
-                t.Equals(metricValue(*service, "handled_calls"), uint64_t{9},
+                t.Equals(metricValue(*service, "handled_calls"), uint64_t{10},
                          "the probe should count all typed calls");
                 t.Equals(metricValue(*service, "f002_calls"), uint64_t{1},
                          "the probe should count typed F002 calls");
@@ -1159,6 +1204,8 @@ void register_ps2_iop_tests()
                          "the probe should retain the registered range size");
                 t.Equals(metricValue(*service, "function_5000_calls"), uint64_t{1},
                          "the probe should count typed 5000 calls");
+                t.Equals(metricValue(*service, "function_5002_calls"), uint64_t{1},
+                         "the probe should count typed 5002 calls");
                 t.Equals(metricValue(*service, "function_5005_calls"), uint64_t{2},
                          "the probe should count typed 5005 calls");
                 t.Equals(metricValue(*service, "last_5005_argument_0"), uint64_t{0},
@@ -1169,7 +1216,7 @@ void register_ps2_iop_tests()
                          "the probe should count typed F003 calls");
                 t.Equals(metricValue(*service, "last_f003_enabled"), uint64_t{1},
                          "the probe should retain the last F003 Boolean");
-                t.Equals(metricValue(*service, "rejected_calls"), uint64_t{15},
+                t.Equals(metricValue(*service, "rejected_calls"), uint64_t{17},
                          "the probe should retain rejected-call diagnostics");
             }
 
@@ -1186,6 +1233,8 @@ void register_ps2_iop_tests()
                          "reset should clear range counters");
                 t.Equals(metricValue(*service, "function_5000_calls"), uint64_t{0},
                          "reset should clear 5000 counters");
+                t.Equals(metricValue(*service, "function_5002_calls"), uint64_t{0},
+                         "reset should clear 5002 counters");
                 t.Equals(metricValue(*service, "function_5005_calls"), uint64_t{0},
                          "reset should clear 5005 counters");
                 t.Equals(metricValue(*service, "f003_calls"), uint64_t{0},
