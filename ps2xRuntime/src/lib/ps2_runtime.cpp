@@ -465,6 +465,26 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
             width != s_lastWidth ||
             height != s_lastHeight)
         {
+            uint64_t frameHash = 14695981039346656037ull;
+            for (const uint8_t byte : s_scratch)
+            {
+                frameHash ^= static_cast<uint64_t>(byte);
+                frameHash *= 1099511628211ull;
+            }
+
+            uint64_t nonBlackPixels = 0u;
+            uint64_t nonOpaqueBlackPixels = 0u;
+            for (size_t offset = 0u; offset + 3u < s_scratch.size(); offset += 4u)
+            {
+                const bool nonBlack =
+                    s_scratch[offset + 0u] != 0u ||
+                    s_scratch[offset + 1u] != 0u ||
+                    s_scratch[offset + 2u] != 0u;
+                nonBlackPixels += nonBlack ? 1u : 0u;
+                nonOpaqueBlackPixels +=
+                    (nonBlack || s_scratch[offset + 3u] != 0xFFu) ? 1u : 0u;
+            }
+
             const GSDebugSnapshot gsDebug = rt->gs().getDebugSnapshot();
             std::cout << "[frame:upload] idx=" << s_uploadDebugCount
                       << " tick=" << currentTick
@@ -472,6 +492,9 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
                       << " sourceFbp=" << sourceFbp
                       << " size=" << width << "x" << height
                       << " preferred=" << static_cast<uint32_t>(usedPreferredDisplaySource ? 1u : 0u)
+                      << " frameHash=0x" << std::hex << frameHash << std::dec
+                      << " nonBlackPixels=" << nonBlackPixels
+                      << " nonOpaqueBlackPixels=" << nonOpaqueBlackPixels
                       << " gifPath1=" << rt->memory().gifPathPacketCount(GifPathId::Path1)
                       << " gifPath3=" << rt->memory().gifPathPacketCount(GifPathId::Path3)
                       << " gifPackets=" << gsDebug.gifPacketCount
@@ -2434,6 +2457,64 @@ void PS2Runtime::Store32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
     ps2TraceGuestWrite(rdram, vaddr, 4u, value, 0u, "WRITE32", ctx);
     try
     {
+        PS2_IF_AGRESSIVE_LOGS({
+            constexpr uint32_t kGifChcr = 0x1000A000u;
+            constexpr uint32_t kGifMadr = 0x1000A010u;
+            constexpr uint32_t kGifQwc = 0x1000A020u;
+            constexpr uint32_t kGifTadr = 0x1000A030u;
+            constexpr uint32_t kGifAsr0 = 0x1000A040u;
+            constexpr uint32_t kGifAsr1 = 0x1000A050u;
+            static uint64_t s_gifDmaWatchCount = 0u;
+            if (vaddr == kGifChcr &&
+                (value & 0x100u) != 0u &&
+                s_gifDmaWatchCount < 160u)
+            {
+                const uint32_t madr = m_memory.readIORegister(kGifMadr);
+                const uint32_t qwc = m_memory.readIORegister(kGifQwc);
+                const uint32_t tadr = m_memory.readIORegister(kGifTadr);
+                const uint32_t mode = (value >> 2u) & 0x3u;
+                const uint32_t source = (mode == 0u) ? madr : tadr;
+                const uint32_t bytes = (mode == 0u) ? (qwc * 16u) : 16u;
+                uint64_t tagLo = 0u;
+                uint64_t tagHi = 0u;
+                uint64_t packetHash = 14695981039346656037ull;
+                bool tagReadable = false;
+                try
+                {
+                    tagLo = m_memory.read64(source);
+                    tagHi = m_memory.read64(source + 8u);
+                    for (uint32_t offset = 0u; offset < bytes; ++offset)
+                    {
+                        packetHash ^= static_cast<uint64_t>(
+                            m_memory.read8(source + offset));
+                        packetHash *= 1099511628211ull;
+                    }
+                    tagReadable = true;
+                }
+                catch (const std::exception &)
+                {
+                }
+
+                std::cout << "[gif:dma-origin] idx=" << s_gifDmaWatchCount
+                          << " pc=0x" << std::hex << (ctx ? ctx->pc : 0u)
+                          << " ra=0x" << (ctx ? getRegU32(ctx, 31) : 0u)
+                          << " chcr=0x" << value
+                          << " mode=" << std::dec << mode
+                          << " madr=0x" << std::hex << madr
+                          << " qwc=0x" << qwc
+                          << " tadr=0x" << tadr
+                          << " asr0=0x" << m_memory.readIORegister(kGifAsr0)
+                          << " asr1=0x" << m_memory.readIORegister(kGifAsr1)
+                          << " source=0x" << source
+                          << " bytes=0x" << bytes
+                          << " tagReadable=" << std::dec << (tagReadable ? 1u : 0u)
+                          << " tagLo=0x" << std::hex << tagLo
+                          << " tagHi=0x" << tagHi
+                          << " packetHash=0x" << packetHash
+                          << std::dec << std::endl;
+                ++s_gifDmaWatchCount;
+            }
+        });
         m_memory.write32(vaddr, value);
         drainCompletedDmacHandlers(rdram);
     }
