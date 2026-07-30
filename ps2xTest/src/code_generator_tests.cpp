@@ -851,6 +851,232 @@ void register_code_generator_tests()
             t.IsTrue(ctc2Code.find("Unimplemented CTC2 VU CReg") == std::string::npos, "CTC2 should not hit unimplemented CReg path");
         });
 
+        tc.Run("CFC2 from the Q control register reads vu0_q as raw bits", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+
+            Instruction cfc2{};
+            cfc2.opcode = OPCODE_COP2;
+            cfc2.rs = COP2_CFC2;
+            cfc2.rt = 19;
+            cfc2.rd = VU0_CR_Q;
+
+            std::string code = gen.translateInstruction(cfc2);
+            printGeneratedCode("CFC2 from the Q control register reads vu0_q as raw bits", code);
+            t.Equals(code,
+                     std::string("{ uint32_t bits; std::memcpy(&bits, &ctx->vu0_q, sizeof(bits)); SET_GPR_U32(ctx, 19, bits); }"),
+                     "CFC2 from the Q control register should copy all of vu0_q's bits into rt");
+
+            cfc2.rt = 24;
+            code = gen.translateInstruction(cfc2);
+            printGeneratedCode("CFC2 from the Q control register reads vu0_q as raw bits (rt 24)", code);
+            t.Equals(code,
+                     std::string("{ uint32_t bits; std::memcpy(&bits, &ctx->vu0_q, sizeof(bits)); SET_GPR_U32(ctx, 24, bits); }"),
+                     "CFC2 from the Q control register should write whichever GPR rt names");
+
+            cfc2.rt = 31;
+            code = gen.translateInstruction(cfc2);
+            printGeneratedCode("CFC2 from the Q control register reads vu0_q as raw bits (rt 31)", code);
+            t.Equals(code,
+                     std::string("{ uint32_t bits; std::memcpy(&bits, &ctx->vu0_q, sizeof(bits)); SET_GPR_U32(ctx, 31, bits); }"),
+                     "CFC2 from the Q control register should name rt with no bits dropped");
+        });
+
+        tc.Run("CTC2 to the Q control register writes vu0_q as raw bits", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+
+            Instruction ctc2{};
+            ctc2.opcode = OPCODE_COP2;
+            ctc2.rs = COP2_CTC2;
+            ctc2.rt = 19;
+            ctc2.rd = VU0_CR_Q;
+
+            std::string code = gen.translateInstruction(ctc2);
+            printGeneratedCode("CTC2 to the Q control register writes vu0_q as raw bits", code);
+            t.Equals(code,
+                     std::string("{ uint32_t tmp = GPR_U32(ctx, 19); std::memcpy(&ctx->vu0_q, &tmp, sizeof(tmp)); }"),
+                     "CTC2 to the Q control register should copy all of rt's low bits into vu0_q");
+
+            ctc2.rt = 24;
+            code = gen.translateInstruction(ctc2);
+            printGeneratedCode("CTC2 to the Q control register writes vu0_q as raw bits (rt 24)", code);
+            t.Equals(code,
+                     std::string("{ uint32_t tmp = GPR_U32(ctx, 24); std::memcpy(&ctx->vu0_q, &tmp, sizeof(tmp)); }"),
+                     "CTC2 to the Q control register should read whichever GPR rt names");
+
+            ctc2.rt = 31;
+            code = gen.translateInstruction(ctc2);
+            printGeneratedCode("CTC2 to the Q control register writes vu0_q as raw bits (rt 31)", code);
+            t.Equals(code,
+                     std::string("{ uint32_t tmp = GPR_U32(ctx, 31); std::memcpy(&ctx->vu0_q, &tmp, sizeof(tmp)); }"),
+                     "CTC2 to the Q control register should name rt with no bits dropped");
+        });
+
+        tc.Run("the Q register is COP2 control register 22", [](TestCase &t) {
+            t.Equals(static_cast<int>(VU0_CR_Q), 22, "Q is COP2 control register 22");
+        });
+
+        tc.Run("CFC2 from VU0_CR_CLIP still reads vu0_clip_flags", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+
+            Instruction cfc2{};
+            cfc2.opcode = OPCODE_COP2;
+            cfc2.rs = COP2_CFC2;
+            cfc2.rt = 24;
+            cfc2.rd = VU0_CR_CLIP;
+
+            std::string code = gen.translateInstruction(cfc2);
+            printGeneratedCode("CFC2 from VU0_CR_CLIP still reads vu0_clip_flags", code);
+            t.Equals(code,
+                     std::string("SET_GPR_U32(ctx, 24, ctx->vu0_clip_flags);"),
+                     "the CFC2 VU0_CR_CLIP arm should still read vu0_clip_flags");
+        });
+
+        tc.Run("CFC2 from an unmapped control register names the control register", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+
+            Instruction cfc2{};
+            cfc2.opcode = OPCODE_COP2;
+            cfc2.rs = COP2_CFC2;
+            cfc2.rt = 24;
+            cfc2.rd = 19;
+
+            std::string code = gen.translateInstruction(cfc2);
+            printGeneratedCode("CFC2 from an unmapped control register names the control register", code);
+            t.Equals(code,
+                     std::string("// Unimplemented CFC2 VU CReg: 19"),
+                     "the CFC2 fallback should report the control register with no bits added");
+
+            cfc2.rd = 25;
+            code = gen.translateInstruction(cfc2);
+            printGeneratedCode("CFC2 from an unmapped control register names the control register (25)", code);
+            t.Equals(code,
+                     std::string("// Unimplemented CFC2 VU CReg: 25"),
+                     "the CFC2 fallback should report the control register number, not rt");
+
+            cfc2.rd = 30;
+            code = gen.translateInstruction(cfc2);
+            printGeneratedCode("CFC2 from an unmapped control register names the control register (30)", code);
+            t.Equals(code,
+                     std::string("// Unimplemented CFC2 VU CReg: 30"),
+                     "the CFC2 fallback should report whichever control register was named");
+
+            cfc2.rd = 23;
+            code = gen.translateInstruction(cfc2);
+            printGeneratedCode("CFC2 from an unmapped control register names the control register (23)", code);
+            t.Equals(code,
+                     std::string("// Unimplemented CFC2 VU CReg: 23"),
+                     "the CFC2 fallback should report the control register without truncating the register field");
+        });
+
+        tc.Run("CTC2 to VU0_CR_CLIP still writes vu0_clip_flags", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+
+            Instruction ctc2{};
+            ctc2.opcode = OPCODE_COP2;
+            ctc2.rs = COP2_CTC2;
+            ctc2.rt = 24;
+            ctc2.rd = VU0_CR_CLIP;
+
+            std::string code = gen.translateInstruction(ctc2);
+            printGeneratedCode("CTC2 to VU0_CR_CLIP still writes vu0_clip_flags", code);
+            t.Equals(code,
+                     std::string("ctx->vu0_clip_flags = GPR_U32(ctx, 24);"),
+                     "the CTC2 VU0_CR_CLIP arm should still write vu0_clip_flags");
+        });
+
+        tc.Run("CTC2 to an unmapped control register names the control register", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+
+            Instruction ctc2{};
+            ctc2.opcode = OPCODE_COP2;
+            ctc2.rs = COP2_CTC2;
+            ctc2.rt = 24;
+            ctc2.rd = 19;
+
+            std::string code = gen.translateInstruction(ctc2);
+            printGeneratedCode("CTC2 to an unmapped control register names the control register", code);
+            t.Equals(code,
+                     std::string("// Unimplemented CTC2 VU CReg: 19"),
+                     "the CTC2 fallback should report the control register with no bits added");
+
+            ctc2.rd = 25;
+            code = gen.translateInstruction(ctc2);
+            printGeneratedCode("CTC2 to an unmapped control register names the control register (25)", code);
+            t.Equals(code,
+                     std::string("// Unimplemented CTC2 VU CReg: 25"),
+                     "the CTC2 fallback should report the control register number, not rt");
+
+            ctc2.rd = 30;
+            code = gen.translateInstruction(ctc2);
+            printGeneratedCode("CTC2 to an unmapped control register names the control register (30)", code);
+            t.Equals(code,
+                     std::string("// Unimplemented CTC2 VU CReg: 30"),
+                     "the CTC2 fallback should report whichever control register was named");
+
+            ctc2.rd = 23;
+            code = gen.translateInstruction(ctc2);
+            printGeneratedCode("CTC2 to an unmapped control register names the control register (23)", code);
+            t.Equals(code,
+                     std::string("// Unimplemented CTC2 VU CReg: 23"),
+                     "the CTC2 fallback should report the control register without truncating the register field");
+        });
+
+        tc.Run("CFC2 and CTC2 still route the I, INFO and P control registers to their own fields", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+
+            Instruction cfc2{};
+            cfc2.opcode = OPCODE_COP2;
+            cfc2.rs = COP2_CFC2;
+            cfc2.rt = 24;
+
+            cfc2.rd = VU0_CR_I;
+            std::string code = gen.translateInstruction(cfc2);
+            printGeneratedCode("CFC2 from VU0_CR_I still reads vu0_i", code);
+            t.Equals(code,
+                     std::string("{ uint32_t bits; std::memcpy(&bits, &ctx->vu0_i, sizeof(bits)); SET_GPR_U32(ctx, 24, bits); }"),
+                     "the CFC2 VU0_CR_I arm should still read vu0_i");
+
+            cfc2.rd = VU0_CR_INFO;
+            code = gen.translateInstruction(cfc2);
+            printGeneratedCode("CFC2 from VU0_CR_INFO still reads vu0_info", code);
+            t.Equals(code,
+                     std::string("SET_GPR_U32(ctx, 24, ctx->vu0_info);"),
+                     "the CFC2 VU0_CR_INFO arm should still read vu0_info");
+
+            cfc2.rd = VU0_CR_P;
+            code = gen.translateInstruction(cfc2);
+            printGeneratedCode("CFC2 from VU0_CR_P still reads vu0_p", code);
+            t.Equals(code,
+                     std::string("{ uint32_t bits; std::memcpy(&bits, &ctx->vu0_p, sizeof(bits)); SET_GPR_U32(ctx, 24, bits); }"),
+                     "the CFC2 VU0_CR_P arm should still read vu0_p");
+
+            Instruction ctc2{};
+            ctc2.opcode = OPCODE_COP2;
+            ctc2.rs = COP2_CTC2;
+            ctc2.rt = 24;
+
+            ctc2.rd = VU0_CR_I;
+            code = gen.translateInstruction(ctc2);
+            printGeneratedCode("CTC2 to VU0_CR_I still writes vu0_i", code);
+            t.Equals(code,
+                     std::string("{ uint32_t tmp = GPR_U32(ctx, 24); std::memcpy(&ctx->vu0_i, &tmp, sizeof(tmp)); }"),
+                     "the CTC2 VU0_CR_I arm should still write vu0_i");
+
+            ctc2.rd = VU0_CR_INFO;
+            code = gen.translateInstruction(ctc2);
+            printGeneratedCode("CTC2 to VU0_CR_INFO still writes vu0_info", code);
+            t.Equals(code,
+                     std::string("ctx->vu0_info = GPR_U32(ctx, 24);"),
+                     "the CTC2 VU0_CR_INFO arm should still write vu0_info");
+
+            ctc2.rd = VU0_CR_P;
+            code = gen.translateInstruction(ctc2);
+            printGeneratedCode("CTC2 to VU0_CR_P still writes vu0_p", code);
+            t.Equals(code,
+                     std::string("{ uint32_t tmp = GPR_U32(ctx, 24); std::memcpy(&ctx->vu0_p, &tmp, sizeof(tmp)); }"),
+                     "the CTC2 VU0_CR_P arm should still write vu0_p");
+        });
+
         tc.Run("scalar logical immediates emit low64 operations", [](TestCase &t) {
             CodeGenerator gen({}, {});
 
