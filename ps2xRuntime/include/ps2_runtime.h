@@ -2,6 +2,8 @@
 #define PS2_RUNTIME_H
 
 #include <cstring>
+#include <cstdlib>
+#include <algorithm>
 #include <cstdint>
 #include <vector>
 #include <string>
@@ -233,6 +235,113 @@ inline uint8_t ps2PathWatchExtractByteFromWrite(uint32_t writeAddr, uint32_t wat
     return static_cast<uint8_t>((valueHi >> ((byteIndex - 8u) * 8u)) & 0xFFu);
 }
 
+struct PS2GuestWriteWatchConfig
+{
+    uint32_t address = 0u;
+    uint32_t size = 0u;
+    bool enabled = false;
+};
+
+inline bool ps2GuestWriteWatchIntersects(uint32_t guestAddr,
+                                         uint32_t size,
+                                         uint32_t watchAddr,
+                                         uint32_t watchSize)
+{
+    if (size == 0u || watchSize == 0u)
+    {
+        return false;
+    }
+    const uint64_t writeBegin = guestAddr & PS2_RAM_MASK;
+    const uint64_t watchBegin = watchAddr & PS2_RAM_MASK;
+    return writeBegin < watchBegin + watchSize && watchBegin < writeBegin + size;
+}
+
+inline const PS2GuestWriteWatchConfig &ps2GuestWriteWatchConfig()
+{
+    static const PS2GuestWriteWatchConfig config = []
+    {
+        PS2GuestWriteWatchConfig parsed{};
+        const char *addressText = std::getenv("PS2X_GUEST_WRITE_WATCH_ADDR");
+        const char *sizeText = std::getenv("PS2X_GUEST_WRITE_WATCH_SIZE");
+        if (!addressText || !sizeText || addressText[0] == '\0' || sizeText[0] == '\0')
+        {
+            return parsed;
+        }
+
+        char *addressEnd = nullptr;
+        char *sizeEnd = nullptr;
+        const unsigned long address = std::strtoul(addressText, &addressEnd, 0);
+        const unsigned long size = std::strtoul(sizeText, &sizeEnd, 0);
+        if (addressEnd != addressText && *addressEnd == '\0' &&
+            sizeEnd != sizeText && *sizeEnd == '\0' &&
+            address <= UINT32_MAX && size != 0u && size <= UINT32_MAX)
+        {
+            parsed.address = static_cast<uint32_t>(address);
+            parsed.size = static_cast<uint32_t>(size);
+            parsed.enabled = true;
+        }
+        return parsed;
+    }();
+    return config;
+}
+
+inline bool ps2ShouldLogGuestWriteWatch()
+{
+    static std::atomic<uint64_t> hitCount{0u};
+    const uint64_t hit = hitCount.fetch_add(1u, std::memory_order_relaxed) + 1u;
+    return hit <= 256u || (hit & (hit - 1u)) == 0u;
+}
+
+inline void ps2LogGuestWriteWatch(uint8_t *rdram,
+                                  uint32_t guestAddr,
+                                  uint32_t size,
+                                  uint64_t valueLo,
+                                  uint64_t valueHi,
+                                  bool hasImmediateValue,
+                                  const char *op,
+                                  const R5900Context *ctx)
+{
+    const PS2GuestWriteWatchConfig &watch = ps2GuestWriteWatchConfig();
+    if (!watch.enabled ||
+        !ps2GuestWriteWatchIntersects(guestAddr, size, watch.address, watch.size) ||
+        !ps2ShouldLogGuestWriteWatch())
+    {
+        return;
+    }
+
+    const uint32_t pc = ctx ? ctx->pc : 0u;
+    const uint32_t ra = ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0)) : 0u;
+    static std::mutex logMutex;
+    std::lock_guard<std::mutex> lock(logMutex);
+    std::cerr << "[guest-write-watch] op=" << (op ? op : "<unknown>")
+              << " addr=0x" << std::hex << guestAddr
+              << " size=0x" << size
+              << " pc=0x" << pc
+              << " ra=0x" << ra;
+    if (hasImmediateValue)
+    {
+        std::cerr << " valueLo=0x" << valueLo;
+        if (size > 8u)
+        {
+            std::cerr << " valueHi=0x" << valueHi;
+        }
+    }
+    else if (rdram)
+    {
+        const uint32_t physical = guestAddr & PS2_RAM_MASK;
+        uint64_t preview = 0u;
+        const uint32_t previewSize =
+            physical < PS2_RAM_SIZE ? std::min<uint32_t>(size, std::min<uint32_t>(8u, PS2_RAM_SIZE - physical)) : 0u;
+        if (previewSize != 0u)
+        {
+            std::memcpy(&preview, rdram + physical, previewSize);
+            std::cerr << " valuePreview=0x" << preview
+                      << " previewSize=0x" << previewSize;
+        }
+    }
+    std::cerr << " watch=0x" << watch.address << "+0x" << watch.size << std::dec << std::endl;
+}
+
 inline void ps2TraceGuestWrite(uint8_t *rdram,
                                uint32_t guestAddr,
                                uint32_t size,
@@ -241,14 +350,7 @@ inline void ps2TraceGuestWrite(uint8_t *rdram,
                                const char *op,
                                const R5900Context *ctx)
 {
-    (void)rdram;
-    (void)guestAddr;
-    (void)size;
-    (void)valueLo;
-    (void)valueHi;
-    (void)op;
-    (void)ctx;
-    // TODO we dont need this anymore so on next release it will be deleted
+    ps2LogGuestWriteWatch(rdram, guestAddr, size, valueLo, valueHi, true, op, ctx);
 }
 
 inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
@@ -257,12 +359,7 @@ inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
                                     const char *op,
                                     const R5900Context *ctx)
 {
-    (void)rdram;
-    (void)guestAddr;
-    (void)size;
-    (void)op;
-    (void)ctx;
-    // TODO we dont need this anymore so on next release it will be deleted
+    ps2LogGuestWriteWatch(rdram, guestAddr, size, 0u, 0u, false, op, ctx);
 }
 
 class PS2Runtime
@@ -439,6 +536,19 @@ public:
         return m_guestExecutionHandoffTimeouts.load(std::memory_order_relaxed);
     }
 
+    struct GuestLoopWatchStats
+    {
+        uint64_t totalSamples = 0u;
+        uint64_t identicalStreak = 0u;
+        uint64_t progressChanges = 0u;
+        uint64_t reportCount = 0u;
+        uint32_t historySize = 0u;
+    };
+
+    // Optional diagnostic only. A watched PC of zero disables sampling.
+    void configureGuestLoopWatch(uint32_t watchedPc, uint64_t reportThreshold = 1024u);
+    GuestLoopWatchStats guestLoopWatchStats() const;
+
     uint8_t Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr);
     uint16_t Load16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr);
     uint32_t Load32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr);
@@ -507,6 +617,7 @@ private:
     uint32_t releaseGuestExecution();
     void reacquireGuestExecution(uint32_t depth);
     void markGuestExecutionAcquired();
+    void observeGuestLoopWatch(uint8_t *rdram, const R5900Context *ctx, uint32_t pc);
 
     void HandleIntegerOverflow(R5900Context *ctx);
 
@@ -537,6 +648,24 @@ private:
     mutable std::condition_variable m_guestExecutionHandoffCv;
     std::atomic<uint64_t> m_guestExecutionHandoffEpoch{0u};
     std::atomic<uint64_t> m_guestExecutionHandoffTimeouts{0u};
+    struct GuestLoopWatchSnapshot
+    {
+        std::array<uint32_t, 12> values{};
+        uint32_t readableMask = 0u;
+
+        bool operator==(const GuestLoopWatchSnapshot &other) const
+        {
+            return readableMask == other.readableMask && values == other.values;
+        }
+    };
+    std::atomic<uint32_t> m_guestLoopWatchPc{0u};
+    std::atomic<uint64_t> m_guestLoopWatchReportThreshold{1024u};
+    mutable std::mutex m_guestLoopWatchMutex;
+    GuestLoopWatchSnapshot m_guestLoopWatchLast{};
+    std::array<GuestLoopWatchSnapshot, 16> m_guestLoopWatchHistory{};
+    GuestLoopWatchStats m_guestLoopWatchStats{};
+    uint32_t m_guestLoopWatchHistoryNext = 0u;
+    bool m_guestLoopWatchHasLast = false;
     mutable std::mutex m_guestHeapMutex;
     mutable std::mutex m_asyncCallbackStackMutex;
     std::vector<GuestHeapBlock> m_guestHeapBlocks;

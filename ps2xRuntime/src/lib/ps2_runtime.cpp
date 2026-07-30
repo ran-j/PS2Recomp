@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <chrono>
@@ -542,6 +543,28 @@ PS2Runtime::PS2Runtime()
     m_guestHeapConfigured = false;
     m_asyncCallbackStackFloor = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
     m_asyncCallbackStackTop = PS2_RAM_SIZE;
+
+    if (const char *watchPc = std::getenv("PS2X_GUEST_LOOP_WATCH_PC");
+        watchPc && watchPc[0] != '\0')
+    {
+        char *end = nullptr;
+        const unsigned long parsedPc = std::strtoul(watchPc, &end, 0);
+        if (end != watchPc && *end == '\0' && parsedPc <= std::numeric_limits<uint32_t>::max())
+        {
+            uint64_t threshold = 1024u;
+            if (const char *watchThreshold = std::getenv("PS2X_GUEST_LOOP_WATCH_THRESHOLD");
+                watchThreshold && watchThreshold[0] != '\0')
+            {
+                char *thresholdEnd = nullptr;
+                const unsigned long long parsedThreshold = std::strtoull(watchThreshold, &thresholdEnd, 0);
+                if (thresholdEnd != watchThreshold && *thresholdEnd == '\0' && parsedThreshold != 0u)
+                {
+                    threshold = parsedThreshold;
+                }
+            }
+            configureGuestLoopWatch(static_cast<uint32_t>(parsedPc), threshold);
+        }
+    }
 }
 
 void PS2Runtime::setDebugUiCallbacks(DebugUiCallback initCallback,
@@ -1949,6 +1972,11 @@ void PS2Runtime::dispatchLoop(uint8_t *rdram, R5900Context *ctx)
     while (!isStopRequested())
     {
         const uint32_t pc = ctx->pc;
+        const uint32_t watchedPc = m_guestLoopWatchPc.load(std::memory_order_relaxed);
+        if (watchedPc != 0u && pc == watchedPc)
+        {
+            observeGuestLoopWatch(rdram, ctx, pc);
+        }
 
         if (pc == lastPc)
         {
@@ -2004,6 +2032,113 @@ void PS2Runtime::dispatchLoop(uint8_t *rdram, R5900Context *ctx)
             // Do not request a global runtime stop here: other guest threads may still run.
             break;
         }
+    }
+}
+
+void PS2Runtime::configureGuestLoopWatch(uint32_t watchedPc, uint64_t reportThreshold)
+{
+    std::lock_guard<std::mutex> lock(m_guestLoopWatchMutex);
+    m_guestLoopWatchPc.store(0u, std::memory_order_release);
+    m_guestLoopWatchReportThreshold.store(std::max<uint64_t>(1u, reportThreshold), std::memory_order_relaxed);
+    m_guestLoopWatchLast = {};
+    m_guestLoopWatchHistory = {};
+    m_guestLoopWatchStats = {};
+    m_guestLoopWatchHistoryNext = 0u;
+    m_guestLoopWatchHasLast = false;
+    m_guestLoopWatchPc.store(watchedPc, std::memory_order_release);
+}
+
+PS2Runtime::GuestLoopWatchStats PS2Runtime::guestLoopWatchStats() const
+{
+    std::lock_guard<std::mutex> lock(m_guestLoopWatchMutex);
+    return m_guestLoopWatchStats;
+}
+
+void PS2Runtime::observeGuestLoopWatch(uint8_t *rdram, const R5900Context *ctx, uint32_t pc)
+{
+    GuestLoopWatchSnapshot snapshot{};
+    snapshot.values[0] = pc;
+    constexpr std::array<uint32_t, 7> registers{31u, 16u, 5u, 6u, 8u, 17u, 10u};
+    for (uint32_t i = 0u; i < registers.size(); ++i)
+    {
+        snapshot.values[i + 1u] = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[registers[i]], 0));
+    }
+
+    auto readWord = [&](uint32_t address, uint32_t valueIndex, uint32_t readableBit)
+    {
+        const uint32_t physical = address & 0x1FFFFFFFu;
+        if (rdram && physical <= PS2_RAM_SIZE - sizeof(uint32_t))
+        {
+            std::memcpy(&snapshot.values[valueIndex], rdram + physical, sizeof(uint32_t));
+            snapshot.readableMask |= 1u << readableBit;
+        }
+    };
+
+    const uint32_t s0 = snapshot.values[2];
+    const uint32_t a1 = snapshot.values[3];
+    auto readWordOffset = [&](uint32_t base, uint32_t offset, uint32_t valueIndex, uint32_t readableBit)
+    {
+        if (base <= std::numeric_limits<uint32_t>::max() - offset)
+        {
+            readWord(base + offset, valueIndex, readableBit);
+        }
+    };
+    readWordOffset(s0, 4u, 8u, 0u);
+    readWordOffset(s0, 8u, 9u, 1u);
+    readWordOffset(s0, 12u, 10u, 2u);
+    readWordOffset(a1, 12u, 11u, 3u);
+
+    std::lock_guard<std::mutex> lock(m_guestLoopWatchMutex);
+    if (pc != m_guestLoopWatchPc.load(std::memory_order_relaxed))
+    {
+        return;
+    }
+    ++m_guestLoopWatchStats.totalSamples;
+    if (m_guestLoopWatchHasLast && snapshot == m_guestLoopWatchLast)
+    {
+        ++m_guestLoopWatchStats.identicalStreak;
+    }
+    else
+    {
+        if (m_guestLoopWatchHasLast)
+        {
+            ++m_guestLoopWatchStats.progressChanges;
+        }
+        m_guestLoopWatchLast = snapshot;
+        m_guestLoopWatchHasLast = true;
+        m_guestLoopWatchStats.identicalStreak = 1u;
+        m_guestLoopWatchHistory[m_guestLoopWatchHistoryNext] = snapshot;
+        m_guestLoopWatchHistoryNext =
+            (m_guestLoopWatchHistoryNext + 1u) % static_cast<uint32_t>(m_guestLoopWatchHistory.size());
+        m_guestLoopWatchStats.historySize =
+            std::min<uint32_t>(m_guestLoopWatchStats.historySize + 1u,
+                               static_cast<uint32_t>(m_guestLoopWatchHistory.size()));
+    }
+
+    const uint64_t streak = m_guestLoopWatchStats.identicalStreak;
+    const uint64_t threshold = m_guestLoopWatchReportThreshold.load(std::memory_order_relaxed);
+    const bool powerOfTwo = streak != 0u && (streak & (streak - 1u)) == 0u;
+    if (streak >= threshold && (streak == threshold || powerOfTwo))
+    {
+        ++m_guestLoopWatchStats.reportCount;
+        std::cerr << "[guest-loop-watch] pc=0x" << std::hex << pc
+                  << " ra=0x" << snapshot.values[1]
+                  << " s0=0x" << s0
+                  << " a1=0x" << a1
+                  << " a2=0x" << snapshot.values[4]
+                  << " t0=0x" << snapshot.values[5]
+                  << " s1=0x" << snapshot.values[6]
+                  << " t2=0x" << snapshot.values[7]
+                  << " nodeSize=0x" << snapshot.values[8]
+                  << " nodePrev=0x" << snapshot.values[9]
+                  << " nodeNext=0x" << snapshot.values[10]
+                  << " sentinelNext=0x" << snapshot.values[11]
+                  << std::dec
+                  << " readableMask=" << snapshot.readableMask
+                  << " samples=" << m_guestLoopWatchStats.totalSamples
+                  << " identical=" << streak
+                  << " progress=" << m_guestLoopWatchStats.progressChanges
+                  << std::endl;
     }
 }
 

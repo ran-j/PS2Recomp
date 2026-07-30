@@ -144,6 +144,9 @@ namespace
     std::atomic<int32_t> gPreemptionPolicyEntryCount{0};
     std::atomic<bool> gPreemptionPolicyAllowFirstProbe{false};
     std::atomic<bool> gPreemptionPolicyPeerRan{false};
+    std::atomic<uint32_t> gGuestLoopWatchInvocations{0u};
+    uint32_t gGuestLoopWatchStopAfter = 0u;
+    bool gGuestLoopWatchMutateS0 = false;
 
     void testSerializedGuestStep(uint8_t *, R5900Context *ctx, PS2Runtime *)
     {
@@ -197,6 +200,19 @@ namespace
         }
 
         ctx->pc = 0u;
+    }
+
+    void testGuestLoopWatchStep(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        const uint32_t invocation = gGuestLoopWatchInvocations.fetch_add(1u, std::memory_order_relaxed) + 1u;
+        if (gGuestLoopWatchMutateS0)
+        {
+            setRegU32(*ctx, 16, 0x2000u + invocation * 0x10u);
+        }
+        if (invocation >= gGuestLoopWatchStopAfter)
+        {
+            ctx->pc = 0u;
+        }
     }
 
     void testResumeOwnerFallbackHandler(uint8_t *, R5900Context *ctx, PS2Runtime *)
@@ -627,6 +643,78 @@ void register_ps2_runtime_expansion_tests()
                      "second guest worker should run after the first returns to the dispatcher");
             t.Equals(getRegU32(&firstCtx, 2), 1u,
                      "first guest worker should observe that the runtime requested preemption under contention");
+        });
+
+        tc.Run("guest loop watch is disabled by default and rate limits identical snapshots", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            constexpr uint32_t kWatchPc = 0x190000u;
+            runtime.registerFunction(kWatchPc, &testGuestLoopWatchStep);
+
+            R5900Context ctx{};
+            ctx.pc = kWatchPc;
+            setRegU32(ctx, 16, 0x2000u);
+            setRegU32(ctx, 5, 0x2100u);
+            gGuestLoopWatchInvocations.store(0u, std::memory_order_relaxed);
+            gGuestLoopWatchStopAfter = 2u;
+            gGuestLoopWatchMutateS0 = false;
+            runtime.dispatchLoop(rdram.data(), &ctx);
+            t.Equals(runtime.guestLoopWatchStats().totalSamples, 0ull,
+                     "disabled watch should not collect samples");
+
+            ctx.pc = kWatchPc;
+            gGuestLoopWatchInvocations.store(0u, std::memory_order_relaxed);
+            gGuestLoopWatchStopAfter = 5u;
+            runtime.configureGuestLoopWatch(kWatchPc, 2u);
+            runtime.dispatchLoop(rdram.data(), &ctx);
+            const auto stats = runtime.guestLoopWatchStats();
+            t.Equals(stats.totalSamples, 5ull, "watch should sample once per dispatcher resume");
+            t.Equals(stats.identicalStreak, 5ull, "unchanged guest state should extend the streak");
+            t.Equals(stats.reportCount, 2ull, "reports should occur at threshold 2 and power-of-two 4");
+            t.Equals(stats.historySize, 1u, "identical state should consume one bounded history slot");
+        });
+
+        tc.Run("guest loop watch records progress and bounds distinct history", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            constexpr uint32_t kWatchPc = 0x190000u;
+            runtime.registerFunction(kWatchPc, &testGuestLoopWatchStep);
+            runtime.configureGuestLoopWatch(kWatchPc, 1024u);
+
+            R5900Context ctx{};
+            ctx.pc = kWatchPc;
+            setRegU32(ctx, 5, 0x2100u);
+            gGuestLoopWatchInvocations.store(0u, std::memory_order_relaxed);
+            gGuestLoopWatchStopAfter = 20u;
+            gGuestLoopWatchMutateS0 = true;
+            runtime.dispatchLoop(rdram.data(), &ctx);
+
+            const auto stats = runtime.guestLoopWatchStats();
+            t.Equals(stats.totalSamples, 20ull, "all dispatcher resumes should be sampled");
+            t.Equals(stats.progressChanges, 19ull, "each changed allocator node should count as progress");
+            t.Equals(stats.identicalStreak, 1ull, "progress should reset the identical-state streak");
+            t.Equals(stats.historySize, 16u, "distinct snapshot history must remain bounded");
+            t.Equals(stats.reportCount, 0ull, "progressing state should not trigger a cycle report");
+        });
+
+        tc.Run("guest write watch intersection handles overlap aliases and boundaries", [](TestCase &t)
+        {
+            constexpr uint32_t kWatchAddr = 0x0028FCA8u;
+            constexpr uint32_t kWatchSize = 0x0Cu;
+            t.IsTrue(ps2GuestWriteWatchIntersects(kWatchAddr, 4u, kWatchAddr, kWatchSize),
+                     "write beginning at the watch range should intersect");
+            t.IsTrue(ps2GuestWriteWatchIntersects(kWatchAddr - 4u, 8u, kWatchAddr, kWatchSize),
+                     "write crossing into the watch range should intersect");
+            t.IsTrue(ps2GuestWriteWatchIntersects(0x8028FCA8u, 4u, kWatchAddr, kWatchSize),
+                     "KSEG alias should map to the same watched physical range");
+            t.IsFalse(ps2GuestWriteWatchIntersects(kWatchAddr - 4u, 4u, kWatchAddr, kWatchSize),
+                      "write ending exactly at the range should not intersect");
+            t.IsFalse(ps2GuestWriteWatchIntersects(kWatchAddr + kWatchSize, 4u, kWatchAddr, kWatchSize),
+                      "write beginning exactly after the range should not intersect");
+            t.IsFalse(ps2GuestWriteWatchIntersects(kWatchAddr, 0u, kWatchAddr, kWatchSize),
+                      "empty writes should not intersect");
         });
 
         tc.Run("lookupFunction rejects internal resume PCs without exact registration", [](TestCase &t)
