@@ -1,7 +1,9 @@
 #include "MiniTest.h"
 #include "ps2recomp/code_generator.h"
+#include "ps2recomp/codegen_helpers.h"
 #include "ps2recomp/instructions.h"
 #include "ps2recomp/ps2_recompiler.h"
+#include "ps2recomp/r5900_decoder.h"
 #include "ps2recomp/types.h"
 #include <filesystem>
 #include <fstream>
@@ -106,6 +108,346 @@ static std::vector<uint32_t> parseEnumValues(const std::string &text, const std:
     }
     return values;
 }
+
+// Enumerators with the given prefix, counted however they are initialised. parseEnumValues only
+// matches a hexadecimal initialiser; held against this, a list that silently stopped covering an
+// opcode fails instead of shrinking. No number is written down, so adding an opcode does not touch
+// either side.
+static size_t countEnumDeclarations(const std::string &text, const std::string &prefix)
+{
+    std::regex re("\\b" + prefix + "[A-Za-z0-9_]+\\b\\s*=");
+    size_t count = 0;
+    for (auto it = std::sregex_iterator(text.begin(), text.end(), re); it != std::sregex_iterator(); ++it)
+    {
+        ++count;
+    }
+    return count;
+}
+
+static std::vector<std::pair<bool, uint32_t>> vu0MacroOps(TestCase &t)
+{
+    const std::vector<std::string> candidates = {
+        "ps2xRecomp/include/ps2recomp/instructions.h",
+        "../ps2xRecomp/include/ps2recomp/instructions.h",
+        "../../ps2xRecomp/include/ps2recomp/instructions.h"
+    };
+
+    std::string text = readFileFromCandidates(candidates);
+    t.IsTrue(!text.empty(), "instructions.h should be readable from the test working directory");
+
+    std::vector<uint32_t> s1 = parseEnumValues(text, "VU0_S1_");
+    std::vector<uint32_t> s2 = parseEnumValues(text, "VU0_S2_");
+    t.IsTrue(!s1.empty(), "VU0_S1 enum list should not be empty");
+    t.IsTrue(!s2.empty(), "VU0_S2 enum list should not be empty");
+    t.IsTrue(s1.size() == countEnumDeclarations(text, "VU0_S1_"),
+             "every VU0_S1_ enumerator must be parsed out of instructions.h");
+    t.IsTrue(s2.size() == countEnumDeclarations(text, "VU0_S2_"),
+             "every VU0_S2_ enumerator must be parsed out of instructions.h");
+
+    std::vector<std::pair<bool, uint32_t>> ops;
+    for (uint32_t value : s1)
+    {
+        ops.emplace_back(true, value);
+    }
+    for (uint32_t value : s2)
+    {
+        ops.emplace_back(false, value);
+    }
+    return ops;
+}
+
+// A guard added at one of these sites can read any field of the instruction, not just the two the
+// emission reads, so the sweep builds its operands into a word and decodes it exactly as a
+// recompile does. Every field then carries the value production carries - including the format
+// field, which the encoding ties to the destination mask, and the modification-info flags - rather
+// than a value-initialised zero a guard could key on unnoticed.
+static Instruction makeVu0MacroOp(bool isS1, uint32_t value, uint32_t sa, uint32_t rd, uint32_t rt,
+                                  uint8_t vectorField = 0xF, uint32_t address = 0x00100000u)
+{
+    const uint32_t format = static_cast<uint32_t>(COP2_CO) | (vectorField & 0xFu);
+    uint32_t raw = (static_cast<uint32_t>(OPCODE_COP2) << 26) | (format << 21) |
+                   ((rt & 0x1Fu) << 16) | ((rd & 0x1Fu) << 11);
+    if (isS1)
+    {
+        raw |= ((sa & 0x1Fu) << 6) | (value & 0x3Fu);
+    }
+    else
+    {
+        raw |= (((value >> 2) & 0x1Fu) << 6) | (0x3Cu | (value & 0x3u));
+    }
+
+    static const R5900Decoder decoder;
+    // Both configurations the recompiler runs in: the disassembly text is populated unless the
+    // config asks for low memory.
+    Instruction inst = decoder.decodeInstruction(address, raw, (vectorField & 0x1u) != 0);
+    if (!isS1)
+    {
+        // A Special2 word has no shift-amount operand - those bits carry its function code - so the
+        // sweep's third probe slot is set after the decode.
+        inst.sa = sa;
+    }
+    return inst;
+}
+
+static std::vector<std::string> collectMaskLiterals(const std::string &text)
+{
+    std::vector<std::string> literals;
+    const std::string tag = "_mm_set_epi32(";
+    size_t pos = 0;
+    while ((pos = text.find(tag, pos)) != std::string::npos)
+    {
+        const size_t end = text.find(')', pos);
+        if (end == std::string::npos)
+        {
+            break;
+        }
+        literals.push_back(text.substr(pos, end - pos + 1));
+        pos = end + 1;
+    }
+    return literals;
+}
+
+// Every `ctx->vu0_vf[N] = ` assignment in an emission, by index, read exhaustively rather than
+// probed at the sweep's three operand values: "and no other" is a claim about all thirty-two VF
+// registers, and a probe at three of them is not that claim.
+static std::vector<uint32_t> collectVfAssignmentIndices(const std::string &text)
+{
+    std::vector<uint32_t> indices;
+    const std::string tag = "ctx->vu0_vf[";
+    size_t pos = 0;
+    while ((pos = text.find(tag, pos)) != std::string::npos)
+    {
+        const size_t start = pos + tag.size();
+        size_t end = start;
+        while (end < text.size() && text[end] >= '0' && text[end] <= '9')
+        {
+            ++end;
+        }
+        if (end > start && text.compare(end, 4, "] = ") == 0)
+        {
+            indices.push_back(static_cast<uint32_t>(std::stoul(text.substr(start, end - start))));
+        }
+        pos = start;
+    }
+    return indices;
+}
+
+static std::string vuFieldMaskLiteral(uint32_t mask)
+{
+    std::ostringstream ss;
+    ss << "_mm_set_epi32(" << ((mask & 0x1) ? -1 : 0)
+       << ", " << ((mask & 0x2) ? -1 : 0)
+       << ", " << ((mask & 0x4) ? -1 : 0)
+       << ", " << ((mask & 0x8) ? -1 : 0) << ")";
+    return ss.str();
+}
+
+static bool isVuFieldMaskLiteral(const std::string &literal)
+{
+    static const std::vector<std::string> table = []() {
+        std::vector<std::string> values;
+        for (uint32_t mask = 0; mask <= 0xF; ++mask)
+        {
+            values.push_back(vuFieldMaskLiteral(mask));
+        }
+        return values;
+    }();
+
+    for (const std::string &candidate : table)
+    {
+        if (literal == candidate)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The shape each VU0 macro-mode opcode must emit, declared here rather than read back off an
+// emission. Every expectation this file computes by calling the generator - a reference emission, a
+// sibling emission, the absence of an "Unhandled" marker - is satisfied by a translator that emits
+// nothing, because an empty string carries no mask literal, no destination assignment and no
+// marker. These two numbers are facts about the dispatch in vu_translator.cpp and the format strings
+// in vu_translation_helpers.cpp, and they do not move when a site stops emitting.
+//
+// maskLiterals: how many _mm_set_epi32 literals in the field-mask table the site carries.
+// vfDestSlot:   which of the sweep's three probe slots (0 = sa, 2 = rt) holds this opcode's VF
+//               destination register, or -1 for the sites that write no VF register at all - the
+//               accumulator "A" family, the two stores, the VI and Q and R writers.
+//
+// The default arms are deliberately the stronger claim, so an opcode added to instructions.h
+// without a row here fails this file rather than passing unanchored.
+struct Vu0MacroShape
+{
+    int maskLiterals;
+    int vfDestSlot;
+};
+
+static Vu0MacroShape vu0MacroShape(bool isS1, uint32_t value)
+{
+    if (isS1)
+    {
+        switch (value)
+        {
+        case VU0_S1_VIADD:
+        case VU0_S1_VISUB:
+        case VU0_S1_VIADDI:
+        case VU0_S1_VIAND:
+        case VU0_S1_VIOR:
+        case VU0_S1_VCALLMS:
+        case VU0_S1_VCALLMSR:
+            return {0, -1};
+        default:
+            // 0x00..0x2F: every Special1 vector ALU form, masked-blend into the shift-amount slot.
+            return {1, 0};
+        }
+    }
+
+    switch (value)
+    {
+    case VU0_S2_VITOF0:
+    case VU0_S2_VITOF4:
+    case VU0_S2_VITOF12:
+    case VU0_S2_VITOF15:
+    case VU0_S2_VFTOI0:
+    case VU0_S2_VFTOI4:
+    case VU0_S2_VFTOI12:
+    case VU0_S2_VFTOI15:
+    case VU0_S2_VABS:
+    case VU0_S2_VMOVE:
+    case VU0_S2_VMR32:
+    case VU0_S2_VLQI:
+    case VU0_S2_VLQD:
+    case VU0_S2_VMFIR:
+    case VU0_S2_VRGET:
+        return {1, 2};
+    case VU0_S2_VCLIPw:
+    case VU0_S2_VNOP:
+    case VU0_S2_VDIV:
+    case VU0_S2_VSQRT:
+    case VU0_S2_VRSQRT:
+    case VU0_S2_VWAITQ:
+    case VU0_S2_VMTIR:
+    case VU0_S2_VILWR:
+    case VU0_S2_VISWR:
+    case VU0_S2_VRNEXT:
+    case VU0_S2_VRINIT:
+    case VU0_S2_VRXOR:
+        return {0, -1};
+    default:
+        // The accumulator "A" family and the VSQI/VSQD stores: a field mask, no VF destination.
+        return {1, -1};
+    }
+}
+
+// QMTC2's encoding is COP2 | QMTC2 | rt | fd | 00 0000 0000 | I: bit 0 selects the interlocked form,
+// and the ten bits above it are fixed at zero. The first two values are the whole of what a
+// conforming encoding can carry; the other two drive the fixed bits anyway, so a guard keyed on
+// them cannot pass unnoticed either.
+static const uint32_t qmtc2LowBits[] = {0x000u, 0x001u, 0x2AAu, 0x7FFu};
+
+static Instruction makeQmtc2(uint32_t address, uint32_t rd, uint32_t rt, uint32_t lowBits,
+                             bool includeDisassembly)
+{
+    const uint32_t raw = (static_cast<uint32_t>(OPCODE_COP2) << 26) |
+                         (static_cast<uint32_t>(COP2_QMTC2) << 21) |
+                         ((rt & 0x1Fu) << 16) | ((rd & 0x1Fu) << 11) | (lowBits & 0x7FFu);
+    static const R5900Decoder decoder;
+    return decoder.decodeInstruction(address, raw, includeDisassembly);
+}
+
+static Instruction makeLqc2(uint32_t address, uint32_t rt, uint32_t rs, uint16_t offset,
+                            bool includeDisassembly)
+{
+    const uint32_t raw = (static_cast<uint32_t>(OPCODE_LDC2) << 26) |
+                         ((rs & 0x1Fu) << 21) | ((rt & 0x1Fu) << 16) | offset;
+    static const R5900Decoder decoder;
+    return decoder.decodeInstruction(address, raw, includeDisassembly);
+}
+
+// The sixteen-bit offset field at zero, a positive offset, both sign boundaries, and minus one.
+// The sign-extended value each produces is read back off the decoded instruction.
+static const uint16_t lqc2Immediates[] = {0x0000u, 0x0010u, 0x7FFFu, 0x8000u, 0xFFFFu};
+
+// The load expression an LQC2 emits is a function of three things: the post-decode MMIO flag, the
+// resolved-address hint the caller passes, and the address itself. The flag routes the load to the
+// runtime loader; so does a resolved address inside a special region, with the flag clear; an
+// ordinary resolved address takes the fast read; and with neither set the load reads through the
+// address built from the instruction's own operands. The first ten rows below are the whole
+// cross-product of the flag, the hint, and an address at each of the three values that matter:
+// zero, an ordinary main-RAM address, and one inside the I/O range. Nothing is argued away except
+// the address when neither the flag nor the hint is set, which no branch reads - that case is one
+// row rather than three.
+//
+// Those ten rows carry one address value in both members, because setting the flag overwrites the
+// hint's address with the MMIO address and the emission therefore cannot tell the two apart. A
+// guard is not restricted to what the emission reads: it can read the relation between the two
+// members, and the two come from independent sources - inst.mmioAddress from a configuration map
+// keyed on instruction address, the hint's address from constant folding of rs plus the immediate -
+// so a recompile reaches states in which they disagree. The last three rows drive that disagreement
+// at each flag/hint combination that can produce it; with neither flag nor hint set both members
+// are zero, so that combination cannot produce it.
+// expectedLoad is the exact load expression the row must produce, written out here rather than
+// recomputed from the row's own members: a mirror of the branch logic would agree with a generator
+// that took the wrong branch, which is the whole thing being guarded against. It is null on the one
+// row where neither the flag nor the hint is set, because there the address is built from the
+// instruction's own base register and immediate and the test constructs it from the fixture.
+struct Lqc2MemoryPath
+{
+    bool hasHint;
+    bool isMmio;
+    uint32_t hintAddress;
+    uint32_t mmioAddress;
+    const char *expectedLoad;
+};
+
+static const Lqc2MemoryPath lqc2MemoryPaths[] = {
+    {false, false, 0x00000000u, 0x00000000u, nullptr},
+    {false, true, 0x00000000u, 0x00000000u, "runtime->Load128(rdram, ctx, 0x0u)"},
+    {false, true, 0x00100000u, 0x00100000u, "runtime->Load128(rdram, ctx, 0x100000u)"},
+    {false, true, 0x10002000u, 0x10002000u, "runtime->Load128(rdram, ctx, 0x10002000u)"},
+    {true, false, 0x00000000u, 0x00000000u, "FAST_READ128(0x0u)"},
+    {true, false, 0x00100000u, 0x00100000u, "FAST_READ128(0x100000u)"},
+    {true, false, 0x10002000u, 0x10002000u, "runtime->Load128(rdram, ctx, 0x10002000u)"},
+    {true, true, 0x00000000u, 0x00000000u, "runtime->Load128(rdram, ctx, 0x0u)"},
+    {true, true, 0x00100000u, 0x00100000u, "runtime->Load128(rdram, ctx, 0x100000u)"},
+    {true, true, 0x10002000u, 0x10002000u, "runtime->Load128(rdram, ctx, 0x10002000u)"},
+    {false, true, 0x00000000u, 0x10002000u, "runtime->Load128(rdram, ctx, 0x10002000u)"},
+    {true, false, 0x00100000u, 0x00000000u, "FAST_READ128(0x100000u)"},
+    {true, true, 0x00100000u, 0x10002000u, "runtime->Load128(rdram, ctx, 0x10002000u)"},
+};
+
+// The load expression a row must produce for a given decoded fixture.
+static std::string lqc2ExpectedLoad(const Lqc2MemoryPath &path, const Instruction &inst)
+{
+    if (path.expectedLoad != nullptr)
+    {
+        return path.expectedLoad;
+    }
+    std::ostringstream ss;
+    ss << "READ128(ADD32(GPR_U32(ctx, " << inst.rs << "), " << inst.simmediate << "))";
+    return ss.str();
+}
+
+// The decoder never derives these two members from the instruction word - it clears both
+// unconditionally. The recompiler assigns them after the decode, from a configuration map keyed on
+// instruction address that carries no opcode filter, so a macro-mode instruction or a QMTC2 listed
+// at such an address reaches the code generator with them set. They are the only members of the
+// instruction structure a decoder-built fixture does not already pin at its production value, so
+// every guard shape is run over the states a recompile can produce: flag clear, flag set with a
+// zero address, and flag set with a non-zero address inside the I/O range the analyzer records.
+// The flag is never set with the address left unassigned - the two are written together.
+struct PostDecodeMmioState
+{
+    bool isMmio;
+    uint32_t mmioAddress;
+};
+
+static const PostDecodeMmioState postDecodeMmioStates[] = {
+    {false, 0x00000000u},
+    {true, 0x00000000u},
+    {true, 0x10002000u},
+};
 
 static Instruction makeJal(uint32_t address, uint32_t target)
 {
@@ -1004,56 +1346,21 @@ void register_code_generator_tests()
         });
 
         tc.Run("VU0 macro mappings cover all S1/S2 enums", [](TestCase &t) {
-            const std::vector<std::string> candidates = {
-                "ps2xRecomp/include/ps2recomp/instructions.h",
-                "../ps2xRecomp/include/ps2recomp/instructions.h",
-                "../../ps2xRecomp/include/ps2recomp/instructions.h"
-            };
-
-            std::string text = readFileFromCandidates(candidates);
-            t.IsTrue(!text.empty(), "instructions.h should be readable from the test working directory");
-
-            std::vector<uint32_t> s1 = parseEnumValues(text, "VU0_S1_");
-            std::vector<uint32_t> s2 = parseEnumValues(text, "VU0_S2_");
-            t.IsTrue(!s1.empty(), "VU0_S1 enum list should not be empty");
-            t.IsTrue(!s2.empty(), "VU0_S2 enum list should not be empty");
-
             CodeGenerator gen({}, {});
 
-            for (uint32_t value : s1)
+            for (const auto &op : vu0MacroOps(t))
             {
-                Instruction inst;
-                inst.opcode = OPCODE_COP2;
-                inst.rs = COP2_CO; // format
-                inst.rt = 2;
-                inst.rd = 3;
-                inst.function = value;
-                inst.vectorInfo.vectorField = 0xF;
+                bool isS1 = op.first;
+                uint32_t value = op.second;
+                Instruction inst = makeVu0MacroOp(isS1, value, 3, 3, 2);
 
                 std::string out = gen.translateInstruction(inst);
                 std::ostringstream msg;
-                msg << "VU0 S1 0x" << std::hex << value << " should be mapped";
-                t.IsTrue(out.find("Unhandled VU0 Special1") == std::string::npos, msg.str().c_str());
-            }
-
-            for (uint32_t value : s2)
-            {
-                Instruction inst;
-                inst.opcode = OPCODE_COP2;
-                inst.rs = COP2_CO; // format
-                inst.rt = 2;
-                inst.rd = 3;
-                inst.function = 0x3C; // force Special2 path
-                inst.vectorInfo.vectorField = 0xF;
-
-                uint32_t upper = (value >> 2) & 0x1F;
-                uint32_t lower = value & 0x3;
-                inst.raw = (upper << 6) | lower;
-
-                std::string out = gen.translateInstruction(inst);
-                std::ostringstream msg;
-                msg << "VU0 S2 0x" << std::hex << value << " should be mapped";
-                t.IsTrue(out.find("Unhandled VU0 Special2") == std::string::npos, msg.str().c_str());
+                msg << (isS1 ? "VU0 S1 0x" : "VU0 S2 0x") << std::hex << value << " should be mapped";
+                const std::string unhandled = isS1 ? "Unhandled VU0 Special1" : "Unhandled VU0 Special2";
+                // The marker check is a negative, and an empty emission carries no marker either.
+                t.IsTrue(!out.empty(), msg.str());
+                t.IsTrue(out.find(unhandled) == std::string::npos, msg.str());
             }
         });
 
@@ -1135,6 +1442,704 @@ void register_code_generator_tests()
             t.IsTrue(out.find("ctx->vi[14]") != std::string::npos, "S2 VLQI base VI should come from rd");
             t.IsTrue(out.find("ctx->vu0_vf[6]") != std::string::npos, "S2 VLQI destination VF should come from rt");
             t.IsTrue(out.find("ctx->vi[20]") == std::string::npos, "S2 VLQI must not use rs(format) as VI index");
+        });
+
+        tc.Run("vuVfDestMask yields an empty mask for a vf0 destination", [](TestCase &t) {
+            std::string failure;
+            for (uint32_t mask = 0; mask <= 0xF; ++mask)
+            {
+                if (codegen::vuVfDestMask(0, static_cast<uint8_t>(mask)) != 0)
+                {
+                    std::ostringstream ss;
+                    ss << "vuVfDestMask(0, 0x" << std::hex << mask
+                       << ") must yield an empty write mask";
+                    failure = ss.str();
+                    break;
+                }
+            }
+            t.IsTrue(failure.empty(), failure);
+        });
+
+        tc.Run("vuVfDestMask passes the field mask through for every non-vf0 destination", [](TestCase &t) {
+            std::string failure;
+            for (uint32_t reg = 1; reg <= 31 && failure.empty(); ++reg)
+            {
+                for (uint32_t mask = 0; mask <= 0xF; ++mask)
+                {
+                    if (codegen::vuVfDestMask(reg, static_cast<uint8_t>(mask)) != mask)
+                    {
+                        std::ostringstream ss;
+                        ss << "vuVfDestMask(" << std::dec << reg << ", 0x" << std::hex << mask
+                           << ") must return the field mask unchanged";
+                        failure = ss.str();
+                        break;
+                    }
+                }
+            }
+            t.IsTrue(failure.empty(), failure);
+        });
+
+        // The anchor the two sweeps below stand on. Both derive their expectations from a reference
+        // emission built at the same opcode and field mask as the emission under test, so a discard
+        // keyed on the field mask - or an unconditional one - empties reference and subject
+        // together and leaves every derived comparison true over an empty collection. What is
+        // asserted here is declared, not derived: the site emits something, it carries the number
+        // of write masks its opcode carries, and it writes the VF register its opcode names.
+        //
+        // The fixture is built exactly as the sweeps' reference is - same operand triple, same
+        // field range, same address formula - so this covers the very string they derive from. If
+        // a sweep's reference fixture changes, change this one with it.
+        tc.Run("every VU0 macro site emits the write masks and VF destination its opcode declares", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+            const uint32_t refOperands[3] = {9, 11, 7}; // sa, rd, rt
+            std::string failure;
+
+            for (const auto &op : vu0MacroOps(t))
+            {
+                if (!failure.empty())
+                {
+                    break;
+                }
+                const bool isS1 = op.first;
+                const uint32_t value = op.second;
+                const Vu0MacroShape shape = vu0MacroShape(isS1, value);
+
+                for (uint32_t fieldValue = 0; fieldValue <= 0xF && failure.empty(); ++fieldValue)
+                {
+                    const uint8_t field = static_cast<uint8_t>(fieldValue);
+                    const std::string out = gen.translateInstruction(
+                        makeVu0MacroOp(isS1, value, refOperands[0], refOperands[1], refOperands[2], field, 0x00100000u + 4u * fieldValue));
+
+                    std::ostringstream label;
+                    label << (isS1 ? "S1 0x" : "S2 0x") << std::hex << value
+                          << " field 0x" << static_cast<uint32_t>(field);
+
+                    if (out.empty())
+                    {
+                        failure = label.str() + ": the site must emit a statement";
+                        break;
+                    }
+
+                    int masks = 0;
+                    for (const std::string &literal : collectMaskLiterals(out))
+                    {
+                        if (isVuFieldMaskLiteral(literal))
+                        {
+                            ++masks;
+                        }
+                    }
+                    if (masks != shape.maskLiterals)
+                    {
+                        failure = label.str() + ": the site must emit the write masks its opcode carries";
+                        break;
+                    }
+
+                    std::vector<uint32_t> expectedDest;
+                    if (shape.vfDestSlot >= 0)
+                    {
+                        expectedDest.push_back(refOperands[shape.vfDestSlot]);
+                    }
+                    if (collectVfAssignmentIndices(out) != expectedDest)
+                    {
+                        failure = label.str() +
+                                  ": the site must write the VF destination its opcode names, and no other";
+                        break;
+                    }
+                }
+            }
+            t.IsTrue(failure.empty(), failure);
+        });
+
+        tc.Run("every VU0 macro write site emits its own field mask, and a vf0 destination changes only that mask", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+            const std::string zeroMask = "_mm_set_epi32(0, 0, 0, 0)";
+            const uint32_t refOperands[3] = {9, 11, 7}; // sa, rd, rt
+
+            for (const auto &op : vu0MacroOps(t))
+            {
+                bool isS1 = op.first;
+                uint32_t value = op.second;
+
+                for (uint32_t fieldValue = 0; fieldValue <= 0xF; ++fieldValue)
+                {
+                    const uint8_t field = static_cast<uint8_t>(fieldValue);
+                    const std::string liveMask = vuFieldMaskLiteral(field);
+
+                    Instruction ref = makeVu0MacroOp(isS1, value, refOperands[0], refOperands[1], refOperands[2], field, 0x00100000u + 4u * fieldValue);
+                    std::string outRef = gen.translateInstruction(ref);
+                    const Vu0MacroShape shape = vu0MacroShape(isS1, value);
+
+                    // Absolute: the pass comparisons below are relative to outRef, so a mask that
+                    // is dead in both emissions is invisible to them.
+                    for (const std::string &literal : collectMaskLiterals(outRef))
+                    {
+                        if (!isVuFieldMaskLiteral(literal))
+                        {
+                            continue;
+                        }
+                        std::ostringstream anchorMsg;
+                        anchorMsg << (isS1 ? "S1 0x" : "S2 0x") << std::hex << value
+                                  << " field 0x" << static_cast<uint32_t>(field)
+                                  << ": a non-vf0 destination must emit this instruction's own field mask";
+                        t.IsTrue(literal == liveMask, anchorMsg.str());
+                    }
+
+                    for (int pass = 0; pass < 3; ++pass)
+                    {
+                        uint32_t operands[3] = {refOperands[0], refOperands[1], refOperands[2]};
+                        operands[pass] = 0;
+                        const uint32_t zeroedDest = refOperands[pass];
+
+                        Instruction mutated = makeVu0MacroOp(isS1, value, operands[0], operands[1], operands[2], field, 0x00100000u + 4u * fieldValue);
+                        std::string out0 = gen.translateInstruction(mutated);
+
+                        std::ostringstream destAssign;
+                        destAssign << "ctx->vu0_vf[" << zeroedDest << "] = ";
+
+                        std::ostringstream label;
+                        label << (isS1 ? "S1 0x" : "S2 0x") << std::hex << value
+                              << " field 0x" << static_cast<uint32_t>(field);
+
+                        // Gated on the opcode's declared destination slot rather than on whether
+                        // the reference emission happens to contain the assignment: a discard that
+                        // empties the reference would otherwise steer every pass into the weak
+                        // branch below, where an empty collection compares equal to an empty one.
+                        if (shape.vfDestSlot == pass)
+                        {
+                            std::ostringstream oldDestStream;
+                            oldDestStream << "ctx->vu0_vf[" << zeroedDest << "]";
+                            const std::string oldDest = oldDestStream.str();
+                            const std::string newDest = "ctx->vu0_vf[0]";
+
+                            std::string expect = outRef;
+                            size_t pos = 0;
+                            while ((pos = expect.find(oldDest, pos)) != std::string::npos)
+                            {
+                                expect.replace(pos, oldDest.size(), newDest);
+                                pos += newDest.size();
+                            }
+                            pos = 0;
+                            while ((pos = expect.find(liveMask, pos)) != std::string::npos)
+                            {
+                                expect.replace(pos, liveMask.size(), zeroMask);
+                                pos += zeroMask.size();
+                            }
+
+                            std::ostringstream deadMsg;
+                            deadMsg << label.str() << ": a vf0 destination must emit an empty write mask";
+                            t.IsTrue(out0.find(zeroMask) != std::string::npos, deadMsg.str());
+
+                            std::ostringstream msg;
+                            msg << label.str() << ": a vf0 destination must change only the destination index and the write mask";
+                            t.IsTrue(out0 == expect, msg.str());
+                        }
+                        else
+                        {
+                            std::ostringstream msg;
+                            msg << label.str() << ": zeroing a non-destination operand must not change any write mask";
+                            t.IsTrue(collectMaskLiterals(out0) == collectMaskLiterals(outRef), msg.str());
+                        }
+                    }
+                }
+            }
+        });
+
+        tc.Run("VU0 macro write masks depend only on the destination index and the field mask", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+            const std::string zeroMask = "_mm_set_epi32(0, 0, 0, 0)";
+            const uint32_t refOperands[3] = {9, 11, 7}; // sa, rd, rt
+            std::string failure;
+
+            for (const auto &op : vu0MacroOps(t))
+            {
+                if (!failure.empty())
+                {
+                    break;
+                }
+                const bool isS1 = op.first;
+                const uint32_t value = op.second;
+
+                for (uint32_t fieldValue = 0; fieldValue <= 0xF && failure.empty(); ++fieldValue)
+                {
+                    const uint8_t field = static_cast<uint8_t>(fieldValue);
+                    const std::string liveMask = vuFieldMaskLiteral(field);
+                    const std::string outRef = gen.translateInstruction(
+                        makeVu0MacroOp(isS1, value, refOperands[0], refOperands[1], refOperands[2], field, 0x00100000u + 4u * fieldValue));
+
+                    // The accumulator family and the two store forms hold no VF destination in any
+                    // swept slot, so the destination loop below skips them outright and their masks
+                    // would be pinned only at the operand triples the other sweep drives. They are
+                    // deliberately unguarded, which makes the property one-sided: the mask must stay
+                    // this instruction's own field mask at every value of every slot. That domain
+                    // contains the value the decoder gives the shift-amount slot, which is the one
+                    // slot a fixture here sets after the decode.
+                    // Declared, not read back off outRef: a discard that empties the reference would
+                    // otherwise make every site look destination-free and send all 96 probes below
+                    // through a comparison of two empty collections.
+                    const Vu0MacroShape shape = vu0MacroShape(isS1, value);
+                    const bool anyDest = shape.vfDestSlot >= 0;
+
+                    for (int slot = 0; !anyDest && slot < 3 && failure.empty(); ++slot)
+                    {
+                        for (uint32_t v = 0; v <= 31 && failure.empty(); ++v)
+                        {
+                            uint32_t operands[3] = {refOperands[0], refOperands[1], refOperands[2]};
+                            operands[slot] = v;
+
+                            const std::string out = gen.translateInstruction(
+                                makeVu0MacroOp(isS1, value, operands[0], operands[1], operands[2], field, 0x00100000u + 4u * fieldValue));
+
+                            std::ostringstream label;
+                            label << (isS1 ? "S1 0x" : "S2 0x") << std::hex << value
+                                  << " field 0x" << static_cast<uint32_t>(field)
+                                  << " operand " << std::dec << slot << " = " << v;
+
+                            // Held against the reference emission rather than only walked: an
+                            // operand value that empties the emission, or drops a mask out of it,
+                            // leaves the walk below nothing to look at, and a walk over nothing
+                            // reports nothing.
+                            if (collectMaskLiterals(out) != collectMaskLiterals(outRef))
+                            {
+                                failure = label.str() +
+                                          ": a site with no vf destination must emit the same write masks at every value of every operand";
+                                break;
+                            }
+
+                            for (const std::string &literal : collectMaskLiterals(out))
+                            {
+                                if (isVuFieldMaskLiteral(literal) && literal != liveMask)
+                                {
+                                    failure = label.str() +
+                                              ": a site with no vf destination must emit this instruction's own field mask at every value of every operand";
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    for (int destSlot = 0; destSlot < 3 && failure.empty(); ++destSlot)
+                    {
+                        if (destSlot != shape.vfDestSlot)
+                        {
+                            continue;
+                        }
+
+                        for (int other = 0; other < 3 && failure.empty(); ++other)
+                        {
+                            if (other == destSlot)
+                            {
+                                continue;
+                            }
+                            for (uint32_t v = 0; v <= 31 && failure.empty(); ++v)
+                            {
+                                uint32_t live[3] = {refOperands[0], refOperands[1], refOperands[2]};
+                                live[other] = v;
+                                uint32_t zero[3] = {live[0], live[1], live[2]};
+                                zero[destSlot] = 0;
+
+                                const std::string outLive = gen.translateInstruction(
+                                    makeVu0MacroOp(isS1, value, live[0], live[1], live[2], field, 0x00100000u + 4u * fieldValue));
+                                const std::string outZero = gen.translateInstruction(
+                                    makeVu0MacroOp(isS1, value, zero[0], zero[1], zero[2], field, 0x00100000u + 4u * fieldValue));
+
+                                std::ostringstream label;
+                                label << (isS1 ? "S1 0x" : "S2 0x") << std::hex << value
+                                      << " field 0x" << static_cast<uint32_t>(field)
+                                      << " operand " << std::dec << other << " = " << v;
+
+                                if (collectMaskLiterals(outLive) != collectMaskLiterals(outRef))
+                                {
+                                    failure = label.str() +
+                                              ": a non-vf0 destination must emit the same write masks at every value of its other operands";
+                                    break;
+                                }
+
+                                for (const std::string &literal : collectMaskLiterals(outLive))
+                                {
+                                    if (isVuFieldMaskLiteral(literal) && literal != liveMask)
+                                    {
+                                        failure = label.str() +
+                                                  ": a non-vf0 destination must emit this instruction's own field mask at every value of its other operands";
+                                        break;
+                                    }
+                                }
+                                if (!failure.empty())
+                                {
+                                    break;
+                                }
+                                // The vf0 emission carries a different mask value, so what is held
+                                // against the reference here is that the masks are still there.
+                                if (collectMaskLiterals(outZero).size() != collectMaskLiterals(outRef).size())
+                                {
+                                    failure = label.str() +
+                                              ": a vf0 destination must still emit its write masks at every value of its other operands";
+                                    break;
+                                }
+
+                                for (const std::string &literal : collectMaskLiterals(outZero))
+                                {
+                                    if (isVuFieldMaskLiteral(literal) && literal != zeroMask)
+                                    {
+                                        failure = label.str() +
+                                                  ": a vf0 destination must emit an empty write mask at every value of its other operands";
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            t.IsTrue(failure.empty(), failure);
+        });
+
+        tc.Run("VU0 non-zero destination keeps its write mask", [](TestCase &t) {
+            const Instruction inst = makeVu0MacroOp(true, VU0_S1_VADD, 7, 11, 5, 0xF);
+
+            CodeGenerator gen({}, {});
+            std::string out = gen.translateInstruction(inst);
+
+            t.IsTrue(out.find("ctx->vu0_vf[7] = ") != std::string::npos, "non-zero destination should still be written");
+            t.IsTrue(out.find("_mm_set_epi32(-1, -1, -1, -1)") != std::string::npos, "non-zero destination should keep a live write mask");
+        });
+
+        tc.Run("QMTC2 to vf0 emits no vf0 write", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+            std::string failure;
+            for (uint32_t lowBits : qmtc2LowBits)
+            {
+                for (int disasm = 0; disasm < 2 && failure.empty(); ++disasm)
+                {
+                    for (uint32_t rt = 0; rt <= 31 && failure.empty(); ++rt)
+                    {
+                        const Instruction inst = makeQmtc2(0x00100000u + 4u * rt, 0, rt, lowBits, disasm != 0);
+                        const std::string out = gen.translateInstruction(inst);
+
+                        if (out.find("ctx->vu0_vf[") != std::string::npos)
+                        {
+                            std::ostringstream ss;
+                            ss << "QMTC2 from $" << std::dec << rt << " to $vf0 (encoding low bits 0x"
+                               << std::hex << lowBits << ") must not write any vu0_vf entry";
+                            failure = ss.str();
+                        }
+                        // The discard's own text, not only the absence of a write: EVIDENCE.md's
+                        // corpus recipe greps a generated tree for exactly this comment, and an
+                        // emission that stopped carrying it would leave that grep silently empty.
+                        else if (out != "// QMTC2 to $vf0 discarded")
+                        {
+                            std::ostringstream ss;
+                            ss << "QMTC2 from $" << std::dec << rt << " to $vf0 (encoding low bits 0x"
+                               << std::hex << lowBits << ") must emit the discard comment, got \""
+                               << out << "\"";
+                            failure = ss.str();
+                        }
+                    }
+                }
+                if (!failure.empty())
+                {
+                    break;
+                }
+            }
+            t.IsTrue(failure.empty(), failure);
+        });
+
+        tc.Run("QMTC2 to a non-zero vf still writes", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+            std::string failure;
+            for (uint32_t lowBits : qmtc2LowBits)
+            {
+                for (int disasm = 0; disasm < 2 && failure.empty(); ++disasm)
+                {
+                    for (uint32_t rd = 1; rd <= 31 && failure.empty(); ++rd)
+                    {
+                        for (uint32_t rt = 0; rt <= 31 && failure.empty(); ++rt)
+                        {
+                            const Instruction inst = makeQmtc2(0x00100000u + 4u * rd, rd, rt, lowBits, disasm != 0);
+                            const std::string out = gen.translateInstruction(inst);
+
+                            std::ostringstream expect;
+                            expect << "ctx->vu0_vf[" << rd << "] = _mm_castsi128_ps(GPR_VEC(ctx, " << rt << "));";
+                            if (out.find(expect.str()) == std::string::npos)
+                            {
+                                std::ostringstream ss;
+                                ss << "QMTC2 from $" << std::dec << rt << " to $vf" << rd
+                                   << " (encoding low bits 0x" << std::hex << lowBits << ") should still write that source";
+                                failure = ss.str();
+                            }
+                        }
+                    }
+                }
+                if (!failure.empty())
+                {
+                    break;
+                }
+            }
+            t.IsTrue(failure.empty(), failure);
+        });
+
+        // The two members below take no part in what these sites emit, which is exactly why a guard
+        // could read one unnoticed: a decoder-built fixture leaves both cleared. What is pinned here
+        // is that the translated statement is unchanged across every state a recompile can reach.
+        // LQC2 is deliberately not covered this way - its emission does read them, and it is driven
+        // over the memory-path table instead.
+        tc.Run("VU0 macro emission does not depend on the post-decode MMIO fields", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+            const uint32_t refOperands[3] = {9, 11, 7}; // sa, rd, rt
+            std::string failure;
+
+            for (const auto &op : vu0MacroOps(t))
+            {
+                if (!failure.empty())
+                {
+                    break;
+                }
+                const bool isS1 = op.first;
+                const uint32_t value = op.second;
+
+                for (uint32_t fieldValue = 0; fieldValue <= 0xF && failure.empty(); ++fieldValue)
+                {
+                    const uint8_t field = static_cast<uint8_t>(fieldValue);
+
+                    // pass 3 leaves every operand non-zero; passes 0..2 put vf0 in each slot in
+                    // turn, so both halves of the guarded property are run over every state.
+                    for (int pass = 0; pass < 4 && failure.empty(); ++pass)
+                    {
+                        uint32_t operands[3] = {refOperands[0], refOperands[1], refOperands[2]};
+                        if (pass < 3)
+                        {
+                            operands[pass] = 0;
+                        }
+
+                        const Instruction base = makeVu0MacroOp(
+                            isS1, value, operands[0], operands[1], operands[2], field,
+                            0x00100000u + 4u * fieldValue);
+                        const std::string expected = gen.translateInstruction(base);
+                        // Invariance across the MMIO states is a comparison of two emissions, so it
+                        // holds vacuously if the site emits nothing at all.
+                        if (expected.empty())
+                        {
+                            std::ostringstream ss;
+                            ss << (isS1 ? "S1 0x" : "S2 0x") << std::hex << value
+                               << " field 0x" << static_cast<uint32_t>(field)
+                               << ", operand slot " << std::dec << pass
+                               << ": the site must emit a statement";
+                            failure = ss.str();
+                            break;
+                        }
+
+                        for (const PostDecodeMmioState &state : postDecodeMmioStates)
+                        {
+                            Instruction inst = base;
+                            inst.isMmio = state.isMmio;         // set post-decode, as the recompiler does
+                            inst.mmioAddress = state.mmioAddress;
+
+                            if (gen.translateInstruction(inst) != expected)
+                            {
+                                std::ostringstream ss;
+                                ss << (isS1 ? "S1 0x" : "S2 0x") << std::hex << value
+                                   << " field 0x" << static_cast<uint32_t>(field)
+                                   << ", operand slot " << std::dec << pass
+                                   << ": the emitted statement must not change when the post-decode"
+                                      " MMIO fields are set";
+                                failure = ss.str();
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            t.IsTrue(failure.empty(), failure);
+        });
+
+        tc.Run("QMTC2 emission does not depend on the post-decode MMIO fields", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+            std::string failure;
+            for (uint32_t lowBits : qmtc2LowBits)
+            {
+                if (!failure.empty())
+                {
+                    break;
+                }
+                for (int disasm = 0; disasm < 2 && failure.empty(); ++disasm)
+                {
+                    for (uint32_t rd = 0; rd <= 31 && failure.empty(); ++rd)
+                    {
+                        for (uint32_t rt = 0; rt <= 31 && failure.empty(); ++rt)
+                        {
+                            const Instruction base =
+                                makeQmtc2(0x00100000u + 4u * rd, rd, rt, lowBits, disasm != 0);
+                            const std::string expected = gen.translateInstruction(base);
+                            // Same reason as the VU0 macro case: two empty emissions are invariant.
+                            if (expected.empty())
+                            {
+                                std::ostringstream ss;
+                                ss << "QMTC2 from $" << std::dec << rt << " to $vf" << rd
+                                   << " (encoding low bits 0x" << std::hex << lowBits
+                                   << "): the emission must not be empty";
+                                failure = ss.str();
+                                break;
+                            }
+
+                            for (const PostDecodeMmioState &state : postDecodeMmioStates)
+                            {
+                                Instruction inst = base;
+                                inst.isMmio = state.isMmio;         // set post-decode, as the recompiler does
+                                inst.mmioAddress = state.mmioAddress;
+
+                                if (gen.translateInstruction(inst) != expected)
+                                {
+                                    std::ostringstream ss;
+                                    ss << "QMTC2 from $" << std::dec << rt << " to $vf" << rd
+                                       << " (encoding low bits 0x" << std::hex << lowBits
+                                       << "): the emitted statement must not change when the"
+                                          " post-decode MMIO fields are set";
+                                    failure = ss.str();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            t.IsTrue(failure.empty(), failure);
+        });
+
+        tc.Run("LQC2 to vf0 emits no vf0 write", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+            std::string failure;
+            for (const Lqc2MemoryPath &path : lqc2MemoryPaths)
+            {
+                if (!failure.empty())
+                {
+                    break;
+                }
+                for (int disasm = 0; disasm < 2 && failure.empty(); ++disasm)
+                {
+                    for (uint32_t rs = 0; rs <= 31 && failure.empty(); ++rs)
+                    {
+                        for (uint16_t offset : lqc2Immediates)
+                        {
+                            Instruction inst = makeLqc2(0x00100000u + 4u * rs, /*rt*/ 0, rs, offset, disasm != 0);
+                            inst.isMmio = path.isMmio;          // set post-decode, as the recompiler does
+                            inst.mmioAddress = path.mmioAddress;
+
+                            MemoryAccessHint hint{};
+                            hint.hasAddress = path.hasHint;
+                            hint.address = path.hintAddress;
+
+                            const std::string out = gen.translateInstruction(inst, hint);
+
+                            if (out.find("ctx->vu0_vf[") != std::string::npos)
+                            {
+                                std::ostringstream ss;
+                                ss << "LQC2 to vf0 based on $" << rs << " must not write any vu0_vf entry";
+                                failure = ss.str();
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            t.IsTrue(failure.empty(), failure);
+        });
+
+        // The load takes three shapes - the runtime loader for an MMIO or special-region address,
+        // the fast read for an ordinary resolved one, and a read through the operand-built address
+        // when neither the flag nor the hint is set - and the discard has to keep all three. Driven
+        // over the same memory-path table as the two siblings, and held against the whole emitted
+        // statement rather than a token: "READ128(" is a substring of "FAST_READ128(", so no single
+        // substring can tell the three apart, and a substring check leaves the address and the
+        // discard's own spelling unpinned. EVIDENCE.md's corpus recipe greps for that spelling.
+        tc.Run("LQC2 to vf0 still performs the load", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+            std::string failure;
+            for (const Lqc2MemoryPath &path : lqc2MemoryPaths)
+            {
+                if (!failure.empty())
+                {
+                    break;
+                }
+                for (int disasm = 0; disasm < 2 && failure.empty(); ++disasm)
+                {
+                    for (uint32_t rs = 0; rs <= 31 && failure.empty(); ++rs)
+                    {
+                        for (uint16_t offset : lqc2Immediates)
+                        {
+                            Instruction inst = makeLqc2(0x00100000u + 4u * rs, /*rt*/ 0, rs, offset, disasm != 0);
+                            inst.isMmio = path.isMmio;          // set post-decode, as the recompiler does
+                            inst.mmioAddress = path.mmioAddress;
+
+                            MemoryAccessHint hint{};
+                            hint.hasAddress = path.hasHint;
+                            hint.address = path.hintAddress;
+
+                            const std::string out = gen.translateInstruction(inst, hint);
+                            const std::string expect = "(void)" + lqc2ExpectedLoad(path, inst) + ";";
+
+                            if (out != expect)
+                            {
+                                std::ostringstream ss;
+                                ss << "LQC2 to vf0 based on $" << rs
+                                   << " must discard the loaded value and keep the load: expected \""
+                                   << expect << "\", got \"" << out << "\"";
+                                failure = ss.str();
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            t.IsTrue(failure.empty(), failure);
+        });
+
+        tc.Run("LQC2 to a non-zero vf still writes", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+            std::string failure;
+            for (const Lqc2MemoryPath &path : lqc2MemoryPaths)
+            {
+                if (!failure.empty())
+                {
+                    break;
+                }
+                for (int disasm = 0; disasm < 2 && failure.empty(); ++disasm)
+                {
+                    for (uint32_t rt = 1; rt <= 31 && failure.empty(); ++rt)
+                    {
+                        for (uint32_t rs = 0; rs <= 31 && failure.empty(); ++rs)
+                        {
+                            for (uint16_t offset : lqc2Immediates)
+                            {
+                                Instruction inst = makeLqc2(0x00100000u + 4u * rs, rt, rs, offset, disasm != 0);
+                                inst.isMmio = path.isMmio;          // set post-decode, as the recompiler does
+                                inst.mmioAddress = path.mmioAddress;
+
+                                MemoryAccessHint hint{};
+                                hint.hasAddress = path.hasHint;
+                                hint.address = path.hintAddress;
+
+                                const std::string out = gen.translateInstruction(inst, hint);
+
+                                // The whole statement, on every memory path. The address used to be
+                                // checked only on the default path, so twelve of the thirteen rows
+                                // asserted the write and nothing about what it loaded or from where.
+                                std::ostringstream expect;
+                                expect << "ctx->vu0_vf[" << rt << "] = _mm_castsi128_ps("
+                                       << lqc2ExpectedLoad(path, inst) << ");";
+
+                                if (out != expect.str())
+                                {
+                                    std::ostringstream ss;
+                                    ss << "LQC2 to $vf" << rt << " must write the loaded value: expected \""
+                                       << expect.str() << "\", got \"" << out << "\"";
+                                    failure = ss.str();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            t.IsTrue(failure.empty(), failure);
         });
 
         tc.Run("JAL to known function emits call and check", [](TestCase &t) {

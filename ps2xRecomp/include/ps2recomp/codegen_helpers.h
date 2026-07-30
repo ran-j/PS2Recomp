@@ -24,6 +24,11 @@ namespace ps2recomp::codegen
         return literal;
     }
 
+    inline uint8_t vuVfDestMask(uint32_t vf_dest_reg, uint8_t dest_mask)
+    {
+        return (vf_dest_reg == 0) ? 0 : dest_mask;
+    }
+
     inline std::string vuMaskExpr(uint8_t dest_mask)
     {
         return fmt::format("_mm_castsi128_ps(_mm_set_epi32({}, {}, {}, {}))",
