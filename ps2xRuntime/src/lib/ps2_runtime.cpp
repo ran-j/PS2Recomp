@@ -90,7 +90,8 @@ namespace
     constexpr uint32_t kGuestHeapDefaultBase = 0x00100000u;
     constexpr uint32_t kGuestHeapDefaultAlignment = 16u;
     constexpr uint32_t kGuestHeapSafetyPad = 0x1000u;
-    constexpr uint32_t kGuestHeapHardLimit = 0x01F00000u;
+    constexpr uint32_t kGuestHeapHardLimit = PS2_RAM_SIZE;
+    constexpr uint32_t kAsyncCallbackStackDefaultFloor = 0x01F00000u;
 
     constexpr uint32_t COP0_CAUSE_EXCCODE_MASK = 0x0000007Cu;
     constexpr uint32_t COP0_CAUSE_BD = 0x80000000u;
@@ -541,7 +542,7 @@ PS2Runtime::PS2Runtime()
     m_guestHeapLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
     m_guestHeapSuggestedBase = kGuestHeapDefaultBase;
     m_guestHeapConfigured = false;
-    m_asyncCallbackStackFloor = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
+    m_asyncCallbackStackFloor = std::min(kAsyncCallbackStackDefaultFloor, PS2_RAM_SIZE);
     m_asyncCallbackStackTop = PS2_RAM_SIZE;
 
     if (const char *watchPc = std::getenv("PS2X_GUEST_LOOP_WATCH_PC");
@@ -965,8 +966,8 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     }
     {
         std::lock_guard<std::mutex> lock(m_asyncCallbackStackMutex);
-        const uint32_t hardLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
-        m_asyncCallbackStackFloor = std::min(std::max(hardLimit, suggestedHeapBase), PS2_RAM_SIZE);
+        const uint32_t stackFloor = std::min(kAsyncCallbackStackDefaultFloor, PS2_RAM_SIZE);
+        m_asyncCallbackStackFloor = std::min(std::max(stackFloor, suggestedHeapBase), PS2_RAM_SIZE);
         m_asyncCallbackStackTop = PS2_RAM_SIZE;
     }
 
@@ -1756,14 +1757,33 @@ void PS2Runtime::freeGuestBlockLocked(uint32_t guestAddr)
 
 void PS2Runtime::configureGuestHeap(uint32_t guestBase, uint32_t guestLimit)
 {
-    std::lock_guard<std::mutex> lock(m_guestHeapMutex);
-    uint32_t normalizedBase = alignGuestHeapValue(clampGuestHeapBase(guestBase), kGuestHeapDefaultAlignment);
-    if (normalizedBase == 0u)
+    uint32_t configuredBase = 0u;
+    uint32_t configuredLimit = 0u;
     {
-        normalizedBase = (m_guestHeapSuggestedBase != 0u) ? m_guestHeapSuggestedBase : kGuestHeapDefaultBase;
+        std::lock_guard<std::mutex> lock(m_guestHeapMutex);
+        uint32_t normalizedBase = alignGuestHeapValue(clampGuestHeapBase(guestBase), kGuestHeapDefaultAlignment);
+        if (normalizedBase == 0u)
+        {
+            normalizedBase = (m_guestHeapSuggestedBase != 0u) ? m_guestHeapSuggestedBase : kGuestHeapDefaultBase;
+        }
+        m_guestHeapSuggestedBase = normalizedBase;
+        resetGuestHeapLocked(normalizedBase, guestLimit);
+        configuredBase = m_guestHeapBase;
+        configuredLimit = m_guestHeapLimit;
     }
-    m_guestHeapSuggestedBase = normalizedBase;
-    resetGuestHeapLocked(normalizedBase, guestLimit);
+
+    // The default callback stack reservation occupies the top MiB of RDRAM.
+    // If a title explicitly claims that range for its EE heap before any
+    // callback stack has been reserved, move the callback stack ceiling below
+    // the heap instead of silently shrinking the guest-visible heap contract.
+    std::lock_guard<std::mutex> stackLock(m_asyncCallbackStackMutex);
+    if (m_asyncCallbackStackTop == PS2_RAM_SIZE &&
+        configuredBase < m_asyncCallbackStackTop &&
+        configuredLimit > m_asyncCallbackStackFloor)
+    {
+        m_asyncCallbackStackTop = configuredBase;
+        m_asyncCallbackStackFloor = std::min(m_asyncCallbackStackFloor, m_asyncCallbackStackTop);
+    }
 }
 
 uint32_t PS2Runtime::guestMalloc(uint32_t size, uint32_t alignment)

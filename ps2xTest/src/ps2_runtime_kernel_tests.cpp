@@ -233,6 +233,21 @@ namespace
         ctx->pc = 0u;
     }
 
+    void deci2CompletionHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
+    {
+        const uint32_t event = ::getRegU32(ctx, 4);
+        const uint32_t userArea = ::getRegU32(ctx, 6);
+        const uint32_t count = readGuestU32(rdram, userArea);
+        writeGuestU32(rdram, userArea, count + 1u);
+        writeGuestU32(rdram, userArea + 4u,
+                      (readGuestU32(rdram, userArea + 4u) << 4u) | event);
+        if (event == 4u)
+        {
+            writeGuestU32(rdram, userArea + 0x0Cu, 0u);
+        }
+        ctx->pc = 0u;
+    }
+
     struct TestEnv
     {
         std::vector<uint8_t> rdram;
@@ -986,6 +1001,57 @@ void register_ps2_runtime_kernel_tests()
             t.Equals(getRegS32(env.ctx, 2), sid, "DeleteSema should return sid while cleaning up the waiter semaphore");
         });
 
+        tc.Run("DECI2 hostless send completes through the registered handler", [](TestCase &t)
+        {
+            TestEnv env;
+            constexpr uint32_t kArgsAddr = 0x1A00u;
+            constexpr uint32_t kUserArea = 0x1B00u;
+            constexpr uint32_t kUnusedFourthArg = 0x1C00u;
+            constexpr uint32_t kHandler = 0x00210000u;
+            env.runtime.registerFunction(kHandler, &deci2CompletionHandler);
+
+            const uint32_t openArgs[4] = {0x210u, kUserArea, kHandler, kUnusedFourthArg};
+            writeGuestWords(env.rdram.data(), kArgsAddr, openArgs, std::size(openArgs));
+            setRegU32(env.ctx, 4, 1u);
+            setRegU32(env.ctx, 5, kArgsAddr);
+            Deci2Call(env.rdram.data(), &env.ctx, &env.runtime);
+            const int32_t socket = getRegS32(env.ctx, 2);
+            t.IsTrue(socket > 0, "DECI2 open should allocate a socket");
+
+            writeGuestU32(env.rdram.data(), kUserArea + 0x0Cu, 1u);
+            const uint32_t sendArgs[4] = {static_cast<uint32_t>(socket), 0u, 0u, 0u};
+            writeGuestWords(env.rdram.data(), kArgsAddr, sendArgs, std::size(sendArgs));
+            setRegU32(env.ctx, 4, 3u);
+            Deci2Call(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_OK, "DECI2 send request should be accepted");
+            t.Equals(readGuestU32(env.rdram.data(), kUserArea), 0u,
+                     "send completion should remain pending until poll");
+
+            setRegU32(env.ctx, 4, 4u);
+            Deci2Call(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_OK, "DECI2 poll should succeed");
+            t.Equals(readGuestU32(env.rdram.data(), kUserArea), 2u,
+                     "poll should dispatch send and completion events");
+            t.Equals(readGuestU32(env.rdram.data(), kUserArea + 4u), 0x34u,
+                     "DECI2 handler should receive event 3 followed by event 4");
+            t.Equals(readGuestU32(env.rdram.data(), kUserArea + 0x0Cu), 0u,
+                     "completion handler should be able to release the guest request");
+            t.Equals(readGuestU32(env.rdram.data(), kUnusedFourthArg), 0u,
+                     "DECI2 callback state must come from the open opt argument");
+
+            setRegU32(env.ctx, 4, 4u);
+            Deci2Call(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(readGuestU32(env.rdram.data(), kUserArea), 2u,
+                     "poll should not repeat a completed send");
+
+            const uint32_t invalidArgs[4] = {0x7FFFFFFFu, 0u, 0u, 0u};
+            writeGuestWords(env.rdram.data(), kArgsAddr, invalidArgs, std::size(invalidArgs));
+            setRegU32(env.ctx, 4, 3u);
+            Deci2Call(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_ERROR,
+                     "DECI2 send should reject an unknown socket");
+        });
+
         tc.Run("setup heap and allocator primitives track end-of-heap", [](TestCase &t)
         {
             TestEnv env;
@@ -1017,6 +1083,40 @@ void register_ps2_runtime_kernel_tests()
             env.runtime.guestFree(grown);
             const uint32_t reused = env.runtime.guestMalloc(0x80u, 16u);
             t.Equals(reused, heapBase, "guestFree should make the head block reusable");
+        });
+
+        tc.Run("setup heap honors an explicit range through the end of RDRAM", [](TestCase &t)
+        {
+            TestEnv env;
+
+            constexpr uint32_t kHeapBase = 0x01FE0000u;
+            constexpr uint32_t kHeapSize = 0x00020000u;
+
+            setRegU32(env.ctx, 4, kHeapBase);
+            setRegU32(env.ctx, 5, kHeapSize);
+            t.IsTrue(callSyscall(0x3Du, env.rdram.data(), &env.ctx, &env.runtime),
+                     "SetupHeap syscall should dispatch");
+            t.Equals(::getRegU32(&env.ctx, 2), kHeapBase,
+                     "SetupHeap should preserve a valid explicit base near the end of RDRAM");
+
+            t.IsTrue(callSyscall(0x3Eu, env.rdram.data(), &env.ctx, &env.runtime),
+                     "EndOfHeap syscall should dispatch");
+            t.Equals(::getRegU32(&env.ctx, 2), PS2_RAM_SIZE,
+                     "EndOfHeap should report the exclusive end of the explicit heap range");
+
+            const uint32_t callbackStack = env.runtime.reserveAsyncCallbackStack(0x1000u, 16u);
+            t.IsTrue(callbackStack >= 0x01F00000u && callbackStack < kHeapBase,
+                     "callback stack reservation should relocate below an explicit high heap");
+
+            const uint32_t leading = env.runtime.guestMalloc(kHeapSize - 0x10u, 16u);
+            t.Equals(leading, kHeapBase, "allocation should start at the explicit heap base");
+
+            const uint32_t finalBlock = env.runtime.guestMalloc(0x10u, 16u);
+            t.Equals(finalBlock, PS2_RAM_SIZE - 0x10u,
+                     "an allocation ending exactly at the final RDRAM byte should succeed");
+
+            const uint32_t overflow = env.runtime.guestMalloc(1u, 16u);
+            t.Equals(overflow, 0u, "an allocation extending beyond RDRAM should fail");
         });
 
         tc.Run("memalign stubs allocate aligned guest memory", [](TestCase &t)

@@ -9,8 +9,9 @@ namespace
         uint16_t protocol = 0;
         uint32_t opt = 0;
         uint32_t handler = 0;
-        uint32_t userArea = 0;
+        uint32_t workArea = 0;
         bool locked = false;
+        bool sendPending = false;
     };
 
     std::mutex g_deci2Mutex;
@@ -79,7 +80,7 @@ namespace
         }
     }
 
-    static int32_t allocateDeci2Socket(uint16_t protocol, uint32_t opt, uint32_t handler, uint32_t userArea)
+    static int32_t allocateDeci2Socket(uint16_t protocol, uint32_t opt, uint32_t handler, uint32_t workArea)
     {
         std::lock_guard<std::mutex> lock(g_deci2Mutex);
 
@@ -89,12 +90,17 @@ namespace
         }
 
         const int32_t socket = g_nextDeci2Socket;
+        g_nextDeci2Socket =
+            (g_nextDeci2Socket == std::numeric_limits<int32_t>::max())
+                ? 1
+                : g_nextDeci2Socket + 1;
         Deci2Session session;
         session.protocol = protocol;
         session.opt = opt;
         session.handler = handler;
-        session.userArea = userArea;
+        session.workArea = workArea;
         session.locked = false;
+        session.sendPending = false;
 
         g_deci2Sessions[socket] = session;
         return socket;
@@ -119,13 +125,72 @@ namespace
         std::lock_guard<std::mutex> lock(g_deci2Mutex);
         return g_deci2Sessions.erase(socket) != 0;
     }
+
+    static bool setDeci2SendPending(int32_t socket)
+    {
+        std::lock_guard<std::mutex> lock(g_deci2Mutex);
+        auto sessionIt = g_deci2Sessions.find(socket);
+        if (sessionIt == g_deci2Sessions.end())
+        {
+            return false;
+        }
+        sessionIt->second.sendPending = true;
+        return true;
+    }
+
+    static bool takePendingDeci2Send(int32_t socket, Deci2Session &session)
+    {
+        std::lock_guard<std::mutex> lock(g_deci2Mutex);
+        auto sessionIt = g_deci2Sessions.find(socket);
+        if (sessionIt == g_deci2Sessions.end())
+        {
+            return false;
+        }
+        session = sessionIt->second;
+        sessionIt->second.sendPending = false;
+        return true;
+    }
+
+    static void dispatchDeci2Handler(uint8_t *rdram,
+                                     R5900Context *callerCtx,
+                                     PS2Runtime *runtime,
+                                     const Deci2Session &session,
+                                     uint32_t event)
+    {
+        if (!rdram || !callerCtx || !runtime || session.handler == 0u || !runtime->hasFunction(session.handler))
+        {
+            return;
+        }
+
+        R5900Context callbackCtx = *callerCtx;
+        SET_GPR_U32(&callbackCtx, 4, event);
+        SET_GPR_U32(&callbackCtx, 5, 0u);
+        // The DECI2 handler ABI is handler(event, count, opt). The value
+        // supplied as `opt` to sceDeci2Open is the callback's state pointer.
+        SET_GPR_U32(&callbackCtx, 6, session.opt);
+        SET_GPR_U32(&callbackCtx, 31, 0u);
+        callbackCtx.pc = session.handler;
+
+        constexpr uint32_t kMaxCallbackSteps = 100000u;
+        PS2Runtime::GuestExecutionScope guestExecution(runtime);
+        for (uint32_t steps = 0u;
+             callbackCtx.pc != 0u && !runtime->isStopRequested() && steps < kMaxCallbackSteps;
+             ++steps)
+        {
+            PS2Runtime::RecompiledFunction callback = runtime->lookupFunction(callbackCtx.pc);
+            if (!callback)
+            {
+                break;
+            }
+            callback(rdram, &callbackCtx, runtime);
+        }
+    }
 }
 
 namespace ps2_syscalls
 {
     void Deci2Call(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-#if defined(_DEBUG) || defined(RUNTIME_DECI2CALL)
         const int32_t code = static_cast<int32_t>(getRegU32(ctx, 4));
         const uint32_t argsAddr = getRegU32(ctx, 5);
 
@@ -139,9 +204,9 @@ namespace ps2_syscalls
             const uint16_t protocol = static_cast<uint16_t>(args[0] & 0xFFFFu);
             const uint32_t opt = args[1];
             const uint32_t handler = args[2];
-            const uint32_t userArea = args[3];
+            const uint32_t workArea = args[3];
 
-            const int32_t socket = allocateDeci2Socket(protocol, opt, handler, userArea);
+            const int32_t socket = allocateDeci2Socket(protocol, opt, handler, workArea);
             setReturnS32(ctx, socket);
             return;
         }
@@ -151,11 +216,31 @@ namespace ps2_syscalls
             setReturnS32(ctx, closeDeci2Socket(socket) ? KE_OK : KE_ERROR);
             return;
         }
-        // WE dont need to do thouses
         case 3:  // sceDeci2ReqSend(socket, dest)
-        case 4:  // sceDeci2Poll(socket)
         case -7: // sceDeci2ExReqSend(socket, dest)
         {
+            const int32_t socket = static_cast<int32_t>(args[0]);
+            setReturnS32(ctx, setDeci2SendPending(socket) ? KE_OK : KE_ERROR);
+            return;
+        }
+        case 4: // sceDeci2Poll(socket)
+        {
+            const int32_t socket = static_cast<int32_t>(args[0]);
+            Deci2Session session;
+            if (!takePendingDeci2Send(socket, session))
+            {
+                setReturnS32(ctx, KE_ERROR);
+                return;
+            }
+
+            if (session.sendPending)
+            {
+                // A hostless DECI2 channel accepts the complete packet immediately.
+                // Event 3 lets the registered handler provide it through ExSend;
+                // event 4 reports completion so the guest can release its request.
+                dispatchDeci2Handler(rdram, ctx, runtime, session, 3u);
+                dispatchDeci2Handler(rdram, ctx, runtime, session, 4u);
+            }
             setReturnS32(ctx, KE_OK);
             return;
         }
@@ -230,6 +315,5 @@ namespace ps2_syscalls
             return;
         }
         }
-#endif
     }
 }
