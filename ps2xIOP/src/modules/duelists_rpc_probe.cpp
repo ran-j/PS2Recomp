@@ -34,6 +34,9 @@ namespace ps2x::iop::detail
                 m_f002Calls = 0u;
                 m_registrationCount = 0u;
                 m_rangeRegistrationCount = 0u;
+                m_function5000Calls = 0u;
+                m_function5005Calls = 0u;
+                m_f003Calls = 0u;
                 m_rejectedCalls = 0u;
                 m_lastFunction = 0u;
                 m_lastSendAddress = 0u;
@@ -47,6 +50,9 @@ namespace ps2x::iop::detail
                 m_lastRegistrationPointer = 0u;
                 m_registeredRangeBase = 0u;
                 m_registeredRangeSize = 0u;
+                m_last5005Argument0 = 0u;
+                m_last5005Argument1 = 0u;
+                m_lastF003Enabled = 0u;
                 m_registry = {};
             }
 
@@ -178,6 +184,91 @@ namespace ps2x::iop::detail
                     }
                 }
 
+                const bool structurallyValid5000 =
+                    request.function == k5000Function &&
+                    request.mode == kNowaitMode &&
+                    validTypedEnvelope &&
+                    wordsReadable &&
+                    readableWords >= 1u &&
+                    words[0] != 0u &&
+                    (words[0] & (kSelfTokenAlignment - 1u)) == 0u;
+                if (structurallyValid5000)
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    if (m_selfToken != 0u &&
+                        words[0] == m_selfToken &&
+                        m_host.zeroGuest(request.receive.address, request.receive.size))
+                    {
+                        ++m_handledCalls;
+                        ++m_function5000Calls;
+                        recordRequest(request, words, wordsReadable);
+
+                        RpcResult result;
+                        result.handled = true;
+                        result.resultAddress = request.receive.address;
+                        result.signalNowaitCompletion = true;
+                        return result;
+                    }
+                }
+
+                const bool structurallyValid5005 =
+                    request.function == k5005Function &&
+                    request.mode == kNowaitMode &&
+                    validTypedEnvelope &&
+                    wordsReadable &&
+                    readableWords >= 3u &&
+                    words[0] != 0u &&
+                    (words[0] & (kSelfTokenAlignment - 1u)) == 0u;
+                if (structurallyValid5005)
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    if (m_selfToken != 0u &&
+                        words[0] == m_selfToken &&
+                        m_host.zeroGuest(request.receive.address, request.receive.size))
+                    {
+                        ++m_handledCalls;
+                        ++m_function5005Calls;
+                        m_last5005Argument0 = words[1];
+                        m_last5005Argument1 = words[2];
+                        recordRequest(request, words, wordsReadable);
+
+                        RpcResult result;
+                        result.handled = true;
+                        result.resultAddress = request.receive.address;
+                        result.signalNowaitCompletion = true;
+                        return result;
+                    }
+                }
+
+                const bool structurallyValidF003 =
+                    request.function == kF003Function &&
+                    request.mode == kNowaitMode &&
+                    validTypedEnvelope &&
+                    wordsReadable &&
+                    readableWords >= 2u &&
+                    words[0] != 0u &&
+                    (words[0] & (kSelfTokenAlignment - 1u)) == 0u &&
+                    words[1] <= 1u;
+                if (structurallyValidF003)
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    if (m_selfToken != 0u &&
+                        words[0] == m_selfToken &&
+                        m_host.zeroGuest(request.receive.address, request.receive.size))
+                    {
+                        ++m_handledCalls;
+                        ++m_f003Calls;
+                        m_lastF003Enabled = words[1];
+                        recordRequest(request, words, wordsReadable);
+
+                        RpcResult result;
+                        result.handled = true;
+                        result.resultAddress = request.receive.address;
+                        result.signalNowaitCompletion = true;
+                        return result;
+                    }
+                }
+
                 {
                     std::lock_guard<std::mutex> lock(m_mutex);
                     ++m_rejectedCalls;
@@ -217,6 +308,12 @@ namespace ps2x::iop::detail
                 metrics.push_back({"f002_calls", m_f002Calls, false});
                 metrics.push_back({"registration_count", m_registrationCount, false});
                 metrics.push_back({"range_registration_count", m_rangeRegistrationCount, false});
+                metrics.push_back({"function_5000_calls", m_function5000Calls, false});
+                metrics.push_back({"function_5005_calls", m_function5005Calls, false});
+                metrics.push_back({"last_5005_argument_0", m_last5005Argument0, true});
+                metrics.push_back({"last_5005_argument_1", m_last5005Argument1, true});
+                metrics.push_back({"f003_calls", m_f003Calls, false});
+                metrics.push_back({"last_f003_enabled", m_lastF003Enabled, false});
                 metrics.push_back({"registered_range_base", m_registeredRangeBase, true});
                 metrics.push_back({"registered_range_size", m_registeredRangeSize, false});
                 metrics.push_back({"self_token", m_selfToken, true});
@@ -256,8 +353,13 @@ namespace ps2x::iop::detail
             static constexpr uint32_t kF005Function = 0xF005u;
             static constexpr uint32_t k5F10Function = 0x5F10u;
             static constexpr uint32_t k5F12Function = 0x5F12u;
+            static constexpr uint32_t k5000Function = 0x5000u;
+            static constexpr uint32_t k5005Function = 0x5005u;
+            static constexpr uint32_t kF003Function = 0xF003u;
             static constexpr uint32_t kTypedSendSize = 0x40u;
             static constexpr uint32_t kTypedReceiveSize = 0x10u;
+            static constexpr uint32_t kNowaitMode = 1u;
+            static constexpr uint32_t kSelfTokenAlignment = 0x40u;
             inline static constexpr std::array<uint32_t, 1> kSids{kSid};
 
             IopHost &m_host;
@@ -266,12 +368,18 @@ namespace ps2x::iop::detail
             uint64_t m_f002Calls = 0u;
             uint64_t m_registrationCount = 0u;
             uint64_t m_rangeRegistrationCount = 0u;
+            uint64_t m_function5000Calls = 0u;
+            uint64_t m_function5005Calls = 0u;
+            uint64_t m_f003Calls = 0u;
             uint64_t m_rejectedCalls = 0u;
             uint32_t m_lastRegistrationIndex = 0u;
             uint32_t m_lastRegistrationPointer = 0u;
             uint32_t m_selfToken = 0u;
             uint32_t m_registeredRangeBase = 0u;
             uint32_t m_registeredRangeSize = 0u;
+            uint32_t m_last5005Argument0 = 0u;
+            uint32_t m_last5005Argument1 = 0u;
+            uint32_t m_lastF003Enabled = 0u;
             uint32_t m_lastFunction = 0u;
             uint32_t m_lastSendAddress = 0u;
             uint32_t m_lastSendSize = 0u;

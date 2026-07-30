@@ -524,6 +524,82 @@ void register_ps2_iop_tests()
             }
         });
 
+        tc.Run("FILEIO core service binds without fabricating uncharacterized calls", [](TestCase &t)
+        {
+            constexpr uint32_t kSid = 0x80000001u;
+            constexpr uint32_t kReceive = 0x300u;
+            constexpr uint32_t kSentinel = 0xA55AA55Au;
+
+            FakeIopHost host;
+            ps2x::iop::IopSubsystem subsystem(host);
+            std::string error;
+            t.IsTrue(subsystem.configure({"unmatched.elf", 0u, 0u}, &error),
+                     "FILEIO should be available without a game profile");
+            t.IsTrue(subsystem.handlesSid(kSid),
+                     "the core FILEIO endpoint should be bindable");
+            t.IsTrue(host.writeWord(kReceive, kSentinel),
+                     "FILEIO receive sentinel should be writable");
+
+            RpcRequest request{};
+            request.sid = kSid;
+            request.function = 0x1234u;
+            request.send = {0x200u, 0x20u};
+            request.receive = {kReceive, sizeof(uint32_t)};
+            t.IsFalse(subsystem.handleRpc(request).handled,
+                      "uncharacterized FILEIO calls must remain rejected");
+            t.Equals(host.readWord(kReceive), kSentinel,
+                     "bind-only FILEIO must leave receive memory untouched");
+
+            constexpr uint32_t kInitPointer = 0x400u;
+            t.IsTrue(host.writeWord(request.send.address, kInitPointer),
+                     "FILEIO init pointer should be writable");
+            request.function = 0xFFu;
+            request.send.size = sizeof(uint32_t);
+            t.IsTrue(subsystem.handleRpc(request).handled,
+                     "the exact FILEIO init envelope should be handled");
+            t.Equals(host.readWord(kReceive), 0u,
+                     "FILEIO init should return zero");
+
+            t.IsTrue(host.writeWord(request.send.address, kInitPointer + 1u),
+                     "misaligned FILEIO init pointer should be writable");
+            t.IsTrue(host.writeWord(kReceive, kSentinel),
+                     "malformed FILEIO receive sentinel should be writable");
+            t.IsFalse(subsystem.handleRpc(request).handled,
+                      "FILEIO init must reject a misaligned guest pointer");
+            t.Equals(host.readWord(kReceive), kSentinel,
+                     "malformed FILEIO init must leave receive memory untouched");
+
+            DebugSnapshot snapshot = subsystem.debugSnapshot();
+            const DebugService *fileio = findService(snapshot, "FILEIO");
+            t.IsTrue(fileio != nullptr, "FILEIO should appear in core diagnostics");
+            if (fileio)
+            {
+                t.Equals(fileio->sids.size(), static_cast<size_t>(1u),
+                         "FILEIO should advertise one endpoint");
+                t.Equals(metricValue(*fileio, "init_calls"), uint64_t{1},
+                         "FILEIO should count typed initialization");
+                t.Equals(metricValue(*fileio, "rejected_calls"), uint64_t{2},
+                         "FILEIO should count observed calls");
+                t.Equals(metricValue(*fileio, "last_function"), uint64_t{0xFFu},
+                         "FILEIO should retain the last rejected function");
+                t.Equals(metricValue(*fileio, "last_send_size"), uint64_t{4u},
+                         "FILEIO should retain the send size");
+                t.Equals(metricValue(*fileio, "last_receive_size"), uint64_t{4u},
+                         "FILEIO should retain the receive size");
+            }
+
+            subsystem.reset();
+            snapshot = subsystem.debugSnapshot();
+            fileio = findService(snapshot, "FILEIO");
+            if (fileio)
+            {
+                t.Equals(metricValue(*fileio, "rejected_calls"), uint64_t{0},
+                         "FILEIO reset should clear diagnostics");
+                t.Equals(metricValue(*fileio, "init_calls"), uint64_t{0},
+                         "FILEIO reset should clear typed call counters");
+            }
+        });
+
         tc.Run("LOADFILE reports the compatible version and tracks HLE modules", [](TestCase &t)
         {
             FakeIopHost host;
@@ -917,11 +993,154 @@ void register_ps2_iop_tests()
             t.IsFalse(subsystem.handleRpc(request).handled,
                       "5F12 must reject a zero-base range");
 
+            t.IsTrue(host.writeWord(kSend + 0u, kSelfToken),
+                     "5000 self token should be writable");
+            t.IsTrue(host.writeWord(kSend + 4u, 0x00400000u),
+                     "5000 stale trailing word should be writable");
+            t.IsTrue(host.writeWord(kSend + 8u, 0x21u),
+                     "5000 second stale trailing word should be writable");
+            t.IsTrue(host.writeWord(kSend + 12u, 0x00911EE8u),
+                     "5000 third stale trailing word should be writable");
+            for (uint32_t offset = 0u; offset < 0x10u; offset += sizeof(uint32_t))
+            {
+                t.IsTrue(host.writeWord(kReceive + offset, kSentinel),
+                         "5000 response sentinel should be writable");
+            }
+            t.IsTrue(host.writeWord(kReceive + 0x10u, kSentinel),
+                     "memory after the 5000 response should be writable");
+            request.function = 0x5000u;
+            request.mode = 1u;
+            const RpcResult function5000Result = subsystem.handleRpc(request);
+            t.IsTrue(function5000Result.handled,
+                     "the exact NOWAIT 5000 envelope should be handled");
+            t.IsTrue(function5000Result.signalNowaitCompletion,
+                     "5000 should request NOWAIT completion signaling");
+            t.Equals(function5000Result.resultAddress, kReceive,
+                     "5000 should return its receive buffer");
+            for (uint32_t offset = 0u; offset < 0x10u; offset += sizeof(uint32_t))
+            {
+                t.Equals(host.readWord(kReceive + offset), 0u,
+                         "5000 should zero its characterized response");
+            }
+            t.Equals(host.readWord(kReceive + 0x10u), kSentinel,
+                     "5000 must not write beyond its response");
+
+            t.IsTrue(host.writeWord(kReceive, kSentinel),
+                     "malformed 5000 receive sentinel should be writable");
+            request.mode = 0u;
+            t.IsFalse(subsystem.handleRpc(request).handled,
+                      "5000 must reject a non-NOWAIT call");
+            t.Equals(host.readWord(kReceive), kSentinel,
+                     "malformed 5000 must leave receive memory untouched");
+            request.mode = 1u;
+            t.IsTrue(host.writeWord(kSend, kSelfToken + 0x40u),
+                     "mismatched aligned 5000 self token should be writable");
+            t.IsFalse(subsystem.handleRpc(request).handled,
+                      "5000 must reject a mismatched stable self token");
+            t.Equals(host.readWord(kReceive), kSentinel,
+                     "mismatched 5000 must leave receive memory untouched");
+
+            t.IsTrue(host.writeWord(kSend + 0u, kSelfToken),
+                     "5005 self token should be writable");
+            t.IsTrue(host.writeWord(kSend + 4u, 0x80u),
+                     "5005 first opaque argument should be writable");
+            t.IsTrue(host.writeWord(kSend + 8u, 0x80u),
+                     "5005 second opaque argument should be writable");
+            t.IsTrue(host.writeWord(kSend + 12u, 0xDEADBEEFu),
+                     "5005 ignored trailing word should be writable");
+            for (uint32_t offset = 0u; offset < 0x10u; offset += sizeof(uint32_t))
+            {
+                t.IsTrue(host.writeWord(kReceive + offset, kSentinel),
+                         "5005 response sentinel should be writable");
+            }
+            request.function = 0x5005u;
+            const RpcResult function5005Result = subsystem.handleRpc(request);
+            t.IsTrue(function5005Result.handled,
+                     "the exact NOWAIT 5005 envelope should be handled");
+            t.IsTrue(function5005Result.signalNowaitCompletion,
+                     "5005 should request NOWAIT completion signaling");
+            t.Equals(function5005Result.resultAddress, kReceive,
+                     "5005 should return its receive buffer");
+            for (uint32_t offset = 0u; offset < 0x10u; offset += sizeof(uint32_t))
+            {
+                t.Equals(host.readWord(kReceive + offset), 0u,
+                         "5005 should zero its characterized response");
+            }
+
+            t.IsTrue(host.writeWord(kSend + 4u, 0u),
+                     "zero 5005 first argument should be writable");
+            t.IsTrue(host.writeWord(kSend + 8u, 0u),
+                     "zero 5005 second argument should be writable");
+            t.IsTrue(subsystem.handleRpc(request).handled,
+                     "5005 should accept characterized zero opaque arguments");
+
+            t.IsTrue(host.writeWord(kReceive, kSentinel),
+                     "malformed 5005 receive sentinel should be writable");
+            request.mode = 0u;
+            t.IsFalse(subsystem.handleRpc(request).handled,
+                      "5005 must reject a non-NOWAIT call");
+            t.Equals(host.readWord(kReceive), kSentinel,
+                     "malformed 5005 must leave receive memory untouched");
+            request.mode = 1u;
+            t.IsTrue(host.writeWord(kSend, kSelfToken + 0x40u),
+                     "mismatched aligned 5005 self token should be writable");
+            t.IsFalse(subsystem.handleRpc(request).handled,
+                      "5005 must reject a mismatched stable self token");
+            t.Equals(host.readWord(kReceive), kSentinel,
+                     "mismatched 5005 must leave receive memory untouched");
+
+            t.IsTrue(host.writeWord(kSend + 0u, kSelfToken),
+                     "F003 self token should be writable");
+            t.IsTrue(host.writeWord(kSend + 4u, 0u),
+                     "disabled F003 boolean should be writable");
+            t.IsTrue(host.writeWord(kSend + 8u, 0x0034F6E0u),
+                     "F003 ignored trailing word should be writable");
+            for (uint32_t offset = 0u; offset < 0x10u; offset += sizeof(uint32_t))
+            {
+                t.IsTrue(host.writeWord(kReceive + offset, kSentinel),
+                         "F003 response sentinel should be writable");
+            }
+            request.function = 0xF003u;
+            const RpcResult disabledF003Result = subsystem.handleRpc(request);
+            t.IsTrue(disabledF003Result.handled,
+                     "the exact disabled F003 envelope should be handled");
+            t.IsTrue(disabledF003Result.signalNowaitCompletion,
+                     "F003 should request NOWAIT completion signaling");
+            t.Equals(disabledF003Result.resultAddress, kReceive,
+                     "F003 should return its receive buffer");
+            for (uint32_t offset = 0u; offset < 0x10u; offset += sizeof(uint32_t))
+            {
+                t.Equals(host.readWord(kReceive + offset), 0u,
+                         "F003 should zero its characterized response");
+            }
+
+            t.IsTrue(host.writeWord(kSend + 4u, 1u),
+                     "enabled F003 boolean should be writable");
+            t.IsTrue(subsystem.handleRpc(request).handled,
+                     "F003 should accept the characterized enabled boolean");
+
+            t.IsTrue(host.writeWord(kReceive, kSentinel),
+                     "malformed F003 receive sentinel should be writable");
+            t.IsTrue(host.writeWord(kSend + 4u, 2u),
+                     "invalid F003 boolean should be writable");
+            t.IsFalse(subsystem.handleRpc(request).handled,
+                      "F003 must reject values outside its Boolean domain");
+            t.Equals(host.readWord(kReceive), kSentinel,
+                     "invalid F003 must leave receive memory untouched");
+            t.IsTrue(host.writeWord(kSend + 4u, 1u),
+                     "valid F003 boolean should be restorable");
+            request.mode = 0u;
+            t.IsFalse(subsystem.handleRpc(request).handled,
+                      "F003 must reject a non-NOWAIT call");
+            t.Equals(host.readWord(kReceive), kSentinel,
+                     "non-NOWAIT F003 must leave receive memory untouched");
+            request.mode = 1u;
+
             const ps2x::iop::DebugSnapshot handledSnapshot = subsystem.debugSnapshot();
             service = findService(handledSnapshot, "Duelists custom RPC probe");
             if (service)
             {
-                t.Equals(metricValue(*service, "handled_calls"), uint64_t{4},
+                t.Equals(metricValue(*service, "handled_calls"), uint64_t{9},
                          "the probe should count all typed calls");
                 t.Equals(metricValue(*service, "f002_calls"), uint64_t{1},
                          "the probe should count typed F002 calls");
@@ -938,7 +1157,19 @@ void register_ps2_iop_tests()
                          "the probe should retain the registered range base");
                 t.Equals(metricValue(*service, "registered_range_size"), uint64_t{kRangeSize},
                          "the probe should retain the registered range size");
-                t.Equals(metricValue(*service, "rejected_calls"), uint64_t{9},
+                t.Equals(metricValue(*service, "function_5000_calls"), uint64_t{1},
+                         "the probe should count typed 5000 calls");
+                t.Equals(metricValue(*service, "function_5005_calls"), uint64_t{2},
+                         "the probe should count typed 5005 calls");
+                t.Equals(metricValue(*service, "last_5005_argument_0"), uint64_t{0},
+                         "the probe should retain the last 5005 first argument");
+                t.Equals(metricValue(*service, "last_5005_argument_1"), uint64_t{0},
+                         "the probe should retain the last 5005 second argument");
+                t.Equals(metricValue(*service, "f003_calls"), uint64_t{2},
+                         "the probe should count typed F003 calls");
+                t.Equals(metricValue(*service, "last_f003_enabled"), uint64_t{1},
+                         "the probe should retain the last F003 Boolean");
+                t.Equals(metricValue(*service, "rejected_calls"), uint64_t{15},
                          "the probe should retain rejected-call diagnostics");
             }
 
@@ -953,6 +1184,12 @@ void register_ps2_iop_tests()
                          "reset should clear registration counters");
                 t.Equals(metricValue(*service, "range_registration_count"), uint64_t{0},
                          "reset should clear range counters");
+                t.Equals(metricValue(*service, "function_5000_calls"), uint64_t{0},
+                         "reset should clear 5000 counters");
+                t.Equals(metricValue(*service, "function_5005_calls"), uint64_t{0},
+                         "reset should clear 5005 counters");
+                t.Equals(metricValue(*service, "f003_calls"), uint64_t{0},
+                         "reset should clear F003 counters");
                 t.Equals(metricValue(*service, "self_token"), uint64_t{0},
                          "reset should clear the established self token");
                 t.Equals(metricValue(*service, "registered_range_size"), uint64_t{0},

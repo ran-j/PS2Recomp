@@ -165,6 +165,7 @@ namespace ps2x::iop::detail
     std::unique_ptr<IopService> createCdvdSearchFileService(IopHost &host, CdvdSearchFileBindings bindings);
     std::unique_ptr<IopService> createLibSdService(IopHost &host);
     std::unique_ptr<IopService> createPadmanService(IopHost &host);
+    std::unique_ptr<IopService> createFileIoService(IopHost &host);
     std::unique_ptr<IopService> createLoadFileService(IopHost &host);
     std::unique_ptr<IopService> createMcservService(IopHost &host);
     std::unique_ptr<IopService> createTsnddrvService(IopHost &host, TsnddrvBindings bindings);
