@@ -3153,6 +3153,494 @@ void register_ps2_gs_tests()
                      "triangle fan quad should light at least one framebuffer row");
         });
 
+        tc.Run("GS TRISTRIP XYZ3 vertex advances the queue window", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            constexpr uint64_t kFrame =
+                (0ull << 0) |
+                (1ull << 16) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kZbuf = (1ull << 32);
+            constexpr uint64_t kScissor =
+                (0ull << 0) |
+                (63ull << 16) |
+                (0ull << 32) |
+                (63ull << 48);
+            constexpr uint64_t kTest = (1ull << 17); // ZTST = ALWAYS, alpha test off
+            constexpr uint64_t kPrim = static_cast<uint64_t>(GS_PRIM_TRISTRIP);
+
+            gs.writeRegister(GS_REG_FRAME_1, kFrame);
+            gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
+            gs.writeRegister(GS_REG_SCISSOR_1, kScissor);
+            gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, kTest);
+            gs.writeRegister(GS_REG_PRIM, kPrim);
+
+            auto makeRgbaq = [](uint8_t c) -> uint64_t
+            {
+                return static_cast<uint64_t>(c) |
+                       (static_cast<uint64_t>(c) << 8) |
+                       (static_cast<uint64_t>(c) << 16) |
+                       (0x3F800000ull << 32); // q = 1.0f
+            };
+            auto makeXyz = [](uint16_t x, uint16_t y) -> uint64_t
+            {
+                return (static_cast<uint64_t>(x) * 16ull) |
+                       ((static_cast<uint64_t>(y) * 16ull) << 16);
+            };
+
+            gs.writeRegister(GS_REG_RGBAQ, makeRgbaq(0x11));
+            gs.writeRegister(GS_REG_XYZ2, makeXyz(4u, 4u));
+            gs.writeRegister(GS_REG_RGBAQ, makeRgbaq(0x22));
+            gs.writeRegister(GS_REG_XYZ2, makeXyz(4u, 16u));
+            gs.writeRegister(GS_REG_RGBAQ, makeRgbaq(0x33));
+            gs.writeRegister(GS_REG_XYZ2, makeXyz(20u, 4u));
+            gs.writeRegister(GS_REG_RGBAQ, makeRgbaq(0x44));
+            gs.writeRegister(GS_REG_XYZ3, makeXyz(20u, 28u)); // ADC: vertex kick only, no drawing kick
+            gs.writeRegister(GS_REG_RGBAQ, makeRgbaq(0x55));
+            gs.writeRegister(GS_REG_XYZ2, makeXyz(36u, 16u));
+            gs.writeRegister(GS_REG_RGBAQ, makeRgbaq(0x66));
+            gs.writeRegister(GS_REG_XYZ2, makeXyz(36u, 44u));
+
+            t.Equals(readReferenceFramePSMCT32Pixel(vram, 0u, 1u, 6u, 6u), 0x00333333u,
+                     "the first triangle (V1,V2,V3) should draw regardless of the ADC fix");
+            t.Equals(readReferenceFramePSMCT32Pixel(vram, 0u, 1u, 25u, 12u), 0x00555555u,
+                     "the second triangle should be (V3,V4,V5), formed after the ADC kick advances the queue");
+            t.Equals(readReferenceFramePSMCT32Pixel(vram, 0u, 1u, 10u, 12u), 0x00000000u,
+                     "the stale triangle (V2,V3,V4) must not be drawn");
+            t.Equals(readReferenceFramePSMCT32Pixel(vram, 0u, 1u, 33u, 20u), 0x00666666u,
+                     "the strip should stay in phase: the third triangle is (V4,V5,V6)");
+        });
+
+        tc.Run("GS TRISTRIP PACKED ADC vertex advances the queue window", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            constexpr uint64_t kFrame =
+                (0ull << 0) |
+                (1ull << 16) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kZbuf = (1ull << 32);
+            constexpr uint64_t kScissor =
+                (0ull << 0) |
+                (63ull << 16) |
+                (0ull << 32) |
+                (63ull << 48);
+            constexpr uint64_t kTest = (1ull << 17); // ZTST = ALWAYS, alpha test off
+            constexpr uint64_t kPrim = static_cast<uint64_t>(GS_PRIM_TRISTRIP);
+
+            gs.writeRegister(GS_REG_FRAME_1, kFrame);
+            gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
+            gs.writeRegister(GS_REG_SCISSOR_1, kScissor);
+            gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, kTest);
+            gs.writeRegister(GS_REG_PRIM, kPrim);
+
+            struct PackedVertex
+            {
+                uint16_t x;
+                uint16_t y;
+                uint8_t color;
+                bool adc;
+            };
+            const PackedVertex verts[6] = {
+                {4u, 4u, 0x11u, false},
+                {4u, 16u, 0x22u, false},
+                {20u, 4u, 0x33u, false},
+                {20u, 28u, 0x44u, true}, // ADC: vertex kick only, no drawing kick
+                {36u, 16u, 0x55u, false},
+                {36u, 44u, 0x66u, false},
+            };
+
+            std::vector<uint8_t> packet;
+            appendU64(packet, makeGifTag(6u, GIF_FMT_PACKED, 2u, true));
+            appendU64(packet, 0x01ull | (0x05ull << 4)); // REGS = {0x01 RGBAQ, 0x05 XYZ}
+            for (const PackedVertex &v : verts)
+            {
+                const uint64_t rgbaqLo = static_cast<uint64_t>(v.color) |
+                                         (static_cast<uint64_t>(v.color) << 32);
+                const uint64_t rgbaqHi = static_cast<uint64_t>(v.color);
+                appendU64(packet, rgbaqLo);
+                appendU64(packet, rgbaqHi);
+
+                const uint64_t xyzLo = (static_cast<uint64_t>(v.x) * 16ull) |
+                                       ((static_cast<uint64_t>(v.y) * 16ull) << 32);
+                const uint64_t xyzHi = v.adc ? (1ull << 47) : 0ull; // bit 47 of the high half is the ADC bit
+                appendU64(packet, xyzLo);
+                appendU64(packet, xyzHi);
+            }
+
+            gs.processGIFPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            t.Equals(readReferenceFramePSMCT32Pixel(vram, 0u, 1u, 6u, 6u), 0x00333333u,
+                     "the first triangle (V1,V2,V3) should draw regardless of the ADC fix");
+            t.Equals(readReferenceFramePSMCT32Pixel(vram, 0u, 1u, 25u, 12u), 0x00555555u,
+                     "the second triangle should be (V3,V4,V5), formed after the ADC kick advances the queue");
+            t.Equals(readReferenceFramePSMCT32Pixel(vram, 0u, 1u, 10u, 12u), 0x00000000u,
+                     "the stale triangle (V2,V3,V4) must not be drawn");
+            t.Equals(readReferenceFramePSMCT32Pixel(vram, 0u, 1u, 33u, 20u), 0x00666666u,
+                     "the strip should stay in phase: the third triangle is (V4,V5,V6)");
+        });
+
+        tc.Run("GS LINESTRIP XYZ3 vertex advances the queue window", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            constexpr uint64_t kFrame =
+                (0ull << 0) |
+                (1ull << 16) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kZbuf = (1ull << 32);
+            constexpr uint64_t kScissor =
+                (0ull << 0) |
+                (63ull << 16) |
+                (0ull << 32) |
+                (63ull << 48);
+            constexpr uint64_t kTest = (1ull << 17); // ZTST = ALWAYS, alpha test off
+            constexpr uint64_t kPrim = static_cast<uint64_t>(GS_PRIM_LINESTRIP);
+
+            gs.writeRegister(GS_REG_FRAME_1, kFrame);
+            gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
+            gs.writeRegister(GS_REG_SCISSOR_1, kScissor);
+            gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, kTest);
+            gs.writeRegister(GS_REG_PRIM, kPrim);
+
+            auto makeRgbaq = [](uint8_t c) -> uint64_t
+            {
+                return static_cast<uint64_t>(c) |
+                       (static_cast<uint64_t>(c) << 8) |
+                       (static_cast<uint64_t>(c) << 16) |
+                       (0x3F800000ull << 32); // q = 1.0f
+            };
+            auto makeXyz = [](uint16_t x, uint16_t y) -> uint64_t
+            {
+                return (static_cast<uint64_t>(x) * 16ull) |
+                       ((static_cast<uint64_t>(y) * 16ull) << 16);
+            };
+
+            gs.writeRegister(GS_REG_RGBAQ, makeRgbaq(0x11));
+            gs.writeRegister(GS_REG_XYZ2, makeXyz(4u, 4u));
+            gs.writeRegister(GS_REG_RGBAQ, makeRgbaq(0x22));
+            gs.writeRegister(GS_REG_XYZ2, makeXyz(4u, 20u));
+            gs.writeRegister(GS_REG_RGBAQ, makeRgbaq(0x33));
+            gs.writeRegister(GS_REG_XYZ3, makeXyz(30u, 4u)); // ADC: vertex kick only, no drawing kick
+            gs.writeRegister(GS_REG_RGBAQ, makeRgbaq(0x44));
+            gs.writeRegister(GS_REG_XYZ2, makeXyz(30u, 40u));
+            gs.writeRegister(GS_REG_RGBAQ, makeRgbaq(0x55));
+            gs.writeRegister(GS_REG_XYZ2, makeXyz(54u, 40u));
+
+            t.Equals(readReferenceFramePSMCT32Pixel(vram, 0u, 1u, 4u, 10u), 0x00222222u,
+                     "the first segment (V1,V2) should draw regardless of the ADC fix");
+            t.Equals(readReferenceFramePSMCT32Pixel(vram, 0u, 1u, 30u, 30u), 0x00444444u,
+                     "the second segment should be (V3,V4), formed after the ADC kick advances the queue");
+            t.Equals(readReferenceFramePSMCT32Pixel(vram, 0u, 1u, 42u, 40u), 0x00555555u,
+                     "the third segment should be (V4,V5): the advance must leave exactly one vertex in the queue");
+
+            uint32_t litCount = 0u;
+            for (uint32_t y = 6u; y <= 18u; ++y)
+            {
+                for (uint32_t x = 8u; x <= 26u; ++x)
+                {
+                    if (readReferenceFramePSMCT32Pixel(vram, 0u, 1u, x, y) != 0u)
+                        ++litCount;
+                }
+            }
+            t.Equals(litCount, 0u,
+                     "the stale segment (V2,V3) must not be drawn anywhere in the interior of its bounding box");
+        });
+
+        tc.Run("GS TRIFAN XYZF3 vertex advances the queue window and keeps the fan pivot", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            constexpr uint64_t kFrame =
+                (0ull << 0) |
+                (1ull << 16) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kZbuf = (1ull << 32);
+            constexpr uint64_t kScissor =
+                (0ull << 0) |
+                (63ull << 16) |
+                (0ull << 32) |
+                (63ull << 48);
+            constexpr uint64_t kTest = (1ull << 17); // ZTST = ALWAYS, alpha test off
+            constexpr uint64_t kPrim = static_cast<uint64_t>(GS_PRIM_TRIFAN);
+
+            gs.writeRegister(GS_REG_FRAME_1, kFrame);
+            gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
+            gs.writeRegister(GS_REG_SCISSOR_1, kScissor);
+            gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, kTest);
+            gs.writeRegister(GS_REG_PRIM, kPrim);
+
+            auto makeRgbaq = [](uint8_t c) -> uint64_t
+            {
+                return static_cast<uint64_t>(c) |
+                       (static_cast<uint64_t>(c) << 8) |
+                       (static_cast<uint64_t>(c) << 16) |
+                       (0x3F800000ull << 32); // q = 1.0f
+            };
+            auto makeXyzf = [](uint16_t x, uint16_t y) -> uint64_t
+            {
+                return (static_cast<uint64_t>(x) * 16ull) |
+                       ((static_cast<uint64_t>(y) * 16ull) << 16);
+            };
+
+            gs.writeRegister(GS_REG_RGBAQ, makeRgbaq(0x11));
+            gs.writeRegister(GS_REG_XYZF2, makeXyzf(4u, 4u)); // pivot
+            gs.writeRegister(GS_REG_RGBAQ, makeRgbaq(0x22));
+            gs.writeRegister(GS_REG_XYZF2, makeXyzf(4u, 30u));
+            gs.writeRegister(GS_REG_RGBAQ, makeRgbaq(0x33));
+            gs.writeRegister(GS_REG_XYZF2, makeXyzf(14u, 30u));
+            gs.writeRegister(GS_REG_RGBAQ, makeRgbaq(0x44));
+            gs.writeRegister(GS_REG_XYZF3, makeXyzf(34u, 30u)); // ADC: vertex kick only, no drawing kick
+            gs.writeRegister(GS_REG_RGBAQ, makeRgbaq(0x55));
+            gs.writeRegister(GS_REG_XYZF2, makeXyzf(44u, 4u));
+            gs.writeRegister(GS_REG_RGBAQ, makeRgbaq(0x66));
+            gs.writeRegister(GS_REG_XYZF2, makeXyzf(24u, 0u));
+
+            t.Equals(readReferenceFramePSMCT32Pixel(vram, 0u, 1u, 6u, 20u), 0x00333333u,
+                     "the first fan triangle (V1,V2,V3) should draw regardless of the ADC fix");
+            t.Equals(readReferenceFramePSMCT32Pixel(vram, 0u, 1u, 34u, 10u), 0x00555555u,
+                     "the second fan triangle should be (V1,V4,V5): pivot preserved, ADC vertex promoted");
+            t.Equals(readReferenceFramePSMCT32Pixel(vram, 0u, 1u, 22u, 26u), 0x00000000u,
+                     "the stale fan triangle (V1,V3,V4) must not be drawn");
+            t.Equals(readReferenceFramePSMCT32Pixel(vram, 0u, 1u, 24u, 2u), 0x00666666u,
+                     "the third fan triangle should be (V1,V5,V6): the advance must leave exactly two vertices in the queue");
+        });
+
+        tc.Run("GS one-shot primitives consume an XYZ3 vertex without drawing it", [](TestCase &t)
+        {
+            auto makeRgbaq = [](uint8_t c) -> uint64_t
+            {
+                return static_cast<uint64_t>(c) |
+                       (static_cast<uint64_t>(c) << 8) |
+                       (static_cast<uint64_t>(c) << 16) |
+                       (0x3F800000ull << 32); // q = 1.0f
+            };
+            auto makeXyz = [](uint16_t x, uint16_t y) -> uint64_t
+            {
+                return (static_cast<uint64_t>(x) * 16ull) |
+                       ((static_cast<uint64_t>(y) * 16ull) << 16);
+            };
+
+            struct Vertex
+            {
+                uint16_t x;
+                uint16_t y;
+                uint8_t color;
+                bool adc;
+            };
+
+            struct Case
+            {
+                const char *name;
+                GSPrimType prim;
+                std::vector<Vertex> verts;
+                uint16_t lightX;
+                uint16_t lightY;
+                uint32_t lightExpected;
+                uint16_t darkX;
+                uint16_t darkY;
+                uint32_t darkExpected;
+            };
+
+            const std::vector<Case> cases = {
+                {"POINT", GS_PRIM_POINT,
+                 {{8u, 8u, 0x11u, true}, {40u, 8u, 0x22u, false}},
+                 40u, 8u, 0x00222222u,
+                 8u, 8u, 0x00000000u},
+                {"LINE", GS_PRIM_LINE,
+                 {{4u, 4u, 0x11u, false}, {4u, 20u, 0x22u, true},
+                  {40u, 4u, 0x33u, false}, {40u, 20u, 0x44u, false}},
+                 40u, 12u, 0x00444444u,
+                 4u, 12u, 0x00000000u},
+                {"TRIANGLE", GS_PRIM_TRIANGLE,
+                 {{4u, 4u, 0x11u, false}, {4u, 20u, 0x22u, false}, {20u, 4u, 0x33u, true},
+                  {36u, 4u, 0x44u, false}, {36u, 20u, 0x55u, false}, {52u, 4u, 0x66u, false}},
+                 40u, 8u, 0x00666666u,
+                 8u, 8u, 0x00000000u},
+                {"SPRITE", GS_PRIM_SPRITE,
+                 {{4u, 4u, 0x11u, false}, {20u, 20u, 0x22u, true},
+                  {36u, 4u, 0x33u, false}, {52u, 20u, 0x44u, false}},
+                 40u, 10u, 0x00444444u,
+                 8u, 10u, 0x00000000u},
+            };
+
+            for (const Case &c : cases)
+            {
+                std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+                GS gs;
+                gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+                constexpr uint64_t kFrame =
+                    (0ull << 0) |
+                    (1ull << 16) |
+                    (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+                constexpr uint64_t kZbuf = (1ull << 32);
+                constexpr uint64_t kScissor =
+                    (0ull << 0) |
+                    (63ull << 16) |
+                    (0ull << 32) |
+                    (63ull << 48);
+                constexpr uint64_t kTest = (1ull << 17); // ZTST = ALWAYS, alpha test off
+
+                gs.writeRegister(GS_REG_FRAME_1, kFrame);
+                gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
+                gs.writeRegister(GS_REG_SCISSOR_1, kScissor);
+                gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+                gs.writeRegister(GS_REG_TEST_1, kTest);
+                gs.writeRegister(GS_REG_PRIM, static_cast<uint64_t>(c.prim));
+
+                for (const Vertex &v : c.verts)
+                {
+                    gs.writeRegister(GS_REG_RGBAQ, makeRgbaq(v.color));
+                    gs.writeRegister(v.adc ? GS_REG_XYZ3 : GS_REG_XYZ2, makeXyz(v.x, v.y));
+                }
+
+                const std::string lightMsg = std::string("GS ") + c.name +
+                                              ": the vertex kicked after the ADC vertex should complete a new primitive";
+                const std::string darkMsg = std::string("GS ") + c.name +
+                                             ": the primitive whose last vertex was ADC must not be drawn";
+
+                t.Equals(readReferenceFramePSMCT32Pixel(vram, 0u, 1u, c.lightX, c.lightY),
+                         c.lightExpected, lightMsg);
+                t.Equals(readReferenceFramePSMCT32Pixel(vram, 0u, 1u, c.darkX, c.darkY),
+                         c.darkExpected, darkMsg);
+            }
+        });
+
+        tc.Run("GS TRISTRIP leading XYZ3 vertices do not shift a partial queue", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            constexpr uint64_t kFrame =
+                (0ull << 0) |
+                (1ull << 16) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kZbuf = (1ull << 32);
+            constexpr uint64_t kScissor =
+                (0ull << 0) |
+                (63ull << 16) |
+                (0ull << 32) |
+                (63ull << 48);
+            constexpr uint64_t kTest = (1ull << 17); // ZTST = ALWAYS, alpha test off
+            constexpr uint64_t kPrim = static_cast<uint64_t>(GS_PRIM_TRISTRIP);
+
+            gs.writeRegister(GS_REG_FRAME_1, kFrame);
+            gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
+            gs.writeRegister(GS_REG_SCISSOR_1, kScissor);
+            gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, kTest);
+            gs.writeRegister(GS_REG_PRIM, kPrim);
+
+            auto makeRgbaq = [](uint8_t c) -> uint64_t
+            {
+                return static_cast<uint64_t>(c) |
+                       (static_cast<uint64_t>(c) << 8) |
+                       (static_cast<uint64_t>(c) << 16) |
+                       (0x3F800000ull << 32); // q = 1.0f
+            };
+            auto makeXyz = [](uint16_t x, uint16_t y) -> uint64_t
+            {
+                return (static_cast<uint64_t>(x) * 16ull) |
+                       ((static_cast<uint64_t>(y) * 16ull) << 16);
+            };
+
+            gs.writeRegister(GS_REG_RGBAQ, makeRgbaq(0x11));
+            gs.writeRegister(GS_REG_XYZ3, makeXyz(4u, 4u));  // ADC: queue still partial, must not shift
+            gs.writeRegister(GS_REG_RGBAQ, makeRgbaq(0x22));
+            gs.writeRegister(GS_REG_XYZ3, makeXyz(4u, 16u)); // ADC: queue still partial, must not shift
+            gs.writeRegister(GS_REG_RGBAQ, makeRgbaq(0x33));
+            gs.writeRegister(GS_REG_XYZ2, makeXyz(20u, 4u));
+            gs.writeRegister(GS_REG_RGBAQ, makeRgbaq(0x44));
+            gs.writeRegister(GS_REG_XYZ2, makeXyz(20u, 28u));
+
+            t.Equals(readReferenceFramePSMCT32Pixel(vram, 0u, 1u, 8u, 8u), 0x00333333u,
+                     "the first triangle (V1,V2,V3) should draw once the queue fills");
+            t.Equals(readReferenceFramePSMCT32Pixel(vram, 0u, 1u, 12u, 18u), 0x00444444u,
+                     "the second triangle should be (V2,V3,V4), not shifted by the two leading ADC kicks");
+        });
+
+        tc.Run("GS ADC vertex kick records no draw debug event", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            constexpr uint64_t kFrame =
+                (0ull << 0) |
+                (1ull << 16) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kZbuf = (1ull << 32);
+            constexpr uint64_t kScissor =
+                (0ull << 0) |
+                (63ull << 16) |
+                (0ull << 32) |
+                (63ull << 48);
+            constexpr uint64_t kTest = (1ull << 17); // ZTST = ALWAYS, alpha test off
+            constexpr uint64_t kPrim = static_cast<uint64_t>(GS_PRIM_POINT);
+
+            gs.writeRegister(GS_REG_FRAME_1, kFrame);
+            gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
+            gs.writeRegister(GS_REG_SCISSOR_1, kScissor);
+            gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, kTest);
+            gs.writeRegister(GS_REG_PRIM, kPrim);
+
+            auto makeRgbaq = [](uint8_t c) -> uint64_t
+            {
+                return static_cast<uint64_t>(c) |
+                       (static_cast<uint64_t>(c) << 8) |
+                       (static_cast<uint64_t>(c) << 16) |
+                       (0x3F800000ull << 32); // q = 1.0f
+            };
+            auto makeXyz = [](uint16_t x, uint16_t y) -> uint64_t
+            {
+                return (static_cast<uint64_t>(x) * 16ull) |
+                       ((static_cast<uint64_t>(y) * 16ull) << 16);
+            };
+
+            auto drawEventCount = [](const GS &g) -> uint32_t
+            {
+                uint32_t n = 0u;
+                for (const GSDebugHistoryEntry &entry : g.getDebugHistory())
+                {
+                    if (entry.kind == GSDebugEventKind::Draw)
+                        ++n;
+                }
+                return n;
+            };
+
+            // Draw history is paused by default; un-pause it so draw events are recorded.
+            gs.setDebugHistoryPaused(false);
+            gs.clearDebugHistory();
+
+            // A POINT needs one vertex, so this ADC kick reaches the draw dispatch
+            // with a full queue and is suppressed there rather than earlier.
+            gs.writeRegister(GS_REG_RGBAQ, makeRgbaq(0x11));
+            gs.writeRegister(GS_REG_XYZ3, makeXyz(8u, 8u));
+            t.Equals(drawEventCount(gs), 0u,
+                     "an ADC vertex kick must not record a draw debug event");
+
+            gs.writeRegister(GS_REG_RGBAQ, makeRgbaq(0x22));
+            gs.writeRegister(GS_REG_XYZ2, makeXyz(40u, 8u));
+            t.Equals(drawEventCount(gs), 1u,
+                     "a drawing vertex kick does record a draw debug event");
+        });
+
         tc.Run("sceGsExecLoadImage and sceGsExecStoreImage roundtrip and free guest packets", [](TestCase &t)
         {
             PS2Runtime runtime;
