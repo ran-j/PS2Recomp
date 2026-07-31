@@ -37,6 +37,7 @@ namespace ps2x::iop::detail
                 m_function5000Calls = 0u;
                 m_function5002Calls = 0u;
                 m_function5003Calls = 0u;
+                m_function5004Calls = 0u;
                 m_function5005Calls = 0u;
                 m_function5202Calls = 0u;
                 m_f003Calls = 0u;
@@ -56,6 +57,7 @@ namespace ps2x::iop::detail
                 m_last5005Argument0 = 0u;
                 m_last5005Argument1 = 0u;
                 m_last5003FadeStep = 0u;
+                m_last5004FadeStep = 0u;
                 m_lastF003Enabled = 0u;
                 m_registry = {};
             }
@@ -349,6 +351,45 @@ namespace ps2x::iop::detail
                     }
                 }
 
+                const bool structurallyValid5004 =
+                    request.function == k5004Function &&
+                    request.mode == kNowaitMode &&
+                    validTypedEnvelope &&
+                    wordsReadable &&
+                    readableWords >= 2u &&
+                    words[0] != 0u &&
+                    (words[0] & (kSelfTokenAlignment - 1u)) == 0u;
+                if (structurallyValid5004)
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    if (m_selfToken != 0u && words[0] == m_selfToken)
+                    {
+                        // KCEJEAST's 5004 command is SD_vFadeInAutoDMA.
+                        // It stores the magnitude of a signed fade step. Use
+                        // unsigned subtraction so INT_MIN retains 0x80000000
+                        // without signed-overflow undefined behavior.
+                        const int32_t requestedStep = static_cast<int32_t>(words[1]);
+                        const uint32_t fadeStep =
+                            requestedStep < 0 ? 0u - words[1] : words[1];
+                        const std::array<uint32_t, 4> idleStatus{};
+                        if (m_host.writeGuest(request.receive.address,
+                                              idleStatus.data(),
+                                              sizeof(idleStatus)))
+                        {
+                            ++m_handledCalls;
+                            ++m_function5004Calls;
+                            m_last5004FadeStep = fadeStep;
+                            recordRequest(request, words, wordsReadable);
+
+                            RpcResult result;
+                            result.handled = true;
+                            result.resultAddress = request.receive.address;
+                            result.signalNowaitCompletion = true;
+                            return result;
+                        }
+                    }
+                }
+
                 const bool structurallyValidF003 =
                     request.function == kF003Function &&
                     request.mode == kNowaitMode &&
@@ -421,6 +462,8 @@ namespace ps2x::iop::detail
                 metrics.push_back({"function_5002_calls", m_function5002Calls, false});
                 metrics.push_back({"function_5003_calls", m_function5003Calls, false});
                 metrics.push_back({"last_5003_fade_step", m_last5003FadeStep, true});
+                metrics.push_back({"function_5004_calls", m_function5004Calls, false});
+                metrics.push_back({"last_5004_fade_step", m_last5004FadeStep, true});
                 metrics.push_back({"function_5005_calls", m_function5005Calls, false});
                 metrics.push_back({"function_5202_calls", m_function5202Calls, false});
                 metrics.push_back({"last_5005_argument_0", m_last5005Argument0, true});
@@ -469,6 +512,7 @@ namespace ps2x::iop::detail
             static constexpr uint32_t k5000Function = 0x5000u;
             static constexpr uint32_t k5002Function = 0x5002u;
             static constexpr uint32_t k5003Function = 0x5003u;
+            static constexpr uint32_t k5004Function = 0x5004u;
             static constexpr uint32_t k5005Function = 0x5005u;
             static constexpr uint32_t k5202Function = 0x5202u;
             static constexpr uint32_t kF003Function = 0xF003u;
@@ -487,6 +531,7 @@ namespace ps2x::iop::detail
             uint64_t m_function5000Calls = 0u;
             uint64_t m_function5002Calls = 0u;
             uint64_t m_function5003Calls = 0u;
+            uint64_t m_function5004Calls = 0u;
             uint64_t m_function5005Calls = 0u;
             uint64_t m_function5202Calls = 0u;
             uint64_t m_f003Calls = 0u;
@@ -499,6 +544,7 @@ namespace ps2x::iop::detail
             uint32_t m_last5005Argument0 = 0u;
             uint32_t m_last5005Argument1 = 0u;
             uint32_t m_last5003FadeStep = 0u;
+            uint32_t m_last5004FadeStep = 0u;
             uint32_t m_lastF003Enabled = 0u;
             uint32_t m_lastFunction = 0u;
             uint32_t m_lastSendAddress = 0u;
