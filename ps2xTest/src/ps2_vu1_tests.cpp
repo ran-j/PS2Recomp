@@ -4,6 +4,7 @@
 #include "runtime/ps2_gs_psmct32.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_vu1.h"
+#include "vu/ps2_vu1_detail.h"
 
 #include <cstdint>
 #include <cstring>
@@ -343,6 +344,116 @@ void register_ps2_vu1_tests()
             t.Equals(vu1.state().vf[1][1], 220.0f, "upper ADD should write y after lower read");
             t.Equals(vu1.state().vf[1][2], 330.0f, "upper ADD should write z after lower read");
             t.Equals(vu1.state().vf[1][3], 440.0f, "upper ADD should write w after lower read");
+        });
+
+        tc.Run("EFU lower op reads the pre-pair VF value the upper half overwrites", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+            writeVuInstructionPair(fx.code,
+                                   0u,
+                                   makeVuLowerSpecial(0x72u, 3u, 0u, 0u, 0xEu),  // ELENG P, VF[3]
+                                   makeVuUpper(0x28u, 0xFu, 2u, 1u, 3u));        // ADD.xyzw vf3, vf1, vf2
+
+            VU1Interpreter vu1;
+            vu1.state().vf[3][0] = 3.0f;
+            vu1.state().vf[3][1] = 4.0f;
+            vu1.state().vf[3][2] = 12.0f;
+            vu1.state().vf[3][3] = 1.0f;
+            vu1.state().vf[1][0] = 6.0f;
+            vu1.state().vf[1][1] = 8.0f;
+            vu1.state().vf[1][2] = 24.0f;
+            vu1.state().vf[1][3] = 2.0f;
+            vu1.state().vf[2][0] = 6.0f;
+            vu1.state().vf[2][1] = 8.0f;
+            vu1.state().vf[2][2] = 24.0f;
+            vu1.state().vf[2][3] = 2.0f;
+
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 0u, 1u);
+
+            t.Equals(vu1.state().p, 13.0f, "ELENG should read the pre-pair length of vf3");
+            t.Equals(vu1.state().vf[3][0], 12.0f, "upper ADD write should still land on x");
+            t.Equals(vu1.state().vf[3][2], 48.0f, "upper ADD write should still land on z");
+        });
+
+        tc.Run("EFU lower ops report their fs read and WAITP reports none", [](TestCase &t)
+        {
+            const uint8_t efuOps[] = {0x70u, 0x71u, 0x72u, 0x73u, 0x74u, 0x75u, 0x76u,
+                                       0x78u, 0x79u, 0x7Au, 0x7Cu, 0x7Du, 0x7Eu};
+            for (uint8_t op : efuOps)
+            {
+                uint32_t readMask = 0u;
+                uint32_t writeMask = 0u;
+                vuLowerVfReadWriteMasks(makeVuLowerSpecial(op, 3u, 5u, 0u, 0xEu), readMask, writeMask);
+                t.Equals(readMask, static_cast<uint32_t>(1u << 3), "EFU op should report reading VF[fs]");
+                t.Equals(writeMask, 0u, "EFU op should report no VF write");
+            }
+
+            {
+                uint32_t readMask = 0u;
+                uint32_t writeMask = 0u;
+                vuLowerVfReadWriteMasks(makeVuLowerSpecial(0x7Bu, 3u, 5u, 0u, 0xEu), readMask, writeMask);
+                t.Equals(readMask, 0u, "WAITP should report no VF read");
+                t.Equals(writeMask, 0u, "WAITP should report no VF write");
+            }
+
+            {
+                uint32_t readMask = 0u;
+                uint32_t writeMask = 0u;
+                vuLowerVfReadWriteMasks(makeVuLowerSpecial(0x77u, 3u, 5u, 0u, 0xEu), readMask, writeMask);
+                t.Equals(readMask, 0u, "unallocated slot 0x77 should report no VF read");
+                t.Equals(writeMask, 0u, "unallocated slot 0x77 should report no VF write");
+            }
+
+            {
+                uint32_t readMask = 0u;
+                uint32_t writeMask = 0u;
+                vuLowerVfReadWriteMasks(makeVuLowerSpecial(0x7Fu, 3u, 5u, 0u, 0xEu), readMask, writeMask);
+                t.Equals(readMask, 0u, "unallocated slot 0x7F should report no VF read");
+                t.Equals(writeMask, 0u, "unallocated slot 0x7F should report no VF write");
+            }
+
+            {
+                uint32_t readMask = 0u;
+                uint32_t writeMask = 0u;
+                vuLowerVfReadWriteMasks(makeVuLowerSpecial(0x30u, 3u, 5u, 0u, 0xFu), readMask, writeMask);
+                t.Equals(readMask, static_cast<uint32_t>(1u << 3), "MOVE positive control should report is read");
+                t.Equals(writeMask, static_cast<uint32_t>(1u << 5), "MOVE positive control should report it write");
+            }
+        });
+
+        tc.Run("EFU pair with no VF write leaves the reordered branch behaviourally unchanged", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+            writeVuInstructionPair(fx.code,
+                                   0u,
+                                   makeVuLowerSpecial(0x73u, 3u, 0u, 0u, 0xEu),  // ERLENG P, VF[3]
+                                   makeVuUpper(0x28u, 0xFu, 2u, 1u, 3u));        // ADD.xyzw vf3, vf1, vf2
+
+            VU1Interpreter vu1;
+            vu1.state().vf[3][0] = 3.0f;
+            vu1.state().vf[3][1] = 4.0f;
+            vu1.state().vf[3][2] = 12.0f;
+            vu1.state().vf[3][3] = 1.0f;
+            vu1.state().vf[1][0] = 6.0f;
+            vu1.state().vf[1][1] = 8.0f;
+            vu1.state().vf[1][2] = 24.0f;
+            vu1.state().vf[1][3] = 2.0f;
+            vu1.state().vf[2][0] = 6.0f;
+            vu1.state().vf[2][1] = 8.0f;
+            vu1.state().vf[2][2] = 24.0f;
+            vu1.state().vf[2][3] = 2.0f;
+
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 0u, 1u);
+
+            t.Equals(vu1.state().p, 1.0f / 13.0f, "ERLENG should read the pre-pair reciprocal length of vf3");
+            t.Equals(vu1.state().vf[3][0], 12.0f, "upper ADD write should land on x");
+            t.Equals(vu1.state().vf[3][1], 16.0f, "upper ADD write should land on y");
+            t.Equals(vu1.state().vf[3][2], 48.0f, "upper ADD write should land on z");
+            t.Equals(vu1.state().vf[3][3], 4.0f, "upper ADD write should land on w");
         });
 
         tc.Run("DIV and SQRT update the Q register from selected vector components", [](TestCase &t)

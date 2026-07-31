@@ -120,6 +120,28 @@ static inline void vuLowerVfReadWriteMasks(uint32_t lower, uint32_t &readMask, u
             case 0x64: // MFP
                 vuSetRegBit(writeMask, it);
                 return;
+            // EFU block.  Every EFU operation takes VF[is] as its only vector
+            // operand and writes the P register; see the VU User's Manual EFU
+            // instruction pages ("ESADD P, VF[fs]" through "EEXP P, VF[fs]fsf").
+            // The read is reported whether or not the execution switch gives the
+            // opcode a body today, so implementing one later cannot silently
+            // reopen the hazard.  WAITP (0x7B) has no vector operand and is
+            // deliberately absent, as are the unallocated slots 0x77 and 0x7F.
+            case 0x70: // ESADD
+            case 0x71: // ERSADD
+            case 0x72: // ELENG
+            case 0x73: // ERLENG
+            case 0x74: // EATANxy
+            case 0x75: // EATANxz
+            case 0x76: // ESUM
+            case 0x78: // ESQRT
+            case 0x79: // ERSQRT
+            case 0x7A: // ERCPR
+            case 0x7C: // ESIN
+            case 0x7D: // EATAN
+            case 0x7E: // EEXP
+                vuSetRegBit(readMask, is);
+                return;
             default:
                 return;
             }
