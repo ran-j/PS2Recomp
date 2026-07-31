@@ -41,6 +41,7 @@ namespace ps2x::iop::detail
                 m_function5005Calls = 0u;
                 m_function5202Calls = 0u;
                 m_f003Calls = 0u;
+                m_f006Calls = 0u;
                 m_rejectedCalls = 0u;
                 m_lastFunction = 0u;
                 m_lastSendAddress = 0u;
@@ -59,6 +60,7 @@ namespace ps2x::iop::detail
                 m_last5003FadeStep = 0u;
                 m_last5004FadeStep = 0u;
                 m_lastF003Enabled = 0u;
+                m_lastF006Value = 0u;
                 m_registry = {};
             }
 
@@ -419,6 +421,37 @@ namespace ps2x::iop::detail
                     }
                 }
 
+                const bool structurallyValidF006 =
+                    request.function == kF006Function &&
+                    request.mode == kNowaitMode &&
+                    validTypedEnvelope &&
+                    wordsReadable &&
+                    readableWords >= 2u &&
+                    words[0] != 0u &&
+                    (words[0] & (kSelfTokenAlignment - 1u)) == 0u;
+                if (structurallyValidF006)
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    if (m_selfToken != 0u &&
+                        words[0] == m_selfToken &&
+                        m_host.zeroGuest(request.receive.address, request.receive.size))
+                    {
+                        // KCEJEAST stores this value verbatim. Zero enables
+                        // its auto-DMA volume/fade handler; any nonzero value
+                        // suppresses the handler.
+                        ++m_handledCalls;
+                        ++m_f006Calls;
+                        m_lastF006Value = words[1];
+                        recordRequest(request, words, wordsReadable);
+
+                        RpcResult result;
+                        result.handled = true;
+                        result.resultAddress = request.receive.address;
+                        result.signalNowaitCompletion = true;
+                        return result;
+                    }
+                }
+
                 {
                     std::lock_guard<std::mutex> lock(m_mutex);
                     ++m_rejectedCalls;
@@ -470,6 +503,8 @@ namespace ps2x::iop::detail
                 metrics.push_back({"last_5005_argument_1", m_last5005Argument1, true});
                 metrics.push_back({"f003_calls", m_f003Calls, false});
                 metrics.push_back({"last_f003_enabled", m_lastF003Enabled, false});
+                metrics.push_back({"f006_calls", m_f006Calls, false});
+                metrics.push_back({"last_f006_value", m_lastF006Value, true});
                 metrics.push_back({"registered_range_base", m_registeredRangeBase, true});
                 metrics.push_back({"registered_range_size", m_registeredRangeSize, false});
                 metrics.push_back({"self_token", m_selfToken, true});
@@ -516,6 +551,7 @@ namespace ps2x::iop::detail
             static constexpr uint32_t k5005Function = 0x5005u;
             static constexpr uint32_t k5202Function = 0x5202u;
             static constexpr uint32_t kF003Function = 0xF003u;
+            static constexpr uint32_t kF006Function = 0xF006u;
             static constexpr uint32_t kTypedSendSize = 0x40u;
             static constexpr uint32_t kTypedReceiveSize = 0x10u;
             static constexpr uint32_t kNowaitMode = 1u;
@@ -535,6 +571,7 @@ namespace ps2x::iop::detail
             uint64_t m_function5005Calls = 0u;
             uint64_t m_function5202Calls = 0u;
             uint64_t m_f003Calls = 0u;
+            uint64_t m_f006Calls = 0u;
             uint64_t m_rejectedCalls = 0u;
             uint32_t m_lastRegistrationIndex = 0u;
             uint32_t m_lastRegistrationPointer = 0u;
@@ -546,6 +583,7 @@ namespace ps2x::iop::detail
             uint32_t m_last5003FadeStep = 0u;
             uint32_t m_last5004FadeStep = 0u;
             uint32_t m_lastF003Enabled = 0u;
+            uint32_t m_lastF006Value = 0u;
             uint32_t m_lastFunction = 0u;
             uint32_t m_lastSendAddress = 0u;
             uint32_t m_lastSendSize = 0u;

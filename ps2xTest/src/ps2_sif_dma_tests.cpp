@@ -2046,7 +2046,48 @@ void register_ps2_sif_dma_tests()
                      kCallCommand,
                      "Duelists 5004 completion should identify RPC_CALL");
 
-            constexpr uint32_t k5002Sequence = 0x3Fu;
+            constexpr uint32_t kF006Sequence = 0x3Fu;
+            writeGuestU32(env.rdram.data(), kSendAddress + 0x00u,
+                          kRegistrationSelfToken);
+            writeGuestU32(env.rdram.data(), kSendAddress + 0x04u, 0x00000001u);
+            writeGuestU32(env.rdram.data(), kSendAddress + 0x08u, 0x20311040u);
+            writeGuestU32(env.rdram.data(), kSendAddress + 0x0Cu, 0x00000040u);
+            writeGuestU32(env.rdram.data(), kReceiveAddress - 4u, kGuard);
+            std::memset(env.rdram.data() + kReceiveAddress, 0xCC, 0x10u);
+            writeGuestU32(env.rdram.data(), kReceiveAddress + 0x10u, kGuard);
+
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x10u,
+                          0xA5000000u | kF006Sequence);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x14u,
+                          0x20310000u + kF006Sequence * 0x40u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x18u, kF006Sequence);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x20u, 0xF006u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x30u, 1u);
+            std::memcpy(env.rdram.data() + kDescriptorAddress,
+                        callDescriptors.data(),
+                        sizeof(callDescriptors));
+            invokeDma(2u);
+
+            for (uint32_t offset = 0u; offset < 0x10u; offset += 4u)
+            {
+                t.Equals(readGuestU32(env.rdram.data(), kReceiveAddress + offset),
+                         0u,
+                         "Duelists F006 should return its idle audio status");
+            }
+            t.Equals(readGuestU32(env.rdram.data(), kReceiveAddress - 4u),
+                     kGuard,
+                     "Duelists F006 should preserve memory before the response");
+            t.Equals(readGuestU32(env.rdram.data(), kReceiveAddress + 0x10u),
+                     kGuard,
+                     "Duelists F006 should preserve memory after the response");
+            t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x18u),
+                     kF006Sequence,
+                     "Duelists F006 completion should preserve the RPC sequence");
+            t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x20u),
+                     kCallCommand,
+                     "Duelists F006 completion should identify RPC_CALL");
+
+            constexpr uint32_t k5002Sequence = 0x40u;
             writeGuestU32(env.rdram.data(), kSendAddress + 0x00u,
                           kRegistrationSelfToken);
             writeGuestU32(env.rdram.data(), kSendAddress + 0x04u, 0x00000002u);
@@ -2087,7 +2128,7 @@ void register_ps2_sif_dma_tests()
                      kCallCommand,
                      "Duelists 5002 completion should identify RPC_CALL");
 
-            constexpr uint32_t k5202Sequence = 0x40u;
+            constexpr uint32_t k5202Sequence = 0x41u;
             writeGuestU32(env.rdram.data(), kSendAddress + 0x00u,
                           kRegistrationSelfToken);
             writeGuestU32(env.rdram.data(), kSendAddress + 0x04u, 0xCCCCCCCCu);

@@ -1084,6 +1084,142 @@ void register_ps2_iop_tests()
             }
         });
 
+        tc.Run("Duelists F006 gates its auto-DMA fade handler with a raw value", [](TestCase &t)
+        {
+            constexpr uint32_t kSid = 0x05730601u;
+            constexpr uint32_t kSend = 0x1180u;
+            constexpr uint32_t kReceive = 0x1280u;
+            constexpr uint32_t kSelfToken = 0x00400080u;
+            constexpr uint32_t kRegistrationPointer = 0x00005010u;
+            constexpr uint32_t kGuard = 0xA5A55A5Au;
+
+            FakeIopHost host;
+            ps2x::iop::IopSubsystem subsystem(host);
+            std::string error;
+            t.IsTrue(subsystem.configure({"SLUS_205.15", 0u, 0u}, &error),
+                     "Duelists profile should configure");
+
+            ps2x::iop::RpcRequest request{};
+            request.sid = kSid;
+            request.send = {kSend, 0x40u};
+            request.receive = {kReceive, 0x10u};
+            t.IsTrue(host.writeWord(kSend, kSelfToken),
+                     "F006 self token should be writable");
+            t.IsTrue(host.writeWord(kSend + 4u, 0u),
+                     "registration index should be writable");
+            t.IsTrue(host.writeWord(kSend + 8u, kRegistrationPointer),
+                     "registration pointer should be writable");
+            request.function = 0x5F10u;
+            t.IsTrue(subsystem.handleRpc(request).handled,
+                     "registration should establish the stable self token");
+
+            t.IsTrue(host.writeWord(kSend + 4u, 1u),
+                     "live F006 disable value should be writable");
+            t.IsTrue(host.writeWord(kSend + 8u, 0x20311040u),
+                     "live F006 stale request word two should be writable");
+            t.IsTrue(host.writeWord(kSend + 12u, 0x00000040u),
+                     "live F006 stale request word three should be writable");
+            t.IsTrue(host.writeWord(kReceive - 4u, kGuard),
+                     "memory before the F006 response should be writable");
+            for (uint32_t offset = 0u; offset < 0x10u; offset += sizeof(uint32_t))
+            {
+                t.IsTrue(host.writeWord(kReceive + offset, kGuard),
+                         "F006 response sentinel should be writable");
+            }
+            t.IsTrue(host.writeWord(kReceive + 0x10u, kGuard),
+                     "memory after the F006 response should be writable");
+
+            request.function = 0xF006u;
+            request.mode = 1u;
+            const RpcResult result = subsystem.handleRpc(request);
+            t.IsTrue(result.handled,
+                     "the exact NOWAIT F006 envelope should be handled");
+            t.IsTrue(result.signalNowaitCompletion,
+                     "F006 should request NOWAIT completion signaling");
+            t.Equals(result.resultAddress, kReceive,
+                     "F006 should return its receive buffer");
+            for (uint32_t offset = 0u; offset < 0x10u; offset += sizeof(uint32_t))
+            {
+                t.Equals(host.readWord(kReceive + offset), 0u,
+                         "F006 should return the idle KCEJEAST status snapshot");
+            }
+            t.Equals(host.readWord(kReceive - 4u), kGuard,
+                     "F006 must preserve memory before its response");
+            t.Equals(host.readWord(kReceive + 0x10u), kGuard,
+                     "F006 must preserve memory after its response");
+
+            DebugSnapshot snapshot = subsystem.debugSnapshot();
+            const DebugService *service =
+                findService(snapshot, "Duelists custom RPC probe");
+            t.IsNotNull(service, "Duelists diagnostics should include F006");
+            if (service)
+            {
+                t.Equals(metricValue(*service, "f006_calls"), uint64_t{1},
+                         "the probe should count the live F006 call");
+                t.Equals(metricValue(*service, "last_f006_value"), uint64_t{1},
+                         "the probe should retain the live disable value");
+            }
+
+            t.IsTrue(host.writeWord(kSend + 4u, 0u),
+                     "F006 enable value should be writable");
+            t.IsTrue(subsystem.handleRpc(request).handled,
+                     "F006 should accept zero to enable fade processing");
+            snapshot = subsystem.debugSnapshot();
+            service = findService(snapshot, "Duelists custom RPC probe");
+            t.IsNotNull(service, "Duelists diagnostics should retain F006");
+            if (service)
+            {
+                t.Equals(metricValue(*service, "f006_calls"), uint64_t{2},
+                         "the probe should count the zero F006 call");
+                t.Equals(metricValue(*service, "last_f006_value"), uint64_t{0},
+                         "F006 should preserve its zero value");
+            }
+
+            t.IsTrue(host.writeWord(kSend + 4u, 0xFFFFFFFFu),
+                     "arbitrary nonzero F006 value should be writable");
+            t.IsTrue(subsystem.handleRpc(request).handled,
+                     "F006 should accept any nonzero suppression value");
+            snapshot = subsystem.debugSnapshot();
+            service = findService(snapshot, "Duelists custom RPC probe");
+            t.IsNotNull(service, "Duelists diagnostics should retain raw F006 state");
+            if (service)
+            {
+                t.Equals(metricValue(*service, "f006_calls"), uint64_t{3},
+                         "the probe should count the raw F006 call");
+                t.Equals(metricValue(*service, "last_f006_value"),
+                         uint64_t{0xFFFFFFFFu},
+                         "F006 must store its raw value without Boolean clamping");
+            }
+
+            t.IsTrue(host.writeWord(kReceive, kGuard),
+                     "rejected F006 response sentinel should be writable");
+            request.mode = 0u;
+            t.IsFalse(subsystem.handleRpc(request).handled,
+                      "F006 must reject synchronous mode");
+            t.Equals(host.readWord(kReceive), kGuard,
+                     "wrong-mode F006 must leave receive memory untouched");
+
+            request.mode = 1u;
+            t.IsTrue(host.writeWord(kSend, kSelfToken + 0x40u),
+                     "mismatched aligned F006 self token should be writable");
+            t.IsFalse(subsystem.handleRpc(request).handled,
+                      "F006 must reject a mismatched stable self token");
+            t.Equals(host.readWord(kReceive), kGuard,
+                     "mismatched-token F006 must leave receive memory untouched");
+
+            subsystem.reset();
+            snapshot = subsystem.debugSnapshot();
+            service = findService(snapshot, "Duelists custom RPC probe");
+            t.IsNotNull(service, "Duelists diagnostics should survive reset");
+            if (service)
+            {
+                t.Equals(metricValue(*service, "f006_calls"), uint64_t{0},
+                         "reset should clear the F006 counter");
+                t.Equals(metricValue(*service, "last_f006_value"), uint64_t{0},
+                         "reset should clear the last F006 value");
+            }
+        });
+
         tc.Run("Duelists 5202 stops all programs through its NOWAIT typed envelope", [](TestCase &t)
         {
             constexpr uint32_t kSid = 0x05730601u;
