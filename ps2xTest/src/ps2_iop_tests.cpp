@@ -869,6 +869,83 @@ void register_ps2_iop_tests()
 
         });
 
+        tc.Run("Duelists 5003 applies the characterized NOWAIT auto-DMA fade-out step", [](TestCase &t)
+        {
+            constexpr uint32_t kSid = 0x05730601u;
+            constexpr uint32_t kSend = 0x1180u;
+            constexpr uint32_t kReceive = 0x1280u;
+            constexpr uint32_t kSelfToken = 0x00400080u;
+            constexpr uint32_t kRegistrationPointer = 0x00005010u;
+            constexpr uint32_t kGuard = 0xA5A55A5Au;
+
+            FakeIopHost host;
+            ps2x::iop::IopSubsystem subsystem(host);
+            std::string error;
+            t.IsTrue(subsystem.configure({"SLUS_205.15", 0u, 0u}, &error),
+                     "Duelists profile should configure");
+
+            ps2x::iop::RpcRequest request{};
+            request.sid = kSid;
+            request.send = {kSend, 0x40u};
+            request.receive = {kReceive, 0x10u};
+            t.IsTrue(host.writeWord(kSend, kSelfToken),
+                     "5003 self token should be writable");
+            t.IsTrue(host.writeWord(kSend + 4u, 0u),
+                     "registration index should be writable");
+            t.IsTrue(host.writeWord(kSend + 8u, kRegistrationPointer),
+                     "registration pointer should be writable");
+            request.function = 0x5F10u;
+            t.IsTrue(subsystem.handleRpc(request).handled,
+                     "registration should establish the stable self token");
+
+            t.IsTrue(host.writeWord(kSend + 4u, 0x100u),
+                     "5003 fade step should be writable");
+            for (uint32_t offset = 0u; offset < 0x10u; offset += sizeof(uint32_t))
+            {
+                t.IsTrue(host.writeWord(kReceive + offset, kGuard),
+                         "5003 response sentinel should be writable");
+            }
+            t.IsTrue(host.writeWord(kReceive + 0x10u, kGuard),
+                     "memory after the 5003 response should be writable");
+            request.function = 0x5003u;
+            request.mode = 1u;
+            const RpcResult result = subsystem.handleRpc(request);
+            t.IsTrue(result.handled,
+                     "the exact NOWAIT 5003 envelope should be handled");
+            t.IsTrue(result.signalNowaitCompletion,
+                     "5003 should request NOWAIT completion signaling");
+            t.Equals(result.resultAddress, kReceive,
+                     "5003 should return its receive buffer");
+            for (uint32_t offset = 0u; offset < 0x10u; offset += sizeof(uint32_t))
+            {
+                t.Equals(host.readWord(kReceive + offset), 0u,
+                         "5003 should return the idle KCEJEAST status snapshot");
+            }
+            t.Equals(host.readWord(kReceive + 0x10u), kGuard,
+                     "5003 must not write beyond its typed response");
+
+            const DebugSnapshot snapshot = subsystem.debugSnapshot();
+            const DebugService *service =
+                findService(snapshot, "Duelists custom RPC probe");
+            t.IsNotNull(service, "Duelists diagnostics should include 5003");
+            if (service)
+            {
+                t.Equals(metricValue(*service, "function_5003_calls"), uint64_t{1},
+                         "the probe should count typed 5003 calls");
+                t.Equals(metricValue(*service, "last_5003_fade_step"),
+                         uint64_t{0xFFFFFF00u},
+                         "positive fade-out input should normalize to a negative step");
+            }
+
+            t.IsTrue(host.writeWord(kReceive, kGuard),
+                     "malformed 5003 response sentinel should be writable");
+            request.mode = 0u;
+            t.IsFalse(subsystem.handleRpc(request).handled,
+                      "5003 must reject synchronous mode");
+            t.Equals(host.readWord(kReceive), kGuard,
+                     "rejected 5003 must leave receive memory untouched");
+        });
+
         tc.Run("Duelists profile binds its observed custom RPC without fabricating behavior", [](TestCase &t)
         {
             constexpr uint32_t kSid = 0x05730601u;
