@@ -946,6 +946,107 @@ void register_ps2_iop_tests()
                      "rejected 5003 must leave receive memory untouched");
         });
 
+        tc.Run("Duelists 5202 stops all programs through its NOWAIT typed envelope", [](TestCase &t)
+        {
+            constexpr uint32_t kSid = 0x05730601u;
+            constexpr uint32_t kSend = 0x1180u;
+            constexpr uint32_t kReceive = 0x1280u;
+            constexpr uint32_t kSelfToken = 0x00400080u;
+            constexpr uint32_t kRegistrationPointer = 0x00005010u;
+            constexpr uint32_t kGuard = 0xA5A55A5Au;
+
+            FakeIopHost host;
+            ps2x::iop::IopSubsystem subsystem(host);
+            std::string error;
+            t.IsTrue(subsystem.configure({"SLUS_205.15", 0u, 0u}, &error),
+                     "Duelists profile should configure");
+
+            ps2x::iop::RpcRequest request{};
+            request.sid = kSid;
+            request.send = {kSend, 0x40u};
+            request.receive = {kReceive, 0x10u};
+            t.IsTrue(host.writeWord(kSend, kSelfToken),
+                     "5202 self token should be writable");
+            t.IsTrue(host.writeWord(kSend + 4u, 0u),
+                     "registration index should be writable");
+            t.IsTrue(host.writeWord(kSend + 8u, kRegistrationPointer),
+                     "registration pointer should be writable");
+            request.function = 0x5F10u;
+            t.IsTrue(subsystem.handleRpc(request).handled,
+                     "registration should establish the stable self token");
+
+            t.IsTrue(host.writeWord(kSend + 4u, 0xCCCCCCCCu),
+                     "5202 stale request word one should be writable");
+            t.IsTrue(host.writeWord(kSend + 8u, 0xDDDDDDDDu),
+                     "5202 stale request word two should be writable");
+            t.IsTrue(host.writeWord(kSend + 12u, 0xEEEEEEEEu),
+                     "5202 stale request word three should be writable");
+            t.IsTrue(host.writeWord(kReceive - 4u, kGuard),
+                     "memory before the 5202 response should be writable");
+            for (uint32_t offset = 0u; offset < 0x10u; offset += sizeof(uint32_t))
+            {
+                t.IsTrue(host.writeWord(kReceive + offset, kGuard),
+                         "5202 response sentinel should be writable");
+            }
+            t.IsTrue(host.writeWord(kReceive + 0x10u, kGuard),
+                     "memory after the 5202 response should be writable");
+
+            request.function = 0x5202u;
+            request.mode = 1u;
+            const RpcResult result = subsystem.handleRpc(request);
+            t.IsTrue(result.handled,
+                     "the exact NOWAIT 5202 envelope should be handled");
+            t.IsTrue(result.signalNowaitCompletion,
+                     "5202 should request NOWAIT completion signaling");
+            t.Equals(result.resultAddress, kReceive,
+                     "5202 should return its receive buffer");
+            for (uint32_t offset = 0u; offset < 0x10u; offset += sizeof(uint32_t))
+            {
+                t.Equals(host.readWord(kReceive + offset), 0u,
+                         "5202 should return the idle KCEJEAST status snapshot");
+            }
+            t.Equals(host.readWord(kReceive - 4u), kGuard,
+                     "5202 must preserve memory before its response");
+            t.Equals(host.readWord(kReceive + 0x10u), kGuard,
+                     "5202 must preserve memory after its response");
+
+            const DebugSnapshot snapshot = subsystem.debugSnapshot();
+            const DebugService *service =
+                findService(snapshot, "Duelists custom RPC probe");
+            t.IsNotNull(service, "Duelists diagnostics should include 5202");
+            if (service)
+            {
+                t.Equals(metricValue(*service, "function_5202_calls"), uint64_t{1},
+                         "the probe should count typed 5202 calls");
+            }
+
+            t.IsTrue(host.writeWord(kReceive, kGuard),
+                     "rejected 5202 response sentinel should be writable");
+            request.mode = 0u;
+            t.IsFalse(subsystem.handleRpc(request).handled,
+                      "5202 must reject synchronous mode");
+            t.Equals(host.readWord(kReceive), kGuard,
+                     "wrong-mode 5202 must leave receive memory untouched");
+
+            request.mode = 1u;
+            t.IsTrue(host.writeWord(kSend, kSelfToken + 0x40u),
+                     "mismatched aligned 5202 self token should be writable");
+            t.IsFalse(subsystem.handleRpc(request).handled,
+                      "5202 must reject a mismatched stable self token");
+            t.Equals(host.readWord(kReceive), kGuard,
+                     "mismatched-token 5202 must leave receive memory untouched");
+
+            subsystem.reset();
+            const DebugSnapshot resetSnapshot = subsystem.debugSnapshot();
+            service = findService(resetSnapshot, "Duelists custom RPC probe");
+            t.IsNotNull(service, "Duelists diagnostics should survive reset");
+            if (service)
+            {
+                t.Equals(metricValue(*service, "function_5202_calls"), uint64_t{0},
+                         "reset should clear the 5202 counter");
+            }
+        });
+
         tc.Run("Duelists profile binds its observed custom RPC without fabricating behavior", [](TestCase &t)
         {
             constexpr uint32_t kSid = 0x05730601u;

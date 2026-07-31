@@ -38,6 +38,7 @@ namespace ps2x::iop::detail
                 m_function5002Calls = 0u;
                 m_function5003Calls = 0u;
                 m_function5005Calls = 0u;
+                m_function5202Calls = 0u;
                 m_f003Calls = 0u;
                 m_rejectedCalls = 0u;
                 m_lastFunction = 0u;
@@ -318,6 +319,36 @@ namespace ps2x::iop::detail
                     }
                 }
 
+                const bool structurallyValid5202 =
+                    request.function == k5202Function &&
+                    request.mode == kNowaitMode &&
+                    validTypedEnvelope &&
+                    wordsReadable &&
+                    readableWords >= 1u &&
+                    words[0] != 0u &&
+                    (words[0] & (kSelfTokenAlignment - 1u)) == 0u;
+                if (structurallyValid5202)
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    if (m_selfToken != 0u &&
+                        words[0] == m_selfToken &&
+                        m_host.zeroGuest(request.receive.address, request.receive.size))
+                    {
+                        // KCEJEAST's 5202 command is SD_vStopAllProgram.
+                        // It consumes no arguments; the generic EE wrapper
+                        // leaves trailing request words stale.
+                        ++m_handledCalls;
+                        ++m_function5202Calls;
+                        recordRequest(request, words, wordsReadable);
+
+                        RpcResult result;
+                        result.handled = true;
+                        result.resultAddress = request.receive.address;
+                        result.signalNowaitCompletion = true;
+                        return result;
+                    }
+                }
+
                 const bool structurallyValidF003 =
                     request.function == kF003Function &&
                     request.mode == kNowaitMode &&
@@ -391,6 +422,7 @@ namespace ps2x::iop::detail
                 metrics.push_back({"function_5003_calls", m_function5003Calls, false});
                 metrics.push_back({"last_5003_fade_step", m_last5003FadeStep, true});
                 metrics.push_back({"function_5005_calls", m_function5005Calls, false});
+                metrics.push_back({"function_5202_calls", m_function5202Calls, false});
                 metrics.push_back({"last_5005_argument_0", m_last5005Argument0, true});
                 metrics.push_back({"last_5005_argument_1", m_last5005Argument1, true});
                 metrics.push_back({"f003_calls", m_f003Calls, false});
@@ -438,6 +470,7 @@ namespace ps2x::iop::detail
             static constexpr uint32_t k5002Function = 0x5002u;
             static constexpr uint32_t k5003Function = 0x5003u;
             static constexpr uint32_t k5005Function = 0x5005u;
+            static constexpr uint32_t k5202Function = 0x5202u;
             static constexpr uint32_t kF003Function = 0xF003u;
             static constexpr uint32_t kTypedSendSize = 0x40u;
             static constexpr uint32_t kTypedReceiveSize = 0x10u;
@@ -455,6 +488,7 @@ namespace ps2x::iop::detail
             uint64_t m_function5002Calls = 0u;
             uint64_t m_function5003Calls = 0u;
             uint64_t m_function5005Calls = 0u;
+            uint64_t m_function5202Calls = 0u;
             uint64_t m_f003Calls = 0u;
             uint64_t m_rejectedCalls = 0u;
             uint32_t m_lastRegistrationIndex = 0u;
