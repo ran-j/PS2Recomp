@@ -120,6 +120,22 @@ static inline void vuLowerVfReadWriteMasks(uint32_t lower, uint32_t &readMask, u
             case 0x64: // MFP
                 vuSetRegBit(writeMask, it);
                 return;
+            // R-register block.  RNEXT and RGET store the random number into
+            // VF[ft]; RINIT and RXOR take VF[fs]fsf as their only vector
+            // operand.  RGET's instruction page states the rule this table
+            // exists to serve: "When an Upper instruction in the same cycle
+            // writes data to the VF[ft] register, the result of this
+            // instruction is discarded with priority given to the Upper
+            // instruction, regardless of whether the data is written to the
+            // same field or not."
+            case 0x40: // RNEXT
+            case 0x41: // RGET
+                vuSetRegBit(writeMask, it);
+                return;
+            case 0x42: // RINIT
+            case 0x43: // RXOR
+                vuSetRegBit(readMask, is);
+                return;
             // EFU block.  Every EFU operation takes VF[is] as its only vector
             // operand and writes the P register; see the VU User's Manual EFU
             // instruction pages ("ESADD P, VF[fs]" through "EEXP P, VF[fs]fsf").
@@ -160,6 +176,33 @@ static inline void vuLowerVfReadWriteMasks(uint32_t lower, uint32_t &readMask, u
     default:
         return;
     }
+}
+
+static inline uint32_t vuLowerVfWriteMask(uint32_t lower)
+{
+    uint32_t reads = 0u;
+    uint32_t writes = 0u;
+    vuLowerVfReadWriteMasks(lower, reads, writes);
+    return writes;
+}
+
+// Collects the VF registers a reordered pair has to protect: the upper half's
+// source registers, whose pre-pair values it must still observe, and the
+// upper half's destination register, whose lower-half write hardware discards.
+// A register is collected at most once, and that is required rather than tidy:
+// the caller captures and rolls back each entry in turn, so a second entry for
+// an already-rolled-back register would capture the pre-pair value and replay
+// it over the lower half's write.
+static inline void vuAddGuardedReg(uint8_t *regs, uint8_t &count, uint8_t reg, uint32_t lowerWrites)
+{
+    if (reg == 0u || ((lowerWrites >> reg) & 1u) == 0u)
+        return;
+    for (uint8_t i = 0u; i < count; ++i)
+    {
+        if (regs[i] == reg)
+            return;
+    }
+    regs[count++] = reg;
 }
 
 static inline bool vuLowerShouldRunBeforeUpper(uint32_t upper, uint32_t lower)
