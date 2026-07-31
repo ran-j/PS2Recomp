@@ -467,11 +467,11 @@ void register_ps2_sif_dma_tests()
                      0u,
                      "raw MCSERV init should report success");
             t.Equals(readGuestU32(env.rdram.data(), kMcservResultAddress + 4u),
-                     0x0205u,
-                     "raw MCSERV init should report MCSERV version 0x205");
+                     0x020Au,
+                     "raw MCSERV init should report MCSERV version 0x20A");
             t.Equals(readGuestU32(env.rdram.data(), kMcservResultAddress + 8u),
-                     0x0206u,
-                     "raw MCSERV init should report MCMAN version 0x206");
+                     0x020Eu,
+                     "raw MCSERV init should report MCMAN version 0x20E");
             t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x08u),
                      kEndCommand,
                      "the MCSERV init completion should emit RPC_END");
@@ -1524,6 +1524,101 @@ void register_ps2_sif_dma_tests()
                          1u,
                          "OPEN should activate the read task in each pad buffer");
             }
+        });
+
+        tc.Run("raw Duelists MCSERV init returns its required version tuple", [](TestCase &t)
+        {
+            TestEnv env;
+            configureProfile(env, "SLUS_205.15");
+
+            constexpr uint32_t kDescriptorAddress = 0x00026400u;
+            constexpr uint32_t kPacketAddress = 0x00026500u;
+            constexpr uint32_t kSendAddress = 0x00026600u;
+            constexpr uint32_t kReceiveAddress = 0x00026700u;
+            constexpr uint32_t kReceivePointerAddress = 0x00026800u;
+            constexpr uint32_t kInboundAddress = 0x00026900u;
+            constexpr uint32_t kClientAddress = 0x00315C40u;
+            constexpr uint32_t kSid = 0x80000400u;
+            constexpr uint32_t kBindCommand = 0x80000009u;
+            constexpr uint32_t kCallCommand = 0x8000000Au;
+            constexpr uint32_t kSifSubAddressRegister = 0x80000001u;
+            constexpr uint32_t kSequence = 0xD6u;
+            constexpr uint32_t kGuard = 0xA5A55A5Au;
+
+            writeGuestU32(env.rdram.data(), kReceivePointerAddress, kInboundAddress);
+            setRegU32(env.ctx, 4, kSifSubAddressRegister);
+            setRegU32(env.ctx, 5, kReceivePointerAddress);
+            ps2_stubs::sceSifSetReg(env.rdram.data(), &env.ctx, &env.runtime);
+
+            const auto invokeDma = [&](uint32_t count)
+            {
+                setRegU32(env.ctx, 4, kDescriptorAddress);
+                setRegU32(env.ctx, 5, count);
+                ps2_stubs::sceSifSetDma(env.rdram.data(), &env.ctx, &env.runtime);
+                t.IsTrue(getRegS32(env.ctx, 2) > 0,
+                         "raw Duelists MCSERV DMA should complete");
+            };
+
+            std::memset(env.rdram.data() + kPacketAddress, 0, 0x40u);
+            writeGuestU32(env.rdram.data(), kPacketAddress, 0x40u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x08u, kBindCommand);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x10u, 0xA50000D5u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x14u, 0x20313540u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x18u, 0xD5u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x1Cu, kClientAddress);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x20u, kSid);
+            const Ps2SifDmaTransfer bindDescriptor{
+                kPacketAddress, 0u, 0x40, 0x44};
+            std::memcpy(env.rdram.data() + kDescriptorAddress,
+                        &bindDescriptor,
+                        sizeof(bindDescriptor));
+            invokeDma(1u);
+            t.IsTrue(readGuestU32(env.rdram.data(), kInboundAddress + 0x24u) != 0u,
+                     "Duelists MCSERV bind should return a server token");
+
+            std::memset(env.rdram.data() + kSendAddress, 0, 0x30u);
+            writeGuestU32(env.rdram.data(), kReceiveAddress - 4u, kGuard);
+            std::memset(env.rdram.data() + kReceiveAddress, 0xCC, 0x0Cu);
+            writeGuestU32(env.rdram.data(), kReceiveAddress + 0x0Cu, kGuard);
+
+            std::memset(env.rdram.data() + kPacketAddress, 0, 0x40u);
+            writeGuestU32(env.rdram.data(), kPacketAddress, 0x40u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x08u, kCallCommand);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x10u,
+                          0xA5000000u | kSequence);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x14u,
+                          0x20310000u + kSequence * 0x40u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x18u, kSequence);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x1Cu, kClientAddress);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x20u, 0xFEu);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x24u, 0x30u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x28u, kReceiveAddress);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x2Cu, 0x0Cu);
+            const std::array<Ps2SifDmaTransfer, 2> callDescriptors{{
+                {kSendAddress, 0u, 0x30, 0},
+                {kPacketAddress, 0u, 0x40, 0x44},
+            }};
+            std::memcpy(env.rdram.data() + kDescriptorAddress,
+                        callDescriptors.data(),
+                        sizeof(callDescriptors));
+            invokeDma(2u);
+
+            t.Equals(readGuestU32(env.rdram.data(), kReceiveAddress), 0u,
+                     "Duelists MCSERV init should report success");
+            t.Equals(readGuestU32(env.rdram.data(), kReceiveAddress + 4u), 0x020Au,
+                     "Duelists MCSERV init should report version 2.10");
+            t.Equals(readGuestU32(env.rdram.data(), kReceiveAddress + 8u), 0x020Eu,
+                     "Duelists MCSERV init should report MCMAN version 2.14");
+            t.Equals(readGuestU32(env.rdram.data(), kReceiveAddress - 4u), kGuard,
+                     "Duelists MCSERV init should preserve memory before its response");
+            t.Equals(readGuestU32(env.rdram.data(), kReceiveAddress + 0x0Cu), kGuard,
+                     "Duelists MCSERV init should preserve memory after its response");
+            t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x18u),
+                     kSequence,
+                     "Duelists MCSERV completion should preserve its RPC sequence");
+            t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x20u),
+                     kCallCommand,
+                     "Duelists MCSERV completion should identify RPC_CALL");
         });
 
         tc.Run("raw Duelists typed calls preserve their observed SIF framing", [](TestCase &t)

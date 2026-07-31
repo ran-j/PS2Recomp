@@ -828,6 +828,47 @@ void register_ps2_iop_tests()
                         "Fatal Frame profile should expose SDRDRV");
         });
 
+        tc.Run("Duelists MCSERV init reports the required game-compatible versions", [](TestCase &t)
+        {
+            constexpr uint32_t kSid = 0x80000400u;
+            constexpr uint32_t kSend = 0x1000u;
+            constexpr uint32_t kReceive = 0x1100u;
+            constexpr uint32_t kGuard = 0xA5A55A5Au;
+
+            FakeIopHost host;
+            ps2x::iop::IopSubsystem subsystem(host);
+            std::string error;
+            t.IsTrue(subsystem.configure({"SLUS_205.15", 0u, 0u}, &error),
+                     "Duelists profile should configure");
+
+            t.IsTrue(host.writeWord(kReceive - 4u, kGuard),
+                     "memory before the MCSERV response should be writable");
+            t.IsTrue(host.writeWord(kReceive + 0x0Cu, kGuard),
+                     "memory after the MCSERV response should be writable");
+
+            ps2x::iop::RpcRequest request{};
+            request.sid = kSid;
+            request.function = 0xFEu;
+            request.send = {kSend, 0x30u};
+            request.receive = {kReceive, 0x0Cu};
+            const RpcResult result = subsystem.handleRpc(request);
+            t.IsTrue(result.handled,
+                     "the exact Duelists MCSERV init envelope should be handled");
+            t.Equals(result.resultAddress, kReceive,
+                     "MCSERV init should return its receive buffer");
+            t.Equals(host.readWord(kReceive), 0u,
+                     "MCSERV init should report success");
+            t.Equals(host.readWord(kReceive + 4u), 0x020Au,
+                     "MCSERV init should meet the guest's minimum MCSERV version");
+            t.Equals(host.readWord(kReceive + 8u), 0x020Eu,
+                     "MCSERV init should meet the guest's minimum MCMAN version");
+            t.Equals(host.readWord(kReceive - 4u), kGuard,
+                     "MCSERV init must preserve memory before its response");
+            t.Equals(host.readWord(kReceive + 0x0Cu), kGuard,
+                     "MCSERV init must preserve memory after its response");
+
+        });
+
         tc.Run("Duelists profile binds its observed custom RPC without fabricating behavior", [](TestCase &t)
         {
             constexpr uint32_t kSid = 0x05730601u;

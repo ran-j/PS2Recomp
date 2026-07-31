@@ -18,8 +18,11 @@ namespace ps2x::iop::detail
         constexpr uint32_t kMcservDev9Sid = 0x80000480u;
         constexpr int32_t kSucceeded = 0;
         constexpr int32_t kDenied = -5;
-        constexpr uint32_t kMcservVersion = 0x0205u;
-        constexpr uint32_t kMcmanVersion = 0x0206u;
+        // Duelists of the Roses rejects older revisions during its MCSERV
+        // initialization handshake. Advertise the minimum compatible pair
+        // while retaining the complete core MCSERV implementation.
+        constexpr uint32_t kMcservVersion = 0x020Au;
+        constexpr uint32_t kMcmanVersion = 0x020Eu;
         constexpr uint32_t kCreateDirectory = 0x0040u;
 
         enum class Operation
