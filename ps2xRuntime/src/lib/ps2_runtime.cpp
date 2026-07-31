@@ -2511,6 +2511,7 @@ void PS2Runtime::Store32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
                           << " tagLo=0x" << std::hex << tagLo
                           << " tagHi=0x" << tagHi
                           << " packetHash=0x" << packetHash
+                          << " trace=" << formatDispatchHistory()
                           << std::dec << std::endl;
                 ++s_gifDmaWatchCount;
             }
