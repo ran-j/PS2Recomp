@@ -21,8 +21,8 @@ namespace ps2_stubs
     void sceSifSendCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const uint32_t srcAddr = getRegU32(ctx, 7); // $a3
-        const uint32_t dstAddr = readStackU32(rdram, ctx, 16);
-        const uint32_t size = readStackU32(rdram, ctx, 20);
+        const uint32_t dstAddr = getRegU32(ctx, 8);
+        const uint32_t size = getRegU32(ctx, 9);
         if (size != 0u && srcAddr != 0u && dstAddr != 0u)
         {
             for (uint32_t i = 0; i < size; ++i)
