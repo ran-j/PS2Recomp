@@ -272,6 +272,16 @@ bool PS2IopHostAdapter::searchCdFile(std::string_view path,
     return ps2_stubs::resolveCdFile(path, file.lsn, file.size, file.name);
 }
 
+bool PS2IopHostAdapter::readCdSectors(uint32_t lsn,
+                                      uint32_t sectors,
+                                      void *destination,
+                                      size_t capacity,
+                                      uint32_t &sectorsRead)
+{
+    return ps2_stubs::readCdSectorsForIop(
+        lsn, sectors, destination, capacity, sectorsRead);
+}
+
 uint64_t PS2IopHostAdapter::openHostFile(std::string_view path)
 {
     if (path.empty())

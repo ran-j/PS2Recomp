@@ -2087,7 +2087,80 @@ void register_ps2_sif_dma_tests()
                      kCallCommand,
                      "Duelists F006 completion should identify RPC_CALL");
 
-            constexpr uint32_t k5002Sequence = 0x40u;
+            constexpr uint32_t kF004Sequence = 0x40u;
+            writeGuestU32(env.rdram.data(), kSendAddress + 0x00u,
+                          kRegistrationSelfToken);
+            writeGuestU32(env.rdram.data(), kSendAddress + 0x04u, kF002Token);
+            writeGuestU32(env.rdram.data(), kSendAddress + 0x08u, 0x20311040u);
+            writeGuestU32(env.rdram.data(), kSendAddress + 0x0Cu, 0x00000040u);
+            writeGuestU32(env.rdram.data(), kReceiveAddress - 4u, kGuard);
+            std::memset(env.rdram.data() + kReceiveAddress, 0xCC, 0x10u);
+            writeGuestU32(env.rdram.data(), kReceiveAddress + 0x10u, kGuard);
+
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x10u,
+                          0xA5000000u | kF004Sequence);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x14u,
+                          0x20310000u + kF004Sequence * 0x40u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x18u, kF004Sequence);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x20u, 0xF004u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x30u, 1u);
+            std::memcpy(env.rdram.data() + kDescriptorAddress,
+                        callDescriptors.data(),
+                        sizeof(callDescriptors));
+            invokeDma(2u);
+
+            for (uint32_t offset = 0u; offset < 0x10u; offset += 4u)
+            {
+                t.Equals(readGuestU32(env.rdram.data(), kReceiveAddress + offset),
+                         0u,
+                         "Duelists F004 should return its successful free status");
+            }
+            t.Equals(readGuestU32(env.rdram.data(), kReceiveAddress - 4u),
+                     kGuard,
+                     "Duelists F004 should preserve memory before the response");
+            t.Equals(readGuestU32(env.rdram.data(), kReceiveAddress + 0x10u),
+                     kGuard,
+                     "Duelists F004 should preserve memory after the response");
+            t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x18u),
+                     kF004Sequence,
+                     "Duelists F004 completion should preserve the RPC sequence");
+            t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x20u),
+                     kCallCommand,
+                     "Duelists F004 completion should identify RPC_CALL");
+
+            constexpr uint32_t kPostF004F006Sequence = 0x41u;
+            writeGuestU32(env.rdram.data(), kSendAddress + 0x00u,
+                          kRegistrationSelfToken);
+            writeGuestU32(env.rdram.data(), kSendAddress + 0x04u, 0u);
+            writeGuestU32(env.rdram.data(), kSendAddress + 0x08u, 0x20311040u);
+            std::memset(env.rdram.data() + kReceiveAddress, 0xCC, 0x10u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x10u,
+                          0xA5000000u | kPostF004F006Sequence);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x14u,
+                          0x20310000u + kPostF004F006Sequence * 0x40u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x18u,
+                          kPostF004F006Sequence);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x20u, 0xF006u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x30u, 1u);
+            std::memcpy(env.rdram.data() + kDescriptorAddress,
+                        callDescriptors.data(),
+                        sizeof(callDescriptors));
+            invokeDma(2u);
+
+            for (uint32_t offset = 0u; offset < 0x10u; offset += 4u)
+            {
+                t.Equals(readGuestU32(env.rdram.data(), kReceiveAddress + offset),
+                         0u,
+                         "Duelists F006(0) should complete immediately after F004");
+            }
+            t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x18u),
+                     kPostF004F006Sequence,
+                     "post-F004 F006 completion should preserve the RPC sequence");
+            t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x20u),
+                     kCallCommand,
+                     "post-F004 F006 completion should identify RPC_CALL");
+
+            constexpr uint32_t k5002Sequence = 0x42u;
             writeGuestU32(env.rdram.data(), kSendAddress + 0x00u,
                           kRegistrationSelfToken);
             writeGuestU32(env.rdram.data(), kSendAddress + 0x04u, 0x00000002u);
@@ -2128,7 +2201,7 @@ void register_ps2_sif_dma_tests()
                      kCallCommand,
                      "Duelists 5002 completion should identify RPC_CALL");
 
-            constexpr uint32_t k5202Sequence = 0x41u;
+            constexpr uint32_t k5202Sequence = 0x43u;
             writeGuestU32(env.rdram.data(), kSendAddress + 0x00u,
                           kRegistrationSelfToken);
             writeGuestU32(env.rdram.data(), kSendAddress + 0x04u, 0xCCCCCCCCu);
@@ -2168,6 +2241,208 @@ void register_ps2_sif_dma_tests()
             t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x20u),
                      kCallCommand,
                      "Duelists 5202 completion should identify RPC_CALL");
+        });
+
+        tc.Run("raw LIBSD SetParam completes the four Duelists movie volume writes", [](TestCase &t)
+        {
+            TestEnv env;
+            configureProfile(env, "SLUS_205.15");
+
+            constexpr uint32_t kDescriptorAddress = 0x00026700u;
+            constexpr uint32_t kPacketAddress = 0x00026800u;
+            constexpr uint32_t kReceivePointerAddress = 0x00026900u;
+            constexpr uint32_t kInboundAddress = 0x00026A00u;
+            constexpr uint32_t kSendAddress = 0x00315640u;
+            constexpr uint32_t kReceiveAddress = 0x00315640u;
+            constexpr uint32_t kClientAddress = 0x00315680u;
+            constexpr uint32_t kSid = 0x80000701u;
+            constexpr uint32_t kBindCommand = 0x80000009u;
+            constexpr uint32_t kCallCommand = 0x8000000Au;
+            constexpr uint32_t kSetParamFunction = 0x8010u;
+            constexpr uint32_t kSifSubAddressRegister = 0x80000001u;
+
+            writeGuestU32(env.rdram.data(), kReceivePointerAddress, kInboundAddress);
+            setRegU32(env.ctx, 4, kSifSubAddressRegister);
+            setRegU32(env.ctx, 5, kReceivePointerAddress);
+            ps2_stubs::sceSifSetReg(env.rdram.data(), &env.ctx, &env.runtime);
+
+            std::memset(env.rdram.data() + kPacketAddress, 0, 0x40u);
+            writeGuestU32(env.rdram.data(), kPacketAddress, 0x40u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x08u, kBindCommand);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x10u, 0xA50000ECu);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x14u, 0x20314B00u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x18u, 0xECu);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x1Cu, kClientAddress);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x20u, kSid);
+
+            const Ps2SifDmaTransfer bindDescriptor{
+                kPacketAddress, 0u, 0x40, 0x44};
+            std::memcpy(env.rdram.data() + kDescriptorAddress,
+                        &bindDescriptor,
+                        sizeof(bindDescriptor));
+            setRegU32(env.ctx, 4, kDescriptorAddress);
+            setRegU32(env.ctx, 5, 1u);
+            ps2_stubs::sceSifSetDma(env.rdram.data(), &env.ctx, &env.runtime);
+            t.IsTrue(getRegS32(env.ctx, 2) > 0,
+                     "raw LIBSD bind should complete through SIF DMA");
+
+            const std::array<uint32_t, 4> entries{
+                0x0980u, 0x0A80u, 0x0981u, 0x0A81u};
+            for (uint32_t index = 0u; index < entries.size(); ++index)
+            {
+                const uint32_t sequence = 0xEDu + index;
+                std::memset(env.rdram.data() + kSendAddress, 0, 64u);
+                writeGuestU32(env.rdram.data(), kSendAddress, kSendAddress);
+                writeGuestU32(env.rdram.data(), kSendAddress + 4u, entries[index]);
+                writeGuestU32(env.rdram.data(), kSendAddress + 8u, 0x3FFFu);
+
+                std::memset(env.rdram.data() + kPacketAddress, 0, 0x40u);
+                writeGuestU32(env.rdram.data(), kPacketAddress, 0x40u);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x08u, kCallCommand);
+                writeGuestU32(env.rdram.data(),
+                              kPacketAddress + 0x10u,
+                              0xA5000000u | sequence);
+                writeGuestU32(env.rdram.data(),
+                              kPacketAddress + 0x14u,
+                              0x20310000u + sequence * 0x40u);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x18u, sequence);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x1Cu, kClientAddress);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x20u, kSetParamFunction);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x24u, 64u);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x28u, kReceiveAddress);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x2Cu, 16u);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x30u, 1u);
+
+                const std::array<Ps2SifDmaTransfer, 2> descriptors{{
+                    {kSendAddress, 0u, 64, 0},
+                    {kPacketAddress, 0u, 0x40, 0x44},
+                }};
+                std::memcpy(env.rdram.data() + kDescriptorAddress,
+                            descriptors.data(),
+                            sizeof(descriptors));
+                setRegU32(env.ctx, 4, kDescriptorAddress);
+                setRegU32(env.ctx, 5, 2u);
+                ps2_stubs::sceSifSetDma(env.rdram.data(), &env.ctx, &env.runtime);
+
+                t.IsTrue(getRegS32(env.ctx, 2) > 0,
+                         "raw LIBSD SetParam should complete through SIF DMA");
+                for (uint32_t offset = 0u; offset < 16u; offset += 4u)
+                {
+                    t.Equals(readGuestU32(env.rdram.data(),
+                                          kReceiveAddress + offset),
+                             0u,
+                             "LIBSD SetParam should return the zeroed sdrdrv result");
+                }
+                t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x18u),
+                         sequence,
+                         "LIBSD SetParam completion should preserve its RPC sequence");
+                t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x20u),
+                         kCallCommand,
+                         "LIBSD SetParam completion should identify RPC_CALL");
+            }
+        });
+
+        tc.Run("raw IOP heap service allocates and frees the Duelists startup block", [](TestCase &t)
+        {
+            TestEnv env;
+            configureProfile(env, "SLUS_205.15");
+
+            constexpr uint32_t kDescriptorAddress = 0x00026900u;
+            constexpr uint32_t kPacketAddress = 0x00026A00u;
+            constexpr uint32_t kReceivePointerAddress = 0x00026B00u;
+            constexpr uint32_t kInboundAddress = 0x00026C00u;
+            constexpr uint32_t kSendAddress = 0x003134C0u;
+            constexpr uint32_t kReceiveAddress = 0x00313500u;
+            constexpr uint32_t kClientAddress = 0x00313C40u;
+            constexpr uint32_t kSid = 0x80000003u;
+            constexpr uint32_t kBindCommand = 0x80000009u;
+            constexpr uint32_t kCallCommand = 0x8000000Au;
+            constexpr uint32_t kSifSubAddressRegister = 0x80000001u;
+            constexpr uint32_t kHeapBase = 0x01A00000u;
+
+            writeGuestU32(env.rdram.data(), kReceivePointerAddress, kInboundAddress);
+            setRegU32(env.ctx, 4, kSifSubAddressRegister);
+            setRegU32(env.ctx, 5, kReceivePointerAddress);
+            ps2_stubs::sceSifSetReg(env.rdram.data(), &env.ctx, &env.runtime);
+
+            std::memset(env.rdram.data() + kPacketAddress, 0, 0x40u);
+            writeGuestU32(env.rdram.data(), kPacketAddress, 0x40u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x08u, kBindCommand);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x10u, 0xA50000E9u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x14u, 0x20313A40u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x18u, 0xE9u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x1Cu, kClientAddress);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x20u, kSid);
+
+            const Ps2SifDmaTransfer bindDescriptor{
+                kPacketAddress, 0u, 0x40, 0x44};
+            std::memcpy(env.rdram.data() + kDescriptorAddress,
+                        &bindDescriptor,
+                        sizeof(bindDescriptor));
+            setRegU32(env.ctx, 4, kDescriptorAddress);
+            setRegU32(env.ctx, 5, 1u);
+            ps2_stubs::sceSifSetDma(env.rdram.data(), &env.ctx, &env.runtime);
+            t.IsTrue(getRegS32(env.ctx, 2) > 0,
+                     "raw IOP heap bind should complete through SIF DMA");
+            t.IsTrue(readGuestU32(env.rdram.data(), kInboundAddress + 0x24u) != 0u,
+                     "raw IOP heap bind should return a server token");
+
+            const auto callHeap = [&](uint32_t function,
+                                      uint32_t argument,
+                                      uint32_t sequence)
+            {
+                writeGuestU32(env.rdram.data(), kSendAddress, argument);
+                writeGuestU32(env.rdram.data(), kReceiveAddress, 0xA55AA55Au);
+                std::memset(env.rdram.data() + kPacketAddress, 0, 0x40u);
+                writeGuestU32(env.rdram.data(), kPacketAddress, 0x40u);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x08u, kCallCommand);
+                writeGuestU32(env.rdram.data(),
+                              kPacketAddress + 0x10u,
+                              0xA5000000u | sequence);
+                writeGuestU32(env.rdram.data(),
+                              kPacketAddress + 0x14u,
+                              0x20310000u + sequence * 0x40u);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x18u, sequence);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x1Cu, kClientAddress);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x20u, function);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x24u, 4u);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x28u, kReceiveAddress);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x2Cu, 4u);
+
+                const std::array<Ps2SifDmaTransfer, 2> descriptors{{
+                    {kSendAddress, 0u, 4, 0},
+                    {kPacketAddress, 0u, 0x40, 0x44},
+                }};
+                std::memcpy(env.rdram.data() + kDescriptorAddress,
+                            descriptors.data(),
+                            sizeof(descriptors));
+                setRegU32(env.ctx, 4, kDescriptorAddress);
+                setRegU32(env.ctx, 5, 2u);
+                ps2_stubs::sceSifSetDma(env.rdram.data(), &env.ctx, &env.runtime);
+            };
+
+            callHeap(1u, 0x6000u, 0xEAu);
+            t.IsTrue(getRegS32(env.ctx, 2) > 0,
+                     "raw IOP heap allocation should complete through SIF DMA");
+            t.Equals(readGuestU32(env.rdram.data(), kReceiveAddress),
+                     kHeapBase,
+                     "Duelists should receive a 64-byte-aligned synthetic IOP block");
+            t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x18u),
+                     0xEAu,
+                     "IOP heap allocation completion should preserve its sequence");
+            t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x20u),
+                     kCallCommand,
+                     "IOP heap allocation completion should identify RPC_CALL");
+
+            callHeap(2u, kHeapBase, 0xEBu);
+            t.IsTrue(getRegS32(env.ctx, 2) > 0,
+                     "raw IOP heap free should complete through SIF DMA");
+            t.Equals(readGuestU32(env.rdram.data(), kReceiveAddress),
+                     0u,
+                     "raw IOP heap free should return success");
+            t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x18u),
+                     0xEBu,
+                     "IOP heap free completion should preserve its sequence");
         });
 
         tc.Run("raw FILEIO core service binds at the observed Duelists boundary", [](TestCase &t)
@@ -2278,6 +2553,133 @@ void register_ps2_sif_dma_tests()
             t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x20u),
                      kCallCommand,
                      "FILEIO init completion should identify RPC_CALL");
+        });
+
+        tc.Run("raw CDVD NCMD bind and stream lifecycle complete at the Duelists boundary", [](TestCase &t)
+        {
+            TestEnv env;
+            configureProfile(env, "SLUS_205.15");
+
+            constexpr uint32_t kDescriptorAddress = 0x00027200u;
+            constexpr uint32_t kPacketAddress = 0x00027300u;
+            constexpr uint32_t kReceivePointerAddress = 0x00027400u;
+            constexpr uint32_t kInboundAddress = 0x00027500u;
+            constexpr uint32_t kSendAddress = 0x00027600u;
+            constexpr uint32_t kReceiveAddress = 0x00027700u;
+            constexpr uint32_t kClientAddress = 0x0028EE90u;
+            constexpr uint32_t kSid = 0x80000595u;
+            constexpr uint32_t kBindCommand = 0x80000009u;
+            constexpr uint32_t kCallCommand = 0x8000000Au;
+            constexpr uint32_t kBindSequence = 0xEFu;
+            constexpr uint32_t kSifSubAddressRegister = 0x80000001u;
+
+            writeGuestU32(env.rdram.data(), kReceivePointerAddress, kInboundAddress);
+            setRegU32(env.ctx, 4, kSifSubAddressRegister);
+            setRegU32(env.ctx, 5, kReceivePointerAddress);
+            ps2_stubs::sceSifSetReg(env.rdram.data(), &env.ctx, &env.runtime);
+
+            std::memset(env.rdram.data() + kPacketAddress, 0, 0x40u);
+            writeGuestU32(env.rdram.data(), kPacketAddress, 0x40u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x08u, kBindCommand);
+            writeGuestU32(env.rdram.data(),
+                          kPacketAddress + 0x10u,
+                          0xA5000000u | kBindSequence);
+            writeGuestU32(env.rdram.data(),
+                          kPacketAddress + 0x14u,
+                          0x20310000u + kBindSequence * 0x40u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x18u, kBindSequence);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x1Cu, kClientAddress);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x20u, kSid);
+
+            const Ps2SifDmaTransfer descriptor{
+                kPacketAddress, 0u, 0x40, 0x44};
+            std::memcpy(env.rdram.data() + kDescriptorAddress,
+                        &descriptor,
+                        sizeof(descriptor));
+
+            setRegU32(env.ctx, 4, kDescriptorAddress);
+            setRegU32(env.ctx, 5, 1u);
+            ps2_stubs::sceSifSetDma(env.rdram.data(), &env.ctx, &env.runtime);
+            t.IsTrue(getRegS32(env.ctx, 2) > 0,
+                     "raw CDVD NCMD bind should complete through SIF DMA");
+            t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x18u),
+                     kBindSequence,
+                     "CDVD NCMD bind completion should preserve its sequence");
+            t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x20u),
+                     kBindCommand,
+                     "CDVD NCMD bind completion should identify RPC_BIND");
+            t.IsTrue(readGuestU32(env.rdram.data(), kInboundAddress + 0x24u) != 0u,
+                     "CDVD NCMD bind should return a nonzero server token");
+
+            const auto streamCall = [&](uint32_t command,
+                                        uint32_t lsn,
+                                        uint32_t sequence)
+            {
+                writeGuestU32(env.rdram.data(), kSendAddress + 0u, lsn);
+                writeGuestU32(env.rdram.data(), kSendAddress + 4u, 16u);
+                writeGuestU32(env.rdram.data(), kSendAddress + 8u, 0x00028000u);
+                writeGuestU32(env.rdram.data(), kSendAddress + 12u, command);
+                writeGuestU32(env.rdram.data(), kSendAddress + 16u, 0u);
+                writeGuestU32(env.rdram.data(), kReceiveAddress, 0xA55A5AA5u);
+
+                std::memset(env.rdram.data() + kPacketAddress, 0, 0x40u);
+                writeGuestU32(env.rdram.data(), kPacketAddress, 0x40u);
+                writeGuestU32(env.rdram.data(),
+                              kPacketAddress + 0x08u,
+                              kCallCommand);
+                writeGuestU32(env.rdram.data(),
+                              kPacketAddress + 0x10u,
+                              0xA5000000u | sequence);
+                writeGuestU32(env.rdram.data(),
+                              kPacketAddress + 0x14u,
+                              0x20310000u + sequence * 0x40u);
+                writeGuestU32(env.rdram.data(),
+                              kPacketAddress + 0x18u,
+                              sequence);
+                writeGuestU32(env.rdram.data(),
+                              kPacketAddress + 0x1Cu,
+                              kClientAddress);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x20u, 9u);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x24u, 20u);
+                writeGuestU32(env.rdram.data(),
+                              kPacketAddress + 0x28u,
+                              kReceiveAddress);
+                writeGuestU32(env.rdram.data(), kPacketAddress + 0x2Cu, 4u);
+
+                const std::array<Ps2SifDmaTransfer, 2> callDescriptors{{
+                    {kSendAddress, 0u, 20, 0},
+                    {kPacketAddress, 0u, 0x40, 0x44},
+                }};
+                std::memcpy(env.rdram.data() + kDescriptorAddress,
+                            callDescriptors.data(),
+                            sizeof(callDescriptors));
+
+                setRegU32(env.ctx, 4, kDescriptorAddress);
+                setRegU32(env.ctx, 5, 2u);
+                ps2_stubs::sceSifSetDma(
+                    env.rdram.data(), &env.ctx, &env.runtime);
+                t.IsTrue(getRegS32(env.ctx, 2) > 0,
+                         "raw CDVD stream call should complete through SIF DMA");
+                t.Equals(readGuestU32(env.rdram.data(),
+                                      kInboundAddress + 0x18u),
+                         sequence,
+                         "raw CDVD stream completion should preserve its sequence");
+                t.Equals(readGuestU32(env.rdram.data(),
+                                      kInboundAddress + 0x20u),
+                         kCallCommand,
+                         "raw CDVD stream completion should identify RPC_CALL");
+                return readGuestU32(env.rdram.data(), kReceiveAddress);
+            };
+
+            t.Equals(streamCall(5u, 2048u, 0xF0u),
+                     1u,
+                     "raw CDVD stream INIT should report success");
+            t.Equals(streamCall(1u, 0x00100000u, 0xF1u),
+                     1u,
+                     "raw CDVD stream START should report success");
+            t.Equals(streamCall(3u, 0u, 0xF2u),
+                     1u,
+                     "raw CDVD stream STOP should report success");
         });
     });
 }

@@ -8,6 +8,9 @@ namespace ps2x::iop::detail
     namespace
     {
         constexpr uint32_t kLibSdSid = 0x80000701u;
+        constexpr uint32_t kSetParamFunction = 0x8010u;
+        constexpr uint32_t kRemoteSendSize = 64u;
+        constexpr uint32_t kRemoteReceiveSize = 16u;
 
         class LibSdService final : public IopService
         {
@@ -38,14 +41,30 @@ namespace ps2x::iop::detail
                     return {};
                 }
 
+                if (request.function == kSetParamFunction &&
+                    (request.send.address == 0u ||
+                     request.send.size != kRemoteSendSize ||
+                     request.receive.address == 0u ||
+                     request.receive.size != kRemoteReceiveSize))
+                {
+                    return {};
+                }
+
                 m_host.audioCommand(request.sid,
                                     request.function,
                                     request.send,
                                     request.receive);
+                if (request.function == kSetParamFunction &&
+                    !m_host.zeroGuest(request.receive.address,
+                                      request.receive.size))
+                {
+                    return {};
+                }
 
                 RpcResult result;
                 result.handled = true;
                 result.resultAddress = request.receive.address;
+                result.signalNowaitCompletion = request.mode != 0u;
                 return result;
             }
 

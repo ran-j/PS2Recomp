@@ -162,6 +162,52 @@ namespace
             return true;
         }
 
+        bool readCdSectors(uint32_t lsn,
+                           uint32_t sectors,
+                           void *destination,
+                           size_t capacity,
+                           uint32_t &sectorsRead) override
+        {
+            sectorsRead = 0u;
+            if (!destination || sectors == 0u)
+            {
+                return false;
+            }
+            for (const auto &[path, file] : cdFiles)
+            {
+                const uint64_t endLsn =
+                    static_cast<uint64_t>(file.lsn) +
+                    (static_cast<uint64_t>(file.size) + 2047u) / 2048u;
+                if (lsn < file.lsn || static_cast<uint64_t>(lsn) >= endLsn)
+                {
+                    continue;
+                }
+
+                const auto contents = hostFileContents.find(path);
+                if (contents == hostFileContents.end())
+                {
+                    return false;
+                }
+                const uint32_t available = static_cast<uint32_t>(
+                    std::min<uint64_t>(sectors, endLsn - lsn));
+                const size_t bytes = static_cast<size_t>(available) * 2048u;
+                const size_t offset =
+                    static_cast<size_t>(lsn - file.lsn) * 2048u;
+                if (bytes > capacity || offset > contents->second.size())
+                {
+                    return false;
+                }
+
+                std::memset(destination, 0, bytes);
+                const size_t copied =
+                    std::min(bytes, contents->second.size() - offset);
+                std::memcpy(destination, contents->second.data() + offset, copied);
+                sectorsRead = available;
+                return true;
+            }
+            return false;
+        }
+
         uint64_t openHostFile(std::string_view path) override
         {
             const auto file = hostFileContents.find(std::string(path));
@@ -524,10 +570,123 @@ void register_ps2_iop_tests()
             }
         });
 
-        tc.Run("FILEIO core service binds without fabricating uncharacterized calls", [](TestCase &t)
+        tc.Run("IOP heap core service allocates aligned blocks and reuses freed space", [](TestCase &t)
+        {
+            constexpr uint32_t kSid = 0x80000003u;
+            constexpr uint32_t kSend = 0x200u;
+            constexpr uint32_t kReceive = 0x300u;
+            constexpr uint32_t kHeapBase = 0x01A00000u;
+            constexpr uint32_t kSentinel = 0xA55AA55Au;
+
+            FakeIopHost host;
+            ps2x::iop::IopSubsystem subsystem(host);
+            std::string error;
+            t.IsTrue(subsystem.configure({"unmatched.elf", 0u, 0u}, &error),
+                     "IOP heap should be available without a game profile");
+            t.IsTrue(subsystem.handlesSid(kSid),
+                     "the core IOP heap endpoint should be bindable");
+
+            RpcRequest request{};
+            request.sid = kSid;
+            request.function = 1u;
+            request.send = {kSend, sizeof(uint32_t)};
+            request.receive = {kReceive, sizeof(uint32_t)};
+
+            t.IsTrue(host.writeWord(kSend, 0x6000u),
+                     "IOP heap allocation size should be writable");
+            const RpcResult firstAllocation = subsystem.handleRpc(request);
+            t.IsTrue(firstAllocation.handled,
+                     "function one should allocate an IOP heap block");
+            t.Equals(firstAllocation.resultAddress, kReceive,
+                     "allocation should return its receive buffer");
+            t.Equals(host.readWord(kReceive), kHeapBase,
+                     "the first allocation should begin at the synthetic IOP heap base");
+            t.Equals(host.readWord(kReceive) & 0x3Fu, 0u,
+                     "IOP heap allocations should be 64-byte aligned");
+
+            t.IsTrue(host.writeWord(kSend, 1u),
+                     "second IOP heap allocation size should be writable");
+            request.mode = 1u;
+            const RpcResult secondAllocation = subsystem.handleRpc(request);
+            t.IsTrue(secondAllocation.handled,
+                     "a second IOP heap allocation should be handled");
+            t.IsTrue(secondAllocation.signalNowaitCompletion,
+                     "NOWAIT heap calls should request completion signaling");
+            t.Equals(host.readWord(kReceive), kHeapBase + 0x6000u,
+                     "the second allocation should follow the aligned first block");
+
+            t.IsTrue(host.writeWord(kSend, kHeapBase),
+                     "IOP heap free address should be writable");
+            request.function = 2u;
+            request.mode = 0u;
+            t.IsTrue(subsystem.handleRpc(request).handled,
+                     "function two should free an IOP heap block");
+            t.Equals(host.readWord(kReceive), 0u,
+                     "freeing a live IOP heap block should succeed");
+
+            t.IsTrue(host.writeWord(kSend, 0x40u),
+                     "replacement IOP heap allocation size should be writable");
+            request.function = 1u;
+            t.IsTrue(subsystem.handleRpc(request).handled,
+                     "replacement IOP heap allocation should be handled");
+            t.Equals(host.readWord(kReceive), kHeapBase,
+                     "the allocator should reuse a freed first-fit block");
+            t.IsTrue(host.guestAllocations.empty(),
+                     "synthetic IOP blocks should not consume the EE guest heap");
+
+            t.IsTrue(host.writeWord(kSend, 0xDEADBEEFu),
+                     "invalid IOP heap free address should be writable");
+            request.function = 2u;
+            t.IsTrue(subsystem.handleRpc(request).handled,
+                     "an invalid free should still complete its typed RPC");
+            t.Equals(host.readWord(kReceive), UINT32_MAX,
+                     "an invalid free should return minus one");
+
+            t.IsTrue(host.writeWord(kReceive, kSentinel),
+                     "unknown-call response sentinel should be writable");
+            request.function = 0u;
+            t.IsFalse(subsystem.handleRpc(request).handled,
+                      "IOP heap initialization is binding, not a function-zero RPC");
+            t.Equals(host.readWord(kReceive), kSentinel,
+                     "an unknown IOP heap function should leave the response untouched");
+
+            DebugSnapshot snapshot = subsystem.debugSnapshot();
+            const DebugService *heap = findService(snapshot, "IOP heap");
+            t.IsTrue(heap != nullptr, "IOP heap should appear in core diagnostics");
+            if (heap)
+            {
+                t.Equals(metricValue(*heap, "allocate_calls"), uint64_t{3},
+                         "IOP heap should count typed allocations");
+                t.Equals(metricValue(*heap, "free_calls"), uint64_t{2},
+                         "IOP heap should count typed frees");
+                t.Equals(metricValue(*heap, "failed_calls"), uint64_t{1},
+                         "IOP heap should count invalid frees");
+                t.Equals(metricValue(*heap, "rejected_calls"), uint64_t{1},
+                         "IOP heap should count unknown functions");
+                t.Equals(metricValue(*heap, "active_allocations"), uint64_t{2},
+                         "IOP heap should track live blocks");
+                t.Equals(metricValue(*heap, "allocated_bytes"), uint64_t{0x80},
+                         "IOP heap metrics should expose aligned live bytes");
+            }
+
+            subsystem.reset();
+            snapshot = subsystem.debugSnapshot();
+            heap = findService(snapshot, "IOP heap");
+            if (heap)
+            {
+                t.Equals(metricValue(*heap, "active_allocations"), uint64_t{0},
+                         "IOP heap reset should release all synthetic blocks");
+                t.Equals(metricValue(*heap, "allocate_calls"), uint64_t{0},
+                         "IOP heap reset should clear allocation counters");
+            }
+        });
+
+        tc.Run("FILEIO core service handles standard open read and close calls", [](TestCase &t)
         {
             constexpr uint32_t kSid = 0x80000001u;
+            constexpr uint32_t kSend = 0x200u;
             constexpr uint32_t kReceive = 0x300u;
+            constexpr uint32_t kDestination = 0x1000u;
             constexpr uint32_t kSentinel = 0xA55AA55Au;
 
             FakeIopHost host;
@@ -543,7 +702,7 @@ void register_ps2_iop_tests()
             RpcRequest request{};
             request.sid = kSid;
             request.function = 0x1234u;
-            request.send = {0x200u, 0x20u};
+            request.send = {kSend, 0x20u};
             request.receive = {kReceive, sizeof(uint32_t)};
             t.IsFalse(subsystem.handleRpc(request).handled,
                       "uncharacterized FILEIO calls must remain rejected");
@@ -560,10 +719,66 @@ void register_ps2_iop_tests()
             t.Equals(host.readWord(kReceive), 0u,
                      "FILEIO init should return zero");
 
+            constexpr std::string_view kGuestPath = "cdrom0:\\MOVIE\\INTRO.PSS;1";
+            const std::vector<uint8_t> fileBytes{
+                0x00u, 0x00u, 0x01u, 0xBAu, 0x44u, 0x02u, 0x00u, 0x04u,
+                0x00u, 0x00u, 0x01u, 0xE0u, 0x11u, 0x22u, 0x33u, 0x44u};
+            host.hostFileContents["translated/" + std::string(kGuestPath)] = fileBytes;
+
+            t.IsTrue(host.writeWord(kSend, 1u),
+                     "FILEIO open mode should be writable");
+            t.IsTrue(host.writeGuest(kSend + sizeof(uint32_t),
+                                     kGuestPath.data(),
+                                     kGuestPath.size() + 1u),
+                     "FILEIO open path should be writable");
+            request.function = 0u;
+            request.send.size = 0x104u;
+            const RpcResult openResult = subsystem.handleRpc(request);
+            t.IsTrue(openResult.handled, "standard FILEIO open should be handled");
+            const int32_t fileDescriptor = static_cast<int32_t>(host.readWord(kReceive));
+            t.IsTrue(fileDescriptor >= 3, "FILEIO open should return a valid descriptor");
+            t.Equals(host.openHostFiles.size(), size_t{1},
+                     "FILEIO open should retain the translated host file");
+
+            t.IsTrue(host.writeWord(kSend + 0u, static_cast<uint32_t>(fileDescriptor)),
+                     "FILEIO read descriptor should be writable");
+            t.IsTrue(host.writeWord(kSend + 4u, kDestination),
+                     "FILEIO read destination should be writable");
+            t.IsTrue(host.writeWord(kSend + 8u, static_cast<uint32_t>(fileBytes.size())),
+                     "FILEIO read size should be writable");
+            t.IsTrue(host.writeWord(kSend + 12u, 0x500u),
+                     "FILEIO read alignment metadata pointer should be writable");
+            request.function = 2u;
+            request.send.size = 4u * sizeof(uint32_t);
+            request.mode = 1u;
+            const RpcResult readResult = subsystem.handleRpc(request);
+            t.IsTrue(readResult.handled, "standard FILEIO read should be handled");
+            t.IsTrue(readResult.signalNowaitCompletion,
+                     "asynchronous FILEIO read should request completion signaling");
+            t.Equals(host.readWord(kReceive), static_cast<uint32_t>(fileBytes.size()),
+                     "FILEIO read should return the transferred byte count");
+            t.IsTrue(std::equal(fileBytes.begin(),
+                                fileBytes.end(),
+                                host.memory.begin() + kDestination),
+                     "FILEIO read should copy host file bytes into guest memory");
+
+            t.IsTrue(host.writeWord(kSend, static_cast<uint32_t>(fileDescriptor)),
+                     "FILEIO close descriptor should be writable");
+            request.function = 1u;
+            request.send.size = sizeof(uint32_t);
+            request.mode = 0u;
+            const RpcResult closeResult = subsystem.handleRpc(request);
+            t.IsTrue(closeResult.handled, "standard FILEIO close should be handled");
+            t.Equals(host.readWord(kReceive), 0u,
+                     "FILEIO close should report success");
+            t.IsTrue(host.openHostFiles.empty(),
+                     "FILEIO close should release the translated host file");
+
             t.IsTrue(host.writeWord(request.send.address, kInitPointer + 1u),
                      "misaligned FILEIO init pointer should be writable");
             t.IsTrue(host.writeWord(kReceive, kSentinel),
                      "malformed FILEIO receive sentinel should be writable");
+            request.function = 0xFFu;
             t.IsFalse(subsystem.handleRpc(request).handled,
                       "FILEIO init must reject a misaligned guest pointer");
             t.Equals(host.readWord(kReceive), kSentinel,
@@ -578,6 +793,14 @@ void register_ps2_iop_tests()
                          "FILEIO should advertise one endpoint");
                 t.Equals(metricValue(*fileio, "init_calls"), uint64_t{1},
                          "FILEIO should count typed initialization");
+                t.Equals(metricValue(*fileio, "open_calls"), uint64_t{1},
+                         "FILEIO should count standard open calls");
+                t.Equals(metricValue(*fileio, "read_calls"), uint64_t{1},
+                         "FILEIO should count standard read calls");
+                t.Equals(metricValue(*fileio, "close_calls"), uint64_t{1},
+                         "FILEIO should count standard close calls");
+                t.Equals(metricValue(*fileio, "open_files"), uint64_t{0},
+                         "FILEIO should report no files after close");
                 t.Equals(metricValue(*fileio, "rejected_calls"), uint64_t{2},
                          "FILEIO should count observed calls");
                 t.Equals(metricValue(*fileio, "last_function"), uint64_t{0xFFu},
@@ -597,6 +820,12 @@ void register_ps2_iop_tests()
                          "FILEIO reset should clear diagnostics");
                 t.Equals(metricValue(*fileio, "init_calls"), uint64_t{0},
                          "FILEIO reset should clear typed call counters");
+                t.Equals(metricValue(*fileio, "open_calls"), uint64_t{0},
+                         "FILEIO reset should clear open counters");
+                t.Equals(metricValue(*fileio, "read_calls"), uint64_t{0},
+                         "FILEIO reset should clear read counters");
+                t.Equals(metricValue(*fileio, "close_calls"), uint64_t{0},
+                         "FILEIO reset should clear close counters");
             }
         });
 
@@ -699,6 +928,143 @@ void register_ps2_iop_tests()
             {
                 t.Equals(metricValue(*service, "disk_ready_calls"), uint64_t{3},
                          "CD/DVD Disk Ready should count repeated polls");
+            }
+        });
+
+        tc.Run("CD/DVD non-blocking command service streams searched loose-disc sectors", [](TestCase &t)
+        {
+            FakeIopHost host;
+            ps2x::iop::IopSubsystem subsystem(host);
+            std::string error;
+            t.IsTrue(subsystem.configure({"unmatched.elf", 0u, 0u}, &error),
+                     "the CD/DVD non-blocking command service should be available as a core service");
+
+            constexpr uint32_t kSid = 0x80000595u;
+            constexpr uint32_t kSearchSid = 0x80000597u;
+            constexpr uint32_t kSearchSend = 0x500u;
+            constexpr uint32_t kSearchReceive = 0x700u;
+            constexpr uint32_t kFileInfo = 0x800u;
+            constexpr uint32_t kSend = 0xA00u;
+            constexpr uint32_t kReceive = 0xA40u;
+            constexpr uint32_t kDestination = 0x1000u;
+            constexpr uint32_t kLsn = 0x00123456u;
+            constexpr std::string_view kPath = "cdrom0:\\MOVIE\\INTRO.PSS;1";
+            constexpr uint32_t kSentinel = 0xA55A5AA5u;
+            std::vector<uint8_t> movie(2u * 2048u);
+            for (size_t index = 0u; index < movie.size(); ++index)
+            {
+                movie[index] = static_cast<uint8_t>((index * 13u + 7u) & 0xFFu);
+            }
+            host.cdFiles.emplace(std::string(kPath),
+                                 CdFileInfo{kLsn,
+                                            static_cast<uint32_t>(movie.size()),
+                                            {},
+                                            "INTRO.PSS"});
+            host.hostFileContents.emplace(std::string(kPath), movie);
+
+            t.IsTrue(subsystem.handlesSid(kSid),
+                     "the core service set should advertise the standard CDVD NCMD SID");
+
+            t.IsTrue(host.writeGuest(kSearchSend + 0x20u,
+                                     kPath.data(),
+                                     kPath.size() + 1u),
+                     "the movie search path should fit in fake guest memory");
+            t.IsTrue(host.writeWord(kSearchSend + 0x120u, kFileInfo),
+                     "the movie search destination should be writable");
+            ps2x::iop::RpcRequest search{};
+            search.sid = kSearchSid;
+            search.function = 0u;
+            search.send = {kSearchSend, 0x124u};
+            search.receive = {kSearchReceive, sizeof(uint32_t)};
+            t.IsTrue(subsystem.handleRpc(search).handled,
+                     "CD/DVD Search File should establish the loose-disc LSN mapping");
+            t.Equals(host.readWord(kSearchReceive), 1u,
+                     "the movie file should resolve before streaming starts");
+            t.Equals(host.readWord(kFileInfo), kLsn,
+                     "the movie search should return the stream start LSN");
+
+            ps2x::iop::RpcRequest request{};
+            request.sid = kSid;
+            request.function = 9u;
+            request.send = {kSend, 20u};
+            request.receive = {kReceive, sizeof(uint32_t)};
+            const auto streamCall = [&](uint32_t lsn,
+                                        uint32_t sectors,
+                                        uint32_t destination,
+                                        uint32_t command)
+            {
+                host.writeWord(kSend + 0u, lsn);
+                host.writeWord(kSend + 4u, sectors);
+                host.writeWord(kSend + 8u, destination);
+                host.writeWord(kSend + 12u, command);
+                host.writeWord(kSend + 16u, 0u);
+                host.writeWord(kReceive, kSentinel);
+                return subsystem.handleRpc(request);
+            };
+
+            t.IsTrue(streamCall(2048u, 16u, 0x2000u, 5u).handled,
+                     "stream INIT should accept the characterized 20-byte packet");
+            t.Equals(host.readWord(kReceive), 1u,
+                     "stream INIT should report success");
+            t.IsTrue(streamCall(kLsn, 0u, 0u, 1u).handled,
+                     "stream START should accept the searched file LSN");
+            t.Equals(host.readWord(kReceive), 1u,
+                     "stream START should report success");
+            t.IsTrue(streamCall(0u, 2u, kDestination, 2u).handled,
+                     "stream READ should complete from the loose-disc mapping");
+            t.Equals(host.readWord(kReceive), 2u,
+                     "stream READ should return the completed sector count in the low 16 bits");
+            t.IsTrue(std::equal(movie.begin(),
+                                movie.end(),
+                                host.memory.begin() + kDestination),
+                     "stream READ should copy real movie bytes into the EE destination");
+
+            request.function = 14u;
+            request.send = {};
+            t.IsTrue(subsystem.handleRpc(request).handled,
+                     "NCMD Disk Ready should handle its empty request");
+            t.Equals(host.readWord(kReceive), 2u,
+                     "NCMD Disk Ready should report the standard ready status");
+
+            request.function = 9u;
+            request.send = {kSend, 20u};
+            t.IsTrue(streamCall(0u, 0u, 0u, 3u).handled,
+                     "stream STOP should complete");
+            t.Equals(host.readWord(kReceive), 1u,
+                     "stream STOP should report success");
+            t.IsTrue(streamCall(0u, 1u, kDestination, 2u).handled,
+                     "a stopped stream READ should return a typed zero result");
+            t.Equals(host.readWord(kReceive), 0u,
+                     "a stopped stream must not report sectors");
+
+            t.IsTrue(host.writeWord(kReceive, kSentinel),
+                     "the uncharacterized NCMD response sentinel should be writable");
+            request.function = 1u;
+            t.IsFalse(subsystem.handleRpc(request).handled,
+                      "uncharacterized CDVD NCMD calls must remain visibly unhandled");
+            t.Equals(host.readWord(kReceive), kSentinel,
+                     "uncharacterized CDVD NCMD must leave receive memory untouched");
+
+            const ps2x::iop::DebugSnapshot snapshot = subsystem.debugSnapshot();
+            const ps2x::iop::DebugService *service =
+                findService(snapshot, "CD/DVD non-blocking commands");
+            t.IsNotNull(service,
+                        "the core service snapshot should include CD/DVD non-blocking commands");
+            if (service)
+            {
+                t.Equals(service->sids.size(), static_cast<size_t>(1u),
+                         "CD/DVD non-blocking commands should advertise one endpoint");
+                if (!service->sids.empty())
+                {
+                    t.Equals(service->sids.front(), kSid,
+                             "CD/DVD non-blocking commands should advertise SID 0x80000595");
+                }
+                t.Equals(metricValue(*service, "stream_calls"), uint64_t{5},
+                         "CD/DVD non-blocking commands should count typed stream calls");
+                t.Equals(metricValue(*service, "stream_read_calls"), uint64_t{1},
+                         "only the successful movie read should count");
+                t.Equals(metricValue(*service, "stream_sectors_read"), uint64_t{2},
+                         "the stream should count copied sectors");
             }
         });
 
@@ -1217,6 +1583,196 @@ void register_ps2_iop_tests()
                          "reset should clear the F006 counter");
                 t.Equals(metricValue(*service, "last_f006_value"), uint64_t{0},
                          "reset should clear the last F006 value");
+            }
+        });
+
+        tc.Run("Duelists F004 releases the synthetic F002 arena lifecycle", [](TestCase &t)
+        {
+            constexpr uint32_t kSid = 0x05730601u;
+            constexpr uint32_t kSend = 0x1180u;
+            constexpr uint32_t kReceive = 0x1280u;
+            constexpr uint32_t kSelfToken = 0x00400080u;
+            constexpr uint32_t kArenaToken = 0x000C1800u;
+            constexpr uint32_t kRegistrationPointer = 0x00005010u;
+            constexpr uint32_t kGuard = 0xA5A55A5Au;
+
+            FakeIopHost host;
+            ps2x::iop::IopSubsystem subsystem(host);
+            std::string error;
+            t.IsTrue(subsystem.configure({"SLUS_205.15", 0u, 0u}, &error),
+                     "Duelists profile should configure");
+
+            ps2x::iop::RpcRequest request{};
+            request.sid = kSid;
+            request.send = {kSend, 0x40u};
+            request.receive = {kReceive, 0x10u};
+            t.IsTrue(host.writeWord(kSend, kSend),
+                     "pre-registration F002 token should be writable");
+            t.IsTrue(host.writeWord(kSend + 4u, kArenaToken),
+                     "F002 arena size should be writable");
+            request.function = 0xF002u;
+            t.IsTrue(subsystem.handleRpc(request).handled,
+                     "F002 should establish its synthetic arena");
+            t.Equals(host.readWord(kReceive), kArenaToken,
+                     "F002 should return the deterministic arena token");
+
+            DebugSnapshot snapshot = subsystem.debugSnapshot();
+            const DebugService *service =
+                findService(snapshot, "Duelists custom RPC probe");
+            t.IsNotNull(service, "Duelists diagnostics should expose F002 arena state");
+            if (service)
+            {
+                t.Equals(metricValue(*service, "active_f002_arena_token"),
+                         uint64_t{kArenaToken},
+                         "F002 should track its active arena token");
+                t.Equals(metricValue(*service, "active_f002_arena_size"),
+                         uint64_t{kArenaToken},
+                         "F002 should track the characterized arena size");
+            }
+
+            t.IsTrue(host.writeWord(kSend, kSelfToken),
+                     "F004 self token should be writable");
+            t.IsTrue(host.writeWord(kSend + 4u, 0u),
+                     "registration index should be writable");
+            t.IsTrue(host.writeWord(kSend + 8u, kRegistrationPointer),
+                     "registration pointer should be writable");
+            request.function = 0x5F10u;
+            t.IsTrue(subsystem.handleRpc(request).handled,
+                     "registration should establish the stable self token");
+
+            t.IsTrue(host.writeWord(kSend + 4u, kArenaToken),
+                     "live F004 arena pointer should be writable");
+            t.IsTrue(host.writeWord(kSend + 8u, 0x20311040u),
+                     "live F004 stale request word two should be writable");
+            t.IsTrue(host.writeWord(kSend + 12u, 0x00000040u),
+                     "live F004 stale request word three should be writable");
+            t.IsTrue(host.writeWord(kReceive - 4u, kGuard),
+                     "memory before the F004 response should be writable");
+            for (uint32_t offset = 0u; offset < 0x10u; offset += sizeof(uint32_t))
+            {
+                t.IsTrue(host.writeWord(kReceive + offset, kGuard),
+                         "F004 response sentinel should be writable");
+            }
+            t.IsTrue(host.writeWord(kReceive + 0x10u, kGuard),
+                     "memory after the F004 response should be writable");
+
+            request.function = 0xF004u;
+            request.mode = 1u;
+            const RpcResult result = subsystem.handleRpc(request);
+            t.IsTrue(result.handled,
+                     "the matching NOWAIT F004 arena release should be handled");
+            t.IsTrue(result.signalNowaitCompletion,
+                     "F004 should request NOWAIT completion signaling");
+            t.Equals(result.resultAddress, kReceive,
+                     "F004 should return its receive buffer");
+            for (uint32_t offset = 0u; offset < 0x10u; offset += sizeof(uint32_t))
+            {
+                t.Equals(host.readWord(kReceive + offset), 0u,
+                         "successful F004 should return a zero status response");
+            }
+            t.Equals(host.readWord(kReceive - 4u), kGuard,
+                     "F004 must preserve memory before its response");
+            t.Equals(host.readWord(kReceive + 0x10u), kGuard,
+                     "F004 must preserve memory after its response");
+
+            t.IsTrue(host.writeWord(kSend + 4u, 0u),
+                     "immediate F006 disabled value should be writable");
+            t.IsTrue(host.writeWord(kSend + 8u, 0x20311040u),
+                     "immediate F006 stale request word should be writable");
+            request.function = 0xF006u;
+            const RpcResult f006Result = subsystem.handleRpc(request);
+            t.IsTrue(f006Result.handled,
+                     "F006(0) should complete immediately after F004");
+            t.IsTrue(f006Result.signalNowaitCompletion,
+                     "post-F004 F006 should request NOWAIT completion signaling");
+            t.Equals(f006Result.resultAddress, kReceive,
+                     "post-F004 F006 should return its receive buffer");
+            for (uint32_t offset = 0u; offset < 0x10u; offset += sizeof(uint32_t))
+            {
+                t.Equals(host.readWord(kReceive + offset), 0u,
+                         "post-F004 F006 should return the idle audio status");
+            }
+
+            snapshot = subsystem.debugSnapshot();
+            service = findService(snapshot, "Duelists custom RPC probe");
+            t.IsNotNull(service, "Duelists diagnostics should include F004");
+            if (service)
+            {
+                t.Equals(metricValue(*service, "f004_calls"), uint64_t{1},
+                         "the probe should count the successful F004 release");
+                t.Equals(metricValue(*service, "last_f004_pointer"),
+                         uint64_t{kArenaToken},
+                         "the probe should retain the released arena pointer");
+                t.Equals(metricValue(*service, "active_f002_arena_token"), uint64_t{0},
+                         "F004 should clear the active arena token");
+                t.Equals(metricValue(*service, "active_f002_arena_size"), uint64_t{0},
+                         "F004 should clear the active arena size");
+                t.Equals(metricValue(*service, "self_token"), uint64_t{kSelfToken},
+                         "F004 must preserve the service self token for immediate F006");
+                t.Equals(metricValue(*service, "registration_count"), uint64_t{1},
+                         "F004 must preserve registration state");
+                t.Equals(metricValue(*service, "last_registration_pointer"),
+                         uint64_t{kRegistrationPointer},
+                         "F004 must preserve the registered callback pointer");
+                t.Equals(metricValue(*service, "f006_calls"), uint64_t{1},
+                         "the immediate F006 should be counted");
+                t.Equals(metricValue(*service, "last_f006_value"), uint64_t{0},
+                         "the immediate F006 should retain its disabled value");
+            }
+
+            request.function = 0xF004u;
+            t.IsTrue(host.writeWord(kSend + 4u, kArenaToken),
+                     "released F004 arena pointer should be restorable");
+            t.IsTrue(host.writeWord(kReceive, kGuard),
+                     "rejected F004 response sentinel should be writable");
+            t.IsFalse(subsystem.handleRpc(request).handled,
+                      "F004 must reject an already released arena token");
+            t.Equals(host.readWord(kReceive), kGuard,
+                     "untracked F004 must leave receive memory untouched");
+
+            request.function = 0xF002u;
+            t.IsTrue(subsystem.handleRpc(request).handled,
+                     "F002 should re-establish the arena for rejection checks");
+            request.function = 0xF004u;
+            request.mode = 0u;
+            t.IsTrue(host.writeWord(kReceive, kGuard),
+                     "wrong-mode F004 response sentinel should be writable");
+            t.IsFalse(subsystem.handleRpc(request).handled,
+                      "F004 must reject synchronous mode");
+            t.Equals(host.readWord(kReceive), kGuard,
+                     "wrong-mode F004 must leave receive memory untouched");
+
+            request.mode = 1u;
+            t.IsTrue(host.writeWord(kSend + 4u, kArenaToken + 0x40u),
+                     "untracked F004 arena pointer should be writable");
+            t.IsFalse(subsystem.handleRpc(request).handled,
+                      "F004 must reject an untracked arena pointer");
+            t.Equals(host.readWord(kReceive), kGuard,
+                     "wrong-pointer F004 must leave receive memory untouched");
+
+            t.IsTrue(host.writeWord(kSend + 4u, kArenaToken),
+                     "matching F004 arena pointer should be restorable");
+            t.IsTrue(host.writeWord(kSend, kSelfToken + 0x40u),
+                     "mismatched aligned F004 self token should be writable");
+            t.IsFalse(subsystem.handleRpc(request).handled,
+                      "F004 must reject a mismatched stable self token");
+            t.Equals(host.readWord(kReceive), kGuard,
+                     "mismatched-token F004 must leave receive memory untouched");
+
+            subsystem.reset();
+            snapshot = subsystem.debugSnapshot();
+            service = findService(snapshot, "Duelists custom RPC probe");
+            t.IsNotNull(service, "Duelists diagnostics should survive reset");
+            if (service)
+            {
+                t.Equals(metricValue(*service, "f004_calls"), uint64_t{0},
+                         "reset should clear the F004 counter");
+                t.Equals(metricValue(*service, "last_f004_pointer"), uint64_t{0},
+                         "reset should clear the last F004 pointer");
+                t.Equals(metricValue(*service, "active_f002_arena_token"), uint64_t{0},
+                         "reset should clear the active arena token");
+                t.Equals(metricValue(*service, "active_f002_arena_size"), uint64_t{0},
+                         "reset should clear the active arena size");
             }
         });
 

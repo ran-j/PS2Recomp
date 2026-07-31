@@ -102,7 +102,9 @@ namespace ps2x::iop::detail
         services.emplace_back(createLibSdService(host));
         services.emplace_back(createPadmanService(host));
         services.emplace_back(createFileIoService(host));
+        services.emplace_back(createIopHeapService(host));
         services.emplace_back(createLoadFileService(host));
+        services.emplace_back(createCdvdNcmdService(host));
         services.emplace_back(createCdvdService(host, {}));
         services.emplace_back(createCdvdSearchFileService(host, {}));
         return services;

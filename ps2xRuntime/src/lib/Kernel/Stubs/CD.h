@@ -14,6 +14,11 @@ namespace ps2_stubs
                        uint32_t &lsn,
                        uint32_t &size,
                        std::string &name);
+    bool readCdSectorsForIop(uint32_t lsn,
+                             uint32_t sectors,
+                             void *destination,
+                             size_t capacity,
+                             uint32_t &sectorsRead);
 
     struct CdDebugFileEntry
     {

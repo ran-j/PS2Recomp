@@ -427,19 +427,88 @@ namespace ps2_stubs
             bool m_seenKeyframe = false;
         };
 #else
-        // TODO
+        // Keep movie-driven games progressing when FFmpeg is intentionally
+        // unavailable. This recognizes MPEG sequence/picture start codes and
+        // exposes a single black placeholder frame at a time; it is not used
+        // for FFmpeg initialization or decode failures.
         class MpegFfmpegDecoder
         {
         public:
-            bool feed(const uint8_t *, size_t, std::deque<MpegDecodedFrame> &)
+            bool feed(const uint8_t *data, size_t size, std::deque<MpegDecodedFrame> &frames)
             {
                 static bool s_warnedNoFfmpeg = false;
                 if (!s_warnedNoFfmpeg)
                 {
-                    std::cerr << "[MPEG] runtime built without FFmpeg; MPEG video decode is disabled." << std::endl;
+                    std::cerr << "[MPEG] runtime built without FFmpeg; using placeholder video frames." << std::endl;
                     s_warnedNoFfmpeg = true;
                 }
-                return false;
+
+                if (!data || size == 0u)
+                {
+                    return true;
+                }
+
+                std::vector<uint8_t> scan;
+                scan.reserve(m_startCodePrefix.size() + size);
+                scan.insert(scan.end(), m_startCodePrefix.begin(), m_startCodePrefix.end());
+                scan.insert(scan.end(), data, data + size);
+
+                bool sawPicture = false;
+                const size_t retainedPrefixSize = m_startCodePrefix.size();
+                for (size_t i = 0u; i + 3u < scan.size(); ++i)
+                {
+                    if (scan[i] != 0x00u || scan[i + 1u] != 0x00u || scan[i + 2u] != 0x01u)
+                    {
+                        continue;
+                    }
+
+                    const uint8_t startCode = scan[i + 3u];
+                    if (startCode == 0xB3u && i + 6u < scan.size())
+                    {
+                        if (i + 6u < retainedPrefixSize)
+                        {
+                            continue;
+                        }
+                        const uint32_t width =
+                            (static_cast<uint32_t>(scan[i + 4u]) << 4u) |
+                            (static_cast<uint32_t>(scan[i + 5u]) >> 4u);
+                        const uint32_t height =
+                            ((static_cast<uint32_t>(scan[i + 5u]) & 0x0Fu) << 8u) |
+                            static_cast<uint32_t>(scan[i + 6u]);
+                        if (width != 0u && height != 0u && width <= 4096u && height <= 4096u)
+                        {
+                            m_width = width;
+                            m_height = height;
+                        }
+                    }
+                    else if (startCode == 0x00u)
+                    {
+                        if (i + 3u >= retainedPrefixSize)
+                        {
+                            sawPicture = true;
+                        }
+                    }
+                }
+
+                const size_t prefixSize = std::min<size_t>(6u, scan.size());
+                m_startCodePrefix.assign(scan.end() - static_cast<std::ptrdiff_t>(prefixSize), scan.end());
+
+                if (sawPicture && frames.empty())
+                {
+                    MpegDecodedFrame frame;
+                    frame.width = static_cast<int>(m_width);
+                    frame.height = static_cast<int>(m_height);
+                    frame.rgba.resize(
+                        static_cast<size_t>(m_width) * static_cast<size_t>(m_height) * 4u,
+                        0u);
+                    for (size_t i = 3u; i < frame.rgba.size(); i += 4u)
+                    {
+                        frame.rgba[i] = 0xFFu;
+                    }
+                    frames.push_back(std::move(frame));
+                }
+
+                return true;
             }
 
             bool flush(std::deque<MpegDecodedFrame> &)
@@ -447,7 +516,17 @@ namespace ps2_stubs
                 return true;
             }
 
-            void reset() {}
+            void reset()
+            {
+                m_width = 320u;
+                m_height = 240u;
+                m_startCodePrefix.clear();
+            }
+
+        private:
+            uint32_t m_width = 320u;
+            uint32_t m_height = 240u;
+            std::vector<uint8_t> m_startCodePrefix;
         };
 #endif
 

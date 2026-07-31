@@ -496,33 +496,52 @@ void register_ps2_sif_rpc_tests()
             }
         });
 
-        tc.Run("LIBSD RPC routes through the IOP audio service", [](TestCase &t)
+        tc.Run("LIBSD SetParam completes NOWAIT and returns the sdrdrv zero result", [](TestCase &t)
         {
             TestEnv env;
 
-            constexpr uint32_t kSetVoiceRpc = 0x8010u;
+            constexpr uint32_t kSetParamRpc = 0x8010u;
             constexpr uint32_t kSendAddr = 0x00035B00u;
             constexpr uint32_t kRecvAddr = 0x00035C00u;
 
-            std::array<uint32_t, 5> command{};
-            command[0] = 3u;          // voice index
-            command[2] = 0x1000u;    // neutral pitch
-            command[3] = 0x00120000u; // plausible sample address
+            std::array<uint32_t, 16> command{};
+            command[0] = kSendAddr;
+            command[1] = 0x00000980u;
+            command[2] = 0x00003FFFu;
             writeGuestStruct(env.rdram.data(), kSendAddr, command);
             std::memset(env.rdram.data() + kRecvAddr, 0xA5, 16u);
+            ps2x::iop::RpcRequest request{};
+            request.sid = IOP_SID_LIBSD;
+            request.function = kSetParamRpc;
+            request.mode = 1u;
+            request.send = {kSendAddr, static_cast<uint32_t>(sizeof(command))};
+            request.receive = {kRecvAddr, 16u};
             const ps2x::iop::RpcResult result =
-                callIop(env, IOP_SID_LIBSD, kSetVoiceRpc,
-                        kSendAddr, static_cast<uint32_t>(sizeof(command)),
-                        kRecvAddr, 16u);
+                PS2IopTransport::handleRpc(&env.runtime,
+                                           env.rdram.data(),
+                                           &env.ctx,
+                                           request);
 
             t.IsTrue(result.handled, "LIBSD SID should be handled by the IOP audio service");
             t.Equals(result.resultAddress, kRecvAddr, "LIBSD should return the audio backend receive buffer");
-            t.IsFalse(result.signalNowaitCompletion, "LIBSD should not request special nowait signaling");
+            t.IsTrue(result.signalNowaitCompletion,
+                     "LIBSD NOWAIT should publish its synchronous completion");
             for (uint32_t index = 0u; index < 16u; ++index)
             {
-                t.Equals(env.rdram[kRecvAddr + index], static_cast<uint8_t>(0xA5),
-                         "LIBSD should preserve the backend-owned response buffer");
+                t.Equals(env.rdram[kRecvAddr + index], static_cast<uint8_t>(0u),
+                         "LIBSD SetParam should return the zeroed sdrdrv result array");
             }
+
+            std::memset(env.rdram.data() + kRecvAddr, 0xA5, 16u);
+            request.send.size = 20u;
+            t.IsFalse(PS2IopTransport::handleRpc(&env.runtime,
+                                                 env.rdram.data(),
+                                                 &env.ctx,
+                                                 request)
+                          .handled,
+                      "LIBSD SetParam should reject a nonstandard request envelope");
+            t.Equals(env.rdram[kRecvAddr], static_cast<uint8_t>(0xA5),
+                     "a malformed LIBSD request should leave the response untouched");
         });
 
         tc.Run("LotR ClFile RPC opens reads and reports EOF", [](TestCase &t)

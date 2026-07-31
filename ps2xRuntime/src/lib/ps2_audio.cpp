@@ -140,7 +140,7 @@ void PS2AudioBackend::onVagTransferFromBuffer(const uint8_t *data, uint32_t size
 
 namespace
 {
-    constexpr uint32_t LIBSD_CMD_SET_VOICE = 0x8010u;
+    constexpr uint32_t LIBSD_CMD_BLOCK_TRANS_STATUS = 0x8100u;
 }
 
 void PS2AudioBackend::onSoundCommand(uint32_t sid, uint32_t rpcNum,
@@ -150,7 +150,7 @@ void PS2AudioBackend::onSoundCommand(uint32_t sid, uint32_t rpcNum,
     if (sid != 0x80000701u)
         return;
 
-    if ((rpcNum == LIBSD_CMD_SET_VOICE || (rpcNum & 0xFF00u) == 0x8100u) &&
+    if ((rpcNum & 0xFF00u) == LIBSD_CMD_BLOCK_TRANS_STATUS &&
         sendBuf && sendSize >= 20)
     {
         uint32_t sampleAddr = 0;

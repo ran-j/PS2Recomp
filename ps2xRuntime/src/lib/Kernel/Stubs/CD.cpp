@@ -27,6 +27,55 @@ namespace ps2_stubs
         return true;
     }
 
+    bool readCdSectorsForIop(uint32_t lsn,
+                             uint32_t sectors,
+                             void *destination,
+                             size_t capacity,
+                             uint32_t &sectorsRead)
+    {
+        sectorsRead = 0u;
+        if (!destination || sectors == 0u)
+        {
+            return false;
+        }
+
+        constexpr uint64_t kSectorBytes = 2048u;
+        uint32_t available = sectors;
+        CdFileEntry file{};
+        if (findRegisteredCdFileForLbn(lsn, file))
+        {
+            available = std::min(available,
+                                 file.baseLbn + file.sectors - lsn);
+        }
+        else
+        {
+            uint64_t imageSectors = 0u;
+            if (!tryGetCdImageTotalSectors(imageSectors) ||
+                static_cast<uint64_t>(lsn) >= imageSectors)
+            {
+                return false;
+            }
+            available = static_cast<uint32_t>(
+                std::min<uint64_t>(available, imageSectors - lsn));
+        }
+
+        const uint64_t bytes = static_cast<uint64_t>(available) * kSectorBytes;
+        if (bytes == 0u || bytes > capacity ||
+            bytes > std::numeric_limits<size_t>::max())
+        {
+            return false;
+        }
+        if (!readCdSectors(lsn,
+                           available,
+                           static_cast<uint8_t *>(destination),
+                           static_cast<size_t>(bytes)))
+        {
+            return false;
+        }
+        sectorsRead = available;
+        return true;
+    }
+
     CdDebugSnapshot getCdDebugSnapshot()
     {
         CdDebugSnapshot snapshot{};

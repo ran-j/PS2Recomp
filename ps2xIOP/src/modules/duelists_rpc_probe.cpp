@@ -32,6 +32,7 @@ namespace ps2x::iop::detail
                 std::lock_guard<std::mutex> lock(m_mutex);
                 m_handledCalls = 0u;
                 m_f002Calls = 0u;
+                m_f004Calls = 0u;
                 m_registrationCount = 0u;
                 m_rangeRegistrationCount = 0u;
                 m_function5000Calls = 0u;
@@ -55,6 +56,9 @@ namespace ps2x::iop::detail
                 m_lastRegistrationPointer = 0u;
                 m_registeredRangeBase = 0u;
                 m_registeredRangeSize = 0u;
+                m_activeF002ArenaToken = 0u;
+                m_activeF002ArenaSize = 0u;
+                m_lastF004Pointer = 0u;
                 m_last5005Argument0 = 0u;
                 m_last5005Argument1 = 0u;
                 m_last5003FadeStep = 0u;
@@ -125,6 +129,8 @@ namespace ps2x::iop::detail
                         std::lock_guard<std::mutex> lock(m_mutex);
                         ++m_handledCalls;
                         ++m_f002Calls;
+                        m_activeF002ArenaToken = f002Response[0];
+                        m_activeF002ArenaSize = words[1];
                         recordRequest(request, words, wordsReadable);
                     }
 
@@ -421,6 +427,42 @@ namespace ps2x::iop::detail
                     }
                 }
 
+                const bool structurallyValidF004 =
+                    request.function == kF004Function &&
+                    request.mode == kNowaitMode &&
+                    validTypedEnvelope &&
+                    wordsReadable &&
+                    readableWords >= 2u &&
+                    words[0] != 0u &&
+                    words[1] != 0u &&
+                    (words[0] & (kSelfTokenAlignment - 1u)) == 0u;
+                if (structurallyValidF004)
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    if (m_selfToken != 0u &&
+                        words[0] == m_selfToken &&
+                        m_activeF002ArenaToken != 0u &&
+                        words[1] == m_activeF002ArenaToken &&
+                        m_host.zeroGuest(request.receive.address, request.receive.size))
+                    {
+                        // The characterized FreeSysMemory call succeeds for
+                        // the arena token returned by F002 and clears the
+                        // service's tracked allocation state.
+                        ++m_handledCalls;
+                        ++m_f004Calls;
+                        m_lastF004Pointer = words[1];
+                        m_activeF002ArenaToken = 0u;
+                        m_activeF002ArenaSize = 0u;
+                        recordRequest(request, words, wordsReadable);
+
+                        RpcResult result;
+                        result.handled = true;
+                        result.resultAddress = request.receive.address;
+                        result.signalNowaitCompletion = true;
+                        return result;
+                    }
+                }
+
                 const bool structurallyValidF006 =
                     request.function == kF006Function &&
                     request.mode == kNowaitMode &&
@@ -489,6 +531,10 @@ namespace ps2x::iop::detail
                 std::lock_guard<std::mutex> lock(m_mutex);
                 metrics.push_back({"handled_calls", m_handledCalls, false});
                 metrics.push_back({"f002_calls", m_f002Calls, false});
+                metrics.push_back({"active_f002_arena_token", m_activeF002ArenaToken, true});
+                metrics.push_back({"active_f002_arena_size", m_activeF002ArenaSize, true});
+                metrics.push_back({"f004_calls", m_f004Calls, false});
+                metrics.push_back({"last_f004_pointer", m_lastF004Pointer, true});
                 metrics.push_back({"registration_count", m_registrationCount, false});
                 metrics.push_back({"range_registration_count", m_rangeRegistrationCount, false});
                 metrics.push_back({"function_5000_calls", m_function5000Calls, false});
@@ -551,6 +597,7 @@ namespace ps2x::iop::detail
             static constexpr uint32_t k5005Function = 0x5005u;
             static constexpr uint32_t k5202Function = 0x5202u;
             static constexpr uint32_t kF003Function = 0xF003u;
+            static constexpr uint32_t kF004Function = 0xF004u;
             static constexpr uint32_t kF006Function = 0xF006u;
             static constexpr uint32_t kTypedSendSize = 0x40u;
             static constexpr uint32_t kTypedReceiveSize = 0x10u;
@@ -562,6 +609,7 @@ namespace ps2x::iop::detail
             mutable std::mutex m_mutex;
             uint64_t m_handledCalls = 0u;
             uint64_t m_f002Calls = 0u;
+            uint64_t m_f004Calls = 0u;
             uint64_t m_registrationCount = 0u;
             uint64_t m_rangeRegistrationCount = 0u;
             uint64_t m_function5000Calls = 0u;
@@ -578,6 +626,9 @@ namespace ps2x::iop::detail
             uint32_t m_selfToken = 0u;
             uint32_t m_registeredRangeBase = 0u;
             uint32_t m_registeredRangeSize = 0u;
+            uint32_t m_activeF002ArenaToken = 0u;
+            uint32_t m_activeF002ArenaSize = 0u;
+            uint32_t m_lastF004Pointer = 0u;
             uint32_t m_last5005Argument0 = 0u;
             uint32_t m_last5005Argument1 = 0u;
             uint32_t m_last5003FadeStep = 0u;

@@ -79,6 +79,11 @@ namespace ps2x::iop
         virtual std::string hostPath(HostPathKind kind) const = 0;
         virtual std::string translateGuestPath(std::string_view path) const = 0;
         virtual bool searchCdFile(std::string_view path, CdFileInfo &file) = 0;
+        virtual bool readCdSectors(uint32_t lsn,
+                                   uint32_t sectors,
+                                   void *destination,
+                                   size_t capacity,
+                                   uint32_t &sectorsRead) = 0;
         virtual uint64_t openHostFile(std::string_view path) = 0;
         virtual bool hostFileSize(uint64_t handle, uint64_t &size) const = 0;
         virtual bool readHostFile(uint64_t handle,
