@@ -696,7 +696,7 @@ namespace ps2recomp
         VU0_CR_FBRST4 = 18,    // VIF/VU reset register 4
         VU0_CR_ACC = 20,       // Accumulator register
         VU0_CR_INFO = 21,      // Information register
-        VU0_CR_CLIP2 = 22,     // Clipping flags register 2
+        VU0_CR_Q = 22,         // Q register
         VU0_CR_P = 26,         // P register
         VU0_CR_XITOP = 27,     // XITOP register
         VU0_CR_ITOP = 28,      // ITOP register

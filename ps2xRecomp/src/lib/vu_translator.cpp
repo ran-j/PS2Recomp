@@ -73,8 +73,8 @@ namespace ps2recomp
                 return fmt::format("SET_GPR_VEC(ctx, {}, _mm_castps_si128(ctx->vu0_acc));", rt);
             case VU0_CR_INFO: // I dd found on offical docs but ok
                 return fmt::format("SET_GPR_U32(ctx, {}, ctx->vu0_info);", rt);
-            case VU0_CR_CLIP2:
-                return fmt::format("SET_GPR_U32(ctx, {}, ctx->vu0_clip_flags2);", rt);
+            case VU0_CR_Q:
+                return fmt::format("{{ uint32_t bits; std::memcpy(&bits, &ctx->vu0_q, sizeof(bits)); SET_GPR_U32(ctx, {}, bits); }}", rt);
             case VU0_CR_P:
                 return fmt::format("{{ uint32_t bits; std::memcpy(&bits, &ctx->vu0_p, sizeof(bits)); SET_GPR_U32(ctx, {}, bits); }}", rt);
             case VU0_CR_XITOP: // Maybe this does not exist, maybe we handle to vu0_itop
@@ -84,7 +84,7 @@ namespace ps2recomp
             case VU0_CR_TOP:
                 return fmt::format("SET_GPR_U32(ctx, {}, ctx->vu0_top);", rt);
             default:
-                return fmt::format("// Unimplemented CFC2 VU CReg: {}", rt);
+                return fmt::format("// Unimplemented CFC2 VU CReg: {}", rd);
             }
         }
         case COP2_QMTC2:
@@ -135,8 +135,8 @@ namespace ps2recomp
                 return fmt::format("ctx->vu0_acc = _mm_castsi128_ps(GPR_VEC(ctx, {}));", rt);
             case VU0_CR_INFO:
                 return fmt::format("ctx->vu0_info = GPR_U32(ctx, {});", rt);
-            case VU0_CR_CLIP2:
-                return fmt::format("ctx->vu0_clip_flags2 = GPR_U32(ctx, {});", rt);
+            case VU0_CR_Q:
+                return fmt::format("{{ uint32_t tmp = GPR_U32(ctx, {}); std::memcpy(&ctx->vu0_q, &tmp, sizeof(tmp)); }}", rt);
             case VU0_CR_P:
                 return fmt::format("{{ uint32_t tmp = GPR_U32(ctx, {}); std::memcpy(&ctx->vu0_p, &tmp, sizeof(tmp)); }}", rt);
             case VU0_CR_XITOP:
