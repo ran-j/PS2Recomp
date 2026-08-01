@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <memory>
 #include <map>
+#include <utility>
 
 namespace ps2recomp
 {
@@ -45,6 +46,10 @@ namespace ps2recomp
             std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions);
 
         static std::string ClampFilenameLength(const std::string& baseName, const std::string& extension, std::size_t maxLength);
+
+        static std::vector<std::string> ComputeOversizedTranslationUnits(
+            const std::vector<std::pair<std::string, size_t>>& translationUnitInstructionCounts,
+            uint32_t instructionThreshold);
 
     private:
         ConfigManager m_configManager;

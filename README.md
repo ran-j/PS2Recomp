@@ -22,6 +22,29 @@ This project statically recompiles PS2 ELF binaries into C++ and provides a runt
 * Configurable stubs, skips, and instruction patches.
 * Instruction-driven syscall handling.
 
+### Giant-function handling
+
+* `general.giant_function_instruction_threshold` (integer, TOML `[general]` table, default `0` = disabled). When a decoded guest function's instruction count exceeds this threshold, the recompiler:
+  1. Emits a guarded GCC `__attribute__((optimize("O1")))` on that function to bound its `-O3` compile time.
+  2. Writes an `oversized_tus.txt` manifest into the output directory.
+* The attribute is gated to real GCC (`#if defined(__GNUC__) && !defined(__clang__)`), so it is a no-op on Clang/MSVC -- on those toolchains the manifest is the mitigation path instead.
+* Manifest format: `oversized_tus.txt` contains one translation-unit filename per line, each relative to the output directory, deduplicated. It lists the TUs that contain at least one oversized function.
+* Intended downstream usage: the consuming build applies `-O1` to just those TUs, for example:
+
+```cmake
+# Compile only the recompiler's oversized translation units at -O1 to keep
+# their -O3 compile time bounded (the rest of the program stays at -O3).
+file(STRINGS "${PS2X_OUTPUT_DIR}/oversized_tus.txt" PS2X_OVERSIZED_TUS)
+foreach(tu IN LISTS PS2X_OVERSIZED_TUS)
+    set_source_files_properties("${PS2X_OUTPUT_DIR}/${tu}"
+        PROPERTIES COMPILE_OPTIONS "-O1")
+endforeach()
+```
+
+* `set_source_files_properties` is directory-scoped: by default a source file property is only visible to targets added in the same directory (`CMakeLists.txt`). Run this snippet in the same directory scope as the target that compiles the generated sources, or on CMake 3.18+ pass the `DIRECTORY`/`TARGET_DIRECTORY` option to set the property from another scope.
+
+* Caveat for single-file output mode: when `single_file_output = true`, all functions land in one combined TU, so the manifest names that single TU -- applying `-O1` from the manifest then lowers optimization for the whole program, not just the giant function. The per-function-file mode (the default, `single_file_output = false`) is what gives per-TU granularity.
+
 ### How It Works
 PS2Recomp works by:
 
