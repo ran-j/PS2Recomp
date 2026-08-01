@@ -4,6 +4,7 @@
 #include "runtime/ps2_gs_psmct32.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_vu1.h"
+#include "vu/ps2_vu1_detail.h"
 
 #include <cstdint>
 #include <cstring>
@@ -79,6 +80,15 @@ namespace
                (static_cast<uint32_t>(fs & 0x1Fu) << 11) |
                (static_cast<uint32_t>(fd & 0x1Fu) << 6) |
                static_cast<uint32_t>(op & 0x3Fu);
+    }
+
+    uint32_t makeVuUpperSpecial(uint8_t specialOp, uint8_t dest, uint8_t ft, uint8_t fs)
+    {
+        return (static_cast<uint32_t>(dest & 0xFu) << 21) |
+               (static_cast<uint32_t>(ft & 0x1Fu) << 16) |
+               (static_cast<uint32_t>(fs & 0x1Fu) << 11) |
+               (static_cast<uint32_t>((specialOp & 0x7Cu) >> 2) << 6) |
+               static_cast<uint32_t>(0x3Cu | (specialOp & 0x3u));
     }
 
     uint32_t makeVuLq(uint8_t dest, uint8_t targetVf, uint8_t baseVi, int16_t imm)
@@ -343,6 +353,414 @@ void register_ps2_vu1_tests()
             t.Equals(vu1.state().vf[1][1], 220.0f, "upper ADD should write y after lower read");
             t.Equals(vu1.state().vf[1][2], 330.0f, "upper ADD should write z after lower read");
             t.Equals(vu1.state().vf[1][3], 440.0f, "upper ADD should write w after lower read");
+        });
+
+        tc.Run("EFU lower op reads the pre-pair VF value the upper half overwrites", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+            writeVuInstructionPair(fx.code,
+                                   0u,
+                                   makeVuLowerSpecial(0x72u, 3u, 0u, 0u, 0xEu),  // ELENG P, VF[3]
+                                   makeVuUpper(0x28u, 0xFu, 2u, 1u, 3u));        // ADD.xyzw vf3, vf1, vf2
+
+            VU1Interpreter vu1;
+            vu1.state().vf[3][0] = 3.0f;
+            vu1.state().vf[3][1] = 4.0f;
+            vu1.state().vf[3][2] = 12.0f;
+            vu1.state().vf[3][3] = 1.0f;
+            vu1.state().vf[1][0] = 6.0f;
+            vu1.state().vf[1][1] = 8.0f;
+            vu1.state().vf[1][2] = 24.0f;
+            vu1.state().vf[1][3] = 2.0f;
+            vu1.state().vf[2][0] = 6.0f;
+            vu1.state().vf[2][1] = 8.0f;
+            vu1.state().vf[2][2] = 24.0f;
+            vu1.state().vf[2][3] = 2.0f;
+
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 0u, 1u);
+
+            t.Equals(vu1.state().p, 13.0f, "ELENG should read the pre-pair length of vf3");
+            t.Equals(vu1.state().vf[3][0], 12.0f, "upper ADD write should still land on x");
+            t.Equals(vu1.state().vf[3][2], 48.0f, "upper ADD write should still land on z");
+        });
+
+        tc.Run("EFU lower ops report their fs read and WAITP reports none", [](TestCase &t)
+        {
+            const uint8_t efuOps[] = {0x70u, 0x71u, 0x72u, 0x73u, 0x74u, 0x75u, 0x76u,
+                                       0x78u, 0x79u, 0x7Au, 0x7Cu, 0x7Du, 0x7Eu};
+            for (uint8_t op : efuOps)
+            {
+                uint32_t readMask = 0u;
+                uint32_t writeMask = 0u;
+                vuLowerVfReadWriteMasks(makeVuLowerSpecial(op, 3u, 5u, 0u, 0xEu), readMask, writeMask);
+                t.Equals(readMask, static_cast<uint32_t>(1u << 3), "EFU op should report reading VF[fs]");
+                t.Equals(writeMask, 0u, "EFU op should report no VF write");
+            }
+
+            {
+                uint32_t readMask = 0u;
+                uint32_t writeMask = 0u;
+                vuLowerVfReadWriteMasks(makeVuLowerSpecial(0x7Bu, 3u, 5u, 0u, 0xEu), readMask, writeMask);
+                t.Equals(readMask, 0u, "WAITP should report no VF read");
+                t.Equals(writeMask, 0u, "WAITP should report no VF write");
+            }
+
+            {
+                uint32_t readMask = 0u;
+                uint32_t writeMask = 0u;
+                vuLowerVfReadWriteMasks(makeVuLowerSpecial(0x77u, 3u, 5u, 0u, 0xEu), readMask, writeMask);
+                t.Equals(readMask, 0u, "unallocated slot 0x77 should report no VF read");
+                t.Equals(writeMask, 0u, "unallocated slot 0x77 should report no VF write");
+            }
+
+            {
+                uint32_t readMask = 0u;
+                uint32_t writeMask = 0u;
+                vuLowerVfReadWriteMasks(makeVuLowerSpecial(0x7Fu, 3u, 5u, 0u, 0xEu), readMask, writeMask);
+                t.Equals(readMask, 0u, "unallocated slot 0x7F should report no VF read");
+                t.Equals(writeMask, 0u, "unallocated slot 0x7F should report no VF write");
+            }
+
+            {
+                uint32_t readMask = 0u;
+                uint32_t writeMask = 0u;
+                vuLowerVfReadWriteMasks(makeVuLowerSpecial(0x30u, 3u, 5u, 0u, 0xFu), readMask, writeMask);
+                t.Equals(readMask, static_cast<uint32_t>(1u << 3), "MOVE positive control should report is read");
+                t.Equals(writeMask, static_cast<uint32_t>(1u << 5), "MOVE positive control should report it write");
+            }
+        });
+
+        tc.Run("R-register lower ops report their VF operand", [](TestCase &t)
+        {
+            {
+                uint32_t readMask = 0u;
+                uint32_t writeMask = 0u;
+                vuLowerVfReadWriteMasks(makeVuLowerSpecial(0x40u, 3u, 5u, 0u, 0xFu), readMask, writeMask);
+                t.Equals(readMask, 0u, "RNEXT should report no VF read");
+                t.Equals(writeMask, static_cast<uint32_t>(1u << 5), "RNEXT should report writing VF[ft]");
+            }
+
+            {
+                uint32_t readMask = 0u;
+                uint32_t writeMask = 0u;
+                vuLowerVfReadWriteMasks(makeVuLowerSpecial(0x41u, 3u, 5u, 0u, 0xFu), readMask, writeMask);
+                t.Equals(readMask, 0u, "RGET should report no VF read");
+                t.Equals(writeMask, static_cast<uint32_t>(1u << 5), "RGET should report writing VF[ft]");
+            }
+
+            {
+                uint32_t readMask = 0u;
+                uint32_t writeMask = 0u;
+                vuLowerVfReadWriteMasks(makeVuLowerSpecial(0x42u, 3u, 5u, 0u, 0u), readMask, writeMask);
+                t.Equals(readMask, static_cast<uint32_t>(1u << 3), "RINIT should report reading VF[fs]");
+                t.Equals(writeMask, 0u, "RINIT should report no VF write");
+            }
+
+            {
+                uint32_t readMask = 0u;
+                uint32_t writeMask = 0u;
+                vuLowerVfReadWriteMasks(makeVuLowerSpecial(0x43u, 3u, 5u, 0u, 0u), readMask, writeMask);
+                t.Equals(readMask, static_cast<uint32_t>(1u << 3), "RXOR should report reading VF[fs]");
+                t.Equals(writeMask, 0u, "RXOR should report no VF write");
+            }
+        });
+
+        tc.Run("lower-special ops that name no VF operand report neither read nor write", [](TestCase &t)
+        {
+            // The lower-special selectors the manual allocates to operations
+            // whose only operands are integer registers, or which take no
+            // operand at all.  Their absence from the hazard table is
+            // deliberate, so it is pinned rather than left to inspection.
+            const uint8_t viOnlyOps[] = {0x3Bu, 0x3Eu, 0x3Fu, 0x68u, 0x69u, 0x6Cu};
+            for (uint8_t op : viOnlyOps)
+            {
+                uint32_t readMask = 0u;
+                uint32_t writeMask = 0u;
+                vuLowerVfReadWriteMasks(makeVuLowerSpecial(op, 3u, 5u, 0u, 0xFu), readMask, writeMask);
+                t.Equals(readMask, 0u, "integer-only lower op should report no VF read");
+                t.Equals(writeMask, 0u, "integer-only lower op should report no VF write");
+            }
+        });
+
+        tc.Run("upper half reads the pre-pair Q value the lower half overwrites", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+            writeVuInstructionPair(fx.code,
+                                   0u,
+                                   makeVuDiv(3u, 4u, 0u, 0u),             // DIV Q, vf3x, vf4x
+                                   makeVuUpper(0x20u, 0xFu, 0u, 3u, 3u)); // ADDq.xyzw vf3, vf3, Q
+
+            VU1Interpreter vu1;
+            vu1.state().q = 100.0f;
+            vu1.state().vf[3][0] = 8.0f;
+            vu1.state().vf[3][1] = 8.0f;
+            vu1.state().vf[3][2] = 8.0f;
+            vu1.state().vf[3][3] = 8.0f;
+            vu1.state().vf[4][0] = 2.0f;
+            vu1.state().vf[4][1] = 2.0f;
+            vu1.state().vf[4][2] = 2.0f;
+            vu1.state().vf[4][3] = 2.0f;
+
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 0u, 1u);
+
+            t.Equals(vu1.state().vf[3][0], 108.0f, "upper ADDq should use the pre-pair Q for x");
+            t.Equals(vu1.state().vf[3][1], 108.0f, "upper ADDq should use the pre-pair Q for y");
+            t.Equals(vu1.state().vf[3][2], 108.0f, "upper ADDq should use the pre-pair Q for z");
+            t.Equals(vu1.state().vf[3][3], 108.0f, "upper ADDq should use the pre-pair Q for w");
+            t.Equals(vu1.state().q, 4.0f, "lower DIV should still leave its own result in Q");
+        });
+
+        tc.Run("EFU pair with no VF write leaves the reordered branch behaviourally unchanged", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+            writeVuInstructionPair(fx.code,
+                                   0u,
+                                   makeVuLowerSpecial(0x73u, 3u, 0u, 0u, 0xEu),  // ERLENG P, VF[3]
+                                   makeVuUpper(0x28u, 0xFu, 2u, 1u, 3u));        // ADD.xyzw vf3, vf1, vf2
+
+            VU1Interpreter vu1;
+            vu1.state().vf[3][0] = 3.0f;
+            vu1.state().vf[3][1] = 4.0f;
+            vu1.state().vf[3][2] = 12.0f;
+            vu1.state().vf[3][3] = 1.0f;
+            vu1.state().vf[1][0] = 6.0f;
+            vu1.state().vf[1][1] = 8.0f;
+            vu1.state().vf[1][2] = 24.0f;
+            vu1.state().vf[1][3] = 2.0f;
+            vu1.state().vf[2][0] = 6.0f;
+            vu1.state().vf[2][1] = 8.0f;
+            vu1.state().vf[2][2] = 24.0f;
+            vu1.state().vf[2][3] = 2.0f;
+
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 0u, 1u);
+
+            t.Equals(vu1.state().p, 1.0f / 13.0f, "ERLENG should read the pre-pair reciprocal length of vf3");
+            t.Equals(vu1.state().vf[3][0], 12.0f, "upper ADD write should land on x");
+            t.Equals(vu1.state().vf[3][1], 16.0f, "upper ADD write should land on y");
+            t.Equals(vu1.state().vf[3][2], 48.0f, "upper ADD write should land on z");
+            t.Equals(vu1.state().vf[3][3], 4.0f, "upper ADD write should land on w");
+        });
+
+        tc.Run("upper half reads the pre-pair value of an fs operand the lower half overwrites", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+            writeVuInstructionPair(fx.code,
+                                   0u,
+                                   makeVuLowerSpecial(0x30u, 5u, 1u, 0u, 0xFu),  // MOVE.xyzw vf1, vf5
+                                   makeVuUpper(0x28u, 0xFu, 2u, 1u, 5u));        // ADD.xyzw vf5, vf1, vf2
+
+            VU1Interpreter vu1;
+            vu1.state().vf[1][0] = 1.0f;
+            vu1.state().vf[1][1] = 2.0f;
+            vu1.state().vf[1][2] = 3.0f;
+            vu1.state().vf[1][3] = 4.0f;
+            vu1.state().vf[2][0] = 10.0f;
+            vu1.state().vf[2][1] = 20.0f;
+            vu1.state().vf[2][2] = 30.0f;
+            vu1.state().vf[2][3] = 40.0f;
+            vu1.state().vf[5][0] = 100.0f;
+            vu1.state().vf[5][1] = 200.0f;
+            vu1.state().vf[5][2] = 300.0f;
+            vu1.state().vf[5][3] = 400.0f;
+
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 0u, 1u);
+
+            t.Equals(vu1.state().vf[5][0], 11.0f, "upper ADD should use the pre-pair vf1 for x");
+            t.Equals(vu1.state().vf[5][1], 22.0f, "upper ADD should use the pre-pair vf1 for y");
+            t.Equals(vu1.state().vf[5][2], 33.0f, "upper ADD should use the pre-pair vf1 for z");
+            t.Equals(vu1.state().vf[5][3], 44.0f, "upper ADD should use the pre-pair vf1 for w");
+            t.Equals(vu1.state().vf[1][0], 100.0f, "lower MOVE write to vf1 should still land on x");
+            t.Equals(vu1.state().vf[1][1], 200.0f, "lower MOVE write to vf1 should still land on y");
+            t.Equals(vu1.state().vf[1][2], 300.0f, "lower MOVE write to vf1 should still land on z");
+            t.Equals(vu1.state().vf[1][3], 400.0f, "lower MOVE write to vf1 should still land on w");
+        });
+
+        tc.Run("upper half reads the pre-pair value of an ft operand the lower half overwrites", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+            writeVuInstructionPair(fx.code,
+                                   0u,
+                                   makeVuLowerSpecial(0x30u, 5u, 2u, 0u, 0xFu),  // MOVE.xyzw vf2, vf5
+                                   makeVuUpper(0x2Au, 0xFu, 2u, 1u, 5u));        // MUL.xyzw vf5, vf1, vf2
+
+            VU1Interpreter vu1;
+            vu1.state().vf[1][0] = 1.0f;
+            vu1.state().vf[1][1] = 2.0f;
+            vu1.state().vf[1][2] = 3.0f;
+            vu1.state().vf[1][3] = 4.0f;
+            vu1.state().vf[2][0] = 2.0f;
+            vu1.state().vf[2][1] = 4.0f;
+            vu1.state().vf[2][2] = 5.0f;
+            vu1.state().vf[2][3] = 10.0f;
+            vu1.state().vf[5][0] = 100.0f;
+            vu1.state().vf[5][1] = 200.0f;
+            vu1.state().vf[5][2] = 300.0f;
+            vu1.state().vf[5][3] = 400.0f;
+
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 0u, 1u);
+
+            t.Equals(vu1.state().vf[5][0], 2.0f, "upper MUL should use the pre-pair vf2 for x");
+            t.Equals(vu1.state().vf[5][1], 8.0f, "upper MUL should use the pre-pair vf2 for y");
+            t.Equals(vu1.state().vf[5][2], 15.0f, "upper MUL should use the pre-pair vf2 for z");
+            t.Equals(vu1.state().vf[5][3], 40.0f, "upper MUL should use the pre-pair vf2 for w");
+            t.Equals(vu1.state().vf[2][0], 100.0f, "lower MOVE write to vf2 should still land on x");
+            t.Equals(vu1.state().vf[2][1], 200.0f, "lower MOVE write to vf2 should still land on y");
+            t.Equals(vu1.state().vf[2][2], 300.0f, "lower MOVE write to vf2 should still land on z");
+            t.Equals(vu1.state().vf[2][3], 400.0f, "lower MOVE write to vf2 should still land on w");
+        });
+
+        tc.Run("upper half with fs and ft aliased to one register keeps the lower half's write to it", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+            writeVuInstructionPair(fx.code,
+                                   0u,
+                                   makeVuLowerSpecial(0x30u, 5u, 2u, 0u, 0xFu),  // MOVE.xyzw vf2, vf5
+                                   makeVuUpper(0x28u, 0xFu, 2u, 2u, 5u));        // ADD.xyzw vf5, vf2, vf2
+
+            VU1Interpreter vu1;
+            vu1.state().vf[2][0] = 1.0f;
+            vu1.state().vf[2][1] = 2.0f;
+            vu1.state().vf[2][2] = 3.0f;
+            vu1.state().vf[2][3] = 4.0f;
+            vu1.state().vf[5][0] = 100.0f;
+            vu1.state().vf[5][1] = 200.0f;
+            vu1.state().vf[5][2] = 300.0f;
+            vu1.state().vf[5][3] = 400.0f;
+
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 0u, 1u);
+
+            t.Equals(vu1.state().vf[5][0], 2.0f, "upper ADD should use the pre-pair vf2 for both operands on x");
+            t.Equals(vu1.state().vf[5][1], 4.0f, "upper ADD should use the pre-pair vf2 for both operands on y");
+            t.Equals(vu1.state().vf[5][2], 6.0f, "upper ADD should use the pre-pair vf2 for both operands on z");
+            t.Equals(vu1.state().vf[5][3], 8.0f, "upper ADD should use the pre-pair vf2 for both operands on w");
+            t.Equals(vu1.state().vf[2][0], 100.0f, "aliased guard should keep the lower MOVE write to vf2 on x");
+            t.Equals(vu1.state().vf[2][1], 200.0f, "aliased guard should keep the lower MOVE write to vf2 on y");
+            t.Equals(vu1.state().vf[2][2], 300.0f, "aliased guard should keep the lower MOVE write to vf2 on z");
+            t.Equals(vu1.state().vf[2][3], 400.0f, "aliased guard should keep the lower MOVE write to vf2 on w");
+        });
+
+        tc.Run("upper half write discards the lower half write to the same register in whole-register units", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+            writeVuInstructionPair(fx.code,
+                                   0u,
+                                   makeVuLowerSpecial(0x30u, 9u, 1u, 0u, 0x1u),  // MOVE.w vf1, vf9
+                                   makeVuUpper(0x28u, 0xCu, 3u, 1u, 1u));        // ADD.xy vf1, vf1, vf3
+
+            VU1Interpreter vu1;
+            vu1.state().vf[1][0] = 1.0f;
+            vu1.state().vf[1][1] = 2.0f;
+            vu1.state().vf[1][2] = 3.0f;
+            vu1.state().vf[1][3] = 4.0f;
+            vu1.state().vf[3][0] = 10.0f;
+            vu1.state().vf[3][1] = 20.0f;
+            vu1.state().vf[3][2] = 30.0f;
+            vu1.state().vf[3][3] = 40.0f;
+            vu1.state().vf[9][0] = 5.0f;
+            vu1.state().vf[9][1] = 6.0f;
+            vu1.state().vf[9][2] = 7.0f;
+            vu1.state().vf[9][3] = 777.0f;
+
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 0u, 1u);
+
+            t.Equals(vu1.state().vf[1][0], 11.0f, "upper ADD.xy should write x against the pre-pair vf1");
+            t.Equals(vu1.state().vf[1][1], 22.0f, "upper ADD.xy should write y against the pre-pair vf1");
+            t.Equals(vu1.state().vf[1][2], 3.0f, "lower MOVE.w write should be discarded even though z is untouched");
+            t.Equals(vu1.state().vf[1][3], 4.0f, "lower MOVE.w write should be discarded in whole-register units");
+            t.Equals(vu1.state().vf[9][0], 5.0f, "lower MOVE source vf9 should be untouched on x");
+            t.Equals(vu1.state().vf[9][1], 6.0f, "lower MOVE source vf9 should be untouched on y");
+            t.Equals(vu1.state().vf[9][2], 7.0f, "lower MOVE source vf9 should be untouched on z");
+            t.Equals(vu1.state().vf[9][3], 777.0f, "lower MOVE source vf9 should be untouched on w");
+        });
+
+        tc.Run("upper-special ft destination discards the lower half write to that register", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+            writeVuInstructionPair(fx.code,
+                                   0u,
+                                   makeVuLowerSpecial(0x30u, 7u, 4u, 0u, 0xFu),  // MOVE.xyzw vf4, vf7
+                                   makeVuUpperSpecial(0x1Du, 0xCu, 4u, 6u));     // ABS.xy vf4, vf6
+
+            VU1Interpreter vu1;
+            vu1.state().vf[4][0] = 9.0f;
+            vu1.state().vf[4][1] = 9.0f;
+            vu1.state().vf[4][2] = 9.0f;
+            vu1.state().vf[4][3] = 9.0f;
+            vu1.state().vf[6][0] = -1.0f;
+            vu1.state().vf[6][1] = -2.0f;
+            vu1.state().vf[6][2] = -3.0f;
+            vu1.state().vf[6][3] = -4.0f;
+            vu1.state().vf[7][0] = 5.0f;
+            vu1.state().vf[7][1] = 6.0f;
+            vu1.state().vf[7][2] = 7.0f;
+            vu1.state().vf[7][3] = 8.0f;
+
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 0u, 1u);
+
+            t.Equals(vu1.state().vf[4][0], 1.0f, "ABS.xy should write x against the pre-pair vf6");
+            t.Equals(vu1.state().vf[4][1], 2.0f, "ABS.xy should write y against the pre-pair vf6");
+            t.Equals(vu1.state().vf[4][2], 9.0f, "lower MOVE write to vf4 z should be discarded");
+            t.Equals(vu1.state().vf[4][3], 9.0f, "lower MOVE write to vf4 w should be discarded");
+            t.Equals(vu1.state().vf[7][0], 5.0f, "lower MOVE source vf7 should be untouched on x");
+            t.Equals(vu1.state().vf[7][1], 6.0f, "lower MOVE source vf7 should be untouched on y");
+            t.Equals(vu1.state().vf[7][2], 7.0f, "lower MOVE source vf7 should be untouched on z");
+            t.Equals(vu1.state().vf[7][3], 8.0f, "lower MOVE source vf7 should be untouched on w");
+        });
+
+        tc.Run("upper half destination is guarded even when it is not one of its own operands", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+            writeVuInstructionPair(fx.code,
+                                   0u,
+                                   makeVuLowerSpecial(0x30u, 9u, 1u, 0u, 0xFu),  // MOVE.xyzw vf1, vf9
+                                   makeVuUpper(0x28u, 0xCu, 3u, 2u, 1u));        // ADD.xy vf1, vf2, vf3
+
+            VU1Interpreter vu1;
+            vu1.state().vf[1][0] = 1.0f;
+            vu1.state().vf[1][1] = 2.0f;
+            vu1.state().vf[1][2] = 3.0f;
+            vu1.state().vf[1][3] = 4.0f;
+            vu1.state().vf[2][0] = 10.0f;
+            vu1.state().vf[2][1] = 20.0f;
+            vu1.state().vf[2][2] = 30.0f;
+            vu1.state().vf[2][3] = 40.0f;
+            vu1.state().vf[3][0] = 100.0f;
+            vu1.state().vf[3][1] = 200.0f;
+            vu1.state().vf[3][2] = 300.0f;
+            vu1.state().vf[3][3] = 400.0f;
+            vu1.state().vf[9][0] = 5.0f;
+            vu1.state().vf[9][1] = 6.0f;
+            vu1.state().vf[9][2] = 7.0f;
+            vu1.state().vf[9][3] = 8.0f;
+
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 0u, 1u);
+
+            t.Equals(vu1.state().vf[1][0], 110.0f, "upper ADD.xy should write x");
+            t.Equals(vu1.state().vf[1][1], 220.0f, "upper ADD.xy should write y");
+            t.Equals(vu1.state().vf[1][2], 3.0f, "z should keep its pre-pair value, not the lower half's write");
+            t.Equals(vu1.state().vf[1][3], 4.0f, "w should keep its pre-pair value, not the lower half's write");
+            t.Equals(vu1.state().vf[9][0], 5.0f, "lower MOVE source vf9 should be untouched on x");
+            t.Equals(vu1.state().vf[9][1], 6.0f, "lower MOVE source vf9 should be untouched on y");
+            t.Equals(vu1.state().vf[9][2], 7.0f, "lower MOVE source vf9 should be untouched on z");
+            t.Equals(vu1.state().vf[9][3], 8.0f, "lower MOVE source vf9 should be untouched on w");
         });
 
         tc.Run("DIV and SQRT update the Q register from selected vector components", [](TestCase &t)

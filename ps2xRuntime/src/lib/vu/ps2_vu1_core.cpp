@@ -152,11 +152,49 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         }
         else if (decoded.lowerBeforeUpper)
         {
-            // VU upper/lower execute as a pair.  If the upper op writes a VF register
-            // that the lower op reads or also writes, Dobie runs the lower side first
-            // so it observes the old VF value and the upper write has priority.
+            // Both halves of a pair are issued concurrently, so both observe the
+            // pre-pair VF register file and the pre-pair Q, and a VF write
+            // collision resolves in favour of the upper half for the whole
+            // register - not just the fields it names.  Running the lower half
+            // first gives it the pre-pair values; the snapshots below give the
+            // upper half the same guarantee for its own VF operands and for Q,
+            // and enforce the VF write priority afterwards.  No upper
+            // instruction writes Q, so Q is restored unconditionally and needs
+            // no priority arbitration.  Inter-pair Q and P visibility latency is
+            // a separate concern and is not modelled here.
+            const uint32_t lowerWrites = vuLowerVfWriteMask(decoded.lower);
+            const uint8_t upperWriteReg = vuUpperVfWriteReg(decoded.upper);
+
+            uint8_t guarded[3];
+            uint8_t guardedCount = 0u;
+            vuAddGuardedReg(guarded, guardedCount, FS(decoded.upper), lowerWrites);
+            vuAddGuardedReg(guarded, guardedCount, FT(decoded.upper), lowerWrites);
+            vuAddGuardedReg(guarded, guardedCount, upperWriteReg, lowerWrites);
+
+            float prePair[3][4];
+            float postLower[3][4];
+            for (uint8_t i = 0u; i < guardedCount; ++i)
+                std::memcpy(prePair[i], m_state.vf[guarded[i]], sizeof(prePair[i]));
+            const float prePairQ = m_state.q;
+
             execLower(decoded.lower, vuData, dataSize, gs, memory, decoded.upper);
+
+            for (uint8_t i = 0u; i < guardedCount; ++i)
+            {
+                std::memcpy(postLower[i], m_state.vf[guarded[i]], sizeof(postLower[i]));
+                std::memcpy(m_state.vf[guarded[i]], prePair[i], sizeof(prePair[i]));
+            }
+            const float postLowerQ = m_state.q;
+            m_state.q = prePairQ;
+
             execUpper(decoded.upper);
+            m_state.q = postLowerQ;
+
+            for (uint8_t i = 0u; i < guardedCount; ++i)
+            {
+                if (guarded[i] != upperWriteReg)
+                    std::memcpy(m_state.vf[guarded[i]], postLower[i], sizeof(postLower[i]));
+            }
         }
         else
         {
