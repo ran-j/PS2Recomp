@@ -5,6 +5,4 @@
 namespace ps2_syscalls
 {
     void notifyRuntimeStop();
-    void joinAllGuestHostThreads();
-    void detachAllGuestHostThreads();
 }

@@ -2,6 +2,7 @@
 #include "Interrupt.h"
 #include "ps2_log.h"
 #include "Stubs/GS.h"
+#include "ps2_fiber.h"
 
 namespace ps2_syscalls
 {
@@ -11,17 +12,22 @@ namespace ps2_syscalls
         constexpr uint32_t kIntcVblankEnd = 3u;
         constexpr auto kVblankPeriod = std::chrono::microseconds(16667);
         constexpr int kMaxCatchupTicks = 4;
-        constexpr uint32_t kMaxIrqHandlerSteps = 4096u;
 
         std::mutex g_irq_handler_mutex;
         std::mutex g_irq_worker_mutex;
         std::condition_variable g_irq_worker_cv;
         std::mutex g_vsync_flag_mutex;
-        std::condition_variable g_vsync_cv;
+        std::vector<std::pair<int, ps2sched::FiberToken>> g_vsync_waitList;
         std::atomic<bool> g_irq_worker_stop{false};
         std::atomic<bool> g_irq_worker_running{false};
-        uint32_t g_enabled_intc_mask = 0xFFFFFFFFu;
-        uint32_t g_enabled_dmac_mask = 0xFFFFFFFFu;
+        std::thread g_irq_worker_thread; // joinable worker handle so stopInterruptWorker() can join it
+        // See Interrupt.h: read from the IRQ worker thread without holding
+        // g_irq_handler_mutex (the dispatch*HandlersForCause call sites read this
+        // while evaluating a function argument), so it must be atomic rather than
+        // mutex-protected like the rest of the handler bookkeeping.
+        std::atomic<uint32_t> g_enabled_intc_mask{0xFFFFFFFFu};
+        std::atomic<uint32_t> g_enabled_dmac_mask{0xFFFFFFFFu};
+        constexpr uint32_t kAsyncHandlerStackSize = 0x4000u; // 16 KB, one pool slot
         uint64_t g_vsync_tick_counter = 0u;
         VSyncFlagRegistration g_vsync_registration{};
     }
@@ -78,13 +84,14 @@ namespace ps2_syscalls
 
     static uint32_t getAsyncHandlerStackTop(PS2Runtime *runtime)
     {
-        constexpr uint32_t kAsyncHandlerStackSize = 0x4000u;
+        // Only reachable if the callback stack pool is exhausted or runtime is
+        // null; see kAsyncCallbackFallbackSp for the fallback.
         thread_local PS2Runtime *s_cachedRuntime = nullptr;
         thread_local uint32_t s_cachedStackTop = 0u;
 
         if (runtime == nullptr)
         {
-            return PS2_RAM_SIZE - 0x10u;
+            return kAsyncCallbackFallbackSp;
         }
 
         if (s_cachedRuntime != runtime || s_cachedStackTop == 0u)
@@ -93,236 +100,155 @@ namespace ps2_syscalls
             s_cachedStackTop = runtime->reserveAsyncCallbackStack(kAsyncHandlerStackSize, 16u);
         }
 
-        return (s_cachedStackTop != 0u) ? s_cachedStackTop : (PS2_RAM_SIZE - 0x10u);
+        return (s_cachedStackTop != 0u) ? s_cachedStackTop : kAsyncCallbackFallbackSp;
+    }
+
+    // Unified INTC/DMAC dispatch: collect handlers from `handlerMap` that are
+    // enabled for `cause`, then run them under AsyncGuestScope. `enabledMask`
+    // is the per-cause enable bitmask (g_enabled_intc_mask or g_enabled_dmac_mask).
+    // `tag` is used for exception logging ("INTC" or "DMAC").
+    //
+    // NOTE on guest-memory concurrency: the handler bodies invoked below run on
+    // the IRQ worker thread (a real, separate host thread — see AsyncGuestScope),
+    // genuinely in parallel with the main guest fiber executing on the scheduler's
+    // single guest-executor thread. If a handler and the main guest code both
+    // touch the same rdram address without the guest itself arranging a lock/
+    // semaphore, that is an intentional characteristic of this "IRQ handlers are
+    // real concurrent workers" design (it mirrors how an interrupt handler
+    // touching a shared variable requires the GUEST to synchronize, exactly as
+    // on real hardware) rather than a synchronization bug in the runtime. Do not
+    // add locking around guest rdram accesses here to silence such reports.
+    static void dispatchHandlersForCause(
+        uint8_t *rdram, PS2Runtime *runtime, uint32_t cause,
+        const std::unordered_map<int, IrqHandlerInfo> &handlerMap,
+        uint32_t enabledMask, const char *tag)
+    {
+        if (!rdram || !runtime)
+        {
+            return;
+        }
+
+        std::vector<IrqHandlerInfo> handlers;
+        {
+            std::lock_guard<std::mutex> lock(g_irq_handler_mutex);
+            if (cause < 32u && (enabledMask & (1u << cause)) == 0u)
+            {
+                return;
+            }
+
+            handlers.reserve(handlerMap.size());
+            for (const auto &kv : handlerMap)
+            {
+                const IrqHandlerInfo &info = kv.second;
+                if (!info.enabled || info.cause != cause || info.handler == 0u)
+                {
+                    continue;
+                }
+                handlers.push_back(info);
+            }
+            std::sort(handlers.begin(), handlers.end(), [](const IrqHandlerInfo &a, const IrqHandlerInfo &b)
+                      { return a.order < b.order; });
+        }
+
+        auto runHandlers = [&](uint32_t stackTop)
+        {
+            for (const IrqHandlerInfo &info : handlers)
+            {
+                if (!runtime->hasFunction(info.handler))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    R5900Context irqCtx{};
+                    SET_GPR_U32(&irqCtx, 28, info.gp);
+                    SET_GPR_U32(&irqCtx, 29, stackTop);
+                    SET_GPR_U32(&irqCtx, 31, 0u);
+                    SET_GPR_U32(&irqCtx, 4, cause);
+                    SET_GPR_U32(&irqCtx, 5, info.arg);
+                    SET_GPR_U32(&irqCtx, 6, 0u);
+                    SET_GPR_U32(&irqCtx, 7, 0u);
+                    irqCtx.pc = info.handler;
+
+                    while (irqCtx.pc != 0u && runtime && !runtime->isStopRequested())
+                    {
+                        PS2Runtime::RecompiledFunction step = runtime->lookupFunction(irqCtx.pc);
+                        if (!step)
+                        {
+                            break;
+                        }
+                        step(rdram, &irqCtx, runtime);
+                    }
+                }
+                catch (const ThreadExitException &)
+                {
+                }
+                catch (const std::exception &e)
+                {
+                    static uint32_t warnCount = 0;
+                    if (warnCount < 8u)
+                    {
+                        std::cerr << "[" << tag << "] handler 0x" << std::hex << info.handler
+                                  << " threw exception: " << e.what() << std::dec << std::endl;
+                        ++warnCount;
+                    }
+                }
+            }
+        };
+
+        // Nothing to run: skip the token borrow and the scratch reservation.
+        if (handlers.empty())
+        {
+            return;
+        }
+
+        // The INTC path only ever runs on the IRQ worker host thread, but the
+        // DMAC path is ALSO reachable synchronously from guest code:
+        // sceSifSetDma (Stubs/SIF.cpp), sceDmaSend (Stubs/Helpers/Support.h),
+        // and drainCompletedDmacHandlers (ps2_runtime.cpp) all call
+        // dispatchDmacHandlersForCause inline while servicing a guest syscall,
+        // i.e. while the calling fiber IS the guest execution slot.
+        // AsyncGuestScope's async_guest_begin() aborts by design if invoked
+        // from the guest executor thread (that guard exists to catch host
+        // workers mistakenly running there) - so only borrow the token when
+        // this call is NOT already running on the guest thread.
+        if (ps2sched::is_guest_thread())
+        {
+            // Inline on the calling fiber: a handler body can yield at a
+            // back-edge, so a shared stack would be clobbered by another fiber
+            // dispatching inline (or by a nested inline DMAC on this same
+            // fiber). Reserve a fresh per-invocation scratch stack — NOT the
+            // async pool: a per-fiber pool reservation would exhaust the pool's
+            // 32 slots and fall back onto a shared stack, reintroducing the bug.
+            // Handlers in this loop run sequentially (never nested), so one
+            // reservation for the whole dispatch is correct; guestFree fires
+            // here when the dispatch (and any yield inside it) completes.
+            GuestScratchStack handlerStack(runtime, kAsyncHandlerStackSize);
+            runHandlers(handlerStack.valid() ? handlerStack.top()
+                                             : getAsyncHandlerStackTop(runtime));
+        }
+        else
+        {
+            // Host worker (INTC) under AsyncGuestScope: cannot yield, one
+            // callback runs to completion, so the per-OS-thread pool cache is
+            // safe, including its failure fallback (kAsyncCallbackFallbackSp
+            // when the pool is exhausted or runtime is null).
+            AsyncGuestScope guestScope; // token released on any exit path
+            runHandlers(getAsyncHandlerStackTop(runtime));
+        }
     }
 
     static void dispatchIntcHandlersForCause(uint8_t *rdram, PS2Runtime *runtime, uint32_t cause)
     {
-        if (!rdram || !runtime)
-        {
-            return;
-        }
-
-        std::vector<IrqHandlerInfo> handlers;
-        {
-            std::lock_guard<std::mutex> lock(g_irq_handler_mutex);
-            if (cause < 32u && (g_enabled_intc_mask & (1u << cause)) == 0u)
-            {
-                return;
-            }
-
-            handlers.reserve(g_intcHandlers.size());
-            for (const auto &[id, info] : g_intcHandlers)
-            {
-                (void)id;
-                if (!info.enabled)
-                {
-                    continue;
-                }
-                if (info.cause != cause)
-                {
-                    continue;
-                }
-                if (info.handler == 0u)
-                {
-                    continue;
-                }
-                handlers.push_back(info);
-            }
-            std::sort(handlers.begin(), handlers.end(), [](const IrqHandlerInfo &a, const IrqHandlerInfo &b)
-                      { return a.order < b.order; });
-        }
-
-        for (const IrqHandlerInfo &info : handlers)
-        {
-            if (!runtime->hasFunction(info.handler))
-            {
-                if (cause == kIntcVblankStart)
-                {
-                    PS2_IF_AGRESSIVE_LOGS({
-                        static std::atomic<uint32_t> s_missingHandlerLogCount{0u};
-                        const uint32_t logIndex = s_missingHandlerLogCount.fetch_add(1u, std::memory_order_relaxed);
-                        if (logIndex < 32u)
-                        {
-                            auto flags = std::cout.flags();
-                            std::cout << "[INTC:missing] cause=" << cause
-                                      << " handler=0x" << std::hex << info.handler
-                                      << std::dec
-                                      << " id=" << info.id
-                                      << std::endl;
-                            std::cout.flags(flags);
-                        }
-                    });
-                }
-                continue;
-            }
-
-            try
-            {
-                R5900Context irqCtx{};
-                SET_GPR_U32(&irqCtx, 28, info.gp);
-                SET_GPR_U32(&irqCtx, 29, getAsyncHandlerStackTop(runtime));
-                SET_GPR_U32(&irqCtx, 31, 0u);
-                SET_GPR_U32(&irqCtx, 4, cause);
-                SET_GPR_U32(&irqCtx, 5, info.arg);
-                SET_GPR_U32(&irqCtx, 6, 0u);
-                SET_GPR_U32(&irqCtx, 7, 0u);
-                irqCtx.pc = info.handler;
-
-                bool reschedulePending = false;
-                uint64_t handoffBaseline = 0u;
-                uint32_t steps = 0u;
-                {
-                    PS2Runtime::GuestExecutionScope guestExecution(runtime);
-                    PS2Runtime::DeferredGuestYieldScope deferYield(reschedulePending);
-
-                    while (irqCtx.pc != 0u && runtime && !runtime->isStopRequested() && steps < kMaxIrqHandlerSteps)
-                    {
-                        PS2Runtime::RecompiledFunction step = runtime->lookupFunction(irqCtx.pc);
-                        if (!step)
-                        {
-                            break;
-                        }
-                        step(rdram, &irqCtx, runtime);
-                        ++steps;
-                    }
-                    handoffBaseline = runtime->guestExecutionHandoffEpochSnapshot();
-                }
-                if (steps >= kMaxIrqHandlerSteps)
-                {
-                    static uint32_t s_stepLimitLogCount = 0u;
-                    if (s_stepLimitLogCount < 16u)
-                    {
-                        std::cerr << "[INTC:step-limit] handler=0x" << std::hex << info.handler << " pc=0x" << irqCtx.pc << std::dec << std::endl;
-                        ++s_stepLimitLogCount;
-                    }
-                }
-                if (reschedulePending && !runtime->isStopRequested())
-                {
-                    runtime->waitForGuestExecutionHandoff(handoffBaseline);
-                }
-            }
-            catch (const ThreadExitException &)
-            {
-            }
-            catch (const std::exception &e)
-            {
-                static uint32_t warnCount = 0;
-                if (warnCount < 8u)
-                {
-                    std::cerr << "[INTC] handler 0x" << std::hex << info.handler
-                              << " threw exception: " << e.what() << std::dec << std::endl;
-                    ++warnCount;
-                }
-            }
-        }
+        dispatchHandlersForCause(rdram, runtime, cause, g_intcHandlers,
+                                  g_enabled_intc_mask.load(std::memory_order_acquire), "INTC");
     }
 
     void dispatchDmacHandlersForCause(uint8_t *rdram, PS2Runtime *runtime, uint32_t cause)
     {
-        if (!rdram || !runtime)
-        {
-            return;
-        }
-
-        std::vector<IrqHandlerInfo> handlers;
-        {
-            std::lock_guard<std::mutex> lock(g_irq_handler_mutex);
-            if (cause < 32u && (g_enabled_dmac_mask & (1u << cause)) == 0u)
-            {
-                return;
-            }
-
-            handlers.reserve(g_dmacHandlers.size());
-            for (const auto &[id, info] : g_dmacHandlers)
-            {
-                (void)id;
-                if (!info.enabled)
-                {
-                    continue;
-                }
-                if (info.cause != cause)
-                {
-                    continue;
-                }
-                if (info.handler == 0u)
-                {
-                    continue;
-                }
-                handlers.push_back(info);
-            }
-            std::sort(handlers.begin(), handlers.end(), [](const IrqHandlerInfo &a, const IrqHandlerInfo &b)
-                      { return a.order < b.order; });
-        }
-
-        for (const IrqHandlerInfo &info : handlers)
-        {
-            if (!runtime->hasFunction(info.handler))
-            {
-                continue;
-            }
-
-            try
-            {
-                R5900Context irqCtx{};
-                SET_GPR_U32(&irqCtx, 28, info.gp);
-                SET_GPR_U32(&irqCtx, 29, getAsyncHandlerStackTop(runtime));
-                SET_GPR_U32(&irqCtx, 31, 0u);
-                SET_GPR_U32(&irqCtx, 4, cause);
-                SET_GPR_U32(&irqCtx, 5, info.arg);
-                SET_GPR_U32(&irqCtx, 6, 0u);
-                SET_GPR_U32(&irqCtx, 7, 0u);
-                irqCtx.pc = info.handler;
-
-                bool reschedulePending = false;
-                uint64_t handoffBaseline = 0u;
-                uint32_t steps = 0u;
-                {
-                    PS2Runtime::GuestExecutionScope guestExecution(runtime);
-                    PS2Runtime::DeferredGuestYieldScope deferYield(reschedulePending);
-
-                    while (irqCtx.pc != 0u && runtime && !runtime->isStopRequested() &&
-                           steps < kMaxIrqHandlerSteps)
-                    {
-                        PS2Runtime::RecompiledFunction step = runtime->lookupFunction(irqCtx.pc);
-                        if (!step)
-                        {
-                            break;
-                        }
-                        step(rdram, &irqCtx, runtime);
-                        ++steps;
-                    }
-                    handoffBaseline = runtime->guestExecutionHandoffEpochSnapshot();
-                }
-                if (steps >= kMaxIrqHandlerSteps)
-                {
-                    static uint32_t s_stepLimitLogCount = 0u;
-                    if (s_stepLimitLogCount < 16u)
-                    {
-                        std::cerr << "[DMAC:step-limit] handler=0x" << std::hex << info.handler
-                                  << " pc=0x" << irqCtx.pc << std::dec << std::endl;
-                        ++s_stepLimitLogCount;
-                    }
-                }
-                if (reschedulePending && !runtime->isStopRequested())
-                {
-                    runtime->waitForGuestExecutionHandoff(handoffBaseline);
-                }
-            }
-            catch (const ThreadExitException &)
-            {
-            }
-            catch (const std::exception &e)
-            {
-                static uint32_t warnCount = 0;
-                if (warnCount < 8u)
-                {
-                    std::cerr << "[DMAC] handler 0x" << std::hex << info.handler
-                              << " threw exception: " << e.what() << std::dec << std::endl;
-                    ++warnCount;
-                }
-            }
-        }
+        dispatchHandlersForCause(rdram, runtime, cause, g_dmacHandlers,
+                                  g_enabled_dmac_mask.load(std::memory_order_acquire), "DMAC");
     }
 
     static void updateGsCsrFieldForVSync(PS2Runtime *runtime, uint64_t tickValue)
@@ -355,9 +281,23 @@ namespace ps2_syscalls
             tickValue = ++g_vsync_tick_counter;
         }
 
-        g_vsync_cv.notify_all();
+        // Wake all guest threads waiting for the next vsync tick.
+        // Called from the IRQ worker (a non-guest host thread). Use the identity-
+        // validated wakeup so a recycled tid cannot deliver this tick to the wrong
+        // fiber: each entry carries the parking fiber's generation token.
+        wakeWaiters(g_vsync_flag_mutex, g_vsync_waitList);
         updateGsCsrFieldForVSync(runtime, tickValue);
 
+        // These two writes race, by design, with guest/test code polling the
+        // same rdram words on another thread (real PS2 hardware exposes the
+        // vsync flag/tick exactly this way: a plain memory-mapped word the
+        // application polls, with no interlock). TSan reports this as a data
+        // race because it is one under the C++ memory model, but adding a
+        // mutex here would not match real hardware semantics and would still
+        // require the poller to take the same lock (it can't: it's guest code
+        // reading raw rdram, or test code via readGuestU32/readGuestU64,
+        // neither of which we can — or should — change). Left unsynchronized
+        // intentionally; do not wrap in a lock.
         if (reg.flagAddr != 0u)
         {
             writeGuestU32NoThrow(rdram, reg.flagAddr, 1u);
@@ -401,20 +341,9 @@ namespace ps2_syscalls
 
             for (int i = 0; i < ticksToProcess; ++i)
             {
-                bool reschedulePending = false;
-                uint64_t handoffBaseline = 0u;
-                {
-                    PS2Runtime::GuestExecutionScope guestExecution(runtime);
-                    PS2Runtime::DeferredGuestYieldScope deferYield(reschedulePending);
-                    const uint64_t tickValue = signalVSyncFlag(rdram, runtime);
-                    ps2_stubs::dispatchGsSyncVCallback(rdram, runtime, tickValue);
-                    dispatchIntcHandlersForCause(rdram, runtime, kIntcVblankStart);
-                    handoffBaseline = runtime->guestExecutionHandoffEpochSnapshot();
-                }
-                if (reschedulePending && !runtime->isStopRequested())
-                {
-                    runtime->waitForGuestExecutionHandoff(handoffBaseline);
-                }
+                const uint64_t tickValue = signalVSyncFlag(rdram, runtime);
+                ps2_stubs::dispatchGsSyncVCallback(rdram, runtime, tickValue);
+                dispatchIntcHandlersForCause(rdram, runtime, kIntcVblankStart);
                 std::this_thread::sleep_for(std::chrono::microseconds(500));
                 dispatchIntcHandlersForCause(rdram, runtime, kIntcVblankEnd);
             }
@@ -437,11 +366,16 @@ namespace ps2_syscalls
             return;
         }
 
+        if (g_irq_worker_thread.joinable())
+        {
+            g_irq_worker_thread.join();
+        }
+
         g_irq_worker_stop.store(false, std::memory_order_release);
         g_irq_worker_running.store(true, std::memory_order_release);
         try
         {
-            std::thread(interruptWorkerMain, rdram, runtime).detach();
+            g_irq_worker_thread = std::thread(interruptWorkerMain, rdram, runtime);
         }
         catch (...)
         {
@@ -460,35 +394,138 @@ namespace ps2_syscalls
         return g_vsync_tick_counter;
     }
 
+    void signalInterruptWorkerStop()
+    {
+        // Signal-only: no join (see Interrupt.h). The worker observes the stop
+        // flag on its next CV wait / loop check and exits; scheduler_shutdown()
+        // performs the join on the main thread via stopInterruptWorker().
+        g_irq_worker_stop.store(true, std::memory_order_release);
+        g_irq_worker_cv.notify_all();
+    }
+
     void stopInterruptWorker()
     {
         g_irq_worker_stop.store(true, std::memory_order_release);
         g_irq_worker_cv.notify_all();
-        std::unique_lock<std::mutex> lock(g_irq_worker_mutex);
-        g_irq_worker_cv.wait_for(lock, std::chrono::milliseconds(500), []()
-                                 { return !g_irq_worker_running.load(std::memory_order_acquire); });
-        g_vsync_cv.notify_all();
+
+        // Join the worker to a clean stop; it checks g_irq_worker_stop on both
+        // its CV wait and its while-condition, so it exits promptly. We must
+        // NOT hold g_irq_worker_mutex while joining (the worker takes that
+        // mutex on its CV wait — joining under it would deadlock).
+        std::thread workerToJoin;
+        {
+            std::lock_guard<std::mutex> lock(g_irq_worker_mutex);
+            if (g_irq_worker_thread.joinable())
+            {
+                workerToJoin = std::move(g_irq_worker_thread);
+            }
+        }
+        if (workerToJoin.joinable())
+        {
+            workerToJoin.join();
+        }
+
+        // Wake any guest threads waiting on vsync during shutdown.
+        wakeWaiters(g_vsync_flag_mutex, g_vsync_waitList);
     }
 
     uint64_t WaitForNextVSyncTick(uint8_t *rdram, PS2Runtime *runtime)
     {
         ensureInterruptWorkerRunning(rdram, runtime);
-        std::unique_lock<std::mutex> lock(g_vsync_flag_mutex);
-        uint64_t current = g_vsync_tick_counter;
-        uint64_t result = current;
-        waitWithGuestExecutionReleasedUntilUnlocked(
-            runtime,
-            lock,
-            [&]()
+
+        // Opaque identity of the fiber that is about to park. Non-fiber host
+        // workers get token FiberToken{} and never publish to the wait-list.
+        const ps2sched::FiberToken selfToken = ps2sched::current_fiber_token();
+        const bool onFiber = (selfToken != ps2sched::FiberToken{});
+
+        // Snapshot the tick we are waiting to advance past. A non-fiber worker
+        // never publishes to g_vsync_waitList (it cannot park), so it cannot
+        // rely on a single wake meaning "signalVSyncFlag ran"; it must instead
+        // poll this counter directly until it changes.
+        uint64_t entryTick;
+        {
+            std::lock_guard<std::mutex> lock(g_vsync_flag_mutex);
+            entryTick = g_vsync_tick_counter;
+        }
+
+        if (!onFiber)
+        {
+            // Non-fiber path (IRQ/alarm worker calling back into vsync wait, or
+            // a borrowed host worker): loop with bounded exponential backoff
+            // (mirrors WaitSema/WaitEventFlag's non-fiber Mesa loop) until
+            // g_vsync_tick_counter actually advances past entryTick or runtime
+            // stop is requested. A single block_current()+backoff step could
+            // return before the IRQ worker's next tick fired, handing back the
+            // SAME tick the caller already observed instead of truly waiting
+            // for the next one.
+            NonFiberBackoff nfBackoff;
+            for (;;)
             {
-                g_vsync_cv.wait(lock, [current, runtime]()
-                                { return g_vsync_tick_counter > current || (runtime != nullptr && runtime->isStopRequested()); });
-            },
-            [&]()
+                const ps2sched::BlockResult br = nfBackoff.wait(false);
+
+                std::lock_guard<std::mutex> lock(g_vsync_flag_mutex);
+                if (g_vsync_tick_counter != entryTick)
+                {
+                    return g_vsync_tick_counter;
+                }
+                if (runtime == nullptr || runtime->isStopRequested())
+                {
+                    return g_vsync_tick_counter;
+                }
+            }
+        }
+
+        // Publish under g_vsync_flag_mutex; arm_park after the lock is
+        // released so g_sched_mutex is never nested under it.
+        {
+            std::lock_guard<std::mutex> lock(g_vsync_flag_mutex);
+            g_vsync_waitList.emplace_back(g_currentThreadId, selfToken);
+        }
+        // Block the current fiber; signalVSyncFlag calls the validated wakeup
+        // from the IRQ worker thread to wake us. onFiber is always true here
+        // (the !onFiber path above already returned), so wait() never runs a
+        // backoff step for this park.
+        NonFiberBackoff nfBackoff;
+        const ps2sched::BlockResult br = nfBackoff.wait(true);
+
+        // A fiber woken from a real park (Parked) may have been woken by
+        // scheduler_shutdown / TerminateThread rather than a vsync tick. If so,
+        // unwind instead of returning a tick value. Mirrors WaitSema's terminate
+        // check after wake.
+        if (br == ps2sched::BlockResult::Parked)
+        {
+            std::shared_ptr<ThreadInfo> info = lookupThreadInfo(g_currentThreadId);
+            if (info && info->terminated.load())
             {
-                result = g_vsync_tick_counter;
-            });
-        return result;
+                // Drop our wait-list entry before unwinding so a recycled tid
+                // cannot inherit a stale token.
+                {
+                    std::lock_guard<std::mutex> clLock(g_vsync_flag_mutex);
+                    auto &wl = g_vsync_waitList;
+                    auto it = std::find_if(wl.begin(), wl.end(),
+                                           [selfToken](const std::pair<int, ps2sched::FiberToken> &e)
+                                           { return e.second == selfToken; });
+                    if (it != wl.end()) wl.erase(it);
+                }
+                throw ThreadExitException();
+            }
+        }
+
+        // If we were woken by something other than a vsync tick (shutdown,
+        // TerminateThread, or a wakeup during the parking window), signalVSyncFlag
+        // never drained us, so our entry is still queued. Remove it by fiber-token
+        // identity (NOT by tid, which can recycle). A real vsync wake already
+        // swapped us out, so this erase is a harmless no-op on that path.
+        std::lock_guard<std::mutex> lock(g_vsync_flag_mutex);
+        auto &wl = g_vsync_waitList;
+        auto it = std::find_if(wl.begin(), wl.end(),
+                               [selfToken](const std::pair<int, ps2sched::FiberToken> &e)
+                               { return e.second == selfToken; });
+        if (it != wl.end())
+        {
+            wl.erase(it);
+        }
+        return g_vsync_tick_counter;
     }
 
     void WaitVSyncTick(uint8_t *rdram, PS2Runtime *runtime)
@@ -518,19 +555,10 @@ namespace ps2_syscalls
         const uint32_t cause = getRegU32(ctx, 4);
         if (cause < 32u)
         {
-            std::lock_guard<std::mutex> lock(g_irq_handler_mutex);
-            g_enabled_intc_mask |= (1u << cause);
-        }
-        if (cause == kIntcVblankStart || cause == kIntcVblankEnd)
-        {
-            PS2_IF_AGRESSIVE_LOGS({
-                static std::atomic<uint32_t> s_enableLogCount{0u};
-                const uint32_t logIndex = s_enableLogCount.fetch_add(1u, std::memory_order_relaxed);
-                if (logIndex < 32u)
-                {
-                    RUNTIME_LOG("[EnableIntc] cause=" << cause);
-                }
-            });
+            // Atomic RMW: g_enabled_intc_mask is read lock-free from the IRQ
+            // worker thread (see declaration comment), so it must also be
+            // written lock-free rather than under g_irq_handler_mutex.
+            g_enabled_intc_mask.fetch_or(1u << cause, std::memory_order_acq_rel);
         }
         setReturnS32(ctx, KE_OK);
     }
@@ -545,19 +573,7 @@ namespace ps2_syscalls
         const uint32_t cause = getRegU32(ctx, 4);
         if (cause < 32u)
         {
-            std::lock_guard<std::mutex> lock(g_irq_handler_mutex);
-            g_enabled_intc_mask &= ~(1u << cause);
-        }
-        if (cause == kIntcVblankStart || cause == kIntcVblankEnd)
-        {
-            PS2_IF_AGRESSIVE_LOGS({
-                static std::atomic<uint32_t> s_disableLogCount{0u};
-                const uint32_t logIndex = s_disableLogCount.fetch_add(1u, std::memory_order_relaxed);
-                if (logIndex < 32u)
-                {
-                    RUNTIME_LOG("[DisableIntc] cause=" << cause);
-                }
-            });
+            g_enabled_intc_mask.fetch_and(~(1u << cause), std::memory_order_acq_rel);
         }
         setReturnS32(ctx, KE_OK);
     }
@@ -585,27 +601,6 @@ namespace ps2_syscalls
             handlerId = g_nextIntcHandlerId++;
             info.id = handlerId;
             g_intcHandlers[handlerId] = info;
-        }
-
-        if (info.cause == kIntcVblankStart)
-        {
-            PS2_IF_AGRESSIVE_LOGS({
-                static std::atomic<uint32_t> s_addHandlerLogCount{0u};
-                const uint32_t logIndex = s_addHandlerLogCount.fetch_add(1u, std::memory_order_relaxed);
-                if (logIndex < 32u)
-                {
-                    auto flags = std::cout.flags();
-                    std::cout << "[AddIntcHandler] cause=" << info.cause
-                              << " handler=0x" << std::hex << info.handler
-                              << " arg=0x" << info.arg
-                              << " gp=0x" << info.gp
-                              << " sp=0x" << info.sp
-                              << std::dec
-                              << " id=" << handlerId
-                              << std::endl;
-                    std::cout.flags(flags);
-                }
-            });
         }
 
         ensureInterruptWorkerRunning(rdram, runtime);
@@ -733,8 +728,8 @@ namespace ps2_syscalls
         const uint32_t cause = getRegU32(ctx, 4);
         if (cause < 32u)
         {
-            std::lock_guard<std::mutex> lock(g_irq_handler_mutex);
-            g_enabled_dmac_mask |= (1u << cause);
+            // See EnableIntc: g_enabled_dmac_mask is atomic for the same reason.
+            g_enabled_dmac_mask.fetch_or(1u << cause, std::memory_order_acq_rel);
         }
         setReturnS32(ctx, KE_OK);
     }
@@ -749,8 +744,7 @@ namespace ps2_syscalls
         const uint32_t cause = getRegU32(ctx, 4);
         if (cause < 32u)
         {
-            std::lock_guard<std::mutex> lock(g_irq_handler_mutex);
-            g_enabled_dmac_mask &= ~(1u << cause);
+            g_enabled_dmac_mask.fetch_and(~(1u << cause), std::memory_order_acq_rel);
         }
         setReturnS32(ctx, KE_OK);
     }

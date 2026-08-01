@@ -37,7 +37,6 @@ namespace ps2_stubs
             auto setD4 = runtime->lookupFunction(SETD4_CHCR_ENTRY);
             ctx->r[4] = _mm_set_epi64x(0, 1);
             {
-                PS2Runtime::GuestExecutionScope guestExecution(runtime);
                 setD4(rdram, ctx, runtime);
             }
         }

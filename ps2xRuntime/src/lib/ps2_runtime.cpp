@@ -1,4 +1,6 @@
 #include "ps2_runtime.h"
+#include "ps2_dispatch_history.h"
+#include "ps2_scheduler.h"
 #include "ps2_log.h"
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
@@ -23,7 +25,6 @@
 #include <chrono>
 #include <atomic>
 #include <thread>
-#include <unordered_map>
 #include <sstream>
 
 namespace ps2_stubs
@@ -91,6 +92,31 @@ namespace
     constexpr uint32_t kGuestHeapSafetyPad = 0x1000u;
     constexpr uint32_t kGuestHeapHardLimit = 0x01F00000u;
 
+    // -----------------------------------------------------------------------
+    // Async callback stack pool: [kAsyncCallbackStackFloor, kAsyncCallbackStackTop)
+    // — KERNEL-RESERVED memory, carved downward from the top.
+    //
+    // Placed below the ELF load base so it is disjoint from the game-chosen
+    // main stack at top-of-RAM — SDK crt0 calls SetupThread to place that
+    // stack at the top of user RAM — so
+    // host-dispatched guest callbacks (the sceGsSyncVCallback chain, INTC
+    // handlers, alarms) never interleave, via the N=1 scheduler's token
+    // handoff, with the game's own live stack frames.
+    //
+    // On real hardware these contexts run on KERNEL stacks in kernel-reserved
+    // memory — never on the interrupted user thread's stack. The EE kernel
+    // owns phys [0, 0x00100000): this runtime's kernel-mirror state sits
+    // below 0x00012000, the ELF loads at 0x00100000+, the guest heap starts
+    // at the ELF's bss end, and guest thread stacks are game-chosen addresses
+    // >= 0x00100000. [kAsyncCallbackStackFloor, kAsyncCallbackStackTop) is untouched by both sides, so
+    // callback stacks there are disjoint from ALL guest memory by
+    // construction.
+    //
+    // kAsyncCallbackStackFloor/Top themselves live in ps2_runtime.h (next to
+    // kAsyncCallbackFallbackSp) so the member default initializers below and
+    // this file's re-arm site share one definition instead of three.
+    // -----------------------------------------------------------------------
+
     constexpr uint32_t COP0_CAUSE_EXCCODE_MASK = 0x0000007Cu;
     constexpr uint32_t COP0_CAUSE_BD = 0x80000000u;
     constexpr uint32_t COP0_STATUS_EXL = 0x00000002u;
@@ -99,17 +125,12 @@ namespace
     constexpr uint32_t EXCEPTION_VECTOR_TLB_REFILL = 0x80000000u;
     constexpr uint32_t EXCEPTION_VECTOR_BOOT = 0xBFC00200u;
 
-    struct DispatchHistory
+    // Fiber-owned when running inside a fiber; per-OS-thread fallback otherwise
+    // (borrowed host workers, executor between fibers, direct non-fiber callers).
+    DispatchHistory &currentDispatchHistory()
     {
-        std::array<uint32_t, 64> pcs{};
-        uint32_t next = 0u;
-        bool wrapped = false;
-    };
-
-    thread_local DispatchHistory g_dispatchHistory;
-    thread_local std::unordered_map<PS2Runtime *, uint32_t> g_guestExecutionDepths;
-    thread_local uint32_t g_deferredGuestYieldDepth = 0u;
-    thread_local bool g_deferredGuestYieldPending = false;
+        return ps2sched::current_dispatch_history();
+    }
 
     bool computeFileCrc32(const std::string &path, uint32_t &crcOut)
     {
@@ -155,7 +176,7 @@ namespace
 
     void pushDispatchPc(uint32_t pc)
     {
-        DispatchHistory &h = g_dispatchHistory;
+        DispatchHistory &h = currentDispatchHistory();
         h.pcs[h.next] = pc;
         h.next = (h.next + 1u) % static_cast<uint32_t>(h.pcs.size());
         if (h.next == 0u)
@@ -166,7 +187,7 @@ namespace
 
     std::string formatDispatchHistory()
     {
-        const DispatchHistory &h = g_dispatchHistory;
+        const DispatchHistory &h = currentDispatchHistory();
         const uint32_t count = h.wrapped ? static_cast<uint32_t>(h.pcs.size()) : h.next;
         if (count == 0u)
         {
@@ -368,40 +389,6 @@ namespace
     }
 }
 
-PS2Runtime::GuestExecutionScope::GuestExecutionScope(PS2Runtime *runtime) noexcept
-    : m_runtime(runtime)
-{
-    if (m_runtime)
-    {
-        m_runtime->enterGuestExecution();
-    }
-}
-
-PS2Runtime::GuestExecutionScope::~GuestExecutionScope()
-{
-    if (m_runtime)
-    {
-        m_runtime->leaveGuestExecution();
-    }
-}
-
-PS2Runtime::GuestExecutionReleaseScope::GuestExecutionReleaseScope(PS2Runtime *runtime) noexcept
-    : m_runtime(runtime)
-{
-    if (m_runtime)
-    {
-        m_depth = m_runtime->releaseGuestExecution();
-    }
-}
-
-PS2Runtime::GuestExecutionReleaseScope::~GuestExecutionReleaseScope()
-{
-    if (m_runtime && m_depth != 0u)
-    {
-        m_runtime->reacquireGuestExecution(m_depth);
-    }
-}
-
 static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint32_t &outHeight)
 {
     static uint64_t s_lastPresentationTick = std::numeric_limits<uint64_t>::max();
@@ -533,8 +520,27 @@ PS2Runtime::PS2Runtime()
     m_guestHeapLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
     m_guestHeapSuggestedBase = kGuestHeapDefaultBase;
     m_guestHeapConfigured = false;
-    m_asyncCallbackStackFloor = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
-    m_asyncCallbackStackTop = PS2_RAM_SIZE;
+    // m_asyncCallbackStack (KernelStackPool) keeps its kernel-pool default
+    // member initializer here; loadELF() re-arms it for the pool's next load
+    // (see the layout comment at kAsyncCallbackStackFloor).
+
+    // Claim the reserved main-thread identity (tid 1 — see State.h's
+    // g_nextThreadId starting at 2, and run()'s create_fiber(1, 1, ...) for the
+    // guest boot fiber, both of which reserve this same id) for the host thread
+    // that constructs this runtime. g_currentThreadId == -1 here means this
+    // host thread has never been assigned a guest identity: it is neither a
+    // running guest fiber (which carries its own tid, set by the scheduler on
+    // its own dedicated executor thread — a different OS thread from this one)
+    // nor a borrowed IRQ/alarm/RPC worker (those self-assign -1 as the first
+    // statement of their thread function, before any PS2Runtime is reachable).
+    // ensureCurrentThreadInfo() lazily creates tid 1's ThreadInfo (THS_RUN,
+    // wakeupCount 0) the first time a syscall needs it, and the guest boot
+    // fiber (also tid 1, but on the separate executor thread) later finds and
+    // reuses that same g_threads entry — so tid 1 never has two ThreadInfos.
+    if (g_currentThreadId == -1)
+    {
+        g_currentThreadId = 1;
+    }
 }
 
 void PS2Runtime::setDebugUiCallbacks(DebugUiCallback initCallback,
@@ -559,7 +565,9 @@ PS2Runtime::~PS2Runtime()
     try
     {
         requestStop();
-        ps2_syscalls::detachAllGuestHostThreads();
+        // Fiber pool is cleaned up by scheduler_shutdown() in run(); there is
+        // no longer a g_hostThreads map to detach (superseded by the fiber
+        // scheduler), so no detachAllGuestHostThreads() call is needed here.
         m_iopSubsystem.reset();
         m_iopHost.reset();
 #if defined(PLATFORM_VITA)
@@ -777,7 +785,6 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     }
 
     m_cpuContext.pc = header.entry;
-    m_debugPc.store(m_cpuContext.pc, std::memory_order_relaxed);
 
     uint32_t maxLoadedRdramEnd = kGuestHeapDefaultBase;
     uint32_t moduleBase = std::numeric_limits<uint32_t>::max();
@@ -930,9 +937,9 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     }
     {
         std::lock_guard<std::mutex> lock(m_asyncCallbackStackMutex);
-        const uint32_t hardLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
-        m_asyncCallbackStackFloor = std::min(std::max(hardLimit, suggestedHeapBase), PS2_RAM_SIZE);
-        m_asyncCallbackStackTop = PS2_RAM_SIZE;
+        // Re-arm the kernel pool for this load (see the layout comment at
+        // kAsyncCallbackStackFloor); a prior run may have carved it down.
+        m_asyncCallbackStack.reset();
     }
 
     LoadedModule module;
@@ -1139,6 +1146,11 @@ PS2Runtime::MissingFunctionPolicy PS2Runtime::missingFunctionPolicy() const
 void PS2Runtime::resetMissingFunctionReportOnce()
 {
     m_missingFunctionReported.store(false, std::memory_order_release);
+}
+
+std::string PS2Runtime::debugCurrentDispatchTrace() const
+{
+    return formatDispatchHistory();
 }
 
 void PS2Runtime::reportMissingFunction(uint8_t *rdram,
@@ -1890,6 +1902,44 @@ uint32_t PS2Runtime::guestHeapLimit() const
     return m_guestHeapConfigured ? m_guestHeapLimit : m_guestHeapSuggestedBase;
 }
 
+// Carve arithmetic lifted verbatim out of reserveAsyncCallbackStack(). Two
+// clamps present in the pre-encapsulation version were confirmed dead and
+// dropped here rather than ported:
+//   - `if (top > PS2_RAM_SIZE) top = PS2_RAM_SIZE;` — top starts at
+//     kAsyncCallbackStackTop (0x00100000) and every successful carve strictly
+//     decreases it (base < top is required to succeed), so top can never
+//     approach PS2_RAM_SIZE (0x02000000); the branch never fired.
+//   - the per-call `top &= ~(kGuestHeapDefaultAlignment - 1u)` re-align —
+//     top starts 16-aligned (0x00100000) and every stored top is a `base`
+//     that was itself masked to `align`, which normalizeGuestHeapAlignment()
+//     guarantees is a power of two >= kGuestHeapDefaultAlignment (16); a
+//     value aligned to a multiple of 16 is already 16-aligned, so the
+//     re-align was always a no-op.
+uint32_t KernelStackPool::carve(uint32_t size, uint32_t align)
+{
+    if (top <= size)
+    {
+        return 0u;
+    }
+
+    uint32_t base = top - size;
+    base &= ~(align - 1u);
+    if (base < floor || base >= top)
+    {
+        return 0u;
+    }
+
+    const uint32_t reservedTop = top;
+    top = base;
+    // One line per reservation (a handful per boot): permanent evidence of
+    // where host-dispatched callback stacks live, so any future overlap with
+    // guest memory is visible in the boot log.
+    std::cerr << "[async-stack] reserved [0x" << std::hex << base
+              << ", 0x" << reservedTop << ") stackTop=0x" << (reservedTop - 0x10u)
+              << std::dec << '\n';
+    return reservedTop - 0x10u;
+}
+
 uint32_t PS2Runtime::reserveAsyncCallbackStack(uint32_t size, uint32_t alignment)
 {
     if (size == 0u)
@@ -1905,27 +1955,7 @@ uint32_t PS2Runtime::reserveAsyncCallbackStack(uint32_t size, uint32_t alignment
     }
 
     std::lock_guard<std::mutex> lock(m_asyncCallbackStackMutex);
-    uint32_t top = m_asyncCallbackStackTop;
-    if (top > PS2_RAM_SIZE)
-    {
-        top = PS2_RAM_SIZE;
-    }
-    top &= ~(kGuestHeapDefaultAlignment - 1u);
-
-    if (top <= allocSize)
-    {
-        return 0u;
-    }
-
-    uint32_t base = top - allocSize;
-    base &= ~(normalizedAlignment - 1u);
-    if (base < m_asyncCallbackStackFloor || base >= top)
-    {
-        return 0u;
-    }
-
-    m_asyncCallbackStackTop = base;
-    return top - 0x10u;
+    return m_asyncCallbackStack.carve(allocSize, normalizedAlignment);
 }
 
 void PS2Runtime::dispatchLoop(uint8_t *rdram, R5900Context *ctx)
@@ -1936,6 +1966,19 @@ void PS2Runtime::dispatchLoop(uint8_t *rdram, R5900Context *ctx)
 
     while (!isStopRequested())
     {
+        // Cooperative scheduling point. The recompiler emits the
+        // shouldPreemptGuestExecution() hook only at INTRA-function back-edges;
+        // a guest loop that spins ACROSS function dispatches (call/return
+        // chains, recover-pc storms) has its back-edge HERE, not inside any
+        // recompiled function, so without this call such a loop never reaches
+        // yield_point() and holds the guest token forever, starving host
+        // workers (interrupt worker VBlank/INTC delivery) parked in
+        // async_guest_begin(). The fast path is a counter test, so this is as
+        // cheap as the emitted per-back-edge checks. The return value is
+        // irrelevant: whether or not we yielded, ctx->pc is a clean
+        // function-boundary resume point.
+        (void)shouldPreemptGuestExecution();
+
         const uint32_t pc = ctx->pc;
 
         if (pc == lastPc)
@@ -1963,15 +2006,7 @@ void PS2Runtime::dispatchLoop(uint8_t *rdram, R5900Context *ctx)
         RecompiledFunction fn = lookupFunction(pc);
         const uint32_t dispatchedPc = pc;
         const uint32_t dispatchedRa = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0));
-
-        uint64_t handoffBaseline = 0u;
-        {
-            GuestExecutionScope guestExecution(this);
-            fn(rdram, ctx, this);
-            handoffBaseline = guestExecutionHandoffEpochSnapshot();
-        }
-
-        waitForGuestExecutionHandoff(handoffBaseline);
+        fn(rdram, ctx, this);
 
         if (ctx->pc == 0u)
         {
@@ -1995,180 +2030,9 @@ void PS2Runtime::dispatchLoop(uint8_t *rdram, R5900Context *ctx)
     }
 }
 
-void PS2Runtime::enterGuestExecution()
-{
-    uint32_t &depth = g_guestExecutionDepths[this];
-
-    if (depth != 0u)
-    {
-        m_guestExecutionMutex.lock();
-        ++depth;
-        return;
-    }
-
-    m_guestExecutionWaiters.fetch_add(1u, std::memory_order_acq_rel);
-    m_guestExecutionMutex.lock();
-    m_guestExecutionWaiters.fetch_sub(1u, std::memory_order_acq_rel);
-    depth = 1u;
-    markGuestExecutionAcquired();
-}
-
-void PS2Runtime::leaveGuestExecution()
-{
-    auto it = g_guestExecutionDepths.find(this);
-    if (it == g_guestExecutionDepths.end() || it->second == 0u)
-    {
-        return;
-    }
-
-    --it->second;
-    m_guestExecutionMutex.unlock();
-    if (it->second == 0u)
-    {
-        g_guestExecutionDepths.erase(it);
-    }
-}
-
-uint32_t PS2Runtime::releaseGuestExecution()
-{
-    auto it = g_guestExecutionDepths.find(this);
-    if (it == g_guestExecutionDepths.end() || it->second == 0u)
-    {
-        return 0u;
-    }
-
-    const uint32_t depth = it->second;
-    for (uint32_t i = 0; i < depth; ++i)
-    {
-        m_guestExecutionMutex.unlock();
-    }
-    g_guestExecutionDepths.erase(it);
-    return depth;
-}
-
-void PS2Runtime::reacquireGuestExecution(uint32_t depth)
-{
-    if (depth == 0u)
-    {
-        return;
-    }
-
-    uint32_t &heldDepth = g_guestExecutionDepths[this];
-    uint32_t remaining = depth;
-
-    if (heldDepth == 0u)
-    {
-        m_guestExecutionWaiters.fetch_add(1u, std::memory_order_acq_rel);
-        m_guestExecutionMutex.lock();
-        m_guestExecutionWaiters.fetch_sub(1u, std::memory_order_acq_rel);
-        heldDepth = 1u;
-        markGuestExecutionAcquired();
-        --remaining;
-    }
-
-    for (uint32_t i = 0; i < remaining; ++i)
-    {
-        m_guestExecutionMutex.lock();
-        ++heldDepth;
-    }
-}
-
-void PS2Runtime::markGuestExecutionAcquired()
-{
-    {
-        std::lock_guard<std::mutex> lock(m_guestExecutionHandoffMutex);
-        m_guestExecutionHandoffEpoch.fetch_add(1u, std::memory_order_acq_rel);
-    }
-    m_guestExecutionHandoffCv.notify_all();
-}
-
-void PS2Runtime::waitForGuestExecutionHandoff()
-{
-    waitForGuestExecutionHandoff(guestExecutionHandoffEpochSnapshot());
-}
-
-void PS2Runtime::waitForGuestExecutionHandoff(uint64_t baselineEpoch)
-{
-    // Lock-free fast path
-    if (m_guestExecutionWaiters.load(std::memory_order_acquire) == 0u)
-    {
-        return;
-    }
-
-    std::unique_lock<std::mutex> lock(m_guestExecutionHandoffMutex);
-
-    if (m_guestExecutionWaiters.load(std::memory_order_acquire) == 0u)
-    {
-        return;
-    }
-
-    const bool handedOff = m_guestExecutionHandoffCv.wait_for(
-        lock,
-        std::chrono::milliseconds(2),
-        [&]()
-        {
-            return m_guestExecutionWaiters.load(std::memory_order_acquire) == 0u ||
-                   m_guestExecutionHandoffEpoch.load(std::memory_order_relaxed) != baselineEpoch ||
-                   isStopRequested();
-        });
-
-    if (!handedOff)
-    {
-        m_guestExecutionHandoffTimeouts.fetch_add(1u, std::memory_order_relaxed);
-    }
-}
-
-PS2Runtime::DeferredGuestYieldScope::DeferredGuestYieldScope(bool &pendingOut) noexcept
-    : m_pendingOut(pendingOut)
-{
-    ++g_deferredGuestYieldDepth;
-}
-
-PS2Runtime::DeferredGuestYieldScope::~DeferredGuestYieldScope()
-{
-    if (--g_deferredGuestYieldDepth == 0u && g_deferredGuestYieldPending)
-    {
-        g_deferredGuestYieldPending = false;
-        m_pendingOut = true;
-    }
-}
-
-void PS2Runtime::yieldGuestExecutionAfterWake()
-{
-    if (g_deferredGuestYieldDepth != 0u)
-    {
-        g_deferredGuestYieldPending = true;
-        return;
-    }
-
-    auto it = g_guestExecutionDepths.find(this);
-    if (it == g_guestExecutionDepths.end() || it->second == 0u)
-    {
-        std::this_thread::yield();
-        return;
-    }
-
-    const uint64_t handoffEpoch = m_guestExecutionHandoffEpoch.load(std::memory_order_acquire);
-    {
-        GuestExecutionReleaseScope releaseGuestExecution(this);
-        std::unique_lock<std::mutex> lock(m_guestExecutionHandoffMutex);
-        m_guestExecutionHandoffCv.wait_for(lock, std::chrono::milliseconds(2), [&]()
-                                           { return m_guestExecutionHandoffEpoch.load(std::memory_order_acquire) != handoffEpoch; });
-    }
-}
-
 bool PS2Runtime::shouldPreemptGuestExecution()
 {
-    thread_local uint32_t s_backEdgeYieldCounter = 0u;
-    const uint32_t waiterCount = m_guestExecutionWaiters.load(std::memory_order_acquire);
-    const uint32_t yieldInterval = (waiterCount != 0u) ? 64u : 100u;
-    if (++s_backEdgeYieldCounter < yieldInterval)
-    {
-        return false;
-    }
-
-    s_backEdgeYieldCounter = 0u;
-    return true;
+    return ps2sched::yield_point();
 }
 
 uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
@@ -2344,6 +2208,11 @@ void PS2Runtime::requestStop()
     ps2_syscalls::notifyRuntimeStop();
 }
 
+void PS2Runtime::requestStopFlagOnly()
+{
+    m_stopRequested.store(true, std::memory_order_relaxed);
+}
+
 bool PS2Runtime::isStopRequested() const
 {
     return m_stopRequested.load(std::memory_order_relaxed);
@@ -2365,11 +2234,12 @@ void PS2Runtime::run()
     ps2_syscalls::initializeGuestKernelState(m_memory.getRDRAM());
     m_cpuContext.r[4] = _mm_setzero_si128();
     m_cpuContext.r[5] = _mm_setzero_si128();
+    // Bootstrap $sp at top of RAM, as the hardware loader does; the guest's
+    // crt0 immediately replaces it via SetupThread, which points $sp at the
+    // top of the game-chosen main stack. Callback stacks live in the
+    // kernel-reserved pool (see kAsyncCallbackStackFloor), not here, so this
+    // cannot collide with them.
     m_cpuContext.r[29] = _mm_set_epi64x(0, static_cast<int64_t>(PS2_RAM_SIZE - 0x10u));
-    m_debugPc.store(m_cpuContext.pc, std::memory_order_relaxed);
-    m_debugRa.store(static_cast<uint32_t>(_mm_extract_epi32(m_cpuContext.r[31], 0)), std::memory_order_relaxed);
-    m_debugSp.store(static_cast<uint32_t>(_mm_extract_epi32(m_cpuContext.r[29], 0)), std::memory_order_relaxed);
-    m_debugGp.store(static_cast<uint32_t>(_mm_extract_epi32(m_cpuContext.r[28], 0)), std::memory_order_relaxed);
 
     RUNTIME_LOG("Starting execution at address 0x" << std::hex << m_cpuContext.pc << std::dec);
 
@@ -2378,34 +2248,23 @@ void PS2Runtime::run()
     Texture2D frameTex = LoadTextureFromImage(blank);
     UnloadImage(blank);
 
-    g_activeThreads.store(1, std::memory_order_relaxed);
-    std::atomic<bool> gameThreadFinished{false};
+    // Initialize the fiber/pool scheduler.
+    ps2sched::scheduler_init();
+    ps2sched::scheduler_set_stop_callback(+[](void* p) { static_cast<PS2Runtime*>(p)->requestStopFlagOnly(); }, this);
 
-    std::thread gameThread([&]()
-                           {
-        ThreadNaming::SetCurrentThreadName("GameThread");
-        try
-        {
-            dispatchLoop(m_memory.getRDRAM(), &m_cpuContext);
-            uint32_t pc = m_debugPc.load(std::memory_order_relaxed);
-            RUNTIME_LOG("Game thread returned. PC=0x" << std::hex << pc
-                      << " RA=0x" << static_cast<uint32_t>(_mm_extract_epi32(m_cpuContext.r[31], 0)) << std::dec << std::endl);
-        }
-        catch (const std::exception &e)
-        {
-            std::cerr << "Error during program execution: " << e.what() << std::endl;
-        }
-        catch (...)
-        {
-            std::cerr << "Error during program execution: unknown exception" << std::endl;
-        }
-        g_activeThreads.fetch_sub(1, std::memory_order_relaxed);
-        gameThreadFinished.store(true, std::memory_order_release); });
+    // Create the main guest fiber (tid=1).
+    uint8_t *rdram = m_memory.getRDRAM();
+    {
+        const uint32_t entry = m_cpuContext.pc;
+        const uint32_t sp    = static_cast<uint32_t>(_mm_extract_epi32(m_cpuContext.r[29], 0));
+        const uint32_t gp    = static_cast<uint32_t>(_mm_extract_epi32(m_cpuContext.r[28], 0));
+        ps2sched::create_fiber(1, 1, entry, sp, gp, 0u, this, rdram);
+    }
 
     ps2_syscalls::EnsureVSyncWorkerRunning(m_memory.getRDRAM(), this);
 
     uint64_t tick = 0;
-    while (!isStopRequested() && g_activeThreads.load(std::memory_order_relaxed) > 0)
+    while (!isStopRequested())
     {
         PS2_IF_AGRESSIVE_LOGS({
             tick++;
@@ -2474,54 +2333,9 @@ void PS2Runtime::run()
 
     requestStop();
 
-    const auto joinDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    while (!gameThreadFinished.load(std::memory_order_acquire) &&
-           std::chrono::steady_clock::now() < joinDeadline)
-    {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-
-    if (gameThread.joinable())
-    {
-        if (gameThreadFinished.load(std::memory_order_acquire))
-        {
-            gameThread.join();
-        }
-        else
-        {
-            std::cerr << "[run] game thread did not stop within timeout; detaching" << std::endl;
-            gameThread.detach();
-        }
-    }
-
-    const auto workerDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);
-    while (g_activeThreads.load(std::memory_order_relaxed) > 0 &&
-           std::chrono::steady_clock::now() < workerDeadline)
-    {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-
-    if (g_activeThreads.load(std::memory_order_relaxed) > 0)
-    {
-        requestStop();
-        const auto finalWorkerDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);
-        while (g_activeThreads.load(std::memory_order_relaxed) > 0 &&
-               std::chrono::steady_clock::now() < finalWorkerDeadline)
-        {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-    }
-
-    if (g_activeThreads.load(std::memory_order_relaxed) == 0)
-    {
-        ps2_syscalls::joinAllGuestHostThreads();
-    }
-    else
-    {
-        std::cerr << "[run] guest host threads did not stop within timeout; detaching remaining worker threads"
-                  << std::endl;
-        ps2_syscalls::detachAllGuestHostThreads();
-    }
+    // Signal all guest fibers to stop and join the pool threads.
+    ps2sched::scheduler_shutdown();
+    ps2sched::scheduler_set_stop_callback(nullptr, nullptr);
 
     if (m_debugUiInitialized && m_debugUiShutdownCallback)
     {
@@ -2530,12 +2344,4 @@ void PS2Runtime::run()
     }
     UnloadTexture(frameTex);
     CloseWindow();
-
-    const int remainingThreads = g_activeThreads.load(std::memory_order_relaxed);
-    RUNTIME_LOG("[run] exiting loop, activeThreads=" << remainingThreads);
-    if (remainingThreads > 0)
-    {
-        std::cerr << "[run] warning: " << remainingThreads
-                  << " guest worker thread(s) still active during shutdown." << std::endl;
-    }
 }

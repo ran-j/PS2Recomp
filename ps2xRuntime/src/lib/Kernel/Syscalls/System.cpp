@@ -1,5 +1,6 @@
 #include "Common.h"
 #include "System.h"
+#include "ps2_syscall_override_state.h"
 
 namespace ps2_syscalls
 {
@@ -435,7 +436,17 @@ namespace ps2_syscalls
         const uint32_t overridePc = ctx->pc;
         const uint32_t overrideRa = getRegU32(ctx, 31);
 
-        thread_local std::vector<uint32_t> s_activeSyscallOverrides;
+        // Reentrancy guard scoped to the CALLING guest context. On a fiber (the
+        // N=1 executor) this resolves to the fiber's OWN stack, so a fiber parked
+        // mid-override never marks the syscall active for another fiber, and the
+        // pop_back below always removes THIS fiber's entry (push/pop is LIFO on
+        // one fiber's call chain). Host workers and direct non-fiber callers
+        // (e.g. the kernel-test main thread) use a PERSISTENT per-OS-thread
+        // fallback: each runs its override chain to completion without yielding,
+        // so a per-OS-thread stack is exactly right and still catches genuine
+        // single-context self-recursion (the 0x83 recursive-override case).
+        SyscallOverrideStack &overrideState = ps2sched::current_active_syscall_overrides();
+        std::vector<uint32_t> &s_activeSyscallOverrides = overrideState.active;
         if (std::find(s_activeSyscallOverrides.begin(), s_activeSyscallOverrides.end(), syscallNumber) != s_activeSyscallOverrides.end())
         {
             static std::atomic<uint32_t> s_reentrantLogs{0u};

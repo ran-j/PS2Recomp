@@ -4,6 +4,7 @@
 #include "ps2_syscalls.h"
 #include "ps2_stubs.h"
 
+#include <atomic>
 #include <chrono>
 #include <array>
 #include <cstdint>
@@ -51,9 +52,14 @@ namespace
     constexpr uint32_t TSW_SEMA = 2u;
     constexpr uint32_t TSW_EVENT = 3u;
 
-    constexpr uint32_t K_EVENT_WAIT_READY_ADDR = 0x1800u;
-    constexpr uint32_t K_EVENT_WAIT_GATE_ADDR = 0x1804u;
-    constexpr uint32_t K_TERMINATE_SEMA_WAIT_READY_ADDR = 0x1810u;
+    // waitEventAfterSuspendHandler runs on a guest fiber thread while the test
+    // body polls from the host test thread; these rendezvous flags must be
+    // atomics with acquire/release ordering rather than plain rdram words — a
+    // plain memcpy poll across that thread boundary is a data race even though
+    // the two threads never touch memory at the same instant.
+    std::atomic<uint32_t> gEventWaitReady{0};
+    std::atomic<uint32_t> gEventWaitGate{0};
+    std::atomic<uint32_t> gTerminateSemaWaitReady{0};
 
     struct EeThreadStatus
     {
@@ -196,8 +202,8 @@ namespace
             return;
         }
 
-        writeGuestU32(rdram, K_EVENT_WAIT_READY_ADDR, 1u);
-        while (readGuestU32(rdram, K_EVENT_WAIT_GATE_ADDR) == 0u)
+        gEventWaitReady.store(1u, std::memory_order_release);
+        while (gEventWaitGate.load(std::memory_order_acquire) == 0u)
         {
             if (runtime && runtime->isStopRequested())
             {
@@ -223,7 +229,7 @@ namespace
             return;
         }
 
-        writeGuestU32(rdram, K_TERMINATE_SEMA_WAIT_READY_ADDR, 1u);
+        gTerminateSemaWaitReady.store(1u, std::memory_order_release);
         WaitSema(rdram, ctx, runtime);
         ctx->pc = 0u;
     }
@@ -692,7 +698,7 @@ void register_ps2_runtime_kernel_tests()
                          "sub-case H: count must be exactly 0 after single token consumed (not -1)");
             }
 
-            // Sub-case I: blocking WaitSema woken by SignalSema returns sid (the DQ8 scenario).
+            // Sub-case I: blocking WaitSema woken by SignalSema returns sid (the sid-on-success wake scenario).
             // init=0 forces the worker to block; SignalSema uses cv.notify_one() (not
             // ReleaseWaitThread), so the worker needs no g_currentThreadId identity.
             {
@@ -757,6 +763,13 @@ void register_ps2_runtime_kernel_tests()
 
         tc.Run("WaitEventFlag preserves waitsuspend state when a suspended thread blocks", [](TestCase &t)
         {
+            // StartThread enqueues a guest fiber; nothing executes it unless the
+            // fiber scheduler's executor thread is running, so this test must
+            // bracket itself with scheduler_init()/scheduler_shutdown() like the
+            // Scheduler* suites do.
+            notifyRuntimeStop();
+            ps2sched::scheduler_init();
+
             TestEnv env;
 
             constexpr uint32_t kEventParamAddr = 0x1600u;
@@ -768,8 +781,8 @@ void register_ps2_runtime_kernel_tests()
                 0u
             };
             std::memcpy(env.rdram.data() + kEventParamAddr, eventParam, sizeof(eventParam));
-            writeGuestU32(env.rdram.data(), K_EVENT_WAIT_READY_ADDR, 0u);
-            writeGuestU32(env.rdram.data(), K_EVENT_WAIT_GATE_ADDR, 0u);
+            gEventWaitReady.store(0u, std::memory_order_release);
+            gEventWaitGate.store(0u, std::memory_order_release);
 
             R5900Context createEventCtx{};
             setRegU32(createEventCtx, 4, kEventParamAddr);
@@ -802,7 +815,7 @@ void register_ps2_runtime_kernel_tests()
 
             const bool ready = waitUntil([&]()
             {
-                return readGuestU32(env.rdram.data(), K_EVENT_WAIT_READY_ADDR) == 1u;
+                return gEventWaitReady.load(std::memory_order_acquire) == 1u;
             }, std::chrono::milliseconds(200));
             t.IsTrue(ready, "waiter thread should reach the suspend gate before blocking");
 
@@ -810,7 +823,7 @@ void register_ps2_runtime_kernel_tests()
             SuspendThread(env.rdram.data(), &env.ctx, &env.runtime);
             t.Equals(getRegS32(env.ctx, 2), KE_OK, "SuspendThread should succeed for the running waiter");
 
-            writeGuestU32(env.rdram.data(), K_EVENT_WAIT_GATE_ADDR, 1u);
+            gEventWaitGate.store(1u, std::memory_order_release);
 
             const bool waiting = waitUntil([&]()
             {
@@ -840,22 +853,26 @@ void register_ps2_runtime_kernel_tests()
             SetEventFlag(env.rdram.data(), &signalCtx, &env.runtime);
             t.Equals(getRegS32(signalCtx, 2), KE_OK, "SetEventFlag should wake the waiting thread");
 
-            const bool suspended = waitUntil([&]()
+            // Fiber-scheduler semantics: a wakeup that arrives while the fiber is
+            // suspended is deferred by the suspendCount gate — the fiber cannot run
+            // (or update its own wait bookkeeping) until ResumeThread, so the thread
+            // remains THS_WAITSUSPEND here. (The original EE kernel moved the TCB to
+            // THS_SUSPEND as soon as the wait was released; the cooperative fiber
+            // model applies that transition when the resumed fiber re-checks its
+            // now-satisfied wait — see the SchedulerProtocol suspend/resume tests.)
             {
                 R5900Context statusCtx{};
                 setRegU32(statusCtx, 4, static_cast<uint32_t>(tid));
                 setRegU32(statusCtx, 5, K_STATUS_ADDR);
                 ReferThreadStatus(env.rdram.data(), &statusCtx, &env.runtime);
-                if (getRegS32(statusCtx, 2) != KE_OK)
-                {
-                    return false;
-                }
+                t.Equals(getRegS32(statusCtx, 2), KE_OK,
+                         "ReferThreadStatus should succeed after SetEventFlag");
 
                 EeThreadStatus status{};
                 std::memcpy(&status, env.rdram.data() + K_STATUS_ADDR, sizeof(status));
-                return status.status == THS_SUSPEND && status.waitType == 0u;
-            }, std::chrono::milliseconds(200));
-            t.IsTrue(suspended, "after wake, a still-suspended waiter should move to THS_SUSPEND");
+                t.Equals(status.status, THS_WAITSUSPEND,
+                         "a suspended waiter stays THS_WAITSUSPEND until ResumeThread lifts the suspend gate");
+            }
 
             setRegU32(env.ctx, 4, static_cast<uint32_t>(tid));
             ResumeThread(env.rdram.data(), &env.ctx, &env.runtime);
@@ -885,10 +902,20 @@ void register_ps2_runtime_kernel_tests()
             setRegU32(env.ctx, 4, static_cast<uint32_t>(tid));
             DeleteThread(env.rdram.data(), &env.ctx, &env.runtime);
             t.Equals(getRegS32(env.ctx, 2), KE_OK, "DeleteThread should clean up the waiter thread");
+
+            ps2sched::scheduler_shutdown();
+            env.runtime.requestStop();
+            notifyRuntimeStop();
         });
 
         tc.Run("TerminateThread unwinds semaphore wait as a normal thread exit", [](TestCase &t)
         {
+            // Bracket with scheduler_init()/scheduler_shutdown() so the enqueued
+            // guest fiber runs (see "WaitEventFlag preserves waitsuspend
+            // state..." above).
+            notifyRuntimeStop();
+            ps2sched::scheduler_init();
+
             TestEnv env;
 
             constexpr uint32_t kWaitThreadEntry = 0x00261000u;
@@ -920,7 +947,7 @@ void register_ps2_runtime_kernel_tests()
                 0u
             };
 
-            writeGuestU32(env.rdram.data(), K_TERMINATE_SEMA_WAIT_READY_ADDR, 0u);
+            gTerminateSemaWaitReady.store(0u, std::memory_order_release);
             writeGuestWords(env.rdram.data(), K_PARAM_ADDR, threadParam, std::size(threadParam));
             setRegU32(env.ctx, 4, K_PARAM_ADDR);
             CreateThread(env.rdram.data(), &env.ctx, &env.runtime);
@@ -937,7 +964,7 @@ void register_ps2_runtime_kernel_tests()
 
             const bool waiting = waitUntil([&]()
             {
-                if (readGuestU32(env.rdram.data(), K_TERMINATE_SEMA_WAIT_READY_ADDR) != 1u)
+                if (gTerminateSemaWaitReady.load(std::memory_order_acquire) != 1u)
                 {
                     return false;
                 }
@@ -984,6 +1011,10 @@ void register_ps2_runtime_kernel_tests()
             setRegU32(env.ctx, 4, static_cast<uint32_t>(sid));
             DeleteSema(env.rdram.data(), &env.ctx, &env.runtime);
             t.Equals(getRegS32(env.ctx, 2), sid, "DeleteSema should return sid while cleaning up the waiter semaphore");
+
+            ps2sched::scheduler_shutdown();
+            env.runtime.requestStop();
+            notifyRuntimeStop();
         });
 
         tc.Run("setup heap and allocator primitives track end-of-heap", [](TestCase &t)

@@ -50,6 +50,18 @@ PS2-specific 128-bit MMI instructions and VU0 macro mode instructions are suppor
 ## Instruction Patching
 You can patch specific instructions in the recompiled code to fix game issues or implement custom behavior.
 
+## Threading model
+
+Guest threads run as cooperative fibers on a single host executor thread
+(matching the real EE's single-core scheduling), not on concurrent host
+threads. See `ps2xRuntime/include/ps2_scheduler.h` for the API and design notes.
+
+The fiber backend is selected by platform: ucontext (Linux/macOS, default),
+Win32 Fibers (`_WIN32`), or SceFiber (`PLATFORM_VITA`). Build with
+`-DPS2X_FIBER_PTHREAD=ON` for the pthread backend required by ThreadSanitizer,
+and `-DPS2X_SANITIZE=thread|address` to enable sanitizers on targets that link
+`ps2_runtime` (`thread` requires the pthread backend).
+
 ## Limitations
 
 * Graphics and sound output require external implementations
