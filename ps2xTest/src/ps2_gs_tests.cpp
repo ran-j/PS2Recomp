@@ -3,6 +3,7 @@
 #include "ps2_runtime.h"
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
+#include "runtime/ps2_gs_common.h"
 #include "runtime/ps2_gs_gpu.h"
 #include "runtime/ps2_gs_memory.h"
 #include "runtime/ps2_gs_psmct32.h"
@@ -3066,6 +3067,189 @@ void register_ps2_gs_tests()
             std::memcpy(&pixel, vram.data(), sizeof(pixel));
             t.Equals(pixel, 0xAB563412u,
                      "AFAIL=RGB_ONLY should update RGB while preserving destination alpha");
+        });
+
+        tc.Run("GS alpha test AFAIL Z-buffer-only writes depth but not color", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            constexpr uint32_t kFbw = 1u;
+            constexpr uint32_t kZbp = 1u;         // ZBUF page, distinct from the color page
+            const uint32_t zBlock = GSInternal::framePageBaseToBlock(kZbp);
+
+            constexpr uint32_t kColorSentinel = 0xAB030201u;
+            constexpr uint32_t kZSentinel = 0x11111111u;
+            constexpr uint32_t kDrawnZ = 0x12345678u;
+
+            std::memcpy(vram.data(), &kColorSentinel, sizeof(kColorSentinel));
+            gs.WriteVram(GS_PSM_Z32, zBlock, kFbw, 0u, 0u, kZSentinel);
+
+            constexpr uint64_t kFrame =
+                (0ull << 0) |
+                (1ull << 16) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            const uint64_t kZbuf = static_cast<uint64_t>(kZbp) << 0; // ZBP=1, PSM nibble=0 (Z32), ZMSK=0
+            constexpr uint64_t kScissor =
+                (0ull << 0) |
+                (0ull << 16) |
+                (0ull << 32) |
+                (0ull << 48);
+            constexpr uint64_t kTest =
+                1ull |                  // ATE
+                (5ull << 1) |          // ATST = GEQUAL
+                (0x80ull << 4) |       // AREF
+                (2ull << 12) |          // AFAIL = ZB_ONLY
+                (1ull << 17);          // ZTST = ALWAYS
+            constexpr uint64_t kPrim =
+                static_cast<uint64_t>(GS_PRIM_POINT);
+            constexpr uint64_t kRgbaq =
+                (0x12ull << 0) |
+                (0x34ull << 8) |
+                (0x56ull << 16) |
+                (0x00ull << 24) |
+                (0x3F800000ull << 32); // q = 1.0f
+            const uint64_t kXyz2 = static_cast<uint64_t>(kDrawnZ) << 32;
+
+            gs.writeRegister(GS_REG_FRAME_1, kFrame);
+            gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
+            gs.writeRegister(GS_REG_SCISSOR_1, kScissor);
+            gs.writeRegister(GS_REG_TEST_1, kTest);
+            gs.writeRegister(GS_REG_PRIM, kPrim);
+            gs.writeRegister(GS_REG_RGBAQ, kRgbaq);
+            gs.writeRegister(GS_REG_XYZ2, kXyz2);
+
+            uint32_t pixel = 0u;
+            std::memcpy(&pixel, vram.data(), sizeof(pixel));
+            t.Equals(pixel, kColorSentinel,
+                     "AFAIL=ZB_ONLY must not write the framebuffer when the alpha test fails");
+
+            const uint32_t depthResult = gs.ReadVram(GS_PSM_Z32, zBlock, kFbw, 0u, 0u);
+            t.Equals(depthResult, kDrawnZ,
+                     "AFAIL=ZB_ONLY must still write depth when the alpha test fails");
+        });
+
+        tc.Run("GS alpha test AFAIL framebuffer-only leaves the depth buffer unwritten", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            constexpr uint32_t kFbw = 1u;
+            constexpr uint32_t kZbp = 1u;         // ZBUF page, distinct from the color page
+            const uint32_t zBlock = GSInternal::framePageBaseToBlock(kZbp);
+
+            constexpr uint32_t kColorSentinel = 0xAB030201u;
+            constexpr uint32_t kZSentinel = 0x11111111u;
+            constexpr uint32_t kDrawnZ = 0x12345678u;
+
+            std::memcpy(vram.data(), &kColorSentinel, sizeof(kColorSentinel));
+            gs.WriteVram(GS_PSM_Z32, zBlock, kFbw, 0u, 0u, kZSentinel);
+
+            constexpr uint64_t kFrame =
+                (0ull << 0) |
+                (1ull << 16) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            const uint64_t kZbuf = static_cast<uint64_t>(kZbp) << 0; // ZBP=1, PSM nibble=0 (Z32), ZMSK=0
+            constexpr uint64_t kScissor =
+                (0ull << 0) |
+                (0ull << 16) |
+                (0ull << 32) |
+                (0ull << 48);
+            constexpr uint64_t kTest =
+                1ull |                  // ATE
+                (5ull << 1) |          // ATST = GEQUAL
+                (0x80ull << 4) |       // AREF
+                (1ull << 12) |          // AFAIL = FB_ONLY
+                (1ull << 17);          // ZTST = ALWAYS
+            constexpr uint64_t kPrim =
+                static_cast<uint64_t>(GS_PRIM_POINT);
+            constexpr uint64_t kRgbaq =
+                (0x12ull << 0) |
+                (0x34ull << 8) |
+                (0x56ull << 16) |
+                (0x00ull << 24) |
+                (0x3F800000ull << 32); // q = 1.0f
+            const uint64_t kXyz2 = static_cast<uint64_t>(kDrawnZ) << 32;
+
+            gs.writeRegister(GS_REG_FRAME_1, kFrame);
+            gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
+            gs.writeRegister(GS_REG_SCISSOR_1, kScissor);
+            gs.writeRegister(GS_REG_TEST_1, kTest);
+            gs.writeRegister(GS_REG_PRIM, kPrim);
+            gs.writeRegister(GS_REG_RGBAQ, kRgbaq);
+            gs.writeRegister(GS_REG_XYZ2, kXyz2);
+
+            uint32_t pixel = 0u;
+            std::memcpy(&pixel, vram.data(), sizeof(pixel));
+            t.Equals(pixel, 0x00563412u,
+                     "AFAIL=FB_ONLY must write the framebuffer when the alpha test fails");
+
+            const uint32_t depthResult = gs.ReadVram(GS_PSM_Z32, zBlock, kFbw, 0u, 0u);
+            t.Equals(depthResult, kZSentinel,
+                     "AFAIL=FB_ONLY must NOT write depth when the alpha test fails");
+        });
+
+        tc.Run("GS alpha test AFAIL RGB-only leaves the depth buffer unwritten", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            constexpr uint32_t kFbw = 1u;
+            constexpr uint32_t kZbp = 1u;         // ZBUF page, distinct from the color page
+            const uint32_t zBlock = GSInternal::framePageBaseToBlock(kZbp);
+
+            constexpr uint32_t kColorSentinel = 0xAB030201u;
+            constexpr uint32_t kZSentinel = 0x11111111u;
+            constexpr uint32_t kDrawnZ = 0x12345678u;
+
+            std::memcpy(vram.data(), &kColorSentinel, sizeof(kColorSentinel));
+            gs.WriteVram(GS_PSM_Z32, zBlock, kFbw, 0u, 0u, kZSentinel);
+
+            constexpr uint64_t kFrame =
+                (0ull << 0) |
+                (1ull << 16) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            const uint64_t kZbuf = static_cast<uint64_t>(kZbp) << 0; // ZBP=1, PSM nibble=0 (Z32), ZMSK=0
+            constexpr uint64_t kScissor =
+                (0ull << 0) |
+                (0ull << 16) |
+                (0ull << 32) |
+                (0ull << 48);
+            constexpr uint64_t kTest =
+                1ull |                  // ATE
+                (5ull << 1) |          // ATST = GEQUAL
+                (0x80ull << 4) |       // AREF
+                (3ull << 12) |          // AFAIL = RGB_ONLY
+                (1ull << 17);          // ZTST = ALWAYS
+            constexpr uint64_t kPrim =
+                static_cast<uint64_t>(GS_PRIM_POINT);
+            constexpr uint64_t kRgbaq =
+                (0x12ull << 0) |
+                (0x34ull << 8) |
+                (0x56ull << 16) |
+                (0x00ull << 24) |
+                (0x3F800000ull << 32); // q = 1.0f
+            const uint64_t kXyz2 = static_cast<uint64_t>(kDrawnZ) << 32;
+
+            gs.writeRegister(GS_REG_FRAME_1, kFrame);
+            gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
+            gs.writeRegister(GS_REG_SCISSOR_1, kScissor);
+            gs.writeRegister(GS_REG_TEST_1, kTest);
+            gs.writeRegister(GS_REG_PRIM, kPrim);
+            gs.writeRegister(GS_REG_RGBAQ, kRgbaq);
+            gs.writeRegister(GS_REG_XYZ2, kXyz2);
+
+            uint32_t pixel = 0u;
+            std::memcpy(&pixel, vram.data(), sizeof(pixel));
+            t.Equals(pixel, 0xAB563412u,
+                     "AFAIL=RGB_ONLY must write RGB and preserve destination alpha when the alpha test fails");
+
+            const uint32_t depthResult = gs.ReadVram(GS_PSM_Z32, zBlock, kFbw, 0u, 0u);
+            t.Equals(depthResult, kZSentinel,
+                     "AFAIL=RGB_ONLY must NOT write depth when the alpha test fails");
         });
 
         tc.Run("GS triangle fan subpixel quad fills rows without interior holes", [](TestCase &t)
