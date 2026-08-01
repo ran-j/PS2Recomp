@@ -3,10 +3,12 @@
 #include "ps2recomp/types.h"
 #include "ps2recomp/elf_parser.h"
 #include "ps2recomp/r5900_decoder.h"
+#include "ps2recomp/control_flow_utils.h"
 #include "ps2_runtime_calls.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
+#include <iomanip>
 #include <algorithm>
 #include <stdexcept>
 #include <filesystem>
@@ -925,7 +927,7 @@ namespace ps2recomp
         }
     }
 
-    bool PS2Recompiler::recompile()
+    bool PS2Recompiler::recompile(bool emitManifestOnly)
     {
         try
         {
@@ -982,6 +984,23 @@ namespace ps2recomp
 #endif
             }
 
+            // Emission depends only on this unit's own decoded functions and sections,
+            // never on any ingested manifest - every unit's emitted manifest is a
+            // fixpoint after one emission pass, independent of build order. Emit
+            // unconditionally, then in analysis-only mode stop before ingesting any
+            // sibling manifest so a multi-unit clean build can run every unit's
+            // analysis phase first without any sibling manifest existing yet.
+            emitExternalCallTargetManifest();
+            if (emitManifestOnly)
+            {
+                m_reporter.progress("analysis phase complete (manifest emitted)");
+                return true;
+            }
+
+            if (!loadExternalCallTargetManifests())
+            {
+                return false;
+            }
             discoverAdditionalEntryPoints();
 
             if (failedCount > 0)
@@ -1714,6 +1733,135 @@ namespace ps2recomp
         }
     }
 
+    bool PS2Recompiler::loadExternalCallTargetManifests()
+    {
+        m_ingestedExternalCallTargets.clear();
+
+        std::vector<uint32_t> merged;
+        for (const auto &manifestPath : m_config.externalCallTargetManifests)
+        {
+            std::ifstream manifestFile(manifestPath);
+            if (!manifestFile)
+            {
+                // The two-phase build (recompile(true) for every unit, then
+                // recompile(false) for every unit) removes any legitimate reason for a
+                // configured manifest to be missing by generate time, so this is a hard
+                // error rather than a warn-and-continue.
+                m_reporter.error("external-call-targets", "Failed to open manifest for reading: " + manifestPath);
+                return false;
+            }
+
+            const std::vector<uint32_t> parsed = ParseCallTargetManifest(manifestFile);
+            merged.insert(merged.end(), parsed.begin(), parsed.end());
+
+            std::ostringstream msg;
+            msg << "ingested " << parsed.size() << " external call target(s) from " << manifestPath;
+            m_reporter.progress(msg.str());
+        }
+
+        std::sort(merged.begin(), merged.end());
+        merged.erase(std::unique(merged.begin(), merged.end()), merged.end());
+        m_ingestedExternalCallTargets = std::move(merged);
+        return true;
+    }
+
+    std::vector<uint32_t> PS2Recompiler::CollectExternalCallTargets(
+        const std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions,
+        const std::vector<Function> &functions,
+        const std::vector<Section> &sections)
+    {
+        std::vector<uint32_t> externalTargets;
+
+        // Excludes only the caller's own data/bss - not its code sections. The caller
+        // cannot know a callee unit's section layout, so emission must not filter on
+        // the caller's own code sections; the one real garbage source (a mis-decoded
+        // jal landing in this unit's own data/bss) is still worth dropping. The
+        // ingesting unit's findContainingFunction is the authoritative filter.
+        auto isInsideCallerDataSection = [&](uint32_t address) -> bool
+        {
+            for (const auto &section : sections)
+            {
+                if (section.isCode || !(section.isData || section.isBSS))
+                {
+                    continue;
+                }
+
+                if (address >= section.address && address < section.address + section.size)
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        auto isInsideRecompiledFunction = [&](uint32_t address) -> bool
+        {
+            for (const auto &function : functions)
+            {
+                if (!function.isRecompiled || function.isStub || function.isSkipped)
+                {
+                    continue;
+                }
+
+                if (address >= function.start && address < function.end)
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        for (const auto &[functionStart, instructions] : decodedFunctions)
+        {
+            for (const auto &inst : instructions)
+            {
+                if (inst.opcode != OPCODE_JAL && inst.opcode != OPCODE_J)
+                {
+                    continue;
+                }
+
+                const uint32_t target = buildAbsoluteJumpTarget(inst.address, inst.target);
+                if (isInsideRecompiledFunction(target))
+                {
+                    continue;
+                }
+
+                if (isInsideCallerDataSection(target))
+                {
+                    continue;
+                }
+
+                externalTargets.push_back(target);
+            }
+        }
+
+        std::sort(externalTargets.begin(), externalTargets.end());
+        externalTargets.erase(std::unique(externalTargets.begin(), externalTargets.end()), externalTargets.end());
+
+        return externalTargets;
+    }
+
+    void PS2Recompiler::emitExternalCallTargetManifest()
+    {
+        const std::vector<uint32_t> externalTargets =
+            CollectExternalCallTargets(m_decodedFunctions, m_functions, m_sections);
+
+        std::ostringstream ss;
+        for (uint32_t target : externalTargets)
+        {
+            ss << "0x" << std::hex << std::setw(8) << std::setfill('0') << target << std::dec << "\n";
+        }
+
+        const fs::path manifestPath = fs::path(m_config.outputPath) / "external_call_targets.txt";
+        writeToFile(manifestPath.string(), ss.str());
+
+        {
+            std::ostringstream msg;
+            msg << "wrote " << externalTargets.size() << " candidate cross-unit call target(s) to " << manifestPath;
+            m_reporter.progress(msg.str());
+        }
+    }
+
     void PS2Recompiler::discoverAdditionalEntryPoints()
     {
         m_resumeEntryTargetsByOwner.clear();
@@ -1810,6 +1958,64 @@ namespace ps2recomp
 
                 auto &targets = m_resumeEntryTargetsByOwner[owner->start];
                 targets.push_back(target);
+            }
+        }
+
+        for (uint32_t target : m_ingestedExternalCallTargets)
+        {
+            const Function *owner = findContainingFunction(target);
+            if (!owner)
+            {
+                continue;
+            }
+
+            if (owner->start == target)
+            {
+                continue;
+            }
+
+            auto &targets = m_resumeEntryTargetsByOwner[owner->start];
+            targets.push_back(target);
+        }
+
+        if (m_elfParser)
+        {
+            try
+            {
+                const std::vector<uint32_t> threadEntries = DiscoverDataEmbeddedThreadEntries(
+                    m_decodedFunctions,
+                    [this](uint32_t address) { return m_elfParser->isValidAddress(address); },
+                    [this](uint32_t address) { return m_elfParser->readWord(address); });
+
+                size_t mappedThreadEntries = 0u;
+                for (uint32_t target : threadEntries)
+                {
+                    const Function *owner = findContainingFunction(target);
+                    if (!owner)
+                    {
+                        continue;
+                    }
+
+                    if (owner->start == target)
+                    {
+                        continue;
+                    }
+
+                    auto &targets = m_resumeEntryTargetsByOwner[owner->start];
+                    targets.push_back(target);
+                    ++mappedThreadEntries;
+                }
+
+                if (mappedThreadEntries > 0u)
+                {
+                    std::ostringstream msg;
+                    msg << "mapped " << mappedThreadEntries << " data-embedded thread entry point(s)";
+                    m_reporter.progress(msg.str());
+                }
+            }
+            catch (const std::exception &ex)
+            {
+                m_reporter.warning("thread-entries", std::string("failed to discover data-embedded thread entries: ") + ex.what());
             }
         }
 
@@ -2119,5 +2325,493 @@ namespace ps2recomp
     std::string PS2Recompiler::ClampFilenameLength(const std::string& baseName, const std::string& extension, std::size_t maxLength)
     {
         return clampFilenameLength(baseName, extension, maxLength);
+    }
+
+    std::vector<uint32_t> PS2Recompiler::ParseCallTargetManifest(std::istream &input)
+    {
+        std::vector<uint32_t> targets;
+        std::string line;
+
+        while (std::getline(input, line))
+        {
+            const size_t firstNonSpace = line.find_first_not_of(" \t\r\n");
+            if (firstNonSpace == std::string::npos)
+            {
+                continue;
+            }
+
+            if (line[firstNonSpace] == '#')
+            {
+                continue;
+            }
+
+            try
+            {
+                uint32_t target = static_cast<uint32_t>(std::stoul(line.substr(firstNonSpace), nullptr, 0));
+                targets.push_back(target);
+            }
+            catch (const std::exception &)
+            {
+                continue;
+            }
+        }
+
+        std::sort(targets.begin(), targets.end());
+        targets.erase(std::unique(targets.begin(), targets.end()), targets.end());
+        return targets;
+    }
+
+    namespace
+    {
+        constexpr uint32_t kSyscallCreateThreadNumber = 0x20u;
+        constexpr uint32_t kThreadEntryRegV1 = 3u;
+        constexpr uint32_t kThreadEntryRegA0 = 4u;
+        constexpr size_t kThreadWrapperScanWindow = 8u;
+        constexpr size_t kThreadSyscallBackScanWindow = 8u;
+        constexpr size_t kThreadConstantScanWindow = 12u;
+
+        bool isAddiuV1SyscallImm(const Instruction &inst)
+        {
+            return inst.opcode == OPCODE_ADDIU && inst.rt == kThreadEntryRegV1 && inst.rs == 0u &&
+                   (inst.immediate & 0xFFFFu) == kSyscallCreateThreadNumber;
+        }
+
+        bool isSyscallInstruction(const Instruction &inst)
+        {
+            return inst.opcode == OPCODE_SPECIAL && inst.function == SPECIAL_SYSCALL;
+        }
+
+        // A small fixed-capacity set of GPR numbers, used instead of a heap-allocating
+        // container since mayWriteGprs never needs to report more than two registers.
+        struct GprWriteSet
+        {
+            uint32_t regs[2] = {0u, 0u};
+            uint8_t count = 0u;
+
+            void add(uint32_t reg)
+            {
+                if (reg != 0u && count < 2u)
+                {
+                    regs[count++] = reg;
+                }
+            }
+
+            const uint32_t *begin() const { return regs; }
+            const uint32_t *end() const { return regs + count; }
+        };
+
+        // Conservative superset of the GPRs `inst` may write, keyed off opcode (+
+        // SPECIAL function) rather than the decoder-derived modifiesGPR/isStore/...
+        // booleans: the unit-test fixtures build Instructions by hand and populate
+        // only raw fields, so deriving from opcode keeps unit-test and real-ELF
+        // behavior identical. Only $v1 and $a0 are ever tracked by callers of this
+        // helper, so this need not be a disassembler-complete def model - it only has
+        // to never miss a write to one of those two registers (soundness target: a
+        // tracked register must never falsely survive a clobber; over-invalidating is
+        // always safe and only costs a missed entry).
+        GprWriteSet mayWriteGprs(const Instruction &inst)
+        {
+            GprWriteSet result;
+
+            switch (inst.opcode)
+            {
+            // Stores (including coprocessor stores) read rt, they don't write it;
+            // CACHE/PREF and coprocessor loads that target a coprocessor register
+            // (not a GPR) write nothing tracked; branches and jumps/calls write
+            // nothing tracked ($ra=31 for jal/…AL REGIMM variants is untracked).
+            case OPCODE_SB:
+            case OPCODE_SH:
+            case OPCODE_SWL:
+            case OPCODE_SW:
+            case OPCODE_SDL:
+            case OPCODE_SDR:
+            case OPCODE_SWR:
+            case OPCODE_SC:
+            case OPCODE_SCD:
+            case OPCODE_SQ:
+            case OPCODE_SD:
+            case OPCODE_SWC1:
+            case OPCODE_SWC2:
+            case OPCODE_SDC1:
+            case OPCODE_SDC2: // SQC2 aliases SDC2 (same enum value)
+            case OPCODE_CACHE:
+            case OPCODE_PREF:
+            case OPCODE_LWC1:
+            case OPCODE_LWC2:
+            case OPCODE_LDC1:
+            case OPCODE_LDC2: // LQC2 aliases LDC2 (same enum value)
+            case OPCODE_BEQ:
+            case OPCODE_BNE:
+            case OPCODE_BLEZ:
+            case OPCODE_BGTZ:
+            case OPCODE_BEQL:
+            case OPCODE_BNEL:
+            case OPCODE_BLEZL:
+            case OPCODE_BGTZL:
+            case OPCODE_REGIMM:
+            case OPCODE_J:
+            case OPCODE_JAL:
+                return result;
+
+            // I-type ALU and GPR loads write rt.
+            case OPCODE_ADDI:
+            case OPCODE_ADDIU:
+            case OPCODE_SLTI:
+            case OPCODE_SLTIU:
+            case OPCODE_ANDI:
+            case OPCODE_ORI:
+            case OPCODE_XORI:
+            case OPCODE_LUI:
+            case OPCODE_DADDI:
+            case OPCODE_DADDIU:
+            case OPCODE_LB:
+            case OPCODE_LH:
+            case OPCODE_LWL:
+            case OPCODE_LW:
+            case OPCODE_LBU:
+            case OPCODE_LHU:
+            case OPCODE_LWR:
+            case OPCODE_LWU:
+            case OPCODE_LD:
+            case OPCODE_LDL:
+            case OPCODE_LDR:
+            case OPCODE_LL:
+            case OPCODE_LLD:
+            case OPCODE_LQ:
+                result.add(inst.rt);
+                return result;
+
+            case OPCODE_SPECIAL:
+                // JR/JALR/SYSCALL/BREAK/SYNC write nothing tracked (JALR's rd is a
+                // link register, conventionally $ra=31, untracked). Every other
+                // SPECIAL form (arithmetic/logical/shift/move) writes rd; the forms
+                // that write HI/LO/SA or nothing instead (MULT/DIV/MTHI/MTLO/MTSA,
+                // traps, …) encode rd=0 in valid encodings, so {rd} degenerates to
+                // {} naturally.
+                if (inst.function == SPECIAL_JR || inst.function == SPECIAL_JALR ||
+                    inst.function == SPECIAL_SYSCALL || inst.function == SPECIAL_BREAK ||
+                    inst.function == SPECIAL_SYNC)
+                {
+                    return result;
+                }
+                result.add(inst.rd);
+                return result;
+
+            case OPCODE_COP0:
+            case OPCODE_COP1:
+            case OPCODE_COP2:
+            case OPCODE_MMI:
+                // Unknown/complex: an MFC*/CFC*/QMFC2 writes GPR rt; other forms
+                // (e.g. mtc1, which only reads rt) do not. Rather than sub-decode
+                // fmt, conservatively invalidate both rt and rd - the safe direction
+                // (a missed entry, never a false survival).
+                result.add(inst.rt);
+                result.add(inst.rd);
+                return result;
+
+            default:
+                return result;
+            }
+        }
+
+        bool mayClobber(const Instruction &inst, uint32_t reg)
+        {
+            if (reg == 0u)
+            {
+                return false;
+            }
+            for (uint32_t written : mayWriteGprs(inst))
+            {
+                if (written == reg)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // True for instructions that transfer control - used to bound the
+        // constant-propagation walk and the $v1 back-scan to a single basic block, so
+        // neither can cross a branch/jump and trust register state that does not
+        // dominate the site being analyzed.
+        bool isControlTransfer(const Instruction &inst)
+        {
+            switch (inst.opcode)
+            {
+            case OPCODE_J:
+            case OPCODE_JAL:
+            case OPCODE_BEQ:
+            case OPCODE_BNE:
+            case OPCODE_BLEZ:
+            case OPCODE_BGTZ:
+            case OPCODE_BEQL:
+            case OPCODE_BNEL:
+            case OPCODE_BLEZL:
+            case OPCODE_BGTZL:
+            case OPCODE_REGIMM:
+                return true;
+            case OPCODE_SPECIAL:
+                return inst.function == SPECIAL_JR || inst.function == SPECIAL_JALR ||
+                       inst.function == SPECIAL_SYSCALL || inst.function == SPECIAL_BREAK;
+            default:
+                return false;
+            }
+        }
+
+        struct ThreadCreateCallSite
+        {
+            const std::vector<Instruction> *instructions;
+            size_t index;
+            bool isJal;
+        };
+    }
+
+    std::vector<uint32_t> PS2Recompiler::DiscoverDataEmbeddedThreadEntries(
+        const std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions,
+        const std::function<bool(uint32_t)> &isValidAddress,
+        const std::function<uint32_t(uint32_t)> &readWord)
+    {
+        std::vector<uint32_t> results;
+
+        // Step 1: identify CreateThread (syscall 0x20) wrapper function entry points -
+        // functions whose first few instructions set $v1 = 0x20 and execute a syscall.
+        std::unordered_set<uint32_t> wrapperStarts;
+        for (const auto &[functionStart, instructions] : decodedFunctions)
+        {
+            const size_t window = std::min(instructions.size(), kThreadWrapperScanWindow);
+            bool sawAddiuV1Syscall = false;
+            bool isWrapper = false;
+            for (size_t idx = 0; idx < window; ++idx)
+            {
+                const Instruction &inst = instructions[idx];
+                if (isAddiuV1SyscallImm(inst))
+                {
+                    sawAddiuV1Syscall = true;
+                    continue;
+                }
+                // A later write to $v1 that is not itself the 0x20 materialization
+                // (e.g. a second addiu $v1,... with a different immediate) means the
+                // 0x20 seen earlier no longer holds by the time any subsequent syscall
+                // runs - reset before checking, mirroring the inline scan's clobber
+                // check in Step 2.
+                if (sawAddiuV1Syscall && mayClobber(inst, kThreadEntryRegV1))
+                {
+                    sawAddiuV1Syscall = false;
+                }
+                if (sawAddiuV1Syscall && isSyscallInstruction(inst))
+                {
+                    isWrapper = true;
+                    break;
+                }
+            }
+
+            if (isWrapper)
+            {
+                wrapperStarts.insert(functionStart);
+            }
+        }
+
+        // Step 2: find CreateThread invocation sites - either a jal to a wrapper found
+        // above, or a direct inline syscall preceded (within a small window, with no
+        // intervening write to $v1) by addiu $v1, $zero, 0x20.
+        std::vector<ThreadCreateCallSite> callSites;
+        for (const auto &[functionStart, instructions] : decodedFunctions)
+        {
+            (void)functionStart;
+            for (size_t idx = 0; idx < instructions.size(); ++idx)
+            {
+                const Instruction &inst = instructions[idx];
+
+                if (inst.opcode == OPCODE_JAL)
+                {
+                    const uint32_t target = buildAbsoluteJumpTarget(inst.address, inst.target);
+                    if (wrapperStarts.count(target) != 0u)
+                    {
+                        callSites.push_back(ThreadCreateCallSite{&instructions, idx, true});
+                    }
+                    continue;
+                }
+
+                if (!isSyscallInstruction(inst))
+                {
+                    continue;
+                }
+
+                // Note: this back-scan can double-attribute a single `addiu $v1,$zero,0x20`
+                // write to two syscall instructions if both sit within the scan window with no
+                // intervening $v1 clobber. That is harmless here: the worst case is one extra
+                // in-range candidate entry, which is de-duplicated downstream (results are sorted
+                // and uniqued, and the resume-target map dedups per owner), so no logic change.
+                const size_t lowerBound = (idx >= kThreadSyscallBackScanWindow) ? idx - kThreadSyscallBackScanWindow : 0u;
+                bool foundAddiuV1 = false;
+                for (size_t p = idx; p > lowerBound;)
+                {
+                    --p;
+                    const Instruction &prior = instructions[p];
+                    if (isAddiuV1SyscallImm(prior))
+                    {
+                        foundAddiuV1 = true;
+                        break;
+                    }
+                    // A branch/jump between the candidate materialization and the
+                    // syscall means the materialization does not dominate this site -
+                    // stop without accepting it (this instruction is also excluded
+                    // from the block, so it can't be the found materialization even
+                    // if it happened to match isAddiuV1SyscallImm).
+                    if (isControlTransfer(prior))
+                    {
+                        break;
+                    }
+                    if (mayClobber(prior, kThreadEntryRegV1))
+                    {
+                        break;
+                    }
+                }
+
+                if (foundAddiuV1)
+                {
+                    callSites.push_back(ThreadCreateCallSite{&instructions, idx, false});
+                }
+            }
+        }
+
+        // Step 3 + 4: recover the static $a0 (ThreadParam*) value at each call site by
+        // walking a small constant-propagation window forward, then read the embedded
+        // entry function pointer (word offset +4 in the ThreadParam struct) from ELF data.
+        for (const ThreadCreateCallSite &site : callSites)
+        {
+            const std::vector<Instruction> &instructions = *site.instructions;
+
+            size_t windowEnd;
+            if (site.isJal)
+            {
+                windowEnd = (site.index + 1u < instructions.size()) ? site.index + 1u : site.index;
+            }
+            else
+            {
+                if (site.index == 0u)
+                {
+                    continue;
+                }
+                windowEnd = site.index - 1u;
+            }
+            const size_t windowStart =
+                (site.index >= kThreadConstantScanWindow) ? site.index - kThreadConstantScanWindow : 0u;
+
+            // Restrict the walk to the call site's basic block (+ the retained delay
+            // slot in windowEnd): scan backward from immediately before the call for
+            // the nearest preceding control transfer. A basic block has no interior
+            // control transfer, so a jal/inline syscall can never sit mid-block - a
+            // resolved $a0 structurally cannot survive across an unrelated call, and
+            // the walk never crosses a branch/jump it doesn't dominate.
+            size_t blockStart = windowStart;
+            if (site.index > 0u)
+            {
+                size_t k = site.index - 1u;
+                while (true)
+                {
+                    if (isControlTransfer(instructions[k]))
+                    {
+                        blockStart = k + 2u; // block begins after the terminator's delay slot
+                        break;
+                    }
+                    if (k <= windowStart)
+                    {
+                        break;
+                    }
+                    --k;
+                }
+            }
+            size_t walkStart = std::max(blockStart, windowStart);
+
+            std::unordered_map<uint32_t, uint32_t> resolved;
+            auto invalidate = [&resolved](uint32_t reg)
+            {
+                if (reg != 0u)
+                {
+                    resolved.erase(reg);
+                }
+            };
+
+            for (size_t idx = walkStart; idx <= windowEnd; ++idx)
+            {
+                const Instruction &inst = instructions[idx];
+
+                if (inst.opcode == OPCODE_LUI)
+                {
+                    if (inst.rt != 0u)
+                    {
+                        resolved[inst.rt] = (inst.immediate & 0xFFFFu) << 16;
+                    }
+                    continue;
+                }
+
+                if (inst.opcode == OPCODE_ADDIU)
+                {
+                    auto srcIt = resolved.find(inst.rs);
+                    if (inst.rs != 0u && srcIt != resolved.end())
+                    {
+                        const int32_t lo = static_cast<int32_t>(static_cast<int16_t>(inst.immediate & 0xFFFFu));
+                        if (inst.rt != 0u)
+                        {
+                            resolved[inst.rt] = static_cast<uint32_t>(static_cast<int32_t>(srcIt->second) + lo);
+                        }
+                        continue;
+                    }
+                }
+                else if (inst.opcode == OPCODE_ORI)
+                {
+                    auto srcIt = resolved.find(inst.rs);
+                    if (inst.rs != 0u && srcIt != resolved.end())
+                    {
+                        const uint32_t lo = inst.immediate & 0xFFFFu;
+                        if (inst.rt != 0u)
+                        {
+                            resolved[inst.rt] = srcIt->second | lo;
+                        }
+                        continue;
+                    }
+                }
+
+                for (uint32_t reg : mayWriteGprs(inst))
+                {
+                    invalidate(reg);
+                }
+            }
+
+            auto a0It = resolved.find(kThreadEntryRegA0);
+            if (a0It == resolved.end())
+            {
+                continue;
+            }
+
+            const uint32_t paramAddress = a0It->second;
+            if (!isValidAddress(paramAddress) || !isValidAddress(paramAddress + 4u))
+            {
+                continue;
+            }
+
+            uint32_t entry = 0u;
+            try
+            {
+                entry = readWord(paramAddress + 4u);
+            }
+            catch (const std::exception &)
+            {
+                // A section can satisfy isValidAddress's byte-range check yet still have
+                // no backing data (e.g. BSS), in which case readWord throws. Skip this
+                // candidate rather than losing the whole discovery pass.
+                continue;
+            }
+
+            if (entry != 0u)
+            {
+                results.push_back(entry);
+            }
+        }
+
+        std::sort(results.begin(), results.end());
+        results.erase(std::unique(results.begin(), results.end()), results.end());
+        return results;
     }
 }

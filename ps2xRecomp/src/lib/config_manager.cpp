@@ -83,6 +83,17 @@ namespace ps2recomp
                 config.skipFunctions = toml::find<std::vector<std::string>>(data, "skip");
             }
 
+            if (general.contains("external_call_target_manifests") && general.at("external_call_target_manifests").is_array())
+            {
+                config.externalCallTargetManifests =
+                    toml::find<std::vector<std::string>>(general, "external_call_target_manifests");
+            }
+            else if (data.contains("external_call_target_manifests") && data.at("external_call_target_manifests").is_array())
+            {
+                config.externalCallTargetManifests =
+                    toml::find<std::vector<std::string>>(data, "external_call_target_manifests");
+            }
+
             if (data.contains("patches") && data.at("patches").is_table())
             {
                 const auto &patches = toml::find(data, "patches");
@@ -276,6 +287,10 @@ namespace ps2recomp
         general["patch_cache"] = config.patchCache;
         general["skip"] = config.skipFunctions;
         general["stubs"] = config.stubImplementations;
+        if (!config.externalCallTargetManifests.empty())
+        {
+            general["external_call_target_manifests"] = config.externalCallTargetManifests;
+        }
         data["general"] = general;
 
         if (!config.mmioByInstructionAddress.empty())

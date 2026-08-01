@@ -11,6 +11,8 @@
 #include <filesystem>
 #include <memory>
 #include <map>
+#include <istream>
+#include <functional>
 
 namespace ps2recomp
 {
@@ -31,7 +33,13 @@ namespace ps2recomp
         ~PS2Recompiler();
 
         bool initialize();
-        bool recompile();
+        // emitManifestOnly: run only the input-independent analysis phase (decode +
+        // emit this unit's external_call_targets.txt) and return before ingesting any
+        // sibling manifest or discovering entry points. Used to drive a two-phase
+        // multi-unit build: run every unit with emitManifestOnly=true first (any
+        // order), then run every unit normally so every configured sibling manifest
+        // is guaranteed to already exist.
+        bool recompile(bool emitManifestOnly = false);
         void generateOutput();
         void printReport() const;
 
@@ -45,6 +53,31 @@ namespace ps2recomp
             std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions);
 
         static std::string ClampFilenameLength(const std::string& baseName, const std::string& extension, std::size_t maxLength);
+
+        // Parses a call-target manifest (one "0x%08x" address per line, blank lines and
+        // '#' comments ignored) into a sorted, de-duplicated list of addresses. Shared by
+        // the production manifest loader and unit tests.
+        static std::vector<uint32_t> ParseCallTargetManifest(std::istream &input);
+
+        // Discovers thread entry function pointers embedded in static ThreadParam
+        // structs passed to the CreateThread syscall (0x20). Returns the entry-pointer
+        // values read from data memory, sorted and de-duplicated.
+        static std::vector<uint32_t> DiscoverDataEmbeddedThreadEntries(
+            const std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions,
+            const std::function<bool(uint32_t)> &isValidAddress,
+            const std::function<uint32_t(uint32_t)> &readWord);
+
+        // Collects jal/j targets that fall outside every recompiled local function
+        // range and outside this unit's own data/bss sections - candidate cross-unit
+        // call targets (including cross-ELF/overlay targets outside every one of this
+        // unit's sections) to publish in the external call-target manifest. The
+        // caller cannot know a callee unit's section layout, so this is a permissive
+        // collector: the ingesting unit's findContainingFunction is the authoritative
+        // filter. Sorted and de-duplicated.
+        static std::vector<uint32_t> CollectExternalCallTargets(
+            const std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions,
+            const std::vector<Function> &functions,
+            const std::vector<Section> &sections);
 
     private:
         ConfigManager m_configManager;
@@ -68,10 +101,16 @@ namespace ps2recomp
         std::map<uint32_t, std::string> m_generatedStubs;
         std::unordered_map<uint32_t, std::string> m_functionRenames;
         std::unordered_map<uint32_t, std::vector<uint32_t>> m_resumeEntryTargetsByOwner;
+        std::vector<uint32_t> m_ingestedExternalCallTargets;
         CodeGenerator::BootstrapInfo m_bootstrapInfo;
 
         bool decodeFunction(Function &function);
         void discoverAdditionalEntryPoints();
+        // Returns false (after reporting an error) when a configured manifest path
+        // cannot be opened - there is no legitimate reason for a configured manifest
+        // to be missing once every unit's analysis phase has run.
+        bool loadExternalCallTargetManifests();
+        void emitExternalCallTargetManifest();
         bool shouldSkipFunction(const Function &function) const;
         bool isStubFunction(const Function &function) const;
         bool generateFunctionHeader();
