@@ -2271,9 +2271,6 @@ void GS::vertexKick(bool drawing)
         }
     });
 
-    if (!drawing)
-        return;
-
     int needed = 0;
     switch (m_prim.type)
     {
@@ -2305,8 +2302,13 @@ void GS::vertexKick(bool drawing)
     if (m_vtxCount < needed)
         return;
 
-    m_rasterizer.drawPrimitive(this);
-    recordDrawDebugEventUnlocked(needed);
+    // A non-drawing kick (XYZ3/XYZF3, or the ADC bit of a PACKED vertex)
+    // suppresses only the drawing kick; the vertex queue still advances.
+    if (drawing)
+    {
+        m_rasterizer.drawPrimitive(this);
+        recordDrawDebugEventUnlocked(needed);
+    }
 
     switch (m_prim.type)
     {
