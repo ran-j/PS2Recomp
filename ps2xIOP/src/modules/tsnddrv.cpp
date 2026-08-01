@@ -13,17 +13,12 @@
 #include <string_view>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace ps2x::iop::detail
 {
     namespace
     {
-        constexpr uint32_t kCommandSid = 0x00000000u;
-        constexpr uint32_t kStateSid = 0x00000001u;
-        constexpr uint32_t kSubmitFunction = 0x00000000u;
-        constexpr uint32_t kGetStatusAddressFunction = 0x00000012u;
-        constexpr uint32_t kGetAddressTableFunction = 0x00000013u;
-
         constexpr uint32_t kStatusSize = 0x42u;
         constexpr uint32_t kSeInfoOffset = 0x00u;
         constexpr uint32_t kMidiInfoOffset = 0x0Cu;
@@ -147,6 +142,11 @@ namespace ps2x::iop::detail
             TsnddrvService(IopHost &host, TsnddrvBindings bindings)
                 : m_host(host), m_bindings(std::move(bindings))
             {
+                m_sids.push_back(m_bindings.commandSid);
+                if (m_bindings.stateSid != m_bindings.commandSid)
+                {
+                    m_sids.push_back(m_bindings.stateSid);
+                }
             }
 
             [[nodiscard]] std::string_view name() const override
@@ -169,14 +169,19 @@ namespace ps2x::iop::detail
             {
                 RpcResult result{};
 
-                if (request.sid == kCommandSid && request.function == kSubmitFunction)
+                if (request.sid != m_bindings.commandSid && request.sid != m_bindings.stateSid)
+                {
+                    return result;
+                }
+
+                if (request.sid == m_bindings.commandSid && request.function == m_bindings.submitFunction)
                 {
                     handleCommandBuffer(request.send);
                     result.handled = true;
                 }
-                else if (request.sid == kStateSid &&
-                         (request.function == kGetStatusAddressFunction ||
-                          request.function == kGetAddressTableFunction))
+                else if (request.sid == m_bindings.stateSid &&
+                         (request.function == m_bindings.getStatusFunction ||
+                          request.function == m_bindings.getAddrTableFunction))
                 {
                     uint32_t responseAddress = 0u;
                     {
@@ -185,7 +190,7 @@ namespace ps2x::iop::detail
                         {
                             return result;
                         }
-                        responseAddress = request.function == kGetStatusAddressFunction
+                        responseAddress = request.function == m_bindings.getStatusFunction
                                               ? m_state.statusAddress
                                               : m_state.addressTableAddress;
                     }
@@ -203,6 +208,70 @@ namespace ps2x::iop::detail
 
                     result.handled = true;
                     result.signalNowaitCompletion = true;
+                }
+                else if (m_bindings.streamOpenFunction != 0u &&
+                         request.function == m_bindings.streamOpenFunction)
+                {
+                    if (m_bindings.streamStateAddress != 0u)
+                    {
+                        (void)writeGuestPod(m_host, m_bindings.streamStateAddress, m_bindings.streamReadyValue);
+                    }
+                    if (request.receive.address != 0u && request.receive.size >= sizeof(uint32_t))
+                    {
+                        constexpr uint32_t zero = 0u;
+                        (void)writeGuestPod(m_host, request.receive.address, zero);
+                        result.resultAddress = request.receive.address;
+                    }
+                    result.handled = true;
+                    result.signalNowaitCompletion = true;
+                }
+                else if (m_bindings.channelConfigFunction != 0u &&
+                         request.function == m_bindings.channelConfigFunction)
+                {
+                    uint32_t channel = 0u;
+                    if (request.send.address != 0u)
+                    {
+                        (void)readGuestPod(m_host, request.send.address, channel);
+                    }
+                    if (m_bindings.channelAllocFlagTableAddress != 0u && channel < 16u)
+                    {
+                        constexpr uint32_t allocated = 1u;
+                        (void)writeGuestPod(m_host,
+                                            m_bindings.channelAllocFlagTableAddress + channel * sizeof(uint32_t),
+                                            allocated);
+                    }
+                    if (request.receive.address != 0u && request.receive.size >= sizeof(uint32_t))
+                    {
+                        constexpr uint32_t zero = 0u;
+                        (void)writeGuestPod(m_host, request.receive.address, zero);
+                        result.resultAddress = request.receive.address;
+                    }
+                    result.handled = true;
+                    result.signalNowaitCompletion = true;
+                }
+                else if (m_bindings.stopFunction != 0u && request.function == m_bindings.stopFunction)
+                {
+                    if (m_bindings.stopCompletionFlagAddress != 0u)
+                    {
+                        constexpr uint32_t stopped = 1u;
+                        (void)writeGuestPod(m_host, m_bindings.stopCompletionFlagAddress, stopped);
+                    }
+                    if (request.receive.address != 0u && request.receive.size >= sizeof(uint32_t))
+                    {
+                        constexpr uint32_t zero = 0u;
+                        (void)writeGuestPod(m_host, request.receive.address, zero);
+                        result.resultAddress = request.receive.address;
+                    }
+                    result.handled = true;
+                    result.signalNowaitCompletion = true;
+                }
+                else if (request.receive.address != 0u && request.receive.size >= sizeof(uint32_t))
+                {
+                    // Unrecognized subcommand on a service SID we own: leave the request
+                    // unhandled (so a guest-registered server function at this SID, if any,
+                    // still runs) but hand back a benign status word rather than stale/zeroed
+                    // memory, matching real hardware's tolerance of unknown subcommands.
+                    (void)writeGuestPod(m_host, request.receive.address, m_bindings.benignStatusValue);
                 }
 
                 if (result.handled)
@@ -562,7 +631,7 @@ namespace ps2x::iop::detail
             TsnddrvBindings m_bindings;
             mutable std::mutex m_mutex;
             State m_state;
-            const std::array<uint32_t, 2> m_sids = {kCommandSid, kStateSid};
+            std::vector<uint32_t> m_sids;
         };
     }
 
@@ -584,9 +653,28 @@ namespace ps2x::iop::detail
             !isPowerOfTwo(arena.tableAlignment) ||
             !isPowerOfTwo(arena.storageAlignment) ||
             arena.hdBytes == 0u || arena.sqBytes == 0u || arena.dataBytes == 0u ||
-            bindings.checksumCandidates.empty())
+            bindings.checksumCandidates.empty() ||
+            bindings.getStatusFunction == bindings.getAddrTableFunction)
         {
             throw std::invalid_argument("invalid TSNDDRV bindings");
+        }
+
+        {
+            // The optional extra subcommands (0 = disabled) must not alias the
+            // always-on submit/getStatus/getAddrTable functions or each other, or
+            // dispatch would become ambiguous/unreachable.
+            std::unordered_set<uint32_t> reserved{bindings.submitFunction,
+                                                   bindings.getStatusFunction,
+                                                   bindings.getAddrTableFunction};
+            for (const uint32_t extra : {bindings.streamOpenFunction,
+                                         bindings.channelConfigFunction,
+                                         bindings.stopFunction})
+            {
+                if (extra != 0u && !reserved.insert(extra).second)
+                {
+                    throw std::invalid_argument("colliding TSNDDRV subcommand function numbers");
+                }
+            }
         }
 
         uint64_t end = alignUp64(arena.base, arena.statusAlignment) + kStatusSize;

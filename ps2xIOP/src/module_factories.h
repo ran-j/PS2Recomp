@@ -62,6 +62,27 @@ namespace ps2x::iop::detail
         std::vector<TsnddrvChecksumTables> checksumCandidates;
         uint32_t busyFlagAddress = 0u;
         std::vector<TsnddrvCompletionRule> completionRules;
+
+        // SID + subcommand (fno) numbers this title's sound driver speaks. Defaults match
+        // the values every currently-known title uses; override per game if a title's
+        // driver registers a different service id or subcommand numbering. SID 0 is a
+        // legitimate service id here (unlike the fno fields below, these two are always
+        // considered configured).
+        uint32_t commandSid = 0x00000000u;        // service id carrying the submit-command-buffer subcommand
+        uint32_t stateSid = 0x00000001u;           // service id carrying the status/addr-table queries
+        uint32_t submitFunction = 0x00000000u;     // submit-command-buffer
+        uint32_t getStatusFunction = 0x00000012u;  // return statusAddress
+        uint32_t getAddrTableFunction = 0x00000013u; // return addressTableAddress
+
+        // Optional extra subcommands some titles' drivers expose. 0 = unused/disabled.
+        uint32_t streamOpenFunction = 0u;     // write streamReadyValue to streamStateAddress
+        uint32_t channelConfigFunction = 0u;  // set channelAllocFlagTableAddress[channel]=1 (channel from send word 0 if <16)
+        uint32_t stopFunction = 0u;           // write 1 to stopCompletionFlagAddress
+        uint32_t benignStatusValue = 0xffffff9bu; // recv[0] written for an unrecognized fno on a served sid
+        uint32_t streamStateAddress = 0u;
+        uint32_t streamReadyValue = 0u;
+        uint32_t channelAllocFlagTableAddress = 0u;
+        uint32_t stopCompletionFlagAddress = 0u;
     };
 
     struct ClFileRpcLayout

@@ -33,6 +33,16 @@ namespace ps2x::iop::detail
                     {0x002FAC20u, true, true, false},
                     {0x002FAC30u, true, true, true},
                 },
+                // RE:CVX's sound driver muxes submit on SID 0 and status/addr-table
+                // queries on SID 1, using subcommands 0x00/0x12/0x13. Carried here
+                // (rather than hardcoded in the module) so a title whose driver
+                // registers a different SID or subcommand numbering can reuse this
+                // module without editing it.
+                .commandSid = 0x00000000u,
+                .stateSid = 0x00000001u,
+                .submitFunction = 0x00000000u,
+                .getStatusFunction = 0x00000012u,
+                .getAddrTableFunction = 0x00000013u,
             };
         }
 
