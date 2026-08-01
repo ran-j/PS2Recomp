@@ -10,6 +10,8 @@
 #include "Kernel/Stubs/GS.h"
 #include "Kernel/Stubs/MPEG.h"
 #include "ps2_host_backend.h"
+#include "runtime/ps2_diag.h"
+#include "runtime/ps2_guestwatch.h"
 #include "ps2_iop_host.h"
 #include "ps2x/iop/iop_subsystem.h"
 
@@ -18,6 +20,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <chrono>
@@ -29,6 +32,33 @@
 namespace ps2_stubs
 {
     void resetSifState();
+}
+
+namespace ps2_watch
+{
+    // Out-of-line definitions for the forward decls in ps2_runtime.h. Kept
+    // here (rather than header-only in ps2_guestwatch.h) so ps2_runtime.h
+    // only needs a tiny forward declaration and never pulls in
+    // runtime/ps2_guestwatch.h -- that header is included only by this .cpp.
+    std::atomic<bool> g_writeWatchActive{false};
+
+    void onGuestWrite(uint32_t addr, uint32_t size, uint64_t lo, uint64_t hi, uint32_t pc) noexcept
+    {
+        (void)lo;
+        (void)hi;
+
+        std::lock_guard<std::mutex> lock(registryMutex());
+        const uint32_t writeEnd = addr + size;
+        for (Watch &w : registry())
+        {
+            const uint32_t watchEnd = w.addr + w.byteWidth;
+            if (addr < watchEnd && w.addr < writeEnd)
+            {
+                w.writerPc = pc;
+                w.hasWriterPc = true;
+            }
+        }
+    }
 }
 
 #define ELF_MAGIC 0x464C457F // "\x7FELF" in little endian
@@ -2373,6 +2403,18 @@ void PS2Runtime::run()
 
     RUNTIME_LOG("Starting execution at address 0x" << std::hex << m_cpuContext.pc << std::dec);
 
+    // [watch] env hook: PS2X_WATCH=ADDR[:SIZE][:LABEL][,...] arms guest-memory
+    // watches before guest code starts. Arming a watch also enables the
+    // diagnostics gate -- this turns on the FULL diagnostics stream, i.e. ALL
+    // PS2X_DIAG probe output (every [gs:*], [dma:*], [watch], etc. line),
+    // exactly as if PS2X_DIAG=1 had been set -- not just [watch] lines.
+    // Costs nothing when PS2X_WATCH is unset.
+    if (const size_t armed = ps2_watch::armWatchesFromEnv(std::getenv("PS2X_WATCH")))
+    {
+        ps2_diag::set_enabled(true);
+        PS2X_DIAG_LOG("[watch] armed " << armed << " guest-memory watch(es) from PS2X_WATCH");
+    }
+
     // A blank image to use as a framebuffer
     Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLANK);
     Texture2D frameTex = LoadTextureFromImage(blank);
@@ -2438,9 +2480,137 @@ void PS2Runtime::run()
                                                << std::endl);
             }
         });
+
+        if (ps2_diag::enabled())
+        {
+            // [gs-activity]: opt-in headline distinct from the AGRESSIVE_LOGS
+            // [run:tick] block above. Emits once on the first sign of GS
+            // activity, then at most once every 600 iterations and only
+            // while the underlying counters actually changed.
+            static bool s_anyActivitySeen = false;
+            static bool s_havePrevCounters = false;
+            static uint64_t s_activityFrame = 0;
+            static uint64_t s_prevDma = 0;
+            static uint64_t s_prevGif = 0;
+            static uint64_t s_prevGsw = 0;
+            static uint64_t s_prevVif = 0;
+
+            ++s_activityFrame;
+
+            const uint64_t curDma = m_memory.dmaStartCount();
+            const uint64_t curGif = m_memory.gifCopyCount();
+            const uint64_t curGsw = m_memory.gsWriteCount();
+            const uint64_t curVif = m_memory.vifWriteCount();
+            const GSRegisters &gsRegs = m_memory.gs();
+
+            const bool anyActivityNow = (curDma != 0u) || (curGif != 0u) || (curGsw != 0u) || (curVif != 0u);
+            const bool countersChanged = !s_havePrevCounters ||
+                                         curDma != s_prevDma || curGif != s_prevGif ||
+                                         curGsw != s_prevGsw || curVif != s_prevVif;
+
+            bool emitFirstActivity = false;
+            if (!s_anyActivitySeen && anyActivityNow)
+            {
+                s_anyActivitySeen = true;
+                emitFirstActivity = true;
+            }
+
+            const bool emitPeriodic = s_anyActivitySeen && ((s_activityFrame % 600u) == 0u) && countersChanged;
+
+            if (emitFirstActivity || emitPeriodic)
+            {
+                // NOTE: prims/imgbytes/lastfbp below are three independent relaxed
+                // loads while the GS thread updates them; the printed triple may be
+                // torn (values from slightly different instants). This is a
+                // human-read diagnostic headline, not a consistent snapshot — a torn
+                // read is acceptable and never affects control flow.
+                PS2X_DIAG_LOG("[gs-activity] frame=" << s_activityFrame
+                                                   << " dma=" << curDma
+                                                   << " gif=" << curGif
+                                                   << " gsw=" << curGsw
+                                                   << " vif=" << curVif
+                                                   << " dispfb1=0x" << std::hex << gsRegs.dispfb1
+                                                   << " dispfb2=0x" << gsRegs.dispfb2
+                                                   << " display1=0x" << gsRegs.display1
+                                                   << std::dec
+                                                   << " prims=" << m_gs.drawStatPrims()
+                                                   << " imgbytes=" << m_gs.drawStatImageBytes()
+                                                   << " lastfbp=0x" << std::hex << m_gs.drawStatLastFbp()
+                                                   << std::dec
+                                                   << (emitFirstActivity ? "  (FIRST ACTIVITY)" : ""));
+
+                // Only update the "last emitted" snapshot when a line is
+                // actually emitted, so countersChanged means "changed since
+                // the last emitted line" rather than "changed since the last
+                // loop iteration" (which could wrongly suppress a periodic
+                // line if activity paused right at the 600-frame boundary).
+                s_prevDma = curDma;
+                s_prevGif = curGif;
+                s_prevGsw = curGsw;
+                s_prevVif = curVif;
+                s_havePrevCounters = true;
+            }
+        }
+
+        // Guest-memory watch polling (~60Hz, frame-paced by this loop). Bails
+        // out immediately when no watches are registered or the gate is off.
+        ps2_watch::pollWatches(m_memory.getRDRAM());
+
         uint32_t presentWidth = FB_WIDTH;
         uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
         UploadFrame(frameTex, this, presentWidth, presentHeight);
+
+        // [STEP 6] Frame recorder: separately env-gated via PS2X_REC (not
+        // PS2X_DIAG). Dumps a PNG only when the presented frame's hash
+        // changes, so unchanged frames never touch disk.
+        static const bool s_recEnabled = ps2_diag::env_int("PS2X_REC", 0) != 0;
+        if (s_recEnabled)
+        {
+            static const int s_recInterval = std::max(1, ps2_diag::env_int("PS2X_REC_INTERVAL", 1));
+            static uint64_t s_recFrameIndex = 0;
+            static uint64_t s_recLastHash = 0;
+            static bool s_recHaveLastHash = false;
+
+            ++s_recFrameIndex;
+            if ((s_recFrameIndex % static_cast<uint64_t>(s_recInterval)) == 0u)
+            {
+                std::vector<uint8_t> recPixels;
+                uint32_t recWidth = 0u;
+                uint32_t recHeight = 0u;
+                if (m_gs.copyLatchedHostPresentationFrame(recPixels, recWidth, recHeight) &&
+                    !recPixels.empty() && recWidth != 0u && recHeight != 0u)
+                {
+                    // FNV-1a over the raw pixel bytes.
+                    uint64_t hash = 1469598103934665603ull;
+                    for (const uint8_t byteValue : recPixels)
+                    {
+                        hash ^= static_cast<uint64_t>(byteValue);
+                        hash *= 1099511628211ull;
+                    }
+
+                    if (!s_recHaveLastHash || hash != s_recLastHash)
+                    {
+                        s_recLastHash = hash;
+                        s_recHaveLastHash = true;
+
+                        // Build the Image struct manually so it points at our
+                        // own vector's storage. Raylib did not allocate this
+                        // memory, so it must NOT be freed via UnloadImage.
+                        Image recImage{};
+                        recImage.data = recPixels.data();
+                        recImage.width = static_cast<int>(recWidth);
+                        recImage.height = static_cast<int>(recHeight);
+                        recImage.mipmaps = 1;
+                        recImage.format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
+
+                        std::ostringstream recNameStream;
+                        recNameStream << "ps2x_rec_" << s_recFrameIndex << "_"
+                                      << std::hex << hash << ".png";
+                        ExportImage(recImage, recNameStream.str().c_str());
+                    }
+                }
+            }
+        }
 
         BeginDrawing();
         ClearBackground(BLACK);

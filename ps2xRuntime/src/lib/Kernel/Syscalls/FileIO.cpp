@@ -1,5 +1,6 @@
 #include "Common.h"
 #include "FileIO.h"
+#include "runtime/ps2_diag.h"
 
 namespace ps2_syscalls
 {
@@ -96,6 +97,18 @@ namespace ps2_syscalls
 
         const char *mode = translateFioMode(flags);
         RUNTIME_LOG("fioOpen: '" << hostPath << "' flags=0x" << std::hex << flags << std::dec << " mode='" << mode << "'");
+
+        if (ps2_diag::enabled())
+        {
+            static std::atomic<uint64_t> s_fioOpenCount{0};
+            const uint64_t n = s_fioOpenCount.fetch_add(1, std::memory_order_relaxed);
+            if (ps2_diag::should_log(n, 16, 200))
+            {
+                PS2X_DIAG_LOG("[fioOpen] n=" << n
+                                           << " ps2Path='" << ps2Path << "'"
+                                           << " hostPath='" << hostPath << "'");
+            }
+        }
 
         FILE *fp = ::fopen(hostPath.c_str(), mode);
         if (!fp)
@@ -235,6 +248,19 @@ namespace ps2_syscalls
                     if (bytesRead <= kVagAccumMaxBytes)
                         e.data.assign(hostBuf, hostBuf + bytesRead);
                 }
+            }
+        }
+
+        if (ps2_diag::enabled())
+        {
+            static std::atomic<uint64_t> s_fioReadCount{0};
+            const uint64_t n = s_fioReadCount.fetch_add(1, std::memory_order_relaxed);
+            if (ps2_diag::should_log(n, 16, 200))
+            {
+                PS2X_DIAG_LOG("[fioRead] n=" << n
+                                           << " fd=" << ps2Fd
+                                           << " requested=" << size
+                                           << " actual=" << bytesRead);
             }
         }
 

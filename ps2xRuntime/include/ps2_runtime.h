@@ -233,6 +233,18 @@ inline uint8_t ps2PathWatchExtractByteFromWrite(uint32_t writeAddr, uint32_t wat
     return static_cast<uint8_t>((valueHi >> ((byteIndex - 8u) * 8u)) & 0xFFu);
 }
 
+// Minimal forward declarations for the guest-memory write-watch hook. Kept
+// deliberately tiny (an atomic<bool> + one free function) so this header --
+// which recompiled units include -- never has to pull in
+// runtime/ps2_guestwatch.h. The real implementation lives in
+// runtime/ps2_guestwatch.h / ps2_runtime.cpp, which is the only translation
+// unit that includes that header.
+namespace ps2_watch
+{
+    extern std::atomic<bool> g_writeWatchActive;
+    void onGuestWrite(uint32_t addr, uint32_t size, uint64_t lo, uint64_t hi, uint32_t pc) noexcept;
+}
+
 inline void ps2TraceGuestWrite(uint8_t *rdram,
                                uint32_t guestAddr,
                                uint32_t size,
@@ -241,14 +253,19 @@ inline void ps2TraceGuestWrite(uint8_t *rdram,
                                const char *op,
                                const R5900Context *ctx)
 {
+    // Residual cost when no watch is armed: one relaxed load of a
+    // cache-resident global bool + a predicted-not-taken branch, per guest
+    // store — sitting inside the store's existing (non-special-address) fast
+    // path. No locked RMW, no I/O, no allocation. Armed only when PS2X_WATCH
+    // registered a watch (see armWatchesFromEnv); when armed, onGuestWrite
+    // takes registryMutex per matching store.
     (void)rdram;
-    (void)guestAddr;
-    (void)size;
-    (void)valueLo;
-    (void)valueHi;
     (void)op;
-    (void)ctx;
-    // TODO we dont need this anymore so on next release it will be deleted
+
+    if (ps2_watch::g_writeWatchActive.load(std::memory_order_relaxed))
+    {
+        ps2_watch::onGuestWrite(guestAddr, size, valueLo, valueHi, ctx ? ctx->pc : 0u);
+    }
 }
 
 inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
