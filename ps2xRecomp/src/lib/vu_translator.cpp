@@ -88,6 +88,8 @@ namespace ps2recomp
             }
         }
         case COP2_QMTC2:
+            if (rd == 0)
+                return "// QMTC2 to $vf0 discarded";
             return fmt::format("ctx->vu0_vf[{}] = _mm_castsi128_ps(GPR_VEC(ctx, {}));", rd, rt);
         case COP2_CTC2:
         {
@@ -273,7 +275,7 @@ namespace ps2recomp
                     return m_codeGenerator.translateVU_VISWR(inst);
                 case VU0_S2_VABS:
                 {
-                    uint8_t dest_mask = inst.vectorInfo.vectorField;
+                    uint8_t dest_mask = codegen::vuVfDestMask(inst.rt, inst.vectorInfo.vectorField);
                     return fmt::format("{{ __m128 res = _mm_and_ps(ctx->vu0_vf[{}], _mm_castsi128_ps(_mm_set1_epi32(0x7FFFFFFF))); "
                                        "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                                        "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
@@ -284,7 +286,7 @@ namespace ps2recomp
                 }
                 case VU0_S2_VMOVE:
                 {
-                    uint8_t dest_mask = inst.vectorInfo.vectorField;
+                    uint8_t dest_mask = codegen::vuVfDestMask(inst.rt, inst.vectorInfo.vectorField);
                     return fmt::format(
                         "{{ __m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                         "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _mm_castsi128_ps(mask)); }}",
@@ -296,7 +298,7 @@ namespace ps2recomp
                 }
                 case VU0_S2_VMR32:
                 {
-                    uint8_t dest_mask = inst.vectorInfo.vectorField;
+                    uint8_t dest_mask = codegen::vuVfDestMask(inst.rt, inst.vectorInfo.vectorField);
                     return fmt::format(
                         "{{ __m128 res = _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], _MM_SHUFFLE(0,3,2,1)); "
                         "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
