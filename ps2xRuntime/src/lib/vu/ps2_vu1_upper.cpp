@@ -3,6 +3,24 @@
 
 #include <cmath>
 #include <cstring>
+#include <cstdint>
+
+namespace
+{
+    // Saturating float->int32 conversion sourced from PCSX2 pcsx2/VUops.cpp floatToInt<Offset>.
+    // `scaled` is the FTOI operand already multiplied by 2^Offset (1/16/4096/32768 for
+    // FTOI0/4/12/15). A scaled magnitude of 2^31 or more, including inf and NaN, saturates to
+    // INT_MAX or INT_MIN by the sign bit; NaN follows the same sign-based clamp as overflow,
+    // there is no separate NaN case in the source.
+    int32_t ftoiSaturate(float scaled)
+    {
+        uint32_t bits;
+        std::memcpy(&bits, &scaled, sizeof(bits));
+        if ((bits & 0x7F800000u) >= 0x4F000000u)
+            return (bits & 0x80000000u) ? static_cast<int32_t>(0x80000000u) : 0x7FFFFFFF;
+        return static_cast<int32_t>(scaled);
+    }
+}
 
 // ============================================================================
 // Upper instructions (FMAC pipeline)
@@ -31,7 +49,8 @@ void VU1Interpreter::execUpper(uint32_t instr)
         float bc = broadcast(vt, op & 3);
         for (int c = 0; c < 4; c++)
             result[c] = vs[c] + bc;
-        applyDest(vd, result, dest);
+        computeFmacFlags(result, dest);
+        writeDestMasked(vd, result, dest);
         return;
     }
     case 0x04:
@@ -42,7 +61,8 @@ void VU1Interpreter::execUpper(uint32_t instr)
         float bc = broadcast(vt, op & 3);
         for (int c = 0; c < 4; c++)
             result[c] = vs[c] - bc;
-        applyDest(vd, result, dest);
+        computeFmacFlags(result, dest);
+        writeDestMasked(vd, result, dest);
         return;
     }
     case 0x08:
@@ -53,7 +73,8 @@ void VU1Interpreter::execUpper(uint32_t instr)
         float bc = broadcast(vt, op & 3);
         for (int c = 0; c < 4; c++)
             result[c] = m_state.acc[c] + vs[c] * bc;
-        applyDest(vd, result, dest);
+        computeFmacFlags(result, dest);
+        writeDestMasked(vd, result, dest);
         return;
     }
     case 0x0C:
@@ -64,7 +85,8 @@ void VU1Interpreter::execUpper(uint32_t instr)
         float bc = broadcast(vt, op & 3);
         for (int c = 0; c < 4; c++)
             result[c] = m_state.acc[c] - vs[c] * bc;
-        applyDest(vd, result, dest);
+        computeFmacFlags(result, dest);
+        writeDestMasked(vd, result, dest);
         return;
     }
     case 0x10:
@@ -75,7 +97,7 @@ void VU1Interpreter::execUpper(uint32_t instr)
         float bc = broadcast(vt, op & 3);
         for (int c = 0; c < 4; c++)
             result[c] = (vs[c] > bc) ? vs[c] : bc;
-        applyDest(vd, result, dest);
+        writeDestMasked(vd, result, dest);
         return;
     }
     case 0x14:
@@ -86,7 +108,7 @@ void VU1Interpreter::execUpper(uint32_t instr)
         float bc = broadcast(vt, op & 3);
         for (int c = 0; c < 4; c++)
             result[c] = (vs[c] < bc) ? vs[c] : bc;
-        applyDest(vd, result, dest);
+        writeDestMasked(vd, result, dest);
         return;
     }
     case 0x18:
@@ -97,110 +119,127 @@ void VU1Interpreter::execUpper(uint32_t instr)
         float bc = broadcast(vt, op & 3);
         for (int c = 0; c < 4; c++)
             result[c] = vs[c] * bc;
-        applyDest(vd, result, dest);
+        computeFmacFlags(result, dest);
+        writeDestMasked(vd, result, dest);
         return;
     }
     case 0x1C: // MULq
         for (int c = 0; c < 4; c++)
             result[c] = vs[c] * m_state.q;
-        applyDest(vd, result, dest);
+        computeFmacFlags(result, dest);
+        writeDestMasked(vd, result, dest);
         return;
     case 0x1D: // MAXi
         for (int c = 0; c < 4; c++)
             result[c] = (vs[c] > m_state.i) ? vs[c] : m_state.i;
-        applyDest(vd, result, dest);
+        writeDestMasked(vd, result, dest);
         return;
     case 0x1E: // MULi
         for (int c = 0; c < 4; c++)
             result[c] = vs[c] * m_state.i;
-        applyDest(vd, result, dest);
+        computeFmacFlags(result, dest);
+        writeDestMasked(vd, result, dest);
         return;
     case 0x1F: // MINIi
         for (int c = 0; c < 4; c++)
             result[c] = (vs[c] < m_state.i) ? vs[c] : m_state.i;
-        applyDest(vd, result, dest);
+        writeDestMasked(vd, result, dest);
         return;
     case 0x20: // ADDq
         for (int c = 0; c < 4; c++)
             result[c] = vs[c] + m_state.q;
-        applyDest(vd, result, dest);
+        computeFmacFlags(result, dest);
+        writeDestMasked(vd, result, dest);
         return;
     case 0x21: // MADDq
         for (int c = 0; c < 4; c++)
             result[c] = m_state.acc[c] + vs[c] * m_state.q;
-        applyDest(vd, result, dest);
+        computeFmacFlags(result, dest);
+        writeDestMasked(vd, result, dest);
         return;
     case 0x22: // ADDi
         for (int c = 0; c < 4; c++)
             result[c] = vs[c] + m_state.i;
-        applyDest(vd, result, dest);
+        computeFmacFlags(result, dest);
+        writeDestMasked(vd, result, dest);
         return;
     case 0x23: // MADDi
         for (int c = 0; c < 4; c++)
             result[c] = m_state.acc[c] + vs[c] * m_state.i;
-        applyDest(vd, result, dest);
+        computeFmacFlags(result, dest);
+        writeDestMasked(vd, result, dest);
         return;
     case 0x24: // SUBq
         for (int c = 0; c < 4; c++)
             result[c] = vs[c] - m_state.q;
-        applyDest(vd, result, dest);
+        computeFmacFlags(result, dest);
+        writeDestMasked(vd, result, dest);
         return;
     case 0x25: // MSUBq
         for (int c = 0; c < 4; c++)
             result[c] = m_state.acc[c] - vs[c] * m_state.q;
-        applyDest(vd, result, dest);
+        computeFmacFlags(result, dest);
+        writeDestMasked(vd, result, dest);
         return;
     case 0x26: // SUBi
         for (int c = 0; c < 4; c++)
             result[c] = vs[c] - m_state.i;
-        applyDest(vd, result, dest);
+        computeFmacFlags(result, dest);
+        writeDestMasked(vd, result, dest);
         return;
     case 0x27: // MSUBi
         for (int c = 0; c < 4; c++)
             result[c] = m_state.acc[c] - vs[c] * m_state.i;
-        applyDest(vd, result, dest);
+        computeFmacFlags(result, dest);
+        writeDestMasked(vd, result, dest);
         return;
     case 0x28: // ADD
         for (int c = 0; c < 4; c++)
             result[c] = vs[c] + vt[c];
-        applyDest(vd, result, dest);
+        computeFmacFlags(result, dest);
+        writeDestMasked(vd, result, dest);
         return;
     case 0x29: // MADD
         for (int c = 0; c < 4; c++)
             result[c] = m_state.acc[c] + vs[c] * vt[c];
-        applyDest(vd, result, dest);
+        computeFmacFlags(result, dest);
+        writeDestMasked(vd, result, dest);
         return;
     case 0x2A: // MUL
         for (int c = 0; c < 4; c++)
             result[c] = vs[c] * vt[c];
-        applyDest(vd, result, dest);
+        computeFmacFlags(result, dest);
+        writeDestMasked(vd, result, dest);
         return;
     case 0x2B: // MAX
         for (int c = 0; c < 4; c++)
             result[c] = (vs[c] > vt[c]) ? vs[c] : vt[c];
-        applyDest(vd, result, dest);
+        writeDestMasked(vd, result, dest);
         return;
     case 0x2C: // SUB
         for (int c = 0; c < 4; c++)
             result[c] = vs[c] - vt[c];
-        applyDest(vd, result, dest);
+        computeFmacFlags(result, dest);
+        writeDestMasked(vd, result, dest);
         return;
     case 0x2D: // MSUB
         for (int c = 0; c < 4; c++)
             result[c] = m_state.acc[c] - vs[c] * vt[c];
-        applyDest(vd, result, dest);
+        computeFmacFlags(result, dest);
+        writeDestMasked(vd, result, dest);
         return;
     case 0x2E: // OPMSUB
         result[0] = m_state.acc[0] - vs[1] * vt[2];
         result[1] = m_state.acc[1] - vs[2] * vt[0];
         result[2] = m_state.acc[2] - vs[0] * vt[1];
         result[3] = 0.0f;
-        applyDest(vd, result, dest);
+        computeFmacFlags(result, dest);
+        writeDestMasked(vd, result, dest);
         return;
     case 0x2F: // MINI
         for (int c = 0; c < 4; c++)
             result[c] = (vs[c] < vt[c]) ? vs[c] : vt[c];
-        applyDest(vd, result, dest);
+        writeDestMasked(vd, result, dest);
         return;
 
     // Upper special group (low op 0x3C..0x3F).
@@ -268,7 +307,7 @@ void VU1Interpreter::execUpper(uint32_t instr)
                 std::memcpy(&iv, &vs[c], 4);
                 result[c] = static_cast<float>(iv);
             }
-            applyDest(vtDest, result, dest);
+            writeDestMasked(vtDest, result, dest);
             return;
         case 0x11: // ITOF4
             for (int c = 0; c < 4; c++)
@@ -277,7 +316,7 @@ void VU1Interpreter::execUpper(uint32_t instr)
                 std::memcpy(&iv, &vs[c], 4);
                 result[c] = static_cast<float>(iv) / 16.0f;
             }
-            applyDest(vtDest, result, dest);
+            writeDestMasked(vtDest, result, dest);
             return;
         case 0x12: // ITOF12
             for (int c = 0; c < 4; c++)
@@ -286,7 +325,7 @@ void VU1Interpreter::execUpper(uint32_t instr)
                 std::memcpy(&iv, &vs[c], 4);
                 result[c] = static_cast<float>(iv) / 4096.0f;
             }
-            applyDest(vtDest, result, dest);
+            writeDestMasked(vtDest, result, dest);
             return;
         case 0x13: // ITOF15
             for (int c = 0; c < 4; c++)
@@ -295,39 +334,39 @@ void VU1Interpreter::execUpper(uint32_t instr)
                 std::memcpy(&iv, &vs[c], 4);
                 result[c] = static_cast<float>(iv) / 32768.0f;
             }
-            applyDest(vtDest, result, dest);
+            writeDestMasked(vtDest, result, dest);
             return;
         case 0x14: // FTOI0
             for (int c = 0; c < 4; c++)
             {
-                int32_t iv = static_cast<int32_t>(vs[c]);
+                int32_t iv = ftoiSaturate(vs[c]);
                 std::memcpy(&result[c], &iv, 4);
             }
-            applyDest(vtDest, result, dest);
+            writeDestMasked(vtDest, result, dest);
             return;
         case 0x15: // FTOI4
             for (int c = 0; c < 4; c++)
             {
-                int32_t iv = static_cast<int32_t>(vs[c] * 16.0f);
+                int32_t iv = ftoiSaturate(vs[c] * 16.0f);
                 std::memcpy(&result[c], &iv, 4);
             }
-            applyDest(vtDest, result, dest);
+            writeDestMasked(vtDest, result, dest);
             return;
         case 0x16: // FTOI12
             for (int c = 0; c < 4; c++)
             {
-                int32_t iv = static_cast<int32_t>(vs[c] * 4096.0f);
+                int32_t iv = ftoiSaturate(vs[c] * 4096.0f);
                 std::memcpy(&result[c], &iv, 4);
             }
-            applyDest(vtDest, result, dest);
+            writeDestMasked(vtDest, result, dest);
             return;
         case 0x17: // FTOI15
             for (int c = 0; c < 4; c++)
             {
-                int32_t iv = static_cast<int32_t>(vs[c] * 32768.0f);
+                int32_t iv = ftoiSaturate(vs[c] * 32768.0f);
                 std::memcpy(&result[c], &iv, 4);
             }
-            applyDest(vtDest, result, dest);
+            writeDestMasked(vtDest, result, dest);
             return;
         case 0x18:
         case 0x19:
@@ -348,7 +387,7 @@ void VU1Interpreter::execUpper(uint32_t instr)
         case 0x1D: // ABS
             for (int c = 0; c < 4; c++)
                 result[c] = std::fabs(vs[c]);
-            applyDest(vtDest, result, dest);
+            writeDestMasked(vtDest, result, dest);
             return;
         case 0x1E: // MULAi
             for (int c = 0; c < 4; c++)
@@ -365,7 +404,11 @@ void VU1Interpreter::execUpper(uint32_t instr)
             if (vs[1] < -w) flags |= 0x08;
             if (vs[2] > +w) flags |= 0x10;
             if (vs[2] < -w) flags |= 0x20;
-            m_state.clip = (m_state.clip << 6) | flags;
+            // Masked to 24 bits: sourced from PCSX2 pcsx2/VUops.cpp _vuCLIP, which ANDs the
+            // shift register with 0xFFFFFF after every accumulation. Without the mask, bits
+            // shifted past 23 persist forever and FCOR's == 0xFFFFFF check never goes true
+            // again once five or more CLIPs have run.
+            m_state.clip = ((m_state.clip << 6) | flags) & 0xFFFFFFu;
             return;
         }
         case 0x20: // ADDAq

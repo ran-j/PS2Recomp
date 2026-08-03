@@ -13,6 +13,14 @@ namespace
 {
     constexpr uint32_t kVuUpperNop = 0u;
 
+    // kVuUpperNop (raw 0) decodes as ADDbc.x vf0, vf0, vf0 with dest=0: a real FMAC
+    // instruction that writes no VF lanes but, once MAC/STATUS are modelled, legitimately
+    // clears MAC/STATUS every time it runs (dest=0 means every lane's flags are cleared,
+    // not skipped). Tests that check MAC/STATUS/CLIP need filler that is truly inert on the
+    // upper pipe: the special-group NOP at specialOp 0x2F, which returns before touching any
+    // VF/MAC/STATUS state. kVuUpperFmacNop is that encoding.
+    constexpr uint32_t kVuUpperFmacNop = (0x0Bu << 6) | 0x3Fu; // specialOp 0x2F, dest=ft=fs=0
+
     struct Vu1Fixture
     {
         PS2Memory mem;
@@ -155,6 +163,32 @@ namespace
     void readVuQword(const uint8_t *data, uint32_t qwordIndex, float values[4])
     {
         std::memcpy(values, data + qwordIndex * 16u, sizeof(float) * 4u);
+    }
+
+    // Encodes the lower-word primary-opcode space 0x10..0x1C: the flag-condition ops
+    // (FCEQ/FCSET/FCAND/FCOR/FSEQ/FSSET/FSAND/FSOR, which use a bare 24/12-bit immediate)
+    // and the flag-register ops (FMEQ/FMAND/FMOR/FCGET, which use it/is like an integer op).
+    // Callers pass 0 for whichever field group their instruction does not have.
+    uint32_t makeVuLowerOpHi(uint8_t opHi, uint8_t it, uint8_t is, uint32_t imm)
+    {
+        return (static_cast<uint32_t>(opHi & 0x7Fu) << 25) |
+               (static_cast<uint32_t>(it & 0xFu) << 16) |
+               (static_cast<uint32_t>(is & 0xFu) << 11) |
+               (imm & 0xFFFFFFu);
+    }
+
+    // Encodes the upper-word special group (raw op 0x3C..0x3F). The real selector is
+    // (instr & 0x3) | ((instr >> 4) & 0x7C); the FD field doubles as the top bits of that
+    // selector, which is why CLIP/ITOF/FTOI/ABS cannot be built with makeVuUpper.
+    uint32_t makeVuUpperSpecial(uint8_t specialOp, uint8_t dest, uint8_t ft, uint8_t fs)
+    {
+        const uint8_t op6 = static_cast<uint8_t>(0x3Cu | (specialOp & 0x3u));
+        const uint8_t fdField = static_cast<uint8_t>((specialOp >> 2) & 0x1Fu);
+        return (static_cast<uint32_t>(dest & 0xFu) << 21) |
+               (static_cast<uint32_t>(ft & 0x1Fu) << 16) |
+               (static_cast<uint32_t>(fs & 0x1Fu) << 11) |
+               (static_cast<uint32_t>(fdField) << 6) |
+               static_cast<uint32_t>(op6);
     }
 }
 
@@ -554,6 +588,473 @@ void register_ps2_vu1_tests()
                 }
             }
             t.IsTrue(imageOk, "MSCAL-triggered XGKICK should route PATH1 packet into GS VRAM");
+        });
+
+        tc.Run("FMAC computes MAC Z and S bits for zero and negative results", [](TestCase &t)
+        {
+            // Z case: SUB.xyzw vf3, vf1, vf1 -> all-lane zero result.
+            {
+                Vu1Fixture fx;
+                t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+                uint32_t pc = 0u;
+                writeVuInstructionPair(fx.code, pc, 0u, makeVuUpper(0x2Cu, 0xFu, 1u, 1u, 3u)); // SUB.xyzw vf3, vf1, vf1
+                pc += 8u;
+                for (int i = 0; i < 4; ++i)
+                {
+                    writeVuInstructionPair(fx.code, pc, 0u, kVuUpperFmacNop);
+                    pc += 8u;
+                }
+                writeVuInstructionPair(fx.code, pc, makeVuLowerOpHi(0x1Au, 1u, 2u, 0u), kVuUpperFmacNop); // FMAND vi1, vi2
+                pc += 8u;
+
+                VU1Interpreter vu1;
+                vu1.state().vf[1][0] = 5.0f;
+                vu1.state().vf[1][1] = 5.0f;
+                vu1.state().vf[1][2] = 5.0f;
+                vu1.state().vf[1][3] = 5.0f;
+                vu1.state().vi[2] = 0xFFFF;
+
+                vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 0u, pc / 8u);
+
+                t.Equals(vu1.state().vi[1], 0xF, "FMAND after a zero FMAC result should read back the four Z bits");
+            }
+
+            // S case: SUB.xyzw vf3, vf1, vf2 with vf1 < vf2 in every lane -> all-lane negative result.
+            {
+                Vu1Fixture fx;
+                t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+                uint32_t pc = 0u;
+                writeVuInstructionPair(fx.code, pc, 0u, makeVuUpper(0x2Cu, 0xFu, 2u, 1u, 3u)); // SUB.xyzw vf3, vf1, vf2
+                pc += 8u;
+                for (int i = 0; i < 4; ++i)
+                {
+                    writeVuInstructionPair(fx.code, pc, 0u, kVuUpperFmacNop);
+                    pc += 8u;
+                }
+                writeVuInstructionPair(fx.code, pc, makeVuLowerOpHi(0x1Au, 1u, 2u, 0u), kVuUpperFmacNop); // FMAND vi1, vi2
+                pc += 8u;
+
+                VU1Interpreter vu1;
+                vu1.state().vf[1][0] = 1.0f;
+                vu1.state().vf[1][1] = 1.0f;
+                vu1.state().vf[1][2] = 1.0f;
+                vu1.state().vf[1][3] = 1.0f;
+                vu1.state().vf[2][0] = 5.0f;
+                vu1.state().vf[2][1] = 5.0f;
+                vu1.state().vf[2][2] = 5.0f;
+                vu1.state().vf[2][3] = 5.0f;
+                vu1.state().vi[2] = 0xFFFF;
+
+                vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 0u, pc / 8u);
+
+                t.Equals(vu1.state().vi[1], 0xF0, "FMAND after a negative FMAC result should read back the four S bits");
+            }
+        });
+
+        tc.Run("FMAC sets both MAC U and Z bits on a denormal (underflow) result", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+            uint32_t pc = 0u;
+            // MUL.xyzw vf3, vf1, vf2 with vf1=vf2=1e-20 -> ~1e-40 in every lane: a positive
+            // denormal (exponent field 0, nonzero mantissa). PCSX2 flushes this underflow to
+            // zero, raising both U and Z per lane.
+            writeVuInstructionPair(fx.code, pc, 0u, makeVuUpper(0x2Au, 0xFu, 2u, 1u, 3u)); // MUL.xyzw vf3, vf1, vf2
+            pc += 8u;
+            for (int i = 0; i < 4; ++i)
+            {
+                writeVuInstructionPair(fx.code, pc, 0u, kVuUpperFmacNop);
+                pc += 8u;
+            }
+            writeVuInstructionPair(fx.code, pc, makeVuLowerOpHi(0x1Au, 1u, 2u, 0u), kVuUpperFmacNop); // FMAND vi1, vi2
+            pc += 8u;
+
+            VU1Interpreter vu1;
+            const float tiny = 1e-20f;
+            vu1.state().vf[1][0] = tiny;
+            vu1.state().vf[1][1] = tiny;
+            vu1.state().vf[1][2] = tiny;
+            vu1.state().vf[1][3] = tiny;
+            vu1.state().vf[2][0] = tiny;
+            vu1.state().vf[2][1] = tiny;
+            vu1.state().vf[2][2] = tiny;
+            vu1.state().vf[2][3] = tiny;
+            vu1.state().vi[2] = 0xFFFF;
+
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 0u, pc / 8u);
+
+            // Positive denormal in all four lanes -> U nibble 0x0F00 and Z nibble 0x000F,
+            // no S (positive), no O -> mac == 0x0F0F. A U-only denormal branch would read 0x0F00.
+            t.Equals(vu1.state().vi[1], 0x0F0F, "FMAND after a denormal FMAC result should read back both the U and Z bits");
+        });
+
+        tc.Run("FMAC honors the DEST mask when computing MAC bits", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+            uint32_t pc = 0u;
+            writeVuInstructionPair(fx.code, pc, 0u, makeVuUpper(0x2Cu, 0x8u, 2u, 1u, 3u)); // SUB.x vf3, vf1, vf2 (dest=x only)
+            pc += 8u;
+            for (int i = 0; i < 4; ++i)
+            {
+                writeVuInstructionPair(fx.code, pc, 0u, kVuUpperFmacNop);
+                pc += 8u;
+            }
+            writeVuInstructionPair(fx.code, pc, makeVuLowerOpHi(0x1Au, 1u, 2u, 0u), kVuUpperFmacNop); // FMAND vi1, vi2
+            pc += 8u;
+
+            VU1Interpreter vu1;
+            // x lane produces zero (Z bit, 0x8). y/z/w produce a NEGATIVE result (S bits 0x40/0x20/0x10)
+            // if wrongly included, which is a different bit pattern than the x-only Z bit, so a dest-mask
+            // bug that computes all four lanes is distinguishable from the correct x-only result.
+            vu1.state().vf[1][0] = 5.0f;
+            vu1.state().vf[1][1] = 1.0f;
+            vu1.state().vf[1][2] = 1.0f;
+            vu1.state().vf[1][3] = 1.0f;
+            vu1.state().vf[2][0] = 5.0f;
+            vu1.state().vf[2][1] = 5.0f;
+            vu1.state().vf[2][2] = 5.0f;
+            vu1.state().vf[2][3] = 5.0f;
+            vu1.state().vi[2] = 0xFFFF;
+
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 0u, pc / 8u);
+
+            t.Equals(vu1.state().vi[1], 0x8, "MAC should only reflect the x lane when dest masks out y/z/w");
+        });
+
+        tc.Run("MAX and MINI run in the FMAC pipeline but must not update MAC or STATUS", [](TestCase &t)
+        {
+            // MAX site (0x2B).
+            {
+                Vu1Fixture fx;
+                t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+                uint32_t pc = 0u;
+                // MUL.xyzw vf3, vf1, vf2 with vf1=-1, vf2=0 -> -0.0 in every lane: Z and S
+                // both set, mac == 0xFF. This is the pattern FMAND must still read back after
+                // the MAX below, if MAX correctly leaves MAC untouched.
+                writeVuInstructionPair(fx.code, pc, 0u, makeVuUpper(0x2Au, 0xFu, 2u, 1u, 3u));
+                pc += 8u;
+                // MAX.xyzw vf12, vf10, vf11 with vf10=5.0, vf11=6.0 -> 6.0 in every lane: a
+                // positive nonzero result that raises no MAC bits at all. If MAX wrongly
+                // computed flags it would clobber mac to 0x00, a different pattern than 0xFF,
+                // so the two outcomes are distinguishable by the read below.
+                writeVuInstructionPair(fx.code, pc, 0u, makeVuUpper(0x2Bu, 0xFu, 11u, 10u, 12u));
+                pc += 8u;
+                for (int i = 0; i < 4; ++i)
+                {
+                    writeVuInstructionPair(fx.code, pc, 0u, kVuUpperFmacNop);
+                    pc += 8u;
+                }
+                writeVuInstructionPair(fx.code, pc, makeVuLowerOpHi(0x1Au, 1u, 2u, 0u), kVuUpperFmacNop); // FMAND vi1, vi2
+                pc += 8u;
+
+                VU1Interpreter vu1;
+                vu1.state().vf[1][0] = -1.0f;
+                vu1.state().vf[1][1] = -1.0f;
+                vu1.state().vf[1][2] = -1.0f;
+                vu1.state().vf[1][3] = -1.0f;
+                vu1.state().vf[2][0] = 0.0f;
+                vu1.state().vf[2][1] = 0.0f;
+                vu1.state().vf[2][2] = 0.0f;
+                vu1.state().vf[2][3] = 0.0f;
+                vu1.state().vf[10][0] = 5.0f;
+                vu1.state().vf[10][1] = 5.0f;
+                vu1.state().vf[10][2] = 5.0f;
+                vu1.state().vf[10][3] = 5.0f;
+                vu1.state().vf[11][0] = 6.0f;
+                vu1.state().vf[11][1] = 6.0f;
+                vu1.state().vf[11][2] = 6.0f;
+                vu1.state().vf[11][3] = 6.0f;
+                vu1.state().vi[2] = 0xFFFF;
+
+                vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 0u, pc / 8u);
+
+                t.Equals(vu1.state().vi[1], 0xFF, "MAX must not clobber MAC; FMAND should still read the producing FMAC's flags");
+            }
+
+            // MINI site (0x2F).
+            {
+                Vu1Fixture fx;
+                t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+                uint32_t pc = 0u;
+                // Same -0.0 Z+S producer as the MAX block above, mac == 0xFF.
+                writeVuInstructionPair(fx.code, pc, 0u, makeVuUpper(0x2Au, 0xFu, 2u, 1u, 3u));
+                pc += 8u;
+                // MINI.xyzw vf12, vf10, vf11 with vf10=5.0, vf11=6.0 -> 5.0 in every lane: a
+                // positive nonzero result that raises no MAC bits, distinguishable from 0xFF
+                // the same way as the MAX block.
+                writeVuInstructionPair(fx.code, pc, 0u, makeVuUpper(0x2Fu, 0xFu, 11u, 10u, 12u));
+                pc += 8u;
+                for (int i = 0; i < 4; ++i)
+                {
+                    writeVuInstructionPair(fx.code, pc, 0u, kVuUpperFmacNop);
+                    pc += 8u;
+                }
+                writeVuInstructionPair(fx.code, pc, makeVuLowerOpHi(0x1Au, 1u, 2u, 0u), kVuUpperFmacNop); // FMAND vi1, vi2
+                pc += 8u;
+
+                VU1Interpreter vu1;
+                vu1.state().vf[1][0] = -1.0f;
+                vu1.state().vf[1][1] = -1.0f;
+                vu1.state().vf[1][2] = -1.0f;
+                vu1.state().vf[1][3] = -1.0f;
+                vu1.state().vf[2][0] = 0.0f;
+                vu1.state().vf[2][1] = 0.0f;
+                vu1.state().vf[2][2] = 0.0f;
+                vu1.state().vf[2][3] = 0.0f;
+                vu1.state().vf[10][0] = 5.0f;
+                vu1.state().vf[10][1] = 5.0f;
+                vu1.state().vf[10][2] = 5.0f;
+                vu1.state().vf[10][3] = 5.0f;
+                vu1.state().vf[11][0] = 6.0f;
+                vu1.state().vf[11][1] = 6.0f;
+                vu1.state().vf[11][2] = 6.0f;
+                vu1.state().vf[11][3] = 6.0f;
+                vu1.state().vi[2] = 0xFFFF;
+
+                vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 0u, pc / 8u);
+
+                t.Equals(vu1.state().vi[1], 0xFF, "MINI must not clobber MAC; FMAND should still read the producing FMAC's flags");
+            }
+        });
+
+        tc.Run("STATUS folds MAC into a live half that resets and a sticky half that accumulates", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+            uint32_t pc = 0u;
+            // MUL.xyzw vf3, vf1, vf2 with vf1=-1, vf2=0 -> -0.0 in every lane (Z and S both set).
+            writeVuInstructionPair(fx.code, pc, 0u, makeVuUpper(0x2Au, 0xFu, 2u, 1u, 3u));
+            pc += 8u;
+            // ADD.xyzw vf4, vf5, vf6 with 5+5=10 -> positive nonzero, no flags.
+            writeVuInstructionPair(fx.code, pc, 0u, makeVuUpper(0x28u, 0xFu, 6u, 5u, 4u));
+            pc += 8u;
+            for (int i = 0; i < 4; ++i)
+            {
+                writeVuInstructionPair(fx.code, pc, 0u, kVuUpperFmacNop);
+                pc += 8u;
+            }
+            writeVuInstructionPair(fx.code, pc, makeVuLowerOpHi(0x16u, 1u, 0u, 0xFFFu), kVuUpperFmacNop); // FSAND vi1, 0xFFF
+            pc += 8u;
+
+            VU1Interpreter vu1;
+            vu1.state().vf[1][0] = -1.0f;
+            vu1.state().vf[1][1] = -1.0f;
+            vu1.state().vf[1][2] = -1.0f;
+            vu1.state().vf[1][3] = -1.0f;
+            vu1.state().vf[2][0] = 0.0f;
+            vu1.state().vf[2][1] = 0.0f;
+            vu1.state().vf[2][2] = 0.0f;
+            vu1.state().vf[2][3] = 0.0f;
+            vu1.state().vf[5][0] = 5.0f;
+            vu1.state().vf[5][1] = 5.0f;
+            vu1.state().vf[5][2] = 5.0f;
+            vu1.state().vf[5][3] = 5.0f;
+            vu1.state().vf[6][0] = 5.0f;
+            vu1.state().vf[6][1] = 5.0f;
+            vu1.state().vf[6][2] = 5.0f;
+            vu1.state().vf[6][3] = 5.0f;
+
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 0u, pc / 8u);
+
+            const int32_t status = vu1.state().vi[1];
+            t.IsTrue((status & 0x40) != 0, "sticky Z should survive a later non-zero FMAC");
+            t.IsTrue((status & 0x80) != 0, "sticky S should survive a later non-zero FMAC");
+            t.IsTrue((status & 0x01) == 0, "live Z should not persist from the first FMAC once a later FMAC clears it");
+        });
+
+        tc.Run("FSSET preserves the live half and writes the sourced immediate into the sticky half", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+            // Sourced from PCSX2 _vuFSSET: imm12 = ((instr>>21)&1)<<11 | (instr&0x7FF).
+            // Target imm12 = 0xFFF, so instr bit21=1 and instr bits10:0=0x7FF -> imm24 = 0x2007FF.
+            writeVuInstructionPair(fx.code, 0u, makeVuLowerOpHi(0x15u, 0u, 0u, 0x2007FFu), kVuUpperFmacNop); // FSSET
+
+            VU1Interpreter vu1;
+            vu1.state().status = 0x15u; // arbitrary live half, must survive FSSET untouched
+
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 0u, 1u);
+
+            t.Equals(vu1.state().status & 0x3Fu, 0x15u, "FSSET should preserve the live half");
+            t.Equals(vu1.state().status & 0xFC0u, 0xFC0u, "FSSET should place the sourced immediate in the sticky half");
+        });
+
+        tc.Run("the lower flag-read table decodes FMEQ, FMAND, FMOR, and FCGET at their correct opcodes", [](TestCase &t)
+        {
+            // FMEQ @ 0x18
+            {
+                Vu1Fixture fx;
+                t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+                writeVuInstructionPair(fx.code, 0u, makeVuLowerOpHi(0x18u, 1u, 2u, 0u), kVuUpperFmacNop);
+                VU1Interpreter vu1;
+                vu1.state().mac = 0x1234u;
+                vu1.state().vi[2] = 0x1234;
+                vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 0u, 1u);
+                t.Equals(vu1.state().vi[1], 1, "0x18 should decode FMEQ and compare equal MAC/VI values");
+            }
+            // FMAND @ 0x1A
+            {
+                Vu1Fixture fx;
+                t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+                writeVuInstructionPair(fx.code, 0u, makeVuLowerOpHi(0x1Au, 1u, 2u, 0u), kVuUpperFmacNop);
+                VU1Interpreter vu1;
+                vu1.state().mac = 0x0F0Fu;
+                vu1.state().vi[2] = 0x00FF;
+                vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 0u, 1u);
+                t.Equals(vu1.state().vi[1], 0x0F, "0x1A should decode FMAND and AND the MAC and VI values");
+            }
+            // FMOR @ 0x1B
+            {
+                Vu1Fixture fx;
+                t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+                writeVuInstructionPair(fx.code, 0u, makeVuLowerOpHi(0x1Bu, 1u, 2u, 0u), kVuUpperFmacNop);
+                VU1Interpreter vu1;
+                vu1.state().mac = 0x0F00u;
+                vu1.state().vi[2] = 0x000F;
+                vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 0u, 1u);
+                t.Equals(vu1.state().vi[1], 0x0F0F, "0x1B should decode FMOR and OR the MAC and VI values");
+            }
+            // FCGET @ 0x1C
+            {
+                Vu1Fixture fx;
+                t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+                writeVuInstructionPair(fx.code, 0u, makeVuLowerOpHi(0x1Cu, 1u, 0u, 0u), kVuUpperFmacNop);
+                VU1Interpreter vu1;
+                vu1.state().clip = 0xABCDEFu;
+                vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 0u, 1u);
+                t.Equals(vu1.state().vi[1], 0xDEF, "0x1C should decode FCGET and read the low 12 bits of CLIP");
+            }
+        });
+
+        tc.Run("ITOF, FTOI, and ABS never feed the flag-computation path", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+            uint32_t pc = 0u;
+            // MUL.xyzw vf3, vf1, vf2 with vf1=-1, vf2=0 -> -0.0 in every lane (mac becomes 0xFF for dest=xyzw).
+            writeVuInstructionPair(fx.code, pc, 0u, makeVuUpper(0x2Au, 0xFu, 2u, 1u, 3u));
+            pc += 8u;
+            writeVuInstructionPair(fx.code, pc, 0u, makeVuUpperSpecial(0x10u, 0xFu, 5u, 4u)); // ITOF0.xyzw vf5, vf4
+            pc += 8u;
+            writeVuInstructionPair(fx.code, pc, 0u, makeVuUpperSpecial(0x14u, 0xFu, 6u, 7u)); // FTOI0.xyzw vf6, vf7
+            pc += 8u;
+            writeVuInstructionPair(fx.code, pc, 0u, makeVuUpperSpecial(0x1Du, 0xFu, 8u, 9u)); // ABS.xyzw vf8, vf9
+            pc += 8u;
+            for (int i = 0; i < 4; ++i)
+            {
+                writeVuInstructionPair(fx.code, pc, 0u, kVuUpperFmacNop);
+                pc += 8u;
+            }
+            writeVuInstructionPair(fx.code, pc, makeVuLowerOpHi(0x1Au, 1u, 2u, 0u), kVuUpperFmacNop); // FMAND vi1, vi2
+            pc += 8u;
+
+            VU1Interpreter vu1;
+            vu1.state().vf[1][0] = -1.0f;
+            vu1.state().vf[1][1] = -1.0f;
+            vu1.state().vf[1][2] = -1.0f;
+            vu1.state().vf[1][3] = -1.0f;
+            vu1.state().vf[2][0] = 0.0f;
+            vu1.state().vf[2][1] = 0.0f;
+            vu1.state().vf[2][2] = 0.0f;
+            vu1.state().vf[2][3] = 0.0f;
+
+            uint32_t intBits = 1000u;
+            float asFloat;
+            std::memcpy(&asFloat, &intBits, 4);
+            vu1.state().vf[4][0] = asFloat;
+            vu1.state().vf[4][1] = asFloat;
+            vu1.state().vf[4][2] = asFloat;
+            vu1.state().vf[4][3] = asFloat;
+
+            vu1.state().vf[7][0] = 2.5f;
+            vu1.state().vf[7][1] = 2.5f;
+            vu1.state().vf[7][2] = 2.5f;
+            vu1.state().vf[7][3] = 2.5f;
+
+            vu1.state().vf[9][0] = -3.0f;
+            vu1.state().vf[9][1] = -3.0f;
+            vu1.state().vf[9][2] = -3.0f;
+            vu1.state().vf[9][3] = -3.0f;
+
+            vu1.state().vi[2] = 0xFFFF;
+
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 0u, pc / 8u);
+
+            t.Equals(vu1.state().vi[1], 0xFF, "MAC must reflect only the producing FMAC, not the intervening ITOF/FTOI/ABS");
+        });
+
+        tc.Run("CLIP accumulation is masked to 24 bits so FCOR can go true again", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+            uint32_t pc = 0u;
+            for (int i = 0; i < 5; ++i)
+            {
+                writeVuInstructionPair(fx.code, pc, 0u, makeVuUpperSpecial(0x1Fu, 0u, 2u, 1u)); // CLIP vf1.xyz, vf2.w
+                pc += 8u;
+            }
+            writeVuInstructionPair(fx.code, pc, makeVuLowerOpHi(0x13u, 0u, 0u, 0x555555u), kVuUpperFmacNop); // FCOR vi1, 0x555555
+            pc += 8u;
+
+            VU1Interpreter vu1;
+            vu1.state().vf[1][0] = -2.0f;
+            vu1.state().vf[1][1] = -2.0f;
+            vu1.state().vf[1][2] = -2.0f;
+            vu1.state().vf[2][3] = 1.0f;
+
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 0u, pc / 8u);
+
+            t.Equals(vu1.state().vi[1], 1, "FCOR should go true again once CLIP is masked to 24 bits after five accumulations");
+        });
+
+        tc.Run("FTOI4 saturates out-of-range floats instead of wrapping the plain int32 cast", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+            uint32_t pc = 0u;
+            for (uint8_t i = 0; i < 6u; ++i)
+            {
+                writeVuInstructionPair(fx.code, pc, 0u,
+                                       makeVuUpperSpecial(0x15u, 0xFu, static_cast<uint8_t>(20u + i), static_cast<uint8_t>(10u + i)));
+                pc += 8u;
+            }
+
+            VU1Interpreter vu1;
+            vu1.state().vf[10][0] = 1e30f;
+            vu1.state().vf[11][0] = -1e30f;
+            vu1.state().vf[12][0] = 0.5f;
+            vu1.state().vf[13][0] = -0.5f;
+            vu1.state().vf[14][0] = 0.0f;
+            const uint32_t nanBits = 0x7FC00000u; // positive quiet NaN
+            std::memcpy(&vu1.state().vf[15][0], &nanBits, 4);
+
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 0u, 6u);
+
+            auto bitsOf = [&](int reg) -> uint32_t
+            {
+                uint32_t v;
+                std::memcpy(&v, &vu1.state().vf[reg][0], 4);
+                return v;
+            };
+
+            t.Equals(bitsOf(20), 0x7FFFFFFFu, "FTOI4 should clamp large positive overflow to INT_MAX");
+            t.Equals(bitsOf(21), 0x80000000u, "FTOI4 should clamp large negative overflow to INT_MIN");
+            t.Equals(static_cast<int32_t>(bitsOf(22)), 8, "FTOI4 should convert +0.5 scaled by 16 to 8");
+            t.Equals(static_cast<int32_t>(bitsOf(23)), -8, "FTOI4 should convert -0.5 scaled by 16 to -8");
+            t.Equals(static_cast<int32_t>(bitsOf(24)), 0, "FTOI4 should convert 0.0 to 0");
+            t.Equals(bitsOf(25), 0x7FFFFFFFu, "FTOI4 should clamp a positive-signed NaN to INT_MAX per the sourced convention");
         });
     });
 }
