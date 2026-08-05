@@ -477,8 +477,8 @@ private:
     std::unique_ptr<ps2x::iop::IopSubsystem> m_iopSubsystem;
     PS2AudioBackend m_audioBackend;
     PSPadBackend m_padBackend;
-    VU1Interpreter m_vu0;
-    VU1Interpreter m_vu1;
+    VU1Interpreter m_vu0{VU1Interpreter::Unit::VU0};
+    VU1Interpreter m_vu1{VU1Interpreter::Unit::VU1};
     R5900Context m_cpuContext;
     std::unique_ptr<EeScheduler> m_eeScheduler;
     mutable std::mutex m_eeKernelStateMutex;

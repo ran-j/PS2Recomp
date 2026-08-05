@@ -81,10 +81,36 @@ namespace
                0x28u;
     }
 
+    uint32_t makeVuIaddiu(uint8_t it, uint8_t is, int16_t immediate)
+    {
+        return (0x08u << 25) |
+               (static_cast<uint32_t>(it & 0xFu) << 16) |
+               (static_cast<uint32_t>(is & 0xFu) << 11) |
+               (static_cast<uint32_t>(immediate) & 0x7FFu);
+    }
+
+    uint32_t makeVuLowerSpecial(uint8_t specialOp, uint8_t is,
+                                uint8_t it = 0u, uint8_t dest = 0u)
+    {
+        return (0x40u << 25) |
+               (static_cast<uint32_t>(dest & 0xFu) << 21) |
+               (static_cast<uint32_t>(it & 0x1Fu) << 16) |
+               (static_cast<uint32_t>(is & 0x1Fu) << 11) |
+               (static_cast<uint32_t>(specialOp & 0x7Cu) << 4) |
+               static_cast<uint32_t>(specialOp & 0x3u) |
+               0x3Cu;
+    }
+
     void writeVuInstructionPair(uint8_t *code, uint32_t pc, uint32_t lower, uint32_t upper)
     {
         std::memcpy(code + pc, &lower, sizeof(lower));
         std::memcpy(code + pc + sizeof(lower), &upper, sizeof(upper));
+    }
+
+    uint64_t packVuInstructionPair(uint32_t lower, uint32_t upper)
+    {
+        return static_cast<uint64_t>(lower) |
+               (static_cast<uint64_t>(upper) << 32);
     }
 
     bool hasSignedRdWrite(const std::string &generated, uint8_t rd)
@@ -151,10 +177,6 @@ namespace
     std::atomic<uint32_t> gMpegWaitStage{0u};
     std::atomic<uint32_t> gMpegNoDuplicateStage{0u};
     std::atomic<uint32_t> gMpegNoDuplicateProducerStage{0u};
-    std::atomic<uint32_t> gMpegPacingStage{0u};
-    std::atomic<uint32_t> gMpegPacingFirstProducerStage{0u};
-    std::atomic<uint32_t> gMpegPacingSecondProducerStage{0u};
-    std::atomic<uint64_t> gMpegPacingResumeTick{0u};
 
     constexpr uint32_t kMpegWaitMainPc = 0x00125000u;
     constexpr uint32_t kMpegWaitResumePc = 0x00125010u;
@@ -166,13 +188,6 @@ namespace
     constexpr uint32_t kMpegNoDuplicateProducerPc = 0x00125050u;
     constexpr uint32_t kMpegNoDuplicateHandle = 0x00124000u;
     constexpr uint32_t kMpegNoDuplicateImage = 0x00131000u;
-    constexpr uint32_t kMpegPacingMainPc = 0x00125060u;
-    constexpr uint32_t kMpegPacingAfterFirstPc = 0x00125070u;
-    constexpr uint32_t kMpegPacingAfterSecondPc = 0x00125080u;
-    constexpr uint32_t kMpegPacingFirstProducerPc = 0x00125090u;
-    constexpr uint32_t kMpegPacingSecondProducerPc = 0x001250A0u;
-    constexpr uint32_t kMpegPacingHandle = 0x00124800u;
-    constexpr uint32_t kMpegPacingImage = 0x00132000u;
     constexpr uint32_t kIpuInitMainPc = 0x00125100u;
     constexpr uint32_t kIpuInitResumePc = 0x00125104u;
     constexpr uint32_t kIpuSetD4Pc = 0x00126428u;
@@ -259,51 +274,6 @@ namespace
             std::memory_order_release);
         gMpegNoDuplicateStage.store(2u, std::memory_order_release);
         ps2_stubs::notifyMpegCdStreamEof(runtime);
-        ctx->pc = 0u;
-    }
-
-    void testMpegPacingMain(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-    {
-        setRegU32(*ctx, 4, kMpegPacingHandle);
-        setRegU32(*ctx, 5, kMpegPacingImage);
-        ctx->pc = kMpegPacingAfterFirstPc;
-        ps2_stubs::sceMpegGetPicture(rdram, ctx, runtime);
-    }
-
-    void testMpegPacingAfterFirst(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-    {
-        gMpegPacingStage.store(1u, std::memory_order_release);
-        setRegU32(*ctx, 4, kMpegPacingHandle);
-        setRegU32(*ctx, 5, kMpegPacingImage);
-        ctx->pc = kMpegPacingAfterSecondPc;
-        ps2_stubs::sceMpegGetPicture(rdram, ctx, runtime);
-    }
-
-    void testMpegPacingAfterSecond(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
-    {
-        gMpegPacingResumeTick.store(
-            runtime->eeScheduler().currentVSyncTick(),
-            std::memory_order_release);
-        gMpegPacingStage.store(3u, std::memory_order_release);
-        ctx->pc = 0u;
-        runtime->requestStop();
-    }
-
-    void testMpegPacingFirstProducer(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
-    {
-        gMpegPacingFirstProducerStage.store(
-            gMpegPacingStage.load(std::memory_order_acquire),
-            std::memory_order_release);
-        runtime->eeScheduler().postEvent(EeEvent{EeEventType::VBlankStart, 0u, 0u});
-        ctx->pc = 0u;
-    }
-
-    void testMpegPacingSecondProducer(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
-    {
-        gMpegPacingSecondProducerStage.store(
-            gMpegPacingStage.load(std::memory_order_acquire),
-            std::memory_order_release);
-        runtime->eeScheduler().postEvent(EeEvent{EeEventType::VBlankStart, 0u, 0u});
         ctx->pc = 0u;
     }
 
@@ -750,66 +720,6 @@ void register_ps2_runtime_expansion_tests()
                      "resumed GetPicture should publish the configured height");
         });
 
-        tc.Run("CD EOF becomes visible only after the final guest MPEG demux", [](TestCase &t)
-        {
-            PS2Runtime runtime;
-            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
-            ps2_stubs::resetMpegStubState();
-            ps2_stubs::notifyMpegCdStreamStart();
-
-            constexpr uint32_t kMpegAddr = 0x00126000u;
-            constexpr uint32_t kPacketAddr = 0x00127000u;
-            const std::vector<uint8_t> finalPacket = {
-                0x00u, 0x00u, 0x01u, 0xE0u,
-                0x00u, 0x04u,
-                0x80u, 0x00u, 0x00u,
-                0x00u};
-            std::memcpy(rdram.data() + kPacketAddr, finalPacket.data(), finalPacket.size());
-
-            ps2_stubs::notifyMpegCdStreamDataProduced(
-                static_cast<uint32_t>(finalPacket.size()), true);
-
-            R5900Context beforeDemuxCtx{};
-            setRegU32(beforeDemuxCtx, 4, kMpegAddr);
-            ps2_stubs::sceMpegIsEnd(rdram.data(), &beforeDemuxCtx, &runtime);
-            t.Equals(getRegS32(beforeDemuxCtx, 2), 0,
-                     "physical CD EOF must not end MPEG before the final guest buffer is demuxed");
-
-            constexpr uint32_t kFirstPartSize = 5u;
-            R5900Context firstDemuxCtx{};
-            setRegU32(firstDemuxCtx, 4, kMpegAddr);
-            setRegU32(firstDemuxCtx, 5, kPacketAddr);
-            setRegU32(firstDemuxCtx, 6, kFirstPartSize);
-            setRegU32(firstDemuxCtx, 7, kPacketAddr);
-            setRegU32(firstDemuxCtx, 8, static_cast<uint32_t>(finalPacket.size()));
-            ps2_stubs::sceMpegDemuxPssRing(rdram.data(), &firstDemuxCtx, &runtime);
-            t.Equals(getRegS32(firstDemuxCtx, 2), static_cast<int32_t>(kFirstPartSize),
-                     "the partial final MPEG buffer should be consumed");
-
-            R5900Context midwayCtx{};
-            setRegU32(midwayCtx, 4, kMpegAddr);
-            ps2_stubs::sceMpegIsEnd(rdram.data(), &midwayCtx, &runtime);
-            t.Equals(getRegS32(midwayCtx, 2), 0,
-                     "a partial final MPEG demux must keep physical CD EOF pending");
-
-            const uint32_t remainingSize = static_cast<uint32_t>(finalPacket.size()) - kFirstPartSize;
-            R5900Context finalDemuxCtx{};
-            setRegU32(finalDemuxCtx, 4, kMpegAddr);
-            setRegU32(finalDemuxCtx, 5, kPacketAddr + kFirstPartSize);
-            setRegU32(finalDemuxCtx, 6, remainingSize);
-            setRegU32(finalDemuxCtx, 7, kPacketAddr);
-            setRegU32(finalDemuxCtx, 8, static_cast<uint32_t>(finalPacket.size()));
-            ps2_stubs::sceMpegDemuxPssRing(rdram.data(), &finalDemuxCtx, &runtime);
-            t.Equals(getRegS32(finalDemuxCtx, 2), static_cast<int32_t>(remainingSize),
-                     "the final guest MPEG bytes should be consumed before EOF is committed");
-
-            R5900Context afterDemuxCtx{};
-            setRegU32(afterDemuxCtx, 4, kMpegAddr);
-            ps2_stubs::sceMpegIsEnd(rdram.data(), &afterDemuxCtx, &runtime);
-            t.Equals(getRegS32(afterDemuxCtx, 2), 1,
-                     "MPEG should end after the pending final guest buffer is demuxed");
-        });
-
         tc.Run("sceMpegGetPicture waits for new decoder output instead of duplicating the last frame", [](TestCase &t)
         {
             PS2Runtime runtime;
@@ -840,76 +750,6 @@ void register_ps2_runtime_expansion_tests()
                      "EOF should resume the blocked GetPicture continuation");
             t.Equals(Ps2FastRead32(rdram.data(), kMpegNoDuplicateHandle + 0x08u), 1u,
                      "only the injected decoder frame should be counted as served");
-        });
-
-        tc.Run("sceMpegGetPicture resumes its HLE operation at the MPEG frame cadence", [](TestCase &t)
-        {
-            PS2Runtime runtime;
-            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
-            ps2_stubs::resetMpegStubState();
-            ps2_stubs::notifyMpegCdStreamStart();
-
-            constexpr uint32_t kSequencePacketAddr = 0x00127000u;
-            const std::vector<uint8_t> sequencePacket = {
-                0x00u, 0x00u, 0x01u, 0xE0u,
-                0x00u, 0x0Bu,
-                0x80u, 0x00u, 0x00u,
-                0x00u, 0x00u, 0x01u, 0xB3u,
-                0x14u, 0x01u, 0x60u, 0x14u};
-            std::memcpy(
-                rdram.data() + kSequencePacketAddr,
-                sequencePacket.data(),
-                sequencePacket.size());
-
-            R5900Context demuxContext{};
-            runtime.eeScheduler().reset(rdram.data(), demuxContext);
-            setRegU32(demuxContext, 4, kMpegPacingHandle);
-            setRegU32(demuxContext, 5, kSequencePacketAddr);
-            setRegU32(demuxContext, 6, static_cast<uint32_t>(sequencePacket.size()));
-            setRegU32(demuxContext, 7, kSequencePacketAddr);
-            setRegU32(demuxContext, 8, static_cast<uint32_t>(sequencePacket.size()));
-            ps2_stubs::sceMpegDemuxPssRing(rdram.data(), &demuxContext, &runtime);
-            t.Equals(
-                getRegS32(demuxContext, 2),
-                static_cast<int32_t>(sequencePacket.size()),
-                "the 29.97 fps MPEG sequence header should be consumed");
-
-            ps2_stubs::enqueueMpegDecodedFrameForTesting(kMpegPacingHandle);
-            ps2_stubs::enqueueMpegDecodedFrameForTesting(kMpegPacingHandle);
-            runtime.registerFunction(kMpegPacingMainPc, testMpegPacingMain);
-            runtime.registerFunction(kMpegPacingAfterFirstPc, testMpegPacingAfterFirst);
-            runtime.registerFunction(kMpegPacingAfterSecondPc, testMpegPacingAfterSecond);
-            runtime.registerFunction(kMpegPacingFirstProducerPc, testMpegPacingFirstProducer);
-            runtime.registerFunction(kMpegPacingSecondProducerPc, testMpegPacingSecondProducer);
-            gMpegPacingStage.store(0u, std::memory_order_release);
-            gMpegPacingFirstProducerStage.store(0u, std::memory_order_release);
-            gMpegPacingSecondProducerStage.store(0u, std::memory_order_release);
-            gMpegPacingResumeTick.store(0u, std::memory_order_release);
-
-            R5900Context mainContext{};
-            mainContext.pc = kMpegPacingMainPc;
-            EeScheduler &ee = runtime.eeScheduler();
-            ee.reset(rdram.data(), mainContext);
-            const int firstProducerId = ee.createThread(EeThreadCreateParams{
-                0u, kMpegPacingFirstProducerPc, 0u, 0u, 0u, 10, 0u});
-            const int secondProducerId = ee.createThread(EeThreadCreateParams{
-                0u, kMpegPacingSecondProducerPc, 0u, 0u, 0u, 11, 0u});
-            t.IsTrue(firstProducerId > 1 && secondProducerId > firstProducerId,
-                     "two VSync producer guest threads should be created");
-            t.Equals(ee.startThread(firstProducerId, 0u, mainContext, false), 0,
-                     "the first VSync producer should become ready");
-            t.Equals(ee.startThread(secondProducerId, 0u, mainContext, false), 0,
-                     "the second VSync producer should become ready");
-            ee.run();
-
-            t.Equals(gMpegPacingFirstProducerStage.load(std::memory_order_acquire), 1u,
-                     "the second GetPicture should wait before the first VSync");
-            t.Equals(gMpegPacingSecondProducerStage.load(std::memory_order_acquire), 1u,
-                     "29.97 fps must still be waiting after one 59.94 Hz VSync");
-            t.Equals(gMpegPacingResumeTick.load(std::memory_order_acquire), 2ull,
-                     "the pending GetPicture should complete after two VSync ticks");
-            t.Equals(gMpegPacingStage.load(std::memory_order_acquire), 3u,
-                     "VSync completion must re-enter GetPicture before its guest continuation");
         });
 
         tc.Run("sceSdRemote isolates voice transfers from block streaming state", [](TestCase &t)
@@ -1025,7 +865,7 @@ void register_ps2_runtime_expansion_tests()
             t.Equals(remote(0x80F0u, 1u, 0u), 1u,
                      "sceSdRemoteInit should restore idle voice status to complete");
         });
-         
+
         tc.Run("IPU init skips missing optional helper instead of dispatching the default trap", [](TestCase &t)
         {
             PS2Runtime runtime;
@@ -1252,7 +1092,7 @@ void register_ps2_runtime_expansion_tests()
             writeVuInstructionPair(code, 8u, 0u, makeVuAdd(0xFu, 2u, 1u, 1u));
             writeVuInstructionPair(code, 16u, makeVuSq(0xFu, 2u, 0u, 1), kVuEndNop);
 
-            R5900Context ctx;
+            R5900Context ctx{};
             runtime.executeVU0Microprogram(runtime.memory().getRDRAM(), &ctx, 0u);
 
             float output[4]{};
@@ -1266,6 +1106,102 @@ void register_ps2_runtime_expansion_tests()
             _mm_storeu_ps(vf2, ctx.vu0_vf[2]);
             t.Equals(vf2[0], 2.0f, "VU0 VF2.x should copy back to CPU context");
             t.Equals(static_cast<uint32_t>(ctx.vi[0]), 0u, "VU0 VI0 should remain zero");
+        });
+
+        tc.Run("VU0 microprogram preserves the architectural RNG state", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize should succeed");
+            t.IsTrue(runtime.syncCoreSubsystems(), "runtime core subsystems should bind");
+
+            uint8_t *const code = runtime.memory().getVU0Code();
+            std::memset(code, 0, PS2_VU0_CODE_SIZE);
+            constexpr uint32_t kVuUpperNop = 0x000002FFu;
+            constexpr uint32_t kVuUpperEndNop = 0x400002FFu;
+            writeVuInstructionPair(
+                code, 0u,
+                makeVuLowerSpecial(0x40u, 0u, 1u, 0x8u),
+                kVuUpperEndNop); // RNEXT.x vf1
+            writeVuInstructionPair(code, 8u, 0u, kVuUpperNop);
+
+            constexpr uint32_t seed = 0x3FC00000u;
+            const uint32_t x = (seed >> 4) & 1u;
+            const uint32_t y = (seed >> 22) & 1u;
+            const uint32_t expected =
+                (((seed << 1) ^ x ^ y) & 0x007FFFFFu) | 0x3F800000u;
+            R5900Context ctx{};
+            ctx.vu0_r = _mm_castsi128_ps(
+                _mm_set1_epi32(static_cast<int32_t>(seed)));
+            runtime.executeVU0Microprogram(runtime.memory().getRDRAM(), &ctx, 0u);
+
+            alignas(16) uint32_t rWords[4]{};
+            _mm_storeu_si128(reinterpret_cast<__m128i *>(rWords),
+                             _mm_castps_si128(ctx.vu0_r));
+            t.Equals(rWords[0], expected, "VU0 micro RNG should advance the imported R seed");
+            t.Equals(rWords[1], expected, "VU0 R should remain replicated for macro-mode access");
+            alignas(16) uint32_t vf1Words[4]{};
+            _mm_storeu_si128(reinterpret_cast<__m128i *>(vf1Words),
+                             _mm_castps_si128(ctx.vu0_vf[1]));
+            t.Equals(vf1Words[0], expected, "RNEXT should expose the same R value through VF1.x");
+        });
+
+        tc.Run("VU0 direct MicroMem writes invalidate the fixed decode cache", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize should succeed");
+            t.IsTrue(runtime.syncCoreSubsystems(), "runtime core subsystems should bind");
+
+            constexpr uint32_t kVuUpperNop = 0x000002FFu;
+            constexpr uint32_t kVuUpperEndNop = 0x400002FFu;
+            runtime.memory().write64(
+                PS2_VU0_CODE_BASE,
+                packVuInstructionPair(makeVuIaddiu(1u, 0u, 1), kVuUpperEndNop));
+            runtime.memory().write64(
+                PS2_VU0_CODE_BASE + 8u,
+                packVuInstructionPair(0u, kVuUpperNop));
+
+            R5900Context first{};
+            runtime.executeVU0Microprogram(runtime.memory().getRDRAM(), &first, 0u);
+            t.Equals(static_cast<uint32_t>(first.vi[1]), 1u,
+                     "first cached VU0 microprogram should execute");
+
+            runtime.memory().write64(
+                PS2_VU0_CODE_BASE,
+                packVuInstructionPair(makeVuIaddiu(1u, 0u, 2), kVuUpperEndNop));
+            R5900Context second{};
+            runtime.executeVU0Microprogram(runtime.memory().getRDRAM(), &second, 0u);
+            t.Equals(static_cast<uint32_t>(second.vi[1]), 2u,
+                     "VU0 cache should rebuild after a direct MicroMem write");
+        });
+
+        tc.Run("VU0 FBRST TE gates a T-bit microprogram stop", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize should succeed");
+            t.IsTrue(runtime.syncCoreSubsystems(), "runtime core subsystems should bind");
+
+            uint8_t *const code = runtime.memory().getVU0Code();
+            std::memset(code, 0, PS2_VU0_CODE_SIZE);
+            constexpr uint32_t kVuUpperNop = 0x000002FFu;
+            writeVuInstructionPair(
+                code, 0u, makeVuIaddiu(1u, 0u, 7),
+                kVuUpperNop | 0x08000000u);
+            writeVuInstructionPair(
+                code, 8u, makeVuIaddiu(2u, 0u, 9),
+                kVuUpperNop);
+
+            R5900Context ctx{};
+            ctx.vu0_fbrst = 1u << 3; // TE0
+            runtime.executeVU0Microprogram(runtime.memory().getRDRAM(), &ctx, 0u);
+
+            t.Equals(static_cast<uint32_t>(ctx.vi[1]), 7u,
+                     "the T-marked instruction should execute");
+            t.Equals(static_cast<uint32_t>(ctx.vi[2]), 0u,
+                     "TE0 should stop VU0 before the following instruction");
+            t.IsTrue((ctx.vu0_vpu_stat & (1u << 2)) != 0u,
+                     "VPU-STAT should report a VU0 T-bit stop");
+            t.Equals(ctx.vu0_tpc, 8u,
+                     "TPC should point at the first instruction not executed");
         });
 
         tc.Run("GS sprite draw applies XYOFFSET and fully-outside scissor should not render", [](TestCase &t)

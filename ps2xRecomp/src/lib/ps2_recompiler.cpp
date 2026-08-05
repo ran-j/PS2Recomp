@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <cctype>
 #include <condition_variable>
+#include <cstring>
 #include <exception>
 #include <mutex>
 #include <queue>
@@ -750,6 +751,7 @@ namespace ps2recomp
             m_stubFunctions.clear();
             m_stubFunctionStarts.clear();
             m_stubHandlerBindingsByStart.clear();
+            m_correctnessCriticalFunctionStarts.clear();
 
             for (const auto &name : m_config.skipFunctions)
             {
@@ -809,6 +811,7 @@ namespace ps2recomp
             m_symbols = m_elfParser->extractSymbols();
             m_sections = m_elfParser->getSections();
             m_relocations = m_elfParser->getRelocations();
+            collectCorrectnessCriticalFunctionStarts();
 
             if (m_functions.empty())
             {
@@ -937,24 +940,81 @@ namespace ps2recomp
 
             size_t processedCount = 0;
             size_t failedCount = 0;
+            size_t correctnessCriticalFailureCount = 0;
+
+            for (uint32_t initializerStart : m_correctnessCriticalFunctionStarts)
+            {
+                const auto functionIt = std::find_if(
+                    m_functions.begin(), m_functions.end(),
+                    [initializerStart](const Function &function)
+                    { return function.start == initializerStart; });
+                if (functionIt == m_functions.end())
+                {
+                    const auto bindingIt = m_stubHandlerBindingsByStart.find(initializerStart);
+                    if (bindingIt != m_stubHandlerBindingsByStart.end() &&
+                        resolveStubTarget(bindingIt->second) != StubTarget::Unknown)
+                    {
+                        Function manualInitializer{};
+                        manualInitializer.name = "manual_initializer_" + bindingIt->second;
+                        manualInitializer.start = initializerStart;
+                        manualInitializer.end = initializerStart + 4u;
+                        m_functions.push_back(std::move(manualInitializer));
+                        m_reporter.info(
+                            "correctness-critical",
+                            "Synthesized initializer entry for resolved handler '" +
+                                bindingIt->second + "'");
+                        continue;
+                    }
+
+                    ++correctnessCriticalFailureCount;
+                    m_reporter.recordCorrectnessCriticalFailure();
+                    m_reporter.errorAt(
+                        "correctness-critical",
+                        ".ctors/.init_array",
+                        initializerStart,
+                        "Initializer table target has no discovered guest function or manual handler");
+                }
+            }
+
             for (auto &function : m_functions)
             {
                 m_reporter.recordFunctionProcessed();
+                const bool correctnessCritical = isCorrectnessCriticalFunction(function);
 
                 if (isStubFunction(function))
                 {
-                    function.isStub = true;
-                    function.isSkipped = false;
-                    m_reporter.recordFunctionStubbed();
-                    continue;
+                    if (!correctnessCritical || hasResolvedStubHandler(function))
+                    {
+                        function.isStub = true;
+                        function.isSkipped = false;
+                        m_reporter.recordFunctionStubbed();
+                        continue;
+                    }
+
+                    m_reporter.recordCorrectnessCriticalGuestFallback();
+                    m_reporter.warningAt(
+                        "correctness-critical",
+                        function.name,
+                        function.start,
+                        "Unresolved initializer stub ignored; recompiling the original guest function");
                 }
 
                 if (shouldSkipFunction(function))
                 {
-                    function.isSkipped = true;
-                    function.isStub = false;
-                    m_reporter.recordFunctionSkipped();
-                    continue;
+                    if (!correctnessCritical)
+                    {
+                        function.isSkipped = true;
+                        function.isStub = false;
+                        m_reporter.recordFunctionSkipped();
+                        continue;
+                    }
+
+                    m_reporter.recordCorrectnessCriticalGuestFallback();
+                    m_reporter.warningAt(
+                        "correctness-critical",
+                        function.name,
+                        function.start,
+                        "Initializer skip ignored; recompiling the original guest function");
                 }
 
                 if (!decodeFunction(function))
@@ -962,11 +1022,26 @@ namespace ps2recomp
                     ++failedCount;
                     m_reporter.recordDecodeFailure();
                     m_reporter.recordFunctionSkipped();
-                    m_reporter.warningAt("decode", function.name, function.start, "Skipping function due decode failure");
                     function.isSkipped = true;
+                    if (correctnessCritical)
+                    {
+                        ++correctnessCriticalFailureCount;
+                        m_reporter.recordCorrectnessCriticalFailure();
+                        m_reporter.errorAt(
+                            "correctness-critical",
+                            function.name,
+                            function.start,
+                            "Initializer could not be recompiled and has no resolved manual handler");
+                    }
+                    else
+                    {
+                        m_reporter.warningAt("decode", function.name, function.start, "Skipping function due decode failure");
+                    }
                     continue;
                 }
 
+                function.isStub = false;
+                function.isSkipped = false;
                 function.isRecompiled = true;
                 m_reporter.recordFunctionRecompiled();
 #if _DEBUG
@@ -992,7 +1067,7 @@ namespace ps2recomp
             }
 
             m_reporter.progress("recompilation pass completed");
-            return true;
+            return correctnessCriticalFailureCount == 0u;
         }
         catch (const std::exception &e)
         {
@@ -1957,6 +2032,64 @@ namespace ps2recomp
             return true;
         }
         return ps2_runtime_calls::isStubName(function.name);
+    }
+
+    bool PS2Recompiler::IsCorrectnessCriticalFunctionName(const std::string &name)
+    {
+        static constexpr const char *kPrefixes[] = {
+            "__ct__",
+            "__sinit_",
+            "_GLOBAL__sub_I_",
+            "GLOBAL__sub_I_",
+            "__static_initialization_and_destruction_0",
+            "__do_global_ctors",
+        };
+
+        for (const char *prefix : kPrefixes)
+        {
+            if (name.rfind(prefix, 0u) == 0u)
+                return true;
+        }
+        return false;
+    }
+
+    bool PS2Recompiler::isCorrectnessCriticalFunction(const Function &function) const
+    {
+        return IsCorrectnessCriticalFunctionName(function.name) ||
+               m_correctnessCriticalFunctionStarts.contains(function.start);
+    }
+
+    bool PS2Recompiler::hasResolvedStubHandler(const Function &function) const
+    {
+        std::string handlerName = function.name;
+        const auto bindingIt = m_stubHandlerBindingsByStart.find(function.start);
+        if (bindingIt != m_stubHandlerBindingsByStart.end() && !bindingIt->second.empty())
+            handlerName = bindingIt->second;
+        return resolveStubTarget(handlerName) != StubTarget::Unknown;
+    }
+
+    void PS2Recompiler::collectCorrectnessCriticalFunctionStarts()
+    {
+        m_correctnessCriticalFunctionStarts.clear();
+        for (const Section &section : m_sections)
+        {
+            if (section.name != ".ctors" &&
+                section.name != ".init_array" &&
+                section.name != ".preinit_array")
+            {
+                continue;
+            }
+            if (section.data == nullptr || section.size < sizeof(uint32_t))
+                continue;
+
+            for (uint32_t offset = 0; offset + sizeof(uint32_t) <= section.size; offset += sizeof(uint32_t))
+            {
+                uint32_t target = 0u;
+                std::memcpy(&target, section.data + offset, sizeof(target));
+                if (target != 0u && target != 0xFFFFFFFFu)
+                    m_correctnessCriticalFunctionStarts.insert(target);
+            }
+        }
     }
 
     bool PS2Recompiler::writeToFile(const std::string &path, const std::string &content)
