@@ -182,6 +182,11 @@ namespace
         return static_cast<uint64_t>(lower) | (static_cast<uint64_t>(upper) << 32);
     }
 
+    void writeTrackedVuInstructionPair(Vu1Fixture &fx, uint32_t pc, uint32_t lower, uint32_t upper)
+    {
+        fx.mem.write64(PS2_VU1_CODE_BASE + pc, packVuInstructionPair(lower, upper));
+    }
+
     void appendU32(std::vector<uint8_t> &bytes, uint32_t value)
     {
         const uint8_t *src = reinterpret_cast<const uint8_t *>(&value);
@@ -574,7 +579,7 @@ void register_ps2_vu1_tests()
                      "dependency stall and the dependent FMAC writeback must both consume cycles");
         });
 
-        tc.Run("ACC writeback participates in the same four-cycle scheduler", [](TestCase &t)
+        tc.Run("ACC forwarding feeds the next upper instruction without a dependency stall", [](TestCase &t)
         {
             Vu1Fixture fx;
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
@@ -596,16 +601,11 @@ void register_ps2_vu1_tests()
                         0u, 0u, 0u, 5u);
 
             t.Equals(vu1.state().acc[0], 11.0f,
-                     "ADDA should become visible when the dependent MADD issues");
-            t.Equals(vu1.state().vf[5][0], 0.0f,
-                     "dependent MADD should remain pending until its own writeback");
-            vu1.resume(fx.code, PS2_VU1_CODE_SIZE,
-                       fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
-                       0u, 0u, 3u);
+                     "ADDA should forward ACC to the following upper instruction");
             t.Equals(vu1.state().vf[5][0], 17.0f,
-                     "MADD should consume the committed ACC lane");
-            t.Equals(vu1.state().cycles, static_cast<uint64_t>(8u),
-                     "ACC hazard and destination writeback must share the VU clock");
+                     "MADD should consume the forwarded ACC value without stalling");
+            t.Equals(vu1.state().cycles, static_cast<uint64_t>(5u),
+                     "ACC forwarding must not introduce a four-cycle dependency stall");
         });
 
         tc.Run("ILW result becomes visible after four cycles before IALU consumes it", [](TestCase &t)
@@ -867,11 +867,11 @@ void register_ps2_vu1_tests()
                      "E should stop before the instruction after its delay slot");
 
             vu1.reset();
-            writeVuInstructionPair(
-                fx.code, 0u, makeVuIaddiu(1u, 0u, 3),
+            writeTrackedVuInstructionPair(
+                fx, 0u, makeVuIaddiu(1u, 0u, 3),
                 kVuUpperNop | 0x08000000u);
-            writeVuInstructionPair(
-                fx.code, 8u, makeVuIaddiu(2u, 0u, 5),
+            writeTrackedVuInstructionPair(
+                fx, 8u, makeVuIaddiu(2u, 0u, 5),
                 kVuUpperNop);
             vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
                         fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
@@ -893,11 +893,11 @@ void register_ps2_vu1_tests()
 
             vu1.reset();
             vu1.state().dBitEnabled = true;
-            writeVuInstructionPair(
-                fx.code, 0u, makeVuIaddiu(1u, 0u, 4),
+            writeTrackedVuInstructionPair(
+                fx, 0u, makeVuIaddiu(1u, 0u, 4),
                 kVuUpperNop | 0x10000000u);
-            writeVuInstructionPair(
-                fx.code, 8u, makeVuIaddiu(2u, 0u, 6),
+            writeTrackedVuInstructionPair(
+                fx, 8u, makeVuIaddiu(2u, 0u, 6),
                 kVuUpperNop);
             vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
                         fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
@@ -919,14 +919,14 @@ void register_ps2_vu1_tests()
 
             vu1.reset();
             vu1.state().tBitEnabled = true;
-            writeVuInstructionPair(
-                fx.code, 0u, makeVuBranch(1),
+            writeTrackedVuInstructionPair(
+                fx, 0u, makeVuBranch(1),
                 kVuUpperNop | 0x08000000u);
-            writeVuInstructionPair(
-                fx.code, 8u, makeVuIaddiu(2u, 0u, 11),
+            writeTrackedVuInstructionPair(
+                fx, 8u, makeVuIaddiu(2u, 0u, 11),
                 kVuUpperNop);
-            writeVuInstructionPair(
-                fx.code, 16u, makeVuIaddiu(3u, 0u, 13),
+            writeTrackedVuInstructionPair(
+                fx, 16u, makeVuIaddiu(3u, 0u, 13),
                 kVuUpperNop);
             vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
                         fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
@@ -971,12 +971,12 @@ void register_ps2_vu1_tests()
                      "an immediately following branch should see the pre-write VI value");
 
             vu1.reset();
-            writeVuInstructionPair(fx.code, 8u, 0u, kVuUpperNop);
-            writeVuInstructionPair(
-                fx.code, 16u, makeVuIbne(1u, 0u, 2),
+            writeTrackedVuInstructionPair(fx, 8u, 0u, kVuUpperNop);
+            writeTrackedVuInstructionPair(
+                fx, 16u, makeVuIbne(1u, 0u, 2),
                 kVuUpperNop);
-            writeVuInstructionPair(
-                fx.code, 40u, makeVuIaddiu(5u, 0u, 5),
+            writeTrackedVuInstructionPair(
+                fx, 40u, makeVuIaddiu(5u, 0u, 5),
                 kVuUpperNop);
             vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
                         fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
@@ -989,20 +989,20 @@ void register_ps2_vu1_tests()
                      "taken branch should arrive at its target after the delay slot");
 
             vu1.reset();
-            writeVuInstructionPair(
-                fx.code, 0u, makeVuIaddiu(1u, 0u, 1),
+            writeTrackedVuInstructionPair(
+                fx, 0u, makeVuIaddiu(1u, 0u, 1),
                 makeVuUpper(0x28u, 0x8u, 2u, 1u, 3u));
-            writeVuInstructionPair(
-                fx.code, 8u, makeVuIbne(1u, 0u, 2),
+            writeTrackedVuInstructionPair(
+                fx, 8u, makeVuIbne(1u, 0u, 2),
                 makeVuUpper(0x28u, 0x8u, 0u, 3u, 4u));
-            writeVuInstructionPair(
-                fx.code, 16u, makeVuIaddiu(2u, 0u, 2),
+            writeTrackedVuInstructionPair(
+                fx, 16u, makeVuIaddiu(2u, 0u, 2),
                 kVuUpperNop);
-            writeVuInstructionPair(
-                fx.code, 24u, makeVuIaddiu(3u, 0u, 3),
+            writeTrackedVuInstructionPair(
+                fx, 24u, makeVuIaddiu(3u, 0u, 3),
                 kVuUpperNop);
-            writeVuInstructionPair(
-                fx.code, 32u, makeVuIaddiu(4u, 0u, 4),
+            writeTrackedVuInstructionPair(
+                fx, 32u, makeVuIaddiu(4u, 0u, 4),
                 kVuUpperNop);
             vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
                         fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
@@ -1428,7 +1428,7 @@ void register_ps2_vu1_tests()
                             startPC,
                             top,
                             itop,
-                            2u);
+                            3u);
             });
 
             const uint32_t mscalCmd = makeVifCmd(0x14u, 0u, 0u);
