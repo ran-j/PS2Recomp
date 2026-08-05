@@ -144,7 +144,10 @@ void PS2Memory::processVIF0Data(const uint8_t *data, uint32_t sizeBytes)
                 if (destAddr + copyBytes > PS2_VU0_CODE_SIZE)
                     copyBytes = PS2_VU0_CODE_SIZE - destAddr;
                 if (pos + copyBytes <= sizeBytes)
+                {
                     std::memcpy(m_vu0Code + destAddr, data + pos, copyBytes);
+                    markVU0CodeModified();
+                }
             }
 
             pos += mpgBytes;

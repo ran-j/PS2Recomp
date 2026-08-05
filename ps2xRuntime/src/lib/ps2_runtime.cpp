@@ -209,6 +209,7 @@ namespace
         ctx->vu0_mac_flags = 0;
         ctx->vu0_status = 0;
         ctx->vu0_q = 1.0f;
+        ctx->vu0_r = _mm_castsi128_ps(_mm_set1_epi32(0x3F800000));
         ctx->vu0_vpu_stat = 0;
         ctx->vu0_vpu_stat2 = 0;
     }
@@ -230,11 +231,16 @@ namespace
         state.q = ctx->vu0_q;
         state.p = ctx->vu0_p;
         state.i = ctx->vu0_i;
+        alignas(16) uint32_t rWords[4]{};
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(rWords), _mm_castps_si128(ctx->vu0_r));
+        state.r = 0x3F800000u | (rWords[0] & 0x007FFFFFu);
         state.pc = ctx->vu0_pc;
         state.mac = ctx->vu0_mac_flags;
         state.clip = ctx->vu0_clip_flags;
         state.status = ctx->vu0_status;
         state.itop = ctx->vu0_itop;
+        state.dBitEnabled = (ctx->vu0_fbrst & (1u << 2)) != 0u;
+        state.tBitEnabled = (ctx->vu0_fbrst & (1u << 3)) != 0u;
 
         state.vf[0][0] = 0.0f;
         state.vf[0][1] = 0.0f;
@@ -258,6 +264,7 @@ namespace
         ctx->vu0_q = state.q;
         ctx->vu0_p = state.p;
         ctx->vu0_i = state.i;
+        ctx->vu0_r = _mm_castsi128_ps(_mm_set1_epi32(static_cast<int32_t>(state.r)));
         ctx->vu0_mac_flags = state.mac;
         ctx->vu0_clip_flags = state.clip;
         ctx->vu0_clip_flags2 = state.clip;
@@ -265,7 +272,7 @@ namespace
         ctx->vu0_itop = state.itop;
         ctx->vu0_pc = state.pc;
         ctx->vu0_tpc = state.pc;
-        ctx->vu0_vpu_stat = 0;
+        ctx->vu0_vpu_stat = (ctx->vu0_vpu_stat & 0xFF00u) | (state.stoppedByD ? (1u << 1) : 0u) | (state.stoppedByT ? (1u << 2) : 0u);
         ctx->vu0_vpu_stat2 = 0;
 
         ctx->vu0_vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
@@ -523,6 +530,9 @@ PS2Runtime::PS2Runtime()
 
     // R0 is always zero in MIPS
     m_cpuContext.r[0] = _mm_set1_epi32(0);
+    m_cpuContext.vu0_vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
+    m_cpuContext.vu0_q = 1.0f;
+    m_cpuContext.vu0_r = _mm_castsi128_ps(_mm_set1_epi32(0x3F800000));
 
     // Stack pointer (SP) and global pointer (GP) will be set by the loaded ELF
 
@@ -647,13 +657,31 @@ bool PS2Runtime::syncCoreSubsystems()
                                     { m_gs.processGIFPacket(data, size); });
     m_memory.setGifArbiter(&m_gifArbiter);
     m_memory.setVu1MscalCallback([this](uint32_t startPC, uint32_t top, uint32_t itop)
-                                 { m_vu1.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
-                                                 m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
-                                                 m_gs, &m_memory, startPC, top, itop, 65536); });
+                                 {
+                                     m_vu1.state().dBitEnabled =
+                                         (m_cpuContext.vu0_fbrst & (1u << 10)) != 0u;
+                                     m_vu1.state().tBitEnabled =
+                                         (m_cpuContext.vu0_fbrst & (1u << 11)) != 0u;
+                                     m_vu1.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
+                                                   m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
+                                                   m_gs, &m_memory, startPC, top, itop, 65536);
+                                     m_cpuContext.vu0_vpu_stat =
+                                         (m_cpuContext.vu0_vpu_stat & ~0x0600u) |
+                                         (m_vu1.state().stoppedByD ? 0x0200u : 0u) |
+                                         (m_vu1.state().stoppedByT ? 0x0400u : 0u); });
     m_memory.setVu1MscntCallback([this](uint32_t top, uint32_t itop)
-                                 { m_vu1.resume(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
-                                                m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
-                                                m_gs, &m_memory, top, itop, 65536); });
+                                 {
+                                     m_vu1.state().dBitEnabled =
+                                         (m_cpuContext.vu0_fbrst & (1u << 10)) != 0u;
+                                     m_vu1.state().tBitEnabled =
+                                         (m_cpuContext.vu0_fbrst & (1u << 11)) != 0u;
+                                     m_vu1.resume(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
+                                                  m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
+                                                  m_gs, &m_memory, top, itop, 65536);
+                                     m_cpuContext.vu0_vpu_stat =
+                                         (m_cpuContext.vu0_vpu_stat & ~0x0600u) |
+                                         (m_vu1.state().stoppedByD ? 0x0200u : 0u) |
+                                         (m_vu1.state().stoppedByT ? 0x0400u : 0u); });
     resetIop();
     m_vu0.reset();
     m_vu1.reset();
@@ -1157,6 +1185,10 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
     const uint32_t gp = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[28], 0));
     const uint32_t a0 = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[4], 0));
     const uint32_t a1 = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[5], 0));
+    const uint32_t a2 = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[6], 0));
+    const uint32_t a3 = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[7], 0));
+    const uint32_t s0 = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[16], 0));
+    const uint32_t s1 = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[17], 0));
     const uint32_t v0 = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[2], 0));
     const uint32_t v1 = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[3], 0));
 
@@ -1194,6 +1226,27 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
         readGuestU32Offset(a0, 0x08u, a0Word8) &&
         readGuestU32Offset(a0, 0x0cu, a0WordC);
 
+    uint32_t s0Word0 = 0u;
+    uint32_t s0Word4 = 0u;
+    uint32_t s0Word8 = 0u;
+    uint32_t s0WordC = 0u;
+    const bool s0Readable =
+        readGuestU32Offset(s0, 0x00u, s0Word0) &&
+        readGuestU32Offset(s0, 0x04u, s0Word4) &&
+        readGuestU32Offset(s0, 0x08u, s0Word8) &&
+        readGuestU32Offset(s0, 0x0cu, s0WordC);
+
+    uint32_t recordWord0 = 0u;
+    uint32_t recordWord4 = 0u;
+    uint32_t recordWord8 = 0u;
+    uint32_t recordWordC = 0u;
+    const bool recordReadable =
+        s0Readable && s0Word4 != 0u &&
+        readGuestU32Offset(s0Word4, 0x00u, recordWord0) &&
+        readGuestU32Offset(s0Word4, 0x04u, recordWord4) &&
+        readGuestU32Offset(s0Word4, 0x08u, recordWord8) &&
+        readGuestU32Offset(s0Word4, 0x0cu, recordWordC);
+
     uint32_t vtableSlot0 = 0u;
     uint32_t vtableSlot4 = 0u;
     uint32_t vtableSlot8 = 0u;
@@ -1218,6 +1271,10 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
             << " gp=0x" << gp
             << " a0=0x" << a0
             << " a1=0x" << a1
+            << " a2=0x" << a2
+            << " a3=0x" << a3
+            << " s0=0x" << s0
+            << " s1=0x" << s1
             << " v0=0x" << v0
             << " v1=0x" << v1
             << " a0Readable=" << (a0Readable ? "yes" : "no")
@@ -1225,6 +1282,16 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
             << " a0[4]=0x" << a0Word4
             << " a0[8]=0x" << a0Word8
             << " a0[c]=0x" << a0WordC
+            << " s0Readable=" << (s0Readable ? "yes" : "no")
+            << " s0[0]=0x" << s0Word0
+            << " s0[4]=0x" << s0Word4
+            << " s0[8]=0x" << s0Word8
+            << " s0[c]=0x" << s0WordC
+            << " recordReadable=" << (recordReadable ? "yes" : "no")
+            << " record[0]=0x" << recordWord0
+            << " record[4]=0x" << recordWord4
+            << " record[8]=0x" << recordWord8
+            << " record[c]=0x" << recordWordC
             << " vtableReadable=" << (vtableReadable ? "yes" : "no")
             << " vtbl[0]=0x" << vtableSlot0
             << " vtbl[4]=0x" << vtableSlot4
@@ -2152,16 +2219,19 @@ void PS2Runtime::yieldGuestExecutionAfterWake()
     {
         GuestExecutionReleaseScope releaseGuestExecution(this);
         std::unique_lock<std::mutex> lock(m_guestExecutionHandoffMutex);
-        m_guestExecutionHandoffCv.wait_for(lock, std::chrono::milliseconds(2), [&]()
+        m_guestExecutionHandoffCv.wait_for(lock, std::chrono::milliseconds(1), [&]()
                                            { return m_guestExecutionHandoffEpoch.load(std::memory_order_acquire) != handoffEpoch; });
     }
 }
 
 bool PS2Runtime::shouldPreemptGuestExecution()
 {
+    constexpr uint32_t kContendedYieldInterval = 1024u;
+    constexpr uint32_t kUncontendedYieldInterval = 16384u;
+
     thread_local uint32_t s_backEdgeYieldCounter = 0u;
     const uint32_t waiterCount = m_guestExecutionWaiters.load(std::memory_order_acquire);
-    const uint32_t yieldInterval = (waiterCount != 0u) ? 64u : 100u;
+    const uint32_t yieldInterval = (waiterCount != 0u) ? kContendedYieldInterval : kUncontendedYieldInterval;
     if (++s_backEdgeYieldCounter < yieldInterval)
     {
         return false;

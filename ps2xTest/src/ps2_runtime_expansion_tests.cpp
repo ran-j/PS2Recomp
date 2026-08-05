@@ -82,10 +82,36 @@ namespace
                0x28u;
     }
 
+    uint32_t makeVuIaddiu(uint8_t it, uint8_t is, int16_t immediate)
+    {
+        return (0x08u << 25) |
+               (static_cast<uint32_t>(it & 0xFu) << 16) |
+               (static_cast<uint32_t>(is & 0xFu) << 11) |
+               (static_cast<uint32_t>(immediate) & 0x7FFu);
+    }
+
+    uint32_t makeVuLowerSpecial(uint8_t specialOp, uint8_t is,
+                                uint8_t it = 0u, uint8_t dest = 0u)
+    {
+        return (0x40u << 25) |
+               (static_cast<uint32_t>(dest & 0xFu) << 21) |
+               (static_cast<uint32_t>(it & 0x1Fu) << 16) |
+               (static_cast<uint32_t>(is & 0x1Fu) << 11) |
+               (static_cast<uint32_t>(specialOp & 0x7Cu) << 4) |
+               static_cast<uint32_t>(specialOp & 0x3u) |
+               0x3Cu;
+    }
+
     void writeVuInstructionPair(uint8_t *code, uint32_t pc, uint32_t lower, uint32_t upper)
     {
         std::memcpy(code + pc, &lower, sizeof(lower));
         std::memcpy(code + pc + sizeof(lower), &upper, sizeof(upper));
+    }
+
+    uint64_t packVuInstructionPair(uint32_t lower, uint32_t upper)
+    {
+        return static_cast<uint64_t>(lower) |
+               (static_cast<uint64_t>(upper) << 32);
     }
 
     bool hasSignedRdWrite(const std::string &generated, uint8_t rd)
@@ -182,7 +208,7 @@ namespace
             }
 
             bool shouldPreempt = false;
-            for (int attempt = 0; attempt < 256 &&
+            for (int attempt = 0; attempt < 2048 &&
                                   !shouldPreempt;
                  ++attempt)
             {
@@ -569,6 +595,30 @@ void register_ps2_runtime_expansion_tests()
 
             t.IsTrue(outerPending, "outermost scope should deliver the deferred yield");
             t.IsFalse(innerPending, "inner scope must stay untouched");
+        });
+
+        tc.Run("guest preemption policy amortizes uncontended back-edge checks", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            uint32_t firstPreemptionCall = 0u;
+
+            // Use a fresh host thread so this assertion starts with a fresh
+            // thread-local back-edge counter.
+            std::thread worker([&]()
+            {
+                for (uint32_t call = 1u; call <= 32768u; ++call)
+                {
+                    if (runtime.shouldPreemptGuestExecution())
+                    {
+                        firstPreemptionCall = call;
+                        break;
+                    }
+                }
+            });
+            worker.join();
+
+            t.Equals(firstPreemptionCall, 16384u,
+                     "uncontended parser loops should amortize dispatcher handoffs across many back edges");
         });
 
         tc.Run("guest preemption policy requests a dispatcher handoff when another guest thread contends", [](TestCase &t)
@@ -1693,7 +1743,7 @@ void register_ps2_runtime_expansion_tests()
             writeVuInstructionPair(code, 8u, 0u, makeVuAdd(0xFu, 2u, 1u, 1u));
             writeVuInstructionPair(code, 16u, makeVuSq(0xFu, 2u, 0u, 1), kVuEndNop);
 
-            R5900Context ctx;
+            R5900Context ctx{};
             runtime.executeVU0Microprogram(runtime.memory().getRDRAM(), &ctx, 0u);
 
             float output[4]{};
@@ -1707,6 +1757,102 @@ void register_ps2_runtime_expansion_tests()
             _mm_storeu_ps(vf2, ctx.vu0_vf[2]);
             t.Equals(vf2[0], 2.0f, "VU0 VF2.x should copy back to CPU context");
             t.Equals(static_cast<uint32_t>(ctx.vi[0]), 0u, "VU0 VI0 should remain zero");
+        });
+
+        tc.Run("VU0 microprogram preserves the architectural RNG state", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize should succeed");
+            t.IsTrue(runtime.syncCoreSubsystems(), "runtime core subsystems should bind");
+
+            uint8_t *const code = runtime.memory().getVU0Code();
+            std::memset(code, 0, PS2_VU0_CODE_SIZE);
+            constexpr uint32_t kVuUpperNop = 0x000002FFu;
+            constexpr uint32_t kVuUpperEndNop = 0x400002FFu;
+            writeVuInstructionPair(
+                code, 0u,
+                makeVuLowerSpecial(0x40u, 0u, 1u, 0x8u),
+                kVuUpperEndNop); // RNEXT.x vf1
+            writeVuInstructionPair(code, 8u, 0u, kVuUpperNop);
+
+            constexpr uint32_t seed = 0x3FC00000u;
+            const uint32_t x = (seed >> 4) & 1u;
+            const uint32_t y = (seed >> 22) & 1u;
+            const uint32_t expected =
+                (((seed << 1) ^ x ^ y) & 0x007FFFFFu) | 0x3F800000u;
+            R5900Context ctx{};
+            ctx.vu0_r = _mm_castsi128_ps(
+                _mm_set1_epi32(static_cast<int32_t>(seed)));
+            runtime.executeVU0Microprogram(runtime.memory().getRDRAM(), &ctx, 0u);
+
+            alignas(16) uint32_t rWords[4]{};
+            _mm_storeu_si128(reinterpret_cast<__m128i *>(rWords),
+                             _mm_castps_si128(ctx.vu0_r));
+            t.Equals(rWords[0], expected, "VU0 micro RNG should advance the imported R seed");
+            t.Equals(rWords[1], expected, "VU0 R should remain replicated for macro-mode access");
+            alignas(16) uint32_t vf1Words[4]{};
+            _mm_storeu_si128(reinterpret_cast<__m128i *>(vf1Words),
+                             _mm_castps_si128(ctx.vu0_vf[1]));
+            t.Equals(vf1Words[0], expected, "RNEXT should expose the same R value through VF1.x");
+        });
+
+        tc.Run("VU0 direct MicroMem writes invalidate the fixed decode cache", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize should succeed");
+            t.IsTrue(runtime.syncCoreSubsystems(), "runtime core subsystems should bind");
+
+            constexpr uint32_t kVuUpperNop = 0x000002FFu;
+            constexpr uint32_t kVuUpperEndNop = 0x400002FFu;
+            runtime.memory().write64(
+                PS2_VU0_CODE_BASE,
+                packVuInstructionPair(makeVuIaddiu(1u, 0u, 1), kVuUpperEndNop));
+            runtime.memory().write64(
+                PS2_VU0_CODE_BASE + 8u,
+                packVuInstructionPair(0u, kVuUpperNop));
+
+            R5900Context first{};
+            runtime.executeVU0Microprogram(runtime.memory().getRDRAM(), &first, 0u);
+            t.Equals(static_cast<uint32_t>(first.vi[1]), 1u,
+                     "first cached VU0 microprogram should execute");
+
+            runtime.memory().write64(
+                PS2_VU0_CODE_BASE,
+                packVuInstructionPair(makeVuIaddiu(1u, 0u, 2), kVuUpperEndNop));
+            R5900Context second{};
+            runtime.executeVU0Microprogram(runtime.memory().getRDRAM(), &second, 0u);
+            t.Equals(static_cast<uint32_t>(second.vi[1]), 2u,
+                     "VU0 cache should rebuild after a direct MicroMem write");
+        });
+
+        tc.Run("VU0 FBRST TE gates a T-bit microprogram stop", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize should succeed");
+            t.IsTrue(runtime.syncCoreSubsystems(), "runtime core subsystems should bind");
+
+            uint8_t *const code = runtime.memory().getVU0Code();
+            std::memset(code, 0, PS2_VU0_CODE_SIZE);
+            constexpr uint32_t kVuUpperNop = 0x000002FFu;
+            writeVuInstructionPair(
+                code, 0u, makeVuIaddiu(1u, 0u, 7),
+                kVuUpperNop | 0x08000000u);
+            writeVuInstructionPair(
+                code, 8u, makeVuIaddiu(2u, 0u, 9),
+                kVuUpperNop);
+
+            R5900Context ctx{};
+            ctx.vu0_fbrst = 1u << 3; // TE0
+            runtime.executeVU0Microprogram(runtime.memory().getRDRAM(), &ctx, 0u);
+
+            t.Equals(static_cast<uint32_t>(ctx.vi[1]), 7u,
+                     "the T-marked instruction should execute");
+            t.Equals(static_cast<uint32_t>(ctx.vi[2]), 0u,
+                     "TE0 should stop VU0 before the following instruction");
+            t.IsTrue((ctx.vu0_vpu_stat & (1u << 2)) != 0u,
+                     "VPU-STAT should report a VU0 T-bit stop");
+            t.Equals(ctx.vu0_tpc, 8u,
+                     "TPC should point at the first instruction not executed");
         });
 
         tc.Run("GS sprite draw applies XYOFFSET and fully-outside scissor should not render", [](TestCase &t)
