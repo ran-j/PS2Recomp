@@ -383,6 +383,7 @@ public:
     const EeScheduler &eeScheduler() const;
     void postEeEvent(EeEvent event);
     bool eeCheckpointDue() const noexcept;
+    [[noreturn]] void eeWaitVSyncTicks(uint32_t ticks, uint32_t resumePc);
 
     struct EeExitHandlerRegistration
     {

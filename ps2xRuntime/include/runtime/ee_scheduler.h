@@ -409,6 +409,7 @@ private:
     std::atomic<bool> m_guestExecuting{false};
     std::atomic<bool> m_stopRequested{false};
     std::atomic<bool> m_checkpointPending{false};
+    uint32_t m_debugPublishCountdown = 0u;
 
     mutable std::mutex m_eventMutex;
     std::condition_variable m_eventCv;

@@ -490,13 +490,16 @@ void GS::reset()
     m_preferredDisplaySourceFrame = {};
     m_preferredDisplayDestFbp = 0;
     m_hasPreferredDisplaySource = false;
-    m_hostPresentationFrame.clear();
-    m_hostPresentationWidth = 0u;
-    m_hostPresentationHeight = 0u;
-    m_hostPresentationDisplayFbp = 0u;
-    m_hostPresentationSourceFbp = 0u;
-    m_hostPresentationUsedPreferred = false;
-    m_hasHostPresentationFrame = false;
+    {
+        std::lock_guard<std::mutex> presentationLock(m_presentationMutex);
+        m_hostPresentationFrame.clear();
+        m_hostPresentationWidth = 0u;
+        m_hostPresentationHeight = 0u;
+        m_hostPresentationDisplayFbp = 0u;
+        m_hostPresentationSourceFbp = 0u;
+        m_hostPresentationUsedPreferred = false;
+        m_hasHostPresentationFrame = false;
+    }
 
     m_debugHistoryWrite = 0;
     m_debugHistoryCount = 0;
@@ -562,12 +565,15 @@ GSDebugSnapshot GS::getDebugSnapshot() const
     snapshot.preferredDisplaySourceFrame = m_preferredDisplaySourceFrame;
     snapshot.preferredDisplayDestFbp = m_preferredDisplayDestFbp;
     snapshot.hasPreferredDisplaySource = m_hasPreferredDisplaySource;
-    snapshot.hostPresentationWidth = m_hostPresentationWidth;
-    snapshot.hostPresentationHeight = m_hostPresentationHeight;
-    snapshot.hostPresentationDisplayFbp = m_hostPresentationDisplayFbp;
-    snapshot.hostPresentationSourceFbp = m_hostPresentationSourceFbp;
-    snapshot.hostPresentationUsedPreferred = m_hostPresentationUsedPreferred;
-    snapshot.hasHostPresentationFrame = m_hasHostPresentationFrame;
+    {
+        std::lock_guard<std::mutex> presentationLock(m_presentationMutex);
+        snapshot.hostPresentationWidth = m_hostPresentationWidth;
+        snapshot.hostPresentationHeight = m_hostPresentationHeight;
+        snapshot.hostPresentationDisplayFbp = m_hostPresentationDisplayFbp;
+        snapshot.hostPresentationSourceFbp = m_hostPresentationSourceFbp;
+        snapshot.hostPresentationUsedPreferred = m_hostPresentationUsedPreferred;
+        snapshot.hasHostPresentationFrame = m_hasHostPresentationFrame;
+    }
     snapshot.localToHostPendingBytes = (m_localToHostReadPos < m_localToHostBuffer.size())
                                            ? (m_localToHostBuffer.size() - m_localToHostReadPos)
                                            : 0u;
@@ -959,8 +965,100 @@ bool GS::copyFrameToHostRgbaUnlocked(const GSFrameReg &frame,
 
 void GS::latchHostPresentationFrame()
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
-    latchHostPresentationFrameUnlocked();
+    thread_local std::vector<uint8_t> vramSnapshot;
+    thread_local GS presentationGs;
+
+    thread_local GSRegisters privateRegisters{};
+    GSFrameReg contextFrames[2]{};
+    GSFrameReg preferredSource{};
+    uint32_t preferredDestFbp = 0u;
+    bool hasPreferredSource = false;
+    uint32_t vramSize = 0u;
+
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+        if (!m_privRegs || !m_vram || m_vramSize == 0u)
+        {
+            std::lock_guard<std::mutex> presentationLock(m_presentationMutex);
+            m_hostPresentationFrame.clear();
+            m_hostPresentationWidth = 0u;
+            m_hostPresentationHeight = 0u;
+            m_hostPresentationDisplayFbp = 0u;
+            m_hostPresentationSourceFbp = 0u;
+            m_hostPresentationUsedPreferred = false;
+            m_hasHostPresentationFrame = false;
+            return;
+        }
+
+        vramSize = m_vramSize;
+        vramSnapshot.resize(vramSize);
+        std::memcpy(vramSnapshot.data(), m_vram, vramSize);
+
+        privateRegisters.pmode = m_privRegs->pmode;
+        privateRegisters.smode1 = m_privRegs->smode1;
+        privateRegisters.smode2 = m_privRegs->smode2;
+        privateRegisters.srfsh = m_privRegs->srfsh;
+        privateRegisters.synch1 = m_privRegs->synch1;
+        privateRegisters.synch2 = m_privRegs->synch2;
+        privateRegisters.syncv = m_privRegs->syncv;
+        privateRegisters.dispfb1 = m_privRegs->dispfb1;
+        privateRegisters.display1 = m_privRegs->display1;
+        privateRegisters.dispfb2 = m_privRegs->dispfb2;
+        privateRegisters.display2 = m_privRegs->display2;
+        privateRegisters.extbuf = m_privRegs->extbuf;
+        privateRegisters.extdata = m_privRegs->extdata;
+        privateRegisters.extwrite = m_privRegs->extwrite;
+        privateRegisters.bgcolor = m_privRegs->bgcolor;
+        privateRegisters.csr.store(m_privRegs->csr.load(std::memory_order_acquire), std::memory_order_relaxed);
+        privateRegisters.vsyncTick.store(m_privRegs->vsyncTick.load(std::memory_order_acquire), std::memory_order_relaxed);
+        privateRegisters.imr = m_privRegs->imr;
+        privateRegisters.busdir = m_privRegs->busdir;
+        privateRegisters.siglblid = m_privRegs->siglblid;
+
+        contextFrames[0] = m_ctx[0].frame;
+        contextFrames[1] = m_ctx[1].frame;
+        preferredSource = m_preferredDisplaySourceFrame;
+        preferredDestFbp = m_preferredDisplayDestFbp;
+        hasPreferredSource = m_hasPreferredDisplaySource;
+    }
+
+    presentationGs.init(vramSnapshot.data(), vramSize, &privateRegisters);
+    presentationGs.m_ctx[0].frame = contextFrames[0];
+    presentationGs.m_ctx[1].frame = contextFrames[1];
+    presentationGs.m_preferredDisplaySourceFrame = preferredSource;
+    presentationGs.m_preferredDisplayDestFbp = preferredDestFbp;
+    presentationGs.m_hasPreferredDisplaySource = hasPreferredSource;
+    presentationGs.latchHostPresentationFrameUnlocked();
+
+    uint32_t displayFbp = 0u;
+    uint32_t sourceFbp = 0u;
+    uint32_t width = 0u;
+    uint32_t height = 0u;
+    bool usedPreferred = false;
+    bool hasFrame = false;
+    {
+        std::lock_guard<std::mutex> presentationLock(m_presentationMutex);
+        m_hostPresentationFrame.swap(presentationGs.m_hostPresentationFrame);
+        m_hostPresentationWidth = presentationGs.m_hostPresentationWidth;
+        m_hostPresentationHeight = presentationGs.m_hostPresentationHeight;
+        m_hostPresentationDisplayFbp = presentationGs.m_hostPresentationDisplayFbp;
+        m_hostPresentationSourceFbp = presentationGs.m_hostPresentationSourceFbp;
+        m_hostPresentationUsedPreferred = presentationGs.m_hostPresentationUsedPreferred;
+        m_hasHostPresentationFrame = presentationGs.m_hasHostPresentationFrame;
+
+        displayFbp = m_hostPresentationDisplayFbp;
+        sourceFbp = m_hostPresentationSourceFbp;
+        width = m_hostPresentationWidth;
+        height = m_hostPresentationHeight;
+        usedPreferred = m_hostPresentationUsedPreferred;
+        hasFrame = m_hasHostPresentationFrame;
+    }
+
+    if (hasFrame)
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+        recordPresentDebugEventUnlocked(displayFbp, sourceFbp, width, height, usedPreferred);
+    }
 }
 
 void GS::latchHostPresentationFrameUnlocked()
@@ -1249,7 +1347,7 @@ bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
                                           uint32_t *outSourceFbp,
                                           bool *outUsedPreferred) const
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<std::mutex> lock(m_presentationMutex);
     if (!m_hasHostPresentationFrame || m_hostPresentationFrame.empty())
     {
         outPixels.clear();
@@ -1355,7 +1453,7 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
         bool pre = ((tagLo >> 46) & 1) != 0;
         if (pre)
         {
-            writeRegister(GS_REG_PRIM, (tagLo >> 47) & 0x7FF);
+            writeRegisterUnlocked(GS_REG_PRIM, (tagLo >> 47) & 0x7FF);
         }
 
         uint8_t regs[16];
@@ -1385,7 +1483,7 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
                 {
                     if (offset + 8 > sizeBytes)
                         return;
-                    writeRegister(regs[r], loadLE64(data + offset));
+                    writeRegisterUnlocked(regs[r], loadLE64(data + offset));
                     offset += 8;
                 }
             }
@@ -1420,7 +1518,7 @@ bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 
         const bool pre = ((tag.lo >> 46u) & 1u) != 0u;
         if (pre)
-            writeRegister(GS_REG_PRIM, (tag.lo >> 47u) & 0x7FFu);
+            writeRegisterUnlocked(GS_REG_PRIM, (tag.lo >> 47u) & 0x7FFu);
 
         uint32_t offset = tag.payloadOffset;
         for (uint32_t loop = 0u; loop < tag.nloop; ++loop)
@@ -1451,13 +1549,23 @@ void GS::uploadImageNative(uint64_t bitbltbuf,
                            uint32_t sizeBytes)
 {
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    uploadImageNativeUnlocked(bitbltbuf, trxpos, trxreg, trxdir, data, sizeBytes);
+}
+
+void GS::uploadImageNativeUnlocked(uint64_t bitbltbuf,
+                                   uint64_t trxpos,
+                                   uint64_t trxreg,
+                                   uint64_t trxdir,
+                                   const uint8_t *data,
+                                   uint32_t sizeBytes)
+{
     if (!data || sizeBytes == 0 || !m_vram)
         return;
 
-    writeRegister(GS_REG_BITBLTBUF, bitbltbuf);
-    writeRegister(GS_REG_TRXPOS, trxpos);
-    writeRegister(GS_REG_TRXREG, trxreg);
-    writeRegister(GS_REG_TRXDIR, trxdir);
+    writeRegisterUnlocked(GS_REG_BITBLTBUF, bitbltbuf);
+    writeRegisterUnlocked(GS_REG_TRXPOS, trxpos);
+    writeRegisterUnlocked(GS_REG_TRXREG, trxreg);
+    writeRegisterUnlocked(GS_REG_TRXDIR, trxdir);
     processImageData(data, sizeBytes);
     ++m_nativeImageUploadCount;
 }
@@ -1528,7 +1636,7 @@ bool GS::tryProcessNativeImageUploadPacket(const uint8_t *data, uint32_t sizeByt
     if (offset + imageBytes != sizeBytes)
         return false;
 
-    uploadImageNative(regs[0], regs[1], regs[2], regs[3], data + offset, imageBytes);
+    uploadImageNativeUnlocked(regs[0], regs[1], regs[2], regs[3], data + offset, imageBytes);
     return true;
 }
 
@@ -1537,7 +1645,7 @@ void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
     switch (regDesc)
     {
     case 0x00:
-        writeRegister(GS_REG_PRIM, lo & 0x7FF);
+        writeRegisterUnlocked(GS_REG_PRIM, lo & 0x7FF);
         break;
     case 0x01:
         m_curR = static_cast<uint8_t>(lo & 0xFF);
@@ -1705,13 +1813,13 @@ void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
     case 0x0E:
     {
         uint8_t addr = static_cast<uint8_t>(hi & 0xFF);
-        writeRegister(addr, lo);
+        writeRegisterUnlocked(addr, lo);
         break;
     }
     case 0x0F:
         break;
     default:
-        writeRegister(regDesc, lo);
+        writeRegisterUnlocked(regDesc, lo);
         break;
     }
 }
@@ -1719,6 +1827,11 @@ void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
 void GS::writeRegister(uint8_t regAddr, uint64_t value)
 {
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    writeRegisterUnlocked(regAddr, value);
+}
+
+void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
+{
     const bool interestingReg =
         regAddr == GS_REG_PRIM ||
         regAddr == GS_REG_RGBAQ ||

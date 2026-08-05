@@ -34,6 +34,7 @@ namespace
     constexpr auto kVBlankPeriod = std::chrono::microseconds(16667);
     constexpr auto kVBlankDuration = std::chrono::microseconds(500);
     constexpr uint64_t kAlarmTickMicroseconds = 64u;
+    constexpr uint32_t kDebugPublishDispatchInterval = 4096u;
 
     template <typename Map>
     int allocatePositiveId(int &nextId, const Map &objects)
@@ -92,6 +93,7 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_insideInterrupt = false;
     m_stopRequested.store(false, std::memory_order_release);
     m_checkpointPending.store(false, std::memory_order_release);
+    m_debugPublishCountdown = 0u;
     {
         std::lock_guard lock(m_eventMutex);
         m_events.clear();
@@ -184,8 +186,16 @@ void EeScheduler::run()
             }
         }
         R5900Context &context = running->activeContext();
-        copyMainContextToRuntime();
-        publishSnapshot();
+        if (m_debugPublishCountdown == 0u)
+        {
+            copyMainContextToRuntime();
+            publishSnapshot();
+            m_debugPublishCountdown = kDebugPublishDispatchInterval - 1u;
+        }
+        else
+        {
+            --m_debugPublishCountdown;
+        }
 
         m_runtime.m_debugPc.store(context.pc, std::memory_order_relaxed);
         m_runtime.m_debugRa.store(getRegU32(&context, 31), std::memory_order_relaxed);

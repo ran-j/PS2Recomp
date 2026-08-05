@@ -622,28 +622,38 @@ bool PS2Runtime::syncCoreSubsystems()
     m_memory.setGifArbiter(&m_gifArbiter);
     m_memory.setVu1MscalCallback([this](uint32_t startPC, uint32_t top, uint32_t itop)
                                  {
+                                     R5900Context *cpuContext = m_eeScheduler ? m_eeScheduler->currentContext() : nullptr;
+                                     if (!cpuContext)
+                                     {
+                                         cpuContext = &m_cpuContext;
+                                     }
                                      m_vu1.state().dBitEnabled =
-                                         (m_cpuContext.vu0_fbrst & (1u << 10)) != 0u;
+                                         (cpuContext->vu0_fbrst & (1u << 10)) != 0u;
                                      m_vu1.state().tBitEnabled =
-                                         (m_cpuContext.vu0_fbrst & (1u << 11)) != 0u;
+                                         (cpuContext->vu0_fbrst & (1u << 11)) != 0u;
                                      m_vu1.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
                                                    m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
                                                    m_gs, &m_memory, startPC, top, itop, 65536);
-                                     m_cpuContext.vu0_vpu_stat =
-                                         (m_cpuContext.vu0_vpu_stat & ~0x0600u) |
+                                     cpuContext->vu0_vpu_stat =
+                                         (cpuContext->vu0_vpu_stat & ~0x0600u) |
                                          (m_vu1.state().stoppedByD ? 0x0200u : 0u) |
                                          (m_vu1.state().stoppedByT ? 0x0400u : 0u); });
     m_memory.setVu1MscntCallback([this](uint32_t top, uint32_t itop)
                                  {
+                                     R5900Context *cpuContext = m_eeScheduler ? m_eeScheduler->currentContext() : nullptr;
+                                     if (!cpuContext)
+                                     {
+                                         cpuContext = &m_cpuContext;
+                                     }
                                      m_vu1.state().dBitEnabled =
-                                         (m_cpuContext.vu0_fbrst & (1u << 10)) != 0u;
+                                         (cpuContext->vu0_fbrst & (1u << 10)) != 0u;
                                      m_vu1.state().tBitEnabled =
-                                         (m_cpuContext.vu0_fbrst & (1u << 11)) != 0u;
+                                         (cpuContext->vu0_fbrst & (1u << 11)) != 0u;
                                      m_vu1.resume(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
                                                   m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
                                                   m_gs, &m_memory, top, itop, 65536);
-                                     m_cpuContext.vu0_vpu_stat =
-                                         (m_cpuContext.vu0_vpu_stat & ~0x0600u) |
+                                     cpuContext->vu0_vpu_stat =
+                                         (cpuContext->vu0_vpu_stat & ~0x0600u) |
                                          (m_vu1.state().stoppedByD ? 0x0200u : 0u) |
                                          (m_vu1.state().stoppedByT ? 0x0400u : 0u); });
     resetIop();
@@ -2158,6 +2168,18 @@ void PS2Runtime::postEeEvent(EeEvent event)
 bool PS2Runtime::eeCheckpointDue() const noexcept
 {
     return m_eeScheduler->checkpointDue();
+}
+
+[[noreturn]] void PS2Runtime::eeWaitVSyncTicks(uint32_t ticks, uint32_t resumePc)
+{
+    const uint64_t currentTick = m_eeScheduler->currentVSyncTick();
+    const uint64_t waitTicks = std::max<uint64_t>(1u, ticks);
+    m_eeScheduler->waitVSync(currentTick + waitTicks - 1u,
+                             0,
+                             [resumePc](R5900Context &context)
+                             {
+                                 context.pc = resumePc;
+                             });
 }
 
 void PS2Runtime::addEeExitHandler(int threadId, uint32_t function, uint32_t argument)

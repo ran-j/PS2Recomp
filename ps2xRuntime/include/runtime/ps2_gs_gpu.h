@@ -364,7 +364,14 @@ public:
 
 private:
     void snapshotVRAM();
+    void writeRegisterUnlocked(uint8_t regAddr, uint64_t value);
     void writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi);
+    void uploadImageNativeUnlocked(uint64_t bitbltbuf,
+                                   uint64_t trxpos,
+                                   uint64_t trxreg,
+                                   uint64_t trxdir,
+                                   const uint8_t *data,
+                                   uint32_t sizeBytes);
     void vertexKick(bool drawing);
     void latchHostPresentationFrameUnlocked();
 
@@ -396,6 +403,7 @@ private:
     uint32_t m_vramSize = 0;
     struct GSRegisters *m_privRegs = nullptr;
     mutable std::recursive_mutex m_stateMutex;
+    mutable std::mutex m_presentationMutex;
 
     GSContext m_ctx[2];
     GSPrimReg m_prim{};
