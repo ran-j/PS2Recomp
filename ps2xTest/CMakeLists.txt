@@ -116,6 +116,15 @@ target_link_libraries(ps2x_tests PRIVATE
     ps2_runtime
 )
 
+# VU/GS tests intentionally instantiate large interpreter state.
+# Windows executables default to a much smaller stack than Linux, and
+# sanitizer/debug instrumentation can push these test frames over 1 MiB.
+if(MSVC)
+    target_link_options(ps2x_tests PRIVATE "/STACK:8388608")
+elseif(MINGW)
+    target_link_options(ps2x_tests PRIVATE "--stack,8388608")
+endif()
+
 if(COMMAND ps2x_stage_ffmpeg_runtime_dlls)
     ps2x_stage_ffmpeg_runtime_dlls(ps2x_tests)
 endif()
