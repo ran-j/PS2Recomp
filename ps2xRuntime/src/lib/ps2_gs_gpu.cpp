@@ -23,6 +23,21 @@ namespace
     static constexpr uint32_t kHostFrameWidth = 640u;
     static constexpr uint32_t kHostFrameHeight = 512u;
 
+    GSPrimReg decodePrimRegister(uint64_t value)
+    {
+        GSPrimReg prim{};
+        prim.type = static_cast<GSPrimType>(value & 0x7u);
+        prim.iip = ((value >> 3) & 1u) != 0u;
+        prim.tme = ((value >> 4) & 1u) != 0u;
+        prim.fge = ((value >> 5) & 1u) != 0u;
+        prim.abe = ((value >> 6) & 1u) != 0u;
+        prim.aa1 = ((value >> 7) & 1u) != 0u;
+        prim.fst = ((value >> 8) & 1u) != 0u;
+        prim.ctxt = ((value >> 9) & 1u) != 0u;
+        prim.fix = ((value >> 10) & 1u) != 0u;
+        return prim;
+    }
+
     uint16_t encodeFramePixelPSMCT16(uint8_t r, uint8_t g, uint8_t b, uint8_t a)
     {
         return static_cast<uint16_t>(((r >> 3) & 0x1Fu) |
@@ -109,7 +124,8 @@ namespace
 
     bool validatePackedGifPacket(const uint8_t *data, uint32_t sizeBytes)
     {
-        return visitPackedGifPacket(data, sizeBytes, [](const PackedGifPacketTag &) { return true; });
+        return visitPackedGifPacket(data, sizeBytes, [](const PackedGifPacketTag &)
+                                    { return true; });
     }
 
     void decodeDisplaySize(uint64_t display64, uint32_t &outWidth, uint32_t &outHeight)
@@ -265,7 +281,7 @@ namespace
         return count;
     }
 
-    bool clearFramebufferRect(GS* gs, const GSContext &ctx, uint32_t rgba)
+    bool clearFramebufferRect(GS *gs, const GSContext &ctx, uint32_t rgba)
     {
         if (ctx.frame.fbw == 0u)
         {
@@ -444,6 +460,8 @@ void GS::reset()
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     std::memset(m_ctx, 0, sizeof(m_ctx));
     m_prim = {};
+    m_primRegister = {};
+    m_prmodeRegister = {};
     m_curR = 0x80;
     m_curG = 0x80;
     m_curB = 0x80;
@@ -454,6 +472,9 @@ void GS::reset()
     m_curU = 0;
     m_curV = 0;
     m_curFog = 0;
+    m_fogR = 0;
+    m_fogG = 0;
+    m_fogB = 0;
     m_prmodecont = true;
     m_pabe = false;
     m_texa = {0u, false, 0u};
@@ -552,7 +573,6 @@ GSDebugSnapshot GS::getDebugSnapshot() const
                                            : 0u;
     return snapshot;
 }
-
 
 std::vector<GSDebugHistoryEntry> GS::getDebugHistory() const
 {
@@ -1315,7 +1335,6 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
         }
     });
 
-
     uint32_t offset = 0;
     while (offset + 16 <= sizeBytes)
     {
@@ -1394,7 +1413,7 @@ bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
         return false;
 
     const bool processed = visitPackedGifPacket(data, sizeBytes, [&](const PackedGifPacketTag &tag)
-    {
+                                                {
         m_curQ = 1.0f;
 
         recordGifTagDebugEventUnlocked(sizeBytes, tag.nloop, GIF_FMT_PACKED, tag.nreg);
@@ -1415,8 +1434,7 @@ bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
             }
         }
 
-        return true;
-    });
+        return true; });
 
     if (!processed)
         return false;
@@ -1775,15 +1793,17 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
     {
     case GS_REG_PRIM:
     {
-        m_prim.type = static_cast<GSPrimType>(value & 0x7);
-        m_prim.iip = ((value >> 3) & 1) != 0;
-        m_prim.tme = ((value >> 4) & 1) != 0;
-        m_prim.fge = ((value >> 5) & 1) != 0;
-        m_prim.abe = ((value >> 6) & 1) != 0;
-        m_prim.aa1 = ((value >> 7) & 1) != 0;
-        m_prim.fst = ((value >> 8) & 1) != 0;
-        m_prim.ctxt = ((value >> 9) & 1) != 0;
-        m_prim.fix = ((value >> 10) & 1) != 0;
+        m_primRegister = decodePrimRegister(value);
+        if (m_prmodecont)
+        {
+            m_prim = m_primRegister;
+        }
+        else
+        {
+            // PRIM always selects the primitive topology. With AC=0, all
+            // rendering attributes remain sourced from PRMODE.
+            m_prim.type = m_primRegister.type;
+        }
         m_vtxCount = 0;
         m_vtxIndex = 0;
         break;
@@ -1912,21 +1932,24 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
         break;
     }
     case GS_REG_PRMODECONT:
+    {
         m_prmodecont = (value & 1) != 0;
+        const GSPrimType type = m_primRegister.type;
+        m_prim = m_prmodecont ? m_primRegister : m_prmodeRegister;
+        m_prim.type = type;
         break;
+    }
     case GS_REG_PRMODE:
+    {
+        m_prmodeRegister = decodePrimRegister(value);
         if (!m_prmodecont)
         {
-            m_prim.iip = ((value >> 3) & 1) != 0;
-            m_prim.tme = ((value >> 4) & 1) != 0;
-            m_prim.fge = ((value >> 5) & 1) != 0;
-            m_prim.abe = ((value >> 6) & 1) != 0;
-            m_prim.aa1 = ((value >> 7) & 1) != 0;
-            m_prim.fst = ((value >> 8) & 1) != 0;
-            m_prim.ctxt = ((value >> 9) & 1) != 0;
-            m_prim.fix = ((value >> 10) & 1) != 0;
+            const GSPrimType type = m_primRegister.type;
+            m_prim = m_prmodeRegister;
+            m_prim.type = type;
         }
         break;
+    }
     case GS_REG_TEXCLUT:
         m_texclut.cbw = static_cast<uint8_t>(value & 0x3Fu);
         m_texclut.cou = static_cast<uint8_t>((value >> 6) & 0x3Fu);
@@ -2041,9 +2064,13 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
     case GS_REG_PABE:
         m_pabe = (value & 1u) != 0u;
         break;
+    case GS_REG_FOGCOL:
+        m_fogR = static_cast<uint8_t>(value & 0xFFu);
+        m_fogG = static_cast<uint8_t>((value >> 8) & 0xFFu);
+        m_fogB = static_cast<uint8_t>((value >> 16) & 0xFFu);
+        break;
     case GS_REG_TEXFLUSH:
     case GS_REG_SCANMSK:
-    case GS_REG_FOGCOL:
     case GS_REG_DIMX:
     case GS_REG_DTHE:
     case GS_REG_COLCLAMP:
@@ -2180,7 +2207,6 @@ void GS::performLocalToLocalTransfer()
     }
     break;
 
-
     // left -> right
     // bottom -> top (invert y)
     case 1:
@@ -2271,9 +2297,6 @@ void GS::vertexKick(bool drawing)
         }
     });
 
-    if (!drawing)
-        return;
-
     int needed = 0;
     switch (m_prim.type)
     {
@@ -2305,8 +2328,11 @@ void GS::vertexKick(bool drawing)
     if (m_vtxCount < needed)
         return;
 
-    m_rasterizer.drawPrimitive(this);
-    recordDrawDebugEventUnlocked(needed);
+    if (drawing)
+    {
+        m_rasterizer.drawPrimitive(this);
+        recordDrawDebugEventUnlocked(needed);
+    }
 
     switch (m_prim.type)
     {
