@@ -26,7 +26,7 @@ enum class OverrideStatus {
 };
 
 enum class ThemeMode {
-    Dark, Light, Custom
+    Dark, Light, Custom, PS2
 };
 
 struct AppSettings {
