@@ -4,9 +4,25 @@
 
 namespace ps2_stubs
 {
+    // Upper bound on how many host-fed bytes are held in the pre-decoder stage
+    // (see feedMpegCdStreamBytes below) before the stage is abandoned for the
+    // rest of the current CD-stream generation. Internal tuning knob, not part
+    // of the API contract.
+    constexpr size_t kMpegHostFeedStageCapBytes = 4u * 1024u * 1024u;
+
     void resetMpegStubState();
     void notifyMpegCdStreamStart();
     void notifyMpegCdStreamEof();
+    // Push `size` bytes of the active CD movie stream's program-stream/PES data into
+    // the guest-driven MPEG decoder from host memory. Must be bracketed by
+    // notifyMpegCdStreamStart()/notifyMpegCdStreamEof(). Order-insensitive w.r.t.
+    // sceMpegCreate: bytes fed before any decoder exists on the current CD-stream
+    // generation are staged (bounded; see kMpegHostFeedStageCapBytes) and replayed
+    // into the next decoder created on that generation. Staged bytes are discarded on
+    // stream stop/restart. Returns `size` while a CD stream is active (routed or
+    // staged), 0 only when no CD stream is active. Thread-safe; stream callbacks are
+    // not dispatched on this path.
+    size_t feedMpegCdStreamBytes(const uint8_t *data, size_t size);
     void sceMpegFlush(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceMpegAddBs(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceMpegAddCallback(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
