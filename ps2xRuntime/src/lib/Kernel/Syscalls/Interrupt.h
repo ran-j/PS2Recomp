@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <condition_variable>
 #include "ps2_syscalls.h"
 
@@ -7,6 +8,12 @@ namespace ps2_syscalls
 {
     namespace interrupt_state
     {
+        // Period of the emulator's vsync tick worker (GetCurrentVSyncTick advances once per
+        // period). Authoritative single source of truth: the interrupt worker sleeps this long
+        // between ticks (Interrupt.cpp), and sceMpeg frame-rate pacing static_asserts its 60Hz rate
+        // against it (Stubs/MPEG.cpp). ~1/60s, independent of the guest's NTSC/PAL display mode.
+        constexpr auto kVblankPeriod = std::chrono::microseconds(16667);
+
         struct VSyncFlagRegistration
         {
             uint32_t flagAddr;

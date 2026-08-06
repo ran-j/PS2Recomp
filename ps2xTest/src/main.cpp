@@ -9,6 +9,7 @@ void register_pad_input_tests();
 void register_ps2_runtime_io_tests();
 void register_ps2_runtime_kernel_tests();
 void register_ps2_runtime_interrupt_tests();
+void register_ps2_mpeg_pacing_tests();
 void register_ps2_memory_tests();
 void register_ps2_vu1_tests();
 void register_ps2_vu_tests();
@@ -31,6 +32,7 @@ int main()
     register_ps2_runtime_io_tests();
     register_ps2_runtime_kernel_tests();
     register_ps2_runtime_interrupt_tests();
+    register_ps2_mpeg_pacing_tests();
     register_ps2_memory_tests();
     register_ps2_vu1_tests();
     register_ps2_vu_tests();
