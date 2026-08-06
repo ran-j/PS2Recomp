@@ -1883,8 +1883,9 @@ namespace
         auto &regs = runtime->memory().gs();
         regs.pmode = env.pmode;
         regs.smode2 = env.smode2;
-        regs.dispfb1 = env.dispfb;
-        regs.display1 = env.display;
+        // Circuit 1 (DISPFB1/DISPLAY1) is deliberately not programmed: the env
+        // describes read circuit 2 only, and the game drives circuit 1 itself via
+        // GS MMIO. Writing it here would collapse any two-buffer blend.
         regs.dispfb2 = env.dispfb;
         regs.display2 = env.display;
         regs.bgcolor = env.bgcolor;
