@@ -1221,5 +1221,159 @@ void register_ps2_sif_rpc_tests()
             t.IsTrue(stackHandle != 0u, "DTX handle should be written to stack-selected recv buffer");
             t.Equals(regHandle, 0u, "register recv buffer should remain untouched when stack ABI is preferred");
         });
+
+        tc.Run("ps2_syscalls::sceSifSendCmd copies to the register-supplied destination", [](TestCase &t)
+        {
+            TestEnv env;
+
+            constexpr uint32_t kPacketAddr = 0x0003E000u;
+            constexpr uint32_t kSrcAddr = 0x0003E100u;
+            constexpr uint32_t kRegDestAddr = 0x0003E200u;
+            constexpr uint32_t kStackDestAddr = 0x0003E300u;
+            constexpr uint32_t kExtraSize = 8u;
+            constexpr uint32_t kStackSize = 4u;
+
+            std::array<uint8_t, kExtraSize> payload{};
+            for (size_t i = 0; i < payload.size(); ++i)
+            {
+                payload[i] = static_cast<uint8_t>(0x70u + i);
+            }
+            std::memcpy(env.rdram.data() + kSrcAddr, payload.data(), payload.size());
+            std::memset(env.rdram.data() + kRegDestAddr, 0, payload.size());
+            std::memset(env.rdram.data() + kStackDestAddr, 0, payload.size());
+
+            setRegU32(env.ctx, 4, 0x11u);         // cid
+            setRegU32(env.ctx, 5, kPacketAddr);   // packet
+            setRegU32(env.ctx, 6, 0x20u);         // packetSize
+            setRegU32(env.ctx, 7, kSrcAddr);      // srcExtra ($a3)
+            setRegU32(env.ctx, 8, kRegDestAddr);  // destExtra: EE arg register t0
+            setRegU32(env.ctx, 9, kExtraSize);    // sizeExtra: EE arg register t1
+            setRegU32(env.ctx, 29, K_STACK_ADDR);
+            // Stale o32 stack-argument slots -- immediately above the 16-byte
+            // caller-reserved save area -- that the old decode read from,
+            // holding a different, also-valid destination and a different,
+            // also-valid size, so each of the two reads is separately
+            // distinguishable.
+            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x10u, kStackDestAddr);
+            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x14u, kStackSize);
+
+            ps2_syscalls::sceSifSendCmd(env.rdram.data(), &env.ctx, &env.runtime);
+
+            t.IsTrue(std::memcmp(env.rdram.data() + kRegDestAddr, payload.data(), payload.size()) == 0,
+                     "extra payload should land at the register-supplied destination");
+            const std::array<uint8_t, kExtraSize> zeros{};
+            t.IsTrue(std::memcmp(env.rdram.data() + kStackDestAddr, zeros.data(), zeros.size()) == 0,
+                     "stack-named destination should be left untouched");
+        });
+
+        tc.Run("ps2_stubs::sceSifSendCmd copies to the register-supplied destination", [](TestCase &t)
+        {
+            TestEnv env;
+
+            constexpr uint32_t kSrcAddr = 0x0003F000u;
+            constexpr uint32_t kRegDestAddr = 0x0003F100u;
+            constexpr uint32_t kStackDestAddr = 0x0003F200u;
+            constexpr uint32_t kExtraSize = 8u;
+            constexpr uint32_t kStackSize = 4u;
+
+            std::array<uint8_t, kExtraSize> payload{};
+            for (size_t i = 0; i < payload.size(); ++i)
+            {
+                payload[i] = static_cast<uint8_t>(0x90u + i);
+            }
+            std::memcpy(env.rdram.data() + kSrcAddr, payload.data(), payload.size());
+            std::memset(env.rdram.data() + kRegDestAddr, 0, payload.size());
+            std::memset(env.rdram.data() + kStackDestAddr, 0, payload.size());
+
+            setRegU32(env.ctx, 7, kSrcAddr);      // srcAddr ($a3)
+            setRegU32(env.ctx, 8, kRegDestAddr);  // dstAddr: EE arg register t0
+            setRegU32(env.ctx, 9, kExtraSize);    // size: EE arg register t1
+            setRegU32(env.ctx, 29, K_STACK_ADDR);
+            // Stale o32 stack-argument slots -- immediately above the 16-byte
+            // caller-reserved save area -- that the old decode read from,
+            // holding a different, also-valid destination and a different,
+            // also-valid size, so each of the two reads is separately
+            // distinguishable.
+            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x10u, kStackDestAddr);
+            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x14u, kStackSize);
+
+            ps2_stubs::sceSifSendCmd(env.rdram.data(), &env.ctx, &env.runtime);
+
+            t.IsTrue(std::memcmp(env.rdram.data() + kRegDestAddr, payload.data(), payload.size()) == 0,
+                     "payload should land at the register-supplied destination");
+            const std::array<uint8_t, kExtraSize> zeros{};
+            t.IsTrue(std::memcmp(env.rdram.data() + kStackDestAddr, zeros.data(), zeros.size()) == 0,
+                     "stack-named destination should be left untouched");
+        });
+
+        tc.Run("ps2_syscalls::sceSifSendCmd skips the copy when the argument registers are zero", [](TestCase &t)
+        {
+            TestEnv env;
+
+            constexpr uint32_t kPacketAddr = 0x00040000u;
+            constexpr uint32_t kSrcAddr = 0x00040100u;
+            constexpr uint32_t kStackDestAddr = 0x00040200u;
+            constexpr uint32_t kStackSize = 8u;
+
+            std::array<uint8_t, kStackSize> payload{};
+            for (size_t i = 0; i < payload.size(); ++i)
+            {
+                payload[i] = static_cast<uint8_t>(0xB0u + i);
+            }
+            std::memcpy(env.rdram.data() + kSrcAddr, payload.data(), payload.size());
+            std::memset(env.rdram.data() + kStackDestAddr, 0, payload.size());
+
+            setRegU32(env.ctx, 4, 0x13u);         // cid
+            setRegU32(env.ctx, 5, kPacketAddr);   // packet
+            setRegU32(env.ctx, 6, 0x20u);         // packetSize
+            setRegU32(env.ctx, 7, kSrcAddr);      // srcExtra ($a3)
+            setRegU32(env.ctx, 8, 0u);            // destExtra: caller asked for no extra copy
+            setRegU32(env.ctx, 9, 0u);            // sizeExtra: caller asked for no extra copy
+            setRegU32(env.ctx, 29, K_STACK_ADDR);
+            // A plausible destination and a non-zero size in the o32
+            // stack-argument slots above the caller-reserved save area.
+            // Zero argument registers must not fall through to them.
+            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x10u, kStackDestAddr);
+            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x14u, kStackSize);
+
+            ps2_syscalls::sceSifSendCmd(env.rdram.data(), &env.ctx, &env.runtime);
+
+            const std::array<uint8_t, kStackSize> zeros{};
+            t.IsTrue(std::memcmp(env.rdram.data() + kStackDestAddr, zeros.data(), zeros.size()) == 0,
+                     "zero argument registers should not fall through to the stack destination");
+        });
+
+        tc.Run("ps2_stubs::sceSifSendCmd skips the copy when the argument registers are zero", [](TestCase &t)
+        {
+            TestEnv env;
+
+            constexpr uint32_t kSrcAddr = 0x00041000u;
+            constexpr uint32_t kStackDestAddr = 0x00041200u;
+            constexpr uint32_t kStackSize = 8u;
+
+            std::array<uint8_t, kStackSize> payload{};
+            for (size_t i = 0; i < payload.size(); ++i)
+            {
+                payload[i] = static_cast<uint8_t>(0xC0u + i);
+            }
+            std::memcpy(env.rdram.data() + kSrcAddr, payload.data(), payload.size());
+            std::memset(env.rdram.data() + kStackDestAddr, 0, payload.size());
+
+            setRegU32(env.ctx, 7, kSrcAddr);      // srcAddr ($a3)
+            setRegU32(env.ctx, 8, 0u);            // dstAddr: caller asked for no extra copy
+            setRegU32(env.ctx, 9, 0u);            // size: caller asked for no extra copy
+            setRegU32(env.ctx, 29, K_STACK_ADDR);
+            // A plausible destination and a non-zero size in the o32
+            // stack-argument slots above the caller-reserved save area.
+            // Zero argument registers must not fall through to them.
+            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x10u, kStackDestAddr);
+            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x14u, kStackSize);
+
+            ps2_stubs::sceSifSendCmd(env.rdram.data(), &env.ctx, &env.runtime);
+
+            const std::array<uint8_t, kStackSize> zeros{};
+            t.IsTrue(std::memcmp(env.rdram.data() + kStackDestAddr, zeros.data(), zeros.size()) == 0,
+                     "zero argument registers should not fall through to the stack destination");
+        });
     });
 }
