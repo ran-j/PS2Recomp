@@ -10,6 +10,7 @@ namespace ps2_stubs
     {
         std::mutex g_gs_sync_v_mutex;
         uint64_t g_gs_sync_v_base_tick = 0u;
+        uint64_t g_gs_sync_v_last_tick = 0u;   // last tick consumed by sceGsSyncV (test observability)
         std::mutex g_gs_sync_v_callback_mutex;
         uint32_t g_gs_sync_v_callback_func = 0u;
         uint32_t g_gs_sync_v_callback_gp = 0u;
@@ -613,6 +614,18 @@ namespace ps2_stubs
         }
 
         return static_cast<int32_t>((tick - g_gs_sync_v_base_tick - 1u) & 1u);
+    }
+
+    uint64_t lastGsSyncVConsumedTick()
+    {
+        std::lock_guard<std::mutex> lock(g_gs_sync_v_mutex);
+        return g_gs_sync_v_last_tick;
+    }
+
+    uint64_t gsSyncVBaseTick()
+    {
+        std::lock_guard<std::mutex> lock(g_gs_sync_v_mutex);
+        return g_gs_sync_v_base_tick;
     }
 
     void resetGsSyncVCallbackState()
@@ -1460,6 +1473,10 @@ namespace ps2_stubs
     void sceGsSyncV(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const uint64_t tick = ps2_syscalls::WaitForNextVSyncTick(rdram, runtime);
+        {
+            std::lock_guard<std::mutex> lock(g_gs_sync_v_mutex);
+            g_gs_sync_v_last_tick = tick;
+        }
         if (g_gparam.interlace != 0u)
         {
             setReturnS32(ctx, getGsSyncVFieldForTick(tick));
