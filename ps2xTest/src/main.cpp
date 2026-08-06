@@ -18,6 +18,7 @@ void register_ps2_sif_rpc_tests();
 void register_ps2_sif_dma_tests();
 void register_ps2_recompiler_tests();
 void register_ps2_runtime_expansion_tests();
+void register_present_layout_tests();
 void reset_ps2_test_function_table();
 
 int main()
@@ -40,6 +41,7 @@ int main()
     register_ps2_sif_dma_tests();
     register_ps2_recompiler_tests();
     register_ps2_runtime_expansion_tests();
+    register_present_layout_tests();
     int res = MiniTest::Run();
     std::cout.flush();
     std::cerr.flush();
