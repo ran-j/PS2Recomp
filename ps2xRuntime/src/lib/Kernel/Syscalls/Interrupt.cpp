@@ -3,6 +3,8 @@
 #include "ps2_log.h"
 #include "Stubs/GS.h"
 
+#include <bit>
+
 namespace ps2_syscalls
 {
     namespace interrupt_state
@@ -24,9 +26,34 @@ namespace ps2_syscalls
         uint32_t g_enabled_dmac_mask = 0xFFFFFFFFu;
         uint64_t g_vsync_tick_counter = 0u;
         VSyncFlagRegistration g_vsync_registration{};
+
+        std::atomic<uint32_t> g_pending_intc_causes{0u};              // bitmask, one pending bit per cause
+        std::atomic<int64_t> g_pending_intc_raise_ns[32] = {}; // steady_clock ns at last raise, per cause
+        // The raise-timestamp entries are atomic because raisePendingIntc (any
+        // thread) stores a fresh timestamp while the interrupt worker thread
+        // reads it in drainPendingIntc.
     }
 
     using namespace interrupt_state;
+
+    namespace
+    {
+        SteadyNowFn g_pendingIntcNowFn{}; // empty = real clock
+
+        int64_t now_ns()
+        {
+            const auto tp = g_pendingIntcNowFn ? g_pendingIntcNowFn()
+                                                : std::chrono::steady_clock::now();
+            return std::chrono::duration_cast<std::chrono::nanoseconds>(
+                       tp.time_since_epoch())
+                .count();
+        }
+    }
+
+    void setPendingIntcClockForTest(SteadyNowFn fn)
+    {
+        g_pendingIntcNowFn = std::move(fn);
+    }
 
     static void writeGuestU32NoThrow(uint8_t *rdram, uint32_t addr, uint32_t value)
     {
@@ -96,11 +123,11 @@ namespace ps2_syscalls
         return (s_cachedStackTop != 0u) ? s_cachedStackTop : (PS2_RAM_SIZE - 0x10u);
     }
 
-    static void dispatchIntcHandlersForCause(uint8_t *rdram, PS2Runtime *runtime, uint32_t cause)
+    static int dispatchAndCountIntcHandlersForCause(uint8_t *rdram, PS2Runtime *runtime, uint32_t cause)
     {
         if (!rdram || !runtime)
         {
-            return;
+            return 0;
         }
 
         std::vector<IrqHandlerInfo> handlers;
@@ -108,7 +135,7 @@ namespace ps2_syscalls
             std::lock_guard<std::mutex> lock(g_irq_handler_mutex);
             if (cause < 32u && (g_enabled_intc_mask & (1u << cause)) == 0u)
             {
-                return;
+                return 0;
             }
 
             handlers.reserve(g_intcHandlers.size());
@@ -133,6 +160,7 @@ namespace ps2_syscalls
                       { return a.order < b.order; });
         }
 
+        int dispatchedCount = 0;
         for (const IrqHandlerInfo &info : handlers)
         {
             if (!runtime->hasFunction(info.handler))
@@ -157,6 +185,7 @@ namespace ps2_syscalls
                 continue;
             }
 
+            ++dispatchedCount;
             try
             {
                 R5900Context irqCtx{};
@@ -216,6 +245,96 @@ namespace ps2_syscalls
                 }
             }
         }
+
+        return dispatchedCount;
+    }
+
+    void raisePendingIntc(uint32_t cause)
+    {
+        if (cause >= 32u || cause == kIntcVblankStart || cause == kIntcVblankEnd)
+        {
+            return;
+        }
+
+        const uint32_t bit = 1u << cause;
+        g_pending_intc_raise_ns[cause].store(now_ns(), std::memory_order_relaxed); // every raise
+        const uint32_t prev = g_pending_intc_causes.fetch_or(bit, std::memory_order_acq_rel);
+        if ((prev & bit) == 0u)
+        {
+            PS2_IF_AGRESSIVE_LOGS({
+                static std::atomic<uint32_t> s_raiseLogCount{0u};
+                const uint32_t logIndex = s_raiseLogCount.fetch_add(1u, std::memory_order_relaxed);
+                if (logIndex < 16u || (logIndex % 256u) == 0u)
+                {
+                    RUNTIME_LOG("[INTC:raise] cause=" << cause);
+                }
+            });
+        }
+    }
+
+    void drainPendingIntc(uint8_t *rdram, PS2Runtime *runtime)
+    {
+        uint32_t pending = g_pending_intc_causes.load(std::memory_order_acquire);
+        while (pending != 0u)
+        {
+            const uint32_t cause = static_cast<uint32_t>(std::countr_zero(pending));
+            const uint32_t bit = 1u << cause;
+            pending &= ~bit;
+
+            const int ran = dispatchAndCountIntcHandlersForCause(rdram, runtime, cause);
+            if (ran > 0)
+            {
+                // Level-triggered: concurrent same-cause raises collapse into one delivery (intentional).
+                g_pending_intc_causes.fetch_and(~bit, std::memory_order_acq_rel);
+                PS2_IF_AGRESSIVE_LOGS({
+                    static std::atomic<uint32_t> s_deliverLogCount{0u};
+                    const uint32_t logIndex = s_deliverLogCount.fetch_add(1u, std::memory_order_relaxed);
+                    if (logIndex < 16u || (logIndex % 256u) == 0u)
+                    {
+                        RUNTIME_LOG("[INTC:deliver] cause=" << cause << " handlers=" << ran);
+                    }
+                });
+            }
+            else
+            {
+                const int64_t age = now_ns() - g_pending_intc_raise_ns[cause].load(std::memory_order_relaxed);
+                if (age > kPendingIntcMaxAgeNs)
+                {
+                    g_pending_intc_causes.fetch_and(~bit, std::memory_order_acq_rel);
+                    PS2_IF_AGRESSIVE_LOGS({
+                        static std::atomic<uint32_t> s_dropLogCount{0u};
+                        const uint32_t logIndex = s_dropLogCount.fetch_add(1u, std::memory_order_relaxed);
+                        if (logIndex < 16u || (logIndex % 256u) == 0u)
+                        {
+                            RUNTIME_LOG("[INTC:drop] cause=" << cause << " aged out with no registered/enabled handler");
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    void resetInterruptHandlerState()
+    {
+        {
+            std::lock_guard<std::mutex> lock(g_irq_handler_mutex);
+            g_intcHandlers.clear();
+            g_dmacHandlers.clear();
+            g_nextIntcHandlerId = 1;
+            g_nextDmacHandlerId = 1;
+            g_intc_head_order = 0;
+            g_intc_tail_order = 1000;
+            g_dmac_head_order = 0;
+            g_dmac_tail_order = 1000;
+            g_enabled_intc_mask = 0xFFFFFFFFu;
+            g_enabled_dmac_mask = 0xFFFFFFFFu;
+        }
+        g_pending_intc_causes.store(0u, std::memory_order_release);
+        for (auto &ts : g_pending_intc_raise_ns)
+        {
+            ts.store(0, std::memory_order_relaxed);
+        }
+        setPendingIntcClockForTest(nullptr); // a leaked fake clock would leak into the next test
     }
 
     void dispatchDmacHandlersForCause(uint8_t *rdram, PS2Runtime *runtime, uint32_t cause)
@@ -408,7 +527,7 @@ namespace ps2_syscalls
                     PS2Runtime::DeferredGuestYieldScope deferYield(reschedulePending);
                     const uint64_t tickValue = signalVSyncFlag(rdram, runtime);
                     ps2_stubs::dispatchGsSyncVCallback(rdram, runtime, tickValue);
-                    dispatchIntcHandlersForCause(rdram, runtime, kIntcVblankStart);
+                    dispatchAndCountIntcHandlersForCause(rdram, runtime, kIntcVblankStart);
                     handoffBaseline = runtime->guestExecutionHandoffEpochSnapshot();
                 }
                 if (reschedulePending && !runtime->isStopRequested())
@@ -416,7 +535,8 @@ namespace ps2_syscalls
                     runtime->waitForGuestExecutionHandoff(handoffBaseline);
                 }
                 std::this_thread::sleep_for(std::chrono::microseconds(500));
-                dispatchIntcHandlersForCause(rdram, runtime, kIntcVblankEnd);
+                dispatchAndCountIntcHandlersForCause(rdram, runtime, kIntcVblankEnd);
+                drainPendingIntc(rdram, runtime);
             }
         }
 

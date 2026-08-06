@@ -2,6 +2,7 @@
 #include "ps2_runtime.h"
 #include "ps2_syscalls.h"
 #include "Stubs/DMA.h"
+#include "Syscalls/Interrupt.h"
 #include "runtime/ps2_gs_gpu.h"
 
 #include <atomic>
@@ -52,6 +53,8 @@ namespace
     std::atomic<uint32_t> g_dmacSendHits{0u};
     std::atomic<uint32_t> g_dmacSendLastCause{0u};
     std::atomic<uint32_t> g_dmacSendLastChcr{0u};
+    std::atomic<uint32_t> g_pendingIntcHits{0u};
+    std::atomic<uint32_t> g_pendingIntcLastCause{0xFFFFFFFFu};
 
     void setRegU32(R5900Context &ctx, int reg, uint32_t value)
     {
@@ -125,6 +128,9 @@ namespace
     {
         env.runtime.requestStop();
         notifyRuntimeStop();
+        // Defensive cleanup: reset the global INTC handler tables, enable masks,
+        // and pending latch so each test starts from a known INTC state.
+        resetInterruptHandlerState();
     }
 
     void testIntcHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -174,6 +180,18 @@ namespace
         {
             g_dmacSendLastChcr.store(runtime->memory().readIORegister(channelBase + 0x00u), std::memory_order_relaxed);
         }
+
+        ctx->pc = 0u;
+    }
+
+    void testPendingIntcHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        (void)runtime;
+
+        const uint32_t cause = getRegU32(ctx, 4);
+        g_pendingIntcHits.fetch_add(1u, std::memory_order_relaxed);
+        g_pendingIntcLastCause.store(cause, std::memory_order_relaxed);
 
         ctx->pc = 0u;
     }
@@ -514,6 +532,123 @@ void register_ps2_runtime_interrupt_tests()
             t.Equals(g_dmacSendLastCause.load(std::memory_order_relaxed), 1u, "DMAC handler should observe VIF1 cause");
             t.Equals(g_dmacSendLastChcr.load(std::memory_order_relaxed) & 0x100u, 0u, "handler should see VIF1 STR cleared");
             t.Equals(g_dmacSendLastChcr.load(std::memory_order_relaxed) & 0x70000000u, 0x70000000u, "handler should see the latched END tag id");
+
+            cleanupRuntime(env);
+        });
+
+        tc.Run("I-bit VIF1 packet raises cause 5, delivered to a handler registered after the kick", [](TestCase &t)
+        {
+            notifyRuntimeStop();
+            TestEnv env;
+            t.IsTrue(env.runtime.memory().initialize(), "runtime memory initialize should succeed");
+
+            constexpr uint32_t kHandlerAddr = 0x00ABD300u;
+            constexpr uint32_t kVif1Ch = 0x10009000u;
+            constexpr uint32_t kTag0 = 0x00028800u;
+            constexpr uint32_t kTag1 = kTag0 + 0x20u;
+            constexpr uint32_t kCause = 5u;
+
+            uint8_t *rdram = env.runtime.memory().getRDRAM();
+            writeDmaTag(rdram, kTag0, makeDmaTag(1u, 1u, 0u, false)); // CNT, qwc=1
+            writeGuestU64(rdram, kTag0 + 0x10u, 0x0000000080000000ull); // I-bit VIF_NOP
+            writeGuestU64(rdram, kTag0 + 0x18u, 0u);
+            writeDmaTag(rdram, kTag1, makeDmaTag(0u, 7u, 0u, false)); // END
+
+            stopInterruptWorker();
+            interrupt_state::g_pending_intc_causes.store(0u);
+            g_pendingIntcHits.store(0u, std::memory_order_relaxed);
+            g_pendingIntcLastCause.store(0xFFFFFFFFu, std::memory_order_relaxed);
+
+            // Kick before registering: sce libdma only registers the cause-5
+            // handler after the kick returns -- the typical sce-libdma
+            // kick-before-register order.
+            R5900Context sendCtx{};
+            setRegU32(sendCtx, 4, kVif1Ch);
+            setRegU32(sendCtx, 5, kTag0);
+            ps2_stubs::sceDmaSend(rdram, &sendCtx, &env.runtime);
+
+            t.Equals(interrupt_state::g_pending_intc_causes.load() & (1u << kCause), (1u << kCause),
+                     "an I-bit VIFcode parsed by the kick should raise cause 5 before any handler is registered");
+
+            env.runtime.registerFunction(kHandlerAddr, &testPendingIntcHandler);
+
+            R5900Context addCtx{};
+            setRegU32(addCtx, 4, kCause);
+            setRegU32(addCtx, 5, kHandlerAddr);
+            setRegU32(addCtx, 6, 0u);
+            setRegU32(addCtx, 7, 0u);
+            t.IsTrue(callSyscall(0x10u, rdram, &addCtx, &env.runtime), "AddIntcHandler syscall should dispatch");
+            t.IsTrue(getRegS32(addCtx, 2) > 0, "AddIntcHandler for cause 5 should return handler id");
+
+            R5900Context enableCtx{};
+            setRegU32(enableCtx, 4, kCause);
+            t.IsTrue(callSyscall(0x14u, rdram, &enableCtx, &env.runtime), "EnableIntc syscall should dispatch");
+
+            // AddIntcHandler auto-starts the interrupt worker; stop it so this
+            // test thread is the only drainer.
+            stopInterruptWorker();
+
+            drainPendingIntc(rdram, &env.runtime);
+
+            t.Equals(g_pendingIntcHits.load(std::memory_order_relaxed), 1u, "late-registered handler should run exactly once");
+            t.Equals(g_pendingIntcLastCause.load(std::memory_order_relaxed), kCause, "handler should observe cause 5 in $a0");
+            t.Equals(interrupt_state::g_pending_intc_causes.load() & (1u << kCause), 0u,
+                     "pending bit 5 should be cleared after delivery");
+
+            cleanupRuntime(env);
+        });
+
+        tc.Run("VIF1 packet without an I bit does not raise cause 5", [](TestCase &t)
+        {
+            notifyRuntimeStop();
+            TestEnv env;
+            t.IsTrue(env.runtime.memory().initialize(), "runtime memory initialize should succeed");
+
+            constexpr uint32_t kHandlerAddr = 0x00ABD380u;
+            constexpr uint32_t kVif1Ch = 0x10009000u;
+            constexpr uint32_t kTag0 = 0x00028A00u;
+            constexpr uint32_t kTag1 = kTag0 + 0x20u;
+            constexpr uint32_t kCause = 5u;
+
+            uint8_t *rdram = env.runtime.memory().getRDRAM();
+            writeDmaTag(rdram, kTag0, makeDmaTag(1u, 1u, 0u, false)); // CNT, qwc=1
+            writeGuestU64(rdram, kTag0 + 0x10u, 0u); // plain VIF_NOP, no I bit
+            writeGuestU64(rdram, kTag0 + 0x18u, 0u);
+            writeDmaTag(rdram, kTag1, makeDmaTag(0u, 7u, 0u, false)); // END
+
+            stopInterruptWorker();
+            interrupt_state::g_pending_intc_causes.store(0u);
+            g_pendingIntcHits.store(0u, std::memory_order_relaxed);
+            g_pendingIntcLastCause.store(0xFFFFFFFFu, std::memory_order_relaxed);
+
+            R5900Context sendCtx{};
+            setRegU32(sendCtx, 4, kVif1Ch);
+            setRegU32(sendCtx, 5, kTag0);
+            ps2_stubs::sceDmaSend(rdram, &sendCtx, &env.runtime);
+
+            t.Equals(interrupt_state::g_pending_intc_causes.load() & (1u << kCause), 0u,
+                     "an ordinary VIF1 packet with no I bit must not raise cause 5");
+
+            env.runtime.registerFunction(kHandlerAddr, &testPendingIntcHandler);
+
+            R5900Context addCtx{};
+            setRegU32(addCtx, 4, kCause);
+            setRegU32(addCtx, 5, kHandlerAddr);
+            setRegU32(addCtx, 6, 0u);
+            setRegU32(addCtx, 7, 0u);
+            t.IsTrue(callSyscall(0x10u, rdram, &addCtx, &env.runtime), "AddIntcHandler syscall should dispatch");
+            t.IsTrue(getRegS32(addCtx, 2) > 0, "AddIntcHandler for cause 5 should return handler id");
+
+            R5900Context enableCtx{};
+            setRegU32(enableCtx, 4, kCause);
+            t.IsTrue(callSyscall(0x14u, rdram, &enableCtx, &env.runtime), "EnableIntc syscall should dispatch");
+
+            stopInterruptWorker();
+
+            drainPendingIntc(rdram, &env.runtime);
+
+            t.Equals(g_pendingIntcHits.load(std::memory_order_relaxed), 0u,
+                     "a persistent cause-5 handler must not be invoked by an ordinary VIF1 packet with no I bit");
 
             cleanupRuntime(env);
         });
@@ -884,6 +1019,202 @@ void register_ps2_runtime_interrupt_tests()
             t.IsFalse(waiterThrew.load(std::memory_order_acquire),
                       "WaitVSyncTick waiter thread should not throw");
             t.IsTrue(wokeOnStop, "WaitVSyncTick waiter should unblock when runtime is stopping");
+
+            cleanupRuntime(env);
+        });
+
+        tc.Run("raisePendingIntc delivers to a registered handler on the next drain tick", [](TestCase &t)
+        {
+            notifyRuntimeStop();
+            TestEnv env;
+            stopInterruptWorker();
+            interrupt_state::g_pending_intc_causes.store(0u);
+
+            constexpr uint32_t kCause = 5u;
+            constexpr uint32_t kHandlerAddr = 0x00ABE100u;
+
+            g_pendingIntcHits.store(0u, std::memory_order_relaxed);
+            g_pendingIntcLastCause.store(0xFFFFFFFFu, std::memory_order_relaxed);
+
+            env.runtime.registerFunction(kHandlerAddr, &testPendingIntcHandler);
+
+            R5900Context addCtx{};
+            setRegU32(addCtx, 4, kCause);
+            setRegU32(addCtx, 5, kHandlerAddr);
+            setRegU32(addCtx, 6, 0u);
+            setRegU32(addCtx, 7, 0u);
+            t.IsTrue(callSyscall(0x10u, env.rdram.data(), &addCtx, &env.runtime), "AddIntcHandler syscall should dispatch");
+            t.IsTrue(getRegS32(addCtx, 2) > 0, "AddIntcHandler for cause 5 should return handler id");
+
+            R5900Context enableCtx{};
+            setRegU32(enableCtx, 4, kCause);
+            t.IsTrue(callSyscall(0x14u, env.rdram.data(), &enableCtx, &env.runtime), "EnableIntc syscall should dispatch");
+
+            // AddIntcHandler auto-starts the interrupt worker thread; stop it so
+            // this test thread is the only drainer (avoids a double-dispatch race
+            // between the worker's own per-tick drain and the manual drain below).
+            stopInterruptWorker();
+
+            raisePendingIntc(kCause);
+            t.Equals(interrupt_state::g_pending_intc_causes.load() & (1u << kCause), (1u << kCause),
+                     "pending bit 5 should be set after raise");
+
+            drainPendingIntc(env.rdram.data(), &env.runtime);
+
+            t.Equals(g_pendingIntcHits.load(std::memory_order_relaxed), 1u, "handler should run exactly once");
+            t.Equals(g_pendingIntcLastCause.load(std::memory_order_relaxed), kCause,
+                     "handler should observe cause 5 in $a0");
+            t.Equals(interrupt_state::g_pending_intc_causes.load() & (1u << kCause), 0u,
+                     "pending bit 5 should be cleared after delivery");
+
+            cleanupRuntime(env);
+        });
+
+        tc.Run("re-raise at the age-out boundary is not dropped", [](TestCase &t)
+        {
+            notifyRuntimeStop();
+            TestEnv env;
+            stopInterruptWorker();
+            interrupt_state::g_pending_intc_causes.store(0u);
+
+            // No cause-5 handler is registered in this test, and cleanupRuntime
+            // resets the process-global INTC handler table between tests, so the
+            // handler table starts empty here by construction (order-independent).
+            // Every drain therefore finds no registered+enabled handler for
+            // cause 5 and is a no-op until the wall-clock expiry fires.
+            constexpr uint32_t kCause = 5u;
+
+            auto fakeNow = std::chrono::steady_clock::now();
+            setPendingIntcClockForTest([&fakeNow]() { return fakeNow; });
+
+            raisePendingIntc(kCause);
+            t.Equals(interrupt_state::g_pending_intc_causes.load() & (1u << kCause), (1u << kCause),
+                     "pending bit should be set after raise");
+
+            // Advance to just under the expiry window measured from the raise.
+            fakeNow += std::chrono::nanoseconds(interrupt_state::kPendingIntcMaxAgeNs - 1);
+            drainPendingIntc(env.rdram.data(), &env.runtime);
+            t.Equals(interrupt_state::g_pending_intc_causes.load() & (1u << kCause), (1u << kCause),
+                     "pending bit should survive a drain just under the expiry window");
+
+            // Re-raise while still pending -- this refreshes the timestamp.
+            raisePendingIntc(kCause);
+
+            // Advance again by just-under-the-window: measured from the
+            // ORIGINAL raise this is now well past expiry, but measured from
+            // the re-raise it is still just under. A comment-3 regression
+            // (only stamping the timestamp on the 0->1 edge) would drop the
+            // bit here.
+            fakeNow += std::chrono::nanoseconds(interrupt_state::kPendingIntcMaxAgeNs - 1);
+            drainPendingIntc(env.rdram.data(), &env.runtime);
+            t.Equals(interrupt_state::g_pending_intc_causes.load() & (1u << kCause), (1u << kCause),
+                     "pending bit should survive when re-raised -- freshness is measured from the most recent raise");
+
+            // Advance past the window measured from the re-raise.
+            fakeNow += std::chrono::nanoseconds(interrupt_state::kPendingIntcMaxAgeNs + 1);
+            drainPendingIntc(env.rdram.data(), &env.runtime);
+            t.Equals(interrupt_state::g_pending_intc_causes.load() & (1u << kCause), 0u,
+                     "pending bit should drop once the window has elapsed since the most recent raise");
+
+            cleanupRuntime(env);
+        });
+
+        tc.Run("a raise before worker startup cannot survive beyond the expiry window", [](TestCase &t)
+        {
+            notifyRuntimeStop();
+            TestEnv env;
+            stopInterruptWorker();
+            interrupt_state::g_pending_intc_causes.store(0u);
+
+            constexpr uint32_t kCause = 5u;
+
+            auto fakeNow = std::chrono::steady_clock::now();
+            setPendingIntcClockForTest([&fakeNow]() { return fakeNow; });
+
+            // No worker started and no drain yet -- this models a cause raised
+            // synchronously before the game ever reaches a VSync/AddIntc path
+            // that would start the interrupt worker.
+            raisePendingIntc(kCause);
+            t.Equals(interrupt_state::g_pending_intc_causes.load() & (1u << kCause), (1u << kCause),
+                     "pending bit should be set after raise");
+
+            fakeNow += std::chrono::nanoseconds(interrupt_state::kPendingIntcMaxAgeNs + 1);
+
+            // The worker's first tick after a late start.
+            drainPendingIntc(env.rdram.data(), &env.runtime);
+            t.Equals(interrupt_state::g_pending_intc_causes.load() & (1u << kCause), 0u,
+                     "a raise that predates worker startup by more than the expiry window must not survive "
+                     "the worker's first drain");
+
+            cleanupRuntime(env);
+        });
+
+        tc.Run("pending cause persists across the raise-vs-registration race", [](TestCase &t)
+        {
+            notifyRuntimeStop();
+            TestEnv env;
+            stopInterruptWorker();
+            interrupt_state::g_pending_intc_causes.store(0u);
+
+            constexpr uint32_t kCause = 5u;
+            constexpr uint32_t kHandlerAddr = 0x00ABE200u;
+
+            g_pendingIntcHits.store(0u, std::memory_order_relaxed);
+            g_pendingIntcLastCause.store(0xFFFFFFFFu, std::memory_order_relaxed);
+
+            raisePendingIntc(kCause);
+            t.Equals(interrupt_state::g_pending_intc_causes.load() & (1u << kCause), (1u << kCause),
+                     "pending bit should be set after raise");
+
+            drainPendingIntc(env.rdram.data(), &env.runtime);
+            t.Equals(interrupt_state::g_pending_intc_causes.load() & (1u << kCause), (1u << kCause),
+                     "pending bit should survive a drain while no handler is registered yet");
+
+            env.runtime.registerFunction(kHandlerAddr, &testPendingIntcHandler);
+
+            R5900Context addCtx{};
+            setRegU32(addCtx, 4, kCause);
+            setRegU32(addCtx, 5, kHandlerAddr);
+            setRegU32(addCtx, 6, 0u);
+            setRegU32(addCtx, 7, 0u);
+            t.IsTrue(callSyscall(0x10u, env.rdram.data(), &addCtx, &env.runtime), "AddIntcHandler syscall should dispatch");
+            t.IsTrue(getRegS32(addCtx, 2) > 0, "AddIntcHandler for cause 5 should return handler id");
+
+            R5900Context enableCtx{};
+            setRegU32(enableCtx, 4, kCause);
+            t.IsTrue(callSyscall(0x14u, env.rdram.data(), &enableCtx, &env.runtime), "EnableIntc syscall should dispatch");
+
+            // AddIntcHandler auto-starts the worker thread; it may legitimately
+            // deliver the still-pending cause on its own tick before we stop it.
+            // Either that path or the manual drain below is correct -- the
+            // level-triggered bit guarantees exactly one delivery either way.
+            stopInterruptWorker();
+
+            drainPendingIntc(env.rdram.data(), &env.runtime);
+
+            t.Equals(g_pendingIntcHits.load(std::memory_order_relaxed), 1u,
+                     "handler should run exactly once total, delivered by the worker or the manual drain");
+            t.Equals(g_pendingIntcLastCause.load(std::memory_order_relaxed), kCause,
+                     "delivered handler should observe cause 5 in $a0");
+            t.Equals(interrupt_state::g_pending_intc_causes.load() & (1u << kCause), 0u,
+                     "pending bit should be cleared after delivery");
+
+            cleanupRuntime(env);
+        });
+
+        tc.Run("vblank causes are excluded from the pending latch", [](TestCase &t)
+        {
+            notifyRuntimeStop();
+            TestEnv env;
+            stopInterruptWorker();
+            interrupt_state::g_pending_intc_causes.store(0u);
+
+            raisePendingIntc(2u);  // VBLANK start
+            raisePendingIntc(3u);  // VBLANK end
+            raisePendingIntc(32u); // out of range
+
+            t.Equals(interrupt_state::g_pending_intc_causes.load(), 0u,
+                     "vblank causes and out-of-range causes must never set the pending latch");
 
             cleanupRuntime(env);
         });

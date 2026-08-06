@@ -1,6 +1,11 @@
 #include <algorithm>
 #include <cctype>
 
+namespace ps2_syscalls
+{
+    void raisePendingIntc(uint32_t cause);
+}
+
 namespace
 {
     constexpr uint32_t kCdSectorSize = 2048;
@@ -1434,6 +1439,15 @@ namespace
         for (const uint32_t completedCause : completedCauses)
         {
             ps2_syscalls::dispatchDmacHandlersForCause(rdram, runtime, completedCause);
+        }
+
+        // VIF1 INTC cause 5 is asserted by a VIFcode I bit, decoded during the
+        // processPendingTransfers() parse above. Raise only when such an edge was
+        // actually seen. Delivery stays deferred to the next drain: sce libdma
+        // registers the cause-5 handler after this kick returns.
+        if (mem.consumeVif1InterruptEdges() != 0u)
+        {
+            ps2_syscalls::raisePendingIntc(5u);
         }
 
         return 0;

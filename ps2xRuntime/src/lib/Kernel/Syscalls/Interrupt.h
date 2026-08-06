@@ -1,6 +1,10 @@
 #pragma once
 
+#include <atomic>
+#include <chrono>
 #include <condition_variable>
+#include <cstdint>
+#include <functional>
 #include "ps2_syscalls.h"
 
 namespace ps2_syscalls
@@ -24,9 +28,18 @@ namespace ps2_syscalls
         extern uint32_t g_enabled_dmac_mask;
         extern uint64_t g_vsync_tick_counter;
         extern VSyncFlagRegistration g_vsync_registration;
+        extern std::atomic<uint32_t> g_pending_intc_causes;
+        constexpr int64_t kPendingIntcMaxAgeNs = 2'000'000'000; // ~2 s wall-clock
     }
 
     void dispatchDmacHandlersForCause(uint8_t *rdram, PS2Runtime *runtime, uint32_t cause);
+    void raisePendingIntc(uint32_t cause);
+    void drainPendingIntc(uint8_t *rdram, PS2Runtime *runtime);
+    // Test-support: reset all INTC/DMAC handler bookkeeping to process-start
+    // defaults so regression tests are order-independent.
+    void resetInterruptHandlerState();
+    using SteadyNowFn = std::function<std::chrono::steady_clock::time_point()>;
+    void setPendingIntcClockForTest(SteadyNowFn fn); // nullptr restores steady_clock::now
     void EnsureVSyncWorkerRunning(uint8_t *rdram, PS2Runtime *runtime);
     uint64_t GetCurrentVSyncTick();
     void stopInterruptWorker();

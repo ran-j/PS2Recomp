@@ -344,6 +344,7 @@ public:
     void processVIF1Data(const uint8_t *data, uint32_t sizeBytes);
     void processPendingTransfers();
     std::vector<uint32_t> consumeCompletedDmacCauses();
+    uint32_t consumeVif1InterruptEdges();
 
     int pollDmaRegisters();
 
@@ -422,6 +423,7 @@ public:
     std::vector<PendingTransfer> m_pendingVif1Transfers;
     std::mutex m_completedDmacMutex;
     std::vector<uint32_t> m_completedDmacCauses;
+    std::atomic<uint32_t> m_vif1InterruptEdges{0u}; // I-bit VIFcodes seen since last consume
 
     struct CodeRegion
     {
