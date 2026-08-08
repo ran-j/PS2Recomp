@@ -131,11 +131,8 @@ namespace ps2_log
 {
 inline std::string log_path()
 {
-    static std::string path;
-    if (path.empty())
-    {
-        path = (std::filesystem::current_path() / "ps2_log.txt").string();
-    }
+    static const std::string path =
+        (std::filesystem::current_path() / "ps2_log.txt").string();
     return path;
 }
 inline std::ostream &log_stream()
@@ -148,8 +145,14 @@ inline int &depth()
     static thread_local int d = 0;
     return d;
 }
+inline std::mutex &log_mutex()
+{
+    static std::mutex mutex;
+    return mutex;
+}
 inline void log_entry(const char *name)
 {
+    std::lock_guard<std::mutex> lock(log_mutex());
     for (int i = 0; i < depth(); ++i)
         log_stream() << '\t';
     log_stream() << ">> " << name << " enter\n";
@@ -158,6 +161,7 @@ inline void log_entry(const char *name)
 }
 inline void log_exit(const char *name)
 {
+    std::lock_guard<std::mutex> lock(log_mutex());
     depth()--;
     for (int i = 0; i < depth(); ++i)
         log_stream() << '\t';

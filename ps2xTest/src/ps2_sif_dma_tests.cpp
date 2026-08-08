@@ -113,6 +113,9 @@ namespace
     uint32_t g_dmacHandlerValue = 0u;
     uint32_t g_dmacHandlerLastCause = 0u;
     uint32_t g_dmacHandlerLastArg = 0u;
+    uint32_t g_sifCommandHandlerCalls = 0u;
+    uint32_t g_sifCommandHandlerPacket = 0u;
+    uint32_t g_sifCommandHandlerArg = 0u;
 
     void testDmacHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
@@ -124,6 +127,16 @@ namespace
             writeGuestU32(rdram, g_dmacHandlerWriteAddr, g_dmacHandlerValue);
         }
         ctx->pc = 0u;
+    }
+
+    void testSifCommandHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        (void)runtime;
+        ++g_sifCommandHandlerCalls;
+        g_sifCommandHandlerPacket = ::getRegU32(ctx, 4);
+        g_sifCommandHandlerArg = ::getRegU32(ctx, 5);
+        ctx->pc = ::getRegU32(ctx, 31);
     }
 }
 
@@ -1619,6 +1632,121 @@ void register_ps2_sif_dma_tests()
             t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x20u),
                      kCallCommand,
                      "Duelists MCSERV completion should identify RPC_CALL");
+        });
+
+        tc.Run("raw RPC_END dispatches the registered SIF command handler immediately", [](TestCase &t)
+        {
+            TestEnv env;
+            configureProfile(env, "unmatched.elf");
+
+            constexpr uint32_t kDescriptorAddress = 0x00024000u;
+            constexpr uint32_t kPacketAddress = 0x00024100u;
+            constexpr uint32_t kReceivePointerAddress = 0x00024200u;
+            constexpr uint32_t kInboundAddress = 0x00024300u;
+            constexpr uint32_t kClientAddress = 0x00024400u;
+            constexpr uint32_t kHandlerAddress = 0x00100040u;
+            constexpr uint32_t kHandlerArgument = 0x1234ABCDu;
+            constexpr uint32_t kBindCommand = 0x80000009u;
+            constexpr uint32_t kEndCommand = 0x80000008u;
+            constexpr uint32_t kLoadFileSid = 0x80000006u;
+            constexpr uint32_t kSubAddressRegister = 0x80000001u;
+
+            g_sifCommandHandlerCalls = 0u;
+            g_sifCommandHandlerPacket = 0u;
+            g_sifCommandHandlerArg = 0u;
+            env.runtime.registerFunction(kHandlerAddress, &testSifCommandHandler);
+
+            setRegU32(env.ctx, 4, kEndCommand);
+            setRegU32(env.ctx, 5, kHandlerAddress);
+            setRegU32(env.ctx, 6, kHandlerArgument);
+            ps2_stubs::sceSifAddCmdHandler(env.rdram.data(), &env.ctx, &env.runtime);
+
+            writeGuestU32(env.rdram.data(), kReceivePointerAddress, kInboundAddress);
+            setRegU32(env.ctx, 4, kSubAddressRegister);
+            setRegU32(env.ctx, 5, kReceivePointerAddress);
+            ps2_stubs::sceSifSetReg(env.rdram.data(), &env.ctx, &env.runtime);
+
+            std::memset(env.rdram.data() + kPacketAddress, 0, 0x40u);
+            writeGuestU32(env.rdram.data(), kPacketAddress, 0x40u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x08u, kBindCommand);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x10u, 0xA5000001u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x14u, 0x20310040u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x18u, 1u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x1Cu, kClientAddress);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x20u, kLoadFileSid);
+
+            const Ps2SifDmaTransfer descriptor{
+                kPacketAddress, 0u, 0x40, 0x44};
+            std::memcpy(env.rdram.data() + kDescriptorAddress,
+                        &descriptor,
+                        sizeof(descriptor));
+
+            setRegU32(env.ctx, 4, kDescriptorAddress);
+            setRegU32(env.ctx, 5, 1u);
+            ps2_stubs::sceSifSetDma(env.rdram.data(), &env.ctx, &env.runtime);
+
+            t.IsTrue(getRegS32(env.ctx, 2) > 0,
+                     "raw bind should complete through SIF DMA");
+            t.Equals(g_sifCommandHandlerCalls, 1u,
+                     "RPC_END should invoke the registered command handler exactly once");
+            t.Equals(g_sifCommandHandlerPacket, kInboundAddress,
+                     "command handler should receive the inbound RPC_END packet");
+            t.Equals(g_sifCommandHandlerArg, kHandlerArgument,
+                     "command handler should receive its registered argument");
+            t.Equals(readGuestU32(env.rdram.data(), kInboundAddress + 0x08u),
+                     0u,
+                     "dispatched RPC_END should not remain queued for a second completion");
+
+            setRegU32(env.ctx, 4, kEndCommand);
+            ps2_stubs::sceSifRemoveCmdHandler(env.rdram.data(),
+                                              &env.ctx,
+                                              &env.runtime);
+
+            constexpr uint32_t kSemaParamAddress = 0x00024500u;
+            constexpr uint32_t kCommandPacketAddress = 0x00024600u;
+            writeGuestU32(env.rdram.data(), kSemaParamAddress + 0x00u, 0u);
+            writeGuestU32(env.rdram.data(), kSemaParamAddress + 0x04u, 1u);
+            writeGuestU32(env.rdram.data(), kSemaParamAddress + 0x08u, 0u);
+            writeGuestU32(env.rdram.data(), kSemaParamAddress + 0x0Cu, 0u);
+            writeGuestU32(env.rdram.data(), kSemaParamAddress + 0x10u, 0u);
+            writeGuestU32(env.rdram.data(), kSemaParamAddress + 0x14u, 0u);
+            setRegU32(env.ctx, 4, kSemaParamAddress);
+            ps2_syscalls::CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
+            const int32_t semaphore = getRegS32(env.ctx, 2);
+            t.IsTrue(semaphore > 0,
+                     "synchronous raw completion test should create a semaphore");
+
+            writeGuestU32(env.rdram.data(), kClientAddress, kCommandPacketAddress);
+            writeGuestU32(env.rdram.data(), kClientAddress + 0x08u,
+                          static_cast<uint32_t>(semaphore));
+            writeGuestU32(env.rdram.data(), kClientAddress + 0x1Cu, 0u);
+            writeGuestU32(env.rdram.data(), kClientAddress + 0x20u, 0u);
+            writeGuestU32(env.rdram.data(), kCommandPacketAddress + 0x10u, 5u);
+            writeGuestU32(env.rdram.data(), kCommandPacketAddress + 0x18u,
+                          0xDEADBEEFu);
+
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x10u, 0xA5000002u);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x14u,
+                          kCommandPacketAddress);
+            writeGuestU32(env.rdram.data(), kPacketAddress + 0x18u, 2u);
+            setRegU32(env.ctx, 4, kDescriptorAddress);
+            setRegU32(env.ctx, 5, 1u);
+            ps2_stubs::sceSifSetDma(env.rdram.data(), &env.ctx, &env.runtime);
+
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(semaphore));
+            ps2_syscalls::PollSema(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), semaphore,
+                     "host RPC_END fallback should signal the synchronous semaphore");
+            t.IsTrue(readGuestU32(env.rdram.data(), kClientAddress + 0x24u) != 0u,
+                     "host RPC_END fallback should publish the bound server token");
+            t.Equals(readGuestU32(env.rdram.data(), kClientAddress), 0u,
+                     "host RPC_END fallback should clear the active client packet");
+            t.Equals(readGuestU32(env.rdram.data(), kCommandPacketAddress + 0x10u),
+                     4u,
+                     "host RPC_END fallback should release the command-packet busy bit");
+            t.Equals(readGuestU32(env.rdram.data(), kCommandPacketAddress + 0x18u),
+                     0u,
+                     "host RPC_END fallback should clear command-packet ownership");
         });
 
         tc.Run("raw Duelists typed calls preserve their observed SIF framing", [](TestCase &t)

@@ -57,7 +57,13 @@ namespace ps2_stubs
         std::mutex g_sifHeapMutex;
         std::unordered_map<uint32_t, uint32_t> g_sifRegs;
         std::unordered_map<uint32_t, uint32_t> g_sifSregs;
-        std::unordered_map<uint32_t, uint32_t> g_sifCmdHandlers;
+        struct SifCommandHandler
+        {
+            uint32_t function = 0u;
+            uint32_t argument = 0u;
+        };
+
+        std::unordered_map<uint32_t, SifCommandHandler> g_sifCmdHandlers;
         std::unordered_map<uint32_t, uint32_t> g_rawSifRpcClients;
         std::map<uint32_t, uint32_t> g_sifHeapAllocations;
         uint32_t g_sifCmdBuffer = 0u;
@@ -156,7 +162,133 @@ namespace ps2_stubs
                        : 0u;
         }
 
+        bool invokeSifCommandHandler(uint8_t *rdram,
+                                     R5900Context *ctx,
+                                     PS2Runtime *runtime,
+                                     const SifCommandHandler &handler,
+                                     uint32_t packetAddress)
+        {
+            if (!rdram || !ctx || !runtime || handler.function == 0u ||
+                !runtime->hasFunction(handler.function))
+            {
+                return false;
+            }
+
+            constexpr uint32_t kCallbackStackSize = 0x4000u;
+            constexpr uint32_t kReturnSentinel = 0x00FFF000u;
+            constexpr uint32_t kMaxSteps = 0x8000u;
+
+            R5900Context callback = *ctx;
+            SET_GPR_U32(&callback, 4, packetAddress);
+            SET_GPR_U32(&callback, 5, handler.argument);
+            SET_GPR_U32(&callback, 6, 0u);
+            SET_GPR_U32(&callback, 7, 0u);
+
+            thread_local uint32_t callbackStackTop = 0u;
+            if (callbackStackTop == 0u)
+            {
+                const uint32_t stackBase =
+                    runtime->guestMalloc(kCallbackStackSize, 16u);
+                if (stackBase != 0u)
+                {
+                    callbackStackTop =
+                        (stackBase + kCallbackStackSize) & ~0xFu;
+                }
+            }
+            if (callbackStackTop != 0u)
+            {
+                SET_GPR_U32(&callback, 29, callbackStackTop);
+            }
+
+            SET_GPR_U32(&callback, 31, kReturnSentinel);
+            callback.pc = handler.function;
+            uint32_t steps = 0u;
+            while (callback.pc != 0u &&
+                   callback.pc != kReturnSentinel &&
+                   runtime->hasFunction(callback.pc) &&
+                   steps < kMaxSteps)
+            {
+                const PS2Runtime::RecompiledFunction function =
+                    runtime->lookupFunction(callback.pc);
+                {
+                    PS2Runtime::GuestExecutionScope guestExecution(runtime);
+                    function(rdram, &callback, runtime);
+                }
+                ++steps;
+            }
+            return callback.pc == kReturnSentinel;
+        }
+
+        void completeRawSifRpcClient(uint8_t *rdram,
+                                     R5900Context *ctx,
+                                     PS2Runtime *runtime,
+                                     uint32_t responseAddress,
+                                     uint32_t clientAddress,
+                                     uint32_t requestCommand,
+                                     uint32_t server)
+        {
+            if (clientAddress == 0u || !getMemPtr(rdram, clientAddress))
+            {
+                return;
+            }
+
+            uint32_t packetAddress = 0u;
+            uint32_t semaphore = 0xFFFFFFFFu;
+            uint32_t endFunction = 0u;
+            uint32_t endParameter = 0u;
+            uint32_t serverBuffer = 0u;
+            uint32_t serverCopyBuffer = 0u;
+            if (!readGuestU32(rdram, clientAddress, packetAddress) ||
+                !readGuestU32(rdram, clientAddress + 0x08u, semaphore) ||
+                !readGuestU32(rdram, clientAddress + 0x1Cu, endFunction) ||
+                !readGuestU32(rdram, clientAddress + 0x20u, endParameter) ||
+                !readGuestU32(rdram, responseAddress + 0x28u, serverBuffer) ||
+                !readGuestU32(rdram, responseAddress + 0x2Cu, serverCopyBuffer))
+            {
+                return;
+            }
+
+            if (requestCommand == kSifRpcBindCommand)
+            {
+                (void)writeGuestU32(rdram, clientAddress + 0x24u, server);
+            }
+            (void)writeGuestU32(rdram, clientAddress + 0x14u, serverBuffer);
+            (void)writeGuestU32(rdram, clientAddress + 0x18u, serverCopyBuffer);
+
+            if (requestCommand == kSifRpcCallCommand && endFunction != 0u)
+            {
+                const SifCommandHandler callback{endFunction, 0u};
+                (void)invokeSifCommandHandler(rdram,
+                                              ctx,
+                                              runtime,
+                                              callback,
+                                              endParameter);
+            }
+
+            if (static_cast<int32_t>(semaphore) >= 0)
+            {
+                R5900Context signalContext = *ctx;
+                SET_GPR_U32(&signalContext, 4, semaphore);
+                ps2_syscalls::SignalSema(rdram, &signalContext, runtime);
+            }
+
+            if (packetAddress != 0u)
+            {
+                uint32_t packetFlags = 0u;
+                if (readGuestU32(rdram, packetAddress + 0x10u, packetFlags))
+                {
+                    (void)writeGuestU32(rdram,
+                                        packetAddress + 0x10u,
+                                        packetFlags & ~1u);
+                }
+                (void)writeGuestU32(rdram, packetAddress + 0x18u, 0u);
+            }
+            (void)writeGuestU32(rdram, clientAddress, 0u);
+        }
+
         bool writeRawSifRpcEnd(uint8_t *rdram,
+                               R5900Context *ctx,
+                               PS2Runtime *runtime,
                                uint32_t recordId,
                                uint32_t packetAddress,
                                uint32_t rpcId,
@@ -174,14 +306,57 @@ namespace ps2_stubs
             }
 
             std::memset(response, 0, 0x30u);
-            return writeGuestU32(rdram, responseAddress, 0x30u) &&
-                   writeGuestU32(rdram, responseAddress + 0x08u, kSifRpcEndCommand) &&
-                   writeGuestU32(rdram, responseAddress + 0x10u, recordId) &&
-                   writeGuestU32(rdram, responseAddress + 0x14u, packetAddress) &&
-                   writeGuestU32(rdram, responseAddress + 0x18u, rpcId) &&
-                   writeGuestU32(rdram, responseAddress + 0x1Cu, client) &&
-                   writeGuestU32(rdram, responseAddress + 0x20u, requestCommand) &&
-                   writeGuestU32(rdram, responseAddress + 0x24u, server);
+            const bool wroteResponse =
+                writeGuestU32(rdram, responseAddress, 0x30u) &&
+                writeGuestU32(rdram, responseAddress + 0x08u, kSifRpcEndCommand) &&
+                writeGuestU32(rdram, responseAddress + 0x10u, recordId) &&
+                writeGuestU32(rdram, responseAddress + 0x14u, packetAddress) &&
+                writeGuestU32(rdram, responseAddress + 0x18u, rpcId) &&
+                writeGuestU32(rdram, responseAddress + 0x1Cu, client) &&
+                writeGuestU32(rdram, responseAddress + 0x20u, requestCommand) &&
+                writeGuestU32(rdram, responseAddress + 0x24u, server);
+            if (!wroteResponse)
+            {
+                return false;
+            }
+
+            SifCommandHandler handler{};
+            {
+                std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
+                const auto it = g_sifCmdHandlers.find(kSifRpcEndCommand);
+                if (it != g_sifCmdHandlers.end())
+                {
+                    handler = it->second;
+                }
+            }
+
+            bool dispatched = false;
+            if (handler.function != 0u)
+            {
+                dispatched = invokeSifCommandHandler(rdram,
+                                                     ctx,
+                                                     runtime,
+                                                     handler,
+                                                     responseAddress);
+            }
+            if (dispatched)
+            {
+                // The registered command handler consumed this inbound
+                // command synchronously; do not queue it a second time.
+                (void)writeGuestU32(rdram, responseAddress + 0x08u, 0u);
+                runtime->yieldGuestExecutionAfterWake();
+            }
+            else
+            {
+                completeRawSifRpcClient(rdram,
+                                        ctx,
+                                        runtime,
+                                        responseAddress,
+                                        client,
+                                        requestCommand,
+                                        server);
+            }
+            return true;
         }
 
         bool dispatchRawSifRpc(uint8_t *rdram,
@@ -237,6 +412,8 @@ namespace ps2_stubs
                         g_rawSifRpcClients[client] = sid;
                     }
                     return writeRawSifRpcEnd(rdram,
+                                             ctx,
+                                             runtime,
                                              recordId,
                                              packetAddress,
                                              rpcId,
@@ -323,6 +500,8 @@ namespace ps2_stubs
                     }
                 }
                 return writeRawSifRpcEnd(rdram,
+                                         ctx,
+                                         runtime,
                                          recordId,
                                          packetAddress,
                                          rpcId,
@@ -534,8 +713,9 @@ namespace ps2_stubs
     {
         const uint32_t cid = getRegU32(ctx, 4);
         const uint32_t handler = getRegU32(ctx, 5);
+        const uint32_t argument = getRegU32(ctx, 6);
         std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
-        g_sifCmdHandlers[cid] = handler;
+        g_sifCmdHandlers[cid] = {handler, argument};
         setReturnS32(ctx, 0);
     }
 
