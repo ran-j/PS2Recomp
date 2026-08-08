@@ -9,6 +9,7 @@
 #include "Kernel/Stubs/Audio.h"
 #include "Kernel/Stubs/GS.h"
 #include "Kernel/Stubs/MPEG.h"
+#include "Kernel/Stubs/SIF.h"
 #include "ps2_host_backend.h"
 #include "ps2_iop_host.h"
 #include "ps2x/iop/iop_subsystem.h"
@@ -2014,6 +2015,12 @@ void PS2Runtime::dispatchLoop(uint8_t *rdram, R5900Context *ctx)
 
     while (!isStopRequested())
     {
+        // Raw SIF DMA is accepted synchronously, but its RPC end interrupt
+        // becomes visible only after the issuing guest function has returned.
+        // This gives NOWAIT callers time to publish their pending state before
+        // completion callbacks can wake dependent guest threads.
+        ps2_stubs::drainRawSifRpcCompletions(rdram, ctx, this);
+
         const uint32_t pc = ctx->pc;
         const uint32_t watchedPc = m_guestLoopWatchPc.load(std::memory_order_relaxed);
         if (watchedPc != 0u && pc == watchedPc)

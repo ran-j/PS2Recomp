@@ -5,17 +5,22 @@
 #include "ps2_stubs.h"
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
 namespace ps2_stubs
 {
     void resetSifState();
+    void drainRawSifRpcCompletions(uint8_t *rdram,
+                                   R5900Context *ctx,
+                                   PS2Runtime *runtime);
 }
 
 namespace
@@ -2790,7 +2795,12 @@ void register_ps2_sif_dma_tests()
                 ps2_stubs::sceSifSetDma(
                     env.rdram.data(), &env.ctx, &env.runtime);
                 t.IsTrue(getRegS32(env.ctx, 2) > 0,
-                         "raw CDVD stream call should complete through SIF DMA");
+                         "raw CDVD stream call should be accepted through SIF DMA");
+                t.IsTrue(readGuestU32(env.rdram.data(), kClientAddress) != 0u,
+                         "raw CDVD NOWAIT completion should remain pending until guest dispatch resumes");
+                std::this_thread::sleep_for(std::chrono::milliseconds(3));
+                ps2_stubs::drainRawSifRpcCompletions(
+                    env.rdram.data(), &env.ctx, &env.runtime);
                 t.Equals(readGuestU32(env.rdram.data(),
                                       kInboundAddress + 0x18u),
                          sequence,

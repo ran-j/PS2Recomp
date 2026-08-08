@@ -8,6 +8,8 @@ namespace ps2_stubs
     void sceSifLoadModule(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifSendCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void resetSifState();
+    void drainRawSifRpcCompletions(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void drainBlockingRawSifRpcCompletions(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifAddCmdHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifAllocIopHeap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifAllocSysMemory(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);

@@ -5,6 +5,8 @@
 #include "runtime/ps2_address.h"
 
 #include <map>
+#include <deque>
+#include <chrono>
 
 namespace ps2_stubs
 {
@@ -65,6 +67,18 @@ namespace ps2_stubs
 
         std::unordered_map<uint32_t, SifCommandHandler> g_sifCmdHandlers;
         std::unordered_map<uint32_t, uint32_t> g_rawSifRpcClients;
+        struct PendingRawSifRpcCompletion
+        {
+            uint32_t recordId = 0u;
+            uint32_t packetAddress = 0u;
+            uint32_t rpcId = 0u;
+            uint32_t client = 0u;
+            uint32_t requestCommand = 0u;
+            uint32_t server = 0u;
+            bool hasCallback = false;
+            std::chrono::steady_clock::time_point notBefore{};
+        };
+        std::deque<PendingRawSifRpcCompletion> g_rawSifRpcCompletions;
         std::map<uint32_t, uint32_t> g_sifHeapAllocations;
         uint32_t g_sifCmdBuffer = 0u;
         uint32_t g_sifSysCmdBuffer = 0u;
@@ -84,6 +98,7 @@ namespace ps2_stubs
             g_sifSregs.clear();
             g_sifCmdHandlers.clear();
             g_rawSifRpcClients.clear();
+            g_rawSifRpcCompletions.clear();
             g_sifCmdBuffer = 0u;
             g_sifSysCmdBuffer = 0u;
             g_sifCmdInitialized = false;
@@ -505,6 +520,22 @@ namespace ps2_stubs
                         continue;
                     }
                 }
+                if (result.signalNowaitCompletion && mode != 0u)
+                {
+                    uint32_t endFunction = 0u;
+                    (void)readGuestU32(rdram, client + 0x1Cu, endFunction);
+                    std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
+                    g_rawSifRpcCompletions.push_back({recordId,
+                                                      packetAddress,
+                                                      rpcId,
+                                                      client,
+                                                      command,
+                                                      0u,
+                                                      endFunction != 0u,
+                                                      std::chrono::steady_clock::now() +
+                                                          std::chrono::milliseconds(2)});
+                    return true;
+                }
                 return writeRawSifRpcEnd(rdram,
                                          ctx,
                                          runtime,
@@ -713,6 +744,62 @@ namespace ps2_stubs
         std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
         seedDefaultSifRegsLocked();
         resetSifHeapState();
+    }
+
+    namespace
+    {
+        void drainQueuedRawSifRpcCompletions(uint8_t *rdram,
+                                             R5900Context *ctx,
+                                             PS2Runtime *runtime,
+                                             bool blockingOnly)
+        {
+            std::deque<PendingRawSifRpcCompletion> pending;
+            {
+                std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
+                const auto now = std::chrono::steady_clock::now();
+                auto completion = g_rawSifRpcCompletions.begin();
+                while (completion != g_rawSifRpcCompletions.end())
+                {
+                    const bool ready = blockingOnly
+                                           ? !completion->hasCallback
+                                           : completion->notBefore <= now;
+                    if (!ready)
+                    {
+                        ++completion;
+                        continue;
+                    }
+                    pending.push_back(*completion);
+                    completion = g_rawSifRpcCompletions.erase(completion);
+                }
+            }
+
+            for (const PendingRawSifRpcCompletion &completion : pending)
+            {
+                (void)writeRawSifRpcEnd(rdram,
+                                        ctx,
+                                        runtime,
+                                        completion.recordId,
+                                        completion.packetAddress,
+                                        completion.rpcId,
+                                        completion.client,
+                                        completion.requestCommand,
+                                        completion.server);
+            }
+        }
+    }
+
+    void drainRawSifRpcCompletions(uint8_t *rdram,
+                                   R5900Context *ctx,
+                                   PS2Runtime *runtime)
+    {
+        drainQueuedRawSifRpcCompletions(rdram, ctx, runtime, false);
+    }
+
+    void drainBlockingRawSifRpcCompletions(uint8_t *rdram,
+                                           R5900Context *ctx,
+                                           PS2Runtime *runtime)
+    {
+        drainQueuedRawSifRpcCompletions(rdram, ctx, runtime, true);
     }
 
     void sceSifAddCmdHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

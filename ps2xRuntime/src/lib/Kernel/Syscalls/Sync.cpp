@@ -1,5 +1,6 @@
 #include "Common.h"
 #include "Sync.h"
+#include "../Stubs/SIF.h"
 
 namespace ps2_syscalls
 {
@@ -289,6 +290,11 @@ namespace ps2_syscalls
 
     void WaitSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        // A NOWAIT SIF request may have completed while its SDK wrapper was
+        // still publishing guest-side state. Deliver that completion at the
+        // last safe point before this thread can block on its RPC semaphore.
+        ps2_stubs::drainBlockingRawSifRpcCompletions(rdram, ctx, runtime);
+
         int sid = static_cast<int>(getRegU32(ctx, 4));
         auto sema = lookupSemaInfo(sid);
         if (!sema)
