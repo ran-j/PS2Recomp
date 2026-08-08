@@ -298,6 +298,7 @@ public:
     uint64_t vif1CommandCount() const { return m_vif1CommandCount.load(std::memory_order_relaxed); }
     uint64_t vu1MscalCount() const { return m_vu1MscalCount.load(std::memory_order_relaxed); }
     uint64_t vu1MscntCount() const { return m_vu1MscntCount.load(std::memory_order_relaxed); }
+    uint64_t getVU0CodeGeneration() const { return m_vu0CodeGeneration.load(std::memory_order_relaxed); }
     uint64_t getVU1CodeGeneration() const { return m_vu1CodeGeneration.load(std::memory_order_relaxed); }
 
     // Read/write memory
@@ -390,6 +391,7 @@ public:
     std::atomic<uint64_t> m_vif1CommandCount{0};
     std::atomic<uint64_t> m_vu1MscalCount{0};
     std::atomic<uint64_t> m_vu1MscntCount{0};
+    std::atomic<uint64_t> m_vu0CodeGeneration{0};
     std::atomic<uint64_t> m_vu1CodeGeneration{0};
     // I/O registers
     std::unordered_map<uint32_t, uint32_t> m_ioRegisters;
@@ -449,6 +451,7 @@ public:
 
     bool isAddressInRegion(uint32_t address, const CodeRegion &region);
     void markModified(uint32_t address, uint32_t size);
+    void markVU0CodeModified() { m_vu0CodeGeneration.fetch_add(1, std::memory_order_relaxed); }
     void markVU1CodeModified() { m_vu1CodeGeneration.fetch_add(1, std::memory_order_relaxed); }
     bool isScratchpad(uint32_t address) const;
     uint8_t *mapVuMemory(uint32_t physAddr, uint32_t size, uint32_t &offset, uint32_t &limit);

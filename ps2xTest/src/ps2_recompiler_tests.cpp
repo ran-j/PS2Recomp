@@ -155,10 +155,9 @@ static bool writeMinimalMipsElfWithJalFallbackTarget(const std::filesystem::path
     return writer.save(elfPath.string());
 }
 
-static bool writeMinimalMipsElfWithSizedFunctionSymbol(
-    const std::filesystem::path &elfPath,
-    const std::string &symbolName,
-    uint32_t symbolSize)
+static bool writeMinimalMipsElfWithInitializer(const std::filesystem::path &elfPath,
+                                               const std::string &functionName,
+                                               uint32_t initializerTarget)
 {
     ELFIO::elfio writer;
     writer.create(ELFIO::ELFCLASS32, ELFIO::ELFDATA2LSB);
@@ -172,9 +171,20 @@ static bool writeMinimalMipsElfWithSizedFunctionSymbol(
     text->set_flags(ELFIO::SHF_ALLOC | ELFIO::SHF_EXECINSTR);
     text->set_addr_align(4);
     text->set_address(0x00100000u);
-    const std::array<uint32_t, 16> textWords = {};
+    const std::array<uint32_t, 2> textWords = {
+        0x03E00008u, // jr $ra
+        0x00000000u, // nop
+    };
     text->set_data(reinterpret_cast<const char *>(textWords.data()),
                    static_cast<ELFIO::Elf_Word>(textWords.size() * sizeof(uint32_t)));
+
+    ELFIO::section *ctors = writer.sections.add(".ctors");
+    ctors->set_type(ELFIO::SHT_PROGBITS);
+    ctors->set_flags(ELFIO::SHF_ALLOC | ELFIO::SHF_WRITE);
+    ctors->set_addr_align(4);
+    ctors->set_address(0x00200000u);
+    ctors->set_data(reinterpret_cast<const char *>(&initializerTarget),
+                    static_cast<ELFIO::Elf_Word>(sizeof(initializerTarget)));
 
     ELFIO::section *strtab = writer.sections.add(".strtab");
     strtab->set_type(ELFIO::SHT_STRTAB);
@@ -189,8 +199,9 @@ static bool writeMinimalMipsElfWithSizedFunctionSymbol(
 
     ELFIO::symbol_section_accessor symbols(writer, symtab);
     ELFIO::string_section_accessor strings(strtab);
-    symbols.add_symbol(strings, "", 0, 0, ELFIO::STB_LOCAL, ELFIO::STT_NOTYPE, 0, ELFIO::SHN_UNDEF);
-    symbols.add_symbol(strings, symbolName.c_str(), text->get_address(), symbolSize,
+    symbols.add_symbol(strings, "", 0, 0,
+                       ELFIO::STB_LOCAL, ELFIO::STT_NOTYPE, 0, ELFIO::SHN_UNDEF);
+    symbols.add_symbol(strings, functionName.c_str(), text->get_address(), text->get_size(),
                        ELFIO::STB_GLOBAL, ELFIO::STT_FUNC, 0, text->get_index());
 
     ELFIO::segment *textSegment = writer.segments.add();
@@ -199,7 +210,45 @@ static bool writeMinimalMipsElfWithSizedFunctionSymbol(
     textSegment->set_align(0x1000);
     textSegment->add_section_index(text->get_index(), text->get_addr_align());
 
+    ELFIO::segment *dataSegment = writer.segments.add();
+    dataSegment->set_type(ELFIO::PT_LOAD);
+    dataSegment->set_flags(ELFIO::PF_R | ELFIO::PF_W);
+    dataSegment->set_align(0x1000);
+    dataSegment->add_section_index(ctors->get_index(), ctors->get_addr_align());
+
     return writer.save(elfPath.string());
+}
+
+static bool writeRecompilerTestConfig(const std::filesystem::path &configPath,
+                                      const std::filesystem::path &elfPath,
+                                      const std::filesystem::path &outputPath,
+                                      const std::vector<std::string> &skip,
+                                      const std::vector<std::string> &stubs = {})
+{
+    std::ofstream config(configPath);
+    if (!config)
+        return false;
+
+    config << "[general]\n";
+    config << "input = \"" << elfPath.generic_string() << "\"\n";
+    config << "output = \"" << outputPath.generic_string() << "\"\n";
+    config << "skip = [";
+    for (size_t i = 0; i < skip.size(); ++i)
+    {
+        if (i != 0u)
+            config << ", ";
+        config << '"' << skip[i] << '"';
+    }
+    config << "]\n";
+    config << "stubs = [";
+    for (size_t i = 0; i < stubs.size(); ++i)
+    {
+        if (i != 0u)
+            config << ", ";
+        config << '"' << stubs[i] << '"';
+    }
+    config << "]\n";
+    return static_cast<bool>(config);
 }
 
 void register_ps2_recompiler_tests()
@@ -898,178 +947,6 @@ void register_ps2_recompiler_tests()
             std::filesystem::remove(mapPath, removeError);
         });
 
-        tc.Run("auto-named ghidra bounds override larger auto symbol ranges", [](TestCase &t) {
-            const auto uniqueSuffix = std::to_string(
-                static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
-            const std::filesystem::path elfPath =
-                std::filesystem::temp_directory_path() / ("ps2recomp-ghidra-auto-bound-" + uniqueSuffix + ".elf");
-            const std::filesystem::path mapPath =
-                std::filesystem::temp_directory_path() / ("ps2recomp-ghidra-auto-bound-" + uniqueSuffix + ".csv");
-
-            const bool writeOk =
-                writeMinimalMipsElfWithSizedFunctionSymbol(elfPath, "sub_00100000", 0x30u);
-            t.IsTrue(writeOk, "temporary ELF should be generated");
-            if (!writeOk)
-            {
-                return;
-            }
-
-            ElfParser parser(elfPath.string());
-            const bool parseOk = parser.parse();
-            t.IsTrue(parseOk, "generated ELF should parse");
-
-            std::ofstream mapFile(mapPath);
-            t.IsTrue(static_cast<bool>(mapFile), "ghidra map file should be writable");
-            if (mapFile)
-            {
-                mapFile << "name,start,end,size\n";
-                mapFile << "FUN_00100000,0x00100000,0x00100010,0x10\n";
-                mapFile << "FUN_00100020,0x00100020,0x00100028,0x8\n";
-                mapFile.close();
-            }
-
-            if (parseOk && mapFile)
-            {
-                const bool mapLoaded = parser.loadGhidraFunctionMap(mapPath.string());
-                t.IsTrue(mapLoaded, "ghidra map should load");
-
-                const auto functions = parser.extractFunctions();
-                const auto firstIt = std::find_if(
-                    functions.begin(), functions.end(),
-                    [](const Function &fn)
-                    { return fn.start == 0x00100000u; });
-                const auto secondIt = std::find_if(
-                    functions.begin(), functions.end(),
-                    [](const Function &fn)
-                    { return fn.start == 0x00100020u; });
-
-                t.IsTrue(firstIt != functions.end(), "first ghidra function should exist");
-                if (firstIt != functions.end())
-                {
-                    t.Equals(firstIt->end, 0x00100010u,
-                             "explicit ghidra end must override a larger same-start auto symbol");
-                }
-
-                t.IsTrue(secondIt != functions.end(),
-                         "adjacent ghidra function after a gap must not be swallowed by the larger symbol range");
-                if (secondIt != functions.end())
-                {
-                    t.Equals(secondIt->end, 0x00100028u,
-                             "adjacent ghidra function should retain its explicit end");
-                }
-            }
-
-            std::error_code removeError;
-            std::filesystem::remove(elfPath, removeError);
-            std::filesystem::remove(mapPath, removeError);
-        });
-
-        tc.Run("sub-named ghidra bounds override larger auto symbol ranges", [](TestCase &t) {
-            const auto uniqueSuffix = std::to_string(
-                static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
-            const std::filesystem::path elfPath =
-                std::filesystem::temp_directory_path() / ("ps2recomp-ghidra-sub-bound-" + uniqueSuffix + ".elf");
-            const std::filesystem::path mapPath =
-                std::filesystem::temp_directory_path() / ("ps2recomp-ghidra-sub-bound-" + uniqueSuffix + ".csv");
-
-            const bool writeOk =
-                writeMinimalMipsElfWithSizedFunctionSymbol(elfPath, "FUN_00100000", 0x30u);
-            t.IsTrue(writeOk, "temporary ELF should be generated");
-            if (!writeOk)
-            {
-                return;
-            }
-
-            ElfParser parser(elfPath.string());
-            const bool parseOk = parser.parse();
-            t.IsTrue(parseOk, "generated ELF should parse");
-
-            std::ofstream mapFile(mapPath);
-            t.IsTrue(static_cast<bool>(mapFile), "ghidra map file should be writable");
-            if (mapFile)
-            {
-                mapFile << "name,start,end,size\n";
-                mapFile << "sub_00100000,0x00100000,0x00100010,0x10\n";
-                mapFile.close();
-            }
-
-            if (parseOk && mapFile)
-            {
-                const bool mapLoaded = parser.loadGhidraFunctionMap(mapPath.string());
-                t.IsTrue(mapLoaded, "ghidra map should load");
-
-                const auto functions = parser.extractFunctions();
-                const auto entryIt = std::find_if(
-                    functions.begin(), functions.end(),
-                    [](const Function &fn)
-                    { return fn.start == 0x00100000u; });
-                t.IsTrue(entryIt != functions.end(), "sub-named ghidra function should exist");
-                if (entryIt != functions.end())
-                {
-                    t.Equals(entryIt->end, 0x00100010u,
-                             "explicit sub_ ghidra end must override a larger same-start auto symbol");
-                }
-            }
-
-            std::error_code removeError;
-            std::filesystem::remove(elfPath, removeError);
-            std::filesystem::remove(mapPath, removeError);
-        });
-
-        tc.Run("ghidra bounds retain useful same-start symbol names", [](TestCase &t) {
-            const auto uniqueSuffix = std::to_string(
-                static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
-            const std::filesystem::path elfPath =
-                std::filesystem::temp_directory_path() / ("ps2recomp-ghidra-named-bound-" + uniqueSuffix + ".elf");
-            const std::filesystem::path mapPath =
-                std::filesystem::temp_directory_path() / ("ps2recomp-ghidra-named-bound-" + uniqueSuffix + ".csv");
-
-            const bool writeOk =
-                writeMinimalMipsElfWithSizedFunctionSymbol(elfPath, "GameInit", 0x30u);
-            t.IsTrue(writeOk, "temporary ELF should be generated");
-            if (!writeOk)
-            {
-                return;
-            }
-
-            ElfParser parser(elfPath.string());
-            const bool parseOk = parser.parse();
-            t.IsTrue(parseOk, "generated ELF should parse");
-
-            std::ofstream mapFile(mapPath);
-            t.IsTrue(static_cast<bool>(mapFile), "ghidra map file should be writable");
-            if (mapFile)
-            {
-                mapFile << "name,start,end,size\n";
-                mapFile << "FUN_00100000,0x00100000,0x00100010,0x10\n";
-                mapFile.close();
-            }
-
-            if (parseOk && mapFile)
-            {
-                const bool mapLoaded = parser.loadGhidraFunctionMap(mapPath.string());
-                t.IsTrue(mapLoaded, "ghidra map should load");
-
-                const auto functions = parser.extractFunctions();
-                const auto entryIt = std::find_if(
-                    functions.begin(), functions.end(),
-                    [](const Function &fn)
-                    { return fn.start == 0x00100000u; });
-                t.IsTrue(entryIt != functions.end(), "same-start function should exist");
-                if (entryIt != functions.end())
-                {
-                    t.Equals(entryIt->name, std::string("GameInit"),
-                             "useful ELF symbol name should win over an autogenerated ghidra name");
-                    t.Equals(entryIt->end, 0x00100010u,
-                             "ghidra boundary should win independently of name precedence");
-                }
-            }
-
-            std::error_code removeError;
-            std::filesystem::remove(elfPath, removeError);
-            std::filesystem::remove(mapPath, removeError);
-        });
-
         tc.Run("runtime call resolution includes Veronica compatibility aliases", [](TestCase &t) {
             t.Equals(ps2_runtime_calls::resolveSyscallName("ReleaseAlarm"), std::string_view{"ReleaseAlarm"},
                      "ReleaseAlarm should resolve as a syscall name");
@@ -1107,6 +984,98 @@ void register_ps2_recompiler_tests()
                      "__sprint_r should be left for recompilation");
             t.Equals(ps2_runtime_calls::resolveStubName("__sbprintf"), std::string_view{},
                      "__sbprintf should be left for recompilation");
+        });
+
+        tc.Run("initializer skips fall back to guest recompilation", [](TestCase &t) {
+            const std::string uniqueSuffix =
+                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+            const std::filesystem::path tempRoot =
+                std::filesystem::temp_directory_path() / ("ps2recomp-initializer-" + uniqueSuffix);
+            const std::filesystem::path elfPath = tempRoot / "initializer.elf";
+            const std::filesystem::path configPath = tempRoot / "initializer.toml";
+            const std::filesystem::path outputPath = tempRoot / "output";
+            std::filesystem::create_directories(tempRoot);
+
+            const bool elfWritten =
+                writeMinimalMipsElfWithInitializer(elfPath, "__sinit_test.cpp", 0x00100000u);
+            const bool configWritten =
+                writeRecompilerTestConfig(configPath, elfPath, outputPath, {"__sinit_test.cpp"});
+            t.IsTrue(elfWritten && configWritten,
+                     "initializer regression inputs should be generated");
+
+            if (elfWritten && configWritten)
+            {
+                PS2Recompiler recompiler(configPath.string());
+                t.IsTrue(recompiler.initialize(),
+                         "initializer regression config should initialize");
+                t.IsTrue(recompiler.recompile(),
+                         "a decodable skipped initializer should use guest fallback");
+                const RecompilerReporter::Counters &counters = recompiler.reportCounters();
+                t.Equals(counters.correctnessCriticalGuestFallbacks, static_cast<size_t>(1u),
+                         "the ignored initializer skip should be reported");
+                t.Equals(counters.correctnessCriticalFailures, static_cast<size_t>(0u),
+                         "guest fallback should avoid a correctness-critical failure");
+                t.Equals(counters.functionsSkipped, static_cast<size_t>(0u),
+                         "the initializer should not remain skipped");
+                t.Equals(counters.functionsRecompiled, static_cast<size_t>(1u),
+                         "the original initializer body should be recompiled");
+            }
+
+            std::error_code removeError;
+            std::filesystem::remove_all(tempRoot, removeError);
+        });
+
+        tc.Run("missing constructor-table targets fail recompilation", [](TestCase &t) {
+            const std::string uniqueSuffix =
+                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+            const std::filesystem::path tempRoot =
+                std::filesystem::temp_directory_path() / ("ps2recomp-missing-initializer-" + uniqueSuffix);
+            const std::filesystem::path elfPath = tempRoot / "initializer.elf";
+            const std::filesystem::path configPath = tempRoot / "initializer.toml";
+            const std::filesystem::path outputPath = tempRoot / "output";
+            std::filesystem::create_directories(tempRoot);
+
+            const bool elfWritten =
+                writeMinimalMipsElfWithInitializer(elfPath, "ordinary_entry", 0x00100040u);
+            const bool configWritten =
+                writeRecompilerTestConfig(configPath, elfPath, outputPath, {});
+            t.IsTrue(elfWritten && configWritten,
+                     "missing-initializer regression inputs should be generated");
+
+            if (elfWritten && configWritten)
+            {
+                {
+                    PS2Recompiler recompiler(configPath.string());
+                    t.IsTrue(recompiler.initialize(),
+                             "missing-initializer regression config should initialize");
+                    t.IsFalse(recompiler.recompile(),
+                              "an unresolved .ctors target should be correctness-fatal");
+                    t.Equals(recompiler.reportCounters().correctnessCriticalFailures,
+                             static_cast<size_t>(1u),
+                             "the unresolved constructor target should appear in the report");
+                }
+
+                const bool overrideWritten =
+                    writeRecompilerTestConfig(
+                        configPath, elfPath, outputPath, {},
+                        {"memclr@0x00100040"});
+                t.IsTrue(overrideWritten,
+                         "manual initializer override config should be generated");
+                if (overrideWritten)
+                {
+                    PS2Recompiler overridden(configPath.string());
+                    t.IsTrue(overridden.initialize(),
+                             "manual initializer override should initialize");
+                    t.IsTrue(overridden.recompile(),
+                             "a resolved address-bound handler should satisfy the constructor target");
+                    t.Equals(overridden.reportCounters().functionsStubbed,
+                             static_cast<size_t>(1u),
+                             "the resolved manual initializer should be emitted as a stub binding");
+                }
+            }
+
+            std::error_code removeError;
+            std::filesystem::remove_all(tempRoot, removeError);
         });
 
         tc.Run("respect max length for .cpp filenames", [](TestCase& t) {

@@ -1,6 +1,7 @@
 #ifndef PS2RECOMP_ELF_PARSER_H
 #define PS2RECOMP_ELF_PARSER_H
 
+#include <cstdint>
 #include <elfio/elfio.hpp>
 #include <string>
 #include <vector>

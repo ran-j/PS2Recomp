@@ -403,12 +403,15 @@ private:
 
     GSContext m_ctx[2];
     GSPrimReg m_prim{};
+    GSPrimReg m_primRegister{};
+    GSPrimReg m_prmodeRegister{};
 
     uint8_t m_curR = 0x80, m_curG = 0x80, m_curB = 0x80, m_curA = 0x80;
     float m_curQ = 1.0f;
     float m_curS = 0.0f, m_curT = 0.0f;
     uint16_t m_curU = 0, m_curV = 0;
     uint8_t m_curFog = 0;
+    uint8_t m_fogR = 0, m_fogG = 0, m_fogB = 0;
 
     bool m_prmodecont = true;
     bool m_pabe = false;
@@ -470,8 +473,9 @@ private:
     using WriteVramFunc = std::function<void(u8*, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t)>;
     using ReadVramFunc = std::function<u32(u8*, u32, u32, u32, u32)>;
 
-    std::array<ReadVramFunc, 0x3F> m_read_vram_funcs{ };
-    std::array<WriteVramFunc, 0x3F> m_write_vram_funcs{ };
+    static constexpr size_t kPsmHandlerCount = 1u << 6u;
+    std::array<ReadVramFunc, kPsmHandlerCount> m_read_vram_funcs{ };
+    std::array<WriteVramFunc, kPsmHandlerCount> m_write_vram_funcs{ };
 };
 
 inline u32 GS::ReadVram(u32 psm, u32 base, u32 bw, u32 x, u32 y) const

@@ -19,6 +19,18 @@
 #define AGRESSIVE_LOGS 0
 #endif
 
+#define RUNTIME_ERROR(x)                                                                                               \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        std::ostringstream _ps2_runtime_error_stream;                                                                  \
+        _ps2_runtime_error_stream << x;                                                                                \
+        const std::string _ps2_runtime_error_text =                                                                    \
+            _ps2_runtime_error_stream.str();                                                                           \
+                                                                                                                       \
+        std::cerr << _ps2_runtime_error_text;                                                                           \
+        ps2_log::append_runtime_log_text(_ps2_runtime_error_text);                                                      \
+    } while (0)
+
 namespace ps2_log
 {
 struct RuntimeLogEntry

@@ -2374,6 +2374,69 @@ void register_ps2_iop_tests()
                      "reset should restore per-instance service state");
         });
 
+        tc.Run("LotR sound update completes queued PlayStream slots", [](TestCase &t)
+        {
+            FakeIopHost host;
+            ps2x::iop::IopSubsystem subsystem(host);
+            std::string error;
+            t.IsTrue(subsystem.configure({"SLUS_205.78", 0u, 0u}, &error),
+                     "LotR profile should configure");
+
+            constexpr uint32_t kSendAddress = 0x0800u;
+            constexpr uint32_t kReceiveAddress = 0x1000u;
+            constexpr uint16_t kStreamSlot = 7u;
+            const std::array<uint16_t, 10> playStreamPacket = {
+                1u, // command count
+                1u, // PlayStream
+                7u, // argument count
+                0u,
+                static_cast<uint16_t>(kStreamSlot << 8u),
+                0u,
+                0u,
+                0u,
+                0u,
+                0u,
+            };
+            t.IsTrue(host.writeGuest(kSendAddress,
+                                     playStreamPacket.data(),
+                                     sizeof(playStreamPacket)),
+                     "PlayStream command packet should fit in guest memory");
+
+            ps2x::iop::RpcRequest request{};
+            request.sid = 0x00012345u;
+            request.send = {kSendAddress, sizeof(playStreamPacket)};
+            request.receive = {kReceiveAddress, 0x100u};
+
+            t.IsTrue(subsystem.handleRpc(request).handled,
+                     "LotR sound service should handle PlayStream");
+            t.Equals(host.readWord(kReceiveAddress), 1u,
+                     "PlayStream response should expose one active record");
+            const uint32_t packedStream = host.readWord(kReceiveAddress + 4u);
+            t.Equals((packedStream >> 4u) & 0x3Fu,
+                     static_cast<uint32_t>(kStreamSlot),
+                     "active record should identify the queued EE stream slot");
+            t.Equals(host.readWord(kReceiveAddress + 0x24u), 1u,
+                     "response counter should follow the active record");
+
+            const std::array<uint16_t, 5> statusPacket = {
+                1u, // command count
+                9u, // GetStatus
+                2u, // argument count
+                kStreamSlot,
+                0u,
+            };
+            t.IsTrue(host.writeGuest(kSendAddress, statusPacket.data(), sizeof(statusPacket)),
+                     "GetStatus command packet should fit in guest memory");
+            request.send.size = sizeof(statusPacket);
+
+            t.IsTrue(subsystem.handleRpc(request).handled,
+                     "LotR sound service should handle the following status update");
+            t.Equals(host.readWord(kReceiveAddress), 0u,
+                     "the update after PlayStream should report no active records");
+            t.Equals(host.readWord(kReceiveAddress + 4u), 2u,
+                     "empty response counter should return to the base offset");
+        });
+
         tc.Run("TSNDDRV uses profile checksum bindings without writing invalid ports", [](TestCase &t)
         {
             FakeIopHost host(0x02000000u);

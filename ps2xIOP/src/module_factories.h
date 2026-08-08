@@ -122,6 +122,7 @@ namespace ps2x::iop::detail
         uint32_t responseCounterOffset = 0u;
         bool zeroReceiveBuffer = true;
         bool signalNowaitCompletion = false;
+        bool completeQueuedPlayStreams = false;
         std::vector<uint32_t> suppressedCompletionCallbacks;
     };
 

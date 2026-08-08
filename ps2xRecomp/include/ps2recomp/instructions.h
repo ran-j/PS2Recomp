@@ -288,12 +288,12 @@ namespace ps2recomp
         MMI2_PMULTW = 0x0C,
         MMI2_PDIVW = 0x0D,
         MMI2_PCPYLD = 0x0E,
+        MMI2_PMADDH = 0x10,
+        MMI2_PHMADH = 0x11,
         MMI2_PAND = 0x12,
         MMI2_PXOR = 0x13,
-        MMI2_PMADDH = 0x14,
-        MMI2_PHMADH = 0x15,
-        MMI2_PMSUBH = 0x18,
-        MMI2_PHMSBH = 0x19,
+        MMI2_PMSUBH = 0x14,
+        MMI2_PHMSBH = 0x15,
         MMI2_PEXEH = 0x1A,
         MMI2_PREVH = 0x1B,
         MMI2_PMULTH = 0x1C,
@@ -670,37 +670,21 @@ namespace ps2recomp
     //     VU0_VLDQ = 0x1F    // VU0 Load/Store Quad with Decrement
     // };
 
-    // VU0 Control Register Numbers (used with CFC2/CTC2)
+    // VU0 COP2 control register numbers used by CFC2/CTC2.
+    // Registers 0..15 address VI0..VI15 directly.
     enum VU0ControlRegisters
     {
-        VU0_CR_STATUS = 0, // Status/Control register
-        VU0_CR_MAC = 1,    // MAC flags register
-        VU0_CR_CLIP = 5,   // Clipping flags register
-        VU0_CR_R = 3,      // R register (Random number)
-        VU0_CR_I = 4,      // I register (Immediate)
-
-        // Add missing registers
-        VU0_CR_VPU_STAT = 2,   // VPU-STAT register
-        VU0_CR_TPC = 6,        // T (program counter) register
-        VU0_CR_CMSAR0 = 7,     // Call/return address 0
-        VU0_CR_FBRST = 8,      // VIF/VU reset register
-        VU0_CR_VPU_STAT2 = 9,  // VPU-STAT register 2
-        VU0_CR_TPC2 = 10,      // T (program counter) register 2
-        VU0_CR_CMSAR1 = 11,    // Call/return address 1
-        VU0_CR_FBRST2 = 12,    // VIF/VU reset register 2
-        VU0_CR_VPU_STAT3 = 13, // VPU-STAT register 3
-        VU0_CR_CMSAR2 = 14,    // Call/return address 2
-        VU0_CR_FBRST3 = 15,    // VIF/VU reset register 3
-        VU0_CR_VPU_STAT4 = 16, // VPU-STAT register 4
-        VU0_CR_CMSAR3 = 17,    // Call/return address 3
-        VU0_CR_FBRST4 = 18,    // VIF/VU reset register 4
-        VU0_CR_ACC = 20,       // Accumulator register
-        VU0_CR_INFO = 21,      // Information register
-        VU0_CR_CLIP2 = 22,     // Clipping flags register 2
-        VU0_CR_P = 26,         // P register
-        VU0_CR_XITOP = 27,     // XITOP register
-        VU0_CR_ITOP = 28,      // ITOP register
-        VU0_CR_TOP = 29        // TOP register
+        VU0_CR_STATUS = 16,
+        VU0_CR_MAC = 17,
+        VU0_CR_CLIP = 18,
+        VU0_CR_R = 20,
+        VU0_CR_I = 21,
+        VU0_CR_Q = 22,
+        VU0_CR_TPC = 26,
+        VU0_CR_CMSAR0 = 27,
+        VU0_CR_FBRST = 28,
+        VU0_CR_VPU_STAT = 29,
+        VU0_CR_CMSAR1 = 31
     };
     enum VU0OPSFunctions
     {
