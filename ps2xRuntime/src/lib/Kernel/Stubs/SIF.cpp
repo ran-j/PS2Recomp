@@ -145,9 +145,16 @@ namespace ps2_stubs
 
         uint32_t rawSifRpcReceiveBuffer(uint8_t *rdram)
         {
+            uint32_t commandBuffer = 0u;
             uint32_t receivePointerAddress = 0u;
             {
                 std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
+                commandBuffer = g_sifCmdBuffer;
+                if (commandBuffer != 0u)
+                {
+                    return commandBuffer;
+                }
+
                 const auto it = g_sifRegs.find(kSifRegSubAddr);
                 if (it == g_sifRegs.end())
                 {
@@ -344,7 +351,6 @@ namespace ps2_stubs
                 // The registered command handler consumed this inbound
                 // command synchronously; do not queue it a second time.
                 (void)writeGuestU32(rdram, responseAddress + 0x08u, 0u);
-                runtime->yieldGuestExecutionAfterWake();
             }
             else
             {

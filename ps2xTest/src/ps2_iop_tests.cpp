@@ -1037,13 +1037,49 @@ void register_ps2_iop_tests()
             t.Equals(host.readWord(kReceive), 0u,
                      "a stopped stream must not report sectors");
 
-            t.IsTrue(host.writeWord(kReceive, kSentinel),
-                     "the uncharacterized NCMD response sentinel should be writable");
+            request.mode = 1u;
             request.function = 1u;
+            request.send = {kSend, 24u};
+            request.receive = {};
+            host.writeWord(kSend + 0u, kLsn);
+            host.writeWord(kSend + 4u, 2u);
+            host.writeWord(kSend + 8u, kDestination);
+            host.writeWord(kSend + 12u, 0u);
+            constexpr uint32_t kRemainder = 0x3200u;
+            host.writeWord(kSend + 16u, kRemainder);
+            constexpr uint32_t kCompletion = 0x3000u;
+            constexpr uint32_t kCompletionSentinel = 0xA5A5A5A5u;
+            host.writeWord(kCompletion, kCompletionSentinel);
+            host.writeWord(kSend + 20u, kCompletion);
+            const RpcResult readResult = subsystem.handleRpc(request);
+            t.IsTrue(readResult.handled,
+                     "NCMD function 1 should accept the live 24-byte NOWAIT read packet");
+            t.IsTrue(readResult.signalNowaitCompletion,
+                     "NCMD function 1 should request asynchronous completion");
+            t.IsTrue(std::equal(movie.begin(),
+                                movie.end(),
+                                host.memory.begin() + kDestination),
+                     "NCMD function 1 should copy searched loose-disc sectors to EE memory");
+            t.Equals(host.readWord(kCompletion), 2u,
+                     "NCMD function 1 should update read progress without overwriting "
+                     "the adjacent RPC client record");
+
+            request.sid = 0x80000593u;
+            request.mode = 0u;
+            request.function = 4u;
+            request.send = {};
+            request.receive = {kReceive, sizeof(uint32_t)};
+            host.writeWord(kReceive, kSentinel);
+            t.IsTrue(subsystem.handleRpc(request).handled,
+                     "SCMD GetError should handle the loader's status request");
+            t.Equals(host.readWord(kReceive), 0u,
+                     "SCMD GetError should report no error after a completed host read");
+
+            request.sid = kSid;
+            request.mode = 0u;
+            request.function = 0xFFu;
             t.IsFalse(subsystem.handleRpc(request).handled,
-                      "uncharacterized CDVD NCMD calls must remain visibly unhandled");
-            t.Equals(host.readWord(kReceive), kSentinel,
-                     "uncharacterized CDVD NCMD must leave receive memory untouched");
+                      "unknown CDVD NCMD calls must remain visibly unhandled");
 
             const ps2x::iop::DebugSnapshot snapshot = subsystem.debugSnapshot();
             const ps2x::iop::DebugService *service =
@@ -1052,8 +1088,8 @@ void register_ps2_iop_tests()
                         "the core service snapshot should include CD/DVD non-blocking commands");
             if (service)
             {
-                t.Equals(service->sids.size(), static_cast<size_t>(1u),
-                         "CD/DVD non-blocking commands should advertise one endpoint");
+                t.Equals(service->sids.size(), static_cast<size_t>(2u),
+                         "CD/DVD commands should advertise NCMD and SCMD endpoints");
                 if (!service->sids.empty())
                 {
                     t.Equals(service->sids.front(), kSid,
@@ -1131,12 +1167,12 @@ void register_ps2_iop_tests()
             constexpr uint32_t kLayeredFile = 0x900u;
             host.cdFiles[std::string(kPath)] =
                 CdFileInfo{0x00123457u, 4097u, {}, "SYSTEM.CNF"};
-            t.IsTrue(host.writeGuest(kSend + 0x20u,
+            t.IsTrue(host.writeGuest(kSend + 0x24u,
                                      kPath.data(),
                                      kPath.size() + 1u),
-                     "the layered Search File path should remain at offset 0x20");
+                     "the 296-byte Search File path should follow its leading words");
             t.IsTrue(host.writeWord(kSend + 0x120u, 0u),
-                     "the layered Search File request should include a layer word");
+                     "the 296-byte Search File request should preserve path padding");
             t.IsTrue(host.writeWord(kSend + 0x124u, kLayeredFile),
                      "the layered Search File destination should follow the layer word");
             request.send.size = kLayeredPacketSize;

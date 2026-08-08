@@ -35,7 +35,7 @@ namespace ps2x::iop::detail
             }
             if (size == kNonDualPacketBytes)
             {
-                layout = {0x20u, 0x124u};
+                layout = {0x24u, 0x124u};
                 return true;
             }
             if (size >= kDualPacketBytes)

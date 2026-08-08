@@ -278,7 +278,13 @@ namespace ps2_syscalls
 
     void iSignalSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        SignalSema(rdram, ctx, runtime);
+        // Interrupt-safe signaling wakes a waiter but must not hand execution
+        // to it until the interrupt/callback path has fully unwound.
+        bool ignoredReschedule = false;
+        {
+            PS2Runtime::DeferredGuestYieldScope deferYield(ignoredReschedule);
+            SignalSema(rdram, ctx, runtime);
+        }
     }
 
     void WaitSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

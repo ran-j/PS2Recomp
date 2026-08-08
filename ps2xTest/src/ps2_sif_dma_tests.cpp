@@ -2773,6 +2773,9 @@ void register_ps2_sif_dma_tests()
                               kPacketAddress + 0x28u,
                               kReceiveAddress);
                 writeGuestU32(env.rdram.data(), kPacketAddress + 0x2Cu, 4u);
+                writeGuestU32(env.rdram.data(),
+                              kPacketAddress + 0x30u,
+                              1u);
 
                 const std::array<Ps2SifDmaTransfer, 2> callDescriptors{{
                     {kSendAddress, 0u, 20, 0},
@@ -2796,6 +2799,10 @@ void register_ps2_sif_dma_tests()
                                       kInboundAddress + 0x20u),
                          kCallCommand,
                          "raw CDVD stream completion should identify RPC_CALL");
+                t.Equals(readGuestU32(env.rdram.data(),
+                                      kClientAddress),
+                         0u,
+                         "raw CDVD NOWAIT completion should release client ownership");
                 return readGuestU32(env.rdram.data(), kReceiveAddress);
             };
 
