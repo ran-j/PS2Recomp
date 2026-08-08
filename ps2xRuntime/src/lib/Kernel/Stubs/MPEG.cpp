@@ -29,6 +29,8 @@ namespace ps2_stubs
         {
             int width = 0;
             int height = 0;
+            int repeatPict = 0;
+            int64_t pts90k = -1;
             std::vector<uint8_t> rgba;
         };
 
@@ -46,13 +48,14 @@ namespace ps2_stubs
         void configureFfmpegLogLevel()
         {
             static std::once_flag s_once;
-            std::call_once(s_once, [] {
+            std::call_once(s_once, []
+                           {
 #if AGRESSIVE_LOGS
-                av_log_set_level(AV_LOG_WARNING);
+                               av_log_set_level(AV_LOG_WARNING);
 #else
-                av_log_set_level(AV_LOG_ERROR);
+                               av_log_set_level(AV_LOG_ERROR);
 #endif
-            });
+                           });
         }
 
         class MpegFfmpegDecoder
@@ -68,7 +71,7 @@ namespace ps2_stubs
             MpegFfmpegDecoder(const MpegFfmpegDecoder &) = delete;
             MpegFfmpegDecoder &operator=(const MpegFfmpegDecoder &) = delete;
 
-            bool feed(const uint8_t *data, size_t size, std::deque<MpegDecodedFrame> &frames)
+            bool feed(const uint8_t *data, size_t size, std::deque<MpegDecodedFrame> &frames, int64_t pts90k = -1, int64_t dts90k = -1)
             {
                 if (!data || size == 0)
                 {
@@ -91,6 +94,8 @@ namespace ps2_stubs
 
                 const uint8_t *cursor = data;
                 size_t remaining = size;
+                int64_t parserPts = pts90k >= 0 ? pts90k : AV_NOPTS_VALUE;
+                int64_t parserDts = dts90k >= 0 ? dts90k : AV_NOPTS_VALUE;
                 while (remaining > 0)
                 {
                     uint8_t *packetData = nullptr;
@@ -104,8 +109,8 @@ namespace ps2_stubs
                         &packetSize,
                         cursor,
                         chunk,
-                        AV_NOPTS_VALUE,
-                        AV_NOPTS_VALUE,
+                        parserPts,
+                        parserDts,
                         0);
                     if (used < 0)
                     {
@@ -121,10 +126,16 @@ namespace ps2_stubs
                     cursor += used;
                     remaining -= static_cast<size_t>(used);
 
+                    if (used > 0)
+                    {
+                        parserPts = AV_NOPTS_VALUE;
+                        parserDts = AV_NOPTS_VALUE;
+                    }
+
                     if (packetSize > 0)
                     {
                         ++totalPacketsSent;
-                        if (!sendPacket(packetData, static_cast<size_t>(packetSize), frames))
+                        if (!sendPacket(packetData, static_cast<size_t>(packetSize), frames, m_parser->pts, m_parser->dts))
                         {
                             return false;
                         }
@@ -168,7 +179,7 @@ namespace ps2_stubs
                         AV_NOPTS_VALUE,
                         0);
                     (void)used;
-                    if (packetSize > 0 && !sendPacket(packetData, static_cast<size_t>(packetSize), frames))
+                    if (packetSize > 0 && !sendPacket(packetData, static_cast<size_t>(packetSize), frames, m_parser->pts, m_parser->dts))
                     {
                         return false;
                     }
@@ -253,7 +264,12 @@ namespace ps2_stubs
                 }
 
                 m_codecCtx->thread_count = 1;
-                m_codecCtx->skip_frame = AVDISCARD_NONKEY;
+                m_codecCtx->pkt_timebase = AVRational{1, 90000};
+                // feedElementaryStream() does not create the decoder until a valid
+                // MPEG sequence header has been found.  Dropping non-key pictures
+                // here therefore throws away real presentation frames and makes
+                // movies finish early once the EE is fast enough to drain them.
+                m_codecCtx->skip_frame = AVDISCARD_DEFAULT;
                 m_codecCtx->err_recognition = 0;
                 const int ret = avcodec_open2(m_codecCtx, codec, nullptr);
                 if (ret < 0)
@@ -265,11 +281,14 @@ namespace ps2_stubs
 
                 m_initialized = true;
                 m_drained = false;
-                m_seenKeyframe = false;
                 return true;
             }
 
-            bool sendPacket(const uint8_t *data, size_t size, std::deque<MpegDecodedFrame> &frames)
+            bool sendPacket(const uint8_t *data,
+                            size_t size,
+                            std::deque<MpegDecodedFrame> &frames,
+                            int64_t pts = AV_NOPTS_VALUE,
+                            int64_t dts = AV_NOPTS_VALUE)
             {
                 if (!data || size == 0)
                 {
@@ -284,6 +303,8 @@ namespace ps2_stubs
                     return false;
                 }
                 std::memcpy(m_packet->data, data, size);
+                m_packet->pts = pts;
+                m_packet->dts = dts;
 
                 int ret = avcodec_send_packet(m_codecCtx, m_packet);
                 if (ret == AVERROR(EAGAIN))
@@ -330,12 +351,6 @@ namespace ps2_stubs
                             ++s_receiveErrorLogCount;
                         }
                         return true;
-                    }
-
-                    if (!m_seenKeyframe)
-                    {
-                        m_seenKeyframe = true;
-                        m_codecCtx->skip_frame = AVDISCARD_DEFAULT;
                     }
 
                     if (!convertFrame(frames))
@@ -391,6 +406,10 @@ namespace ps2_stubs
                 MpegDecodedFrame decoded;
                 decoded.width = width;
                 decoded.height = height;
+                decoded.repeatPict = std::max(0, m_frame->repeat_pict);
+                decoded.pts90k = m_frame->best_effort_timestamp != AV_NOPTS_VALUE
+                                     ? m_frame->best_effort_timestamp
+                                     : -1;
                 decoded.rgba.resize(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u);
 
                 uint8_t *dstData[4] = {decoded.rgba.data(), nullptr, nullptr, nullptr};
@@ -423,14 +442,13 @@ namespace ps2_stubs
             AVPixelFormat m_swsFormat = AV_PIX_FMT_NONE;
             bool m_initialized = false;
             bool m_drained = false;
-            bool m_seenKeyframe = false;
         };
 #else
         // TODO
         class MpegFfmpegDecoder
         {
         public:
-            bool feed(const uint8_t *, size_t, std::deque<MpegDecodedFrame> &)
+            bool feed(const uint8_t *, size_t, std::deque<MpegDecodedFrame> &, int64_t = -1, int64_t = -1)
             {
                 static bool s_warnedNoFfmpeg = false;
                 if (!s_warnedNoFfmpeg)
@@ -460,6 +478,12 @@ namespace ps2_stubs
             bool stream = false;
         };
 
+        constexpr uint64_t kPictureClockOne = 1ull << 32u;
+        // NTSC-style fields at ~59.94 Hz to keep MPEG timing yet (29.97 fps).
+        constexpr uint64_t kDefaultPictureIntervalQ32 = 2ull * kPictureClockOne;
+        constexpr size_t kMpegTimingScanLimit = 4096u;
+        constexpr size_t kMaxDecodedPicturesAhead = 8u;
+
         struct MpegPlaybackState
         {
             uint32_t picturesServed = 0u;
@@ -468,6 +492,7 @@ namespace ps2_stubs
             uint32_t decodeMode = 0u;
             uint32_t imageBufferAddr = 0u;
             bool sawInput = false;
+            bool sawSequenceEnd = false;
             bool streamEnded = false;
             bool decoderFailed = false;
             uint64_t cdStreamGeneration = 0u;
@@ -477,8 +502,16 @@ namespace ps2_stubs
             std::vector<uint32_t> pssGuestAddrs;
             std::deque<MpegDecodedFrame> decodedFrames;
             std::unique_ptr<MpegFfmpegDecoder> decoder;
-            uint64_t pictureIntervalQ32 = 0u;
+            uint8_t frameRateCode = 0u;
+            uint8_t frameRateExtensionN = 0u;
+            uint8_t frameRateExtensionD = 0u;
+            bool hasFrameRateExtension = false;
+            std::vector<uint8_t> videoTimingScanBuffer;
+            uint64_t pictureIntervalQ32 = kDefaultPictureIntervalQ32;
             uint64_t nextPictureTickQ32 = std::numeric_limits<uint64_t>::max();
+            uint64_t presentationEndTickQ32 = std::numeric_limits<uint64_t>::max();
+            int64_t firstPresentedPts90k = -1;
+            uint64_t ptsPresentationBaseTickQ32 = 0u;
         };
 
         struct MpegStreamCallbackEvent
@@ -528,9 +561,8 @@ namespace ps2_stubs
         constexpr uint8_t kMpegPrivateStream1 = 0xBDu;
         constexpr size_t kStartCodeNotFound = std::numeric_limits<size_t>::max();
         constexpr uint32_t kMpegCallbackDataSize = 0x20u;
-        constexpr uint64_t kPictureClockOne = 1ull << 32u;
 
-        uint64_t mpegPictureIntervalQ32(uint8_t frameRateCode)
+        uint64_t mpegPictureIntervalQ32(uint8_t frameRateCode, uint8_t frameRateExtensionN = 0u, uint8_t frameRateExtensionD = 0u)
         {
             uint64_t frameRateNumerator = 0u;
             uint64_t frameRateDenominator = 1u;
@@ -567,11 +599,177 @@ namespace ps2_stubs
                 return 0u;
             }
 
-            // EE VSync runs at the NTSC field rate. Q32 preserves fractional
-            // cadences such as 24 fps without accumulating host-time drift.
-            const uint64_t denominator = 1001u * frameRateNumerator;
-            const uint64_t numerator = (60000u * frameRateDenominator) << 32u;
+            const uint64_t extensionNumerator = static_cast<uint64_t>(frameRateExtensionN) + 1u;
+            const uint64_t extensionDenominator = static_cast<uint64_t>(frameRateExtensionD) + 1u;
+            const uint64_t denominator = 1001u * frameRateNumerator * extensionNumerator;
+            const uint64_t numerator = (60000u * frameRateDenominator * extensionDenominator) << 32u;
             return std::max(kPictureClockOne, (numerator + denominator / 2u) / denominator);
+        }
+
+        uint32_t readMpegBits(const uint8_t *data, size_t bitOffset, uint32_t bitCount)
+        {
+            uint32_t value = 0u;
+            for (uint32_t bit = 0u; bit < bitCount; ++bit)
+            {
+                const size_t absoluteBit = bitOffset + bit;
+                const uint8_t source = data[absoluteBit >> 3u];
+                value = (value << 1u) | ((source >> (7u - static_cast<uint32_t>(absoluteBit & 7u))) & 1u);
+            }
+            return value;
+        }
+
+        void updateMpegPictureTiming(MpegPlaybackState &playback, const uint8_t *data, size_t size)
+        {
+            if (!data || size == 0u)
+            {
+                return;
+            }
+
+            playback.videoTimingScanBuffer.insert(playback.videoTimingScanBuffer.end(), data, data + size);
+            if (playback.videoTimingScanBuffer.size() > kMpegTimingScanLimit)
+            {
+                const size_t discard = playback.videoTimingScanBuffer.size() - kMpegTimingScanLimit;
+                playback.videoTimingScanBuffer.erase(playback.videoTimingScanBuffer.begin(), playback.videoTimingScanBuffer.begin() + static_cast<std::ptrdiff_t>(discard));
+            }
+
+            const std::vector<uint8_t> &buffer = playback.videoTimingScanBuffer;
+            size_t lastSequenceHeader = kStartCodeNotFound;
+            for (size_t i = 0u; i + 7u < buffer.size(); ++i)
+            {
+                if (buffer[i + 0u] == 0x00u &&
+                    buffer[i + 1u] == 0x00u &&
+                    buffer[i + 2u] == 0x01u &&
+                    buffer[i + 3u] == 0xB3u)
+                {
+                    const uint8_t frameRateCode = buffer[i + 7u] & 0x0Fu;
+                    if (mpegPictureIntervalQ32(frameRateCode) != 0u)
+                    {
+                        lastSequenceHeader = i;
+                    }
+                }
+            }
+
+            if (lastSequenceHeader == kStartCodeNotFound)
+            {
+                return;
+            }
+
+            playback.frameRateCode = buffer[lastSequenceHeader + 7u] & 0x0Fu;
+            playback.frameRateExtensionN = 0u;
+            playback.frameRateExtensionD = 0u;
+            playback.hasFrameRateExtension = false;
+            playback.pictureIntervalQ32 = mpegPictureIntervalQ32(playback.frameRateCode);
+
+            for (size_t i = lastSequenceHeader + 8u; i + 9u < buffer.size(); ++i)
+            {
+                if (buffer[i + 0u] != 0x00u ||
+                    buffer[i + 1u] != 0x00u ||
+                    buffer[i + 2u] != 0x01u)
+                {
+                    continue;
+                }
+
+                if (buffer[i + 3u] == 0xB3u)
+                {
+                    break;
+                }
+                if (buffer[i + 3u] != 0xB5u)
+                {
+                    continue;
+                }
+
+                const uint8_t *extension = buffer.data() + i + 4u;
+                if (readMpegBits(extension, 0u, 4u) != 1u)
+                {
+                    continue;
+                }
+
+                playback.frameRateExtensionN = static_cast<uint8_t>(readMpegBits(extension, 41u, 2u));
+                playback.frameRateExtensionD = static_cast<uint8_t>(readMpegBits(extension, 43u, 5u));
+                playback.hasFrameRateExtension = true;
+                playback.pictureIntervalQ32 = mpegPictureIntervalQ32(
+                    playback.frameRateCode,
+                    playback.frameRateExtensionN,
+                    playback.frameRateExtensionD);
+                break;
+            }
+
+            if (playback.pictureIntervalQ32 == 0u)
+            {
+                playback.pictureIntervalQ32 = kDefaultPictureIntervalQ32;
+            }
+        }
+
+        uint64_t decodedFrameIntervalQ32(const MpegPlaybackState &playback,
+                                         const MpegDecodedFrame &frame)
+        {
+            const uint64_t base = playback.pictureIntervalQ32 != 0u
+                                      ? playback.pictureIntervalQ32
+                                      : kDefaultPictureIntervalQ32;
+            const uint64_t fields = static_cast<uint64_t>(2 + std::max(0, frame.repeatPict));
+            return std::max(kPictureClockOne, (base * fields + 1u) / 2u);
+        }
+
+        constexpr uint64_t kMpegPtsWrap = 1ull << 33u;
+        constexpr uint64_t kMpegPtsHalfWrap = 1ull << 32u;
+
+        int64_t mpegPtsDelta90k(int64_t fromPts, int64_t toPts)
+        {
+            if (fromPts < 0 || toPts < 0)
+            {
+                return 0;
+            }
+
+            uint64_t from = static_cast<uint64_t>(fromPts) & (kMpegPtsWrap - 1u);
+            uint64_t to = static_cast<uint64_t>(toPts) & (kMpegPtsWrap - 1u);
+            uint64_t delta = (to - from) & (kMpegPtsWrap - 1u);
+            if (delta >= kMpegPtsHalfWrap)
+            {
+                return -static_cast<int64_t>(kMpegPtsWrap - delta);
+            }
+            return static_cast<int64_t>(delta);
+        }
+
+        uint64_t mpegPtsDeltaToVSyncQ32(uint64_t delta90k)
+        {
+            // 90 kHz MPEG clock -> NTSC field clock (60000/1001 Hz):
+            // fields = pts * 60000 / (90000 * 1001) = pts * 2 / 3003.
+            constexpr uint64_t kPtsDivisor = 3003u;
+            const uint64_t whole = delta90k / kPtsDivisor;
+            const uint64_t remainder = delta90k % kPtsDivisor;
+            const uint64_t wholeQ32 = whole * 2u * kPictureClockOne;
+            const uint64_t remainderQ32 = ((remainder * 2u * kPictureClockOne) + kPtsDivisor / 2u) / kPtsDivisor;
+            return wholeQ32 + remainderQ32;
+        }
+
+        uint64_t presentationTickForFrame(MpegPlaybackState &playback, const MpegDecodedFrame &frame, uint64_t currentTickQ32)
+        {
+            if (frame.pts90k < 0)
+            {
+                if (playback.nextPictureTickQ32 == std::numeric_limits<uint64_t>::max())
+                {
+                    playback.nextPictureTickQ32 = currentTickQ32;
+                }
+                return playback.nextPictureTickQ32;
+            }
+
+            if (playback.firstPresentedPts90k < 0)
+            {
+                playback.firstPresentedPts90k = frame.pts90k;
+                playback.ptsPresentationBaseTickQ32 = currentTickQ32;
+                return currentTickQ32;
+            }
+
+            const int64_t delta = mpegPtsDelta90k(playback.firstPresentedPts90k, frame.pts90k);
+            if (delta >= 0)
+            {
+                return playback.ptsPresentationBaseTickQ32 + mpegPtsDeltaToVSyncQ32(static_cast<uint64_t>(delta));
+            }
+
+            const uint64_t backwards = mpegPtsDeltaToVSyncQ32(static_cast<uint64_t>(-delta));
+            return playback.ptsPresentationBaseTickQ32 > backwards
+                       ? playback.ptsPresentationBaseTickQ32 - backwards
+                       : 0u;
         }
 
         uint32_t align16(uint32_t value)
@@ -622,8 +820,7 @@ namespace ps2_stubs
 
         uint16_t readBe16(const uint8_t *p)
         {
-            return static_cast<uint16_t>((static_cast<uint16_t>(p[0]) << 8u) |
-                                         static_cast<uint16_t>(p[1]));
+            return static_cast<uint16_t>((static_cast<uint16_t>(p[0]) << 8u) | static_cast<uint16_t>(p[1]));
         }
 
         bool isVideoStreamId(uint8_t streamId)
@@ -721,49 +918,90 @@ namespace ps2_stubs
             return kStartCodeNotFound;
         }
 
-        size_t parsePesPayloadOffset(const uint8_t *packet, size_t packetSize)
+        struct MpegPesHeader
         {
+            size_t payloadOffset = 0u;
+            int64_t pts90k = -1;
+            int64_t dts90k = -1;
+        };
+
+        int64_t decodePesTimestamp90k(const uint8_t *p, size_t remaining)
+        {
+            if (!p || remaining < 5u)
+            {
+                return -1;
+            }
+
+            const uint64_t value =
+                (static_cast<uint64_t>((p[0] >> 1u) & 0x07u) << 30u) |
+                (static_cast<uint64_t>(p[1]) << 22u) |
+                (static_cast<uint64_t>((p[2] >> 1u) & 0x7Fu) << 15u) |
+                (static_cast<uint64_t>(p[3]) << 7u) |
+                static_cast<uint64_t>((p[4] >> 1u) & 0x7Fu);
+            return static_cast<int64_t>(value & (kMpegPtsWrap - 1u));
+        }
+
+        MpegPesHeader parsePesHeader(const uint8_t *packet, size_t packetSize)
+        {
+            MpegPesHeader result{};
+            result.payloadOffset = packetSize;
             if (!packet || packetSize <= 6u)
             {
-                return packetSize;
+                return result;
             }
 
             size_t pos = 6u;
             if (packetSize >= 9u && (packet[pos] & 0xC0u) == 0x80u)
             {
-                return std::min(packetSize, 9u + static_cast<size_t>(packet[pos + 2u]));
+                const uint8_t ptsDtsFlags = packet[pos + 1u] & 0xC0u;
+                const size_t headerDataLength = static_cast<size_t>(packet[pos + 2u]);
+                const size_t optionalStart = 9u;
+                const size_t optionalEnd = std::min(packetSize, optionalStart + headerDataLength);
+                if ((ptsDtsFlags == 0x80u || ptsDtsFlags == 0xC0u) && optionalEnd >= optionalStart + 5u)
+                {
+                    result.pts90k = decodePesTimestamp90k(packet + optionalStart, optionalEnd - optionalStart);
+                }
+                if (ptsDtsFlags == 0xC0u && optionalEnd >= optionalStart + 10u)
+                {
+                    result.dts90k = decodePesTimestamp90k(packet + optionalStart + 5u, optionalEnd - optionalStart - 5u);
+                }
+                result.payloadOffset = optionalEnd;
+                return result;
             }
 
+            // MPEG-1 PES.
             while (pos < packetSize && packet[pos] == 0xFFu)
             {
                 ++pos;
             }
-
             if (pos + 1u < packetSize && (packet[pos] & 0xC0u) == 0x40u)
             {
                 pos += 2u;
             }
-
             if (pos >= packetSize)
             {
-                return packetSize;
+                return result;
             }
 
-            const uint8_t flags = packet[pos];
-            if ((flags & 0xF0u) == 0x20u)
+            const uint8_t marker = packet[pos] & 0xF0u;
+            if (marker == 0x20u && pos + 5u <= packetSize)
             {
+                result.pts90k = decodePesTimestamp90k(packet + pos, packetSize - pos);
                 pos += 5u;
             }
-            else if ((flags & 0xF0u) == 0x30u)
+            else if (marker == 0x30u && pos + 10u <= packetSize)
             {
+                result.pts90k = decodePesTimestamp90k(packet + pos, packetSize - pos);
+                result.dts90k = decodePesTimestamp90k(packet + pos + 5u, packetSize - pos - 5u);
                 pos += 10u;
             }
-            else if (flags == 0x0Fu)
+            else if (packet[pos] == 0x0Fu)
             {
-                pos += 1u;
+                ++pos;
             }
 
-            return std::min(packetSize, pos);
+            result.payloadOffset = std::min(packetSize, pos);
+            return result;
         }
 
         void flushDecoderIfEnded(MpegPlaybackState &playback)
@@ -774,7 +1012,7 @@ namespace ps2_stubs
             }
         }
 
-        void feedElementaryStream(MpegPlaybackState &playback, const uint8_t *data, size_t size)
+        void feedElementaryStream(MpegPlaybackState &playback, const uint8_t *data, size_t size, int64_t pts90k = -1, int64_t dts90k = -1)
         {
             if (!data || size == 0)
             {
@@ -800,6 +1038,7 @@ namespace ps2_stubs
             }
 
             playback.sawInput = true;
+            updateMpegPictureTiming(playback, data, size);
             if (playback.waitingForVideoSequenceHeader)
             {
                 playback.videoSequenceSyncBuffer.insert(
@@ -833,8 +1072,14 @@ namespace ps2_stubs
 
                 data = playback.videoSequenceSyncBuffer.data();
                 size = playback.videoSequenceSyncBuffer.size();
-                playback.pictureIntervalQ32 = mpegPictureIntervalQ32(data[7u] & 0x0Fu);
+                if (playback.pictureIntervalQ32 == 0u)
+                {
+                    playback.pictureIntervalQ32 = kDefaultPictureIntervalQ32;
+                }
                 playback.nextPictureTickQ32 = std::numeric_limits<uint64_t>::max();
+                playback.presentationEndTickQ32 = std::numeric_limits<uint64_t>::max();
+                playback.firstPresentedPts90k = -1;
+                playback.ptsPresentationBaseTickQ32 = 0u;
                 playback.waitingForVideoSequenceHeader = false;
                 playback.decoderFailed = false;
                 playback.decoder.reset();
@@ -843,7 +1088,7 @@ namespace ps2_stubs
 
             if (containsMpegSequenceEnd(data, size))
             {
-                playback.streamEnded = true;
+                playback.sawSequenceEnd = true;
                 playback.cdStreamGeneration = g_mpeg_stub_state.cdStreamGeneration;
             }
 
@@ -852,7 +1097,7 @@ namespace ps2_stubs
                 playback.decoder = std::make_unique<MpegFfmpegDecoder>();
             }
 
-            if (!playback.decoder->feed(data, size, playback.decodedFrames))
+            if (!playback.decoder->feed(data, size, playback.decodedFrames, pts90k, dts90k))
             {
                 playback.decoder.reset();
                 playback.waitingForVideoSequenceHeader = true;
@@ -909,13 +1154,17 @@ namespace ps2_stubs
                                       uint32_t streamType,
                                       uint32_t dataAddr,
                                       uint32_t len,
-                                      std::vector<MpegStreamCallbackEvent> &callbackEvents)
+                                      std::vector<MpegStreamCallbackEvent> &callbackEvents,
+                                      int64_t pts90k = -1,
+                                      int64_t dts90k = -1)
         {
             MpegStreamCallbackEvent event{};
             event.mpegAddr = mpegAddr;
             event.streamType = streamType;
             event.dataAddr = dataAddr;
             event.len = len;
+            event.pts = pts90k >= 0 ? static_cast<uint64_t>(pts90k) : 0xFFFFFFFFFFFFFFFFull;
+            event.dts = dts90k >= 0 ? static_cast<uint64_t>(dts90k) : 0xFFFFFFFFFFFFFFFFull;
             event.callbacks = matchingStreamCallbacks(mpegAddr, streamType);
             if (!event.callbacks.empty())
             {
@@ -1067,7 +1316,8 @@ namespace ps2_stubs
 
                 if (isVideoStreamId(streamId))
                 {
-                    const size_t payloadStart = parsePesPayloadOffset(buffer.data(), packetEnd);
+                    const MpegPesHeader pes = parsePesHeader(buffer.data(), packetEnd);
+                    const size_t payloadStart = pes.payloadOffset;
                     if (payloadStart < packetEnd)
                     {
                         if (payloadStart < playback.pssGuestAddrs.size())
@@ -1077,17 +1327,22 @@ namespace ps2_stubs
                                 kMpegStrM2V,
                                 playback.pssGuestAddrs[payloadStart],
                                 static_cast<uint32_t>(packetEnd - payloadStart),
-                                callbackEvents);
+                                callbackEvents,
+                                pes.pts90k,
+                                pes.dts90k);
                         }
                         feedElementaryStream(
                             playback,
                             buffer.data() + payloadStart,
-                            packetEnd - payloadStart);
+                            packetEnd - payloadStart,
+                            pes.pts90k,
+                            pes.dts90k);
                     }
                 }
                 else if (isAudioStreamId(streamId))
                 {
-                    const size_t payloadStart = parsePesPayloadOffset(buffer.data(), packetEnd);
+                    const MpegPesHeader pes = parsePesHeader(buffer.data(), packetEnd);
+                    const size_t payloadStart = pes.payloadOffset;
                     if (payloadStart < packetEnd && payloadStart < playback.pssGuestAddrs.size())
                     {
                         queueStreamCallbackEvent(
@@ -1095,13 +1350,17 @@ namespace ps2_stubs
                             kMpegStrPCM,
                             playback.pssGuestAddrs[payloadStart],
                             static_cast<uint32_t>(packetEnd - payloadStart),
-                            callbackEvents);
+                            callbackEvents,
+                            pes.pts90k,
+                            pes.dts90k);
                         queueStreamCallbackEvent(
                             mpegAddr,
                             kMpegStrADPCM,
                             playback.pssGuestAddrs[payloadStart],
                             static_cast<uint32_t>(packetEnd - payloadStart),
-                            callbackEvents);
+                            callbackEvents,
+                            pes.pts90k,
+                            pes.dts90k);
                     }
                 }
 
@@ -1133,6 +1392,25 @@ namespace ps2_stubs
                 finishPlaybackStream(mpegAddr, playback);
                 changed = true;
             }
+        }
+
+        bool mpegDemuxBackpressured(const MpegPlaybackState &playback)
+        {
+            // Let EOF finalization drain any tail that is already in the guest
+            // ring, otherwise bound decode lead to a handful of pictures.
+            //
+            // Important: do not park sceMpegDemuxPss/Ring here. Code Veronica
+            // explicitly wakes its video thread before every demux call and that
+            // thread sleeps again after presenting one picture. A single host
+            // decoder feed can enqueue more than kMaxDecodedPicturesAhead frames;
+            // parking the producer then leaves the consumer asleep after draining
+            // just one frame, with nobody left to issue the next WakeupThread.
+            // Returning 0 bytes consumed instead leaves the guest ring intact and
+            // lets the game's producer loop wake the consumer again. Backpressure
+            // still propagates naturally to sceCdStRead because the ring does not
+            // advance while this is true.
+            return !g_mpeg_stub_state.currentCdStreamEofSeen &&
+                   playback.decodedFrames.size() >= kMaxDecodedPicturesAhead;
         }
 
         void recordCdStreamBytesDemuxedUnlocked(
@@ -1575,15 +1853,23 @@ namespace ps2_stubs
     {
         (void)rdram;
         const uint32_t mpegAddr = getRegU32(ctx, 4);
+        bool wakePictureWaiter = false;
         {
             std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
             MpegPlaybackState &playback = getPlaybackState(mpegAddr);
+            const size_t framesBefore = playback.decodedFrames.size();
             if (playback.decoder)
             {
                 playback.decoder->flush(playback.decodedFrames);
             }
+            wakePictureWaiter = playback.decodedFrames.size() != framesBefore ||
+                                playback.streamEnded ||
+                                playback.decoderFailed;
         }
-        runtime->eeScheduler().completeExternalWait(kMpegPictureWaitType, mpegAddr, KE_OK);
+        if (wakePictureWaiter)
+        {
+            runtime->eeScheduler().completeExternalWait(kMpegPictureWaitType, mpegAddr, KE_OK);
+        }
         setReturnS32(ctx, 0);
     }
 
@@ -1594,9 +1880,11 @@ namespace ps2_stubs
         const uint32_t byteCount = getRegU32(ctx, 6);
 
         size_t copied = 0u;
+        bool wakePictureWaiter = false;
         {
             std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
             MpegPlaybackState &playback = getPlaybackState(mpegAddr);
+            const size_t framesBefore = playback.decodedFrames.size();
             while (copied < byteCount)
             {
                 const uint32_t curAddr = dataAddr + static_cast<uint32_t>(copied);
@@ -1610,9 +1898,13 @@ namespace ps2_stubs
                 feedElementaryStream(playback, src, chunk);
                 copied += chunk;
             }
+            wakePictureWaiter = playback.decodedFrames.size() != framesBefore || playback.streamEnded || playback.decoderFailed;
         }
 
-        runtime->eeScheduler().completeExternalWait(kMpegPictureWaitType, mpegAddr, KE_OK);
+        if (wakePictureWaiter)
+        {
+            runtime->eeScheduler().completeExternalWait(kMpegPictureWaitType, mpegAddr, KE_OK);
+        }
         setReturnS32(ctx, static_cast<int32_t>(copied));
     }
 
@@ -1793,24 +2085,46 @@ namespace ps2_stubs
         std::vector<MpegStreamCallbackEvent> callbackEvents;
         std::vector<uint32_t> completedMpegIds;
         size_t consumed = 0u;
+        size_t decodedBefore = 0u;
         size_t decodedCount = 0u;
         uint32_t traceIdx = 0u;
         bool eofChanged = false;
+        bool backpressured = false;
         {
             std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
             MpegPlaybackState &playback = getPlaybackState(mpegAddr);
-            consumed = appendGuestBytes(mpegAddr, playback, rdram, dataAddr, byteCount, callbackEvents);
-            recordCdStreamBytesDemuxedUnlocked(consumed, completedMpegIds, eofChanged);
+            decodedBefore = playback.decodedFrames.size();
+            backpressured = mpegDemuxBackpressured(playback);
+            if (!backpressured)
+            {
+                consumed = appendGuestBytes(mpegAddr, playback, rdram, dataAddr, byteCount, callbackEvents);
+                recordCdStreamBytesDemuxedUnlocked(consumed, completedMpegIds, eofChanged);
+            }
             decodedCount = playback.decodedFrames.size();
             traceIdx = g_mpeg_stub_state.demuxPssTraceCount++;
         }
-        runtime->eeScheduler().completeExternalWait(kMpegPictureWaitType, mpegAddr, KE_OK);
+
+        if (backpressured)
+        {
+            if (traceIdx < 32u)
+            {
+                PS2_IF_AGRESSIVE_LOGS({
+                    std::cerr << "[MPEG:DemuxPss:BACKPRESSURE] mpeg=0x" << std::hex << mpegAddr << std::dec << " decoded=" << decodedCount << std::endl;
+                });
+            }
+            setReturnS32(ctx, 0);
+            return;
+        }
+        const bool currentStreamCompleted = std::find(completedMpegIds.begin(), completedMpegIds.end(), mpegAddr) != completedMpegIds.end();
+        if (decodedCount != decodedBefore || eofChanged || currentStreamCompleted)
+        {
+            runtime->eeScheduler().completeExternalWait(kMpegPictureWaitType, mpegAddr, KE_OK);
+        }
         for (const uint32_t completedMpegId : completedMpegIds)
         {
             if (completedMpegId != mpegAddr)
             {
-                runtime->eeScheduler().completeExternalWait(
-                    kMpegPictureWaitType, completedMpegId, KE_OK);
+                runtime->eeScheduler().completeExternalWait(kMpegPictureWaitType, completedMpegId, KE_OK);
             }
         }
 
@@ -1854,32 +2168,56 @@ namespace ps2_stubs
         std::vector<MpegStreamCallbackEvent> callbackEvents;
         std::vector<uint32_t> completedMpegIds;
         size_t consumed = 0u;
+        size_t decodedBefore = 0u;
         size_t decodedCount = 0u;
         uint32_t traceIdx = 0u;
         bool eofChanged = false;
+        bool backpressured = false;
         {
             std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
             MpegPlaybackState &playback = getPlaybackState(mpegAddr);
-            consumed = appendGuestRingBytes(
-                mpegAddr,
-                playback,
-                rdram,
-                dataAddr,
-                availableBytes,
-                ringBaseAddr,
-                ringSize,
-                callbackEvents);
-            recordCdStreamBytesDemuxedUnlocked(consumed, completedMpegIds, eofChanged);
+            decodedBefore = playback.decodedFrames.size();
+            backpressured = mpegDemuxBackpressured(playback);
+            if (!backpressured)
+            {
+                consumed = appendGuestRingBytes(
+                    mpegAddr,
+                    playback,
+                    rdram,
+                    dataAddr,
+                    availableBytes,
+                    ringBaseAddr,
+                    ringSize,
+                    callbackEvents);
+                recordCdStreamBytesDemuxedUnlocked(consumed, completedMpegIds, eofChanged);
+            }
             decodedCount = playback.decodedFrames.size();
             traceIdx = g_mpeg_stub_state.demuxRingTraceCount++;
         }
-        runtime->eeScheduler().completeExternalWait(kMpegPictureWaitType, mpegAddr, KE_OK);
+
+        if (backpressured)
+        {
+            if (traceIdx < 32u)
+            {
+                PS2_IF_AGRESSIVE_LOGS({
+                    std::cerr << "[MPEG:DemuxPssRing:BACKPRESSURE] mpeg=0x" << std::hex << mpegAddr
+                              << std::dec << " decoded=" << decodedCount
+                              << " avail=" << availableBytes << std::endl;
+                });
+            }
+            setReturnS32(ctx, 0);
+            return;
+        }
+        const bool currentStreamCompleted = std::find(completedMpegIds.begin(), completedMpegIds.end(), mpegAddr) != completedMpegIds.end();
+        if (decodedCount != decodedBefore || eofChanged || currentStreamCompleted)
+        {
+            runtime->eeScheduler().completeExternalWait(kMpegPictureWaitType, mpegAddr, KE_OK);
+        }
         for (const uint32_t completedMpegId : completedMpegIds)
         {
             if (completedMpegId != mpegAddr)
             {
-                runtime->eeScheduler().completeExternalWait(
-                    kMpegPictureWaitType, completedMpegId, KE_OK);
+                runtime->eeScheduler().completeExternalWait(kMpegPictureWaitType, completedMpegId, KE_OK);
             }
         }
 
@@ -1986,40 +2324,38 @@ namespace ps2_stubs
 
             if (!playback.decodedFrames.empty())
             {
-                if (playback.pictureIntervalQ32 != 0u)
+                const uint64_t currentTick = runtime->eeScheduler().currentVSyncTick();
+                const uint64_t currentTickQ32 = currentTick << 32u;
+                const MpegDecodedFrame &nextFrame = playback.decodedFrames.front();
+                const uint64_t frameIntervalQ32 = decodedFrameIntervalQ32(playback, nextFrame);
+                uint64_t presentationTargetQ32 = presentationTickForFrame(playback, nextFrame, currentTickQ32);
+
+                if (currentTickQ32 > presentationTargetQ32 && currentTickQ32 - presentationTargetQ32 >= frameIntervalQ32)
                 {
-                    const uint64_t currentTick = runtime->eeScheduler().currentVSyncTick();
-                    const uint64_t currentTickQ32 = currentTick << 32u;
-                    if (playback.nextPictureTickQ32 == std::numeric_limits<uint64_t>::max())
+                    const uint64_t correction = currentTickQ32 - presentationTargetQ32;
+                    presentationTargetQ32 = currentTickQ32;
+                    if (nextFrame.pts90k >= 0 && playback.firstPresentedPts90k >= 0)
                     {
-                        playback.nextPictureTickQ32 = currentTickQ32;
+                        playback.ptsPresentationBaseTickQ32 += correction;
                     }
+                    playback.nextPictureTickQ32 = currentTickQ32;
+                }
 
-                    if (currentTickQ32 < playback.nextPictureTickQ32)
-                    {
-                        const uint64_t eligibleTick =
-                            (playback.nextPictureTickQ32 + kPictureClockOne - 1u) >> 32u;
-                        lock.unlock();
-                        runtime->eeScheduler().waitVSync(
-                            eligibleTick - 1u,
-                            -1,
-                            [rdram, runtime](R5900Context &resumeContext)
+                if (currentTickQ32 < presentationTargetQ32)
+                {
+                    const uint64_t eligibleTick = (presentationTargetQ32 + kPictureClockOne - 1u) >> 32u;
+                    lock.unlock();
+                    runtime->eeScheduler().waitVSync(
+                        eligibleTick - 1u,
+                        -1,
+                        [rdram, runtime](R5900Context &resumeContext)
+                        {
+                            if (static_cast<int32_t>(getRegU32(&resumeContext, 2)) < 0)
                             {
-                                if (static_cast<int32_t>(getRegU32(&resumeContext, 2)) < 0)
-                                {
-                                    return;
-                                }
-                                sceMpegGetPicture(rdram, &resumeContext, runtime);
-                            });
-                    }
-
-                    // If decoding fell more than one frame behind, resume from the
-                    // current field instead of releasing a burst of stale pictures.
-                    if (currentTickQ32 - playback.nextPictureTickQ32 >= playback.pictureIntervalQ32)
-                    {
-                        playback.nextPictureTickQ32 = currentTickQ32;
-                    }
-                    playback.nextPictureTickQ32 += playback.pictureIntervalQ32;
+                                return;
+                            }
+                            sceMpegGetPicture(rdram, &resumeContext, runtime);
+                        });
                 }
 
                 frame = std::move(playback.decodedFrames.front());
@@ -2030,6 +2366,8 @@ namespace ps2_stubs
                 height = playback.height;
                 frameCount = playback.picturesServed;
                 playback.picturesServed += 1u;
+                playback.nextPictureTickQ32 = presentationTargetQ32 + frameIntervalQ32;
+                playback.presentationEndTickQ32 = playback.nextPictureTickQ32;
                 haveFrame = true;
                 if (g_mpeg_stub_state.pictureTraceCount < 32u)
                 {
@@ -2117,20 +2455,38 @@ namespace ps2_stubs
         std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
         g_mpeg_stub_state.initialized = true;
         MpegPlaybackState &playback = getPlaybackState(mpegAddr);
-        const bool ended = playback.streamEnded || (playback.decoderFailed && playback.sawInput);
+        // Only the producer/demux EOF is authoritative. A sequence_end_code can
+        // be observed while more PSS data is still buffered, and a decoder
+        // failure before producer EOF may still recover on a later sequence.
+        const bool producerEnded =
+            g_mpeg_stub_state.currentCdStreamEofSeen &&
+            playback.cdStreamGeneration == g_mpeg_stub_state.cdStreamGeneration;
+        const bool ended = producerEnded &&
+                           (playback.streamEnded || (playback.decoderFailed && playback.sawInput));
+        const uint64_t presentationEnd = playback.presentationEndTickQ32;
+        const uint64_t currentTickQ32 = runtime != nullptr
+                                            ? (runtime->eeScheduler().currentVSyncTick() << 32u)
+                                            : std::numeric_limits<uint64_t>::max();
+        const bool presentationComplete =
+            presentationEnd == std::numeric_limits<uint64_t>::max() ||
+            currentTickQ32 >= presentationEnd;
 
         if (g_mpeg_stub_state.isEndTraceCount < 16u)
         {
             PS2_IF_AGRESSIVE_LOGS({
                 std::cerr << "[MPEG:IsEnd] mpeg=0x" << std::hex << mpegAddr << std::dec
                           << " ended=" << ended
+                          << " producerEof=" << producerEnded
+                          << " seqEnd=" << playback.sawSequenceEnd
+                          << " streamEnded=" << playback.streamEnded
+                          << " presentationComplete=" << presentationComplete
                           << " frames=" << playback.decodedFrames.size()
                           << " sawInput=" << playback.sawInput << std::endl;
             });
             ++g_mpeg_stub_state.isEndTraceCount;
         }
 
-        setReturnS32(ctx, (ended && playback.decodedFrames.empty()) ? 1 : 0);
+        setReturnS32(ctx, (ended && playback.decodedFrames.empty() && presentationComplete) ? 1 : 0);
     }
 
     void sceMpegIsRefBuffEmpty(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

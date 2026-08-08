@@ -36,6 +36,15 @@ namespace
     constexpr uint64_t kAlarmTickMicroseconds = 64u;
     constexpr uint32_t kDebugPublishDispatchInterval = 4096u;
 
+    constexpr uint64_t microsecondsToEeCycles(uint64_t microseconds)
+    {
+        return (microseconds * EeScheduler::kEeClockHz + 999999ull) / 1000000ull;
+    }
+
+    constexpr uint64_t kVBlankPeriodCycles = microsecondsToEeCycles(16667u);
+    constexpr uint64_t kVBlankDurationCycles = microsecondsToEeCycles(500u);
+    constexpr uint64_t kAlarmTickCycles = microsecondsToEeCycles(kAlarmTickMicroseconds);
+
     template <typename Map>
     int allocatePositiveId(int &nextId, const Map &objects)
     {
@@ -90,7 +99,10 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_enabledDmacMask = 0xFFFFFFFFu;
     m_currentThreadId = 0;
     m_rescheduleRequested = false;
+    m_timeSliceExpired = false;
     m_insideInterrupt = false;
+    m_eeCycle = 0u;
+    m_sliceEndCycle = kDefaultTimeSliceCycles;
     m_stopRequested.store(false, std::memory_order_release);
     m_checkpointPending.store(false, std::memory_order_release);
     m_debugPublishCountdown = 0u;
@@ -121,7 +133,8 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     main.status = EeThreadStatus::Ready;
     m_threads.emplace(main.id, std::move(main));
     m_readyQueues[0].push_back(kMainThreadId);
-    scheduleEvent(std::chrono::steady_clock::now() + kVBlankPeriod,
+    scheduleEvent(m_eeCycle + kVBlankPeriodCycles,
+                  std::chrono::steady_clock::now() + kVBlankPeriod,
                   EeEvent{EeEventType::VBlankStart, 0, 0});
     publishSnapshot();
 }
@@ -159,6 +172,7 @@ void EeScheduler::run()
                 m_pendingInvocations.pop_front();
                 owner->status = EeThreadStatus::Running;
                 m_currentThreadId = owner->id;
+                renewTimeSlice();
                 if (getRegU32(&invocation.context, 29) == 0u)
                 {
                     SET_GPR_U32(&invocation.context, 29, invocationStackTop());
@@ -258,11 +272,14 @@ void EeScheduler::run()
         }
         PS2Runtime::RecompiledFunction function = m_runtime.lookupFunction(context.pc);
 
+        if (checkpointDue(kGuestDispatchCycles))
+        {
+            continue;
+        }
+
         try
         {
-            m_insideInterrupt = !running->invocations.empty() &&
-                                running->invocations.back().kind == GuestInvocationKind::Interrupt;
-            m_checkpointPending.store(false, std::memory_order_release);
+            m_insideInterrupt = !running->invocations.empty() && running->invocations.back().kind == GuestInvocationKind::Interrupt;
             m_guestExecuting.store(true, std::memory_order_release);
             function(m_rdram, &context, &m_runtime);
             m_guestExecuting.store(false, std::memory_order_release);
@@ -286,9 +303,10 @@ void EeScheduler::run()
         {
             GuestThread *preempted = currentThread();
             assert(preempted != nullptr);
-            enqueueReady(*preempted, true);
+            enqueueReady(*preempted, !m_timeSliceExpired);
             m_currentThreadId = 0;
             m_rescheduleRequested = false;
+            m_timeSliceExpired = false;
         }
     }
 
@@ -316,27 +334,48 @@ void EeScheduler::postEvent(EeEvent event)
     {
         std::lock_guard lock(m_eventMutex);
         m_events.push_back(event);
+        m_checkpointPending.store(true, std::memory_order_release);
     }
-    m_checkpointPending.store(true, std::memory_order_release);
     m_eventCv.notify_one();
 }
 
-bool EeScheduler::checkpointDue() const noexcept
+bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
 {
+    accountCycles(cycles);
+
     if (m_checkpointPending.load(std::memory_order_acquire) ||
         m_stopRequested.load(std::memory_order_acquire))
     {
         return true;
     }
-    const int64_t deadline = m_nextDeadlineNanoseconds.load(std::memory_order_acquire);
-    if (deadline == 0)
+
+    const uint64_t nextEventCycle = m_nextDeadlineCycle.load(std::memory_order_acquire);
+    if (nextEventCycle != 0u && m_eeCycle >= nextEventCycle)
+    {
+        m_checkpointPending.store(true, std::memory_order_release);
+        return true;
+    }
+
+    if (m_eeCycle < m_sliceEndCycle)
     {
         return false;
     }
-    const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                            std::chrono::steady_clock::now().time_since_epoch())
-                            .count();
-    return now >= deadline;
+
+    const GuestThread *running = currentThread();
+    if (running != nullptr && hasReadyAtOrAbovePriority(running->currentPriority))
+    {
+        m_rescheduleRequested = true;
+        m_timeSliceExpired = true;
+        return true;
+    }
+
+    renewTimeSlice();
+    return false;
+}
+
+void EeScheduler::accountCycles(uint32_t cycles) noexcept
+{
+    m_eeCycle += std::max<uint64_t>(1u, cycles);
 }
 
 bool EeScheduler::isExecutingGuest() const noexcept
@@ -737,6 +776,7 @@ void EeScheduler::transferIfRequested(bool interruptSafe)
         m_currentThreadId = 0;
     }
     m_rescheduleRequested = false;
+    m_timeSliceExpired = false;
     publishSnapshot();
     throw EeDispatcherTransfer{};
 }
@@ -998,8 +1038,8 @@ int EeScheduler::setAlarm(uint16_t ticks,
     }
     m_alarms.emplace(id, EeAlarm{id, ticks, handler, argument, gp, sp});
     const uint64_t tickCount = ticks == 0u ? 1u : static_cast<uint64_t>(ticks);
-    scheduleEvent(std::chrono::steady_clock::now() +
-                      std::chrono::microseconds(tickCount * kAlarmTickMicroseconds),
+    scheduleEvent(m_eeCycle + tickCount * kAlarmTickCycles,
+                  std::chrono::steady_clock::now() + std::chrono::microseconds(tickCount * kAlarmTickMicroseconds),
                   EeEvent{EeEventType::Alarm, static_cast<uint32_t>(id), 0});
     return id;
 }
@@ -1409,6 +1449,9 @@ void EeScheduler::publishSnapshot()
 {
     EeKernelSnapshot next{};
     next.sequence = ++m_snapshotSequence;
+    next.eeCycle = m_eeCycle;
+    next.sliceEndCycle = m_sliceEndCycle;
+    next.nextEventCycle = m_nextDeadlineCycle.load(std::memory_order_acquire);
     next.runningThreadId = m_currentThreadId;
     next.threads.reserve(m_threads.size());
     for (const auto &[id, item] : m_threads)
@@ -1550,6 +1593,7 @@ void EeScheduler::makeRunning(GuestThread &item)
     assert(item.status == EeThreadStatus::Ready);
     item.status = EeThreadStatus::Running;
     m_currentThreadId = item.id;
+    renewTimeSlice();
 }
 
 void EeScheduler::makeDormant(GuestThread &item)
@@ -1643,13 +1687,15 @@ void EeScheduler::applyPendingPreemption()
     if (m_currentThreadId == 0)
     {
         m_rescheduleRequested = false;
+        m_timeSliceExpired = false;
         return;
     }
     GuestThread *self = currentThread();
     assert(self != nullptr);
-    enqueueReady(*self, true);
+    enqueueReady(*self, !m_timeSliceExpired);
     m_currentThreadId = 0;
     m_rescheduleRequested = false;
+    m_timeSliceExpired = false;
 }
 
 void EeScheduler::processPendingEvents()
@@ -1665,49 +1711,100 @@ void EeScheduler::processPendingEvents()
     {
         processEvent(event);
     }
-    m_checkpointPending.store(false, std::memory_order_release);
+
+    {
+        std::lock_guard lock(m_eventMutex);
+        const uint64_t nextEventCycle = m_nextDeadlineCycle.load(std::memory_order_acquire);
+        const bool cycleEventDue = nextEventCycle != 0u && m_eeCycle >= nextEventCycle;
+        const bool pendingWork = !m_events.empty() || cycleEventDue || m_stopRequested.load(std::memory_order_acquire);
+        m_checkpointPending.store(pendingWork, std::memory_order_release);
+    }
     applyPendingPreemption();
 }
 
 void EeScheduler::processDueDeadlines()
 {
-    const auto now = std::chrono::steady_clock::now();
-    std::vector<ScheduledEvent> due;
+    for (;;)
     {
-        std::lock_guard lock(m_eventMutex);
-        auto firstFuture = std::partition(m_deadlines.begin(), m_deadlines.end(), [now](const ScheduledEvent &item)
-                                          { return item.deadline <= now; });
-        due.insert(due.end(),
-                   std::make_move_iterator(m_deadlines.begin()),
-                   std::make_move_iterator(firstFuture));
-        m_deadlines.erase(m_deadlines.begin(), firstFuture);
-        updateNextDeadline();
-    }
-    std::sort(due.begin(), due.end(), [](const ScheduledEvent &left, const ScheduledEvent &right)
-              {
-                  if (left.deadline != right.deadline)
-                  {
-                      return left.deadline < right.deadline;
-                  }
-                  if (left.event.type != right.event.type)
-                  {
-                      return left.event.type < right.event.type;
-                  }
-                  if (left.event.id != right.event.id)
-                  {
-                      return left.event.id < right.event.id;
-                  }
-                  return left.sequence < right.sequence; });
-    for (ScheduledEvent &scheduled : due)
-    {
-        if (scheduled.event.type == EeEventType::VBlankStart)
+        std::vector<ScheduledEvent> due;
+        std::chrono::steady_clock::time_point pacingDeadline{};
         {
-            scheduleEvent(scheduled.deadline + kVBlankDuration,
-                          EeEvent{EeEventType::VBlankEnd, 0, m_vsyncTick + 1u});
-            scheduleEvent(scheduled.deadline + kVBlankPeriod,
-                          EeEvent{EeEventType::VBlankStart, 0, 0});
+            std::unique_lock lock(m_eventMutex);
+            const auto now = std::chrono::steady_clock::now();
+            for (const ScheduledEvent &item : m_deadlines)
+            {
+                if (item.deadlineCycle <= m_eeCycle &&
+                    (pacingDeadline == std::chrono::steady_clock::time_point{} ||
+                     item.hostDeadline < pacingDeadline))
+                {
+                    pacingDeadline = item.hostDeadline;
+                }
+            }
+
+            if (pacingDeadline == std::chrono::steady_clock::time_point{})
+            {
+                updateNextDeadline();
+                return;
+            }
+
+            if (now < pacingDeadline)
+            {
+                m_eventCv.wait_until(lock, pacingDeadline, [this]()
+                                     { return !m_events.empty() ||
+                                              m_stopRequested.load(std::memory_order_acquire); });
+                if (!m_events.empty() || m_stopRequested.load(std::memory_order_acquire))
+                {
+                    updateNextDeadline();
+                    return;
+                }
+            }
+
+            const auto pacedNow = std::chrono::steady_clock::now();
+            auto firstFuture = std::partition(m_deadlines.begin(), m_deadlines.end(),
+                                              [this, pacedNow](const ScheduledEvent &item)
+                                              { return item.deadlineCycle <= m_eeCycle &&
+                                                       item.hostDeadline <= pacedNow; });
+            due.insert(due.end(),
+                       std::make_move_iterator(m_deadlines.begin()),
+                       std::make_move_iterator(firstFuture));
+            m_deadlines.erase(m_deadlines.begin(), firstFuture);
+            updateNextDeadline();
         }
-        processEvent(scheduled.event);
+
+        std::sort(due.begin(), due.end(), [](const ScheduledEvent &left, const ScheduledEvent &right)
+                  {
+                      if (left.deadlineCycle != right.deadlineCycle)
+                      {
+                          return left.deadlineCycle < right.deadlineCycle;
+                      }
+                      if (left.event.type != right.event.type)
+                      {
+                          return left.event.type < right.event.type;
+                      }
+                      if (left.event.id != right.event.id)
+                      {
+                          return left.event.id < right.event.id;
+                      }
+                      return left.sequence < right.sequence; });
+
+        if (due.empty())
+        {
+            return;
+        }
+
+        for (ScheduledEvent &scheduled : due)
+        {
+            if (scheduled.event.type == EeEventType::VBlankStart)
+            {
+                scheduleEvent(scheduled.deadlineCycle + kVBlankDurationCycles,
+                              scheduled.hostDeadline + kVBlankDuration,
+                              EeEvent{EeEventType::VBlankEnd, 0, m_vsyncTick + 1u});
+                scheduleEvent(scheduled.deadlineCycle + kVBlankPeriodCycles,
+                              scheduled.hostDeadline + kVBlankPeriod,
+                              EeEvent{EeEventType::VBlankStart, 0, 0});
+            }
+            processEvent(scheduled.event);
+        }
     }
 }
 
@@ -1849,23 +1946,45 @@ void EeScheduler::writeGuestU32(uint32_t address, uint32_t value)
 void EeScheduler::waitForEvent()
 {
     std::unique_lock lock(m_eventMutex);
+    if (!m_events.empty() || m_stopRequested.load(std::memory_order_acquire))
+    {
+        return;
+    }
     if (m_deadlines.empty())
     {
         m_eventCv.wait(lock, [this]()
                        { return !m_events.empty() || m_stopRequested.load(std::memory_order_acquire); });
         return;
     }
-    const auto next = std::min_element(m_deadlines.begin(), m_deadlines.end(), [](const ScheduledEvent &left, const ScheduledEvent &right)
-                                       { return left.deadline < right.deadline; })
-                          ->deadline;
-    m_eventCv.wait_until(lock, next);
+
+    const auto next = std::min_element(m_deadlines.begin(), m_deadlines.end(),
+                                       [](const ScheduledEvent &left, const ScheduledEvent &right)
+                                       {
+                                           if (left.deadlineCycle != right.deadlineCycle)
+                                           {
+                                               return left.deadlineCycle < right.deadlineCycle;
+                                           }
+                                           return left.sequence < right.sequence;
+                                       });
+    const uint64_t deadlineCycle = next->deadlineCycle;
+    const auto hostDeadline = next->hostDeadline;
+    const bool signaled = m_eventCv.wait_until(lock, hostDeadline, [this]()
+                                               { return !m_events.empty() ||
+                                                        m_stopRequested.load(std::memory_order_acquire); });
+    if (!signaled)
+    {
+        m_eeCycle = std::max(m_eeCycle, deadlineCycle);
+        m_checkpointPending.store(true, std::memory_order_release);
+    }
 }
 
-void EeScheduler::scheduleEvent(std::chrono::steady_clock::time_point deadline, EeEvent event)
+void EeScheduler::scheduleEvent(uint64_t deadlineCycle,
+                                std::chrono::steady_clock::time_point hostDeadline,
+                                EeEvent event)
 {
     {
         std::lock_guard lock(m_eventMutex);
-        m_deadlines.push_back(ScheduledEvent{deadline, event, ++m_eventSequence});
+        m_deadlines.push_back(ScheduledEvent{deadlineCycle, hostDeadline, event, ++m_eventSequence});
         updateNextDeadline();
     }
     m_eventCv.notify_one();
@@ -1875,15 +1994,38 @@ void EeScheduler::updateNextDeadline()
 {
     if (m_deadlines.empty())
     {
-        m_nextDeadlineNanoseconds.store(0, std::memory_order_release);
+        m_nextDeadlineCycle.store(0u, std::memory_order_release);
         return;
     }
-    const auto it = std::min_element(m_deadlines.begin(), m_deadlines.end(), [](const ScheduledEvent &left, const ScheduledEvent &right)
-                                     { return left.deadline < right.deadline; });
-    const int64_t nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                    it->deadline.time_since_epoch())
-                                    .count();
-    m_nextDeadlineNanoseconds.store(nanoseconds, std::memory_order_release);
+    const auto it = std::min_element(m_deadlines.begin(), m_deadlines.end(),
+                                     [](const ScheduledEvent &left, const ScheduledEvent &right)
+                                     {
+                                         if (left.deadlineCycle != right.deadlineCycle)
+                                         {
+                                             return left.deadlineCycle < right.deadlineCycle;
+                                         }
+                                         return left.sequence < right.sequence;
+                                     });
+    m_nextDeadlineCycle.store(it->deadlineCycle, std::memory_order_release);
+}
+
+bool EeScheduler::hasReadyAtOrAbovePriority(int priority) const
+{
+    const int last = std::clamp(priority, 0, kPriorityCount - 1);
+    for (int p = 0; p <= last; ++p)
+    {
+        if (!m_readyQueues[static_cast<size_t>(p)].empty())
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+void EeScheduler::renewTimeSlice()
+{
+    m_sliceEndCycle = m_eeCycle + kDefaultTimeSliceCycles;
+    m_timeSliceExpired = false;
 }
 
 void EeScheduler::copyMainContextToRuntime()

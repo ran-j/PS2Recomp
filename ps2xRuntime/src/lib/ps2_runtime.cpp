@@ -1312,6 +1312,14 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     ctx->pc = targetPc;
     const bool isCall = (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall);
 
+    // Every inter-function transfer is also a deterministic EE safe point.
+    // Backward edges inside generated functions use eeCheckpointDue(), while
+    // this charge bounds straight-line call chains that have no local loop.
+    if (m_eeScheduler && m_eeScheduler->checkpointDue(EeScheduler::kGuestDispatchCycles))
+    {
+        return false;
+    }
+
     if (kind == GuestBranchKind::Return)
     {
         if (!hasFunction(targetPc))
@@ -2165,9 +2173,9 @@ void PS2Runtime::postEeEvent(EeEvent event)
     m_eeScheduler->postEvent(event);
 }
 
-bool PS2Runtime::eeCheckpointDue() const noexcept
+bool PS2Runtime::eeCheckpointDue(uint32_t cycles) noexcept
 {
-    return m_eeScheduler->checkpointDue();
+    return m_eeScheduler->checkpointDue(cycles);
 }
 
 [[noreturn]] void PS2Runtime::eeWaitVSyncTicks(uint32_t ticks, uint32_t resumePc)

@@ -214,6 +214,9 @@ struct EeEventFlagSnapshot
 struct EeKernelSnapshot
 {
     uint64_t sequence = 0;
+    uint64_t eeCycle = 0;
+    uint64_t sliceEndCycle = 0;
+    uint64_t nextEventCycle = 0;
     int runningThreadId = 0;
     std::vector<EeThreadSnapshot> threads;
     std::vector<EeSemaphoreSnapshot> semaphores;
@@ -255,6 +258,10 @@ public:
     static constexpr int kFirstThreadId = 2;
     static constexpr int kLastThreadId = 255;
     static constexpr int kPriorityCount = 128;
+    static constexpr uint64_t kEeClockHz = 294912000ull;
+    static constexpr uint32_t kGeneratedCheckpointCycles = 32u;
+    static constexpr uint32_t kGuestDispatchCycles = 8u;
+    static constexpr uint64_t kDefaultTimeSliceCycles = 65536ull;
 
     explicit EeScheduler(PS2Runtime &runtime);
     ~EeScheduler();
@@ -266,7 +273,8 @@ public:
     void run();
     void requestStop();
     void postEvent(EeEvent event);
-    [[nodiscard]] bool checkpointDue() const noexcept;
+    [[nodiscard]] bool checkpointDue(uint32_t cycles = kGeneratedCheckpointCycles) noexcept;
+    void accountCycles(uint32_t cycles) noexcept;
     [[nodiscard]] bool isExecutingGuest() const noexcept;
 
     // Kernel object API. All calls except postEvent/requestStop execute on the
@@ -349,7 +357,8 @@ public:
 private:
     struct ScheduledEvent
     {
-        std::chrono::steady_clock::time_point deadline{};
+        uint64_t deadlineCycle = 0;
+        std::chrono::steady_clock::time_point hostDeadline{};
         EeEvent event{};
         uint64_t sequence = 0;
     };
@@ -375,8 +384,10 @@ private:
     static int waitObjectId(const EeWaitState &wait);
     void writeGuestU32(uint32_t address, uint32_t value);
     void waitForEvent();
-    void scheduleEvent(std::chrono::steady_clock::time_point deadline, EeEvent event);
+    void scheduleEvent(uint64_t deadlineCycle, std::chrono::steady_clock::time_point hostDeadline, EeEvent event);
     void updateNextDeadline();
+    [[nodiscard]] bool hasReadyAtOrAbovePriority(int priority) const;
+    void renewTimeSlice();
     void copyMainContextToRuntime();
 
     PS2Runtime &m_runtime;
@@ -403,7 +414,10 @@ private:
     uint32_t m_enabledDmacMask = 0xFFFFFFFFu;
     int m_currentThreadId = 0;
     bool m_rescheduleRequested = false;
+    bool m_timeSliceExpired = false;
     bool m_insideInterrupt = false;
+    uint64_t m_eeCycle = 0;
+    uint64_t m_sliceEndCycle = kDefaultTimeSliceCycles;
     std::thread::id m_executorThread{};
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_guestExecuting{false};
@@ -425,7 +439,7 @@ private:
     uint32_t m_gsVSyncCallbackGp = 0;
     uint32_t m_gsVSyncCallbackSp = 0;
     std::unordered_map<uint64_t, uint32_t> m_invocationStackTops;
-    std::atomic<int64_t> m_nextDeadlineNanoseconds{0};
+    std::atomic<uint64_t> m_nextDeadlineCycle{0};
 
     mutable std::mutex m_snapshotMutex;
     EeKernelSnapshot m_snapshot;

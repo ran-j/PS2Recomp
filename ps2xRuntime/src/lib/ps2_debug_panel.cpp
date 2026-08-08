@@ -767,6 +767,10 @@ namespace
     {
         const EeKernelSnapshot snapshot = runtime.eeScheduler().snapshot();
         ImGui::Text("Threads: %zu running=%d", snapshot.threads.size(), snapshot.runningThreadId);
+        ImGui::Text("EE cycle: %llu  slice end: %llu  next event: %llu",
+                    static_cast<unsigned long long>(snapshot.eeCycle),
+                    static_cast<unsigned long long>(snapshot.sliceEndCycle),
+                    static_cast<unsigned long long>(snapshot.nextEventCycle));
         if (ImGui::BeginTable("threads", 11, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY, ImVec2(0, 320)))
         {
             ImGui::TableSetupColumn("ID");
