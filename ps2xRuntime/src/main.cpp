@@ -26,38 +26,69 @@
 namespace
 {
 #if defined(__ANDROID__)
+    int g_logcatPipeFds[2]{-1, -1};
+    std::thread g_logcatThread;
+
+    void stopLogcatRedirect()
+    {
+        std::fflush(stdout);
+        std::fflush(stderr);
+        close(STDOUT_FILENO);
+        close(STDERR_FILENO);
+        if (g_logcatPipeFds[1] >= 0)
+        {
+            close(g_logcatPipeFds[1]);
+            g_logcatPipeFds[1] = -1;
+        }
+        if (g_logcatThread.joinable())
+        {
+            g_logcatThread.join();
+        }
+    }
+
     void redirectStdioToLogcat()
     {
-        static int pipeFds[2];
-        if (pipe(pipeFds) != 0)
+        if (pipe(g_logcatPipeFds) != 0)
         {
             return;
         }
 
         setvbuf(stdout, nullptr, _IOLBF, 0);
         setvbuf(stderr, nullptr, _IONBF, 0);
-        dup2(pipeFds[1], STDOUT_FILENO);
-        dup2(pipeFds[1], STDERR_FILENO);
+        dup2(g_logcatPipeFds[1], STDOUT_FILENO);
+        dup2(g_logcatPipeFds[1], STDERR_FILENO);
 
-        std::thread([]()
-                    {
-                        FILE *reader = fdopen(pipeFds[0], "r");
-                        if (!reader)
-                        {
-                            return;
-                        }
-                        char line[1024];
-                        while (fgets(line, sizeof(line), reader))
-                        {
-                            size_t len = std::strlen(line);
-                            if (len > 0 && line[len - 1] == '\n')
-                            {
-                                line[len - 1] = '\0';
-                            }
-                            __android_log_write(ANDROID_LOG_INFO, "ps2x", line);
-                        }
-                    })
-            .detach();
+        g_logcatThread = std::thread([]()
+                                     {
+                                         FILE *reader = fdopen(g_logcatPipeFds[0], "r");
+                                         if (!reader)
+                                         {
+                                             return;
+                                         }
+                                         char line[1024];
+                                         while (fgets(line, sizeof(line), reader))
+                                         {
+                                             size_t len = std::strlen(line);
+                                             if (len > 0 && line[len - 1] == '\n')
+                                             {
+                                                 line[len - 1] = '\0';
+                                             }
+                                             __android_log_write(ANDROID_LOG_INFO, "ps2x", line);
+                                         }
+                                         fclose(reader);
+                                         g_logcatPipeFds[0] = -1;
+                                     });
+        if (std::atexit(stopLogcatRedirect) != 0)
+        {
+            close(STDOUT_FILENO);
+            close(STDERR_FILENO);
+            close(g_logcatPipeFds[1]);
+            g_logcatPipeFds[1] = -1;
+            if (g_logcatThread.joinable())
+            {
+                g_logcatThread.join();
+            }
+        }
     }
 #endif
 

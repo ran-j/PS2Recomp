@@ -1153,7 +1153,7 @@ namespace ps2recomp
                     stub << "#ifdef _DEBUG\n";
                     stub << "    PS_LOG_ENTRY(\"" << generatedName << "\");\n";
                     stub << "#endif\n";
-                    stub << "    const uint32_t __entryPc = ctx->pc;\n"
+                    stub << "    ctx->pc = getRegU32(ctx, 31);\n"
                          << "    ";
 
                     if (function.isSkipped)
@@ -1190,12 +1190,7 @@ namespace ps2recomp
                         }
                     }
 
-                    stub << "\n"
-                         << "    if (ctx->pc == __entryPc)\n"
-                         << "    {\n"
-                         << "        ctx->pc = getRegU32(ctx, 31);\n"
-                         << "    }\n"
-                         << "}";
+                    stub << "\n}";
                     m_generatedStubs[function.start] = stub.str();
                 }
             }

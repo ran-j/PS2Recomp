@@ -2,6 +2,7 @@
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
 #include "ps2_log.h"
+#include "runtime/ee_scheduler.h"
 
 #include <unordered_set>
 #include "Kernel/Syscalls/Helpers/State.h"
@@ -32,39 +33,45 @@
 namespace
 {
 #if defined(PS2X_ENABLE_DEBUG_UI) && !defined(PLATFORM_VITA)
-    const char *threadStatusName(int status)
+    const char *threadStatusName(EeThreadStatus status)
     {
         switch (status)
         {
-        case THS_RUN:
+        case EeThreadStatus::Running:
             return "RUN";
-        case THS_READY:
+        case EeThreadStatus::Ready:
             return "READY";
-        case THS_WAIT:
+        case EeThreadStatus::Waiting:
             return "WAIT";
-        case THS_SUSPEND:
+        case EeThreadStatus::Suspended:
             return "SUSPEND";
-        case THS_WAITSUSPEND:
+        case EeThreadStatus::WaitingSuspended:
             return "WAITSUSP";
-        case THS_DORMANT:
+        case EeThreadStatus::Dormant:
             return "DORMANT";
         default:
             return "?";
         }
     }
 
-    const char *waitTypeName(int waitType)
+    const char *waitTypeName(EeWaitReason waitType)
     {
         switch (waitType)
         {
-        case TSW_NONE:
+        case EeWaitReason::None:
             return "NONE";
-        case TSW_SLEEP:
+        case EeWaitReason::Sleep:
             return "SLEEP";
-        case TSW_SEMA:
+        case EeWaitReason::Semaphore:
             return "SEMA";
-        case TSW_EVENT:
+        case EeWaitReason::EventFlag:
             return "EVENT";
+        case EeWaitReason::VSync:
+            return "VSYNC";
+        case EeWaitReason::External:
+            return "EXTERNAL";
+        case EeWaitReason::Mpeg:
+            return "MPEG";
         default:
             return "?";
         }
@@ -698,7 +705,7 @@ namespace
         const uint32_t gp = runtime.m_debugGp.load(std::memory_order_relaxed);
 
         ImGui::Text("Runtime: %s", runtime.isStopRequested() ? "stop requested" : "running");
-        ImGui::Text("Guest execution waiters: %u", runtime.guestExecutionWaiterCountForTesting());
+        ImGui::Text("EE executor: %s", runtime.eeScheduler().isExecutingGuest() ? "guest" : "scheduler");
         ImGui::Separator();
         textHex32("PC", pc);
         ImGui::SameLine();
@@ -756,60 +763,15 @@ namespace
         }
     }
 
-    void drawThreadsTab()
+    void drawThreadsTab(PS2Runtime &runtime)
     {
-        struct ThreadRow
-        {
-            int id = 0;
-            uint32_t entry = 0;
-            uint32_t stack = 0;
-            uint32_t stackSize = 0;
-            uint32_t gp = 0;
-            uint32_t priority = 0;
-            int status = 0;
-            int waitType = 0;
-            int waitId = 0;
-            int currentPriority = 0;
-            int wakeupCount = 0;
-            int suspendCount = 0;
-            uint32_t currentPc = 0u;
-            bool terminated = false;
-        };
-
-        std::vector<ThreadRow> rows;
-        {
-            std::lock_guard<std::mutex> lock(g_thread_map_mutex);
-            rows.reserve(g_threads.size());
-            for (const auto &[id, ptr] : g_threads)
-            {
-                if (!ptr)
-                {
-                    continue;
-                }
-                ThreadRow row{};
-                row.id = id;
-                {
-                    std::lock_guard<std::mutex> threadLock(ptr->m);
-                    row.entry = ptr->entry;
-                    row.stack = ptr->stack;
-                    row.stackSize = ptr->stackSize;
-                    row.gp = ptr->gp;
-                    row.priority = ptr->priority;
-                    row.currentPriority = ptr->currentPriority;
-                    row.status = ptr->status;
-                    row.waitType = ptr->waitType;
-                    row.waitId = ptr->waitId;
-                    row.wakeupCount = ptr->wakeupCount;
-                    row.suspendCount = ptr->suspendCount;
-                }
-                row.currentPc = ptr->currentPc.load(std::memory_order_relaxed);
-                row.terminated = ptr->terminated.load(std::memory_order_relaxed);
-                rows.push_back(row);
-            }
-        }
-
-        ImGui::Text("Threads: %zu activeThreads=%d", rows.size(), g_activeThreads.load(std::memory_order_relaxed));
-        if (ImGui::BeginTable("threads", 12, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY, ImVec2(0, 320)))
+        const EeKernelSnapshot snapshot = runtime.eeScheduler().snapshot();
+        ImGui::Text("Threads: %zu running=%d", snapshot.threads.size(), snapshot.runningThreadId);
+        ImGui::Text("EE cycle: %llu  slice end: %llu  next event: %llu",
+                    static_cast<unsigned long long>(snapshot.eeCycle),
+                    static_cast<unsigned long long>(snapshot.sliceEndCycle),
+                    static_cast<unsigned long long>(snapshot.nextEventCycle));
+        if (ImGui::BeginTable("threads", 11, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY, ImVec2(0, 320)))
         {
             ImGui::TableSetupColumn("ID");
             ImGui::TableSetupColumn("Status");
@@ -822,9 +784,8 @@ namespace
             ImGui::TableSetupColumn("Prio");
             ImGui::TableSetupColumn("Wake");
             ImGui::TableSetupColumn("Susp");
-            ImGui::TableSetupColumn("Term");
             ImGui::TableHeadersRow();
-            for (const ThreadRow &row : rows)
+            for (const EeThreadSnapshot &row : snapshot.threads)
             {
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn();
@@ -832,11 +793,11 @@ namespace
                 ImGui::TableNextColumn();
                 ImGui::Text("%s", threadStatusName(row.status));
                 ImGui::TableNextColumn();
-                ImGui::Text("%s", waitTypeName(row.waitType));
+                ImGui::Text("%s", waitTypeName(row.waitReason));
                 ImGui::TableNextColumn();
                 ImGui::Text("%d", row.waitId);
                 ImGui::TableNextColumn();
-                ImGui::Text("0x%08X", row.currentPc);
+                ImGui::Text("0x%08X", row.pc);
                 ImGui::TableNextColumn();
                 ImGui::Text("0x%08X", row.entry);
                 ImGui::TableNextColumn();
@@ -844,23 +805,21 @@ namespace
                 ImGui::TableNextColumn();
                 ImGui::Text("0x%08X", row.gp);
                 ImGui::TableNextColumn();
-                ImGui::Text("%d/%u", row.currentPriority, row.priority);
+                ImGui::Text("%d/%d", row.currentPriority, row.initialPriority);
                 ImGui::TableNextColumn();
-                ImGui::Text("%d", row.wakeupCount);
+                ImGui::Text("%u", row.wakeupCount);
                 ImGui::TableNextColumn();
                 ImGui::Text("%d", row.suspendCount);
-                ImGui::TableNextColumn();
-                ImGui::Text("%u", row.terminated ? 1u : 0u);
             }
             ImGui::EndTable();
         }
     }
 
-    void drawKernelTab()
+    void drawKernelTab(PS2Runtime &runtime)
     {
+        const EeKernelSnapshot snapshot = runtime.eeScheduler().snapshot();
         ImGui::SeparatorText("Semaphores");
         {
-            std::lock_guard<std::mutex> lock(g_sema_map_mutex);
             if (ImGui::BeginTable("semas", 7, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable))
             {
                 ImGui::TableSetupColumn("ID");
@@ -871,26 +830,23 @@ namespace
                 ImGui::TableSetupColumn("Attr");
                 ImGui::TableSetupColumn("Deleted");
                 ImGui::TableHeadersRow();
-                for (const auto &[id, sema] : g_semas)
+                for (const EeSemaphoreSnapshot &sema : snapshot.semaphores)
                 {
-                    if (!sema)
-                        continue;
-                    std::lock_guard<std::mutex> semaLock(sema->m);
                     ImGui::TableNextRow();
                     ImGui::TableNextColumn();
-                    ImGui::Text("%d", id);
+                    ImGui::Text("%d", sema.id);
                     ImGui::TableNextColumn();
-                    ImGui::Text("%d", sema->count);
+                    ImGui::Text("%d", sema.count);
                     ImGui::TableNextColumn();
-                    ImGui::Text("%d", sema->maxCount);
+                    ImGui::Text("%d", sema.maxCount);
                     ImGui::TableNextColumn();
-                    ImGui::Text("%d", sema->initCount);
+                    ImGui::Text("-");
                     ImGui::TableNextColumn();
-                    ImGui::Text("%d", sema->waiters);
+                    ImGui::Text("%u", sema.waiters);
                     ImGui::TableNextColumn();
-                    ImGui::Text("0x%08X", sema->attr);
+                    ImGui::Text("-");
                     ImGui::TableNextColumn();
-                    ImGui::Text("%u", sema->deleted ? 1u : 0u);
+                    ImGui::Text("0");
                 }
                 ImGui::EndTable();
             }
@@ -898,7 +854,6 @@ namespace
 
         ImGui::SeparatorText("Event flags");
         {
-            std::lock_guard<std::mutex> lock(g_event_flag_map_mutex);
             if (ImGui::BeginTable("evf", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable))
             {
                 ImGui::TableSetupColumn("ID");
@@ -908,24 +863,21 @@ namespace
                 ImGui::TableSetupColumn("Attr");
                 ImGui::TableSetupColumn("Deleted");
                 ImGui::TableHeadersRow();
-                for (const auto &[id, evf] : g_eventFlags)
+                for (const EeEventFlagSnapshot &evf : snapshot.eventFlags)
                 {
-                    if (!evf)
-                        continue;
-                    std::lock_guard<std::mutex> evfLock(evf->m);
                     ImGui::TableNextRow();
                     ImGui::TableNextColumn();
-                    ImGui::Text("%d", id);
+                    ImGui::Text("%d", evf.id);
                     ImGui::TableNextColumn();
-                    ImGui::Text("0x%08X", evf->bits);
+                    ImGui::Text("0x%08X", evf.bits);
                     ImGui::TableNextColumn();
-                    ImGui::Text("0x%08X", evf->initBits);
+                    ImGui::Text("0x%08X", evf.initBits);
                     ImGui::TableNextColumn();
-                    ImGui::Text("%d", evf->waiters);
+                    ImGui::Text("%u", evf.waiters);
                     ImGui::TableNextColumn();
-                    ImGui::Text("0x%08X", evf->attr);
+                    ImGui::Text("0x%08X", evf.attr);
                     ImGui::TableNextColumn();
-                    ImGui::Text("%u", evf->deleted ? 1u : 0u);
+                    ImGui::Text("0");
                 }
                 ImGui::EndTable();
             }
@@ -2249,12 +2201,12 @@ void PS2DebugPanel::draw(PS2Runtime &runtime)
             }
             if (ImGui::BeginTabItem("Threads"))
             {
-                drawThreadsTab();
+                drawThreadsTab(runtime);
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("Kernel"))
             {
-                drawKernelTab();
+                drawKernelTab(runtime);
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("IOP/SIF"))

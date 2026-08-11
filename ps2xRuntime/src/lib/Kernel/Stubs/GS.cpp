@@ -3,20 +3,12 @@
 #include "ps2_log.h"
 #include "runtime/ps2_gs_common.h"
 #include "runtime/ps2_gs_psmct16.h"
+#include "runtime/ee_scheduler.h"
 
 namespace ps2_stubs
 {
     namespace
     {
-        std::mutex g_gs_sync_v_mutex;
-        uint64_t g_gs_sync_v_base_tick = 0u;
-        std::mutex g_gs_sync_v_callback_mutex;
-        uint32_t g_gs_sync_v_callback_func = 0u;
-        uint32_t g_gs_sync_v_callback_gp = 0u;
-        uint32_t g_gs_sync_v_callback_sp = 0u;
-        uint32_t g_gs_sync_v_callback_stack_base = 0u;
-        uint32_t g_gs_sync_v_callback_stack_top = 0u;
-        uint32_t g_gs_sync_v_callback_bad_pc_logs = 0u;
         uint64_t makeClearPrim(bool useContext2)
         {
             return static_cast<uint64_t>(GS_PRIM_SPRITE) |
@@ -598,175 +590,6 @@ namespace ps2_stubs
         setReturnU32(ctx, terminatePacketBuilderState(rdram, ctx, runtime));
     }
 
-    static void resetGsSyncVState()
-    {
-        std::lock_guard<std::mutex> lock(g_gs_sync_v_mutex);
-        g_gs_sync_v_base_tick = ps2_syscalls::GetCurrentVSyncTick();
-    }
-
-    static int32_t getGsSyncVFieldForTick(uint64_t tick)
-    {
-        std::lock_guard<std::mutex> lock(g_gs_sync_v_mutex);
-        if (tick <= g_gs_sync_v_base_tick)
-        {
-            return 0;
-        }
-
-        return static_cast<int32_t>((tick - g_gs_sync_v_base_tick - 1u) & 1u);
-    }
-
-    void resetGsSyncVCallbackState()
-    {
-        {
-            std::lock_guard<std::mutex> lock(g_gs_sync_v_callback_mutex);
-            g_gs_sync_v_callback_func = 0u;
-            g_gs_sync_v_callback_gp = 0u;
-            g_gs_sync_v_callback_sp = 0u;
-            g_gs_sync_v_callback_stack_base = 0u;
-            g_gs_sync_v_callback_stack_top = 0u;
-            g_gs_sync_v_callback_bad_pc_logs = 0u;
-        }
-        resetGsSyncVState();
-    }
-
-    void dispatchGsSyncVCallback(uint8_t *rdram, PS2Runtime *runtime, uint64_t tick)
-    {
-        if (!rdram || !runtime)
-        {
-            return;
-        }
-
-        uint32_t callback = 0u;
-        uint32_t gp = 0u;
-        uint32_t callbackStackTop = 0u;
-        const uint64_t callbackTick = (tick != 0u) ? tick : ps2_syscalls::GetCurrentVSyncTick();
-        {
-            std::lock_guard<std::mutex> lock(g_gs_sync_v_callback_mutex);
-            callback = g_gs_sync_v_callback_func;
-            gp = g_gs_sync_v_callback_gp;
-            callbackStackTop = g_gs_sync_v_callback_stack_top;
-            if (callback == 0u)
-            {
-                return;
-            }
-        }
-
-        if (!runtime->hasFunction(callback))
-        {
-            static uint32_t s_missingCallbackLogCount = 0u;
-            if (s_missingCallbackLogCount < 32u)
-            {
-                PS2_IF_AGRESSIVE_LOGS({
-                    std::cerr << "[sceGsSyncVCallback:missing] cb=0x" << std::hex << callback
-                              << " gp=0x" << gp
-                              << " tick=0x" << callbackTick
-                              << std::dec << std::endl;
-                });
-                ++s_missingCallbackLogCount;
-            }
-            return;
-        }
-
-        if (callbackStackTop == 0u)
-        {
-            constexpr uint32_t kCallbackStackSize = 0x4000u;
-            const uint32_t stackTop = runtime->reserveAsyncCallbackStack(kCallbackStackSize, 16u);
-            if (stackTop != 0u)
-            {
-                std::lock_guard<std::mutex> lock(g_gs_sync_v_callback_mutex);
-                if (g_gs_sync_v_callback_stack_top == 0u)
-                {
-                    g_gs_sync_v_callback_stack_base = stackTop - (kCallbackStackSize - 0x10u);
-                    g_gs_sync_v_callback_stack_top = stackTop;
-                }
-                callbackStackTop = g_gs_sync_v_callback_stack_top;
-            }
-        }
-
-        try
-        {
-            R5900Context callbackCtx{};
-            SET_GPR_U32(&callbackCtx, 28, gp);
-            SET_GPR_U32(&callbackCtx, 29, (callbackStackTop != 0u) ? callbackStackTop : (PS2_RAM_SIZE - 0x10u));
-            SET_GPR_U32(&callbackCtx, 31, 0u);
-            SET_GPR_U32(&callbackCtx, 4, static_cast<uint32_t>(callbackTick));
-            callbackCtx.pc = callback;
-
-            static uint32_t s_dispatchLogCount = 0u;
-            const bool shouldLogDispatch = (s_dispatchLogCount < 64u);
-            if (shouldLogDispatch)
-            {
-                PS2_IF_AGRESSIVE_LOGS({
-                    RUNTIME_LOG("[sceGsSyncVCallback:dispatch] cb=0x" << std::hex << callback
-                                                                      << " gp=0x" << gp
-                                                                      << " sp=0x" << getRegU32(&callbackCtx, 29)
-                                                                      << " tick=0x" << callbackTick
-                                                                      << std::dec << std::endl);
-                });
-            }
-
-            uint32_t steps = 0u;
-            bool reschedulePending = false;
-            uint64_t handoffBaseline = 0u;
-            {
-                PS2Runtime::GuestExecutionScope guestExecution(runtime);
-                PS2Runtime::DeferredGuestYieldScope deferYield(reschedulePending);
-
-                while (callbackCtx.pc != 0u && !runtime->isStopRequested() && steps < 1024u)
-                {
-                    if (!runtime->hasFunction(callbackCtx.pc))
-                    {
-                        if (g_gs_sync_v_callback_bad_pc_logs < 16u)
-                        {
-                            std::cerr << "[sceGsSyncVCallback:bad-pc] pc=0x" << std::hex << callbackCtx.pc
-                                      << " ra=0x" << getRegU32(&callbackCtx, 31)
-                                      << " sp=0x" << getRegU32(&callbackCtx, 29)
-                                      << " gp=0x" << getRegU32(&callbackCtx, 28)
-                                      << std::dec << std::endl;
-                            ++g_gs_sync_v_callback_bad_pc_logs;
-                        }
-                        callbackCtx.pc = 0u;
-                        break;
-                    }
-
-                    auto step = runtime->lookupFunction(callbackCtx.pc);
-                    if (!step)
-                    {
-                        break;
-                    }
-                    ++steps;
-                    step(rdram, &callbackCtx, runtime);
-                }
-                handoffBaseline = runtime->guestExecutionHandoffEpochSnapshot();
-            }
-            if (reschedulePending && !runtime->isStopRequested())
-            {
-                runtime->waitForGuestExecutionHandoff(handoffBaseline);
-            }
-
-            if (shouldLogDispatch)
-            {
-                PS2_IF_AGRESSIVE_LOGS({
-                    RUNTIME_LOG("[sceGsSyncVCallback:return] cb=0x" << std::hex << callback
-                                                                    << " finalPc=0x" << callbackCtx.pc
-                                                                    << " ra=0x" << getRegU32(&callbackCtx, 31)
-                                                                    << " steps=0x" << steps
-                                                                    << std::dec << std::endl);
-                });
-                ++s_dispatchLogCount;
-            }
-        }
-        catch (const std::exception &e)
-        {
-            static uint32_t warnCount = 0u;
-            if (warnCount < 8u)
-            {
-                std::cerr << "[sceGsSyncVCallback] callback exception: " << e.what() << std::endl;
-                ++warnCount;
-            }
-        }
-    }
-
     void sceGsExecLoadImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t imgAddr = getRegU32(ctx, 4);
@@ -979,8 +802,6 @@ namespace ps2_stubs
             g_gparam.omode = static_cast<uint8_t>(omode & 0xFF);
             g_gparam.ffmode = static_cast<uint8_t>(ffmode & 0x1);
             writeGsGParamToScratch(runtime);
-            resetGsSyncVState();
-
             uint64_t pmode = makePmode(1, 0, 0, 0, 0, 0x80);
             uint64_t smode2 = (interlace & 0x1) | ((ffmode & 0x1) << 1);
             uint64_t dispfb = makeDispFb(0, 10, 0, 0, 0);
@@ -1459,14 +1280,10 @@ namespace ps2_stubs
 
     void sceGsSyncV(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        const uint64_t tick = ps2_syscalls::WaitForNextVSyncTick(rdram, runtime);
-        if (g_gparam.interlace != 0u)
-        {
-            setReturnS32(ctx, getGsSyncVFieldForTick(tick));
-            return;
-        }
-
-        setReturnS32(ctx, 1);
+        ps2_syscalls::WaitVSyncTick(rdram,
+                                    ctx,
+                                    runtime,
+                                    g_gparam.interlace != 0u ? -1 : 1);
     }
 
     void sceGsSyncVCallback(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1477,17 +1294,9 @@ namespace ps2_stubs
         const uint32_t gp = getRegU32(ctx, 28);
         const uint32_t sp = getRegU32(ctx, 29);
 
-        uint32_t oldCallback = 0u;
-        {
-            std::lock_guard<std::mutex> lock(g_gs_sync_v_callback_mutex);
-            oldCallback = g_gs_sync_v_callback_func;
-            g_gs_sync_v_callback_func = newCallback;
-            if (newCallback != 0u)
-            {
-                g_gs_sync_v_callback_gp = gp;
-                g_gs_sync_v_callback_sp = sp;
-            }
-        }
+        EeScheduler &ee = runtime->eeScheduler();
+        ee.bindMainContextForSyscall(*ctx, rdram);
+        const uint32_t oldCallback = ee.setGsVSyncCallback(newCallback, gp, sp);
 
         static uint32_t s_syncVCallbackLogCount = 0u;
         if (s_syncVCallbackLogCount < 128u)
@@ -1502,11 +1311,6 @@ namespace ps2_stubs
                                                               << std::dec << std::endl);
             });
             ++s_syncVCallbackLogCount;
-        }
-
-        if (newCallback != 0u)
-        {
-            ps2_syscalls::EnsureVSyncWorkerRunning(rdram, runtime);
         }
 
         setReturnU32(ctx, oldCallback);

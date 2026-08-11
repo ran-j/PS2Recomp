@@ -94,6 +94,9 @@ namespace ps2x::iop
         bool signalCompletion = false;
         CallbackPolicy callbackPolicy = CallbackPolicy::RuntimeDefault;
         ServerDispatchPolicy serverDispatchPolicy = ServerDispatchPolicy::RuntimeDefault;
+        uint32_t guestFunction = 0;
+        uint32_t guestArguments[4]{};
+        uint32_t guestDefaultResultAddress = 0;
     };
 
     enum class SifTransferKind : uint32_t

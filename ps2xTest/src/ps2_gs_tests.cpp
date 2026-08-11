@@ -4,6 +4,7 @@
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
 #include "runtime/ps2_gs_gpu.h"
+#include "runtime/ee_scheduler.h"
 #include "runtime/ps2_gs_memory.h"
 #include "runtime/ps2_gs_rasterizer.h"
 #include "runtime/ps2_gs_psmct32.h"
@@ -25,6 +26,21 @@ namespace
 {
     std::atomic<uint32_t> g_gsSyncCallbackHits{0u};
     std::atomic<uint32_t> g_gsSyncCallbackLastTick{0u};
+    std::atomic<int32_t> g_gsSyncFirstField{-1};
+    std::atomic<int32_t> g_gsSyncSecondField{-1};
+    std::atomic<uint32_t> g_gsSyncCallbackSp{0u};
+    std::atomic<uint32_t> g_gsSyncCallbackGp{0u};
+    std::atomic<uint32_t> g_gsSyncCallbackPrevious{0u};
+
+    constexpr uint32_t kGsSyncWait0Pc = 0x0011F000u;
+    constexpr uint32_t kGsSyncResume0Pc = 0x0011F010u;
+    constexpr uint32_t kGsSyncWait1Pc = 0x0011F020u;
+    constexpr uint32_t kGsSyncResume1Pc = 0x0011F030u;
+    constexpr uint32_t kGsCallbackMainPc = 0x0011F040u;
+    constexpr uint32_t kGsCallbackResumePc = 0x0011F050u;
+    constexpr uint32_t kGsCallbackPc = 0x00120000u;
+    constexpr uint32_t kGsCallbackGp = 0x0036A7F0u;
+    constexpr uint32_t kGsCallbackCallerSp = 0x00123450u;
 
     static_assert(sizeof(GsImageMem) == 12, "GsImageMem size mismatch");
 
@@ -95,8 +111,52 @@ namespace
         (void)runtime;
 
         g_gsSyncCallbackLastTick.store(getRegU32(ctx, 4), std::memory_order_relaxed);
+        g_gsSyncCallbackSp.store(getRegU32(ctx, 29), std::memory_order_relaxed);
+        g_gsSyncCallbackGp.store(getRegU32(ctx, 28), std::memory_order_relaxed);
         g_gsSyncCallbackHits.fetch_add(1u, std::memory_order_relaxed);
         ctx->pc = 0u;
+    }
+
+    void testGsSyncWait0(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        ctx->pc = kGsSyncResume0Pc;
+        ps2_stubs::sceGsSyncV(rdram, ctx, runtime);
+    }
+
+    void testGsSyncResume0(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        g_gsSyncFirstField.store(static_cast<int32_t>(getRegU32(ctx, 2)), std::memory_order_release);
+        ctx->pc = kGsSyncWait1Pc;
+    }
+
+    void testGsSyncWait1(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        ctx->pc = kGsSyncResume1Pc;
+        ps2_stubs::sceGsSyncV(rdram, ctx, runtime);
+    }
+
+    void testGsSyncResume1(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_gsSyncSecondField.store(static_cast<int32_t>(getRegU32(ctx, 2)), std::memory_order_release);
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
+    void testGsCallbackMain(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        setRegU32(*ctx, 4, kGsCallbackPc);
+        setRegU32(*ctx, 28, kGsCallbackGp);
+        setRegU32(*ctx, 29, kGsCallbackCallerSp);
+        ctx->pc = kGsCallbackResumePc;
+        ps2_stubs::sceGsSyncVCallback(rdram, ctx, runtime);
+        g_gsSyncCallbackPrevious.store(getRegU32(ctx, 2), std::memory_order_release);
+        ps2_syscalls::WaitVSyncTick(rdram, ctx, runtime, -1);
+    }
+
+    void testGsCallbackResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        ctx->pc = 0u;
+        runtime->requestStop();
     }
 
     void writeGsImageTest(uint8_t *rdram, uint32_t addr, const GsImageMem &image)
@@ -3899,11 +3959,8 @@ void register_ps2_gs_tests()
                                     "sceGsResetGraph should free its temporary GIF packet");
         });
 
-        tc.Run("sceGsSyncV waits on VBlank and reports interlaced field parity", [](TestCase &t)
+        tc.Run("sceGsSyncV resumes through the scheduler with deterministic field parity", [](TestCase &t)
         {
-            notifyRuntimeStop();
-            ps2_stubs::resetGsSyncVCallbackState();
-
             PS2Runtime runtime;
             t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
@@ -3914,66 +3971,57 @@ void register_ps2_gs_tests()
             setRegU32(resetCtx, 6, 2u);
             setRegU32(resetCtx, 7, 1u);
             ps2_stubs::sceGsResetGraph(rdram.data(), &resetCtx, &runtime);
+            runtime.registerFunction(kGsSyncWait0Pc, testGsSyncWait0);
+            runtime.registerFunction(kGsSyncResume0Pc, testGsSyncResume0);
+            runtime.registerFunction(kGsSyncWait1Pc, testGsSyncWait1);
+            runtime.registerFunction(kGsSyncResume1Pc, testGsSyncResume1);
+            g_gsSyncFirstField.store(-1, std::memory_order_release);
+            g_gsSyncSecondField.store(-1, std::memory_order_release);
 
-            R5900Context sync0{};
-            ps2_stubs::sceGsSyncV(rdram.data(), &sync0, &runtime);
-            t.Equals(static_cast<int32_t>(getRegU32Test(sync0, 2)), 0, "first interlaced sceGsSyncV should report even field");
+            R5900Context mainContext{};
+            mainContext.pc = kGsSyncWait0Pc;
+            runtime.eeScheduler().reset(rdram.data(), mainContext);
+            runtime.eeScheduler().run();
 
-            R5900Context sync1{};
-            ps2_stubs::sceGsSyncV(rdram.data(), &sync1, &runtime);
-            t.Equals(static_cast<int32_t>(getRegU32Test(sync1, 2)), 1, "second interlaced sceGsSyncV should report odd field");
-
-            R5900Context resetProgCtx{};
-            setRegU32(resetProgCtx, 4, 0u);
-            setRegU32(resetProgCtx, 5, 0u);
-            setRegU32(resetProgCtx, 6, 2u);
-            setRegU32(resetProgCtx, 7, 1u);
-            ps2_stubs::sceGsResetGraph(rdram.data(), &resetProgCtx, &runtime);
-
-            R5900Context syncProg{};
-            ps2_stubs::sceGsSyncV(rdram.data(), &syncProg, &runtime);
-            t.Equals(static_cast<int32_t>(getRegU32Test(syncProg, 2)), 1, "progressive sceGsSyncV should always return one");
-
-            runtime.requestStop();
-            notifyRuntimeStop();
-            ps2_stubs::resetGsSyncVCallbackState();
+            t.Equals(g_gsSyncFirstField.load(std::memory_order_acquire), 0,
+                     "first interlaced VBlank should report even field");
+            t.Equals(g_gsSyncSecondField.load(std::memory_order_acquire), 1,
+                     "second interlaced VBlank should report odd field");
         });
 
-        tc.Run("sceGsSyncVCallback uses the shared VBlank worker", [](TestCase &t)
+        tc.Run("sceGsSyncVCallback runs as a scheduler invocation on its callback stack", [](TestCase &t)
         {
-            notifyRuntimeStop();
-            ps2_stubs::resetGsSyncVCallbackState();
             g_gsSyncCallbackHits.store(0u, std::memory_order_relaxed);
             g_gsSyncCallbackLastTick.store(0u, std::memory_order_relaxed);
+            g_gsSyncCallbackSp.store(0u, std::memory_order_relaxed);
+            g_gsSyncCallbackGp.store(0u, std::memory_order_relaxed);
+            g_gsSyncCallbackPrevious.store(0xFFFFFFFFu, std::memory_order_relaxed);
 
             PS2Runtime runtime;
             t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            runtime.configureGuestHeap(0x01F00000u, 0x01F00000u);
+            runtime.registerFunction(kGsCallbackMainPc, testGsCallbackMain);
+            runtime.registerFunction(kGsCallbackResumePc, testGsCallbackResume);
+            runtime.registerFunction(kGsCallbackPc, testGsSyncVCallback);
 
-            constexpr uint32_t kCallbackAddr = 0x120000u;
-            runtime.registerFunction(kCallbackAddr, testGsSyncVCallback);
+            R5900Context mainContext{};
+            mainContext.pc = kGsCallbackMainPc;
+            runtime.eeScheduler().reset(rdram.data(), mainContext);
+            runtime.eeScheduler().run();
 
-            R5900Context callbackCtx{};
-            setRegU32(callbackCtx, 4, kCallbackAddr);
-            ps2_stubs::sceGsSyncVCallback(rdram.data(), &callbackCtx, &runtime);
-            t.Equals(getRegU32Test(callbackCtx, 2), 0u, "first sceGsSyncVCallback registration should return no previous callback");
-
-            const bool callbackFired = waitUntil([]() {
-                return g_gsSyncCallbackHits.load(std::memory_order_acquire) > 0u;
-            }, std::chrono::milliseconds(80));
-
-            t.IsTrue(callbackFired, "registered GS VSync callback should fire from the VBlank worker");
+            t.Equals(g_gsSyncCallbackPrevious.load(std::memory_order_acquire), 0u,
+                     "first callback registration should return no previous callback");
+            t.Equals(g_gsSyncCallbackHits.load(std::memory_order_acquire), 1u,
+                     "the callback should execute once at the next VBlank boundary");
             t.IsTrue(g_gsSyncCallbackLastTick.load(std::memory_order_acquire) > 0u,
                      "VSync callback should receive a positive tick value");
-
-            R5900Context clearCtx{};
-            setRegU32(clearCtx, 4, 0u);
-            ps2_stubs::sceGsSyncVCallback(rdram.data(), &clearCtx, &runtime);
-            t.Equals(getRegU32Test(clearCtx, 2), kCallbackAddr, "clearing sceGsSyncVCallback should return the previous callback");
-
-            runtime.requestStop();
-            notifyRuntimeStop();
-            ps2_stubs::resetGsSyncVCallbackState();
+            t.Equals(g_gsSyncCallbackGp.load(std::memory_order_acquire), kGsCallbackGp,
+                     "callback invocation should preserve the registered GP");
+            t.IsTrue(g_gsSyncCallbackSp.load(std::memory_order_acquire) >= 0x01F00000u,
+                     "callback invocation should use the reserved async stack pool");
+            t.IsTrue(g_gsSyncCallbackSp.load(std::memory_order_acquire) != kGsCallbackCallerSp,
+                     "callback invocation must not reuse the caller stack");
         });
 
         tc.Run("GS T4HL/T4HH shared-plane upload preserves both index planes via RMW", [](TestCase &t)

@@ -133,48 +133,26 @@ namespace ps2x::iop::detail
                 const bool hasUrpcHandler = isUrpc && command < 64u && urpcFunction != 0u;
                 if (hasUrpcHandler && request.serverFunction != 0u)
                 {
-                    uint32_t serverResult = 0u;
-                    if (m_host.invokeGuestFunction(request.callToken,
-                                                   request.serverFunction,
-                                                   request.function,
-                                                   request.serverBuffer,
-                                                   request.send.size,
-                                                   0u,
-                                                   &serverResult))
-                    {
-                        result.handled = true;
-                        result.resultAddress = serverResult;
-                        if (result.resultAddress == 0u && request.serverBuffer != 0u)
-                        {
-                            result.resultAddress = request.serverBuffer;
-                        }
-                        if (result.resultAddress == 0u && request.receive.address != 0u)
-                        {
-                            result.resultAddress = request.receive.address;
-                        }
-                        return result;
-                    }
+                    result.guestFunction = request.serverFunction;
+                    result.guestArguments[0] = request.function;
+                    result.guestArguments[1] = request.serverBuffer;
+                    result.guestArguments[2] = request.send.size;
+                    result.guestDefaultResultAddress = request.serverBuffer != 0u
+                                                           ? request.serverBuffer
+                                                           : request.receive.address;
+                    return result;
                 }
 
                 if (hasUrpcHandler &&
                     request.send.address != 0u &&
                     request.send.size > 0u)
                 {
-                    uint32_t dispatcherResult = 0u;
-                    if (m_host.invokeGuestFunction(request.callToken,
-                                                   m_bindings.dispatcherFunctionAddress,
-                                                   request.function,
-                                                   request.send.address,
-                                                   request.send.size,
-                                                   0u,
-                                                   &dispatcherResult))
-                    {
-                        result.handled = true;
-                        result.resultAddress = dispatcherResult != 0u
-                                                   ? dispatcherResult
-                                                   : request.send.address;
-                        return result;
-                    }
+                    result.guestFunction = m_bindings.dispatcherFunctionAddress;
+                    result.guestArguments[0] = request.function;
+                    result.guestArguments[1] = request.send.address;
+                    result.guestArguments[2] = request.send.size;
+                    result.guestDefaultResultAddress = request.send.address;
+                    return result;
                 }
 
                 if (request.function == 2u &&

@@ -458,21 +458,17 @@ bool PS2IopHostAdapter::invokeGuestFunction(uint64_t callToken,
                                             uint32_t a3,
                                             uint32_t *resultAddress)
 {
-    if (!m_activeContext || callToken == 0 || callToken != m_activeToken)
+    (void)callToken;
+    (void)address;
+    (void)a0;
+    (void)a1;
+    (void)a2;
+    (void)a3;
+    if (resultAddress)
     {
-        return false;
+        *resultAddress = 0u;
     }
-    return rpcInvokeFunction(m_activeRdram
-                                 ? m_activeRdram
-                                 : m_runtime.memory().getRDRAM(),
-                             m_activeContext,
-                             &m_runtime,
-                             address,
-                             a0,
-                             a1,
-                             a2,
-                             a3,
-                             resultAddress);
+    return false;
 }
 
 void PS2IopHostAdapter::log(ps2x::iop::LogLevel level, std::string_view message)

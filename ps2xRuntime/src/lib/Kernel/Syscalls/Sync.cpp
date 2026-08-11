@@ -1,426 +1,120 @@
 #include "Common.h"
 #include "Sync.h"
+#include "runtime/ee_scheduler.h"
 
 namespace ps2_syscalls
 {
-    static bool looksLikeGuestPointerOrNull(uint32_t value)
+    namespace
     {
-        if (value == 0u)
-        {
-            return true;
-        }
-        const uint32_t normalized = value & 0x1FFFFFFFu;
-        return normalized < PS2_RAM_SIZE;
-    }
+        constexpr uint32_t WEF_OR = 0x01u;
+        constexpr uint32_t WEF_CLEAR = 0x10u;
+        constexpr uint32_t WEF_CLEAR_ALL = 0x20u;
+        constexpr uint32_t WEF_MODE_MASK = WEF_OR | WEF_CLEAR | WEF_CLEAR_ALL;
+        constexpr uint32_t EA_MULTI = 0x02u;
 
-    static bool readGuestU32Safe(const uint8_t *rdram, uint32_t addr, uint32_t &out)
-    {
-        const uint8_t *b0 = getConstMemPtr(rdram, addr + 0u);
-        const uint8_t *b1 = getConstMemPtr(rdram, addr + 1u);
-        const uint8_t *b2 = getConstMemPtr(rdram, addr + 2u);
-        const uint8_t *b3 = getConstMemPtr(rdram, addr + 3u);
-        if (!b0 || !b1 || !b2 || !b3)
+        EeScheduler &scheduler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
-            out = 0u;
-            return false;
+            EeScheduler &result = runtime->eeScheduler();
+            result.bindMainContextForSyscall(*ctx, rdram);
+            return result;
         }
 
-        out = static_cast<uint32_t>(*b0) |
-              (static_cast<uint32_t>(*b1) << 8) |
-              (static_cast<uint32_t>(*b2) << 16) |
-              (static_cast<uint32_t>(*b3) << 24);
-        return true;
-    }
-
-    struct DecodedSemaParams
-    {
-        int init = 0;
-        int max = 1;
-        uint32_t attr = 0;
-        uint32_t option = 0;
-    };
-
-    static DecodedSemaParams decodeCreateSemaParams(const uint32_t *param, uint32_t availableWords)
-    {
-        DecodedSemaParams out{};
-        if (!param || availableWords == 0u)
+        void deleteSemaphoreImpl(uint8_t *rdram,
+                                 R5900Context *ctx,
+                                 PS2Runtime *runtime,
+                                 bool interruptSafe)
         {
-            return out;
+            EeScheduler &ee = scheduler(rdram, ctx, runtime);
+            const int result = ee.deleteSemaphore(static_cast<int>(getRegU32(ctx, 4)), interruptSafe);
+            setReturnS32(ctx, result);
+            ee.transferIfRequested(interruptSafe);
         }
 
-        // EE layout (kernel.h):
-        // [0]=count [1]=max_count [2]=init_count [3]=wait_threads [4]=attr [5]=option
-        const bool hasEeLayout = availableWords >= 3u;
-        const int eeMax = hasEeLayout ? static_cast<int>(param[1]) : 1;
-        const int eeInit = hasEeLayout ? static_cast<int>(param[2]) : 0;
-        const uint32_t eeAttr = (availableWords >= 5u) ? param[4] : 0u;
-        const uint32_t eeOption = (availableWords >= 6u) ? param[5] : 0u;
-
-        // Legacy layout (IOP-style):
-        // [0]=attr [1]=option [2]=init [3]=max
-        const bool hasLegacyLayout = availableWords >= 4u;
-        const int legacyMax = hasLegacyLayout ? static_cast<int>(param[3]) : 1;
-        const int legacyInit = hasLegacyLayout ? static_cast<int>(param[2]) : 0;
-        const uint32_t legacyAttr = hasLegacyLayout ? param[0] : 0u;
-        const uint32_t legacyOption = hasLegacyLayout ? param[1] : 0u;
-
-        auto countLooksPlausible = [](int value) -> bool
+        void signalSemaphoreImpl(uint8_t *rdram,
+                                 R5900Context *ctx,
+                                 PS2Runtime *runtime,
+                                 bool interruptSafe)
         {
-            return value > 0 && value <= 0x10000;
-        };
-
-        bool useLegacyLayout = hasLegacyLayout && !hasEeLayout;
-        if (hasLegacyLayout && hasEeLayout && countLooksPlausible(legacyMax) && !countLooksPlausible(eeMax))
-        {
-            useLegacyLayout = true;
-        }
-        else if (hasLegacyLayout && hasEeLayout && countLooksPlausible(legacyMax) && countLooksPlausible(eeMax))
-        {
-            // If both max values look valid, prefer the layout whose option field
-            // looks like a pointer/NULL payload.
-            const bool eeOptionLooksValid = looksLikeGuestPointerOrNull(eeOption);
-            const bool legacyOptionLooksValid = looksLikeGuestPointerOrNull(legacyOption);
-            if (!eeOptionLooksValid && legacyOptionLooksValid)
-            {
-                useLegacyLayout = true;
-            }
+            EeScheduler &ee = scheduler(rdram, ctx, runtime);
+            const int result = ee.signalSemaphore(static_cast<int>(getRegU32(ctx, 4)), interruptSafe);
+            setReturnS32(ctx, result);
+            ee.transferIfRequested(interruptSafe);
         }
 
-        if (useLegacyLayout && hasLegacyLayout)
+        void deleteEventFlagImpl(uint8_t *rdram,
+                                 R5900Context *ctx,
+                                 PS2Runtime *runtime,
+                                 bool interruptSafe)
         {
-            out.max = legacyMax;
-            out.init = legacyInit;
-            out.attr = legacyAttr;
-            out.option = legacyOption;
-        }
-        else
-        {
-            if (!hasEeLayout)
-            {
-                return out;
-            }
-            out.max = eeMax;
-            out.init = eeInit;
-            out.attr = eeAttr;
-            out.option = eeOption;
+            EeScheduler &ee = scheduler(rdram, ctx, runtime);
+            const int result = ee.deleteEventFlag(static_cast<int>(getRegU32(ctx, 4)), interruptSafe);
+            setReturnS32(ctx, result);
+            ee.transferIfRequested(interruptSafe);
         }
 
-        return out;
+        void setEventFlagImpl(uint8_t *rdram,
+                              R5900Context *ctx,
+                              PS2Runtime *runtime,
+                              bool interruptSafe)
+        {
+            EeScheduler &ee = scheduler(rdram, ctx, runtime);
+            const int result = ee.setEventFlag(static_cast<int>(getRegU32(ctx, 4)),
+                                               getRegU32(ctx, 5),
+                                               interruptSafe);
+            setReturnS32(ctx, result);
+            ee.transferIfRequested(interruptSafe);
+        }
     }
 
     void CreateSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        uint32_t paramAddr = getRegU32(ctx, 4); // $a0
-        if (paramAddr == 0u)
+        const uint32_t address = getRegU32(ctx, 4);
+        const auto *param = address == 0u ? nullptr : getEeGuestStruct<ee_sema_t>(rdram, address);
+        if (!param)
         {
             setReturnS32(ctx, KE_ERROR);
             return;
         }
 
-        uint32_t rawParams[6] = {};
-        uint32_t availableWords = 0u;
-        for (uint32_t i = 0; i < 6u; ++i)
-        {
-            if (!readGuestU32Safe(rdram, paramAddr + (i * 4u), rawParams[i]))
-            {
-                break;
-            }
-            availableWords = i + 1u;
-        }
-
-        if (availableWords < 3u)
-        {
-            setReturnS32(ctx, KE_ERROR);
-            return;
-        }
-
-        const DecodedSemaParams decoded = decodeCreateSemaParams(rawParams, availableWords);
-        int init = decoded.init;
-        int max = decoded.max;
-        uint32_t attr = decoded.attr;
-        uint32_t option = decoded.option;
-
-        if (max <= 0)
-        {
-            max = 1;
-        }
-        if (init < 0)
-        {
-            init = 0;
-        }
-        if (init > max)
-        {
-            init = max;
-        }
-
-        int id = 0;
-        auto info = std::make_shared<SemaInfo>();
-        info->count = init;
-        info->maxCount = max;
-        info->initCount = init;
-        info->attr = attr;
-        info->option = option;
-
-        {
-            std::lock_guard<std::mutex> lock(g_sema_map_mutex);
-            for (int attempts = 0; attempts < 0x7FFF; ++attempts)
-            {
-                if (g_nextSemaId <= 0)
-                {
-                    g_nextSemaId = 1;
-                }
-
-                const int candidate = g_nextSemaId++;
-                if (candidate <= 0)
-                {
-                    continue;
-                }
-
-                if (g_semas.find(candidate) == g_semas.end())
-                {
-                    id = candidate;
-                    break;
-                }
-            }
-
-            if (id <= 0)
-            {
-                setReturnS32(ctx, KE_ERROR);
-                return;
-            }
-
-            g_semas.emplace(id, info);
-        }
-        RUNTIME_LOG("[CreateSema] id=" << id << " init=" << init << " max=" << max);
-        setReturnS32(ctx, id);
+        // ee_sema_t from ps2sdk. The IOP attr/option/init/max ordering is not
+        // accepted by the EE runtime.
+        setReturnS32(ctx,
+                     scheduler(rdram, ctx, runtime)
+                         .createSemaphore(param->init_count,
+                                          param->max_count,
+                                          param->attr,
+                                          param->option));
     }
 
     void DeleteSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        int sid = static_cast<int>(getRegU32(ctx, 4));
-        std::shared_ptr<SemaInfo> sema;
-
-        {
-            std::lock_guard<std::mutex> lock(g_sema_map_mutex);
-            auto it = g_semas.find(sid);
-            if (it == g_semas.end())
-            {
-                setReturnS32(ctx, KE_UNKNOWN_SEMID);
-                return;
-            }
-            sema = it->second;
-            g_semas.erase(it);
-        }
-
-        {
-            std::lock_guard<std::mutex> lock(sema->m);
-            sema->deleted = true;
-        }
-        sema->cv.notify_all();
-
-        // PS2 EE BIOS returns sid on success.
-        setReturnS32(ctx, sid);
+        deleteSemaphoreImpl(rdram, ctx, runtime, false);
     }
 
     void iDeleteSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        DeleteSema(rdram, ctx, runtime);
+        deleteSemaphoreImpl(rdram, ctx, runtime, true);
     }
 
     void SignalSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        int sid = static_cast<int>(getRegU32(ctx, 4));
-        auto sema = lookupSemaInfo(sid);
-        if (!sema)
-        {
-            setReturnS32(ctx, KE_UNKNOWN_SEMID);
-            return;
-        }
-
-        // PS2 EE BIOS returns sid on success; KE_SEMA_OVF overrides on overflow.
-        int ret = sid;
-        int beforeCount = 0;
-        int afterCount = 0;
-        bool wokeWaiter = false;
-        {
-            std::lock_guard<std::mutex> lock(sema->m);
-            beforeCount = sema->count;
-            if (sema->count >= sema->maxCount)
-            {
-                ret = KE_SEMA_OVF;
-            }
-            else
-            {
-                sema->count++;
-                wokeWaiter = sema->waiters > 0;
-                sema->cv.notify_one();
-            }
-            afterCount = sema->count;
-        }
-
-        static std::atomic<uint32_t> s_signalSemaLogs{0};
-        const uint32_t sigLog = s_signalSemaLogs.fetch_add(1, std::memory_order_relaxed);
-        if (sigLog < 256u)
-        {
-            RUNTIME_LOG("[SignalSema] tid=" << g_currentThreadId
-                                            << " sid=" << sid
-                                            << " count=" << beforeCount << "->" << afterCount
-                                            << " ret=" << ret
-                                            << std::endl);
-        }
-
-        setReturnS32(ctx, ret);
-        if (wokeWaiter)
-        {
-            yieldGuestExecutionAfterWake(runtime);
-        }
+        signalSemaphoreImpl(rdram, ctx, runtime, false);
     }
 
     void iSignalSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        SignalSema(rdram, ctx, runtime);
+        signalSemaphoreImpl(rdram, ctx, runtime, true);
     }
 
     void WaitSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        int sid = static_cast<int>(getRegU32(ctx, 4));
-        auto sema = lookupSemaInfo(sid);
-        if (!sema)
-        {
-            setReturnS32(ctx, KE_UNKNOWN_SEMID);
-            return;
-        }
-
-        auto info = ensureCurrentThreadInfo(ctx);
-        throwIfTerminated(info);
-
-        std::unique_lock<std::mutex> lock(sema->m);
-
-        // PS2 EE BIOS returns sid on success.
-        int ret = sid;
-        int countAfter = sema->count;
-        bool terminated = false;
-        bool consumed = false;
-
-        if (sema->count == 0)
-        {
-            static std::atomic<uint32_t> s_waitSemaBlockLogs{0};
-            const uint32_t blockLog = s_waitSemaBlockLogs.fetch_add(1, std::memory_order_relaxed);
-            if (blockLog < 256u)
-            {
-                RUNTIME_LOG("[WaitSema:block] tid=" << g_currentThreadId
-                                                    << " sid=" << sid
-                                                    << " pc=0x" << std::hex << ctx->pc
-                                                    << " ra=0x" << getRegU32(ctx, 31)
-                                                    << std::dec
-                                                    << std::endl);
-            }
-
-            if (info)
-            {
-                std::lock_guard<std::mutex> tLock(info->m);
-                info->status = (info->suspendCount > 0) ? THS_WAITSUSPEND : THS_WAIT;
-                info->waitType = TSW_SEMA;
-                info->waitId = sid;
-                info->forceRelease = false;
-            }
-
-            sema->waiters++;
-            waitWithGuestExecutionReleasedUntilUnlocked(
-                runtime,
-                lock,
-                [&]()
-                {
-                    sema->cv.wait(lock, [&]()
-                                  {
-                                      const bool forced = info ? info->forceRelease.load() : false;
-                                      const bool isTerminated = info ? info->terminated.load() : false;
-                                      return sema->count > 0 || sema->deleted || forced || isTerminated;
-                                  });
-                },
-                [&]()
-                {
-                    sema->waiters--;
-                    if (sema->deleted)
-                    {
-                        ret = KE_WAIT_DELETE;
-                    }
-
-                    if (info)
-                    {
-                        std::lock_guard<std::mutex> tLock(info->m);
-                        terminated = info->terminated.load();
-                        info->status = (info->suspendCount > 0) ? THS_SUSPEND : THS_RUN;
-                        info->waitType = TSW_NONE;
-                        info->waitId = 0;
-                        if (info->forceRelease)
-                        {
-                            info->forceRelease = false;
-                            ret = KE_RELEASE_WAIT;
-                        }
-                    }
-
-                    if (!terminated && ret == sid && sema->count > 0)
-                    {
-                        sema->count--;
-                        consumed = true;
-                    }
-                    countAfter = sema->count;
-                });
-        }
-
-        if (terminated)
-        {
-            throw ThreadExitException();
-        }
-
-        if (!consumed && lock.owns_lock())
-        {
-            if (ret == sid && sema->count > 0)
-            {
-                sema->count--;
-                consumed = true;
-            }
-            countAfter = sema->count;
-        }
-
-        static std::atomic<uint32_t> s_waitSemaWakeLogs{0};
-        const uint32_t wakeLog = s_waitSemaWakeLogs.fetch_add(1, std::memory_order_relaxed);
-        if (wakeLog < 256u)
-        {
-            RUNTIME_LOG("[WaitSema:wake] tid=" << g_currentThreadId
-                                               << " sid=" << sid
-                                               << " ret=" << ret
-                                               << " count=" << countAfter
-                                               << std::endl);
-        }
-        if (lock.owns_lock())
-        {
-            lock.unlock();
-        }
-        waitWhileSuspended(info, runtime);
-        setReturnS32(ctx, ret);
+        scheduler(rdram, ctx, runtime).waitSemaphore(static_cast<int>(getRegU32(ctx, 4)));
     }
 
     void PollSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        int sid = static_cast<int>(getRegU32(ctx, 4));
-        auto sema = lookupSemaInfo(sid);
-        if (!sema)
-        {
-            setReturnS32(ctx, KE_UNKNOWN_SEMID);
-            return;
-        }
-
-        std::lock_guard<std::mutex> lock(sema->m);
-        if (sema->count > 0)
-        {
-            sema->count--;
-            setReturnS32(ctx, sid);  // PS2 EE BIOS returns sid on success.
-            return;
-        }
-
-        setReturnS32(ctx, KE_SEMA_ZERO);
+        setReturnS32(ctx,
+                     scheduler(rdram, ctx, runtime).pollSemaphore(static_cast<int>(getRegU32(ctx, 4))));
     }
 
     void iPollSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -430,30 +124,25 @@ namespace ps2_syscalls
 
     void ReferSemaStatus(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        int sid = static_cast<int>(getRegU32(ctx, 4));
-        uint32_t statusAddr = getRegU32(ctx, 5);
-
-        auto sema = lookupSemaInfo(sid);
-        if (!sema)
+        EeScheduler &ee = scheduler(rdram, ctx, runtime);
+        const EeSemaphore *semaphore = ee.semaphore(static_cast<int>(getRegU32(ctx, 4)));
+        if (!semaphore)
         {
             setReturnS32(ctx, KE_UNKNOWN_SEMID);
             return;
         }
-
-        ee_sema_t *status = reinterpret_cast<ee_sema_t *>(getMemPtr(rdram, statusAddr));
+        auto *status = getEeGuestStruct<ee_sema_t>(rdram, getRegU32(ctx, 5));
         if (!status)
         {
             setReturnS32(ctx, KE_ERROR);
             return;
         }
-
-        std::lock_guard<std::mutex> lock(sema->m);
-        status->count = sema->count;
-        status->max_count = sema->maxCount;
-        status->init_count = sema->initCount;
-        status->wait_threads = sema->waiters;
-        status->attr = sema->attr;
-        status->option = sema->option;
+        status->count = semaphore->count;
+        status->max_count = semaphore->maxCount;
+        status->init_count = semaphore->initCount;
+        status->wait_threads = static_cast<int>(semaphore->waiters.size());
+        status->attr = semaphore->attr;
+        status->option = semaphore->option;
         setReturnS32(ctx, KE_OK);
     }
 
@@ -462,131 +151,50 @@ namespace ps2_syscalls
         ReferSemaStatus(rdram, ctx, runtime);
     }
 
-    constexpr uint32_t WEF_OR = 1;
-    constexpr uint32_t WEF_CLEAR = 0x10;
-    constexpr uint32_t WEF_CLEAR_ALL = 0x20;
-    constexpr uint32_t WEF_MODE_MASK = WEF_OR | WEF_CLEAR | WEF_CLEAR_ALL;
-    constexpr uint32_t EA_MULTI = 0x2;
-
     void CreateEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        uint32_t paramAddr = getRegU32(ctx, 4); // $a0
-        const uint32_t *param = reinterpret_cast<const uint32_t *>(getConstMemPtr(rdram, paramAddr));
-
-        auto info = std::make_shared<EventFlagInfo>();
-        if (param)
+        struct EeEventFlagParam
         {
-            info->attr = param[0];
-            info->option = param[1];
-            info->initBits = param[2];
-            info->bits = info->initBits;
-        }
-
-        int id = 0;
+            uint32_t attr;
+            uint32_t option;
+            uint32_t bits;
+        };
+        const uint32_t address = getRegU32(ctx, 4);
+        const auto *param = address == 0u ? nullptr : getEeGuestStruct<EeEventFlagParam>(rdram, address);
+        if (!param)
         {
-            std::lock_guard<std::mutex> mapLock(g_event_flag_map_mutex);
-            id = g_nextEventFlagId++;
-            g_eventFlags[id] = info;
+            setReturnS32(ctx, KE_ERROR);
+            return;
         }
-        setReturnS32(ctx, id);
+        setReturnS32(ctx,
+                     scheduler(rdram, ctx, runtime).createEventFlag(param->bits, param->attr, param->option));
     }
 
     void DeleteEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        int eid = static_cast<int>(getRegU32(ctx, 4));
-        std::shared_ptr<EventFlagInfo> info;
-        {
-            std::lock_guard<std::mutex> mapLock(g_event_flag_map_mutex);
-            auto it = g_eventFlags.find(eid);
-            if (it == g_eventFlags.end())
-            {
-                setReturnS32(ctx, KE_UNKNOWN_EVFID);
-                return;
-            }
-            info = it->second;
-            g_eventFlags.erase(it);
-        }
+        deleteEventFlagImpl(rdram, ctx, runtime, false);
+    }
 
-        if (!info)
-        {
-            setReturnS32(ctx, KE_UNKNOWN_EVFID);
-            return;
-        }
-
-        {
-            std::lock_guard<std::mutex> lock(info->m);
-            info->deleted = true;
-        }
-        info->cv.notify_all();
-        setReturnS32(ctx, 0);
+    void iDeleteEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        deleteEventFlagImpl(rdram, ctx, runtime, true);
     }
 
     void SetEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        int eid = static_cast<int>(getRegU32(ctx, 4));
-        uint32_t bits = getRegU32(ctx, 5);
-        auto info = lookupEventFlagInfo(eid);
-        if (!info)
-        {
-            setReturnS32(ctx, KE_UNKNOWN_EVFID);
-            return;
-        }
-
-        if (bits == 0)
-        {
-            setReturnS32(ctx, KE_OK);
-            return;
-        }
-
-        uint32_t newBits = 0u;
-        bool hadWaiters = false;
-        {
-            std::lock_guard<std::mutex> lock(info->m);
-            info->bits |= bits;
-            newBits = info->bits;
-            hadWaiters = info->waiters > 0;
-        }
-
-        static std::atomic<uint32_t> s_setEventFlagLogs{0};
-        const uint32_t setLog = s_setEventFlagLogs.fetch_add(1, std::memory_order_relaxed);
-        if (setLog < 256u)
-        {
-            RUNTIME_LOG("[SetEventFlag] tid=" << g_currentThreadId
-                                              << " eid=" << eid
-                                              << " bits=0x" << std::hex << bits
-                                              << " newBits=0x" << newBits
-                                              << std::dec << std::endl);
-        }
-        info->cv.notify_all();
-        setReturnS32(ctx, 0);
-        if (hadWaiters)
-        {
-            yieldGuestExecutionAfterWake(runtime);
-        }
+        setEventFlagImpl(rdram, ctx, runtime, false);
     }
 
     void iSetEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        SetEventFlag(rdram, ctx, runtime);
+        setEventFlagImpl(rdram, ctx, runtime, true);
     }
 
     void ClearEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        int eid = static_cast<int>(getRegU32(ctx, 4));
-        uint32_t bits = getRegU32(ctx, 5);
-        auto info = lookupEventFlagInfo(eid);
-        if (!info)
-        {
-            setReturnS32(ctx, KE_UNKNOWN_EVFID);
-            return;
-        }
-
-        {
-            std::lock_guard<std::mutex> lock(info->m);
-            info->bits &= bits;
-        }
-        info->cv.notify_all();
-        setReturnS32(ctx, KE_OK);
+        setReturnS32(ctx,
+                     scheduler(rdram, ctx, runtime)
+                         .clearEventFlag(static_cast<int>(getRegU32(ctx, 4)), getRegU32(ctx, 5)));
     }
 
     void iClearEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -596,251 +204,84 @@ namespace ps2_syscalls
 
     void WaitEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        int eid = static_cast<int>(getRegU32(ctx, 4));
-        uint32_t waitBits = getRegU32(ctx, 5);
-        uint32_t mode = getRegU32(ctx, 6);
-        uint32_t resBitsAddr = getRegU32(ctx, 7);
-
-        if ((mode & ~WEF_MODE_MASK) != 0)
+        const int id = static_cast<int>(getRegU32(ctx, 4));
+        const uint32_t bits = getRegU32(ctx, 5);
+        const uint32_t mode = getRegU32(ctx, 6);
+        if ((mode & ~WEF_MODE_MASK) != 0u)
         {
             setReturnS32(ctx, KE_ILLEGAL_MODE);
             return;
         }
-
-        if (waitBits == 0)
+        if (bits == 0u)
         {
             setReturnS32(ctx, KE_EVF_ILPAT);
             return;
         }
-
-        auto info = lookupEventFlagInfo(eid);
-        if (!info)
+        EeScheduler &ee = scheduler(rdram, ctx, runtime);
+        const EeEventFlag *flag = ee.eventFlag(id);
+        if (!flag)
         {
             setReturnS32(ctx, KE_UNKNOWN_EVFID);
             return;
         }
-
-        uint32_t *resBitsPtr = resBitsAddr ? reinterpret_cast<uint32_t *>(getMemPtr(rdram, resBitsAddr)) : nullptr;
-
-        std::unique_lock<std::mutex> lock(info->m);
-        if ((info->attr & EA_MULTI) == 0 && info->waiters > 0)
+        if ((flag->attr & EA_MULTI) == 0u && !flag->waiters.empty())
         {
             setReturnS32(ctx, KE_EVF_MULTI);
             return;
         }
-
-        auto tInfo = ensureCurrentThreadInfo(ctx);
-        throwIfTerminated(tInfo);
-        int ret = KE_OK;
-
-        auto satisfied = [&]()
+        const uint32_t resultAddress = getRegU32(ctx, 7);
+        if (resultAddress != 0u && !getEeGuestStruct<uint32_t>(rdram, resultAddress))
         {
-            if (tInfo && tInfo->forceRelease.load())
-                return true;
-            if (tInfo && tInfo->terminated.load())
-                return true;
-            if (info->deleted)
-            {
-                return true;
-            }
-            if (mode & WEF_OR)
-            {
-                return (info->bits & waitBits) != 0;
-            }
-            return (info->bits & waitBits) == waitBits;
-        };
-
-        bool waitedWithGuestRelease = false;
-        bool terminated = false;
-        uint32_t bitsAfter = info->bits;
-
-        auto finishEventFlagWaitLocked = [&]()
-        {
-            if (ret == KE_OK && info->deleted)
-            {
-                ret = KE_WAIT_DELETE;
-            }
-
-            if (ret == KE_OK)
-            {
-                if (resBitsPtr)
-                {
-                    *resBitsPtr = info->bits;
-                }
-
-                if (mode & WEF_CLEAR_ALL)
-                {
-                    info->bits = 0;
-                }
-                else if (mode & WEF_CLEAR)
-                {
-                    info->bits &= ~waitBits;
-                }
-            }
-
-            bitsAfter = info->bits;
-        };
-
-        if (!satisfied())
-        {
-            static std::atomic<uint32_t> s_waitEventBlockLogs{0};
-            const uint32_t evBlockLog = s_waitEventBlockLogs.fetch_add(1, std::memory_order_relaxed);
-            if (evBlockLog < 256u)
-            {
-                RUNTIME_LOG("[WaitEventFlag:block] tid=" << g_currentThreadId
-                                                         << " eid=" << eid
-                                                         << " waitBits=0x" << std::hex << waitBits
-                                                         << " mode=0x" << mode
-                                                         << " bits=0x" << info->bits
-                                                         << " pc=0x" << ctx->pc
-                                                         << " ra=0x" << getRegU32(ctx, 31)
-                                                         << std::dec
-                                                         << std::endl);
-            }
-
-            if (tInfo)
-            {
-                std::lock_guard<std::mutex> tLock(tInfo->m);
-                tInfo->status = (tInfo->suspendCount > 0) ? THS_WAITSUSPEND : THS_WAIT;
-                tInfo->waitType = TSW_EVENT;
-                tInfo->waitId = eid;
-                tInfo->forceRelease = false;
-            }
-
-            info->waiters++;
-            waitedWithGuestRelease = true;
-            waitWithGuestExecutionReleasedUntilUnlocked(
-                runtime,
-                lock,
-                [&]()
-                {
-                    info->cv.wait(lock, satisfied);
-                },
-                [&]()
-                {
-                    info->waiters--;
-
-                    if (tInfo)
-                    {
-                        std::lock_guard<std::mutex> tLock(tInfo->m);
-                        terminated = tInfo->terminated.load();
-                        tInfo->status = (tInfo->suspendCount > 0) ? THS_SUSPEND : THS_RUN;
-                        tInfo->waitType = TSW_NONE;
-                        tInfo->waitId = 0;
-                        if (tInfo->forceRelease)
-                        {
-                            tInfo->forceRelease = false;
-                            ret = KE_RELEASE_WAIT;
-                        }
-                    }
-
-                    if (!terminated)
-                    {
-                        finishEventFlagWaitLocked();
-                    }
-                    else
-                    {
-                        bitsAfter = info->bits;
-                    }
-                });
+            setReturnS32(ctx, KE_ERROR);
+            return;
         }
-
-        if (terminated)
-        {
-            throw ThreadExitException();
-        }
-
-        if (!waitedWithGuestRelease)
-        {
-            finishEventFlagWaitLocked();
-        }
-
-        static std::atomic<uint32_t> s_waitEventWakeLogs{0};
-        const uint32_t evWakeLog = s_waitEventWakeLogs.fetch_add(1, std::memory_order_relaxed);
-        if (evWakeLog < 256u)
-        {
-            RUNTIME_LOG("[WaitEventFlag:wake] tid=" << g_currentThreadId
-                                                    << " eid=" << eid
-                                                    << " ret=" << ret
-                                                    << " bits=0x" << std::hex << bitsAfter
-                                                    << std::dec
-                                                    << std::endl);
-        }
-
-        if (lock.owns_lock())
-        {
-            lock.unlock();
-        }
-        waitWhileSuspended(tInfo, runtime);
-        setReturnS32(ctx, ret);
+        ee.waitEventFlag(id, bits, mode, resultAddress);
     }
 
     void PollEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        int eid = static_cast<int>(getRegU32(ctx, 4));
-        uint32_t waitBits = getRegU32(ctx, 5);
-        uint32_t mode = getRegU32(ctx, 6);
-        uint32_t resBitsAddr = getRegU32(ctx, 7);
-
-        if ((mode & ~WEF_MODE_MASK) != 0)
+        const int id = static_cast<int>(getRegU32(ctx, 4));
+        const uint32_t bits = getRegU32(ctx, 5);
+        const uint32_t mode = getRegU32(ctx, 6);
+        if ((mode & ~WEF_MODE_MASK) != 0u)
         {
             setReturnS32(ctx, KE_ILLEGAL_MODE);
             return;
         }
-
-        if (waitBits == 0)
+        if (bits == 0u)
         {
             setReturnS32(ctx, KE_EVF_ILPAT);
             return;
         }
-
-        auto info = lookupEventFlagInfo(eid);
-        if (!info)
+        EeScheduler &ee = scheduler(rdram, ctx, runtime);
+        const EeEventFlag *flag = ee.eventFlag(id);
+        if (!flag)
         {
             setReturnS32(ctx, KE_UNKNOWN_EVFID);
             return;
         }
-
-        uint32_t *resBitsPtr = resBitsAddr ? reinterpret_cast<uint32_t *>(getMemPtr(rdram, resBitsAddr)) : nullptr;
-
-        std::lock_guard<std::mutex> lock(info->m);
-        if ((info->attr & EA_MULTI) == 0 && info->waiters > 0)
+        if ((flag->attr & EA_MULTI) == 0u && !flag->waiters.empty())
         {
             setReturnS32(ctx, KE_EVF_MULTI);
             return;
         }
-
-        bool ok = false;
-        if (mode & WEF_OR)
+        uint32_t *output = nullptr;
+        if (getRegU32(ctx, 7) != 0u)
         {
-            ok = (info->bits & waitBits) != 0;
+            output = getEeGuestStruct<uint32_t>(rdram, getRegU32(ctx, 7));
+            if (!output)
+            {
+                setReturnS32(ctx, KE_ERROR);
+                return;
+            }
         }
-        else
+        uint32_t observed = 0;
+        const int result = ee.pollEventFlag(id, bits, mode, observed);
+        if (result == KE_OK && output)
         {
-            ok = (info->bits & waitBits) == waitBits;
+            *output = observed;
         }
-
-        if (!ok)
-        {
-            setReturnS32(ctx, KE_EVF_COND);
-            return;
-        }
-
-        if (resBitsPtr)
-        {
-            *resBitsPtr = info->bits;
-        }
-
-        if (mode & WEF_CLEAR_ALL)
-        {
-            info->bits = 0;
-        }
-        else if (mode & WEF_CLEAR)
-        {
-            info->bits &= ~waitBits;
-        }
-
-        setReturnS32(ctx, KE_OK);
+        setReturnS32(ctx, result);
     }
 
     void iPollEventFlag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -850,43 +291,38 @@ namespace ps2_syscalls
 
     void ReferEventFlagStatus(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        int eid = static_cast<int>(getRegU32(ctx, 4));
-        uint32_t infoAddr = getRegU32(ctx, 5);
-
-        struct Ps2EventFlagInfo
+        struct EeEventFlagStatus
         {
             uint32_t attr;
             uint32_t option;
             uint32_t initBits;
-            uint32_t currBits;
-            int32_t numThreads;
+            uint32_t currentBits;
+            int32_t waitThreads;
             int32_t reserved1;
             int32_t reserved2;
         };
 
-        auto info = lookupEventFlagInfo(eid);
-        if (!info)
+        EeScheduler &ee = scheduler(rdram, ctx, runtime);
+        const EeEventFlag *flag = ee.eventFlag(static_cast<int>(getRegU32(ctx, 4)));
+        if (!flag)
         {
             setReturnS32(ctx, KE_UNKNOWN_EVFID);
             return;
         }
-
-        Ps2EventFlagInfo *out = infoAddr ? reinterpret_cast<Ps2EventFlagInfo *>(getMemPtr(rdram, infoAddr)) : nullptr;
-        if (!out)
+        auto *status = getEeGuestStruct<EeEventFlagStatus>(rdram, getRegU32(ctx, 5));
+        if (!status)
         {
-            setReturnS32(ctx, -1);
+            setReturnS32(ctx, KE_ERROR);
             return;
         }
-
-        std::lock_guard<std::mutex> lock(info->m);
-        out->attr = info->attr;
-        out->option = info->option;
-        out->initBits = info->initBits;
-        out->currBits = info->bits;
-        out->numThreads = info->waiters;
-        out->reserved1 = 0;
-        out->reserved2 = 0;
-        setReturnS32(ctx, 0);
+        *status = {flag->attr,
+                   flag->option,
+                   flag->initBits,
+                   flag->bits,
+                   static_cast<int32_t>(flag->waiters.size()),
+                   0,
+                   0};
+        setReturnS32(ctx, KE_OK);
     }
 
     void iReferEventFlagStatus(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -896,55 +332,18 @@ namespace ps2_syscalls
 
     void SetAlarm(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        uint16_t ticks = static_cast<uint16_t>(getRegU32(ctx, 4) & 0xFFFFu);
-        uint32_t handler = getRegU32(ctx, 5);
-        uint32_t arg = getRegU32(ctx, 6);
-
-        static int logCount = 0;
-        if (logCount < 5)
-        {
-            RUNTIME_LOG("[SetAlarm] ticks=" << ticks
-                                            << " handler=0x" << std::hex << handler
-                                            << " arg=0x" << arg << std::dec << std::endl);
-            ++logCount;
-        }
-
-        if (!runtime || !handler || !runtime->hasFunction(handler))
-        {
-            setReturnS32(ctx, KE_ERROR);
-            return;
-        }
-
-        auto info = std::make_shared<AlarmInfo>();
-        info->ticks = ticks;
-        info->handler = handler;
-        info->commonArg = arg;
-        info->gp = getRegU32(ctx, 28);
-        info->sp = getRegU32(ctx, 29);
-        info->rdram = rdram;
-        info->runtime = runtime;
-        info->dueAt = std::chrono::steady_clock::now() + alarmTicksToDuration(ticks);
-
-        int alarmId = 0;
-        {
-            std::lock_guard<std::mutex> lock(g_alarm_mutex);
-            alarmId = g_nextAlarmId++;
-            if (g_nextAlarmId <= 0)
-            {
-                g_nextAlarmId = 1;
-            }
-            info->id = alarmId;
-            g_alarms[alarmId] = info;
-        }
-
-        ensureAlarmWorkerRunning();
-        g_alarm_cv.notify_all();
-        setReturnS32(ctx, alarmId);
+        setReturnS32(ctx,
+                     scheduler(rdram, ctx, runtime)
+                         .setAlarm(static_cast<uint16_t>(getRegU32(ctx, 4)),
+                                   getRegU32(ctx, 5),
+                                   getRegU32(ctx, 6),
+                                   getRegU32(ctx, 28),
+                                   getRegU32(ctx, 29)));
     }
 
-    void InitAlarm(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void InitAlarm(uint8_t *, R5900Context *ctx, PS2Runtime *)
     {
-        setReturnS32(ctx, 0);
+        setReturnS32(ctx, KE_OK);
     }
 
     void iSetAlarm(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -954,27 +353,8 @@ namespace ps2_syscalls
 
     void CancelAlarm(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        int alarmId = static_cast<int>(getRegU32(ctx, 4));
-        if (alarmId <= 0)
-        {
-            setReturnS32(ctx, KE_ERROR);
-            return;
-        }
-
-        bool removed = false;
-        {
-            std::lock_guard<std::mutex> lock(g_alarm_mutex);
-            removed = g_alarms.erase(alarmId) != 0;
-        }
-
-        if (removed)
-        {
-            g_alarm_cv.notify_all();
-            setReturnS32(ctx, KE_OK);
-            return;
-        }
-
-        setReturnS32(ctx, KE_ERROR);
+        setReturnS32(ctx,
+                     scheduler(rdram, ctx, runtime).cancelAlarm(static_cast<int>(getRegU32(ctx, 4))));
     }
 
     void iCancelAlarm(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -989,6 +369,6 @@ namespace ps2_syscalls
 
     void iReleaseAlarm(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        iCancelAlarm(rdram, ctx, runtime);
+        CancelAlarm(rdram, ctx, runtime);
     }
 }

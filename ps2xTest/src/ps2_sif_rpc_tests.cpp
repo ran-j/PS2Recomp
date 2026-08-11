@@ -1,8 +1,10 @@
 #include "MiniTest.h"
 #include "ps2_runtime.h"
+#include "ps2_runtime_macros.h"
 #include "ps2_iop_transport.h"
 #include "ps2_syscalls.h"
 #include "ps2_stubs.h"
+#include "runtime/ee_scheduler.h"
 
 #include <array>
 #include <atomic>
@@ -161,6 +163,23 @@ namespace
 
     constexpr uint32_t K_DTX_DISPATCH_RESULT_ADDR = 0x0002D800u;
     constexpr uint32_t K_DTX_DISPATCH_RESULT_MARKER = 0xD15CA7C1u;
+    constexpr uint32_t K_DTX_SCHEDULER_CALL = 0x00102000u;
+    constexpr uint32_t K_DTX_SCHEDULER_RESUME = 0x00102010u;
+    constexpr uint32_t K_LOTR_SOUND_SCHEDULER_CALL = 0x00102020u;
+    constexpr uint32_t K_LOTR_SOUND_SCHEDULER_RESUME = 0x00102030u;
+    uint32_t g_schedulerRpcClient = 0u;
+    uint32_t g_schedulerRpcNumber = 0u;
+    uint32_t g_schedulerRpcSend = 0u;
+    uint32_t g_schedulerRpcReceive = 0u;
+    uint32_t g_schedulerRpcResult = 0u;
+    uint32_t g_schedulerLotrSoundClient = 0u;
+    uint32_t g_schedulerLotrSoundSend = 0u;
+    uint32_t g_schedulerLotrSoundReceive = 0u;
+    uint32_t g_schedulerLotrSoundEndFunction = 0u;
+    uint32_t g_schedulerLotrSoundSemaphore = 0u;
+    uint32_t g_schedulerLotrSoundResult = 0u;
+
+    void writeGuestU32(uint8_t *rdram, uint32_t addr, uint32_t value);
 
     void lotrSoundEndCallback(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
@@ -176,6 +195,49 @@ namespace
         (void)runtime;
         ++g_recvxSoundCallbackHits;
         ctx->pc = ::getRegU32(ctx, 31);
+    }
+
+    void schedulerLotrSoundRpcCall(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        SET_GPR_U32(ctx, 4, g_schedulerLotrSoundClient);
+        SET_GPR_U32(ctx, 5, 0u);
+        SET_GPR_U32(ctx, 6, K_SIF_RPC_MODE_NOWAIT);
+        SET_GPR_U32(ctx, 7, g_schedulerLotrSoundSend);
+        SET_GPR_U32(ctx, 8, 0x2000u);
+        SET_GPR_U32(ctx, 9, g_schedulerLotrSoundReceive);
+        SET_GPR_U32(ctx, 10, 0x2000u);
+        SET_GPR_U32(ctx, 11, g_schedulerLotrSoundEndFunction);
+        writeGuestU32(rdram, ::getRegU32(ctx, 29), g_schedulerLotrSoundSemaphore);
+        ctx->pc = K_LOTR_SOUND_SCHEDULER_RESUME;
+        SifCallRpc(rdram, ctx, runtime);
+    }
+
+    void schedulerLotrSoundRpcResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_schedulerLotrSoundResult = ::getRegU32(ctx, 2);
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
+    void schedulerDtxRpcCall(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        SET_GPR_U32(ctx, 4, g_schedulerRpcClient);
+        SET_GPR_U32(ctx, 5, g_schedulerRpcNumber);
+        SET_GPR_U32(ctx, 6, 0u);
+        SET_GPR_U32(ctx, 7, g_schedulerRpcSend);
+        SET_GPR_U32(ctx, 8, 8u);
+        SET_GPR_U32(ctx, 9, g_schedulerRpcReceive);
+        SET_GPR_U32(ctx, 10, sizeof(uint32_t));
+        SET_GPR_U32(ctx, 11, 0u);
+        ctx->pc = K_DTX_SCHEDULER_RESUME;
+        SifCallRpc(rdram, ctx, runtime);
+    }
+
+    void schedulerDtxRpcResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_schedulerRpcResult = ::getRegU32(ctx, 2);
+        ctx->pc = 0u;
+        runtime->requestStop();
     }
 
     void recvxDtxDispatcher(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -643,7 +705,6 @@ void register_ps2_sif_rpc_tests()
             configureProfile(env, "SLUS_205.78");
 
             constexpr uint32_t kClientAddr = 0x00039000u;
-            constexpr uint32_t kSemaParamAddr = 0x00039100u;
             constexpr uint32_t kSendAddr = 0x0003A000u;
             constexpr uint32_t kRecvAddr = 0x0003C000u;
             constexpr uint32_t kEndFunc = 0x001FFD70u;
@@ -653,13 +714,6 @@ void register_ps2_sif_rpc_tests()
 
             SifInitRpc(env.rdram.data(), &env.ctx, &env.runtime);
 
-            const uint32_t semaParam[6] = {0u, 1u, 0u, 0u, 0u, 0u};
-            std::memcpy(env.rdram.data() + kSemaParamAddr, semaParam, sizeof(semaParam));
-            setRegU32(env.ctx, 4, kSemaParamAddr);
-            CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
-            const int32_t semaId = getRegS32(env.ctx, 2);
-            t.IsTrue(semaId > 0, "CreateSema should return a positive semaphore id");
-
             setRegU32(env.ctx, 4, kClientAddr);
             setRegU32(env.ctx, 5, IOP_SID_LOTR_SOUND);
             setRegU32(env.ctx, 6, 0u);
@@ -668,19 +722,25 @@ void register_ps2_sif_rpc_tests()
 
             writeGuestU32(env.rdram.data(), kSendAddr, 3u);
             std::memset(env.rdram.data() + kRecvAddr, 0xAA, 0x2000u);
-            setRegU32(env.ctx, 4, kClientAddr);
-            setRegU32(env.ctx, 5, 0u);
-            setRegU32(env.ctx, 6, K_SIF_RPC_MODE_NOWAIT);
-            setRegU32(env.ctx, 7, kSendAddr);
-            setRegU32(env.ctx, 8, 0x2000u);
-            setRegU32(env.ctx, 9, kRecvAddr);
-            setRegU32(env.ctx, 10, 0x2000u);
-            setRegU32(env.ctx, 11, kEndFunc);
-            setRegU32(env.ctx, 29, K_STACK_ADDR);
-            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x00u, static_cast<uint32_t>(semaId));
-            SifCallRpc(env.rdram.data(), &env.ctx, &env.runtime);
+            env.runtime.registerFunction(K_LOTR_SOUND_SCHEDULER_CALL, schedulerLotrSoundRpcCall);
+            env.runtime.registerFunction(K_LOTR_SOUND_SCHEDULER_RESUME, schedulerLotrSoundRpcResume);
+            g_schedulerLotrSoundClient = kClientAddr;
+            g_schedulerLotrSoundSend = kSendAddr;
+            g_schedulerLotrSoundReceive = kRecvAddr;
+            g_schedulerLotrSoundEndFunction = kEndFunc;
+            g_schedulerLotrSoundResult = static_cast<uint32_t>(-1);
 
-            t.Equals(getRegS32(env.ctx, 2), KE_OK, "SifCallRpc should succeed for LotR sound RPC");
+            R5900Context mainContext{};
+            mainContext.pc = K_LOTR_SOUND_SCHEDULER_CALL;
+            setRegU32(mainContext, 29, K_STACK_ADDR);
+            env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+            const int32_t semaId = env.runtime.eeScheduler().createSemaphore(0, 1, 0u, 0u);
+            t.IsTrue(semaId > 0, "scheduler should create a positive semaphore id");
+            g_schedulerLotrSoundSemaphore = static_cast<uint32_t>(semaId);
+            env.runtime.eeScheduler().run();
+
+            t.Equals(g_schedulerLotrSoundResult, static_cast<uint32_t>(KE_OK),
+                     "SifCallRpc should resume with KE_OK for LotR sound RPC");
             t.Equals(g_lotrSoundCallbackHits.load(), 1u,
                      "LotR SOUND_JP callback should consume the HLE response");
             t.Equals(readGuestStruct<uint32_t>(env.rdram.data(), kRecvAddr + 0u), 0u,
@@ -688,9 +748,8 @@ void register_ps2_sif_rpc_tests()
             t.IsTrue(readGuestStruct<uint32_t>(env.rdram.data(), kRecvAddr + 4u) != 0u,
                      "LotR sound response should advance the IOP update counter");
 
-            setRegU32(env.ctx, 4, static_cast<uint32_t>(semaId));
-            PollSema(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), semaId, "LotR sound callback completion should signal the sema");
+            t.Equals(env.runtime.eeScheduler().pollSemaphore(semaId), semaId,
+                     "LotR sound callback completion should signal the sema");
         });
 
         tc.Run("RECVX sound callbacks complete in HLE and only clear busy on designated callbacks", [](TestCase &t)
@@ -1156,7 +1215,22 @@ void register_ps2_sif_rpc_tests()
 
             writeGuestU32(env.rdram.data(), kFnTableSlot, kRegisteredHandlerAddr);
             writeGuestU32(env.rdram.data(), kRecvAddr, 0u);
-            callUrpc();
+            env.runtime.registerFunction(K_DTX_SCHEDULER_CALL, schedulerDtxRpcCall);
+            env.runtime.registerFunction(K_DTX_SCHEDULER_RESUME, schedulerDtxRpcResume);
+            g_schedulerRpcClient = kClientAddr;
+            g_schedulerRpcNumber = kRpcNum;
+            g_schedulerRpcSend = kSendAddr;
+            g_schedulerRpcReceive = kRecvAddr;
+            g_schedulerRpcResult = static_cast<uint32_t>(-1);
+            R5900Context mainContext{};
+            mainContext.pc = K_DTX_SCHEDULER_CALL;
+            setRegU32(mainContext, 29, K_STACK_ADDR);
+            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x00u, 0u);
+            env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+            env.runtime.eeScheduler().run();
+
+            t.Equals(g_schedulerRpcResult, static_cast<uint32_t>(KE_OK),
+                     "DTX URPC should resume its base context with KE_OK");
 
             t.Equals(g_dtxDispatcherHits.load(), 1u,
                      "registered DTX function-table slot should enter the guest dispatcher");
