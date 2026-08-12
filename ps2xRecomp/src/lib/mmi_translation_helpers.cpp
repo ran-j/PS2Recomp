@@ -456,7 +456,7 @@ namespace ps2recomp
     {
         // Swaps halfwords 1<->3 and 5<->7 within the 128-bit register
         return fmt::format("SET_GPR_VEC(ctx, {}, _mm_shufflelo_epi16(_mm_shufflehi_epi16(GPR_VEC(ctx, {}), _MM_SHUFFLE(2,3,0,1)), _MM_SHUFFLE(2,3,0,1)));",
-                           inst.rd, inst.rs);
+                           inst.rd, inst.rt);
     }
 
 
@@ -465,7 +465,7 @@ namespace ps2recomp
         // Reverses the order of the 8 halfwords
         return fmt::format("{{ __m128i mask = _mm_setr_epi8(14,15, 12,13, 10,11, 8,9, 6,7, 4,5, 2,3, 0,1); "
                            "SET_GPR_VEC(ctx, {}, PS2_SHUFFLE_EPI8(GPR_VEC(ctx, {}), mask)); }}",
-                           inst.rd, inst.rs);
+                           inst.rd, inst.rt);
     }
 
 
@@ -514,7 +514,7 @@ namespace ps2recomp
     std::string CodeGenerator::translatePEXEW(const Instruction &inst)
     {
         return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PEXEW(GPR_VEC(ctx, {})));",
-                           inst.rd, inst.rs);
+                           inst.rd, inst.rt);
     }
 
 
@@ -522,7 +522,7 @@ namespace ps2recomp
     {
         // Rotates words left by 3: [d,c,b,a] -> [a,d,c,b]
         return fmt::format("SET_GPR_VEC(ctx, {}, _mm_shuffle_epi32(GPR_VEC(ctx, {}), _MM_SHUFFLE(0,3,2,1)));",
-                           inst.rd, inst.rs);
+                           inst.rd, inst.rt);
     }
 
 
@@ -562,7 +562,7 @@ namespace ps2recomp
     {
         // Parallel Exchange Center Halfword (same as MMI2 PEXEH)
         return fmt::format("SET_GPR_VEC(ctx, {}, _mm_shufflelo_epi16(_mm_shufflehi_epi16(GPR_VEC(ctx, {}), _MM_SHUFFLE(2,3,0,1)), _MM_SHUFFLE(2,3,0,1)));",
-                           inst.rd, inst.rs);
+                           inst.rd, inst.rt);
     }
 
 
@@ -571,7 +571,7 @@ namespace ps2recomp
         // Parallel Copy Halfword (Broadcast lower 16 bits of each 64-bit half)
         return fmt::format("{{ __m128i src = GPR_VEC(ctx, {}); uint16_t l = _mm_extract_epi16(src, 0); uint16_t h = _mm_extract_epi16(src, 4); \n"
                            "   SET_GPR_VEC(ctx, {}, _mm_set_epi16(h,h,h,h, l,l,l,l)); }}",
-                           inst.rs, inst.rd);
+                           inst.rt, inst.rd);
     }
 
 
@@ -579,7 +579,7 @@ namespace ps2recomp
     {
         // Parallel Exchange Center Word (Swaps words 0<>2, 1<>3)
         return fmt::format("SET_GPR_VEC(ctx, {}, _mm_shuffle_epi32(GPR_VEC(ctx, {}), _MM_SHUFFLE(1,0,3,2)));",
-                           inst.rd, inst.rs);
+                           inst.rd, inst.rt);
     }
 
 

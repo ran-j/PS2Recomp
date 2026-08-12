@@ -59,6 +59,17 @@ namespace
     constexpr uint32_t kEventWaitPc = 0x00160400u;
     constexpr uint32_t kEventResumePc = 0x00160410u;
     constexpr uint32_t kEventProducerPc = 0x00160420u;
+    constexpr uint32_t kTimer2WaitPc = 0x00160500u;
+    constexpr uint32_t kTimer2ResumePc = 0x00160510u;
+    constexpr uint32_t kTimer2HandlerPc = 0x00160520u;
+
+    constexpr uint32_t kTimer2Count = 0x10001000u;
+    constexpr uint32_t kTimer2Mode = 0x10001010u;
+    constexpr uint32_t kTimer2Compare = 0x10001020u;
+    constexpr uint32_t kTimerModeBusClockDiv256 = 2u;
+    constexpr uint32_t kTimerModeCue = 1u << 7u;
+    constexpr uint32_t kTimerModeCmpe = 1u << 8u;
+    constexpr uint32_t kTimerModeEquf = 1u << 10u;
 
     constexpr uint32_t kVSyncFlagAddr = 0x1800u;
     constexpr uint32_t kVSyncTickAddr = 0x1810u;
@@ -71,6 +82,7 @@ namespace
     uint32_t g_vsyncFlag = 0;
     uint64_t g_vsyncTick = 0;
     uint64_t g_vsyncCsr = 0;
+    std::atomic<bool> g_timer2Resumed{false};
 
     void setRegU32(R5900Context &ctx, int reg, uint32_t value)
     {
@@ -244,6 +256,41 @@ namespace
     {
         g_dispatchTrace.push_back(3);
         g_resumedResult = getRegS32(*ctx, 2);
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
+    void schedulerTimer2Handler(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_dispatchTrace.push_back(2);
+        PS2Memory &memory = runtime->memory();
+        memory.writeIORegister(kTimer2Mode, memory.readIORegister(kTimer2Mode) | kTimerModeEquf);
+        runtime->eeScheduler().signalSemaphore(g_testSemaphoreId, true);
+        ctx->pc = 0u;
+    }
+
+    void schedulerTimer2Wait(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_dispatchTrace.push_back(1);
+        EeScheduler &scheduler = runtime->eeScheduler();
+        g_testSemaphoreId = scheduler.createSemaphore(0, 1, 0u, 0u);
+        scheduler.addIrqHandler(false, 11u, kTimer2HandlerPc, true, 0u, 0u, 0u);
+
+        PS2Memory &memory = runtime->memory();
+        memory.writeIORegister(kTimer2Count, 0u);
+        memory.writeIORegister(kTimer2Compare, 8u);
+        memory.writeIORegister(kTimer2Mode,
+                               kTimerModeBusClockDiv256 | kTimerModeCue | kTimerModeCmpe | kTimerModeEquf);
+
+        ctx->pc = kTimer2ResumePc;
+        scheduler.waitSemaphore(g_testSemaphoreId);
+    }
+
+    void schedulerTimer2Resume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_dispatchTrace.push_back(3);
+        g_resumedResult = getRegS32(*ctx, 2);
+        g_timer2Resumed.store(true, std::memory_order_release);
         ctx->pc = 0u;
         runtime->requestStop();
     }
@@ -476,6 +523,52 @@ void register_ps2_runtime_interrupt_tests()
             {
                 t.Equals(flag->bits, 0x4u, "WEF_CLEAR should remove only the requested matched bit");
             }
+        });
+
+        tc.Run("EE Timer2 compare IRQ wakes a DelayThread-style semaphore wait", [](TestCase &t)
+        {
+            TestEnv env;
+            t.IsTrue(env.runtime.memory().initialize(), "runtime memory initialize should succeed");
+            env.runtime.registerFunction(kTimer2WaitPc, schedulerTimer2Wait);
+            env.runtime.registerFunction(kTimer2ResumePc, schedulerTimer2Resume);
+            env.runtime.registerFunction(kTimer2HandlerPc, schedulerTimer2Handler);
+
+            g_dispatchTrace.clear();
+            g_resumedResult = -1;
+            g_timer2Resumed.store(false, std::memory_order_release);
+            R5900Context mainContext{};
+            mainContext.pc = kTimer2WaitPc;
+            std::atomic<bool> schedulerThrew{false};
+            std::thread gameThread([&]()
+            {
+                try
+                {
+                    env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+                    env.runtime.eeScheduler().run();
+                }
+                catch (...)
+                {
+                    schedulerThrew.store(true, std::memory_order_release);
+                }
+            });
+
+            const bool resumed = waitUntil([]()
+            {
+                return g_timer2Resumed.load(std::memory_order_acquire);
+            }, std::chrono::milliseconds(150));
+            if (!resumed)
+            {
+                env.runtime.requestStop();
+            }
+            gameThread.join();
+
+            t.IsTrue(resumed, "Timer2 compare should dispatch INTC_TIM2 and wake the semaphore waiter");
+            t.IsFalse(schedulerThrew.load(std::memory_order_acquire), "Timer2 IRQ path should not throw");
+            const std::vector<int> expected{1, 2, 3};
+            t.IsTrue(g_dispatchTrace == expected,
+                     "Timer2 flow should run wait, interrupt handler, then the resumed thread");
+            t.Equals(g_resumedResult, g_testSemaphoreId,
+                     "the Timer2 handler should hand the semaphore directly to the waiter");
         });
 
         tc.Run("scheduler stop wakes an idle VSync wait without a timeout", [](TestCase &t)

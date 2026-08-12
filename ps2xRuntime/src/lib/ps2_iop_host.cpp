@@ -2,6 +2,7 @@
 
 #include "ps2_runtime.h"
 #include "ps2_stubs.h"
+#include "Kernel/Stubs/SIF.h"
 #include "runtime/ps2_memory.h"
 #include "Kernel/Stubs/MemoryCard.h"
 #include "Kernel/Syscalls/Common.h"
@@ -134,6 +135,11 @@ bool PS2IopHostAdapter::readGuest(uint32_t address, void *destination, size_t si
     {
         return false;
     }
+    if (ps2_stubs::isSifIopHeapAddress(address))
+    {
+        return ps2_stubs::readSifIopHeap(address, destination, size);
+    }
+
     uint8_t *source = nullptr;
     if (!guestRange(address, size, source))
     {
@@ -152,6 +158,11 @@ bool PS2IopHostAdapter::writeGuest(uint32_t address, const void *source, size_t 
     {
         return false;
     }
+    if (ps2_stubs::isSifIopHeapAddress(address))
+    {
+        return ps2_stubs::writeSifIopHeap(address, source, size);
+    }
+
     uint8_t *destination = nullptr;
     if (!guestRange(address, size, destination))
     {
@@ -168,6 +179,11 @@ bool PS2IopHostAdapter::writeGuest(uint32_t address, const void *source, size_t 
 
 bool PS2IopHostAdapter::zeroGuest(uint32_t address, size_t size)
 {
+    if (ps2_stubs::isSifIopHeapAddress(address))
+    {
+        return ps2_stubs::zeroSifIopHeap(address, size);
+    }
+
     uint8_t *destination = nullptr;
     if (!guestRange(address, size, destination))
     {
@@ -184,6 +200,12 @@ bool PS2IopHostAdapter::zeroGuest(uint32_t address, size_t size)
 
 bool PS2IopHostAdapter::normalizeGuestAddress(uint32_t address, uint32_t &normalized) const
 {
+    if (ps2_stubs::isSifIopHeapAddress(address))
+    {
+        normalized = address;
+        return ps2_stubs::isSifIopHeapRange(address, 0u);
+    }
+
     bool scratchpad = false;
     if (!ps2ResolveGuestPointer(address, normalized, scratchpad) || scratchpad)
     {

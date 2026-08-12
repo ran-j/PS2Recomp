@@ -1320,14 +1320,13 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         return false;
     }
 
-    if (kind == GuestBranchKind::Return)
+    if (!isCall)
     {
         if (!hasFunction(targetPc))
         {
             reportMissingFunction(rdram, ctx, targetPc, sourcePc, kind, debugName);
         }
 
-        // Prevent nested dispatch.
         ctx->pc = targetPc;
         return false;
     }
@@ -1358,11 +1357,6 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     targetFn(rdram, ctx, this);
 
     if (isStopRequested() || ctx->pc == 0u)
-    {
-        return false;
-    }
-
-    if (!isCall)
     {
         return false;
     }

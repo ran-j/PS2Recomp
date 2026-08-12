@@ -1042,7 +1042,7 @@ void register_code_generator_tests()
                      "QFSRV should map to PS2_QFSRV with rs/rt ordering");
         });
 
-        tc.Run("PCPYLD and PEXEW use runtime helper macros", [](TestCase &t) {
+        tc.Run("PCPYLD uses runtime helper macro", [](TestCase &t) {
             CodeGenerator gen({}, {});
 
             Instruction pcpyld{};
@@ -1057,18 +1057,45 @@ void register_code_generator_tests()
             std::string pcpyldOut = gen.translateInstruction(pcpyld);
             t.IsTrue(pcpyldOut.find("PS2_PCPYLD(GPR_VEC(ctx, 7), GPR_VEC(ctx, 8))") != std::string::npos,
                      "PCPYLD should use PS2_PCPYLD helper");
+        });
 
-            Instruction pexew{};
-            pexew.isMMI = true;
-            pexew.opcode = OPCODE_MMI;
-            pexew.function = MMI_MMI2;
-            pexew.sa = MMI2_PEXEW;
-            pexew.rd = 9;
-            pexew.rs = 10;
+        tc.Run("Unary MMI permutations read their source from rt", [](TestCase &t) {
+            CodeGenerator gen({}, {});
 
-            std::string pexewOut = gen.translateInstruction(pexew);
-            t.IsTrue(pexewOut.find("PS2_PEXEW(GPR_VEC(ctx, 10))") != std::string::npos,
-                     "PEXEW should use PS2_PEXEW helper");
+            struct UnaryMmiCase
+            {
+                const char *name;
+                uint8_t function;
+                uint8_t subfunction;
+            };
+
+            const std::vector<UnaryMmiCase> cases = {
+                {"PEXEH", MMI_MMI2, MMI2_PEXEH},
+                {"PREVH", MMI_MMI2, MMI2_PREVH},
+                {"PEXEW", MMI_MMI2, MMI2_PEXEW},
+                {"PROT3W", MMI_MMI2, MMI2_PROT3W},
+                {"PEXCH", MMI_MMI3, MMI3_PEXCH},
+                {"PCPYH", MMI_MMI3, MMI3_PCPYH},
+                {"PEXCW", MMI_MMI3, MMI3_PEXCW},
+            };
+
+            for (const UnaryMmiCase &item : cases)
+            {
+                Instruction inst{};
+                inst.isMMI = true;
+                inst.opcode = OPCODE_MMI;
+                inst.function = item.function;
+                inst.sa = item.subfunction;
+                inst.rd = 3;
+                inst.rs = 4;
+                inst.rt = 5;
+
+                const std::string out = gen.translateInstruction(inst);
+                t.IsTrue(out.find("GPR_VEC(ctx, 5)") != std::string::npos,
+                         std::string(item.name) + " should read its source from rt");
+                t.IsTrue(out.find("GPR_VEC(ctx, 4)") == std::string::npos,
+                         std::string(item.name) + " should not read its source from rs");
+            }
         });
 
         tc.Run("VU0 macro mappings cover all S1/S2 enums", [](TestCase &t) {

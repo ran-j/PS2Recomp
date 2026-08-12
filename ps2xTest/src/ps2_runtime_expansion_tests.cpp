@@ -166,6 +166,13 @@ namespace
         }
     }
 
+    std::atomic<uint32_t> gGuestJumpTargetCount{0u};
+
+    void testGuestJumpTargetHandler(uint8_t *, R5900Context *, PS2Runtime *)
+    {
+        gGuestJumpTargetCount.fetch_add(1u, std::memory_order_relaxed);
+    }
+
     std::atomic<uint32_t> gMpegStreamCallbackCount{0u};
     std::atomic<uint32_t> gMpegStreamCallbackMpeg{0u};
     std::atomic<uint32_t> gMpegStreamCallbackType{0u};
@@ -397,6 +404,32 @@ void register_ps2_runtime_expansion_tests()
                      "unchanged callee PC should be converted to call fallthrough");
             t.Equals(::getRegU32(&ctx, 2), 0x00FACE42u,
                      "callee should still execute normally");
+        });
+
+        tc.Run("dispatchGuestBranch jump returns to central dispatcher without nesting", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            runtime.registerFunction(0x3400u, &testGuestJumpTargetHandler);
+            gGuestJumpTargetCount.store(0u, std::memory_order_relaxed);
+
+            R5900Context ctx{};
+            ctx.pc = 0x2000u;
+
+            const bool continuedInCaller = runtime.dispatchGuestBranch(
+                nullptr,
+                &ctx,
+                0x3400u,
+                0x2000u,
+                0u,
+                PS2Runtime::GuestBranchKind::IndirectJump,
+                "test-jr");
+
+            t.IsFalse(continuedInCaller,
+                      "jump should stop the current generated wrapper");
+            t.Equals(gGuestJumpTargetCount.load(std::memory_order_relaxed), 0u,
+                     "jump target must not execute on a nested host stack frame");
+            t.Equals(ctx.pc, 0x3400u,
+                     "central dispatcher should receive the exact jump target");
         });
 
         tc.Run("dispatchGuestBranch call returns false when callee transfers elsewhere", [](TestCase &t)

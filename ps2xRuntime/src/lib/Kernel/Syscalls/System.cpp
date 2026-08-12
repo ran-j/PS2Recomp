@@ -495,6 +495,8 @@ namespace ps2_syscalls
         const uint32_t stack = getRegU32(ctx, 5);
         const int32_t stackSizeSigned = static_cast<int32_t>(getRegU32(ctx, 6));
         const uint32_t currentSp = getRegU32(ctx, 29);
+        EeScheduler &scheduler = runtime->eeScheduler();
+        scheduler.bindMainContextForSyscall(*ctx, rdram);
 
         if (gp != 0u)
         {
@@ -502,6 +504,10 @@ namespace ps2_syscalls
         }
 
         uint32_t sp = currentSp;
+        uint32_t initialStack = 0u;
+        const uint32_t stackSize = stackSizeSigned > 0
+                                       ? static_cast<uint32_t>(stackSizeSigned)
+                                       : 0u;
         if (stack == 0xFFFFFFFFu)
         {
             if (stackSizeSigned > 0)
@@ -534,6 +540,16 @@ namespace ps2_syscalls
         }
 
         sp &= ~0xFu;
+        if (stack == 0xFFFFFFFFu)
+        {
+            initialStack = sp;
+        }
+        else if (stack != 0u)
+        {
+            initialStack = stack;
+        }
+
+        scheduler.setupCurrentThread(initialStack, stackSize, getRegU32(ctx, 28));
         setReturnU32(ctx, sp);
     }
 

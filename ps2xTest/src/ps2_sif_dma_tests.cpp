@@ -1,8 +1,10 @@
 #include "MiniTest.h"
 #include "ps2_runtime.h"
+#include "ps2_iop_host.h"
 #include "ps2_iop_transport.h"
 #include "ps2_syscalls.h"
 #include "ps2_stubs.h"
+#include "Kernel/Stubs/SIF.h"
 #include "runtime/ee_scheduler.h"
 
 #include <array>
@@ -195,6 +197,79 @@ void register_ps2_sif_dma_tests()
             setRegU32(env.ctx, 4, static_cast<uint32_t>(dmaId));
             ps2_stubs::sceSifDmaStat(env.rdram.data(), &env.ctx, &env.runtime);
             t.IsTrue(getRegS32(env.ctx, 2) < 0, "sceSifDmaStat should be negative when transfer is complete");
+        });
+
+        tc.Run("IOP heap DMA uses private backing instead of aliasing EE RDRAM", [](TestCase &t)
+        {
+            TestEnv env;
+
+            constexpr uint32_t kDescAddr = 0x00020040u;
+            constexpr uint32_t kSrcAddr = 0x00020140u;
+            constexpr uint32_t kRoundTripAddr = 0x00020240u;
+            constexpr uint32_t kFormerAliasAddr = 0x01A53880u;
+            constexpr uint32_t kIopBlockSize = 0x880u;
+
+            std::array<uint8_t, 32> payload{};
+            for (size_t i = 0; i < payload.size(); ++i)
+            {
+                payload[i] = static_cast<uint8_t>(0x80u + i);
+            }
+            std::memcpy(env.rdram.data() + kSrcAddr, payload.data(), payload.size());
+            std::memset(env.rdram.data() + kRoundTripAddr, 0, payload.size());
+            std::memset(env.rdram.data() + kFormerAliasAddr, 0x5Au, payload.size());
+
+            setRegU32(env.ctx, 4, kIopBlockSize);
+            ps2_stubs::sceSifAllocIopHeap(env.rdram.data(), &env.ctx, &env.runtime);
+            const uint32_t iopAddress = ::getRegU32(&env.ctx, 2);
+            t.IsTrue(iopAddress >= PS2_RAM_SIZE,
+                     "sceSifAllocIopHeap should return an address outside EE RDRAM");
+
+            Ps2SifDmaTransfer desc{
+                kSrcAddr,
+                iopAddress,
+                static_cast<int32_t>(payload.size()),
+                0};
+            std::memcpy(env.rdram.data() + kDescAddr, &desc, sizeof(desc));
+            setRegU32(env.ctx, 4, kDescAddr);
+            setRegU32(env.ctx, 5, 1u);
+            ps2_stubs::sceSifSetDma(env.rdram.data(), &env.ctx, &env.runtime);
+            t.IsTrue(getRegS32(env.ctx, 2) > 0,
+                     "EE-to-IOP DMA should accept a private IOP heap destination");
+
+            const std::array<uint8_t, 32> aliasSentinel{
+                0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A,
+                0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A,
+                0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A,
+                0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A};
+            t.IsTrue(std::memcmp(env.rdram.data() + kFormerAliasAddr,
+                                 aliasSentinel.data(), aliasSentinel.size()) == 0,
+                     "IOP DMA must not overwrite the old 0x01A00000 EE alias range");
+
+            PS2IopHostAdapter host(env.runtime);
+            auto scope = host.enterCall(&env.ctx, env.rdram.data());
+            uint32_t normalized = 0u;
+            std::array<uint8_t, 32> hostReadback{};
+            t.IsTrue(host.normalizeGuestAddress(iopAddress, normalized) &&
+                         normalized == iopAddress,
+                     "IOP modules should preserve private IOP heap addresses");
+            t.IsTrue(host.readGuest(iopAddress, hostReadback.data(), hostReadback.size()) &&
+                         hostReadback == payload,
+                     "IOP modules should read the private heap backing");
+
+            desc = {
+                iopAddress,
+                kRoundTripAddr,
+                static_cast<int32_t>(payload.size()),
+                0};
+            std::memcpy(env.rdram.data() + kDescAddr, &desc, sizeof(desc));
+            setRegU32(env.ctx, 4, kDescAddr);
+            setRegU32(env.ctx, 5, 1u);
+            ps2_stubs::sceSifSetDma(env.rdram.data(), &env.ctx, &env.runtime);
+            t.IsTrue(getRegS32(env.ctx, 2) > 0,
+                     "IOP-to-EE DMA should accept a private IOP heap source");
+            t.IsTrue(std::memcmp(env.rdram.data() + kRoundTripAddr,
+                                 payload.data(), payload.size()) == 0,
+                     "IOP-to-EE DMA should round-trip the payload");
         });
 
         tc.Run("isceSifSetDma and isceSifSetDChain alias the SIF DMA helpers", [](TestCase &t)
@@ -438,6 +513,8 @@ void register_ps2_sif_dma_tests()
             t.IsTrue(getRegS32(env.ctx, 2) > 0, "sceSifSetDma should succeed for the SJX transport");
             t.Equals(env.rdram[kEeWorkAddr + 0x11u], static_cast<uint8_t>(0u),
                      "SJX DMA ack should rewrite the response line to room so EE recycles the chunk");
+            t.Equals(readGuestU32(env.rdram.data(), kEeWorkAddr + 0x14u), 0x12345678u,
+                     "SJX DMA ack should translate the remote handle back to the EE callback object");
             t.Equals(readGuestU32(env.rdram.data(), kEeWorkAddr + kWorkLen - sizeof(uint32_t)), 2u,
                      "SJX DMA ack should still advance the EE footer ticket");
 
