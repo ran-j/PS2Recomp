@@ -8,10 +8,8 @@
 #include "Stubs/GS.h"
 
 #include <algorithm>
-#include <chrono>
 #include <cstdint>
 #include <cstring>
-#include <thread>
 #include <vector>
 
 namespace
@@ -194,7 +192,7 @@ void register_ps2_memory_tests()
             t.Equals(mem.translateAddress(PS2_SCRATCHPAD_ALIAS_BASE + 0x123u), 0x123u, "0xF000 scratchpad alias should translate to local offset");
         });
 
-        tc.Run("EE timer0 count advances while enabled and can be reset", [](TestCase &t)
+        tc.Run("EE timer0 count advances from scheduler cycles and can be reset", [](TestCase &t)
         {
             PS2Memory mem;
             t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
@@ -204,17 +202,111 @@ void register_ps2_memory_tests()
             constexpr uint32_t kTimer0Compare = 0x10000020u;
 
             t.IsTrue(mem.writeIORegister(kTimer0Count, 0u), "timer count reset write should succeed");
-            t.IsTrue(mem.writeIORegister(kTimer0Compare, 1u), "timer compare write should succeed");
-            t.IsTrue(mem.writeIORegister(kTimer0Mode, 0x283u), "timer mode write should be retained");
-            t.Equals(mem.readIORegister(kTimer0Mode), 0x283u, "timer mode should be readable");
+            t.IsTrue(mem.writeIORegister(kTimer0Compare, 0xFFFFu), "timer compare write should succeed");
+            t.IsTrue(mem.writeIORegister(kTimer0Mode, 0x82u), "timer mode write should be retained");
+            t.Equals(mem.readIORegister(kTimer0Mode), 0x82u, "timer mode should be readable");
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(3));
+            mem.advanceEeTimers(8u * 512u);
             const uint32_t firstCount = mem.readIORegister(kTimer0Count);
-            t.IsTrue(firstCount > 0u, "enabled timer count should advance from host time");
+            t.Equals(firstCount, 8u, "BUSCLK/256 should increment once per 512 EE cycles");
 
             t.IsTrue(mem.writeIORegister(kTimer0Count, 0u), "timer count second reset should succeed");
+            mem.advanceEeTimers(512u);
             const uint32_t resetCount = mem.readIORegister(kTimer0Count);
-            t.IsTrue(resetCount <= firstCount, "timer reset should restart the count window");
+            t.Equals(resetCount, 1u, "timer reset should restart the deterministic count window");
+        });
+
+        tc.Run("EE timers 0 through 3 expose independent COUNT MODE and COMP registers", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kTimerBases[] = {
+                0x10000000u,
+                0x10000800u,
+                0x10001000u,
+                0x10001800u,
+            };
+            constexpr uint32_t kBusClockDiv256Cue = 0x82u;
+            for (uint32_t index = 0u; index < 4u; ++index)
+            {
+                const uint32_t base = kTimerBases[index];
+                t.IsTrue(mem.writeIORegister(base, 0x100u + index), "timer COUNT write should succeed");
+                t.IsTrue(mem.writeIORegister(base + 0x10u, kBusClockDiv256Cue), "timer MODE write should succeed");
+                t.IsTrue(mem.writeIORegister(base + 0x20u, 0x200u + index), "timer COMP write should succeed");
+            }
+
+            mem.advanceEeTimers(512u);
+            for (uint32_t index = 0u; index < 4u; ++index)
+            {
+                const uint32_t base = kTimerBases[index];
+                t.Equals(mem.readIORegister(base), 0x101u + index, "each timer should advance its own COUNT");
+                t.Equals(mem.readIORegister(base + 0x10u), kBusClockDiv256Cue, "each timer should retain MODE");
+                t.Equals(mem.readIORegister(base + 0x20u), 0x200u + index, "each timer should retain COMP");
+            }
+
+            t.IsTrue(mem.writeIORegister(kTimerBases[0] + 0x30u, 0x12345u), "Timer0 HOLD write should succeed");
+            t.IsTrue(mem.writeIORegister(kTimerBases[1] + 0x30u, 0x23456u), "Timer1 HOLD write should succeed");
+            t.Equals(mem.readIORegister(kTimerBases[0] + 0x30u), 0x2345u, "Timer0 HOLD should be 16-bit");
+            t.Equals(mem.readIORegister(kTimerBases[1] + 0x30u), 0x3456u, "Timer1 HOLD should be 16-bit");
+        });
+
+        tc.Run("EE Timer2 compare and overflow flags raise INTC_TIM2 and clear on write-one", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kTimer2Count = 0x10001000u;
+            constexpr uint32_t kTimer2Mode = 0x10001010u;
+            constexpr uint32_t kTimer2Compare = 0x10001020u;
+            constexpr uint32_t kCue = 1u << 7u;
+            constexpr uint32_t kCmpe = 1u << 8u;
+            constexpr uint32_t kOvfe = 1u << 9u;
+            constexpr uint32_t kEquf = 1u << 10u;
+            constexpr uint32_t kOvff = 1u << 11u;
+            constexpr uint32_t kBusClockDiv256 = 2u;
+
+            mem.writeIORegister(kTimer2Count, 0u);
+            mem.writeIORegister(kTimer2Compare, 8u);
+            mem.writeIORegister(kTimer2Mode, kBusClockDiv256 | kCue | kCmpe | kEquf | kOvff);
+
+            t.Equals(mem.advanceEeTimers(7u * 512u), 0u, "compare should not fire before COUNT reaches COMP");
+            t.Equals(mem.readIORegister(kTimer2Count), 7u, "Timer2 should expose its live 16-bit count");
+            t.Equals(mem.advanceEeTimers(512u), 1u << 2u, "Timer2 compare should raise the TIM2 interrupt bit");
+            t.IsTrue((mem.readIORegister(kTimer2Mode) & kEquf) != 0u, "Timer2 compare should latch EQUF");
+
+            mem.writeIORegister(kTimer2Mode, mem.readIORegister(kTimer2Mode) | kEquf);
+            t.IsTrue((mem.readIORegister(kTimer2Mode) & kEquf) == 0u, "writing one should clear EQUF");
+
+            mem.writeIORegister(kTimer2Count, 0xFFFFu);
+            mem.writeIORegister(kTimer2Mode, kBusClockDiv256 | kCue | kOvfe | kOvff);
+            t.Equals(mem.advanceEeTimers(512u), 1u << 2u, "Timer2 overflow should raise the TIM2 interrupt bit");
+            t.Equals(mem.readIORegister(kTimer2Count), 0u, "Timer2 count should wrap at 16 bits");
+            t.IsTrue((mem.readIORegister(kTimer2Mode) & kOvff) != 0u, "Timer2 overflow should latch OVFF");
+
+            mem.writeIORegister(kTimer2Mode, mem.readIORegister(kTimer2Mode) | kOvff);
+            t.IsTrue((mem.readIORegister(kTimer2Mode) & kOvff) == 0u, "writing one should clear OVFF");
+        });
+
+        tc.Run("EE timer zero-return clears COUNT on compare", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kTimer0Count = 0x10000000u;
+            constexpr uint32_t kTimer0Mode = 0x10000010u;
+            constexpr uint32_t kTimer0Compare = 0x10000020u;
+            constexpr uint32_t kZret = 1u << 6u;
+            constexpr uint32_t kCue = 1u << 7u;
+            constexpr uint32_t kCmpe = 1u << 8u;
+            constexpr uint32_t kEquf = 1u << 10u;
+
+            mem.writeIORegister(kTimer0Count, 0u);
+            mem.writeIORegister(kTimer0Compare, 3u);
+            mem.writeIORegister(kTimer0Mode, kZret | kCue | kCmpe | kEquf);
+
+            t.Equals(mem.advanceEeTimers(6u), 1u, "Timer0 compare should raise TIM0 after three BUSCLK ticks");
+            t.Equals(mem.readIORegister(kTimer0Count), 0u, "ZRET should clear COUNT when it equals COMP");
         });
 
         tc.Run("scratchpad alias accesses the same bytes as base", [](TestCase &t)

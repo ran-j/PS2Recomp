@@ -1049,6 +1049,46 @@ void register_ps2_runtime_kernel_tests()
             t.Equals(setupSp & 0xFu, 0u, "SetupThread should always return a 16-byte aligned stack pointer");
         });
 
+        tc.Run("SetupThread exposes stable main stack metadata through ReferThreadStatus", [](TestCase &t)
+        {
+            TestEnv env;
+            constexpr uint32_t kInitialLoaderSp = PS2_RAM_SIZE - 0x10u;
+            constexpr uint32_t kMainStackSize = 0x00020000u;
+            constexpr uint32_t kExpectedStack = PS2_RAM_SIZE - kMainStackSize;
+            constexpr uint32_t kMainGp = 0x0036A7F0u;
+
+            env.ctx.pc = 0x00100000u;
+            setRegU32(env.ctx, 29, kInitialLoaderSp);
+            setRegU32(env.ctx, 4, kMainGp);
+            setRegU32(env.ctx, 5, 0xFFFFFFFFu);
+            setRegU32(env.ctx, 6, kMainStackSize);
+            t.IsTrue(callSyscall(0x3Cu, env.rdram.data(), &env.ctx, &env.runtime),
+                     "SetupThread syscall should dispatch");
+            t.Equals(::getRegU32(&env.ctx, 2), kExpectedStack,
+                     "automatic main stack should start below the reserved top-of-RDRAM area");
+
+            // ReferThreadStatus can be called after many nested frames have moved $sp.
+            // It must report the initial stack recorded by SetupThread, not this live snapshot.
+            constexpr uint32_t kTransientSp = kExpectedStack - 0x80u;
+            setRegU32(env.ctx, 29, kTransientSp);
+            setRegU32(env.ctx, 4, 0u);
+            setRegU32(env.ctx, 5, K_STATUS_ADDR);
+            t.IsTrue(callSyscall(0x30u, env.rdram.data(), &env.ctx, &env.runtime),
+                     "ReferThreadStatus syscall should dispatch");
+            t.Equals(getRegS32(env.ctx, 2), KE_OK, "ReferThreadStatus should accept the current-thread id alias");
+
+            EeThreadStatusAbi status{};
+            std::memcpy(&status, env.rdram.data() + K_STATUS_ADDR, sizeof(status));
+            t.Equals(status.stack, kExpectedStack,
+                     "main thread status must expose SetupThread's stable initial stack");
+            t.Equals(status.stack_size, static_cast<int32_t>(kMainStackSize),
+                     "main thread status must preserve SetupThread's stack size");
+            t.Equals(status.gp_reg, kMainGp,
+                     "main thread status must preserve SetupThread's global pointer");
+            t.IsTrue(status.stack != kInitialLoaderSp && status.stack != kTransientSp,
+                     "main thread status must never expose a live stack-pointer snapshot");
+        });
+
         tc.Run("OSD config2 syscalls round-trip extended config", [](TestCase &t)
         {
             TestEnv env;

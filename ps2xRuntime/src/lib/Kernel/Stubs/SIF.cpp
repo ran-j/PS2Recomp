@@ -4,7 +4,10 @@
 #include "../../ps2_iop_transport.h"
 #include "runtime/ps2_address.h"
 
+#include <algorithm>
+#include <limits>
 #include <map>
+#include <vector>
 
 namespace ps2_stubs
 {
@@ -59,6 +62,7 @@ namespace ps2_stubs
         std::unordered_map<uint32_t, uint32_t> g_sifSregs;
         std::unordered_map<uint32_t, uint32_t> g_sifCmdHandlers;
         std::map<uint32_t, uint32_t> g_sifHeapAllocations;
+        std::array<uint8_t, kIopHeapLimit - kIopHeapBase> g_sifHeapStorage{};
         uint32_t g_sifCmdBuffer = 0u;
         uint32_t g_sifSysCmdBuffer = 0u;
         bool g_sifCmdInitialized = false;
@@ -158,6 +162,9 @@ namespace ps2_stubs
             }
 
             g_sifHeapAllocations[candidate] = alignedSize;
+            std::fill_n(g_sifHeapStorage.data() + (candidate - kIopHeapBase),
+                        alignedSize,
+                        uint8_t{0});
             g_iopHeapNext = candidate + alignedSize;
             return candidate;
         }
@@ -183,7 +190,27 @@ namespace ps2_stubs
         {
             std::lock_guard<std::mutex> lock(g_sifHeapMutex);
             g_sifHeapAllocations.clear();
+            g_sifHeapStorage.fill(0u);
             g_iopHeapNext = kIopHeapBase;
+        }
+
+        bool isAllocatedSifHeapRangeLocked(uint32_t address, size_t size)
+        {
+            if (address < kIopHeapBase || address >= kIopHeapLimit || size > static_cast<size_t>(kIopHeapLimit - address))
+            {
+                return false;
+            }
+
+            auto it = g_sifHeapAllocations.upper_bound(address);
+            if (it == g_sifHeapAllocations.begin())
+            {
+                return false;
+            }
+            --it;
+
+            const uint64_t allocationEnd = static_cast<uint64_t>(it->first) + it->second;
+            const uint64_t rangeEnd = static_cast<uint64_t>(address) + size;
+            return address >= it->first && rangeEnd <= allocationEnd;
         }
 
         bool isCopyableGuestAddress(uint32_t addr)
@@ -211,37 +238,38 @@ namespace ps2_stubs
             return false;
         }
 
-        bool canCopyGuestByteRange(const uint8_t *rdram, uint32_t dstAddr, uint32_t srcAddr, uint32_t sizeBytes)
+        bool canCopyAddressRange(const uint8_t *rdram, uint32_t address, uint32_t sizeBytes)
         {
-            if (!rdram)
+            if (isSifIopHeapRange(address, sizeBytes))
+            {
+                return true;
+            }
+            if (isSifIopHeapAddress(address) || !rdram)
             {
                 return false;
             }
-
             if (sizeBytes == 0u)
             {
                 return true;
             }
-
+            if (sizeBytes - 1u > std::numeric_limits<uint32_t>::max() - address)
+            {
+                return false;
+            }
             for (uint32_t i = 0u; i < sizeBytes; ++i)
             {
-                const uint32_t srcByteAddr = srcAddr + i;
-                const uint32_t dstByteAddr = dstAddr + i;
-
-                if (!isCopyableGuestAddress(srcByteAddr) || !isCopyableGuestAddress(dstByteAddr))
-                {
-                    return false;
-                }
-
-                const uint8_t *src = getConstMemPtr(rdram, srcByteAddr);
-                const uint8_t *dst = getConstMemPtr(rdram, dstByteAddr);
-                if (!src || !dst)
+                const uint32_t byteAddress = address + i;
+                if (!isCopyableGuestAddress(byteAddress) ||getConstMemPtr(rdram, byteAddress) == nullptr)
                 {
                     return false;
                 }
             }
-
             return true;
+        }
+
+        bool canCopyGuestByteRange(const uint8_t *rdram, uint32_t dstAddr, uint32_t srcAddr, uint32_t sizeBytes)
+        {
+            return canCopyAddressRange(rdram, srcAddr, sizeBytes) && canCopyAddressRange(rdram, dstAddr, sizeBytes);
         }
 
         bool copyGuestByteRange(uint8_t *rdram, uint32_t dstAddr, uint32_t srcAddr, uint32_t sizeBytes)
@@ -253,6 +281,49 @@ namespace ps2_stubs
 
             if (sizeBytes == 0u)
             {
+                return true;
+            }
+
+            const bool sourceIsIop = isSifIopHeapRange(srcAddr, sizeBytes);
+            const bool destinationIsIop = isSifIopHeapRange(dstAddr, sizeBytes);
+            if (sourceIsIop || destinationIsIop)
+            {
+                std::vector<uint8_t> payload(sizeBytes);
+                if (sourceIsIop)
+                {
+                    if (!readSifIopHeap(srcAddr, payload.data(), payload.size()))
+                    {
+                        return false;
+                    }
+                }
+                else
+                {
+                    for (uint32_t i = 0u; i < sizeBytes; ++i)
+                    {
+                        const uint8_t *src = getConstMemPtr(rdram, srcAddr + i);
+                        if (!src)
+                        {
+                            return false;
+                        }
+                        payload[i] = *src;
+                    }
+                }
+
+                if (destinationIsIop)
+                {
+                    return writeSifIopHeap(dstAddr, payload.data(), payload.size());
+                }
+
+                ps2TraceGuestRangeWrite(rdram, dstAddr, sizeBytes, "sifCopyGuestByteRange", nullptr);
+                for (uint32_t i = 0u; i < sizeBytes; ++i)
+                {
+                    uint8_t *dst = getMemPtr(rdram, dstAddr + i);
+                    if (!dst)
+                    {
+                        return false;
+                    }
+                    *dst = payload[i];
+                }
                 return true;
             }
 
@@ -291,6 +362,71 @@ namespace ps2_stubs
             }
             return true;
         }
+    }
+
+    bool isSifIopHeapAddress(uint32_t address)
+    {
+        return address >= kIopHeapBase && address < kIopHeapLimit;
+    }
+
+    bool isSifIopHeapRange(uint32_t address, size_t size)
+    {
+        std::lock_guard<std::mutex> lock(g_sifHeapMutex);
+        return isAllocatedSifHeapRangeLocked(address, size);
+    }
+
+    bool readSifIopHeap(uint32_t address, void *destination, size_t size)
+    {
+        if (!destination && size != 0u)
+        {
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(g_sifHeapMutex);
+        if (!isAllocatedSifHeapRangeLocked(address, size))
+        {
+            return false;
+        }
+        if (size != 0u)
+        {
+            std::memcpy(destination,
+                        g_sifHeapStorage.data() + (address - kIopHeapBase),
+                        size);
+        }
+        return true;
+    }
+
+    bool writeSifIopHeap(uint32_t address, const void *source, size_t size)
+    {
+        if (!source && size != 0u)
+        {
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(g_sifHeapMutex);
+        if (!isAllocatedSifHeapRangeLocked(address, size))
+        {
+            return false;
+        }
+        if (size != 0u)
+        {
+            std::memcpy(g_sifHeapStorage.data() + (address - kIopHeapBase),
+                        source,
+                        size);
+        }
+        return true;
+    }
+
+    bool zeroSifIopHeap(uint32_t address, size_t size)
+    {
+        std::lock_guard<std::mutex> lock(g_sifHeapMutex);
+        if (!isAllocatedSifHeapRangeLocked(address, size))
+        {
+            return false;
+        }
+        if (size != 0u)
+        {
+            std::memset(g_sifHeapStorage.data() + (address - kIopHeapBase), 0, size);
+        }
+        return true;
     }
 
     void resetSifState()

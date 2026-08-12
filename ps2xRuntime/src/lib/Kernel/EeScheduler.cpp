@@ -41,6 +41,15 @@ namespace
         return (microseconds * EeScheduler::kEeClockHz + 999999ull) / 1000000ull;
     }
 
+    std::chrono::nanoseconds eeCyclesToHostDuration(uint64_t cycles)
+    {
+        constexpr uint64_t kNanosecondsPerSecond = 1000000000ull;
+        const uint64_t wholeSeconds = cycles / EeScheduler::kEeClockHz;
+        const uint64_t remainingCycles = cycles % EeScheduler::kEeClockHz;
+        const uint64_t remainingNanoseconds = (remainingCycles * kNanosecondsPerSecond + EeScheduler::kEeClockHz - 1u) / EeScheduler::kEeClockHz;
+        return std::chrono::seconds(wholeSeconds) + std::chrono::nanoseconds(remainingNanoseconds);
+    }
+
     constexpr uint64_t kVBlankPeriodCycles = microsecondsToEeCycles(16667u);
     constexpr uint64_t kVBlankDurationCycles = microsecondsToEeCycles(500u);
     constexpr uint64_t kAlarmTickCycles = microsecondsToEeCycles(kAlarmTickMicroseconds);
@@ -101,6 +110,7 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_rescheduleRequested = false;
     m_timeSliceExpired = false;
     m_insideInterrupt = false;
+    m_pendingEeTimerInterrupts = 0u;
     m_eeCycle = 0u;
     m_sliceEndCycle = kDefaultTimeSliceCycles;
     m_stopRequested.store(false, std::memory_order_release);
@@ -121,12 +131,15 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_gsVSyncCallbackGp = 0;
     m_gsVSyncCallbackSp = 0;
     m_runtime.memory().gs().vsyncTick.store(0u, std::memory_order_release);
+    m_runtime.memory().resetEeTimers();
 
     GuestThread main{};
     main.id = kMainThreadId;
     main.context = mainContext;
     main.entry = mainContext.pc;
-    main.stack = getRegU32(&mainContext, 29);
+    // $sp is live execution state, not the stable initial stack descriptor
+    // returned by ReferThreadStatus. SetupThread records that metadata.
+    main.stack = 0u;
     main.gp = getRegU32(&mainContext, 28);
     main.initialPriority = 0;
     main.currentPriority = 0;
@@ -375,12 +388,33 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
 
 void EeScheduler::accountCycles(uint32_t cycles) noexcept
 {
-    m_eeCycle += std::max<uint64_t>(1u, cycles);
+    const uint64_t elapsed = std::max<uint64_t>(1u, cycles);
+    m_eeCycle += elapsed;
+    m_pendingEeTimerInterrupts |= m_runtime.memory().advanceEeTimers(elapsed);
+    if (m_pendingEeTimerInterrupts != 0u)
+    {
+        m_checkpointPending.store(true, std::memory_order_release);
+    }
 }
 
 bool EeScheduler::isExecutingGuest() const noexcept
 {
     return m_guestExecuting.load(std::memory_order_acquire);
+}
+
+void EeScheduler::setupCurrentThread(uint32_t stack, uint32_t stackSize, uint32_t gp)
+{
+    assertExecutor();
+    GuestThread *target = currentThread();
+    if (!target)
+    {
+        return;
+    }
+
+    target->stack = stack;
+    target->stackSize = stackSize;
+    target->gp = gp;
+    publishSnapshot();
 }
 
 int EeScheduler::createThread(const EeThreadCreateParams &params)
@@ -1702,6 +1736,15 @@ void EeScheduler::processPendingEvents()
 {
     assertExecutor();
     processDueDeadlines();
+    const uint32_t timerInterrupts = m_pendingEeTimerInterrupts;
+    m_pendingEeTimerInterrupts = 0u;
+    for (uint32_t timer = 0u; timer < 4u; ++timer)
+    {
+        if ((timerInterrupts & (1u << timer)) != 0u)
+        {
+            dispatchIrq(false, 9u + timer);
+        }
+    }
     std::deque<EeEvent> pending;
     {
         std::lock_guard lock(m_eventMutex);
@@ -1950,30 +1993,55 @@ void EeScheduler::waitForEvent()
     {
         return;
     }
-    if (m_deadlines.empty())
+    const uint64_t timerCycles = m_runtime.memory().cyclesUntilNextEeTimerInterrupt();
+    const bool hasTimerDeadline = timerCycles != std::numeric_limits<uint64_t>::max();
+    if (m_deadlines.empty() && !hasTimerDeadline)
     {
         m_eventCv.wait(lock, [this]()
                        { return !m_events.empty() || m_stopRequested.load(std::memory_order_acquire); });
         return;
     }
 
-    const auto next = std::min_element(m_deadlines.begin(), m_deadlines.end(),
-                                       [](const ScheduledEvent &left, const ScheduledEvent &right)
-                                       {
-                                           if (left.deadlineCycle != right.deadlineCycle)
+    uint64_t deadlineCycle = 0u;
+    auto hostDeadline = std::chrono::steady_clock::time_point::max();
+    if (!m_deadlines.empty())
+    {
+        const auto next = std::min_element(m_deadlines.begin(), m_deadlines.end(),
+                                           [](const ScheduledEvent &left, const ScheduledEvent &right)
                                            {
-                                               return left.deadlineCycle < right.deadlineCycle;
-                                           }
-                                           return left.sequence < right.sequence;
-                                       });
-    const uint64_t deadlineCycle = next->deadlineCycle;
-    const auto hostDeadline = next->hostDeadline;
+                                               if (left.deadlineCycle != right.deadlineCycle)
+                                               {
+                                                   return left.deadlineCycle < right.deadlineCycle;
+                                               }
+                                               return left.sequence < right.sequence;
+                                           });
+        deadlineCycle = next->deadlineCycle;
+        hostDeadline = next->hostDeadline;
+    }
+    if (hasTimerDeadline)
+    {
+        const auto timerHostDeadline = std::chrono::steady_clock::now() + eeCyclesToHostDuration(timerCycles);
+        if (timerHostDeadline < hostDeadline)
+        {
+            deadlineCycle = m_eeCycle + timerCycles;
+            hostDeadline = timerHostDeadline;
+        }
+    }
+
     const bool signaled = m_eventCv.wait_until(lock, hostDeadline, [this]()
                                                { return !m_events.empty() ||
                                                         m_stopRequested.load(std::memory_order_acquire); });
     if (!signaled)
     {
-        m_eeCycle = std::max(m_eeCycle, deadlineCycle);
+        const uint64_t elapsed = deadlineCycle > m_eeCycle ? deadlineCycle - m_eeCycle : 0u;
+        lock.unlock();
+        uint64_t remaining = elapsed;
+        while (remaining > 0u)
+        {
+            const uint32_t step = static_cast<uint32_t>(std::min<uint64_t>(remaining, std::numeric_limits<uint32_t>::max()));
+            accountCycles(step);
+            remaining -= step;
+        }
         m_checkpointPending.store(true, std::memory_order_release);
     }
 }

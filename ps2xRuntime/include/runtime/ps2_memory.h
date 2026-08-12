@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <array>
 #include <functional>
 #include <vector>
 #include <unordered_map>
@@ -306,6 +307,12 @@ public:
     bool writeIORegister(uint32_t address, uint32_t value);
     uint32_t readIORegister(uint32_t address);
 
+    // EE timers advance from the scheduler's emulated EE-cycle clock. The
+    // returned mask uses bits 0..3 for newly raised TIM0..TIM3 interrupts.
+    uint32_t advanceEeTimers(uint64_t eeCycles) noexcept;
+    [[nodiscard]] uint64_t cyclesUntilNextEeTimerInterrupt() const noexcept;
+    void resetEeTimers() noexcept;
+
     using GifPacketCallback = std::function<void(const uint8_t *, uint32_t)>;
     void setGifPacketCallback(GifPacketCallback cb) { m_gifPacketCallback = std::move(cb); }
     void setGifArbiter(GifArbiter *arbiter) { m_gifArbiter = arbiter; }
@@ -432,10 +439,17 @@ public:
     bool isScratchpad(uint32_t address) const;
     uint8_t *mapVuMemory(uint32_t physAddr, uint32_t size, uint32_t &offset, uint32_t &limit);
     const uint8_t *mapVuMemory(uint32_t physAddr, uint32_t size, uint32_t &offset, uint32_t &limit) const;
-    void updateEeTimer0Counter();
+    struct EeTimer
+    {
+        uint32_t count = 0;
+        uint32_t mode = 0;
+        uint32_t compare = 0;
+        uint32_t hold = 0;
+        uint64_t clockRemainder = 0;
+    };
+
+    std::array<EeTimer, 4> m_eeTimers{};
     void queueCompletedDmacCause(uint32_t cause);
-    uint64_t m_timer0LastHostNs = 0;
-    uint64_t m_timer0FractionNs = 0;
 };
 
 #endif // PS2_MEMORY_H

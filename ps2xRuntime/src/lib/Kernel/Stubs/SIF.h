@@ -2,8 +2,16 @@
 
 #include "ps2_stubs.h"
 
+#include <cstddef>
+
 namespace ps2_stubs
 {
+    bool isSifIopHeapAddress(uint32_t address);
+    bool isSifIopHeapRange(uint32_t address, size_t size);
+    bool readSifIopHeap(uint32_t address, void *destination, size_t size);
+    bool writeSifIopHeap(uint32_t address, const void *source, size_t size);
+    bool zeroSifIopHeap(uint32_t address, size_t size);
+
     void sceSifCmdIntrHdlr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifLoadModule(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifSendCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);

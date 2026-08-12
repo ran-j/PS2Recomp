@@ -1181,13 +1181,10 @@ namespace ps2x::iop::detail
                         continue;
                     }
 
-                    appendToSjrmtData(sjrmt->second,
-                                      chunkDataAddress,
-                                      chunkLength);
+                    appendToSjrmtData(sjrmt->second, chunkDataAddress, chunkLength);
+                    (void)writeGuestPod(m_host, commandAddress + 4u, sjx->second.eeObjectAddress);
                     constexpr uint8_t roomLine = 0u;
-                    (void)m_host.writeGuest(commandAddress + 1u,
-                                            &roomLine,
-                                            sizeof(roomLine));
+                    (void)m_host.writeGuest(commandAddress + 1u, &roomLine, sizeof(roomLine));
                 }
                 consumeActivePs2RnaStreamsLocked();
             }
