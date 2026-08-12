@@ -23,3 +23,16 @@ android/app/.cxx/
 android/local.properties
 android/.gradle/ 
 .idea/
+
+*.bat
+*.md
+*.csv
+*.toml
+*.patch
+gs-users-manual.txt
+
+outvita/
+pcsx2Code/
+ps2sdk/
+lotr/
+recvx-decomp/
