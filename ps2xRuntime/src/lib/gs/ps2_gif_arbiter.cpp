@@ -1,4 +1,4 @@
-#include "runtime/ps2_gif_arbiter.h"
+#include "runtime/gs/ps2_gif_arbiter.h"
 #include <algorithm>
 #include <cstring>
 

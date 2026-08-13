@@ -1,8 +1,8 @@
 #include "Common.h"
 #include "GS.h"
 #include "ps2_log.h"
-#include "runtime/ps2_gs_common.h"
-#include "runtime/ps2_gs_psmct16.h"
+#include "runtime/gs/ps2_gs_common.h"
+#include "runtime/gs/ps2_gs_psmct16.h"
 #include "runtime/ee_scheduler.h"
 
 namespace ps2_stubs

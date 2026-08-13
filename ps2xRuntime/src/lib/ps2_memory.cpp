@@ -1,6 +1,6 @@
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_address.h"
-#include "runtime/ps2_gs_gpu.h"
+#include "runtime/gs/gs_frontend.h"
 #include "ps2_log.h"
 #include <atomic>
 #include <cstring>

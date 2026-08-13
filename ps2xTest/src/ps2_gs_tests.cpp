@@ -3,13 +3,12 @@
 #include "ps2_runtime.h"
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
-#include "runtime/ps2_gs_gpu.h"
+#include "runtime/gs/gs_frontend.h"
 #include "runtime/ee_scheduler.h"
-#include "runtime/ps2_gs_memory.h"
-#include "runtime/ps2_gs_rasterizer.h"
-#include "runtime/ps2_gs_psmct32.h"
-#include "runtime/ps2_gs_psmt4.h"
-#include "runtime/ps2_gs_psmt8.h"
+#include "runtime/gs/ps2_gs_memory.h"
+#include "runtime/gs/ps2_gs_psmct32.h"
+#include "runtime/gs/ps2_gs_psmt4.h"
+#include "runtime/gs/ps2_gs_psmt8.h"
 #include "Stubs/Helpers/Support.h"
 #include "Stubs/GS.h"
 
@@ -2861,9 +2860,13 @@ void register_ps2_gs_tests()
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
             GS gs;
             gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
-            GSRasterizer rasterizer;
 
             constexpr uint32_t kTexTbp = 64u;
+            constexpr uint64_t kFrameReg =
+                (0ull << 0) |
+                (1ull << 16) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kZbuf = (1ull << 32);
             constexpr uint64_t kTex0 =
                 (static_cast<uint64_t>(kTexTbp) << 0) |
                 (16ull << 14) |
@@ -2873,20 +2876,55 @@ void register_ps2_gs_tests()
                 (1ull << 34) |
                 (1ull << 35);
             constexpr uint64_t kPrim =
-                static_cast<uint64_t>(GS_PRIM_TRIANGLE) |
+                static_cast<uint64_t>(GS_PRIM_SPRITE) |
                 (1ull << 4);
             constexpr uint32_t kExpectedColor = 0xFF3366CCu;
             constexpr uint32_t kUnsaturatedColor = 0xFF00FF00u;
 
+            auto packFloat = [](float value) -> uint32_t
+            {
+                uint32_t bits = 0u;
+                std::memcpy(&bits, &value, sizeof(bits));
+                return bits;
+            };
+            auto packSt = [&](float s, float tValue) -> uint64_t
+            {
+                return static_cast<uint64_t>(packFloat(s)) |
+                       (static_cast<uint64_t>(packFloat(tValue)) << 32u);
+            };
+
             gs.WriteVram(GS_PSM_CT32, kTexTbp, 16u, 1u, 0u, kExpectedColor);
             gs.WriteVram(GS_PSM_CT32, kTexTbp, 16u, 32u, 0u, kUnsaturatedColor);
+            gs.writeRegister(GS_REG_FRAME_1, kFrameReg);
+            gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
+            gs.writeRegister(GS_REG_SCISSOR_1, 0ull);
+            gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
             gs.writeRegister(GS_REG_TEX0_1, kTex0);
             gs.writeRegister(GS_REG_PRIM, kPrim);
+            gs.writeRegister(GS_REG_RGBAQ, 0x3F80000080808080ull);
+            gs.writeRegister(GS_REG_ST, packSt(1.0f / 1024.0f, 0.0f));
+            gs.writeRegister(GS_REG_XYZ2, 0ull);
+            gs.writeRegister(GS_REG_ST, packSt(1.0f / 1024.0f, 0.0f));
+            gs.writeRegister(GS_REG_XYZ2, (16ull << 0) | (16ull << 16));
 
-            const uint32_t sampled =
-                rasterizer.sampleTexture(&gs, 1.0f / 1024.0f, 0.0f, 1.0f, 0u, 0u);
+            const uint32_t sampled = gs.ReadVram(GS_PSM_CT32, 0u, 1u, 0u, 0u);
             t.Equals(sampled, kExpectedColor,
                      "TW/TH values above 10 should address a 1024-pixel texture instead of growing beyond GS limits");
+        });
+
+        tc.Run("GS backend replacement preserves canonical local memory", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            constexpr uint32_t kColor = 0xA55A33CCu;
+            gs.WriteVram(GS_PSM_CT32, 64u, 1u, 3u, 2u, kColor);
+            gs.setRasterBackend(nullptr);
+
+            t.Equals(gs.ReadVram(GS_PSM_CT32, 64u, 1u, 3u, 2u), kColor,
+                     "switching raster backends must retain the logical 4 MiB GS local memory");
         });
 
         tc.Run("GS TEX2 updates CLUT state independently from TEX0", [](TestCase &t)

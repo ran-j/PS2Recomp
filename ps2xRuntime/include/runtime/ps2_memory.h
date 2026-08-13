@@ -11,7 +11,7 @@
 #include <iostream>
 #include <mutex>
 
-#include "ps2_gif_arbiter.h"
+#include "gs/ps2_gif_arbiter.h"
 #if defined(_MSC_VER)
 #include <intrin.h>
 #elif defined(USE_SSE2NEON)

@@ -4,7 +4,7 @@
 #include "ps2_syscalls.h"
 #include "game_overrides.h"
 #include "ps2_runtime_macros.h"
-#include "runtime/ps2_gs_gpu.h"
+#include "runtime/gs/gs_frontend.h"
 #include "runtime/ee_scheduler.h"
 #include "ThreadNaming.h"
 #include "Kernel/Stubs/Audio.h"

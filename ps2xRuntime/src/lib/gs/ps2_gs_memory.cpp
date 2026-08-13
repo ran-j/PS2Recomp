@@ -1,6 +1,6 @@
 #include <array>
 
-#include "runtime/ps2_gs_memory.h"
+#include "runtime/gs/ps2_gs_memory.h"
 
 namespace GSMem
 {
