@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 namespace
@@ -16,6 +17,12 @@ namespace
     bool nearlyEqual(float a, float b, float eps = kEps)
     {
         return std::fabs(a - b) <= eps;
+    }
+
+    float noFold(float f)
+    {
+        volatile float v = f;
+        return v;
     }
 
     constexpr uint32_t kDst = 0x1000u;
@@ -1040,6 +1047,169 @@ void register_ps2_vu_tests()
             float out[16]{};
             readMat4(env, kDst, out);
             t.IsTrue(nearlyEqual(out[0], 0.0f), "DropShadowMatrix point mode should subtract d before scaling by k");
+        });
+    });
+
+    MiniTest::Case("PS2VU0FdivUnit", [](TestCase &tc)
+    {
+        const float kFmax = std::numeric_limits<float>::max();
+
+        tc.Run("VDIV divides ordinarily on any non-zero divisor, a zero dividend included, and saturates to the signed float maximum on a zero divisor", [](TestCase &t)
+        {
+            t.Equals(PS2_VU_DIV_Q(noFold(8.0f), noFold(2.0f)), 4.0f, "VDIV should divide normally when the divisor is non-zero");
+            t.Equals(PS2_VU_DIV_Q(noFold(1.0f), noFold(-2.0f)), -0.5f, "a negative divisor is an ordinary divide, not a saturation case");
+            t.Equals(PS2_VU_DIV_Q(noFold(-8.0f), noFold(2.0f)), -4.0f, "a negative dividend is an ordinary divide");
+            t.Equals(PS2_VU_DIV_Q(noFold(-8.0f), noFold(-2.0f)), 4.0f, "two negatively-signed operands give a positive quotient, not a negated one");
+
+            t.Equals(PS2_VU_DIV_Q(noFold(0.0f), noFold(2.0f)), 0.0f, "a zero dividend over a non-zero divisor is an ordinary divide, not a saturation case");
+            t.IsFalse(std::signbit(PS2_VU_DIV_Q(noFold(0.0f), noFold(2.0f))), "two positively-signed operands give a positive zero");
+            t.Equals(PS2_VU_DIV_Q(noFold(0.0f), noFold(-2.0f)), 0.0f, "a negative divisor does not turn a zero dividend into a saturation case");
+            t.IsTrue(std::signbit(PS2_VU_DIV_Q(noFold(0.0f), noFold(-2.0f))), "the quotient takes the divisor's sign, so this zero is negative");
+            t.Equals(PS2_VU_DIV_Q(noFold(-0.0f), noFold(2.0f)), 0.0f, "a negative-zero dividend over a non-zero divisor is an ordinary divide too");
+            t.IsTrue(std::signbit(PS2_VU_DIV_Q(noFold(-0.0f), noFold(2.0f))), "the quotient takes the dividend's sign, so this zero is negative");
+            t.Equals(PS2_VU_DIV_Q(noFold(-0.0f), noFold(-2.0f)), 0.0f, "two negatively-signed operands with a zero dividend are an ordinary divide");
+            t.IsFalse(std::signbit(PS2_VU_DIV_Q(noFold(-0.0f), noFold(-2.0f))), "the two signs cancel, so this zero is positive");
+
+            t.Equals(PS2_VU_DIV_Q(noFold(1.0f), noFold(0.0f)), std::numeric_limits<float>::max(), "VDIV by zero should saturate to the float maximum");
+            t.Equals(PS2_VU_DIV_Q(noFold(-1.0f), noFold(0.0f)), -std::numeric_limits<float>::max(), "VDIV by zero should keep the dividend's sign");
+            t.IsFalse(std::isinf(PS2_VU_DIV_Q(noFold(1.0f), noFold(0.0f))), "VDIV by zero must not produce an infinity");
+        });
+
+        tc.Run("VDIV saturation is chosen by sign bits, so signed zero operands are honoured", [kFmax](TestCase &t)
+        {
+            t.Equals(PS2_VU_DIV_Q(noFold(0.0f), noFold(0.0f)), kFmax, "0/0 with two positive zeros should saturate to the positive float maximum");
+            t.Equals(PS2_VU_DIV_Q(noFold(-0.0f), noFold(0.0f)), -kFmax, "-0/+0 should saturate to the negative float maximum, which a >= 0.0f test cannot express");
+            t.Equals(PS2_VU_DIV_Q(noFold(1.0f), noFold(-0.0f)), -kFmax, "a negative-zero divisor should saturate negative");
+            t.Equals(PS2_VU_DIV_Q(noFold(-1.0f), noFold(-0.0f)), kFmax, "two negatively-signed operands should saturate positive, which an or of the sign bits cannot express");
+            t.Equals(PS2_VU_DIV_Q(noFold(0.0f), noFold(-0.0f)), -kFmax, "a saturation whose dividend is a zero is still a float maximum, not a zero");
+            t.Equals(PS2_VU_DIV_Q(noFold(-0.0f), noFold(-0.0f)), kFmax, "two negative zeros should saturate positive");
+
+            const float kInf = std::numeric_limits<float>::infinity();
+            const float kNegNan = std::copysign(std::numeric_limits<float>::quiet_NaN(), -1.0f);
+            t.IsTrue(std::isnan(kNegNan), "the negatively-signed NaN below is still a NaN, so those rows exercise the non-finite dividend class");
+            t.IsTrue(std::signbit(kNegNan), "and its sign bit really is set, which is the premise the two NaN rows below rest on");
+            t.Equals(PS2_VU_DIV_Q(noFold(kInf), noFold(-0.0f)), -kFmax, "an infinite dividend over a negative-zero divisor saturates negative, because the branch reads both sign bits and not the dividend's alone");
+            t.Equals(PS2_VU_DIV_Q(noFold(-kInf), noFold(-0.0f)), kFmax, "and a negative infinite dividend over a negative-zero divisor saturates positive, which is the mirror no positive-zero divisor can show");
+            t.Equals(PS2_VU_DIV_Q(noFold(kNegNan), noFold(0.0f)), -kFmax, "a negatively-signed NaN dividend saturates negative, because the branch reads the dividend's sign bit and never its value");
+            t.Equals(PS2_VU_DIV_Q(noFold(kNegNan), noFold(-0.0f)), kFmax, "and over a negative-zero divisor the two set sign bits cancel, so it saturates positive");
+        });
+
+        tc.Run("VSQRT returns the root of the radicand magnitude", [](TestCase &t)
+        {
+            t.Equals(PS2_VU_SQRT_Q(noFold(16.0f)), 4.0f, "VSQRT of a positive radicand should be its root");
+            t.Equals(PS2_VU_SQRT_Q(noFold(-16.0f)), 4.0f, "VSQRT of a negative radicand should be the root of its magnitude");
+            t.Equals(PS2_VU_SQRT_Q(noFold(0.0f)), 0.0f, "VSQRT of positive zero should be zero");
+            t.IsFalse(std::signbit(PS2_VU_SQRT_Q(noFold(0.0f))), "the root of positive zero is a positive zero");
+            t.Equals(PS2_VU_SQRT_Q(noFold(-0.0f)), 0.0f, "VSQRT of negative zero should be zero");
+            t.IsFalse(std::signbit(PS2_VU_SQRT_Q(noFold(-0.0f))), "VSQRT should take the magnitude before the root, so the result is positive zero");
+        });
+
+        tc.Run("VRSQRT divides fs by the root of the radicand magnitude at every combination of the operands' sign bits, a zero dividend included", [](TestCase &t)
+        {
+            t.Equals(PS2_VU_RSQRT_Q(noFold(8.0f), noFold(4.0f)), 4.0f, "VRSQRT should divide fs by the root of ft");
+            t.Equals(PS2_VU_RSQRT_Q(noFold(8.0f), noFold(-4.0f)), 4.0f, "a negative radicand is an ordinary divide, not an exception");
+            t.Equals(PS2_VU_RSQRT_Q(noFold(-8.0f), noFold(4.0f)), -4.0f, "VRSQRT should carry the dividend's sign through an ordinary divide");
+            t.Equals(PS2_VU_RSQRT_Q(noFold(-8.0f), noFold(-4.0f)), -4.0f, "the radicand's sign is discarded before the root, so two negatively-signed operands still give a negative quotient, not a negated one");
+
+            t.Equals(PS2_VU_RSQRT_Q(noFold(0.0f), noFold(4.0f)), 0.0f, "a zero dividend over a non-zero radicand is an ordinary divide, not a saturation case");
+            t.IsFalse(std::signbit(PS2_VU_RSQRT_Q(noFold(0.0f), noFold(4.0f))), "the root is never negative, so a positive-zero dividend gives a positive zero");
+            t.Equals(PS2_VU_RSQRT_Q(noFold(0.0f), noFold(-4.0f)), 0.0f, "a negative radicand does not turn a zero dividend into a saturation case");
+            t.IsFalse(std::signbit(PS2_VU_RSQRT_Q(noFold(0.0f), noFold(-4.0f))), "the radicand's sign is gone before the divide, so this zero stays positive");
+            t.Equals(PS2_VU_RSQRT_Q(noFold(-0.0f), noFold(4.0f)), 0.0f, "a negative-zero dividend over a non-zero radicand is an ordinary divide too");
+            t.IsTrue(std::signbit(PS2_VU_RSQRT_Q(noFold(-0.0f), noFold(4.0f))), "the quotient takes the dividend's sign alone, so this zero is negative");
+            t.Equals(PS2_VU_RSQRT_Q(noFold(-0.0f), noFold(-4.0f)), 0.0f, "a negative-zero dividend over a negative radicand is an ordinary divide too");
+            t.IsTrue(std::signbit(PS2_VU_RSQRT_Q(noFold(-0.0f), noFold(-4.0f))), "both operands negatively signed still leaves the quotient's sign the dividend's alone");
+        });
+
+        tc.Run("VRSQRT saturates on a zero radicand with the dividend's sign alone", [kFmax](TestCase &t)
+        {
+            t.Equals(PS2_VU_RSQRT_Q(noFold(3.0f), noFold(0.0f)), kFmax, "VRSQRT with a zero radicand should saturate positive for a positive dividend");
+            t.Equals(PS2_VU_RSQRT_Q(noFold(-3.0f), noFold(0.0f)), -kFmax, "VRSQRT with a zero radicand should saturate negative for a negative dividend");
+            t.Equals(PS2_VU_RSQRT_Q(noFold(3.0f), noFold(-0.0f)), kFmax, "the radicand's sign is discarded before the root, so a negative zero radicand still saturates positive");
+            t.Equals(PS2_VU_RSQRT_Q(noFold(-3.0f), noFold(-0.0f)), -kFmax, "a negative dividend over a negative zero radicand saturates negative, because the radicand's sign never reaches the divide");
+            t.Equals(PS2_VU_RSQRT_Q(noFold(-0.0f), noFold(0.0f)), -kFmax, "a negative-zero dividend should saturate to the negative float maximum, which a < 0.0f test cannot express");
+            t.Equals(PS2_VU_RSQRT_Q(noFold(-0.0f), noFold(-0.0f)), -kFmax, "two negatively-signed operands saturate negative, not positive, because only the dividend's sign survives");
+            t.Equals(PS2_VU_RSQRT_Q(noFold(0.0f), noFold(0.0f)), kFmax, "a saturation whose dividend is a positive zero is still a positive float maximum, not a zero");
+            t.Equals(PS2_VU_RSQRT_Q(noFold(0.0f), noFold(-0.0f)), kFmax, "a positive-zero dividend over a negative zero radicand saturates positive");
+
+            const float kInf = std::numeric_limits<float>::infinity();
+            const float kNegNan = std::copysign(std::numeric_limits<float>::quiet_NaN(), -1.0f);
+            t.IsTrue(std::isnan(kNegNan), "the negatively-signed NaN below is still a NaN, so those rows exercise the non-finite dividend class");
+            t.IsTrue(std::signbit(kNegNan), "and its sign bit really is set, which is the premise the two NaN rows below rest on");
+            t.Equals(PS2_VU_RSQRT_Q(noFold(kInf), noFold(0.0f)), kFmax, "an infinite dividend over a zero radicand saturates positive, because the branch never reads the dividend's value");
+            t.Equals(PS2_VU_RSQRT_Q(noFold(kInf), noFold(-0.0f)), kFmax, "and a negative-zero radicand does not flip it, because the radicand's sign is gone before the divide");
+            t.Equals(PS2_VU_RSQRT_Q(noFold(-kInf), noFold(-0.0f)), -kFmax, "a negative infinite dividend over a negative-zero radicand still saturates negative, for the same reason");
+            t.Equals(PS2_VU_RSQRT_Q(noFold(kNegNan), noFold(0.0f)), -kFmax, "a negatively-signed NaN dividend saturates negative, because only the dividend's sign bit survives");
+            t.Equals(PS2_VU_RSQRT_Q(noFold(kNegNan), noFold(-0.0f)), -kFmax, "and a negative-zero radicand does not flip that either");
+        });
+
+        tc.Run("VU0 FDIV-unit results are finite across the zero and float-maximum operand set, a non-finite operand propagates on the ordinary path, the zero-divisor branch saturates by sign bit alone, and neither end of the range is clamped", [kFmax](TestCase &t)
+        {
+            const float kNan = std::numeric_limits<float>::quiet_NaN();
+            const float kInf = std::numeric_limits<float>::infinity();
+
+            const float probes[] = {kFmax, -kFmax, 0.0f, -0.0f, 1.0f, -1.0f};
+            for (float a : probes)
+            {
+                t.IsTrue(std::isfinite(PS2_VU_SQRT_Q(noFold(a))), "VSQRT must stay finite over this operand set");
+                for (float b : probes)
+                {
+                    t.IsTrue(std::isfinite(PS2_VU_DIV_Q(noFold(a), noFold(b))), "VDIV must stay finite over this operand set");
+                    t.IsTrue(std::isfinite(PS2_VU_RSQRT_Q(noFold(a), noFold(b))), "VRSQRT must stay finite over this operand set");
+                }
+            }
+
+            t.IsTrue(std::isnan(PS2_VU_DIV_Q(noFold(1.0f), noFold(kNan))), "a NaN divisor is non-zero, so it takes the ordinary path and propagates");
+            t.IsTrue(std::isnan(PS2_VU_DIV_Q(noFold(kNan), noFold(1.0f))), "a NaN dividend propagates on the ordinary path");
+            t.IsTrue(std::isnan(PS2_VU_SQRT_Q(noFold(kNan))), "a NaN radicand propagates");
+            t.IsTrue(std::isnan(PS2_VU_RSQRT_Q(noFold(1.0f), noFold(kNan))), "a NaN radicand propagates through the root and the divide");
+            t.IsTrue(std::isnan(PS2_VU_RSQRT_Q(noFold(kNan), noFold(1.0f))), "a NaN dividend propagates through the reciprocal root as well as through the divide");
+            t.IsTrue(std::isnan(PS2_VU_DIV_Q(noFold(kInf), noFold(kInf))), "an infinite dividend over an infinite divisor is the one operand pair these helpers turn into a NaN");
+
+            const float kNegNan = std::copysign(std::numeric_limits<float>::quiet_NaN(), -1.0f);
+            t.IsTrue(std::isnan(kNegNan), "the negatively-signed NaN below is still a NaN, so those rows exercise the non-finite operand class");
+            t.IsTrue(std::signbit(kNegNan), "and its sign bit really is set, which is the premise the five ordinary-path rows below rest on");
+            t.IsTrue(std::isnan(PS2_VU_DIV_Q(noFold(1.0f), noFold(kNegNan))), "a negatively-signed NaN divisor is non-zero too, so it takes the ordinary path and propagates rather than being swallowed");
+            t.IsTrue(std::isnan(PS2_VU_DIV_Q(noFold(kNegNan), noFold(1.0f))), "a negatively-signed NaN dividend propagates on the ordinary path, where no sign bit is read at all");
+            t.IsTrue(std::isnan(PS2_VU_SQRT_Q(noFold(kNegNan))), "a negatively-signed NaN radicand propagates through the root, because taking the magnitude first leaves a NaN a NaN");
+            t.IsTrue(std::isnan(PS2_VU_RSQRT_Q(noFold(1.0f), noFold(kNegNan))), "a negatively-signed NaN radicand propagates through the reciprocal root, which is the sign mirror of the row above it");
+            t.IsTrue(std::isnan(PS2_VU_RSQRT_Q(noFold(kNegNan), noFold(1.0f))), "a negatively-signed NaN dividend propagates through the reciprocal root as well as through the divide");
+
+            t.Equals(PS2_VU_DIV_Q(noFold(kInf), noFold(2.0f)), kInf, "an infinite dividend propagates on the ordinary path");
+            t.Equals(PS2_VU_DIV_Q(noFold(-kInf), noFold(2.0f)), -kInf, "a negative infinite dividend propagates with its sign");
+            t.Equals(PS2_VU_DIV_Q(noFold(1.0f), noFold(kInf)), 0.0f, "an infinite divisor is non-zero, so it takes the ordinary path and gives a zero");
+            t.IsFalse(std::signbit(PS2_VU_DIV_Q(noFold(1.0f), noFold(kInf))), "that zero is positive; equality cannot separate the two zeros, so the sign is asserted on its own");
+            t.Equals(PS2_VU_DIV_Q(noFold(1.0f), noFold(-kInf)), 0.0f, "a negative infinite divisor gives a zero too");
+            t.IsTrue(std::signbit(PS2_VU_DIV_Q(noFold(1.0f), noFold(-kInf))), "and that zero is negative, which is the mirror the equality above cannot see");
+            t.Equals(PS2_VU_SQRT_Q(noFold(kInf)), kInf, "an infinite radicand propagates through the root");
+            t.Equals(PS2_VU_SQRT_Q(noFold(-kInf)), kInf, "the magnitude is taken first, so a negative infinite radicand gives a positive infinity, which is the one input a clamp on the root would show up in");
+            t.Equals(PS2_VU_RSQRT_Q(noFold(kInf), noFold(4.0f)), kInf, "an infinite dividend propagates through the reciprocal root");
+            t.Equals(PS2_VU_RSQRT_Q(noFold(-kInf), noFold(4.0f)), -kInf, "with its sign, which is the mirror of the row above");
+            t.Equals(PS2_VU_RSQRT_Q(noFold(1.0f), noFold(kInf)), 0.0f, "an infinite radicand gives a zero through the reciprocal root");
+            t.IsFalse(std::signbit(PS2_VU_RSQRT_Q(noFold(1.0f), noFold(kInf))), "and that zero is positive, because the root is never negative");
+            t.Equals(PS2_VU_RSQRT_Q(noFold(1.0f), noFold(-kInf)), 0.0f, "a negative infinite radicand gives a zero through the reciprocal root too, because the magnitude is taken before the root");
+            t.IsFalse(std::signbit(PS2_VU_RSQRT_Q(noFold(1.0f), noFold(-kInf))), "and that zero is positive as well, which is the mirror the positive-infinity rows alone cannot see");
+
+            t.IsFalse(std::signbit(kNan), "the quiet NaN this test uses has a clear sign bit, which is the premise the two saturation rows below rest on");
+            t.Equals(PS2_VU_DIV_Q(noFold(kNan), noFold(0.0f)), kFmax, "the zero-divisor branch reads sign bits and never the dividend's value, so a NaN dividend saturates rather than propagating");
+            t.Equals(PS2_VU_DIV_Q(noFold(kNan), noFold(-0.0f)), -kFmax, "and a negative-zero divisor still flips it, because a quiet NaN's sign bit is clear");
+            t.Equals(PS2_VU_DIV_Q(noFold(kInf), noFold(0.0f)), kFmax, "an infinite dividend saturates on that branch too");
+            t.Equals(PS2_VU_DIV_Q(noFold(-kInf), noFold(0.0f)), -kFmax, "and a negative infinite dividend saturates negative, by the same sign-bit rule");
+            t.Equals(PS2_VU_RSQRT_Q(noFold(kNan), noFold(0.0f)), kFmax, "the reciprocal root inherits it: a NaN dividend over a zero radicand saturates");
+            t.Equals(PS2_VU_RSQRT_Q(noFold(kNan), noFold(-0.0f)), kFmax, "and stays positive for a negative-zero radicand, because the radicand's sign never reaches the divide");
+            t.Equals(PS2_VU_RSQRT_Q(noFold(-kInf), noFold(0.0f)), -kFmax, "a negative infinite dividend over a zero radicand saturates negative");
+
+            t.Equals(PS2_VU_DIV_Q(noFold(kFmax), noFold(0.5f)), kInf, "an ordinary quotient that overflows the float range still reaches an infinity");
+            t.Equals(PS2_VU_DIV_Q(noFold(-kFmax), noFold(0.5f)), -kInf, "and one that overflows negatively reaches a negative infinity, which a clamp on the low side alone would hide");
+            t.Equals(PS2_VU_RSQRT_Q(noFold(kFmax), noFold(1.0e-30f)), kInf, "an overflowing quotient reaches an infinity through the reciprocal root too, which a clamp on that path would hide");
+            t.Equals(PS2_VU_RSQRT_Q(noFold(-kFmax), noFold(1.0e-30f)), -kInf, "and on the negative side, which is the mirror the positive row alone cannot see");
+
+            t.Equals(PS2_VU_DIV_Q(noFold(1.0e-30f), noFold(1.0e20f)), 0.0f, "a quotient far below the smallest normal is left to reach zero, neither saturated nor clamped away from it");
+            t.IsFalse(std::signbit(PS2_VU_DIV_Q(noFold(1.0e-30f), noFold(1.0e20f))), "that zero is positive; equality cannot separate the two zeros, so the sign is asserted on its own");
+            t.Equals(PS2_VU_DIV_Q(noFold(-1.0e-30f), noFold(1.0e20f)), 0.0f, "a negative dividend vanishes the same way");
+            t.IsTrue(std::signbit(PS2_VU_DIV_Q(noFold(-1.0e-30f), noFold(1.0e20f))), "and keeps its sign, which is the mirror the equality above cannot see");
+            t.Equals(PS2_VU_RSQRT_Q(noFold(-1.0e-30f), noFold(kFmax)), 0.0f, "the reciprocal root vanishes the same way");
+            t.IsTrue(std::signbit(PS2_VU_RSQRT_Q(noFold(-1.0e-30f), noFold(kFmax))), "and keeps the dividend's sign there too");
         });
     });
 }
