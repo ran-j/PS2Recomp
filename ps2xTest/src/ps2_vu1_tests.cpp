@@ -1,7 +1,7 @@
 #include "MiniTest.h"
-#include "runtime/ps2_gif_arbiter.h"
-#include "runtime/ps2_gs_gpu.h"
-#include "runtime/ps2_gs_psmct32.h"
+#include "runtime/gs/ps2_gif_arbiter.h"
+#include "runtime/gs/gs_frontend.h"
+#include "runtime/gs/ps2_gs_psmct32.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_vu1.h"
 

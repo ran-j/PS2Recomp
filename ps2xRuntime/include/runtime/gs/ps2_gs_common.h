@@ -1,7 +1,7 @@
 #ifndef PS2_GS_COMMON_H
 #define PS2_GS_COMMON_H
 
-#include "ps2_gs_gpu.h"
+#include "runtime/gs/gs_types.h"
 #include <cstdint>
 
 namespace GSInternal
