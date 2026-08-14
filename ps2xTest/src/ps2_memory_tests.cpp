@@ -1541,6 +1541,213 @@ void register_ps2_memory_tests()
             t.IsTrue((mem.readIORegister(0x1000E010u) & 0x2u) != 0u, "VIF1 DMA completion should raise D_STAT channel bit");
         });
 
+        tc.Run("VIF1 DMA chain transfers a REF tag half so its UNPACK executes", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0, PS2_VU1_DATA_SIZE);
+
+            constexpr uint32_t kVif1Ch = 0x10009000u;
+            constexpr uint32_t kTag0 = 0x00029000u;
+            constexpr uint32_t kTag1 = kTag0 + 0x20u;
+            constexpr uint32_t kRefData = 0x00029200u;
+
+            uint8_t *rdram = mem.getRDRAM();
+
+            // REF (id 3): the referenced quadword lives at kRefData; the chain
+            // itself continues at kTag0+16, not at the referenced address.
+            writeDmaTag(rdram, kTag0, makeDmaTag(1u, 3u, kRefData, false));
+
+            // The tag's upper half is two real vifcodes: an implicit NOP (left
+            // zeroed by writeDmaTag) followed by an UNPACK V4-32 that claims the
+            // referenced quadword as its source data.
+            const uint32_t unpackCmd = makeVifCmd(0x6Cu, 1u, 0x0005u);
+            std::memcpy(rdram + kTag0 + 12u, &unpackCmd, sizeof(unpackCmd));
+
+            writeDmaTag(rdram, kTag1, makeDmaTag(0u, 7u, 0u, false)); // END, stops the chain.
+
+            const uint32_t p0 = 0x11111111u;
+            const uint32_t p1 = 0x22222222u;
+            const uint32_t p2 = 0x33333333u;
+            const uint32_t p3 = 0x44444444u;
+            std::memcpy(rdram + kRefData + 0u, &p0, sizeof(p0));
+            std::memcpy(rdram + kRefData + 4u, &p1, sizeof(p1));
+            std::memcpy(rdram + kRefData + 8u, &p2, sizeof(p2));
+            std::memcpy(rdram + kRefData + 12u, &p3, sizeof(p3));
+
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kTag0), "write VIF1 TADR should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x104u), "write VIF1 CHCR STR|CHAIN should succeed");
+
+            mem.processPendingTransfers();
+
+            const uint8_t *vu1 = mem.getVU1Data();
+            const uint32_t dest = 5u * 16u;
+            uint32_t x = 0, y = 0, z = 0, w = 0;
+            std::memcpy(&x, vu1 + dest + 0u, 4);
+            std::memcpy(&y, vu1 + dest + 4u, 4);
+            std::memcpy(&z, vu1 + dest + 8u, 4);
+            std::memcpy(&w, vu1 + dest + 12u, 4);
+            t.Equals(x, p0, "REF tag upper-half UNPACK should land the referenced quadword at VU1 addr 5 (x)");
+            t.Equals(y, p1, "REF tag upper-half UNPACK should land the referenced quadword at VU1 addr 5 (y)");
+            t.Equals(z, p2, "REF tag upper-half UNPACK should land the referenced quadword at VU1 addr 5 (z)");
+            t.Equals(w, p3, "REF tag upper-half UNPACK should land the referenced quadword at VU1 addr 5 (w)");
+        });
+
+        tc.Run("VIF1 DMA chain does not desync MSCAL after a REF tag with a non-empty half", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kVif1Ch = 0x10009000u;
+            constexpr uint32_t kTagA = 0x00029400u; // REF
+            constexpr uint32_t kTagB = kTagA + 0x10u; // END, immediately follows (REF does not jump)
+            constexpr uint32_t kPoisonData = 0x00029600u;
+
+            uint8_t *rdram = mem.getRDRAM();
+
+            // TagA: REF (id 3), qwc=1, referenced payload at kPoisonData. Its own
+            // upper half is a real NOP+UNPACK pair that claims the referenced
+            // quadword as UNPACK data, so the bytes at kPoisonData are never
+            // parsed as vifcodes when the tag half is transferred correctly.
+            writeDmaTag(rdram, kTagA, makeDmaTag(1u, 3u, kPoisonData, false));
+            const uint32_t unpackCmd = makeVifCmd(0x6Cu, 1u, 0x0000u);
+            std::memcpy(rdram + kTagA + 12u, &unpackCmd, sizeof(unpackCmd));
+
+            // TagB: END (id 7), qwc=0. Its upper half carries an implicit NOP
+            // followed by MSCAL imm=100 (startPC = 100*8 = 800).
+            writeDmaTag(rdram, kTagB, makeDmaTag(0u, 7u, 0u, false));
+            const uint32_t mscalCmd = makeVifCmd(0x14u, 0u, 100u);
+            std::memcpy(rdram + kTagB + 12u, &mscalCmd, sizeof(mscalCmd));
+
+            // If TagA's own half is dropped, these bytes become the start of the
+            // vifcode stream instead of UNPACK's source data: a V4-32 UNPACK
+            // requesting 4 vectors (64 bytes) that the short chain cannot supply,
+            // which runs the cursor past the end of the buffer.
+            const uint32_t poisonWord0 = makeVifCmd(0x6Cu, 4u, 0u);
+            std::memcpy(rdram + kPoisonData + 0u, &poisonWord0, sizeof(poisonWord0));
+            std::memset(rdram + kPoisonData + 4u, 0, 12u);
+
+            struct MscalCall
+            {
+                uint32_t startPC;
+                uint32_t top;
+                uint32_t itop;
+            };
+            std::vector<MscalCall> mscalCalls;
+            mem.setVu1MscalCallback([&](uint32_t startPC, uint32_t top, uint32_t itop)
+            {
+                mscalCalls.push_back({startPC, top, itop});
+            });
+
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kTagA), "write VIF1 TADR should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x104u), "write VIF1 CHCR STR|CHAIN should succeed");
+
+            mem.processPendingTransfers();
+
+            t.Equals(mscalCalls.size(), static_cast<size_t>(1u), "MSCAL after a transferred REF half should fire exactly once");
+            if (!mscalCalls.empty())
+            {
+                t.Equals(mscalCalls[0].startPC, 800u, "MSCAL imm=100 should compute startPC=800");
+            }
+        });
+
+        tc.Run("VIF1 DIRECT continuation sources image data from its own payload, not intervening vifcodes", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            std::vector<std::vector<uint8_t>> captured;
+            mem.setGifPacketCallback([&](const uint8_t *data, uint32_t sizeBytes)
+            {
+                captured.emplace_back(data, data + sizeBytes);
+            });
+
+            // Packet 1: DIRECT with a GIF IMAGE tag claiming 3 quadwords total,
+            // but only 1 inline quadword follows -> arms a 2-quadword pending
+            // continuation. Followed by a real NOP vifcode.
+            const uint32_t directCmd1 = makeVifCmd(0x50u, 0u, 2u); // DIRECT, 2 QW payload
+            const std::vector<uint8_t> inlineQw(16u, 0xA0u);
+            const uint32_t nopCmd = makeVifCmd(0x00u, 0u, 0x1234u);
+
+            std::vector<uint8_t> packet1;
+            appendU32(packet1, directCmd1);
+            appendU64(packet1, makeGifTag(3u, GIF_FMT_IMAGE, 0u)); // tag lo: nloop=3, flg=IMAGE
+            appendU64(packet1, 0u);                                // tag hi: unused when nreg=0
+            packet1.insert(packet1.end(), inlineQw.begin(), inlineQw.end());
+            appendU32(packet1, nopCmd);
+
+            mem.processVIF1Data(packet1.data(), static_cast<uint32_t>(packet1.size()));
+            t.Equals(mem.vif1_regs.code, nopCmd,
+                     "the NOP between an IMAGE DIRECT and its continuation should execute as a vifcode, not be swallowed as image data");
+
+            // Packet 2: the continuation DIRECT. Its 3-quadword payload supplies
+            // the 2 remaining pending image quadwords up front, then 1 quadword
+            // of its own new content.
+            std::vector<uint8_t> qw0(16u, 0xC1u);
+            std::vector<uint8_t> qw1(16u, 0xC2u);
+            std::vector<uint8_t> qw2(16u, 0xC3u);
+            std::vector<uint8_t> packet2;
+            const uint32_t directCmd2 = makeVifCmd(0x50u, 0u, 3u);
+            appendU32(packet2, directCmd2);
+            packet2.insert(packet2.end(), qw0.begin(), qw0.end());
+            packet2.insert(packet2.end(), qw1.begin(), qw1.end());
+            packet2.insert(packet2.end(), qw2.begin(), qw2.end());
+
+            mem.processVIF1Data(packet2.data(), static_cast<uint32_t>(packet2.size()));
+
+            t.Equals(captured.size(), static_cast<size_t>(3u),
+                     "DIRECT#1, the image continuation, and the continuation's own remainder should each emit one GIF packet");
+            if (captured.size() >= 2)
+            {
+                t.Equals(captured[1].size(), static_cast<size_t>(48u), "continuation image packet should be a synthetic tag plus 2 QW");
+                bool continuationOk = captured[1].size() == 48u;
+                if (continuationOk)
+                {
+                    continuationOk = std::equal(qw0.begin(), qw0.end(), captured[1].begin() + 16) &&
+                                      std::equal(qw1.begin(), qw1.end(), captured[1].begin() + 32);
+                }
+                t.IsTrue(continuationOk, "continuation image quadwords should come from the continuation DIRECT's own payload (qw0, qw1)");
+            }
+            if (captured.size() >= 3)
+            {
+                t.IsTrue(captured[2].size() == 16u && std::equal(qw2.begin(), qw2.end(), captured[2].begin()),
+                         "leftover payload after the continuation is satisfied should submit as the DIRECT's own content (qw2)");
+            }
+        });
+
+        tc.Run("VIF1 DMA chain walks past 4096 tags to the real end of a longer chain", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kVif1Ch = 0x10009000u;
+            constexpr uint32_t kChainBase = 0x00030000u;
+            constexpr uint32_t kTagCount = 4200u; // > 4096, comfortably under 65536
+
+            uint8_t *rdram = mem.getRDRAM();
+
+            for (uint32_t i = 0; i < kTagCount - 1u; ++i)
+            {
+                // CNT (id 1), qwc=0: the chain continues immediately at the next tag.
+                writeDmaTag(rdram, kChainBase + i * 16u, makeDmaTag(0u, 1u, 0u, false));
+            }
+
+            // Final tag: END (id 7) with an ITOP vifcode in its upper half. Only
+            // reachable if the walker does not stop short at the old 4096 cap.
+            const uint32_t lastTagAddr = kChainBase + (kTagCount - 1u) * 16u;
+            writeDmaTag(rdram, lastTagAddr, makeDmaTag(0u, 7u, 0u, false));
+            const uint32_t itopCmd = makeVifCmd(0x04u, 0u, 0x0077u);
+            std::memcpy(rdram + lastTagAddr + 12u, &itopCmd, sizeof(itopCmd));
+
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kChainBase), "write VIF1 TADR should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x104u), "write VIF1 CHCR STR|CHAIN should succeed");
+
+            mem.processPendingTransfers();
+
+            t.Equals(mem.vif1_regs.itops, 0x77u,
+                     "a chain longer than the old 4096-tag cap should still reach and process its final tag");
+        });
+
         tc.Run("GIF DMA chain CALL sources payload from TADR+16", [](TestCase &t)
         {
             PS2Memory mem;
@@ -1880,7 +2087,7 @@ void register_ps2_memory_tests()
             t.IsTrue(imageOk, "VIF1 DIRECT image should update GS VRAM through GIF path2");
         });
 
-        tc.Run("VIF1 DIRECT image tag can continue with raw image qwords", [](TestCase &t)
+        tc.Run("VIF1 DIRECT image tag continues via a follow-up DIRECT", [](TestCase &t)
         {
             PS2Memory mem;
             t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
@@ -1905,10 +2112,14 @@ void register_ps2_memory_tests()
             gs.writeRegister(GS_REG_TRXREG, (4ull << 0) | (1ull << 32));
             gs.writeRegister(GS_REG_TRXDIR, 0ull);
 
+            // The image data continues in a second DIRECT, not as unwrapped raw
+            // quadwords: PATH2 image continuation is always carried by another
+            // DIRECT/DIRECTHL vifcode, the same way a real VIF chain would emit it.
             std::vector<uint8_t> packet;
             appendU32(packet, makeVifCmd(0x50u, 0u, 1u)); // DIRECT 1 QW payload: GIF IMAGE tag only.
             appendU64(packet, makeGifTag(1u, GIF_FMT_IMAGE, 0u, true));
             appendU64(packet, 0ull);
+            appendU32(packet, makeVifCmd(0x50u, 0u, 1u)); // continuation DIRECT: 1 QW of image data.
             for (uint32_t i = 0; i < 16u; ++i)
             {
                 packet.push_back(static_cast<uint8_t>(0xA0u + i));
@@ -1930,7 +2141,7 @@ void register_ps2_memory_tests()
                     }
                 }
             }
-            t.IsTrue(imageOk, "raw qwords after a DIRECT image tag should continue the PATH2 image upload");
+            t.IsTrue(imageOk, "a follow-up DIRECT after a DIRECT image tag should continue the PATH2 image upload");
         });
 
         tc.Run("unaligned accesses throw", [](TestCase &t)
