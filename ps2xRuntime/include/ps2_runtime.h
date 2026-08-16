@@ -148,6 +148,13 @@ struct alignas(16) R5900Context
         // Initialize VU0 registers
         vu0_q = 1.0f; // Q register usually initialized to 1.0
 
+        // vf0 is hardwired on real VU0 hardware to (x,y,z,w) = (0,0,0,1) and reads
+        // back that constant regardless of writes; it is the vector-unit analogue of
+        // GPR r0. memset above leaves it (0,0,0,0), so w reads 0 instead of 1. Pin it
+        // here so every context this runtime constructs starts hardware-correct.
+        // (_mm_set_ps arguments are in (w, z, y, x) order, so this is x=0,y=0,z=0,w=1.)
+        vu0_vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
+
         // Reset COP0 registers
         cop0_random = 47; // Start at maximum value
         // cop0_status = 0x400000; // BEV set, ERL clear, kernel mode
