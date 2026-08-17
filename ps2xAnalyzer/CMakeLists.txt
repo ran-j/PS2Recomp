@@ -27,8 +27,8 @@ add_library(ps2_analyzer_lib STATIC ${PS2ANALYZER_LIB_SOURCES})
 
 target_include_directories(ps2_analyzer_lib PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/ps2xRecomp/include
-    ${CMAKE_SOURCE_DIR}/ps2xRuntime/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ps2xRecomp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ps2xRuntime/include
 )
 
 target_link_libraries(ps2_analyzer_lib PUBLIC
@@ -50,7 +50,7 @@ install(TARGETS ps2_analyzer ps2_analyzer_lib
     ARCHIVE DESTINATION lib
 )
 
-include("${CMAKE_SOURCE_DIR}/ps2xRuntime/cmake/ReleaseMode.cmake")
+include("${CMAKE_CURRENT_SOURCE_DIR}/../ps2xRuntime/cmake/ReleaseMode.cmake")
 
 if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
     EnableFastReleaseMode(ps2_analyzer_lib)
