@@ -552,6 +552,11 @@ if(PS2X_IS_VITA)
     endif()
 endif()
 
+# Every configuration, not just Release: SSE4.1 is required to compile, not an
+# optimisation. PUBLIC so recompiled game code linking against ps2_runtime
+# inherits it -- that code is where most of the SSE4.1 intrinsics actually are.
+EnableX86SimdBaseline(ps2_runtime)
+
 if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
     EnableFastReleaseMode(ps2_runtime)
     EnableFastReleaseMode(ps2EntryRunner)
