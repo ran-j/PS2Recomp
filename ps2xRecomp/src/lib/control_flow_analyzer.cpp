@@ -385,7 +385,14 @@ namespace ps2recomp
                         }
                     }
                 }
-                if (!foundTable)
+                // Only an unresolved computed *jump* can land on an arbitrary
+                // instruction of this function and therefore force every address to
+                // become an entry point. JALR is a call: it transfers control to
+                // another function and comes back to the instruction after the delay
+                // slot, which is already queued as a resume target above. Treating a
+                // call like a jump here promotes the whole function for what is
+                // usually just a function pointer or virtual dispatch.
+                if (!foundTable && jrInst->function != SPECIAL_JALR)
                 {
                     needsIndirectFallback = true;
                 }
