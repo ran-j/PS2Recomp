@@ -135,6 +135,23 @@ namespace ps2recomp
 
         for (const auto &inst : instructions)
         {
+            // A syscall can hand control back to the scheduler before the
+            // instruction after it runs: SetSyscall lets the guest install its
+            // own handler, and dispatchSyscallOverride then suspends the
+            // calling thread and queues that handler as a GuestInvocation. When
+            // the invocation completes, the scheduler resumes the parent thread
+            // at the address the generated code stored before calling
+            // handleSyscall -- i.e. right here. Without an entry point there,
+            // EeScheduler's hasFunction() check fails and the thread is made
+            // dormant instead of resumed.
+            //
+            // Note the offset is +4, not the +8 used for JAL/JALR: syscall has
+            // no delay slot.
+            if (inst.opcode == OPCODE_SPECIAL && inst.function == SPECIAL_SYSCALL)
+            {
+                queueResumeEntryTarget(inst.address + 4u);
+            }
+
             bool isStaticJump = (inst.opcode == OPCODE_J || inst.opcode == OPCODE_JAL);
             if (inst.isBranch && inst.opcode != OPCODE_J && inst.opcode != OPCODE_JAL)
             {

@@ -144,6 +144,17 @@ static Instruction makeJr(uint32_t address, uint8_t rs)
     return inst;
 }
 
+static Instruction makeSyscall(uint32_t address)
+{
+    Instruction inst{};
+    inst.address = address;
+    inst.opcode = OPCODE_SPECIAL;
+    inst.function = SPECIAL_SYSCALL;
+    inst.hasDelaySlot = false;
+    inst.raw = (OPCODE_SPECIAL << 26) | SPECIAL_SYSCALL;
+    return inst;
+}
+
 static void printGeneratedCode(const std::string& name, const std::string& code)
 {
 #ifdef PRINT_GENERATED_CODE
@@ -565,6 +576,40 @@ void register_code_generator_tests()
 
         t.IsFalse(analysis.jumpTableTargets.contains(0x3204u),
                   "unresolved JALR should not pretend it has a resolved local jump table");
+    });
+
+    tc.Run("syscall marks the following instruction as a resume entry", [](TestCase &t) {
+        // Shape of a real SDK syscall wrapper:
+        //   addiu $v1, $zero, <num> ; syscall ; jr $ra ; <delay slot>
+        // SetSyscall lets a guest install its own handler for a syscall number,
+        // and the runtime then suspends the calling thread to run that handler
+        // as a separate invocation. The parent thread's saved pc is the address
+        // after the syscall, so the scheduler needs an entry point there to
+        // resume it -- otherwise the thread is made dormant and silently dies.
+        Function func;
+        func.name = "syscall_wrapper";
+        func.start = 0x4000;
+        func.end = 0x4010;
+        func.isRecompiled = true;
+        func.isStub = false;
+
+        std::vector<Instruction> instructions{
+            makeAddiu(0x4000, 3, 0, 0x83),
+            makeSyscall(0x4004),
+            makeJr(0x4008, 31),
+            makeNop(0x400C),
+        };
+
+        CodeGenerator gen({}, {});
+        CodeGenerator::AnalysisResult analysis = gen.collectInternalBranchTargets(func, instructions);
+
+        // +4, not +8: syscall has no delay slot.
+        t.IsTrue(analysis.resumeEntryPoints.contains(0x4008u),
+                 "syscall should mark the next instruction as resumable");
+        t.IsTrue(analysis.entryPoints.contains(0x4008u),
+                 "syscall resume pc should emit a label in the owner");
+        t.IsFalse(analysis.resumeEntryPoints.contains(0x400Cu),
+                  "syscall must not claim a delay slot it does not have");
     });
 
     tc.Run("resume entry targets emit a top-level pc switch in the owner wrapper", [](TestCase &t) {
