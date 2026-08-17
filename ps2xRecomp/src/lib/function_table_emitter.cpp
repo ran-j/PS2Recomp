@@ -95,9 +95,25 @@ namespace ps2recomp
             }
             if (entryTarget.empty())
             {
-                throw std::runtime_error("No entry function name available for registration.");
+                // Not every toolchain points e_entry at code. Metrowerks CodeWarrior
+                // for PS2 emits a crt0 data table there, so no function covers the
+                // address and no name resolves. Registering a synthesized name would
+                // reference a definition that was never emitted, so skip the entry
+                // instead - the real start address comes from configuration - and
+                // keep emitting the rest of the table rather than aborting after the
+                // per-function sources were already written.
+                if (cg.m_reporter)
+                {
+                    std::ostringstream oss;
+                    oss << "No function covers the ELF entry point; skipping its table registration. "
+                        << "Set the entry explicitly if the runtime should start here.";
+                    cg.m_reporter->warning("function-table", oss.str());
+                }
             }
-            addEntry(cg.m_bootstrapInfo.entry, entryTarget);
+            else
+            {
+                addEntry(cg.m_bootstrapInfo.entry, entryTarget);
+            }
         }
 
         for (const auto &[address, name] : normalFunctions)
