@@ -440,6 +440,11 @@ namespace ps2_syscalls
             parent.r[2] = completed.r[2];
         };
         scheduler.invokeCurrent(std::move(invocation));
+        // The invocation is queued and the caller must not fall through to the
+        // built-in handler. Falling off the end of a non-void function here was
+        // undefined behaviour: whatever happened to be in the return register
+        // decided whether the built-in ran as well as the guest's override.
+        return true;
     }
 
     static bool tryResolveGuestSyscallMirrorAddr(uint32_t syscallIndex, uint32_t &guestAddr)
