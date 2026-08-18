@@ -135,6 +135,14 @@ namespace ps2recomp
 
         for (const auto &inst : instructions)
         {
+            // A guest-installed syscall handler runs as a separate invocation,
+            // so the scheduler resumes this thread at syscall+4 and needs an
+            // entry point there. +4, not +8: syscall has no delay slot.
+            if (inst.opcode == OPCODE_SPECIAL && inst.function == SPECIAL_SYSCALL)
+            {
+                queueResumeEntryTarget(inst.address + 4u);
+            }
+
             bool isStaticJump = (inst.opcode == OPCODE_J || inst.opcode == OPCODE_JAL);
             if (inst.isBranch && inst.opcode != OPCODE_J && inst.opcode != OPCODE_JAL)
             {
