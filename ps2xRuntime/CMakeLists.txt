@@ -552,6 +552,9 @@ if(PS2X_IS_VITA)
     endif()
 endif()
 
+# PUBLIC, so recompiled game code linking against ps2_runtime inherits it.
+EnableX86SimdBaseline(ps2_runtime)
+
 if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
     EnableFastReleaseMode(ps2_runtime)
     EnableFastReleaseMode(ps2EntryRunner)
