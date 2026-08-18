@@ -491,7 +491,15 @@ PS2Runtime::PS2Runtime()
     }
 #endif
 
-    std::memset(&m_cpuContext, 0, sizeof(m_cpuContext));
+    // Assign a default-constructed context rather than memset-ing this one.
+    // R5900Context's constructor already zeroes itself and then applies the
+    // architectural reset values on top -- COP0 Status, PRId, Random. A raw
+    // memset here silently threw those away, leaving Status at 0 for the main
+    // thread while every thread created later, which goes through
+    // `target->context = R5900Context{}` in EeScheduler::startThread, got the
+    // correct values. Guest code reads Status.IE to decide whether interrupts
+    // are enabled, so the main thread believed they were permanently off.
+    m_cpuContext = R5900Context{};
 
     // R0 is always zero in MIPS
     m_cpuContext.r[0] = _mm_set1_epi32(0);

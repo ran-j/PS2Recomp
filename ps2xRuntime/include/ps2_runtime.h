@@ -150,10 +150,33 @@ struct alignas(16) R5900Context
 
         // Reset COP0 registers
         cop0_random = 47; // Start at maximum value
-        // cop0_status = 0x400000; // BEV set, ERL clear, kernel mode
-        // 0x00400000 = BEV (Boot Exception Vectors).
-        // 0x00000000 = Normal mode (after BIOS handoff).
-        cop0_status = 0x00000000;
+        // Status as the EE kernel leaves it when it hands control to the game,
+        // which is the state recompiled code starts in -- we never execute the
+        // boot ROM that would otherwise set this up.
+        //
+        // Both interrupt-enable bits matter, and they are not the same bit:
+        //
+        //   IE  (bit 0)     the architectural MIPS interrupt enable. The kernel
+        //                   sets it once during boot and it normally stays set.
+        //   EIE (bit 16)    the EE-specific enable that the `ei` and `di`
+        //                   instructions toggle.
+        //
+        // Interrupts are only really on when both are set, and guest code reads
+        // them separately. libkernel's StartThread, for instance, opens with
+        // `mfc0 Status; xori 1; andi 1` and refuses to run when IE is clear --
+        // that is its "you must call iStartThread from an interrupt handler"
+        // guard. Leaving Status at zero made that guard fire forever, so every
+        // StartThread returned -1 and any game that creates a thread stalled
+        // with no diagnostic.
+        //
+        // EIE matters for the matching reason: DIntr reports whether it was set
+        // so the caller knows whether to pair it with an EIntr. Starting at zero
+        // makes DIntr always answer "already disabled" and the re-enable never
+        // happens.
+        //
+        // BEV (0x00400000) is deliberately not set: that selects the boot
+        // exception vectors, which is the pre-handoff state, not this one.
+        cop0_status = 0x00010001; // EIE | IE
         cop0_prid = 0x00002e20; // CPU ID for R5900
 
         in_delay_slot = false;
