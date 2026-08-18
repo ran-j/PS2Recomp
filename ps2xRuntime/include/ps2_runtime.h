@@ -150,10 +150,10 @@ struct alignas(16) R5900Context
 
         // Reset COP0 registers
         cop0_random = 47; // Start at maximum value
-        // cop0_status = 0x400000; // BEV set, ERL clear, kernel mode
-        // 0x00400000 = BEV (Boot Exception Vectors).
-        // 0x00000000 = Normal mode (after BIOS handoff).
-        cop0_status = 0x00000000;
+        // Status as the EE kernel leaves it at handoff. IE (bit 0) and EIE
+        // (bit 16) are separate enables and guest code reads both; libkernel's
+        // StartThread refuses to run while IE is clear.
+        cop0_status = 0x00010001; // EIE | IE
         cop0_prid = 0x00002e20; // CPU ID for R5900
 
         in_delay_slot = false;
