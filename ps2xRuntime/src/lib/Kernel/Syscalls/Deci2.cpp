@@ -2,6 +2,8 @@
 #include "Common.h"
 #include "ps2_runtime.h"
 
+#include <cstdlib>
+
 namespace
 {
     struct Deci2Session
@@ -62,11 +64,37 @@ namespace
         return text;
     }
 
+    // Line cap for DECI2 text output. PS2X_DECI2_LOG_LIMIT overrides it;
+    // 0 means unlimited, for diffing a full boot trace against a reference.
+    static uint32_t deci2TextLogLimit()
+    {
+        static const uint32_t limit = []() -> uint32_t
+        {
+            constexpr uint32_t kDefaultMaxDeci2TextLogs = 256u;
+            const char *env = std::getenv("PS2X_DECI2_LOG_LIMIT");
+            if (!env || *env == '\0')
+            {
+                return kDefaultMaxDeci2TextLogs;
+            }
+
+            char *parseEnd = nullptr;
+            const unsigned long parsed = std::strtoul(env, &parseEnd, 10);
+            if (parseEnd == env || *parseEnd != '\0' || parsed > 0xFFFFFFFFul)
+            {
+                return kDefaultMaxDeci2TextLogs;
+            }
+
+            return static_cast<uint32_t>(parsed);
+        }();
+
+        return limit;
+    }
+
     static void logDeci2Text(const char *prefix, const std::string &text)
     {
-        constexpr uint32_t kMaxDeci2TextLogs = 256u;
+        const uint32_t maxDeci2TextLogs = deci2TextLogLimit();
         const uint32_t logIndex = g_deci2LogCount.fetch_add(1u, std::memory_order_relaxed);
-        if (logIndex >= kMaxDeci2TextLogs)
+        if (maxDeci2TextLogs != 0u && logIndex >= maxDeci2TextLogs)
         {
             return;
         }
