@@ -252,7 +252,12 @@ void EeScheduler::run()
             continue;
         }
 
-        if (!m_pendingInvocations.empty())
+        // Invocations nest onto the running thread, so a callback storm stacks
+        // them faster than they retire -- DQ8's movie streaming reached depth 13
+        // and exhausted the stack pool. Past this the rest simply stay queued.
+        constexpr size_t kMaxInvocationDepth = 4u;
+        if (!m_pendingInvocations.empty() &&
+            running->invocations.size() < kMaxInvocationDepth)
         {
             GuestInvocation invocation = std::move(m_pendingInvocations.front());
             m_pendingInvocations.pop_front();
