@@ -1037,6 +1037,9 @@ void PS2Runtime::configureIoPathsFromElf(const std::string &elfPath)
 
 namespace
 {
+    std::atomic<PS2Runtime::FunctionRegionResolver> g_functionRegionResolver{nullptr};
+    std::atomic<void *> g_functionRegionResolverUserData{nullptr};
+
     bool generatedFunctionTableSlot(uint32_t address, uint32_t &slot)
     {
         if ((address & 3u) != 0u || g_ps2RecompiledFunctionTableSlotCount == 0u)
@@ -1053,21 +1056,67 @@ namespace
         slot = offset >> 2;
         return slot < g_ps2RecompiledFunctionTableSlotCount;
     }
+
+    // Generated table first, then the host's region resolver for overlaid
+    // code. Returns a pointer into the owning table so replaceFunction can
+    // patch overlay entries too.
+    PS2Runtime::RecompiledFunction *functionTableSlotPointer(uint32_t address)
+    {
+        uint32_t slot = 0u;
+        if (generatedFunctionTableSlot(address, slot))
+        {
+            return &g_ps2RecompiledFunctionTable[slot];
+        }
+
+        if ((address & 3u) != 0u)
+        {
+            return nullptr;
+        }
+
+        const PS2Runtime::FunctionRegionResolver resolver =
+            g_functionRegionResolver.load(std::memory_order_acquire);
+        if (!resolver)
+        {
+            return nullptr;
+        }
+
+        PS2Runtime::FunctionRegion *region =
+            resolver(address, g_functionRegionResolverUserData.load(std::memory_order_acquire));
+        if (!region || !region->slots || address < region->base || address >= region->end)
+        {
+            return nullptr;
+        }
+
+        const uint32_t regionSlot = (address - region->base) >> 2;
+        if (regionSlot >= region->slotCount)
+        {
+            return nullptr;
+        }
+
+        return &region->slots[regionSlot];
+    }
+}
+
+void PS2Runtime::setFunctionRegionResolver(FunctionRegionResolver resolver, void *userData)
+{
+    g_functionRegionResolverUserData.store(userData, std::memory_order_release);
+    g_functionRegionResolver.store(resolver, std::memory_order_release);
 }
 
 bool PS2Runtime::replaceFunction(uint32_t address, RecompiledFunction func)
 {
-    uint32_t slot = 0u;
-    if (!generatedFunctionTableSlot(address, slot))
+    RecompiledFunction *slot = functionTableSlotPointer(address);
+    if (!slot)
     {
         std::cerr << "[function-table] cannot replace guest PC 0x" << std::hex << address
                   << ": outside generated dense table [0x" << g_ps2RecompiledFunctionTableBase
                   << ", 0x" << g_ps2RecompiledFunctionTableEnd << ")"
+                  << " and not claimed by a function-region resolver"
                   << std::dec << std::endl;
         return false;
     }
 
-    g_ps2RecompiledFunctionTable[slot] = func;
+    *slot = func;
     return true;
 }
 
@@ -1078,8 +1127,8 @@ bool PS2Runtime::registerFunction(uint32_t address, RecompiledFunction func)
 
 bool PS2Runtime::hasFunction(uint32_t address) const
 {
-    uint32_t slot = 0u;
-    return generatedFunctionTableSlot(address, slot) && g_ps2RecompiledFunctionTable[slot] != nullptr;
+    const RecompiledFunction *slot = functionTableSlotPointer(address);
+    return slot != nullptr && *slot != nullptr;
 }
 
 const char *describeGuestBranchKind(PS2Runtime::GuestBranchKind kind)
@@ -1105,13 +1154,11 @@ PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
 {
     pushDispatchPc(address);
 
-    uint32_t slot = 0u;
-    if (generatedFunctionTableSlot(address, slot))
+    if (const RecompiledFunction *slot = functionTableSlotPointer(address))
     {
-        RecompiledFunction fn = g_ps2RecompiledFunctionTable[slot];
-        if (fn != nullptr)
+        if (*slot != nullptr)
         {
-            return fn;
+            return *slot;
         }
     }
 
@@ -1935,10 +1982,27 @@ uint32_t PS2Runtime::guestHeapEnd() const
     return m_guestHeapConfigured ? m_guestHeapEnd : m_guestHeapSuggestedBase;
 }
 
+void PS2Runtime::setGuestHeapCeiling(uint32_t ceiling)
+{
+    std::lock_guard<std::mutex> lock(m_guestHeapMutex);
+    m_guestHeapCeiling = ceiling;
+}
+
+uint32_t PS2Runtime::guestHeapCeiling() const
+{
+    std::lock_guard<std::mutex> lock(m_guestHeapMutex);
+    return m_guestHeapCeiling;
+}
+
 uint32_t PS2Runtime::guestHeapLimit() const
 {
     std::lock_guard<std::mutex> lock(m_guestHeapMutex);
     return m_guestHeapConfigured ? m_guestHeapLimit : m_guestHeapSuggestedBase;
+}
+
+uint32_t PS2Runtime::guestHeapHardLimit() const
+{
+    return std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
 }
 
 uint32_t PS2Runtime::reserveAsyncCallbackStack(uint32_t size, uint32_t alignment)

@@ -578,6 +578,14 @@ namespace ps2_syscalls
 
         if (runtime)
         {
+            // A guest running its own allocator is describing *its* heap;
+            // moving the runtime arena there would collide with it.
+            if (runtime->guestHeapCeiling() != 0u)
+            {
+                setReturnU32(ctx, heapBase);
+                return;
+            }
+
             runtime->configureGuestHeap(heapBase, heapLimit);
 
             PS2_IF_AGRESSIVE_LOGS({
@@ -604,9 +612,13 @@ namespace ps2_syscalls
 
         static constexpr uint32_t kDefaultGuestHeapEnd = 0x01F00000u;
 
-        const uint32_t ret = runtime
-                                 ? runtime->guestHeapLimit()
-                                 : kDefaultGuestHeapEnd;
+        // A guest running its own allocator grows right up to this value.
+        uint32_t ret = kDefaultGuestHeapEnd;
+        if (runtime)
+        {
+            const uint32_t ceiling = runtime->guestHeapCeiling();
+            ret = (ceiling != 0u) ? ceiling : runtime->guestHeapLimit();
+        }
 
         setReturnU32(ctx, ret);
     }

@@ -345,6 +345,25 @@ public:
         SkipCallDebug = 3,
     };
 
+    // Overlaid guest code: one dense table per streamed-in image, so the same
+    // arena address can mean different code depending on which is resident.
+    // The host owns the images and answers "which table covers this address?".
+    struct FunctionRegion
+    {
+        uint32_t base = 0u;            // first guest address covered
+        uint32_t end = 0u;             // one past the last covered address
+        uint32_t slotCount = 0u;       // entries in `slots`
+        RecompiledFunction *slots = nullptr; // dense, indexed (addr - base) >> 2
+    };
+
+    // Return the region covering `address`, or nullptr. Called on the guest
+    // thread from dispatch, so it must be cheap and must not block.
+    using FunctionRegionResolver = FunctionRegion *(*)(uint32_t address, void *userData);
+
+    // Global rather than per-instance to match the generated table it extends.
+    // Passing nullptr removes the resolver.
+    static void setFunctionRegionResolver(FunctionRegionResolver resolver, void *userData);
+
     bool replaceFunction(uint32_t address, RecompiledFunction func);
     // TODO remove this later need to update all tests
     bool registerFunction(uint32_t address, RecompiledFunction func);
@@ -393,8 +412,18 @@ public:
     uint32_t guestRealloc(uint32_t guestAddr, uint32_t newSize, uint32_t alignment = 16u);
     void guestFree(uint32_t guestAddr);
     uint32_t guestHeapBase() const;
+
+    // Ceiling for a guest that grows its own heap through sbrk/EndOfHeap.
+    // Zero (default) makes EndOfHeap report guestHeapLimit(), as before.
+    void setGuestHeapCeiling(uint32_t ceiling);
+    uint32_t guestHeapCeiling() const;
+
     uint32_t guestHeapEnd() const;
     uint32_t guestHeapLimit() const;
+
+    // Highest address any heap may reach. Unlike guestHeapLimit() this is
+    // valid before the heap is configured, so a caller can split the range.
+    uint32_t guestHeapHardLimit() const;
     uint32_t reserveAsyncCallbackStack(uint32_t size, uint32_t alignment = 16u);
 
     void drainCompletedDmacHandlers(uint8_t *rdram);
@@ -515,6 +544,7 @@ private:
     uint32_t m_guestHeapBase = 0x00100000u;
     uint32_t m_guestHeapEnd = 0x00100000u;
     uint32_t m_guestHeapLimit = PS2_RAM_SIZE;
+    uint32_t m_guestHeapCeiling = 0u;
     uint32_t m_guestHeapSuggestedBase = 0x00100000u;
     bool m_guestHeapConfigured = false;
     uint32_t m_asyncCallbackStackFloor = 0x01F00000u;
