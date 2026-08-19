@@ -1,4 +1,5 @@
 #include "ps2recomp/elf_parser.h"
+#include "ps2recomp/instructions.h"
 #include "ps2recomp/recompiler_reporter.h"
 #include "ps2recomp/types.h"
 #include <iostream>
@@ -116,6 +117,8 @@ namespace
 
 namespace
 {
+    using namespace ps2recomp;
+
     bool HasDwarfSections(const ELFIO::elfio &elf)
     {
         for (ELFIO::Elf_Half i = 0; i < elf.sections.size(); ++i)
@@ -453,7 +456,328 @@ namespace
         }
     }
 
-    void ScanJalTargetsFallback(ps2recomp::ElfParser *parser, std::vector<ps2recomp::Function> &outFunctions)
+    bool ReadSectionWord(const ps2recomp::Section &section, uint32_t offset, uint32_t &outWord)
+    {
+        if (!section.data || offset > section.size || section.size - offset < sizeof(uint32_t))
+        {
+            return false;
+        }
+
+        std::memcpy(&outWord, section.data + offset, sizeof(uint32_t));
+        return true;
+    }
+
+    bool LooksLikeCallableEntry(const std::vector<ps2recomp::Section> &sections, uint32_t address, bool allowLeafThunk)
+    {
+        if ((address % MIPS_INSTRUCTION_SIZE) != 0)
+        {
+            return false;
+        }
+
+        const ps2recomp::Section *section = FindCodeSectionByAddress(sections, address);
+        if (!section || !section->data)
+        {
+            return false;
+        }
+
+        const uint32_t startOffset = address - section->address;
+        constexpr uint32_t kProbeWords = 8;
+
+        for (uint32_t index = 0; index < kProbeWords; ++index)
+        {
+            uint32_t raw = 0;
+            if (!ReadSectionWord(*section, startOffset + (index * MIPS_INSTRUCTION_SIZE), raw))
+            {
+                break;
+            }
+
+            const uint32_t opcode = OPCODE(raw);
+            const uint32_t rs = RS(raw);
+            const uint32_t rt = RT(raw);
+            const uint16_t immediate = static_cast<uint16_t>(IMMEDIATE(raw));
+
+            // Non-leaf functions normally allocate their stack frame immediately.
+            // Accept ADDIU/DADDIU $sp,$sp,-N in the first few instructions.
+            if (index < 4 &&
+                (opcode == OPCODE_ADDIU || opcode == OPCODE_DADDIU) &&
+                rs == GPR_SP && rt == GPR_SP &&
+                (immediate & MIPS_IMMEDIATE_SIGN_BIT) != 0)
+            {
+                return true;
+            }
+
+            // Some prologues set up GP before saving RA, so also recognize the
+            // common SW/SD/SQ $ra,offset($sp) forms in the entry window.
+            if ((opcode == OPCODE_SW || opcode == OPCODE_SD || opcode == OPCODE_SQ) &&
+                rs == GPR_SP && rt == GPR_RA)
+            {
+                return true;
+            }
+
+            // Leaf callbacks and vtable thunks often have no stack frame at all.
+            if (allowLeafThunk &&
+                opcode == OPCODE_SPECIAL && FUNCTION(raw) == SPECIAL_JR && rs == GPR_RA)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    bool WritesGpr(uint32_t raw, uint32_t reg)
+    {
+        if (reg == GPR_ZERO)
+        {
+            return false;
+        }
+
+        const uint32_t opcode = OPCODE(raw);
+        const uint32_t rt = RT(raw);
+        const uint32_t rd = RD(raw);
+
+        if (opcode == OPCODE_SPECIAL || opcode == OPCODE_MMI)
+        {
+            return rd == reg;
+        }
+
+        if (opcode == OPCODE_JAL)
+        {
+            return reg == GPR_RA;
+        }
+
+        bool writesRt = false;
+        switch (opcode)
+        {
+        case OPCODE_ADDI:
+        case OPCODE_ADDIU:
+        case OPCODE_SLTI:
+        case OPCODE_SLTIU:
+        case OPCODE_ANDI:
+        case OPCODE_ORI:
+        case OPCODE_XORI:
+        case OPCODE_LUI:
+        case OPCODE_DADDI:
+        case OPCODE_DADDIU:
+        case OPCODE_LDL:
+        case OPCODE_LDR:
+        case OPCODE_LQ:
+        case OPCODE_LB:
+        case OPCODE_LH:
+        case OPCODE_LWL:
+        case OPCODE_LW:
+        case OPCODE_LBU:
+        case OPCODE_LHU:
+        case OPCODE_LWR:
+        case OPCODE_LWU:
+        case OPCODE_LL:
+        case OPCODE_LLD:
+        case OPCODE_LD:
+            writesRt = true;
+            break;
+        default:
+            break;
+        }
+
+        return writesRt && rt == reg;
+    }
+
+    bool IsControlTransfer(uint32_t raw)
+    {
+        const uint32_t opcode = OPCODE(raw);
+        switch (opcode)
+        {
+        case OPCODE_REGIMM:
+        case OPCODE_J:
+        case OPCODE_JAL:
+        case OPCODE_BEQ:
+        case OPCODE_BNE:
+        case OPCODE_BLEZ:
+        case OPCODE_BGTZ:
+        case OPCODE_BEQL:
+        case OPCODE_BNEL:
+        case OPCODE_BLEZL:
+        case OPCODE_BGTZL:
+            return true;
+        default:
+            break;
+        }
+
+        if (opcode != OPCODE_SPECIAL)
+        {
+            return false;
+        }
+
+        const uint32_t function = FUNCTION(raw);
+        return function == SPECIAL_JR || function == SPECIAL_JALR;
+    }
+
+    bool IsCallInstruction(uint32_t raw)
+    {
+        const uint32_t opcode = OPCODE(raw);
+        return opcode == OPCODE_JAL ||
+               (opcode == OPCODE_SPECIAL && FUNCTION(raw) == SPECIAL_JALR);
+    }
+
+    void ScanMaterializedCodeAddresses(const std::vector<ps2recomp::Section> &sections,
+                                       std::unordered_set<uint32_t> &starts)
+    {
+        constexpr uint32_t kMaxLookaheadWords = 4;
+
+        for (const auto &section : sections)
+        {
+            if (!section.isCode || !section.data || section.size < (2u * MIPS_INSTRUCTION_SIZE))
+            {
+                continue;
+            }
+
+            for (uint32_t offset = 0; offset + MIPS_INSTRUCTION_SIZE <= section.size;
+                 offset += MIPS_INSTRUCTION_SIZE)
+            {
+                uint32_t upperRaw = 0;
+                if (!ReadSectionWord(section, offset, upperRaw) ||
+                    OPCODE(upperRaw) != OPCODE_LUI)
+                {
+                    continue;
+                }
+
+                const uint32_t upperReg = RT(upperRaw);
+                if (upperReg == GPR_ZERO)
+                {
+                    continue;
+                }
+
+                const uint32_t upperValue = IMMEDIATE(upperRaw) << 16;
+                bool sawControlTransfer = false;
+                bool sawCallTransfer = false;
+
+                for (uint32_t lookahead = 1; lookahead <= kMaxLookaheadWords; ++lookahead)
+                {
+                    uint32_t lowRaw = 0;
+                    if (!ReadSectionWord(section, offset + (lookahead * MIPS_INSTRUCTION_SIZE), lowRaw))
+                    {
+                        break;
+                    }
+
+                    const uint32_t opcode = OPCODE(lowRaw);
+                    const uint32_t rs = RS(lowRaw);
+                    const uint32_t rt = RT(lowRaw);
+
+                    if ((opcode == OPCODE_ADDIU || opcode == OPCODE_ORI || opcode == OPCODE_DADDIU) &&
+                        rs == upperReg)
+                    {
+                        const uint16_t immediate = static_cast<uint16_t>(IMMEDIATE(lowRaw));
+                        uint32_t target = 0;
+                        if (opcode == OPCODE_ORI)
+                        {
+                            target = upperValue | static_cast<uint32_t>(immediate);
+                        }
+                        else // ADDIU/DADDIU use a signed low half
+                        {
+                            target = upperValue + static_cast<uint32_t>(
+                                                      static_cast<int32_t>(static_cast<int16_t>(immediate)));
+                        }
+
+                        uint32_t nextRaw = 0;
+                        const bool followedByCall =
+                            ReadSectionWord(section,
+                                            offset + ((lookahead + 1u) * MIPS_INSTRUCTION_SIZE),
+                                            nextRaw) &&
+                            IsCallInstruction(nextRaw);
+                        const bool materializedAsCallArgument =
+                            rt >= GPR_A0 && rt <= GPR_A3 && (sawCallTransfer || followedByCall);
+
+                        if (LooksLikeCallableEntry(sections, target, materializedAsCallArgument))
+                        {
+                            starts.insert(target);
+                        }
+                        break;
+                    }
+
+                    // The instruction immediately after a branch/call is its
+                    // delay slot. It may complete a callback address, but no
+                    // later instruction is in the same straight-line state.
+                    if (sawControlTransfer)
+                    {
+                        break;
+                    }
+
+                    if (WritesGpr(lowRaw, upperReg))
+                    {
+                        break;
+                    }
+
+                    if (IsControlTransfer(lowRaw))
+                    {
+                        sawControlTransfer = true;
+                        sawCallTransfer = IsCallInstruction(lowRaw);
+                    }
+                }
+            }
+        }
+    }
+
+    bool IsDedicatedFunctionPointerSection(const std::string &name)
+    {
+        return name == ".ctors" || name == ".dtors" ||
+               name == ".init_array" || name == ".fini_array";
+    }
+
+    void ScanDataFunctionPointerTables(const std::vector<ps2recomp::Section> &sections,
+                                       std::unordered_set<uint32_t> &starts)
+    {
+        struct PointerCandidate
+        {
+            uint32_t sourceOffset;
+            uint32_t target;
+        };
+
+        constexpr uint32_t kClusterDistanceBytes = 32;
+
+        for (const auto &section : sections)
+        {
+            if (!section.isData || section.isCode || section.isBSS ||
+                !section.data || section.size < MIPS_INSTRUCTION_SIZE)
+            {
+                continue;
+            }
+
+            std::vector<PointerCandidate> candidates;
+            for (uint32_t offset = 0; offset + MIPS_INSTRUCTION_SIZE <= section.size;
+                 offset += MIPS_INSTRUCTION_SIZE)
+            {
+                uint32_t target = 0;
+                if (ReadSectionWord(section, offset, target) &&
+                    LooksLikeCallableEntry(sections, target, true))
+                {
+                    candidates.push_back({offset, target});
+                }
+            }
+
+            const bool dedicatedPointerSection = IsDedicatedFunctionPointerSection(section.name);
+            for (size_t index = 0; index < candidates.size(); ++index)
+            {
+                bool clustered = dedicatedPointerSection;
+                if (index > 0 &&
+                    candidates[index].sourceOffset - candidates[index - 1].sourceOffset <= kClusterDistanceBytes)
+                {
+                    clustered = true;
+                }
+                if (index + 1 < candidates.size() &&
+                    candidates[index + 1].sourceOffset - candidates[index].sourceOffset <= kClusterDistanceBytes)
+                {
+                    clustered = true;
+                }
+
+                if (clustered)
+                {
+                    starts.insert(candidates[index].target);
+                }
+            }
+        }
+    }
+
+    void ScanFunctionStartsFallback(ps2recomp::ElfParser *parser, std::vector<ps2recomp::Function> &outFunctions)
     {
         std::unordered_set<uint32_t> starts;
         starts.reserve(4096);
@@ -467,26 +791,29 @@ namespace
         const auto &sections = parser->getSections();
         for (const auto &section : sections)
         {
-            if (!section.isCode || !section.data || section.size < 4)
+            if (!section.isCode || !section.data || section.size < MIPS_INSTRUCTION_SIZE)
             {
                 continue;
             }
 
-            for (uint32_t offset = 0; offset + 4 <= section.size; offset += 4)
+            for (uint32_t offset = 0; offset + MIPS_INSTRUCTION_SIZE <= section.size;
+                 offset += MIPS_INSTRUCTION_SIZE)
             {
                 const uint32_t pc = section.address + offset;
 
                 uint32_t raw = 0;
                 std::memcpy(&raw, section.data + offset, sizeof(uint32_t));
 
-                const uint32_t op = (raw >> 26) & 0x3F;
-                if (op != 0x03) // JAL
+                const uint32_t op = OPCODE(raw);
+                if (op != OPCODE_JAL)
                 {
                     continue;
                 }
 
-                const uint32_t index = raw & 0x03FFFFFF;
-                const uint32_t target = ((pc + 4) & 0xF0000000u) | (index << 2);
+                const uint32_t index = TARGET(raw);
+                const uint32_t target =
+                    ((pc + MIPS_INSTRUCTION_SIZE) & MIPS_JUMP_REGION_MASK) |
+                    (index << MIPS_JUMP_TARGET_SHIFT);
 
                 if (FindCodeSectionByAddress(sections, target))
                 {
@@ -494,6 +821,9 @@ namespace
                 }
             }
         }
+       
+        ScanMaterializedCodeAddresses(sections, starts);
+        ScanDataFunctionPointerTables(sections, starts);
 
         std::vector<uint32_t> sortedStarts(starts.begin(), starts.end());
         std::sort(sortedStarts.begin(), sortedStarts.end());
@@ -523,7 +853,7 @@ namespace
             ps2recomp::Function func{};
             func.name = MakeAutoFunctionName(start);
             func.start = start;
-            func.end = (end > start) ? end : (start + 4);
+            func.end = (end > start) ? end : (start + MIPS_INSTRUCTION_SIZE);
             func.isRecompiled = false;
             func.isStub = false;
             func.isSkipped = false;
@@ -1420,7 +1750,7 @@ namespace ps2recomp
 
         if (m_extraFunctions.empty())
         {
-            ScanJalTargetsFallback(this, m_extraFunctions);
+            ScanFunctionStartsFallback(this, m_extraFunctions);
         }
 
         std::sort(m_extraFunctions.begin(), m_extraFunctions.end(),

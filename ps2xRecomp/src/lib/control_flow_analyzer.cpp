@@ -135,6 +135,11 @@ namespace ps2recomp
 
         for (const auto &inst : instructions)
         {
+            if (inst.opcode == OPCODE_SPECIAL && inst.function == SPECIAL_SYSCALL)
+            {
+                queueResumeEntryTarget(inst.address + 4u);
+            }
+
             bool isStaticJump = (inst.opcode == OPCODE_J || inst.opcode == OPCODE_JAL);
             if (inst.isBranch && inst.opcode != OPCODE_J && inst.opcode != OPCODE_JAL)
             {

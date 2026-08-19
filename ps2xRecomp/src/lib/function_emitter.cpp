@@ -45,8 +45,8 @@ namespace ps2recomp
             ss << "#include <stdexcept>\n";
             ss << "#include \"ps2_runtime_macros.h\"\n";
             ss << "#include \"ps2_runtime.h\"\n";
-            ss << "#include \"ps2_recompiled_functions.h\"\n";
-            ss << "#include \"ps2_recompiled_stubs.h\"\n\n";
+            ss << "#include <ps2_recompiled_functions.h>\n";
+            ss << "#include <ps2_recompiled_stubs.h>\n\n";
             ss << "#include \"ps2_syscalls.h\"\n";
             ss << "#include \"ps2_stubs.h\"\n\n";
             ss << "#ifdef PS2_FUNCTION_LOG_TRACKER\n";

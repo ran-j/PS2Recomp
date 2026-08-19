@@ -102,10 +102,10 @@ namespace ps2recomp
         void writeCombinedOutputPreamble(std::ostream &output)
         {
             output << "#include <stdexcept>\n";
-            output << "#include \"ps2_recompiled_functions.h\"\n\n";
+            output << "#include <ps2_recompiled_functions.h>\n\n";
             output << "#include \"ps2_runtime_macros.h\"\n";
             output << "#include \"ps2_runtime.h\"\n";
-            output << "#include \"ps2_recompiled_stubs.h\"\n";
+            output << "#include <ps2_recompiled_stubs.h>\n";
             output << "#include \"ps2_syscalls.h\"\n";
             output << "#include \"ps2_stubs.h\"\n";
             output << "#ifdef _DEBUG\n";
@@ -725,6 +725,71 @@ namespace ps2recomp
 
             return reslicedCount;
         }
+
+        size_t collectInternalEntryTargetsImpl(
+            const std::vector<Function> &functions,
+            const std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions,
+            const std::unordered_set<uint32_t> &entryAddresses,
+            std::unordered_map<uint32_t, std::vector<uint32_t>> &targetsByOwner)
+        {
+            std::unordered_set<uint32_t> functionStarts;
+            functionStarts.reserve(functions.size());
+            for (const auto &function : functions)
+            {
+                functionStarts.insert(function.start);
+            }
+
+            size_t addedCount = 0u;
+            for (uint32_t entryAddress : entryAddresses)
+            {
+                if (functionStarts.contains(entryAddress))
+                {
+                    continue;
+                }
+
+                const Function *owner = nullptr;
+                for (const auto &function : functions)
+                {
+                    if (!function.isRecompiled || function.isStub || function.isSkipped ||
+                        entryAddress <= function.start || entryAddress >= function.end)
+                    {
+                        continue;
+                    }
+
+                    const auto decodedIt = decodedFunctions.find(function.start);
+                    if (decodedIt == decodedFunctions.end())
+                    {
+                        continue;
+                    }
+
+                    const bool containsInstruction = std::any_of(decodedIt->second.begin(), decodedIt->second.end(), [entryAddress](const Instruction &instruction)
+                                                                 { return instruction.address == entryAddress; });
+                    if (!containsInstruction)
+                    {
+                        continue;
+                    }
+
+                    if (!owner || function.start > owner->start)
+                    {
+                        owner = &function;
+                    }
+                }
+
+                if (!owner)
+                {
+                    continue;
+                }
+
+                auto &targets = targetsByOwner[owner->start];
+                if (std::find(targets.begin(), targets.end(), entryAddress) == targets.end())
+                {
+                    targets.push_back(entryAddress);
+                    ++addedCount;
+                }
+            }
+
+            return addedCount;
+        }
     }
 
     PS2Recompiler::PS2Recompiler(const std::string &configPath)
@@ -751,6 +816,7 @@ namespace ps2recomp
             m_stubFunctions.clear();
             m_stubFunctionStarts.clear();
             m_stubHandlerBindingsByStart.clear();
+            m_entryPointHintStarts.clear();
             m_correctnessCriticalFunctionStarts.clear();
 
             for (const auto &name : m_config.skipFunctions)
@@ -790,6 +856,14 @@ namespace ps2recomp
                         }
                         m_stubHandlerBindingsByStart[*selector.start] = selector.name;
                     }
+                }
+            }
+            for (const auto &hint : m_config.entryPointHints)
+            {
+                const FunctionSelector selector = parseFunctionSelector(hint);
+                if (selector.start.has_value())
+                {
+                    m_entryPointHintStarts.insert(*selector.start);
                 }
             }
 
@@ -983,7 +1057,7 @@ namespace ps2recomp
 
                 if (isStubFunction(function))
                 {
-                    if (!correctnessCritical || hasResolvedStubHandler(function))
+                    if (hasResolvedStubHandler(function))
                     {
                         function.isStub = true;
                         function.isSkipped = false;
@@ -991,12 +1065,15 @@ namespace ps2recomp
                         continue;
                     }
 
-                    m_reporter.recordCorrectnessCriticalGuestFallback();
+                    if (correctnessCritical)
+                    {
+                        m_reporter.recordCorrectnessCriticalGuestFallback();
+                    }
                     m_reporter.warningAt(
-                        "correctness-critical",
+                        "stub",
                         function.name,
                         function.start,
-                        "Unresolved initializer stub ignored; recompiling the original guest function");
+                        "Configured stub has no runtime handler; recompiling the original guest function");
                 }
 
                 if (shouldSkipFunction(function))
@@ -1882,6 +1959,22 @@ namespace ps2recomp
                 targets.push_back(target);
             }
         }
+        
+        std::unordered_set<uint32_t> guestFallbackEntryAddresses = m_entryPointHintStarts;
+        for (uint32_t address : m_stubFunctionStarts)
+        {
+            const auto bindingIt = m_stubHandlerBindingsByStart.find(address);
+            if (bindingIt == m_stubHandlerBindingsByStart.end() ||
+                resolveStubTarget(bindingIt->second) == StubTarget::Unknown)
+            {
+                guestFallbackEntryAddresses.insert(address);
+            }
+        }
+        collectInternalEntryTargetsImpl(
+            m_functions,
+            m_decodedFunctions,
+            guestFallbackEntryAddresses,
+            m_resumeEntryTargetsByOwner);
 
         size_t totalTargets = 0u;
         for (auto it = m_resumeEntryTargetsByOwner.begin(); it != m_resumeEntryTargetsByOwner.end();)
@@ -2152,12 +2245,12 @@ namespace ps2recomp
         return outputPath;
     }
 
-    std::string PS2Recompiler::clampFilenameLength(const std::string& baseName, const std::string& extension, std::size_t maxLength)
+    std::string PS2Recompiler::clampFilenameLength(const std::string &baseName, const std::string &extension, std::size_t maxLength)
     {
         if (maxLength == 0)
         {
             // Keep this static helper side-effect free; callers validate arguments.
-            //Better go over the limit than create files with an empty path
+            // Better go over the limit than create files with an empty path
             return baseName + extension;
         }
 
@@ -2224,11 +2317,18 @@ namespace ps2recomp
         return stats.discoveredCount;
     }
 
-    size_t PS2Recompiler::ResliceEntryFunctions(
-        std::vector<Function> &functions,
-        std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions)
+    size_t PS2Recompiler::ResliceEntryFunctions(std::vector<Function> &functions, std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions)
     {
         return resliceEntryFunctionsImpl(functions, decodedFunctions);
+    }
+
+    size_t PS2Recompiler::CollectInternalEntryTargets(
+        const std::vector<Function> &functions,
+        const std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions,
+        const std::unordered_set<uint32_t> &entryAddresses,
+        std::unordered_map<uint32_t, std::vector<uint32_t>> &targetsByOwner)
+    {
+        return collectInternalEntryTargetsImpl(functions, decodedFunctions, entryAddresses, targetsByOwner);
     }
 
     StubTarget PS2Recompiler::resolveStubTarget(const std::string &name)
@@ -2244,7 +2344,7 @@ namespace ps2recomp
         return StubTarget::Unknown;
     }
 
-    std::string PS2Recompiler::ClampFilenameLength(const std::string& baseName, const std::string& extension, std::size_t maxLength)
+    std::string PS2Recompiler::ClampFilenameLength(const std::string &baseName, const std::string &extension, std::size_t maxLength)
     {
         return clampFilenameLength(baseName, extension, maxLength);
     }

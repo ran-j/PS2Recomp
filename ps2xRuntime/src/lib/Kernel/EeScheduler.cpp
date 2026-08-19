@@ -391,6 +391,7 @@ void EeScheduler::accountCycles(uint32_t cycles) noexcept
     const uint64_t elapsed = std::max<uint64_t>(1u, cycles);
     m_eeCycle += elapsed;
     m_pendingEeTimerInterrupts |= m_runtime.memory().advanceEeTimers(elapsed);
+    m_runtime.advanceIopEeCycles(elapsed);
     if (m_pendingEeTimerInterrupts != 0u)
     {
         m_checkpointPending.store(true, std::memory_order_release);
@@ -1278,7 +1279,7 @@ void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
         SET_GPR_U32(&invocation.context, 4, cause);
         SET_GPR_U32(&invocation.context, 5, handler.argument);
         SET_GPR_U32(&invocation.context, 28, handler.gp);
-        SET_GPR_U32(&invocation.context, 29, handler.sp);
+        SET_GPR_U32(&invocation.context, 29, 0u);
         SET_GPR_U32(&invocation.context, 31, 0u);
         queueInvocation(std::move(invocation));
     }
@@ -1918,7 +1919,7 @@ void EeScheduler::processEvent(const EeEvent &event)
         SET_GPR_U32(&invocation.context, 5, static_cast<uint32_t>(alarm.ticks));
         SET_GPR_U32(&invocation.context, 6, alarm.argument);
         SET_GPR_U32(&invocation.context, 28, alarm.gp);
-        SET_GPR_U32(&invocation.context, 29, alarm.sp);
+        SET_GPR_U32(&invocation.context, 29, 0u);
         SET_GPR_U32(&invocation.context, 31, 0u);
         queueInvocation(std::move(invocation));
         break;

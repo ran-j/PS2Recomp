@@ -5,6 +5,48 @@
 
 namespace ps2recomp
 {
+    inline constexpr uint32_t MIPS_INSTRUCTION_SIZE = sizeof(uint32_t);
+    inline constexpr uint16_t MIPS_IMMEDIATE_SIGN_BIT = 0x8000u;
+    inline constexpr uint32_t MIPS_JUMP_TARGET_SHIFT = 2u;
+    inline constexpr uint32_t MIPS_JUMP_REGION_MASK = 0xF0000000u;
+
+    // R5900 general-purpose register indices used by the encoded RS/RT/RD fields.
+    enum GprRegisters : uint32_t
+    {
+        GPR_ZERO = 0,
+        GPR_AT = 1,
+        GPR_V0 = 2,
+        GPR_V1 = 3,
+        GPR_A0 = 4,
+        GPR_A1 = 5,
+        GPR_A2 = 6,
+        GPR_A3 = 7,
+        GPR_T0 = 8,
+        GPR_T1 = 9,
+        GPR_T2 = 10,
+        GPR_T3 = 11,
+        GPR_T4 = 12,
+        GPR_T5 = 13,
+        GPR_T6 = 14,
+        GPR_T7 = 15,
+        GPR_S0 = 16,
+        GPR_S1 = 17,
+        GPR_S2 = 18,
+        GPR_S3 = 19,
+        GPR_S4 = 20,
+        GPR_S5 = 21,
+        GPR_S6 = 22,
+        GPR_S7 = 23,
+        GPR_T8 = 24,
+        GPR_T9 = 25,
+        GPR_K0 = 26,
+        GPR_K1 = 27,
+        GPR_GP = 28,
+        GPR_SP = 29,
+        GPR_FP = 30,
+        GPR_RA = 31,
+    };
+
     // Basic MIPS opcodes (shared with R4300i)
     enum MipsOpcodes
     {

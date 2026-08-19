@@ -1,6 +1,7 @@
 #include "ps2x/iop/iop_subsystem.h"
 
 #include "iop_service.h"
+#include "emulator/iop_emulator.h"
 #include "plugin_loader.h"
 
 #include <algorithm>
@@ -68,7 +69,7 @@ namespace ps2x::iop
     {
     public:
         explicit Impl(IopHost &hostRef)
-            : host(hostRef), pluginCatalog(hostRef), coreServices(detail::createCoreServices(hostRef)), profiles(detail::createBuiltinProfiles())
+            : host(hostRef), pluginCatalog(hostRef), coreServices(detail::createCoreServices(hostRef)), profiles(detail::createBuiltinProfiles()), emulator(hostRef)
         {
             rebuildRoutes();
         }
@@ -118,6 +119,7 @@ namespace ps2x::iop
         std::string activeProvider;
         std::string lastError;
         bool routesValid = true;
+        detail::IopEmulator emulator;
     };
 
     IopSubsystem::IopSubsystem(IopHost &host)
@@ -248,6 +250,27 @@ namespace ps2x::iop
                 service->reset();
             }
         }
+        m_impl->emulator.reset();
+    }
+
+    ModuleLoadResult IopSubsystem::loadModule(std::string_view path, const void *arguments, uint32_t argumentSize)
+    {
+        return m_impl->emulator.loadModule(path, arguments, argumentSize);
+    }
+
+    ModuleLoadResult IopSubsystem::loadModuleBuffer(uint32_t guestAddress, const void *arguments, uint32_t argumentSize)
+    {
+        return m_impl->emulator.loadModuleBuffer(guestAddress, arguments, argumentSize);
+    }
+
+    bool IopSubsystem::stopModule(int32_t moduleId, int32_t *result)
+    {
+        return m_impl->emulator.stopModule(moduleId, result);
+    }
+
+    void IopSubsystem::runEeCycles(uint64_t eeCycles) noexcept
+    {
+        m_impl->emulator.runEeCycles(eeCycles);
     }
 
     RpcAbi IopSubsystem::selectRpcAbi(const RpcAbiRequest &request) const
@@ -277,14 +300,41 @@ namespace ps2x::iop
         return RpcAbi::RuntimeDefault;
     }
 
+    bool IopSubsystem::canBindRpc(uint32_t sid) const noexcept
+    {
+        if (m_impl->routes.find(sid) != m_impl->routes.end())
+        {
+            return true;
+        }
+        return m_impl->emulator.hasRpcServer(sid);
+    }
+
     RpcResult IopSubsystem::handleRpc(const RpcRequest &request)
     {
-        const auto it = m_impl->routes.find(request.sid);
-        if (it == m_impl->routes.end() || !it->second)
+        const auto route = m_impl->routes.find(request.sid);
+        detail::IopService *hle = route != m_impl->routes.end() ? route->second : nullptr;
+
+        // A profile can deliberately replace a physical endpoint when running
+        // that IRX is outside the selected compatibility scope (for example,
+        // disabling a game's audio driver while keeping the rest of its IOP
+        // modules physical).
+        if (hle && hle->overridesPhysicalRpcServer())
         {
-            return {};
+            RpcResult overridden = hle->handleRpc(request);
+            if (overridden.handled)
+            {
+                return overridden;
+            }
         }
-        return it->second->handleRpc(request);
+
+        // Otherwise physical servers are authoritative and HLE remains a
+        // compatibility fallback for endpoints no loaded IRX provides.
+        RpcResult emulated = m_impl->emulator.handleRpc(request);
+        if (emulated.handled || !hle || hle->overridesPhysicalRpcServer())
+        {
+            return emulated;
+        }
+        return hle->handleRpc(request);
     }
 
     void IopSubsystem::onSifTransfer(const SifTransfer &transfer)
@@ -303,11 +353,17 @@ namespace ps2x::iop
                 service->onSifTransfer(transfer);
             }
         }
+        m_impl->emulator.onSifTransfer(transfer);
     }
 
     DebugSnapshot IopSubsystem::debugSnapshot() const
     {
         DebugSnapshot snapshot;
+        snapshot.emulatorCycles = m_impl->emulator.cycles();
+        snapshot.emulatorInstructions = m_impl->emulator.instructions();
+        snapshot.emulatorLoadedModules = m_impl->emulator.loadedModuleCount();
+        snapshot.emulatorThreads = m_impl->emulator.threadCount();
+        snapshot.emulatorRpcServers = m_impl->emulator.rpcServerCount();
         snapshot.activeProfile = m_impl->activeProfile;
         snapshot.activeProvider = m_impl->activeProvider;
         snapshot.diagnostics = m_impl->diagnostics;

@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace ps2x::iop
@@ -27,7 +28,13 @@ namespace ps2x::iop
         bool configure(const GameIdentity &identity, std::string *error = nullptr);
         void reset();
 
+        [[nodiscard]] ModuleLoadResult loadModule(std::string_view path, const void *arguments = nullptr, uint32_t argumentSize = 0);
+        [[nodiscard]] ModuleLoadResult loadModuleBuffer(uint32_t guestAddress, const void *arguments = nullptr, uint32_t argumentSize = 0);
+        [[nodiscard]] bool stopModule(int32_t moduleId, int32_t *result = nullptr);
+        void runEeCycles(uint64_t eeCycles) noexcept;
+
         [[nodiscard]] RpcAbi selectRpcAbi(const RpcAbiRequest &request) const;
+        [[nodiscard]] bool canBindRpc(uint32_t sid) const noexcept;
         [[nodiscard]] RpcResult handleRpc(const RpcRequest &request);
         void onSifTransfer(const SifTransfer &transfer);
 

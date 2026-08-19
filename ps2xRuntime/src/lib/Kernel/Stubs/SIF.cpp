@@ -709,6 +709,7 @@ namespace ps2_stubs
 
     void sceSifRebootIop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        PS2IopTransport::reset(runtime);
         setReturnS32(ctx, 1);
     }
 
@@ -737,6 +738,7 @@ namespace ps2_stubs
 
     void sceSifResetIop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        PS2IopTransport::reset(runtime);
         setReturnS32(ctx, 1);
     }
 

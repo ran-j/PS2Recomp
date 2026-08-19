@@ -313,15 +313,39 @@ namespace ps2_syscalls
 
     void sceSifLoadModuleBuffer(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        const uint32_t bufferAddr = getRegU32(ctx, 4); // $a0
+        const uint32_t bufferAddr = getRegU32(ctx, 4);   // $a0
+        const uint32_t argumentSize = getRegU32(ctx, 5); // $a1
+        const uint32_t argumentAddr = getRegU32(ctx, 6); // $a2
         if (!rdram || bufferAddr == 0u)
         {
             setReturnS32(ctx, -1);
             return;
         }
 
-        // Match buffer-based module loads to stable synthetic tags so module ID lookup remains deterministic.
         const std::string moduleTag = makeSifModuleBufferTag(rdram, bufferAddr);
+        std::vector<uint8_t> arguments;
+        constexpr uint32_t kMaxIopModuleArguments = 64u * 1024u;
+        if (!copyGuestBytesBounded(rdram, argumentAddr, argumentSize, kMaxIopModuleArguments, arguments))
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        const auto emulated = runtime->loadIopModuleBuffer(bufferAddr, arguments.empty() ? nullptr : arguments.data(), static_cast<uint32_t>(arguments.size()));
+        if (emulated.handled)
+        {
+            if (emulated.moduleId <= 0)
+            {
+                setReturnS32(ctx, -1);
+                return;
+            }
+            trackSifModuleLoadExternal(moduleTag, emulated.moduleId);
+            logSifModuleAction("load-buffer-emulated", emulated.moduleId, moduleTag, 1u);
+            setReturnS32(ctx, emulated.moduleId);
+            return;
+        }
+
+        // Profile mode keeps the existing deterministic synthetic IDs.
         const int32_t moduleId = trackSifModuleLoad(moduleTag);
         if (moduleId <= 0)
         {

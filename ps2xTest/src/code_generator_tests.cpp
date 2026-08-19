@@ -157,6 +157,29 @@ void register_code_generator_tests()
 {
     MiniTest::Case("CodeGenerator", [](TestCase &tc)
                    {
+    tc.Run("Generated sources cannot be shadowed by stale local declaration headers", [](TestCase &t) {
+        Function func;
+        func.name = "header_lookup";
+        func.start = 0x8F00;
+        func.end = 0x8F04;
+        func.isRecompiled = true;
+
+        CodeGenerator gen({}, {});
+        gen.setRenamedFunctions({{func.start, "header_lookup_0x8f00"}});
+
+        const std::string generated = gen.generateFunction(func, {makeNop(func.start)}, true);
+        const std::string registration = gen.generateFunctionRegistration({func}, {});
+
+        t.IsTrue(generated.find("#include <ps2_recompiled_functions.h>") != std::string::npos,
+                 "function sources must resolve declarations through the configured include path");
+        t.IsTrue(generated.find("#include <ps2_recompiled_stubs.h>") != std::string::npos,
+                 "function sources must resolve stub declarations through the configured include path");
+        t.IsTrue(registration.find("#include <ps2_recompiled_functions.h>") != std::string::npos,
+                 "the registration source must use the same unambiguous declaration header");
+        t.IsTrue(registration.find("#include <ps2_recompiled_stubs.h>") != std::string::npos,
+                 "the registration source must use the same unambiguous stub header");
+    });
+
     tc.Run("SYSCALL publishes its continuation before entering the runtime", [](TestCase &t) {
         Function func;
         func.name = "syscall_resume";
@@ -183,6 +206,42 @@ void register_code_generator_tests()
                  "generated syscall must still dispatch the encoded syscall");
         t.IsTrue(continuation < dispatch,
                  "the continuation PC must be visible before a syscall can transfer to the scheduler");
+    });
+
+    tc.Run("SYSCALL fallthrough is a resumable entry", [](TestCase &t) {
+        Function func;
+        func.name = "syscall_resume_entry";
+        func.start = 0x9100;
+        func.end = 0x9108;
+        func.isRecompiled = true;
+
+        Instruction syscall{};
+        syscall.address = 0x9100;
+        syscall.opcode = OPCODE_SPECIAL;
+        syscall.function = SPECIAL_SYSCALL;
+        syscall.raw = (0x83u << 6) | SPECIAL_SYSCALL;
+
+        Instruction after = makeNop(0x9104);
+        CodeGenerator gen({}, {});
+        CodeGenerator::AnalysisResult analysis =
+            gen.collectInternalBranchTargets(func, {syscall, after});
+
+        t.IsTrue(analysis.resumeEntryPoints.contains(0x9104u),
+                 "a syscall can yield through a guest override, so its fallthrough must be resumable");
+
+        const std::string generated = gen.generateFunction(func, {syscall, after}, false);
+        t.IsTrue(generated.find("case 0x9104u: goto label_9104;") != std::string::npos,
+                 "the owner wrapper must resume directly after the syscall");
+
+        gen.setRenamedFunctions({{0x9100u, "syscall_resume_entry_0x9100"}});
+        gen.setResumeEntryTargets({{0x9100u,
+                                    std::vector<uint32_t>(analysis.resumeEntryPoints.begin(),
+                                                          analysis.resumeEntryPoints.end())}});
+        const std::string registration = gen.generateFunctionRegistration({func}, {});
+        t.IsTrue(registration.find(
+                     "g_ps2RecompiledFunctionTable[1] = syscall_resume_entry_0x9100; // 0x9104") !=
+                     std::string::npos,
+                 "the syscall continuation must register to the owner wrapper");
     });
 
     tc.Run("R5900 MULT writes rd when rd is non-zero", [](TestCase &t) {
@@ -604,6 +663,46 @@ void register_code_generator_tests()
                  "resume entry pc should register to the owner wrapper");
         t.IsTrue(registration.find("g_ps2RecompiledFunctionTable[3] = resume_owner_0x7000; // 0x700c") != std::string::npos,
                  "multiple resume pcs should register to the same owner wrapper");
+    });
+
+    tc.Run("configured internal guest handlers register to their owner wrapper", [](TestCase &t) {
+        Function owner;
+        owner.name = "sdk_bootstrap_owner";
+        owner.start = 0x7000;
+        owner.end = 0x7020;
+        owner.isRecompiled = true;
+        owner.isStub = false;
+
+        std::vector<Instruction> instructions{
+            makeNop(0x7000), makeNop(0x7004), makeNop(0x7008), makeNop(0x700C),
+            makeNop(0x7010), makeNop(0x7014), makeNop(0x7018), makeNop(0x701C)};
+        std::vector<Function> functions{owner};
+        std::unordered_map<uint32_t, std::vector<Instruction>> decoded{{owner.start, instructions}};
+        std::unordered_map<uint32_t, std::vector<uint32_t>> targetsByOwner;
+
+        const size_t added = PS2Recompiler::CollectInternalEntryTargets(
+            functions, decoded, {0x7008u, 0x7018u}, targetsByOwner);
+
+        t.IsTrue(added == 2u,
+                 "both address-qualified internal handlers should be promoted");
+        t.IsTrue(targetsByOwner.at(owner.start).size() == 2u,
+                 "both handlers should belong to the containing generated wrapper");
+
+        CodeGenerator gen({}, {});
+        gen.setRenamedFunctions({{owner.start, "sdk_bootstrap_owner_0x7000"}});
+        gen.setResumeEntryTargets(targetsByOwner);
+
+        const std::string generated = gen.generateFunction(owner, instructions, false);
+        const std::string registration = gen.generateFunctionRegistration(functions, {});
+
+        t.IsTrue(generated.find("case 0x7008u: goto label_7008;") != std::string::npos,
+                 "the owner must enter directly at the first installed handler");
+        t.IsTrue(generated.find("case 0x7018u: goto label_7018;") != std::string::npos,
+                 "the owner must enter directly at the second installed handler");
+        t.IsTrue(registration.find("sdk_bootstrap_owner_0x7000; // 0x7008") != std::string::npos,
+                 "the first handler address must dispatch to its owner wrapper");
+        t.IsTrue(registration.find("sdk_bootstrap_owner_0x7000; // 0x7018") != std::string::npos,
+                 "the second handler address must dispatch to its owner wrapper");
     });
 
     tc.Run("external mid-function entry can register to the owner wrapper", [](TestCase &t) {

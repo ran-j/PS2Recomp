@@ -108,6 +108,7 @@ namespace ps2x::iop::detail
         bool zeroReceiveBuffer = true;
         bool signalNowaitCompletion = false;
         bool completeQueuedPlayStreams = false;
+        bool overridePhysicalServer = false;
         std::vector<uint32_t> suppressedCompletionCallbacks;
     };
 

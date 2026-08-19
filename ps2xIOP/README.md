@@ -1,57 +1,22 @@
 # ps2xIOP
 
-`ps2xIOP` is the IOP high-level emulation (HLE) subsystem used by
-`ps2xRuntime`. It implements the behavior that games expect from IOP services
-exposed through SIF RPC and DMA.
-
-This subsystem does not emulate the IOP's R3000A CPU and does not load or
-execute IRX binaries. Its scope is the RPC/DMA behavior needed by recompiled
-games.
+`ps2xIOP` is the IOP subsystem used by `ps2xRuntime`. It combines high-level service/profile path with an R3000A-backed IRX execution path. 
+No PS2 BIOS is required by the emulator backend: IRX imports for the kernel-facing libraries are handled by a small virtual IOP kernel, while the IRX module itself executes as original MIPS code.
 
 > [!IMPORTANT]
 > `ps2_iop`/`ps2x::iop` is a C++20 static library linked into the runtime.
-> Optional `.dll` and `.so` files are native profile plugins loaded by that
-> library. They extend the profile catalog; they do not replace `ps2_iop`, its
-> registry, its host bridge, the SIF transport, or execute PS2 IRX code.
+> Optional `.dll` and `.so` files are native profile plugins. They extend
+> the HLE profile catalog; they are not PS2 IRX modules.
 
-## Architecture
+## Execution policy
 
-```text
-EE game
-  |
-  | SIF RPC / DMA
-  v
-ps2xRuntime transport
-  |
-  | RpcRequest / RpcResult / SifTransfer
-  v
-ps2x::iop::IopSubsystem
-  |-- selected game profile services
-  |-- core services
-  |
-  v
-IopHost bridge -> validated guest memory, files, audio, memory card,
-                  logging, and EE function invocation
-```
-
-### Modules, bindings, and profiles
-
-These terms describe different layers:
-
-- A **module implementation** is a reusable protocol engine, such as TSNDDRV,
-  CRI DTX, CLFILE, or SDRDRV.
-- A **binding** contains build-specific values: SIDs, absolute EE addresses,
-  callback addresses, guest arenas, archive names, and protocol variants.
-- A **profile** matches one game build and creates the required module
-  implementations with that build's bindings.
-
-For example, `cri_dtx.cpp` contains the reusable CRI DTX engine, while the
-`recvx-us` profile supplies Code: Veronica X addresses. A second game should
-reuse that engine only after its wire protocol has been compared with the
-characterized variant; normally only its profile bindings should change.
-Parameterized does not mean universally protocol-compatible. In particular,
-`sound_update_stub.cpp` is a narrow LotR compatibility shim, not a complete
-generic SOUND driver.
+The subsystem is always hybrid. Original IRX modules execute on the R3000A
+path, while core and game-profile HLE services are available for endpoints
+that the loaded modules do not provide. A server registered by a physical IRX
+is normally authoritative for its SID; HLE is the fallback. A profile service
+may explicitly replace a physical endpoint when it is a compatibility stub.
+There is no runtime mode
+switch or environment variable to create divergent boot paths.
 
 ## Built-in services and profiles
 
@@ -99,13 +64,14 @@ the shadowed core service.
 
 ## Dispatch and transfer flow
 
-`IopSubsystem` exposes five operations used by the runtime:
+`IopSubsystem` exposes the profile/HLE operations plus emulator lifecycle entry points:
 
-1. `configure(GameIdentity)` selects and creates the active profile.
-2. `reset()` resets core and profile services.
-3. `selectRpcAbi(...)` lets a service choose the register or stack RPC layout when the default decoder is not sufficient.
-4. `handleRpc(...)` routes a request by SID and returns both the payload result and the transport policy.
-5. `onSifTransfer(...)` notifies services before and after SetDma and GetOtherData copies.
+1. `configure(GameIdentity)` selects the active compatibility profile.
+2. `reset()` resets both active HLE services and the emulator state.
+3. `loadModule(...)` / `loadModuleBuffer(...)` load and start an IRX.
+4. `stopModule(...)` releases an emulated module and its owned runtime state.
+5. `runEeCycles(...)` advances the IOP from EE cycle accounting.
+6. `selectRpcAbi(...)`, `handleRpc(...)`, and `onSifTransfer(...)` provide the SIF transport bridge.
 
 `RpcResult::handled` indicates whether a service consumed the request. The
 result can also request completion semaphore signals and can suppress the
@@ -142,7 +108,7 @@ Linux with `PS2X_IOP_ENABLE_PLUGINS=ON`.
 | Windows | `.dll` | Supported |
 | Linux | `.so` | Supported |
 
-When enable By default, the runtime scans `iop_plugins/` next to the executable. Discovery
+When enabled, the runtime scans `iop_plugins/` next to the executable. Discovery
 is non-recursive. An embedding application can replace the search directories
 before calling `initialize()`:
 
@@ -209,9 +175,10 @@ FOr learn more you can check [PluginExample](./PluginExample.md)
 
 ## Diagnostics and tests
 
-`debugSnapshot()` exposes the active profile, its provider, registered core and
-profile services, service metrics, loader diagnostics, and the last selection
-error. The runtime debugger renders this data in the **IOP/SIF** tab.
+`debugSnapshot()` exposes emulator cycle/instruction counts, loaded
+IRX/thread/RPC-server counts, the active profile and provider, registered core
+and profile services, service metrics, loader diagnostics, and the last
+selection error. The runtime debugger renders this data in the **IOP/SIF** tab.
 
 Registry behavior, instance isolation, reset, built-in services, profile
 precedence, plugin discovery, ABI rejection, ambiguity, dispatch, destruction,

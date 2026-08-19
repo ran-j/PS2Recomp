@@ -155,6 +155,78 @@ static bool writeMinimalMipsElfWithJalFallbackTarget(const std::filesystem::path
     return writer.save(elfPath.string());
 }
 
+static bool writeMinimalMipsElfWithAddressTakenCallbacks(const std::filesystem::path &elfPath)
+{
+    ELFIO::elfio writer;
+    writer.create(ELFIO::ELFCLASS32, ELFIO::ELFDATA2LSB);
+    writer.set_os_abi(ELFIO::ELFOSABI_NONE);
+    writer.set_type(ELFIO::ET_EXEC);
+    writer.set_machine(ELFIO::EM_MIPS);
+    writer.set_entry(0x00100000u);
+
+    ELFIO::section *text = writer.sections.add(".text");
+    text->set_type(ELFIO::SHT_PROGBITS);
+    text->set_flags(ELFIO::SHF_ALLOC | ELFIO::SHF_EXECINSTR);
+    text->set_addr_align(4);
+    text->set_address(0x00100000u);
+
+    std::array<uint32_t, 30> textWords{};
+    textWords[0] = 0x3C040010u;  // lui a0,0x10
+    textWords[1] = 0xAC800000u;  // sw zero,0(a0)
+    textWords[2] = 0x0C040008u;  // jal 0x00100020 (callback registrar)
+    textWords[3] = 0x24840040u;  // addiu a0,a0,0x40 (delay slot)
+    textWords[4] = 0x03E00008u;  // jr ra
+    textWords[5] = 0x00000000u;  // nop
+    textWords[6] = 0x3C080010u;  // lui t0,0x10
+    textWords[7] = 0x25080070u;  // addiu t0,t0,0x70 (code label, not a callback argument)
+
+    textWords[8] = 0x03E00008u;  // registrar at 0x00100020
+    textWords[9] = 0x00000000u;
+
+    textWords[16] = 0x27BDFFF0u; // callback at 0x00100040: addiu sp,sp,-0x10
+    textWords[17] = 0xFFBF0000u; // sd ra,0(sp)
+    textWords[18] = 0xDFBF0000u; // ld ra,0(sp)
+    textWords[19] = 0x03E00008u; // jr ra
+    textWords[20] = 0x27BD0010u; // addiu sp,sp,0x10
+
+    textWords[24] = 0x03E00008u; // table leaf at 0x00100060
+    textWords[25] = 0x00000000u;
+    textWords[26] = 0x03E00008u; // table leaf at 0x00100068
+    textWords[27] = 0x00000000u;
+    textWords[28] = 0x03E00008u; // isolated pointer target at 0x00100070
+    textWords[29] = 0x00000000u;
+
+    text->set_data(reinterpret_cast<const char *>(textWords.data()),
+                   static_cast<ELFIO::Elf_Word>(textWords.size() * sizeof(uint32_t)));
+
+    ELFIO::section *rodata = writer.sections.add(".rodata");
+    rodata->set_type(ELFIO::SHT_PROGBITS);
+    rodata->set_flags(ELFIO::SHF_ALLOC);
+    rodata->set_addr_align(4);
+    rodata->set_address(0x00200000u);
+
+    std::array<uint32_t, 20> tableWords{};
+    tableWords[1] = 0x00100060u;
+    tableWords[3] = 0x00100068u;
+    tableWords[16] = 0x00100070u; // plausible entry, but not part of a pointer cluster
+    rodata->set_data(reinterpret_cast<const char *>(tableWords.data()),
+                     static_cast<ELFIO::Elf_Word>(tableWords.size() * sizeof(uint32_t)));
+
+    ELFIO::segment *textSegment = writer.segments.add();
+    textSegment->set_type(ELFIO::PT_LOAD);
+    textSegment->set_flags(ELFIO::PF_R | ELFIO::PF_X);
+    textSegment->set_align(0x1000);
+    textSegment->add_section_index(text->get_index(), text->get_addr_align());
+
+    ELFIO::segment *dataSegment = writer.segments.add();
+    dataSegment->set_type(ELFIO::PT_LOAD);
+    dataSegment->set_flags(ELFIO::PF_R);
+    dataSegment->set_align(0x1000);
+    dataSegment->add_section_index(rodata->get_index(), rodata->get_addr_align());
+
+    return writer.save(elfPath.string());
+}
+
 static bool writeMinimalMipsElfWithInitializer(const std::filesystem::path &elfPath,
                                                const std::string &functionName,
                                                uint32_t initializerTarget)
@@ -838,6 +910,42 @@ void register_ps2_recompiler_tests()
             std::filesystem::remove(configPath, removeError);
         });
 
+        tc.Run("config manager loads modern and legacy guest entry hints", [](TestCase &t) {
+            const auto uniqueSuffix = std::to_string(
+                static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+            const std::filesystem::path configPath =
+                std::filesystem::temp_directory_path() / ("ps2recomp-entry-hints-" + uniqueSuffix + ".toml");
+
+            std::ofstream configFile(configPath);
+            t.IsTrue(static_cast<bool>(configFile), "temp config file should be writable");
+            if (!configFile)
+            {
+                return;
+            }
+
+            configFile << "[general]\n";
+            configFile << "input = \"dummy.elf\"\n";
+            configFile << "output = \"out\"\n";
+            configFile << "entry_points = [\"callback@0x7008\"]\n";
+            configFile << "untracked_stubs = [\"legacy_callback@0x7018\"]\n";
+            configFile.close();
+
+            ConfigManager manager(configPath.string());
+            const RecompilerConfig config = manager.loadConfig();
+
+            t.Equals(config.entryPointHints.size(), static_cast<size_t>(2),
+                     "modern and legacy entry metadata should be merged");
+            t.IsTrue(std::find(config.entryPointHints.begin(), config.entryPointHints.end(),
+                               "callback@0x7008") != config.entryPointHints.end(),
+                     "modern entry_points metadata should load");
+            t.IsTrue(std::find(config.entryPointHints.begin(), config.entryPointHints.end(),
+                               "legacy_callback@0x7018") != config.entryPointHints.end(),
+                     "legacy untracked_stubs metadata should remain compatible");
+
+            std::error_code removeError;
+            std::filesystem::remove(configPath, removeError);
+        });
+
         tc.Run("elf parser ignores STT_FUNC symbols in non-executable sections", [](TestCase &t) {
             const auto uniqueSuffix = std::to_string(
                 static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -945,6 +1053,50 @@ void register_ps2_recompiler_tests()
             std::error_code removeError;
             std::filesystem::remove(elfPath, removeError);
             std::filesystem::remove(mapPath, removeError);
+        });
+
+        tc.Run("elf parser discovers address-taken callbacks in stripped ELFs", [](TestCase &t) {
+            const auto uniqueSuffix = std::to_string(
+                static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+            const std::filesystem::path elfPath =
+                std::filesystem::temp_directory_path() / ("ps2recomp-address-taken-" + uniqueSuffix + ".elf");
+
+            const bool writeOk = writeMinimalMipsElfWithAddressTakenCallbacks(elfPath);
+            t.IsTrue(writeOk, "temporary stripped ELF should be generated");
+            if (!writeOk)
+            {
+                return;
+            }
+
+            ElfParser parser(elfPath.string());
+            const bool parseOk = parser.parse();
+            t.IsTrue(parseOk, "generated ELF should parse");
+            if (!parseOk)
+            {
+                std::error_code removeError;
+                std::filesystem::remove(elfPath, removeError);
+                return;
+            }
+
+            const auto functions = parser.extractFunctions();
+            auto hasStart = [&functions](uint32_t start)
+            {
+                return std::any_of(functions.begin(), functions.end(),
+                                   [start](const Function &function)
+                                   { return function.start == start; });
+            };
+
+            t.IsTrue(hasStart(0x00100040u),
+                     "LUI plus delay-slot ADDIU should discover the callback entry");
+            t.IsTrue(hasStart(0x00100060u),
+                     "clustered rodata pointers should discover the first leaf callback");
+            t.IsTrue(hasStart(0x00100068u),
+                     "clustered rodata pointers should discover the second leaf callback");
+            t.IsFalse(hasStart(0x00100070u),
+                      "an isolated data pointer or non-callback code materialization must not become a function");
+
+            std::error_code removeError;
+            std::filesystem::remove(elfPath, removeError);
         });
 
         tc.Run("runtime call resolution includes Veronica compatibility aliases", [](TestCase &t) {

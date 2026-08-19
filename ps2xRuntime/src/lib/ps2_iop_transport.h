@@ -37,6 +37,11 @@ public:
                    : ps2x::iop::RpcResult{};
     }
 
+    [[nodiscard]] static bool canBindRpc(const PS2Runtime *runtime, uint32_t sid)
+    {
+        return !runtime || runtime->canBindIopRpc(sid);
+    }
+
     static void notifyTransfer(
         PS2Runtime *runtime,
         uint8_t *rdram,

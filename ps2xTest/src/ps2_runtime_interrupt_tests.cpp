@@ -52,6 +52,11 @@ namespace
     constexpr uint32_t kIrqWaitPc = 0x00160200u;
     constexpr uint32_t kIrqResumePc = 0x00160210u;
     constexpr uint32_t kIntcHandlerPc = 0x00160220u;
+    constexpr uint32_t kIrqStackWaitPc = 0x00160230u;
+    constexpr uint32_t kIrqStackResumePc = 0x00160240u;
+    constexpr uint32_t kIrqStackHandlerPc = 0x00160250u;
+    constexpr uint32_t kIrqRegistrationSp = 0x001E0000u;
+    constexpr uint32_t kIrqRegistrationGuardAddr = kIrqRegistrationSp - 16u;
     constexpr uint32_t kISemaWaitPc = 0x00160300u;
     constexpr uint32_t kISemaResumePc = 0x00160310u;
     constexpr uint32_t kISemaDriverPc = 0x00160320u;
@@ -83,6 +88,7 @@ namespace
     uint64_t g_vsyncTick = 0;
     uint64_t g_vsyncCsr = 0;
     std::atomic<bool> g_timer2Resumed{false};
+    uint32_t g_irqObservedSp = 0u;
 
     void setRegU32(R5900Context &ctx, int reg, uint32_t value)
     {
@@ -180,6 +186,34 @@ namespace
     void schedulerIrqResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
     {
         g_dispatchTrace.push_back(3);
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
+    void schedulerIrqStackHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
+    {
+        g_irqObservedSp = getRegU32(ctx, 29);
+        const uint64_t clobber = 0u;
+        std::memcpy(rdram + g_irqObservedSp - sizeof(clobber), &clobber, sizeof(clobber));
+        ctx->pc = 0u;
+    }
+
+    void schedulerIrqStackWait(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        EeScheduler &scheduler = runtime->eeScheduler();
+        scheduler.addIrqHandler(false,
+                                2u,
+                                kIrqStackHandlerPc,
+                                true,
+                                0u,
+                                0u,
+                                kIrqRegistrationSp);
+        ctx->pc = kIrqStackResumePc;
+        scheduler.waitVSync(scheduler.currentVSyncTick());
+    }
+
+    void schedulerIrqStackResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
         ctx->pc = 0u;
         runtime->requestStop();
     }
@@ -465,6 +499,32 @@ void register_ps2_runtime_interrupt_tests()
                      "the dispatcher should run wait, IRQ frame, then the resumed base context in exact order");
             t.Equals(g_lastIntcArg.load(std::memory_order_relaxed), 0xCAFEu,
                      "the IRQ frame should receive its registered argument");
+        });
+
+        tc.Run("IRQ callbacks use an isolated invocation stack", [](TestCase &t)
+        {
+            TestEnv env;
+            env.runtime.registerFunction(kIrqStackWaitPc, schedulerIrqStackWait);
+            env.runtime.registerFunction(kIrqStackResumePc, schedulerIrqStackResume);
+            env.runtime.registerFunction(kIrqStackHandlerPc, schedulerIrqStackHandler);
+
+            constexpr uint64_t guard = 0x1122334455667788ull;
+            std::memcpy(env.rdram.data() + kIrqRegistrationGuardAddr, &guard, sizeof(guard));
+            g_irqObservedSp = 0u;
+
+            R5900Context mainContext{};
+            mainContext.pc = kIrqStackWaitPc;
+            env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+            env.runtime.eeScheduler().run();
+
+            uint64_t guardAfter = 0u;
+            std::memcpy(&guardAfter,
+                        env.rdram.data() + kIrqRegistrationGuardAddr,
+                        sizeof(guardAfter));
+            t.IsTrue(g_irqObservedSp != 0u && g_irqObservedSp != kIrqRegistrationSp,
+                     "IRQ handler must not reuse the transient stack captured at registration");
+            t.Equals(guardAfter, guard,
+                     "IRQ handler stack writes must not clobber the registering thread's live frame");
         });
 
         tc.Run("iSignalSema defers selection until IRQ return", [](TestCase &t)

@@ -79,9 +79,7 @@ Fallback workflow for quick local experiments or ELFs with debug symbol :
 ./ps2_analyzer your_game.elf config.toml
 ```
 
-Use this only when you do not have a Ghidra project yet. The native analyzer is faster to start, but it is less accurate on stripped retail games and more likely to miss internal callable entry points.
-
-See the [Ghidra Workflow](ps2xAnalyzer/Readme.md#3-ghidra-integration-for-retail-and-stripped-games-preferred) for the recommended path.
+See the [Ghidra Workflow](ps2xAnalyzer/Readme.md#3-ghidra-integration-for-retail-and-stripped-games-preferred) for ghdira instructions.
 
 Then build generated output and link with `ps2xRuntime`.
 
@@ -164,9 +162,8 @@ Use Game Override modules when:
 6. Re-test from cold boot after each batch.
 
 ### Limitations
-
-* Graphics Synthesizer and other hardware components need external implementation
-* VU1 microcode is not complete.
+ 
+* Performance is very bad for VU and GS
 * Hardware emulation is partial and many paths are stubbed.
 
 ###  Acknowledgments
@@ -175,3 +172,4 @@ Use Game Override modules when:
 * Uses ELFIO for ELF parsing
 * Uses toml11 for TOML parsing
 * Uses fmt for string formatting
+* Reference for runtime PCSX2

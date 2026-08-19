@@ -32,6 +32,70 @@ import java.util.regex.Pattern;
 
 public class ExportPS2Functions extends GhidraScript {
 
+    // Names and values mirror ps2recomp::MipsOpcodes/SpecialFunctions/GprRegisters.
+    // would be amazing cmake create this script coping the register from the header file
+    private static final int MIPS_INSTRUCTION_SIZE = 4;
+    private static final int MIPS_IMMEDIATE_BITS = 16;
+    private static final int MIPS_IMMEDIATE_SIGN_BIT = 0x8000;
+    private static final long UINT32_MASK = 0xFFFFFFFFL;
+    private static final long OPCODE_MASK = 0x3FL;
+    private static final long REGISTER_MASK = 0x1FL;
+    private static final long IMMEDIATE_MASK = 0xFFFFL;
+    private static final int OPCODE_SHIFT = 26;
+    private static final int RS_SHIFT = 21;
+    private static final int RT_SHIFT = 16;
+    private static final int RD_SHIFT = 11;
+
+    private static final int GPR_ZERO = 0;
+    private static final int GPR_A0 = 4;
+    private static final int GPR_A3 = 7;
+    private static final int GPR_SP = 29;
+    private static final int GPR_RA = 31;
+
+    private static final int OPCODE_SPECIAL = 0x00;
+    private static final int OPCODE_REGIMM = 0x01;
+    private static final int OPCODE_J = 0x02;
+    private static final int OPCODE_JAL = 0x03;
+    private static final int OPCODE_BEQ = 0x04;
+    private static final int OPCODE_BNE = 0x05;
+    private static final int OPCODE_BLEZ = 0x06;
+    private static final int OPCODE_BGTZ = 0x07;
+    private static final int OPCODE_ADDI = 0x08;
+    private static final int OPCODE_ADDIU = 0x09;
+    private static final int OPCODE_SLTI = 0x0A;
+    private static final int OPCODE_SLTIU = 0x0B;
+    private static final int OPCODE_ANDI = 0x0C;
+    private static final int OPCODE_ORI = 0x0D;
+    private static final int OPCODE_XORI = 0x0E;
+    private static final int OPCODE_LUI = 0x0F;
+    private static final int OPCODE_BEQL = 0x14;
+    private static final int OPCODE_BNEL = 0x15;
+    private static final int OPCODE_BLEZL = 0x16;
+    private static final int OPCODE_BGTZL = 0x17;
+    private static final int OPCODE_DADDI = 0x18;
+    private static final int OPCODE_DADDIU = 0x19;
+    private static final int OPCODE_LDL = 0x1A;
+    private static final int OPCODE_LDR = 0x1B;
+    private static final int OPCODE_MMI = 0x1C;
+    private static final int OPCODE_LQ = 0x1E;
+    private static final int OPCODE_SQ = 0x1F;
+    private static final int OPCODE_LB = 0x20;
+    private static final int OPCODE_LH = 0x21;
+    private static final int OPCODE_LWL = 0x22;
+    private static final int OPCODE_LW = 0x23;
+    private static final int OPCODE_LBU = 0x24;
+    private static final int OPCODE_LHU = 0x25;
+    private static final int OPCODE_LWR = 0x26;
+    private static final int OPCODE_LWU = 0x27;
+    private static final int OPCODE_SW = 0x2B;
+    private static final int OPCODE_LL = 0x30;
+    private static final int OPCODE_LLD = 0x34;
+    private static final int OPCODE_LD = 0x37;
+    private static final int OPCODE_SD = 0x3F;
+
+    private static final int SPECIAL_JR = 0x08;
+    private static final int SPECIAL_JALR = 0x09;
+
     // For now I have to copy all functions from the runtime handler list
     private static final Set<String> RUNTIME_HANDLER_NAMES = new HashSet<>(Arrays.asList(
         "FlushCache", "iFlushCache", "ResetEE", "SetMemoryMode", "InitThread", "CreateThread",
@@ -207,6 +271,16 @@ public class ExportPS2Functions extends GhidraScript {
         boolean syntheticEntry = false;
     }
 
+    private static final class AddressTakenCandidate {
+        long sourceOffset;
+        long target;
+
+        AddressTakenCandidate(long sourceOffset, long target) {
+            this.sourceOffset = sourceOffset;
+            this.target = target;
+        }
+    }
+
     private enum ClassificationKind {
         STUB,
         UNTRACKED_STUB,
@@ -224,7 +298,31 @@ public class ExportPS2Functions extends GhidraScript {
     }
 
     private static String hex(long value) {
-        return String.format("0x%08X", value & 0xFFFFFFFFL);
+        return String.format("0x%08X", value & UINT32_MASK);
+    }
+
+    private static int opcode(long raw) {
+        return (int) ((raw >>> OPCODE_SHIFT) & OPCODE_MASK);
+    }
+
+    private static int rs(long raw) {
+        return (int) ((raw >>> RS_SHIFT) & REGISTER_MASK);
+    }
+
+    private static int rt(long raw) {
+        return (int) ((raw >>> RT_SHIFT) & REGISTER_MASK);
+    }
+
+    private static int rd(long raw) {
+        return (int) ((raw >>> RD_SHIFT) & REGISTER_MASK);
+    }
+
+    private static int function(long raw) {
+        return (int) (raw & OPCODE_MASK);
+    }
+
+    private static int immediate(long raw) {
+        return (int) (raw & IMMEDIATE_MASK);
     }
 
     private static String tomlString(String value) {
@@ -466,8 +564,8 @@ public class ExportPS2Functions extends GhidraScript {
             }
 
             MemoryBlock fromBlock = currentProgram.getMemory().getBlock(from);
-            if (fromBlock == null || !fromBlock.isExecute()) {
-                continue; // lets ignore DATA/non-code refs
+            if (fromBlock != null && fromBlock.isExecute()) {
+                return true;
             }
         }
 
@@ -475,7 +573,311 @@ public class ExportPS2Functions extends GhidraScript {
     }
 
     private static String makeAnonymousEntryName(long start) {
-        return String.format("entry_%08x", start & 0xFFFFFFFFL);
+        return String.format("entry_%08x", start & UINT32_MASK);
+    }
+
+    private Long readWord(Address address) {
+        if (address == null) {
+            return null;
+        }
+
+        try {
+            return ((long) currentProgram.getMemory().getInt(address)) & UINT32_MASK;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private Address addressFromOffset(long offset) {
+        try {
+            return currentProgram.getAddressFactory().getDefaultAddressSpace().getAddress(offset & UINT32_MASK);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private boolean looksLikeCallableEntry(long target, boolean allowLeafThunk) {
+        if ((target % MIPS_INSTRUCTION_SIZE) != 0L) {
+            return false;
+        }
+
+        Address address = addressFromOffset(target);
+        if (!isExecutableAddress(address) || currentProgram.getListing().getInstructionAt(address) == null) {
+            return false;
+        }
+
+        for (int index = 0; index < 8; ++index) {
+            Address probe;
+            try {
+                probe = address.add(index * (long) MIPS_INSTRUCTION_SIZE);
+            } catch (Exception ignored) {
+                break;
+            }
+
+            Long rawValue = readWord(probe);
+            if (rawValue == null) {
+                break;
+            }
+
+            long raw = rawValue;
+            int opcode = opcode(raw);
+            int rs = rs(raw);
+            int rt = rt(raw);
+            int immediate = immediate(raw);
+
+            if (index < 4 && (opcode == OPCODE_ADDIU || opcode == OPCODE_DADDIU) && rs == GPR_SP && rt == GPR_SP && (immediate & MIPS_IMMEDIATE_SIGN_BIT) != 0) {
+                return true;
+            }
+
+            if ((opcode == OPCODE_SW || opcode == OPCODE_SD || opcode == OPCODE_SQ) &&
+                rs == GPR_SP && rt == GPR_RA) {
+                return true;
+            }
+
+            if (allowLeafThunk && opcode == OPCODE_SPECIAL &&
+                function(raw) == SPECIAL_JR && rs == GPR_RA) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static boolean writesGpr(long raw, int register) {
+        if (register == GPR_ZERO) {
+            return false;
+        }
+
+        int opcode = opcode(raw);
+        int rt = rt(raw);
+        int rd = rd(raw);
+
+        if (opcode == OPCODE_SPECIAL || opcode == OPCODE_MMI) {
+            return rd == register;
+        }
+        if (opcode == OPCODE_JAL) {
+            return register == GPR_RA;
+        }
+
+        boolean writesRt;
+        switch (opcode) {
+        case OPCODE_ADDI:
+        case OPCODE_ADDIU:
+        case OPCODE_SLTI:
+        case OPCODE_SLTIU:
+        case OPCODE_ANDI:
+        case OPCODE_ORI:
+        case OPCODE_XORI:
+        case OPCODE_LUI:
+        case OPCODE_DADDI:
+        case OPCODE_DADDIU:
+        case OPCODE_LDL:
+        case OPCODE_LDR:
+        case OPCODE_LQ:
+        case OPCODE_LB:
+        case OPCODE_LH:
+        case OPCODE_LWL:
+        case OPCODE_LW:
+        case OPCODE_LBU:
+        case OPCODE_LHU:
+        case OPCODE_LWR:
+        case OPCODE_LWU:
+        case OPCODE_LL:
+        case OPCODE_LLD:
+        case OPCODE_LD:
+            writesRt = true;
+            break;
+        default:
+            writesRt = false;
+            break;
+        }
+        return writesRt && rt == register;
+    }
+
+    private static boolean isControlTransfer(long raw) {
+        int opcode = opcode(raw);
+        switch (opcode) {
+        case OPCODE_REGIMM:
+        case OPCODE_J:
+        case OPCODE_JAL:
+        case OPCODE_BEQ:
+        case OPCODE_BNE:
+        case OPCODE_BLEZ:
+        case OPCODE_BGTZ:
+        case OPCODE_BEQL:
+        case OPCODE_BNEL:
+        case OPCODE_BLEZL:
+        case OPCODE_BGTZL:
+            return true;
+        default:
+            break;
+        }
+
+        if (opcode != OPCODE_SPECIAL) {
+            return false;
+        }
+
+        int function = function(raw);
+        return function == SPECIAL_JR || function == SPECIAL_JALR;
+    }
+
+    private static boolean isCallInstruction(long raw) {
+        int opcode = opcode(raw);
+        return opcode == OPCODE_JAL ||
+               (opcode == OPCODE_SPECIAL && function(raw) == SPECIAL_JALR);
+    }
+
+    private void addSyntheticEntry(List<FunctionRecord> records, Set<Long> existingStarts, long target) {
+        target &= UINT32_MASK;
+        if (!existingStarts.add(target)) {
+            return;
+        }
+
+        FunctionRecord record = new FunctionRecord();
+        record.name = makeAnonymousEntryName(target);
+        record.start = target;
+        record.syntheticEntry = true;
+        records.add(record);
+    }
+
+    private void collectMaterializedCodeEntries(List<FunctionRecord> records, Set<Long> existingStarts) {
+        AddressSet executableAddresses = new AddressSet();
+        for (MemoryBlock block : currentProgram.getMemory().getBlocks()) {
+            if (block != null && block.isExecute()) {
+                executableAddresses.addRange(block.getStart(), block.getEnd());
+            }
+        }
+
+        InstructionIterator instructions = currentProgram.getListing().getInstructions(executableAddresses, true);
+        while (instructions.hasNext() && !monitor.isCancelled()) {
+            Instruction instruction = instructions.next();
+            if (instruction == null) {
+                continue;
+            }
+
+            Long upperRawValue = readWord(instruction.getAddress());
+            if (upperRawValue == null) {
+                continue;
+            }
+
+            long upperRaw = upperRawValue;
+            if (opcode(upperRaw) != OPCODE_LUI) {
+                continue;
+            }
+
+            int upperRegister = rt(upperRaw);
+            if (upperRegister == GPR_ZERO) {
+                continue;
+            }
+
+            long upperValue = ((long) immediate(upperRaw)) << MIPS_IMMEDIATE_BITS;
+            boolean sawControlTransfer = false;
+            boolean sawCallTransfer = false;
+
+            for (int lookahead = 1; lookahead <= 4; ++lookahead) {
+                Address lowAddress;
+                try {
+                    lowAddress = instruction.getAddress().add(lookahead * (long) MIPS_INSTRUCTION_SIZE);
+                } catch (Exception ignored) {
+                    break;
+                }
+
+                Long lowRawValue = readWord(lowAddress);
+                if (lowRawValue == null) {
+                    break;
+                }
+
+                long lowRaw = lowRawValue;
+                int opcode = opcode(lowRaw);
+                int rs = rs(lowRaw);
+                int rt = rt(lowRaw);
+
+                if ((opcode == OPCODE_ADDIU || opcode == OPCODE_ORI || opcode == OPCODE_DADDIU) &&
+                    rs == upperRegister) {
+                    int immediate = immediate(lowRaw);
+                    long target;
+                    if (opcode == OPCODE_ORI) {
+                        target = upperValue | immediate;
+                    } else {
+                        target = (upperValue + (short) immediate) & UINT32_MASK;
+                    }
+
+                    Long nextRaw = readWord(addressFromOffset(
+                        lowAddress.getOffset() + MIPS_INSTRUCTION_SIZE));
+                    boolean followedByCall = nextRaw != null && isCallInstruction(nextRaw);
+                    boolean materializedAsCallArgument =
+                        rt >= GPR_A0 && rt <= GPR_A3 && (sawCallTransfer || followedByCall);
+
+                    if (looksLikeCallableEntry(target, materializedAsCallArgument)) {
+                        addSyntheticEntry(records, existingStarts, target);
+                    }
+                    break;
+                }
+
+                if (sawControlTransfer) {
+                    break;
+                }
+                if (writesGpr(lowRaw, upperRegister)) {
+                    break;
+                }
+                if (isControlTransfer(lowRaw)) {
+                    sawControlTransfer = true;
+                    sawCallTransfer = isCallInstruction(lowRaw);
+                }
+            }
+        }
+    }
+
+    private static boolean isDedicatedFunctionPointerBlock(String name) {
+        return ".ctors".equals(name) || ".dtors".equals(name) ||
+               ".init_array".equals(name) || ".fini_array".equals(name);
+    }
+
+    private void collectDataFunctionPointerEntries(List<FunctionRecord> records, Set<Long> existingStarts) {
+        final long clusterDistanceBytes = 32L;
+
+        for (MemoryBlock block : currentProgram.getMemory().getBlocks()) {
+            if (block == null || block.isExecute() || !block.isInitialized() ||
+                block.getSize() < MIPS_INSTRUCTION_SIZE) {
+                continue;
+            }
+
+            List<AddressTakenCandidate> candidates = new ArrayList<>();
+            for (long offset = 0;
+                 offset + MIPS_INSTRUCTION_SIZE <= block.getSize() && !monitor.isCancelled();
+                 offset += MIPS_INSTRUCTION_SIZE) {
+                Address source;
+                try {
+                    source = block.getStart().add(offset);
+                } catch (Exception ignored) {
+                    break;
+                }
+
+                Long target = readWord(source);
+                if (target != null && looksLikeCallableEntry(target, true)) {
+                    candidates.add(new AddressTakenCandidate(offset, target));
+                }
+            }
+
+            boolean dedicatedPointerBlock = isDedicatedFunctionPointerBlock(block.getName());
+            for (int index = 0; index < candidates.size(); ++index) {
+                AddressTakenCandidate candidate = candidates.get(index);
+                boolean clustered = dedicatedPointerBlock;
+
+                if (index > 0 &&
+                    candidate.sourceOffset - candidates.get(index - 1).sourceOffset <= clusterDistanceBytes) {
+                    clustered = true;
+                }
+                if (index + 1 < candidates.size() &&
+                    candidates.get(index + 1).sourceOffset - candidate.sourceOffset <= clusterDistanceBytes) {
+                    clustered = true;
+                }
+
+                if (clustered) {
+                    addSyntheticEntry(records, existingStarts, candidate.target);
+                }
+            }
+        }
     }
 
     private List<FunctionRecord> collectExecutableLabelRecords(List<FunctionRecord> functionRecords) {
@@ -554,6 +956,13 @@ public class ExportPS2Functions extends GhidraScript {
             labelRecords.add(record);
             existingStarts.add(start);
         }
+
+        // Ghidra does not always promote function pointers to CALL references,
+        // especially when the low half is produced in a MIPS delay slot. Mirror
+        // the stripped-ELF fallback used by ElfParser so the CSV still contains
+        // callback and vtable entries that are only address-taken.
+        collectMaterializedCodeEntries(labelRecords, existingStarts);
+        collectDataFunctionPointerEntries(labelRecords, existingStarts);
 
         if (labelRecords.isEmpty()) {
             return labelRecords;

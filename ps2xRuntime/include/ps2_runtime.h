@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <vector>
 #include <string>
+#include <string_view>
 #include <functional>
 #if defined(_MSC_VER)
 #include <intrin.h>
@@ -288,6 +289,9 @@ public:
     void run();
 
     void setIopPluginSearchPaths(std::vector<std::filesystem::path> paths);
+    [[nodiscard]] ps2x::iop::ModuleLoadResult loadIopModule(std::string_view path, const void *arguments = nullptr, uint32_t argumentSize = 0);
+    [[nodiscard]] ps2x::iop::ModuleLoadResult loadIopModuleBuffer(uint32_t guestAddress, const void *arguments = nullptr, uint32_t argumentSize = 0);
+    [[nodiscard]] bool stopIopModule(int32_t moduleId, int32_t *result = nullptr);
     [[nodiscard]] ps2x::iop::DebugSnapshot iopDebugSnapshot() const;
 
     using DebugUiCallback = void (*)(PS2Runtime &runtime, void *userData);
@@ -463,8 +467,10 @@ private:
     void HandleIntegerOverflow(R5900Context *ctx);
 
     [[nodiscard]] ps2x::iop::RpcAbi selectIopRpcAbi(const ps2x::iop::RpcAbiRequest &request) const;
+    [[nodiscard]] bool canBindIopRpc(uint32_t sid) const noexcept;
     [[nodiscard]] ps2x::iop::RpcResult handleIopRpc(uint8_t *rdram, R5900Context *ctx, ps2x::iop::RpcRequest request);
     void notifyIopSifTransfer(uint8_t *rdram, const ps2x::iop::SifTransfer &transfer);
+    void advanceIopEeCycles(uint64_t eeCycles) noexcept;
     void resetIop();
 
     friend class PS2IopTransport;

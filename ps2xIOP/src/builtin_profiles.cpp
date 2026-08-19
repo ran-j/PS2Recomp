@@ -71,6 +71,7 @@ namespace ps2x::iop::detail
                 .zeroReceiveBuffer = true,
                 .signalNowaitCompletion = true,
                 .completeQueuedPlayStreams = true,
+                .overridePhysicalServer = true,
                 .suppressedCompletionCallbacks = {},
             };
         }
@@ -106,7 +107,6 @@ namespace ps2x::iop::detail
     std::vector<ProfileDefinition> createBuiltinProfiles()
     {
         std::vector<ProfileDefinition> profiles;
-
         profiles.push_back({
             "recvx-us",
             "builtin",
@@ -120,30 +120,31 @@ namespace ps2x::iop::detail
             },
         });
 
-        profiles.push_back({
-            "lotr-two-towers-us",
-            "builtin",
-            {.elfName = "SLUS_205.78"},
-            [](IopHost &host, const GameIdentity &)
-            {
-                ServiceList services;
-                services.emplace_back(createClFileService(host, lotrClFileBindings()));
-                services.emplace_back(createSoundUpdateStubService(host, lotrSoundBindings()));
-                return services;
-            },
-        });
+        // TODO remove this on next release
+        // profiles.push_back({
+        //     "lotr-two-towers-us",
+        //     "builtin",
+        //     {.elfName = "SLUS_205.78"},
+        //     [](IopHost &host, const GameIdentity &)
+        //     {
+        //         ServiceList services;
+        //         services.emplace_back(createClFileService(host, lotrClFileBindings()));
+        //         services.emplace_back(createSoundUpdateStubService(host, lotrSoundBindings()));
+        //         return services;
+        //     },
+        // });
 
-        profiles.push_back({
-            "fatal-frame-us",
-            "builtin",
-            {.elfName = "SLUS_203.88"},
-            [](IopHost &host, const GameIdentity &)
-            {
-                ServiceList services;
-                services.emplace_back(createSdrdrvService(host, fatalFrameSdrdrvBindings()));
-                return services;
-            },
-        });
+        // profiles.push_back({
+        //     "fatal-frame-us",
+        //     "builtin",
+        //     {.elfName = "SLUS_203.88"},
+        //     [](IopHost &host, const GameIdentity &)
+        //     {
+        //         ServiceList services;
+        //         services.emplace_back(createSdrdrvService(host, fatalFrameSdrdrvBindings()));
+        //         return services;
+        //     },
+        // });
 
         return profiles;
     }

@@ -26,6 +26,11 @@ namespace ps2x::iop::detail
             return RpcAbi::RuntimeDefault;
         }
 
+        [[nodiscard]] virtual bool overridesPhysicalRpcServer() const noexcept
+        {
+            return false;
+        }
+
         [[nodiscard]] virtual RpcResult handleRpc(const RpcRequest &request) = 0;
 
         virtual void onSifTransfer(const SifTransfer &transfer)

@@ -39,6 +39,11 @@ namespace ps2x::iop::detail
                 return m_sids;
             }
 
+            [[nodiscard]] bool overridesPhysicalRpcServer() const noexcept override
+            {
+                return m_bindings.overridePhysicalServer;
+            }
+
             void reset() override
             {
                 std::lock_guard<std::mutex> lock(m_mutex);

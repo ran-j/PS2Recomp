@@ -3,9 +3,19 @@ cmake_minimum_required(VERSION 3.21)
 project(ps2xIOP LANGUAGES CXX)
 
 option(PS2X_IOP_ENABLE_PLUGINS "Enable dynamic ps2xIOP plugins" OFF)
+option(PS2X_IOP_BUILD_TESTS "Build ps2xIOP emulator smoke tests" OFF)
 
 add_library(ps2_iop STATIC
     src/iop_subsystem.cpp
+    src/emulator/iop_emulator.cpp
+    src/emulator/iop_cdvd.cpp
+    src/emulator/iop_cpu.cpp
+    src/emulator/iop_imports.cpp
+    src/emulator/iop_kernel.cpp
+    src/emulator/iop_memory.cpp
+    src/emulator/iop_module_loader.cpp
+    src/emulator/iop_rpc.cpp
+    src/emulator/iop_sysclib.cpp
     src/builtin_profiles.cpp
     src/plugin_loader.cpp
     src/modules/dbcman.cpp
@@ -36,6 +46,13 @@ target_compile_definitions(ps2_iop PUBLIC
 
 if(PS2X_IOP_ENABLE_PLUGINS AND UNIX AND NOT APPLE)
     target_link_libraries(ps2_iop PRIVATE ${CMAKE_DL_LIBS})
+endif()
+
+if(PS2X_IOP_BUILD_TESTS)
+    enable_testing()
+    add_executable(ps2_iop_emulator_tests tests/iop_emulator_tests.cpp)
+    target_link_libraries(ps2_iop_emulator_tests PRIVATE ps2_iop)
+    add_test(NAME ps2_iop_emulator_tests COMMAND ps2_iop_emulator_tests)
 endif()
 
 install(TARGETS ps2_iop

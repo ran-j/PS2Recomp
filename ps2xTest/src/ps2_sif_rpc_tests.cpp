@@ -319,6 +319,39 @@ void register_ps2_sif_rpc_tests()
 {
     MiniTest::Case("PS2SifRpc", [](TestCase &tc)
     {
+        tc.Run("SifInitRpc does not reset the running IOP", [](TestCase &t)
+        {
+            TestEnv env;
+
+            env.runtime.eeScheduler().accountCycles(80u);
+            const uint64_t cyclesBeforeInit = env.runtime.iopDebugSnapshot().emulatorCycles;
+            t.IsTrue(cyclesBeforeInit != 0u, "IOP cycle counter should advance before RPC initialization");
+
+            SifInitRpc(env.rdram.data(), &env.ctx, &env.runtime);
+
+            t.Equals(env.runtime.iopDebugSnapshot().emulatorCycles, cyclesBeforeInit,
+                     "SifInitRpc must not reboot or reset the IOP");
+        });
+
+        tc.Run("emulated RPC bind waits for a registered IOP server", [](TestCase &t)
+        {
+            TestEnv env;
+
+            constexpr uint32_t kClientAddr = 0x00021F00u;
+            constexpr uint32_t kUnregisteredSid = 0x13572468u;
+
+            SifInitRpc(env.rdram.data(), &env.ctx, &env.runtime);
+            setRegU32(env.ctx, 4, kClientAddr);
+            setRegU32(env.ctx, 5, kUnregisteredSid);
+            setRegU32(env.ctx, 6, 0u);
+            SifBindRpc(env.rdram.data(), &env.ctx, &env.runtime);
+
+            t.Equals(getRegS32(env.ctx, 2), KE_OK, "SifBindRpc transport should complete");
+            const SifRpcClientData client = readGuestStruct<SifRpcClientData>(env.rdram.data(), kClientAddr);
+            t.Equals(client.server, 0u,
+                     "client server pointer must stay null until the emulated IRX registers its SID");
+        });
+
         tc.Run("register bind call updates descriptors and payload", [](TestCase &t)
         {
             TestEnv env;
@@ -826,7 +859,7 @@ void register_ps2_sif_rpc_tests()
             t.Equals(getRegS32(env.ctx, 2), 0, "RECVX snddrv client should no longer be RPC-busy");
         });
 
-        tc.Run("bind before register creates placeholder then remaps", [](TestCase &t)
+        tc.Run("hybrid bind before register waits then remaps", [](TestCase &t)
         {
             TestEnv env;
 
@@ -846,11 +879,9 @@ void register_ps2_sif_rpc_tests()
             t.Equals(getRegS32(env.ctx, 2), KE_OK, "initial bind without registered server should still succeed");
 
             const SifRpcClientData clientBeforeRegister = readGuestStruct<SifRpcClientData>(env.rdram.data(), kClientAddr);
-            t.IsTrue(clientBeforeRegister.server != 0u, "bind should allocate placeholder server when sid is missing");
-            t.IsTrue(clientBeforeRegister.server >= 0x01F10000u && clientBeforeRegister.server < 0x01F20000u,
-                     "placeholder server should come from rpc server pool");
-            t.Equals(clientBeforeRegister.buf, 0u, "placeholder server starts with empty buf");
-            t.Equals(clientBeforeRegister.cbuf, 0u, "placeholder server starts with empty cbuf");
+            t.Equals(clientBeforeRegister.server, 0u, "bind must wait until a hybrid backend owns the SID");
+            t.Equals(clientBeforeRegister.buf, 0u, "unbound client starts with empty buf");
+            t.Equals(clientBeforeRegister.cbuf, 0u, "unbound client starts with empty cbuf");
 
             setRegU32(env.ctx, 4, kQdAddr);
             setRegU32(env.ctx, 5, 0x44u);
@@ -873,7 +904,7 @@ void register_ps2_sif_rpc_tests()
             t.Equals(clientAfterRegister.server, kSdAddr, "register should remap pre-bound clients to concrete server descriptor");
             t.Equals(clientAfterRegister.buf, kServerBufAddr, "register should update client buf from server descriptor");
             t.Equals(clientAfterRegister.cbuf, kServerCbufAddr, "register should update client cbuf from server descriptor");
-            t.IsTrue(clientAfterRegister.server != clientBeforeRegister.server, "client server pointer should switch from placeholder to real server");
+            t.IsTrue(clientAfterRegister.server != clientBeforeRegister.server, "client server pointer should switch from unbound to real server");
 
             setRegU32(env.ctx, 4, kSdAddr);
             setRegU32(env.ctx, 5, kQdAddr);
