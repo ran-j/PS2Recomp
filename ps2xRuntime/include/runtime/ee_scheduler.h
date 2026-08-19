@@ -367,6 +367,7 @@ private:
     void assertExecutor() const;
     [[nodiscard]] int allocateThreadId();
     GuestThread &acquireInvocationThread();
+    void reserveGuestStackFromAsyncPool(uint32_t guestStackBase);
     void enqueueReady(GuestThread &thread, bool front = false);
     void removeReady(GuestThread &thread);
     [[nodiscard]] GuestThread *selectReady();

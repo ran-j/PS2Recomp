@@ -414,7 +414,24 @@ void EeScheduler::setupCurrentThread(uint32_t stack, uint32_t stackSize, uint32_
     target->stack = stack;
     target->stackSize = stackSize;
     target->gp = gp;
+    reserveGuestStackFromAsyncPool(stack);
     publishSnapshot();
+}
+
+// Invocation stacks are carved from the top of RAM, where the EE kernel also
+// puts a game's initial stack. Keep the pool below any guest stack.
+void EeScheduler::reserveGuestStackFromAsyncPool(uint32_t guestStackBase)
+{
+    if (guestStackBase == 0u)
+    {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(m_runtime.m_asyncCallbackStackMutex);
+    if (guestStackBase > m_runtime.m_asyncCallbackStackFloor &&
+        guestStackBase < m_runtime.m_asyncCallbackStackTop)
+    {
+        m_runtime.m_asyncCallbackStackTop = guestStackBase;
+    }
 }
 
 int EeScheduler::createThread(const EeThreadCreateParams &params)
@@ -443,6 +460,7 @@ int EeScheduler::createThread(const EeThreadCreateParams &params)
     thread.currentPriority = params.priority;
     thread.status = EeThreadStatus::Dormant;
     m_threads.emplace(id, std::move(thread));
+    reserveGuestStackFromAsyncPool(params.stack);
     publishSnapshot();
     return id;
 }
@@ -1278,7 +1296,9 @@ void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
         SET_GPR_U32(&invocation.context, 4, cause);
         SET_GPR_U32(&invocation.context, 5, handler.argument);
         SET_GPR_U32(&invocation.context, 28, handler.gp);
-        SET_GPR_U32(&invocation.context, 29, handler.sp);
+        // Not handler.sp: that thread has moved on. $sp = 0 makes the
+        // dispatcher hand out an invocation stack, as the EE does.
+        SET_GPR_U32(&invocation.context, 29, 0u);
         SET_GPR_U32(&invocation.context, 31, 0u);
         queueInvocation(std::move(invocation));
     }
@@ -1888,7 +1908,8 @@ void EeScheduler::processEvent(const EeEvent &event)
             invocation.context.pc = m_gsVSyncCallback;
             SET_GPR_U32(&invocation.context, 4, static_cast<uint32_t>(m_vsyncTick));
             SET_GPR_U32(&invocation.context, 28, m_gsVSyncCallbackGp);
-            SET_GPR_U32(&invocation.context, 29, m_gsVSyncCallbackSp);
+            // See dispatchIrq.
+            SET_GPR_U32(&invocation.context, 29, 0u);
             SET_GPR_U32(&invocation.context, 31, 0u);
             queueInvocation(std::move(invocation));
         }
@@ -1918,7 +1939,8 @@ void EeScheduler::processEvent(const EeEvent &event)
         SET_GPR_U32(&invocation.context, 5, static_cast<uint32_t>(alarm.ticks));
         SET_GPR_U32(&invocation.context, 6, alarm.argument);
         SET_GPR_U32(&invocation.context, 28, alarm.gp);
-        SET_GPR_U32(&invocation.context, 29, alarm.sp);
+        // See dispatchIrq.
+        SET_GPR_U32(&invocation.context, 29, 0u);
         SET_GPR_U32(&invocation.context, 31, 0u);
         queueInvocation(std::move(invocation));
         break;
