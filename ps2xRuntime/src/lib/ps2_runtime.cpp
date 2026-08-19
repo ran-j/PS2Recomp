@@ -5,6 +5,7 @@
 #include "game_overrides.h"
 #include "ps2_runtime_macros.h"
 #include "runtime/gs/gs_frontend.h"
+#include "runtime/ps2_pad_host.h"
 #include "runtime/ee_scheduler.h"
 #include "ThreadNaming.h"
 #include "Kernel/Stubs/Audio.h"
@@ -19,6 +20,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <chrono>
@@ -673,6 +675,28 @@ bool PS2Runtime::syncCoreSubsystems()
     return true;
 }
 
+// Grow the default window to an exact 2x of the PS2 output when the monitor has
+// room, so it opens both larger and integer-scaled. Resizable either way.
+static void applyDefaultWindowScale()
+{
+    constexpr int kScale = 2;
+    const int monitor = GetCurrentMonitor();
+    const int monitorWidth = GetMonitorWidth(monitor);
+    const int monitorHeight = GetMonitorHeight(monitor);
+    const int width = HOST_WINDOW_WIDTH * kScale;
+    const int height = HOST_WINDOW_HEIGHT * kScale;
+    if (monitorWidth <= 0 || monitorHeight <= 0 ||
+        width * 10 > monitorWidth * 9 || height * 10 > monitorHeight * 9)
+    {
+        return;
+    }
+
+    const Vector2 origin = GetMonitorPosition(monitor);
+    SetWindowSize(width, height);
+    SetWindowPosition(static_cast<int>(origin.x) + (monitorWidth - width) / 2,
+                      static_cast<int>(origin.y) + (monitorHeight - height) / 2);
+}
+
 bool PS2Runtime::initialize(const char *title)
 {
     try
@@ -702,6 +726,9 @@ bool PS2Runtime::initialize(const char *title)
 #else
         SetConfigFlags(FLAG_WINDOW_RESIZABLE);
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
+        // Escape is bound to Circle; without this raylib also closes on it.
+        SetExitKey(KEY_NULL);
+        applyDefaultWindowScale();
         InitAudioDevice();
         m_audioBackend.setAudioReady(IsAudioDeviceReady());
 #endif
@@ -2391,6 +2418,8 @@ void PS2Runtime::run()
     Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLANK);
     Texture2D frameTex = LoadTextureFromImage(blank);
     UnloadImage(blank);
+    int frameTexFilter = TEXTURE_FILTER_POINT;
+    SetTextureFilter(frameTex, frameTexFilter);
 
     std::atomic<bool> gameThreadFinished{false};
 
@@ -2459,13 +2488,24 @@ void PS2Runtime::run()
         const float srcHeight = static_cast<float>(std::max<uint32_t>(1u, presentHeight));
         const float screenWidth = static_cast<float>(GetScreenWidth());
         const float screenHeight = static_cast<float>(GetScreenHeight());
-        const float scale = std::min(screenWidth / srcWidth, screenHeight / srcHeight);
+        const float fitScale = std::min(screenWidth / srcWidth, screenHeight / srcHeight);
+        // Snap upscales to an integer multiple: a fractional nearest-neighbour scale
+        // duplicates some pixel columns and not others, which shreds 1px font stems.
+        const bool integerScale = fitScale >= 1.0f;
+        const float scale = integerScale ? std::floor(fitScale) : fitScale;
+        const int wantedFilter = integerScale ? TEXTURE_FILTER_POINT : TEXTURE_FILTER_BILINEAR;
+        if (wantedFilter != frameTexFilter)
+        {
+            SetTextureFilter(frameTex, wantedFilter);
+            frameTexFilter = wantedFilter;
+        }
         const float dstWidth = srcWidth * scale;
         const float dstHeight = srcHeight * scale;
         const Rectangle srcRect{0.0f, 0.0f, srcWidth, srcHeight};
+        // Whole-pixel origin, else centring can land the quad on a half pixel.
         const Rectangle dstRect{
-            (screenWidth - dstWidth) * 0.5f,
-            (screenHeight - dstHeight) * 0.5f,
+            std::floor((screenWidth - dstWidth) * 0.5f),
+            std::floor((screenHeight - dstHeight) * 0.5f),
             dstWidth,
             dstHeight};
         DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
@@ -2474,6 +2514,7 @@ void PS2Runtime::run()
             m_debugUiDrawCallback(*this, m_debugUiUserData);
         }
         EndDrawing();
+        ps2PadPollHost(); // EndDrawing() polled raylib input; latch edges for the EE thread
 
         if (WindowShouldClose())
         {
