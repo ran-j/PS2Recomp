@@ -1920,6 +1920,9 @@ namespace ps2recomp
 
         uint32_t start = function.start;
         uint32_t end = function.end;
+        // A branch at the mapped end still owns the next word as its delay
+        // slot; without this the emitter substitutes a NOP and loses it.
+        bool delaySlotExtended = false;
 
         for (uint32_t address = start; address < end; address += 4)
         {
@@ -1977,6 +1980,12 @@ namespace ps2recomp
                 }
 
                 instructions.push_back(inst);
+
+                if (!delaySlotExtended && inst.hasDelaySlot && address + 4u == end)
+                {
+                    delaySlotExtended = true;
+                    end += 4u;
+                }
             }
             catch (const std::exception &e)
             {
