@@ -420,22 +420,6 @@ namespace
         return {(smode2 & 0x1ull) != 0ull, ((smode2 >> 1) & 0x1ull) != 0ull};
     }
 
-    void applyFieldPresentation(std::vector<uint8_t> &pixels, uint32_t width, uint32_t height, bool oddField)
-    {
-        if (pixels.empty() || width == 0u || height < 2u)
-            return;
-        const std::vector<uint8_t> source = pixels;
-        for (uint32_t y = 0; y < height; ++y)
-        {
-            uint32_t sourceY = ((y >> 1u) << 1u) + (oddField ? 1u : 0u);
-            if (sourceY >= height)
-                sourceY = height - 1u;
-            std::memcpy(pixels.data() + y * kHostFrameWidth * 4u,
-                        source.data() + sourceY * kHostFrameWidth * 4u,
-                        width * 4u);
-        }
-    }
-
     void normalizePresentationAlpha(std::vector<uint8_t> &pixels, uint32_t width, uint32_t height)
     {
         for (uint32_t y = 0; y < height; ++y)
@@ -1687,7 +1671,8 @@ bool GSCpuBackend::CopyFrameToHostRgba(const GSFrameReg &frame,
                                        bool useLocalMemoryLayout,
                                        bool frameBaseIsPages,
                                        uint32_t sourceOriginX,
-                                       uint32_t sourceOriginY) const
+                                       uint32_t sourceOriginY,
+                                       bool doubleSourceRows) const
 {
     if (!m_vram || m_vramSize == 0u)
         return false;
@@ -1705,7 +1690,7 @@ bool GSCpuBackend::CopyFrameToHostRgba(const GSFrameReg &frame,
         for (uint32_t x = 0; x < width; ++x)
         {
             const uint32_t sx = sourceOriginX + x;
-            const uint32_t sy = sourceOriginY + y;
+            const uint32_t sy = sourceOriginY + (doubleSourceRows ? (y >> 1u) : y);
             if (frame.psm == GS_PSM_CT32 || frame.psm == GS_PSM_CT24)
             {
                 uint32_t color = 0u;
@@ -1776,12 +1761,14 @@ PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationReque
     PresentationFrame result{};
     const GSPmodeState pmode = decodePmode(request.pmode);
     const GSSmode2State smode2 = decodeSMode2(request.smode2);
-    const bool fieldMode = smode2.interlaced && !smode2.frameMode;
-    const bool oddField = (request.vsyncTick & 1ull) != 0ull;
+    // SMODE2 FFMD=1 (FRAME) reads a half-height buffer whole once per field, so the
+    // woven host frame line-doubles it. FFMD=0 (FIELD) buffers a full frame whose
+    // two fields are alternate buffer rows: weaving is just reading every row.
+    const bool halfHeightSource = smode2.interlaced && smode2.frameMode;
     const GSFrameReg displayFrame1 = decodeDisplayFrame(request.dispfb1);
     const GSFrameReg displayFrame2 = decodeDisplayFrame(request.dispfb2);
-    const GSDisplayReadOrigin origin1 = decodeDisplayReadOrigin(request.dispfb1);
-    const GSDisplayReadOrigin origin2 = decodeDisplayReadOrigin(request.dispfb2);
+    GSDisplayReadOrigin origin1 = decodeDisplayReadOrigin(request.dispfb1);
+    GSDisplayReadOrigin origin2 = decodeDisplayReadOrigin(request.dispfb2);
     uint32_t width1 = 0u, height1 = 0u, width2 = 0u, height2 = 0u;
     decodeDisplaySize(request.display1, width1, height1);
     decodeDisplaySize(request.display2, width2, height2);
@@ -1789,6 +1776,14 @@ PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationReque
     const bool valid2 = pmode.enableCrt2 && hasDisplaySetup(request.display2, displayFrame2);
     if (!valid1 && !valid2)
         return result;
+
+    // Both circuits on one buffer a single row apart is a deliberate flicker filter;
+    // snapping them together drops the half-row blur, as PCSX2 does by default.
+    const uint32_t originGap = origin1.y > origin2.y ? origin1.y - origin2.y : origin2.y - origin1.y;
+    const bool sameReadSource = displayFrame1.fbp == displayFrame2.fbp && displayFrame1.fbw == displayFrame2.fbw &&
+                                displayFrame1.psm == displayFrame2.psm && origin1.x == origin2.x;
+    if (valid1 && valid2 && sameReadSource && originGap == 1u)
+        origin1.y = origin2.y = std::min(origin1.y, origin2.y);
 
     auto copySource = [&](const GSFrameReg &displayFrame,
                           const GSDisplayReadOrigin &origin,
@@ -1805,12 +1800,12 @@ PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationReque
         usedPreferred = false;
         if (allowPreferred && request.hasPreferredSource && request.preferredDestFbp == displayFrame.fbp &&
             (request.preferredSource.fbw != 0u || request.preferredSource.fbp != displayFrame.fbp) &&
-            CopyFrameToHostRgba(request.preferredSource, width, height, pixels, preserveAlpha, true, false, 0u, 0u))
+            CopyFrameToHostRgba(request.preferredSource, width, height, pixels, preserveAlpha, true, false, 0u, 0u, halfHeightSource))
         {
             selected = request.preferredSource;
             usedPreferred = true;
         }
-        if (pixels.empty() && !CopyFrameToHostRgba(displayFrame, width, height, pixels, preserveAlpha, true, true, origin.x, origin.y))
+        if (pixels.empty() && !CopyFrameToHostRgba(displayFrame, width, height, pixels, preserveAlpha, true, true, origin.x, origin.y, halfHeightSource))
             return false;
 
         if (!usedPreferred && displayFrame.fbp == 0u && countNonBlackPixels(pixels, width, height) == 0u)
@@ -1820,7 +1815,7 @@ PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationReque
                 if (candidate.fbp == selected.fbp && candidate.fbw == selected.fbw && candidate.psm == selected.psm)
                     continue;
                 std::vector<uint8_t> candidatePixels;
-                if (!CopyFrameToHostRgba(candidate, width, height, candidatePixels, preserveAlpha, true, true, 0u, 0u))
+                if (!CopyFrameToHostRgba(candidate, width, height, candidatePixels, preserveAlpha, true, true, 0u, 0u, halfHeightSource))
                     continue;
                 if (countNonBlackPixels(candidatePixels, width, height) == 0u)
                     continue;
@@ -1870,8 +1865,6 @@ PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationReque
                     dst[3] = pmode.amod ? dst[3] : src[3];
                 }
             normalizePresentationAlpha(result.pixels, result.width, result.height);
-            if (fieldMode)
-                applyFieldPresentation(result.pixels, result.width, result.height, oddField);
             result.displayFbp = displayFrame1.fbp;
             result.sourceFbp = selected1.fbp;
             return result;
@@ -1885,8 +1878,6 @@ PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationReque
     GSFrameReg selected = displayFrame;
     if (!copySource(displayFrame, origin, result.width, result.height, true, false, selected, result.pixels, result.usedPreferred))
         return {};
-    if (fieldMode)
-        applyFieldPresentation(result.pixels, result.width, result.height, oddField);
     normalizePresentationAlpha(result.pixels, result.width, result.height);
     result.displayFbp = displayFrame.fbp;
     result.sourceFbp = selected.fbp;

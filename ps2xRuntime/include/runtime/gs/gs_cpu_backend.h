@@ -56,7 +56,8 @@ private:
                              bool useLocalMemoryLayout,
                              bool frameBaseIsPages,
                              uint32_t sourceOriginX,
-                             uint32_t sourceOriginY) const;
+                             uint32_t sourceOriginY,
+                             bool doubleSourceRows = false) const;
 
     using WriteVramFunc = std::function<void(uint8_t *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t)>;
     using ReadVramFunc = std::function<uint32_t(uint8_t *, uint32_t, uint32_t, uint32_t, uint32_t)>;
