@@ -540,7 +540,7 @@ void register_code_generator_tests()
                   "unresolved JR should not pretend it has a resolved local jump table");
     });
 
-    tc.Run("unresolved JALR marks internal labels as indirect fallback resume entries", [](TestCase &t) {
+    tc.Run("unresolved JALR resumes after the call without promoting the function", [](TestCase &t) {
         Function func;
         func.name = "unresolved_jalr_fallback";
         func.start = 0x3200;
@@ -559,10 +559,21 @@ void register_code_generator_tests()
         CodeGenerator gen({}, {});
         CodeGenerator::AnalysisResult analysis = gen.collectInternalBranchTargets(func, instructions);
 
-        t.IsTrue(analysis.indirectFallbackEntryPoints.contains(0x320Cu),
-                 "unresolved JALR should register internal labels as resumable entries for the owning function");
+        // JALR is a call: it returns past the delay slot, so 0x320C is the only
+        // address in this function that has to be reachable from outside.
+        t.IsTrue(analysis.resumeEntryPoints.contains(0x320Cu),
+                 "unresolved JALR should mark its return pc as resumable");
         t.IsTrue(analysis.entryPoints.contains(0x320Cu),
-                 "unresolved JALR fallback targets should still emit labels in the owner");
+                 "unresolved JALR resume pc should still emit a label in the owner");
+
+        // Both sets feed the same owner resume-target list, so the return pc is
+        // registered either way; what must not happen is the whole-function
+        // promotion reserved for jumps that could land anywhere.
+        t.IsFalse(analysis.indirectFallbackEntryPoints.contains(0x3210u),
+                  "an indirect call must not promote unrelated instructions to entry points");
+        t.IsFalse(analysis.indirectFallbackEntryPoints.contains(0x3200u),
+                  "an indirect call must not promote the function start to a fallback entry");
+
         t.IsFalse(analysis.jumpTableTargets.contains(0x3204u),
                   "unresolved JALR should not pretend it has a resolved local jump table");
     });
