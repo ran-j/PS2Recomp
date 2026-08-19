@@ -1765,6 +1765,17 @@ void EeScheduler::processPendingEvents()
             dispatchIrq(false, 9u + timer);
         }
     }
+    // INTC VIF0 (4) and VIF1 (5), raised by a VIFcode carrying the i bit.
+    const uint32_t vifInterrupts = m_runtime.memory().takePendingVifInterrupts();
+    if ((vifInterrupts & 0x1u) != 0u)
+    {
+        dispatchIrq(false, 4u);
+    }
+    if ((vifInterrupts & 0x2u) != 0u)
+    {
+        dispatchIrq(false, 5u);
+    }
+
     std::deque<EeEvent> pending;
     {
         std::lock_guard lock(m_eventMutex);

@@ -77,7 +77,10 @@ void PS2Memory::processVIF0Data(const uint8_t *data, uint32_t sizeBytes)
         vif0_regs.code = cmd;
         vif0_regs.num = num;
         if (irq)
+        {
             vif0_regs.stat |= (1u << 11);
+            m_pendingVifInterrupts.fetch_or(0x1u, std::memory_order_relaxed);
+        }
 
         if (opcode == VIF_NOP)
         {
@@ -312,7 +315,10 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         vif1_regs.code = cmd;
         vif1_regs.num = num;
         if (irq)
+        {
             vif1_regs.stat |= (1u << 11); // INT
+            m_pendingVifInterrupts.fetch_or(0x2u, std::memory_order_relaxed);
+        }
 
         if (opcode == VIF_NOP)
         {

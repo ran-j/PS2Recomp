@@ -404,6 +404,11 @@ void PS2Memory::resetEeTimers() noexcept
     m_eeTimers = {};
 }
 
+uint32_t PS2Memory::takePendingVifInterrupts() noexcept
+{
+    return m_pendingVifInterrupts.exchange(0u, std::memory_order_acq_rel);
+}
+
 uint32_t PS2Memory::advanceEeTimers(uint64_t eeCycles) noexcept
 {
     if (eeCycles == 0u)

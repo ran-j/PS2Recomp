@@ -313,6 +313,10 @@ public:
     [[nodiscard]] uint64_t cyclesUntilNextEeTimerInterrupt() const noexcept;
     void resetEeTimers() noexcept;
 
+    // A VIFcode carrying the i bit raises INTC VIF0/VIF1. Bit 0 is VIF0,
+    // bit 1 is VIF1; the scheduler drains this and dispatches the handlers.
+    uint32_t takePendingVifInterrupts() noexcept;
+
     using GifPacketCallback = std::function<void(const uint8_t *, uint32_t)>;
     void setGifPacketCallback(GifPacketCallback cb) { m_gifPacketCallback = std::move(cb); }
     void setGifArbiter(GifArbiter *arbiter) { m_gifArbiter = arbiter; }
@@ -374,6 +378,7 @@ public:
     std::atomic<uint64_t> m_gifCopyCount{0};
     std::atomic<uint64_t> m_gsWriteCount{0};
     std::atomic<uint64_t> m_vifWriteCount{0};
+    std::atomic<uint32_t> m_pendingVifInterrupts{0};
     std::atomic<uint64_t> m_vu0CodeGeneration{0};
     std::atomic<uint64_t> m_vu1CodeGeneration{0};
     // I/O registers
