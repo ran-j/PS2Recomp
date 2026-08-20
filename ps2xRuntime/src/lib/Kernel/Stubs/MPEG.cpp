@@ -61,6 +61,8 @@ namespace ps2_stubs
         class MpegFfmpegDecoder
         {
         public:
+            static constexpr bool kAvailable = true;
+
             MpegFfmpegDecoder() = default;
 
             ~MpegFfmpegDecoder()
@@ -448,6 +450,8 @@ namespace ps2_stubs
         class MpegFfmpegDecoder
         {
         public:
+            static constexpr bool kAvailable = false;
+
             bool feed(const uint8_t *, size_t, std::deque<MpegDecodedFrame> &, int64_t = -1, int64_t = -1)
             {
                 static bool s_warnedNoFfmpeg = false;
@@ -1038,6 +1042,16 @@ namespace ps2_stubs
             }
 
             playback.sawInput = true;
+
+            // Without a video decoder no frame can ever arrive, so parking
+            // sceMpegGetPicture waiters would hang the movie forever. Mark the
+            // stream failed instead and let them return empty-handed.
+            if constexpr (!MpegFfmpegDecoder::kAvailable)
+            {
+                playback.decoderFailed = true;
+                return;
+            }
+
             updateMpegPictureTiming(playback, data, size);
             if (playback.waitingForVideoSequenceHeader)
             {
@@ -2090,6 +2104,7 @@ namespace ps2_stubs
         uint32_t traceIdx = 0u;
         bool eofChanged = false;
         bool backpressured = false;
+        bool decoderFailed = false;
         {
             std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
             MpegPlaybackState &playback = getPlaybackState(mpegAddr);
@@ -2101,6 +2116,7 @@ namespace ps2_stubs
                 recordCdStreamBytesDemuxedUnlocked(consumed, completedMpegIds, eofChanged);
             }
             decodedCount = playback.decodedFrames.size();
+            decoderFailed = playback.decoderFailed;
             traceIdx = g_mpeg_stub_state.demuxPssTraceCount++;
         }
 
@@ -2116,7 +2132,7 @@ namespace ps2_stubs
             return;
         }
         const bool currentStreamCompleted = std::find(completedMpegIds.begin(), completedMpegIds.end(), mpegAddr) != completedMpegIds.end();
-        if (decodedCount != decodedBefore || eofChanged || currentStreamCompleted)
+        if (decodedCount != decodedBefore || eofChanged || currentStreamCompleted || decoderFailed)
         {
             runtime->eeScheduler().completeExternalWait(kMpegPictureWaitType, mpegAddr, KE_OK);
         }
@@ -2173,6 +2189,7 @@ namespace ps2_stubs
         uint32_t traceIdx = 0u;
         bool eofChanged = false;
         bool backpressured = false;
+        bool decoderFailed = false;
         {
             std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
             MpegPlaybackState &playback = getPlaybackState(mpegAddr);
@@ -2192,6 +2209,7 @@ namespace ps2_stubs
                 recordCdStreamBytesDemuxedUnlocked(consumed, completedMpegIds, eofChanged);
             }
             decodedCount = playback.decodedFrames.size();
+            decoderFailed = playback.decoderFailed;
             traceIdx = g_mpeg_stub_state.demuxRingTraceCount++;
         }
 
@@ -2209,7 +2227,7 @@ namespace ps2_stubs
             return;
         }
         const bool currentStreamCompleted = std::find(completedMpegIds.begin(), completedMpegIds.end(), mpegAddr) != completedMpegIds.end();
-        if (decodedCount != decodedBefore || eofChanged || currentStreamCompleted)
+        if (decodedCount != decodedBefore || eofChanged || currentStreamCompleted || decoderFailed)
         {
             runtime->eeScheduler().completeExternalWait(kMpegPictureWaitType, mpegAddr, KE_OK);
         }
@@ -2288,13 +2306,18 @@ namespace ps2_stubs
         uint32_t height = kStubMovieHeight;
         uint32_t frameCount = 0u;
         bool haveFrame = false;
+        bool movieEnded = false;
         MpegDecodedFrame frame;
         {
             std::unique_lock<std::mutex> lock(g_mpeg_stub_mutex);
             MpegPlaybackState &playback = getPlaybackState(mpegAddr);
+            // sawSequenceEnd is the only end-of-video signal a game streaming
+            // with plain sceCdRead can raise: the CD-stream EOF path belongs to
+            // sceCdSt*, and a PSS need not carry a program-end code.
             if (playback.decodedFrames.empty() &&
                 !g_mpeg_stub_state.currentCdStreamEofSeen &&
                 !playback.streamEnded &&
+                !playback.sawSequenceEnd &&
                 !playback.decoderFailed)
             {
                 if (g_mpeg_stub_state.getPictureWaitTraceCount < 32u)
@@ -2387,17 +2410,30 @@ namespace ps2_stubs
                 height = playback.height;
                 frameCount = playback.picturesServed;
             }
+
+            // Not on the call that serves the final frame -- the caller would
+            // tear the movie down before uploading it.
+            movieEnded = !haveFrame && playback.decodedFrames.empty() &&
+                         (playback.sawSequenceEnd || playback.streamEnded ||
+                          playback.decoderFailed || g_mpeg_stub_state.currentCdStreamEofSeen);
         }
 
         mpegGuestWrite32(rdram, mpegAddr + 0x00u, width);
         mpegGuestWrite32(rdram, mpegAddr + 0x04u, height);
-        mpegGuestWrite32(rdram, mpegAddr + 0x08u, frameCount);
+        // +0x08 gates the caller's VRAM upload: DQ8 uploads its movie buffers
+        // only while this reads zero, so a running picture counter here stops
+        // the movie updating after the very first frame.
+        mpegGuestWrite32(rdram, mpegAddr + 0x08u, haveFrame ? 0u : 1u);
 
         if (uint8_t *base = getMemPtr(rdram, mpegAddr))
         {
             const uint32_t iVar1 = *reinterpret_cast<uint32_t *>(base + 0x40);
             if (uint8_t *inner = getMemPtr(rdram, iVar1))
             {
+                // inner[0x00] is the end-of-stream flag the game polls; its
+                // sceMpegIsEnd equivalent is just `return **(mpeg+0x40)`.
+                // Without this the movie plays out and never terminates.
+                *reinterpret_cast<uint32_t *>(inner + 0x00) = movieEnded ? 1u : 0u;
                 *reinterpret_cast<uint32_t *>(inner + 0xb0) = 1;
                 *reinterpret_cast<uint32_t *>(inner + 0xd8) = (getRegU32(ctx, 5) & 0x0FFFFFFFu) | 0x20000000u;
                 *reinterpret_cast<uint32_t *>(inner + 0xe4) = getRegU32(ctx, 6);
@@ -2507,7 +2543,12 @@ namespace ps2_stubs
             std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
             MpegPlaybackState &playback = getPlaybackState(param_1);
             MpegPlaybackState resetState = makeFreshPlaybackStatePreservingConfig(playback);
-            if (playback.streamEnded || playback.decoderFailed)
+            // Only meaningful while sceCdSt* drives the stream: appendPssBytes
+            // clears a carried streamEnded when the generation advances, and
+            // only notifyMpegCdStreamStart advances it. Carrying it for a game
+            // that streams with plain sceCdRead wedges every later movie.
+            const bool cdStreamDriven = g_mpeg_stub_state.cdStreamBytesProduced != 0u;
+            if (cdStreamDriven && (playback.streamEnded || playback.decoderFailed))
             {
                 resetState.sawInput = true;
                 resetState.streamEnded = true;
