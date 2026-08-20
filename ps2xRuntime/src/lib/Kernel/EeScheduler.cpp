@@ -87,6 +87,13 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_executorThread = std::this_thread::get_id();
     m_rdram = rdram;
     m_readyQueues = {};
+    // Thread ids restart here, so keyed stacks would otherwise be stranded:
+    // the pool below cannot reclaim them either.
+    for (const auto &[key, top] : m_invocationStackTops)
+    {
+        m_freeInvocationStacks.push_back(top);
+    }
+    m_invocationStackTops.clear();
     m_threads.clear();
     m_semaphores.clear();
     m_eventFlags.clear();
@@ -491,6 +498,7 @@ int EeScheduler::deleteThread(int id, uint32_t &ownedStack)
     {
         ownedStack = it->second.stack;
     }
+    releaseInvocationStacks(id);
     m_threads.erase(it);
     publishSnapshot();
     return KE_OK;
@@ -539,6 +547,7 @@ int EeScheduler::startThread(int id, uint32_t arg, const R5900Context &caller, b
     m_currentThreadId = 0;
     if (deleteThreadRecord && id != kMainThreadId)
     {
+        releaseInvocationStacks(id);
         m_threads.erase(id);
     }
     if (ownedStack != 0u)
@@ -1191,13 +1200,42 @@ uint32_t EeScheduler::invocationStackTop()
         return existing->second;
     }
     constexpr uint32_t kInvocationStackSize = 0x4000u;
-    const uint32_t top = m_runtime.reserveAsyncCallbackStack(kInvocationStackSize, 16u);
+    uint32_t top = 0u;
+    if (!m_freeInvocationStacks.empty())
+    {
+        top = m_freeInvocationStacks.back();
+        m_freeInvocationStacks.pop_back();
+    }
+    else
+    {
+        top = m_runtime.reserveAsyncCallbackStack(kInvocationStackSize, 16u);
+    }
     if (top == 0u)
     {
         throw std::runtime_error("EE invocation stack space exhausted");
     }
     m_invocationStackTops.emplace(key, top);
     return top;
+}
+
+// Stacks are keyed per (thread, depth) and the pool only bumps down, so without
+// this every thread that ever took an invocation holds 16 KiB forever -- DQ8
+// starts one thread per movie and drained all 16 slots on the second one.
+void EeScheduler::releaseInvocationStacks(int threadId)
+{
+    const uint64_t prefix = static_cast<uint64_t>(static_cast<uint32_t>(threadId)) << 32u;
+    for (auto it = m_invocationStackTops.begin(); it != m_invocationStackTops.end();)
+    {
+        if ((it->first & 0xFFFFFFFF00000000ull) == prefix)
+        {
+            m_freeInvocationStacks.push_back(it->second);
+            it = m_invocationStackTops.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
 }
 
 int EeScheduler::addIrqHandler(bool dmac,
