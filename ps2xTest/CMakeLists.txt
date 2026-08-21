@@ -45,6 +45,7 @@ target_include_directories(ps2_test_function_table PRIVATE
 add_library(ps2_test_lib STATIC
     src/code_generator_tests.cpp
     src/r5900_decoder_tests.cpp
+    src/ps2_fpu_macros_tests.cpp
     src/elf_analyzer_tests.cpp
     src/pad_input_tests.cpp
     src/ps2_runtime_io_tests.cpp
