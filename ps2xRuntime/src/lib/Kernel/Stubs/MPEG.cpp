@@ -2162,10 +2162,10 @@ namespace ps2_stubs
                     std::cerr << "[MPEG:DemuxPss:BACKPRESSURE] mpeg=0x" << std::hex << mpegAddr << std::dec << " decoded=" << decodedCount << std::endl;
                 });
             }
-            // Same reasoning as the ring variant: yield so the consumer can
-            // drain a picture, rather than letting the producer spin.
-            runtime->eeScheduler().rotateReadyQueue(0, false);
+            // Same reasoning and the same order as the ring variant.
             setReturnS32(ctx, 0);
+            runtime->eeScheduler().rotateReadyQueue(0, false);
+            runtime->eeScheduler().transferIfRequested(false);
             return;
         }
         const bool currentStreamCompleted = std::find(completedMpegIds.begin(), completedMpegIds.end(), mpegAddr) != completedMpegIds.end();
@@ -2265,13 +2265,21 @@ namespace ps2_stubs
             // asks again immediately -- DQ8 called this 22,000 times per
             // presented frame, which is where the movie's frame time went.
             //
-            // Yield rather than park. Parking is what the comment on
-            // mpegDemuxBackpressured warns against: the consumer may be asleep
-            // waiting for this very thread to wake it. Rotating the ready queue
-            // just lets the consumer run and comes back, so the spin becomes a
-            // scheduling point without changing who wakes whom.
-            runtime->eeScheduler().rotateReadyQueue(0, false);
+            // Yield, do not park. Parking the producer on a space-available
+            // wait and waking it from sceMpegGetPicture was tried and
+            // deadlocks the movie: DQ8 served 4 pictures instead of 658. That
+            // is exactly what the comment on mpegDemuxBackpressured predicts,
+            // so it is recorded here rather than left to be rediscovered.
+            //
+            // The return value has to be set before the transfer, and the
+            // transfer is not optional: rotateReadyQueue clears the current
+            // thread and asks for a reschedule, so returning normally after it
+            // leaves the scheduler with no running thread and trips
+            // bindMainContextForSyscall's assert on the next syscall. Same
+            // order as the RotateThreadReadyQueue syscall.
             setReturnS32(ctx, 0);
+            runtime->eeScheduler().rotateReadyQueue(0, false);
+            runtime->eeScheduler().transferIfRequested(false);
             return;
         }
         const bool currentStreamCompleted = std::find(completedMpegIds.begin(), completedMpegIds.end(), mpegAddr) != completedMpegIds.end();
