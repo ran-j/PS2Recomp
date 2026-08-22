@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 enum GSPrimType : uint8_t
@@ -290,18 +291,52 @@ struct GSPresentationRequest
     bool hasPreferredSource = false;
 };
 
+enum class GSPresentationMode : uint8_t
+{
+    // The backend returned host-readable RGBA8 pixels. rowPitchBytes describes
+    // their layout and may be wider than width * 4.
+    HostPixels,
+    // The backend presented through its own native swapchain. There is no host
+    // pixel payload to copy through the legacy presentation path.
+    BackendNative,
+};
+
 struct PresentationFrame
 {
     std::vector<uint8_t> pixels;
     uint32_t width = 0;
     uint32_t height = 0;
+    uint32_t rowPitchBytes = 0;
     uint32_t displayFbp = 0;
     uint32_t sourceFbp = 0;
     bool usedPreferred = false;
+    GSPresentationMode mode = GSPresentationMode::HostPixels;
+
+    bool HasHostPixels() const
+    {
+        if (mode != GSPresentationMode::HostPixels || width == 0u || height == 0u)
+            return false;
+
+        if (static_cast<size_t>(width) > std::numeric_limits<size_t>::max() / 4u)
+            return false;
+        const size_t packedRowBytes = static_cast<size_t>(width) * 4u;
+        const size_t sourceRowBytes = rowPitchBytes != 0u ? rowPitchBytes : packedRowBytes;
+        if (sourceRowBytes < packedRowBytes)
+            return false;
+
+        if (height > 1u &&
+            sourceRowBytes > (std::numeric_limits<size_t>::max() - packedRowBytes) /
+                                 static_cast<size_t>(height - 1u))
+            return false;
+        const size_t requiredBytes = sourceRowBytes * static_cast<size_t>(height - 1u) + packedRowBytes;
+        return pixels.size() >= requiredBytes;
+    }
 
     explicit operator bool() const
     {
-        return !pixels.empty() && width != 0u && height != 0u;
+        if (width == 0u || height == 0u)
+            return false;
+        return mode == GSPresentationMode::BackendNative || HasHostPixels();
     }
 };
 

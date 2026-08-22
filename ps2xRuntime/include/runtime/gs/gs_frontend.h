@@ -225,6 +225,7 @@ private:
     std::vector<uint8_t> m_hostPresentationFrame;
     uint32_t m_hostPresentationWidth = 0;
     uint32_t m_hostPresentationHeight = 0;
+    uint32_t m_hostPresentationRowPitchBytes = 0;
     uint32_t m_hostPresentationDisplayFbp = 0;
     uint32_t m_hostPresentationSourceFbp = 0;
     bool m_hostPresentationUsedPreferred = false;

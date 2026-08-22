@@ -1759,6 +1759,7 @@ PresentationFrame GSCpuBackend::Present(const GSPresentationRequest &request)
 PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationRequest &request)
 {
     PresentationFrame result{};
+    result.rowPitchBytes = kHostFrameWidth * 4u;
     const GSPmodeState pmode = decodePmode(request.pmode);
     const GSSmode2State smode2 = decodeSMode2(request.smode2);
     // SMODE2 FFMD=1 (FRAME) reads a half-height buffer whole once per field, so the

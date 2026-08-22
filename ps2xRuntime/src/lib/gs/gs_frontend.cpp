@@ -8,12 +8,11 @@
 #include <cstdio>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <sstream>
 
 namespace
 {
-    static constexpr uint32_t kHostFrameWidth = 640u;
-
     GSPrimReg decodePrimRegister(uint64_t value)
     {
         GSPrimReg prim{};
@@ -170,6 +169,7 @@ void GS::reset()
         m_hostPresentationFrame.clear();
         m_hostPresentationWidth = 0u;
         m_hostPresentationHeight = 0u;
+        m_hostPresentationRowPitchBytes = 0u;
         m_hostPresentationDisplayFbp = 0u;
         m_hostPresentationSourceFbp = 0u;
         m_hostPresentationUsedPreferred = false;
@@ -535,6 +535,7 @@ void GS::latchHostPresentationFrame()
             m_hostPresentationFrame.clear();
             m_hasHostPresentationFrame = false;
             m_hostPresentationWidth = m_hostPresentationHeight = 0u;
+            m_hostPresentationRowPitchBytes = 0u;
             return;
         }
         request = buildPresentationRequestUnlocked();
@@ -551,24 +552,32 @@ void GS::latchHostPresentationFrame()
         }
     }
 
-    const bool hasFrame = static_cast<bool>(frame);
+    const bool presented = static_cast<bool>(frame);
+    const bool hasHostFrame = presented && frame.mode == GSPresentationMode::HostPixels;
     const uint32_t displayFbp = frame.displayFbp;
     const uint32_t sourceFbp = frame.sourceFbp;
     const uint32_t width = frame.width;
     const uint32_t height = frame.height;
+    uint32_t rowPitchBytes = frame.rowPitchBytes;
+    if (rowPitchBytes == 0u && width <= std::numeric_limits<uint32_t>::max() / 4u)
+        rowPitchBytes = width * 4u;
     const bool usedPreferred = frame.usedPreferred;
     {
         std::lock_guard<std::mutex> presentationLock(m_presentationMutex);
-        m_hostPresentationFrame = std::move(frame.pixels);
-        m_hostPresentationWidth = width;
-        m_hostPresentationHeight = height;
+        if (hasHostFrame)
+            m_hostPresentationFrame = std::move(frame.pixels);
+        else
+            m_hostPresentationFrame.clear();
+        m_hostPresentationWidth = hasHostFrame ? width : 0u;
+        m_hostPresentationHeight = hasHostFrame ? height : 0u;
+        m_hostPresentationRowPitchBytes = hasHostFrame ? rowPitchBytes : 0u;
         m_hostPresentationDisplayFbp = displayFbp;
         m_hostPresentationSourceFbp = sourceFbp;
         m_hostPresentationUsedPreferred = usedPreferred;
-        m_hasHostPresentationFrame = hasFrame;
+        m_hasHostPresentationFrame = hasHostFrame;
     }
 
-    if (hasFrame)
+    if (presented)
     {
         std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
         recordPresentDebugEventUnlocked(displayFbp, sourceFbp, width, height, usedPreferred);
@@ -610,7 +619,20 @@ bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
     outPixels.resize(packedRowBytes * static_cast<size_t>(outHeight));
     if (outWidth != 0u && outHeight != 0u)
     {
-        const size_t sourceRowBytes = static_cast<size_t>(kHostFrameWidth) * 4u;
+        const size_t sourceRowBytes = m_hostPresentationRowPitchBytes;
+        if (sourceRowBytes < packedRowBytes)
+        {
+            outPixels.clear();
+            outWidth = 0u;
+            outHeight = 0u;
+            if (outDisplayFbp)
+                *outDisplayFbp = 0u;
+            if (outSourceFbp)
+                *outSourceFbp = 0u;
+            if (outUsedPreferred)
+                *outUsedPreferred = false;
+            return false;
+        }
         for (uint32_t y = 0; y < outHeight; ++y)
         {
             const size_t srcOffset = static_cast<size_t>(y) * sourceRowBytes;
