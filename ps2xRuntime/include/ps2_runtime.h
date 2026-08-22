@@ -319,6 +319,17 @@ public:
                              DebugUiCallback shutdownCallback,
                              void *userData);
 
+    // A host that owns its own window and shows frames itself. When one is
+    // installed the runtime opens no window of its own and does no drawing:
+    // the raster backend has already presented by the time Present() returns,
+    // and this is called once per frame to service the window. Returning false
+    // asks the runtime to stop, the way a close button would.
+    //
+    // Set before initialize(), which is where the built-in window is created.
+    using FramePumpCallback = bool (*)(void *userData);
+    void setExternalPresenter(FramePumpCallback pump, void *userData);
+    [[nodiscard]] bool hasExternalPresenter() const { return m_framePump != nullptr; }
+
     using RecompiledFunction = void (*)(uint8_t *, R5900Context *, PS2Runtime *);
 
     enum class GuestBranchKind
@@ -553,6 +564,8 @@ private:
     std::atomic<uint32_t> m_missingFunctionPolicy{static_cast<uint32_t>(MissingFunctionPolicy::ContinueToTarget)};
     std::atomic<bool> m_missingFunctionReported{false};
     std::atomic<bool> m_stopRequested{false};
+    FramePumpCallback m_framePump = nullptr;
+    void *m_framePumpUserData = nullptr;
     DebugUiCallback m_debugUiInitCallback = nullptr;
     DebugUiCallback m_debugUiDrawCallback = nullptr;
     DebugUiCallback m_debugUiShutdownCallback = nullptr;

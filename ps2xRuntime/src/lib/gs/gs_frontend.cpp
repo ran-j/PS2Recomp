@@ -4,6 +4,7 @@
 #include "runtime/ps2_memory.h"
 #include <atomic>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -660,8 +661,30 @@ bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
     return true;
 }
 
+// Debug accounting: total time decoding GIF packets, and how many arrived.
+// A backend can subtract its own time from this to see what packet decoding
+// costs on its own, which is the difference between "the renderer is slow" and
+// "the game is sending an enormous number of tiny packets".
+std::atomic<uint64_t> g_gsFrontendPacketNanos{0};
+std::atomic<uint64_t> g_gsFrontendPacketCount{0};
+
 void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
+    const auto packetStart = std::chrono::steady_clock::now();
+    struct PacketTimer
+    {
+        std::chrono::steady_clock::time_point start;
+        ~PacketTimer()
+        {
+            g_gsFrontendPacketNanos.fetch_add(
+                static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                          std::chrono::steady_clock::now() - start)
+                                          .count()),
+                std::memory_order_relaxed);
+            g_gsFrontendPacketCount.fetch_add(1, std::memory_order_relaxed);
+        }
+    } packetTimer{packetStart};
+
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     if (!data || sizeBytes < 16 || !m_backend)
         return;

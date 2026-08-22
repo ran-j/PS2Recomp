@@ -522,6 +522,12 @@ PS2Runtime::PS2Runtime()
     m_asyncCallbackStackTop = PS2_RAM_SIZE;
 }
 
+void PS2Runtime::setExternalPresenter(FramePumpCallback pump, void *userData)
+{
+    m_framePump = pump;
+    m_framePumpUserData = userData;
+}
+
 void PS2Runtime::setDebugUiCallbacks(DebugUiCallback initCallback,
                                      DebugUiCallback drawCallback,
                                      DebugUiCallback shutdownCallback,
@@ -721,18 +727,29 @@ bool PS2Runtime::initialize(const char *title)
             return false;
         }
 #endif
+        // An external presenter owns the window, so opening one here would put
+        // a second, empty window on screen and pay for its swap every frame.
+        if (!hasExternalPresenter())
+        {
 #if defined(PLATFORM_VITA)
-        InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
+            InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
 #else
-        SetConfigFlags(FLAG_WINDOW_RESIZABLE);
-        InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
-        // Escape is bound to Circle; without this raylib also closes on it.
-        SetExitKey(KEY_NULL);
-        applyDefaultWindowScale();
+            SetConfigFlags(FLAG_WINDOW_RESIZABLE);
+            InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
+            // Escape is bound to Circle; without this raylib also closes on it.
+            SetExitKey(KEY_NULL);
+            applyDefaultWindowScale();
+#endif
+            SetTargetFPS(60);
+        }
+#if !defined(PLATFORM_VITA)
+        // Audio is not presentation: it has no window and an external presenter
+        // does not replace it. Initialising it only in the built-in path left
+        // the audio backend permanently not-ready, which anything waiting on
+        // sound never recovers from.
         InitAudioDevice();
         m_audioBackend.setAudioReady(IsAudioDeviceReady());
 #endif
-        SetTargetFPS(60);
         if (m_debugUiInitCallback)
         {
             m_debugUiInitCallback(*this, m_debugUiUserData);
@@ -2414,12 +2431,17 @@ void PS2Runtime::run()
 
     RUNTIME_LOG("Starting execution at address 0x" << std::hex << m_cpuContext.pc << std::dec);
 
-    // A blank image to use as a framebuffer
-    Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLANK);
-    Texture2D frameTex = LoadTextureFromImage(blank);
-    UnloadImage(blank);
+    // A blank image to use as a framebuffer. Not needed when something else
+    // owns the window -- there is no GL context to create a texture in.
+    Texture2D frameTex{};
     int frameTexFilter = TEXTURE_FILTER_POINT;
-    SetTextureFilter(frameTex, frameTexFilter);
+    if (!hasExternalPresenter())
+    {
+        Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLANK);
+        frameTex = LoadTextureFromImage(blank);
+        UnloadImage(blank);
+        SetTextureFilter(frameTex, frameTexFilter);
+    }
 
     std::atomic<bool> gameThreadFinished{false};
 
@@ -2478,6 +2500,36 @@ void PS2Runtime::run()
                                                << std::endl);
             }
         });
+        // With an external presenter the backend draws to its own swapchain,
+        // so the frame still has to be latched -- that is what calls into the
+        // backend's Present() -- but nothing is uploaded or drawn here.
+        if (m_framePump)
+        {
+            static uint64_t s_lastNativeTick = std::numeric_limits<uint64_t>::max();
+            const uint64_t currentTick = eeScheduler().currentVSyncTick();
+            const bool newFrame = currentTick != s_lastNativeTick;
+            if (newFrame)
+            {
+                gs().latchHostPresentationFrame();
+                s_lastNativeTick = currentTick;
+            }
+            else
+            {
+                // Nothing new to show. Without this the loop spins a core flat
+                // out waiting for the guest, which is a core the EE thread
+                // wants; the raylib path got the same effect from its frame
+                // limiter blocking in EndDrawing().
+                std::this_thread::sleep_for(std::chrono::microseconds(250));
+            }
+            if (!m_framePump(m_framePumpUserData))
+            {
+                RUNTIME_LOG("[run] external presenter requested stop");
+                requestStop();
+                break;
+            }
+            continue;
+        }
+
         uint32_t presentWidth = FB_WIDTH;
         uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
         UploadFrame(frameTex, this, presentWidth, presentHeight);
@@ -2535,8 +2587,11 @@ void PS2Runtime::run()
         m_debugUiShutdownCallback(*this, m_debugUiUserData);
         m_debugUiInitialized = false;
     }
-    UnloadTexture(frameTex);
-    CloseWindow();
+    if (!hasExternalPresenter())
+    {
+        UnloadTexture(frameTex);
+        CloseWindow();
+    }
 
     RUNTIME_LOG("[run] exiting loop");
 }

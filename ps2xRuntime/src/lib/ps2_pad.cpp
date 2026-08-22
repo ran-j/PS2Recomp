@@ -165,6 +165,41 @@ namespace
     }
 }
 
+namespace
+{
+    // Shared tail of both host paths: publish held state and latch edges long
+    // enough that a tap between two guest polls is not lost.
+    void publishHostState(uint32_t held, uint32_t pressed, uint32_t sticks)
+    {
+        g_held.store(held);
+        g_sticks.store(sticks);
+
+        const uint64_t now = nowMs();
+        if (pressed != 0u)
+        {
+            if (g_latched.fetch_or(pressed) == 0u)
+            {
+                g_latchStampMs.store(now);
+            }
+        }
+        else
+        {
+            const uint32_t stale = g_latched.load();
+            if (stale != 0u && (now - g_latchStampMs.load()) > kLatchTimeoutMs)
+            {
+                g_latched.fetch_and(~stale);
+            }
+        }
+
+        g_hostPolled.store(true);
+    }
+}
+
+void ps2PadPublishHostState(uint32_t held, uint32_t pressed, uint32_t sticks)
+{
+    publishHostState(held, pressed, sticks);
+}
+
 void ps2PadPollHost()
 {
     if (!IsWindowReady())
