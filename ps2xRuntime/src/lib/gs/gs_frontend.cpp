@@ -667,6 +667,11 @@ bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
 // "the game is sending an enormous number of tiny packets".
 std::atomic<uint64_t> g_gsFrontendPacketNanos{0};
 std::atomic<uint64_t> g_gsFrontendPacketCount{0};
+// The same for the native image-upload fast path, which bypasses
+// processGIFPacket entirely -- DQ8's movie tiles arrive this way, one DMA
+// chain per 16x16 tile, so without a separate counter they are invisible.
+std::atomic<uint64_t> g_gsUploadNativeNanos{0};
+std::atomic<uint64_t> g_gsUploadNativeCount{0};
 
 void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
@@ -828,8 +833,17 @@ void GS::uploadImageNative(uint64_t bitbltbuf,
                            const uint8_t *data,
                            uint32_t sizeBytes)
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
-    uploadImageNativeUnlocked(bitbltbuf, trxpos, trxreg, trxdir, data, sizeBytes);
+    const auto start = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+        uploadImageNativeUnlocked(bitbltbuf, trxpos, trxreg, trxdir, data, sizeBytes);
+    }
+    g_gsUploadNativeNanos.fetch_add(
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                  std::chrono::steady_clock::now() - start)
+                                  .count()),
+        std::memory_order_relaxed);
+    g_gsUploadNativeCount.fetch_add(1, std::memory_order_relaxed);
 }
 
 void GS::uploadImageNativeUnlocked(uint64_t bitbltbuf,

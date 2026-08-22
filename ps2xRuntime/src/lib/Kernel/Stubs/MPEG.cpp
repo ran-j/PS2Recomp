@@ -16,10 +16,43 @@ extern "C"
 }
 #endif
 
+#include <atomic>
+#include <chrono>
 #include <deque>
 #include <memory>
 
 #include "Syscalls/Helpers/State.h"
+
+// Debug accounting for the movie path, read by whichever backend reports stats.
+// A movie frame arrives as ~900 tile transfers, but those turned out to cost
+// almost nothing; these say what the rest of the frame is doing.
+std::atomic<uint64_t> g_mpegGetPictureNanos{0};
+std::atomic<uint64_t> g_mpegGetPictureCount{0};
+std::atomic<uint64_t> g_mpegWriteFrameNanos{0};
+std::atomic<uint64_t> g_mpegWriteFrameCount{0};
+std::atomic<uint64_t> g_mpegDemuxNanos{0};
+std::atomic<uint64_t> g_mpegDemuxCount{0};
+
+namespace
+{
+    struct MpegScopedTimer
+    {
+        std::atomic<uint64_t> &sink;
+        std::atomic<uint64_t> &counter;
+        std::chrono::steady_clock::time_point start;
+        MpegScopedTimer(std::atomic<uint64_t> &nanos, std::atomic<uint64_t> &count)
+            : sink(nanos), counter(count), start(std::chrono::steady_clock::now()) {}
+        ~MpegScopedTimer()
+        {
+            sink.fetch_add(static_cast<uint64_t>(
+                               std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                   std::chrono::steady_clock::now() - start)
+                                   .count()),
+                           std::memory_order_relaxed);
+            counter.fetch_add(1, std::memory_order_relaxed);
+        }
+    };
+}
 
 namespace ps2_stubs
 {
@@ -1706,6 +1739,7 @@ namespace ps2_stubs
             {
                 return;
             }
+            MpegScopedTimer timer(g_mpegWriteFrameNanos, g_mpegWriteFrameCount);
 
             const uint32_t width = static_cast<uint32_t>(frame.width);
             const uint32_t height = static_cast<uint32_t>(frame.height);
@@ -2128,6 +2162,9 @@ namespace ps2_stubs
                     std::cerr << "[MPEG:DemuxPss:BACKPRESSURE] mpeg=0x" << std::hex << mpegAddr << std::dec << " decoded=" << decodedCount << std::endl;
                 });
             }
+            // Same reasoning as the ring variant: yield so the consumer can
+            // drain a picture, rather than letting the producer spin.
+            runtime->eeScheduler().rotateReadyQueue(0, false);
             setReturnS32(ctx, 0);
             return;
         }
@@ -2163,6 +2200,7 @@ namespace ps2_stubs
 
     void sceMpegDemuxPssRing(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        MpegScopedTimer timer(g_mpegDemuxNanos, g_mpegDemuxCount);
         static std::atomic<uint32_t> s_demuxRingEntryCount{0u};
         const uint32_t entryIdx = s_demuxRingEntryCount.fetch_add(1u, std::memory_order_relaxed);
         if (entryIdx < 4u)
@@ -2223,6 +2261,16 @@ namespace ps2_stubs
                               << " avail=" << availableBytes << std::endl;
                 });
             }
+            // Returning 0 consumed tells the producer "not now", and its loop
+            // asks again immediately -- DQ8 called this 22,000 times per
+            // presented frame, which is where the movie's frame time went.
+            //
+            // Yield rather than park. Parking is what the comment on
+            // mpegDemuxBackpressured warns against: the consumer may be asleep
+            // waiting for this very thread to wake it. Rotating the ready queue
+            // just lets the consumer run and comes back, so the spin becomes a
+            // scheduling point without changing who wakes whom.
+            runtime->eeScheduler().rotateReadyQueue(0, false);
             setReturnS32(ctx, 0);
             return;
         }
@@ -2300,6 +2348,7 @@ namespace ps2_stubs
 
     void sceMpegGetPicture(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        MpegScopedTimer timer(g_mpegGetPictureNanos, g_mpegGetPictureCount);
         const uint32_t mpegAddr = getRegU32(ctx, 4);
         const uint32_t imageAddr = getRegU32(ctx, 5);
         uint32_t width = kStubMovieWidth;

@@ -2519,7 +2519,17 @@ void PS2Runtime::run()
                 // out waiting for the guest, which is a core the EE thread
                 // wants; the raylib path got the same effect from its frame
                 // limiter blocking in EndDrawing().
-                std::this_thread::sleep_for(std::chrono::microseconds(250));
+                //
+                // Tunable because how often this thread wakes changes the
+                // interleaving the EE thread sees, and the memory-card boot
+                // race is sensitive to exactly that
+                // (docs/notes/memory-card-boot-race.md).
+                static const int idleMicros = [] {
+                    const char *value = std::getenv("DQ8_PRESENT_IDLE_US");
+                    const int parsed = value ? std::atoi(value) : 0;
+                    return parsed > 0 ? parsed : 1000;
+                }();
+                std::this_thread::sleep_for(std::chrono::microseconds(idleMicros));
             }
             if (!m_framePump(m_framePumpUserData))
             {
