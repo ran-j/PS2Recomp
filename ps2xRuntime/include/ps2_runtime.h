@@ -364,7 +364,9 @@ public:
     void handleTLBWR(uint8_t *rdram, R5900Context *ctx);
     void handleTLBP(uint8_t *rdram, R5900Context *ctx);
     void clearLLBit(R5900Context *ctx);
-    void configureGuestHeap(uint32_t guestBase, uint32_t guestLimit = PS2_RAM_SIZE);
+    // guestLimit 0 means "rest of RAM": resolved to the main thread's stack
+    // base recorded by SetupThread, or a bounded fallback before that.
+    void configureGuestHeap(uint32_t guestBase, uint32_t guestLimit = 0u);
     uint32_t guestMalloc(uint32_t size, uint32_t alignment = 16u);
     uint32_t guestCalloc(uint32_t count, uint32_t size, uint32_t alignment = 16u);
     uint32_t guestRealloc(uint32_t guestAddr, uint32_t newSize, uint32_t alignment = 16u);
@@ -372,6 +374,8 @@ public:
     uint32_t guestHeapBase() const;
     uint32_t guestHeapEnd() const;
     uint32_t guestHeapLimit() const;
+    void setGuestMainStackBase(uint32_t stackBase);
+    uint32_t guestMainStackBase() const;
     uint32_t reserveAsyncCallbackStack(uint32_t size, uint32_t alignment = 16u);
 
     void drainCompletedDmacHandlers(uint8_t *rdram);
@@ -454,6 +458,7 @@ private:
     static uint32_t normalizeGuestHeapAlignment(uint32_t alignment);
     uint32_t clampGuestHeapBase(uint32_t guestBase) const;
     uint32_t clampGuestHeapLimit(uint32_t guestLimit) const;
+    uint32_t defaultGuestHeapLimitLocked() const;
     void resetGuestHeapLocked(uint32_t guestBase, uint32_t guestLimit);
     void ensureGuestHeapInitializedLocked();
     int32_t findGuestHeapBlockIndexLocked(uint32_t guestAddr) const;
@@ -494,6 +499,7 @@ private:
     uint32_t m_guestHeapLimit = PS2_RAM_SIZE;
     uint32_t m_guestHeapSuggestedBase = 0x00100000u;
     bool m_guestHeapConfigured = false;
+    uint32_t m_guestMainStackBase = 0u;
     uint32_t m_asyncCallbackStackFloor = 0x01F00000u;
     uint32_t m_asyncCallbackStackTop = PS2_RAM_SIZE;
 
