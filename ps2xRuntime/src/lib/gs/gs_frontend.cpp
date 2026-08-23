@@ -2,15 +2,22 @@
 #include "runtime/gs/gs_cpu_backend.h"
 #include "ps2_log.h"
 #include "runtime/ps2_memory.h"
+
+// Weak on purpose: the offline gs-dump harness links this file without the pad
+// backend, and there a screenshot just falls back to counting latches.
+extern "C++" __attribute__((weak)) uint64_t ps2PadCurrentGuestFrame();
 #include <atomic>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <sstream>
+#include <string>
 
 namespace
 {
@@ -525,6 +532,8 @@ GSPresentationRequest GS::buildPresentationRequestUnlocked() const
     return request;
 }
 
+static void maybeWriteScreenshot(GS &gs);
+
 void GS::latchHostPresentationFrame()
 {
     GSPresentationRequest request{};
@@ -578,11 +587,90 @@ void GS::latchHostPresentationFrame()
         m_hasHostPresentationFrame = hasHostFrame;
     }
 
+    if (hasHostFrame)
+    {
+        maybeWriteScreenshot(*this);
+    }
+
     if (presented)
     {
         std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
         recordPresentDebugEventUnlocked(displayFbp, sourceFbp, width, height, usedPreferred);
     }
+}
+
+// DQ8_GFX_SCREENSHOT_DIR + DQ8_GFX_SCREENSHOT_EVERY=N dump the presented frame
+// as a binary PPM every N frames. PPM keeps this dependency-free; convert with
+// `ffmpeg -i shot.ppm shot.png` when a viewer is wanted. A backend that presents
+// natively skips the CPU compose, so it disables that fast path while this is on.
+//
+// A free function on purpose: gs_frontend.h reaches the whole recompiled corpus
+// through ps2_runtime.h, so declaring this on GS would cost a full rebuild.
+static void maybeWriteScreenshot(GS &gs)
+{
+    struct Config
+    {
+        std::string directory;
+        uint64_t every = 0u;
+    };
+    static const Config config = [] {
+        Config parsed{};
+        const char *dir = std::getenv("DQ8_GFX_SCREENSHOT_DIR");
+        if (dir == nullptr || *dir == '\0')
+        {
+            return parsed;
+        }
+        parsed.directory = dir;
+        const char *every = std::getenv("DQ8_GFX_SCREENSHOT_EVERY");
+        const long long value = every ? std::atoll(every) : 0;
+        parsed.every = value > 0 ? static_cast<uint64_t>(value) : 60ull;
+        return parsed;
+    }();
+    if (config.every == 0u)
+    {
+        return;
+    }
+
+    // Named by guest vsync tick, the same clock DQ8_PAD_SCRIPT uses, so a
+    // screenshot tells you directly which frame to script an input at.
+    static uint64_t s_latches = 0u;
+    const uint64_t frame =
+        ps2PadCurrentGuestFrame != nullptr ? ps2PadCurrentGuestFrame() : s_latches++;
+    static uint64_t s_lastWritten = std::numeric_limits<uint64_t>::max();
+    if (s_lastWritten != std::numeric_limits<uint64_t>::max() &&
+        frame < s_lastWritten + config.every)
+    {
+        return;
+    }
+    s_lastWritten = frame;
+
+    std::vector<uint8_t> pixels;
+    uint32_t width = 0u;
+    uint32_t height = 0u;
+    if (!gs.copyLatchedHostPresentationFrame(pixels, width, height, nullptr, nullptr, nullptr) ||
+        width == 0u || height == 0u)
+    {
+        return;
+    }
+
+    char path[512];
+    std::snprintf(path, sizeof(path), "%s/frame_%06llu.ppm", config.directory.c_str(),
+                  static_cast<unsigned long long>(frame));
+    std::ofstream out(path, std::ios::binary);
+    if (!out)
+    {
+        return;
+    }
+    out << "P6\n" << width << " " << height << "\n255\n";
+    // copyLatchedHostPresentationFrame hands back tightly packed RGBA.
+    std::vector<uint8_t> rgb(static_cast<size_t>(width) * height * 3u);
+    for (size_t i = 0u, n = static_cast<size_t>(width) * height; i < n; ++i)
+    {
+        rgb[i * 3u + 0u] = pixels[i * 4u + 0u];
+        rgb[i * 3u + 1u] = pixels[i * 4u + 1u];
+        rgb[i * 3u + 2u] = pixels[i * 4u + 2u];
+    }
+    out.write(reinterpret_cast<const char *>(rgb.data()), static_cast<std::streamsize>(rgb.size()));
 }
 
 bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,

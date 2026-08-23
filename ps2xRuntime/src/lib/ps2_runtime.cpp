@@ -2503,6 +2503,7 @@ void PS2Runtime::run()
         // With an external presenter the backend draws to its own swapchain,
         // so the frame still has to be latched -- that is what calls into the
         // backend's Present() -- but nothing is uploaded or drawn here.
+        ps2PadSetGuestFrame(eeScheduler().currentVSyncTick());
         if (m_framePump)
         {
             static uint64_t s_lastNativeTick = std::numeric_limits<uint64_t>::max();

@@ -1,6 +1,9 @@
 #pragma once
 
 #include "ps2_runtime.h"
+#include "runtime/ee_fiber.h"
+
+#include <memory>
 
 #include <array>
 #include <atomic>
@@ -122,6 +125,11 @@ struct GuestThread
     EeWaitState wait{};
     std::function<void(R5900Context &)> resumeCompletion;
     std::vector<GuestInvocation> invocations;
+    // Host stack this thread's guest code runs on, created on first dispatch.
+    // While inGuestCall is set the stack is suspended part way through a guest
+    // call and must be resumed, not re-entered from the saved pc.
+    std::unique_ptr<EeFiber> fiber;
+    bool inGuestCall = false;
 
     [[nodiscard]] R5900Context &activeContext()
     {
@@ -375,15 +383,21 @@ private:
     void reserveGuestStackFromAsyncPool(uint32_t guestStackBase);
     void enqueueReady(GuestThread &thread, bool front = false);
     void removeReady(GuestThread &thread);
+    // Runs one guest dispatch on `thread`'s fiber, creating it if needed, and
+    // returns when the fiber suspends or the call completes.
+    void enterGuest(GuestThread &thread);
+    // The fiber's body: run the pending dispatch, hand control back, repeat.
+    static void fiberEntry(void *user);
+    void runPendingGuestCall();
+
     [[nodiscard]] GuestThread *selectReady();
-    // What selectReady() would return, without dequeuing it. 0 when nothing is ready.
-    [[nodiscard]] int peekReadyId() const;
-    // Whether the dispatch loop has work that a same-thread yield must not skip.
-    [[nodiscard]] bool mustReturnToDispatcher() const noexcept;
     void makeRunning(GuestThread &thread);
     void makeDormant(GuestThread &thread);
     void removeFromWaitObject(GuestThread &thread);
     [[noreturn]] void blockCurrent(EeWaitState wait);
+    // Suspends the guest stack instead of unwinding it; see the definition for
+    // when that is allowed.
+    void blockCurrentResumable(EeWaitState wait);
     void makeReady(GuestThread &thread, int result, bool interruptSafe);
     void requestPreemptionIfHigher(const GuestThread &readyThread, bool interruptSafe);
     void applyPendingPreemption();
@@ -439,6 +453,17 @@ private:
     // The thread whose C++ stack the executor is standing in, or 0 outside a
     // guest dispatch. A yield back onto this thread can skip the unwind.
     int m_dispatchedThreadId = 0;
+
+    // Guest code runs on a per-thread fiber so a yield can suspend the stack
+    // instead of unwinding it. Null while the executor is on its own stack.
+    EeFiber *m_activeFiber = nullptr;
+    // Handed to the fiber for the dispatch it is about to run.
+    PS2Runtime::RecompiledFunction m_pendingFunction = nullptr;
+    R5900Context *m_pendingContext = nullptr;
+    bool m_pendingInsideInterrupt = false;
+    // A non-transfer exception escaping guest code, rethrown by the executor
+    // once it is back on its own stack.
+    std::exception_ptr m_fiberException;
 
     mutable std::mutex m_eventMutex;
     std::condition_variable m_eventCv;

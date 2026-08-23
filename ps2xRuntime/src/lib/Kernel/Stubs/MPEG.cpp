@@ -550,6 +550,7 @@ namespace ps2_stubs
             int64_t dts90k = -1;
         };
 
+
         struct MpegPlaybackState
         {
             uint32_t picturesServed = 0u;
@@ -2491,6 +2492,7 @@ namespace ps2_stubs
         {
             std::unique_lock<std::mutex> lock(g_mpeg_stub_mutex);
             MpegPlaybackState &playback = getPlaybackState(mpegAddr);
+            {
             // The consumer drives decode: demux only buffers.
             decodePendingElementaryStream(playback);
             // sawSequenceEnd is the only end-of-video signal a game streaming
@@ -2598,6 +2600,7 @@ namespace ps2_stubs
             movieEnded = !haveFrame && playback.decodedFrames.empty() && playback.pendingEs.empty() &&
                          (playback.sawSequenceEnd || playback.streamEnded ||
                           playback.decoderFailed || g_mpeg_stub_state.currentCdStreamEofSeen);
+            }
         }
 
         mpegGuestWrite32(rdram, mpegAddr + 0x00u, width);

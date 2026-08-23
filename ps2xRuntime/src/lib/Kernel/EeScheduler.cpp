@@ -22,6 +22,8 @@ std::atomic<uint64_t> g_eeGuestDispatchCount{0};
 // whether the executor is re-entering guest code because a transfer asked it
 // to, or because the call chain has to be rebuilt after one.
 std::atomic<uint64_t> g_eeTransferThrowCount{0};
+// Transfers served by suspending the guest stack instead of unwinding it.
+std::atomic<uint64_t> g_eeTransferSuspendCount{0};
 
 namespace
 {
@@ -235,6 +237,34 @@ void EeScheduler::run()
 
         GuestThread *running = currentThread();
         assert(running != nullptr);
+
+        // Suspended part way through a guest call: its stack is still live, so
+        // resume it rather than dispatching the saved pc, which points into the
+        // middle of a function the fiber is already executing.
+        if (running->inGuestCall)
+        {
+            enterGuest(*running);
+            if (m_fiberException)
+            {
+                std::exception_ptr escaped;
+                escaped.swap(m_fiberException);
+                m_running.store(false, std::memory_order_release);
+                publishSnapshotNow();
+                std::rethrow_exception(escaped);
+            }
+            processPendingEvents();
+            if (m_rescheduleRequested && m_currentThreadId != 0)
+            {
+                GuestThread *preempted = currentThread();
+                assert(preempted != nullptr);
+                enqueueReady(*preempted, !m_timeSliceExpired);
+                m_currentThreadId = 0;
+                m_rescheduleRequested = false;
+                m_timeSliceExpired = false;
+            }
+            continue;
+        }
+
         if (running->resumeCompletion)
         {
             auto completion = std::move(running->resumeCompletion);
@@ -363,29 +393,19 @@ void EeScheduler::run()
             continue;
         }
 
-        try
+        m_pendingFunction = function;
+        m_pendingContext = &context;
+        m_pendingInsideInterrupt =
+            !running->invocations.empty() &&
+            running->invocations.back().kind == GuestInvocationKind::Interrupt;
+        enterGuest(*running);
+        if (m_fiberException)
         {
-            m_insideInterrupt = !running->invocations.empty() && running->invocations.back().kind == GuestInvocationKind::Interrupt;
-            m_guestExecuting.store(true, std::memory_order_release);
-            m_dispatchedThreadId = running->id;
-            function(m_rdram, &context, &m_runtime);
-            m_dispatchedThreadId = 0;
-            m_guestExecuting.store(false, std::memory_order_release);
-            m_insideInterrupt = false;
-        }
-        catch (const EeDispatcherTransfer &)
-        {
-            m_dispatchedThreadId = 0;
-            m_guestExecuting.store(false, std::memory_order_release);
-            m_insideInterrupt = false;
-        }
-        catch (...)
-        {
-            m_dispatchedThreadId = 0;
-            m_guestExecuting.store(false, std::memory_order_release);
+            std::exception_ptr escaped;
+            escaped.swap(m_fiberException);
             m_running.store(false, std::memory_order_release);
-            publishSnapshot();
-            throw;
+            publishSnapshotNow();
+            std::rethrow_exception(escaped);
         }
 
         processPendingEvents();
@@ -749,7 +769,7 @@ void EeScheduler::sleepCurrent()
         setReturnS32(&self->activeContext(), KE_OK);
         return;
     }
-    blockCurrent(EeWaitState{EeWaitReason::Sleep, std::monostate{}});
+    blockCurrentResumable(EeWaitState{EeWaitReason::Sleep, std::monostate{}});
 }
 
 int EeScheduler::wakeupThread(int id, bool interruptSafe)
@@ -914,39 +934,21 @@ void EeScheduler::transferIfRequested(bool interruptSafe)
         m_currentThreadId = 0;
     }
 
-    // A yield that lands back on the thread we are already executing does not
-    // need the C++ stack torn down and rebuilt. Unwinding EeDispatcherTransfer
-    // through the guest's frames was ~40% of EE time during a movie, because
-    // DQ8's movie producer yields thousands of times per frame and almost
-    // always ends up running again immediately.
-    if (m_dispatchedThreadId != 0 &&
-        m_pendingInvocations.empty() &&
-        peekReadyId() == m_dispatchedThreadId &&
-        !mustReturnToDispatcher())
-    {
-        // Charge what the dispatch loop would have charged, so the time slice
-        // and the EE timers still advance and this cannot spin forever.
-        accountCycles(kGuestDispatchCycles);
-        GuestThread *next = selectReady();
-        assert(next != nullptr && next->id == m_dispatchedThreadId);
-        if (next != nullptr && next->id == m_dispatchedThreadId)
-        {
-            next->status = EeThreadStatus::Running;
-            m_currentThreadId = next->id;
-            m_rescheduleRequested = false;
-            m_timeSliceExpired = false;
-            return;
-        }
-        // peekReadyId lied, so put it back and take the slow path.
-        if (next != nullptr)
-        {
-            enqueueReady(*next, true);
-        }
-    }
-
     m_rescheduleRequested = false;
     m_timeSliceExpired = false;
     publishSnapshot();
+
+    // The thread stays runnable, so its C++ stack is still wanted: suspend it
+    // rather than unwinding and rebuilding it. Only the executor's own stack
+    // has nowhere to suspend to (direct-syscall tests, embedders), and it still
+    // throws.
+    if (m_activeFiber != nullptr)
+    {
+        g_eeTransferSuspendCount.fetch_add(1u, std::memory_order_relaxed);
+        m_activeFiber->suspend();
+        return;
+    }
+
     g_eeTransferThrowCount.fetch_add(1u, std::memory_order_relaxed);
     throw EeDispatcherTransfer{};
 }
@@ -1063,7 +1065,7 @@ void EeScheduler::waitSemaphore(int id)
     GuestThread *self = currentThread();
     assert(self != nullptr);
     object->waiters.push_back(self->id);
-    blockCurrent(EeWaitState{EeWaitReason::Semaphore, EeSemaphoreWait{id}});
+    blockCurrentResumable(EeWaitState{EeWaitReason::Semaphore, EeSemaphoreWait{id}});
 }
 
 int EeScheduler::createEventFlag(uint32_t initialBits, uint32_t attr, uint32_t option)
@@ -1186,8 +1188,8 @@ void EeScheduler::waitEventFlag(int id, uint32_t bits, uint32_t mode, uint32_t r
         return;
     }
     flag->waiters.push_back(self->id);
-    blockCurrent(EeWaitState{EeWaitReason::EventFlag,
-                             EeEventFlagWait{id, bits, mode, resultAddress}});
+    blockCurrentResumable(EeWaitState{EeWaitReason::EventFlag,
+                                      EeEventFlagWait{id, bits, mode, resultAddress}});
 }
 
 int EeScheduler::setAlarm(uint16_t ticks,
@@ -1807,32 +1809,82 @@ GuestThread *EeScheduler::selectReady()
     return nullptr;
 }
 
-int EeScheduler::peekReadyId() const
+void EeScheduler::fiberEntry(void *user)
 {
-    for (const auto &queue : m_readyQueues)
+    auto *self = static_cast<EeScheduler *>(user);
+    for (;;)
     {
-        if (!queue.empty())
-        {
-            return queue.front();
-        }
+        self->runPendingGuestCall();
+        // The dispatch is over; hand the executor back its stack. Resumed when
+        // this thread is scheduled again with a new pending call.
+        self->m_activeFiber->suspend();
     }
-    return 0;
 }
 
-bool EeScheduler::mustReturnToDispatcher() const noexcept
+// Runs on the fiber's stack. Nothing may escape it: an exception unwinding past
+// the fiber entry has no frame to land on.
+void EeScheduler::runPendingGuestCall()
 {
-    // The same conditions checkpointDue() uses, minus its side effects.
-    if (m_checkpointPending.load(std::memory_order_acquire) ||
-        m_stopRequested.load(std::memory_order_acquire))
+    PS2Runtime::RecompiledFunction function = m_pendingFunction;
+    R5900Context *context = m_pendingContext;
+    m_pendingFunction = nullptr;
+    m_pendingContext = nullptr;
+    try
     {
-        return true;
+        m_insideInterrupt = m_pendingInsideInterrupt;
+        m_guestExecuting.store(true, std::memory_order_release);
+        if (function != nullptr && context != nullptr)
+        {
+            function(m_rdram, context, &m_runtime);
+        }
     }
-    const uint64_t nextEventCycle = m_nextDeadlineCycle.load(std::memory_order_acquire);
-    if (nextEventCycle != 0u && m_eeCycle >= nextEventCycle)
+    catch (const EeDispatcherTransfer &)
     {
-        return true;
+        // A block, an invocation push or a thread exit. The stack is unwound,
+        // so the next dispatch starts from the thread's saved pc again.
     }
-    return m_eeCycle >= m_sliceEndCycle;
+    catch (...)
+    {
+        m_fiberException = std::current_exception();
+    }
+    m_guestExecuting.store(false, std::memory_order_release);
+    m_insideInterrupt = false;
+    m_dispatchedThreadId = 0;
+}
+
+void EeScheduler::enterGuest(GuestThread &thread)
+{
+    if (!thread.fiber)
+    {
+        // Sized for deeply nested guest call chains; mapped lazily, so the
+        // resident cost is only the pages a thread actually touches.
+        static const size_t stackBytes = [] {
+            const char *value = std::getenv("DQ8_EE_FIBER_STACK_KB");
+            const long long parsed = value ? std::atoll(value) : 0;
+            const size_t kb = parsed > 0 ? static_cast<size_t>(parsed) : 8192u;
+            return kb * 1024u;
+        }();
+        thread.fiber = std::make_unique<EeFiber>();
+        if (!thread.fiber->create(&EeScheduler::fiberEntry, this, stackBytes))
+        {
+            thread.fiber.reset();
+            throw std::runtime_error("EE scheduler could not allocate a guest fiber stack");
+        }
+    }
+
+    assert(m_activeFiber == nullptr && "guest fibers must not nest");
+    EeFiber *previous = m_activeFiber;
+    m_activeFiber = thread.fiber.get();
+    m_dispatchedThreadId = thread.id;
+    thread.inGuestCall = true;
+    m_activeFiber->resume();
+    m_activeFiber = previous;
+    // Cleared by the fiber when a dispatch finishes; still set means it
+    // suspended part way through and its stack is waiting to be resumed.
+    if (m_dispatchedThreadId == 0)
+    {
+        thread.inGuestCall = false;
+    }
 }
 
 void EeScheduler::makeRunning(GuestThread &item)
@@ -1896,6 +1948,29 @@ void EeScheduler::blockCurrent(EeWaitState wait)
     publishSnapshot();
     g_eeTransferThrowCount.fetch_add(1u, std::memory_order_relaxed);
     throw EeDispatcherTransfer{};
+}
+
+// Blocks and comes back where it left off. Only for waits that carry no
+// completion -- a completion re-invokes its syscall on wake, which would run
+// twice if the stack were still there -- and whose caller has nothing left to
+// do afterwards, so returning here returns into the guest. blockCurrent()
+// stays [[noreturn]] for everyone else, including the [[noreturn]] waitVSync
+// and waitExternal, whose completions are optional.
+void EeScheduler::blockCurrentResumable(EeWaitState wait)
+{
+    assert(!wait.completion && "a resumable block must not carry a completion");
+    if (m_activeFiber == nullptr)
+    {
+        blockCurrent(std::move(wait));
+    }
+    GuestThread *self = currentThread();
+    assert(self != nullptr);
+    self->wait = std::move(wait);
+    self->status = self->suspendCount == 0 ? EeThreadStatus::Waiting : EeThreadStatus::WaitingSuspended;
+    m_currentThreadId = 0;
+    publishSnapshot();
+    g_eeTransferSuspendCount.fetch_add(1u, std::memory_order_relaxed);
+    m_activeFiber->suspend();
 }
 
 void EeScheduler::makeReady(GuestThread &item, int result, bool interruptSafe)

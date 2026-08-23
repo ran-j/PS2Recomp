@@ -1,9 +1,21 @@
 #include "runtime/ps2_pad.h"
 #include "runtime/ps2_pad_host.h"
 #include "ps2_host_backend.h"
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+// Defined by the MPEG stub; advances once per picture the game asks for.
+extern std::atomic<uint64_t> g_mpegGetPictureCount;
 
 namespace
 {
@@ -167,10 +179,201 @@ namespace
 
 namespace
 {
+    // Scripted input. DQ8_PAD_SCRIPT is either a file path or the script text
+    // itself, entries separated by ';' or newlines:
+    //
+    //     <guest-frame> <BUTTON>[+<BUTTON>...] [hold-frames]
+    //
+    // Timed in guest vsync ticks so a script replays the same way whether the
+    // game is running at 3 fps or 60. Lines starting with '#' are comments.
+    struct PadScriptEvent
+    {
+        uint64_t frame = 0u;
+        uint64_t holdFrames = 4u;
+        uint32_t mask = 0u;
+        bool active = false;
+    };
+
+    std::atomic<uint64_t> g_guestFrame{0u};
+    std::vector<PadScriptEvent> g_padScript;
+    bool g_padScriptVerbose = false;
+
+    uint32_t padScriptButtonMask(const std::string &name)
+    {
+        static const std::unordered_map<std::string, uint32_t> kNames = {
+            {"UP", PAD_UP}, {"DOWN", PAD_DOWN}, {"LEFT", PAD_LEFT}, {"RIGHT", PAD_RIGHT},
+            {"CROSS", PAD_CROSS}, {"CIRCLE", PAD_CIRCLE}, {"SQUARE", PAD_SQUARE},
+            {"TRIANGLE", PAD_TRIANGLE}, {"START", PAD_START}, {"SELECT", PAD_SELECT},
+            {"L1", PAD_L1}, {"R1", PAD_R1}, {"L2", PAD_L2}, {"R2", PAD_R2},
+            {"L3", PAD_L3}, {"R3", PAD_R3},
+        };
+        std::string upper;
+        upper.reserve(name.size());
+        for (const char c : name)
+        {
+            upper.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+        }
+        const auto it = kNames.find(upper);
+        return it == kNames.end() ? 0u : it->second;
+    }
+
+    void parsePadScript(const std::string &text)
+    {
+        std::string entry;
+        std::istringstream stream(text);
+        while (std::getline(stream, entry, '\n'))
+        {
+            std::string chunk;
+            std::istringstream entries(entry);
+            while (std::getline(entries, chunk, ';'))
+            {
+                const size_t hash = chunk.find('#');
+                if (hash != std::string::npos)
+                {
+                    chunk.erase(hash);
+                }
+                std::istringstream fields(chunk);
+                uint64_t frame = 0u;
+                std::string buttons;
+                if (!(fields >> frame >> buttons))
+                {
+                    continue;
+                }
+                PadScriptEvent event{};
+                event.frame = frame;
+                uint64_t hold = 0u;
+                if (fields >> hold && hold > 0u)
+                {
+                    event.holdFrames = hold;
+                }
+                size_t start = 0u;
+                while (start <= buttons.size())
+                {
+                    const size_t plus = buttons.find('+', start);
+                    const std::string name = buttons.substr(
+                        start, plus == std::string::npos ? std::string::npos : plus - start);
+                    const uint32_t mask = padScriptButtonMask(name);
+                    if (mask == 0u && !name.empty())
+                    {
+                        std::fprintf(stderr, "[pad] unknown button in DQ8_PAD_SCRIPT: '%s'\n",
+                                     name.c_str());
+                    }
+                    event.mask |= mask;
+                    if (plus == std::string::npos)
+                    {
+                        break;
+                    }
+                    start = plus + 1u;
+                }
+                if (event.mask != 0u)
+                {
+                    g_padScript.push_back(event);
+                }
+            }
+        }
+        std::sort(g_padScript.begin(), g_padScript.end(),
+                  [](const PadScriptEvent &l, const PadScriptEvent &r) { return l.frame < r.frame; });
+    }
+
+    void ensurePadScriptLoaded()
+    {
+        static const bool loaded = [] {
+            const char *value = std::getenv("DQ8_PAD_SCRIPT");
+            g_padScriptVerbose = std::getenv("DQ8_PAD_SCRIPT_VERBOSE") != nullptr;
+            if (value == nullptr || *value == '\0')
+            {
+                return true;
+            }
+            std::ifstream file(value);
+            if (file)
+            {
+                std::ostringstream contents;
+                contents << file.rdbuf();
+                parsePadScript(contents.str());
+            }
+            else
+            {
+                parsePadScript(value);
+            }
+            std::fprintf(stderr, "[pad] DQ8_PAD_SCRIPT: %zu events\n", g_padScript.size());
+            return true;
+        }();
+        (void)loaded;
+    }
+
+    // Merges scripted buttons into whatever the host sampled, so a human can
+    // still take over while a script is running.
+    void applyPadScript(uint32_t &held, uint32_t &pressed)
+    {
+        ensurePadScriptLoaded();
+        if (g_padScript.empty())
+        {
+            return;
+        }
+        const uint64_t frame = g_guestFrame.load(std::memory_order_relaxed);
+        for (PadScriptEvent &event : g_padScript)
+        {
+            const bool on = frame >= event.frame && frame < event.frame + event.holdFrames;
+            if (on)
+            {
+                held |= event.mask;
+                if (!event.active)
+                {
+                    pressed |= event.mask;
+                    event.active = true;
+                    if (g_padScriptVerbose)
+                    {
+                        std::fprintf(stderr, "[pad] frame %llu: press 0x%04x\n",
+                                     static_cast<unsigned long long>(frame), event.mask);
+                    }
+                }
+            }
+            else
+            {
+                event.active = false;
+            }
+        }
+    }
+
+    // DQ8_SKIP_MOVIES=1 taps START while a movie is running, which is the
+    // game's own skip. Faking end-of-stream inside the MPEG stub was tried
+    // instead and leaves the movie's streaming thread spinning forever on a
+    // black screen: the guest state machine never learns the movie is over.
+    // g_mpegGetPictureCount advancing is the signal that one is playing.
+    void applyMovieSkip(uint32_t &held, uint32_t &pressed)
+    {
+        static const bool enabled = [] {
+            const char *value = std::getenv("DQ8_SKIP_MOVIES");
+            return value != nullptr && *value != '\0' && *value != '0';
+        }();
+        if (!enabled)
+        {
+            return;
+        }
+        static uint64_t lastPictureCount = 0u;
+        static uint32_t sincePress = 0u;
+        const uint64_t pictures = g_mpegGetPictureCount.load(std::memory_order_relaxed);
+        if (pictures == lastPictureCount)
+        {
+            sincePress = 0u;
+            return;
+        }
+        lastPictureCount = pictures;
+        // An edge now and then, not a hold: the title screen that follows takes
+        // START too, and one held press would walk straight through it.
+        if ((sincePress++ % 12u) == 0u)
+        {
+            held |= PAD_START;
+            pressed |= PAD_START;
+        }
+    }
+
     // Shared tail of both host paths: publish held state and latch edges long
     // enough that a tap between two guest polls is not lost.
     void publishHostState(uint32_t held, uint32_t pressed, uint32_t sticks)
     {
+        applyPadScript(held, pressed);
+        applyMovieSkip(held, pressed);
         g_held.store(held);
         g_sticks.store(sticks);
 
@@ -200,6 +403,16 @@ void ps2PadPublishHostState(uint32_t held, uint32_t pressed, uint32_t sticks)
     publishHostState(held, pressed, sticks);
 }
 
+void ps2PadSetGuestFrame(uint64_t frame)
+{
+    g_guestFrame.store(frame, std::memory_order_relaxed);
+}
+
+uint64_t ps2PadCurrentGuestFrame()
+{
+    return g_guestFrame.load(std::memory_order_relaxed);
+}
+
 void ps2PadPollHost()
 {
     if (!IsWindowReady())
@@ -211,28 +424,7 @@ void ps2PadPollHost()
     uint32_t pressed = 0u;
     uint32_t sticks = kPadStickNeutral;
     sampleHost(true, held, pressed, sticks);
-
-    g_held.store(held);
-    g_sticks.store(sticks);
-
-    const uint64_t now = nowMs();
-    if (pressed != 0u)
-    {
-        if (g_latched.fetch_or(pressed) == 0u)
-        {
-            g_latchStampMs.store(now);
-        }
-    }
-    else
-    {
-        const uint32_t stale = g_latched.load();
-        if (stale != 0u && (now - g_latchStampMs.load()) > kLatchTimeoutMs)
-        {
-            g_latched.fetch_and(~stale);
-        }
-    }
-
-    g_hostPolled.store(true);
+    publishHostState(held, pressed, sticks);
 }
 
 bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t size)
