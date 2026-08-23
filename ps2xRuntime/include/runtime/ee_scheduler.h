@@ -354,7 +354,11 @@ public:
     void bindMainContextForSyscall(R5900Context &ctx, uint8_t *rdram);
 
     [[nodiscard]] EeKernelSnapshot snapshot() const;
+    // Cheap unless snapshot() has asked for a refresh since the last build.
     void publishSnapshot();
+    // Builds unconditionally; for the idle path, where no later scheduler
+    // operation is guaranteed to service a pending request.
+    void publishSnapshotNow();
 
 private:
     struct ScheduledEvent
@@ -372,6 +376,10 @@ private:
     void enqueueReady(GuestThread &thread, bool front = false);
     void removeReady(GuestThread &thread);
     [[nodiscard]] GuestThread *selectReady();
+    // What selectReady() would return, without dequeuing it. 0 when nothing is ready.
+    [[nodiscard]] int peekReadyId() const;
+    // Whether the dispatch loop has work that a same-thread yield must not skip.
+    [[nodiscard]] bool mustReturnToDispatcher() const noexcept;
     void makeRunning(GuestThread &thread);
     void makeDormant(GuestThread &thread);
     void removeFromWaitObject(GuestThread &thread);
@@ -428,6 +436,9 @@ private:
     std::atomic<bool> m_stopRequested{false};
     std::atomic<bool> m_checkpointPending{false};
     uint32_t m_debugPublishCountdown = 0u;
+    // The thread whose C++ stack the executor is standing in, or 0 outside a
+    // guest dispatch. A yield back onto this thread can skip the unwind.
+    int m_dispatchedThreadId = 0;
 
     mutable std::mutex m_eventMutex;
     std::condition_variable m_eventCv;
@@ -451,4 +462,7 @@ private:
     mutable std::mutex m_snapshotMutex;
     EeKernelSnapshot m_snapshot;
     uint64_t m_snapshotSequence = 0;
+    // Set by snapshot(), cleared by publishSnapshot(). The snapshot is debug
+    // state, so it is only worth building when someone has asked for it.
+    mutable std::atomic<bool> m_snapshotWanted{false};
 };
