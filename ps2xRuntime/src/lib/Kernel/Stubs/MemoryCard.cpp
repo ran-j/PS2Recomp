@@ -107,9 +107,35 @@ namespace ps2_stubs
             cvMcKilobytes(kCvMcIconInfoBytes) +
             cvMcKilobytes(kCvMcIconFileBytes) + 11;
 
+        // DQ8_MC_TRACE=1 logs the card calls. RUNTIME_LOG is compile-time and
+        // lives in a header the whole recompiled corpus includes, so turning it
+        // on to look at one stub costs a full rebuild.
+        bool mcTraceEnabled()
+        {
+            static const bool on = [] {
+                const char *value = std::getenv("DQ8_MC_TRACE");
+                return value != nullptr && *value != '\0' && *value != '0';
+            }();
+            return on;
+        }
+
+#define MC_TRACE(...)                               \
+    do                                              \
+    {                                               \
+        if (mcTraceEnabled())                       \
+        {                                           \
+            std::fprintf(stderr, "[mc] " __VA_ARGS__); \
+        }                                           \
+    } while (0)
+
         bool isValidMcPortSlot(int32_t port, int32_t slot)
         {
-            return port >= 0 && port < static_cast<int32_t>(g_mcPorts.size()) && slot == 0;
+            // The slot argument selects a multitap sub-slot. This runtime models
+            // a console with no multitap -- one card per port, and getMcRootPath()
+            // ignores the slot entirely -- so any slot query for a port answers
+            // for that port's card. Rejecting everything but slot 0 made DQ8 see
+            // no card at all: it passes slot=1 to every libmc call.
+            return port >= 0 && port < static_cast<int32_t>(g_mcPorts.size()) && slot >= 0;
         }
 
         std::filesystem::path getMcRootPath(int32_t port)
@@ -844,6 +870,8 @@ namespace ps2_stubs
         }
         RUNTIME_LOG("[MC] GetDir port=" << port << " '" << rawPath
                                         << "' maxent=" << maxEntries << " -> result=" << result);
+        MC_TRACE("GetDir port=%d '%s' maxent=%d -> result=%d\n", port, rawPath.c_str(),
+                 maxEntries, result);
         setReturnS32(ctx, 0);
     }
 
@@ -908,6 +936,9 @@ namespace ps2_stubs
         RUNTIME_LOG("[MC] GetInfo port=" << port << " type=" << cardType
                                          << " free=" << freeBlocks << " format=" << format
                                          << " result=" << result);
+        MC_TRACE("GetInfo port=%d slot=%d -> type=%d free=%d format=%d result=%d "
+                 "(typePtr=%08x freePtr=%08x formatPtr=%08x)\n",
+                 port, slot, cardType, freeBlocks, format, result, typePtr, freePtr, formatPtr);
         setReturnS32(ctx, 0);
     }
 
@@ -933,6 +964,8 @@ namespace ps2_stubs
         }
         ensureMcRootExists(0);
         ensureMcRootExists(1);
+        MC_TRACE("Init -> 0, roots %s | %s\n", getMcRootPath(0).string().c_str(),
+                 getMcRootPath(1).string().c_str());
         setReturnS32(ctx, 0);
     }
 
@@ -1209,11 +1242,13 @@ namespace ps2_stubs
         // on it to tell idle polling apart from command completion.
         if (!hadPending)
         {
+            MC_TRACE("Sync -> idle (-1)\n");
             setReturnS32(ctx, -1);
             return;
         }
 
         RUNTIME_LOG("[MC] Sync cmd=" << cmd << " result=" << result);
+        MC_TRACE("Sync cmd=%d result=%d\n", cmd, result);
 
         if (cmdPtr != 0u)
         {

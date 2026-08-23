@@ -118,6 +118,7 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_executorThread = std::this_thread::get_id();
     m_rdram = rdram;
     m_readyQueues = {};
+    m_readyMask = {};
     // Thread ids restart here, so keyed stacks would otherwise be stranded:
     // the pool below cannot reclaim them either.
     for (const auto &[key, top] : m_invocationStackTops)
@@ -185,6 +186,7 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     main.status = EeThreadStatus::Ready;
     m_threads.emplace(main.id, std::move(main));
     m_readyQueues[0].push_back(kMainThreadId);
+    refreshReadyMask(0);
     scheduleEvent(m_eeCycle + kVBlankPeriodCycles,
                   std::chrono::steady_clock::now() + kVBlankPeriod,
                   EeEvent{EeEventType::VBlankStart, 0, 0});
@@ -848,13 +850,10 @@ int EeScheduler::changePriority(int id, int priority, bool interruptSafe, int &o
         target->currentPriority = priority;
         if (target->status == EeThreadStatus::Running)
         {
-            for (int p = 0; p < target->currentPriority; ++p)
+            const int first = firstReadyPriority();
+            if (first >= 0 && first < target->currentPriority)
             {
-                if (!m_readyQueues[p].empty())
-                {
-                    m_rescheduleRequested = true;
-                    break;
-                }
+                m_rescheduleRequested = true;
             }
         }
     }
@@ -1764,6 +1763,33 @@ GuestThread &EeScheduler::acquireInvocationThread()
     return m_threads.emplace(dispatcher.id, std::move(dispatcher)).first->second;
 }
 
+void EeScheduler::refreshReadyMask(int priority) noexcept
+{
+    const size_t word = static_cast<size_t>(priority) / 64u;
+    const uint64_t bit = uint64_t{1} << (static_cast<size_t>(priority) % 64u);
+    if (m_readyQueues[static_cast<size_t>(priority)].empty())
+    {
+        m_readyMask[word] &= ~bit;
+    }
+    else
+    {
+        m_readyMask[word] |= bit;
+    }
+}
+
+int EeScheduler::firstReadyPriority() const noexcept
+{
+    for (size_t word = 0; word < m_readyMask.size(); ++word)
+    {
+        if (m_readyMask[word] != 0u)
+        {
+            return static_cast<int>(word * 64u +
+                                    static_cast<size_t>(__builtin_ctzll(m_readyMask[word])));
+        }
+    }
+    return -1;
+}
+
 void EeScheduler::enqueueReady(GuestThread &item, bool front)
 {
     assert(item.currentPriority >= 0 && item.currentPriority < kPriorityCount);
@@ -1777,6 +1803,7 @@ void EeScheduler::enqueueReady(GuestThread &item, bool front)
     {
         queue.push_back(item.id);
     }
+    refreshReadyMask(item.currentPriority);
 }
 
 void EeScheduler::removeReady(GuestThread &item)
@@ -1789,18 +1816,19 @@ void EeScheduler::removeReady(GuestThread &item)
     auto it = std::find(queue.begin(), queue.end(), item.id);
     assert(it != queue.end());
     queue.erase(it);
+    refreshReadyMask(item.currentPriority);
 }
 
 GuestThread *EeScheduler::selectReady()
 {
-    for (auto &queue : m_readyQueues)
+    const int priority = firstReadyPriority();
+    if (priority >= 0)
     {
-        if (queue.empty())
-        {
-            continue;
-        }
+        auto &queue = m_readyQueues[static_cast<size_t>(priority)];
+        assert(!queue.empty());
         const int id = queue.front();
         queue.pop_front();
+        refreshReadyMask(priority);
         GuestThread *selected = thread(id);
         assert(selected != nullptr);
         assert(selected->status == EeThreadStatus::Ready);
@@ -2399,14 +2427,8 @@ void EeScheduler::updateNextDeadline()
 bool EeScheduler::hasReadyAtOrAbovePriority(int priority) const
 {
     const int last = std::clamp(priority, 0, kPriorityCount - 1);
-    for (int p = 0; p <= last; ++p)
-    {
-        if (!m_readyQueues[static_cast<size_t>(p)].empty())
-        {
-            return true;
-        }
-    }
-    return false;
+    const int first = firstReadyPriority();
+    return first >= 0 && first <= last;
 }
 
 void EeScheduler::renewTimeSlice()

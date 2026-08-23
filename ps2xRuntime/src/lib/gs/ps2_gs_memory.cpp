@@ -225,6 +225,41 @@ namespace GSMem
         PixelStorageTraits<C32>::Write(PageTableC32, data, bp, bw, x, y, value);
     }
 
+    namespace
+    {
+        // Shared body for the 32-bit run writers. Defined here so the storage
+        // traits and their page table inline into the loop.
+        template <PixelStorageMode psm, typename TableT>
+        inline void WriteRun32(const TableT& table, u8* data, u32 bp, u32 bw, u32 dsax,
+                               u32 rowEnd, u32 x, u32 y, const u8* src, u32 count)
+        {
+            for (u32 i = 0; i < count; ++i)
+            {
+                u32 value = 0;
+                std::memcpy(&value, src, sizeof(value));
+                src += sizeof(value);
+                PixelStorageTraits<psm>::Write(table, data, bp, bw, x, y, value);
+                if (++x >= rowEnd)
+                {
+                    x = dsax;
+                    ++y;
+                }
+            }
+        }
+    }
+
+    void WriteRunCT32(u8* data, u32 bp, u32 bw, u32 dsax, u32 rowEnd, u32 x, u32 y,
+                      const u8* src, u32 count)
+    {
+        WriteRun32<C32>(PageTableC32, data, bp, bw, dsax, rowEnd, x, y, src, count);
+    }
+
+    void WriteRunZ32(u8* data, u32 bp, u32 bw, u32 dsax, u32 rowEnd, u32 x, u32 y,
+                     const u8* src, u32 count)
+    {
+        WriteRun32<Z32>(PageTableZ32, data, bp, bw, dsax, rowEnd, x, y, src, count);
+    }
+
     void WriteCT24(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
     {
         PixelStorageTraits<C24>::Write(PageTableC32, data, bp, bw, x, y, value);

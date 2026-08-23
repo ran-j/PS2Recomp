@@ -619,6 +619,29 @@ namespace ps2_stubs
         std::mutex g_mpeg_stub_mutex;
         constexpr uint32_t kMpegPictureWaitType = 1u;
 
+        // DQ8_SKIP_MOVIES=1 serves pictures without waiting for their
+        // presentation tick, so a movie runs as fast as the guest will drive it
+        // rather than being held to 30fps. Everything else about playback is
+        // untouched: the frames are still decoded and written, and the movie
+        // still ends by itself.
+        //
+        // Two stronger skips were tried and are recorded because both looked
+        // right. Reporting end-of-stream from sceMpegGetPicture/sceMpegIsEnd
+        // leaves the streaming thread spinning on a black screen -- the guest
+        // state machine never learns the movie is over. Closing the caller's
+        // upload gate to drop the ~900 VRAM tiles a movie frame costs does cut
+        // them (54,000 transfers per 60 frames to 240) but the guest then DMAs
+        // a buffer nothing initialises, and the screen fills with garbage.
+        // DQ8's attract movies are not button-skippable either.
+        bool mpegSkipMovies()
+        {
+            static const bool skip = [] {
+                const char *value = std::getenv("DQ8_SKIP_MOVIES");
+                return value != nullptr && *value != '\0' && *value != '0';
+            }();
+            return skip;
+        }
+
         // A refused demux call only has to give the consumer thread a turn --
         // it does not need one context transfer per refusal, and a transfer is
         // a thrown EeDispatcherTransfer unwound through the guest's whole call
@@ -2548,7 +2571,7 @@ namespace ps2_stubs
                     playback.nextPictureTickQ32 = currentTickQ32;
                 }
 
-                if (currentTickQ32 < presentationTargetQ32)
+                if (currentTickQ32 < presentationTargetQ32 && !mpegSkipMovies())
                 {
                     const uint64_t eligibleTick = (presentationTargetQ32 + kPictureClockOne - 1u) >> 32u;
                     lock.unlock();

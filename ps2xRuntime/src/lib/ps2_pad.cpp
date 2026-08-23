@@ -14,9 +14,6 @@
 #include <unordered_map>
 #include <vector>
 
-// Defined by the MPEG stub; advances once per picture the game asks for.
-extern std::atomic<uint64_t> g_mpegGetPictureCount;
-
 namespace
 {
     constexpr uint8_t kPadAnalogMarker = 0x73;
@@ -335,45 +332,11 @@ namespace
         }
     }
 
-    // DQ8_SKIP_MOVIES=1 taps START while a movie is running, which is the
-    // game's own skip. Faking end-of-stream inside the MPEG stub was tried
-    // instead and leaves the movie's streaming thread spinning forever on a
-    // black screen: the guest state machine never learns the movie is over.
-    // g_mpegGetPictureCount advancing is the signal that one is playing.
-    void applyMovieSkip(uint32_t &held, uint32_t &pressed)
-    {
-        static const bool enabled = [] {
-            const char *value = std::getenv("DQ8_SKIP_MOVIES");
-            return value != nullptr && *value != '\0' && *value != '0';
-        }();
-        if (!enabled)
-        {
-            return;
-        }
-        static uint64_t lastPictureCount = 0u;
-        static uint32_t sincePress = 0u;
-        const uint64_t pictures = g_mpegGetPictureCount.load(std::memory_order_relaxed);
-        if (pictures == lastPictureCount)
-        {
-            sincePress = 0u;
-            return;
-        }
-        lastPictureCount = pictures;
-        // An edge now and then, not a hold: the title screen that follows takes
-        // START too, and one held press would walk straight through it.
-        if ((sincePress++ % 12u) == 0u)
-        {
-            held |= PAD_START;
-            pressed |= PAD_START;
-        }
-    }
-
     // Shared tail of both host paths: publish held state and latch edges long
     // enough that a tap between two guest polls is not lost.
     void publishHostState(uint32_t held, uint32_t pressed, uint32_t sticks)
     {
         applyPadScript(held, pressed);
-        applyMovieSkip(held, pressed);
         g_held.store(held);
         g_sticks.store(sticks);
 

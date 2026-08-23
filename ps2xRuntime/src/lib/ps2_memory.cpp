@@ -426,11 +426,30 @@ uint32_t PS2Memory::advanceEeTimers(uint64_t eeCycles) noexcept
         }
 
         const uint64_t clockHz = kEeTimerClockHz[timer.mode & kEeTimerModeClksMask];
-        const uint64_t wholeSeconds = eeCycles / kEeClockHz;
-        const uint64_t remainingCycles = eeCycles % kEeClockHz;
-        const uint64_t scaled = remainingCycles * clockHz + timer.clockRemainder;
-        const uint64_t ticks = wholeSeconds * clockHz + scaled / kEeClockHz;
-        timer.clockRemainder = scaled % kEeClockHz;
+        uint64_t ticks = 0u;
+        if (eeCycles < kEeClockHz)
+        {
+            // The hot case by far: this runs on every guest safe point with a
+            // handful of cycles, so the two 64-bit divisions the general form
+            // needs are pure overhead. Below one EE second wholeSeconds is
+            // zero, and a sub-tick accumulation needs no division at all.
+            const uint64_t scaled = eeCycles * clockHz + timer.clockRemainder;
+            if (scaled < kEeClockHz)
+            {
+                timer.clockRemainder = scaled;
+                continue;
+            }
+            ticks = scaled / kEeClockHz;
+            timer.clockRemainder = scaled % kEeClockHz;
+        }
+        else
+        {
+            const uint64_t wholeSeconds = eeCycles / kEeClockHz;
+            const uint64_t remainingCycles = eeCycles % kEeClockHz;
+            const uint64_t scaled = remainingCycles * clockHz + timer.clockRemainder;
+            ticks = wholeSeconds * clockHz + scaled / kEeClockHz;
+            timer.clockRemainder = scaled % kEeClockHz;
+        }
         if (ticks == 0u)
         {
             continue;

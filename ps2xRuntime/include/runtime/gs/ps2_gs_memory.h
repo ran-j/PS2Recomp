@@ -541,6 +541,18 @@ namespace GSMem
 	void WriteCT32(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
 	void WriteZ32(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
 
+	// Writes `count` little-endian 32-bit pixels from `src`, starting at (x, y)
+	// and wrapping back to `dsax` when x reaches `rowEnd`. The per-pixel entry
+	// points above are out-of-line wrappers around a template whose lookup table
+	// is private to ps2_gs_memory.cpp, so a caller writing a run of pixels pays a
+	// cross-TU call each time and nothing inlines. A host-to-local transfer moves
+	// 256 pixels per 16x16 tile and DQ8's movies send ~900 tiles a frame, which
+	// made that the hottest thing in the runtime.
+	void WriteRunCT32(u8* data, u32 bp, u32 bw, u32 dsax, u32 rowEnd, u32 x, u32 y,
+	                  const u8* src, u32 count);
+	void WriteRunZ32(u8* data, u32 bp, u32 bw, u32 dsax, u32 rowEnd, u32 x, u32 y,
+	                 const u8* src, u32 count);
+
 	void WriteCT24(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
 	void WriteZ24(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
 
