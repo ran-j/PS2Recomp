@@ -454,6 +454,11 @@ public:
     };
 
     std::array<EeTimer, 4> m_eeTimers{};
+    // True while any timer has CUE set. advanceEeTimers runs on every guest
+    // safe point; without this it walks all four timers each time even when
+    // the game never armed one.
+    bool m_anyEeTimerCued = false;
+    void refreshEeTimersCued() noexcept;
     void queueCompletedDmacCause(uint32_t cause);
 };
 

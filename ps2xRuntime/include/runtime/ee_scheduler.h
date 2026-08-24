@@ -477,6 +477,12 @@ private:
     mutable std::mutex m_eventMutex;
     std::condition_variable m_eventCv;
     std::deque<EeEvent> m_events;
+    // Nonzero while m_events has anything in it. The post-dispatch pump's
+    // tail used to take m_eventMutex to ask m_events.empty(); at the movie
+    // thread's ~4M pumps a second that mutex pair was measurable, and the
+    // count answers the same question without it. postEvent increments under
+    // m_eventMutex, the pump zeroes it under the same mutex when it drains.
+    std::atomic<uint32_t> m_pendingEventCount{0};
     std::vector<ScheduledEvent> m_deadlines;
     std::deque<GuestInvocation> m_pendingInvocations;
     uint64_t m_eventSequence = 0;

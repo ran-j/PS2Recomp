@@ -402,16 +402,38 @@ bool PS2Memory::initialize(size_t ramSize)
 void PS2Memory::resetEeTimers() noexcept
 {
     m_eeTimers = {};
+    m_anyEeTimerCued = false;
+}
+
+void PS2Memory::refreshEeTimersCued() noexcept
+{
+    // Write path only: advanceEeTimers is the hot side and just reads the
+    // flag.
+    m_anyEeTimerCued = false;
+    for (const EeTimer &timer : m_eeTimers)
+    {
+        if ((timer.mode & kEeTimerModeCue) != 0u)
+        {
+            m_anyEeTimerCued = true;
+            return;
+        }
+    }
 }
 
 uint32_t PS2Memory::takePendingVifInterrupts() noexcept
 {
+    // Runs after every guest dispatch. The exchange is a locked RMW; the
+    // pending set is almost always empty, so the plain load answers first.
+    if (m_pendingVifInterrupts.load(std::memory_order_acquire) == 0u)
+    {
+        return 0u;
+    }
     return m_pendingVifInterrupts.exchange(0u, std::memory_order_acq_rel);
 }
 
 uint32_t PS2Memory::advanceEeTimers(uint64_t eeCycles) noexcept
 {
-    if (eeCycles == 0u)
+    if (eeCycles == 0u || !m_anyEeTimerCued)
     {
         return 0u;
     }
@@ -500,6 +522,10 @@ uint32_t PS2Memory::advanceEeTimers(uint64_t eeCycles) noexcept
 
 uint64_t PS2Memory::cyclesUntilNextEeTimerInterrupt() const noexcept
 {
+    if (!m_anyEeTimerCued)
+    {
+        return std::numeric_limits<uint64_t>::max();
+    }
     uint64_t nearest = std::numeric_limits<uint64_t>::max();
     for (const EeTimer &timer : m_eeTimers)
     {
@@ -1147,6 +1173,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
             {
                 timer.clockRemainder = 0u;
             }
+            refreshEeTimersCued();
             break;
         }
         case kEeTimerCompareOffset:

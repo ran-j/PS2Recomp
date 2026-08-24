@@ -24,6 +24,13 @@ std::atomic<uint64_t> g_eeGuestDispatchCount{0};
 std::atomic<uint64_t> g_eeTransferThrowCount{0};
 // Transfers served by suspending the guest stack instead of unwinding it.
 std::atomic<uint64_t> g_eeTransferSuspendCount{0};
+// Temporary diagnostics for the movie-speed work: how often the run loop goes
+// round, how many of those resume a suspended guest stack, and how often the
+// post-dispatch event pump runs. Read by the sdlgpu stats line.
+std::atomic<uint64_t> g_eeRunLoopIterations{0};
+std::atomic<uint64_t> g_eeRunLoopResumeCount{0};
+std::atomic<uint64_t> g_eeProcessPendingEventsCount{0};
+std::atomic<uint64_t> g_eeEnterGuestCount{0};
 
 namespace
 {
@@ -159,6 +166,7 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     {
         std::lock_guard lock(m_eventMutex);
         m_events.clear();
+        m_pendingEventCount.store(0u, std::memory_order_release);
         m_deadlines.clear();
         m_pendingInvocations.clear();
     }
@@ -200,6 +208,7 @@ void EeScheduler::run()
 
     while (!m_stopRequested.load(std::memory_order_acquire))
     {
+        g_eeRunLoopIterations.fetch_add(1u, std::memory_order_relaxed);
         processPendingEvents();
         if (m_stopRequested.load(std::memory_order_acquire))
         {
@@ -245,6 +254,7 @@ void EeScheduler::run()
         // middle of a function the fiber is already executing.
         if (running->inGuestCall)
         {
+            g_eeRunLoopResumeCount.fetch_add(1u, std::memory_order_relaxed);
             enterGuest(*running);
             if (m_fiberException)
             {
@@ -446,6 +456,7 @@ void EeScheduler::postEvent(EeEvent event)
     {
         std::lock_guard lock(m_eventMutex);
         m_events.push_back(event);
+        m_pendingEventCount.fetch_add(1u, std::memory_order_release);
         m_checkpointPending.store(true, std::memory_order_release);
     }
     m_eventCv.notify_one();
@@ -1901,6 +1912,7 @@ void EeScheduler::enterGuest(GuestThread &thread)
     }
 
     assert(m_activeFiber == nullptr && "guest fibers must not nest");
+    g_eeEnterGuestCount.fetch_add(1u, std::memory_order_relaxed);
     EeFiber *previous = m_activeFiber;
     m_activeFiber = thread.fiber.get();
     m_dispatchedThreadId = thread.id;
@@ -2053,6 +2065,7 @@ void EeScheduler::applyPendingPreemption()
 void EeScheduler::processPendingEvents()
 {
     assertExecutor();
+    g_eeProcessPendingEventsCount.fetch_add(1u, std::memory_order_relaxed);
     processDueDeadlines();
     const uint32_t timerInterrupts = m_pendingEeTimerInterrupts;
     m_pendingEeTimerInterrupts = 0u;
@@ -2082,6 +2095,9 @@ void EeScheduler::processPendingEvents()
         {
             std::deque<EeEvent> pending;
             pending.swap(m_events);
+            // Same mutex postEvent counts under, so a post that races this
+            // either lands in the deque being drained or after this store.
+            m_pendingEventCount.store(0u, std::memory_order_release);
             lock.unlock();
             for (const EeEvent &event : pending)
             {
@@ -2090,13 +2106,16 @@ void EeScheduler::processPendingEvents()
         }
     }
 
-    {
-        std::lock_guard lock(m_eventMutex);
-        const uint64_t nextEventCycle = m_nextDeadlineCycle.load(std::memory_order_acquire);
-        const bool cycleEventDue = nextEventCycle != 0u && m_eeCycle >= nextEventCycle;
-        const bool pendingWork = !m_events.empty() || cycleEventDue || m_stopRequested.load(std::memory_order_acquire);
-        m_checkpointPending.store(pendingWork, std::memory_order_release);
-    }
+    // The tail used to take m_eventMutex to ask m_events.empty(); the movie
+    // thread pumps twice per yield at ~4M yields a second and the mutex pair
+    // showed in its profile. The count plus the atomics answer the same
+    // question.
+    const uint64_t nextEventCycle = m_nextDeadlineCycle.load(std::memory_order_acquire);
+    const bool cycleEventDue = nextEventCycle != 0u && m_eeCycle >= nextEventCycle;
+    const bool pendingWork = m_pendingEventCount.load(std::memory_order_acquire) != 0u ||
+                             cycleEventDue ||
+                             m_stopRequested.load(std::memory_order_acquire);
+    m_checkpointPending.store(pendingWork, std::memory_order_release);
     applyPendingPreemption();
 }
 
