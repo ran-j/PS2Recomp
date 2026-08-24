@@ -393,6 +393,66 @@ namespace GSMem
     {
         return 0;
     }
+
+    namespace
+    {
+        // Body for the consecutive-x row readers. Along a row only the
+        // in-page column and the page column move, so the walk is increments;
+        // the swizzle table lookup is the only per-pixel work left. The
+        // address mask matches Read()'s wrap guard for regions past 4 MiB.
+        template <typename TableT, u32 PageW, u32 PageH, u32 BytesPerPixel>
+        inline void ReadRowImpl(const TableT& table, u8* data, u32 bp, u32 bw,
+                                u32 x, u32 y, u32 count, u8* dst)
+        {
+            constexpr u32 kBlocksPerPage = 32;
+            constexpr u32 kPixelsPerPage = PageW * PageH;
+            constexpr u32 kAddressMask = u32(MEMORY_SIZE) - BytesPerPixel;
+
+            const u32 basePage = bp / kBlocksPerPage;
+            const u32 block = bp % kBlocksPerPage;
+            const u32 pagesPerRow = (bw * 64u) / PageW;
+            const u32 pageRowBase = basePage + (y / PageH) * pagesPerRow;
+            const u32 yInPage = y % PageH;
+            const auto& row = table[block][yInPage];
+
+            u32 page = pageRowBase + x / PageW;
+            u32 xInPage = x % PageW;
+            while (count > 0)
+            {
+                const u32 segment = count < (PageW - xInPage) ? count : (PageW - xInPage);
+                const u32 pageAddress = page * kPixelsPerPage;
+                for (u32 i = 0; i < segment; ++i)
+                {
+                    const u32 byteAddress =
+                        ((pageAddress + row[xInPage + i]) * BytesPerPixel) & kAddressMask;
+                    std::memcpy(dst, data + byteAddress, BytesPerPixel);
+                    dst += BytesPerPixel;
+                }
+                xInPage += segment;
+                if (xInPage == PageW)
+                {
+                    xInPage = 0;
+                    ++page;
+                }
+                count -= segment;
+            }
+        }
+    }
+
+    void ReadRowCT32(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 count, u8* dst)
+    {
+        ReadRowImpl<C32PageLookupTable, 64, 32, 4>(PageTableC32, data, bp, bw, x, y, count, dst);
+    }
+
+    void ReadRowZ32(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 count, u8* dst)
+    {
+        ReadRowImpl<Z32PageLookupTableT, 64, 32, 4>(PageTableZ32, data, bp, bw, x, y, count, dst);
+    }
+
+    void ReadRowP8(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 count, u8* dst)
+    {
+        ReadRowImpl<P8PageLookupTable, 128, 64, 1>(PageTableP8, data, bp, bw, x, y, count, dst);
+    }
 }
 
 

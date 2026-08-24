@@ -592,4 +592,13 @@ namespace GSMem
 	u32 ReadP4HH(u8* data, u32 bp, u32 bw, u32 x, u32 y);
 
 	u32 ReadNull(u8* data, u32 bp, u32 bw, u32 x, u32 y);
+
+	// Reads `count` consecutive-x pixels starting at (x, y) into dst, packed
+	// at the PSM's storage width. Texture expansion reads whole rows; the
+	// per-pixel entry points recompute page, block row and column from (x, y)
+	// with three integer divisions each, and a 512x448 expand paid that 229k
+	// times. Same values, same order, increments instead of divisions.
+	void ReadRowCT32(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 count, u8* dst);
+	void ReadRowZ32(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 count, u8* dst);
+	void ReadRowP8(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 count, u8* dst);
 }
