@@ -278,6 +278,7 @@ namespace ps2_syscalls
         client->hdr.mode = mode;
 
         uint32_t serverPtr = 0;
+        bool serverIsSynthetic = false;
         {
             std::lock_guard<std::mutex> lock(g_rpc_mutex);
             client->hdr.rpc_id = g_rpc_next_id++;
@@ -285,6 +286,7 @@ namespace ps2_syscalls
             if (it != g_rpc_servers.end())
             {
                 serverPtr = it->second.sd_ptr;
+                serverIsSynthetic = it->second.synthetic;
             }
             g_rpc_clients[clientPtr] = {};
             g_rpc_clients[clientPtr].sid = rpcId;
@@ -303,16 +305,25 @@ namespace ps2_syscalls
                     dummy->sid = static_cast<int>(rpcId);
                 }
                 std::lock_guard<std::mutex> lock(g_rpc_mutex);
-                g_rpc_servers[rpcId] = {rpcId, serverPtr};
+                g_rpc_servers[rpcId] = {rpcId, serverPtr, true};
+                serverIsSynthetic = true;
             }
         }
 
         if (serverPtr)
         {
-            t_SifRpcServerData *sd = reinterpret_cast<t_SifRpcServerData *>(getMemPtr(rdram, serverPtr));
             client->server = serverPtr;
-            client->buf = sd ? sd->buf : 0;
-            client->cbuf = sd ? sd->cbuf : 0;
+            if (serverIsSynthetic)
+            {
+                client->buf = 0;
+                client->cbuf = 0;
+            }
+            else
+            {
+                t_SifRpcServerData *sd = reinterpret_cast<t_SifRpcServerData *>(getMemPtr(rdram, serverPtr));
+                client->buf = sd ? sd->buf : 0;
+                client->cbuf = sd ? sd->cbuf : 0;
+            }
         }
         else
         {
@@ -476,25 +487,29 @@ namespace ps2_syscalls
         client->hdr.mode = mode;
 
         uint32_t sid = 0u;
+        bool serverIsSynthetic = false;
         {
             std::lock_guard<std::mutex> lock(g_rpc_mutex);
             auto &state = g_rpc_clients[clientPtr];
             state.busy = true;
             state.last_rpc = rpcNum;
             sid = state.sid;
-            if (sid != 0u)
+            const auto serverIt = g_rpc_servers.find(sid);
+            if (serverIt != g_rpc_servers.end())
             {
-                const auto serverIt = g_rpc_servers.find(sid);
-                if (serverIt != g_rpc_servers.end() &&
-                    serverIt->second.sd_ptr != 0u)
+                if (sid != 0u && serverIt->second.sd_ptr != 0u)
                 {
                     client->server = serverIt->second.sd_ptr;
+                }
+                if (serverIt->second.sd_ptr == client->server)
+                {
+                    serverIsSynthetic = serverIt->second.synthetic;
                 }
             }
         }
 
         const uint32_t serverPtr = client->server;
-        auto *server = serverPtr
+        auto *server = serverPtr && !serverIsSynthetic
                            ? reinterpret_cast<t_SifRpcServerData *>(getMemPtr(rdram, serverPtr))
                            : nullptr;
         if (server)
@@ -777,7 +792,7 @@ namespace ps2_syscalls
                 }
             }
 
-            g_rpc_servers[sid] = {sid, sdPtr};
+            g_rpc_servers[sid] = {sid, sdPtr, false};
             for (auto &entry : g_rpc_clients)
             {
                 if (entry.second.sid == sid)

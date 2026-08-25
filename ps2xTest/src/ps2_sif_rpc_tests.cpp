@@ -319,6 +319,58 @@ void register_ps2_sif_rpc_tests()
 {
     MiniTest::Case("PS2SifRpc", [](TestCase &tc)
     {
+        tc.Run("synthetic RPC server ignores overwritten guest descriptor", [](TestCase &t)
+        {
+            TestEnv env;
+
+            constexpr uint32_t kClientAddr = 0x00022000u;
+            constexpr uint32_t kSendAddr = 0x00022100u;
+            constexpr uint32_t kRecvAddr = 0x00022200u;
+            constexpr uint32_t kVictimAddr = 0x00022300u;
+            constexpr uint32_t kUnknownSid = 0x80000903u;
+
+            SifInitRpc(env.rdram.data(), &env.ctx, &env.runtime);
+
+            setRegU32(env.ctx, 4, kClientAddr);
+            setRegU32(env.ctx, 5, kUnknownSid);
+            setRegU32(env.ctx, 6, 0u);
+            SifBindRpc(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_OK, "SifBindRpc should synthesize an unknown server");
+
+            const SifRpcClientData client = readGuestStruct<SifRpcClientData>(env.rdram.data(), kClientAddr);
+            t.IsTrue(client.server != 0u, "synthetic bind should expose a nonzero server pointer");
+            t.Equals(client.buf, 0u, "synthetic bind should not trust a guest server buffer");
+            t.Equals(client.cbuf, 0u, "synthetic bind should not trust a guest callback buffer");
+
+            SifRpcServerData overwrittenServer{};
+            overwrittenServer.sid = static_cast<int32_t>(kUnknownSid);
+            overwrittenServer.buf = kVictimAddr;
+            writeGuestStruct(env.rdram.data(), client.server, overwrittenServer);
+
+            std::array<uint8_t, 16> payload{};
+            std::array<uint8_t, 16> sentinel{};
+            payload.fill(0u);
+            sentinel.fill(0xA5u);
+            std::memcpy(env.rdram.data() + kSendAddr, payload.data(), payload.size());
+            std::memcpy(env.rdram.data() + kVictimAddr, sentinel.data(), sentinel.size());
+
+            setRegU32(env.ctx, 4, kClientAddr);
+            setRegU32(env.ctx, 5, 1u);
+            setRegU32(env.ctx, 6, 0u);
+            setRegU32(env.ctx, 7, kSendAddr);
+            setRegU32(env.ctx, 8, static_cast<uint32_t>(payload.size()));
+            setRegU32(env.ctx, 9, kRecvAddr);
+            setRegU32(env.ctx, 10, static_cast<uint32_t>(payload.size()));
+            setRegU32(env.ctx, 11, 0u);
+            setRegU32(env.ctx, 29, K_STACK_ADDR);
+            writeGuestU32(env.rdram.data(), K_STACK_ADDR, 0u);
+
+            SifCallRpc(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_OK, "SifCallRpc should complete for a synthetic server");
+            t.IsTrue(std::memcmp(env.rdram.data() + kVictimAddr, sentinel.data(), sentinel.size()) == 0,
+                     "overwritten synthetic descriptor must not redirect the server-buffer copy");
+        });
+
         tc.Run("register bind call updates descriptors and payload", [](TestCase &t)
         {
             TestEnv env;

@@ -162,6 +162,7 @@ struct RpcServerState
 {
     uint32_t sid = 0;
     uint32_t sd_ptr = 0; // PS2 address
+    bool synthetic = false;
 };
 
 struct RpcClientState
