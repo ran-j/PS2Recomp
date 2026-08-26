@@ -20,6 +20,9 @@ namespace
     constexpr uint32_t GUEST_MC_SYNC_CMD_ADDR = GUEST_BUFFER_AREA_START + 0x1C00;
     constexpr uint32_t GUEST_MC_SYNC_RESULT_ADDR = GUEST_BUFFER_AREA_START + 0x1C04;
     constexpr uint32_t GUEST_MC_TABLE_ADDR = GUEST_BUFFER_AREA_START + 0x2000;
+    constexpr uint32_t GUEST_MC2_SYNC_CMD_ADDR = GUEST_BUFFER_AREA_START + 0x1C08;
+    constexpr uint32_t GUEST_MC2_SYNC_RESULT_ADDR = GUEST_BUFFER_AREA_START + 0x1C0C;
+    constexpr uint32_t GUEST_MC2_ENTRY_ADDR = GUEST_BUFFER_AREA_START + 0x2400;
     
     // Common file I/O flag combinations
     constexpr uint32_t PS2_FIO_WRITE_CREATE_TRUNC = 
@@ -49,6 +52,29 @@ namespace
     };
 
     static_assert(sizeof(SceMcTblGetDir) == 64, "sceMcTblGetDir size mismatch");
+
+    struct SceMc2DirEntry
+    {
+        SceMcStDateTime create;
+        SceMcStDateTime modify;
+        uint32_t fileSizeByte;
+        uint16_t attrFile;
+        uint16_t reserved;
+        char entryName[32];
+    };
+
+    static_assert(sizeof(SceMc2DirEntry) == 56, "sceMc2DirEntry size mismatch");
+
+    constexpr int32_t MC2_CMD_GETINFO = 2;
+    constexpr int32_t MC2_CMD_FORMAT = 3;
+    constexpr int32_t MC2_CMD_READ = 5;
+    constexpr int32_t MC2_CMD_WRITE = 6;
+    constexpr int32_t MC2_CMD_CREATEFILE = 7;
+    constexpr int32_t MC2_CMD_MKDIR = 11;
+    constexpr int32_t MC2_CMD_SEARCHFILE = 14;
+
+    constexpr int32_t MC2_ERR_NOENTRY = static_cast<int32_t>(0x81010002u);
+    constexpr int32_t MC2_ERR_EXISTS = static_cast<int32_t>(0x81010011u);
 
     void setRegU32(R5900Context &ctx, int reg, uint32_t value)
     {
@@ -102,6 +128,21 @@ namespace
             *cmdOut = readGuestS32(rdram.data(), GUEST_MC_SYNC_CMD_ADDR);
         }
         return readGuestS32(rdram.data(), GUEST_MC_SYNC_RESULT_ADDR);
+    }
+
+    int32_t syncMc2(std::vector<uint8_t> &rdram, int32_t *cmdOut = nullptr)
+    {
+        R5900Context syncCtx{};
+        setRegU32(syncCtx, 4, 0u);
+        setRegU32(syncCtx, 5, GUEST_MC2_SYNC_CMD_ADDR);
+        setRegU32(syncCtx, 6, GUEST_MC2_SYNC_RESULT_ADDR);
+        ps2_stubs::sceMc2Sync2(rdram.data(), &syncCtx, nullptr);
+
+        if (cmdOut)
+        {
+            *cmdOut = readGuestS32(rdram.data(), GUEST_MC2_SYNC_CMD_ADDR);
+        }
+        return readGuestS32(rdram.data(), GUEST_MC2_SYNC_RESULT_ADDR);
     }
 
     struct TempPaths
@@ -535,6 +576,249 @@ void register_ps2_runtime_io_tests()
             ps2_stubs::sceMcSync(test.rdram.data(), &syncCtx, nullptr);
             t.Equals(getRegS32(&syncCtx, 2), -1,
                      "sceMcSync after sceMcEnd should report that no command is active");
+        });
+
+        tc.Run("sceMc2 mkdir create write read roundtrip through sync2", [](TestCase &t)
+        {
+            TestContext test;
+
+            const uint32_t dirAddr = GUEST_STRING_AREA_START + 0xC00;
+            const uint32_t fileAddr = GUEST_STRING_AREA_START + 0xD00;
+            const uint32_t writeBufAddr = GUEST_BUFFER_AREA_START + 0x700;
+            const uint32_t readBufAddr = GUEST_BUFFER_AREA_START + 0x800;
+            const std::string payload = "libmc2 roundtrip";
+
+            writeGuestString(test.rdram.data(), dirAddr, "/SAVEDATA");
+            writeGuestString(test.rdram.data(), fileAddr, "/SAVEDATA/test.bin");
+            std::memcpy(test.rdram.data() + writeBufAddr, payload.data(), payload.size());
+
+            clearContext(test.ctx);
+            ps2_stubs::sceMc2Init(test.rdram.data(), &test.ctx, nullptr);
+            t.Equals(getRegS32(&test.ctx, 2), 0, "sceMc2Init should succeed");
+
+            clearContext(test.ctx);
+            ps2_stubs::sceMc2CreateSocket(test.rdram.data(), &test.ctx, nullptr);
+            t.Equals(getRegS32(&test.ctx, 2), 0, "sceMc2CreateSocket should return the port 0 socket");
+
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 5, dirAddr);
+            ps2_stubs::sceMc2MkdirAsync(test.rdram.data(), &test.ctx, nullptr);
+            t.Equals(getRegS32(&test.ctx, 2), 0, "sceMc2MkdirAsync should accept the request");
+
+            int32_t cmd = 0;
+            t.Equals(syncMc2(test.rdram, &cmd), 0, "sceMc2MkdirAsync should finish successfully");
+            t.Equals(cmd, MC2_CMD_MKDIR, "sceMc2Sync2 should report MKDIR as the finished command");
+
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 5, fileAddr);
+            ps2_stubs::sceMc2CreateFileAsync(test.rdram.data(), &test.ctx, nullptr);
+            t.Equals(syncMc2(test.rdram, &cmd), 0, "sceMc2CreateFileAsync should finish successfully");
+            t.Equals(cmd, MC2_CMD_CREATEFILE, "sceMc2Sync2 should report CREATEFILE as the finished command");
+
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 5, fileAddr);
+            setRegU32(test.ctx, 6, writeBufAddr);
+            setRegU32(test.ctx, 7, 0u);
+            setRegU32(test.ctx, 8, static_cast<uint32_t>(payload.size()));
+            ps2_stubs::sceMc2WriteFileAsync(test.rdram.data(), &test.ctx, nullptr);
+            t.Equals(syncMc2(test.rdram, &cmd), static_cast<int32_t>(payload.size()),
+                     "sceMc2WriteFileAsync should report the full byte count");
+            t.Equals(cmd, MC2_CMD_WRITE, "sceMc2Sync2 should report WRITE as the finished command");
+
+            std::memset(test.rdram.data() + readBufAddr, 0, payload.size());
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 5, fileAddr);
+            setRegU32(test.ctx, 6, readBufAddr);
+            setRegU32(test.ctx, 7, 0u);
+            setRegU32(test.ctx, 8, static_cast<uint32_t>(payload.size()));
+            ps2_stubs::sceMc2ReadFileAsync(test.rdram.data(), &test.ctx, nullptr);
+            t.Equals(syncMc2(test.rdram, &cmd), static_cast<int32_t>(payload.size()),
+                     "sceMc2ReadFileAsync should report the full byte count");
+            t.Equals(cmd, MC2_CMD_READ, "sceMc2Sync2 should report READ as the finished command");
+
+            std::string readback(reinterpret_cast<const char *>(test.rdram.data() + readBufAddr), payload.size());
+            t.Equals(readback, payload, "sceMc2ReadFileAsync should fill the guest buffer with the written payload");
+
+            const uint32_t tailSize = 4u;
+            const uint32_t tailOffset = static_cast<uint32_t>(payload.size()) - tailSize;
+            std::memset(test.rdram.data() + readBufAddr, 0, payload.size());
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 5, fileAddr);
+            setRegU32(test.ctx, 6, readBufAddr);
+            setRegU32(test.ctx, 7, tailOffset);
+            setRegU32(test.ctx, 8, tailSize);
+            ps2_stubs::sceMc2ReadFileAsync(test.rdram.data(), &test.ctx, nullptr);
+            t.Equals(syncMc2(test.rdram, &cmd), static_cast<int32_t>(tailSize),
+                     "sceMc2ReadFileAsync should report the byte count of a partial read");
+
+            std::string tail(reinterpret_cast<const char *>(test.rdram.data() + readBufAddr), tailSize);
+            t.Equals(tail, payload.substr(tailOffset),
+                     "sceMc2ReadFileAsync should honour the offset argument");
+
+            const std::filesystem::path hostPath = test.paths.mcRoot / "SAVEDATA" / "test.bin";
+            t.IsTrue(std::filesystem::exists(hostPath), "sceMc2CreateFileAsync should create the host file under mcRoot");
+        });
+
+        tc.Run("sceMc2SearchFileAsync reports file metadata and missing entries", [](TestCase &t)
+        {
+            TestContext test;
+
+            std::filesystem::create_directories(test.paths.mcRoot / "SAVEDATA");
+            const std::string hostPayload = "abc123";
+            {
+                std::ofstream out(test.paths.mcRoot / "SAVEDATA" / "game.dat", std::ios::binary);
+                out.write(hostPayload.data(), static_cast<std::streamsize>(hostPayload.size()));
+            }
+
+            const uint32_t pathAddr = GUEST_STRING_AREA_START + 0xE00;
+            writeGuestString(test.rdram.data(), pathAddr, "/SAVEDATA/game.dat");
+
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 5, pathAddr);
+            setRegU32(test.ctx, 6, GUEST_MC2_ENTRY_ADDR);
+            ps2_stubs::sceMc2SearchFileAsync(test.rdram.data(), &test.ctx, nullptr);
+
+            int32_t cmd = 0;
+            t.Equals(syncMc2(test.rdram, &cmd), 0, "sceMc2SearchFileAsync should find the existing file");
+            t.Equals(cmd, MC2_CMD_SEARCHFILE, "sceMc2Sync2 should report SEARCHFILE as the finished command");
+
+            const auto *entry = reinterpret_cast<const SceMc2DirEntry *>(test.rdram.data() + GUEST_MC2_ENTRY_ADDR);
+            t.Equals(std::string(entry->entryName), std::string("game.dat"),
+                     "sceMc2SearchFileAsync should report the host file name");
+            t.Equals(entry->fileSizeByte, static_cast<uint32_t>(hostPayload.size()),
+                     "sceMc2SearchFileAsync should report the host file size");
+            t.IsTrue((entry->attrFile & 0x0010u) != 0u,
+                     "sceMc2SearchFileAsync should mark a regular file");
+            t.IsTrue((entry->attrFile & 0x0020u) == 0u,
+                     "sceMc2SearchFileAsync should not mark a regular file as a subdirectory");
+
+            writeGuestString(test.rdram.data(), pathAddr, "/SAVEDATA/missing.dat");
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 5, pathAddr);
+            setRegU32(test.ctx, 6, GUEST_MC2_ENTRY_ADDR);
+            ps2_stubs::sceMc2SearchFileAsync(test.rdram.data(), &test.ctx, nullptr);
+            t.Equals(syncMc2(test.rdram, &cmd), MC2_ERR_NOENTRY,
+                     "sceMc2SearchFileAsync should report ENOENT for a missing file");
+        });
+
+        tc.Run("sceMc2GetInfoAsync reports a formatted PS2 card", [](TestCase &t)
+        {
+            TestContext test;
+
+            constexpr uint32_t infoAddr = GUEST_BUFFER_AREA_START + 0xA00;
+
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 5, infoAddr);
+            ps2_stubs::sceMc2GetInfoAsync(test.rdram.data(), &test.ctx, nullptr);
+
+            int32_t cmd = 0;
+            t.Equals(syncMc2(test.rdram, &cmd), 0, "sceMc2GetInfoAsync should finish successfully");
+            t.Equals(cmd, MC2_CMD_GETINFO, "sceMc2Sync2 should report GETINFO as the finished command");
+            t.Equals(readGuestS32(test.rdram.data(), infoAddr + 0), 2,
+                     "sceMc2GetInfoAsync should report a PS2 memory card");
+            t.Equals(readGuestS32(test.rdram.data(), infoAddr + 4), 1,
+                     "sceMc2GetInfoAsync should report a formatted card");
+            t.Equals(readGuestS32(test.rdram.data(), infoAddr + 8), 0x2000,
+                     "sceMc2GetInfoAsync should report the free cluster count");
+        });
+
+        tc.Run("sceMc2CreateFileAsync rejects duplicates and missing parents", [](TestCase &t)
+        {
+            TestContext test;
+
+            const uint32_t dirAddr = GUEST_STRING_AREA_START + 0xF00;
+            const uint32_t fileAddr = GUEST_STRING_AREA_START + 0x1000;
+            const uint32_t orphanAddr = GUEST_STRING_AREA_START + 0x1100;
+
+            writeGuestString(test.rdram.data(), dirAddr, "/SAVEDATA");
+            writeGuestString(test.rdram.data(), fileAddr, "/SAVEDATA/once.bin");
+            writeGuestString(test.rdram.data(), orphanAddr, "/NOSUCHDIR/orphan.bin");
+
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 5, dirAddr);
+            ps2_stubs::sceMc2MkdirAsync(test.rdram.data(), &test.ctx, nullptr);
+            int32_t cmd = 0;
+            t.Equals(syncMc2(test.rdram, &cmd), 0, "sceMc2MkdirAsync should create the parent directory");
+
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 5, dirAddr);
+            ps2_stubs::sceMc2MkdirAsync(test.rdram.data(), &test.ctx, nullptr);
+            t.Equals(syncMc2(test.rdram, &cmd), MC2_ERR_EXISTS,
+                     "sceMc2MkdirAsync should report EEXIST for an existing directory");
+
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 5, fileAddr);
+            ps2_stubs::sceMc2CreateFileAsync(test.rdram.data(), &test.ctx, nullptr);
+            t.Equals(syncMc2(test.rdram, &cmd), 0, "sceMc2CreateFileAsync should create a new file");
+
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 5, fileAddr);
+            ps2_stubs::sceMc2CreateFileAsync(test.rdram.data(), &test.ctx, nullptr);
+            t.Equals(syncMc2(test.rdram, &cmd), MC2_ERR_EXISTS,
+                     "sceMc2CreateFileAsync should report EEXIST for an existing file");
+
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 5, orphanAddr);
+            ps2_stubs::sceMc2CreateFileAsync(test.rdram.data(), &test.ctx, nullptr);
+            t.Equals(syncMc2(test.rdram, &cmd), MC2_ERR_NOENTRY,
+                     "sceMc2CreateFileAsync should report ENOENT when the parent directory is missing");
+        });
+
+        tc.Run("sceMc2FormatAsync wipes and recreates the card root", [](TestCase &t)
+        {
+            TestContext test;
+
+            std::filesystem::create_directories(test.paths.mcRoot / "SAVEDATA");
+
+            clearContext(test.ctx);
+            ps2_stubs::sceMc2FormatAsync(test.rdram.data(), &test.ctx, nullptr);
+
+            int32_t cmd = 0;
+            t.Equals(syncMc2(test.rdram, &cmd), 0, "sceMc2FormatAsync should finish successfully");
+            t.Equals(cmd, MC2_CMD_FORMAT, "sceMc2Sync2 should report FORMAT as the finished command");
+            t.IsFalse(std::filesystem::exists(test.paths.mcRoot / "SAVEDATA"),
+                      "sceMc2FormatAsync should remove the existing card contents");
+            t.IsTrue(std::filesystem::exists(test.paths.mcRoot),
+                     "sceMc2FormatAsync should recreate an empty card root");
+        });
+
+        tc.Run("sceMc2CheckAsync reports a finished request exactly once", [](TestCase &t)
+        {
+            TestContext test;
+
+            const uint32_t dirAddr = GUEST_STRING_AREA_START + 0x1200;
+            writeGuestString(test.rdram.data(), dirAddr, "/PENDING");
+
+            clearContext(test.ctx);
+            ps2_stubs::sceMc2Init(test.rdram.data(), &test.ctx, nullptr);
+
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 4, GUEST_MC2_SYNC_CMD_ADDR);
+            setRegU32(test.ctx, 5, GUEST_MC2_SYNC_RESULT_ADDR);
+            ps2_stubs::sceMc2CheckAsync(test.rdram.data(), &test.ctx, nullptr);
+            t.Equals(getRegS32(&test.ctx, 2), -1,
+                     "sceMc2CheckAsync after sceMc2Init should report that nothing is pending");
+
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 5, dirAddr);
+            ps2_stubs::sceMc2MkdirAsync(test.rdram.data(), &test.ctx, nullptr);
+
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 4, GUEST_MC2_SYNC_CMD_ADDR);
+            setRegU32(test.ctx, 5, GUEST_MC2_SYNC_RESULT_ADDR);
+            ps2_stubs::sceMc2CheckAsync(test.rdram.data(), &test.ctx, nullptr);
+            t.Equals(getRegS32(&test.ctx, 2), 1, "sceMc2CheckAsync should report the finished request");
+            t.Equals(readGuestS32(test.rdram.data(), GUEST_MC2_SYNC_CMD_ADDR), MC2_CMD_MKDIR,
+                     "sceMc2CheckAsync should report MKDIR as the finished command");
+            t.Equals(readGuestS32(test.rdram.data(), GUEST_MC2_SYNC_RESULT_ADDR), 0,
+                     "sceMc2CheckAsync should report the mkdir result");
+
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 4, GUEST_MC2_SYNC_CMD_ADDR);
+            setRegU32(test.ctx, 5, GUEST_MC2_SYNC_RESULT_ADDR);
+            ps2_stubs::sceMc2CheckAsync(test.rdram.data(), &test.ctx, nullptr);
+            t.Equals(getRegS32(&test.ctx, 2), -1,
+                     "a second sceMc2CheckAsync should report that the request was already taken");
         });
 
         tc.Run("sceIoctl cmd1 updates wait flag state", [](TestCase &t)

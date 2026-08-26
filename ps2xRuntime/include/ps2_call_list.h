@@ -440,6 +440,17 @@
     X(sceMcSync)                              \
     X(sceMcUnformat)                          \
     X(sceMcWrite)                             \
+    X(sceMc2Init)                             \
+    X(sceMc2CreateSocket)                     \
+    X(sceMc2GetInfoAsync)                     \
+    X(sceMc2SearchFileAsync)                  \
+    X(sceMc2ReadFileAsync)                    \
+    X(sceMc2WriteFileAsync)                   \
+    X(sceMc2CreateFileAsync)                  \
+    X(sceMc2MkdirAsync)                       \
+    X(sceMc2FormatAsync)                      \
+    X(sceMc2Sync2)                            \
+    X(sceMc2CheckAsync)                       \
     X(sceMpegAddBs)                           \
     X(sceMpegAddCallback)                     \
     X(sceMpegAddStrCallback)                  \
