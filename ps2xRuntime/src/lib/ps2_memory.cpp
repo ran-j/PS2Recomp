@@ -1315,7 +1315,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     uint32_t asr1 = m_ioRegisters[channelBase + 0x50];
                     uint32_t asp = (chcr >> 4) & 0x3u;
                     const bool tieEnabled = (chcr & (1u << 7)) != 0u;
-                    const int kMaxChainTags = 4096;
+                    const int kMaxChainTags = 65536;
                     std::vector<uint8_t> chainBuf;
 
                     auto appendData = [&](uint32_t srcAddr, uint32_t qwCount)
@@ -1353,27 +1353,18 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         }
                     };
 
-                    auto appendCompactVif1TagData = [&](uint32_t localTagAddr, uint32_t qwCount)
-                    {
-                        uint32_t tagPhys = 0u;
-                        const bool tagScratch = isScratchpad(localTagAddr);
-                        tagPhys = translateAddress(localTagAddr);
-
-                        const uint8_t *localBase = tagScratch ? m_scratchpad : m_rdram;
-                        const uint32_t localMax = tagScratch ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
-                        if (tagPhys + 16u > localMax)
-                            return;
-
-                        // VIF packet helpers embed 8 bytes of VIF stream in the DMAtag's upper half.
-                        chainBuf.insert(chainBuf.end(), localBase + tagPhys + 8u, localBase + tagPhys + 16u);
-                        appendData(localTagAddr + 16u, qwCount);
-                    };
-
                     int tagsProcessed = 0;
+                    bool chainTagCapHit = false;
                     uint32_t lastTagUpper = (chcr >> 16) & 0xFFFFu;
+                    const bool vifChannel = (channelBase == 0x10009000u || channelBase == 0x10008000u);
 
-                    while (tagsProcessed < kMaxChainTags)
+                    while (true)
                     {
+                        if (tagsProcessed >= kMaxChainTags)
+                        {
+                            chainTagCapHit = true;
+                            break;
+                        }
                         const uint32_t currentTagAddr = tagAddr;
                         const bool tagInSPR = isScratchpad(tagAddr);
                         uint32_t physTag = 0;
@@ -1477,23 +1468,38 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             break;
                         }
 
-                        const bool compactVifLocalTag =
-                            (channelBase == 0x10009000u || channelBase == 0x10008000u) &&
-                            (id == 1u || id == 2u || id == 5u || id == 6u || id == 7u);
-                        if (compactVifLocalTag)
-                            appendCompactVif1TagData(currentTagAddr, 0u);
+                        if (vifChannel)
+                        {
+                            // A VIF chain tag's upper quadword holds two embedded vifcodes (for
+                            // example STCYCL+UNPACK, or a DIRECT header). Hardware transfers it
+                            // for every tag id when CHCR.TTE is set, regardless of where the
+                            // tag's own payload lives, so append it unconditionally. physTag and
+                            // tagBase were translated and the +16 bound validated at the top of
+                            // the loop, so no re-translation is needed here.
+                            chainBuf.insert(chainBuf.end(),
+                                            tagBase + physTag + 8u, tagBase + physTag + 16u);
+                        }
 
                         if (hasPayload)
-                        {
-                            if (compactVifLocalTag)
-                                appendData(currentTagAddr + 16u, tagQwc);
-                            else
-                                appendData(dataAddr, tagQwc);
-                        }
+                            appendData(dataAddr, tagQwc);
+
                         if (irq && tieEnabled)
                             endChain = true;
                         if (endChain)
                             break;
+                    }
+
+                    if (chainTagCapHit)
+                    {
+                        static bool s_vifChainTagCapWarned = false;
+                        if (!s_vifChainTagCapWarned)
+                        {
+                            s_vifChainTagCapWarned = true;
+                            std::cerr << "PS2Memory: DMA chain walker hit the " << kMaxChainTags
+                                      << "-tag cap; truncating the chain to guard against a "
+                                         "self-referential NEXT tag hanging the walker."
+                                      << std::endl;
+                        }
                     }
 
                     m_ioRegisters[channelBase + 0x30] = tagAddr;
