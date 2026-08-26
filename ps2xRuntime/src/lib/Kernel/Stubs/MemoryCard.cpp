@@ -44,6 +44,27 @@ namespace ps2_stubs
         constexpr uint16_t kMcAttrClosed = 0x0080;
         constexpr uint16_t kMcAttrExists = 0x8000;
 
+        // libmc2 is async on hardware over dbc IOP
+        constexpr int32_t kMc2CmdNone = 0;
+        constexpr int32_t kMc2CmdGetInfo = 2;
+        constexpr int32_t kMc2CmdFormat = 3;
+        constexpr int32_t kMc2CmdRead = 5;
+        constexpr int32_t kMc2CmdWrite = 6;
+        constexpr int32_t kMc2CmdCreateFile = 7;
+        constexpr int32_t kMc2CmdMkdir = 11;
+        constexpr int32_t kMc2CmdSearchFile = 14;
+
+        constexpr int32_t kMc2RequestAccepted = 0;
+        constexpr int32_t kMc2NoRequestPending = -1;
+        constexpr int32_t kMc2RequestFinished = 1;
+
+        constexpr int32_t kMc2Ok = 0;
+        constexpr int32_t kMc2ErrNoEntry = static_cast<int32_t>(0x81010002u);
+        constexpr int32_t kMc2ErrDenied = static_cast<int32_t>(0x8101000Du);
+        constexpr int32_t kMc2ErrExists = static_cast<int32_t>(0x81010011u);
+
+        constexpr int32_t kMc2SocketPort = 0;
+
         struct SceMcStDateTime
         {
             uint8_t Resv2 = 0;
@@ -69,6 +90,18 @@ namespace ps2_stubs
 
         static_assert(sizeof(SceMcTblGetDir) == 64, "sceMcTblGetDir size mismatch");
 
+        struct SceMc2DirEntry
+        {
+            SceMcStDateTime create{};
+            SceMcStDateTime modify{};
+            uint32_t fileSizeByte = 0;
+            uint16_t attrFile = 0;
+            uint16_t reserved = 0;
+            char entryName[32]{};
+        };
+
+        static_assert(sizeof(SceMc2DirEntry) == 56, "sceMc2DirEntry size mismatch");
+
         struct McOpenFile
         {
             FILE *file = nullptr;
@@ -90,6 +123,10 @@ namespace ps2_stubs
         std::unordered_map<int32_t, McOpenFile> g_mcFiles;
         std::array<McPortState, 2> g_mcPorts{};
         int32_t g_cvMcFileCursor = 0;
+
+        std::mutex g_mc2Mutex;
+        int32_t g_mc2PendingCommand = kMc2CmdNone;
+        int32_t g_mc2PendingResult = 0;
 
         constexpr int32_t kCvMcSaveFileBytes = 0x838;
         constexpr int32_t kCvMcConfigFileBytes = 0x34;
@@ -284,6 +321,14 @@ namespace ps2_stubs
             std::memcpy(dst, value.c_str(), value.size() + 1u);
         }
 
+        void writeMcWord(uint8_t *rdram, uint32_t addr, uint32_t value)
+        {
+            if (uint8_t *dst = addr ? getMemPtr(rdram, addr) : nullptr)
+            {
+                std::memcpy(dst, &value, sizeof(value));
+            }
+        }
+
         void writeMcDateTime(SceMcStDateTime &out, std::time_t value)
         {
             std::tm tm{};
@@ -475,6 +520,49 @@ namespace ps2_stubs
             }
 
             return std::fopen(hostPath.string().c_str(), mode);
+        }
+
+        std::filesystem::path getMc2HostPath(const std::string &guestPath)
+        {
+            std::lock_guard<std::mutex> lock(g_mcStateMutex);
+            ensureMcRootExists(kMc2SocketPort);
+            return guestMcPathToHostPath(kMc2SocketPort,
+                                         normalizeGuestMcPathLocked(kMc2SocketPort, guestPath));
+        }
+
+        void acceptMc2Request(R5900Context *ctx, int32_t command, int32_t result)
+        {
+            {
+                std::lock_guard<std::mutex> lock(g_mc2Mutex);
+                g_mc2PendingCommand = command;
+                g_mc2PendingResult = result;
+            }
+            setReturnS32(ctx, kMc2RequestAccepted);
+        }
+
+        void takeMc2PendingRequest(uint8_t *rdram,
+                                   R5900Context *ctx,
+                                   uint32_t commandPtr,
+                                   uint32_t resultPtr)
+        {
+            int32_t command = kMc2CmdNone;
+            int32_t result = 0;
+            {
+                std::lock_guard<std::mutex> lock(g_mc2Mutex);
+                command = g_mc2PendingCommand;
+                result = g_mc2PendingResult;
+                g_mc2PendingCommand = kMc2CmdNone;
+            }
+
+            if (command == kMc2CmdNone)
+            {
+                setReturnS32(ctx, kMc2NoRequestPending);
+                return;
+            }
+
+            writeMcWord(rdram, commandPtr, static_cast<uint32_t>(command));
+            writeMcWord(rdram, resultPtr, static_cast<uint32_t>(result));
+            setReturnS32(ctx, kMc2RequestFinished);
         }
     }
 
@@ -1528,5 +1616,201 @@ namespace ps2_stubs
     void mcWriteStartSaveFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 1);
+    }
+
+    void sceMc2Init(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        {
+            std::lock_guard<std::mutex> lock(g_mc2Mutex);
+            g_mc2PendingCommand = kMc2CmdNone;
+            g_mc2PendingResult = 0;
+        }
+        setReturnS32(ctx, 0);
+    }
+
+    void sceMc2CreateSocket(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        {
+            std::lock_guard<std::mutex> lock(g_mcStateMutex);
+            ensureMcRootExists(kMc2SocketPort);
+        }
+        setReturnS32(ctx, kMc2SocketPort);
+    }
+
+    void sceMc2GetInfoAsync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
+    {
+        const uint32_t cardInfoPtr = getRegU32(ctx, 5);
+        writeMcWord(rdram, cardInfoPtr + 0u, static_cast<uint32_t>(kMcTypePs2));
+        writeMcWord(rdram, cardInfoPtr + 4u, static_cast<uint32_t>(kMcFormatted));
+        writeMcWord(rdram, cardInfoPtr + 8u, static_cast<uint32_t>(kMcFreeClusters));
+        RUNTIME_LOG("[mc2] getinfo -> type " << kMcTypePs2 << " formatted " << kMcFormatted
+                                             << " free " << kMcFreeClusters << std::endl);
+        acceptMc2Request(ctx, kMc2CmdGetInfo, kMc2Ok);
+    }
+
+    void sceMc2SearchFileAsync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
+    {
+        const std::string path = readPs2CStringBounded(rdram, getRegU32(ctx, 5), kMcMaxPathLen);
+        const uint32_t entryPtr = getRegU32(ctx, 6);
+        const std::filesystem::path host = getMc2HostPath(path);
+
+        std::error_code ec;
+        const auto status = std::filesystem::status(host, ec);
+        if (ec || !std::filesystem::exists(status))
+        {
+            RUNTIME_LOG("[mc2] search " << path << " -> missing" << std::endl);
+            acceptMc2Request(ctx, kMc2CmdSearchFile, kMc2ErrNoEntry);
+            return;
+        }
+
+        const bool isDirectory = std::filesystem::is_directory(status);
+        if (uint8_t *out = entryPtr ? getMemPtr(rdram, entryPtr) : nullptr)
+        {
+            std::error_code sizeEc;
+            const uintmax_t size = isDirectory ? 0u : std::filesystem::file_size(host, sizeEc);
+            std::error_code timeEc;
+            const auto written = std::filesystem::last_write_time(host, timeEc);
+            const std::time_t modified = timeEc ? std::time_t{0} : fileTimeToTimeTMc(written);
+
+            SceMc2DirEntry entry{};
+            writeMcDateTime(entry.create, modified);
+            writeMcDateTime(entry.modify, modified);
+            entry.fileSizeByte = sizeEc ? 0u : static_cast<uint32_t>(size);
+            entry.attrFile = static_cast<uint16_t>(kMcAttrReadable |
+                                                   kMcAttrWriteable |
+                                                   (isDirectory ? kMcAttrSubdir : kMcAttrFile) |
+                                                   kMcAttrClosed |
+                                                   kMcAttrExists);
+            const std::string name = host.filename().string();
+            std::strncpy(entry.entryName, name.c_str(), sizeof(entry.entryName) - 1u);
+            std::memcpy(out, &entry, sizeof(entry));
+        }
+
+        RUNTIME_LOG("[mc2] search " << path << " -> found" << std::endl);
+        acceptMc2Request(ctx, kMc2CmdSearchFile, kMc2Ok);
+    }
+
+    void sceMc2ReadFileAsync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
+    {
+        const std::string path = readPs2CStringBounded(rdram, getRegU32(ctx, 5), kMcMaxPathLen);
+        const uint32_t bufferPtr = getRegU32(ctx, 6);
+        const uint32_t offset = getRegU32(ctx, 7);
+        const uint32_t size = getRegU32(ctx, 8);
+
+        int32_t result = kMc2ErrNoEntry;
+        uint8_t *buffer = bufferPtr ? getMemPtr(rdram, bufferPtr) : nullptr;
+        if (FILE *file = openMcHostFile(getMc2HostPath(path), PS2_FIO_O_RDONLY))
+        {
+            if (buffer && std::fseek(file, static_cast<long>(offset), SEEK_SET) == 0)
+            {
+                result = static_cast<int32_t>(std::fread(buffer, 1u, size, file));
+            }
+            std::fclose(file);
+        }
+
+        RUNTIME_LOG("[mc2] read " << path << " off " << offset << " len " << size
+                                  << " -> " << result << std::endl);
+        acceptMc2Request(ctx, kMc2CmdRead, result);
+    }
+
+    void sceMc2WriteFileAsync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
+    {
+        const std::string path = readPs2CStringBounded(rdram, getRegU32(ctx, 5), kMcMaxPathLen);
+        const uint32_t bufferPtr = getRegU32(ctx, 6);
+        const uint32_t offset = getRegU32(ctx, 7);
+        const uint32_t size = getRegU32(ctx, 8);
+
+        int32_t result = kMc2ErrNoEntry;
+        const uint8_t *buffer = bufferPtr ? getMemPtr(rdram, bufferPtr) : nullptr;
+        if (FILE *file = openMcHostFile(getMc2HostPath(path), PS2_FIO_O_RDWR))
+        {
+            if (buffer && std::fseek(file, static_cast<long>(offset), SEEK_SET) == 0)
+            {
+                const size_t written = std::fwrite(buffer, 1u, size, file);
+                result = (written == size) ? static_cast<int32_t>(written) : kMc2ErrDenied;
+            }
+            std::fclose(file);
+        }
+
+        RUNTIME_LOG("[mc2] write " << path << " off " << offset << " len " << size
+                                   << " -> " << result << std::endl);
+        acceptMc2Request(ctx, kMc2CmdWrite, result);
+    }
+
+    void sceMc2CreateFileAsync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
+    {
+        const std::string path = readPs2CStringBounded(rdram, getRegU32(ctx, 5), kMcMaxPathLen);
+        const std::filesystem::path host = getMc2HostPath(path);
+
+        std::error_code ec;
+        int32_t result = kMc2Ok;
+        if (std::filesystem::exists(host, ec) && !ec)
+        {
+            result = kMc2ErrExists;
+        }
+        else if (!std::filesystem::exists(host.parent_path(), ec))
+        {
+            result = kMc2ErrNoEntry;
+        }
+        else if (FILE *file = openMcHostFile(host, PS2_FIO_O_WRONLY | PS2_FIO_O_CREAT | PS2_FIO_O_TRUNC))
+        {
+            std::fclose(file);
+        }
+        else
+        {
+            result = kMc2ErrDenied;
+        }
+
+        RUNTIME_LOG("[mc2] create " << path << " -> " << result << std::endl);
+        acceptMc2Request(ctx, kMc2CmdCreateFile, result);
+    }
+
+    void sceMc2MkdirAsync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
+    {
+        const std::string path = readPs2CStringBounded(rdram, getRegU32(ctx, 5), kMcMaxPathLen);
+        const std::filesystem::path host = getMc2HostPath(path);
+
+        std::error_code ec;
+        int32_t result = kMc2Ok;
+        if (std::filesystem::exists(host, ec) && !ec)
+        {
+            result = kMc2ErrExists;
+        }
+        else if (!std::filesystem::create_directories(host, ec) || ec)
+        {
+            result = kMc2ErrDenied;
+        }
+
+        RUNTIME_LOG("[mc2] mkdir " << path << " -> " << result << std::endl);
+        acceptMc2Request(ctx, kMc2CmdMkdir, result);
+    }
+
+    void sceMc2FormatAsync(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        std::error_code ec;
+        std::filesystem::path cardRoot;
+        {
+            std::lock_guard<std::mutex> lock(g_mcStateMutex);
+            cardRoot = getMcRootPath(kMc2SocketPort);
+        }
+        std::filesystem::remove_all(cardRoot, ec);
+        {
+            std::lock_guard<std::mutex> lock(g_mcStateMutex);
+            ensureMcRootExists(kMc2SocketPort);
+        }
+
+        RUNTIME_LOG("[mc2] format " << cardRoot.string() << " -> " << (ec ? "failed" : "ok")
+                                    << std::endl);
+        acceptMc2Request(ctx, kMc2CmdFormat, ec ? kMc2ErrDenied : kMc2Ok);
+    }
+
+    void sceMc2Sync2(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
+    {
+        takeMc2PendingRequest(rdram, ctx, getRegU32(ctx, 5), getRegU32(ctx, 6));
+    }
+
+    void sceMc2CheckAsync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
+    {
+        takeMc2PendingRequest(rdram, ctx, getRegU32(ctx, 4), getRegU32(ctx, 5));
     }
 }

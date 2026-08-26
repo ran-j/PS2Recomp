@@ -58,6 +58,17 @@ namespace ps2_stubs
     void sceMcSync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceMcUnformat(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceMcWrite(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void sceMc2Init(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void sceMc2CreateSocket(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void sceMc2GetInfoAsync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void sceMc2SearchFileAsync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void sceMc2ReadFileAsync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void sceMc2WriteFileAsync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void sceMc2CreateFileAsync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void sceMc2MkdirAsync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void sceMc2FormatAsync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void sceMc2Sync2(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void sceMc2CheckAsync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void mcCallMessageTypeSe(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void mcCheckReadStartConfigFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void mcCheckReadStartSaveFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
