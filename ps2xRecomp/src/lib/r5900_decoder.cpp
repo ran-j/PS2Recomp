@@ -69,6 +69,7 @@ namespace ps2recomp
         inst.isVU = false;
         inst.isBranch = false;
         inst.isJump = false;
+        inst.isUnconditionalBranch = false;
         inst.isCall = false;
         inst.isReturn = false;
         inst.hasDelaySlot = false;
@@ -105,6 +106,7 @@ namespace ps2recomp
         const RabbitizerInstrDescriptor *desc = rabbitizerInst.descriptor;
 
         inst.isBranch = RabbitizerInstrDescriptor_isBranch(desc);
+        inst.isUnconditionalBranch = RabbitizerInstruction_isUnconditionalBranch(&rabbitizerInst);
         inst.isJump = RabbitizerInstrDescriptor_isJump(desc);
         inst.isCall = RabbitizerInstruction_isFunctionCall(&rabbitizerInst);
         inst.isReturn = RabbitizerInstruction_isReturn(&rabbitizerInst) ||

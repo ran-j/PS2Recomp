@@ -1,6 +1,8 @@
 #include "ps2recomp/elf_parser.h"
 #include "ps2recomp/recompiler_reporter.h"
 #include "ps2recomp/types.h"
+#include "ps2recomp/instructions.h"
+#include "ps2recomp/r5900_decoder.h"
 #include <iostream>
 #include <stdexcept>
 #include <unordered_set>
@@ -453,10 +455,31 @@ namespace
         }
     }
 
+    bool CannotFallThrough(const ps2recomp::Instruction &inst)
+    {
+        if (inst.isCall)
+        {
+            return false;
+        }
+        return inst.isJump || inst.isUnconditionalBranch;
+    }
+
+    bool IsStackAllocatingPrologue(const ps2recomp::Instruction &inst)
+    {
+        if (inst.opcode != ps2recomp::OPCODE_ADDIU && inst.opcode != ps2recomp::OPCODE_DADDIU)
+        {
+            return false;
+        }
+        return inst.rs == 29 && inst.rt == 29 &&
+               static_cast<int32_t>(inst.simmediate) < 0;
+    }
+
     void ScanJalTargetsFallback(ps2recomp::ElfParser *parser, std::vector<ps2recomp::Function> &outFunctions)
     {
         std::unordered_set<uint32_t> starts;
         starts.reserve(4096);
+
+        const ps2recomp::R5900Decoder decoder;
 
         const uint32_t entry = parser->getEntryPoint();
         if (FindCodeSectionByAddress(parser->getSections(), entry))
@@ -478,6 +501,27 @@ namespace
 
                 uint32_t raw = 0;
                 std::memcpy(&raw, section.data + offset, sizeof(uint32_t));
+
+                if (CannotFallThrough(decoder.decodeInstruction(pc, raw, false)))
+                {
+                    uint32_t candidate = offset + 8;
+                    while (candidate + 4 <= section.size)
+                    {
+                        uint32_t following = 0;
+                        std::memcpy(&following, section.data + candidate, sizeof(following));
+                        if (following != 0u)
+                        {
+                            const uint32_t candidatePc = section.address + candidate;
+                            if (IsStackAllocatingPrologue(decoder.decodeInstruction(candidatePc, following, false)))
+                            {
+                                starts.insert(candidatePc);
+                            }
+                            break;
+                        }
+                        candidate += 4;
+                    }
+                    continue;
+                }
 
                 const uint32_t op = (raw >> 26) & 0x3F;
                 if (op != 0x03) // JAL
