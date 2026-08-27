@@ -77,6 +77,8 @@ if(PS2X_IS_ARM_TARGET)
             add_compile_options(-march=armv8-a+fp+simd)
         endif()
     endif()
+elseif(NOT MSVC AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64|i[3-6]86")
+    add_compile_options(-msse4.1)
 endif()
 
 if(PS2X_BUILD_RECOMP)
