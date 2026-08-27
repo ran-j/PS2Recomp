@@ -98,6 +98,8 @@ Main fields in `config.toml`:
 * `general.patch_syscalls`: apply configured patches to `SYSCALL` instructions (`false` recommended).
 * `general.patch_cop0`: apply configured patches to COP0 instructions.
 * `general.patch_cache`: apply configured patches to CACHE instructions.
+* `general.resume_entry_points_file`: optional text file containing extra callable guest addresses, one per line.
+* `general.entry_point_pointer_ranges`: optional static-data ranges to scan for clustered pointers to decoded guest code. Each range requires `source_start` and `source_end`; `target_start`/`target_end`, `window_words`, and `minimum_code_pointers` constrain validation. This is useful for vtables and callback tables in stripped ELFs.
 * `general.stubs`: names to force as stubs. Also accepts `handler@0xADDRESS` to bind a stripped function address directly to a runtime syscall/stub handler. Includes generic handlers `ret0`, `ret1`, `reta0`.
 * `general.skip`: names to force as skipped wrappers.
 * `patches.instructions`: raw instruction replacements by address.

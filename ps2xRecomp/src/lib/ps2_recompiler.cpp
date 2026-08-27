@@ -1883,6 +1883,147 @@ namespace ps2recomp
             }
         }
 
+        if (!m_config.resumeEntryPointsPath.empty())
+        {
+            std::ifstream manifest(m_config.resumeEntryPointsPath);
+            if (!manifest)
+            {
+                m_reporter.error(
+                    "resume-entry-manifest",
+                    "Unable to open " + m_config.resumeEntryPointsPath);
+            }
+            else
+            {
+                size_t importedTargets = 0u;
+                size_t lineNumber = 0u;
+                std::string line;
+                while (std::getline(manifest, line))
+                {
+                    ++lineNumber;
+                    const size_t comment = line.find('#');
+                    if (comment != std::string::npos)
+                    {
+                        line.erase(comment);
+                    }
+                    line.erase(std::remove_if(line.begin(), line.end(), [](unsigned char character)
+                                              { return std::isspace(character) != 0; }),
+                               line.end());
+                    if (line.empty())
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        size_t consumed = 0u;
+                        const unsigned long parsed = std::stoul(line, &consumed, 0);
+                        if (consumed != line.size() || parsed > std::numeric_limits<uint32_t>::max())
+                        {
+                            throw std::out_of_range("entry point is not a 32-bit address");
+                        }
+
+                        const uint32_t target = static_cast<uint32_t>(parsed);
+                        const Function *owner = findContainingFunction(target);
+                        if (!owner)
+                        {
+                            std::ostringstream msg;
+                            msg << "Ignoring address 0x" << std::hex << target
+                                << " on line " << std::dec << lineNumber
+                                << "; it is not decoded guest code";
+                            m_reporter.warning("resume-entry-manifest", msg.str());
+                            continue;
+                        }
+                        if (owner->start != target)
+                        {
+                            m_resumeEntryTargetsByOwner[owner->start].push_back(target);
+                            ++importedTargets;
+                        }
+                    }
+                    catch (const std::exception &exception)
+                    {
+                        std::ostringstream msg;
+                        msg << "Ignoring line " << lineNumber << ": " << exception.what();
+                        m_reporter.warning("resume-entry-manifest", msg.str());
+                    }
+                }
+
+                std::ostringstream msg;
+                msg << "imported " << importedTargets << " validated resume entry point(s)";
+                m_reporter.progress(msg.str());
+            }
+        }
+
+        for (const auto &range : m_config.entryPointPointerRanges)
+        {
+            const size_t wordCount = static_cast<size_t>((range.sourceEnd - range.sourceStart) / 4u);
+            std::vector<uint32_t> targets(wordCount, 0u);
+            std::vector<const Function *> owners(wordCount, nullptr);
+            std::vector<size_t> prefixCodePointers(wordCount + 1u, 0u);
+
+            for (size_t index = 0; index < wordCount; ++index)
+            {
+                const uint32_t address = range.sourceStart + static_cast<uint32_t>(index * 4u);
+                try
+                {
+                    const uint32_t target = m_elfParser->readWord(address);
+                    if ((target & 3u) == 0u && target >= range.targetStart && target < range.targetEnd)
+                    {
+                        if (const Function *owner = findContainingFunction(target))
+                        {
+                            targets[index] = target;
+                            owners[index] = owner;
+                        }
+                    }
+                }
+                catch (const std::exception &exception)
+                {
+                    std::ostringstream msg;
+                    msg << "Unable to read pointer source 0x" << std::hex << address
+                        << ": " << exception.what();
+                    m_reporter.warning("entry-point-pointer-range", msg.str());
+                }
+                prefixCodePointers[index + 1u] =
+                    prefixCodePointers[index] + static_cast<size_t>(owners[index] != nullptr);
+            }
+
+            std::vector<int32_t> qualifyingWindowCoverage(wordCount + 1u, 0);
+            for (size_t start = 0; start < wordCount; ++start)
+            {
+                const size_t end = std::min(wordCount, start + static_cast<size_t>(range.windowWords));
+                const size_t codePointerCount = prefixCodePointers[end] - prefixCodePointers[start];
+                if (codePointerCount >= range.minimumCodePointers)
+                {
+                    ++qualifyingWindowCoverage[start];
+                    --qualifyingWindowCoverage[end];
+                }
+            }
+
+            size_t validatedPointers = 0u;
+            size_t importedTargets = 0u;
+            int32_t activeWindows = 0;
+            for (size_t index = 0; index < wordCount; ++index)
+            {
+                activeWindows += qualifyingWindowCoverage[index];
+                if (activeWindows <= 0 || owners[index] == nullptr)
+                {
+                    continue;
+                }
+
+                ++validatedPointers;
+                if (owners[index]->start != targets[index])
+                {
+                    m_resumeEntryTargetsByOwner[owners[index]->start].push_back(targets[index]);
+                    ++importedTargets;
+                }
+            }
+
+            std::ostringstream msg;
+            msg << "validated " << validatedPointers << " clustered code pointer(s) in 0x"
+                << std::hex << range.sourceStart << "-0x" << range.sourceEnd
+                << "; imported " << std::dec << importedTargets << " internal entry point(s)";
+            m_reporter.progress(msg.str());
+        }
+
         size_t totalTargets = 0u;
         for (auto it = m_resumeEntryTargetsByOwner.begin(); it != m_resumeEntryTargetsByOwner.end();)
         {

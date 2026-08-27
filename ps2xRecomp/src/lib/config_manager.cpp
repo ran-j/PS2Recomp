@@ -64,6 +64,74 @@ namespace ps2recomp
             config.patchSyscalls = toml::find_or<bool>(general, "patch_syscalls", config.patchSyscalls);
             config.patchCop0 = toml::find_or<bool>(general, "patch_cop0", config.patchCop0);
             config.patchCache = toml::find_or<bool>(general, "patch_cache", config.patchCache);
+            config.resumeEntryPointsPath = toml::find_or<std::string>(general, "resume_entry_points_file", "");
+
+            if (general.contains("entry_point_pointer_ranges") &&
+                general.at("entry_point_pointer_ranges").is_array())
+            {
+                const auto parseAddress = [](const toml::value &node, const std::string &field)
+                {
+                    const auto &value = node.at(field);
+                    if (value.is_string())
+                    {
+                        const std::string text = toml::find<std::string>(node, field);
+                        size_t consumed = 0;
+                        const unsigned long parsed = std::stoul(text, &consumed, 0);
+                        if (consumed != text.size() || parsed > std::numeric_limits<uint32_t>::max())
+                        {
+                            throw std::out_of_range(field + " is not a 32-bit address");
+                        }
+                        return static_cast<uint32_t>(parsed);
+                    }
+                    if (value.is_integer())
+                    {
+                        const int64_t parsed = toml::find<int64_t>(node, field);
+                        if (parsed < 0 || static_cast<uint64_t>(parsed) > std::numeric_limits<uint32_t>::max())
+                        {
+                            throw std::out_of_range(field + " is not a 32-bit address");
+                        }
+                        return static_cast<uint32_t>(parsed);
+                    }
+                    throw std::invalid_argument(field + " must be an integer or address string");
+                };
+
+                for (const auto &rangeNode : general.at("entry_point_pointer_ranges").as_array())
+                {
+                    if (!rangeNode.is_table() || !rangeNode.contains("source_start") ||
+                        !rangeNode.contains("source_end"))
+                    {
+                        throw std::invalid_argument(
+                            "entry_point_pointer_ranges entries require source_start and source_end");
+                    }
+
+                    EntryPointPointerRange range;
+                    range.sourceStart = parseAddress(rangeNode, "source_start");
+                    range.sourceEnd = parseAddress(rangeNode, "source_end");
+                    if (rangeNode.contains("target_start"))
+                    {
+                        range.targetStart = parseAddress(rangeNode, "target_start");
+                    }
+                    if (rangeNode.contains("target_end"))
+                    {
+                        range.targetEnd = parseAddress(rangeNode, "target_end");
+                    }
+                    range.windowWords = static_cast<uint32_t>(std::clamp<int64_t>(
+                        toml::find_or<int64_t>(rangeNode, "window_words", range.windowWords), 1, 4096));
+                    range.minimumCodePointers = static_cast<uint32_t>(std::clamp<int64_t>(
+                        toml::find_or<int64_t>(
+                            rangeNode, "minimum_code_pointers", range.minimumCodePointers),
+                        1,
+                        range.windowWords));
+
+                    if (range.sourceStart >= range.sourceEnd || range.targetStart >= range.targetEnd ||
+                        (range.sourceStart & 3u) != 0u || (range.sourceEnd & 3u) != 0u)
+                    {
+                        throw std::invalid_argument(
+                            "entry_point_pointer_ranges addresses must form aligned, non-empty ranges");
+                    }
+                    config.entryPointPointerRanges.push_back(range);
+                }
+            }
 
             if (general.contains("stubs") && general.at("stubs").is_array())
             {
@@ -274,6 +342,30 @@ namespace ps2recomp
         general["patch_syscalls"] = config.patchSyscalls;
         general["patch_cop0"] = config.patchCop0;
         general["patch_cache"] = config.patchCache;
+        general["resume_entry_points_file"] = config.resumeEntryPointsPath;
+        if (!config.entryPointPointerRanges.empty())
+        {
+            toml::array pointerRanges;
+            for (const auto &range : config.entryPointPointerRanges)
+            {
+                const auto addressString = [](uint32_t address)
+                {
+                    std::ostringstream stream;
+                    stream << "0x" << std::hex << address;
+                    return stream.str();
+                };
+
+                toml::table rangeNode;
+                rangeNode["source_start"] = addressString(range.sourceStart);
+                rangeNode["source_end"] = addressString(range.sourceEnd);
+                rangeNode["target_start"] = addressString(range.targetStart);
+                rangeNode["target_end"] = addressString(range.targetEnd);
+                rangeNode["window_words"] = static_cast<int64_t>(range.windowWords);
+                rangeNode["minimum_code_pointers"] = static_cast<int64_t>(range.minimumCodePointers);
+                pointerRanges.push_back(rangeNode);
+            }
+            general["entry_point_pointer_ranges"] = pointerRanges;
+        }
         general["skip"] = config.skipFunctions;
         general["stubs"] = config.stubImplementations;
         data["general"] = general;

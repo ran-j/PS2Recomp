@@ -155,6 +155,80 @@ static bool writeMinimalMipsElfWithJalFallbackTarget(const std::filesystem::path
     return writer.save(elfPath.string());
 }
 
+static bool writeMinimalMipsElfWithCallbackTable(const std::filesystem::path &elfPath)
+{
+    ELFIO::elfio writer;
+    writer.create(ELFIO::ELFCLASS32, ELFIO::ELFDATA2LSB);
+    writer.set_os_abi(ELFIO::ELFOSABI_NONE);
+    writer.set_type(ELFIO::ET_EXEC);
+    writer.set_machine(ELFIO::EM_MIPS);
+    writer.set_entry(0x00100000u);
+
+    ELFIO::section *text = writer.sections.add(".text");
+    text->set_type(ELFIO::SHT_PROGBITS);
+    text->set_flags(ELFIO::SHF_ALLOC | ELFIO::SHF_EXECINSTR);
+    text->set_addr_align(4);
+    text->set_address(0x00100000u);
+    const std::array<uint32_t, 8> textWords = {
+        0x27BDFFF0u, // addiu $sp, $sp, -16
+        0x00000000u, // nop
+        0x27BDFFF0u, // interior callback entry
+        0x00000000u, // nop
+        0x03E00008u, // jr $ra
+        0x00000000u, // nop
+        0x03E00008u, // jr $ra
+        0x00000000u  // nop
+    };
+    text->set_data(reinterpret_cast<const char *>(textWords.data()),
+                   static_cast<ELFIO::Elf_Word>(textWords.size() * sizeof(uint32_t)));
+
+    ELFIO::section *data = writer.sections.add(".data");
+    data->set_type(ELFIO::SHT_PROGBITS);
+    data->set_flags(ELFIO::SHF_ALLOC | ELFIO::SHF_WRITE);
+    data->set_addr_align(4);
+    data->set_address(0x00200000u);
+    const std::array<uint32_t, 4> callbackWords = {
+        0x00100000u,
+        0x00100008u,
+        0u,
+        0u
+    };
+    data->set_data(reinterpret_cast<const char *>(callbackWords.data()),
+                   static_cast<ELFIO::Elf_Word>(callbackWords.size() * sizeof(uint32_t)));
+
+    ELFIO::section *strtab = writer.sections.add(".strtab");
+    strtab->set_type(ELFIO::SHT_STRTAB);
+    strtab->set_addr_align(1);
+
+    ELFIO::section *symtab = writer.sections.add(".symtab");
+    symtab->set_type(ELFIO::SHT_SYMTAB);
+    symtab->set_info(1);
+    symtab->set_link(strtab->get_index());
+    symtab->set_addr_align(4);
+    symtab->set_entry_size(writer.get_default_entry_size(ELFIO::SHT_SYMTAB));
+
+    ELFIO::symbol_section_accessor symbols(writer, symtab);
+    ELFIO::string_section_accessor strings(strtab);
+    symbols.add_symbol(strings, "", 0, 0,
+                       ELFIO::STB_LOCAL, ELFIO::STT_NOTYPE, 0, ELFIO::SHN_UNDEF);
+    symbols.add_symbol(strings, "merged_callbacks", text->get_address(), text->get_size(),
+                       ELFIO::STB_GLOBAL, ELFIO::STT_FUNC, 0, text->get_index());
+
+    ELFIO::segment *textSegment = writer.segments.add();
+    textSegment->set_type(ELFIO::PT_LOAD);
+    textSegment->set_flags(ELFIO::PF_R | ELFIO::PF_X);
+    textSegment->set_align(0x1000);
+    textSegment->add_section_index(text->get_index(), text->get_addr_align());
+
+    ELFIO::segment *dataSegment = writer.segments.add();
+    dataSegment->set_type(ELFIO::PT_LOAD);
+    dataSegment->set_flags(ELFIO::PF_R | ELFIO::PF_W);
+    dataSegment->set_align(0x1000);
+    dataSegment->add_section_index(data->get_index(), data->get_addr_align());
+
+    return writer.save(elfPath.string());
+}
+
 static bool writeMinimalMipsElfWithInitializer(const std::filesystem::path &elfPath,
                                                const std::string &functionName,
                                                uint32_t initializerTarget)
@@ -836,6 +910,101 @@ void register_ps2_recompiler_tests()
 
             std::error_code removeError;
             std::filesystem::remove(configPath, removeError);
+        });
+
+        tc.Run("config manager parses callable entry point sources", [](TestCase &t) {
+            const auto uniqueSuffix = std::to_string(
+                static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+            const std::filesystem::path configPath =
+                std::filesystem::temp_directory_path() / ("ps2recomp-entry-points-" + uniqueSuffix + ".toml");
+
+            std::ofstream configFile(configPath);
+            t.IsTrue(static_cast<bool>(configFile), "temp config file should be writable");
+            if (!configFile)
+            {
+                return;
+            }
+
+            configFile << "[general]\n";
+            configFile << "input = \"dummy.elf\"\n";
+            configFile << "output = \"out\"\n";
+            configFile << "resume_entry_points_file = \"entries.txt\"\n";
+            configFile << "entry_point_pointer_ranges = [\n";
+            configFile << "  { source_start = \"0x200000\", source_end = 0x200020, "
+                          "target_start = \"0x100000\", target_end = \"0x180000\", "
+                          "window_words = 6, minimum_code_pointers = 3 }\n";
+            configFile << "]\n";
+            configFile.close();
+
+            ConfigManager manager(configPath.string());
+            RecompilerConfig config = manager.loadConfig();
+
+            t.Equals(config.resumeEntryPointsPath, std::string{"entries.txt"},
+                     "resume entry manifest path should parse");
+            t.Equals(config.entryPointPointerRanges.size(), static_cast<size_t>(1),
+                     "one pointer range should parse");
+            if (!config.entryPointPointerRanges.empty())
+            {
+                const EntryPointPointerRange &range = config.entryPointPointerRanges.front();
+                t.Equals(range.sourceStart, 0x00200000u, "source start should parse");
+                t.Equals(range.sourceEnd, 0x00200020u, "source end should parse");
+                t.Equals(range.targetStart, 0x00100000u, "target start should parse");
+                t.Equals(range.targetEnd, 0x00180000u, "target end should parse");
+                t.Equals(range.windowWords, 6u, "window size should parse");
+                t.Equals(range.minimumCodePointers, 3u, "minimum pointer count should parse");
+            }
+
+            std::error_code removeError;
+            std::filesystem::remove(configPath, removeError);
+        });
+
+        tc.Run("clustered callback pointers register interior callable entries", [](TestCase &t) {
+            const std::string uniqueSuffix =
+                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+            const std::filesystem::path tempRoot =
+                std::filesystem::temp_directory_path() / ("ps2recomp-callback-table-" + uniqueSuffix);
+            const std::filesystem::path elfPath = tempRoot / "callbacks.elf";
+            const std::filesystem::path configPath = tempRoot / "callbacks.toml";
+            const std::filesystem::path outputPath = tempRoot / "output";
+            std::filesystem::create_directories(tempRoot);
+
+            const bool elfWritten = writeMinimalMipsElfWithCallbackTable(elfPath);
+            std::ofstream configFile(configPath);
+            if (configFile)
+            {
+                configFile << "[general]\n";
+                configFile << "input = \"" << elfPath.generic_string() << "\"\n";
+                configFile << "output = \"" << outputPath.generic_string() << "\"\n";
+                configFile << "entry_point_pointer_ranges = [\n";
+                configFile << "  { source_start = \"0x200000\", source_end = \"0x200010\", "
+                              "target_start = \"0x100000\", target_end = \"0x100020\", "
+                              "window_words = 4, minimum_code_pointers = 2 }\n";
+                configFile << "]\n";
+            }
+            configFile.close();
+
+            t.IsTrue(elfWritten && std::filesystem::exists(configPath),
+                     "callback-table regression inputs should be generated");
+            if (elfWritten && std::filesystem::exists(configPath))
+            {
+                PS2Recompiler recompiler(configPath.string());
+                t.IsTrue(recompiler.initialize(), "callback-table config should initialize");
+                t.IsTrue(recompiler.recompile(), "callback-table fixture should recompile");
+                recompiler.generateOutput();
+                t.Equals(recompiler.reportCounters().additionalEntryPoints, static_cast<size_t>(1u),
+                         "one interior callback entry should be registered");
+
+                const std::filesystem::path registrationPath = outputPath / "register_functions.cpp";
+                std::ifstream registrationFile(registrationPath);
+                const std::string registration(
+                    (std::istreambuf_iterator<char>(registrationFile)),
+                    std::istreambuf_iterator<char>());
+                t.IsTrue(registration.find("// 0x100008") != std::string::npos,
+                         "generated function table should expose the interior callback entry");
+            }
+
+            std::error_code removeError;
+            std::filesystem::remove_all(tempRoot, removeError);
         });
 
         tc.Run("elf parser ignores STT_FUNC symbols in non-executable sections", [](TestCase &t) {

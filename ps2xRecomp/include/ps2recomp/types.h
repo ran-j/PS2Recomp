@@ -172,6 +172,16 @@ namespace ps2recomp
         std::string calleeName;
     };
 
+    struct EntryPointPointerRange
+    {
+        uint32_t sourceStart = 0;
+        uint32_t sourceEnd = 0;
+        uint32_t targetStart = 0;
+        uint32_t targetEnd = UINT32_MAX;
+        uint32_t windowWords = 8;
+        uint32_t minimumCodePointers = 2;
+    };
+
     // Recompiler configuration
     struct RecompilerConfig
     {
@@ -184,6 +194,8 @@ namespace ps2recomp
         bool patchSyscalls = false;
         bool patchCop0 = true;
         bool patchCache = true;
+        std::string resumeEntryPointsPath;
+        std::vector<EntryPointPointerRange> entryPointPointerRanges;
         std::vector<std::string> skipFunctions;
         std::unordered_map<uint32_t, std::string> patches;
         std::vector<std::string> stubImplementations;
