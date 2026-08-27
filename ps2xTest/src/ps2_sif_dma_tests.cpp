@@ -138,7 +138,7 @@ namespace
     void schedulerSifDmaEntry(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         runtime->eeScheduler().addIrqHandler(true,
-                                             5u,
+                                             6u,
                                              kSchedulerSifDmaHandlerPc,
                                              true,
                                              kSchedulerSifDmaHandlerArg,
@@ -306,7 +306,7 @@ void register_ps2_sif_dma_tests()
             t.Equals(getRegS32(env.ctx, 2), 0, "isceSifSetDChain should mirror sceSifSetDChain");
         });
 
-        tc.Run("sceSifSetDma dispatches enabled DMAC handlers for cause 5", [](TestCase &t)
+        tc.Run("sceSifSetDma dispatches enabled DMAC handlers for cause 6", [](TestCase &t)
         {
             TestEnv env;
 
@@ -345,7 +345,7 @@ void register_ps2_sif_dma_tests()
             t.IsTrue(g_sifDmaResult > 0, "sceSifSetDma should still report success");
             t.Equals(readGuestU32(env.rdram.data(), kHandlerWriteAddr), g_dmacHandlerValue,
                      "the scheduler should execute the queued DMAC invocation");
-            t.Equals(g_dmacHandlerLastCause, 5u, "DMAC handler should observe cause 5");
+            t.Equals(g_dmacHandlerLastCause, 6u, "DMAC handler should observe SIF1 cause 6");
             t.Equals(g_dmacHandlerLastArg, kSchedulerSifDmaHandlerArg,
                      "DMAC handler should receive registered argument");
         });

@@ -76,6 +76,7 @@ namespace ps2_stubs
         constexpr uint32_t kSifSysRegSubAddr = 0x80000000u;
         constexpr uint32_t kSifSysRegMainAddr = 0x80000001u;
         constexpr uint32_t kSifSysRegRpcInit = 0x80000002u;
+        constexpr uint32_t kDmacCauseSif1 = 6u;
         constexpr uint32_t kSifStatSifInit = 0x00010000u;
         constexpr uint32_t kSifStatCmdInit = 0x00020000u;
         constexpr uint32_t kSifStatBootEnd = 0x00040000u;
@@ -1176,7 +1177,7 @@ namespace ps2_stubs
             return;
         }
 
-        ps2_syscalls::dispatchDmacHandlersForCause(rdram, runtime, 5u);
+        ps2_syscalls::dispatchDmacHandlersForCause(rdram, runtime, kDmacCauseSif1);
 
         setReturnS32(ctx, static_cast<int32_t>(allocateSifDmaTransferId()));
     }
