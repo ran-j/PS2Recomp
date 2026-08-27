@@ -14,7 +14,7 @@ int main(int argc, char *argv[])
 
     PS2Runtime runtime;
 
-    if (!runtime.initialize("ps2xAutoTests"))
+    if (!runtime.initialize("ps2xAutoTests", true))
     {
         std::cerr << "Failed to initialize PS2 runtime" << std::endl;
         return 2;

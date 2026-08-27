@@ -282,7 +282,7 @@ public:
     PS2Runtime();
     ~PS2Runtime();
 
-    bool initialize(const char *title = "PS2 Game");
+    bool initialize(const char *title = "PS2 Game", bool headless = false);
     bool syncCoreSubsystems();
     bool loadELF(const std::string &elfPath);
     void run();
@@ -505,6 +505,7 @@ private:
     DebugUiCallback m_debugUiShutdownCallback = nullptr;
     void *m_debugUiUserData = nullptr;
     bool m_debugUiInitialized = false;
+    bool m_headless = false;
 
 public:
     std::atomic<uint32_t> m_debugPc{0};
