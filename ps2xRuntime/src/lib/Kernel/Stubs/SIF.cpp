@@ -2,6 +2,7 @@
 #include "SIF.h"
 #include "../Syscalls/RPC.h"
 #include "../../ps2_iop_transport.h"
+#include "runtime/ee_scheduler.h"
 #include "runtime/ps2_address.h"
 
 #include <algorithm>
@@ -69,11 +70,21 @@ namespace ps2_stubs
         uint32_t g_sifGetRegLogCount = 0u;
         uint32_t g_sifSetRegLogCount = 0u;
 
-        constexpr uint32_t kSifRegBootStatus = 0x4u;
-        constexpr uint32_t kSifRegMainAddr = 0x80000000u;
-        constexpr uint32_t kSifRegSubAddr = 0x80000001u;
-        constexpr uint32_t kSifRegMsCom = 0x80000002u;
-        constexpr uint32_t kSifBootReadyMask = 0x00020000u;
+        constexpr uint32_t kSifRegSubAddr = 0x2u;
+        constexpr uint32_t kSifRegMsFlag = 0x3u;
+        constexpr uint32_t kSifRegSmFlag = 0x4u;
+        constexpr uint32_t kSifSysRegSubAddr = 0x80000000u;
+        constexpr uint32_t kSifSysRegMainAddr = 0x80000001u;
+        constexpr uint32_t kSifSysRegRpcInit = 0x80000002u;
+        constexpr uint32_t kDmacCauseSif1 = 6u;
+        constexpr uint32_t kSifStatSifInit = 0x00010000u;
+        constexpr uint32_t kSifStatCmdInit = 0x00020000u;
+        constexpr uint32_t kSifStatBootEnd = 0x00040000u;
+
+        bool isSifSystemRegister(uint32_t reg)
+        {
+            return reg == kSifSysRegSubAddr || reg == kSifSysRegMainAddr || reg == kSifSysRegRpcInit;
+        }
 
         void seedDefaultSifRegsLocked()
         {
@@ -86,10 +97,13 @@ namespace ps2_stubs
             g_sifGetRegLogCount = 0u;
             g_sifSetRegLogCount = 0u;
 
-            g_sifRegs[kSifRegBootStatus] = kSifBootReadyMask;
-            g_sifRegs[kSifRegMainAddr] = 0u;
-            g_sifRegs[kSifRegSubAddr] = 0u;
-            g_sifRegs[kSifRegMsCom] = 0u;
+            const uint32_t ready = kSifStatSifInit | kSifStatCmdInit | kSifStatBootEnd;
+            g_sifRegs[kSifRegMsFlag] = ready;
+            g_sifRegs[kSifRegSmFlag] = ready;
+            g_sifRegs[kSifRegSubAddr] = kSifIopBuffer;
+            g_sifRegs[kSifSysRegSubAddr] = 0u;
+            g_sifRegs[kSifSysRegMainAddr] = 0u;
+            g_sifRegs[kSifSysRegRpcInit] = 1u;
         }
 
         bool shouldTraceSifReg(uint32_t reg)
@@ -362,6 +376,251 @@ namespace ps2_stubs
             }
             return true;
         }
+
+        constexpr uint32_t kCmdHeaderFunction = 8u;
+
+        constexpr uint32_t kPacketRecordId = 16u;
+        constexpr uint32_t kPacketRpcId = 24u;
+        constexpr uint32_t kPacketClientData = 28u;
+        constexpr uint32_t kPacketAllocatedBit = 0x01u;
+
+        constexpr uint32_t kBindServerId = 32u;
+
+        constexpr uint32_t kCallFunction = 32u;
+        constexpr uint32_t kCallReceiveBuffer = 40u;
+        constexpr uint32_t kCallReceiveSize = 44u;
+
+        constexpr uint32_t kClientPacketAddress = 0u;
+        constexpr uint32_t kClientSemaphore = 8u;
+        constexpr uint32_t kClientBuffer = 20u;
+        constexpr uint32_t kClientEndFunction = 28u;
+        constexpr uint32_t kClientEndParameter = 32u;
+        constexpr uint32_t kClientServer = 36u;
+
+        constexpr uint32_t kSifCmdRpcBind = 0x80000009u;
+        constexpr uint32_t kSifCmdRpcCall = 0x8000000Au;
+
+        constexpr uint32_t kFileIoServerId = 0x80000001u;
+        constexpr uint32_t kFileIoWrite = 3u;
+
+        constexpr uint32_t kWriteArgDescriptor = 0u;
+        constexpr uint32_t kWriteArgBuffer = 4u;
+        constexpr uint32_t kWriteArgSize = 8u;
+
+        constexpr uint32_t kMaxWriteBytes = 1u << 20;
+
+        struct SifRpcResult
+        {
+            bool handled = false;
+            int32_t semaphore = -1;
+            uint32_t endFunction = 0u;
+            uint32_t endParameter = 0u;
+        };
+
+        bool readGuestU32(uint8_t *rdram, uint32_t address, uint32_t &out)
+        {
+            const uint8_t *pointer = getConstMemPtr(rdram, address);
+            if (!pointer)
+            {
+                return false;
+            }
+            std::memcpy(&out, pointer, sizeof(out));
+            return true;
+        }
+
+        bool writeGuestU32(uint8_t *rdram, uint32_t address, uint32_t value)
+        {
+            uint8_t *pointer = getMemPtr(rdram, address);
+            if (!pointer)
+            {
+                return false;
+            }
+            std::memcpy(pointer, &value, sizeof(value));
+            return true;
+        }
+
+        bool readSifDmaTransfer(uint8_t *rdram, uint32_t listAddress, uint32_t index, Ps2SifDmaTransfer &out)
+        {
+            const uint8_t *entry = getConstMemPtr(rdram, listAddress + (index * sizeof(Ps2SifDmaTransfer)));
+            if (!entry)
+            {
+                return false;
+            }
+            std::memcpy(&out, entry, sizeof(out));
+            return true;
+        }
+
+        int32_t writeFileIoStream(uint8_t *rdram, uint32_t argument)
+        {
+            uint32_t descriptor = 0u;
+            uint32_t buffer = 0u;
+            uint32_t size = 0u;
+            if (!readGuestU32(rdram, argument + kWriteArgDescriptor, descriptor) ||
+                !readGuestU32(rdram, argument + kWriteArgBuffer, buffer) ||
+                !readGuestU32(rdram, argument + kWriteArgSize, size))
+            {
+                return -1;
+            }
+
+            std::FILE *stream = nullptr;
+            if (descriptor == 1u)
+            {
+                stream = stdout;
+            }
+            else if (descriptor == 2u)
+            {
+                stream = stderr;
+            }
+            else
+            {
+                return -1;
+            }
+
+            if (size == 0u)
+            {
+                return 0;
+            }
+
+            const uint32_t clamped = std::min(size, kMaxWriteBytes);
+            std::string bytes;
+            bytes.reserve(clamped);
+            for (uint32_t offset = 0u; offset < clamped; ++offset)
+            {
+                const uint8_t *pointer = getConstMemPtr(rdram, buffer + offset);
+                if (!pointer)
+                {
+                    break;
+                }
+                bytes.push_back(static_cast<char>(*pointer));
+            }
+
+            std::fwrite(bytes.data(), 1u, bytes.size(), stream);
+            return static_cast<int32_t>(bytes.size());
+        }
+
+        void releaseSifRpcPacket(uint8_t *rdram, uint32_t packet, uint32_t clientData)
+        {
+            uint32_t recordId = 0u;
+            if (readGuestU32(rdram, packet + kPacketRecordId, recordId))
+            {
+                writeGuestU32(rdram, packet + kPacketRecordId, recordId & ~kPacketAllocatedBit);
+            }
+            writeGuestU32(rdram, packet + kPacketRpcId, 0u);
+            writeGuestU32(rdram, clientData + kClientPacketAddress, 0u);
+        }
+
+        bool bindFileIoServer(uint8_t *rdram, uint32_t packet, uint32_t clientData)
+        {
+            uint32_t serverId = 0u;
+            if (!readGuestU32(rdram, packet + kBindServerId, serverId) || serverId != kFileIoServerId)
+            {
+                return false;
+            }
+            writeGuestU32(rdram, clientData + kClientServer, kSifIopBuffer);
+            writeGuestU32(rdram, clientData + kClientBuffer, kSifIopBuffer);
+            return true;
+        }
+
+        bool callFileIoServer(uint8_t *rdram,
+                              uint32_t packet,
+                              uint32_t clientData,
+                              uint32_t transferList,
+                              uint32_t transferCount)
+        {
+            uint32_t server = 0u;
+            if (!readGuestU32(rdram, clientData + kClientServer, server) || server != kSifIopBuffer)
+            {
+                return false;
+            }
+
+            uint32_t rpcNumber = 0u;
+            uint32_t receiveBuffer = 0u;
+            uint32_t receiveSize = 0u;
+            if (!readGuestU32(rdram, packet + kCallFunction, rpcNumber) ||
+                !readGuestU32(rdram, packet + kCallReceiveBuffer, receiveBuffer) ||
+                !readGuestU32(rdram, packet + kCallReceiveSize, receiveSize))
+            {
+                return false;
+            }
+
+            switch (rpcNumber)
+            {
+            case kFileIoWrite:
+            {
+                Ps2SifDmaTransfer payload{};
+                if (transferCount < 2u || !readSifDmaTransfer(rdram, transferList, 0u, payload) || payload.src == 0u)
+                {
+                    return false;
+                }
+
+                const int32_t written = writeFileIoStream(rdram, payload.src);
+                if (receiveSize >= sizeof(uint32_t) && receiveBuffer != 0u)
+                {
+                    writeGuestU32(rdram, receiveBuffer, static_cast<uint32_t>(written));
+                }
+                return true;
+            }
+            default:
+                return false;
+            }
+        }
+
+        SifRpcResult processSifRpcTransfer(uint8_t *rdram, uint32_t transferList, uint32_t transferCount)
+        {
+            SifRpcResult result;
+            if (!rdram || transferList == 0u || transferCount == 0u || transferCount > 32u)
+            {
+                return result;
+            }
+
+            Ps2SifDmaTransfer packetTransfer{};
+            if (!readSifDmaTransfer(rdram, transferList, transferCount - 1u, packetTransfer) ||
+                packetTransfer.src == 0u)
+            {
+                return result;
+            }
+
+            const uint32_t packet = packetTransfer.src;
+            uint32_t function = 0u;
+            if (!readGuestU32(rdram, packet + kCmdHeaderFunction, function))
+            {
+                return result;
+            }
+
+            if (function != kSifCmdRpcBind && function != kSifCmdRpcCall)
+            {
+                result.handled = transferCount == 1u && packetTransfer.dest == kSifIopBuffer;
+                return result;
+            }
+
+            uint32_t clientData = 0u;
+            if (!readGuestU32(rdram, packet + kPacketClientData, clientData) || clientData == 0u)
+            {
+                return result;
+            }
+
+            const bool serviced = (function == kSifCmdRpcBind)
+                                      ? bindFileIoServer(rdram, packet, clientData)
+                                      : callFileIoServer(rdram, packet, clientData, transferList, transferCount);
+            if (!serviced)
+            {
+                return result;
+            }
+
+            readGuestU32(rdram, clientData + kClientEndFunction, result.endFunction);
+            readGuestU32(rdram, clientData + kClientEndParameter, result.endParameter);
+
+            uint32_t semaphore = 0u;
+            if (readGuestU32(rdram, clientData + kClientSemaphore, semaphore))
+            {
+                result.semaphore = static_cast<int32_t>(semaphore);
+            }
+
+            releaseSifRpcPacket(rdram, packet, clientData);
+            result.handled = true;
+            return result;
+        }
+
     }
 
     bool isSifIopHeapAddress(uint32_t address)
@@ -812,6 +1071,28 @@ namespace ps2_stubs
             return;
         }
 
+        const SifRpcResult rpc = processSifRpcTransfer(rdram, dmatAddr, count);
+        if (rpc.handled)
+        {
+            setReturnS32(ctx, static_cast<int32_t>(allocateSifDmaTransferId()));
+            if (rpc.semaphore >= 0 && runtime)
+            {
+                runtime->eeScheduler().signalSemaphore(rpc.semaphore, true);
+            }
+            if (rpc.endFunction != 0u && runtime && runtime->hasFunction(rpc.endFunction))
+            {
+                GuestInvocation callback{};
+                callback.kind = GuestInvocationKind::RpcCallback;
+                callback.context = *ctx;
+                callback.context.pc = rpc.endFunction;
+                SET_GPR_U32(&callback.context, 4, rpc.endParameter);
+                SET_GPR_U32(&callback.context, 29, runtime->eeScheduler().invocationStackTop());
+                SET_GPR_U32(&callback.context, 31, 0u);
+                runtime->eeScheduler().invokeCurrent(std::move(callback));
+            }
+            return;
+        }
+
         std::array<Ps2SifDmaTransfer, 32u> pending{};
         uint32_t pendingCount = 0u;
         bool ok = true;
@@ -896,7 +1177,7 @@ namespace ps2_stubs
             return;
         }
 
-        ps2_syscalls::dispatchDmacHandlersForCause(rdram, runtime, 5u);
+        ps2_syscalls::dispatchDmacHandlersForCause(rdram, runtime, kDmacCauseSif1);
 
         setReturnS32(ctx, static_cast<int32_t>(allocateSifDmaTransferId()));
     }
@@ -919,7 +1200,10 @@ namespace ps2_stubs
             {
                 prev = it->second;
             }
-            g_sifRegs[reg] = value;
+            if (!isSifSystemRegister(reg))
+            {
+                g_sifRegs[reg] = value;
+            }
             shouldLog = shouldTraceSifReg(reg) && g_sifSetRegLogCount < 128u;
             if (shouldLog)
             {

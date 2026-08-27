@@ -369,6 +369,7 @@ private:
     GuestThread &acquireInvocationThread();
     void enqueueReady(GuestThread &thread, bool front = false);
     void removeReady(GuestThread &thread);
+    [[nodiscard]] bool allThreadsFinished() const;
     [[nodiscard]] GuestThread *selectReady();
     void makeRunning(GuestThread &thread);
     void makeDormant(GuestThread &thread);

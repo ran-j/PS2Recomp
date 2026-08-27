@@ -667,8 +667,9 @@ bool PS2Runtime::syncCoreSubsystems()
     return true;
 }
 
-bool PS2Runtime::initialize(const char *title)
+bool PS2Runtime::initialize(const char *title, bool headless)
 {
+    m_headless = headless;
     try
     {
         if (!m_memory.initialize())
@@ -694,12 +695,18 @@ bool PS2Runtime::initialize(const char *title)
 #if defined(PLATFORM_VITA)
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
 #else
-        SetConfigFlags(FLAG_WINDOW_RESIZABLE);
-        InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
-        InitAudioDevice();
-        m_audioBackend.setAudioReady(IsAudioDeviceReady());
+        if (!m_headless)
+        {
+            SetConfigFlags(FLAG_WINDOW_RESIZABLE);
+            InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
+            InitAudioDevice();
+            m_audioBackend.setAudioReady(IsAudioDeviceReady());
+        }
 #endif
-        SetTargetFPS(60);
+        if (!m_headless)
+        {
+            SetTargetFPS(60);
+        }
         if (m_debugUiInitCallback)
         {
             m_debugUiInitCallback(*this, m_debugUiUserData);
@@ -2318,9 +2325,13 @@ void PS2Runtime::run()
     RUNTIME_LOG("Starting execution at address 0x" << std::hex << m_cpuContext.pc << std::dec);
 
     // A blank image to use as a framebuffer
-    Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLANK);
-    Texture2D frameTex = LoadTextureFromImage(blank);
-    UnloadImage(blank);
+    Texture2D frameTex{};
+    if (!m_headless)
+    {
+        Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLANK);
+        frameTex = LoadTextureFromImage(blank);
+        UnloadImage(blank);
+    }
 
     std::atomic<bool> gameThreadFinished{false};
 
@@ -2379,6 +2390,12 @@ void PS2Runtime::run()
                                                << std::endl);
             }
         });
+        if (m_headless)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
+
         uint32_t presentWidth = FB_WIDTH;
         uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
         UploadFrame(frameTex, this, presentWidth, presentHeight);
@@ -2424,8 +2441,11 @@ void PS2Runtime::run()
         m_debugUiShutdownCallback(*this, m_debugUiUserData);
         m_debugUiInitialized = false;
     }
-    UnloadTexture(frameTex);
-    CloseWindow();
+    if (!m_headless)
+    {
+        UnloadTexture(frameTex);
+        CloseWindow();
+    }
 
     RUNTIME_LOG("[run] exiting loop");
 }

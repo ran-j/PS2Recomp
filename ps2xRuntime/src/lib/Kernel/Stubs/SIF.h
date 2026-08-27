@@ -6,6 +6,8 @@
 
 namespace ps2_stubs
 {
+    constexpr uint32_t kSifIopBuffer = 0x04FFF000u;
+
     bool isSifIopHeapAddress(uint32_t address);
     bool isSifIopHeapRange(uint32_t address, size_t size);
     bool readSifIopHeap(uint32_t address, void *destination, size_t size);

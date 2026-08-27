@@ -138,7 +138,7 @@ namespace
     void schedulerSifDmaEntry(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         runtime->eeScheduler().addIrqHandler(true,
-                                             5u,
+                                             6u,
                                              kSchedulerSifDmaHandlerPc,
                                              true,
                                              kSchedulerSifDmaHandlerArg,
@@ -306,7 +306,7 @@ void register_ps2_sif_dma_tests()
             t.Equals(getRegS32(env.ctx, 2), 0, "isceSifSetDChain should mirror sceSifSetDChain");
         });
 
-        tc.Run("sceSifSetDma dispatches enabled DMAC handlers for cause 5", [](TestCase &t)
+        tc.Run("sceSifSetDma dispatches enabled DMAC handlers for cause 6", [](TestCase &t)
         {
             TestEnv env;
 
@@ -345,7 +345,7 @@ void register_ps2_sif_dma_tests()
             t.IsTrue(g_sifDmaResult > 0, "sceSifSetDma should still report success");
             t.Equals(readGuestU32(env.rdram.data(), kHandlerWriteAddr), g_dmacHandlerValue,
                      "the scheduler should execute the queued DMAC invocation");
-            t.Equals(g_dmacHandlerLastCause, 5u, "DMAC handler should observe cause 5");
+            t.Equals(g_dmacHandlerLastCause, 6u, "DMAC handler should observe SIF1 cause 6");
             t.Equals(g_dmacHandlerLastArg, kSchedulerSifDmaHandlerArg,
                      "DMAC handler should receive registered argument");
         });
@@ -860,10 +860,12 @@ void register_ps2_sif_dma_tests()
                 return ::getRegU32(&env.ctx, 2);
             };
 
-            t.Equals(getReg(0x4u), 0x00020000u, "SIF boot status register should expose ready bit by default");
-            t.Equals(getReg(0x80000000u), 0u, "SIF main-address register should default to zero");
-            t.Equals(getReg(0x80000001u), 0u, "SIF sub-address register should default to zero");
-            t.Equals(getReg(0x80000002u), 0u, "SIF mscom register should default to zero");
+            t.Equals(getReg(0x3u), 0x00070000u, "MSFLAG should report SIF, command and boot ready");
+            t.Equals(getReg(0x4u), 0x00070000u, "SMFLAG should report SIF, command and boot ready");
+            t.Equals(getReg(0x2u), ps2_stubs::kSifIopBuffer, "SUBADDR should point at the fileio server buffer");
+            t.Equals(getReg(0x80000000u), 0u, "system SUBADDR should read zero so the guest runs SIFCMD init");
+            t.Equals(getReg(0x80000001u), 0u, "system MAINADDR should default to zero");
+            t.Equals(getReg(0x80000002u), 1u, "RPCINIT should report RPC already initialized");
         });
 
         tc.Run("sceSifExitCmd restores default boot-ready SIF registers", [](TestCase &t)
@@ -888,8 +890,35 @@ void register_ps2_sif_dma_tests()
                 return ::getRegU32(&env.ctx, 2);
             };
 
-            t.Equals(getReg(0x4u), 0x00020000u, "sceSifExitCmd should restore the boot-ready status bit");
-            t.Equals(getReg(0x80000002u), 0u, "sceSifExitCmd should clear transient mscom state");
+            t.Equals(getReg(0x4u), 0x00070000u, "sceSifExitCmd should restore the ready flags");
+            t.Equals(getReg(0x80000002u), 1u, "sceSifExitCmd should restore the RPCINIT flag");
+        });
+
+        tc.Run("SIF system registers ignore guest writes", [](TestCase &t)
+        {
+            TestEnv env;
+
+            auto setReg = [&](uint32_t reg, uint32_t value)
+            {
+                setRegU32(env.ctx, 4, reg);
+                setRegU32(env.ctx, 5, value);
+                ps2_stubs::sceSifSetReg(env.rdram.data(), &env.ctx, &env.runtime);
+            };
+            auto getReg = [&](uint32_t reg) -> uint32_t
+            {
+                setRegU32(env.ctx, 4, reg);
+                ps2_stubs::sceSifGetReg(env.rdram.data(), &env.ctx, &env.runtime);
+                return ::getRegU32(&env.ctx, 2);
+            };
+
+            setReg(0x80000002u, 0u);
+            t.Equals(getReg(0x80000002u), 1u, "SifIopReset clearing RPCINIT must not strand sceSifInitRpc");
+
+            setReg(0x80000000u, 0xDEADBEEFu);
+            t.Equals(getReg(0x80000000u), 0u, "system SUBADDR must stay zero");
+
+            setReg(0x4u, 0x00050000u);
+            t.Equals(getReg(0x4u), 0x00050000u, "non-system SIF registers should still be writable");
         });
 
         tc.Run("sceSifSetDma rejects invalid descriptors without partial writes", [](TestCase &t)

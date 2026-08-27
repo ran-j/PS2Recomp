@@ -29,6 +29,7 @@ namespace ps2recomp
         bool isMMI;        // Is MMI instruction (PS2 specific)
         bool isVU;         // Is VU instruction (PS2 specific)
         bool isBranch;     // Is branch instruction
+        bool isUnconditionalBranch; // Branch that always transfers, such as b/bl
         bool isJump;       // Is jump instruction
         bool isCall;       // Is function call
         bool isReturn;     // Is return instruction
