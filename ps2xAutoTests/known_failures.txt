@@ -3,7 +3,6 @@ cpu.ee.branch
 cpu.ee.branchdelay
 cpu.ee_cop0.performance
 cpu.ee_fpu.arithmetic
-cpu.ee_fpu.branch
 cpu.ee_fpu.branchdelay
 cpu.ee_fpu.compare
 cpu.ee_fpu.convert
@@ -12,7 +11,6 @@ cpu.ee_fpu.muldiv
 cpu.ee_fpu.sqrt
 cpu.ee_fpu.transfer
 cpu.ee.lsu
-cpu.ee.lsudelay
 cpu.ee.muldiv
 cpu.ee_simd.arithmetic
 cpu.ee_simd.compare

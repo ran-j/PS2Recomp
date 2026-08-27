@@ -170,6 +170,10 @@ void EeScheduler::run()
             GuestThread *next = selectReady();
             if (!next && m_pendingInvocations.empty())
             {
+                if (allThreadsFinished())
+                {
+                    break;
+                }
                 publishSnapshot();
                 waitForEvent();
                 continue;
@@ -1601,6 +1605,14 @@ void EeScheduler::removeReady(GuestThread &item)
     auto it = std::find(queue.begin(), queue.end(), item.id);
     assert(it != queue.end());
     queue.erase(it);
+}
+
+bool EeScheduler::allThreadsFinished() const
+{
+    return !m_threads.empty() &&
+           std::all_of(m_threads.begin(), m_threads.end(), [](const auto &entry)
+                       { return entry.second.status == EeThreadStatus::Dormant &&
+                                entry.second.invocations.empty(); });
 }
 
 GuestThread *EeScheduler::selectReady()
