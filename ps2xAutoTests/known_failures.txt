@@ -13,7 +13,6 @@ cpu.ee_fpu.transfer
 cpu.ee.lsu
 cpu.ee.muldiv
 cpu.ee_simd.arithmetic
-cpu.ee_simd.compare
 cpu.ee_simd.funnel
 cpu.ee_simd.logic
 cpu.ee_simd.muldiv
