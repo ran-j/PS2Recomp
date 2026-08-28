@@ -602,7 +602,21 @@ namespace ps2x::iop::detail
                         workAddress = argument0;
                         workSize = argument1 != 0u ? argument1 : argument2;
                     }
-                    workSize = normalizeSjrmtCapacity(workSize);
+                    if (command == 34u && m_bindings.sjrmtUniCapacity != 0u)
+                    {
+                        const uint32_t dataAddress = workAddress + m_bindings.sjrmtUniDataOffset;
+                        if (dataAddress < workAddress)
+                        {
+                            output[0] = 0u;
+                            break;
+                        }
+                        workAddress = dataAddress;
+                        workSize = m_bindings.sjrmtUniCapacity;
+                    }
+                    else
+                    {
+                        workSize = normalizeSjrmtCapacity(workSize);
+                    }
 
                     std::lock_guard<std::mutex> lock(m_mutex);
                     const uint32_t handle = allocateUrpcHandleLocked();

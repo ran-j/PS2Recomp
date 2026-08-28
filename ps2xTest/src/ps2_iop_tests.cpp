@@ -1,4 +1,5 @@
 #include "MiniTest.h"
+#include "module_factories.h"
 #include "ps2x/iop/iop_subsystem.h"
 
 #include <algorithm>
@@ -608,6 +609,61 @@ void register_ps2_iop_tests()
             }
             t.Equals(metricValue(*service, "sjrmt_objects"), uint64_t{0},
                      "reset should clear CRI object maps");
+        });
+
+        tc.Run("CRI DTX maps profile-defined SJRMT UNI storage", [](TestCase &t)
+        {
+            FakeIopHost host(0x10000u);
+            auto service = ps2x::iop::detail::createCriDtxService(
+                host,
+                {
+                    .serviceName = "test CRI DTX",
+                    .sid = kSyntheticSid,
+                    .urpcObjectBase = 0x3000u,
+                    .urpcObjectLimit = 0x3400u,
+                    .urpcObjectStride = 0x20u,
+                    .urpcFunctionTableBase = 0x3500u,
+                    .urpcObjectTableBase = 0x3600u,
+                    .dispatcherFunctionAddress = 0x3700u,
+                    .rpcServerPoolBase = 0x3800u,
+                    .rpcServerStride = 0x40u,
+                    .sjrmtUniDataOffset = 0x100u,
+                    .sjrmtUniCapacity = 0x4000u,
+                });
+
+            constexpr uint32_t kSendAddress = 0x2000u;
+            constexpr uint32_t kReceiveAddress = 0x2100u;
+            constexpr uint32_t kUniWorkAddress = 0x4000u;
+            constexpr uint32_t kUniMetadataBytes = 0x100u;
+            constexpr uint32_t kRequestedBytes = 0xA00u;
+
+            host.writeWord(kSendAddress + 0u, 1u);
+            host.writeWord(kSendAddress + 4u, kUniWorkAddress);
+            host.writeWord(kSendAddress + 8u, kUniMetadataBytes);
+
+            RpcRequest request{};
+            request.sid = kSyntheticSid;
+            request.function = 0x422u;
+            request.send = {kSendAddress, 12u};
+            request.receive = {kReceiveAddress, sizeof(uint32_t)};
+            t.IsTrue(service->handleRpc(request).handled,
+                     "SJRMT_UNI_CREATE should be handled");
+            const uint32_t handle = host.readWord(kReceiveAddress);
+            t.IsTrue(handle != 0u, "SJRMT_UNI_CREATE should return a handle");
+
+            host.writeWord(kSendAddress + 0u, handle);
+            host.writeWord(kSendAddress + 4u, 0u);
+            host.writeWord(kSendAddress + 8u, kRequestedBytes);
+            request.function = 0x426u;
+            request.receive.size = 2u * sizeof(uint32_t);
+            t.IsTrue(service->handleRpc(request).handled,
+                     "SJRMT_GET_CHUNK should be handled");
+            t.Equals(host.readWord(kReceiveAddress),
+                     kUniWorkAddress + kUniMetadataBytes,
+                     "the first audio chunk should begin after profile metadata");
+            t.Equals(host.readWord(kReceiveAddress + sizeof(uint32_t)),
+                     kRequestedBytes,
+                     "the configured audio ring should accept a larger chunk");
         });
 
         tc.Run("reset closes profile-owned host file handles", [](TestCase &t)

@@ -21,6 +21,8 @@ namespace ps2x::iop::detail
         uint32_t dispatcherFunctionAddress = 0u;
         uint32_t rpcServerPoolBase = 0u;
         uint32_t rpcServerStride = 0u;
+        uint32_t sjrmtUniDataOffset = 0u;
+        uint32_t sjrmtUniCapacity = 0u;
     };
 
     enum class TsnddrvProtocolVariant
