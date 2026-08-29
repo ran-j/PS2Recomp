@@ -948,9 +948,14 @@ uint32_t GSCpuBackend::LookupCLUT(const GSDrawState &state,
                                   uint8_t sourcePsm)
 {
     const uint32_t clutIndex = resolveClutIndex(index, cpsm, csm, csa, sourcePsm);
-    const uint32_t clutWidth = (state.texclut.cbw != 0u) ? static_cast<uint32_t>(state.texclut.cbw) : 1u;
-    const uint32_t clutX = static_cast<uint32_t>(state.texclut.cou) + (clutIndex & 0x0Fu);
-    const uint32_t clutY = static_cast<uint32_t>(state.texclut.cov) + (clutIndex >> 4);
+    const bool csm2 = csm != 0u;
+    const uint32_t clutWidth = csm2 && state.texclut.cbw != 0u
+        ? static_cast<uint32_t>(state.texclut.cbw)
+        : 1u;
+    const uint32_t clutX = (csm2 ? static_cast<uint32_t>(state.texclut.cou) << 4u : 0u) +
+                           (clutIndex & 0x0Fu);
+    const uint32_t clutY = (csm2 ? static_cast<uint32_t>(state.texclut.cov) : 0u) +
+                           (clutIndex >> 4);
 
     switch (cpsm)
     {

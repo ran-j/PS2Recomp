@@ -2993,7 +2993,7 @@ void register_ps2_gs_tests()
                      "TEX2 should override the active CLUT base and format state without requiring a new TEX0 write");
         });
 
-        tc.Run("GS TEXCLUT offsets T8 CLUT fetch coordinates", [](TestCase &t)
+        tc.Run("GS CSM2 TEXCLUT offsets T8 CLUT fetch coordinates", [](TestCase &t)
         {
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
             GS gs;
@@ -3032,7 +3032,7 @@ void register_ps2_gs_tests()
             vram[texOff] = 0u;
 
             const uint32_t wrongClutOff = GSPSMCT32::addrPSMCT32(kClutCbp, 1u, 0u, 0u);
-            const uint32_t expectedClutOff = GSPSMCT32::addrPSMCT32(kClutCbp, 1u, 3u, 2u);
+            const uint32_t expectedClutOff = GSPSMCT32::addrPSMCT32(kClutCbp, 1u, 48u, 2u);
             std::memcpy(vram.data() + wrongClutOff, &kWrongColor, sizeof(kWrongColor));
             std::memcpy(vram.data() + expectedClutOff, &kExpectedColor, sizeof(kExpectedColor));
 
@@ -3054,7 +3054,64 @@ void register_ps2_gs_tests()
             uint32_t pixel = 0u;
             std::memcpy(&pixel, vram.data(), sizeof(pixel));
             t.Equals(pixel, kExpectedColor,
-                     "TEXCLUT should offset the CLUT lookup coordinates instead of always starting from the CLUT base");
+                     "CSM2 should apply TEXCLUT COU in 16-pixel units and COV in rows");
+        });
+
+        tc.Run("GS CSM1 ignores TEXCLUT fetch coordinates", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            constexpr uint32_t kTexTbp = 64u;
+            constexpr uint32_t kClutCbp = 128u;
+            constexpr uint64_t kFrameReg =
+                (1ull << 16) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kTex0 =
+                (static_cast<uint64_t>(kTexTbp) << 0) |
+                (1ull << 14) |
+                (static_cast<uint64_t>(GS_PSM_T8) << 20) |
+                (1ull << 34) |
+                (1ull << 35) |
+                (static_cast<uint64_t>(kClutCbp) << 37) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 51);
+            constexpr uint64_t kTexClut =
+                (1ull << 0) |
+                (3ull << 6) |
+                (2ull << 12);
+            constexpr uint64_t kPrim =
+                static_cast<uint64_t>(GS_PRIM_SPRITE) |
+                (1ull << 4) |
+                (1ull << 8);
+            constexpr uint32_t kExpectedColor = 0xFF3366CCu;
+            constexpr uint32_t kWrongColor = 0xFF00FF00u;
+
+            const uint32_t texOff = GSPSMT8::addrPSMT8(kTexTbp, 1u, 0u, 0u);
+            vram[texOff] = 0u;
+
+            const uint32_t expectedClutOff = GSPSMCT32::addrPSMCT32(kClutCbp, 1u, 0u, 0u);
+            const uint32_t wrongClutOff = GSPSMCT32::addrPSMCT32(kClutCbp, 1u, 3u, 2u);
+            std::memcpy(vram.data() + expectedClutOff, &kExpectedColor, sizeof(kExpectedColor));
+            std::memcpy(vram.data() + wrongClutOff, &kWrongColor, sizeof(kWrongColor));
+
+            gs.writeRegister(GS_REG_FRAME_1, kFrameReg);
+            gs.writeRegister(GS_REG_ZBUF_1, (1ull << 32));
+            gs.writeRegister(GS_REG_SCISSOR_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
+            gs.writeRegister(GS_REG_TEX0_1, kTex0);
+            gs.writeRegister(GS_REG_TEXCLUT, kTexClut);
+            gs.writeRegister(GS_REG_PRIM, kPrim);
+            gs.writeRegister(GS_REG_RGBAQ, 0x80808080ull);
+            gs.writeRegister(GS_REG_UV, 0ull);
+            gs.writeRegister(GS_REG_XYZ2, 0ull);
+            gs.writeRegister(GS_REG_UV, 0ull);
+            gs.writeRegister(GS_REG_XYZ2, (16ull << 0) | (16ull << 16));
+
+            uint32_t pixel = 0u;
+            std::memcpy(&pixel, vram.data(), sizeof(pixel));
+            t.Equals(pixel, kExpectedColor,
+                     "CSM1 should use its fixed CLUT layout regardless of TEXCLUT state");
         });
 
         tc.Run("GS TEXA expands CT24 alpha and honors AEM for black texels", [](TestCase &t)
