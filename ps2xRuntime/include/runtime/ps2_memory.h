@@ -261,6 +261,12 @@ struct JumpTable
 class PS2Memory
 {
 public:
+    struct DmacCompletion
+    {
+        uint32_t cause = 0;
+        uint64_t delayCycles = 0;
+    };
+
     PS2Memory();
     ~PS2Memory();
 
@@ -344,7 +350,7 @@ public:
     void processVIF1Data(uint32_t srcPhysAddr, uint32_t sizeBytes);
     void processVIF1Data(const uint8_t *data, uint32_t sizeBytes);
     void processPendingTransfers();
-    std::vector<uint32_t> consumeCompletedDmacCauses();
+    std::vector<DmacCompletion> consumeCompletedDmacCauses();
 
     int pollDmaRegisters();
 
@@ -416,13 +422,14 @@ public:
         bool fromScratchpad = false;
         uint32_t srcAddr = 0;
         uint32_t qwc = 0;
+        uint32_t dmaTagCount = 0;
         std::vector<uint8_t> chainData;
     };
     std::vector<PendingTransfer> m_pendingGifTransfers;
     std::vector<PendingTransfer> m_pendingVif0Transfers;
     std::vector<PendingTransfer> m_pendingVif1Transfers;
     std::mutex m_completedDmacMutex;
-    std::vector<uint32_t> m_completedDmacCauses;
+    std::vector<DmacCompletion> m_completedDmacCauses;
 
     struct CodeRegion
     {
@@ -449,7 +456,7 @@ public:
     };
 
     std::array<EeTimer, 4> m_eeTimers{};
-    void queueCompletedDmacCause(uint32_t cause);
+    void queueCompletedDmacCause(uint32_t cause, uint64_t delayCycles = 0);
 };
 
 #endif // PS2_MEMORY_H

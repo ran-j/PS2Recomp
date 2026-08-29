@@ -1379,20 +1379,20 @@ namespace
         mem.writeIORegister(channelBase + 0x00u, chcr);
         mem.processPendingTransfers();
 
-        std::vector<uint32_t> completedCauses = mem.consumeCompletedDmacCauses();
+        std::vector<PS2Memory::DmacCompletion> completedCauses = mem.consumeCompletedDmacCauses();
         if (completedCauses.empty() && (mem.readIORegister(channelBase + 0x00u) & 0x100u) == 0u)
         {
             if (channelBase == 0x10008000u)
             {
-                completedCauses.push_back(0u);
+                completedCauses.push_back({0u, 0u});
             }
             else if (channelBase == 0x10009000u)
             {
-                completedCauses.push_back(1u);
+                completedCauses.push_back({1u, 0u});
             }
             else if (channelBase == 0x1000A000u)
             {
-                completedCauses.push_back(2u);
+                completedCauses.push_back({2u, 0u});
             }
         }
 
@@ -1431,9 +1431,10 @@ namespace
             }
         }
 
-        for (const uint32_t completedCause : completedCauses)
+        for (const PS2Memory::DmacCompletion completion : completedCauses)
         {
-            ps2_syscalls::dispatchDmacHandlersForCause(rdram, runtime, completedCause);
+            ps2_syscalls::dispatchDmacHandlersForCause(rdram, runtime, completion.cause,
+                                                       completion.delayCycles);
         }
 
         return 0;

@@ -1284,6 +1284,41 @@ void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
     }
 }
 
+void EeScheduler::scheduleDmacIrq(uint32_t cause, uint64_t delayCycles)
+{
+    assertExecutor();
+    const uint64_t delay = std::max<uint64_t>(delayCycles, 1u);
+    const uint64_t deadlineCycle = m_eeCycle + delay;
+    const auto hostDeadline = std::chrono::steady_clock::now() + eeCyclesToHostDuration(delay);
+    {
+        std::lock_guard lock(m_eventMutex);
+        // Each DMAC cause is a latched status bit, not a queue of completions.
+        const auto pending = std::find_if(m_deadlines.begin(), m_deadlines.end(),
+                                          [cause](const ScheduledEvent &item)
+                                          {
+                                              return item.event.type == EeEventType::Dmac &&
+                                                     item.event.id == cause;
+                                          });
+        if (pending != m_deadlines.end())
+        {
+            return;
+        }
+        m_deadlines.push_back(ScheduledEvent{
+            deadlineCycle,
+            hostDeadline,
+            EeEvent{EeEventType::Dmac, cause, 0u},
+            ++m_eventSequence,
+        });
+        updateNextDeadline();
+    }
+    m_eventCv.notify_one();
+}
+
+uint64_t EeScheduler::currentEeCycle() const noexcept
+{
+    return m_eeCycle;
+}
+
 void EeScheduler::setVSyncFlag(uint32_t flagAddress, uint32_t tickAddress)
 {
     assertExecutor();
@@ -1901,6 +1936,7 @@ void EeScheduler::processEvent(const EeEvent &event)
         dispatchIrq(false, 3u);
         break;
     case EeEventType::Dmac:
+        dispatchIrq(true, event.id);
         break;
     case EeEventType::Alarm:
     {

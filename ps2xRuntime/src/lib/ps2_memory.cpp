@@ -12,6 +12,20 @@
 
 namespace
 {
+    constexpr uint64_t gifDmacCompletionCycles(uint64_t qwc, uint64_t tagCount)
+    {
+        constexpr uint64_t kBusCyclesPerQword = 2u;
+        constexpr uint64_t kCyclesPerTag = 2u;
+        constexpr uint64_t kTerminalCycles = 16u;
+        // Generated guest code accounts time in coarse checkpoints. Keep short
+        // GIF transfers asynchronous long enough for chained packet producers
+        // to reach a checkpoint before their completion handler can run.
+        constexpr uint64_t kMinimumCompletionCycles = 1024u;
+        const uint64_t transferCycles =
+            qwc * kBusCyclesPerQword + tagCount * kCyclesPerTag + kTerminalCycles;
+        return std::max(transferCycles, kMinimumCompletionCycles);
+    }
+
     inline void inRange(uint32_t offset, size_t bytes, size_t regionSize, const char *op, uint32_t address)
     {
         if (static_cast<uint64_t>(offset) + static_cast<uint64_t>(bytes) > static_cast<uint64_t>(regionSize))
@@ -1509,6 +1523,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         pt.fromScratchpad = false;
                         pt.srcAddr = 0;
                         pt.qwc = 0;
+                        pt.dmaTagCount = static_cast<uint32_t>(tagsProcessed);
                         pt.chainData = std::move(chainBuf);
                         if (channelBase == 0x1000A000)
                         {
@@ -1562,17 +1577,22 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 void PS2Memory::processPendingTransfers()
 {
     const bool hadGif = !m_pendingGifTransfers.empty();
+    uint64_t gifTransferQwc = 0u;
+    uint64_t gifDmaTagCount = 0u;
     for (size_t idx = 0; idx < m_pendingGifTransfers.size(); ++idx)
     {
         auto &p = m_pendingGifTransfers[idx];
+        gifDmaTagCount += p.dmaTagCount;
         if (!p.chainData.empty())
         {
+            gifTransferQwc += (p.chainData.size() + 15u) / 16u;
             m_seenGifCopy = true;
             m_gifCopyCount.fetch_add(1, std::memory_order_relaxed);
             submitGifPacket(GifPathId::Path3, p.chainData.data(), static_cast<uint32_t>(p.chainData.size()), false);
         }
         else if (p.qwc > 0)
         {
+            gifTransferQwc += p.qwc;
             const uint64_t bytes64 = static_cast<uint64_t>(p.qwc) * 16ull;
             uint32_t sizeBytes = (bytes64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu : static_cast<uint32_t>(bytes64);
             uint32_t srcPhys = 0;
@@ -1768,7 +1788,7 @@ void PS2Memory::processPendingTransfers()
     if (hadGif)
     {
         raiseDStatChannel(2u); // GIF channel
-        queueCompletedDmacCause(2u);
+        queueCompletedDmacCause(2u, gifDmacCompletionCycles(gifTransferQwc, gifDmaTagCount));
         m_ioRegisters[GIF_CHANNEL + 0x00] &= ~0x100u;
         m_ioRegisters[GIF_CHANNEL + 0x20] = 0;
     }
@@ -1788,16 +1808,16 @@ void PS2Memory::processPendingTransfers()
     }
 }
 
-void PS2Memory::queueCompletedDmacCause(uint32_t cause)
+void PS2Memory::queueCompletedDmacCause(uint32_t cause, uint64_t delayCycles)
 {
     std::lock_guard<std::mutex> lock(m_completedDmacMutex);
-    m_completedDmacCauses.push_back(cause);
+    m_completedDmacCauses.push_back(DmacCompletion{cause, delayCycles});
 }
 
-std::vector<uint32_t> PS2Memory::consumeCompletedDmacCauses()
+std::vector<PS2Memory::DmacCompletion> PS2Memory::consumeCompletedDmacCauses()
 {
     std::lock_guard<std::mutex> lock(m_completedDmacMutex);
-    std::vector<uint32_t> causes;
+    std::vector<DmacCompletion> causes;
     causes.swap(m_completedDmacCauses);
     return causes;
 }
@@ -2072,7 +2092,9 @@ bool PS2Memory::tryProcessNativeGifImageUploadChain(GS &gs, uint32_t tadr, uint3
     else
         dstat &= ~(1u << 31u);
     m_ioRegisters[D_STAT] = dstat;
-    queueCompletedDmacCause(2u);
+    const uint64_t transferredQwc = 5u + 1u + imageQwc;
+    const uint64_t dmaTagCount = (payloadTag.id == 7u) ? 3u : 4u;
+    queueCompletedDmacCause(2u, gifDmacCompletionCycles(transferredQwc, dmaTagCount));
     return true;
 }
 
@@ -2152,7 +2174,7 @@ bool PS2Memory::tryProcessNativeGifPackedChain(GS &gs, uint32_t tadr, uint32_t c
     else
         dstat &= ~(1u << 31u);
     m_ioRegisters[D_STAT] = dstat;
-    queueCompletedDmacCause(2u);
+    queueCompletedDmacCause(2u, gifDmacCompletionCycles(tag.qwc, 1u));
     return true;
 }
 

@@ -65,9 +65,13 @@ namespace ps2_syscalls
         }
     }
 
-    void dispatchDmacHandlersForCause(uint8_t *, PS2Runtime *runtime, uint32_t cause)
+    void dispatchDmacHandlersForCause(uint8_t *, PS2Runtime *runtime, uint32_t cause,
+                                      uint64_t delayCycles)
     {
-        runtime->eeScheduler().dispatchIrq(true, cause);
+        if (delayCycles != 0u)
+            runtime->eeScheduler().scheduleDmacIrq(cause, delayCycles);
+        else
+            runtime->eeScheduler().dispatchIrq(true, cause);
     }
 
     uint64_t GetCurrentVSyncTick(PS2Runtime *runtime)

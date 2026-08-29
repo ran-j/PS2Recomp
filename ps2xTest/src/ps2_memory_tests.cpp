@@ -1006,6 +1006,49 @@ void register_ps2_memory_tests()
             t.Equals(mem.gifCopyCount(), 1ull, "GIF DMA should increment gifCopyCount");
             t.IsTrue((mem.readIORegister(kGifCh + 0x00u) & 0x100u) == 0u, "GIF CHCR STR bit should be cleared after drain");
             t.Equals(mem.readIORegister(kGifCh + 0x20u), 0u, "GIF QWC should be cleared after drain");
+
+            const std::vector<PS2Memory::DmacCompletion> completions =
+                mem.consumeCompletedDmacCauses();
+            t.Equals(completions.size(), static_cast<size_t>(1u),
+                     "GIF DMA should queue one completion");
+            if (!completions.empty())
+            {
+                t.Equals(completions[0].cause, 2u,
+                         "GIF DMA completion should identify the GIF channel");
+                t.Equals(completions[0].delayCycles, 1024ull,
+                         "short GIF DMA should use the minimum asynchronous completion delay");
+            }
+        });
+
+        tc.Run("GIF DMA completion delay scales beyond the asynchronous floor", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kGifCh = 0x1000A000u;
+            constexpr uint32_t kSrc = 0x00024000u;
+            constexpr uint32_t kQwc = 600u;
+
+            uint8_t *rdram = mem.getRDRAM();
+            std::memset(rdram + kSrc, 0, kQwc * 16u);
+
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x10u, kSrc), "write MADR should succeed");
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x20u, kQwc), "write QWC should succeed");
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x00u, 0x100u), "write CHCR STR should succeed");
+
+            mem.processPendingTransfers();
+
+            const std::vector<PS2Memory::DmacCompletion> completions =
+                mem.consumeCompletedDmacCauses();
+            t.Equals(completions.size(), static_cast<size_t>(1u),
+                     "large GIF DMA should queue one completion");
+            if (!completions.empty())
+            {
+                t.Equals(completions[0].cause, 2u,
+                         "large GIF DMA completion should identify the GIF channel");
+                t.Equals(completions[0].delayCycles, 1216ull,
+                         "large GIF DMA delay should include payload and terminal cycles");
+            }
         });
 
         tc.Run("GIF DMA can source from scratchpad", [](TestCase &t)

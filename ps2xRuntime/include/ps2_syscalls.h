@@ -26,7 +26,8 @@ namespace ps2_syscalls
     void DisableDmacHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
 
     bool dispatchNumericSyscall(uint32_t syscallNumber, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
-    void dispatchDmacHandlersForCause(uint8_t *rdram, PS2Runtime *runtime, uint32_t cause);
+    void dispatchDmacHandlersForCause(uint8_t *rdram, PS2Runtime *runtime, uint32_t cause,
+                                      uint64_t delayCycles = 0);
     void initializeGuestKernelState(uint8_t *rdram, PS2Runtime *runtime);
     void TODO(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t encodedSyscallId);
     uint64_t GetCurrentVSyncTick(PS2Runtime *runtime);
