@@ -344,6 +344,91 @@ void register_ps2_runtime_io_tests()
                 "mc0: directory should NOT exist under cdRoot");
         });
 
+        tc.Run("PS2 paths cannot escape configured roots", [](TestCase &t)
+        {
+            TestContext test;
+
+            t.Equals(translatePs2Path("mc0:../outside.dat"), std::string(),
+                     "mc0: traversal should be rejected");
+            t.Equals(translatePs2Path("cdrom:../../outside.dat"), std::string(),
+                     "cdrom: traversal should be rejected");
+            t.Equals(translatePs2Path("host:..\\..\\outside.dat"), std::string(),
+                     "mixed slash traversal should be rejected");
+
+            std::error_code ec;
+            std::filesystem::create_directory_symlink(test.paths.base,
+                                                      test.paths.mcRoot / "escape", ec);
+#ifndef _WIN32
+            t.IsFalse(static_cast<bool>(ec), "symlink traversal fixture should be created");
+#endif
+            if (!ec)
+            {
+                t.Equals(translatePs2Path("mc0:/escape/outside.dat"), std::string(),
+                         "symlink traversal should be rejected");
+            }
+        });
+
+        tc.Run("PS2 path normalization preserves valid paths", [](TestCase &t)
+        {
+            TestContext test;
+
+            t.Equals(translatePs2Path("mc0:/dir/../save.dat"),
+                     (test.paths.mcRoot / "save.dat").string(),
+                     "valid traversal within mcRoot should be preserved");
+            t.Equals(translatePs2Path("host:/config.ini"),
+                     (test.paths.cdRoot / "config.ini").string(),
+                     "host: path should resolve under hostRoot");
+            t.Equals(translatePs2Path("cdrom:/DATA.BIN;1"),
+                     (test.paths.cdRoot / "DATA.BIN").string(),
+                     "cdrom: path should preserve ISO version handling");
+            t.Equals(translatePs2Path("mc0:/SAVEDATA/save.dat"),
+                     (test.paths.mcRoot / "SAVEDATA" / "save.dat").string(),
+                     "mc0: path should resolve under mcRoot");
+#ifdef _WIN32
+            const std::filesystem::path directPath = test.paths.cdRoot / "inside.dat";
+            t.Equals(translatePs2Path(directPath.string().c_str()), directPath.string(),
+                     "direct Windows paths inside cdRoot should be preserved");
+            std::string caseVariant = directPath.string();
+            if (!caseVariant.empty() && caseVariant.front() >= 'A' && caseVariant.front() <= 'Z')
+            {
+                caseVariant.front() = static_cast<char>(caseVariant.front() - 'A' + 'a');
+            }
+            else if (!caseVariant.empty() && caseVariant.front() >= 'a' && caseVariant.front() <= 'z')
+            {
+                caseVariant.front() = static_cast<char>(caseVariant.front() - 'a' + 'A');
+            }
+            t.IsFalse(translatePs2Path(caseVariant.c_str()).empty(),
+                      "Windows containment should compare path components case-insensitively");
+            t.Equals(translatePs2Path("C:\\outside.dat"), std::string(),
+                     "direct Windows paths outside cdRoot should be rejected");
+#else
+            t.Equals(translatePs2Path("C:\\outside.dat"), std::string("C:\\outside.dat"),
+                     "drive-shaped paths should preserve non-Windows behavior");
+#endif
+        });
+
+        tc.Run("fioOpen rejects paths outside configured roots", [](TestCase &t)
+        {
+            TestContext test;
+            const uint32_t pathAddr = GUEST_STRING_AREA_START + 0x300;
+            const std::filesystem::path escapedPath = test.paths.base / "outside.dat";
+            writeGuestString(test.rdram.data(), pathAddr, "mc0:../outside.dat");
+
+            setRegU32(test.ctx, 4, pathAddr);
+            setRegU32(test.ctx, 5, PS2_FIO_WRITE_CREATE_TRUNC);
+            fioOpen(test.rdram.data(), &test.ctx, nullptr);
+
+            const int32_t fd = getRegS32(&test.ctx, 2);
+            if (fd >= 0)
+            {
+                setRegU32(test.ctx, 4, static_cast<uint32_t>(fd));
+                fioClose(test.rdram.data(), &test.ctx, nullptr);
+            }
+            t.Equals(fd, -1, "fioOpen should reject traversal outside mcRoot");
+            t.IsFalse(std::filesystem::exists(escapedPath),
+                      "fioOpen should not create a file outside mcRoot");
+        });
+
         tc.Run("sceMc open write read and close roundtrip through sync", [](TestCase &t)
         {
             TestContext test;

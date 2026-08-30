@@ -118,12 +118,65 @@ inline std::string translatePs2Path(const char *ps2Path)
     auto resolveWithBase = [&](const std::filesystem::path &base, const std::string &suffix) -> std::string
     {
         const std::string normalizedSuffix = normalizePs2PathSuffix(suffix);
-        std::filesystem::path resolved = base;
+        const std::filesystem::path normalizedBase = base.lexically_normal();
+        std::filesystem::path resolved = normalizedBase;
         if (!normalizedSuffix.empty())
         {
             resolved /= std::filesystem::path(normalizedSuffix);
         }
-        return resolved.lexically_normal().string();
+
+        const std::filesystem::path normalizedPath = resolved.lexically_normal();
+        std::error_code ec;
+        const std::filesystem::path canonicalBase = std::filesystem::weakly_canonical(normalizedBase, ec);
+        if (ec)
+        {
+            return {};
+        }
+        const std::filesystem::path canonicalPath = std::filesystem::weakly_canonical(normalizedPath, ec);
+        if (ec)
+        {
+            return {};
+        }
+
+        std::size_t baseDepth = 0;
+        for (auto it = canonicalBase.begin(); it != canonicalBase.end(); ++it)
+        {
+            ++baseDepth;
+        }
+        std::size_t pathDepth = 0;
+        for (auto it = canonicalPath.begin(); it != canonicalPath.end(); ++it)
+        {
+            ++pathDepth;
+        }
+        if (pathDepth < baseDepth)
+        {
+            return {};
+        }
+
+        std::filesystem::path candidateBase = canonicalPath;
+        while (pathDepth-- > baseDepth)
+        {
+            candidateBase = candidateBase.parent_path();
+        }
+
+        const bool baseExists = std::filesystem::exists(canonicalBase, ec);
+        if (ec)
+        {
+            return {};
+        }
+        if (baseExists)
+        {
+            const bool sameBase = std::filesystem::equivalent(canonicalBase, candidateBase, ec);
+            if (ec || !sameBase)
+            {
+                return {};
+            }
+        }
+        else if (canonicalBase != candidateBase)
+        {
+            return {};
+        }
+        return normalizedPath.string();
     };
 
     if (lower.rfind("host0:", 0) == 0 || lower.rfind("host:", 0) == 0)
@@ -151,7 +204,11 @@ inline std::string translatePs2Path(const char *ps2Path)
 
     if (pathStr.size() > 1 && pathStr[1] == ':')
     {
+#ifdef _WIN32
+        return resolveWithBase(getConfiguredCdRoot(), pathStr);
+#else
         return pathStr;
+#endif
     }
 
     return resolveWithBase(getConfiguredCdRoot(), pathStr);
