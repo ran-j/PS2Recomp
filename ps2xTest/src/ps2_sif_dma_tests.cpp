@@ -115,6 +115,9 @@ namespace
     uint32_t g_dmacHandlerValue = 0u;
     uint32_t g_dmacHandlerLastCause = 0u;
     uint32_t g_dmacHandlerLastArg = 0u;
+    uint32_t g_dmacDispatchSequence = 0u;
+    uint32_t g_dmacHandlerObservedSequence = 0u;
+    uint32_t g_dmacHandlerReplyAddr = 0u;
     int32_t g_sifDmaResult = 0;
 
     constexpr uint32_t kSchedulerSifDmaEntryPc = 0x00101000u;
@@ -128,9 +131,21 @@ namespace
         (void)runtime;
         g_dmacHandlerLastCause = ::getRegU32(ctx, 4);
         g_dmacHandlerLastArg = ::getRegU32(ctx, 5);
+        g_dmacHandlerObservedSequence = g_dmacDispatchSequence;
         if (g_dmacHandlerWriteAddr != 0u)
         {
-            writeGuestU32(rdram, g_dmacHandlerWriteAddr, g_dmacHandlerValue);
+            if (g_dmacHandlerReplyAddr == 0u)
+            {
+                writeGuestU32(rdram, g_dmacHandlerWriteAddr, g_dmacHandlerValue);
+            }
+            else if (readGuestU32(rdram, g_dmacHandlerReplyAddr + 0u) == 24u &&
+                     readGuestU32(rdram, g_dmacHandlerReplyAddr + 8u) == 0x80000001u &&
+                     readGuestU32(rdram, g_dmacHandlerReplyAddr + 16u) == 0u)
+            {
+                writeGuestU32(rdram,
+                              g_dmacHandlerWriteAddr,
+                              readGuestU32(rdram, g_dmacHandlerReplyAddr + 20u));
+            }
         }
         ctx->pc = 0u;
     }
@@ -147,7 +162,9 @@ namespace
         setRegU32(*ctx, 4, kSchedulerSifDmaDescAddr);
         setRegU32(*ctx, 5, 1u);
         ctx->pc = kSchedulerSifDmaResumePc;
+        g_dmacDispatchSequence = 1u;
         ps2_stubs::sceSifSetDma(rdram, ctx, runtime);
+        g_dmacDispatchSequence = 2u;
     }
 
     void schedulerSifDmaResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
@@ -197,6 +214,79 @@ void register_ps2_sif_dma_tests()
             setRegU32(env.ctx, 4, static_cast<uint32_t>(dmaId));
             ps2_stubs::sceSifDmaStat(env.rdram.data(), &env.ctx, &env.runtime);
             t.IsTrue(getRegS32(env.ctx, 2) < 0, "sceSifDmaStat should be negative when transfer is complete");
+        });
+
+        tc.Run("raw SIF INIT_CMD replies through the EE receive buffer", [](TestCase &t)
+        {
+            TestEnv env;
+
+            constexpr uint32_t kDescAddr = 0x00020700u;
+            constexpr uint32_t kPacketAddr = 0x00020800u;
+            constexpr uint32_t kReceiveAddr = 0x00020900u;
+            constexpr uint32_t kInitCmd = 0x80000002u;
+
+            const Ps2SifDmaTransfer bootEndDesc{kPacketAddr, 0u, 16, 4};
+            std::memcpy(env.rdram.data() + kDescAddr, &bootEndDesc, sizeof(bootEndDesc));
+            const uint32_t bootEndPacket[4] = {16u, 0u, kInitCmd, 1u};
+            std::memcpy(env.rdram.data() + kPacketAddr, bootEndPacket, sizeof(bootEndPacket));
+            setRegU32(env.ctx, 4, kDescAddr);
+            setRegU32(env.ctx, 5, 1u);
+            ps2_stubs::sceSifSetDma(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(readGuestU32(env.rdram.data(), 0u), 0u,
+                     "INIT_CMD without a receive buffer should not overwrite EE address zero");
+
+            const Ps2SifDmaTransfer initDesc{kPacketAddr, 0u, 20, 4};
+            std::memcpy(env.rdram.data() + kDescAddr, &initDesc, sizeof(initDesc));
+            const uint32_t initPacket[5] = {20u, 0u, kInitCmd, 0u, kReceiveAddr};
+            std::memcpy(env.rdram.data() + kPacketAddr, initPacket, sizeof(initPacket));
+            setRegU32(env.ctx, 4, kDescAddr);
+            setRegU32(env.ctx, 5, 1u);
+            ps2_stubs::sceSifSetDma(env.rdram.data(), &env.ctx, &env.runtime);
+
+            std::memcpy(env.rdram.data() + kDescAddr, &bootEndDesc, sizeof(bootEndDesc));
+            std::memcpy(env.rdram.data() + kPacketAddr, bootEndPacket, sizeof(bootEndPacket));
+            setRegU32(env.ctx, 4, kDescAddr);
+            setRegU32(env.ctx, 5, 1u);
+            ps2_stubs::sceSifSetDma(env.rdram.data(), &env.ctx, &env.runtime);
+
+            t.Equals(readGuestU32(env.rdram.data(), 0u), 0u,
+                     "raw SIF commands should not overwrite EE address zero");
+            t.Equals(readGuestU32(env.rdram.data(), kReceiveAddr + 0u), 24u,
+                     "SET_SREG reply should carry a 24-byte packet size");
+            t.Equals(readGuestU32(env.rdram.data(), kReceiveAddr + 8u), 0x80000001u,
+                     "reply should use SIF_CMD_SET_SREG");
+            t.Equals(readGuestU32(env.rdram.data(), kReceiveAddr + 16u), 0u,
+                     "reply should select SREG 0");
+            t.Equals(readGuestU32(env.rdram.data(), kReceiveAddr + 20u), 1u,
+                     "reply should mark RPC initialization complete");
+
+            constexpr uint32_t kSregAddr = 0x00020A00u;
+            g_dmacHandlerWriteAddr = kSregAddr;
+            g_dmacHandlerValue = 0u;
+            g_dmacHandlerLastCause = 0u;
+            g_dmacHandlerLastArg = 0u;
+            g_dmacDispatchSequence = 0u;
+            g_dmacHandlerObservedSequence = 0u;
+            g_dmacHandlerReplyAddr = kReceiveAddr;
+            g_sifDmaResult = 0;
+            env.runtime.registerFunction(kSchedulerSifDmaEntryPc, schedulerSifDmaEntry);
+            env.runtime.registerFunction(kSchedulerSifDmaResumePc, schedulerSifDmaResume);
+            env.runtime.registerFunction(kSchedulerSifDmaHandlerPc, testDmacHandler);
+
+            std::memset(env.rdram.data() + kReceiveAddr, 0, 24u);
+            std::memcpy(env.rdram.data() + kSchedulerSifDmaDescAddr, &bootEndDesc, sizeof(bootEndDesc));
+            std::memcpy(env.rdram.data() + kPacketAddr, bootEndPacket, sizeof(bootEndPacket));
+
+            R5900Context mainContext{};
+            mainContext.pc = kSchedulerSifDmaEntryPc;
+            env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+            env.runtime.eeScheduler().run();
+
+            t.IsTrue(g_sifDmaResult > 0, "raw INIT_CMD should still report DMA success");
+            t.Equals(readGuestU32(env.rdram.data(), kSregAddr), 1u,
+                     "DMAC handler should consume the SET_SREG reply");
+            t.Equals(g_dmacHandlerObservedSequence, 1u,
+                     "SET_SREG reply should preempt before sceSifSetDma returns");
         });
 
         tc.Run("IOP heap DMA uses private backing instead of aliasing EE RDRAM", [](TestCase &t)
@@ -306,7 +396,7 @@ void register_ps2_sif_dma_tests()
             t.Equals(getRegS32(env.ctx, 2), 0, "isceSifSetDChain should mirror sceSifSetDChain");
         });
 
-        tc.Run("sceSifSetDma dispatches enabled DMAC handlers for cause 5", [](TestCase &t)
+        tc.Run("ordinary sceSifSetDma queues enabled DMAC handlers for cause 5", [](TestCase &t)
         {
             TestEnv env;
 
@@ -318,6 +408,9 @@ void register_ps2_sif_dma_tests()
             g_dmacHandlerValue = 0xCAFEBABEu;
             g_dmacHandlerLastCause = 0u;
             g_dmacHandlerLastArg = 0u;
+            g_dmacDispatchSequence = 0u;
+            g_dmacHandlerObservedSequence = 0u;
+            g_dmacHandlerReplyAddr = 0u;
             g_sifDmaResult = 0;
             env.runtime.registerFunction(kSchedulerSifDmaEntryPc, schedulerSifDmaEntry);
             env.runtime.registerFunction(kSchedulerSifDmaResumePc, schedulerSifDmaResume);
@@ -348,6 +441,8 @@ void register_ps2_sif_dma_tests()
             t.Equals(g_dmacHandlerLastCause, 5u, "DMAC handler should observe cause 5");
             t.Equals(g_dmacHandlerLastArg, kSchedulerSifDmaHandlerArg,
                      "DMAC handler should receive registered argument");
+            t.Equals(g_dmacHandlerObservedSequence, 2u,
+                     "ordinary DMA handler should remain queued until sceSifSetDma returns");
         });
 
         tc.Run("sceSifSetDma acknowledges DTX work-buffer transfers by advancing the EE footer ticket", [](TestCase &t)

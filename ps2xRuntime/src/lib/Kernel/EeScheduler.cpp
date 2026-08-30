@@ -1284,6 +1284,57 @@ void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
     }
 }
 
+void EeScheduler::dispatchIrqNow(bool dmac, uint32_t cause)
+{
+    assertExecutor();
+    const uint32_t mask = dmac ? m_enabledDmacMask : m_enabledIntcMask;
+    if (cause < 32u && (mask & (1u << cause)) == 0u)
+    {
+        return;
+    }
+    const auto &handlers = dmac ? m_dmacHandlers : m_intcHandlers;
+    std::vector<EeIrqHandler> matching;
+    for (const auto &[id, handler] : handlers)
+    {
+        (void)id;
+        if (handler.enabled && handler.cause == cause && handler.handler != 0u &&
+            m_runtime.hasFunction(handler.handler))
+        {
+            matching.push_back(handler);
+        }
+    }
+    std::sort(matching.begin(), matching.end(), [](const EeIrqHandler &left, const EeIrqHandler &right)
+              { return left.order < right.order; });
+    std::vector<GuestInvocation> invocations;
+    invocations.reserve(matching.size());
+    for (const EeIrqHandler &handler : matching)
+    {
+        GuestInvocation invocation{};
+        invocation.kind = GuestInvocationKind::Interrupt;
+        invocation.context.pc = handler.handler;
+        SET_GPR_U32(&invocation.context, 4, cause);
+        SET_GPR_U32(&invocation.context, 5, handler.argument);
+        SET_GPR_U32(&invocation.context, 28, handler.gp);
+        SET_GPR_U32(&invocation.context, 29, handler.sp);
+        SET_GPR_U32(&invocation.context, 31, 0u);
+        invocations.push_back(std::move(invocation));
+    }
+    if (invocations.empty())
+    {
+        return;
+    }
+
+    if (m_running.load(std::memory_order_acquire) && currentThread() && !m_insideInterrupt)
+    {
+        invokeCurrentSequence(std::move(invocations));
+    }
+
+    for (GuestInvocation &invocation : invocations)
+    {
+        queueInvocation(std::move(invocation));
+    }
+}
+
 void EeScheduler::setVSyncFlag(uint32_t flagAddress, uint32_t tickAddress)
 {
     assertExecutor();

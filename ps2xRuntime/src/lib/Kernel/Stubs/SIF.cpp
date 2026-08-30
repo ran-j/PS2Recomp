@@ -2,6 +2,7 @@
 #include "SIF.h"
 #include "../Syscalls/RPC.h"
 #include "../../ps2_iop_transport.h"
+#include "runtime/ee_scheduler.h"
 #include "runtime/ps2_address.h"
 
 #include <algorithm>
@@ -65,6 +66,7 @@ namespace ps2_stubs
         std::array<uint8_t, kIopHeapLimit - kIopHeapBase> g_sifHeapStorage{};
         uint32_t g_sifCmdBuffer = 0u;
         uint32_t g_sifSysCmdBuffer = 0u;
+        uint32_t g_sifEeReceiveBuffer = 0u;
         bool g_sifCmdInitialized = false;
         uint32_t g_sifGetRegLogCount = 0u;
         uint32_t g_sifSetRegLogCount = 0u;
@@ -82,6 +84,7 @@ namespace ps2_stubs
             g_sifCmdHandlers.clear();
             g_sifCmdBuffer = 0u;
             g_sifSysCmdBuffer = 0u;
+            g_sifEeReceiveBuffer = 0u;
             g_sifCmdInitialized = false;
             g_sifGetRegLogCount = 0u;
             g_sifSetRegLogCount = 0u;
@@ -815,6 +818,7 @@ namespace ps2_stubs
         std::array<Ps2SifDmaTransfer, 32u> pending{};
         uint32_t pendingCount = 0u;
         bool ok = true;
+        bool generatedSifReply = false;
         for (uint32_t i = 0; i < count; ++i)
         {
             const uint32_t entryAddr = dmatAddr + (i * static_cast<uint32_t>(sizeof(Ps2SifDmaTransfer)));
@@ -862,7 +866,10 @@ namespace ps2_stubs
                         static_cast<uint32_t>(xfer.size),
                     });
                 }
-                if (!copyGuestByteRange(rdram, xfer.dest, xfer.src, static_cast<uint32_t>(xfer.size)))
+                // Destination zero is the IOP sifcmd receive endpoint, not EE
+                // address zero. The transport and raw-command HLE consume it.
+                if (xfer.dest != 0u &&
+                    !copyGuestByteRange(rdram, xfer.dest, xfer.src, static_cast<uint32_t>(xfer.size)))
                 {
                     ok = false;
                     break;
@@ -877,6 +884,75 @@ namespace ps2_stubs
                         static_cast<uint32_t>(xfer.size),
                     });
                 }
+            }
+        }
+
+        // Emulate the IOP-side sifcmd/sifrpc boot handshake carried in raw
+        // SIF DMA packets.
+        if (ok && runtime)
+        {
+            auto readGuestDword = [rdram](uint32_t addr)
+            {
+                uint8_t bytes[sizeof(uint32_t)]{};
+                for (uint32_t byte = 0u; byte < sizeof(bytes); ++byte)
+                {
+                    bytes[byte] = *getConstMemPtr(rdram, addr + byte);
+                }
+                uint32_t value = 0u;
+                std::memcpy(&value, bytes, sizeof(value));
+                return value;
+            };
+            for (uint32_t i = 0; i < pendingCount; ++i)
+            {
+                const Ps2SifDmaTransfer &xfer = pending[i];
+                if (xfer.dest != 0u || static_cast<uint32_t>(xfer.size) < 0x10u ||
+                    isSifIopHeapRange(xfer.src, static_cast<uint32_t>(xfer.size)))
+                {
+                    continue;
+                }
+                if (readGuestDword(xfer.src + 0x08u) != 0x80000002u) // SIF_CMD_INIT_CMD
+                {
+                    continue;
+                }
+                const uint32_t opt = readGuestDword(xfer.src + 0x0Cu);
+                if (opt == 0u && static_cast<uint32_t>(xfer.size) >= 0x14u)
+                {
+                    std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
+                    g_sifEeReceiveBuffer = readGuestDword(xfer.src + 0x10u);
+                    continue;
+                }
+                if (opt != 1u)
+                {
+                    continue;
+                }
+
+                uint32_t pktbuf = 0u;
+                {
+                    std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
+                    pktbuf = g_sifEeReceiveBuffer;
+                }
+                if (pktbuf == 0u || isSifIopHeapRange(pktbuf, 24u) ||
+                    !canCopyAddressRange(rdram, pktbuf, 24u))
+                {
+                    continue;
+                }
+                const uint8_t reply[24] = {
+                    0x18, 0x00, 0x00, 0x00,
+                    0x00, 0x00, 0x00, 0x00,
+                    0x01, 0x00, 0x00, 0x80,
+                    0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x00, 0x00, 0x00,
+                    0x01, 0x00, 0x00, 0x00,
+                };
+                for (uint32_t byte = 0u; byte < sizeof(reply); ++byte)
+                {
+                    *getMemPtr(rdram, pktbuf + byte) = reply[byte];
+                }
+                generatedSifReply = true;
+                PS2_IF_AGRESSIVE_LOGS({
+                    std::cerr << "[sifcmd] INIT_CMD boot end: SET_SREG reply to 0x"
+                              << std::hex << pktbuf << std::dec << std::endl;
+                });
             }
         }
 
@@ -896,9 +972,15 @@ namespace ps2_stubs
             return;
         }
 
-        ps2_syscalls::dispatchDmacHandlersForCause(rdram, runtime, 5u);
-
         setReturnS32(ctx, static_cast<int32_t>(allocateSifDmaTransferId()));
+        if (generatedSifReply)
+        {
+            runtime->eeScheduler().dispatchIrqNow(true, 5u);
+        }
+        else
+        {
+            runtime->eeScheduler().dispatchIrq(true, 5u);
+        }
     }
 
     void sceSifSetIopAddr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
