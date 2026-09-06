@@ -342,6 +342,64 @@ void register_ps2_vu1_tests()
                      "MTIR fsf=w should read VF.w");
         });
 
+        tc.Run("reused VU pipeline entries preserve raw lanes and write deadlines", [](TestCase &t)
+        {
+            const uint32_t first[] = {0x80000000u, 0x7FC12345u, 0x00000001u, 0xFF800000u};
+            const uint32_t second[] = {0x7F800000u, 0xFFC54321u, 0x80000001u, 0x00000000u};
+            const uint32_t initial[] = {0x3F800000u, 0x40000000u, 0x40400000u, 0x40800000u};
+            for (uint8_t mask = 0u; mask < 16u; ++mask)
+            {
+                Vu1Fixture fx;
+                if (!fx.initialize())
+                {
+                    t.IsTrue(false, "Queue reuse fixture should initialize");
+                    return;
+                }
+                VU1Interpreter vu;
+                std::memcpy(fx.data + 16u, first, sizeof(first));
+                std::memcpy(fx.data + 32u, second, sizeof(second));
+                std::memset(fx.data + 48u, 0xA5, 32u);
+                std::memcpy(vu.state().vf[4], initial, sizeof(initial));
+                vu.state().vi[3] = 0x7FF0;
+                for (uint32_t pc = 0u; pc < 96u; pc += 8u)
+                    writeVuInstructionPair(fx.code, pc, 0u, kVuUpperNop);
+                writeVuInstructionPair(fx.code, 0u, makeVuLq(mask, 4u, 0u, 1), kVuUpperNop);
+                writeVuInstructionPair(fx.code, 8u, makeVuIaddiu(3u, 3u, 1), kVuUpperNop);
+                writeVuInstructionPair(fx.code, 32u, makeVuSq(mask, 4u, 0u, 3), kVuUpperNop);
+                writeVuInstructionPair(fx.code, 40u, makeVuLq(mask ^ 15u, 4u, 0u, 2), kVuUpperNop);
+                writeVuInstructionPair(fx.code, 48u, makeVuIaddiu(3u, 3u, 2), kVuUpperNop);
+                writeVuInstructionPair(fx.code, 72u, makeVuSq(15u, 4u, 0u, 4), kVuUpperNop);
+                vu.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                           fx.gs, &fx.mem, 0u, 0u, 0u, 1u);
+                for (uint32_t cycle = 1u; cycle <= 10u; ++cycle)
+                {
+                    if (cycle > 1u)
+                        vu.resume(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                                  fx.gs, &fx.mem, 0u, 0u, 1u);
+                    t.Equals(vu.state().cycles, static_cast<uint64_t>(cycle),
+                             "Each observation must advance exactly one cycle");
+                    uint32_t actualVf[4], actualFirst[4], actualSecond[4];
+                    std::memcpy(actualVf, vu.state().vf[4], sizeof(actualVf));
+                    std::memcpy(actualFirst, fx.data + 48u, sizeof(actualFirst));
+                    std::memcpy(actualSecond, fx.data + 64u, sizeof(actualSecond));
+                    for (uint32_t lane = 0u; lane < 4u; ++lane)
+                    {
+                        const bool selected = (mask & (8u >> lane)) != 0u;
+                        uint32_t expected = cycle >= 4u && selected ? first[lane] : initial[lane];
+                        if (cycle >= 9u && !selected)
+                            expected = second[lane];
+                        t.Equals(actualVf[lane], expected, "VF lanes must retain raw bits until their write deadline");
+                        t.Equals(actualFirst[lane], cycle >= 5u && selected ? first[lane] : 0xA5A5A5A5u,
+                                 "The first store must preserve disabled lanes and commit after one cycle");
+                        t.Equals(actualSecond[lane], cycle >= 10u ? expected : 0xA5A5A5A5u,
+                                 "Reused store entries must publish the second value at its deadline");
+                    }
+                    t.Equals(vu.state().vi[3], cycle >= 7u ? 0x7FF3 : cycle >= 2u ? 0x7FF1 : 0x7FF0,
+                             "Reused integer writes must commit at their individual deadlines");
+                }
+            }
+        });
+
         tc.Run("LQ and SQ use VI qword addressing and destination masks", [](TestCase &t)
         {
             Vu1Fixture fx;
