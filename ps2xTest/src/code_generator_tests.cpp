@@ -168,6 +168,48 @@ void register_code_generator_tests()
 {
     MiniTest::Case("CodeGenerator", [](TestCase &tc)
                    {
+    tc.Run("function sources avoid the global generated declaration header", [](TestCase &t) {
+        Function func;
+        func.name = "isolated_function";
+        func.start = 0x8000;
+        func.end = 0x8004;
+        func.isRecompiled = true;
+
+        CodeGenerator gen({}, {});
+        const std::string generated = gen.generateFunction(func, {makeNop(0x8000)}, true);
+
+        t.IsTrue(generated.find("#include \"ps2_runtime.h\"") != std::string::npos,
+                 "generated functions still require the runtime interface");
+        t.IsTrue(generated.find("#include \"ps2_recompiled_functions.h\"") == std::string::npos,
+                 "only the registration unit should depend on all generated declarations");
+        t.IsTrue(generated.find("#include \"ps2_recompiled_stubs.h\"") == std::string::npos,
+                 "ordinary generated functions should not depend on every stub declaration");
+    });
+
+    tc.Run("direct generated jumps declare only their target", [](TestCase &t) {
+        Function func;
+        func.name = "direct_jump_source";
+        func.start = 0x8000;
+        func.end = 0x8008;
+        func.isRecompiled = true;
+
+        Instruction jump{};
+        jump.address = 0x8000;
+        jump.opcode = OPCODE_J;
+        jump.target = (0x9000u >> 2) & 0x3FFFFFFu;
+        jump.hasDelaySlot = true;
+        jump.raw = (OPCODE_J << 26) | jump.target;
+
+        CodeGenerator gen({}, {});
+        gen.setRenamedFunctions({{0x9000u, "direct_jump_target"}});
+        const std::string generated = gen.generateFunction(func, {jump, makeNop(0x8004)}, true);
+
+        t.IsTrue(generated.find("void direct_jump_target(uint8_t*, R5900Context*, PS2Runtime*);") != std::string::npos,
+                 "a direct generated jump should receive a local forward declaration");
+        t.IsTrue(generated.find("#include \"ps2_recompiled_functions.h\"") == std::string::npos,
+                 "a direct generated jump should not restore the global declaration dependency");
+    });
+
     tc.Run("SYSCALL publishes its continuation before entering the runtime", [](TestCase &t) {
         Function func;
         func.name = "syscall_resume";

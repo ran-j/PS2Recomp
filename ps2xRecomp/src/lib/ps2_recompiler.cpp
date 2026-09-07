@@ -102,7 +102,6 @@ namespace ps2recomp
         void writeCombinedOutputPreamble(std::ostream &output)
         {
             output << "#include <stdexcept>\n";
-            output << "#include \"ps2_recompiled_functions.h\"\n\n";
             output << "#include \"ps2_runtime_macros.h\"\n";
             output << "#include \"ps2_runtime.h\"\n";
             output << "#include \"ps2_recompiled_stubs.h\"\n";

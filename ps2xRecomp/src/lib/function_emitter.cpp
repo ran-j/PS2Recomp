@@ -40,20 +40,6 @@ namespace ps2recomp
         std::stringstream ss;
         cg.m_currentFunctionName = function.name;
 
-        if (useHeaders)
-        {
-            ss << "#include <stdexcept>\n";
-            ss << "#include \"ps2_runtime_macros.h\"\n";
-            ss << "#include \"ps2_runtime.h\"\n";
-            ss << "#include \"ps2_recompiled_functions.h\"\n";
-            ss << "#include \"ps2_recompiled_stubs.h\"\n\n";
-            ss << "#include \"ps2_syscalls.h\"\n";
-            ss << "#include \"ps2_stubs.h\"\n\n";
-            ss << "#ifdef PS2_FUNCTION_LOG_TRACKER\n";
-            ss << "#include \"ps2_log.h\"\n";
-            ss << "#endif\n\n";
-        }
-
         CodeGenerator::AnalysisResult analysisResult = cg.collectInternalBranchTargets(function, instructions);
         std::vector<uint32_t> resumeTargets(analysisResult.resumeEntryPoints.begin(),
                                             analysisResult.resumeEntryPoints.end());
@@ -234,6 +220,50 @@ namespace ps2recomp
         }
 
         ss << "}\n";
-        return ss.str();
+
+        const std::string body = ss.str();
+        if (!useHeaders)
+        {
+            return body;
+        }
+
+        std::stringstream output;
+        output << "#include <stdexcept>\n";
+        output << "#include \"ps2_runtime_macros.h\"\n";
+        output << "#include \"ps2_runtime.h\"\n";
+        output << "#include \"ps2_syscalls.h\"\n";
+        output << "#include \"ps2_stubs.h\"\n\n";
+        output << "#ifdef PS2_FUNCTION_LOG_TRACKER\n";
+        output << "#include \"ps2_log.h\"\n";
+        output << "#endif\n\n";
+
+        // Most guest calls are dispatched through PS2Runtime and therefore do
+        // not need declarations for every generated function. A direct J to
+        // a recovered function is emitted as a C++ tail call, so declare only
+        // those targets locally instead of including the global declaration
+        // header in every generated source file.
+        constexpr std::string_view callSuffix = "(rdram, ctx, runtime); return;";
+        std::unordered_set<std::string> directJumpTargets;
+        size_t searchOffset = 0;
+        while ((searchOffset = body.find(callSuffix, searchOffset)) != std::string::npos)
+        {
+            const size_t lineStart = body.rfind('\n', searchOffset);
+            const size_t nameStart = body.find_first_not_of(" \t", lineStart == std::string::npos ? 0 : lineStart + 1);
+            if (nameStart != std::string::npos && nameStart < searchOffset)
+            {
+                directJumpTargets.emplace(body.substr(nameStart, searchOffset - nameStart));
+            }
+            searchOffset += callSuffix.size();
+        }
+        for (const std::string &target : directJumpTargets)
+        {
+            output << "void " << target << "(uint8_t*, R5900Context*, PS2Runtime*);\n";
+        }
+        if (!directJumpTargets.empty())
+        {
+            output << "\n";
+        }
+        output << body;
+        return output.str();
     }
 }
