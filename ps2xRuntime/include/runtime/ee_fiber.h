@@ -12,7 +12,7 @@
 // Suspending the stack instead makes a switch a register save and a stack
 // pointer swap.
 //
-// x86-64 gets a hand-written switch; everything else falls back to ucontext,
+// x86-64 and ARM64 get native switches; other targets fall back to ucontext,
 // which is correct but pays a sigprocmask syscall per switch. setjmp/longjmp
 // across stacks is deliberately not used: glibc's _FORTIFY_SOURCE turns it
 // into an abort ("longjmp causes uninitialized stack frame").

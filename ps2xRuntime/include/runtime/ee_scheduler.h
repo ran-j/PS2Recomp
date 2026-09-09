@@ -428,6 +428,8 @@ private:
     // refreshReadyMask(), which every mutation of m_readyQueues calls.
     std::array<uint64_t, (kPriorityCount + 63) / 64> m_readyMask{};
     std::unordered_map<int, GuestThread> m_threads;
+    // EE thread IDs are bounded; map nodes remain stable across rehashes.
+    std::array<GuestThread *, kLastThreadId + 1> m_threadIndex{};
     std::unordered_map<int, EeSemaphore> m_semaphores;
     std::unordered_map<int, EeEventFlag> m_eventFlags;
     std::unordered_map<int, EeAlarm> m_alarms;

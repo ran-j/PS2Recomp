@@ -44,6 +44,7 @@ static constexpr int FB_HEIGHT = 512;
 static constexpr int DEFAULT_DISPLAY_HEIGHT = 448;
 static constexpr uint32_t DEFAULT_FB_SIZE = FB_WIDTH * FB_HEIGHT * 4;
 static constexpr uint32_t DEFAULT_FB_ADDR = (PS2_RAM_SIZE - DEFAULT_FB_SIZE - 0x10000u);
+static std::atomic<uint64_t> s_syscallOverrideGeneration{1u};
 #if defined(PLATFORM_VITA)
 static constexpr int HOST_WINDOW_WIDTH = 960;
 static constexpr int HOST_WINDOW_HEIGHT = 544;
@@ -481,6 +482,8 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
 
 PS2Runtime::PS2Runtime()
 {
+    // A new instance may reuse the address of a cached, destroyed runtime.
+    s_syscallOverrideGeneration.fetch_add(1u, std::memory_order_release);
     m_iopHost = std::make_unique<PS2IopHostAdapter>(*this);
     m_iopSubsystem = std::make_unique<ps2x::iop::IopSubsystem>(*m_iopHost);
     m_eeScheduler = std::make_unique<EeScheduler>(*this);
@@ -2327,8 +2330,29 @@ void PS2Runtime::removeEeExitHandlers(int threadId)
 
 bool PS2Runtime::findEeSyscallOverride(uint32_t syscallNumber, uint32_t &handler) const
 {
+    struct CachedOverride
+    {
+        const PS2Runtime *owner = nullptr;
+        uint64_t generation = 0u;
+        uint32_t number = 0u;
+        uint32_t handler = 0u;
+        bool found = false;
+    };
+    // Polling loops repeatedly call the same syscall with no override.
+    // Cache misses still read the map under its lock; every mutation invalidates.
+    static thread_local CachedOverride cache;
+    const uint64_t generation = s_syscallOverrideGeneration.load(std::memory_order_acquire);
+    if (cache.owner == this && cache.generation == generation && cache.number == syscallNumber)
+    {
+        if (cache.found)
+            handler = cache.handler;
+        return cache.found;
+    }
     std::lock_guard lock(m_eeKernelStateMutex);
     const auto it = m_eeSyscallOverrides.find(syscallNumber);
+    cache = {this, generation, syscallNumber,
+             it == m_eeSyscallOverrides.end() ? 0u : it->second,
+             it != m_eeSyscallOverrides.end()};
     if (it == m_eeSyscallOverrides.end())
     {
         return false;
@@ -2353,6 +2377,7 @@ void PS2Runtime::setEeSyscallOverride(uint8_t *rdram, uint32_t syscallNumber, ui
     {
         m_eeSyscallOverrides[syscallNumber] = handler;
     }
+    s_syscallOverrideGeneration.fetch_add(1u, std::memory_order_release);
     if (!rdram || address < 0 || address + 4 > kMirrorLimit)
     {
         return;

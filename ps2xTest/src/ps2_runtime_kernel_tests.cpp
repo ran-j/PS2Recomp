@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <sstream>
 #include <thread>
 #include <vector>
@@ -549,6 +550,28 @@ void register_ps2_runtime_kernel_tests()
 {
     MiniTest::Case("PS2RuntimeKernel", [](TestCase &tc)
     {
+        tc.Run("syscall lookup observes replacement, removal and runtime reuse", [](TestCase &t)
+        {
+            std::optional<PS2Runtime> runtime(std::in_place);
+            uint32_t handler = 0u;
+            constexpr uint32_t number = 0x2Bu;
+            t.IsTrue(!runtime->findEeSyscallOverride(number, handler), "no initial override");
+            runtime->setEeSyscallOverride(nullptr, number, 0x1000u);
+            t.IsTrue(runtime->findEeSyscallOverride(number, handler), "new override replaces cached miss");
+            t.Equals(handler, 0x1000u, "installed handler is visible");
+            std::thread writer([&] { runtime->setEeSyscallOverride(nullptr, number, 0x2000u); });
+            writer.join();
+            t.IsTrue(runtime->findEeSyscallOverride(number, handler), "cross-thread replacement is visible");
+            t.Equals(handler, 0x2000u, "replacement invalidates cached hit");
+            runtime->setEeSyscallOverride(nullptr, number, 0u);
+            t.IsTrue(!runtime->findEeSyscallOverride(number, handler), "removal invalidates cached hit");
+            runtime->setEeSyscallOverride(nullptr, number, 0x3000u);
+            runtime->findEeSyscallOverride(number, handler);
+            runtime.reset();
+            runtime.emplace();
+            t.IsTrue(!runtime->findEeSyscallOverride(number, handler), "reused runtime address has no old override");
+        });
+
         tc.Run("CreateThread and CreateSema decode the exact PS2SDK EE layouts", [](TestCase &t)
         {
             TestEnv env;
@@ -808,6 +831,51 @@ void register_ps2_runtime_kernel_tests()
 
             const std::vector<int> expected{1, 10, 20, 11};
             t.IsTrue(trace == expected, "explicit rotation should move the current head behind its FIFO peer");
+        });
+
+        tc.Run("rotating a singleton does not run a lower-priority thread", [](TestCase &t)
+        {
+            for (const bool withLower : {false, true})
+            {
+                TestEnv env;
+                std::vector<int> trace;
+                gSchedulerTrace = &trace;
+                env.runtime.registerFunction(K_SCHED_MAIN, schedulerMainExit);
+                env.runtime.registerFunction(K_SCHED_A, schedulerRotateA);
+                env.runtime.registerFunction(K_SCHED_A_RESUME, schedulerRotateAResume);
+                env.runtime.registerFunction(K_SCHED_B, schedulerTraceB);
+                env.ctx.pc = K_SCHED_MAIN;
+                EeScheduler &ee = env.runtime.eeScheduler();
+                ee.reset(env.rdram.data(), env.ctx);
+                const int first = ee.createThread(EeThreadCreateParams{0, K_SCHED_A, 0x20000u, 0x800u, 0, 5, 0});
+                ee.startThread(first, 0, env.ctx, false);
+                if (withLower)
+                {
+                    const int lower = ee.createThread(EeThreadCreateParams{0, K_SCHED_B, 0x21000u, 0x800u, 0, 20, 0});
+                    ee.startThread(lower, 0, env.ctx, false);
+                }
+                ee.run();
+                t.IsTrue(trace == std::vector<int>({1, 10, 11}), "the rotating thread retains its priority");
+            }
+        });
+
+        tc.Run("thread lookup follows ID reuse and scheduler reset", [](TestCase &t)
+        {
+            TestEnv env;
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.reset(env.rdram.data(), env.ctx);
+            for (int i = 0; i < 2 * EeScheduler::kLastThreadId; ++i)
+            {
+                const int id = ee.createThread(EeThreadCreateParams{0, K_SCHED_A, 0x20000u, 0x800u, 0, 5, 0});
+                t.IsTrue(ee.thread(id) != nullptr, "new and reused IDs resolve");
+                uint32_t ownedStack = 0u;
+                t.Equals(ee.deleteThread(id, ownedStack), KE_OK, "dormant thread deletes");
+                t.IsTrue(ee.thread(id) == nullptr, "deleted ID does not retain its old node");
+            }
+            const int last = ee.createThread(EeThreadCreateParams{0, K_SCHED_B, 0x21000u, 0x800u, 0, 5, 0});
+            ee.reset(env.rdram.data(), env.ctx);
+            t.IsTrue(ee.thread(last) == nullptr, "reset clears all indexed threads");
+            t.IsTrue(ee.thread(EeScheduler::kMainThreadId) != nullptr, "reset installs the main thread");
         });
 
         tc.Run("starting a strictly higher-priority thread preempts immediately", [](TestCase &t)

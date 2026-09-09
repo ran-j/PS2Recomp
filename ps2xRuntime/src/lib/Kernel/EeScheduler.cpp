@@ -134,6 +134,7 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     }
     m_invocationStackTops.clear();
     m_threads.clear();
+    m_threadIndex.fill(nullptr);
     m_semaphores.clear();
     m_eventFlags.clear();
     m_alarms.clear();
@@ -192,7 +193,7 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     main.initialPriority = 0;
     main.currentPriority = 0;
     main.status = EeThreadStatus::Ready;
-    m_threads.emplace(main.id, std::move(main));
+    m_threadIndex[kMainThreadId] = &m_threads.emplace(main.id, std::move(main)).first->second;
     m_readyQueues[0].push_back(kMainThreadId);
     refreshReadyMask(0);
     scheduleEvent(m_eeCycle + kVBlankPeriodCycles,
@@ -209,6 +210,7 @@ void EeScheduler::run()
     while (!m_stopRequested.load(std::memory_order_acquire))
     {
         g_eeRunLoopIterations.fetch_add(1u, std::memory_order_relaxed);
+        // Service events and preemption once between guest turns.
         processPendingEvents();
         if (m_stopRequested.load(std::memory_order_acquire))
         {
@@ -259,20 +261,10 @@ void EeScheduler::run()
             if (m_fiberException)
             {
                 std::exception_ptr escaped;
-                escaped.swap(m_fiberException);
+                std::swap(escaped, m_fiberException);
                 m_running.store(false, std::memory_order_release);
                 publishSnapshotNow();
                 std::rethrow_exception(escaped);
-            }
-            processPendingEvents();
-            if (m_rescheduleRequested && m_currentThreadId != 0)
-            {
-                GuestThread *preempted = currentThread();
-                assert(preempted != nullptr);
-                enqueueReady(*preempted, !m_timeSliceExpired);
-                m_currentThreadId = 0;
-                m_rescheduleRequested = false;
-                m_timeSliceExpired = false;
             }
             continue;
         }
@@ -414,21 +406,10 @@ void EeScheduler::run()
         if (m_fiberException)
         {
             std::exception_ptr escaped;
-            escaped.swap(m_fiberException);
+            std::swap(escaped, m_fiberException);
             m_running.store(false, std::memory_order_release);
             publishSnapshotNow();
             std::rethrow_exception(escaped);
-        }
-
-        processPendingEvents();
-        if (m_rescheduleRequested && m_currentThreadId != 0)
-        {
-            GuestThread *preempted = currentThread();
-            assert(preempted != nullptr);
-            enqueueReady(*preempted, !m_timeSliceExpired);
-            m_currentThreadId = 0;
-            m_rescheduleRequested = false;
-            m_timeSliceExpired = false;
         }
     }
 
@@ -575,7 +556,7 @@ int EeScheduler::createThread(const EeThreadCreateParams &params)
     thread.initialPriority = params.priority;
     thread.currentPriority = params.priority;
     thread.status = EeThreadStatus::Dormant;
-    m_threads.emplace(id, std::move(thread));
+    m_threadIndex[id] = &m_threads.emplace(id, std::move(thread)).first->second;
     reserveGuestStackFromAsyncPool(params.stack);
     publishSnapshot();
     return id;
@@ -603,6 +584,7 @@ int EeScheduler::deleteThread(int id, uint32_t &ownedStack)
         ownedStack = it->second.stack;
     }
     releaseInvocationStacks(id);
+    m_threadIndex[id] = nullptr;
     m_threads.erase(it);
     publishSnapshot();
     return KE_OK;
@@ -652,6 +634,8 @@ int EeScheduler::startThread(int id, uint32_t arg, const R5900Context &caller, b
     if (deleteThreadRecord && id != kMainThreadId)
     {
         releaseInvocationStacks(id);
+        if (static_cast<uint32_t>(id) <= kLastThreadId)
+            m_threadIndex[id] = nullptr;
         m_threads.erase(id);
     }
     if (ownedStack != 0u)
@@ -888,6 +872,13 @@ int EeScheduler::rotateReadyQueue(int priority, bool interruptSafe)
     GuestThread *self = currentThread();
     if (self && self->currentPriority == priority)
     {
+        // Rotating a singleton would immediately select this same thread.
+        // Guest checkpoints still service timers and newly posted events.
+        const int firstReady = firstReadyPriority();
+        if ((firstReady < 0 || firstReady > priority) && !m_rescheduleRequested)
+        {
+            return KE_OK;
+        }
         enqueueReady(*self);
         m_currentThreadId = 0;
         m_rescheduleRequested = true;
@@ -1572,12 +1563,16 @@ void EeScheduler::completeExternalWait(uint32_t type, uint64_t token, int result
 
 GuestThread *EeScheduler::thread(int id)
 {
+    if (static_cast<uint32_t>(id) <= kLastThreadId)
+        return m_threadIndex[id];
     auto it = m_threads.find(id);
     return it == m_threads.end() ? nullptr : &it->second;
 }
 
 const GuestThread *EeScheduler::thread(int id) const
 {
+    if (static_cast<uint32_t>(id) <= kLastThreadId)
+        return m_threadIndex[id];
     auto it = m_threads.find(id);
     return it == m_threads.end() ? nullptr : &it->second;
 }
@@ -1670,7 +1665,8 @@ void EeScheduler::publishSnapshot()
     // three. Called from ~40 scheduler operations it was 45% of EE thread time
     // during a movie, for state whose only readers are the debug panel and an
     // aggressive-log tick.
-    if (!m_snapshotWanted.exchange(false, std::memory_order_relaxed))
+    if (!m_snapshotWanted.load(std::memory_order_relaxed) ||
+        !m_snapshotWanted.exchange(false, std::memory_order_relaxed))
     {
         return;
     }
@@ -2089,6 +2085,7 @@ void EeScheduler::processPendingEvents()
 
     // A default-constructed deque still allocates, and this path is almost
     // always empty, so only build one when there is something to take.
+    if (m_pendingEventCount.load(std::memory_order_acquire) != 0u)
     {
         std::unique_lock lock(m_eventMutex);
         if (!m_events.empty())
