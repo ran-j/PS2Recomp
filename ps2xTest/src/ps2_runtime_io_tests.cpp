@@ -152,6 +152,38 @@ void register_ps2_runtime_io_tests()
 {
     MiniTest::Case("PS2RuntimeIO", [](TestCase &tc)
     {
+        tc.Run("SifInitRpc preserves pending card operations and open files", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            TestContext test;
+            clearContext(test.ctx);
+            ps2_stubs::sceMcInit(test.rdram.data(), &test.ctx, &runtime);
+            { std::ofstream out(test.paths.mcRoot / "save.dat"); out << "saved adventure"; }
+            writeGuestString(test.rdram.data(), GUEST_STRING_AREA_START, "/save.dat");
+            setRegU32(test.ctx, 4, 0u);
+            setRegU32(test.ctx, 5, 1u);
+            setRegU32(test.ctx, 6, GUEST_STRING_AREA_START);
+            setRegU32(test.ctx, 7, PS2_FIO_O_RDONLY);
+            ps2_stubs::sceMcOpen(test.rdram.data(), &test.ctx, &runtime);
+            clearContext(test.ctx);
+            ps2_syscalls::SifInitRpc(test.rdram.data(), &test.ctx, &runtime);
+            int32_t cmd = 0;
+            const int32_t fd = syncMc(test.rdram, &cmd);
+            t.Equals(cmd, 0x02, "RPC init preserves pending card-open completion");
+            t.IsTrue(fd > 0, "card file remains open");
+            ps2_syscalls::SifInitRpc(test.rdram.data(), &test.ctx, &runtime);
+            setRegU32(test.ctx, 4, static_cast<uint32_t>(fd));
+            setRegU32(test.ctx, 5, GUEST_BUFFER_AREA_START);
+            setRegU32(test.ctx, 6, 15u);
+            ps2_stubs::sceMcRead(test.rdram.data(), &test.ctx, &runtime);
+            t.Equals(syncMc(test.rdram), 15, "repeated RPC initialization does not close the card file");
+            t.Equals(std::string(reinterpret_cast<char *>(test.rdram.data() + GUEST_BUFFER_AREA_START), 15),
+                     std::string("saved adventure"), "save contents survive RPC init");
+            setRegU32(test.ctx, 4, static_cast<uint32_t>(fd));
+            ps2_stubs::sceMcClose(test.rdram.data(), &test.ctx, &runtime);
+            t.Equals(syncMc(test.rdram), 0, "close the test save");
+        });
+
         tc.Run("mc0 directory creation", [](TestCase &t)
         {
             TestContext test;
@@ -459,6 +491,61 @@ void register_ps2_runtime_io_tests()
                      "sceMcGetDir should report the host file size");
             t.IsTrue((entries[2].attrFile & 0x0080u) != 0u,
                      "sceMcGetDir file entries should carry the closed-file attribute");
+        });
+
+        tc.Run("sceMcGetDir uses MCMAN wildcard semantics", [](TestCase &t)
+        {
+            TestContext test;
+            for (const char *name : {"SAVE_0", "SAVE_12", "SAVE_123", "SAVED_0"})
+                std::filesystem::create_directories(test.paths.mcRoot / name);
+
+            auto count = [&](const char *pattern) {
+                writeGuestString(test.rdram.data(), GUEST_STRING_AREA_START, pattern);
+                clearContext(test.ctx);
+                setRegU32(test.ctx, 4, 0u);
+                setRegU32(test.ctx, 5, 1u);
+                setRegU32(test.ctx, 6, GUEST_STRING_AREA_START);
+                setRegU32(test.ctx, 8, 8u);
+                setRegU32(test.ctx, 9, GUEST_MC_TABLE_ADDR);
+                ps2_stubs::sceMcGetDir(test.rdram.data(), &test.ctx, nullptr);
+                return syncMc(test.rdram);
+            };
+            t.Equals(count("/SAVE???"), 3, "question marks accept shorter names but exclude longer ones");
+            t.Equals(count("/SAVE_0?tail"), 1, "MCMAN accepts a question mark reached at end of name");
+            t.Equals(count("/SAVE*?0"), 2, "questions after a star do not require an extra character");
+            t.Equals(count("/SAVE*12"), 1, "star backtracking must still match the literal suffix");
+            t.Equals(count("/SAVE_0x"), 0, "a missing literal is not a wildcard match");
+        });
+
+        tc.Run("sceMcRename keeps entries in their parent directory", [](TestCase &t)
+        {
+            TestContext test;
+            clearContext(test.ctx);
+            ps2_stubs::sceMcFormat(test.rdram.data(), &test.ctx, nullptr);
+            t.Equals(syncMc(test.rdram), 0, "format the isolated test card");
+            std::filesystem::create_directories(test.paths.mcRoot / "SAVEDATA");
+            const auto original = test.paths.mcRoot / "SAVEDATA" / "icon.sys";
+            const auto renamed = test.paths.mcRoot / "SAVEDATA" / "icon.err";
+            { std::ofstream out(original); out << "icon metadata"; }
+            auto rename = [&](const char *oldName, const char *newName) {
+                writeGuestString(test.rdram.data(), GUEST_STRING_AREA_START, oldName);
+                writeGuestString(test.rdram.data(), GUEST_STRING_AREA_START + 0x100, newName);
+                clearContext(test.ctx);
+                setRegU32(test.ctx, 4, 0u);
+                setRegU32(test.ctx, 5, 1u);
+                setRegU32(test.ctx, 6, GUEST_STRING_AREA_START);
+                setRegU32(test.ctx, 7, GUEST_STRING_AREA_START + 0x100);
+                ps2_stubs::sceMcRename(test.rdram.data(), &test.ctx, nullptr);
+                return syncMc(test.rdram);
+            };
+            t.Equals(rename("/SAVEDATA/icon.sys", "icon.err"), 0, "basename rename succeeds");
+            t.IsTrue(std::filesystem::exists(renamed), "renamed metadata stays beside the save");
+            t.IsTrue(!std::filesystem::exists(test.paths.mcRoot / "icon.err"), "rename must not move to card root");
+            t.Equals(rename("/SAVEDATA/icon.err", "icon.sys"), 0, "save completion restores metadata name");
+            t.IsTrue(rename("/SAVEDATA/icon.sys", "../escape") < 0, "new name cannot move an entry");
+            { std::ofstream out(renamed); out << "existing file"; }
+            t.IsTrue(rename("/SAVEDATA/icon.sys", "icon.err") < 0, "rename cannot overwrite another entry");
+            t.IsTrue(std::filesystem::exists(original), "failed rename preserves the original");
         });
 
         tc.Run("sceMcGetInfo reports formatted and unformatted states", [](TestCase &t)

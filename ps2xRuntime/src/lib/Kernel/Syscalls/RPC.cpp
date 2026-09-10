@@ -219,10 +219,7 @@ namespace ps2_syscalls
     void SifInitRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         std::lock_guard<std::mutex> lock(g_rpc_mutex);
-        if (runtime)
-        {
-            PS2IopTransport::reset(runtime);
-        }
+        // Initializing the EE RPC client must not reboot the IOP services.
         if (!g_rpc_initialized)
         {
             g_rpc_servers.clear();

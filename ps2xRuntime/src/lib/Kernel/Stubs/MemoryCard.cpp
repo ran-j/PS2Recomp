@@ -364,7 +364,12 @@ namespace ps2_stubs
                 }
                 else if (patternPos < pattern.size() && pattern[patternPos] == '*')
                 {
-                    starPos = patternPos++;
+                    while (patternPos < pattern.size() &&
+                           (pattern[patternPos] == '*' || pattern[patternPos] == '?'))
+                    {
+                        ++patternPos;
+                    }
+                    starPos = patternPos - 1u;
                     matchPos = valuePos;
                 }
                 else if (starPos != std::string::npos)
@@ -383,7 +388,9 @@ namespace ps2_stubs
                 ++patternPos;
             }
 
-            return patternPos == pattern.size();
+            // MCMAN accepts '?' at the end of a shorter filename, even if
+            // more pattern characters follow (mcman_checkdirpath in PS2SDK).
+            return patternPos == pattern.size() || pattern[patternPos] == '?';
         }
 
         void setMcCommandResultLocked(int32_t cmd, int32_t result)
@@ -1135,11 +1142,13 @@ namespace ps2_stubs
                 {
                     const std::filesystem::path oldHostPath =
                         guestMcPathToHostPath(port, normalizeGuestMcPathLocked(port, oldPath));
-                    const std::filesystem::path newHostPath =
-                        guestMcPathToHostPath(port, normalizeGuestMcPathLocked(port, newPath));
+                    // libmc renames an entry within its existing directory.
+                    const std::filesystem::path newHostPath = oldHostPath.parent_path() / newPath;
                     std::error_code ec;
-                    if (std::filesystem::exists(oldHostPath, ec) && !ec &&
-                        std::filesystem::exists(newHostPath.parent_path(), ec) && !ec)
+                    if (!newPath.empty() && newPath != "." && newPath != ".." &&
+                        newPath.find_first_of("/\\") == std::string::npos &&
+                        std::filesystem::exists(oldHostPath, ec) && !ec &&
+                        !std::filesystem::exists(newHostPath, ec) && !ec)
                     {
                         std::filesystem::rename(oldHostPath, newHostPath, ec);
                         result = ec ? kMcResultDeniedPermit : kMcResultSucceed;
@@ -1149,6 +1158,7 @@ namespace ps2_stubs
 
             setMcCommandResultLocked(kMcCmdRename, result);
         }
+        MC_TRACE("Rename port=%d '%s' -> '%s' result=%d\n", port, oldPath.c_str(), newPath.c_str(), result);
         setReturnS32(ctx, 0);
     }
 

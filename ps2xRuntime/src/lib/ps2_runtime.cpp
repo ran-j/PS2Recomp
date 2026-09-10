@@ -2491,9 +2491,27 @@ void PS2Runtime::run()
         }
         gameThreadFinished.store(true, std::memory_order_release); });
 
+    const char *kernelTraceEnv = std::getenv("PS2X_KERNEL_TRACE_MS");
+    const auto kernelTraceInterval = std::chrono::milliseconds(kernelTraceEnv ? std::max(0, std::atoi(kernelTraceEnv)) : 0);
+    auto nextKernelTrace = std::chrono::steady_clock::now() + kernelTraceInterval;
     uint64_t tick = 0;
     while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
     {
+        if (kernelTraceInterval.count() > 0 && std::chrono::steady_clock::now() >= nextKernelTrace)
+        {
+            const auto snapshot = m_eeScheduler->snapshot();
+            std::fprintf(stderr, "[ee-kernel] sequence=%llu cycle=%llu running=%d\n",
+                         static_cast<unsigned long long>(snapshot.sequence),
+                         static_cast<unsigned long long>(snapshot.eeCycle), snapshot.runningThreadId);
+            for (const auto &thread : snapshot.threads)
+                std::fprintf(stderr, "  thread=%d pc=%08x entry=%08x priority=%d state=%d wait=%d object=%d\n",
+                             thread.id, thread.pc, thread.entry, thread.currentPriority,
+                             static_cast<int>(thread.status), static_cast<int>(thread.waitReason), thread.waitId);
+            for (const auto &sema : snapshot.semaphores)
+                if (sema.waiters)
+                    std::fprintf(stderr, "  sema=%d count=%d waiters=%u\n", sema.id, sema.count, sema.waiters);
+            nextKernelTrace = std::chrono::steady_clock::now() + kernelTraceInterval;
+        }
         PS2_IF_AGRESSIVE_LOGS({
             tick++;
             if ((tick % 120) == 0)
