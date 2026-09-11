@@ -1053,13 +1053,13 @@ void register_ps2_vu1_tests()
                      "the flag-driven branch should arrive at its target");
         });
 
-        tc.Run("JR shares the one-instruction VI branch visibility rule", [](TestCase &t)
+        tc.Run("JR reads the latest VI value after an integer write", [](TestCase &t)
         {
             Vu1Fixture fx;
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
 
             writeVuInstructionPair(
-                fx.code, 0u, makeVuIaddiu(1u, 0u, 2),
+                fx.code, 0u, makeVuIaddiu(1u, 0u, 4),
                 kVuUpperNop);
             writeVuInstructionPair(
                 fx.code, 8u, makeVuJr(1u),
@@ -1075,19 +1075,42 @@ void register_ps2_vu1_tests()
                 kVuUpperNop);
 
             VU1Interpreter vu1;
-            vu1.state().vi[1] = 4;
+            vu1.state().vi[1] = 3;
             vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
                         fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
                         0u, 0u, 0u, 4u);
 
-            t.Equals(vu1.state().vi[1], 2,
+            t.Equals(vu1.state().vi[1], 4,
                      "the pending IALU write should still commit normally");
             t.Equals(vu1.state().vi[2], 2,
                      "JR should execute exactly one delay-slot pair");
             t.Equals(vu1.state().vi[3], 0,
                      "JR should skip the sequential instruction after its delay slot");
             t.Equals(vu1.state().vi[4], 4,
-                     "JR immediately after a VI write should branch using the previous VI value");
+                     "JR must use the updated target, unlike a conditional branch");
+        });
+
+        tc.Run("JALR uses the latest target before writing its link register", [](TestCase &t)
+        {
+            for (uint8_t link : {uint8_t{15}, uint8_t{1}})
+            {
+                Vu1Fixture fx;
+                t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+                writeVuInstructionPair(fx.code, 0u, makeVuIaddiu(1u, 0u, 4), kVuUpperNop);
+                const uint32_t jalr = (0x25u << 25u) | (static_cast<uint32_t>(link) << 16u) | (1u << 11u);
+                writeVuInstructionPair(fx.code, 8u, jalr, kVuUpperNop);
+                writeVuInstructionPair(fx.code, 16u, makeVuIaddiu(2u, 0u, 2), kVuUpperNop);
+                writeVuInstructionPair(fx.code, 24u, makeVuIaddiu(3u, 0u, 3), kVuUpperNop);
+                writeVuInstructionPair(fx.code, 32u, makeVuIaddiu(4u, 0u, 4), kVuUpperNop);
+                VU1Interpreter vu1;
+                vu1.state().vi[1] = 3;
+                vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                            fx.gs, &fx.mem, 0u, 0u, 0u, 4u);
+                t.Equals(vu1.state().vi[link], 3, "JALR links to the instruction after its delay slot");
+                t.Equals(vu1.state().vi[2], 2, "JALR must execute its delay slot");
+                t.Equals(vu1.state().vi[3], 0, "JALR must not use the stale target or newly written link");
+                t.Equals(vu1.state().vi[4], 4, "JALR must reach the updated target");
+            }
         });
 
         tc.Run("MPG upload invalidates cached VU1 decode before MSCAL", [](TestCase &t)
