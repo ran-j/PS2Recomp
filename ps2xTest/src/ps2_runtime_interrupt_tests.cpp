@@ -52,6 +52,7 @@ namespace
     constexpr uint32_t kIrqWaitPc = 0x00160200u;
     constexpr uint32_t kIrqResumePc = 0x00160210u;
     constexpr uint32_t kIntcHandlerPc = 0x00160220u;
+    constexpr uint32_t kLatchedIrqWaitPc = 0x00160230u;
     constexpr uint32_t kISemaWaitPc = 0x00160300u;
     constexpr uint32_t kISemaResumePc = 0x00160310u;
     constexpr uint32_t kISemaDriverPc = 0x00160320u;
@@ -182,6 +183,20 @@ namespace
         g_dispatchTrace.push_back(3);
         ctx->pc = 0u;
         runtime->requestStop();
+    }
+
+    void schedulerLatchedIrqWait(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_dispatchTrace.push_back(1);
+        EeScheduler &scheduler = runtime->eeScheduler();
+        scheduler.setIrqCauseEnabled(false, 5u, false);
+        scheduler.dispatchIrq(false, 5u);
+        scheduler.dispatchIrq(false, 5u);
+        scheduler.addIrqHandler(false, 5u, kIntcHandlerPc, true, 0xCAFEu, 0u, 0u);
+        scheduler.setIrqCauseEnabled(false, 5u, true);
+        scheduler.setIrqCauseEnabled(false, 5u, true);
+        ctx->pc = kIrqResumePc;
+        scheduler.waitVSync(scheduler.currentVSyncTick());
     }
 
     void schedulerISemaHandler(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
@@ -465,6 +480,25 @@ void register_ps2_runtime_interrupt_tests()
                      "the dispatcher should run wait, IRQ frame, then the resumed base context in exact order");
             t.Equals(g_lastIntcArg.load(std::memory_order_relaxed), 0xCAFEu,
                      "the IRQ frame should receive its registered argument");
+        });
+
+        tc.Run("masked VIF completion survives late handler registration", [](TestCase &t)
+        {
+            TestEnv env;
+            env.runtime.registerFunction(kLatchedIrqWaitPc, schedulerLatchedIrqWait);
+            env.runtime.registerFunction(kIrqResumePc, schedulerIrqResume);
+            env.runtime.registerFunction(kIntcHandlerPc, schedulerIntcHandler);
+            g_dispatchTrace.clear();
+            g_lastIntcArg.store(0u, std::memory_order_relaxed);
+            R5900Context mainContext{};
+            mainContext.pc = kLatchedIrqWaitPc;
+            env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+            env.runtime.eeScheduler().run();
+
+            t.IsTrue(g_dispatchTrace == std::vector<int>({1, 2, 3}),
+                     "unmasking must deliver the latched cause exactly once before resuming");
+            t.Equals(g_lastIntcArg.load(std::memory_order_relaxed), 0xCAFEu,
+                     "completion reaches the handler installed after the transfer");
         });
 
         tc.Run("iSignalSema defers selection until IRQ return", [](TestCase &t)

@@ -189,6 +189,8 @@ struct EeThreadSnapshot
 {
     int id = 0;
     uint32_t pc = 0;
+    uint32_t ra = 0;
+    uint32_t sp = 0;
     uint32_t entry = 0;
     uint32_t stack = 0;
     uint32_t stackSize = 0;
@@ -448,6 +450,8 @@ private:
     int m_dmacTailOrder = 1000;
     uint32_t m_enabledIntcMask = 0xFFFFFFFFu;
     uint32_t m_enabledDmacMask = 0xFFFFFFFFu;
+    uint32_t m_pendingIntcMask = 0u;
+    uint32_t m_pendingDmacMask = 0u;
     int m_currentThreadId = 0;
     bool m_rescheduleRequested = false;
     bool m_timeSliceExpired = false;

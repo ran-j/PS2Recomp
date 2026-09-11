@@ -1360,7 +1360,9 @@ namespace
         uint32_t madr = 0;
         uint32_t qwc = 0;
         uint32_t tadr = payloadPhys;
-        uint32_t chcr = 0x00000181u; // DIR=1, TIE=1, STR=1 (normal mode).
+        PS2Memory &mem = runtime->memory();
+        // The SDK changes MODE, DIR and STR while preserving TTE and TIE.
+        uint32_t chcr = (mem.readIORegister(channelBase) & ~0xCu) | 0x101u;
 
         if (preferNormalCount)
         {
@@ -1369,10 +1371,9 @@ namespace
         }
         else
         {
-            chcr = 0x00000185u; // MODE=1 chain, DIR=1, TIE=1, STR=1.
+            chcr |= 0x4u; // MODE=1 chain.
         }
 
-        PS2Memory &mem = runtime->memory();
         mem.writeIORegister(channelBase + 0x20u, qwc & 0xFFFFu);
         mem.writeIORegister(channelBase + 0x10u, madr);
         mem.writeIORegister(channelBase + 0x30u, tadr);

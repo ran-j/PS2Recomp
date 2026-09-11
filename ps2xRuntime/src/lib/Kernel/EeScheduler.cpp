@@ -153,6 +153,8 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_dmacTailOrder = 1000;
     m_enabledIntcMask = 0xFFFFFFFFu;
     m_enabledDmacMask = 0xFFFFFFFFu;
+    m_pendingIntcMask = 0u;
+    m_pendingDmacMask = 0u;
     m_currentThreadId = 0;
     m_rescheduleRequested = false;
     m_timeSliceExpired = false;
@@ -1374,6 +1376,9 @@ int EeScheduler::addIrqHandler(bool dmac,
                                   sp,
                                   true,
                                   append ? ++tail : --head});
+    const uint32_t pending = dmac ? m_pendingDmacMask : m_pendingIntcMask;
+    if (cause < 32u && (pending & (1u << cause)) != 0u)
+        dispatchIrq(dmac, cause);
     return id;
 }
 
@@ -1397,6 +1402,10 @@ int EeScheduler::setIrqHandlerEnabled(bool dmac, int id, bool enabled)
     if (it != handlers.end())
     {
         it->second.enabled = enabled;
+        const uint32_t cause = it->second.cause;
+        const uint32_t pending = dmac ? m_pendingDmacMask : m_pendingIntcMask;
+        if (enabled && cause < 32u && (pending & (1u << cause)) != 0u)
+            dispatchIrq(dmac, cause);
     }
     return KE_OK;
 }
@@ -1410,6 +1419,9 @@ int EeScheduler::setIrqCauseEnabled(bool dmac, uint32_t cause, bool enabled)
         if (enabled)
         {
             mask |= 1u << cause;
+            const uint32_t pending = dmac ? m_pendingDmacMask : m_pendingIntcMask;
+            if ((pending & (1u << cause)) != 0u)
+                dispatchIrq(dmac, cause);
         }
         else
         {
@@ -1422,6 +1434,10 @@ int EeScheduler::setIrqCauseEnabled(bool dmac, uint32_t cause, bool enabled)
 void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
 {
     assertExecutor();
+    // Device completion remains pending while its handler or mask is disabled.
+    uint32_t &pending = dmac ? m_pendingDmacMask : m_pendingIntcMask;
+    const uint32_t causeBit = cause < 32u ? (1u << cause) : 0u;
+    pending |= causeBit;
     const uint32_t mask = dmac ? m_enabledDmacMask : m_enabledIntcMask;
     if (cause < 32u && (mask & (1u << cause)) == 0u)
     {
@@ -1440,6 +1456,8 @@ void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
     }
     std::sort(matching.begin(), matching.end(), [](const EeIrqHandler &left, const EeIrqHandler &right)
               { return left.order < right.order; });
+    if (!matching.empty())
+        pending &= ~causeBit;
     for (const EeIrqHandler &handler : matching)
     {
         GuestInvocation invocation{};
@@ -1684,13 +1702,15 @@ void EeScheduler::publishSnapshotNow()
     next.threads.reserve(m_threads.size());
     for (const auto &[id, item] : m_threads)
     {
-        if (id < 0)
+        if (id < 0 && item.status == EeThreadStatus::Dormant)
         {
             continue;
         }
         EeThreadSnapshot snapshot{};
         snapshot.id = id;
         snapshot.pc = item.activeContext().pc;
+        snapshot.ra = getRegU32(&item.activeContext(), 31);
+        snapshot.sp = getRegU32(&item.activeContext(), 29);
         snapshot.entry = item.entry;
         snapshot.stack = item.stack;
         snapshot.stackSize = item.stackSize;

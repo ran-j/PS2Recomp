@@ -2504,8 +2504,8 @@ void PS2Runtime::run()
                          static_cast<unsigned long long>(snapshot.sequence),
                          static_cast<unsigned long long>(snapshot.eeCycle), snapshot.runningThreadId);
             for (const auto &thread : snapshot.threads)
-                std::fprintf(stderr, "  thread=%d pc=%08x entry=%08x priority=%d state=%d wait=%d object=%d\n",
-                             thread.id, thread.pc, thread.entry, thread.currentPriority,
+                std::fprintf(stderr, "  thread=%d pc=%08x ra=%08x sp=%08x entry=%08x priority=%d state=%d wait=%d object=%d\n",
+                             thread.id, thread.pc, thread.ra, thread.sp, thread.entry, thread.currentPriority,
                              static_cast<int>(thread.status), static_cast<int>(thread.waitReason), thread.waitId);
             for (const auto &sema : snapshot.semaphores)
                 if (sema.waiters)

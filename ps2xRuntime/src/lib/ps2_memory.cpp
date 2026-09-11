@@ -2,6 +2,7 @@
 #include "runtime/ps2_address.h"
 #include "runtime/gs/gs_frontend.h"
 #include "ps2_log.h"
+#include <array>
 #include <atomic>
 #include <cstring>
 #include <limits>
@@ -1366,7 +1367,13 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     uint32_t asr1 = m_ioRegisters[channelBase + 0x50];
                     uint32_t asp = (chcr >> 4) & 0x3u;
                     const bool tieEnabled = (chcr & (1u << 7)) != 0u;
-                    const int kMaxChainTags = 4096;
+                    const bool transferVifTagData = (chcr & (1u << 6)) != 0u &&
+                        (channelBase == 0x10009000u || channelBase == 0x10008000u);
+                    // Brent's cycle check includes the return stack, so finite CALL
+                    // chains can reuse a subchain without an arbitrary tag limit.
+                    std::array<uint32_t, 4> cycleCheckpoint{tagAddr, asr0, asr1, asp};
+                    uint64_t cyclePower = 1u;
+                    uint64_t cycleDistance = 0u;
                     std::vector<uint8_t> chainBuf;
 
                     auto appendData = [&](uint32_t srcAddr, uint32_t qwCount)
@@ -1404,7 +1411,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         }
                     };
 
-                    auto appendCompactVif1TagData = [&](uint32_t localTagAddr, uint32_t qwCount)
+                    auto appendVifTagData = [&](uint32_t localTagAddr)
                     {
                         uint32_t tagPhys = 0u;
                         const bool tagScratch = isScratchpad(localTagAddr);
@@ -1415,15 +1422,13 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         if (tagPhys + 16u > localMax)
                             return;
 
-                        // VIF packet helpers embed 8 bytes of VIF stream in the DMAtag's upper half.
+                        // With TTE, every tag supplies two VIFcodes before its payload.
                         chainBuf.insert(chainBuf.end(), localBase + tagPhys + 8u, localBase + tagPhys + 16u);
-                        appendData(localTagAddr + 16u, qwCount);
                     };
 
-                    int tagsProcessed = 0;
                     uint32_t lastTagUpper = (chcr >> 16) & 0xFFFFu;
 
-                    while (tagsProcessed < kMaxChainTags)
+                    while (true)
                     {
                         const uint32_t currentTagAddr = tagAddr;
                         const bool tagInSPR = isScratchpad(tagAddr);
@@ -1458,7 +1463,6 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         const bool irq = ((tag >> 31) & 0x1ull) != 0ull;
                         uint32_t addr = static_cast<uint32_t>((tag >> 32) & 0x7FFFFFFF);
                         lastTagUpper = static_cast<uint32_t>((tag >> 16) & 0xFFFFu);
-                        ++tagsProcessed;
 
                         uint32_t dataAddr = 0;
                         bool hasPayload = (tagQwc > 0);
@@ -1528,23 +1532,30 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             break;
                         }
 
-                        const bool compactVifLocalTag =
-                            (channelBase == 0x10009000u || channelBase == 0x10008000u) &&
-                            (id == 1u || id == 2u || id == 5u || id == 6u || id == 7u);
-                        if (compactVifLocalTag)
-                            appendCompactVif1TagData(currentTagAddr, 0u);
+                        if (transferVifTagData)
+                            appendVifTagData(currentTagAddr);
 
                         if (hasPayload)
                         {
-                            if (compactVifLocalTag)
-                                appendData(currentTagAddr + 16u, tagQwc);
-                            else
-                                appendData(dataAddr, tagQwc);
+                            appendData(dataAddr, tagQwc);
                         }
                         if (irq && tieEnabled)
                             endChain = true;
                         if (endChain)
                             break;
+                        const std::array<uint32_t, 4> nextState{tagAddr, asr0, asr1, asp};
+                        if (nextState == cycleCheckpoint)
+                        {
+                            RUNTIME_ERROR("[DMA] cyclic source chain at 0x" << std::hex
+                                          << tagAddr << " on channel 0x" << channelBase << std::dec << '\n');
+                            break;
+                        }
+                        if (++cycleDistance == cyclePower)
+                        {
+                            cycleCheckpoint = nextState;
+                            cyclePower *= 2u;
+                            cycleDistance = 0u;
+                        }
                     }
 
                     m_ioRegisters[channelBase + 0x30] = tagAddr;
