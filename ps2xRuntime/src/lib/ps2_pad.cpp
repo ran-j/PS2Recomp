@@ -56,10 +56,10 @@ namespace
     };
 
     constexpr KeyBinding kKeyBindings[] = {
-        {KEY_UP, PAD_UP}, {KEY_W, PAD_UP},
-        {KEY_DOWN, PAD_DOWN}, {KEY_S, PAD_DOWN},
-        {KEY_LEFT, PAD_LEFT}, {KEY_A, PAD_LEFT},
-        {KEY_RIGHT, PAD_RIGHT}, {KEY_D, PAD_RIGHT},
+        {KEY_UP, PAD_UP},
+        {KEY_DOWN, PAD_DOWN},
+        {KEY_LEFT, PAD_LEFT},
+        {KEY_RIGHT, PAD_RIGHT},
         {KEY_X, PAD_CROSS}, {KEY_SPACE, PAD_CROSS},
         {KEY_C, PAD_CIRCLE}, {KEY_ESCAPE, PAD_CIRCLE},
         {KEY_Z, PAD_SQUARE}, {KEY_KP_0, PAD_SQUARE},
@@ -70,6 +70,8 @@ namespace
         {KEY_RIGHT_SHIFT, PAD_R2},
         {KEY_ENTER, PAD_START},
         {KEY_TAB, PAD_SELECT},
+        {KEY_R, PAD_L3},
+        {KEY_F, PAD_R3},
     };
 
     struct PadBinding
@@ -99,8 +101,17 @@ namespace
 
     uint8_t axisToByte(float axis)
     {
-        const float mapped = 128.0f + axis * 127.0f;
+        if (axis > -0.125f && axis < 0.125f)
+            return kPadStickCenter;
+        const float mapped = 128.0f + axis * (axis < 0.0f ? 128.0f : 127.0f);
         return static_cast<uint8_t>(mapped < 0.0f ? 0.0f : (mapped > 255.0f ? 255.0f : mapped));
+    }
+
+    uint8_t keyboardAxis(int negative, int positive, uint8_t fallback)
+    {
+        const bool low = IsKeyDown(negative);
+        const bool high = IsKeyDown(positive);
+        return low || high ? (low == high ? kPadStickCenter : low ? 0u : 255u) : fallback;
     }
 
     uint64_t nowMs()
@@ -151,7 +162,6 @@ namespace
             const uint8_t ly = axisToByte(GetGamepadAxisMovement(kGamepad, GAMEPAD_AXIS_LEFT_Y));
             sticks = (static_cast<uint32_t>(rx) << 24) | (static_cast<uint32_t>(ry) << 16) |
                      (static_cast<uint32_t>(lx) << 8) | static_cast<uint32_t>(ly);
-            return;
         }
 
         for (const KeyBinding &binding : kKeyBindings)
@@ -161,6 +171,12 @@ namespace
                 held |= binding.mask;
             }
         }
+
+        const uint8_t rx = keyboardAxis(KEY_J, KEY_L, static_cast<uint8_t>(sticks >> 24u));
+        const uint8_t ry = keyboardAxis(KEY_I, KEY_K, static_cast<uint8_t>(sticks >> 16u));
+        const uint8_t lx = keyboardAxis(KEY_A, KEY_D, static_cast<uint8_t>(sticks >> 8u));
+        const uint8_t ly = keyboardAxis(KEY_W, KEY_S, static_cast<uint8_t>(sticks));
+        sticks = (uint32_t(rx) << 24u) | (uint32_t(ry) << 16u) | (uint32_t(lx) << 8u) | ly;
 
         if (drainQueue)
         {
