@@ -216,6 +216,11 @@ private:
     std::array<PendingVfWrite, kMaxPendingVfWrites> m_vfWritePipeline{};
     std::array<PendingViWrite, kMaxPendingViWrites> m_viWritePipeline{};
     std::array<PendingAccWrite, kMaxPendingAccWrites> m_accWritePipeline{};
+    uint32_t m_activeFlags = 0;
+    uint32_t m_activeStores = 0;
+    uint32_t m_activeVfWrites = 0;
+    uint32_t m_activeViWrites = 0;
+    uint32_t m_activeAccWrites = 0;
     XgkickPipeline m_xgkick{};
     std::array<std::array<uint64_t, 4>, 32> m_vfReady{};
     std::array<uint64_t, 16> m_viReady{};
