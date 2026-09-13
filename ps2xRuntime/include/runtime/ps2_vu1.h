@@ -62,6 +62,10 @@ public:
     VU1State &state() { return m_state; }
     const VU1State &state() const { return m_state; }
 
+    void setCompiledExecutionEnabled(bool enabled) { m_useCompiledExecution = enabled; }
+    uint64_t compiledPairsExecuted() const { return m_compiledPairsExecuted; }
+    uint64_t interpretedPairsExecuted() const { return m_interpretedPairsExecuted; }
+
 private:
     enum Pipeline : uint8_t
     {
@@ -200,6 +204,12 @@ private:
     static constexpr uint32_t kMaxPendingAccWrites = 8u;
     static constexpr uint32_t kMaxDecodedPairs = 0x4000u / 8u;
 
+    using CompiledBlock = bool (*)(VU1Interpreter &, uint64_t);
+    std::array<CompiledBlock, kMaxDecodedPairs> m_compiledCodeCache{};
+    bool m_useCompiledExecution = true;
+    uint64_t m_compiledPairsExecuted = 0;
+    uint64_t m_interpretedPairsExecuted = 0;
+
     Unit m_unit;
     VU1State m_state;
     std::array<DecodedInstructionPair, kMaxDecodedPairs> m_decodedCodeCache{};
@@ -249,17 +259,25 @@ private:
              uint8_t *vuData, uint32_t dataSize,
              GS &gs, PS2Memory *memory, uint32_t maxCycles);
 
-    InstructionUsage decodeUpperUsage(uint32_t upper) const;
-    InstructionUsage decodeLowerUsage(uint32_t lower) const;
-    static void addVfRead(InstructionUsage &usage, uint8_t reg, uint8_t lanes);
-    static void addVfWrite(InstructionUsage &usage, uint8_t reg, uint8_t lanes);
-    static uint8_t vfReadLanes(const InstructionUsage &usage, uint8_t reg);
+    static constexpr InstructionUsage decodeUpperUsage(uint32_t upper);
+    static constexpr InstructionUsage decodeLowerUsage(uint32_t lower, Unit unit);
+    static constexpr void addVfRead(InstructionUsage &usage, uint8_t reg, uint8_t lanes);
+    static constexpr void addVfWrite(InstructionUsage &usage, uint8_t reg, uint8_t lanes);
+    static constexpr uint8_t vfReadLanes(const InstructionUsage &usage, uint8_t reg);
+    static constexpr DecodedInstructionPair decodeInstructionWords(uint32_t lower, uint32_t upper, Unit unit);
     DecodedInstructionPair decodeInstructionPair(const uint8_t *vuCode, uint32_t pc) const;
     DecodedInstructionPair getDecodedInstructionPairForPc(const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory, uint32_t pc);
     void rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t codeSize, const PS2Memory *memory, uint64_t generation);
+    static CompiledBlock findCompiledBlock(const uint8_t *code, uint32_t size, Unit unit);
+    template <Unit unit, uint64_t... words>
+    static bool runCompiledBlock(VU1Interpreter &vu, uint64_t budgetEnd);
+    template <bool compiled>
+    bool runDecodedPair(const DecodedInstructionPair &decoded, uint64_t budgetEnd, uint32_t codeSize);
 
     void execUpper(uint32_t instr);
     void execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSize, GS &gs, PS2Memory *memory, uint32_t upperInstr);
+    void execUpperInline(uint32_t instr);
+    void execLowerInline(uint32_t instr, uint8_t *vuData, uint32_t dataSize, GS &gs, PS2Memory *memory, uint32_t upperInstr);
 
     void applyDest(float *dst, const float *result, uint8_t dest);
     void applyDestAcc(const float *result, uint8_t dest);
@@ -289,7 +307,9 @@ private:
     void progressXgkick();
     void finishXgkick();
     uint64_t calculatePairReadyCycle(const DecodedInstructionPair &decoded) const;
+    uint64_t calculatePairReadyCycleInline(const DecodedInstructionPair &decoded) const;
     void markPairWrites(const DecodedInstructionPair &decoded);
+    void markPairWritesInline(const DecodedInstructionPair &decoded);
     bool pipelinesPending() const;
 
     float normalizeOperand(float value) const;

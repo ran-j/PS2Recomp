@@ -608,6 +608,84 @@ void register_ps2_vu1_tests()
                      "ACC forwarding must not introduce a four-cycle dependency stall");
         });
 
+        tc.Run("two VF writes per cycle retire across queue wraps and one-cycle resumes", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+            VU1Interpreter vu;
+            for (uint32_t i = 0; i < 32u; ++i)
+            {
+                const float values[4] = {float(i + 1u), float(i + 2u), float(i + 3u), float(i + 4u)};
+                std::memcpy(fx.data + i * 16u, values, sizeof(values));
+                writeVuInstructionPair(fx.code, i * 8u,
+                    makeVuLq(0xFu, 16u + i % 8u, 0u, i),
+                    makeVuUpper(0x28u, 0xFu, 0u, 1u + i / 8u, 8u + i % 8u));
+            }
+            for (uint32_t i = 32u; i < 36u; ++i)
+                writeVuInstructionPair(fx.code, i * 8u, 0u, kVuUpperNop);
+            for (uint32_t reg = 1u; reg <= 4u; ++reg)
+                for (float &component : vu.state().vf[reg])
+                    component = float(reg * 10u);
+
+            for (uint32_t cycle = 1u; cycle <= 35u; ++cycle)
+            {
+                if (cycle == 1u)
+                    vu.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                               fx.gs, &fx.mem, 0u, 0u, 0u, 1u);
+                else
+                    vu.resume(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                              fx.gs, &fx.mem, 0u, 0u, 1u);
+                for (uint32_t reg = 0u; reg < 8u; ++reg)
+                {
+                    int32_t last = -1;
+                    for (uint32_t issued = reg; issued < 32u; issued += 8u)
+                        if (issued + 4u <= cycle) last = issued;
+                    const float upper = last < 0 ? 0.0f : float((last / 8 + 1) * 10);
+                    const float lower = last < 0 ? 0.0f : float(last + 1);
+                    t.Equals(vu.state().vf[8u + reg][0], upper, "upper write must retire at its exact cycle");
+                    t.Equals(vu.state().vf[16u + reg][0], lower, "lower write must retire at its exact cycle");
+                }
+            }
+        });
+
+        tc.Run("ILW and IALU can retire together after repeated queue wraps", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+            for (uint32_t group = 0; group < 8u; ++group)
+            {
+                const uint32_t base = group * 6u;
+                for (uint32_t i = 0; i < 3u; ++i)
+                {
+                    const uint32_t value = group * 10u + i + 1u;
+                    std::memcpy(fx.data + (base + i) * 16u, &value, sizeof(value));
+                    writeVuInstructionPair(fx.code, (base + i) * 8u,
+                        makeVuIlw(0x8u, i + 1u, 0u, base + i), kVuUpperNop);
+                    writeVuInstructionPair(fx.code, (base + i + 3u) * 8u,
+                        makeVuIaddiu(i + 4u, 0u, value + 100u), kVuUpperNop);
+                }
+            }
+            VU1Interpreter vu;
+            for (uint32_t cycle = 1u; cycle <= 48u; ++cycle)
+            {
+                if (cycle == 1u)
+                    vu.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                               fx.gs, &fx.mem, 0u, 0u, 0u, 1u);
+                else
+                    vu.resume(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                              fx.gs, &fx.mem, 0u, 0u, 1u);
+                for (uint32_t i = 0; i < 3u; ++i)
+                {
+                    int32_t expected = 0;
+                    for (uint32_t group = 0; group < 8u; ++group)
+                        if (group * 6u + i + 4u <= cycle) expected = group * 10u + i + 1u;
+                    t.Equals(vu.state().vi[i + 1u], expected, "delayed ILW must commit on the shared cycle");
+                    t.Equals(vu.state().vi[i + 4u], expected ? expected + 100 : 0,
+                             "one-cycle IALU must commit alongside ILW");
+                }
+            }
+        });
+
         tc.Run("ILW result becomes visible after four cycles before IALU consumes it", [](TestCase &t)
         {
             Vu1Fixture fx;
@@ -1225,6 +1303,31 @@ void register_ps2_vu1_tests()
             }
         });
 
+        tc.Run("XGKICK wraps within a qword for an external unaligned data size", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+            std::vector<uint8_t> data(31u, 0u);
+            uint8_t expected[16]{};
+            const uint64_t tag = makeGifTag(0u, GIF_FMT_PACKED, 1u, true);
+            std::memcpy(expected, &tag, sizeof(tag));
+            expected[15] = 0x5au;
+            for (uint32_t i = 0; i < 16u; ++i)
+                data[(16u + i) % data.size()] = expected[i];
+            std::vector<uint8_t> captured;
+            fx.mem.setGifPacketCallback([&](const uint8_t *packet, uint32_t size) {
+                captured.assign(packet, packet + size);
+            });
+            writeVuInstructionPair(fx.code, 0u, makeVuLowerSpecial(0x6Cu, 1u), kVuUpperNop);
+            VU1Interpreter vu;
+            vu.state().vi[1] = 1;
+            vu.execute(fx.code, PS2_VU1_CODE_SIZE, data.data(), data.size(),
+                       fx.gs, &fx.mem, 0u, 0u, 0u, 1u);
+            t.IsTrue(captured.size() == sizeof(expected) &&
+                         std::memcmp(captured.data(), expected, sizeof(expected)) == 0,
+                     "the final byte of the qword must wrap to the data buffer start");
+        });
+
         tc.Run("XGKICK observes stores committed before a future PATH1 qword", [](TestCase &t)
         {
             PS2Memory mem;
@@ -1747,6 +1850,35 @@ void register_ps2_vu1_tests()
                      "MAC flags should describe the final accumulated value");
             t.Equals(vu1.state().status, 0x140u,
                      "the underflowing product should set sticky Z and U");
+        });
+
+        tc.Run("FMAC product sticky flags retain sign and range boundaries", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+            writeVuInstructionPair(fx.code, 0u, 0u, makeVuUpper(0x29u, 0x8u, 2u, 1u, 3u));
+            struct Input { float left, right, acc; uint32_t status; };
+            const float minimum = std::numeric_limits<float>::min();
+            const float maximum = std::numeric_limits<float>::max();
+            const Input inputs[] = {
+                {2.0f, 3.0f, 1.0f, 0u},
+                {-2.0f, 3.0f, 10.0f, 0x80u},
+                {0.0f, 3.0f, 1.0f, 0x40u},
+                {-0.0f, 3.0f, 1.0f, 0xc0u},
+                {minimum, 0.5f, 1.0f, 0x140u},
+                {maximum, 2.0f, -maximum, 0x200u},
+            };
+            for (const auto &input : inputs)
+            {
+                VU1Interpreter vu1;
+                vu1.state().vf[1][0] = input.left;
+                vu1.state().vf[2][0] = input.right;
+                vu1.state().acc[0] = input.acc;
+                vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                            fx.gs, &fx.mem, 0u, 0u, 0u, 5u);
+                t.Equals(vu1.state().status, input.status,
+                         "a normal accumulated result must retain exceptional product conditions");
+            }
         });
 
         tc.Run("reserved opcodes stop before executing or corrupting state", [](TestCase &t)

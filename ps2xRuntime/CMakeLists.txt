@@ -402,6 +402,28 @@ set_source_files_properties(
     src/lib/vu/ps2_vu1_lower.cpp
     PROPERTIES UNITY_GROUP vu1)
 
+set(PS2X_VU_AOT_IMAGES "" CACHE STRING "Local VU code images or block profiles to compile; never distributed")
+option(PS2X_VU_AOT_DEBUG_INFO "Include expanded VU AOT debug scopes (slow to compile)" OFF)
+if(PS2X_VU_AOT_IMAGES)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    set(PS2X_VU_AOT_INCLUDE "${CMAKE_CURRENT_BINARY_DIR}/generated/vu_aot_blocks.inc")
+    add_custom_command(
+        OUTPUT "${PS2X_VU_AOT_INCLUDE}"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../tools/compile_vu_blocks.py"
+                --output "${PS2X_VU_AOT_INCLUDE}" ${PS2X_VU_AOT_IMAGES}
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../tools/compile_vu_blocks.py" ${PS2X_VU_AOT_IMAGES}
+        VERBATIM)
+    add_custom_target(ps2_vu_aot DEPENDS "${PS2X_VU_AOT_INCLUDE}")
+    add_dependencies(ps2_runtime ps2_vu_aot)
+    target_compile_definitions(ps2_runtime PRIVATE PS2X_VU_AOT_INCLUDE="${PS2X_VU_AOT_INCLUDE}")
+    # Thousands of specialized inline scopes otherwise dominate compile time.
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU" AND NOT PS2X_VU_AOT_DEBUG_INFO)
+        set_source_files_properties(
+            "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/ps2_runtime.dir/Unity/unity_vu1_cxx.cxx"
+            PROPERTIES COMPILE_OPTIONS "-g0")
+    endif()
+endif()
+
 if(PS2X_ENABLE_RUNTIME_LOGS)
     target_compile_definitions(ps2_runtime PUBLIC
         PS2_RUNTIME_LOGS=1

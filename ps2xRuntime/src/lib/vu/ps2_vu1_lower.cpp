@@ -71,6 +71,11 @@ namespace
 // ============================================================================
 void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSize, GS &gs, PS2Memory *memory, uint32_t upperInstr)
 {
+    execLowerInline(instr, vuData, dataSize, gs, memory, upperInstr);
+}
+
+PS2_VU_FORCE_INLINE void VU1Interpreter::execLowerInline(uint32_t instr, uint8_t *vuData, uint32_t dataSize, GS &gs, PS2Memory *memory, uint32_t upperInstr)
+{
     (void)upperInstr;
     if (instr == 0x00000000 || instr == 0x8000033C) // NOP
         return;

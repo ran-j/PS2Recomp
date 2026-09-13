@@ -23,6 +23,11 @@ namespace
 // ============================================================================
 void VU1Interpreter::execUpper(uint32_t instr)
 {
+    execUpperInline(instr);
+}
+
+PS2_VU_FORCE_INLINE void VU1Interpreter::execUpperInline(uint32_t instr)
+{
     m_currentUpperInstruction = instr;
     uint8_t dest = DEST(instr);
     uint8_t ft = FT(instr);
