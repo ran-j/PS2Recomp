@@ -403,15 +403,18 @@ set_source_files_properties(
     PROPERTIES UNITY_GROUP vu1)
 
 set(PS2X_VU_AOT_IMAGES "" CACHE STRING "Local VU code images or block profiles to compile; never distributed")
+set(PS2X_VU_AOT_PAIR_IMAGES "" CACHE STRING "Additional local VU inputs to compile as reusable individual pairs")
 option(PS2X_VU_AOT_DEBUG_INFO "Include expanded VU AOT debug scopes (slow to compile)" OFF)
-if(PS2X_VU_AOT_IMAGES)
+if(PS2X_VU_AOT_IMAGES OR PS2X_VU_AOT_PAIR_IMAGES)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     set(PS2X_VU_AOT_INCLUDE "${CMAKE_CURRENT_BINARY_DIR}/generated/vu_aot_blocks.inc")
     add_custom_command(
         OUTPUT "${PS2X_VU_AOT_INCLUDE}"
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../tools/compile_vu_blocks.py"
-                --output "${PS2X_VU_AOT_INCLUDE}" ${PS2X_VU_AOT_IMAGES}
-        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../tools/compile_vu_blocks.py" ${PS2X_VU_AOT_IMAGES}
+                --output "${PS2X_VU_AOT_INCLUDE}" --pair-images ${PS2X_VU_AOT_PAIR_IMAGES}
+                -- ${PS2X_VU_AOT_IMAGES}
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../tools/compile_vu_blocks.py"
+                ${PS2X_VU_AOT_IMAGES} ${PS2X_VU_AOT_PAIR_IMAGES}
         VERBATIM)
     add_custom_target(ps2_vu_aot DEPENDS "${PS2X_VU_AOT_INCLUDE}")
     add_dependencies(ps2_runtime ps2_vu_aot)

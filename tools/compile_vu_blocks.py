@@ -6,13 +6,9 @@ import struct
 from pathlib import Path
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("images", type=Path, nargs="+")
-    args = parser.parse_args()
+def read_blocks(paths, parser):
     blocks = set()
-    for path in args.images:
+    for path in paths:
         data = path.read_bytes()
         if data.startswith(b"VU-BLOCKS 1\n"):
             for line in data.decode("ascii").splitlines()[1:]:
@@ -36,15 +32,28 @@ def main():
             block = tuple(words[index:index + 4])
             if any(block):
                 blocks.add((block, unit))
-    if not blocks:
+    return blocks
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--pair-images", type=Path, nargs="*", default=[],
+                        help="Compile individual pairs from these images or profiles")
+    parser.add_argument("images", type=Path, nargs="*")
+    args = parser.parse_args()
+    blocks = read_blocks(args.images, parser)
+    pair_blocks = blocks | read_blocks(args.pair_images, parser)
+    pairs = {((word,), unit) for block, unit in pair_blocks for word in block}
+    if not pairs:
         parser.error("no nonempty microcode blocks")
     lines = ["// Generated from local microcode; do not distribute game data."]
-    for block, unit in sorted(blocks):
+    for block, unit in sorted(blocks | pairs):
         values = ", ".join(f"0x{word:016x}ull" for word in block)
-        lines.append(f"{{Unit::VU{unit}, {{{values}}}, &runCompiledBlock<Unit::VU{unit}, {values}>}},")
+        lines.append(f"{{Unit::VU{unit}, {{{values}}}, &runCompiledBlock<Unit::VU{unit}, {values}>, {len(block) * 8}u}},")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text("\n".join(lines) + "\n")
-    print(f"Compiled VU input: {len(args.images)} images, {len(blocks)} distinct four-pair blocks")
+    print(f"Compiled VU input: {len(blocks)} four-pair blocks, {len(pairs)} individual pairs")
 
 
 if __name__ == "__main__":

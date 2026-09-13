@@ -14,12 +14,65 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <set>
+#include <tuple>
 #include <ps2_log.h>
 
 namespace
 {
+    void captureProgramStart(const char *directory, unsigned unit,
+                             const uint8_t *code, uint32_t codeSize, uint64_t generation,
+                             const uint8_t *data, uint32_t dataSize, const VU1State &state)
+    {
+        static std::mutex mutex;
+        const std::lock_guard lock(mutex);
+        static unsigned captured = 0;
+        if (captured >= 256u)
+            return;
+        struct CodeHash {
+            const uint8_t *code = nullptr;
+            uint64_t generation = 0;
+            uint64_t hash = 0;
+        };
+        static std::array<CodeHash, 2> hashes;
+        auto &cached = hashes[unit];
+        if (cached.code != code || cached.generation != generation) {
+            cached = {code, generation, 14695981039346656037ull};
+            for (uint32_t i = 0; i < codeSize; ++i)
+                cached.hash = (cached.hash ^ code[i]) * 1099511628211ull;
+        }
+        static std::map<std::tuple<unsigned, uint32_t, uint64_t>, uint64_t> calls;
+        const uint64_t call = ++calls[{unit, state.pc, cached.hash}];
+        if ((call & (call - 1u)) != 0u)
+            return;
+        std::error_code error;
+        std::filesystem::create_directories(directory, error);
+        if (error) {
+            std::fprintf(stderr, "VU capture directory: %s\n", error.message().c_str());
+            captured = 256u;
+            return;
+        }
+        const std::string stem = std::string(directory) + "/vu" + std::to_string(unit) +
+            "-pc" + std::to_string(state.pc) + "-call" + std::to_string(call) +
+            "-code" + std::to_string(cached.hash);
+        VU1State initial = state;
+        initial.cycles = 0u;
+        const auto write = [&](const char *suffix, const void *bytes, size_t size) {
+            std::ofstream output(stem + suffix, std::ios::binary);
+            output.write(static_cast<const char *>(bytes), static_cast<std::streamsize>(size));
+            return static_cast<bool>(output);
+        };
+        if (!write(".code", code, codeSize) || !write(".data", data, dataSize) ||
+            !write(".state", &initial, sizeof(initial))) {
+            std::fprintf(stderr, "Unable to write VU capture %s\n", stem.c_str());
+            captured = 256u;
+            return;
+        }
+        ++captured;
+    }
+
     void recordUncompiledBlock(const char *path, unsigned unit, const uint8_t *code)
     {
         static std::mutex mutex;
@@ -1695,6 +1748,14 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
     m_state.vf[0][1] = 0.0f;
     m_state.vf[0][2] = 0.0f;
     m_state.vf[0][3] = 1.0f;
+    static const char *captureDirectory = std::getenv("PS2_VU_CAPTURE_DIR");
+    if (captureDirectory && *captureDirectory && memory) {
+        // execute() has an empty pipeline; resumed states need a fuller snapshot.
+        const uint64_t generation = m_unit == Unit::VU1
+            ? memory->getVU1CodeGeneration() : memory->getVU0CodeGeneration();
+        captureProgramStart(captureDirectory, m_unit == Unit::VU1 ? 1u : 0u,
+                            vuCode, codeSize, generation, vuData, dataSize, m_state);
+    }
     run(vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles);
 }
 
@@ -1956,19 +2017,32 @@ VU1Interpreter::CompiledBlock VU1Interpreter::findCompiledBlock(
         Unit unit;
         std::array<uint64_t, 4> words;
         CompiledBlock run;
+        uint32_t bytes;
     };
     static const Entry entries[] = {
 #include PS2X_VU_AOT_INCLUDE
     };
-    if (size < 32u)
+    if (size < 8u)
         return nullptr;
+    static const bool pairsOnly = [] {
+        const char *mode = std::getenv("PS2_VU_EXECUTION");
+        return mode && std::strcmp(mode, "pairs") == 0;
+    }();
     uint64_t first;
     std::memcpy(&first, code, sizeof(first));
     const auto *entry = std::lower_bound(std::begin(entries), std::end(entries), first,
         [](const Entry &entry, uint64_t word) { return entry.words[0] < word; });
-    for (; entry != std::end(entries) && entry->words[0] == first; ++entry)
-        if (entry->unit == unit && std::memcmp(code, entry->words.data(), 32u) == 0)
+    CompiledBlock pair = nullptr;
+    for (; entry != std::end(entries) && entry->words[0] == first; ++entry) {
+        if (entry->unit != unit)
+            continue;
+        if (entry->bytes == 8u)
+            pair = entry->run;
+        else if (!pairsOnly && size >= entry->bytes &&
+                 std::memcmp(code, entry->words.data(), entry->bytes) == 0)
             return entry->run;
+    }
+    return pair;
 #endif
     return nullptr;
 }
