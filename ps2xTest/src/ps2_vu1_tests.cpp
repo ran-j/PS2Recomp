@@ -1688,6 +1688,42 @@ void register_ps2_vu1_tests()
                      "underflow should flush to signed zero before writeback");
         });
 
+        tc.Run("FMAC normal results and finite overflow keep distinct flags", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+            struct Case { uint8_t op; float left, right, result; uint32_t flags; };
+            const float maximum = std::numeric_limits<float>::max();
+            const float minimum = std::numeric_limits<float>::min();
+            const Case cases[] = {
+                {0x28u, 1.25f, 2.5f, 3.75f, 0u},
+                {0x2cu, 1.25f, 2.5f, -1.25f, 2u},
+                {0x2au, -1.25f, 2.5f, -3.125f, 2u},
+                {0x2au, minimum, 1.0f, minimum, 0u},
+                {0x2au, maximum, 1.0f, maximum, 0u},
+                {0x28u, maximum, maximum, maximum, 8u},
+                {0x2cu, -maximum, maximum, -maximum, 10u},
+                {0x2au, -minimum, 0.5f, -0.0f, 7u},
+            };
+            for (const auto &entry : cases)
+            {
+                writeVuInstructionPair(fx.code, 0u, 0u,
+                                       makeVuUpper(entry.op, 0x8u, 2u, 1u, 3u));
+                VU1Interpreter vu1;
+                vu1.state().vf[1][0] = entry.left;
+                vu1.state().vf[2][0] = entry.right;
+                vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
+                            fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
+                            0u, 0u, 0u, 5u);
+                t.Equals(vu1.state().vf[3][0], entry.result,
+                         "arithmetic must retain toward-zero saturation and signed underflow");
+                t.Equals(std::signbit(vu1.state().vf[3][0]), std::signbit(entry.result),
+                         "the sign of an underflowed result must survive");
+                t.Equals(vu1.state().status, entry.flags | (entry.flags << 6u),
+                         "normal finite values and overflow saturated to finite values differ");
+            }
+        });
+
         tc.Run("FMAC product contributes Z/S/U/O sticky flags", [](TestCase &t)
         {
             Vu1Fixture fx;

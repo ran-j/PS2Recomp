@@ -211,11 +211,28 @@ void VU1Interpreter::applyDestAcc(const float *result, uint8_t dest)
 void VU1Interpreter::normalizeFmacResult(float *result, uint8_t dest,
                                          uint8_t laneFlags[4])
 {
+    const uint32_t upper = m_currentUpperInstruction;
+    const uint32_t op = (upper & 0x3fu) < 0x3cu
+        ? upper & 0x3fu : (upper & 3u) | ((upper >> 4u) & 0x7cu);
+    const bool simpleArithmetic = op <= 7u || (op >= 0x18u && op <= 0x1cu) ||
+        op == 0x1eu || op == 0x20u || op == 0x22u || op == 0x24u ||
+        op == 0x26u || op == 0x28u || op == 0x2au || op == 0x2cu;
     for (uint32_t component = 0; component < 4u; ++component)
     {
         laneFlags[component] = 0u;
         if ((dest & laneForComponent(component)) == 0u)
             continue;
+
+        // A normal ADD/SUB/MUL result has only a sign flag. Keep exact checks
+        // at both range boundaries, including overflow rounded to FLT_MAX.
+        uint32_t bits;
+        std::memcpy(&bits, &result[component], sizeof(bits));
+        const uint32_t magnitude = bits & 0x7fffffffu;
+        if (simpleArithmetic && magnitude >= 0x00800000u && magnitude < 0x7f7fffffu)
+        {
+            laneFlags[component] = static_cast<uint8_t>((bits >> 30u) & 2u);
+            continue;
+        }
 
         long double exactResult = 0.0L;
         if (calculateFmacExactResult(component, exactResult))
