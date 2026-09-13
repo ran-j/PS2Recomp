@@ -394,6 +394,14 @@ add_library(ps2_runtime STATIC
     src/lib/games_database.cpp
 )
 
+# Keep the VU execution loop and its arithmetic helpers visible to the optimizer.
+set_target_properties(ps2_runtime PROPERTIES UNITY_BUILD ON UNITY_BUILD_MODE GROUP)
+set_source_files_properties(
+    src/lib/vu/ps2_vu1_core.cpp
+    src/lib/vu/ps2_vu1_upper.cpp
+    src/lib/vu/ps2_vu1_lower.cpp
+    PROPERTIES UNITY_GROUP vu1)
+
 if(PS2X_ENABLE_RUNTIME_LOGS)
     target_compile_definitions(ps2_runtime PUBLIC
         PS2_RUNTIME_LOGS=1

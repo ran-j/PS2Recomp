@@ -30,6 +30,14 @@ void VU1Interpreter::execUpper(uint32_t instr)
     uint8_t fd = FD(instr);
     uint8_t op = instr & 0x3F;
 
+    // Lower-pipeline work often pairs with an upper NOP; it has no operands.
+    if (op >= 0x3Cu)
+    {
+        const uint8_t special = (instr & 3u) | ((instr >> 4) & 0x7Cu);
+        if (special == 0x2Fu || special == 0x30u)
+            return;
+    }
+
     float *vd = m_state.vf[fd];
     float normalizedVs[4];
     float normalizedVt[4];
