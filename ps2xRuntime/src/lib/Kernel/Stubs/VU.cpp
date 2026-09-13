@@ -168,21 +168,43 @@ namespace ps2_stubs
             out[3] = fullFtoi4 ? static_cast<int32_t>(t[3] * 16.0f) : static_cast<int32_t>(t[3]);
         }
 
-        // Guard-band proxy for the COP2 sticky clip flags: nonzero => the
-        // vertex is offscreen. Not the hardware per-plane flag layout.
-        constexpr float kScreenClipGuard = 4096.0f;
         int32_t screenClipCode(const float (&v)[4])
         {
+            // The SDK returns sticky Z/S from (x,y,w)-0 and 4096-(x,y).
+            // Inspecting bits also preserves VU signed-zero/denormal behavior.
             int32_t code = 0;
-            if (v[0] > kScreenClipGuard)
-                code |= 0x1;
-            if (v[0] < -kScreenClipGuard)
-                code |= 0x2;
-            if (v[1] > kScreenClipGuard)
-                code |= 0x4;
-            if (v[1] < -kScreenClipGuard)
-                code |= 0x8;
+            for (unsigned lane : {0u, 1u, 3u})
+            {
+                uint32_t bits;
+                std::memcpy(&bits, &v[lane], sizeof(bits));
+                const uint32_t magnitude = bits & 0x7fffffffu;
+                if (magnitude < 0x00800000u)
+                    code |= 0x40;
+                if (bits & 0x80000000u)
+                    code |= 0x80;
+                else if (lane != 3u)
+                {
+                    if (magnitude == 0x45800000u)
+                        code |= 0x40;
+                    else if (magnitude > 0x45800000u)
+                        code |= 0x80;
+                }
+            }
             return code;
+        }
+
+        void traceScreenClip(const R5900Context *ctx, const float (&v)[4], int32_t code)
+        {
+            static const bool enabled = std::getenv("PS2_VU_TRACE_SCREEN_CLIP") != nullptr;
+            if (!enabled)
+                return;
+            static uint64_t calls = 0, rejected = 0;
+            ++calls;
+            rejected += code != 0;
+            if (calls <= 16 || (calls & (calls - 1)) == 0)
+                std::fprintf(stderr, "[vu-screen-clip] calls=%llu rejected=%llu ra=%08x v=(%g,%g,%g,%g) flags=%02x\n",
+                             static_cast<unsigned long long>(calls), static_cast<unsigned long long>(rejected),
+                             getRegU32(ctx, 31), v[0], v[1], v[2], v[3], code);
         }
     }
 
@@ -340,6 +362,7 @@ namespace ps2_stubs
         if (readVuVec4f(rdram, vAddr, v))
         {
             code = screenClipCode(v);
+            traceScreenClip(ctx, v, code);
         }
         setReturnS32(ctx, code);
     }
@@ -354,14 +377,17 @@ namespace ps2_stubs
         if (readVuVec4f(rdram, v0Addr, v0))
         {
             code |= screenClipCode(v0);
+            traceScreenClip(ctx, v0, screenClipCode(v0));
         }
         if (readVuVec4f(rdram, v1Addr, v1))
         {
             code |= screenClipCode(v1);
+            traceScreenClip(ctx, v1, screenClipCode(v1));
         }
         if (readVuVec4f(rdram, v2Addr, v2))
         {
             code |= screenClipCode(v2);
+            traceScreenClip(ctx, v2, screenClipCode(v2));
         }
         setReturnS32(ctx, code);
     }

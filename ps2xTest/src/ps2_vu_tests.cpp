@@ -2,8 +2,11 @@
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_memory.h"
+#include "runtime/ps2_vu1.h"
+#include "runtime/gs/gs_frontend.h"
 #include "Kernel/Stubs/VU.h"
 
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -864,7 +867,7 @@ void register_ps2_vu_tests()
         tc.Run("ClipScreen_inside_zero", [](TestCase &t)
         {
             VuEnv env;
-            writeVec4(env, kA, 100.0f, 100.0f, 0.0f, 0.0f);
+            writeVec4(env, kA, 100.0f, 100.0f, 0.0f, 1.0f);
             SET_GPR_U32(&env.ctx, 4, kA);
             ps2_stubs::sceVu0ClipScreen(env.rdram.data(), &env.ctx, &env.runtime);
             t.Equals(getRegU32(&env.ctx, 2), 0u, "ClipScreen should return 0 for an in-bounds vertex");
@@ -873,28 +876,23 @@ void register_ps2_vu_tests()
         tc.Run("ClipScreen_offscreen_nonzero", [](TestCase &t)
         {
             VuEnv env;
-            writeVec4(env, kA, 5000.0f, 100.0f, 0.0f, 0.0f);
+            writeVec4(env, kA, 5000.0f, 100.0f, 0.0f, 1.0f);
             SET_GPR_U32(&env.ctx, 4, kA);
             ps2_stubs::sceVu0ClipScreen(env.rdram.data(), &env.ctx, &env.runtime);
-            t.IsTrue(getRegU32(&env.ctx, 2) != 0u, "ClipScreen should return nonzero when x exceeds the guard band");
+            t.Equals(getRegU32(&env.ctx, 2), 0x80u, "ClipScreen should return sticky sign when x exceeds 4096");
         });
 
         tc.Run("ClipScreen_negx_nonzero", [](TestCase &t)
         {
-            // Pins the negative-x guard-band clause (v[0] < -kScreenClipGuard => 0x2),
-            // the mirror of ClipScreen_offscreen_nonzero's +x clause. Without this
-            // case, deleting the negative-x clause leaves the suite green.
             VuEnv env;
-            writeVec4(env, kA, -5000.0f, 100.0f, 0.0f, 0.0f);
+            writeVec4(env, kA, -1.0f, 100.0f, 0.0f, 1.0f);
             SET_GPR_U32(&env.ctx, 4, kA);
             ps2_stubs::sceVu0ClipScreen(env.rdram.data(), &env.ctx, &env.runtime);
-            t.IsTrue(getRegU32(&env.ctx, 2) != 0u, "ClipScreen should return nonzero when x is below the negative guard band");
+            t.Equals(getRegU32(&env.ctx, 2), 0x80u, "ClipScreen should reject every negative x");
         });
 
         tc.Run("ClipScreen3_ors_three", [](TestCase &t)
         {
-            // Both offscreen vertices trip the y-guard clauses (not x) so this
-            // test does not overlap ClipScreen_offscreen_nonzero's x-guard mutation.
             VuEnv env;
             writeVec4(env, kA, 0.0f, 5000.0f, 0.0f, 0.0f);
             writeVec4(env, kB, 0.0f, 0.0f, 0.0f, 0.0f);
@@ -903,7 +901,52 @@ void register_ps2_vu_tests()
             SET_GPR_U32(&env.ctx, 5, kB);
             SET_GPR_U32(&env.ctx, 6, kC);
             ps2_stubs::sceVu0ClipScreen3(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegU32(&env.ctx, 2), 0xCu, "ClipScreen3 should OR the guard-band codes across all 3 vertices");
+            t.Equals(getRegU32(&env.ctx, 2), 0xC0u, "ClipScreen3 should accumulate sticky zero and sign across all 3 vertices");
+        });
+
+        tc.Run("ClipScreen_matches_VU_sticky_subtraction_flags", [](TestCase &t)
+        {
+            VuEnv env;
+            auto vu = std::make_unique<VU1Interpreter>(VU1Interpreter::Unit::VU0);
+            auto gs = std::make_unique<GS>();
+            uint32_t code[16]{};
+            uint8_t data[16]{};
+            for (unsigned pair = 0; pair < 8; ++pair)
+                code[pair * 2 + 1] = 0x800002ffu; // I-bit NOP ignores the lower word.
+            const auto sub = [](unsigned mask, unsigned fs, unsigned ft) {
+                return 0x8000002cu | (mask << 21) | (ft << 16) | (fs << 11) | (4u << 6);
+            };
+            code[1] = sub(0xdu, 1u, 2u); // x, y, w minus zero
+            code[3] = sub(0xcu, 3u, 1u); // 4096 minus x, y
+            code[13] |= 0x40000000u;
+            const uint32_t values[] = {
+                0u, 0x80000000u, 1u, 0x80000001u, 0x007fffffu, 0x807fffffu,
+                0x00800000u, 0x80800000u, 0x3f800000u, 0xbf800000u,
+                0x457fffffu, 0x45800000u, 0x45800001u, 0xc5800000u,
+                0x7f7fffffu, 0xff7fffffu, 0x7f800000u, 0xff800000u,
+                0x7fc00001u, 0xffc00001u
+            };
+            for (unsigned lane = 0; lane < 4; ++lane)
+            {
+                for (uint32_t bits : values)
+                {
+                    float v[4] = {100.0f, 200.0f, 300.0f, 1.0f};
+                    v[lane] = std::bit_cast<float>(bits);
+                    writeVec4(env, kA, v[0], v[1], v[2], v[3]);
+                    SET_GPR_U32(&env.ctx, 4, kA);
+                    ps2_stubs::sceVu0ClipScreen(env.rdram.data(), &env.ctx, &env.runtime);
+                    vu->reset();
+                    std::memcpy(vu->state().vf[1], v, sizeof(v));
+                    vu->state().vf[3][0] = vu->state().vf[3][1] = 4096.0f;
+                    vu->execute(reinterpret_cast<uint8_t *>(code), sizeof(code),
+                                data, sizeof(data), *gs, nullptr, 0, 0, 0, 64);
+                    t.Equals(getRegU32(&env.ctx, 2), vu->state().status & 0xc0u,
+                             "screen clipping lane " + std::to_string(lane) +
+                             " bits " + std::to_string(bits) + " HLE " +
+                             std::to_string(getRegU32(&env.ctx, 2)) + " VU " +
+                             std::to_string(vu->state().status & 0xc0u));
+                }
+            }
         });
 
         tc.Run("ClipAll_all_out_returns_1", [](TestCase &t)
