@@ -4,7 +4,10 @@
 #include "runtime/gs/ps2_gs_psmct32.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_vu1.h"
+#include "../../ps2xRuntime/src/lib/vu/ps2_vu1_fmac.h"
+#include "../../ps2xRuntime/src/lib/vu/ps2_vu1_fmac_neon.h"
 
+#include <cfenv>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -1880,6 +1883,207 @@ void register_ps2_vu1_tests()
                          "a normal accumulated result must retain exceptional product conditions");
             }
         });
+
+        tc.Run("FMAC product-sum fast flags require a certified normal result", [](TestCase &t)
+        {
+            const float minimum = std::numeric_limits<float>::min();
+            const float maximum = std::numeric_limits<float>::max();
+            t.IsTrue(ps2_vu_detail::normalProductSumFlags(7.0f, 2.0f, 3.0f),
+                     "ordinary matrix arithmetic should use the fast flags");
+            t.IsTrue(!ps2_vu_detail::normalProductSumFlags(minimum, minimum, 0.5f),
+                     "the minimum normal exponent requires exact underflow checks");
+            t.IsTrue(!ps2_vu_detail::normalProductSumFlags(maximum, maximum, 1.0f),
+                     "the maximum exponent requires exact overflow checks");
+            t.IsTrue(!ps2_vu_detail::normalProductSumFlags(maximum / 2.0f, maximum, 2.0f),
+                     "a clamped product followed by cancellation is not certified");
+            t.IsTrue(!ps2_vu_detail::normalProductSumFlags(0x1p-22f, 1.0f, 1.0f),
+                     "near cancellation must keep exact checks");
+            t.IsTrue(ps2_vu_detail::normalProductSumFlags(0x1p106f, 0x1p63f, 0x1p62f),
+                     "product exponent sum 379 and result exponent plus 146 are included");
+            t.IsTrue(!ps2_vu_detail::normalProductSumFlags(0x1p107f, 0x1p63f, 0x1p63f),
+                     "product exponent sum 380 retains the exact fallback");
+            t.IsTrue(!ps2_vu_detail::normalProductSumFlags(0x1p105f, 0x1p63f, 0x1p62f),
+                     "product exponent sum at result exponent plus 147 is excluded");
+            t.IsTrue(ps2_vu_detail::normalProductSumFlags(7.0f, 0.0f, maximum) &&
+                     ps2_vu_detail::normalProductSumFlags(-7.0f, maximum, -0.0f),
+                     "both signed-zero multiplicands leave a normal accumulator unchanged");
+        });
+
+        tc.Run("FMAC product-sum fast flags match exact fused and separate arithmetic", [](TestCase &t)
+        {
+            struct RestoreRounding {
+                int mode = std::fegetround();
+                ~RestoreRounding() { std::fesetround(mode); }
+            } rounding;
+            std::fesetround(FE_TOWARDZERO);
+            uint64_t randomState = 0x8467410553247782ull;
+            const auto random = [&]() {
+                randomState ^= randomState << 13u;
+                randomState ^= randomState >> 7u;
+                randomState ^= randomState << 17u;
+                return static_cast<uint32_t>(randomState);
+            };
+            const auto normalized = [](uint32_t bits) {
+                const uint32_t exponent = bits & 0x7f800000u;
+                if (exponent == 0u)
+                    bits &= 0x80000000u;
+                else if (exponent == 0x7f800000u)
+                    bits = (bits & 0x80000000u) | 0x7f7fffffu;
+                return std::bit_cast<float>(bits);
+            };
+            uint32_t accepted = 0u;
+            bool matches = true;
+            const auto check = [&](float left, float right, float acc) {
+                volatile float product = left * right;
+                const float results[] = {product + acc, std::fma(left, right, acc)};
+                const long double exact = static_cast<long double>(left) * right + acc;
+                for (const float result : results)
+                {
+                    if (!ps2_vu_detail::normalProductSumFlags(result, left, right))
+                        continue;
+                    ++accepted;
+                    matches &= std::signbit(exact) == std::signbit(result) &&
+                        std::fabs(exact) >= std::numeric_limits<float>::min() &&
+                        std::fabs(exact) <= std::numeric_limits<float>::max();
+                }
+            };
+            for (uint32_t iteration = 0u; iteration < 100000u; ++iteration)
+            {
+                const float left = normalized(random()), right = normalized(random());
+                check(left, right, normalized(random()));
+                const uint32_t oppositeProduct = std::bit_cast<uint32_t>(left * right) ^ 0x80000000u;
+                for (const int32_t offset : {-2, -1, 0, 1, 2})
+                    check(left, right, normalized(oppositeProduct + offset));
+            }
+            t.IsTrue(matches, "every accepted result must have exact normal/sign flags");
+            t.IsTrue(accepted > 100000u, "the randomized test must exercise the certified path");
+        });
+
+#if defined(__aarch64__)
+        tc.Run("SIMD product-sum values and flags match independent scalar arithmetic", [](TestCase &t)
+        {
+            struct RestoreRounding {
+                int mode = std::fegetround();
+                ~RestoreRounding() { std::fesetround(mode); }
+            } rounding;
+            std::fesetround(FE_TOWARDZERO);
+            uint64_t randomState = 0x8754617084462351ull;
+            const auto random = [&]() {
+                randomState ^= randomState << 13u;
+                randomState ^= randomState >> 7u;
+                randomState ^= randomState << 17u;
+                return static_cast<uint32_t>(randomState);
+            };
+            const auto normalized = [](uint32_t bits) {
+                const uint32_t exponent = bits & 0x7f800000u;
+                if (exponent == 0u)
+                    bits &= 0x80000000u;
+                else if (exponent == 0x7f800000u)
+                    bits = (bits & 0x80000000u) | 0x7f7fffffu;
+                return std::bit_cast<float>(bits);
+            };
+            const auto flags = [](long double exact) {
+                const auto magnitude = std::fabs(exact);
+                return (std::signbit(exact) ? 2u : 0u) |
+                    (magnitude == 0.0L ? 1u : magnitude < std::numeric_limits<float>::min() ? 5u :
+                     magnitude > std::numeric_limits<float>::max() ? 8u : 0u);
+            };
+            uint32_t accepted = 0u;
+            bool matches = true;
+            const auto check = [&]<bool subtract>(const float left[4], const float right[4],
+                                                  const float acc[4], uint8_t destination) {
+                float result[4] = {123.0f, 123.0f, 123.0f, 123.0f};
+                uint8_t laneFlags[4] = {0xff, 0xff, 0xff, 0xff};
+                uint32_t sticky = 0xfeedbeef;
+                if (!ps2_vu_detail::tryProductSumVector<subtract>(left, right, acc, destination, result, laneFlags, sticky))
+                {
+                    for (unsigned lane = 0u; lane < 4u; ++lane)
+                        matches &= result[lane] == 123.0f && laneFlags[lane] == 0xff && sticky == 0xfeedbeef;
+                    return;
+                }
+                ++accepted;
+                uint32_t expectedSticky = 0u;
+                for (unsigned lane = 0u; lane < 4u; ++lane)
+                {
+                    const float l = normalized(std::bit_cast<uint32_t>(left[lane]));
+                    const float r = normalized(std::bit_cast<uint32_t>(right[lane]));
+                    const float a = normalized(std::bit_cast<uint32_t>(acc[lane]));
+                    const float expected = std::fma(subtract ? -l : l, r, a);
+                    const long double product = static_cast<long double>(l) * r;
+                    const long double exact = subtract ? static_cast<long double>(a) - product : static_cast<long double>(a) + product;
+                    const bool active = (destination & (8u >> lane)) != 0u;
+                    matches &= std::bit_cast<uint32_t>(result[lane]) == std::bit_cast<uint32_t>(expected) &&
+                        laneFlags[lane] == (active ? flags(exact) : 0u);
+                    if (active)
+                        expectedSticky |= flags(product);
+                }
+                matches &= sticky == expectedSticky;
+            };
+            const auto checkBoth = [&](const float left[4], const float right[4], const float acc[4], uint8_t mask) {
+                check.template operator()<false>(left, right, acc, mask);
+                check.template operator()<true>(left, right, acc, mask);
+            };
+            struct GuardBoundary { float left, right, acc; bool accepted; };
+            const GuardBoundary boundaries[] = {
+                {0x1p63f, 0x1p62f, -(0x1p125f - 0x1p106f), true},
+                {0x1p63f, 0x1p62f, -(0x1p125f - 0x1p105f), false},
+                {0x1p63f, 0x1p63f, -0x1p125f, false},
+                {0.0f, std::numeric_limits<float>::max(), 7.0f, true},
+                {-0.0f, std::numeric_limits<float>::max(), -7.0f, true},
+            };
+            for (const auto &boundary : boundaries)
+            {
+                float left[4], right[4], acc[4];
+                std::fill_n(left, 4u, boundary.left);
+                std::fill_n(right, 4u, boundary.right);
+                std::fill_n(acc, 4u, boundary.acc);
+                uint32_t previous = accepted;
+                check.template operator()<false>(left, right, acc, 0xfu);
+                matches &= accepted == previous + boundary.accepted;
+                std::fill_n(acc, 4u, -boundary.acc);
+                previous = accepted;
+                check.template operator()<true>(left, right, acc, 0xfu);
+                matches &= accepted == previous + boundary.accepted;
+            }
+            for (unsigned signs = 0u; signs < 8u; ++signs)
+                for (uint8_t mask = 0u; mask < 16u; ++mask)
+                {
+                    float left[4], right[4], acc[4];
+                    for (unsigned lane = 0u; lane < 4u; ++lane)
+                    {
+                        left[lane] = std::bit_cast<float>((signs & 1u) << 31u);
+                        right[lane] = std::bit_cast<float>((signs & 2u) << 30u);
+                        acc[lane] = std::bit_cast<float>((signs & 4u) << 29u);
+                    }
+                    checkBoth(left, right, acc, mask);
+                }
+            for (uint32_t iteration = 0u; iteration < 100000u; ++iteration)
+            {
+                float left[4], right[4], acc[4];
+                for (unsigned lane = 0u; lane < 4u; ++lane)
+                {
+                    uint32_t l = random(), r = random(), a = random();
+                    if (iteration % 3u == 0u)
+                    {
+                        l = (l & 0x807fffffu) | ((115u + l % 24u) << 23u);
+                        r = (r & 0x807fffffu) | ((115u + r % 24u) << 23u);
+                        a = (a & 0x807fffffu) | ((115u + a % 24u) << 23u);
+                    }
+                    left[lane] = std::bit_cast<float>(l);
+                    right[lane] = std::bit_cast<float>(r);
+                    acc[lane] = std::bit_cast<float>(a);
+                    if (iteration % 3u == 2u)
+                    {
+                        const float product = normalized(l) * normalized(r);
+                        acc[lane] = normalized((std::bit_cast<uint32_t>(product) ^ 0x80000000u) + iteration % 5u - 2u);
+                    }
+                }
+                checkBoth(left, right, acc, static_cast<uint8_t>(random() & 15u));
+            }
+            t.IsTrue(matches, "accepted vectors must match exact flags and scalar fused values; fallback must leave outputs unchanged");
+            t.IsTrue(accepted > 100000u, "the test must exercise the vector path across destination masks");
+        });
+#endif
 
         tc.Run("reserved opcodes stop before executing or corrupting state", [](TestCase &t)
         {

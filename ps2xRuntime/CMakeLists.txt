@@ -408,24 +408,42 @@ set_source_files_properties(
 set(PS2X_VU_AOT_IMAGES "" CACHE STRING "Local VU code images or block profiles to compile; never distributed")
 set(PS2X_VU_AOT_PAIR_IMAGES "" CACHE STRING "Additional local VU inputs to compile as reusable individual pairs")
 option(PS2X_VU_AOT_DEBUG_INFO "Include expanded VU AOT debug scopes (slow to compile)" OFF)
+set(PS2X_VU_AOT_SHARDS "8" CACHE STRING "Number of independent VU AOT compilation units")
 if(PS2X_VU_AOT_IMAGES OR PS2X_VU_AOT_PAIR_IMAGES)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    if(NOT PS2X_VU_AOT_SHARDS MATCHES "^[1-9][0-9]*$")
+        message(FATAL_ERROR "PS2X_VU_AOT_SHARDS must be a positive integer")
+    endif()
     set(PS2X_VU_AOT_INCLUDE "${CMAKE_CURRENT_BINARY_DIR}/generated/vu_aot_blocks.inc")
+    set(PS2X_VU_AOT_EXTERN_INCLUDE "${CMAKE_CURRENT_BINARY_DIR}/generated/vu_aot_blocks_extern.inc")
+    set(PS2X_VU_AOT_SOURCES)
+    math(EXPR PS2X_VU_AOT_LAST_SHARD "${PS2X_VU_AOT_SHARDS} - 1")
+    foreach(SHARD RANGE ${PS2X_VU_AOT_LAST_SHARD})
+        list(APPEND PS2X_VU_AOT_SOURCES "${CMAKE_CURRENT_BINARY_DIR}/generated/vu_aot_blocks_${SHARD}.cpp")
+    endforeach()
     add_custom_command(
-        OUTPUT "${PS2X_VU_AOT_INCLUDE}"
+        OUTPUT "${PS2X_VU_AOT_INCLUDE}" "${PS2X_VU_AOT_EXTERN_INCLUDE}" ${PS2X_VU_AOT_SOURCES}
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../tools/compile_vu_blocks.py"
-                --output "${PS2X_VU_AOT_INCLUDE}" --pair-images ${PS2X_VU_AOT_PAIR_IMAGES}
+                --output "${PS2X_VU_AOT_INCLUDE}" --shards ${PS2X_VU_AOT_SHARDS}
+                --pair-images ${PS2X_VU_AOT_PAIR_IMAGES}
                 -- ${PS2X_VU_AOT_IMAGES}
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../tools/compile_vu_blocks.py"
                 ${PS2X_VU_AOT_IMAGES} ${PS2X_VU_AOT_PAIR_IMAGES}
         VERBATIM)
-    add_custom_target(ps2_vu_aot DEPENDS "${PS2X_VU_AOT_INCLUDE}")
+    add_custom_target(ps2_vu_aot DEPENDS "${PS2X_VU_AOT_INCLUDE}" "${PS2X_VU_AOT_EXTERN_INCLUDE}" ${PS2X_VU_AOT_SOURCES})
     add_dependencies(ps2_runtime ps2_vu_aot)
-    target_compile_definitions(ps2_runtime PRIVATE PS2X_VU_AOT_INCLUDE="${PS2X_VU_AOT_INCLUDE}")
+    target_sources(ps2_runtime PRIVATE ${PS2X_VU_AOT_SOURCES})
+    target_compile_definitions(ps2_runtime PRIVATE
+        PS2X_VU_AOT_INCLUDE="${PS2X_VU_AOT_INCLUDE}"
+        PS2X_VU_AOT_EXTERN_INCLUDE="${PS2X_VU_AOT_EXTERN_INCLUDE}")
+    set_source_files_properties(${PS2X_VU_AOT_SOURCES} PROPERTIES
+        SKIP_UNITY_BUILD_INCLUSION ON
+        INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/vu")
     # Thousands of specialized inline scopes otherwise dominate compile time.
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU" AND NOT PS2X_VU_AOT_DEBUG_INFO)
         set_source_files_properties(
             "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/ps2_runtime.dir/Unity/unity_vu1_cxx.cxx"
+            ${PS2X_VU_AOT_SOURCES}
             PROPERTIES COMPILE_OPTIONS "-g0")
     endif()
 endif()

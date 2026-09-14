@@ -38,21 +38,36 @@ def read_blocks(paths, parser):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--shards", type=int, default=0,
+                        help="Emit this many independent native instantiation sources")
     parser.add_argument("--pair-images", type=Path, nargs="*", default=[],
                         help="Compile individual pairs from these images or profiles")
     parser.add_argument("images", type=Path, nargs="*")
     args = parser.parse_args()
+    if args.shards < 0:
+        parser.error("--shards must be nonnegative")
     blocks = read_blocks(args.images, parser)
     pair_blocks = blocks | read_blocks(args.pair_images, parser)
     pairs = {((word,), unit) for block, unit in pair_blocks for word in block}
     if not pairs:
         parser.error("no nonempty microcode blocks")
     lines = ["// Generated from local microcode; do not distribute game data."]
-    for block, unit in sorted(blocks | pairs):
+    externs = [lines[0]]
+    shards = [[lines[0], '#include "ps2_vu1_exec.inl"'] for _ in range(args.shards)]
+    for index, (block, unit) in enumerate(sorted(blocks | pairs)):
         values = ", ".join(f"0x{word:016x}ull" for word in block)
         lines.append(f"{{Unit::VU{unit}, {{{values}}}, &runCompiledBlock<Unit::VU{unit}, {values}>, {len(block) * 8}u}},")
+        if args.shards:
+            instance = (f"bool VU1Interpreter::runCompiledBlock<VU1Interpreter::Unit::VU{unit}, {values}>"
+                        "(VU1Interpreter &, uint64_t);")
+            externs.append(f"extern template {instance}")
+            shards[index % args.shards].append(f"template {instance}")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text("\n".join(lines) + "\n")
+    if args.shards:
+        args.output.with_name(f"{args.output.stem}_extern.inc").write_text("\n".join(externs) + "\n")
+        for index, source in enumerate(shards):
+            args.output.with_name(f"{args.output.stem}_{index}.cpp").write_text("\n".join(source) + "\n")
     print(f"Compiled VU input: {len(blocks)} four-pair blocks, {len(pairs)} individual pairs")
 
 
