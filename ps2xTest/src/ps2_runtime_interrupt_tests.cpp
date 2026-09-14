@@ -13,6 +13,10 @@
 
 using namespace ps2_syscalls;
 
+void ps2SetGuestReturnObserver(
+    uint32_t sourcePc, uint32_t targetPc,
+    void (*observer)(uint8_t *, const R5900Context *, PS2Runtime *)) noexcept;
+
 namespace
 {
     constexpr int KE_OK = 0;
@@ -46,6 +50,19 @@ namespace
     };
 
     std::atomic<uint32_t> g_lastIntcArg{0u};
+    uint32_t g_observedReturns = 0u;
+    uint32_t g_observedContinuations = 0u;
+
+    void observeGuestReturn(uint8_t *, const R5900Context *, PS2Runtime *)
+    {
+        ++g_observedReturns;
+    }
+
+    void observedContinuation(uint8_t *, R5900Context *, PS2Runtime *)
+    {
+        ++g_observedContinuations;
+    }
+
     constexpr uint32_t kIdleVSyncWaitPc = 0x00160000u;
     constexpr uint32_t kVSyncWaitPc = 0x00160100u;
     constexpr uint32_t kVSyncResumePc = 0x00160110u;
@@ -315,6 +332,43 @@ void register_ps2_runtime_interrupt_tests()
 {
     MiniTest::Case("PS2RuntimeInterrupt", [](TestCase &tc)
     {
+        tc.Run("filtered return observer counts a yielding return once", [](TestCase &t)
+        {
+            TestEnv env;
+            env.runtime.memory().initialize();
+            constexpr uint32_t source = 0x180000u;
+            constexpr uint32_t target = 0x180100u;
+            env.runtime.registerFunction(target, observedContinuation);
+            env.runtime.registerFunction(target + 4u, observedContinuation);
+            R5900Context ctx{};
+            g_observedReturns = g_observedContinuations = 0u;
+            ps2SetGuestReturnObserver(source, target, observeGuestReturn);
+            const auto branch = [&](uint32_t from, uint32_t to, PS2Runtime::GuestBranchKind kind)
+            {
+                return env.runtime.dispatchGuestBranch(env.rdram.data(), &ctx, to, from, 0u, kind, "test");
+            };
+
+            branch(source + 4u, target, PS2Runtime::GuestBranchKind::Return);
+            branch(source, target + 4u, PS2Runtime::GuestBranchKind::Return);
+            branch(source, target, PS2Runtime::GuestBranchKind::DirectJump);
+            t.Equals(g_observedReturns, 0u, "source, target and return kind must all match");
+            branch(source, target, PS2Runtime::GuestBranchKind::Return);
+            t.Equals(g_observedReturns, 1u, "matching return must be observed");
+
+            env.runtime.eeScheduler().postEvent(EeEvent{EeEventType::ExternalWake, 1u, 0u});
+            t.IsFalse(branch(source, target, PS2Runtime::GuestBranchKind::Return),
+                      "pending checkpoint should yield to the continuation");
+            t.Equals(ctx.pc, target, "yield must preserve the return destination");
+            t.Equals(g_observedReturns, 2u, "return must be counted before the checkpoint yields");
+            env.runtime.lookupFunction(target)(env.rdram.data(), &ctx, &env.runtime);
+            t.Equals(g_observedContinuations, 1u, "continuation should execute once");
+            t.Equals(g_observedReturns, 2u, "resuming the continuation must not count the return again");
+
+            ps2SetGuestReturnObserver(0u, 0u, nullptr);
+            branch(source, target, PS2Runtime::GuestBranchKind::Return);
+            t.Equals(g_observedReturns, 2u, "disabled observer must not run");
+        });
+
         tc.Run("negative interrupt-safe EE syscall ids dispatch", [](TestCase &t)
         {
             TestEnv env;

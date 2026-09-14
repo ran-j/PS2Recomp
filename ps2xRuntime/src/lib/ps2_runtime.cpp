@@ -34,6 +34,21 @@ namespace ps2_stubs
     void resetSifState();
 }
 
+// Optional executor-thread diagnostic. Configure before starting guest execution;
+// keeping this declaration source-local avoids rebuilding the generated corpus.
+using Ps2GuestReturnObserver = void (*)(uint8_t *, const R5900Context *, PS2Runtime *);
+static uint32_t s_observedReturnSource = 0u;
+static uint32_t s_observedReturnTarget = 0u;
+static Ps2GuestReturnObserver s_guestReturnObserver = nullptr;
+
+void ps2SetGuestReturnObserver(uint32_t sourcePc, uint32_t targetPc,
+                              Ps2GuestReturnObserver observer) noexcept
+{
+    s_observedReturnSource = sourcePc;
+    s_observedReturnTarget = targetPc;
+    s_guestReturnObserver = observer;
+}
+
 #define ELF_MAGIC 0x464C457F // "\x7FELF" in little endian
 #define ET_EXEC 2            // Executable file
 #define EM_MIPS 8            // MIPS architecture
@@ -1413,6 +1428,14 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
 {
     ctx->pc = targetPc;
     const bool isCall = (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall);
+
+    if (sourcePc == s_observedReturnSource && targetPc == s_observedReturnTarget &&
+        kind == GuestBranchKind::Return && s_guestReturnObserver != nullptr)
+    {
+        // The generated JR has executed, including its delay slot. Observe it
+        // before a safe-point yield can transfer control to the continuation.
+        s_guestReturnObserver(rdram, ctx, this);
+    }
 
     // Every inter-function transfer is also a deterministic EE safe point.
     // Backward edges inside generated functions use eeCheckpointDue(), while
