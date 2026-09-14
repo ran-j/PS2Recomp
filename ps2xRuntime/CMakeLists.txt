@@ -391,6 +391,9 @@ add_library(ps2_runtime STATIC
     src/lib/vu/ps2_vu1_core.cpp
     src/lib/vu/ps2_vu1_upper.cpp
     src/lib/vu/ps2_vu1_lower.cpp
+    src/lib/vu/ps2_vu1_pipeline.cpp
+    src/lib/vu/ps2_vu1_capture.cpp
+    src/lib/vu/ps2_vu1_cache.cpp
     src/lib/games_database.cpp
 )
 

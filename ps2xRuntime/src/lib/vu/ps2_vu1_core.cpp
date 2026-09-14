@@ -3,6 +3,7 @@
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/ps2_memory.h"
 #include "ps2_vu1_detail.h"
+#include "ps2_vu1_capture.h"
 
 #include <algorithm>
 #include <bit>
@@ -22,57 +23,6 @@
 
 namespace
 {
-    void captureProgramStart(const char *directory, unsigned unit,
-                             const uint8_t *code, uint32_t codeSize, uint64_t generation,
-                             const uint8_t *data, uint32_t dataSize, const VU1State &state)
-    {
-        static std::mutex mutex;
-        const std::lock_guard lock(mutex);
-        static unsigned captured = 0;
-        if (captured >= 256u)
-            return;
-        struct CodeHash {
-            const uint8_t *code = nullptr;
-            uint64_t generation = 0;
-            uint64_t hash = 0;
-        };
-        static std::array<CodeHash, 2> hashes;
-        auto &cached = hashes[unit];
-        if (cached.code != code || cached.generation != generation) {
-            cached = {code, generation, 14695981039346656037ull};
-            for (uint32_t i = 0; i < codeSize; ++i)
-                cached.hash = (cached.hash ^ code[i]) * 1099511628211ull;
-        }
-        static std::map<std::tuple<unsigned, uint32_t, uint64_t>, uint64_t> calls;
-        const uint64_t call = ++calls[{unit, state.pc, cached.hash}];
-        if ((call & (call - 1u)) != 0u)
-            return;
-        std::error_code error;
-        std::filesystem::create_directories(directory, error);
-        if (error) {
-            std::fprintf(stderr, "VU capture directory: %s\n", error.message().c_str());
-            captured = 256u;
-            return;
-        }
-        const std::string stem = std::string(directory) + "/vu" + std::to_string(unit) +
-            "-pc" + std::to_string(state.pc) + "-call" + std::to_string(call) +
-            "-code" + std::to_string(cached.hash);
-        VU1State initial = state;
-        initial.cycles = 0u;
-        const auto write = [&](const char *suffix, const void *bytes, size_t size) {
-            std::ofstream output(stem + suffix, std::ios::binary);
-            output.write(static_cast<const char *>(bytes), static_cast<std::streamsize>(size));
-            return static_cast<bool>(output);
-        };
-        if (!write(".code", code, codeSize) || !write(".data", data, dataSize) ||
-            !write(".state", &initial, sizeof(initial))) {
-            std::fprintf(stderr, "Unable to write VU capture %s\n", stem.c_str());
-            captured = 256u;
-            return;
-        }
-        ++captured;
-    }
-
     void recordUncompiledBlock(const char *path, unsigned unit, const uint8_t *code)
     {
         static std::mutex mutex;
@@ -857,118 +807,6 @@ PS2_VU_FORCE_INLINE void VU1Interpreter::queueAccWrite(uint8_t laneMask, const f
     reportReservedInstruction(true, 0xFFFFFFF5u);
 }
 
-void VU1Interpreter::commitReadyPipelines()
-{
-    // The two slots in each bucket preserve issue order for simultaneous flags.
-    for (uint32_t active = m_activeFlags & pipelineCycleMask<kMaxFlagEntries>(m_cycle);
-         active != 0u; active &= active - 1u)
-    {
-        const unsigned index = std::countr_zero(active);
-        auto &entry = m_flagPipeline[index];
-        if (entry.readyCycle > m_cycle)
-            continue;
-
-        if (entry.writesMac)
-            m_state.mac = entry.mac;
-        if (entry.writesStatus)
-        {
-            const uint32_t current = entry.status & 0xFu;
-            m_state.status = (m_state.status & 0xFF0u) | current | ((current | entry.extraSticky) << 6);
-        }
-        if (entry.writesSticky)
-        {
-            m_state.status = (m_state.status & 0x03Fu) | (entry.status & 0xFC0u);
-        }
-        if (entry.writesClip)
-            m_state.clip = entry.clip;
-        m_activeFlags &= ~(1u << index);
-    }
-
-    if (m_fdiv.valid && m_fdiv.readyCycle <= m_cycle)
-    {
-        m_state.q = m_fdiv.value;
-        const uint32_t currentDi = m_fdiv.statusDi & 0x30u;
-        m_state.status = (m_state.status & 0xFCFu) | currentDi | (currentDi << 6);
-        m_fdiv = {};
-    }
-
-    for (ScalarPipelineEntry &entry : m_efu)
-    {
-        if (entry.valid && entry.readyCycle <= m_cycle)
-        {
-            m_state.p = entry.value;
-            entry = {};
-        }
-    }
-
-    for (uint32_t active = m_activeStores; active != 0u; active &= active - 1u)
-    {
-        const unsigned index = std::countr_zero(active);
-        auto &store = m_storePipeline[index];
-        if (store.readyCycle > m_cycle)
-            continue;
-        if (m_activeVuData && store.address + 16u <= m_activeVuDataSize)
-        {
-            uint32_t oldWords[4]{};
-            std::memcpy(oldWords, m_activeVuData + store.address, sizeof(oldWords));
-            for (uint32_t component = 0; component < 4u; ++component)
-            {
-                if ((store.laneMask & laneForComponent(component)) != 0u)
-                    oldWords[component] = store.words[component];
-            }
-            std::memcpy(m_activeVuData + store.address, oldWords, sizeof(oldWords));
-        }
-        m_activeStores &= ~(1u << index);
-    }
-
-    for (uint32_t active = m_activeVfWrites & pipelineCycleMask<kMaxPendingVfWrites>(m_cycle);
-         active != 0u; active &= active - 1u)
-    {
-        const unsigned index = std::countr_zero(active);
-        auto &write = m_vfWritePipeline[index];
-        if (write.readyCycle > m_cycle)
-            continue;
-        for (uint32_t component = 0; component < 4u; ++component)
-        {
-            if ((write.laneMask & laneForComponent(component)) != 0u &&
-                m_vfLatestWrite[write.reg][component] == write.sequence)
-            {
-                m_state.vf[write.reg][component] = write.value[component];
-            }
-        }
-        m_activeVfWrites &= ~(1u << index);
-    }
-
-    for (uint32_t active = m_activeViWrites & pipelineCycleMask<kMaxPendingViWrites>(m_cycle);
-         active != 0u; active &= active - 1u)
-    {
-        const unsigned index = std::countr_zero(active);
-        auto &write = m_viWritePipeline[index];
-        if (write.readyCycle > m_cycle)
-            continue;
-        if (m_viLatestWrite[write.reg] == write.sequence)
-            m_state.vi[write.reg] = static_cast<int16_t>(write.value);
-        m_activeViWrites &= ~(1u << index);
-    }
-
-    for (uint32_t active = m_activeAccWrites; active != 0u; active &= active - 1u)
-    {
-        const unsigned index = std::countr_zero(active);
-        auto &write = m_accWritePipeline[index];
-        if (write.readyCycle > m_cycle)
-            continue;
-        for (uint32_t component = 0; component < 4u; ++component)
-        {
-            if ((write.laneMask & laneForComponent(component)) != 0u &&
-                m_accLatestWrite[component] == write.sequence)
-            {
-                m_state.acc[component] = write.value[component];
-            }
-        }
-        m_activeAccWrites &= ~(1u << index);
-    }
-}
-
 void VU1Interpreter::progressXgkick()
 {
     if (!m_xgkick.active || !m_activeVuData || m_activeVuDataSize == 0u)
@@ -1671,23 +1509,6 @@ VU1Interpreter::DecodedInstructionPair VU1Interpreter::decodeInstructionPair(con
     return decodeInstructionWords(lower, upper, m_unit);
 }
 
-void VU1Interpreter::rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t codeSize,
-                                             const PS2Memory *memory, uint64_t generation)
-{
-    const uint32_t pairCount = std::min<uint32_t>(codeSize / 8u, kMaxDecodedPairs);
-    for (uint32_t i = 0; i < pairCount; ++i)
-    {
-        m_decodedCodeCache[i] = decodeInstructionPair(vuCode, i * 8u);
-        m_compiledCodeCache[i] = findCompiledBlock(vuCode + i * 8u, codeSize - i * 8u, m_unit);
-    }
-
-    m_cachedVuCode = vuCode;
-    m_cachedMemory = memory;
-    m_cachedCodeSize = codeSize;
-    m_cachedCodeGeneration = generation;
-    m_decodedCodeCacheValid = true;
-}
-
 VU1Interpreter::DecodedInstructionPair VU1Interpreter::getDecodedInstructionPairForPc(
     const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory, uint32_t pc)
 {
@@ -1753,7 +1574,7 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
         // execute() has an empty pipeline; resumed states need a fuller snapshot.
         const uint64_t generation = m_unit == Unit::VU1
             ? memory->getVU1CodeGeneration() : memory->getVU0CodeGeneration();
-        captureProgramStart(captureDirectory, m_unit == Unit::VU1 ? 1u : 0u,
+        ps2_vu_detail::captureProgramStart(captureDirectory, m_unit == Unit::VU1 ? 1u : 0u,
                             vuCode, codeSize, generation, vuData, dataSize, m_state);
     }
     run(vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles);
@@ -1768,6 +1589,13 @@ void VU1Interpreter::resume(uint8_t *vuCode, uint32_t codeSize,
     m_state.itop = itop;
     m_state.stoppedByD = false;
     m_state.stoppedByT = false;
+    static const char *captureDirectory = std::getenv("PS2_VU_CAPTURE_DIR");
+    // A drained continuation has no hidden writes or branch forwarding to serialize.
+    if (captureDirectory && *captureDirectory && memory && !pipelinesPending() &&
+        !m_viBranchBackupValid && !m_state.branchPending && !m_stopRequested)
+        ps2_vu_detail::captureProgramStart(captureDirectory, m_unit == Unit::VU1 ? 1u : 0u,
+            vuCode, codeSize, m_unit == Unit::VU1 ? memory->getVU1CodeGeneration() : memory->getVU0CodeGeneration(),
+            vuData, dataSize, m_state);
     run(vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles);
 }
 
