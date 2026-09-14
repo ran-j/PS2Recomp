@@ -23,6 +23,11 @@ public:
     void TextureFlush() override;
     void Sync(GSSyncReason reason) override;
     PresentationFrame Present(const GSPresentationRequest &request) override;
+    bool SupportsPreparedPresentation() const override;
+    bool QueuesPreparedPresentation() const override { return SupportsPreparedPresentation(); }
+    GSPresentationTicket PreparePresentation(const GSPresentationRequest &request) override;
+    PresentationFrame DisplayPreparedPresentation(const GSPresentationTicket &ticket) override;
+    void CancelPreparedPresentations() noexcept override;
     bool ClearFramebuffer(const GSContext &context, uint32_t rgba) override;
     uint32_t ConsumeLocalToHostBytes(uint8_t *dst, uint32_t size) override;
     uint32_t ReadVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y) const override;

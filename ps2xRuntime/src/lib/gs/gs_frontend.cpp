@@ -132,6 +132,7 @@ void GS::init(uint8_t *vram, uint32_t vramSize, GSRegisters *privRegs)
 void GS::reset()
 {
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<std::mutex> backendLock(m_backendLifetimeMutex);
     std::memset(m_ctx, 0, sizeof(m_ctx));
     m_prim = {};
     m_primRegister = {};
@@ -537,6 +538,8 @@ static void maybeWriteScreenshot(GS &gs);
 void GS::latchHostPresentationFrame()
 {
     GSPresentationRequest request{};
+    GSPresentationTicket ticket;
+    std::unique_lock<std::mutex> backendLock(m_backendLifetimeMutex, std::defer_lock);
     {
         std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
         if (!m_backend || !m_privRegs)
@@ -548,18 +551,20 @@ void GS::latchHostPresentationFrame()
             m_hostPresentationRowPitchBytes = 0u;
             return;
         }
+        backendLock.lock();
         request = buildPresentationRequestUnlocked();
+        if (m_backend->QueuesPreparedPresentation())
+            ticket = m_backend->PreparePresentation(request);
     }
 
     PresentationFrame frame{};
+    if (ticket)
+        frame = m_backend->DisplayPreparedPresentation(ticket);
+    else
     {
-        std::lock_guard<std::mutex> backendLock(m_backendLifetimeMutex);
-        if (m_backend)
-        {
-            m_backend->Flush();
-            m_backend->Sync(GSSyncReason::Presentation);
-            frame = m_backend->Present(request);
-        }
+        m_backend->Flush();
+        m_backend->Sync(GSSyncReason::Presentation);
+        frame = m_backend->Present(request);
     }
 
     const bool presented = static_cast<bool>(frame);
@@ -586,6 +591,8 @@ void GS::latchHostPresentationFrame()
         m_hostPresentationUsedPreferred = usedPreferred;
         m_hasHostPresentationFrame = hasHostFrame;
     }
+    ticket.reset();
+    backendLock.unlock();
 
     if (hasHostFrame)
     {

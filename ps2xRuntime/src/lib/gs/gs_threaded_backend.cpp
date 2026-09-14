@@ -16,13 +16,41 @@
 
 struct GSThreadedBackend::Impl
 {
-    enum class Op { Submit, Transfer, Upload, Flush, TextureFlush, Write };
+    struct PresentationResult
+    {
+        std::mutex mutex;
+        std::condition_variable ready;
+        bool completed = false;
+        GSPresentationTicket frame;
+        std::exception_ptr error;
+        void fail(std::exception_ptr failure)
+        {
+            std::lock_guard lock(mutex);
+            if (completed) return;
+            error = failure;
+            completed = true;
+            ready.notify_all();
+        }
+    };
+    struct PresentationTicket final : GSPreparedPresentation
+    {
+        std::shared_ptr<const int> owner;
+        std::shared_ptr<PresentationResult> result;
+        PresentationTicket(std::shared_ptr<const int> owner, std::shared_ptr<PresentationResult> result)
+            : owner(std::move(owner)), result(std::move(result)) {}
+    };
+    struct Prepare
+    {
+        GSPresentationRequest request;
+        std::shared_ptr<PresentationResult> result;
+    };
+    enum class Op { Submit, Transfer, Upload, Flush, TextureFlush, Write, Prepare };
     using Pixel = std::array<uint32_t, 6>;
     struct Command
     {
         Op op;
         std::variant<std::monostate, GSPrimitiveBatch, GSTransferCommand,
-                     std::vector<uint8_t>, Pixel> data;
+                     std::vector<uint8_t>, Pixel, Prepare> data;
         int rounding = std::fegetround();
         size_t bytes() const
         {
@@ -40,6 +68,7 @@ struct GSThreadedBackend::Impl
 
     ~Impl()
     {
+        backend->CancelPreparedPresentations();
         {
             std::lock_guard lock(mutex);
             stopping = true;
@@ -118,6 +147,20 @@ struct GSThreadedBackend::Impl
             backend->WriteVram(p[0], p[1], p[2], p[3], p[4], p[5]);
             break;
         }
+        case Op::Prepare:
+        {
+            const auto &prepare = std::get<Prepare>(command.data);
+            backend->Flush();
+            backend->Sync(GSSyncReason::Presentation);
+            auto frame = backend->PreparePresentation(prepare.request);
+            if (!frame)
+                throw std::runtime_error("GS presentation preparation returned no ticket");
+            std::lock_guard lock(prepare.result->mutex);
+            prepare.result->frame = std::move(frame);
+            prepare.result->completed = true;
+            prepare.result->ready.notify_all();
+            break;
+        }
         }
     }
 
@@ -157,6 +200,12 @@ struct GSThreadedBackend::Impl
             {
                 std::lock_guard lock(mutex);
                 error = std::current_exception();
+                for (const auto &command : batch)
+                    if (command.op == Op::Prepare)
+                        std::get<Prepare>(command.data).result->fail(error);
+                for (const auto &command : pending)
+                    if (command.op == Op::Prepare)
+                        std::get<Prepare>(command.data).result->fail(error);
                 pending.clear();
                 outstandingBytes = 0u;
                 progress.notify_all();
@@ -172,6 +221,7 @@ struct GSThreadedBackend::Impl
     }
 
     std::unique_ptr<GSRasterBackend> backend;
+    const std::shared_ptr<const int> identity = std::make_shared<const int>(0);
     const size_t capacity;
     std::mutex submission, mutex;
     std::condition_variable work, progress;
@@ -219,7 +269,40 @@ void GSThreadedBackend::Sync(GSSyncReason reason)
 }
 PresentationFrame GSThreadedBackend::Present(const GSPresentationRequest &request)
 {
+    if (SupportsPreparedPresentation())
+        return DisplayPreparedPresentation(PreparePresentation(request));
     return m_impl->observe([&](auto &b) { return b.Present(request); });
+}
+bool GSThreadedBackend::SupportsPreparedPresentation() const
+{
+    return m_impl->backend->SupportsPreparedPresentation();
+}
+GSPresentationTicket GSThreadedBackend::PreparePresentation(const GSPresentationRequest &request)
+{
+    if (!SupportsPreparedPresentation()) return {};
+    auto result = std::make_shared<Impl::PresentationResult>();
+    auto ticket = std::make_shared<Impl::PresentationTicket>(m_impl->identity, result);
+    ticket->sourceVsyncTick = request.vsyncTick;
+    m_impl->enqueue({Impl::Op::Prepare, Impl::Prepare{request, std::move(result)}}, true);
+    return ticket;
+}
+PresentationFrame GSThreadedBackend::DisplayPreparedPresentation(const GSPresentationTicket &ticket)
+{
+    const auto *prepared = dynamic_cast<const Impl::PresentationTicket *>(ticket.get());
+    if (!prepared || prepared->owner != m_impl->identity)
+        throw std::invalid_argument("GS presentation ticket belongs to another backend");
+    GSPresentationTicket frame;
+    {
+        std::unique_lock lock(prepared->result->mutex);
+        prepared->result->ready.wait(lock, [&] { return prepared->result->completed; });
+        if (prepared->result->error) std::rethrow_exception(prepared->result->error);
+        frame = prepared->result->frame;
+    }
+    return m_impl->backend->DisplayPreparedPresentation(frame);
+}
+void GSThreadedBackend::CancelPreparedPresentations() noexcept
+{
+    m_impl->backend->CancelPreparedPresentations();
 }
 bool GSThreadedBackend::ClearFramebuffer(const GSContext &context, uint32_t rgba)
 {

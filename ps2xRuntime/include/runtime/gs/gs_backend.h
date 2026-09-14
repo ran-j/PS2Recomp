@@ -3,7 +3,15 @@
 #include "runtime/gs/gs_types.h"
 
 #include <cstdint>
+#include <memory>
 #include <vector>
+
+struct GSPreparedPresentation
+{
+    virtual ~GSPreparedPresentation() = default;
+    uint64_t sourceVsyncTick = 0u;
+};
+using GSPresentationTicket = std::shared_ptr<const GSPreparedPresentation>;
 
 class GSRasterBackend
 {
@@ -30,4 +38,14 @@ public:
     virtual void WriteVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value) = 0;
     virtual void SnapshotVram(std::vector<uint8_t> &out) const = 0;
     virtual GSTransferSnapshot GetTransferSnapshot() const = 0;
+
+    // Display has one consumer on the window thread; concurrent repeats are
+    // unsupported. The owner outlives calls, but tickets may outlive the owner.
+    virtual bool SupportsPreparedPresentation() const { return false; }
+    // Only queued preparation may run under the frontend's state lock.
+    virtual bool QueuesPreparedPresentation() const { return false; }
+    virtual GSPresentationTicket PreparePresentation(const GSPresentationRequest &) { return {}; }
+    virtual PresentationFrame DisplayPreparedPresentation(const GSPresentationTicket &) { return {}; }
+    // Shutdown must wake a producer blocked waiting for a free snapshot slot.
+    virtual void CancelPreparedPresentations() noexcept {}
 };
