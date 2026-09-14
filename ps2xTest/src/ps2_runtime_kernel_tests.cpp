@@ -4,13 +4,16 @@
 #include "ps2_syscalls.h"
 #include "ps2_stubs.h"
 #include "runtime/ee_scheduler.h"
+#include "runtime/gs/gs_frontend.h"
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -18,6 +21,61 @@ using namespace ps2_syscalls;
 
 namespace
 {
+    std::atomic<bool> s_presentationGuestEntered{false}, s_presentationGuestExited{false};
+
+    void presentationFailureGuest(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        s_presentationGuestEntered.store(true, std::memory_order_release);
+        while (!runtime->isStopRequested())
+            std::this_thread::yield();
+        s_presentationGuestExited.store(true, std::memory_order_release);
+        ctx->pc = 0u;
+    }
+
+    class PresentationFailureBackend final : public GSRasterBackend
+    {
+    public:
+        explicit PresentationFailureBackend(bool failAtSync) : m_failAtSync(failAtSync) {}
+        void Initialize(uint8_t *, uint32_t) override {}
+        void Reset() override {}
+        void Submit(const GSPrimitiveBatch &) override {}
+        void BeginTransfer(const GSTransferCommand &) override {}
+        void UploadImage(const uint8_t *, uint32_t) override {}
+        void Flush() override {}
+        void TextureFlush() override {}
+        void Sync(GSSyncReason reason) override
+        {
+            if (m_failAtSync && reason == GSSyncReason::Presentation)
+            {
+                waitForGuest();
+                throw std::runtime_error("injected delayed GS failure");
+            }
+        }
+        PresentationFrame Present(const GSPresentationRequest &) override
+        {
+            waitForGuest();
+            throw 42; // Exercise the non-std::exception cleanup path too.
+        }
+        bool ClearFramebuffer(const GSContext &, uint32_t) override { return false; }
+        uint32_t ConsumeLocalToHostBytes(uint8_t *, uint32_t) override { return 0u; }
+        uint32_t ReadVram(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) const override { return 0u; }
+        void WriteVram(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) override {}
+        void SnapshotVram(std::vector<uint8_t> &out) const override { out.clear(); }
+        GSTransferSnapshot GetTransferSnapshot() const override { return {}; }
+    private:
+        static void waitForGuest()
+        {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (!s_presentationGuestEntered.load(std::memory_order_acquire))
+            {
+                if (std::chrono::steady_clock::now() >= deadline)
+                    throw std::runtime_error("presentation test guest did not start");
+                std::this_thread::yield();
+            }
+        }
+        bool m_failAtSync;
+    };
+
     constexpr uint32_t K_PARAM_ADDR = 0x1000u;
     constexpr uint32_t K_STATUS_ADDR = 0x1400u;
 
@@ -550,6 +608,28 @@ void register_ps2_runtime_kernel_tests()
 {
     MiniTest::Case("PS2RuntimeKernel", [](TestCase &tc)
     {
+        tc.Run("Host presentation failures stop and join the actual guest thread", [](TestCase &t)
+        {
+            for (const bool failAtSync : {true, false})
+            {
+                auto runtime = std::make_unique<PS2Runtime>();
+                t.IsTrue(runtime->memory().initialize(), "test memory initializes without a window");
+                runtime->gs().init(runtime->memory().getGSVRAM(), PS2_GS_VRAM_SIZE, &runtime->memory().gs());
+                runtime->gs().setRasterBackend(std::make_unique<PresentationFailureBackend>(failAtSync));
+                runtime->setExternalPresenter([](void *) { return true; }, nullptr);
+                constexpr uint32_t entry = 0x27000u;
+                runtime->registerFunction(entry, presentationFailureGuest);
+                runtime->cpu().pc = entry;
+                s_presentationGuestEntered.store(false, std::memory_order_relaxed);
+                s_presentationGuestExited.store(false, std::memory_order_relaxed);
+                runtime->run();
+                t.IsTrue(runtime->isStopRequested(), "presentation failure requests stop");
+                t.IsTrue(s_presentationGuestEntered.load(std::memory_order_acquire), "guest was running when presentation failed");
+                t.IsTrue(s_presentationGuestExited.load(std::memory_order_acquire), "run returned only after the guest exited");
+                runtime->replaceFunction(entry, nullptr);
+            }
+        });
+
         tc.Run("syscall lookup observes replacement, removal and runtime reuse", [](TestCase &t)
         {
             std::optional<PS2Runtime> runtime(std::in_place);

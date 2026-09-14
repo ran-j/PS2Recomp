@@ -90,6 +90,28 @@ struct ProgramHeader
 
 namespace
 {
+    template <class Present>
+    bool presentHostFrame(PS2Runtime &runtime, Present &&present)
+    {
+        try
+        {
+            present();
+            return true;
+        }
+        catch (const std::exception &error)
+        {
+            std::fprintf(stderr, "Error during host presentation: %s\n", error.what());
+        }
+        catch (...)
+        {
+            std::fprintf(stderr, "Error during host presentation: unknown exception\n");
+        }
+        // Return to run()'s normal cleanup so its joinable guest thread cannot
+        // be destroyed by exception unwinding, including delayed GS failures.
+        runtime.requestStop();
+        return false;
+    }
+
     constexpr uint32_t kGuestHeapDefaultBase = 0x00100000u;
     constexpr uint32_t kGuestHeapDefaultAlignment = 16u;
     constexpr uint32_t kGuestHeapSafetyPad = 0x1000u;
@@ -2554,7 +2576,8 @@ void PS2Runtime::run()
             const bool newFrame = currentTick != s_lastNativeTick;
             if (newFrame)
             {
-                gs().latchHostPresentationFrame();
+                if (!presentHostFrame(*this, [&] { gs().latchHostPresentationFrame(); }))
+                    break;
                 s_lastNativeTick = currentTick;
             }
             else
@@ -2586,7 +2609,8 @@ void PS2Runtime::run()
 
         uint32_t presentWidth = FB_WIDTH;
         uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
-        UploadFrame(frameTex, this, presentWidth, presentHeight);
+        if (!presentHostFrame(*this, [&] { UploadFrame(frameTex, this, presentWidth, presentHeight); }))
+            break;
 
         BeginDrawing();
         ClearBackground(BLACK);
