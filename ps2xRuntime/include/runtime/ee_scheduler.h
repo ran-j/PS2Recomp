@@ -371,6 +371,7 @@ public:
     void publishSnapshotNow();
 
 private:
+    friend struct EeSchedulerPacingTestAccess;
     struct ScheduledEvent
     {
         uint64_t deadlineCycle = 0;
