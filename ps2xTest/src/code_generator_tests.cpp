@@ -2,6 +2,7 @@
 #include "ps2recomp/code_generator.h"
 #include "ps2recomp/instructions.h"
 #include "ps2recomp/ps2_recompiler.h"
+#include "ps2recomp/r5900_decoder.h"
 #include "ps2recomp/types.h"
 #include <filesystem>
 #include <fstream>
@@ -168,6 +169,28 @@ void register_code_generator_tests()
 {
     MiniTest::Case("CodeGenerator", [](TestCase &tc)
                    {
+    tc.Run("R5900 SQRT.S reads ft while other unary operations read fs", [](TestCase &t) {
+        CodeGenerator gen({}, {});
+        R5900Decoder decoder;
+        for (unsigned source = 0; source < 32; ++source) {
+            for (unsigned destination = 0; destination < 32; ++destination) {
+                const uint32_t raw = (OPCODE_COP1 << 26) | (COP1_S << 21) |
+                                     (source << 16) | (destination << 6) | COP1_S_SQRT;
+                const auto inst = decoder.decodeInstruction(0x1000, raw);
+                const auto generated = gen.translateInstruction(inst);
+                const std::string expected = "ctx->f[" + std::to_string(destination) +
+                    "] = FPU_SQRT_S(ctx->f[" + std::to_string(source) + "]);";
+                t.IsTrue(generated.find(expected) != std::string::npos,
+                         "SQRT.S operand comes from instruction bits 20:16");
+            }
+        }
+        const uint32_t rawAbs = (OPCODE_COP1 << 26) | (COP1_S << 21) |
+                                (7u << 11) | (3u << 6) | COP1_S_ABS;
+        const auto absolute = gen.translateInstruction(decoder.decodeInstruction(0x1000, rawAbs));
+        t.IsTrue(absolute.find("ctx->f[3] = FPU_ABS_S(ctx->f[7]);") != std::string::npos,
+                 "ABS.S keeps its different fs operand encoding");
+    });
+
     tc.Run("SYSCALL publishes its continuation before entering the runtime", [](TestCase &t) {
         Function func;
         func.name = "syscall_resume";
