@@ -13,6 +13,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <stdexcept>
 
 using namespace GSInternal;
 
@@ -291,32 +292,6 @@ namespace
         return psm == GS_PSM_T8 || psm == GS_PSM_T8H;
     }
 
-    uint32_t texturePageIndex(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y)
-    {
-        switch (psm & 0x3Fu)
-        {
-        case GS_PSM_CT32:
-        case GS_PSM_CT24:
-        case GS_PSM_Z32:
-        case GS_PSM_Z24:
-        case GS_PSM_T8H:
-        case GS_PSM_T4HL:
-        case GS_PSM_T4HH:
-            return static_cast<uint32_t>(GSMem::PixelStorageTraits<GSMem::C32>::PageId(base, bw, x, y));
-        case GS_PSM_CT16:
-        case GS_PSM_CT16S:
-        case GS_PSM_Z16:
-        case GS_PSM_Z16S:
-            return static_cast<uint32_t>(GSMem::PixelStorageTraits<GSMem::C16>::PageId(base, bw, x, y));
-        case GS_PSM_T8:
-            return static_cast<uint32_t>(GSMem::PixelStorageTraits<GSMem::P8>::PageId(base, bw, x, y));
-        case GS_PSM_T4:
-            return static_cast<uint32_t>(GSMem::PixelStorageTraits<GSMem::P4>::PageId(base, bw, x, y));
-        default:
-            return UINT32_MAX;
-        }
-    }
-
     uint8_t lerpChannel(uint8_t c00, uint8_t c10, uint8_t c01, uint8_t c11, float fx, float fy)
     {
         const float top = static_cast<float>(c00) + (static_cast<float>(c10) - static_cast<float>(c00)) * fx;
@@ -540,10 +515,12 @@ GSCpuBackend::GSCpuBackend()
 
 void GSCpuBackend::Initialize(uint8_t *vram, uint32_t vramSize)
 {
+    if (vram && vramSize < GSMem::MEMORY_SIZE)
+        throw std::invalid_argument("GS CPU backend requires at least 4 MiB of VRAM");
+
     std::lock_guard<std::mutex> lock(m_mutex);
     m_vram = vram;
     m_vramSize = vramSize;
-    m_texturePageBuffer.resize(vramSize);
     ResetUnlocked();
 }
 
@@ -557,7 +534,7 @@ void GSCpuBackend::ResetUnlocked()
 {
     m_clut.fill(0u);
     m_clutCbp.fill(0u);
-    m_texturePageIndex = UINT32_MAX;
+    m_texturePageCache.Invalidate();
     m_transfer = {};
     m_transfer.direction = 3u;
     m_transferState = {};
@@ -645,9 +622,8 @@ void GSCpuBackend::LoadClutUnlocked(const GSTex0Reg &tex0, const GSTexClutReg &t
             sourceY = static_cast<uint32_t>(texclut.cov);
         }
 
-        const uint32_t raw = ReadTextureVramUnlocked(tex0.cpsm, tex0.cbp, sourceWidth, sourceX, sourceY);
-        const uint32_t destination = (loadCsm1Suffix ? entry : destinationBase + entry) &
-                                     (sixteenBit ? 0x1FFu : 0x0FFu);
+        const uint32_t raw = ReadTextureVramUnlocked(tex0.cpsm, tex0.cbp, sourceWidth, sourceX, sourceY); 
+        const uint32_t destination = (loadCsm1Suffix ? entry : destinationBase + entry) & (sixteenBit ? 0x1FFu : 0x0FFu);
         if (sixteenBit)
         {
             m_clut[destination] = static_cast<uint16_t>(raw);
@@ -668,7 +644,7 @@ void GSCpuBackend::Flush()
 void GSCpuBackend::TextureFlush()
 {
     std::lock_guard<std::mutex> lock(m_mutex);
-    m_texturePageIndex = UINT32_MAX;
+    m_texturePageCache.Invalidate();
 }
 
 void GSCpuBackend::Sync(GSSyncReason)
@@ -694,20 +670,7 @@ uint32_t GSCpuBackend::ReadTextureVramUnlocked(uint32_t psm, uint32_t base, uint
     if (!m_vram)
         return 0u;
 
-    const uint32_t pageCount = m_vramSize / static_cast<uint32_t>(GSMem::GS_PAGE_SIZE);
-    uint32_t page = texturePageIndex(psm, base, bw, x, y);
-    if (page == UINT32_MAX || pageCount == 0u || m_texturePageBuffer.size() < m_vramSize)
-        return ReadVramUnlocked(psm, base, bw, x, y);
-
-    page %= pageCount;
-    if (m_texturePageIndex != page)
-    {
-        const size_t pageOffset = static_cast<size_t>(page) * GSMem::GS_PAGE_SIZE;
-        std::memcpy(m_texturePageBuffer.data() + pageOffset, m_vram + pageOffset, GSMem::GS_PAGE_SIZE);
-        m_texturePageIndex = page;
-    }
-
-    return m_readVramFuncs[psm & 0x3Fu](m_texturePageBuffer.data(), base, bw, x, y);
+    return GSMem::ReadTexture(m_texturePageCache, m_vram, psm, base, bw, x, y);
 }
 
 void GSCpuBackend::WriteVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value)

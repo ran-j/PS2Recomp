@@ -1,4 +1,5 @@
 #include "../iop_service.h"
+#include "../rpc_reply.h"
 
 #include <algorithm>
 #include <array>
@@ -189,8 +190,8 @@ namespace ps2x::iop::detail
                 const Operation operation = decodeOperation(request.function, flavor);
                 if (operation == Operation::Init)
                 {
-                    (void)call(MemoryCardOperation::Init);
-                    writeInitResult(request.receive);
+                    const int32_t result = call(MemoryCardOperation::Init);
+                    writeInitResult(request.receive, flavor, result);
                     return response;
                 }
 
@@ -206,7 +207,7 @@ namespace ps2x::iop::detail
                 {
                     NameParameter parameter{};
                     if (request.send.address != 0u &&
-                        request.send.size >= offsetof(NameParameter, name) &&
+                        request.send.size >= sizeof(parameter) &&
                         m_host.readGuest(request.send.address, &parameter, sizeof(parameter)))
                     {
                         result = handleNameOperation(operation, request.send.address, parameter);
@@ -222,22 +223,15 @@ namespace ps2x::iop::detail
                         if (operation == Operation::Write && parameter.origin > 0 &&
                             parameter.origin <= static_cast<int32_t>(sizeof(parameter.data)))
                         {
-                            const uint32_t inlineAddress =
-                                request.send.address + static_cast<uint32_t>(offsetof(DescriptorParameter, data));
-                            const int32_t prefix = call(MemoryCardOperation::Write,
-                                                        static_cast<uint32_t>(parameter.fd),
-                                                        inlineAddress,
-                                                        static_cast<uint32_t>(parameter.origin));
+                            const uint32_t inlineAddress = request.send.address + static_cast<uint32_t>(offsetof(DescriptorParameter, data));
+                            const int32_t prefix = call(MemoryCardOperation::Write, static_cast<uint32_t>(parameter.fd), inlineAddress, static_cast<uint32_t>(parameter.origin));
                             if (prefix < 0)
                             {
                                 result = prefix;
                             }
                             else
                             {
-                                const int32_t body = call(MemoryCardOperation::Write,
-                                                          static_cast<uint32_t>(parameter.fd),
-                                                          parameter.buffer,
-                                                          static_cast<uint32_t>(std::max(parameter.size, 0)));
+                                const int32_t body = call(MemoryCardOperation::Write, static_cast<uint32_t>(parameter.fd), parameter.buffer, static_cast<uint32_t>(std::max(parameter.size, 0)));
                                 result = body < 0 ? body : prefix + body;
                             }
                         }
@@ -271,36 +265,18 @@ namespace ps2x::iop::detail
 
             void writeResult(GuestBuffer receive, int32_t result)
             {
-                if (receive.address == 0u || receive.size < sizeof(result))
-                {
-                    return;
-                }
-                (void)m_host.writeGuest(receive.address, &result, sizeof(result));
-                if (receive.size > sizeof(result))
-                {
-                    (void)m_host.zeroGuest(receive.address + sizeof(result), receive.size - sizeof(result));
-                }
+                const std::array<uint32_t, 1> values{static_cast<uint32_t>(result)};
+                (void)writeRpcWords(m_host, receive, values);
             }
 
-            void writeInitResult(GuestBuffer receive)
+            void writeInitResult(GuestBuffer receive, Flavor flavor, int32_t result)
             {
-                if (receive.address == 0u || receive.size < sizeof(int32_t))
-                {
-                    return;
-                }
-                const std::array<uint32_t, 3> values = {
-                    static_cast<uint32_t>(kSucceeded), kMcservVersion, kMcmanVersion};
-                const uint32_t bytes = std::min<uint32_t>(receive.size, sizeof(values));
-                (void)m_host.writeGuest(receive.address, values.data(), bytes);
-                if (receive.size > bytes)
-                {
-                    (void)m_host.zeroGuest(receive.address + bytes, receive.size - bytes);
-                }
+                const std::array<uint32_t, 3> values = {static_cast<uint32_t>(result), kMcservVersion, kMcmanVersion};
+                const size_t count = flavor == Flavor::NewXmcserv ? values.size() : 1u;
+                (void)writeRpcWords(m_host, receive, std::span<const uint32_t>(values.data(), count));
             }
 
-            int32_t handleNameOperation(Operation operation,
-                                        uint32_t sendAddress,
-                                        const NameParameter &parameter)
+            int32_t handleNameOperation(Operation operation, uint32_t sendAddress, const NameParameter &parameter)
             {
                 const uint32_t nameAddress = sendAddress + static_cast<uint32_t>(offsetof(NameParameter, name));
                 const uint32_t port = static_cast<uint32_t>(parameter.port);
@@ -367,8 +343,7 @@ namespace ps2x::iop::detail
                 case Operation::Read:
                     if (parameter.parameter != 0u)
                     {
-                        (void)m_host.zeroGuest(parameter.parameter,
-                                               flavor == Flavor::NewXmcserv ? 192u : 64u);
+                        (void)m_host.zeroGuest(parameter.parameter, flavor == Flavor::NewXmcserv ? 192u : 64u);
                     }
                     return call(MemoryCardOperation::Read,
                                 static_cast<uint32_t>(parameter.fd),

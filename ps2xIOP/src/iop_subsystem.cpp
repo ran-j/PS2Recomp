@@ -11,6 +11,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace ps2x::iop
@@ -137,6 +138,19 @@ namespace ps2x::iop
             routesValid = addLayer(coreServices, false) && addLayer(profileServices, true);
         }
 
+        void recordLoadOutcome(std::string_view path, bool hle)
+        {
+            constexpr size_t maxOutcomes = 32u;
+            if (loadOutcomes.size() >= maxOutcomes || !loggedLoadPaths.emplace(path).second)
+                return;
+            std::string message = hle ? "[IOP:HLE] fallback module='" : "[IOP:load-failed] module='";
+            message.append(path);
+            message += hle ? "' physical IRX unavailable; using registered HLE provider"
+                           : "' no HLE provider accepted the module; physical IRX was not loaded";
+            loadOutcomes.push_back(message);
+            host.log(hle ? LogLevel::Info : LogLevel::Warning, message);
+        }
+
         IopHost &host;
         detail::PluginCatalog pluginCatalog;
         detail::ServiceList coreServices;
@@ -145,6 +159,8 @@ namespace ps2x::iop
         std::unordered_map<uint32_t, detail::IopService *> routes;
         std::vector<std::filesystem::path> pluginSearchPaths;
         std::vector<std::string> diagnostics;
+        std::vector<std::string> loadOutcomes;
+        std::unordered_set<std::string> loggedLoadPaths;
         std::string activeProfile;
         std::string activeProvider;
         std::string lastError;
@@ -174,6 +190,8 @@ namespace ps2x::iop
 
     bool IopSubsystem::configure(const GameIdentity &identity, std::string *error)
     {
+        if (error)
+            error->clear();
         m_impl->profileServices.clear();
         m_impl->activeProfile.clear();
         m_impl->activeProvider.clear();
@@ -273,6 +291,8 @@ namespace ps2x::iop
     void IopSubsystem::reset()
     {
         m_impl->moduleManager.reset();
+        m_impl->loadOutcomes.clear();
+        m_impl->loggedLoadPaths.clear();
         for (auto &service : m_impl->coreServices)
         {
             if (service)
@@ -311,7 +331,15 @@ namespace ps2x::iop
 
         ModuleLoadResult hle = m_impl->moduleManager.loadHle(path);
         if (hle.moduleId > 0)
+        {
             m_impl->rebuildRoutes();
+            if (parsed.device != Ps2PathDevice::Rom0)
+                m_impl->recordLoadOutcome(path, true);
+        }
+        else
+        {
+            m_impl->recordLoadOutcome(path, false);
+        }
         return hle;
     }
 
@@ -463,6 +491,7 @@ namespace ps2x::iop
         snapshot.activeProfile = m_impl->activeProfile;
         snapshot.activeProvider = m_impl->activeProvider;
         snapshot.diagnostics = m_impl->diagnostics;
+        snapshot.diagnostics.insert(snapshot.diagnostics.end(), m_impl->loadOutcomes.begin(), m_impl->loadOutcomes.end());
         if (!m_impl->lastError.empty())
         {
             snapshot.diagnostics.push_back(m_impl->lastError);

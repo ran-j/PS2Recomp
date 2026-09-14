@@ -92,6 +92,7 @@ namespace ps2x::iop::detail
                 return IopImportCall{
                     trimLibraryName(name),
                     static_cast<uint16_t>(delay & 0xFFFFu),
+                    m_memory.read16(table + 8u),
                 };
             }
         }
@@ -131,20 +132,34 @@ namespace ps2x::iop::detail
         return m_libraries.erase(IopMemory::physicalAddress(address)) != 0u;
     }
 
-    uint32_t IopImportRegistry::findTable(std::string_view library) const
+    const IopImportRegistry::ExportLibrary *IopImportRegistry::findLibrary(std::string_view name, std::optional<uint16_t> version) const
     {
-        const auto found = std::find_if(m_libraries.begin(), m_libraries.end(), [&](const auto &entry)
-                                        { return equalsIgnoreCase(entry.second.name, library); });
-        return found != m_libraries.end() ? found->second.tableAddress : 0u;
+        const ExportLibrary *selected = nullptr;
+        for (const auto &[address, library] : m_libraries)
+        {
+            (void)address;
+            if (!equalsIgnoreCase(library.name, name) ||
+                (version && (library.version >> 8u) != (*version >> 8u)))
+                continue;
+            // LOADCORE links by major version; a newer minor supersedes older exports.
+            if (!selected || library.version > selected->version)
+                selected = &library;
+        }
+        return selected;
     }
 
-    uint32_t IopImportRegistry::resolve(std::string_view library, uint16_t ordinal) const
+    uint32_t IopImportRegistry::findTable(std::string_view library, std::optional<uint16_t> version) const
     {
-        const auto found = std::find_if(m_libraries.begin(), m_libraries.end(), [&](const auto &entry)
-                                        { return equalsIgnoreCase(entry.second.name, library); });
-        if (found == m_libraries.end() || ordinal >= found->second.functions.size())
+        const ExportLibrary *found = findLibrary(library, version);
+        return found ? found->tableAddress : 0u;
+    }
+
+    uint32_t IopImportRegistry::resolve(std::string_view library, uint16_t ordinal, std::optional<uint16_t> version) const
+    {
+        const ExportLibrary *found = findLibrary(library, version);
+        if (!found || ordinal >= found->functions.size())
             return 0u;
-        return found->second.functions[ordinal];
+        return found->functions[ordinal];
     }
 
     int32_t IopImportRegistry::setRebootTimeLibraryHandlingMode(uint32_t address, uint32_t mode)

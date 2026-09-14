@@ -5,6 +5,11 @@ project(ps2xTest LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+include(CTest)
+if(BUILD_TESTING)
+    add_subdirectory(gs_cache)
+endif()
+
 if(PS2X_IOP_ENABLE_PLUGINS AND (WIN32 OR (UNIX AND NOT APPLE)))
     add_library(ps2_iop_fake_plugin MODULE
         src/fake_iop_plugin.cpp

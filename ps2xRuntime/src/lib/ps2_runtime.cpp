@@ -15,6 +15,7 @@
 #include "ps2x/iop/iop_subsystem.h"
 
 #include <iostream>
+#include <stdexcept>
 #include <fstream>
 #include <algorithm>
 #include <array>

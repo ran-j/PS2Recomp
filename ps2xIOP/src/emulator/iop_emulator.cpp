@@ -342,7 +342,7 @@ namespace ps2x::iop::detail
             if (iequals(call.library, "heaplib") && heaplib.dispatchImport(call.ordinal, cpu))
                 return ImportDisposition::Handled;
 
-            const uint32_t target = imports.resolve(call.library, call.ordinal);
+            const uint32_t target = imports.resolve(call.library, call.ordinal, call.version);
             if (target != 0u)
             {
                 cpu.pc = target;
@@ -351,7 +351,8 @@ namespace ps2x::iop::detail
             }
 
             std::ostringstream out;
-            out << "[IOP] unhandled import " << call.library << ':' << call.ordinal << " pc=0x" << std::hex << cpu.pc;
+            out << "[IOP] unhandled import " << call.library << ':' << call.ordinal
+                << " version=0x" << std::hex << call.version << " pc=0x" << cpu.pc;
             log(LogLevel::Warning, out.str());
             setV0(0);
             return ImportDisposition::Missing;

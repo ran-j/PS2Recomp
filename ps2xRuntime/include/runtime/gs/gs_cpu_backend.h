@@ -1,9 +1,9 @@
 #pragma once
 
 #include "runtime/gs/gs_backend.h"
+#include "runtime/gs/gs_texture_page_cache.h"
 
 #include <array>
-#include <functional>
 #include <mutex>
 #include <vector>
 
@@ -61,8 +61,8 @@ private:
                              uint32_t sourceOriginX,
                              uint32_t sourceOriginY) const;
 
-    using WriteVramFunc = std::function<void(uint8_t *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t)>;
-    using ReadVramFunc = std::function<uint32_t(uint8_t *, uint32_t, uint32_t, uint32_t, uint32_t)>;
+    using WriteVramFunc = void (*)(uint8_t *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+    using ReadVramFunc = uint32_t (*)(uint8_t *, uint32_t, uint32_t, uint32_t, uint32_t);
 
     static constexpr size_t kPsmHandlerCount = 1u << 6u;
     mutable std::mutex m_mutex;
@@ -72,8 +72,7 @@ private:
     std::array<WriteVramFunc, kPsmHandlerCount> m_writeVramFuncs{};
     std::array<uint16_t, 512> m_clut{};
     std::array<uint32_t, 2> m_clutCbp{};
-    std::vector<uint8_t> m_texturePageBuffer;
-    uint32_t m_texturePageIndex = UINT32_MAX;
+    GSMem::TexturePageCache m_texturePageCache;
 
     GSTransferCommand m_transfer{};
     GSTransferSnapshot m_transferState{};
