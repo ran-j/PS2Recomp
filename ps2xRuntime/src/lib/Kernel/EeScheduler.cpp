@@ -1493,7 +1493,9 @@ void EeScheduler::setVSyncFlag(uint32_t flagAddress, uint32_t tickAddress)
 
 uint64_t EeScheduler::currentVSyncTick() const noexcept
 {
-    return m_vsyncTick;
+    // The host presenter also observes this clock. m_vsyncTick belongs to the
+    // executor; VBlankStart publishes the same value through the GS atomic.
+    return m_runtime.memory().gs().vsyncTick.load(std::memory_order_acquire);
 }
 
 uint32_t EeScheduler::setGsVSyncCallback(uint32_t callback, uint32_t gp, uint32_t sp)
