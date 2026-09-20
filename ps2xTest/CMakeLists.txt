@@ -47,6 +47,11 @@ target_include_directories(ps2_test_lib PRIVATE
     ${CMAKE_SOURCE_DIR}/ps2xRuntime/src/lib
 )
 
+# Test reads ps2recomp/instructions.h by absolute path so it works from any working directory.
+target_compile_definitions(ps2_test_lib PRIVATE
+    PS2X_RECOMP_INCLUDE_DIR="${CMAKE_SOURCE_DIR}/ps2xRecomp/include"
+)
+
 target_link_libraries(ps2_test_lib PRIVATE
     ps2_recomp_lib
     ps2_analyzer_lib
