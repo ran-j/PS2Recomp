@@ -2,7 +2,6 @@ cmake_minimum_required(VERSION 3.21)
 
 project(ps2xIOP LANGUAGES CXX)
 
-option(PS2X_IOP_ENABLE_PLUGINS "Enable dynamic ps2xIOP plugins" OFF)
 option(PS2X_IOP_BUILD_TESTS "Build ps2xIOP emulator smoke tests" OFF)
 
 add_library(ps2_iop STATIC
@@ -26,16 +25,9 @@ add_library(ps2_iop STATIC
     src/emulator/imports/iop_sysmem.cpp
     src/emulator/imports/iop_timrman.cpp
     src/emulator/imports/iop_vblank.cpp
-    src/builtin_profiles.cpp
-    src/plugin_loader.cpp
     src/modules/dbcman.cpp
     src/modules/libsd.cpp
     src/modules/mcserv.cpp
-    src/modules/tsnddrv.cpp
-    src/modules/cri_dtx.cpp
-    src/modules/clfile.cpp
-    src/modules/sound_update_stub.cpp
-    src/modules/sdrdrv.cpp
 )
 
 target_compile_features(ps2_iop PUBLIC cxx_std_20)
@@ -49,14 +41,6 @@ target_include_directories(ps2_iop
 )
 
 add_library(ps2x::iop ALIAS ps2_iop)
-
-target_compile_definitions(ps2_iop PUBLIC
-    PS2X_IOP_ENABLE_PLUGINS=$<BOOL:${PS2X_IOP_ENABLE_PLUGINS}>
-)
-
-if(PS2X_IOP_ENABLE_PLUGINS AND UNIX AND NOT APPLE)
-    target_link_libraries(ps2_iop PRIVATE ${CMAKE_DL_LIBS})
-endif()
 
 if(PS2X_IOP_BUILD_TESTS)
     enable_testing()

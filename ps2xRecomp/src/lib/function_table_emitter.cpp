@@ -147,9 +147,9 @@ namespace ps2recomp
 
         std::stringstream ss;
         ss << "#include \"ps2_runtime.h\"\n";
-        ss << "#include \"ps2_recompiled_functions.h\"\n";
+        ss << "#include <ps2_recompiled_functions.h>\n";
         ss << "#include \"ps2_stubs.h\"\n";
-        ss << "#include \"ps2_recompiled_stubs.h\"//this will give duplicated erros because runtime maybe has it define already, just delete the TODOS ones\n";
+        ss << "#include <ps2_recompiled_stubs.h>\n";
         ss << "#include \"ps2_syscalls.h\"\n\n";
 
         ss << "extern const uint32_t g_ps2RecompiledFunctionTableBase = 0x" << std::hex << tableBase << "u;\n";

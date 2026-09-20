@@ -3,7 +3,6 @@
 #include "ps2x/iop/iop_host.h"
 #include "ps2x/iop/iop_types.h"
 
-#include <functional>
 #include <memory>
 #include <span>
 #include <string>
@@ -19,8 +18,7 @@ namespace ps2x::iop::detail
         [[nodiscard]] virtual std::string_view name() const = 0;
         [[nodiscard]] virtual std::span<const uint32_t> sids() const = 0;
         // A service with aliases is dormant until one of these IOP modules is
-        // actually loaded. Profile services can omit aliases when the profile
-        // itself is the explicit compatibility contract.
+        // actually loaded.
         [[nodiscard]] virtual std::span<const std::string_view> moduleAliases() const
         {
             return {};
@@ -31,11 +29,6 @@ namespace ps2x::iop::detail
         {
             (void)request;
             return RpcAbi::RuntimeDefault;
-        }
-
-        [[nodiscard]] virtual bool overridesPhysicalRpcServer() const noexcept
-        {
-            return false;
         }
 
         [[nodiscard]] virtual RpcResult handleRpc(const RpcRequest &request) = 0;
@@ -52,16 +45,4 @@ namespace ps2x::iop::detail
     };
 
     using ServiceList = std::vector<std::unique_ptr<IopService>>;
-    using ProfileFactory = std::function<ServiceList(IopHost &, const GameIdentity &)>;
-
-    struct ProfileDefinition
-    {
-        std::string id;
-        std::string provider = "builtin";
-        GameMatcher matcher;
-        ProfileFactory factory;
-    };
-
-    ServiceList createCoreServices(IopHost &host);
-    std::vector<ProfileDefinition> createBuiltinProfiles();
 }

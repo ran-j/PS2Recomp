@@ -10,33 +10,6 @@ if(BUILD_TESTING)
     add_subdirectory(gs_cache)
 endif()
 
-if(PS2X_IOP_ENABLE_PLUGINS AND (WIN32 OR (UNIX AND NOT APPLE)))
-    add_library(ps2_iop_fake_plugin MODULE
-        src/fake_iop_plugin.cpp
-    )
-    add_library(ps2_iop_bad_abi_plugin MODULE
-        src/fake_iop_bad_abi.c
-    )
-    add_library(ps2_iop_missing_symbol_plugin MODULE
-        src/fake_iop_missing_symbol.cpp
-    )
-
-    foreach(plugin_target IN ITEMS
-            ps2_iop_fake_plugin
-            ps2_iop_bad_abi_plugin
-            ps2_iop_missing_symbol_plugin)
-        target_compile_features(${plugin_target} PRIVATE cxx_std_20)
-        target_include_directories(${plugin_target} PRIVATE
-            ${CMAKE_SOURCE_DIR}/ps2xIOP/include
-        )
-        set_target_properties(${plugin_target} PROPERTIES
-            PREFIX ""
-            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/iop_test_plugins"
-            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/iop_test_plugins"
-        )
-    endforeach()
-endif()
-
 # Static library with test logic (no main), used by ps2xStudio
 add_library(ps2_test_function_table OBJECT
     src/test_function_table.cpp
@@ -83,17 +56,6 @@ target_link_libraries(ps2_test_lib PRIVATE
 
 if(UNIX AND NOT APPLE)
     target_link_libraries(ps2_test_lib PRIVATE ${CMAKE_DL_LIBS})
-endif()
-
-if(TARGET ps2_iop_fake_plugin)
-    target_compile_definitions(ps2_test_lib PRIVATE
-        PS2X_TEST_IOP_PLUGIN_DIR="$<TARGET_FILE_DIR:ps2_iop_fake_plugin>"
-    )
-    add_dependencies(ps2_test_lib
-        ps2_iop_fake_plugin
-        ps2_iop_bad_abi_plugin
-        ps2_iop_missing_symbol_plugin
-    )
 endif()
 
 add_executable(ps2x_tests

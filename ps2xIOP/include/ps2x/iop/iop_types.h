@@ -138,7 +138,6 @@ namespace ps2x::iop
     {
         std::string name;
         std::vector<uint32_t> sids;
-        bool profileSpecific = false;
         bool active = true;
         std::vector<DebugMetric> metrics;
     };
@@ -150,8 +149,6 @@ namespace ps2x::iop
         uint32_t emulatorLoadedModules = 0;
         uint32_t emulatorThreads = 0;
         uint32_t emulatorRpcServers = 0;
-        std::string activeProfile;
-        std::string activeProvider;
         std::vector<DebugService> services;
         std::vector<std::string> diagnostics;
     };

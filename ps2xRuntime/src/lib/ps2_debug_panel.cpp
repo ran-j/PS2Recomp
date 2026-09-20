@@ -1067,18 +1067,9 @@ namespace
         }
 
         ImGui::SeparatorText("ps2xIOP HLE services");
-        ImGui::Text("Profile: %s  provider: %s",
-                    iopSnapshot.activeProfile.empty()
-                        ? "<core only>"
-                        : iopSnapshot.activeProfile.c_str(),
-                    iopSnapshot.activeProvider.empty()
-                        ? "builtin"
-                        : iopSnapshot.activeProvider.c_str());
-
-        if (ImGui::BeginTable("iop_hle_services", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable))
+        if (ImGui::BeginTable("iop_hle_services", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable))
         {
             ImGui::TableSetupColumn("Service");
-            ImGui::TableSetupColumn("Layer");
             ImGui::TableSetupColumn("Active");
             ImGui::TableSetupColumn("SID");
             ImGui::TableSetupColumn("EE server");
@@ -1091,8 +1082,6 @@ namespace
                     ImGui::TableNextRow();
                     ImGui::TableNextColumn();
                     ImGui::TextUnformatted(service.name.c_str());
-                    ImGui::TableNextColumn();
-                    ImGui::TextUnformatted(service.profileSpecific ? "profile" : "core");
                     ImGui::TableNextColumn();
                     ImGui::TextUnformatted(service.active ? "yes" : "no");
                     ImGui::TableNextColumn();
@@ -1109,8 +1098,6 @@ namespace
                     ImGui::TableNextRow();
                     ImGui::TableNextColumn();
                     ImGui::TextUnformatted(service.name.c_str());
-                    ImGui::TableNextColumn();
-                    ImGui::TextUnformatted(service.profileSpecific ? "profile" : "core");
                     ImGui::TableNextColumn();
                     ImGui::TextUnformatted(service.active ? "yes" : "no");
                     ImGui::TableNextColumn();

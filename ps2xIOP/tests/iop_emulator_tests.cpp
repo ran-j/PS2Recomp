@@ -926,36 +926,33 @@ int main()
                 "IOP reset did not remove the registered RPC server")) return 1;
 
     constexpr uint32_t lotrSoundSid = 0x00012345u;
-    GameIdentity lotrIdentity{};
-    lotrIdentity.elfName = "SLUS_205.78";
-    std::string profileError;
-    if (!expect(iop.configure(lotrIdentity, &profileError),
-                "Could not configure the LotR IOP profile")) return 1;
     writeRpcServerIrx(host, 0x100u, lotrSoundSid);
     const ModuleLoadResult physicalSoundModule = iop.loadModuleBuffer(0x100u);
     if (!expect(physicalSoundModule.handled && physicalSoundModule.startResult == 0,
                 "Synthetic physical sound RPC server did not start")) return 1;
 
-    constexpr uint32_t soundSendAddress = 0x800u;
-    constexpr uint32_t soundReceiveAddress = 0x900u;
-    uint16_t emptySoundCommandCount = 0u;
-    std::memcpy(host.guest.data() + soundSendAddress,
-                &emptySoundCommandCount,
-                sizeof(emptySoundCommandCount));
-    std::fill_n(host.guest.data() + soundReceiveAddress, 32u, 0xA5u);
+    const uint32_t soundHandler[] = {
+        0x3C020001u, // lui v0, 1
+        0x34420400u, // ori v0, v0, 0x400 (registered server buffer)
+        0x03E00008u, // jr ra
+        0x00000000u, // nop
+    };
+    if (!expect(iop.writeMemory(0x00010300u, soundHandler, sizeof(soundHandler)),
+                "Could not install the physical sound RPC handler")) return 1;
+    constexpr uint32_t soundPayload = 0x1234ABCDu;
+    std::memcpy(host.guest.data() + 0x800u, &soundPayload, sizeof(soundPayload));
     RpcRequest soundRequest{};
     soundRequest.sid = lotrSoundSid;
-    soundRequest.send = {soundSendAddress, 32u};
-    soundRequest.receive = {soundReceiveAddress, 32u};
+    soundRequest.send = {0x800u, sizeof(soundPayload)};
+    soundRequest.receive = {0x900u, sizeof(soundPayload)};
+    const uint64_t soundInstructionsBefore = iop.debugSnapshot().emulatorInstructions;
     const RpcResult soundResult = iop.handleRpc(soundRequest);
-    uint32_t soundResponseCounter = 0u;
-    std::memcpy(&soundResponseCounter,
-                host.guest.data() + soundReceiveAddress + sizeof(uint32_t),
-                sizeof(soundResponseCounter));
-    if (!expect(soundResult.handled,
-                "LotR sound RPC was not handled")) return 1;
-    if (!expect(soundResponseCounter == 1u,
-                "Physical sound server bypassed the LotR compatibility stub")) return 1;
+    uint32_t soundResponse = 0u;
+    std::memcpy(&soundResponse, host.guest.data() + 0x900u, sizeof(soundResponse));
+    if (!expect(soundResult.handled && soundResponse == soundPayload,
+                "Physical sound RPC did not return its own payload")) return 1;
+    if (!expect(iop.debugSnapshot().emulatorInstructions > soundInstructionsBefore,
+                "Sound RPC did not execute the physical IOP handler")) return 1;
 
     constexpr uint32_t relocatableRpcSid = 0xA11CE001u;
     writeRelocatableRpcServerIrx(host, 0x100u);
@@ -997,6 +994,8 @@ int main()
     constexpr uint32_t eeDestination = 0x900u;
     const uint32_t transferPayload = 0x53494621u; // "SIF!"
     std::memcpy(host.guest.data() + eeSource, &transferPayload, sizeof(transferPayload));
+    if (!expect(iop.writeMemory(iopBuffer, &transferPayload, sizeof(transferPayload)),
+                "Could not initialize physical IOP memory")) return 1;
     iop.onSifTransfer({
         SifTransferKind::SetDma,
         SifTransferPhase::AfterCopy,
@@ -1014,8 +1013,12 @@ int main()
     });
     uint32_t stagedIopPayload = 0u;
     std::memcpy(&stagedIopPayload, host.guest.data() + iopBuffer, sizeof(stagedIopPayload));
-    if (!expect(stagedIopPayload == transferPayload,
-                "sceSifGetOtherData did not stage physical IOP memory for an EE copy")) return 1;
+    if (!expect(stagedIopPayload == 0u,
+                "SIF notification aliased physical IOP memory into EE RAM")) return 1;
+    uint32_t physicalIopPayload = 0u;
+    if (!expect(iop.readMemory(iopBuffer, &physicalIopPayload, sizeof(physicalIopPayload)) &&
+                    physicalIopPayload == transferPayload,
+                "SIF notification corrupted physical IOP memory")) return 1;
 
     iop.reset();
     constexpr uint32_t sifDmaDestination = 0xC00u;
@@ -1043,7 +1046,8 @@ int main()
         sizeof(uint32_t),
     });
     uint32_t lowPriorityMarker = 0u;
-    std::memcpy(&lowPriorityMarker, host.guest.data() + 0x00010400u, sizeof(lowPriorityMarker));
+    if (!expect(iop.readMemory(0x00010400u, &lowPriorityMarker, sizeof(lowPriorityMarker)),
+                "Could not read the IOP scheduling marker")) return 1;
     if (!expect(lowPriorityMarker == 1u,
                 "WaitVblankEnd returned immediately and starved a lower-priority IOP thread")) return 1;
 
@@ -1103,8 +1107,8 @@ int main()
         sizeof(uint32_t),
     });
     uint32_t cdvdCallbackReason = 0u;
-    std::memcpy(&cdvdCallbackReason, host.guest.data() + 0x000101C0u,
-                sizeof(cdvdCallbackReason));
+    if (!expect(iop.readMemory(0x000101C0u, &cdvdCallbackReason, sizeof(cdvdCallbackReason)),
+                "Could not read the physical CDVD callback result")) return 1;
     host.cdRoot.clear();
     std::filesystem::remove(virtualCdRoot, cdRootError);
     if (!expect(cdvdPvdRead.handled && cdvdPvdRead.startResult == 0,
@@ -1125,8 +1129,8 @@ int main()
         sizeof(uint32_t),
     });
     uint32_t cdvdSeekCallbackReason = 0u;
-    std::memcpy(&cdvdSeekCallbackReason, host.guest.data() + 0x000101C0u,
-                sizeof(cdvdSeekCallbackReason));
+    if (!expect(iop.readMemory(0x000101C0u, &cdvdSeekCallbackReason, sizeof(cdvdSeekCallbackReason)),
+                "Could not read the physical CDVD callback result")) return 1;
     if (!expect(cdvdSeek.handled && cdvdSeek.startResult == 1,
                 "sceCdSeek did not accept a valid LBN")) return 1;
     if (!expect(cdvdSeekCallbackReason == 4u,

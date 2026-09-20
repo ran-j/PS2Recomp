@@ -3,7 +3,6 @@
 #include "ps2x/iop/iop_host.h"
 #include "ps2x/iop/iop_types.h"
 
-#include <filesystem>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -22,10 +21,6 @@ namespace ps2x::iop
         IopSubsystem(IopSubsystem &&) noexcept;
         IopSubsystem &operator=(IopSubsystem &&) noexcept;
 
-        void setPluginSearchPaths(std::vector<std::filesystem::path> paths);
-        bool loadPlugins(std::string *error = nullptr);
-
-        bool configure(const GameIdentity &identity, std::string *error = nullptr);
         void reset();
 
         [[nodiscard]] ModuleLoadResult loadModule(std::string_view path, const void *arguments = nullptr, uint32_t argumentSize = 0);

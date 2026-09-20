@@ -483,14 +483,6 @@ PS2Runtime::PS2Runtime()
     m_iopSubsystem = std::make_unique<ps2x::iop::IopSubsystem>(*m_iopHost);
 
     m_eeScheduler = std::make_unique<EeScheduler>(*this);
-#if defined(PS2X_IOP_ENABLE_PLUGINS) && PS2X_IOP_ENABLE_PLUGINS && \
-    !defined(PLATFORM_VITA) && (defined(_WIN32) || defined(__linux__))
-    if (const char *applicationDirectory = GetApplicationDirectory();
-        applicationDirectory && applicationDirectory[0] != '\0')
-    {
-        m_iopSubsystem->setPluginSearchPaths({std::filesystem::path(applicationDirectory) / "iop_plugins"});
-    }
-#endif
 
     // Assign rather than memset: R5900Context's constructor zeroes itself and
     // then applies the COP0 reset values, which a memset here would discard.
@@ -570,11 +562,6 @@ PS2Runtime::~PS2Runtime()
     {
         std::cerr << "[~PS2Runtime] cleanup exception: unknown" << std::endl;
     }
-}
-
-void PS2Runtime::setIopPluginSearchPaths(std::vector<std::filesystem::path> paths)
-{
-    m_iopSubsystem->setPluginSearchPaths(std::move(paths));
 }
 
 ps2x::iop::ModuleLoadResult PS2Runtime::loadIopModule(std::string_view path, const void *arguments, uint32_t argumentSize)
@@ -741,15 +728,6 @@ bool PS2Runtime::initialize(const char *title)
             std::cerr << "Failed to bind runtime core subsystems" << std::endl;
             return false;
         }
-#if defined(PS2X_IOP_ENABLE_PLUGINS) && PS2X_IOP_ENABLE_PLUGINS && \
-    !defined(PLATFORM_VITA) && (defined(_WIN32) || defined(__linux__))
-        std::string pluginError;
-        if (!m_iopSubsystem->loadPlugins(&pluginError))
-        {
-            std::cerr << "Failed to load IOP plugins: " << pluginError << std::endl;
-            return false;
-        }
-#endif
 #if defined(PLATFORM_VITA)
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
 #else
@@ -1022,12 +1000,8 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
         std::cerr << "[ROM0] failed to configure profile: " << romError << std::endl;
         return false;
     }
-    std::string iopError;
-    if (!m_iopSubsystem->configure(identity, &iopError))
-    {
-        std::cerr << "[ps2xIOP] failed to configure profile: " << iopError << std::endl;
-        return false;
-    }
+
+    m_iopSubsystem->reset();
 
     ps2_game_overrides::applyMatching(*this,
                                       elfPath,
