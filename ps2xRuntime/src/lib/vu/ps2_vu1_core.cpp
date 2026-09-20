@@ -5,6 +5,7 @@
 #include "ps2_vu1_detail.h"
 
 #include <algorithm>
+#include <bit>
 #include <cfenv>
 #include <cmath>
 #include <cstdio>
@@ -857,10 +858,16 @@ void VU1Interpreter::progressXgkick()
         }
 
         const uint32_t qwordOffset = m_xgkick.copiedBytes;
-        for (uint32_t i = 0; i < 16u; ++i)
+        const uint32_t address = m_xgkick.sourceAddress + qwordOffset;
+        const uint32_t source = address % m_activeVuDataSize;
+        if (address <= UINT32_MAX - 15u && m_activeVuDataSize - source >= 16u)
         {
-            const uint32_t source = (m_xgkick.sourceAddress + m_xgkick.copiedBytes + i) % m_activeVuDataSize;
-            m_xgkick.packet[m_xgkick.copiedBytes + i] = m_activeVuData[source];
+            std::memcpy(m_xgkick.packet.data() + qwordOffset, m_activeVuData + source, 16u);
+        }
+        else
+        {
+            for (uint32_t i = 0; i < 16u; ++i)
+                m_xgkick.packet[qwordOffset + i] = m_activeVuData[(address + i) % m_activeVuDataSize];
         }
         m_xgkick.copiedBytes += 16u;
 
@@ -1005,10 +1012,10 @@ uint64_t VU1Interpreter::calculatePairReadyCycle(const DecodedInstructionPair &d
                     ready = std::max(ready, m_vfReady[access.reg][component]);
             }
         }
-        for (uint32_t reg = 1; reg < m_viReady.size(); ++reg)
+        for (uint32_t regs = usage->viRead & 0xFFFEu; regs != 0u; regs &= regs - 1u)
         {
-            if ((usage->viRead & (1u << reg)) != 0u)
-                ready = std::max(ready, m_viReady[reg]);
+            const uint32_t reg = static_cast<uint32_t>(std::countr_zero(regs));
+            ready = std::max(ready, m_viReady[reg]);
         }
         for (uint32_t component = 0; component < 4u; ++component)
         {
@@ -1063,10 +1070,10 @@ void VU1Interpreter::markPairWrites(const DecodedInstructionPair &decoded)
         }
     }
 
-    for (uint32_t reg = 1; reg < m_viReady.size(); ++reg)
+    for (uint32_t regs = decoded.lowerUsage.viWrite & 0xFFFEu; regs != 0u; regs &= regs - 1u)
     {
-        if ((decoded.lowerUsage.viWrite & (1u << reg)) != 0u)
-            m_viReady[reg] = m_cycle + (decoded.lowerUsage.viLatency != 0u ? decoded.lowerUsage.viLatency : decoded.lowerUsage.latency);
+        const uint32_t reg = static_cast<uint32_t>(std::countr_zero(regs));
+        m_viReady[reg] = m_cycle + (decoded.lowerUsage.viLatency != 0u ? decoded.lowerUsage.viLatency : decoded.lowerUsage.latency);
     }
     for (uint32_t component = 0; component < 4u; ++component)
     {
@@ -1633,9 +1640,12 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     const bool useVuRounding = std::fesetround(FE_TOWARDZERO) == 0;
     const uint64_t budgetEnd = m_cycle + maxCycles;
     bool programEnded = false;
+    // Resume may enter with pending work. Subsequent cycle boundaries already
+    // retire pipelines in advanceOneCycle(), before PATH1 reads VU memory.
+    if (m_cycle < budgetEnd && !m_stopRequested)
+        commitReadyPipelines();
     while (m_cycle < budgetEnd && !m_stopRequested)
     {
-        commitReadyPipelines();
         if (m_state.pc + 8u > codeSize)
             break;
 
@@ -1660,17 +1670,10 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         if (m_cycle >= budgetEnd)
             break;
 
-        uint8_t writtenVi = 0u;
-        int32_t oldVi = 0;
-        for (uint32_t reg = 1; reg < 16u; ++reg)
-        {
-            if ((decoded.lowerUsage.viWrite & (1u << reg)) != 0u)
-            {
-                writtenVi = static_cast<uint8_t>(reg);
-                oldVi = m_state.vi[reg];
-                break;
-            }
-        }
+        const uint32_t writtenViMask = decoded.lowerUsage.viWrite & 0xFFFEu;
+        const uint8_t writtenVi = writtenViMask != 0u
+            ? static_cast<uint8_t>(std::countr_zero(writtenViMask)) : 0u;
+        const int32_t oldVi = writtenVi != 0u ? m_state.vi[writtenVi] : 0;
 
         const VfAccess upperWrite = decoded.upperUsage.vfWrite;
         const VfAccess lowerWrite = decoded.lowerUsage.vfWrite;

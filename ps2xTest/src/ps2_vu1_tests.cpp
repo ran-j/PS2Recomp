@@ -634,6 +634,52 @@ void register_ps2_vu1_tests()
                      "ILW-to-IALU dependency should account for all stalled cycles");
         });
 
+        tc.Run("integer dependency masks cover every VI source and destination", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+            if (!fx.code || !fx.data)
+                return;
+            const uint32_t first = 100u, second = 200u;
+            std::memcpy(fx.data, &first, sizeof(first));
+            std::memcpy(fx.data + 16u, &second, sizeof(second));
+            for (uint8_t left = 0u; left < 16u; ++left)
+            {
+                for (uint8_t right = 0u; right < 16u; ++right)
+                {
+                    const uint8_t dest = (left + right) & 15u;
+                    writeTrackedVuInstructionPair(fx, 0u, makeVuIlw(0x8u, left, 0u, 0), kVuUpperNop);
+                    writeTrackedVuInstructionPair(fx, 8u, makeVuIlw(0x8u, right, 0u, 1), kVuUpperNop);
+                    writeTrackedVuInstructionPair(fx, 16u, makeVuLowerDirect(0x30u, left, right, dest),
+                                                  kVuUpperNop | 0x40000000u);
+                    writeTrackedVuInstructionPair(fx, 24u, 0u, kVuUpperNop);
+                    VU1Interpreter vu;
+                    for (uint32_t reg = 1u; reg < 16u; ++reg)
+                        vu.state().vi[reg] = static_cast<int32_t>(reg * 7u);
+                    vu.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                               fx.gs, &fx.mem, 0u, 0u, 0u, 64u);
+                    const int32_t leftValue = left == 0u ? 0 : (left == right ? 200 : 100);
+                    const int32_t rightValue = right == 0u ? 0 : 200;
+                    for (uint32_t reg = 0u; reg < 16u; ++reg)
+                    {
+                        int32_t expected = static_cast<int32_t>(reg * 7u);
+                        if (reg == left)
+                            expected = 100;
+                        if (reg == right)
+                            expected = 200;
+                        if (reg == dest)
+                            expected = leftValue + rightValue;
+                        if (reg == 0u)
+                            expected = 0;
+                        t.Equals(vu.state().vi[reg], expected, "Only the named VI registers may change");
+                    }
+                    const uint64_t expectedCycles = right != 0u ? 7u : (left != 0u ? 6u : 4u);
+                    t.Equals(vu.state().cycles, expectedCycles, "IADD must wait for its latest nonzero VI input");
+                    t.Equals(vu.state().pc, 32u, "The end-bit delay slot must complete");
+                }
+            }
+        });
+
         tc.Run("DIV and SQRT update the Q register from selected vector components", [](TestCase &t)
         {
             Vu1Fixture fx;
@@ -1134,6 +1180,50 @@ void register_ps2_vu1_tests()
             fx.mem.write64(PS2_VU1_CODE_BASE, packVuInstructionPair(makeVuIaddiu(1u, 0u, 2), kVuUpperNop));
             vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 0u, 1u);
             t.Equals(vu1.state().vi[1], 2, "second execution should rebuild decode after the direct write");
+        });
+
+        tc.Run("XGKICK preserves qword bytes across arbitrary memory boundaries", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+            if (!fx.code || !fx.data)
+                return;
+            writeTrackedVuInstructionPair(fx, 0u, makeVuLowerSpecial(0x6Cu, 1u), kVuUpperNop);
+            writeTrackedVuInstructionPair(fx, 8u, 0u, kVuUpperNop);
+            writeTrackedVuInstructionPair(fx, 16u, 0u, kVuUpperNop);
+            std::vector<uint8_t> expected(32u, 0u), captured;
+            const uint64_t tag = makeGifTag(1u, GIF_FMT_IMAGE, 0u, true);
+            std::memcpy(expected.data(), &tag, sizeof(tag));
+            for (uint32_t i = 16u; i < 32u; ++i)
+                expected[i] = static_cast<uint8_t>(0xA0u + i);
+            fx.mem.setGifPacketCallback([&](const uint8_t *packet, uint32_t size)
+            {
+                captured.assign(packet, packet + size);
+            });
+            for (const uint32_t size : {32u, 33u, 47u, 64u, uint32_t{PS2_VU1_DATA_SIZE}})
+            {
+                const uint32_t source = ((size - 1u) / 16u) * 16u;
+                std::vector<uint8_t> data(size + 16u, 0xCDu);
+                for (uint32_t i = 0; i < expected.size(); ++i)
+                    data[(source + i) % size] = expected[i];
+                VU1Interpreter vu;
+                vu.state().vi[1] = static_cast<int32_t>(source / 16u);
+                captured.clear();
+                vu.execute(fx.code, PS2_VU1_CODE_SIZE, data.data(), size,
+                           fx.gs, &fx.mem, 0u, 0u, 0u, 1u);
+                t.IsTrue(captured.empty(), "The first cycle must transfer only the tag");
+                vu.resume(fx.code, PS2_VU1_CODE_SIZE, data.data(), size,
+                          fx.gs, &fx.mem, 0u, 0u, 0u);
+                t.Equals(vu.state().cycles, uint64_t{1u}, "A zero-cycle resume must not advance PATH1");
+                t.IsTrue(captured.empty(), "A zero-cycle resume must not emit the packet");
+                vu.resume(fx.code, PS2_VU1_CODE_SIZE, data.data(), size,
+                          fx.gs, &fx.mem, 0u, 0u, 1u);
+                t.IsTrue(captured.empty(), "The payload must still be pending at cycle two");
+                vu.resume(fx.code, PS2_VU1_CODE_SIZE, data.data(), size,
+                          fx.gs, &fx.mem, 0u, 0u, 1u);
+                t.Equals(vu.state().cycles, uint64_t{3u}, "The payload must finish at cycle three");
+                t.IsTrue(captured == expected, "Every wrapped tag and payload byte must match");
+            }
         });
 
         tc.Run("XGKICK sends a VU memory GIF packet through PATH1", [](TestCase &t)
