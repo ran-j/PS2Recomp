@@ -1,4 +1,5 @@
 #include "runtime/ps2_vu1.h"
+#include "runtime/ps2_vu_flags.h"
 #include "runtime/gs/ps2_gif_arbiter.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/ps2_memory.h"
@@ -494,25 +495,7 @@ void VU1Interpreter::updateFmacFlags(const uint8_t laneFlags[4], uint8_t dest,
     if (dest == 0u)
         return;
 
-    uint32_t mac = 0u;
-    uint32_t status = 0u;
-    for (uint32_t component = 0; component < 4u; ++component)
-    {
-        const uint8_t lane = laneForComponent(component);
-        if ((dest & lane) == 0u)
-            continue;
-
-        const uint32_t flags = laneFlags[component];
-        if ((flags & 0x1u) != 0u)
-            mac |= lane;
-        if ((flags & 0x2u) != 0u)
-            mac |= static_cast<uint32_t>(lane) << 4;
-        if ((flags & 0x4u) != 0u)
-            mac |= static_cast<uint32_t>(lane) << 8;
-        if ((flags & 0x8u) != 0u)
-            mac |= static_cast<uint32_t>(lane) << 12;
-        status |= flags;
-    }
+    const auto flags = VUFlags::packFmac(laneFlags, dest);
 
     FlagPipelineEntry *entry = nullptr;
     for (FlagPipelineEntry &candidate : m_flagPipeline)
@@ -529,12 +512,12 @@ void VU1Interpreter::updateFmacFlags(const uint8_t laneFlags[4], uint8_t dest,
         return;
     }
 
-    *entry = {};
+    std::memset(entry, 0, sizeof(*entry));
     entry->valid = true;
     entry->issueCycle = m_cycle;
     entry->readyCycle = m_cycle + kFmacLatency;
-    entry->mac = mac;
-    entry->status = status;
+    entry->mac = flags.mac;
+    entry->status = flags.status;
     entry->extraSticky = extraSticky;
     entry->writesMac = true;
     entry->writesStatus = true;
