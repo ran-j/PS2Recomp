@@ -1192,6 +1192,30 @@ void register_ps2_runtime_kernel_tests()
                      "FindAddress should return address of first matching word");
         });
 
+        tc.Run("numeric syscall 0x79/0x7A route SifSetReg/SifGetReg", [](TestCase &t)
+        {
+            TestEnv env;
+            constexpr uint32_t kSifReg = 0x80000000u;
+            constexpr uint32_t kValue = 0x11223344u;
+
+            setRegU32(env.ctx, 4, kSifReg);
+            setRegU32(env.ctx, 5, kValue);
+            t.IsTrue(callSyscall(0x79u, env.rdram.data(), &env.ctx, &env.runtime),
+                     "SifSetReg syscall should dispatch");
+
+            setRegU32(env.ctx, 4, kSifReg);
+            t.IsTrue(callSyscall(0x7Au, env.rdram.data(), &env.ctx, &env.runtime),
+                     "SifGetReg syscall should dispatch");
+            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)),
+                     kValue,
+                     "SifGetReg should return the value written by SifSetReg");
+
+            // Restore the shared SIF register state for other tests.
+            setRegU32(env.ctx, 4, kSifReg);
+            setRegU32(env.ctx, 5, 0u);
+            callSyscall(0x79u, env.rdram.data(), &env.ctx, &env.runtime);
+        });
+
         tc.Run("numeric syscall 0x83 supports KSEG aliases", [](TestCase &t)
         {
             TestEnv env;
