@@ -1311,6 +1311,55 @@ void register_ps2_vu1_tests()
                      "XGKICK resource stalls should consume VU cycles");
         });
 
+        tc.Run("XGKICK reuses storage across long short and growing packets", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+            if (!fx.code || !fx.data) return;
+            const uint32_t addresses[] = {0u, 8192u, 12288u};
+            const uint32_t sizes[] = {4096u, 32u, 80u};
+            const std::vector<uint64_t> expectedCycles{511u, 514u, 523u};
+            std::vector<std::vector<uint8_t>> expected, captured;
+            std::vector<uint64_t> capturedCycles;
+            for (uint32_t i = 0; i < 3u; ++i)
+            {
+                expected.emplace_back(sizes[i], 0u);
+                auto &packet = expected.back();
+                const uint64_t tag = makeGifTag(static_cast<uint16_t>(sizes[i] / 16u - 1u), GIF_FMT_IMAGE, 0u, true);
+                std::memcpy(packet.data(), &tag, sizeof(tag));
+                for (uint32_t byte = 16u; byte < sizes[i]; ++byte)
+                    packet[byte] = static_cast<uint8_t>(byte * 13u + i * 71u);
+                std::memcpy(fx.data + addresses[i], packet.data(), packet.size());
+                writeVuInstructionPair(fx.code, i * 8u, makeVuLowerSpecial(0x6Cu, static_cast<uint8_t>(i + 1u)), kVuUpperNop);
+            }
+            writeVuInstructionPair(fx.code, 24u, 0u, kVuUpperNop | 0x40000000u);
+            writeVuInstructionPair(fx.code, 32u, 0u, kVuUpperNop);
+            VU1Interpreter *active = nullptr;
+            fx.mem.setGifPacketCallback([&](const uint8_t *packet, uint32_t size)
+            {
+                captured.emplace_back(packet, packet + size);
+                capturedCycles.push_back(active->state().cycles);
+            });
+            for (const uint32_t budget : {4096u, 1u, 3u, 8u, 64u})
+            {
+                captured.clear();
+                capturedCycles.clear();
+                VU1Interpreter vu;
+                active = &vu;
+                for (uint32_t i = 0; i < 3u; ++i)
+                    vu.state().vi[i + 1u] = static_cast<int32_t>(addresses[i] / 16u);
+                vu.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                           fx.gs, &fx.mem, 0u, 0u, 0u, budget);
+                for (uint32_t calls = 0u; captured.size() < 3u && calls < 4096u; ++calls)
+                    vu.resume(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                              fx.gs, &fx.mem, 0u, 0u, budget);
+                t.IsTrue(captured == expected, "Every packet must have exact new bytes and length, with no stale suffix");
+                t.IsTrue(capturedCycles == expectedCycles, "Back-to-back transfers must retain their exact completion cycles");
+                t.Equals(vu.state().cycles, uint64_t{523u}, "Slicing must not change final cycle count");
+                active = nullptr;
+            }
+        });
+
         tc.Run("synthetic Code Veronica text packet preserves black-frame PATH1 data", [](TestCase &t)
         {
             PS2Memory mem;

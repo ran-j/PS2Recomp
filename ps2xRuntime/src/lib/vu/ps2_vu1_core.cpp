@@ -932,7 +932,12 @@ void VU1Interpreter::startXgkick(uint32_t qwordAddress)
         return;
 
     const uint32_t sourceAddress = (qwordAddress * 16u) % m_activeVuDataSize;
-    m_xgkick = {};
+    // Only the copied prefix is read; each qword is overwritten before publication.
+    // Keep the packet storage instead of clearing and copying a 64 KiB temporary.
+    m_xgkick.totalBytes = 0u;
+    m_xgkick.copiedBytes = 0u;
+    m_xgkick.currentTagEnd = 0u;
+    m_xgkick.currentTagEop = false;
     m_xgkick.active = true;
     m_xgkick.sourceAddress = sourceAddress;
     m_xgkick.cycleCredit = 1u; // XGKICK's issue cycle counts toward PATH1.
