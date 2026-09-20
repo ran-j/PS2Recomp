@@ -6,6 +6,8 @@
 #include "runtime/ps2_vu1.h"
 
 #include <cmath>
+#include <chrono>
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -217,6 +219,130 @@ void register_ps2_vu1_tests()
 {
     MiniTest::Case("PS2VU1", [](TestCase &tc)
     {
+        tc.Run("upper NOP preserves register bits and flags", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+            if (!fx.code || !fx.data)
+                return;
+            const uint32_t operands[] = {0x00000001u, 0x80000001u, 0x7FC01234u, 0xFF800000u};
+            VU1Interpreter vu1;
+            auto &state = vu1.state();
+            std::memcpy(state.vf[1], operands, sizeof(operands));
+            std::memcpy(state.vf[2], operands, sizeof(operands));
+            std::memcpy(state.acc, operands, sizeof(operands));
+            state.mac = 0x1234u;
+            state.status = 0xABCu;
+            state.clip = 0x123456u;
+            const uint32_t nop = makeVuUpperSpecial(0x2Fu, 0xFu, 2u, 1u);
+            writeTrackedVuInstructionPair(fx, 0u, 0u, nop | 0x40000000u);
+            writeTrackedVuInstructionPair(fx, 8u, 0u, nop);
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                        fx.gs, &fx.mem, 0u, 0u, 0u, 32u);
+            t.IsTrue(!state.ebit, "NOP must retain end-bit completion handling");
+            t.Equals(state.pc, 16u, "NOP end-bit delay slot must execute");
+            t.Equals(state.cycles, uint64_t{2u}, "NOP pairs must consume two cycles");
+            t.IsTrue(std::memcmp(state.vf[1], operands, sizeof(operands)) == 0,
+                     "NOP must preserve its encoded source register bits");
+            t.IsTrue(std::memcmp(state.vf[2], operands, sizeof(operands)) == 0,
+                     "NOP must preserve its encoded target register bits");
+            t.IsTrue(std::memcmp(state.acc, operands, sizeof(operands)) == 0,
+                     "NOP must preserve accumulator bits");
+            t.Equals(state.mac, 0x1234u, "NOP must preserve MAC flags");
+            t.Equals(state.status, 0xABCu, "NOP must preserve status flags");
+            t.Equals(state.clip, 0x123456u, "NOP must preserve clip flags");
+        });
+
+        tc.Run("VU arithmetic workload records registers flags and memory", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+            if (!fx.code || !fx.data)
+                return;
+            for (uint32_t index = 0u; index < 128u; ++index)
+            {
+                const uint8_t mask = static_cast<uint8_t>((index % 15u) + 1u);
+                const uint8_t fs = static_cast<uint8_t>(1u + index % 8u);
+                const uint8_t ft = static_cast<uint8_t>(9u + index % 8u);
+                uint32_t upper = kVuUpperNop;
+                uint32_t lower = 0u;
+                if (index < 48u)
+                    upper = makeVuUpper(static_cast<uint8_t>(index), mask, ft, fs,
+                                        static_cast<uint8_t>(17u + index % 12u));
+                else if (index < 96u)
+                {
+                    const auto special = static_cast<uint8_t>(index - 48u);
+                    if (special != 0x2Bu) // Reserved upper opcode.
+                        upper = makeVuUpperSpecial(special, mask, ft, fs);
+                }
+                else if (index < 126u)
+                    lower = (index & 1u) != 0u
+                        ? makeVuSq(mask, static_cast<uint8_t>(17u + index % 12u), 0u,
+                                   static_cast<int16_t>(index - 96u))
+                        : makeVuLq(mask, ft, 0u, static_cast<int16_t>(index - 96u));
+                if (index == 126u)
+                    upper |= 0x40000000u;
+                writeTrackedVuInstructionPair(fx, index * 8u, lower, upper);
+            }
+            VU1Interpreter vu1;
+            uint32_t random = 0x162EA971u;
+            auto next = [&]() { random = random * 1664525u + 1013904223u; return random; };
+            uint64_t hash = 14695981039346656037ull;
+            auto absorb = [&](const void *data, size_t size)
+            {
+                const auto *bytes = static_cast<const uint8_t *>(data);
+                for (size_t index = 0u; index < size; ++index)
+                    hash = (hash ^ bytes[index]) * 1099511628211ull;
+            };
+            uint64_t executeNs = 0u;
+            for (uint32_t round = 0u; round < 1024u; ++round)
+            {
+                vu1.reset();
+                auto &state = vu1.state();
+                for (uint32_t reg = 1u; reg < 32u; ++reg)
+                for (uint32_t lane = 0u; lane < 4u; ++lane)
+                {
+                    const uint32_t bits = next();
+                    std::memcpy(&state.vf[reg][lane], &bits, sizeof(bits));
+                }
+                for (float &value : state.acc)
+                {
+                    const uint32_t bits = next();
+                    std::memcpy(&value, &bits, sizeof(bits));
+                }
+                const uint32_t qBits = next();
+                const uint32_t iBits = next();
+                std::memcpy(&state.q, &qBits, sizeof(qBits));
+                std::memcpy(&state.i, &iBits, sizeof(iBits));
+                for (uint32_t offset = 0u; offset < PS2_VU1_DATA_SIZE; offset += 4u)
+                {
+                    const uint32_t bits = next();
+                    std::memcpy(fx.data + offset, &bits, sizeof(bits));
+                }
+                const auto start = std::chrono::steady_clock::now();
+                vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                            fx.gs, &fx.mem, 0u, 0u, 0u, 4096u);
+                executeNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - start).count());
+                t.IsTrue(!state.ebit, "The workload must finish its end-bit delay slot");
+                t.Equals(state.pc, 1024u, "All 128 instruction pairs must execute");
+                if (state.ebit || state.pc != 1024u)
+                    return;
+                absorb(state.vf, sizeof(state.vf));
+                absorb(state.vi, sizeof(state.vi));
+                absorb(state.acc, sizeof(state.acc));
+                absorb(&state.q, sizeof(state.q));
+                absorb(&state.i, sizeof(state.i));
+                absorb(&state.mac, sizeof(state.mac));
+                absorb(&state.clip, sizeof(state.clip));
+                absorb(&state.status, sizeof(state.status));
+                absorb(&state.cycles, sizeof(state.cycles));
+                absorb(fx.data, PS2_VU1_DATA_SIZE);
+            }
+            std::printf("[vu-arithmetic-workload] rounds=1024 hash=%016llx execute-ms=%.3f\n",
+                        static_cast<unsigned long long>(hash), static_cast<double>(executeNs) / 1000000.0);
+        });
+
         tc.Run("upper ADD applies the destination mask", [](TestCase &t)
         {
             Vu1Fixture fx;

@@ -24,6 +24,8 @@ namespace
 void VU1Interpreter::execUpper(uint32_t instr)
 {
     m_currentUpperInstruction = instr;
+    if ((instr & 0x7FFu) == 0x2FFu)
+        return; // NOP does not read or normalize arithmetic operands.
     uint8_t dest = DEST(instr);
     uint8_t ft = FT(instr);
     uint8_t fs = FS(instr);
