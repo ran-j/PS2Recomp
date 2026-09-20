@@ -411,6 +411,12 @@ uint32_t PS2Memory::advanceEeTimers(uint64_t eeCycles) noexcept
         return 0u;
     }
 
+    constexpr uint32_t kGifStat = 0x10003020u;
+    constexpr uint32_t kGifFqcMask = 0x1F000000u;
+    auto gifStatIt = m_ioRegisters.find(kGifStat);
+    if (gifStatIt != m_ioRegisters.end())
+        gifStatIt->second &= ~kGifFqcMask;
+
     uint32_t interruptMask = 0u;
     for (size_t index = 0; index < m_eeTimers.size(); ++index)
     {
@@ -1064,6 +1070,21 @@ void PS2Memory::write128(uint32_t address, __m128i value)
     const bool scratch = isScratchpad(address);
     uint32_t physAddr = translateAddress(address);
 
+    if (!scratch && physAddr == 0x10004000u) // VIF0_FIFO
+    {
+        alignas(16) uint8_t fifoData[16];
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(fifoData), value);
+        processVIF0Data(fifoData, sizeof(fifoData));
+        return;
+    }
+    if (!scratch && physAddr == 0x10005000u) // VIF1_FIFO
+    {
+        alignas(16) uint8_t fifoData[16];
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(fifoData), value);
+        processVIF1Data(fifoData, sizeof(fifoData));
+        return;
+    }
+
     if (scratch)
     {
         inRange(physAddr, sizeof(__m128i), PS2_SCRATCHPAD_SIZE, "write128 scratchpad", address);
@@ -1117,7 +1138,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
         case kEeTimerModeOffset:
         {
             const uint32_t previousMode = timer.mode;
-            const uint32_t status = (previousMode & kEeTimerModeStatusMask) &~(value & kEeTimerModeStatusMask);
+            const uint32_t status = (previousMode & kEeTimerModeStatusMask) & ~(value & kEeTimerModeStatusMask);
             timer.mode = (value & kEeTimerModeConfigMask) | status;
             if (((previousMode ^ timer.mode) & (kEeTimerModeClksMask | kEeTimerModeCue)) != 0u)
             {
@@ -1206,9 +1227,13 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
         case 0x10003C10u:     // VIF1_FBRST
             if (value & 0x1u) // RST
             {
+                const bool wasPath3Masked = m_path3Masked;
                 std::memset(&vif1_regs, 0, sizeof(vif1_regs));
                 m_vif1PendingPath2ImageQwc = 0u;
                 m_vif1PendingPath2DirectHl = false;
+                m_path3Masked = false;
+                if (wasPath3Masked)
+                    flushMaskedPath3Packets();
             }
             if (value & 0x8u) // STC
             {
@@ -1281,8 +1306,12 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
             const uint32_t qwc = m_ioRegisters[channelBase + 0x20];
             m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
 
-            if ((channelBase == 0x1000A000u || channelBase == 0x10009000u || channelBase == 0x10008000u) &&
-                (m_gsVRAM || channelBase == 0x10008000u))
+            if (tryProcessScratchpadDma(channelBase, value))
+            {
+                return true;
+            }
+
+            if ((channelBase == 0x1000A000u || channelBase == 0x10009000u || channelBase == 0x10008000u) && (m_gsVRAM || channelBase == 0x10008000u))
             {
                 auto enqueueTransfer = [&](uint32_t srcAddr, uint32_t qwCount)
                 {
@@ -1353,7 +1382,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         }
                     };
 
-                    auto appendCompactVif1TagData = [&](uint32_t localTagAddr, uint32_t qwCount)
+                    auto appendVifTagData = [&](uint32_t localTagAddr)
                     {
                         uint32_t tagPhys = 0u;
                         const bool tagScratch = isScratchpad(localTagAddr);
@@ -1364,10 +1393,14 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         if (tagPhys + 16u > localMax)
                             return;
 
-                        // VIF packet helpers embed 8 bytes of VIF stream in the DMAtag's upper half.
+                        // CHCR.TTE sends the DMAtag's upper 64 bits to the channel before
+                        // the tag payload. VIF chains use those bytes for two VIFcodes.
                         chainBuf.insert(chainBuf.end(), localBase + tagPhys + 8u, localBase + tagPhys + 16u);
-                        appendData(localTagAddr + 16u, qwCount);
                     };
+
+                    const bool isVifChannel =
+                        channelBase == 0x10009000u || channelBase == 0x10008000u;
+                    const bool transferTagData = isVifChannel && (chcr & 0x40u) != 0u;
 
                     int tagsProcessed = 0;
                     uint32_t lastTagUpper = (chcr >> 16) & 0xFFFFu;
@@ -1477,19 +1510,11 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             break;
                         }
 
-                        const bool compactVifLocalTag =
-                            (channelBase == 0x10009000u || channelBase == 0x10008000u) &&
-                            (id == 1u || id == 2u || id == 5u || id == 6u || id == 7u);
-                        if (compactVifLocalTag)
-                            appendCompactVif1TagData(currentTagAddr, 0u);
+                        if (transferTagData)
+                            appendVifTagData(currentTagAddr);
 
                         if (hasPayload)
-                        {
-                            if (compactVifLocalTag)
-                                appendData(currentTagAddr + 16u, tagQwc);
-                            else
-                                appendData(dataAddr, tagQwc);
-                        }
+                            appendData(dataAddr, tagQwc);
                         if (irq && tieEnabled)
                             endChain = true;
                         if (endChain)
@@ -1559,9 +1584,101 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
     return false;
 }
 
+bool PS2Memory::tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr)
+{
+    static constexpr uint32_t kSprFromChannel = 0x1000D000u;
+    static constexpr uint32_t kSprToChannel = 0x1000D400u;
+    if (channelBase != kSprFromChannel && channelBase != kSprToChannel)
+        return false;
+
+    const uint32_t mode = (chcr >> 2u) & 0x3u;
+    if (mode != 0u)
+        return false;
+
+    const uint32_t qwc = m_ioRegisters[channelBase + 0x20u] & 0xFFFFu;
+    const uint32_t byteCount = qwc * 16u;
+    const uint32_t originalMadr = m_ioRegisters[channelBase + 0x10u] & 0x7FFFFFF0u;
+    const uint32_t originalSadr = m_ioRegisters[channelBase + 0x80u] & 0x3FF0u;
+
+    uint32_t mainOffset = 0u;
+    try
+    {
+        mainOffset = translateAddress(originalMadr);
+    }
+    catch (const std::exception &)
+    {
+        return false;
+    }
+
+    if (mainOffset > PS2_RAM_SIZE || byteCount > PS2_RAM_SIZE - mainOffset)
+        return false;
+
+    const bool fromScratchpad = channelBase == kSprFromChannel;
+    uint32_t scratchOffset = originalSadr;
+    uint32_t bytesLeft = byteCount;
+    uint32_t copied = 0u;
+    while (bytesLeft != 0u)
+    {
+        const uint32_t scratchChunk = PS2_SCRATCHPAD_SIZE - scratchOffset;
+        const uint32_t chunk = std::min(bytesLeft, scratchChunk);
+        if (fromScratchpad)
+        {
+            std::memcpy(m_rdram + mainOffset + copied, m_scratchpad + scratchOffset, chunk);
+            markModified(mainOffset + copied, chunk);
+        }
+        else
+        {
+            std::memcpy(m_scratchpad + scratchOffset, m_rdram + mainOffset + copied, chunk);
+        }
+
+        copied += chunk;
+        bytesLeft -= chunk;
+        scratchOffset = (scratchOffset + chunk) & (PS2_SCRATCHPAD_SIZE - 1u);
+    }
+
+    m_ioRegisters[channelBase + 0x10u] = (originalMadr + byteCount) & 0x7FFFFFF0u;
+    m_ioRegisters[channelBase + 0x20u] = 0u;
+    m_ioRegisters[channelBase + 0x80u] = (originalSadr + byteCount) & 0x3FF0u;
+    completeDmacChannel(channelBase, fromScratchpad ? 8u : 9u);
+    return true;
+}
+
+void PS2Memory::completeDmacChannel(uint32_t channelBase, uint32_t cause)
+{
+    static constexpr uint32_t kDStat = 0x1000E010u;
+    m_ioRegisters[channelBase] &= ~0x100u;
+
+    uint32_t dstat = m_ioRegisters.count(kDStat) ? m_ioRegisters[kDStat] : 0u;
+    dstat |= 1u << cause;
+    const uint32_t status = dstat & 0x3FFu;
+    const uint32_t mask = (dstat >> 16u) & 0x3FFu;
+    if ((status & mask) != 0u)
+        dstat |= 1u << 31u;
+    else
+        dstat &= ~(1u << 31u);
+    m_ioRegisters[kDStat] = dstat;
+    queueCompletedDmacCause(cause);
+}
+
 void PS2Memory::processPendingTransfers()
 {
     const bool hadGif = !m_pendingGifTransfers.empty();
+    uint32_t observedGifQwc = 0u;
+    for (const auto &transfer : m_pendingGifTransfers)
+    {
+        const uint64_t transferQwc = !transfer.chainData.empty()
+                                         ? (transfer.chainData.size() / 16u)
+                                         : transfer.qwc;
+        observedGifQwc = static_cast<uint32_t>(std::min<uint64_t>(16u, static_cast<uint64_t>(observedGifQwc) + transferQwc));
+    }
+    if (observedGifQwc != 0u)
+    {
+        constexpr uint32_t kGifStat = 0x10003020u;
+        constexpr uint32_t kGifFqcMask = 0x1F000000u;
+        uint32_t &gifStat = m_ioRegisters[kGifStat];
+        gifStat = (gifStat & ~kGifFqcMask) | (observedGifQwc << 24u);
+    }
+
     for (size_t idx = 0; idx < m_pendingGifTransfers.size(); ++idx)
     {
         auto &p = m_pendingGifTransfers[idx];
@@ -2221,6 +2338,23 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
         }
         return val;
     }
+
+    if (address == 0x10003020u) // GIF_STAT
+    {
+        uint32_t stat = m_ioRegisters.count(address) ? m_ioRegisters[address] : 0u;
+        const uint32_t mode = m_ioRegisters.count(0x10003010u) ? m_ioRegisters[0x10003010u] : 0u;
+        const uint32_t ctrl = m_ioRegisters.count(0x10003000u) ? m_ioRegisters[0x10003000u] : 0u;
+
+        // M3R and IMT mirror GIF_MODE, PSE mirrors GIF_CTRL, and M3P is the
+        // effective PATH3 mask controlled by the VIF1 MSKPATH3 command.
+        stat = (stat & ~0xFu) |
+               (mode & 0x1u) |
+               (m_path3Masked ? 0x2u : 0u) |
+               (mode & 0x4u) |
+               (ctrl & 0x8u);
+        return stat;
+    }
+
     if (address >= 0x10000000 && address < 0x10010000)
     {
         if (address >= 0x10008000 && address < 0x1000F000)

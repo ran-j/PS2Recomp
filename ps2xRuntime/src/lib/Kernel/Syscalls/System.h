@@ -16,7 +16,6 @@ namespace ps2_syscalls
     void SetOsdConfigParam(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void SetOsdConfigParam2(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void GetOsdConfigParam2(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
-    void GetRomName(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void SifLoadElfPart(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifLoadElf(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifLoadElfPart(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);

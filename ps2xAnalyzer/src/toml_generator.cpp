@@ -138,9 +138,9 @@ namespace ps2recomp
         }
         file << "]\n\n";
 
-        file << "# Detected library-like functions without runtime handlers.\n";
-        file << "# This is informational only; PS2Recomp ignores this list and recompiles them normally.\n";
-        file << "untracked_stubs = [\n";
+        file << "# Guest functions without runtime handlers that may be referenced by address.\n";
+        file << "# PS2Recomp keeps their guest implementation and exposes exact callable entries.\n";
+        file << "entry_points = [\n";
         for (const auto &func : untrackedStubEntries)
         {
             file << "  \"" << func << "\",\n";

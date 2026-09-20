@@ -1,4 +1,5 @@
 #include "ps2recomp/elf_parser.h"
+#include "ps2recomp/instructions.h"
 #include "ps2recomp/recompiler_reporter.h"
 #include "ps2recomp/types.h"
 #include <iostream>
@@ -116,6 +117,8 @@ namespace
 
 namespace
 {
+    using namespace ps2recomp;
+
     bool HasDwarfSections(const ELFIO::elfio &elf)
     {
         for (ELFIO::Elf_Half i = 0; i < elf.sections.size(); ++i)
@@ -453,7 +456,1156 @@ namespace
         }
     }
 
-    void ScanJalTargetsFallback(ps2recomp::ElfParser *parser, std::vector<ps2recomp::Function> &outFunctions)
+    bool ReadSectionWord(const ps2recomp::Section &section, uint32_t offset, uint32_t &outWord)
+    {
+        if (!section.data || offset > section.size || section.size - offset < sizeof(uint32_t))
+        {
+            return false;
+        }
+
+        std::memcpy(&outWord, section.data + offset, sizeof(uint32_t));
+        return true;
+    }
+
+    bool ReadWordByAddress(const std::vector<ps2recomp::Section> &sections,
+                           uint32_t address,
+                           uint32_t &outWord)
+    {
+        // Prefer real ELF sections over the synthetic LOAD-section fallback.
+        // Both can cover the same address, but named sections have exact file
+        // bounds and avoid treating a segment's zero-filled alignment as data.
+        for (int pass = 0; pass < 2; ++pass)
+        {
+            for (const auto &section : sections)
+            {
+                const bool isSyntheticLoad = section.name.rfind("LOAD", 0) == 0;
+                if ((pass == 0 && isSyntheticLoad) ||
+                    (pass == 1 && !isSyntheticLoad) ||
+                    section.isBSS || !section.data || address < section.address)
+                {
+                    continue;
+                }
+
+                const uint32_t offset = address - section.address;
+                if (ReadSectionWord(section, offset, outWord))
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    bool HasReachableReturnByControlFlow(const ps2recomp::Section &section,
+                                         uint32_t startOffset);
+
+    bool LooksLikeCallableEntry(const std::vector<ps2recomp::Section> &sections,
+                                uint32_t address,
+                                bool allowLeafThunk,
+                                bool allowLongLeaf = false,
+                                bool restrictTailThunk = false)
+    {
+        if ((address % MIPS_INSTRUCTION_SIZE) != 0)
+        {
+            return false;
+        }
+
+        const ps2recomp::Section *section = FindCodeSectionByAddress(sections, address);
+        if (!section || !section->data)
+        {
+            return false;
+        }
+
+        const uint32_t startOffset = address - section->address;
+        constexpr uint32_t kStandardProbeWords = 8;
+        // Retail initializer tables sometimes point at functions that materialize
+        // a sizeable block of constants before allocating their stack frame.
+        // Keep the broader window exclusive to that LUI-preamble pattern so leaf
+        // returns and saved-RA sequences retain the tighter historical window.
+        constexpr uint32_t kDelayedPrologueProbeWords = 12;
+        const uint32_t probeWords = std::max(kDelayedPrologueProbeWords, kStandardProbeWords);
+        bool hasOnlyConstantPreamble = true;
+
+        for (uint32_t index = 0; index < probeWords; ++index)
+        {
+            uint32_t raw = 0;
+            if (!ReadSectionWord(*section, startOffset + (index * MIPS_INSTRUCTION_SIZE), raw))
+            {
+                break;
+            }
+
+            const uint32_t opcode = OPCODE(raw);
+            const uint32_t rs = RS(raw);
+            const uint32_t rt = RT(raw);
+            const uint16_t immediate = static_cast<uint16_t>(IMMEDIATE(raw));
+
+            // Non-leaf functions normally allocate their stack frame immediately.
+            // Static initializers may first issue a block of LUI instructions for
+            // callback and descriptor addresses, as long as no unrelated operation
+            // appears before the delayed prologue.
+            if ((opcode == OPCODE_ADDIU || opcode == OPCODE_DADDIU) &&
+                rs == GPR_SP && rt == GPR_SP &&
+                (immediate & MIPS_IMMEDIATE_SIGN_BIT) != 0 &&
+                index < kDelayedPrologueProbeWords &&
+                (index < 4 || hasOnlyConstantPreamble))
+            {
+                return true;
+            }
+
+            // Some prologues set up GP before saving RA, so also recognize the
+            // common SW/SD/SQ $ra,offset($sp) forms in the entry window.
+            if (index < kStandardProbeWords &&
+                (opcode == OPCODE_SW || opcode == OPCODE_SD || opcode == OPCODE_SQ) &&
+                rs == GPR_SP && rt == GPR_RA)
+            {
+                return true;
+            }
+
+            // Leaf callbacks and vtable thunks often have no stack frame at all.
+            // Besides the usual `jr $ra`, constructor/destructor wrappers commonly
+            // prepare arguments and tail-call their implementation with a direct
+            // `j`.  These addresses are only accepted by callers that already have
+            // strong address-taken evidence (for example a clustered pointer table),
+            // so recognizing the tail jump does not turn arbitrary code labels into
+            // function starts.
+            const bool isLeafReturn =
+                index < kStandardProbeWords &&
+                opcode == OPCODE_SPECIAL && FUNCTION(raw) == SPECIAL_JR && rs == GPR_RA;
+            const uint32_t tailThunkProbeWords = restrictTailThunk ? 4u : kStandardProbeWords;
+            const bool isShortTailThunk =
+                index < tailThunkProbeWords && opcode == OPCODE_J;
+            if (allowLeafThunk && (isLeafReturn || isShortTailThunk))
+            {
+                return true;
+            }
+
+            if (opcode != OPCODE_LUI)
+            {
+                hasOnlyConstantPreamble = false;
+            }
+        }
+
+        // A callback supported by strong address-taken evidence does not need a
+        // prologue and is not required to return within an arbitrary linear
+        // instruction window. Follow its reachable basic blocks instead. The
+        // traversal itself is guarded against malformed code, while branches and
+        // loops do not consume a caller-visible "function length" allowance.
+        if (allowLeafThunk && allowLongLeaf &&
+            HasReachableReturnByControlFlow(*section, startOffset))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    bool WritesGpr(uint32_t raw, uint32_t reg)
+    {
+        if (reg == GPR_ZERO)
+        {
+            return false;
+        }
+
+        const uint32_t opcode = OPCODE(raw);
+        const uint32_t rt = RT(raw);
+        const uint32_t rd = RD(raw);
+
+        if (opcode == OPCODE_SPECIAL || opcode == OPCODE_MMI)
+        {
+            return rd == reg;
+        }
+
+        if (opcode == OPCODE_JAL)
+        {
+            return reg == GPR_RA;
+        }
+
+        bool writesRt = false;
+        switch (opcode)
+        {
+        case OPCODE_ADDI:
+        case OPCODE_ADDIU:
+        case OPCODE_SLTI:
+        case OPCODE_SLTIU:
+        case OPCODE_ANDI:
+        case OPCODE_ORI:
+        case OPCODE_XORI:
+        case OPCODE_LUI:
+        case OPCODE_DADDI:
+        case OPCODE_DADDIU:
+        case OPCODE_LDL:
+        case OPCODE_LDR:
+        case OPCODE_LQ:
+        case OPCODE_LB:
+        case OPCODE_LH:
+        case OPCODE_LWL:
+        case OPCODE_LW:
+        case OPCODE_LBU:
+        case OPCODE_LHU:
+        case OPCODE_LWR:
+        case OPCODE_LWU:
+        case OPCODE_LL:
+        case OPCODE_LLD:
+        case OPCODE_LD:
+            writesRt = true;
+            break;
+        default:
+            break;
+        }
+
+        return writesRt && rt == reg;
+    }
+
+    bool IsControlTransfer(uint32_t raw)
+    {
+        const uint32_t opcode = OPCODE(raw);
+        switch (opcode)
+        {
+        case OPCODE_REGIMM:
+        case OPCODE_J:
+        case OPCODE_JAL:
+        case OPCODE_BEQ:
+        case OPCODE_BNE:
+        case OPCODE_BLEZ:
+        case OPCODE_BGTZ:
+        case OPCODE_BEQL:
+        case OPCODE_BNEL:
+        case OPCODE_BLEZL:
+        case OPCODE_BGTZL:
+            return true;
+        default:
+            break;
+        }
+
+        if (opcode != OPCODE_SPECIAL)
+        {
+            return false;
+        }
+
+        const uint32_t function = FUNCTION(raw);
+        return function == SPECIAL_JR || function == SPECIAL_JALR;
+    }
+
+    bool IsCallInstruction(uint32_t raw)
+    {
+        const uint32_t opcode = OPCODE(raw);
+        return opcode == OPCODE_JAL ||
+               (opcode == OPCODE_SPECIAL && FUNCTION(raw) == SPECIAL_JALR);
+    }
+
+    bool TryGetGprCopy(uint32_t raw, uint32_t &outDestination, uint32_t &outSource)
+    {
+        const uint32_t opcode = OPCODE(raw);
+        const uint32_t rs = RS(raw);
+        const uint32_t rt = RT(raw);
+        const uint32_t rd = RD(raw);
+
+        if (opcode == OPCODE_SPECIAL)
+        {
+            const uint32_t function = FUNCTION(raw);
+            const bool zeroExtendedMove =
+                function == SPECIAL_ADDU || function == SPECIAL_DADDU || function == SPECIAL_OR;
+            if (zeroExtendedMove && rd != GPR_ZERO)
+            {
+                if (rs == GPR_ZERO && rt != GPR_ZERO)
+                {
+                    outDestination = rd;
+                    outSource = rt;
+                    return true;
+                }
+                if (rt == GPR_ZERO && rs != GPR_ZERO)
+                {
+                    outDestination = rd;
+                    outSource = rs;
+                    return true;
+                }
+            }
+
+            if (function == SPECIAL_SLL && SA(raw) == 0 &&
+                rd != GPR_ZERO && rt != GPR_ZERO)
+            {
+                outDestination = rd;
+                outSource = rt;
+                return true;
+            }
+        }
+
+        if ((opcode == OPCODE_ADDIU || opcode == OPCODE_DADDIU || opcode == OPCODE_ORI) &&
+            IMMEDIATE(raw) == 0 && rs != GPR_ZERO && rt != GPR_ZERO)
+        {
+            outDestination = rt;
+            outSource = rs;
+            return true;
+        }
+
+        return false;
+    }
+
+    uint32_t PropagateTrackedGprs(uint32_t raw, uint32_t trackedGprs)
+    {
+        uint32_t copyDestination = GPR_ZERO;
+        uint32_t copySource = GPR_ZERO;
+        const bool copiesTrackedValue =
+            TryGetGprCopy(raw, copyDestination, copySource) &&
+            (trackedGprs & (1u << copySource)) != 0;
+
+        for (uint32_t reg = 1; reg < 32; ++reg)
+        {
+            if (WritesGpr(raw, reg))
+            {
+                trackedGprs &= ~(1u << reg);
+            }
+        }
+
+        if (copiesTrackedValue)
+        {
+            trackedGprs |= 1u << copyDestination;
+        }
+
+        return trackedGprs;
+    }
+
+    bool IsConditionalBranch(uint32_t raw)
+    {
+        switch (OPCODE(raw))
+        {
+        case OPCODE_BEQ:
+        case OPCODE_BNE:
+        case OPCODE_BLEZ:
+        case OPCODE_BGTZ:
+        case OPCODE_BEQL:
+        case OPCODE_BNEL:
+        case OPCODE_BLEZL:
+        case OPCODE_BGTZL:
+            return true;
+        case OPCODE_REGIMM:
+            switch (RT(raw))
+            {
+            case REGIMM_BLTZ:
+            case REGIMM_BGEZ:
+            case REGIMM_BLTZL:
+            case REGIMM_BGEZL:
+            case REGIMM_BLTZAL:
+            case REGIMM_BGEZAL:
+            case REGIMM_BLTZALL:
+            case REGIMM_BGEZALL:
+                return true;
+            default:
+                return false;
+            }
+        default:
+            return false;
+        }
+    }
+
+    bool IsLikelyBranch(uint32_t raw)
+    {
+        switch (OPCODE(raw))
+        {
+        case OPCODE_BEQL:
+        case OPCODE_BNEL:
+        case OPCODE_BLEZL:
+        case OPCODE_BGTZL:
+            return true;
+        case OPCODE_REGIMM:
+            return RT(raw) == REGIMM_BLTZL || RT(raw) == REGIMM_BGEZL ||
+                   RT(raw) == REGIMM_BLTZALL || RT(raw) == REGIMM_BGEZALL;
+        default:
+            return false;
+        }
+    }
+
+    uint32_t PcRelativeBranchTargetOffset(uint32_t instructionOffset, uint32_t raw)
+    {
+        return instructionOffset + MIPS_INSTRUCTION_SIZE +
+               static_cast<uint32_t>(SIMMEDIATE(raw) * static_cast<int32_t>(MIPS_INSTRUCTION_SIZE));
+    }
+
+    bool TryGetDirectJumpTargetOffset(const ps2recomp::Section &section,
+                                      uint32_t instructionOffset,
+                                      uint32_t raw,
+                                      uint32_t &outTargetOffset)
+    {
+        if (OPCODE(raw) != OPCODE_J && OPCODE(raw) != OPCODE_JAL)
+        {
+            return false;
+        }
+
+        const uint32_t instructionAddress = section.address + instructionOffset;
+        const uint32_t targetAddress =
+            ((instructionAddress + MIPS_INSTRUCTION_SIZE) & MIPS_JUMP_REGION_MASK) |
+            (TARGET(raw) << MIPS_JUMP_TARGET_SHIFT);
+        if (targetAddress < section.address || targetAddress >= section.address + section.size)
+        {
+            return false;
+        }
+
+        outTargetOffset = targetAddress - section.address;
+        return true;
+    }
+
+    bool HasReachableReturnByControlFlow(const ps2recomp::Section &section, uint32_t startOffset)
+    {
+        // This is a corruption/cycle guard
+        constexpr size_t kReachableInstructionSafetyBudget = 4096;
+
+        std::vector<uint32_t> pendingOffsets{startOffset};
+        std::unordered_set<uint32_t> visitedOffsets;
+        visitedOffsets.reserve(256);
+
+        auto isReadableOffset = [&section](uint32_t offset)
+        {
+            return (offset % MIPS_INSTRUCTION_SIZE) == 0 && offset <= section.size && section.size - offset >= sizeof(uint32_t);
+        };
+
+        while (!pendingOffsets.empty() && visitedOffsets.size() < kReachableInstructionSafetyBudget)
+        {
+            uint32_t offset = pendingOffsets.back();
+            pendingOffsets.pop_back();
+
+            while (isReadableOffset(offset) && visitedOffsets.size() < kReachableInstructionSafetyBudget && visitedOffsets.insert(offset).second)
+            {
+                uint32_t raw = 0;
+                if (!ReadSectionWord(section, offset, raw))
+                {
+                    break;
+                }
+
+                const uint32_t opcode = OPCODE(raw);
+                if (opcode == OPCODE_SPECIAL && FUNCTION(raw) == SPECIAL_JR)
+                {
+                    if (RS(raw) == GPR_RA)
+                    {
+                        return true;
+                    }
+                    break;
+                }
+
+                if (IsConditionalBranch(raw))
+                {
+                    const uint32_t targetOffset = PcRelativeBranchTargetOffset(offset, raw);
+                    const bool isUnconditionalBranch = opcode == OPCODE_BEQ && RS(raw) == GPR_ZERO && RT(raw) == GPR_ZERO;
+
+                    if (isUnconditionalBranch)
+                    {
+                        if (!isReadableOffset(targetOffset))
+                        {
+                            break;
+                        }
+                        offset = targetOffset;
+                        continue;
+                    }
+
+                    if (isReadableOffset(targetOffset))
+                    {
+                        pendingOffsets.push_back(targetOffset);
+                    }
+
+                    // Both ordinary and likely branches resume after their delay
+                    // slot on the fallthrough path. The delay instruction cannot
+                    // legally contain another control transfer.
+                    offset += 2u * MIPS_INSTRUCTION_SIZE;
+                    continue;
+                }
+
+                if (opcode == OPCODE_J)
+                {
+                    uint32_t targetOffset = 0;
+                    if (!TryGetDirectJumpTargetOffset(section, offset, raw, targetOffset))
+                    {
+                        break;
+                    }
+                    offset = targetOffset;
+                    continue;
+                }
+
+                if (opcode == OPCODE_JAL || (opcode == OPCODE_SPECIAL && FUNCTION(raw) == SPECIAL_JALR))
+                {
+                    // Calls return after their delay slot; the callee is a separate
+                    // control-flow region and is intentionally not traversed here.
+                    offset += 2u * MIPS_INSTRUCTION_SIZE;
+                    continue;
+                }
+
+                offset += MIPS_INSTRUCTION_SIZE;
+            }
+        }
+
+        return false;
+    }
+
+    struct TrackedGprState
+    {
+        uint32_t offset;
+        uint32_t trackedGprs;
+    };
+
+    constexpr uint32_t kCalleePreservedGprMask =
+        (1u << GPR_S0) | (1u << GPR_S1) | (1u << GPR_S2) | (1u << GPR_S3) |
+        (1u << GPR_S4) | (1u << GPR_S5) | (1u << GPR_S6) | (1u << GPR_S7) |
+        (1u << GPR_GP) | (1u << GPR_SP) | (1u << GPR_FP);
+
+    bool IsConsumedAsCodePointerInControlFlow(const ps2recomp::Section &section,
+                                              uint32_t firstInstructionOffset,
+                                              uint32_t trackedGprs,
+                                              uint32_t regionBegin,
+                                              uint32_t regionEnd)
+    {
+        // Retail EE code also uses t0-t3 as extended call arguments for localhelpers.
+        constexpr uint32_t kArgumentMask =
+            (1u << GPR_A0) | (1u << GPR_A1) | (1u << GPR_A2) | (1u << GPR_A3) |
+            (1u << GPR_T0) | (1u << GPR_T1) | (1u << GPR_T2) | (1u << GPR_T3);
+        std::vector<TrackedGprState> worklist;
+        std::unordered_set<uint64_t> visited;
+        auto enqueue = [&](uint32_t offset, uint32_t registers)
+        {
+            if (registers != 0 && offset >= regionBegin &&
+                offset + MIPS_INSTRUCTION_SIZE <= regionEnd)
+            {
+                worklist.push_back({offset, registers});
+            }
+        };
+        enqueue(firstInstructionOffset, trackedGprs);
+
+        while (!worklist.empty())
+        {
+            const TrackedGprState state = worklist.back();
+            worklist.pop_back();
+
+            const uint64_t visitKey = (static_cast<uint64_t>(state.offset) << 32u) | state.trackedGprs;
+            if (!visited.insert(visitKey).second)
+            {
+                continue;
+            }
+
+            uint32_t raw = 0;
+            if (!ReadSectionWord(section, state.offset, raw))
+            {
+                continue;
+            }
+
+            const uint32_t opcode = OPCODE(raw);
+            if ((opcode == OPCODE_SW || opcode == OPCODE_SD || opcode == OPCODE_SQ) &&
+                (state.trackedGprs & (1u << RT(raw))) != 0)
+            {
+                // Some retail C++ runtimes construct vtables and interface
+                // descriptors in writable memory. In those cases the only
+                // address-taken evidence is a materialized code address being
+                // stored into an object; it is never passed to a registrar.
+                return true;
+            }
+
+            if (IsCallInstruction(raw))
+            {
+                const bool isTrackedIndirectTarget = OPCODE(raw) == OPCODE_SPECIAL && (state.trackedGprs & (1u << RS(raw))) != 0;
+                if (isTrackedIndirectTarget)
+                {
+                    return true;
+                }
+
+                uint32_t afterDelay = state.trackedGprs;
+                uint32_t delayRaw = 0;
+                if (ReadSectionWord(section, state.offset + MIPS_INSTRUCTION_SIZE, delayRaw))
+                {
+                    afterDelay = PropagateTrackedGprs(delayRaw, afterDelay);
+                }
+                if ((afterDelay & kArgumentMask) != 0)
+                {
+                    return true;
+                }
+
+                // A normal call may clobber caller-saved registers, but values
+                // deliberately parked in s0-s7/fp remain live afterwards.
+                enqueue(state.offset + (2u * MIPS_INSTRUCTION_SIZE), afterDelay & kCalleePreservedGprMask);
+                continue;
+            }
+
+            if (IsConditionalBranch(raw))
+            {
+                uint32_t delayTracked = state.trackedGprs;
+                uint32_t delayRaw = 0;
+                if (ReadSectionWord(section, state.offset + MIPS_INSTRUCTION_SIZE, delayRaw))
+                {
+                    delayTracked = PropagateTrackedGprs(delayRaw, delayTracked);
+                }
+
+                enqueue(PcRelativeBranchTargetOffset(state.offset, raw), delayTracked);
+                enqueue(state.offset + (2u * MIPS_INSTRUCTION_SIZE), IsLikelyBranch(raw) ? state.trackedGprs : delayTracked);
+                continue;
+            }
+
+            if (OPCODE(raw) == OPCODE_J)
+            {
+                uint32_t delayTracked = state.trackedGprs;
+                uint32_t delayRaw = 0;
+                if (ReadSectionWord(section, state.offset + MIPS_INSTRUCTION_SIZE, delayRaw))
+                {
+                    delayTracked = PropagateTrackedGprs(delayRaw, delayTracked);
+                }
+
+                uint32_t targetOffset = 0;
+                if (TryGetDirectJumpTargetOffset(section, state.offset, raw, targetOffset))
+                {
+                    enqueue(targetOffset, delayTracked);
+                }
+                else if ((delayTracked & kArgumentMask) != 0)
+                {
+                    // A direct jump outside the current coarse function is a
+                    // tail call, and observes the same argument registers.
+                    return true;
+                }
+                continue;
+            }
+
+            if (OPCODE(raw) == OPCODE_SPECIAL && FUNCTION(raw) == SPECIAL_JR)
+            {
+                // A materialized code address used as a JR target is a tail
+                // callback even though it does not write $ra.
+                if ((state.trackedGprs & (1u << RS(raw))) != 0)
+                {
+                    return true;
+                }
+                continue;
+            }
+
+            if (IsControlTransfer(raw))
+            {
+                continue;
+            }
+
+            const uint32_t nextTracked = PropagateTrackedGprs(raw, state.trackedGprs);
+            enqueue(state.offset + MIPS_INSTRUCTION_SIZE, nextTracked);
+        }
+
+        return false;
+    }
+
+    bool TryCompleteCodeAddress(uint32_t raw,
+                                uint32_t upperValue,
+                                uint32_t upperAliases,
+                                uint32_t &outTarget,
+                                uint32_t &outValueReg)
+    {
+        const uint32_t opcode = OPCODE(raw);
+        const uint32_t rs = RS(raw);
+        if ((opcode != OPCODE_ADDIU && opcode != OPCODE_DADDIU && opcode != OPCODE_ORI) || (upperAliases & (1u << rs)) == 0)
+        {
+            return false;
+        }
+
+        const uint16_t immediate = static_cast<uint16_t>(IMMEDIATE(raw));
+        outTarget = opcode == OPCODE_ORI
+                        ? upperValue | static_cast<uint32_t>(immediate)
+                        : upperValue + static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(immediate)));
+        outValueReg = RT(raw);
+        return true;
+    }
+
+    bool TryLoadCodeAddressFromInitializedData(
+        const std::vector<ps2recomp::Section> &sections,
+        uint32_t raw,
+        uint32_t upperValue,
+        uint32_t upperAliases,
+        uint32_t &outTarget,
+        uint32_t &outValueReg)
+    {
+        const uint32_t opcode = OPCODE(raw);
+        const uint32_t baseReg = RS(raw);
+        if ((opcode != OPCODE_LW && opcode != OPCODE_LWU) || (upperAliases & (1u << baseReg)) == 0)
+        {
+            return false;
+        }
+
+        const uint32_t slotAddress = upperValue + static_cast<uint32_t>(SIMMEDIATE(raw));
+        uint32_t target = 0;
+        if (!ReadWordByAddress(sections, slotAddress, target) || (target % MIPS_INSTRUCTION_SIZE) != 0)
+        {
+            return false;
+        }
+
+        const ps2recomp::Section *targetSection = FindCodeSectionByAddress(sections, target);
+        if (!targetSection)
+        {
+            return false;
+        }
+
+        const uint32_t targetOffset = target - targetSection->address;
+        if (targetOffset >= MIPS_INSTRUCTION_SIZE)
+        {
+            uint32_t predecessorRaw = 0;
+            if (ReadSectionWord(*targetSection, targetOffset - MIPS_INSTRUCTION_SIZE, predecessorRaw) && IsControlTransfer(predecessorRaw))
+            {
+                // A loaded code-looking value that lands immediately after a
+                // control transfer names its delay slot. Promoting it would cut
+                // the real owner before the delay instruction, as happened at Silent Hill's 0x325350 (the delay slot of JALR 0x32534c).
+                return false;
+            }
+        }
+
+        outTarget = target;
+        outValueReg = RT(raw);
+        return outValueReg != GPR_ZERO;
+    }
+
+    bool IsMaterializedAddressConsumed(const std::vector<ps2recomp::Section> &sections,
+                                       const ps2recomp::Section &section,
+                                       uint32_t target,
+                                       uint32_t valueReg,
+                                       uint32_t firstUseOffset,
+                                       uint32_t regionBegin,
+                                       uint32_t regionEnd,
+                                       bool consumedByCurrentCall,
+                                       std::unordered_set<uint32_t> &starts)
+    {
+        const bool materializedAsCodePointer =
+            consumedByCurrentCall ||
+            IsConsumedAsCodePointerInControlFlow(section,
+                                                 firstUseOffset,
+                                                 1u << valueReg,
+                                                 regionBegin,
+                                                 regionEnd);
+
+        if (!LooksLikeCallableEntry(sections,
+                                    target,
+                                    materializedAsCodePointer,
+                                    materializedAsCodePointer,
+                                    materializedAsCodePointer))
+        {
+            return false;
+        }
+
+        starts.insert(target);
+        return true;
+    }
+
+    void ScanMaterializedCodeAddresses(const std::vector<ps2recomp::Section> &sections,
+                                       std::unordered_set<uint32_t> &starts)
+    {
+        for (const auto &section : sections)
+        {
+            if (!section.isCode || !section.data || section.size < (2u * MIPS_INSTRUCTION_SIZE))
+            {
+                continue;
+            }
+
+            // JAL targets known before this pass form conservative function
+            // boundaries.  CFG traversal may cross basic blocks but never leaks
+            // into the next coarse function.
+            std::vector<uint32_t> functionBoundaries;
+            for (uint32_t start : starts)
+            {
+                if (start >= section.address && start < section.address + section.size)
+                {
+                    functionBoundaries.push_back(start - section.address);
+                }
+            }
+            std::sort(functionBoundaries.begin(), functionBoundaries.end());
+            functionBoundaries.erase(std::unique(functionBoundaries.begin(), functionBoundaries.end()), functionBoundaries.end());
+
+            for (uint32_t offset = 0; offset + MIPS_INSTRUCTION_SIZE <= section.size;
+                 offset += MIPS_INSTRUCTION_SIZE)
+            {
+                uint32_t upperRaw = 0;
+                if (!ReadSectionWord(section, offset, upperRaw) || OPCODE(upperRaw) != OPCODE_LUI)
+                {
+                    continue;
+                }
+
+                const uint32_t upperReg = RT(upperRaw);
+                if (upperReg == GPR_ZERO)
+                {
+                    continue;
+                }
+
+                const auto nextBoundary = std::upper_bound(functionBoundaries.begin(), functionBoundaries.end(), offset);
+                const uint32_t regionBegin = nextBoundary == functionBoundaries.begin()
+                                                 ? 0u
+                                                 : *std::prev(nextBoundary);
+                const uint32_t regionEnd = nextBoundary == functionBoundaries.end()
+                                               ? section.size
+                                               : *nextBoundary;
+                const uint32_t upperValue = IMMEDIATE(upperRaw) << 16;
+                const uint32_t initialAliases = 1u << upperReg;
+
+                std::vector<TrackedGprState> worklist;
+                std::unordered_set<uint64_t> visited;
+                auto enqueue = [&](uint32_t nextOffset, uint32_t aliases)
+                {
+                    if (aliases != 0 && nextOffset >= regionBegin &&
+                        nextOffset + MIPS_INSTRUCTION_SIZE <= regionEnd)
+                    {
+                        worklist.push_back({nextOffset, aliases});
+                    }
+                };
+
+                bool startsAfterPredecessorTransfer = false;
+                if (offset >= MIPS_INSTRUCTION_SIZE)
+                {
+                    uint32_t predecessorRaw = 0;
+                    if (ReadSectionWord(section, offset - MIPS_INSTRUCTION_SIZE, predecessorRaw))
+                    {
+                        if (IsConditionalBranch(predecessorRaw))
+                        {
+                            enqueue(PcRelativeBranchTargetOffset(offset - MIPS_INSTRUCTION_SIZE, predecessorRaw), initialAliases);
+                            if (!IsLikelyBranch(predecessorRaw))
+                            {
+                                enqueue(offset + MIPS_INSTRUCTION_SIZE, initialAliases);
+                            }
+                            startsAfterPredecessorTransfer = true;
+                        }
+                        else if (OPCODE(predecessorRaw) == OPCODE_J)
+                        {
+                            uint32_t targetOffset = 0;
+                            if (TryGetDirectJumpTargetOffset(
+                                    section,
+                                    offset - MIPS_INSTRUCTION_SIZE,
+                                    predecessorRaw,
+                                    targetOffset))
+                            {
+                                enqueue(targetOffset, initialAliases);
+                            }
+                            startsAfterPredecessorTransfer = true;
+                        }
+                        else if (IsCallInstruction(predecessorRaw) || (OPCODE(predecessorRaw) == OPCODE_SPECIAL && FUNCTION(predecessorRaw) == SPECIAL_JR))
+                        {
+                            // The LUI ran in a call/jump delay slot. An incomplete
+                            // address cannot survive through an unknown callee or
+                            // indirect target in a caller-saved register.
+                            startsAfterPredecessorTransfer = true;
+                        }
+                    }
+                }
+                if (!startsAfterPredecessorTransfer)
+                {
+                    enqueue(offset + MIPS_INSTRUCTION_SIZE, initialAliases);
+                }
+
+                while (!worklist.empty())
+                {
+                    const TrackedGprState state = worklist.back();
+                    worklist.pop_back();
+
+                    const uint64_t visitKey = (static_cast<uint64_t>(state.offset) << 32u) | state.trackedGprs;
+                    if (!visited.insert(visitKey).second)
+                    {
+                        continue;
+                    }
+
+                    uint32_t raw = 0;
+                    if (!ReadSectionWord(section, state.offset, raw))
+                    {
+                        continue;
+                    }
+
+                    uint32_t target = 0;
+                    uint32_t valueReg = GPR_ZERO;
+                    if (TryLoadCodeAddressFromInitializedData(sections,
+                                                              raw,
+                                                              upperValue,
+                                                              state.trackedGprs,
+                                                              target,
+                                                              valueReg))
+                    {
+                        // A singleton callback slot is strong evidence only when
+                        // the loaded value actually flows into a call/jump (or a
+                        // callback store). The CFG worklist in the consumer check
+                        // follows branches and register copies, so this does not
+                        // promote every code-looking word found in arbitrary data.
+                        IsMaterializedAddressConsumed(sections,
+                                                      section,
+                                                      target,
+                                                      valueReg,
+                                                      state.offset + MIPS_INSTRUCTION_SIZE,
+                                                      regionBegin,
+                                                      regionEnd,
+                                                      false,
+                                                      starts);
+
+                        // Keep following the data-slot base as well: one function
+                        // can load several callbacks from the same descriptor.
+                        const uint32_t nextAliases = PropagateTrackedGprs(raw, state.trackedGprs);
+                        enqueue(state.offset + MIPS_INSTRUCTION_SIZE, nextAliases);
+                        continue;
+                    }
+
+                    if (TryCompleteCodeAddress(raw, upperValue, state.trackedGprs, target, valueReg))
+                    {
+                        IsMaterializedAddressConsumed(sections,
+                                                      section,
+                                                      target,
+                                                      valueReg,
+                                                      state.offset + MIPS_INSTRUCTION_SIZE,
+                                                      regionBegin,
+                                                      regionEnd,
+                                                      false,
+                                                      starts);
+                        continue;
+                    }
+
+                    if (IsControlTransfer(raw))
+                    {
+                        uint32_t delayAliases = state.trackedGprs;
+                        uint32_t delayRaw = 0;
+                        const bool hasDelay = ReadSectionWord(section, state.offset + MIPS_INSTRUCTION_SIZE, delayRaw);
+                        if (hasDelay && TryCompleteCodeAddress(delayRaw, upperValue, delayAliases, target, valueReg))
+                        {
+                            const bool currentIsCall = IsCallInstruction(raw);
+                            const uint32_t firstUseOffset = state.offset + (2u * MIPS_INSTRUCTION_SIZE);
+                            IsMaterializedAddressConsumed(sections,
+                                                          section,
+                                                          target,
+                                                          valueReg,
+                                                          firstUseOffset,
+                                                          regionBegin,
+                                                          regionEnd,
+                                                          currentIsCall &&
+                                                              valueReg >= GPR_A0 &&
+                                                              valueReg <= GPR_A3,
+                                                          starts);
+                            continue;
+                        }
+                        if (hasDelay)
+                        {
+                            delayAliases = PropagateTrackedGprs(delayRaw, delayAliases);
+                        }
+
+                        if (IsConditionalBranch(raw))
+                        {
+                            enqueue(PcRelativeBranchTargetOffset(state.offset, raw), delayAliases);
+                            enqueue(state.offset + (2u * MIPS_INSTRUCTION_SIZE), IsLikelyBranch(raw) ? state.trackedGprs : delayAliases);
+                        }
+                        else if (OPCODE(raw) == OPCODE_J)
+                        {
+                            uint32_t targetOffset = 0;
+                            if (TryGetDirectJumpTargetOffset(section, state.offset, raw, targetOffset))
+                            {
+                                enqueue(targetOffset, delayAliases);
+                            }
+                        }
+                        else if (IsCallInstruction(raw))
+                        {
+                            // An upper half deliberately kept in s0-s7/fp/gp
+                            // survives ordinary calls. Retail callback builders
+                            // commonly load that half once, perform setup calls,
+                            // and only then complete the address into a0-a3.
+                            enqueue(state.offset + (2u * MIPS_INSTRUCTION_SIZE), delayAliases & kCalleePreservedGprMask);
+                        }
+                        continue;
+                    }
+
+                    const uint32_t nextAliases = PropagateTrackedGprs(raw, state.trackedGprs);
+                    enqueue(state.offset + MIPS_INSTRUCTION_SIZE, nextAliases);
+                }
+            }
+        }
+    }
+
+    bool IsDedicatedFunctionPointerSection(const std::string &name)
+    {
+        return name == ".ctors" || name == ".dtors" || name == ".init_array" || name == ".fini_array";
+    }
+
+    void ScanDataFunctionPointerTables(const std::vector<ps2recomp::Section> &sections, std::unordered_set<uint32_t> &starts)
+    {
+        struct PointerCandidate
+        {
+            uint32_t sourceOffset;
+            uint32_t target;
+            bool hasConservativeShape;
+        };
+
+        constexpr uint32_t kClusterDistanceBytes = 32;
+
+        for (const auto &section : sections)
+        {
+            if (!section.isData || section.isCode || section.isBSS ||
+                !section.data || section.size < MIPS_INSTRUCTION_SIZE)
+            {
+                continue;
+            }
+
+            std::vector<PointerCandidate> candidates;
+            for (uint32_t offset = 0; offset + MIPS_INSTRUCTION_SIZE <= section.size;
+                 offset += MIPS_INSTRUCTION_SIZE)
+            {
+                uint32_t target = 0;
+                if (ReadSectionWord(section, offset, target) && (target % MIPS_INSTRUCTION_SIZE) == 0 && FindCodeSectionByAddress(sections, target))
+                {
+                    candidates.push_back({offset, target, LooksLikeCallableEntry(sections, target, true)});
+                }
+            }
+
+            const bool dedicatedPointerSection = IsDedicatedFunctionPointerSection(section.name);
+            auto hasConservativeNeighborWithin = [&](size_t candidateIndex, uint32_t maxDistance)
+            {
+                for (size_t neighbor = candidateIndex; neighbor > 0;)
+                {
+                    --neighbor;
+                    if (candidates[candidateIndex].sourceOffset - candidates[neighbor].sourceOffset > maxDistance)
+                    {
+                        break;
+                    }
+                    if (candidates[neighbor].hasConservativeShape)
+                    {
+                        return true;
+                    }
+                }
+
+                for (size_t neighbor = candidateIndex + 1; neighbor < candidates.size(); ++neighbor)
+                {
+                    if (candidates[neighbor].sourceOffset - candidates[candidateIndex].sourceOffset > maxDistance)
+                    {
+                        break;
+                    }
+                    if (candidates[neighbor].hasConservativeShape)
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            };
+
+            auto hasClassDescriptorShape = [&](size_t candidateIndex)
+            {
+                // Several retail engines describe a class as:
+                //   name pointer, ordinary method, 0, 0, long leaf method
+                // The ordinary method gives us a conservative executable anchor,
+                // while the two reserved words and data pointer distinguish this
+                // from an accidental code address embedded in arbitrary data.
+                const uint32_t methodOffset = candidates[candidateIndex].sourceOffset;
+                constexpr uint32_t kDescriptorPrefixBytes = 4u * sizeof(uint32_t);
+                if (methodOffset < kDescriptorPrefixBytes)
+                {
+                    return false;
+                }
+
+                uint32_t nameAddress = 0;
+                uint32_t conservativeMethod = 0;
+                uint32_t reserved0 = 0;
+                uint32_t reserved1 = 0;
+                if (!ReadSectionWord(section, methodOffset - 16u, nameAddress) ||
+                    !ReadSectionWord(section, methodOffset - 12u, conservativeMethod) ||
+                    !ReadSectionWord(section, methodOffset - 8u, reserved0) ||
+                    !ReadSectionWord(section, methodOffset - 4u, reserved1) ||
+                    reserved0 != 0 || reserved1 != 0)
+                {
+                    return false;
+                }
+
+                const ps2recomp::Section *nameSection = FindSectionByAddress(sections, nameAddress);
+                return nameSection && nameSection->isData && !nameSection->isCode &&
+                       LooksLikeCallableEntry(sections, conservativeMethod, true);
+            };
+
+            auto hasAlternatingPointerIdShape = [&](size_t candidateIndex)
+            {
+                const auto isSmallIdAt = [&](uint32_t offset)
+                {
+                    uint32_t value = 0;
+                    return offset + sizeof(uint32_t) <= section.size &&
+                           ReadSectionWord(section, offset, value) &&
+                           value <= 0xFFFFu;
+                };
+
+                const PointerCandidate &candidate = candidates[candidateIndex];
+                if (!isSmallIdAt(candidate.sourceOffset + sizeof(uint32_t)))
+                    return false;
+
+                if (candidateIndex > 0)
+                {
+                    const PointerCandidate &previous = candidates[candidateIndex - 1u];
+                    if (previous.hasConservativeShape &&
+                        previous.sourceOffset + (2u * sizeof(uint32_t)) == candidate.sourceOffset &&
+                        isSmallIdAt(previous.sourceOffset + sizeof(uint32_t)))
+                    {
+                        return true;
+                    }
+                }
+
+                if (candidateIndex + 1u < candidates.size())
+                {
+                    const PointerCandidate &next = candidates[candidateIndex + 1u];
+                    if (next.hasConservativeShape &&
+                        candidate.sourceOffset + (2u * sizeof(uint32_t)) == next.sourceOffset &&
+                        isSmallIdAt(next.sourceOffset + sizeof(uint32_t)))
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            };
+
+            for (size_t index = 0; index < candidates.size(); ++index)
+            {
+                if (candidates[index].hasConservativeShape)
+                {
+                    const bool clustered = dedicatedPointerSection || hasConservativeNeighborWithin(index, kClusterDistanceBytes);
+                    if (clustered)
+                    {
+                        starts.insert(candidates[index].target);
+                    }
+                    continue;
+                }
+
+                const bool hasConservativeAnchor = dedicatedPointerSection || hasClassDescriptorShape(index) || hasAlternatingPointerIdShape(index);
+                if (hasConservativeAnchor && LooksLikeCallableEntry(sections, candidates[index].target, true, true))
+                {
+                    starts.insert(candidates[index].target);
+                }
+            }
+        }
+    }
+
+    void ScanAdjacentLeafThunkRuns(const std::vector<ps2recomp::Section> &sections, std::unordered_set<uint32_t> &starts)
+    {
+        // Stripped retail ELFs occasionally pack trivial accessors back-to-back:
+        //
+        //   known_entry: jr ra        next_entry: jr ra
+        //                <delay>                  <delay>
+        //
+        // A coarse function map can merge the middle accessor into its predecessor,
+        // even when runtime tables call it directly.  Requiring the predecessor to
+        // already be a known function start keeps this deliberately narrower than
+        // treating every instruction after a return as a new function.
+        constexpr uint32_t kLeafThunkBytes = 2u * MIPS_INSTRUCTION_SIZE;
+
+        for (const auto &section : sections)
+        {
+            if (!section.isCode || !section.data || section.size < (2u * kLeafThunkBytes))
+            {
+                continue;
+            }
+
+            for (uint32_t offset = kLeafThunkBytes; offset + kLeafThunkBytes <= section.size; offset += MIPS_INSTRUCTION_SIZE)
+            {
+                const uint32_t previousAddress = section.address + offset - kLeafThunkBytes;
+                if (!starts.contains(previousAddress))
+                {
+                    continue;
+                }
+
+                uint32_t previousRaw = 0;
+                uint32_t candidateRaw = 0;
+                if (!ReadSectionWord(section, offset - kLeafThunkBytes, previousRaw) || !ReadSectionWord(section, offset, candidateRaw))
+                {
+                    continue;
+                }
+
+                const auto isReturn = [](uint32_t raw)
+                {
+                    return OPCODE(raw) == OPCODE_SPECIAL && FUNCTION(raw) == SPECIAL_JR && RS(raw) == GPR_RA;
+                };
+
+                if (isReturn(previousRaw) && isReturn(candidateRaw))
+                {
+                    starts.insert(section.address + offset);
+                }
+            }
+        }
+    }
+
+    void ScanFunctionStartsFallback(ps2recomp::ElfParser *parser, std::vector<ps2recomp::Function> &outFunctions)
     {
         std::unordered_set<uint32_t> starts;
         starts.reserve(4096);
@@ -467,26 +1619,28 @@ namespace
         const auto &sections = parser->getSections();
         for (const auto &section : sections)
         {
-            if (!section.isCode || !section.data || section.size < 4)
+            if (!section.isCode || !section.data || section.size < MIPS_INSTRUCTION_SIZE)
             {
                 continue;
             }
 
-            for (uint32_t offset = 0; offset + 4 <= section.size; offset += 4)
+            for (uint32_t offset = 0; offset + MIPS_INSTRUCTION_SIZE <= section.size; offset += MIPS_INSTRUCTION_SIZE)
             {
                 const uint32_t pc = section.address + offset;
 
                 uint32_t raw = 0;
                 std::memcpy(&raw, section.data + offset, sizeof(uint32_t));
 
-                const uint32_t op = (raw >> 26) & 0x3F;
-                if (op != 0x03) // JAL
+                const uint32_t op = OPCODE(raw);
+                if (op != OPCODE_JAL)
                 {
                     continue;
                 }
 
-                const uint32_t index = raw & 0x03FFFFFF;
-                const uint32_t target = ((pc + 4) & 0xF0000000u) | (index << 2);
+                const uint32_t index = TARGET(raw);
+                const uint32_t target =
+                    ((pc + MIPS_INSTRUCTION_SIZE) & MIPS_JUMP_REGION_MASK) |
+                    (index << MIPS_JUMP_TARGET_SHIFT);
 
                 if (FindCodeSectionByAddress(sections, target))
                 {
@@ -494,6 +1648,10 @@ namespace
                 }
             }
         }
+
+        ScanMaterializedCodeAddresses(sections, starts);
+        ScanDataFunctionPointerTables(sections, starts);
+        ScanAdjacentLeafThunkRuns(sections, starts);
 
         std::vector<uint32_t> sortedStarts(starts.begin(), starts.end());
         std::sort(sortedStarts.begin(), sortedStarts.end());
@@ -508,22 +1666,10 @@ namespace
                 continue;
             }
 
-            const uint32_t secEnd = sec->address + sec->size;
-
-            uint32_t end = secEnd;
-            if (i + 1 < sortedStarts.size())
-            {
-                const uint32_t next = sortedStarts[i + 1];
-                if (next > start && next < secEnd)
-                {
-                    end = next;
-                }
-            }
-
             ps2recomp::Function func{};
             func.name = MakeAutoFunctionName(start);
             func.start = start;
-            func.end = (end > start) ? end : (start + 4);
+            func.end = 0;
             func.isRecompiled = false;
             func.isStub = false;
             func.isSkipped = false;
@@ -543,7 +1689,17 @@ namespace ps2recomp
 
     bool ElfParser::isExecutableSection(const ELFIO::section *section) const
     {
-        return (section->get_flags() & ELFIO::SHF_EXECINSTR) != 0;
+        if ((section->get_flags() & ELFIO::SHF_EXECINSTR) == 0)
+            return false;
+
+        // Sony's PS2 linker marks embedded VU microprogram sections executable,
+        // but their words use the VU ISA rather than the EE/R5900 ISA. Keep the
+        // bytes in the parsed ELF while excluding these ABI-defined section
+        // names from EE function discovery and recompilation.
+        const std::string name = section->get_name();
+        const bool vuText = name == ".vutext" || name.rfind(".vutext.", 0) == 0;
+        const bool dvpOverlay = name == ".DVP.overlay" || name.rfind(".DVP.overlay.", 0) == 0;
+        return !vuText && !dvpOverlay;
     }
 
     bool ElfParser::isDataSection(const ELFIO::section *section) const
@@ -1113,9 +2269,7 @@ namespace ps2recomp
         {
             if (m_reporter)
             {
-                m_reporter->warning("ghidra-map", "Loaded 0 functions from Ghidra map after filtering (" +
-                                                   std::to_string(skippedNonExecutable) + " non-executable, " +
-                                                   std::to_string(skippedInvalidRange) + " invalid range).");
+                m_reporter->warning("ghidra-map", "Loaded 0 functions from Ghidra map after filtering (" + std::to_string(skippedNonExecutable) + " non-executable, " + std::to_string(skippedInvalidRange) + " invalid range).");
             }
         }
 
@@ -1192,8 +2346,7 @@ namespace ps2recomp
             {
                 if (m_reporter)
                 {
-                    m_reporter->info("elf", "ELF has no section headers; using loadable segments as sections (" +
-                                          std::to_string(m_sections.size()) + " entries).");
+                    m_reporter->info("elf", "ELF has no section headers; using loadable segments as sections (" + std::to_string(m_sections.size()) + " entries).");
                 }
             }
         }
@@ -1418,14 +2571,26 @@ namespace ps2recomp
             }
         }
 
-        if (m_extraFunctions.empty())
-        {
-            ScanJalTargetsFallback(this, m_extraFunctions);
-        }
+        // DWARF in retail ELFs is often partial.
+        ScanFunctionStartsFallback(this, m_extraFunctions);
 
         std::sort(m_extraFunctions.begin(), m_extraFunctions.end(),
                   [](const Function &a, const Function &b)
-                  { return a.start < b.start; });
+                  {
+                      if (a.start != b.start)
+                      {
+                        return a.start < b.start;
+                      }
+
+                      const bool aAuto = IsAutoGeneratedName(a.name);
+                      const bool bAuto = IsAutoGeneratedName(b.name);
+                      if (aAuto != bAuto)
+                      {
+                        return !aAuto;
+                      }
+
+                      return a.end > b.end;
+                  });
 
         m_extraFunctions.erase(
             std::unique(m_extraFunctions.begin(), m_extraFunctions.end(),

@@ -5,6 +5,8 @@
 
 #include <filesystem>
 #include <fstream>
+#include <string>
+#include <utility>
 #include <vector>
 #include <cstring>
 #include <chrono>
@@ -49,6 +51,19 @@ namespace
     };
 
     static_assert(sizeof(SceMcTblGetDir) == 64, "sceMcTblGetDir size mismatch");
+
+    struct GuestIoStat
+    {
+        uint32_t mode;
+        uint32_t attr;
+        uint32_t size;
+        uint8_t ctime[8];
+        uint8_t atime[8];
+        uint8_t mtime[8];
+        uint32_t hisize;
+    };
+
+    static_assert(sizeof(GuestIoStat) == 40u);
 
     void setRegU32(R5900Context &ctx, int reg, uint32_t value)
     {
@@ -135,6 +150,7 @@ namespace
         TempPaths paths;
         std::vector<uint8_t> rdram;
         R5900Context ctx;
+        PS2Runtime runtime;
 
         TestContext() : paths(makeTempPaths()), rdram(PS2_RAM_SIZE, 0)
         {
@@ -152,6 +168,112 @@ void register_ps2_runtime_io_tests()
 {
     MiniTest::Case("PS2RuntimeIO", [](TestCase &tc)
     {
+        tc.Run("ROM0 ROMVER is exposed as the 14-byte firmware pseudo-file", [](TestCase &t)
+        {
+            TestContext test;
+            constexpr uint32_t kPathAddr = GUEST_STRING_AREA_START;
+            constexpr uint32_t kBufferAddr = GUEST_BUFFER_AREA_START;
+            constexpr char kExpectedRomVersion[] = "0200AC20040614";
+            static_assert(sizeof(kExpectedRomVersion) - 1u == 14u);
+
+            writeGuestString(test.rdram.data(), kPathAddr, "rom0:ROMVER");
+            std::memset(test.rdram.data() + kBufferAddr, 0xA5, 16u);
+            setRegU32(test.ctx, 4, kPathAddr);
+            setRegU32(test.ctx, 5, PS2_FIO_O_RDONLY);
+            fioOpen(test.rdram.data(), &test.ctx, &test.runtime);
+            const int32_t fd = getRegS32(&test.ctx, 2);
+            t.IsTrue(fd >= 0, "fioOpen should recognize rom0:ROMVER without a host file");
+
+            setRegU32(test.ctx, 4, static_cast<uint32_t>(fd));
+            setRegU32(test.ctx, 5, kBufferAddr);
+            setRegU32(test.ctx, 6, 14u);
+            fioRead(test.rdram.data(), &test.ctx, &test.runtime);
+            t.Equals(getRegS32(&test.ctx, 2), 14, "fioRead should return the complete ROMVER payload");
+            t.IsTrue(std::memcmp(test.rdram.data() + kBufferAddr,
+                                 kExpectedRomVersion,
+                                 sizeof(kExpectedRomVersion) - 1u) == 0,
+                     "ROMVER should use the normal consumer-console format");
+            t.Equals(static_cast<uint32_t>(test.rdram[kBufferAddr + 14u]), 0xA5u,
+                     "ROMVER reads must not append a terminator");
+
+            setRegU32(test.ctx, 4, static_cast<uint32_t>(fd));
+            fioClose(test.rdram.data(), &test.ctx, &test.runtime);
+            t.Equals(getRegS32(&test.ctx, 2), 0, "fioClose should release the ROMVER descriptor");
+        });
+
+        tc.Run("ROM0 profiles can extend and override files without a BIOS", [](TestCase &t)
+        {
+            PS2RomProfile profile;
+            profile.id = "runtime-io-test";
+            profile.provider = "test-extension";
+            profile.matcher.elfName = "rom_profile_test.elf";
+            profile.files["CONFIG"] = {'p', 'r', 'o', 'f', 'i', 'l', 'e'};
+            profile.files["ROMVER"] = {'9', '9', '9', '9', 'T', '2', '0', '2', '6', '0', '8', '2', '4', 'X'};
+            PS2RomDevice::registerProfile(std::move(profile));
+
+            TestContext test;
+            std::string error;
+            t.IsTrue(test.runtime.romDevice().configure({"rom_profile_test.elf", 0u, 0u}, &error),
+                     "a uniquely matched ROM0 profile should configure");
+            t.Equals(std::string(test.runtime.romDevice().activeProvider()), std::string("test-extension"),
+                     "the selected ROM0 profile should expose its provider");
+
+            constexpr uint32_t kPathAddr = GUEST_STRING_AREA_START;
+            constexpr uint32_t kBufferAddr = GUEST_BUFFER_AREA_START;
+            writeGuestString(test.rdram.data(), kPathAddr, "rom0:CONFIG");
+            setRegU32(test.ctx, 4, kPathAddr);
+            setRegU32(test.ctx, 5, PS2_FIO_O_RDONLY);
+            fioOpen(test.rdram.data(), &test.ctx, &test.runtime);
+            const int32_t fd = getRegS32(&test.ctx, 2);
+            t.IsTrue(fd >= 0, "a profile-provided ROM0 file should open through normal FileIO");
+
+            setRegU32(test.ctx, 4, static_cast<uint32_t>(fd));
+            setRegU32(test.ctx, 5, kBufferAddr);
+            setRegU32(test.ctx, 6, 7u);
+            fioRead(test.rdram.data(), &test.ctx, &test.runtime);
+            t.Equals(getRegS32(&test.ctx, 2), 7, "profile-provided ROM0 bytes should be readable");
+            t.IsTrue(std::memcmp(test.rdram.data() + kBufferAddr, "profile", 7u) == 0,
+                     "ROM0 profile contents should reach the guest unchanged");
+
+            setRegU32(test.ctx, 4, static_cast<uint32_t>(fd));
+            fioClose(test.rdram.data(), &test.ctx, &test.runtime);
+        });
+
+        tc.Run("ROM0 uses VFS stat and per-runtime descriptors", [](TestCase &t)
+        {
+            TestContext owner;
+            TestContext other;
+            constexpr uint32_t kPathAddr = GUEST_STRING_AREA_START;
+            constexpr uint32_t kBufferAddr = GUEST_BUFFER_AREA_START;
+            constexpr uint32_t kStatAddr = GUEST_BUFFER_AREA_START + 0x100u;
+            writeGuestString(owner.rdram.data(), kPathAddr, "rom0:ROMVER");
+
+            setRegU32(owner.ctx, 4, kPathAddr);
+            setRegU32(owner.ctx, 5, PS2_FIO_O_RDONLY);
+            fioOpen(owner.rdram.data(), &owner.ctx, &owner.runtime);
+            const int32_t fd = getRegS32(&owner.ctx, 2);
+            t.IsTrue(fd >= 3, "ROM0 should return a normal VFS descriptor");
+
+            setRegU32(owner.ctx, 4, static_cast<uint32_t>(fd));
+            setRegU32(owner.ctx, 5, kBufferAddr);
+            setRegU32(owner.ctx, 6, 4u);
+            fioRead(owner.rdram.data(), &owner.ctx, &other.runtime);
+            t.Equals(getRegS32(&owner.ctx, 2), -1,
+                     "a descriptor must not leak into a different runtime instance");
+
+            setRegU32(owner.ctx, 4, kPathAddr);
+            setRegU32(owner.ctx, 5, kStatAddr);
+            fioGetstat(owner.rdram.data(), &owner.ctx, &owner.runtime);
+            t.Equals(getRegS32(&owner.ctx, 2), 0, "fioGetstat should see ROM0 virtual files");
+            GuestIoStat stat{};
+            std::memcpy(&stat, owner.rdram.data() + kStatAddr, sizeof(stat));
+            t.Equals(stat.size, 14u, "ROMVER stat should report its exact payload size");
+            t.Equals(stat.mode & 0x38u, 0x10u, "ROMVER should be reported as an ioman regular file");
+
+            setRegU32(owner.ctx, 4, static_cast<uint32_t>(fd));
+            fioClose(owner.rdram.data(), &owner.ctx, &owner.runtime);
+        });
+
         tc.Run("mc0 directory creation", [](TestCase &t)
         {
             TestContext test;
@@ -161,7 +283,7 @@ void register_ps2_runtime_io_tests()
             writeGuestString(test.rdram.data(), dirAddr, dirPath);
 
             setRegU32(test.ctx, 4, dirAddr);
-            fioMkdir(test.rdram.data(), &test.ctx, nullptr);
+            fioMkdir(test.rdram.data(), &test.ctx, &test.runtime);
             
             const int32_t result = getRegS32(&test.ctx, 2);
             t.IsTrue(result >= 0, "fioMkdir should succeed for mc0: directory");
@@ -182,7 +304,7 @@ void register_ps2_runtime_io_tests()
             const uint32_t dirAddr = GUEST_STRING_AREA_START;
             writeGuestString(test.rdram.data(), dirAddr, dirPath);
             setRegU32(test.ctx, 4, dirAddr);
-            fioMkdir(test.rdram.data(), &test.ctx, nullptr);
+            fioMkdir(test.rdram.data(), &test.ctx, &test.runtime);
 
             // Test: open file for writing
             const std::string filePath = "mc0:/SAVEDATA/test.txt";
@@ -191,7 +313,7 @@ void register_ps2_runtime_io_tests()
 
             setRegU32(test.ctx, 4, fileAddr);
             setRegU32(test.ctx, 5, PS2_FIO_WRITE_CREATE_TRUNC);
-            fioOpen(test.rdram.data(), &test.ctx, nullptr);
+            fioOpen(test.rdram.data(), &test.ctx, &test.runtime);
             
             const int32_t fd = getRegS32(&test.ctx, 2);
             t.IsTrue(fd >= 0, "fioOpen should return valid file descriptor");
@@ -204,7 +326,7 @@ void register_ps2_runtime_io_tests()
             setRegU32(test.ctx, 4, static_cast<uint32_t>(fd));
             setRegU32(test.ctx, 5, bufAddr);
             setRegU32(test.ctx, 6, static_cast<uint32_t>(payload.size()));
-            fioWrite(test.rdram.data(), &test.ctx, nullptr);
+            fioWrite(test.rdram.data(), &test.ctx, &test.runtime);
             
             const int32_t bytesWritten = getRegS32(&test.ctx, 2);
             t.Equals(bytesWritten, static_cast<int32_t>(payload.size()), 
@@ -212,7 +334,7 @@ void register_ps2_runtime_io_tests()
 
             // Close file
             setRegU32(test.ctx, 4, static_cast<uint32_t>(fd));
-            fioClose(test.rdram.data(), &test.ctx, nullptr);
+            fioClose(test.rdram.data(), &test.ctx, &test.runtime);
             
             const int32_t closeResult = getRegS32(&test.ctx, 2);
             t.IsTrue(closeResult >= 0, "fioClose should succeed");
@@ -239,7 +361,7 @@ void register_ps2_runtime_io_tests()
             const uint32_t dirAddr = GUEST_STRING_AREA_START;
             writeGuestString(test.rdram.data(), dirAddr, dirPath);
             setRegU32(test.ctx, 4, dirAddr);
-            fioMkdir(test.rdram.data(), &test.ctx, nullptr);
+            fioMkdir(test.rdram.data(), &test.ctx, &test.runtime);
 
             const std::string filePath = "mc0:/SAVEDATA/test.txt";
             const uint32_t fileAddr = GUEST_STRING_AREA_START + 0x100;
@@ -252,21 +374,21 @@ void register_ps2_runtime_io_tests()
 
             setRegU32(test.ctx, 4, fileAddr);
             setRegU32(test.ctx, 5, PS2_FIO_WRITE_CREATE_TRUNC);
-            fioOpen(test.rdram.data(), &test.ctx, nullptr);
+            fioOpen(test.rdram.data(), &test.ctx, &test.runtime);
             int32_t fd = getRegS32(&test.ctx, 2);
 
             setRegU32(test.ctx, 4, static_cast<uint32_t>(fd));
             setRegU32(test.ctx, 5, writeBufAddr);
             setRegU32(test.ctx, 6, static_cast<uint32_t>(payload.size()));
-            fioWrite(test.rdram.data(), &test.ctx, nullptr);
+            fioWrite(test.rdram.data(), &test.ctx, &test.runtime);
 
             setRegU32(test.ctx, 4, static_cast<uint32_t>(fd));
-            fioClose(test.rdram.data(), &test.ctx, nullptr);
+            fioClose(test.rdram.data(), &test.ctx, &test.runtime);
 
             // Test: read back via fioRead
             setRegU32(test.ctx, 4, fileAddr);
             setRegU32(test.ctx, 5, PS2_FIO_O_RDONLY);
-            fioOpen(test.rdram.data(), &test.ctx, nullptr);
+            fioOpen(test.rdram.data(), &test.ctx, &test.runtime);
             fd = getRegS32(&test.ctx, 2);
             t.IsTrue(fd >= 0, "fioOpen for reading should succeed");
 
@@ -277,7 +399,7 @@ void register_ps2_runtime_io_tests()
             setRegU32(test.ctx, 4, static_cast<uint32_t>(fd));
             setRegU32(test.ctx, 5, readBufAddr);
             setRegU32(test.ctx, 6, static_cast<uint32_t>(payload.size()));
-            fioRead(test.rdram.data(), &test.ctx, nullptr);
+            fioRead(test.rdram.data(), &test.ctx, &test.runtime);
 
             const int32_t bytesRead = getRegS32(&test.ctx, 2);
             t.Equals(bytesRead, static_cast<int32_t>(payload.size()), 
@@ -290,7 +412,7 @@ void register_ps2_runtime_io_tests()
             t.Equals(readback, payload, "fioRead content should match original");
 
             setRegU32(test.ctx, 4, static_cast<uint32_t>(fd));
-            fioClose(test.rdram.data(), &test.ctx, nullptr);
+            fioClose(test.rdram.data(), &test.ctx, &test.runtime);
         });
 
         tc.Run("mc0 paths isolated from cdRoot", [](TestCase &t)
@@ -307,11 +429,11 @@ void register_ps2_runtime_io_tests()
 
             // Create directory and file on mc0:
             setRegU32(test.ctx, 4, dirAddr);
-            fioMkdir(test.rdram.data(), &test.ctx, nullptr);
+            fioMkdir(test.rdram.data(), &test.ctx, &test.runtime);
 
             setRegU32(test.ctx, 4, fileAddr);
             setRegU32(test.ctx, 5, PS2_FIO_WRITE_CREATE_TRUNC);
-            fioOpen(test.rdram.data(), &test.ctx, nullptr);
+            fioOpen(test.rdram.data(), &test.ctx, &test.runtime);
             const int32_t fd = getRegS32(&test.ctx, 2);
 
             const std::string payload = "isolation test";
@@ -321,10 +443,10 @@ void register_ps2_runtime_io_tests()
             setRegU32(test.ctx, 4, static_cast<uint32_t>(fd));
             setRegU32(test.ctx, 5, bufAddr);
             setRegU32(test.ctx, 6, static_cast<uint32_t>(payload.size()));
-            fioWrite(test.rdram.data(), &test.ctx, nullptr);
+            fioWrite(test.rdram.data(), &test.ctx, &test.runtime);
 
             setRegU32(test.ctx, 4, static_cast<uint32_t>(fd));
-            fioClose(test.rdram.data(), &test.ctx, nullptr);
+            fioClose(test.rdram.data(), &test.ctx, &test.runtime);
 
             // Verify isolation
             const std::filesystem::path expectedMc = 

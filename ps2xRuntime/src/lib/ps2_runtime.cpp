@@ -15,10 +15,10 @@
 #include "ps2x/iop/iop_subsystem.h"
 
 #include <iostream>
+#include <stdexcept>
 #include <fstream>
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <cstring>
 #include <limits>
 #include <chrono>
@@ -481,15 +481,8 @@ PS2Runtime::PS2Runtime()
 {
     m_iopHost = std::make_unique<PS2IopHostAdapter>(*this);
     m_iopSubsystem = std::make_unique<ps2x::iop::IopSubsystem>(*m_iopHost);
+
     m_eeScheduler = std::make_unique<EeScheduler>(*this);
-#if defined(PS2X_IOP_ENABLE_PLUGINS) && PS2X_IOP_ENABLE_PLUGINS && \
-    !defined(PLATFORM_VITA) && (defined(_WIN32) || defined(__linux__))
-    if (const char *applicationDirectory = GetApplicationDirectory();
-        applicationDirectory && applicationDirectory[0] != '\0')
-    {
-        m_iopSubsystem->setPluginSearchPaths({std::filesystem::path(applicationDirectory) / "iop_plugins"});
-    }
-#endif
 
     // Assign rather than memset: R5900Context's constructor zeroes itself and
     // then applies the COP0 reset values, which a memset here would discard.
@@ -571,14 +564,32 @@ PS2Runtime::~PS2Runtime()
     }
 }
 
-void PS2Runtime::setIopPluginSearchPaths(std::vector<std::filesystem::path> paths)
+ps2x::iop::ModuleLoadResult PS2Runtime::loadIopModule(std::string_view path, const void *arguments, uint32_t argumentSize)
 {
-    m_iopSubsystem->setPluginSearchPaths(std::move(paths));
+    auto scope = m_iopHost->enterCall(nullptr, m_memory.getRDRAM());
+    return m_iopSubsystem->loadModule(path, arguments, argumentSize);
+}
+
+ps2x::iop::ModuleLoadResult PS2Runtime::loadIopModuleBuffer(uint32_t guestAddress, const void *arguments, uint32_t argumentSize)
+{
+    auto scope = m_iopHost->enterCall(nullptr, m_memory.getRDRAM());
+    return m_iopSubsystem->loadModuleBuffer(guestAddress, arguments, argumentSize);
+}
+
+bool PS2Runtime::stopIopModule(int32_t moduleId, int32_t *result)
+{
+    auto scope = m_iopHost->enterCall(nullptr, m_memory.getRDRAM());
+    return m_iopSubsystem->stopModule(moduleId, result);
 }
 
 ps2x::iop::RpcAbi PS2Runtime::selectIopRpcAbi(const ps2x::iop::RpcAbiRequest &request) const
 {
     return m_iopSubsystem->selectRpcAbi(request);
+}
+
+bool PS2Runtime::canBindIopRpc(uint32_t sid) const noexcept
+{
+    return m_iopSubsystem->canBindRpc(sid);
 }
 
 ps2x::iop::RpcResult PS2Runtime::handleIopRpc(uint8_t *rdram, R5900Context *ctx, ps2x::iop::RpcRequest request)
@@ -594,6 +605,11 @@ void PS2Runtime::notifyIopSifTransfer(uint8_t *rdram, const ps2x::iop::SifTransf
     m_iopSubsystem->onSifTransfer(transfer);
 }
 
+void PS2Runtime::advanceIopEeCycles(uint64_t eeCycles) noexcept
+{
+    m_iopSubsystem->runEeCycles(eeCycles);
+}
+
 void PS2Runtime::resetIop()
 {
     m_iopSubsystem->reset();
@@ -602,6 +618,36 @@ void PS2Runtime::resetIop()
 ps2x::iop::DebugSnapshot PS2Runtime::iopDebugSnapshot() const
 {
     return m_iopSubsystem->debugSnapshot();
+}
+
+uint32_t PS2Runtime::allocateIopMemory(uint32_t size, uint32_t alignment)
+{
+    return m_iopSubsystem ? m_iopSubsystem->allocateMemory(size, alignment) : 0u;
+}
+
+bool PS2Runtime::freeIopMemory(uint32_t address)
+{
+    return m_iopSubsystem && m_iopSubsystem->freeMemory(address);
+}
+
+bool PS2Runtime::readIopMemory(uint32_t address, void *destination, size_t size) const
+{
+    return m_iopSubsystem && m_iopSubsystem->readMemory(address, destination, size);
+}
+
+bool PS2Runtime::writeIopMemory(uint32_t address, const void *source, size_t size)
+{
+    return m_iopSubsystem && m_iopSubsystem->writeMemory(address, source, size);
+}
+
+bool PS2Runtime::zeroIopMemory(uint32_t address, size_t size)
+{
+    return m_iopSubsystem && m_iopSubsystem->zeroMemory(address, size);
+}
+
+bool PS2Runtime::isIopMemoryRange(uint32_t address, size_t size) const
+{
+    return m_iopSubsystem && m_iopSubsystem->isMemoryRange(address, size);
 }
 
 bool PS2Runtime::syncCoreSubsystems()
@@ -682,15 +728,6 @@ bool PS2Runtime::initialize(const char *title)
             std::cerr << "Failed to bind runtime core subsystems" << std::endl;
             return false;
         }
-#if defined(PS2X_IOP_ENABLE_PLUGINS) && PS2X_IOP_ENABLE_PLUGINS && \
-    !defined(PLATFORM_VITA) && (defined(_WIN32) || defined(__linux__))
-        std::string pluginError;
-        if (!m_iopSubsystem->loadPlugins(&pluginError))
-        {
-            std::cerr << "Failed to load IOP plugins: " << pluginError << std::endl;
-            return false;
-        }
-#endif
 #if defined(PLATFORM_VITA)
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
 #else
@@ -957,12 +994,14 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     identity.elfName = module.name;
     identity.entryPoint = m_cpuContext.pc;
     identity.crc32 = elfCrc32;
-    std::string iopError;
-    if (!m_iopSubsystem->configure(identity, &iopError))
+    std::string romError;
+    if (!m_romDevice.configure(identity, &romError))
     {
-        std::cerr << "[ps2xIOP] failed to configure profile: " << iopError << std::endl;
+        std::cerr << "[ROM0] failed to configure profile: " << romError << std::endl;
         return false;
     }
+
+    m_iopSubsystem->reset();
 
     ps2_game_overrides::applyMatching(*this,
                                       elfPath,
@@ -1348,7 +1387,8 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         if (policy == MissingFunctionPolicy::ContinueToTarget)
         {
             ctx->pc = targetPc;
-            return true;
+            // if you need the app to keep open to open debug pannel change this to false
+            return false;
         }
 
         return false;
@@ -2377,6 +2417,7 @@ void PS2Runtime::run()
                                                << " gsw=" << curGs
                                                << " vif=" << curVif
                                                << std::endl);
+
             }
         });
         uint32_t presentWidth = FB_WIDTH;

@@ -135,11 +135,6 @@ bool PS2IopHostAdapter::readGuest(uint32_t address, void *destination, size_t si
     {
         return false;
     }
-    if (ps2_stubs::isSifIopHeapAddress(address))
-    {
-        return ps2_stubs::readSifIopHeap(address, destination, size);
-    }
-
     uint8_t *source = nullptr;
     if (!guestRange(address, size, source))
     {
@@ -158,11 +153,6 @@ bool PS2IopHostAdapter::writeGuest(uint32_t address, const void *source, size_t 
     {
         return false;
     }
-    if (ps2_stubs::isSifIopHeapAddress(address))
-    {
-        return ps2_stubs::writeSifIopHeap(address, source, size);
-    }
-
     uint8_t *destination = nullptr;
     if (!guestRange(address, size, destination))
     {
@@ -179,11 +169,6 @@ bool PS2IopHostAdapter::writeGuest(uint32_t address, const void *source, size_t 
 
 bool PS2IopHostAdapter::zeroGuest(uint32_t address, size_t size)
 {
-    if (ps2_stubs::isSifIopHeapAddress(address))
-    {
-        return ps2_stubs::zeroSifIopHeap(address, size);
-    }
-
     uint8_t *destination = nullptr;
     if (!guestRange(address, size, destination))
     {
@@ -200,18 +185,38 @@ bool PS2IopHostAdapter::zeroGuest(uint32_t address, size_t size)
 
 bool PS2IopHostAdapter::normalizeGuestAddress(uint32_t address, uint32_t &normalized) const
 {
-    if (ps2_stubs::isSifIopHeapAddress(address))
-    {
-        normalized = address;
-        return ps2_stubs::isSifIopHeapRange(address, 0u);
-    }
-
     bool scratchpad = false;
     if (!ps2ResolveGuestPointer(address, normalized, scratchpad) || scratchpad)
     {
         normalized = 0;
         return false;
     }
+    return true;
+}
+
+bool PS2IopHostAdapter::readIopMemory(uint32_t address, void *destination, size_t size) const
+{
+    return m_runtime.readIopMemory(address, destination, size);
+}
+
+bool PS2IopHostAdapter::writeIopMemory(uint32_t address, const void *source, size_t size)
+{
+    return m_runtime.writeIopMemory(address, source, size);
+}
+
+bool PS2IopHostAdapter::zeroIopMemory(uint32_t address, size_t size)
+{
+    return m_runtime.zeroIopMemory(address, size);
+}
+
+bool PS2IopHostAdapter::normalizeIopAddress(uint32_t address, uint32_t &normalized) const
+{
+    if (!m_runtime.isIopMemoryRange(address, 0u))
+    {
+        normalized = 0u;
+        return false;
+    }
+    normalized = address & 0x1FFFFFFFu;
     return true;
 }
 
@@ -283,7 +288,12 @@ std::string PS2IopHostAdapter::hostPath(ps2x::iop::HostPathKind kind) const
 
 std::string PS2IopHostAdapter::translateGuestPath(std::string_view path) const
 {
-    return translatePs2Path(std::string(path).c_str());
+    const PS2Runtime::IoPaths &paths = PS2Runtime::getIoPaths();
+    const PS2VfsMounts mounts{paths.hostRoot, paths.cdRoot, paths.mcRoot};
+    std::filesystem::path hostPath;
+    if (!m_runtime.vfs().resolveHostPath(path, mounts, hostPath))
+        return {};
+    return hostPath.string();
 }
 
 uint64_t PS2IopHostAdapter::openHostFile(std::string_view path)
@@ -491,6 +501,20 @@ bool PS2IopHostAdapter::invokeGuestFunction(uint64_t callToken,
         *resultAddress = 0u;
     }
     return false;
+}
+
+bool PS2IopHostAdapter::sendSifCommand(uint32_t commandId,
+                                       const void *packet,
+                                       size_t packetSize)
+{
+    uint8_t *const rdram = m_activeRdram
+                               ? m_activeRdram
+                               : m_runtime.memory().getRDRAM();
+    return ps2_stubs::dispatchSifCommand(rdram,
+                                         &m_runtime,
+                                         commandId,
+                                         packet,
+                                         packetSize);
 }
 
 void PS2IopHostAdapter::log(ps2x::iop::LogLevel level, std::string_view message)

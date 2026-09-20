@@ -12,7 +12,7 @@ This project statically recompiles PS2 ELF binaries into C++ and provides a runt
 * `ps2xAnalyzer`: scans ELF/functions and writes TOML config (`stubs`, `skip`, instruction patches).
 * `ps2xRecomp`: reads TOML + ELF, decodes R5900 instructions, and generates C++ output.
 * `ps2xRuntime`: hosts memory, function registration, syscall dispatch, and hardware stubs.
-* `ps2xIOP`: portable, instance-owned IOP HLE services, game profiles, and the C plugin ABI.
+* `ps2xIOP`: R3000A IRX execution, a virtual IOP kernel, and generic HLE fallbacks.
 
 ### Features
 
@@ -79,9 +79,7 @@ Fallback workflow for quick local experiments or ELFs with debug symbol :
 ./ps2_analyzer your_game.elf config.toml
 ```
 
-Use this only when you do not have a Ghidra project yet. The native analyzer is faster to start, but it is less accurate on stripped retail games and more likely to miss internal callable entry points.
-
-See the [Ghidra Workflow](ps2xAnalyzer/Readme.md#3-ghidra-integration-for-retail-and-stripped-games-preferred) for the recommended path.
+See the [Ghidra Workflow](ps2xAnalyzer/Readme.md#3-ghidra-integration-for-retail-and-stripped-games-preferred) for ghdira instructions.
 
 Then build generated output and link with `ps2xRuntime`.
 
@@ -133,15 +131,15 @@ To execute the recompiled code.
 * Some syscall dispatcher with common kernel IDs.
 * Basic GS/VU/file/system stubs.
 * Foundation to expand and port your game.
-* `ps2xIOP` profile selection and optional `.dll`/`.so` discovery for game-specific IOP HLE.
+* `ps2xIOP` execution of original IRX modules with generic HLE fallbacks.
 
-See [IOP HLE profiles and plugins](ps2xIOP/README.md) for the service boundary and external plugin workflow.
+See [IOP emulation](ps2xIOP/README.md) for module execution and the service boundary.
 
 ### Game Override Hooks
 
 Game overrides are runtime-side, build-scoped patch modules.
 
-A game override is C++ code that runs during `loadELF` and can replace EE function bindings by address for one specific game build. IOP RPC/DMA behavior belongs in a `ps2xIOP` profile instead. This is separate from recompilation output and separate from global runtime stubs/syscalls.
+A game override is C++ code that runs during `loadELF` and can replace EE function bindings by address for one specific game build. IOP RPC/DMA behavior is handled by the `ps2xIOP` emulator and its runtime transport. This is separate from recompilation output and separate from global runtime stubs/syscalls.
 
 API:
 
@@ -164,9 +162,8 @@ Use Game Override modules when:
 6. Re-test from cold boot after each batch.
 
 ### Limitations
-
-* Graphics Synthesizer and other hardware components need external implementation
-* VU1 microcode is not complete.
+ 
+* Performance is very bad for VU and GS
 * Hardware emulation is partial and many paths are stubbed.
 
 ###  Acknowledgments
@@ -175,3 +172,4 @@ Use Game Override modules when:
 * Uses ELFIO for ELF parsing
 * Uses toml11 for TOML parsing
 * Uses fmt for string formatting
+* Reference for runtime PCSX2

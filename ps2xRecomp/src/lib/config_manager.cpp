@@ -74,6 +74,27 @@ namespace ps2recomp
                 config.stubImplementations = toml::find<std::vector<std::string>>(data, "stubs");
             }
 
+            auto appendEntryPointHints = [&](const toml::value &table, const char *key)
+            {
+                if (!table.contains(key) || !table.at(key).is_array())
+                {
+                    return;
+                }
+                const auto values = toml::find<std::vector<std::string>>(table, key);
+                config.entryPointHints.insert(
+                    config.entryPointHints.end(), values.begin(), values.end());
+            };
+            appendEntryPointHints(general, "entry_points");
+            appendEntryPointHints(data, "entry_points");
+            // Backward compatibility
+            appendEntryPointHints(general, "untracked_stubs");
+            appendEntryPointHints(data, "untracked_stubs");
+
+            std::sort(config.entryPointHints.begin(), config.entryPointHints.end());
+            config.entryPointHints.erase(
+                std::unique(config.entryPointHints.begin(), config.entryPointHints.end()),
+                config.entryPointHints.end());
+
             if (general.contains("skip") && general.at("skip").is_array())
             {
                 config.skipFunctions = toml::find<std::vector<std::string>>(general, "skip");
@@ -276,6 +297,7 @@ namespace ps2recomp
         general["patch_cache"] = config.patchCache;
         general["skip"] = config.skipFunctions;
         general["stubs"] = config.stubImplementations;
+        general["entry_points"] = config.entryPointHints;
         data["general"] = general;
 
         if (!config.mmioByInstructionAddress.empty())

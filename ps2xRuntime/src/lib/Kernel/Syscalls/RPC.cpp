@@ -155,20 +155,22 @@ namespace ps2_syscalls
         const int32_t moduleId = static_cast<int32_t>(getRegU32(ctx, 4)); // $a0
         const uint32_t resultAddr = getRegU32(ctx, 7);                    // $a3 (int* result, optional)
 
+        int32_t moduleResult = -1;
+        const bool stoppedByEmulator = runtime->stopIopModule(moduleId, &moduleResult);
         uint32_t refsLeft = 0;
         const bool knownModule = trackSifModuleStop(moduleId, &refsLeft);
-        const int32_t ret = knownModule ? 0 : -1;
+        const int32_t ret = (stoppedByEmulator || knownModule) ? 0 : -1;
 
         if (resultAddr != 0)
         {
             int32_t *hostResult = reinterpret_cast<int32_t *>(getMemPtr(rdram, resultAddr));
             if (hostResult)
             {
-                *hostResult = knownModule ? 0 : -1;
+                *hostResult = stoppedByEmulator ? moduleResult : (knownModule ? 0 : -1);
             }
         }
 
-        if (knownModule)
+        if (stoppedByEmulator || knownModule)
         {
             std::string modulePath;
             {
@@ -179,7 +181,7 @@ namespace ps2_syscalls
                     modulePath = it->second.path;
                 }
             }
-            logSifModuleAction("stop", moduleId, modulePath, refsLeft);
+            logSifModuleAction(stoppedByEmulator ? "stop-emulated" : "stop", moduleId, modulePath, refsLeft);
         }
 
         setReturnS32(ctx, ret);
@@ -187,7 +189,9 @@ namespace ps2_syscalls
 
     void SifLoadModule(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        const uint32_t pathAddr = getRegU32(ctx, 4); // $a0
+        const uint32_t pathAddr = getRegU32(ctx, 4);     // $a0
+        const uint32_t argumentSize = getRegU32(ctx, 5); // $a1
+        const uint32_t argumentAddr = getRegU32(ctx, 6); // $a2
         const std::string modulePath = readGuestCStringBounded(rdram, pathAddr, kMaxSifModulePathBytes);
         if (modulePath.empty())
         {
@@ -195,34 +199,35 @@ namespace ps2_syscalls
             return;
         }
 
-        const int32_t moduleId = trackSifModuleLoad(modulePath);
-        if (moduleId <= 0)
+        std::vector<uint8_t> arguments;
+        constexpr uint32_t kMaxIopModuleArguments = 64u * 1024u;
+        if (!copyGuestBytesBounded(rdram, argumentAddr, argumentSize, kMaxIopModuleArguments, arguments))
         {
             setReturnS32(ctx, -1);
             return;
         }
 
-        uint32_t refs = 0;
+        if (!runtime)
         {
-            std::lock_guard<std::mutex> lock(g_sif_module_mutex);
-            auto it = g_sif_modules_by_id.find(moduleId);
-            if (it != g_sif_modules_by_id.end())
-            {
-                refs = it->second.refCount;
-            }
+            setReturnS32(ctx, -1);
+            return;
         }
-        logSifModuleAction("load", moduleId, modulePath, refs);
 
-        setReturnS32(ctx, moduleId);
+        const auto loaded = runtime->loadIopModule(modulePath, arguments.empty() ? nullptr : arguments.data(), static_cast<uint32_t>(arguments.size()));
+        if (!loaded.handled || loaded.moduleId <= 0)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+
+        trackSifModuleLoadExternal(modulePath, loaded.moduleId);
+        logSifModuleAction("load-emulated", loaded.moduleId, modulePath, 1u);
+        setReturnS32(ctx, loaded.moduleId);
     }
 
     void SifInitRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         std::lock_guard<std::mutex> lock(g_rpc_mutex);
-        if (runtime)
-        {
-            PS2IopTransport::reset(runtime);
-        }
         if (!g_rpc_initialized)
         {
             g_rpc_servers.clear();
@@ -290,9 +295,12 @@ namespace ps2_syscalls
             g_rpc_clients[clientPtr].sid = rpcId;
         }
 
-        if (!serverPtr)
+        if (!serverPtr && PS2IopTransport::canBindRpc(runtime, rpcId))
         {
-            // Allocate a dummy server so bind loops can proceed.
+            // EE-side servers and HLE routes need a descriptor in guest RAM.
+            // With an emulated IOP, only publish it after the IRX has actually
+            // registered the SID; cd->server == nullptr is the SDK's retry
+            // signal while the IOP server thread is still starting.
             serverPtr = rpcAllocServerAddr(rdram);
             if (serverPtr)
             {

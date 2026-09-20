@@ -8,15 +8,6 @@
 class PS2IopTransport
 {
 public:
-    static bool configureForTesting(
-        PS2Runtime *runtime,
-        const ps2x::iop::GameIdentity &identity,
-        std::string *error = nullptr)
-    {
-        return runtime && runtime->m_iopSubsystem &&
-               runtime->m_iopSubsystem->configure(identity, error);
-    }
-
     [[nodiscard]] static ps2x::iop::RpcAbi selectRpcAbi(
         const PS2Runtime *runtime,
         const ps2x::iop::RpcAbiRequest &request)
@@ -35,6 +26,11 @@ public:
         return runtime
                    ? runtime->handleIopRpc(rdram, context, std::move(request))
                    : ps2x::iop::RpcResult{};
+    }
+
+    [[nodiscard]] static bool canBindRpc(const PS2Runtime *runtime, uint32_t sid)
+    {
+        return !runtime || runtime->canBindIopRpc(sid);
     }
 
     static void notifyTransfer(
