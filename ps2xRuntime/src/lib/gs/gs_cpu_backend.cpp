@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -1310,6 +1311,12 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch)
     const float winding = (denom < 0.0f) ? -1.0f : 1.0f;
     const float invAbsDenom = 1.0f / std::fabs(denom);
     constexpr float kEdgeEpsilon = 1.0e-4f;
+    static const bool disableEarlyDepth = std::getenv("PS2X_GS_DISABLE_EARLY_DEPTH") != nullptr;
+    const uint32_t depthMethod = static_cast<uint32_t>((ctx.test >> 17u) & 3u);
+    const bool earlyDepth = !disableEarlyDepth && ((ctx.test >> 16u) & 1u) != 0u && depthMethod >= 2u;
+    const uint32_t depthBase = GSInternal::framePageBaseToBlock(ctx.zbuf.zbp);
+    const uint32_t depthWidth = std::max<uint32_t>(ctx.frame.fbw, 1u);
+    const auto &depthReader = m_readVramFuncs[ctx.zbuf.psm & 0x3Fu];
 
     for (int y = minY; y <= maxY; ++y)
     {
@@ -1326,6 +1333,16 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch)
                 continue;
 
             double z = v0.z * w0 + v1.z * w1 + v2.z * w2;
+            const uint32_t pixelZ = static_cast<uint32_t>(z + 0.5);
+
+            // A failing depth test cannot store color or depth, regardless of
+            // alpha-test mode. Passing pixels retain the existing write path.
+            if (earlyDepth)
+            {
+                const uint32_t storedZ = depthReader(m_vram, depthBase, depthWidth, x, y);
+                if (pixelZ < storedZ || (depthMethod == 3u && pixelZ == storedZ))
+                    continue;
+            }
 
             uint8_t r, g, b, a;
             if (state.prim.iip)
@@ -1388,7 +1405,7 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch)
             }
 
             const uint8_t fog = clampU8(static_cast<int>(v0.fog * w0 + v1.fog * w1 + v2.fog * w2));
-            WritePixel(state, x, y, static_cast<u32>(z + 0.5), r, g, b, a, fog);
+            WritePixel(state, x, y, pixelZ, r, g, b, a, fog);
         }
     }
 }
