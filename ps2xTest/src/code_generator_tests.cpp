@@ -1443,6 +1443,26 @@ void register_code_generator_tests()
             t.IsTrue(out.find("ctx->vu0_vf[22]") == std::string::npos, "S2 must not use rs(format) as register index");
         });
 
+        tc.Run("VU0 VCLIP emits the PS2 clip helper", [](TestCase &t) {
+            Instruction inst{};
+            inst.opcode = OPCODE_COP2;
+            inst.rs = COP2_CO | 0xF;
+            inst.rt = 20;
+            inst.rd = 12;
+            inst.function = 0x3C;
+            inst.vectorInfo.vectorField = 0xF;
+
+            const uint32_t upper = (VU0_S2_VCLIPw >> 2) & 0x1F;
+            const uint32_t lower = VU0_S2_VCLIPw & 0x3;
+            inst.raw = (upper << 6) | lower;
+
+            CodeGenerator gen({}, {});
+            const std::string out = gen.translateInstruction(inst);
+
+            t.IsTrue(out.find("PS2_VCLIP(ctx->vu0_clip_flags, ctx->vu0_vf[12], ctx->vu0_vf[20])") != std::string::npos,
+                     "VCLIP should use the runtime helper with Fs from rd and Ft from rt");
+        });
+
         tc.Run("VU0 S2 VI memory ops use rd as VI base register", [](TestCase &t) {
             Instruction inst{};
             inst.opcode = OPCODE_COP2;

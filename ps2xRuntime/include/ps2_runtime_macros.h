@@ -141,12 +141,34 @@ static inline uint32_t ps2_plzcw32(uint32_t x)
 #define PS2_PNOR(a, b) _mm_xor_si128(_mm_or_si128((__m128i)(a), (__m128i)(b)), _mm_set1_epi32(0xFFFFFFFF))
 
 // PS2 VU (Vector Unit) operations
+static inline uint32_t ps2_vu_clip(uint32_t previousFlags, __m128 fs, __m128 ft)
+{
+    const __m128i fsBits = _mm_castps_si128(fs);
+    const __m128i ftBits = _mm_castps_si128(ft);
+    const uint32_t wBits = static_cast<uint32_t>(Ps2ExtractEpi32(ftBits, 3));
+    const int32_t clipMagnitude = static_cast<int32_t>(
+        (wBits & 0x7F800000u) != 0u ? (wBits & 0x7FFFFFFFu) : 0x007FFFFFu);
+
+    uint32_t flags = 0u;
+    for (int lane = 0; lane < 3; ++lane)
+    {
+        const uint32_t value = static_cast<uint32_t>(Ps2ExtractEpi32(fsBits, lane));
+        if (static_cast<int32_t>(value) > clipMagnitude)
+            flags |= 1u << (lane * 2);
+        if (static_cast<int32_t>(value ^ 0x80000000u) > clipMagnitude)
+            flags |= 2u << (lane * 2);
+    }
+
+    return ((previousFlags << 6) | flags) & 0x00FFFFFFu;
+}
+
 #define PS2_VADD(a, b) _mm_add_ps((__m128)(a), (__m128)(b))
 #define PS2_VSUB(a, b) _mm_sub_ps((__m128)(a), (__m128)(b))
 #define PS2_VMUL(a, b) _mm_mul_ps((__m128)(a), (__m128)(b))
 #define PS2_VDIV(a, b) _mm_div_ps((__m128)(a), (__m128)(b))
 #define PS2_VMULQ(a, q) _mm_mul_ps((__m128)(a), _mm_set1_ps(q))
 #define PS2_VBLEND(a, b, mask) PS2_BLENDV_PS((__m128)(a), (__m128)(b), (__m128)(mask))
+#define PS2_VCLIP(flags, fs, ft) ps2_vu_clip((uint32_t)(flags), (__m128)(fs), (__m128)(ft))
 
 // Memory access helpers - Hybrid Fast/Slow Path
 // Fast path: Direct RDRAM access (masked).

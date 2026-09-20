@@ -75,10 +75,52 @@ namespace
         m[10] = 1.0f;
         m[15] = 1.0f;
     }
+
+    float floatFromBits(uint32_t bits)
+    {
+        float value = 0.0f;
+        std::memcpy(&value, &bits, sizeof(value));
+        return value;
+    }
 }
 
 void register_ps2_vu_tests()
 {
+    MiniTest::Case("PS2VU0ClipSemantics", [](TestCase &tc)
+    {
+        tc.Run("ClipFlagsUsePositiveThenNegativeBitsPerAxis", [](TestCase &t)
+        {
+            const __m128 positiveNegativePositive = _mm_set_ps(0.0f, 3.0f, -3.0f, 3.0f);
+            const __m128 negativePositiveNegative = _mm_set_ps(0.0f, -3.0f, 3.0f, -3.0f);
+            const __m128 limit = _mm_set_ps(2.0f, 0.0f, 0.0f, 0.0f);
+
+            t.IsTrue(PS2_VCLIP(0u, positiveNegativePositive, limit) == 0x19u,
+                     "VCLIP should assign positive X/Y/Z to bits 0/2/4 and negative values to bits 1/3/5");
+            t.IsTrue(PS2_VCLIP(0u, negativePositiveNegative, limit) == 0x26u,
+                     "VCLIP should preserve the negative X/Y/Z bit ordering");
+        });
+
+        tc.Run("ClipUsesAbsoluteWAndPreservesFlagHistory", [](TestCase &t)
+        {
+            const __m128 value = _mm_set_ps(0.0f, 1.0f, -3.0f, 3.0f);
+            const __m128 negativeLimit = _mm_set_ps(-2.0f, 0.0f, 0.0f, 0.0f);
+            const uint32_t previous = 0x123456u;
+            const uint32_t expected = ((previous << 6) | 0x09u) & 0x00FFFFFFu;
+
+            t.IsTrue(PS2_VCLIP(previous, value, negativeLimit) == expected,
+                     "VCLIP should compare against abs(W) and retain four generations of six-bit flags");
+        });
+
+        tc.Run("ClipTreatsDenormalWAsMaximumDenormal", [](TestCase &t)
+        {
+            const __m128 value = _mm_set_ps(0.0f, 0.0f, 0.0f, floatFromBits(0x00800000u));
+            const __m128 denormalLimit = _mm_set_ps(floatFromBits(0x80000001u), 0.0f, 0.0f, 0.0f);
+
+            t.IsTrue(PS2_VCLIP(0u, value, denormalLimit) == 0x01u,
+                     "VCLIP should classify the smallest normal value beyond a denormal W limit");
+        });
+    });
+
     MiniTest::Case("PS2VU0Math", [](TestCase &tc)
     {
         tc.Run("MulVector_componentwise", [](TestCase &t)
