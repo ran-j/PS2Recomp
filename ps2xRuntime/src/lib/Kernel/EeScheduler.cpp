@@ -1254,6 +1254,10 @@ int EeScheduler::setIrqCauseEnabled(bool dmac, uint32_t cause, bool enabled)
 
 void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
 {
+    if (m_executorThread == std::thread::id{})
+    {
+        m_executorThread = std::this_thread::get_id();
+    }
     assertExecutor();
     const uint32_t mask = dmac ? m_enabledDmacMask : m_enabledIntcMask;
     if (cause < 32u && (mask & (1u << cause)) == 0u)
@@ -1456,7 +1460,7 @@ uint8_t *EeScheduler::rdram() const noexcept
 
 void EeScheduler::bindMainContextForSyscall(R5900Context &ctx, uint8_t *rdram)
 {
-    if (m_executorThread == std::thread::id{})
+    if (m_executorThread == std::thread::id{} || m_threads.empty())
     {
         reset(rdram, ctx);
         GuestThread *main = selectReady();
