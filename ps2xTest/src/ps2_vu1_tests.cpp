@@ -217,6 +217,96 @@ void register_ps2_vu1_tests()
 {
     MiniTest::Case("PS2VU1", [](TestCase &tc)
     {
+        tc.Run("flag and VF deadlines preserve slot reuse across single-cycle slices", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+            if (!fx.code || !fx.data)
+                return;
+            constexpr uint32_t pairs = 40u;
+            for (uint32_t i = 0; i < pairs + 8u; ++i)
+            {
+                const bool alternate = ((i / 8u) & 1u) != 0u;
+                const uint32_t lower = i >= pairs ? 0u : i % 3u == 0u
+                    ? makeVuFlagImmediate(0x15u, 0u, static_cast<uint16_t>((i & 15u) << 6u))
+                    : makeVuLowerSpecial(0x30u, alternate ? 1u : 2u, static_cast<uint8_t>(20u + i % 8u), 0u, 0xFu);
+                const uint32_t upper = i >= pairs ? kVuUpperNop
+                    : makeVuUpper(0x28u, 0xFu, 2u, alternate ? 2u : 1u, static_cast<uint8_t>(4u + i % 8u));
+                writeTrackedVuInstructionPair(fx, i * 8u, lower, upper);
+            }
+            VU1Interpreter vu;
+            float expected[32][4]{};
+            expected[0][3] = 1.0f;
+            for (uint32_t lane = 0; lane < 4u; ++lane)
+            {
+                vu.state().vf[1][lane] = expected[1][lane] = static_cast<float>(lane + 1u);
+                vu.state().vf[2][lane] = expected[2][lane] = static_cast<float>((lane + 1u) * 10u);
+            }
+            uint32_t expectedStatus = 0u;
+            vu.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                       fx.gs, &fx.mem, 0u, 0u, 0u, 0u);
+            for (uint32_t cycle = 1u; cycle <= pairs + 8u; ++cycle)
+            {
+                vu.resume(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                          fx.gs, &fx.mem, 0u, 0u, 0u);
+                t.Equals(vu.state().cycles, uint64_t{cycle - 1u}, "Zero budget must preserve the cycle");
+                vu.resume(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                          fx.gs, &fx.mem, 0u, 0u, 1u);
+                if (cycle >= 4u && cycle - 4u < pairs)
+                {
+                    const uint32_t retired = cycle - 4u;
+                    const bool alternate = ((retired / 8u) & 1u) != 0u;
+                    for (uint32_t lane = 0; lane < 4u; ++lane)
+                    {
+                        expected[4u + retired % 8u][lane] = static_cast<float>((lane + 1u) * (alternate ? 20u : 11u));
+                        if (retired % 3u != 0u)
+                            expected[20u + retired % 8u][lane] = expected[alternate ? 1u : 2u][lane];
+                    }
+                    if (retired % 3u == 0u)
+                        expectedStatus = (retired & 15u) << 6u;
+                }
+                t.Equals(vu.state().cycles, uint64_t{cycle}, "Each slice must advance one cycle");
+                t.Equals(vu.state().pc, cycle * 8u, "Independent pairs must not stall");
+                t.Equals(vu.state().status, expectedStatus, "Same-pair FSSET must win at its deadline");
+                t.Equals(vu.state().mac, 0u, "Positive ADD results must preserve zero MAC flags");
+                for (uint32_t reg = 0; reg < 32u; ++reg)
+                    for (uint32_t lane = 0; lane < 4u; ++lane)
+                        t.Equals(vu.state().vf[reg][lane], expected[reg][lane], "VF values must commit at their exact deadline");
+            }
+        });
+
+        tc.Run("fresh execution and reset discard pending flag and VF deadlines", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+            if (!fx.code || !fx.data)
+                return;
+            writeTrackedVuInstructionPair(fx, 0u, makeVuFlagImmediate(0x15u, 0u, 0xFC0u),
+                                          makeVuUpper(0x28u, 0xFu, 2u, 1u, 3u));
+            for (uint32_t pc = 8u; pc <= 128u; pc += 8u)
+                writeTrackedVuInstructionPair(fx, pc, 0u, kVuUpperNop);
+            VU1Interpreter vu;
+            for (uint32_t restart = 0; restart < 12u; ++restart)
+            {
+                vu.state().vf[1][0] = 1.0f;
+                vu.state().vf[2][0] = 2.0f;
+                vu.state().vf[3][0] = 123.0f;
+                vu.state().status = 0x80u;
+                vu.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                           fx.gs, &fx.mem, 0u, 0u, 0u, 1u);
+                if ((restart & 1u) != 0u)
+                {
+                    vu.reset();
+                    vu.state().vf[3][0] = 123.0f;
+                    vu.state().status = 0x80u;
+                }
+                vu.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                           fx.gs, &fx.mem, 8u, 0u, 0u, 12u);
+                t.Equals(vu.state().vf[3][0], 123.0f, "Cancelled VF writes must not reappear");
+                t.Equals(vu.state().status, 0x80u, "Cancelled flags must not reappear");
+            }
+        });
+
         tc.Run("upper ADD applies the destination mask", [](TestCase &t)
         {
             Vu1Fixture fx;
