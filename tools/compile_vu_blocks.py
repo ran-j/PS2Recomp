@@ -10,10 +10,11 @@ def read_blocks(paths, parser):
     blocks = set()
     for path in paths:
         data = path.read_bytes()
-        if data.startswith(b"VU-BLOCKS 1\n"):
+        if data.startswith((b"VU-BLOCKS 1\n", b"VU-BLOCKS 2\n")):
+            extended = data.startswith(b"VU-BLOCKS 2\n")
             for line in data.decode("ascii").splitlines()[1:]:
                 fields = line.split()
-                if len(fields) != 5:
+                if len(fields) not in ((5, 9, 13, 17) if extended else (5,)):
                     parser.error(f"{path}: invalid block profile record")
                 try:
                     unit = int(fields[0])
@@ -68,7 +69,7 @@ def main():
         args.output.with_name(f"{args.output.stem}_extern.inc").write_text("\n".join(externs) + "\n")
         for index, source in enumerate(shards):
             args.output.with_name(f"{args.output.stem}_{index}.cpp").write_text("\n".join(source) + "\n")
-    print(f"Compiled VU input: {len(blocks)} four-pair blocks, {len(pairs)} individual pairs")
+    print(f"Compiled VU input: {len(blocks)} native blocks, {len(pairs)} individual pairs")
 
 
 if __name__ == "__main__":

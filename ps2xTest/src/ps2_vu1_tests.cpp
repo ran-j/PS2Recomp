@@ -6,6 +6,7 @@
 #include "runtime/ps2_vu1.h"
 #include "../../ps2xRuntime/src/lib/vu/ps2_vu1_fmac.h"
 #include "../../ps2xRuntime/src/lib/vu/ps2_vu1_fmac_neon.h"
+#include "../../ps2xRuntime/src/lib/vu/ps2_vu1_region.h"
 
 #include <cfenv>
 #include <cmath>
@@ -220,6 +221,314 @@ void register_ps2_vu1_tests()
 {
     MiniTest::Case("PS2VU1", [](TestCase &tc)
     {
+        tc.Run("static region timestamps reject wrap and retire at the clock limit", [](TestCase &t)
+        {
+            constexpr uint64_t limit = UINT64_MAX;
+            t.IsTrue(ps2_vu_detail::regionBudgetFits(limit - 8u, limit, 4u),
+                     "the highest safe four-cycle region must fit");
+            t.IsTrue(!ps2_vu_detail::regionBudgetFits(limit - 7u, limit, 4u),
+                     "pending timestamps near wrap must force ordinary execution");
+            t.IsTrue(!ps2_vu_detail::regionBudgetFits(10u, 13u, 4u) &&
+                     !ps2_vu_detail::regionBudgetFits(limit - 8u, 3u, 4u),
+                     "short and wrapped deadlines must reject without mutation");
+            struct Flag {
+                uint64_t readyCycle{};
+                uint32_t mac{}, status{}, extraSticky{}, clip{};
+                bool writesMac{}, writesStatus{}, writesSticky{}, writesClip{};
+            };
+            struct VectorWrite {
+                uint64_t readyCycle{}, sequence{};
+                unsigned reg{};
+                uint8_t laneMask{};
+                std::array<float, 4> value{};
+            };
+            struct IntegerWrite {
+                uint64_t readyCycle{}, sequence{};
+                unsigned reg{};
+                int32_t value{};
+            };
+            VU1State state{};
+            std::array<Flag, 8> flags{};
+            std::array<VectorWrite, 1> vectors{};
+            std::array<IntegerWrite, 1> integers{};
+            std::array<std::array<uint64_t, 4>, 32> vfSequences{};
+            std::array<uint64_t, 16> viSequences{};
+            std::array<std::array<uint8_t, 4>, 32> firstWrite{};
+            std::array<uint8_t, 16> firstViWrite{};
+            constexpr uint64_t start = limit - 8u;
+            uint32_t activeFlags = 0u, activeVf = 1u, activeVi = 1u;
+            for (unsigned offset = 1u; offset <= 4u; ++offset)
+            {
+                const unsigned slot = 2u * ((start + offset) & 3u);
+                flags[slot] = {start + offset, offset, offset, 0u, offset,
+                               true, true, false, true};
+                activeFlags |= 1u << slot;
+            }
+            vectors[0] = {start + 3u, 9u, 1u, 12u, {3.0f, 7.0f, 0.0f, 0.0f}};
+            vfSequences[1] = {9u, 9u, 0u, 0u};
+            firstWrite[1] = {2u, 3u, 4u, 4u};
+            integers[0] = {start + 4u, 10u, 1u, 0x8000};
+            viSequences[1] = 10u;
+            firstViWrite[1] = 4u;
+            ps2_vu_detail::retireRegionInputs(state, start, flags, vectors, integers,
+                vfSequences, viSequences, activeFlags, activeVf, activeVi, firstWrite, firstViWrite);
+            t.Equals(activeFlags | activeVf | activeVi, 0u,
+                     "all four incoming timestamp slots must retire once");
+            t.Equals(state.mac, 4u, "chronological MAC retirement must retain the last event");
+            t.Equals(state.clip, 4u, "chronological CLIP retirement must retain the last event");
+            t.Equals(state.status, 0x1c4u, "all retired flag sticky bits must accumulate");
+            t.Equals(state.vf[1][0], 0.0f, "a write before incoming readiness must cancel its lane");
+            t.Equals(state.vf[1][1], 7.0f, "an equal-cycle write must retain incoming visibility");
+            t.Equals(state.vi[1], -32768, "equal-cycle VI visibility must sign-truncate");
+        });
+        tc.Run("static regions preserve pending writes and exact budget boundaries", [](TestCase &t)
+        {
+            for (unsigned scenario = 0; scenario < 3; ++scenario)
+                for (unsigned budget : {3u, 4u, 5u})
+                {
+                    Vu1Fixture fx;
+                    t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+                    writeVuInstructionPair(fx.code, 0u, 0x8000033cu, makeVuUpper(0x28u, 0xfu, 3u, 2u, 1u));
+                    for (unsigned pair = 1; pair <= 4; ++pair)
+                        writeVuInstructionPair(fx.code, pair * 8u, 0x8000033cu, kVuUpperNop);
+                    const uint32_t upper = scenario == 2u
+                        ? makeVuUpper(0x28u, 0xfu, 3u, 1u, 6u)
+                        : makeVuUpper(0x28u, 0xfu, 5u, 4u, 1u);
+                    writeVuInstructionPair(fx.code, scenario == 0u ? 16u : 32u, 0x8000033cu, upper);
+                    VU1Interpreter native, oracle;
+                    oracle.setCompiledExecutionEnabled(false);
+                    for (unsigned reg = 0; reg < 7; ++reg)
+                        for (unsigned lane = 0; lane < 4; ++lane)
+                            native.state().vf[reg][lane] = reg == 1u ? 11.0f : static_cast<float>(reg);
+                    oracle.state() = native.state();
+                    for (auto *vu : {&native, &oracle})
+                        vu->execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                                    fx.gs, &fx.mem, 0u, 0u, 0u, 1u);
+                    const uint64_t accepted = ps2_vu_detail::regionCounters.accepted[1];
+                    native.resume(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                                  fx.gs, &fx.mem, 0u, 0u, budget);
+                    oracle.resume(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                                  fx.gs, &fx.mem, 0u, 0u, budget);
+                    t.IsTrue(std::memcmp(&native.state(), &oracle.state(), sizeof(VU1State)) == 0,
+                             "native region must publish the same visible state at the requested budget");
+                    if (std::getenv("PS2_VU_REQUIRE_REGIONS"))
+                        t.Equals(ps2_vu_detail::regionCounters.accepted[1] - accepted,
+                                 budget >= 4u ? uint64_t{4u} : uint64_t{0u},
+                                 "the native fixture must force the region path only when the complete budget fits");
+                    for (unsigned tail = 0; tail < 5; ++tail)
+                    {
+                        native.resume(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                                      fx.gs, &fx.mem, 0u, 0u, 1u);
+                        oracle.resume(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                                      fx.gs, &fx.mem, 0u, 0u, 1u);
+                        t.IsTrue(std::memcmp(&native.state(), &oracle.state(), sizeof(VU1State)) == 0,
+                                 "every outgoing pending-write boundary must remain identical");
+                    }
+                }
+        });
+        tc.Run("static regions preserve LSU forwarding and following branch backups", [](TestCase &t)
+        {
+            for (unsigned budget : {3u, 4u, 5u})
+            {
+                Vu1Fixture nativeMemory, oracleMemory;
+                t.IsTrue(nativeMemory.initialize() && oracleMemory.initialize(), "VU1 fixtures should initialize");
+                for (auto *fx : {&nativeMemory, &oracleMemory})
+                {
+                    writeVuInstructionPair(fx->code, 0u, makeVuIlw(8u, 1u, 0u, 0), kVuUpperNop);
+                    writeVuInstructionPair(fx->code, 8u, makeVuIaddiu(1u, 0u, 7), kVuUpperNop);
+                    writeVuInstructionPair(fx->code, 16u, makeVuLq(15u, 6u, 0u, 1), kVuUpperNop);
+                    writeVuInstructionPair(fx->code, 24u, makeVuSq(15u, 2u, 0u, 2), makeVuUpper(0x28u, 15u, 5u, 4u, 9u));
+                    writeVuInstructionPair(fx->code, 32u, makeVuIaddiu(1u, 1u, 1), kVuUpperNop);
+                    writeVuInstructionPair(fx->code, 40u, makeVuIbne(1u, 2u, 2), kVuUpperNop);
+                    const uint32_t loadedVi = 5u;
+                    std::memcpy(fx->data, &loadedVi, sizeof(loadedVi));
+                    const float loadedVf[4] = {13.0f, 17.0f, 19.0f, 23.0f};
+                    writeVuQword(fx->data, 1u, loadedVf);
+                }
+                VU1Interpreter native, oracle;
+                oracle.setCompiledExecutionEnabled(false);
+                for (unsigned reg = 1; reg < 10; ++reg)
+                    for (unsigned lane = 0; lane < 4; ++lane)
+                        native.state().vf[reg][lane] = static_cast<float>(reg * 4u + lane);
+                native.state().vi[1] = 11;
+                native.state().vi[2] = 7;
+                oracle.state() = native.state();
+                native.execute(nativeMemory.code, PS2_VU1_CODE_SIZE, nativeMemory.data, PS2_VU1_DATA_SIZE,
+                               nativeMemory.gs, &nativeMemory.mem, 0u, 0u, 0u, 1u);
+                oracle.execute(oracleMemory.code, PS2_VU1_CODE_SIZE, oracleMemory.data, PS2_VU1_DATA_SIZE,
+                               oracleMemory.gs, &oracleMemory.mem, 0u, 0u, 0u, 1u);
+                const uint64_t accepted = ps2_vu_detail::regionCounters.accepted[1];
+                for (unsigned step = 0; step < 7; ++step)
+                {
+                    const unsigned cycles = step == 0u ? budget : 1u;
+                    native.resume(nativeMemory.code, PS2_VU1_CODE_SIZE, nativeMemory.data, PS2_VU1_DATA_SIZE,
+                                  nativeMemory.gs, &nativeMemory.mem, 0u, 0u, cycles);
+                    oracle.resume(oracleMemory.code, PS2_VU1_CODE_SIZE, oracleMemory.data, PS2_VU1_DATA_SIZE,
+                                  oracleMemory.gs, &oracleMemory.mem, 0u, 0u, cycles);
+                    t.IsTrue(std::memcmp(&native.state(), &oracle.state(), sizeof(VU1State)) == 0,
+                             "LSU and branch state must match at every resumed boundary");
+                    t.IsTrue(std::memcmp(nativeMemory.data, oracleMemory.data, PS2_VU1_DATA_SIZE) == 0,
+                             "region stores must preserve data memory ordering");
+                    if (step == 0u && std::getenv("PS2_VU_REQUIRE_REGIONS"))
+                        t.Equals(ps2_vu_detail::regionCounters.accepted[1] - accepted,
+                                 budget >= 4u ? uint64_t{4u} : uint64_t{0u}, "LSU fixture must force the fast path");
+                }
+            }
+        });
+        tc.Run("static regions preserve accumulator and flag history", [](TestCase &t)
+        {
+            for (unsigned budget : {3u, 4u, 5u})
+            {
+                Vu1Fixture fx;
+                t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+                writeVuInstructionPair(fx.code, 0u, makeVuFlagImmediate(0x15u, 0u, 0xac0u), kVuUpperNop);
+                writeVuInstructionPair(fx.code, 8u, (0x11u << 25u) | 0x123456u, kVuUpperNop);
+                writeVuInstructionPair(fx.code, 16u, 0x8000033cu, makeVuUpperSpecial(0x2au, 15u, 3u, 2u));
+                writeVuInstructionPair(fx.code, 24u, 0x8000033cu, makeVuUpper(0x29u, 15u, 5u, 4u, 6u));
+                writeVuInstructionPair(fx.code, 32u, 0x8000033cu, makeVuUpperSpecial(0x1fu, 15u, 8u, 7u));
+                writeVuInstructionPair(fx.code, 40u, 0x8000033cu, makeVuUpperSpecial(0x1fu, 15u, 7u, 8u));
+                VU1Interpreter native, oracle;
+                oracle.setCompiledExecutionEnabled(false);
+                for (unsigned reg = 1; reg < 9; ++reg)
+                    for (unsigned lane = 0; lane < 4; ++lane)
+                        native.state().vf[reg][lane] = static_cast<float>(reg * (lane + 1u));
+                native.state().vf[7][0] = -40.0f;
+                native.state().vf[8][2] = 80.0f;
+                native.state().status = 0x30u;
+                oracle.state() = native.state();
+                for (auto *vu : {&native, &oracle})
+                    vu->execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                                fx.gs, &fx.mem, 0u, 0u, 0u, 2u);
+                const uint64_t accepted = ps2_vu_detail::regionCounters.accepted[1];
+                for (unsigned step = 0; step < 7; ++step)
+                {
+                    for (auto *vu : {&native, &oracle})
+                        vu->resume(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                                   fx.gs, &fx.mem, 0u, 0u, step == 0u ? budget : 1u);
+                    t.IsTrue(std::memcmp(&native.state(), &oracle.state(), sizeof(VU1State)) == 0,
+                             "ACC forwarding and chronological MAC/STATUS/CLIP must match");
+                    if (step == 0u && std::getenv("PS2_VU_REQUIRE_REGIONS"))
+                        t.Equals(ps2_vu_detail::regionCounters.accepted[1] - accepted,
+                                 budget >= 4u ? uint64_t{4u} : uint64_t{0u}, "flag fixture must force the fast path");
+                }
+            }
+        });
+        tc.Run("static SSA regions retain stalled dependencies and deferred tails", [](TestCase &t)
+        {
+            for (unsigned budget : {12u, 13u, 14u})
+            {
+                Vu1Fixture nativeMemory, oracleMemory;
+                t.IsTrue(nativeMemory.initialize() && oracleMemory.initialize(), "VU1 fixtures should initialize");
+                for (auto *fx : {&nativeMemory, &oracleMemory})
+                {
+                    writeVuInstructionPair(fx->code, 0u, makeVuFlagImmediate(0x15u, 0u, 0xac0u), kVuUpperNop);
+                    writeVuInstructionPair(fx->code, 8u, (0x11u << 25u) | 0x123456u, kVuUpperNop);
+                    writeVuInstructionPair(fx->code, 16u, makeVuIaddiu(1u, 0u, 7), makeVuUpperSpecial(0x2au, 15u, 3u, 2u));
+                    writeVuInstructionPair(fx->code, 24u, makeVuSq(15u, 2u, 0u, 1), makeVuUpper(0x29u, 15u, 5u, 4u, 6u));
+                    writeVuInstructionPair(fx->code, 32u, makeVuLowerSpecial(0x34u, 2u, 8u, 0u, 4u), makeVuUpper(0x28u, 8u, 3u, 2u, 8u));
+                    writeVuInstructionPair(fx->code, 40u, makeVuLq(15u, 12u, 0u, 1), makeVuUpper(0x28u, 8u, 5u, 4u, 6u));
+                    writeVuInstructionPair(fx->code, 48u, 0x8000033cu, makeVuUpper(0x29u, 15u, 6u, 4u, 9u));
+                    writeVuInstructionPair(fx->code, 56u, 0x8000033cu, makeVuUpper(0x28u, 15u, 7u, 8u, 10u));
+                    writeVuInstructionPair(fx->code, 64u, makeVuIlw(8u, 3u, 0u, 1), makeVuUpperSpecial(0x1fu, 15u, 8u, 7u));
+                    writeVuInstructionPair(fx->code, 72u, makeVuIaddiu(1u, 1u, 1), makeVuUpper(0x28u, 15u, 9u, 10u, 11u));
+                    writeVuInstructionPair(fx->code, 80u, makeVuIbne(1u, 4u, 2), kVuUpperNop);
+                }
+                VU1Interpreter native, oracle;
+                oracle.setCompiledExecutionEnabled(false);
+                for (unsigned reg = 1; reg < 14; ++reg)
+                    for (unsigned lane = 0; lane < 4; ++lane)
+                        native.state().vf[reg][lane] = static_cast<float>(reg * (lane + 1u));
+                native.state().vi[1] = 11;
+                native.state().vi[2] = 1;
+                native.state().vi[4] = 7;
+                oracle.state() = native.state();
+                native.execute(nativeMemory.code, PS2_VU1_CODE_SIZE, nativeMemory.data, PS2_VU1_DATA_SIZE,
+                               nativeMemory.gs, &nativeMemory.mem, 0u, 0u, 0u, 2u);
+                oracle.execute(oracleMemory.code, PS2_VU1_CODE_SIZE, oracleMemory.data, PS2_VU1_DATA_SIZE,
+                               oracleMemory.gs, &oracleMemory.mem, 0u, 0u, 0u, 2u);
+                const uint64_t accepted = ps2_vu_detail::regionCounters.accepted[1];
+                for (unsigned step = 0; step < 10; ++step)
+                {
+                    const unsigned cycles = step == 0u ? budget : 1u;
+                    native.resume(nativeMemory.code, PS2_VU1_CODE_SIZE, nativeMemory.data, PS2_VU1_DATA_SIZE,
+                                  nativeMemory.gs, &nativeMemory.mem, 0u, 0u, cycles);
+                    oracle.resume(oracleMemory.code, PS2_VU1_CODE_SIZE, oracleMemory.data, PS2_VU1_DATA_SIZE,
+                                  oracleMemory.gs, &oracleMemory.mem, 0u, 0u, cycles);
+                    t.IsTrue(std::memcmp(&native.state(), &oracle.state(), sizeof(VU1State)) == 0,
+                             "SSA forwarding, stalls, canceled lanes and pending flags must survive each boundary");
+                    t.IsTrue(std::memcmp(nativeMemory.data, oracleMemory.data, PS2_VU1_DATA_SIZE) == 0,
+                             "SSA store/load ordering must match the raw interpreter");
+                    if (step == 0u && std::getenv("PS2_VU_REQUIRE_REGIONS"))
+                        t.Equals(ps2_vu_detail::regionCounters.accepted[1] - accepted,
+                                 budget >= 13u ? uint64_t{8u} : uint64_t{4u},
+                                 "the whole region must run when it fits; a shorter budget uses the shared four-pair entry");
+                }
+            }
+        });
+        tc.Run("static SSA LOI retains old I operands and publishes normalized immediates", [](TestCase &t)
+        {
+            for (unsigned phase = 0u; phase < 8u; ++phase)
+                for (unsigned budget : {1u, 3u, 4u, 7u, 8u, 9u})
+                {
+                    Vu1Fixture nativeMemory, oracleMemory;
+                    t.IsTrue(nativeMemory.initialize() && oracleMemory.initialize(), "VU1 fixtures should initialize");
+                    const uint32_t upper[] = {
+                        makeVuUpper(0x22u, 15u, 0u, 1u, 3u) | 0x80000000u,
+                        makeVuUpper(0x1eu, 15u, 0u, 2u, 4u),
+                        makeVuUpper(0x1eu, 15u, 0u, 1u, 5u) | 0x80000000u,
+                        makeVuUpper(0x22u, 15u, 0u, 2u, 6u) | 0x80000000u,
+                        makeVuUpper(0x22u, 15u, 0u, 1u, 7u),
+                        kVuUpperNop | 0x80000000u,
+                        makeVuUpper(0x1eu, 15u, 0u, 2u, 8u),
+                        makeVuUpper(0x1eu, 15u, 0u, 1u, 9u) | 0x80000000u};
+                    const uint32_t lower[] = {0x40e00000u, 0x8000033cu, 0xffc12345u,
+                        0x80000001u, 0x8000033cu, 0x3f000000u, 0x8000033cu, 0x7f800000u};
+                    for (auto *fx : {&nativeMemory, &oracleMemory})
+                    {
+                        for (unsigned index = 0u; index < phase + 18u; ++index)
+                            writeVuInstructionPair(fx->code, index * 8u, 0x8000033cu, kVuUpperNop);
+                        for (unsigned index = 0u; index < 8u; ++index)
+                            writeVuInstructionPair(fx->code, (phase + index) * 8u, lower[index], upper[index]);
+                    }
+                    VU1Interpreter native, oracle;
+                    native.setCompiledExecutionEnabled(false);
+                    oracle.setCompiledExecutionEnabled(false);
+                    native.state().i = 3.5f;
+                    for (unsigned lane = 0u; lane < 4u; ++lane)
+                    {
+                        native.state().vf[1][lane] = static_cast<float>(lane + 1u);
+                        native.state().vf[2][lane] = -static_cast<float>(lane + 2u);
+                    }
+                    oracle.state() = native.state();
+                    if (phase != 0u)
+                    {
+                        native.execute(nativeMemory.code, PS2_VU1_CODE_SIZE, nativeMemory.data, PS2_VU1_DATA_SIZE,
+                            nativeMemory.gs, &nativeMemory.mem, 0u, 0u, 0u, phase);
+                        oracle.execute(oracleMemory.code, PS2_VU1_CODE_SIZE, oracleMemory.data, PS2_VU1_DATA_SIZE,
+                            oracleMemory.gs, &oracleMemory.mem, 0u, 0u, 0u, phase);
+                    }
+                    native.setCompiledExecutionEnabled(true);
+                    const uint64_t accepted = ps2_vu_detail::regionCounters.accepted[1];
+                    for (unsigned step = 0u; step < 9u; ++step)
+                    {
+                        if (step != 0u)
+                            native.setCompiledExecutionEnabled(false);
+                        const unsigned cycles = step == 0u ? budget : 1u;
+                        native.resume(nativeMemory.code, PS2_VU1_CODE_SIZE, nativeMemory.data, PS2_VU1_DATA_SIZE,
+                            nativeMemory.gs, &nativeMemory.mem, 0u, 0u, cycles);
+                        oracle.resume(oracleMemory.code, PS2_VU1_CODE_SIZE, oracleMemory.data, PS2_VU1_DATA_SIZE,
+                            oracleMemory.gs, &oracleMemory.mem, 0u, 0u, cycles);
+                        t.IsTrue(std::memcmp(&native.state(), &oracle.state(), sizeof(VU1State)) == 0,
+                            "old I operands, normalization and delayed flags must match at every boundary");
+                        t.IsTrue(std::memcmp(nativeMemory.data, oracleMemory.data, PS2_VU1_DATA_SIZE) == 0,
+                            "LOI bits must not execute as a lower instruction");
+                        if (step == 0u && std::getenv("PS2_VU_REQUIRE_REGIONS"))
+                            t.Equals(ps2_vu_detail::regionCounters.accepted[1] - accepted,
+                                budget >= 8u ? uint64_t{8u} : (budget >= 4u ? uint64_t{4u} : uint64_t{0u}),
+                                "LOI fixture must force the longest fitting native SSA region");
+                    }
+                }
+        });
         tc.Run("upper ADD applies the destination mask", [](TestCase &t)
         {
             Vu1Fixture fx;
@@ -1225,6 +1534,64 @@ void register_ps2_vu1_tests()
             t.Equals(vu1.state().vi[1], 2, "second MSCAL should see the MPG-updated instruction");
         });
 
+        tc.Run("late code edits invalidate every overlapping native region", [](TestCase &t)
+        {
+            for (unsigned length : {4u, 8u, 12u, 16u})
+                for (unsigned offset = 0u; offset < length; ++offset)
+                    for (bool atCodeEnd : {false, true})
+                    {
+                        Vu1Fixture nativeMemory, oracleMemory;
+                        t.IsTrue(nativeMemory.initialize() && oracleMemory.initialize(), "VU1 fixtures should initialize");
+                        const uint32_t start = atCodeEnd ? PS2_VU1_CODE_SIZE - length * 8u : 0u;
+                        for (auto *fx : {&nativeMemory, &oracleMemory})
+                        {
+                            for (unsigned pc = 0u; pc < PS2_VU1_CODE_SIZE; pc += 8u)
+                                writeVuInstructionPair(fx->code, pc, 0x8000033cu, kVuUpperNop);
+                            for (unsigned index = 0u; index < length; ++index)
+                                fx->mem.write64(PS2_VU1_CODE_BASE + start + index * 8u,
+                                    packVuInstructionPair(makeVuIaddiu(1u, 0u, index + 1u), kVuUpperNop));
+                        }
+                        VU1Interpreter native, oracle;
+                        oracle.setCompiledExecutionEnabled(false);
+                        const auto accepted = [&] { return ps2_vu_detail::regionCounters.acceptedByLength[length][1]; };
+                        const uint64_t warm = accepted();
+                        native.execute(nativeMemory.code, PS2_VU1_CODE_SIZE, nativeMemory.data, PS2_VU1_DATA_SIZE,
+                            nativeMemory.gs, &nativeMemory.mem, start, 0u, 0u, length);
+                        oracle.execute(oracleMemory.code, PS2_VU1_CODE_SIZE, oracleMemory.data, PS2_VU1_DATA_SIZE,
+                            oracleMemory.gs, &oracleMemory.mem, start, 0u, 0u, length);
+                        if (std::getenv("PS2_VU_REQUIRE_REGIONS"))
+                            t.Equals(accepted() - warm, uint64_t{length}, "the complete original region must be cached and executed");
+                        for (bool restore : {false, true})
+                        {
+                            const uint32_t lower = restore ? makeVuIaddiu(1u, 0u, offset + 1u) : makeVuIaddiu(2u, 0u, 777u);
+                            for (auto *fx : {&nativeMemory, &oracleMemory})
+                                fx->mem.write64(PS2_VU1_CODE_BASE + start + offset * 8u,
+                                    packVuInstructionPair(lower, kVuUpperNop));
+                            native.state().pc = oracle.state().pc = start;
+                            const uint64_t before = accepted();
+                            native.resume(nativeMemory.code, PS2_VU1_CODE_SIZE, nativeMemory.data, PS2_VU1_DATA_SIZE,
+                                nativeMemory.gs, &nativeMemory.mem, 0u, 0u, length);
+                            oracle.resume(oracleMemory.code, PS2_VU1_CODE_SIZE, oracleMemory.data, PS2_VU1_DATA_SIZE,
+                                oracleMemory.gs, &oracleMemory.mem, 0u, 0u, length);
+                            t.IsTrue(std::memcmp(&native.state(), &oracle.state(), sizeof(VU1State)) == 0,
+                                "late edits and restored long regions must match raw interpretation across resume");
+                            t.Equals(native.state().vi[2], 777, "the replacement instruction must execute");
+                            if (std::getenv("PS2_VU_REQUIRE_REGIONS"))
+                                t.Equals(accepted() - before, restore ? uint64_t{length} : uint64_t{0},
+                                    "a late edit must replace a cached long match; restoration must select it again");
+                        }
+                        native.setCompiledExecutionEnabled(false);
+                        for (unsigned tail = 0u; tail < 8u; ++tail)
+                        {
+                            native.resume(nativeMemory.code, PS2_VU1_CODE_SIZE, nativeMemory.data, PS2_VU1_DATA_SIZE,
+                                nativeMemory.gs, &nativeMemory.mem, 0u, 0u, 1u);
+                            oracle.resume(oracleMemory.code, PS2_VU1_CODE_SIZE, oracleMemory.data, PS2_VU1_DATA_SIZE,
+                                oracleMemory.gs, &oracleMemory.mem, 0u, 0u, 1u);
+                            t.IsTrue(std::memcmp(&native.state(), &oracle.state(), sizeof(VU1State)) == 0,
+                                "replacement state must survive one-cycle raw continuation");
+                        }
+                    }
+        });
         tc.Run("direct VU1 code writes invalidate cached decode", [](TestCase &t)
         {
             Vu1Fixture fx;

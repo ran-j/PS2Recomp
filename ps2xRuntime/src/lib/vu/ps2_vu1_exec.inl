@@ -6,6 +6,11 @@
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/ps2_memory.h"
 #include "ps2_vu1_detail.h"
+#include "ps2_vu1_region.h"
+#include "ps2_vu1_region_plan.h"
+#include "ps2_vu1_region_lower.h"
+#include "ps2_vu1_region_values.h"
+#include "ps2_vu1_upper_engine.h"
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -1507,6 +1512,14 @@ PS2_VU_FORCE_INLINE bool VU1Interpreter::runDecodedPair(const DecodedInstruction
 template <VU1Interpreter::Unit unit, uint64_t... words>
 bool VU1Interpreter::runCompiledBlock(VU1Interpreter &vu, uint64_t budgetEnd)
 {
+    static constexpr std::array decodedRegion = {
+        decodeInstructionWords(static_cast<uint32_t>(words), static_cast<uint32_t>(words >> 32u), unit)...};
+#include "ps2_vu1_region_exec.inl"
+    if constexpr (sizeof...(words) > 4u)
+    {
+        static constexpr std::array rawWords = {words...};
+        return runCompiledBlock<unit, rawWords[0], rawWords[1], rawWords[2], rawWords[3]>(vu, budgetEnd);
+    }
     const uint32_t startPC = vu.m_state.pc;
     uint32_t nextPC = startPC;
     bool active = true;

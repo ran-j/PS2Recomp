@@ -332,7 +332,7 @@ VU1Interpreter::CompiledBlock VU1Interpreter::findCompiledBlock(
 #ifdef PS2X_VU_AOT_INCLUDE
     struct Entry {
         Unit unit;
-        std::array<uint64_t, 4> words;
+        std::array<uint64_t, 16> words;
         CompiledBlock run;
         uint32_t bytes;
     };
@@ -350,16 +350,21 @@ VU1Interpreter::CompiledBlock VU1Interpreter::findCompiledBlock(
     const auto *entry = std::lower_bound(std::begin(entries), std::end(entries), first,
         [](const Entry &entry, uint64_t word) { return entry.words[0] < word; });
     CompiledBlock pair = nullptr;
+    CompiledBlock block = nullptr;
+    uint32_t longest = 0u;
     for (; entry != std::end(entries) && entry->words[0] == first; ++entry) {
         if (entry->unit != unit)
             continue;
         if (entry->bytes == 8u)
             pair = entry->run;
-        else if (!pairsOnly && size >= entry->bytes &&
+        else if (!pairsOnly && entry->bytes > longest && size >= entry->bytes &&
                  std::memcmp(code, entry->words.data(), entry->bytes) == 0)
-            return entry->run;
+        {
+            block = entry->run;
+            longest = entry->bytes;
+        }
     }
-    return pair;
+    return block ? block : pair;
 #endif
     return nullptr;
 }
@@ -436,6 +441,8 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     if (useVuRounding && previousRoundingMode != -1)
         std::fesetround(previousRoundingMode);
     const uint64_t pairsAfter = m_compiledPairsExecuted + m_interpretedPairsExecuted;
+    if (ps2_vu_detail::profileRegions)
+        ps2_vu_detail::regionCounters.total[m_unit == Unit::VU1 ? 1u : 0u] += pairsAfter - pairsBefore;
     if (profileExecution && (pairsBefore >> 24u) != (pairsAfter >> 24u))
         std::fprintf(stderr, "[VU%u execution] native=%llu fallback=%llu (%.1f%% native)\n",
                      m_unit == Unit::VU1 ? 1u : 0u,
