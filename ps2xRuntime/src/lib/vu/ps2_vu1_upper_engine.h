@@ -2,6 +2,7 @@
 #define PS2_VU1_UPPER_ENGINE_H
 
 #include "ps2_vu1_detail.h"
+#include "ps2_vu1_fmac_flags.h"
 #include "ps2_vu1_fmac_neon.h"
 #include <cmath>
 #include <cstring>
@@ -394,27 +395,8 @@ PS2_VU_FORCE_INLINE void publishFmacFlags(Sink &sink, const uint8_t laneFlags[4]
     if (dest == 0u)
         return;
 
-    uint32_t mac = 0u;
-    uint32_t status = 0u;
-    for (uint32_t component = 0; component < 4u; ++component)
-    {
-        const uint8_t lane = laneForComponent(component);
-        if ((dest & lane) == 0u)
-            continue;
-
-        const uint32_t flags = laneFlags[component];
-        if ((flags & 0x1u) != 0u)
-            mac |= lane;
-        if ((flags & 0x2u) != 0u)
-            mac |= static_cast<uint32_t>(lane) << 4;
-        if ((flags & 0x4u) != 0u)
-            mac |= static_cast<uint32_t>(lane) << 8;
-        if ((flags & 0x8u) != 0u)
-            mac |= static_cast<uint32_t>(lane) << 12;
-        status |= flags;
-    }
-
-    sink.fmac(mac, status, extraSticky);
+    const auto packed = ps2_vu_detail::packFmacFlags(laneFlags, dest);
+    sink.fmac(packed.mac, packed.status, extraSticky);
 }
 
 // Inputs expose raw operands. Compute flags before publishing values so
@@ -438,6 +420,39 @@ PS2_VU_FORCE_INLINE void computeUpper(uint32_t instr, const Inputs &in, Sink &si
     float result[4];
 #if defined(__aarch64__)
     const uint8_t arithmeticOp = op < 0x3cu ? op : (instr & 3u) | ((instr >> 4u) & 0x7cu);
+    const bool simpleAdd = arithmeticOp <= 3u || arithmeticOp == 0x20u || arithmeticOp == 0x22u || arithmeticOp == 0x28u;
+    const bool simpleSub = (arithmeticOp >= 4u && arithmeticOp <= 7u) || arithmeticOp == 0x24u || arithmeticOp == 0x26u || arithmeticOp == 0x2cu;
+    const bool simpleMul = (arithmeticOp >= 0x18u && arithmeticOp <= 0x1cu) || arithmeticOp == 0x1eu || arithmeticOp == 0x2au;
+    if (in.compiledFastPath() && (simpleAdd || simpleSub || simpleMul))
+    {
+        float left[4], right[4];
+        for (unsigned lane = 0u; lane < 4u; ++lane)
+        {
+            left[lane] = in.fs(lane);
+            if (arithmeticOp <= 7u || (arithmeticOp >= 0x18u && arithmeticOp <= 0x1bu))
+                right[lane] = in.ft(arithmeticOp & 3u);
+            else if (arithmeticOp == 0x1cu || arithmeticOp == 0x20u || arithmeticOp == 0x24u)
+                right[lane] = in.q();
+            else if (arithmeticOp == 0x1eu || arithmeticOp == 0x22u || arithmeticOp == 0x26u)
+                right[lane] = in.i();
+            else
+                right[lane] = in.ft(lane);
+        }
+        uint8_t laneFlags[4];
+        using Arithmetic = ps2_vu_detail::SimpleArithmetic;
+        const bool fast = simpleAdd ? ps2_vu_detail::trySimpleArithmeticVector<Arithmetic::Add>(left, right, dest, result, laneFlags)
+            : simpleSub ? ps2_vu_detail::trySimpleArithmeticVector<Arithmetic::Subtract>(left, right, dest, result, laneFlags)
+                        : ps2_vu_detail::trySimpleArithmeticVector<Arithmetic::Multiply>(left, right, dest, result, laneFlags);
+        if (fast)
+        {
+            publishFmacFlags(sink, laneFlags, dest, 0u);
+            if (op >= 0x3cu)
+                sink.acc(dest, result);
+            else
+                sink.vf(fd, dest, result);
+            return;
+        }
+    }
     const bool productSum = (arithmeticOp >= 8u && arithmeticOp <= 0xfu) ||
         arithmeticOp == 0x21u || arithmeticOp == 0x23u || arithmeticOp == 0x25u ||
         arithmeticOp == 0x27u || arithmeticOp == 0x29u || arithmeticOp == 0x2du;

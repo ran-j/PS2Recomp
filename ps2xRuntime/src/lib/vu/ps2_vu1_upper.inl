@@ -46,6 +46,39 @@ PS2_VU_FORCE_INLINE void VU1Interpreter::execUpperInline(uint32_t instr)
     float result[4];
 #if defined(__aarch64__)
     const uint8_t arithmeticOp = op < 0x3cu ? op : (instr & 3u) | ((instr >> 4u) & 0x7cu);
+    const bool simpleAdd = arithmeticOp <= 3u || arithmeticOp == 0x20u || arithmeticOp == 0x22u || arithmeticOp == 0x28u;
+    const bool simpleSub = (arithmeticOp >= 4u && arithmeticOp <= 7u) || arithmeticOp == 0x24u || arithmeticOp == 0x26u || arithmeticOp == 0x2cu;
+    const bool simpleMul = (arithmeticOp >= 0x18u && arithmeticOp <= 0x1cu) || arithmeticOp == 0x1eu || arithmeticOp == 0x2au;
+    if (m_useCompiledExecution && (simpleAdd || simpleSub || simpleMul))
+    {
+        float rightBroadcast[4];
+        const float *right = m_state.vf[ft];
+        if (arithmeticOp <= 7u || (arithmeticOp >= 0x18u && arithmeticOp <= 0x1bu) ||
+            arithmeticOp == 0x1cu || arithmeticOp == 0x20u || arithmeticOp == 0x24u ||
+            arithmeticOp == 0x1eu || arithmeticOp == 0x22u || arithmeticOp == 0x26u)
+        {
+            const float scalar = arithmeticOp <= 7u || (arithmeticOp >= 0x18u && arithmeticOp <= 0x1bu)
+                ? m_state.vf[ft][arithmeticOp & 3u]
+                : arithmeticOp == 0x1cu || arithmeticOp == 0x20u || arithmeticOp == 0x24u
+                    ? m_state.q : m_state.i;
+            for (auto &lane : rightBroadcast) lane = scalar;
+            right = rightBroadcast;
+        }
+        uint8_t laneFlags[4];
+        using Arithmetic = ps2_vu_detail::SimpleArithmetic;
+        const bool fast = simpleAdd ? ps2_vu_detail::trySimpleArithmeticVector<Arithmetic::Add>(m_state.vf[fs], right, dest, result, laneFlags)
+            : simpleSub ? ps2_vu_detail::trySimpleArithmeticVector<Arithmetic::Subtract>(m_state.vf[fs], right, dest, result, laneFlags)
+                        : ps2_vu_detail::trySimpleArithmeticVector<Arithmetic::Multiply>(m_state.vf[fs], right, dest, result, laneFlags);
+        if (fast)
+        {
+            updateFmacFlags(laneFlags, dest, 0u);
+            if (op >= 0x3cu)
+                applyDestAcc(result, dest);
+            else
+                applyDest(vd, result, dest);
+            return;
+        }
+    }
     const bool productSum = (arithmeticOp >= 8u && arithmeticOp <= 0xfu) ||
         arithmeticOp == 0x21u || arithmeticOp == 0x23u || arithmeticOp == 0x25u ||
         arithmeticOp == 0x27u || arithmeticOp == 0x29u || arithmeticOp == 0x2du;

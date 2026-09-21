@@ -6,8 +6,10 @@
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/ps2_memory.h"
 #include "ps2_vu1_detail.h"
+#include "ps2_vu1_fmac_flags.h"
 #include "ps2_vu1_region.h"
 #include "ps2_vu1_region_plan.h"
+#include "ps2_vu1_loop_plan.h"
 #include "ps2_vu1_region_lower.h"
 #include "ps2_vu1_region_values.h"
 #include "ps2_vu1_upper_engine.h"
@@ -516,7 +518,13 @@ PS2_VU_FORCE_INLINE void VU1Interpreter::updateFmacFlags(const uint8_t laneFlags
 
     uint32_t mac = 0u;
     uint32_t status = 0u;
-    for (uint32_t component = 0; component < 4u; ++component)
+    if (m_useCompiledExecution)
+    {
+        const auto packed = ps2_vu_detail::packFmacFlags(laneFlags, dest);
+        mac = packed.mac;
+        status = packed.status;
+    }
+    else for (uint32_t component = 0; component < 4u; ++component)
     {
         const uint8_t lane = laneForComponent(component);
         if ((dest & lane) == 0u)
@@ -1514,6 +1522,7 @@ bool VU1Interpreter::runCompiledBlock(VU1Interpreter &vu, uint64_t budgetEnd)
 {
     static constexpr std::array decodedRegion = {
         decodeInstructionWords(static_cast<uint32_t>(words), static_cast<uint32_t>(words >> 32u), unit)...};
+#include "ps2_vu1_loop_exec.inl"
 #include "ps2_vu1_region_exec.inl"
     if constexpr (sizeof...(words) > 4u)
     {

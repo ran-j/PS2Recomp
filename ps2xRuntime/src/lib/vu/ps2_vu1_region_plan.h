@@ -13,7 +13,7 @@ inline constexpr uint16_t regionConstantZero = 0xffffu;
 
 struct RegionSources {
     std::array<uint16_t, 4> fs{}, ft{}, acc{}, lowerFs{}, lowerFt{};
-    uint16_t viS{}, viT{}, viOld{}, scalarI{};
+    uint16_t viS{}, viT{}, viOld{}, scalarI{}, clip{};
 };
 
 struct RegionWrite {
@@ -24,6 +24,7 @@ struct RegionWrite {
 template <size_t N>
 struct RegionPlan {
     bool eligible = N >= 4u && N <= 16u;
+    bool readsClip = false;
     uint16_t cycles{}, sequences{}, scalarI{};
     std::array<uint16_t, N> issue{};
     std::array<RegionSources, N> sources{};
@@ -41,11 +42,25 @@ constexpr bool regionLowerSupported(uint32_t lower)
     const uint32_t special = (lower & 3u) | ((lower >> 4u) & 0x7cu);
     return lower == 0u || lower == 0x8000033cu || opcode == 0u || opcode == 1u ||
         opcode == 4u || opcode == 5u || opcode == 8u || opcode == 9u ||
+        opcode == 0x10u || opcode == 0x12u || opcode == 0x13u || opcode == 0x1cu ||
         (opcode == 0x40u && (direct == 0x30u || direct == 0x31u || direct == 0x32u ||
             direct == 0x34u || direct == 0x35u ||
             (direct >= 0x3cu && ((special >= 0x30u && special <= 0x31u) ||
                                (special >= 0x34u && special <= 0x37u) ||
                                (special >= 0x3cu && special <= 0x3fu)))));
+}
+
+template <typename Decoded, size_t N>
+constexpr uint8_t regionTerminalBranch(const std::array<Decoded, N> &decoded)
+{
+    if constexpr (N >= 2u)
+    {
+        const auto &branch = decoded[N - 2u];
+        const uint32_t opcode = branch.lower >> 25u;
+        if (!branch.iBit && (opcode == 0x28u || opcode == 0x29u))
+            return static_cast<uint8_t>(opcode);
+    }
+    return 0u;
 }
 
 template <typename Decoded, size_t N>
@@ -81,8 +96,11 @@ constexpr RegionPlan<N> planRegion(const std::array<Decoded, N> &decoded)
     for (unsigned index = 0; index < N; ++index)
     {
         const auto &pair = decoded[index];
+        const uint32_t branchOpcode = pair.lower >> 25u;
+        const bool terminalBranch = !pair.iBit && index + 2u == N &&
+            (branchOpcode == 0x28u || branchOpcode == 0x29u);
         if (pair.eBit || pair.mBit || pair.dBit || pair.tBit || pair.upperUsage.reserved ||
-            (!pair.iBit && (pair.lowerUsage.reserved || !regionLowerSupported(pair.lower))))
+            (!pair.iBit && (pair.lowerUsage.reserved || (!terminalBranch && !regionLowerSupported(pair.lower)))))
             plan.eligible = false;
         const uint32_t upperOp = pair.upper & 63u;
         const uint32_t upperSpecial = (pair.upper & 3u) | ((pair.upper >> 4u) & 0x7cu);
@@ -123,10 +141,28 @@ constexpr RegionPlan<N> planRegion(const std::array<Decoded, N> &decoded)
         source.ft = plan.vfVisible[(pair.upper >> 16u) & 31u];
         source.acc = plan.accVisible;
         source.scalarI = plan.scalarI;
+        if (pair.lowerUsage.readsClip)
+        {
+            plan.readsClip = true;
+            for (unsigned previous = 0; previous < index; ++previous)
+                if (decoded[previous].upperUsage.writesClip && plan.issue[previous] + 4u <= cycle)
+                    source.clip = previous + 1u;
+        }
         source.lowerFs = plan.vfVisible[(pair.lower >> 11u) & 31u];
         source.lowerFt = plan.vfVisible[(pair.lower >> 16u) & 31u];
         source.viS = plan.viVisible[(pair.lower >> 11u) & 15u];
         source.viT = plan.viVisible[(pair.lower >> 16u) & 15u];
+        if (terminalBranch && index != 0u && decoded[index - 1u].lowerUsage.delaysNextBranchRead)
+        {
+            const auto &previous = plan.vi[index - 1u];
+            if (previous.mask != 0u)
+            {
+                if (previous.reg == ((pair.lower >> 11u) & 15u))
+                    source.viS = plan.sources[index - 1u].viOld;
+                if (previous.reg == ((pair.lower >> 16u) & 15u))
+                    source.viT = plan.sources[index - 1u].viOld;
+            }
+        }
         const auto writeVf = [&](const auto &usage, RegionWrite &write, uint16_t value) {
             const auto &access = usage.vfWrite;
             if (access.reg == 0u || access.lanes == 0u)

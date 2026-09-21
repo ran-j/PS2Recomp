@@ -408,10 +408,11 @@ set_source_files_properties(
 
 set(PS2X_VU_AOT_IMAGES "" CACHE STRING "Local VU code images or block profiles to compile; never distributed")
 set(PS2X_VU_AOT_PAIR_IMAGES "" CACHE STRING "Additional local VU inputs to compile as reusable individual pairs")
+set(PS2X_VU_AOT_LOOP_IMAGES "" CACHE STRING "Local VU code images to scan for bounded conditional loops")
 option(PS2X_VU_AOT_DEBUG_INFO "Include expanded VU AOT debug scopes (slow to compile)" OFF)
 set(PS2X_VU_AOT_SHARDS "32" CACHE STRING "Number of independent VU AOT compilation units")
 set(PS2X_VU_AOT_COMPILE_JOBS "2" CACHE STRING "Maximum concurrent runtime compilations with VU AOT (Ninja)")
-if(PS2X_VU_AOT_IMAGES OR PS2X_VU_AOT_PAIR_IMAGES)
+if(PS2X_VU_AOT_IMAGES OR PS2X_VU_AOT_PAIR_IMAGES OR PS2X_VU_AOT_LOOP_IMAGES)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     if(NOT PS2X_VU_AOT_SHARDS MATCHES "^[1-9][0-9]*$")
         message(FATAL_ERROR "PS2X_VU_AOT_SHARDS must be a positive integer")
@@ -436,9 +437,10 @@ if(PS2X_VU_AOT_IMAGES OR PS2X_VU_AOT_PAIR_IMAGES)
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../tools/compile_vu_blocks.py"
                 --output "${PS2X_VU_AOT_INCLUDE}" --shards ${PS2X_VU_AOT_SHARDS}
                 --pair-images ${PS2X_VU_AOT_PAIR_IMAGES}
+                --loop-images ${PS2X_VU_AOT_LOOP_IMAGES}
                 -- ${PS2X_VU_AOT_IMAGES}
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../tools/compile_vu_blocks.py"
-                ${PS2X_VU_AOT_IMAGES} ${PS2X_VU_AOT_PAIR_IMAGES}
+                ${PS2X_VU_AOT_IMAGES} ${PS2X_VU_AOT_PAIR_IMAGES} ${PS2X_VU_AOT_LOOP_IMAGES}
         VERBATIM)
     add_custom_target(ps2_vu_aot DEPENDS "${PS2X_VU_AOT_INCLUDE}" "${PS2X_VU_AOT_EXTERN_INCLUDE}" ${PS2X_VU_AOT_SOURCES})
     add_dependencies(ps2_runtime ps2_vu_aot)

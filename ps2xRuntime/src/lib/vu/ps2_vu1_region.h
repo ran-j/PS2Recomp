@@ -25,7 +25,7 @@ struct RegionCounters {
                 unit, static_cast<unsigned long long>(total[unit]),
                 static_cast<unsigned long long>(candidate[unit]),
                 static_cast<unsigned long long>(accepted[unit]));
-            for (unsigned length = 4u; length <= 16u; length += 4u)
+            for (unsigned length = 4u; length <= 16u; ++length)
                 if (acceptedByLength[length][unit] != 0u)
                     std::fprintf(stderr, "VU%u region%u=%llu pairs\n", unit, length,
                         static_cast<unsigned long long>(acceptedByLength[length][unit]));
@@ -34,6 +34,8 @@ struct RegionCounters {
 };
 inline thread_local RegionCounters regionCounters;
 inline const bool profileRegions = std::getenv("PS2_VU_PROFILE_REGIONS") != nullptr;
+inline const bool disableTerminalBranches = std::getenv("PS2_VU_DISABLE_BRANCH_TAILS") != nullptr;
+inline thread_local uint64_t terminalBranchPairs = 0u;
 
 constexpr bool regionBudgetFits(uint64_t start, uint64_t budgetEnd, unsigned cycles)
 {

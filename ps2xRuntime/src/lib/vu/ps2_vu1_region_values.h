@@ -53,9 +53,11 @@ struct RegionUpperSink {
 struct RegionLowerInputs {
     const float *left;
     int32_t source, target;
+    uint32_t clipValue{};
     float fs(unsigned lane) const { return left[lane]; }
     int32_t viS() const { return source; }
     int32_t viT() const { return target; }
+    uint32_t clip() const { return clipValue; }
 };
 
 struct RegionLowerSink {

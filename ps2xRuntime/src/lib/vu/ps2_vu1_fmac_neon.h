@@ -20,6 +20,57 @@ PS2_VU_FORCE_INLINE float32x4_t normalizeFmacOperands(float32x4_t value)
     return vreinterpretq_f32_u32(vbslq_u32(zero, sign, finite));
 }
 
+enum class SimpleArithmetic { Add, Subtract, Multiply };
+
+template <SimpleArithmetic operation>
+PS2_VU_FORCE_INLINE bool trySimpleArithmeticVector(
+    const float *leftInput, const float *rightInput, uint8_t destination,
+    float *result, uint8_t laneFlags[4])
+{
+    const auto left = normalizeFmacOperands(vld1q_f32(leftInput));
+    const auto right = normalizeFmacOperands(vld1q_f32(rightInput));
+    float32x4_t value;
+    if constexpr (operation == SimpleArithmetic::Add)
+        value = vaddq_f32(left, right);
+    else if constexpr (operation == SimpleArithmetic::Subtract)
+        value = vsubq_f32(left, right);
+    else
+        value = vmulq_f32(left, right);
+    const auto bits = vreinterpretq_u32_f32(value);
+    const auto magnitudeMask = vdupq_n_u32(0x7fffffffu);
+    const auto magnitude = vandq_u32(bits, magnitudeMask);
+    const auto leftBits = vreinterpretq_u32_f32(left);
+    const auto rightBits = vreinterpretq_u32_f32(right);
+    const auto leftZero = vceqq_u32(vandq_u32(leftBits, magnitudeMask), vdupq_n_u32(0u));
+    const auto rightZero = vceqq_u32(vandq_u32(rightBits, magnitudeMask), vdupq_n_u32(0u));
+    uint32x4_t exactZero;
+    if constexpr (operation == SimpleArithmetic::Multiply)
+        exactZero = vorrq_u32(leftZero, rightZero);
+    else
+    {
+        const auto opposing = operation == SimpleArithmetic::Add
+            ? veorq_u32(rightBits, vdupq_n_u32(0x80000000u)) : rightBits;
+        exactZero = vorrq_u32(vandq_u32(leftZero, rightZero), vceqq_u32(leftBits, opposing));
+    }
+    const auto zero = vceqq_u32(magnitude, vdupq_n_u32(0u));
+    const auto normal = vandq_u32(vcgtq_u32(magnitude, vdupq_n_u32(0x00800000u)),
+                                  vcltq_u32(magnitude, vdupq_n_u32(0x7f7fffffu)));
+    const uint32x4_t laneBits = {8u, 4u, 2u, 1u};
+    const auto active = vtstq_u32(vdupq_n_u32(destination), laneBits);
+    // Boundary results retain the scalar exact-result checks, including
+    // tiny exact results rounded to zero/MIN_NORMAL and overflow to FLT_MAX.
+    const auto safe = vorrq_u32(normal, vandq_u32(zero, exactZero));
+    if (vminvq_u32(vorrq_u32(safe, vmvnq_u32(active))) == 0u)
+        return false;
+    const auto flags = vandq_u32(vorrq_u32(vshlq_n_u32(vshrq_n_u32(bits, 31), 1),
+                                          vandq_u32(zero, vdupq_n_u32(1u))), active);
+    const auto packed = vmovn_u16(vcombine_u16(vmovn_u32(flags), vdup_n_u16(0u)));
+    const uint32_t bytes = vget_lane_u32(vreinterpret_u32_u8(packed), 0);
+    std::memcpy(laneFlags, &bytes, sizeof(bytes));
+    vst1q_f32(result, value);
+    return true;
+}
+
 template <bool subtract>
 PS2_VU_FORCE_INLINE bool tryProductSumVector(
     const float *leftInput, const float *rightInput, const float *accInput,

@@ -61,6 +61,10 @@ PS2_VU_FORCE_INLINE void computeRegionLower(uint32_t instr, const Inputs &input,
     case 1u: storeVector(address(viT + immediate)); return;
     case 4u: loadInteger(address(viS + immediate)); return;
     case 5u: storeInteger(address(viS + immediate)); return;
+    case 0x10u: sink.vi(1u, (input.clip() & 0xffffffu) == (instr & 0xffffffu)); return;
+    case 0x12u: sink.vi(1u, (input.clip() & (instr & 0xffffffu)) != 0u); return;
+    case 0x13u: sink.vi(1u, (input.clip() | (instr & 0xffffffu)) == 0xffffffu); return;
+    case 0x1cu: sink.vi(it, input.clip() & 0xfffu); return;
     case 8u:
     case 9u:
     {

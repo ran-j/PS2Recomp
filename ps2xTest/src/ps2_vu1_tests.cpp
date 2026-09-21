@@ -7,6 +7,7 @@
 #include "../../ps2xRuntime/src/lib/vu/ps2_vu1_fmac.h"
 #include "../../ps2xRuntime/src/lib/vu/ps2_vu1_fmac_neon.h"
 #include "../../ps2xRuntime/src/lib/vu/ps2_vu1_region.h"
+#include "../../ps2xRuntime/src/lib/vu/ps2_vu1_loop_plan.h"
 
 #include <cfenv>
 #include <cmath>
@@ -206,6 +207,46 @@ namespace
         mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
     }
 
+    void writeCountedLoopCode(Vu1Fixture &fx, uint32_t base = 0u)
+    {
+        writeVuInstructionPair(fx.code, base + 0u, makeVuLq(14u, 27u, 10u, 3),
+            makeVuUpper(0x2bu, 14u, 21u, 21u, 28u));
+        writeVuInstructionPair(fx.code, base + 8u, makeVuLq(14u, 25u, 11u, 4),
+            makeVuUpper(0x2au, 14u, 16u, 26u, 20u));
+        writeVuInstructionPair(fx.code, base + 16u, makeVuLq(12u, 23u, 12u, 4),
+            makeVuUpper(0x2au, 14u, 17u, 24u, 21u));
+        writeVuInstructionPair(fx.code, base + 24u, makeVuLowerSpecial(0x35u, 19u, 12u, 0u, 12u),
+            makeVuUpper(0x2au, 12u, 18u, 22u, 19u));
+        writeVuInstructionPair(fx.code, base + 32u, makeVuLowerSpecial(0x35u, 28u, 11u, 0u, 14u),
+            makeVuUpperSpecial(0x13u, 14u, 26u, 27u));
+        writeVuInstructionPair(fx.code, base + 40u, makeVuIbne(13u, 10u, -6),
+            makeVuUpperSpecial(0x13u, 14u, 24u, 25u));
+        writeVuInstructionPair(fx.code, base + 48u, makeVuLowerSpecial(0x35u, 20u, 10u, 0u, 14u),
+            makeVuUpperSpecial(0x13u, 12u, 22u, 23u));
+    }
+
+    void writeEarlyCounterLoopCode(Vu1Fixture &fx)
+    {
+        writeVuInstructionPair(fx.code, 0u, makeVuLowerSpecial(0x34u, 10u, 26u, 0u, 14u),
+            makeVuUpperSpecial(0x09u, 14u, 23u, 19u));
+        writeVuInstructionPair(fx.code, 8u, 0x8000033cu,
+            makeVuUpperSpecial(0x0au, 14u, 23u, 20u));
+        writeVuInstructionPair(fx.code, 16u, 0x8000033cu,
+            makeVuUpper(0x0bu, 14u, 23u, 21u, 25u));
+        writeVuInstructionPair(fx.code, 24u, 0x8000033cu,
+            makeVuUpper(0x10u, 15u, 0u, 24u, 23u));
+        writeVuInstructionPair(fx.code, 32u, makeVuLowerSpecial(0x30u, 22u, 25u, 0u, 1u),
+            makeVuUpperSpecial(0x18u, 15u, 26u, 15u));
+        writeVuInstructionPair(fx.code, 40u, makeVuIaddiu(11u, 11u, 5),
+            makeVuUpperSpecial(0x09u, 15u, 26u, 16u));
+        writeVuInstructionPair(fx.code, 48u, 0x8000033cu,
+            makeVuUpper(0x0au, 15u, 26u, 17u, 24u));
+        writeVuInstructionPair(fx.code, 56u, makeVuIbne(12u, 11u, -8),
+            makeVuUpperSpecial(0x1bu, 14u, 0u, 22u));
+        writeVuInstructionPair(fx.code, 64u, makeVuSq(15u, 25u, 11u, -7),
+            makeVuUpperSpecial(0x08u, 14u, 23u, 18u));
+    }
+
     void writeVuQword(uint8_t *data, uint32_t qwordIndex, const float values[4])
     {
         std::memcpy(data + qwordIndex * 16u, values, sizeof(float) * 4u);
@@ -215,12 +256,413 @@ namespace
     {
         std::memcpy(values, data + qwordIndex * 16u, sizeof(float) * 4u);
     }
+
+    void writeTerminalBranchFixture(uint8_t *code, uint32_t start, uint8_t opcode,
+                                    uint8_t previousVi, int16_t displacement)
+    {
+        writeVuInstructionPair(code, start, makeVuIlw(8u, 8u, 0u, 3),
+            makeVuUpper(0x28u, 12u, 17u, 16u, 18u));
+        writeVuInstructionPair(code, start + 8u, makeVuIaddiu(previousVi, 0u, 9),
+            makeVuUpper(0x29u, 3u, 17u, 16u, 19u));
+        writeVuInstructionPair(code, start + 16u,
+            (uint32_t{opcode} << 25u) | (4u << 16u) | (5u << 11u) | (uint32_t(displacement) & 0x7ffu),
+            makeVuUpper(0x2au, 12u, 17u, 18u, 20u));
+        writeVuInstructionPair(code, start + 24u, makeVuLowerSpecial(0x35u, 18u, 6u, 0u, 12u),
+            makeVuUpperSpecial(0x1fu, 14u, 21u, 22u));
+    }
 }
 
 void register_ps2_vu1_tests()
 {
     MiniTest::Case("PS2VU1", [](TestCase &tc)
     {
+        tc.Run("terminal conditional regions preserve branch bypass and delayed tails", [](TestCase &t)
+        {
+            for (auto unit : {VU1Interpreter::Unit::VU0, VU1Interpreter::Unit::VU1})
+            {
+                Vu1Fixture candidateMemory, oracleMemory;
+                t.IsTrue(candidateMemory.initialize() && oracleMemory.initialize(), "branch fixtures must initialize");
+                const uint32_t codeSize = unit == VU1Interpreter::Unit::VU1 ? PS2_VU1_CODE_SIZE : PS2_VU0_CODE_SIZE;
+                const uint32_t dataSize = unit == VU1Interpreter::Unit::VU1 ? PS2_VU1_DATA_SIZE : PS2_VU0_DATA_SIZE;
+                if (unit == VU1Interpreter::Unit::VU0)
+                    for (auto *fx : {&candidateMemory, &oracleMemory})
+                    {
+                        fx->code = fx->mem.getVU0Code();
+                        fx->data = fx->mem.getVU0Data();
+                    }
+                for (uint8_t opcode : {0x28u, 0x29u})
+                    for (uint8_t previousVi : {4u, 5u})
+                        for (int16_t displacement : {3, -7})
+                            for (uint32_t start : {64u, codeSize - 32u})
+                                for (bool equal : {false, true})
+                                    for (bool incomingWrite : {false, true})
+                                        for (uint32_t budget : {0u, 1u, 2u, 4u, 5u, 6u, 7u, 9u})
+                                        {
+                                            for (auto *fx : {&candidateMemory, &oracleMemory})
+                                            {
+                                                for (uint32_t pc = 0; pc < codeSize; pc += 8u)
+                                                    writeVuInstructionPair(fx->code, pc, 0x8000033cu, kVuUpperNop);
+                                                writeTerminalBranchFixture(fx->code, start, opcode, previousVi, displacement);
+                                                const uint32_t target = (start + 24u + displacement * 8u) & (codeSize - 1u);
+                                                for (uint32_t next : {(start + 32u) & (codeSize - 1u), target})
+                                                    writeVuInstructionPair(fx->code, next, makeVuIbne(6u, 7u, 2), kVuUpperNop);
+                                                if (incomingWrite)
+                                                    writeVuInstructionPair(fx->code, start - 8u,
+                                                        makeVuIlw(8u, previousVi, 0u, 3), kVuUpperNop);
+                                                for (uint32_t byte = 0; byte < dataSize; ++byte)
+                                                    fx->data[byte] = static_cast<uint8_t>(byte * 29u + 11u);
+                                            }
+                                            VU1Interpreter candidate(unit), oracle(unit);
+                                            oracle.setCompiledExecutionEnabled(false);
+                                            uint32_t random = 0x753bc411u;
+                                            for (unsigned reg = 1; reg < 32u; ++reg)
+                                                for (unsigned lane = 0; lane < 4u; ++lane)
+                                                {
+                                                    random = random * 1664525u + 1013904223u;
+                                                    std::memcpy(&candidate.state().vf[reg][lane], &random, sizeof(random));
+                                                }
+                                            for (unsigned lane = 0; lane < 4u; ++lane)
+                                                candidate.state().acc[lane] = candidate.state().vf[23u][lane];
+                                            candidate.state().vi[5] = 3;
+                                            candidate.state().vi[4] = equal ? 3 : 9;
+                                            candidate.state().vi[6] = candidate.state().vi[7] = -32768;
+                                            candidate.state().branchTarget = 0x1a8u;
+                                            candidate.state().branchDelay = 7u;
+                                            oracle.state() = candidate.state();
+                                            const auto execute = [&](VU1Interpreter &vu, Vu1Fixture &fx, uint32_t pc, uint32_t cycles) {
+                                                vu.execute(fx.code, codeSize, fx.data, dataSize, fx.gs, &fx.mem, pc, 0u, 0u, cycles);
+                                            };
+                                            const auto resume = [&](VU1Interpreter &vu, Vu1Fixture &fx, uint32_t cycles) {
+                                                vu.resume(fx.code, codeSize, fx.data, dataSize, fx.gs, &fx.mem, 0u, 0u, cycles);
+                                            };
+                                            const uint64_t before = ps2_vu_detail::terminalBranchPairs;
+                                            if (incomingWrite)
+                                            {
+                                                candidate.setCompiledExecutionEnabled(false);
+                                                execute(candidate, candidateMemory, start - 8u, 1u);
+                                                execute(oracle, oracleMemory, start - 8u, 1u);
+                                                candidate.setCompiledExecutionEnabled(true);
+                                                resume(candidate, candidateMemory, budget);
+                                                resume(oracle, oracleMemory, budget);
+                                            }
+                                            else
+                                            {
+                                                execute(candidate, candidateMemory, start, budget);
+                                                execute(oracle, oracleMemory, start, budget);
+                                            }
+                                            if (std::getenv("PS2_VU_REQUIRE_BRANCH_TAILS"))
+                                                t.Equals(ps2_vu_detail::terminalBranchPairs - before, budget >= 6u ? uint64_t{4} : uint64_t{0},
+                                                    "only a complete six-cycle terminal region should execute the forced path");
+                                            const auto compare = [&] {
+                                                t.IsTrue(std::memcmp(&candidate.state(), &oracle.state(), sizeof(VU1State)) == 0,
+                                                    "taken/untaken PC, branch backup, flags and masked registers must match raw execution");
+                                                t.IsTrue(std::memcmp(candidateMemory.data, oracleMemory.data, dataSize) == 0,
+                                                    "the delay-slot store must execute exactly once and preserve all other bytes");
+                                            };
+                                            compare();
+                                            for (unsigned tail = 0; tail < 8u; ++tail)
+                                            {
+                                                resume(candidate, candidateMemory, 1u);
+                                                resume(oracle, oracleMemory, 1u);
+                                                compare();
+                                            }
+                                        }
+            }
+        });
+
+        tc.Run("terminal branches consume delayed CLIP checks without integer bypass", [](TestCase &t)
+        {
+            for (auto unit : {VU1Interpreter::Unit::VU0, VU1Interpreter::Unit::VU1})
+                for (unsigned phase = 0; phase < 8u; ++phase)
+                    for (uint32_t firstClip : {0u, 1u})
+                        for (uint32_t opcode : {0x28u, 0x29u})
+                            for (uint32_t budget : {1u, 2u, 3u, 4u, 5u, 7u})
+                            {
+                                Vu1Fixture candidateMemory, oracleMemory;
+                                t.IsTrue(candidateMemory.initialize() && oracleMemory.initialize(), "flag branch fixtures initialize");
+                                const uint32_t codeSize = unit == VU1Interpreter::Unit::VU1 ? PS2_VU1_CODE_SIZE : PS2_VU0_CODE_SIZE;
+                                const uint32_t dataSize = unit == VU1Interpreter::Unit::VU1 ? PS2_VU1_DATA_SIZE : PS2_VU0_DATA_SIZE;
+                                const uint32_t start = (phase + 3u) * 8u;
+                                for (auto *fx : {&candidateMemory, &oracleMemory})
+                                {
+                                    if (unit == VU1Interpreter::Unit::VU0)
+                                    {
+                                        fx->code = fx->mem.getVU0Code();
+                                        fx->data = fx->mem.getVU0Data();
+                                    }
+                                    for (uint32_t pc = 0; pc < codeSize; pc += 8u)
+                                        writeVuInstructionPair(fx->code, pc, 0x8000033cu, kVuUpperNop);
+                                    writeVuInstructionPair(fx->code, phase * 8u, 0x22000000u | firstClip, kVuUpperNop);
+                                    writeVuInstructionPair(fx->code, (phase + 1u) * 8u, 0x22222222u, kVuUpperNop);
+                                    writeVuInstructionPair(fx->code, (phase + 2u) * 8u, 0x22555555u, kVuUpperNop);
+                                    writeVuInstructionPair(fx->code, start, 0x38020000u, makeVuUpperSpecial(0x1fu, 15u, 2u, 1u));
+                                    writeVuInstructionPair(fx->code, start + 8u, 0x24000001u, kVuUpperNop);
+                                    writeVuInstructionPair(fx->code, start + 16u, (opcode << 25u) | 0x00030802u, kVuUpperNop);
+                                    writeVuInstructionPair(fx->code, start + 24u, 0x0b010000u, makeVuUpperSpecial(0x1fu, 15u, 4u, 3u));
+                                    for (uint32_t byte = 0; byte < dataSize; ++byte)
+                                        fx->data[byte] = static_cast<uint8_t>(byte * 13u + 7u);
+                                }
+                                VU1Interpreter candidate(unit), oracle(unit);
+                                for (uint32_t reg = 1; reg <= 4u; ++reg)
+                                    for (uint32_t lane = 0; lane < 4u; ++lane)
+                                        candidate.state().vf[reg][lane] = static_cast<float>(static_cast<int>(reg + lane) - 4);
+                                candidate.state().clip = 0xabcdefu;
+                                candidate.state().vi[1] = firstClip ^ 1u;
+                                candidate.state().vi[3] = 1;
+                                oracle.state() = candidate.state();
+                                candidate.setCompiledExecutionEnabled(false);
+                                oracle.setCompiledExecutionEnabled(false);
+                                candidate.execute(candidateMemory.code, codeSize, candidateMemory.data, dataSize,
+                                    candidateMemory.gs, &candidateMemory.mem, 0u, 0u, 0u, phase + 3u);
+                                oracle.execute(oracleMemory.code, codeSize, oracleMemory.data, dataSize,
+                                    oracleMemory.gs, &oracleMemory.mem, 0u, 0u, 0u, phase + 3u);
+                                candidate.setCompiledExecutionEnabled(true);
+                                const uint64_t before = ps2_vu_detail::terminalBranchPairs;
+                                for (unsigned step = 0; step < 9u; ++step)
+                                {
+                                    if (step != 0u) candidate.setCompiledExecutionEnabled(false);
+                                    const uint32_t cycles = step == 0u ? budget : 1u;
+                                    candidate.resume(candidateMemory.code, codeSize, candidateMemory.data, dataSize,
+                                        candidateMemory.gs, &candidateMemory.mem, 0u, 0u, cycles);
+                                    oracle.resume(oracleMemory.code, codeSize, oracleMemory.data, dataSize,
+                                        oracleMemory.gs, &oracleMemory.mem, 0u, 0u, cycles);
+                                    t.IsTrue(std::memcmp(&candidate.state(), &oracle.state(), sizeof(VU1State)) == 0,
+                                        "the immediately preceding CLIP result must feed branch selection and every raw flag tail");
+                                    t.IsTrue(std::memcmp(candidateMemory.data, oracleMemory.data, dataSize) == 0,
+                                        "the branch delay-slot store must use the new flag-check value");
+                                    if (step == 0u && std::getenv("PS2_VU_REQUIRE_BRANCH_TAILS"))
+                                        t.Equals(ps2_vu_detail::terminalBranchPairs - before, budget >= 4u ? uint64_t{4} : uint64_t{0},
+                                            "both CLIP reads and the terminal branch must execute in one native region");
+                                    if (step == 0u && budget == 4u)
+                                    {
+                                        const bool taken = opcode == 0x28u ? firstClip == 1u : firstClip != 1u;
+                                        t.Equals(candidate.state().pc, start + (taken ? 40u : 32u), "the branch uses the newly visible CLIP predicate");
+                                        t.Equals(candidate.state().vi[2], int32_t{0xdef}, "the earlier FCGET still sees the entry CLIP value");
+                                    }
+                                }
+                            }
+        });
+
+        tc.Run("terminal branch and delay-slot code edits invalidate cached selection", [](TestCase &t)
+        {
+            for (uint32_t offset : {16u, 24u})
+            {
+                Vu1Fixture candidateMemory, oracleMemory;
+                t.IsTrue(candidateMemory.initialize() && oracleMemory.initialize(), "branch edit fixtures must initialize");
+                for (auto *fx : {&candidateMemory, &oracleMemory})
+                {
+                    for (uint32_t pc = 0; pc < PS2_VU1_CODE_SIZE; pc += 8u)
+                        writeVuInstructionPair(fx->code, pc, 0x8000033cu, kVuUpperNop);
+                    writeTerminalBranchFixture(fx->code, 64u, 0x29u, 5u, 3);
+                }
+                VU1Interpreter candidate, oracle;
+                oracle.setCompiledExecutionEnabled(false);
+                candidate.state().vi[4] = candidate.state().vi[5] = 3;
+                oracle.state() = candidate.state();
+                const uint64_t before = ps2_vu_detail::terminalBranchPairs;
+                candidate.execute(candidateMemory.code, PS2_VU1_CODE_SIZE, candidateMemory.data, PS2_VU1_DATA_SIZE,
+                    candidateMemory.gs, &candidateMemory.mem, 64u, 0u, 0u, 6u);
+                oracle.execute(oracleMemory.code, PS2_VU1_CODE_SIZE, oracleMemory.data, PS2_VU1_DATA_SIZE,
+                    oracleMemory.gs, &oracleMemory.mem, 64u, 0u, 0u, 6u);
+                if (std::getenv("PS2_VU_REQUIRE_BRANCH_TAILS"))
+                    t.Equals(ps2_vu_detail::terminalBranchPairs - before, uint64_t{4}, "the original branch region must be cached");
+                for (auto *fx : {&candidateMemory, &oracleMemory})
+                    writeTrackedVuInstructionPair(*fx, 64u + offset, makeVuIaddiu(15u, 0u, 777), kVuUpperNop);
+                candidate.state().pc = oracle.state().pc = 64u;
+                const uint64_t edited = ps2_vu_detail::terminalBranchPairs;
+                for (unsigned step = 0; step < 10u; ++step)
+                {
+                    const uint32_t budget = step == 0u ? 6u : 1u;
+                    candidate.resume(candidateMemory.code, PS2_VU1_CODE_SIZE, candidateMemory.data, PS2_VU1_DATA_SIZE,
+                        candidateMemory.gs, &candidateMemory.mem, 0u, 0u, budget);
+                    oracle.resume(oracleMemory.code, PS2_VU1_CODE_SIZE, oracleMemory.data, PS2_VU1_DATA_SIZE,
+                        oracleMemory.gs, &oracleMemory.mem, 0u, 0u, budget);
+                    t.IsTrue(std::memcmp(&candidate.state(), &oracle.state(), sizeof(VU1State)) == 0,
+                        "edited branch or delay slot must match raw execution and all resumed tails");
+                    t.IsTrue(std::memcmp(candidateMemory.data, oracleMemory.data, PS2_VU1_DATA_SIZE) == 0,
+                        "editing the delay-slot store must remove its effect");
+                }
+                t.Equals(candidate.state().vi[15], 777, "the replacement instruction must execute");
+                t.Equals(ps2_vu_detail::terminalBranchPairs - edited, uint64_t{0}, "an edited terminal region must fall back");
+            }
+        });
+
+        tc.Run("natural loops keep flag-reading bodies on the exact fallback", [](TestCase &t)
+        {
+            for (auto unit : {VU1Interpreter::Unit::VU0, VU1Interpreter::Unit::VU1})
+                for (unsigned budget : {4u, 8u, 19u})
+                {
+                    Vu1Fixture nativeMemory, oracleMemory;
+                    t.IsTrue(nativeMemory.initialize() && oracleMemory.initialize(), "flag loop fixtures initialize");
+                    const uint32_t codeSize = unit == VU1Interpreter::Unit::VU1 ? PS2_VU1_CODE_SIZE : PS2_VU0_CODE_SIZE;
+                    const uint32_t dataSize = unit == VU1Interpreter::Unit::VU1 ? PS2_VU1_DATA_SIZE : PS2_VU0_DATA_SIZE;
+                    for (auto *fx : {&nativeMemory, &oracleMemory})
+                    {
+                        if (unit == VU1Interpreter::Unit::VU0)
+                        {
+                            fx->code = fx->mem.getVU0Code();
+                            fx->data = fx->mem.getVU0Data();
+                        }
+                        writeVuInstructionPair(fx->code, 0u, 0x24000001u, kVuUpperNop);
+                        writeVuInstructionPair(fx->code, 8u, 0x8000033cu, kVuUpperNop);
+                        writeVuInstructionPair(fx->code, 16u, makeVuIbne(1u, 0u, -3), kVuUpperNop);
+                        writeVuInstructionPair(fx->code, 24u, 0x8000033cu, kVuUpperNop);
+                    }
+                    VU1Interpreter native(unit), oracle(unit);
+                    oracle.setCompiledExecutionEnabled(false);
+                    native.state().clip = 1u;
+                    oracle.state() = native.state();
+                    const uint64_t before = ps2_vu_detail::countedLoopPairs;
+                    native.execute(nativeMemory.code, codeSize, nativeMemory.data, dataSize,
+                        nativeMemory.gs, &nativeMemory.mem, 0u, 0u, 0u, budget);
+                    oracle.execute(oracleMemory.code, codeSize, oracleMemory.data, dataSize,
+                        oracleMemory.gs, &oracleMemory.mem, 0u, 0u, 0u, budget);
+                    t.Equals(ps2_vu_detail::countedLoopPairs - before, uint64_t{0},
+                        "broader bounded-region support must not enable unsupported loop flag timelines");
+                    for (unsigned tail = 0; tail < 8u; ++tail)
+                    {
+                        t.IsTrue(std::memcmp(&native.state(), &oracle.state(), sizeof(VU1State)) == 0,
+                            "FCAND and its immediate backedge must preserve the visible CLIP version");
+                        native.resume(nativeMemory.code, codeSize, nativeMemory.data, dataSize,
+                            nativeMemory.gs, &nativeMemory.mem, 0u, 0u, 1u);
+                        oracle.resume(oracleMemory.code, codeSize, oracleMemory.data, dataSize,
+                            oracleMemory.gs, &oracleMemory.mem, 0u, 0u, 1u);
+                    }
+                }
+        });
+
+        tc.Run("natural loops without counters yield at every exact budget", [](TestCase &t)
+        {
+            for (auto unit : {VU1Interpreter::Unit::VU0, VU1Interpreter::Unit::VU1})
+                for (unsigned budget = 0; budget <= 25u; ++budget)
+                {
+                    Vu1Fixture nativeMemory, oracleMemory;
+                    t.IsTrue(nativeMemory.initialize() && oracleMemory.initialize(), "uncounted loop fixtures initialize");
+                    const uint32_t codeSize = unit == VU1Interpreter::Unit::VU1 ? PS2_VU1_CODE_SIZE : PS2_VU0_CODE_SIZE;
+                    const uint32_t dataSize = unit == VU1Interpreter::Unit::VU1 ? PS2_VU1_DATA_SIZE : PS2_VU0_DATA_SIZE;
+                    for (auto *fx : {&nativeMemory, &oracleMemory})
+                    {
+                        if (unit == VU1Interpreter::Unit::VU0)
+                        {
+                            fx->code = fx->mem.getVU0Code();
+                            fx->data = fx->mem.getVU0Data();
+                        }
+                        writeVuInstructionPair(fx->code, 0u, 0x40000000u,
+                            makeVuUpper(0x22u, 15u, 0u, 2u, 1u) | 0x80000000u);
+                        writeVuInstructionPair(fx->code, 8u, 0x40400000u,
+                            makeVuUpper(0x1eu, 15u, 0u, 2u, 3u) | 0x80000000u);
+                        writeVuInstructionPair(fx->code, 16u, (0x28u << 25u) | (-3 & 0x7ff), kVuUpperNop);
+                        writeVuInstructionPair(fx->code, 24u, 0x8000033cu, kVuUpperNop);
+                    }
+                    VU1Interpreter native(unit), oracle(unit);
+                    oracle.setCompiledExecutionEnabled(false);
+                    native.state().i = 5.0f;
+                    for (unsigned lane = 0; lane < 4u; ++lane)
+                        native.state().vf[2][lane] = static_cast<float>(lane + 1u);
+                    oracle.state() = native.state();
+                    const uint64_t before = ps2_vu_detail::countedLoopPairs;
+                    native.execute(nativeMemory.code, codeSize, nativeMemory.data, dataSize,
+                        nativeMemory.gs, &nativeMemory.mem, 0u, 0u, 0u, budget);
+                    oracle.execute(oracleMemory.code, codeSize, oracleMemory.data, dataSize,
+                        oracleMemory.gs, &oracleMemory.mem, 0u, 0u, 0u, budget);
+                    if (std::getenv("PS2_VU_REQUIRE_NATURAL_LOOPS"))
+                        t.Equals(ps2_vu_detail::countedLoopPairs - before, uint64_t{budget / 4u * 4u},
+                            "an always-taken loop needs no counter to honor its exact budget");
+                    for (unsigned tail = 0; tail < 8u; ++tail)
+                    {
+                        t.IsTrue(std::memcmp(&native.state(), &oracle.state(), sizeof(VU1State)) == 0,
+                            "bounded infinite backedges retain I and pending pipeline tails");
+                        native.resume(nativeMemory.code, codeSize, nativeMemory.data, dataSize,
+                            nativeMemory.gs, &nativeMemory.mem, 0u, 0u, 1u);
+                        oracle.resume(oracleMemory.code, codeSize, oracleMemory.data, dataSize,
+                            oracleMemory.gs, &oracleMemory.mem, 0u, 0u, 1u);
+                    }
+                }
+        });
+
+        tc.Run("natural loops carry old and new I across stalled iterations", [](TestCase &t)
+        {
+            for (auto unit : {VU1Interpreter::Unit::VU0, VU1Interpreter::Unit::VU1})
+                for (unsigned opcode : {0x28u, 0x29u})
+                    for (uint32_t immediate : {0x40400000u, 0x7fffffffu, 0x80000001u})
+                        for (unsigned phase : {0u, 1u, 2u, 3u})
+                            for (unsigned trips : {1u, 2u, 7u})
+                                for (unsigned budget : {0u, 1u, 8u, 12u, 14u, 15u, 16u, 29u, 30u, 31u, 45u, 46u, 120u})
+                                {
+                                    Vu1Fixture nativeMemory, oracleMemory;
+                                    t.IsTrue(nativeMemory.initialize() && oracleMemory.initialize(), "natural loop fixtures initialize");
+                                    const uint32_t codeSize = unit == VU1Interpreter::Unit::VU1 ? PS2_VU1_CODE_SIZE : PS2_VU0_CODE_SIZE;
+                                    const uint32_t dataSize = unit == VU1Interpreter::Unit::VU1 ? PS2_VU1_DATA_SIZE : PS2_VU0_DATA_SIZE;
+                                    const uint32_t start = phase * 8u;
+                                    for (auto *fx : {&nativeMemory, &oracleMemory})
+                                    {
+                                        if (unit == VU1Interpreter::Unit::VU0)
+                                        {
+                                            fx->code = fx->mem.getVU0Code();
+                                            fx->data = fx->mem.getVU0Data();
+                                        }
+                                        for (unsigned pc = 0; pc < codeSize; pc += 8u)
+                                            writeVuInstructionPair(fx->code, pc, 0x8000033cu, kVuUpperNop);
+                                        writeEarlyCounterLoopCode(*fx);
+                                        std::memmove(fx->code + start, fx->code, 56u);
+                                        for (unsigned pc = 0; pc < start; pc += 8u)
+                                            writeVuInstructionPair(fx->code, pc, 0x8000033cu, kVuUpperNop);
+                                        writeVuInstructionPair(fx->code, start + 56u, 0x40000000u,
+                                            makeVuUpper(0x1eu, 15u, 0u, 16u, 27u) | 0x80000000u);
+                                        writeVuInstructionPair(fx->code, start + 64u, immediate,
+                                            makeVuUpper(0x22u, 12u, 0u, 17u, 28u) | 0x80000000u);
+                                        writeVuInstructionPair(fx->code, start + 72u, 0x8000033cu,
+                                            makeVuUpper(0x1eu, 12u, 0u, 28u, 29u));
+                                        writeVuInstructionPair(fx->code, start + 80u,
+                                            (opcode << 25u) | (11u << 16u) | (12u << 11u) | (-11 & 0x7ff),
+                                            makeVuUpperSpecial(0x1bu, 14u, 0u, 22u));
+                                        writeVuInstructionPair(fx->code, start + 88u, makeVuSq(15u, 25u, 11u, -7),
+                                            makeVuUpperSpecial(0x08u, 14u, 23u, 18u));
+                                        for (unsigned byte = 0; byte < dataSize; ++byte)
+                                            fx->data[byte] = static_cast<uint8_t>(byte * 23u + 5u);
+                                    }
+                                    VU1Interpreter native(unit), oracle(unit);
+                                    oracle.setCompiledExecutionEnabled(false);
+                                    uint32_t random = 0x783bd519u;
+                                    for (unsigned reg = 1; reg < 32u; ++reg)
+                                        for (unsigned lane = 0; lane < 4u; ++lane)
+                                        {
+                                            random = random * 1664525u + 1013904223u;
+                                            native.state().vf[reg][lane] = std::bit_cast<float>(random);
+                                        }
+                                    native.state().i = 5.0f;
+                                    native.state().vi[10] = 11;
+                                    native.state().vi[11] = 32766;
+                                    const unsigned expectedTrips = opcode == 0x29u ? trips : trips == 1u ? 1u : 2u;
+                                    native.state().vi[12] = static_cast<int16_t>(32766 +
+                                        (opcode == 0x29u ? 5u * trips : trips == 1u ? 10u : 5u));
+                                    native.state().branchTarget = 0x1238u;
+                                    native.state().status = 0xa50u;
+                                    native.state().clip = 0xa5a5a5u;
+                                    oracle.state() = native.state();
+                                    const uint64_t before = ps2_vu_detail::countedLoopPairs;
+                                    native.execute(nativeMemory.code, codeSize, nativeMemory.data, dataSize,
+                                        nativeMemory.gs, &nativeMemory.mem, 0u, 0u, 0u, phase + budget);
+                                    oracle.execute(oracleMemory.code, codeSize, oracleMemory.data, dataSize,
+                                        oracleMemory.gs, &oracleMemory.mem, 0u, 0u, 0u, phase + budget);
+                                    if (std::getenv("PS2_VU_REQUIRE_NATURAL_LOOPS"))
+                                        t.Equals(ps2_vu_detail::countedLoopPairs - before,
+                                            uint64_t{12u} * std::min(expectedTrips, budget / 15u),
+                                            "complete stalled iterations must enter the retained natural-loop path");
+                                    for (unsigned tail = 0; tail < 9u; ++tail)
+                                    {
+                                        t.IsTrue(std::memcmp(&native.state(), &oracle.state(), sizeof(VU1State)) == 0,
+                                            "LOI old-I arithmetic, loop-carried I, branches and all delayed flags must match raw state");
+                                        t.IsTrue(std::memcmp(nativeMemory.data, oracleMemory.data, dataSize) == 0,
+                                            "loop-carried I must retain exact stored result bits");
+                                        native.resume(nativeMemory.code, codeSize, nativeMemory.data, dataSize,
+                                            nativeMemory.gs, &nativeMemory.mem, 0u, 0u, 1u);
+                                        oracle.resume(oracleMemory.code, codeSize, oracleMemory.data, dataSize,
+                                            oracleMemory.gs, &oracleMemory.mem, 0u, 0u, 1u);
+                                    }
+                                }
+        });
+
         tc.Run("static region timestamps reject wrap and retire at the clock limit", [](TestCase &t)
         {
             constexpr uint64_t limit = UINT64_MAX;
@@ -465,6 +907,79 @@ void register_ps2_vu1_tests()
                 }
             }
         });
+        tc.Run("static clip readers observe incoming and local delayed flag versions", [](TestCase &t)
+        {
+            for (unsigned phase = 0; phase < 8u; ++phase)
+                for (unsigned budget : {1u, 3u, 4u, 7u, 11u, 12u, 13u})
+                {
+                    Vu1Fixture nativeMemory, oracleMemory;
+                    t.IsTrue(nativeMemory.initialize() && oracleMemory.initialize(), "clip fixtures initialize");
+                    const uint32_t upper[12] = {
+                        makeVuUpperSpecial(0x1fu, 15u, 2u, 1u),
+                        makeVuUpperSpecial(0x1fu, 15u, 4u, 3u), kVuUpperNop, kVuUpperNop,
+                        makeVuUpperSpecial(0x1fu, 15u, 1u, 2u), kVuUpperNop, kVuUpperNop,
+                        makeVuUpperSpecial(0x1fu, 15u, 3u, 4u), kVuUpperNop, kVuUpperNop,
+                        makeVuUpperSpecial(0x1fu, 15u, 3u, 1u), kVuUpperNop};
+                    const uint32_t lower[12] = {
+                        0x38020000u, 0x38030000u, 0x38040000u, 0x38050000u,
+                        0x38060000u, 0x38070000u, 0x24100000u, 0x0b010000u,
+                        0x26feffffu, 0x0b010001u, 0x20ffffffu, 0x38080000u};
+                    for (auto *fx : {&nativeMemory, &oracleMemory})
+                    {
+                        for (unsigned index = 0; index < phase + 24u; ++index)
+                            writeVuInstructionPair(fx->code, index * 8u, 0x8000033cu, kVuUpperNop);
+                        writeVuInstructionPair(fx->code, phase * 8u, 0x22123456u, kVuUpperNop);
+                        writeVuInstructionPair(fx->code, (phase + 1u) * 8u,
+                            makeVuFlagImmediate(0x15u, 0u, 0xac0u), makeVuUpperSpecial(0x1fu, 15u, 4u, 1u));
+                        writeVuInstructionPair(fx->code, (phase + 2u) * 8u,
+                            0x22654321u, makeVuUpperSpecial(0x1fu, 15u, 2u, 3u));
+                        for (unsigned index = 0; index < 12u; ++index)
+                            writeVuInstructionPair(fx->code, (phase + 3u + index) * 8u, lower[index], upper[index]);
+                        for (unsigned index = 0; index < 8u; ++index)
+                            writeVuInstructionPair(fx->code, (phase + 15u + index) * 8u,
+                                0x0b000000u | ((index < 7u ? index + 2u : 1u) << 16u) | (index + 2u), kVuUpperNop);
+                    }
+                    VU1Interpreter native, oracle;
+                    oracle.setCompiledExecutionEnabled(false);
+                    for (unsigned reg = 1; reg < 5u; ++reg)
+                        for (unsigned lane = 0; lane < 4u; ++lane)
+                            native.state().vf[reg][lane] = static_cast<float>(
+                                (static_cast<int>(reg * 3u + lane + phase) % 9) - 4);
+                    native.state().vf[2][3] = 1.0f;
+                    native.state().vf[4][3] = 2.0f;
+                    native.state().clip = 0xabcdefu;
+                    native.state().status = 0x135u;
+                    oracle.state() = native.state();
+                    native.execute(nativeMemory.code, PS2_VU1_CODE_SIZE, nativeMemory.data, PS2_VU1_DATA_SIZE,
+                        nativeMemory.gs, &nativeMemory.mem, 0u, 0u, 0u, phase + 3u);
+                    oracle.execute(oracleMemory.code, PS2_VU1_CODE_SIZE, oracleMemory.data, PS2_VU1_DATA_SIZE,
+                        oracleMemory.gs, &oracleMemory.mem, 0u, 0u, 0u, phase + 3u);
+                    const uint64_t accepted = ps2_vu_detail::regionCounters.accepted[1];
+                    for (unsigned step = 0; step < 9u; ++step)
+                    {
+                        const unsigned cycles = step == 0u ? budget : 1u;
+                        if (step != 0u) native.setCompiledExecutionEnabled(false);
+                        native.resume(nativeMemory.code, PS2_VU1_CODE_SIZE, nativeMemory.data, PS2_VU1_DATA_SIZE,
+                            nativeMemory.gs, &nativeMemory.mem, 0u, 0u, cycles);
+                        oracle.resume(oracleMemory.code, PS2_VU1_CODE_SIZE, oracleMemory.data, PS2_VU1_DATA_SIZE,
+                            oracleMemory.gs, &oracleMemory.mem, 0u, 0u, cycles);
+                        t.IsTrue(std::memcmp(&native.state(), &oracle.state(), sizeof(VU1State)) == 0,
+                            "CLIP/FCSET issue history and every visible delayed flag version match");
+                        t.IsTrue(std::memcmp(nativeMemory.data, oracleMemory.data, PS2_VU1_DATA_SIZE) == 0,
+                            "flag-dependent stores match at every raw continuation");
+                        if (step == 0u && std::getenv("PS2_VU_REQUIRE_REGIONS"))
+                            t.Equals(ps2_vu_detail::regionCounters.accepted[1] - accepted,
+                                budget >= 12u ? uint64_t{12} : budget >= 4u ? uint64_t{4} : uint64_t{0},
+                                "clip readers genuinely take the complete region or bounded first-four fallback");
+                        if (step == 0u && budget >= 12u)
+                        {
+                            t.Equals(native.state().vi[2], int32_t{0xdef}, "first reader sees entry CLIP");
+                            t.Equals(native.state().vi[3], int32_t{0x456}, "second reader sees first pending FCSET");
+                            t.Equals(native.state().vi[5], int32_t{0x321}, "fourth reader sees final pending FCSET");
+                        }
+                    }
+                }
+        });
         tc.Run("static SSA LOI retains old I operands and publishes normalized immediates", [](TestCase &t)
         {
             for (unsigned phase = 0u; phase < 8u; ++phase)
@@ -528,6 +1043,421 @@ void register_ps2_vu1_tests()
                                 "LOI fixture must force the longest fitting native SSA region");
                     }
                 }
+        });
+        tc.Run("counted loops retain register versions and exact delayed exits", [](TestCase &t)
+        {
+            for (unsigned trips : {1u, 2u, 9u})
+                for (int initial : {13, 32766})
+                    for (bool alias : {false, true})
+                        for (unsigned budget : {0u, 1u, 6u, 7u, 8u, 13u, 14u, 15u, 20u, 21u, 22u, 70u, 71u})
+                        {
+                            Vu1Fixture nativeMemory, oracleMemory;
+                            t.IsTrue(nativeMemory.initialize() && oracleMemory.initialize(), "loop fixtures initialize");
+                            for (auto *fx : {&nativeMemory, &oracleMemory})
+                            {
+                                for (unsigned pc = 0; pc < 0x400u; pc += 8u)
+                                    writeVuInstructionPair(fx->code, pc, 0x8000033cu, kVuUpperNop);
+                                writeCountedLoopCode(*fx);
+                                for (unsigned offset = 0; offset < PS2_VU1_DATA_SIZE; offset += 4u)
+                                {
+                                    const uint32_t value = 0x8010203u ^ (offset * 0x10203u);
+                                    std::memcpy(fx->data + offset, &value, sizeof(value));
+                                }
+                            }
+                            VU1Interpreter native, oracle;
+                            oracle.setCompiledExecutionEnabled(false);
+                            for (unsigned reg = 1; reg < 32u; ++reg)
+                                for (unsigned lane = 0; lane < 4u; ++lane)
+                                    native.state().vf[reg][lane] = static_cast<float>(reg * (lane + 1u)) * 0.03125f;
+                            native.state().vi[10] = static_cast<int16_t>(initial);
+                            native.state().vi[11] = static_cast<int16_t>(initial + (alias ? 0 : 7));
+                            native.state().vi[12] = static_cast<int16_t>(initial + (alias ? 0 : 15));
+                            native.state().vi[13] = static_cast<int16_t>(initial + trips - 1u);
+                            native.state().status = 0xa50u;
+                            native.state().clip = 0xabcdeu;
+                            oracle.state() = native.state();
+                            const uint64_t accepted = ps2_vu_detail::countedLoopPairs;
+                            native.execute(nativeMemory.code, PS2_VU1_CODE_SIZE, nativeMemory.data, PS2_VU1_DATA_SIZE,
+                                           nativeMemory.gs, &nativeMemory.mem, 0u, 0u, 0u, budget);
+                            oracle.execute(oracleMemory.code, PS2_VU1_CODE_SIZE, oracleMemory.data, PS2_VU1_DATA_SIZE,
+                                           oracleMemory.gs, &oracleMemory.mem, 0u, 0u, 0u, budget);
+                            if (std::getenv("PS2_VU_REQUIRE_COUNTED_LOOPS"))
+                                t.Equals(ps2_vu_detail::countedLoopPairs - accepted,
+                                    static_cast<uint64_t>(7u * std::min(trips, budget / 7u)),
+                                    "complete iterations execute in the retained loop path");
+                            for (unsigned step = 0; step < 10u; ++step)
+                            {
+                                const bool stateEqual = std::memcmp(&native.state(), &oracle.state(), sizeof(VU1State)) == 0;
+                                const bool dataEqual = std::memcmp(nativeMemory.data, oracleMemory.data, PS2_VU1_DATA_SIZE) == 0;
+                                if (!stateEqual || !dataEqual)
+                                    std::fprintf(stderr, "loop mismatch trips=%u initial=%d alias=%u budget=%u step=%u pc=%u/%u cycle=%llu/%llu\n",
+                                        trips, initial, alias, budget, step, native.state().pc, oracle.state().pc,
+                                        static_cast<unsigned long long>(native.state().cycles),
+                                        static_cast<unsigned long long>(oracle.state().cycles));
+                                t.IsTrue(stateEqual, "visible and pending loop results match raw execution at each boundary");
+                                t.IsTrue(dataEqual, "loop loads and delay-slot stores retain alias ordering");
+                                native.resume(nativeMemory.code, PS2_VU1_CODE_SIZE, nativeMemory.data, PS2_VU1_DATA_SIZE,
+                                              nativeMemory.gs, &nativeMemory.mem, 0u, 0u, 1u);
+                                oracle.resume(oracleMemory.code, PS2_VU1_CODE_SIZE, oracleMemory.data, PS2_VU1_DATA_SIZE,
+                                              oracleMemory.gs, &oracleMemory.mem, 0u, 0u, 1u);
+                            }
+                        }
+        });
+        tc.Run("counted loops reenter through pending tails with raw operand bits", [](TestCase &t)
+        {
+            uint32_t random = 0x61e04abdu;
+            const auto next = [&]() {
+                random ^= random << 13u;
+                random ^= random >> 17u;
+                random ^= random << 5u;
+                return random;
+            };
+            for (unsigned trial = 0u; trial < 128u; ++trial)
+            {
+                Vu1Fixture nativeMemory, oracleMemory;
+                t.IsTrue(nativeMemory.initialize() && oracleMemory.initialize(), "reentry fixtures initialize");
+                for (auto *fx : {&nativeMemory, &oracleMemory})
+                    writeCountedLoopCode(*fx);
+                for (unsigned offset = 0u; offset < PS2_VU1_DATA_SIZE; offset += 4u)
+                {
+                    const uint32_t value = next();
+                    std::memcpy(nativeMemory.data + offset, &value, sizeof(value));
+                    std::memcpy(oracleMemory.data + offset, &value, sizeof(value));
+                }
+                VU1Interpreter native, oracle;
+                oracle.setCompiledExecutionEnabled(false);
+                for (unsigned reg = 1u; reg < 32u; ++reg)
+                    for (unsigned lane = 0u; lane < 4u; ++lane)
+                        native.state().vf[reg][lane] = std::bit_cast<float>(next());
+                for (unsigned lane = 0u; lane < 4u; ++lane)
+                    native.state().acc[lane] = std::bit_cast<float>(next());
+                const int16_t initial = static_cast<int16_t>(next());
+                native.state().vi[10] = initial;
+                native.state().vi[11] = static_cast<int16_t>(next());
+                native.state().vi[12] = static_cast<int16_t>(next());
+                native.state().vi[13] = static_cast<int16_t>(initial + 24);
+                native.state().status = next() & 0xfffu;
+                native.state().mac = next() & 0xffffu;
+                native.state().clip = next() & 0xffffffu;
+                oracle.state() = native.state();
+                unsigned step = 0u;
+                for (unsigned budget : {7u, 7u, 14u, 1u, 6u, 21u, 2u, 5u, 7u, 7u, 70u, 7u})
+                {
+                    const uint64_t accepted = ps2_vu_detail::countedLoopPairs;
+                    if (step == 0u)
+                    {
+                        native.execute(nativeMemory.code, PS2_VU1_CODE_SIZE, nativeMemory.data, PS2_VU1_DATA_SIZE,
+                                       nativeMemory.gs, &nativeMemory.mem, 0u, 0u, 0u, budget);
+                        oracle.execute(oracleMemory.code, PS2_VU1_CODE_SIZE, oracleMemory.data, PS2_VU1_DATA_SIZE,
+                                       oracleMemory.gs, &oracleMemory.mem, 0u, 0u, 0u, budget);
+                    }
+                    else
+                    {
+                        native.resume(nativeMemory.code, PS2_VU1_CODE_SIZE, nativeMemory.data, PS2_VU1_DATA_SIZE,
+                                      nativeMemory.gs, &nativeMemory.mem, 0u, 0u, budget);
+                        oracle.resume(oracleMemory.code, PS2_VU1_CODE_SIZE, oracleMemory.data, PS2_VU1_DATA_SIZE,
+                                      oracleMemory.gs, &oracleMemory.mem, 0u, 0u, budget);
+                    }
+                    t.IsTrue(std::memcmp(&native.state(), &oracle.state(), sizeof(VU1State)) == 0,
+                             "retained loop reentry preserves all visible state and the +1/+2/+3 tails");
+                    t.IsTrue(std::memcmp(nativeMemory.data, oracleMemory.data, PS2_VU1_DATA_SIZE) == 0,
+                             "raw bit patterns preserve exact load/store and masked-lane results");
+                    if (step < 3u && std::getenv("PS2_VU_REQUIRE_COUNTED_LOOPS"))
+                        t.Equals(ps2_vu_detail::countedLoopPairs - accepted, static_cast<uint64_t>(budget),
+                                 "each initial bounded resume reenters the retained loop with pending VF writes");
+                    ++step;
+                }
+            }
+        });
+        tc.Run("counted-loop branches use the preceding VI write backup", [](TestCase &t)
+        {
+            for (int initial : {13, 32767})
+                for (int distance : {0, 1})
+                    for (unsigned budget : {6u, 7u, 14u, 21u})
+                    {
+                        Vu1Fixture nativeMemory, oracleMemory;
+                        t.IsTrue(nativeMemory.initialize() && oracleMemory.initialize(), "branch fixtures initialize");
+                        for (auto *fx : {&nativeMemory, &oracleMemory})
+                        {
+                            writeCountedLoopCode(*fx);
+                            writeVuInstructionPair(fx->code, 40u, makeVuIbne(11u, 10u, -6),
+                                makeVuUpperSpecial(0x13u, 14u, 24u, 25u));
+                        }
+                        VU1Interpreter native, oracle;
+                        oracle.setCompiledExecutionEnabled(false);
+                        native.state().vi[10] = static_cast<int16_t>(initial);
+                        native.state().vi[11] = static_cast<int16_t>(initial + distance);
+                        native.state().vi[12] = 30;
+                        oracle.state() = native.state();
+                        const uint64_t accepted = ps2_vu_detail::countedLoopPairs;
+                        native.execute(nativeMemory.code, PS2_VU1_CODE_SIZE, nativeMemory.data, PS2_VU1_DATA_SIZE,
+                                       nativeMemory.gs, &nativeMemory.mem, 0u, 0u, 0u, budget);
+                        oracle.execute(oracleMemory.code, PS2_VU1_CODE_SIZE, oracleMemory.data, PS2_VU1_DATA_SIZE,
+                                       oracleMemory.gs, &oracleMemory.mem, 0u, 0u, 0u, budget);
+                        if (std::getenv("PS2_VU_REQUIRE_COUNTED_LOOPS"))
+                            t.Equals(ps2_vu_detail::countedLoopPairs - accepted,
+                                static_cast<uint64_t>(7u * (distance == 0 ? std::min(1u, budget / 7u) : budget / 7u)),
+                                "the branch-backup fixture enters the retained loop");
+                        for (unsigned step = 0; step < 10u; ++step)
+                        {
+                            t.IsTrue(std::memcmp(&native.state(), &oracle.state(), sizeof(VU1State)) == 0,
+                                     "IBNE compares the old VI value before SQI and its delay slot");
+                            t.IsTrue(std::memcmp(nativeMemory.data, oracleMemory.data, PS2_VU1_DATA_SIZE) == 0,
+                                     "branch backup does not reorder stores");
+                            native.resume(nativeMemory.code, PS2_VU1_CODE_SIZE, nativeMemory.data, PS2_VU1_DATA_SIZE,
+                                          nativeMemory.gs, &nativeMemory.mem, 0u, 0u, 1u);
+                            oracle.resume(oracleMemory.code, PS2_VU1_CODE_SIZE, oracleMemory.data, PS2_VU1_DATA_SIZE,
+                                          oracleMemory.gs, &oracleMemory.mem, 0u, 0u, 1u);
+                        }
+                    }
+        });
+        tc.Run("counted loops yield to code replacement between budgets", [](TestCase &t)
+        {
+            for (uint32_t patchPC : {0u, 32u, 40u, 48u})
+            {
+                Vu1Fixture nativeMemory, oracleMemory;
+                t.IsTrue(nativeMemory.initialize() && oracleMemory.initialize(), "invalidation fixtures initialize");
+                for (auto *fx : {&nativeMemory, &oracleMemory})
+                    writeCountedLoopCode(*fx);
+                VU1Interpreter native, oracle;
+                oracle.setCompiledExecutionEnabled(false);
+                native.state().vi[10] = 13;
+                native.state().vi[11] = 20;
+                native.state().vi[12] = 30;
+                native.state().vi[13] = 100;
+                oracle.state() = native.state();
+                for (unsigned step = 0; step < 2u; ++step)
+                {
+                    const uint64_t accepted = ps2_vu_detail::countedLoopPairs;
+                    if (step == 0u)
+                    {
+                        native.execute(nativeMemory.code, PS2_VU1_CODE_SIZE, nativeMemory.data, PS2_VU1_DATA_SIZE,
+                                       nativeMemory.gs, &nativeMemory.mem, 0u, 0u, 0u, 21u);
+                        oracle.execute(oracleMemory.code, PS2_VU1_CODE_SIZE, oracleMemory.data, PS2_VU1_DATA_SIZE,
+                                       oracleMemory.gs, &oracleMemory.mem, 0u, 0u, 0u, 21u);
+                    }
+                    else
+                    {
+                        for (auto *fx : {&nativeMemory, &oracleMemory})
+                            writeTrackedVuInstructionPair(*fx, patchPC, makeVuIaddiu(15u, 0u, 123), kVuUpperNop);
+                        native.resume(nativeMemory.code, PS2_VU1_CODE_SIZE, nativeMemory.data, PS2_VU1_DATA_SIZE,
+                                      nativeMemory.gs, &nativeMemory.mem, 0u, 0u, 7u);
+                        oracle.resume(oracleMemory.code, PS2_VU1_CODE_SIZE, oracleMemory.data, PS2_VU1_DATA_SIZE,
+                                      oracleMemory.gs, &oracleMemory.mem, 0u, 0u, 7u);
+                    }
+                    t.IsTrue(std::memcmp(&native.state(), &oracle.state(), sizeof(VU1State)) == 0,
+                             "code generation invalidates the old loop before another iteration");
+                    t.IsTrue(std::memcmp(nativeMemory.data, oracleMemory.data, PS2_VU1_DATA_SIZE) == 0,
+                             "invalidation preserves pending stores and VF tails");
+                    if (std::getenv("PS2_VU_REQUIRE_COUNTED_LOOPS"))
+                        t.Equals(ps2_vu_detail::countedLoopPairs - accepted, step == 0u ? uint64_t{21u} : uint64_t{0u},
+                                 "only the original code image uses the compiled loop");
+                }
+                t.Equals(native.state().vi[15], 123, "replacement instruction executes");
+            }
+        });
+        tc.Run("counted loops fall back while XGKICK can replace code", [](TestCase &t)
+        {
+            Vu1Fixture nativeMemory, oracleMemory;
+            t.IsTrue(nativeMemory.initialize() && oracleMemory.initialize(), "XGKICK fixtures initialize");
+            std::vector<std::vector<uint8_t>> nativePackets, oraclePackets;
+            const auto setup = [&](Vu1Fixture &fx, std::vector<std::vector<uint8_t>> &packets) {
+                writeVuInstructionPair(fx.code, 0u, makeVuLowerSpecial(0x6cu, 14u), kVuUpperNop);
+                writeCountedLoopCode(fx, 8u);
+                const uint64_t tag = makeGifTag(4u, GIF_FMT_IMAGE, 0u, true);
+                std::memcpy(fx.data + 800u * 16u, &tag, sizeof(tag));
+                fx.mem.setGifPacketCallback([&fx, &packets](const uint8_t *data, uint32_t size) {
+                    packets.emplace_back(data, data + size);
+                    writeTrackedVuInstructionPair(fx, 16u, makeVuIaddiu(15u, 0u, 321), kVuUpperNop);
+                });
+            };
+            setup(nativeMemory, nativePackets);
+            setup(oracleMemory, oraclePackets);
+            VU1Interpreter native, oracle;
+            oracle.setCompiledExecutionEnabled(false);
+            native.state().vi[10] = 13;
+            native.state().vi[11] = 20;
+            native.state().vi[12] = 30;
+            native.state().vi[13] = 100;
+            native.state().vi[14] = 800;
+            oracle.state() = native.state();
+            const uint64_t accepted = ps2_vu_detail::countedLoopPairs;
+            native.execute(nativeMemory.code, PS2_VU1_CODE_SIZE, nativeMemory.data, PS2_VU1_DATA_SIZE,
+                           nativeMemory.gs, &nativeMemory.mem, 0u, 0u, 0u, 1u);
+            oracle.execute(oracleMemory.code, PS2_VU1_CODE_SIZE, oracleMemory.data, PS2_VU1_DATA_SIZE,
+                           oracleMemory.gs, &oracleMemory.mem, 0u, 0u, 0u, 1u);
+            for (unsigned step = 0; step < 4u; ++step)
+            {
+                native.resume(nativeMemory.code, PS2_VU1_CODE_SIZE, nativeMemory.data, PS2_VU1_DATA_SIZE,
+                              nativeMemory.gs, &nativeMemory.mem, 0u, 0u, 7u);
+                oracle.resume(oracleMemory.code, PS2_VU1_CODE_SIZE, oracleMemory.data, PS2_VU1_DATA_SIZE,
+                              oracleMemory.gs, &oracleMemory.mem, 0u, 0u, 7u);
+                t.IsTrue(std::memcmp(&native.state(), &oracle.state(), sizeof(VU1State)) == 0,
+                         "live PATH1 progress retains exact callback and code-change boundaries");
+                t.IsTrue(std::memcmp(nativeMemory.data, oracleMemory.data, PS2_VU1_DATA_SIZE) == 0,
+                         "PATH1 fallback preserves loop store ordering");
+                t.IsTrue(nativePackets == oraclePackets, "PATH1 captures exact bytes at the original cycles");
+                t.Equals(ps2_vu_detail::countedLoopPairs - accepted, uint64_t{0u},
+                         "live XGKICK and then the changed code reject the compiled loop");
+            }
+            t.Equals(nativePackets.size(), size_t{1u}, "XGKICK callback actually ran");
+            t.Equals(native.state().vi[15], 321, "callback replacement executed");
+        });
+        tc.Run("counted loops reject cyclic cancellation before visibility", [](TestCase &t)
+        {
+            for (bool integer : {false, true})
+                for (unsigned budget : {7u, 14u, 21u, 22u, 23u, 24u})
+                {
+                    Vu1Fixture nativeMemory, oracleMemory;
+                    t.IsTrue(nativeMemory.initialize() && oracleMemory.initialize(), "cancellation fixtures initialize");
+                    for (auto *fx : {&nativeMemory, &oracleMemory})
+                    {
+                        for (unsigned index = 0; index < 16u; ++index)
+                            writeVuInstructionPair(fx->code, index * 8u, 0x8000033cu, kVuUpperNop);
+                        if (integer)
+                        {
+                            for (unsigned index : {0u, 2u, 4u})
+                                writeVuInstructionPair(fx->code, index * 8u, makeVuIlw(8u, 14u, 0u, 2), kVuUpperNop);
+                        }
+                        else
+                        {
+                            for (unsigned index : {0u, 3u, 6u})
+                                writeVuInstructionPair(fx->code, index * 8u, 0x8000033cu,
+                                    makeVuUpper(0x28u, 8u, 17u, 16u, 20u));
+                        }
+                        writeVuInstructionPair(fx->code, 40u, makeVuIbne(13u, 10u, -6), kVuUpperNop);
+                        writeVuInstructionPair(fx->code, 48u, makeVuLowerSpecial(0x35u, 25u, 10u, 0u, 8u),
+                            integer ? kVuUpperNop : makeVuUpper(0x28u, 8u, 17u, 16u, 20u));
+                        const uint32_t value = 567u;
+                        std::memcpy(fx->data + 32u, &value, sizeof(value));
+                    }
+                    VU1Interpreter native, oracle;
+                    oracle.setCompiledExecutionEnabled(false);
+                    native.state().vi[10] = 20;
+                    native.state().vi[13] = 22;
+                    native.state().vi[14] = 123;
+                    native.state().vf[16][0] = 1.0f;
+                    native.state().vf[17][0] = 2.0f;
+                    native.state().vf[20][0] = 7.0f;
+                    oracle.state() = native.state();
+                    const uint64_t accepted = ps2_vu_detail::countedLoopPairs;
+                    native.execute(nativeMemory.code, PS2_VU1_CODE_SIZE, nativeMemory.data, PS2_VU1_DATA_SIZE,
+                                   nativeMemory.gs, &nativeMemory.mem, 0u, 0u, 0u, budget);
+                    oracle.execute(oracleMemory.code, PS2_VU1_CODE_SIZE, oracleMemory.data, PS2_VU1_DATA_SIZE,
+                                   oracleMemory.gs, &oracleMemory.mem, 0u, 0u, 0u, budget);
+                    t.Equals(ps2_vu_detail::countedLoopPairs - accepted, uint64_t{0u},
+                             "a next-iteration write that cancels an incoming tail rejects loop retention");
+                    for (unsigned step = 0; step < 6u; ++step)
+                    {
+                        t.IsTrue(std::memcmp(&native.state(), &oracle.state(), sizeof(VU1State)) == 0,
+                                 "canceled tail values must not become architecturally visible");
+                        native.resume(nativeMemory.code, PS2_VU1_CODE_SIZE, nativeMemory.data, PS2_VU1_DATA_SIZE,
+                                      nativeMemory.gs, &nativeMemory.mem, 0u, 0u, 1u);
+                        oracle.resume(oracleMemory.code, PS2_VU1_CODE_SIZE, oracleMemory.data, PS2_VU1_DATA_SIZE,
+                                      oracleMemory.gs, &oracleMemory.mem, 0u, 0u, 1u);
+                    }
+                }
+        });
+        tc.Run("early counter loops retain ACC and exact masked flag tails", [](TestCase &t)
+        {
+            uint32_t random = 0x7293bd41u;
+            const auto next = [&]() {
+                random ^= random << 13u;
+                random ^= random >> 17u;
+                random ^= random << 5u;
+                return random;
+            };
+            for (int initial : {13, 32760})
+                for (unsigned trips : {1u, 2u, 7u})
+                    for (unsigned budget : {0u, 1u, 8u, 9u, 10u, 17u, 18u, 19u, 26u, 27u, 28u, 63u, 64u})
+                    {
+                        Vu1Fixture nativeMemory, oracleMemory;
+                        t.IsTrue(nativeMemory.initialize() && oracleMemory.initialize(), "early counter fixtures initialize");
+                        for (auto *fx : {&nativeMemory, &oracleMemory})
+                        {
+                            for (unsigned pc = 0u; pc < 0x400u; pc += 8u)
+                                writeVuInstructionPair(fx->code, pc, 0x8000033cu, kVuUpperNop);
+                            writeEarlyCounterLoopCode(*fx);
+                            writeVuInstructionPair(fx->code, 72u, makeVuIbne(11u, 12u, 2), kVuUpperNop);
+                        }
+                        for (unsigned offset = 0u; offset < PS2_VU1_DATA_SIZE; offset += 4u)
+                        {
+                            const uint32_t value = next();
+                            std::memcpy(nativeMemory.data + offset, &value, sizeof(value));
+                            std::memcpy(oracleMemory.data + offset, &value, sizeof(value));
+                        }
+                        VU1Interpreter native, oracle;
+                        oracle.setCompiledExecutionEnabled(false);
+                        for (unsigned reg = 1u; reg < 32u; ++reg)
+                            for (unsigned lane = 0u; lane < 4u; ++lane)
+                                native.state().vf[reg][lane] = std::bit_cast<float>(next());
+                        for (unsigned lane = 0u; lane < 4u; ++lane)
+                            native.state().acc[lane] = std::bit_cast<float>(next());
+                        native.state().vi[10] = static_cast<int16_t>(initial - 2);
+                        native.state().vi[11] = static_cast<int16_t>(initial);
+                        native.state().vi[12] = static_cast<int16_t>(initial + 5 * trips);
+                        native.state().mac = next() & 0xffffu;
+                        native.state().status = next() & 0xfffu;
+                        oracle.state() = native.state();
+                        const uint64_t accepted = ps2_vu_detail::countedLoopPairs;
+                        native.execute(nativeMemory.code, PS2_VU1_CODE_SIZE, nativeMemory.data, PS2_VU1_DATA_SIZE,
+                                       nativeMemory.gs, &nativeMemory.mem, 0u, 0u, 0u, budget);
+                        oracle.execute(oracleMemory.code, PS2_VU1_CODE_SIZE, oracleMemory.data, PS2_VU1_DATA_SIZE,
+                                       oracleMemory.gs, &oracleMemory.mem, 0u, 0u, 0u, budget);
+                        if (std::getenv("PS2_VU_REQUIRE_COUNTED_LOOPS"))
+                            t.Equals(ps2_vu_detail::countedLoopPairs - accepted,
+                                     static_cast<uint64_t>(9u * std::min(trips, budget / 9u)),
+                                     "whole nine-pair iterations use retained ACC and early-counter execution");
+                        for (unsigned step = 0u; step < 10u; ++step)
+                        {
+                            t.IsTrue(std::memcmp(&native.state(), &oracle.state(), sizeof(VU1State)) == 0,
+                                     "ACC, masked VF results and FMAC flags match at every delayed boundary");
+                            t.IsTrue(std::memcmp(nativeMemory.data, oracleMemory.data, PS2_VU1_DATA_SIZE) == 0,
+                                     "SQ uses the updated signed counter after LQI and masked MOVE");
+                            native.resume(nativeMemory.code, PS2_VU1_CODE_SIZE, nativeMemory.data, PS2_VU1_DATA_SIZE,
+                                          nativeMemory.gs, &nativeMemory.mem, 0u, 0u, 1u);
+                            oracle.resume(oracleMemory.code, PS2_VU1_CODE_SIZE, oracleMemory.data, PS2_VU1_DATA_SIZE,
+                                          oracleMemory.gs, &oracleMemory.mem, 0u, 0u, 1u);
+                        }
+                    }
+        });
+        tc.Run("early counter loops reenter and invalidate every late pair", [](TestCase &t)
+        {
+            for (unsigned patchPC : {32u, 40u, 48u, 56u, 64u})
+            {
+                Vu1Fixture nativeMemory, oracleMemory;
+                t.IsTrue(nativeMemory.initialize() && oracleMemory.initialize(), "early counter reentry fixtures initialize");
+                for (auto *fx : {&nativeMemory, &oracleMemory})
+                    writeEarlyCounterLoopCode(*fx);
+                VU1Interpreter native, oracle;
+                oracle.setCompiledExecutionEnabled(false);
+                native.state().vi[10] = 22;
+                native.state().vi[11] = 24;
+                native.state().vi[12] = 200;
+                for (unsigned reg = 1u; reg < 32u; ++reg)
+                    for (unsigned lane = 0u; lane < 4u; ++lane)
+                        native.state().vf[reg][lane] = static_cast<float>(reg + lane) * 0.125f;
+                oracle.state() = native.state();
+                for (unsigned step = 0u; step < 4u; ++step)
+                {
+                    const uint64_t accepted = ps2_vu_detail::countedLoopPairs;
+                    if (step == 3u)
+                        for (auto *fx : {&nativeMemory, &oracleMemory})
+                            writeTrackedVuInstructionPair(*fx, patchPC, makeVuIaddiu(15u, 0u, 123), kVuUpperNop);
+                    native.resume(nativeMemory.code, PS2_VU1_CODE_SIZE, nativeMemory.data, PS2_VU1_DATA_SIZE,
+                                  nativeMemory.gs, &nativeMemory.mem, 0u, 0u, 9u);
+                    oracle.resume(oracleMemory.code, PS2_VU1_CODE_SIZE, oracleMemory.data, PS2_VU1_DATA_SIZE,
+                                  oracleMemory.gs, &oracleMemory.mem, 0u, 0u, 9u);
+                    t.IsTrue(std::memcmp(&native.state(), &oracle.state(), sizeof(VU1State)) == 0,
+                             "resumed ACC/flag/VF tails and late counter-loop edits match raw execution");
+                    t.IsTrue(std::memcmp(nativeMemory.data, oracleMemory.data, PS2_VU1_DATA_SIZE) == 0,
+                             "late-pair invalidation retains exact load/store order");
+                    if (std::getenv("PS2_VU_REQUIRE_COUNTED_LOOPS"))
+                        t.Equals(ps2_vu_detail::countedLoopPairs - accepted, step < 3u ? uint64_t{9u} : uint64_t{0u},
+                                 "nine-pair reentry is active until any late instruction changes");
+                }
+                t.Equals(native.state().vi[15], 123, "late replacement executes");
+            }
         });
         tc.Run("upper ADD applies the destination mask", [](TestCase &t)
         {

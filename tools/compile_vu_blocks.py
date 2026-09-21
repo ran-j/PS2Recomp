@@ -10,11 +10,12 @@ def read_blocks(paths, parser):
     blocks = set()
     for path in paths:
         data = path.read_bytes()
-        if data.startswith((b"VU-BLOCKS 1\n", b"VU-BLOCKS 2\n")):
+        if data.startswith((b"VU-BLOCKS 1\n", b"VU-BLOCKS 2\n", b"VU-BLOCKS 3\n")):
             extended = data.startswith(b"VU-BLOCKS 2\n")
+            loops = data.startswith(b"VU-BLOCKS 3\n")
             for line in data.decode("ascii").splitlines()[1:]:
                 fields = line.split()
-                if len(fields) not in ((5, 9, 13, 17) if extended else (5,)):
+                if len(fields) not in (range(5, 18) if loops else (5, 9, 13, 17) if extended else (5,)):
                     parser.error(f"{path}: invalid block profile record")
                 try:
                     unit = int(fields[0])
@@ -36,6 +37,35 @@ def read_blocks(paths, parser):
     return blocks
 
 
+def read_counted_loops(paths, parser):
+    """Find bounded straight conditional backedges, including their delay slot.
+
+    Native planning applies the complete opcode, dependency and pipeline guards.
+    This pass only recognizes the reusable control-flow shape in local images.
+    """
+    blocks = set()
+    for path in paths:
+        data = path.read_bytes()
+        if len(data) not in (4096, 16384):
+            parser.error(f"{path}: expected a 4 KiB VU0 or 16 KiB VU1 code image")
+        unit = 0 if len(data) == 4096 else 1
+        words = [word for (word,) in struct.iter_unpack("<Q", data)]
+        for index in range(len(words) - 1):
+            branch = words[index] & 0xffffffff
+            if words[index] >> 63 or branch >> 25 not in (0x28, 0x29):
+                continue
+            offset = (branch & 0x7ff) - (0x800 if branch & 0x400 else 0)
+            head = index + 1 + offset
+            if head < 0 or not 4 <= index + 2 - head <= 16:
+                continue
+            if any(not word >> 63 and ((word & 0xffffffff) >> 25) in
+                   (0x20, 0x21, 0x24, 0x25, 0x28, 0x29, 0x2c, 0x2d, 0x2e, 0x2f)
+                   for word in words[head:index] + words[index+1:index+2]):
+                continue
+            blocks.add((tuple(words[head:index + 2]), unit))
+    return blocks
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
@@ -43,11 +73,13 @@ def main():
                         help="Emit this many independent native instantiation sources")
     parser.add_argument("--pair-images", type=Path, nargs="*", default=[],
                         help="Compile individual pairs from these images or profiles")
+    parser.add_argument("--loop-images", type=Path, nargs="*", default=[],
+                        help="Compile guarded straight loops from these local code images")
     parser.add_argument("images", type=Path, nargs="*")
     args = parser.parse_args()
     if args.shards < 0:
         parser.error("--shards must be nonnegative")
-    blocks = read_blocks(args.images, parser)
+    blocks = read_blocks(args.images, parser) | read_counted_loops(args.loop_images, parser)
     pair_blocks = blocks | read_blocks(args.pair_images, parser)
     pairs = {((word,), unit) for block, unit in pair_blocks for word in block}
     if not pairs:

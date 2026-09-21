@@ -1,13 +1,15 @@
-    static constexpr auto plan = ps2_vu_detail::planRegion(decodedRegion);
-    static constexpr uint8_t terminalBranch = ps2_vu_detail::regionTerminalBranch(decodedRegion);
-    if constexpr (plan.eligible)
+{
+    static constexpr auto loop = ps2_vu_detail::planCountedLoop(decodedRegion);
+    static constexpr auto plan = loop.body;
+    if constexpr (loop.eligible)
     {
-        const auto tryRegion = [&]() PS2_VU_INLINE_LAMBDA {
-            if constexpr (terminalBranch != 0u)
-                if (ps2_vu_detail::disableTerminalBranches)
-                    return false;
-            const uint64_t start = vu.m_cycle;
-            if (!ps2_vu_detail::regionBudgetFits(start, budgetEnd, plan.cycles) ||
+        const auto tryLoop = [&]() PS2_VU_INLINE_LAMBDA {
+            uint64_t start = vu.m_cycle;
+            const uint32_t startPC = vu.m_state.pc;
+            uint64_t sequenceBase = vu.m_nextWriteSequence;
+            uint64_t iterations = 0u;
+            bool branchTaken = false, everBranched = false;
+            if (ps2_vu_detail::disableCountedLoops || !ps2_vu_detail::regionBudgetFits(start, budgetEnd, plan.cycles) ||
                 vu.m_state.pc + sizeof...(words) * 8u > vu.m_cachedCodeSize || vu.m_stopRequested ||
                 vu.m_state.branchPending || vu.m_state.ebit || vu.m_state.haltAfterDelaySlot ||
                 vu.m_xgkick.active || vu.m_fdiv.valid || vu.m_activeStores || vu.m_activeAccWrites ||
@@ -29,24 +31,6 @@
             if (!ready)
                 return false;
 
-            std::array<uint32_t, 4> incomingClip{};
-            if constexpr (plan.readsClip)
-            {
-                incomingClip[0] = vu.m_state.clip;
-                // Incoming CLIP/FCSET entries retire before newly issued CLIP results.
-                for (unsigned offset = 1u; offset < 4u; ++offset)
-                {
-                    incomingClip[offset] = incomingClip[offset - 1u];
-                    const uint64_t cycle = start + offset;
-                    for (uint32_t active = vu.m_activeFlags & (3u << (2u * (cycle & 3u)));
-                         active != 0u; active &= active - 1u)
-                    {
-                        const auto &entry = vu.m_flagPipeline[std::countr_zero(active)];
-                        if (entry.readyCycle <= cycle && entry.writesClip)
-                            incomingClip[offset] = entry.clip;
-                    }
-                }
-            }
             ps2_vu_detail::retireRegionInputs(vu.m_state, start, vu.m_flagPipeline,
                 vu.m_vfWritePipeline, vu.m_viWritePipeline, vu.m_vfLatestWrite,
                 vu.m_viLatestWrite, vu.m_activeFlags, vu.m_activeVfWrites, vu.m_activeViWrites,
@@ -80,10 +64,10 @@
                 }
                 for (unsigned reg = 0; reg < 32u; ++reg)
                     for (unsigned lane = 0; lane < 4u; ++lane)
-                        if (plan.vfVisible[reg][lane] != reg)
+                        if ((plan.vfVisible[reg][lane] != reg || plan.vfLatest[reg][lane] != 0u))
                             vf(plan.vfVisible[reg][lane], lane);
                 for (unsigned reg = 0; reg < 16u; ++reg)
-                    if (plan.viVisible[reg] != reg)
+                    if ((plan.viVisible[reg] != reg || plan.viLatest[reg] != 0u))
                         vi(plan.viVisible[reg]);
                 for (unsigned lane = 0; lane < 4u; ++lane)
                     if (plan.accVisible[lane] != 32u)
@@ -111,12 +95,16 @@
                         entryVi[regs] = vu.m_state.vi[regs];
                 }()), ...);
             }(std::make_index_sequence<16u>{});
-            const float entryI = vu.m_state.i, entryQ = vu.m_state.q;
+            float entryI = vu.m_state.i;
+            const float entryQ = vu.m_state.q;
             std::array<std::array<float, 4>, sizeof...(words) * 2u> values{};
             std::array<int32_t, sizeof...(words)> integers{};
             std::array<ps2_vu_detail::RegionFlag, sizeof...(words)> flags{};
             uint32_t workingClip = vu.m_workingClip;
-            bool branchTaken = false;
+            uint32_t workingMac = vu.m_state.mac, workingStatus = vu.m_state.status;
+            uint32_t visibleClip = vu.m_state.clip;
+            auto *const loopData = vu.m_activeVuData;
+            const uint32_t loopDataSize = vu.m_activeVuDataSize;
             const auto readVf = [&]<uint16_t source, unsigned lane>() PS2_VU_INLINE_LAMBDA {
                 if constexpr (source == ps2_vu_detail::regionConstantZero)
                     return lane == 3u ? 1.0f : 0.0f;
@@ -151,14 +139,6 @@
                     return ps2_vu_detail::upper::normalizeOperand(
                         std::bit_cast<float>(decodedRegion[source - 1u].lower));
             };
-            const auto readClip = [&]<size_t index>() PS2_VU_INLINE_LAMBDA {
-                if constexpr (!decodedRegion[index].lowerUsage.readsClip)
-                    return uint32_t{0};
-                else if constexpr (plan.sources[index].clip != 0u)
-                    return flags[plan.sources[index].clip - 1u].clipValue;
-                else
-                    return incomingClip[std::min<unsigned>(plan.issue[index], 3u)];
-            };
             const auto issue = [&]<size_t index>() PS2_VU_INLINE_LAMBDA {
                 static constexpr auto source = plan.sources[index];
                 float fs[4], ft[4], acc[4], lowerFs[4];
@@ -171,32 +151,80 @@
                 }(std::make_index_sequence<4u>{});
                 ps2_vu_detail::RegionUpperInputs input{fs, ft, acc,
                     readI.template operator()<source.scalarI>(), entryQ};
+                flags[index] = {};
                 ps2_vu_detail::RegionUpperSink sink{values[index * 2u].data(), flags[index], workingClip};
                 ps2_vu_detail::upper::computeUpper(decodedRegion[index].upper, input, sink);
                 integers[index] = readVi.template operator()<source.viOld>();
                 ps2_vu_detail::RegionLowerInputs lowerInput{lowerFs,
-                    readVi.template operator()<source.viS>(), readVi.template operator()<source.viT>(),
-                    readClip.template operator()<index>()};
+                    readVi.template operator()<source.viS>(), readVi.template operator()<source.viT>()};
                 ps2_vu_detail::RegionLowerSink lowerSink{values[index * 2u + 1u].data(), integers[index]};
-                if constexpr (terminalBranch != 0u && index + 2u == sizeof...(words))
+                if constexpr (index == sizeof...(words) - 2u)
                 {
-                    const bool equal = static_cast<int16_t>(lowerInput.viS()) == static_cast<int16_t>(lowerInput.viT());
-                    branchTaken = terminalBranch == 0x28u ? equal : !equal;
+                    const bool equal = static_cast<int16_t>(readVi.template operator()<loop.branchS>()) ==
+                                       static_cast<int16_t>(readVi.template operator()<loop.branchT>());
+                    branchTaken = (decodedRegion[index].lower >> 25u) == 0x28u ? equal : !equal;
                 }
                 else if constexpr (!decodedRegion[index].iBit)
                     ps2_vu_detail::computeRegionLower(decodedRegion[index].lower, lowerInput, lowerSink,
-                                                    vu.m_activeVuData, vu.m_activeVuDataSize);
+                                                    loopData, loopDataSize);
             };
+            for (;;)
+            {
             [&]<size_t... indices>(std::index_sequence<indices...>) PS2_VU_INLINE_LAMBDA {
                 (issue.template operator()<indices>(), ...);
             }(std::make_index_sequence<sizeof...(words)>{});
 
-            const uint64_t sequenceBase = vu.m_nextWriteSequence;
+            ++iterations;
+            everBranched |= branchTaken;
             const uint64_t end = start + plan.cycles;
+            const uint64_t currentGeneration = unit == Unit::VU1
+                ? vu.m_activeMemory->getVU1CodeGeneration() : vu.m_activeMemory->getVU0CodeGeneration();
+            if (branchTaken && ps2_vu_detail::regionBudgetFits(end, budgetEnd, plan.cycles) &&
+                !vu.m_stopRequested && currentGeneration == vu.m_cachedCodeGeneration)
+            {
+                // Prior-iteration flags retire before this iteration can publish any new ones.
+                for (const auto &flag : flags)
+                {
+                    if (flag.fmac)
+                    {
+                        workingMac = flag.mac;
+                        const uint32_t current = flag.status & 15u;
+                        workingStatus = (workingStatus & 0xff0u) | current | ((current | flag.extraSticky) << 6u);
+                    }
+                    if (flag.clip)
+                        visibleClip = flag.clipValue;
+                }
+                [&]<size_t... indices>(std::index_sequence<indices...>) PS2_VU_INLINE_LAMBDA {
+                    (([&]() PS2_VU_INLINE_LAMBDA {
+                        constexpr unsigned reg = indices / 4u, lane = indices % 4u;
+                        if constexpr ((entryReads.vf[reg] & (1u << lane)) != 0u)
+                        {
+                            if constexpr (reg < 32u)
+                                entryVf[reg][lane] = readVf.template operator()<loop.vfNext[reg][lane], lane>();
+                            else
+                                entryVf[reg][lane] = readVf.template operator()<plan.accVisible[lane], lane>();
+                        }
+                    }()), ...);
+                }(std::make_index_sequence<132u>{});
+                [&]<size_t... regs>(std::index_sequence<regs...>) PS2_VU_INLINE_LAMBDA {
+                    (([&]() PS2_VU_INLINE_LAMBDA {
+                        if constexpr (entryReads.vi[regs])
+                            entryVi[regs] = readVi.template operator()<loop.viNext[regs]>();
+                    }()), ...);
+                }(std::make_index_sequence<16u>{});
+                if constexpr (plan.scalarI != 0u)
+                    entryI = readI.template operator()<plan.scalarI>();
+                sequenceBase += plan.sequences;
+                start = end;
+                continue;
+            }
+            vu.m_state.mac = workingMac;
+            vu.m_state.status = workingStatus;
+            vu.m_state.clip = visibleClip;
             constexpr unsigned last = sizeof...(words) - 1u;
             const int32_t branchOld = readVi.template operator()<plan.sources[last].viOld>();
             const auto publishVf = [&]<size_t reg, size_t lane>() PS2_VU_INLINE_LAMBDA {
-                if constexpr (plan.vfVisible[reg][lane] != reg)
+                if constexpr ((plan.vfVisible[reg][lane] != reg || plan.vfLatest[reg][lane] != 0u))
                     vu.m_state.vf[reg][lane] = readVf.template operator()<plan.vfVisible[reg][lane], lane>();
                 if constexpr (plan.vfLatest[reg][lane] != 0u)
                 {
@@ -209,7 +237,7 @@
             }(std::make_index_sequence<128u>{});
             [&]<size_t... regs>(std::index_sequence<regs...>) PS2_VU_INLINE_LAMBDA {
                 (([&]() PS2_VU_INLINE_LAMBDA {
-                    if constexpr (plan.viVisible[regs] != regs)
+                    if constexpr ((plan.viVisible[regs] != regs || plan.viLatest[regs] != 0u))
                         vu.m_state.vi[regs] = readVi.template operator()<plan.viVisible[regs]>();
                     if constexpr (plan.viLatest[regs] != 0u)
                     {
@@ -295,32 +323,21 @@
                 vu.m_state.i = readI.template operator()<plan.scalarI>();
             vu.m_currentUpperInstruction = decodedRegion[last].upper;
             vu.m_cycle = vu.m_state.cycles = end;
-            if (branchTaken)
+            if (everBranched)
             {
-                constexpr uint32_t instruction = decodedRegion[sizeof...(words) - 2u].lower;
-                constexpr int32_t displacement = (static_cast<int32_t>(instruction << 21u) >> 21u) * 8;
-                vu.m_state.branchTarget = (vu.m_state.pc + (sizeof...(words) - 1u) * 8u + displacement) & vu.microAddressMask();
+                vu.m_state.branchTarget = startPC;
                 vu.m_state.branchDelay = 0u;
-                vu.m_state.pc = vu.m_state.branchTarget;
             }
-            else
-            {
-                vu.m_state.pc += sizeof...(words) * 8u;
-                if (vu.m_state.pc == vu.m_cachedCodeSize)
-                    vu.m_state.pc = 0u;
-            }
-            vu.m_compiledPairsExecuted += sizeof...(words);
+            vu.m_state.pc = branchTaken ? startPC : startPC + sizeof...(words) * 8u;
+            if (vu.m_state.pc == vu.m_cachedCodeSize)
+                vu.m_state.pc = 0u;
+            vu.m_compiledPairsExecuted += sizeof...(words) * iterations;
+            if (ps2_vu_detail::profileCountedLoops)
+                ps2_vu_detail::countedLoopPairs += sizeof...(words) * iterations;
             return true;
-        };
-        if (tryRegion())
-        {
-            if (ps2_vu_detail::profileRegions)
-            {
-                ps2_vu_detail::regionCounters.accepted[unit == Unit::VU1 ? 1u : 0u] += sizeof...(words);
-                ps2_vu_detail::regionCounters.acceptedByLength[sizeof...(words)][unit == Unit::VU1 ? 1u : 0u] += sizeof...(words);
-                if constexpr (terminalBranch != 0u)
-                    ps2_vu_detail::terminalBranchPairs += sizeof...(words);
             }
+        };
+        if (tryLoop())
             return false;
-        }
     }
+}
