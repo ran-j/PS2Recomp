@@ -13,7 +13,7 @@ inline constexpr uint16_t regionConstantZero = 0xffffu;
 
 struct RegionSources {
     std::array<uint16_t, 4> fs{}, ft{}, acc{}, lowerFs{}, lowerFt{};
-    uint16_t viS{}, viT{}, viOld{}, scalarI{}, clip{};
+    uint16_t viS{}, viT{}, viOld{}, scalarI{}, scalarQ{}, clip{};
 };
 
 struct RegionWrite {
@@ -26,6 +26,8 @@ struct RegionPlan {
     bool eligible = N >= 4u && N <= 16u;
     bool readsClip = false;
     uint16_t cycles{}, sequences{}, scalarI{};
+    uint16_t scalarQ{}, pendingQ{};
+    std::array<uint16_t, N> qReady{};
     std::array<uint16_t, N> issue{};
     std::array<RegionSources, N> sources{};
     std::array<RegionWrite, N> upper{}, lower{}, vi{};
@@ -50,6 +52,12 @@ constexpr bool regionLowerSupported(uint32_t lower)
                                (special >= 0x3cu && special <= 0x3fu)))));
 }
 
+constexpr bool regionDiv(uint32_t lower)
+{
+    return (lower >> 25u) == 0x40u && (lower & 63u) >= 0x3cu &&
+        ((lower & 3u) | ((lower >> 4u) & 0x7cu)) == 0x38u;
+}
+
 template <typename Decoded, size_t N>
 constexpr uint8_t regionTerminalBranch(const std::array<Decoded, N> &decoded)
 {
@@ -64,9 +72,10 @@ constexpr uint8_t regionTerminalBranch(const std::array<Decoded, N> &decoded)
 }
 
 template <typename Decoded, size_t N>
-constexpr RegionPlan<N> planRegion(const std::array<Decoded, N> &decoded)
+constexpr RegionPlan<N> planRegion(const std::array<Decoded, N> &decoded, bool allowDiv = false)
 {
     RegionPlan<N> plan;
+    plan.eligible = N >= 4u && N <= (allowDiv ? 32u : 16u);
     auto vfPending = plan.vfVisible;
     auto viPending = plan.viVisible;
     auto accPending = plan.accVisible;
@@ -82,6 +91,8 @@ constexpr RegionPlan<N> planRegion(const std::array<Decoded, N> &decoded)
     accPending.fill(32u);
     plan.firstViWrite.fill(255u);
     const auto retire = [&](uint16_t cycle) {
+        if (plan.pendingQ != 0u && plan.qReady[plan.pendingQ - 1u] <= cycle)
+            plan.scalarQ = plan.pendingQ;
         for (unsigned reg = 1; reg < 32; ++reg)
             for (unsigned lane = 0; lane < 4; ++lane)
                 if (plan.vfReady[reg][lane] <= cycle)
@@ -96,11 +107,12 @@ constexpr RegionPlan<N> planRegion(const std::array<Decoded, N> &decoded)
     for (unsigned index = 0; index < N; ++index)
     {
         const auto &pair = decoded[index];
+        const bool div = !pair.iBit && regionDiv(pair.lower);
         const uint32_t branchOpcode = pair.lower >> 25u;
         const bool terminalBranch = !pair.iBit && index + 2u == N &&
             (branchOpcode == 0x28u || branchOpcode == 0x29u);
         if (pair.eBit || pair.mBit || pair.dBit || pair.tBit || pair.upperUsage.reserved ||
-            (!pair.iBit && (pair.lowerUsage.reserved || (!terminalBranch && !regionLowerSupported(pair.lower)))))
+            (!pair.iBit && (pair.lowerUsage.reserved || (!terminalBranch && !regionLowerSupported(pair.lower) && !(allowDiv && div)))))
             plan.eligible = false;
         const uint32_t upperOp = pair.upper & 63u;
         const uint32_t upperSpecial = (pair.upper & 3u) | ((pair.upper >> 4u) & 0x7cu);
@@ -115,9 +127,12 @@ constexpr RegionPlan<N> planRegion(const std::array<Decoded, N> &decoded)
                 (lowerSpecial == 0x30u || lowerSpecial == 0x31u || lowerSpecial == 0x35u ||
                  lowerSpecial == 0x37u || lowerSpecial == 0x3cu)));
         // The scalar oracle exposes a transient upper VF0 write to lower reads.
-        if (!pair.iBit && upperWritesZero && lowerReadsZero)
+        if (!pair.iBit && upperWritesZero && (lowerReadsZero ||
+            (div && (((pair.lower >> 11u) & 31u) == 0u || ((pair.lower >> 16u) & 31u) == 0u))))
             plan.eligible = false;
         uint16_t cycle = plan.cycles;
+        if (allowDiv && div && plan.pendingQ != 0u)
+            cycle = std::max(cycle, plan.qReady[plan.pendingQ - 1u]);
         for (const auto *usage : {&pair.upperUsage, &pair.lowerUsage})
         {
             for (unsigned readIndex = 0; readIndex < usage->vfReadCount; ++readIndex)
@@ -141,6 +156,7 @@ constexpr RegionPlan<N> planRegion(const std::array<Decoded, N> &decoded)
         source.ft = plan.vfVisible[(pair.upper >> 16u) & 31u];
         source.acc = plan.accVisible;
         source.scalarI = plan.scalarI;
+        source.scalarQ = plan.scalarQ;
         if (pair.lowerUsage.readsClip)
         {
             plan.readsClip = true;
@@ -204,6 +220,11 @@ constexpr RegionPlan<N> planRegion(const std::array<Decoded, N> &decoded)
         plan.cycles = cycle + 1u;
         if (pair.iBit)
             plan.scalarI = index + 1u;
+        if (allowDiv && div)
+        {
+            plan.pendingQ = index + 1u;
+            plan.qReady[index] = cycle + 7u;
+        }
         plan.vfVisible[0].fill(regionConstantZero);
         plan.viVisible[0] = regionConstantZero;
     }

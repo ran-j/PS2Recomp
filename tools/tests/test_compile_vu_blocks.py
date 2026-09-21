@@ -40,7 +40,7 @@ class CompileVuBlocksTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             script = Path(__file__).resolve().parents[1] / "compile_vu_blocks.py"
-            for pairs in (4, 7, 16):
+            for pairs in (4, 7, 16, 17, 31, 32):
                 words = [0x000002ff8000033c] * pairs  # Authored NOP pairs.
                 words[-2] = (0x000002ff << 32) | (0x29 << 25) | (2 << 16) | (3 << 11) | ((1 - pairs) & 0x7ff)
                 words[-1] = (0x000002ff << 32) | 0x8000037d | (8 << 21) | (2 << 16) | (4 << 11)
@@ -162,7 +162,7 @@ class CompileVuBlocksTests(unittest.TestCase):
             script = Path(__file__).resolve().parents[1] / "compile_vu_blocks.py"
             for header, words in [(1, "1 2 3 4 5 6 7 8"), (2, "1 2 3 4 5"),
                                   (2, "1 2 3 10000000000000000"), (2, "1 2 3 -1"),
-                                  (3, "1 2 3"), (3, " ".join(["1"] * 17)),
+                                  (3, "1 2 3"), (3, " ".join(["1"] * 33)),
                                   (3, "1 2 3 10000000000000000"), (3, "1 2 3 -1")]:
                 profile.write_text(f"VU-BLOCKS {header}\n1 {words}\n")
                 result = subprocess.run([sys.executable, str(script), "--output", str(output),

@@ -14,9 +14,10 @@ constexpr bool loopLowerSupported(uint32_t lower)
 {
     const uint32_t opcode = lower >> 25u, direct = lower & 0x3fu;
     const uint32_t special = (lower & 3u) | ((lower >> 4u) & 0x7cu);
-    // Loop-carried flag reads need their own timeline before becoming eligible.
+    // Keep unsupported flag writers and internal branches on the exact fallback.
     return lower == 0u || lower == 0x8000033cu || opcode == 0u || opcode == 1u ||
         opcode == 4u || opcode == 5u || opcode == 8u || opcode == 9u ||
+        opcode == 0x10u || opcode == 0x12u || opcode == 0x13u || opcode == 0x1cu ||
         (opcode == 0x40u && (direct == 0x30u || direct == 0x31u || direct == 0x32u ||
             direct == 0x34u || direct == 0x35u ||
             (direct >= 0x3cu && ((special >= 0x30u && special <= 0x31u) ||
@@ -31,13 +32,14 @@ struct CountedLoopPlan {
     std::array<std::array<uint16_t, 4>, 32> vfNext{};
     std::array<uint16_t, 16> viNext{};
     uint16_t branchS{}, branchT{};
+    uint16_t firstDiv = N;
 };
 
 template <typename Decoded, size_t N>
 constexpr CountedLoopPlan<N> planCountedLoop(const std::array<Decoded, N> &decoded)
 {
     CountedLoopPlan<N> loop;
-    if constexpr (N < 4u || N > 16u)
+    if constexpr (N < 4u || N > 32u)
         return loop;
     else
     {
@@ -52,7 +54,7 @@ constexpr CountedLoopPlan<N> planCountedLoop(const std::array<Decoded, N> &decod
         auto straight = decoded;
         straight[branchIndex].lower = 0u;
         straight[branchIndex].lowerUsage = {};
-        const auto supported = planRegion(straight);
+        const auto supported = planRegion(straight, true);
         if (!supported.eligible)
             return loop;
         for (unsigned index = 0; index < N; ++index)
@@ -61,12 +63,17 @@ constexpr CountedLoopPlan<N> planCountedLoop(const std::array<Decoded, N> &decod
                 decoded[index].dBit || decoded[index].tBit)
                 return loop;
             if (!decoded[index].iBit && index != branchIndex &&
-                !loopLowerSupported(decoded[index].lower))
+                !loopLowerSupported(decoded[index].lower) && !regionDiv(decoded[index].lower))
                 return loop;
+            if (!decoded[index].iBit && regionDiv(decoded[index].lower))
+                loop.firstDiv = std::min(loop.firstDiv, static_cast<uint16_t>(index));
         }
-        loop.body = planRegion(decoded);
+        loop.body = planRegion(decoded, true);
         const auto &plan = loop.body;
         if (plan.cycles < 4u)
+            return loop;
+        if (plan.pendingQ != 0u && plan.qReady[plan.pendingQ - 1u] >
+            plan.cycles + plan.issue[loop.firstDiv])
             return loop;
         // A pending entry value and the visible entry value share one local phi.
         // Keep that representation only when the previous iteration's final write

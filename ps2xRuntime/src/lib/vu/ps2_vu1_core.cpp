@@ -332,7 +332,7 @@ VU1Interpreter::CompiledBlock VU1Interpreter::findCompiledBlock(
 #ifdef PS2X_VU_AOT_INCLUDE
     struct Entry {
         Unit unit;
-        std::array<uint64_t, 16> words;
+        std::array<uint64_t, 32> words;
         CompiledBlock run;
         uint32_t bytes;
     };

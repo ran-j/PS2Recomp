@@ -1,6 +1,7 @@
 {
     static constexpr auto loop = ps2_vu_detail::planCountedLoop(decodedRegion);
     static constexpr auto plan = loop.body;
+    static constexpr bool hasDiv = plan.pendingQ != 0u;
     if constexpr (loop.eligible)
     {
         const auto tryLoop = [&]() PS2_VU_INLINE_LAMBDA {
@@ -12,7 +13,7 @@
             if (ps2_vu_detail::disableCountedLoops || !ps2_vu_detail::regionBudgetFits(start, budgetEnd, plan.cycles) ||
                 vu.m_state.pc + sizeof...(words) * 8u > vu.m_cachedCodeSize || vu.m_stopRequested ||
                 vu.m_state.branchPending || vu.m_state.ebit || vu.m_state.haltAfterDelaySlot ||
-                vu.m_xgkick.active || vu.m_fdiv.valid || vu.m_activeStores || vu.m_activeAccWrites ||
+                vu.m_xgkick.active || (!hasDiv && vu.m_fdiv.valid) || vu.m_activeStores || vu.m_activeAccWrites ||
                 !vu.m_activeVuData || vu.m_activeVuDataSize < 16u)
                 return false;
             const uint64_t generation = unit == Unit::VU1
@@ -23,7 +24,8 @@
                 if (entry.valid)
                     return false;
             for (uint32_t active = vu.m_activeFlags; active != 0u; active &= active - 1u)
-                if (vu.m_flagPipeline[std::countr_zero(active)].readyCycle > start + 3u)
+                if (vu.m_flagPipeline[std::countr_zero(active)].readyCycle > start + 3u ||
+                    (hasDiv && vu.m_fdiv.valid && vu.m_flagPipeline[std::countr_zero(active)].writesSticky))
                     return false;
             const bool ready = [&]<size_t... indices>(std::index_sequence<indices...>) PS2_VU_INLINE_LAMBDA {
                 return ((vu.calculatePairReadyCycleInline(decodedRegion[indices]) <= start + plan.issue[indices]) && ...);
@@ -31,6 +33,23 @@
             if (!ready)
                 return false;
 
+            std::array<uint32_t, 4> incomingClip{};
+            if constexpr (plan.readsClip)
+            {
+                incomingClip[0] = vu.m_state.clip;
+                for (unsigned offset = 1u; offset < 4u; ++offset)
+                {
+                    incomingClip[offset] = incomingClip[offset - 1u];
+                    const uint64_t cycle = start + offset;
+                    for (uint32_t active = vu.m_activeFlags & (3u << (2u * (cycle & 3u)));
+                         active != 0u; active &= active - 1u)
+                    {
+                        const auto &entry = vu.m_flagPipeline[std::countr_zero(active)];
+                        if (entry.readyCycle <= cycle && entry.writesClip)
+                            incomingClip[offset] = entry.clip;
+                    }
+                }
+            }
             ps2_vu_detail::retireRegionInputs(vu.m_state, start, vu.m_flagPipeline,
                 vu.m_vfWritePipeline, vu.m_viWritePipeline, vu.m_vfLatestWrite,
                 vu.m_viLatestWrite, vu.m_activeFlags, vu.m_activeVfWrites, vu.m_activeViWrites,
@@ -96,7 +115,13 @@
                 }()), ...);
             }(std::make_index_sequence<16u>{});
             float entryI = vu.m_state.i;
-            const float entryQ = vu.m_state.q;
+            float entryQ = vu.m_state.q;
+            float entryPendingQ = vu.m_fdiv.value;
+            uint64_t entryPendingReady = vu.m_fdiv.readyCycle;
+            uint32_t entryPendingDi = vu.m_fdiv.statusDi;
+            bool entryPending = vu.m_fdiv.valid;
+            struct DivValue { float value{}; uint32_t statusDi{}; };
+            std::array<DivValue, sizeof...(words)> divisions{};
             std::array<std::array<float, 4>, sizeof...(words) * 2u> values{};
             std::array<int32_t, sizeof...(words)> integers{};
             std::array<ps2_vu_detail::RegionFlag, sizeof...(words)> flags{};
@@ -139,6 +164,22 @@
                     return ps2_vu_detail::upper::normalizeOperand(
                         std::bit_cast<float>(decodedRegion[source - 1u].lower));
             };
+            const auto readQ = [&]<uint16_t source, uint16_t offset>() PS2_VU_INLINE_LAMBDA {
+                if constexpr (source != 0u)
+                    return divisions[source - 1u].value;
+                else if constexpr (hasDiv)
+                    return entryPending && entryPendingReady <= start + offset ? entryPendingQ : entryQ;
+                else
+                    return entryQ;
+            };
+            const auto readClip = [&]<size_t index>() PS2_VU_INLINE_LAMBDA {
+                if constexpr (!decodedRegion[index].lowerUsage.readsClip)
+                    return uint32_t{0};
+                else if constexpr (plan.sources[index].clip != 0u)
+                    return flags[plan.sources[index].clip - 1u].clipValue;
+                else
+                    return incomingClip[std::min<unsigned>(plan.issue[index], 3u)];
+            };
             const auto issue = [&]<size_t index>() PS2_VU_INLINE_LAMBDA {
                 static constexpr auto source = plan.sources[index];
                 float fs[4], ft[4], acc[4], lowerFs[4];
@@ -150,13 +191,15 @@
                       values[index * 2u + 1u][lanes] = readVf.template operator()<source.lowerFt[lanes], lanes>()), ...);
                 }(std::make_index_sequence<4u>{});
                 ps2_vu_detail::RegionUpperInputs input{fs, ft, acc,
-                    readI.template operator()<source.scalarI>(), entryQ};
+                    readI.template operator()<source.scalarI>(),
+                    readQ.template operator()<source.scalarQ, plan.issue[index]>()};
                 flags[index] = {};
                 ps2_vu_detail::RegionUpperSink sink{values[index * 2u].data(), flags[index], workingClip};
                 ps2_vu_detail::upper::computeUpper(decodedRegion[index].upper, input, sink);
                 integers[index] = readVi.template operator()<source.viOld>();
                 ps2_vu_detail::RegionLowerInputs lowerInput{lowerFs,
-                    readVi.template operator()<source.viS>(), readVi.template operator()<source.viT>()};
+                    readVi.template operator()<source.viS>(), readVi.template operator()<source.viT>(),
+                    readClip.template operator()<index>()};
                 ps2_vu_detail::RegionLowerSink lowerSink{values[index * 2u + 1u].data(), integers[index]};
                 if constexpr (index == sizeof...(words) - 2u)
                 {
@@ -164,9 +207,45 @@
                                        static_cast<int16_t>(readVi.template operator()<loop.branchT>());
                     branchTaken = (decodedRegion[index].lower >> 25u) == 0x28u ? equal : !equal;
                 }
+                else if constexpr (plan.qReady[index] != 0u)
+                {
+                    constexpr uint32_t instruction = decodedRegion[index].lower;
+                    const float num = vu.normalizeOperand(lowerFs[(instruction >> 21u) & 3u]);
+                    const float den = vu.normalizeOperand(values[index * 2u + 1u][(instruction >> 23u) & 3u]);
+                    auto &division = divisions[index];
+                    division.statusDi = 0u;
+                    if (den == 0.0f)
+                    {
+                        division.statusDi = num == 0.0f ? 0x10u : 0x20u;
+                        division.value = std::signbit(num) != std::signbit(den)
+                            ? -std::numeric_limits<float>::max() : std::numeric_limits<float>::max();
+                    }
+                    else
+                        division.value = num / den;
+                    uint32_t ignoredFlags = 0u;
+                    division.value = vu.normalizeResult(division.value, ignoredFlags);
+                }
                 else if constexpr (!decodedRegion[index].iBit)
                     ps2_vu_detail::computeRegionLower(decodedRegion[index].lower, lowerInput, lowerSink,
                                                     loopData, loopDataSize);
+            };
+            const auto retireDivStatus = [&]<bool includePending>() PS2_VU_INLINE_LAMBDA {
+                const auto apply = [&](uint32_t statusDi) PS2_VU_INLINE_LAMBDA {
+                    const uint32_t current = statusDi & 0x30u;
+                    workingStatus = (workingStatus & 0xfcfu) | current | (current << 6u);
+                };
+                if constexpr (hasDiv)
+                {
+                    if (entryPending && entryPendingReady <= start + plan.cycles)
+                        apply(entryPendingDi);
+                    [&]<size_t... indices>(std::index_sequence<indices...>) PS2_VU_INLINE_LAMBDA {
+                        (([&]() PS2_VU_INLINE_LAMBDA {
+                            if constexpr (plan.qReady[indices] != 0u &&
+                                (includePending || plan.qReady[indices] <= plan.cycles))
+                                apply(divisions[indices].statusDi);
+                        }()), ...);
+                    }(std::make_index_sequence<sizeof...(words)>{});
+                }
             };
             for (;;)
             {
@@ -182,6 +261,20 @@
             if (branchTaken && ps2_vu_detail::regionBudgetFits(end, budgetEnd, plan.cycles) &&
                 !vu.m_stopRequested && currentGeneration == vu.m_cachedCodeGeneration)
             {
+                retireDivStatus.template operator()<true>();
+                if constexpr (plan.readsClip)
+                {
+                    // The last three CLIP results can cross the loop backedge.
+                    const uint32_t entryClip = incomingClip[3];
+                    for (unsigned offset = 0u; offset < 4u; ++offset)
+                    {
+                        uint32_t clip = entryClip;
+                        for (unsigned index = 0u; index < sizeof...(words); ++index)
+                            if (flags[index].clip && plan.issue[index] + 4u <= plan.cycles + offset)
+                                clip = flags[index].clipValue;
+                        incomingClip[offset] = clip;
+                    }
+                }
                 // Prior-iteration flags retire before this iteration can publish any new ones.
                 for (const auto &flag : flags)
                 {
@@ -214,9 +307,32 @@
                 }(std::make_index_sequence<16u>{});
                 if constexpr (plan.scalarI != 0u)
                     entryI = readI.template operator()<plan.scalarI>();
+                if constexpr (hasDiv)
+                {
+                    entryQ = readQ.template operator()<plan.scalarQ, plan.cycles>();
+                    constexpr unsigned lastDiv = plan.pendingQ - 1u;
+                    entryPending = plan.qReady[lastDiv] > plan.cycles;
+                    entryPendingQ = divisions[lastDiv].value;
+                    entryPendingDi = divisions[lastDiv].statusDi;
+                    entryPendingReady = start + plan.qReady[lastDiv];
+                }
                 sequenceBase += plan.sequences;
                 start = end;
                 continue;
+            }
+            retireDivStatus.template operator()<false>();
+            if constexpr (hasDiv)
+            {
+                vu.m_state.q = readQ.template operator()<plan.scalarQ, plan.cycles>();
+                vu.m_fdiv = {};
+                constexpr unsigned lastDiv = plan.pendingQ - 1u;
+                if constexpr (plan.qReady[lastDiv] > plan.cycles)
+                {
+                    vu.m_fdiv.valid = true;
+                    vu.m_fdiv.readyCycle = start + plan.qReady[lastDiv];
+                    vu.m_fdiv.value = divisions[lastDiv].value;
+                    vu.m_fdiv.statusDi = divisions[lastDiv].statusDi;
+                }
             }
             vu.m_state.mac = workingMac;
             vu.m_state.status = workingStatus;

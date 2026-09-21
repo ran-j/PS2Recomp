@@ -15,7 +15,7 @@ def read_blocks(paths, parser):
             loops = data.startswith(b"VU-BLOCKS 3\n")
             for line in data.decode("ascii").splitlines()[1:]:
                 fields = line.split()
-                if len(fields) not in (range(5, 18) if loops else (5, 9, 13, 17) if extended else (5,)):
+                if len(fields) not in (range(5, 34) if loops else (5, 9, 13, 17) if extended else (5,)):
                     parser.error(f"{path}: invalid block profile record")
                 try:
                     unit = int(fields[0])
@@ -56,7 +56,7 @@ def read_counted_loops(paths, parser):
                 continue
             offset = (branch & 0x7ff) - (0x800 if branch & 0x400 else 0)
             head = index + 1 + offset
-            if head < 0 or not 4 <= index + 2 - head <= 16:
+            if head < 0 or not 4 <= index + 2 - head <= 32:
                 continue
             if any(not word >> 63 and ((word & 0xffffffff) >> 25) in
                    (0x20, 0x21, 0x24, 0x25, 0x28, 0x29, 0x2c, 0x2d, 0x2e, 0x2f)

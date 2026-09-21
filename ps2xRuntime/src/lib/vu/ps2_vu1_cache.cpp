@@ -17,8 +17,8 @@ void VU1Interpreter::rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t cod
         const auto &old = m_decodedCodeCache[i];
         const bool changed = !reusable || old.lower != words[0] || old.upper != words[1];
         // A later edit must invalidate every native region that can contain it.
-        // The registry supports regions of up to sixteen pairs without code wrap.
-        changedWindow = ((changedWindow << 1u) | static_cast<uint32_t>(changed)) & 0xffffu;
+        // The registry supports regions of up to thirty-two pairs without code wrap.
+        changedWindow = (changedWindow << 1u) | static_cast<uint32_t>(changed);
         if (changed)
             m_decodedCodeCache[i] = decodeInstructionPair(vuCode, i * 8u);
         if (changedWindow != 0u)

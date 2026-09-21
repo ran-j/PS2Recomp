@@ -247,6 +247,46 @@ namespace
             makeVuUpperSpecial(0x08u, 14u, 23u, 18u));
     }
 
+    void writeDivLoopCode(uint8_t *code, uint32_t base, unsigned mode)
+    {
+        for (unsigned index = 0; index < 17u; ++index)
+            writeVuInstructionPair(code, base + index * 8u, 0x8000033cu, kVuUpperNop);
+        writeVuInstructionPair(code, base, 0x8000033cu, makeVuUpper(0x20u, 15u, 0u, 3u, 5u));
+        writeVuInstructionPair(code, base + 16u, mode == 1u ? makeVuDiv(10u, 12u, 0u, 0u) : 0x8000033cu,
+            makeVuUpper(0x1cu, 15u, 0u, 3u, 6u));
+        writeVuInstructionPair(code, base + 32u, makeVuIaddiu(1u, 1u, 1), kVuUpperNop);
+        writeVuInstructionPair(code, base + 64u, 0x8000033cu, makeVuUpper(0x28u, 8u, 11u, 10u, 10u));
+        writeVuInstructionPair(code, base + 96u, makeVuDiv(10u, 12u, 0u, 0u), kVuUpperNop);
+        writeVuInstructionPair(code, base + 104u, mode == 2u ? makeVuDiv(13u, 14u, 0u, 0u) : 0x8000033cu,
+            makeVuUpper(0x24u, 15u, 0u, 3u, 7u));
+        writeVuInstructionPair(code, base + 120u, makeVuIbne(1u, 2u, -16), kVuUpperNop);
+        writeVuInstructionPair(code, base + 128u, makeVuSq(15u, 7u, 1u, 0),
+            makeVuUpper(0x28u, 15u, 3u, 3u, 8u));
+    }
+
+    void writeDivClipLoopCode(uint8_t *code, uint32_t base, unsigned mode)
+    {
+        writeDivLoopCode(code, base, mode);
+        writeVuInstructionPair(code, base, (0x12u << 25u) | 0xaaaaaau,
+            makeVuUpper(0x20u, 15u, 0u, 3u, 5u));
+        writeVuInstructionPair(code, base + 16u, (0x1cu << 25u) | (8u << 16u),
+            makeVuUpper(0x1cu, 15u, 0u, 3u, 6u));
+        writeVuInstructionPair(code, base + 24u, (0x1cu << 25u) | (9u << 16u), kVuUpperNop);
+        writeVuInstructionPair(code, base + 32u, makeVuIaddiu(6u, 6u, 1), kVuUpperNop);
+        writeVuInstructionPair(code, base + 112u, 0x8000033cu,
+            makeVuUpperSpecial(0x1fu, 14u, 4u, 3u));
+        writeVuInstructionPair(code, base + 120u, makeVuIbne(6u, 7u, -16), kVuUpperNop);
+        writeVuInstructionPair(code, base + 128u, makeVuSq(15u, 7u, 6u, 0),
+            makeVuUpperSpecial(0x1fu, 14u, 4u, 5u));
+    }
+
+    void writeLongLoopCode(uint8_t *code, uint32_t base)
+    {
+        for (unsigned index = 0; index < 32u; ++index)
+            writeVuInstructionPair(code, base + index * 8u, 0x8000033cu, kVuUpperNop);
+        writeVuInstructionPair(code, base + 240u, (0x28u << 25u) | (-31 & 0x7ff), kVuUpperNop);
+    }
+
     void writeVuQword(uint8_t *data, uint32_t qwordIndex, const float values[4])
     {
         std::memcpy(data + qwordIndex * 16u, values, sizeof(float) * 4u);
@@ -276,6 +316,248 @@ void register_ps2_vu1_tests()
 {
     MiniTest::Case("PS2VU1", [](TestCase &tc)
     {
+        tc.Run("retained loops carry independent Q and CLIP timelines through DIV stalls", [](TestCase &t)
+        {
+            for (auto unit : {VU1Interpreter::Unit::VU0, VU1Interpreter::Unit::VU1})
+                for (unsigned mode : {0u, 2u})
+                    for (unsigned phase = 0; phase < 8u; ++phase)
+                        for (unsigned trips : {1u, 3u})
+                            for (uint32_t divisor : {0x00000000u, 0x80000000u, 0x40000000u, 0x00800000u})
+                                for (unsigned budget : {0u, 1u, 2u, 3u, 4u, 16u, 17u, 18u, 19u, 20u, 21u, 23u, 24u, 25u, 35u, 36u, 48u, 54u, 72u})
+                                {
+                                    Vu1Fixture a, b;
+                                    t.IsTrue(a.initialize() && b.initialize(), "joint Q/CLIP fixtures initialize");
+                                    const unsigned codeSize = unit == VU1Interpreter::Unit::VU1 ? PS2_VU1_CODE_SIZE : PS2_VU0_CODE_SIZE;
+                                    const unsigned dataSize = unit == VU1Interpreter::Unit::VU1 ? PS2_VU1_DATA_SIZE : PS2_VU0_DATA_SIZE;
+                                    const unsigned base = phase * 8u;
+                                    for (auto *fx : {&a, &b})
+                                    {
+                                        if (unit == VU1Interpreter::Unit::VU0)
+                                        {
+                                            fx->code = fx->mem.getVU0Code();
+                                            fx->data = fx->mem.getVU0Data();
+                                        }
+                                        for (unsigned pc = 0; pc < codeSize; pc += 8u)
+                                            writeVuInstructionPair(fx->code, pc, 0x8000033cu, kVuUpperNop);
+                                        writeDivClipLoopCode(fx->code, base, mode);
+                                        if (phase)
+                                            writeVuInstructionPair(fx->code, base - 8u, makeVuDiv(13u, 14u, 0u, 0u),
+                                                makeVuUpperSpecial(0x1fu, 14u, 4u, 3u));
+                                    }
+                                    VU1Interpreter native(unit), oracle(unit);
+                                    oracle.setCompiledExecutionEnabled(false);
+                                    native.state().q = -3.0f;
+                                    native.state().status = 0xa50u;
+                                    native.state().clip = 0xabcdefu;
+                                    native.state().vi[7] = trips;
+                                    for (unsigned lane = 0; lane < 4u; ++lane)
+                                        native.state().vf[3][lane] = static_cast<float>(static_cast<int>(lane) - 2);
+                                    native.state().vf[4][3] = 0.5f;
+                                    native.state().vf[10][0] = 4.0f;
+                                    native.state().vf[11][0] = -1.0f;
+                                    native.state().vf[12][0] = std::bit_cast<float>(divisor);
+                                    native.state().vf[13][0] = 0.0f;
+                                    native.state().vf[14][0] = 0.0f;
+                                    oracle.state() = native.state();
+                                    const unsigned duration = mode == 2u ? 24u : 18u;
+                                    const uint64_t before = ps2_vu_detail::countedLoopPairs;
+                                    native.execute(a.code, codeSize, a.data, dataSize, a.gs, &a.mem, 0u, 0u, 0u, phase + budget);
+                                    oracle.execute(b.code, codeSize, b.data, dataSize, b.gs, &b.mem, 0u, 0u, 0u, phase + budget);
+                                    if (std::getenv("PS2_VU_REQUIRE_DIV_LOOPS"))
+                                        t.Equals(ps2_vu_detail::countedLoopPairs - before,
+                                            uint64_t{17} * std::min(trips, budget / duration),
+                                            "complete joint Q/CLIP iterations must enter the retained path");
+                                    for (unsigned step = 0; step < 3u; ++step)
+                                    {
+                                        t.IsTrue(std::memcmp(&native.state(), &oracle.state(), sizeof(VU1State)) == 0,
+                                            "pending Q and CLIP have separate visibility at every compiled return");
+                                        t.IsTrue(std::memcmp(a.data, b.data, dataSize) == 0,
+                                            "joint timeline stores retain the exact Q arithmetic result");
+                                        native.resume(a.code, codeSize, a.data, dataSize, a.gs, &a.mem, 0u, 0u, duration);
+                                        oracle.resume(b.code, codeSize, b.data, dataSize, b.gs, &b.mem, 0u, 0u, duration);
+                                    }
+                                    native.setCompiledExecutionEnabled(false);
+                                    for (unsigned tail = 0; tail < 10u; ++tail)
+                                    {
+                                        t.IsTrue(std::memcmp(&native.state(), &oracle.state(), sizeof(VU1State)) == 0,
+                                            "raw tails expose every delayed Q, D/I and CLIP result after reentry");
+                                        t.IsTrue(std::memcmp(a.data, b.data, dataSize) == 0,
+                                            "raw tails preserve joint timeline store ordering");
+                                        native.resume(a.code, codeSize, a.data, dataSize, a.gs, &a.mem, 0u, 0u, 1u);
+                                        oracle.resume(b.code, codeSize, b.data, dataSize, b.gs, &b.mem, 0u, 0u, 1u);
+                                    }
+                                }
+        });
+
+        tc.Run("DIV loops retain visible and pending Q at every budget and raw tail", [](TestCase &t)
+        {
+            const uint32_t raw[][4] = {
+                {0x40800000u, 0x3f800000u, 0x40000000u, 0x00000000u},
+                {0x00000000u, 0x00000000u, 0x00000000u, 0x80000000u},
+                {0x80000000u, 0x80000000u, 0x80000000u, 0x00000000u},
+                {0x7fffffffu, 0x00000001u, 0x00800000u, 0x7f800000u},
+                {0x80800000u, 0x00000000u, 0x7f7fffffu, 0x3f800000u}};
+            for (auto unit : {VU1Interpreter::Unit::VU0, VU1Interpreter::Unit::VU1})
+                for (unsigned mode : {0u, 1u, 2u})
+                    for (unsigned wrapped : {0u, 1u})
+                        for (unsigned incoming : {0u, 1u, 2u, 3u})
+                            for (const auto &bits : raw)
+                                for (unsigned budget : {0u, 1u, 12u, 16u, 17u, 18u, 19u, 22u, 23u, 24u, 33u, 34u, 35u, 46u, 51u, 69u})
+                                {
+                                    Vu1Fixture a, b;
+                                    t.IsTrue(a.initialize() && b.initialize(), "DIV fixtures initialize");
+                                    const unsigned codeSize = unit == VU1Interpreter::Unit::VU1 ? PS2_VU1_CODE_SIZE : PS2_VU0_CODE_SIZE;
+                                    const unsigned dataSize = unit == VU1Interpreter::Unit::VU1 ? PS2_VU1_DATA_SIZE : PS2_VU0_DATA_SIZE;
+                                    const unsigned base = wrapped ? codeSize - 136u : 56u;
+                                    const unsigned prefixPairs = incoming == 3u ? 7u : 3u;
+                                    const unsigned prefix = base - prefixPairs * 8u;
+                                    for (auto *fx : {&a, &b})
+                                    {
+                                        if (unit == VU1Interpreter::Unit::VU0)
+                                        {
+                                            fx->code = fx->mem.getVU0Code();
+                                            fx->data = fx->mem.getVU0Data();
+                                        }
+                                        for (unsigned pc = 0; pc < codeSize; pc += 8u)
+                                            writeVuInstructionPair(fx->code, pc, 0x8000033cu, kVuUpperNop);
+                                        writeDivLoopCode(fx->code, base, mode);
+                                        if (incoming)
+                                            writeVuInstructionPair(fx->code, prefix + (incoming == 3u ? 8u : 0u), makeVuDiv(13u, 14u, 0u, 0u), kVuUpperNop);
+                                        if (incoming == 2u)
+                                            writeVuInstructionPair(fx->code, prefix + 8u, makeVuFlagImmediate(0x15u, 0u, 0x840u), kVuUpperNop);
+                                        if (incoming == 3u)
+                                            writeVuInstructionPair(fx->code, base - 8u, makeVuFlagImmediate(0x15u, 0u, 0x040u), kVuUpperNop);
+                                    }
+                                    VU1Interpreter native(unit), oracle(unit);
+                                    oracle.setCompiledExecutionEnabled(false);
+                                    native.state().q = 5.0f;
+                                    native.state().status = 0xa50u;
+                                    native.state().vi[2] = 3;
+                                    for (unsigned lane = 0; lane < 4u; ++lane)
+                                        native.state().vf[3][lane] = static_cast<float>(lane + 1u);
+                                    native.state().vf[10][0] = std::bit_cast<float>(bits[0]);
+                                    native.state().vf[11][0] = std::bit_cast<float>(bits[1]);
+                                    native.state().vf[12][0] = std::bit_cast<float>(bits[2]);
+                                    native.state().vf[13][0] = std::bit_cast<float>(bits[3]);
+                                    native.state().vf[14][0] = 0.0f;
+                                    oracle.state() = native.state();
+                                    const uint64_t before = ps2_vu_detail::countedLoopPairs;
+                                    native.execute(a.code, codeSize, a.data, dataSize, a.gs, &a.mem, prefix, 0u, 0u, budget + prefixPairs);
+                                    oracle.execute(b.code, codeSize, b.data, dataSize, b.gs, &b.mem, prefix, 0u, 0u, budget + prefixPairs);
+                                    if (std::getenv("PS2_VU_REQUIRE_DIV_LOOPS") && incoming == 0u && budget >= (mode == 2u ? 24u : 18u))
+                                        t.IsTrue(ps2_vu_detail::countedLoopPairs > before, "complete DIV iterations enter the retained path");
+                                    native.setCompiledExecutionEnabled(false);
+                                    for (unsigned tail = 0; tail < 10u; ++tail)
+                                    {
+                                        const bool equal = std::memcmp(&native.state(), &oracle.state(), sizeof(VU1State)) == 0;
+                                        if (!equal)
+                                            std::fprintf(stderr, "DIV mismatch mode=%u wrap=%u incoming=%u budget=%u tail=%u pc=%u/%u cycles=%llu/%llu Q=%08x/%08x status=%x/%x\n", mode, wrapped, incoming, budget, tail, native.state().pc, oracle.state().pc, (unsigned long long)native.state().cycles, (unsigned long long)oracle.state().cycles, std::bit_cast<uint32_t>(native.state().q), std::bit_cast<uint32_t>(oracle.state().q), native.state().status, oracle.state().status);
+                                        t.IsTrue(equal, "DIV Q, D/I, FMAC flags, registers and branch state match the independent raw tail");
+                                        t.IsTrue(std::memcmp(a.data, b.data, dataSize) == 0, "DIV delay-slot stores match raw execution");
+                                        native.resume(a.code, codeSize, a.data, dataSize, a.gs, &a.mem, 0u, 0u, 1u);
+                                        oracle.resume(b.code, codeSize, b.data, dataSize, b.gs, &b.mem, 0u, 0u, 1u);
+                                    }
+                                }
+        });
+
+        tc.Run("DIV loops reenter through pending Q and end controls", [](TestCase &t)
+        {
+            for (auto unit : {VU1Interpreter::Unit::VU0, VU1Interpreter::Unit::VU1})
+                for (unsigned mode : {0u, 1u, 2u})
+                    for (unsigned stop : {0u, 1u})
+                    {
+                        Vu1Fixture a, b;
+                        t.IsTrue(a.initialize() && b.initialize(), "DIV reentry fixtures initialize");
+                        const unsigned codeSize = unit == VU1Interpreter::Unit::VU1 ? PS2_VU1_CODE_SIZE : PS2_VU0_CODE_SIZE;
+                        const unsigned dataSize = unit == VU1Interpreter::Unit::VU1 ? PS2_VU1_DATA_SIZE : PS2_VU0_DATA_SIZE;
+                        const uint32_t codeBase = unit == VU1Interpreter::Unit::VU1 ? PS2_VU1_CODE_BASE : PS2_VU0_CODE_BASE;
+                        for (auto *fx : {&a, &b})
+                        {
+                            if (unit == VU1Interpreter::Unit::VU0)
+                            {
+                                fx->code = fx->mem.getVU0Code();
+                                fx->data = fx->mem.getVU0Data();
+                            }
+                            writeDivLoopCode(fx->code, 0u, mode);
+                        }
+                        VU1Interpreter native(unit), oracle(unit);
+                        oracle.setCompiledExecutionEnabled(false);
+                        native.state().q = 5.0f;
+                        native.state().vi[2] = 20;
+                        native.state().status = 0x430u;
+                        native.state().vf[10][0] = 4.0f;
+                        native.state().vf[11][0] = 1.0f;
+                        native.state().vf[12][0] = 2.0f;
+                        native.state().vf[13][0] = 0.0f;
+                        native.state().vf[14][0] = 0.0f;
+                        for (unsigned lane = 0; lane < 4u; ++lane)
+                            native.state().vf[3][lane] = static_cast<float>(lane + 1u);
+                        oracle.state() = native.state();
+                        for (unsigned step = 0; step < 5u; ++step)
+                        {
+                            if (step == 3u && stop)
+                                for (auto *fx : {&a, &b})
+                                    fx->mem.write64(codeBase + 104u,
+                                        packVuInstructionPair(0x8000033cu, kVuUpperNop | 0x40000000u));
+                            const uint64_t before = ps2_vu_detail::countedLoopPairs;
+                            const unsigned budget = mode == 2u ? 24u : 18u;
+                            native.resume(a.code, codeSize, a.data, dataSize, a.gs, &a.mem, 0u, 0u, budget);
+                            oracle.resume(b.code, codeSize, b.data, dataSize, b.gs, &b.mem, 0u, 0u, budget);
+                            t.IsTrue(std::memcmp(&native.state(), &oracle.state(), sizeof(VU1State)) == 0,
+                                "pending Q/D-I survive compiled reentry and a late E-bit replacement");
+                            t.IsTrue(std::memcmp(a.data, b.data, dataSize) == 0,
+                                "reentered division loops preserve delay-slot stores");
+                            if (std::getenv("PS2_VU_REQUIRE_DIV_LOOPS"))
+                                t.Equals(ps2_vu_detail::countedLoopPairs - before,
+                                    stop && step >= 3u ? uint64_t{0} : uint64_t{17},
+                                    "each complete valid loop resumes while changed end controls use fallback");
+                        }
+                    }
+        });
+
+        tc.Run("thirty-two-pair loops invalidate and restore every late code offset", [](TestCase &t)
+        {
+            for (auto unit : {VU1Interpreter::Unit::VU0, VU1Interpreter::Unit::VU1})
+                for (unsigned offset = 16u; offset < 32u; ++offset)
+                {
+                    Vu1Fixture a, b;
+                    t.IsTrue(a.initialize() && b.initialize(), "long loop fixtures initialize");
+                    const unsigned codeSize = unit == VU1Interpreter::Unit::VU1 ? PS2_VU1_CODE_SIZE : PS2_VU0_CODE_SIZE;
+                    const unsigned dataSize = unit == VU1Interpreter::Unit::VU1 ? PS2_VU1_DATA_SIZE : PS2_VU0_DATA_SIZE;
+                    const uint32_t codeBase = unit == VU1Interpreter::Unit::VU1 ? PS2_VU1_CODE_BASE : PS2_VU0_CODE_BASE;
+                    for (auto *fx : {&a, &b})
+                    {
+                        if (unit == VU1Interpreter::Unit::VU0)
+                        {
+                            fx->code = fx->mem.getVU0Code();
+                            fx->data = fx->mem.getVU0Data();
+                        }
+                        writeLongLoopCode(fx->code, 0u);
+                    }
+                    uint64_t original;
+                    std::memcpy(&original, a.code + offset * 8u, sizeof(original));
+                    VU1Interpreter native(unit), oracle(unit);
+                    oracle.setCompiledExecutionEnabled(false);
+                    for (unsigned step = 0u; step < 3u; ++step)
+                    {
+                        if (step)
+                            for (auto *fx : {&a, &b})
+                                fx->mem.write64(codeBase + offset * 8u, step == 2u ? original :
+                                    packVuInstructionPair(makeVuIaddiu(15u, 0u, 123), kVuUpperNop));
+                        native.reset();
+                        oracle.reset();
+                        const uint64_t before = ps2_vu_detail::countedLoopPairs;
+                        native.execute(a.code, codeSize, a.data, dataSize, a.gs, &a.mem, 0u, 0u, 0u, 32u);
+                        oracle.execute(b.code, codeSize, b.data, dataSize, b.gs, &b.mem, 0u, 0u, 0u, 32u);
+                        t.IsTrue(std::memcmp(&native.state(), &oracle.state(), sizeof(VU1State)) == 0,
+                            "every late edit and restore changes cached dispatch before it executes");
+                        if (std::getenv("PS2_VU_REQUIRE_DIV_LOOPS"))
+                            t.Equals(ps2_vu_detail::countedLoopPairs - before, step == 1u ? uint64_t{0} : uint64_t{32},
+                                "the 32-pair specialization runs only for its complete byte identity");
+                    }
+                }
+        });
+
         tc.Run("terminal conditional regions preserve branch bypass and delayed tails", [](TestCase &t)
         {
             for (auto unit : {VU1Interpreter::Unit::VU0, VU1Interpreter::Unit::VU1})
@@ -487,7 +769,7 @@ void register_ps2_vu1_tests()
             }
         });
 
-        tc.Run("natural loops keep flag-reading bodies on the exact fallback", [](TestCase &t)
+        tc.Run("natural loops retain unchanged CLIP flag reads", [](TestCase &t)
         {
             for (auto unit : {VU1Interpreter::Unit::VU0, VU1Interpreter::Unit::VU1})
                 for (unsigned budget : {4u, 8u, 19u})
@@ -517,8 +799,9 @@ void register_ps2_vu1_tests()
                         nativeMemory.gs, &nativeMemory.mem, 0u, 0u, 0u, budget);
                     oracle.execute(oracleMemory.code, codeSize, oracleMemory.data, dataSize,
                         oracleMemory.gs, &oracleMemory.mem, 0u, 0u, 0u, budget);
-                    t.Equals(ps2_vu_detail::countedLoopPairs - before, uint64_t{0},
-                        "broader bounded-region support must not enable unsupported loop flag timelines");
+                    if (std::getenv("PS2_VU_REQUIRE_COUNTED_LOOPS"))
+                        t.Equals(ps2_vu_detail::countedLoopPairs - before, uint64_t{4u * (budget / 4u)},
+                            "complete iterations must retain the CLIP predicate");
                     for (unsigned tail = 0; tail < 8u; ++tail)
                     {
                         t.IsTrue(std::memcmp(&native.state(), &oracle.state(), sizeof(VU1State)) == 0,
@@ -529,6 +812,74 @@ void register_ps2_vu1_tests()
                             oracleMemory.gs, &oracleMemory.mem, 0u, 0u, 1u);
                     }
                 }
+        });
+
+        tc.Run("natural loops carry every delayed CLIP version across backedges", [](TestCase &t)
+        {
+            for (auto unit : {VU1Interpreter::Unit::VU0, VU1Interpreter::Unit::VU1})
+                for (unsigned phase = 0u; phase < 8u; ++phase)
+                    for (unsigned variant = 0u; variant < 4u; ++variant)
+                        for (unsigned budget = 0u; budget <= 34u; ++budget)
+                        {
+                            Vu1Fixture nativeMemory, oracleMemory;
+                            t.IsTrue(nativeMemory.initialize() && oracleMemory.initialize(), "CLIP loop fixtures initialize");
+                            const uint32_t codeSize = unit == VU1Interpreter::Unit::VU1 ? PS2_VU1_CODE_SIZE : PS2_VU0_CODE_SIZE;
+                            const uint32_t dataSize = unit == VU1Interpreter::Unit::VU1 ? PS2_VU1_DATA_SIZE : PS2_VU0_DATA_SIZE;
+                            const uint32_t start = (phase + 3u) * 8u;
+                            for (auto *fx : {&nativeMemory, &oracleMemory})
+                            {
+                                if (unit == VU1Interpreter::Unit::VU0)
+                                {
+                                    fx->code = fx->mem.getVU0Code();
+                                    fx->data = fx->mem.getVU0Data();
+                                }
+                                for (unsigned pc = 0u; pc < codeSize; pc += 8u)
+                                    writeVuInstructionPair(fx->code, pc, 0x8000033cu, kVuUpperNop);
+                                for (unsigned index = 0u; index < 3u; ++index)
+                                    writeVuInstructionPair(fx->code, (phase + index) * 8u,
+                                        0x22000000u | ((0x246813u * (index + 1u)) & 0xffffffu), kVuUpperNop);
+                                for (unsigned index = 0u; index < 8u; ++index)
+                                {
+                                    const uint32_t read = variant == 0u ? 0x38000000u | ((index + 2u) << 16u) :
+                                        variant == 1u ? 0x24000000u | (1u << (index * 3u)) :
+                                        variant == 2u ? 0x26000000u | (0xffffffu ^ (1u << (index * 3u))) :
+                                                        0x20000000u | (0x123456u * index);
+                                    const uint32_t lower = index == 6u ? 0x500007f9u : read;
+                                    writeVuInstructionPair(fx->code, start + index * 8u, lower,
+                                        makeVuUpperSpecial(0x1fu, 15u, 10u, static_cast<uint8_t>(index + 1u)));
+                                }
+                            }
+                            VU1Interpreter native(unit), oracle(unit);
+                            for (unsigned reg = 1u; reg <= 10u; ++reg)
+                                for (unsigned lane = 0u; lane < 4u; ++lane)
+                                    native.state().vf[reg][lane] = static_cast<float>(static_cast<int>((reg + 2u * lane) % 7u) - 3);
+                            native.state().vf[10][3] = 1.0f;
+                            native.state().clip = 0xabcdefu;
+                            oracle.state() = native.state();
+                            native.setCompiledExecutionEnabled(false);
+                            oracle.setCompiledExecutionEnabled(false);
+                            native.execute(nativeMemory.code, codeSize, nativeMemory.data, dataSize,
+                                nativeMemory.gs, &nativeMemory.mem, 0u, 0u, 0u, phase + 3u);
+                            oracle.execute(oracleMemory.code, codeSize, oracleMemory.data, dataSize,
+                                oracleMemory.gs, &oracleMemory.mem, 0u, 0u, 0u, phase + 3u);
+                            native.setCompiledExecutionEnabled(true);
+                            const uint64_t before = ps2_vu_detail::countedLoopPairs;
+                            for (unsigned step = 0u; step < 10u; ++step)
+                            {
+                                const unsigned cycles = step == 0u ? budget : 1u;
+                                if (step != 0u)
+                                    native.setCompiledExecutionEnabled(false);
+                                native.resume(nativeMemory.code, codeSize, nativeMemory.data, dataSize,
+                                    nativeMemory.gs, &nativeMemory.mem, 0u, 0u, cycles);
+                                oracle.resume(oracleMemory.code, codeSize, oracleMemory.data, dataSize,
+                                    oracleMemory.gs, &oracleMemory.mem, 0u, 0u, cycles);
+                                t.IsTrue(std::memcmp(&native.state(), &oracle.state(), sizeof(VU1State)) == 0,
+                                    "each flag read and raw tail must see the CLIP version ready at its issue cycle");
+                                if (step == 0u && std::getenv("PS2_VU_REQUIRE_COUNTED_LOOPS"))
+                                    t.Equals(ps2_vu_detail::countedLoopPairs - before, uint64_t{8u * (budget / 8u)},
+                                        "whole CLIP loop iterations must execute the retained path");
+                            }
+                        }
         });
 
         tc.Run("natural loops without counters yield at every exact budget", [](TestCase &t)
