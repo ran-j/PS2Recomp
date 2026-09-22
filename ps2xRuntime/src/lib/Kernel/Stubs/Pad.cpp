@@ -148,16 +148,16 @@ namespace ps2_stubs
             // Keyboard mapping (PS2 -> keys):
             // D-Pad: arrows, Square/Cross/Circle/Triangle: Z/X/C/V
             // L1/R1: Q/E, L2/R2: 1/3, Start/Select: Enter/RightShift
-            // L3/R3: LeftCtrl/RightCtrl, Analog left: WASD
+            // L3/R3: LeftCtrl/RightCtrl, analog sticks: WASD and IJKL
             setButton(state, kPadBtnUp, IsKeyDown(KEY_UP));
             setButton(state, kPadBtnDown, IsKeyDown(KEY_DOWN));
             setButton(state, kPadBtnLeft, IsKeyDown(KEY_LEFT));
             setButton(state, kPadBtnRight, IsKeyDown(KEY_RIGHT));
 
-            setButton(state, kPadBtnSquare, IsKeyDown(KEY_Z));
-            setButton(state, kPadBtnCross, IsKeyDown(KEY_X));
-            setButton(state, kPadBtnCircle, IsKeyDown(KEY_C));
-            setButton(state, kPadBtnTriangle, IsKeyDown(KEY_V));
+            setButton(state, kPadBtnSquare, IsKeyDown(KEY_Z) || IsKeyDown(KEY_KP_0));
+            setButton(state, kPadBtnCross, IsKeyDown(KEY_X) || IsKeyDown(KEY_SPACE));
+            setButton(state, kPadBtnCircle, IsKeyDown(KEY_C) || IsKeyDown(KEY_ESCAPE));
+            setButton(state, kPadBtnTriangle, IsKeyDown(KEY_V) || IsKeyDown(KEY_KP_1));
 
             setButton(state, kPadBtnL1, IsKeyDown(KEY_Q));
             setButton(state, kPadBtnR1, IsKeyDown(KEY_E));
@@ -165,7 +165,7 @@ namespace ps2_stubs
             setButton(state, kPadBtnR2, IsKeyDown(KEY_THREE));
 
             setButton(state, kPadBtnStart, IsKeyDown(KEY_ENTER));
-            setButton(state, kPadBtnSelect, IsKeyDown(KEY_RIGHT_SHIFT));
+            setButton(state, kPadBtnSelect, IsKeyDown(KEY_RIGHT_SHIFT) || IsKeyDown(KEY_TAB));
             setButton(state, kPadBtnL3, IsKeyDown(KEY_LEFT_CONTROL));
             setButton(state, kPadBtnR3, IsKeyDown(KEY_RIGHT_CONTROL));
 
@@ -174,22 +174,18 @@ namespace ps2_stubs
                 return;
             }
 
-            float ax = 0.0f;
-            float ay = 0.0f;
-            if (IsKeyDown(KEY_D))
-                ax += 1.0f;
-            if (IsKeyDown(KEY_A))
-                ax -= 1.0f;
-            if (IsKeyDown(KEY_S))
-                ay += 1.0f;
-            if (IsKeyDown(KEY_W))
-                ay -= 1.0f;
-
-            if (ax != 0.0f || ay != 0.0f)
-            {
-                state.lx = axisToByte(ax);
-                state.ly = axisToByte(ay);
-            }
+            const int leftX = (IsKeyDown(KEY_D) ? 1 : 0) - (IsKeyDown(KEY_A) ? 1 : 0);
+            const int leftY = (IsKeyDown(KEY_S) ? 1 : 0) - (IsKeyDown(KEY_W) ? 1 : 0);
+            const int rightX = (IsKeyDown(KEY_L) ? 1 : 0) - (IsKeyDown(KEY_J) ? 1 : 0);
+            const int rightY = (IsKeyDown(KEY_K) ? 1 : 0) - (IsKeyDown(KEY_I) ? 1 : 0);
+            if (leftX != 0)
+                state.lx = leftX < 0 ? 0x00u : 0xFFu;
+            if (leftY != 0)
+                state.ly = leftY < 0 ? 0x00u : 0xFFu;
+            if (rightX != 0)
+                state.rx = rightX < 0 ? 0x00u : 0xFFu;
+            if (rightY != 0)
+                state.ry = rightY < 0 ? 0x00u : 0xFFu;
         }
 
         void resetPadStateLocked()
