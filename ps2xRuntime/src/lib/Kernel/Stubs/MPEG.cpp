@@ -1835,8 +1835,12 @@ namespace ps2_stubs
                 return;
             }
 
-            // One after another, so they can share one stack.
-            const uint32_t stackTop = runtime->eeScheduler().invocationStackTop();
+            // One after another, so they can share one stack. A caller outside
+            // guest code (a test) gets them queued instead.
+            EeScheduler &scheduler = runtime->eeScheduler();
+            const GuestThread *thread = scheduler.currentThread();
+            const bool inGuest = thread && thread->inGuestCall;
+            const uint32_t stackTop = inGuest ? scheduler.invocationStackTop() : 0u;
             std::vector<GuestInvocation> invocations;
             for (const MpegStreamCallbackEvent &event : events)
             {
@@ -1849,9 +1853,20 @@ namespace ps2_stubs
                     }
                 }
             }
-            if (!invocations.empty())
+            if (invocations.empty())
             {
-                runtime->eeScheduler().invokeCurrentSequence(std::move(invocations));
+                return;
+            }
+            if (inGuest)
+            {
+                scheduler.invokeCurrentSequence(std::move(invocations));
+            }
+            else
+            {
+                for (GuestInvocation &invocation : invocations)
+                {
+                    scheduler.queueInvocation(std::move(invocation));
+                }
             }
         }
 
