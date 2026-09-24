@@ -47,6 +47,31 @@ The runtime handles PS2's memory addressing, including:
 ## Vector Unit Support
 PS2-specific 128-bit MMI instructions and VU0 macro mode instructions are supported via SSE/AVX intrinsics.
 
+### Compiled VU1 programs
+
+VU1 microprograms normally run on the interpreter. A build can instead compile
+the programs a game actually runs into C++ ahead of time, whole, from the entry
+point to the E bit: every pair still issues in order with the interpreter's
+stall rules, but the per-pair bookkeeping is decided at compile time and the
+hot state stays in registers. Anything the compiled code cannot express, or
+microcode that changed since it was recorded, falls back to the interpreter.
+
+The input is recorded, not guessed, because the microcode is game data:
+
+1. Run the game with `PS2_VU_PROGRAM_PROFILE=some/directory`. Each entry point
+   reached without a compiled routine is saved there as a 16 KiB code image
+   plus a line in `entries.txt`. Recording keeps adding to the directory.
+2. Configure with `-DPS2X_VU_PROGRAM_PROFILES=dir1;dir2` and rebuild. The
+   build runs `tools/compile_vu_programs.py` over the recordings and compiles
+   the result in `PS2X_VU_PROGRAM_SHARDS` units (8 by default).
+
+Recordings and the generated sources contain game code; keep them local.
+
+On AArch64 the arithmetic has NEON fast paths with exact fallbacks. Defining
+`PS2X_VU_PROGRAM_PORTABLE` builds the path other hosts use, so it can be tested
+on an ARM machine. `ps2xTest/data/vu_programs.py` writes synthetic programs for
+the differential test in `ps2xTest/src/ps2_vu1_program_tests.cpp`.
+
 ## Instruction Patching
 You can patch specific instructions in the recompiled code to fix game issues or implement custom behavior.
 
