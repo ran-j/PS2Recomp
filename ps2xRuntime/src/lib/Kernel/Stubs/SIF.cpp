@@ -54,6 +54,13 @@ namespace ps2_stubs
         };
         static_assert(sizeof(Ps2SifDmaTransfer) == 16u, "Unexpected SIF DMA descriptor size");
 
+        // Once a game runs IOP modules natively, IOP memory is that IOP's.
+        ps2x::iop::NativeIop *nativeIop(PS2Runtime *runtime)
+        {
+            ps2x::iop::NativeIop *native = PS2IopTransport::native(runtime);
+            return native && native->enabled() ? native : nullptr;
+        }
+
         std::mutex g_sifDmaTransferMutex;
         uint32_t g_nextSifDmaTransferId = 1u;
         std::mutex g_sifCmdStateMutex;
@@ -448,19 +455,19 @@ namespace ps2_stubs
     void sceSifAllocIopHeap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         (void)rdram;
-        (void)runtime;
 
         const uint32_t reqSize = getRegU32(ctx, 4);
-        setReturnU32(ctx, allocateSifHeapBlock(reqSize));
+        ps2x::iop::NativeIop *native = nativeIop(runtime);
+        setReturnU32(ctx, native ? native->allocate(reqSize) : allocateSifHeapBlock(reqSize));
     }
 
     void sceSifAllocSysMemory(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         (void)rdram;
-        (void)runtime;
 
         const uint32_t size = getRegU32(ctx, 5);
-        setReturnU32(ctx, allocateSifHeapBlock(size));
+        ps2x::iop::NativeIop *native = nativeIop(runtime);
+        setReturnU32(ctx, native ? native->allocate(size) : allocateSifHeapBlock(size));
     }
 
     void sceSifBindRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -503,19 +510,20 @@ namespace ps2_stubs
     void sceSifFreeIopHeap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         (void)rdram;
-        (void)runtime;
 
         const uint32_t addr = getRegU32(ctx, 4);
+        if (ps2x::iop::NativeIop *native = nativeIop(runtime))
+        {
+            native->release(addr);
+            setReturnS32(ctx, 0);
+            return;
+        }
         setReturnS32(ctx, freeSifHeapBlock(addr) ? 0 : -1);
     }
 
     void sceSifFreeSysMemory(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        (void)rdram;
-        (void)runtime;
-
-        const uint32_t addr = getRegU32(ctx, 4);
-        setReturnS32(ctx, freeSifHeapBlock(addr) ? 0 : -1);
+        sceSifFreeIopHeap(rdram, ctx, runtime);
     }
 
     void sceSifGetDataTable(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -778,6 +786,37 @@ namespace ps2_stubs
     {
         const uint32_t dmatAddr = getRegU32(ctx, 4);
         const uint32_t count = getRegU32(ctx, 5);
+
+        // With native modules, EE-to-IOP transfers land in that IOP's memory.
+        if (ps2x::iop::NativeIop *native = nativeIop(runtime); native && dmatAddr != 0u && count <= 32u)
+        {
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                Ps2SifDmaTransfer xfer{};
+                const uint8_t *entry = getConstMemPtr(rdram, dmatAddr + i * static_cast<uint32_t>(sizeof(xfer)));
+                if (!entry)
+                {
+                    break;
+                }
+                std::memcpy(&xfer, entry, sizeof(xfer));
+                if (xfer.size <= 0)
+                {
+                    continue;
+                }
+                const uint32_t size = static_cast<uint32_t>(xfer.size);
+                // The source has to be one contiguous stretch of EE memory.
+                const uint8_t *first = getConstMemPtr(rdram, xfer.src);
+                const uint8_t *last = getConstMemPtr(rdram, xfer.src + size - 1u);
+                if (!first || !last || static_cast<uint32_t>(last - first) != size - 1u)
+                {
+                    continue;
+                }
+                native->write(xfer.dest, first, size);
+            }
+            ps2_syscalls::dispatchDmacHandlersForCause(rdram, runtime, 5u);
+            setReturnS32(ctx, static_cast<int32_t>(allocateSifDmaTransferId()));
+            return;
+        }
 
         const uint32_t listAddr = getRegU32(ctx, 4);
         PS2_IF_AGRESSIVE_LOGS({

@@ -37,6 +37,11 @@ public:
                    : ps2x::iop::RpcResult{};
     }
 
+    [[nodiscard]] static ps2x::iop::NativeIop *native(PS2Runtime *runtime)
+    {
+        return runtime && runtime->m_iopSubsystem ? &runtime->m_iopSubsystem->native() : nullptr;
+    }
+
     static void notifyTransfer(
         PS2Runtime *runtime,
         uint8_t *rdram,

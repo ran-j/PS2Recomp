@@ -14,6 +14,7 @@
 #include "ps2_host_backend.h"
 #include "ps2_iop_host.h"
 #include "ps2x/iop/iop_subsystem.h"
+#include "runtime/ps2_native_iop.h"
 
 #include <iostream>
 #include <fstream>
@@ -575,6 +576,8 @@ PS2Runtime::~PS2Runtime()
     try
     {
         requestStop();
+        // The audio callback renders from the IOP subsystem.
+        ps2_native_iop::stopAudio();
         m_iopSubsystem.reset();
         m_iopHost.reset();
 #if defined(PLATFORM_VITA)

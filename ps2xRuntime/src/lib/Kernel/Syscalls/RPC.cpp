@@ -1,6 +1,7 @@
 #include "Common.h"
 #include "RPC.h"
 #include "../../ps2_iop_transport.h"
+#include "runtime/ps2_native_iop.h"
 
 namespace ps2_syscalls
 {
@@ -193,6 +194,20 @@ namespace ps2_syscalls
         {
             setReturnS32(ctx, -1);
             return;
+        }
+        // A module the game runs natively also loads onto the emulated IOP.
+        // The tracker below still hands out the id the game sees.
+        if (ps2x::iop::NativeIop *native = PS2IopTransport::native(runtime); native && native->claims(modulePath))
+        {
+            const uint32_t argLength = std::min<uint32_t>(getRegU32(ctx, 5), 512u);
+            std::string arguments(argLength, '\0');
+            for (uint32_t i = 0; i < argLength; ++i)
+            {
+                if (const uint8_t *byte = getConstMemPtr(rdram, getRegU32(ctx, 6) + i))
+                    arguments[i] = static_cast<char>(*byte);
+            }
+            if (native->load(modulePath, arguments) > 0)
+                ps2_native_iop::startAudio(*runtime);
         }
 
         const int32_t moduleId = trackSifModuleLoad(modulePath);
