@@ -395,6 +395,7 @@ add_library(ps2_runtime STATIC
     src/lib/vu/ps2_vu1_pipeline.cpp
     src/lib/vu/ps2_vu1_capture.cpp
     src/lib/vu/ps2_vu1_cache.cpp
+    src/lib/vu/ps2_vu1_program.cpp
     src/lib/games_database.cpp
 )
 
@@ -457,6 +458,46 @@ if(PS2X_VU_AOT_IMAGES OR PS2X_VU_AOT_PAIR_IMAGES OR PS2X_VU_AOT_LOOP_IMAGES)
             "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/ps2_runtime.dir/Unity/unity_vu1_cxx.cxx"
             ${PS2X_VU_AOT_SOURCES}
             PROPERTIES COMPILE_OPTIONS "-g0")
+    endif()
+endif()
+
+# Whole VU1 routines, compiled from PS2_VU_PROGRAM_PROFILE recordings.
+set(PS2X_VU_PROGRAM_PROFILES "" CACHE STRING "Local VU1 program profile directories to compile; never distributed")
+set(PS2X_VU_PROGRAM_SHARDS "8" CACHE STRING "Number of compilation units for compiled VU1 routines")
+if(PS2X_VU_PROGRAM_PROFILES)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    if(NOT PS2X_VU_PROGRAM_SHARDS MATCHES "^[1-9][0-9]*$")
+        message(FATAL_ERROR "PS2X_VU_PROGRAM_SHARDS must be a positive integer")
+    endif()
+    set(PS2X_VU_PROGRAM_INCLUDE "${CMAKE_CURRENT_BINARY_DIR}/generated/vu_programs.inc")
+    set(PS2X_VU_PROGRAM_EXTERN_INCLUDE "${CMAKE_CURRENT_BINARY_DIR}/generated/vu_programs_extern.inc")
+    set(PS2X_VU_PROGRAM_SOURCES)
+    math(EXPR PS2X_VU_PROGRAM_LAST_SHARD "${PS2X_VU_PROGRAM_SHARDS} - 1")
+    foreach(SHARD RANGE ${PS2X_VU_PROGRAM_LAST_SHARD})
+        list(APPEND PS2X_VU_PROGRAM_SOURCES "${CMAKE_CURRENT_BINARY_DIR}/generated/vu_programs_${SHARD}.cpp")
+    endforeach()
+    set(PS2X_VU_PROGRAM_LISTS)
+    foreach(PROFILE ${PS2X_VU_PROGRAM_PROFILES})
+        list(APPEND PS2X_VU_PROGRAM_LISTS "${PROFILE}/entries.txt")
+    endforeach()
+    add_custom_command(
+        OUTPUT "${PS2X_VU_PROGRAM_INCLUDE}" "${PS2X_VU_PROGRAM_EXTERN_INCLUDE}" ${PS2X_VU_PROGRAM_SOURCES}
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../tools/compile_vu_programs.py"
+                --output "${PS2X_VU_PROGRAM_INCLUDE}" --shards ${PS2X_VU_PROGRAM_SHARDS}
+                ${PS2X_VU_PROGRAM_PROFILES}
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../tools/compile_vu_programs.py" ${PS2X_VU_PROGRAM_LISTS}
+        VERBATIM)
+    add_custom_target(ps2_vu_programs DEPENDS "${PS2X_VU_PROGRAM_INCLUDE}"
+                      "${PS2X_VU_PROGRAM_EXTERN_INCLUDE}" ${PS2X_VU_PROGRAM_SOURCES})
+    add_dependencies(ps2_runtime ps2_vu_programs)
+    target_sources(ps2_runtime PRIVATE ${PS2X_VU_PROGRAM_SOURCES})
+    set_source_files_properties(src/lib/vu/ps2_vu1_program.cpp PROPERTIES COMPILE_DEFINITIONS
+        "PS2X_VU_PROGRAM_INCLUDE=\"${PS2X_VU_PROGRAM_INCLUDE}\";PS2X_VU_PROGRAM_EXTERN_INCLUDE=\"${PS2X_VU_PROGRAM_EXTERN_INCLUDE}\"")
+    set_source_files_properties(${PS2X_VU_PROGRAM_SOURCES} PROPERTIES
+        SKIP_UNITY_BUILD_INCLUSION ON
+        INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/vu")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        set_source_files_properties(${PS2X_VU_PROGRAM_SOURCES} PROPERTIES COMPILE_OPTIONS "-g0")
     endif()
 endif()
 

@@ -7,6 +7,11 @@
 class GS;
 class PS2Memory;
 
+namespace ps2_vu_program
+{
+    struct Access;
+}
+
 struct VU1State
 {
     float vf[32][4];
@@ -67,6 +72,9 @@ public:
     uint64_t interpretedPairsExecuted() const { return m_interpretedPairsExecuted; }
 
 private:
+    // Whole-program compiled code reads and publishes interpreter state.
+    friend struct ps2_vu_program::Access;
+
     enum Pipeline : uint8_t
     {
         PipelineNone = 0,

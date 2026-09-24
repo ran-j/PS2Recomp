@@ -1,4 +1,5 @@
 #include "ps2_vu1_exec.inl"
+#include "ps2_vu1_program.h"
 #include "runtime/ps2_vu1.h"
 #include "runtime/gs/ps2_gif_arbiter.h"
 #include "runtime/gs/gs_frontend.h"
@@ -91,6 +92,9 @@ void VU1Interpreter::reset()
     m_state.r = 0x3F800000u;
     m_cycle = 0;
     resetScheduler();
+    // VU0 resets for every micro call; VU1 only at startup, and in tests.
+    if (m_unit == Unit::VU1)
+        ps2_vu_program::forgetRoutines();
 }
 
 void VU1Interpreter::progressXgkick()
@@ -392,7 +396,17 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         rebuildDecodedCodeCache(vuCode, codeSize, memory,
             m_unit == Unit::VU1 ? memory->getVU1CodeGeneration() : memory->getVU0CodeGeneration());
     commitReadyPipelines();
-    while (m_cycle < budgetEnd && !m_stopRequested)
+    // A drained VU1 at the entry of a compiled program runs it whole.
+    if (trackedCode && m_unit == Unit::VU1 && m_useCompiledExecution &&
+        budgetEnd - m_cycle >= ps2_vu_program::kMinimumBudget && ps2_vu_program::Access::drained(*this))
+    {
+        const uint64_t generation = memory->getVU1CodeGeneration();
+        if (const auto routine = ps2_vu_program::find(vuCode, codeSize, m_state.pc, generation))
+            programEnded = ps2_vu_program::run(*this, vuCode, codeSize, budgetEnd, routine);
+        else
+            ps2_vu_program::recordMissing(vuCode, codeSize, m_state.pc);
+    }
+    while (!programEnded && m_cycle < budgetEnd && !m_stopRequested)
     {
         // advanceOneCycle already committed this boundary, including stalls.
         if (m_state.pc + 8u > codeSize)
