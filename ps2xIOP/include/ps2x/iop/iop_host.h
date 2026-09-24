@@ -82,6 +82,13 @@ namespace ps2x::iop
         virtual int32_t memoryCard(const MemoryCardRequest &request) = 0;
 
         virtual bool hasGuestFunction(uint32_t address) const = 0;
+        // Whether the EE has registered an RPC server under this id, which is
+        // what an IOP module binding to it waits for.
+        virtual bool hasGuestRpcServer(uint32_t sid) const
+        {
+            (void)sid;
+            return false;
+        }
         virtual bool invokeGuestFunction(uint64_t callToken,
                                          uint32_t address,
                                          uint32_t a0,

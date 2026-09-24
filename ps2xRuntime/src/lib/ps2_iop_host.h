@@ -71,6 +71,7 @@ public:
     int32_t memoryCard(const ps2x::iop::MemoryCardRequest &request) override;
 
     bool hasGuestFunction(uint32_t address) const override;
+    bool hasGuestRpcServer(uint32_t sid) const override;
     bool invokeGuestFunction(uint64_t callToken,
                              uint32_t address,
                              uint32_t a0,

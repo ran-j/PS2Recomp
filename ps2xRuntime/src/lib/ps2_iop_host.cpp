@@ -472,6 +472,23 @@ bool PS2IopHostAdapter::hasGuestFunction(uint32_t address) const
     return m_runtime.hasFunction(address);
 }
 
+bool PS2IopHostAdapter::hasGuestRpcServer(uint32_t sid) const
+{
+    uint32_t record = 0u;
+    {
+        std::lock_guard<std::mutex> lock(g_rpc_mutex);
+        const auto found = g_rpc_servers.find(sid);
+        if (found == g_rpc_servers.end())
+        {
+            return false;
+        }
+        record = found->second.sd_ptr;
+    }
+    // Binding from the EE side leaves a placeholder with no function.
+    t_SifRpcServerData server{};
+    return record != 0u && readGuest(record, &server, sizeof(server)) && server.func != 0u;
+}
+
 bool PS2IopHostAdapter::invokeGuestFunction(uint64_t callToken,
                                             uint32_t address,
                                             uint32_t a0,

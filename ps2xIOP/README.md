@@ -4,9 +4,11 @@
 `ps2xRuntime`. It implements the behavior that games expect from IOP services
 exposed through SIF RPC and DMA.
 
-This subsystem does not emulate the IOP's R3000A CPU and does not load or
-execute IRX binaries. Its scope is the RPC/DMA behavior needed by recompiled
-games.
+The services below do not emulate the IOP's R3000A CPU and do not load or
+execute IRX binaries. Their scope is the RPC/DMA behavior needed by recompiled
+games. A runtime can additionally run a game's own modules on a small emulated
+IOP, which is how sound drivers are handled; see
+[Native IRX modules](#native-irx-modules).
 
 > [!IMPORTANT]
 > `ps2_iop`/`ps2x::iop` is a C++20 static library linked into the runtime.
@@ -120,6 +122,69 @@ RPC ABI selection is offered to every active profile service before the core
 services, and every active service receives each SIF transfer notification.
 Implementations must filter the relevant SID/function or transfer
 kind/phase/address range themselves.
+
+## Native IRX modules
+
+Some drivers are easier to run than to rewrite. A sound driver is the usual
+case: its RPC protocol is the only part the EE sees, but what the game hears
+comes from years of tuning in how it drives the SPU2. `NativeIop`
+([`native_iop.h`](include/ps2x/iop/native_iop.h)) loads a game's own IRX files
+onto an emulated IOP and lets their RPC servers answer the game directly.
+
+The emulator under [`src/lle/`](src/lle) is only as large as sound drivers
+need:
+
+| File | Contents |
+| --- | --- |
+| `cpu.*` | R3000A interpreter, with load delay slots and no caches or MMU |
+| `irx.*` | IRX parsing, relocation and import stub discovery |
+| `kernel.cpp` | High-level kernel: threads, semaphores, event flags, mailboxes, alarms, hardware timers, interrupts, the IOP heap, SIF DMA and RPC, and the sysclib calls the drivers use |
+| `spu2.*` | Both SPU2 cores: 48 ADPCM voices with ADSR, noise, pitch modulation, reverb, AutoDMA input and 2 MiB of sound memory |
+| `iop.*` | The pieces together: memory map, DMA channels 4 and 7, interrupts and the clock |
+
+An import the kernel does not provide returns zero, and an instruction the CPU
+does not implement stops its thread with a log message. Both mean a driver
+needs more than has been written so far.
+
+### Timing
+
+IOP time is counted at 36.864 MHz and advances only as the SPU2 produces
+samples, 768 cycles for each 48 kHz stereo pair. The host audio callback calls
+`render()`, so the IOP runs in step with the audio device rather than with the
+EE. Work that answers an RPC runs without moving the clock, until every thread
+is waiting again, and so do interrupt, alarm and timer handlers. Charging that
+work to the clock let heavy RPC traffic push the drivers' timers ahead of the
+audio, and music played fast.
+
+With no audio device, or while it is paused, an RPC that waits on IOP time
+steps the IOP itself and discards the samples. A call that still cannot finish
+gives up after two seconds and logs a warning.
+
+### Hooking it up
+
+The runtime names the modules to run natively before the game starts. The
+native path then takes over in three places:
+
+- `sceSifLoadModule` of a named module also loads it on the emulated IOP. The
+  high-level module tracker still hands out the id the game sees.
+- `IopSubsystem::handleRpc` gives an RPC to a server a native module
+  registered before any high-level service with the same SID.
+- IOP heap allocation and EE-to-IOP `sceSifSetDma` use the emulated IOP's
+  memory, since native modules read what the game sends them from there.
+
+IOP modules that bind back to an EE server, like SDRDRV's callback thread,
+wait until the EE has registered it (`IopHost::hasGuestRpcServer`). Answering
+the bind early left the thread spinning and starved the rest of the driver.
+
+On the runtime side, [`ps2_native_iop.h`](../ps2xRuntime/include/runtime/ps2_native_iop.h)
+takes the module list, opens a 48 kHz stereo stream once the first module
+loads, and sets the volume. Volume zero keeps the stream running: games wait
+on their sound drivers, so the IOP has to keep going even when nothing is
+heard. `PS2X_AUDIO_DUMP=path` keeps a raw copy of everything played
+(48 kHz, stereo, signed 16-bit) for comparing against a reference offline.
+
+The SPU2 input path and the DMA registers have tests in
+[`ps2_native_iop_tests.cpp`](../ps2xTest/src/ps2_native_iop_tests.cpp).
 
 ## Linking the static library 
 

@@ -16,6 +16,12 @@ add_library(ps2_iop STATIC
     src/modules/clfile.cpp
     src/modules/sound_update_stub.cpp
     src/modules/sdrdrv.cpp
+    src/native_iop.cpp
+    src/lle/cpu.cpp
+    src/lle/irx.cpp
+    src/lle/iop.cpp
+    src/lle/kernel.cpp
+    src/lle/spu2.cpp
 )
 
 target_compile_features(ps2_iop PUBLIC cxx_std_20)
