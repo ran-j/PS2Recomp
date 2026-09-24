@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ps2x/iop/iop_host.h"
+#include "ps2x/iop/native_iop.h"
 #include "ps2x/iop/iop_types.h"
 
 #include <filesystem>
@@ -32,6 +33,9 @@ namespace ps2x::iop
         void onSifTransfer(const SifTransfer &transfer);
 
         [[nodiscard]] DebugSnapshot debugSnapshot() const;
+
+        // Original IRX modules running on an emulated IOP; see NativeIop.
+        [[nodiscard]] NativeIop &native();
 
     private:
         class Impl;

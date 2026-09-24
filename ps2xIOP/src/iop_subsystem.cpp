@@ -68,7 +68,8 @@ namespace ps2x::iop
     {
     public:
         explicit Impl(IopHost &hostRef)
-            : host(hostRef), pluginCatalog(hostRef), coreServices(detail::createCoreServices(hostRef)), profiles(detail::createBuiltinProfiles())
+            : host(hostRef), pluginCatalog(hostRef), coreServices(detail::createCoreServices(hostRef)), profiles(detail::createBuiltinProfiles()),
+              native(hostRef)
         {
             rebuildRoutes();
         }
@@ -118,6 +119,7 @@ namespace ps2x::iop
         std::string activeProvider;
         std::string lastError;
         bool routesValid = true;
+        NativeIop native;
     };
 
     IopSubsystem::IopSubsystem(IopHost &host)
@@ -279,6 +281,18 @@ namespace ps2x::iop
 
     RpcResult IopSubsystem::handleRpc(const RpcRequest &request)
     {
+        // A server registered by a native module replaces any high-level one.
+        uint32_t record = 0, buffer = 0;
+        if (m_impl->native.server(request.sid, record, buffer))
+        {
+            RpcResult result;
+            result.handled = m_impl->native.call(request.sid, request.function, request.send.address,
+                                                 request.send.size, request.receive.address,
+                                                 request.receive.size);
+            result.resultAddress = request.receive.address;
+            result.serverDispatchPolicy = ServerDispatchPolicy::Suppress;
+            return result;
+        }
         const auto it = m_impl->routes.find(request.sid);
         if (it == m_impl->routes.end() || !it->second)
         {
@@ -303,6 +317,11 @@ namespace ps2x::iop
                 service->onSifTransfer(transfer);
             }
         }
+    }
+
+    NativeIop &IopSubsystem::native()
+    {
+        return m_impl->native;
     }
 
     DebugSnapshot IopSubsystem::debugSnapshot() const
