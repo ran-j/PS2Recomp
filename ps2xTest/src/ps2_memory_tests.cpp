@@ -531,6 +531,31 @@ void register_ps2_memory_tests()
             t.Equals(sw, 0x00008001u, "zero-extend w");
         });
 
+        tc.Run("VIF UNPACK V4-5 expands packed channels", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0, PS2_VU1_DATA_SIZE);
+
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x6Fu, 1u, 0u)); // UNPACK V4-5, NUM=1, ADDR=0
+            appendU32(packet, 0x0000FC41u); // X=1, Y=2, Z=31, W=1
+
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            const uint8_t *vu = mem.getVU1Data();
+            uint32_t x = 0, y = 0, z = 0, w = 0;
+            std::memcpy(&x, vu + 0u, 4u);
+            std::memcpy(&y, vu + 4u, 4u);
+            std::memcpy(&z, vu + 8u, 4u);
+            std::memcpy(&w, vu + 12u, 4u);
+
+            t.Equals(x, 8u, "V4-5 should expand X from five bits");
+            t.Equals(y, 16u, "V4-5 should expand Y from five bits");
+            t.Equals(z, 248u, "V4-5 should expand Z from five bits");
+            t.Equals(w, 128u, "V4-5 should expand W from one bit");
+        });
+
         tc.Run("VIF UNPACK bit15 adds TOPS to destination address", [](TestCase &t)
         {
             PS2Memory mem;
