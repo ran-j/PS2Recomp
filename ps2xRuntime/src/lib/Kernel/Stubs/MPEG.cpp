@@ -527,6 +527,9 @@ namespace ps2_stubs
         constexpr uint64_t kDefaultPictureIntervalQ32 = 2ull * kPictureClockOne;
         constexpr size_t kMpegTimingScanLimit = 4096u;
         constexpr size_t kMaxDecodedPicturesAhead = 8u;
+        // Games size their audio buffers for a demux the IPU pulls along in
+        // real time. DQ8 holds a quarter second and drops what does not fit.
+        constexpr int64_t kMaxAudioLead90k = 90000 * 3 / 20;
 
         // Lookahead is held as compressed elementary stream, not as decoded
         // pictures: a 512x448 frame costs ~917 KB decoded against ~25 KB on the
@@ -584,6 +587,11 @@ namespace ps2_stubs
             uint64_t presentationEndTickQ32 = std::numeric_limits<uint64_t>::max();
             int64_t firstPresentedPts90k = -1;
             uint64_t ptsPresentationBaseTickQ32 = 0u;
+            // How far audio has been handed to the game, against how much of it
+            // has played; see mpegDemuxBackpressured.
+            int64_t firstAudioPts90k = -1;
+            int64_t lastAudioPts90k = -1;
+            std::chrono::steady_clock::time_point firstAudioTime{};
         };
 
         struct MpegStreamCallbackEvent
@@ -1508,6 +1516,15 @@ namespace ps2_stubs
                 {
                     const MpegPesHeader pes = parsePesHeader(buffer.data(), packetEnd);
                     const size_t payloadStart = pes.payloadOffset;
+                    if (pes.pts90k >= 0)
+                    {
+                        if (playback.firstAudioPts90k < 0)
+                        {
+                            playback.firstAudioPts90k = pes.pts90k;
+                            playback.firstAudioTime = std::chrono::steady_clock::now();
+                        }
+                        playback.lastAudioPts90k = pes.pts90k;
+                    }
                     if (payloadStart < packetEnd && payloadStart < playback.pssGuestAddrs.size())
                     {
                         queueStreamCallbackEvent(
@@ -1581,8 +1598,19 @@ namespace ps2_stubs
             // pulled by the consumer, so pictures no longer pile up ahead of it
             // and the old limit would fire on a queue that is nearly always
             // empty.
+            // Audio goes to the game as it is demuxed, so stay a short lead ahead
+            // of what has played, by real time rather than by the pictures,
+            // which fall behind whenever decoding does.
+            bool audioAhead = false;
+            if (playback.firstAudioPts90k >= 0)
+            {
+                const auto elapsed = std::chrono::steady_clock::now() - playback.firstAudioTime;
+                const int64_t played = playback.firstAudioPts90k +
+                    std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count() * 9 / 100;
+                audioAhead = mpegPtsDelta90k(played, playback.lastAudioPts90k) > kMaxAudioLead90k;
+            }
             return !g_mpeg_stub_state.currentCdStreamEofSeen &&
-                   (playback.pendingEsBytes >= mpegMaxPendingEsBytes() ||
+                   (audioAhead || playback.pendingEsBytes >= mpegMaxPendingEsBytes() ||
                     playback.decodedFrames.size() >= kMaxDecodedPicturesAhead);
         }
 
@@ -1752,26 +1780,28 @@ namespace ps2_stubs
             return true;
         }
 
-        void dispatchGuestStreamCallback(uint8_t *rdram,
-                                         R5900Context *callerCtx,
-                                         PS2Runtime *runtime,
-                                         const MpegStreamCallbackEvent &event,
-                                         const MpegRegisteredCallback &callback)
+        bool makeGuestStreamCallback(uint8_t *rdram,
+                                     R5900Context *callerCtx,
+                                     PS2Runtime *runtime,
+                                     const MpegStreamCallbackEvent &event,
+                                     const MpegRegisteredCallback &callback,
+                                     uint32_t stackTop,
+                                     GuestInvocation &invocation)
         {
             if (!rdram || !callerCtx || !runtime || callback.func == 0u || !runtime->hasFunction(callback.func))
             {
-                return;
+                return false;
             }
 
             const uint32_t cbDataAddr = runtime->guestMalloc(kMpegCallbackDataSize, 16u);
             if (cbDataAddr == 0u)
             {
-                return;
+                return false;
             }
             if (!writeMpegCallbackData(rdram, cbDataAddr, event))
             {
                 runtime->guestFree(cbDataAddr);
-                return;
+                return false;
             }
 
             R5900Context callbackCtx = *callerCtx;
@@ -1779,20 +1809,22 @@ namespace ps2_stubs
             SET_GPR_U32(&callbackCtx, 5, cbDataAddr);
             SET_GPR_U32(&callbackCtx, 6, callback.data);
             SET_GPR_U32(&callbackCtx, 7, 0u);
-            SET_GPR_U32(&callbackCtx, 29, 0u);
+            SET_GPR_U32(&callbackCtx, 29, stackTop);
             SET_GPR_U32(&callbackCtx, 31, 0u);
             callbackCtx.pc = callback.func;
 
-            GuestInvocation invocation{};
             invocation.kind = GuestInvocationKind::RpcCallback;
             invocation.context = callbackCtx;
             invocation.onComplete = [runtime, cbDataAddr](const R5900Context &, R5900Context &)
             {
                 runtime->guestFree(cbDataAddr);
             };
-            runtime->eeScheduler().queueInvocation(std::move(invocation));
+            return true;
         }
 
+        // libmpeg calls these inside the demux call, in stream order, while the
+        // ring still holds their data. Queued, they ran after it was released,
+        // and last to first, which shuffled movie audio.
         void dispatchStreamCallbacks(uint8_t *rdram,
                                      R5900Context *ctx,
                                      PS2Runtime *runtime,
@@ -1803,12 +1835,23 @@ namespace ps2_stubs
                 return;
             }
 
+            // One after another, so they can share one stack.
+            const uint32_t stackTop = runtime->eeScheduler().invocationStackTop();
+            std::vector<GuestInvocation> invocations;
             for (const MpegStreamCallbackEvent &event : events)
             {
                 for (const MpegRegisteredCallback &callback : event.callbacks)
                 {
-                    dispatchGuestStreamCallback(rdram, ctx, runtime, event, callback);
+                    GuestInvocation invocation{};
+                    if (makeGuestStreamCallback(rdram, ctx, runtime, event, callback, stackTop, invocation))
+                    {
+                        invocations.push_back(std::move(invocation));
+                    }
                 }
+            }
+            if (!invocations.empty())
+            {
+                runtime->eeScheduler().invokeCurrentSequence(std::move(invocations));
             }
         }
 
@@ -2328,8 +2371,9 @@ namespace ps2_stubs
             });
         }
 
-        dispatchStreamCallbacksUnlocked(rdram, ctx, runtime, callbackEvents);
+        // The callbacks run before the caller resumes, so set its result first.
         setReturnS32(ctx, static_cast<int32_t>(consumed));
+        dispatchStreamCallbacksUnlocked(rdram, ctx, runtime, callbackEvents);
     }
 
     void sceMpegDemuxPssRing(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -2453,8 +2497,8 @@ namespace ps2_stubs
             });
         }
 
-        dispatchStreamCallbacksUnlocked(rdram, ctx, runtime, callbackEvents);
         setReturnS32(ctx, static_cast<int32_t>(consumed));
+        dispatchStreamCallbacksUnlocked(rdram, ctx, runtime, callbackEvents);
     }
 
     void sceMpegDispCenterOffX(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
