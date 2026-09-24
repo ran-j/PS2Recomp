@@ -967,10 +967,16 @@ void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uin
                 };
                 int cAlpha = (csel == 0) ? a : (csel == 1) ? da
                                                            : fix;
+                auto finalizeBlendChannel = [&](int value) -> uint8_t
+                {
+                    return (state.colclamp & 0x1u) != 0u
+                        ? clampU8(value)
+                        : static_cast<uint8_t>(value);
+                };
 
-                r = clampU8(((pickRGB(asel, r, dr) - pickRGB(bsel, r, dr)) * cAlpha >> 7) + pickRGB(dsel, r, dr));
-                g = clampU8(((pickRGB(asel, g, dg) - pickRGB(bsel, g, dg)) * cAlpha >> 7) + pickRGB(dsel, g, dg));
-                b = clampU8(((pickRGB(asel, b, db) - pickRGB(bsel, b, db)) * cAlpha >> 7) + pickRGB(dsel, b, db));
+                r = finalizeBlendChannel(((pickRGB(asel, r, dr) - pickRGB(bsel, r, dr)) * cAlpha >> 7) + pickRGB(dsel, r, dr));
+                g = finalizeBlendChannel(((pickRGB(asel, g, dg) - pickRGB(bsel, g, dg)) * cAlpha >> 7) + pickRGB(dsel, g, dg));
+                b = finalizeBlendChannel(((pickRGB(asel, b, db) - pickRGB(bsel, b, db)) * cAlpha >> 7) + pickRGB(dsel, b, db));
             }
             else
             {

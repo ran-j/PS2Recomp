@@ -904,6 +904,49 @@ void register_ps2_gs_tests()
                      "with PABE enabled, high-alpha source pixels should still use the configured ALPHA blend");
         });
 
+        tc.Run("COLCLAMP selects saturated or wrapped alpha blend output", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            constexpr uint64_t kAlpha =
+                (0ull << 0) |  // A = source
+                (2ull << 2) |  // B = zero
+                (2ull << 4) |  // C = FIX
+                (1ull << 6) |  // D = destination
+                (0x80ull << 32);
+            constexpr uint32_t kColor = 0x801020F0u;
+
+            gs.writeRegister(GS_REG_FRAME_1, (1ull << 16));
+            gs.writeRegister(GS_REG_ZBUF_1, (1ull << 32));
+            gs.writeRegister(GS_REG_SCISSOR_1, 0ull);
+            gs.writeRegister(GS_REG_ALPHA_1, kAlpha);
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
+
+            std::memcpy(vram.data(), &kColor, sizeof(kColor));
+            gs.writeRegister(GS_REG_COLCLAMP, 0ull);
+            gs.writeRegister(GS_REG_PRIM, static_cast<uint64_t>(GS_PRIM_POINT) | (1ull << 6));
+            gs.writeRegister(GS_REG_RGBAQ, kColor);
+            gs.writeRegister(GS_REG_XYZ2, 0ull);
+
+            uint32_t wrappedPixel = 0u;
+            std::memcpy(&wrappedPixel, vram.data(), sizeof(wrappedPixel));
+            t.Equals(wrappedPixel, 0x802040E0u,
+                     "COLCLAMP=0 should retain the low eight bits of overflowing blend channels");
+
+            std::memcpy(vram.data(), &kColor, sizeof(kColor));
+            gs.writeRegister(GS_REG_COLCLAMP, 1ull);
+            gs.writeRegister(GS_REG_PRIM, static_cast<uint64_t>(GS_PRIM_POINT) | (1ull << 6));
+            gs.writeRegister(GS_REG_RGBAQ, kColor);
+            gs.writeRegister(GS_REG_XYZ2, 0ull);
+
+            uint32_t clampedPixel = 0u;
+            std::memcpy(&clampedPixel, vram.data(), sizeof(clampedPixel));
+            t.Equals(clampedPixel, 0x802040FFu,
+                     "COLCLAMP=1 should saturate overflowing blend channels");
+        });
+
         tc.Run("FBA forces the framebuffer alpha high bit on CT32 writes", [](TestCase &t)
         {
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
