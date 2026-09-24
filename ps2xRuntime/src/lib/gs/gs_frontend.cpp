@@ -762,6 +762,9 @@ bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
 // "the game is sending an enormous number of tiny packets".
 std::atomic<uint64_t> g_gsFrontendPacketNanos{0};
 std::atomic<uint64_t> g_gsFrontendPacketCount{0};
+// Off unless a backend reports the numbers: the field sends over ten thousand
+// packets a frame, and two clock reads each add up.
+std::atomic<bool> g_gsFrontendTiming{false};
 // The same for the native image-upload fast path, which bypasses
 // processGIFPacket entirely -- DQ8's movie tiles arrive this way, one DMA
 // chain per 16x16 tile, so without a separate counter they are invisible.
@@ -770,12 +773,15 @@ std::atomic<uint64_t> g_gsUploadNativeCount{0};
 
 void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
-    const auto packetStart = std::chrono::steady_clock::now();
     struct PacketTimer
     {
-        std::chrono::steady_clock::time_point start;
+        bool timed = g_gsFrontendTiming.load(std::memory_order_relaxed);
+        std::chrono::steady_clock::time_point start =
+            timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         ~PacketTimer()
         {
+            if (!timed)
+                return;
             g_gsFrontendPacketNanos.fetch_add(
                 static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                           std::chrono::steady_clock::now() - start)
@@ -783,7 +789,7 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
                 std::memory_order_relaxed);
             g_gsFrontendPacketCount.fetch_add(1, std::memory_order_relaxed);
         }
-    } packetTimer{packetStart};
+    } packetTimer;
 
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     if (!data || sizeBytes < 16 || !m_backend)
