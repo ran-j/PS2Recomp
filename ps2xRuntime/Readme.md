@@ -67,10 +67,12 @@ The input is recorded, not guessed, because the microcode is game data:
 
 Recordings and the generated sources contain game code; keep them local.
 
-On AArch64 the arithmetic has NEON fast paths with exact fallbacks. Defining
-`PS2X_VU_PROGRAM_PORTABLE` builds the path other hosts use, so it can be tested
-on an ARM machine. `ps2xTest/data/vu_programs.py` writes synthetic programs for
-the differential test in `ps2xTest/src/ps2_vu1_program_tests.cpp`.
+The FMAC arithmetic has fast paths with exact fallbacks, NEON on AArch64 and
+SSE2 on x86. Other hosts get a plain C++ path. All three can be tested on an ARM
+machine: `PS2X_VU_PROGRAM_SSE` builds the SSE2 one through sse2neon, and
+`PS2X_VU_PROGRAM_PORTABLE` the plain one. `ps2xTest/data/vu_programs.py` writes
+synthetic programs for the differential test in
+`ps2xTest/src/ps2_vu1_program_tests.cpp`.
 
 ## Instruction Patching
 You can patch specific instructions in the recompiled code to fix game issues or implement custom behavior.

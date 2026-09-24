@@ -16,13 +16,27 @@
 #include <limits>
 #include <utility>
 
-// NEON fast paths. Defining PS2X_VU_PROGRAM_PORTABLE runs the path other
-// hosts take, so it can be tested on an ARM machine.
-#if defined(__aarch64__) && !defined(PS2X_VU_PROGRAM_PORTABLE)
+// FMAC fast paths: NEON on AArch64, SSE2 on x86. So that all three can be tested
+// on an ARM machine, PS2X_VU_PROGRAM_SSE runs the SSE2 one there through
+// sse2neon, and PS2X_VU_PROGRAM_PORTABLE runs neither.
+#if defined(PS2X_VU_PROGRAM_PORTABLE)
+#define PS2_VU_PROGRAM_NEON 0
+#define PS2_VU_PROGRAM_SSE 0
+#elif defined(__aarch64__) && !defined(PS2X_VU_PROGRAM_SSE)
 #define PS2_VU_PROGRAM_NEON 1
+#define PS2_VU_PROGRAM_SSE 0
 #include <arm_neon.h>
+#elif defined(__aarch64__) || defined(__SSE2__) || defined(_M_X64)
+#define PS2_VU_PROGRAM_NEON 0
+#define PS2_VU_PROGRAM_SSE 1
+#if defined(__aarch64__)
+#include "sse2neon.h"
+#else
+#include <immintrin.h>
+#endif
 #else
 #define PS2_VU_PROGRAM_NEON 0
+#define PS2_VU_PROGRAM_SSE 0
 #endif
 
 namespace ps2_vu_program
@@ -327,6 +341,50 @@ PS2_VU_FORCE_INLINE float32x4_t flushDenormals(float32x4_t value)
     return vreinterpretq_f32_u32(vbicq_u32(vreinterpretq_u32_f32(value), vshrq_n_u32(tiny, 1)));
 }
 }
+#elif PS2_VU_PROGRAM_SSE
+namespace fast
+{
+// Movemask puts lane x in bit 0 and the MAC register in bit 3.
+inline constexpr uint8_t kReversed[16] = {0, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15};
+
+template <uint8_t Dest>
+inline constexpr int kLanes = kReversed[Dest];
+
+PS2_VU_FORCE_INLINE int mask(__m128i lanes)
+{
+    return _mm_movemask_ps(_mm_castsi128_ps(lanes));
+}
+
+// Lane masks in the MAC register's layout, limited to the Dest lanes.
+template <uint8_t Dest>
+PS2_VU_FORCE_INLINE uint32_t layout(int zero, int sign, int underflow)
+{
+    return (kReversed[zero] | kReversed[sign] << 4u | kReversed[underflow] << 8u) & (Dest * 0x111u);
+}
+
+// As the NEON version: infinity and NaN stay, and fail the range checks.
+PS2_VU_FORCE_INLINE __m128 flushDenormals(__m128 value)
+{
+    const __m128 magnitude = _mm_castsi128_ps(_mm_set1_epi32(0x7FFFFFFF));
+    const __m128 tiny = _mm_cmplt_ps(_mm_and_ps(value, magnitude), _mm_set1_ps(std::numeric_limits<float>::min()));
+    return _mm_andnot_ps(_mm_and_ps(tiny, magnitude), value);
+}
+
+// Rounds like the interpreter's acc + fs * ft, which GCC and Clang fuse by
+// default wherever FMA is available. AArch64 only gets here in tests.
+template <bool Subtract>
+PS2_VU_FORCE_INLINE __m128 productSum(__m128 acc, __m128 left, __m128 right)
+{
+#if defined(__aarch64__)
+    return Subtract ? vfmsq_f32(acc, left, right) : vfmaq_f32(acc, left, right);
+#elif defined(__FMA__)
+    return Subtract ? _mm_fnmadd_ps(left, right, acc) : _mm_fmadd_ps(left, right, acc);
+#else
+    const __m128 product = _mm_mul_ps(left, right);
+    return Subtract ? _mm_sub_ps(acc, product) : _mm_add_ps(acc, product);
+#endif
+}
+}
 #endif
 
 class Run
@@ -567,7 +625,7 @@ private:
     template <uint32_t Upper>
     PS2_VU_FORCE_INLINE void upper(float *value);
 
-#if PS2_VU_PROGRAM_NEON
+#if PS2_VU_PROGRAM_NEON || PS2_VU_PROGRAM_SSE
     template <uint32_t Upper>
     PS2_VU_FORCE_INLINE bool fastUpper(float *value);
 #endif
@@ -799,7 +857,7 @@ PS2_VU_FORCE_INLINE void Frame::upper(float *value)
     }
     else
     {
-#if PS2_VU_PROGRAM_NEON
+#if PS2_VU_PROGRAM_NEON || PS2_VU_PROGRAM_SSE
         if (fastUpper<Upper>(value))
             return;
 #endif
@@ -948,7 +1006,7 @@ PS2_VU_FORCE_INLINE uint32_t Frame::plainUpper(float *value)
 }
 #endif
 
-#if PS2_VU_PROGRAM_NEON
+#if PS2_VU_PROGRAM_NEON || PS2_VU_PROGRAM_SSE
 // computeUpper's vector cases with the same range checks, but with the flags
 // built straight into the MAC layout. Results the checks do not clear take
 // the exact path.
@@ -968,8 +1026,10 @@ PS2_VU_FORCE_INLINE bool Frame::fastUpper(float *value)
     constexpr bool simpleMul = (code >= 0x18u && code <= 0x1Cu) || code == 0x1Eu || code == 0x2Au || (cross && accumulate);
     constexpr bool productSum = (code >= 8u && code <= 0xFu) || code == 0x21u || code == 0x23u ||
                                 code == 0x25u || code == 0x27u || code == 0x29u || code == 0x2Du || (cross && !accumulate);
+    constexpr bool subtract = (code >= 0xCu && code <= 0xFu) || code == 0x25u || code == 0x27u || code == 0x2Du || cross;
     if constexpr (!simpleAdd && !simpleSub && !simpleMul && !productSum)
         return false;
+#if PS2_VU_PROGRAM_NEON
     else
     {
         using fast::flushDenormals;
@@ -1030,8 +1090,6 @@ PS2_VU_FORCE_INLINE bool Frame::fastUpper(float *value)
         }
         else
         {
-            constexpr bool subtract =
-                (code >= 0xCu && code <= 0xFu) || code == 0x25u || code == 0x27u || code == 0x2Du || cross;
             // Only FMAC results reach ACC, and those are already in range.
             const float32x4_t acc = vld1q_f32(m_state.acc);
             const float32x4_t result = subtract ? vfmsq_f32(acc, left, right) : vfmaq_f32(acc, left, right);
@@ -1065,6 +1123,99 @@ PS2_VU_FORCE_INLINE bool Frame::fastUpper(float *value)
             return true;
         }
     }
+#else
+    else
+    {
+        // The same steps. Every integer compare here is on values below 2^31,
+        // which SSE2's signed compares handle.
+        using fast::flushDenormals;
+        const __m128i magnitudeMask = _mm_set1_epi32(0x7FFFFFFF);
+        const __m128i none = _mm_setzero_si128();
+        __m128 left = flushDenormals(_mm_loadu_ps(m_state.vf[fs]));
+        __m128 right;
+        if constexpr (code <= 0xFu || (code >= 0x18u && code <= 0x1Bu))
+            right = _mm_set1_ps(m_state.vf[ft][code & 3u]);
+        else if constexpr (code == 0x1Cu || code == 0x20u || code == 0x21u || code == 0x24u || code == 0x25u)
+            right = _mm_set1_ps(m_state.q);
+        else if constexpr (code == 0x1Eu || code == 0x22u || code == 0x23u || code == 0x26u || code == 0x27u)
+            right = _mm_set1_ps(m_state.i);
+        else
+            right = _mm_loadu_ps(m_state.vf[ft]);
+        right = flushDenormals(right);
+        if constexpr (cross)
+        {
+            left = _mm_shuffle_ps(left, left, _MM_SHUFFLE(3, 0, 2, 1));
+            right = _mm_shuffle_ps(right, right, _MM_SHUFFLE(3, 1, 0, 2));
+        }
+        const __m128i leftBits = _mm_castps_si128(left);
+        const __m128i rightBits = _mm_castps_si128(right);
+
+        if constexpr (!productSum)
+        {
+            __m128 result;
+            if constexpr (simpleAdd)
+                result = _mm_add_ps(left, right);
+            else if constexpr (simpleSub)
+                result = _mm_sub_ps(left, right);
+            else
+                result = _mm_mul_ps(left, right);
+            const __m128i magnitude = _mm_and_si128(_mm_castps_si128(result), magnitudeMask);
+            const __m128i leftZero = _mm_cmpeq_epi32(_mm_and_si128(leftBits, magnitudeMask), none);
+            const __m128i rightZero = _mm_cmpeq_epi32(_mm_and_si128(rightBits, magnitudeMask), none);
+            __m128i exactZero;
+            if constexpr (simpleMul)
+                exactZero = _mm_or_si128(leftZero, rightZero);
+            else
+            {
+                const __m128i opposing =
+                    simpleAdd ? _mm_xor_si128(rightBits, _mm_set1_epi32(std::numeric_limits<int32_t>::min())) : rightBits;
+                exactZero = _mm_or_si128(_mm_and_si128(leftZero, rightZero), _mm_cmpeq_epi32(leftBits, opposing));
+            }
+            const __m128i zero = _mm_cmpeq_epi32(magnitude, none);
+            const __m128i normal = _mm_and_si128(_mm_cmpgt_epi32(magnitude, _mm_set1_epi32(0x00800000)),
+                                                 _mm_cmplt_epi32(magnitude, _mm_set1_epi32(0x7F7FFFFF)));
+            const __m128i safe = _mm_or_si128(normal, _mm_and_si128(zero, exactZero));
+            if ((fast::mask(safe) & fast::kLanes<dest>) != fast::kLanes<dest>)
+                return false;
+            _mm_storeu_ps(value, result);
+            if constexpr (dest != 0u)
+                pushFlags(3u, fast::layout<dest>(fast::mask(zero), _mm_movemask_ps(result), 0), 0u);
+            return true;
+        }
+        else
+        {
+            const __m128 result = fast::productSum<subtract>(_mm_loadu_ps(m_state.acc), left, right);
+            const __m128i bits = _mm_castps_si128(result);
+            const __m128i exponentMask = _mm_set1_epi32(0xFF);
+            const __m128i resultExponent = _mm_and_si128(_mm_srli_epi32(bits, 23), exponentMask);
+            const __m128i leftExponent = _mm_and_si128(_mm_srli_epi32(leftBits, 23), exponentMask);
+            const __m128i rightExponent = _mm_and_si128(_mm_srli_epi32(rightBits, 23), exponentMask);
+            const __m128i productBound = _mm_add_epi32(leftExponent, rightExponent);
+            const __m128i zeroProduct =
+                _mm_or_si128(_mm_cmpeq_epi32(leftExponent, none), _mm_cmpeq_epi32(rightExponent, none));
+            // A nonzero product that may be infinite, or round by too much next to the result.
+            const __m128i risky = _mm_andnot_si128(
+                zeroProduct, _mm_or_si128(_mm_cmpgt_epi32(productBound, _mm_set1_epi32(379)),
+                                          _mm_cmpgt_epi32(productBound, _mm_add_epi32(resultExponent, _mm_set1_epi32(146)))));
+            const __m128i resultSafe = _mm_and_si128(_mm_cmpgt_epi32(resultExponent, _mm_set1_epi32(1)),
+                                                     _mm_cmplt_epi32(resultExponent, _mm_set1_epi32(254)));
+            const __m128i zero = _mm_cmpeq_epi32(_mm_and_si128(bits, magnitudeMask), none);
+            const __m128i safe = _mm_or_si128(_mm_andnot_si128(risky, resultSafe), _mm_and_si128(zero, zeroProduct));
+            if ((fast::mask(safe) & fast::kLanes<dest>) != fast::kLanes<dest>)
+                return false;
+            _mm_storeu_ps(value, result);
+            if constexpr (dest != 0u)
+            {
+                const __m128i product = _mm_and_si128(_mm_castps_si128(_mm_mul_ps(left, right)), magnitudeMask);
+                const __m128i tiny = _mm_cmplt_epi32(product, _mm_set1_epi32(0x00800000));
+                const uint32_t conditions = fast::layout<dest>(fast::mask(tiny), _mm_movemask_ps(_mm_xor_ps(left, right)),
+                                                               fast::mask(_mm_andnot_si128(zeroProduct, tiny)));
+                pushFlags(3u, fast::layout<dest>(fast::mask(zero), _mm_movemask_ps(result), 0), conditions);
+            }
+            return true;
+        }
+    }
+#endif
 }
 #endif
 
