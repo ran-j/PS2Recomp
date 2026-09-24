@@ -13,6 +13,7 @@ void register_ee_fiber_tests();
 void register_ps2_memory_tests();
 void register_ps2_vu1_tests();
 void register_ps2_vu1_upper_engine_tests();
+void register_ps2_vu1_program_tests();
 void register_ps2_vu_tests();
 void register_ps2_gs_tests();
 void register_ps2_iop_tests();
@@ -37,6 +38,7 @@ int main()
     register_ps2_memory_tests();
     register_ps2_vu1_tests();
     register_ps2_vu1_upper_engine_tests();
+    register_ps2_vu1_program_tests();
     register_ps2_vu_tests();
     register_ps2_gs_tests();
     register_ps2_iop_tests();

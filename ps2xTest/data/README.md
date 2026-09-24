@@ -17,5 +17,15 @@ to generate native instantiations and a dispatch registry. Its
 profiles and code images. The profile format contains instruction records only,
 so provenance is documented here rather than inside the fixture files.
 
+[`vu_programs.py`](vu_programs.py) writes synthetic VU1 programs in the layout
+a `PS2_VU_PROGRAM_PROFILE` recording has, for the whole-program compiler. A few
+are written out by hand to reach particular paths; the rest come from a seeded
+generator, so every run writes the same programs. Build the runtime with
+`PS2X_VU_PROGRAM_PROFILES` pointing at the output and set
+`PS2_VU_PROGRAM_FIXTURES` to the same directory to run them through
+[`ps2_vu1_program_tests.cpp`](../src/ps2_vu1_program_tests.cpp), which compares
+each program compiled and interpreted at several cycle budgets.
+`PS2_VU_REQUIRE_PROGRAMS=1` makes a program without a compiled routine fail.
+
 Runtime captures, game code images, snapshots, and native sources generated from
 game inputs remain local build artifacts. Do not add them to this directory.

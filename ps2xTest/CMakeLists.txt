@@ -54,6 +54,7 @@ add_library(ps2_test_lib STATIC
     src/ps2_memory_tests.cpp
     src/ps2_vu1_tests.cpp
     src/ps2_vu1_upper_engine_tests.cpp
+    src/ps2_vu1_program_tests.cpp
     src/ps2_vu_tests.cpp
     src/ps2_gs_tests.cpp
     src/ps2_iop_tests.cpp
