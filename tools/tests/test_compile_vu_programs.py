@@ -104,6 +104,28 @@ class CompileVuProgramsTests(unittest.TestCase):
             self.assertEqual(blocks, [3])
             self.assertIn("return p.leave(0x0018u);", text)
 
+    def test_every_assigned_efu_opcode_compiles_and_the_unassigned_ones_hand_back(self):
+        nop = (vu.LOWER_NOP, vu.UPPER_NOP)
+        end = [(vu.LOWER_NOP, vu.UPPER_NOP | vu.E_BIT), nop]
+        assigned = [op for op in range(0x70, 0x80) if op not in (0x77, 0x7F)]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pairs = [(vu.lower_special(op, 1), vu.UPPER_NOP) for op in assigned] + end
+            profile(root, pairs, [0])
+            result, output = compile_profile(root)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            _, blocks = routines(output)
+            self.assertEqual(blocks, [len(pairs)])
+        for op in (0x77, 0x7F):
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                profile(root, [nop, nop, (vu.lower_special(op, 1), vu.UPPER_NOP)] + end, [0])
+                result, output = compile_profile(root)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                text, blocks = routines(output)
+                self.assertEqual(blocks, [2])
+                self.assertIn("return p.leave(0x0010u);", text)
+
     def test_entries_must_be_pair_aligned_and_inside_code_memory(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
