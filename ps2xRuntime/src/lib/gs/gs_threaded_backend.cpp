@@ -194,6 +194,18 @@ struct GSThreadedBackend::Impl
                 {
                     execute(command);
                     bytes += command.bytes();
+                    // A batch can hold most of a frame. Returning its space as
+                    // it drains keeps the producer going instead of stopping
+                    // it for the whole batch and then leaving this thread idle.
+                    if (bytes >= kReleaseBytes)
+                    {
+                        {
+                            std::lock_guard lock(mutex);
+                            outstandingBytes -= bytes;
+                        }
+                        bytes = 0u;
+                        progress.notify_all();
+                    }
                 }
             }
             catch (...)
@@ -219,6 +231,8 @@ struct GSThreadedBackend::Impl
             progress.notify_all();
         }
     }
+
+    static constexpr size_t kReleaseBytes = 64u * 1024u;
 
     std::unique_ptr<GSRasterBackend> backend;
     const std::shared_ptr<const int> identity = std::make_shared<const int>(0);
