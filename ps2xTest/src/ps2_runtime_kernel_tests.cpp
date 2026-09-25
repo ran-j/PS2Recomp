@@ -922,6 +922,48 @@ void register_ps2_runtime_kernel_tests()
             t.Equals(reused, heapBase, "guestFree should make the head block reusable");
         });
 
+        tc.Run("SetupHeap with size -1 runs the heap up to the main stack base", [](TestCase &t)
+        {
+            TestEnv env;
+            constexpr uint32_t kMainStackSize = 0x00030000u;
+            constexpr uint32_t kMainStackBase = PS2_RAM_SIZE - kMainStackSize;
+            constexpr uint32_t kHeapBase = 0x00528200u;
+
+            setRegU32(env.ctx, 29, PS2_RAM_SIZE - 0x10u);
+            setRegU32(env.ctx, 4, 0x00485170u);
+            setRegU32(env.ctx, 5, 0xFFFFFFFFu); // stack: top of RAM
+            setRegU32(env.ctx, 6, kMainStackSize);
+            t.IsTrue(callSyscall(0x3Cu, env.rdram.data(), &env.ctx, &env.runtime), "SetupThread syscall should dispatch");
+
+            setRegU32(env.ctx, 4, kHeapBase);
+            setRegU32(env.ctx, 5, 0xFFFFFFFFu); // heap: rest of RAM
+            t.IsTrue(callSyscall(0x3Du, env.rdram.data(), &env.ctx, &env.runtime), "SetupHeap syscall should dispatch");
+            t.Equals(::getRegU32(&env.ctx, 2), kHeapBase, "SetupHeap should return the configured base");
+
+            t.IsTrue(callSyscall(0x3Eu, env.rdram.data(), &env.ctx, &env.runtime), "EndOfHeap syscall should dispatch");
+            t.Equals(::getRegU32(&env.ctx, 2), kMainStackBase,
+                     "a rest-of-RAM heap should end at the main thread's stack base");
+
+            // A retail-sized master arena (e.g. Rogue Galaxy's 0x18B0000-byte
+            // "MainMemory") must fit in a rest-of-RAM heap.
+            const uint32_t arena = env.runtime.guestMalloc(0x018B0000u, 16u);
+            t.IsTrue(arena != 0u, "a rest-of-RAM heap should satisfy a ~25MB allocation");
+            env.runtime.guestFree(arena);
+        });
+
+        tc.Run("SetupHeap with size -1 stays bounded before SetupThread runs", [](TestCase &t)
+        {
+            TestEnv env;
+
+            setRegU32(env.ctx, 4, 0x00180010u);
+            setRegU32(env.ctx, 5, 0xFFFFFFFFu);
+            t.IsTrue(callSyscall(0x3Du, env.rdram.data(), &env.ctx, &env.runtime), "SetupHeap syscall should dispatch");
+
+            t.IsTrue(callSyscall(0x3Eu, env.rdram.data(), &env.ctx, &env.runtime), "EndOfHeap syscall should dispatch");
+            t.Equals(::getRegU32(&env.ctx, 2), 0x01F00000u,
+                     "without a recorded stack base the heap should use the bounded fallback");
+        });
+
         tc.Run("memalign stubs allocate aligned guest memory", [](TestCase &t)
         {
             TestEnv env;

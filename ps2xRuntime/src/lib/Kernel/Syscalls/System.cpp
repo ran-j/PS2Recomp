@@ -531,6 +531,13 @@ namespace ps2_syscalls
         }
 
         scheduler.setupCurrentThread(initialStack, stackSize, getRegU32(ctx, 28));
+
+        // SetupHeap resolves a "rest of RAM" heap to this stack base.
+        if (runtime && initialStack != 0u)
+        {
+            runtime->setGuestMainStackBase(initialStack);
+        }
+
         setReturnU32(ctx, sp);
     }
 
@@ -542,19 +549,18 @@ namespace ps2_syscalls
 
         const uint32_t heapBase = (heapBaseRaw + 0xFu) & ~0xFu;
 
-        // Silent Hill and other games often pass -1 (0xFFFFFFFF) to mean "rest of RAM".
-        static constexpr uint32_t kDefaultGuestHeapEnd = 0x01F00000u;
-        uint32_t heapLimit = kDefaultGuestHeapEnd;
-
+        // heap_size of 0 or -1 means "rest of RAM"; like the retail kernel,
+        // that resolves to the main thread's stack base recorded by
+        // SetupThread (limit 0 below).
+        uint32_t heapLimit = 0u;
         if (heapSize != 0u && heapSize != 0xFFFFFFFFu)
         {
             const uint64_t candidate = static_cast<uint64_t>(heapBase) + static_cast<uint64_t>(heapSize);
-            heapLimit = static_cast<uint32_t>(std::min<uint64_t>(candidate, kDefaultGuestHeapEnd));
-        }
-
-        if (heapLimit <= heapBase)
-        {
-            heapLimit = kDefaultGuestHeapEnd;
+            heapLimit = static_cast<uint32_t>(std::min<uint64_t>(candidate, PS2_RAM_SIZE));
+            if (heapLimit <= heapBase)
+            {
+                heapLimit = 0u;
+            }
         }
 
         if (runtime)
@@ -578,18 +584,11 @@ namespace ps2_syscalls
         setReturnU32(ctx, heapBase);
     }
 
-    // 0x3E EndOfHeap: commonly returns current heap end; keep it stable for now.
+    // 0x3E EndOfHeap: returns the current heap end.
     void EndOfHeap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         (void)rdram;
-
-        static constexpr uint32_t kDefaultGuestHeapEnd = 0x01F00000u;
-
-        const uint32_t ret = runtime
-                                 ? runtime->guestHeapLimit()
-                                 : kDefaultGuestHeapEnd;
-
-        setReturnU32(ctx, ret);
+        setReturnU32(ctx, runtime ? runtime->guestHeapLimit() : PS2_RAM_SIZE);
     }
 
     void GetMemorySize(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
