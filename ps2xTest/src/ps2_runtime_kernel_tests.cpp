@@ -855,6 +855,35 @@ void register_ps2_runtime_kernel_tests()
             t.IsTrue(trace == expected, "higher priority should run before the starter continues");
         });
 
+        tc.Run("time-slice preemption waits until EE interrupts are enabled", [](TestCase &t)
+        {
+            constexpr uint32_t kStatusIe = 1u << 0u;
+            constexpr uint32_t kStatusEie = 1u << 16u;
+
+            TestEnv env;
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.reset(env.rdram.data(), env.ctx);
+            ee.bindMainContextForSyscall(env.ctx, env.rdram.data());
+
+            int oldPriority = 0;
+            t.Equals(ee.changePriority(EeScheduler::kMainThreadId, 5, false, oldPriority), 0,
+                     "the running main thread should accept a schedulable priority");
+            const int peer = ee.createThread(EeThreadCreateParams{0u, K_SCHED_HIGH, 0x24000u, 0x800u,
+                                                                  0u, 5, 0u});
+            t.Equals(ee.startThread(peer, 0u, env.ctx, false), KE_OK,
+                     "the same-priority peer should become ready");
+
+            R5900Context *current = ee.currentContext();
+            t.IsTrue(current != nullptr, "the main thread should remain the active context");
+            current->cop0_status = kStatusIe;
+            t.IsFalse(ee.checkpointDue(static_cast<uint32_t>(EeScheduler::kDefaultTimeSliceCycles)),
+                      "DI must defer synthetic time-slice preemption");
+
+            current->cop0_status |= kStatusEie;
+            t.IsTrue(ee.checkpointDue(1u),
+                     "EI must make the deferred time-slice preemption due immediately");
+        });
+
         tc.Run("semaphore waiters are FIFO and signal transfers one token directly", [](TestCase &t)
         {
             TestEnv env;

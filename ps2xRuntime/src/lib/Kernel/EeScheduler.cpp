@@ -36,6 +36,17 @@ namespace
     constexpr uint64_t kAlarmTickMicroseconds = 64u;
     constexpr uint32_t kDebugPublishDispatchInterval = 4096u;
 
+    bool eeInterruptsEnabled(const R5900Context &context)
+    {
+        constexpr uint32_t kStatusIe = 1u << 0u;
+        constexpr uint32_t kStatusExl = 1u << 1u;
+        constexpr uint32_t kStatusErl = 1u << 2u;
+        constexpr uint32_t kStatusEie = 1u << 16u;
+        const uint32_t status = context.cop0_status;
+        return (status & (kStatusIe | kStatusEie)) == (kStatusIe | kStatusEie) &&
+               (status & (kStatusExl | kStatusErl)) == 0u;
+    }
+
     constexpr uint64_t microsecondsToEeCycles(uint64_t microseconds)
     {
         return (microseconds * EeScheduler::kEeClockHz + 999999ull) / 1000000ull;
@@ -364,6 +375,12 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
         return true;
     }
 
+    const GuestThread *running = currentThread();
+    if (m_rescheduleRequested && running != nullptr && eeInterruptsEnabled(running->activeContext()))
+    {
+        return true;
+    }
+
     const uint64_t nextEventCycle = m_nextDeadlineCycle.load(std::memory_order_acquire);
     if (nextEventCycle != 0u && m_eeCycle >= nextEventCycle)
     {
@@ -376,9 +393,12 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
         return false;
     }
 
-    const GuestThread *running = currentThread();
     if (running != nullptr && hasReadyAtOrAbovePriority(running->currentPriority))
     {
+        if (!eeInterruptsEnabled(running->activeContext()))
+        {
+            return false;
+        }
         m_rescheduleRequested = true;
         m_timeSliceExpired = true;
         return true;
@@ -1734,6 +1754,10 @@ void EeScheduler::applyPendingPreemption()
     }
     GuestThread *self = currentThread();
     assert(self != nullptr);
+    if (!eeInterruptsEnabled(self->activeContext()))
+    {
+        return;
+    }
     enqueueReady(*self, !m_timeSliceExpired);
     m_currentThreadId = 0;
     m_rescheduleRequested = false;
