@@ -1020,6 +1020,22 @@ void register_code_generator_tests()
             t.IsTrue(ctc1Code.find("ignored") == std::string::npos, "CTC1 FCR31 should not be ignored");
         });
 
+        tc.Run("SQRT.S reads the ft source register", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+
+            Instruction sqrt{};
+            sqrt.opcode = OPCODE_COP1;
+            sqrt.rs = COP1_S;
+            sqrt.rt = 4;
+            sqrt.rd = 9;
+            sqrt.sa = 2;
+            sqrt.function = COP1_S_SQRT;
+
+            const std::string generated = gen.translateInstruction(sqrt);
+            t.IsTrue(generated.find("ctx->f[2] = FPU_SQRT_S(ctx->f[4]);") != std::string::npos,
+                     "SQRT.S should read ft, not the otherwise-unused fs field");
+        });
+
         tc.Run("VU CFC2/CTC2 access VI registers directly", [](TestCase& t)
             {
                 CodeGenerator gen({}, {});
