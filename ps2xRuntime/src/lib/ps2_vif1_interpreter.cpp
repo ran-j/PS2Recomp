@@ -604,6 +604,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                     uint32_t decompressed[4] = {lanes[0], lanes[1], lanes[2], lanes[3]};
                     bool decoded = false;
 
+                    const uint32_t sourceVectorIndex = srcIndex;
                     const uint8_t *srcVec = nullptr;
                     if (sourceAvailable && srcIndex < sourceVectorCount)
                     {
@@ -708,6 +709,74 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                     else
                     {
                         handledFormat = false;
+                    }
+
+                    // The VIF expands V2 to XYXY. V3's hardware-defined W lane depends
+                    // on both the packed format and the source packet phase.
+                    if (handledFormat && components == 2)
+                    {
+                        decompressed[2] = decompressed[0];
+                        decompressed[3] = decompressed[1];
+                    }
+                    else if (handledFormat && components == 3)
+                    {
+                        const size_t dataStartOffset =
+                            static_cast<size_t>(srcBase - data);
+                        const uint32_t dataStartWord =
+                            static_cast<uint32_t>((dataStartOffset >> 2u) & 0x3u);
+                        const uint32_t startAlignment =
+                            (dataStartWord == 0u) ? 4u : dataStartWord;
+                        const uint32_t unpackIteration = sourceVectorIndex + 1u;
+                        bool keepFourthComponent = false;
+
+                        if (vl == 0u)
+                        {
+                            // V3-32 advances its internal phase after each vector.
+                            keepFourthComponent =
+                                ((sourceVectorIndex & 1u) == (startAlignment & 1u));
+                        }
+                        else if (vl == 1u)
+                        {
+                            // V3-16 has a four-word phase tested against real hardware.
+                            const uint32_t phase =
+                                ((unpackIteration / 4u) + 1u +
+                                 (4u - startAlignment)) & 0x3u;
+                            keepFourthComponent =
+                                !((unpackIteration & 1u) == 0u && phase == 0u);
+                        }
+                        else if (vl == 2u)
+                        {
+                            // V3-8 only exposes W at its matching initial packet phase.
+                            keepFourthComponent =
+                                (unpackIteration == (startAlignment & 1u));
+                        }
+
+                        const size_t fourthComponentOffset =
+                            static_cast<size_t>(srcVec - data) +
+                            3u * static_cast<size_t>(bitsPerComponent / 8);
+                        const size_t fourthComponentBytes =
+                            static_cast<size_t>(bitsPerComponent / 8);
+                        decompressed[3] = 0u;
+                        if (keepFourthComponent &&
+                            fourthComponentOffset + fourthComponentBytes <= sizeBytes)
+                        {
+                            if (vl == 0u)
+                            {
+                                std::memcpy(&decompressed[3],
+                                            data + fourthComponentOffset,
+                                            sizeof(decompressed[3]));
+                            }
+                            else if (vl == 1u)
+                            {
+                                uint16_t raw = 0u;
+                                std::memcpy(&raw, data + fourthComponentOffset, sizeof(raw));
+                                decompressed[3] = extend16(raw);
+                            }
+                            else if (vl == 2u)
+                            {
+                                decompressed[3] = extend8(data[fourthComponentOffset]);
+                            }
+                        }
                     }
 
                     // Unknown compressed format fallback: preserve legacy raw-copy behavior.

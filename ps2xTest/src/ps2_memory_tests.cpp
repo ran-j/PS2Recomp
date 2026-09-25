@@ -531,6 +531,146 @@ void register_ps2_memory_tests()
             t.Equals(sw, 0x00008001u, "zero-extend w");
         });
 
+        tc.Run("VIF UNPACK V2 duplicates XY into ZW", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0, PS2_VU1_DATA_SIZE);
+
+            // UNPACK V2-8 (opcode 0x66), NUM=2, sign-extended.
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x66u, 2u, 0u));
+            packet.insert(packet.end(), {0x01u, 0x02u, 0xFEu, 0x7Fu});
+
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            const uint8_t *vu = mem.getVU1Data();
+            const uint32_t expected[2][4] = {
+                {1u, 2u, 1u, 2u},
+                {0xFFFFFFFEu, 0x7Fu, 0xFFFFFFFEu, 0x7Fu},
+            };
+            for (uint32_t vector = 0u; vector < 2u; ++vector)
+            {
+                for (uint32_t lane = 0u; lane < 4u; ++lane)
+                {
+                    uint32_t actual = 0u;
+                    std::memcpy(&actual, vu + vector * 16u + lane * 4u, sizeof(actual));
+                    t.Equals(actual, expected[vector][lane],
+                             "V2 lane should follow XYXY hardware expansion");
+                }
+            }
+        });
+
+        tc.Run("VIF UNPACK V3-32 W follows source packet phase", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            for (uint32_t prefixWords = 0u; prefixWords < 4u; ++prefixWords)
+            {
+                std::memset(mem.getVU1Data(), 0, PS2_VU1_DATA_SIZE);
+
+                std::vector<uint8_t> packet;
+                for (uint32_t i = 0u; i < prefixWords; ++i)
+                    appendU32(packet, makeVifCmd(0x00u, 0u, 0u));
+
+                appendU32(packet, makeVifCmd(0x68u, 2u, 0u)); // UNPACK V3-32
+                for (uint32_t component = 1u; component <= 6u; ++component)
+                    appendU32(packet, 0x10000000u + component);
+                appendU32(packet, makeVifCmd(0x07u, 0u, 0xBEEFu));
+
+                mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+                const uint32_t dataStartWord = (prefixWords + 1u) & 0x3u;
+                const uint32_t startAlignment =
+                    (dataStartWord == 0u) ? 4u : dataStartWord;
+                for (uint32_t vector = 0u; vector < 2u; ++vector)
+                {
+                    uint32_t actualW = 0u;
+                    std::memcpy(&actualW,
+                                mem.getVU1Data() + vector * 16u + 12u,
+                                sizeof(actualW));
+                    const bool keepW =
+                        ((vector & 1u) == (startAlignment & 1u));
+                    const uint32_t expectedW = keepW
+                        ? ((vector == 0u) ? 0x10000004u : 0x0700BEEFu)
+                        : 0u;
+                    t.Equals(actualW, expectedW,
+                             "V3-32 W should follow the hardware-tested packet phase");
+                }
+            }
+        });
+
+        tc.Run("VIF UNPACK V3-16 W follows four-word packet phase", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0, PS2_VU1_DATA_SIZE);
+
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x00u, 0u, 0u));
+            appendU32(packet, makeVifCmd(0x69u, 6u, 0u)); // data begins at word phase 2
+            for (uint16_t component = 1u; component <= 18u; ++component)
+            {
+                const size_t offset = packet.size();
+                packet.resize(offset + sizeof(component));
+                std::memcpy(packet.data() + offset, &component, sizeof(component));
+            }
+            appendU32(packet, makeVifCmd(0x07u, 0u, 0xBEEFu));
+
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            const uint8_t *vu = mem.getVU1Data();
+            const uint32_t expectedW[6] = {
+                4u, 7u, 10u, 0u, 16u, 0u,
+            };
+            for (uint32_t vector = 0u; vector < 6u; ++vector)
+            {
+                uint32_t actualW = 0u;
+                std::memcpy(&actualW, vu + vector * 16u + 12u, sizeof(actualW));
+                t.Equals(actualW, expectedW[vector],
+                         "V3-16 W should follow the hardware-tested four-word phase");
+            }
+        });
+
+        tc.Run("VIF UNPACK V3-8 W follows its initial packet phase", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            for (uint32_t prefixWords = 0u; prefixWords < 4u; ++prefixWords)
+            {
+                std::memset(mem.getVU1Data(), 0, PS2_VU1_DATA_SIZE);
+
+                std::vector<uint8_t> packet;
+                for (uint32_t i = 0u; i < prefixWords; ++i)
+                    appendU32(packet, makeVifCmd(0x00u, 0u, 0u));
+
+                appendU32(packet, makeVifCmd(0x6Au, 2u, 0u));
+                packet.insert(packet.end(), {
+                    0x11u, 0x12u, 0x13u,
+                    0x21u, 0x22u, 0x23u,
+                    0xA5u, 0xA6u,
+                });
+
+                mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+                const uint32_t dataStartWord = (prefixWords + 1u) & 0x3u;
+                const uint32_t startAlignment =
+                    (dataStartWord == 0u) ? 4u : dataStartWord;
+                uint32_t firstW = 0u;
+                uint32_t secondW = 0u;
+                std::memcpy(&firstW, mem.getVU1Data() + 12u, sizeof(firstW));
+                std::memcpy(&secondW, mem.getVU1Data() + 28u, sizeof(secondW));
+                const uint32_t expectedFirstW =
+                    ((startAlignment & 1u) != 0u) ? 0x21u : 0u;
+                t.Equals(firstW, expectedFirstW,
+                         "V3-8 first W should follow the hardware-tested packet phase");
+                t.Equals(secondW, 0u,
+                         "V3-8 should zero W after its initial matching phase");
+            }
+        });
+
         tc.Run("VIF UNPACK bit15 adds TOPS to destination address", [](TestCase &t)
         {
             PS2Memory mem;
