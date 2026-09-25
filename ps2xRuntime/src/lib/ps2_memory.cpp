@@ -2116,7 +2116,8 @@ bool PS2Memory::tryProcessNativeGifImageUploadChain(GS &gs, uint32_t tadr, uint3
         return false;
 
     const uint64_t imageTagLo = loadScalar<uint64_t>(imageGifTag, 0u, 16u, "native gif image tag", imageTagDmaAddr + 16u);
-    if (gifTagFlg(imageTagLo) != GIF_FMT_IMAGE)
+    const uint8_t imageFormat = gifTagFlg(imageTagLo);
+    if (imageFormat != GIF_FMT_IMAGE && imageFormat != GIF_FMT_IMAGE2)
         return false;
 
     const uint32_t imageQwc = gifTagNloop(imageTagLo);

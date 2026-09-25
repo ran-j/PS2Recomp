@@ -725,7 +725,7 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
             if ((nloop * nreg) & 1)
                 offset += 8;
         }
-        else if (flg == GIF_FMT_IMAGE)
+        else if (flg == GIF_FMT_IMAGE || flg == GIF_FMT_IMAGE2)
         {
             uint32_t imageBytes = nloop * 16;
             if (offset + imageBytes > sizeBytes)
@@ -860,7 +860,7 @@ bool GS::tryProcessNativeImageUploadPacket(const uint8_t *data, uint32_t sizeByt
     const uint64_t imageTagLo = loadLE64(data + offset);
     const uint8_t imageFlg = static_cast<uint8_t>((imageTagLo >> 58u) & 0x3u);
     const uint32_t imageNloop = static_cast<uint32_t>(imageTagLo & 0x7FFFu);
-    if (imageFlg != GIF_FMT_IMAGE || imageNloop == 0u)
+    if ((imageFlg != GIF_FMT_IMAGE && imageFlg != GIF_FMT_IMAGE2) || imageNloop == 0u)
         return false;
 
     offset += 16u;

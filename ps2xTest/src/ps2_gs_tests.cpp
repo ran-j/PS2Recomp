@@ -2170,6 +2170,49 @@ void register_ps2_gs_tests()
             t.IsTrue(same, "GIF IMAGE transfer should write payload bytes into GS VRAM");
         });
 
+        tc.Run("GIF IMAGE2 packet writes host-to-local data into GS VRAM", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            const uint64_t bitblt =
+                (static_cast<uint64_t>(1u) << 16) |
+                (static_cast<uint64_t>(1u) << 48);
+            gs.writeRegister(GS_REG_BITBLTBUF, bitblt);
+            gs.writeRegister(GS_REG_TRXPOS, 0ull);
+            gs.writeRegister(GS_REG_TRXREG, (4ull << 0) | (1ull << 32));
+            gs.writeRegister(GS_REG_TRXDIR, 0ull);
+
+            std::vector<uint8_t> packet;
+            appendU64(packet, makeGifTag(1u, GIF_FMT_IMAGE2, 0u, true));
+            appendU64(packet, 0ull);
+            const uint8_t payload[16] = {
+                0x71u, 0x72u, 0x73u, 0x74u,
+                0x75u, 0x76u, 0x77u, 0x78u,
+                0x79u, 0x7Au, 0x7Bu, 0x7Cu,
+                0x7Du, 0x7Eu, 0x7Fu, 0x80u,
+            };
+            packet.insert(packet.end(), payload, payload + sizeof(payload));
+
+            gs.processGIFPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            bool same = true;
+            for (uint32_t x = 0; x < 4u && same; ++x)
+            {
+                const uint32_t off = referenceAddrPSMCT32(0u, 1u, x, 0u);
+                for (uint32_t c = 0; c < 4u; ++c)
+                {
+                    if (vram[off + c] != payload[x * 4u + c])
+                    {
+                        same = false;
+                        break;
+                    }
+                }
+            }
+            t.IsTrue(same, "IMAGE2 payload should be handled like IMAGE");
+        });
+
         tc.Run("GIF load-image packet uses native upload fast path", [](TestCase &t)
         {
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);

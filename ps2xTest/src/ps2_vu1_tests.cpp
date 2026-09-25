@@ -1202,6 +1202,49 @@ void register_ps2_vu1_tests()
             }
         });
 
+        tc.Run("XGKICK accepts IMAGE2 GIF tags", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            std::vector<std::vector<uint8_t>> captured;
+            mem.setGifPacketCallback([&](const uint8_t *packet, uint32_t sizeBytes)
+            {
+                captured.emplace_back(packet, packet + sizeBytes);
+            });
+
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            uint8_t *code = mem.getVU1Code();
+            uint8_t *data = mem.getVU1Data();
+            std::memset(code, 0, PS2_VU1_CODE_SIZE);
+            std::memset(data, 0, PS2_VU1_DATA_SIZE);
+
+            const uint64_t image2Tag = makeGifTag(1u, GIF_FMT_IMAGE2, 0u, true);
+            std::memcpy(data, &image2Tag, sizeof(image2Tag));
+            std::memset(data + 16u, 0x5Au, 16u);
+            writeVuInstructionPair(
+                code, 0u,
+                makeVuLowerSpecial(0x6Cu, 1u),
+                kVuUpperNop);
+
+            VU1Interpreter vu1;
+            vu1.state().vi[1] = 0;
+            vu1.execute(code, PS2_VU1_CODE_SIZE,
+                        data, PS2_VU1_DATA_SIZE, gs, &mem,
+                        0u, 0u, 0u, 3u);
+
+            t.Equals(captured.size(), static_cast<size_t>(1u),
+                     "IMAGE2 should complete one PATH1 packet");
+            if (!captured.empty())
+            {
+                t.Equals(captured[0].size(), static_cast<size_t>(32u),
+                         "IMAGE2 PATH1 packet should include its image payload");
+            }
+        });
+
         tc.Run("XGKICK observes stores committed before a future PATH1 qword", [](TestCase &t)
         {
             PS2Memory mem;

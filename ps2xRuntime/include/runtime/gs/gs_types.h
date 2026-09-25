@@ -38,7 +38,7 @@ enum GSGifFormat : uint8_t
     GIF_FMT_PACKED = 0,
     GIF_FMT_REGLIST = 1,
     GIF_FMT_IMAGE = 2,
-    GIF_FMT_DISABLED = 3,
+    GIF_FMT_IMAGE2 = 3,
 };
 
 enum GSRegId : uint8_t
