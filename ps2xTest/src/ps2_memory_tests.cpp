@@ -40,12 +40,13 @@ namespace
         std::memcpy(dst.data() + pos, &value, sizeof(uint64_t));
     }
 
-    uint64_t makeDmaTag(uint16_t qwc, uint8_t id, uint32_t addr, bool irq = false)
+    uint64_t makeDmaTag(uint16_t qwc, uint8_t id, uint32_t addr, bool irq = false, bool spr = false)
     {
         return static_cast<uint64_t>(qwc) |
                (static_cast<uint64_t>(id & 0x7u) << 28) |
                (irq ? (1ull << 31) : 0ull) |
-               (static_cast<uint64_t>(addr & 0x7FFFFFFFu) << 32);
+               (static_cast<uint64_t>(addr & 0x7FFFFFFFu) << 32) |
+               (spr ? (1ull << 63) : 0ull);
     }
 
     void writeDmaTag(uint8_t *rdram, uint32_t tagAddr, uint64_t tagLo)
@@ -1098,6 +1099,71 @@ void register_ps2_memory_tests()
                 }
             }
             t.IsTrue(contentOk, "scratchpad GIF DMA packet bytes should match scratchpad source");
+        });
+
+        tc.Run("GIF DMA mode0 honors the MADR SPR selector", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kGifCh = 0x1000A000u;
+            constexpr uint32_t kRawSprMadr = 0x80898080u;
+            constexpr uint32_t kScratchOffset = 0x80u;
+
+            uint8_t *scratch = mem.getScratchpad();
+            for (uint32_t i = 0; i < 16u; ++i)
+                scratch[kScratchOffset + i] = static_cast<uint8_t>(0xB0u + i);
+
+            std::vector<std::vector<uint8_t>> captured;
+            mem.setGifPacketCallback([&](const uint8_t *data, uint32_t sizeBytes)
+            {
+                captured.emplace_back(data, data + sizeBytes);
+            });
+
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x10u, kRawSprMadr), "write SPR-selected MADR should succeed");
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x20u, 1u), "write QWC should succeed");
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x00u, 0x100u), "write CHCR STR should succeed");
+
+            mem.processPendingTransfers();
+
+            t.Equals(captured.size(), static_cast<size_t>(1u), "SPR-selected MADR should emit one packet");
+            t.Equals(captured[0].size(), static_cast<size_t>(16u), "SPR-selected MADR should emit one qword");
+            t.IsTrue(std::equal(captured[0].begin(), captured[0].end(), scratch + kScratchOffset),
+                     "SPR-selected MADR should read scratchpad bytes");
+        });
+
+        tc.Run("GIF DMA chain follows SPR-selected NEXT tags", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kGifCh = 0x1000A000u;
+            constexpr uint32_t kFirstTag = 0x00022100u;
+            constexpr uint32_t kRawSprTarget = 0x00898F00u;
+            constexpr uint32_t kScratchTagOffset = 0x0F00u;
+
+            uint8_t *rdram = mem.getRDRAM();
+            uint8_t *scratch = mem.getScratchpad();
+            writeDmaTag(rdram, kFirstTag, makeDmaTag(0u, 2u, kRawSprTarget, false, true));
+            writeDmaTag(scratch, kScratchTagOffset, makeDmaTag(1u, 7u, 0u));
+            for (uint32_t i = 0; i < 16u; ++i)
+                scratch[kScratchTagOffset + 16u + i] = static_cast<uint8_t>(0xD0u + i);
+
+            std::vector<std::vector<uint8_t>> captured;
+            mem.setGifPacketCallback([&](const uint8_t *data, uint32_t sizeBytes)
+            {
+                captured.emplace_back(data, data + sizeBytes);
+            });
+
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x30u, kFirstTag), "write TADR should succeed");
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x00u, 0x104u), "write CHCR STR|CHAIN should succeed");
+
+            mem.processPendingTransfers();
+
+            t.Equals(captured.size(), static_cast<size_t>(1u), "SPR-selected NEXT should emit one packet");
+            t.Equals(captured[0].size(), static_cast<size_t>(16u), "SPR-selected NEXT should emit one qword");
+            t.IsTrue(std::equal(captured[0].begin(), captured[0].end(), scratch + kScratchTagOffset + 16u),
+                     "SPR-selected NEXT should read the scratchpad tag payload");
         });
 
         tc.Run("GIF DMA chain can source tags and payload from 0xF000 scratchpad alias", [](TestCase &t)

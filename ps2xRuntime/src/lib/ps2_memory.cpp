@@ -46,6 +46,13 @@ namespace
         return Ps2AddressInRange(addr, PS2_IO_BASE, PS2_IO_SIZE);
     }
 
+    inline uint32_t canonicalDmacAddress(uint32_t address)
+    {
+        if ((address & 0x80000000u) != 0u)
+            return PS2_SCRATCHPAD_BASE + (address & (PS2_SCRATCHPAD_SIZE - 1u));
+        return address;
+    }
+
     inline uint64_t *gsRegPtr(GSRegisters &gs, uint32_t addr)
     {
         // Support both 64-bit base offsets and +4 dword aliases.
@@ -1317,6 +1324,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                 {
                     if (qwCount == 0)
                         return;
+                    srcAddr = canonicalDmacAddress(srcAddr);
                     const bool scratch = isScratchpad(srcAddr);
                     PendingTransfer pt;
                     pt.fromScratchpad = scratch;
@@ -1351,9 +1359,9 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     {
                         const uint64_t bytes64 = static_cast<uint64_t>(qwCount) * 16ull;
                         uint32_t bytes = (bytes64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu : static_cast<uint32_t>(bytes64);
+                        srcAddr = canonicalDmacAddress(srcAddr);
                         const bool scratch = isScratchpad(srcAddr);
-                        uint32_t src = 0;
-                        src = translateAddress(srcAddr);
+                        uint32_t src = translateAddress(srcAddr);
                         const uint8_t *base2;
                         uint32_t maxSz2;
                         if (scratch)
@@ -1384,9 +1392,9 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
                     auto appendVifTagData = [&](uint32_t localTagAddr)
                     {
-                        uint32_t tagPhys = 0u;
+                        localTagAddr = canonicalDmacAddress(localTagAddr);
                         const bool tagScratch = isScratchpad(localTagAddr);
-                        tagPhys = translateAddress(localTagAddr);
+                        const uint32_t tagPhys = translateAddress(localTagAddr);
 
                         const uint8_t *localBase = tagScratch ? m_scratchpad : m_rdram;
                         const uint32_t localMax = tagScratch ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
@@ -1408,11 +1416,12 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     while (tagsProcessed < kMaxChainTags)
                     {
                         const uint32_t currentTagAddr = tagAddr;
-                        const bool tagInSPR = isScratchpad(tagAddr);
+                        const uint32_t canonicalTagAddr = canonicalDmacAddress(tagAddr);
+                        const bool tagInSPR = isScratchpad(canonicalTagAddr);
                         uint32_t physTag = 0;
                         try
                         {
-                            physTag = translateAddress(tagAddr);
+                            physTag = translateAddress(canonicalTagAddr);
                         }
                         catch (...)
                         {
@@ -1438,7 +1447,9 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         uint16_t tagQwc = static_cast<uint16_t>(tag & 0xFFFF);
                         uint32_t id = static_cast<uint32_t>((tag >> 28) & 0x7);
                         const bool irq = ((tag >> 31) & 0x1ull) != 0ull;
-                        uint32_t addr = static_cast<uint32_t>((tag >> 32) & 0x7FFFFFFF);
+                        // The upper address bit is the DMAtag SPR selector. Keep it
+                        // attached so later tag/payload resolution uses scratchpad.
+                        uint32_t addr = static_cast<uint32_t>(tag >> 32);
                         lastTagUpper = static_cast<uint32_t>((tag >> 16) & 0xFFFFu);
                         ++tagsProcessed;
 
