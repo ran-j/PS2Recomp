@@ -1871,6 +1871,37 @@ void register_ps2_memory_tests()
             t.IsTrue((dstatCleared & kSummaryBit) == 0u, "summary bit should clear after status clear");
         });
 
+        tc.Run("GIF DMA zero-QWC END still completes the channel", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kGifCh = 0x1000A000u;
+            constexpr uint32_t kDStat = 0x1000E010u;
+            constexpr uint32_t kTag = 0x00027600u;
+
+            uint8_t *rdram = mem.getRDRAM();
+            writeDmaTag(rdram, kTag, makeDmaTag(0u, 7u, 0u, false));
+
+            uint32_t callbackCount = 0u;
+            mem.setGifPacketCallback([&](const uint8_t *, uint32_t)
+            {
+                ++callbackCount;
+            });
+
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x30u, kTag), "write GIF TADR should succeed");
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x00u, 0x104u), "write GIF CHCR STR|CHAIN should succeed");
+
+            mem.processPendingTransfers();
+
+            const uint32_t chcr = mem.readIORegister(kGifCh + 0x00u);
+            t.Equals(callbackCount, 0u, "zero-QWC chain must not submit an empty GIF packet");
+            t.Equals(chcr & 0x100u, 0u, "zero-QWC END should clear GIF STR");
+            t.Equals(chcr & 0x70000000u, 0x70000000u, "GIF CHCR should expose the terminal END tag id");
+            t.IsTrue((mem.readIORegister(kDStat) & (1u << 2u)) != 0u,
+                     "zero-QWC END should raise the GIF D_STAT channel bit");
+        });
+
         tc.Run("DMAC D_CTRL DMAE gates GIF DMA start", [](TestCase &t)
         {
             PS2Memory mem;
