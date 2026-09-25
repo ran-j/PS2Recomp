@@ -2,6 +2,21 @@ include(CheckIPOSupported)
 
 check_ipo_supported(RESULT IPO_SUPPORTED OUTPUT IPO_ERROR)
 
+# SSE4.1 is required to compile, not an optimisation: ps2_runtime.h includes
+# <smmintrin.h> and the recompiler emits SSE4.1-only intrinsics. GCC and Clang
+# default to the SSE2 baseline, so those TUs fail without this. Kept out of
+# EnableFastReleaseMode because it applies to every configuration, not just
+# Release.
+function(EnableX86SimdBaseline TargetName)
+    if(MSVC)
+        return()
+    endif()
+    if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|i[3-6]86|x86)$")
+        return()
+    endif()
+    target_compile_options(${TargetName} PUBLIC -msse4.1)
+endfunction()
+
 function(EnableFastReleaseMode TargetName)
     message("> Enabling optimization for: ${TargetName}")
     if(MSVC)
