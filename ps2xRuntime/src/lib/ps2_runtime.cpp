@@ -5,12 +5,18 @@
 #include "game_overrides.h"
 #include "ps2_runtime_macros.h"
 #include "runtime/gs/gs_frontend.h"
+#ifdef PS2X_GS_PARALLEL
+#include "runtime/gs/gs_parallel_backend.h"
+#endif
 #include "runtime/ee_scheduler.h"
 #include "ThreadNaming.h"
 #include "Kernel/Stubs/Audio.h"
 #include "Kernel/Stubs/GS.h"
 #include "Kernel/Stubs/MPEG.h"
 #include "ps2_host_backend.h"
+#ifdef PS2X_GS_PARALLEL
+#include "rlgl.h"
+#endif
 #include "ps2_iop_host.h"
 #include "ps2x/iop/iop_subsystem.h"
 
@@ -22,6 +28,7 @@
 #include <cstring>
 #include <limits>
 #include <chrono>
+#include <cstdlib>
 #include <atomic>
 #include <thread>
 #include <unordered_map>
@@ -394,7 +401,12 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
         s_lastPresentationTick = currentTick;
         s_hasLatchedInitialFrame = true;
     }
-    else if (s_hasUploadedFrame)
+#ifdef PS2X_GS_PARALLEL
+    float aspect = 0.0f;
+    rt->gs().getLatchedGpuFrame(outWidth, outHeight, aspect);
+    return;
+#endif
+    if (!needsLatch && s_hasUploadedFrame)
     {
         outWidth = (s_lastWidth != 0u) ? s_lastWidth : FB_WIDTH;
         outHeight = (s_lastHeight != 0u) ? s_lastHeight : DEFAULT_DISPLAY_HEIGHT;
@@ -549,6 +561,7 @@ PS2Runtime::~PS2Runtime()
 
         if (IsWindowReady())
         {
+            m_gs.shutdownBackend();
             CloseWindow();
         }
 
@@ -665,8 +678,8 @@ bool PS2Runtime::syncCoreSubsystems()
     }
 
     m_gs.init(gsVram, static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &m_memory.gs());
-    m_gifArbiter.setProcessPacketFn([this](const uint8_t *data, uint32_t size)
-                                    { m_gs.processGIFPacket(data, size); });
+    m_gifArbiter.setProcessPacketFn([this](GifPathId path, const uint8_t *data, uint32_t size)
+                                    { m_gs.processGIFPacket(data, size, static_cast<uint32_t>(path)); });
     m_memory.setGifArbiter(&m_gifArbiter);
     m_memory.setVu1MscalCallback([this](uint32_t startPC, uint32_t top, uint32_t itop)
                                  {
@@ -735,6 +748,9 @@ bool PS2Runtime::initialize(const char *title)
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
         InitAudioDevice();
         m_audioBackend.setAudioReady(IsAudioDeviceReady());
+#endif
+#ifdef PS2X_GS_PARALLEL
+        m_gs.setRasterBackend(CreateParallelGSBackend(m_memory.gs()));
 #endif
         SetTargetFPS(60);
         if (m_debugUiInitCallback)
@@ -2386,72 +2402,97 @@ void PS2Runtime::run()
         gameThreadFinished.store(true, std::memory_order_release); });
 
     uint64_t tick = 0;
-    while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
+    std::exception_ptr presentationError;
+    try
     {
-        PS2_IF_AGRESSIVE_LOGS({
-            tick++;
-            if ((tick % 120) == 0)
+        while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
+        {
+            PS2_IF_AGRESSIVE_LOGS({
+                tick++;
+                if ((tick % 120) == 0)
+                {
+                    uint64_t curDma = m_memory.dmaStartCount();
+                    uint64_t curGif = m_memory.gifCopyCount();
+                    uint64_t curGs = m_memory.gsWriteCount();
+                    uint64_t curVif = m_memory.vifWriteCount();
+                    const GSRegisters &gs = m_memory.gs();
+                    const uint32_t dbgPc = m_debugPc.load(std::memory_order_relaxed);
+                    const uint32_t dbgRa = m_debugRa.load(std::memory_order_relaxed);
+                    const uint32_t dbgSp = m_debugSp.load(std::memory_order_relaxed);
+                    const uint32_t dbgGp = m_debugGp.load(std::memory_order_relaxed);
+                    const auto eeSnapshot = m_eeScheduler->snapshot();
+
+                    RUNTIME_LOG("[run:tick] tick=" << tick
+                                                   << " pc=0x" << std::hex << dbgPc
+                                                   << " ra=0x" << dbgRa
+                                                   << " sp=0x" << dbgSp
+                                                   << " gp=0x" << dbgGp
+                                                   << " dispfb1=0x" << gs.dispfb1
+                                                   << " display1=0x" << gs.display1
+                                                   << std::dec
+                                                   << " activeThreads=" << eeSnapshot.threads.size()
+                                                   << " dma=" << curDma
+                                                   << " gif=" << curGif
+                                                   << " gsw=" << curGs
+                                                   << " vif=" << curVif
+                                                   << std::endl);
+                }
+            });
+            uint32_t presentWidth = FB_WIDTH;
+            uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
+            UploadFrame(frameTex, this, presentWidth, presentHeight);
+
+            Texture2D presentationTexture = frameTex;
+            float aspectRatio = 0.0f;
+#ifdef PS2X_GS_PARALLEL
+            auto gpuFrame = m_gs.getLatchedGpuFrame(presentWidth, presentHeight, aspectRatio);
+            presentationTexture = {};
+            if (gpuFrame)
+                presentationTexture = Texture2D{gpuFrame->AcquireTexture(), int(presentWidth), int(presentHeight), 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+#endif
+
+            BeginDrawing();
+            ClearBackground(BLACK);
+            const float srcWidth = static_cast<float>(std::max<uint32_t>(1u, presentWidth));
+            const float srcHeight = static_cast<float>(std::max<uint32_t>(1u, presentHeight));
+            const float screenWidth = static_cast<float>(GetScreenWidth());
+            const float screenHeight = static_cast<float>(GetScreenHeight());
+            const float displayWidth = aspectRatio > 0 ? srcHeight * aspectRatio : srcWidth;
+            const float scale = std::min(screenWidth / displayWidth, screenHeight / srcHeight);
+            const float dstWidth = displayWidth * scale;
+            const float dstHeight = srcHeight * scale;
+            const Rectangle srcRect{0.0f, 0.0f, srcWidth, srcHeight};
+            const Rectangle dstRect{
+                (screenWidth - dstWidth) * 0.5f,
+                (screenHeight - dstHeight) * 0.5f,
+                dstWidth,
+                dstHeight};
+            if (presentationTexture.id)
+                DrawTexturePro(presentationTexture, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+#ifdef PS2X_GS_PARALLEL
+            if (gpuFrame)
             {
-                uint64_t curDma = m_memory.dmaStartCount();
-                uint64_t curGif = m_memory.gifCopyCount();
-                uint64_t curGs = m_memory.gsWriteCount();
-                uint64_t curVif = m_memory.vifWriteCount();
-                const GSRegisters &gs = m_memory.gs();
-                const uint32_t dbgPc = m_debugPc.load(std::memory_order_relaxed);
-                const uint32_t dbgRa = m_debugRa.load(std::memory_order_relaxed);
-                const uint32_t dbgSp = m_debugSp.load(std::memory_order_relaxed);
-                const uint32_t dbgGp = m_debugGp.load(std::memory_order_relaxed);
-                const auto eeSnapshot = m_eeScheduler->snapshot();
-
-                RUNTIME_LOG("[run:tick] tick=" << tick
-                                               << " pc=0x" << std::hex << dbgPc
-                                               << " ra=0x" << dbgRa
-                                               << " sp=0x" << dbgSp
-                                               << " gp=0x" << dbgGp
-                                               << " dispfb1=0x" << gs.dispfb1
-                                               << " display1=0x" << gs.display1
-                                               << std::dec
-                                               << " activeThreads=" << eeSnapshot.threads.size()
-                                               << " dma=" << curDma
-                                               << " gif=" << curGif
-                                               << " gsw=" << curGs
-                                               << " vif=" << curVif
-                                               << std::endl);
-
+                rlDrawRenderBatchActive();
+                gpuFrame->ReleaseTexture();
             }
-        });
-        uint32_t presentWidth = FB_WIDTH;
-        uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
-        UploadFrame(frameTex, this, presentWidth, presentHeight);
+#endif
+            if (m_debugUiInitialized && m_debugUiDrawCallback)
+            {
+                m_debugUiDrawCallback(*this, m_debugUiUserData);
+            }
+            EndDrawing();
 
-        BeginDrawing();
-        ClearBackground(BLACK);
-        const float srcWidth = static_cast<float>(std::max<uint32_t>(1u, presentWidth));
-        const float srcHeight = static_cast<float>(std::max<uint32_t>(1u, presentHeight));
-        const float screenWidth = static_cast<float>(GetScreenWidth());
-        const float screenHeight = static_cast<float>(GetScreenHeight());
-        const float scale = std::min(screenWidth / srcWidth, screenHeight / srcHeight);
-        const float dstWidth = srcWidth * scale;
-        const float dstHeight = srcHeight * scale;
-        const Rectangle srcRect{0.0f, 0.0f, srcWidth, srcHeight};
-        const Rectangle dstRect{
-            (screenWidth - dstWidth) * 0.5f,
-            (screenHeight - dstHeight) * 0.5f,
-            dstWidth,
-            dstHeight};
-        DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
-        if (m_debugUiInitialized && m_debugUiDrawCallback)
-        {
-            m_debugUiDrawCallback(*this, m_debugUiUserData);
+            if (WindowShouldClose())
+            {
+                RUNTIME_LOG("[run] window close requested, breaking out of loop");
+                requestStop();
+                break;
+            }
         }
-        EndDrawing();
-
-        if (WindowShouldClose())
-        {
-            RUNTIME_LOG("[run] window close requested, breaking out of loop");
-            requestStop();
-            break;
-        }
+    }
+    catch (...)
+    {
+        presentationError = std::current_exception();
     }
 
     requestStop();
@@ -2466,7 +2507,11 @@ void PS2Runtime::run()
         m_debugUiInitialized = false;
     }
     UnloadTexture(frameTex);
+    m_gs.shutdownBackend();
     CloseWindow();
+
+    if (presentationError)
+        std::rethrow_exception(presentationError);
 
     RUNTIME_LOG("[run] exiting loop");
 }

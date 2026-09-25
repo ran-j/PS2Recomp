@@ -159,6 +159,40 @@ void register_ps2_memory_tests()
 {
     MiniTest::Case("PS2Memory", [](TestCase &tc)
     {
+        tc.Run("GS display flip counters track guest buffer changes independently of host VSync", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "memory initialization");
+            auto &regs = mem.gs();
+            mem.write64(0x12000000u, 3); // Enable both display circuits.
+            mem.write64(0x12000070u, 32 | (10ull << 9));
+            mem.write32(0x12000090u, 32 | (10u << 9));
+            t.Equals(regs.displayFlipCount[0].load(), uint64_t(1), "64-bit flip counted");
+            t.Equals(regs.displayFlipCount[1].load(), uint64_t(1), "32-bit flip counted independently");
+            mem.write32(0x12000074u, 1u << 11); // DBY/field offset only.
+            mem.write32(0x12000070u, 32 | (20u << 9)); // Same FBP, different width.
+            for (unsigned i = 0; i < 60; ++i)
+            {
+                ++regs.vsyncTick;
+                mem.write32(0x12000070u, 32 | (20u << 9));
+            }
+            t.Equals(regs.displayFlipCount[0].load(), uint64_t(1), "repeats, field offsets and host VSync are not flips");
+            mem.write64(0x12000000u, 0);
+            mem.write64(0x12000070u, 64);
+            t.Equals(regs.displayFlipCount[0].load(), uint64_t(1), "disabled display excluded");
+            mem.write64(0x12000000u, 3);
+            GS gs;
+            gs.init(mem.getGSVRAM(), PS2_GS_VRAM_SIZE, &regs);
+            gs.writeRegister(0x59, 96);
+            gs.writeRegister(0x5b, 96);
+            t.Equals(regs.displayFlipCount[0].load(), uint64_t(2), "native GS register path counted");
+            t.Equals(regs.displayFlipCount[1].load(), uint64_t(2), "second native circuit counted");
+            gs.shutdownBackend();
+            t.IsTrue(mem.initialize(), "memory reset");
+            t.Equals(regs.displayFlipCount[0].load(), uint64_t(0), "reset clears counters");
+            t.Equals(regs.displayFlipCount[1].load(), uint64_t(0), "reset clears both circuits");
+        });
+
         tc.Run("uncached aliases map to same RDRAM bytes", [](TestCase &t)
         {
             PS2Memory mem;

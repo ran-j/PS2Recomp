@@ -23,10 +23,12 @@ struct GifArbiterPacket
 class GifArbiter
 {
 public:
-    using ProcessPacketFn = std::function<void(const uint8_t *, uint32_t)>;
+    using ProcessPacketFn = std::function<void(GifPathId, const uint8_t *, uint32_t)>;
 
     GifArbiter() = default;
     explicit GifArbiter(ProcessPacketFn processFn);
+    explicit GifArbiter(std::function<void(const uint8_t *, uint32_t)> processFn)
+        : GifArbiter([fn = std::move(processFn)](GifPathId, const uint8_t *data, uint32_t size) { fn(data, size); }) {}
 
     void setProcessPacketFn(ProcessPacketFn fn) { m_processFn = std::move(fn); }
 

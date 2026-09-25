@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdint>
 #include <vector>
+#include <memory>
 
 enum GSPrimType : uint8_t
 {
@@ -277,6 +278,8 @@ struct GSTransferSnapshot
 struct GSPresentationRequest
 {
     uint64_t pmode = 0;
+    uint64_t smode1 = 0;
+    uint64_t syncv = 0;
     uint64_t smode2 = 0;
     uint64_t dispfb1 = 0;
     uint64_t display1 = 0;
@@ -284,24 +287,35 @@ struct GSPresentationRequest
     uint64_t display2 = 0;
     uint64_t bgcolor = 0;
     uint64_t vsyncTick = 0;
+    uint32_t field = 0;
     GSFrameReg contextFrames[2]{};
     GSFrameReg preferredSource{};
     uint32_t preferredDestFbp = 0;
     bool hasPreferredSource = false;
 };
 
+class GSGpuFrame
+{
+public:
+    virtual ~GSGpuFrame() = default;
+    virtual uint32_t AcquireTexture() = 0;
+    virtual void ReleaseTexture() = 0;
+};
+
 struct PresentationFrame
 {
     std::vector<uint8_t> pixels;
+    std::shared_ptr<GSGpuFrame> gpu;
     uint32_t width = 0;
     uint32_t height = 0;
     uint32_t displayFbp = 0;
     uint32_t sourceFbp = 0;
     bool usedPreferred = false;
+    float aspectRatio = 0.0f;
 
     explicit operator bool() const
     {
-        return !pixels.empty() && width != 0u && height != 0u;
+        return (gpu || !pixels.empty()) && width != 0u && height != 0u;
     }
 };
 

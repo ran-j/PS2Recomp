@@ -274,6 +274,128 @@ namespace
         return passed;
     }
 
+    bool testKernelSchedulingTransitions()
+    {
+        IopMemory memory;
+        IopKernel kernel(memory);
+        IopCpuState caller{};
+        const auto createThread = [&](uint32_t entry, uint32_t priority)
+        {
+            memory.write32(0x2008, entry);
+            memory.write32(0x200c, 0x100);
+            memory.write32(0x2010, priority);
+            caller.gpr[4] = 0x2000;
+            (void)kernel.dispatchThreadImport(4, caller, 0);
+            const int id = static_cast<int>(caller.gpr[2]);
+            caller.gpr[4] = static_cast<uint32_t>(id);
+            (void)kernel.dispatchThreadImport(6, caller, 0);
+            return id;
+        };
+        const auto select = [&](int id, uint64_t cycle)
+        {
+            IopThread *thread = kernel.beginNextReady(cycle);
+            if (!expect(thread && thread->id == id, "scheduler selected the wrong thread"))
+                return static_cast<IopThread *>(nullptr);
+            return thread;
+        };
+        const auto threadImport = [&](uint16_t ordinal, int id, uint32_t value = 0)
+        {
+            caller.gpr[4] = static_cast<uint32_t>(id);
+            caller.gpr[5] = value;
+            return kernel.dispatchThreadImport(ordinal, caller, 0) && caller.gpr[2] == 0;
+        };
+        constexpr uint32_t sentinel = 0xfffffffcu;
+        const int first = createThread(0x10000, 32);
+        const int second = createThread(0x20000, 64);
+        for (int i = 0; i < 128; ++i)
+        {
+            auto *thread = select(first, 0);
+            if (!thread) return false;
+            kernel.endTimeslice(*thread, sentinel);
+        }
+        if (!threadImport(14, second, 16)) return false;
+        auto *thread = select(second, 0);
+        if (!thread) return false;
+        kernel.delayCurrentUntil(100, thread->cpu);
+        kernel.endTimeslice(*thread, sentinel);
+        if (!expect(kernel.nextWakeCycle(1000) == 100, "delay deadline lost after blocking")) return false;
+        thread = select(first, 99);
+        if (!thread) return false;
+        kernel.endTimeslice(*thread, sentinel);
+        thread = select(second, 100);
+        if (!thread) return false;
+        kernel.sleepCurrent(thread->cpu);
+        kernel.endTimeslice(*thread, sentinel);
+        thread = select(first, 101);
+        if (!thread) return false;
+        kernel.endTimeslice(*thread, sentinel);
+        if (!threadImport(25, second)) return false;
+        thread = select(second, 101);
+        if (!thread) return false;
+        kernel.endTimeslice(*thread, sentinel);
+        if (!threadImport(29, second)) return false;
+        thread = select(first, 101);
+        if (!thread) return false;
+        kernel.endTimeslice(*thread, sentinel);
+        if (!threadImport(31, second)) return false;
+
+        memory.write32(0x202c, 1); // semaphore maximum, initially empty
+        caller.gpr[4] = 0x2020;
+        (void)kernel.dispatchSemaphoreImport(4, caller);
+        const uint32_t semaphore = caller.gpr[2];
+        thread = select(second, 101);
+        if (!thread) return false;
+        thread->cpu.gpr[4] = semaphore;
+        (void)kernel.dispatchSemaphoreImport(8, thread->cpu);
+        kernel.endTimeslice(*thread, sentinel);
+        thread = select(first, 101);
+        if (!thread) return false;
+        kernel.endTimeslice(*thread, sentinel);
+        caller.gpr[4] = semaphore;
+        (void)kernel.dispatchSemaphoreImport(6, caller);
+        thread = select(second, 101);
+        if (!thread) return false;
+
+        const int event = kernel.createInternalEventFlag(0, 0, 0);
+        thread->cpu.gpr[4] = static_cast<uint32_t>(event);
+        thread->cpu.gpr[5] = 1;
+        thread->cpu.gpr[6] = 0;
+        thread->cpu.gpr[7] = 0;
+        (void)kernel.dispatchEventImport(10, thread->cpu);
+        kernel.endTimeslice(*thread, sentinel);
+        thread = select(first, 101);
+        if (!thread) return false;
+        kernel.endTimeslice(*thread, sentinel);
+        if (!kernel.setInternalEventFlag(event, 1)) return false;
+        const int third = createThread(0x30000, 16);
+        thread = select(second, 101); // Equal priorities retain ascending ID order.
+        if (!thread) return false;
+        (void)kernel.dispatchThreadImport(9, thread->cpu, 101);
+        kernel.endTimeslice(*thread, sentinel);
+        if (!expect(kernel.threadCount() == 2, "ExitDeleteThread must not turn Dead into Dormant")) return false;
+        thread = select(third, 101);
+        if (!thread) return false;
+        kernel.terminateThreadsInRange(0x30000, 0x100);
+        kernel.cleanupDeadThreads();
+        if (!expect(kernel.threadCount() == 2 && thread->cpu.stopped, "active CPU reference must survive module unload")) return false;
+        kernel.endTimeslice(*thread, sentinel);
+        if (!expect(kernel.threadCount() == 1, "unloaded thread must retire after its timeslice")) return false;
+        thread = select(first, 101);
+        if (!thread) return false;
+        kernel.delayCurrentUntil(1000, thread->cpu);
+        kernel.endTimeslice(*thread, sentinel);
+        if (!expect(kernel.beginNextReady(999) == nullptr && kernel.nextWakeCycle(2000) == 1000,
+                    "idle scheduling must preserve the next wake deadline")) return false;
+        thread = select(first, 1000);
+        if (!thread) return false;
+        kernel.endTimeslice(*thread, sentinel);
+        if (!threadImport(5, first)) return false;
+        if (!expect(kernel.beginNextReady(1000) == nullptr, "deletion must invalidate the cached ready thread")) return false;
+        kernel.reset();
+        return expect(kernel.beginNextReady(0) == nullptr && kernel.threadCount() == 0,
+                      "reset must discard scheduling state");
+    }
+
     bool testTimrmanPeriodicCallback()
     {
         IopTimrman timrman;
@@ -331,7 +453,7 @@ namespace
 int main()
 {
     if (!testLoadcoreRebootLibraryMode() || !testCdvdSpecialControl() || !testCdvdSearchFile() ||
-        !testTimrmanPeriodicCallback())
+        !testTimrmanPeriodicCallback() || !testKernelSchedulingTransitions())
         return 1;
     std::cout << "ps2xIOP import tests passed\n";
     return 0;

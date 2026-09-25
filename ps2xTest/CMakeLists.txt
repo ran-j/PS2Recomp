@@ -8,6 +8,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include(CTest)
 if(BUILD_TESTING)
     add_subdirectory(gs_cache)
+    if(PS2X_GS_BACKEND STREQUAL "PARALLEL_GS")
+        add_executable(ps2_gs_parallel_tests gs_parallel_tests.cpp)
+        target_link_libraries(ps2_gs_parallel_tests PRIVATE ps2_runtime)
+        add_test(NAME gs.parallel_gpu COMMAND ps2_gs_parallel_tests)
+        set_tests_properties(gs.parallel_gpu PROPERTIES LABELS "gs;gpu;interop" TIMEOUT 120)
+    endif()
 endif()
 
 # Static library with test logic (no main), used by ps2xStudio

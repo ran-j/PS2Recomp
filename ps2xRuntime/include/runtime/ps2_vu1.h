@@ -2,6 +2,9 @@
 #define PS2_VU1_H
 
 #include <array>
+#include <bit>
+#include <cstddef>
+#include <limits>
 #include <cstdint>
 
 class GS;
@@ -102,6 +105,11 @@ private:
         bool reserved = false;
     };
 
+    static constexpr uint32_t kVfReadyCount = 32u * 4u;
+    static constexpr uint32_t kViReadyBase = kVfReadyCount;
+    static constexpr uint32_t kAccReadyBase = kViReadyBase + 16u;
+    static constexpr uint32_t kRegisterReadyCount = kAccReadyBase + 4u;
+
     struct DecodedInstructionPair
     {
         uint32_t lower = 0;
@@ -113,8 +121,9 @@ private:
         bool mBit = false;
         bool dBit = false;
         bool tBit = false;
-        uint8_t upperVfShadowReg = 0;
         uint8_t suppressedLowerVf = 0;
+        std::array<uint8_t, 4u * 4u + 15u + 4u> readDependencies{};
+        uint8_t readDependencyCount = 0;
     };
 
     struct FlagPipelineEntry
@@ -189,6 +198,13 @@ private:
         uint64_t issueCycle = 0;
         bool active = false;
         bool currentTagEop = false;
+
+        void reset()
+        {
+            sourceAddress = totalBytes = copiedBytes = currentTagEnd = cycleCredit = 0;
+            issueCycle = 0;
+            active = currentTagEop = false;
+        }
     };
 
     static constexpr uint32_t kFmacLatency = 4u;
@@ -203,6 +219,8 @@ private:
     Unit m_unit;
     VU1State m_state;
     std::array<DecodedInstructionPair, kMaxDecodedPairs> m_decodedCodeCache{};
+    std::array<uint64_t, kMaxDecodedPairs / 64u> m_decodedPairValid{};
+    DecodedInstructionPair m_uncachedDecoded{};
     const uint8_t *m_cachedVuCode = nullptr;
     const PS2Memory *m_cachedMemory = nullptr;
     uint32_t m_cachedCodeSize = 0;
@@ -216,10 +234,21 @@ private:
     std::array<PendingVfWrite, kMaxPendingVfWrites> m_vfWritePipeline{};
     std::array<PendingViWrite, kMaxPendingViWrites> m_viWritePipeline{};
     std::array<PendingAccWrite, kMaxPendingAccWrites> m_accWritePipeline{};
+
+    uint32_t m_flagActive = 0;
+    uint32_t m_efuActive = 0;
+    uint32_t m_storeActive = 0;
+    uint32_t m_vfWriteActive = 0;
+    uint32_t m_viWriteActive = 0;
+    uint32_t m_accWriteActive = 0;
+
+    static constexpr uint64_t kNoPipelineEvent = std::numeric_limits<uint64_t>::max();
+    uint64_t m_nextPipelineCycle = kNoPipelineEvent;
+    bool m_schedulerClean = true;
+
     XgkickPipeline m_xgkick{};
-    std::array<std::array<uint64_t, 4>, 32> m_vfReady{};
-    std::array<uint64_t, 16> m_viReady{};
-    std::array<uint64_t, 4> m_accReady{};
+
+    std::array<uint64_t, kRegisterReadyCount> m_registerReady{};
     std::array<std::array<uint64_t, 4>, 32> m_vfLatestWrite{};
     std::array<uint64_t, 16> m_viLatestWrite{};
     std::array<uint64_t, 4> m_accLatestWrite{};
@@ -229,6 +258,10 @@ private:
     uint64_t m_efuResourceReady = 0;
     uint32_t m_workingClip = 0;
     uint32_t m_currentUpperInstruction = 0;
+    struct UpperOperands
+    {
+        float vs[4], vt[4], acc[4], q, i;
+    } m_upperOperands{};
     int32_t m_viBranchBackupValue = 0;
     uint8_t m_viBranchBackupReg = 0;
     bool m_viBranchBackupValid = false;
@@ -248,18 +281,15 @@ private:
     InstructionUsage decodeLowerUsage(uint32_t lower) const;
     static void addVfRead(InstructionUsage &usage, uint8_t reg, uint8_t lanes);
     static void addVfWrite(InstructionUsage &usage, uint8_t reg, uint8_t lanes);
-    static uint8_t vfReadLanes(const InstructionUsage &usage, uint8_t reg);
     DecodedInstructionPair decodeInstructionPair(const uint8_t *vuCode, uint32_t pc) const;
-    DecodedInstructionPair getDecodedInstructionPairForPc(const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory, uint32_t pc);
-    void rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t codeSize, const PS2Memory *memory, uint64_t generation);
+    const DecodedInstructionPair &getDecodedInstructionPairForPc(const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory, uint32_t pc);
+    void invalidateDecodedCodeCache(const uint8_t *vuCode, uint32_t codeSize, const PS2Memory *memory, uint64_t generation);
 
-    void execUpper(uint32_t instr);
+    void execUpper(uint32_t instr, float *vfResult, float *accResult);
     void execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSize, GS &gs, PS2Memory *memory, uint32_t upperInstr);
 
     void applyDest(float *dst, const float *result, uint8_t dest);
-    void applyDestAcc(const float *result, uint8_t dest);
     void applyFmacDest(float *dst, float *result, uint8_t dest);
-    void applyFmacDestAcc(float *result, uint8_t dest);
     void normalizeFmacResult(float *result, uint8_t dest, uint8_t laneFlags[4]);
     bool calculateFmacExactResult(uint32_t component, long double &result) const;
     uint8_t normalizeFmacExactResult(float &value, long double exactResult) const;
@@ -276,24 +306,49 @@ private:
     void queueAccWrite(uint8_t laneMask, const float value[4], uint32_t latency);
     void startXgkick(uint32_t qwordAddress);
 
+    template <typename Entry, std::size_t Capacity>
+    Entry *allocatePipelineEntry(std::array<Entry, Capacity> &entries, uint32_t &active, uint64_t readyCycle)
+    {
+        static_assert(Capacity > 0 && Capacity <= 32);
+        const uint32_t slot = std::countr_zero(~active);
+        if (slot >= Capacity)
+            return nullptr;
+        active |= 1u << slot;
+        Entry &entry = entries[slot];
+        entry = {};
+        entry.valid = true;
+        entry.readyCycle = readyCycle;
+        if (readyCycle < m_nextPipelineCycle)
+            m_nextPipelineCycle = readyCycle;
+        return &entry;
+    }
+
     void resetScheduler();
     void commitReadyPipelines();
     void advanceOneCycle();
     void advanceTo(uint64_t targetCycle);
     void flushPipelines();
-    void progressXgkick();
+    void progressXgkick(uint32_t elapsedCycles = 1u);
     void finishXgkick();
     uint64_t calculatePairReadyCycle(const DecodedInstructionPair &decoded) const;
     void markPairWrites(const DecodedInstructionPair &decoded);
     bool pipelinesPending() const;
 
-    float normalizeOperand(float value) const;
+    static float normalizeOperand(float value)
+    {
+        uint32_t bits = std::bit_cast<uint32_t>(value);
+        const uint32_t exponent = bits & 0x7F800000u;
+        if (exponent == 0u)
+            bits &= 0x80000000u;
+        else if (exponent == 0x7F800000u)
+            bits = (bits & 0x80000000u) | 0x7F7FFFFFu;
+        return std::bit_cast<float>(bits);
+    }
     float normalizeResult(float value, uint32_t &laneFlags) const;
     uint32_t microAddressMask() const;
     int32_t readBranchVi(uint8_t reg) const;
     void recordViWriteForBranch(uint8_t reg, int32_t oldValue);
     void reportReservedInstruction(bool upper, uint32_t instruction);
-    float broadcast(const float *vf, uint8_t bc);
 };
 
 #endif

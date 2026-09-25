@@ -5,6 +5,7 @@
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_vu1.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -1688,6 +1689,213 @@ void register_ps2_vu1_tests()
                      "MAC flags should describe the final accumulated value");
             t.Equals(vu1.state().status, 0x140u,
                      "the underflowing product should set sticky Z and U");
+        });
+
+        tc.Run("cycle budget splitting preserves pipelines and PATH1 observations", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+            std::vector<std::vector<uint8_t>> packets;
+            fx.mem.setGifPacketCallback([&](const uint8_t *data, uint32_t size)
+            {
+                packets.emplace_back(data, data + size);
+            });
+            writeTrackedVuInstructionPair(fx, 0u, makeVuLowerSpecial(0x6Cu, 0u), kVuUpperNop);
+            writeTrackedVuInstructionPair(fx, 8u, makeVuSq(0xFu, 4u, 0u, 1),
+                                          makeVuUpper(0x29u, 0xFu, 2u, 1u, 3u));
+            writeTrackedVuInstructionPair(fx, 16u, makeVuDiv(1u, 2u, 0u, 0u), kVuUpperNop);
+            writeTrackedVuInstructionPair(fx, 24u, makeVuLowerSpecial(0x7Cu, 1u), kVuUpperNop);
+            writeTrackedVuInstructionPair(fx, 32u, makeVuLowerSpecial(0x7Bu, 0u), kVuUpperNop);
+            writeTrackedVuInstructionPair(fx, 40u, makeVuSq(0xFu, 3u, 0u, 12),
+                                          makeVuUpper(0x1Cu, 0xFu, 0u, 3u, 5u));
+            for (uint32_t pc = 48u; pc < 512u; pc += 8u)
+                writeTrackedVuInstructionPair(fx, pc, 0u, kVuUpperNop);
+
+            const auto prepare = [&](VU1Interpreter &vu)
+            {
+                std::memset(fx.data, 0xAB, PS2_VU1_DATA_SIZE);
+                const uint64_t tag = makeGifTag(8u, GIF_FMT_IMAGE, 0u, true);
+                std::memset(fx.data, 0, 16u);
+                std::memcpy(fx.data, &tag, sizeof(tag));
+                const float a[4] = {0.25f, 0.5f, 0.75f, 1.0f};
+                const float b[4] = {2.0f, -2.0f, 4.0f, -4.0f};
+                std::memcpy(vu.state().vf[1], a, sizeof(a));
+                std::memcpy(vu.state().vf[2], b, sizeof(b));
+                std::memcpy(vu.state().vf[4], b, sizeof(b));
+            };
+            VU1Interpreter whole;
+            prepare(whole);
+            whole.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                          fx.gs, &fx.mem, 0u, 0u, 0u, 70u);
+            const VU1State expected = whole.state();
+            const std::vector<uint8_t> expectedData(fx.data, fx.data + PS2_VU1_DATA_SIZE);
+            const auto expectedPackets = packets;
+            t.Equals(expectedPackets.size(), size_t(1u), "reference run should emit one packet");
+
+            for (const uint32_t slice : {1u, 2u, 3u, 7u, 13u})
+            {
+                VU1Interpreter sliced;
+                prepare(sliced);
+                packets.clear();
+                sliced.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                               fx.gs, &fx.mem, 0u, 0u, 0u, 0u);
+                for (uint32_t elapsed = 0; elapsed < 70u;)
+                {
+                    const uint32_t budget = std::min(slice, 70u - elapsed);
+                    sliced.resume(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                                  fx.gs, &fx.mem, 0u, 0u, budget);
+                    elapsed += budget;
+                    t.Equals(sliced.state().cycles, uint64_t(elapsed), "resume must stop at its budget");
+                }
+                const auto &actual = sliced.state();
+                t.IsTrue(std::memcmp(actual.vf, expected.vf, sizeof(actual.vf)) == 0, "VF bits must match");
+                t.IsTrue(std::memcmp(actual.vi, expected.vi, sizeof(actual.vi)) == 0, "VI values must match");
+                t.IsTrue(std::memcmp(actual.acc, expected.acc, sizeof(actual.acc)) == 0, "ACC bits must match");
+                t.Equals(actual.q, expected.q, "Q result must match");
+                t.Equals(actual.p, expected.p, "P result must match");
+                t.Equals(actual.pc, expected.pc, "PC must match");
+                t.Equals(actual.mac, expected.mac, "MAC flags must match");
+                t.Equals(actual.status, expected.status, "STATUS flags must match");
+                t.Equals(actual.clip, expected.clip, "CLIP flags must match");
+                t.IsTrue(std::memcmp(fx.data, expectedData.data(), expectedData.size()) == 0, "store bytes must match");
+                t.IsTrue(packets == expectedPackets, "PATH1 bytes and packet order must match");
+            }
+        });
+
+        tc.Run("XGKICK reuse submits only the new packet across reset and memory wrap", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+            std::vector<std::vector<uint8_t>> packets;
+            fx.mem.setGifPacketCallback([&](const uint8_t *data, uint32_t size)
+            {
+                packets.emplace_back(data, data + size);
+            });
+            writeTrackedVuInstructionPair(fx, 0u, makeVuLowerSpecial(0x6Cu, 1u), kVuUpperNop | (1u << 30));
+            writeTrackedVuInstructionPair(fx, 8u, 0u, kVuUpperNop);
+            VU1Interpreter vu;
+            unsigned run = 0;
+            for (const uint32_t qwords : {128u, 1u, 0u, 64u, 2u})
+            {
+                const uint32_t start = PS2_VU1_DATA_SIZE - 16u;
+                const uint64_t tag = makeGifTag(static_cast<uint16_t>(qwords), GIF_FMT_IMAGE, 0u, true);
+                std::vector<uint8_t> expected((qwords + 1u) * 16u, static_cast<uint8_t>(++run));
+                std::memset(expected.data(), 0, 16u);
+                std::memcpy(expected.data(), &tag, sizeof(tag));
+                for (uint32_t i = 0; i < expected.size(); ++i)
+                    fx.data[(start + i) % PS2_VU1_DATA_SIZE] = expected[i];
+                if (run % 2u == 0u)
+                    vu.reset();
+                vu.state().vi[1] = start / 16u;
+                packets.clear();
+                vu.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem);
+                t.Equals(packets.size(), size_t(1u), "one complete packet should be emitted");
+                if (!packets.empty())
+                    t.IsTrue(packets.front() == expected, "packet must contain no stale bytes after reuse");
+            }
+        });
+
+        tc.Run("reset discards pending scalar vector flags and PATH1 work", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+            unsigned packets = 0;
+            fx.mem.setGifPacketCallback([&](const uint8_t *, uint32_t) { ++packets; });
+            const uint64_t tag = makeGifTag(128u, GIF_FMT_IMAGE, 0u, true);
+            std::memcpy(fx.data, &tag, sizeof(tag));
+            writeTrackedVuInstructionPair(fx, 0u, makeVuLowerSpecial(0x6Cu, 0u), kVuUpperNop);
+            writeTrackedVuInstructionPair(fx, 8u, makeVuDiv(1u, 2u, 0u, 0u),
+                                          makeVuUpper(0x2Au, 0xFu, 1u, 1u, 3u));
+            writeTrackedVuInstructionPair(fx, 16u, makeVuLowerSpecial(0x7Cu, 1u), kVuUpperNop);
+            writeTrackedVuInstructionPair(fx, 24u, 0u, kVuUpperNop | (1u << 30));
+            writeTrackedVuInstructionPair(fx, 32u, 0u, kVuUpperNop);
+            VU1Interpreter vu;
+            vu.state().vf[1][0] = std::numeric_limits<float>::max();
+            vu.state().vf[2][0] = 2.0f;
+            vu.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                       fx.gs, &fx.mem, 0u, 0u, 0u, 3u);
+            vu.reset();
+            // The runtime imports VU0 state after reset and before execute.
+            vu.state().clip = 0x123456u;
+            vu.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                       fx.gs, &fx.mem, 24u);
+            t.Equals(vu.state().cycles, uint64_t(2u), "reset should discard old event deadlines");
+            t.Equals(vu.state().vf[3][0], 0.0f, "old vector result must not commit");
+            t.Equals(vu.state().q, 1.0f, "old Q result must not commit");
+            t.Equals(vu.state().p, 0.0f, "old P result must not commit");
+            t.Equals(vu.state().status, 0u, "old flags must not commit");
+            t.Equals(vu.state().clip, 0x123456u, "imported CLIP must survive execute");
+            t.Equals(packets, 0u, "abandoned PATH1 packet must not be submitted");
+        });
+
+        tc.Run("FMAC packs each flag plane for every destination mask", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+            const float left[4] = {-std::numeric_limits<float>::max(), std::numeric_limits<float>::min(), 0.0f, 1.0f};
+            const float right[4] = {2.0f, 0.5f, -1.0f, 2.0f};
+            const uint32_t flags[4] = {0xAu, 0x5u, 0x3u, 0x0u};
+            const uint32_t resultBits[4] = {0xFF7FFFFFu, 0u, 0x80000000u, 0x40000000u};
+            for (uint8_t mask = 0; mask < 16; ++mask)
+            {
+                VU1Interpreter vu;
+                std::memcpy(vu.state().vf[1], left, sizeof(left));
+                std::memcpy(vu.state().vf[2], right, sizeof(right));
+                std::fill_n(vu.state().vf[3], 4, 7.0f);
+                writeTrackedVuInstructionPair(fx, 0u, 0u, makeVuUpper(0x2Au, mask, 2u, 1u, 3u) | (1u << 30));
+                writeTrackedVuInstructionPair(fx, 8u, 0u, kVuUpperNop);
+                vu.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem);
+                uint32_t expectedMac = 0, expectedStatus = 0;
+                for (uint32_t lane = 0; lane < 4; ++lane)
+                {
+                    const uint32_t laneBit = 8u >> lane;
+                    if ((mask & laneBit) != 0)
+                    {
+                        expectedStatus |= flags[lane];
+                        for (uint32_t condition = 0; condition < 4; ++condition)
+                            if ((flags[lane] & (1u << condition)) != 0)
+                                expectedMac |= laneBit << (condition * 4u);
+                    }
+                    const uint32_t expectedBits = (mask & laneBit) ? resultBits[lane] : 0x40E00000u;
+                    uint32_t actualBits;
+                    std::memcpy(&actualBits, &vu.state().vf[3][lane], sizeof(actualBits));
+                    t.Equals(actualBits, expectedBits, "only selected lanes receive the normalized result");
+                }
+                t.Equals(vu.state().mac, expectedMac, "Z/S/U/O occupy distinct MAC bit planes");
+                t.Equals(vu.state().status, expectedStatus | (expectedStatus << 6), "current and sticky conditions must agree");
+            }
+        });
+
+        tc.Run("code changed during a stall refreshes decoded lane dependencies on resume", [](TestCase &t)
+        {
+            for (bool tracked : {false, true})
+            {
+                Vu1Fixture fx;
+                t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+                const auto writePair = [&](uint32_t pc, uint32_t upper)
+                {
+                    if (tracked)
+                        writeTrackedVuInstructionPair(fx, pc, 0u, upper);
+                    else
+                        writeVuInstructionPair(fx.code, pc, 0u, upper);
+                };
+                PS2Memory *memory = tracked ? &fx.mem : nullptr;
+                writePair(0u, makeVuUpper(0x28u, 8u, 2u, 1u, 3u));
+                writePair(8u, makeVuUpper(0x28u, 8u, 2u, 3u, 4u));
+                writePair(16u, kVuUpperNop | (1u << 30));
+                writePair(24u, kVuUpperNop);
+                VU1Interpreter vu;
+                vu.state().vf[3][1] = 7.0f;
+                vu.state().vf[2][1] = 1.0f;
+                vu.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, memory, 0u, 0u, 0u, 2u);
+                t.Equals(vu.state().pc, 8u, "the decoded consumer must stall on the pending X producer");
+                writePair(8u, makeVuUpper(0x28u, 4u, 2u, 3u, 4u));
+                vu.resume(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, memory, 0u, 0u, 1u);
+                t.Equals(vu.state().pc, 16u, "new Y dependency must not wait for the old X producer");
+                t.Equals(vu.state().cycles, uint64_t(3u), "resume must honor its cycle budget");
+                vu.resume(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, memory);
+                t.Equals(vu.state().vf[4][1], 8.0f, "the replacement instruction must use the Y lanes");
+            }
         });
 
         tc.Run("reserved opcodes stop before executing or corrupting state", [](TestCase &t)

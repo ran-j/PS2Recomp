@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <vector>
 
+struct GSDebugSnapshot;
+
 class GSRasterBackend
 {
 public:
@@ -12,6 +14,12 @@ public:
 
     virtual void Initialize(uint8_t *vram, uint32_t vramSize) = 0;
     virtual void Reset() = 0;
+ 
+    virtual bool UsesRawCommands() const { return false; }
+    virtual void ProcessGIF(uint32_t, const uint8_t *, uint32_t) {}
+    virtual void WriteRegisterRaw(uint8_t, uint64_t) {}
+    virtual void ReadRegisterState(GSDebugSnapshot &) const {} 
+    virtual uint64_t GetReadbackCount() const { return 0; }
 
     virtual void Submit(const GSPrimitiveBatch &batch) = 0;
     virtual void LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut) = 0;

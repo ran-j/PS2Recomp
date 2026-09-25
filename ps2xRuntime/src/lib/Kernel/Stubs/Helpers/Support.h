@@ -1486,11 +1486,12 @@ namespace
 {
     struct GsGParam
     {
-        uint8_t interlace;
-        uint8_t omode;
-        uint8_t ffmode;
-        uint8_t version;
+        uint16_t interlace;
+        uint16_t omode;
+        uint16_t ffmode;
+        uint16_t version;
     };
+    static_assert(sizeof(GsGParam) == 8, "sceGsGetGParam exposes four 16-bit fields");
 
     struct GsDispEnvMem
     {
@@ -1622,6 +1623,35 @@ namespace
                (static_cast<uint64_t>(magv & 0x03) << 27) |
                (static_cast<uint64_t>(dw & 0x0FFF) << 32) |
                (static_cast<uint64_t>(dh & 0x07FF) << 44);
+    }
+
+    static GsDispEnvMem makeDefaultGsDispEnv(uint32_t psm, uint32_t width, uint32_t height,
+                                           int32_t dx = 0, int32_t dy = 0)
+    {
+        GsDispEnvMem env{};
+        env.pmode = 0x66; // EN2, CRTMD=1, MMOD=1, AMOD=1 (libgs default).
+        env.smode2 = g_gparam.interlace ? (1u | ((g_gparam.ffmode & 1u) << 1)) : 2u;
+        env.dispfb = makeDispFb(0, (width + 63u) / 64u, psm, 0, 0);
+
+        if (g_gparam.omode == 2 || g_gparam.omode == 3)
+        {
+            // Note libgs DISPLAY dimensions are output clocks/scanlines. In analog
+            // modes 640 framebuffer pixels span 2560 clocks (MAGH=3).
+            const uint32_t magnification = (width + 2559u) / width;
+            const int32_t originX = g_gparam.omode == 2 ? 636 : 656;
+            const int32_t originY = g_gparam.omode == 2 ? 25 : 36;
+            const uint32_t displayHeight =
+                g_gparam.interlace && g_gparam.ffmode ? height * 2u : height;
+            env.display = makeDisplay(originX + dx * static_cast<int32_t>(magnification),
+                                      originY * (g_gparam.interlace ? 2 : 1) + dy,
+                                      magnification - 1u, 0, width * magnification - 1u,
+                                      displayHeight - 1u);
+        }
+        else
+        {
+            env.display = makeDisplay(dx, dy, 0, 0, width - 1u, height - 1u);
+        }
+        return env;
     }
 
     static uint64_t makeFrame(uint32_t fbp, uint32_t fbw, uint32_t psm, uint32_t fbmsk)
@@ -1805,15 +1835,11 @@ namespace
         return true;
     }
 
-    static bool writeGsDispEnv(uint8_t *rdram, uint32_t addr, uint64_t display, uint64_t dispfb)
+    static bool writeGsDispEnv(uint8_t *rdram, uint32_t addr, const GsDispEnvMem &env)
     {
         uint8_t *ptr = getMemPtr(rdram, addr);
         if (!ptr)
             return false;
-        GsDispEnvMem env{};
-        std::memcpy(&env, ptr, sizeof(env));
-        env.dispfb = dispfb;
-        env.display = display;
         std::memcpy(ptr, &env, sizeof(env));
         return true;
     }
@@ -1881,9 +1907,9 @@ namespace
         auto &regs = runtime->memory().gs();
         regs.pmode = env.pmode;
         regs.smode2 = env.smode2;
-        regs.dispfb1 = env.dispfb;
+        regs.writeDisplayFramebuffer(0, env.dispfb);
         regs.display1 = env.display;
-        regs.dispfb2 = env.dispfb;
+        regs.writeDisplayFramebuffer(1, env.dispfb);
         regs.display2 = env.display;
         regs.bgcolor = env.bgcolor;
     }

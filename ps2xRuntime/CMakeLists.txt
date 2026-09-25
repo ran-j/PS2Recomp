@@ -5,13 +5,23 @@ project(PS2Runtime VERSION 0.1.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+set(PS2X_GS_BACKEND "PARALLEL_GS" CACHE STRING "GS backend: CPU or PARALLEL_GS")
+set_property(CACHE PS2X_GS_BACKEND PROPERTY STRINGS CPU PARALLEL_GS)
+if(NOT PS2X_GS_BACKEND MATCHES "^(CPU|PARALLEL_GS)$")
+    message(FATAL_ERROR "PS2X_GS_BACKEND must be CPU or PARALLEL_GS")
+endif()
+if(PS2X_GS_BACKEND STREQUAL "PARALLEL_GS" AND
+   (ANDROID OR NOT (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux")))
+    message(FATAL_ERROR "PARALLEL_GS is supported only on Windows and Linux desktop")
+endif()
+
 option(PS2X_ENABLE_RUNNER_UNITY_BUILD "Build ps2EntryRunner with CMake unity build" ON)
 set(PS2X_RUNNER_UNITY_BUILD_BATCH_SIZE 32 CACHE STRING "Unity build batch size for ps2EntryRunner")
 option(PS2X_ENABLE_RUNNER_PCH "Precompile the heavy runtime headers for ps2EntryRunner" ON)
 option(PS2X_ENABLE_SCCACHE "Use sccache as compiler launcher when available" ON)
 
-option(PS2X_ENABLE_RUNTIME_LOGS "Enable PS2 runtime logs" ON)
-option(PS2X_ENABLE_AGRESSIVE_LOGS "Enable very verbose/agressive PS2 runtime logs" ON)
+option(PS2X_ENABLE_RUNTIME_LOGS "Enable PS2 runtime logs" OFF)
+option(PS2X_ENABLE_AGRESSIVE_LOGS "Enable very verbose/agressive PS2 runtime logs" OFF)
 option(PS2X_ENABLE_IOP_RPC_TRACE "Log unhandled IOP/SIF RPC trace suggestions" ON)
 option(PS2X_STRICT_RETURN_DIAGNOSTICS "Route generated JR $ra returns through runtime branch diagnostics" OFF)
 option(PS2X_SHOW_WINDOWS_CONSOLE "Show a console window for ps2EntryRunner on Windows release builds" ON)
@@ -395,6 +405,11 @@ add_library(ps2_runtime STATIC
     src/lib/vu/ps2_vu1_lower.cpp
     src/lib/games_database.cpp
 )
+
+if(PS2X_GS_BACKEND STREQUAL "PARALLEL_GS")
+    message(STATUS "Using ParallelGS backend for PS2 graphics")
+    include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/ParallelGS.cmake")
+endif()
 
 if(PS2X_ENABLE_RUNTIME_LOGS)
     target_compile_definitions(ps2_runtime PUBLIC

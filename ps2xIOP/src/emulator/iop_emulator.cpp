@@ -125,6 +125,7 @@ namespace ps2x::iop::detail
             timrman.reset();
             ioman.reset();
             pendingDmaInterrupts.clear();
+            nextDmaInterruptCycle = UINT64_MAX;
             pendingGuestCallbacks.clear();
             nextModuleId = 1;
             moduleCursor = kModuleLoadBase;
@@ -177,7 +178,12 @@ namespace ps2x::iop::detail
         void schedulePendingDma()
         {
             if (const auto dma = memory.takeDmaStart())
+            {
                 pendingDmaInterrupts[dma->irq] = totalCycles + dma->delayCycles;
+                nextDmaInterruptCycle = UINT64_MAX;
+                for (const auto &[irq, cycle] : pendingDmaInterrupts)
+                    nextDmaInterruptCycle = std::min(nextDmaInterruptCycle, cycle);
+            }
         }
 
         bool readRam(uint32_t address, void *destination, size_t size) const
@@ -378,7 +384,8 @@ namespace ps2x::iop::detail
             if (checkInterrupt(cpu))
                 return true;
 
-            if (const auto import = imports.decode(cpu.pc))
+            const uint32_t instruction = memory.read32(cpu.pc);
+            if (const auto import = imports.decode(cpu.pc, instruction))
             {
                 const ImportDisposition disposition = dispatchImport(*import, cpu);
                 ++totalInstructions;
@@ -390,8 +397,9 @@ namespace ps2x::iop::detail
                 return !cpu.stopped;
             }
 
-            const bool running = cpuCore.executeInstruction(cpu);
-            schedulePendingDma();
+            const bool running = cpuCore.executeInstruction(cpu, instruction);
+            if (memory.hasDmaStart())
+                schedulePendingDma();
             ++totalInstructions;
             ++totalCycles;
             return running;
@@ -406,7 +414,7 @@ namespace ps2x::iop::detail
             {
                 if (!step(cpu))
                     break;
-                if (!servicingDmaInterrupts && !pendingDmaInterrupts.empty())
+                if (!servicingDmaInterrupts && totalCycles >= nextDmaInterruptCycle)
                     servicePendingDmaInterrupts();
                 if (!servicingGuestCallbacks && !pendingGuestCallbacks.empty())
                     servicePendingGuestCallbacks();
@@ -483,16 +491,18 @@ namespace ps2x::iop::detail
         // Not that good to use exception handling for control flow but will do for now
         void servicePendingDmaInterrupts()
         {
-            if (servicingDmaInterrupts || pendingDmaInterrupts.empty())
+            if (servicingDmaInterrupts || totalCycles < nextDmaInterruptCycle)
                 return;
 
             servicingDmaInterrupts = true;
 
             std::vector<int> completed;
+            nextDmaInterruptCycle = UINT64_MAX;
             for (auto it = pendingDmaInterrupts.begin(); it != pendingDmaInterrupts.end();)
             {
                 if (it->second > totalCycles)
                 {
+                    nextDmaInterruptCycle = std::min(nextDmaInterruptCycle, it->second);
                     ++it;
                     continue;
                 }
@@ -567,8 +577,7 @@ namespace ps2x::iop::detail
                     if (!next)
                     {
                         uint64_t nextWake = kernel.nextWakeCycle(target);
-                        for (const auto &[irq, completionCycle] : pendingDmaInterrupts)
-                            nextWake = std::min(nextWake, completionCycle);
+                        nextWake = std::min(nextWake, nextDmaInterruptCycle);
                         if (!pendingGuestCallbacks.empty())
                             nextWake = std::min(nextWake, pendingGuestCallbacks.begin()->first);
                         nextWake = timrman.nextEventCycle(nextWake);
@@ -696,6 +705,7 @@ namespace ps2x::iop::detail
         IopLoadcore loadcore;
         std::map<int, Module> modules;
         std::map<int, uint64_t> pendingDmaInterrupts;
+        uint64_t nextDmaInterruptCycle = UINT64_MAX;
         std::multimap<uint64_t, ScheduledGuestCallback> pendingGuestCallbacks;
         uint32_t nextModuleId = 1;
         uint32_t moduleCursor = kModuleLoadBase;

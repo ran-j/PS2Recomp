@@ -210,8 +210,23 @@ struct GSRegisters
     uint64_t imr;      // Interrupt mask
     uint64_t busdir;   // Bus direction
     uint64_t siglblid; // Signal label ID
+
+    // Host diagnostics, not guest registers. Count enabled CRTC buffer switches,
+    // independently of host redraws and without counting both circuits as frames.
+    std::atomic<uint64_t> displayFlipCount[2]{};
+    // Completed libgs swaps can present a frame without changing DISPFB.FBP.
+    std::atomic<uint64_t> sdkPresentCount{0};
+
+    void writeDisplayFramebuffer(unsigned circuit, uint64_t value)
+    {
+        uint64_t &reg = circuit == 0 ? dispfb1 : dispfb2;
+        // FBP only: field offsets and display configuration changes are not flips.
+        if (((reg ^ value) & 0x1ffu) != 0 && (pmode & (1ull << circuit)))
+            displayFlipCount[circuit].fetch_add(1, std::memory_order_relaxed);
+        reg = value;
+    }
 };
-static_assert(sizeof(GSRegisters) == (20u * sizeof(uint64_t)), "GSRegisters layout changed unexpectedly");
+static_assert(offsetof(GSRegisters, displayFlipCount) == (20u * sizeof(uint64_t)), "GSRegisters register layout changed unexpectedly");
 static_assert(alignof(GSRegisters) == alignof(uint64_t), "GSRegisters alignment must remain 64-bit");
 static_assert(std::atomic<uint64_t>::is_always_lock_free, "GS CSR atomic must be lock-free on all supported targets");
 
