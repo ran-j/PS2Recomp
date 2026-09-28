@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <string>
 #include <utility>
 
 // FMAC fast paths: NEON on AArch64, SSE2 on x86. So that all three can be tested
@@ -71,6 +72,9 @@ void forgetRoutines();
 // With PS2_VU_PROGRAM_PROFILE set, save the microcode image and entry of a
 // routine that has no compiled version, for compile_vu_programs.py.
 void recordMissing(const uint8_t *code, uint32_t codeSize, uint32_t pc);
+
+// Replaces the directory PS2_VU_PROGRAM_PROFILE named; empty stops recording.
+void setProfileDirectory(std::string directory);
 
 // Run from the current PC, starting with First. Returns true when the E-bit
 // delay slot issued, false when the interpreter has to continue.

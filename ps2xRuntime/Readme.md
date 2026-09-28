@@ -60,7 +60,9 @@ The input is recorded, not guessed, because the microcode is game data:
 
 1. Run the game with `PS2_VU_PROGRAM_PROFILE=some/directory`. Each entry point
    reached without a compiled routine is saved there as a 16 KiB code image
-   plus a line in `entries.txt`. Recording keeps adding to the directory.
+   plus a line in `entries.txt`, and so is every place a register jump lands,
+   so one run covers the code it went through. Recording keeps adding to the
+   directory.
 2. Configure with `-DPS2X_VU_PROGRAM_PROFILES=dir1;dir2` and rebuild. The
    build runs `tools/compile_vu_programs.py` over the recordings and compiles
    the result in `PS2X_VU_PROGRAM_SHARDS` units (8 by default).
