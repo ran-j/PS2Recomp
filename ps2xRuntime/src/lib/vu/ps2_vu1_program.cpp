@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bitset>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -89,10 +90,27 @@ Routine find(const uint8_t *code, uint32_t codeSize, uint32_t pc, uint64_t gener
     return routine;
 }
 
+namespace
+{
+std::string &profileDirectory()
+{
+    static std::string directory = [] {
+        const char *value = std::getenv("PS2_VU_PROGRAM_PROFILE");
+        return std::string(value ? value : "");
+    }();
+    return directory;
+}
+}
+
+void setProfileDirectory(std::string directory)
+{
+    profileDirectory() = std::move(directory);
+}
+
 void recordMissing(const uint8_t *code, uint32_t codeSize, uint32_t pc)
 {
-    static const char *directory = std::getenv("PS2_VU_PROGRAM_PROFILE");
-    if (!directory || !*directory)
+    const std::string &directory = profileDirectory();
+    if (directory.empty())
         return;
     static std::mutex mutex;
     const std::lock_guard lock(mutex);
@@ -111,6 +129,29 @@ void recordMissing(const uint8_t *code, uint32_t codeSize, uint32_t pc)
     if (!std::filesystem::exists(image, error))
         std::ofstream(image, std::ios::binary).write(reinterpret_cast<const char *>(code), codeSize);
     std::ofstream(root / "entries.txt", std::ios::app) << name << ' ' << std::hex << pc << '\n';
+}
+
+void noteJump(PS2Memory *memory, uint32_t target)
+{
+    if (!memory || profileDirectory().empty())
+        return;
+    // Once per target and microcode generation, as recordMissing hashes the
+    // whole image.
+    thread_local uint64_t seenGeneration = ~0ull;
+    thread_local std::bitset<PS2_VU1_CODE_SIZE / 8u> seen;
+    const uint64_t generation = memory->getVU1CodeGeneration();
+    if (generation != seenGeneration)
+    {
+        seen.reset();
+        seenGeneration = generation;
+    }
+    const uint32_t pair = (target / 8u) % seen.size();
+    if (seen.test(pair))
+        return;
+    seen.set(pair);
+    const uint8_t *code = memory->getVU1Code();
+    if (!find(code, PS2_VU1_CODE_SIZE, target, generation))
+        recordMissing(code, PS2_VU1_CODE_SIZE, target);
 }
 
 void Access::pendVf(VU1Interpreter &vu, uint8_t reg, uint8_t lanes, uint64_t ready)

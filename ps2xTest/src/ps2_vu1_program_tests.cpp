@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -325,6 +326,47 @@ void register_ps2_vu1_program_tests()
                 t.IsTrue(!entries.empty(), "PS2_VU_PROGRAM_FIXTURES names the compiled programs");
             for (const auto &entry : entries)
                 checkEntry(t, entry, require);
+        });
+
+        tc.Run("a recording notes where register jumps land", [](TestCase &t)
+        {
+            // The target comes from VU memory, so only running the code finds it.
+            constexpr uint32_t kLowerNop = 0x8000033Cu;
+            constexpr uint32_t kUpperNop = 0x000002FFu;
+            constexpr uint32_t kEBit = 0x40000000u;
+            std::vector<uint8_t> code(PS2_VU1_CODE_SIZE, 0u);
+            const auto pair = [&code](uint32_t pc, uint32_t lower, uint32_t upper)
+            {
+                std::memcpy(&code[pc], &lower, sizeof(lower));
+                std::memcpy(&code[pc + 4u], &upper, sizeof(upper));
+            };
+            for (uint32_t pc = 0u; pc < 0x210u; pc += 8u)
+                pair(pc, kLowerNop, kUpperNop);
+            pair(0x000u, 0x09010010u, kUpperNop); // ILW.x vi1, 0x10(vi0)
+            pair(0x028u, 0x48000800u, kUpperNop); // JR vi1
+            pair(0x200u, kLowerNop, kUpperNop | kEBit);
+            std::vector<uint8_t> data = initialData();
+            const uint32_t target = 0x200u / 8u;
+            std::memcpy(&data[0x10u * 16u], &target, sizeof(target));
+
+            const std::filesystem::path directory =
+                std::filesystem::temp_directory_path() / "ps2x-vu-jump-recording";
+            std::filesystem::remove_all(directory);
+            ps2_vu_program::setProfileDirectory(directory.string());
+            Side side;
+            t.IsTrue(side.initialize(code, true), "memory initializes");
+            side.reset(initialState(), data);
+            side.start(0u, kWideBudget);
+            ps2_vu_program::setProfileDirectory({});
+
+            std::ifstream entries(directory / "entries.txt");
+            std::string hash;
+            std::string pc;
+            bool recorded = false;
+            while (entries >> hash >> pc)
+                recorded = recorded || pc == "200";
+            t.IsTrue(recorded, "the jump target 0x200 is saved as an entry");
+            std::filesystem::remove_all(directory);
         });
     });
 }

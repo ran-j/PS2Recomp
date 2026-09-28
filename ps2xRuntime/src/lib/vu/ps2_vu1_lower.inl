@@ -8,6 +8,14 @@
 #include <cstring>
 #include <limits>
 
+namespace ps2_vu_program
+{
+// While a program profile is recorded, saves where a register jump lands.
+// Compiled routines only look targets up once the code before them runs
+// compiled, so a first recording would otherwise never see them.
+void noteJump(PS2Memory *memory, uint32_t target);
+}
+
 namespace ps2_vu_detail
 {
     inline float vuEatan(float value)
@@ -291,6 +299,8 @@ PS2_VU_FORCE_INLINE void VU1Interpreter::execLowerInline(uint32_t instr, uint8_t
         uint8_t is = VIS(instr);
         // Register jumps do not use conditional branches' delayed VI operand.
         uint32_t target = ((uint32_t)(uint16_t)m_state.vi[is] * 8u) & pcMask;
+        if (m_unit == Unit::VU1)
+            ps2_vu_program::noteJump(memory, target);
         m_state.branchPending = true;
         m_state.branchTarget = target;
         m_state.branchDelay = 1;
@@ -301,6 +311,8 @@ PS2_VU_FORCE_INLINE void VU1Interpreter::execLowerInline(uint32_t instr, uint8_t
         uint8_t it = VIT(instr);
         uint8_t is = VIS(instr);
         uint32_t target = ((uint32_t)(uint16_t)m_state.vi[is] * 8u) & pcMask;
+        if (m_unit == Unit::VU1)
+            ps2_vu_program::noteJump(memory, target);
         if (it != 0)
             m_state.vi[it] = (int32_t)((m_state.pc + 16) / 8);
         m_state.branchPending = true;
