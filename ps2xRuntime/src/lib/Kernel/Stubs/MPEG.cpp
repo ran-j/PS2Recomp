@@ -2291,6 +2291,11 @@ namespace ps2_stubs
             setDynamicRet = *reinterpret_cast<uint32_t *>(p);
         mpegGuestWrite32(rdram, puVar4 + 12, setDynamicRet);
 
+        // The real sceMpegCreate ends with sceMpegReset, which clears the end flag
+        // the game polls. Without it a decoder made in reused memory can read as
+        // ended before its first picture.
+        sceMpegReset(rdram, ctx, runtime);
+
         setReturnU32(ctx, setDynamicRet);
     }
 

@@ -522,6 +522,28 @@ void register_ps2_runtime_expansion_tests()
                      "sceMpegInit should reset MPEG callback bookkeeping between runs");
         });
 
+        tc.Run("sceMpegCreate starts a decoder that has not ended, even in reused memory", [](TestCase &t)
+        {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            ps2_stubs::resetMpegStubState();
+            constexpr uint32_t kMpegAddr = 0x00123000u;
+            constexpr uint32_t kMpegWorkAddr = 0x00130000u;
+            constexpr uint32_t kMpegWorkSize = 0x2000u;
+            // A game's heap hands back memory with whatever an earlier user left in it.
+            std::memset(rdram.data() + kMpegWorkAddr, 0xFF, kMpegWorkSize);
+
+            R5900Context createCtx{};
+            setRegU32(createCtx, 4, kMpegAddr);
+            setRegU32(createCtx, 5, kMpegWorkAddr);
+            setRegU32(createCtx, 6, kMpegWorkSize);
+            ps2_stubs::sceMpegCreate(rdram.data(), &createCtx, nullptr);
+
+            const uint32_t inner = Ps2FastRead32(rdram.data(), kMpegAddr + 0x40u);
+            t.Equals(inner, kMpegWorkAddr, "sceMpegCreate should build its decoder in the work buffer");
+            t.Equals(Ps2FastRead32(rdram.data(), inner), 0u,
+                     "a new decoder's end flag should read zero whatever the buffer held");
+        });
+
         tc.Run("sceMpegDemuxPssRing dispatches registered video and audio stream callbacks", [](TestCase &t)
         {
             PS2Runtime runtime;
