@@ -274,6 +274,8 @@ namespace ps2x::iop::detail
             }
             if (iequals(call.library, "thsemap"))
             {
+                if (call.ordinal == 8u && !kernel.inThread())
+                    waitSemaphoreOutsideThread(static_cast<int>(a0));
                 return kernel.dispatchSemaphoreImport(call.ordinal, cpu)
                            ? ImportDisposition::Handled
                            : ImportDisposition::Missing;
@@ -553,38 +555,87 @@ namespace ps2x::iop::detail
             servicingGuestCallbacks = false;
         }
 
+        struct SchedulerGuard
+        {
+            bool &flag;
+            const bool previous;
+            explicit SchedulerGuard(bool &f) : flag(f), previous(f) { flag = true; }
+            ~SchedulerGuard() { flag = previous; }
+        };
+
+        // One scheduler step toward `target`: service due interrupts, callbacks and timers, then run the best ready
+        // thread for a slice or, with every thread idle, advance the clock to the next event (at most `target`).
+        void scheduleStep(uint64_t target)
+        {
+            servicePendingDmaInterrupts();
+            servicePendingGuestCallbacks();
+            timrman.serviceDue(totalCycles, *this);
+            IopThread *next = kernel.beginNextReady(totalCycles);
+            if (!next)
+            {
+                uint64_t nextWake = kernel.nextWakeCycle(target);
+                for (const auto &[irq, completionCycle] : pendingDmaInterrupts)
+                    nextWake = std::min(nextWake, completionCycle);
+                if (!pendingGuestCallbacks.empty())
+                    nextWake = std::min(nextWake, pendingGuestCallbacks.begin()->first);
+                nextWake = timrman.nextEventCycle(nextWake);
+                totalCycles = std::max(totalCycles + 1u, std::min(target, nextWake));
+                return;
+            }
+            const uint64_t before = totalCycles;
+            runCpu(next->cpu, static_cast<uint32_t>(std::min<uint64_t>(kDefaultSlice, target - totalCycles)));
+            kernel.endTimeslice(*next, kThreadReturnSentinel);
+            if (totalCycles == before)
+                ++totalCycles;
+        }
+
         void runCycles(uint64_t cycles) noexcept
         {
             try
             {
+                const SchedulerGuard guard{inScheduler};
                 const uint64_t target = totalCycles + cycles;
                 while (totalCycles < target)
-                {
-                    servicePendingDmaInterrupts();
-                    servicePendingGuestCallbacks();
-                    timrman.serviceDue(totalCycles, *this);
-                    IopThread *next = kernel.beginNextReady(totalCycles);
-                    if (!next)
-                    {
-                        uint64_t nextWake = kernel.nextWakeCycle(target);
-                        for (const auto &[irq, completionCycle] : pendingDmaInterrupts)
-                            nextWake = std::min(nextWake, completionCycle);
-                        if (!pendingGuestCallbacks.empty())
-                            nextWake = std::min(nextWake, pendingGuestCallbacks.begin()->first);
-                        nextWake = timrman.nextEventCycle(nextWake);
-                        totalCycles = std::max(totalCycles + 1u, std::min(target, nextWake));
-                        continue;
-                    }
-                    const uint64_t before = totalCycles;
-                    runCpu(next->cpu, static_cast<uint32_t>(std::min<uint64_t>(kDefaultSlice, target - totalCycles)));
-                    kernel.endTimeslice(*next, kThreadReturnSentinel);
-                    if (totalCycles == before)
-                        ++totalCycles;
-                }
+                    scheduleStep(target);
             }
             catch (...)
             {
                 // Runtime scheduling must never throw through EeScheduler::accountCycles().
+            }
+        }
+
+        // RPC server functions and module start routines run synchronously (callFunction), outside any IOP thread.
+        // A WaitSema there that finds the count at 0 cannot block, so the caller used to go on without the semaphore
+        // while the IOP thread holding it was preempted inside its critical section. On a real IOP the calling
+        // thread blocks and the holder runs until it signals. Do the same: run the IOP scheduler (threads, due
+        // interrupts, callbacks and timers) until the semaphore is signalled, then let WaitSema take it. Not from
+        // an interrupt handler or guest callback, nor while the scheduler is already running; gives up after one
+        // second of IOP time.
+        void waitSemaphoreOutsideThread(int id)
+        {
+            if (kernel.semaphoreCount(id) != 0)
+                return; // available, or an unknown id (WaitSema reports it)
+            if (inScheduler || servicingDmaInterrupts || servicingGuestCallbacks)
+                return;
+            const SchedulerGuard guard{inScheduler};
+            const uint64_t limit = totalCycles + kIopClockHz;
+            kernel.setOutsideSemaphoreWait(id);
+            try
+            {
+                while (kernel.semaphoreCount(id) == 0 && totalCycles < limit)
+                    scheduleStep(limit);
+            }
+            catch (...)
+            {
+                kernel.setOutsideSemaphoreWait(0);
+                throw;
+            }
+            kernel.setOutsideSemaphoreWait(0);
+            if (kernel.semaphoreCount(id) == 0)
+            {
+                std::ostringstream out;
+                out << "[IOP] WaitSema(" << id << ") outside a thread timed out";
+                log(LogLevel::Warning, out.str());
             }
         }
 
@@ -706,6 +757,7 @@ namespace ps2x::iop::detail
         std::string lastError;
         bool servicingDmaInterrupts = false;
         bool servicingGuestCallbacks = false;
+        bool inScheduler = false; // runCycles or an outside-thread semaphore wait is running IOP threads
         uint32_t callDepth = 0u;
         GuestCallback secrMcCommandHandler;
         GuestCallback secrMcDevIdHandler;
