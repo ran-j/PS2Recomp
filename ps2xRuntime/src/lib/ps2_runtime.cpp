@@ -1358,6 +1358,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     // this charge bounds straight-line call chains that have no local loop.
     if (m_eeScheduler && m_eeScheduler->checkpointDue(EeScheduler::kGuestDispatchCycles))
     {
+        m_eeScheduler->noteGuestUnwind();
         return false;
     }
 
@@ -1369,6 +1370,10 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         }
 
         ctx->pc = targetPc;
+        if (m_eeScheduler)
+        {
+            m_eeScheduler->noteGuestUnwind();
+        }
         return false;
     }
 
@@ -1396,9 +1401,18 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
 
     RecompiledFunction targetFn = lookupFunction(targetPc);
     const uint32_t entryPc = ctx->pc;
+    const uint64_t unwindCountBefore = m_eeScheduler ? m_eeScheduler->guestUnwindCount() : 0u;
     targetFn(rdram, ctx, this);
 
     if (isStopRequested() || ctx->pc == 0u)
+    {
+        return false;
+    }
+
+    // A callee that yielded to the scheduler can leave ctx->pc equal to its own entry (a recursive call, or a loop
+    // head on its first instruction), which is indistinguishable from an implicit return. The yield is recorded by
+    // the scheduler instead, and every caller on the host stack has to unwind too.
+    if (m_eeScheduler && m_eeScheduler->guestUnwindCount() != unwindCountBefore)
     {
         return false;
     }
@@ -1408,7 +1422,17 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         ctx->pc = fallthroughPc;
     }
 
-    return ctx->pc == fallthroughPc;
+    if (ctx->pc != fallthroughPc)
+    {
+        // Non-local return (longjmp, tail jump): the scheduler continues at ctx->pc.
+        if (m_eeScheduler)
+        {
+            m_eeScheduler->noteGuestUnwind();
+        }
+        return false;
+    }
+
+    return true;
 }
 
 void PS2Runtime::SignalException(R5900Context *ctx, PS2Exception exception)
@@ -2211,7 +2235,12 @@ void PS2Runtime::postEeEvent(EeEvent event)
 
 bool PS2Runtime::eeCheckpointDue(uint32_t cycles) noexcept
 {
-    return m_eeScheduler->checkpointDue(cycles);
+    const bool due = m_eeScheduler->checkpointDue(cycles);
+    if (due)
+    {
+        m_eeScheduler->noteGuestUnwind();
+    }
+    return due;
 }
 
 [[noreturn]] void PS2Runtime::eeWaitVSyncTicks(uint32_t ticks, uint32_t resumePc)
