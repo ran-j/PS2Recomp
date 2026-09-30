@@ -456,9 +456,22 @@ void register_pad_input_tests()
             t.Equals(data[14], static_cast<uint8_t>(0xFF), "cross pressure should be populated when pressed");
             t.Equals(data[15], static_cast<uint8_t>(0x00), "square pressure should be clear when not pressed");
             t.Equals(data[16], static_cast<uint8_t>(0xFF), "L1 pressure should be populated when pressed");
-            t.Equals(data[17], static_cast<uint8_t>(0x00), "L2 pressure should be clear when not pressed");
-            t.Equals(data[18], static_cast<uint8_t>(0x00), "R1 pressure should be clear when not pressed");
+            t.Equals(data[17], static_cast<uint8_t>(0x00), "R1 pressure should be clear when not pressed");
+            t.Equals(data[18], static_cast<uint8_t>(0x00), "L2 pressure should be clear when not pressed");
             t.Equals(data[19], static_cast<uint8_t>(0xFF), "R2 pressure should be populated when pressed");
+
+            // Shoulder pressure bytes follow the DualShock 2 order L1, R1, L2, R2.
+            ps2_stubs::setPadOverrideState(static_cast<uint16_t>(0xFFFFu & ~kPadBtnR1), 0x80, 0x80, 0x80, 0x80);
+            runPadRead(ctx, rdram);
+            t.Equals(data[16], static_cast<uint8_t>(0x00), "L1 pressure should be clear when only R1 is pressed");
+            t.Equals(data[17], static_cast<uint8_t>(0xFF), "R1 pressure is byte 17");
+            t.Equals(data[18], static_cast<uint8_t>(0x00), "L2 pressure should be clear when only R1 is pressed");
+            t.Equals(data[19], static_cast<uint8_t>(0x00), "R2 pressure should be clear when only R1 is pressed");
+            ps2_stubs::setPadOverrideState(static_cast<uint16_t>(0xFFFFu & ~kPadBtnL2), 0x80, 0x80, 0x80, 0x80);
+            runPadRead(ctx, rdram);
+            t.Equals(data[17], static_cast<uint8_t>(0x00), "R1 pressure should be clear when only L2 is pressed");
+            t.Equals(data[18], static_cast<uint8_t>(0xFF), "L2 pressure is byte 18");
+            ps2_stubs::setPadOverrideState(pressedButtons, 0x80, 0x80, 0x80, 0x80);
 
             setRegU32(ctx, 4, 0u);
             setRegU32(ctx, 5, 0u);
