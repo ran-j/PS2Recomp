@@ -2002,6 +2002,38 @@ namespace ps2recomp
             return best;
         };
 
+        // Ghidra exports standalone code blocks (static initializers, thunks, ...) as entry_* labels. Only entry_*
+        // blocks nested inside a real function are synthetic wrappers; standalone ones need their own resume
+        // points, otherwise a thread switched out inside a call from them cannot be resumed.
+        std::vector<std::pair<uint32_t, uint32_t>> ownerRanges;
+        for (const auto &function : m_functions)
+        {
+            if (function.isRecompiled && !function.isStub && !function.isSkipped &&
+                !isEntryFunctionName(function.name) && function.end > function.start)
+            {
+                ownerRanges.emplace_back(function.start, function.end);
+            }
+        }
+        std::sort(ownerRanges.begin(), ownerRanges.end());
+        uint32_t maxEnd = 0u;
+        std::vector<uint32_t> prefixMaxEnd;
+        prefixMaxEnd.reserve(ownerRanges.size());
+        for (const auto &range : ownerRanges)
+        {
+            maxEnd = std::max(maxEnd, range.second);
+            prefixMaxEnd.push_back(maxEnd);
+        }
+        auto nestedInRealFunction = [&](uint32_t address) -> bool
+        {
+            auto it = std::upper_bound(ownerRanges.begin(), ownerRanges.end(), std::make_pair(address, UINT32_MAX));
+            if (it == ownerRanges.begin())
+            {
+                return false;
+            }
+            const size_t idx = static_cast<size_t>(std::distance(ownerRanges.begin(), it)) - 1u;
+            return prefixMaxEnd[idx] > address;
+        };
+
         for (const auto &function : m_functions)
         {
             if (!function.isRecompiled || function.isStub || function.isSkipped)
@@ -2009,7 +2041,7 @@ namespace ps2recomp
                 continue;
             }
 
-            if (isEntryFunctionName(function.name))
+            if (isEntryFunctionName(function.name) && nestedInRealFunction(function.start))
             {
                 continue;
             }
