@@ -2035,6 +2035,25 @@ void register_code_generator_tests()
                      "VRXOR should keep the LFSR comment on its own line");
         });
 
+        tc.Run("VCALLMSR starts the microprogram from CMSAR0, not a VI array slot", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+
+            // VCALLMSR has no register operand; $vi27 in the assembly is CMSAR0 (VU0 control register 27).
+            Instruction inst{};
+            inst.opcode = OPCODE_COP2;
+            inst.function = VU0_S1_VCALLMSR;
+            inst.rd = 27;
+
+            const std::string generated = gen.translateVU_VCALLMSR(inst);
+            printGeneratedCode("VCALLMSR starts the microprogram from CMSAR0, not a VI array slot", generated);
+            t.IsTrue(generated.find("ctx->vu0_cmsar0") != std::string::npos,
+                     "VCALLMSR should read the start address from CMSAR0");
+            t.IsTrue(generated.find("ctx->vi[") == std::string::npos,
+                     "VCALLMSR must not index the 16-entry vi[] array with a control register number");
+            t.IsTrue(generated.find("runtime->vu0StartMicroProgram(") != std::string::npos,
+                     "VCALLMSR should still start the VU0 microprogram");
+        });
+
         tc.Run("resolveStubTarget allows leading underscore alias", [](TestCase &t) {
             t.Equals(PS2Recompiler::resolveStubTarget("_rand"), StubTarget::Stub,
                      "_rand should resolve via rand stub alias");
