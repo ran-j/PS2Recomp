@@ -90,6 +90,7 @@ enum class GuestInvocationKind : uint8_t
     SyscallOverride,
     ExitHandler,
     HleCall,
+    SifCommand,
 };
 
 struct GuestInvocation
@@ -181,6 +182,9 @@ struct EeThreadSnapshot
 {
     int id = 0;
     uint32_t pc = 0;
+    uint32_t ra = 0;
+    uint32_t sp = 0;
+    uint32_t contextGp = 0;
     uint32_t entry = 0;
     uint32_t stack = 0;
     uint32_t stackSize = 0;
@@ -192,6 +196,7 @@ struct EeThreadSnapshot
     int waitId = 0;
     int suspendCount = 0;
     uint32_t wakeupCount = 0;
+    uint32_t invocationDepth = 0;
 };
 
 struct EeSemaphoreSnapshot
@@ -390,6 +395,8 @@ private:
     [[nodiscard]] bool hasReadyAtOrAbovePriority(int priority) const;
     void renewTimeSlice();
     void copyMainContextToRuntime();
+    void publishDebugContext(const R5900Context &context);
+    void publishIdleDebugContext();
 
     PS2Runtime &m_runtime;
     uint8_t *m_rdram = nullptr;

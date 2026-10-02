@@ -27,6 +27,11 @@ namespace ps2x::iop::detail
                 return kSids;
             }
 
+            [[nodiscard]] std::span<const std::string_view> moduleAliases() const override
+            {
+                return kModuleAliases;
+            }
+
             void reset() override
             {
             }
@@ -51,6 +56,7 @@ namespace ps2x::iop::detail
 
         private:
             inline static constexpr std::array<uint32_t, 1> kSids{kLibSdSid};
+            inline static constexpr std::array<std::string_view, 1> kModuleAliases{"libsd"};
 
             IopHost &m_host;
         };

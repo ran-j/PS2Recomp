@@ -12,7 +12,7 @@ This project statically recompiles PS2 ELF binaries into C++ and provides a runt
 * `ps2xAnalyzer`: scans ELF/functions and writes TOML config (`stubs`, `skip`, instruction patches).
 * `ps2xRecomp`: reads TOML + ELF, decodes R5900 instructions, and generates C++ output.
 * `ps2xRuntime`: hosts memory, function registration, syscall dispatch, and hardware stubs.
-* `ps2xIOP`: portable, instance-owned IOP HLE services, game profiles, and the C plugin ABI.
+* `ps2xIOP`: R3000A IRX execution, a virtual IOP kernel, and generic HLE fallbacks.
 
 ### Features
 
@@ -79,9 +79,7 @@ Fallback workflow for quick local experiments or ELFs with debug symbol :
 ./ps2_analyzer your_game.elf config.toml
 ```
 
-Use this only when you do not have a Ghidra project yet. The native analyzer is faster to start, but it is less accurate on stripped retail games and more likely to miss internal callable entry points.
-
-See the [Ghidra Workflow](ps2xAnalyzer/Readme.md#3-ghidra-integration-for-retail-and-stripped-games-preferred) for the recommended path.
+See the [Ghidra Workflow](ps2xAnalyzer/Readme.md#3-ghidra-integration-for-retail-and-stripped-games-preferred) for ghdira instructions.
 
 Then build generated output and link with `ps2xRuntime`.
 
@@ -133,15 +131,15 @@ To execute the recompiled code.
 * Some syscall dispatcher with common kernel IDs.
 * Basic GS/VU/file/system stubs.
 * Foundation to expand and port your game.
-* `ps2xIOP` profile selection and optional `.dll`/`.so` discovery for game-specific IOP HLE.
+* `ps2xIOP` execution of original IRX modules with generic HLE fallbacks.
 
-See [IOP HLE profiles and plugins](ps2xIOP/README.md) for the service boundary and external plugin workflow.
+See [IOP emulation](ps2xIOP/README.md) for module execution and the service boundary.
 
 ### Game Override Hooks
 
 Game overrides are runtime-side, build-scoped patch modules.
 
-A game override is C++ code that runs during `loadELF` and can replace EE function bindings by address for one specific game build. IOP RPC/DMA behavior belongs in a `ps2xIOP` profile instead. This is separate from recompilation output and separate from global runtime stubs/syscalls.
+A game override is C++ code that runs during `loadELF` and can replace EE function bindings by address for one specific game build. IOP RPC/DMA behavior is handled by the `ps2xIOP` emulator and its runtime transport. This is separate from recompilation output and separate from global runtime stubs/syscalls.
 
 API:
 
@@ -163,10 +161,36 @@ Use Game Override modules when:
 5. Move per-game hacks into game overrides keyed by ELF metadata.
 6. Re-test from cold boot after each batch.
 
-### Limitations
+### Describing Your Game Project
 
-* Graphics Synthesizer and other hardware components need external implementation
-* VU1 microcode is not complete.
+A game project built with PS2Recomp can describe itself in a `.recomp.json` file at the root of its repository. Lists of recomp and decomp projects, such as [recomp.board](https://recomp.fyi), read that file instead of guessing the game, system and status from the README.
+
+> [!NOTE]
+> This file is optional: PS2Recomp does not read it and works the same without it. `.recomp.json` and recomp.board are third-party projects; the PS2Recomp developers have no ties to them.
+
+Starter file:
+
+```json
+{
+  "$schema": "https://recomp.fyi/schema/v1.json",
+  "game": "<title as it shipped>",
+  "system": "PS2",
+  "type": "recomp",
+  "toolchain": "PS2Recomp",
+  "status": "in-progress",
+  "original": { "region": "USA", "serial": "SLUS-20312" }
+}
+```
+
+* `original` is the release a user must own. On retail discs the ELF is named after the serial (`SLUS_203.12` is `SLUS-20312`), and the prefix gives the region: `SLUS`/`SCUS` USA, `SLES`/`SCES` Europe, `SLPS`/`SLPM`/`SCPS` Japan.
+* `status` is one of `exploring`, `in-progress`, `playable`, `released`, `complete`, `paused`. Edit it when the project moves on: a stale status is worse than none.
+* Never put a game file, or a link to one, in the file.
+
+Other fields (Wikidata item, target platforms, maintainers, links, what help is wanted) and the JSON Schema are in the [specification](https://recomp.fyi/spec).
+
+### Limitations
+ 
+* Performance is very bad for VU and GS
 * Hardware emulation is partial and many paths are stubbed.
 
 ###  Acknowledgments
@@ -175,3 +199,4 @@ Use Game Override modules when:
 * Uses ELFIO for ELF parsing
 * Uses toml11 for TOML parsing
 * Uses fmt for string formatting
+* Reference for runtime PCSX2

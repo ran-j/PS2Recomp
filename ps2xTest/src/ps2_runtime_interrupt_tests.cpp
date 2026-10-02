@@ -8,7 +8,9 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace ps2_syscalls;
@@ -52,6 +54,11 @@ namespace
     constexpr uint32_t kIrqWaitPc = 0x00160200u;
     constexpr uint32_t kIrqResumePc = 0x00160210u;
     constexpr uint32_t kIntcHandlerPc = 0x00160220u;
+    constexpr uint32_t kIrqStackWaitPc = 0x00160230u;
+    constexpr uint32_t kIrqStackResumePc = 0x00160240u;
+    constexpr uint32_t kIrqStackHandlerPc = 0x00160250u;
+    constexpr uint32_t kIrqRegistrationSp = 0x001E0000u;
+    constexpr uint32_t kIrqRegistrationGuardAddr = kIrqRegistrationSp - 16u;
     constexpr uint32_t kISemaWaitPc = 0x00160300u;
     constexpr uint32_t kISemaResumePc = 0x00160310u;
     constexpr uint32_t kISemaDriverPc = 0x00160320u;
@@ -62,6 +69,9 @@ namespace
     constexpr uint32_t kTimer2WaitPc = 0x00160500u;
     constexpr uint32_t kTimer2ResumePc = 0x00160510u;
     constexpr uint32_t kTimer2HandlerPc = 0x00160520u;
+    constexpr uint32_t kInvocationQueuePc = 0x00160530u;
+    constexpr uint32_t kInvocationQueueResumePc = 0x00160540u;
+    constexpr uint32_t kInvocationQueueHandlerPc = 0x00160550u;
 
     constexpr uint32_t kTimer2Count = 0x10001000u;
     constexpr uint32_t kTimer2Mode = 0x10001010u;
@@ -83,6 +93,10 @@ namespace
     uint64_t g_vsyncTick = 0;
     uint64_t g_vsyncCsr = 0;
     std::atomic<bool> g_timer2Resumed{false};
+    uint32_t g_irqObservedSp = 0u;
+    uint32_t g_invocationQueueRuns = 0u;
+    uint32_t g_invocationQueueSp = 0u;
+    bool g_invocationQueueSpChanged = false;
 
     void setRegU32(R5900Context &ctx, int reg, uint32_t value)
     {
@@ -180,6 +194,34 @@ namespace
     void schedulerIrqResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
     {
         g_dispatchTrace.push_back(3);
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
+    void schedulerIrqStackHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
+    {
+        g_irqObservedSp = getRegU32(ctx, 29);
+        const uint64_t clobber = 0u;
+        std::memcpy(rdram + g_irqObservedSp - sizeof(clobber), &clobber, sizeof(clobber));
+        ctx->pc = 0u;
+    }
+
+    void schedulerIrqStackWait(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        EeScheduler &scheduler = runtime->eeScheduler();
+        scheduler.addIrqHandler(false,
+                                2u,
+                                kIrqStackHandlerPc,
+                                true,
+                                0u,
+                                0u,
+                                kIrqRegistrationSp);
+        ctx->pc = kIrqStackResumePc;
+        scheduler.waitVSync(scheduler.currentVSyncTick());
+    }
+
+    void schedulerIrqStackResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
         ctx->pc = 0u;
         runtime->requestStop();
     }
@@ -291,6 +333,43 @@ namespace
         g_dispatchTrace.push_back(3);
         g_resumedResult = getRegS32(*ctx, 2);
         g_timer2Resumed.store(true, std::memory_order_release);
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
+    void schedulerInvocationQueueHandler(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        const uint32_t sp = getRegU32(ctx, 29);
+        if (g_invocationQueueSp == 0u)
+        {
+            g_invocationQueueSp = sp;
+        }
+        else if (g_invocationQueueSp != sp)
+        {
+            g_invocationQueueSpChanged = true;
+        }
+        ++g_invocationQueueRuns;
+        ctx->pc = 0u;
+    }
+
+    void schedulerQueueManyInvocations(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        constexpr uint32_t kInvocationCount = 96u;
+        EeScheduler &scheduler = runtime->eeScheduler();
+        for (uint32_t i = 0u; i < kInvocationCount; ++i)
+        {
+            GuestInvocation invocation{};
+            invocation.kind = GuestInvocationKind::Interrupt;
+            invocation.tag = i;
+            invocation.context.pc = kInvocationQueueHandlerPc;
+            setRegU32(invocation.context, 31, 0u);
+            scheduler.queueInvocation(std::move(invocation));
+        }
+        ctx->pc = kInvocationQueueResumePc;
+    }
+
+    void schedulerInvocationQueueResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
         ctx->pc = 0u;
         runtime->requestStop();
     }
@@ -465,6 +544,62 @@ void register_ps2_runtime_interrupt_tests()
                      "the dispatcher should run wait, IRQ frame, then the resumed base context in exact order");
             t.Equals(g_lastIntcArg.load(std::memory_order_relaxed), 0xCAFEu,
                      "the IRQ frame should receive its registered argument");
+        });
+
+        tc.Run("IRQ callbacks use an isolated invocation stack", [](TestCase &t)
+        {
+            TestEnv env;
+            env.runtime.registerFunction(kIrqStackWaitPc, schedulerIrqStackWait);
+            env.runtime.registerFunction(kIrqStackResumePc, schedulerIrqStackResume);
+            env.runtime.registerFunction(kIrqStackHandlerPc, schedulerIrqStackHandler);
+
+            constexpr uint64_t guard = 0x1122334455667788ull;
+            std::memcpy(env.rdram.data() + kIrqRegistrationGuardAddr, &guard, sizeof(guard));
+            g_irqObservedSp = 0u;
+
+            R5900Context mainContext{};
+            mainContext.pc = kIrqStackWaitPc;
+            env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+            env.runtime.eeScheduler().run();
+
+            uint64_t guardAfter = 0u;
+            std::memcpy(&guardAfter,
+                        env.rdram.data() + kIrqRegistrationGuardAddr,
+                        sizeof(guardAfter));
+            t.IsTrue(g_irqObservedSp != 0u && g_irqObservedSp != kIrqRegistrationSp,
+                     "IRQ handler must not reuse the transient stack captured at registration");
+            t.Equals(guardAfter, guard,
+                     "IRQ handler stack writes must not clobber the registering thread's live frame");
+        });
+
+        tc.Run("pending async callbacks execute sequentially on a reusable invocation stack", [](TestCase &t)
+        {
+            TestEnv env;
+            env.runtime.registerFunction(kInvocationQueuePc, schedulerQueueManyInvocations);
+            env.runtime.registerFunction(kInvocationQueueResumePc, schedulerInvocationQueueResume);
+            env.runtime.registerFunction(kInvocationQueueHandlerPc, schedulerInvocationQueueHandler);
+
+            g_invocationQueueRuns = 0u;
+            g_invocationQueueSp = 0u;
+            g_invocationQueueSpChanged = false;
+
+            R5900Context mainContext{};
+            mainContext.pc = kInvocationQueuePc;
+            env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+
+            bool exhausted = false;
+            try
+            {
+                env.runtime.eeScheduler().run();
+            }
+            catch (const std::runtime_error &error)
+            {
+                exhausted = std::string_view(error.what()) == "EE invocation stack space exhausted";
+            }
+
+            t.IsFalse(exhausted, "queued callbacks must not consume one invocation stack per pending item");
+            t.Equals(g_invocationQueueRuns, 96u, "every queued callback should execute exactly once");
+            t.IsFalse(g_invocationQueueSpChanged, "sequential callbacks should reuse the same stack depth");
         });
 
         tc.Run("iSignalSema defers selection until IRQ return", [](TestCase &t)

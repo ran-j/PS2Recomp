@@ -1,9 +1,9 @@
 #pragma once
 
 #include "runtime/gs/gs_backend.h"
+#include "runtime/gs/gs_texture_page_cache.h"
 
 #include <array>
-#include <functional>
 #include <mutex>
 #include <vector>
 
@@ -16,6 +16,7 @@ public:
     void Reset() override;
 
     void Submit(const GSPrimitiveBatch &batch) override;
+    void LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut) override;
     void BeginTransfer(const GSTransferCommand &command) override;
     void UploadImage(const uint8_t *data, uint32_t sizeBytes) override;
 
@@ -34,7 +35,9 @@ public:
 
 private:
     void ResetUnlocked();
+    void LoadClutUnlocked(const GSTex0Reg &tex0, const GSTexClutReg &texclut);
     uint32_t ReadVramUnlocked(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y) const;
+    uint32_t ReadTextureVramUnlocked(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y);
     void WriteVramUnlocked(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value);
 
     void DrawPrimitive(const GSPrimitiveBatch &batch);
@@ -43,7 +46,7 @@ private:
     void DrawLine(const GSPrimitiveBatch &batch);
     void WritePixel(const GSDrawState &state, int x, int y, int z, uint8_t r, uint8_t g, uint8_t b, uint8_t a, uint8_t fog);
     uint32_t SampleTexture(const GSDrawState &state, float s, float t, float q, uint16_t u, uint16_t v);
-    uint32_t LookupCLUT(const GSDrawState &state, uint8_t index, uint32_t cbp, uint8_t cpsm, uint8_t csm, uint8_t csa, uint8_t sourcePsm);
+    uint32_t LookupCLUT(const GSDrawState &state, uint8_t index, uint8_t cpsm, uint8_t csm, uint8_t csa, uint8_t sourcePsm);
 
     void PerformLocalToLocalTransfer();
     void PerformLocalToHostTransfer();
@@ -58,8 +61,8 @@ private:
                              uint32_t sourceOriginX,
                              uint32_t sourceOriginY) const;
 
-    using WriteVramFunc = std::function<void(uint8_t *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t)>;
-    using ReadVramFunc = std::function<uint32_t(uint8_t *, uint32_t, uint32_t, uint32_t, uint32_t)>;
+    using WriteVramFunc = void (*)(uint8_t *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+    using ReadVramFunc = uint32_t (*)(uint8_t *, uint32_t, uint32_t, uint32_t, uint32_t);
 
     static constexpr size_t kPsmHandlerCount = 1u << 6u;
     mutable std::mutex m_mutex;
@@ -67,6 +70,9 @@ private:
     uint32_t m_vramSize = 0;
     std::array<ReadVramFunc, kPsmHandlerCount> m_readVramFuncs{};
     std::array<WriteVramFunc, kPsmHandlerCount> m_writeVramFuncs{};
+    std::array<uint16_t, 512> m_clut{};
+    std::array<uint32_t, 2> m_clutCbp{};
+    GSMem::TexturePageCache m_texturePageCache;
 
     GSTransferCommand m_transfer{};
     GSTransferSnapshot m_transferState{};

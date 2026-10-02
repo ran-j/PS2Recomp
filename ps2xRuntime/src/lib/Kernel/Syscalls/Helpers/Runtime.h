@@ -112,8 +112,11 @@ inline std::string translatePs2Path(const char *ps2Path)
         return {};
     }
 
-    std::string pathStr(ps2Path);
-    std::string lower = toLowerAscii(pathStr);
+    const ps2x::iop::ParsedPs2Path parsed = ps2x::iop::parsePs2Path(ps2Path);
+    if (!parsed)
+    {
+        return {};
+    }
 
     auto resolveWithBase = [&](const std::filesystem::path &base, const std::string &suffix) -> std::string
     {
@@ -126,35 +129,19 @@ inline std::string translatePs2Path(const char *ps2Path)
         return resolved.lexically_normal().string();
     };
 
-    if (lower.rfind("host0:", 0) == 0 || lower.rfind("host:", 0) == 0)
+    switch (parsed.device)
     {
-        const std::size_t prefixLength = (lower.rfind("host0:", 0) == 0) ? 6 : 5;
-        return resolveWithBase(getConfiguredHostRoot(), pathStr.substr(prefixLength));
+    case ps2x::iop::Ps2PathDevice::Host:
+        return resolveWithBase(getConfiguredHostRoot(), parsed.path);
+    case ps2x::iop::Ps2PathDevice::Cdrom:
+        return resolveWithBase(getConfiguredCdRoot(), parsed.path);
+    case ps2x::iop::Ps2PathDevice::MemoryCard0:
+        return resolveWithBase(getConfiguredMcRoot(), parsed.path);
+    case ps2x::iop::Ps2PathDevice::NativeHost:
+        return std::filesystem::path(parsed.path).lexically_normal().string();
+    default:
+        return {};
     }
-
-    if (lower.rfind("cdrom0:", 0) == 0 || lower.rfind("cdrom:", 0) == 0)
-    {
-        const std::size_t prefixLength = (lower.rfind("cdrom0:", 0) == 0) ? 7 : 6;
-        return resolveWithBase(getConfiguredCdRoot(), pathStr.substr(prefixLength));
-    }
-
-    if (lower.rfind(kMc0Prefix, 0) == 0)
-    {
-        const std::size_t prefixLength = sizeof(kMc0Prefix) - 1;
-        return resolveWithBase(getConfiguredMcRoot(), pathStr.substr(prefixLength));
-    }
-
-    if (!pathStr.empty() && (pathStr.front() == '/' || pathStr.front() == '\\'))
-    {
-        return resolveWithBase(getConfiguredCdRoot(), pathStr);
-    }
-
-    if (pathStr.size() > 1 && pathStr[1] == ':')
-    {
-        return pathStr;
-    }
-
-    return resolveWithBase(getConfiguredCdRoot(), pathStr);
 }
 
 static bool localtimeSafe(const std::time_t *t, std::tm *out)

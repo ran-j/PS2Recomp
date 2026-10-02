@@ -1,4 +1,5 @@
 #include "module_factories.h"
+#include "rpc_reply.h"
 
 #include <array>
 #include <cstdint>
@@ -12,8 +13,10 @@ namespace ps2x::iop::detail
     {
         constexpr uint32_t kDbcManSid = 0x80001300u;
         constexpr uint32_t kRpcCheckVersion = 0x80001363u;
-        constexpr uint32_t kDbcManVersion = 0x0320u;
         constexpr uint32_t kMaxUnknownRpcLogs = 32u;
+
+        constexpr std::array<uint16_t, 2> kSupportedVersions{0x0310u, 0x0320u};
+        constexpr uint16_t kReportedVersion = kSupportedVersions.front();
 
         class DbcmanService final : public IopService
         {
@@ -33,10 +36,17 @@ namespace ps2x::iop::detail
                 return kSids;
             }
 
+            [[nodiscard]] std::span<const std::string_view> moduleAliases() const override
+            {
+                return kModuleAliases;
+            }
+
             void reset() override
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 m_unknownRpcLogCount = 0u;
+                m_versionQueryCount = 0u;
+                m_failedVersionReplies = 0u;
             }
 
             [[nodiscard]] RpcResult handleRpc(const RpcRequest &request) override
@@ -56,12 +66,21 @@ namespace ps2x::iop::detail
 
                 if (request.function == kRpcCheckVersion)
                 {
-                    const uint32_t wordCount = request.receive.size / sizeof(uint32_t);
-                    const uint32_t count = wordCount < 4u ? wordCount : 4u;
-                    for (uint32_t index = 0u; index < count; ++index)
+                    const uint32_t version = kReportedVersion;
+                    const std::array<uint32_t, 4> reply{version, version, version, version};
+                    const bool written = writeRpcWords(m_host, request.receive, reply);
+                    bool firstQuery = false;
                     {
-                        const uint32_t address = request.receive.address + index * sizeof(uint32_t);
-                        (void)m_host.writeGuest(address, &kDbcManVersion, sizeof(kDbcManVersion));
+                        std::lock_guard<std::mutex> lock(m_mutex);
+                        firstQuery = m_versionQueryCount++ == 0u;
+                        if (!written)
+                            ++m_failedVersionReplies;
+                    }
+                    if (firstQuery)
+                    {
+                        std::ostringstream message;
+                        message << "[DBCMAN:HLE] check-version reply=0x" << std::hex << version;
+                        m_host.log(LogLevel::Info, message.str());
                     }
                     return result;
                 }
@@ -94,15 +113,21 @@ namespace ps2x::iop::detail
             void appendDebugMetrics(std::vector<DebugMetric> &metrics) const override
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
+                metrics.push_back({"reported_version", kReportedVersion, true});
+                metrics.push_back({"version_queries", m_versionQueryCount, false});
+                metrics.push_back({"failed_version_replies", m_failedVersionReplies, false});
                 metrics.push_back({"unknown_rpc_logs", m_unknownRpcLogCount, false});
             }
 
         private:
             inline static constexpr std::array<uint32_t, 1> kSids{kDbcManSid};
+            inline static constexpr std::array<std::string_view, 3> kModuleAliases{"dbcman", "dbcm", "dbcmserv"};
 
             IopHost &m_host;
             mutable std::mutex m_mutex;
             uint32_t m_unknownRpcLogCount = 0u;
+            uint64_t m_versionQueryCount = 0u;
+            uint64_t m_failedVersionReplies = 0u;
         };
     }
 

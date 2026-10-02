@@ -1,4 +1,5 @@
 #include "../iop_service.h"
+#include "../rpc_reply.h"
 
 #include <algorithm>
 #include <array>
@@ -82,43 +83,75 @@ namespace ps2x::iop::detail
             flavor = Flavor::NewXmcserv;
             switch (function)
             {
-            case 0xFEu: return Operation::Init;
-            case 0x01u: return Operation::GetInfo;
-            case 0x02u: return Operation::Open;
-            case 0x03u: return Operation::Close;
-            case 0x04u: return Operation::Seek;
-            case 0x05u: return Operation::Read;
-            case 0x06u: return Operation::Write;
-            case 0x0Au: return Operation::Flush;
-            case 0x0Cu: return Operation::Chdir;
-            case 0x0Du: return Operation::GetDir;
-            case 0x0Eu: return Operation::SetInfo;
-            case 0x0Fu: return Operation::Delete;
-            case 0x10u: return Operation::Format;
-            case 0x11u: return Operation::Unformat;
-            case 0x12u: return Operation::GetEnt;
-            case 0x14u: return Operation::ChangePriority;
-            default: break;
+            case 0xFEu:
+                return Operation::Init;
+            case 0x01u:
+                return Operation::GetInfo;
+            case 0x02u:
+                return Operation::Open;
+            case 0x03u:
+                return Operation::Close;
+            case 0x04u:
+                return Operation::Seek;
+            case 0x05u:
+                return Operation::Read;
+            case 0x06u:
+                return Operation::Write;
+            case 0x0Au:
+                return Operation::Flush;
+            case 0x0Cu:
+                return Operation::Chdir;
+            case 0x0Du:
+                return Operation::GetDir;
+            case 0x0Eu:
+                return Operation::SetInfo;
+            case 0x0Fu:
+                return Operation::Delete;
+            case 0x10u:
+                return Operation::Format;
+            case 0x11u:
+                return Operation::Unformat;
+            case 0x12u:
+                return Operation::GetEnt;
+            case 0x14u:
+                return Operation::ChangePriority;
+            default:
+                break;
             }
 
             flavor = Flavor::OldMcserv;
             switch (function)
             {
-            case 0x70u: return Operation::Init;
-            case 0x71u: return Operation::Open;
-            case 0x72u: return Operation::Close;
-            case 0x73u: return Operation::Read;
-            case 0x74u: return Operation::Write;
-            case 0x75u: return Operation::Seek;
-            case 0x76u: return Operation::GetDir;
-            case 0x77u: return Operation::Format;
-            case 0x78u: return Operation::GetInfo;
-            case 0x79u: return Operation::Delete;
-            case 0x7Au: return Operation::Flush;
-            case 0x7Bu: return Operation::Chdir;
-            case 0x7Cu: return Operation::SetInfo;
-            case 0x80u: return Operation::Unformat;
-            default: return Operation::Unknown;
+            case 0x70u:
+                return Operation::Init;
+            case 0x71u:
+                return Operation::Open;
+            case 0x72u:
+                return Operation::Close;
+            case 0x73u:
+                return Operation::Read;
+            case 0x74u:
+                return Operation::Write;
+            case 0x75u:
+                return Operation::Seek;
+            case 0x76u:
+                return Operation::GetDir;
+            case 0x77u:
+                return Operation::Format;
+            case 0x78u:
+                return Operation::GetInfo;
+            case 0x79u:
+                return Operation::Delete;
+            case 0x7Au:
+                return Operation::Flush;
+            case 0x7Bu:
+                return Operation::Chdir;
+            case 0x7Cu:
+                return Operation::SetInfo;
+            case 0x80u:
+                return Operation::Unformat;
+            default:
+                return Operation::Unknown;
             }
         }
 
@@ -136,6 +169,7 @@ namespace ps2x::iop::detail
 
             [[nodiscard]] std::string_view name() const override { return "MCSERV"; }
             [[nodiscard]] std::span<const uint32_t> sids() const override { return m_sids; }
+            [[nodiscard]] std::span<const std::string_view> moduleAliases() const override { return m_moduleAliases; }
 
             void reset() override
             {
@@ -156,8 +190,8 @@ namespace ps2x::iop::detail
                 const Operation operation = decodeOperation(request.function, flavor);
                 if (operation == Operation::Init)
                 {
-                    (void)call(MemoryCardOperation::Init);
-                    writeInitResult(request.receive);
+                    const int32_t result = call(MemoryCardOperation::Init);
+                    writeInitResult(request.receive, flavor, result);
                     return response;
                 }
 
@@ -173,7 +207,7 @@ namespace ps2x::iop::detail
                 {
                     NameParameter parameter{};
                     if (request.send.address != 0u &&
-                        request.send.size >= offsetof(NameParameter, name) &&
+                        request.send.size >= sizeof(parameter) &&
                         m_host.readGuest(request.send.address, &parameter, sizeof(parameter)))
                     {
                         result = handleNameOperation(operation, request.send.address, parameter);
@@ -189,22 +223,15 @@ namespace ps2x::iop::detail
                         if (operation == Operation::Write && parameter.origin > 0 &&
                             parameter.origin <= static_cast<int32_t>(sizeof(parameter.data)))
                         {
-                            const uint32_t inlineAddress =
-                                request.send.address + static_cast<uint32_t>(offsetof(DescriptorParameter, data));
-                            const int32_t prefix = call(MemoryCardOperation::Write,
-                                                        static_cast<uint32_t>(parameter.fd),
-                                                        inlineAddress,
-                                                        static_cast<uint32_t>(parameter.origin));
+                            const uint32_t inlineAddress = request.send.address + static_cast<uint32_t>(offsetof(DescriptorParameter, data));
+                            const int32_t prefix = call(MemoryCardOperation::Write, static_cast<uint32_t>(parameter.fd), inlineAddress, static_cast<uint32_t>(parameter.origin));
                             if (prefix < 0)
                             {
                                 result = prefix;
                             }
                             else
                             {
-                                const int32_t body = call(MemoryCardOperation::Write,
-                                                          static_cast<uint32_t>(parameter.fd),
-                                                          parameter.buffer,
-                                                          static_cast<uint32_t>(std::max(parameter.size, 0)));
+                                const int32_t body = call(MemoryCardOperation::Write, static_cast<uint32_t>(parameter.fd), parameter.buffer, static_cast<uint32_t>(std::max(parameter.size, 0)));
                                 result = body < 0 ? body : prefix + body;
                             }
                         }
@@ -238,40 +265,20 @@ namespace ps2x::iop::detail
 
             void writeResult(GuestBuffer receive, int32_t result)
             {
-                if (receive.address == 0u || receive.size < sizeof(result))
-                {
-                    return;
-                }
-                (void)m_host.writeGuest(receive.address, &result, sizeof(result));
-                if (receive.size > sizeof(result))
-                {
-                    (void)m_host.zeroGuest(receive.address + sizeof(result),
-                                           receive.size - sizeof(result));
-                }
+                const std::array<uint32_t, 1> values{static_cast<uint32_t>(result)};
+                (void)writeRpcWords(m_host, receive, values);
             }
 
-            void writeInitResult(GuestBuffer receive)
+            void writeInitResult(GuestBuffer receive, Flavor flavor, int32_t result)
             {
-                if (receive.address == 0u || receive.size < sizeof(int32_t))
-                {
-                    return;
-                }
-                const std::array<uint32_t, 3> values = {
-                    static_cast<uint32_t>(kSucceeded), kMcservVersion, kMcmanVersion};
-                const uint32_t bytes = std::min<uint32_t>(receive.size, sizeof(values));
-                (void)m_host.writeGuest(receive.address, values.data(), bytes);
-                if (receive.size > bytes)
-                {
-                    (void)m_host.zeroGuest(receive.address + bytes, receive.size - bytes);
-                }
+                const std::array<uint32_t, 3> values = {static_cast<uint32_t>(result), kMcservVersion, kMcmanVersion};
+                const size_t count = flavor == Flavor::NewXmcserv ? values.size() : 1u;
+                (void)writeRpcWords(m_host, receive, std::span<const uint32_t>(values.data(), count));
             }
 
-            int32_t handleNameOperation(Operation operation,
-                                        uint32_t sendAddress,
-                                        const NameParameter &parameter)
+            int32_t handleNameOperation(Operation operation, uint32_t sendAddress, const NameParameter &parameter)
             {
-                const uint32_t nameAddress =
-                    sendAddress + static_cast<uint32_t>(offsetof(NameParameter, name));
+                const uint32_t nameAddress = sendAddress + static_cast<uint32_t>(offsetof(NameParameter, name));
                 const uint32_t port = static_cast<uint32_t>(parameter.port);
                 const uint32_t slot = static_cast<uint32_t>(parameter.slot);
                 switch (operation)
@@ -281,12 +288,9 @@ namespace ps2x::iop::detail
                     {
                         return call(MemoryCardOperation::Mkdir, port, slot, nameAddress);
                     }
-                    return call(MemoryCardOperation::Open,
-                                port, slot, nameAddress,
-                                static_cast<uint32_t>(parameter.flags));
+                    return call(MemoryCardOperation::Open, port, slot, nameAddress, static_cast<uint32_t>(parameter.flags));
                 case Operation::Chdir:
-                    return call(MemoryCardOperation::Chdir,
-                                port, slot, nameAddress, parameter.pointer);
+                    return call(MemoryCardOperation::Chdir, port, slot, nameAddress, parameter.pointer);
                 case Operation::SetInfo:
                     return call(MemoryCardOperation::SetFileInfo, port, slot, nameAddress);
                 case Operation::Delete:
@@ -302,9 +306,7 @@ namespace ps2x::iop::detail
                 }
             }
 
-            int32_t handleDescriptorOperation(Operation operation,
-                                               Flavor flavor,
-                                               const DescriptorParameter &parameter)
+            int32_t handleDescriptorOperation(Operation operation, Flavor flavor, const DescriptorParameter &parameter)
             {
                 switch (operation)
                 {
@@ -341,8 +343,7 @@ namespace ps2x::iop::detail
                 case Operation::Read:
                     if (parameter.parameter != 0u)
                     {
-                        (void)m_host.zeroGuest(parameter.parameter,
-                                               flavor == Flavor::NewXmcserv ? 192u : 64u);
+                        (void)m_host.zeroGuest(parameter.parameter, flavor == Flavor::NewXmcserv ? 192u : 64u);
                     }
                     return call(MemoryCardOperation::Read,
                                 static_cast<uint32_t>(parameter.fd),
@@ -392,6 +393,7 @@ namespace ps2x::iop::detail
             mutable std::mutex m_mutex;
             uint32_t m_unknownRpcLogCount = 0u;
             const std::array<uint32_t, 2> m_sids = {kMcservSid, kMcservDev9Sid};
+            const std::array<std::string_view, 2> m_moduleAliases = {"mcserv", "xmcserv"};
         };
     }
 

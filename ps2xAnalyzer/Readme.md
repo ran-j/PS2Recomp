@@ -32,8 +32,7 @@ Japanese set, and depends on samples that retained relocations. Treat the result
 high-confidence hint rather than a complete SDK catalog: it can miss SDK variants that
 were not present in the sampled games, and ambiguous matches are intentionally ignored.
 
-### 4. Ghidra Integration (For Retail and Stripped Games, Preferred)
-This is the recommended workflow for almost every commercial game:
+### 4. Ghidra Integration
 1. Use the provided script: `ps2xRecomp/tools/ghidra/ExportPS2Functions.java`.
 2. Run it in Ghidra to export a CSV map of all functions.
 3. Let the script generate the TOML, and keep the CSV path in `ghidra_output = "path/to/map.csv"`.
@@ -63,8 +62,7 @@ ps2_analyzer <input_elf> <output_toml> [sce_symbol_db_dir]
 1. Open `game.elf` in Ghidra.
 2. Run `ps2xRecomp/tools/ghidra/ExportPS2Functions.java`.
 3. Use the exported TOML and CSV.
-4. Run the recompiler:
-   `ps2recomp config.toml`
+4. Run the recompiler: `ps2recomp config.toml`
 
 Fallback:
 1. Run `ps2_analyzer game.elf config.toml`.
@@ -74,8 +72,8 @@ Fallback:
 The tool creates a TOML file with the following sections:
 * `[general]`: Paths to ELF and Ghidra maps.
 * `stubs`: Runtime-known functions to be replaced by C++ stubs or syscall handlers.
-* `untracked_stubs`: Detected library-like functions without runtime handlers. This is
-  informational only and is ignored by the recompiler.
+* `untracked_stubs`: Detected library-like functions without runtime handlers. This is informational only and is ignored by the recompiler.
+* `entry_points`: Guest functions without runtime handlers that may be referenced by address.
 * `skip`: Legacy compatibility field. The analyzer no longer auto-populates it.
 * `[patches]`: Individual instructions that need to be replaced (SYSCALLs, COP0, etc.).
 
@@ -83,6 +81,5 @@ The tool creates a TOML file with the following sections:
 
 * Heuristics may not catch all special cases in highly optimized code.
 * Self-modifying code is flagged but requires manual review.
-* Indirect jumps (jump tables) are detected but complex ones might need manual TOML entries.
 
 For more details on the recompilation process, see the [Main README](../README.md).

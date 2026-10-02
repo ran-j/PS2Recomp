@@ -11,8 +11,6 @@
 
 std::string translatePs2Path(const char *ps2Path);
 
-inline std::mutex g_sys_fd_mutex;
-
 namespace ps2_syscalls
 {
 #define PS2_DECLARE_SYSCALL(name) void name(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);

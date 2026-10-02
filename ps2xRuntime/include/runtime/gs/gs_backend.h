@@ -14,6 +14,7 @@ public:
     virtual void Reset() = 0;
 
     virtual void Submit(const GSPrimitiveBatch &batch) = 0;
+    virtual void LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut) = 0;
 
     virtual void BeginTransfer(const GSTransferCommand &command) = 0;
     virtual void UploadImage(const uint8_t *data, uint32_t sizeBytes) = 0;

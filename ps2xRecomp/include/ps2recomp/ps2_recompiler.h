@@ -42,9 +42,12 @@ namespace ps2recomp
             std::vector<Function> &functions,
             std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions,
             const std::vector<Section> &sections);
-        static size_t ResliceEntryFunctions(
-            std::vector<Function> &functions,
-            std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions);
+        static size_t ResliceEntryFunctions(std::vector<Function> &functions, std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions);
+        static size_t CollectInternalEntryTargets(
+            const std::vector<Function> &functions,
+            const std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions,
+            const std::unordered_set<uint32_t> &entryAddresses,
+            std::unordered_map<uint32_t, std::vector<uint32_t>> &targetsByOwner);
 
         static std::string ClampFilenameLength(const std::string& baseName, const std::string& extension, std::size_t maxLength);
 
@@ -67,6 +70,7 @@ namespace ps2recomp
         std::unordered_set<std::string> m_stubFunctions;
         std::unordered_set<uint32_t> m_stubFunctionStarts;
         std::unordered_map<uint32_t, std::string> m_stubHandlerBindingsByStart;
+        std::unordered_set<uint32_t> m_entryPointHintStarts;
         std::unordered_set<uint32_t> m_correctnessCriticalFunctionStarts;
         std::map<uint32_t, std::string> m_generatedStubs;
         std::unordered_map<uint32_t, std::string> m_functionRenames;

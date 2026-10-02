@@ -13,6 +13,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <stdexcept>
 
 using namespace GSInternal;
 
@@ -281,41 +282,14 @@ namespace
         return (index & ~0x18u) | ((index & 0x08u) << 1u) | ((index & 0x10u) >> 1u);
     }
 
-    // TODO: clut cache
-    uint32_t resolveClutIndex(uint8_t index, uint8_t cpsm, uint8_t csm, uint8_t csa, uint8_t sourcePsm)
+    bool isFourBitIndexedPsm(uint8_t psm)
     {
-        uint32_t clutIndex = static_cast<uint32_t>(index);
+        return psm == GS_PSM_T4 || psm == GS_PSM_T4HL || psm == GS_PSM_T4HH;
+    }
 
-        // CSM2 addresses the source directly through TEXCLUT. CSA is required
-        // to be zero there, so it must not offset the source coordinates.
-        if (csm != 0u)
-            return (sourcePsm == GS_PSM_T4 ||
-                    sourcePsm == GS_PSM_T4HH ||
-                    sourcePsm == GS_PSM_T4HL)
-                       ? (clutIndex & 0x0Fu)
-                       : clutIndex;
-
-        const bool is16BitClut = cpsm == GS_PSM_CT16 || cpsm == GS_PSM_CT16S;
-        const uint32_t csaMask = is16BitClut ? 0x1Fu : 0x0Fu;
-        const uint32_t clutIndexMask = is16BitClut ? 0x1FFu : 0x0FFu;
-        const uint32_t clutBase = (static_cast<uint32_t>(csa) & csaMask) << 4u;
-
-        switch (sourcePsm)
-        {
-        case GS_PSM_T4:
-        case GS_PSM_T4HH:
-        case GS_PSM_T4HL:
-            clutIndex = clutBase + (clutIndex & 0x0Fu);
-            break;
-        case GS_PSM_T8:
-        case GS_PSM_T8H:
-            clutIndex = clutBase + clutIndex;
-            break;
-        default:
-            return clutIndex;
-        }
-
-        return swizzleClutIndexCSM1(clutIndex & clutIndexMask);
+    bool isEightBitIndexedPsm(uint8_t psm)
+    {
+        return psm == GS_PSM_T8 || psm == GS_PSM_T8H;
     }
 
     uint8_t lerpChannel(uint8_t c00, uint8_t c10, uint8_t c01, uint8_t c11, float fx, float fy)
@@ -541,6 +515,9 @@ GSCpuBackend::GSCpuBackend()
 
 void GSCpuBackend::Initialize(uint8_t *vram, uint32_t vramSize)
 {
+    if (vram && vramSize < GSMem::MEMORY_SIZE)
+        throw std::invalid_argument("GS CPU backend requires at least 4 MiB of VRAM");
+
     std::lock_guard<std::mutex> lock(m_mutex);
     m_vram = vram;
     m_vramSize = vramSize;
@@ -555,6 +532,9 @@ void GSCpuBackend::Reset()
 
 void GSCpuBackend::ResetUnlocked()
 {
+    m_clut.fill(0u);
+    m_clutCbp.fill(0u);
+    m_texturePageCache.Invalidate();
     m_transfer = {};
     m_transfer.direction = 3u;
     m_transferState = {};
@@ -571,6 +551,91 @@ void GSCpuBackend::Submit(const GSPrimitiveBatch &batch)
     DrawPrimitive(batch);
 }
 
+void GSCpuBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_vram || (!isFourBitIndexedPsm(tex0.psm) && !isEightBitIndexedPsm(tex0.psm)))
+        return;
+
+    switch (tex0.cld)
+    {
+    case 0u:
+    case 6u:
+    case 7u:
+        return;
+    case 1u:
+        break;
+    case 2u:
+        m_clutCbp[0] = tex0.cbp;
+        break;
+    case 3u:
+        m_clutCbp[1] = tex0.cbp;
+        break;
+    case 4u:
+        if (m_clutCbp[0] == tex0.cbp)
+            return;
+        m_clutCbp[0] = tex0.cbp;
+        break;
+    case 5u:
+        if (m_clutCbp[1] == tex0.cbp)
+            return;
+        m_clutCbp[1] = tex0.cbp;
+        break;
+    default:
+        return;
+    }
+
+    LoadClutUnlocked(tex0, texclut);
+}
+
+void GSCpuBackend::LoadClutUnlocked(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
+{
+    const bool fourBit = isFourBitIndexedPsm(tex0.psm);
+    const bool sixteenBit = tex0.cpsm == GS_PSM_CT16 || tex0.cpsm == GS_PSM_CT16S;
+    const bool thirtyTwoBit = tex0.cpsm == GS_PSM_CT32 || tex0.cpsm == GS_PSM_CT24;
+    if (!sixteenBit && !thirtyTwoBit)
+        return;
+
+    const uint32_t entryCount = fourBit ? 16u : 256u;
+    const uint32_t csaMask = sixteenBit ? 0x1Fu : 0x0Fu;
+    const uint32_t destinationBase = (static_cast<uint32_t>(tex0.csa) & csaMask) << 4u;
+
+    const bool loadCsm1Suffix = tex0.csm == 0u && thirtyTwoBit && !fourBit;
+    const uint32_t firstEntry = loadCsm1Suffix ? destinationBase : 0u;
+
+    for (uint32_t entry = firstEntry; entry < entryCount; ++entry)
+    {
+        uint32_t sourceX = 0u;
+        uint32_t sourceY = 0u;
+        uint32_t sourceWidth = 1u;
+
+        if (tex0.csm == 0u)
+        {
+            const uint32_t sourceIndex = swizzleClutIndexCSM1(entry);
+            sourceX = sourceIndex & 0x0Fu;
+            sourceY = sourceIndex >> 4u;
+        }
+        else
+        {
+            sourceWidth = texclut.cbw != 0u ? static_cast<uint32_t>(texclut.cbw) : 1u;
+            sourceX = (static_cast<uint32_t>(texclut.cou) << 4u) + entry;
+            sourceY = static_cast<uint32_t>(texclut.cov);
+        }
+
+        const uint32_t raw = ReadTextureVramUnlocked(tex0.cpsm, tex0.cbp, sourceWidth, sourceX, sourceY); 
+        const uint32_t destination = (loadCsm1Suffix ? entry : destinationBase + entry) & (sixteenBit ? 0x1FFu : 0x0FFu);
+        if (sixteenBit)
+        {
+            m_clut[destination] = static_cast<uint16_t>(raw);
+        }
+        else
+        {
+            m_clut[destination] = static_cast<uint16_t>(raw & 0xFFFFu);
+            m_clut[destination + 256u] = static_cast<uint16_t>(raw >> 16u);
+        }
+    }
+}
+
 void GSCpuBackend::Flush()
 {
     // CPU backend is immediate. GPU backends may submit command buffers here.
@@ -578,8 +643,8 @@ void GSCpuBackend::Flush()
 
 void GSCpuBackend::TextureFlush()
 {
-    // CPU texture reads are coherent with local memory. Future cached/GPU
-    // backends use this boundary to invalidate texture views.
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_texturePageCache.Invalidate();
 }
 
 void GSCpuBackend::Sync(GSSyncReason)
@@ -598,6 +663,14 @@ uint32_t GSCpuBackend::ReadVramUnlocked(uint32_t psm, uint32_t base, uint32_t bw
     if (!m_vram)
         return 0u;
     return m_readVramFuncs[psm & 0x3Fu](m_vram, base, bw, x, y);
+}
+
+uint32_t GSCpuBackend::ReadTextureVramUnlocked(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y)
+{
+    if (!m_vram)
+        return 0u;
+
+    return GSMem::ReadTexture(m_texturePageCache, m_vram, psm, base, bw, x, y);
 }
 
 void GSCpuBackend::WriteVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value)
@@ -941,27 +1014,40 @@ void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uin
 
 uint32_t GSCpuBackend::LookupCLUT(const GSDrawState &state,
                                   uint8_t index,
-                                  uint32_t cbp,
                                   uint8_t cpsm,
                                   uint8_t csm,
                                   uint8_t csa,
                                   uint8_t sourcePsm)
 {
-    const uint32_t clutIndex = resolveClutIndex(index, cpsm, csm, csa, sourcePsm);
-    const uint32_t clutWidth = (state.texclut.cbw != 0u) ? static_cast<uint32_t>(state.texclut.cbw) : 1u;
-    const uint32_t clutX = static_cast<uint32_t>(state.texclut.cou) + (clutIndex & 0x0Fu);
-    const uint32_t clutY = static_cast<uint32_t>(state.texclut.cov) + (clutIndex >> 4);
+    const bool sixteenBit = cpsm == GS_PSM_CT16 || cpsm == GS_PSM_CT16S;
+    const uint32_t csaMask = sixteenBit ? 0x1Fu : 0x0Fu;
+    const uint32_t clutBase = (static_cast<uint32_t>(csa) & csaMask) << 4u;
+    const uint32_t sourceIndex = isFourBitIndexedPsm(sourcePsm)
+                                     ? (static_cast<uint32_t>(index) & 0x0Fu)
+                                     : static_cast<uint32_t>(index);
+
+    uint32_t clutIndex = (clutBase + sourceIndex) & (sixteenBit ? 0x1FFu : 0x0FFu);
+    if (!sixteenBit && csm == 0u && isEightBitIndexedPsm(sourcePsm))
+    {
+        const uint32_t block = std::min((sourceIndex & 0xF0u) + clutBase, 240u);
+        clutIndex = block + (sourceIndex & 0x0Fu);
+    }
 
     switch (cpsm)
     {
     case GS_PSM_CT32:
-        return applyTexa(state.texa, cpsm, GSMem::ReadCT32(m_vram, cbp, clutWidth, clutX, clutY));
+    {
+        const uint32_t raw = static_cast<uint32_t>(m_clut[clutIndex]) | (static_cast<uint32_t>(m_clut[clutIndex + 256u]) << 16u);
+        return applyTexa(state.texa, cpsm, raw);
+    }
     case GS_PSM_CT24:
-        return applyTexa(state.texa, cpsm, GSMem::ReadCT24(m_vram, cbp, clutWidth, clutX, clutY));
+    {
+        const uint32_t raw = static_cast<uint32_t>(m_clut[clutIndex]) | (static_cast<uint32_t>(m_clut[clutIndex + 256u]) << 16u);
+        return applyTexa(state.texa, cpsm, raw & 0x00FFFFFFu);
+    }
     case GS_PSM_CT16:
-        return applyTexa(state.texa, cpsm, Rgba5551ToRgba8888(GSMem::ReadCT16(m_vram, cbp, clutWidth, clutX, clutY)));
     case GS_PSM_CT16S:
-        return applyTexa(state.texa, cpsm, Rgba5551ToRgba8888(GSMem::ReadCT16S(m_vram, cbp, clutWidth, clutX, clutY)));
+        return applyTexa(state.texa, cpsm, Rgba5551ToRgba8888(m_clut[clutIndex]));
     default:
         break;
     }
@@ -1002,7 +1088,7 @@ uint32_t GSCpuBackend::SampleTexture(const GSDrawState &state, float s, float t,
         sampleU = wrapTextureCoordinate(sampleU, texW, wrapU, minU, maxU);
         sampleV = wrapTextureCoordinate(sampleV, texH, wrapV, minV, maxV);
 
-        u32 out = ReadVramUnlocked(tex.psm, tex.tbp0, tex.tbw, sampleU, sampleV);
+        u32 out = ReadTextureVramUnlocked(tex.psm, tex.tbp0, tex.tbw, sampleU, sampleV);
 
         switch (tex.psm)
         {
@@ -1021,7 +1107,7 @@ uint32_t GSCpuBackend::SampleTexture(const GSDrawState &state, float s, float t,
         case GS_PSM_T4:
         case GS_PSM_T4HL:
         case GS_PSM_T4HH:
-            return LookupCLUT(state, static_cast<u8>(out), tex.cbp, tex.cpsm, tex.csm, tex.csa, tex.psm);
+            return LookupCLUT(state, static_cast<u8>(out), tex.cpsm, tex.csm, tex.csa, tex.psm);
         }
 
         return 0xFFFF00FFu;

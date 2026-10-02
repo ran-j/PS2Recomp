@@ -549,6 +549,29 @@ void register_ps2_runtime_kernel_tests()
 {
     MiniTest::Case("PS2RuntimeKernel", [](TestCase &tc)
     {
+        tc.Run("unsigned loads and ABI word writes extend independently", [](TestCase &t)
+        {
+            constexpr uint64_t kUpper = 0x1122334455667788ull;
+            R5900Context ctx{};
+            ctx.r[2] = _mm_set_epi64x(static_cast<int64_t>(kUpper), 0);
+
+            SET_GPR_ZE32(&ctx, 2, 0x80000000u);
+            t.Equals(static_cast<uint64_t>(_mm_extract_epi64(ctx.r[2], 0)),
+                     0x0000000080000000ull,
+                     "SET_GPR_ZE32 must zero-extend values used by LWU/LHU/LBU");
+            t.Equals(static_cast<uint64_t>(_mm_extract_epi64(ctx.r[2], 1)),
+                     kUpper,
+                     "SET_GPR_ZE32 must preserve the upper 64 bits of the 128-bit GPR");
+
+            SET_GPR_U32(&ctx, 2, 0x80000000u);
+            t.Equals(static_cast<uint64_t>(_mm_extract_epi64(ctx.r[2], 0)),
+                     0xFFFFFFFF80000000ull,
+                     "SET_GPR_U32 must retain the existing EE 32-bit ABI extension semantics");
+            t.Equals(static_cast<uint64_t>(_mm_extract_epi64(ctx.r[2], 1)),
+                     kUpper,
+                     "SET_GPR_U32 must preserve the upper 64 bits of the 128-bit GPR");
+        });
+
         tc.Run("CreateThread and CreateSema decode the exact PS2SDK EE layouts", [](TestCase &t)
         {
             TestEnv env;
@@ -977,7 +1000,7 @@ void register_ps2_runtime_kernel_tests()
             t.Equals(getRegS32(env.ctx, 2), -4, "__divdi3 should divide signed 64-bit values");
         });
 
-        tc.Run("ReleaseAlarm aliases CancelAlarm and cache toggles succeed", [](TestCase &t)
+        tc.Run("ReleaseAlarm aliases CancelAlarm and cache syscalls succeed", [](TestCase &t)
         {
             TestEnv env;
 
@@ -1005,6 +1028,13 @@ void register_ps2_runtime_kernel_tests()
 
             DisableCache(env.rdram.data(), &env.ctx, &env.runtime);
             t.Equals(getRegS32(env.ctx, 2), KE_OK, "DisableCache should succeed as a no-op");
+
+            setRegU32(env.ctx, 2, 0xDEADBEEFu);
+            setRegU32(env.ctx, 4, 0u); // PS2SDK WRITEBACK_DCACHE
+            t.IsTrue(callSyscall(static_cast<uint32_t>(-0x68), env.rdram.data(), &env.ctx, &env.runtime),
+                     "-0x68 should dispatch iFlushCache");
+            t.Equals(getRegS32(env.ctx, 2), KE_OK,
+                     "iFlushCache should succeed when guest and host memory are coherent");
         });
 
         tc.Run("setup heap and thread invalid ids use documented kernel errors", [](TestCase &t)

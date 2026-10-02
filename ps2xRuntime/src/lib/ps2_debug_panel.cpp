@@ -81,7 +81,7 @@ namespace
     {
         for (const ps2x::iop::DebugService &service : snapshot.services)
         {
-            if (std::find(service.sids.begin(), service.sids.end(), sid) !=
+            if (service.active && std::find(service.sids.begin(), service.sids.end(), sid) !=
                 service.sids.end())
             {
                 return service.name;
@@ -699,13 +699,48 @@ namespace
 
     void drawCpuTab(PS2Runtime &runtime, bool showRegisters)
     {
-        const uint32_t pc = runtime.m_debugPc.load(std::memory_order_relaxed);
-        const uint32_t ra = runtime.m_debugRa.load(std::memory_order_relaxed);
-        const uint32_t sp = runtime.m_debugSp.load(std::memory_order_relaxed);
-        const uint32_t gp = runtime.m_debugGp.load(std::memory_order_relaxed);
+        const bool executingGuest = runtime.eeScheduler().isExecutingGuest();
+        const EeKernelSnapshot schedulerSnapshot = runtime.eeScheduler().snapshot();
+        const EeThreadSnapshot *selectedThread = nullptr;
+        if (!executingGuest)
+        {
+            const auto running = std::find_if(schedulerSnapshot.threads.begin(),
+                                              schedulerSnapshot.threads.end(),
+                                              [&](const EeThreadSnapshot &thread)
+                                              { return thread.id == schedulerSnapshot.runningThreadId; });
+            if (running != schedulerSnapshot.threads.end())
+            {
+                selectedThread = &*running;
+            }
+            else
+            {
+                const auto blocked = std::find_if(schedulerSnapshot.threads.begin(),
+                                                  schedulerSnapshot.threads.end(),
+                                                  [](const EeThreadSnapshot &thread)
+                                                  { return thread.status != EeThreadStatus::Dormant; });
+                if (blocked != schedulerSnapshot.threads.end())
+                {
+                    selectedThread = &*blocked;
+                }
+                else if (!schedulerSnapshot.threads.empty())
+                {
+                    selectedThread = &schedulerSnapshot.threads.front();
+                }
+            }
+        }
+
+        const uint32_t pc = selectedThread ? selectedThread->pc : runtime.m_debugPc.load(std::memory_order_relaxed);
+        const uint32_t ra = selectedThread ? selectedThread->ra : runtime.m_debugRa.load(std::memory_order_relaxed);
+        const uint32_t sp = selectedThread ? selectedThread->sp : runtime.m_debugSp.load(std::memory_order_relaxed);
+        const uint32_t gp = selectedThread ? selectedThread->contextGp : runtime.m_debugGp.load(std::memory_order_relaxed);
 
         ImGui::Text("Runtime: %s", runtime.isStopRequested() ? "stop requested" : "running");
-        ImGui::Text("EE executor: %s", runtime.eeScheduler().isExecutingGuest() ? "guest" : "scheduler");
+        ImGui::Text("EE executor: %s", executingGuest ? "guest" : "scheduler");
+        if (selectedThread)
+        {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(thread %d: %s/%s)", selectedThread->id, threadStatusName(selectedThread->status), waitTypeName(selectedThread->waitReason));
+        }
         ImGui::Separator();
         textHex32("PC", pc);
         ImGui::SameLine();
@@ -771,19 +806,23 @@ namespace
                     static_cast<unsigned long long>(snapshot.eeCycle),
                     static_cast<unsigned long long>(snapshot.sliceEndCycle),
                     static_cast<unsigned long long>(snapshot.nextEventCycle));
-        if (ImGui::BeginTable("threads", 11, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY, ImVec2(0, 320)))
+        if (ImGui::BeginTable("threads", 15, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY, ImVec2(0, 320)))
         {
             ImGui::TableSetupColumn("ID");
             ImGui::TableSetupColumn("Status");
             ImGui::TableSetupColumn("Wait");
             ImGui::TableSetupColumn("WaitId");
             ImGui::TableSetupColumn("PC");
+            ImGui::TableSetupColumn("RA");
+            ImGui::TableSetupColumn("SP");
+            ImGui::TableSetupColumn("Ctx GP");
             ImGui::TableSetupColumn("Entry");
             ImGui::TableSetupColumn("Stack");
             ImGui::TableSetupColumn("GP");
             ImGui::TableSetupColumn("Prio");
             ImGui::TableSetupColumn("Wake");
             ImGui::TableSetupColumn("Susp");
+            ImGui::TableSetupColumn("Inv");
             ImGui::TableHeadersRow();
             for (const EeThreadSnapshot &row : snapshot.threads)
             {
@@ -799,6 +838,12 @@ namespace
                 ImGui::TableNextColumn();
                 ImGui::Text("0x%08X", row.pc);
                 ImGui::TableNextColumn();
+                ImGui::Text("0x%08X", row.ra);
+                ImGui::TableNextColumn();
+                ImGui::Text("0x%08X", row.sp);
+                ImGui::TableNextColumn();
+                ImGui::Text("0x%08X", row.contextGp);
+                ImGui::TableNextColumn();
                 ImGui::Text("0x%08X", row.entry);
                 ImGui::TableNextColumn();
                 ImGui::Text("0x%08X/%u", row.stack, row.stackSize);
@@ -810,6 +855,8 @@ namespace
                 ImGui::Text("%u", row.wakeupCount);
                 ImGui::TableNextColumn();
                 ImGui::Text("%d", row.suspendCount);
+                ImGui::TableNextColumn();
+                ImGui::Text("%u", row.invocationDepth);
             }
             ImGui::EndTable();
         }
@@ -1020,22 +1067,10 @@ namespace
         }
 
         ImGui::SeparatorText("ps2xIOP HLE services");
-        ImGui::Text("Profile: %s  provider: %s",
-                    iopSnapshot.activeProfile.empty()
-                        ? "<core only>"
-                        : iopSnapshot.activeProfile.c_str(),
-                    iopSnapshot.activeProvider.empty()
-                        ? "builtin"
-                        : iopSnapshot.activeProvider.c_str());
-
-        if (ImGui::BeginTable("iop_hle_services",
-                              5,
-                              ImGuiTableFlags_Borders |
-                                  ImGuiTableFlags_RowBg |
-                                  ImGuiTableFlags_Resizable))
+        if (ImGui::BeginTable("iop_hle_services", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable))
         {
             ImGui::TableSetupColumn("Service");
-            ImGui::TableSetupColumn("Layer");
+            ImGui::TableSetupColumn("Active");
             ImGui::TableSetupColumn("SID");
             ImGui::TableSetupColumn("EE server");
             ImGui::TableSetupColumn("Metrics");
@@ -1048,7 +1083,7 @@ namespace
                     ImGui::TableNextColumn();
                     ImGui::TextUnformatted(service.name.c_str());
                     ImGui::TableNextColumn();
-                    ImGui::TextUnformatted(service.profileSpecific ? "profile" : "core");
+                    ImGui::TextUnformatted(service.active ? "yes" : "no");
                     ImGui::TableNextColumn();
                     ImGui::TextUnformatted("-");
                     ImGui::TableNextColumn();
@@ -1064,7 +1099,7 @@ namespace
                     ImGui::TableNextColumn();
                     ImGui::TextUnformatted(service.name.c_str());
                     ImGui::TableNextColumn();
-                    ImGui::TextUnformatted(service.profileSpecific ? "profile" : "core");
+                    ImGui::TextUnformatted(service.active ? "yes" : "no");
                     ImGui::TableNextColumn();
                     ImGui::Text("0x%08X", sid);
                     ImGui::TableNextColumn();
@@ -1761,27 +1796,25 @@ namespace
         struct FdRow
         {
             int fd = 0;
-            FILE *file = nullptr;
+            std::string device;
+            std::string path;
         };
 
         std::vector<FdRow> fds;
+        for (const PS2VfsDescriptorInfo &descriptor : runtime.vfs().descriptors())
         {
-            std::lock_guard<std::mutex> lock(g_fd_mutex);
-            fds.reserve(g_fileDescriptors.size());
-            for (const auto &[fd, file] : g_fileDescriptors)
-            {
-                fds.push_back(FdRow{fd, file});
-            }
+            fds.push_back({descriptor.descriptor, descriptor.device, descriptor.path});
         }
         std::sort(fds.begin(), fds.end(), [](const FdRow &a, const FdRow &b)
                   { return a.fd < b.fd; });
 
         ImGui::SeparatorText("FileIO descriptors");
-        ImGui::Text("Open host FILE* descriptors: %zu", fds.size());
-        if (ImGui::BeginTable("fileio_fds", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable, ImVec2(0, 90)))
+        ImGui::Text("Open VFS descriptors: %zu", fds.size());
+        if (ImGui::BeginTable("fileio_fds", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable, ImVec2(0, 90)))
         {
             ImGui::TableSetupColumn("FD");
-            ImGui::TableSetupColumn("FILE*");
+            ImGui::TableSetupColumn("Device");
+            ImGui::TableSetupColumn("Path");
             ImGui::TableHeadersRow();
             for (const FdRow &row : fds)
             {
@@ -1789,7 +1822,9 @@ namespace
                 ImGui::TableNextColumn();
                 ImGui::Text("%d", row.fd);
                 ImGui::TableNextColumn();
-                ImGui::Text("%p", static_cast<void *>(row.file));
+                ImGui::TextUnformatted(row.device.c_str());
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(row.path.c_str());
             }
             ImGui::EndTable();
         }
