@@ -82,29 +82,49 @@ struct GSThreadedBackend::Impl
         // A presenter may also submit. Holding this lock across a drain keeps
         // newer commands behind the synchronous operation, not merely its fence.
         std::lock_guard submitLock(submission);
-        const size_t size = command.bytes();
+        stagedBytes += command.bytes();
+        staged.push_back(std::move(command));
+        // Commands are staged under the submission lock and handed to the
+        // worker in groups: DQ8 submits hundreds of thousands of single
+        // primitives per second, and taking the queue lock and waking the
+        // worker for each one cost more than the copies themselves.
+        if (flush || staged.size() >= kStageCommands || stagedBytes >= kStageBytes)
+            publishStaged(flush);
+    }
+
+    // Caller holds `submission`.
+    void publishStaged(bool flush)
+    {
+        if (staged.empty() && !flush)
+            return;
         std::unique_lock lock(mutex);
-        if (outstandingBytes != 0u && size > capacity - std::min(capacity, outstandingBytes))
+        if (outstandingBytes != 0u && stagedBytes > capacity - std::min(capacity, outstandingBytes))
         {
             urgent = true;
             work.notify_one();
             progress.wait(lock, [&] {
                 return error || outstandingBytes == 0u ||
-                       size <= capacity - std::min(capacity, outstandingBytes);
+                       stagedBytes <= capacity - std::min(capacity, outstandingBytes);
             });
         }
         rethrow();
-        pending.push_back(std::move(command));
-        outstandingBytes += size;
+        if (pending.empty())
+            pending.swap(staged);
+        else
+            for (auto &command : staged)
+                pending.push_back(std::move(command));
+        staged.clear();
+        outstandingBytes += stagedBytes;
+        stagedBytes = 0u;
         urgent = urgent || flush;
-        if (pending.size() == 1u || pending.size() == 64u || urgent)
-            work.notify_one();
+        work.notify_one();
     }
 
     template <class F>
     auto observe(F &&fn)
     {
         std::lock_guard submitLock(submission);
+        publishStaged(true);
         {
             std::unique_lock lock(mutex);
             urgent = true;
@@ -240,6 +260,10 @@ struct GSThreadedBackend::Impl
     std::mutex submission, mutex;
     std::condition_variable work, progress;
     std::vector<Command> pending;
+    std::vector<Command> staged;  // guarded by `submission`
+    size_t stagedBytes = 0u;
+    static constexpr size_t kStageCommands = 128u;
+    static constexpr size_t kStageBytes = 256u * 1024u;
     size_t outstandingBytes = 0u;
     bool urgent = false, stopping = false;
     std::exception_ptr error;
