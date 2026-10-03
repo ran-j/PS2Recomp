@@ -70,6 +70,17 @@ struct GSThreadedBackend::Impl
     {
         backend->CancelPreparedPresentations();
         {
+            // Whatever is still staged runs before the worker stops.
+            std::lock_guard submitLock(submission);
+            try
+            {
+                publishStaged(false);
+            }
+            catch (...)
+            {
+            }
+        }
+        {
             std::lock_guard lock(mutex);
             stopping = true;
         }
@@ -87,9 +98,25 @@ struct GSThreadedBackend::Impl
         // Commands are staged under the submission lock and handed to the
         // worker in groups: DQ8 submits hundreds of thousands of single
         // primitives per second, and taking the queue lock and waking the
-        // worker for each one cost more than the copies themselves.
-        if (flush || staged.size() >= kStageCommands || stagedBytes >= kStageBytes)
+        // worker for each one cost more than the copies themselves. An idle
+        // worker gets them at once, so batching never leaves it waiting.
+        if (flush || staged.size() >= kStageCommands ||
+            stagedBytes >= std::min(kStageBytes, capacity) || idle.load(std::memory_order_acquire))
             publishStaged(flush);
+    }
+
+    // The worker's side of publishStaged, when it is idle: nothing outstanding,
+    // so no capacity to wait for. Caller holds `submission`, not `mutex`.
+    void takeStaged()
+    {
+        if (staged.empty())
+            return;
+        std::lock_guard lock(mutex);
+        for (auto &command : staged)
+            pending.push_back(std::move(command));
+        staged.clear();
+        outstandingBytes += stagedBytes;
+        stagedBytes = 0u;
     }
 
     // Caller holds `submission`.
@@ -198,7 +225,24 @@ struct GSThreadedBackend::Impl
             size_t bytes = 0u;
             {
                 std::unique_lock lock(mutex);
-                work.wait(lock, [&] { return stopping || !pending.empty(); });
+                while (!stopping && pending.empty())
+                {
+                    idle.store(true, std::memory_order_release);
+                    if (work.wait_for(lock, std::chrono::milliseconds(2),
+                                      [&] { return stopping || !pending.empty(); }))
+                        break;
+                    // A producer that saw this thread busy may have staged
+                    // commands just before it went idle. Only try the lock: a
+                    // drain holds it while it waits for this thread.
+                    lock.unlock();
+                    if (submission.try_lock())
+                    {
+                        takeStaged();
+                        submission.unlock();
+                    }
+                    lock.lock();
+                }
+                idle.store(false, std::memory_order_release);
                 if (pending.empty() && stopping)
                     return;
                 // Batch small primitives without stranding a short final packet.
@@ -262,6 +306,7 @@ struct GSThreadedBackend::Impl
     std::vector<Command> pending;
     std::vector<Command> staged;  // guarded by `submission`
     size_t stagedBytes = 0u;
+    std::atomic<bool> idle{false}; // the worker is waiting for commands
     static constexpr size_t kStageCommands = 128u;
     static constexpr size_t kStageBytes = 256u * 1024u;
     size_t outstandingBytes = 0u;
