@@ -4,9 +4,38 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#if defined(__SSE4_1__)
+#include <smmintrin.h>
+#endif
 
 namespace
 {
+    // normalizeOperand on four lanes.
+    void normalizeOperands(const float *in, float *out)
+    {
+#if defined(__SSE4_1__)
+        const __m128i bits = _mm_loadu_si128(reinterpret_cast<const __m128i *>(in));
+        const __m128i exponent = _mm_and_si128(bits, _mm_set1_epi32(0x7F800000));
+        const __m128i sign = _mm_and_si128(bits, _mm_set1_epi32(static_cast<int>(0x80000000u)));
+        __m128i normalized = _mm_blendv_epi8(bits, sign, _mm_cmpeq_epi32(exponent, _mm_setzero_si128()));
+        normalized = _mm_blendv_epi8(normalized, _mm_or_si128(sign, _mm_set1_epi32(0x7F7FFFFF)),
+                                     _mm_cmpeq_epi32(exponent, _mm_set1_epi32(0x7F800000)));
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(out), normalized);
+#else
+        for (uint32_t lane = 0; lane < 4u; ++lane)
+        {
+            uint32_t bits = 0;
+            std::memcpy(&bits, &in[lane], sizeof(bits));
+            const uint32_t exponent = (bits >> 23) & 0xFFu;
+            if (exponent == 0u)
+                bits &= 0x80000000u;
+            else if (exponent == 0xFFu)
+                bits = (bits & 0x80000000u) | 0x7F7FFFFFu;
+            std::memcpy(&out[lane], &bits, sizeof(bits));
+        }
+#endif
+    }
+
     int32_t vuFloatToInt(float value, float scale)
     {
         const double scaled = static_cast<double>(value) * static_cast<double>(scale);
@@ -34,17 +63,19 @@ void VU1Interpreter::execUpper(uint32_t instr)
     float normalizedVs[4];
     float normalizedVt[4];
     float normalizedAcc[4];
-    for (uint32_t component = 0; component < 4u; ++component)
-    {
-        normalizedVs[component] = normalizeOperand(m_state.vf[fs][component]);
-        normalizedVt[component] = normalizeOperand(m_state.vf[ft][component]);
-        normalizedAcc[component] = normalizeOperand(m_state.acc[component]);
-    }
+    normalizeOperands(m_state.vf[fs], normalizedVs);
+    normalizeOperands(m_state.vf[ft], normalizedVt);
+    normalizeOperands(m_state.acc, normalizedAcc);
     const float *vs = normalizedVs;
     const float *vt = normalizedVt;
     const float *acc = normalizedAcc;
     const float q = normalizeOperand(m_state.q);
     const float i = normalizeOperand(m_state.i);
+    m_fmacVs = vs;
+    m_fmacVt = vt;
+    m_fmacAcc = acc;
+    m_fmacQ = q;
+    m_fmacI = i;
     float result[4];
 
     // Upper opcode decoding (bits 5:0 of upper word)

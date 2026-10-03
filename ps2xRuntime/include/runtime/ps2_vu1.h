@@ -3,6 +3,8 @@
 
 #include <array>
 #include <cstdint>
+#include <cstring>
+#include <limits>
 
 class GS;
 class PS2Memory;
@@ -115,7 +117,23 @@ private:
         bool tBit = false;
         uint8_t upperVfShadowReg = 0;
         uint8_t suppressedLowerVf = 0;
+        // Precomputed from the usages: ready-time slots (see m_ready) the
+        // pair reads, and the slots it writes with their latencies, in the
+        // order markPairWrites applies them.
+        uint8_t readSlotCount = 0;
+        uint8_t writeSlotCount = 0;
+        uint8_t firstViWrite = 0;
+        uint8_t maxWriteLatency = 0;
+        std::array<uint8_t, 56> readSlots{};
+        std::array<uint8_t, 28> writeSlots{};
+        std::array<uint8_t, 28> writeLatencies{};
     };
+
+    // m_ready slots: VF register r lane c, then VI registers, then ACC lanes.
+    static constexpr uint32_t kReadyVfBase = 0u;
+    static constexpr uint32_t kReadyViBase = 128u;
+    static constexpr uint32_t kReadyAccBase = 144u;
+    static constexpr uint32_t kReadySlotCount = 148u;
 
     struct FlagPipelineEntry
     {
@@ -149,34 +167,6 @@ private:
         bool valid = false;
     };
 
-    struct PendingVfWrite
-    {
-        uint64_t readyCycle = 0;
-        uint64_t sequence = 0;
-        std::array<float, 4> value{};
-        uint8_t reg = 0;
-        uint8_t laneMask = 0;
-        bool valid = false;
-    };
-
-    struct PendingViWrite
-    {
-        uint64_t readyCycle = 0;
-        uint64_t sequence = 0;
-        int32_t value = 0;
-        uint8_t reg = 0;
-        bool valid = false;
-    };
-
-    struct PendingAccWrite
-    {
-        uint64_t readyCycle = 0;
-        uint64_t sequence = 0;
-        std::array<float, 4> value{};
-        uint8_t laneMask = 0;
-        bool valid = false;
-    };
-
     struct XgkickPipeline
     {
         static constexpr uint32_t kBufferSize = 0x10000u;
@@ -195,9 +185,6 @@ private:
     static constexpr uint32_t kAccForwardLatency = 1u;
     static constexpr uint32_t kMaxFlagEntries = 8u;
     static constexpr uint32_t kMaxPendingStores = 8u;
-    static constexpr uint32_t kMaxPendingVfWrites = 16u;
-    static constexpr uint32_t kMaxPendingViWrites = 8u;
-    static constexpr uint32_t kMaxPendingAccWrites = 8u;
     static constexpr uint32_t kMaxDecodedPairs = 0x4000u / 8u;
 
     Unit m_unit;
@@ -213,22 +200,35 @@ private:
     ScalarPipelineEntry m_fdiv{};
     std::array<ScalarPipelineEntry, 2> m_efu{};
     std::array<PendingStore, kMaxPendingStores> m_storePipeline{};
-    std::array<PendingVfWrite, kMaxPendingVfWrites> m_vfWritePipeline{};
-    std::array<PendingViWrite, kMaxPendingViWrites> m_viWritePipeline{};
-    std::array<PendingAccWrite, kMaxPendingAccWrites> m_accWritePipeline{};
     XgkickPipeline m_xgkick{};
-    std::array<std::array<uint64_t, 4>, 32> m_vfReady{};
-    std::array<uint64_t, 16> m_viReady{};
-    std::array<uint64_t, 4> m_accReady{};
-    std::array<std::array<uint64_t, 4>, 32> m_vfLatestWrite{};
-    std::array<uint64_t, 16> m_viLatestWrite{};
-    std::array<uint64_t, 4> m_accLatestWrite{};
+    // Cycle at which each VF lane / VI register / ACC lane write becomes
+    // readable by a following instruction.
+    std::array<uint64_t, kReadySlotCount> m_ready{};
 
     uint64_t m_cycle = 0;
-    uint64_t m_nextWriteSequence = 0;
     uint64_t m_efuResourceReady = 0;
+    // Earliest readyCycle of any valid pipeline entry (max when none), so
+    // the per-cycle commit and pending checks don't scan every pipeline.
+    uint64_t m_nextCommitCycle = std::numeric_limits<uint64_t>::max();
+    // Latest cycle at which an issued VF/VI/ACC write lands. The values are
+    // written back at issue (see run), but a program only ends once its
+    // writes would have committed.
+    uint64_t m_writebackHorizon = 0;
+    // Occupied slots per pipeline (bit i = entry i valid); commits walk set
+    // bits in ascending slot order, the same order as a full array scan.
+    uint32_t m_flagMask = 0;
+    uint32_t m_efuMask = 0;
+    uint32_t m_storeMask = 0;
+    DecodedInstructionPair m_uncachedDecoded{};
     uint32_t m_workingClip = 0;
     uint32_t m_currentUpperInstruction = 0;
+    // Normalized operands of the executing upper instruction (set by
+    // execUpper, read by normalizeFmacResult).
+    const float *m_fmacVs = nullptr;
+    const float *m_fmacVt = nullptr;
+    const float *m_fmacAcc = nullptr;
+    float m_fmacQ = 0.0f;
+    float m_fmacI = 0.0f;
     int32_t m_viBranchBackupValue = 0;
     uint8_t m_viBranchBackupReg = 0;
     bool m_viBranchBackupValid = false;
@@ -250,7 +250,7 @@ private:
     static void addVfWrite(InstructionUsage &usage, uint8_t reg, uint8_t lanes);
     static uint8_t vfReadLanes(const InstructionUsage &usage, uint8_t reg);
     DecodedInstructionPair decodeInstructionPair(const uint8_t *vuCode, uint32_t pc) const;
-    DecodedInstructionPair getDecodedInstructionPairForPc(const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory, uint32_t pc);
+    const DecodedInstructionPair &getDecodedInstructionPairForPc(const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory, uint32_t pc);
     void rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t codeSize, const PS2Memory *memory, uint64_t generation);
 
     void execUpper(uint32_t instr);
@@ -260,10 +260,11 @@ private:
     void applyDestAcc(const float *result, uint8_t dest);
     void applyFmacDest(float *dst, float *result, uint8_t dest);
     void applyFmacDestAcc(float *result, uint8_t dest);
-    void normalizeFmacResult(float *result, uint8_t dest, uint8_t laneFlags[4]);
-    bool calculateFmacExactResult(uint32_t component, long double &result) const;
-    uint8_t normalizeFmacExactResult(float &value, long double exactResult) const;
-    uint32_t calculateFmacProductSticky(uint8_t dest) const;
+    void normalizeFmacResult(float *result, uint8_t dest, uint8_t laneFlags[4], uint32_t &productSticky);
+    template <typename Real>
+    bool calculateFmacExactResult(uint32_t component, Real &result) const;
+    template <typename Real>
+    uint8_t normalizeFmacExactResult(float &value, Real exactResult) const;
     void updateFmacFlags(const uint8_t laneFlags[4], uint8_t dest, uint32_t extraSticky);
     void queueFsset(uint16_t immediate);
     void queueClip(uint32_t clip);
@@ -271,13 +272,16 @@ private:
     void queueQ(float value, uint32_t latency, uint32_t statusDi);
     void queueP(float value, uint32_t latency);
     void queueStore(uint32_t address, const uint32_t words[4], uint8_t laneMask);
-    void queueVfWrite(uint8_t reg, uint8_t laneMask, const float value[4], uint32_t latency);
-    void queueViWrite(uint8_t reg, int32_t value, uint32_t latency);
-    void queueAccWrite(uint8_t laneMask, const float value[4], uint32_t latency);
     void startXgkick(uint32_t qwordAddress);
 
     void resetScheduler();
     void commitReadyPipelines();
+    void commitDuePipelines();
+    void noteReadyCycle(uint64_t readyCycle)
+    {
+        if (readyCycle < m_nextCommitCycle)
+            m_nextCommitCycle = readyCycle;
+    }
     void advanceOneCycle();
     void advanceTo(uint64_t targetCycle);
     void flushPipelines();
@@ -287,7 +291,19 @@ private:
     void markPairWrites(const DecodedInstructionPair &decoded);
     bool pipelinesPending() const;
 
-    float normalizeOperand(float value) const;
+    // Denormals flush to signed zero; Inf/NaN clamp to the signed max.
+    float normalizeOperand(float value) const
+    {
+        uint32_t bits = 0;
+        std::memcpy(&bits, &value, sizeof(bits));
+        const uint32_t exponent = (bits >> 23) & 0xFFu;
+        if (exponent == 0u)
+            bits &= 0x80000000u;
+        else if (exponent == 0xFFu)
+            bits = (bits & 0x80000000u) | 0x7F7FFFFFu;
+        std::memcpy(&value, &bits, sizeof(value));
+        return value;
+    }
     float normalizeResult(float value, uint32_t &laneFlags) const;
     uint32_t microAddressMask() const;
     int32_t readBranchVi(uint8_t reg) const;
