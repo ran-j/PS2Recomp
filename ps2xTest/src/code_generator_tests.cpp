@@ -1268,6 +1268,9 @@ void register_code_generator_tests()
 
         tc.Run("VU0 macro mappings cover all S1/S2 enums", [](TestCase &t) {
             const std::vector<std::string> candidates = {
+#ifdef PS2X_RECOMP_INCLUDE_DIR
+                std::string(PS2X_RECOMP_INCLUDE_DIR) + "/ps2recomp/instructions.h",
+#endif
                 "ps2xRecomp/include/ps2recomp/instructions.h",
                 "../ps2xRecomp/include/ps2recomp/instructions.h",
                 "../../ps2xRecomp/include/ps2recomp/instructions.h"
