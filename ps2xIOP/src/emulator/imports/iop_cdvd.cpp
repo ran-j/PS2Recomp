@@ -39,6 +39,7 @@ namespace ps2x::iop::detail
         constexpr uint32_t kCdvdStreamTimeout = 5000u;
         constexpr uint32_t kCdvdSyncTimeout = 15000u;
         constexpr uint32_t kCdvdmanVersion = 0x0226u;
+        constexpr uint32_t kMaxImageDirectoryBytes = 1u << 20;
 
         uint32_t alignSectors(uint64_t bytes)
         {
@@ -278,6 +279,15 @@ namespace ps2x::iop::detail
 
             case 13: // sceCdDiskReady
                 cpu.gpr[2] = kCdvdReadyComplete;
+                return true;
+
+            case 14: // sceCdTrayReq(mode, u32 *traycnt): the tray never moves
+                if (a1 != 0u)
+                {
+                    const uint32_t trayCount = 0u;
+                    (void)memory.writeRam(a1, &trayCount, sizeof(trayCount));
+                }
+                cpu.gpr[2] = 1u;
                 return true;
 
             case 28: // sceCdStatus
@@ -594,24 +604,133 @@ namespace ps2x::iop::detail
             return &nodes[current];
         }
 
+        // With a disc image configured, sectors are read from it, so files have to be looked up in its own ISO9660
+        // directory: the virtual layout built from the host folder assigns different LSNs.
+        struct ImageEntry
+        {
+            uint32_t lsn = 0u;
+            uint32_t size = 0u;
+            bool directory = false;
+            std::string identifier;
+        };
+
+        enum class ImageSearch
+        {
+            Unavailable, // no image, or it has no ISO9660 volume descriptor
+            NotFound,
+            Found,
+        };
+
+        bool readImageBytes(uint64_t offset, void *destination, size_t size)
+        {
+            const std::string imagePath = host.hostPath(HostPathKind::CdImage);
+            if (imagePath.empty())
+                return false;
+            if (imageHandle == 0u)
+                imageHandle = host.openHostFile(imagePath);
+            size_t bytesRead = 0u;
+            return imageHandle != 0u && host.readHostFile(imageHandle, offset, destination, size, bytesRead) && bytesRead == size;
+        }
+
+        ImageSearch searchImage(std::string_view guestPath, ImageEntry &out)
+        {
+            std::array<uint8_t, kSectorSize> descriptor{};
+            if (!readImageBytes(static_cast<uint64_t>(kPrimaryVolumeDescriptorLsn) * kSectorSize, descriptor.data(), descriptor.size()) ||
+                descriptor[0] != 1u || std::memcmp(descriptor.data() + 1, "CD001", 5) != 0)
+                return ImageSearch::Unavailable;
+
+            const ParsedPs2Path parsed = parsePs2Path(guestPath);
+            if (!parsed || parsed.device != Ps2PathDevice::Cdrom)
+                return ImageSearch::NotFound;
+
+            const auto readLe32 = [](const uint8_t *source)
+            {
+                return static_cast<uint32_t>(source[0]) | (static_cast<uint32_t>(source[1]) << 8u) |
+                       (static_cast<uint32_t>(source[2]) << 16u) | (static_cast<uint32_t>(source[3]) << 24u);
+            };
+            // The root directory record sits at offset 156 of the volume descriptor.
+            ImageEntry current{readLe32(descriptor.data() + 158u), readLe32(descriptor.data() + 166u), true, {}};
+            size_t begin = 0u;
+            while (begin <= parsed.path.size())
+            {
+                const size_t end = parsed.path.find('/', begin);
+                const size_t length = (end == std::string::npos) ? parsed.path.size() - begin : end - begin;
+                const std::string_view component(parsed.path.data() + begin, length);
+                begin = (end == std::string::npos) ? parsed.path.size() + 1u : end + 1u;
+
+                if (component.empty() || component == ".")
+                    continue;
+                if (component == ".." || !current.directory || current.size == 0u || current.size > kMaxImageDirectoryBytes)
+                    return ImageSearch::NotFound;
+
+                std::vector<uint8_t> directory(current.size);
+                if (!readImageBytes(static_cast<uint64_t>(current.lsn) * kSectorSize, directory.data(), directory.size()))
+                    return ImageSearch::NotFound;
+
+                const std::string wanted = normalizedIsoComponent(component);
+                bool found = false;
+                for (size_t offset = 0u; offset < directory.size();)
+                {
+                    const uint8_t recordLength = directory[offset];
+                    if (recordLength == 0u)
+                    {
+                        // Records do not cross sector boundaries; the rest of the sector is padding.
+                        offset = (offset / kSectorSize + 1u) * kSectorSize;
+                        continue;
+                    }
+                    if (recordLength < 33u || offset + recordLength > directory.size())
+                        break;
+                    const size_t nameLength = std::min<size_t>(directory[offset + 32u], recordLength - 33u);
+                    const std::string identifier(reinterpret_cast<const char *>(&directory[offset + 33u]), nameLength);
+                    if (normalizedIsoComponent(identifier) == wanted)
+                    {
+                        current = ImageEntry{readLe32(&directory[offset + 2u]), readLe32(&directory[offset + 10u]),
+                                             (directory[offset + 25u] & 2u) != 0u, identifier};
+                        found = true;
+                        break;
+                    }
+                    offset += recordLength;
+                }
+                if (!found)
+                    return ImageSearch::NotFound;
+            }
+            out = std::move(current);
+            return ImageSearch::Found;
+        }
+
+        // sceCdlFILE: lsn, size, name[16], date/flags[8].
+        bool writeSearchResult(uint32_t resultAddress, uint32_t lsn, uint32_t size, std::string_view identifier, bool directory)
+        {
+            std::array<uint8_t, 32u> result{};
+            writeLe32(result.data(), lsn);
+            writeLe32(result.data() + 4u, size);
+            const std::string leaf = normalizedIsoComponent(identifier);
+            std::memcpy(result.data() + 8u, leaf.data(), std::min<size_t>(16u, leaf.size()));
+            result[24u] = directory ? 2u : 0u;
+            return memory.writeRam(resultAddress, result.data(), result.size());
+        }
+
         bool searchFile(uint32_t resultAddress, uint32_t nameAddress)
         {
             if (resultAddress == 0u || nameAddress == 0u)
                 return false;
 
             const std::string guestPath = memory.readString(nameAddress, 1024u);
+            ImageEntry entry;
+            switch (searchImage(guestPath, entry))
+            {
+            case ImageSearch::Found:
+                return writeSearchResult(resultAddress, entry.lsn, entry.size, entry.identifier, entry.directory);
+            case ImageSearch::NotFound:
+                return false;
+            case ImageSearch::Unavailable:
+                break;
+            }
+
             IsoNode *node = findVirtualIsoNode(guestPath);
             if (!node)
                 return false;
-
-            // sceCdlFILE: lsn, size, name[16], date/flags[8].
-            std::array<uint8_t, 32u> result{};
-            writeLe32(result.data(), node->lsn);
-            writeLe32(result.data() + 4u, node->size);
-            const std::string leaf = normalizedIsoComponent(node->identifier);
-            std::memcpy(result.data() + 8u, leaf.data(), std::min<size_t>(16u, leaf.size()));
-            result[24u] = node->directory ? 2u : 0u;
-            return memory.writeRam(resultAddress, result.data(), result.size());
+            return writeSearchResult(resultAddress, node->lsn, node->size, node->identifier, node->directory);
         }
 
         IsoNode *fileForSector(uint32_t lsn)

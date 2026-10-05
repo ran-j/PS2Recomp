@@ -61,21 +61,38 @@ namespace
         void audioCommand(uint32_t, uint32_t, GuestBuffer, GuestBuffer) override {}
         std::string hostPath(HostPathKind kind) const override
         {
+            if (kind == HostPathKind::CdImage)
+                return cdImage.empty() ? std::string{} : std::string(kCdImagePath);
             return kind == HostPathKind::CdRoot ? cdRoot : std::string{};
         }
         std::string translateGuestPath(std::string_view path) const override { return std::string(path); }
-        uint64_t openHostFile(std::string_view) override { return 0u; }
+        uint64_t openHostFile(std::string_view path) override
+        {
+            return path == kCdImagePath && !cdImage.empty() ? kCdImageHandle : 0u;
+        }
         bool hostFileSize(uint64_t, uint64_t &) const override { return false; }
-        bool readHostFile(uint64_t, uint64_t, void *, size_t, size_t &) override { return false; }
+        bool readHostFile(uint64_t handle, uint64_t offset, void *destination, size_t size, size_t &bytesRead) override
+        {
+            bytesRead = 0u;
+            if (handle != kCdImageHandle || offset >= cdImage.size())
+                return false;
+            bytesRead = static_cast<size_t>(std::min<uint64_t>(size, cdImage.size() - offset));
+            std::memcpy(destination, cdImage.data() + offset, bytesRead);
+            return true;
+        }
         void closeHostFile(uint64_t) override {}
         int32_t memoryCard(const MemoryCardRequest &) override { return 0; }
         bool hasGuestFunction(uint32_t) const override { return false; }
         bool invokeGuestFunction(uint64_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t *) override { return false; }
         void log(LogLevel, std::string_view message) override { logs.emplace_back(message); }
 
+        static constexpr std::string_view kCdImagePath = "test.iso";
+        static constexpr uint64_t kCdImageHandle = 2u;
+
         std::vector<uint8_t> guest;
         std::vector<std::string> logs;
         std::string cdRoot;
+        std::vector<uint8_t> cdImage;
     };
 
 #pragma pack(push, 1)
@@ -883,6 +900,110 @@ namespace
         std::memcpy(host.guest.data() + address + codeOffset, segment.data(), segment.size());
     }
 
+    // A small ISO9660 image: /FILE.BIN (LSN 30) and /DIR/DATA.BIN (LSN 25, 0x1234 bytes). The LSNs differ from what
+    // the virtual layout of a host folder would assign.
+    std::vector<uint8_t> makeCdImage()
+    {
+        constexpr uint32_t sectorSize = 2048u;
+        std::vector<uint8_t> image(40u * sectorSize, 0u);
+        const auto putBoth32 = [&image](size_t offset, uint32_t value)
+        {
+            for (uint32_t i = 0u; i < 4u; ++i)
+            {
+                image[offset + i] = static_cast<uint8_t>(value >> (i * 8u));
+                image[offset + 4u + i] = static_cast<uint8_t>(value >> ((3u - i) * 8u));
+            }
+        };
+        const auto addRecord = [&](size_t base, size_t &cursor, std::string_view identifier, uint32_t lsn,
+                                   uint32_t size, bool directory)
+        {
+            const size_t record = base + cursor;
+            const size_t length = (33u + identifier.size() + 1u) & ~static_cast<size_t>(1u);
+            image[record] = static_cast<uint8_t>(length);
+            putBoth32(record + 2u, lsn);
+            putBoth32(record + 10u, size);
+            image[record + 25u] = directory ? 2u : 0u;
+            image[record + 32u] = static_cast<uint8_t>(identifier.size());
+            std::memcpy(&image[record + 33u], identifier.data(), identifier.size());
+            cursor += length;
+        };
+        const std::string_view dot("\0", 1u);
+        const std::string_view dotDot("\1", 1u);
+
+        const size_t volumeDescriptor = 16u * sectorSize;
+        image[volumeDescriptor] = 1u;
+        std::memcpy(&image[volumeDescriptor + 1u], "CD001", 5u);
+        image[volumeDescriptor + 6u] = 1u;
+        size_t rootRecord = 156u;
+        addRecord(volumeDescriptor, rootRecord, dot, 18u, sectorSize, true);
+
+        size_t cursor = 0u;
+        addRecord(18u * sectorSize, cursor, dot, 18u, sectorSize, true);
+        addRecord(18u * sectorSize, cursor, dotDot, 18u, sectorSize, true);
+        addRecord(18u * sectorSize, cursor, "FILE.BIN;1", 30u, 0x800u, false);
+        addRecord(18u * sectorSize, cursor, "DIR", 19u, sectorSize, true);
+        cursor = 0u;
+        addRecord(19u * sectorSize, cursor, dot, 19u, sectorSize, true);
+        addRecord(19u * sectorSize, cursor, dotDot, 18u, sectorSize, true);
+        addRecord(19u * sectorSize, cursor, "DATA.BIN;1", 25u, 0x1234u, false);
+        return image;
+    }
+
+    // Start routine: sceCdSearchFile("cdrom0:/DIR/DATA.BIN;1") into 0x10500 (result at 0x10540), sceCdTrayReq(2,
+    // 0x10520) (result at 0x10544), sceCdSearchFile("cdrom0:/MISSING.BIN;1") (result at 0x10548).
+    void writeCdvdSearchIrx(TestHost &host, uint32_t address)
+    {
+        constexpr uint32_t codeOffset = 0x100u;
+        constexpr uint32_t loadAddress = 0x00010000u;
+        constexpr uint32_t importTableAddress = loadAddress + 0x100u;
+        constexpr uint32_t searchStub = importTableAddress + 20u;
+        constexpr uint32_t trayStub = searchStub + 8u;
+
+        ElfHeader header{};
+        header.ident[0] = 0x7Fu; header.ident[1] = 'E'; header.ident[2] = 'L'; header.ident[3] = 'F';
+        header.ident[4] = 1u; header.ident[5] = 1u; header.ident[6] = 1u;
+        header.type = 2u; header.machine = 8u; header.version = 1u;
+        header.entry = loadAddress; header.phoff = sizeof(ElfHeader);
+        header.ehsize = sizeof(ElfHeader); header.phentsize = sizeof(ProgramHeader); header.phnum = 1u;
+
+        ProgramHeader program{};
+        program.type = 1u; program.offset = codeOffset; program.vaddr = loadAddress; program.paddr = loadAddress;
+        program.filesz = 0x700u; program.memsz = 0x700u; program.flags = 7u; program.align = 4u;
+
+        const auto jal = [](uint32_t target) { return 0x0C000000u | ((target >> 2u) & 0x03FFFFFFu); };
+        const uint32_t entry[] = {
+            0x27BDFFF0u, 0xAFBF000Cu,
+            0x3C040001u, 0x34840500u, 0x3C050001u, 0x34A50600u, jal(searchStub), 0x00000000u, // found file
+            0x3C080001u, 0x35080540u, 0xAD020000u,                                            // [0x10540] = v0
+            0x24040002u, 0x3C050001u, 0x34A50520u, jal(trayStub), 0x00000000u,                // sceCdTrayReq(2, 0x10520)
+            0x3C080001u, 0x35080540u, 0xAD020004u,                                            // [0x10544] = v0
+            0x3C040001u, 0x34840500u, 0x3C050001u, 0x34A50680u, jal(searchStub), 0x00000000u, // missing file
+            0x3C080001u, 0x35080540u, 0xAD020008u,                                            // [0x10548] = v0
+            0x8FBF000Cu, 0x00001021u, 0x27BD0010u, 0x03E00008u, 0x00000000u,
+        };
+        const uint32_t imports[] = {
+            0x41E00000u, 0u, 0x00000101u,
+            0x64766463u, 0x006E616Du, // "cdvdman"
+            0x03E00008u, 0x2400000Au, // sceCdSearchFile
+            0x03E00008u, 0x2400000Eu, // sceCdTrayReq
+            0u, 0u,
+        };
+        const uint32_t trayCountInit = 0xFFFFFFFFu;
+        const std::string_view found = "cdrom0:/DIR/DATA.BIN;1";
+        const std::string_view missing = "cdrom0:/MISSING.BIN;1";
+
+        std::vector<uint8_t> segment(program.filesz, 0u);
+        std::memcpy(segment.data(), entry, sizeof(entry));
+        std::memcpy(segment.data() + 0x100u, imports, sizeof(imports));
+        std::memcpy(segment.data() + 0x520u, &trayCountInit, sizeof(trayCountInit));
+        std::memcpy(segment.data() + 0x600u, found.data(), found.size());
+        std::memcpy(segment.data() + 0x680u, missing.data(), missing.size());
+        std::memset(host.guest.data() + address, 0, codeOffset + program.filesz);
+        std::memcpy(host.guest.data() + address, &header, sizeof(header));
+        std::memcpy(host.guest.data() + address + sizeof(header), &program, sizeof(program));
+        std::memcpy(host.guest.data() + address + codeOffset, segment.data(), segment.size());
+    }
+
     bool expect(bool value, const char *message)
     {
         if (!value)
@@ -1141,6 +1262,32 @@ int main()
         { return message.find("unhandled import cdvdman:7") != std::string::npos; });
     if (!expect(!emittedUnhandledSeek,
                 "sceCdSeek still emitted an unhandled IOP import")) return 1;
+
+    iop.reset();
+    host.logs.clear();
+    host.cdImage = makeCdImage();
+    writeCdvdSearchIrx(host, 0x100u);
+    const ModuleLoadResult cdvdSearch = iop.loadModuleBuffer(0x100u);
+    host.cdImage.clear();
+    uint32_t cdvdSearchResults[3] = {};
+    uint32_t cdvdSearchFile[2] = {};
+    uint32_t cdvdTrayCount = 0u;
+    if (!expect(cdvdSearch.handled && cdvdSearch.startResult == 0, "CDVD search module did not start")) return 1;
+    if (!expect(iop.readMemory(0x00010540u, cdvdSearchResults, sizeof(cdvdSearchResults)) &&
+                    iop.readMemory(0x00010500u, cdvdSearchFile, sizeof(cdvdSearchFile)) &&
+                    iop.readMemory(0x00010520u, &cdvdTrayCount, sizeof(cdvdTrayCount)),
+                "Could not read the CDVD search results")) return 1;
+    if (!expect(cdvdSearchResults[0] == 1u, "sceCdSearchFile did not find a file in the disc image")) return 1;
+    if (!expect(cdvdSearchFile[0] == 25u && cdvdSearchFile[1] == 0x1234u,
+                "sceCdSearchFile did not report the LSN and size from the disc image's ISO9660 directory")) return 1;
+    if (!expect(cdvdSearchResults[1] == 1u && cdvdTrayCount == 0u,
+                "sceCdTrayReq did not succeed with a tray count of 0")) return 1;
+    if (!expect(cdvdSearchResults[2] == 0u, "sceCdSearchFile found a file that is not in the disc image")) return 1;
+    const bool emittedUnhandledTrayReq = std::any_of(
+        host.logs.begin(), host.logs.end(),
+        [](const std::string &message)
+        { return message.find("unhandled import cdvdman:14") != std::string::npos; });
+    if (!expect(!emittedUnhandledTrayReq, "sceCdTrayReq still emitted an unhandled IOP import")) return 1;
 
     std::cout << "ps2xIOP emulator smoke tests passed\n";
     return 0;
