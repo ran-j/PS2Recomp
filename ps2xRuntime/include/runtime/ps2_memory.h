@@ -335,6 +335,7 @@ public:
     void flushMaskedPath3Packets(bool drainImmediately = true);
 
     void submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool drainImmediately = true, bool path2DirectHl = false);
+    void forwardVif1DirectData(const uint8_t *data, uint32_t sizeBytes, bool directHl);
     void processGIFPacket(uint32_t srcPhysAddr, uint32_t qwCount);
     void processGIFPacket(const uint8_t *data, uint32_t sizeBytes);
     bool tryProcessNativeGifImageUploadChain(GS &gs, uint32_t tadr, uint32_t chcr);
@@ -409,6 +410,10 @@ public:
     bool m_path3Masked = false;
     uint32_t m_vif1PendingPath2ImageQwc = 0u;
     bool m_vif1PendingPath2DirectHl = false;
+    // Remaining data qwords of a VIF1 DIRECT/DIRECTHL cut off by the end of a processVIF1Data() buffer; the next
+    // buffer starts with that raw data (no VIFcodes).
+    uint32_t m_vif1PendingDirectQwc = 0u;
+    bool m_vif1PendingDirectHl = false;
     std::vector<std::vector<uint8_t>> m_path3MaskedFifo;
 
     struct PendingTransfer
