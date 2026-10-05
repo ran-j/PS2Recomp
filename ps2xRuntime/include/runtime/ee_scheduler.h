@@ -282,6 +282,12 @@ public:
     void accountCycles(uint32_t cycles) noexcept;
     [[nodiscard]] bool isExecutingGuest() const noexcept;
 
+    // Guest code gives control back to the scheduler by returning up the host stack (a due checkpoint, or a
+    // branch the dispatcher cannot follow in place). Callers of a nested guest function compare this counter
+    // across the call to tell such an unwind apart from a normal return.
+    void noteGuestUnwind() noexcept { m_guestUnwindCount.fetch_add(1u, std::memory_order_relaxed); }
+    [[nodiscard]] uint64_t guestUnwindCount() const noexcept { return m_guestUnwindCount.load(std::memory_order_relaxed); }
+
     // Kernel object API. All calls except postEvent/requestStop execute on the
     // EE executor and therefore need no host synchronization.
     void setupCurrentThread(uint32_t stack, uint32_t stackSize, uint32_t gp);
@@ -430,6 +436,7 @@ private:
     std::thread::id m_executorThread{};
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_guestExecuting{false};
+    std::atomic<uint64_t> m_guestUnwindCount{0u};
     std::atomic<bool> m_stopRequested{false};
     std::atomic<bool> m_checkpointPending{false};
     uint32_t m_debugPublishCountdown = 0u;
