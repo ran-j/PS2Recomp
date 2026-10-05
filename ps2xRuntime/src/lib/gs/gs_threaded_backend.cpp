@@ -230,6 +230,7 @@ struct GSThreadedBackend::Impl
         pthread_setname_np(pthread_self(), "GSWorker");
 #endif
         std::vector<Command> batch;
+        std::vector<const GSPrimitiveBatch *> run;
         for (;;)
         {
             size_t bytes = 0u;
@@ -264,8 +265,44 @@ struct GSThreadedBackend::Impl
             }
             try
             {
-                for (const auto &command : batch)
+                for (size_t index = 0u; index < batch.size(); ++index)
                 {
+                    const auto &command = batch[index];
+                    // Consecutive primitives under one rounding mode go to the
+                    // backend as a run: DQ8 sends over a million a second.
+                    if (command.op == Op::Submit)
+                    {
+                        size_t end = index + 1u;
+                        while (end < batch.size() && batch[end].op == Op::Submit &&
+                               batch[end].rounding == command.rounding &&
+                               bytes + (end - index) * sizeof(Command) < kReleaseBytes)
+                            ++end;
+                        if (end - index > 1u)
+                        {
+                            if (rounding != command.rounding)
+                            {
+                                std::fesetround(command.rounding);
+                                rounding = command.rounding;
+                            }
+                            run.clear();
+                            for (size_t i = index; i < end; ++i)
+                                run.push_back(&std::get<GSPrimitiveBatch>(batch[i].data));
+                            backend->SubmitMany(run.data(), run.size());
+                            for (size_t i = index; i < end; ++i)
+                                bytes += batch[i].bytes();
+                            index = end - 1u;
+                            if (bytes >= kReleaseBytes)
+                            {
+                                {
+                                    std::lock_guard lock(mutex);
+                                    outstandingBytes -= bytes;
+                                }
+                                bytes = 0u;
+                                progress.notify_all();
+                            }
+                            continue;
+                        }
+                    }
                     execute(command);
                     bytes += command.bytes();
                     // A batch can hold most of a frame. Returning its space as
