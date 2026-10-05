@@ -292,6 +292,25 @@ namespace ps2_syscalls
         case static_cast<uint32_t>(-0x78):
             ps2_stubs::sceSifSetDChain(rdram, ctx, runtime);
             return true;
+        // SIF register syscalls. sceSifInitCmd (0x11A480) issues syscall 0x7A and the
+        // runtime answered "Unimplemented PS2 syscall" 11 271 times, with zero CD reads
+        // and a black screen (run168). Identified from the disassembly, not guessed:
+        //   0x118B60: `li v1,0x79; syscall` called with (0x80000000, value) then
+        //             (0x80000001, address) -> TWO arguments -> sceSifSetReg(reg,val)
+        //   0x118B70: `li v1,0x7A; syscall` called with (0x80000000), (4), (2)
+        //             -> ONE argument -> sceSifGetReg(reg)
+        // The neighbours confirm the family: 0x76 DmaStat, 0x77 SetDma, 0x78 SetDChain.
+        // Both handlers ALREADY exist in Stubs/SIF.cpp and read a0/a1, exactly the
+        // syscall convention - only the dispatch branch was missing.
+        // Bit 31 of `reg` is the PS2 convention (0x80000000 | SIF register number).
+        case 0x79:
+        case static_cast<uint32_t>(-0x79):
+            ps2_stubs::sceSifSetReg(rdram, ctx, runtime);
+            return true;
+        case 0x7A:
+        case static_cast<uint32_t>(-0x7A):
+            ps2_stubs::sceSifGetReg(rdram, ctx, runtime);
+            return true;
         case 0x7F:
             GetMemorySize(rdram, ctx, runtime);
             return true;
