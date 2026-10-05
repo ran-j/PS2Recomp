@@ -140,10 +140,60 @@ static inline uint32_t ps2_plzcw32(uint32_t x)
 #define PS2_PXOR(a, b) _mm_xor_si128((__m128i)(a), (__m128i)(b))
 #define PS2_PNOR(a, b) _mm_xor_si128(_mm_or_si128((__m128i)(a), (__m128i)(b)), _mm_set1_epi32(0xFFFFFFFF))
 
+// PS2 float semantics (EE FPU and VU). The PS2 has no Inf/NaN: a value with exponent 255 behaves like a huge
+// normal number, an overflowing result saturates to +-max (0x7F7FFFFF) and x/0 gives +-max with the sign of
+// (numerator xor denominator). Hosts that follow IEEE produce Inf/NaN here, which then poisons later maths
+// (e.g. a normalisation of a zero-length vector).
+inline float ps2_fclamp(float x)
+{
+    uint32_t b;
+    std::memcpy(&b, &x, sizeof(b));
+    if ((b & 0x7F800000u) == 0x7F800000u)
+        b = (b & 0x80000000u) | 0x7F7FFFFFu;
+    std::memcpy(&x, &b, sizeof(b));
+    return x;
+}
+
+// Sign is sign(a) xor sign(b); used for a division by zero.
+inline float ps2_fmax_signed(float a, float b)
+{
+    uint32_t ua, ub;
+    std::memcpy(&ua, &a, sizeof(ua));
+    std::memcpy(&ub, &b, sizeof(ub));
+    const uint32_t r = ((ua ^ ub) & 0x80000000u) | 0x7F7FFFFFu;
+    float f;
+    std::memcpy(&f, &r, sizeof(f));
+    return f;
+}
+
+inline float ps2_fdiv(float a, float b)
+{
+    a = ps2_fclamp(a);
+    b = ps2_fclamp(b);
+    return (b == 0.0f) ? ps2_fmax_signed(a, b) : ps2_fclamp(a / b);
+}
+
+// fs / sqrt(|ft|); the radicand's sign is ignored.
+inline float ps2_frsqrt(float a, float b)
+{
+    a = ps2_fclamp(a);
+    b = ps2_fclamp(b);
+    return (b == 0.0f) ? ps2_fmax_signed(a, b) : ps2_fclamp(a / std::sqrt(std::fabs(b)));
+}
+
+inline __m128 ps2_vclamp(__m128 v)
+{
+    const __m128i bits = _mm_castps_si128(v);
+    const __m128i expMask = _mm_set1_epi32(0x7F800000);
+    const __m128i special = _mm_cmpeq_epi32(_mm_and_si128(bits, expMask), expMask);
+    const __m128i saturated = _mm_or_si128(_mm_and_si128(bits, _mm_set1_epi32((int)0x80000000)), _mm_set1_epi32(0x7F7FFFFF));
+    return _mm_castsi128_ps(_mm_or_si128(_mm_and_si128(special, saturated), _mm_andnot_si128(special, bits)));
+}
+
 // PS2 VU (Vector Unit) operations
-#define PS2_VADD(a, b) _mm_add_ps((__m128)(a), (__m128)(b))
-#define PS2_VSUB(a, b) _mm_sub_ps((__m128)(a), (__m128)(b))
-#define PS2_VMUL(a, b) _mm_mul_ps((__m128)(a), (__m128)(b))
+#define PS2_VADD(a, b) ps2_vclamp(_mm_add_ps(ps2_vclamp((__m128)(a)), ps2_vclamp((__m128)(b))))
+#define PS2_VSUB(a, b) ps2_vclamp(_mm_sub_ps(ps2_vclamp((__m128)(a)), ps2_vclamp((__m128)(b))))
+#define PS2_VMUL(a, b) ps2_vclamp(_mm_mul_ps(ps2_vclamp((__m128)(a)), ps2_vclamp((__m128)(b))))
 #define PS2_VDIV(a, b) _mm_div_ps((__m128)(a), (__m128)(b))
 #define PS2_VMULQ(a, q) _mm_mul_ps((__m128)(a), _mm_set1_ps(q))
 #define PS2_VBLEND(a, b, mask) PS2_BLENDV_PS((__m128)(a), (__m128)(b), (__m128)(mask))
@@ -605,11 +655,12 @@ inline __m128i ps2_u64_to_epi64_pair(uint64_t value)
 
 // FPU (COP1) operations
 #define FPU_SET_ACC(ctx, res) (ctx->f_acc = res)
-#define FPU_ADD_S(a, b) ((float)(a) + (float)(b))
-#define FPU_SUB_S(a, b) ((float)(a) - (float)(b))
-#define FPU_MUL_S(a, b) ((float)(a) * (float)(b))
-#define FPU_DIV_S(a, b) ((float)(a) / (float)(b))
-#define FPU_SQRT_S(a) sqrtf((float)(a))
+#define FPU_ADD_S(a, b) ps2_fclamp(ps2_fclamp((float)(a)) + ps2_fclamp((float)(b)))
+#define FPU_SUB_S(a, b) ps2_fclamp(ps2_fclamp((float)(a)) - ps2_fclamp((float)(b)))
+#define FPU_MUL_S(a, b) ps2_fclamp(ps2_fclamp((float)(a)) * ps2_fclamp((float)(b)))
+#define FPU_DIV_S(a, b) ps2_fdiv((float)(a), (float)(b))
+#define FPU_RSQRT_S(a, b) ps2_frsqrt((float)(a), (float)(b))
+#define FPU_SQRT_S(a) std::sqrt(std::fabs(ps2_fclamp((float)(a))))
 #define FPU_ABS_S(a) fabsf((float)(a))
 #define FPU_MOV_S(a) ((float)(a))
 #define FPU_NEG_S(a) (-(float)(a))
