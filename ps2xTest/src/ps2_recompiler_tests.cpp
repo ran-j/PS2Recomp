@@ -270,6 +270,65 @@ static bool writeMinimalMipsElfWithUnmappedEntryHint(const std::filesystem::path
     return writer.save(elfPath.string());
 }
 
+static bool writeMinimalMipsElfWithStandaloneEntryBlock(const std::filesystem::path &elfPath)
+{
+    ELFIO::elfio writer;
+    writer.create(ELFIO::ELFCLASS32, ELFIO::ELFDATA2LSB);
+    writer.set_os_abi(ELFIO::ELFOSABI_NONE);
+    writer.set_type(ELFIO::ET_EXEC);
+    writer.set_machine(ELFIO::EM_MIPS);
+    writer.set_entry(0x00100000u);
+
+    ELFIO::section *text = writer.sections.add(".text");
+    text->set_type(ELFIO::SHT_PROGBITS);
+    text->set_flags(ELFIO::SHF_ALLOC | ELFIO::SHF_EXECINSTR);
+    text->set_addr_align(4);
+    text->set_address(0x00100000u);
+
+    const std::array<uint32_t, 8> textWords = {
+        0x0C040004u, // entry_00100000: jal 0x00100010
+        0x00000000u, // nop
+        0x03E00008u, // jr $ra (the JAL return address, 0x00100008, is a resume point)
+        0x00000000u, // nop
+        0x03E00008u, // callee at 0x00100010: jr $ra
+        0x00000000u, // nop
+        0x03E00008u, // other at 0x00100018: jr $ra
+        0x00000000u  // nop
+    };
+    text->set_data(reinterpret_cast<const char *>(textWords.data()),
+                   static_cast<ELFIO::Elf_Word>(textWords.size() * sizeof(uint32_t)));
+
+    ELFIO::section *strtab = writer.sections.add(".strtab");
+    strtab->set_type(ELFIO::SHT_STRTAB);
+    strtab->set_addr_align(1);
+
+    ELFIO::section *symtab = writer.sections.add(".symtab");
+    symtab->set_type(ELFIO::SHT_SYMTAB);
+    symtab->set_info(1);
+    symtab->set_link(strtab->get_index());
+    symtab->set_addr_align(4);
+    symtab->set_entry_size(writer.get_default_entry_size(ELFIO::SHT_SYMTAB));
+
+    ELFIO::symbol_section_accessor symbols(writer, symtab);
+    ELFIO::string_section_accessor strings(strtab);
+    symbols.add_symbol(strings, "", 0, 0,
+                       ELFIO::STB_LOCAL, ELFIO::STT_NOTYPE, 0, ELFIO::SHN_UNDEF);
+    symbols.add_symbol(strings, "entry_00100000", 0x00100000u, 0x10u,
+                       ELFIO::STB_GLOBAL, ELFIO::STT_FUNC, 0, text->get_index());
+    symbols.add_symbol(strings, "callee", 0x00100010u, 8u,
+                       ELFIO::STB_GLOBAL, ELFIO::STT_FUNC, 0, text->get_index());
+    symbols.add_symbol(strings, "other", 0x00100018u, 8u,
+                       ELFIO::STB_GLOBAL, ELFIO::STT_FUNC, 0, text->get_index());
+
+    ELFIO::segment *textSegment = writer.segments.add();
+    textSegment->set_type(ELFIO::PT_LOAD);
+    textSegment->set_flags(ELFIO::PF_R | ELFIO::PF_X);
+    textSegment->set_align(0x1000);
+    textSegment->add_section_index(text->get_index(), text->get_addr_align());
+
+    return writer.save(elfPath.string());
+}
+
 static bool writeMinimalMipsElfWithAddressTakenCallbacks(const std::filesystem::path &elfPath,
                                                          bool includePartialDwarf = false)
 {
@@ -1406,6 +1465,45 @@ void register_ps2_recompiler_tests()
                          "synthesized entry address should be registered for guest dispatch");
                 t.IsTrue(recompiler.reportCounters().additionalEntryPoints >= 1u,
                          "synthesized entry should be visible in the report");
+            }
+
+            std::error_code removeError;
+            std::filesystem::remove_all(tempRoot, removeError);
+        });
+
+        tc.Run("standalone entry_ blocks register resume points for their JAL return addresses", [](TestCase &t) {
+            const std::string uniqueSuffix =
+                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+            const std::filesystem::path tempRoot =
+                std::filesystem::temp_directory_path() / ("ps2recomp-standalone-entry-" + uniqueSuffix);
+            const std::filesystem::path elfPath = tempRoot / "standalone-entry.elf";
+            const std::filesystem::path configPath = tempRoot / "standalone-entry.toml";
+            const std::filesystem::path outputPath = tempRoot / "output";
+            std::filesystem::create_directories(tempRoot);
+
+            const bool elfWritten = writeMinimalMipsElfWithStandaloneEntryBlock(elfPath);
+            const bool configWritten = writeRecompilerTestConfig(configPath, elfPath, outputPath, {});
+            t.IsTrue(elfWritten && configWritten,
+                     "standalone entry block regression inputs should be generated");
+
+            if (elfWritten && configWritten)
+            {
+                PS2Recompiler recompiler(configPath.string());
+                t.IsTrue(recompiler.initialize(),
+                         "standalone entry block config should initialize");
+                t.IsTrue(recompiler.recompile(),
+                         "standalone entry block should recompile");
+                recompiler.generateOutput();
+
+                // entry_00100000 is not nested inside any other function, so a thread switched out inside its
+                // JAL must be able to resume at the return address (0x100008) through the registered owner.
+                const std::filesystem::path registrationPath = outputPath / "register_functions.cpp";
+                std::ifstream registrationFile(registrationPath);
+                const std::string registration{
+                    std::istreambuf_iterator<char>(registrationFile),
+                    std::istreambuf_iterator<char>()};
+                t.IsTrue(registration.find("// 0x100008") != std::string::npos,
+                         "JAL return address inside a standalone entry_ block should be registered as a resume point");
             }
 
             std::error_code removeError;
