@@ -1290,6 +1290,19 @@ void register_ps2_runtime_kernel_tests()
                      "SetSyscall should treat the syscall index as a signed offset from the kernel table base");
         });
 
+        tc.Run("an early dispatchIrq without reset cannot break a later syscall bind", [](TestCase &t)
+        {
+            TestEnv env;
+
+            // dispatchIrq can run before reset(); the lazy claim must not skip scheduler init.
+            env.runtime.eeScheduler().dispatchIrq(true, 5u);
+
+            t.IsTrue(callSyscall(0x3Cu, env.rdram.data(), &env.ctx, &env.runtime),
+                     "SetupThread should still dispatch after an early dispatchIrq");
+            t.Equals(env.runtime.eeScheduler().currentThreadId(), EeScheduler::kMainThreadId,
+                     "the syscall bind should fall back to a full scheduler reset");
+        });
+
         tc.Run("guest kernel syscall overrides and mirrors are isolated per runtime", [](TestCase &t)
         {
             TestEnv first;
