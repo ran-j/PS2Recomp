@@ -615,6 +615,90 @@ namespace
         std::memcpy(host.guest.data() + address + codeOffset, segment.data(), segment.size());
     }
 
+    // The module start routine runs outside any IOP thread. It creates a semaphore (count 0), starts a thread
+    // that writes a marker and then signals the semaphore, and calls WaitSema. It returns the marker as read right
+    // after WaitSema: 1 when the wait ran the thread, 0 when it returned without waiting. With startWorker false the
+    // thread is never started, so nothing signals the semaphore.
+    void writeSemaphoreWaitIrx(TestHost &host, uint32_t address, bool startWorker = true)
+    {
+        constexpr uint32_t codeOffset = 0x100u;
+        constexpr uint32_t loadAddress = 0x00010000u;
+        constexpr uint32_t workerAddress = loadAddress + 0x100u;
+        constexpr uint32_t thbaseTableAddress = loadAddress + 0x180u;
+        constexpr uint32_t createThreadStub = thbaseTableAddress + 20u;
+        constexpr uint32_t startThreadStub = createThreadStub + 8u;
+        constexpr uint32_t thsemapTableAddress = loadAddress + 0x1C0u;
+        constexpr uint32_t createSemaStub = thsemapTableAddress + 20u;
+        constexpr uint32_t signalSemaStub = createSemaStub + 8u;
+        constexpr uint32_t waitSemaStub = signalSemaStub + 8u;
+
+        ElfHeader header{};
+        header.ident[0] = 0x7Fu; header.ident[1] = 'E'; header.ident[2] = 'L'; header.ident[3] = 'F';
+        header.ident[4] = 1u; header.ident[5] = 1u; header.ident[6] = 1u;
+        header.type = 2u; header.machine = 8u; header.version = 1u;
+        header.entry = loadAddress; header.phoff = sizeof(ElfHeader);
+        header.ehsize = sizeof(ElfHeader); header.phentsize = sizeof(ProgramHeader); header.phnum = 1u;
+
+        ProgramHeader program{};
+        program.type = 1u; program.offset = codeOffset; program.vaddr = loadAddress; program.paddr = loadAddress;
+        program.filesz = 0x500u; program.memsz = 0x500u; program.flags = 7u; program.align = 4u;
+
+        const auto jal = [](uint32_t target) { return 0x0C000000u | ((target >> 2u) & 0x03FFFFFFu); };
+        const uint32_t entry[] = {
+            0x27BDFFE0u, 0xAFBF001Cu, 0xAFB00018u, // addiu sp, sp, -0x20; sw ra, 0x1c(sp); sw s0, 0x18(sp)
+            0x3C040001u, 0x34840300u, jal(createSemaStub), 0x00000000u, // CreateSema(0x10300)
+            0x00408021u,                                                // move s0, v0
+            0x3C080001u, 0x35080400u, 0xAD100004u,                      // sw s0, 4(0x10400): semaphore id for the thread
+            0x3C040001u, 0x34840320u, jal(createThreadStub), 0x00000000u, // CreateThread(0x10320)
+            0x00402021u, 0x00002821u, startWorker ? jal(startThreadStub) : 0x00000000u, 0x00000000u, // StartThread(id, 0)
+            0x02002021u, jal(waitSemaStub), 0x00000000u,                // WaitSema(s0)
+            0x3C080001u, 0x35080400u, 0x8D090000u, 0x00000000u,         // t1 = marker (load delay slot)
+            0x01201021u,                                                // move v0, t1
+            0x8FB00018u, 0x8FBF001Cu, 0x27BD0020u, 0x03E00008u, 0x00000000u,
+        };
+        const uint32_t worker[] = {
+            0x27BDFFF0u, 0xAFBF000Cu,                     // addiu sp, sp, -0x10; sw ra, 0xc(sp)
+            0x3C080001u, 0x35080400u,                     // t0 = 0x10400
+            0x24090001u, 0xAD090000u,                     // marker = 1
+            0x8D040004u, jal(signalSemaStub), 0x00000000u, // SignalSema(semaphore id)
+            0x8FBF000Cu, 0x27BD0010u, 0x03E00008u, 0x00000000u,
+        };
+        const uint32_t thbaseImports[] = {
+            0x41E00000u, 0u, 0x00000101u,
+            0x61626874u, 0x00006573u, // "thbase"
+            0x03E00008u, 0x24000004u, // CreateThread
+            0x03E00008u, 0x24000006u, // StartThread
+            0u, 0u,
+        };
+        const uint32_t thsemapImports[] = {
+            0x41E00000u, 0u, 0x00000101u,
+            0x65736874u, 0x0070616Du, // "thsemap"
+            0x03E00008u, 0x24000004u, // CreateSema
+            0x03E00008u, 0x24000006u, // SignalSema
+            0x03E00008u, 0x24000008u, // WaitSema
+            0u, 0u,
+        };
+        const uint32_t semaphoreDescriptor[] = {0u, 0u, 0u, 1u};
+        const uint32_t workerDescriptor[] = {0u, 0u, workerAddress, 0x400u, 20u};
+
+        std::vector<uint8_t> segment(program.filesz, 0u);
+        const auto put = [&](uint32_t offset, const void *data, size_t size)
+        {
+            std::memcpy(segment.data() + offset, data, size);
+        };
+        put(0u, entry, sizeof(entry));
+        put(0x100u, worker, sizeof(worker));
+        put(0x180u, thbaseImports, sizeof(thbaseImports));
+        put(0x1C0u, thsemapImports, sizeof(thsemapImports));
+        put(0x300u, semaphoreDescriptor, sizeof(semaphoreDescriptor));
+        put(0x320u, workerDescriptor, sizeof(workerDescriptor));
+
+        std::memset(host.guest.data() + address, 0, codeOffset + program.filesz);
+        std::memcpy(host.guest.data() + address, &header, sizeof(header));
+        std::memcpy(host.guest.data() + address + sizeof(header), &program, sizeof(program));
+        std::memcpy(host.guest.data() + address + codeOffset, segment.data(), segment.size());
+    }
+
     void writeMcmanRegistrationIrx(TestHost &host, uint32_t address)
     {
         constexpr uint32_t codeOffset = 0x100u;
@@ -1050,6 +1134,27 @@ int main()
                 "Could not read the IOP scheduling marker")) return 1;
     if (!expect(lowPriorityMarker == 1u,
                 "WaitVblankEnd returned immediately and starved a lower-priority IOP thread")) return 1;
+
+    iop.reset();
+    host.logs.clear();
+    writeSemaphoreWaitIrx(host, 0x100u);
+    const ModuleLoadResult semaphoreWait = iop.loadModuleBuffer(0x100u);
+    if (!expect(semaphoreWait.handled && semaphoreWait.startResult == 1,
+                "WaitSema outside an IOP thread returned without waiting for the thread that signals it")) return 1;
+    const auto timedOutWait = [&host]()
+    {
+        return std::any_of(host.logs.begin(), host.logs.end(),
+                           [](const std::string &message) { return message.find("timed out") != std::string::npos; });
+    };
+    if (!expect(!timedOutWait(), "WaitSema outside an IOP thread timed out although a thread signalled")) return 1;
+
+    iop.reset();
+    host.logs.clear();
+    writeSemaphoreWaitIrx(host, 0x100u, false);
+    const ModuleLoadResult semaphoreTimeout = iop.loadModuleBuffer(0x100u);
+    if (!expect(semaphoreTimeout.handled && semaphoreTimeout.startResult == 0,
+                "WaitSema outside an IOP thread with no signaller did not return")) return 1;
+    if (!expect(timedOutWait(), "WaitSema outside an IOP thread with no signaller did not report a timeout")) return 1;
 
     iop.reset();
     host.logs.clear();
