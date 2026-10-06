@@ -9,6 +9,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <optional>
@@ -1123,6 +1124,42 @@ void register_ps2_runtime_kernel_tests()
             SET_GPR_S64(&env.ctx, 5, 2);
             ps2_stubs::__divdi3(env.rdram.data(), &env.ctx, &env.runtime);
             t.Equals(getRegS32(env.ctx, 2), -4, "__divdi3 should divide signed 64-bit values");
+        });
+
+        tc.Run("libm double stubs take $a0 and return in $v0", [](TestCase &t)
+        {
+            // EE GCC has no double-precision FPU: a double travels whole in one GPR.
+            const auto bits = [](double v)
+            {
+                uint64_t b = 0;
+                std::memcpy(&b, &v, sizeof(b));
+                return b;
+            };
+            struct Case
+            {
+                void (*fn)(uint8_t *, R5900Context *, PS2Runtime *);
+                double in;
+                double out;
+                const char *name;
+            };
+            const Case cases[] = {
+                {ps2_stubs::sin, 0.5, std::sin(0.5), "sin"},
+                {ps2_stubs::cos, 0.5, std::cos(0.5), "cos"},
+                {ps2_stubs::tan, 0.25, std::tan(0.25), "tan"},
+                {ps2_stubs::atan, 1.0, std::atan(1.0), "atan"},
+                {ps2_stubs::floor, -1.5, -2.0, "floor"},
+                {ps2_stubs::fabs, -2.25, 2.25, "fabs"},
+            };
+            for (const Case &c : cases)
+            {
+                TestEnv env;
+                R5900Context *ctx = &env.ctx;
+                SET_GPR_U64(ctx, 4, bits(c.in));
+                ctx->f[12] = 99.0f; // a stale single-precision argument must be ignored
+                c.fn(env.rdram.data(), ctx, &env.runtime);
+                t.Equals(GPR_U64(ctx, 2), bits(c.out),
+                         std::string(c.name) + " should read the double in $a0 and return it in $v0");
+            }
         });
 
         tc.Run("ReleaseAlarm aliases CancelAlarm and cache toggles succeed", [](TestCase &t)

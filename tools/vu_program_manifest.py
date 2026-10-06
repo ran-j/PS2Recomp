@@ -25,7 +25,7 @@ import argparse
 import importlib.util
 import struct
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
@@ -102,8 +102,9 @@ def uploads_in(data):
             position += 4
             command = (code >> 24) & 0x7F
             if command == 0x4A:
+                # The data follows from any word, as the runtime's VIF reads it.
                 count, first = (code >> 16) & 0xFF or 256, code & 0xFFFF
-                if position % 8 or position + count * 8 > end or first + count > PAIRS:
+                if position + count * 8 > end or first + count > PAIRS:
                     break
                 uploads.append((position, first, count))
                 position += count * 8
@@ -172,12 +173,38 @@ def place(image, entries, files):
     return placed
 
 
+def bad_file_name(name):
+    """Why a manifest file name could reach outside the game root, or None if it can't."""
+    # Checked as text, so Windows root- and drive-relative forms fail everywhere.
+    path = PurePosixPath(name)
+    if "\\" in name or ":" in name or path.is_absolute() or ".." in path.parts:
+        return "game files must be relative paths below the game root, separated by /"
+    if len(name.split()) != 1:
+        return "manifest file names cannot contain spaces"
+    return None
+
+
+def game_file_name(path, root, parser):
+    """How the manifest names a game file: its path below the game root, else its name."""
+    if root is None:
+        name = path.name
+    else:
+        try:
+            name = path.resolve().relative_to(root.resolve()).as_posix()
+        except ValueError:
+            parser.error(f"{path} is not inside the game root {root}")
+    problem = bad_file_name(name)
+    if problem:
+        parser.error(f"{name}: {problem}")
+    return name
+
+
 def make(args, parser):
     images, entries = compiler.load_images(args.profiles, parser)
     by_image = {}
     for name, entry in entries:
         by_image.setdefault(name, set()).add(entry)
-    files = [(path.name, path.read_bytes()) for path in args.game]
+    files = [(game_file_name(path, args.game_root, parser), path.read_bytes()) for path in args.game]
     work = [(images[name], by_image[name]) for name in sorted(by_image)]
     extra = list(unrecorded_uploads(images, by_image, files)) if args.uploads else []
     lines = ["# VU1 microcode compiled into the runtime, located in the game's files.",
@@ -215,6 +242,9 @@ def expand(args, parser):
             current = ([int(entry, 16) for entry in fields[1].split(",")], int(fields[2], 16), [])
             images.append(current)
         elif fields[0] == "run" and len(fields) == 5 and current is not None:
+            problem = bad_file_name(fields[3])
+            if problem:
+                parser.error(f"{args.manifest}:{number}: {fields[3]}: {problem}")
             current[2].append((int(fields[1]), int(fields[2]), fields[3], int(fields[4])))
         else:
             parser.error(f"{args.manifest}:{number}: unexpected line")
@@ -224,7 +254,7 @@ def expand(args, parser):
         chunks = []
         for start, length, file, offset in runs:
             if file not in files:
-                path = args.game_root / file
+                path = args.game_root.joinpath(*PurePosixPath(file).parts)
                 files[file] = path.read_bytes() if path.is_file() else b""
             chunks.append(files[file][offset:offset + length * 8])
         if any(len(chunk) != run[1] * 8 for chunk, run in zip(chunks, runs)) \
@@ -250,6 +280,8 @@ def main():
     p_make.add_argument("--output", type=Path, required=True)
     p_make.add_argument("--game", type=Path, action="append", required=True,
                         help="game file to look the microcode up in (repeatable)")
+    p_make.add_argument("--game-root", type=Path,
+                        help="disc root; game files are then named by their path below it")
     p_make.add_argument("--uploads", action="store_true",
                         help="also describe microcode the game files upload but no recording holds")
     p_make.add_argument("profiles", type=Path, nargs="+")
