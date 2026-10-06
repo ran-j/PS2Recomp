@@ -69,6 +69,25 @@ The input is recorded, not guessed, because the microcode is game data:
 
 Recordings and the generated sources contain game code; keep them local.
 
+A project can still ship what it recorded without shipping the code.
+`tools/vu_program_manifest.py make --game <file> <recordings>` writes a
+manifest: for each recorded image, the runs of instruction pairs its routines
+read, as offsets into the game's files, and one checksum over them all. On a
+player's machine, `vu_program_manifest.py expand --manifest <file> --game-root
+<disc> --output <dir>` rebuilds those images from their own copy of the game,
+and `<dir>` goes into `PS2X_VU_PROGRAM_PROFILES` like any recording. The
+compiled routines come out the same as from the recordings; images whose code
+differs in the given files, such as another region's, are skipped. An expanded
+directory goes back into `make` like a recording, so a manifest can grow from
+new recordings without the ones it was made from.
+
+A recording only covers the programs that ran while it was made. `make
+--uploads` also finds the DMA packets in the game's files that load microcode
+with VIF `MPG`, and describes each program no recording holds as if it had
+been loaded in place of a recorded one at the same address, entered at the
+same points. Programs the game builds at run time, or loads at an address
+nothing was recorded at, still need a recording.
+
 The FMAC arithmetic has fast paths with exact fallbacks, NEON on AArch64 and
 SSE2 on x86. Other hosts get a plain C++ path. All three can be tested on an ARM
 machine: `PS2X_VU_PROGRAM_SSE` builds the SSE2 one through sse2neon, and
