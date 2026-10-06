@@ -130,6 +130,30 @@ class VuProgramManifestTests(unittest.TestCase):
         self.assertEqual(compiled(self.recordings, self.root / "from-recordings"),
                          compiled(expanded, self.root / "from-manifest"))
 
+    def test_expand_refuses_names_that_leave_the_game_root(self):
+        image = next(line for line in self.manifest.read_text().splitlines() if line.startswith("image "))
+        for name in ("../GAME.ELF", "/GAME.ELF", "C:GAME.ELF", "\\GAME.ELF", "DATA\\GAME.ELF"):
+            with self.subTest(name=name):
+                manifest = self.root / "outside.txt"
+                manifest.write_text(f"{image}\nrun 0 1 {name} 0\n")
+                with self.assertRaises(subprocess.CalledProcessError):
+                    run(MANIFEST, "expand", "--manifest", manifest, "--game-root", self.disc,
+                        "--output", self.root / "outside")
+
+    def test_a_game_root_of_links_still_expands(self):
+        # A disc folder made of links into an extracted copy is a normal setup.
+        links = self.root / "links"
+        links.mkdir()
+        try:
+            (links / self.game.name).symlink_to(self.game)
+        except OSError:
+            self.skipTest("symbolic links are not available here")
+        expanded = self.root / "expanded"
+        result = run(MANIFEST, "expand", "--manifest", self.manifest, "--game-root", links,
+                     "--output", expanded)
+        self.assertNotIn("skipped", result.stdout)
+        self.assertTrue((expanded / "entries.txt").read_text().strip())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -25,7 +25,7 @@ import argparse
 import importlib.util
 import struct
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
@@ -173,6 +173,17 @@ def place(image, entries, files):
     return placed
 
 
+def bad_file_name(name):
+    """Why a manifest file name could reach outside the game root, or None if it can't."""
+    # Checked as text, so Windows root- and drive-relative forms fail everywhere.
+    path = PurePosixPath(name)
+    if "\\" in name or ":" in name or path.is_absolute() or ".." in path.parts:
+        return "game files must be relative paths below the game root, separated by /"
+    if len(name.split()) != 1:
+        return "manifest file names cannot contain spaces"
+    return None
+
+
 def game_file_name(path, root, parser):
     """How the manifest names a game file: its path below the game root, else its name."""
     if root is None:
@@ -182,8 +193,9 @@ def game_file_name(path, root, parser):
             name = path.resolve().relative_to(root.resolve()).as_posix()
         except ValueError:
             parser.error(f"{path} is not inside the game root {root}")
-    if len(name.split()) != 1:
-        parser.error(f"{name}: manifest file names cannot contain spaces")
+    problem = bad_file_name(name)
+    if problem:
+        parser.error(f"{name}: {problem}")
     return name
 
 
@@ -230,8 +242,9 @@ def expand(args, parser):
             current = ([int(entry, 16) for entry in fields[1].split(",")], int(fields[2], 16), [])
             images.append(current)
         elif fields[0] == "run" and len(fields) == 5 and current is not None:
-            if Path(fields[3]).is_absolute() or ".." in Path(fields[3]).parts:
-                parser.error(f"{args.manifest}:{number}: game file outside the game root")
+            problem = bad_file_name(fields[3])
+            if problem:
+                parser.error(f"{args.manifest}:{number}: {fields[3]}: {problem}")
             current[2].append((int(fields[1]), int(fields[2]), fields[3], int(fields[4])))
         else:
             parser.error(f"{args.manifest}:{number}: unexpected line")
@@ -241,7 +254,7 @@ def expand(args, parser):
         chunks = []
         for start, length, file, offset in runs:
             if file not in files:
-                path = args.game_root / file
+                path = args.game_root.joinpath(*PurePosixPath(file).parts)
                 files[file] = path.read_bytes() if path.is_file() else b""
             chunks.append(files[file][offset:offset + length * 8])
         if any(len(chunk) != run[1] * 8 for chunk, run in zip(chunks, runs)) \
