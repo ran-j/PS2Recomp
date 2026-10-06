@@ -6,6 +6,25 @@ namespace ps2_stubs
 {
     namespace
     {
+        // Soft-float doubles travel whole in one 64-bit GPR on the EE.
+        double guestDoubleArg(const R5900Context *ctx, int reg)
+        {
+            const uint64_t bits = GPR_U64(ctx, reg);
+            double value;
+            std::memcpy(&value, &bits, sizeof(value));
+            return value;
+        }
+
+        uint64_t guestDoubleBits(double value)
+        {
+            uint64_t bits;
+            std::memcpy(&bits, &value, sizeof(bits));
+            return bits;
+        }
+    }
+
+    namespace
+    {
         uint32_t sanitizeMemTransferSize(uint32_t size, const char *op)
         {
             constexpr uint32_t kMaxTransfer = PS2_RAM_SIZE;
@@ -922,10 +941,13 @@ namespace ps2_stubs
         ctx->f[0] = ::sqrtf(arg);
     }
 
+    // libm's sin here is the soft-float double version: the 64-bit argument
+    // arrives in $a0 and the result goes back in $v0 (newlib, EE GCC).
     void sin(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        float arg = ctx->f[12];
-        ctx->f[0] = ::sinf(arg);
+        (void)rdram;
+        (void)runtime;
+        setReturnU64(ctx, guestDoubleBits(std::sin(guestDoubleArg(ctx, 4))));
     }
 
     void __kernel_sinf(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -936,10 +958,13 @@ namespace ps2_stubs
         ctx->f[0] = ::sinf(x + (iy != 0 ? y : 0.0f));
     }
 
+    // libm's cos here is the soft-float double version: the 64-bit argument
+    // arrives in $a0 and the result goes back in $v0 (newlib, EE GCC).
     void cos(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        float arg = ctx->f[12];
-        ctx->f[0] = ::cosf(arg);
+        (void)rdram;
+        (void)runtime;
+        setReturnU64(ctx, guestDoubleBits(std::cos(guestDoubleArg(ctx, 4))));
     }
 
     void __kernel_cosf(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -972,10 +997,13 @@ namespace ps2_stubs
         setReturnS32(ctx, n);
     }
 
+    // libm's tan here is the soft-float double version: the 64-bit argument
+    // arrives in $a0 and the result goes back in $v0 (newlib, EE GCC).
     void tan(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        float arg = ctx->f[12];
-        ctx->f[0] = ::tanf(arg);
+        (void)rdram;
+        (void)runtime;
+        setReturnU64(ctx, guestDoubleBits(std::tan(guestDoubleArg(ctx, 4))));
     }
 
     void atan2(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1016,16 +1044,22 @@ namespace ps2_stubs
         ctx->f[0] = ::ceilf(arg);
     }
 
+    // libm's floor here is the soft-float double version: the 64-bit argument
+    // arrives in $a0 and the result goes back in $v0 (newlib, EE GCC).
     void floor(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        float arg = ctx->f[12];
-        ctx->f[0] = ::floorf(arg);
+        (void)rdram;
+        (void)runtime;
+        setReturnU64(ctx, guestDoubleBits(std::floor(guestDoubleArg(ctx, 4))));
     }
 
+    // libm's fabs here is the soft-float double version: the 64-bit argument
+    // arrives in $a0 and the result goes back in $v0 (newlib, EE GCC).
     void fabs(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        float arg = ctx->f[12];
-        ctx->f[0] = ::fabsf(arg);
+        (void)rdram;
+        (void)runtime;
+        setReturnU64(ctx, guestDoubleBits(std::fabs(guestDoubleArg(ctx, 4))));
     }
     void abs(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
@@ -1038,23 +1072,13 @@ namespace ps2_stubs
         setReturnS32(ctx, value < 0 ? -value : value);
     }
 
+    // libm's atan here is the soft-float double version: the 64-bit argument
+    // arrives in $a0 and the result goes back in $v0 (newlib, EE GCC).
     void atan(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        float in = ctx ? ctx->f[12] : 0.0f;
-        if (in == 0.0f)
-        {
-            uint32_t raw = getRegU32(ctx, 4);
-            std::memcpy(&in, &raw, sizeof(in));
-        }
-        const float out = std::atan(in);
-        if (ctx)
-        {
-            ctx->f[0] = out;
-        }
-
-        uint32_t outRaw = 0u;
-        std::memcpy(&outRaw, &out, sizeof(outRaw));
-        setReturnU32(ctx, outRaw);
+        (void)rdram;
+        (void)runtime;
+        setReturnU64(ctx, guestDoubleBits(std::atan(guestDoubleArg(ctx, 4))));
     }
 
     void memchr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

@@ -267,12 +267,14 @@ namespace ps2_stubs
                 o[2] = (l[0] * r[1]) - (l[1] * r[0]);
                 o[3] = 0.0f;
             };
+            // libvu0's sceVu0Normalize: length over x,y,z only, w written as 0.
             auto normalize = [](const float (&s)[4], float (&o)[4])
             {
-                const float len = std::sqrt((s[0] * s[0]) + (s[1] * s[1]) + (s[2] * s[2]) + (s[3] * s[3]));
+                const float len = std::sqrt((s[0] * s[0]) + (s[1] * s[1]) + (s[2] * s[2]));
                 const float inv = (len > 1.0e-6f) ? (1.0f / len) : 0.0f;
-                for (int i = 0; i < 4; ++i)
+                for (int i = 0; i < 3; ++i)
                     o[i] = s[i] * inv;
+                o[3] = 0.0f;
             };
             float rawCross[4]{}, row0[4]{}, row1[4]{}, row2[4]{};
             cross(up, fwd, rawCross);
@@ -579,7 +581,8 @@ namespace ps2_stubs
         float dot = 0.0f;
         if (readVuVec4f(rdram, lhsAddr, lhs) && readVuVec4f(rdram, rhsAddr, rhs))
         {
-            dot = (lhs[0] * rhs[0]) + (lhs[1] * rhs[1]) + (lhs[2] * rhs[2]) + (lhs[3] * rhs[3]);
+            // vmul.xyz then vaddy/vaddz: w does not take part.
+            dot = (lhs[0] * rhs[0]) + (lhs[1] * rhs[1]) + (lhs[2] * rhs[2]);
         }
 
         if (ctx)
@@ -725,10 +728,11 @@ namespace ps2_stubs
         float m0[16]{}, m1[16]{}, out[16]{};
         if (readVuMatrix4f(rdram, m0Addr, m0) && readVuMatrix4f(rdram, m1Addr, m1))
         {
-            // out = m0 * m1 (first source . second source), matching the
-            // file's mulVuMatrix(lhs,rhs)=lhs.rhs convention and the RotMatrix
-            // / ViewScreenMatrix siblings (first operand on the left).
-            mulVuMatrix(m0, m1, out);
+            // libvu0 loads vf4-vf7 from the second argument (a1) and walks the
+            // rows of the third (a2): out[i] = sum_k m1[i][k] * m0[k], i.e.
+            // out = m1 . m0 here -- apply the third argument, then the second.
+            // ViewScreenMatrix's own MulMatrix(m, mt, m) relies on this order.
+            mulVuMatrix(m1, m0, out);
             (void)writeVuMatrix4f(rdram, dstAddr, out);
         }
         setReturnS32(ctx, 0);
@@ -758,11 +762,13 @@ namespace ps2_stubs
         float src[4]{}, out[4]{};
         if (readVuVec4f(rdram, srcAddr, src))
         {
-            const float len = std::sqrt((src[0] * src[0]) + (src[1] * src[1]) + (src[2] * src[2]) + (src[3] * src[3]));
+            // vmul.xyz / vmulq.xyz on a zeroed register: the length covers
+            // x,y,z only and w comes out 0.
+            const float len = std::sqrt((src[0] * src[0]) + (src[1] * src[1]) + (src[2] * src[2]));
             if (len > 1.0e-6f)
             {
                 const float invLen = 1.0f / len;
-                for (int i = 0; i < 4; ++i)
+                for (int i = 0; i < 3; ++i)
                 {
                     out[i] = src[i] * invLen;
                 }
@@ -783,12 +789,14 @@ namespace ps2_stubs
         float l0[4]{}, l1[4]{}, l2[4]{};
         if (readVuVec4f(rdram, l0Addr, l0) && readVuVec4f(rdram, l1Addr, l1) && readVuVec4f(rdram, l2Addr, l2))
         {
+            // ScaleVector by -1 then sceVu0Normalize: x,y,z only, w = 0.
             auto negNormalize = [](const float (&s)[4], float (&o)[4])
             {
-                const float len = std::sqrt((s[0] * s[0]) + (s[1] * s[1]) + (s[2] * s[2]) + (s[3] * s[3]));
+                const float len = std::sqrt((s[0] * s[0]) + (s[1] * s[1]) + (s[2] * s[2]));
                 const float inv = (len > 1.0e-6f) ? (1.0f / len) : 0.0f;
-                for (int i = 0; i < 4; ++i)
+                for (int i = 0; i < 3; ++i)
                     o[i] = -s[i] * inv;
+                o[3] = 0.0f;
             };
             float r0[4]{}, r1[4]{}, r2[4]{};
             negNormalize(l0, r0);
@@ -914,7 +922,8 @@ namespace ps2_stubs
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t matAddr = getRegU32(ctx, 5);
         const uint32_t vAddr = getRegU32(ctx, 6);
-        const bool fullFtoi4 = (getRegU32(ctx, 7) != 0);
+        // beqz a3 skips the vftoi0.zw: a zero flag keeps the full FTOI4.
+        const bool fullFtoi4 = (getRegU32(ctx, 7) == 0);
         float m[16]{}, v[4]{};
         if (readVuMatrix4f(rdram, matAddr, m) && readVuVec4f(rdram, vAddr, v))
         {
@@ -931,7 +940,8 @@ namespace ps2_stubs
         const uint32_t matAddr = getRegU32(ctx, 5);
         uint32_t vAddr = getRegU32(ctx, 6);
         const int32_t count = static_cast<int32_t>(getRegU32(ctx, 7));
-        const bool fullFtoi4 = (getRegU32(ctx, 8) != 0);
+        // beqz t0 skips the vftoi0.zw: a zero flag keeps the full FTOI4.
+        const bool fullFtoi4 = (getRegU32(ctx, 8) == 0);
         float m[16]{};
         if (readVuMatrix4f(rdram, matAddr, m))
         {
@@ -956,16 +966,8 @@ namespace ps2_stubs
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t srcAddr = getRegU32(ctx, 5);
         float src[4]{}, out[4]{};
-        float scale = ctx ? ctx->f[12] : 0.0f;
-        if (scale == 0.0f)
-        {
-            uint32_t raw = getRegU32(ctx, 6);
-            std::memcpy(&scale, &raw, sizeof(scale));
-            if (scale == 0.0f)
-            {
-                scale = static_cast<float>(getRegU32(ctx, 6));
-            }
-        }
+        // The SDK takes the scale from f12 only; 0 is a legitimate scale.
+        const float scale = ctx ? ctx->f[12] : 0.0f;
 
         if (readVuVec4f(rdram, srcAddr, src))
         {

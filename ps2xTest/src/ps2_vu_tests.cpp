@@ -299,7 +299,7 @@ void register_ps2_vu_tests()
             t.IsTrue(allMatch, "MulMatrix(dst, I, A) should equal A");
         });
 
-        tc.Run("MulMatrix_equals_arg1_times_arg2", [](TestCase &t)
+        tc.Run("MulMatrix_equals_arg2_times_arg1", [](TestCase &t)
         {
             VuEnv env;
             float m0[16] = {
@@ -320,9 +320,8 @@ void register_ps2_vu_tests()
                     float sum = 0.0f;
                     for (int k = 0; k < 4; ++k)
                     {
-                        // expected = mulVuMatrix(m0, m1) = m0 * m1 (arg1 * arg2);
-                        // mulVuMatrix is file-local to VU.cpp, so mirror its formula here.
-                        sum += m1[4 * k + j] * m0[4 * i + k];
+                        // libvu0 walks the rows of the third argument over the second's.
+                        sum += m1[4 * i + k] * m0[4 * k + j];
                     }
                     expected[4 * i + j] = sum;
                 }
@@ -343,7 +342,7 @@ void register_ps2_vu_tests()
                     allMatch = false;
                 }
             }
-            t.IsTrue(allMatch, "MulMatrix(dst, m0, m1) should equal m0*m1 (mulVuMatrix(m0,m1), arg1*arg2)");
+            t.IsTrue(allMatch, "MulMatrix(dst, m0, m1) should equal m1*m0, as libvu0 computes it");
         });
 
         tc.Run("RotMatrix_Z_matches_RotMatrixZ", [](TestCase &t)
@@ -742,6 +741,32 @@ void register_ps2_vu_tests()
                      "LightColorMatrix should copy the 4 color vectors verbatim into the 4 rows");
         });
 
+        tc.Run("Normalize_xyz_length_w_zero", [](TestCase &t)
+        {
+            // libvu0 squares with vmul.xyz and scales with vmulq.xyz into a zeroed vf6.
+            VuEnv env;
+            writeVec4(env, kA, 3.0f, 0.0f, 4.0f, 1.0f);
+            SET_GPR_U32(&env.ctx, 4, kDst);
+            SET_GPR_U32(&env.ctx, 5, kA);
+            ps2_stubs::sceVu0Normalize(env.rdram.data(), &env.ctx, &env.runtime);
+            float out[4]{};
+            readVec4f(env, kDst, out);
+            t.IsTrue(nearlyEqual(out[0], 0.6f) && nearlyEqual(out[1], 0.0f) && nearlyEqual(out[2], 0.8f) &&
+                         out[3] == 0.0f,
+                     "Normalize should measure x, y and z only and write w as 0");
+        });
+
+        tc.Run("InnerProduct_xyz_only", [](TestCase &t)
+        {
+            VuEnv env;
+            writeVec4(env, kA, 1.0f, 2.0f, 3.0f, 10.0f);
+            writeVec4(env, kB, 4.0f, 5.0f, 6.0f, 10.0f);
+            SET_GPR_U32(&env.ctx, 4, kA);
+            SET_GPR_U32(&env.ctx, 5, kB);
+            ps2_stubs::sceVu0InnerProduct(env.rdram.data(), &env.ctx, &env.runtime);
+            t.IsTrue(nearlyEqual(env.ctx.f[0], 32.0f), "InnerProduct should sum x, y and z, leaving w out");
+        });
+
         tc.Run("RotTransPers_apply_persp_ftoi4", [](TestCase &t)
         {
             VuEnv env;
@@ -752,7 +777,7 @@ void register_ps2_vu_tests()
             SET_GPR_U32(&env.ctx, 4, kDst);
             SET_GPR_U32(&env.ctx, 5, kA);
             SET_GPR_U32(&env.ctx, 6, kB);
-            SET_GPR_U32(&env.ctx, 7, 1u); // fullFtoi4 = true
+            SET_GPR_U32(&env.ctx, 7, 0u); // a zero flag keeps the full FTOI4
             ps2_stubs::sceVu0RotTransPers(env.rdram.data(), &env.ctx, &env.runtime);
             int32_t out[4]{};
             readVec4i(env, kDst, out);
@@ -760,7 +785,7 @@ void register_ps2_vu_tests()
                      "RotTransPers should perspective-divide x/y/z then FTOI4, with w taking the un-divided FTOI4 value");
         });
 
-        tc.Run("RotTransPers_ftoi0_z_when_flag0", [](TestCase &t)
+        tc.Run("RotTransPers_ftoi0_zw_when_flag_set", [](TestCase &t)
         {
             VuEnv env;
             float ident[16]{};
@@ -770,12 +795,12 @@ void register_ps2_vu_tests()
             SET_GPR_U32(&env.ctx, 4, kDst);
             SET_GPR_U32(&env.ctx, 5, kA);
             SET_GPR_U32(&env.ctx, 6, kB);
-            SET_GPR_U32(&env.ctx, 7, 0u); // fullFtoi4 = false
+            SET_GPR_U32(&env.ctx, 7, 1u); // a non-zero flag runs the vftoi0.zw
             ps2_stubs::sceVu0RotTransPers(env.rdram.data(), &env.ctx, &env.runtime);
             int32_t out[4]{};
             readVec4i(env, kDst, out);
-            t.IsTrue(out[2] == 8 && out[3] == 2,
-                     "RotTransPers should FTOI0-truncate z/w instead of FTOI4 when fullFtoi4 is clear");
+            t.IsTrue(out[0] == 256 && out[1] == 512 && out[2] == 8 && out[3] == 2,
+                     "RotTransPers should FTOI0-truncate z/w, and only z/w, when the flag is set");
         });
 
         tc.Run("RotTransPers_persp_wzero_zero", [](TestCase &t)
@@ -808,7 +833,7 @@ void register_ps2_vu_tests()
             //   t1 = m1*1 + m5*2 + m9*3  + m13*1 = 3 + 2  + 0  + 20 = 25
             //   t2 = m2*1 + m6*2 + m10*3 + m14*1 = 0 + 8  + 3  + 30 = 41
             //   t3 = m3*1 + m7*2 + m11*3 + m15*1 = 1
-            // fullFtoi4=true => every lane x16: (432, 400, 656, 16).
+            // A zero flag keeps FTOI4 on every lane, x16: (432, 400, 656, 16).
             VuEnv env;
             float m[16] = {
                 2.0f, 3.0f, 0.0f, 0.0f,
@@ -821,7 +846,7 @@ void register_ps2_vu_tests()
             SET_GPR_U32(&env.ctx, 4, kDst);
             SET_GPR_U32(&env.ctx, 5, kA);
             SET_GPR_U32(&env.ctx, 6, kB);
-            SET_GPR_U32(&env.ctx, 7, 1u); // fullFtoi4 = true
+            SET_GPR_U32(&env.ctx, 7, 0u); // a zero flag keeps the full FTOI4
             ps2_stubs::sceVu0RotTransPers(env.rdram.data(), &env.ctx, &env.runtime);
             int32_t out[4]{};
             readVec4i(env, kDst, out);
@@ -841,7 +866,7 @@ void register_ps2_vu_tests()
             SET_GPR_U32(&env.ctx, 5, kA);
             SET_GPR_U32(&env.ctx, 6, kArr);
             SET_GPR_U32(&env.ctx, 7, 2u);
-            SET_GPR_U32(&env.ctx, 8, 1u);
+            SET_GPR_U32(&env.ctx, 8, 0u);
             ps2_stubs::sceVu0RotTransPersN(env.rdram.data(), &env.ctx, &env.runtime);
             int32_t out0[4]{}, out1[4]{};
             readVec4i(env, kDst, out0);
