@@ -191,6 +191,25 @@ void register_code_generator_tests()
                  "ABS.S keeps its different fs operand encoding");
     });
 
+    tc.Run("RSQRT keeps its numerator on the FPU and in VU0 macro mode", [](TestCase &t) {
+        CodeGenerator gen({}, {});
+        R5900Decoder decoder;
+        const uint32_t rawFpu = (OPCODE_COP1 << 26) | (COP1_S << 21) | (4u << 16) |
+                                (9u << 11) | (2u << 6) | COP1_S_RSQRT;
+        const auto fpu = gen.translateInstruction(decoder.decodeInstruction(0x1000, rawFpu));
+        t.IsTrue(fpu.find("ctx->f[2] = ctx->f[9] / sqrtf(ctx->f[4]);") != std::string::npos,
+                 "RSQRT.S divides fs by the root of ft");
+
+        // vrsqrt Q, vf12x, vf6x, as Dragon Quest VIII's distance constraints use it.
+        const auto vu = gen.translateInstruction(decoder.decodeInstruction(0x1000, 0x4a0663beu));
+        const size_t numerator = vu.find("ctx->vu0_vf[12], ctx->vu0_vf[12], _MM_SHUFFLE(0,0,0,0)");
+        const size_t radicand = vu.find("ctx->vu0_vf[6], ctx->vu0_vf[6], _MM_SHUFFLE(0,0,0,0)");
+        t.IsTrue(numerator != std::string::npos && radicand != std::string::npos && numerator < radicand,
+                 "VRSQRT reads fs.fsf as the numerator and ft.ftf as the radicand");
+        t.IsTrue(vu.find("ctx->vu0_q = (ft > 0.0f) ? (fs / sqrtf(ft)) : 0.0f;") != std::string::npos,
+                 "VRSQRT divides the numerator by the root and keeps 0 for other radicands");
+    });
+
     tc.Run("SYSCALL publishes its continuation before entering the runtime", [](TestCase &t) {
         Function func;
         func.name = "syscall_resume";
