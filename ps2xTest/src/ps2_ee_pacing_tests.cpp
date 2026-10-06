@@ -23,6 +23,7 @@ struct EeSchedulerPacingTestAccess {
     static void cycle(EeScheduler &scheduler, uint64_t value) { scheduler.m_eeCycle = value; }
     static uint64_t cycle(const EeScheduler &scheduler) { return scheduler.m_eeCycle; }
     static void pump(EeScheduler &scheduler) { scheduler.processDueDeadlines(); }
+    static Clock::time_point now(const EeScheduler &scheduler) { return scheduler.pacingNow(); }
     static void wait(EeScheduler &scheduler) { scheduler.waitForEvent(); }
     static void clear(EeScheduler &scheduler) {
         scheduler.m_deadlines.clear();
@@ -229,6 +230,63 @@ int main() {
                 t.IsTrue(pending.back().host == ready + period,
                          "catch-up debt stays bounded after every slow render");
             }
+        });
+        tc.Run("a host pause stops pacing time and leaves no debt to catch up", [](TestCase &t) {
+            Fixture fixture;
+            t.IsTrue(fixture.initialize(), "fixture initializes");
+            EeSchedulerPacingTestAccess::cycle(fixture.scheduler, periodCycles);
+            EeSchedulerPacingTestAccess::pump(fixture.scheduler);
+            const auto pausedAt = fixture.clock.time;
+            fixture.scheduler.setHostPaused(true);
+            t.IsTrue(fixture.scheduler.hostPaused(), "pause is reported");
+            fixture.clock.time += 10s;
+            t.IsTrue(EeSchedulerPacingTestAccess::now(fixture.scheduler) == pausedAt,
+                     "pacing time stands still while paused");
+            fixture.scheduler.setHostPaused(false);
+            const auto resumed = fixture.clock.time;
+            for (uint64_t field = 2; field <= 10; ++field) {
+                EeSchedulerPacingTestAccess::cycle(fixture.scheduler, field * periodCycles);
+                EeSchedulerPacingTestAccess::pump(fixture.scheduler);
+                t.Equals(fixture.scheduler.currentVSyncTick(), field, "one tick per field after the pause");
+                t.IsTrue(fixture.clock.time == resumed + (field - 1u) * period,
+                         "fields keep their spacing after the pause, with no catch-up");
+            }
+        });
+        tc.Run("a host speed paces fields at that multiple of wall time", [](TestCase &t) {
+            Fixture fixture;
+            t.IsTrue(fixture.initialize(), "fixture initializes");
+            fixture.scheduler.setHostSpeed(2.0);
+            const auto start = fixture.clock.time;
+            for (uint64_t field = 1; field <= 60; ++field) {
+                EeSchedulerPacingTestAccess::cycle(fixture.scheduler, field * periodCycles);
+                EeSchedulerPacingTestAccess::pump(fixture.scheduler);
+                t.Equals(fixture.scheduler.currentVSyncTick(), field, "every field still starts");
+            }
+            const auto doubled = fixture.clock.time - start;
+            t.IsTrue(doubled > 30 * period - 1ms && doubled < 30 * period + 1ms,
+                     "sixty fields take thirty fields of wall time at double speed");
+            t.Equals(EeSchedulerPacingTestAccess::cycle(fixture.scheduler), 60 * periodCycles,
+                     "speed does not alter guest cycles");
+            fixture.scheduler.setHostSpeed(1.0);
+            const auto normal = fixture.clock.time;
+            for (uint64_t field = 61; field <= 70; ++field) {
+                EeSchedulerPacingTestAccess::cycle(fixture.scheduler, field * periodCycles);
+                EeSchedulerPacingTestAccess::pump(fixture.scheduler);
+            }
+            const auto real = fixture.clock.time - normal;
+            t.IsTrue(real > 9 * period && real < 10 * period + 1ms, "back at real time after the speed is reset");
+        });
+        tc.Run("a speed of zero leaves the guest unpaced", [](TestCase &t) {
+            Fixture fixture;
+            t.IsTrue(fixture.initialize(), "fixture initializes");
+            fixture.scheduler.setHostSpeed(0.0);
+            const auto start = fixture.clock.time;
+            for (uint64_t field = 1; field <= 120; ++field) {
+                EeSchedulerPacingTestAccess::cycle(fixture.scheduler, field * periodCycles);
+                EeSchedulerPacingTestAccess::pump(fixture.scheduler);
+                t.Equals(fixture.scheduler.currentVSyncTick(), field, "every field still starts");
+            }
+            t.IsTrue(fixture.clock.time - start < 5ms, "two seconds of fields take almost no wall time");
         });
     });
     return MiniTest::Run();

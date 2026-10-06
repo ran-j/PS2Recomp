@@ -236,7 +236,7 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_readyQueues[0].push_back(kMainThreadId);
     refreshReadyMask(0);
     scheduleEvent(m_eeCycle + kVBlankPeriodCycles,
-                  ee_host_pacing::now() + kVBlankPeriod,
+                  pacingNow() + kVBlankPeriod,
                   EeEvent{EeEventType::VBlankStart, 0, 0});
     publishSnapshotNow();
 }
@@ -463,6 +463,118 @@ void EeScheduler::requestStop()
     m_stopRequested.store(true, std::memory_order_release);
     m_checkpointPending.store(true, std::memory_order_release);
     m_eventCv.notify_all();
+}
+
+namespace
+{
+    // A speed of zero or less: deadlines come due almost as soon as they are set.
+    constexpr double kUnpacedSpeed = 1000.0;
+
+    std::chrono::steady_clock::duration scaleDuration(std::chrono::steady_clock::duration duration, double factor)
+    {
+        return std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::duration<double, std::chrono::steady_clock::period>(static_cast<double>(duration.count()) * factor));
+    }
+}
+
+std::chrono::steady_clock::time_point EeScheduler::pacingNow() const
+{
+    const auto wall = ee_host_pacing::now();
+    std::lock_guard lock(m_pacingMutex);
+    if (m_pacingPaused)
+    {
+        return m_pacingBase;
+    }
+    const auto elapsed = wall - m_pacingWallBase;
+    // Exact at the default speed, so pacing that never changed is wall time.
+    return m_pacingBase + (m_pacingSpeed == 1.0 ? elapsed : scaleDuration(elapsed, m_pacingSpeed));
+}
+
+template <typename Predicate>
+bool EeScheduler::pacingWaitUntil(std::unique_lock<std::mutex> &lock,
+                                  std::chrono::steady_clock::time_point deadline, Predicate predicate)
+{
+    for (;;)
+    {
+        const uint64_t generation = m_pacingGeneration.load(std::memory_order_acquire);
+        const auto readyOrChanged = [&]() {
+            return predicate() || m_pacingGeneration.load(std::memory_order_acquire) != generation;
+        };
+        bool paused = false;
+        auto wallDeadline = std::chrono::steady_clock::time_point::max();
+        {
+            std::lock_guard pacingLock(m_pacingMutex);
+            paused = m_pacingPaused;
+            if (!paused && deadline != std::chrono::steady_clock::time_point::max())
+            {
+                const auto ahead = deadline - m_pacingBase;
+                wallDeadline = m_pacingWallBase +
+                               (m_pacingSpeed == 1.0 ? ahead : scaleDuration(ahead, 1.0 / m_pacingSpeed));
+            }
+        }
+        if (paused)
+        {
+            m_eventCv.wait(lock, readyOrChanged);
+        }
+        else if (!ee_host_pacing::waitUntil(m_eventCv, lock, wallDeadline, readyOrChanged))
+        {
+            return predicate();
+        }
+        if (predicate())
+        {
+            return true;
+        }
+        // Woken by a pause or speed change: measure the deadline again.
+    }
+}
+
+void EeScheduler::setHostPacing(bool paused, double speed)
+{
+    const auto wall = ee_host_pacing::now();
+    {
+        std::lock_guard lock(m_pacingMutex);
+        if (paused == m_pacingPaused && speed == m_pacingSpeed)
+        {
+            return;
+        }
+        // Rebased at the change, so pacing time carries on from where it is
+        // instead of jumping, and a pause leaves no debt to catch up.
+        if (!m_pacingPaused)
+        {
+            const auto elapsed = wall - m_pacingWallBase;
+            m_pacingBase += m_pacingSpeed == 1.0 ? elapsed : scaleDuration(elapsed, m_pacingSpeed);
+        }
+        m_pacingWallBase = wall;
+        m_pacingPaused = paused;
+        m_pacingSpeed = speed;
+    }
+    {
+        std::lock_guard lock(m_eventMutex);
+        m_pacingGeneration.fetch_add(1u, std::memory_order_acq_rel);
+    }
+    m_eventCv.notify_all();
+}
+
+void EeScheduler::setHostPaused(bool paused)
+{
+    setHostPacing(paused, hostSpeed());
+}
+
+void EeScheduler::setHostSpeed(double speed)
+{
+    setHostPacing(hostPaused(), speed > 0.0 ? speed : kUnpacedSpeed);
+}
+
+bool EeScheduler::hostPaused() const
+{
+    std::lock_guard lock(m_pacingMutex);
+    return m_pacingPaused;
+}
+
+double EeScheduler::hostSpeed() const
+{
+    std::lock_guard lock(m_pacingMutex);
+    return m_pacingSpeed;
 }
 
 void EeScheduler::postEvent(EeEvent event)
@@ -1251,7 +1363,7 @@ int EeScheduler::setAlarm(uint16_t ticks,
     m_alarms.emplace(id, EeAlarm{id, ticks, handler, argument, gp, sp});
     const uint64_t tickCount = ticks == 0u ? 1u : static_cast<uint64_t>(ticks);
     scheduleEvent(m_eeCycle + tickCount * kAlarmTickCycles,
-                  ee_host_pacing::now() + std::chrono::microseconds(tickCount * kAlarmTickMicroseconds),
+                  pacingNow() + std::chrono::microseconds(tickCount * kAlarmTickMicroseconds),
                   EeEvent{EeEventType::Alarm, static_cast<uint32_t>(id), 0});
     return id;
 }
@@ -2193,7 +2305,7 @@ void EeScheduler::processDueDeadlines()
         std::chrono::steady_clock::time_point pacingDeadline{};
         {
             std::unique_lock lock(m_eventMutex);
-            const auto now = ee_host_pacing::now();
+            const auto now = pacingNow();
             for (const ScheduledEvent &item : m_deadlines)
             {
                 if (item.deadlineCycle <= m_eeCycle &&
@@ -2212,9 +2324,9 @@ void EeScheduler::processDueDeadlines()
 
             if (now < pacingDeadline)
             {
-                ee_host_pacing::waitUntil(m_eventCv, lock, pacingDeadline, [this]()
-                                     { return !m_events.empty() ||
-                                              m_stopRequested.load(std::memory_order_acquire); });
+                pacingWaitUntil(lock, pacingDeadline, [this]()
+                                { return !m_events.empty() ||
+                                         m_stopRequested.load(std::memory_order_acquire); });
                 if (!m_events.empty() || m_stopRequested.load(std::memory_order_acquire))
                 {
                     updateNextDeadline();
@@ -2222,7 +2334,7 @@ void EeScheduler::processDueDeadlines()
                 }
             }
 
-            const auto pacedNow = ee_host_pacing::now();
+            const auto pacedNow = pacingNow();
             auto firstFuture = std::partition(m_deadlines.begin(), m_deadlines.end(),
                                               [this, pacedNow](const ScheduledEvent &item)
                                               { return item.deadlineCycle <= m_eeCycle &&
@@ -2261,7 +2373,7 @@ void EeScheduler::processDueDeadlines()
             {
                 // Preserve the guest event stream while bounding old host debt.
                 // Both children belong to this same host VBlank boundary.
-                const auto now = ee_host_pacing::now();
+                const auto now = pacingNow();
                 const auto boundary = ee_host_pacing::vblankBoundary(scheduled.hostDeadline, now, kVBlankPeriod);
                 traceVBlankPacing(m_vsyncTick + 1u, scheduled.deadlineCycle, now, boundary);
                 scheduleEvent(scheduled.deadlineCycle + kVBlankDurationCycles,
@@ -2447,7 +2559,7 @@ void EeScheduler::waitForEvent()
     }
     if (hasTimerDeadline)
     {
-        const auto timerHostDeadline = ee_host_pacing::now() + eeCyclesToHostDuration(timerCycles);
+        const auto timerHostDeadline = pacingNow() + eeCyclesToHostDuration(timerCycles);
         if (timerHostDeadline < hostDeadline)
         {
             deadlineCycle = m_eeCycle + timerCycles;
@@ -2455,9 +2567,9 @@ void EeScheduler::waitForEvent()
         }
     }
 
-    const bool signaled = ee_host_pacing::waitUntil(m_eventCv, lock, hostDeadline, [this]()
-                                               { return !m_events.empty() ||
-                                                        m_stopRequested.load(std::memory_order_acquire); });
+    const bool signaled = pacingWaitUntil(lock, hostDeadline, [this]()
+                                          { return !m_events.empty() ||
+                                                   m_stopRequested.load(std::memory_order_acquire); });
     if (!signaled)
     {
         const uint64_t elapsed = deadlineCycle > m_eeCycle ? deadlineCycle - m_eeCycle : 0u;
