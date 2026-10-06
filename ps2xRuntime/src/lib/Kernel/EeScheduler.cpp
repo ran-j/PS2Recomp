@@ -8,6 +8,7 @@
 #include <atomic>
 #include <bit>
 #include <cassert>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -467,27 +468,52 @@ void EeScheduler::requestStop()
 
 namespace
 {
-    // A speed of zero or less: deadlines come due almost as soon as they are set.
-    constexpr double kUnpacedSpeed = 1000.0;
-
     std::chrono::steady_clock::duration scaleDuration(std::chrono::steady_clock::duration duration, double factor)
     {
+        // Exact at the default speed, so pacing that never changed is wall time.
+        if (factor == 1.0)
+        {
+            return duration;
+        }
         return std::chrono::duration_cast<std::chrono::steady_clock::duration>(
             std::chrono::duration<double, std::chrono::steady_clock::period>(static_cast<double>(duration.count()) * factor));
     }
 }
 
-std::chrono::steady_clock::time_point EeScheduler::pacingNow() const
+std::chrono::steady_clock::time_point EeScheduler::pacingNowLocked(std::chrono::steady_clock::time_point wall) const
 {
-    const auto wall = ee_host_pacing::now();
-    std::lock_guard lock(m_pacingMutex);
     if (m_pacingPaused)
     {
         return m_pacingBase;
     }
-    const auto elapsed = wall - m_pacingWallBase;
-    // Exact at the default speed, so pacing that never changed is wall time.
-    return m_pacingBase + (m_pacingSpeed == 1.0 ? elapsed : scaleDuration(elapsed, m_pacingSpeed));
+    // Unpaced time runs with the wall clock between the deadlines it jumps to.
+    return m_pacingBase + scaleDuration(wall - m_pacingWallBase, m_pacingSpeed > 0.0 ? m_pacingSpeed : 1.0);
+}
+
+std::chrono::steady_clock::time_point EeScheduler::pacingNow() const
+{
+    // The wall clock is read under the lock, so no rebase can fall between
+    // the two and set pacing time back.
+    std::lock_guard lock(m_pacingMutex);
+    return pacingNowLocked(ee_host_pacing::now());
+}
+
+void EeScheduler::rebasePacingLocked()
+{
+    // Pacing time carries on from where it is instead of jumping, and a pause
+    // leaves no debt to catch up.
+    const auto wall = ee_host_pacing::now();
+    m_pacingBase = pacingNowLocked(wall);
+    m_pacingWallBase = wall;
+}
+
+void EeScheduler::notifyPacingChanged()
+{
+    {
+        std::lock_guard lock(m_eventMutex);
+        m_pacingGeneration.fetch_add(1u, std::memory_order_acq_rel);
+    }
+    m_eventCv.notify_all();
 }
 
 template <typename Predicate>
@@ -496,21 +522,42 @@ bool EeScheduler::pacingWaitUntil(std::unique_lock<std::mutex> &lock,
 {
     for (;;)
     {
+        if (predicate())
+        {
+            return true;
+        }
         const uint64_t generation = m_pacingGeneration.load(std::memory_order_acquire);
         const auto readyOrChanged = [&]() {
             return predicate() || m_pacingGeneration.load(std::memory_order_acquire) != generation;
         };
         bool paused = false;
+        bool reached = false;
         auto wallDeadline = std::chrono::steady_clock::time_point::max();
         {
             std::lock_guard pacingLock(m_pacingMutex);
             paused = m_pacingPaused;
             if (!paused && deadline != std::chrono::steady_clock::time_point::max())
             {
-                const auto ahead = deadline - m_pacingBase;
-                wallDeadline = m_pacingWallBase +
-                               (m_pacingSpeed == 1.0 ? ahead : scaleDuration(ahead, 1.0 / m_pacingSpeed));
+                if (m_pacingSpeed > 0.0)
+                {
+                    wallDeadline = m_pacingWallBase + scaleDuration(deadline - m_pacingBase, 1.0 / m_pacingSpeed);
+                }
+                else
+                {
+                    // Unpaced: instead of a host wait, pacing time jumps to the deadline.
+                    const auto wall = ee_host_pacing::now();
+                    if (pacingNowLocked(wall) < deadline)
+                    {
+                        m_pacingBase = deadline;
+                        m_pacingWallBase = wall;
+                    }
+                    reached = true;
+                }
             }
+        }
+        if (reached)
+        {
+            return predicate();
         }
         if (paused)
         {
@@ -520,49 +567,39 @@ bool EeScheduler::pacingWaitUntil(std::unique_lock<std::mutex> &lock,
         {
             return predicate();
         }
-        if (predicate())
-        {
-            return true;
-        }
-        // Woken by a pause or speed change: measure the deadline again.
+        // Woken by an event, or by a pause or speed change: check the
+        // predicate, then measure the deadline again.
     }
-}
-
-void EeScheduler::setHostPacing(bool paused, double speed)
-{
-    const auto wall = ee_host_pacing::now();
-    {
-        std::lock_guard lock(m_pacingMutex);
-        if (paused == m_pacingPaused && speed == m_pacingSpeed)
-        {
-            return;
-        }
-        // Rebased at the change, so pacing time carries on from where it is
-        // instead of jumping, and a pause leaves no debt to catch up.
-        if (!m_pacingPaused)
-        {
-            const auto elapsed = wall - m_pacingWallBase;
-            m_pacingBase += m_pacingSpeed == 1.0 ? elapsed : scaleDuration(elapsed, m_pacingSpeed);
-        }
-        m_pacingWallBase = wall;
-        m_pacingPaused = paused;
-        m_pacingSpeed = speed;
-    }
-    {
-        std::lock_guard lock(m_eventMutex);
-        m_pacingGeneration.fetch_add(1u, std::memory_order_acq_rel);
-    }
-    m_eventCv.notify_all();
 }
 
 void EeScheduler::setHostPaused(bool paused)
 {
-    setHostPacing(paused, hostSpeed());
+    {
+        std::lock_guard lock(m_pacingMutex);
+        if (paused == m_pacingPaused)
+        {
+            return;
+        }
+        rebasePacingLocked();
+        m_pacingPaused = paused;
+    }
+    notifyPacingChanged();
 }
 
 void EeScheduler::setHostSpeed(double speed)
 {
-    setHostPacing(hostPaused(), speed > 0.0 ? speed : kUnpacedSpeed);
+    // Zero, negative and non-finite speeds are all stored as 0: unpaced.
+    const double stored = std::isfinite(speed) && speed > 0.0 ? speed : 0.0;
+    {
+        std::lock_guard lock(m_pacingMutex);
+        if (stored == m_pacingSpeed)
+        {
+            return;
+        }
+        rebasePacingLocked();
+        m_pacingSpeed = stored;
+    }
+    notifyPacingChanged();
 }
 
 bool EeScheduler::hostPaused() const
