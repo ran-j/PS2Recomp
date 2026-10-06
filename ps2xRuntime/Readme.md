@@ -70,9 +70,11 @@ The input is recorded, not guessed, because the microcode is game data:
 Recordings and the generated sources contain game code; keep them local.
 
 A project can still ship what it recorded without shipping the code.
-`tools/vu_program_manifest.py make --game <file> <recordings>` writes a
-manifest: for each recorded image, the runs of instruction pairs its routines
-read, as offsets into the game's files, and one checksum over them all. On a
+`tools/vu_program_manifest.py make --game-root <disc> --game <file>
+<recordings>` writes a manifest: for each recorded image, the runs of
+instruction pairs its routines read, as offsets into the game's files, and one
+checksum over them all. Files are named by their path below `<disc>`, or by
+their bare name without `--game-root`. On a
 player's machine, `vu_program_manifest.py expand --manifest <file> --game-root
 <disc> --output <dir>` rebuilds those images from their own copy of the game,
 and `<dir>` goes into `PS2X_VU_PROGRAM_PROFILES` like any recording. The

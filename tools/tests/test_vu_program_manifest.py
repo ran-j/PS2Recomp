@@ -40,6 +40,13 @@ def upload(code, first):
     return struct.pack("<4I", (6 << 28) | len(code) // 16, 0, 0, mpg) + code
 
 
+def upload_first_slot(code, first):
+    """The same with MPG in the tag's first VIF slot, so the code starts in its last word."""
+    body = struct.pack("<I", (0x4A << 24) | (len(code) // 8 << 16) | first) + code
+    body += bytes(-(8 + len(body)) % 16)
+    return struct.pack("<2I", (6 << 28) | (len(body) - 8) // 16, 0) + body
+
+
 class VuProgramManifestTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -76,30 +83,52 @@ class VuProgramManifestTests(unittest.TestCase):
         self.assertIn("0 images expanded", result.stdout)
         self.assertEqual((expanded / "entries.txt").read_text().strip(), "")
 
-    def test_uploads_add_programs_no_recording_holds(self):
+    def uploaded_routines(self, unrecorded_upload, *options):
         # Two programs the game loads at pair 16; only the first one ran while recording.
-        recorded, unrecorded = program(1), program(4)
+        recorded = program(1)
         recording = self.root / "one-program"
-        recording.mkdir()
+        recording.mkdir(exist_ok=True)
         image = bytearray(16384)
         image[16 * 8:16 * 8 + len(recorded)] = recorded
         (recording / "vu1-a0.code").write_bytes(image)
         (recording / "entries.txt").write_text("a0 80\n")
         game = self.disc / "UPLOADS.BIN"
-        game.write_bytes(bytes(48) + upload(recorded, 16) + bytes(range(64)) + upload(unrecorded, 16))
+        game.write_bytes(bytes(48) + upload(recorded, 16) + bytes(range(64)) + unrecorded_upload)
+        manifest = self.root / "uploads.txt"
+        run(MANIFEST, "make", "--output", manifest, "--game", game, *options, recording)
+        expanded = self.root / f"expanded{len(options)}"
+        run(MANIFEST, "expand", "--manifest", manifest, "--game-root", self.disc, "--output", expanded)
+        output = self.root / f"compiled{len(options)}"
+        compiled(expanded, output)
+        return [line for line in (output / "vu_programs.inc").read_text().splitlines()
+                if line.startswith("{0x0080u")]
 
-        def routines(*options):
-            manifest = self.root / "uploads.txt"
-            run(MANIFEST, "make", "--output", manifest, "--game", game, *options, recording)
-            expanded = self.root / f"expanded{len(options)}"
-            run(MANIFEST, "expand", "--manifest", manifest, "--game-root", self.disc, "--output", expanded)
-            output = self.root / f"compiled{len(options)}"
-            compiled(expanded, output)
-            return [line for line in (output / "vu_programs.inc").read_text().splitlines()
-                    if line.startswith("{0x0080u")]
+    def test_uploads_add_programs_no_recording_holds(self):
+        self.assertEqual(len(self.uploaded_routines(upload(program(4), 16))), 1)
+        self.assertEqual(len(self.uploaded_routines(upload(program(4), 16), "--uploads")), 2)
 
-        self.assertEqual(len(routines()), 1)
-        self.assertEqual(len(routines("--uploads")), 2)
+    def test_uploads_found_with_mpg_in_the_tags_first_slot(self):
+        unrecorded = upload_first_slot(program(4), 16)
+        self.assertEqual(len(self.uploaded_routines(unrecorded, "--uploads")), 2)
+
+    def test_game_files_in_folders_keep_their_path(self):
+        folder = self.disc / "DATA"
+        folder.mkdir()
+        nested = folder / "GAME.BIN"
+        nested.write_bytes(self.game.read_bytes())
+        self.game.unlink()
+        manifest = self.root / "nested.txt"
+        run(MANIFEST, "make", "--output", manifest, "--game-root", self.disc, "--game", nested,
+            self.recordings)
+        runs = [line.split()[3] for line in manifest.read_text().splitlines() if line.startswith("run ")]
+        self.assertTrue(runs)
+        self.assertEqual(set(runs), {"DATA/GAME.BIN"})
+        expanded = self.root / "expanded"
+        result = run(MANIFEST, "expand", "--manifest", manifest, "--game-root", self.disc,
+                     "--output", expanded)
+        self.assertNotIn("skipped", result.stdout)
+        self.assertEqual(compiled(self.recordings, self.root / "from-recordings"),
+                         compiled(expanded, self.root / "from-manifest"))
 
 
 if __name__ == "__main__":
