@@ -1205,6 +1205,7 @@ constexpr VU1Interpreter::InstructionUsage VU1Interpreter::decodeLowerUsage(uint
         usage.latency = 2u;
         readVi(viS);
         break;
+    // 0x77 and 0x7F are unassigned in the manual's EFU rows and stay reserved.
     case 0x70:
     case 0x71:
     case 0x72:
@@ -1212,12 +1213,12 @@ constexpr VU1Interpreter::InstructionUsage VU1Interpreter::decodeLowerUsage(uint
     case 0x74:
     case 0x75:
     case 0x76:
-    case 0x77:
     case 0x78:
     case 0x79:
     case 0x7A:
     case 0x7C:
     case 0x7D:
+    case 0x7E:
         if (unit == Unit::VU0)
         {
             usage.reserved = true;
@@ -1231,7 +1232,7 @@ constexpr VU1Interpreter::InstructionUsage VU1Interpreter::decodeLowerUsage(uint
             break;
         case 0x71:
         case 0x72:
-        case 0x77:
+        case 0x79:
             usage.latency = 18u;
             break;
         case 0x73:
@@ -1239,7 +1240,7 @@ constexpr VU1Interpreter::InstructionUsage VU1Interpreter::decodeLowerUsage(uint
             break;
         case 0x74:
         case 0x75:
-        case 0x7C:
+        case 0x7D:
             usage.latency = 54u;
             break;
         case 0x76:
@@ -1247,10 +1248,10 @@ constexpr VU1Interpreter::InstructionUsage VU1Interpreter::decodeLowerUsage(uint
         case 0x7A:
             usage.latency = 12u;
             break;
-        case 0x79:
+        case 0x7C:
             usage.latency = 29u;
             break;
-        case 0x7D:
+        case 0x7E:
             usage.latency = 44u;
             break;
         default:

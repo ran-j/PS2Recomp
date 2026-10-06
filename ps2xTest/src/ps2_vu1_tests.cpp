@@ -2480,9 +2480,9 @@ void register_ps2_vu1_tests()
             };
             constexpr EfuCase cases[] = {
                 {0x70u, 11u}, {0x71u, 18u}, {0x72u, 18u}, {0x73u, 24u},
-                {0x74u, 54u}, {0x75u, 54u}, {0x76u, 12u}, {0x77u, 18u},
-                {0x78u, 12u}, {0x79u, 29u}, {0x7Au, 12u}, {0x7Cu, 54u},
-                {0x7Du, 44u}};
+                {0x74u, 54u}, {0x75u, 54u}, {0x76u, 12u}, {0x78u, 12u},
+                {0x79u, 18u}, {0x7Au, 12u}, {0x7Cu, 29u}, {0x7Du, 54u},
+                {0x7Eu, 44u}};
 
             for (const EfuCase &efu : cases)
             {
@@ -2510,6 +2510,93 @@ void register_ps2_vu1_tests()
                          "WAITP should count every EFU stall as an elapsed VU cycle");
                 t.IsTrue(std::isfinite(vu1.state().p),
                          "architected EFU opcode should commit a finite P result");
+            }
+        });
+
+        tc.Run("EFU opcodes compute their own function at their manual encodings", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+            struct EfuCase
+            {
+                const char *name;
+                uint32_t opcode; // bits 10-0 as the manual lists them: row, then 1111 and column
+                uint8_t fields;  // the manual's dest mask, or fsf for one-field operations
+                float source[4];
+                float expected;
+            };
+            // vuEatan adds pi/4 to the series of its raw operand, as PCSX2's
+            // interpreter does; microVU first maps x to (x-1)/(x+1).
+            const float quarterPi = 0.785398185f;
+            const EfuCase cases[] = {
+                {"ESADD", 0b11100'111100u, 0xEu, {6.0f, 3.0f, 2.0f, -1.0f}, 49.0f},
+                {"ERSADD", 0b11100'111101u, 0xEu, {6.0f, 3.0f, 2.0f, -1.0f}, 1.0f / 49.0f},
+                {"ELENG", 0b11100'111110u, 0xEu, {6.0f, 3.0f, 2.0f, -1.0f}, 7.0f},
+                {"ERLENG", 0b11100'111111u, 0xEu, {6.0f, 3.0f, 2.0f, -1.0f}, 1.0f / 7.0f},
+                {"EATANxy", 0b11101'111100u, 0xCu, {4.0f, 1.0f, -1.0f, 8.0f}, quarterPi + std::atan(0.25f)},
+                {"EATANxz", 0b11101'111101u, 0xAu, {4.0f, 1.0f, -1.0f, 8.0f}, quarterPi + std::atan(-0.25f)},
+                {"ESUM", 0b11101'111110u, 0xFu, {6.0f, 3.0f, 2.0f, -1.0f}, 10.0f},
+                {"ESQRT", 0b11110'111100u, 2u, {9.0f, 25.0f, 4.0f, 16.0f}, 2.0f},
+                {"ERSQRT", 0b11110'111101u, 1u, {9.0f, 4.0f, 25.0f, 16.0f}, 0.5f},
+                {"ERCPR", 0b11110'111110u, 3u, {9.0f, 25.0f, 16.0f, 4.0f}, 0.25f},
+                {"ESIN", 0b11111'111100u, 0u, {0.25f, 0.5f, 1.0f, 2.0f}, std::sin(0.25f)},
+                {"ESIN of 0", 0b11111'111100u, 3u, {0.25f, 0.5f, 1.0f, 0.0f}, 0.0f},
+                {"EATAN", 0b11111'111101u, 1u, {0.5f, 0.25f, 1.0f, 2.0f}, quarterPi + std::atan(0.25f)},
+                {"EATAN of 0", 0b11111'111101u, 0u, {0.0f, 0.25f, 1.0f, 2.0f}, quarterPi},
+                {"EEXP", 0b11111'111110u, 2u, {0.5f, 1.0f, 0.25f, 2.0f}, std::exp(-0.25f)},
+                {"EEXP of 0", 0b11111'111110u, 1u, {0.5f, 0.0f, 0.25f, 2.0f}, 1.0f},
+            };
+
+            for (const EfuCase &efu : cases)
+            {
+                std::memset(fx.code, 0, PS2_VU1_CODE_SIZE);
+                writeVuInstructionPair(
+                    fx.code, 0u,
+                    0x80000000u | (uint32_t{efu.fields} << 21) | (1u << 11) | efu.opcode,
+                    kVuUpperNop); // op P, vf1
+                writeVuInstructionPair(fx.code, 8u, makeVuLowerSpecial(0x7Bu, 0u), kVuUpperNop); // WAITP
+                writeVuInstructionPair(fx.code, 16u, 0x8000033Cu, kVuUpperNop | 0x40000000u);
+                writeVuInstructionPair(fx.code, 24u, 0x8000033Cu, kVuUpperNop);
+
+                VU1Interpreter vu1;
+                std::memcpy(vu1.state().vf[1], efu.source, sizeof(efu.source));
+                vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
+                            fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
+                            0u, 0u, 0u, 256u);
+
+                const float p = vu1.state().p;
+                t.IsTrue(std::fabs(p - efu.expected) <= 1e-5f,
+                         std::string(efu.name) + " should leave " + std::to_string(efu.expected) +
+                             " in P, not " + std::to_string(p));
+            }
+        });
+
+        tc.Run("unassigned opcodes in the EFU rows are reserved", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+            for (const uint32_t opcode : {0b11101'111111u, 0b11111'111111u}) // 0x77, 0x7F
+            {
+                std::memset(fx.code, 0, PS2_VU1_CODE_SIZE);
+                writeVuInstructionPair(fx.code, 0u, 0x80000000u | (1u << 11) | opcode, kVuUpperNop);
+                writeVuInstructionPair(fx.code, 8u, makeVuIaddiu(1u, 0u, 7), kVuUpperNop);
+
+                VU1Interpreter vu1;
+                vu1.state().vf[1][0] = 4.0f;
+                vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
+                            fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
+                            0u, 0u, 0u, 64u);
+
+                t.Equals(vu1.state().cycles, static_cast<uint64_t>(0u),
+                         "an unassigned EFU-row opcode should stop before issuing");
+                t.Equals(vu1.state().pc, 0u,
+                         "an unassigned EFU-row opcode should retain the diagnostic PC");
+                t.Equals(vu1.state().vi[1], 0,
+                         "the instruction after an unassigned EFU-row opcode must not execute");
+                t.Equals(vu1.state().p, 0.0f,
+                         "an unassigned EFU-row opcode must not write P");
             }
         });
 

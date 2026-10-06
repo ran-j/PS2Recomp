@@ -53,7 +53,7 @@ VECTOR_OPS = [op for op in range(0x30) if op != 0x2E]
 ACC_OPS = [*range(0x10), *range(0x18, 0x1D), 0x1E, *range(0x20, 0x2B), 0x2C, 0x2D]
 # EFU operations on a vector, with the fields each one reads, and on one field.
 EFU_VECTOR = ((0x70, XYZ), (0x71, XYZ), (0x72, XYZ), (0x73, XYZ), (0x74, 0b1100), (0x75, 0b1010), (0x76, 0b1111))
-EFU_SCALAR = (0x78, 0x79, 0x7A, 0x7C, 0x7D)
+EFU_SCALAR = (0x78, 0x79, 0x7A, 0x7C, 0x7D, 0x7E)
 
 FLOATS = (0.0, -0.0, 1.0, -1.0, 0.5, -2.5, 3.0, 1000.0, 1e-30, 1e30, 3.4e38, -3.4e38)
 # Bit patterns without a PS2 float meaning: infinities, NaN, a denormal.
