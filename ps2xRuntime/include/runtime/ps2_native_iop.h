@@ -14,8 +14,11 @@ namespace ps2_native_iop
     // before the game starts.
     void setModules(PS2Runtime &runtime, std::vector<std::string> names);
     // 0 mutes the output. The IOP keeps running in step with the device either
-    // way, since games wait on their sound driver.
+    // way, since games wait on their sound driver. Any thread.
     void setVolume(float volume);
+    // Stops the device, and with it the IOP that runs in step with it, for a
+    // host pause; sound picks up where it left off. Any thread.
+    void setPaused(bool paused);
 
     // Called by the runtime; the stream starts with the first native module.
     void startAudio(PS2Runtime &runtime);
