@@ -12,10 +12,11 @@
 // Suspending the stack instead makes a switch a register save and a stack
 // pointer swap.
 //
-// x86-64 and ARM64 get native switches; other targets fall back to ucontext,
-// which is correct but pays a sigprocmask syscall per switch. setjmp/longjmp
-// across stacks is deliberately not used: glibc's _FORTIFY_SOURCE turns it
-// into an abort ("longjmp causes uninitialized stack frame").
+// x86-64 and ARM64 get native switches and Windows uses its own fibers; other
+// targets fall back to ucontext, which is correct but pays a sigprocmask
+// syscall per switch. setjmp/longjmp across stacks is deliberately not used:
+// glibc's _FORTIFY_SOURCE turns it into an abort ("longjmp causes
+// uninitialized stack frame").
 class EeFiber
 {
 public:
@@ -29,7 +30,7 @@ public:
 
     // Allocates the stack and arms `entry`; entry must never return.
     bool create(EntryFn entry, void *user, size_t stackBytes);
-    [[nodiscard]] bool valid() const noexcept { return m_stack != nullptr; }
+    [[nodiscard]] bool valid() const noexcept { return m_platform != nullptr; }
     void destroy();
 
     // Called from the scheduler: run this fiber until it switches back.
@@ -40,9 +41,9 @@ public:
     [[nodiscard]] static bool usingFastSwitch() noexcept;
 
 private:
-    void *m_stack = nullptr;      // lowest address of the allocation
+    void *m_stack = nullptr;      // lowest address of the allocation (none on Windows)
     size_t m_stackBytes = 0u;
     void *m_fiberSp = nullptr;    // suspended fiber stack pointer
     void *m_returnSp = nullptr;   // stack pointer of whoever called resume()
-    void *m_platform = nullptr;   // ucontext pair on the fallback path
+    void *m_platform = nullptr;   // per-backend state; non-null once create() succeeds
 };

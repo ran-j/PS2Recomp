@@ -4,6 +4,19 @@
 #include <cstring>
 #include <new>
 
+#if defined(_WIN32)
+#define EE_FIBER_WIN32 1
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#define EE_FIBER_WIN32 0
+#endif
+
 #if defined(__unix__) || defined(__APPLE__)
 #include <sys/mman.h>
 #include <unistd.h>
@@ -12,6 +25,7 @@
 #define EE_FIBER_HAVE_MMAP 0
 #endif
 
+#if !EE_FIBER_WIN32
 namespace
 {
     size_t stackPageSize()
@@ -57,6 +71,7 @@ namespace
 #endif
     }
 } // namespace
+#endif
 
 #if defined(__x86_64__) && (defined(__linux__) || defined(__unix__) || defined(__APPLE__)) && !defined(EE_FIBER_FORCE_UCONTEXT)
 #define EE_FIBER_FAST_X86_64 1
@@ -70,8 +85,9 @@ namespace
 #define EE_FIBER_FAST_ARM64 0
 #endif
 #define EE_FIBER_FAST (EE_FIBER_FAST_X86_64 || EE_FIBER_FAST_ARM64)
+#define EE_FIBER_UCONTEXT (!EE_FIBER_FAST && !EE_FIBER_WIN32)
 
-#if !EE_FIBER_FAST
+#if EE_FIBER_UCONTEXT
 #if defined(__APPLE__) && !defined(_XOPEN_SOURCE)
 #define _XOPEN_SOURCE 700
 #endif
@@ -144,7 +160,9 @@ namespace
         "    hlt\n" // eeFiberEnter never returns
         ".size eeFiberTrampoline,.-eeFiberTrampoline\n");
 
-    extern "C" void eeFiberEnter(void *bootstrap)
+    // Only the asm calls this, which GCC's LTO cannot see: without `used` it
+    // drops the definition and the trampoline's call fails to link.
+    extern "C" __attribute__((used)) void eeFiberEnter(void *bootstrap)
     {
         auto *boot = static_cast<FiberBootstrap *>(bootstrap);
         boot->entry(boot->user);
@@ -159,7 +177,8 @@ namespace
 
     extern "C" void eeFiberSwitch(void **saveSp, void *targetSp);
     extern "C" void eeFiberTrampoline();
-    extern "C" void eeFiberEnter(void *bootstrap)
+    // Called only from the asm below; `used` keeps LTO from dropping it.
+    extern "C" __attribute__((used)) void eeFiberEnter(void *bootstrap)
     {
         auto *boot = static_cast<FiberBootstrap *>(bootstrap);
         boot->entry(boot->user);
@@ -223,6 +242,39 @@ namespace
         "bl " EE_ASM_SYMBOL(eeFiberEnter) "\n"
         "brk #0\n");
 #undef EE_ASM_SYMBOL
+#elif EE_FIBER_WIN32
+    // Win32 fibers rather than a hand-rolled switch: SwitchToFiber also moves
+    // the TEB stack bounds, without which C++ exceptions cannot unwind a fiber.
+    struct FiberPlatform
+    {
+        void *fiber = nullptr;
+        void *caller = nullptr;
+        EeFiber::EntryFn entry = nullptr;
+        void *user = nullptr;
+    };
+
+    void WINAPI fiberStart(void *param)
+    {
+        auto *self = static_cast<FiberPlatform *>(param);
+        self->entry(self->user);
+        std::abort(); // returning would end the thread
+    }
+
+    // SwitchToFiber needs a fiber to come back to, so a thread becomes one the
+    // first time it resumes anything.
+    void *currentFiber()
+    {
+        if (IsThreadAFiber())
+        {
+            return GetCurrentFiber();
+        }
+        void *self = ConvertThreadToFiberEx(nullptr, FIBER_FLAG_FLOAT_SWITCH);
+        if (self == nullptr)
+        {
+            std::abort();
+        }
+        return self;
+    }
 #else
     struct FiberPlatform
     {
@@ -255,13 +307,21 @@ EeFiber::~EeFiber()
 
 void EeFiber::destroy()
 {
-#if !EE_FIBER_FAST
+#if EE_FIBER_WIN32
+    if (auto *platform = static_cast<FiberPlatform *>(m_platform))
+    {
+        DeleteFiber(platform->fiber);
+        delete platform;
+    }
+#elif EE_FIBER_UCONTEXT
     delete static_cast<FiberPlatform *>(m_platform);
 #else
     std::free(m_platform);
 #endif
     m_platform = nullptr;
+#if !EE_FIBER_WIN32
     munmapStack(m_stack, m_stackBytes);
+#endif
     m_stack = nullptr;
     m_stackBytes = 0u;
     m_fiberSp = nullptr;
@@ -275,6 +335,24 @@ bool EeFiber::create(EntryFn entry, void *user, size_t stackBytes)
     {
         return false;
     }
+#if EE_FIBER_WIN32
+    // The fiber reserves its own stack, guard page included.
+    auto *platform = new (std::nothrow) FiberPlatform();
+    if (platform == nullptr)
+    {
+        return false;
+    }
+    platform->entry = entry;
+    platform->user = user;
+    platform->fiber = CreateFiberEx(0, stackBytes, FIBER_FLAG_FLOAT_SWITCH, fiberStart, platform);
+    if (platform->fiber == nullptr)
+    {
+        delete platform;
+        return false;
+    }
+    m_platform = platform;
+    return true;
+#else
     // Guest call chains nest in C++ through dispatchGuestBranch, so a fiber
     // stack can run deep. Map it with a PROT_NONE guard page at the low end:
     // an overflow then faults on the guard instead of quietly writing into
@@ -356,12 +434,17 @@ bool EeFiber::create(EntryFn entry, void *user, size_t stackBytes)
     m_platform = platform;
 #endif
     return true;
+#endif
 }
 
 void EeFiber::resume()
 {
 #if EE_FIBER_FAST
     eeFiberSwitch(&m_returnSp, m_fiberSp);
+#elif EE_FIBER_WIN32
+    auto *platform = static_cast<FiberPlatform *>(m_platform);
+    platform->caller = currentFiber();
+    SwitchToFiber(platform->fiber);
 #else
     auto *platform = static_cast<FiberPlatform *>(m_platform);
     g_startingFiber = platform;
@@ -373,6 +456,8 @@ void EeFiber::suspend()
 {
 #if EE_FIBER_FAST
     eeFiberSwitch(&m_fiberSp, m_returnSp);
+#elif EE_FIBER_WIN32
+    SwitchToFiber(static_cast<FiberPlatform *>(m_platform)->caller);
 #else
     auto *platform = static_cast<FiberPlatform *>(m_platform);
     swapcontext(&platform->fiber, &platform->caller);
