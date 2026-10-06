@@ -1681,12 +1681,15 @@ void register_ps2_gs_tests()
                      "single-circuit presentation should normalize the last row alpha");
         });
 
-        tc.Run("latched host presentation line-doubles interlaced field output", [](TestCase &t)
+        // SMODE2.FFMD says what the buffer holds. FIELD (0) is a whole frame whose
+        // fields are alternate rows, so the woven host frame reads every row;
+        // FRAME (1) is one field's worth, read whole by both fields.
+        tc.Run("latched host presentation weaves an FFMD=0 interlaced frame row for row", [](TestCase &t)
         {
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
             GSRegisters regs{};
             regs.pmode = 0x0001ull;
-            regs.smode2 = 0x0001ull; // interlaced, field mode
+            regs.smode2 = 0x0001ull; // INT=1, FFMD=0 (FIELD)
             regs.dispfb1 =
                 0ull |
                 (10ull << 9) |
@@ -1698,14 +1701,9 @@ void register_ps2_gs_tests()
             GS gs;
             gs.init(vram.data(), static_cast<uint32_t>(vram.size()), &regs);
 
-            constexpr uint32_t kLine0 = 0x000000FFu;
-            constexpr uint32_t kLine1 = 0x0000FF00u;
-            constexpr uint32_t kLine2 = 0x00FF0000u;
-            constexpr uint32_t kLine3 = 0x00FFFF00u;
-            writeReferencePSMCT32Pixel(vram, 0u, 10u, 0u, 0u, kLine0);
-            writeReferencePSMCT32Pixel(vram, 0u, 10u, 0u, 1u, kLine1);
-            writeReferencePSMCT32Pixel(vram, 0u, 10u, 0u, 2u, kLine2);
-            writeReferencePSMCT32Pixel(vram, 0u, 10u, 0u, 3u, kLine3);
+            constexpr uint32_t kLines[4] = {0x000000FFu, 0x0000FF00u, 0x00FF0000u, 0x00FFFF00u};
+            for (uint32_t row = 0u; row < 4u; ++row)
+                writeReferencePSMCT32Pixel(vram, 0u, 10u, 0u, row, kLines[row]);
 
             gs.latchHostPresentationFrame();
 
@@ -1713,11 +1711,11 @@ void register_ps2_gs_tests()
             uint32_t latchedWidth = 0u;
             uint32_t latchedHeight = 0u;
             t.IsTrue(gs.copyLatchedHostPresentationFrame(latchedFrame, latchedWidth, latchedHeight),
-                     "interlaced field presentation should produce a host frame");
+                     "FFMD=0 presentation should produce a host frame");
             t.Equals(latchedWidth, 640u,
-                     "field presentation should preserve display width");
+                     "FFMD=0 presentation should preserve display width");
             t.Equals(latchedHeight, 448u,
-                     "field presentation should preserve display height");
+                     "FFMD=0 presentation should preserve display height");
 
             auto pixelAtRow = [&](uint32_t row) -> uint32_t
             {
@@ -1727,17 +1725,60 @@ void register_ps2_gs_tests()
                        (static_cast<uint32_t>(latchedFrame[off + 2u]) << 16);
             };
 
-            const uint32_t row0 = pixelAtRow(0u);
-            const uint32_t row1 = pixelAtRow(1u);
-            const uint32_t row2 = pixelAtRow(2u);
-            const uint32_t row3 = pixelAtRow(3u);
+            for (uint32_t row = 0u; row < 4u; ++row)
+                t.Equals(pixelAtRow(row), kLines[row],
+                         "FFMD=0 presentation should show buffer row " + std::to_string(row) +
+                             " as host row " + std::to_string(row) + ", not line-double a field");
+        });
 
-            t.Equals(row0, row1,
-                     "field presentation should duplicate the active field into the next scanline");
-            t.Equals(row2, row3,
-                     "field presentation should duplicate later field scanlines as well");
-            t.IsTrue(row0 != row2,
-                     "field presentation should still preserve different source content across field rows");
+        tc.Run("latched host presentation line-doubles an FFMD=1 half-height frame", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GSRegisters regs{};
+            regs.pmode = 0x0001ull;
+            regs.smode2 = 0x0003ull; // INT=1, FFMD=1 (FRAME)
+            regs.dispfb1 =
+                0ull |
+                (10ull << 9) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 15);
+            regs.display1 =
+                (639ull << 32) |
+                (447ull << 44);
+
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), &regs);
+
+            constexpr uint32_t kRow0 = 0x000000FFu;
+            constexpr uint32_t kRow1 = 0x0000FF00u;
+            constexpr uint32_t kLastRow = 0x00FF00FFu;
+            writeReferencePSMCT32Pixel(vram, 0u, 10u, 0u, 0u, kRow0);
+            writeReferencePSMCT32Pixel(vram, 0u, 10u, 0u, 1u, kRow1);
+            writeReferencePSMCT32Pixel(vram, 0u, 10u, 0u, 223u, kLastRow);
+
+            gs.latchHostPresentationFrame();
+
+            std::vector<uint8_t> latchedFrame;
+            uint32_t latchedWidth = 0u;
+            uint32_t latchedHeight = 0u;
+            t.IsTrue(gs.copyLatchedHostPresentationFrame(latchedFrame, latchedWidth, latchedHeight),
+                     "FFMD=1 presentation should produce a host frame");
+            t.Equals(latchedHeight, 448u,
+                     "FFMD=1 presentation should still fill the display height");
+
+            auto pixelAtRow = [&](uint32_t row) -> uint32_t
+            {
+                const size_t off = static_cast<size_t>(row) * 640u * 4u;
+                return static_cast<uint32_t>(latchedFrame[off + 0u]) |
+                       (static_cast<uint32_t>(latchedFrame[off + 1u]) << 8) |
+                       (static_cast<uint32_t>(latchedFrame[off + 2u]) << 16);
+            };
+
+            t.Equals(pixelAtRow(0u), kRow0, "buffer row 0 should cover host row 0");
+            t.Equals(pixelAtRow(1u), kRow0, "buffer row 0 should cover host row 1");
+            t.Equals(pixelAtRow(2u), kRow1, "buffer row 1 should cover host row 2");
+            t.Equals(pixelAtRow(3u), kRow1, "buffer row 1 should cover host row 3");
+            t.Equals(pixelAtRow(446u), kLastRow, "the 224-row buffer should reach host row 446");
+            t.Equals(pixelAtRow(447u), kLastRow, "the 224-row buffer should reach host row 447");
         });
 
         tc.Run("GIF PACKED A+D writes DISPFB1 and DISPLAY1 privileged registers", [](TestCase &t)
