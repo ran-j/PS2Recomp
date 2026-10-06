@@ -271,7 +271,7 @@ namespace ps2_stubs
             auto normalize = [](const float (&s)[4], float (&o)[4])
             {
                 const float len = std::sqrt((s[0] * s[0]) + (s[1] * s[1]) + (s[2] * s[2]));
-                const float inv = (len > 1.0e-6f) ? (1.0f / len) : 0.0f;
+                const float inv = (len > 0.0f) ? (1.0f / len) : 0.0f;
                 for (int i = 0; i < 3; ++i)
                     o[i] = s[i] * inv;
                 o[3] = 0.0f;
@@ -763,9 +763,10 @@ namespace ps2_stubs
         if (readVuVec4f(rdram, srcAddr, src))
         {
             // vmul.xyz / vmulq.xyz on a zeroed register: the length covers
-            // x,y,z only and w comes out 0.
+            // x,y,z only and w comes out 0. Any nonzero length normalizes, as on
+            // the VU; zero and NaN keep the zero vector instead of 1/0.
             const float len = std::sqrt((src[0] * src[0]) + (src[1] * src[1]) + (src[2] * src[2]));
-            if (len > 1.0e-6f)
+            if (len > 0.0f)
             {
                 const float invLen = 1.0f / len;
                 for (int i = 0; i < 3; ++i)
@@ -793,7 +794,7 @@ namespace ps2_stubs
             auto negNormalize = [](const float (&s)[4], float (&o)[4])
             {
                 const float len = std::sqrt((s[0] * s[0]) + (s[1] * s[1]) + (s[2] * s[2]));
-                const float inv = (len > 1.0e-6f) ? (1.0f / len) : 0.0f;
+                const float inv = (len > 0.0f) ? (1.0f / len) : 0.0f;
                 for (int i = 0; i < 3; ++i)
                     o[i] = -s[i] * inv;
                 o[3] = 0.0f;

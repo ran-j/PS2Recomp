@@ -756,6 +756,51 @@ void register_ps2_vu_tests()
                      "Normalize should measure x, y and z only and write w as 0");
         });
 
+        tc.Run("Normalize_small_nonzero_and_zero", [](TestCase &t)
+        {
+            // The VU normalizes any nonzero length; only a zero length is left at zero.
+            VuEnv env;
+            writeVec4(env, kA, 1.0e-7f, 0.0f, 0.0f, 1.0f);
+            writeVec4(env, kB, 0.0f, 0.0f, 0.0f, 1.0f);
+            SET_GPR_U32(&env.ctx, 4, kDst);
+            SET_GPR_U32(&env.ctx, 5, kA);
+            ps2_stubs::sceVu0Normalize(env.rdram.data(), &env.ctx, &env.runtime);
+            SET_GPR_U32(&env.ctx, 4, kDst2);
+            SET_GPR_U32(&env.ctx, 5, kB);
+            ps2_stubs::sceVu0Normalize(env.rdram.data(), &env.ctx, &env.runtime);
+            float small[4]{}, zero[4]{};
+            readVec4f(env, kDst, small);
+            readVec4f(env, kDst2, zero);
+            t.IsTrue(nearlyEqual(small[0], 1.0f) && small[1] == 0.0f && small[2] == 0.0f && small[3] == 0.0f,
+                     "Normalize should scale a tiny nonzero vector to unit length");
+            t.IsTrue(zero[0] == 0.0f && zero[1] == 0.0f && zero[2] == 0.0f && zero[3] == 0.0f,
+                     "Normalize should leave the zero vector at zero rather than divide by zero");
+        });
+
+        tc.Run("ScaleVector_scale_from_f12_only", [](TestCase &t)
+        {
+            // libvu0 moves f12 into vf5 and runs vmulx.xyzw; $a2 plays no part.
+            VuEnv env;
+            writeVec4(env, kA, 2.0f, 3.0f, 4.0f, 5.0f);
+            SET_GPR_U32(&env.ctx, 4, kDst);
+            SET_GPR_U32(&env.ctx, 5, kA);
+            SET_GPR_U32(&env.ctx, 6, 0x3F800000u); // 1.0f as a stray $a2
+            env.ctx.f[12] = 0.0f;
+            ps2_stubs::sceVu0ScaleVector(env.rdram.data(), &env.ctx, &env.runtime);
+            float zeroed[4]{};
+            readVec4f(env, kDst, zeroed);
+            t.IsTrue(zeroed[0] == 0.0f && zeroed[1] == 0.0f && zeroed[2] == 0.0f && zeroed[3] == 0.0f,
+                     "ScaleVector by an f12 of 0 should zero all four lanes, whatever $a2 holds");
+
+            env.ctx.f[12] = 2.0f;
+            ps2_stubs::sceVu0ScaleVector(env.rdram.data(), &env.ctx, &env.runtime);
+            float scaled[4]{};
+            readVec4f(env, kDst, scaled);
+            t.IsTrue(nearlyEqual(scaled[0], 4.0f) && nearlyEqual(scaled[1], 6.0f) &&
+                         nearlyEqual(scaled[2], 8.0f) && nearlyEqual(scaled[3], 10.0f),
+                     "ScaleVector should scale all four lanes by f12");
+        });
+
         tc.Run("InnerProduct_xyz_only", [](TestCase &t)
         {
             VuEnv env;
