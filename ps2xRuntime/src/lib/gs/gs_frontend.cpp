@@ -2,10 +2,8 @@
 #include "runtime/gs/gs_cpu_backend.h"
 #include "ps2_log.h"
 #include "runtime/ps2_memory.h"
+#include "runtime/ps2_pad_host.h"
 
-// Weak on purpose: the offline gs-dump harness links this file without the pad
-// backend, and there a screenshot just falls back to counting latches.
-extern "C++" __attribute__((weak)) uint64_t ps2PadCurrentGuestFrame();
 #include <atomic>
 #include <algorithm>
 #include <chrono>
@@ -640,9 +638,7 @@ static void maybeWriteScreenshot(GS &gs)
 
     // Named by guest vsync tick, the same clock DQ8_PAD_SCRIPT uses, so a
     // screenshot tells you directly which frame to script an input at.
-    static uint64_t s_latches = 0u;
-    const uint64_t frame =
-        ps2PadCurrentGuestFrame != nullptr ? ps2PadCurrentGuestFrame() : s_latches++;
+    const uint64_t frame = ps2PadCurrentGuestFrame();
     static uint64_t s_lastWritten = std::numeric_limits<uint64_t>::max();
     if (s_lastWritten != std::numeric_limits<uint64_t>::max() &&
         frame < s_lastWritten + config.every)
