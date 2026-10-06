@@ -97,6 +97,18 @@ namespace
 namespace
 {
 #if EE_FIBER_FAST_X86_64
+    // Mach-O: C symbols take a leading underscore, .hidden is .private_extern,
+    // there is no .type or .size, and .align N aligns to 2^N, hence .p2align.
+#if defined(__APPLE__)
+#define EE_ASM_SYMBOL(name) "_" #name
+#define EE_ASM_FUNCTION(name) ".globl _" #name "\n.private_extern _" #name "\n"
+#define EE_ASM_FUNCTION_END(name) ""
+#else
+#define EE_ASM_SYMBOL(name) #name
+#define EE_ASM_FUNCTION(name) ".globl " #name "\n.hidden " #name "\n.type " #name ",@function\n"
+#define EE_ASM_FUNCTION_END(name) ".size " #name ",.-" #name "\n"
+#endif
+
     // void eeFiberSwitch(void **saveSp, void *targetSp)
     //
     // Saves the callee-saved registers and the FP control words on the current
@@ -107,11 +119,9 @@ namespace
     extern "C" void eeFiberSwitch(void **saveSp, void *targetSp);
     __asm__(
         ".text\n"
-        ".globl eeFiberSwitch\n"
-        ".hidden eeFiberSwitch\n"
-        ".type eeFiberSwitch,@function\n"
-        ".align 16\n"
-        "eeFiberSwitch:\n"
+        EE_ASM_FUNCTION(eeFiberSwitch)
+        ".p2align 4\n"
+        EE_ASM_SYMBOL(eeFiberSwitch) ":\n"
         "    pushq %rbp\n"
         "    pushq %rbx\n"
         "    pushq %r12\n"
@@ -133,7 +143,7 @@ namespace
         "    popq %rbx\n"
         "    popq %rbp\n"
         "    ret\n"
-        ".size eeFiberSwitch,.-eeFiberSwitch\n");
+        EE_ASM_FUNCTION_END(eeFiberSwitch));
 
     struct FiberBootstrap
     {
@@ -146,19 +156,17 @@ namespace
     extern "C" void eeFiberTrampoline();
     __asm__(
         ".text\n"
-        ".globl eeFiberTrampoline\n"
-        ".hidden eeFiberTrampoline\n"
-        ".type eeFiberTrampoline,@function\n"
-        ".align 16\n"
-        "eeFiberTrampoline:\n"
+        EE_ASM_FUNCTION(eeFiberTrampoline)
+        ".p2align 4\n"
+        EE_ASM_SYMBOL(eeFiberTrampoline) ":\n"
         // Entered by `ret`, so rsp%16 == 8 as at any function entry. SysV wants
         // rsp%16 == 0 immediately before a call; without this the callee's
         // 16-byte SSE spills fault.
         "    subq $8, %rsp\n"
         "    movq %rbx, %rdi\n"
-        "    call eeFiberEnter\n"
+        "    call " EE_ASM_SYMBOL(eeFiberEnter) "\n"
         "    hlt\n" // eeFiberEnter never returns
-        ".size eeFiberTrampoline,.-eeFiberTrampoline\n");
+        EE_ASM_FUNCTION_END(eeFiberTrampoline));
 
     // Only the asm calls this, which GCC's LTO cannot see: without `used` it
     // drops the definition and the trampoline's call fails to link.
@@ -168,6 +176,9 @@ namespace
         boot->entry(boot->user);
         std::abort(); // entry must never return
     }
+#undef EE_ASM_SYMBOL
+#undef EE_ASM_FUNCTION
+#undef EE_ASM_FUNCTION_END
 #elif EE_FIBER_FAST_ARM64
     struct FiberBootstrap
     {
