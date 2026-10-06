@@ -366,6 +366,7 @@ void register_ps2_vu1_program_tests()
             while (entries >> hash >> pc)
                 recorded = recorded || pc == "200";
             t.IsTrue(recorded, "the jump target 0x200 is saved as an entry");
+            entries.close(); // Windows will not delete a file that is still open
             std::filesystem::remove_all(directory);
         });
     });
