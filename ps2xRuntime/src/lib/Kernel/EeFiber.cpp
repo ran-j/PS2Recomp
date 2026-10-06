@@ -144,7 +144,9 @@ namespace
         "    hlt\n" // eeFiberEnter never returns
         ".size eeFiberTrampoline,.-eeFiberTrampoline\n");
 
-    extern "C" void eeFiberEnter(void *bootstrap)
+    // Only the asm calls this, which GCC's LTO cannot see: without `used` it
+    // drops the definition and the trampoline's call fails to link.
+    extern "C" __attribute__((used)) void eeFiberEnter(void *bootstrap)
     {
         auto *boot = static_cast<FiberBootstrap *>(bootstrap);
         boot->entry(boot->user);
@@ -159,7 +161,8 @@ namespace
 
     extern "C" void eeFiberSwitch(void **saveSp, void *targetSp);
     extern "C" void eeFiberTrampoline();
-    extern "C" void eeFiberEnter(void *bootstrap)
+    // Called only from the asm below; `used` keeps LTO from dropping it.
+    extern "C" __attribute__((used)) void eeFiberEnter(void *bootstrap)
     {
         auto *boot = static_cast<FiberBootstrap *>(bootstrap);
         boot->entry(boot->user);
