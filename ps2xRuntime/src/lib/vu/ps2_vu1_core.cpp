@@ -66,7 +66,17 @@ void VU1Interpreter::resetScheduler()
     m_viWritePipeline = {};
     m_accWritePipeline = {};
     m_activeFlags = m_activeStores = m_activeVfWrites = m_activeViWrites = m_activeAccWrites = 0u;
-    m_xgkick = {};
+    // Reset the PATH1 transfer state but not its 64 KiB packet buffer: every
+    // byte is copied in before it is read or submitted, and clearing it here
+    // ran at every MSCAL (about 1 GB/s of memset in DQ8's open world).
+    m_xgkick.sourceAddress = 0;
+    m_xgkick.totalBytes = 0;
+    m_xgkick.copiedBytes = 0;
+    m_xgkick.currentTagEnd = 0;
+    m_xgkick.cycleCredit = 0;
+    m_xgkick.issueCycle = 0;
+    m_xgkick.active = false;
+    m_xgkick.currentTagEop = false;
     m_vfReady = {};
     m_viReady = {};
     m_accReady = {};
