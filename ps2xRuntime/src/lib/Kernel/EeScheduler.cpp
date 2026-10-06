@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
@@ -1849,7 +1850,7 @@ int EeScheduler::firstReadyPriority() const noexcept
         if (m_readyMask[word] != 0u)
         {
             return static_cast<int>(word * 64u +
-                                    static_cast<size_t>(__builtin_ctzll(m_readyMask[word])));
+                                    static_cast<size_t>(std::countr_zero(m_readyMask[word])));
         }
     }
     return -1;
