@@ -370,6 +370,16 @@ public:
     // operation is guaranteed to service a pending request.
     void publishSnapshotNow();
 
+    // The host clock that VBlanks, alarms and timer waits are paced against.
+    // Pausing stops it, so the guest sees no time pass and does not catch up
+    // afterwards; a speed runs it faster or slower than wall time, and zero
+    // or less leaves the guest unpaced. Guest cycles and event order do not
+    // change. Any thread.
+    void setHostPaused(bool paused);
+    void setHostSpeed(double speed);
+    [[nodiscard]] bool hostPaused() const;
+    [[nodiscard]] double hostSpeed() const;
+
 private:
     friend struct EeSchedulerPacingTestAccess;
     struct ScheduledEvent
@@ -418,6 +428,15 @@ private:
     void waitForEvent();
     void scheduleEvent(uint64_t deadlineCycle, std::chrono::steady_clock::time_point hostDeadline, EeEvent event);
     void updateNextDeadline();
+    // Host-pacing time: wall time through the pause and speed above.
+    [[nodiscard]] std::chrono::steady_clock::time_point pacingNow() const;
+    // Waits on m_eventCv until `predicate` holds or pacing time reaches
+    // `deadline`, following pause and speed changes made meanwhile. Returns
+    // the predicate's value, as ee_host_pacing::waitUntil does.
+    template <typename Predicate>
+    bool pacingWaitUntil(std::unique_lock<std::mutex> &lock, std::chrono::steady_clock::time_point deadline,
+                         Predicate predicate);
+    void setHostPacing(bool paused, double speed);
     [[nodiscard]] bool hasReadyAtOrAbovePriority(int priority) const;
     void renewTimeSlice();
     void copyMainContextToRuntime();
@@ -512,4 +531,16 @@ private:
     // Set by snapshot(), cleared by publishSnapshot(). The snapshot is debug
     // state, so it is only worth building when someone has asked for it.
     mutable std::atomic<bool> m_snapshotWanted{false};
+
+    // Pacing time is pacingBase + (wall - wallBase) * speed while running, and
+    // stays at pacingBase while paused. Both bases start at the clock's epoch,
+    // so until a change pacing time is wall time exactly.
+    mutable std::mutex m_pacingMutex;
+    std::chrono::steady_clock::time_point m_pacingWallBase{};
+    std::chrono::steady_clock::time_point m_pacingBase{};
+    double m_pacingSpeed = 1.0;
+    bool m_pacingPaused = false;
+    // Bumped under m_eventMutex on every change, so a waiting executor wakes
+    // and measures its deadline against the new clock.
+    std::atomic<uint64_t> m_pacingGeneration{0};
 };

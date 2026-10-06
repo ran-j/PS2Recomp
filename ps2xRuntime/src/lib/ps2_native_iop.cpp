@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
+#include <mutex>
 
 namespace ps2_native_iop
 {
@@ -14,9 +15,13 @@ namespace ps2_native_iop
     {
         // raylib's stream callback carries no user pointer.
         std::atomic<ps2x::iop::NativeIop *> g_source{nullptr};
+        // The stream starts on the guest's thread while a host menu may set
+        // volume or pause from its own.
+        std::mutex g_streamMutex;
         AudioStream g_stream{};
         bool g_streaming = false;
         float g_volume = 1.0f;
+        bool g_paused = false;
 
         void fill(void *buffer, unsigned int frames)
         {
@@ -41,6 +46,7 @@ namespace ps2_native_iop
 
     void setVolume(float volume)
     {
+        std::lock_guard lock(g_streamMutex);
         g_volume = volume;
 #if !defined(PLATFORM_VITA)
         if (g_streaming)
@@ -48,9 +54,26 @@ namespace ps2_native_iop
 #endif
     }
 
+    void setPaused(bool paused)
+    {
+        std::lock_guard lock(g_streamMutex);
+        if (g_paused == paused)
+            return;
+        g_paused = paused;
+#if !defined(PLATFORM_VITA)
+        if (!g_streaming)
+            return;
+        if (paused)
+            PauseAudioStream(g_stream);
+        else
+            ResumeAudioStream(g_stream);
+#endif
+    }
+
     void startAudio(PS2Runtime &runtime)
     {
 #if !defined(PLATFORM_VITA)
+        std::lock_guard lock(g_streamMutex);
         ps2x::iop::NativeIop *native = PS2IopTransport::native(&runtime);
         if (g_streaming || !native || !IsAudioDeviceReady())
             return;
@@ -66,6 +89,8 @@ namespace ps2_native_iop
         SetAudioStreamCallback(g_stream, &fill);
         SetAudioStreamVolume(g_stream, g_volume);
         PlayAudioStream(g_stream);
+        if (g_paused)
+            PauseAudioStream(g_stream);
         g_streaming = true;
 #else
         (void)runtime;
@@ -75,6 +100,7 @@ namespace ps2_native_iop
     void stopAudio()
     {
 #if !defined(PLATFORM_VITA)
+        std::lock_guard lock(g_streamMutex);
         if (!g_streaming)
             return;
         // Unloading takes the mixer lock, so no callback is running after it.
