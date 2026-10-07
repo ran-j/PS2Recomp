@@ -2,6 +2,7 @@
 
 #include "runtime/gs/gs_types.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -22,6 +23,13 @@ public:
     virtual void Reset() = 0;
 
     virtual void Submit(const GSPrimitiveBatch &batch) = 0;
+    // A run of primitives in order. Backends with per-call costs (a lock, a
+    // timer) override it to pay them once per run rather than per primitive.
+    virtual void SubmitMany(const GSPrimitiveBatch *const *batches, size_t count)
+    {
+        for (size_t i = 0; i < count; ++i)
+            Submit(*batches[i]);
+    }
 
     virtual void BeginTransfer(const GSTransferCommand &command) = 0;
     virtual void UploadImage(const uint8_t *data, uint32_t sizeBytes) = 0;
