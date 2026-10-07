@@ -1,6 +1,7 @@
 #include "spu2.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 
 namespace ps2x::iop::lle
