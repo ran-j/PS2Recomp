@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cfenv>
 #include <condition_variable>
@@ -70,6 +71,17 @@ struct GSThreadedBackend::Impl
     {
         backend->CancelPreparedPresentations();
         {
+            // Whatever is still staged runs before the worker stops.
+            std::lock_guard submitLock(submission);
+            try
+            {
+                publishStaged(false);
+            }
+            catch (...)
+            {
+            }
+        }
+        {
             std::lock_guard lock(mutex);
             stopping = true;
         }
@@ -82,29 +94,74 @@ struct GSThreadedBackend::Impl
         // A presenter may also submit. Holding this lock across a drain keeps
         // newer commands behind the synchronous operation, not merely its fence.
         std::lock_guard submitLock(submission);
+        // A failed worker takes nothing more: report it now, as an unbatched
+        // submit would, instead of at the next flush.
+        if (failed.load(std::memory_order_acquire))
+        {
+            std::lock_guard lock(mutex);
+            rethrow();
+        }
         const size_t size = command.bytes();
+        staged.push_back(std::move(command));
+        stagedBytes += size;
+        // Handed over in groups: per-command locking and wakeups cost more
+        // than the copies. An idle worker gets them at once.
+        if (flush || staged.size() >= kStageCommands ||
+            stagedBytes >= std::min(kStageBytes, capacity) || idle.load(std::memory_order_acquire))
+            publishStaged(flush);
+    }
+
+    // The worker's side of publishStaged, when it is idle: nothing outstanding,
+    // so no capacity to wait for. Caller holds `submission`, not `mutex`.
+    void takeStaged()
+    {
+        if (staged.empty())
+            return;
+        std::lock_guard lock(mutex);
+        pending.reserve(pending.size() + staged.size());
+        for (auto &command : staged)
+            pending.push_back(std::move(command));
+        staged.clear();
+        outstandingBytes += stagedBytes;
+        stagedBytes = 0u;
+    }
+
+    // Caller holds `submission`.
+    void publishStaged(bool flush)
+    {
+        if (staged.empty() && !flush)
+            return;
         std::unique_lock lock(mutex);
-        if (outstandingBytes != 0u && size > capacity - std::min(capacity, outstandingBytes))
+        if (outstandingBytes != 0u && stagedBytes > capacity - std::min(capacity, outstandingBytes))
         {
             urgent = true;
             work.notify_one();
             progress.wait(lock, [&] {
                 return error || outstandingBytes == 0u ||
-                       size <= capacity - std::min(capacity, outstandingBytes);
+                       stagedBytes <= capacity - std::min(capacity, outstandingBytes);
             });
         }
         rethrow();
-        pending.push_back(std::move(command));
-        outstandingBytes += size;
+        if (pending.empty())
+            pending.swap(staged);
+        else
+        {
+            pending.reserve(pending.size() + staged.size());
+            for (auto &command : staged)
+                pending.push_back(std::move(command));
+        }
+        staged.clear();
+        outstandingBytes += stagedBytes;
+        stagedBytes = 0u;
         urgent = urgent || flush;
-        if (pending.size() == 1u || pending.size() == 64u || urgent)
-            work.notify_one();
+        work.notify_one();
     }
 
     template <class F>
     auto observe(F &&fn)
     {
         std::lock_guard submitLock(submission);
+        publishStaged(true);
         {
             std::unique_lock lock(mutex);
             urgent = true;
@@ -178,7 +235,24 @@ struct GSThreadedBackend::Impl
             size_t bytes = 0u;
             {
                 std::unique_lock lock(mutex);
-                work.wait(lock, [&] { return stopping || !pending.empty(); });
+                while (!stopping && pending.empty())
+                {
+                    idle.store(true, std::memory_order_release);
+                    if (work.wait_for(lock, std::chrono::milliseconds(2),
+                                      [&] { return stopping || !pending.empty(); }))
+                        break;
+                    // A producer that saw this thread busy may have staged
+                    // commands just before it went idle. Only try the lock: a
+                    // drain holds it while it waits for this thread.
+                    lock.unlock();
+                    if (submission.try_lock())
+                    {
+                        takeStaged();
+                        submission.unlock();
+                    }
+                    lock.lock();
+                }
+                idle.store(false, std::memory_order_release);
                 if (pending.empty() && stopping)
                     return;
                 // Batch small primitives without stranding a short final packet.
@@ -212,6 +286,7 @@ struct GSThreadedBackend::Impl
             {
                 std::lock_guard lock(mutex);
                 error = std::current_exception();
+                failed.store(true, std::memory_order_release);
                 for (const auto &command : batch)
                     if (command.op == Op::Prepare)
                         std::get<Prepare>(command.data).result->fail(error);
@@ -240,6 +315,12 @@ struct GSThreadedBackend::Impl
     std::mutex submission, mutex;
     std::condition_variable work, progress;
     std::vector<Command> pending;
+    std::vector<Command> staged;  // guarded by `submission`
+    size_t stagedBytes = 0u;
+    std::atomic<bool> idle{false}; // the worker is waiting for commands
+    std::atomic<bool> failed{false}; // set with `error`, read without `mutex`
+    static constexpr size_t kStageCommands = 128u;
+    static constexpr size_t kStageBytes = 256u * 1024u;
     size_t outstandingBytes = 0u;
     bool urgent = false, stopping = false;
     std::exception_ptr error;
