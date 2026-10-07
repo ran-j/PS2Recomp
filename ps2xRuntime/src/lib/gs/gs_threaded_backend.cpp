@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cfenv>
 #include <condition_variable>
@@ -93,13 +94,18 @@ struct GSThreadedBackend::Impl
         // A presenter may also submit. Holding this lock across a drain keeps
         // newer commands behind the synchronous operation, not merely its fence.
         std::lock_guard submitLock(submission);
-        stagedBytes += command.bytes();
+        // A failed worker takes nothing more: report it now, as an unbatched
+        // submit would, instead of at the next flush.
+        if (failed.load(std::memory_order_acquire))
+        {
+            std::lock_guard lock(mutex);
+            rethrow();
+        }
+        const size_t size = command.bytes();
         staged.push_back(std::move(command));
-        // Commands are staged under the submission lock and handed to the
-        // worker in groups: DQ8 submits hundreds of thousands of single
-        // primitives per second, and taking the queue lock and waking the
-        // worker for each one cost more than the copies themselves. An idle
-        // worker gets them at once, so batching never leaves it waiting.
+        stagedBytes += size;
+        // Handed over in groups: per-command locking and wakeups cost more
+        // than the copies. An idle worker gets them at once.
         if (flush || staged.size() >= kStageCommands ||
             stagedBytes >= std::min(kStageBytes, capacity) || idle.load(std::memory_order_acquire))
             publishStaged(flush);
@@ -112,6 +118,7 @@ struct GSThreadedBackend::Impl
         if (staged.empty())
             return;
         std::lock_guard lock(mutex);
+        pending.reserve(pending.size() + staged.size());
         for (auto &command : staged)
             pending.push_back(std::move(command));
         staged.clear();
@@ -138,8 +145,11 @@ struct GSThreadedBackend::Impl
         if (pending.empty())
             pending.swap(staged);
         else
+        {
+            pending.reserve(pending.size() + staged.size());
             for (auto &command : staged)
                 pending.push_back(std::move(command));
+        }
         staged.clear();
         outstandingBytes += stagedBytes;
         stagedBytes = 0u;
@@ -276,6 +286,7 @@ struct GSThreadedBackend::Impl
             {
                 std::lock_guard lock(mutex);
                 error = std::current_exception();
+                failed.store(true, std::memory_order_release);
                 for (const auto &command : batch)
                     if (command.op == Op::Prepare)
                         std::get<Prepare>(command.data).result->fail(error);
@@ -307,6 +318,7 @@ struct GSThreadedBackend::Impl
     std::vector<Command> staged;  // guarded by `submission`
     size_t stagedBytes = 0u;
     std::atomic<bool> idle{false}; // the worker is waiting for commands
+    std::atomic<bool> failed{false}; // set with `error`, read without `mutex`
     static constexpr size_t kStageCommands = 128u;
     static constexpr size_t kStageBytes = 256u * 1024u;
     size_t outstandingBytes = 0u;
