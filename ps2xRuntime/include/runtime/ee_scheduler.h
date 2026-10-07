@@ -373,8 +373,8 @@ public:
     // The host clock that VBlanks, alarms and timer waits are paced against.
     // Pausing stops it, so the guest sees no time pass and does not catch up
     // afterwards; a speed runs it faster or slower than wall time, and zero
-    // or less leaves the guest unpaced. Guest cycles and event order do not
-    // change. Any thread.
+    // or less leaves the guest unpaced (hostSpeed() then reads 0). Guest
+    // cycles and event order do not change. Any thread.
     void setHostPaused(bool paused);
     void setHostSpeed(double speed);
     [[nodiscard]] bool hostPaused() const;
@@ -430,13 +430,18 @@ private:
     void updateNextDeadline();
     // Host-pacing time: wall time through the pause and speed above.
     [[nodiscard]] std::chrono::steady_clock::time_point pacingNow() const;
+    // The same at `wall`; the caller holds m_pacingMutex.
+    [[nodiscard]] std::chrono::steady_clock::time_point pacingNowLocked(std::chrono::steady_clock::time_point wall) const;
+    // Restarts both bases at the current time; the caller holds m_pacingMutex.
+    void rebasePacingLocked();
+    void notifyPacingChanged();
     // Waits on m_eventCv until `predicate` holds or pacing time reaches
-    // `deadline`, following pause and speed changes made meanwhile. Returns
-    // the predicate's value, as ee_host_pacing::waitUntil does.
+    // `deadline`, following pause and speed changes made meanwhile. Unpaced,
+    // it does not wait: pacing time jumps to the deadline. Returns the
+    // predicate's value, as ee_host_pacing::waitUntil does.
     template <typename Predicate>
     bool pacingWaitUntil(std::unique_lock<std::mutex> &lock, std::chrono::steady_clock::time_point deadline,
                          Predicate predicate);
-    void setHostPacing(bool paused, double speed);
     [[nodiscard]] bool hasReadyAtOrAbovePriority(int priority) const;
     void renewTimeSlice();
     void copyMainContextToRuntime();
@@ -534,7 +539,8 @@ private:
 
     // Pacing time is pacingBase + (wall - wallBase) * speed while running, and
     // stays at pacingBase while paused. Both bases start at the clock's epoch,
-    // so until a change pacing time is wall time exactly.
+    // so until a change pacing time is wall time exactly. A speed of 0 is
+    // unpaced: wall rate, plus a jump to each deadline instead of a wait.
     mutable std::mutex m_pacingMutex;
     std::chrono::steady_clock::time_point m_pacingWallBase{};
     std::chrono::steady_clock::time_point m_pacingBase{};

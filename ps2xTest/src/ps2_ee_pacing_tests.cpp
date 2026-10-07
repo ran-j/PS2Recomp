@@ -6,6 +6,7 @@
 #include <array>
 #include <chrono>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <tuple>
 #include <vector>
@@ -279,14 +280,29 @@ int main() {
         tc.Run("a speed of zero leaves the guest unpaced", [](TestCase &t) {
             Fixture fixture;
             t.IsTrue(fixture.initialize(), "fixture initializes");
+            fixture.scheduler.setHostSpeed(std::numeric_limits<double>::infinity());
+            t.IsTrue(fixture.scheduler.hostSpeed() == 0.0, "a non-finite speed is unpaced too");
             fixture.scheduler.setHostSpeed(0.0);
+            t.IsTrue(fixture.scheduler.hostSpeed() == 0.0, "unpaced reads back as zero");
             const auto start = fixture.clock.time;
             for (uint64_t field = 1; field <= 120; ++field) {
                 EeSchedulerPacingTestAccess::cycle(fixture.scheduler, field * periodCycles);
                 EeSchedulerPacingTestAccess::pump(fixture.scheduler);
                 t.Equals(fixture.scheduler.currentVSyncTick(), field, "every field still starts");
             }
-            t.IsTrue(fixture.clock.time - start < 5ms, "two seconds of fields take almost no wall time");
+            t.IsTrue(fixture.clock.waits.empty() && fixture.clock.time == start,
+                     "two seconds of fields make no host wait at all");
+            t.IsTrue(EeSchedulerPacingTestAccess::now(fixture.scheduler) >= start + 120 * period,
+                     "pacing time jumps to each deadline instead");
+            fixture.scheduler.setHostSpeed(1.0);
+            const auto paced = fixture.clock.time;
+            for (uint64_t field = 121; field <= 130; ++field) {
+                EeSchedulerPacingTestAccess::cycle(fixture.scheduler, field * periodCycles);
+                EeSchedulerPacingTestAccess::pump(fixture.scheduler);
+            }
+            const auto real = fixture.clock.time - paced;
+            t.IsTrue(real > 9 * period && real < 10 * period + 1ms,
+                     "back at real time, with no debt from the unpaced run");
         });
     });
     return MiniTest::Run();
