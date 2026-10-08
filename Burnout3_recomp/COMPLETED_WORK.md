@@ -27,6 +27,18 @@ All paths below are relative to the PS2Recomp repo root. Run every command from 
 | `tools/` | yes | Ghidra scripts and the repair/verify scripts |
 | `reports/`, `logs/`, `backups/` | no | Analysis/validation reports, console logs, pre-repair exports |
 | `output/`, `output_bounded/` | no | Generated C++ |
+| `disc_image/` | no | Read-only mount point for your own Burnout 3 ISO (empty when detached) |
+| `disc/` | no | Runtime launch folder: relative symlinks into `disc_image/`, an APFS clone of `SLUS_210.50`, and a writable `mc0/` for saves |
+
+Mount before running the game, and detach afterwards. The runtime maps `cdrom0:` to the folder containing the launched ELF.
+
+```bash
+hdiutil attach -readonly -nobrowse -mountpoint "$PWD/Burnout3_recomp/disc_image" "<path to your Burnout 3 ISO>"
+```
+
+```bash
+hdiutil detach Burnout3_recomp/disc_image
+```
 
 ## Completed steps
 
@@ -98,7 +110,33 @@ sed -n '/PS2Recomp report/,/Events:/p' Burnout3_recomp/logs/08_ps2_recomp_instru
 ## Not done yet
 
 - Triage the 5,636 control-flow warnings by resolving jump tables in Ghidra.
-- Integrate `output_bounded/` into `ps2xRuntime`: `.cpp` files into `src/runner`
-  (mark the tracked placeholder `register_functions.cpp` with `git update-index --skip-worktree`)
-  and the two headers into `include/`.
 - Build, link, then handle runtime work (syscalls, GS/VU1, IOP/IRX), using your own disc for assets.
+
+## Runtime integration (done)
+
+`output_bounded/` is integrated into `ps2xRuntime`:
+- **Code:** all 71,113 `.cpp` files, cloned with `cp -c` (no extra disk space), are in
+  `ps2xRuntime/src/runner/`.
+- **Headers:** `ps2_recompiled_functions.h` and `ps2_recompiled_stubs.h` are in
+  `ps2xRuntime/include/`.
+- **Git:** upstream's `.gitignore` already ignores both locations. The tracked placeholder
+  `ps2xRuntime/src/runner/register_functions.cpp` is marked `--skip-worktree`, so the
+  generated version does not show as modified.
+
+To undo (restores the upstream placeholder):
+
+```bash
+find ps2xRuntime/src/runner -name '*.cpp' ! -name register_functions.cpp -delete
+```
+
+```bash
+rm ps2xRuntime/include/ps2_recompiled_functions.h ps2xRuntime/include/ps2_recompiled_stubs.h
+```
+
+```bash
+git update-index --no-skip-worktree ps2xRuntime/src/runner/register_functions.cpp
+```
+
+```bash
+git checkout -- ps2xRuntime/src/runner/register_functions.cpp
+```

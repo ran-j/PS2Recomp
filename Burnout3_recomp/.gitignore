@@ -13,7 +13,7 @@
 *.cso
 
 # Extracted disc contents and assets
-/disc/
+/disc*/
 /assets/
 /game_data/
 
