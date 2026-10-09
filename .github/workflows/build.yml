@@ -21,6 +21,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ninja-build libgl-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev pkg-config libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev
 
+      - name: Tool tests
+        run: python3 -B -m unittest discover -s tools/tests
+
+      - name: VU1 program fixtures
+        run: python3 -B ps2xTest/data/vu_programs.py "$RUNNER_TEMP/vu-programs"
+
       - name: Configure
         run: |
           if [ "${{ matrix.compiler }}" = "gcc" ]; then
@@ -30,12 +36,16 @@ jobs:
             export CC=clang
             export CXX=clang++
           fi
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-msse4.1 -DCMAKE_CXX_FLAGS=-msse4.1
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-msse4.1 -DCMAKE_CXX_FLAGS=-msse4.1 \
+            -DPS2X_VU_PROGRAM_PROFILES="$RUNNER_TEMP/vu-programs"
 
       - name: Build
         run: cmake --build build --config Release
 
       - name: Tests
+        env:
+          PS2_VU_PROGRAM_FIXTURES: ${{ runner.temp }}/vu-programs
+          PS2_VU_REQUIRE_PROGRAMS: 1
         run: ./build/ps2xTest/ps2x_tests
 
   windows-msvc:
