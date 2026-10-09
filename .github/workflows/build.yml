@@ -48,6 +48,17 @@ jobs:
           PS2_VU_REQUIRE_PROGRAMS: 1
         run: ./build/ps2xTest/ps2x_tests
 
+      - name: Rebuild VU1 programs in 128-pair chunks
+        run: |
+          cmake -S . -B build -DPS2X_VU_PROGRAM_MAX_PAIRS=128
+          cmake --build build --config Release --target ps2x_tests
+
+      - name: Tests with 128-pair chunks
+        env:
+          PS2_VU_PROGRAM_FIXTURES: ${{ runner.temp }}/vu-programs
+          PS2_VU_REQUIRE_PROGRAMS: 1
+        run: ./build/ps2xTest/ps2x_tests
+
   windows-msvc:
     strategy:
       fail-fast: false
