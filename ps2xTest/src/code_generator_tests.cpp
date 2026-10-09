@@ -1020,6 +1020,40 @@ void register_code_generator_tests()
             t.IsTrue(ctc1Code.find("ignored") == std::string::npos, "CTC1 FCR31 should not be ignored");
         });
 
+        tc.Run("SQRT.S/RSQRT.S use the ft operand", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+
+            // sqrt.s $f2, $f2 (0x46020084): fs field is 0, the source is ft
+            Instruction sqrtS{};
+            sqrtS.raw = 0x46020084;
+            sqrtS.opcode = OPCODE_COP1;
+            sqrtS.rs = COP1_S;
+            sqrtS.rt = 2;
+            sqrtS.rd = 0;
+            sqrtS.sa = 2;
+            sqrtS.function = COP1_S_SQRT;
+
+            std::string sqrtCode = gen.translateInstruction(sqrtS);
+            printGeneratedCode("SQRT.S/RSQRT.S use the ft operand (SQRT.S)", sqrtCode);
+            t.IsTrue(sqrtCode.find("ctx->f[2] = FPU_SQRT_S(fabsf(ctx->f[2]))") != std::string::npos,
+                     "SQRT.S should take the square root of ft");
+            t.IsTrue(sqrtCode.find("ctx->f[0]") == std::string::npos, "SQRT.S must not read fs");
+
+            // rsqrt.s $f1, $f3, $f4: fd = fs / sqrt(|ft|)
+            Instruction rsqrtS{};
+            rsqrtS.opcode = OPCODE_COP1;
+            rsqrtS.rs = COP1_S;
+            rsqrtS.rt = 4;
+            rsqrtS.rd = 3;
+            rsqrtS.sa = 1;
+            rsqrtS.function = COP1_S_RSQRT;
+
+            std::string rsqrtCode = gen.translateInstruction(rsqrtS);
+            printGeneratedCode("SQRT.S/RSQRT.S use the ft operand (RSQRT.S)", rsqrtCode);
+            t.IsTrue(rsqrtCode.find("ctx->f[1] = ctx->f[3] / sqrtf(fabsf(ctx->f[4]))") != std::string::npos,
+                     "RSQRT.S should compute fs / sqrt(|ft|)");
+        });
+
         tc.Run("VU CFC2/CTC2 access VI registers directly", [](TestCase& t)
             {
                 CodeGenerator gen({}, {});
