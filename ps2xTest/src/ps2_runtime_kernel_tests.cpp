@@ -1249,12 +1249,12 @@ void register_ps2_runtime_kernel_tests()
             setRegU32(env.ctx, 6, kMainStackSize);
             t.IsTrue(callSyscall(0x3Cu, env.rdram.data(), &env.ctx, &env.runtime),
                      "SetupThread syscall should dispatch");
-            t.Equals(::getRegU32(&env.ctx, 2), kExpectedStack,
-                     "automatic main stack should start below the reserved top-of-RDRAM area");
+            t.Equals(::getRegU32(&env.ctx, 2), PS2_RAM_SIZE,
+                     "automatic main stack should grow down from the top of RDRAM through the area it reserves");
 
             // ReferThreadStatus can be called after many nested frames have moved $sp.
             // It must report the initial stack recorded by SetupThread, not this live snapshot.
-            constexpr uint32_t kTransientSp = kExpectedStack - 0x80u;
+            constexpr uint32_t kTransientSp = PS2_RAM_SIZE - 0x80u;
             setRegU32(env.ctx, 29, kTransientSp);
             setRegU32(env.ctx, 4, 0u);
             setRegU32(env.ctx, 5, K_STATUS_ADDR);
@@ -1272,6 +1272,32 @@ void register_ps2_runtime_kernel_tests()
                      "main thread status must preserve SetupThread's global pointer");
             t.IsTrue(status.stack != kInitialLoaderSp && status.stack != kTransientSp,
                      "main thread status must never expose a live stack-pointer snapshot");
+        });
+
+        tc.Run("SetupThread's automatic stack shares no memory with invocation stacks", [](TestCase &t)
+        {
+            // DQ8's crt0 asks for 0xC0000. An area down to the guest heap limit
+            // leaves the pool no room under it.
+            for (const uint32_t mainStackSize : {0x000C0000u, 0x00100000u})
+            {
+                TestEnv env;
+                env.ctx.pc = 0x00100000u;
+                setRegU32(env.ctx, 29, PS2_RAM_SIZE - 0x10u);
+                setRegU32(env.ctx, 4, 0u);
+                setRegU32(env.ctx, 5, 0xFFFFFFFFu);
+                setRegU32(env.ctx, 6, mainStackSize);
+                t.IsTrue(callSyscall(0x3Cu, env.rdram.data(), &env.ctx, &env.runtime),
+                         "SetupThread syscall should dispatch");
+                const uint32_t mainSp = ::getRegU32(&env.ctx, 2);
+
+                // VBlank handlers and movie callbacks taken now run on stacks carved
+                // downwards from here, and never under the guest heap limit.
+                const uint32_t invocationTop = env.runtime.eeScheduler().invocationStackTop();
+                t.IsTrue(invocationTop != 0u, "an invocation stack should be available");
+                t.IsTrue(invocationTop <= mainSp - mainStackSize ||
+                             mainSp <= env.runtime.guestHeapHardLimit(),
+                         "invocation stacks must stay out of everything the main thread's stack can reach");
+            }
         });
 
         tc.Run("OSD config2 syscalls round-trip extended config", [](TestCase &t)
