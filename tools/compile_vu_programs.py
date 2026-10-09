@@ -314,32 +314,44 @@ def successors(terminator):
 
 def loops(routine):
     """Each block's strongly connected component, as a frozenset of block starts."""
+    # Tarjan's algorithm without recursion: a routine can chain over a
+    # thousand blocks, deeper than Python's recursion limit.
     index, low, stack, on_stack, component = {}, {}, [], set(), {}
+    path = []
 
-    def visit(start):
+    def enter(start):
         index[start] = low[start] = len(index)
         stack.append(start)
         on_stack.add(start)
-        for target in successors(routine.blocks[start][1]):
-            if target not in index:
-                visit(target)
-                low[start] = min(low[start], low[target])
-            elif target in on_stack:
-                low[start] = min(low[start], index[target])
-        if low[start] == index[start]:
-            members = []
-            while True:
-                member = stack.pop()
-                on_stack.discard(member)
-                members.append(member)
-                if member == start:
-                    break
-            for member in members:
-                component[member] = frozenset(members)
+        path.append((start, iter(successors(routine.blocks[start][1]))))
 
-    for start in sorted(routine.blocks):
-        if start not in index:
-            visit(start)
+    for root in sorted(routine.blocks):
+        if root in index:
+            continue
+        enter(root)
+        while path:
+            start, targets = path[-1]
+            target = next(targets, None)
+            if target is not None:
+                if target not in index:
+                    enter(target)
+                elif target in on_stack:
+                    low[start] = min(low[start], index[target])
+                continue
+            path.pop()
+            if path:
+                parent = path[-1][0]
+                low[parent] = min(low[parent], low[start])
+            if low[start] == index[start]:
+                members = []
+                while True:
+                    member = stack.pop()
+                    on_stack.discard(member)
+                    members.append(member)
+                    if member == start:
+                        break
+                for member in members:
+                    component[member] = frozenset(members)
     return component
 
 

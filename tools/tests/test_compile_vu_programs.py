@@ -190,6 +190,21 @@ class CompileVuProgramsTests(unittest.TestCase):
                 result, _ = compile_profile(root, options=("--max-routine-pairs", limit))
                 self.assertNotEqual(result.returncode, 0)
 
+    def test_a_routine_of_a_thousand_chained_blocks_compiles(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            nop = (vu.LOWER_NOP, vu.UPPER_NOP)
+            # Each IBNE continues at the next block either way: all of code
+            # memory as one chain of 1,024 blocks.
+            pairs = [(vu.branch(0x29, offset=1), vu.UPPER_NOP), nop] * 1023
+            pairs += [(vu.LOWER_NOP, vu.UPPER_NOP | vu.E_BIT), nop]
+            profile(root, pairs, [0])
+            result, output = compile_profile(root)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            text, blocks = routines(output)
+            self.assertEqual(len(blocks), 1024)
+            self.assertEqual(text.count("static PS2_VU_CHUNK"), 8)
+
 
 if __name__ == "__main__":
     unittest.main()
