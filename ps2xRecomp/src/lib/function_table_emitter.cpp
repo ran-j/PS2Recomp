@@ -105,20 +105,6 @@ namespace ps2recomp
             addEntry(address, name);
         }
 
-        for (const auto &[ownerStart, targets] : cg.m_resumeEntryTargetsByOwner)
-        {
-            const std::string ownerName = cg.getFunctionName(ownerStart);
-            if (ownerName.empty())
-            {
-                continue;
-            }
-
-            for (uint32_t target : targets)
-            {
-                addEntry(target, ownerName);
-            }
-        }
-
         for (const auto &[address, name] : stubFunctions)
         {
             addEntry(address, name);
@@ -130,6 +116,51 @@ namespace ps2recomp
         for (const auto &[address, name] : libraryFunctions)
         {
             addEntry(address, name);
+        }
+
+        // Explicit function starts, including configured runtime handlers,
+        // own their addresses even when another wrapper resumes there.
+        std::unordered_set<uint32_t> entryWrapperStarts;
+        for (const auto &function : functions)
+        {
+            if (function.name.rfind("entry_", 0) == 0)
+            {
+                entryWrapperStarts.insert(function.start);
+            }
+        }
+        std::vector<uint32_t> resumeOwners;
+        resumeOwners.reserve(cg.m_resumeEntryTargetsByOwner.size());
+        for (const auto &[ownerStart, targets] : cg.m_resumeEntryTargetsByOwner)
+        {
+            (void)targets;
+            resumeOwners.push_back(ownerStart);
+        }
+        std::sort(resumeOwners.begin(), resumeOwners.end(), [&](uint32_t left, uint32_t right)
+                  {
+                      const bool leftEntry = entryWrapperStarts.contains(left);
+                      const bool rightEntry = entryWrapperStarts.contains(right);
+                      if (leftEntry != rightEntry)
+                      {
+                          return !leftEntry;
+                      }
+                      // Prefer the most specific owner, as containing-owner
+                      // discovery does. Synthetic entries only fill gaps left
+                      // by normal owners, regardless of unordered-map layout.
+                      return left > right;
+                  });
+        for (uint32_t ownerStart : resumeOwners)
+        {
+            const auto &targets = cg.m_resumeEntryTargetsByOwner.at(ownerStart);
+            const std::string ownerName = cg.getFunctionName(ownerStart);
+            if (ownerName.empty())
+            {
+                continue;
+            }
+
+            for (uint32_t target : targets)
+            {
+                addEntry(target, ownerName);
+            }
         }
 
         std::sort(entries.begin(), entries.end(), [](const auto &a, const auto &b)

@@ -12,6 +12,10 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <map>
+#include <regex>
+#include <sstream>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -326,6 +330,62 @@ static bool writeMinimalMipsElfWithStandaloneEntryBlock(const std::filesystem::p
     textSegment->set_align(0x1000);
     textSegment->add_section_index(text->get_index(), text->get_addr_align());
 
+    return writer.save(elfPath.string());
+}
+
+static bool writeMinimalMipsElfWithOverlappingResumeOwners(const std::filesystem::path &elfPath)
+{
+    ELFIO::elfio writer;
+    writer.create(ELFIO::ELFCLASS32, ELFIO::ELFDATA2LSB);
+    writer.set_type(ELFIO::ET_EXEC);
+    writer.set_machine(ELFIO::EM_MIPS);
+    writer.set_entry(0x00100000u);
+    auto *text = writer.sections.add(".text");
+    text->set_type(ELFIO::SHT_PROGBITS);
+    text->set_flags(ELFIO::SHF_ALLOC | ELFIO::SHF_EXECINSTR);
+    text->set_addr_align(4u);
+    text->set_address(0x00100000u);
+    std::array<uint32_t, 48> words{};
+    // The normal owner can resolve this configured jump table. Its overlapping
+    // entry_100014 slice cannot see the table setup and needs fallback entries.
+    words[0] = 0x3c080020u; // lui t0,0x20
+    words[1] = 0x010a4821u; // addu t1,t0,t2
+    words[2] = 0x8d390000u; // lw t9,0(t1)
+    words[3] = 0x0c040018u; // jal 100060, resume 100014
+    words[5] = 0x0320f809u; // jalr t9, resume 10001c
+    words[7] = 0x0000000cu; // syscall, resume 100020
+    words[9] = 0x03e00008u; // jr ra
+    words[24] = 0x03e00008u; // callee at 100060
+    words[28] = 0x03e00008u; // other at 100070
+    words[32] = 0x0804001du; // standalone entry: j 100074, an unrelated owner's interior
+    words[40] = 0x0c040018u; // standalone entry: jal 100060, resume 1000a8
+    words[42] = 0x0300f809u; // jalr t8, resume 1000b0
+    words[44] = 0x0000000cu; // syscall, resume 1000b4
+    words[45] = 0x03e00008u; // jr ra
+    text->set_data(reinterpret_cast<const char *>(words.data()), sizeof(words));
+    auto *strings = writer.sections.add(".strtab");
+    strings->set_type(ELFIO::SHT_STRTAB);
+    strings->set_addr_align(1u);
+    auto *symbols = writer.sections.add(".symtab");
+    symbols->set_type(ELFIO::SHT_SYMTAB);
+    symbols->set_info(1u);
+    symbols->set_link(strings->get_index());
+    symbols->set_addr_align(4u);
+    symbols->set_entry_size(writer.get_default_entry_size(ELFIO::SHT_SYMTAB));
+    ELFIO::symbol_section_accessor accessor(writer, symbols);
+    ELFIO::string_section_accessor names(strings);
+    accessor.add_symbol(names, "", 0, 0, ELFIO::STB_LOCAL, ELFIO::STT_NOTYPE, 0, ELFIO::SHN_UNDEF);
+    for (const auto &[name, start, size] : std::vector<std::tuple<std::string, uint32_t, uint32_t>>{
+             {"normal_owner", 0x100000u, 0x40u}, {"entry_00100014", 0x100014u, 0xcu},
+             {"callee", 0x100060u, 8u},
+             {"other", 0x100070u, 8u}, {"entry_00100080", 0x100080u, 8u},
+             {"entry_001000a0", 0x1000a0u, 0x1cu}})
+        accessor.add_symbol(names, name.c_str(), start, size, ELFIO::STB_GLOBAL, ELFIO::STT_FUNC, 0, text->get_index());
+    auto *segment = writer.segments.add();
+    segment->set_type(ELFIO::PT_LOAD);
+    segment->set_flags(ELFIO::PF_R | ELFIO::PF_X);
+    segment->set_align(0x1000u);
+    segment->add_section_index(text->get_index(), text->get_addr_align());
     return writer.save(elfPath.string());
 }
 
@@ -1506,6 +1566,91 @@ void register_ps2_recompiler_tests()
                          "JAL return address inside a standalone entry_ block should be registered as a resume point");
             }
 
+            std::error_code removeError;
+            std::filesystem::remove_all(tempRoot, removeError);
+        });
+
+        tc.Run("all entry wrappers retain their own resume targets without promoting external entries", [](TestCase &t) {
+            const std::string uniqueSuffix =
+                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+            const auto tempRoot = std::filesystem::temp_directory_path() /
+                ("ps2recomp-resume-owners-" + uniqueSuffix);
+            for (unsigned mode = 0u; mode < 3u; ++mode)
+            {
+                const auto root = tempRoot / std::to_string(mode);
+                const auto elfPath = root / "resume-owners.elf";
+                const auto configPath = root / "resume-owners.toml";
+                const auto outputPath = root / "output";
+                std::filesystem::create_directories(root);
+                const bool written = writeMinimalMipsElfWithOverlappingResumeOwners(elfPath) &&
+                    writeRecompilerTestConfig(configPath, elfPath, outputPath, {});
+                t.IsTrue(written, "synthetic overlapping-owner inputs should be generated");
+                if (!written)
+                    continue;
+                {
+                    std::ofstream config(configPath, std::ios::app);
+                    config << "single_file_output = " << (mode == 2u ? "true" : "false") << '\n'
+                           << "output_worker_threads = " << (mode == 1u ? 2u : 1u) << '\n'
+                           << "[jump_tables]\n[[jump_tables.table]]\naddress = \"0x200000\"\n"
+                           << "entries = [{ index = 0, target = \"0x100024\" }]\n";
+                }
+                PS2Recompiler recompiler(configPath.string());
+                const bool initialized = recompiler.initialize();
+                t.IsTrue(initialized, "synthetic overlapping-owner config should initialize");
+                if (!initialized)
+                    continue;
+                const bool recompiled = recompiler.recompile();
+                t.IsTrue(recompiled, "actual discovery should decode overlapping entry wrappers");
+                if (!recompiled)
+                    continue;
+                recompiler.generateOutput();
+                auto read = [](const std::filesystem::path &path) {
+                    std::ifstream file(path);
+                    return std::string(std::istreambuf_iterator<char>(file), {});
+                };
+                const std::string registration = read(outputPath / "register_functions.cpp");
+                std::map<uint32_t, std::string> bindings;
+                const std::regex assignment(R"(g_ps2RecompiledFunctionTable\[[0-9]+\] = ([a-zA-Z0-9_]+); // 0x([0-9a-f]+))");
+                for (std::sregex_iterator i(registration.begin(), registration.end(), assignment), end; i != end; ++i)
+                {
+                    const uint32_t address = static_cast<uint32_t>(std::stoul((*i)[2].str(), nullptr, 16));
+                    t.IsTrue(bindings.emplace(address, (*i)[1].str()).second,
+                             "each generated dispatch address must have exactly one assignment");
+                }
+                std::string generated;
+                for (const auto &file : std::filesystem::directory_iterator(outputPath))
+                    if (file.path().extension() == ".cpp" && file.path().filename() != "register_functions.cpp")
+                        generated += read(file.path());
+                const auto nested = bindings.find(0x100014u);
+                t.IsTrue(nested != bindings.end() && nested->second.rfind("entry_", 0u) == 0u,
+                         "the actual pipeline must retain the nested entry wrapper");
+                if (nested != bindings.end())
+                {
+                    const auto fallback = bindings.find(0x100018u);
+                    t.IsTrue(fallback != bindings.end() && fallback->second == nested->second,
+                             "nested indirect fallback must register to its own decoded wrapper");
+                    t.IsTrue(generated.find("case 0x100018u: goto label_100018;") != std::string::npos,
+                             "nested fallback registration must have a matching emitted resume switch");
+                }
+                const auto standalone = bindings.find(0x1000a0u);
+                t.IsTrue(standalone != bindings.end(), "standalone entry support from #271 must remain intact");
+                for (uint32_t address : {0x1000a8u, 0x1000b0u, 0x1000b4u})
+                {
+                    const auto resume = bindings.find(address);
+                    t.IsTrue(standalone != bindings.end() && resume != bindings.end() &&
+                                 resume->second == standalone->second,
+                             "standalone JAL, JALR and syscall continuations must register to their owner");
+                    std::ostringstream resumeCase;
+                    resumeCase << "case 0x" << std::hex << address << "u: goto label_"
+                               << address << ';';
+                    t.IsTrue(generated.find(resumeCase.str()) != std::string::npos,
+                             "each registered standalone continuation must match its emitted resume switch");
+                }
+                t.IsFalse(bindings.contains(0x100074u),
+                          "entry-wrapper jumps must not promote external labels into unrelated normal owners");
+                t.IsFalse(bindings.contains(0x1000bcu),
+                          "entry wrappers must not register a continuation outside their decoded range");
+            }
             std::error_code removeError;
             std::filesystem::remove_all(tempRoot, removeError);
         });
