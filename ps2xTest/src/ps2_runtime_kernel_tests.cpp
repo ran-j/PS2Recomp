@@ -12,9 +12,12 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -175,6 +178,49 @@ namespace
     bool callSyscall(uint32_t syscallNumber, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         return dispatchNumericSyscall(syscallNumber, rdram, ctx, runtime);
+    }
+
+    // A MIPS executable whose one loadable segment, all .bss, spans [base, end).
+    bool writeBssOnlyElf(const std::filesystem::path &path, uint32_t base, uint32_t end)
+    {
+        std::vector<uint8_t> bytes;
+        const auto put16 = [&bytes](uint16_t value)
+        {
+            bytes.push_back(static_cast<uint8_t>(value));
+            bytes.push_back(static_cast<uint8_t>(value >> 8u));
+        };
+        const auto put32 = [&put16](uint32_t value)
+        {
+            put16(static_cast<uint16_t>(value));
+            put16(static_cast<uint16_t>(value >> 16u));
+        };
+        put32(0x464C457Fu); // "\x7FELF"
+        put32(0x00010101u); // 32-bit, little-endian, version 1
+        bytes.resize(16u, 0u);
+        put16(2u);          // ET_EXEC
+        put16(8u);          // EM_MIPS
+        put32(1u);          // version
+        put32(base);        // entry
+        put32(52u);         // program headers right after this header
+        put32(0u);          // no section headers
+        put32(0u);          // flags
+        put16(52u);         // header size
+        put16(32u);         // program header size
+        put16(1u);          // one program header
+        put16(0u);
+        put16(0u);
+        put16(0u);
+        put32(1u);          // PT_LOAD
+        put32(0u);          // offset
+        put32(base);        // vaddr
+        put32(base);        // paddr
+        put32(0u);          // filesz
+        put32(end - base);  // memsz
+        put32(6u);          // read, write
+        put32(0x1000u);     // align
+        std::ofstream file(path, std::ios::binary | std::ios::trunc);
+        file.write(reinterpret_cast<const char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        return static_cast<bool>(file);
     }
 
     void overrideReturnHandler(uint8_t *, R5900Context *ctx, PS2Runtime *)
@@ -1249,12 +1295,12 @@ void register_ps2_runtime_kernel_tests()
             setRegU32(env.ctx, 6, kMainStackSize);
             t.IsTrue(callSyscall(0x3Cu, env.rdram.data(), &env.ctx, &env.runtime),
                      "SetupThread syscall should dispatch");
-            t.Equals(::getRegU32(&env.ctx, 2), kExpectedStack,
-                     "automatic main stack should start below the reserved top-of-RDRAM area");
+            t.Equals(::getRegU32(&env.ctx, 2), PS2_RAM_SIZE,
+                     "automatic main stack should grow down from the top of RDRAM through the area it reserves");
 
             // ReferThreadStatus can be called after many nested frames have moved $sp.
             // It must report the initial stack recorded by SetupThread, not this live snapshot.
-            constexpr uint32_t kTransientSp = kExpectedStack - 0x80u;
+            constexpr uint32_t kTransientSp = PS2_RAM_SIZE - 0x80u;
             setRegU32(env.ctx, 29, kTransientSp);
             setRegU32(env.ctx, 4, 0u);
             setRegU32(env.ctx, 5, K_STATUS_ADDR);
@@ -1272,6 +1318,57 @@ void register_ps2_runtime_kernel_tests()
                      "main thread status must preserve SetupThread's global pointer");
             t.IsTrue(status.stack != kInitialLoaderSp && status.stack != kTransientSp,
                      "main thread status must never expose a live stack-pointer snapshot");
+        });
+
+        tc.Run("SetupThread's automatic stack shares no memory with invocation stacks", [](TestCase &t)
+        {
+            struct Layout
+            {
+                const char *name;
+                uint32_t stackSize;
+                uint32_t imageEnd; // 0 when no ELF is loaded
+            };
+            // DQ8's crt0 asks for 0xC0000. An area down to the guest heap limit
+            // leaves the pool no room under it, and so does an image that fills
+            // RAM up to where the kernel puts the area, 4 KB under the end of RAM.
+            constexpr uint32_t kSmallStack = 0x00010000u;
+            const Layout layouts[] = {
+                {"DQ8's stack", 0x000C0000u, 0u},
+                {"a stack down to the guest heap limit", 0x00100000u, 0u},
+                {"an image up to the stack", kSmallStack, PS2_RAM_SIZE - 0x1000u - kSmallStack},
+            };
+            for (const Layout &layout : layouts)
+            {
+                TestEnv env;
+                if (layout.imageEnd != 0u)
+                {
+                    const PS2Runtime::IoPaths ioPaths = PS2Runtime::getIoPaths();
+                    const std::filesystem::path elf =
+                        std::filesystem::temp_directory_path() / "ps2x_setup_thread_image.elf";
+                    t.IsTrue(writeBssOnlyElf(elf, 0x00100000u, layout.imageEnd), "test ELF should be written");
+                    t.IsTrue(env.runtime.memory().initialize(), "test memory initializes without a window");
+                    t.IsTrue(env.runtime.loadELF(elf.string()), "test ELF should load");
+                    PS2Runtime::setIoPaths(ioPaths);
+                    std::error_code error;
+                    std::filesystem::remove(elf, error);
+                }
+                env.ctx.pc = 0x00100000u;
+                setRegU32(env.ctx, 29, PS2_RAM_SIZE - 0x10u);
+                setRegU32(env.ctx, 4, 0u);
+                setRegU32(env.ctx, 5, 0xFFFFFFFFu);
+                setRegU32(env.ctx, 6, layout.stackSize);
+                t.IsTrue(callSyscall(0x3Cu, env.rdram.data(), &env.ctx, &env.runtime),
+                         "SetupThread syscall should dispatch");
+                const uint32_t mainSp = ::getRegU32(&env.ctx, 2);
+
+                // VBlank handlers and movie callbacks taken now run on this
+                // 16 KB stack, the first one the pool hands out.
+                const uint32_t invocationEnd = env.runtime.eeScheduler().invocationStackTop() + 0x10u;
+                const uint32_t invocationBase = invocationEnd - 0x4000u;
+                t.IsTrue(invocationEnd <= mainSp - layout.stackSize || invocationBase >= mainSp,
+                         std::string("invocation stacks must stay out of everything the main thread's stack "
+                                     "can reach, with ") + layout.name);
+            }
         });
 
         tc.Run("OSD config2 syscalls round-trip extended config", [](TestCase &t)

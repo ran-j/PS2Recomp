@@ -510,22 +510,15 @@ namespace ps2_syscalls
                                        : 0u;
         if (stack == 0xFFFFFFFFu)
         {
-            if (stackSizeSigned > 0)
+            if (stackSizeSigned > 0 && static_cast<uint32_t>(stackSizeSigned) < PS2_RAM_SIZE)
             {
-                const uint32_t requestedSize = static_cast<uint32_t>(stackSizeSigned);
-                if (requestedSize < PS2_RAM_SIZE)
-                {
-                    sp = PS2_RAM_SIZE - requestedSize;
-                }
-                else
-                {
-                    sp = PS2_RAM_SIZE;
-                }
+                initialStack = PS2_RAM_SIZE - static_cast<uint32_t>(stackSizeSigned);
             }
             else
             {
-                sp = PS2_RAM_SIZE;
+                initialStack = PS2_RAM_SIZE;
             }
+            sp = initialStack;
         }
         else if (stack != 0u)
         {
@@ -542,7 +535,7 @@ namespace ps2_syscalls
         sp &= ~0xFu;
         if (stack == 0xFFFFFFFFu)
         {
-            initialStack = sp;
+            initialStack &= ~0xFu;
         }
         else if (stack != 0u)
         {
@@ -550,6 +543,16 @@ namespace ps2_syscalls
         }
 
         scheduler.setupCurrentThread(initialStack, stackSize, getRegU32(ctx, 28));
+        // Frames grow down from the top of the area, as on the kernel, once the
+        // invocation stacks are carved under it: starting at its bottom ran
+        // DQ8's main thread over the ones its VBlank handlers and movie
+        // callbacks were using. When the guest heap limit or the loaded image
+        // leaves no room under the area, the pool stays inside it, and frames
+        // starting at its bottom, as before, still keep out of the pool.
+        if (stack == 0xFFFFFFFFu && runtime->asyncCallbackStackTop() <= initialStack)
+        {
+            sp = PS2_RAM_SIZE;
+        }
         setReturnU32(ctx, sp);
     }
 

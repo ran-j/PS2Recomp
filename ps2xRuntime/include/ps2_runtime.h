@@ -436,6 +436,8 @@ public:
     // valid before the heap is configured, so a caller can split the range.
     uint32_t guestHeapHardLimit() const;
     uint32_t reserveAsyncCallbackStack(uint32_t size, uint32_t alignment = 16u);
+    // Where the next invocation stack would be carved down from.
+    uint32_t asyncCallbackStackTop() const;
 
     void drainCompletedDmacHandlers(uint8_t *rdram);
 
