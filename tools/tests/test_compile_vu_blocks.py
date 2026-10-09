@@ -155,10 +155,25 @@ class CompileVuBlocksTests(unittest.TestCase):
             for _, words, size in entries:
                 self.assertEqual(len(words.split(", ")) * 8, int(size))
 
+    def test_profiles_with_crlf_line_endings_match_lf_profiles(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = Path(__file__).resolve().parents[1] / "compile_vu_blocks.py"
+            text = "VU-BLOCKS 2\n1 1 2 3 4 5 6 7 8\n0 1 2 3 4\n"
+            outputs = []
+            for name, newline in (("lf", "\n"), ("crlf", "\r\n")):
+                profile, output = root / f"{name}.profile", root / f"{name}.inc"
+                profile.write_bytes(text.replace("\n", newline).encode("ascii"))
+                subprocess.run([sys.executable, str(script), "--output", str(output), "--", str(profile)],
+                               check=True, capture_output=True, text=True)
+                outputs.append(output.read_text())
+            self.assertIn("&runCompiledBlock<Unit::VU1, 0x0000000000000001ull", outputs[0])
+            self.assertEqual(outputs[0], outputs[1])
+
     def test_profile_length_and_word_bounds_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            profile, output = root / "invalid.profile", root / "blocks.inc"
+            profile, output = root / "bounds.profile", root / "blocks.inc"
             script = Path(__file__).resolve().parents[1] / "compile_vu_blocks.py"
             for header, words in [(1, "1 2 3 4 5 6 7 8"), (2, "1 2 3 4 5"),
                                   (2, "1 2 3 10000000000000000"), (2, "1 2 3 -1"),

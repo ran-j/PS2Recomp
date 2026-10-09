@@ -10,9 +10,11 @@ def read_blocks(paths, parser):
     blocks = set()
     for path in paths:
         data = path.read_bytes()
-        if data.startswith((b"VU-BLOCKS 1\n", b"VU-BLOCKS 2\n", b"VU-BLOCKS 3\n")):
-            extended = data.startswith(b"VU-BLOCKS 2\n")
-            loops = data.startswith(b"VU-BLOCKS 3\n")
+        # Profiles written or checked out on Windows end their lines in CRLF.
+        header = data.split(b"\n", 1)[0].rstrip(b"\r")
+        if header in (b"VU-BLOCKS 1", b"VU-BLOCKS 2", b"VU-BLOCKS 3"):
+            extended = header == b"VU-BLOCKS 2"
+            loops = header == b"VU-BLOCKS 3"
             for line in data.decode("ascii").splitlines()[1:]:
                 fields = line.split()
                 if len(fields) not in (range(5, 34) if loops else (5, 9, 13, 17) if extended else (5,)):
