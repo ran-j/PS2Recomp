@@ -16,6 +16,11 @@ CODE_SIZE = 16384
 PAIRS = CODE_SIZE // 8
 # Run::kMaxBlockPairs: each block reserves flag queue room for its pairs.
 MAX_BLOCK_PAIRS = 128
+# Pairs compiled as one function; longer routines are compiled in chunks.
+# Optimizers slow down sharply on long functions: MSVC 14.51 spent an hour
+# on one 498-pair routine, most of it in a single SSA pass, and 18 seconds
+# on 127 pairs.
+MAX_ROUTINE_PAIRS = 256
 BRANCHES = {0x20, 0x21, 0x24, 0x25, 0x28, 0x29, 0x2C, 0x2D, 0x2E, 0x2F}
 CONDITIONAL = {0x28, 0x29, 0x2C, 0x2D, 0x2E, 0x2F}
 CALLS = {0x21, 0x25}
@@ -297,20 +302,113 @@ def pc(index):
     return f"0x{(index * 8) & (CODE_SIZE - 1):04X}u"
 
 
-def emit_routine(routine, name):
+def successors(terminator):
+    """The blocks a block continues at within its routine, straight line first."""
+    kind = terminator[0]
+    if kind in ("fall", "goto"):
+        return [terminator[1]]
+    if kind == "cond":
+        return [terminator[2], terminator[1]]
+    return []
+
+
+def loops(routine):
+    """Each block's strongly connected component, as a frozenset of block starts."""
+    index, low, stack, on_stack, component = {}, {}, [], set(), {}
+
+    def visit(start):
+        index[start] = low[start] = len(index)
+        stack.append(start)
+        on_stack.add(start)
+        for target in successors(routine.blocks[start][1]):
+            if target not in index:
+                visit(target)
+                low[start] = min(low[start], low[target])
+            elif target in on_stack:
+                low[start] = min(low[start], index[target])
+        if low[start] == index[start]:
+            members = []
+            while True:
+                member = stack.pop()
+                on_stack.discard(member)
+                members.append(member)
+                if member == start:
+                    break
+            for member in members:
+                component[member] = frozenset(members)
+
+    for start in sorted(routine.blocks):
+        if start not in index:
+            visit(start)
+    return component
+
+
+def partition(routine, max_pairs):
+    """Cut a routine's blocks, in depth-first order, into runs of at most max_pairs pairs.
+
+    A loop that fits in one run stays in one, so that no iteration changes chunks.
+    """
+    order, seen, work = [], set(), [routine.entry]
+    while work:
+        start = work.pop()
+        if start in seen:
+            continue
+        seen.add(start)
+        order.append(start)
+        work.extend(reversed(successors(routine.blocks[start][1])))
+    component = loops(routine)
+    size_of = lambda starts: sum(len(routine.blocks[start][0]) for start in starts)
+    chunks, size, placed = [[]], 0, set()
+    for start in order:
+        if start in placed:
+            continue
+        unit = [start]
+        if len(component[start]) > 1 and size_of(component[start]) <= max_pairs:
+            unit = [member for member in order if member in component[start]]
+        pairs = size_of(unit)
+        if chunks[-1] and size + pairs > max_pairs:
+            chunks.append([])
+            size = 0
+        chunks[-1].extend(unit)
+        placed.update(unit)
+        size += pairs
+    return chunks
+
+
+def emit_routine(routine, name, max_pairs):
     pairs = routine.pairs
-    targets = set()
-    for _, terminator in routine.blocks.values():
-        if terminator[0] in ("fall", "goto"):
-            targets.add(terminator[1])
-        elif terminator[0] == "cond":
-            targets.update(terminator[1:])
+    # The entry block comes first; every other block is reached by goto.
+    blocks = sorted(routine.blocks, key=lambda start: start != routine.entry)
+    chunks = [blocks]
+    if sum(len(body) for body, _ in routine.blocks.values()) > max_pairs:
+        chunks = partition(routine, max_pairs)
+    chunk_of = {start: index for index, chunk in enumerate(chunks) for start in chunk}
+    # Where each chunk can be entered: its first block, then blocks other chunks branch to.
+    entries = [[chunk[0]] for chunk in chunks]
+    for start, (_, terminator) in sorted(routine.blocks.items()):
+        for target in successors(terminator):
+            chunk = chunk_of[target]
+            if chunk != chunk_of[start] and target not in entries[chunk]:
+                entries[chunk].append(target)
+    targets = {start for entry in entries for start in entry[1:]}
+    for start, (_, terminator) in routine.blocks.items():
+        targets.update(target for target in successors(terminator) if chunk_of[target] == chunk_of[start])
+    assert len(chunks) < 256 and all(len(entry) < 256 for entry in entries)
+
+    def jump(source, target):
+        chunk = chunk_of[target]
+        if chunk == chunk_of[source]:
+            return f"goto b_{target:04x};"
+        # The routine's own function continues with the chunk holding the target.
+        return f"return p.exit(0x{0x10000 | chunk << 8 | entries[chunk].index(target):05X}u);"
+
     # Pairs are named by block and position, which lets each one see the pairs
     # issued before it in the block.
     tables = []
-    lines = [f"uint32_t {name}(Run &run, uint64_t budgetEnd)", "{", "    Frame p(run, budgetEnd);"]
-    # The entry block comes first; every other block is reached by goto.
-    for start, (body, terminator) in sorted(routine.blocks.items(), key=lambda item: item[0] != routine.entry):
+    lines = []
+
+    def emit_block(start):
+        body, terminator = routine.blocks[start]
         table = f"{name}_{start:04x}"
         if body:
             words = ", ".join(f"0x{pairs[i].word:016x}ull" for i in body)
@@ -331,10 +429,10 @@ def emit_routine(routine, name):
             lines.append(emit_pair(index, pc(index + 1)))
         if kind == "leave":
             lines.append(f"    return p.leave({pc(terminator[1])});")
-            continue
+            return
         if kind == "fall":
-            lines.append(f"    goto b_{terminator[1]:04x};")
-            continue
+            lines.append(f"    {jump(start, terminator[1])}")
+            return
 
         first, delay = tail
         if kind == "end":
@@ -342,7 +440,7 @@ def emit_routine(routine, name):
             lines.append(emit_pair(first, pc(delay)))
             lines.append(emit_pair(delay, pc(terminator[1]), checked=False))
             lines.append(f"    return p.end({pc(terminator[1])});")
-            continue
+            return
 
         # A branch and its delay slot. The E bit on the branch ends the program
         # once the delay slot has issued.
@@ -361,11 +459,38 @@ def emit_routine(routine, name):
         elif kind in ("call", "jump"):
             lines.append(f"    return p.exit({after});")
         elif kind == "goto":
-            lines.append(f"    goto b_{terminator[1]:04x};")
+            lines.append(f"    {jump(start, terminator[1])}")
         else:
-            lines.append(f"    if (p.taken()) goto b_{terminator[1]:04x};")
-            lines.append(f"    goto b_{terminator[2]:04x};")
-    lines.append("}")
+            lines.append(f"    if (p.taken()) {jump(start, terminator[1])}")
+            lines.append(f"    {jump(start, terminator[2])}")
+
+    if len(chunks) == 1:
+        lines += [f"uint32_t {name}(Run &run, uint64_t budgetEnd)", "{", "    Frame p(run, budgetEnd);"]
+        for start in blocks:
+            emit_block(start)
+        lines.append("}")
+        return tables + lines
+
+    # Optimizers take far longer than linear time on long functions, so a
+    # long routine is compiled as chunks of at most max_pairs pairs. A chunk
+    # hands over by returning 0x1CCEE, chunk CC entered at EE, which no PC is.
+    for index, chunk in enumerate(chunks):
+        lines += [f"static PS2_VU_CHUNK uint32_t {name}_c{index}(Run &run, uint64_t budgetEnd, uint32_t entry)",
+                  "{", "    Frame p(run, budgetEnd);"]
+        if len(entries[index]) > 1:
+            lines += ["    switch (entry)", "    {"]
+            lines += [f"    case {number}u: goto b_{start:04x};" for number, start in enumerate(entries[index]) if number]
+            lines += ["    default: break;", "    }"]
+        for start in chunk:
+            emit_block(start)
+        lines += ["}", ""]
+    lines += [f"uint32_t {name}(Run &run, uint64_t budgetEnd)", "{",
+              f"    uint32_t next = {name}_c0(run, budgetEnd, 0u);",
+              "    while (next >= 0x10000u)", "    {",
+              "        const uint32_t entry = next & 0xFFu;",
+              "        switch ((next >> 8u) & 0xFFu)", "        {"]
+    lines += [f"        case {index}u: next = {name}_c{index}(run, budgetEnd, entry); break;" for index in range(1, len(chunks))]
+    lines += [f"        default: next = {name}_c0(run, budgetEnd, entry); break;", "        }", "    }", "    return next;", "}"]
     return tables + lines
 
 
@@ -374,10 +499,14 @@ def main():
     parser.add_argument("--output", type=Path, required=True,
                         help="registry include; declarations and shards are written beside it")
     parser.add_argument("--shards", type=int, default=4)
+    parser.add_argument("--max-routine-pairs", type=int, default=MAX_ROUTINE_PAIRS,
+                        help="pairs compiled as one function; longer routines are cut into chunks")
     parser.add_argument("profiles", type=Path, nargs="*")
     args = parser.parse_args()
     if args.shards < 1:
         parser.error("--shards must be positive")
+    if args.max_routine_pairs < MAX_BLOCK_PAIRS:
+        parser.error(f"--max-routine-pairs must be at least {MAX_BLOCK_PAIRS}")
 
     images, entries = load_images(args.profiles, parser)
     routines = {}
@@ -423,10 +552,14 @@ def main():
                      + ", ".join(str(i) for i in footprint) + "};\n")
         shard.append(f"extern const uint64_t {name}_words[] = {{"
                      + ", ".join(f"0x{routine.pairs[i].word:016x}ull" for i in footprint) + "};\n")
-        shard.append("\n".join(emit_routine(routine, name)) + "\n\n")
+        shard.append("\n".join(emit_routine(routine, name, args.max_routine_pairs)) + "\n\n")
     externs.append("}\n")
     for shard in shards:
         shard.append("}\n")
+        if any("PS2_VU_CHUNK" in part for part in shard):
+            # A chunk inlined into its routine would make the long function again.
+            shard.insert(2, "#if defined(_MSC_VER)\n#define PS2_VU_CHUNK __declspec(noinline)\n#else\n"
+                            "#define PS2_VU_CHUNK __attribute__((noinline))\n#endif\n\n")
 
     output.write_text("".join(registry))
     output.with_name(output.stem + "_extern.inc").write_text("".join(externs))

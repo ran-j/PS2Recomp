@@ -27,10 +27,10 @@ def profile(directory, pairs, entries):
     (directory / "entries.txt").write_text("".join(f"test {index * 8:x}\n" for index in entries))
 
 
-def compile_profile(directory, shards=1):
+def compile_profile(directory, shards=1, options=()):
     output = directory / "out" / "vu_programs.inc"
     result = subprocess.run([sys.executable, str(SCRIPT), "--output", str(output), "--shards", str(shards),
-                             str(directory)], capture_output=True, text=True)
+                             *options, str(directory)], capture_output=True, text=True)
     return result, output
 
 
@@ -135,6 +135,60 @@ class CompileVuProgramsTests(unittest.TestCase):
                 result, _ = compile_profile(root)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertRegex(result.stderr, "invalid entry|expected '<hash> <pc>'")
+
+    def test_long_routines_are_compiled_in_chunks_that_continue_each_other(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pairs = [(vu.immediate15(0x08, 2, 2, 1), vu.UPPER_NOP)] * 600
+            pairs += [(vu.LOWER_NOP, vu.UPPER_NOP | vu.E_BIT), (vu.LOWER_NOP, vu.UPPER_NOP)]
+            profile(root, pairs, [0])
+            result, output = compile_profile(root)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            # Still one routine, entered and checked as a whole.
+            self.assertEqual(registered_pcs(output), {0})
+            text, blocks = routines(output)
+            self.assertEqual(sum(blocks), len(pairs))
+            chunks = re.split(r"^static PS2_VU_CHUNK ", text, flags=re.M)[1:]
+            self.assertEqual(len(chunks), 3)
+            for chunk in chunks:
+                self.assertLessEqual(sum(int(n) for n in re.findall(r"p\.fits<\d+u, (\d+)u>", chunk)), 256)
+            self.assertIn("return p.exit(0x10100u);", text)
+            self.assertIn("return p.exit(0x10200u);", text)
+
+    def test_a_loop_that_fits_in_a_chunk_is_not_cut(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            work = (vu.immediate15(0x08, 2, 2, 1), vu.UPPER_NOP)
+            nop = (vu.LOWER_NOP, vu.UPPER_NOP)
+            pairs = [work] * 119 + [(vu.immediate15(0x08, 8, 0, 3), vu.UPPER_NOP)]
+            head = len(pairs)
+            # 150 pairs, which the compiler cuts into blocks of 127 and 23.
+            pairs += [work] * 147 + [(vu.immediate15(0x09, 8, 8, 1), vu.UPPER_NOP)]
+            pairs += [(vu.branch(0x29, 0, 8, head - (len(pairs) + 1)), vu.UPPER_NOP), nop]
+            pairs += [(vu.LOWER_NOP, vu.UPPER_NOP | vu.E_BIT), nop]
+            profile(root, pairs, [0])
+            result, output = compile_profile(root)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            text, blocks = routines(output)
+            self.assertEqual(sorted(blocks), [2, 23, 120, 127])
+            # Filling the first chunk would have cut the loop after its first block.
+            self.assertEqual(text.count("static PS2_VU_CHUNK"), 2)
+            self.assertIn(f"goto b_{head + 127:04x};", text)
+            self.assertIn(f"if (p.taken()) goto b_{head:04x};", text)
+
+    def test_routines_under_the_limit_compile_as_before(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pairs = [(vu.immediate15(0x08, 2, 2, 1), vu.UPPER_NOP)] * 600
+            pairs += [(vu.LOWER_NOP, vu.UPPER_NOP | vu.E_BIT), (vu.LOWER_NOP, vu.UPPER_NOP)]
+            profile(root, pairs, [0])
+            result, output = compile_profile(root, options=("--max-routine-pairs", "1000"))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            text, _ = routines(output)
+            self.assertNotIn("PS2_VU_CHUNK", text)
+            for limit in ("127", "x"):
+                result, _ = compile_profile(root, options=("--max-routine-pairs", limit))
+                self.assertNotEqual(result.returncode, 0)
 
 
 if __name__ == "__main__":
