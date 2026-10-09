@@ -518,12 +518,7 @@ namespace ps2_syscalls
             {
                 initialStack = PS2_RAM_SIZE;
             }
-            // Frames grow down from the top of the area, as on the kernel.
-            // Invocation stacks are carved right under it, and starting at its
-            // bottom ran DQ8's main thread over the ones its VBlank handlers and
-            // movie callbacks were using. An area down to the guest heap limit
-            // leaves the pool no room under it, so that one starts under the pool.
-            sp = initialStack > runtime->guestHeapHardLimit() ? PS2_RAM_SIZE : initialStack;
+            sp = initialStack;
         }
         else if (stack != 0u)
         {
@@ -548,6 +543,16 @@ namespace ps2_syscalls
         }
 
         scheduler.setupCurrentThread(initialStack, stackSize, getRegU32(ctx, 28));
+        // Frames grow down from the top of the area, as on the kernel, once the
+        // invocation stacks are carved under it: starting at its bottom ran
+        // DQ8's main thread over the ones its VBlank handlers and movie
+        // callbacks were using. When the guest heap limit or the loaded image
+        // leaves no room under the area, the pool stays inside it, and frames
+        // starting at its bottom, as before, still keep out of the pool.
+        if (stack == 0xFFFFFFFFu && runtime->asyncCallbackStackTop() <= initialStack)
+        {
+            sp = PS2_RAM_SIZE;
+        }
         setReturnU32(ctx, sp);
     }
 

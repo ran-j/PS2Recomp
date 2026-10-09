@@ -2115,6 +2115,12 @@ uint32_t PS2Runtime::reserveAsyncCallbackStack(uint32_t size, uint32_t alignment
     return top - 0x10u;
 }
 
+uint32_t PS2Runtime::asyncCallbackStackTop() const
+{
+    std::lock_guard<std::mutex> lock(m_asyncCallbackStackMutex);
+    return m_asyncCallbackStackTop;
+}
+
 uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
     try
