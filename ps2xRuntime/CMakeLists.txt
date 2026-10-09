@@ -259,6 +259,8 @@ elseif(WIN32)
     set(FFMPEG_PREBUILT_TAG "n7.1-241205")
     set(FFMPEG_PREBUILT_URL
         "https://github.com/System233/ffmpeg-msvc-prebuilt/releases/download/${FFMPEG_PREBUILT_TAG}/ffmpeg-${FFMPEG_PREBUILT_TAG}-lgpl-amd64-shared.zip")
+    # A release asset can be replaced, and its DLLs end up beside the game.
+    set(FFMPEG_PREBUILT_SHA256 "b985887dbca8c0a9a4c47f9d2bac7ec3ab994335b1b7fe7000bdb1dcd772ac68")
 
     set(FFMPEG_PREFIX_DIR "${CMAKE_BINARY_DIR}/ThirdParty/ffmpeg-prefix")
     set(FFMPEG_SOURCE_DIR "${FFMPEG_PREFIX_DIR}/src/ffmpeg_external")
@@ -268,6 +270,7 @@ elseif(WIN32)
 
     ExternalProject_Add(ffmpeg_external
         URL "${FFMPEG_PREBUILT_URL}"
+        URL_HASH SHA256=${FFMPEG_PREBUILT_SHA256}
         DOWNLOAD_EXTRACT_TIMESTAMP TRUE
         PREFIX "${FFMPEG_PREFIX_DIR}"
         CONFIGURE_COMMAND ""
