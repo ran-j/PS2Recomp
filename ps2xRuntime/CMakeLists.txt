@@ -468,10 +468,15 @@ endif()
 # Whole VU1 routines, compiled from PS2_VU_PROGRAM_PROFILE recordings.
 set(PS2X_VU_PROGRAM_PROFILES "" CACHE STRING "Local VU1 program profile directories to compile; never distributed")
 set(PS2X_VU_PROGRAM_SHARDS "8" CACHE STRING "Number of compilation units for compiled VU1 routines")
+set(PS2X_VU_PROGRAM_MAX_PAIRS "256" CACHE STRING
+    "Pairs of a compiled VU1 routine built as one function; longer routines are split, as optimizers slow down sharply on long functions")
 if(PS2X_VU_PROGRAM_PROFILES)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     if(NOT PS2X_VU_PROGRAM_SHARDS MATCHES "^[1-9][0-9]*$")
         message(FATAL_ERROR "PS2X_VU_PROGRAM_SHARDS must be a positive integer")
+    endif()
+    if(NOT PS2X_VU_PROGRAM_MAX_PAIRS MATCHES "^[0-9]+$" OR PS2X_VU_PROGRAM_MAX_PAIRS LESS 128)
+        message(FATAL_ERROR "PS2X_VU_PROGRAM_MAX_PAIRS must be at least 128, the longest block")
     endif()
     set(PS2X_VU_PROGRAM_INCLUDE "${CMAKE_CURRENT_BINARY_DIR}/generated/vu_programs.inc")
     set(PS2X_VU_PROGRAM_EXTERN_INCLUDE "${CMAKE_CURRENT_BINARY_DIR}/generated/vu_programs_extern.inc")
@@ -488,6 +493,7 @@ if(PS2X_VU_PROGRAM_PROFILES)
         OUTPUT "${PS2X_VU_PROGRAM_INCLUDE}" "${PS2X_VU_PROGRAM_EXTERN_INCLUDE}" ${PS2X_VU_PROGRAM_SOURCES}
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../tools/compile_vu_programs.py"
                 --output "${PS2X_VU_PROGRAM_INCLUDE}" --shards ${PS2X_VU_PROGRAM_SHARDS}
+                --max-routine-pairs ${PS2X_VU_PROGRAM_MAX_PAIRS}
                 ${PS2X_VU_PROGRAM_PROFILES}
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../tools/compile_vu_programs.py" ${PS2X_VU_PROGRAM_LISTS}
         VERBATIM)
