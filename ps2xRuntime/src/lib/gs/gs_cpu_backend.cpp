@@ -1166,26 +1166,31 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
     const GSVertex &v1 = batch.vertices[1];
     const auto &ctx = state.context;
 
-    int ofx = ctx.xyoffset.ofx >> 4;
-    int ofy = ctx.xyoffset.ofy >> 4;
+    const float ofx = static_cast<float>(ctx.xyoffset.ofx) / 16.0f;
+    const float ofy = static_cast<float>(ctx.xyoffset.ofy) / 16.0f;
 
-    int x0 = static_cast<int>(v0.x) - ofx;
-    int y0 = static_cast<int>(v0.y) - ofy;
-    int x1 = static_cast<int>(v1.x) - ofx;
-    int y1 = static_cast<int>(v1.y) - ofy;
+    float x0 = v0.x - ofx;
+    float y0 = v0.y - ofy;
+    float x1 = v1.x - ofx;
+    float y1 = v1.y - ofy;
     u32 z1 = static_cast<u32>(v1.z);
 
-    if (x0 > x1)
+    const bool reverseX = x0 > x1;
+    const bool reverseY = y0 > y1;
+    if (reverseX)
         std::swap(x0, x1);
-    if (y0 > y1)
+    if (reverseY)
         std::swap(y0, y1);
 
-    const int unclippedX0 = x0;
-    const int unclippedY0 = y0;
-    const int spanX = std::max(1, x1 - x0);
-    const int spanY = std::max(1, y1 - y0);
-    const int unclippedX1 = unclippedX0 + spanX - 1;
-    const int unclippedY1 = unclippedY0 + spanY - 1;
+    // GS samples sprites at integer pixel coordinates; the lower bounds are
+    // inclusive and the upper bounds exclusive, after rounding up. Keep the
+    // fractional endpoints for texture interpolation and sort UV per axis too.
+    const int unclippedX0 = static_cast<int>(std::ceil(x0));
+    const int unclippedY0 = static_cast<int>(std::ceil(y0));
+    const int unclippedX1 = static_cast<int>(std::ceil(x1)) - 1;
+    const int unclippedY1 = static_cast<int>(std::ceil(y1)) - 1;
+    if (unclippedX0 > unclippedX1 || unclippedY0 > unclippedY1)
+        return;
 
     // If the sprite rectangle is fully outside scissor, nothing should render.
     if (unclippedX1 < ctx.scissor.x0 || unclippedX0 > ctx.scissor.x1 ||
@@ -1212,50 +1217,44 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
         float u0f, v0f, u1f, v1f;
         if (state.prim.fst)
         {
-            u0f = static_cast<float>(v0.u >> 4);
-            v0f = static_cast<float>(v0.v >> 4);
-            u1f = static_cast<float>(v1.u >> 4);
-            v1f = static_cast<float>(v1.v >> 4);
+            u0f = static_cast<float>(v0.u) / 16.0f;
+            v0f = static_cast<float>(v0.v) / 16.0f;
+            u1f = static_cast<float>(v1.u) / 16.0f;
+            v1f = static_cast<float>(v1.v) / 16.0f;
         }
         else
         {
-            const float q0 = fabsQ(v0.q);
+            // Sprite Q is flat, taken from the second vertex.
             const float q1 = fabsQ(v1.q);
-            u0f = (v0.s / q0) * static_cast<float>(texW);
-            v0f = (v0.t / q0) * static_cast<float>(texH);
+            u0f = (v0.s / q1) * static_cast<float>(texW);
+            v0f = (v0.t / q1) * static_cast<float>(texH);
             u1f = (v1.s / q1) * static_cast<float>(texW);
             v1f = (v1.t / q1) * static_cast<float>(texH);
         }
 
-        float spriteW = static_cast<float>(spanX);
-        float spriteH = static_cast<float>(spanY);
-        if (spriteW < 1.0f)
-            spriteW = 1.0f;
-        if (spriteH < 1.0f)
-            spriteH = 1.0f;
+        if (reverseX)
+            std::swap(u0f, u1f);
+        if (reverseY)
+            std::swap(v0f, v1f);
+
+        const float spriteW = x1 - x0;
+        const float spriteH = y1 - y0;
+        // Use the floating-coordinate sampler for interpolated UV as well as
+        // STQ, avoiding a second quantization to the vertex UV's four bits.
+        GSDrawState textureState = state;
+        textureState.prim.fst = false;
 
         for (int y = drawY0; y <= drawY1; ++y)
         {
-            float ty = (static_cast<float>(y - unclippedY0) + 0.5f) / spriteH;
+            float ty = (static_cast<float>(y) - y0) / spriteH;
             float texVf = v0f + (v1f - v0f) * ty;
 
             for (int x = drawX0; x <= drawX1; ++x)
             {
-                float tx = (static_cast<float>(x - unclippedX0) + 0.5f) / spriteW;
+                float tx = (static_cast<float>(x) - x0) / spriteW;
                 float texUf = u0f + (u1f - u0f) * tx;
-                uint32_t texel = 0xFFFF00FFu;
-                if (state.prim.fst)
-                {
-                    const int fixedU = static_cast<int>((texUf * 16.0f) + 0.5f);
-                    const int fixedV = static_cast<int>((texVf * 16.0f) + 0.5f);
-                    const uint16_t sampleU = static_cast<uint16_t>(clampInt(fixedU, 0, 0xFFFF));
-                    const uint16_t sampleV = static_cast<uint16_t>(clampInt(fixedV, 0, 0xFFFF));
-                    texel = SampleTexture(state, 0.0f, 0.0f, 1.0f, sampleU, sampleV);
-                }
-                else
-                {
-                    texel = SampleTexture(state, texUf / static_cast<float>(texW), texVf / static_cast<float>(texH), 1.0f, 0u, 0u);
-                }
+                const uint32_t texel = SampleTexture(textureState,
+                    texUf / static_cast<float>(texW), texVf / static_cast<float>(texH), 1.0f, 0u, 0u);
 
                 uint8_t tr = static_cast<uint8_t>(texel & 0xFF);
                 uint8_t tg = static_cast<uint8_t>((texel >> 8) & 0xFF);
@@ -1270,8 +1269,10 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
     else
     {
         for (int y = drawY0; y <= drawY1; ++y)
+        {
             for (int x = drawX0; x <= drawX1; ++x)
                 WritePixel(state, x, y, z1, r, g, b, a, v1.fog);
+        }
     }
 }
 
