@@ -503,7 +503,7 @@ void register_ps2_gs_tests()
             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
             R5900Context ctx{};
             setRegU32(ctx, 4, 1u); // interlaced
-            setRegU32(ctx, 5, 0u); // NTSC
+            setRegU32(ctx, 5, 2u); // NTSC (GS CRT mode 0x02)
             setRegU32(ctx, 6, 0u); // field mode
 
             runtime.memory().gs().pmode = 0u;
@@ -512,6 +512,10 @@ void register_ps2_gs_tests()
 
             t.Equals(runtime.memory().gs().smode2, 0x1ull,
                      "GsSetCrt should publish interlaced field mode through SMODE2");
+            t.Equals((runtime.memory().gs().smode1 >> 3) & 127ull, 32ull,
+                     "GsSetCrt should program the analog clock for the hardware CRTC");
+            t.Equals((runtime.memory().gs().smode1 >> 13) & 3ull, 2ull,
+                     "GsSetCrt should program NTSC in SMODE1");
             t.Equals(runtime.memory().gs().pmode & 0x3ull, 0x1ull,
                      "GsSetCrt should leave CRT1 enabled for presentation");
             t.Equals(getRegU32Test(ctx, 2), 0u,
@@ -557,8 +561,9 @@ void register_ps2_gs_tests()
             std::memcpy(&xyoffset10Addr, rdram.data() + kEnvAddr + kXYOffset1AddrOffset, sizeof(xyoffset10Addr));
 
             t.Equals((dispfb0 >> 9) & 0x3Fu, 10ull, "dbuff display env should seed FBW from width");
-            t.Equals((display0 >> 32) & 0x0FFFull, 639ull, "dbuff display env should seed DW from width");
-            t.Equals((display0 >> 44) & 0x07FFull, 447ull, "dbuff display env should seed DH from height");
+            t.Equals((display0 >> 23) & 0x0Full, 3ull, "NTSC should use four output clocks per pixel");
+            t.Equals((display0 >> 32) & 0x0FFFull, 2559ull, "DW is measured in output clocks, not framebuffer pixels");
+            t.Equals((display0 >> 44) & 0x07FFull, 895ull, "interlaced frame mode should double the supplied height");
             t.Equals((frame10 >> 16) & 0x3Full, 10ull, "dbuff draw env should seed FRAME FBW from width");
             t.Equals(frame10Addr, 0x4Cull, "dbuff draw env should seed FRAME_1 register id");
             t.Equals(xyoffset10 & 0xFFFFull, 0x6C00ull, "dbuff draw env should seed OFX in 12.4 fixed point");
@@ -572,6 +577,12 @@ void register_ps2_gs_tests()
             dispfb1 = (dispfb1 & ~0x1FFull) | 151ull;
             std::memcpy(rdram.data() + kEnvAddr + kDispEnvSize + kDispFbOffset, &dispfb1, sizeof(dispfb1));
 
+            // Exercise both circuits so the SDK shortcut must update the same
+            // per-circuit counters as native GS and MMIO writes.
+            const uint64_t pmode = 3u;
+            std::memcpy(rdram.data() + kEnvAddr, &pmode, sizeof(pmode));
+            std::memcpy(rdram.data() + kEnvAddr + kDispEnvSize, &pmode, sizeof(pmode));
+
             std::memset(&ctx, 0, sizeof(ctx));
             setRegU32(ctx, 4, kEnvAddr);
             setRegU32(ctx, 5, 1u);
@@ -579,8 +590,92 @@ void register_ps2_gs_tests()
 
             t.Equals(runtime.memory().gs().dispfb1 & 0x1FFull, 151ull,
                      "sceGsSwapDBuffDc should program GS to the selected display page");
-            t.Equals((runtime.memory().gs().display1 >> 32) & 0x0FFFull, 639ull,
+            t.Equals((runtime.memory().gs().display1 >> 32) & 0x0FFFull, 2559ull,
                      "sceGsSwapDBuffDc should preserve the display width from the seeded env");
+            auto &regs = runtime.memory().gs();
+            t.Equals(regs.displayFlipCount[0].load(), uint64_t(1), "SDK swap must count the first display flip");
+            t.Equals(regs.displayFlipCount[1].load(), uint64_t(1), "SDK swap must count the second circuit independently");
+            ps2_stubs::sceGsSwapDBuffDc(rdram.data(), &ctx, &runtime);
+            t.Equals(regs.displayFlipCount[0].load(), uint64_t(1), "repeating the SDK swap must not add a flip");
+            setRegU32(ctx, 5, 0u);
+            ps2_stubs::sceGsSwapDBuffDc(rdram.data(), &ctx, &runtime);
+            t.Equals(regs.displayFlipCount[0].load(), uint64_t(2), "SDK swap back to the other page must count");
+            t.Equals(regs.displayFlipCount[1].load(), uint64_t(2), "SDK swap back must count for both circuits");
+            t.Equals(regs.sdkPresentCount.load(), uint64_t(3), "each completed SDK swap counts once, not once per circuit");
+
+            // Retail games can alternate draw buffers while both display envs
+            // point at one scanout page. FBP changes cannot measure their FPS.
+            std::memcpy(rdram.data() + kEnvAddr + kDispEnvSize + kDispFbOffset, &dispfb0, sizeof(dispfb0));
+            setRegU32(ctx, 5, 1u);
+            ps2_stubs::sceGsSwapDBuffDc(rdram.data(), &ctx, &runtime);
+            setRegU32(ctx, 5, 0u);
+            ps2_stubs::sceGsSwapDBuffDc(rdram.data(), &ctx, &runtime);
+            t.Equals(regs.sdkPresentCount.load(), uint64_t(5), "fixed scanout page must still count SDK presentations");
+            t.Equals(regs.displayFlipCount[0].load(), uint64_t(2), "SDK presentation must not fabricate a buffer flip");
+            ps2_stubs::sceGsSwapDBuff(rdram.data(), &ctx, &runtime);
+            t.Equals(regs.sdkPresentCount.load(), uint64_t(6), "non-DC SDK swap also counts once");
+            ps2_stubs::sceGsSwapDBuffDc(rdram.data(), &ctx, nullptr);
+            t.Equals(regs.sdkPresentCount.load(), uint64_t(6), "failed swap must not count as a presentation");
+        });
+
+        tc.Run("sceGsSetDefDispEnv matches libgs display timing and initializes every register", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            constexpr uint32_t envAddr = 0x4000u;
+            struct ModeCase
+            {
+                uint32_t mode, interlace, frame, width, height;
+                int32_t dx, dy;
+                uint64_t smode2, expectedDx, expectedDy, magh, dw, dh;
+            };
+            // Expected fields from sceGsSetDefDispEnv at 0x100248 in SLUS_201.84.
+            const ModeCase cases[] = {
+                {2, 1, 1, 640, 224, 0, 0, 3, 636, 50, 3, 2559, 447},
+                {2, 1, 0, 640, 448, 0, 0, 1, 636, 50, 3, 2559, 447},
+                {2, 0, 0, 640, 224, 0, 0, 2, 636, 25, 3, 2559, 223},
+                {3, 1, 1, 512, 256, 0, 0, 3, 656, 72, 4, 2559, 511},
+                {3, 0, 1, 640, 256, 0, 0, 2, 656, 36, 3, 2559, 255},
+                {2, 1, 1, 640, 224, -4, -2, 3, 620, 48, 3, 2559, 447},
+            };
+            for (const auto &mode : cases)
+            {
+                R5900Context ctx{};
+                setRegU32(ctx, 4, 0u);
+                setRegU32(ctx, 5, mode.interlace);
+                setRegU32(ctx, 6, mode.mode);
+                setRegU32(ctx, 7, mode.frame);
+                ps2_stubs::sceGsResetGraph(rdram.data(), &ctx, &runtime);
+                ps2_stubs::sceGsGetGParam(rdram.data(), &ctx, &runtime);
+                const uint32_t params = getRegU32Test(ctx, 2);
+                t.Equals(runtime.memory().read16(params), static_cast<uint16_t>(mode.interlace), "GParam interlace occupies a halfword");
+                t.Equals(runtime.memory().read16(params + 2), static_cast<uint16_t>(mode.mode), "GParam output mode is at offset 2");
+                t.Equals(runtime.memory().read16(params + 4), static_cast<uint16_t>(mode.frame), "GParam frame mode is at offset 4");
+                t.Equals(runtime.memory().read16(params + 6), uint16_t(3), "GParam version is at offset 6");
+                std::memset(rdram.data() + envAddr, 0xcd, 40);
+                setRegU32(ctx, 4, envAddr);
+                setRegU32(ctx, 5, 0u);
+                setRegU32(ctx, 6, mode.width);
+                setRegU32(ctx, 7, mode.height);
+                setRegU32(ctx, 8, static_cast<uint32_t>(mode.dx));
+                setRegU32(ctx, 9, static_cast<uint32_t>(mode.dy));
+                setRegU32(ctx, 29, 0x3000u);
+                const uint32_t staleStackArgs[2] = {123u, 456u};
+                std::memcpy(rdram.data() + 0x3010, staleStackArgs, sizeof(staleStackArgs));
+                ps2_stubs::sceGsSetDefDispEnv(rdram.data(), &ctx, &runtime);
+                uint64_t regs[5]{};
+                std::memcpy(regs, rdram.data() + envAddr, sizeof(regs));
+                t.Equals(regs[0], 0x66ull, "PMODE should enable circuit 2 with fixed alpha");
+                t.Equals(regs[1], mode.smode2, "SMODE2 should follow the libgs mode");
+                t.Equals(regs[2], uint64_t((mode.width + 63) / 64) << 9, "DISPFB should encode the framebuffer stride");
+                t.Equals(regs[3] & 0xfffull, mode.expectedDx, "DX should include the CRT origin and scaled offset");
+                t.Equals((regs[3] >> 12) & 0x7ffull, mode.expectedDy, "DY should include the CRT origin");
+                t.Equals((regs[3] >> 23) & 15ull, mode.magh, "MAGH should match the output clock multiplier");
+                t.Equals((regs[3] >> 32) & 0xfffull, mode.dw, "DW should cover the output clocks");
+                t.Equals((regs[3] >> 44) & 0x7ffull, mode.dh, "DH should match field or frame mode");
+                t.Equals(regs[4], 0ull, "BGCOLOR should be initialized even in dirty guest memory");
+            }
         });
 
         tc.Run("sceGsSetDefDBuffDc seeds a clear packet and swap clears the draw buffer", [](TestCase &t)
@@ -4061,7 +4156,7 @@ void register_ps2_gs_tests()
                       "TRXDIR payload must encode dir=0 (host-to-local)");
         });
 
-        tc.Run("sceGsResetGraph frees its temporary GIF packet", [](TestCase &t)
+        tc.Run("sceGsResetGraph programs the CRT without sending privileged registers through GIF", [](TestCase &t)
         {
             PS2Runtime runtime;
             t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
@@ -4076,8 +4171,21 @@ void register_ps2_gs_tests()
 
             t.Equals(static_cast<int32_t>(getRegU32Test(ctx, 2)), 0,
                      "sceGsResetGraph should succeed in reset mode");
+            const auto &regs = runtime.memory().gs();
+            t.Equals((regs.smode1 >> 3) & 127ull, 32ull, "reset should select the analog clock");
+            t.Equals((regs.smode1 >> 13) & 3ull, 2ull, "reset should select NTSC");
+            t.Equals(regs.smode2, 3ull, "reset should select interlaced frame mode");
+            t.Equals(regs.pmode & 3ull, 1ull, "reset should enable circuit 1");
+            t.Equals(regs.dispfb1, 10ull << 9, "reset should set the display buffer width");
+            t.Equals(regs.dispfb2, regs.dispfb1, "reset should initialize both display buffers");
+            t.Equals(runtime.gs().getDebugSnapshot().ctx[1].alpha, 0ull,
+                     "PMODE must not be sent to GIF register 0x41 (ALPHA_2)");
+
+            setRegU32(ctx, 6, 3u);
+            ps2_stubs::sceGsResetGraph(rdram.data(), &ctx, &runtime);
+            t.Equals((regs.smode1 >> 13) & 3ull, 3ull, "reset should also select PAL");
             expectGuestHeapReusable(t, runtime,
-                                    "sceGsResetGraph should free its temporary GIF packet");
+                                    "sceGsResetGraph should leave the guest heap reusable");
         });
 
         tc.Run("sceGsSyncV resumes through the scheduler with deterministic field parity", [](TestCase &t)

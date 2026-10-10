@@ -15,6 +15,7 @@ add_library(ps2_gs_cache_backend_under_test STATIC
     "${PS2_GS_RUNTIME_DIR}/src/lib/gs/gs_cpu_backend.cpp"
     "${PS2_GS_RUNTIME_DIR}/src/lib/gs/gs_frontend.cpp"
     "${PS2_GS_RUNTIME_DIR}/src/lib/gs/ps2_gs_memory.cpp"
+    "${PS2_GS_RUNTIME_DIR}/src/lib/gs/ps2_gif_arbiter.cpp"
 )
 target_include_directories(ps2_gs_cache_backend_under_test PUBLIC "${PS2_GS_RUNTIME_DIR}/include")
 target_compile_features(ps2_gs_cache_backend_under_test PUBLIC cxx_std_20)
@@ -40,6 +41,8 @@ function(add_gs_cache_suite target source prefix)
         set_tests_properties("gs_cache.${prefix}.${test_name}" PROPERTIES LABELS "gs;cache" TIMEOUT 60)
     endforeach()
 endfunction()
+
+add_gs_cache_suite(ps2_gs_raw_routing_tests gs_raw_routing_tests.cpp routing raw_commands)
 
 add_gs_cache_suite(ps2_gs_texture_cache_tests gs_texture_cache_tests.cpp texture
     unaligned_texture unaligned_wrap stale_mirror page_alternation

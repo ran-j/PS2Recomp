@@ -47,8 +47,11 @@ namespace ps2x::iop::detail
 
     std::optional<IopImportCall> IopImportRegistry::decode(uint32_t pc) const
     {
-        if (m_memory.read32(pc) != 0x03E00008u)
-            return std::nullopt;
+        return decode(pc, m_memory.read32(pc));
+    }
+
+    std::optional<IopImportCall> IopImportRegistry::decodeStub(uint32_t pc) const
+    {
         const uint32_t delay = m_memory.read32(pc + 4u);
         if ((delay & 0xFFFF0000u) != 0x24000000u)
             return std::nullopt;

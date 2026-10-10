@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <unordered_map>
 
 namespace ps2x::iop::detail
 {
@@ -90,14 +91,19 @@ namespace ps2x::iop::detail
         void wakeOneSemaphore(int id);
         [[nodiscard]] static bool eventSatisfied(const EventFlag &event, uint32_t bits, uint32_t mode);
         void wakeEventWaiters(EventFlag &event);
+        void setThreadState(IopThread &thread, IopThreadState state);
 
         IopMemory &m_memory;
         std::map<int, IopThread> m_threads;
-        std::map<int, Semaphore> m_semaphores;
-        std::map<int, EventFlag> m_eventFlags;
+        std::unordered_map<int, Semaphore> m_semaphores;
+        std::unordered_map<int, EventFlag> m_eventFlags;
         uint32_t m_nextThreadId = 1;
         uint32_t m_nextSemaphoreId = 1;
         uint32_t m_nextEventFlagId = 1;
         IopThread *m_currentThread = nullptr;
+        IopThread *m_nextReady = nullptr;
+        uint64_t m_nextWakeCycle = UINT64_MAX;
+        bool m_scheduleDirty = true;
+        bool m_hasDeadThreads = false;
     };
 }

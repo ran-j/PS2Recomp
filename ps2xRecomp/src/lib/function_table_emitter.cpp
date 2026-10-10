@@ -152,6 +152,7 @@ namespace ps2recomp
         ss << "#include <ps2_recompiled_stubs.h>\n";
         ss << "#include \"ps2_syscalls.h\"\n\n";
 
+        ss << "extern const uint32_t g_ps2RecompiledEeAbiVersion = 4u;\n";
         ss << "extern const uint32_t g_ps2RecompiledFunctionTableBase = 0x" << std::hex << tableBase << "u;\n";
         ss << "extern const uint32_t g_ps2RecompiledFunctionTableEnd = 0x" << std::hex << tableEnd << "u;\n";
         ss << "extern const uint32_t g_ps2RecompiledFunctionTableSlotCount = " << std::dec << slotCount << "u;\n";

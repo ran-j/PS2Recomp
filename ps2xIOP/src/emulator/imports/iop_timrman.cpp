@@ -56,6 +56,7 @@ namespace ps2x::iop::detail
         }
         m_holdMode = 0u;
         m_servicing = false;
+        m_deadlineDirty = true;
     }
 
     uint32_t IopTimrman::timerId(size_t index) noexcept
@@ -155,6 +156,7 @@ namespace ps2x::iop::detail
 
     bool IopTimrman::dispatchImport(uint16_t ordinal, IopCpuState &cpu, uint64_t currentCycle)
     {
+        m_deadlineDirty = true;
         const uint32_t a0 = cpu.gpr[4];
         const uint32_t a1 = cpu.gpr[5];
         const uint32_t a2 = cpu.gpr[6];
@@ -416,9 +418,10 @@ namespace ps2x::iop::detail
 
     void IopTimrman::serviceDue(uint64_t currentCycle, IopGuestExecutor &executor)
     {
-        if (m_servicing)
+        if (m_servicing || nextEventCycle(UINT64_MAX) > currentCycle)
             return;
         m_servicing = true;
+        m_deadlineDirty = true;
         struct ServiceGuard
         {
             bool &flag;
@@ -465,12 +468,18 @@ namespace ps2x::iop::detail
 
     uint64_t IopTimrman::nextEventCycle(uint64_t fallback) const noexcept
     {
-        uint64_t next = fallback;
-        for (const Timer &timer : m_timers)
+        if (m_servicing)
+            return fallback;
+        if (m_deadlineDirty)
         {
-            next = std::min(next, timer.compareCycle);
-            next = std::min(next, timer.overflowCycle);
+            m_nextEventCycle = UINT64_MAX;
+            for (const Timer &timer : m_timers)
+            {
+                m_nextEventCycle = std::min(m_nextEventCycle, timer.compareCycle);
+                m_nextEventCycle = std::min(m_nextEventCycle, timer.overflowCycle);
+            }
+            m_deadlineDirty = false;
         }
-        return next;
+        return std::min(fallback, m_nextEventCycle);
     }
 }

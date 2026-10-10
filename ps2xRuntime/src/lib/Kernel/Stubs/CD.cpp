@@ -790,6 +790,7 @@ namespace ps2_stubs
                             }
                             continueCdStRead(rdram, &resumeContext, runtime, state);
                         });
+                    return;
                 }
 
                 uint32_t sectors = std::min(remaining, available);

@@ -67,6 +67,7 @@ namespace ps2x::iop::detail
         void setInterruptMask(uint32_t value) noexcept { m_interruptMask = value; }
         void setInterruptControl(uint32_t value) noexcept { m_interruptControl = value & 1u; }
 
+        [[nodiscard]] bool hasDmaStart() const noexcept { return m_dmaStart.has_value(); }
         [[nodiscard]] std::optional<DmaStart> takeDmaStart() noexcept;
         [[nodiscard]] std::span<const uint8_t> ram() const noexcept { return m_ram; }
 

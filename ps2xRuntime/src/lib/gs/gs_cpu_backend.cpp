@@ -518,6 +518,8 @@ void GSCpuBackend::Initialize(uint8_t *vram, uint32_t vramSize)
     if (vram && vramSize < GSMem::MEMORY_SIZE)
         throw std::invalid_argument("GS CPU backend requires at least 4 MiB of VRAM");
 
+    RUNTIME_WARNING("GS CPU backend is experimental and may not be fully compatible with all games.");
+
     std::lock_guard<std::mutex> lock(m_mutex);
     m_vram = vram;
     m_vramSize = vramSize;

@@ -26,6 +26,12 @@ namespace ps2x::iop::detail
 
         void reset();
         [[nodiscard]] std::optional<IopImportCall> decode(uint32_t pc) const;
+        [[nodiscard]] std::optional<IopImportCall> decode(uint32_t pc, uint32_t instruction) const
+        {
+            if (instruction != 0x03E00008u) // Import stubs begin with jr ra.
+                return std::nullopt;
+            return decodeStub(pc);
+        }
         [[nodiscard]] bool registerExportTable(uint32_t address);
         [[nodiscard]] bool releaseExportTable(uint32_t address);
         [[nodiscard]] uint32_t findTable(std::string_view library, std::optional<uint16_t> version = std::nullopt) const;
@@ -34,6 +40,7 @@ namespace ps2x::iop::detail
         void eraseRange(uint32_t base, uint32_t size);
 
     private:
+        [[nodiscard]] std::optional<IopImportCall> decodeStub(uint32_t pc) const;
         struct ExportLibrary
         {
             uint32_t tableAddress = 0;

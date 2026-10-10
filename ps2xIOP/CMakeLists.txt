@@ -62,6 +62,11 @@ if(PS2X_IOP_BUILD_TESTS)
     target_include_directories(ps2_iop_import_version_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_test(NAME ps2_iop_import_version_tests COMMAND ps2_iop_import_version_tests)
 
+    add_executable(ps2_iop_execution_tests tests/iop_execution_tests.cpp)
+    target_link_libraries(ps2_iop_execution_tests PRIVATE ps2_iop)
+    target_include_directories(ps2_iop_execution_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    add_test(NAME ps2_iop_execution_tests COMMAND ps2_iop_execution_tests)
+
 endif()
 
 install(TARGETS ps2_iop
