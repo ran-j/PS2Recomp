@@ -1,4 +1,6 @@
 #include "ps2recomp/ps2_recompiler.h"
+#include "ps2recomp/config_manager.h"
+#include "ps2recomp/elf_parser.h"
 #include <iostream>
 #include <string>
 
@@ -8,6 +10,7 @@ void printUsage()
 {
     std::cout << "PS2Recomp - A static recompiler for PlayStation 2 ELF files\n";
     std::cout << "Usage: ps2recomp <config.toml>\n";
+
     std::cout << "  config.toml: Configuration file for the recompiler\n";
 }
 
@@ -23,6 +26,8 @@ int main(int argc, char *argv[])
 
     try
     {
+        if (configPath == "--vu1-only")
+            throw std::runtime_error("--vu1-only has been retired. Recompile the EE normally; VU0/VU1 use the runtime interpreter.");
         PS2Recompiler recompiler(configPath);
 
         if (!recompiler.initialize())

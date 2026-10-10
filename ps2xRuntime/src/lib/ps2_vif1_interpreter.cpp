@@ -142,6 +142,19 @@ void PS2Memory::processVIF0Data(const uint8_t *data, uint32_t sizeBytes)
         }
         else if (opcode == VIF_FLUSHE || opcode == VIF_FLUSH || opcode == VIF_FLUSHA)
         {
+            if (m_vuFlushCallback[0]) m_vuFlushCallback[0](opcode != VIF_FLUSHE);
+            continue;
+        }
+        else if (opcode == VIF_MSCAL || opcode == VIF_MSCALF)
+        {
+            vif0_regs.itop = vif0_regs.itops & 0x3ff;
+            if (m_vuMscalCallback[0]) m_vuMscalCallback[0]((imm & 0x1ffu) * 8, 0, vif0_regs.itop);
+            continue;
+        }
+        else if (opcode == VIF_MSCNT)
+        {
+            vif0_regs.itop = vif0_regs.itops & 0x3ff;
+            if (m_vuMscntCallback[0]) m_vuMscntCallback[0](0, vif0_regs.itop);
             continue;
         }
         else if (opcode == VIF_STMASK)
@@ -170,6 +183,7 @@ void PS2Memory::processVIF0Data(const uint8_t *data, uint32_t sizeBytes)
         }
         else if (opcode == VIF_MPG)
         {
+            if (m_vuFlushCallback[0]) m_vuFlushCallback[0](false);
             const uint32_t destAddr = static_cast<uint32_t>(imm & 0x1FFu) * 8u;
             const uint32_t instructionCount = (num == 0u) ? 256u : static_cast<uint32_t>(num);
             const uint32_t mpgBytes = instructionCount * 8u;
@@ -181,8 +195,7 @@ void PS2Memory::processVIF0Data(const uint8_t *data, uint32_t sizeBytes)
                     copyBytes = PS2_VU0_CODE_SIZE - destAddr;
                 if (pos + copyBytes <= sizeBytes)
                 {
-                    std::memcpy(m_vu0Code + destAddr, data + pos, copyBytes);
-                    markVU0CodeModified();
+                    writeVuCode(false, destAddr, {data + pos, copyBytes});
                 }
             }
 
@@ -398,11 +411,13 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         }
         else if (opcode == VIF_FLUSHE || opcode == VIF_FLUSH || opcode == VIF_FLUSHA)
         {
+            if (m_vuFlushCallback[1]) m_vuFlushCallback[1](opcode != VIF_FLUSHE);
             continue;
         }
         else if (opcode == VIF_MSCAL || opcode == VIF_MSCALF)
         {
-            uint32_t startPC = (uint32_t)imm * 8u;
+            if (opcode == VIF_MSCALF && m_vuFlushCallback[1]) m_vuFlushCallback[1](true);
+            uint32_t startPC = (imm & 0x7ffu) * 8u;
 
             const uint32_t runTop = vif1_regs.tops & 0x3FFu;
             const uint32_t runItop = vif1_regs.itops & 0x3FFu;
@@ -416,8 +431,8 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 vif1_regs.tops = (vif1_regs.base + vif1_regs.ofst) & 0x3FFu;
             vif1_regs.stat ^= (1u << 7); // toggle DBF
 
-            if (m_vu1MscalCallback)
-                m_vu1MscalCallback(startPC, runTop, runItop);
+            if (m_vuMscalCallback[1])
+                m_vuMscalCallback[1](startPC, runTop, runItop);
             continue;
         }
         else if (opcode == VIF_MSCNT)
@@ -434,8 +449,8 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 vif1_regs.tops = (vif1_regs.base + vif1_regs.ofst) & 0x3FFu;
             vif1_regs.stat ^= (1u << 7); // toggle DBF
 
-            if (m_vu1MscntCallback)
-                m_vu1MscntCallback(runTop, runItop);
+            if (m_vuMscntCallback[1])
+                m_vuMscntCallback[1](runTop, runItop);
             continue;
         }
         else if (opcode == VIF_STMASK)
@@ -466,6 +481,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         }
         else if (opcode == VIF_MPG)
         {
+            if (m_vuFlushCallback[1]) m_vuFlushCallback[1](false);
             uint32_t destAddr = (uint32_t)imm * 8u;
             const uint32_t instructionCount = (num == 0u) ? 256u : static_cast<uint32_t>(num);
             const uint32_t mpgBytes = instructionCount * 8u;
@@ -476,8 +492,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                     copyBytes = PS2_VU1_CODE_SIZE - destAddr;
                 if (pos + copyBytes <= sizeBytes)
                 {
-                    std::memcpy(m_vu1Code + destAddr, data + pos, copyBytes);
-                    markVU1CodeModified();
+                    writeVuCode(true, destAddr, {data + pos, copyBytes});
                 }
             }
             pos += mpgBytes;

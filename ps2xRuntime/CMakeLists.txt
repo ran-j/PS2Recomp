@@ -399,10 +399,13 @@ add_library(ps2_runtime STATIC
     src/lib/ps2_rom_device.cpp
     src/lib/ps2_vfs.cpp
     src/lib/ps2_runtime.cpp
+    src/lib/frame_timing.cpp
     src/lib/ps2_vif1_interpreter.cpp
-    src/lib/vu/ps2_vu1_core.cpp
-    src/lib/vu/ps2_vu1_upper.cpp
-    src/lib/vu/ps2_vu1_lower.cpp
+    src/lib/vu/interpreter/vu_executor.cpp
+    src/lib/vu/interpreter/vu_memory.cpp
+    src/lib/vu/vu_unit.cpp
+    src/lib/vu/vu_runtime.cpp
+    src/lib/vu/vu_context.cpp
     src/lib/games_database.cpp
 )
 
@@ -457,6 +460,7 @@ file(GLOB RUNNER_SRC_FILES CONFIGURE_DEPENDS
 )
 
 set(RUNNER_MAIN_CPP "${CMAKE_CURRENT_SOURCE_DIR}/src/runner/main.cpp")
+list(FILTER RUNNER_SRC_FILES EXCLUDE REGEX "vu1_programs[.]cpp$")
 set(ROOT_MAIN_CPP "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp")
 
 if(EXISTS "${RUNNER_MAIN_CPP}")
@@ -623,3 +627,16 @@ endif()
 install(DIRECTORY include/
     DESTINATION include
 )
+
+if(MSVC)
+    set(PS2X_VU_FP_OPTIONS /fp:strict "$<$<CONFIG:RelWithDebInfo>:/Ob2>" "$<$<CONFIG:RelWithDebInfo>:/Oi>")
+else()
+    set(PS2X_VU_FP_OPTIONS -fno-fast-math -ffp-contract=off -frounding-math)
+endif()
+
+set_source_files_properties(
+    src/lib/vu/interpreter/vu_executor.cpp 
+    src/lib/vu/interpreter/vu_memory.cpp
+    src/lib/vu/vu_unit.cpp src/lib/vu/vu_runtime.cpp 
+    src/lib/vu/vu_context.cpp
+    PROPERTIES COMPILE_OPTIONS "${PS2X_VU_FP_OPTIONS}")

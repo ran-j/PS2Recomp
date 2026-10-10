@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstring>
 #include <sstream>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -132,6 +133,10 @@ namespace
     void overrideRecursiveFindAddressHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         runtime->handleSyscall(rdram, ctx, 0x83u);
+        if (runtime->eeTransferPending())
+        {
+            return;
+        }
         ctx->pc = ::getRegU32(ctx, 31);
     }
 
@@ -443,6 +448,10 @@ namespace
         gSchedulerTrace->push_back(31);
         setRegU32(*ctx, 4, static_cast<uint32_t>(gSchedulerSemaphoreId));
         SignalSema(rdram, ctx, runtime);
+        if (runtime->eeTransferPending())
+        {
+            return;
+        }
         ctx->pc = 0u;
         runtime->requestStop();
     }
@@ -471,6 +480,10 @@ namespace
             ctx->pc = K_EVENT_FIFO_A_RESUME;
             runtime->eeScheduler().waitEventFlag(gEventFifoId, 1u, WEF_OR | WEF_CLEAR,
                                                   K_EVENT_FIFO_RESULT_A);
+            if (runtime->eeTransferPending())
+            {
+                return;
+            }
         }
         gEventFifoTrace.push_back(4);
         ctx->pc = 0u;
@@ -484,6 +497,10 @@ namespace
             ctx->pc = K_EVENT_FIFO_B_RESUME;
             runtime->eeScheduler().waitEventFlag(gEventFifoId, 1u, WEF_OR | WEF_CLEAR,
                                                   K_EVENT_FIFO_RESULT_B);
+            if (runtime->eeTransferPending())
+            {
+                return;
+            }
         }
         gEventFifoTrace.push_back(6);
         ctx->pc = 0u;
@@ -549,6 +566,174 @@ void register_ps2_runtime_kernel_tests()
 {
     MiniTest::Case("PS2RuntimeKernel", [](TestCase &tc)
     {
+        tc.Run("nested calls yield even when the blocked PC equals both return addresses", [](TestCase &t)
+        {
+            TestEnv env;
+            auto &ee = env.runtime.eeScheduler();
+            env.ctx.pc = 0x302000u;
+            ee.reset(env.rdram.data(), env.ctx);
+            ee.bindMainContextForSyscall(env.ctx, env.rdram.data());
+            env.runtime.registerFunction(0x302010u, [](uint8_t *ram, R5900Context *ctx, PS2Runtime *runtime)
+            {
+                if (!runtime->dispatchGuestBranch(ram, ctx, 0x302020u, 0x302010u, 0x302030u,
+                                                   PS2Runtime::GuestBranchKind::DirectCall, "transfer regression")) return;
+                SET_GPR_U32(ctx, 8, 0xBADu);
+            });
+            env.runtime.registerFunction(0x302020u, [](uint8_t *ram, R5900Context *ctx, PS2Runtime *runtime)
+            {
+                ctx->pc = 0x302030u;
+                SleepThread(ram, ctx, runtime);
+                if (runtime->eeTransferPending())
+                {
+                    return;
+                }
+                SET_GPR_U32(ctx, 9, 0xBADu);
+            });
+            env.runtime.registerFunction(0x302030u, [](uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+            {
+                SET_GPR_U32(ctx, 10, runtime->eeTransferPending() ? 0xBADu : 1u);
+                ctx->pc = 0u;
+                runtime->requestStop();
+            });
+            auto *context = ee.currentContext();
+            const bool continued = env.runtime.dispatchGuestBranch(env.rdram.data(), context, 0x302010u,
+                0x302000u, 0x302030u, PS2Runtime::GuestBranchKind::DirectCall, "transfer regression");
+            t.IsTrue(!continued && ee.transferPending(), "yield must propagate across all guest callers");
+            t.IsTrue(ee.thread(1)->status == EeThreadStatus::Waiting, "the thread must remain blocked");
+            t.Equals(::getRegU32(context, 8), 0u, "the caller must not execute after a nested yield");
+            t.Equals(::getRegU32(context, 9), 0u, "the callee must not execute after a blocking syscall");
+            ee.wakeupThread(1, false);
+            ee.run();
+            t.Equals(::getRegU32(&ee.thread(1)->context, 10), 1u, "a new dispatch must clear the old transfer");
+        });
+
+        tc.Run("checkpoint yields propagate through a matching caller continuation", [](TestCase &t)
+        {
+            TestEnv env;
+            auto &ee = env.runtime.eeScheduler();
+            ee.reset(env.rdram.data(), env.ctx);
+            ee.bindMainContextForSyscall(env.ctx, env.rdram.data());
+            env.runtime.registerFunction(0x302080u, [](uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+            {
+                ctx->pc = 0x302084u;
+                runtime->postEeEvent({EeEventType::VBlankStart, 0u, 0u});
+                if (runtime->eeCheckpointDue(1u)) return;
+                SET_GPR_U32(ctx, 8, 0xBADu);
+            });
+            const bool continued = env.runtime.dispatchGuestBranch(env.rdram.data(), ee.currentContext(),
+                0x302080u, 0x302000u, 0x302084u, PS2Runtime::GuestBranchKind::DirectCall, "checkpoint regression");
+            t.IsTrue(!continued && ee.transferPending(), "a checkpoint must reach the outer dispatcher");
+            t.Equals(::getRegU32(ee.currentContext(), 8), 0u, "guest work after the checkpoint must remain pending");
+        });
+
+        tc.Run("thread deletion unwinds dispatch without reading the deleted context", [](TestCase &t)
+        {
+            TestEnv env;
+            auto &ee = env.runtime.eeScheduler();
+            ee.reset(env.rdram.data(), env.ctx);
+            env.runtime.registerFunction(0x302040u, [](uint8_t *ram, R5900Context *ctx, PS2Runtime *runtime)
+            {
+                ExitDeleteThread(ram, ctx, runtime);
+            });
+            env.runtime.registerFunction(0x302048u, [](uint8_t *ram, R5900Context *ctx, PS2Runtime *runtime)
+            {
+                const bool continued = runtime->dispatchGuestBranch(ram, ctx, 0x302040u,
+                    0x302048u, 0x30204Cu, PS2Runtime::GuestBranchKind::DirectCall, "transfer regression");
+                ram[0x1900u] = continued ? 1u : 0u;
+                ram[0x1901u] = runtime->eeTransferPending() ? 1u : 0u;
+                runtime->requestStop();
+            });
+            const int worker = ee.createThread(EeThreadCreateParams{0, 0x302048u, 0x20000u, 0x800u, 0, 5, 0});
+            ee.startThread(worker, 0u, env.ctx, false);
+            ee.run();
+            t.Equals(env.rdram[0x1900u], uint8_t{0}, "deletion must transfer out of every caller");
+            t.Equals(env.rdram[0x1901u], uint8_t{1}, "the deletion transfer must remain pending");
+            t.IsTrue(ee.thread(worker) == nullptr, "ExitDeleteThread must remove the owning context");
+        });
+
+        tc.Run("available semaphore and accumulated wakeup do not yield", [](TestCase &t)
+        {
+            TestEnv env;
+            auto &ee = env.runtime.eeScheduler();
+            ee.reset(env.rdram.data(), env.ctx);
+            ee.wakeupThread(1, false);
+            ee.bindMainContextForSyscall(env.ctx, env.rdram.data());
+            const int semaphore = ee.createSemaphore(1, 1, 0u, 0u);
+            ee.waitSemaphore(semaphore);
+            t.IsTrue(!ee.transferPending(), "an immediately available token must continue inline");
+            ee.sleepCurrent();
+            t.IsTrue(!ee.transferPending(), "a pending wakeup must satisfy sleep without a transfer");
+            t.Equals(ee.currentThreadId(), 1, "nonblocking calls must retain the running thread");
+        });
+
+        tc.Run("a resumed host completion can schedule a guest callback before its parent continues", [](TestCase &t)
+        {
+            TestEnv env;
+            auto &ee = env.runtime.eeScheduler();
+            env.ctx.pc = 0x302060u;
+            env.runtime.registerFunction(0x302060u, [](uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+            {
+                ctx->pc = 0x302064u;
+                runtime->eeScheduler().waitExternal(EeWaitReason::Mpeg, 1u, 123u,
+                    [runtime](R5900Context &parent)
+                    {
+                        GuestInvocation callback{};
+                        callback.kind = GuestInvocationKind::HleCall;
+                        callback.context = parent;
+                        callback.context.pc = 0x302068u;
+                        callback.onComplete = [](const R5900Context &result, R5900Context &owner)
+                        {
+                            SET_GPR_U32(&owner, 2, ::getRegU32(&result, 2));
+                        };
+                        runtime->eeScheduler().invokeCurrent(std::move(callback));
+                    });
+            });
+            env.runtime.registerFunction(0x302064u, [](uint8_t *ram, R5900Context *ctx, PS2Runtime *runtime)
+            {
+                ram[0x1900u] = static_cast<uint8_t>(::getRegU32(ctx, 2));
+                ram[0x1901u] = runtime->eeTransferPending() ? 1u : 0u;
+                ctx->pc = 0u;
+                runtime->requestStop();
+            });
+            env.runtime.registerFunction(0x302068u, [](uint8_t *, R5900Context *ctx, PS2Runtime *)
+            {
+                SET_GPR_U32(ctx, 2, 42u);
+                ctx->pc = 0u;
+            });
+            env.runtime.registerFunction(0x30206Cu, [](uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+            {
+                ctx->pc = 0u;
+                runtime->eeScheduler().completeExternalWait(1u, 123u, 0);
+            });
+            ee.reset(env.rdram.data(), env.ctx);
+            const int worker = ee.createThread(EeThreadCreateParams{0, 0x30206Cu, 0x20000u, 0x800u, 0, 5, 0});
+            ee.startThread(worker, 0u, env.ctx, false);
+            ee.run();
+            t.Equals(env.rdram[0x1900u], uint8_t{42}, "the parent must observe the completed callback result");
+            t.Equals(env.rdram[0x1901u], uint8_t{0}, "the callback transfer must be cleared at the next dispatch");
+            t.IsTrue(ee.thread(1)->invocations.empty(), "the callback frame must be removed exactly once");
+        });
+
+        tc.Run("real guest failures still propagate and release host scopes", [](TestCase &t)
+        {
+            TestEnv env;
+            env.ctx.pc = 0x302050u;
+            gGuestActive.store(0);
+            env.runtime.registerFunction(env.ctx.pc, [](uint8_t *, R5900Context *, PS2Runtime *runtime)
+            {
+                GuestExecutionProbe probe(runtime);
+                throw std::runtime_error("guest failure probe");
+            });
+            auto &ee = env.runtime.eeScheduler();
+            ee.reset(env.rdram.data(), env.ctx);
+            bool caught = false;
+            try { ee.run(); }
+            catch (const std::runtime_error &error) { caught = std::string(error.what()) == "guest failure probe"; }
+            t.IsTrue(caught, "actual failures must not be swallowed by cooperative dispatch");
+            t.Equals(gGuestActive.load(), 0, "host scope destructors must still run");
+            t.IsTrue(!ee.isExecutingGuest(), "an exception must clear the executing state");
+        });
+
         tc.Run("unsigned loads and ABI word writes extend independently", [](TestCase &t)
         {
             constexpr uint64_t kUpper = 0x1122334455667788ull;
@@ -702,16 +887,8 @@ void register_ps2_runtime_kernel_tests()
             t.Equals(ee.deleteThread(id, ownedStack), KE_OK, "a dormant thread record should be deletable");
             t.IsTrue(ee.thread(id) == nullptr, "deleted thread must leave every scheduler collection");
 
-            bool slept = false;
-            try
-            {
-                ee.sleepCurrent();
-            }
-            catch (const EeDispatcherTransfer &)
-            {
-                slept = true;
-            }
-            t.IsTrue(slept && ee.thread(EeScheduler::kMainThreadId)->status == EeThreadStatus::Waiting,
+            ee.sleepCurrent();
+            t.IsTrue(ee.transferPending() && ee.thread(EeScheduler::kMainThreadId)->status == EeThreadStatus::Waiting,
                      "SleepThread should transfer the running context into a typed wait");
             t.Equals(ee.suspendThread(EeScheduler::kMainThreadId, false), KE_OK,
                      "suspending a waiter should produce WAIT-SUSPEND");
@@ -735,13 +912,7 @@ void register_ps2_runtime_kernel_tests()
                 ee.reset(env.rdram.data(), env.ctx);
                 ee.bindMainContextForSyscall(env.ctx, env.rdram.data());
                 semaId = ee.createSemaphore(0, 1, 0u, 0u);
-                try
-                {
-                    ee.waitSemaphore(semaId);
-                }
-                catch (const EeDispatcherTransfer &)
-                {
-                }
+                ee.waitSemaphore(semaId);
             };
 
             TestEnv signaled;

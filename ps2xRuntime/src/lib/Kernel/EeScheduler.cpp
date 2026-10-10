@@ -107,6 +107,7 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_enabledIntcMask = 0xFFFFFFFFu;
     m_enabledDmacMask = 0xFFFFFFFFu;
     m_currentThreadId = 0;
+    m_transferPending = false;
     m_rescheduleRequested = false;
     m_timeSliceExpired = false;
     m_insideInterrupt = false;
@@ -159,6 +160,7 @@ void EeScheduler::run()
 
     while (!m_stopRequested.load(std::memory_order_acquire))
     {
+        m_transferPending = false;
         processPendingEvents();
         if (m_stopRequested.load(std::memory_order_acquire))
         {
@@ -202,14 +204,8 @@ void EeScheduler::run()
         {
             auto completion = std::move(running->resumeCompletion);
             running->resumeCompletion = {};
-            try
-            {
-                completion(running->activeContext());
-            }
-            catch (const EeDispatcherTransfer &)
-            {
-            }
-            if (m_currentThreadId == 0)
+            completion(running->activeContext());
+            if (m_transferPending || m_currentThreadId == 0)
             {
                 continue;
             }
@@ -236,13 +232,7 @@ void EeScheduler::run()
                 running->invocations.pop_back();
                 if (completed.onComplete)
                 {
-                    try
-                    {
-                        completed.onComplete(completed.context, running->activeContext());
-                    }
-                    catch (const EeDispatcherTransfer &)
-                    {
-                    }
+                    completed.onComplete(completed.context, running->activeContext());
                 }
                 continue;
             }
@@ -300,13 +290,9 @@ void EeScheduler::run()
             m_guestExecuting.store(false, std::memory_order_release);
             m_insideInterrupt = false;
         }
-        catch (const EeDispatcherTransfer &)
-        {
-            m_guestExecuting.store(false, std::memory_order_release);
-            m_insideInterrupt = false;
-        }
         catch (...)
         {
+            m_insideInterrupt = false;
             m_guestExecuting.store(false, std::memory_order_release);
             m_running.store(false, std::memory_order_release);
             publishSnapshot();
@@ -361,6 +347,7 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
     if (m_checkpointPending.load(std::memory_order_acquire) ||
         m_stopRequested.load(std::memory_order_acquire))
     {
+        m_transferPending = true;
         return true;
     }
 
@@ -368,6 +355,7 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
     if (nextEventCycle != 0u && m_eeCycle >= nextEventCycle)
     {
         m_checkpointPending.store(true, std::memory_order_release);
+        m_transferPending = true;
         return true;
     }
 
@@ -381,6 +369,7 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
     {
         m_rescheduleRequested = true;
         m_timeSliceExpired = true;
+        m_transferPending = true;
         return true;
     }
 
@@ -508,7 +497,7 @@ int EeScheduler::startThread(int id, uint32_t arg, const R5900Context &caller, b
     return KE_OK;
 }
 
-[[noreturn]] void EeScheduler::exitCurrent(bool deleteThreadRecord)
+void EeScheduler::exitCurrent(bool deleteThreadRecord)
 {
     assertExecutor();
     GuestThread *exiting = currentThread();
@@ -526,7 +515,7 @@ int EeScheduler::startThread(int id, uint32_t arg, const R5900Context &caller, b
         m_runtime.guestFree(ownedStack);
     }
     publishSnapshot();
-    throw EeDispatcherTransfer{};
+    m_transferPending = true;
 }
 
 int EeScheduler::terminateThread(int id, uint32_t &ownedStack, bool interruptSafe)
@@ -815,7 +804,7 @@ void EeScheduler::transferIfRequested(bool interruptSafe)
     m_rescheduleRequested = false;
     m_timeSliceExpired = false;
     publishSnapshot();
-    throw EeDispatcherTransfer{};
+    m_transferPending = true;
 }
 
 int EeScheduler::createSemaphore(int initCount, int maxCount, uint32_t attr, uint32_t option)
@@ -1106,7 +1095,7 @@ void EeScheduler::queueInvocation(GuestInvocation invocation)
     m_checkpointPending.store(true, std::memory_order_release);
 }
 
-[[noreturn]] void EeScheduler::invokeCurrent(GuestInvocation invocation)
+void EeScheduler::invokeCurrent(GuestInvocation invocation)
 {
     assertExecutor();
     GuestThread *owner = currentThread();
@@ -1118,10 +1107,10 @@ void EeScheduler::queueInvocation(GuestInvocation invocation)
     invocation.sequence = ++m_invocationSequence;
     owner->invocations.push_back(std::move(invocation));
     publishSnapshot();
-    throw EeDispatcherTransfer{};
+    m_transferPending = true;
 }
 
-[[noreturn]] void EeScheduler::invokeCurrentSequence(std::vector<GuestInvocation> invocations)
+void EeScheduler::invokeCurrentSequence(std::vector<GuestInvocation> invocations)
 {
     assertExecutor();
     GuestThread *owner = currentThread();
@@ -1137,7 +1126,7 @@ void EeScheduler::queueInvocation(GuestInvocation invocation)
         owner->invocations.push_back(std::move(*it));
     }
     publishSnapshot();
-    throw EeDispatcherTransfer{};
+    m_transferPending = true;
 }
 
 bool EeScheduler::hasInvocation(GuestInvocationKind kind, uint64_t tag) const
@@ -1320,7 +1309,7 @@ uint32_t EeScheduler::setGsVSyncCallback(uint32_t callback, uint32_t gp, uint32_
     return previous;
 }
 
-[[noreturn]] void EeScheduler::waitVSync(uint64_t afterTick, int fixedResult, std::function<void(R5900Context &)> completion)
+void EeScheduler::waitVSync(uint64_t afterTick, int fixedResult, std::function<void(R5900Context &)> completion)
 {
     blockCurrent(EeWaitState{
         EeWaitReason::VSync,
@@ -1383,7 +1372,7 @@ void EeScheduler::completeExternalWait(uint32_t type, uint64_t token, int result
     publishSnapshot();
 }
 
-[[noreturn]] void EeScheduler::waitExternal(EeWaitReason reason,
+void EeScheduler::waitExternal(EeWaitReason reason,
                                             uint32_t type,
                                             uint64_t token,
                                             std::function<void(R5900Context &)> completion)
@@ -1688,7 +1677,7 @@ void EeScheduler::blockCurrent(EeWaitState wait)
     self->status = self->suspendCount == 0 ? EeThreadStatus::Waiting : EeThreadStatus::WaitingSuspended;
     m_currentThreadId = 0;
     publishSnapshot();
-    throw EeDispatcherTransfer{};
+    m_transferPending = true;
 }
 
 void EeScheduler::makeReady(GuestThread &item, int result, bool interruptSafe)
@@ -1736,6 +1725,7 @@ void EeScheduler::applyPendingPreemption()
     assert(self != nullptr);
     enqueueReady(*self, !m_timeSliceExpired);
     m_currentThreadId = 0;
+    m_transferPending = false;
     m_rescheduleRequested = false;
     m_timeSliceExpired = false;
 }

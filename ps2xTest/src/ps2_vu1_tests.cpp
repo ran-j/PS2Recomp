@@ -3,13 +3,15 @@
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/ps2_gs_psmct32.h"
 #include "runtime/ps2_memory.h"
-#include "runtime/ps2_vu1.h"
+#include "runtime/vu/interpreter/vu_executor.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <stdexcept>
+#include <cfenv>
 #include <vector>
 
 namespace
@@ -20,7 +22,7 @@ namespace
     {
         PS2Memory mem;
         GS gs;
-        uint8_t *code = nullptr;
+        const uint8_t *code = nullptr;
         uint8_t *data = nullptr;
 
         bool initialize()
@@ -30,7 +32,6 @@ namespace
             gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
             code = mem.getVU1Code();
             data = mem.getVU1Data();
-            std::memset(code, 0, PS2_VU1_CODE_SIZE);
             std::memset(data, 0, PS2_VU1_DATA_SIZE);
             return code != nullptr && data != nullptr;
         }
@@ -172,10 +173,9 @@ namespace
         return makeVuLowerSpecial(0x39u, 0u, ft, 0u, static_cast<uint8_t>((ftf & 0x3u) << 2));
     }
 
-    void writeVuInstructionPair(uint8_t *code, uint32_t pc, uint32_t lower, uint32_t upper)
+    void writeVuInstructionPair(PS2Memory &memory, uint32_t pc, uint32_t lower, uint32_t upper)
     {
-        std::memcpy(code + pc, &lower, sizeof(lower));
-        std::memcpy(code + pc + sizeof(lower), &upper, sizeof(upper));
+        memory.write64(PS2_VU1_CODE_BASE + pc, uint64_t(lower) | (uint64_t(upper) << 32));
     }
 
     uint64_t packVuInstructionPair(uint32_t lower, uint32_t upper)
@@ -223,9 +223,9 @@ void register_ps2_vu1_tests()
             Vu1Fixture fx;
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
 
-            writeVuInstructionPair(fx.code, 0u, 0u, makeVuUpper(0x28u, 0xAu, 2u, 1u, 3u)); // ADD.xz vf3, vf1, vf2
+            writeVuInstructionPair(fx.mem, 0u, 0u, makeVuUpper(0x28u, 0xAu, 2u, 1u, 3u)); // ADD.xz vf3, vf1, vf2
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             vu1.state().vf[1][0] = 1.0f;
             vu1.state().vf[1][1] = 2.0f;
             vu1.state().vf[1][2] = 3.0f;
@@ -260,9 +260,9 @@ void register_ps2_vu1_tests()
             uint32_t lowerImmediate = 0u;
             std::memcpy(&lowerImmediate, &newI, sizeof(newI));
             const uint32_t upperAddiWithIBit = makeVuUpper(0x22u, 0xFu, 0u, 1u, 2u) | 0x80000000u; // ADDi.xyzw vf2, vf1
-            writeVuInstructionPair(fx.code, 0u, lowerImmediate, upperAddiWithIBit);
+            writeVuInstructionPair(fx.mem, 0u, lowerImmediate, upperAddiWithIBit);
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             vu1.state().i = 2.0f;
             vu1.state().vf[1][0] = 1.0f;
             vu1.state().vf[1][1] = 2.0f;
@@ -290,10 +290,10 @@ void register_ps2_vu1_tests()
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
 
             writeVuInstructionPair(
-                fx.code, 0u, 0u,
+                fx.mem, 0u, 0u,
                 makeVuUpperSpecial(0x10u, 0xFu, 2u, 1u));
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             const int32_t raw[4] = {1, -16, 4096, -32768};
             std::memcpy(vu1.state().vf[1], raw, sizeof(raw));
             vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
@@ -318,7 +318,7 @@ void register_ps2_vu1_tests()
             for (uint32_t component = 0; component < 4u; ++component)
             {
                 writeVuInstructionPair(
-                    fx.code, component * 8u,
+                    fx.mem, component * 8u,
                     makeVuLowerSpecial(0x3Cu, 1u,
                                        static_cast<uint8_t>(component + 2u),
                                        0u,
@@ -326,7 +326,7 @@ void register_ps2_vu1_tests()
                     kVuUpperNop);
             }
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             const uint32_t raw[4] = {0x00001111u, 0x00002222u, 0x00003333u, 0x00004444u};
             std::memcpy(vu1.state().vf[1], raw, sizeof(raw));
             vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
@@ -352,10 +352,10 @@ void register_ps2_vu1_tests()
             const float destQw[4] = {-1.0f, -2.0f, -3.0f, -4.0f};
             writeVuQword(fx.data, 3u, sourceQw);
             writeVuQword(fx.data, 5u, destQw);
-            writeVuInstructionPair(fx.code, 0u, makeVuLq(0x5u, 4u, 1u, 1), kVuUpperNop); // LQ.yw vf4, 1(vi1)
-            writeVuInstructionPair(fx.code, 8u, makeVuSq(0xAu, 4u, 2u, 1), kVuUpperNop); // SQ.xz vf4, 1(vi2)
+            writeVuInstructionPair(fx.mem, 0u, makeVuLq(0x5u, 4u, 1u, 1), kVuUpperNop); // LQ.yw vf4, 1(vi1)
+            writeVuInstructionPair(fx.mem, 8u, makeVuSq(0xAu, 4u, 2u, 1), kVuUpperNop); // SQ.xz vf4, 1(vi2)
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             vu1.state().vi[1] = 2;
             vu1.state().vi[2] = 4;
             vu1.state().vf[4][0] = 100.0f;
@@ -389,11 +389,11 @@ void register_ps2_vu1_tests()
             Vu1Fixture fx;
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
 
-            writeVuInstructionPair(fx.code, 0u, makeVuIaddiu(2u, 1u, 5), kVuUpperNop);      // IADDIU vi2, vi1, 5
-            writeVuInstructionPair(fx.code, 8u, makeVuIaddiu(0u, 2u, 7), kVuUpperNop);      // IADDIU vi0, vi2, 7
-            writeVuInstructionPair(fx.code, 16u, makeVuLowerDirect(0x30u, 2u, 1u, 3u), kVuUpperNop); // IADD vi3, vi2, vi1
+            writeVuInstructionPair(fx.mem, 0u, makeVuIaddiu(2u, 1u, 5), kVuUpperNop);      // IADDIU vi2, vi1, 5
+            writeVuInstructionPair(fx.mem, 8u, makeVuIaddiu(0u, 2u, 7), kVuUpperNop);      // IADDIU vi0, vi2, 7
+            writeVuInstructionPair(fx.mem, 16u, makeVuLowerDirect(0x30u, 2u, 1u, 3u), kVuUpperNop); // IADD vi3, vi2, vi1
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             vu1.state().vi[0] = 99;
             vu1.state().vi[1] = 10;
 
@@ -409,10 +409,10 @@ void register_ps2_vu1_tests()
             Vu1Fixture fx;
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
 
-            writeVuInstructionPair(fx.code, 0u, makeVuLowerSpecial(0x68u, 0u, 2u), kVuUpperNop); // XTOP vi2
-            writeVuInstructionPair(fx.code, 8u, makeVuLowerSpecial(0x69u, 0u, 3u), kVuUpperNop); // XITOP vi3
+            writeVuInstructionPair(fx.mem, 0u, makeVuLowerSpecial(0x68u, 0u, 2u), kVuUpperNop); // XTOP vi2
+            writeVuInstructionPair(fx.mem, 8u, makeVuLowerSpecial(0x69u, 0u, 3u), kVuUpperNop); // XITOP vi3
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0x123u, 0x2ABu, 2u);
 
             t.Equals(vu1.state().vi[2], 0x123, "XTOP should move TOP into the target VI register");
@@ -424,12 +424,12 @@ void register_ps2_vu1_tests()
             Vu1Fixture fx;
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
 
-            writeVuInstructionPair(fx.code, 0u, makeVuBranch(2), kVuUpperNop);              // target pc = 24
-            writeVuInstructionPair(fx.code, 8u, makeVuIaddiu(1u, 0u, 1), kVuUpperNop);      // delay slot
-            writeVuInstructionPair(fx.code, 16u, makeVuIaddiu(2u, 0u, 99), kVuUpperNop);    // skipped
-            writeVuInstructionPair(fx.code, 24u, makeVuIaddiu(3u, 0u, 7), kVuUpperNop);     // branch target
+            writeVuInstructionPair(fx.mem, 0u, makeVuBranch(2), kVuUpperNop);              // target pc = 24
+            writeVuInstructionPair(fx.mem, 8u, makeVuIaddiu(1u, 0u, 1), kVuUpperNop);      // delay slot
+            writeVuInstructionPair(fx.mem, 16u, makeVuIaddiu(2u, 0u, 99), kVuUpperNop);    // skipped
+            writeVuInstructionPair(fx.mem, 24u, makeVuIaddiu(3u, 0u, 7), kVuUpperNop);     // branch target
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 0u, 3u);
 
             t.Equals(vu1.state().vi[1], 1, "branch delay slot should execute");
@@ -442,12 +442,12 @@ void register_ps2_vu1_tests()
             Vu1Fixture fx;
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
 
-            writeVuInstructionPair(fx.code,
+            writeVuInstructionPair(fx.mem,
                                    0u,
                                    makeVuSq(0xFu, 1u, 1u, 0),                 // SQ.xyzw vf1, 0(vi1)
                                    makeVuUpper(0x28u, 0xFu, 3u, 2u, 1u));     // ADD.xyzw vf1, vf2, vf3
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             vu1.state().vi[1] = 6;
             vu1.state().vf[1][0] = 1.0f;
             vu1.state().vf[1][1] = 2.0f;
@@ -486,12 +486,12 @@ void register_ps2_vu1_tests()
             const float loaded[4] = {90.0f, 91.0f, 92.0f, 93.0f};
             writeVuQword(fx.data, 5u, loaded);
             writeVuInstructionPair(
-                fx.code,
+                fx.mem,
                 0u,
                 makeVuLowerSpecial(0x34u, 1u, 1u, 0u, 0xFu),
                 makeVuUpper(0x28u, 0x8u, 3u, 2u, 1u));
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             vu1.state().vi[1] = 5;
             vu1.state().vf[1][0] = 1.0f;
             vu1.state().vf[1][1] = 2.0f;
@@ -529,11 +529,11 @@ void register_ps2_vu1_tests()
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
 
             writeVuInstructionPair(
-                fx.code, 0u,
+                fx.mem, 0u,
                 makeVuLowerSpecial(0x30u, 1u, 2u, 0u, 0x8u),
                 makeVuUpper(0x28u, 0x8u, 3u, 2u, 1u));
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             vu1.state().vf[1][0] = 10.0f;
             vu1.state().vf[2][0] = 20.0f;
             vu1.state().vf[3][0] = 1.0f;
@@ -556,13 +556,13 @@ void register_ps2_vu1_tests()
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
 
             writeVuInstructionPair(
-                fx.code, 0u, 0u,
+                fx.mem, 0u, 0u,
                 makeVuUpper(0x28u, 0x8u, 2u, 1u, 3u));
             writeVuInstructionPair(
-                fx.code, 8u, 0u,
+                fx.mem, 8u, 0u,
                 makeVuUpper(0x28u, 0x8u, 2u, 3u, 4u));
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             vu1.state().vf[1][0] = 1.0f;
             vu1.state().vf[2][0] = 2.0f;
             vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
@@ -586,13 +586,13 @@ void register_ps2_vu1_tests()
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
 
             writeVuInstructionPair(
-                fx.code, 0u, 0u,
+                fx.mem, 0u, 0u,
                 makeVuUpperSpecial(0x28u, 0x8u, 2u, 1u)); // ADDA.x acc, vf1, vf2
             writeVuInstructionPair(
-                fx.code, 8u, 0u,
+                fx.mem, 8u, 0u,
                 makeVuUpper(0x29u, 0x8u, 4u, 3u, 5u)); // MADD.x vf5, vf3, vf4
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             vu1.state().vf[1][0] = 1.0f;
             vu1.state().vf[2][0] = 10.0f;
             vu1.state().vf[3][0] = 2.0f;
@@ -617,11 +617,11 @@ void register_ps2_vu1_tests()
             const uint32_t source[4] = {0x1234u, 0u, 0u, 0u};
             std::memcpy(fx.data + 2u * 16u, source, sizeof(source));
             writeVuInstructionPair(
-                fx.code, 0u, makeVuIlw(0x8u, 2u, 1u, 0), kVuUpperNop);
+                fx.mem, 0u, makeVuIlw(0x8u, 2u, 1u, 0), kVuUpperNop);
             writeVuInstructionPair(
-                fx.code, 8u, makeVuIaddiu(3u, 2u, 1), kVuUpperNop);
+                fx.mem, 8u, makeVuIaddiu(3u, 2u, 1), kVuUpperNop);
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             vu1.state().vi[1] = 2;
             vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
                         fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
@@ -640,12 +640,12 @@ void register_ps2_vu1_tests()
             Vu1Fixture fx;
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
 
-            writeVuInstructionPair(fx.code, 0u, makeVuDiv(1u, 2u, 1u, 2u), kVuUpperNop);              // Q = vf1.y / vf2.z
-            writeVuInstructionPair(fx.code, 8u, makeVuLowerSpecial(0x3Bu, 0u), kVuUpperNop);          // WAITQ
-            writeVuInstructionPair(fx.code, 16u, makeVuSqrt(3u, 3u), kVuUpperNop);                    // Q = sqrt(abs(vf3.w))
-            writeVuInstructionPair(fx.code, 24u, makeVuLowerSpecial(0x3Bu, 0u), kVuUpperNop);         // WAITQ
+            writeVuInstructionPair(fx.mem, 0u, makeVuDiv(1u, 2u, 1u, 2u), kVuUpperNop);              // Q = vf1.y / vf2.z
+            writeVuInstructionPair(fx.mem, 8u, makeVuLowerSpecial(0x3Bu, 0u), kVuUpperNop);          // WAITQ
+            writeVuInstructionPair(fx.mem, 16u, makeVuSqrt(3u, 3u), kVuUpperNop);                    // Q = sqrt(abs(vf3.w))
+            writeVuInstructionPair(fx.mem, 24u, makeVuLowerSpecial(0x3Bu, 0u), kVuUpperNop);         // WAITQ
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             vu1.state().vf[1][1] = 18.0f;
             vu1.state().vf[2][2] = 3.0f;
             vu1.state().vf[3][3] = 25.0f;
@@ -665,19 +665,19 @@ void register_ps2_vu1_tests()
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
 
             writeVuInstructionPair(
-                fx.code, 0u,
+                fx.mem, 0u,
                 makeVuDiv(1u, 2u, 0u, 0u),
                 kVuUpperNop); // Q = vf1.x / vf2.x
             writeVuInstructionPair(
-                fx.code, 8u,
+                fx.mem, 8u,
                 makeVuSqrt(3u, 0u),
                 kVuUpperNop); // Must wait for the shared FDIV unit.
             writeVuInstructionPair(
-                fx.code, 16u,
+                fx.mem, 16u,
                 makeVuLowerSpecial(0x3Bu, 0u),
                 kVuUpperNop); // WAITQ
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             vu1.state().vf[1][0] = 18.0f;
             vu1.state().vf[2][0] = 3.0f;
             vu1.state().vf[3][0] = 25.0f;
@@ -697,13 +697,13 @@ void register_ps2_vu1_tests()
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
 
             writeVuInstructionPair(
-                fx.code, 0u, makeVuDiv(1u, 2u, 0u, 0u),
+                fx.mem, 0u, makeVuDiv(1u, 2u, 0u, 0u),
                 kVuUpperNop);
             writeVuInstructionPair(
-                fx.code, 8u, makeVuLowerSpecial(0x3Bu, 0u),
+                fx.mem, 8u, makeVuLowerSpecial(0x3Bu, 0u),
                 kVuUpperNop);
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             vu1.state().vf[1][0] = 0.0f;
             vu1.state().vf[2][0] = 0.0f;
             vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
@@ -728,23 +728,23 @@ void register_ps2_vu1_tests()
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
 
             writeVuInstructionPair(
-                fx.code, 0u,
+                fx.mem, 0u,
                 makeVuLowerSpecial(0x70u, 1u),
                 kVuUpperNop); // ESADD P, vf1
             writeVuInstructionPair(
-                fx.code, 8u,
+                fx.mem, 8u,
                 makeVuLowerSpecial(0x7Bu, 0u),
                 kVuUpperNop); // WAITP
             writeVuInstructionPair(
-                fx.code, 16u,
+                fx.mem, 16u,
                 makeVuLowerSpecial(0x42u, 2u, 0u, 0u, 0x8u),
                 kVuUpperNop); // RINIT R, vf2.x
             writeVuInstructionPair(
-                fx.code, 24u,
+                fx.mem, 24u,
                 makeVuLowerSpecial(0x40u, 0u, 3u, 0u, 0x8u),
                 kVuUpperNop); // RNEXT.x vf3
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             vu1.state().vf[1][0] = 1.0f;
             vu1.state().vf[1][1] = 2.0f;
             vu1.state().vf[1][2] = 3.0f;
@@ -772,19 +772,19 @@ void register_ps2_vu1_tests()
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
 
             writeVuInstructionPair(
-                fx.code, 0u,
+                fx.mem, 0u,
                 makeVuLowerSpecial(0x70u, 1u),
                 kVuUpperNop); // ESADD: result at cycle 11, resource free at 10.
             writeVuInstructionPair(
-                fx.code, 8u,
+                fx.mem, 8u,
                 makeVuLowerSpecial(0x72u, 1u),
                 kVuUpperNop); // ELENG: must issue at cycle 10.
             writeVuInstructionPair(
-                fx.code, 16u,
+                fx.mem, 16u,
                 makeVuLowerSpecial(0x7Bu, 0u),
                 kVuUpperNop); // WAITP waits for ELENG at cycle 28.
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             vu1.state().vf[1][0] = 1.0f;
             vu1.state().vf[1][1] = 2.0f;
             vu1.state().vf[1][2] = 3.0f;
@@ -816,17 +816,17 @@ void register_ps2_vu1_tests()
 
             for (const EfuCase &efu : cases)
             {
-                std::memset(fx.code, 0, PS2_VU1_CODE_SIZE);
+                fx.mem.writeVuCode(true, 0, std::array<uint8_t, PS2_VU1_CODE_SIZE>{});
                 writeVuInstructionPair(
-                    fx.code, 0u,
+                    fx.mem, 0u,
                     makeVuLowerSpecial(efu.opcode, 1u, 0u, 0u, 0u),
                     kVuUpperNop);
                 writeVuInstructionPair(
-                    fx.code, 8u,
+                    fx.mem, 8u,
                     makeVuLowerSpecial(0x7Bu, 0u),
                     kVuUpperNop);
 
-                VU1Interpreter vu1;
+                VUExecutor vu1;
                 vu1.state().vf[1][0] = 0.25f;
                 vu1.state().vf[1][1] = 0.5f;
                 vu1.state().vf[1][2] = 0.75f;
@@ -849,16 +849,16 @@ void register_ps2_vu1_tests()
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
 
             writeVuInstructionPair(
-                fx.code, 0u, 0u,
+                fx.mem, 0u, 0u,
                 kVuUpperNop | 0x40000000u);
             writeVuInstructionPair(
-                fx.code, 8u, makeVuIaddiu(1u, 0u, 7),
+                fx.mem, 8u, makeVuIaddiu(1u, 0u, 7),
                 kVuUpperNop);
             writeVuInstructionPair(
-                fx.code, 16u, makeVuIaddiu(2u, 0u, 9),
+                fx.mem, 16u, makeVuIaddiu(2u, 0u, 9),
                 kVuUpperNop);
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
                         fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
                         0u, 0u, 0u, 32u);
@@ -946,22 +946,22 @@ void register_ps2_vu1_tests()
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
 
             writeVuInstructionPair(
-                fx.code, 0u, makeVuIaddiu(1u, 0u, 1),
+                fx.mem, 0u, makeVuIaddiu(1u, 0u, 1),
                 kVuUpperNop);
             writeVuInstructionPair(
-                fx.code, 8u, makeVuIbne(1u, 0u, 2),
+                fx.mem, 8u, makeVuIbne(1u, 0u, 2),
                 kVuUpperNop);
             writeVuInstructionPair(
-                fx.code, 16u, makeVuIaddiu(2u, 0u, 2),
+                fx.mem, 16u, makeVuIaddiu(2u, 0u, 2),
                 kVuUpperNop);
             writeVuInstructionPair(
-                fx.code, 24u, makeVuIaddiu(3u, 0u, 3),
+                fx.mem, 24u, makeVuIaddiu(3u, 0u, 3),
                 kVuUpperNop);
             writeVuInstructionPair(
-                fx.code, 32u, makeVuIaddiu(4u, 0u, 4),
+                fx.mem, 32u, makeVuIaddiu(4u, 0u, 4),
                 kVuUpperNop);
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
                         fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
                         0u, 0u, 0u, 4u);
@@ -1022,23 +1022,23 @@ void register_ps2_vu1_tests()
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
 
             writeVuInstructionPair(
-                fx.code, 0u,
+                fx.mem, 0u,
                 makeVuFlagImmediate(0x16u, 1u, 0x001u),
                 kVuUpperNop);
             writeVuInstructionPair(
-                fx.code, 8u, makeVuIbne(1u, 0u, 2),
+                fx.mem, 8u, makeVuIbne(1u, 0u, 2),
                 kVuUpperNop);
             writeVuInstructionPair(
-                fx.code, 16u, makeVuIaddiu(2u, 0u, 2),
+                fx.mem, 16u, makeVuIaddiu(2u, 0u, 2),
                 kVuUpperNop);
             writeVuInstructionPair(
-                fx.code, 24u, makeVuIaddiu(3u, 0u, 3),
+                fx.mem, 24u, makeVuIaddiu(3u, 0u, 3),
                 kVuUpperNop);
             writeVuInstructionPair(
-                fx.code, 32u, makeVuIaddiu(4u, 0u, 4),
+                fx.mem, 32u, makeVuIaddiu(4u, 0u, 4),
                 kVuUpperNop);
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             vu1.state().status = 0x001u;
             vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
                         fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
@@ -1060,22 +1060,22 @@ void register_ps2_vu1_tests()
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
 
             writeVuInstructionPair(
-                fx.code, 0u, makeVuIaddiu(1u, 0u, 2),
+                fx.mem, 0u, makeVuIaddiu(1u, 0u, 2),
                 kVuUpperNop);
             writeVuInstructionPair(
-                fx.code, 8u, makeVuJr(1u),
+                fx.mem, 8u, makeVuJr(1u),
                 kVuUpperNop);
             writeVuInstructionPair(
-                fx.code, 16u, makeVuIaddiu(2u, 0u, 2),
+                fx.mem, 16u, makeVuIaddiu(2u, 0u, 2),
                 kVuUpperNop);
             writeVuInstructionPair(
-                fx.code, 24u, makeVuIaddiu(3u, 0u, 3),
+                fx.mem, 24u, makeVuIaddiu(3u, 0u, 3),
                 kVuUpperNop);
             writeVuInstructionPair(
-                fx.code, 32u, makeVuIaddiu(4u, 0u, 4),
+                fx.mem, 32u, makeVuIaddiu(4u, 0u, 4),
                 kVuUpperNop);
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             vu1.state().vi[1] = 4;
             vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
                         fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
@@ -1096,7 +1096,7 @@ void register_ps2_vu1_tests()
             Vu1Fixture fx;
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             fx.mem.setVu1MscalCallback([&](uint32_t startPC, uint32_t top, uint32_t itop)
             {
                 vu1.execute(fx.code,
@@ -1127,7 +1127,7 @@ void register_ps2_vu1_tests()
             Vu1Fixture fx;
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             fx.mem.write64(PS2_VU1_CODE_BASE, packVuInstructionPair(makeVuIaddiu(1u, 0u, 1), kVuUpperNop));
             vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 0u, 1u);
             t.Equals(vu1.state().vi[1], 1, "first execution should use the original direct write");
@@ -1152,9 +1152,8 @@ void register_ps2_vu1_tests()
             GS gs;
             gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
 
-            uint8_t *vuCode = mem.getVU1Code();
+            const uint8_t *vuCode = mem.getVU1Code();
             uint8_t *vuData = mem.getVU1Data();
-            std::memset(vuCode, 0, PS2_VU1_CODE_SIZE);
             std::memset(vuData, 0, PS2_VU1_DATA_SIZE);
 
             constexpr uint32_t kLastQw = (PS2_VU1_DATA_SIZE / 16u) - 1u;
@@ -1169,11 +1168,11 @@ void register_ps2_vu1_tests()
             }
 
             const uint32_t lower = makeVuLowerSpecial(0x6Cu, 1u);
-            std::memcpy(vuCode + 0u, &lower, sizeof(lower));
+            mem.write32(PS2_VU1_CODE_BASE, lower);
             const uint32_t upper = 0u;
-            std::memcpy(vuCode + 4u, &upper, sizeof(upper));
+            mem.write32(PS2_VU1_CODE_BASE + 4, upper);
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             vu1.state().vi[1] = static_cast<int32_t>(kLastQw);
             vu1.execute(vuCode,
                         PS2_VU1_CODE_SIZE,
@@ -1218,25 +1217,24 @@ void register_ps2_vu1_tests()
             GS gs;
             gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
 
-            uint8_t *code = mem.getVU1Code();
+            const uint8_t *code = mem.getVU1Code();
             uint8_t *data = mem.getVU1Data();
-            std::memset(code, 0, PS2_VU1_CODE_SIZE);
             std::memset(data, 0xFF, PS2_VU1_DATA_SIZE);
 
             const uint64_t imageTag = makeGifTag(1u, GIF_FMT_IMAGE, 0u, true);
             std::memset(data, 0, 16u);
             std::memcpy(data, &imageTag, sizeof(imageTag));
             writeVuInstructionPair(
-                code, 0u,
+                mem, 0u,
                 makeVuLowerSpecial(0x6Cu, 1u),
                 kVuUpperNop);
             writeVuInstructionPair(
-                code, 8u,
+                mem, 8u,
                 makeVuSq(0xFu, 4u, 2u, 0),
                 kVuUpperNop);
-            writeVuInstructionPair(code, 16u, 0u, kVuUpperNop);
+            writeVuInstructionPair(mem, 16u, 0u, kVuUpperNop);
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             vu1.state().vi[1] = 0;
             vu1.state().vi[2] = 1;
             const float replacement[4] = {0.0f, 0.0f, 0.0f, 1.0f};
@@ -1271,9 +1269,8 @@ void register_ps2_vu1_tests()
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
             GS gs;
             gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
-            uint8_t *code = mem.getVU1Code();
+            const uint8_t *code = mem.getVU1Code();
             uint8_t *data = mem.getVU1Data();
-            std::memset(code, 0, PS2_VU1_CODE_SIZE);
             std::memset(data, 0, PS2_VU1_DATA_SIZE);
 
             const uint64_t imageTag = makeGifTag(1u, GIF_FMT_IMAGE, 0u, true);
@@ -1282,17 +1279,17 @@ void register_ps2_vu1_tests()
             std::memset(data + 16u, 0x11, 16u);
             std::memset(data + 48u, 0x22, 16u);
             writeVuInstructionPair(
-                code, 0u,
+                mem, 0u,
                 makeVuLowerSpecial(0x6Cu, 1u),
                 kVuUpperNop);
             writeVuInstructionPair(
-                code, 8u,
+                mem, 8u,
                 makeVuLowerSpecial(0x6Cu, 2u),
                 kVuUpperNop);
-            writeVuInstructionPair(code, 16u, 0u, kVuUpperNop);
-            writeVuInstructionPair(code, 24u, 0u, kVuUpperNop);
+            writeVuInstructionPair(mem, 16u, 0u, kVuUpperNop);
+            writeVuInstructionPair(mem, 24u, 0u, kVuUpperNop);
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             vu1.state().vi[1] = 0;
             vu1.state().vi[2] = 2;
             vu1.execute(code, PS2_VU1_CODE_SIZE,
@@ -1327,26 +1324,25 @@ void register_ps2_vu1_tests()
             GS gs;
             gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
 
-            uint8_t *code = mem.getVU1Code();
+            const uint8_t *code = mem.getVU1Code();
             uint8_t *data = mem.getVU1Data();
-            std::memset(code, 0, PS2_VU1_CODE_SIZE);
             std::memset(data, 0, PS2_VU1_DATA_SIZE);
 
             const uint64_t imageTag = makeGifTag(1u, GIF_FMT_IMAGE, 0u, true);
             std::memcpy(data, &imageTag, sizeof(imageTag));
             writeVuInstructionPair(
-                code, 0u, 0u,
+                mem, 0u, 0u,
                 makeVuUpper(0x28u, 0xFu, 3u, 2u, 4u));
             writeVuInstructionPair(
-                code, 8u,
+                mem, 8u,
                 makeVuSq(0xFu, 4u, 2u, 0),
                 kVuUpperNop);
             writeVuInstructionPair(
-                code, 16u,
+                mem, 16u,
                 makeVuLowerSpecial(0x6Cu, 1u),
                 kVuUpperNop);
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             vu1.state().vi[1] = 0;
             vu1.state().vi[2] = 1;
             const float a[4] = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -1398,15 +1394,14 @@ void register_ps2_vu1_tests()
             gs.writeRegister(GS_REG_TRXREG, (4ull << 0) | (1ull << 32));
             gs.writeRegister(GS_REG_TRXDIR, 0ull);
 
-            uint8_t *vuCode = mem.getVU1Code();
+            const uint8_t *vuCode = mem.getVU1Code();
             uint8_t *vuData = mem.getVU1Data();
-            std::memset(vuCode, 0, PS2_VU1_CODE_SIZE);
             std::memset(vuData, 0, PS2_VU1_DATA_SIZE);
 
             const uint32_t lower = makeVuLowerSpecial(0x6Cu, 0u);
-            std::memcpy(vuCode + 0u, &lower, sizeof(lower));
+            mem.write32(PS2_VU1_CODE_BASE, lower);
             const uint32_t upper = 0u;
-            std::memcpy(vuCode + 4u, &upper, sizeof(upper));
+            mem.write32(PS2_VU1_CODE_BASE + 4, upper);
 
             const uint64_t gifTag = makeGifTag(1u, GIF_FMT_IMAGE, 0u, true);
             std::memcpy(vuData + 0u, &gifTag, sizeof(gifTag));
@@ -1417,7 +1412,7 @@ void register_ps2_vu1_tests()
                 vuData[16u + i] = static_cast<uint8_t>(0x90u + i);
             }
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             mem.setVu1MscalCallback([&](uint32_t startPC, uint32_t top, uint32_t itop)
             {
                 vu1.execute(vuCode,
@@ -1460,7 +1455,7 @@ void register_ps2_vu1_tests()
             GS gs;
             gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             vu1.execute(code.data(), static_cast<uint32_t>(code.size()),
                         data.data(), static_cast<uint32_t>(data.size()),
                         gs, nullptr, 0u, 0u, 0u, 1u);
@@ -1474,17 +1469,17 @@ void register_ps2_vu1_tests()
             Vu1Fixture fx;
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
 
-            writeVuInstructionPair(fx.code, 0u,
+            writeVuInstructionPair(fx.mem, 0u,
                                    makeVuFlagImmediate(0x14u, 5u, 0x812u),
                                    kVuUpperNop);
-            writeVuInstructionPair(fx.code, 8u,
+            writeVuInstructionPair(fx.mem, 8u,
                                    makeVuFlagImmediate(0x16u, 6u, 0x810u),
                                    kVuUpperNop);
-            writeVuInstructionPair(fx.code, 16u,
+            writeVuInstructionPair(fx.mem, 16u,
                                    makeVuFlagImmediate(0x17u, 7u, 0x040u),
                                    kVuUpperNop);
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             vu1.state().status = 0x812u;
             vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
                         fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
@@ -1505,11 +1500,11 @@ void register_ps2_vu1_tests()
             Vu1Fixture fx;
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
 
-            writeVuInstructionPair(fx.code, 0u,
+            writeVuInstructionPair(fx.mem, 0u,
                                    makeVuFlagImmediate(0x15u, 0u, 0xA80u),
                                    kVuUpperNop);
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             vu1.state().status = 0x015u;
             vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
                         fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
@@ -1529,13 +1524,13 @@ void register_ps2_vu1_tests()
             Vu1Fixture fx;
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
 
-            writeVuInstructionPair(fx.code, 0u,
+            writeVuInstructionPair(fx.mem, 0u,
                                    makeVuFlagImmediate(0x15u, 0u, 0xA80u),
                                    makeVuUpper(0x28u, 0xAu, 2u, 1u, 3u));
             for (uint32_t pc = 8u; pc <= 32u; pc += 8u)
-                writeVuInstructionPair(fx.code, pc, 0u, kVuUpperNop);
+                writeVuInstructionPair(fx.mem, pc, 0u, kVuUpperNop);
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             vu1.state().vf[1][0] = 1.0f;
             vu1.state().vf[1][2] = -3.0f;
             vu1.state().vf[2][0] = -1.0f;
@@ -1556,22 +1551,22 @@ void register_ps2_vu1_tests()
             Vu1Fixture fx;
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
 
-            writeVuInstructionPair(fx.code, 0u, 0u,
+            writeVuInstructionPair(fx.mem, 0u, 0u,
                                    makeVuUpper(0x28u, 0xAu, 2u, 1u, 3u));
-            writeVuInstructionPair(fx.code, 8u,
+            writeVuInstructionPair(fx.mem, 8u,
                                    makeVuFlagRegister(0x18u, 6u, 7u),
                                    kVuUpperNop);
-            writeVuInstructionPair(fx.code, 16u,
+            writeVuInstructionPair(fx.mem, 16u,
                                    0u,
                                    kVuUpperNop);
-            writeVuInstructionPair(fx.code, 24u,
+            writeVuInstructionPair(fx.mem, 24u,
                                    0u,
                                    kVuUpperNop);
-            writeVuInstructionPair(fx.code, 32u,
+            writeVuInstructionPair(fx.mem, 32u,
                                    makeVuFlagRegister(0x1Au, 4u, 5u),
                                    kVuUpperNop);
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             vu1.state().vf[1][0] = 1.0f;
             vu1.state().vf[1][2] = -3.0f;
             vu1.state().vf[2][0] = -1.0f;
@@ -1606,20 +1601,20 @@ void register_ps2_vu1_tests()
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
 
             writeVuInstructionPair(
-                fx.code, 0u, 0u,
+                fx.mem, 0u, 0u,
                 makeVuUpperSpecial(0x1Fu, 0u, 2u, 1u));
             writeVuInstructionPair(
-                fx.code, 8u,
+                fx.mem, 8u,
                 makeVuFlagRegister(0x1Cu, 3u, 0u),
                 kVuUpperNop);
-            writeVuInstructionPair(fx.code, 16u, 0u, kVuUpperNop);
-            writeVuInstructionPair(fx.code, 24u, 0u, kVuUpperNop);
+            writeVuInstructionPair(fx.mem, 16u, 0u, kVuUpperNop);
+            writeVuInstructionPair(fx.mem, 24u, 0u, kVuUpperNop);
             writeVuInstructionPair(
-                fx.code, 32u,
+                fx.mem, 32u,
                 makeVuFlagRegister(0x1Cu, 4u, 0u),
                 kVuUpperNop);
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             vu1.state().vf[1][0] = 2.0f;
             vu1.state().vf[2][3] = 1.0f;
             vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
@@ -1639,10 +1634,10 @@ void register_ps2_vu1_tests()
             Vu1Fixture fx;
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
 
-            writeVuInstructionPair(fx.code, 0u, 0u,
+            writeVuInstructionPair(fx.mem, 0u, 0u,
                                    makeVuUpper(0x2Au, 0xFu, 2u, 1u, 3u));
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             vu1.state().vf[1][0] = std::numeric_limits<float>::max();
             vu1.state().vf[1][1] = std::numeric_limits<float>::min();
             vu1.state().vf[1][2] = -2.0f;
@@ -1672,10 +1667,10 @@ void register_ps2_vu1_tests()
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
 
             writeVuInstructionPair(
-                fx.code, 0u, 0u,
+                fx.mem, 0u, 0u,
                 makeVuUpper(0x29u, 0x8u, 2u, 1u, 3u)); // MADD.x
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
             vu1.state().acc[0] = 1.0f;
             vu1.state().vf[1][0] = std::numeric_limits<float>::min();
             vu1.state().vf[2][0] = 0.5f;
@@ -1711,7 +1706,7 @@ void register_ps2_vu1_tests()
             for (uint32_t pc = 48u; pc < 512u; pc += 8u)
                 writeTrackedVuInstructionPair(fx, pc, 0u, kVuUpperNop);
 
-            const auto prepare = [&](VU1Interpreter &vu)
+            const auto prepare = [&](VUExecutor &vu)
             {
                 std::memset(fx.data, 0xAB, PS2_VU1_DATA_SIZE);
                 const uint64_t tag = makeGifTag(8u, GIF_FMT_IMAGE, 0u, true);
@@ -1723,7 +1718,7 @@ void register_ps2_vu1_tests()
                 std::memcpy(vu.state().vf[2], b, sizeof(b));
                 std::memcpy(vu.state().vf[4], b, sizeof(b));
             };
-            VU1Interpreter whole;
+            VUExecutor whole;
             prepare(whole);
             whole.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
                           fx.gs, &fx.mem, 0u, 0u, 0u, 70u);
@@ -1734,7 +1729,7 @@ void register_ps2_vu1_tests()
 
             for (const uint32_t slice : {1u, 2u, 3u, 7u, 13u})
             {
-                VU1Interpreter sliced;
+                VUExecutor sliced;
                 prepare(sliced);
                 packets.clear();
                 sliced.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
@@ -1773,7 +1768,7 @@ void register_ps2_vu1_tests()
             });
             writeTrackedVuInstructionPair(fx, 0u, makeVuLowerSpecial(0x6Cu, 1u), kVuUpperNop | (1u << 30));
             writeTrackedVuInstructionPair(fx, 8u, 0u, kVuUpperNop);
-            VU1Interpreter vu;
+            VUExecutor vu;
             unsigned run = 0;
             for (const uint32_t qwords : {128u, 1u, 0u, 64u, 2u})
             {
@@ -1809,7 +1804,7 @@ void register_ps2_vu1_tests()
             writeTrackedVuInstructionPair(fx, 16u, makeVuLowerSpecial(0x7Cu, 1u), kVuUpperNop);
             writeTrackedVuInstructionPair(fx, 24u, 0u, kVuUpperNop | (1u << 30));
             writeTrackedVuInstructionPair(fx, 32u, 0u, kVuUpperNop);
-            VU1Interpreter vu;
+            VUExecutor vu;
             vu.state().vf[1][0] = std::numeric_limits<float>::max();
             vu.state().vf[2][0] = 2.0f;
             vu.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
@@ -1828,6 +1823,47 @@ void register_ps2_vu1_tests()
             t.Equals(packets, 0u, "abandoned PATH1 packet must not be submitted");
         });
 
+        tc.Run("reused flag entries keep only the current writeback effects", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU fixture should initialize");
+            struct Step
+            {
+                uint32_t lower, upper, mac, status, clip;
+            };
+            const Step steps[] = {
+                {0u, makeVuUpper(0x2Au, 8u, 2u, 1u, 3u), 8u, 0xC1u, 0x777777u},
+                {makeVuFlagImmediate(0x15u, 0u, 0x400u), kVuUpperNop, 8u, 0x401u, 0x777777u},
+                {0u, makeVuUpper(0x28u, 8u, 2u, 1u, 3u), 0u, 0x400u, 0x777777u},
+                {(0x11u << 25) | 0x123456u, kVuUpperNop, 0u, 0x400u, 0x123456u},
+                {makeVuFlagImmediate(0x15u, 0u, 0x80u), kVuUpperNop, 0u, 0x80u, 0x777777u}
+            };
+            for (const auto unit : {VUExecutor::Unit::VU0, VUExecutor::Unit::VU1})
+            {
+                VUExecutor vu(unit);
+                vu.state().vf[2][0] = 2.0f;
+                vu.state().status = 0x80u;
+                writeTrackedVuInstructionPair(fx, 0u, 0u, kVuUpperNop);
+                writeTrackedVuInstructionPair(fx, 8u, 0u, kVuUpperNop);
+                vu.execute(fx.code, 16u, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 0u, 0u);
+                for (uint32_t repetition = 0; repetition < 40; ++repetition)
+                {
+                    for (const auto &step : steps)
+                    {
+                        vu.state().clip = 0x777777u;
+                        writeTrackedVuInstructionPair(fx, 0u, step.lower, step.upper);
+                        vu.resume(fx.code, 16u, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 1u);
+                        writeTrackedVuInstructionPair(fx, 0u, 0u, kVuUpperNop);
+                        vu.resume(fx.code, 16u, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0u, 0u, 3u);
+                        t.Equals(vu.state().mac, step.mac, "a reused entry must not replay a MAC write");
+                        t.Equals(vu.state().status, step.status,
+                                 "only current and sticky effects from this instruction apply");
+                        t.Equals(vu.state().clip, step.clip, "a reused entry must not replay a CLIP write");
+                    }
+                }
+            }
+        });
+
         tc.Run("FMAC packs each flag plane for every destination mask", [](TestCase &t)
         {
             Vu1Fixture fx;
@@ -1838,7 +1874,7 @@ void register_ps2_vu1_tests()
             const uint32_t resultBits[4] = {0xFF7FFFFFu, 0u, 0x80000000u, 0x40000000u};
             for (uint8_t mask = 0; mask < 16; ++mask)
             {
-                VU1Interpreter vu;
+                VUExecutor vu;
                 std::memcpy(vu.state().vf[1], left, sizeof(left));
                 std::memcpy(vu.state().vf[2], right, sizeof(right));
                 std::fill_n(vu.state().vf[3], 4, 7.0f);
@@ -1877,14 +1913,14 @@ void register_ps2_vu1_tests()
                     if (tracked)
                         writeTrackedVuInstructionPair(fx, pc, 0u, upper);
                     else
-                        writeVuInstructionPair(fx.code, pc, 0u, upper);
+                        writeVuInstructionPair(fx.mem, pc, 0u, upper);
                 };
                 PS2Memory *memory = tracked ? &fx.mem : nullptr;
                 writePair(0u, makeVuUpper(0x28u, 8u, 2u, 1u, 3u));
                 writePair(8u, makeVuUpper(0x28u, 8u, 2u, 3u, 4u));
                 writePair(16u, kVuUpperNop | (1u << 30));
                 writePair(24u, kVuUpperNop);
-                VU1Interpreter vu;
+                VUExecutor vu;
                 vu.state().vf[3][1] = 7.0f;
                 vu.state().vf[2][1] = 1.0f;
                 vu.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, memory, 0u, 0u, 0u, 2u);
@@ -1898,20 +1934,47 @@ void register_ps2_vu1_tests()
             }
         });
 
+        tc.Run("native blocks resume in the middle and finish the E delay slot", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+            for (uint32_t pair = 0; pair < 16; ++pair)
+                writeVuInstructionPair(fx.mem, 0x800 + pair * 8, 0,
+                    pair < 14 ? 0x01e208e8 : pair == 14 ? 0x400002ff : 0x2ff);
+            VUExecutor vu;
+            vu.state().vf[1][0] = 1.25f;
+            vu.state().vf[2][0] = 2.5f;
+            vu.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0x800, 0, 0, 3);
+            t.Equals(vu.state().pc, 0x818u, "Budget stops inside the generated block");
+            vu.resume(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem, 0, 0, 64);
+            t.Equals(vu.state().vf[3][0], 3.75f, "Compiled FMAC result must commit");
+            t.Equals(vu.state().pc, 0x880u, "E executes exactly one delay slot");
+            t.IsFalse(vu.state().ebit, "Ending the program clears the E latch");
+        });
+
         tc.Run("reserved opcodes stop before executing or corrupting state", [](TestCase &t)
         {
             Vu1Fixture fx;
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
 
-            writeVuInstructionPair(fx.code, 0u, 0u, 0x30u);
+            writeVuInstructionPair(fx.mem, 0u, 0u, 0x30u);
             writeVuInstructionPair(
-                fx.code, 8u, makeVuIaddiu(1u, 0u, 7),
+                fx.mem, 8u, makeVuIaddiu(1u, 0u, 7),
                 kVuUpperNop);
 
-            VU1Interpreter vu1;
+            VUExecutor vu1;
+            bool trapped = false;
+            try
+            {
             vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
                         fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
                         0u, 0u, 0u, 8u);
+            }
+            catch (const std::runtime_error &)
+            {
+                trapped = true;
+            }
+            t.IsTrue(trapped, "Reserved VU1 instructions must trap");
 
             t.Equals(vu1.state().cycles, static_cast<uint64_t>(0u),
                      "reserved opcode should stop before consuming its issue cycle");

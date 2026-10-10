@@ -86,6 +86,7 @@ namespace ps2_stubs
                 completeIpuInit(rdram, &parent, runtime);
             };
             scheduler.invokeCurrent(std::move(invocation));
+            return;
         }
 
         completeIpuInit(rdram, ctx, runtime);

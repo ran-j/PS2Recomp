@@ -1280,6 +1280,25 @@ void register_ps2_recompiler_tests()
             }
         });
 
+        tc.Run("retired VU catalogs require explicit migration", [](TestCase &t) {
+            const auto path = std::filesystem::temp_directory_path() /
+                ("ps2recomp-vu-migration-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".toml");
+            {
+                std::ofstream file(path);
+                file << "[general]\ninput = 'dummy.elf'\noutput = 'out'\n[[vu1.programs]]\nformat = 'raw'\npath = 'code.bin'\n";
+            }
+            bool diagnosed = false;
+            try { ConfigManager(path.string()).loadConfig(); }
+            catch (const std::exception &error)
+            {
+                const std::string message = error.what();
+                diagnosed = message.find("retired") != std::string::npos &&
+                    message.find("interpreter") != std::string::npos;
+            }
+            std::filesystem::remove(path);
+            t.IsTrue(diagnosed, "old catalogs must fail with the interpreter migration instructions");
+        });
+
         tc.Run("config manager parses jump_tables table entries", [](TestCase &t) {
             const auto uniqueSuffix = std::to_string(
                 static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));

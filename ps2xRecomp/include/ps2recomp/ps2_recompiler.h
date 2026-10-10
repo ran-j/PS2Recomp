@@ -62,6 +62,7 @@ namespace ps2recomp
         std::vector<Function> m_functions;
         std::vector<Symbol> m_symbols;
         std::vector<Section> m_sections;
+
         std::vector<Relocation> m_relocations;
 
         std::unordered_map<uint32_t, std::vector<Instruction>> m_decodedFunctions;

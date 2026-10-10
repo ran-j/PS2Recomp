@@ -48,6 +48,8 @@ namespace ps2x::iop::detail
         cpu.cop0[12] = (status & ~0x3Fu) | ((status << 2u) & 0x3Fu);
         cpu.pc = (status & (1u << 22u)) ? 0xBFC00180u : 0x80000080u;
         cpu.branchPending = false;
+        if (cpu.pendingLoad && cpu.pendingLoadReg != 0u)
+            cpu.gpr[cpu.pendingLoadReg] = cpu.pendingLoadValue;
         cpu.pendingLoad = false;
         cpu.exception = true;
     }
@@ -86,11 +88,8 @@ namespace ps2x::iop::detail
 
         auto branch = [&](bool condition)
         {
-            if (condition)
-            {
-                newBranch = true;
-                newBranchTarget = nextPc + (static_cast<uint32_t>(simm) << 2u);
-            }
+            newBranch = true;
+            newBranchTarget = condition ? nextPc + (static_cast<uint32_t>(simm) << 2u) : nextPc + 4u;
         };
         auto write = [&](uint32_t reg, uint32_t value)
         {

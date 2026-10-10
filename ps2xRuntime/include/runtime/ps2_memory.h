@@ -10,6 +10,9 @@
 #include <atomic>
 #include <iostream>
 #include <mutex>
+#include <memory>
+#include <span>
+
 
 #include "gs/ps2_gif_arbiter.h"
 #if defined(_MSC_VER)
@@ -333,15 +336,19 @@ public:
     void setGifArbiter(GifArbiter *arbiter) { m_gifArbiter = arbiter; }
 
     using Vu1MscalCallback = std::function<void(uint32_t startPC, uint32_t top, uint32_t itop)>;
-    void setVu1MscalCallback(Vu1MscalCallback cb) { m_vu1MscalCallback = std::move(cb); }
+    void setVu1MscalCallback(Vu1MscalCallback cb) { m_vuMscalCallback[1] = std::move(cb); }
+    void setVu0MscalCallback(Vu1MscalCallback cb) { m_vuMscalCallback[0] = std::move(cb); }
     using Vu1MscntCallback = std::function<void(uint32_t top, uint32_t itop)>;
-    void setVu1MscntCallback(Vu1MscntCallback cb) { m_vu1MscntCallback = std::move(cb); }
+    void setVu1MscntCallback(Vu1MscntCallback cb) { m_vuMscntCallback[1] = std::move(cb); }
+    void setVu0MscntCallback(Vu1MscntCallback cb) { m_vuMscntCallback[0] = std::move(cb); }
+    using Vu1FlushCallback = std::function<void(bool)>;
+    void setVu1FlushCallback(Vu1FlushCallback cb) { m_vuFlushCallback[1] = std::move(cb); }
+    void setVu0FlushCallback(Vu1FlushCallback cb) { m_vuFlushCallback[0] = std::move(cb); }
 
-    uint8_t *getVU1Code() { return m_vu1Code; }
     const uint8_t *getVU1Code() const { return m_vu1Code; }
+    bool writeVuCode(bool vu1, uint32_t offset, std::span<const uint8_t> bytes);
     uint8_t *getVU1Data() { return m_vu1Data; }
     const uint8_t *getVU1Data() const { return m_vu1Data; }
-    uint8_t *getVU0Code() { return m_vu0Code; }
     const uint8_t *getVU0Code() const { return m_vu0Code; }
     uint8_t *getVU0Data() { return m_vu0Data; }
     const uint8_t *getVU0Data() const { return m_vu0Data; }
@@ -414,8 +421,9 @@ public:
 
     GifPacketCallback m_gifPacketCallback;
     GifArbiter *m_gifArbiter = nullptr;
-    Vu1MscalCallback m_vu1MscalCallback;
-    Vu1MscntCallback m_vu1MscntCallback;
+    Vu1MscalCallback m_vuMscalCallback[2];
+    Vu1MscntCallback m_vuMscntCallback[2];
+    Vu1FlushCallback m_vuFlushCallback[2];
 
     uint8_t *m_vu0Code = nullptr;
     uint8_t *m_vu0Data = nullptr;

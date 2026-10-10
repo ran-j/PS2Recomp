@@ -9,7 +9,7 @@ include(CTest)
 if(BUILD_TESTING)
     add_subdirectory(gs_cache)
     if(PS2X_GS_BACKEND STREQUAL "PARALLEL_GS")
-        add_executable(ps2_gs_parallel_tests gs_parallel_tests.cpp)
+        add_executable(ps2_gs_parallel_tests gs_parallel_tests.cpp )
         target_link_libraries(ps2_gs_parallel_tests PRIVATE ps2_runtime)
         add_test(NAME gs.parallel_gpu COMMAND ps2_gs_parallel_tests)
         set_tests_properties(gs.parallel_gpu PROPERTIES LABELS "gs;gpu;interop" TIMEOUT 120)
@@ -27,6 +27,7 @@ target_include_directories(ps2_test_function_table PRIVATE
 )
 
 add_library(ps2_test_lib STATIC
+
     src/code_generator_tests.cpp
     src/r5900_decoder_tests.cpp
     src/elf_analyzer_tests.cpp
@@ -35,7 +36,9 @@ add_library(ps2_test_lib STATIC
     src/ps2_runtime_kernel_tests.cpp
     src/ps2_runtime_interrupt_tests.cpp
     src/ps2_memory_tests.cpp
+
     src/ps2_vu1_tests.cpp
+    src/ps2_vu_pipeline_tests.cpp
     src/ps2_vu_tests.cpp
     src/ps2_gs_tests.cpp
     src/ps2_iop_tests.cpp
@@ -60,14 +63,32 @@ target_link_libraries(ps2_test_lib PRIVATE
     ps2_iop
 )
 
+add_executable(ps2_vu1_tests src/vu1_tests_main.cpp $<TARGET_OBJECTS:ps2_test_function_table>)
+target_include_directories(ps2_vu1_tests PRIVATE include)
+target_link_libraries(ps2_vu1_tests PRIVATE ps2_test_lib ps2_recomp_lib ps2_runtime)
+if(MSVC)
+    target_link_options(ps2_vu1_tests PRIVATE /STACK:8388608)
+endif()
+if(BUILD_TESTING)
+    add_test(NAME vu1.regressions COMMAND ps2_vu1_tests)
+endif()
+
 if(UNIX AND NOT APPLE)
-    target_link_libraries(ps2_test_lib PRIVATE ${CMAKE_DL_LIBS})
+    target_link_libraries(ps2_test_lib PRIVATE
+    ${CMAKE_DL_LIBS})
 endif()
 
 add_executable(ps2x_tests
     src/main.cpp
     $<TARGET_OBJECTS:ps2_test_function_table>
 )
+add_test(NAME runtime.regressions COMMAND ps2x_tests)
+set_tests_properties(runtime.regressions PROPERTIES RUN_SERIAL TRUE WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME runtime.frame_measurement COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/frame_times_test.py")
+endif()
 
 option(PRINT_GENERATED_CODE "Print generated code in tests" OFF)
 if(PRINT_GENERATED_CODE)

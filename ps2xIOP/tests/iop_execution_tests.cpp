@@ -191,6 +191,18 @@ namespace
         memory.write32(0x1004, 0x24020033);
         require(step() && cpu.pc == 0x1004 && cpu.branchPending, "branch delay slot was skipped");
         require(step() && cpu.pc == 0x1008 && cpu.gpr[2] == 0x33, "branch delay slot did not execute");
+        cpu = {};
+        cpu.pc = 0x1000;
+        memory.write32(0x1000, 0x14200001);
+        memory.write32(0x1004, 0x8c020001);
+        require(step() && cpu.branchPending, "untaken branch must retain its delay slot");
+        cpu.pendingLoad = true;
+        cpu.pendingLoadReg = 9;
+        cpu.pendingLoadValue = 55;
+        require(step() && cpu.exception && cpu.cop0[14] == 0x1000 &&
+                    (cpu.cop0[13] & 0x8000007c) == 0x80000010 && cpu.cop0[8] == 1 &&
+                    cpu.gpr[9] == 55 && !cpu.pendingLoad,
+                "delay-slot address exception must preserve EPC, BD and the prior load");
     }
 
     void modifiedImportStub()
@@ -213,6 +225,24 @@ namespace
         memory.write32(0x1014, 0x24020011);
         require(!decode(), "patched import stub still dispatched as an import");
     }
+
+    void executionFault()
+    {
+        Host host;
+        IopEmulator iop(host);
+        Irx image{0x10000, 0x100};
+        image.words(0, {0x3c080100, 0x01000008, 0});
+        image.install(host);
+        (void)iop.loadModuleBuffer(0x1000, nullptr, 0);
+        require(iop.fault().active && iop.fault().pc == 0x01000000,
+                "Invalid execution must expose a persistent fault with the guest PC");
+        require(iop.fault().reason[0] != 0, "Execution faults must retain a diagnostic reason");
+        const auto before = iop.instructions();
+        iop.runEeCycles(100000);
+        require(iop.instructions() == before, "A faulted IOP must stop executing guest instructions");
+        iop.reset();
+        require(!iop.fault().active, "Reset must clear the explicit execution fault");
+    }
 }
 
 int main()
@@ -225,6 +255,7 @@ int main()
         {"DMA dispatch while guest instructions execute", dmaWhileExecuting},
         {"Modified instructions and load delay", instructionChanges},
         {"Modified import stub and metadata", modifiedImportStub},
+        {"Explicit execution fault and reset", executionFault},
     };
     return run(tests);
 }

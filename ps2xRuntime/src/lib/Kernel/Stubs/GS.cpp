@@ -1,5 +1,6 @@
 #include "Common.h"
 #include "GS.h"
+#include "runtime/frame_timing.h"
 #include "../Syscalls/System.h"
 #include "ps2_log.h"
 #include "runtime/gs/ps2_gs_common.h"

@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.21)
+cmake_minimum_required(VERSION 3.24)
 
 if(NOT DEFINED CMAKE_TOOLCHAIN_FILE AND DEFINED ENV{VITASDK})
     set(PS2X_VITA_TOOLCHAIN_FILE "$ENV{VITASDK}/share/vita.toolchain.cmake")
@@ -17,7 +17,7 @@ option(PS2X_BUILD_RECOMP "Build ps2xRecomp" ON)
 option(PS2X_BUILD_RUNTIME "Build ps2xRuntime" ON)
 option(PS2X_BUILD_ANALYZER "Build ps2xAnalyzer" ON)
 option(PS2X_BUILD_TEST "Build ps2xTest" ON)
-option(PS2X_BUILD_STUDIO "Build ps2xStudio" ON)
+option(PS2X_BUILD_STUDIO "Build ps2xStudio" OFF)
 
 if(ANDROID)
     message(STATUS "Android target detected, building runtime only")
@@ -28,6 +28,10 @@ if(ANDROID)
 endif()
 
 set(PS2X_IS_ARM_TARGET OFF)
+if(PS2X_BUILD_TEST OR PS2X_BUILD_STUDIO)
+    enable_testing()
+endif()
+
 set(PS2X_IS_AARCH64_TARGET OFF)
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64|ARM64")
     set(PS2X_IS_ARM_TARGET ON)
@@ -79,20 +83,22 @@ if(PS2X_IS_ARM_TARGET)
     endif()
 endif()
 
-if(PS2X_BUILD_RECOMP)
+# Include modules required by enabled consumers even if their own option is OFF.
+# Tests use all three libraries; Studio also uses the test library.
+if(PS2X_BUILD_RECOMP OR PS2X_BUILD_ANALYZER OR PS2X_BUILD_TEST OR PS2X_BUILD_STUDIO)
     add_subdirectory("ps2xRecomp")
 endif()
 
-if(PS2X_BUILD_RUNTIME)
+if(PS2X_BUILD_RUNTIME OR PS2X_BUILD_TEST OR PS2X_BUILD_STUDIO)
     add_subdirectory("ps2xIOP")
     add_subdirectory("ps2xRuntime")
 endif()
 
-if(PS2X_BUILD_ANALYZER)
+if(PS2X_BUILD_ANALYZER OR PS2X_BUILD_TEST OR PS2X_BUILD_STUDIO)
     add_subdirectory("ps2xAnalyzer")
 endif()
 
-if(PS2X_BUILD_TEST)
+if(PS2X_BUILD_TEST OR PS2X_BUILD_STUDIO)
     add_subdirectory("ps2xTest")
 endif()
 

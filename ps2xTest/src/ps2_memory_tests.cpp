@@ -428,7 +428,6 @@ void register_ps2_memory_tests()
                 packet.push_back(static_cast<uint8_t>(i & 0xFFu));
             }
 
-            std::memset(mem.getVU1Code(), 0, PS2_VU1_CODE_SIZE);
             mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
 
             const uint8_t *vu1Code = mem.getVU1Code();
@@ -2248,6 +2247,39 @@ void register_ps2_memory_tests()
                 }
             }
             t.IsTrue(imageOk, "raw image continuation after packed setup should not be decoded as VIF/GIF registers");
+        });
+
+        tc.Run("VU code writes are visible through aliases and MPG", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "memory initializes");
+            for (bool vu1 : {false, true})
+            {
+                const uint32_t base = vu1 ? PS2_VU1_CODE_BASE : PS2_VU0_CODE_BASE;
+                mem.write8(base | 0x80000000u, 1);
+                mem.write16(base + 2, 2);
+                mem.write32(base + 4, 3);
+                mem.write64(base + 8, 4);
+                t.Equals(mem.read8(base), uint8_t(1), "byte alias is visible");
+                t.Equals(mem.read16(base + 2), uint16_t(2), "halfword is visible");
+                t.Equals(mem.read32(base + 4), 3u, "word is visible");
+                t.Equals(mem.read64(base + 8), uint64_t(4), "doubleword is visible");
+                mem.write128(base, _mm_set1_epi32(5));
+                t.Equals(mem.read32(base + 12), 5u, "quadword is visible");
+                std::vector<uint8_t> packet;
+                appendU32(packet, makeVifCmd(0x4a, 1, 0));
+                appendU64(packet, 0x000002ff8000033cull);
+                for (uint32_t upload = 0; upload < 2; ++upload)
+                {
+                    if (vu1) mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+                    else mem.processVIF0Data(packet.data(), static_cast<uint32_t>(packet.size()));
+                    t.Equals(mem.read64(base), uint64_t(0x000002ff8000033cull), "MPG code is visible after each upload");
+                }
+            }
+            const std::array<uint8_t, 4> bytes{0, 0, 1, 2};
+            t.IsTrue(mem.writeVuCode(true, 4094, bytes), "crossing upload changes code");
+            t.IsFalse(mem.writeVuCode(true, 4094, bytes), "identical upload leaves bytes unchanged");
+            t.Equals(mem.read16(PS2_VU1_CODE_BASE + 4096), uint16_t(0x0201), "crossing bytes are visible");
         });
 
         tc.Run("unaligned accesses throw", [](TestCase &t)

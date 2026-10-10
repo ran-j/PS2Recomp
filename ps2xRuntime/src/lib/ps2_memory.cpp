@@ -873,6 +873,26 @@ __m128i PS2Memory::read128(uint32_t address)
     return _mm_setzero_si128();
 }
 
+bool PS2Memory::writeVuCode(bool vu1, uint32_t offset, std::span<const uint8_t> bytes)
+{
+    auto *code = vu1 ? m_vu1Code : m_vu0Code;
+    if (!code)
+        throw std::logic_error("VU code memory is not initialized");
+
+    const auto size = vu1 ? PS2_VU1_CODE_SIZE : PS2_VU0_CODE_SIZE;
+    inRange(offset, bytes.size(), size, "VU code write", offset);
+    const bool changed = !bytes.empty() && std::memcmp(code + offset, bytes.data(), bytes.size()) != 0;
+    if (changed)
+    {
+        std::memmove(code + offset, bytes.data(), bytes.size());
+        if (vu1)
+            markVU1CodeModified();
+        else
+            markVU0CodeModified();
+    }
+    return changed;
+}
+
 void PS2Memory::write8(uint32_t address, uint8_t value)
 {
     const bool scratch = isScratchpad(address);
@@ -893,11 +913,10 @@ void PS2Memory::write8(uint32_t address, uint8_t value)
         if (uint8_t *vuMem = mapVuMemory(physAddr, sizeof(uint8_t), vuOffset, vuLimit))
         {
             (void)vuLimit;
-            vuMem[vuOffset] = value;
-            if (vuMem == m_vu0Code)
-                markVU0CodeModified();
-            else if (vuMem == m_vu1Code)
-                markVU1CodeModified();
+            if (vuMem == m_vu0Code || vuMem == m_vu1Code)
+                writeVuCode(vuMem == m_vu1Code, vuOffset, {&value, 1});
+            else
+                vuMem[vuOffset] = value;
             return;
         }
     }
@@ -936,11 +955,10 @@ void PS2Memory::write16(uint32_t address, uint16_t value)
         uint32_t vuLimit = 0;
         if (uint8_t *vuMem = mapVuMemory(physAddr, sizeof(uint16_t), vuOffset, vuLimit))
         {
-            storeScalar<uint16_t>(vuMem, vuOffset, vuLimit, value, "write16 vu", address);
-            if (vuMem == m_vu0Code)
-                markVU0CodeModified();
-            else if (vuMem == m_vu1Code)
-                markVU1CodeModified();
+            if (vuMem == m_vu0Code || vuMem == m_vu1Code)
+                writeVuCode(vuMem == m_vu1Code, vuOffset, {reinterpret_cast<const uint8_t *>(&value), sizeof(value)});
+            else
+                storeScalar<uint16_t>(vuMem, vuOffset, vuLimit, value, "write16 vu", address);
             return;
         }
     }
@@ -1000,11 +1018,10 @@ void PS2Memory::write32(uint32_t address, uint32_t value)
         uint32_t vuLimit = 0;
         if (uint8_t *vuMem = mapVuMemory(physAddr, sizeof(uint32_t), vuOffset, vuLimit))
         {
-            storeScalar<uint32_t>(vuMem, vuOffset, vuLimit, value, "write32 vu", address);
-            if (vuMem == m_vu0Code)
-                markVU0CodeModified();
-            else if (vuMem == m_vu1Code)
-                markVU1CodeModified();
+            if (vuMem == m_vu0Code || vuMem == m_vu1Code)
+                writeVuCode(vuMem == m_vu1Code, vuOffset, {reinterpret_cast<const uint8_t *>(&value), sizeof(value)});
+            else
+                storeScalar<uint32_t>(vuMem, vuOffset, vuLimit, value, "write32 vu", address);
             return;
         }
     }
@@ -1055,11 +1072,10 @@ void PS2Memory::write64(uint32_t address, uint64_t value)
         uint32_t vuLimit = 0;
         if (uint8_t *vuMem = mapVuMemory(physAddr, sizeof(uint64_t), vuOffset, vuLimit))
         {
-            storeScalar<uint64_t>(vuMem, vuOffset, vuLimit, value, "write64 vu", address);
-            if (vuMem == m_vu0Code)
-                markVU0CodeModified();
-            else if (vuMem == m_vu1Code)
-                markVU1CodeModified();
+            if (vuMem == m_vu0Code || vuMem == m_vu1Code)
+                writeVuCode(vuMem == m_vu1Code, vuOffset, {reinterpret_cast<const uint8_t *>(&value), sizeof(value)});
+            else
+                storeScalar<uint64_t>(vuMem, vuOffset, vuLimit, value, "write64 vu", address);
             return;
         }
     }
@@ -1113,11 +1129,10 @@ void PS2Memory::write128(uint32_t address, __m128i value)
         if (uint8_t *vuMem = mapVuMemory(physAddr, sizeof(__m128i), vuOffset, vuLimit))
         {
             inRange(vuOffset, sizeof(__m128i), vuLimit, "write128 vu", address);
-            _mm_storeu_si128(reinterpret_cast<__m128i *>(vuMem + vuOffset), value);
-            if (vuMem == m_vu0Code)
-                markVU0CodeModified();
-            else if (vuMem == m_vu1Code)
-                markVU1CodeModified();
+            if (vuMem == m_vu0Code || vuMem == m_vu1Code)
+                writeVuCode(vuMem == m_vu1Code, vuOffset, {reinterpret_cast<const uint8_t *>(&value), sizeof(value)});
+            else
+                _mm_storeu_si128(reinterpret_cast<__m128i *>(vuMem + vuOffset), value);
             return;
         }
     }

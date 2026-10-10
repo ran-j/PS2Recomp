@@ -442,11 +442,31 @@ namespace
         if (!expect(executor.calls == 0u, "timer callback ran too early"))
             return false;
         timrman.serviceDue(200u, executor);
-        return expect(executor.calls == 1u, "timer callback did not run") &&
+        if (!(expect(executor.calls == 1u, "timer callback did not run") &&
                expect(executor.lastAddress == 0x12340u, "timer called the wrong handler") &&
                expect(executor.lastArgument == 0x45670u, "timer passed the wrong common argument") &&
                expect(executor.lastGp == 0x89AB0u, "timer callback lost the registering module GP") &&
-               expect(timrman.nextEventCycle(1000u) == 300u, "timer callback return did not rearm compare");
+               expect(timrman.nextEventCycle(1000u) == 300u, "timer callback return did not rearm compare")))
+            return false;
+        cpu.gpr[4] = timerId;
+        cpu.gpr[5] = 80u;
+        if (!timrman.dispatchImport(9u, cpu, 210u) ||
+            !expect(timrman.nextEventCycle(1000u) == 230u, "counter write did not shorten timer deadline") ||
+            !expect(timrman.nextEventCycle(220u) == 220u, "timer deadline exceeded caller budget"))
+            return false;
+        timrman.serviceDue(229u, executor);
+        if (!expect(executor.calls == 1u, "rescheduled timer callback ran early")) return false;
+        timrman.serviceDue(230u, executor);
+        if (!expect(executor.calls == 2u && timrman.nextEventCycle(1000u) == 330u,
+                    "rescheduled timer did not fire and rearm")) return false;
+        if (!timrman.dispatchImport(24u, cpu, 240u) ||
+            !expect(timrman.nextEventCycle(1000u) == 1000u, "stopped timer retained its deadline"))
+            return false;
+        if (!timrman.dispatchImport(23u, cpu, 250u) ||
+            !expect(timrman.nextEventCycle(1000u) == 350u, "restarted timer retained its old deadline"))
+            return false;
+        timrman.reset();
+        return expect(timrman.nextEventCycle(1000u) == 1000u, "reset retained timer deadline");
     }
 }
 
