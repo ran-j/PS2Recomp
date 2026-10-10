@@ -1570,7 +1570,7 @@ void register_ps2_recompiler_tests()
             std::filesystem::remove_all(tempRoot, removeError);
         });
 
-        tc.Run("all entry wrappers retain their own resume targets without promoting external entries", [](TestCase &t) {
+        tc.Run("all entry wrappers retain resume targets and standalone external branches", [](TestCase &t) {
             const std::string uniqueSuffix =
                 std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
             const auto tempRoot = std::filesystem::temp_directory_path() /
@@ -1646,8 +1646,13 @@ void register_ps2_recompiler_tests()
                     t.IsTrue(generated.find(resumeCase.str()) != std::string::npos,
                              "each registered standalone continuation must match its emitted resume switch");
                 }
-                t.IsFalse(bindings.contains(0x100074u),
-                          "entry-wrapper jumps must not promote external labels into unrelated normal owners");
+                const auto externalOwner = bindings.find(0x100070u);
+                const auto externalTarget = bindings.find(0x100074u);
+                t.IsTrue(externalOwner != bindings.end() && externalTarget != bindings.end() &&
+                             externalTarget->second == externalOwner->second,
+                         "a standalone entry jump must register its real external target to the containing owner");
+                t.IsTrue(generated.find("case 0x100074u: goto label_100074;") != std::string::npos,
+                         "the external jump destination must have a matching owner resume switch");
                 t.IsFalse(bindings.contains(0x1000bcu),
                           "entry wrappers must not register a continuation outside their decoded range");
             }

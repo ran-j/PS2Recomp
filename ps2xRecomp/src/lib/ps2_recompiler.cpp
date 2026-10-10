@@ -2002,6 +2002,38 @@ namespace ps2recomp
             return best;
         };
 
+        // Keep standalone entry_* external branches discoverable, as in #271.
+        // Nested wrappers only need their own continuations; their normal owner
+        // already contributes cross-function targets from the same instructions.
+        std::vector<std::pair<uint32_t, uint32_t>> ownerRanges;
+        for (const auto &function : m_functions)
+        {
+            if (function.isRecompiled && !function.isStub && !function.isSkipped &&
+                !isEntryFunctionName(function.name) && function.end > function.start)
+            {
+                ownerRanges.emplace_back(function.start, function.end);
+            }
+        }
+        std::sort(ownerRanges.begin(), ownerRanges.end());
+        uint32_t maxEnd = 0u;
+        std::vector<uint32_t> prefixMaxEnd;
+        prefixMaxEnd.reserve(ownerRanges.size());
+        for (const auto &range : ownerRanges)
+        {
+            maxEnd = std::max(maxEnd, range.second);
+            prefixMaxEnd.push_back(maxEnd);
+        }
+        auto nestedInRealFunction = [&](uint32_t address) -> bool
+        {
+            auto it = std::upper_bound(ownerRanges.begin(), ownerRanges.end(), std::make_pair(address, UINT32_MAX));
+            if (it == ownerRanges.begin())
+            {
+                return false;
+            }
+            const size_t idx = static_cast<size_t>(std::distance(ownerRanges.begin(), it)) - 1u;
+            return prefixMaxEnd[idx] > address;
+        };
+
         for (const auto &function : m_functions)
         {
             if (!function.isRecompiled || function.isStub || function.isSkipped)
@@ -2029,9 +2061,9 @@ namespace ps2recomp
                                 analysisResult.indirectFallbackEntryPoints.begin(),
                                 analysisResult.indirectFallbackEntryPoints.end());
 
-            // Entry wrappers need their own emitted continuations, but must
-            // not promote unrelated external targets into other owners.
-            if (isEntryFunctionName(function.name))
+            // Only nested wrappers suppress duplicate external promotion.
+            // A standalone entry can legitimately branch into another owner.
+            if (isEntryFunctionName(function.name) && nestedInRealFunction(function.start))
             {
                 continue;
             }
