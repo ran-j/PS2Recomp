@@ -404,12 +404,13 @@ namespace ps2recomp
         case OPCODE_BNE:
         case OPCODE_BNEL:
             return fmt::format("GPR_U64(ctx, {}) != GPR_U64(ctx, {})", rsReg, rtReg);
+        // Sign tests look at the full 64-bit register, like every other R5900 compare.
         case OPCODE_BLEZ:
         case OPCODE_BLEZL:
-            return fmt::format("GPR_S32(ctx, {}) <= 0", rsReg);
+            return fmt::format("GPR_S64(ctx, {}) <= 0", rsReg);
         case OPCODE_BGTZ:
         case OPCODE_BGTZL:
-            return fmt::format("GPR_S32(ctx, {}) > 0", rsReg);
+            return fmt::format("GPR_S64(ctx, {}) > 0", rsReg);
         case OPCODE_REGIMM:
             switch (m_branchInst.rt)
             {
@@ -417,12 +418,12 @@ namespace ps2recomp
             case REGIMM_BLTZL:
             case REGIMM_BLTZAL:
             case REGIMM_BLTZALL:
-                return fmt::format("GPR_S32(ctx, {}) < 0", rsReg);
+                return fmt::format("GPR_S64(ctx, {}) < 0", rsReg);
             case REGIMM_BGEZ:
             case REGIMM_BGEZL:
             case REGIMM_BGEZAL:
             case REGIMM_BGEZALL:
-                return fmt::format("GPR_S32(ctx, {}) >= 0", rsReg);
+                return fmt::format("GPR_S64(ctx, {}) >= 0", rsReg);
             default:
                 return "false";
             }
@@ -463,36 +464,28 @@ namespace ps2recomp
         const uint32_t target = conditionalBranchTarget();
         const bool likely = isLikelyBranch();
         const std::string branchTakenVar = fmt::format("branch_taken_0x{:x}", m_branchInst.address);
-        std::string unconditionalLinkCode;
-        std::string conditionalLinkCode;
+        std::string linkCode;
 
-        if (m_branchInst.opcode == OPCODE_REGIMM)
+        if (m_branchInst.opcode == OPCODE_REGIMM &&
+            (m_branchInst.rt == REGIMM_BLTZAL || m_branchInst.rt == REGIMM_BGEZAL ||
+             m_branchInst.rt == REGIMM_BLTZALL || m_branchInst.rt == REGIMM_BGEZALL))
         {
-            if (m_branchInst.rt == REGIMM_BLTZAL || m_branchInst.rt == REGIMM_BGEZAL)
-            {
-                unconditionalLinkCode = fmt::format("SET_GPR_U32(ctx, 31, 0x{:X}u);", fallthroughPc());
-            }
-            else if (m_branchInst.rt == REGIMM_BLTZALL || m_branchInst.rt == REGIMM_BGEZALL)
-            {
-                conditionalLinkCode = fmt::format("SET_GPR_U32(ctx, 31, 0x{:X}u);", fallthroughPc());
-            }
+            // Every "and link" branch, likely or not, writes $ra whether or not it is taken.
+            // The condition is captured first so a link into rs sees the pre-link value.
+            linkCode = fmt::format("SET_GPR_U32(ctx, 31, 0x{:X}u);", fallthroughPc());
         }
 
         m_ss << "    {\n";
         m_ss << "        const bool " << branchTakenVar << " = (" << conditionalBranchExpression() << ");\n";
 
-        if (!unconditionalLinkCode.empty())
+        if (!linkCode.empty())
         {
-            m_ss << "        " << unconditionalLinkCode << "\n";
+            m_ss << "        " << linkCode << "\n";
         }
 
         if (likely)
         {
             m_ss << "        if (" << branchTakenVar << ") {\n";
-            if (!conditionalLinkCode.empty())
-            {
-                m_ss << "            " << conditionalLinkCode << "\n";
-            }
             emitDelaySlot("            ");
 
             if (isInternalTarget(target))
@@ -508,11 +501,6 @@ namespace ps2recomp
         }
         else
         {
-            if (!conditionalLinkCode.empty())
-            {
-                m_ss << "        if (" << branchTakenVar << ") { " << conditionalLinkCode << " }\n";
-            }
-
             emitDelaySlot("        ");
 
             m_ss << "        if (" << branchTakenVar << ") {\n";
