@@ -2002,9 +2002,9 @@ namespace ps2recomp
             return best;
         };
 
-        // Ghidra exports standalone code blocks (static initializers, thunks, ...) as entry_* labels. Only entry_*
-        // blocks nested inside a real function are synthetic wrappers; standalone ones need their own resume
-        // points, otherwise a thread switched out inside a call from them cannot be resumed.
+        // Keep standalone entry_* external branches discoverable, as in #271.
+        // Nested wrappers only need their own continuations; their normal owner
+        // already contributes cross-function targets from the same instructions.
         std::vector<std::pair<uint32_t, uint32_t>> ownerRanges;
         for (const auto &function : m_functions)
         {
@@ -2041,11 +2041,8 @@ namespace ps2recomp
                 continue;
             }
 
-            if (isEntryFunctionName(function.name) && nestedInRealFunction(function.start))
-            {
-                continue;
-            }
-
+            // Match FunctionEmitter's resume switch for every decoded wrapper,
+            // including overlapping entry_* wrappers as well as standalone ones.
             auto decodedIt = m_decodedFunctions.find(function.start);
             if (decodedIt == m_decodedFunctions.end())
             {
@@ -2063,6 +2060,13 @@ namespace ps2recomp
             ownerTargets.insert(ownerTargets.end(),
                                 analysisResult.indirectFallbackEntryPoints.begin(),
                                 analysisResult.indirectFallbackEntryPoints.end());
+
+            // Only nested wrappers suppress duplicate external promotion.
+            // A standalone entry can legitimately branch into another owner.
+            if (isEntryFunctionName(function.name) && nestedInRealFunction(function.start))
+            {
+                continue;
+            }
 
             for (uint32_t target : analysisResult.externalEntryPoints)
             {
