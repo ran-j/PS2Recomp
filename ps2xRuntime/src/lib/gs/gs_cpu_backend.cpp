@@ -24,6 +24,28 @@ namespace
         return (std::fabs(q) > 1.0e-8f) ? q : 1.0f;
     }
 
+    // The GS denormalises each perspective-divided texel coordinate into 12.4
+    // fixed point and saturates it before the wrap mode runs (libgpu2, Sony's
+    // GS model: TexCoordN in src/txm.c, then WrapU/WrapV). A positive overflow
+    // becomes 0x7FFF; a negative overflow becomes zero, not -0x7FFF. The same
+    // bound keeps the static_cast<int> below defined: converting a NaN or an
+    // out-of-range float is undefined behaviour, and games such as Ridge Racer
+    // V emit ST values that reach it. NaN has no hardware meaning and maps to
+    // zero rather than to the host's default NaN sign, so hosts agree.
+    constexpr float kGsTexCoordOverflow = 2048.0f; // 0x8000 in 12.4
+    constexpr float kGsTexCoordMax = 2047.9375f;   // 0x7FFF in 12.4
+
+    float saturateTexCoord(float coordinate)
+    {
+        if (std::isnan(coordinate))
+            return 0.0f;
+        if (coordinate >= kGsTexCoordOverflow)
+            return kGsTexCoordMax;
+        if (coordinate <= -kGsTexCoordOverflow)
+            return 0.0f;
+        return coordinate;
+    }
+
     u16 Rgba8888ToRgba5551(u32 c)
     {
         uint32_t r = ((c >> 0) & 0xFF) >> 3;
@@ -1079,8 +1101,8 @@ uint32_t GSCpuBackend::SampleTexture(const GSDrawState &state, float s, float t,
     else
     {
         const float invQ = 1.0f / fabsQ(q);
-        texUf = s * invQ * static_cast<float>(texW);
-        texVf = t * invQ * static_cast<float>(texH);
+        texUf = saturateTexCoord(s * invQ * static_cast<float>(texW));
+        texVf = saturateTexCoord(t * invQ * static_cast<float>(texH));
     }
 
     auto samplePoint = [&](int sampleU, int sampleV) -> uint32_t
