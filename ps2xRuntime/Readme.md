@@ -65,7 +65,10 @@ The input is recorded, not guessed, because the microcode is game data:
    directory.
 2. Configure with `-DPS2X_VU_PROGRAM_PROFILES=dir1;dir2` and rebuild. The
    build runs `tools/compile_vu_programs.py` over the recordings and compiles
-   the result in `PS2X_VU_PROGRAM_SHARDS` units (8 by default).
+   the result in `PS2X_VU_PROGRAM_SHARDS` units (8 by default). Routines
+   longer than `PS2X_VU_PROGRAM_MAX_PAIRS` pairs (256 by default) are
+   compiled as chained chunks, as optimizers slow down sharply on long
+   functions.
 
 Recordings and the generated sources contain game code; keep them local.
 
