@@ -11,9 +11,8 @@
 #include <stdexcept>
 #include <thread>
 #include <variant>
-#if defined(__APPLE__) || defined(__linux__)
-#include <pthread.h>
-#endif
+
+#include "ThreadNaming.h"
 
 struct GSThreadedBackend::Impl
 {
@@ -224,11 +223,7 @@ struct GSThreadedBackend::Impl
     void run()
     {
         rounding = std::fegetround();
-#if defined(__APPLE__)
-        pthread_setname_np("GSWorker");
-#elif defined(__linux__)
-        pthread_setname_np(pthread_self(), "GSWorker");
-#endif
+        ThreadNaming::SetCurrentThreadName("GSWorker");
         std::vector<Command> batch;
         std::vector<const GSPrimitiveBatch *> run;
         for (;;)
