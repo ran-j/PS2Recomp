@@ -781,6 +781,7 @@ int EeScheduler::deleteThread(int id, uint32_t &ownedStack)
     releaseInvocationStacks(id);
     m_threadIndex[id] = nullptr;
     m_threads.erase(it);
+    forgetLastRun(id);
     publishSnapshot();
     return KE_OK;
 }
@@ -832,6 +833,7 @@ int EeScheduler::startThread(int id, uint32_t arg, const R5900Context &caller, b
         if (static_cast<uint32_t>(id) <= kLastThreadId)
             m_threadIndex[id] = nullptr;
         m_threads.erase(id);
+        forgetLastRun(id);
     }
     if (ownedStack != 0u)
     {

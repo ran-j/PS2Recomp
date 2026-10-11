@@ -638,6 +638,95 @@ namespace
         ctx->pc = 0u;
     }
 
+    // Thread-switch charging: cycles read just before a guest leaves its
+    // thread and just after the next one starts.
+    constexpr uint32_t K_SWITCH_YIELD = 0x300800u;
+    constexpr uint32_t K_SWITCH_YIELD_RESUME = 0x300804u;
+    constexpr uint32_t K_SWITCH_PEER = 0x300810u;
+    constexpr uint32_t K_SWITCH_WAIT = 0x300820u;
+    constexpr uint32_t K_SWITCH_WAIT_RESUME = 0x300824u;
+    constexpr uint32_t K_SWITCH_SIGNAL = 0x300830u;
+    constexpr uint32_t K_SWITCH_EXIT = 0x300840u;
+    constexpr uint32_t K_SWITCH_RESPAWN = 0x300850u;
+    constexpr uint32_t K_SWITCH_REUSED = 0x300860u;
+    uint64_t gSwitchBefore = 0u;
+    uint64_t gSwitchAfter = 0u;
+    int gSwitchSemaphore = 0;
+    int gSwitchReusedId = 0;
+
+    void queueSwitchInvocation(PS2Runtime *runtime, uint32_t pc, uint32_t a0)
+    {
+        GuestInvocation invocation{};
+        invocation.kind = GuestInvocationKind::Interrupt;
+        invocation.context.pc = pc;
+        SET_GPR_U32(&invocation.context, 4, a0);
+        runtime->eeScheduler().queueInvocation(std::move(invocation));
+    }
+
+    void switchYield(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gSwitchBefore = runtime->eeScheduler().eeCycle();
+        ctx->pc = K_SWITCH_YIELD_RESUME;
+        SET_GPR_U32(ctx, 4, 5u);
+        RotateThreadReadyQueue(rdram, ctx, runtime);
+    }
+
+    void switchYieldResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
+    void switchPeer(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gSwitchAfter = runtime->eeScheduler().eeCycle();
+        ctx->pc = 0u;
+    }
+
+    void switchWait(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        queueSwitchInvocation(runtime, K_SWITCH_SIGNAL, static_cast<uint32_t>(gSwitchSemaphore));
+        gSwitchBefore = runtime->eeScheduler().eeCycle();
+        ctx->pc = K_SWITCH_WAIT_RESUME;
+        SET_GPR_U32(ctx, 4, static_cast<uint32_t>(gSwitchSemaphore));
+        WaitSema(rdram, ctx, runtime);
+    }
+
+    void switchWaitResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gSwitchAfter = runtime->eeScheduler().eeCycle();
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
+    void switchSignal(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        iSignalSema(rdram, ctx, runtime);
+        ctx->pc = 0u;
+    }
+
+    void switchExit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        queueSwitchInvocation(runtime, K_SWITCH_RESPAWN, 0u);
+        ExitDeleteThread(rdram, ctx, runtime);
+    }
+
+    void switchRespawn(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        EeScheduler &ee = runtime->eeScheduler();
+        gSwitchReusedId = ee.createThread(EeThreadCreateParams{0, K_SWITCH_REUSED, 0x22000u, 0x800u, 0, 5, 0});
+        ee.startThread(gSwitchReusedId, 0u, *ctx, true);
+        gSwitchBefore = ee.eeCycle();
+        ctx->pc = 0u;
+    }
+
+    void switchReused(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gSwitchAfter = runtime->eeScheduler().eeCycle();
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
     struct TestEnv
     {
         std::vector<uint8_t> rdram;
@@ -984,6 +1073,76 @@ void register_ps2_runtime_kernel_tests()
                 ee.run();
                 t.IsTrue(trace == std::vector<int>({1, 10, 11}), "the rotating thread retains its priority");
             }
+        });
+
+        tc.Run("a switch to another guest thread costs kThreadSwitchCycles", [](TestCase &t)
+        {
+            TestEnv env;
+            std::vector<int> trace;
+            gSchedulerTrace = &trace;
+            env.runtime.registerFunction(K_SCHED_MAIN, schedulerMainExit);
+            env.runtime.registerFunction(K_SWITCH_YIELD, switchYield);
+            env.runtime.registerFunction(K_SWITCH_YIELD_RESUME, switchYieldResume);
+            env.runtime.registerFunction(K_SWITCH_PEER, switchPeer);
+            env.ctx.pc = K_SCHED_MAIN;
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.reset(env.rdram.data(), env.ctx);
+            const int yielding = ee.createThread(EeThreadCreateParams{0, K_SWITCH_YIELD, 0x20000u, 0x800u, 0, 5, 0});
+            const int peer = ee.createThread(EeThreadCreateParams{0, K_SWITCH_PEER, 0x21000u, 0x800u, 0, 5, 0});
+            ee.startThread(yielding, 0, env.ctx, false);
+            ee.startThread(peer, 0, env.ctx, false);
+            ee.run();
+            t.Equals(gSwitchAfter - gSwitchBefore,
+                     uint64_t{EeScheduler::kThreadSwitchCycles + EeScheduler::kGuestDispatchCycles},
+                     "yielding to a peer charges the switch on top of the peer's dispatch");
+        });
+
+        tc.Run("an interrupt between two turns of one thread is not a switch", [](TestCase &t)
+        {
+            TestEnv env;
+            std::vector<int> trace;
+            gSchedulerTrace = &trace;
+            env.runtime.registerFunction(K_SCHED_MAIN, schedulerMainExit);
+            env.runtime.registerFunction(K_SWITCH_WAIT, switchWait);
+            env.runtime.registerFunction(K_SWITCH_WAIT_RESUME, switchWaitResume);
+            env.runtime.registerFunction(K_SWITCH_SIGNAL, switchSignal);
+            env.ctx.pc = K_SCHED_MAIN;
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.reset(env.rdram.data(), env.ctx);
+            gSwitchSemaphore = ee.createSemaphore(0, 1, 0u, 0u);
+            const int waiting = ee.createThread(EeThreadCreateParams{0, K_SWITCH_WAIT, 0x20000u, 0x800u, 0, 5, 0});
+            ee.startThread(waiting, 0, env.ctx, false);
+            gSwitchAfter = 0u;
+            ee.run();
+            t.IsTrue(gSwitchAfter > gSwitchBefore, "the waiting thread resumes after the interrupt signals it");
+            t.IsTrue(gSwitchAfter - gSwitchBefore < EeScheduler::kThreadSwitchCycles,
+                     "the handler and the same thread's return are charged no switch");
+        });
+
+        tc.Run("a new thread reusing the last-run thread's ID still costs a switch", [](TestCase &t)
+        {
+            TestEnv env;
+            std::vector<int> trace;
+            gSchedulerTrace = &trace;
+            env.runtime.registerFunction(K_SCHED_MAIN, schedulerMainExit);
+            env.runtime.registerFunction(K_SWITCH_EXIT, switchExit);
+            env.runtime.registerFunction(K_SWITCH_RESPAWN, switchRespawn);
+            env.runtime.registerFunction(K_SWITCH_REUSED, switchReused);
+            env.runtime.registerFunction(K_SCHED_B, schedulerTraceB);
+            env.ctx.pc = K_SCHED_MAIN;
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.reset(env.rdram.data(), env.ctx);
+            const int exiting = ee.createThread(EeThreadCreateParams{0, K_SWITCH_EXIT, 0x20000u, 0x800u, 0, 5, 0});
+            // Take every other ID so the respawned thread is given the exiting one's.
+            for (int id = exiting + 1; id <= EeScheduler::kLastThreadId; ++id)
+                ee.createThread(EeThreadCreateParams{0, K_SCHED_B, 0x21000u, 0x800u, 0, 5, 0});
+            ee.startThread(exiting, 0, env.ctx, false);
+            gSwitchReusedId = 0;
+            gSwitchAfter = 0u;
+            ee.run();
+            t.Equals(gSwitchReusedId, exiting, "the respawned thread reuses the deleted thread's ID");
+            t.IsTrue(gSwitchAfter >= gSwitchBefore + EeScheduler::kThreadSwitchCycles,
+                     "a deleted thread's ID does not make its successor look like a re-entry");
         });
 
         tc.Run("thread lookup follows ID reuse and scheduler reset", [](TestCase &t)
