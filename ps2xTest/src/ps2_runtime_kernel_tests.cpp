@@ -553,6 +553,38 @@ namespace
         runtime->requestStop();
     }
 
+    // A thread deletes itself from its own fiber; a peer then hands its ID to
+    // a new thread.
+    constexpr uint32_t K_EXIT_DELETE = 0x300900u;
+    constexpr uint32_t K_EXIT_DELETE_PEER = 0x300910u;
+    constexpr uint32_t K_EXIT_DELETE_REUSED = 0x300920u;
+    int gExitDeleteId = 0;
+    int gExitDeleteReusedId = 0;
+    bool gExitDeleteRecordGone = false;
+
+    void schedulerExitDelete(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gSchedulerTrace->push_back(10);
+        ExitDeleteThread(rdram, ctx, runtime);
+    }
+
+    void schedulerExitDeletePeer(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        EeScheduler &ee = runtime->eeScheduler();
+        gSchedulerTrace->push_back(20);
+        gExitDeleteRecordGone = ee.thread(gExitDeleteId) == nullptr;
+        gExitDeleteReusedId = ee.createThread(EeThreadCreateParams{0, K_EXIT_DELETE_REUSED, 0x22000u, 0x800u, 0, 20, 0});
+        ee.startThread(gExitDeleteReusedId, 0u, *ctx, false);
+        ctx->pc = 0u;
+    }
+
+    void schedulerExitDeleteReused(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gSchedulerTrace->push_back(30);
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
     constexpr uint32_t K_EVENT_FIFO_MAIN = 0x301000u;
     constexpr uint32_t K_EVENT_FIFO_A = 0x301010u;
     constexpr uint32_t K_EVENT_FIFO_A_RESUME = 0x301014u;
@@ -1003,6 +1035,36 @@ void register_ps2_runtime_kernel_tests()
             ee.reset(env.rdram.data(), env.ctx);
             t.IsTrue(ee.thread(last) == nullptr, "reset clears all indexed threads");
             t.IsTrue(ee.thread(EeScheduler::kMainThreadId) != nullptr, "reset installs the main thread");
+        });
+
+        tc.Run("a thread deleting itself with ExitDeleteThread leaves the scheduler running", [](TestCase &t)
+        {
+            TestEnv env;
+            std::vector<int> trace;
+            gSchedulerTrace = &trace;
+            env.runtime.registerFunction(K_SCHED_MAIN, schedulerMainExit);
+            env.runtime.registerFunction(K_EXIT_DELETE, schedulerExitDelete);
+            env.runtime.registerFunction(K_EXIT_DELETE_PEER, schedulerExitDeletePeer);
+            env.runtime.registerFunction(K_EXIT_DELETE_REUSED, schedulerExitDeleteReused);
+            env.ctx.pc = K_SCHED_MAIN;
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.reset(env.rdram.data(), env.ctx);
+            gExitDeleteId = ee.createThread(EeThreadCreateParams{0, K_EXIT_DELETE, 0x20000u, 0x800u, 0, 5, 0});
+            const int peer = ee.createThread(EeThreadCreateParams{0, K_EXIT_DELETE_PEER, 0x21000u, 0x800u, 0, 20, 0});
+            // Take every other ID so the peer's new thread is given the deleted one's.
+            while (ee.createThread(EeThreadCreateParams{0, K_SCHED_B, 0x23000u, 0x800u, 0, 20, 0}) > 0)
+            {
+            }
+            ee.startThread(gExitDeleteId, 0, env.ctx, false);
+            ee.startThread(peer, 0, env.ctx, false);
+            gExitDeleteRecordGone = false;
+            gExitDeleteReusedId = 0;
+            ee.run();
+
+            t.IsTrue(trace == std::vector<int>({1, 10, 20, 30}),
+                     "the peer and the thread reusing the ID run after the exit");
+            t.IsTrue(gExitDeleteRecordGone, "ExitDeleteThread removes the thread's record");
+            t.Equals(gExitDeleteReusedId, gExitDeleteId, "the deleted thread's ID can be reused");
         });
 
         tc.Run("starting a strictly higher-priority thread preempts immediately", [](TestCase &t)
