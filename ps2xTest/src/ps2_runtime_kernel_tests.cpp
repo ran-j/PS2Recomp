@@ -707,13 +707,17 @@ namespace
 
     void switchExit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        queueSwitchInvocation(runtime, K_SWITCH_RESPAWN, 0u);
-        ExitDeleteThread(rdram, ctx, runtime);
+        queueSwitchInvocation(runtime, K_SWITCH_RESPAWN,
+                              static_cast<uint32_t>(runtime->eeScheduler().currentThreadId()));
+        ExitThread(rdram, ctx, runtime);
     }
 
+    // Deletes the exited thread, then hands its ID to a new one.
     void switchRespawn(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
     {
         EeScheduler &ee = runtime->eeScheduler();
+        uint32_t ownedStack = 0u;
+        ee.deleteThread(getRegS32(*ctx, 4), ownedStack);
         gSwitchReusedId = ee.createThread(EeThreadCreateParams{0, K_SWITCH_REUSED, 0x22000u, 0x800u, 0, 5, 0});
         ee.startThread(gSwitchReusedId, 0u, *ctx, true);
         gSwitchBefore = ee.eeCycle();
