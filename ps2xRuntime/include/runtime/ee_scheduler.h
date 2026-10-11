@@ -272,6 +272,13 @@ public:
     static constexpr uint64_t kEeClockHz = 294912000ull;
     static constexpr uint32_t kGeneratedCheckpointCycles = 32u;
     static constexpr uint32_t kGuestDispatchCycles = 8u;
+    // What switching to another thread costs: the EE kernel saves one
+    // thread's registers and loads the next's, hundreds of cycles. Charged
+    // per switch, threads yielding to each other in a loop take a few
+    // thousand turns per field, as on hardware; charged only the safe points
+    // around the yield, DQ8's movie threads took ~117,000, and a host that
+    // could not keep up ran the movie and its sound slow.
+    static constexpr uint32_t kThreadSwitchCycles = 512u;
     static constexpr uint64_t kDefaultTimeSliceCycles = 65536ull;
 
     explicit EeScheduler(PS2Runtime &runtime);
@@ -341,6 +348,8 @@ public:
     void dispatchIrq(bool dmac, uint32_t cause);
     void setVSyncFlag(uint32_t flagAddress, uint32_t tickAddress);
     [[nodiscard]] uint64_t currentVSyncTick() const noexcept;
+    // EE cycles charged so far. Executor only.
+    [[nodiscard]] uint64_t eeCycle() const noexcept { return m_eeCycle; }
     uint32_t setGsVSyncCallback(uint32_t callback, uint32_t gp, uint32_t sp);
 
     [[noreturn]] void waitVSync(uint64_t afterTick, int fixedResult = -1, std::function<void(R5900Context &)> completion = {});
@@ -483,6 +492,14 @@ private:
     uint32_t m_pendingIntcMask = 0u;
     uint32_t m_pendingDmacMask = 0u;
     int m_currentThreadId = 0;
+    // The guest thread the executor last switched to; see kThreadSwitchCycles.
+    // Cleared with its record, as a new thread can be given the same ID.
+    int m_lastRunThreadId = 0;
+    void forgetLastRun(int id) noexcept
+    {
+        if (m_lastRunThreadId == id)
+            m_lastRunThreadId = 0;
+    }
     bool m_rescheduleRequested = false;
     bool m_timeSliceExpired = false;
     bool m_insideInterrupt = false;
