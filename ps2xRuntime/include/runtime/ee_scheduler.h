@@ -467,6 +467,10 @@ private:
     std::unordered_map<int, GuestThread> m_threads;
     // EE thread IDs are bounded; map nodes remain stable across rehashes.
     std::array<GuestThread *, kLastThreadId + 1> m_threadIndex{};
+    // A thread that deleted itself. Its record owns the fiber the deletion
+    // ran on, so it is kept until enterGuest() is back on the executor's own
+    // stack; its ID is free for reuse meanwhile.
+    std::unordered_map<int, GuestThread>::node_type m_exitedThread;
     std::unordered_map<int, EeSemaphore> m_semaphores;
     std::unordered_map<int, EeEventFlag> m_eventFlags;
     std::unordered_map<int, EeAlarm> m_alarms;

@@ -172,6 +172,7 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     }
     m_invocationStackTops.clear();
     m_threads.clear();
+    m_exitedThread = {};
     m_threadIndex.fill(nullptr);
     m_semaphores.clear();
     m_eventFlags.clear();
@@ -832,7 +833,9 @@ int EeScheduler::startThread(int id, uint32_t arg, const R5900Context &caller, b
         releaseInvocationStacks(id);
         if (static_cast<uint32_t>(id) <= kLastThreadId)
             m_threadIndex[id] = nullptr;
-        m_threads.erase(id);
+        // This usually runs on the record's own fiber, so the record has to
+        // outlive the call; see m_exitedThread.
+        m_exitedThread = m_threads.extract(id);
         forgetLastRun(id);
     }
     if (ownedStack != 0u)
@@ -2137,6 +2140,12 @@ void EeScheduler::enterGuest(GuestThread &thread)
     if (m_dispatchedThreadId == 0)
     {
         thread.inGuestCall = false;
+    }
+    // `thread` may have deleted itself; now that its fiber is suspended, the
+    // record can go.
+    if (!m_exitedThread.empty())
+    {
+        m_exitedThread = {};
     }
 }
 
