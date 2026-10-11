@@ -194,6 +194,7 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_pendingIntcMask = 0u;
     m_pendingDmacMask = 0u;
     m_currentThreadId = 0;
+    m_lastRunThreadId = 0;
     m_rescheduleRequested = false;
     m_timeSliceExpired = false;
     m_insideInterrupt = false;
@@ -271,6 +272,11 @@ void EeScheduler::run()
             }
             if (next)
             {
+                if (next->id != m_lastRunThreadId)
+                {
+                    accountCycles(kThreadSwitchCycles);
+                    m_lastRunThreadId = next->id;
+                }
                 makeRunning(*next);
             }
             else
