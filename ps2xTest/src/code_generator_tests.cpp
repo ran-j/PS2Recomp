@@ -144,6 +144,21 @@ static Instruction makeJr(uint32_t address, uint8_t rs)
     return inst;
 }
 
+static Instruction makeSpecial(uint32_t address, uint32_t function, uint8_t rs, uint8_t rt, uint8_t rd, uint8_t sa = 0)
+{
+    Instruction inst{};
+    inst.address = address;
+    inst.opcode = OPCODE_SPECIAL;
+    inst.function = function;
+    inst.rs = rs;
+    inst.rt = rt;
+    inst.rd = rd;
+    inst.sa = sa;
+    inst.raw = (OPCODE_SPECIAL << 26) | (static_cast<uint32_t>(rs) << 21) | (static_cast<uint32_t>(rt) << 16) |
+               (static_cast<uint32_t>(rd) << 11) | (static_cast<uint32_t>(sa) << 6) | function;
+    return inst;
+}
+
 static Instruction makeSyscall(uint32_t address)
 {
     Instruction inst{};
@@ -628,9 +643,9 @@ void register_code_generator_tests()
                   "unresolved JR should not pretend it has a resolved local jump table");
     });
 
-    tc.Run("unresolved JALR marks internal labels as indirect fallback resume entries", [](TestCase &t) {
+    tc.Run("unresolved JALR resumes at its link address without indirect fallback entries", [](TestCase &t) {
         Function func;
-        func.name = "unresolved_jalr_fallback";
+        func.name = "unresolved_jalr_call";
         func.start = 0x3200;
         func.end = 0x3220;
         func.isRecompiled = true;
@@ -647,12 +662,107 @@ void register_code_generator_tests()
         CodeGenerator gen({}, {});
         CodeGenerator::AnalysisResult analysis = gen.collectInternalBranchTargets(func, instructions);
 
-        t.IsTrue(analysis.indirectFallbackEntryPoints.contains(0x320Cu),
-                 "unresolved JALR should register internal labels as resumable entries for the owning function");
+        t.IsTrue(analysis.indirectFallbackEntryPoints.empty(),
+                 "a register call returns to its link address, so the caller needs no indirect fallback entries");
+        t.IsTrue(analysis.resumeEntryPoints.contains(0x320Cu),
+                 "unresolved JALR should still mark its link address as resumable");
         t.IsTrue(analysis.entryPoints.contains(0x320Cu),
-                 "unresolved JALR fallback targets should still emit labels in the owner");
+                 "the JALR link address should still emit a label in the owner");
+        t.IsFalse(analysis.entryPoints.contains(0x3210u),
+                  "instructions past the link address should not become labels");
         t.IsFalse(analysis.jumpTableTargets.contains(0x3204u),
                   "unresolved JALR should not pretend it has a resolved local jump table");
+    });
+
+    tc.Run("unresolved JALR linking into $zero keeps indirect fallback entries", [](TestCase &t) {
+        Function func;
+        func.name = "unresolved_jalr_zero_link";
+        func.start = 0x3240;
+        func.end = 0x3260;
+        func.isRecompiled = true;
+        func.isStub = false;
+
+        std::vector<Instruction> instructions{
+            makeNop(0x3240),
+            makeJalr(0x3244, 25, 0),
+            makeNop(0x3248),
+            makeNop(0x324C),
+            makeNop(0x3250),
+        };
+
+        CodeGenerator gen({}, {});
+        CodeGenerator::AnalysisResult analysis = gen.collectInternalBranchTargets(func, instructions);
+
+        t.IsTrue(analysis.indirectFallbackEntryPoints.contains(0x3250u),
+                 "a JALR that links into $zero does not return and should fall back like JR");
+    });
+
+    // Switch whose table LUI was hoisted into a saved register ($s0) far above
+    // the dispatch, with the low half formed into another register:
+    //   lui $s0, 0x40 ... sll $v0, $a0, 2 ; addiu $v1, $s0, 0x1000 ;
+    //   addu $v0, $v1, $v0 ; lw $v0, 0($v0) ; jr $v0
+    static const auto makeHoistedLuiSwitch = []() {
+        return std::vector<Instruction>{
+            makeLui(0x3300, 16, 0x0040),
+            makeNop(0x3304),
+            makeSpecial(0x3308, SPECIAL_SLL, 0, 4, 2, 2),
+            makeAddiu(0x330C, 3, 16, 0x1000),
+            makeSpecial(0x3310, SPECIAL_ADDU, 3, 2, 2),
+            makeLw(0x3314, 2, 2, 0),
+            makeJr(0x3318, 2),
+            makeNop(0x331C),
+            makeNop(0x3320),
+            makeNop(0x3324),
+            makeJr(0x3328, 31),
+            makeNop(0x332C),
+        };
+    };
+
+    tc.Run("configured jump table resolves a switch whose LUI was hoisted into a saved register", [](TestCase &t) {
+        Function func;
+        func.name = "hoisted_lui_switch";
+        func.start = 0x3300;
+        func.end = 0x3330;
+        func.isRecompiled = true;
+        func.isStub = false;
+
+        JumpTable table{};
+        table.address = 0x00401000u;
+        table.entries = {{0u, 0x3320u}, {1u, 0x3324u}};
+
+        CodeGenerator gen({}, {});
+        gen.setConfiguredJumpTables({table});
+        CodeGenerator::AnalysisResult analysis =
+            gen.collectInternalBranchTargets(func, makeHoistedLuiSwitch());
+
+        const auto tableIt = analysis.jumpTableTargets.find(0x3318u);
+        t.IsTrue(tableIt != analysis.jumpTableTargets.end(),
+                 "the configured table should resolve through the hoisted LUI and ADDIU rt, rs, %lo");
+        if (tableIt != analysis.jumpTableTargets.end())
+        {
+            t.Equals(static_cast<size_t>(2u), tableIt->second.size(),
+                     "both configured cases should become local targets");
+        }
+        t.IsTrue(analysis.indirectFallbackEntryPoints.empty(),
+                 "a resolved switch should not promote the function to indirect fallback entries");
+    });
+
+    tc.Run("hoisted LUI switch without a configured table still falls back", [](TestCase &t) {
+        Function func;
+        func.name = "hoisted_lui_switch_unconfigured";
+        func.start = 0x3300;
+        func.end = 0x3330;
+        func.isRecompiled = true;
+        func.isStub = false;
+
+        CodeGenerator gen({}, {});
+        CodeGenerator::AnalysisResult analysis =
+            gen.collectInternalBranchTargets(func, makeHoistedLuiSwitch());
+
+        t.IsFalse(analysis.jumpTableTargets.contains(0x3318u),
+                  "the hoisted shape should only resolve against a configured table");
+        t.IsTrue(analysis.indirectFallbackEntryPoints.contains(0x3320u),
+                 "unconfigured code should keep the indirect fallback behavior");
     });
 
     tc.Run("syscall marks the following instruction as a resume entry", [](TestCase &t) {
