@@ -18,6 +18,12 @@ namespace ps2recomp
 
     std::string VuTranslator::translate(const Instruction &inst)
     {
+        return fmt::format("runtime->beforeVu0Access(ctx, 0x{:08X}u);\n{}\nruntime->afterVu0Access(ctx, 0x{:08X}u);",
+                           inst.raw, translateOperation(inst), inst.raw);
+    }
+
+    std::string VuTranslator::translateOperation(const Instruction &inst)
+    {
         uint8_t format = inst.rs; // Use parsed rs field for COP2 format
         uint8_t rt = inst.rt;
         uint8_t rd = inst.rd;
@@ -215,7 +221,7 @@ namespace ps2recomp
                 case VU0_S2_VRSQRT:
                     return m_codeGenerator.translateVU_VRSQRT(inst);
                 case VU0_S2_VWAITQ:
-                    return fmt::format("// VWAITQ (Q already resolved in this runtime)");
+                    return {};
                 case VU0_S2_VMTIR:
                     return m_codeGenerator.translateVU_VMTIR(inst);
                 case VU0_S2_VMFIR:

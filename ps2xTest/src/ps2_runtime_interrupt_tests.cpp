@@ -715,20 +715,26 @@ void register_ps2_runtime_interrupt_tests()
             mainContext.pc = kIdleVSyncWaitPc;
             std::atomic<bool> schedulerDone{false};
             std::atomic<bool> schedulerThrew{false};
+            std::atomic<bool> schedulerStarted{false};
             std::thread gameThread([&]()
             {
                 try
                 {
                     env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+                    schedulerStarted.store(true, std::memory_order_release);
+                    schedulerStarted.notify_one();
                     env.runtime.eeScheduler().run();
                 }
                 catch (...)
                 {
                     schedulerThrew.store(true, std::memory_order_release);
                 }
+                schedulerStarted.store(true, std::memory_order_release);
+                schedulerStarted.notify_one();
                 schedulerDone.store(true, std::memory_order_release);
             });
 
+            schedulerStarted.wait(false, std::memory_order_acquire);
             const bool becameIdle = waitUntil([&]() {
                 const EeKernelSnapshot snapshot = env.runtime.eeScheduler().snapshot();
                 return snapshot.runningThreadId == 0 &&

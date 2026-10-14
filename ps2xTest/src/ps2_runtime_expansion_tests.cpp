@@ -9,6 +9,7 @@
 #include "ps2_stubs.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/ee_scheduler.h"
+#include "runtime/vu/vu_unit.h"
 #include "runtime/gs/ps2_gs_psmct32.h"
 #include "ps2_runtime_macros.h"
 #include "Stubs/MPEG.h"
@@ -101,10 +102,9 @@ namespace
                0x3Cu;
     }
 
-    void writeVuInstructionPair(uint8_t *code, uint32_t pc, uint32_t lower, uint32_t upper)
+    void writeVuInstructionPair(PS2Memory &memory, uint32_t pc, uint32_t lower, uint32_t upper)
     {
-        std::memcpy(code + pc, &lower, sizeof(lower));
-        std::memcpy(code + pc + sizeof(lower), &upper, sizeof(upper));
+        memory.write64(PS2_VU0_CODE_BASE + pc, uint64_t(lower) | (uint64_t(upper) << 32));
     }
 
     uint64_t packVuInstructionPair(uint32_t lower, uint32_t upper)
@@ -229,6 +229,10 @@ namespace
         setRegU32(*ctx, 5, kMpegWaitImage);
         ctx->pc = kMpegWaitResumePc;
         ps2_stubs::sceMpegGetPicture(rdram, ctx, runtime);
+        if (runtime->eeTransferPending())
+        {
+            return;
+        }
     }
 
     void testMpegWaitResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
@@ -257,10 +261,18 @@ namespace
         setRegU32(*ctx, 4, kMpegNoDuplicateHandle);
         setRegU32(*ctx, 5, kMpegNoDuplicateImage);
         ps2_stubs::sceMpegGetPicture(rdram, ctx, runtime);
+        if (runtime->eeTransferPending())
+        {
+            return;
+        }
 
         gMpegNoDuplicateStage.store(1u, std::memory_order_release);
         ctx->pc = kMpegNoDuplicateResumePc;
         ps2_stubs::sceMpegGetPicture(rdram, ctx, runtime);
+        if (runtime->eeTransferPending())
+        {
+            return;
+        }
 
         gMpegNoDuplicateStage.store(4u, std::memory_order_release);
         ctx->pc = 0u;
@@ -1131,15 +1143,173 @@ void register_ps2_runtime_expansion_tests()
             t.Equals(mem.vif1_regs.itop, 0x21u, "MSCNT should keep latching ITOP from ITOPS");
         });
 
+        tc.Run("VIF startup and FLUSHE synchronize the selected VU", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "memory initializes");
+            t.IsTrue(runtime.syncCoreSubsystems(), "VU services bind");
+            for (uint32_t unit = 0; unit < 2; ++unit)
+            {
+                const auto base = unit ? PS2_VU1_CODE_BASE : PS2_VU0_CODE_BASE;
+                runtime.memory().write64(base, packVuInstructionPair(makeVuIaddiu(1, 0, 7), 0x400002ff));
+                runtime.memory().write64(base + 8, packVuInstructionPair(0x8000033c, 0x2ff));
+                const uint32_t start[] = {0x04000011, 0x14000000};
+                const uint32_t flush = 0x10000000;
+                auto &target = unit ? runtime.vu1() : runtime.vu0();
+                if (unit) runtime.memory().processVIF1Data(reinterpret_cast<const uint8_t *>(start), sizeof(start));
+                else runtime.memory().processVIF0Data(reinterpret_cast<const uint8_t *>(start), sizeof(start));
+                t.IsTrue(target.status() == ps2vu::UnitStatus::Running, "MSCAL launches the selected unit");
+                t.Equals(target.state().vi[1], int16_t(0), "VIF startup does not run instructions early");
+                if (unit) runtime.memory().processVIF1Data(reinterpret_cast<const uint8_t *>(&flush), sizeof(flush));
+                else runtime.memory().processVIF0Data(reinterpret_cast<const uint8_t *>(&flush), sizeof(flush));
+                t.IsTrue(target.status() == ps2vu::UnitStatus::Ready, "FLUSHE waits for the selected unit to finish");
+                t.Equals(target.state().vi[1], int16_t(7), "the microprogram executes before FLUSHE returns");
+                t.Equals(target.state().itop, 17u, "VIF startup latches ITOPS into ITOP");
+            }
+        });
+
+        tc.Run("VU runtime preserves asynchronous startup and scalar completion", [](TestCase &t)
+        {
+            PS2Memory memory;
+            t.IsTrue(memory.initialize(), "memory initializes");
+            R5900Context context{};
+            ps2vu::Runtime *active = nullptr;
+            ps2vu::Runtime runtime(memory, [&](uint32_t cycles) { active->advance(cycles, context); });
+            active = &runtime;
+            memory.write64(PS2_VU0_CODE_BASE,
+                packVuInstructionPair(0x800003bcu | (1u << 11) | (2u << 16), 0x400002ff));
+            memory.write64(PS2_VU0_CODE_BASE + 8, packVuInstructionPair(0x8000033c, 0x2ff));
+            context.vu0_q = 1;
+            context.vu0_vf[1] = _mm_set1_ps(8);
+            context.vu0_vf[2] = _mm_set1_ps(2);
+            runtime.start0(context, 0);
+            t.IsTrue(runtime.unit(false).status() == ps2vu::UnitStatus::Running, "startup launches the unit");
+            t.Equals(runtime.unit(false).state().cycles, uint64_t(0), "startup consumes no execution budget");
+            runtime.advance(2, context);
+            t.IsTrue(runtime.unit(false).status() == ps2vu::UnitStatus::Ready, "E and its delay pair finish at cycle two");
+            t.Equals(context.vu0_q, 1.0f, "Q remains pending after E");
+            runtime.advance(4, context);
+            t.Equals(context.vu0_q, 1.0f, "idle cycles do not publish Q early");
+            runtime.advance(1, context);
+            t.Equals(context.vu0_q, 4.0f, "Q is visible to EE at cycle seven");
+        });
+
+        tc.Run("VU0 noninterlocked memory transfers share the active micro register state", [](TestCase &t)
+        {
+            PS2Memory memory;
+            t.IsTrue(memory.initialize(), "memory initializes");
+            R5900Context context{};
+            ps2vu::Runtime *active = nullptr;
+            ps2vu::Runtime runtime(memory, [&](uint32_t cycles) { active->advance(cycles, context); });
+            active = &runtime;
+            const uint32_t add = (15u << 21) | (4u << 11) | (6u << 6) | 0x28u;
+            memory.write64(PS2_VU0_CODE_BASE, packVuInstructionPair(0x8000033c, add | 0x40000000u));
+            memory.write64(PS2_VU0_CODE_BASE + 8, packVuInstructionPair(0x8000033c, 0x2ff));
+            context.vu0_vf[4] = _mm_set1_ps(2);
+            runtime.start0(context, 0);
+            constexpr uint32_t load = (0x36u << 26) | (18u << 21) | (4u << 16);
+            runtime.beforeAccess(context, load);
+            t.Equals(runtime.unit(false).state().cycles, uint64_t(0), "LQC2 must not wait for the microprogram");
+            context.vu0_vf[4] = _mm_set1_ps(7);
+            runtime.afterAccess(context, load);
+            t.Equals(runtime.unit(false).state().vf[4][0], 7.0f, "LQC2 updates the register seen by the running microprogram");
+            runtime.advance(4, context);
+            t.Equals(_mm_cvtss_f32(context.vu0_vf[6]), 7.0f, "micro execution must retain the EE load");
+            runtime.start0(context, 0);
+            constexpr uint32_t store = (0x3eu << 26) | (18u << 21) | (6u << 16);
+            const auto cycle = runtime.unit(false).state().cycles;
+            runtime.beforeAccess(context, store);
+            t.Equals(runtime.unit(false).state().cycles, cycle, "SQC2 must not wait for the microprogram");
+            t.Equals(_mm_cvtss_f32(context.vu0_vf[6]), 7.0f, "SQC2 reads the current architectural register");
+            runtime.afterAccess(context, store);
+            constexpr uint32_t loadZero = 0xd8000000u;
+            context.vu0_vf[0] = _mm_set1_ps(9);
+            runtime.afterAccess(context, loadZero);
+            t.Equals(_mm_cvtss_f32(context.vu0_vf[0]), 0.0f, "LQC2 cannot overwrite VF00");
+        });
+
+        tc.Run("VU interpreter sees code writes between execution slices", [](TestCase &t)
+        {
+            PS2Memory memory;
+            t.IsTrue(memory.initialize(), "memory initializes");
+            R5900Context context{};
+            ps2vu::Runtime runtime(memory, [](uint32_t) {});
+            for (bool vu1 : {false, true})
+            {
+                const auto base = vu1 ? PS2_VU1_CODE_BASE : PS2_VU0_CODE_BASE;
+                memory.write64(base, packVuInstructionPair(makeVuIaddiu(1, 0, 3), 0x2ff));
+                memory.write64(base + 8, packVuInstructionPair(makeVuIaddiu(2, 0, 5), 0x400002ff));
+                memory.write64(base + 16, packVuInstructionPair(0x8000033c, 0x2ff));
+                auto &unit = runtime.unit(vu1);
+                t.IsTrue(unit.start(0, 0, 0), "unit starts");
+                auto exit = unit.advance(1);
+                t.Equals(exit.cycles, uint64_t(1), "budget stops after one pair");
+                t.Equals(unit.state().pc, 8u, "next pair remains unexecuted");
+                memory.write64((base + 8) | 0x80000000u,
+                    packVuInstructionPair(makeVuIaddiu(2, 0, 9), 0x400002ff));
+                exit = unit.advance(2);
+                t.Equals(exit.cycles, uint64_t(2), "end and delay pair consume two cycles");
+                t.Equals(unit.state().vi[2], int32_t(9), "resume fetches the modified code");
+                t.IsTrue(unit.status() == ps2vu::UnitStatus::Ready, "end returns the unit to ready");
+            }
+        });
+
+        tc.Run("VU0 shared register loads observe VU1 at each issue cycle", [](TestCase &t)
+        {
+            PS2Memory memory;
+            t.IsTrue(memory.initialize(), "memory initializes");
+            R5900Context context{};
+            ps2vu::Runtime *active = nullptr;
+            ps2vu::Runtime runtime(memory, [&](uint32_t cycles) { active->advance(cycles, context); });
+            active = &runtime;
+            for (uint32_t index = 0; index < 4; ++index)
+            {
+                memory.write64(PS2_VU1_CODE_BASE + index * 8,
+                    packVuInstructionPair(makeVuIaddiu(1, 0, index + 1), index == 2 ? 0x400002ff : 0x2ff));
+                const auto lower = index < 3 ? (4u << 25) | (8u << 21) | ((index + 1) << 16) | (5u << 11) : 0x8000033cu;
+                memory.write64(PS2_VU0_CODE_BASE + index * 8,
+                    packVuInstructionPair(lower, index == 2 ? 0x400002ff : 0x2ff));
+            }
+            context.vi[5] = 0x421;
+            runtime.start1(0, 0, 0, false);
+            runtime.start0(context, 0);
+            runtime.advance(10, context);
+            runtime.reportFailure();
+            t.Equals(context.vi[1], uint16_t(0), "first load observes cycle zero");
+            t.Equals(context.vi[2], uint16_t(1), "second load observes cycle one");
+            t.Equals(context.vi[3], uint16_t(2), "third load observes cycle two");
+            t.Equals(runtime.unit(true).state().vi[1], int16_t(4), "VU1 completes its remaining pairs");
+        });
+
+        tc.Run("VU0 interlocked write releases on M without ending the microprogram", [](TestCase &t)
+        {
+            PS2Memory memory;
+            t.IsTrue(memory.initialize(), "memory initializes");
+            R5900Context context{};
+            ps2vu::Runtime *active = nullptr;
+            ps2vu::Runtime runtime(memory, [&](uint32_t cycles) { active->advance(cycles, context); });
+            active = &runtime;
+            memory.write64(PS2_VU0_CODE_BASE, packVuInstructionPair(0x8000033c, 0x200002ff));
+            memory.write64(PS2_VU0_CODE_BASE + 8, packVuInstructionPair(makeVuIaddiu(1, 0, 7), 0x400002ff));
+            memory.write64(PS2_VU0_CODE_BASE + 16, packVuInstructionPair(0x8000033c, 0x2ff));
+            runtime.start0(context, 0);
+            runtime.beforeAccess(context, 0x48a00801);
+            t.IsTrue(runtime.unit(false).status() == ps2vu::UnitStatus::Running, "M releases the transfer while VU0 runs");
+            t.Equals(runtime.unit(false).state().cycles, uint64_t(1), "interlock stops at the M pair boundary");
+            t.Equals(context.vi[1], uint16_t(0), "later instruction has not run");
+            context.vu0_vf[1] = _mm_set1_ps(3);
+            runtime.afterAccess(context, 0x48a00801);
+            runtime.advance(2, context);
+            t.Equals(context.vi[1], uint16_t(7), "execution continues after the transfer");
+        });
+
         tc.Run("VU0 microprogram executes against VU0 code and data memory", [](TestCase &t)
         {
             PS2Runtime runtime;
             t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize should succeed");
             t.IsTrue(runtime.syncCoreSubsystems(), "runtime core subsystems should bind");
 
-            uint8_t *const code = runtime.memory().getVU0Code();
             uint8_t *const data = runtime.memory().getVU0Data();
-            std::memset(code, 0, PS2_VU0_CODE_SIZE);
             std::memset(data, 0, PS2_VU0_DATA_SIZE);
 
             const float input[4] = {1.0f, 2.0f, 3.0f, 4.0f};
@@ -1147,12 +1317,13 @@ void register_ps2_runtime_expansion_tests()
 
             constexpr uint32_t kVuNop = 0x0000003Fu;
             constexpr uint32_t kVuEndNop = 0x4000003Fu;
-            writeVuInstructionPair(code, 0u, makeVuLq(0xFu, 1u, 0u, 0), kVuNop);
-            writeVuInstructionPair(code, 8u, 0u, makeVuAdd(0xFu, 2u, 1u, 1u));
-            writeVuInstructionPair(code, 16u, makeVuSq(0xFu, 2u, 0u, 1), kVuEndNop);
+            writeVuInstructionPair(runtime.memory(), 0u, makeVuLq(0xFu, 1u, 0u, 0), kVuNop);
+            writeVuInstructionPair(runtime.memory(), 8u, 0u, makeVuAdd(0xFu, 2u, 1u, 1u));
+            writeVuInstructionPair(runtime.memory(), 16u, makeVuSq(0xFu, 2u, 0u, 1), kVuEndNop);
 
             R5900Context ctx{};
             runtime.executeVU0Microprogram(runtime.memory().getRDRAM(), &ctx, 0u);
+            runtime.beforeVu0Access(&ctx, 0x48201001u);
 
             float output[4]{};
             std::memcpy(output, data + 16u, sizeof(output));
@@ -1173,15 +1344,13 @@ void register_ps2_runtime_expansion_tests()
             t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize should succeed");
             t.IsTrue(runtime.syncCoreSubsystems(), "runtime core subsystems should bind");
 
-            uint8_t *const code = runtime.memory().getVU0Code();
-            std::memset(code, 0, PS2_VU0_CODE_SIZE);
             constexpr uint32_t kVuUpperNop = 0x000002FFu;
             constexpr uint32_t kVuUpperEndNop = 0x400002FFu;
             writeVuInstructionPair(
-                code, 0u,
+                runtime.memory(), 0u,
                 makeVuLowerSpecial(0x40u, 0u, 1u, 0x8u),
                 kVuUpperEndNop); // RNEXT.x vf1
-            writeVuInstructionPair(code, 8u, 0u, kVuUpperNop);
+            writeVuInstructionPair(runtime.memory(), 8u, 0u, kVuUpperNop);
 
             constexpr uint32_t seed = 0x3FC00000u;
             const uint32_t x = (seed >> 4) & 1u;
@@ -1192,6 +1361,7 @@ void register_ps2_runtime_expansion_tests()
             ctx.vu0_r = _mm_castsi128_ps(
                 _mm_set1_epi32(static_cast<int32_t>(seed)));
             runtime.executeVU0Microprogram(runtime.memory().getRDRAM(), &ctx, 0u);
+            runtime.beforeVu0Access(&ctx, 0x48200801u);
 
             alignas(16) uint32_t rWords[4]{};
             _mm_storeu_si128(reinterpret_cast<__m128i *>(rWords),
@@ -1204,7 +1374,7 @@ void register_ps2_runtime_expansion_tests()
             t.Equals(vf1Words[0], expected, "RNEXT should expose the same R value through VF1.x");
         });
 
-        tc.Run("VU0 direct MicroMem writes invalidate the fixed decode cache", [](TestCase &t)
+        tc.Run("VU0 direct MicroMem writes invalidate native blocks", [](TestCase &t)
         {
             PS2Runtime runtime;
             t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize should succeed");
@@ -1221,6 +1391,7 @@ void register_ps2_runtime_expansion_tests()
 
             R5900Context first{};
             runtime.executeVU0Microprogram(runtime.memory().getRDRAM(), &first, 0u);
+            runtime.beforeVu0Access(&first, 0x48400801u);
             t.Equals(static_cast<uint32_t>(first.vi[1]), 1u,
                      "first cached VU0 microprogram should execute");
 
@@ -1229,6 +1400,7 @@ void register_ps2_runtime_expansion_tests()
                 packVuInstructionPair(makeVuIaddiu(1u, 0u, 2), kVuUpperEndNop));
             R5900Context second{};
             runtime.executeVU0Microprogram(runtime.memory().getRDRAM(), &second, 0u);
+            runtime.beforeVu0Access(&second, 0x48400801u);
             t.Equals(static_cast<uint32_t>(second.vi[1]), 2u,
                      "VU0 cache should rebuild after a direct MicroMem write");
         });
@@ -1239,19 +1411,18 @@ void register_ps2_runtime_expansion_tests()
             t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize should succeed");
             t.IsTrue(runtime.syncCoreSubsystems(), "runtime core subsystems should bind");
 
-            uint8_t *const code = runtime.memory().getVU0Code();
-            std::memset(code, 0, PS2_VU0_CODE_SIZE);
             constexpr uint32_t kVuUpperNop = 0x000002FFu;
             writeVuInstructionPair(
-                code, 0u, makeVuIaddiu(1u, 0u, 7),
+                runtime.memory(), 0u, makeVuIaddiu(1u, 0u, 7),
                 kVuUpperNop | 0x08000000u);
             writeVuInstructionPair(
-                code, 8u, makeVuIaddiu(2u, 0u, 9),
+                runtime.memory(), 8u, makeVuIaddiu(2u, 0u, 9),
                 kVuUpperNop);
 
             R5900Context ctx{};
             ctx.vu0_fbrst = 1u << 3; // TE0
             runtime.executeVU0Microprogram(runtime.memory().getRDRAM(), &ctx, 0u);
+            runtime.beforeVu0Access(&ctx, 0x48400801u);
 
             t.Equals(static_cast<uint32_t>(ctx.vi[1]), 7u,
                      "the T-marked instruction should execute");

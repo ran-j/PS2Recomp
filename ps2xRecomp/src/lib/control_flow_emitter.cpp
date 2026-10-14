@@ -314,7 +314,7 @@ namespace ps2recomp
         }
         else
         {
-            m_ss << fmt::format("{}if (ctx->pc != 0x{:X}u) {{ return; }}\n", indent, fallthroughPc());
+            m_ss << fmt::format("{}if (runtime->eeTransferPending() || ctx->pc != 0x{:X}u) {{ return; }}\n", indent, fallthroughPc());
         }
 
         return true;

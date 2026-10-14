@@ -211,9 +211,12 @@ namespace ps2recomp
                 inst.rt,
                 genWrite(32, fmt::format("ADD32(GPR_U32(ctx, {}), {})", inst.rs, inst.simmediate), "bits"));
         case OPCODE_LDC2:
-            return fmt::format("ctx->vu0_vf[{}] = _mm_castsi128_ps({});", inst.rt, genRead(128, fmt::format("ADD32(GPR_U32(ctx, {}), {})", inst.rs, inst.simmediate)));
+            return fmt::format("runtime->beforeVu0Access(ctx, 0x{:08X}u);\nctx->vu0_vf[{}] = _mm_castsi128_ps({});\nruntime->afterVu0Access(ctx, 0x{:08X}u);",
+                               inst.raw, inst.rt, genRead(128, fmt::format("ADD32(GPR_U32(ctx, {}), {})", inst.rs, inst.simmediate)), inst.raw);
         case OPCODE_SDC2:
-            return genWrite(128, fmt::format("ADD32(GPR_U32(ctx, {}), {})", inst.rs, inst.simmediate), fmt::format("_mm_castps_si128(ctx->vu0_vf[{}])", inst.rt)) + ";";
+            return fmt::format("runtime->beforeVu0Access(ctx, 0x{:08X}u);\n{};\nruntime->afterVu0Access(ctx, 0x{:08X}u);",
+                               inst.raw, genWrite(128, fmt::format("ADD32(GPR_U32(ctx, {}), {})", inst.rs, inst.simmediate),
+                                                 fmt::format("_mm_castps_si128(ctx->vu0_vf[{}])", inst.rt)), inst.raw);
         case OPCODE_DADDI:
             return fmt::format(
                 "{{ int64_t src = (int64_t)GPR_S64(ctx, {}); "

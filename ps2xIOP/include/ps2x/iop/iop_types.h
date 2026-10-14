@@ -4,9 +4,17 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <array>
 
 namespace ps2x::iop
 {
+    struct ExecutionFault
+    {
+        bool active = false;
+        uint32_t pc = 0;
+        std::array<char, 192> reason{};
+    };
+
     struct GuestBuffer
     {
         uint32_t address = 0;

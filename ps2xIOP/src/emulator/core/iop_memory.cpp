@@ -96,7 +96,7 @@ namespace ps2x::iop::detail
         const uint32_t phys = physicalAddress(address);
         if (phys < RamSize)
         {
-            m_ram[phys] = value;
+            std::memcpy(m_ram.data() + phys, &value, sizeof(value));
             markOwned(phys, sizeof(value));
             return;
         }
@@ -167,7 +167,7 @@ namespace ps2x::iop::detail
             return false;
         if (size != 0u)
         {
-            std::memcpy(m_ram.data() + phys, source, size);
+            std::memmove(m_ram.data() + phys, source, size);
             markOwned(phys, size);
         }
         return true;

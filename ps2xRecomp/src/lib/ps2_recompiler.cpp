@@ -1190,6 +1190,7 @@ namespace ps2recomp
     {
         try
         {
+
             m_functionRenames.clear();
 
             auto makeName = [&](const Function &function) -> std::string

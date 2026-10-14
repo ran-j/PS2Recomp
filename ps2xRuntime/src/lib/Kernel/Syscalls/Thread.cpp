@@ -67,7 +67,7 @@ namespace ps2_syscalls
             return 0;
         }
 
-        [[noreturn]] void exitThreadWithHandlers(int tid,
+        void exitThreadWithHandlers(int tid,
                                                  R5900Context *ctx,
                                                  PS2Runtime *runtime,
                                                  bool deleteThread)
@@ -94,6 +94,7 @@ namespace ps2_syscalls
             if (invocations.empty())
             {
                 ee.exitCurrent(deleteThread);
+                return;
             }
             invocations.back().onComplete = [runtime, deleteThread](const R5900Context &, R5900Context &)
             {

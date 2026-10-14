@@ -159,6 +159,40 @@ void register_ps2_memory_tests()
 {
     MiniTest::Case("PS2Memory", [](TestCase &tc)
     {
+        tc.Run("GS display flip counters track guest buffer changes independently of host VSync", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "memory initialization");
+            auto &regs = mem.gs();
+            mem.write64(0x12000000u, 3); // Enable both display circuits.
+            mem.write64(0x12000070u, 32 | (10ull << 9));
+            mem.write32(0x12000090u, 32 | (10u << 9));
+            t.Equals(regs.displayFlipCount[0].load(), uint64_t(1), "64-bit flip counted");
+            t.Equals(regs.displayFlipCount[1].load(), uint64_t(1), "32-bit flip counted independently");
+            mem.write32(0x12000074u, 1u << 11); // DBY/field offset only.
+            mem.write32(0x12000070u, 32 | (20u << 9)); // Same FBP, different width.
+            for (unsigned i = 0; i < 60; ++i)
+            {
+                ++regs.vsyncTick;
+                mem.write32(0x12000070u, 32 | (20u << 9));
+            }
+            t.Equals(regs.displayFlipCount[0].load(), uint64_t(1), "repeats, field offsets and host VSync are not flips");
+            mem.write64(0x12000000u, 0);
+            mem.write64(0x12000070u, 64);
+            t.Equals(regs.displayFlipCount[0].load(), uint64_t(1), "disabled display excluded");
+            mem.write64(0x12000000u, 3);
+            GS gs;
+            gs.init(mem.getGSVRAM(), PS2_GS_VRAM_SIZE, &regs);
+            gs.writeRegister(0x59, 96);
+            gs.writeRegister(0x5b, 96);
+            t.Equals(regs.displayFlipCount[0].load(), uint64_t(2), "native GS register path counted");
+            t.Equals(regs.displayFlipCount[1].load(), uint64_t(2), "second native circuit counted");
+            gs.shutdownBackend();
+            t.IsTrue(mem.initialize(), "memory reset");
+            t.Equals(regs.displayFlipCount[0].load(), uint64_t(0), "reset clears counters");
+            t.Equals(regs.displayFlipCount[1].load(), uint64_t(0), "reset clears both circuits");
+        });
+
         tc.Run("uncached aliases map to same RDRAM bytes", [](TestCase &t)
         {
             PS2Memory mem;
@@ -394,7 +428,6 @@ void register_ps2_memory_tests()
                 packet.push_back(static_cast<uint8_t>(i & 0xFFu));
             }
 
-            std::memset(mem.getVU1Code(), 0, PS2_VU1_CODE_SIZE);
             mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
 
             const uint8_t *vu1Code = mem.getVU1Code();
@@ -2214,6 +2247,39 @@ void register_ps2_memory_tests()
                 }
             }
             t.IsTrue(imageOk, "raw image continuation after packed setup should not be decoded as VIF/GIF registers");
+        });
+
+        tc.Run("VU code writes are visible through aliases and MPG", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "memory initializes");
+            for (bool vu1 : {false, true})
+            {
+                const uint32_t base = vu1 ? PS2_VU1_CODE_BASE : PS2_VU0_CODE_BASE;
+                mem.write8(base | 0x80000000u, 1);
+                mem.write16(base + 2, 2);
+                mem.write32(base + 4, 3);
+                mem.write64(base + 8, 4);
+                t.Equals(mem.read8(base), uint8_t(1), "byte alias is visible");
+                t.Equals(mem.read16(base + 2), uint16_t(2), "halfword is visible");
+                t.Equals(mem.read32(base + 4), 3u, "word is visible");
+                t.Equals(mem.read64(base + 8), uint64_t(4), "doubleword is visible");
+                mem.write128(base, _mm_set1_epi32(5));
+                t.Equals(mem.read32(base + 12), 5u, "quadword is visible");
+                std::vector<uint8_t> packet;
+                appendU32(packet, makeVifCmd(0x4a, 1, 0));
+                appendU64(packet, 0x000002ff8000033cull);
+                for (uint32_t upload = 0; upload < 2; ++upload)
+                {
+                    if (vu1) mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+                    else mem.processVIF0Data(packet.data(), static_cast<uint32_t>(packet.size()));
+                    t.Equals(mem.read64(base), uint64_t(0x000002ff8000033cull), "MPG code is visible after each upload");
+                }
+            }
+            const std::array<uint8_t, 4> bytes{0, 0, 1, 2};
+            t.IsTrue(mem.writeVuCode(true, 4094, bytes), "crossing upload changes code");
+            t.IsFalse(mem.writeVuCode(true, 4094, bytes), "identical upload leaves bytes unchanged");
+            t.Equals(mem.read16(PS2_VU1_CODE_BASE + 4096), uint16_t(0x0201), "crossing bytes are visible");
         });
 
         tc.Run("unaligned accesses throw", [](TestCase &t)

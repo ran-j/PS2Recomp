@@ -1,6 +1,7 @@
 #ifndef PS2RECOMP_TYPES_H
 #define PS2RECOMP_TYPES_H
 
+
 #include <string>
 #include <vector>
 #include <cstdint>
@@ -175,6 +176,7 @@ namespace ps2recomp
     // Recompiler configuration
     struct RecompilerConfig
     {
+
         std::string inputPath;
         std::string outputPath;
         std::string ghidraMapPath;

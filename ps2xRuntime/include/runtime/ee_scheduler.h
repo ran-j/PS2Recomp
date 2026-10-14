@@ -16,12 +16,6 @@
 #include <variant>
 #include <vector>
 
-// This exception is the EE equivalent of a longjmp to the dispatcher.  It is
-// not an error and must only be caught at EeScheduler::run().
-struct EeDispatcherTransfer final
-{
-};
-
 enum class EeThreadStatus : uint8_t
 {
     Running,
@@ -280,6 +274,7 @@ public:
     void postEvent(EeEvent event);
     [[nodiscard]] bool checkpointDue(uint32_t cycles = kGeneratedCheckpointCycles) noexcept;
     void accountCycles(uint32_t cycles) noexcept;
+    [[nodiscard]] bool transferPending() const noexcept { return m_transferPending; }
     [[nodiscard]] bool isExecutingGuest() const noexcept;
 
     // Kernel object API. All calls except postEvent/requestStop execute on the
@@ -288,7 +283,7 @@ public:
     int createThread(const EeThreadCreateParams &params);
     int deleteThread(int id, uint32_t &ownedStack);
     int startThread(int id, uint32_t arg, const R5900Context &caller, bool interruptSafe);
-    [[noreturn]] void exitCurrent(bool deleteThread);
+    void exitCurrent(bool deleteThread);
     int terminateThread(int id, uint32_t &ownedStack, bool interruptSafe);
     int suspendThread(int id, bool interruptSafe);
     int resumeThread(int id, bool interruptSafe);
@@ -316,8 +311,8 @@ public:
     int setAlarm(uint16_t ticks, uint32_t handler, uint32_t argument, uint32_t gp, uint32_t sp);
     int cancelAlarm(int id);
     void queueInvocation(GuestInvocation invocation);
-    [[noreturn]] void invokeCurrent(GuestInvocation invocation);
-    [[noreturn]] void invokeCurrentSequence(std::vector<GuestInvocation> invocations);
+    void invokeCurrent(GuestInvocation invocation);
+    void invokeCurrentSequence(std::vector<GuestInvocation> invocations);
     [[nodiscard]] bool hasInvocation(GuestInvocationKind kind, uint64_t tag) const;
     [[nodiscard]] uint32_t invocationStackTop();
 
@@ -336,10 +331,10 @@ public:
     [[nodiscard]] uint64_t currentVSyncTick() const noexcept;
     uint32_t setGsVSyncCallback(uint32_t callback, uint32_t gp, uint32_t sp);
 
-    [[noreturn]] void waitVSync(uint64_t afterTick, int fixedResult = -1, std::function<void(R5900Context &)> completion = {});
+    void waitVSync(uint64_t afterTick, int fixedResult = -1, std::function<void(R5900Context &)> completion = {});
     void completeVSync(uint64_t tick);
     void completeExternalWait(uint32_t type, uint64_t token, int result);
-    [[noreturn]] void waitExternal(EeWaitReason reason, uint32_t type, uint64_t token, std::function<void(R5900Context &)> completion = {});
+    void waitExternal(EeWaitReason reason, uint32_t type, uint64_t token, std::function<void(R5900Context &)> completion = {});
 
     [[nodiscard]] GuestThread *thread(int id);
     [[nodiscard]] const GuestThread *thread(int id) const;
@@ -378,7 +373,7 @@ private:
     void makeRunning(GuestThread &thread);
     void makeDormant(GuestThread &thread);
     void removeFromWaitObject(GuestThread &thread);
-    [[noreturn]] void blockCurrent(EeWaitState wait);
+    void blockCurrent(EeWaitState wait);
     void makeReady(GuestThread &thread, int result, bool interruptSafe);
     void requestPreemptionIfHigher(const GuestThread &readyThread, bool interruptSafe);
     void applyPendingPreemption();
@@ -421,6 +416,7 @@ private:
     uint32_t m_enabledIntcMask = 0xFFFFFFFFu;
     uint32_t m_enabledDmacMask = 0xFFFFFFFFu;
     int m_currentThreadId = 0;
+    bool m_transferPending = false;
     bool m_rescheduleRequested = false;
     bool m_timeSliceExpired = false;
     bool m_insideInterrupt = false;

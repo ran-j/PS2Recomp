@@ -2182,6 +2182,7 @@ void PS2DebugPanel::initialize()
     if (!m_initialized)
     {
         rlImGuiSetup(true);
+        m_fpsSampleStart = {};
         m_initialized = true;
     }
 #endif
@@ -2205,6 +2206,40 @@ void PS2DebugPanel::draw(PS2Runtime &runtime)
     {
         return;
     }
+ 
+    const auto now = std::chrono::steady_clock::now();
+    const auto &regs = runtime.memory().gs();
+    const uint64_t sdkPresents = regs.sdkPresentCount.load(std::memory_order_relaxed);
+    const std::array<uint64_t, 2> flips{
+        regs.displayFlipCount[0].load(std::memory_order_relaxed),
+        regs.displayFlipCount[1].load(std::memory_order_relaxed)};
+    if (m_fpsSampleStart == std::chrono::steady_clock::time_point{} ||
+        flips[0] < m_lastDisplayFlips[0] || flips[1] < m_lastDisplayFlips[1] || sdkPresents < m_lastSdkPresents)
+    {
+        m_fpsSampleStart = now;
+        m_lastDisplayFlips = flips;
+        m_lastSdkPresents = sdkPresents;
+        m_hostFramesInSample = 0;
+        m_gameFps = m_hostFps = 0.0;
+    }
+    else
+    {
+        ++m_hostFramesInSample;
+        const double seconds = std::chrono::duration<double>(now - m_fpsSampleStart).count();
+        if (seconds >= 1.0)
+        {
+            // Once SDK swaps are observed, keep using their counter even when
+            // it stops: a stalled game must report zero, not host activity.
+            const uint64_t gameFrames = sdkPresents ? sdkPresents - m_lastSdkPresents :
+                std::max(flips[0] - m_lastDisplayFlips[0], flips[1] - m_lastDisplayFlips[1]);
+            m_gameFps = double(gameFrames) / seconds;
+            m_hostFps = double(m_hostFramesInSample) / seconds;
+            m_lastDisplayFlips = flips;
+            m_lastSdkPresents = sdkPresents;
+            m_hostFramesInSample = 0;
+            m_fpsSampleStart = now;
+        }
+    }
 
     if (IsKeyPressed(KEY_F1))
     {
@@ -2227,6 +2262,13 @@ void PS2DebugPanel::draw(PS2Runtime &runtime)
             ImGui::EndMenuBar();
         }
 
+        ImGui::Text("Game FPS (%s): %.1f  |  Host FPS: %.1f", sdkPresents ? "SDK swaps" : "estimated flips", m_gameFps, m_hostFps);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Game: completed sceGsSwapDBuff/sceGsSwapDBuffDc calls per second, when used.\n"
+                              "Without SDK swaps: estimate from framebuffer base changes on the busiest GS circuit.\n"
+                              "These sources are never added together. This measures presentation, not simulation FPS.\n"
+                              "Direct fixed-buffer rendering may show 0; raster effects may overcount the estimate.\n"
+                              "Host: window redraws per second. Both rates use a one-second sample.");
         if (ImGui::BeginTabBar("debug-tabs"))
         {
             if (ImGui::BeginTabItem("CPU"))
