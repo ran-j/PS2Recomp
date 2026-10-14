@@ -956,8 +956,11 @@ void register_ps2_memory_tests()
             t.IsTrue(secondOk, "second queued PATH3 packet should flush in-order");
         });
 
-        tc.Run("GIF arbiter prioritizes PATH1 then PATH2 then PATH3", [](TestCase &t)
+        tc.Run("GIF arbiter drains packets in submission order", [](TestCase &t)
         {
+            // Packets queued between drains were issued one after another by synchronous
+            // transfers, so a texture upload (PATH3) submitted before a draw (PATH1) must
+            // reach the GS first.
             std::vector<uint8_t> order;
             GifArbiter arbiter([&](const uint8_t *data, uint32_t sizeBytes)
             {
@@ -975,9 +978,9 @@ void register_ps2_memory_tests()
             arbiter.drain();
 
             t.Equals(order.size(), static_cast<size_t>(3u), "all queued packets should be drained");
-            t.Equals(order[0], static_cast<uint8_t>(0x11u), "PATH1 should be drained first");
-            t.Equals(order[1], static_cast<uint8_t>(0x22u), "PATH2 should be drained second");
-            t.Equals(order[2], static_cast<uint8_t>(0x33u), "PATH3 should be drained third");
+            t.Equals(order[0], static_cast<uint8_t>(0x33u), "the PATH3 packet was submitted first");
+            t.Equals(order[1], static_cast<uint8_t>(0x22u), "the PATH2 packet was submitted second");
+            t.Equals(order[2], static_cast<uint8_t>(0x11u), "the PATH1 packet was submitted last");
         });
 
         tc.Run("VIF DIRECTHL stalls behind queued PATH3 IMAGE packets", [](TestCase &t)
