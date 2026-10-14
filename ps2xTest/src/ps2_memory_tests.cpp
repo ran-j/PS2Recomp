@@ -440,6 +440,24 @@ void register_ps2_memory_tests()
             t.IsTrue(matches, "UNPACK num=0 should copy 256 V4_32 vectors (4096 bytes)");
         });
 
+        tc.Run("VIF1 register reads return the VIF state, not the last CPU write", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            mem.write32(0x10003C30u, 0x1111u); // CPU writes VIF1_MARK
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x07u, 0u, 0x2222u)); // MARK VIFcode
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            t.Equals(mem.read32(0x10003C30u), 0x2222u, "VIF1_MARK should show the MARK VIFcode's value");
+            t.IsTrue((mem.read32(0x10003C00u) & (1u << 6)) != 0u, "VIF1_STAT.MRK should be visible to the CPU");
+            t.Equals(mem.read32(0x10003C80u), makeVifCmd(0x07u, 0u, 0x2222u), "VIF1_CODE should show the last VIFcode");
+
+            mem.write32(0x10003C20u, 0x1u);
+            t.Equals(mem.read32(0x10003C20u), 0x1u, "VIF1_ERR should read back what was written");
+        });
+
         tc.Run("VIF control commands update MARK MASK ROW and COL registers", [](TestCase &t)
         {
             PS2Memory mem;
