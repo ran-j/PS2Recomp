@@ -734,6 +734,97 @@ void register_code_generator_tests()
                  "multiple resume pcs should register to the same owner wrapper");
     });
 
+    tc.Run("explicit function handlers take precedence over resume aliases", [](TestCase &t) {
+        auto function = [](const std::string &name, uint32_t start) {
+            Function fn{};
+            fn.name = name;
+            fn.start = start;
+            fn.end = start + 0x40u;
+            fn.isRecompiled = true;
+            return fn;
+        };
+        Function stub = function("synthetic_stub", 0x700cu);
+        stub.isRecompiled = false;
+        stub.isStub = true;
+        Function syscall = function("SleepThread", 0x7010u);
+        syscall.isRecompiled = false;
+        syscall.isStub = true;
+        Function library = function("synthetic_library", 0x7014u);
+        library.isRecompiled = false;
+        library.isSkipped = true;
+        const std::vector<Section> sections;
+        CodeGenerator gen({}, sections);
+        gen.setRenamedFunctions({{0x7000u, "owner"}, {0x7008u, "normal"},
+                                 {stub.start, "stub"}, {syscall.start, "syscall"},
+                                 {library.start, "library"}});
+        gen.setResumeEntryTargets({{0x7000u, {0x7004u, 0x7008u, 0x700cu,
+                                               0x7010u, 0x7014u, 0x7004u}}});
+        t.IsTrue(PS2Recompiler::resolveStubTarget(syscall.name) == StubTarget::Syscall,
+                 "the syscall collision must exercise a real runtime binding");
+        const std::string registration = gen.generateFunctionRegistration(
+            {function("entry_owner", 0x7000u), function("normal", 0x7008u),
+             stub, syscall, library}, {});
+        for (const auto &[name, address] : std::vector<std::pair<std::string, std::string>>{
+                 {"owner", "7000"}, {"owner", "7004"}, {"normal", "7008"},
+                 {"stub", "700c"}, {"syscall", "7010"}, {"library", "7014"}})
+        {
+            t.IsTrue(registration.find(" = " + name + "; // 0x" + address + "\n") != std::string::npos,
+                     "an explicit function start must retain its own binding at " + address);
+        }
+        const std::regex assignment(R"(g_ps2RecompiledFunctionTable\[[0-9]+\] = )");
+        t.Equals(std::distance(std::sregex_iterator(registration.begin(), registration.end(), assignment),
+                               std::sregex_iterator()), static_cast<std::ptrdiff_t>(6),
+                 "repeated aliases must not duplicate table assignments");
+    });
+
+    tc.Run("overlapping resume owners are deterministic and prefer normal wrappers", [](TestCase &t) {
+        const std::vector<Section> sections;
+        const std::vector<std::pair<uint32_t, std::vector<uint32_t>>> aliases{
+            {0x8000u, {0x8018u, 0x8024u}}, {0x8008u, {0x8018u, 0x8028u}},
+            {0x800cu, {0x8018u, 0x8020u, 0x8024u}}, {0x8010u, {0x8018u, 0x8020u}}};
+        std::vector<Function> functions;
+        for (const auto &[address, name] : std::vector<std::pair<uint32_t, std::string>>{
+                 {0x8000u, "normal_wide"}, {0x8008u, "normal_narrow"},
+                 {0x800cu, "entry_overlay"}, {0x8010u, "entry_narrow"}})
+        {
+            Function fn{};
+            fn.name = name;
+            fn.start = address;
+            fn.end = address + 0x40u;
+            fn.isRecompiled = true;
+            functions.push_back(fn);
+        }
+        std::string firstRegistration;
+        for (bool reverse : {false, true})
+        {
+            CodeGenerator gen({}, sections);
+            gen.setRenamedFunctions({{0x8000u, "normal_wide"}, {0x8008u, "normal_narrow"},
+                                     {0x800cu, "entry_overlay"}, {0x8010u, "entry_narrow"}});
+            std::unordered_map<uint32_t, std::vector<uint32_t>> owners;
+            for (size_t i = 0; i < aliases.size(); ++i)
+            {
+                const auto &[address, targets] = aliases[reverse ? aliases.size() - i - 1u : i];
+                owners.emplace(address, targets);
+            }
+            gen.setResumeEntryTargets(owners);
+            const std::string registration = gen.generateFunctionRegistration(functions, {});
+            for (const auto &[name, address] : std::vector<std::pair<std::string, std::string>>{
+                     {"normal_wide", "8000"}, {"normal_narrow", "8008"},
+                     {"entry_overlay", "800c"}, {"entry_narrow", "8010"},
+                     {"normal_narrow", "8018"}, {"entry_narrow", "8020"},
+                     {"normal_wide", "8024"}, {"normal_narrow", "8028"}})
+            {
+                t.IsTrue(registration.find(" = " + name + "; // 0x" + address + "\n") != std::string::npos,
+                         "normal owners precede entries, then the most specific owner wins at " + address);
+            }
+            if (reverse)
+                t.Equals(registration, firstRegistration,
+                         "unordered-map insertion order must not change generated registration");
+            else
+                firstRegistration = registration;
+        }
+    });
+
     tc.Run("configured internal guest handlers register to their owner wrapper", [](TestCase &t) {
         Function owner;
         owner.name = "sdk_bootstrap_owner";
