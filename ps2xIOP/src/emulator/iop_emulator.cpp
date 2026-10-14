@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <map>
 #include <optional>
 #include <span>
@@ -397,6 +398,23 @@ namespace ps2x::iop::detail
             return running;
         }
 
+        // Guest calls (RPC servers, callbacks, module entry points) run
+        // synchronously with an instruction cap so a hung IRX can't hang the
+        // EE. Some modules legitimately do far more work in one call (for
+        // example a streaming driver indexing a large archive on the disc),
+        // so PS2X_IOP_CALL_BUDGET can raise it.
+        static uint32_t callInstructionBudget()
+        {
+            static const uint32_t budget = []
+            {
+                const char *value = std::getenv("PS2X_IOP_CALL_BUDGET");
+                const unsigned long long parsed = value ? std::strtoull(value, nullptr, 0) : 0ull;
+                return parsed ? static_cast<uint32_t>(std::min<unsigned long long>(parsed, 0xFFFFFFFFull))
+                              : kMaxCallInstructions;
+            }();
+            return budget;
+        }
+
         uint32_t runCpu(CpuState &cpu, uint32_t instructionBudget)
         {
             CpuState *previous = activeCpu;
@@ -421,8 +439,10 @@ namespace ps2x::iop::detail
                               uint32_t a2,
                               uint32_t a3,
                               uint32_t gp,
-                              uint32_t budget = kMaxCallInstructions)
+                              uint32_t budget = 0u)
         {
+            if (budget == 0u)
+                budget = callInstructionBudget();
             struct CallDepthGuard
             {
                 uint32_t &depth;
@@ -456,6 +476,16 @@ namespace ps2x::iop::detail
             }
             cpu.gpr[31] = kCallReturnSentinel;
             runCpu(cpu, budget);
+            if (!cpu.stopped && !cpu.yielded)
+            {
+                // The call was cut off mid-function. On hardware it would have
+                // run to completion, so this is never benign.
+                std::ostringstream out;
+                out << "[IOP] call to 0x" << std::hex << address << std::dec << " exceeded its " << budget
+                    << "-instruction budget and was abandoned at pc=0x" << std::hex << cpu.pc << std::dec
+                    << " (raise PS2X_IOP_CALL_BUDGET)";
+                log(LogLevel::Warning, out.str());
+            }
             return cpu.gpr[2];
         }
 
