@@ -1660,6 +1660,10 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         if (m_cycle >= budgetEnd)
             break;
 
+        // A VI write in the delay slot of a taken branch is followed by the branch target, which
+        // starts a new block: a branch there reads the new value. Only a write by the instruction
+        // directly before a branch in program order is hidden from it.
+        const bool inTakenDelaySlot = m_state.branchPending && m_state.branchDelay == 0u;
         uint8_t writtenVi = 0u;
         int32_t oldVi = 0;
         for (uint32_t reg = 1; reg < 16u; ++reg)
@@ -1764,7 +1768,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         }
 
         markPairWrites(decoded);
-        if (writtenVi != 0u && decoded.lowerUsage.delaysNextBranchRead)
+        if (writtenVi != 0u && decoded.lowerUsage.delaysNextBranchRead && !inTakenDelaySlot)
             recordViWriteForBranch(writtenVi, oldVi);
 
         m_state.vf[0][0] = 0.0f;
