@@ -356,7 +356,11 @@ namespace ps2x::iop::detail
         {
             const uint32_t address = cpu.gpr[rs] + static_cast<uint32_t>(simm);
             const uint32_t memory = m_memory.read32(address & ~3u);
-            const uint32_t old = cpu.gpr[rt];
+            // LWL/LWR merge with a load still in its delay slot (R3000A
+            // forwarding), so "lwl rt; lwr rt" pairs see each other's bytes.
+            const uint32_t old = (cpu.pendingLoad && cpu.pendingLoadReg == rt)
+                                     ? cpu.pendingLoadValue
+                                     : cpu.gpr[rt];
             static constexpr uint32_t masks[4] = {0x00FFFFFFu, 0x0000FFFFu, 0x000000FFu, 0x00000000u};
             static constexpr uint32_t shifts[4] = {24u, 16u, 8u, 0u};
             load(rt, (old & masks[address & 3u]) | (memory << shifts[address & 3u]));
@@ -377,7 +381,11 @@ namespace ps2x::iop::detail
         {
             const uint32_t address = cpu.gpr[rs] + static_cast<uint32_t>(simm);
             const uint32_t memory = m_memory.read32(address & ~3u);
-            const uint32_t old = cpu.gpr[rt];
+            // LWL/LWR merge with a load still in its delay slot (R3000A
+            // forwarding), so "lwl rt; lwr rt" pairs see each other's bytes.
+            const uint32_t old = (cpu.pendingLoad && cpu.pendingLoadReg == rt)
+                                     ? cpu.pendingLoadValue
+                                     : cpu.gpr[rt];
             static constexpr uint32_t masks[4] = {0x00000000u, 0xFF000000u, 0xFFFF0000u, 0xFFFFFF00u};
             static constexpr uint32_t shifts[4] = {0u, 8u, 16u, 24u};
             load(rt, (old & masks[address & 3u]) | (memory >> shifts[address & 3u]));
