@@ -959,6 +959,30 @@ inline __m128i ps2_qfsrv(__m128i rs, __m128i rt, uint32_t sa)
 #define PS2_PEXEW(rs) _mm_shuffle_epi32(rs, _MM_SHUFFLE(2, 3, 0, 1))
 #define PS2_PROT3W(rs) _mm_shuffle_epi32(rs, _MM_SHUFFLE(0, 3, 2, 1))
 
+// VU0 macro-mode MAC flags for the fields in dest (bit 3 = x ... bit 0 = w): zero in
+// bits 0-3, sign in bits 4-7 (overflow and underflow are not modelled). The status
+// register keeps Z/S and their sticky copies.
+static inline void ps2_vu0_set_mac(R5900Context *ctx, __m128 result, uint32_t dest)
+{
+    float lanes[4];
+    std::memcpy(lanes, &result, sizeof(lanes));
+    uint32_t mac = 0u;
+    for (int lane = 0; lane < 4; ++lane)
+    {
+        const uint32_t bit = 3u - static_cast<uint32_t>(lane);
+        if (!(dest & (1u << bit)))
+            continue;
+        if (lanes[lane] == 0.0f)
+            mac |= 1u << bit;
+        if (std::signbit(lanes[lane]))
+            mac |= 1u << (bit + 4u);
+    }
+    ctx->vu0_mac_flags = mac;
+    const uint16_t zs = static_cast<uint16_t>(((mac & 0x0Fu) ? 0x1u : 0u) | ((mac & 0xF0u) ? 0x2u : 0u));
+    ctx->vu0_status = static_cast<uint16_t>((ctx->vu0_status & ~0x3u) | zs | (zs << 6));
+}
+#define PS2_VU0_SET_MAC(ctx_ptr, result, dest) ps2_vu0_set_mac((ctx_ptr), (result), (dest))
+
 // Additional VU0 operations
 #define PS2_VSQRT(x) sqrtf(x)
 #define PS2_VRSQRT(x) (1.0f / sqrtf(x))
