@@ -377,6 +377,48 @@ namespace
         runtime->requestStop();
     }
 
+    constexpr uint32_t K_INIT_MAIN = 0x301100u;
+    constexpr uint32_t K_INIT_MAIN_RESUME = 0x301104u;
+    constexpr uint32_t K_INIT_MAIN_ROTATED = 0x301108u;
+    constexpr uint32_t K_INIT_WORKER = 0x301110u;
+    int gInitThreadResult = 0;
+    int gInitThreadSecondResult = 0;
+    int gInitThreadWorker = 0;
+
+    void initThreadMain(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gSchedulerTrace->push_back(1);
+        ctx->pc = K_INIT_MAIN_RESUME;
+        InitThread(rdram, ctx, runtime);
+    }
+
+    void initThreadMainResume(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gInitThreadResult = getRegS32(*ctx, 2);
+        InitThread(rdram, ctx, runtime);
+        gInitThreadSecondResult = getRegS32(*ctx, 2);
+        gSchedulerTrace->push_back(2);
+        EeScheduler &ee = runtime->eeScheduler();
+        gInitThreadWorker = ee.createThread(EeThreadCreateParams{0, K_INIT_WORKER, 0x20000u, 0x800u, 0, 1, 0});
+        ee.startThread(gInitThreadWorker, 0, *ctx, false);
+        ctx->pc = K_INIT_MAIN_ROTATED;
+        setRegU32(*ctx, 4, 1u);
+        RotateThreadReadyQueue(rdram, ctx, runtime);
+    }
+
+    void initThreadMainRotated(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gSchedulerTrace->push_back(3);
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
+    void initThreadWorker(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gSchedulerTrace->push_back(20);
+        ExitThread(rdram, ctx, runtime);
+    }
+
     void schedulerPreemptLow(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         gSchedulerTrace->push_back(30);
@@ -831,6 +873,37 @@ void register_ps2_runtime_kernel_tests()
 
             const std::vector<int> expected{1, 10, 20, 11};
             t.IsTrue(trace == expected, "explicit rotation should move the current head behind its FIFO peer");
+        });
+
+        tc.Run("InitThread leaves libkernel's topThread waiting and its caller at priority one", [](TestCase &t)
+        {
+            TestEnv env;
+            std::vector<int> trace;
+            gSchedulerTrace = &trace;
+            env.runtime.registerFunction(K_INIT_MAIN, initThreadMain);
+            env.runtime.registerFunction(K_INIT_MAIN_RESUME, initThreadMainResume);
+            env.runtime.registerFunction(K_INIT_MAIN_ROTATED, initThreadMainRotated);
+            env.runtime.registerFunction(K_INIT_WORKER, initThreadWorker);
+            env.ctx.pc = K_INIT_MAIN;
+
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.reset(env.rdram.data(), env.ctx);
+            ee.run();
+
+            t.Equals(gInitThreadResult, EeScheduler::kFirstThreadId,
+                     "InitThread should return topThread's id, the first one handed out");
+            t.Equals(gInitThreadSecondResult, -1, "a second InitThread should fail");
+            const GuestThread *top = ee.thread(gInitThreadResult);
+            t.IsTrue(top && top->status == EeThreadStatus::Waiting &&
+                         top->wait.reason == EeWaitReason::Semaphore && top->currentPriority == 0,
+                     "topThread should wait on its semaphore at priority zero");
+            t.Equals(ee.thread(EeScheduler::kMainThreadId)->currentPriority, 1,
+                     "InitThread should lower its caller to priority one");
+            t.Equals(gInitThreadWorker, EeScheduler::kFirstThreadId + 1,
+                     "game threads should get the ids after topThread's");
+            const std::vector<int> expected{1, 2, 20, 3};
+            t.IsTrue(trace == expected,
+                     "RotateThreadReadyQueue(1) after InitThread should yield to a priority-one worker");
         });
 
         tc.Run("starting a strictly higher-priority thread preempts immediately", [](TestCase &t)
