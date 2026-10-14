@@ -99,6 +99,13 @@ namespace
 
     constexpr uint32_t kGsCsrRegOffset = 0x1000u;
 
+    // D_ENABLER (read port) and D_ENABLEW (write port) are the one DMAC enable
+    // register; bit 16 (CPND) suspends every channel. The hardware reads 0x1201
+    // at boot (PCSX2 hwReset, ps2tek).
+    constexpr uint32_t kDEnableR = 0x1000F520u;
+    constexpr uint32_t kDEnableW = 0x1000F590u;
+    constexpr uint32_t kDEnableResetValue = 0x1201u;
+
     // Atomically apply a 32-bit write to one half (off=0 low dword, off=4 high
     // dword) of the GS CSR register. Bits 0..1 of the low dword (SIGNAL/FINISH) are
     // write-one-to-clear; everything else is a plain merge. Uses compare_exchange
@@ -355,6 +362,8 @@ bool PS2Memory::initialize(size_t ramSize)
 
         // Initialize I/O registers
         m_ioRegisters.clear();
+        m_ioRegisters[kDEnableR] = kDEnableResetValue;
+        m_ioRegisters[kDEnableW] = kDEnableResetValue;
 
         // Initialize GS registers
         memset(&gs_regs, 0, sizeof(gs_regs));
@@ -1213,6 +1222,15 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
         if ((status & mask) != 0u)
             next |= (1u << 31);
         m_ioRegisters[address] = next;
+        return true;
+    }
+
+    if (address == kDEnableW)
+    {
+        // Writes to D_ENABLEW must read back at D_ENABLER: guests suspend the DMAC
+        // with `sw D_ENABLEW` and spin on `lw D_ENABLER` until CPND is set (#257).
+        m_ioRegisters[kDEnableW] = value;
+        m_ioRegisters[kDEnableR] = value;
         return true;
     }
 
