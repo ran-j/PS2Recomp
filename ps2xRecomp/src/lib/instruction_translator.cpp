@@ -195,10 +195,11 @@ namespace ps2recomp
             return genWrite(16, fmt::format("ADD32(GPR_U32(ctx, {}), {})", inst.rs, inst.simmediate), fmt::format("(uint16_t)GPR_U32(ctx, {})", inst.rt)) + ";";
         case OPCODE_SW:
             return genWrite(32, fmt::format("ADD32(GPR_U32(ctx, {}), {})", inst.rs, inst.simmediate), fmt::format("GPR_U32(ctx, {})", inst.rt)) + ";";
+        // LQ/SQ silently ignore the low four address bits instead of raising an address error.
         case OPCODE_LQ:
-            return fmt::format("SET_GPR_VEC(ctx, {}, {});", inst.rt, genRead(128, fmt::format("ADD32(GPR_U32(ctx, {}), {})", inst.rs, inst.simmediate)));
+            return fmt::format("SET_GPR_VEC(ctx, {}, {});", inst.rt, genRead(128, fmt::format("ADD32(GPR_U32(ctx, {}), {}) & ~0xFu", inst.rs, inst.simmediate)));
         case OPCODE_SQ:
-            return genWrite(128, fmt::format("ADD32(GPR_U32(ctx, {}), {})", inst.rs, inst.simmediate), fmt::format("GPR_VEC(ctx, {})", inst.rt)) + ";";
+            return genWrite(128, fmt::format("ADD32(GPR_U32(ctx, {}), {}) & ~0xFu", inst.rs, inst.simmediate), fmt::format("GPR_VEC(ctx, {})", inst.rt)) + ";";
         case OPCODE_LD:
             return fmt::format("SET_GPR_U64(ctx, {}, {});", inst.rt, genRead(64, fmt::format("ADD32(GPR_U32(ctx, {}), {})", inst.rs, inst.simmediate)));
         case OPCODE_SD:
@@ -218,14 +219,14 @@ namespace ps2recomp
             return fmt::format(
                 "{{ int64_t src = (int64_t)GPR_S64(ctx, {}); "
                 "int64_t imm = (int64_t)(int32_t){}; "
-                "int64_t res = src + imm; "
+                "int64_t res = (int64_t)((uint64_t)src + (uint64_t)imm); "
                 "if (((src ^ imm) >= 0) && ((src ^ res) < 0)) "
                 "    runtime->SignalException(ctx, EXCEPTION_INTEGER_OVERFLOW); "
                 "else SET_GPR_S64(ctx, {}, res); }}",
                 inst.rs, inst.simmediate, inst.rt);
         case OPCODE_DADDIU:
             return fmt::format(
-                "SET_GPR_S64(ctx, {}, (int64_t)GPR_S64(ctx, {}) + (int64_t)(int32_t){});",
+                "SET_GPR_U64(ctx, {}, GPR_U64(ctx, {}) + (uint64_t)(int64_t)(int32_t){});",
                 inst.rt, inst.rs, inst.simmediate);
         case OPCODE_J:
             return fmt::format("// J 0x{:X} - Handled by branch logic", buildAbsoluteJumpTarget(inst.address, inst.target));

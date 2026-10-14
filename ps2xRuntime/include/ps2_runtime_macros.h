@@ -92,7 +92,7 @@ static inline uint32_t ps2_plzcw32(uint32_t x)
     {                                                     \
         int32_t _a = (int32_t)(rs);                       \
         int32_t _b = (int32_t)(rt);                       \
-        int32_t _r = _a + _b;                             \
+        int32_t _r = (int32_t)((uint32_t)_a + (uint32_t)_b); \
         overflow = (((_a ^ _b) >= 0) && ((_a ^ _r) < 0)); \
         result32 = (uint32_t)_r;                          \
     } while (0);
@@ -102,7 +102,7 @@ static inline uint32_t ps2_plzcw32(uint32_t x)
     {                                                    \
         int32_t _a = (int32_t)(rs);                      \
         int32_t _b = (int32_t)(rt);                      \
-        int32_t _r = _a - _b;                            \
+        int32_t _r = (int32_t)((uint32_t)_a - (uint32_t)_b); \
         overflow = (((_a ^ _b) < 0) && ((_a ^ _r) < 0)); \
         result32 = (uint32_t)_r;                         \
     } while (0);
