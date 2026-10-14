@@ -260,9 +260,10 @@ namespace ps2_stubs
             data[13] = pressureValue(state, portState, kPadBtnCircle);
             data[14] = pressureValue(state, portState, kPadBtnCross);
             data[15] = pressureValue(state, portState, kPadBtnSquare);
+            // DualShock 2 pressure order: right, left, up, down, triangle, circle, cross, square, L1, R1, L2, R2.
             data[16] = pressureValue(state, portState, kPadBtnL1);
-            data[17] = pressureValue(state, portState, kPadBtnL2);
-            data[18] = pressureValue(state, portState, kPadBtnR1);
+            data[17] = pressureValue(state, portState, kPadBtnR1);
+            data[18] = pressureValue(state, portState, kPadBtnL2);
             data[19] = pressureValue(state, portState, kPadBtnR2);
         }
 
