@@ -1100,6 +1100,38 @@ void register_ps2_memory_tests()
             t.IsTrue(contentOk, "scratchpad GIF DMA packet bytes should match scratchpad source");
         });
 
+        tc.Run("DMA chains longer than 4096 tags run to their END tag", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kGifCh = 0x1000A000u;
+            constexpr uint32_t kChainBase = 0x00100000u;
+            constexpr uint32_t kCntTags = 5000u;
+            uint8_t *rdram = mem.getRDRAM();
+
+            uint32_t addr = kChainBase;
+            for (uint32_t i = 0; i < kCntTags; ++i, addr += 16u)
+                writeDmaTag(rdram, addr, makeDmaTag(0u, 1u, 0u, false)); // CNT, no payload
+            writeDmaTag(rdram, addr, makeDmaTag(1u, 7u, 0u, false));     // END, one qword
+            for (uint32_t i = 0; i < 16u; ++i)
+                rdram[addr + 16u + i] = static_cast<uint8_t>(0xA0u + i);
+
+            std::vector<uint8_t> captured;
+            mem.setGifPacketCallback([&](const uint8_t *data, uint32_t sizeBytes)
+            {
+                captured.insert(captured.end(), data, data + sizeBytes);
+            });
+
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x30u, kChainBase), "write TADR should succeed");
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x00u, 0x104u), "write CHCR STR|CHAIN should succeed");
+            mem.processPendingTransfers();
+
+            t.Equals(captured.size(), static_cast<size_t>(16u), "the END tag's payload should be transferred");
+            if (captured.size() == 16u)
+                t.Equals(static_cast<uint32_t>(captured[0]), 0xA0u, "payload should come from after the END tag");
+        });
+
         tc.Run("GIF DMA chain can source tags and payload from 0xF000 scratchpad alias", [](TestCase &t)
         {
             PS2Memory mem;
