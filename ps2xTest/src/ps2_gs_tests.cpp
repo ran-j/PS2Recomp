@@ -2037,6 +2037,40 @@ void register_ps2_gs_tests()
             t.IsTrue(imageOk, "odd REGLIST payload should not corrupt alignment of the following IMAGE tag");
         });
 
+        tc.Run("GIF tag FLG=3 transfers its payload as IMAGE", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            const uint64_t bitblt =
+                (static_cast<uint64_t>(0u) << 32) |
+                (static_cast<uint64_t>(1u) << 48);
+            gs.writeRegister(GS_REG_BITBLTBUF, bitblt);
+            gs.writeRegister(GS_REG_TRXPOS, 0ull);
+            gs.writeRegister(GS_REG_TRXREG, (4ull << 0) | (1ull << 32));
+            gs.writeRegister(GS_REG_TRXDIR, 0ull);
+
+            std::vector<uint8_t> packet;
+            appendU64(packet, makeGifTag(1u, 3u, 0u, true)); // FLG=3 ("disable")
+            appendU64(packet, 0ull);
+            uint8_t payload[16];
+            for (uint32_t i = 0; i < 16u; ++i)
+                payload[i] = static_cast<uint8_t>(0x51u + i);
+            packet.insert(packet.end(), payload, payload + sizeof(payload));
+
+            gs.processGIFPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            bool imageOk = true;
+            for (uint32_t x = 0; x < 4u && imageOk; ++x)
+            {
+                const uint32_t off = referenceAddrPSMCT32(0u, 1u, x, 0u);
+                for (uint32_t c = 0; c < 4u; ++c)
+                    imageOk = imageOk && vram[off + c] == payload[x * 4u + c];
+            }
+            t.IsTrue(imageOk, "an FLG=3 tag should upload its payload like an IMAGE tag");
+        });
+
         tc.Run("GIF REGLIST NREG=0 is treated as sixteen descriptors", [](TestCase &t)
         {
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);

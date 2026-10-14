@@ -879,14 +879,8 @@ void VU1Interpreter::progressXgkick()
                 tagBytes += static_cast<uint64_t>(nloop) * nreg * 16u;
             else if (format == 1u)
                 tagBytes += ((static_cast<uint64_t>(nloop) * nreg + 1u) & ~1ull) * 8u;
-            else if (format == 2u)
+            else // 2 = IMAGE; 3 ("disable") behaves as IMAGE on hardware
                 tagBytes += static_cast<uint64_t>(nloop) * 16u;
-            else
-            {
-                reportReservedInstruction(false, 0xFFFFFFF8u);
-                m_xgkick.active = false;
-                return;
-            }
 
             if (tagBytes > XgkickPipeline::kBufferSize - qwordOffset)
             {

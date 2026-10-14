@@ -58,7 +58,7 @@ namespace
                 payloadBytes = static_cast<uint64_t>(nloop) * nreg * 8ull;
                 payloadBytes = (payloadBytes + 15ull) & ~15ull;
             }
-            else if (flg == kGifFmtImage)
+            else // kGifFmtImage; FLG=3 ("disable") behaves as IMAGE on hardware
             {
                 payloadBytes = static_cast<uint64_t>(nloop) * 16ull;
                 const uint64_t availableBytes = sizeBytes - offset;
@@ -66,10 +66,6 @@ namespace
                 {
                     return static_cast<uint32_t>((payloadBytes - availableBytes) / 16ull);
                 }
-            }
-            else
-            {
-                return 0u;
             }
 
             if (payloadBytes > static_cast<uint64_t>(sizeBytes - offset))
