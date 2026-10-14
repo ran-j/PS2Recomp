@@ -531,6 +531,45 @@ void register_ps2_memory_tests()
             t.Equals(sw, 0x00008001u, "zero-extend w");
         });
 
+        tc.Run("VIF UNPACK V2 writes x y x y", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0xEE, PS2_VU1_DATA_SIZE);
+
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x64u, 1u, 0x0000u)); // UNPACK V2-32, num=1, addr=0
+            appendU32(packet, 0x11111111u);
+            appendU32(packet, 0x22222222u);
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            uint32_t lanes[4] = {};
+            std::memcpy(lanes, mem.getVU1Data(), sizeof(lanes));
+            t.Equals(lanes[0], 0x11111111u, "V2 x");
+            t.Equals(lanes[1], 0x22222222u, "V2 y");
+            t.Equals(lanes[2], 0x11111111u, "V2 z should repeat x");
+            t.Equals(lanes[3], 0x22222222u, "V2 w should repeat y");
+        });
+
+        tc.Run("VIF UNPACK V4-5 scales each channel to 8 bits", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0, PS2_VU1_DATA_SIZE);
+
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x6Fu, 1u, 0x0000u)); // UNPACK V4-5, num=1, addr=0
+            appendU32(packet, 0x0000C03Fu);                     // r=0x1F g=0x01 b=0x10 a=1
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            uint32_t lanes[4] = {};
+            std::memcpy(lanes, mem.getVU1Data(), sizeof(lanes));
+            t.Equals(lanes[0], 0xF8u, "r << 3");
+            t.Equals(lanes[1], 0x08u, "g << 3");
+            t.Equals(lanes[2], 0x80u, "b << 3");
+            t.Equals(lanes[3], 0x80u, "a << 7");
+        });
+
         tc.Run("VIF UNPACK bit15 adds TOPS to destination address", [](TestCase &t)
         {
             PS2Memory mem;
