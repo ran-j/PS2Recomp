@@ -454,17 +454,14 @@ namespace ps2recomp
 
     std::string CodeGenerator::translatePEXEH(const Instruction &inst)
     {
-        // Swaps halfwords 1<->3 and 5<->7 within the 128-bit register
-        return fmt::format("SET_GPR_VEC(ctx, {}, _mm_shufflelo_epi16(_mm_shufflehi_epi16(GPR_VEC(ctx, {}), _MM_SHUFFLE(2,3,0,1)), _MM_SHUFFLE(2,3,0,1)));",
+        return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PEXEH(GPR_VEC(ctx, {})));",
                            inst.rd, inst.rt);
     }
 
 
     std::string CodeGenerator::translatePREVH(const Instruction &inst)
     {
-        // Reverses the order of the 8 halfwords
-        return fmt::format("{{ __m128i mask = _mm_setr_epi8(14,15, 12,13, 10,11, 8,9, 6,7, 4,5, 2,3, 0,1); "
-                           "SET_GPR_VEC(ctx, {}, PS2_SHUFFLE_EPI8(GPR_VEC(ctx, {}), mask)); }}",
+        return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PREVH(GPR_VEC(ctx, {})));",
                            inst.rd, inst.rt);
     }
 
@@ -520,8 +517,7 @@ namespace ps2recomp
 
     std::string CodeGenerator::translatePROT3W(const Instruction &inst)
     {
-        // Rotates words left by 3: [d,c,b,a] -> [a,d,c,b]
-        return fmt::format("SET_GPR_VEC(ctx, {}, _mm_shuffle_epi32(GPR_VEC(ctx, {}), _MM_SHUFFLE(0,3,2,1)));",
+        return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PROT3W(GPR_VEC(ctx, {})));",
                            inst.rd, inst.rt);
     }
 
@@ -560,8 +556,7 @@ namespace ps2recomp
 
     std::string CodeGenerator::translatePEXCH(const Instruction &inst)
     {
-        // Parallel Exchange Center Halfword (same as MMI2 PEXEH)
-        return fmt::format("SET_GPR_VEC(ctx, {}, _mm_shufflelo_epi16(_mm_shufflehi_epi16(GPR_VEC(ctx, {}), _MM_SHUFFLE(2,3,0,1)), _MM_SHUFFLE(2,3,0,1)));",
+        return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PEXCH(GPR_VEC(ctx, {})));",
                            inst.rd, inst.rt);
     }
 
@@ -577,8 +572,7 @@ namespace ps2recomp
 
     std::string CodeGenerator::translatePEXCW(const Instruction &inst)
     {
-        // Parallel Exchange Center Word (Swaps words 0<>2, 1<>3)
-        return fmt::format("SET_GPR_VEC(ctx, {}, _mm_shuffle_epi32(GPR_VEC(ctx, {}), _MM_SHUFFLE(1,0,3,2)));",
+        return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PEXCW(GPR_VEC(ctx, {})));",
                            inst.rd, inst.rt);
     }
 
