@@ -769,6 +769,45 @@ void register_ps2_memory_tests()
             t.IsTrue((mem.vif1_regs.stat & (1u << 11)) == 0u, "FBRST.STC should clear VIF1 STAT.INT");
         });
 
+        tc.Run("VIF irq command raises INTC VIF1 and stalls until FBRST.STC", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            std::vector<uint8_t> packet;
+            appendU32(packet, 0x80000000u | makeVifCmd(0x07u, 0u, 0x1111u)); // MARK with the i-bit
+            appendU32(packet, makeVifCmd(0x07u, 0u, 0x2222u));               // runs after the stall
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            const std::vector<uint32_t> causes = mem.consumeCompletedIntcCauses();
+            t.IsTrue(causes.size() == 1u && causes[0] == 5u, "the i-bit should raise INTC cause 5 (VIF1)");
+            t.Equals(mem.vif1_regs.mark, 0x1111u, "the command with the i-bit should complete");
+            t.IsTrue((mem.vif1_regs.stat & (1u << 10)) != 0u, "VIF1 should be stalled (STAT.VIS)");
+
+            const uint32_t later = makeVifCmd(0x07u, 0u, 0x3333u);
+            mem.processVIF1Data(reinterpret_cast<const uint8_t *>(&later), sizeof(later));
+            t.Equals(mem.vif1_regs.mark, 0x1111u, "data behind the stall, including later transfers, should wait");
+
+            t.IsTrue(mem.writeIORegister(0x10003C10u, 0x8u), "FBRST STC write should succeed");
+            t.Equals(mem.vif1_regs.mark, 0x3333u, "FBRST.STC should run the held data in order");
+            t.IsTrue((mem.vif1_regs.stat & (1u << 10)) == 0u, "FBRST.STC should clear STAT.VIS");
+        });
+
+        tc.Run("VIF1_ERR.MII masks the VIFcode i-bit", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            t.IsTrue(mem.writeIORegister(0x10003C20u, 0x1u), "VIF1_ERR write should succeed");
+
+            std::vector<uint8_t> packet;
+            appendU32(packet, 0x80000000u | makeVifCmd(0x07u, 0u, 0x1111u));
+            appendU32(packet, makeVifCmd(0x07u, 0u, 0x2222u));
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            t.IsTrue(mem.consumeCompletedIntcCauses().empty(), "a masked i-bit should not raise an interrupt");
+            t.Equals(mem.vif1_regs.mark, 0x2222u, "a masked i-bit should not stall VIF1");
+        });
+
         tc.Run("VIF FBRST RST clears VIF1 command state", [](TestCase &t)
         {
             PS2Memory mem;

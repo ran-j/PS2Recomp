@@ -1867,6 +1867,9 @@ void EeScheduler::processEvent(const EeEvent &event)
         requestStop();
         break;
     case EeEventType::VBlankStart:
+        // Safety net for interrupts queued by DMA/VIF work outside a guest
+        // store (e.g. from a stub) while the guest spins on loads only.
+        m_runtime.drainCompletedDmacHandlers(m_rdram);
         ++m_vsyncTick;
         m_runtime.memory().gs().vsyncTick.store(m_vsyncTick, std::memory_order_release);
         if ((m_vsyncTick & 1u) != 0u)
