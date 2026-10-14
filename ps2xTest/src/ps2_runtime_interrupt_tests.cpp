@@ -72,6 +72,10 @@ namespace
     constexpr uint32_t kInvocationQueuePc = 0x00160530u;
     constexpr uint32_t kInvocationQueueResumePc = 0x00160540u;
     constexpr uint32_t kInvocationQueueHandlerPc = 0x00160550u;
+    constexpr uint32_t kMaskedIrqRaisePc = 0x00160600u;
+    constexpr uint32_t kMaskedIrqResumePc = 0x00160610u;
+    constexpr uint32_t kMaskedIrqHandlerPc = 0x00160620u;
+    constexpr uint32_t kMaskedIrqCause = 9u;
 
     constexpr uint32_t kTimer2Count = 0x10001000u;
     constexpr uint32_t kTimer2Mode = 0x10001010u;
@@ -222,6 +226,37 @@ namespace
 
     void schedulerIrqStackResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
     {
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
+    void schedulerMaskedIrqRaise(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_dispatchTrace.push_back(1);
+        EeScheduler &scheduler = runtime->eeScheduler();
+        scheduler.addIrqHandler(false, kMaskedIrqCause, kMaskedIrqHandlerPc, true, 0u, 0u, 0u);
+        scheduler.setIrqCauseEnabled(false, kMaskedIrqCause, false);
+        scheduler.dispatchIrq(false, kMaskedIrqCause); // raised while masked: latched, not delivered
+        ctx->pc = kMaskedIrqResumePc;
+    }
+
+    void schedulerMaskedIrqHandler(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        g_dispatchTrace.push_back(3);
+        ctx->pc = 0u;
+    }
+
+    void schedulerMaskedIrqResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (g_dispatchTrace.size() == 1u)
+        {
+            // First pass: the handler must not have run yet. Enable the cause and yield.
+            g_dispatchTrace.push_back(2);
+            runtime->eeScheduler().setIrqCauseEnabled(false, kMaskedIrqCause, true);
+            ctx->pc = kMaskedIrqResumePc;
+            return;
+        }
+        g_dispatchTrace.push_back(4);
         ctx->pc = 0u;
         runtime->requestStop();
     }
@@ -600,6 +635,25 @@ void register_ps2_runtime_interrupt_tests()
             t.IsFalse(exhausted, "queued callbacks must not consume one invocation stack per pending item");
             t.Equals(g_invocationQueueRuns, 96u, "every queued callback should execute exactly once");
             t.IsFalse(g_invocationQueueSpChanged, "sequential callbacks should reuse the same stack depth");
+        });
+
+        tc.Run("an INTC cause raised while masked is delivered when it is enabled", [](TestCase &t)
+        {
+            TestEnv env;
+            env.runtime.registerFunction(kMaskedIrqRaisePc, schedulerMaskedIrqRaise);
+            env.runtime.registerFunction(kMaskedIrqResumePc, schedulerMaskedIrqResume);
+            env.runtime.registerFunction(kMaskedIrqHandlerPc, schedulerMaskedIrqHandler);
+
+            g_dispatchTrace.clear();
+            R5900Context mainContext{};
+            mainContext.pc = kMaskedIrqRaisePc;
+            mainContext.cop0_status = 0x00010001u; // EIE | IE
+            env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+            env.runtime.eeScheduler().run();
+
+            const std::vector<int> expected{1, 2, 3, 4};
+            t.IsTrue(g_dispatchTrace == expected,
+                     "the latched cause should reach its handler once EnableIntc unmasks it, not before");
         });
 
         tc.Run("iSignalSema defers selection until IRQ return", [](TestCase &t)
