@@ -95,6 +95,12 @@ namespace ps2x::iop
         virtual void freeGuest(uint32_t address) = 0;
 
         virtual void audioCommand(uint32_t sid, uint32_t function, GuestBuffer send, GuestBuffer receive) = 0;
+        // 48 kHz interleaved stereo produced by the emulated SPU2, delivered as IOP time advances.
+        virtual void audioOutput(const int16_t *samples, size_t frames)
+        {
+            (void)samples;
+            (void)frames;
+        }
 
         virtual std::string hostPath(HostPathKind kind) const = 0;
         virtual std::string translateGuestPath(std::string_view path) const = 0;

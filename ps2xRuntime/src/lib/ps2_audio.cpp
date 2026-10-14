@@ -1,6 +1,7 @@
 #include "runtime/ps2_audio.h"
 #include "runtime/ps2_memory.h"
 #include "ps2_host_backend.h"
+#include <algorithm>
 #include <cstring>
 #include <vector>
 
@@ -79,12 +80,112 @@ struct PS2AudioBackend::Impl
     std::vector<TrackedSound> activeSounds;
 };
 
-PS2AudioBackend::PS2AudioBackend() : m_impl(std::make_unique<Impl>())
+// SPU2 output is produced as IOP time advances and consumed by the host audio thread.
+struct PS2AudioBackend::PcmStream
 {
+    static constexpr uint32_t kSampleRate = 48000u;
+    static constexpr size_t kCapacityFrames = kSampleRate;       // 1 s ring
+    static constexpr size_t kMaxQueuedFrames = kSampleRate / 4u; // drop the oldest beyond 250 ms
+
+    std::mutex mutex;
+    std::vector<int16_t> ring = std::vector<int16_t>(kCapacityFrames * 2u);
+    size_t readFrame = 0;
+    size_t queuedFrames = 0;
+    bool started = false;
+    bool primed = false;
+#if !defined(PLATFORM_VITA)
+    AudioStream stream{};
+#endif
+
+    static PcmStream *active;
+
+    static void callback(void *buffer, unsigned int frames)
+    {
+        int16_t *out = static_cast<int16_t *>(buffer);
+        PcmStream *self = active;
+        if (!self)
+        {
+            std::memset(out, 0, static_cast<size_t>(frames) * 4u);
+            return;
+        }
+        std::lock_guard<std::mutex> lock(self->mutex);
+        // Wait for a little backlog before starting so the first underrun isn't immediate.
+        if (!self->primed && self->queuedFrames < kSampleRate / 20u)
+        {
+            std::memset(out, 0, static_cast<size_t>(frames) * 4u);
+            return;
+        }
+        self->primed = true;
+        const size_t available = std::min<size_t>(frames, self->queuedFrames);
+        for (size_t i = 0; i < available; ++i)
+        {
+            const size_t index = ((self->readFrame + i) % kCapacityFrames) * 2u;
+            out[i * 2u] = self->ring[index];
+            out[i * 2u + 1u] = self->ring[index + 1u];
+        }
+        if (available < frames)
+        {
+            std::memset(out + available * 2u, 0, (frames - available) * 4u);
+            self->primed = false;
+        }
+        self->readFrame = (self->readFrame + available) % kCapacityFrames;
+        self->queuedFrames -= available;
+    }
+};
+
+PS2AudioBackend::PcmStream *PS2AudioBackend::PcmStream::active = nullptr;
+
+PS2AudioBackend::PS2AudioBackend() : m_impl(std::make_unique<Impl>()), m_pcm(std::make_unique<PcmStream>())
+{
+}
+
+void PS2AudioBackend::pushPcm(const int16_t *samples, size_t frames)
+{
+#if defined(PLATFORM_VITA)
+    (void)samples;
+    (void)frames;
+#else
+    if (!samples || frames == 0 || !m_audioReady)
+        return;
+    PcmStream &pcm = *m_pcm;
+    if (!pcm.started)
+    {
+        // Open the host stream on the first non-silent output, so games that only use the HLE
+        // sound path never get an extra (silent) stream.
+        if (std::all_of(samples, samples + frames * 2u, [](int16_t sample) { return sample == 0; }))
+            return;
+        pcm.started = true;
+        SetAudioStreamBufferSizeDefault(1024);
+        pcm.stream = LoadAudioStream(PcmStream::kSampleRate, 16, 2);
+        PcmStream::active = &pcm;
+        SetAudioStreamCallback(pcm.stream, &PcmStream::callback);
+        PlayAudioStream(pcm.stream);
+    }
+    std::lock_guard<std::mutex> lock(pcm.mutex);
+    for (size_t i = 0; i < frames; ++i)
+    {
+        if (pcm.queuedFrames >= PcmStream::kCapacityFrames)
+        {
+            pcm.readFrame = (pcm.readFrame + 1u) % PcmStream::kCapacityFrames;
+            --pcm.queuedFrames;
+        }
+        const size_t index = ((pcm.readFrame + pcm.queuedFrames) % PcmStream::kCapacityFrames) * 2u;
+        pcm.ring[index] = samples[i * 2u];
+        pcm.ring[index + 1u] = samples[i * 2u + 1u];
+        ++pcm.queuedFrames;
+    }
+    if (pcm.queuedFrames > PcmStream::kMaxQueuedFrames)
+    {
+        const size_t drop = pcm.queuedFrames - PcmStream::kMaxQueuedFrames / 2u;
+        pcm.readFrame = (pcm.readFrame + drop) % PcmStream::kCapacityFrames;
+        pcm.queuedFrames -= drop;
+    }
+#endif
 }
 
 PS2AudioBackend::~PS2AudioBackend()
 {
+    PcmStream::active = nullptr;
     if (m_impl)
         stopAll();
 }
