@@ -513,8 +513,13 @@ private:
     uint32_t m_guestHeapLimit = PS2_RAM_SIZE;
     uint32_t m_guestHeapSuggestedBase = 0x00100000u;
     bool m_guestHeapConfigured = false;
-    uint32_t m_asyncCallbackStackFloor = 0x01F00000u;
-    uint32_t m_asyncCallbackStackTop = PS2_RAM_SIZE;
+    // Interrupt/callback invocation stacks are carved downward from [floor, top). The primary
+    // region is the free RAM below the ELF; the fallback is the top of RAM, used once the
+    // primary region is exhausted (or when the ELF loads too low to leave one).
+    uint32_t m_asyncCallbackStackFloor = 0x00090000u;
+    uint32_t m_asyncCallbackStackTop = 0x000F0000u;
+    uint32_t m_asyncCallbackFallbackFloor = 0x01F00000u;
+    uint32_t m_asyncCallbackFallbackTop = PS2_RAM_SIZE;
 
     std::atomic<uint32_t> m_missingFunctionPolicy{static_cast<uint32_t>(MissingFunctionPolicy::ContinueToTarget)};
     std::atomic<bool> m_missingFunctionReported{false};

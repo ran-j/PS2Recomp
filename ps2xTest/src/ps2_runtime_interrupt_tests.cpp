@@ -546,6 +546,20 @@ void register_ps2_runtime_interrupt_tests()
                      "the IRQ frame should receive its registered argument");
         });
 
+        tc.Run("invocation stacks come from below the ELF before the top of RAM", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            const uint32_t first = runtime.reserveAsyncCallbackStack(0x4000u, 16u);
+            t.IsTrue(first >= 0x00090000u && first < 0x000F0000u,
+                     "the first invocation stack should sit below the usual ELF load address, not in game RAM");
+
+            uint32_t last = first;
+            for (int i = 0; i < 64 && last >= 0x00090000u && last < 0x000F0000u; ++i)
+                last = runtime.reserveAsyncCallbackStack(0x4000u, 16u);
+            t.IsTrue(last >= 0x01F00000u && last < PS2_RAM_SIZE,
+                     "once the low region is used up, stacks should fall back to the top of RAM");
+        });
+
         tc.Run("IRQ callbacks use an isolated invocation stack", [](TestCase &t)
         {
             TestEnv env;
