@@ -254,7 +254,13 @@ void EeScheduler::run()
             continue;
         }
 
-        if (!m_pendingInvocations.empty() && running->invocations.empty())
+        // Interrupts reach a running thread only while it has them enabled: Status.EIE and IE
+        // set, EXL and ERL clear. Games bracket shared-list edits with DI/EI (which toggle
+        // EIE); delivering a handler inside such a section corrupts the list. Pending
+        // invocations stay queued until a dispatch point after EI.
+        const uint32_t status = context.cop0_status;
+        const bool guestInterruptsEnabled = (status & 0x00010001u) == 0x00010001u && (status & 0x6u) == 0u;
+        if (!m_pendingInvocations.empty() && running->invocations.empty() && guestInterruptsEnabled)
         {
             GuestInvocation invocation = std::move(m_pendingInvocations.front());
             m_pendingInvocations.pop_front();
