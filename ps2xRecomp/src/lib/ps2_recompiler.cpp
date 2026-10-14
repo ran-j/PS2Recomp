@@ -2120,7 +2120,14 @@ namespace ps2recomp
         uint32_t start = function.start;
         uint32_t end = function.end;
 
-        for (uint32_t address = start; address < end; address += 4)
+        // A branch/jump in the last word still executes its delay slot, which lies just past
+        // `end` (e.g. a 1-byte Ghidra body around `jr $ra; lw $v0, ..`). Decode that word too;
+        // otherwise the emitter falls back to a synthetic NOP and the slot is silently dropped.
+        // function.end is left unchanged so the next function's range is not overlapped.
+        for (uint32_t address = start;
+             address < end || (address == ((end + 3u) & ~3u) && !instructions.empty() &&
+                               instructions.back().hasDelaySlot && instructions.back().address + 4u == address);
+             address += 4)
         {
             try
             {
