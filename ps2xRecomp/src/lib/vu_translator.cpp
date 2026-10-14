@@ -16,7 +16,78 @@ namespace ps2recomp
     {
     }
 
+    namespace
+    {
+        constexpr uint32_t kCop2Co = 0x10u;
+
+        // What a COP2 macro op writes, for the epilogue below.
+        struct MacroOpDest
+        {
+            bool setsMac = false; // FMAC op: updates MAC/status from its result
+            bool toAcc = false;   // result goes to ACC rather than a VF register
+            int vf = -1;          // VF register written, if any
+        };
+
+        MacroOpDest macroOpDest(uint32_t raw)
+        {
+            MacroOpDest d;
+            const uint32_t funct = raw & 0x3Fu;
+            const int ft = static_cast<int>((raw >> 16) & 0x1Fu);
+            const int fd = static_cast<int>((raw >> 6) & 0x1Fu);
+            if (funct < 0x3Cu)
+            {
+                if (funct >= 0x30u)
+                    return d; // integer ops and VCALLMS
+                d.vf = fd;
+                // MAX/MINI (bc, i and plain forms) leave the flags alone.
+                const bool maxMin = (funct >= 0x10u && funct <= 0x17u) || funct == 0x1Du || funct == 0x1Fu ||
+                                    funct == 0x2Bu || funct == 0x2Fu;
+                d.setsMac = !maxMin;
+                return d;
+            }
+            const uint32_t op2 = (((raw >> 6) & 0x1Fu) << 2) | (raw & 0x3u);
+            const bool accOp = op2 <= 0x0Fu || (op2 >= 0x18u && op2 <= 0x1Cu) || op2 == 0x1Eu ||
+                               (op2 >= 0x20u && op2 <= 0x2Au) || op2 == 0x2Cu || op2 == 0x2Du || op2 == 0x2Eu;
+            if (accOp)
+            {
+                d.toAcc = true;
+                d.setsMac = true;
+                return d;
+            }
+            // ITOF/FTOI, ABS, MOVE, MR32, LQI, LQD, MFIR write ft.
+            if ((op2 >= 0x10u && op2 <= 0x17u) || op2 == 0x1Du || op2 == 0x30u || op2 == 0x31u ||
+                op2 == 0x34u || op2 == 0x36u || op2 == 0x3Du)
+                d.vf = ft;
+            return d;
+        }
+    }
+
+    // Applies what every COP2 macro op shares on top of its own translation:
+    // FMAC ops set the MAC flags (and status Z/S) from the fields they write,
+    // which games read with CFC2 to compare vectors (often via a write to
+    // VF0), and VF0 is hardwired to (0,0,0,1), so writes to it are dropped.
     std::string VuTranslator::translate(const Instruction &inst)
+    {
+        std::string code = translateUnfixed(inst);
+        const uint8_t format = inst.rs;
+        if (format == COP2_QMTC2 && inst.rd == 0)
+            return "// QMTC2 to VF0 ignored";
+        if (format < kCop2Co)
+            return code;
+
+        const MacroOpDest d = macroOpDest(inst.raw);
+        const uint32_t dest = (inst.raw >> 21) & 0xFu;
+        if (d.setsMac)
+        {
+            const std::string result = d.toAcc ? "ctx->vu0_acc" : fmt::format("ctx->vu0_vf[{}]", d.vf);
+            code += fmt::format(" PS2_VU0_SET_MAC(ctx, {}, 0x{:X}u);", result, dest);
+        }
+        if (d.vf == 0)
+            code += " ctx->vu0_vf[0] = _mm_setr_ps(0.0f, 0.0f, 0.0f, 1.0f);";
+        return code;
+    }
+
+    std::string VuTranslator::translateUnfixed(const Instruction &inst)
     {
         uint8_t format = inst.rs; // Use parsed rs field for COP2 format
         uint8_t rt = inst.rt;
