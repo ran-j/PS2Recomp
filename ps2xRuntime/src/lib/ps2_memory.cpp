@@ -201,13 +201,28 @@ namespace
         uint32_t upper = 0;
     };
 
+    // DMA addresses (MADR, TADR, ASR and the ADDR field of tags) select the
+    // scratchpad with bit 31; the low 14 bits are then the offset into it.
+    inline uint32_t canonicalDmaAddress(uint32_t address)
+    {
+        return (address & 0x80000000u) != 0u ? PS2_SCRATCHPAD_BASE + (address & 0x3FFFu) : address;
+    }
+
+    // The inverse, for the address registers the channel leaves behind.
+    inline uint32_t dmaRegisterAddress(uint32_t address)
+    {
+        return (address >= PS2_SCRATCHPAD_BASE && address < PS2_SCRATCHPAD_BASE + PS2_SCRATCHPAD_SIZE)
+                   ? 0x80000000u | (address - PS2_SCRATCHPAD_BASE)
+                   : address;
+    }
+
     inline DmaTagView decodeDmaTag(uint64_t tag)
     {
         DmaTagView out{};
         out.qwc = static_cast<uint16_t>(tag & 0xFFFFu);
         out.id = static_cast<uint8_t>((tag >> 28u) & 0x7u);
         out.irq = ((tag >> 31u) & 0x1ull) != 0ull;
-        out.addr = static_cast<uint32_t>((tag >> 32u) & 0x7FFFFFFFu);
+        out.addr = canonicalDmaAddress(static_cast<uint32_t>(tag >> 32u));
         out.upper = static_cast<uint32_t>((tag >> 16u) & 0xFFFFu);
         return out;
     }
@@ -1302,7 +1317,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
             }
 
             const uint32_t channelBase = address & 0xFFFFFF00;
-            const uint32_t madr = m_ioRegisters[channelBase + 0x10];
+            const uint32_t madr = canonicalDmaAddress(m_ioRegisters[channelBase + 0x10]);
             const uint32_t qwc = m_ioRegisters[channelBase + 0x20];
             m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
 
@@ -1339,12 +1354,14 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                 }
                 else if (mode == 1)
                 {
-                    uint32_t tagAddr = m_ioRegisters[channelBase + 0x30];
-                    uint32_t asr0 = m_ioRegisters[channelBase + 0x40];
-                    uint32_t asr1 = m_ioRegisters[channelBase + 0x50];
+                    uint32_t tagAddr = canonicalDmaAddress(m_ioRegisters[channelBase + 0x30]);
+                    uint32_t asr0 = canonicalDmaAddress(m_ioRegisters[channelBase + 0x40]);
+                    uint32_t asr1 = canonicalDmaAddress(m_ioRegisters[channelBase + 0x50]);
                     uint32_t asp = (chcr >> 4) & 0x3u;
                     const bool tieEnabled = (chcr & (1u << 7)) != 0u;
-                    const int kMaxChainTags = 4096;
+                    // Only bounds runaway (circular) chains: a frame's display
+                    // list can hold several thousand tags.
+                    const int kMaxChainTags = 1 << 20;
                     std::vector<uint8_t> chainBuf;
 
                     auto appendData = [&](uint32_t srcAddr, uint32_t qwCount)
@@ -1438,7 +1455,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         uint16_t tagQwc = static_cast<uint16_t>(tag & 0xFFFF);
                         uint32_t id = static_cast<uint32_t>((tag >> 28) & 0x7);
                         const bool irq = ((tag >> 31) & 0x1ull) != 0ull;
-                        uint32_t addr = static_cast<uint32_t>((tag >> 32) & 0x7FFFFFFF);
+                        uint32_t addr = canonicalDmaAddress(static_cast<uint32_t>(tag >> 32));
                         lastTagUpper = static_cast<uint32_t>((tag >> 16) & 0xFFFFu);
                         ++tagsProcessed;
 
@@ -1521,9 +1538,9 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             break;
                     }
 
-                    m_ioRegisters[channelBase + 0x30] = tagAddr;
-                    m_ioRegisters[channelBase + 0x40] = asr0;
-                    m_ioRegisters[channelBase + 0x50] = asr1;
+                    m_ioRegisters[channelBase + 0x30] = dmaRegisterAddress(tagAddr);
+                    m_ioRegisters[channelBase + 0x40] = dmaRegisterAddress(asr0);
+                    m_ioRegisters[channelBase + 0x50] = dmaRegisterAddress(asr1);
                     chcr = (chcr & ~(0x3u << 4)) | ((asp & 0x3u) << 4);
                     chcr = (chcr & 0x0000FFFFu) | (lastTagUpper << 16);
                     m_ioRegisters[channelBase + 0x00] = chcr;
