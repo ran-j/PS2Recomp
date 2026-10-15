@@ -1358,6 +1358,62 @@ void register_code_generator_tests()
             t.IsTrue(out.find("ctx->vu0_vf[25]") == std::string::npos, "S1 q/i must not use rs(format) as register index");
         });
 
+        tc.Run("VU0 LQI/LQD/SQI/SQD decode fields and use VU0 data memory", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+
+            Instruction sq{};
+            sq.rd = 20; // fs
+            sq.rt = 3;  // it
+            sq.vectorInfo.vectorField = 0xF;
+            for (const std::string &out : {gen.translateVU_VSQI(sq), gen.translateVU_VSQD(sq)})
+            {
+                t.IsTrue(out.find("ctx->vu0_vf[20]") != std::string::npos, "SQI/SQD fs should come from rd");
+                t.IsTrue(out.find("ctx->vi[3]") != std::string::npos, "SQI/SQD it should come from rt");
+                t.IsTrue(out.find("ctx->vi[20]") == std::string::npos, "SQI/SQD must not index VI with the VF register");
+                t.IsTrue(out.find("getVU0Data()") != std::string::npos, "SQI/SQD should store to VU0 data memory");
+                t.IsTrue(out.find("WRITE128") == std::string::npos, "SQI/SQD must not store to RDRAM");
+            }
+
+            Instruction lq{};
+            lq.rd = 5;  // is
+            lq.rt = 21; // ft
+            lq.vectorInfo.vectorField = 0xF;
+            for (const std::string &out : {gen.translateVU_VLQI(lq), gen.translateVU_VLQD(lq)})
+            {
+                t.IsTrue(out.find("ctx->vu0_vf[21]") != std::string::npos, "LQI/LQD ft should come from rt");
+                t.IsTrue(out.find("ctx->vi[5]") != std::string::npos, "LQI/LQD is should come from rd");
+                t.IsTrue(out.find("getVU0Data()") != std::string::npos, "LQI/LQD should load from VU0 data memory");
+                t.IsTrue(out.find("READ128") == std::string::npos, "LQI/LQD must not load from RDRAM");
+            }
+        });
+
+        tc.Run("VU0 ILWR/ISWR address VU0 data memory by qword and field", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+
+            Instruction ilwr{};
+            ilwr.rd = 4; // is
+            ilwr.rt = 6; // it
+            ilwr.vectorInfo.vectorField = 0x2; // z
+            const std::string load = gen.translateVU_VILWR(ilwr);
+            t.IsTrue(load.find("getVU0Data()") != std::string::npos, "ILWR should read VU0 data memory");
+            t.IsTrue(load.find("ctx->vi[4] & 0xFF) << 4) + 8u") != std::string::npos,
+                     "ILWR should address vi[is] in qwords plus the z field offset");
+            t.IsTrue(load.find("ctx->vi[6] =") != std::string::npos, "ILWR should write vi[it]");
+            t.IsTrue(load.find("READ32") == std::string::npos, "ILWR must not read RDRAM");
+
+            Instruction iswr{};
+            iswr.rd = 4; // is
+            iswr.rt = 6; // it
+            iswr.vectorInfo.vectorField = 0xA; // x and z
+            const std::string store = gen.translateVU_VISWR(iswr);
+            t.IsTrue(store.find("ctx->vi[4] & 0xFF) << 4") != std::string::npos, "ISWR should address vi[is] in qwords");
+            t.IsTrue(store.find("v = ctx->vi[6]") != std::string::npos, "ISWR should store vi[it]");
+            t.IsTrue(store.find("addr + 0u") != std::string::npos, "ISWR should write the x field");
+            t.IsTrue(store.find("addr + 8u") != std::string::npos, "ISWR should write the z field");
+            t.IsTrue(store.find("addr + 4u") == std::string::npos, "ISWR must not write unselected fields");
+            t.IsTrue(store.find("WRITE32") == std::string::npos, "ISWR must not write RDRAM");
+        });
+
         tc.Run("VU0 destination MADD and MSUB forms preserve ACC", [](TestCase &t) {
             Instruction inst{};
             inst.rt = 7;
