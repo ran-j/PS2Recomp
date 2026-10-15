@@ -479,6 +479,107 @@ void register_ps2_memory_tests()
             t.Equals(mem.vif1_regs.col[3], 0xAAAA0004u, "STCOL should set col[3]");
         });
 
+        tc.Run("VIF unmasked UNPACK matches the reference for every format and write cycle", [](TestCase &t)
+        {
+            // Random UNPACKs (format, sign, count, CL >= WL, address near the
+            // wrap) against a reference written from the VIF rules: source
+            // vectors in order, WL written then CL - WL skipped, components
+            // past the unpacked ones keep their old value, S formats fill all
+            // four, V4-5 splits 5:5:5:1.
+            uint32_t seed = 0x12345678u;
+            auto next = [&seed]() { seed = seed * 1664525u + 1013904223u; return seed >> 8; };
+            bool allMatch = true;
+            std::string firstMismatch;
+            for (int caseIndex = 0; caseIndex < 400 && allMatch; ++caseIndex)
+            {
+                PS2Memory mem;
+                if (!mem.initialize())
+                {
+                    allMatch = false;
+                    firstMismatch = "initialize failed";
+                    break;
+                }
+                const uint32_t vn = next() & 3u;
+                const uint32_t vl = (vn == 3u) ? (next() & 3u) : (next() % 3u);
+                const uint32_t num = 1u + next() % 40u;
+                const uint32_t cl = 1u + next() % 4u;
+                const uint32_t wl = 1u + next() % cl;
+                const bool zeroExtend = (next() & 1u) != 0u;
+                const uint32_t addr = (next() & 1u) ? (0x3F0u + next() % 16u) : (next() % 0x300u);
+
+                uint8_t *vu = mem.getVU1Data();
+                for (uint32_t i = 0; i < PS2_VU1_DATA_SIZE; i += 4u)
+                {
+                    const uint32_t v = 0xA5000000u | i;
+                    std::memcpy(vu + i, &v, 4u);
+                }
+                std::vector<uint8_t> expected(vu, vu + PS2_VU1_DATA_SIZE);
+
+                const uint32_t components = vn + 1u;
+                const uint32_t bits = vl == 0u ? 32u : vl == 1u ? 16u : vl == 2u ? 8u : 16u;
+                const uint32_t bytesPerVector = (vl == 3u) ? 2u : components * bits / 8u;
+                std::vector<uint8_t> source(num * bytesPerVector);
+                for (auto &b : source)
+                    b = static_cast<uint8_t>(next());
+
+                for (uint32_t i = 0; i < num; ++i)
+                {
+                    const uint32_t vec = (addr + (i / wl) * cl + i % wl) & 0x3FFu;
+                    uint32_t *d = reinterpret_cast<uint32_t *>(expected.data() + vec * 16u);
+                    const uint8_t *src = source.data() + i * bytesPerVector;
+                    auto field = [&](uint32_t c) -> uint32_t
+                    {
+                        if (vl == 0u)
+                        {
+                            uint32_t v;
+                            std::memcpy(&v, src + c * 4u, 4u);
+                            return v;
+                        }
+                        if (vl == 1u)
+                        {
+                            uint16_t v;
+                            std::memcpy(&v, src + c * 2u, 2u);
+                            return zeroExtend ? v : static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(v)));
+                        }
+                        return zeroExtend ? src[c] : static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(src[c])));
+                    };
+                    if (vl == 3u)
+                    {
+                        uint16_t packed;
+                        std::memcpy(&packed, src, 2u);
+                        d[0] = packed & 0x1Fu;
+                        d[1] = (packed >> 5) & 0x1Fu;
+                        d[2] = (packed >> 10) & 0x1Fu;
+                        d[3] = (packed >> 15) & 1u;
+                    }
+                    else if (components == 1u)
+                        d[0] = d[1] = d[2] = d[3] = field(0u);
+                    else
+                        for (uint32_t c = 0; c < components; ++c)
+                            d[c] = field(c);
+                }
+
+                std::vector<uint8_t> packet;
+                appendU32(packet, makeVifCmd(0x01u, 0u, static_cast<uint16_t>(cl | (wl << 8)))); // STCYCL
+                appendU32(packet, makeVifCmd(static_cast<uint8_t>(0x60u | (vn << 2) | vl), static_cast<uint8_t>(num),
+                                             static_cast<uint16_t>(addr | (zeroExtend ? 0x4000u : 0u))));
+                packet.insert(packet.end(), source.begin(), source.end());
+                while (packet.size() & 3u)
+                    packet.push_back(0u);
+                mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+                if (std::memcmp(vu, expected.data(), PS2_VU1_DATA_SIZE) != 0)
+                {
+                    allMatch = false;
+                    char text[160];
+                    std::snprintf(text, sizeof(text), "case %d: vn=%u vl=%u num=%u cl=%u wl=%u zero=%d addr=0x%x", caseIndex, vn, vl,
+                                  num, cl, wl, zeroExtend ? 1 : 0, addr);
+                    firstMismatch = text;
+                }
+            }
+            t.IsTrue(allMatch, "UNPACK should match the reference: " + firstMismatch);
+        });
+
         tc.Run("VIF UNPACK V4-16 sign and zero extension follow immediate bit14", [](TestCase &t)
         {
             PS2Memory mem;
