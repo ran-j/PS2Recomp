@@ -3582,6 +3582,121 @@ void register_ps2_gs_tests()
                      "REGION_REPEAT should calculate (U & UMSK) | UFIX");
         });
 
+        tc.Run("GS STQ texel coordinates saturate like the 12.4 hardware path before wrapping", [](TestCase &t)
+        {
+            // libgpu2 (Sony's GS model) denormalises S/Q into 12.4 texels and
+            // saturates before WrapU/WrapV: a positive overflow becomes 0x7FFF
+            // (2047.9375 texels) and a negative overflow becomes zero. The same
+            // bound keeps the sampler's float-to-int conversion defined for the
+            // NaN and out-of-range S values that some games emit.
+            auto renderConstantSt = [](uint64_t clampReg,
+                                       uint64_t tex1Reg,
+                                       uint32_t sBits,
+                                       uint32_t tBits,
+                                       bool texelsByRow) -> uint32_t
+            {
+                std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+                GS gs;
+                gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+                constexpr uint32_t kTexTbp = 64u;
+                constexpr uint32_t kTexels[4] = {0x800000FFu, 0x8000FF00u, 0x80FF0000u, 0x80FFFFFFu};
+                constexpr uint64_t kFrame =
+                    (1ull << 16) |
+                    (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+                constexpr uint64_t kZbuf = (1ull << 32);
+                constexpr uint64_t kTex0 =
+                    (static_cast<uint64_t>(kTexTbp) << 0) |
+                    (1ull << 14) |
+                    (static_cast<uint64_t>(GS_PSM_CT32) << 20) |
+                    (2ull << 26) |
+                    (2ull << 30) |
+                    (1ull << 34) |
+                    (1ull << 35);
+                constexpr uint64_t kPrim =
+                    static_cast<uint64_t>(GS_PRIM_TRIANGLE) |
+                    (1ull << 4);
+                constexpr uint64_t kRgbaq = 0x3F80000080808080ull;
+
+                // Every row (or every column) holds the same four texels, so
+                // only the axis under test matters.
+                for (uint32_t y = 0u; y < 4u; ++y)
+                    for (uint32_t x = 0u; x < 4u; ++x)
+                        writeReferencePSMCT32Pixel(vram, kTexTbp, 1u, x, y, kTexels[texelsByRow ? y : x]);
+
+                const uint64_t st =
+                    static_cast<uint64_t>(sBits) |
+                    (static_cast<uint64_t>(tBits) << 32);
+
+                gs.writeRegister(GS_REG_FRAME_1, kFrame);
+                gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
+                gs.writeRegister(GS_REG_SCISSOR_1, (3ull << 16) | (3ull << 48));
+                gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+                gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
+                gs.writeRegister(GS_REG_TEX0_1, kTex0);
+                gs.writeRegister(GS_REG_TEX1_1, tex1Reg);
+                gs.writeRegister(GS_REG_CLAMP_1, clampReg);
+                gs.writeRegister(GS_REG_PRIM, kPrim);
+                gs.writeRegister(GS_REG_RGBAQ, kRgbaq);
+
+                // Constant S at every vertex: the DDA weights at pixel (0,0)
+                // are exactly 0.5/0.25/0.25, so S/Q arrives unchanged.
+                gs.writeRegister(GS_REG_ST, st);
+                gs.writeRegister(GS_REG_XYZ2, 0ull);
+                gs.writeRegister(GS_REG_ST, st);
+                gs.writeRegister(GS_REG_XYZ2, 32ull);
+                gs.writeRegister(GS_REG_ST, st);
+                gs.writeRegister(GS_REG_XYZ2, (32ull << 16));
+
+                return readReferencePSMCT32Pixel(vram, 0u, 1u, 0u, 0u);
+            };
+
+            auto packFloat = [](float value) -> uint32_t
+            {
+                uint32_t bits = 0u;
+                std::memcpy(&bits, &value, sizeof(bits));
+                return bits;
+            };
+
+            constexpr uint64_t kRepeat = 0ull;
+            constexpr uint64_t kClamp = 1ull;
+            constexpr uint64_t kTex1Point = 0ull;
+            constexpr uint64_t kTex1Linear = (1ull << 5) | (1ull << 6);
+            constexpr uint32_t kPositiveInfinity = 0x7F800000u;
+            constexpr uint32_t kNegativeInfinity = 0xFF800000u;
+            constexpr uint32_t kNaN = 0x7FC00000u;
+            // 1.5 texels: inside the texture on whichever axis is not under test.
+            const uint32_t kInRange = packFloat(0.375f);
+            constexpr bool kByColumn = false;
+            constexpr bool kByRow = true;
+
+            // S is multiplied by the 4-texel width, so S=512.375 is 2049.5 texels.
+            t.Equals(renderConstantSt(kRepeat, kTex1Point, packFloat(511.625f), kInRange, kByColumn), 0x80FF0000u,
+                     "2046.5 texels is inside the 12.4 range and REPEAT wraps it to texel 2");
+            t.Equals(renderConstantSt(kRepeat, kTex1Point, packFloat(512.375f), kInRange, kByColumn), 0x80FFFFFFu,
+                     "2049.5 texels saturates to 0x7FFF before REPEAT, so it samples texel 2047 & 3 = 3");
+            t.Equals(renderConstantSt(kRepeat, kTex1Point, packFloat(-512.375f), kInRange, kByColumn), 0x800000FFu,
+                     "a negative overflow saturates to zero, not to -0x7FFF");
+            t.Equals(renderConstantSt(kRepeat, kTex1Point, packFloat(-0.25f), kInRange, kByColumn), 0x80FFFFFFu,
+                     "-1 texel is inside the 12.4 range and REPEAT still wraps it to texel 3");
+            t.Equals(renderConstantSt(kRepeat, kTex1Point, packFloat(1.0e30f), kInRange, kByColumn), 0x80FFFFFFu,
+                     "a coordinate beyond the int range saturates instead of converting out of range");
+            t.Equals(renderConstantSt(kClamp, kTex1Point, kPositiveInfinity, kInRange, kByColumn), 0x80FFFFFFu,
+                     "positive infinity saturates to the last texel");
+            t.Equals(renderConstantSt(kClamp, kTex1Point, kNegativeInfinity, kInRange, kByColumn), 0x800000FFu,
+                     "negative infinity saturates to zero");
+            t.Equals(renderConstantSt(kClamp, kTex1Point, kNaN, kInRange, kByColumn), 0x800000FFu,
+                     "NaN samples texel 0 instead of converting NaN to int");
+            t.Equals(renderConstantSt(kRepeat, kTex1Linear, kNaN, kInRange, kByColumn), 0x808080FFu,
+                     "NaN under the linear filter blends texels 3 and 0 at -0.5 instead of using NaN weights");
+
+            // T takes the same path with the texture height.
+            t.Equals(renderConstantSt(kRepeat, kTex1Point, kInRange, packFloat(512.375f), kByRow), 0x80FFFFFFu,
+                     "2049.5 texel rows saturate to 0x7FFF before REPEAT, so T samples row 3");
+            t.Equals(renderConstantSt(kRepeat, kTex1Point, kInRange, kNaN, kByRow), 0x800000FFu,
+                     "NaN T samples row 0 instead of converting NaN to int");
+        });
+
         tc.Run("GS STQ triangle interpolation divides homogeneous coordinates after DDA", [](TestCase &t)
         {
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
