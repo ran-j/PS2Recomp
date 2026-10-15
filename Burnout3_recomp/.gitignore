@@ -1,0 +1,42 @@
+# Burnout 3 (SLUS_210.50) workspace: keep game files and game-derived data out of git.
+# Tracked here: TOML configs (repo-relative paths), tools/, COMPLETED_WORK.md, this file.
+
+# Game executables and disc images (also renamed copies such as SLUS_210.50.bak)
+/SLUS_*
+*.elf
+*.irx
+*.iso
+*.bin
+*.img
+*.cue
+*.chd
+*.cso
+
+# Extracted disc contents and assets
+/disc*/
+/assets/
+/game_data/
+
+# Ghidra project database and lock files
+/ghidra_project/
+*.gpr
+*.rep/
+*.lock
+*.lock~
+
+# Logs
+/logs/
+*.log
+
+# Generated C++ from every recompiler run (output/, output_bounded/, ...)
+/output*/
+
+# Earlier export backups
+/backups/
+
+# Function maps, instruction ranges and reports derived from the ELF
+/*.csv
+/reports/
+
+# Machine-specific values: ELF SHA-256, original ELF location
+/local/
