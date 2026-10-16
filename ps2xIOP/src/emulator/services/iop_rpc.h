@@ -38,6 +38,19 @@ namespace ps2x::iop::detail
         {
             return executeGuestFunction(address, a0, a1, a2, a3, gp);
         }
+        // Runs an RPC server function on the thread parked in its
+        // sceSifRpcLoop, under the IOP scheduler, until it returns. Executors
+        // without a scheduler run it inline.
+        [[nodiscard]] virtual uint32_t executeRpcServer(int loopThreadId,
+                                                        uint32_t address,
+                                                        uint32_t a0,
+                                                        uint32_t a1,
+                                                        uint32_t a2,
+                                                        uint32_t gp)
+        {
+            (void)loopThreadId;
+            return executeGuestFunction(address, a0, a1, a2, 0u, gp);
+        }
     };
 
     class IopRpcBridge
@@ -72,6 +85,8 @@ namespace ps2x::iop::detail
         IopMemory &m_memory;
         IopKernel &m_kernel;
         std::unordered_map<uint32_t, RpcServer> m_servers;
+        // sceSifSetRpcQueue: queue descriptor -> thread that serves it.
+        std::unordered_map<uint32_t, int> m_queueThreads;
         uint32_t m_nextDmaId = 1u;
         bool m_sifInitialized = false;
     };

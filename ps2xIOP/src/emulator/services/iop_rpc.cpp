@@ -21,6 +21,7 @@ namespace ps2x::iop::detail
     void IopRpcBridge::reset()
     {
         m_servers.clear();
+        m_queueThreads.clear();
         m_nextDmaId = 1u;
         m_sifInitialized = false;
     }
@@ -233,7 +234,8 @@ namespace ps2x::iop::detail
         case 18:
             setV0(0);
             return true;
-        case 19: // SetRpcQueue
+        case 19: // sceSifSetRpcQueue(qd, threadId)
+            m_queueThreads[cpu.gpr[4]] = static_cast<int>(cpu.gpr[5]);
             setV0(cpu.gpr[4]);
             return true;
         case 20:
@@ -280,7 +282,9 @@ namespace ps2x::iop::detail
         if (serverIt == m_servers.end() || serverIt->second.function == 0u)
             return result;
 
-        RpcServer &server = serverIt->second;
+        // A copy: while the server runs, other IOP threads may register
+        // servers and rehash m_servers.
+        const RpcServer server = serverIt->second;
         if (request.send.size != 0u && server.buffer != 0u)
         {
             const uint32_t copySize = std::min<uint32_t>(request.send.size, IopMemory::RamSize - std::min(server.buffer, IopMemory::RamSize));
@@ -292,12 +296,23 @@ namespace ps2x::iop::detail
             }
         }
 
-        uint32_t returnPointer = executor.executeGuestFunction(server.function,
-                                                               request.function,
-                                                               server.buffer,
-                                                               request.send.size,
-                                                               0u,
-                                                               server.gp);
+        // A server registered on a queue runs on the thread parked in that
+        // queue's sceSifRpcLoop, as on hardware: it can block on or wait for
+        // other IOP threads and is preempted by higher-priority threads.
+        const auto loop = m_queueThreads.find(server.queue);
+        uint32_t returnPointer = loop != m_queueThreads.end()
+                                     ? executor.executeRpcServer(loop->second,
+                                                                 server.function,
+                                                                 request.function,
+                                                                 server.buffer,
+                                                                 request.send.size,
+                                                                 server.gp)
+                                     : executor.executeGuestFunction(server.function,
+                                                                     request.function,
+                                                                     server.buffer,
+                                                                     request.send.size,
+                                                                     0u,
+                                                                     server.gp);
         if (returnPointer == 0u)
             returnPointer = server.buffer;
         if (request.receive.address != 0u && request.receive.size != 0u && returnPointer != 0u)
@@ -338,6 +353,14 @@ namespace ps2x::iop::detail
                 server = m_servers.erase(server);
             else
                 ++server;
+        }
+        for (auto queue = m_queueThreads.begin(); queue != m_queueThreads.end();)
+        {
+            const uint32_t descriptor = IopMemory::physicalAddress(queue->first);
+            if (descriptor >= base && descriptor < base + size)
+                queue = m_queueThreads.erase(queue);
+            else
+                ++queue;
         }
     }
 
