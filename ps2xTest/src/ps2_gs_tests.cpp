@@ -350,6 +350,95 @@ namespace
         return readReferencePSMCT32Pixel(vram, frameBaseToBlock(fbp), fbw, x, y);
     }
 
+    uint32_t floatBits(float value)
+    {
+        uint32_t bits = 0u;
+        std::memcpy(&bits, &value, sizeof(bits));
+        return bits;
+    }
+
+    // Mipmap fixture: three solid CT32 levels with TBW 1, addressed by TEX0
+    // and MIPTBP1. Level 0 (16x16 at block 64) is red, level 1 (8x8 at block
+    // 128) green and level 2 (4x4 at block 192) blue.
+    constexpr uint32_t kMipTbp[3] = {64u, 128u, 192u};
+    constexpr uint32_t kMipColor[3] = {0x800000FFu, 0x8000FF00u, 0x80FF0000u};
+    constexpr uint64_t kMipTex0 =
+        64ull |
+        (1ull << 14) |
+        (static_cast<uint64_t>(GS_PSM_CT32) << 20) |
+        (4ull << 26) |
+        (4ull << 30) |
+        (1ull << 34) | // TCC
+        (1ull << 35);  // DECAL
+    constexpr uint64_t kMipTbp1 =
+        128ull |
+        (1ull << 14) |
+        (192ull << 20) |
+        (1ull << 34);
+
+    uint64_t makeTex1(uint32_t lcm, uint32_t mxl, uint32_t mmag, uint32_t mmin, uint32_t l, int32_t k)
+    {
+        return static_cast<uint64_t>(lcm & 0x1u) |
+               (static_cast<uint64_t>(mxl & 0x7u) << 2) |
+               (static_cast<uint64_t>(mmag & 0x1u) << 5) |
+               (static_cast<uint64_t>(mmin & 0x7u) << 6) |
+               (static_cast<uint64_t>(l & 0x3u) << 19) |
+               (static_cast<uint64_t>(static_cast<uint32_t>(k) & 0xFFFu) << 32);
+    }
+
+    void writeMipLevels(std::vector<uint8_t> &vram)
+    {
+        for (uint32_t level = 0u; level < 3u; ++level)
+            for (uint32_t y = 0u; y < (16u >> level); ++y)
+                for (uint32_t x = 0u; x < (16u >> level); ++x)
+                    writeReferencePSMCT32Pixel(vram, kMipTbp[level], 1u, x, y, kMipColor[level]);
+    }
+
+    // Context 1 draws into a 64-wide CT32 frame at block 0, every pixel
+    // passing and no depth writes.
+    void setUpMipFrame(GS &gs)
+    {
+        gs.writeRegister(GS_REG_FRAME_1, (1ull << 16) | (static_cast<uint64_t>(GS_PSM_CT32) << 24));
+        gs.writeRegister(GS_REG_ZBUF_1, 1ull << 32);
+        gs.writeRegister(GS_REG_SCISSOR_1, (31ull << 16) | (31ull << 48));
+        gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+        gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
+    }
+
+    void setUpMipDraw(GS &gs, uint64_t tex1)
+    {
+        setUpMipFrame(gs);
+        gs.writeRegister(GS_REG_TEX1_1, tex1);
+        gs.writeRegister(GS_REG_TEX0_1, kMipTex0);
+        gs.writeRegister(GS_REG_MIPTBP1_1, kMipTbp1);
+    }
+
+    // A 16x16-pixel sprite at the origin with a flat Q. FST maps UV 0..16
+    // texels onto it; STQ samples S/Q = T/Q = 0.5.
+    void drawMipSprite(GS &gs, bool fst, float q)
+    {
+        gs.writeRegister(GS_REG_PRIM,
+                         static_cast<uint64_t>(GS_PRIM_SPRITE) | (1ull << 4) | (fst ? (1ull << 8) : 0ull));
+        gs.writeRegister(GS_REG_RGBAQ, 0x80808080ull | (static_cast<uint64_t>(floatBits(q)) << 32));
+        gs.writeRegister(GS_REG_ST, static_cast<uint64_t>(floatBits(0.5f * q)) |
+                                        (static_cast<uint64_t>(floatBits(0.5f * q)) << 32));
+        gs.writeRegister(GS_REG_UV, 0ull);
+        gs.writeRegister(GS_REG_XYZ2, 0ull);
+        gs.writeRegister(GS_REG_UV, 256ull | (256ull << 16));
+        gs.writeRegister(GS_REG_XYZ2, 256ull | (256ull << 16));
+    }
+
+    uint32_t renderMipSpritePixel(uint64_t tex1, bool fst, float q)
+    {
+        std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+        GS gs;
+        gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+        writeMipLevels(vram);
+        setUpMipDraw(gs, tex1);
+        drawMipSprite(gs, fst, q);
+        return readReferencePSMCT32Pixel(vram, 0u, 1u, 8u, 8u);
+    }
+
     void expectGuestHeapReusable(TestCase &t, PS2Runtime &runtime, const char *message)
     {
         const uint32_t expectedBase = runtime.guestHeapBase();
@@ -3580,6 +3669,186 @@ void register_ps2_gs_tests()
                      "REGION_CLAMP should hold texel 3 at MAXU=2");
             t.Equals(renderConstantUv(kRegionRepeat, 4u * 16u, 0u), 0x80FF0000u,
                      "REGION_REPEAT should calculate (U & UMSK) | UFIX");
+        });
+
+        tc.Run("GS mipmapping takes the level from TEX1.K when LCM=1", [](TestCase &t)
+        {
+            constexpr uint32_t kNearestMipmapNearest = 2u;
+            auto render = [](uint32_t mxl, uint32_t mmin, int32_t k) -> uint32_t
+            {
+                return renderMipSpritePixel(makeTex1(1u, mxl, 0u, mmin, 0u, k), true, 1.0f);
+            };
+
+            t.Equals(render(2u, kNearestMipmapNearest, 0), kMipColor[0],
+                     "K=0 should sample level 0");
+            t.Equals(render(2u, kNearestMipmapNearest, 7), kMipColor[0],
+                     "*_MIPMAP_NEAREST should round K=7/16 down to level 0");
+            t.Equals(render(2u, kNearestMipmapNearest, 8), kMipColor[1],
+                     "*_MIPMAP_NEAREST should round K=8/16 up to level 1");
+            t.Equals(render(2u, kNearestMipmapNearest, 16), kMipColor[1],
+                     "K=1.0 should sample level 1 at MIPTBP1.TBP1");
+            t.Equals(render(2u, kNearestMipmapNearest, 32), kMipColor[2],
+                     "K=2.0 should sample level 2 at MIPTBP1.TBP2");
+            t.Equals(render(2u, kNearestMipmapNearest, 48), kMipColor[2],
+                     "a LOD past MXL should clamp to level MXL");
+            t.Equals(render(2u, kNearestMipmapNearest, -16), kMipColor[0],
+                     "a negative LOD should clamp to level 0");
+            t.Equals(render(0u, kNearestMipmapNearest, 32), kMipColor[0],
+                     "MXL=0 should keep level 0");
+            t.Equals(render(2u, 1u, 32), kMipColor[0],
+                     "MMIN=LINEAR has no mip levels and should keep level 0");
+            t.Equals(renderMipSpritePixel(makeTex1(1u, 2u, 0u, kNearestMipmapNearest, 0u, 16), false, 0.25f),
+                     kMipColor[1], "LCM=1 should ignore Q (log2(1/Q) = 2 here)");
+            t.Equals(renderMipSpritePixel(makeTex1(1u, 2u, 0u, kNearestMipmapNearest, 1u, 0), false, 0.25f),
+                     kMipColor[0], "LCM=1 should ignore L along with Q");
+        });
+
+        tc.Run("GS mipmapping derives the LCM=0 level from Q and TEX1.L", [](TestCase &t)
+        {
+            constexpr uint32_t kNearestMipmapNearest = 2u;
+            const uint64_t kTex1 = makeTex1(0u, 2u, 0u, kNearestMipmapNearest, 0u, 0);
+
+            t.Equals(renderMipSpritePixel(kTex1, false, 1.0f), kMipColor[0],
+                     "Q=1 should give LOD 0");
+            t.Equals(renderMipSpritePixel(kTex1, false, 0.5f), kMipColor[1],
+                     "Q=1/2 should give LOD 1");
+            t.Equals(renderMipSpritePixel(kTex1, false, 0.25f), kMipColor[2],
+                     "Q=1/4 should give LOD 2");
+            t.Equals(renderMipSpritePixel(makeTex1(0u, 2u, 0u, kNearestMipmapNearest, 1u, 0), false, 0.5f),
+                     kMipColor[2], "L=1 should double log2(1/Q)");
+            t.Equals(renderMipSpritePixel(makeTex1(0u, 2u, 0u, kNearestMipmapNearest, 0u, -16), false, 0.25f),
+                     kMipColor[1], "K should offset the Q-derived LOD");
+            t.Equals(renderMipSpritePixel(makeTex1(0u, 2u, 0u, kNearestMipmapNearest, 2u, -48), false, 0.5f),
+                     kMipColor[1], "L=2 with K=-3.0 at Q=1/2 should give LOD 1");
+            t.Equals(renderMipSpritePixel(kTex1, true, 0.25f), kMipColor[2],
+                     "FST primitives should take the LOD from RGBAQ.Q too");
+        });
+
+        tc.Run("GS mipmapping picks the level per pixel across an STQ triangle", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+            writeMipLevels(vram);
+            setUpMipDraw(gs, makeTex1(0u, 2u, 0u, 2u, 0u, 0));
+
+            // Q falls from 1 on the left edge to 1/4 at x = 32 while S/Q and
+            // T/Q stay 0.5, so LOD = log2(1/Q) passes 0.5 near x = 12.5 and
+            // 1.5 near x = 27.6.
+            auto vertex = [&](float q, uint64_t xyz)
+            {
+                gs.writeRegister(GS_REG_RGBAQ, 0x80808080ull | (static_cast<uint64_t>(floatBits(q)) << 32));
+                gs.writeRegister(GS_REG_ST, static_cast<uint64_t>(floatBits(0.5f * q)) |
+                                                (static_cast<uint64_t>(floatBits(0.5f * q)) << 32));
+                gs.writeRegister(GS_REG_XYZ2, xyz);
+            };
+            gs.writeRegister(GS_REG_PRIM, static_cast<uint64_t>(GS_PRIM_TRIANGLE) | (1ull << 4));
+            vertex(1.0f, 0ull);
+            vertex(0.25f, 512ull);
+            vertex(1.0f, 512ull << 16);
+
+            t.Equals(readReferencePSMCT32Pixel(vram, 0u, 1u, 4u, 1u), kMipColor[0],
+                     "LOD 0.16 at x=4 should sample level 0");
+            t.Equals(readReferencePSMCT32Pixel(vram, 0u, 1u, 20u, 1u), kMipColor[1],
+                     "LOD 0.94 at x=20 should sample level 1");
+            t.Equals(readReferencePSMCT32Pixel(vram, 0u, 1u, 29u, 1u), kMipColor[2],
+                     "LOD 1.70 at x=29 should sample level 2");
+        });
+
+        tc.Run("GS mip levels sample the level-0 coordinates shifted by the level", [](TestCase &t)
+        {
+            auto render = [](uint64_t clampReg, uint32_t x) -> uint32_t
+            {
+                std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+                GS gs;
+                gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+                writeMipLevels(vram);
+                for (uint32_t y = 0u; y < 8u; ++y)
+                    for (uint32_t u = 4u; u < 8u; ++u)
+                        writeReferencePSMCT32Pixel(vram, kMipTbp[1], 1u, u, y, kMipColor[2]);
+                setUpMipDraw(gs, makeTex1(1u, 1u, 0u, 2u, 0u, 16));
+                gs.writeRegister(GS_REG_CLAMP_1, clampReg);
+                drawMipSprite(gs, true, 1.0f);
+                return readReferencePSMCT32Pixel(vram, 0u, 1u, x, 8u);
+            };
+
+            // Level 1's texels 0-3 are green and 4-7 blue. Pixel x samples
+            // level-0 texel x (+ 1/2), which is level-1 texel x / 2.
+            t.Equals(render(0ull, 6u), kMipColor[1],
+                     "pixel 6 should sample level-1 texel 3");
+            t.Equals(render(0ull, 10u), kMipColor[2],
+                     "pixel 10 should sample level-1 texel 5, not texel 10 & 7");
+            t.Equals(render(2ull | (7ull << 14), 10u), kMipColor[1],
+                     "REGION_CLAMP to level-0 texels 0-7 should hold level 1 to texels 0-3");
+        });
+
+        tc.Run("GS *_MIPMAP_LINEAR blends the two levels by the LOD fraction", [](TestCase &t)
+        {
+            constexpr uint32_t kNearestMipmapLinear = 3u;
+            constexpr uint32_t kLinearMipmapLinear = 5u;
+            auto render = [](uint32_t mmin, int32_t k) -> uint32_t
+            {
+                return renderMipSpritePixel(makeTex1(1u, 2u, 0u, mmin, 0u, k), true, 1.0f);
+            };
+
+            t.Equals(render(kNearestMipmapLinear, 8), 0x80007F7Fu,
+                     "LOD 0.5 should take 8/16 of levels 0 and 1");
+            t.Equals(render(kNearestMipmapLinear, 28), 0x80BF3F00u,
+                     "LOD 1.75 should take 4/16 of level 1 and 12/16 of level 2");
+            t.Equals(render(kLinearMipmapLinear, 8), 0x80007F7Fu,
+                     "LINEAR_MIPMAP_LINEAR should blend its bilinear samples the same way");
+            t.Equals(render(kNearestMipmapLinear, 40), kMipColor[2],
+                     "a LOD clamped to MXL should sample the last level alone");
+        });
+
+        tc.Run("GS mipmapped primitives filter with TEX1.MMAG at LOD 0", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+            writeMipLevels(vram);
+            for (uint32_t y = 0u; y < 16u; ++y)
+                writeReferencePSMCT32Pixel(vram, kMipTbp[0], 1u, 1u, y, kMipColor[1]);
+            // MMAG=NEAREST with MMIN=LINEAR_MIPMAP_NEAREST, LOD 0.
+            setUpMipDraw(gs, makeTex1(1u, 2u, 0u, 4u, 0u, 0));
+
+            // Every pixel samples UV (1.0, 1.0): point sampling reads the
+            // green texel 1, bilinear filtering would average it with the red
+            // texel 0.
+            gs.writeRegister(GS_REG_PRIM, static_cast<uint64_t>(GS_PRIM_TRIANGLE) | (1ull << 4) | (1ull << 8));
+            gs.writeRegister(GS_REG_RGBAQ, 0x3F80000080808080ull);
+            gs.writeRegister(GS_REG_UV, 16ull | (16ull << 16));
+            gs.writeRegister(GS_REG_XYZ2, 0ull);
+            gs.writeRegister(GS_REG_XYZ2, 64ull);
+            gs.writeRegister(GS_REG_XYZ2, 64ull << 16);
+
+            t.Equals(readReferencePSMCT32Pixel(vram, 0u, 1u, 0u, 0u), kMipColor[1],
+                     "LOD 0 should point-sample under MMAG=NEAREST although MMIN filters linearly");
+        });
+
+        tc.Run("GS TEX1.MTBA derives the MIPTBP1 levels from the next TEX0 write", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            // A 32x32 CT32 level 0 at block 64 takes 16 blocks, so MTBA puts
+            // level 1 (16x16, TBW 1) at block 80.
+            for (uint32_t y = 0u; y < 32u; ++y)
+                for (uint32_t x = 0u; x < 32u; ++x)
+                    writeReferencePSMCT32Pixel(vram, 64u, 1u, x, y, kMipColor[0]);
+            for (uint32_t y = 0u; y < 16u; ++y)
+                for (uint32_t x = 0u; x < 16u; ++x)
+                    writeReferencePSMCT32Pixel(vram, 80u, 1u, x, y, kMipColor[1]);
+
+            setUpMipFrame(gs);
+            gs.writeRegister(GS_REG_MIPTBP1_1, 0ull);
+            gs.writeRegister(GS_REG_TEX1_1, makeTex1(1u, 1u, 0u, 2u, 0u, 16) | (1ull << 9));
+            gs.writeRegister(GS_REG_TEX0_1, (kMipTex0 & ~((0xFull << 26) | (0xFull << 30))) | (5ull << 26) | (5ull << 30));
+            drawMipSprite(gs, true, 1.0f);
+
+            t.Equals(readReferencePSMCT32Pixel(vram, 0u, 1u, 8u, 8u), kMipColor[1],
+                     "level 1 should come from the MTBA address after the 32x32 level 0");
         });
 
         tc.Run("GS STQ triangle interpolation divides homogeneous coordinates after DDA", [](TestCase &t)

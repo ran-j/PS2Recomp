@@ -298,6 +298,63 @@ namespace
         const float bottom = static_cast<float>(c01) + (static_cast<float>(c11) - static_cast<float>(c01)) * fx;
         return clampU8(static_cast<int>(std::lround(top + (bottom - top) * fy)));
     }
+
+    // SampleTexture's lod for a primitive that does not mipmap.
+    constexpr int kNoMipmapLod = -1;
+
+    // TEX1 enables mip levels when MMIN is one of the four *_MIPMAP_* modes
+    // and MXL > 0 (PCSX2 GSState::IsMipMapDraw). With MXL = 0 the GS clamps
+    // the LOD to 0, where only the magnification filter applies.
+    bool usesMipmaps(uint64_t tex1)
+    {
+        const uint32_t mmin = static_cast<uint32_t>((tex1 >> 6) & 0x7u);
+        return mmin >= 2u && mmin <= 5u && ((tex1 >> 2) & 0x7u) != 0u;
+    }
+
+    // MIPTBP1/MIPTBP2 address levels 1-6; MXL 7 is reserved.
+    uint32_t mipmapMaxLevel(uint64_t tex1)
+    {
+        return std::min<uint32_t>(static_cast<uint32_t>((tex1 >> 2) & 0x7u), 6u);
+    }
+
+    // The GS level of detail in sixteenths of a level, clamped to
+    // [0, 16 * MXL] (libgpu2 TXM::ComputeLod and TXM::ClampLod; PCSX2
+    // GSDrawScanline):
+    //   LCM = 1: LOD = K
+    //   LCM = 0: LOD = K + (log2(1/|Q|) << L), from the pixel's interpolated Q
+    // K is TEX1's signed 7.4 fixed-point field, so it is already in sixteenths.
+    int mipmapLod(uint64_t tex1, float q)
+    {
+        const int maxLod = static_cast<int>(mipmapMaxLevel(tex1)) * 16;
+        int k = static_cast<int>((tex1 >> 32) & 0xFFFu);
+        if ((k & 0x800) != 0)
+            k -= 0x1000;
+        if ((tex1 & 0x1u) != 0u)
+            return clampInt(k, 0, maxLod);
+
+        const float scale = static_cast<float>(16u << ((tex1 >> 19) & 0x3u));
+        const float lod = static_cast<float>(k) - scale * std::log2(std::fabs(q));
+        if (!(lod > 0.0f)) // also a NaN Q
+            return 0;
+        if (lod >= static_cast<float>(maxLod))
+            return maxLod;
+        return static_cast<int>(lod);
+    }
+
+    // *_MIPMAP_LINEAR: each channel moves fraction/16 of the way from the
+    // lower level's texel to the upper level's, truncated (libgpu2
+    // TXM::MFilter1).
+    uint32_t blendMipLevels(uint32_t lower, uint32_t upper, uint32_t fraction)
+    {
+        uint32_t out = 0u;
+        for (uint32_t shift = 0u; shift < 32u; shift += 8u)
+        {
+            const uint32_t a = (lower >> shift) & 0xFFu;
+            const uint32_t b = (upper >> shift) & 0xFFu;
+            out |= (((16u - fraction) * a + fraction * b) >> 4) << shift;
+        }
+        return out;
+    }
 }
 
 namespace
@@ -1055,21 +1112,8 @@ uint32_t GSCpuBackend::LookupCLUT(const GSDrawState &state,
     return 0xFFFF00FFu;
 }
 
-uint32_t GSCpuBackend::SampleTexture(const GSDrawState &state, float s, float t, float q, uint16_t u, uint16_t v)
+uint32_t GSCpuBackend::SampleTexture(const GSDrawState &state, float s, float t, float q, uint16_t u, uint16_t v, int lod)
 {
-    const auto &ctx = state.context;
-    const auto &tex = ctx.tex0;
-
-    const int texW = state.textureWidth;
-    const int texH = state.textureHeight;
-    const uint64_t clamp = ctx.clamp;
-    const uint8_t wrapU = static_cast<uint8_t>(clamp & 0x3u);
-    const uint8_t wrapV = static_cast<uint8_t>((clamp >> 2) & 0x3u);
-    const uint16_t minU = static_cast<uint16_t>((clamp >> 4) & 0x3FFu);
-    const uint16_t maxU = static_cast<uint16_t>((clamp >> 14) & 0x3FFu);
-    const uint16_t minV = static_cast<uint16_t>((clamp >> 24) & 0x3FFu);
-    const uint16_t maxV = static_cast<uint16_t>((clamp >> 34) & 0x3FFu);
-
     float texUf, texVf;
     if (state.prim.fst)
     {
@@ -1079,16 +1123,78 @@ uint32_t GSCpuBackend::SampleTexture(const GSDrawState &state, float s, float t,
     else
     {
         const float invQ = 1.0f / fabsQ(q);
-        texUf = s * invQ * static_cast<float>(texW);
-        texVf = t * invQ * static_cast<float>(texH);
+        texUf = s * invQ * static_cast<float>(state.textureWidth);
+        texVf = t * invQ * static_cast<float>(state.textureHeight);
     }
+
+    if (lod == kNoMipmapLod)
+        return SampleTextureLevel(state, 0u, texUf, texVf, state.linearFilter);
+
+    // At LOD 0 the GS magnifies: level 0 with TEX1.MMAG. Above it TEX1.MMIN
+    // decides: *_MIPMAP_NEAREST rounds the LOD to the nearest level,
+    // *_MIPMAP_LINEAR blends the levels on either side by its fraction, and
+    // LINEAR_MIPMAP_* filters bilinearly within a level (libgpu2
+    // TXM::Texturing, NMNFilter..LMLFilter). A level's texel coordinates are
+    // level 0's divided by 2^level.
+    const uint64_t tex1 = state.context.tex1;
+    if (lod == 0)
+        return SampleTextureLevel(state, 0u, texUf, texVf, ((tex1 >> 5) & 0x1u) != 0u);
+
+    const uint32_t mmin = static_cast<uint32_t>((tex1 >> 6) & 0x7u);
+    const bool linear = (mmin & 0x4u) != 0u;
+    const uint32_t maxLevel = mipmapMaxLevel(tex1);
+    const auto sampleLevel = [&](uint32_t level) -> uint32_t
+    {
+        const float scale = 1.0f / static_cast<float>(1u << level);
+        return SampleTextureLevel(state, level, texUf * scale, texVf * scale, linear);
+    };
+
+    if ((mmin & 0x1u) == 0u)
+        return sampleLevel(std::min(static_cast<uint32_t>(lod + 8) >> 4, maxLevel));
+
+    const uint32_t level = static_cast<uint32_t>(lod) >> 4;
+    const uint32_t fraction = static_cast<uint32_t>(lod) & 0xFu;
+    const uint32_t lower = sampleLevel(level);
+    if (fraction == 0u)
+        return lower;
+    return blendMipLevels(lower, sampleLevel(std::min(level + 1u, maxLevel)), fraction);
+}
+
+uint32_t GSCpuBackend::SampleTextureLevel(const GSDrawState &state, uint32_t level, float texUf, float texVf, bool linear)
+{
+    const auto &ctx = state.context;
+    const auto &tex = ctx.tex0;
+
+    // Levels 1-3 are in MIPTBP1 and 4-6 in MIPTBP2, 20 bits each (TBPn,
+    // then TBWn). A level halves the texture size, and the CLAMP region is
+    // shifted right by the level (libgpu2 TexAttr::WrapU/WrapV; PCSX2
+    // GSRendererSW's MIP_CLAMP).
+    uint32_t tbp = tex.tbp0;
+    uint32_t tbw = tex.tbw;
+    if (level != 0u)
+    {
+        const uint64_t miptbp = (level <= 3u) ? ctx.miptbp1 : ctx.miptbp2;
+        const uint32_t shift = ((level - 1u) % 3u) * 20u;
+        tbp = static_cast<uint32_t>((miptbp >> shift) & 0x3FFFu);
+        tbw = static_cast<uint32_t>((miptbp >> (shift + 14u)) & 0x3Fu);
+    }
+
+    const int texW = std::max(state.textureWidth >> level, 1);
+    const int texH = std::max(state.textureHeight >> level, 1);
+    const uint64_t clamp = ctx.clamp;
+    const uint8_t wrapU = static_cast<uint8_t>(clamp & 0x3u);
+    const uint8_t wrapV = static_cast<uint8_t>((clamp >> 2) & 0x3u);
+    const uint16_t minU = static_cast<uint16_t>(((clamp >> 4) & 0x3FFu) >> level);
+    const uint16_t maxU = static_cast<uint16_t>(((clamp >> 14) & 0x3FFu) >> level);
+    const uint16_t minV = static_cast<uint16_t>(((clamp >> 24) & 0x3FFu) >> level);
+    const uint16_t maxV = static_cast<uint16_t>(((clamp >> 34) & 0x3FFu) >> level);
 
     auto samplePoint = [&](int sampleU, int sampleV) -> uint32_t
     {
         sampleU = wrapTextureCoordinate(sampleU, texW, wrapU, minU, maxU);
         sampleV = wrapTextureCoordinate(sampleV, texH, wrapV, minV, maxV);
 
-        u32 out = ReadTextureVramUnlocked(tex.psm, tex.tbp0, tex.tbw, sampleU, sampleV);
+        u32 out = ReadTextureVramUnlocked(tex.psm, tbp, tbw, sampleU, sampleV);
 
         switch (tex.psm)
         {
@@ -1113,7 +1219,7 @@ uint32_t GSCpuBackend::SampleTexture(const GSDrawState &state, float s, float t,
         return 0xFFFF00FFu;
     };
 
-    if (!state.linearFilter)
+    if (!linear)
     {
         return samplePoint(static_cast<int>(texUf), static_cast<int>(texVf));
     }
@@ -1208,6 +1314,8 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
         const auto &tex = ctx.tex0;
         const int texW = state.textureWidth;
         const int texH = state.textureHeight;
+        // A sprite's Q is flat, the second vertex's, so its LOD is one value.
+        const int lod = usesMipmaps(ctx.tex1) ? mipmapLod(ctx.tex1, v1.q) : kNoMipmapLod;
 
         float u0f, v0f, u1f, v1f;
         if (state.prim.fst)
@@ -1250,11 +1358,11 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                     const int fixedV = static_cast<int>((texVf * 16.0f) + 0.5f);
                     const uint16_t sampleU = static_cast<uint16_t>(clampInt(fixedU, 0, 0xFFFF));
                     const uint16_t sampleV = static_cast<uint16_t>(clampInt(fixedV, 0, 0xFFFF));
-                    texel = SampleTexture(state, 0.0f, 0.0f, 1.0f, sampleU, sampleV);
+                    texel = SampleTexture(state, 0.0f, 0.0f, 1.0f, sampleU, sampleV, lod);
                 }
                 else
                 {
-                    texel = SampleTexture(state, texUf / static_cast<float>(texW), texVf / static_cast<float>(texH), 1.0f, 0u, 0u);
+                    texel = SampleTexture(state, texUf / static_cast<float>(texW), texVf / static_cast<float>(texH), 1.0f, 0u, 0u, lod);
                 }
 
                 uint8_t tr = static_cast<uint8_t>(texel & 0xFF);
@@ -1282,6 +1390,7 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch)
     const GSVertex &v1 = batch.vertices[1];
     const GSVertex &v2 = batch.vertices[2];
     const auto &ctx = state.context;
+    const bool mipmapped = state.prim.tme && usesMipmaps(ctx.tex1);
 
     int ofx = ctx.xyoffset.ofx >> 4;
     int ofy = ctx.xyoffset.ofy >> 4;
@@ -1367,7 +1476,12 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch)
                     iv = 0;
                 }
 
-                uint32_t texel = SampleTexture(state, is, it, iq, iu, iv);
+                // The LOD follows the interpolated Q, which the GS also
+                // interpolates for FST (UV) primitives.
+                int lod = kNoMipmapLod;
+                if (mipmapped)
+                    lod = mipmapLod(ctx.tex1, state.prim.fst ? v0.q * w0 + v1.q * w1 + v2.q * w2 : iq);
+                uint32_t texel = SampleTexture(state, is, it, iq, iu, iv, lod);
 
                 uint8_t tr = static_cast<uint8_t>(texel & 0xFF);
                 uint8_t tg = static_cast<uint8_t>((texel >> 8) & 0xFF);
