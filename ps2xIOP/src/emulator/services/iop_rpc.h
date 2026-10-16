@@ -2,6 +2,7 @@
 
 #include "ps2x/iop/iop_types.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <unordered_map>
@@ -50,6 +51,9 @@ namespace ps2x::iop::detail
         [[nodiscard]] bool dispatchSifCmdImport(uint16_t ordinal, IopCpuState &cpu);
         [[nodiscard]] RpcResult handleRpc(const RpcRequest &request, IopGuestExecutor &executor);
         void onSifTransfer(const SifTransfer &transfer);
+        // EE -> IOP SIF command (EE sceSifSendCmd). True when an IOP handler
+        // consumed it.
+        bool receiveEeCommand(uint32_t commandId, const uint8_t *packet, size_t packetSize);
         void removeServersInRange(uint32_t base, uint32_t size);
 
         [[nodiscard]] bool hasServer(uint32_t sid) const noexcept;
@@ -74,5 +78,8 @@ namespace ps2x::iop::detail
         std::unordered_map<uint32_t, RpcServer> m_servers;
         uint32_t m_nextDmaId = 1u;
         bool m_sifInitialized = false;
+        // SIF software registers: written by the EE's SIF_CMD_SET_SREG,
+        // read by sceSifGetSreg.
+        std::array<uint32_t, 32> m_sregs{};
     };
 }

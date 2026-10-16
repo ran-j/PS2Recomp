@@ -219,6 +219,11 @@ namespace ps2x::iop
         m_impl->emulator.onSifTransfer(transfer);
     }
 
+    bool IopSubsystem::receiveSifCommand(uint32_t commandId, const void *packet, size_t packetSize)
+    {
+        return m_impl->emulator.receiveSifCommand(commandId, packet, packetSize);
+    }
+
     uint32_t IopSubsystem::allocateMemory(uint32_t size, uint32_t alignment)
     {
         return m_impl->emulator.allocateMemory(size, alignment);

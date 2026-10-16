@@ -763,6 +763,11 @@ namespace ps2x::iop::detail
         m_impl->rpc.onSifTransfer(transfer);
     }
 
+    bool IopEmulator::receiveSifCommand(uint32_t commandId, const void *packet, size_t packetSize)
+    {
+        return m_impl->rpc.receiveEeCommand(commandId, static_cast<const uint8_t *>(packet), packetSize);
+    }
+
     uint32_t IopEmulator::allocateMemory(uint32_t size, uint32_t alignment)
     {
         return m_impl->memory.allocate(size, alignment);

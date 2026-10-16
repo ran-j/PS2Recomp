@@ -5,11 +5,13 @@
 #include "ps2_syscalls.h"
 #include "ps2_stubs.h"
 #include "runtime/ee_scheduler.h"
+#include "../../ps2xIOP/tests/iop_compat_test_support.h"
 
 #include <array>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -624,6 +626,91 @@ void register_ps2_sif_rpc_tests()
 
             t.IsTrue(std::memcmp(env.rdram.data() + kRecvAddr, payload.data(), payload.size()) == 0,
                      "recv payload should match stack-selected transfer size");
+        });
+
+        tc.Run("sceSifSendCmd delivers SET_SREG and its extra block to the IOP", [](TestCase &t)
+        {
+            constexpr uint32_t kSregSid = 0x5E600031u;
+            constexpr uint32_t kSifCmdSetSreg = 0x80000001u;
+            constexpr uint32_t kPacketAddr = 0x00027000u;
+            constexpr uint32_t kExtraSrcAddr = 0x00027100u;
+            constexpr uint32_t kRecvAddr = 0x00027200u;
+            constexpr uint32_t kExtraIopDest = 0x00180000u;
+            constexpr uint32_t kStackDecoyIopDest = 0x00190000u;
+
+            using SendCmd = void (*)(uint8_t *, R5900Context *, PS2Runtime *);
+            const struct
+            {
+                SendCmd send;
+                const char *name;
+                uint32_t value;
+            } entries[] = {
+                {&ps2_syscalls::sceSifSendCmd, "ps2_syscalls::sceSifSendCmd", 0xC0FFEE01u},
+                {&ps2_stubs::sceSifSendCmd, "ps2_stubs::sceSifSendCmd", 0xC0FFEE02u},
+            };
+            for (const auto &entry : entries)
+            {
+                const std::string name(entry.name);
+                TestEnv env;
+                ScopedTempDir temp("sif_set_sreg");
+                {
+                    const iop_test::Irx image = iop_test::sregReader(kSregSid, 31u);
+                    std::ofstream file(temp.path / "SREG.IRX", std::ios::binary);
+                    file.write(reinterpret_cast<const char *>(image.bytes.data()),
+                               static_cast<std::streamsize>(image.bytes.size()));
+                }
+                const PS2Runtime::IoPaths oldPaths = PS2Runtime::getIoPaths();
+                PS2Runtime::IoPaths ioPaths = oldPaths;
+                ioPaths.hostRoot = temp.path;
+                PS2Runtime::setIoPaths(ioPaths);
+                const auto module = env.runtime.loadIopModule("host0:SREG.IRX");
+                PS2Runtime::setIoPaths(oldPaths);
+                t.IsTrue(module.moduleId > 0 && module.startResult == 0,
+                         name + ": the sreg-reading IRX should load and register its RPC server");
+
+                // SifCmdSRegData: 16-byte header (filled by the sender), index, value.
+                const std::array<uint32_t, 6> packet{0u, 0u, 0u, 0u, 31u, entry.value};
+                writeGuestStruct(env.rdram.data(), kPacketAddr, packet);
+                std::array<uint8_t, 16> extra{};
+                for (size_t i = 0; i < extra.size(); ++i)
+                {
+                    extra[i] = static_cast<uint8_t>(0x60u + i);
+                }
+                std::memcpy(env.rdram.data() + kExtraSrcAddr, extra.data(), extra.size());
+                std::memset(env.rdram.data() + kExtraIopDest, 0x5A, extra.size());
+
+                // EE EABI: destExtra and sizeExtra are the fifth and sixth
+                // arguments, in t0/t1. The o32 stack slots hold a decoy.
+                setRegU32(env.ctx, 29, K_STACK_ADDR);
+                writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x10u, kStackDecoyIopDest);
+                writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x14u, static_cast<uint32_t>(extra.size()));
+                setRegU32(env.ctx, 4, kSifCmdSetSreg);
+                setRegU32(env.ctx, 5, kPacketAddr);
+                setRegU32(env.ctx, 6, static_cast<uint32_t>(sizeof(packet)));
+                setRegU32(env.ctx, 7, kExtraSrcAddr);
+                setRegU32(env.ctx, 8, kExtraIopDest);
+                setRegU32(env.ctx, 9, static_cast<uint32_t>(extra.size()));
+                entry.send(env.rdram.data(), &env.ctx, &env.runtime);
+                t.IsTrue(getRegU32Result(env.ctx, 2) != 0u, name + " should return a non-zero DMA id");
+
+                std::array<uint8_t, 16> iopExtra{};
+                t.IsTrue(env.runtime.readIopMemory(kExtraIopDest, iopExtra.data(), iopExtra.size()) &&
+                             iopExtra == extra,
+                         name + " should DMA the extra block to the IOP address in t0");
+                std::array<uint8_t, 16> eeAlias{};
+                eeAlias.fill(0x5Au);
+                t.IsTrue(std::memcmp(env.rdram.data() + kExtraIopDest, eeAlias.data(), eeAlias.size()) == 0,
+                         name + " must not write the extra block to the equal-numbered EE address");
+                std::array<uint8_t, 16> decoy{};
+                t.IsTrue(env.runtime.readIopMemory(kStackDecoyIopDest, decoy.data(), decoy.size()) &&
+                             decoy == std::array<uint8_t, 16>{},
+                         name + " must not take destExtra/sizeExtra from the o32 stack slots");
+
+                const ps2x::iop::RpcResult reply = callIop(env, kSregSid, 0u, 0u, 0u, kRecvAddr, 4u);
+                t.IsTrue(reply.handled, name + ": the sreg-reading RPC server should run");
+                t.Equals(readGuestStruct<uint32_t>(env.rdram.data(), kRecvAddr), entry.value,
+                         name + ": IOP sceSifGetSreg(31) should return the value set by SIF_CMD_SET_SREG");
+            }
         });
 
     });
