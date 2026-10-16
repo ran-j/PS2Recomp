@@ -284,12 +284,16 @@ namespace ps2x::iop::detail
 
     uint32_t IopMemory::allocate(uint32_t size, uint32_t alignment, std::optional<uint32_t> fixed)
     {
+        // No request larger than IOP RAM can fit; rejecting it first also keeps
+        // the 16-byte rounding below from wrapping a huge size to 0.
+        if (size > RamSize)
+            return 0u;
         size = alignUp(std::max(size, 1u), 16u);
         alignment = std::max<uint32_t>(alignment, 4u);
         if (fixed)
         {
             const uint32_t address = *fixed;
-            if (address < HeapBase || address + size > HeapLimit)
+            if (address < HeapBase || address > HeapLimit || size > HeapLimit - address)
                 return 0u;
             for (const auto &block : m_allocations)
                 if (address < block.address + block.size && block.address < address + size)
