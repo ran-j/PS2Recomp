@@ -820,17 +820,367 @@ inline __m128i _mm_custom_srav_epi32(__m128i a, __m128i count)
     return _mm_loadu_si128((__m128i *)result);
 }
 
-// PMFHL function implementations
-inline __m128i ps2_u64_to_epi64_pair(uint64_t value)
+// MMI HI/LO (128-bit) helpers. HI128 = {hi (UD[0]), hi1 (UD[1])}, LO128 = {lo, lo1}:
+// HI.UL[0..1] are the low/high 32 bits of hi, HI.UL[2..3] of hi1 (same for LO);
+// HI.US[0..3] are the halfwords of hi, HI.US[4..7] of hi1 (same for LO).
+// Semantics follow PCSX2's interpreter (pcsx2/MMI.cpp) exactly, quirks included.
+inline uint32_t ps2_mmi_word_u32(__m128i v, int i)
 {
-    return _mm_set1_epi64x(static_cast<long long>(value));
+    alignas(16) uint32_t a[4];
+    _mm_store_si128(reinterpret_cast<__m128i *>(a), v);
+    return a[i & 3];
+}
+inline int32_t ps2_mmi_word_s32(__m128i v, int i)
+{
+    return static_cast<int32_t>(ps2_mmi_word_u32(v, i));
+}
+inline uint16_t ps2_mmi_half_u16(__m128i v, int i)
+{
+    alignas(16) uint16_t a[8];
+    _mm_store_si128(reinterpret_cast<__m128i *>(a), v);
+    return a[i & 7];
+}
+inline int16_t ps2_mmi_half_s16(__m128i v, int i)
+{
+    return static_cast<int16_t>(ps2_mmi_half_u16(v, i));
+}
+inline uint64_t ps2_mmi_sext32(uint32_t v)
+{
+    return static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(v)));
+}
+inline __m128i ps2_mmi_vec_u32(uint32_t w0, uint32_t w1, uint32_t w2, uint32_t w3)
+{
+    return _mm_set_epi32(static_cast<int32_t>(w3), static_cast<int32_t>(w2), static_cast<int32_t>(w1), static_cast<int32_t>(w0));
+}
+inline __m128i ps2_mmi_vec_u64(uint64_t lo, uint64_t hi)
+{
+    return _mm_set_epi64x(static_cast<int64_t>(hi), static_cast<int64_t>(lo));
 }
 
-#define PS2_PMFHL_LW(hi, lo) _mm_unpacklo_epi64(ps2_u64_to_epi64_pair(lo), ps2_u64_to_epi64_pair(hi))
-#define PS2_PMFHL_UW(hi, lo) _mm_unpackhi_epi64(ps2_u64_to_epi64_pair(lo), ps2_u64_to_epi64_pair(hi))
-#define PS2_PMFHL_SLW(hi, lo) _mm_packs_epi32(ps2_u64_to_epi64_pair(lo), ps2_u64_to_epi64_pair(hi))
-#define PS2_PMFHL_LH(hi, lo) _mm_shuffle_epi32(_mm_packs_epi32(ps2_u64_to_epi64_pair(lo), ps2_u64_to_epi64_pair(hi)), _MM_SHUFFLE(3, 1, 2, 0))
-#define PS2_PMFHL_SH(hi, lo) _mm_shufflehi_epi16(_mm_shufflelo_epi16(_mm_packs_epi32(ps2_u64_to_epi64_pair(lo), ps2_u64_to_epi64_pair(hi)), _MM_SHUFFLE(3, 1, 2, 0)), _MM_SHUFFLE(3, 1, 2, 0))
+inline void ps2_mmi_pmfhi(R5900Context *ctx, int rd)
+{
+    if (rd != 0)
+        ctx->r[rd] = ps2_mmi_vec_u64(ctx->hi, ctx->hi1);
+}
+inline void ps2_mmi_pmflo(R5900Context *ctx, int rd)
+{
+    if (rd != 0)
+        ctx->r[rd] = ps2_mmi_vec_u64(ctx->lo, ctx->lo1);
+}
+inline void ps2_mmi_pmthi(R5900Context *ctx, __m128i rs)
+{
+    ctx->hi = static_cast<uint64_t>(_mm_cvtsi128_si64(rs));
+    ctx->hi1 = static_cast<uint64_t>(_mm_extract_epi64(rs, 1));
+}
+inline void ps2_mmi_pmtlo(R5900Context *ctx, __m128i rs)
+{
+    ctx->lo = static_cast<uint64_t>(_mm_cvtsi128_si64(rs));
+    ctx->lo1 = static_cast<uint64_t>(_mm_extract_epi64(rs, 1));
+}
+inline void ps2_mmi_pmfhl(R5900Context *ctx, int rd, int sa)
+{
+    if (rd == 0)
+        return;
+    const uint64_t hi = ctx->hi, lo = ctx->lo, hi1 = ctx->hi1, lo1 = ctx->lo1;
+    switch (sa)
+    {
+    case 0: // LW
+        ctx->r[rd] = ps2_mmi_vec_u32(static_cast<uint32_t>(lo), static_cast<uint32_t>(hi), static_cast<uint32_t>(lo1), static_cast<uint32_t>(hi1));
+        break;
+    case 1: // UW
+        ctx->r[rd] = ps2_mmi_vec_u32(static_cast<uint32_t>(lo >> 32), static_cast<uint32_t>(hi >> 32), static_cast<uint32_t>(lo1 >> 32), static_cast<uint32_t>(hi1 >> 32));
+        break;
+    case 2: { // SLW: clamp each 64-bit (HI.UL:LO.UL) pair to int32 range
+        const int64_t t0 = static_cast<int64_t>((static_cast<uint64_t>(static_cast<uint32_t>(hi)) << 32) | static_cast<uint32_t>(lo));
+        const int64_t t1 = static_cast<int64_t>((static_cast<uint64_t>(static_cast<uint32_t>(hi1)) << 32) | static_cast<uint32_t>(lo1));
+        const uint64_t o0 = (t0 >= 0x7fffffffLL) ? 0x000000007fffffffULL : (t0 <= -0x80000000LL) ? 0xffffffff80000000ULL : ps2_mmi_sext32(static_cast<uint32_t>(lo));
+        const uint64_t o1 = (t1 >= 0x7fffffffLL) ? 0x000000007fffffffULL : (t1 <= -0x80000000LL) ? 0xffffffff80000000ULL : ps2_mmi_sext32(static_cast<uint32_t>(lo1));
+        ctx->r[rd] = ps2_mmi_vec_u64(o0, o1);
+        break;
+    }
+    case 3: { // LH
+        const uint16_t lh[8] = {static_cast<uint16_t>(lo), static_cast<uint16_t>(lo >> 32), static_cast<uint16_t>(hi), static_cast<uint16_t>(hi >> 32),
+                                static_cast<uint16_t>(lo1), static_cast<uint16_t>(lo1 >> 32), static_cast<uint16_t>(hi1), static_cast<uint16_t>(hi1 >> 32)};
+        ctx->r[rd] = _mm_set_epi16(static_cast<int16_t>(lh[7]), static_cast<int16_t>(lh[6]), static_cast<int16_t>(lh[5]), static_cast<int16_t>(lh[4]),
+                                   static_cast<int16_t>(lh[3]), static_cast<int16_t>(lh[2]), static_cast<int16_t>(lh[1]), static_cast<int16_t>(lh[0]));
+        break;
+    }
+    case 4: { // SH: clamp each 32-bit word to int16 range (PCSX2 PMFHL_CLAMP)
+        auto clamp = [](uint32_t w) -> uint16_t {
+            const int32_t s = static_cast<int32_t>(w);
+            if (s > 0x7fff)
+                return 0x7fff;
+            if (s < -0x8000)
+                return 0x8000;
+            return static_cast<uint16_t>(s);
+        };
+        const uint16_t sh[8] = {clamp(static_cast<uint32_t>(lo)), clamp(static_cast<uint32_t>(lo >> 32)), clamp(static_cast<uint32_t>(hi)), clamp(static_cast<uint32_t>(hi >> 32)),
+                                clamp(static_cast<uint32_t>(lo1)), clamp(static_cast<uint32_t>(lo1 >> 32)), clamp(static_cast<uint32_t>(hi1)), clamp(static_cast<uint32_t>(hi1 >> 32))};
+        ctx->r[rd] = _mm_set_epi16(static_cast<int16_t>(sh[7]), static_cast<int16_t>(sh[6]), static_cast<int16_t>(sh[5]), static_cast<int16_t>(sh[4]),
+                                   static_cast<int16_t>(sh[3]), static_cast<int16_t>(sh[2]), static_cast<int16_t>(sh[1]), static_cast<int16_t>(sh[0]));
+        break;
+    }
+    default:
+        break; // PCSX2: no other sa forms
+    }
+}
+inline void ps2_mmi_pmthl(R5900Context *ctx, __m128i rs, int sa)
+{
+    if (sa != 0)
+        return; // PCSX2 PMTHL: only LW (sa == 0) writes; other sa is a no-op
+    // Only LO.UL[0]/HI.UL[0]/LO.UL[2]/HI.UL[2] are written; upper 32 bits survive.
+    ctx->lo = (ctx->lo & 0xFFFFFFFF00000000ULL) | ps2_mmi_word_u32(rs, 0);
+    ctx->hi = (ctx->hi & 0xFFFFFFFF00000000ULL) | ps2_mmi_word_u32(rs, 1);
+    ctx->lo1 = (ctx->lo1 & 0xFFFFFFFF00000000ULL) | ps2_mmi_word_u32(rs, 2);
+    ctx->hi1 = (ctx->hi1 & 0xFFFFFFFF00000000ULL) | ps2_mmi_word_u32(rs, 3);
+}
+inline void ps2_mmi_pmultw(R5900Context *ctx, int rd, __m128i rs, __m128i rt)
+{
+    const int64_t p0 = static_cast<int64_t>(ps2_mmi_word_s32(rs, 0)) * ps2_mmi_word_s32(rt, 0);
+    const int64_t p1 = static_cast<int64_t>(ps2_mmi_word_s32(rs, 2)) * ps2_mmi_word_s32(rt, 2);
+    // PCSX2 stores (s32) halves into UD slots, i.e. sign-extended 32-bit halves.
+    ctx->lo = ps2_mmi_sext32(static_cast<uint32_t>(p0));
+    ctx->hi = ps2_mmi_sext32(static_cast<uint32_t>(p0 >> 32));
+    ctx->lo1 = ps2_mmi_sext32(static_cast<uint32_t>(p1));
+    ctx->hi1 = ps2_mmi_sext32(static_cast<uint32_t>(p1 >> 32));
+    if (rd != 0)
+        ctx->r[rd] = ps2_mmi_vec_u64(static_cast<uint64_t>(p0), static_cast<uint64_t>(p1));
+}
+inline void ps2_mmi_pmaddw(R5900Context *ctx, int rd, __m128i rs, __m128i rt)
+{
+    const int32_t hiW[2] = {static_cast<int32_t>(static_cast<uint32_t>(ctx->hi)), static_cast<int32_t>(static_cast<uint32_t>(ctx->hi1))};
+    const uint32_t loW[2] = {static_cast<uint32_t>(ctx->lo), static_cast<uint32_t>(ctx->lo1)};
+    uint32_t loWord[2], hiWord[2];
+    for (int lane = 0; lane < 2; ++lane)
+    {
+        const int ss = lane * 2;
+        const int64_t temp = static_cast<int64_t>(ps2_mmi_word_s32(rs, ss)) * ps2_mmi_word_s32(rt, ss);
+        int64_t temp2 = temp + (static_cast<int64_t>(hiW[lane]) << 32);
+        // PCSX2 "division voodoo": only pipeline 0, only when rt's magnitude bits are 0 or all-ones and rs != rt.
+        if (lane == 0)
+        {
+            const int32_t rtS = ps2_mmi_word_s32(rt, 0);
+            const int32_t rsS = ps2_mmi_word_s32(rs, 0);
+            if (((rtS & 0x7FFFFFFF) == 0 || (rtS & 0x7FFFFFFF) == 0x7FFFFFFF) && rsS != rtS)
+                temp2 += 0x70000000;
+        }
+        // PCSX2 quirk: the high word is temp2 / 4294967295, not temp2 >> 32.
+        const int32_t h = static_cast<int32_t>(temp2 / 4294967295LL);
+        loWord[lane] = static_cast<uint32_t>(temp) + loW[lane];
+        hiWord[lane] = static_cast<uint32_t>(h);
+    }
+    ctx->lo = ps2_mmi_sext32(loWord[0]);
+    ctx->hi = ps2_mmi_sext32(hiWord[0]);
+    ctx->lo1 = ps2_mmi_sext32(loWord[1]);
+    ctx->hi1 = ps2_mmi_sext32(hiWord[1]);
+    if (rd != 0)
+        ctx->r[rd] = ps2_mmi_vec_u32(loWord[0], hiWord[0], loWord[1], hiWord[1]);
+}
+inline void ps2_mmi_pmsubw(R5900Context *ctx, int rd, __m128i rs, __m128i rt)
+{
+    const int32_t hiW[2] = {static_cast<int32_t>(static_cast<uint32_t>(ctx->hi)), static_cast<int32_t>(static_cast<uint32_t>(ctx->hi1))};
+    const uint32_t loW[2] = {static_cast<uint32_t>(ctx->lo), static_cast<uint32_t>(ctx->lo1)};
+    uint32_t loWord[2], hiWord[2];
+    for (int lane = 0; lane < 2; ++lane)
+    {
+        const int ss = lane * 2;
+        const int64_t temp = static_cast<int64_t>(ps2_mmi_word_s32(rs, ss)) * ps2_mmi_word_s32(rt, ss);
+        const int64_t temp2 = (static_cast<int64_t>(hiW[lane]) << 32) - temp;
+        // PCSX2 quirk: same / 4294967295 rounding as PMADDW (no voodoo term here).
+        const int32_t h = static_cast<int32_t>(temp2 / 4294967295LL);
+        loWord[lane] = loW[lane] - static_cast<uint32_t>(temp);
+        hiWord[lane] = static_cast<uint32_t>(h);
+    }
+    ctx->lo = ps2_mmi_sext32(loWord[0]);
+    ctx->hi = ps2_mmi_sext32(hiWord[0]);
+    ctx->lo1 = ps2_mmi_sext32(loWord[1]);
+    ctx->hi1 = ps2_mmi_sext32(hiWord[1]);
+    if (rd != 0)
+        ctx->r[rd] = ps2_mmi_vec_u32(loWord[0], hiWord[0], loWord[1], hiWord[1]);
+}
+inline void ps2_mmi_pmadduw(R5900Context *ctx, int rd, __m128i rs, __m128i rt)
+{
+    const uint32_t hiW[2] = {static_cast<uint32_t>(ctx->hi), static_cast<uint32_t>(ctx->hi1)};
+    const uint32_t loW[2] = {static_cast<uint32_t>(ctx->lo), static_cast<uint32_t>(ctx->lo1)};
+    uint64_t tempu[2];
+    for (int lane = 0; lane < 2; ++lane)
+    {
+        const int ss = lane * 2;
+        const uint64_t acc = static_cast<uint64_t>(loW[lane]) | (static_cast<uint64_t>(hiW[lane]) << 32);
+        tempu[lane] = acc + static_cast<uint64_t>(ps2_mmi_word_u32(rs, ss)) * ps2_mmi_word_u32(rt, ss);
+    }
+    ctx->lo = ps2_mmi_sext32(static_cast<uint32_t>(tempu[0]));
+    ctx->hi = ps2_mmi_sext32(static_cast<uint32_t>(tempu[0] >> 32));
+    ctx->lo1 = ps2_mmi_sext32(static_cast<uint32_t>(tempu[1]));
+    ctx->hi1 = ps2_mmi_sext32(static_cast<uint32_t>(tempu[1] >> 32));
+    if (rd != 0)
+        ctx->r[rd] = ps2_mmi_vec_u64(tempu[0], tempu[1]);
+}
+inline void ps2_mmi_pdivw(R5900Context *ctx, int rd, __m128i rs, __m128i rt)
+{
+    (void)rd; // PCSX2 PDIVW writes no rd
+    uint64_t loOut[2], hiOut[2];
+    for (int lane = 0; lane < 2; ++lane)
+    {
+        const int ss = lane * 2;
+        const int32_t dividend = ps2_mmi_word_s32(rs, ss);
+        const int32_t divisor = ps2_mmi_word_s32(rt, ss);
+        if (ps2_mmi_word_u32(rs, ss) == 0x80000000u && ps2_mmi_word_u32(rt, ss) == 0xffffffffu)
+        {
+            loOut[lane] = ps2_mmi_sext32(0x80000000u); // 0x80000000 / -1 quirk
+            hiOut[lane] = 0;
+        }
+        else if (divisor != 0)
+        {
+            loOut[lane] = ps2_mmi_sext32(static_cast<uint32_t>(dividend / divisor));
+            hiOut[lane] = ps2_mmi_sext32(static_cast<uint32_t>(dividend % divisor));
+        }
+        else
+        {
+            loOut[lane] = (dividend < 0) ? 1u : 0xFFFFFFFFFFFFFFFFULL; // div-by-zero: 1 if negative else -1
+            hiOut[lane] = ps2_mmi_sext32(static_cast<uint32_t>(dividend));
+        }
+    }
+    ctx->lo = loOut[0];
+    ctx->hi = hiOut[0];
+    ctx->lo1 = loOut[1];
+    ctx->hi1 = hiOut[1];
+}
+inline void ps2_mmi_pmulth(R5900Context *ctx, int rd, __m128i rs, __m128i rt)
+{
+    uint32_t p[8];
+    for (int i = 0; i < 8; ++i)
+        p[i] = static_cast<uint32_t>(static_cast<int32_t>(ps2_mmi_half_s16(rs, i)) * ps2_mmi_half_s16(rt, i));
+    ctx->lo = static_cast<uint64_t>(p[0]) | (static_cast<uint64_t>(p[1]) << 32);
+    ctx->hi = static_cast<uint64_t>(p[2]) | (static_cast<uint64_t>(p[3]) << 32);
+    ctx->lo1 = static_cast<uint64_t>(p[4]) | (static_cast<uint64_t>(p[5]) << 32);
+    ctx->hi1 = static_cast<uint64_t>(p[6]) | (static_cast<uint64_t>(p[7]) << 32);
+    if (rd != 0)
+        ctx->r[rd] = ps2_mmi_vec_u32(p[0], p[2], p[4], p[6]);
+}
+inline void ps2_mmi_pmaddh(R5900Context *ctx, int rd, __m128i rs, __m128i rt)
+{
+    uint32_t p[8];
+    for (int i = 0; i < 8; ++i)
+        p[i] = static_cast<uint32_t>(static_cast<int32_t>(ps2_mmi_half_s16(rs, i)) * ps2_mmi_half_s16(rt, i));
+    const uint32_t nlo[4] = {static_cast<uint32_t>(ctx->lo) + p[0], static_cast<uint32_t>(ctx->lo >> 32) + p[1], static_cast<uint32_t>(ctx->lo1) + p[4], static_cast<uint32_t>(ctx->lo1 >> 32) + p[5]};
+    const uint32_t nhi[4] = {static_cast<uint32_t>(ctx->hi) + p[2], static_cast<uint32_t>(ctx->hi >> 32) + p[3], static_cast<uint32_t>(ctx->hi1) + p[6], static_cast<uint32_t>(ctx->hi1 >> 32) + p[7]};
+    ctx->lo = static_cast<uint64_t>(nlo[0]) | (static_cast<uint64_t>(nlo[1]) << 32);
+    ctx->lo1 = static_cast<uint64_t>(nlo[2]) | (static_cast<uint64_t>(nlo[3]) << 32);
+    ctx->hi = static_cast<uint64_t>(nhi[0]) | (static_cast<uint64_t>(nhi[1]) << 32);
+    ctx->hi1 = static_cast<uint64_t>(nhi[2]) | (static_cast<uint64_t>(nhi[3]) << 32);
+    if (rd != 0)
+        ctx->r[rd] = ps2_mmi_vec_u32(nlo[0], nhi[0], nlo[2], nhi[2]);
+}
+inline void ps2_mmi_pmsubh(R5900Context *ctx, int rd, __m128i rs, __m128i rt)
+{
+    uint32_t p[8];
+    for (int i = 0; i < 8; ++i)
+        p[i] = static_cast<uint32_t>(static_cast<int32_t>(ps2_mmi_half_s16(rs, i)) * ps2_mmi_half_s16(rt, i));
+    const uint32_t nlo[4] = {static_cast<uint32_t>(ctx->lo) - p[0], static_cast<uint32_t>(ctx->lo >> 32) - p[1], static_cast<uint32_t>(ctx->lo1) - p[4], static_cast<uint32_t>(ctx->lo1 >> 32) - p[5]};
+    const uint32_t nhi[4] = {static_cast<uint32_t>(ctx->hi) - p[2], static_cast<uint32_t>(ctx->hi >> 32) - p[3], static_cast<uint32_t>(ctx->hi1) - p[6], static_cast<uint32_t>(ctx->hi1 >> 32) - p[7]};
+    ctx->lo = static_cast<uint64_t>(nlo[0]) | (static_cast<uint64_t>(nlo[1]) << 32);
+    ctx->lo1 = static_cast<uint64_t>(nlo[2]) | (static_cast<uint64_t>(nlo[3]) << 32);
+    ctx->hi = static_cast<uint64_t>(nhi[0]) | (static_cast<uint64_t>(nhi[1]) << 32);
+    ctx->hi1 = static_cast<uint64_t>(nhi[2]) | (static_cast<uint64_t>(nhi[3]) << 32);
+    if (rd != 0)
+        ctx->r[rd] = ps2_mmi_vec_u32(nlo[0], nhi[0], nlo[2], nhi[2]);
+}
+inline void ps2_mmi_phmadh(R5900Context *ctx, int rd, __m128i rs, __m128i rt)
+{
+    uint32_t p[8];
+    for (int i = 0; i < 8; ++i)
+        p[i] = static_cast<uint32_t>(static_cast<int32_t>(ps2_mmi_half_s16(rs, i)) * ps2_mmi_half_s16(rt, i));
+    const uint32_t nlo[4] = {p[1] + p[0], p[1], p[5] + p[4], p[5]};
+    const uint32_t nhi[4] = {p[3] + p[2], p[3], p[7] + p[6], p[7]};
+    ctx->lo = static_cast<uint64_t>(nlo[0]) | (static_cast<uint64_t>(nlo[1]) << 32);
+    ctx->lo1 = static_cast<uint64_t>(nlo[2]) | (static_cast<uint64_t>(nlo[3]) << 32);
+    ctx->hi = static_cast<uint64_t>(nhi[0]) | (static_cast<uint64_t>(nhi[1]) << 32);
+    ctx->hi1 = static_cast<uint64_t>(nhi[2]) | (static_cast<uint64_t>(nhi[3]) << 32);
+    if (rd != 0)
+        ctx->r[rd] = ps2_mmi_vec_u32(nlo[0], nhi[0], nlo[2], nhi[2]);
+}
+inline void ps2_mmi_phmsbh(R5900Context *ctx, int rd, __m128i rs, __m128i rt)
+{
+    uint32_t p[8];
+    for (int i = 0; i < 8; ++i)
+        p[i] = static_cast<uint32_t>(static_cast<int32_t>(ps2_mmi_half_s16(rs, i)) * ps2_mmi_half_s16(rt, i));
+    // PCSX2 quirk: the upper word of each pair is ~firsttemp (undocumented behaviour).
+    const uint32_t nlo[4] = {p[1] - p[0], ~p[1], p[5] - p[4], ~p[5]};
+    const uint32_t nhi[4] = {p[3] - p[2], ~p[3], p[7] - p[6], ~p[7]};
+    ctx->lo = static_cast<uint64_t>(nlo[0]) | (static_cast<uint64_t>(nlo[1]) << 32);
+    ctx->lo1 = static_cast<uint64_t>(nlo[2]) | (static_cast<uint64_t>(nlo[3]) << 32);
+    ctx->hi = static_cast<uint64_t>(nhi[0]) | (static_cast<uint64_t>(nhi[1]) << 32);
+    ctx->hi1 = static_cast<uint64_t>(nhi[2]) | (static_cast<uint64_t>(nhi[3]) << 32);
+    if (rd != 0)
+        ctx->r[rd] = ps2_mmi_vec_u32(nlo[0], nhi[0], nlo[2], nhi[2]);
+}
+inline void ps2_mmi_pdivbw(R5900Context *ctx, int rd, __m128i rs, __m128i rt)
+{
+    (void)rd; // PCSX2 PDIVBW writes no rd; divisor is rt halfword 0 for every lane
+    const uint16_t divisorU = ps2_mmi_half_u16(rt, 0);
+    const int32_t divisor = ps2_mmi_half_s16(rt, 0);
+    uint32_t q[4], r[4];
+    for (int n = 0; n < 4; ++n)
+    {
+        const int32_t dividend = ps2_mmi_word_s32(rs, n);
+        if (ps2_mmi_word_u32(rs, n) == 0x80000000u && divisorU == 0xffffu)
+        {
+            q[n] = 0x80000000u; // 0x80000000 / -1 quirk
+            r[n] = 0;
+        }
+        else if (divisorU != 0)
+        {
+            q[n] = static_cast<uint32_t>(dividend / divisor);
+            r[n] = static_cast<uint32_t>(dividend % divisor);
+        }
+        else
+        {
+            q[n] = (dividend < 0) ? 1u : 0xffffffffu;
+            r[n] = static_cast<uint32_t>(dividend);
+        }
+    }
+    ctx->lo = static_cast<uint64_t>(q[0]) | (static_cast<uint64_t>(q[1]) << 32);
+    ctx->lo1 = static_cast<uint64_t>(q[2]) | (static_cast<uint64_t>(q[3]) << 32);
+    ctx->hi = static_cast<uint64_t>(r[0]) | (static_cast<uint64_t>(r[1]) << 32);
+    ctx->hi1 = static_cast<uint64_t>(r[2]) | (static_cast<uint64_t>(r[3]) << 32);
+}
+inline void ps2_mmi_pmultuw(R5900Context *ctx, int rd, __m128i rs, __m128i rt)
+{
+    const uint64_t t0 = static_cast<uint64_t>(ps2_mmi_word_u32(rs, 0)) * ps2_mmi_word_u32(rt, 0);
+    const uint64_t t1 = static_cast<uint64_t>(ps2_mmi_word_u32(rs, 2)) * ps2_mmi_word_u32(rt, 2);
+    ctx->lo = ps2_mmi_sext32(static_cast<uint32_t>(t0));
+    ctx->hi = ps2_mmi_sext32(static_cast<uint32_t>(t0 >> 32));
+    ctx->lo1 = ps2_mmi_sext32(static_cast<uint32_t>(t1));
+    ctx->hi1 = ps2_mmi_sext32(static_cast<uint32_t>(t1 >> 32));
+    if (rd != 0)
+        ctx->r[rd] = ps2_mmi_vec_u64(t0, t1);
+}
+inline void ps2_mmi_pdivuw(R5900Context *ctx, int rd, __m128i rs, __m128i rt)
+{
+    (void)rd; // PCSX2 PDIVUW writes no rd
+    uint64_t loOut[2], hiOut[2];
+    for (int lane = 0; lane < 2; ++lane)
+    {
+        const int ss = lane * 2;
+        const uint32_t dividend = ps2_mmi_word_u32(rs, ss);
+        const uint32_t divisor = ps2_mmi_word_u32(rt, ss);
+        if (divisor != 0)
+        {
+            loOut[lane] = ps2_mmi_sext32(dividend / divisor);
+            hiOut[lane] = ps2_mmi_sext32(dividend % divisor);
+        }
+        else
+        {
+            loOut[lane] = 0xFFFFFFFFFFFFFFFFULL;
+            hiOut[lane] = ps2_mmi_sext32(dividend);
+        }
+    }
+    ctx->lo = loOut[0];
+    ctx->hi = hiOut[0];
+    ctx->lo1 = loOut[1];
+    ctx->hi1 = hiOut[1];
+}
 
 // FPU (COP1) operations
 #define FPU_SET_ACC(ctx, res) (ctx->f_acc = res)
