@@ -60,6 +60,18 @@ namespace ps2recomp
                 "FAST_WRITE{}({}, _value); }} while (0)",
                 valueType, valueType, val, addr, memoryAccessSize(width), width, width, addr);
         }
+
+        // LQ, SQ, LQC2 and SQC2 ignore the low four bits of their effective address. READ128 and
+        // WRITE128 mask it themselves; the resolved-address and MMIO paths below bypass them.
+        uint32_t accessAddress(int width, uint32_t address)
+        {
+            return width == 128 ? (address & ~0xFu) : address;
+        }
+
+        std::string accessAddressExpr(int width, const std::string &addr)
+        {
+            return width == 128 ? fmt::format("PS2_QWORD_ADDR({})", addr) : addr;
+        }
     }
 
     InstructionTranslator::InstructionTranslator(CodeGenerator &codeGenerator)
@@ -80,7 +92,7 @@ namespace ps2recomp
     {
         if (memoryHint.hasAddress)
         {
-            const uint32_t resolvedAddress = memoryHint.address;
+            const uint32_t resolvedAddress = accessAddress(width, memoryHint.address);
             const std::string resolvedAddressExpr = addressLiteral(resolvedAddress);
             if (inst.isMmio || Ps2IsSpecialAddress(resolvedAddress))
             {
@@ -91,7 +103,7 @@ namespace ps2recomp
 
         if (inst.isMmio)
         {
-            return fmt::format("runtime->Load{}(rdram, ctx, {})", width, addr);
+            return fmt::format("runtime->Load{}(rdram, ctx, {})", width, accessAddressExpr(width, addr));
         }
         return fmt::format("READ{}({})", width, addr);
     }
@@ -104,7 +116,7 @@ namespace ps2recomp
     {
         if (memoryHint.hasAddress)
         {
-            const uint32_t resolvedAddress = memoryHint.address;
+            const uint32_t resolvedAddress = accessAddress(width, memoryHint.address);
             const std::string resolvedAddressExpr = addressLiteral(resolvedAddress);
             if (inst.isMmio || Ps2IsSpecialAddress(resolvedAddress))
             {
@@ -115,7 +127,7 @@ namespace ps2recomp
 
         if (inst.isMmio)
         {
-            return fmt::format("runtime->Store{}(rdram, ctx, {}, {})", width, addr, value);
+            return fmt::format("runtime->Store{}(rdram, ctx, {}, {})", width, accessAddressExpr(width, addr), value);
         }
         return fmt::format("WRITE{}({}, {})", width, addr, value);
     }
