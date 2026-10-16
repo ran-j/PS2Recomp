@@ -311,6 +311,18 @@ inline float ps2_frsqrt(float a, float b)
     return ps2_fall_normal(a, b, r) ? r : ps2_frsqrt_slow(a, b);
 }
 
+// VFTOIn: x * 2^n truncated toward zero. |x * 2^n| >= 2^31 (exponent 158 or more, so the VU's
+// exponent-255 numbers too) saturates by sign to 0x7FFFFFFF / 0x80000000 (PCSX2 VUops.cpp
+// floatToInt). cvttps alone returns 0x80000000 for both signs.
+inline __m128i ps2_vu_ftoi(__m128 value, float scale)
+{
+    const __m128 scaled = _mm_mul_ps(value, _mm_set1_ps(scale));
+    const __m128i bits = _mm_castps_si128(scaled);
+    const __m128i big = _mm_cmpgt_epi32(_mm_and_si128(bits, _mm_set1_epi32(0x7FFFFFFF)), _mm_set1_epi32(0x4EFFFFFF));
+    const __m128i saturated = _mm_xor_si128(_mm_set1_epi32(0x7FFFFFFF), _mm_srai_epi32(bits, 31));
+    return _mm_or_si128(_mm_and_si128(big, saturated), _mm_andnot_si128(big, _mm_cvttps_epi32(scaled)));
+}
+
 enum class Ps2VecOp
 {
     Add,

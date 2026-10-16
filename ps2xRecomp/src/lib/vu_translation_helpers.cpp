@@ -753,10 +753,7 @@ namespace ps2recomp
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         float scale = (shift == 0) ? 1.0f : static_cast<float>(1 << shift);
 
-        return fmt::format("{{ __m128 src = ctx->vu0_vf[{}]; "
-                           "src = _mm_mul_ps(src, _mm_set1_ps({})); "
-                           "__m128i res_i = _mm_cvttps_epi32(src); "
-                           "__m128 res = _mm_castsi128_ps(res_i); "
+        return fmt::format("{{ __m128 res = _mm_castsi128_ps(ps2_vu_ftoi(ctx->vu0_vf[{}], {})); "
                            "__m128i mask = _mm_set_epi32({}, {}, {}, {}); "
                            "ctx->vu0_vf[{}] = _mm_blendv_ps(ctx->vu0_vf[{}], res, _mm_castsi128_ps(mask)); }}",
                            vfs, codegen::formatFloatLiteral(scale),
