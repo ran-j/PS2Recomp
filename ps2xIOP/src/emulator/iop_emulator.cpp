@@ -131,6 +131,11 @@ namespace ps2x::iop::detail
             totalCycles = 0;
             totalInstructions = 0;
             eeCycleCarry = 0;
+            leadCycles = 0;
+            drivingCycles = false;
+            rpcCallThread = 0;
+            rpcCallDone = false;
+            rpcCallResult = 0u;
             activeCpu = nullptr;
             lastError.clear();
             servicingDmaInterrupts = false;
@@ -362,7 +367,7 @@ namespace ps2x::iop::detail
         {
             if (cpu.stopped)
                 return false;
-            if (cpu.pc == kThreadReturnSentinel || cpu.pc == kCallReturnSentinel)
+            if (cpu.pc == kThreadReturnSentinel || cpu.pc == kCallReturnSentinel || cpu.pc == kRpcReturnSentinel)
             {
                 cpu.stopped = true;
                 return false;
@@ -456,6 +461,13 @@ namespace ps2x::iop::detail
             }
             cpu.gpr[31] = kCallReturnSentinel;
             runCpu(cpu, budget);
+            if (cpu.pc != kCallReturnSentinel)
+            {
+                std::ostringstream out;
+                out << "[IOP:call-abandoned] fn=0x" << std::hex << address << " stoppedAt=0x" << cpu.pc
+                    << " v0=0x" << cpu.gpr[2] << std::dec << " budget=" << budget << " cycle=" << totalCycles;
+                log(LogLevel::Warning, out.str());
+            }
             return cpu.gpr[2];
         }
 
@@ -478,6 +490,45 @@ namespace ps2x::iop::detail
                                                 uint32_t instructionBudget) override
         {
             return callFunction(address, a0, a1, a2, a3, gp, instructionBudget);
+        }
+
+        uint32_t executeRpcServer(int loopThreadId,
+                                  uint32_t address,
+                                  uint32_t a0,
+                                  uint32_t a1,
+                                  uint32_t a2,
+                                  uint32_t gp) override
+        {
+            // Entered from the EE's sceSifCallRpc with the IOP idle. A call
+            // made while IOP threads are being driven, or to a loop thread that
+            // is not parked, stays inline.
+            if (drivingCycles || rpcCallThread != 0 ||
+                !kernel.beginNestedCall(loopThreadId, address, a0, a1, a2, gp, kRpcReturnSentinel))
+            {
+                return callFunction(address, a0, a1, a2, 0u, gp);
+            }
+
+            rpcCallThread = loopThreadId;
+            rpcCallDone = false;
+            rpcCallResult = 0u;
+            const uint64_t start = totalCycles;
+            while (!rpcCallDone && totalCycles - start < kRpcServerCycleLimit)
+                runCycles(kRpcServerDriveCycles);
+            rpcCallThread = 0;
+            // The EE is stopped in sceSifCallRpc while the server runs. The IOP
+            // time spent is repaid from the EE's next grants (runEeCycles), so
+            // the IOP clock does not run ahead of EE time / 8.
+            leadCycles += totalCycles - start;
+            if (!rpcCallDone)
+            {
+                std::ostringstream out;
+                out << "[IOP:rpc-stuck] server 0x" << std::hex << address << " rpc=0x" << a0
+                    << " thread=" << std::dec << loopThreadId << " did not return within "
+                    << kRpcServerCycleLimit << " IOP cycles; it keeps running on its thread";
+                log(LogLevel::Error, out.str());
+                return 0u;
+            }
+            return rpcCallResult;
         }
 
         // Not that good to use exception handling for control flow but will do for now
@@ -555,6 +606,8 @@ namespace ps2x::iop::detail
 
         void runCycles(uint64_t cycles) noexcept
         {
+            const bool wasDriving = drivingCycles;
+            drivingCycles = true;
             try
             {
                 const uint64_t target = totalCycles + cycles;
@@ -577,6 +630,18 @@ namespace ps2x::iop::detail
                     }
                     const uint64_t before = totalCycles;
                     runCpu(next->cpu, static_cast<uint32_t>(std::min<uint64_t>(kDefaultSlice, target - totalCycles)));
+                    if (next->nestedSavedCpu && next->cpu.pc == kRpcReturnSentinel)
+                    {
+                        // An RPC server returned on its loop thread: hand its
+                        // reply pointer to executeRpcServer and put the thread
+                        // back to sleep in sceSifRpcLoop.
+                        if (next->id == rpcCallThread)
+                        {
+                            rpcCallResult = next->cpu.gpr[2];
+                            rpcCallDone = true;
+                        }
+                        kernel.finishNestedCall(*next);
+                    }
                     kernel.endTimeslice(*next, kThreadReturnSentinel);
                     if (totalCycles == before)
                         ++totalCycles;
@@ -586,6 +651,7 @@ namespace ps2x::iop::detail
             {
                 // Runtime scheduling must never throw through EeScheduler::accountCycles().
             }
+            drivingCycles = wasDriving;
         }
 
         ModuleLoadResult loadImage(std::string path, std::span<const uint8_t> image, const void *arguments, uint32_t argumentSize)
@@ -702,6 +768,13 @@ namespace ps2x::iop::detail
         uint64_t totalCycles = 0;
         uint64_t totalInstructions = 0;
         uint64_t eeCycleCarry = 0;
+        // IOP cycles run while the EE waited in sceSifCallRpc and not yet
+        // matched by EE time (executeRpcServer, runEeCycles).
+        uint64_t leadCycles = 0;
+        bool drivingCycles = false;
+        int rpcCallThread = 0;
+        bool rpcCallDone = false;
+        uint32_t rpcCallResult = 0u;
         CpuState *activeCpu = nullptr;
         std::string lastError;
         bool servicingDmaInterrupts = false;
@@ -742,8 +815,11 @@ namespace ps2x::iop::detail
     void IopEmulator::runEeCycles(uint64_t eeCycles) noexcept
     {
         const uint64_t total = m_impl->eeCycleCarry + eeCycles;
-        const uint64_t iopCycles = total / 8u;
+        uint64_t iopCycles = total / 8u;
         m_impl->eeCycleCarry = total % 8u;
+        const uint64_t repaid = std::min(iopCycles, m_impl->leadCycles);
+        m_impl->leadCycles -= repaid;
+        iopCycles -= repaid;
         if (iopCycles)
             m_impl->runCycles(iopCycles);
     }

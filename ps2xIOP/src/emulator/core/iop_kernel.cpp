@@ -741,4 +741,42 @@ namespace ps2x::iop::detail
                 thread.state = IopThreadState::Dead;
         }
     }
+
+    bool IopKernel::beginNestedCall(int id, uint32_t function, uint32_t a0, uint32_t a1, uint32_t a2,
+                                    uint32_t gp, uint32_t returnSentinel)
+    {
+        const auto it = m_threads.find(id);
+        if (it == m_threads.end() || it->second.state != IopThreadState::Sleep || it->second.nestedSavedCpu)
+            return false;
+
+        IopThread &thread = it->second;
+        thread.nestedSavedCpu = thread.cpu;
+        IopCpuState &call = thread.cpu;
+        call.pc = function;
+        call.pendingLoad = false;
+        call.branchPending = false;
+        call.stopped = false;
+        call.yielded = false;
+        call.exception = false;
+        call.gpr[4] = a0;
+        call.gpr[5] = a1;
+        call.gpr[6] = a2;
+        call.gpr[7] = 0u;
+        call.gpr[28] = gp;
+        call.gpr[31] = returnSentinel;
+        // The call's frames grow below the live sceSifRpcLoop frame, as the
+        // server's would on hardware.
+        call.gpr[29] = (thread.nestedSavedCpu->gpr[29] - kStackGuardBytes) & ~15u;
+        thread.state = IopThreadState::Ready;
+        return true;
+    }
+
+    void IopKernel::finishNestedCall(IopThread &thread)
+    {
+        if (!thread.nestedSavedCpu)
+            return;
+        thread.cpu = *thread.nestedSavedCpu;
+        thread.nestedSavedCpu.reset();
+        thread.state = IopThreadState::Sleep;
+    }
 }
