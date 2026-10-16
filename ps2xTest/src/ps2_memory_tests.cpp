@@ -1576,7 +1576,7 @@ void register_ps2_memory_tests()
                      "tag high-half VIFcodes must stay hidden when CHCR.TTE is clear");
         });
 
-        tc.Run("VIF1 packet builders keep chain qwc live before terminate", [](TestCase &t)
+        tc.Run("VIF1 packet builders size the chain qwc at terminate, not live", [](TestCase &t)
         {
             PS2Memory mem;
             t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
@@ -1619,7 +1619,13 @@ void register_ps2_memory_tests()
 
             uint32_t dmaTagWord = 0u;
             std::memcpy(&dmaTagWord, rdram + kBaseAddr, sizeof(dmaTagWord));
-            t.Equals(dmaTagWord & 0xFFFFu, 1u, "live packet head qwc should reflect one qword before terminate");
+            t.Equals(dmaTagWord & 0xFFFFu, 0u, "open packet head qwc should stay zero before terminate (guest terminate adds the size once)");
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, kStateAddr);
+            ps2_stubs::sceVif1PkTerminate(rdram, &ctx, nullptr);
+            std::memcpy(&dmaTagWord, rdram + kBaseAddr, sizeof(dmaTagWord));
+            t.Equals(dmaTagWord & 0xFFFFu, 1u, "terminate should size the packet head qwc to the one payload qword after the tag qword");
 
             std::vector<std::vector<uint8_t>> captured;
             mem.setGifPacketCallback([&](const uint8_t *data, uint32_t sizeBytes)
