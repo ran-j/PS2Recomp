@@ -5,12 +5,67 @@
 
 #include <algorithm>
 #include <cassert>
-#include <cstring>
+#include <cstdio>
 #include <limits>
 #include <stdexcept>
 
 namespace
 {
+    const char *invocationKindName(GuestInvocationKind kind)
+    {
+        switch (kind)
+        {
+        case GuestInvocationKind::Interrupt: return "Interrupt";
+        case GuestInvocationKind::Alarm: return "Alarm";
+        case GuestInvocationKind::GsCallback: return "GsCallback";
+        case GuestInvocationKind::RpcCallback: return "RpcCallback";
+        case GuestInvocationKind::SyscallOverride: return "SyscallOverride";
+        case GuestInvocationKind::ExitHandler: return "ExitHandler";
+        case GuestInvocationKind::HleCall: return "HleCall";
+        case GuestInvocationKind::SifCommand: return "SifCommand";
+        }
+        return "?";
+    }
+
+    // A runtime-initiated guest entry (thread start, callback, interrupt /
+    // alarm handler, syscall override, RPC/SIF/HLE invocation) must land on
+    // an actual recompiled function start. The dense function table maps
+    // every instruction slot to its containing function so that the
+    // scheduler can resume a thread mid-function, which means
+    // PS2Runtime::hasFunction() also accepts mid-function addresses; entering
+    // there skips the prologue and executes a function tail with a foreign
+    // register file. Function starts are exactly the slots whose function
+    // pointer differs from the previous slot. Normal recompiled control flow
+    // is unaffected: it never passes through these checked entry points.
+    bool isGuestFunctionStart(uint32_t pc)
+    {
+        if (pc < g_ps2RecompiledFunctionTableBase || pc >= g_ps2RecompiledFunctionTableEnd ||
+            (pc & 3u) != 0u)
+        {
+            return false;
+        }
+        const uint32_t slot = (pc - g_ps2RecompiledFunctionTableBase) >> 2;
+        if (slot >= g_ps2RecompiledFunctionTableSlotCount ||
+            g_ps2RecompiledFunctionTable[slot] == nullptr)
+        {
+            return false;
+        }
+        return slot == 0u || g_ps2RecompiledFunctionTable[slot - 1] != g_ps2RecompiledFunctionTable[slot];
+    }
+
+    void requireGuestFunctionStart(GuestInvocationKind kind, uint32_t pc)
+    {
+        if (isGuestFunctionStart(pc))
+        {
+            return;
+        }
+        std::fprintf(stderr,
+                     "[guest-invocation:bad-entry] kind=%s target=0x%08x is not a recompiled function "
+                     "start (mid-function or unmapped); refusing runtime-initiated guest entry\n",
+                     invocationKindName(kind), pc);
+        throw std::runtime_error("runtime-initiated guest entry target is not a function start");
+    }
+
     constexpr int KE_OK = 0;
     constexpr int KE_ERROR = -1;
     constexpr int KE_ILLEGAL_PRIORITY = -403;
@@ -483,6 +538,14 @@ int EeScheduler::startThread(int id, uint32_t arg, const R5900Context &caller, b
     if (!target)
     {
         return KE_UNKNOWN_THID;
+    }
+    if (!isGuestFunctionStart(target->entry))
+    {
+        std::fprintf(stderr,
+                     "[guest-invocation:bad-entry] kind=ThreadStart thread=%d target=0x%08x is not a "
+                     "recompiled function start (mid-function or unmapped); refusing StartThread\n",
+                     id, target->entry);
+        return KE_ERROR;
     }
     if (target->status != EeThreadStatus::Dormant)
     {
@@ -1101,6 +1164,7 @@ int EeScheduler::cancelAlarm(int id)
 void EeScheduler::queueInvocation(GuestInvocation invocation)
 {
     assertExecutor();
+    requireGuestFunctionStart(invocation.kind, invocation.context.pc);
     invocation.sequence = ++m_invocationSequence;
     m_pendingInvocations.push_back(std::move(invocation));
     m_checkpointPending.store(true, std::memory_order_release);
@@ -1111,6 +1175,7 @@ void EeScheduler::queueInvocation(GuestInvocation invocation)
     assertExecutor();
     GuestThread *owner = currentThread();
     assert(owner != nullptr);
+    requireGuestFunctionStart(invocation.kind, invocation.context.pc);
     if (getRegU32(&invocation.context, 29) == 0u)
     {
         SET_GPR_U32(&invocation.context, 29, invocationStackTop());
@@ -1129,6 +1194,7 @@ void EeScheduler::queueInvocation(GuestInvocation invocation)
     assert(!invocations.empty());
     for (auto it = invocations.rbegin(); it != invocations.rend(); ++it)
     {
+        requireGuestFunctionStart(it->kind, it->context.pc);
         if (getRegU32(&it->context, 29) == 0u)
         {
             SET_GPR_U32(&it->context, 29, invocationStackTop());
