@@ -345,6 +345,12 @@ public:
     void processVIF1Data(const uint8_t *data, uint32_t sizeBytes);
     void processPendingTransfers();
     std::vector<uint32_t> consumeCompletedDmacCauses();
+    // True while consumeCompletedDmacCauses has something to return. One
+    // atomic load, so callers can test it after every special-address store.
+    [[nodiscard]] bool hasCompletedDmacCauses() const noexcept
+    {
+        return m_completedDmacPending.load(std::memory_order_acquire);
+    }
 
     int pollDmaRegisters();
 
@@ -423,6 +429,7 @@ public:
     std::vector<PendingTransfer> m_pendingVif1Transfers;
     std::mutex m_completedDmacMutex;
     std::vector<uint32_t> m_completedDmacCauses;
+    std::atomic<bool> m_completedDmacPending{false};
 
     struct CodeRegion
     {
