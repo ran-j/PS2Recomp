@@ -11,6 +11,8 @@
 
 namespace
 {
+    // EE cycles per batched EE-timer / IOP service flush (accountCycles).
+    constexpr uint64_t kSubsystemFlushCycles = 4096u;
     constexpr int KE_OK = 0;
     constexpr int KE_ERROR = -1;
     constexpr int KE_ILLEGAL_PRIORITY = -403;
@@ -112,6 +114,7 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_insideInterrupt = false;
     m_pendingEeTimerInterrupts = 0u;
     m_eeCycle = 0u;
+    m_unflushedSubsystemCycles = 0u;
     m_sliceEndCycle = kDefaultTimeSliceCycles;
     m_stopRequested.store(false, std::memory_order_release);
     m_checkpointPending.store(false, std::memory_order_release);
@@ -392,8 +395,23 @@ void EeScheduler::accountCycles(uint32_t cycles) noexcept
 {
     const uint64_t elapsed = std::max<uint64_t>(1u, cycles);
     m_eeCycle += elapsed;
-    m_pendingEeTimerInterrupts |= m_runtime.memory().advanceEeTimers(elapsed);
-    m_runtime.advanceIopEeCycles(elapsed);
+    // Batch the expensive per-cycle subsystem advances: generated code
+    // accounts in 8/32-cycle increments, and advancing the IOP (a full
+    // IOP scheduler service pass) plus EE timers on every increment makes
+    // tight guest spin loops (e.g. a vsync-flag poll) run orders of
+    // magnitude slower than the EE clock they are accounting. Accumulate
+    // and flush in 4096-cycle quanta; totals and interrupt generation are
+    // unchanged, only the service granularity is coarser (<=4096 cycles
+    // of timer/IOP latency, flushed on the next account call).
+    m_unflushedSubsystemCycles += elapsed;
+    if (m_unflushedSubsystemCycles < kSubsystemFlushCycles)
+    {
+        return;
+    }
+    const uint64_t batch = m_unflushedSubsystemCycles;
+    m_unflushedSubsystemCycles = 0u;
+    m_pendingEeTimerInterrupts |= m_runtime.memory().advanceEeTimers(batch);
+    m_runtime.advanceIopEeCycles(batch);
     if (m_pendingEeTimerInterrupts != 0u)
     {
         m_checkpointPending.store(true, std::memory_order_release);
