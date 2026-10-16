@@ -576,8 +576,13 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
         ? runtime->Load64(rdram, ctx, _addr)                  \
         : FAST_READ64(_addr); }())
 
+// 128-bit accesses are LQ, SQ, LQC2 and SQC2. The EE ignores the low four bits of their effective
+// address (PCSX2's interpreter and recompiler mask them the same way), so neither macro can touch
+// a misaligned quadword.
+#define PS2_QWORD_ADDR(addr) ((uint32_t)(addr) & ~0xFu)
+
 #define READ128(addr) ([&]() -> __m128i {                     \
-    uint32_t _addr = (uint32_t)(addr);                        \
+    uint32_t _addr = PS2_QWORD_ADDR(addr);                    \
     return PS2Runtime::isSpecialAddress(_addr)                \
         ? runtime->Load128(rdram, ctx, _addr)                 \
         : FAST_READ128(_addr); }())
@@ -637,7 +642,7 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
 #define WRITE128(addr, val)                                                          \
     do                                                                               \
     {                                                                                \
-        uint32_t _addr = (addr);                                                     \
+        uint32_t _addr = PS2_QWORD_ADDR(addr);                                       \
         __m128i _value = (val);                                                      \
         if (PS2Runtime::isSpecialAddress(_addr))                                     \
             runtime->Store128(rdram, ctx, _addr, _value);                            \
