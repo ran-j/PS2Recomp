@@ -1398,7 +1398,7 @@ void register_ps2_memory_tests()
 
             t.IsTrue(mem.writeIORegister(kVif1Ch + 0x10u, kSrc), "write VIF1 MADR should succeed");
             t.IsTrue(mem.writeIORegister(kVif1Ch + 0x20u, kQwc), "write VIF1 QWC should succeed");
-            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x100u), "write VIF1 CHCR STR should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x101u), "write VIF1 CHCR DIR|STR should succeed");
 
             mem.processPendingTransfers();
 
@@ -1416,6 +1416,71 @@ void register_ps2_memory_tests()
             t.IsTrue(contentOk, "VIF1 DIRECT packet bytes should match payload");
             t.IsTrue((mem.readIORegister(kVif1Ch + 0x00u) & 0x100u) == 0u, "VIF1 CHCR STR bit should be cleared after drain");
             t.Equals(mem.readIORegister(kVif1Ch + 0x20u), 0u, "VIF1 QWC should be cleared after drain");
+        });
+
+        tc.Run("VIF1 DMA with CHCR.DIR=0 stores the GS download instead of running VIFcodes", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize should succeed");
+            t.IsTrue(runtime.syncCoreSubsystems(), "runtime core subsystems should bind");
+            PS2Memory &mem = runtime.memory();
+            GS &gs = runtime.gs();
+
+            // Sixteen CT32 pixels at (0..15, 0) of a one-page-wide buffer at
+            // block 0, then a local->host transfer of them (TRXDIR = 1), as the
+            // guest sets up before it reverses the VIF1 FIFO.
+            std::vector<uint8_t> pixels(64u);
+            for (uint32_t i = 0; i < pixels.size(); ++i)
+            {
+                pixels[i] = static_cast<uint8_t>(0xA0u + i);
+            }
+            gs.uploadImageNative(1ull << 48, 0ull, 16ull | (1ull << 32), 0ull,
+                                 pixels.data(), static_cast<uint32_t>(pixels.size()));
+            gs.writeRegister(GS_REG_BITBLTBUF, 1ull << 16);
+            gs.writeRegister(GS_REG_TRXPOS, 0ull);
+            gs.writeRegister(GS_REG_TRXREG, 16ull | (1ull << 32));
+            gs.writeRegister(GS_REG_TRXDIR, 1ull);
+
+            constexpr uint32_t kVif1Ch = 0x10009000u;
+            constexpr uint32_t kVif1Stat = 0x10003C00u;
+            constexpr uint32_t kDStat = 0x1000E010u;
+            constexpr uint32_t kDst = 0x00026000u;
+            constexpr uint32_t kQwc = 2u; // half of the download
+
+            // The receive buffer starts out holding VIFcodes (ITOP, MARK) that
+            // show if the buffer is run through VIF1, and a guard qword past QWC.
+            uint8_t *rdram = mem.getRDRAM();
+            std::memset(rdram + kDst, 0, kQwc * 16u);
+            const uint32_t itopCmd = makeVifCmd(0x04u, 0u, 0x55u);
+            const uint32_t markCmd = makeVifCmd(0x07u, 0u, 0x1234u);
+            std::memcpy(rdram + kDst, &itopCmd, sizeof(itopCmd));
+            std::memcpy(rdram + kDst + 4u, &markCmd, sizeof(markCmd));
+            std::memset(rdram + kDst + kQwc * 16u, 0xCD, 16u);
+
+            t.IsTrue(mem.writeIORegister(kVif1Stat, 0x00800000u), "write VIF1_STAT.FDR should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x10u, kDst), "write VIF1 MADR should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x20u, kQwc), "write VIF1 QWC should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x100u), "write VIF1 CHCR STR with DIR=0 should succeed");
+            mem.processPendingTransfers();
+
+            t.IsTrue(std::memcmp(rdram + kDst, pixels.data(), kQwc * 16u) == 0,
+                     "the GS download should land at MADR");
+            t.Equals(mem.vif1_regs.itops, 0u, "the receive buffer must not run as VIFcodes (ITOP)");
+            t.Equals(mem.vif1_regs.mark, 0u, "the receive buffer must not run as VIFcodes (MARK)");
+            bool guardOk = true;
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                guardOk = guardOk && rdram[kDst + kQwc * 16u + i] == 0xCDu;
+            }
+            t.IsTrue(guardOk, "the transfer must stop at QWC");
+            t.Equals(mem.readIORegister(kVif1Ch + 0x10u), kDst + kQwc * 16u, "VIF1 MADR should advance past the transfer");
+            t.Equals(mem.readIORegister(kVif1Ch + 0x20u), 0u, "VIF1 QWC should count down to 0");
+            t.IsTrue((mem.readIORegister(kDStat) & 0x2u) != 0u, "D_STAT.CIS1 should report the end of the transfer");
+            uint8_t rest[48] = {};
+            t.Equals(gs.consumeLocalToHostBytes(rest, sizeof(rest)), 32u,
+                     "the bytes past QWC should stay in the GS for the next read");
+            t.IsTrue(std::memcmp(rest, pixels.data() + kQwc * 16u, 32u) == 0,
+                     "the transfer should take the download from its start");
         });
 
         tc.Run("VIF1 DMA chain preserves compact tag high bytes for DIRECT packets", [](TestCase &t)
@@ -1447,8 +1512,8 @@ void register_ps2_memory_tests()
             });
 
             t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kTag), "write VIF1 TADR should succeed");
-            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x144u),
-                     "write VIF1 CHCR STR|CHAIN|TTE should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x145u),
+                     "write VIF1 CHCR STR|CHAIN|TTE|DIR should succeed");
 
             mem.processPendingTransfers();
 
@@ -1487,8 +1552,8 @@ void register_ps2_memory_tests()
             std::memcpy(rdram + kTag + 12u, &itopCmd, sizeof(itopCmd));
 
             t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kTag), "write VIF1 TADR should succeed");
-            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x144u),
-                     "write VIF1 CHCR STR|CHAIN|TTE should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x145u),
+                     "write VIF1 CHCR STR|CHAIN|TTE|DIR should succeed");
 
             mem.processPendingTransfers();
 
@@ -1528,8 +1593,8 @@ void register_ps2_memory_tests()
             });
 
             t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kTag0), "write VIF1 TADR should succeed");
-            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x144u),
-                     "write VIF1 CHCR STR|CHAIN|TTE should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x145u),
+                     "write VIF1 CHCR STR|CHAIN|TTE|DIR should succeed");
 
             mem.processPendingTransfers();
 
@@ -1567,8 +1632,8 @@ void register_ps2_memory_tests()
             std::memcpy(rdram + kTag + 12u, &itopCmd, sizeof(itopCmd));
 
             t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kTag), "write VIF1 TADR should succeed");
-            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x104u),
-                     "write VIF1 CHCR STR|CHAIN without TTE should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x105u),
+                     "write VIF1 CHCR STR|CHAIN|DIR without TTE should succeed");
 
             mem.processPendingTransfers();
 
@@ -1628,8 +1693,8 @@ void register_ps2_memory_tests()
             });
 
             t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kBaseAddr), "write VIF1 TADR should succeed");
-            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x144u),
-                     "write VIF1 CHCR STR|CHAIN|TTE should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x145u),
+                     "write VIF1 CHCR STR|CHAIN|TTE|DIR should succeed");
 
             mem.processPendingTransfers();
 
@@ -2091,7 +2156,7 @@ void register_ps2_memory_tests()
 
             t.IsTrue(mem.writeIORegister(kVif1Ch + 0x10u, kSrc), "write VIF1 MADR should succeed");
             t.IsTrue(mem.writeIORegister(kVif1Ch + 0x20u, kQwc), "write VIF1 QWC should succeed");
-            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x100u), "write VIF1 CHCR STR should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x101u), "write VIF1 CHCR DIR|STR should succeed");
 
             mem.processPendingTransfers();
 

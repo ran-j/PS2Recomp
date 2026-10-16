@@ -321,6 +321,10 @@ public:
     void setVu1MscalCallback(Vu1MscalCallback cb) { m_vu1MscalCallback = std::move(cb); }
     using Vu1MscntCallback = std::function<void(uint32_t top, uint32_t itop)>;
     void setVu1MscntCallback(Vu1MscntCallback cb) { m_vu1MscntCallback = std::move(cb); }
+    // A VIF1 DMA with CHCR.DIR = 0 stores the GS's local->host transfer
+    // (TRXDIR = 1) in memory; this callback hands it the downloaded bytes.
+    using GsDownloadCallback = std::function<uint32_t(uint8_t *dst, uint32_t maxBytes)>;
+    void setGsDownloadCallback(GsDownloadCallback cb) { m_gsDownloadCallback = std::move(cb); }
 
     uint8_t *getVU1Code() { return m_vu1Code; }
     const uint8_t *getVU1Code() const { return m_vu1Code; }
@@ -401,6 +405,7 @@ public:
     GifArbiter *m_gifArbiter = nullptr;
     Vu1MscalCallback m_vu1MscalCallback;
     Vu1MscntCallback m_vu1MscntCallback;
+    GsDownloadCallback m_gsDownloadCallback;
 
     uint8_t *m_vu0Code = nullptr;
     uint8_t *m_vu0Data = nullptr;
@@ -451,6 +456,7 @@ public:
     std::array<EeTimer, 4> m_eeTimers{};
     bool tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr);
     void completeDmacChannel(uint32_t channelBase, uint32_t cause);
+    void transferVif1ToMemory();
     void queueCompletedDmacCause(uint32_t cause);
 };
 

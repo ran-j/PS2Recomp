@@ -1311,6 +1311,14 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                 return true;
             }
 
+            // CHCR.DIR = 0 reverses VIF1's FIFO: the channel stores what the
+            // GS sends instead of feeding memory to VIF1 as VIFcodes.
+            if (channelBase == 0x10009000u && (value & 0x1u) == 0u)
+            {
+                transferVif1ToMemory();
+                return true;
+            }
+
             if ((channelBase == 0x1000A000u || channelBase == 0x10009000u || channelBase == 0x10008000u) && (m_gsVRAM || channelBase == 0x10008000u))
             {
                 auto enqueueTransfer = [&](uint32_t srcAddr, uint32_t qwCount)
@@ -1658,6 +1666,39 @@ void PS2Memory::completeDmacChannel(uint32_t channelBase, uint32_t cause)
         dstat &= ~(1u << 31u);
     m_ioRegisters[kDStat] = dstat;
     queueCompletedDmacCause(cause);
+}
+
+void PS2Memory::transferVif1ToMemory()
+{
+    // As PCSX2's vif1TransferToMemory: the channel stores what the GS holds
+    // from its last local->host transfer, up to QWC quadwords, at MADR and
+    // then ends, also when the GS had less.
+    static constexpr uint32_t kVif1Channel = 0x10009000u;
+    const uint32_t madr = m_ioRegisters[kVif1Channel + 0x10u];
+    const uint32_t qwc = m_ioRegisters[kVif1Channel + 0x20u] & 0xFFFFu;
+
+    uint32_t storedQwc = 0u;
+    if (qwc != 0u && m_gsDownloadCallback)
+    {
+        try
+        {
+            const bool scratch = isScratchpad(madr);
+            uint8_t *const base = scratch ? m_scratchpad : m_rdram;
+            const uint32_t limit = scratch ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
+            const uint32_t offset = translateAddress(madr);
+            if (offset < limit)
+            {
+                const uint32_t bytes = std::min(qwc * 16u, (limit - offset) & ~15u);
+                storedQwc = (m_gsDownloadCallback(base + offset, bytes) + 15u) / 16u;
+            }
+        }
+        catch (const std::exception &)
+        {
+        }
+    }
+    m_ioRegisters[kVif1Channel + 0x10u] = madr + storedQwc * 16u;
+    m_ioRegisters[kVif1Channel + 0x20u] = qwc - storedQwc;
+    completeDmacChannel(kVif1Channel, 1u);
 }
 
 void PS2Memory::processPendingTransfers()
