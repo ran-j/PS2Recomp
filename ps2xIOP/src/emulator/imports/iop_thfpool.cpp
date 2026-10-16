@@ -1,12 +1,19 @@
 #include "iop_thfpool.h"
 
 #include "../core/iop_cpu.h"
+#include "../core/iop_kernel.h"
 #include "../core/iop_memory.h"
 
 namespace ps2x::iop::detail
 {
-    IopThfpool::IopThfpool(IopMemory &memory) noexcept
-        : m_memory(memory)
+    namespace
+    {
+        constexpr uint32_t kFaThPri = 0x001u; // waiters are served by priority, not FIFO
+        constexpr uint32_t kKeWaitDelete = static_cast<uint32_t>(-425);
+    }
+
+    IopThfpool::IopThfpool(IopMemory &memory, IopKernel &kernel) noexcept
+        : m_memory(memory), m_kernel(kernel)
     {
     }
 
@@ -56,6 +63,7 @@ namespace ps2x::iop::detail
                 return true;
             }
             Pool pool;
+            pool.attr = m_memory.read32(a0 + 0u);
             pool.base = base;
             pool.stride = stride;
             pool.blockCount = blockCount;
@@ -67,7 +75,7 @@ namespace ps2x::iop::detail
             setV0(static_cast<uint32_t>(id));
             return true;
         }
-        case 5: // DeleteFpool(fpid) -> 0 / error
+        case 5: // DeleteFpool(fpid) -> 0 / error; waiting threads get KE_WAIT_DELETE
         {
             const auto it = m_pools.find(static_cast<int32_t>(a0));
             if (it == m_pools.end())
@@ -75,12 +83,14 @@ namespace ps2x::iop::detail
                 setV0(0xFFFFFFFFu);
                 return true;
             }
+            while (IopThread *waiter = m_kernel.fixedPoolWaiter(it->first, false))
+                m_kernel.releaseWaiter(*waiter, kKeWaitDelete);
             (void)m_memory.freeAllocation(it->second.base);
             m_pools.erase(it);
             setV0(0u);
             return true;
         }
-        case 6: // AllocateFpl(fpid) -> block pointer (0 while the pool is exhausted)
+        case 6: // AllocateFpl(fpid) -> block pointer; waits while the pool is empty
         {
             const auto it = m_pools.find(static_cast<int32_t>(a0));
             if (it == m_pools.end())
@@ -98,10 +108,10 @@ namespace ps2x::iop::detail
                     return true;
                 }
             }
-            // Hardware blocks the caller until a block is freed; without a
-            // blocking wait state the contract is a null block, the same
-            // value a pool with no waiter handling would hand out.
-            setV0(0u);
+            // The calling thread waits for FreeFpl to hand it a block (its
+            // $v0). Interrupt handlers and host calls cannot wait: null block.
+            if (!m_kernel.waitCurrentOnFixedPool(it->first, cpu))
+                setV0(0u);
             return true;
         }
         case 9: // FreeFpool(fpid, ptr) -> 0 / error
@@ -114,12 +124,17 @@ namespace ps2x::iop::detail
             }
             Pool &pool = it->second;
             const uint32_t offset = a1 - pool.base;
-            if (offset % pool.stride != 0u || offset / pool.stride >= pool.blockCount)
+            const uint32_t index = offset / pool.stride;
+            if (offset % pool.stride != 0u || index >= pool.blockCount)
             {
                 setV0(0xFFFFFFFFu);
                 return true;
             }
-            pool.used[offset / pool.stride] = false;
+            // A waiting thread takes the block over; it stays allocated.
+            if (IopThread *waiter = m_kernel.fixedPoolWaiter(it->first, (pool.attr & kFaThPri) != 0u))
+                m_kernel.releaseWaiter(*waiter, a1);
+            else
+                pool.used[index] = false;
             setV0(0u);
             return true;
         }

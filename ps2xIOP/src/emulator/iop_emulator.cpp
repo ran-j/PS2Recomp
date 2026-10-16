@@ -106,7 +106,7 @@ namespace ps2x::iop::detail
               heaplib(memory),
               intrman(memory),
               timrman(),
-              thfpool(memory),
+              thfpool(memory, kernel),
               ioman(memory),
               cpuCore(memory),
               imports(memory),

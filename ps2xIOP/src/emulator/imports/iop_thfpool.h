@@ -9,15 +9,17 @@
 
 namespace ps2x::iop::detail
 {
+    class IopKernel;
+
     // thfpool (IOP kernel fixed-size memory pools), imported only by
     // first-party streaming modules (XAVSTRM.IRX uses ordinals 4, 5, 6, 9).
-    // Pools are backed by IopMemory::allocate; AllocateFpl returns the next
-    // free block, or 0 while the pool is exhausted (a blocking wait needs an
-    // IOP scheduler wait state, which this emulator does not model yet).
+    // Pools are backed by IopMemory::allocate. AllocateFpl on an empty pool
+    // blocks the calling thread until FreeFpl hands it a block or DeleteFpl
+    // deletes the pool.
     class IopThfpool
     {
     public:
-        IopThfpool(IopMemory &memory) noexcept;
+        IopThfpool(IopMemory &memory, IopKernel &kernel) noexcept;
 
         void reset();
 
@@ -27,6 +29,7 @@ namespace ps2x::iop::detail
     private:
         struct Pool
         {
+            uint32_t attr = 0;
             uint32_t base = 0;
             uint32_t stride = 0;
             uint32_t blockCount = 0;
@@ -34,6 +37,7 @@ namespace ps2x::iop::detail
         };
 
         IopMemory &m_memory;
+        IopKernel &m_kernel;
         std::map<int32_t, Pool> m_pools;
         int32_t m_nextId = 1;
     };

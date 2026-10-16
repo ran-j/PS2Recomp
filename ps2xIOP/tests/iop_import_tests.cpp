@@ -6,6 +6,7 @@
 #include "emulator/imports/iop_loadcore.h"
 #include "emulator/imports/iop_timrman.h"
 #include "emulator/imports/iop_thfpool.h"
+#include "emulator/iop_emulator_const.h"
 #include "emulator/services/iop_rpc.h"
 #include "ps2x/iop/iop_host.h"
 
@@ -331,7 +332,8 @@ namespace
     bool testThfpool()
     {
         IopMemory memory;
-        IopThfpool thfpool(memory);
+        IopKernel kernel(memory);
+        IopThfpool thfpool(memory, kernel);
 
         // FpoolParam: attr, option, blockSize = 0x20, blockCount = 3.
         constexpr uint32_t param = 0x2000u;
@@ -391,12 +393,115 @@ namespace
         return expect(thfpool.dispatchImport(6u, cpu), "thfpool:6 after delete was not handled") &&
                expect(cpu.gpr[2] == 0u, "AllocateFpl returned a block from a deleted pool");
     }
+
+    // Creates and starts a thread, runs AllocateFpl(pool) on its own context
+    // as the running thread, then ends its timeslice.
+    IopThread *allocateOnNewThread(IopKernel &kernel, IopMemory &memory, IopThfpool &thfpool,
+                                   uint32_t descriptor, uint32_t priority, uint32_t pool)
+    {
+        memory.write32(descriptor + 8u, 0x1000u); // entry
+        memory.write32(descriptor + 12u, 0x400u); // stack size
+        memory.write32(descriptor + 16u, priority);
+        IopCpuState cpu{};
+        cpu.gpr[4] = descriptor;
+        (void)kernel.dispatchThreadImport(4u, cpu, 0u); // CreateThread
+        const int id = static_cast<int>(cpu.gpr[2]);
+        cpu = {};
+        cpu.gpr[4] = static_cast<uint32_t>(id);
+        (void)kernel.dispatchThreadImport(6u, cpu, 0u); // StartThread
+        IopThread *thread = kernel.beginNextReady(0u);
+        if (thread == nullptr || thread->id != id)
+            return nullptr;
+        thread->cpu.gpr[4] = pool;
+        (void)thfpool.dispatchImport(6u, thread->cpu);
+        kernel.endTimeslice(*thread, kThreadReturnSentinel);
+        return thread;
+    }
+
+    bool testThfpoolWaiters()
+    {
+        constexpr uint32_t kReleaseWait = static_cast<uint32_t>(-418);
+        constexpr uint32_t kWaitDelete = static_cast<uint32_t>(-425);
+        for (const uint32_t attr : {0u, 1u}) // FA_THFIFO, FA_THPRI
+        {
+            IopMemory memory;
+            IopKernel kernel(memory);
+            kernel.reset();
+            IopThfpool thfpool(memory, kernel);
+
+            constexpr uint32_t param = 0x2000u;
+            memory.write32(param + 0u, attr);
+            memory.write32(param + 8u, 0x40u);
+            memory.write32(param + 12u, 1u);
+            IopCpuState host{};
+            host.gpr[4] = param;
+            (void)thfpool.dispatchImport(4u, host);
+            const uint32_t pool = host.gpr[2];
+            host = {};
+            host.gpr[4] = pool;
+            (void)thfpool.dispatchImport(6u, host); // the only block, taken outside any thread
+            const uint32_t block = host.gpr[2];
+
+            // The lower-priority thread starts waiting first.
+            IopThread *early = allocateOnNewThread(kernel, memory, thfpool, 0x2100u, 20u, pool);
+            IopThread *urgent = allocateOnNewThread(kernel, memory, thfpool, 0x2140u, 10u, pool);
+            if (!expect(block != 0u && early != nullptr && urgent != nullptr, "thfpool waiter setup failed") ||
+                !expect(early->state == IopThreadState::FixedPool && urgent->state == IopThreadState::FixedPool,
+                        "AllocateFpl on an empty pool did not block the calling thread"))
+                return false;
+
+            constexpr uint32_t status = 0x3000u;
+            IopCpuState refer{};
+            refer.gpr[4] = static_cast<uint32_t>(early->id);
+            refer.gpr[5] = status;
+            (void)kernel.dispatchThreadImport(22u, refer, 0u);
+            if (!expect(memory.read32(status + 8u) == 0x04u && memory.read32(status + 36u) == 7u &&
+                            memory.read32(status + 40u) == pool,
+                        "ReferThreadStatus does not report the fixed-pool wait (WAIT, type 7, pool id)"))
+                return false;
+
+            // FreeFpl hands the block straight to the next waiter in pool order.
+            IopThread *served = attr == 1u ? urgent : early;
+            IopThread *waiting = attr == 1u ? early : urgent;
+            host = {};
+            host.gpr[4] = pool;
+            host.gpr[5] = block;
+            (void)thfpool.dispatchImport(9u, host);
+            if (!expect(host.gpr[2] == 0u && served->state == IopThreadState::Ready && served->cpu.gpr[2] == block,
+                        attr == 1u ? "FreeFpl did not serve the highest-priority waiter of an FA_THPRI pool"
+                                   : "FreeFpl did not serve the first waiter of an FA_THFIFO pool") ||
+                !expect(waiting->state == IopThreadState::FixedPool, "FreeFpl woke a second waiter"))
+                return false;
+            host = {};
+            host.gpr[4] = pool;
+            (void)thfpool.dispatchImport(6u, host);
+            if (!expect(host.gpr[2] == 0u, "the handed-over block was also left free"))
+                return false;
+
+            IopCpuState release{};
+            release.gpr[4] = static_cast<uint32_t>(waiting->id);
+            (void)kernel.dispatchThreadImport(18u, release, 0u);
+            if (!expect(waiting->state == IopThreadState::Ready && waiting->cpu.gpr[2] == kReleaseWait,
+                        "ReleaseWaitThread did not end the fixed-pool wait with KE_RELEASE_WAIT"))
+                return false;
+
+            IopThread *deleted = allocateOnNewThread(kernel, memory, thfpool, 0x2180u, 5u, pool);
+            host = {};
+            host.gpr[4] = pool;
+            (void)thfpool.dispatchImport(5u, host);
+            if (!expect(deleted != nullptr && host.gpr[2] == 0u && deleted->state == IopThreadState::Ready &&
+                            deleted->cpu.gpr[2] == kWaitDelete,
+                        "DeleteFpl did not release its waiter with KE_WAIT_DELETE"))
+                return false;
+        }
+        return true;
+    }
 }
 
 int main()
 {
     if (!testLoadcoreRebootLibraryMode() || !testCdvdSpecialControl() || !testCdvdSearchFile() ||
-        !testTimrmanPeriodicCallback() || !testThfpool())
+        !testTimrmanPeriodicCallback() || !testThfpool() || !testThfpoolWaiters())
         return 1;
     std::cout << "ps2xIOP import tests passed\n";
     return 0;

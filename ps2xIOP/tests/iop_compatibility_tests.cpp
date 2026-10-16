@@ -220,6 +220,73 @@ namespace
                 "status reply wrapped and zeroed low guest memory");
     }
 
+    // XAVSTRM's stream pattern: one thread takes blocks from a thfpool pool,
+    // another returns them. The IRX entry creates a one-block pool and takes
+    // its block, then starts a taker (priority 10) that asks for another
+    // block and a freer (priority 20) that returns the first one.
+    void allocateFplWaitsForFreeFpl()
+    {
+        constexpr uint32_t base = 0x10000u;
+        constexpr uint32_t createThread = base + 0x180u + 20u;
+        constexpr uint32_t startThread = createThread + 8u;
+        constexpr uint32_t createFpl = base + 0x1C0u + 20u;
+        constexpr uint32_t allocateFpl = createFpl + 8u;
+        constexpr uint32_t freeFpl = allocateFpl + 8u;
+        const auto jal = [](uint32_t target) { return 0x0C000000u | ((target >> 2u) & 0x03FFFFFFu); };
+        Irx image(base);
+        image.words(0x000u, {
+            0x27BDFFE0u, 0xAFBF001Cu,
+            0x3C040001u, 0x34840340u, jal(createFpl), 0u, // CreateFpl(&param)
+            0x3C080001u, 0xAD020400u,                     // fpid -> 0x10400
+            0x00402021u, jal(allocateFpl), 0u,            // AllocateFpl(fpid)
+            0x3C080001u, 0xAD020404u,                     // block -> 0x10404
+            0x3C040001u, 0x34840300u, jal(createThread), 0u,
+            0x00408021u,                                  // s0 = taker
+            0x3C040001u, 0x34840320u, jal(createThread), 0u,
+            0x00408821u,                                  // s1 = freer
+            0x02002021u, 0x00002821u, jal(startThread), 0u,
+            0x02202021u, 0x00002821u, jal(startThread), 0u,
+            0x8FBF001Cu, 0x00001021u, 0x27BD0020u, 0x03E00008u, 0u,
+        });
+        image.words(0x100u, { // taker: AllocateFpl(fpid) -> 0x10410
+            0x27BDFFE0u, 0xAFBF001Cu,
+            0x3C080001u, 0x8D040400u, 0u, jal(allocateFpl), 0u,
+            0x3C080001u, 0xAD020410u,
+            0x8FBF001Cu, 0x27BD0020u, 0x03E00008u, 0u,
+        });
+        image.words(0x140u, { // freer: FreeFpl(fpid, block), then 1 -> 0x10414
+            0x27BDFFE0u, 0xAFBF001Cu,
+            0x3C080001u, 0x8D040400u, 0x8D050404u, 0u, jal(freeFpl), 0u,
+            0x3C080001u, 0x24090001u, 0xAD090414u,
+            0x8FBF001Cu, 0x27BD0020u, 0x03E00008u, 0u,
+        });
+        image.words(0x180u, {0x41E00000u, 0u, 0x0101u, 0x61626874u, 0x00006573u, // thbase
+                             0x03E00008u, 0x24000004u, 0x03E00008u, 0x24000006u, 0u, 0u});
+        image.words(0x1C0u, {0x41E00000u, 0u, 0x0101u, 0x70666874u, 0x006C6F6Fu, // thfpool
+                             0x03E00008u, 0x24000004u, 0x03E00008u, 0x24000006u,
+                             0x03E00008u, 0x24000009u, 0u, 0u});
+        image.words(0x300u, {0u, 0u, base + 0x100u, 0x400u, 10u}); // taker thread
+        image.words(0x320u, {0u, 0u, base + 0x140u, 0x400u, 20u}); // freer thread
+        image.words(0x340u, {0u, 0u, 0x40u, 1u});                 // one 64-byte block
+        image.words(0x410u, {0xFFFFFFFFu});
+
+        Host host;
+        IopSubsystem iop(host);
+        image.install(host);
+        require(iop.loadModuleBuffer(0x1000u).startResult == 0, "thfpool IRX failed");
+        iop.runEeCycles(8u * 4096u);
+        const auto word = [&](uint32_t address)
+        {
+            uint32_t value = 0u;
+            require(iop.readMemory(address, &value, sizeof(value)), "IOP read failed");
+            return value;
+        };
+        const uint32_t block = word(base + 0x404u);
+        require(block != 0u, "AllocateFpl did not return the pool's free block");
+        require(word(base + 0x414u) == 1u, "the freeing thread did not run");
+        require(word(base + 0x410u) == block, "AllocateFpl on an empty pool did not wait for the block FreeFpl returned");
+    }
+
     void moduleAliases()
     {
         Host host;
@@ -305,6 +372,7 @@ int main()
         {"MCSERV rejects truncated name packet", mcShortNamePacket},
         {"MCSERV accepts complete name packets in both dialects", mcFullNamePacket},
         {"MCSERV status replies preserve bounds and cannot wrap", mcStatusBounds},
+        {"AllocateFpl on an empty pool waits for FreeFpl", allocateFplWaitsForFreeFpl},
         {"Extended module aliases and activation", moduleAliases},
         {"Unsupported debug and game IRX stay unsupported", unknownModulesStayUnknown},
         {"HLE repeated loads and alias lifetime", moduleLifetime},
