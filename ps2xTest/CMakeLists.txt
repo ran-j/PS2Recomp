@@ -38,6 +38,7 @@ add_library(ps2_test_lib STATIC
     src/ps2_recompiler_tests.cpp
     src/ps2_runtime_expansion_tests.cpp
     src/ps2_float_semantics_tests.cpp
+    src/ps2_vu0_vf0_tests.cpp
 )
 
 target_include_directories(ps2_test_lib PRIVATE
