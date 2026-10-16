@@ -51,29 +51,6 @@ namespace ps2_stubs
             clear.testb = {restoreTest, testReg};
         }
 
-        bool hasSeededGsClearPacket(const GsClearMem &clear)
-        {
-            return clear.rgbaq.reg == GS_REG_RGBAQ &&
-                   clear.xyz2a.reg == GS_REG_XYZ2 &&
-                   clear.xyz2b.reg == GS_REG_XYZ2;
-        }
-
-
-        void applyGsClearPacket(PS2Runtime *runtime, const GsClearMem &clear)
-        {
-            if (!runtime->syncCoreSubsystems() || !hasSeededGsClearPacket(clear))
-            {
-                return;
-            }
-
-            runtime->gs().writeRegister(static_cast<uint8_t>(clear.testa.reg & 0xFFu), clear.testa.value);
-            runtime->gs().writeRegister(static_cast<uint8_t>(clear.prim.reg & 0xFFu), clear.prim.value);
-            runtime->gs().writeRegister(static_cast<uint8_t>(clear.rgbaq.reg & 0xFFu), clear.rgbaq.value);
-            runtime->gs().writeRegister(static_cast<uint8_t>(clear.xyz2a.reg & 0xFFu), clear.xyz2a.value);
-            runtime->gs().writeRegister(static_cast<uint8_t>(clear.xyz2b.reg & 0xFFu), clear.xyz2b.value);
-            runtime->gs().writeRegister(static_cast<uint8_t>(clear.testb.reg & 0xFFu), clear.testb.value);
-        }
-
         void refreshPacketBuilderPendingCount(uint8_t *rdram, PS2Runtime *runtime, uint32_t stateAddr);
         void writePacketBuilderCurrent(uint8_t *rdram, PS2Runtime *runtime, uint32_t stateAddr, uint32_t currentAddr);
 
@@ -1135,27 +1112,15 @@ namespace ps2_stubs
             });
             ++s_swapDbuffLogCount;
         }
-        if (which == 0u)
+        // libgraph sceGsSwapDBuffDc: sceGsPutDispEnv(&db->disp[which]), then
+        // sceGsPutDrawEnv(&db->giftag{which}). The GIF DMA runs exactly the
+        // pairs NLOOP covers: both contexts' draw envs and, when seeded, the
+        // clear.
+        const size_t giftagOffset = which == 0u ? offsetof(GsDBuffDcMem, giftag0) : offsetof(GsDBuffDcMem, giftag1);
+        if (!submitGsGiftagPacketViaGifDma(rdram, runtime, envAddr + static_cast<uint32_t>(giftagOffset)))
         {
-            applyGsRegPairs(runtime, reinterpret_cast<const GsRegPairMem *>(&db.draw01), 8u);
-            applyGsRegPairs(runtime, reinterpret_cast<const GsRegPairMem *>(&db.draw02), 8u);
-            if (hasSeededGsClearPacket(db.clear0))
-            {
-                const uint32_t clearContext = static_cast<uint32_t>((db.clear0.prim.value >> 9) & 0x1u);
-                runtime->gs().clearFramebufferContext(clearContext, static_cast<uint32_t>(db.clear0.rgbaq.value));
-            }
-            applyGsClearPacket(runtime, db.clear0);
-        }
-        else
-        {
-            applyGsRegPairs(runtime, reinterpret_cast<const GsRegPairMem *>(&db.draw11), 8u);
-            applyGsRegPairs(runtime, reinterpret_cast<const GsRegPairMem *>(&db.draw12), 8u);
-            if (hasSeededGsClearPacket(db.clear1))
-            {
-                const uint32_t clearContext = static_cast<uint32_t>((db.clear1.prim.value >> 9) & 0x1u);
-                runtime->gs().clearFramebufferContext(clearContext, static_cast<uint32_t>(db.clear1.rgbaq.value));
-            }
-            applyGsClearPacket(runtime, db.clear1);
+            setReturnS32(ctx, -1);
+            return;
         }
 
         setReturnS32(ctx, static_cast<int32_t>(which ^ 1u));
@@ -1174,13 +1139,14 @@ namespace ps2_stubs
         }
 
         applyGsDispEnv(runtime, db.disp[which]);
-        if (which == 0u)
+        // libgraph sceGsSwapDBuff: sceGsPutDispEnv(&db->disp[which]), then
+        // sceGsPutDrawEnv(&db->giftag{which}). The GIF DMA runs exactly the
+        // pairs NLOOP covers: the draw env and, when seeded, the clear.
+        const size_t giftagOffset = which == 0u ? offsetof(GsDBuffMem, giftag0) : offsetof(GsDBuffMem, giftag1);
+        if (!submitGsGiftagPacketViaGifDma(rdram, runtime, envAddr + static_cast<uint32_t>(giftagOffset)))
         {
-            applyGsRegPairs(runtime, reinterpret_cast<const GsRegPairMem *>(&db.draw0), 8u);
-        }
-        else
-        {
-            applyGsRegPairs(runtime, reinterpret_cast<const GsRegPairMem *>(&db.draw1), 8u);
+            setReturnS32(ctx, -1);
+            return;
         }
 
         setReturnS32(ctx, static_cast<int32_t>(which ^ 1u));

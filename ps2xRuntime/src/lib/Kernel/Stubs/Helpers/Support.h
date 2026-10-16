@@ -1877,16 +1877,6 @@ namespace
         regs.bgcolor = env.bgcolor;
     }
 
-    static void applyGsRegPairs(PS2Runtime *runtime, const GsRegPairMem *pairs, size_t pairCount)
-    {
-        if (!runtime || !pairs || !runtime->syncCoreSubsystems())
-            return;
-        for (size_t i = 0; i < pairCount; ++i)
-        {
-            runtime->gs().writeRegister(static_cast<uint8_t>(pairs[i].reg & 0xFFu), pairs[i].value);
-        }
-    }
-
     static void seedGsDrawEnv1(GsDrawEnv1Mem &env,
                                int32_t width,
                                int32_t height,
