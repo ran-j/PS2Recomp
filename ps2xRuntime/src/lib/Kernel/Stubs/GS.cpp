@@ -757,6 +757,29 @@ namespace ps2_stubs
         setReturnU32(ctx, addr);
     }
 
+    // Sends the GIF packet starting at the GIFtag at packetAddr on GIF DMA
+    // channel 2 in normal mode, as libgraph sceGsPutDrawEnv does: MADR =
+    // packet, QWC = NLOOP + 1, CHCR = 0x101. The tag itself is not inspected
+    // further; the GIF interprets it. Returns false if the tag is unreadable.
+    static bool submitGsGiftagPacketViaGifDma(uint8_t *rdram, PS2Runtime *runtime, uint32_t packetAddr)
+    {
+        uint64_t giftag = 0u;
+        if (!runtime || !runtime->syncCoreSubsystems() ||
+            !tryReadQwordFromGuest(rdram, runtime, packetAddr, giftag))
+        {
+            return false;
+        }
+
+        constexpr uint32_t GIF_CHANNEL = 0x1000A000u;
+        constexpr uint32_t CHCR_STR_MODE0 = 0x101u;
+        auto &mem = runtime->memory();
+        mem.writeIORegister(GIF_CHANNEL + 0x10u, packetAddr);
+        mem.writeIORegister(GIF_CHANNEL + 0x20u, static_cast<uint32_t>(giftag & 0x7FFFu) + 1u);
+        mem.writeIORegister(GIF_CHANNEL + 0x00u, CHCR_STR_MODE0);
+        mem.processPendingTransfers();
+        return true;
+    }
+
     void sceGsPutDispEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t envAddr = getRegU32(ctx, 4);
@@ -770,17 +793,14 @@ namespace ps2_stubs
         setReturnS32(ctx, 0);
     }
 
+    // libgraph sceGsPutDrawEnv(sceGifTag *giftag) does not apply register
+    // pairs itself: it sends the packet that starts at the GIFtag on GIF DMA
+    // channel 2 in normal mode, QWC = tag NLOOP + 1 (the tag qword plus one
+    // qword per A+D pair), CHCR = 0x101, and returns 0.
     void sceGsPutDrawEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        uint32_t envAddr = getRegU32(ctx, 4);
-        GsRegPairMem pairs[8]{};
-        if (!readGsRegPairs(rdram, envAddr, pairs, 8u))
-        {
-            setReturnS32(ctx, -1);
-            return;
-        }
-        applyGsRegPairs(runtime, pairs, 8u);
-        setReturnS32(ctx, 0);
+        const uint32_t giftagAddr = getRegU32(ctx, 4);
+        setReturnS32(ctx, submitGsGiftagPacketViaGifDma(rdram, runtime, giftagAddr) ? 0 : -1);
     }
 
     void sceGsResetGraph(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

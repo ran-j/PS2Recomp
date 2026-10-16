@@ -1863,17 +1863,6 @@ namespace
         return true;
     }
 
-    static bool readGsRegPairs(uint8_t *rdram, uint32_t addr, GsRegPairMem *pairs, size_t pairCount)
-    {
-        if (!pairs || pairCount == 0u)
-            return false;
-        const uint8_t *ptr = getConstMemPtr(rdram, addr);
-        if (!ptr)
-            return false;
-        std::memcpy(pairs, ptr, pairCount * sizeof(GsRegPairMem));
-        return true;
-    }
-
     static void applyGsDispEnv(PS2Runtime *runtime, const GsDispEnvMem &env)
     {
         if (!runtime || !runtime->syncCoreSubsystems())
