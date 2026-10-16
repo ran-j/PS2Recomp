@@ -989,14 +989,12 @@ namespace
         std::vector<RpcClientRow> clients;
         bool rpcInitialized = false;
         uint32_t rpcNextId = 0;
-        uint32_t rpcPacketIndex = 0;
         uint32_t rpcServerIndex = 0;
         uint32_t rpcActiveQueue = 0;
         {
             std::lock_guard<std::mutex> lock(g_rpc_mutex);
             rpcInitialized = g_rpc_initialized;
             rpcNextId = g_rpc_next_id;
-            rpcPacketIndex = g_rpc_packet_index;
             rpcServerIndex = g_rpc_server_index;
             rpcActiveQueue = g_rpc_active_queue;
             servers.reserve(g_rpc_servers.size());
@@ -1005,7 +1003,8 @@ namespace
                 RpcServerRow row{};
                 row.sid = sid;
                 row.sdPtr = state.sd_ptr;
-                row.readable = readGuestObjectNoThrow(rdram, state.sd_ptr, row.sd);
+                // An IOP-side server's sd_ptr is a handle, not a descriptor.
+                row.readable = state.eeDescriptor && readGuestObjectNoThrow(rdram, state.sd_ptr, row.sd);
                 servers.push_back(row);
             }
 
@@ -1143,12 +1142,11 @@ namespace
         }
 
         ImGui::SeparatorText("SIF RPC state");
-        ImGui::Text("initialized=%u servers=%zu clients=%zu nextId=%u packetIndex=%u serverIndex=%u activeQueue=0x%08X",
+        ImGui::Text("initialized=%u servers=%zu clients=%zu nextId=%u serverIndex=%u activeQueue=0x%08X",
                     rpcInitialized ? 1u : 0u,
                     servers.size(),
                     clients.size(),
                     rpcNextId,
-                    rpcPacketIndex,
                     rpcServerIndex,
                     rpcActiveQueue);
 
