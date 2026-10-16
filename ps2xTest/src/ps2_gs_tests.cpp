@@ -518,6 +518,170 @@ void register_ps2_gs_tests()
                      "GsSetCrt should return success");
         });
 
+        tc.Run("sceGsSetDefDBuff lays out a FRAME-mode double buffer like libgraph", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+            uint8_t *const rdram = runtime.memory().getRDRAM();
+
+            auto resetGraph = [&](uint32_t interlace, uint32_t omode, uint32_t ffmode)
+            {
+                R5900Context reset{};
+                setRegU32(reset, 4, 0u);
+                setRegU32(reset, 5, interlace);
+                setRegU32(reset, 6, omode);
+                setRegU32(reset, 7, ffmode);
+                ps2_stubs::sceGsResetGraph(rdram, &reset, &runtime);
+            };
+            auto q = [&](uint32_t addr)
+            {
+                uint64_t value = 0u;
+                std::memcpy(&value, rdram + addr, sizeof(value));
+                return value;
+            };
+
+            // Stuntman's FrontendViewer call (jal 0x00220D4C): 640x224 CT32,
+            // ztest 2, zpsm 0, clear 1, NTSC interlaced FRAME mode.
+            resetGraph(1u, 2u, 1u);
+            constexpr uint32_t kEnv = 0x7800u;
+            std::memset(rdram + kEnv, 0xCD, sizeof(GsDBuffMem));
+            R5900Context ctx{};
+            setRegU32(ctx, 4, kEnv);
+            setRegU32(ctx, 5, 0u);
+            setRegU32(ctx, 6, 640u);
+            setRegU32(ctx, 7, 224u);
+            setRegU32(ctx, 8, 2u);
+            setRegU32(ctx, 9, 0u);
+            setRegU32(ctx, 10, 1u);
+            ps2_stubs::sceGsSetDefDBuff(rdram, &ctx, &runtime);
+
+            // sceGszbufaddr: 10x7 pages, two frames = 140, so buffer 1 is page 70.
+            const uint64_t display = 636ull | (50ull << 12) | (3ull << 23) | (2559ull << 32) | (447ull << 44);
+            for (uint32_t i = 0; i < 2u; ++i)
+            {
+                const uint32_t disp = kEnv + i * 40u;
+                t.Equals(q(disp + 0u), 0x66ull, "disp PMODE should read circuit 2 only (0x66)");
+                t.Equals(q(disp + 8u), 3ull, "disp SMODE2 should be INT=1 FFMD=1 in FRAME mode");
+                t.Equals(q(disp + 16u), (10ull << 9) | (i == 0u ? 0ull : 70ull),
+                         "disp[0] should show page 0 and disp[1] page zbufaddr/2");
+                t.Equals(q(disp + 24u), display,
+                         "DISPLAY should be NTSC DX 636 DY 50, MAGH 4, DW 2559, DH 2h-1 in FRAME mode");
+                t.Equals(q(disp + 32u), 0ull, "BGCOLOR should be 0");
+            }
+
+            const uint64_t giftagLo = 14ull | (1ull << 15) | (1ull << 60);
+            t.Equals(q(kEnv + 0x50u), giftagLo, "giftag0 should cover 8 draw + 6 clear pairs");
+            t.Equals(q(kEnv + 0x58u), 0xEull, "giftag0 REGS should be one A+D descriptor");
+            t.Equals(q(kEnv + 0x140u), giftagLo, "giftag1 should cover 8 draw + 6 clear pairs");
+            t.Equals(q(kEnv + 0x148u), 0xEull, "giftag1 REGS should be one A+D descriptor");
+            t.Equals(q(kEnv + 0x60u) & 0x1FFull, 70ull, "draw0 FRAME_1 should draw into page zbufaddr/2");
+            t.Equals(q(kEnv + 0x150u) & 0x1FFull, 0ull, "draw1 FRAME_1 should draw into page 0");
+
+            const uint64_t xyz0 = ((2048ull - 320u) << 4) | (((2048ull - 112u) << 4) << 16);
+            const uint64_t xyz1 = ((2048ull + 320u) << 4) | (((2048ull + 112u) << 4) << 16);
+            for (const uint32_t clear : {kEnv + 0xE0u, kEnv + 0x1D0u})
+            {
+                t.Equals(q(clear + 0x08u), 0x47ull, "clear should start with TEST_1");
+                t.Equals(q(clear + 0x00u), 0x30000ull, "clear TEST_1 should be ZTST=ALWAYS");
+                t.Equals(q(clear + 0x10u), 6ull, "clear PRIM should be a sprite");
+                t.Equals(q(clear + 0x28u), 0x01ull, "clear should set RGBAQ");
+                t.Equals(q(clear + 0x30u), xyz0, "clear sprite should start at the draw area's corner");
+                t.Equals(q(clear + 0x40u), xyz1, "clear sprite should cover 640x224");
+                t.Equals(q(clear + 0x50u), 0x50000ull, "clear should restore TEST_1 to the caller's ztest");
+            }
+
+            // Interlaced FIELD mode reserves a single frame and keeps both
+            // buffers at page 0; without clear the GIFtag covers the draw env only.
+            resetGraph(1u, 2u, 0u);
+            setRegU32(ctx, 10, 0u);
+            ps2_stubs::sceGsSetDefDBuff(rdram, &ctx, &runtime);
+            t.Equals(q(kEnv + 8u), 1ull, "disp SMODE2 should be INT=1 FFMD=0 in FIELD mode");
+            t.Equals(q(kEnv + 40u + 16u) & 0x1FFull, 0ull, "FIELD mode should have no second display buffer");
+            t.Equals(q(kEnv + 0x60u) & 0x1FFull, 0ull, "FIELD mode should have no second draw buffer");
+            t.Equals((q(kEnv + 24u) >> 44) & 0x7FFull, 223ull, "FIELD mode DISPLAY DH should be h-1");
+            t.Equals(q(kEnv + 0x50u) & 0x7FFFull, 8ull, "clear 0 should leave NLOOP at the 8 draw-env pairs");
+
+            resetGraph(1u, 2u, 1u);
+        });
+
+        tc.Run("sceGszbufaddr reserves one frame only for interlaced FIELD mode", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+            uint8_t *const rdram = runtime.memory().getRDRAM();
+
+            auto zbufaddr = [&](uint32_t interlace, uint32_t ffmode, uint32_t psm, uint32_t w, uint32_t h)
+            {
+                R5900Context reset{};
+                setRegU32(reset, 5, interlace);
+                setRegU32(reset, 6, 2u);
+                setRegU32(reset, 7, ffmode);
+                ps2_stubs::sceGsResetGraph(rdram, &reset, &runtime);
+
+                R5900Context ctx{};
+                setRegU32(ctx, 4, psm);
+                setRegU32(ctx, 5, w);
+                setRegU32(ctx, 6, h);
+                ps2_stubs::sceGszbufaddr(rdram, &ctx, &runtime);
+                return static_cast<int32_t>(getRegU32Test(ctx, 2));
+            };
+
+            t.Equals(zbufaddr(1u, 0u, 0u, 640u, 224u), 70, "interlaced FIELD mode needs one 10x7-page frame");
+            t.Equals(zbufaddr(1u, 1u, 0u, 640u, 224u), 140, "interlaced FRAME mode needs two frames");
+            t.Equals(zbufaddr(0u, 0u, 0u, 640u, 224u), 140, "progressive mode needs two frames");
+            t.Equals(zbufaddr(1u, 1u, 2u, 640u, 448u), 140, "16-bit formats use 64x64 pages (10x7, two frames)");
+
+            zbufaddr(1u, 1u, 0u, 640u, 448u);
+        });
+
+        tc.Run("sceGsSetDefDispEnv writes all five sceGsDispEnv qwords like libgraph", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+            uint8_t *const rdram = runtime.memory().getRDRAM();
+
+            auto setDispEnv = [&](uint32_t interlace, uint32_t omode, uint32_t ffmode, uint32_t addr)
+            {
+                R5900Context reset{};
+                setRegU32(reset, 5, interlace);
+                setRegU32(reset, 6, omode);
+                setRegU32(reset, 7, ffmode);
+                ps2_stubs::sceGsResetGraph(rdram, &reset, &runtime);
+
+                std::memset(rdram + addr, 0xCD, sizeof(GsDispEnvMem));
+                R5900Context ctx{};
+                setRegU32(ctx, 4, addr);
+                setRegU32(ctx, 5, 2u);   // PSMCT16
+                setRegU32(ctx, 6, 512u);
+                setRegU32(ctx, 7, 448u);
+                setRegU32(ctx, 8, 4u);   // dx
+                setRegU32(ctx, 9, 6u);   // dy
+                ps2_stubs::sceGsSetDefDispEnv(rdram, &ctx, &runtime);
+                GsDispEnvMem env{};
+                std::memcpy(&env, rdram + addr, sizeof(env));
+                return env;
+            };
+
+            // PAL progressive: MAGH = (512 + 2559) / 512 = 5.
+            const GsDispEnvMem pal = setDispEnv(0u, 3u, 0u, 0x7C00u);
+            t.Equals(pal.pmode, 0x66ull, "PMODE should read circuit 2 only (0x66)");
+            t.Equals(pal.smode2, 2ull, "progressive SMODE2 should be 2");
+            t.Equals(pal.dispfb, (8ull << 9) | (2ull << 15), "DISPFB should be page 0, FBW 8, PSMCT16");
+            t.Equals(pal.display,
+                     (4ull * 5ull + 656ull) | ((6ull + 36ull) << 12) | (4ull << 23) | (2559ull << 32) | (447ull << 44),
+                     "PAL progressive DISPLAY: DX dx*MAGH+656, DY dy+36, MAGH 5, DW 2559, DH h-1");
+            t.Equals(pal.bgcolor, 0ull, "BGCOLOR should be 0");
+
+            // NTSC interlaced FIELD mode: DY dy+50, DH h-1.
+            const GsDispEnvMem ntsc = setDispEnv(1u, 2u, 0u, 0x7C40u);
+            t.Equals(ntsc.smode2, 1ull, "interlaced FIELD mode SMODE2 should be 1");
+            t.Equals(ntsc.display,
+                     (4ull * 5ull + 636ull) | ((6ull + 50ull) << 12) | (4ull << 23) | (2559ull << 32) | (447ull << 44),
+                     "NTSC FIELD DISPLAY: DX dx*MAGH+636, DY dy+50, MAGH 5, DW 2559, DH h-1");
+
+            setDispEnv(1u, 2u, 1u, 0x7C80u);
+        });
+
         tc.Run("sceGsSetDefDBuffDc seeds display envs and swap applies the selected page", [](TestCase &t)
         {
             PS2Runtime runtime;

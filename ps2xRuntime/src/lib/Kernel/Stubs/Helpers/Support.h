@@ -1805,15 +1805,11 @@ namespace
         return true;
     }
 
-    static bool writeGsDispEnv(uint8_t *rdram, uint32_t addr, uint64_t display, uint64_t dispfb)
+    static bool writeGsDispEnv(uint8_t *rdram, uint32_t addr, const GsDispEnvMem &env)
     {
         uint8_t *ptr = getMemPtr(rdram, addr);
         if (!ptr)
             return false;
-        GsDispEnvMem env{};
-        std::memcpy(&env, ptr, sizeof(env));
-        env.dispfb = dispfb;
-        env.display = display;
         std::memcpy(ptr, &env, sizeof(env));
         return true;
     }
