@@ -122,9 +122,6 @@ namespace ps2_stubs
             runtime->gs().writeRegister(static_cast<uint8_t>(clear.testb.reg & 0xFFu), clear.testb.value);
         }
 
-        void refreshPacketBuilderPendingCount(uint8_t *rdram, PS2Runtime *runtime, uint32_t stateAddr);
-        void writePacketBuilderCurrent(uint8_t *rdram, PS2Runtime *runtime, uint32_t stateAddr, uint32_t currentAddr);
-
         void initPacketBuilderState(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             const uint32_t stateAddr = getRegU32(ctx, 4);
@@ -137,6 +134,14 @@ namespace ps2_stubs
                             sizeof(words));
         }
 
+        // Guest sce{Vif1,Gif}PkTerminate (Stuntman sub_242FA0): zero-pad the
+        // current pointer to a qword boundary, ADD the payload size in qwords
+        // to the open DMA tag recorded at state+8, and close it. Until then
+        // the open tag carries qwc 0 (plus any flag bits its opener ORed in).
+        // Stuntman runs most sceVif1Pk* builders natively with only AddGsAD,
+        // OpenDirectCode and CloseGifTag stubbed, so no stub may touch the
+        // open tag before terminate: the old per-append rewrite of its qwc
+        // made the native terminate add the size a second time.
         uint32_t terminatePacketBuilderState(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             const uint32_t stateAddr = getRegU32(ctx, 4);
@@ -157,12 +162,16 @@ namespace ps2_stubs
                 currentAddr += 4u;
             }
 
-            writePacketBuilderCurrent(rdram, runtime, stateAddr, currentAddr);
-            writeGuestBytes(rdram,
-                            runtime,
-                            stateAddr + 8u,
-                            reinterpret_cast<const uint8_t *>(&zero),
-                            sizeof(zero));
+            uint32_t openTagAddr = 0u;
+            uint32_t tagWord = 0u;
+            if (tryReadWordFromGuest(rdram, runtime, stateAddr + 8u, openTagAddr) && openTagAddr != 0u &&
+                tryReadWordFromGuest(rdram, runtime, openTagAddr, tagWord))
+            {
+                tagWord += ((currentAddr - openTagAddr) >> 4u) - 1u;
+                writeGuestBytes(rdram, runtime, openTagAddr, reinterpret_cast<const uint8_t *>(&tagWord), sizeof(tagWord));
+            }
+            writeGuestBytes(rdram, runtime, stateAddr, reinterpret_cast<const uint8_t *>(&currentAddr), sizeof(currentAddr));
+            writeGuestBytes(rdram, runtime, stateAddr + 8u, reinterpret_cast<const uint8_t *>(&zero), sizeof(zero));
             return currentAddr;
         }
 
@@ -227,39 +236,10 @@ namespace ps2_stubs
                             sizeof(temp));
         }
 
-        void refreshPacketBuilderPendingCount(uint8_t *rdram, PS2Runtime *runtime, uint32_t stateAddr)
-        {
-            uint32_t currentAddr = 0u;
-            uint32_t pendingCountAddr = 0u;
-            if (!tryReadWordFromGuest(rdram, runtime, stateAddr, currentAddr) ||
-                !tryReadWordFromGuest(rdram, runtime, stateAddr + 8u, pendingCountAddr) ||
-                pendingCountAddr == 0u ||
-                currentAddr <= pendingCountAddr)
-            {
-                return;
-            }
-
-            uint32_t countWord = 0u;
-            if (!tryReadWordFromGuest(rdram, runtime, pendingCountAddr, countWord))
-            {
-                return;
-            }
-
-            const uint32_t deltaBytes = currentAddr - pendingCountAddr;
-            uint32_t deltaQwords = 0u;
-            if (deltaBytes >= 16u)
-            {
-                deltaQwords = (deltaBytes >> 4u) - 1u;
-            }
-
-            countWord = (countWord & 0xFFFF0000u) | (deltaQwords & 0xFFFFu);
-            writeGuestU32(rdram, runtime, pendingCountAddr, countWord);
-        }
-
+        // The open DMA tag is only sized by terminatePacketBuilderState.
         void writePacketBuilderCurrent(uint8_t *rdram, PS2Runtime *runtime, uint32_t stateAddr, uint32_t currentAddr)
         {
             writeGuestU32(rdram, runtime, stateAddr, currentAddr);
-            refreshPacketBuilderPendingCount(rdram, runtime, stateAddr);
         }
 
         uint32_t reservePacketBuilderWords(uint8_t *rdram, PS2Runtime *runtime, uint32_t stateAddr, uint32_t wordCount)
