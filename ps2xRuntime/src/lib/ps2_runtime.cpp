@@ -14,6 +14,7 @@
 #include "ps2_iop_host.h"
 #include "ps2x/iop/iop_subsystem.h"
 
+#include <cstdio>
 #include <iostream>
 #include <stdexcept>
 #include <fstream>
@@ -824,6 +825,7 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     uint32_t moduleBase = std::numeric_limits<uint32_t>::max();
     uint32_t moduleEnd = 0u;
     bool loadedAnySegment = false;
+    m_guestCodeImage.reset();
 
     for (uint16_t i = 0; i < header.phnum; i++)
     {
@@ -930,6 +932,19 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
             if (execEnd <= std::numeric_limits<uint32_t>::max())
             {
                 m_memory.registerCodeRegion(ph.vaddr, static_cast<uint32_t>(execEnd));
+            }
+
+            // The words the recompiled code was generated from, to tell later
+            // which ones the guest rewrote (auditGuestCode).
+            const uint64_t codeBegin = std::max<uint64_t>(ph.vaddr, g_ps2RecompiledFunctionTableBase);
+            const uint64_t codeEnd = std::min<uint64_t>(execEnd, g_ps2RecompiledFunctionTableEnd);
+            if (!scratch && codeEnd > codeBegin)
+            {
+                const uint32_t offset = static_cast<uint32_t>(codeBegin - ph.vaddr);
+                m_guestCodeImage.addSegment(static_cast<uint32_t>(codeBegin),
+                                            physAddr + offset,
+                                            dest + offset,
+                                            static_cast<uint32_t>(codeEnd - codeBegin));
             }
         }
 
@@ -1085,6 +1100,51 @@ namespace
         const uint32_t offset = address - g_ps2RecompiledFunctionTableBase;
         slot = offset >> 2;
         return slot < g_ps2RecompiledFunctionTableSlotCount;
+    }
+
+    constexpr uint32_t kOpcodeJ = 2u;
+    constexpr uint32_t kOpcodeJal = 3u;
+
+    // The J/JAL word that jumps to target from inside target's 256 MiB segment.
+    constexpr uint32_t encodeDirectJump(uint32_t opcode, uint32_t target)
+    {
+        return (opcode << 26) | ((target >> 2) & 0x03FFFFFFu);
+    }
+
+    constexpr uint32_t directJumpTarget(uint32_t word, uint32_t pc)
+    {
+        return ((pc + 4u) & 0xF0000000u) | ((word & 0x03FFFFFFu) << 2);
+    }
+
+    // A recompiled function starts where the dense table changes function.
+    bool isGeneratedFunctionStart(uint32_t address)
+    {
+        uint32_t slot = 0u;
+        if (!generatedFunctionTableSlot(address, slot) || g_ps2RecompiledFunctionTable[slot] == nullptr)
+        {
+            return false;
+        }
+        return slot == 0u || g_ps2RecompiledFunctionTable[slot - 1u] != g_ps2RecompiledFunctionTable[slot];
+    }
+
+    // True when the ELF's J/JAL at site leaves the recompiled function that
+    // holds it. The recompiler then emitted a dispatchGuestBranch call, not a
+    // goto, so the runtime sees the word the guest put at the site. (A JAL the
+    // recompiler bound to an HLE handler by relocation name calls the handler
+    // directly instead; this cannot tell those apart.)
+    bool isDispatchedDirectBranch(uint32_t site, uint32_t elfWord)
+    {
+        uint32_t siteSlot = 0u;
+        uint32_t targetSlot = 0u;
+        if (!generatedFunctionTableSlot(site, siteSlot))
+        {
+            return false;
+        }
+        if (!generatedFunctionTableSlot(directJumpTarget(elfWord, site), targetSlot))
+        {
+            return true;
+        }
+        return g_ps2RecompiledFunctionTable[siteSlot] != g_ps2RecompiledFunctionTable[targetSlot];
     }
 }
 
@@ -1350,6 +1410,21 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
                                      GuestBranchKind kind,
                                      const char *debugName)
 {
+    // The recompiler took a direct J/JAL's target from the ELF. The guest may
+    // have rewritten the instruction since (titles redirect libc calls to
+    // their own allocator this way), so follow the word now in guest RAM, as
+    // the EE does. One load and compare per transfer.
+    if (rdram && (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::DirectJump))
+    {
+        uint32_t word = 0u;
+        std::memcpy(&word, rdram + (sourcePc & PS2_RAM_MASK), sizeof(word));
+        const uint32_t opcode = kind == GuestBranchKind::DirectCall ? kOpcodeJal : kOpcodeJ;
+        if (word != encodeDirectJump(opcode, targetPc))
+        {
+            targetPc = resolveRewrittenDirectBranch(rdram, sourcePc, targetPc, word, kind);
+        }
+    }
+
     ctx->pc = targetPc;
     const bool isCall = (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall);
 
@@ -1409,6 +1484,75 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     }
 
     return ctx->pc == fallthroughPc;
+}
+
+uint32_t PS2Runtime::resolveRewrittenDirectBranch(uint8_t *rdram,
+                                                  uint32_t sourcePc,
+                                                  uint32_t elfTarget,
+                                                  uint32_t word,
+                                                  GuestBranchKind kind)
+{
+    const bool isCall = kind == GuestBranchKind::DirectCall;
+    const char *const name = isCall ? "JAL" : "J";
+    const uint32_t opcode = isCall ? kOpcodeJal : kOpcodeJ;
+    const uint32_t target = directJumpTarget(word, sourcePc);
+
+    // The generated code around the site has already run the ELF's delay
+    // slot and, for a JAL, set $ra, so only the target can change. Anything
+    // else would leave recompiled code running instructions the guest has
+    // replaced: stop before that happens.
+    if ((word >> 26) != opcode || !isGeneratedFunctionStart(target))
+    {
+        char message[256];
+        std::snprintf(message, sizeof(message),
+                      "[smc:unhonoured] %s at 0x%08X was 0x%08X in the ELF and is now 0x%08X; recompiled code can "
+                      "follow a rewritten %s only to the start of another recompiled function",
+                      name, sourcePc, encodeDirectJump(opcode, elfTarget), word, name);
+        std::cerr << message << std::endl;
+        throw std::logic_error(message);
+    }
+
+    if (m_guestCodeImage.firstReport(sourcePc, word))
+    {
+        char message[128];
+        std::snprintf(message, sizeof(message), "[smc:honoured] %s at 0x%08X -> 0x%08X instead of the ELF's 0x%08X",
+                      name, sourcePc, target, elfTarget);
+        std::cerr << message << std::endl;
+        // The guest rewrites its code: report what else it has rewritten.
+        (void)auditGuestCode(rdram, "first rewritten direct branch");
+    }
+    return target;
+}
+
+size_t PS2Runtime::auditGuestCode(const uint8_t *rdram, const char *trigger)
+{
+    constexpr size_t kListedPerAudit = 32u;
+    size_t reported = 0u;
+    for (const GuestCodeImage::Modification &m : m_guestCodeImage.modifiedWords(rdram))
+    {
+        if (!m_guestCodeImage.firstReport(m.address, m.currentWord) || ++reported > kListedPerAudit)
+        {
+            continue;
+        }
+        const uint32_t opcode = m.elfWord >> 26;
+        const char *verdict = "NOT HONOURED: recompiled code still runs the ELF's instruction";
+        if ((opcode == kOpcodeJ || opcode == kOpcodeJal) && isDispatchedDirectBranch(m.address, m.elfWord))
+        {
+            verdict = (m.currentWord >> 26) == opcode && isGeneratedFunctionStart(directJumpTarget(m.currentWord, m.address))
+                          ? "honoured: the site dispatches through the runtime"
+                          : "stops the run when reached: a dispatched J/JAL can only be followed to a recompiled function start";
+        }
+        char line[256];
+        std::snprintf(line, sizeof(line), "[smc:rewrite] 0x%08X elf=0x%08X now=0x%08X: %s [%s]",
+                      m.address, m.elfWord, m.currentWord, verdict, trigger);
+        std::cerr << line << std::endl;
+    }
+    if (reported > kListedPerAudit)
+    {
+        std::cerr << "[smc:rewrite] " << (reported - kListedPerAudit) << " more rewritten code words not listed ["
+                  << trigger << "]" << std::endl;
+    }
+    return reported;
 }
 
 void PS2Runtime::SignalException(R5900Context *ctx, PS2Exception exception)
