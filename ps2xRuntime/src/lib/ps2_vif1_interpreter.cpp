@@ -305,9 +305,28 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
     // later transfers) so it runs, in order, on resume.
     if (m_vif1Stalled)
     {
+        // Resumes read the held data in place. Drop the part they consumed
+        // once it is over half the buffer, so the copying stays linear in
+        // the bytes held.
+        if (m_vif1StalledPos > m_vif1StalledData.size() / 2u)
+        {
+            m_vif1StalledData.erase(m_vif1StalledData.begin(),
+                                    m_vif1StalledData.begin() + static_cast<std::ptrdiff_t>(m_vif1StalledPos));
+            m_vif1StalledPos = 0u;
+        }
         m_vif1StalledData.insert(m_vif1StalledData.end(), data, data + sizeBytes);
         return;
     }
+
+    const uint32_t consumed = runVIF1Data(data, sizeBytes);
+    if (consumed < sizeBytes)
+        m_vif1StalledData.insert(m_vif1StalledData.end(), data + consumed, data + sizeBytes);
+}
+
+uint32_t PS2Memory::runVIF1Data(const uint8_t *data, uint32_t sizeBytes)
+{
+    if (sizeBytes == 0u)
+        return 0u;
 
     uint32_t pos = 0;
 
@@ -317,8 +336,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         {
             m_vif1IrqStallPending = false;
             m_vif1Stalled = true;
-            m_vif1StalledData.insert(m_vif1StalledData.end(), data + pos, data + sizeBytes);
-            return;
+            return pos;
         }
 
         if (m_vif1PendingPath2ImageQwc != 0u)
@@ -807,6 +825,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         m_vif1IrqStallPending = false;
         m_vif1Stalled = true;
     }
+    return sizeBytes;
 }
 
 void PS2Memory::resumeVIF1AfterStall()
@@ -814,9 +833,28 @@ void PS2Memory::resumeVIF1AfterStall()
     if (!m_vif1Stalled)
         return;
     m_vif1Stalled = false;
-    std::vector<uint8_t> rest;
-    rest.swap(m_vif1StalledData);
-    processVIF1Data(rest.data(), static_cast<uint32_t>(rest.size()));
+    // Run the held data in place, from m_vif1StalledPos. The run owns the
+    // buffer meanwhile, so anything fed to VIF1 during it collects in an
+    // empty m_vif1StalledData, ahead of what the run leaves if it stalls.
+    std::vector<uint8_t> held;
+    held.swap(m_vif1StalledData);
+    const size_t start = m_vif1StalledPos;
+    m_vif1StalledPos = 0u;
+    const size_t end = start + runVIF1Data(held.data() + start, static_cast<uint32_t>(held.size() - start));
+    if (m_vif1StalledData.empty())
+    {
+        // Stalled again: the rest stays where it is and only the position
+        // moves. Drained: empty the buffer but keep its allocation.
+        if (end < held.size())
+            m_vif1StalledPos = end;
+        else
+            held.clear();
+        m_vif1StalledData.swap(held);
+    }
+    else if (end < held.size())
+    {
+        m_vif1StalledData.insert(m_vif1StalledData.end(), held.begin() + static_cast<std::ptrdiff_t>(end), held.end());
+    }
     if (m_gifArbiter)
         m_gifArbiter->drain();
     if (!m_vif1Stalled && m_vif1DmaHeld)

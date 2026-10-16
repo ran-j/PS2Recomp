@@ -331,6 +331,7 @@ bool PS2Memory::initialize(size_t ramSize)
     m_vif1Stalled = false;
     m_vif1DmaHeld = false;
     m_vif1StalledData.clear();
+    m_vif1StalledPos = 0u;
     m_codeRegions.clear();
     m_path3Masked = false;
     m_path3MaskedFifo.clear();
@@ -1240,6 +1241,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                 m_vif1IrqStallPending = false;
                 m_vif1Stalled = false;
                 m_vif1StalledData.clear();
+                m_vif1StalledPos = 0u;
                 if (m_vif1DmaHeld)
                 {
                     m_vif1DmaHeld = false;

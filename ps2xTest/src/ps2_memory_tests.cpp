@@ -9,7 +9,11 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <string>
 #include <vector>
 
 namespace
@@ -806,6 +810,250 @@ void register_ps2_memory_tests()
 
             t.IsTrue(mem.consumeCompletedIntcCauses().empty(), "a masked i-bit should not raise an interrupt");
             t.Equals(mem.vif1_regs.mark, 0x2222u, "a masked i-bit should not stall VIF1");
+        });
+
+        // The VIF1 stream held behind interrupt-bit stalls, step by step. One
+        // long VIFcode stream goes in as runs of whole packets, directly or by
+        // ch.1 DMA. Between runs FBRST.STC resumes zero or more times, so later
+        // runs also arrive behind a stall; one seed adds FBRST.RST. A quarter
+        // of the GIF packets feed VIF1 again from the packet callback, so data
+        // also arrives while a resume runs. After every step the state the
+        // guest can see goes to the file named by VIF_HELD_STREAM_LOG, so two
+        // builds can be compared byte for byte. Without resets the run must
+        // end as one unstalled run of the same stream does.
+        tc.Run("VIF1 held stream: chunked feeding behind interrupt-bit stalls", [](TestCase &t)
+        {
+            struct Rng
+            {
+                uint64_t s;
+                uint32_t next()
+                {
+                    s ^= s << 13;
+                    s ^= s >> 7;
+                    s ^= s << 17;
+                    return static_cast<uint32_t>(s >> 32);
+                }
+            };
+            struct Fnv
+            {
+                uint64_t h = 1469598103934665603ull;
+                void add(const void *data, size_t sizeBytes)
+                {
+                    const uint8_t *bytes = static_cast<const uint8_t *>(data);
+                    for (size_t i = 0; i < sizeBytes; ++i)
+                        h = (h ^ bytes[i]) * 1099511628211ull;
+                }
+            };
+            // NOP, FLUSHA, MARK, STCYCL 1/1, UNPACK V4-32 of 1-8 vectors and
+            // DIRECT with a PACKED GIF packet of 1-3 qwords. A quarter carry
+            // the interrupt bit; `interrupts` false gives the same codes and
+            // data without it. Each VIFcode with its data is a packet padded
+            // with NOPs to whole qwords, and chunks are runs of whole packets:
+            // like a DMA list, the scenario feeds whole VIFcodes.
+            struct Stream
+            {
+                std::vector<uint8_t> bytes;
+                std::vector<size_t> packetEnds;
+            };
+            const auto makeStream = [](uint64_t seed, bool interrupts)
+            {
+                Rng rng{seed};
+                Stream out;
+                for (int i = 0; i < 3000; ++i)
+                {
+                    const uint32_t pick = rng.next() % 100u;
+                    const uint32_t irq = (rng.next() % 4u == 0u && interrupts) ? 0x80000000u : 0u;
+                    const uint16_t imm = static_cast<uint16_t>(rng.next());
+                    if (pick < 20u)
+                        appendU32(out.bytes, irq | makeVifCmd(0x00u, 0u, imm)); // NOP
+                    else if (pick < 30u)
+                        appendU32(out.bytes, irq | makeVifCmd(0x13u, 0u, imm)); // FLUSHA
+                    else if (pick < 50u)
+                        appendU32(out.bytes, irq | makeVifCmd(0x07u, 0u, imm)); // MARK
+                    else if (pick < 55u)
+                        appendU32(out.bytes, irq | makeVifCmd(0x01u, 0u, 0x0101u)); // STCYCL
+                    else if (pick < 95u)
+                    {
+                        const uint32_t num = 1u + rng.next() % 8u;
+                        appendU32(out.bytes, irq | makeVifCmd(0x6Cu, static_cast<uint8_t>(num), static_cast<uint16_t>(imm % 1000u)));
+                        for (uint32_t w = 0; w < num * 4u; ++w)
+                            appendU32(out.bytes, rng.next());
+                    }
+                    else
+                    {
+                        const uint32_t qwc = 1u + rng.next() % 3u;
+                        for (int pad = 0; pad < 3; ++pad)
+                            appendU32(out.bytes, 0u);
+                        appendU32(out.bytes, irq | makeVifCmd(0x50u, 0u, static_cast<uint16_t>(qwc))); // DIRECT
+                        appendU64(out.bytes, makeGifTag(static_cast<uint16_t>(qwc - 1u), 0u, 1u));
+                        appendU64(out.bytes, 0xEull); // A+D
+                        for (uint32_t w = 0; w < (qwc - 1u) * 4u; ++w)
+                            appendU32(out.bytes, rng.next());
+                    }
+                    while (out.bytes.size() % 16u != 0u)
+                        appendU32(out.bytes, 0u);
+                    out.packetEnds.push_back(out.bytes.size());
+                }
+                return out;
+            };
+            // readIORegister on a DMA CHCR clears STR, so the scenario reads
+            // registers without side effects.
+            const auto peekIo = [](const PS2Memory &mem, uint32_t address)
+            {
+                const auto it = mem.m_ioRegisters.find(address);
+                return it == mem.m_ioRegisters.end() ? 0u : it->second;
+            };
+            const auto causeList = [](const std::vector<uint32_t> &causes)
+            {
+                std::string out;
+                for (const uint32_t cause : causes)
+                    out += (out.empty() ? "" : ",") + std::to_string(cause);
+                return out.empty() ? std::string("-") : out;
+            };
+
+            const char *logPath = std::getenv("VIF_HELD_STREAM_LOG");
+            std::ofstream log;
+            if (logPath)
+            {
+                log.open(logPath, std::ios::binary);
+                t.IsTrue(log.is_open(), "VIF_HELD_STREAM_LOG should name a writable file");
+            }
+            uint32_t steps = 0u, stalls = 0u, resumes = 0u, appends = 0u, stallsLeft = 0u, resets = 0u, dmaFeeds = 0u;
+            uint32_t nestedFeeds = 0u, nestedInResume = 0u;
+            constexpr uint32_t kVif1Ch = 0x10009000u;
+            constexpr uint32_t kFbrst = 0x10003C10u;
+            constexpr uint32_t kDStat = 0x1000E010u;
+            constexpr uint32_t kSrc = 0x00100000u;
+            for (const uint64_t seed : {0x1234567ull, 0x9E3779B97F4A7C15ull, 0x51ED2701ull})
+            {
+                const bool withResets = seed == 0x51ED2701ull;
+                const Stream stream = makeStream(seed, true);
+                PS2Memory mem;
+                t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+                Rng rng{seed ^ 0xABCDEFull};
+                Rng nestRng{seed ^ 0x13579Bull};
+                Fnv gif;
+                uint32_t gifPackets = 0u;
+                bool inResume = false;
+                mem.setGifPacketCallback([&](const uint8_t *data, uint32_t sizeBytes)
+                {
+                    gif.add(data, sizeBytes);
+                    ++gifPackets;
+                    if (nestRng.next() % 4u != 0u)
+                        return;
+                    // One qword: a NOP, half of them with the interrupt bit.
+                    std::vector<uint8_t> nested;
+                    const uint32_t irq = (nestRng.next() % 2u == 0u) ? 0x80000000u : 0u;
+                    appendU32(nested, irq | makeVifCmd(0x00u, 0u, static_cast<uint16_t>(0xA000u | (nestedFeeds & 0xFFFu))));
+                    for (int pad = 0; pad < 3; ++pad)
+                        appendU32(nested, 0u);
+                    ++nestedFeeds;
+                    if (inResume)
+                        ++nestedInResume;
+                    mem.processVIF1Data(nested.data(), static_cast<uint32_t>(nested.size()));
+                });
+                const auto logState = [&](const char *what)
+                {
+                    ++steps;
+                    const std::vector<uint32_t> intc = mem.consumeCompletedIntcCauses();
+                    const std::vector<uint32_t> dmac = mem.consumeCompletedDmacCauses();
+                    stalls += static_cast<uint32_t>(intc.size());
+                    if (log.is_open())
+                    {
+                        Fnv regs;
+                        regs.add(&mem.vif1_regs, sizeof(mem.vif1_regs));
+                        Fnv vu;
+                        vu.add(mem.getVU1Data(), PS2_VU1_DATA_SIZE);
+                        char line[256];
+                        std::snprintf(line, sizeof(line),
+                                      "%u %s stalled=%d stat=%08X code=%08X mark=%04X num=%02X vif1=%016llX chcr=%08X dstat=%08X gif=%u:%016llX vu=%016llX",
+                                      steps, what, mem.m_vif1Stalled ? 1 : 0, mem.vif1_regs.stat, mem.vif1_regs.code,
+                                      mem.vif1_regs.mark, mem.vif1_regs.num, static_cast<unsigned long long>(regs.h),
+                                      peekIo(mem, kVif1Ch), peekIo(mem, kDStat), gifPackets,
+                                      static_cast<unsigned long long>(gif.h), static_cast<unsigned long long>(vu.h));
+                        log << line << " intc=" << causeList(intc) << " dmac=" << causeList(dmac) << '\n';
+                    }
+                    // The DMAC handler acknowledges the ch.1 completion.
+                    if ((peekIo(mem, kDStat) & 0x2u) != 0u)
+                        mem.writeIORegister(kDStat, 0x2u);
+                };
+                const auto resume = [&](const char *what)
+                {
+                    inResume = true;
+                    mem.writeIORegister(kFbrst, 0x8u);
+                    inResume = false;
+                    ++resumes;
+                    logState(what);
+                };
+
+                size_t pos = 0u;
+                size_t packet = 0u;
+                while (pos < stream.bytes.size())
+                {
+                    // 1-32 qwords' worth of whole packets, at least one.
+                    const size_t limit = pos + 16u * (1u + rng.next() % 32u);
+                    size_t end = stream.packetEnds[packet++];
+                    while (packet < stream.packetEnds.size() && stream.packetEnds[packet] <= limit)
+                        end = stream.packetEnds[packet++];
+                    const size_t chunk = end - pos;
+                    if (mem.m_vif1Stalled)
+                        ++appends;
+                    if ((peekIo(mem, kVif1Ch) & 0x100u) == 0u && rng.next() % 2u == 0u)
+                    {
+                        std::memcpy(mem.getRDRAM() + kSrc, stream.bytes.data() + pos, chunk);
+                        mem.writeIORegister(kVif1Ch + 0x10u, kSrc);
+                        mem.writeIORegister(kVif1Ch + 0x20u, static_cast<uint32_t>(chunk / 16u));
+                        mem.writeIORegister(kVif1Ch + 0x00u, 0x100u);
+                        mem.processPendingTransfers();
+                        ++dmaFeeds;
+                        logState("dma");
+                    }
+                    else
+                    {
+                        mem.processVIF1Data(stream.bytes.data() + pos, static_cast<uint32_t>(chunk));
+                        logState("feed");
+                    }
+                    pos = end;
+                    while (mem.m_vif1Stalled && rng.next() % 3u != 0u)
+                        resume("stc");
+                    if (mem.m_vif1Stalled)
+                        ++stallsLeft;
+                    if (withResets && rng.next() % 50u == 0u)
+                    {
+                        mem.writeIORegister(kFbrst, 0x1u);
+                        ++resets;
+                        logState("rst");
+                    }
+                }
+                for (int guard = 0; guard < 10000 && mem.m_vif1Stalled; ++guard)
+                    resume("drain");
+                t.IsTrue(!mem.m_vif1Stalled, "the held stream should drain");
+                if (!withResets)
+                {
+                    PS2Memory reference;
+                    t.IsTrue(reference.initialize(), "PS2Memory initialize should succeed");
+                    Fnv referenceGif;
+                    uint32_t referencePackets = 0u;
+                    reference.setGifPacketCallback([&](const uint8_t *data, uint32_t sizeBytes)
+                    {
+                        referenceGif.add(data, sizeBytes);
+                        ++referencePackets;
+                    });
+                    const Stream plain = makeStream(seed, false);
+                    reference.processVIF1Data(plain.bytes.data(), static_cast<uint32_t>(plain.bytes.size()));
+                    t.IsTrue(std::memcmp(reference.getVU1Data(), mem.getVU1Data(), PS2_VU1_DATA_SIZE) == 0,
+                             "stalled, chunked feeding should leave VU1 memory as one unstalled run does");
+                    t.Equals(mem.vif1_regs.mark, reference.vif1_regs.mark, "and the same MARK");
+                    t.IsTrue(gifPackets == referencePackets && gif.h == referenceGif.h, "and the same GIF output");
+                }
+            }
+            if (log.is_open())
+                log << "steps=" << steps << " stalls=" << stalls << " resumes=" << resumes << " appends=" << appends
+                    << " stallsLeft=" << stallsLeft << " resets=" << resets << " dmaFeeds=" << dmaFeeds
+                    << " nestedFeeds=" << nestedFeeds << " nestedInResume=" << nestedInResume << '\n';
+            t.IsTrue(steps > 2000u && stalls > 1000u && resumes > 1000u && appends > 500u && stallsLeft > 500u &&
+                         resets > 5u && dmaFeeds > 200u && nestedInResume > 40u,
+                     "the scenario should cover stalls, feeds behind them, resumes, resets, DMA and feeds during a resume");
         });
 
         tc.Run("VIF FBRST RST clears VIF1 command state", [](TestCase &t)
