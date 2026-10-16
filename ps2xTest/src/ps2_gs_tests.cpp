@@ -1681,7 +1681,7 @@ void register_ps2_gs_tests()
                      "single-circuit presentation should normalize the last row alpha");
         });
 
-        tc.Run("latched host presentation line-doubles interlaced field output", [](TestCase &t)
+        tc.Run("latched host presentation shows an interlaced field-mode buffer whole", [](TestCase &t)
         {
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
             GSRegisters regs{};
@@ -1727,17 +1727,72 @@ void register_ps2_gs_tests()
                        (static_cast<uint32_t>(latchedFrame[off + 2u]) << 16);
             };
 
-            const uint32_t row0 = pixelAtRow(0u);
-            const uint32_t row1 = pixelAtRow(1u);
-            const uint32_t row2 = pixelAtRow(2u);
-            const uint32_t row3 = pixelAtRow(3u);
+            // Each field reads every other line of the one buffer, so the
+            // buffer holds both fields: display row N is buffer line N.
+            t.Equals(pixelAtRow(0u), kLine0, "field-mode buffer line 0 should be shown on row 0");
+            t.Equals(pixelAtRow(1u), kLine1, "field-mode buffer line 1 should be shown on row 1");
+            t.Equals(pixelAtRow(2u), kLine2, "field-mode buffer line 2 should be shown on row 2");
+            t.Equals(pixelAtRow(3u), kLine3, "field-mode buffer line 3 should be shown on row 3");
+        });
 
-            t.Equals(row0, row1,
-                     "field presentation should duplicate the active field into the next scanline");
-            t.Equals(row2, row3,
-                     "field presentation should duplicate later field scanlines as well");
-            t.IsTrue(row0 != row2,
-                     "field presentation should still preserve different source content across field rows");
+        tc.Run("latched host presentation reads half an interlaced frame-mode display and shows each line twice", [](TestCase &t)
+        {
+            auto lineColor = [](uint32_t line) -> uint32_t
+            {
+                return 0x5Au | (line << 8) | ((255u - line) << 16);
+            };
+            constexpr uint32_t kPastField = 0x00FFFFFFu;
+
+            for (const uint64_t pmode : {0x0001ull, 0x0003ull})
+            {
+                const char *circuits = pmode == 0x0001ull ? "one read circuit" : "two merged read circuits";
+                std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+                GSRegisters regs{};
+                regs.pmode = pmode;
+                regs.smode2 = 0x0003ull; // interlaced, frame mode
+                regs.dispfb1 =
+                    0ull |
+                    (10ull << 9) |
+                    (static_cast<uint64_t>(GS_PSM_CT32) << 15);
+                regs.display1 =
+                    (639ull << 32) |
+                    (447ull << 44);
+                regs.dispfb2 = regs.dispfb1;
+                regs.display2 = regs.display1;
+
+                GS gs;
+                gs.init(vram.data(), static_cast<uint32_t>(vram.size()), &regs);
+
+                // Both fields of a 448-line FRAME-mode display read buffer
+                // lines 0-223. Lines 224 and up are whatever follows the
+                // buffer in local memory.
+                for (uint32_t line = 0u; line < 448u; ++line)
+                    writeReferencePSMCT32Pixel(vram, 0u, 10u, 0u, line, line < 224u ? lineColor(line) : kPastField);
+
+                gs.latchHostPresentationFrame();
+
+                std::vector<uint8_t> latchedFrame;
+                uint32_t latchedWidth = 0u;
+                uint32_t latchedHeight = 0u;
+                t.IsTrue(gs.copyLatchedHostPresentationFrame(latchedFrame, latchedWidth, latchedHeight),
+                         std::string(circuits) + ": frame-mode presentation should produce a host frame");
+                t.Equals(latchedHeight, 448u,
+                         std::string(circuits) + ": frame-mode presentation should keep the 448 display lines");
+
+                uint32_t firstWrongRow = UINT32_MAX;
+                for (uint32_t row = 0u; row < latchedHeight && firstWrongRow == UINT32_MAX; ++row)
+                {
+                    const size_t off = static_cast<size_t>(row) * latchedWidth * 4u;
+                    const uint32_t pixel = static_cast<uint32_t>(latchedFrame[off + 0u]) |
+                                           (static_cast<uint32_t>(latchedFrame[off + 1u]) << 8) |
+                                           (static_cast<uint32_t>(latchedFrame[off + 2u]) << 16);
+                    if (pixel != lineColor(row / 2u))
+                        firstWrongRow = row;
+                }
+                t.Equals(firstWrongRow, UINT32_MAX,
+                         std::string(circuits) + ": display row y should show buffer line y / 2 (first wrong row " +
+                             std::to_string(firstWrongRow) + ")");
+            }
         });
 
         tc.Run("GIF PACKED A+D writes DISPFB1 and DISPLAY1 privileged registers", [](TestCase &t)
