@@ -193,7 +193,9 @@ void register_ps2_sif_rpc_tests()
         {
             TestEnv env;
 
-            env.runtime.eeScheduler().accountCycles(80u);
+            // A full 4096-cycle quantum: subsystem advances are batched, so a
+            // small account no longer reaches the IOP immediately.
+            env.runtime.eeScheduler().accountCycles(4096u);
             const uint64_t cyclesBeforeInit = env.runtime.iopDebugSnapshot().emulatorCycles;
             t.IsTrue(cyclesBeforeInit != 0u, "IOP cycle counter should advance before RPC initialization");
 
@@ -201,6 +203,29 @@ void register_ps2_sif_rpc_tests()
 
             t.Equals(env.runtime.iopDebugSnapshot().emulatorCycles, cyclesBeforeInit,
                      "SifInitRpc must not reboot or reset the IOP");
+        });
+
+        tc.Run("batched EE accounting reaches the IOP once per quantum without losing cycles", [](TestCase &t)
+        {
+            // Generated code accounts in small increments; the IOP is serviced
+            // once per 4096 accounted EE cycles, with the whole batch.
+            TestEnv batched;
+            const uint64_t batchedStart = batched.runtime.iopDebugSnapshot().emulatorCycles;
+            for (int i = 0; i < 511; ++i)
+            {
+                batched.runtime.eeScheduler().accountCycles(8u); // 4088 cycles in all
+            }
+            t.Equals(batched.runtime.iopDebugSnapshot().emulatorCycles, batchedStart,
+                     "below one quantum the IOP should not be serviced yet");
+            batched.runtime.eeScheduler().accountCycles(8u); // 4096
+            const uint64_t batchedAdvance = batched.runtime.iopDebugSnapshot().emulatorCycles - batchedStart;
+            t.IsTrue(batchedAdvance != 0u, "reaching the quantum should service the IOP");
+
+            TestEnv single;
+            const uint64_t singleStart = single.runtime.iopDebugSnapshot().emulatorCycles;
+            single.runtime.eeScheduler().accountCycles(4096u);
+            t.Equals(batchedAdvance, single.runtime.iopDebugSnapshot().emulatorCycles - singleStart,
+                     "512 accounts of 8 cycles should give the IOP exactly what one 4096-cycle account does");
         });
 
         tc.Run("SifLoadModule validates ROM modules and activates their HLE service", [](TestCase &t)
