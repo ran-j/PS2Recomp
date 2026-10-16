@@ -1591,7 +1591,6 @@ namespace
     static_assert(sizeof(GsClearMem) == 96, "GsClearMem size mismatch");
     static_assert(sizeof(GsDBuffDcMem) == 0x330, "GsDBuffDcMem size mismatch");
 
-    constexpr uint32_t kGsParamScratchOffset = 0x100;
     GsGParam g_gparam{1, 2, 1, 3}; // Default: interlaced NTSC, frame mode.
 
     static uint64_t makePmode(uint32_t en1, uint32_t en2, uint32_t mmod, uint32_t amod, uint32_t slbg, uint32_t alp)
@@ -1940,14 +1939,16 @@ namespace
         env.test2 = {makeTest(ztest), GS_REG_TEST_2};
     }
 
-    static uint32_t writeGsGParamToScratch(PS2Runtime *runtime)
+    // libgraph keeps sceGsGParam in its own data. The HLE stand-in keeps it in
+    // EE kernel RAM, which no title uses; the scratchpad it used before is the
+    // title's. Returns the record's address, 0 if rdram cannot hold it.
+    static uint32_t writeGsGParam(uint8_t *rdram)
     {
-        if (!runtime)
+        static_assert(sizeof(GsGParam) <= PS2_KERNEL_GS_GPARAM_SIZE, "GParam record outgrew its kernel RAM window");
+        uint8_t *const record = getMemPtr(rdram, PS2_KERNEL_GS_GPARAM_BASE);
+        if (!record)
             return 0;
-        uint8_t *scratch = runtime->memory().getScratchpad();
-        if (!scratch)
-            return 0;
-        std::memcpy(scratch + kGsParamScratchOffset, &g_gparam, sizeof(g_gparam));
-        return PS2_SCRATCHPAD_BASE + kGsParamScratchOffset;
+        std::memcpy(record, &g_gparam, sizeof(g_gparam));
+        return PS2_KERNEL_GS_GPARAM_BASE;
     }
 }

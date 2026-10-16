@@ -251,13 +251,13 @@ static constexpr uint32_t kRpcServerPoolBytes = 0x00010000;
 static constexpr uint32_t kRpcServerStride = 0x80;
 static constexpr uint32_t kRpcServerPoolCount = kRpcServerPoolBytes / kRpcServerStride;
 
-static constexpr uint32_t kTlsPoolBase = 0x01F20000;
-static constexpr uint32_t kTlsPoolBytes = 0x00010000;
+static constexpr uint32_t kTlsPoolBase = PS2_KERNEL_TLS_BASE;
+static constexpr uint32_t kTlsPoolBytes = PS2_KERNEL_TLS_SIZE;
 static constexpr uint32_t kTlsBlockSize = 0x100;
 static constexpr uint32_t kTlsPoolCount = kTlsPoolBytes / kTlsBlockSize;
 
-static constexpr uint32_t kBootModePoolBase = 0x01F30000;
-static constexpr uint32_t kBootModePoolBytes = 0x00001000;
+static constexpr uint32_t kBootModePoolBase = PS2_KERNEL_BOOT_MODE_BASE;
+static constexpr uint32_t kBootModePoolBytes = PS2_KERNEL_BOOT_MODE_SIZE;
 
 static constexpr uint32_t kSifRpcModeNowait = 0x01;
 static constexpr uint32_t kSifRpcModeNoWbDc = 0x02;
