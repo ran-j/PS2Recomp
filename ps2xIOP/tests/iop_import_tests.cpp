@@ -3,11 +3,13 @@
 #include "emulator/core/iop_memory.h"
 #include "emulator/imports/iop_cdvd.h"
 #include "emulator/imports/iop_imports.h"
+#include "emulator/imports/iop_ioman.h"
 #include "emulator/imports/iop_loadcore.h"
 #include "emulator/imports/iop_timrman.h"
 #include "emulator/services/iop_rpc.h"
 #include "ps2x/iop/iop_host.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <chrono>
 #include <cstring>
@@ -326,12 +328,136 @@ namespace
                expect(executor.lastGp == 0x89AB0u, "timer callback lost the registering module GP") &&
                expect(timrman.nextEventCycle(1000u) == 300u, "timer callback return did not rearm compare");
     }
+
+    // An IopHost whose single registered file is an in-memory buffer.
+    class FileBackedHost : public IopHost
+    {
+    public:
+        std::string guestPath = "cdrom0:\\DATA.BIN;1";
+        std::vector<uint8_t> bytes{1, 2, 3, 4, 5, 6, 7, 8};
+
+        bool readGuest(uint32_t, void *, size_t) const override { return false; }
+        bool writeGuest(uint32_t, const void *, size_t) override { return false; }
+        bool zeroGuest(uint32_t, size_t) override { return false; }
+        bool normalizeGuestAddress(uint32_t, uint32_t &) const override { return false; }
+        uint32_t allocateIopHandle(IopHandleKind) override { return 1u; }
+        uint32_t allocateGuest(uint32_t, uint32_t) override { return 0u; }
+        void freeGuest(uint32_t) override {}
+        void audioCommand(uint32_t, uint32_t, GuestBuffer, GuestBuffer) override {}
+        bool hasGuestFunction(uint32_t) const override { return false; }
+        bool invokeGuestFunction(uint64_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t *) override
+        {
+            return false;
+        }
+        void log(LogLevel, std::string_view) override {}
+        std::string hostPath(HostPathKind) const override { return {}; }
+        std::string translateGuestPath(std::string_view path) const override
+        {
+            return path == guestPath ? "host/data.bin" : std::string{};
+        }
+        uint64_t openHostFile(std::string_view path) override { return path == "host/data.bin" ? 1u : 0u; }
+        bool hostFileSize(uint64_t handle, uint64_t &size) const override
+        {
+            if (handle != 1u)
+                return false;
+            size = bytes.size();
+            return true;
+        }
+        bool readHostFile(uint64_t handle, uint64_t offset, void *destination, size_t size, size_t &read) override
+        {
+            if (handle != 1u || offset > bytes.size())
+                return false;
+            read = std::min(size, bytes.size() - static_cast<size_t>(offset));
+            std::memcpy(destination, bytes.data() + offset, read);
+            return true;
+        }
+        void closeHostFile(uint64_t handle) override { (void)handle; }
+        int32_t memoryCard(const MemoryCardRequest &) override { return 0; }
+    };
+
+    bool testIomanFileImports()
+    {
+        FileBackedHost host;
+        IopMemory memory;
+        // The file ordinals never touch the guest-executor (only AddDrv/DelDrv do).
+        struct NullExecutor : IopGuestExecutor
+        {
+            uint32_t executeGuestFunction(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) override
+            {
+                return 0u;
+            }
+        } executor;
+        IopIoman ioman(host, memory);
+
+        // The guest path lives in IOP RAM at 0x3000.
+        constexpr uint32_t path = 0x3000u;
+        const char text[] = "cdrom0:\\DATA.BIN;1";
+        (void)memory.writeRam(path, text, sizeof(text));
+
+        IopCpuState cpu{};
+        cpu.gpr[4] = path;
+        cpu.gpr[5] = 0u; // O_RDONLY
+        if (!expect(ioman.dispatchImport(5u, cpu, executor), "ioman:5 open was not handled") ||
+            !expect(static_cast<int32_t>(cpu.gpr[2]) >= 0, "open did not return a file descriptor"))
+            return false;
+        const int32_t fd = static_cast<int32_t>(cpu.gpr[2]);
+
+        // Read five bytes into 0x4000; the per-descriptor offset must advance.
+        cpu = {};
+        cpu.gpr[4] = static_cast<uint32_t>(fd);
+        cpu.gpr[5] = 0x4000u;
+        cpu.gpr[6] = 5u;
+        if (!expect(ioman.dispatchImport(8u, cpu, executor), "ioman:8 read was not handled") ||
+            !expect(cpu.gpr[2] == 5u, "read did not return the byte count"))
+            return false;
+        uint8_t first[5] = {};
+        (void)memory.readRam(0x4000u, first, sizeof(first));
+        if (!expect(first[0] == 1 && first[4] == 5, "read did not land the file bytes in IOP RAM"))
+            return false;
+
+        // Second read continues at offset 5 and hits EOF after 3 bytes.
+        cpu = {};
+        cpu.gpr[4] = static_cast<uint32_t>(fd);
+        cpu.gpr[5] = 0x4000u;
+        cpu.gpr[6] = 8u;
+        if (!expect(ioman.dispatchImport(8u, cpu, executor), "ioman:8 second read was not handled") ||
+            !expect(cpu.gpr[2] == 3u, "the second read did not continue at the advanced offset"))
+            return false;
+
+        cpu = {};
+        cpu.gpr[4] = static_cast<uint32_t>(fd);
+        cpu.gpr[5] = 0x4000u;
+        cpu.gpr[6] = 4u;
+        if (!expect(ioman.dispatchImport(8u, cpu, executor), "ioman:8 EOF read was not handled") ||
+            !expect(cpu.gpr[2] == 0u, "a read at EOF must return 0"))
+            return false;
+
+        cpu = {};
+        cpu.gpr[4] = static_cast<uint32_t>(fd);
+        if (!expect(ioman.dispatchImport(6u, cpu, executor), "ioman:6 close was not handled") ||
+            !expect(cpu.gpr[2] == 0u, "close failed"))
+            return false;
+
+        cpu = {};
+        cpu.gpr[4] = static_cast<uint32_t>(fd);
+        if (!expect(ioman.dispatchImport(6u, cpu, executor), "ioman:6 second close was not handled") ||
+            !expect(cpu.gpr[2] == 0xFFFFFFFFu, "closing a closed descriptor must fail"))
+            return false;
+
+        // A path the host cannot resolve opens nothing.
+        const char missing[] = "cdrom0:\\MISSING.BIN;1";
+        (void)memory.writeRam(path, missing, sizeof(missing));
+        cpu = {};
+        cpu.gpr[4] = path;
+        return expect(ioman.dispatchImport(5u, cpu, executor), "ioman:5 open (missing) was not handled") &&
+               expect(cpu.gpr[2] == 0xFFFFFFFFu, "opening an unresolved path must fail");
+    }
 }
 
 int main()
 {
     if (!testLoadcoreRebootLibraryMode() || !testCdvdSpecialControl() || !testCdvdSearchFile() ||
-        !testTimrmanPeriodicCallback())
+        !testTimrmanPeriodicCallback() || !testIomanFileImports())
         return 1;
     std::cout << "ps2xIOP import tests passed\n";
     return 0;

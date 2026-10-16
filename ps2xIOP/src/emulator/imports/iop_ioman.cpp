@@ -5,16 +5,23 @@
 #include "../services/iop_rpc.h"
 
 #include <algorithm>
+#include <vector>
 
 namespace ps2x::iop::detail
 {
-    IopIoman::IopIoman(IopMemory &memory) noexcept
-        : m_memory(memory)
+    IopIoman::IopIoman(IopHost &host, IopMemory &memory) noexcept
+        : m_host(host), m_memory(memory)
     {
     }
 
     void IopIoman::reset()
     {
+        for (auto &[fd, file] : m_files)
+        {
+            (void)fd;
+            m_host.closeHostFile(file.handle);
+        }
+        m_files.clear();
         m_devices.clear();
     }
 
@@ -29,6 +36,75 @@ namespace ps2x::iop::detail
 
         switch (ordinal)
         {
+        case 5: // open(path, mode) -> fd (XAVSTRM.IRX imports 5/6/8; a real
+                // fd with host backing, never the old unhandled v0=0 alias)
+        {
+            const std::string guestPath = m_memory.readString(a0, 512u);
+            if (guestPath.empty())
+            {
+                setV0(0xFFFFFFFFu);
+                return true;
+            }
+            std::string hostPath = m_host.translateGuestPath(guestPath);
+            if (hostPath.empty())
+                hostPath = guestPath;
+            const uint64_t handle = m_host.openHostFile(hostPath);
+            if (handle == 0u)
+            {
+                setV0(0xFFFFFFFFu);
+                return true;
+            }
+            int32_t fd = 0;
+            while (m_files.find(fd) != m_files.end())
+                ++fd;
+            m_files[fd] = {handle, 0u};
+            setV0(static_cast<uint32_t>(fd));
+            return true;
+        }
+        case 6: // close(fd)
+        {
+            const auto it = m_files.find(static_cast<int32_t>(a0));
+            if (it == m_files.end())
+            {
+                setV0(0xFFFFFFFFu);
+                return true;
+            }
+            m_host.closeHostFile(it->second.handle);
+            m_files.erase(it);
+            setV0(0u);
+            return true;
+        }
+        case 8: // read(fd, buf, size) -> bytes read (0 at EOF, -1 on error)
+        {
+            const uint32_t buffer = cpu.gpr[5];
+            const uint32_t size = cpu.gpr[6];
+            const auto it = m_files.find(static_cast<int32_t>(a0));
+            if (it == m_files.end() || (buffer == 0u && size != 0u))
+            {
+                setV0(0xFFFFFFFFu);
+                return true;
+            }
+            if (size == 0u)
+            {
+                setV0(0u);
+                return true;
+            }
+            std::vector<uint8_t> data(size);
+            size_t bytesRead = 0u;
+            if (!m_host.readHostFile(it->second.handle, it->second.offset, data.data(), data.size(), bytesRead))
+            {
+                setV0(0xFFFFFFFFu);
+                return true;
+            }
+            if (bytesRead != 0u && !m_memory.writeRam(buffer, data.data(), bytesRead))
+            {
+                setV0(0xFFFFFFFFu);
+                return true;
+            }
+            it->second.offset += bytesRead;
+            setV0(static_cast<uint32_t>(bytesRead));
+            return true;
+        }
         case 20: // AddDrv
         {
             if (a0 == 0u || m_devices.size() >= kMaxDevices)
