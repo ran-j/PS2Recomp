@@ -51,77 +51,6 @@ namespace ps2_stubs
             clear.testb = {restoreTest, testReg};
         }
 
-        bool hasSeededGsClearPacket(const GsClearMem &clear)
-        {
-            return clear.rgbaq.reg == GS_REG_RGBAQ &&
-                   clear.xyz2a.reg == GS_REG_XYZ2 &&
-                   clear.xyz2b.reg == GS_REG_XYZ2;
-        }
-
-        struct GsTrailingArgs2
-        {
-            uint32_t arg0 = 0u;
-            uint32_t arg1 = 0u;
-        };
-
-        struct GsTrailingArgs3
-        {
-            uint32_t arg0 = 0u;
-            uint32_t arg1 = 0u;
-            uint32_t arg2 = 0u;
-        };
-
-        GsTrailingArgs2 decodeGsTrailingArgs2(uint8_t *rdram, R5900Context *ctx)
-        {
-            const uint32_t reg8 = getRegU32(ctx, 8);
-            const uint32_t reg9 = getRegU32(ctx, 9);
-            const uint32_t stack0 = readStackU32(rdram, ctx, 16);
-            const uint32_t stack1 = readStackU32(rdram, ctx, 20);
-
-            const bool hasRegArgs = (reg8 != 0u || reg9 != 0u);
-            const bool hasStackArgs = (stack0 != 0u || stack1 != 0u);
-            if (hasRegArgs || !hasStackArgs)
-            {
-                return {reg8, reg9};
-            }
-
-            return {stack0, stack1};
-        }
-
-        GsTrailingArgs3 decodeGsTrailingArgs3(uint8_t *rdram, R5900Context *ctx)
-        {
-            const uint32_t reg8 = getRegU32(ctx, 8);
-            const uint32_t reg9 = getRegU32(ctx, 9);
-            const uint32_t reg10 = getRegU32(ctx, 10);
-            const uint32_t stack0 = readStackU32(rdram, ctx, 16);
-            const uint32_t stack1 = readStackU32(rdram, ctx, 20);
-            const uint32_t stack2 = readStackU32(rdram, ctx, 24);
-
-            const bool hasRegArgs = (reg8 != 0u || reg9 != 0u || reg10 != 0u);
-            const bool hasStackArgs = (stack0 != 0u || stack1 != 0u || stack2 != 0u);
-            if (hasRegArgs || !hasStackArgs)
-            {
-                return {reg8, reg9, reg10};
-            }
-
-            return {stack0, stack1, stack2};
-        }
-
-        void applyGsClearPacket(PS2Runtime *runtime, const GsClearMem &clear)
-        {
-            if (!runtime->syncCoreSubsystems() || !hasSeededGsClearPacket(clear))
-            {
-                return;
-            }
-
-            runtime->gs().writeRegister(static_cast<uint8_t>(clear.testa.reg & 0xFFu), clear.testa.value);
-            runtime->gs().writeRegister(static_cast<uint8_t>(clear.prim.reg & 0xFFu), clear.prim.value);
-            runtime->gs().writeRegister(static_cast<uint8_t>(clear.rgbaq.reg & 0xFFu), clear.rgbaq.value);
-            runtime->gs().writeRegister(static_cast<uint8_t>(clear.xyz2a.reg & 0xFFu), clear.xyz2a.value);
-            runtime->gs().writeRegister(static_cast<uint8_t>(clear.xyz2b.reg & 0xFFu), clear.xyz2b.value);
-            runtime->gs().writeRegister(static_cast<uint8_t>(clear.testb.reg & 0xFFu), clear.testb.value);
-        }
-
         void refreshPacketBuilderPendingCount(uint8_t *rdram, PS2Runtime *runtime, uint32_t stateAddr);
         void writePacketBuilderCurrent(uint8_t *rdram, PS2Runtime *runtime, uint32_t stateAddr, uint32_t currentAddr);
 
@@ -757,6 +686,29 @@ namespace ps2_stubs
         setReturnU32(ctx, addr);
     }
 
+    // Sends the GIF packet starting at the GIFtag at packetAddr on GIF DMA
+    // channel 2 in normal mode, as libgraph sceGsPutDrawEnv does: MADR =
+    // packet, QWC = NLOOP + 1, CHCR = 0x101. The tag itself is not inspected
+    // further; the GIF interprets it. Returns false if the tag is unreadable.
+    static bool submitGsGiftagPacketViaGifDma(uint8_t *rdram, PS2Runtime *runtime, uint32_t packetAddr)
+    {
+        uint64_t giftag = 0u;
+        if (!runtime || !runtime->syncCoreSubsystems() ||
+            !tryReadQwordFromGuest(rdram, runtime, packetAddr, giftag))
+        {
+            return false;
+        }
+
+        constexpr uint32_t GIF_CHANNEL = 0x1000A000u;
+        constexpr uint32_t CHCR_STR_MODE0 = 0x101u;
+        auto &mem = runtime->memory();
+        mem.writeIORegister(GIF_CHANNEL + 0x10u, packetAddr);
+        mem.writeIORegister(GIF_CHANNEL + 0x20u, static_cast<uint32_t>(giftag & 0x7FFFu) + 1u);
+        mem.writeIORegister(GIF_CHANNEL + 0x00u, CHCR_STR_MODE0);
+        mem.processPendingTransfers();
+        return true;
+    }
+
     void sceGsPutDispEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint32_t envAddr = getRegU32(ctx, 4);
@@ -770,17 +722,14 @@ namespace ps2_stubs
         setReturnS32(ctx, 0);
     }
 
+    // libgraph sceGsPutDrawEnv(sceGifTag *giftag) does not apply register
+    // pairs itself: it sends the packet that starts at the GIFtag on GIF DMA
+    // channel 2 in normal mode, QWC = tag NLOOP + 1 (the tag qword plus one
+    // qword per A+D pair), CHCR = 0x101, and returns 0.
     void sceGsPutDrawEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        uint32_t envAddr = getRegU32(ctx, 4);
-        GsRegPairMem pairs[8]{};
-        if (!readGsRegPairs(rdram, envAddr, pairs, 8u))
-        {
-            setReturnS32(ctx, -1);
-            return;
-        }
-        applyGsRegPairs(runtime, pairs, 8u);
-        setReturnS32(ctx, 0);
+        const uint32_t giftagAddr = getRegU32(ctx, 4);
+        setReturnS32(ctx, submitGsGiftagPacketViaGifDma(rdram, runtime, giftagAddr) ? 0 : -1);
     }
 
     void sceGsResetGraph(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -872,10 +821,10 @@ namespace ps2_stubs
         uint32_t psm = getRegU32(ctx, 5);
         uint32_t w = getRegU32(ctx, 6);
         uint32_t h = getRegU32(ctx, 7);
-        const GsTrailingArgs3 trailing = decodeGsTrailingArgs3(rdram, ctx);
-        const uint32_t ztest = trailing.arg0;
-        const uint32_t zpsm = trailing.arg1;
-        const uint32_t clear = trailing.arg2;
+        // EE ABI: args 5-7 arrive in t0-t2 (GPR 8-10), never on the stack.
+        const uint32_t ztest = getRegU32(ctx, 8);
+        const uint32_t zpsm = getRegU32(ctx, 9);
+        const uint32_t clear = getRegU32(ctx, 10);
 
         if (w == 0u)
         {
@@ -943,10 +892,13 @@ namespace ps2_stubs
         uint32_t psm = getRegU32(ctx, 5);
         uint32_t w = getRegU32(ctx, 6);
         uint32_t h = getRegU32(ctx, 7);
-        const uint32_t ztest = readStackU32(rdram, ctx, 16);
-        const uint32_t zpsm = readStackU32(rdram, ctx, 20);
-        const uint32_t clear = readStackU32(rdram, ctx, 24);
-        (void)clear;
+        // EE ABI: args 5-7 arrive in t0-t2 (GPR 8-10). Both observed call
+        // sites load them there; reading them from the stack picked up stale
+        // frame words (clear always read 0, so the seeded clear never ran).
+        const uint32_t ztest = getRegU32(ctx, 8);
+        const uint32_t zpsm = getRegU32(ctx, 9);
+        const uint32_t clear = getRegU32(ctx, 10);
+        (void)clear; // wired into the seeded clear by a follow-up change
 
         if (w == 0u)
         {
@@ -1002,9 +954,9 @@ namespace ps2_stubs
         uint32_t psm = getRegU32(ctx, 5);
         uint32_t w = getRegU32(ctx, 6);
         uint32_t h = getRegU32(ctx, 7);
-        const GsTrailingArgs2 trailing = decodeGsTrailingArgs2(rdram, ctx);
-        uint32_t dx = trailing.arg0;
-        uint32_t dy = trailing.arg1;
+        // EE ABI: args 5-6 arrive in t0-t1 (GPR 8-9), never on the stack.
+        uint32_t dx = getRegU32(ctx, 8);
+        uint32_t dy = getRegU32(ctx, 9);
 
         if (w == 0)
             w = 640;
@@ -1025,9 +977,9 @@ namespace ps2_stubs
         uint32_t param_2 = getRegU32(ctx, 5);
         int32_t w = static_cast<int32_t>(static_cast<int16_t>(getRegU32(ctx, 6) & 0xFFFF));
         int32_t h = static_cast<int32_t>(static_cast<int16_t>(getRegU32(ctx, 7) & 0xFFFF));
-        const GsTrailingArgs2 trailing = decodeGsTrailingArgs2(rdram, ctx);
-        uint32_t param_5 = trailing.arg0;
-        uint32_t param_6 = trailing.arg1;
+        // EE ABI: args 5-6 arrive in t0-t1 (GPR 8-9), never on the stack.
+        uint32_t param_5 = getRegU32(ctx, 8);
+        uint32_t param_6 = getRegU32(ctx, 9);
 
         if (w <= 0)
             w = 640;
@@ -1068,9 +1020,9 @@ namespace ps2_stubs
         uint32_t param_2 = getRegU32(ctx, 5);
         int32_t w = static_cast<int32_t>(static_cast<int16_t>(getRegU32(ctx, 6) & 0xFFFF));
         int32_t h = static_cast<int32_t>(static_cast<int16_t>(getRegU32(ctx, 7) & 0xFFFF));
-        const GsTrailingArgs2 trailing = decodeGsTrailingArgs2(rdram, ctx);
-        uint32_t param_5 = trailing.arg0;
-        uint32_t param_6 = trailing.arg1;
+        // EE ABI: args 5-6 arrive in t0-t1 (GPR 8-9), never on the stack.
+        uint32_t param_5 = getRegU32(ctx, 8);
+        uint32_t param_6 = getRegU32(ctx, 9);
 
         if (w <= 0)
             w = 640;
@@ -1160,27 +1112,15 @@ namespace ps2_stubs
             });
             ++s_swapDbuffLogCount;
         }
-        if (which == 0u)
+        // libgraph sceGsSwapDBuffDc: sceGsPutDispEnv(&db->disp[which]), then
+        // sceGsPutDrawEnv(&db->giftag{which}). The GIF DMA runs exactly the
+        // pairs NLOOP covers: both contexts' draw envs and, when seeded, the
+        // clear.
+        const size_t giftagOffset = which == 0u ? offsetof(GsDBuffDcMem, giftag0) : offsetof(GsDBuffDcMem, giftag1);
+        if (!submitGsGiftagPacketViaGifDma(rdram, runtime, envAddr + static_cast<uint32_t>(giftagOffset)))
         {
-            applyGsRegPairs(runtime, reinterpret_cast<const GsRegPairMem *>(&db.draw01), 8u);
-            applyGsRegPairs(runtime, reinterpret_cast<const GsRegPairMem *>(&db.draw02), 8u);
-            if (hasSeededGsClearPacket(db.clear0))
-            {
-                const uint32_t clearContext = static_cast<uint32_t>((db.clear0.prim.value >> 9) & 0x1u);
-                runtime->gs().clearFramebufferContext(clearContext, static_cast<uint32_t>(db.clear0.rgbaq.value));
-            }
-            applyGsClearPacket(runtime, db.clear0);
-        }
-        else
-        {
-            applyGsRegPairs(runtime, reinterpret_cast<const GsRegPairMem *>(&db.draw11), 8u);
-            applyGsRegPairs(runtime, reinterpret_cast<const GsRegPairMem *>(&db.draw12), 8u);
-            if (hasSeededGsClearPacket(db.clear1))
-            {
-                const uint32_t clearContext = static_cast<uint32_t>((db.clear1.prim.value >> 9) & 0x1u);
-                runtime->gs().clearFramebufferContext(clearContext, static_cast<uint32_t>(db.clear1.rgbaq.value));
-            }
-            applyGsClearPacket(runtime, db.clear1);
+            setReturnS32(ctx, -1);
+            return;
         }
 
         setReturnS32(ctx, static_cast<int32_t>(which ^ 1u));
@@ -1199,13 +1139,14 @@ namespace ps2_stubs
         }
 
         applyGsDispEnv(runtime, db.disp[which]);
-        if (which == 0u)
+        // libgraph sceGsSwapDBuff: sceGsPutDispEnv(&db->disp[which]), then
+        // sceGsPutDrawEnv(&db->giftag{which}). The GIF DMA runs exactly the
+        // pairs NLOOP covers: the draw env and, when seeded, the clear.
+        const size_t giftagOffset = which == 0u ? offsetof(GsDBuffMem, giftag0) : offsetof(GsDBuffMem, giftag1);
+        if (!submitGsGiftagPacketViaGifDma(rdram, runtime, envAddr + static_cast<uint32_t>(giftagOffset)))
         {
-            applyGsRegPairs(runtime, reinterpret_cast<const GsRegPairMem *>(&db.draw0), 8u);
-        }
-        else
-        {
-            applyGsRegPairs(runtime, reinterpret_cast<const GsRegPairMem *>(&db.draw1), 8u);
+            setReturnS32(ctx, -1);
+            return;
         }
 
         setReturnS32(ctx, static_cast<int32_t>(which ^ 1u));
