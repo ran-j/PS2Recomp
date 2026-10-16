@@ -1,6 +1,7 @@
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_address.h"
 #include "runtime/gs/gs_frontend.h"
+#include "ipu/ps2_ipu.h"
 #include "ps2_log.h"
 #include <atomic>
 #include <cstring>
@@ -44,6 +45,29 @@ namespace
     inline bool isIoRegister(uint32_t addr)
     {
         return Ps2AddressInRange(addr, PS2_IO_BASE, PS2_IO_SIZE);
+    }
+
+    constexpr uint32_t kIpuRegisterBase = 0x10002000u; // IPU_CMD, IPU_CTRL, IPU_BP, IPU_TOP
+    constexpr uint32_t kIpuRegisterEnd = 0x10002040u;
+    constexpr uint32_t kIpuOutFifo = 0x10007000u;
+    constexpr uint32_t kIpuInFifo = 0x10007010u;
+    constexpr uint32_t kIpuFromChannel = 0x1000B000u; // DMA ch.3: IPU output -> memory
+    constexpr uint32_t kIpuToChannel = 0x1000B400u;   // DMA ch.4: memory -> IPU input
+    constexpr int kMaxIpuChainTags = 4096;
+
+    inline bool isIpuRegister(uint32_t addr)
+    {
+        return addr >= kIpuRegisterBase && addr < kIpuRegisterEnd;
+    }
+
+    // DMA addresses (D*_MADR, D*_TADR, tag ADDR) select the scratchpad with
+    // bit 31; returns the region base and sets the offset into it.
+    inline uint8_t *dmaRegion(uint8_t *rdram, uint8_t *scratchpad, uint32_t addr, uint32_t &offset, uint32_t &size)
+    {
+        const bool spr = (addr & 0x80000000u) != 0u;
+        size = spr ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
+        offset = addr & (size - 1u);
+        return spr ? scratchpad : rdram;
     }
 
     inline uint64_t *gsRegPtr(GSRegisters &gs, uint32_t addr)
@@ -239,7 +263,8 @@ static inline uint32_t gs_vram_offset(uint32_t basePage, uint32_t x, uint32_t y,
 }
 
 PS2Memory::PS2Memory()
-    : m_rdram(nullptr), m_scratchpad(nullptr), iop_ram(nullptr), m_seenGifCopy(false), m_gsVRAM(nullptr)
+    : m_rdram(nullptr), m_scratchpad(nullptr), iop_ram(nullptr), m_seenGifCopy(false), m_gsVRAM(nullptr),
+      m_ipu(std::make_unique<Ps2Ipu>())
 {
     ps2SetScratchpadHostPtr(nullptr);
 }
@@ -332,6 +357,7 @@ bool PS2Memory::initialize(size_t ramSize)
     m_vif1PendingPath2ImageQwc = 0u;
     m_vif1PendingPath2DirectHl = false;
     resetEeTimers();
+    m_ipu->reset();
 
     try
     {
@@ -823,6 +849,13 @@ uint64_t PS2Memory::read64(uint32_t address)
     // to avoid any side-effects from read32 handlers.
     if (isIoRegister(address))
     {
+        if (isIpuRegister(address))
+        {
+            // IPU_CMD and IPU_TOP are 64-bit registers with BUSY in bit 63;
+            // their reads have no side effects, so read the live state.
+            return static_cast<uint64_t>(readIORegister(address)) |
+                   (static_cast<uint64_t>(readIORegister(address + 4u)) << 32);
+        }
         uint32_t lo = m_ioRegisters.count(address) ? m_ioRegisters[address] : 0u;
         uint32_t hi = m_ioRegisters.count(address + 4) ? m_ioRegisters[address + 4] : 0u;
         return static_cast<uint64_t>(lo) | (static_cast<uint64_t>(hi) << 32);
@@ -856,6 +889,12 @@ __m128i PS2Memory::read128(uint32_t address)
     {
         inRange(vuOffset, sizeof(__m128i), vuLimit, "read128 vu", address);
         return _mm_loadu_si128(reinterpret_cast<const __m128i *>(vuMem + vuOffset));
+    }
+    if (!scratch && physAddr == kIpuOutFifo)
+    {
+        alignas(16) uint8_t fifoData[16] = {};
+        m_ipu->drainOutput(fifoData, sizeof(fifoData));
+        return _mm_load_si128(reinterpret_cast<const __m128i *>(fifoData));
     }
 
     // 128-bit reads are primarily for quad-word loads in the EE, which are only valid for RAM areas
@@ -1084,6 +1123,14 @@ void PS2Memory::write128(uint32_t address, __m128i value)
         processVIF1Data(fifoData, sizeof(fifoData));
         return;
     }
+    if (!scratch && physAddr == kIpuInFifo)
+    {
+        alignas(16) uint8_t fifoData[16];
+        _mm_store_si128(reinterpret_cast<__m128i *>(fifoData), value);
+        m_ipu->feedInput(fifoData, sizeof(fifoData));
+        serviceIpuFromDma();
+        return;
+    }
 
     if (scratch)
     {
@@ -1179,22 +1226,14 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
         return true;
     }
 
-    if (address >= 0x10002000 && address <= 0x10002030)
+    if (isIpuRegister(address))
     {
-        if (address == 0x10002010)
-        {
-            m_ioRegisters[address] = value & ~(1u << 31);
-            if (value & (1u << 30))
-            {
-                m_ioRegisters[0x10002000] = 0;
-                m_ioRegisters[0x10002020] = 0;
-                m_ioRegisters[0x10002030] = 0;
-            }
-        }
-        else
-        {
-            m_ioRegisters[address] = value;
-        }
+        // IPU_BP, IPU_TOP and the upper words are read-only.
+        if (address == 0x10002000u)
+            m_ipu->writeCommand(value);
+        else if (address == 0x10002010u)
+            m_ipu->writeControl(value);
+        serviceIpuFromDma();
         return true;
     }
 
@@ -1307,6 +1346,10 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
             m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
 
             if (tryProcessScratchpadDma(channelBase, value))
+            {
+                return true;
+            }
+            if (tryProcessIpuDma(channelBase, value))
             {
                 return true;
             }
@@ -1641,6 +1684,143 @@ bool PS2Memory::tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr)
     m_ioRegisters[channelBase + 0x80u] = (originalSadr + byteCount) & 0x3FF0u;
     completeDmacChannel(channelBase, fromScratchpad ? 8u : 9u);
     return true;
+}
+
+// DMA ch.4 (IPU_TO) moves memory into the IPU input FIFO, in normal or
+// source-chain mode. The FIFO is unbounded here, so the whole transfer lands
+// at once and the channel completes. DMA ch.3 (IPU_FROM) drains the IPU output
+// FIFO and stays busy until the IPU has produced QWC quadwords.
+bool PS2Memory::tryProcessIpuDma(uint32_t channelBase, uint32_t chcr)
+{
+    if (channelBase == kIpuFromChannel)
+    {
+        serviceIpuFromDma();
+        return true;
+    }
+    if (channelBase != kIpuToChannel)
+        return false;
+
+    const auto pushFromMemory = [this](uint32_t addr, uint32_t bytes)
+    {
+        uint32_t offset = 0u;
+        uint32_t size = 0u;
+        const uint8_t *base = dmaRegion(m_rdram, m_scratchpad, addr & ~0xFu, offset, size);
+        while (bytes != 0u)
+        {
+            const uint32_t chunk = std::min(bytes, size - offset);
+            m_ipu->pushInput(base + offset, chunk);
+            bytes -= chunk;
+            offset = 0u; // wrap to the start of the region
+        }
+    };
+
+    uint32_t madr = m_ioRegisters[kIpuToChannel + 0x10u];
+    if (((chcr >> 2) & 0x3u) != 1u) // normal mode
+    {
+        const uint32_t bytes = (m_ioRegisters[kIpuToChannel + 0x20u] & 0xFFFFu) * 16u;
+        pushFromMemory(madr, bytes);
+        madr += bytes;
+    }
+    else // source chain
+    {
+        uint32_t tadr = m_ioRegisters[kIpuToChannel + 0x30u];
+        uint32_t asr[2] = {m_ioRegisters[kIpuToChannel + 0x40u], m_ioRegisters[kIpuToChannel + 0x50u]};
+        uint32_t asp = (chcr >> 4) & 0x3u;
+        uint32_t tagUpper = chcr >> 16;
+        const bool tieEnabled = (chcr & 0x80u) != 0u;
+        bool end = false;
+        int tags = 0;
+        for (; !end && tags < kMaxIpuChainTags; ++tags)
+        {
+            uint32_t offset = 0u;
+            uint32_t size = 0u;
+            const uint8_t *base = dmaRegion(m_rdram, m_scratchpad, tadr & ~0xFu, offset, size);
+            uint64_t tag = 0;
+            std::memcpy(&tag, base + offset, sizeof(tag));
+            const uint32_t qwc = static_cast<uint32_t>(tag & 0xFFFFu);
+            const uint32_t id = static_cast<uint32_t>(tag >> 28) & 0x7u;
+            const uint32_t addr = static_cast<uint32_t>(tag >> 32);
+            tagUpper = static_cast<uint32_t>(tag >> 16) & 0xFFFFu;
+            madr = tadr + 16u;
+            switch (id)
+            {
+            case 0u: // REFE
+                madr = addr;
+                tadr += 16u;
+                end = true;
+                break;
+            case 1u: // CNT
+                tadr = madr + qwc * 16u;
+                break;
+            case 2u: // NEXT
+                tadr = addr;
+                break;
+            case 3u: // REF
+            case 4u: // REFS
+                madr = addr;
+                tadr += 16u;
+                break;
+            case 5u: // CALL
+                if (asp < 2u)
+                    asr[asp++] = madr + qwc * 16u;
+                tadr = addr;
+                break;
+            case 6u: // RET
+                if (asp > 0u)
+                    tadr = asr[--asp];
+                else
+                    end = true;
+                break;
+            default: // END
+                end = true;
+                break;
+            }
+            pushFromMemory(madr, qwc * 16u);
+            madr += qwc * 16u;
+            if (tieEnabled && (tag & 0x80000000ull) != 0u) // tag IRQ with CHCR.TIE
+                end = true;
+        }
+        if (!end)
+        {
+            RUNTIME_ERROR("[DMA] IPU_TO source chain still running after " << tags << " tags at TADR 0x" << std::hex
+                                                                            << tadr << std::dec << "; stopped" << std::endl);
+        }
+        m_ioRegisters[kIpuToChannel + 0x30u] = tadr;
+        m_ioRegisters[kIpuToChannel + 0x40u] = asr[0];
+        m_ioRegisters[kIpuToChannel + 0x50u] = asr[1];
+        m_ioRegisters[kIpuToChannel] = (chcr & 0x0000FFCFu) | (asp << 4) | (tagUpper << 16);
+    }
+    m_ioRegisters[kIpuToChannel + 0x10u] = madr;
+    m_ioRegisters[kIpuToChannel + 0x20u] = 0u;
+    m_ipu->runPending();
+    completeDmacChannel(kIpuToChannel, 4u);
+    serviceIpuFromDma();
+    return true;
+}
+
+void PS2Memory::serviceIpuFromDma()
+{
+    const auto chcr = m_ioRegisters.find(kIpuFromChannel);
+    if (chcr == m_ioRegisters.end() || (chcr->second & 0x100u) == 0u)
+        return;
+    uint32_t madr = m_ioRegisters[kIpuFromChannel + 0x10u];
+    uint32_t qwc = m_ioRegisters[kIpuFromChannel + 0x20u] & 0xFFFFu;
+    while (qwc != 0u && m_ipu->outputBytes() >= 16u)
+    {
+        uint32_t offset = 0u;
+        uint32_t size = 0u;
+        uint8_t *base = dmaRegion(m_rdram, m_scratchpad, madr & ~0xFu, offset, size);
+        const uint32_t qw = std::min({qwc, static_cast<uint32_t>(m_ipu->outputBytes() / 16u), (size - offset) / 16u});
+        m_ipu->drainOutput(base + offset, qw * 16u);
+        if (base == m_rdram)
+            markModified(offset, qw * 16u);
+        madr += qw * 16u;
+        qwc -= qw;
+    }
+    m_ioRegisters[kIpuFromChannel + 0x10u] = madr;
+    m_ioRegisters[kIpuFromChannel + 0x20u] = qwc;
+    if (qwc == 0u)
+        completeDmacChannel(kIpuFromChannel, 3u);
 }
 
 void PS2Memory::completeDmacChannel(uint32_t channelBase, uint32_t cause)
@@ -2317,26 +2497,25 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
         return 0u;
     }
 
-    if (address >= 0x10002000 && address <= 0x10002030)
+    if (isIpuRegister(address))
     {
-        uint32_t val = 0;
         switch (address)
         {
-        case 0x10002000:
-            val = m_ioRegisters[address];
-            break;
-        case 0x10002010:
-            val = m_ioRegisters[address] & ~(1u << 31);
-            break;
-        case 0x10002020:
-        case 0x10002030:
-            val = m_ioRegisters[address];
-            break;
+        case 0x10002000u: // IPU_CMD DATA
+            return static_cast<uint32_t>(m_ipu->readCommand());
+        case 0x10002004u: // IPU_CMD BUSY (bit 63)
+            return static_cast<uint32_t>(m_ipu->readCommand() >> 32);
+        case 0x10002010u:
+            return m_ipu->readControl();
+        case 0x10002020u:
+            return m_ipu->readBp();
+        case 0x10002030u:
+            return static_cast<uint32_t>(m_ipu->readTop());
+        case 0x10002034u:
+            return static_cast<uint32_t>(m_ipu->readTop() >> 32);
         default:
-            val = 0;
-            break;
+            return 0u;
         }
-        return val;
     }
 
     if (address == 0x10003020u) // GIF_STAT
@@ -2361,6 +2540,10 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
         {
             if ((address & 0xFF) == 0x00)
             {
+                // IPU_FROM's STR is real state: it stays set until the IPU has
+                // produced QWC quadwords (serviceIpuFromDma).
+                if (address == kIpuFromChannel)
+                    return m_ioRegisters[address];
                 uint32_t channelStatus = m_ioRegisters[address] & ~0x100u;
                 m_ioRegisters[address] = channelStatus;
                 return channelStatus;

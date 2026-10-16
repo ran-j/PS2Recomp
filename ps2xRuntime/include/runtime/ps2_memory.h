@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <array>
 #include <functional>
+#include <memory>
 #include <vector>
 #include <unordered_map>
 #include <atomic>
@@ -22,6 +23,7 @@
 #endif
 
 class GS;
+class Ps2Ipu;
 
 constexpr uint32_t PS2_RAM_SIZE = 32u * 1024u * 1024u; // 32MB
 constexpr uint32_t PS2_RAM_MASK = PS2_RAM_SIZE - 1u;   // Mask for 32MB alignment
@@ -449,7 +451,10 @@ public:
     };
 
     std::array<EeTimer, 4> m_eeTimers{};
+    std::unique_ptr<Ps2Ipu> m_ipu;
     bool tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr);
+    bool tryProcessIpuDma(uint32_t channelBase, uint32_t chcr);
+    void serviceIpuFromDma();
     void completeDmacChannel(uint32_t channelBase, uint32_t cause);
     void queueCompletedDmacCause(uint32_t cause);
 };
