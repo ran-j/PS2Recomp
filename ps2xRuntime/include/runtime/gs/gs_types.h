@@ -283,7 +283,6 @@ struct GSPresentationRequest
     uint64_t dispfb2 = 0;
     uint64_t display2 = 0;
     uint64_t bgcolor = 0;
-    uint64_t vsyncTick = 0;
     GSFrameReg contextFrames[2]{};
     GSFrameReg preferredSource{};
     uint32_t preferredDestFbp = 0;
