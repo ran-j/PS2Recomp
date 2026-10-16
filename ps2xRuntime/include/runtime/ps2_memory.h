@@ -34,6 +34,27 @@ constexpr uint32_t PS2_IO_SIZE = 0x10000;              // 64KB
 constexpr uint32_t PS2_BIOS_BASE = 0x1FC00000;         // Or BFC00000 depending on KSEG
 constexpr uint32_t PS2_BIOS_SIZE = 4u * 1024u * 1024u; // 4MB
 
+// EE kernel RAM, physical 0x00000000-0x0007FFFF. On hardware it belongs to the
+// kernel: titles link at 0x00100000 or above and take their heap and stacks
+// from SetupHeap/SetupThread, so no title memory lies down here. The HLE kernel
+// keeps the records it hands the guest in these windows of it, clear of the
+// syscall table (0x00011F80) and of 0x00074000 upwards, where titles copy
+// kernel patches.
+constexpr uint32_t PS2_KERNEL_RAM_SIZE = 0x00080000u;
+constexpr uint32_t PS2_KERNEL_TLS_BASE = 0x00060000u; // GetThreadTLS blocks
+constexpr uint32_t PS2_KERNEL_TLS_SIZE = 0x00010000u;
+constexpr uint32_t PS2_KERNEL_BOOT_MODE_BASE = 0x00070000u; // QueryBootMode records
+constexpr uint32_t PS2_KERNEL_BOOT_MODE_SIZE = 0x00001000u;
+constexpr uint32_t PS2_KERNEL_SIF_CMD_BASE = 0x00071000u; // SIF command packets for EE handlers
+constexpr uint32_t PS2_KERNEL_SIF_CMD_SIZE = 0x00002000u;
+constexpr uint32_t PS2_KERNEL_GS_GPARAM_BASE = 0x00073000u; // sceGsGetGParam record
+constexpr uint32_t PS2_KERNEL_GS_GPARAM_SIZE = 0x00000010u;
+static_assert(PS2_KERNEL_TLS_BASE + PS2_KERNEL_TLS_SIZE <= PS2_KERNEL_BOOT_MODE_BASE &&
+                  PS2_KERNEL_BOOT_MODE_BASE + PS2_KERNEL_BOOT_MODE_SIZE <= PS2_KERNEL_SIF_CMD_BASE &&
+                  PS2_KERNEL_SIF_CMD_BASE + PS2_KERNEL_SIF_CMD_SIZE <= PS2_KERNEL_GS_GPARAM_BASE &&
+                  PS2_KERNEL_GS_GPARAM_BASE + PS2_KERNEL_GS_GPARAM_SIZE <= 0x00074000u,
+              "kernel RAM windows must not overlap each other or the kernel patch area");
+
 constexpr uint32_t PS2_VU0_CODE_BASE = 0x11000000; // Base address as seen from EE
 constexpr uint32_t PS2_VU0_DATA_BASE = 0x11004000;
 constexpr uint32_t PS2_VU0_CODE_SIZE = 4u * 1024u; // 4KB Micro Memory
