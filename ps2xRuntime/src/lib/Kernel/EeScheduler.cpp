@@ -33,6 +33,10 @@ namespace
     constexpr uint32_t WEF_CLEAR_ALL = 0x20u;
     constexpr auto kVBlankPeriod = std::chrono::microseconds(16667);
     constexpr auto kVBlankDuration = std::chrono::microseconds(500);
+    // How much pacing lateness a VBlank schedule may repay. Without a cap, a
+    // phase slower than real time accumulates debt that the next cheap phase
+    // repays by running unpaced (faster than real time).
+    constexpr auto kMaxVBlankPacingDebt = std::chrono::milliseconds(100);
     constexpr uint64_t kAlarmTickMicroseconds = 64u;
     constexpr uint32_t kDebugPublishDispatchInterval = 4096u;
 
@@ -1847,11 +1851,18 @@ void EeScheduler::processDueDeadlines()
         {
             if (scheduled.event.type == EeEventType::VBlankStart)
             {
+                // The next VBlank is paced one period after this one, but this
+                // one's host deadline is never taken as more than
+                // kMaxVBlankPacingDebt in the past. Stalls up to the cap are
+                // still caught up; only the wall time at which a VBlank is
+                // delivered changes, never the EE cycle it is delivered at.
+                const auto paced = std::max(scheduled.hostDeadline,
+                                            std::chrono::steady_clock::now() - kMaxVBlankPacingDebt);
                 scheduleEvent(scheduled.deadlineCycle + kVBlankDurationCycles,
-                              scheduled.hostDeadline + kVBlankDuration,
+                              paced + kVBlankDuration,
                               EeEvent{EeEventType::VBlankEnd, 0, m_vsyncTick + 1u});
                 scheduleEvent(scheduled.deadlineCycle + kVBlankPeriodCycles,
-                              scheduled.hostDeadline + kVBlankPeriod,
+                              paced + kVBlankPeriod,
                               EeEvent{EeEventType::VBlankStart, 0, 0});
             }
             processEvent(scheduled.event);
