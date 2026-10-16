@@ -23,6 +23,7 @@ namespace ps2x::iop::detail
         m_servers.clear();
         m_nextDmaId = 1u;
         m_sifInitialized = false;
+        m_sregs.fill(0u);
     }
 
     bool IopRpcBridge::dispatchSifManImport(uint16_t ordinal, IopCpuState &cpu)
@@ -141,7 +142,6 @@ namespace ps2x::iop::detail
         {
         case 4: // InitCmd
         case 5:
-        case 6:
         case 7:
         case 8:
         case 9:
@@ -151,6 +151,9 @@ namespace ps2x::iop::detail
         case 15:
         case 16:
             setV0(0);
+            return true;
+        case 6: // sceSifGetSreg(index)
+            setV0(cpu.gpr[4] < m_sregs.size() ? m_sregs[cpu.gpr[4]] : 0u);
             return true;
         case 12: // sceSifSendCmd
         case 13: // isceSifSendCmd
@@ -327,6 +330,24 @@ namespace ps2x::iop::detail
         // IOP bytes through an equal-numbered EE address would alias two distinct
         // PS2 address spaces and can overwrite live game data.
         (void)transfer;
+    }
+
+    bool IopRpcBridge::receiveEeCommand(uint32_t commandId, const uint8_t *packet, size_t packetSize)
+    {
+        // The IOP's sifcmd handles SIF_CMD_SET_SREG itself: SifCmdSRegData is
+        // the 16-byte header, then int index and u32 value.
+        constexpr uint32_t kSifCmdSetSreg = 0x80000001u;
+        constexpr size_t kSetSregPacketSize = 24u;
+        if (commandId != kSifCmdSetSreg || packet == nullptr || packetSize < kSetSregPacketSize)
+            return false;
+        uint32_t index = 0u;
+        uint32_t value = 0u;
+        std::memcpy(&index, packet + 16u, sizeof(index));
+        std::memcpy(&value, packet + 20u, sizeof(value));
+        if (index >= m_sregs.size())
+            return false;
+        m_sregs[index] = value;
+        return true;
     }
 
     void IopRpcBridge::removeServersInRange(uint32_t base, uint32_t size)
