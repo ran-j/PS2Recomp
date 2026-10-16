@@ -311,6 +311,20 @@ inline float ps2_frsqrt(float a, float b)
     return ps2_fall_normal(a, b, r) ? r : ps2_frsqrt_slow(a, b);
 }
 
+// VU0 macro-mode FDIV unit (PCSX2 VUops.cpp _vuDIV, _vuSQRT, _vuRSQRT). DIV and SQRT are the FPU's
+// rules: a zero or denormal divisor gives +-max with the sign of fs xor ft, SQRT takes |ft|.
+// RSQRT differs from the FPU's: a zero or denormal ft gives +-max with the sign of fs xor ft, or
+// +-0 with that sign when fs is zero as well; otherwise fs / sqrt(|ft|).
+inline float ps2_vu_rsqrt(float fs, float ft)
+{
+    const uint32_t s = std::bit_cast<uint32_t>(fs);
+    const uint32_t t = std::bit_cast<uint32_t>(ft);
+    if ((t & PS2_FLOAT_EXP_MASK) != 0u)
+        return ps2_frsqrt(fs, ft);
+    const uint32_t sign = (s ^ t) & PS2_FLOAT_SIGN_MASK;
+    return std::bit_cast<float>((s & PS2_FLOAT_EXP_MASK) != 0u ? (sign | PS2_FLOAT_MAX_BITS) : sign);
+}
+
 enum class Ps2VecOp
 {
     Add,
