@@ -200,8 +200,8 @@ void register_ps2_sif_dma_tests()
             setRegU32(env.ctx, 4, kIopBlockSize);
             ps2_stubs::sceSifAllocIopHeap(env.rdram.data(), &env.ctx, &env.runtime);
             const uint32_t iopAddress = ::getRegU32(&env.ctx, 2);
-            t.IsTrue(iopAddress >= 0x00120000u && iopAddress < 0x00200000u,
-                     "sceSifAllocIopHeap should return an address in physical IOP RAM");
+            t.IsTrue(iopAddress >= 0x00010000u && iopAddress < 0x001F0000u,
+                     "sceSifAllocIopHeap should return an address in the IOP sysmem arena");
             std::memset(env.rdram.data() + iopAddress, 0x5Au, payload.size());
 
             Ps2SifDmaTransfer desc{

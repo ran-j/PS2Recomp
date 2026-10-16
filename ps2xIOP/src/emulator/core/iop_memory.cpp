@@ -32,7 +32,6 @@ namespace ps2x::iop::detail
         std::fill(m_scratch.begin(), m_scratch.end(), uint8_t{0});
         m_hardware.clear();
         m_allocations.clear();
-        m_heapCursor = HeapBase;
         m_interruptStatus = 0;
         m_interruptMask = 0;
         m_interruptControl = 1;
@@ -299,7 +298,10 @@ namespace ps2x::iop::detail
             return address;
         }
 
-        uint32_t candidate = alignUp(m_heapCursor, alignment);
+        // First fit from the bottom of the heap, like sysmem: blocks released
+        // by FreeSysMemory must be reusable or a long-running title exhausts
+        // the heap after a few alloc/free cycles.
+        uint32_t candidate = alignUp(HeapBase, alignment);
         for (;;)
         {
             bool overlap = false;
@@ -319,7 +321,6 @@ namespace ps2x::iop::detail
             return 0u;
         m_allocations.push_back({candidate, size});
         markOwned(candidate, size);
-        m_heapCursor = std::max(m_heapCursor, candidate + size);
         return candidate;
     }
 
@@ -339,7 +340,32 @@ namespace ps2x::iop::detail
 
     uint32_t IopMemory::maxFreeMemory() const
     {
-        return m_heapCursor < HeapLimit ? HeapLimit - m_heapCursor : 0u;
+        // largest gap between allocations
+        std::vector<Allocation> sorted(m_allocations.begin(), m_allocations.end());
+        std::sort(sorted.begin(), sorted.end(),
+                  [](const Allocation &a, const Allocation &b)
+                  { return a.address < b.address; });
+        uint32_t largest = 0u;
+        uint32_t cursor = HeapBase;
+        for (const Allocation &block : sorted)
+        {
+            if (block.address > cursor)
+                largest = std::max(largest, block.address - cursor);
+            cursor = std::max(cursor, block.address + block.size);
+        }
+        if (cursor < HeapLimit)
+            largest = std::max(largest, HeapLimit - cursor);
+        return largest;
+    }
+
+    uint32_t IopMemory::totalFreeMemory() const
+    {
+        // Blocks do not overlap and lie inside [HeapBase, HeapLimit).
+        uint32_t used = 0u;
+        for (const Allocation &block : m_allocations)
+            used += block.size;
+        constexpr uint32_t arena = HeapLimit - HeapBase;
+        return used < arena ? arena - used : 0u;
     }
 
     std::optional<IopMemory::Allocation> IopMemory::allocationContaining(uint32_t address) const

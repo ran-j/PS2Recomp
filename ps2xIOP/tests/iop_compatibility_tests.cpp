@@ -260,6 +260,95 @@ namespace
         require(iop.stopModule(alias.moduleId) && !iop.canBindRpc(dbcSid), "last release retained route");
     }
 
+    // Relocatable (ET_SCE_IOPRELEXEC) IRX whose entry returns its own load
+    // base as the start result, so a test can see where the loader put it.
+    Irx relocatableProbe()
+    {
+        Irx image(0u);
+        image.bytes[16] = 0x80u; // e_type 0xFF80
+        image.bytes[17] = 0xFFu;
+        image.words(0u, {
+            0x03E04021u, // move t0, ra
+            0x04110001u, // bal +1: ra = base + 12
+            0u,
+            0x27E2FFF4u, // addiu v0, ra, -12
+            0x01000008u, // jr t0
+            0u,
+        });
+        return image;
+    }
+
+    constexpr uint32_t probeSpan = 0x500u; // Irx's default image size
+
+    uint32_t loadProbe(Host &host, IopSubsystem &iop, int32_t *moduleId = nullptr)
+    {
+        relocatableProbe().install(host);
+        const auto loaded = iop.loadModuleBuffer(0x1000u);
+        require(loaded.moduleId > 0, "relocatable probe IRX did not load");
+        if (moduleId != nullptr)
+            *moduleId = loaded.moduleId;
+        return static_cast<uint32_t>(loaded.startResult);
+    }
+
+    bool disjoint(uint32_t a, uint32_t aSize, uint32_t b, uint32_t bSize)
+    {
+        return a + aSize <= b || b + bSize <= a;
+    }
+
+    void modulesShareTheSysmemArena()
+    {
+        Host host;
+        IopSubsystem iop(host);
+        const uint32_t image = loadProbe(host, iop);
+        // 2 MiB of IOP RAM: one small module leaves room for a 1 MiB block.
+        const uint32_t block = iop.allocateMemory(0x100000u);
+        require(block != 0u, "a 1 MiB block did not fit beside one small module");
+        require(disjoint(block, 0x100000u, image, probeSpan), "the block overlaps the module image");
+    }
+
+    void fixedImageReservesItsRange()
+    {
+        constexpr uint32_t sid = 0x5E600040u;
+        Host host;
+        IopSubsystem iop(host);
+        rpcServer(sid, 0xDEADBEEFu).install(host);
+        require(iop.loadModuleBuffer(0x1000u).startResult == 0, "fixed-address IRX failed");
+        const uint32_t image = loadProbe(host, iop);
+        require(disjoint(image, probeSpan, 0x10000u, probeSpan),
+                "a relocatable image was placed over a fixed-address image");
+        require(iop.handleRpc(request(sid, 0u)).handled && host.word(0x800u) == 0xDEADBEEFu,
+                "the fixed-address image was overwritten");
+        const uint32_t block = iop.allocateMemory(0x100u);
+        require(block != 0u && disjoint(block, 0x100u, 0x10000u, probeSpan) && disjoint(block, 0x100u, image, probeSpan),
+                "AllocSysMemory handed out a module's range");
+    }
+
+    void stoppedModuleImageIsReused()
+    {
+        Host host;
+        IopSubsystem iop(host);
+        int32_t first = 0;
+        const uint32_t image = loadProbe(host, iop, &first);
+        require(iop.stopModule(first), "stopModule failed");
+        require(loadProbe(host, iop) == image, "a stopped module's image block was not reused");
+    }
+
+    void failedLoadReleasesItsBlock()
+    {
+        Host freshHost;
+        IopSubsystem fresh(freshHost);
+        const uint32_t expected = loadProbe(freshHost, fresh);
+
+        Host host;
+        IopSubsystem iop(host);
+        Irx broken = relocatableProbe();
+        broken.bytes[72] = 0x00u; // p_memsz 0x100 < p_filesz 0x500: rejected after placement
+        broken.bytes[73] = 0x01u;
+        broken.install(host);
+        require(iop.loadModuleBuffer(0x1000u).moduleId < 0, "an IRX with p_memsz < p_filesz loaded");
+        require(loadProbe(host, iop) == expected, "a failed load kept its image block");
+    }
+
     void loaderDiagnostics()
     {
         Host host;
@@ -308,6 +397,10 @@ int main()
         {"Extended module aliases and activation", moduleAliases},
         {"Unsupported debug and game IRX stay unsupported", unknownModulesStayUnknown},
         {"HLE repeated loads and alias lifetime", moduleLifetime},
+        {"IRX images and AllocSysMemory share one sysmem arena", modulesShareTheSysmemArena},
+        {"A fixed-address IRX reserves its range", fixedImageReservesItsRange},
+        {"A stopped module's image block is reused", stoppedModuleImageIsReused},
+        {"A failed load releases its image block", failedLoadReleasesItsBlock},
         {"Loader outcomes are bounded and resettable", loaderDiagnostics},
         {"LIBSD audio dispatch is unchanged", libsdUnchanged},
     };
