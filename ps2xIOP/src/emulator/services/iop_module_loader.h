@@ -29,7 +29,6 @@ namespace ps2x::iop::detail
         uint32_t size = 0;
         uint32_t entry = 0;
         uint32_t gp = 0;
-        uint32_t nextModuleCursor = 0;
         bool relocationsComplete = true;
 
         [[nodiscard]] explicit operator bool() const noexcept
@@ -43,6 +42,10 @@ namespace ps2x::iop::detail
     public:
         [[nodiscard]] static bool readWholeHostFile(IopHost &host, std::string_view guestPath, std::vector<uint8_t> &bytes);
         [[nodiscard]] static bool readElfFromGuest(IopHost &host, uint32_t guestAddress, std::vector<uint8_t> &bytes);
-        [[nodiscard]] static IopImageLoadResult load(std::span<const uint8_t> image, IopMemory &memory, uint32_t moduleCursor);
+        // Places the image in a sysmem block (IopMemory::allocate) as the
+        // IOP's LoadModule does: relocatable images get a free block, fixed-
+        // address images reserve their range. The block stays allocated until
+        // the module is stopped.
+        [[nodiscard]] static IopImageLoadResult load(std::span<const uint8_t> image, IopMemory &memory);
     };
 }

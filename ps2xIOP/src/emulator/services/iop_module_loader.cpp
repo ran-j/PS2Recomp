@@ -13,7 +13,6 @@ namespace ps2x::iop::detail
     namespace
     {
         constexpr uint32_t kMaxImageSize = 64u * 1024u * 1024u;
-        constexpr uint32_t kModuleLoadBase = 0x00010000u;
 
         constexpr uint16_t ET_EXEC = 2;
         constexpr uint16_t ET_SCE_IOPRELEXEC = 0xFF80u;
@@ -367,10 +366,9 @@ namespace ps2x::iop::detail
         return host.readGuest(guestAddress, bytes.data(), bytes.size());
     }
 
-    IopImageLoadResult IopModuleLoader::load(std::span<const uint8_t> image, IopMemory &memory, uint32_t moduleCursor)
+    IopImageLoadResult IopModuleLoader::load(std::span<const uint8_t> image, IopMemory &memory)
     {
         IopImageLoadResult result;
-        result.nextModuleCursor = moduleCursor;
         if (image.size() < sizeof(Elf32Ehdr))
             return result;
 
@@ -426,23 +424,43 @@ namespace ps2x::iop::detail
         span = alignUp(span, 0x100u);
         const bool relocate = header.type != ET_EXEC ||
                               maxVaddr > IopMemory::RamSize ||
-                              (minVaddr < kModuleLoadBase && minVaddr != 0u);
+                              (minVaddr < IopMemory::HeapBase && minVaddr != 0u);
         uint32_t base = 0u;
         int64_t delta = 0;
+        // The image's sysmem block, released by every failure return below.
+        struct ImageBlock
+        {
+            IopMemory &memory;
+            uint32_t address = 0u;
+            ~ImageBlock()
+            {
+                if (address != 0u)
+                    (void)memory.freeAllocation(address);
+            }
+        } block{memory};
         if (relocate)
         {
-            base = alignUp(moduleCursor, 0x100u);
-            if (base + span >= IopMemory::HeapBase)
+            base = memory.allocate(span, 0x100u);
+            if (base == 0u)
             {
                 result.error = IopImageLoadError::ArenaExhausted;
                 return result;
             }
+            block.address = base;
             delta = static_cast<int64_t>(base) - minVaddr;
-            result.nextModuleCursor = base + span;
         }
         else
         {
             base = minVaddr;
+            if (base >= IopMemory::HeapBase)
+            {
+                if (memory.allocate(span, 0x100u, base) != base)
+                {
+                    result.error = IopImageLoadError::ArenaExhausted;
+                    return result;
+                }
+                block.address = base;
+            }
         }
 
         if (hasLoad)
@@ -555,6 +573,7 @@ namespace ps2x::iop::detail
             }
         }
 
+        block.address = 0u;
         result.error = IopImageLoadError::None;
         return result;
     }

@@ -358,6 +358,16 @@ namespace ps2x::iop::detail
         return largest;
     }
 
+    uint32_t IopMemory::totalFreeMemory() const
+    {
+        // Blocks do not overlap and lie inside [HeapBase, HeapLimit).
+        uint32_t used = 0u;
+        for (const Allocation &block : m_allocations)
+            used += block.size;
+        constexpr uint32_t arena = HeapLimit - HeapBase;
+        return used < arena ? arena - used : 0u;
+    }
+
     std::optional<IopMemory::Allocation> IopMemory::allocationContaining(uint32_t address) const
     {
         const auto block = std::find_if(m_allocations.begin(), m_allocations.end(),

@@ -22,7 +22,10 @@ namespace ps2x::iop::detail
         static constexpr uint32_t Spu2End = 0x1FA00000u;
         static constexpr uint32_t SifBase = 0x1D000000u;
         static constexpr uint32_t SifEnd = 0x1D001000u;
-        static constexpr uint32_t HeapBase = 0x00120000u;
+        // The sysmem arena: IRX images (IopModuleLoader) and AllocSysMemory
+        // blocks share it, as on hardware. Images are never placed below it;
+        // above HeapLimit are the host call stacks (IopEmulator::Impl::callFunction).
+        static constexpr uint32_t HeapBase = 0x00010000u;
         static constexpr uint32_t HeapLimit = 0x001F0000u;
 
         struct Allocation
@@ -57,7 +60,10 @@ namespace ps2x::iop::detail
 
         [[nodiscard]] uint32_t allocate(uint32_t size, uint32_t alignment = 16u, std::optional<uint32_t> fixed = std::nullopt);
         [[nodiscard]] bool freeAllocation(uint32_t address);
+        // Largest free block (QueryMaxFreeMemSize) and sum of all free blocks
+        // (QueryTotalFreeMemSize).
         [[nodiscard]] uint32_t maxFreeMemory() const;
+        [[nodiscard]] uint32_t totalFreeMemory() const;
         [[nodiscard]] std::optional<Allocation> allocationContaining(uint32_t address) const;
 
         [[nodiscard]] uint32_t interruptStatus() const noexcept { return m_interruptStatus; }

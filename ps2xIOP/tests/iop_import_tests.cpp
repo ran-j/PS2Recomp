@@ -4,6 +4,7 @@
 #include "emulator/imports/iop_cdvd.h"
 #include "emulator/imports/iop_imports.h"
 #include "emulator/imports/iop_loadcore.h"
+#include "emulator/imports/iop_sysmem.h"
 #include "emulator/imports/iop_timrman.h"
 #include "emulator/services/iop_rpc.h"
 #include "ps2x/iop/iop_host.h"
@@ -149,6 +150,35 @@ namespace
                expect(cpu.gpr[2] == 0u, "loadcore:27 returned an error for a registered table") &&
                expect(memory.read16(table + 10u) == 0x1236u,
                       "loadcore:27 did not update a registered table's mode");
+    }
+
+    bool testSysmemFreeQueries()
+    {
+        NullHost host;
+        IopMemory memory;
+        IopSysmem sysmem(host, memory);
+        const auto call = [&](uint16_t ordinal, uint32_t a0 = 0u, uint32_t a1 = 0u)
+        {
+            IopCpuState cpu{};
+            cpu.gpr[4] = a0;
+            cpu.gpr[5] = a1;
+            return sysmem.dispatchImport(ordinal, cpu) ? cpu.gpr[2] : 0xDEADDEADu;
+        };
+
+        const uint32_t emptyMax = call(7u);
+        const uint32_t emptyTotal = call(8u);
+        if (!expect(emptyTotal == emptyMax, "an empty arena is one free block"))
+            return false;
+        // Three 64 KiB AllocSysMemory blocks from the bottom (SMEM_Low), then
+        // free the middle one: two free blocks, the tail and a 64 KiB hole.
+        const uint32_t low = call(4u, 0u, 0x10000u);
+        const uint32_t middle = call(4u, 0u, 0x10000u);
+        const uint32_t high = call(4u, 0u, 0x10000u);
+        if (!expect(low != 0u && middle != 0u && high != 0u, "AllocSysMemory failed") ||
+            !expect(call(5u, middle) == 0u, "FreeSysMemory failed"))
+            return false;
+        return expect(call(7u) == emptyMax - 0x30000u, "QueryMaxFreeMemSize is not the largest free block") &&
+               expect(call(8u) == emptyTotal - 0x20000u, "QueryTotalFreeMemSize does not sum every free block");
     }
 
     bool pollEvent(IopKernel &kernel, int eventId, uint32_t bits, uint32_t resultAddress, int32_t expected)
@@ -332,6 +362,8 @@ int main()
 {
     if (!testLoadcoreRebootLibraryMode() || !testCdvdSpecialControl() || !testCdvdSearchFile() ||
         !testTimrmanPeriodicCallback())
+        return 1;
+    if (!testSysmemFreeQueries())
         return 1;
     std::cout << "ps2xIOP import tests passed\n";
     return 0;
