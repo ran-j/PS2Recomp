@@ -925,7 +925,7 @@ void register_ps2_runtime_expansion_tests()
                      "sceSdRemoteInit should restore idle voice status to complete");
         });
 
-        tc.Run("IPU init skips missing optional helper instead of dispatching the default trap", [](TestCase &t)
+        tc.Run("IPU init completes without any registered guest helper", [](TestCase &t)
         {
             PS2Runtime runtime;
             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
@@ -935,19 +935,23 @@ void register_ps2_runtime_expansion_tests()
             ps2_stubs::sceIpuInit(rdram.data(), &ctx, &runtime);
 
             t.IsFalse(runtime.isStopRequested(),
-                      "sceIpuInit should tolerate the missing optional SetD4 helper");
-            t.Equals(runtime.memory().read32(0x10002010u), 0x40000000u,
-                     "sceIpuInit should still program IPU_CTRL");
+                      "sceIpuInit should complete directly in HLE with no guest helper registered");
+            // IPU_CTRL is deliberately not asserted: RST is write-only on the
+            // IPU (it self-clears), so the value read back after init depends
+            // on the IPU model, not on this stub.
             t.Equals(runtime.memory().read32(0x10002000u), 0u,
                      "sceIpuInit should leave IPU_CMD reset after initialization");
         });
 
-        tc.Run("IPU init executes its guest helper as a scheduler invocation", [](TestCase &t)
+        tc.Run("IPU init completes in HLE without invoking a guest helper", [](TestCase &t)
         {
             PS2Runtime runtime;
             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
             runtime.registerFunction(kIpuInitMainPc, testIpuInitMain);
             runtime.registerFunction(kIpuInitResumePc, testIpuInitResume);
+            // Registered at the address a previous stub hardcoded as a guest
+            // "SetD4" entry: sceIpuInit must never invoke it (in Stuntman it
+            // is mid-function). Init completes directly in HLE instead.
             runtime.registerFunction(kIpuSetD4Pc, testIpuSetD4);
             gIpuSetD4Hits.store(0u, std::memory_order_release);
             gIpuSetD4Argument.store(0u, std::memory_order_release);
@@ -958,14 +962,10 @@ void register_ps2_runtime_expansion_tests()
             runtime.eeScheduler().reset(rdram.data(), context);
             runtime.eeScheduler().run();
 
-            t.Equals(gIpuSetD4Hits.load(std::memory_order_acquire), 1u,
-                     "the optional guest helper should execute exactly once through the dispatcher");
-            t.Equals(gIpuSetD4Argument.load(std::memory_order_acquire), 1u,
-                     "the invocation should receive the SetD4 enable argument");
+            t.Equals(gIpuSetD4Hits.load(std::memory_order_acquire), 0u,
+                     "sceIpuInit should not invoke any guest address as a helper");
             t.Equals(gIpuInitResult.load(std::memory_order_acquire), 0,
                      "the HLE completion should resume the preserved base context with success");
-            t.Equals(runtime.memory().read32(0x10002010u), 0x40000000u,
-                     "IPU initialization should finish only after the guest invocation completes");
         });
 
         tc.Run("sprintf consumes EE varargs from a2 a3 t0 and preserves width formatting", [](TestCase &t)
