@@ -13,6 +13,7 @@
 #include "imports/iop_stdio.h"
 #include "imports/iop_sysclib.h"
 #include "imports/iop_sysmem.h"
+#include "imports/iop_thfpool.h"
 #include "imports/iop_timrman.h"
 #include "imports/iop_vblank.h"
 #include "iop_emulator_const.h"
@@ -105,6 +106,7 @@ namespace ps2x::iop::detail
               heaplib(memory),
               intrman(memory),
               timrman(),
+              thfpool(memory, kernel),
               ioman(memory),
               cpuCore(memory),
               imports(memory),
@@ -123,6 +125,7 @@ namespace ps2x::iop::detail
             cdvd.reset();
             intrman.reset();
             timrman.reset();
+            thfpool.reset();
             ioman.reset();
             pendingDmaInterrupts.clear();
             pendingGuestCallbacks.clear();
@@ -340,6 +343,8 @@ namespace ps2x::iop::detail
                            : ImportDisposition::Missing;
             }
             if (iequals(call.library, "heaplib") && heaplib.dispatchImport(call.ordinal, cpu))
+                return ImportDisposition::Handled;
+            if (iequals(call.library, "thfpool") && thfpool.dispatchImport(call.ordinal, cpu))
                 return ImportDisposition::Handled;
 
             const uint32_t target = imports.resolve(call.library, call.ordinal, call.version);
@@ -690,6 +695,7 @@ namespace ps2x::iop::detail
         IopHeaplib heaplib;
         IopIntrman intrman;
         IopTimrman timrman;
+        IopThfpool thfpool;
         IopIoman ioman;
         IopCpuCore cpuCore;
         IopImportRegistry imports;
