@@ -38,6 +38,7 @@ add_library(ps2_test_lib STATIC
     src/ps2_recompiler_tests.cpp
     src/ps2_runtime_expansion_tests.cpp
     src/ps2_float_semantics_tests.cpp
+    src/ps2_fpu_order_tests.cpp
 )
 
 target_include_directories(ps2_test_lib PRIVATE
@@ -103,4 +104,10 @@ include("${CMAKE_SOURCE_DIR}/ps2xRuntime/cmake/ReleaseMode.cmake")
 if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
     EnableFastReleaseMode(ps2_test_lib)
     EnableFastReleaseMode(ps2x_tests)
+endif()
+
+# The PS2 float-ordering cases compile like the port's generated code (/fp:precise), not with the
+# /fp:fast that EnableFastReleaseMode gives this library: host float compares are what they guard against.
+if(MSVC)
+    set_source_files_properties(src/ps2_fpu_order_tests.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()

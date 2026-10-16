@@ -311,6 +311,56 @@ inline float ps2_frsqrt(float a, float b)
     return ps2_fall_normal(a, b, r) ? r : ps2_frsqrt_slow(a, b);
 }
 
+// FPU comparisons, MIN.S and MAX.S order PS2 floats as sign-magnitude numbers. The EE has no NaN
+// or Inf: an exponent-255 pattern (what ps2_fdiv returns for x / 0, 0x7FFFFFFF) is the largest
+// magnitude, and any exponent-0 pattern is zero (the FPU flushes denormals). Host float compares
+// would see a NaN and answer false, so a clamp such as min(x, limit) would let x through.
+inline int32_t ps2_fkey(float a)
+{
+    const uint32_t bits = std::bit_cast<uint32_t>(a);
+    if ((bits & PS2_FLOAT_EXP_MASK) == 0u)
+        return 0;
+    const int32_t magnitude = static_cast<int32_t>(bits & ~PS2_FLOAT_SIGN_MASK);
+    return (bits & PS2_FLOAT_SIGN_MASK) ? -magnitude : magnitude;
+}
+
+// The selected operand, with an exponent-0 pattern flushed to a signed zero (PCSX2 MAX_S/MIN_S
+// return fpuDouble of it). On a tie the first operand wins, as std::max/std::min do.
+inline float ps2_fflush(float a)
+{
+    const uint32_t bits = std::bit_cast<uint32_t>(a);
+    return (bits & PS2_FLOAT_EXP_MASK) == 0u ? std::bit_cast<float>(bits & PS2_FLOAT_SIGN_MASK) : a;
+}
+
+inline float ps2_fmax(float a, float b)
+{
+    return ps2_fflush(ps2_fkey(a) < ps2_fkey(b) ? b : a);
+}
+
+inline float ps2_fmin(float a, float b)
+{
+    return ps2_fflush(ps2_fkey(b) < ps2_fkey(a) ? b : a);
+}
+
+// VU MAX/MINI compare the raw lanes as integers, the larger magnitude winning among two negative
+// values (PCSX2 VUops.cpp fp_max/fp_min). Exponent-255 lanes are numbers here too; nothing is
+// flushed.
+inline __m128 ps2_vu_max_ps(__m128 a, __m128 b)
+{
+    const __m128i ai = _mm_castps_si128(a);
+    const __m128i bi = _mm_castps_si128(b);
+    const __m128i bothNegative = _mm_srai_epi32(_mm_and_si128(ai, bi), 31);
+    return _mm_castsi128_ps(_mm_blendv_epi8(_mm_max_epi32(ai, bi), _mm_min_epi32(ai, bi), bothNegative));
+}
+
+inline __m128 ps2_vu_min_ps(__m128 a, __m128 b)
+{
+    const __m128i ai = _mm_castps_si128(a);
+    const __m128i bi = _mm_castps_si128(b);
+    const __m128i bothNegative = _mm_srai_epi32(_mm_and_si128(ai, bi), 31);
+    return _mm_castsi128_ps(_mm_blendv_epi8(_mm_min_epi32(ai, bi), _mm_max_epi32(ai, bi), bothNegative));
+}
+
 enum class Ps2VecOp
 {
     Add,
@@ -856,21 +906,26 @@ inline __m128i ps2_u64_to_epi64_pair(uint64_t value)
 #define FPU_CVT_W_S(a) ((int32_t)nearbyintf((float)(a)))
 #define FPU_CVT_L_S(a) ((int64_t)(float)(a))
 #define FPU_C_F_S(a, b) (0)
-#define FPU_C_UN_S(a, b) (isnan((float)(a)) || isnan((float)(b)))
-#define FPU_C_EQ_S(a, b) ((float)(a) == (float)(b))
-#define FPU_C_UEQ_S(a, b) ((float)(a) == (float)(b) || isnan((float)(a)) || isnan((float)(b)))
-#define FPU_C_OLT_S(a, b) ((float)(a) < (float)(b))
-#define FPU_C_ULT_S(a, b) ((float)(a) < (float)(b) || isnan((float)(a)) || isnan((float)(b)))
-#define FPU_C_OLE_S(a, b) ((float)(a) <= (float)(b))
-#define FPU_C_ULE_S(a, b) ((float)(a) <= (float)(b) || isnan((float)(a)) || isnan((float)(b)))
+// The R5900 FPU implements only C.F, C.EQ, C.LT and C.LE, on the function codes MIPS gives C.F,
+// C.EQ, C.OLT and C.OLE, so the decoder names a title's c.lt.s / c.le.s FPU_C_OLT_S / FPU_C_OLE_S.
+// Its numbers are always ordered (ps2_fkey), so the "unordered" forms reduce to those four.
+#define FPU_C_UN_S(a, b) (0)
+#define FPU_C_EQ_S(a, b) (ps2_fkey((float)(a)) == ps2_fkey((float)(b)))
+#define FPU_C_UEQ_S(a, b) FPU_C_EQ_S(a, b)
+#define FPU_C_OLT_S(a, b) FPU_C_LT_S(a, b)
+#define FPU_C_ULT_S(a, b) FPU_C_LT_S(a, b)
+#define FPU_C_OLE_S(a, b) FPU_C_LE_S(a, b)
+#define FPU_C_ULE_S(a, b) FPU_C_LE_S(a, b)
 #define FPU_C_SF_S(a, b) (0)
-#define FPU_C_NGLE_S(a, b) (isnan((float)(a)) || isnan((float)(b)))
-#define FPU_C_SEQ_S(a, b) ((float)(a) == (float)(b))
-#define FPU_C_NGL_S(a, b) ((float)(a) == (float)(b) || isnan((float)(a)) || isnan((float)(b)))
-#define FPU_C_LT_S(a, b) ((float)(a) < (float)(b))
-#define FPU_C_NGE_S(a, b) ((float)(a) < (float)(b) || isnan((float)(a)) || isnan((float)(b)))
-#define FPU_C_LE_S(a, b) ((float)(a) <= (float)(b))
-#define FPU_C_NGT_S(a, b) ((float)(a) <= (float)(b) || isnan((float)(a)) || isnan((float)(b)))
+#define FPU_C_NGLE_S(a, b) (0)
+#define FPU_C_SEQ_S(a, b) FPU_C_EQ_S(a, b)
+#define FPU_C_NGL_S(a, b) FPU_C_EQ_S(a, b)
+#define FPU_C_LT_S(a, b) (ps2_fkey((float)(a)) < ps2_fkey((float)(b)))
+#define FPU_C_NGE_S(a, b) FPU_C_LT_S(a, b)
+#define FPU_C_LE_S(a, b) (ps2_fkey((float)(a)) <= ps2_fkey((float)(b)))
+#define FPU_C_NGT_S(a, b) FPU_C_LE_S(a, b)
+#define FPU_MAX_S(a, b) ps2_fmax((float)(a), (float)(b))
+#define FPU_MIN_S(a, b) ps2_fmin((float)(a), (float)(b))
 
 // QFSRV: Quadword Funnel Shift Right Variable
 // Concatenates rs || rt (256 bits) and right-shifts by SA bits, taking lower 128 bits.
