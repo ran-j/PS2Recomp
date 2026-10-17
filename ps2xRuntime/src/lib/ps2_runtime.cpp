@@ -6,6 +6,7 @@
 #include "ps2_runtime_macros.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/ee_scheduler.h"
+#include "StackSizedThread.h"
 #include "ThreadNaming.h"
 #include "Kernel/Stubs/Audio.h"
 #include "Kernel/Stubs/GS.h"
@@ -2364,7 +2365,7 @@ void PS2Runtime::run()
 
     std::atomic<bool> gameThreadFinished{false};
 
-    std::thread gameThread([&]()
+    StackSizedThread gameThread([&]()
                            {
         ThreadNaming::SetCurrentThreadName("GameThread");
         try
