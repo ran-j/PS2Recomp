@@ -143,7 +143,7 @@ public class ExportPS2Functions extends GhidraScript {
         "mcSetFileSelectWindowCursol", "mcSetFileSelectWindowCursolInit", "mcSetStringSaveFile", "mcSetTyepWriteMode", "mcWriteIconData", "mcWriteStartConfigFile",
         "mcWriteStartSaveFile", "mceGetInfoApdx", "mceIntrReadFixAlign", "mceStorePwd", "sceCdApplyNCmd", "sceCdBreak",
         "sceCdCallback", "sceCdChangeThreadPriority", "sceCdDelayThread", "sceCdDiskReady", "sceCdGetDiskType", "sceCdGetError",
-        "sceCdGetReadPos", "sceCdGetToc", "sceCdInit", "sceCdInitEeCB", "sceCdIntToPos", "sceCdMmode",
+        "sceCdGetReadPos", "sceCdGetToc", "sceCdInit", "sceCdInitEeCB", "sceCdIntToPos", "sceCdLayerSearchFile", "sceCdMmode",
         "sceCdNcmdDiskReady", "sceCdPause", "sceCdPosToInt", "sceCdRead", "sceCdReadChain", "sceCdReadClock",
         "sceCdReadIOPm", "sceCdSearchFile", "sceCdSeek", "sceCdStInit", "sceCdStPause", "sceCdStRead",
         "sceCdStResume", "sceCdStSeek", "sceCdStSeekF", "sceCdStStart", "sceCdStStat", "sceCdStStop",
