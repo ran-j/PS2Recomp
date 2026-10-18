@@ -1283,15 +1283,64 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch)
     const GSVertex &v2 = batch.vertices[2];
     const auto &ctx = state.context;
 
-    int ofx = ctx.xyoffset.ofx >> 4;
-    int ofy = ctx.xyoffset.ofy >> 4;
+    // Window coordinates in 12.4 fixed point, keeping XYOFFSET's fraction.
+    const int64_t ix0 = static_cast<int64_t>(std::lround(v0.x * 16.0f)) - ctx.xyoffset.ofx;
+    const int64_t iy0 = static_cast<int64_t>(std::lround(v0.y * 16.0f)) - ctx.xyoffset.ofy;
+    const int64_t ix1 = static_cast<int64_t>(std::lround(v1.x * 16.0f)) - ctx.xyoffset.ofx;
+    const int64_t iy1 = static_cast<int64_t>(std::lround(v1.y * 16.0f)) - ctx.xyoffset.ofy;
+    const int64_t ix2 = static_cast<int64_t>(std::lround(v2.x * 16.0f)) - ctx.xyoffset.ofx;
+    const int64_t iy2 = static_cast<int64_t>(std::lround(v2.y * 16.0f)) - ctx.xyoffset.ofy;
 
-    float fx0 = v0.x - static_cast<float>(ofx);
-    float fy0 = v0.y - static_cast<float>(ofy);
-    float fx1 = v1.x - static_cast<float>(ofx);
-    float fy1 = v1.y - static_cast<float>(ofy);
-    float fx2 = v2.x - static_cast<float>(ofx);
-    float fy2 = v2.y - static_cast<float>(ofy);
+    float fx0 = static_cast<float>(ix0) / 16.0f;
+    float fy0 = static_cast<float>(iy0) / 16.0f;
+    float fx1 = static_cast<float>(ix1) / 16.0f;
+    float fy1 = static_cast<float>(iy1) / 16.0f;
+    float fx2 = static_cast<float>(ix2) / 16.0f;
+    float fy2 = static_cast<float>(iy2) / 16.0f;
+
+    // Edge functions in exact integers, oriented so the interior is positive.
+    // Like the PCSX2 software rasterizer, pixels are sampled at their integer
+    // corner and the top-left rule decides samples lying exactly on an edge,
+    // so a pixel on an edge shared by two triangles is drawn only once.
+    struct Edge
+    {
+        int64_t a, b, c;
+        bool topLeft;
+    };
+    auto makeEdge = [](int64_t ax, int64_t ay, int64_t bx, int64_t by) -> Edge
+    {
+        const int64_t dx = bx - ax;
+        const int64_t dy = by - ay;
+        return Edge{-dy, dx, dy * ax - dx * ay, dy < 0 || (dy == 0 && dx > 0)};
+    };
+    const int64_t area = (ix1 - ix0) * (iy2 - iy0) - (iy1 - iy0) * (ix2 - ix0);
+    if (area == 0)
+        return;
+    Edge edges[3];
+    if (area > 0)
+    {
+        edges[0] = makeEdge(ix0, iy0, ix1, iy1);
+        edges[1] = makeEdge(ix1, iy1, ix2, iy2);
+        edges[2] = makeEdge(ix2, iy2, ix0, iy0);
+    }
+    else
+    {
+        edges[0] = makeEdge(ix0, iy0, ix2, iy2);
+        edges[1] = makeEdge(ix2, iy2, ix1, iy1);
+        edges[2] = makeEdge(ix1, iy1, ix0, iy0);
+    }
+    auto covers = [&](int x, int y) -> bool
+    {
+        const int64_t sx = static_cast<int64_t>(x) * 16;
+        const int64_t sy = static_cast<int64_t>(y) * 16;
+        for (const Edge &e : edges)
+        {
+            const int64_t value = e.a * sx + e.b * sy + e.c;
+            if (value < 0 || (value == 0 && !e.topLeft))
+                return false;
+        }
+        return true;
+    };
 
     int minX = static_cast<int>(std::floor(std::min({fx0, fx1, fx2})));
     int maxX = static_cast<int>(std::ceil(std::max({fx0, fx1, fx2})));
@@ -1304,26 +1353,23 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch)
     maxY = clampInt(maxY, ctx.scissor.y0, ctx.scissor.y1);
 
     float denom = (fy1 - fy2) * (fx0 - fx2) + (fx2 - fx1) * (fy0 - fy2);
-    if (std::fabs(denom) < 0.001f)
-        return;
 
     const float winding = (denom < 0.0f) ? -1.0f : 1.0f;
     const float invAbsDenom = 1.0f / std::fabs(denom);
-    constexpr float kEdgeEpsilon = 1.0e-4f;
 
     for (int y = minY; y <= maxY; ++y)
     {
-        float py = static_cast<float>(y) + 0.5f;
+        float py = static_cast<float>(y);
         for (int x = minX; x <= maxX; ++x)
         {
-            float px = static_cast<float>(x) + 0.5f;
+            if (!covers(x, y))
+                continue;
+
+            float px = static_cast<float>(x);
 
             float w0 = (((fy1 - fy2) * (px - fx2) + (fx2 - fx1) * (py - fy2)) * winding) * invAbsDenom;
             float w1 = (((fy2 - fy0) * (px - fx2) + (fx0 - fx2) * (py - fy2)) * winding) * invAbsDenom;
             float w2 = 1.0f - w0 - w1;
-
-            if (w0 < -kEdgeEpsilon || w1 < -kEdgeEpsilon || w2 < -kEdgeEpsilon)
-                continue;
 
             double z = v0.z * w0 + v1.z * w1 + v2.z * w2;
 
