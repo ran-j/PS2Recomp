@@ -655,8 +655,16 @@ namespace ps2x::iop::detail
         ModuleLoadResult loadModuleBuffer(uint32_t guestAddress, const void *arguments, uint32_t argumentSize)
         {
             std::vector<uint8_t> image;
-            if (!IopModuleLoader::readElfFromGuest(host, guestAddress, image))
+            // sceSifLoadModuleBuffer takes an IOP address the EE filled with sceSifSetDma;
+            // EE memory remains a fallback for hosts that stage the image there.
+            if (!IopModuleLoader::readElfFromIopRam(memory, guestAddress, image) &&
+                !IopModuleLoader::readElfFromGuest(host, guestAddress, image))
+            {
+                std::ostringstream out;
+                out << "[IOP] no ELF image at buffer 0x" << std::hex << guestAddress << " in IOP or EE memory";
+                log(LogLevel::Warning, out.str());
                 return {true, -1, -1};
+            }
             std::ostringstream tag;
             tag << "buffer@0x" << std::hex << guestAddress;
             return loadImage(tag.str(), image, arguments, argumentSize);
