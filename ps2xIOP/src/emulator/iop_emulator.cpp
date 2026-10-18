@@ -747,6 +747,17 @@ namespace ps2x::iop::detail
         return m_impl->stopModule(moduleId, result);
     }
 
+    int32_t IopEmulator::findModuleByAddress(uint32_t address) const noexcept
+    {
+        const uint32_t phys = address & 0x1FFFFFFFu;
+        for (const auto &[id, module] : m_impl->modules)
+        {
+            if (phys >= module.base && phys - module.base < module.size)
+                return id;
+        }
+        return -1;
+    }
+
     void IopEmulator::runEeCycles(uint64_t eeCycles) noexcept
     {
         const uint64_t total = m_impl->eeCycleCarry + eeCycles;

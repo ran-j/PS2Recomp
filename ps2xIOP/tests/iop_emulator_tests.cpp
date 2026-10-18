@@ -922,7 +922,15 @@ int main()
     const ModuleLoadResult iopStaged = iop.loadModuleBuffer(iopStage);
     if (!expect(iopStaged.handled && iopStaged.moduleId > 0 && iopStaged.startResult == 7,
                 "IRX staged in IOP RAM did not load")) return 1;
+    if (!expect(iop.findModuleByAddress(0x00010004u) == iopStaged.moduleId,
+                "Module lookup missed an address inside the loaded IRX")) return 1;
+    if (!expect(iop.findModuleByAddress(0x80010004u) == iopStaged.moduleId,
+                "Module lookup must accept KSEG0 IOP addresses")) return 1;
+    if (!expect(iop.findModuleByAddress(0x00018000u) == -1,
+                "Module lookup matched an address outside the IRX image")) return 1;
     if (!expect(iop.stopModule(iopStaged.moduleId), "IOP-staged module stop failed")) return 1;
+    if (!expect(iop.findModuleByAddress(0x00010004u) == -1,
+                "Module lookup still matched a stopped IRX")) return 1;
     if (!expect(iop.freeMemory(iopStage), "IOP staging free failed")) return 1;
 
     constexpr uint32_t rpcSid = 0xF00DCAFEu;

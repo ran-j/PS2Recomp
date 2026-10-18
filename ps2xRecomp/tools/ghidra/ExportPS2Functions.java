@@ -185,7 +185,7 @@ public class ExportPS2Functions extends GhidraScript {
         "sceSifGetDataTable", "sceSifGetIopAddr", "sceSifGetNextRequest", "sceSifGetOtherData", "sceSifGetReg", "sceSifGetSreg",
         "sceSifInitCmd", "sceSifInitIopHeap", "sceSifInitRpc", "sceSifIsAliveIop", "sceSifLoadFileReset", "sceSifLoadIopHeap",
         "sceSifRebootIop", "sceSifRegisterRpc", "sceSifRemoveCmdHandler", "sceSifRemoveRpc", "sceSifRemoveRpcQueue", "sceSifResetIop",
-        "sceSifRpcLoop", "sceSifSetCmdBuffer", "sceSifSetDChain", "sceSifSetDma", "isceSifSetDChain", "isceSifSetDma",
+        "sceSifRpcLoop", "sceSifSearchModuleByAddress", "sceSifSetCmdBuffer", "sceSifSetDChain", "sceSifSetDma", "isceSifSetDChain", "isceSifSetDma",
         "sceSifSetIopAddr", "sceSifSetReg", "sceSifSetRpcQueue", "sceSifSetSreg", "sceSifSetSysCmdBuffer", "sceSifStopDma",
         "sceSifSyncIop", "sceSifWriteBackDCache", "sceSynthSizerLfoTriangle", "sceSynthesizerAmpProcI", "sceSynthesizerAmpProcNI", "sceSynthesizerAssignAllNoteOff",
         "sceSynthesizerAssignAllSoundOff", "sceSynthesizerAssignHoldChange", "sceSynthesizerAssignNoteOff", "sceSynthesizerAssignNoteOn", "sceSynthesizerCalcEnv", "sceSynthesizerCalcPortamentPitch",

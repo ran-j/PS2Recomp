@@ -587,6 +587,11 @@ ps2x::iop::RpcAbi PS2Runtime::selectIopRpcAbi(const ps2x::iop::RpcAbiRequest &re
     return m_iopSubsystem->selectRpcAbi(request);
 }
 
+int32_t PS2Runtime::findIopModuleByAddress(uint32_t iopAddress) const noexcept
+{
+    return m_iopSubsystem->findModuleByAddress(iopAddress);
+}
+
 bool PS2Runtime::canBindIopRpc(uint32_t sid) const noexcept
 {
     return m_iopSubsystem->canBindRpc(sid);
