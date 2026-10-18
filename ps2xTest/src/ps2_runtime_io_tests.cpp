@@ -2,6 +2,7 @@
 #include "ps2_runtime.h"
 #include "ps2_syscalls.h"
 #include "ps2_stubs.h"
+#include "runtime/ee_scheduler.h"
 
 #include <filesystem>
 #include <fstream>
@@ -162,6 +163,35 @@ namespace
             PS2Runtime::setIoPaths(ioPaths);
         }
     };
+
+    constexpr uint32_t kCdCallbackEntryPc = 0x00102000u;
+    constexpr uint32_t kCdCallbackResumePc = 0x00102010u;
+    constexpr uint32_t kCdCallbackPc = 0x00102020u;
+    uint32_t g_cdCallbackFunction = 0u;
+    uint32_t g_cdCallbackPrevious = 0xFFFFFFFFu;
+
+    void cdCallbackEntry(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        setRegU32(*ctx, 4, kCdCallbackPc);
+        ps2_stubs::sceCdCallback(rdram, ctx, runtime);
+        g_cdCallbackPrevious = ::getRegU32(ctx, 2);
+        ctx->pc = kCdCallbackResumePc;
+        ps2_stubs::sceCdSeek(rdram, ctx, runtime);
+    }
+
+    void cdCallbackResume(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        setRegU32(*ctx, 4, 0u); // unregister so later tests start clean
+        ps2_stubs::sceCdCallback(rdram, ctx, runtime);
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
+    void cdCallback(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        g_cdCallbackFunction = ::getRegU32(ctx, 4);
+        ctx->pc = 0u;
+    }
 }
 
 void register_ps2_runtime_io_tests()
@@ -705,6 +735,25 @@ void register_ps2_runtime_io_tests()
                      "sceCdSearchFile should report the host file size");
             t.IsTrue(readGuestU32(test.rdram.data(), fileAddr + 0) >= 0x00100000u,
                      "sceCdSearchFile should assign a pseudo LSN for the resolved host file");
+        });
+
+        tc.Run("sceCdCallback returns the previous callback and runs after an async command", [](TestCase &t)
+        {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            PS2Runtime runtime;
+            runtime.registerFunction(kCdCallbackEntryPc, cdCallbackEntry);
+            runtime.registerFunction(kCdCallbackResumePc, cdCallbackResume);
+            runtime.registerFunction(kCdCallbackPc, cdCallback);
+            g_cdCallbackFunction = 0u;
+            g_cdCallbackPrevious = 0xFFFFFFFFu;
+
+            R5900Context mainContext{};
+            mainContext.pc = kCdCallbackEntryPc;
+            runtime.eeScheduler().reset(rdram.data(), mainContext);
+            runtime.eeScheduler().run();
+
+            t.Equals(g_cdCallbackPrevious, 0u, "first sceCdCallback should return no previous callback");
+            t.Equals(g_cdCallbackFunction, 4u, "the callback should receive SCECdFuncSeek");
         });
 
         tc.Run("sceCdRead reads from explicit cdImage path", [](TestCase &t)
