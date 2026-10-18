@@ -842,20 +842,20 @@ namespace
         {
         }
 
+        // EE GCC's EABI spills each variadic GPR as a doubleword, so va_arg steps 8 bytes even for int.
         uint32_t nextU32()
         {
-            uint32_t value = 0;
-            (void)tryReadWordFromGuest(m_rdram, m_runtime, m_curr, value);
-            m_curr += 4;
-            return value;
+            return static_cast<uint32_t>(nextU64());
         }
 
         uint64_t nextU64()
         {
-            m_curr = (m_curr + 7u) & ~7u;
-            const uint64_t low = nextU32();
-            const uint64_t high = nextU32();
-            return low | (high << 32);
+            uint32_t low = 0;
+            uint32_t high = 0;
+            (void)tryReadWordFromGuest(m_rdram, m_runtime, m_curr, low);
+            (void)tryReadWordFromGuest(m_rdram, m_runtime, m_curr + 4u, high);
+            m_curr += 8u;
+            return static_cast<uint64_t>(low) | (static_cast<uint64_t>(high) << 32);
         }
 
     private:
