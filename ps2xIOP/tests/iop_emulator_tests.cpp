@@ -911,6 +911,20 @@ int main()
     if (!expect(stopResult == 0, "Emulated module stop result mismatch")) return 1;
     if (!expect(iop.debugSnapshot().emulatorLoadedModules == 0u, "Module was not released")) return 1;
 
+    // Retail games sceSifSetDma the IRX into IOP RAM and pass that IOP address to sceSifLoadModuleBuffer.
+    constexpr uint32_t irxStageSize = 0x200u;
+    writeMinimalIrx(host, 0x100u);
+    const uint32_t iopStage = iop.allocateMemory(irxStageSize);
+    if (!expect(iopStage != 0u, "IOP staging allocation failed")) return 1;
+    if (!expect(iop.writeMemory(iopStage, host.guest.data() + 0x100u, irxStageSize),
+                "Copying the IRX into IOP RAM failed")) return 1;
+    std::memset(host.guest.data() + 0x100u, 0, irxStageSize);
+    const ModuleLoadResult iopStaged = iop.loadModuleBuffer(iopStage);
+    if (!expect(iopStaged.handled && iopStaged.moduleId > 0 && iopStaged.startResult == 7,
+                "IRX staged in IOP RAM did not load")) return 1;
+    if (!expect(iop.stopModule(iopStaged.moduleId), "IOP-staged module stop failed")) return 1;
+    if (!expect(iop.freeMemory(iopStage), "IOP staging free failed")) return 1;
+
     constexpr uint32_t rpcSid = 0xF00DCAFEu;
     writeRpcServerIrx(host, 0x100u);
     const ModuleLoadResult rpcModule = iop.loadModuleBuffer(0x100u);
