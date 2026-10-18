@@ -914,8 +914,11 @@ int main()
     // Retail games sceSifSetDma the IRX into IOP RAM and pass that IOP address to sceSifLoadModuleBuffer.
     constexpr uint32_t irxStageSize = 0x200u;
     writeMinimalIrx(host, 0x100u);
+    // Keep the stage clear of 0x10000, where the test IRX is linked.
+    const uint32_t stageGuard = iop.allocateMemory(0x1000u);
     const uint32_t iopStage = iop.allocateMemory(irxStageSize);
-    if (!expect(iopStage != 0u, "IOP staging allocation failed")) return 1;
+    if (!expect(stageGuard == 0x00010000u && iopStage != 0u, "IOP staging allocation failed")) return 1;
+    if (!expect(iop.freeMemory(stageGuard), "IOP stage guard free failed")) return 1;
     if (!expect(iop.writeMemory(iopStage, host.guest.data() + 0x100u, irxStageSize),
                 "Copying the IRX into IOP RAM failed")) return 1;
     std::memset(host.guest.data() + 0x100u, 0, irxStageSize);
@@ -928,10 +931,23 @@ int main()
                 "Module lookup must accept KSEG0 IOP addresses")) return 1;
     if (!expect(iop.findModuleByAddress(0x00018000u) == -1,
                 "Module lookup matched an address outside the IRX image")) return 1;
+    if (!expect(iop.allocateMemory(0x10u) != 0x00010000u,
+                "Heap allocation landed inside a loaded IRX image")) return 1;
     if (!expect(iop.stopModule(iopStaged.moduleId), "IOP-staged module stop failed")) return 1;
     if (!expect(iop.findModuleByAddress(0x00010004u) == -1,
                 "Module lookup still matched a stopped IRX")) return 1;
     if (!expect(iop.freeMemory(iopStage), "IOP staging free failed")) return 1;
+    iop.reset();
+
+    // Modules and heap share one arena, and freed blocks are reused first-fit.
+    const uint32_t firstBlock = iop.allocateMemory(0x1000u);
+    const uint32_t secondBlock = iop.allocateMemory(0x1000u);
+    if (!expect(firstBlock != 0u && secondBlock > firstBlock, "IOP heap allocations failed")) return 1;
+    if (!expect(iop.freeMemory(firstBlock), "IOP heap free failed")) return 1;
+    if (!expect(iop.allocateMemory(0x800u) == firstBlock, "Freed IOP heap block was not reused")) return 1;
+    if (!expect(iop.allocateMemory(0x100000u) != 0u,
+                "IOP heap could not satisfy a 1 MiB allocation")) return 1;
+    iop.reset();
 
     constexpr uint32_t rpcSid = 0xF00DCAFEu;
     writeRpcServerIrx(host, 0x100u);

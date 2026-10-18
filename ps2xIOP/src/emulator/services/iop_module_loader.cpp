@@ -382,10 +382,9 @@ namespace ps2x::iop::detail
                             iopAddress, bytes);
     }
 
-    IopImageLoadResult IopModuleLoader::load(std::span<const uint8_t> image, IopMemory &memory, uint32_t moduleCursor)
+    IopImageLoadResult IopModuleLoader::load(std::span<const uint8_t> image, IopMemory &memory)
     {
         IopImageLoadResult result;
-        result.nextModuleCursor = moduleCursor;
         if (image.size() < sizeof(Elf32Ehdr))
             return result;
 
@@ -442,22 +441,36 @@ namespace ps2x::iop::detail
         const bool relocate = header.type != ET_EXEC ||
                               maxVaddr > IopMemory::RamSize ||
                               (minVaddr < kModuleLoadBase && minVaddr != 0u);
+        // Releases the arena block if a later step rejects the image.
+        struct Reservation
+        {
+            IopMemory &memory;
+            uint32_t address = 0u;
+            ~Reservation()
+            {
+                if (address != 0u)
+                    (void)memory.freeAllocation(address);
+            }
+        } reservation{memory};
+
         uint32_t base = 0u;
         int64_t delta = 0;
         if (relocate)
         {
-            base = alignUp(moduleCursor, 0x100u);
-            if (base + span >= IopMemory::HeapBase)
+            base = memory.allocate(span, 0x100u);
+            if (base == 0u)
             {
                 result.error = IopImageLoadError::ArenaExhausted;
                 return result;
             }
+            reservation.address = base;
             delta = static_cast<int64_t>(base) - minVaddr;
-            result.nextModuleCursor = base + span;
         }
         else
         {
             base = minVaddr;
+            // Linked-address images still load when their range is outside the arena or already taken.
+            reservation.address = memory.allocate(span, 4u, base);
         }
 
         if (hasLoad)
@@ -571,6 +584,8 @@ namespace ps2x::iop::detail
         }
 
         result.error = IopImageLoadError::None;
+        result.reserved = reservation.address != 0u;
+        reservation.address = 0u;
         return result;
     }
 }
