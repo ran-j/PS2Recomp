@@ -298,6 +298,7 @@
     X(sceCdInit)                              \
     X(sceCdInitEeCB)                          \
     X(sceCdIntToPos)                          \
+    X(sceCdLayerSearchFile)                   \
     X(sceCdMmode)                             \
     X(sceCdNcmdDiskReady)                     \
     X(sceCdPause)                             \

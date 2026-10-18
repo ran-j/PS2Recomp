@@ -648,6 +648,13 @@ namespace ps2_stubs
         setReturnS32(ctx, 1);
     }
 
+    void sceCdLayerSearchFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        // Host files have no disc layers, so the layer argument in $a2 is irrelevant.
+        // Left to the guest libcdvd, this binds CDVDFSV's RPC, which no BIOS-free IOP registers.
+        sceCdSearchFile(rdram, ctx, runtime);
+    }
+
     void sceCdSeek(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         restartCdStreamAt(getRegU32(ctx, 4), runtime);

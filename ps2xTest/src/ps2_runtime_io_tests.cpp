@@ -707,6 +707,32 @@ void register_ps2_runtime_io_tests()
                      "sceCdSearchFile should assign a pseudo LSN for the resolved host file");
         });
 
+        tc.Run("sceCdLayerSearchFile resolves host files regardless of layer", [](TestCase &t)
+        {
+            TestContext test;
+
+            std::filesystem::create_directories(test.paths.cdRoot / "modules");
+            {
+                std::ofstream out(test.paths.cdRoot / "modules" / "ioprp310.img", std::ios::binary);
+                const std::string payload = "romdir";
+                out.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+            }
+
+            constexpr uint32_t fileAddr = GUEST_BUFFER_AREA_START + 0x1B00;
+            constexpr uint32_t pathAddr = GUEST_STRING_AREA_START + 0xB00;
+            writeGuestString(test.rdram.data(), pathAddr, "\\MODULES\\IOPRP310.IMG;1");
+
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 4, fileAddr);
+            setRegU32(test.ctx, 5, pathAddr);
+            setRegU32(test.ctx, 6, 1u); // second layer
+            ps2_stubs::sceCdLayerSearchFile(test.rdram.data(), &test.ctx, nullptr);
+
+            t.Equals(getRegS32(&test.ctx, 2), 1, "sceCdLayerSearchFile should resolve the extracted file");
+            t.Equals(readGuestU32(test.rdram.data(), fileAddr + 4), 6u,
+                     "sceCdLayerSearchFile should report the host file size");
+        });
+
         tc.Run("sceCdRead reads from explicit cdImage path", [](TestCase &t)
         {
             TestContext test;
