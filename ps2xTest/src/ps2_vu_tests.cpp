@@ -296,7 +296,7 @@ void register_ps2_vu_tests()
             t.IsTrue(allMatch, "MulMatrix(dst, I, A) should equal A");
         });
 
-        tc.Run("MulMatrix_equals_arg1_times_arg2", [](TestCase &t)
+        tc.Run("MulMatrix_matches_libvu0_operand_order", [](TestCase &t)
         {
             VuEnv env;
             float m0[16] = {
@@ -317,9 +317,10 @@ void register_ps2_vu_tests()
                     float sum = 0.0f;
                     for (int k = 0; k < 4; ++k)
                     {
-                        // expected = mulVuMatrix(m0, m1) = m0 * m1 (arg1 * arg2);
-                        // mulVuMatrix is file-local to VU.cpp, so mirror its formula here.
-                        sum += m1[4 * k + j] * m0[4 * i + k];
+                        // libvu0 loads the arg1 rows into vf4-vf7 and, for each arg2 row,
+                        // accumulates vf4*row.x + vf5*row.y + vf6*row.z + vf7*row.w:
+                        // out[i] = sum_k arg2[i][k] * arg1[k], i.e. arg2 * arg1 in memory.
+                        sum += m0[4 * k + j] * m1[4 * i + k];
                     }
                     expected[4 * i + j] = sum;
                 }
@@ -340,7 +341,7 @@ void register_ps2_vu_tests()
                     allMatch = false;
                 }
             }
-            t.IsTrue(allMatch, "MulMatrix(dst, m0, m1) should equal m0*m1 (mulVuMatrix(m0,m1), arg1*arg2)");
+            t.IsTrue(allMatch, "MulMatrix(dst, m0, m1) should equal m1*m0 in row-major memory, like libvu0");
         });
 
         tc.Run("RotMatrix_Z_matches_RotMatrixZ", [](TestCase &t)
