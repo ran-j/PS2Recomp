@@ -182,6 +182,65 @@ namespace
         std::memcpy(host.guest.data() + address + codeOffset, code, sizeof(code));
     }
 
+    // IRX whose .iopmod carries a module name; start returns startResult (0 = RESIDENT_END).
+    void writeNamedIrx(TestHost &host, uint32_t address, const char *name, uint16_t startResult = 0u)
+    {
+        constexpr uint32_t codeOffset = 0x100u;
+        constexpr uint32_t iopModOffset = 0x80u;
+        constexpr uint32_t loadAddress = 0x00010000u;
+
+        ElfHeader header{};
+        header.ident[0] = 0x7Fu;
+        header.ident[1] = 'E';
+        header.ident[2] = 'L';
+        header.ident[3] = 'F';
+        header.ident[4] = 1u;
+        header.ident[5] = 1u;
+        header.ident[6] = 1u;
+        header.type = 2u;
+        header.machine = 8u;
+        header.version = 1u;
+        header.entry = loadAddress;
+        header.phoff = sizeof(ElfHeader);
+        header.ehsize = sizeof(ElfHeader);
+        header.phentsize = sizeof(ProgramHeader);
+        header.phnum = 2u;
+
+        const uint32_t code[] = {
+            0x03E00008u, // jr    ra
+            0x24020000u | startResult, // addiu v0, zero, startResult
+        };
+
+        // moduleinfo, entry, gp, text/data/bss sizes, u16 version, name
+        uint8_t iopMod[0x40] = {};
+        const uint32_t iopModWords[] = {0u, loadAddress, 0u, sizeof(code), 0u, 0u};
+        std::memcpy(iopMod, iopModWords, sizeof(iopModWords));
+        std::memcpy(iopMod + 0x1Au, name, std::strlen(name) + 1u);
+
+        ProgramHeader iopModule{};
+        iopModule.type = 0x70000080u; // PT_SCE_IOPMOD
+        iopModule.offset = iopModOffset;
+        iopModule.filesz = sizeof(iopMod);
+        iopModule.memsz = sizeof(iopMod);
+        iopModule.align = 4u;
+
+        ProgramHeader program{};
+        program.type = 1u;
+        program.offset = codeOffset;
+        program.vaddr = loadAddress;
+        program.paddr = loadAddress;
+        program.filesz = sizeof(code);
+        program.memsz = sizeof(code);
+        program.flags = 5u;
+        program.align = 4u;
+
+        std::memcpy(host.guest.data() + address, &header, sizeof(header));
+        std::memcpy(host.guest.data() + address + sizeof(header), &iopModule, sizeof(iopModule));
+        std::memcpy(host.guest.data() + address + sizeof(header) + sizeof(ProgramHeader), &program, sizeof(program));
+        std::memcpy(host.guest.data() + address + iopModOffset, iopMod, sizeof(iopMod));
+        std::memcpy(host.guest.data() + address + codeOffset, code, sizeof(code));
+    }
+
     void writeRpcServerIrx(TestHost &host,
                            uint32_t address,
                            uint32_t sid = 0xF00DCAFEu)
@@ -1141,6 +1200,22 @@ int main()
         { return message.find("unhandled import cdvdman:7") != std::string::npos; });
     if (!expect(!emittedUnhandledSeek,
                 "sceCdSeek still emitted an unhandled IOP import")) return 1;
+
+    {
+        TestHost namedHost(0x20000u);
+        IopSubsystem namedIop(namedHost);
+        writeNamedIrx(namedHost, 0x100u, "padman");
+        const ModuleLoadResult named = namedIop.loadModuleBuffer(0x100u);
+        if (!expect(named.moduleId > 0 && named.startResult == 0, "Named resident IRX did not load")) return 1;
+        if (!expect(namedIop.findModuleByName("padman") == named.moduleId,
+                    "Module lookup must use the .iopmod name")) return 1;
+        if (!expect(namedIop.findModuleByName("mcman") == -1, "Unknown module name must not match")) return 1;
+
+        writeNamedIrx(namedHost, 0x800u, "mcman", 1u); // NO_RESIDENT_END
+        const ModuleLoadResult transient = namedIop.loadModuleBuffer(0x800u);
+        if (!expect(transient.moduleId > 0 && transient.startResult == 1, "Non-resident IRX did not run")) return 1;
+        if (!expect(namedIop.findModuleByName("mcman") == -1, "Non-resident modules must not be found")) return 1;
+    }
 
     std::cout << "ps2xIOP emulator smoke tests passed\n";
     return 0;

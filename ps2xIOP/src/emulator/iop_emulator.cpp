@@ -609,6 +609,8 @@ namespace ps2x::iop::detail
             module.path = std::move(path);
             const size_t slash = module.path.find_last_of("/\\:");
             module.name = slash == std::string::npos ? module.path : module.path.substr(slash + 1u);
+            if (!loaded.name.empty())
+                module.name = loaded.name;
             module.base = loaded.base;
             module.size = loaded.size;
             module.entry = loaded.entry;
@@ -650,6 +652,16 @@ namespace ps2x::iop::detail
                 return {true, -1, -1};
             }
             return loadImage(std::string(path), image, arguments, argumentSize);
+        }
+
+        int32_t findModuleByName(std::string_view name) const
+        {
+            for (const auto &[id, module] : modules)
+            {
+                if (module.resident && module.name == name)
+                    return id;
+            }
+            return -1;
         }
 
         ModuleLoadResult loadModuleBuffer(uint32_t guestAddress, const void *arguments, uint32_t argumentSize)
@@ -732,6 +744,11 @@ namespace ps2x::iop::detail
     ModuleLoadResult IopEmulator::loadModuleBuffer(uint32_t guestAddress, const void *arguments, uint32_t argumentSize)
     {
         return m_impl->loadModuleBuffer(guestAddress, arguments, argumentSize);
+    }
+
+    int32_t IopEmulator::findModuleByName(std::string_view name) const
+    {
+        return m_impl->findModuleByName(name);
     }
 
     bool IopEmulator::stopModule(int32_t moduleId, int32_t *result)

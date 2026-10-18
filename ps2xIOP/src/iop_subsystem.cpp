@@ -150,6 +150,12 @@ namespace ps2x::iop
         return m_impl->emulator.loadModuleBuffer(guestAddress, arguments, argumentSize);
     }
 
+    int32_t IopSubsystem::findModuleByName(std::string_view name) const
+    {
+        const int32_t physical = m_impl->emulator.findModuleByName(name);
+        return physical >= 0 ? physical : m_impl->moduleManager.findHleByName(name);
+    }
+
     bool IopSubsystem::stopModule(int32_t moduleId, int32_t *result)
     {
         if (m_impl->moduleManager.stopHle(moduleId, result))

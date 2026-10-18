@@ -42,6 +42,7 @@ namespace ps2_stubs
     void sceSifRemoveRpcQueue(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifResetIop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifRpcLoop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void sceSifSearchModuleByName(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifSetCmdBuffer(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void isceSifSetDChain(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void isceSifSetDma(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);

@@ -156,6 +156,12 @@ namespace ps2x::iop::detail
                                return found != m_loadedKeyReferences.end() && found->second != 0u; });
     }
 
+    int32_t IopModuleManager::findHleByName(std::string_view name) const
+    {
+        const auto found = m_hleIdsByKey.find(ps2PathLeafKey(name));
+        return found != m_hleIdsByKey.end() ? found->second : -1;
+    }
+
     bool IopModuleManager::recognizes(std::string_view path) const
     {
         const std::string key = ps2PathLeafKey(path);

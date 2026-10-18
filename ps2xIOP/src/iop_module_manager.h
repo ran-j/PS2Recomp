@@ -27,6 +27,8 @@ namespace ps2x::iop::detail
 
         [[nodiscard]] bool isLoaded(std::span<const std::string_view> aliases) const;
         [[nodiscard]] bool recognizes(std::string_view path) const;
+        // HLE module loaded under this name (path leaf, e.g. "sio2man" for rom0:SIO2MAN), or -1.
+        [[nodiscard]] int32_t findHleByName(std::string_view name) const;
 
     private:
         struct Record

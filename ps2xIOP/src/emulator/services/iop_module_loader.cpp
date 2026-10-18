@@ -522,6 +522,15 @@ namespace ps2x::iop::detail
                 result.gp = gp != 0u
                                 ? static_cast<uint32_t>(static_cast<int64_t>(gp) + delta)
                                 : 0u;
+                // .iopmod: moduleinfo, entry, gp, text/data/bss sizes, u16 version, then the name.
+                constexpr uint32_t kIopModNameOffset = 0x1Au;
+                if (program.filesz > kIopModNameOffset && checkedRange(image.size(), program.offset, program.filesz))
+                {
+                    const char *name = reinterpret_cast<const char *>(image.data() + program.offset + kIopModNameOffset);
+                    const size_t maxLength = program.filesz - kIopModNameOffset;
+                    const void *end = std::memchr(name, '\0', maxLength);
+                    result.name.assign(name, end ? static_cast<const char *>(end) - name : maxLength);
+                }
                 break;
             }
         }
