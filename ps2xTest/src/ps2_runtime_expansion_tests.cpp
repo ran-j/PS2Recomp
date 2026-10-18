@@ -994,6 +994,50 @@ void register_ps2_runtime_expansion_tests()
                      "sprintf should return the rendered length");
         });
 
+        tc.Run("vfprintf fills guest newlib string FILEs from doubleword va_list slots", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            R5900Context ctx{};
+
+            // Layout of guest newlib snprintf's stack FILE: _p, _w and __SWR|__SSTR flags.
+            constexpr uint32_t kFileAddr = 0x00003000u;
+            constexpr uint32_t kDestAddr = 0x00003100u;
+            constexpr uint32_t kFormatAddr = 0x00003200u;
+            constexpr uint32_t kVaListAddr = 0x00003300u;
+            constexpr char kFormat[] = "%s/%02d_%d.bin";
+            constexpr char kDir[] = "DATA";
+            constexpr uint32_t kDirAddr = 0x00003280u;
+            constexpr uint32_t kRoom = 8u;
+
+            std::memcpy(rdram.data() + kFormatAddr, kFormat, sizeof(kFormat));
+            std::memcpy(rdram.data() + kDirAddr, kDir, sizeof(kDir));
+            const uint32_t fileWords[] = {kDestAddr, 0u, kRoom, 0x0208u};
+            std::memcpy(rdram.data() + kFileAddr, fileWords, sizeof(fileWords));
+            const uint64_t slots[] = {kDirAddr, 7u, 3u};
+            std::memcpy(rdram.data() + kVaListAddr, slots, sizeof(slots));
+            std::memset(rdram.data() + kDestAddr, 0xAA, 16u);
+
+            setRegU32(ctx, 4, kFileAddr);
+            setRegU32(ctx, 5, kFormatAddr);
+            setRegU32(ctx, 6, kVaListAddr);
+            ps2_stubs::vfprintf(rdram.data(), &ctx, &runtime);
+
+            const std::string full = "DATA/07_3.bin";
+            t.Equals(getRegS32(ctx, 2), static_cast<int32_t>(full.size()),
+                     "vfprintf should return the full rendered length");
+            t.Equals(std::string(reinterpret_cast<const char *>(rdram.data() + kDestAddr), kRoom),
+                     full.substr(0, kRoom), "vfprintf should copy at most _w bytes to _p");
+            t.Equals(rdram[kDestAddr + kRoom], static_cast<uint8_t>(0xAAu),
+                     "vfprintf must not write past _w; the caller NUL-terminates");
+            uint32_t cursor = 0u;
+            uint32_t room = 0u;
+            std::memcpy(&cursor, rdram.data() + kFileAddr, 4u);
+            std::memcpy(&room, rdram.data() + kFileAddr + 8u, 4u);
+            t.Equals(cursor, kDestAddr + kRoom, "vfprintf should advance _p");
+            t.Equals(room, 0u, "vfprintf should consume _w");
+        });
+
         tc.Run("multiply-add matrix writes rd only when R5900 requires it", [](TestCase &t)
         {
             R5900Decoder decoder;
