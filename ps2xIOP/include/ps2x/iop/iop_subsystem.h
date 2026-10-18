@@ -26,6 +26,8 @@ namespace ps2x::iop
         [[nodiscard]] ModuleLoadResult loadModule(std::string_view path, const void *arguments = nullptr, uint32_t argumentSize = 0);
         [[nodiscard]] ModuleLoadResult loadModuleBuffer(uint32_t guestAddress, const void *arguments = nullptr, uint32_t argumentSize = 0);
         [[nodiscard]] bool stopModule(int32_t moduleId, int32_t *result = nullptr);
+        // Returns the id of the physical IRX whose image contains the IOP address, or -1.
+        [[nodiscard]] int32_t findModuleByAddress(uint32_t iopAddress) const noexcept;
         void runEeCycles(uint64_t eeCycles) noexcept;
 
         [[nodiscard]] RpcAbi selectRpcAbi(const RpcAbiRequest &request) const;
