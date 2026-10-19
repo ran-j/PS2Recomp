@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -161,6 +162,25 @@ struct GSXYOffsetReg
     uint16_t ofx = 0;
     uint16_t ofy = 0;
 };
+
+// Window coordinate in 12.4 fixed point: the vertex position minus XYOFFSET,
+// both at full sub-pixel precision.
+inline int32_t gsWindowCoord(float vertexCoord, uint16_t offset)
+{
+    return static_cast<int32_t>(std::lround(vertexCoord * 16.0f)) - static_cast<int32_t>(offset);
+}
+
+// ceil(coord / 16): first pixel at or after a 12.4 window coordinate.
+inline int32_t gsCeilPixel(int32_t windowCoord)
+{
+    return (windowCoord + 15) >> 4;
+}
+
+// floor(coord / 16 + 0.5): nearest pixel to a 12.4 window coordinate.
+inline int32_t gsNearestPixel(int32_t windowCoord)
+{
+    return (windowCoord + 8) >> 4;
+}
 
 struct GSTexaReg
 {

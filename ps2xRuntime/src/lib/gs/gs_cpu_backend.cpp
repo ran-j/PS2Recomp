@@ -836,8 +836,9 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
     {
         const GSVertex &v = batch.vertices[0];
         const auto &ctx = state.context;
-        int px = static_cast<int>(v.x) - (ctx.xyoffset.ofx >> 4);
-        int py = static_cast<int>(v.y) - (ctx.xyoffset.ofy >> 4);
+        // Points light the pixel nearest to their window position, as in PCSX2.
+        int px = gsNearestPixel(gsWindowCoord(v.x, ctx.xyoffset.ofx));
+        int py = gsNearestPixel(gsWindowCoord(v.y, ctx.xyoffset.ofy));
         WritePixel(state, px, py, static_cast<u32>(v.z), v.r, v.g, v.b, v.a, v.fog);
         break;
     }
@@ -1166,13 +1167,13 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
     const GSVertex &v1 = batch.vertices[1];
     const auto &ctx = state.context;
 
-    int ofx = ctx.xyoffset.ofx >> 4;
-    int ofy = ctx.xyoffset.ofy >> 4;
-
-    int x0 = static_cast<int>(v0.x) - ofx;
-    int y0 = static_cast<int>(v0.y) - ofy;
-    int x1 = static_cast<int>(v1.x) - ofx;
-    int y1 = static_cast<int>(v1.y) - ofy;
+    // Like the PCSX2 software rasterizer, a sprite covers the pixels in
+    // [ceil(x0), ceil(x1)) x [ceil(y0), ceil(y1)) of its window coordinates
+    // (still widened to at least one pixel per axis, as before).
+    int x0 = gsCeilPixel(gsWindowCoord(v0.x, ctx.xyoffset.ofx));
+    int y0 = gsCeilPixel(gsWindowCoord(v0.y, ctx.xyoffset.ofy));
+    int x1 = gsCeilPixel(gsWindowCoord(v1.x, ctx.xyoffset.ofx));
+    int y1 = gsCeilPixel(gsWindowCoord(v1.y, ctx.xyoffset.ofy));
     u32 z1 = static_cast<u32>(v1.z);
 
     if (x0 > x1)

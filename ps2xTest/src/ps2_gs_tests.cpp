@@ -3805,6 +3805,72 @@ void register_ps2_gs_tests()
                      "CT24 DATE should not block depth");
         });
 
+        tc.Run("GS sprite and point keep the sub-pixel part of XYZ and XYOFFSET", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            constexpr uint64_t kFrame =
+                (1ull << 16) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kZbuf = (1ull << 32);
+            constexpr uint64_t kScissor =
+                (0ull << 0) |
+                (15ull << 16) |
+                (0ull << 32) |
+                (15ull << 48);
+            constexpr uint64_t kRgbaq = 0x80FFFFFFull | (0x3F800000ull << 32);
+            auto makeXyz = [](uint16_t x, uint16_t y) -> uint64_t
+            {
+                return static_cast<uint64_t>(x) |
+                       (static_cast<uint64_t>(y) << 16);
+            };
+            auto drawnPixels = [&]() -> std::vector<std::pair<uint32_t, uint32_t>>
+            {
+                std::vector<std::pair<uint32_t, uint32_t>> drawn;
+                for (uint32_t y = 0u; y <= 9u; ++y)
+                {
+                    for (uint32_t x = 0u; x <= 9u; ++x)
+                    {
+                        if ((readReferencePSMCT32Pixel(vram, 0u, 1u, x, y) & 0x00FFFFFFu) != 0u)
+                            drawn.emplace_back(x, y);
+                    }
+                }
+                return drawn;
+            };
+
+            gs.writeRegister(GS_REG_FRAME_1, kFrame);
+            gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
+            gs.writeRegister(GS_REG_SCISSOR_1, kScissor);
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
+            gs.writeRegister(GS_REG_RGBAQ, kRgbaq);
+
+            // XYOFFSET = 0.5 px. The sprite spans window x 2.25..6.25 and
+            // y 2.25..4.25, so it covers [ceil(2.25), ceil(6.25)) = 3..6 and 3..4.
+            gs.writeRegister(GS_REG_XYOFFSET_1, 0x08ull | (0x08ull << 32));
+            gs.writeRegister(GS_REG_PRIM, static_cast<uint64_t>(GS_PRIM_SPRITE));
+            gs.writeRegister(GS_REG_XYZ2, makeXyz(0x2Cu, 0x2Cu));
+            gs.writeRegister(GS_REG_XYZ2, makeXyz(0x6Cu, 0x4Cu));
+
+            std::vector<std::pair<uint32_t, uint32_t>> expectedSprite;
+            for (uint32_t y = 3u; y <= 4u; ++y)
+                for (uint32_t x = 3u; x <= 6u; ++x)
+                    expectedSprite.emplace_back(x, y);
+            t.IsTrue(drawnPixels() == expectedSprite,
+                     "sprite should cover pixels 3..6 x 3..4 from its sub-pixel window rectangle");
+
+            // A point at window (2.75, 1.25) lights the nearest pixel, (3, 1).
+            std::fill(vram.begin(), vram.end(), 0u);
+            gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+            gs.writeRegister(GS_REG_PRIM, static_cast<uint64_t>(GS_PRIM_POINT));
+            gs.writeRegister(GS_REG_XYZ2, makeXyz(0x2Cu, 0x14u));
+
+            const std::vector<std::pair<uint32_t, uint32_t>> expectedPoint = {{3u, 1u}};
+            t.IsTrue(drawnPixels() == expectedPoint,
+                     "point should light the pixel nearest to its sub-pixel window position");
+        });
+
         tc.Run("GS triangle fan subpixel quad fills rows without interior holes", [](TestCase &t)
         {
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
