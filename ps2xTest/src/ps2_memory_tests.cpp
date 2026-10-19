@@ -479,6 +479,29 @@ void register_ps2_memory_tests()
             t.Equals(mem.vif1_regs.col[3], 0xAAAA0004u, "STCOL should set col[3]");
         });
 
+        tc.Run("VIFcode I bit raises the VIF INTC cause unless ERR.MII masks it", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x00u, 0u, 0u) | 0x80000000u); // NOP with the I bit
+
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+            t.IsTrue(mem.consumePendingIntcCauses() == std::vector<uint32_t>{5u},
+                     "a VIF1 VIFcode with the I bit should raise INTC cause 5 (VIF1)");
+            t.IsTrue((mem.vif1_regs.stat & (1u << 11)) != 0u, "the I bit should still set VIF1_STAT.INT");
+            t.IsTrue(mem.consumePendingIntcCauses().empty(), "consuming should clear the pending INTC causes");
+
+            t.IsTrue(mem.writeIORegister(0x10003C20u, 0x1u), "writing VIF1_ERR.MII should succeed");
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+            t.IsTrue(mem.consumePendingIntcCauses().empty(), "VIF1_ERR.MII should mask the I-bit interrupt");
+
+            mem.processVIF0Data(packet.data(), static_cast<uint32_t>(packet.size()));
+            t.IsTrue(mem.consumePendingIntcCauses() == std::vector<uint32_t>{4u},
+                     "a VIF0 VIFcode with the I bit should raise INTC cause 4 (VIF0)");
+        });
+
         tc.Run("VIF UNPACK V4-16 sign and zero extension follow immediate bit14", [](TestCase &t)
         {
             PS2Memory mem;

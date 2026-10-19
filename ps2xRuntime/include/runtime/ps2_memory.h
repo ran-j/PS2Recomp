@@ -345,6 +345,9 @@ public:
     void processVIF1Data(const uint8_t *data, uint32_t sizeBytes);
     void processPendingTransfers();
     std::vector<uint32_t> consumeCompletedDmacCauses();
+    // INTC causes raised by devices (a VIFcode with its I bit set), delivered
+    // to the EE scheduler alongside the completed DMAC causes.
+    std::vector<uint32_t> consumePendingIntcCauses();
 
     int pollDmaRegisters();
 
@@ -423,6 +426,7 @@ public:
     std::vector<PendingTransfer> m_pendingVif1Transfers;
     std::mutex m_completedDmacMutex;
     std::vector<uint32_t> m_completedDmacCauses;
+    std::vector<uint32_t> m_pendingIntcCauses;
 
     struct CodeRegion
     {
@@ -452,6 +456,7 @@ public:
     bool tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr);
     void completeDmacChannel(uint32_t channelBase, uint32_t cause);
     void queueCompletedDmacCause(uint32_t cause);
+    void queueIntcCause(uint32_t cause);
 };
 
 #endif // PS2_MEMORY_H

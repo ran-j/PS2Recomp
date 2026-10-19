@@ -325,6 +325,7 @@ bool PS2Memory::initialize(size_t ramSize)
     {
         std::lock_guard<std::mutex> lock(m_completedDmacMutex);
         m_completedDmacCauses.clear();
+        m_pendingIntcCauses.clear();
     }
     m_codeRegions.clear();
     m_path3Masked = false;
@@ -1240,6 +1241,9 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                 vif1_regs.stat &= ~((1u << 8) | (1u << 9) | (1u << 10) | (1u << 11) | (1u << 12) | (1u << 13));
             }
             break;
+        case 0x10003C20u: // VIF1_ERR: MII, ME0, ME1
+            vif1_regs.err = value & 0x7u;
+            break;
         case 0x10003C30u:
             vif1_regs.mark = value & 0xFFFFu;
             vif1_regs.stat &= ~(1u << 6); // clear MRK flag on CPU write
@@ -1916,6 +1920,20 @@ std::vector<uint32_t> PS2Memory::consumeCompletedDmacCauses()
     std::lock_guard<std::mutex> lock(m_completedDmacMutex);
     std::vector<uint32_t> causes;
     causes.swap(m_completedDmacCauses);
+    return causes;
+}
+
+void PS2Memory::queueIntcCause(uint32_t cause)
+{
+    std::lock_guard<std::mutex> lock(m_completedDmacMutex);
+    m_pendingIntcCauses.push_back(cause);
+}
+
+std::vector<uint32_t> PS2Memory::consumePendingIntcCauses()
+{
+    std::lock_guard<std::mutex> lock(m_completedDmacMutex);
+    std::vector<uint32_t> causes;
+    causes.swap(m_pendingIntcCauses);
     return causes;
 }
 
