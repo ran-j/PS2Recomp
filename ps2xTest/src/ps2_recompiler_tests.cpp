@@ -156,6 +156,65 @@ static bool writeMinimalMipsElfWithJalFallbackTarget(const std::filesystem::path
     return writer.save(elfPath.string());
 }
 
+static bool writeMinimalMipsElfWithDelaySlotPointer(const std::filesystem::path &elfPath)
+{
+    ELFIO::elfio writer;
+    writer.create(ELFIO::ELFCLASS32, ELFIO::ELFDATA2LSB);
+    writer.set_os_abi(ELFIO::ELFOSABI_NONE);
+    writer.set_type(ELFIO::ET_EXEC);
+    writer.set_machine(ELFIO::EM_MIPS);
+    writer.set_entry(0x00100000u);
+
+    ELFIO::section *text = writer.sections.add(".text");
+    text->set_type(ELFIO::SHT_PROGBITS);
+    text->set_flags(ELFIO::SHF_ALLOC | ELFIO::SHF_EXECINSTR);
+    text->set_addr_align(4);
+    text->set_address(0x00100000u);
+
+    const std::array<uint32_t, 16> textWords = {
+        0x0C040004u, // jal 0x00100010
+        0x00000000u, // nop
+        0x03E00008u, // jr $ra
+        0x00000000u, // nop (delay slot, but also a JAL target below)
+        0x0C040008u, // jal 0x00100020
+        0x8C440000u, // lw a0,0(v0) (delay slot named by .ctors)
+        0x03E00008u, // jr $ra
+        0x00000000u, // nop
+        0x0C040003u, // jal 0x0010000C
+        0x00000000u, // nop
+        0x03E00008u, // jr $ra
+        0x00000000u, // nop
+        0x45000001u, // bc1f . + 8
+        0x8C440000u, // lw a0,0(v0) (delay slot named by .ctors)
+        0x03E00008u, // jr $ra
+        0x00000000u  // nop
+    };
+    text->set_data(reinterpret_cast<const char *>(textWords.data()),
+                   static_cast<ELFIO::Elf_Word>(textWords.size() * sizeof(uint32_t)));
+
+    ELFIO::section *ctors = writer.sections.add(".ctors");
+    ctors->set_type(ELFIO::SHT_PROGBITS);
+    ctors->set_flags(ELFIO::SHF_ALLOC | ELFIO::SHF_WRITE);
+    ctors->set_addr_align(4);
+    ctors->set_address(0x00200000u);
+    const std::array<uint32_t, 2> ctorWords{0x00100014u, 0x00100034u};
+    ctors->set_data(reinterpret_cast<const char *>(ctorWords.data()), sizeof(ctorWords));
+
+    ELFIO::segment *textSegment = writer.segments.add();
+    textSegment->set_type(ELFIO::PT_LOAD);
+    textSegment->set_flags(ELFIO::PF_R | ELFIO::PF_X);
+    textSegment->set_align(0x1000);
+    textSegment->add_section_index(text->get_index(), text->get_addr_align());
+
+    ELFIO::segment *dataSegment = writer.segments.add();
+    dataSegment->set_type(ELFIO::PT_LOAD);
+    dataSegment->set_flags(ELFIO::PF_R | ELFIO::PF_W);
+    dataSegment->set_align(0x1000);
+    dataSegment->add_section_index(ctors->get_index(), ctors->get_addr_align());
+
+    return writer.save(elfPath.string());
+}
+
 static bool writeMinimalMipsElfWithVuMicroprogramSection(const std::filesystem::path &elfPath)
 {
     ELFIO::elfio writer;
@@ -1652,6 +1711,45 @@ void register_ps2_recompiler_tests()
             std::error_code removeError;
             std::filesystem::remove(elfPath, removeError);
             std::filesystem::remove(mapPath, removeError);
+        });
+
+        tc.Run("fallback discovery does not split a function at a delay slot", [](TestCase &t) {
+            const auto uniqueSuffix = std::to_string(
+                static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+            const std::filesystem::path elfPath =
+                std::filesystem::temp_directory_path() / ("ps2recomp-delay-slot-start-" + uniqueSuffix + ".elf");
+
+            const bool writeOk = writeMinimalMipsElfWithDelaySlotPointer(elfPath);
+            t.IsTrue(writeOk, "temporary ELF should be generated");
+            if (!writeOk)
+            {
+                return;
+            }
+
+            ElfParser parser(elfPath.string());
+            const bool parseOk = parser.parse();
+            t.IsTrue(parseOk, "generated ELF should parse");
+            if (parseOk)
+            {
+                const auto functions = parser.extractFunctions();
+                auto hasStart = [&functions](uint32_t start)
+                {
+                    return std::any_of(functions.begin(), functions.end(),
+                                       [start](const Function &function)
+                                       { return function.start == start; });
+                };
+
+                t.IsTrue(hasStart(0x00100010u), "JAL target should stay a function start");
+                t.IsFalse(hasStart(0x00100014u),
+                          "a .ctors pointer at a JAL delay slot must not split its owner");
+                t.IsFalse(hasStart(0x00100034u),
+                          "a .ctors pointer at a BC1F delay slot must not split its owner");
+                t.IsTrue(hasStart(0x0010000Cu),
+                         "a JAL target stays a start even when it follows a branch");
+            }
+
+            std::error_code removeError;
+            std::filesystem::remove(elfPath, removeError);
         });
 
         tc.Run("elf parser discovers address-taken callbacks in stripped ELFs", [](TestCase &t) {
