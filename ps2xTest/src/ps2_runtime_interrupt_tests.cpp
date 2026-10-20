@@ -747,5 +747,22 @@ void register_ps2_runtime_interrupt_tests()
 
             cleanupRuntime(env);
         });
+
+        tc.Run("COP0 Count follows the EE cycle clock and MTC0 rebases it", [](TestCase &t)
+        {
+            TestEnv env;
+            t.IsTrue(env.runtime.memory().initialize(), "runtime memory initialize should succeed");
+
+            const uint32_t start = env.runtime.readCop0Count();
+            env.runtime.eeScheduler().accountCycles(1000u);
+            t.Equals(env.runtime.readCop0Count() - start, 1000u, "Count should advance one tick per EE cycle");
+
+            env.runtime.writeCop0Count(0xFFFFFFF0u);
+            t.Equals(env.runtime.readCop0Count(), 0xFFFFFFF0u, "MTC0 Count should set the current value");
+            env.runtime.eeScheduler().accountCycles(0x20u);
+            t.Equals(env.runtime.readCop0Count(), 0x10u, "Count should wrap at 32 bits");
+
+            cleanupRuntime(env);
+        });
     });
 }
