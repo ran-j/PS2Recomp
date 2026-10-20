@@ -1216,6 +1216,15 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
         return true;
     }
 
+    if (address == 0x1000F590u)
+    {
+        // D_ENABLEW: D_ENABLER (0x1000F520) reads back the last write. Games poll it after setting CPND
+        // (bit 16) to suspend DMA; transfers here finish synchronously, so there is nothing to hold back.
+        m_ioRegisters[address] = value;
+        m_ioRegisters[0x1000F520u] = value;
+        return true;
+    }
+
     m_ioRegisters[address] = value;
 
     if (address >= 0x10003C00u && address < 0x10003E00u)
@@ -1308,6 +1317,13 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
             if (tryProcessScratchpadDma(channelBase, value))
             {
+                return true;
+            }
+
+            if (channelBase == mfifoDrainChannel() && ((value >> 2) & 0x3u) == 1u)
+            {
+                // MFIFO drain: STR stays set, tags are consumed as fromSPR fills the ring.
+                drainMfifo();
                 return true;
             }
 
@@ -1600,6 +1616,27 @@ bool PS2Memory::tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr)
     const uint32_t originalMadr = m_ioRegisters[channelBase + 0x10u] & 0x7FFFFFF0u;
     const uint32_t originalSadr = m_ioRegisters[channelBase + 0x80u] & 0x3FF0u;
 
+    if (channelBase == kSprFromChannel && mfifoDrainChannel() != 0u)
+    {
+        // MFIFO: fromSPR's destination is the ring, MADR wraps inside it (RBOR + (addr & RBSR)).
+        uint32_t dst = mfifoWrap(originalMadr);
+        uint32_t scratchOffset = originalSadr;
+        for (uint32_t done = 0u; done < byteCount; done += 16u)
+        {
+            const uint32_t phys = dst & (PS2_RAM_SIZE - 1u);
+            std::memcpy(m_rdram + phys, m_scratchpad + scratchOffset, 16u);
+            markModified(phys, 16u);
+            scratchOffset = (scratchOffset + 16u) & (PS2_SCRATCHPAD_SIZE - 1u);
+            dst = mfifoWrap(dst + 16u);
+        }
+        m_ioRegisters[channelBase + 0x10u] = dst;
+        m_ioRegisters[channelBase + 0x20u] = 0u;
+        m_ioRegisters[channelBase + 0x80u] = scratchOffset & 0x3FF0u;
+        completeDmacChannel(channelBase, 8u);
+        drainMfifo();
+        return true;
+    }
+
     uint32_t mainOffset = 0u;
     try
     {
@@ -1658,6 +1695,160 @@ void PS2Memory::completeDmacChannel(uint32_t channelBase, uint32_t cause)
         dstat &= ~(1u << 31u);
     m_ioRegisters[kDStat] = dstat;
     queueCompletedDmacCause(cause);
+}
+
+uint32_t PS2Memory::mfifoDrainChannel()
+{
+    const auto dctrlIt = m_ioRegisters.find(0x1000E000u);
+    const uint32_t mfd = dctrlIt == m_ioRegisters.end() ? 0u : (dctrlIt->second >> 2u) & 0x3u;
+    if (mfd == 2u)
+        return 0x10009000u; // VIF1
+    if (mfd == 3u)
+        return 0x1000A000u; // GIF
+    return 0u;
+}
+
+uint32_t PS2Memory::mfifoWrap(uint32_t address)
+{
+    const uint32_t rbor = m_ioRegisters[0x1000E050u] & 0x7FFFFFF0u;
+    const uint32_t rbsr = m_ioRegisters[0x1000E040u] & 0x7FFFFFF0u;
+    return rbor + (address & rbsr);
+}
+
+void PS2Memory::drainMfifo()
+{
+    const uint32_t channel = mfifoDrainChannel();
+    if (channel == 0u || m_mfifoDraining)
+        return;
+    const uint32_t chcr = m_ioRegisters[channel];
+    if ((chcr & 0x100u) == 0u || ((chcr >> 2u) & 0x3u) != 1u)
+        return;
+    m_mfifoDraining = true;
+
+    const uint32_t rbor = m_ioRegisters[0x1000E050u] & 0x7FFFFFF0u;
+    const uint32_t ringMask = (m_ioRegisters[0x1000E040u] & 0x7FFFFFF0u) | 0xFu;
+    const uint32_t writePos = m_ioRegisters[0x1000D010u]; // fromSPR MADR, already inside the ring
+    const bool isVif = channel == 0x10009000u;
+    const bool transferTag = isVif && (chcr & 0x40u) != 0u; // CHCR.TTE
+    const bool tieEnabled = (chcr & 0x80u) != 0u;
+    uint32_t tadr = mfifoWrap(m_ioRegisters[channel + 0x30u]);
+    uint32_t madr = m_ioRegisters[channel + 0x10u];
+    uint32_t lastTagUpper = chcr >> 16u;
+    bool ended = false;
+    std::vector<uint8_t> out;
+
+    auto copyRing = [&](uint32_t from, uint32_t qwCount)
+    {
+        for (uint32_t i = 0u; i < qwCount; ++i)
+        {
+            const uint8_t *src = m_rdram + (from & (PS2_RAM_SIZE - 1u));
+            out.insert(out.end(), src, src + 16u);
+            from = mfifoWrap(from + 16u);
+        }
+        return from;
+    };
+    // REF/REFS/REFE data can live anywhere; only addresses inside the ring wrap.
+    auto copyAnywhere = [&](uint32_t from, uint32_t qwCount)
+    {
+        if ((from & ~ringMask) == rbor)
+            return copyRing(from, qwCount);
+        const bool scratch = isScratchpad(from);
+        uint32_t phys = 0u;
+        try
+        {
+            phys = translateAddress(from);
+        }
+        catch (const std::exception &)
+        {
+            return from;
+        }
+        const uint8_t *base = scratch ? m_scratchpad : m_rdram;
+        const uint32_t limit = scratch ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
+        const uint32_t bytes = qwCount * 16u;
+        if (phys < limit)
+            out.insert(out.end(), base + phys, base + phys + std::min(bytes, limit - phys));
+        return from + bytes;
+    };
+
+    for (int tags = 0; tags < 0x10000 && !ended; ++tags)
+    {
+        const uint32_t available = ((writePos - tadr) & ringMask) / 16u;
+        if (available == 0u)
+            break; // ring empty: the channel stalls with STR set until fromSPR writes more
+
+        const uint8_t *tp = m_rdram + (tadr & (PS2_RAM_SIZE - 1u));
+        const uint64_t tag = loadScalar<uint64_t>(tp, 0, 16, "mfifo tag", tadr);
+        const uint32_t tagQwc = static_cast<uint32_t>(tag & 0xFFFFu);
+        const uint32_t id = static_cast<uint32_t>((tag >> 28) & 0x7u);
+        const bool irq = ((tag >> 31) & 0x1u) != 0u;
+        const uint32_t addr = static_cast<uint32_t>((tag >> 32) & 0x7FFFFFF0u);
+        const bool dataFollowsTag = id == 1u || id == 2u || id == 7u;
+        if (dataFollowsTag && available < 1u + tagQwc)
+            break; // packet only partly written: wait for the rest
+
+        lastTagUpper = static_cast<uint32_t>((tag >> 16) & 0xFFFFu);
+        if (transferTag)
+            out.insert(out.end(), tp + 8u, tp + 16u);
+
+        const uint32_t dataStart = mfifoWrap(tadr + 16u);
+        switch (id)
+        {
+        case 0u: // REFE
+            madr = copyAnywhere(addr, tagQwc);
+            tadr = dataStart;
+            ended = true;
+            break;
+        case 1u: // CNT
+            madr = copyRing(dataStart, tagQwc);
+            tadr = madr;
+            break;
+        case 2u: // NEXT
+            madr = copyRing(dataStart, tagQwc);
+            tadr = mfifoWrap(addr);
+            break;
+        case 3u: // REF
+        case 4u: // REFS
+            madr = copyAnywhere(addr, tagQwc);
+            tadr = dataStart;
+            break;
+        case 7u: // END: TADR stays on the tag
+            madr = copyRing(dataStart, tagQwc);
+            ended = true;
+            break;
+        default: // CALL/RET have no meaning in a ring
+            std::cerr << "[mfifo] unsupported tag id " << id << " at 0x" << std::hex << tadr << std::dec << std::endl;
+            ended = true;
+            break;
+        }
+        if (irq && tieEnabled)
+            ended = true;
+    }
+
+    m_ioRegisters[channel + 0x30u] = tadr;
+    m_ioRegisters[channel + 0x10u] = madr;
+    m_ioRegisters[channel] = (m_ioRegisters[channel] & 0x0000FFFFu) | (lastTagUpper << 16u);
+
+    if (!out.empty())
+    {
+        if (isVif)
+        {
+            processVIF1Data(out.data(), static_cast<uint32_t>(out.size()));
+        }
+        else
+        {
+            m_seenGifCopy = true;
+            m_gifCopyCount.fetch_add(1, std::memory_order_relaxed);
+            submitGifPacket(GifPathId::Path3, out.data(), static_cast<uint32_t>(out.size()), false);
+        }
+        if (m_gifArbiter)
+            m_gifArbiter->drain();
+    }
+    if (ended)
+    {
+        m_ioRegisters[channel + 0x20u] = 0u;
+        completeDmacChannel(channel, isVif ? 1u : 2u);
+    }
+    m_mfifoDraining = false;
 }
 
 void PS2Memory::processPendingTransfers()
@@ -2361,6 +2552,9 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
         {
             if ((address & 0xFF) == 0x00)
             {
+                // An MFIFO drain channel stays busy until drainMfifo() reaches an END tag.
+                if ((address & 0xFFFFFF00u) == mfifoDrainChannel() && ((m_ioRegisters[address] >> 2u) & 0x3u) == 1u)
+                    return m_ioRegisters[address];
                 uint32_t channelStatus = m_ioRegisters[address] & ~0x100u;
                 m_ioRegisters[address] = channelStatus;
                 return channelStatus;

@@ -1980,6 +1980,101 @@ void register_ps2_memory_tests()
                 t.Equals(causes[0], 9u, "SPR_TO completion should use DMAC cause 9");
         });
 
+        tc.Run("DMAC MFIFO wraps SPR_FROM inside the ring and VIF1 drains packets as they arrive", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kSprFrom = 0x1000D000u;
+            constexpr uint32_t kVif1 = 0x10009000u;
+            constexpr uint32_t kRbor = 0x00100000u;
+            constexpr uint32_t kRbsr = 0x000003F0u; // 1 KB ring
+            constexpr uint32_t kStart = kRbor + 0x3E0u; // two qwords before the end, so the packet wraps
+
+            t.IsTrue(mem.writeIORegister(0x1000E050u, kRbor), "write D_RBOR should succeed");
+            t.IsTrue(mem.writeIORegister(0x1000E040u, kRbsr), "write D_RBSR should succeed");
+            t.IsTrue(mem.writeIORegister(0x1000E000u, 0x1u | (2u << 2u)), "D_CTRL DMAE + MFD=VIF1 should succeed");
+
+            // VIF1 starts in chain mode on the empty ring: it must wait, not walk stale memory.
+            t.IsTrue(mem.writeIORegister(kSprFrom + 0x10u, kStart), "write SPR_FROM MADR should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x30u, kStart), "write VIF1 TADR should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x00u, 0x105u), "start VIF1 chain should succeed");
+            t.IsTrue((mem.readIORegister(kVif1 + 0x00u) & 0x100u) != 0u, "VIF1 should stay busy on an empty MFIFO");
+            t.Equals(mem.readIORegister(kVif1 + 0x30u), kStart, "VIF1 TADR should not move on an empty MFIFO");
+
+            // Packet: CNT tag (qwc 2) + VIF NOP NOP NOP UNPACK V4_32 num=1 + one vector.
+            std::vector<uint8_t> packet;
+            appendU64(packet, (1ull << 28) | 2ull);
+            appendU64(packet, 0ull);
+            appendU32(packet, 0u);
+            appendU32(packet, 0u);
+            appendU32(packet, 0u);
+            appendU32(packet, makeVifCmd(0x6Cu, 1u, 0u));
+            for (uint32_t i = 0; i < 16u; ++i)
+                packet.push_back(static_cast<uint8_t>(0xA0u + i));
+            std::memcpy(mem.getScratchpad(), packet.data(), packet.size());
+            std::memset(mem.getVU1Data(), 0, PS2_VU1_DATA_SIZE);
+
+            t.IsTrue(mem.writeIORegister(kSprFrom + 0x20u, 3u), "write SPR_FROM QWC should succeed");
+            t.IsTrue(mem.writeIORegister(kSprFrom + 0x80u, 0u), "write SPR_FROM SADR should succeed");
+            t.IsTrue(mem.writeIORegister(kSprFrom + 0x00u, 0x100u), "start SPR_FROM should succeed");
+
+            t.Equals(mem.readIORegister(kSprFrom + 0x10u), kRbor + 0x10u, "SPR_FROM MADR should wrap to the ring start");
+            t.IsTrue(std::memcmp(mem.getRDRAM() + kRbor, packet.data() + 32u, 16u) == 0,
+                     "the third qword should land at RBOR after the wrap");
+            t.IsTrue(std::memcmp(mem.getVU1Data(), packet.data() + 32u, 16u) == 0,
+                     "VIF1 should drain the packet and UNPACK the vector into VU1 memory");
+            t.Equals(mem.readIORegister(kVif1 + 0x30u), kRbor + 0x10u, "VIF1 TADR should catch up with SPR_FROM MADR");
+            t.IsTrue((mem.readIORegister(kVif1 + 0x00u) & 0x100u) != 0u, "VIF1 should keep STR while waiting for more");
+            t.IsTrue((mem.readIORegister(0x1000E010u) & (1u << 1u)) == 0u, "a CNT tag should not complete VIF1");
+
+            const std::vector<uint32_t> causes = mem.consumeCompletedDmacCauses();
+            t.Equals(causes.size(), static_cast<size_t>(1u), "only SPR_FROM should complete");
+        });
+
+        tc.Run("DMAC MFIFO END tag completes the VIF1 drain", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kSprFrom = 0x1000D000u;
+            constexpr uint32_t kVif1 = 0x10009000u;
+            constexpr uint32_t kRbor = 0x00100000u;
+
+            t.IsTrue(mem.writeIORegister(0x1000E050u, kRbor), "write D_RBOR should succeed");
+            t.IsTrue(mem.writeIORegister(0x1000E040u, 0x7FFF0u), "write D_RBSR should succeed");
+            t.IsTrue(mem.writeIORegister(0x1000E000u, 0x1u | (2u << 2u)), "D_CTRL DMAE + MFD=VIF1 should succeed");
+            t.IsTrue(mem.writeIORegister(kSprFrom + 0x10u, kRbor), "write SPR_FROM MADR should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x30u, kRbor), "write VIF1 TADR should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x00u, 0x105u), "start VIF1 chain should succeed");
+
+            std::vector<uint8_t> packet;
+            appendU64(packet, 7ull << 28); // END, qwc 0
+            appendU64(packet, 0ull);
+            std::memcpy(mem.getScratchpad(), packet.data(), packet.size());
+            t.IsTrue(mem.writeIORegister(kSprFrom + 0x20u, 1u), "write SPR_FROM QWC should succeed");
+            t.IsTrue(mem.writeIORegister(kSprFrom + 0x80u, 0u), "write SPR_FROM SADR should succeed");
+            t.IsTrue(mem.writeIORegister(kSprFrom + 0x00u, 0x100u), "start SPR_FROM should succeed");
+
+            t.IsTrue((mem.readIORegister(kVif1 + 0x00u) & 0x100u) == 0u, "END should clear VIF1 CHCR.STR");
+            t.IsTrue((mem.readIORegister(0x1000E010u) & (1u << 1u)) != 0u, "END should raise D_STAT channel 1");
+            const std::vector<uint32_t> causes = mem.consumeCompletedDmacCauses();
+            t.Equals(causes.size(), static_cast<size_t>(2u), "SPR_FROM and VIF1 should both complete");
+            if (causes.size() == 2u)
+                t.Equals(causes[1], 1u, "VIF1 completion should use DMAC cause 1");
+        });
+
+        tc.Run("D_ENABLEW is read back through D_ENABLER", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            t.IsTrue(mem.writeIORegister(0x1000F590u, 0x10000u), "write D_ENABLEW CPND should succeed");
+            t.Equals(mem.readIORegister(0x1000F520u), 0x10000u, "D_ENABLER should show the suspended state");
+            t.IsTrue(mem.writeIORegister(0x1000F590u, 0u), "write D_ENABLEW resume should succeed");
+            t.Equals(mem.readIORegister(0x1000F520u), 0u, "D_ENABLER should show DMA resumed");
+        });
+
         tc.Run("sceDmaReset re-enables DMAC DMAE", [](TestCase &t)
         {
             PS2Runtime runtime;

@@ -452,6 +452,13 @@ public:
     bool tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr);
     void completeDmacChannel(uint32_t channelBase, uint32_t cause);
     void queueCompletedDmacCause(uint32_t cause);
+
+    // MFIFO (D_CTRL.MFD = 2 VIF1, 3 GIF): fromSPR writes into the ring RBOR + (addr & RBSR) and the drain
+    // channel, started in chain mode, consumes tags from the ring as they arrive instead of all at once.
+    uint32_t mfifoDrainChannel();
+    uint32_t mfifoWrap(uint32_t address);
+    void drainMfifo();
+    bool m_mfifoDraining = false;
 };
 
 #endif // PS2_MEMORY_H
