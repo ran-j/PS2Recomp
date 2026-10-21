@@ -1740,6 +1740,48 @@ void register_ps2_gs_tests()
                      "field presentation should still preserve different source content across field rows");
         });
 
+        tc.Run("latched host presentation reads half the lines in interlaced FRAME mode and with MAGV", [](TestCase &t)
+        {
+            // Interlaced FRAME mode (SMODE2 INT=1 FFMD=1): each field reads every buffer line, so a 448-line display
+            // shows 224 buffer lines, each twice. MAGV=1 does the same in progressive mode.
+            const uint64_t smodes[2] = {0x0003ull, 0x0000ull};
+            const uint64_t magvs[2] = {0ull, 1ull};
+            for (uint32_t c = 0; c < 2u; ++c)
+            {
+                std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+                GSRegisters regs{};
+                regs.pmode = 0x0001ull;
+                regs.smode2 = smodes[c];
+                regs.dispfb1 = 0ull | (10ull << 9) | (static_cast<uint64_t>(GS_PSM_CT32) << 15);
+                regs.display1 = (639ull << 32) | (447ull << 44) | (magvs[c] << 27);
+
+                GS gs;
+                gs.init(vram.data(), static_cast<uint32_t>(vram.size()), &regs);
+                for (uint32_t y = 0; y < 448u; ++y)
+                    writeReferencePSMCT32Pixel(vram, 0u, 10u, 0u, y, 0x00010000u * (y & 0xFFu) + y);
+
+                gs.latchHostPresentationFrame();
+                std::vector<uint8_t> frame;
+                uint32_t width = 0u;
+                uint32_t height = 0u;
+                t.IsTrue(gs.copyLatchedHostPresentationFrame(frame, width, height), "presentation should produce a frame");
+                t.Equals(height, 448u, "the display height stays DH + 1");
+
+                auto rowColor = [&](uint32_t row) -> uint32_t
+                {
+                    const size_t off = static_cast<size_t>(row) * 640u * 4u;
+                    return static_cast<uint32_t>(frame[off]) | (static_cast<uint32_t>(frame[off + 1u]) << 8) |
+                           (static_cast<uint32_t>(frame[off + 2u]) << 16);
+                };
+                auto lineColor = [](uint32_t y) { return 0x00010000u * (y & 0xFFu) + y; };
+                bool ok = true;
+                for (uint32_t row = 0; row < 448u && ok; ++row)
+                    ok = rowColor(row) == (lineColor(row / 2u) & 0x00FFFFFFu);
+                t.IsTrue(ok, c == 0u ? "FRAME mode should show buffer line n on display rows 2n and 2n+1"
+                                     : "MAGV=1 should show buffer line n on display rows 2n and 2n+1");
+            }
+        });
+
         tc.Run("GIF PACKED A+D writes DISPFB1 and DISPLAY1 privileged registers", [](TestCase &t)
         {
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);

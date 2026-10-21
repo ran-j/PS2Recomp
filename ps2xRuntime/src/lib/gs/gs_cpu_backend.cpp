@@ -394,6 +394,29 @@ namespace
         return {(smode2 & 0x1ull) != 0ull, ((smode2 >> 1) & 0x1ull) != 0ull};
     }
 
+    // Display lines shown per frame-buffer line: MAGV + 1, doubled in interlaced FRAME mode (FFMD = 1), where each
+    // field reads every buffer line while DH still counts the lines of both fields.
+    uint32_t decodeDisplayLineRepeat(uint64_t display64, const GSSmode2State &smode2)
+    {
+        const uint32_t magv = static_cast<uint32_t>((display64 >> 27) & 0x3u);
+        return (magv + 1u) * ((smode2.interlaced && smode2.frameMode) ? 2u : 1u);
+    }
+
+    // Spreads the first ceil(height / repeat) rows over `height` rows, each repeated `repeat` times.
+    void repeatPresentationLines(std::vector<uint8_t> &pixels, uint32_t width, uint32_t height, uint32_t repeat)
+    {
+        if (pixels.empty() || repeat <= 1u)
+            return;
+        for (uint32_t y = height; y-- > 0u;)
+        {
+            const uint32_t sourceY = y / repeat;
+            if (sourceY != y)
+                std::memcpy(pixels.data() + y * kHostFrameWidth * 4u,
+                            pixels.data() + sourceY * kHostFrameWidth * 4u,
+                            width * 4u);
+        }
+    }
+
     void applyFieldPresentation(std::vector<uint8_t> &pixels, uint32_t width, uint32_t height, bool oddField)
     {
         if (pixels.empty() || width == 0u || height < 2u)
@@ -1871,21 +1894,27 @@ PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationReque
     uint32_t width1 = 0u, height1 = 0u, width2 = 0u, height2 = 0u;
     decodeDisplaySize(request.display1, width1, height1);
     decodeDisplaySize(request.display2, width2, height2);
+    const uint32_t lineRepeat1 = decodeDisplayLineRepeat(request.display1, smode2);
+    const uint32_t lineRepeat2 = decodeDisplayLineRepeat(request.display2, smode2);
     const bool valid1 = pmode.enableCrt1 && hasDisplaySetup(request.display1, displayFrame1);
     const bool valid2 = pmode.enableCrt2 && hasDisplaySetup(request.display2, displayFrame2);
     if (!valid1 && !valid2)
         return result;
 
+    // Reads the buffer lines a circuit shows (displayHeight / lineRepeat of them) and repeats each one to fill
+    // its display height.
     auto copySource = [&](const GSFrameReg &displayFrame,
                           const GSDisplayReadOrigin &origin,
                           uint32_t width,
-                          uint32_t height,
+                          uint32_t displayHeight,
+                          uint32_t lineRepeat,
                           bool allowPreferred,
                           bool preserveAlpha,
                           GSFrameReg &selected,
                           std::vector<uint8_t> &pixels,
                           bool &usedPreferred) -> bool
     {
+        const uint32_t height = (displayHeight + lineRepeat - 1u) / lineRepeat;
         selected = displayFrame;
         pixels.clear();
         usedPreferred = false;
@@ -1915,6 +1944,7 @@ PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationReque
                 break;
             }
         }
+        repeatPresentationLines(pixels, width, displayHeight, lineRepeat);
         return true;
     };
 
@@ -1923,8 +1953,8 @@ PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationReque
         GSFrameReg selected1{}, selected2{};
         std::vector<uint8_t> crt1, crt2;
         bool preferred1 = false, preferred2 = false;
-        if (copySource(displayFrame1, origin1, width1, height1, false, true, selected1, crt1, preferred1) &&
-            copySource(displayFrame2, origin2, width2, height2, false, true, selected2, crt2, preferred2))
+        if (copySource(displayFrame1, origin1, width1, height1, lineRepeat1, false, true, selected1, crt1, preferred1) &&
+            copySource(displayFrame2, origin2, width2, height2, lineRepeat2, false, true, selected2, crt2, preferred2))
         {
             result.width = std::max(width1, width2);
             result.height = std::max(height1, height2);
@@ -1969,7 +1999,8 @@ PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationReque
     result.width = valid1 ? width1 : width2;
     result.height = valid1 ? height1 : height2;
     GSFrameReg selected = displayFrame;
-    if (!copySource(displayFrame, origin, result.width, result.height, true, false, selected, result.pixels, result.usedPreferred))
+    if (!copySource(displayFrame, origin, result.width, result.height, valid1 ? lineRepeat1 : lineRepeat2, true, false,
+                    selected, result.pixels, result.usedPreferred))
         return {};
     if (fieldMode)
         applyFieldPresentation(result.pixels, result.width, result.height, oddField);
