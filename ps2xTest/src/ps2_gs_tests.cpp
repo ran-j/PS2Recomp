@@ -1009,6 +1009,40 @@ void register_ps2_gs_tests()
                      "CT32 primitives should land in the same local-memory layout that later CT32 texture sampling expects");
         });
 
+        tc.Run("sprites with a fractional right edge cover the last pixel before it", [](TestCase &t)
+        {
+            // A sprite covers X0 <= x < X1: strips from 0 to 63.5 and 64 to 127.5 (as games tile a screen copy)
+            // meet without a gap, and a bottom edge at 1.5 still covers row 1.
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GSRegisters regs{};
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), &regs);
+            gs.writeRegister(GS_REG_FRAME_1, (2ull << 16) | (static_cast<uint64_t>(GS_PSM_CT32) << 24));
+            gs.writeRegister(GS_REG_ZBUF_1, 1ull << 32); // no Z writes
+            gs.writeRegister(GS_REG_SCISSOR_1, (127ull << 16) | (31ull << 48));
+            gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
+            constexpr uint32_t kLeft = 0x80112233u;
+            constexpr uint32_t kRight = 0x80445566u;
+            const uint32_t colors[2] = {kLeft, kRight};
+            for (uint32_t i = 0; i < 2u; ++i)
+            {
+                gs.writeRegister(GS_REG_PRIM, static_cast<uint64_t>(GS_PRIM_SPRITE));
+                gs.writeRegister(GS_REG_RGBAQ, colors[i]);
+                gs.writeRegister(GS_REG_XYZ2, static_cast<uint64_t>(i * 64u * 16u));
+                gs.writeRegister(GS_REG_XYZ2, static_cast<uint64_t>(i * 64u * 16u + 63u * 16u + 8u) | (24ull << 16));
+            }
+
+            t.Equals(readReferenceFramePSMCT32Pixel(vram, 0u, 2u, 63u, 0u), kLeft,
+                     "the first strip should draw column 63 (its right edge is 63.5)");
+            t.Equals(readReferenceFramePSMCT32Pixel(vram, 0u, 2u, 64u, 0u), kRight,
+                     "the second strip should start at column 64");
+            t.Equals(readReferenceFramePSMCT32Pixel(vram, 0u, 2u, 127u, 1u), kRight,
+                     "a bottom edge at 1.5 should still cover row 1");
+            t.Equals(readReferenceFramePSMCT32Pixel(vram, 0u, 2u, 0u, 2u), 0u,
+                     "row 2 is below the sprites");
+        });
+
         tc.Run("FST sprite 1:1 CT32 copies preserve source texels at the right and bottom edges", [](TestCase &t)
         {
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
