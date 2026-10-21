@@ -1078,6 +1078,44 @@ void register_ps2_gs_tests()
             t.IsTrue(upright, "row y of the sprite should show texture row y");
         });
 
+        tc.Run("a half-pixel-offset FST sprite samples texel centres and stays inside its UV range", [](TestCase &t)
+        {
+            // Games draw UI strips from X -0.5 to 63.5 over U 0..64: pixel x samples u = x + 0.5, texel x. Reading
+            // one texel further pulls in whatever lies next to the image in GS memory at its right/bottom edge.
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+            constexpr uint32_t kTexTbp = 64u;
+            for (uint32_t y = 0u; y < 8u; ++y)
+                for (uint32_t x = 0u; x < 8u; ++x)
+                    writeReferencePSMCT32Pixel(vram, kTexTbp, 1u, x, y,
+                                               (x < 4u && y < 4u) ? (0x80000000u | (y << 16) | (x << 8) | 0x40u)
+                                                                  : 0x80FF00FFu); // magenta outside the image
+            gs.writeRegister(GS_REG_FRAME_1, 150ull | (1ull << 16) | (static_cast<uint64_t>(GS_PSM_CT32) << 24));
+            gs.writeRegister(GS_REG_ZBUF_1, 1ull << 32);
+            gs.writeRegister(GS_REG_SCISSOR_1, (7ull << 16) | (7ull << 48));
+            gs.writeRegister(GS_REG_XYOFFSET_1, 16ull | (16ull << 32)); // 1.0: vertices at 0.5 land on -0.5
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
+            gs.writeRegister(GS_REG_ALPHA_1, 0ull);
+            gs.writeRegister(GS_REG_TEX0_1, static_cast<uint64_t>(kTexTbp) | (1ull << 14) |
+                                                (static_cast<uint64_t>(GS_PSM_CT32) << 20) | (3ull << 26) |
+                                                (3ull << 30) | (1ull << 34));
+            gs.writeRegister(GS_REG_TEX1_1, 0ull);
+            gs.writeRegister(GS_REG_PRIM, static_cast<uint64_t>(GS_PRIM_SPRITE) | (1ull << 4) | (1ull << 8));
+            gs.writeRegister(GS_REG_RGBAQ, 0x80808080ull);
+            gs.writeRegister(GS_REG_UV, 0ull);
+            gs.writeRegister(GS_REG_XYZ2, 8ull | (8ull << 16)); // (0.5, 0.5) -> screen (-0.5, -0.5)
+            gs.writeRegister(GS_REG_UV, (64ull << 0) | (64ull << 16));
+            gs.writeRegister(GS_REG_XYZ2, 72ull | (72ull << 16)); // (4.5, 4.5) -> screen (3.5, 3.5)
+
+            bool exact = true;
+            for (uint32_t y = 0u; y < 4u; ++y)
+                for (uint32_t x = 0u; x < 4u; ++x)
+                    exact = exact && readReferenceFramePSMCT32Pixel(vram, 150u, 1u, x, y) ==
+                                         (0x80000000u | (y << 16) | (x << 8) | 0x40u);
+            t.IsTrue(exact, "pixel (x, y) should show texel (x, y), never the magenta outside the image");
+        });
+
         tc.Run("FST sprite 1:1 CT32 copies preserve source texels at the right and bottom edges", [](TestCase &t)
         {
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);

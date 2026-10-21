@@ -1217,10 +1217,10 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
         float u0f, v0f, u1f, v1f;
         if (state.prim.fst)
         {
-            u0f = static_cast<float>(v0.u >> 4);
-            v0f = static_cast<float>(v0.v >> 4);
-            u1f = static_cast<float>(v1.u >> 4);
-            v1f = static_cast<float>(v1.v >> 4);
+            u0f = static_cast<float>(v0.u) / 16.0f; // UV is 10.4 fixed point
+            v0f = static_cast<float>(v0.v) / 16.0f;
+            u1f = static_cast<float>(v1.u) / 16.0f;
+            v1f = static_cast<float>(v1.v) / 16.0f;
         }
         else
         {
@@ -1238,12 +1238,13 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
 
         for (int y = drawY0; y <= drawY1; ++y)
         {
-            float ty = (static_cast<float>(y) - fy0 + 0.5f) / spanYf;
+            // The GS evaluates UV at the pixel's own position (pixel centres are integer).
+            float ty = (static_cast<float>(y) - fy0) / spanYf;
             float texVf = v0f + (v1f - v0f) * ty;
 
             for (int x = drawX0; x <= drawX1; ++x)
             {
-                float tx = (static_cast<float>(x) - fx0 + 0.5f) / spanXf;
+                float tx = (static_cast<float>(x) - fx0) / spanXf;
                 float texUf = u0f + (u1f - u0f) * tx;
                 uint32_t texel = 0xFFFF00FFu;
                 if (state.prim.fst)
