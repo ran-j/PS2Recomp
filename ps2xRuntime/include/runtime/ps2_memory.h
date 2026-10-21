@@ -343,6 +343,8 @@ public:
     void processVIF0Data(const uint8_t *data, uint32_t sizeBytes);
     void processVIF1Data(uint32_t srcPhysAddr, uint32_t sizeBytes);
     void processVIF1Data(const uint8_t *data, uint32_t sizeBytes);
+    void forwardPath2Payload(const uint8_t *payload, uint32_t bytes, bool directHl);
+    void continuePath2Packet(const uint8_t *data, uint32_t sizeBytes, bool directHl);
     void processPendingTransfers();
     std::vector<uint32_t> consumeCompletedDmacCauses();
 
@@ -407,8 +409,13 @@ public:
     uint8_t *m_vu1Code = nullptr;
     uint8_t *m_vu1Data = nullptr;
     bool m_path3Masked = false;
-    uint32_t m_vif1PendingPath2ImageQwc = 0u;
-    bool m_vif1PendingPath2DirectHl = false;
+    // PATH2 GIF packet cut off at the end of a DIRECT: it continues in the next DIRECT (an IMAGE also in raw
+    // qwords of the VIF stream).
+    uint64_t m_path2CutTagLo = 0u;
+    uint64_t m_path2CutTagHi = 0u;
+    uint32_t m_path2CutDoneRegs = 0u; // PACKED/REGLIST registers of the cut packet already sent
+    uint32_t m_path2CutRemainingBytes = 0u;
+    bool m_path2CutDirectHl = false;
     std::vector<std::vector<uint8_t>> m_path3MaskedFifo;
 
     struct PendingTransfer
@@ -450,6 +457,7 @@ public:
 
     std::array<EeTimer, 4> m_eeTimers{};
     bool tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr);
+    bool processSprToChain(uint32_t chcr);
     void completeDmacChannel(uint32_t channelBase, uint32_t cause);
     void queueCompletedDmacCause(uint32_t cause);
 };
