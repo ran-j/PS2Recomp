@@ -402,14 +402,16 @@ namespace
         return (magv + 1u) * ((smode2.interlaced && smode2.frameMode) ? 2u : 1u);
     }
 
-    // Spreads the first ceil(height / repeat) rows over `height` rows, each repeated `repeat` times.
-    void repeatPresentationLines(std::vector<uint8_t> &pixels, uint32_t width, uint32_t height, uint32_t repeat)
+    // Spreads the first ceil(height / repeat) rows over `height` rows, each repeated `repeat` times, starting
+    // `offset` rows lower (the odd field of an interlaced picture sits one line below the even one).
+    void repeatPresentationLines(std::vector<uint8_t> &pixels, uint32_t width, uint32_t height, uint32_t repeat,
+                                 uint32_t offset = 0u)
     {
-        if (pixels.empty() || repeat <= 1u)
+        if (pixels.empty() || (repeat <= 1u && offset == 0u))
             return;
         for (uint32_t y = height; y-- > 0u;)
         {
-            const uint32_t sourceY = y / repeat;
+            const uint32_t sourceY = (y < offset ? 0u : y - offset) / repeat;
             if (sourceY != y)
                 std::memcpy(pixels.data() + y * kHostFrameWidth * 4u,
                             pixels.data() + sourceY * kHostFrameWidth * 4u,
@@ -1896,6 +1898,9 @@ PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationReque
     decodeDisplaySize(request.display2, width2, height2);
     const uint32_t lineRepeat1 = decodeDisplayLineRepeat(request.display1, smode2);
     const uint32_t lineRepeat2 = decodeDisplayLineRepeat(request.display2, smode2);
+    // In interlaced FRAME mode the buffer holds one field; a TV shows the odd one a line lower. Place it by the
+    // field it was drawn for, not the current one: a game below 60 fps keeps a field on screen for several.
+    const uint32_t fieldOffset = (smode2.interlaced && smode2.frameMode && request.displayField == 1) ? 1u : 0u;
     const bool valid1 = pmode.enableCrt1 && hasDisplaySetup(request.display1, displayFrame1);
     const bool valid2 = pmode.enableCrt2 && hasDisplaySetup(request.display2, displayFrame2);
     if (!valid1 && !valid2)
@@ -1944,7 +1949,7 @@ PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationReque
                 break;
             }
         }
-        repeatPresentationLines(pixels, width, displayHeight, lineRepeat);
+        repeatPresentationLines(pixels, width, displayHeight, lineRepeat, lineRepeat > 1u ? fieldOffset : 0u);
         return true;
     };
 

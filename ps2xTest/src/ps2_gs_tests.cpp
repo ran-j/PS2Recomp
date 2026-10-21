@@ -1782,6 +1782,56 @@ void register_ps2_gs_tests()
             }
         });
 
+        tc.Run("latched host presentation puts an odd FRAME-mode field one line lower", [](TestCase &t)
+        {
+            // The buffer holds one field; which one is the CSR.FIELD of the last draw into it, and a TV shows the
+            // odd field one line below the even one.
+            for (uint32_t field = 0; field < 2u; ++field)
+            {
+                std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+                GSRegisters regs{};
+                regs.pmode = 0x0001ull;
+                regs.smode2 = 0x0003ull; // interlaced, FRAME mode
+                regs.dispfb1 = 0ull | (10ull << 9) | (static_cast<uint64_t>(GS_PSM_CT32) << 15);
+                regs.display1 = (639ull << 32) | (447ull << 44);
+
+                GS gs;
+                gs.init(vram.data(), static_cast<uint32_t>(vram.size()), &regs);
+                auto lineColor = [](uint32_t y) { return 0x00010000u * (y & 0xFFu) + y + 1u; };
+                for (uint32_t y = 0; y < 224u; ++y)
+                    writeReferencePSMCT32Pixel(vram, 0u, 10u, 0u, y, lineColor(y));
+
+                regs.csr.store(field ? 0x2000ull : 0ull);
+                gs.writeRegister(GS_REG_FRAME_1, (10ull << 16) | (static_cast<uint64_t>(GS_PSM_CT32) << 24));
+                gs.writeRegister(GS_REG_SCISSOR_1, (639ull << 16) | (447ull << 48));
+                gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+                gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
+                gs.writeRegister(GS_REG_PRIM, static_cast<uint64_t>(GS_PRIM_POINT));
+                gs.writeRegister(GS_REG_RGBAQ, 0x80FFFFFFull);
+                gs.writeRegister(GS_REG_XYZ2, (639ull << 4) | (223ull << 20)); // a field draw into the shown buffer
+
+                gs.latchHostPresentationFrame();
+                std::vector<uint8_t> frame;
+                uint32_t width = 0u;
+                uint32_t height = 0u;
+                t.IsTrue(gs.copyLatchedHostPresentationFrame(frame, width, height), "presentation should produce a frame");
+                auto rowColor = [&](uint32_t row) -> uint32_t
+                {
+                    const size_t off = static_cast<size_t>(row) * 640u * 4u;
+                    return static_cast<uint32_t>(frame[off]) | (static_cast<uint32_t>(frame[off + 1u]) << 8) |
+                           (static_cast<uint32_t>(frame[off + 2u]) << 16);
+                };
+                bool ok = height == 448u;
+                for (uint32_t row = 0; row < 448u && ok; ++row)
+                {
+                    const uint32_t line = field ? (row == 0u ? 0u : (row - 1u) / 2u) : row / 2u;
+                    ok = rowColor(row) == (lineColor(line) & 0x00FFFFFFu);
+                }
+                t.IsTrue(ok, field ? "the odd field should start one display line lower"
+                                   : "the even field should start at the top");
+            }
+        });
+
         tc.Run("GIF PACKED A+D writes DISPFB1 and DISPLAY1 privileged registers", [](TestCase &t)
         {
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);

@@ -159,6 +159,7 @@ void GS::reset()
     m_preferredDisplaySourceFrame = {};
     m_preferredDisplayDestFbp = 0;
     m_hasPreferredDisplaySource = false;
+    m_displayWriteField = -1;
     if (m_backend)
     {
         m_backend->Flush();
@@ -521,6 +522,7 @@ GSPresentationRequest GS::buildPresentationRequestUnlocked() const
     request.preferredSource = m_preferredDisplaySourceFrame;
     request.preferredDestFbp = m_preferredDisplayDestFbp;
     request.hasPreferredSource = m_hasPreferredDisplaySource;
+    request.displayField = m_displayWriteField;
     return request;
 }
 
@@ -1707,6 +1709,10 @@ void GS::updatePreferredDisplaySourceForDraw(const GSPrimitiveBatch &batch)
     const GSContext &ctx = state.context;
     if (m_hasPreferredDisplaySource && ctx.frame.fbp == m_preferredDisplayDestFbp)
         m_hasPreferredDisplaySource = false;
+    // Which field the displayed buffer holds: games that draw one field per frame (interlaced FRAME mode) pick
+    // its lines by CSR.FIELD, and the odd field belongs one line lower on screen.
+    if (m_privRegs && (ctx.frame.fbp == (m_privRegs->dispfb1 & 0x1FFu) || ctx.frame.fbp == (m_privRegs->dispfb2 & 0x1FFu)))
+        m_displayWriteField = static_cast<int>((m_privRegs->csr.load(std::memory_order_acquire) >> 13u) & 1u);
     if (state.prim.type != GS_PRIM_SPRITE || batch.vertexCount < 2u)
         return;
 
