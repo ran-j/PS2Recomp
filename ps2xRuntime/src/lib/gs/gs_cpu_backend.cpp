@@ -1175,9 +1175,12 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
     float fy1 = v1.y - static_cast<float>(ofy);
     u32 z1 = static_cast<u32>(v1.z);
 
-    if (fx0 > fx1)
+    // Vertices may come in either order; the texture coordinates stay with their vertex (swapped below).
+    const bool flipX = fx0 > fx1;
+    const bool flipY = fy0 > fy1;
+    if (flipX)
         std::swap(fx0, fx1);
-    if (fy0 > fy1)
+    if (flipY)
         std::swap(fy0, fy1);
 
     // A sprite covers the pixels X0 <= x < X1 (pixel centres at integer positions), so a right edge at 63.5
@@ -1228,6 +1231,10 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
             u1f = (v1.s / q1) * static_cast<float>(texW);
             v1f = (v1.t / q1) * static_cast<float>(texH);
         }
+        if (flipX)
+            std::swap(u0f, u1f);
+        if (flipY)
+            std::swap(v0f, v1f);
 
         for (int y = drawY0; y <= drawY1; ++y)
         {

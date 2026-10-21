@@ -1043,6 +1043,41 @@ void register_ps2_gs_tests()
                      "row 2 is below the sprites");
         });
 
+        tc.Run("a sprite given bottom-right first keeps each vertex's texture coordinates", [](TestCase &t)
+        {
+            // The UV belongs to its vertex: sent as (4,4)/UV(4,4) then (0,0)/UV(0,0), the copy stays upright.
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+            constexpr uint32_t kTexTbp = 64u;
+            constexpr uint32_t kRows[4] = {0x800000FFu, 0x8000FF00u, 0x80FF0000u, 0x80FFFFFFu};
+            for (uint32_t y = 0u; y < 4u; ++y)
+                for (uint32_t x = 0u; x < 4u; ++x)
+                    writeReferencePSMCT32Pixel(vram, kTexTbp, 1u, x, y, kRows[y]);
+
+            gs.writeRegister(GS_REG_FRAME_1, 150ull | (1ull << 16) | (static_cast<uint64_t>(GS_PSM_CT32) << 24));
+            gs.writeRegister(GS_REG_ZBUF_1, 1ull << 32);
+            gs.writeRegister(GS_REG_SCISSOR_1, (3ull << 16) | (3ull << 48));
+            gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
+            gs.writeRegister(GS_REG_ALPHA_1, 0ull);
+            gs.writeRegister(GS_REG_TEX0_1, static_cast<uint64_t>(kTexTbp) | (1ull << 14) |
+                                                (static_cast<uint64_t>(GS_PSM_CT32) << 20) | (2ull << 26) |
+                                                (2ull << 30) | (1ull << 34));
+            gs.writeRegister(GS_REG_TEX1_1, 0ull);
+            gs.writeRegister(GS_REG_PRIM, static_cast<uint64_t>(GS_PRIM_SPRITE) | (1ull << 4) | (1ull << 8));
+            gs.writeRegister(GS_REG_RGBAQ, 0x80808080ull);
+            gs.writeRegister(GS_REG_UV, (64ull << 0) | (64ull << 16));
+            gs.writeRegister(GS_REG_XYZ2, (64ull << 0) | (64ull << 16));
+            gs.writeRegister(GS_REG_UV, 0ull);
+            gs.writeRegister(GS_REG_XYZ2, 0ull);
+
+            bool upright = true;
+            for (uint32_t y = 0u; y < 4u; ++y)
+                upright = upright && readReferenceFramePSMCT32Pixel(vram, 150u, 1u, 1u, y) == kRows[y];
+            t.IsTrue(upright, "row y of the sprite should show texture row y");
+        });
+
         tc.Run("FST sprite 1:1 CT32 copies preserve source texels at the right and bottom edges", [](TestCase &t)
         {
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
