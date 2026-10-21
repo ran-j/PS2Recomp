@@ -811,6 +811,27 @@ void register_ps2_runtime_expansion_tests()
                      "only the injected decoder frame should be counted as served");
         });
 
+        tc.Run("sceMpegCreate clears the end-of-stream word that libmpeg's sceMpegIsEnd reads", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            ps2_stubs::resetMpegStubState();
+            constexpr uint32_t kMpegAddr = 0x00120000u;
+            constexpr uint32_t kWorkAddr = 0x00130000u;
+            std::memset(rdram.data() + kWorkAddr, 0xFF, 0x2000u); // a work area reused from earlier data
+
+            R5900Context createCtx{};
+            setRegU32(createCtx, 4, kMpegAddr);
+            setRegU32(createCtx, 5, kWorkAddr);
+            setRegU32(createCtx, 6, 0x2000u);
+            ps2_stubs::sceMpegCreate(rdram.data(), &createCtx, &runtime);
+
+            const uint32_t sys = Ps2FastRead32(rdram.data(), kMpegAddr + 0x40u);
+            t.Equals(sys, kWorkAddr, "mp->sys should point at the work area");
+            t.Equals(Ps2FastRead32(rdram.data(), sys), 0u,
+                     "a new decoder has not ended: games' own sceMpegIsEnd returns *mp->sys");
+        });
+
         tc.Run("sceSdRemote isolates voice transfers from block streaming state", [](TestCase &t)
         {
             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
