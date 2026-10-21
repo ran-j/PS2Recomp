@@ -329,8 +329,7 @@ bool PS2Memory::initialize(size_t ramSize)
     m_codeRegions.clear();
     m_path3Masked = false;
     m_path3MaskedFifo.clear();
-    m_vif1PendingPath2ImageQwc = 0u;
-    m_vif1PendingPath2DirectHl = false;
+    m_path2CutRemainingBytes = 0u;
     resetEeTimers();
 
     try
@@ -1229,8 +1228,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
             {
                 const bool wasPath3Masked = m_path3Masked;
                 std::memset(&vif1_regs, 0, sizeof(vif1_regs));
-                m_vif1PendingPath2ImageQwc = 0u;
-                m_vif1PendingPath2DirectHl = false;
+                m_path2CutRemainingBytes = 0u;
                 m_path3Masked = false;
                 if (wasPath3Masked)
                     flushMaskedPath3Packets();
@@ -1403,6 +1401,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     const bool transferTagData = isVifChannel && (chcr & 0x40u) != 0u;
 
                     int tagsProcessed = 0;
+                    bool chainEnded = false;
                     uint32_t lastTagUpper = (chcr >> 16) & 0xFFFFu;
 
                     while (tagsProcessed < kMaxChainTags)
@@ -1518,7 +1517,10 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         if (irq && tieEnabled)
                             endChain = true;
                         if (endChain)
+                        {
+                            chainEnded = true;
                             break;
+                        }
                     }
 
                     m_ioRegisters[channelBase + 0x30] = tagAddr;
@@ -1548,10 +1550,14 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             m_pendingVif0Transfers.push_back(std::move(pt));
                         }
                     }
-                    // else if (channelBase == 0x10009000u)
-                    // {
-
-                    // }
+                    else if (chainEnded)
+                    {
+                        // A chain that ends without carrying any data (a lone END, REFE or IRQ tag) still
+                        // completes: STR clears and the channel raises D_STAT and its DMAC interrupt.
+                        const uint32_t cause = channelBase == 0x1000A000u ? 2u : (channelBase == 0x10009000u ? 1u : 0u);
+                        m_ioRegisters[channelBase + 0x20] = 0u;
+                        completeDmacChannel(channelBase, cause);
+                    }
                 }
                 else if (qwc > 0)
                 {
@@ -1592,6 +1598,8 @@ bool PS2Memory::tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr)
         return false;
 
     const uint32_t mode = (chcr >> 2u) & 0x3u;
+    if (mode == 1u && channelBase == kSprToChannel)
+        return processSprToChain(chcr);
     if (mode != 0u)
         return false;
 
@@ -1658,6 +1666,125 @@ void PS2Memory::completeDmacChannel(uint32_t channelBase, uint32_t cause)
         dstat &= ~(1u << 31u);
     m_ioRegisters[kDStat] = dstat;
     queueCompletedDmacCause(cause);
+}
+
+bool PS2Memory::processSprToChain(uint32_t chcr)
+{
+    // toSPR (channel 9) in source-chain mode: DMAtags are read from main memory at TADR and their data is copied
+    // to scratchpad at SADR (wrapping inside the 16 KB). With CHCR.TTE the whole tag qword is copied first.
+    static constexpr uint32_t kChannel = 0x1000D400u;
+    const bool transferTag = (chcr & 0x40u) != 0u;
+    const bool tieEnabled = (chcr & 0x80u) != 0u;
+    uint32_t tadr = m_ioRegisters[kChannel + 0x30u] & 0x7FFFFFF0u;
+    uint32_t madr = m_ioRegisters[kChannel + 0x10u] & 0x7FFFFFF0u;
+    uint32_t sadr = m_ioRegisters[kChannel + 0x80u] & 0x3FF0u;
+    uint32_t asr0 = m_ioRegisters[kChannel + 0x40u];
+    uint32_t asr1 = m_ioRegisters[kChannel + 0x50u];
+    uint32_t asp = (chcr >> 4u) & 0x3u;
+    uint32_t lastTagUpper = chcr >> 16u;
+
+    auto toScratchpad = [&](uint32_t from, uint32_t qwCount)
+    {
+        uint32_t src = 0u;
+        try
+        {
+            src = translateAddress(from);
+        }
+        catch (const std::exception &)
+        {
+            return;
+        }
+        for (uint32_t i = 0u; i < qwCount && src + 16u <= PS2_RAM_SIZE; ++i, src += 16u)
+        {
+            std::memcpy(m_scratchpad + sadr, m_rdram + src, 16u);
+            sadr = (sadr + 16u) & (PS2_SCRATCHPAD_SIZE - 1u);
+        }
+    };
+
+    bool ended = false;
+    for (int tags = 0; tags < 4096 && !ended; ++tags)
+    {
+        uint32_t tagPhys = 0u;
+        try
+        {
+            tagPhys = translateAddress(tadr);
+        }
+        catch (const std::exception &)
+        {
+            break;
+        }
+        if (tagPhys + 16u > PS2_RAM_SIZE)
+            break;
+        const uint64_t tag = loadScalar<uint64_t>(m_rdram + tagPhys, 0, 16, "spr chain tag", tadr);
+        const uint32_t tagQwc = static_cast<uint32_t>(tag & 0xFFFFu);
+        const uint32_t id = static_cast<uint32_t>((tag >> 28) & 0x7u);
+        const bool irq = ((tag >> 31) & 0x1u) != 0u;
+        const uint32_t addr = static_cast<uint32_t>((tag >> 32) & 0x7FFFFFF0u);
+        lastTagUpper = static_cast<uint32_t>((tag >> 16) & 0xFFFFu);
+
+        if (transferTag)
+        {
+            std::memcpy(m_scratchpad + sadr, m_rdram + tagPhys, 16u);
+            sadr = (sadr + 16u) & (PS2_SCRATCHPAD_SIZE - 1u);
+        }
+
+        const uint32_t next = tadr + 16u;
+        switch (id)
+        {
+        case 0u: // REFE
+            madr = addr;
+            tadr = next;
+            ended = true;
+            break;
+        case 1u: // CNT
+            madr = next;
+            tadr = next + tagQwc * 16u;
+            break;
+        case 2u: // NEXT
+            madr = next;
+            tadr = addr;
+            break;
+        case 3u: // REF
+        case 4u: // REFS
+            madr = addr;
+            tadr = next;
+            break;
+        case 5u: // CALL
+            madr = next;
+            if (asp == 0u)
+                asr0 = next + tagQwc * 16u;
+            else
+                asr1 = next + tagQwc * 16u;
+            asp = std::min(asp + 1u, 2u);
+            tadr = addr;
+            break;
+        case 6u: // RET
+            madr = next;
+            if (asp == 0u)
+                ended = true;
+            else
+                tadr = (--asp == 1u) ? asr1 : asr0;
+            break;
+        case 7u: // END
+            madr = next;
+            ended = true;
+            break;
+        }
+        toScratchpad(madr, tagQwc);
+        madr += tagQwc * 16u;
+        if (irq && tieEnabled)
+            ended = true;
+    }
+
+    m_ioRegisters[kChannel + 0x30u] = tadr;
+    m_ioRegisters[kChannel + 0x10u] = madr;
+    m_ioRegisters[kChannel + 0x80u] = sadr;
+    m_ioRegisters[kChannel + 0x40u] = asr0;
+    m_ioRegisters[kChannel + 0x50u] = asr1;
+    m_ioRegisters[kChannel + 0x20u] = 0u;
+    m_ioRegisters[kChannel] = (chcr & 0x0000FFCFu) | ((asp & 0x3u) << 4u) | (lastTagUpper << 16u);
+    completeDmacChannel(kChannel, 9u);
+    return true;
 }
 
 void PS2Memory::processPendingTransfers()
