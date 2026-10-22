@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <string>
 #include <vector>
 
 namespace
@@ -38,6 +39,309 @@ namespace
         const size_t pos = dst.size();
         dst.resize(pos + sizeof(uint64_t));
         std::memcpy(dst.data() + pos, &value, sizeof(uint64_t));
+    }
+
+    void appendU16(std::vector<uint8_t> &dst, uint16_t value)
+    {
+        const size_t pos = dst.size();
+        dst.resize(pos + sizeof(uint16_t));
+        std::memcpy(dst.data() + pos, &value, sizeof(value));
+    }
+
+    uint32_t loadU32(const uint8_t *p)
+    {
+        uint32_t value = 0u;
+        std::memcpy(&value, p, 4u);
+        return value;
+    }
+
+    void fillPrefill(std::vector<uint8_t> &prefill)
+    {
+        prefill.resize(PS2_VU1_DATA_SIZE);
+        for (uint32_t i = 0; i < PS2_VU1_DATA_SIZE; ++i)
+            prefill[i] = static_cast<uint8_t>(0xA0u + (i * 17u));
+    }
+
+    // Per-lane UNPACK. This is the interpreter slow loop. Eligible 32-bit commands take the memcpy path;
+    // the tests require the same VU bytes and the same ROW.
+    struct UnpackCase
+    {
+        const char *label = "";
+        uint32_t cycle = 0;
+        uint32_t mode = 0;
+        uint32_t mask = 0;
+        uint32_t tops = 0;
+        uint32_t row[4] = {};
+        uint32_t col[4] = {};
+        uint8_t opcode = 0;
+        uint8_t num = 0;
+        uint16_t imm = 0;
+        std::vector<uint8_t> payload;
+    };
+
+    void applySlowUnpack(uint8_t *vu, uint32_t row[4], const UnpackCase &in)
+    {
+        const uint8_t vn = static_cast<uint8_t>((in.opcode >> 2) & 0x3u);
+        const uint8_t vl = static_cast<uint8_t>(in.opcode & 0x3u);
+        const bool maskEnable = (in.opcode & 0x10u) != 0u;
+        const int components = static_cast<int>(vn) + 1;
+        int bitsPerComponent = 32;
+        switch (vl)
+        {
+        case 0:
+            bitsPerComponent = 32;
+            break;
+        case 1:
+            bitsPerComponent = 16;
+            break;
+        case 2:
+            bitsPerComponent = 8;
+            break;
+        case 3:
+            bitsPerComponent = (vn == 3u) ? 4 : 16;
+            break;
+        default:
+            break;
+        }
+        const int bitsPerVector = (vl == 3 && vn == 3) ? 16 : (components * bitsPerComponent);
+        const uint32_t bytesPerVector = static_cast<uint32_t>((bitsPerVector + 7) / 8);
+        const uint32_t writeVectorCount = (in.num == 0u) ? 256u : static_cast<uint32_t>(in.num);
+        uint32_t cl = in.cycle & 0xFFu;
+        uint32_t wl = (in.cycle >> 8) & 0xFFu;
+        if (cl == 0u)
+            cl = 1u;
+        if (wl == 0u)
+            wl = 1u;
+
+        uint32_t sourceVectorCount = writeVectorCount;
+        if (cl < wl)
+        {
+            const uint32_t fullBlocks = writeVectorCount / wl;
+            uint32_t remainder = writeVectorCount % wl;
+            if (remainder > cl)
+                remainder = cl;
+            sourceVectorCount = fullBlocks * cl + remainder;
+        }
+
+        uint32_t totalBytes = sourceVectorCount * bytesPerVector;
+        totalBytes = (totalBytes + 3u) & ~3u;
+        uint32_t vuAddr = static_cast<uint32_t>(in.imm) & 0x3FFu;
+        if ((in.imm & 0x8000u) != 0u)
+            vuAddr = (vuAddr + (in.tops & 0x3FFu)) & 0x3FFu;
+        const bool zeroExtend = (in.imm & 0x4000u) != 0u;
+        if (totalBytes == 0u || in.payload.size() < totalBytes)
+            return;
+
+        const uint8_t *srcBase = in.payload.data();
+        uint32_t srcIndex = 0u;
+        for (uint32_t writeIndex = 0; writeIndex < writeVectorCount; ++writeIndex)
+        {
+            const uint32_t cyclePos = writeIndex % wl;
+            const bool sourceAvailable = (cl >= wl) || (cyclePos < cl);
+            uint32_t destVec = 0u;
+            if (cl >= wl)
+                destVec = (vuAddr + (writeIndex / wl) * cl + cyclePos) & 0x3FFu;
+            else
+                destVec = (vuAddr + writeIndex) & 0x3FFu;
+
+            const uint32_t destOff = destVec * 16u;
+            if (destOff + 16u > PS2_VU1_DATA_SIZE)
+            {
+                if (sourceAvailable && srcIndex < sourceVectorCount)
+                    ++srcIndex;
+                continue;
+            }
+
+            uint32_t lanes[4] = {0u, 0u, 0u, 0u};
+            std::memcpy(lanes, vu + destOff, sizeof(lanes));
+            uint32_t decompressed[4] = {lanes[0], lanes[1], lanes[2], lanes[3]};
+            bool decoded = false;
+            const uint8_t *srcVec = nullptr;
+            if (sourceAvailable && srcIndex < sourceVectorCount)
+            {
+                srcVec = srcBase + srcIndex * bytesPerVector;
+                ++srcIndex;
+                decoded = true;
+            }
+
+            auto extend16 = [&](uint16_t raw) -> uint32_t
+            {
+                if (zeroExtend)
+                    return static_cast<uint32_t>(raw);
+                return static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(raw)));
+            };
+            auto extend8 = [&](uint8_t raw) -> uint32_t
+            {
+                if (zeroExtend)
+                    return static_cast<uint32_t>(raw);
+                return static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(raw)));
+            };
+
+            bool handledFormat = true;
+            if (!decoded)
+                handledFormat = false;
+            else if (vl == 0u)
+            {
+                if (components == 1)
+                {
+                    uint32_t scalar = 0u;
+                    std::memcpy(&scalar, srcVec, sizeof(scalar));
+                    decompressed[0] = scalar;
+                    decompressed[1] = scalar;
+                    decompressed[2] = scalar;
+                    decompressed[3] = scalar;
+                }
+                else
+                {
+                    const uint32_t limit = (components > 4) ? 4u : static_cast<uint32_t>(components);
+                    for (uint32_t c = 0; c < limit; ++c)
+                    {
+                        uint32_t scalar = 0u;
+                        std::memcpy(&scalar, srcVec + c * 4u, sizeof(scalar));
+                        decompressed[c] = scalar;
+                    }
+                }
+            }
+            else if (vl == 1u)
+            {
+                if (components == 1)
+                {
+                    uint16_t raw = 0u;
+                    std::memcpy(&raw, srcVec, sizeof(raw));
+                    const uint32_t scalar = extend16(raw);
+                    decompressed[0] = scalar;
+                    decompressed[1] = scalar;
+                    decompressed[2] = scalar;
+                    decompressed[3] = scalar;
+                }
+                else
+                {
+                    const uint32_t limit = (components > 4) ? 4u : static_cast<uint32_t>(components);
+                    for (uint32_t c = 0; c < limit; ++c)
+                    {
+                        uint16_t raw = 0u;
+                        std::memcpy(&raw, srcVec + c * 2u, sizeof(raw));
+                        decompressed[c] = extend16(raw);
+                    }
+                }
+            }
+            else if (vl == 2u)
+            {
+                if (components == 1)
+                {
+                    const uint32_t scalar = extend8(srcVec[0]);
+                    decompressed[0] = scalar;
+                    decompressed[1] = scalar;
+                    decompressed[2] = scalar;
+                    decompressed[3] = scalar;
+                }
+                else
+                {
+                    const uint32_t limit = (components > 4) ? 4u : static_cast<uint32_t>(components);
+                    for (uint32_t c = 0; c < limit; ++c)
+                        decompressed[c] = extend8(srcVec[c]);
+                }
+            }
+            else if (vl == 3u && vn == 3u)
+            {
+                uint16_t packed = 0u;
+                std::memcpy(&packed, srcVec, sizeof(packed));
+                decompressed[0] = packed & 0x1Fu;
+                decompressed[1] = (packed >> 5) & 0x1Fu;
+                decompressed[2] = (packed >> 10) & 0x1Fu;
+                decompressed[3] = (packed >> 15) & 0x01u;
+            }
+            else
+            {
+                handledFormat = false;
+            }
+
+            if (!handledFormat && decoded && !maskEnable && (in.mode == 0u || in.mode == 3u))
+            {
+                const uint32_t copyBytes = (bytesPerVector < 16u) ? bytesPerVector : 16u;
+                std::memcpy(vu + destOff, srcVec, copyBytes);
+                continue;
+            }
+
+            const bool canAdd = (vl != 3u || vn != 3u);
+            const uint32_t mode = in.mode & 3u;
+            const uint32_t colIdx = (cyclePos > 3u) ? 3u : cyclePos;
+            const uint32_t maskCycle = (cyclePos > 3u) ? 3u : cyclePos;
+            for (uint32_t field = 0u; field < 4u; ++field)
+            {
+                uint32_t maskSpec = 0u;
+                if (maskEnable)
+                {
+                    const uint32_t shift = ((maskCycle * 4u) + field) * 2u;
+                    maskSpec = (in.mask >> shift) & 0x3u;
+                }
+                if (!decoded && maskSpec == 0u)
+                    maskSpec = 1u;
+
+                uint32_t writeVal = lanes[field];
+                if (maskSpec == 0u)
+                {
+                    if (handledFormat)
+                    {
+                        writeVal = decompressed[field];
+                        if (canAdd && (mode == 1u || mode == 2u))
+                        {
+                            writeVal = writeVal + row[field];
+                            if (mode == 2u)
+                                row[field] = writeVal;
+                        }
+                    }
+                }
+                else if (maskSpec == 1u)
+                    writeVal = row[field];
+                else if (maskSpec == 2u)
+                    writeVal = in.col[colIdx];
+                else
+                    continue;
+                lanes[field] = writeVal;
+            }
+            std::memcpy(vu + destOff, lanes, sizeof(lanes));
+        }
+    }
+
+    void expectUnpack(TestCase &t, PS2Memory &mem, const std::vector<uint8_t> &prefill, const UnpackCase &in)
+    {
+        std::memcpy(mem.getVU1Data(), prefill.data(), PS2_VU1_DATA_SIZE);
+        mem.vif1_regs = VIFRegisters{};
+        mem.vif1_regs.cycle = in.cycle;
+        mem.vif1_regs.mode = in.mode;
+        mem.vif1_regs.mask = in.mask;
+        mem.vif1_regs.tops = in.tops;
+        std::memcpy(mem.vif1_regs.row, in.row, sizeof(in.row));
+        std::memcpy(mem.vif1_regs.col, in.col, sizeof(in.col));
+
+        std::vector<uint8_t> expected(prefill);
+        uint32_t expectedRow[4] = {};
+        std::memcpy(expectedRow, in.row, sizeof(expectedRow));
+        applySlowUnpack(expected.data(), expectedRow, in);
+
+        std::vector<uint8_t> packet;
+        appendU32(packet, makeVifCmd(in.opcode, in.num, in.imm));
+        packet.insert(packet.end(), in.payload.begin(), in.payload.end());
+        mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+        const uint8_t *got = mem.getVU1Data();
+        for (uint32_t i = 0; i < PS2_VU1_DATA_SIZE; ++i)
+        {
+            if (got[i] != expected[i])
+            {
+                t.Fail(std::string(in.label) + " vu byte " + std::to_string(i));
+                return;
+            }
+        }
+        for (uint32_t i = 0; i < 4u; ++i)
+        {
+            if (mem.vif1_regs.row[i] != expectedRow[i])
+            {
+                t.Fail(std::string(in.label) + " row " + std::to_string(i));
+                return;
+            }
+        }
     }
 
     uint64_t makeDmaTag(uint16_t qwc, uint8_t id, uint32_t addr, bool irq = false)
@@ -2214,6 +2518,474 @@ void register_ps2_memory_tests()
                 }
             }
             t.IsTrue(imageOk, "raw image continuation after packed setup should not be decoded as VIF/GIF registers");
+        });
+
+        tc.Run("UNPACK 32-bit fast path matches the slow per-lane write", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::vector<uint8_t> prefill;
+            fillPrefill(prefill);
+            const uint8_t *vu = nullptr;
+
+            UnpackCase v4;
+            v4.label = "v4 contiguous";
+            v4.cycle = 0x0101u;
+            v4.opcode = 0x6Cu;
+            v4.num = 3u;
+            appendU32(v4.payload, 0x11111111u);
+            appendU32(v4.payload, 0x22222222u);
+            appendU32(v4.payload, 0x33333333u);
+            appendU32(v4.payload, 0x44444444u);
+            appendU32(v4.payload, 0x55555555u);
+            appendU32(v4.payload, 0x66666666u);
+            appendU32(v4.payload, 0x77777777u);
+            appendU32(v4.payload, 0x88888888u);
+            appendU32(v4.payload, 0x99999999u);
+            appendU32(v4.payload, 0xAAAAAAAAu);
+            appendU32(v4.payload, 0xBBBBBBBBu);
+            appendU32(v4.payload, 0xCCCCCCCCu);
+            expectUnpack(t, mem, prefill, v4);
+            vu = mem.getVU1Data();
+            t.Equals(loadU32(vu + 0u), 0x11111111u, "v4 contiguous x");
+            t.Equals(loadU32(vu + 2u * 16u + 12u), 0xCCCCCCCCu, "v4 contiguous last w");
+            t.Equals(loadU32(vu + 3u * 16u), loadU32(prefill.data() + 3u * 16u), "v4 contiguous leaves the next vector");
+
+            UnpackCase wrap;
+            wrap.label = "v4 wrap";
+            wrap.cycle = 0x0101u;
+            wrap.opcode = 0x6Cu;
+            wrap.num = 3u;
+            wrap.imm = 1022u;
+            appendU32(wrap.payload, 0x01010101u);
+            appendU32(wrap.payload, 0x02020202u);
+            appendU32(wrap.payload, 0x03030303u);
+            appendU32(wrap.payload, 0x04040404u);
+            appendU32(wrap.payload, 0x05050505u);
+            appendU32(wrap.payload, 0x06060606u);
+            appendU32(wrap.payload, 0x07070707u);
+            appendU32(wrap.payload, 0x08080808u);
+            appendU32(wrap.payload, 0x0A0A0A0Au);
+            appendU32(wrap.payload, 0x0B0B0B0Bu);
+            appendU32(wrap.payload, 0x0C0C0C0Cu);
+            appendU32(wrap.payload, 0x0D0D0D0Du);
+            expectUnpack(t, mem, prefill, wrap);
+            vu = mem.getVU1Data();
+            t.Equals(loadU32(vu + 1022u * 16u), 0x01010101u, "v4 wrap writes the tail");
+            t.Equals(loadU32(vu + 1023u * 16u), 0x05050505u, "v4 wrap writes vector 1023");
+            t.Equals(loadU32(vu + 0u), 0x0A0A0A0Au, "v4 wrap continues at vector 0");
+            t.Equals(loadU32(vu + 1021u * 16u), loadU32(prefill.data() + 1021u * 16u), "v4 wrap leaves vector 1021");
+
+            UnpackCase num0;
+            num0.label = "v4 num0";
+            num0.cycle = 0x0101u;
+            num0.opcode = 0x6Cu;
+            num0.num = 0u;
+            num0.imm = 100u;
+            num0.payload.resize(256u * 16u);
+            for (uint32_t i = 0; i < num0.payload.size(); ++i)
+                num0.payload[i] = static_cast<uint8_t>(i * 3u);
+            expectUnpack(t, mem, prefill, num0);
+            vu = mem.getVU1Data();
+            t.Equals(static_cast<uint32_t>(vu[100u * 16u]), static_cast<uint32_t>(num0.payload[0]), "v4 num0 first byte");
+            t.Equals(static_cast<uint32_t>(vu[355u * 16u]), static_cast<uint32_t>(num0.payload[4080u]), "v4 num0 last vector");
+            t.Equals(static_cast<uint32_t>(vu[99u * 16u]), static_cast<uint32_t>(prefill[99u * 16u]), "v4 num0 leaves the vector before");
+            t.Equals(static_cast<uint32_t>(vu[356u * 16u]), static_cast<uint32_t>(prefill[356u * 16u]), "v4 num0 leaves the vector after");
+
+            UnpackCase skip;
+            skip.label = "v4 cl>wl";
+            skip.cycle = 0x0103u;
+            skip.opcode = 0x6Cu;
+            skip.num = 2u;
+            appendU32(skip.payload, 0x11111111u);
+            appendU32(skip.payload, 0x22222222u);
+            appendU32(skip.payload, 0x33333333u);
+            appendU32(skip.payload, 0x44444444u);
+            appendU32(skip.payload, 0xAAAAAAAAu);
+            appendU32(skip.payload, 0xBBBBBBBBu);
+            appendU32(skip.payload, 0xCCCCCCCCu);
+            appendU32(skip.payload, 0xDDDDDDDDu);
+            expectUnpack(t, mem, prefill, skip);
+            vu = mem.getVU1Data();
+            t.Equals(loadU32(vu + 0u), 0x11111111u, "v4 skip writes addr 0");
+            t.Equals(loadU32(vu + 1u * 16u), loadU32(prefill.data() + 16u), "v4 skip leaves addr 1");
+            t.Equals(loadU32(vu + 2u * 16u), loadU32(prefill.data() + 32u), "v4 skip leaves addr 2");
+            t.Equals(loadU32(vu + 3u * 16u), 0xAAAAAAAAu, "v4 skip writes addr CL");
+
+            UnpackCase tops;
+            tops.label = "v4 tops";
+            tops.cycle = 0x0101u;
+            tops.opcode = 0x6Cu;
+            tops.num = 1u;
+            tops.imm = static_cast<uint16_t>(0x8000u | 2u);
+            tops.tops = 4u;
+            appendU32(tops.payload, 0x12121212u);
+            appendU32(tops.payload, 0x34343434u);
+            appendU32(tops.payload, 0x56565656u);
+            appendU32(tops.payload, 0x78787878u);
+            expectUnpack(t, mem, prefill, tops);
+            vu = mem.getVU1Data();
+            t.Equals(loadU32(vu + 6u * 16u), 0x12121212u, "v4 tops writes base+TOPS");
+            t.Equals(loadU32(vu + 2u * 16u), loadU32(prefill.data() + 2u * 16u), "v4 tops leaves the unadjusted addr");
+
+            UnpackCase v3;
+            v3.label = "v3-32";
+            v3.cycle = 0x0101u;
+            v3.opcode = 0x68u;
+            v3.num = 2u;
+            v3.imm = 4u;
+            appendU32(v3.payload, 0xA1A1A1A1u);
+            appendU32(v3.payload, 0xA2A2A2A2u);
+            appendU32(v3.payload, 0xA3A3A3A3u);
+            appendU32(v3.payload, 0xB1B1B1B1u);
+            appendU32(v3.payload, 0xB2B2B2B2u);
+            appendU32(v3.payload, 0xB3B3B3B3u);
+            expectUnpack(t, mem, prefill, v3);
+            vu = mem.getVU1Data();
+            t.Equals(loadU32(vu + 4u * 16u), 0xA1A1A1A1u, "v3-32 x");
+            t.Equals(loadU32(vu + 4u * 16u + 8u), 0xA3A3A3A3u, "v3-32 z");
+            t.Equals(loadU32(vu + 4u * 16u + 12u), loadU32(prefill.data() + 4u * 16u + 12u), "v3-32 keeps w");
+            t.Equals(loadU32(vu + 5u * 16u + 12u), loadU32(prefill.data() + 5u * 16u + 12u), "v3-32 keeps the second w");
+
+            UnpackCase v2;
+            v2.label = "v2-32";
+            v2.cycle = 0x0101u;
+            v2.opcode = 0x64u;
+            v2.num = 1u;
+            v2.imm = 20u;
+            appendU32(v2.payload, 0xC1C1C1C1u);
+            appendU32(v2.payload, 0xC2C2C2C2u);
+            expectUnpack(t, mem, prefill, v2);
+            vu = mem.getVU1Data();
+            t.Equals(loadU32(vu + 20u * 16u), 0xC1C1C1C1u, "v2-32 x");
+            t.Equals(loadU32(vu + 20u * 16u + 4u), 0xC2C2C2C2u, "v2-32 y");
+            t.Equals(loadU32(vu + 20u * 16u + 8u), loadU32(prefill.data() + 20u * 16u + 8u), "v2-32 keeps z");
+            t.Equals(loadU32(vu + 20u * 16u + 12u), loadU32(prefill.data() + 20u * 16u + 12u), "v2-32 keeps w");
+
+            UnpackCase s32;
+            s32.label = "s-32";
+            s32.cycle = 0x0101u;
+            s32.opcode = 0x60u;
+            s32.num = 2u;
+            s32.imm = 30u;
+            appendU32(s32.payload, 0x89ABCDEFu);
+            appendU32(s32.payload, 0x01234567u);
+            expectUnpack(t, mem, prefill, s32);
+            vu = mem.getVU1Data();
+            t.Equals(loadU32(vu + 30u * 16u), 0x89ABCDEFu, "s-32 broadcasts x");
+            t.Equals(loadU32(vu + 30u * 16u + 12u), 0x89ABCDEFu, "s-32 broadcasts w");
+            t.Equals(loadU32(vu + 31u * 16u + 8u), 0x01234567u, "s-32 second vector z");
+            t.Equals(loadU32(vu + 32u * 16u), loadU32(prefill.data() + 32u * 16u), "s-32 leaves the next vector");
+
+            UnpackCase sSkip;
+            sSkip.label = "s-32 cl>wl";
+            sSkip.cycle = 0x0103u;
+            sSkip.opcode = 0x60u;
+            sSkip.num = 2u;
+            appendU32(sSkip.payload, 0x11111111u);
+            appendU32(sSkip.payload, 0x22222222u);
+            expectUnpack(t, mem, prefill, sSkip);
+            vu = mem.getVU1Data();
+            t.Equals(loadU32(vu + 4u), 0x11111111u, "s-32 skip broadcasts y");
+            t.Equals(loadU32(vu + 16u), loadU32(prefill.data() + 16u), "s-32 skip leaves addr 1");
+            t.Equals(loadU32(vu + 3u * 16u + 12u), 0x22222222u, "s-32 skip writes addr CL");
+
+            UnpackCase v3Skip;
+            v3Skip.label = "v3-32 cl>wl";
+            v3Skip.cycle = 0x0204u;
+            v3Skip.opcode = 0x68u;
+            v3Skip.num = 4u;
+            for (uint32_t n = 0; n < 4u; ++n)
+            {
+                appendU32(v3Skip.payload, 0x1000u + n);
+                appendU32(v3Skip.payload, 0x2000u + n);
+                appendU32(v3Skip.payload, 0x3000u + n);
+            }
+            expectUnpack(t, mem, prefill, v3Skip);
+            vu = mem.getVU1Data();
+            t.Equals(loadU32(vu + 0u), 0x1000u, "v3 skip dest 0");
+            t.Equals(loadU32(vu + 1u * 16u), 0x1001u, "v3 skip dest 1");
+            t.Equals(loadU32(vu + 2u * 16u), loadU32(prefill.data() + 2u * 16u), "v3 skip leaves dest 2");
+            t.Equals(loadU32(vu + 4u * 16u), 0x1002u, "v3 skip dest 4");
+            t.Equals(loadU32(vu + 5u * 16u), 0x1003u, "v3 skip dest 5");
+            t.Equals(loadU32(vu + 12u), loadU32(prefill.data() + 12u), "v3 skip keeps w");
+
+            UnpackCase mode3;
+            mode3.label = "mode 3";
+            mode3.cycle = 0x0101u;
+            mode3.mode = 3u;
+            mode3.opcode = 0x6Cu;
+            mode3.num = 1u;
+            mode3.row[0] = 10u;
+            mode3.row[1] = 20u;
+            mode3.row[2] = 30u;
+            mode3.row[3] = 40u;
+            appendU32(mode3.payload, 1u);
+            appendU32(mode3.payload, 2u);
+            appendU32(mode3.payload, 3u);
+            appendU32(mode3.payload, 4u);
+            expectUnpack(t, mem, prefill, mode3);
+            vu = mem.getVU1Data();
+            t.Equals(loadU32(vu + 0u), 1u, "mode 3 does not add ROW");
+            t.Equals(loadU32(vu + 12u), 4u, "mode 3 w is the source");
+            t.Equals(mem.vif1_regs.row[0], 10u, "mode 3 leaves ROW");
+        });
+
+        tc.Run("UNPACK fast path stays off for masks STMOD narrow formats and WL greater than CL", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::vector<uint8_t> prefill;
+            fillPrefill(prefill);
+            const uint8_t *vu = nullptr;
+
+            UnpackCase masked;
+            masked.label = "masked v4";
+            masked.cycle = 0x0101u;
+            masked.opcode = 0x7Cu;
+            masked.num = 1u;
+            masked.mask = 0x000000E4u;
+            masked.row[0] = 0xAAAAB001u;
+            masked.row[1] = 0xAAAAB002u;
+            masked.row[2] = 0xAAAAB003u;
+            masked.row[3] = 0xAAAAB004u;
+            masked.col[0] = 0x11110001u;
+            appendU32(masked.payload, 0x01020304u);
+            appendU32(masked.payload, 0x11121314u);
+            appendU32(masked.payload, 0x21222324u);
+            appendU32(masked.payload, 0x31323334u);
+            expectUnpack(t, mem, prefill, masked);
+            vu = mem.getVU1Data();
+            t.Equals(loadU32(vu + 0u), 0x01020304u, "mask data lane");
+            t.Equals(loadU32(vu + 4u), 0xAAAAB002u, "mask row lane");
+            t.Equals(loadU32(vu + 8u), 0x11110001u, "mask col lane");
+            t.Equals(loadU32(vu + 12u), loadU32(prefill.data() + 12u), "mask protect lane");
+
+            UnpackCase offset;
+            offset.label = "mode 1";
+            offset.cycle = 0x0101u;
+            offset.mode = 1u;
+            offset.opcode = 0x6Cu;
+            offset.num = 1u;
+            offset.row[0] = 10u;
+            offset.row[1] = 20u;
+            offset.row[2] = 30u;
+            offset.row[3] = 40u;
+            appendU32(offset.payload, 1u);
+            appendU32(offset.payload, 2u);
+            appendU32(offset.payload, 3u);
+            appendU32(offset.payload, 4u);
+            expectUnpack(t, mem, prefill, offset);
+            vu = mem.getVU1Data();
+            t.Equals(loadU32(vu + 0u), 11u, "offset mode adds ROW");
+            t.Equals(loadU32(vu + 12u), 44u, "offset mode w");
+            t.Equals(mem.vif1_regs.row[0], 10u, "offset mode leaves ROW");
+
+            UnpackCase diff;
+            diff.label = "mode 2";
+            diff.cycle = 0x0101u;
+            diff.mode = 2u;
+            diff.opcode = 0x6Cu;
+            diff.num = 2u;
+            diff.row[0] = 100u;
+            diff.row[1] = 200u;
+            diff.row[2] = 300u;
+            diff.row[3] = 400u;
+            appendU32(diff.payload, 1u);
+            appendU32(diff.payload, 2u);
+            appendU32(diff.payload, 3u);
+            appendU32(diff.payload, 4u);
+            appendU32(diff.payload, 5u);
+            appendU32(diff.payload, 6u);
+            appendU32(diff.payload, 7u);
+            appendU32(diff.payload, 8u);
+            expectUnpack(t, mem, prefill, diff);
+            vu = mem.getVU1Data();
+            t.Equals(loadU32(vu + 0u), 101u, "difference first x");
+            t.Equals(loadU32(vu + 16u), 106u, "difference second x");
+            t.Equals(loadU32(vu + 16u + 12u), 412u, "difference second w");
+            t.Equals(mem.vif1_regs.row[0], 106u, "difference updates row x");
+            t.Equals(mem.vif1_regs.row[3], 412u, "difference updates row w");
+
+            UnpackCase fill;
+            fill.label = "wl>cl";
+            fill.cycle = 0x0301u;
+            fill.opcode = 0x6Cu;
+            fill.num = 3u;
+            fill.row[0] = 9u;
+            fill.row[1] = 8u;
+            fill.row[2] = 7u;
+            fill.row[3] = 6u;
+            appendU32(fill.payload, 1u);
+            appendU32(fill.payload, 2u);
+            appendU32(fill.payload, 3u);
+            appendU32(fill.payload, 4u);
+            expectUnpack(t, mem, prefill, fill);
+            vu = mem.getVU1Data();
+            t.Equals(loadU32(vu + 0u), 1u, "wl>cl first write is source");
+            t.Equals(loadU32(vu + 16u), 9u, "wl>cl fill is ROW");
+            t.Equals(loadU32(vu + 32u + 12u), 6u, "wl>cl third w is ROW");
+
+            UnpackCase v416;
+            v416.label = "v4-16";
+            v416.cycle = 0x0101u;
+            v416.opcode = 0x6Du;
+            v416.num = 1u;
+            appendU16(v416.payload, 0x8001u);
+            appendU16(v416.payload, 0x0001u);
+            appendU16(v416.payload, 0xFFFFu);
+            appendU16(v416.payload, 0x7FFFu);
+            expectUnpack(t, mem, prefill, v416);
+            vu = mem.getVU1Data();
+            t.Equals(loadU32(vu + 0u), 0xFFFF8001u, "v4-16 sign-extends");
+            t.Equals(loadU32(vu + 4u), 1u, "v4-16 y");
+            t.Equals(loadU32(vu + 8u), 0xFFFFFFFFu, "v4-16 z");
+            t.Equals(loadU32(vu + 12u), 0x00007FFFu, "v4-16 w");
+
+            UnpackCase maskedS;
+            maskedS.label = "masked s-32";
+            maskedS.cycle = 0x0101u;
+            maskedS.opcode = 0x70u;
+            maskedS.num = 1u;
+            maskedS.mask = 0x03u;
+            appendU32(maskedS.payload, 0xAABBCCDDu);
+            expectUnpack(t, mem, prefill, maskedS);
+            vu = mem.getVU1Data();
+            t.Equals(loadU32(vu + 0u), loadU32(prefill.data()), "masked s-32 protects x");
+            t.Equals(loadU32(vu + 4u), 0xAABBCCDDu, "masked s-32 writes y");
+            t.Equals(loadU32(vu + 8u), 0xAABBCCDDu, "masked s-32 writes z");
+            t.Equals(loadU32(vu + 12u), 0xAABBCCDDu, "masked s-32 writes w");
+        });
+
+        tc.Run("GIF immediate drain delivers the same bytes as a queued drain", [](TestCase &t)
+        {
+            std::vector<uint8_t> packet(48u);
+            for (uint32_t i = 0; i < packet.size(); ++i)
+                packet[i] = static_cast<uint8_t>(0x30u + i);
+            const std::vector<uint8_t> original = packet;
+
+            int calls = 0;
+            const uint8_t *seen = nullptr;
+            std::vector<uint8_t> got;
+            GifArbiter direct([&](const uint8_t *data, uint32_t sizeBytes)
+            {
+                ++calls;
+                seen = data;
+                got.assign(data, data + sizeBytes);
+            });
+            direct.submit(GifPathId::Path3, packet.data(), static_cast<uint32_t>(packet.size()), false, true);
+            t.Equals(calls, 1, "an empty queue drains inside submit");
+            t.IsTrue(direct.empty(), "immediate submit leaves the queue empty");
+            t.IsTrue(seen == packet.data(), "immediate drain passes the caller buffer");
+            t.IsTrue(got == original, "immediate bytes match the packet");
+            packet[0] ^= 0xFFu;
+            t.Equals(got[0], original[0], "immediate drain has already handed the bytes to the GS");
+            direct.drain();
+            t.Equals(calls, 1, "a later drain does not emit the immediate packet again");
+
+            packet = original;
+            calls = 0;
+            const uint8_t *queuedPtr = nullptr;
+            std::vector<uint8_t> queued;
+            GifArbiter copy([&](const uint8_t *data, uint32_t sizeBytes)
+            {
+                ++calls;
+                queuedPtr = data;
+                queued.assign(data, data + sizeBytes);
+            });
+            copy.submit(GifPathId::Path3, packet.data(), static_cast<uint32_t>(packet.size()), false, false);
+            t.Equals(calls, 0, "drainImmediately false does not call the GS");
+            t.IsFalse(copy.empty(), "the packet stays queued");
+            packet[0] ^= 0xFFu;
+            copy.drain();
+            t.Equals(calls, 1, "drain emits the queued copy");
+            t.IsTrue(copy.empty(), "drain empties the queue");
+            t.IsTrue(queuedPtr != packet.data(), "queued drain feeds the copy, not the caller buffer");
+            t.IsTrue(queued == original, "queued bytes stay the submitted bytes after the caller buffer changes");
+            t.IsTrue(queued == got, "immediate and queued drains deliver the same bytes");
+
+            std::vector<uint8_t> path1(32u);
+            std::vector<uint8_t> path3(32u);
+            for (uint32_t i = 0; i < 32u; ++i)
+            {
+                path1[i] = static_cast<uint8_t>(0x10u + i);
+                path3[i] = static_cast<uint8_t>(0x80u + i);
+            }
+            calls = 0;
+            std::vector<std::vector<uint8_t>> order;
+            GifArbiter mixed([&](const uint8_t *data, uint32_t sizeBytes)
+            {
+                ++calls;
+                order.emplace_back(data, data + sizeBytes);
+            });
+            mixed.submit(GifPathId::Path1, path1.data(), 32u, false, false);
+            mixed.submit(GifPathId::Path3, path3.data(), 32u, false, true);
+            t.Equals(calls, 0, "immediate submit does not bypass a non-empty queue");
+            mixed.drain();
+            t.Equals(order.size(), static_cast<size_t>(2u), "drain emits both packets");
+            t.IsTrue(order[0] == path1, "PATH1 stays ahead of a later PATH3");
+            t.IsTrue(order[1] == path3, "PATH3 bytes survive the copy onto a non-empty queue");
+
+            order.clear();
+            GifArbiter backToBack([&](const uint8_t *data, uint32_t sizeBytes)
+            {
+                order.emplace_back(data, data + sizeBytes);
+            });
+            backToBack.submit(GifPathId::Path2, path1.data(), 32u, false, true);
+            backToBack.submit(GifPathId::Path3, path3.data(), 32u, false, true);
+            t.Equals(order.size(), static_cast<size_t>(2u), "two immediate submits on an empty queue both reach the GS");
+            t.IsTrue(order[0] == path1 && order[1] == path3, "back-to-back immediate bytes stay in submit order");
+            t.IsTrue(backToBack.empty(), "back-to-back immediate submits leave the queue empty");
+
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::vector<std::vector<uint8_t>> via;
+            GifArbiter arbiter([&](const uint8_t *data, uint32_t sizeBytes)
+            {
+                via.emplace_back(data, data + sizeBytes);
+            });
+            mem.setGifArbiter(&arbiter);
+
+            std::vector<uint8_t> gif(64u);
+            for (uint32_t i = 0; i < gif.size(); ++i)
+                gif[i] = static_cast<uint8_t>(i * 3u);
+            mem.submitGifPacket(GifPathId::Path2, gif.data(), static_cast<uint32_t>(gif.size()), true, false);
+            t.Equals(via.size(), static_cast<size_t>(1u), "submitGifPacket immediate reaches the GS");
+            t.IsTrue(via[0] == gif, "submitGifPacket immediate bytes match");
+            t.IsTrue(arbiter.empty(), "submitGifPacket immediate leaves the arbiter empty");
+
+            via.clear();
+            std::vector<uint8_t> held(16u, 0xABu);
+            std::vector<uint8_t> next(16u, 0xCDu);
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                held[i] = static_cast<uint8_t>(0xA0u + i);
+                next[i] = static_cast<uint8_t>(0xC0u + i);
+            }
+            mem.submitGifPacket(GifPathId::Path1, held.data(), 16u, false, false);
+            t.Equals(via.size(), static_cast<size_t>(0u), "submitGifPacket drainImmediately false does not emit");
+            mem.submitGifPacket(GifPathId::Path3, next.data(), 16u, true, false);
+            t.Equals(via.size(), static_cast<size_t>(2u), "the following immediate submit drains the queued packet too");
+            t.IsTrue(via[0] == held, "queued submitGifPacket bytes match");
+            t.IsTrue(via[1] == next, "the immediate submitGifPacket bytes match");
+
+            via.clear();
+            const uint32_t setMask = makeVifCmd(0x06u, 0u, 0x8000u);
+            mem.processVIF1Data(reinterpret_cast<const uint8_t *>(&setMask), sizeof(setMask));
+            std::vector<uint8_t> maskedA(16u, 0x11u);
+            std::vector<uint8_t> maskedB(16u, 0x22u);
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                maskedA[i] = static_cast<uint8_t>(0x40u + i);
+                maskedB[i] = static_cast<uint8_t>(0x50u + i);
+            }
+            mem.submitGifPacket(GifPathId::Path3, maskedA.data(), 16u, true, false);
+            mem.submitGifPacket(GifPathId::Path3, maskedB.data(), 16u, true, false);
+            t.Equals(via.size(), static_cast<size_t>(0u), "a masked PATH3 packet is not drained immediately");
+            const uint32_t clearMask = makeVifCmd(0x06u, 0u, 0u);
+            mem.processVIF1Data(reinterpret_cast<const uint8_t *>(&clearMask), sizeof(clearMask));
+            t.Equals(via.size(), static_cast<size_t>(2u), "unmask flushes both queued PATH3 packets");
+            t.IsTrue(via[0] == maskedA && via[1] == maskedB, "unmask flushes the original PATH3 bytes in order");
         });
 
         tc.Run("unaligned accesses throw", [](TestCase &t)

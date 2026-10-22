@@ -1959,7 +1959,7 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t 
     }
 
     if (m_gifArbiter)
-        m_gifArbiter->submit(pathId, data, sizeBytes, path2DirectHl);
+        m_gifArbiter->submit(pathId, data, sizeBytes, path2DirectHl, drainImmediately);
     else if (m_gifPacketCallback)
         m_gifPacketCallback(data, sizeBytes);
 
