@@ -2170,6 +2170,61 @@ void register_ps2_gs_tests()
             t.IsTrue(same, "GIF IMAGE transfer should write payload bytes into GS VRAM");
         });
 
+        tc.Run("GIF FLG=3 (IMAGE2) packet writes host-to-local data like IMAGE", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            // Setup for host->local transfer to DBP=0, DBW=1, PSMCT32, rect 2x2.
+            const uint64_t bitblt =
+                (static_cast<uint64_t>(0u) << 0) |      // SBP
+                (static_cast<uint64_t>(1u) << 16) |     // SBW
+                (static_cast<uint64_t>(0u) << 24) |     // SPSM
+                (static_cast<uint64_t>(0u) << 32) |     // DBP
+                (static_cast<uint64_t>(1u) << 48) |     // DBW
+                (static_cast<uint64_t>(0u) << 56);      // DPSM (CT32)
+            gs.writeRegister(GS_REG_BITBLTBUF, bitblt);
+            gs.writeRegister(GS_REG_TRXPOS, 0ull);
+            gs.writeRegister(GS_REG_TRXREG, (2ull << 0) | (2ull << 32));
+            gs.writeRegister(GS_REG_TRXDIR, 0ull);
+
+            std::vector<uint8_t> packet;
+            appendU64(packet, makeGifTag(1u, GIF_FMT_DISABLED, 0u, true));
+            appendU64(packet, 0ull);
+
+            const uint8_t payload[16] = {
+                0x10u, 0x11u, 0x12u, 0x13u,
+                0x20u, 0x21u, 0x22u, 0x23u,
+                0x30u, 0x31u, 0x32u, 0x33u,
+                0x40u, 0x41u, 0x42u, 0x43u,
+            };
+            packet.insert(packet.end(), payload, payload + sizeof(payload));
+
+            gs.processGIFPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            bool same = true;
+            for (uint32_t y = 0; y < 2u && same; ++y)
+            {
+                for (uint32_t x = 0; x < 2u; ++x)
+                {
+                    const uint32_t pixelIndex = y * 2u + x;
+                    const uint32_t off = referenceAddrPSMCT32(0u, 1u, x, y);
+                    for (uint32_t c = 0; c < 4u; ++c)
+                    {
+                        if (vram[off + c] != payload[pixelIndex * 4u + c])
+                        {
+                            same = false;
+                            break;
+                        }
+                    }
+                    if (!same)
+                        break;
+                }
+            }
+            t.IsTrue(same, "GIF FLG=3 transfer should write payload bytes into GS VRAM like IMAGE");
+        });
+
         tc.Run("GIF load-image packet uses native upload fast path", [](TestCase &t)
         {
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
