@@ -377,6 +377,87 @@ inline __m128 ps2_vmul(__m128 a, __m128 b)
 #define PS2_VMULQ(a, q) _mm_mul_ps((__m128)(a), _mm_set1_ps(q))
 #define PS2_VBLEND(a, b, mask) PS2_BLENDV_PS((__m128)(a), (__m128)(b), (__m128)(mask))
 
+// PCSX2 _vuCLIP. w with exponent 0 is compared as the max denormal (0x007fffff).
+// bit0 x>+|w|, bit1 x<-|w|, bit2/3 y, bit4/5 z. History shifts up by 6 and keeps 24 bits.
+inline uint32_t ps2_vu_clip(uint32_t clip, uint32_t x, uint32_t y, uint32_t z, uint32_t w)
+{
+    int32_t value = static_cast<int32_t>(w);
+    value = (value & 0x7f800000) ? (value & 0x7fffffff) : 0x007fffff;
+    uint32_t flags = 0;
+    if (static_cast<int32_t>(x ^ 0u) > value) flags |= 0x01u;
+    if (static_cast<int32_t>(x ^ 0x80000000u) > value) flags |= 0x02u;
+    if (static_cast<int32_t>(y ^ 0u) > value) flags |= 0x04u;
+    if (static_cast<int32_t>(y ^ 0x80000000u) > value) flags |= 0x08u;
+    if (static_cast<int32_t>(z ^ 0u) > value) flags |= 0x10u;
+    if (static_cast<int32_t>(z ^ 0x80000000u) > value) flags |= 0x20u;
+    return ((clip << 6) | flags) & 0x00FFFFFFu;
+}
+
+// One lane of PCSX2 VU_MAC_UPDATE. shift: x=3, y=2, z=1, w=0.
+// Bits at that shift: Z=0x1, S=0x10, U=0x100, O=0x1000.
+inline uint32_t ps2_vu_mac_lane(uint32_t mac, int shift, float f)
+{
+    const uint32_t v = std::bit_cast<uint32_t>(f);
+    const int exp = static_cast<int>((v >> 23) & 0xffu);
+    const uint32_t s = v & 0x80000000u;
+    if (s)
+        mac |= 0x0010u << shift;
+    else
+        mac &= ~(0x0010u << shift);
+    if (f == 0.0f)
+        return (mac & ~(0x1100u << shift)) | (0x0001u << shift);
+    switch (exp)
+    {
+    case 0:
+        return (mac & ~(0x1000u << shift)) | (0x0101u << shift);
+    case 255:
+        return (mac & ~(0x0101u << shift)) | (0x1000u << shift);
+    default:
+        return mac & ~(0x1101u << shift);
+    }
+}
+
+// dest_mask: X=0x8 Y=0x4 Z=0x2 W=0x1. clear_absent drops lanes the op does not write
+// (VU_MACx_CLEAR). OPMULA/OPMSUB pass false so W, which those ops never touch, stays.
+// status becomes the Z/S/U/O summary, matching v2.8.2 VU_STAT_UPDATE.
+inline void ps2_vu_mac_apply(uint32_t &mac, uint16_t &status, __m128 result, uint32_t dest_mask, bool clear_absent)
+{
+    alignas(16) float lanes[4];
+    _mm_store_ps(lanes, result);
+    static const int kShift[4] = {3, 2, 1, 0};
+    static const uint32_t kBit[4] = {0x8u, 0x4u, 0x2u, 0x1u};
+    for (int i = 0; i < 4; ++i)
+    {
+        if ((dest_mask & kBit[i]) != 0u)
+            mac = ps2_vu_mac_lane(mac, kShift[i], lanes[i]);
+        else if (clear_absent)
+            mac &= ~(0x1111u << kShift[i]);
+    }
+    uint32_t nf = 0;
+    if ((mac & 0x000Fu) != 0u) nf = 0x1u;
+    if ((mac & 0x00F0u) != 0u) nf |= 0x2u;
+    if ((mac & 0x0F00u) != 0u) nf |= 0x4u;
+    if ((mac & 0xF000u) != 0u) nf |= 0x8u;
+    status = static_cast<uint16_t>(nf);
+}
+
+// PCSX2 floatToInt<Offset>. Exponent >= 0x4F000000 (>= 2^31) saturates; otherwise chop toward 0.
+inline __m128 ps2_vftoi(__m128 src, int shift)
+{
+    __m128 scaled = src;
+    if (shift != 0)
+        scaled = _mm_mul_ps(src, _mm_set1_ps(static_cast<float>(1 << shift)));
+    const __m128i bits = _mm_castps_si128(scaled);
+    const __m128i exp = _mm_and_si128(bits, _mm_set1_epi32(0x7F800000));
+    const __m128i ge = _mm_or_si128(_mm_cmpgt_epi32(exp, _mm_set1_epi32(0x4F000000)),
+                                    _mm_cmpeq_epi32(exp, _mm_set1_epi32(0x4F000000)));
+    const __m128i trunc = _mm_cvttps_epi32(scaled);
+    const __m128i neg = _mm_srai_epi32(bits, 31);
+    const __m128i sat = _mm_or_si128(_mm_and_si128(neg, _mm_set1_epi32(static_cast<int>(0x80000000))),
+                                     _mm_andnot_si128(neg, _mm_set1_epi32(0x7FFFFFFF)));
+    return _mm_blendv_ps(_mm_castsi128_ps(trunc), _mm_castsi128_ps(sat), _mm_castsi128_ps(ge));
+}
+
 // Memory access helpers - Hybrid Fast/Slow Path
 // Fast path: Direct RDRAM access (masked).
 // Slow path: Full runtime->Load/Store
@@ -853,7 +934,18 @@ inline __m128i ps2_u64_to_epi64_pair(uint64_t value)
 #define FPU_FLOOR_W_S(a) ((int32_t)floorf((float)(a)))
 #define FPU_CVT_S_W(a) ((float)(int32_t)(a))
 #define FPU_CVT_S_L(a) ((float)(int64_t)(a))
-#define FPU_CVT_W_S(a) ((int32_t)nearbyintf((float)(a)))
+// CVT.W.S follows the EE reset RM (chop). Exponent <= 0x4E800000 fits in int32 and truncates toward 0.
+// A larger magnitude saturates: + -> 0x7fffffff, - -> 0x80000000. Same test as PCSX2 CVT_W.
+inline int32_t ps2_cvt_w_s(float a)
+{
+    const uint32_t bits = std::bit_cast<uint32_t>(a);
+    if ((bits & 0x7F800000u) <= 0x4E800000u)
+        return static_cast<int32_t>(a);
+    if ((bits & 0x80000000u) == 0u)
+        return 0x7FFFFFFF;
+    return static_cast<int32_t>(0x80000000u);
+}
+#define FPU_CVT_W_S(a) ps2_cvt_w_s((float)(a))
 #define FPU_CVT_L_S(a) ((int64_t)(float)(a))
 #define FPU_C_F_S(a, b) (0)
 #define FPU_C_UN_S(a, b) (isnan((float)(a)) || isnan((float)(b)))

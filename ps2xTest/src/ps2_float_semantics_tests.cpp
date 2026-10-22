@@ -223,6 +223,31 @@ void register_ps2_float_semantics_tests()
             const std::string rsqrt = gen.translateInstruction(makeCop1S(COP1_S_RSQRT, 2, 3, 4));
             t.IsTrue(rsqrt.find("ctx->f[2] = FPU_RSQRT_S(ctx->f[3], ctx->f[4])") != std::string::npos,
                      "RSQRT.S should compute fs / sqrt(ft) but got: " + rsqrt);
+
+            const std::string cvt = gen.translateInstruction(makeCop1S(COP1_S_CVT_W, 2, 3, 4));
+            t.IsTrue(cvt.find("FPU_CVT_W_S(ctx->f[3])") != std::string::npos,
+                     "CVT.W.S should chop fs into fd but got: " + cvt);
+        });
+
+        tc.Run("CVT.W.S chops toward zero and saturates like PCSX2", [](TestCase &t)
+        {
+            auto bits = [](int32_t v) { return static_cast<uint32_t>(v); };
+            t.Equals(bits(FPU_CVT_W_S(0.5f)), 0u, "+0.5 chops to 0");
+            t.Equals(bits(FPU_CVT_W_S(-0.5f)), 0u, "-0.5 chops to 0");
+            t.Equals(bits(FPU_CVT_W_S(1.5f)), 1u, "+1.5 chops to 1");
+            t.Equals(bits(FPU_CVT_W_S(-1.5f)), 0xFFFFFFFFu, "-1.5 chops to -1");
+            t.Equals(bits(FPU_CVT_W_S(1.9f)), 1u, "+1.9 chops to 1");
+            t.Equals(bits(FPU_CVT_W_S(-1.9f)), 0xFFFFFFFFu, "-1.9 chops to -1");
+            t.Equals(bits(FPU_CVT_W_S(2147483648.0f)), 0x7FFFFFFFu, "2^31 saturates to 0x7fffffff");
+            // -2^31-1 is not a float32; it rounds to -2^31, whose CVT.W.S result is 0x80000000.
+            t.Equals(bits(FPU_CVT_W_S(-2147483648.0f)), 0x80000000u, "-2^31 and float(-2^31-1) saturate to 0x80000000");
+            t.Equals(bits(FPU_CVT_W_S(floatOf(0xCF000001u))), 0x80000000u, "the next float below -2^31 saturates to 0x80000000");
+            t.Equals(bits(FPU_CVT_W_S(floatOf(0x4EFFFFFFu))), 0x7FFFFF80u, "max in-range magnitude chops to 2147483520");
+            t.Equals(bits(FPU_CVT_W_S(floatOf(0xCEFFFFFFu))), 0x80000080u, "min in-range magnitude chops to -2147483520");
+            t.Equals(bits(FPU_CVT_W_S(std::numeric_limits<float>::max())), 0x7FFFFFFFu, "max float saturates to 0x7fffffff");
+            t.Equals(bits(FPU_CVT_W_S(-std::numeric_limits<float>::max())), 0x80000000u, "-max float saturates to 0x80000000");
+            t.Equals(bits(FPU_CVT_W_S(floatOf(0x7F800000u))), 0x7FFFFFFFu, "exponent 255 saturates positive");
+            t.Equals(bits(FPU_CVT_W_S(floatOf(0xFF800000u))), 0x80000000u, "exponent 255 saturates negative");
         });
     });
 }

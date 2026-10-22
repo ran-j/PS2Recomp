@@ -3,10 +3,14 @@
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_memory.h"
 #include "Kernel/Stubs/VU.h"
+#include "ps2recomp/code_generator.h"
+#include "ps2recomp/instructions.h"
+#include "ps2recomp/r5900_decoder.h"
 
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <string>
 #include <vector>
 
 namespace
@@ -74,6 +78,46 @@ namespace
         m[5] = 1.0f;
         m[10] = 1.0f;
         m[15] = 1.0f;
+    }
+
+    uint32_t cop2s1(uint32_t dest, uint32_t ft, uint32_t fs, uint32_t fd, uint32_t fn)
+    {
+        const uint32_t fmt = 0x10u | (dest & 0xFu);
+        return (0x12u << 26) | (fmt << 21) | ((ft & 31u) << 16) | ((fs & 31u) << 11) | ((fd & 31u) << 6) | (fn & 0x3Fu);
+    }
+
+    uint32_t cop2s2(uint32_t dest, uint32_t ft, uint32_t fs, uint32_t vuFunc)
+    {
+        const uint32_t low6 = 0x3Cu | (vuFunc & 0x3u);
+        const uint32_t hi = (vuFunc >> 2) & 0x1Fu;
+        const uint32_t fmt = 0x10u | (dest & 0xFu);
+        return (0x12u << 26) | (fmt << 21) | ((ft & 31u) << 16) | ((fs & 31u) << 11) | (hi << 6) | low6;
+    }
+
+    uint32_t cfc2(uint32_t rt, uint32_t rd)
+    {
+        return (0x12u << 26) | (2u << 21) | ((rt & 31u) << 16) | ((rd & 31u) << 11);
+    }
+
+    std::string emitVu(uint32_t raw)
+    {
+        ps2recomp::R5900Decoder dec;
+        ps2recomp::CodeGenerator gen({}, {});
+        return gen.translateInstruction(dec.decodeInstruction(0, raw, false));
+    }
+
+    uint32_t laneU(__m128 v, int lane)
+    {
+        alignas(16) uint32_t b[4];
+        _mm_store_si128(reinterpret_cast<__m128i *>(b), _mm_castps_si128(v));
+        return b[lane];
+    }
+
+    uint32_t fbits(float f)
+    {
+        uint32_t b;
+        std::memcpy(&b, &f, 4);
+        return b;
     }
 }
 
@@ -1040,6 +1084,106 @@ void register_ps2_vu_tests()
             float out[16]{};
             readMat4(env, kDst, out);
             t.IsTrue(nearlyEqual(out[0], 0.0f), "DropShadowMatrix point mode should subtract d before scaling by k");
+        });
+    });
+
+    MiniTest::Case("PS2VuFpuFixes", [](TestCase &tc)
+    {
+        tc.Run("VCLIP side bits and 24-bit history", [](TestCase &t)
+        {
+            const uint32_t x = fbits(2.0f);
+            const uint32_t y = fbits(-3.0f);
+            const uint32_t z = fbits(0.5f);
+            const uint32_t wPos = fbits(1.0f);
+            const uint32_t wNeg = fbits(-1.0f);
+            const uint32_t pos = ps2_vu_clip(0, x, y, z, wPos);
+            const uint32_t neg = ps2_vu_clip(0, x, y, z, wNeg);
+            t.Equals(pos, 0x09u, "x=2,y=-3,z=0.5,|w|=1 sets bit0 and bit3");
+            t.Equals(pos & 0x01u, 0x01u, "bit0 is x > +|w|");
+            t.Equals(pos & 0x02u, 0u, "bit1 is clear when x is positive");
+            t.Equals(neg, 0x09u, "negative w uses |w| and keeps the same side bits");
+            const uint32_t xNeg = ps2_vu_clip(0, fbits(-2.0f), 0, 0, wPos);
+            t.Equals(xNeg, 0x02u, "x=-2 sets bit1 (x < -|w|) and clears bit0");
+            const uint32_t yz = ps2_vu_clip(0, 0, fbits(4.0f), fbits(-4.0f), wPos);
+            t.Equals(yz, 0x24u, "y>+|w| is bit2 and z<-|w| is bit5");
+            t.Equals(ps2_vu_clip(0x00FFFFFFu, 0, 0, 0, wPos), 0x00FFFFC0u, "a zero result shifts the 24-bit history by 6");
+            t.Equals(ps2_vu_clip(1u, x, 0, 0, wPos), 0x41u, "previous clip is shifted and the new low bits are OR'd");
+            t.Equals(ps2_vu_clip(0, 0x007FFFFFu, 0, 0, 0x00000001u), 0u, "denormal x against denormal w does not set a side");
+            t.Equals(ps2_vu_clip(0, 0x00800000u, 0, 0, 0u), 0x01u, "a normal x against a zero w sets bit0");
+
+            const std::string clip = emitVu(cop2s2(0xF, 2, 1, ps2recomp::VU0_S2_VCLIPw));
+            t.IsTrue(clip.find("ps2_vu_clip(ctx->vu0_clip_flags, xb, yb, zb, wb)") != std::string::npos,
+                     "VCLIPw should call ps2_vu_clip but got: " + clip);
+            t.IsTrue(clip.find("_MM_SHUFFLE(3,3,3,3)") != std::string::npos,
+                     "VCLIPw broadcasts ft.w but got: " + clip);
+            t.IsTrue(clip.find("lt_mask") == std::string::npos, "VCLIPw must not keep the swapped lt/gt pack");
+        });
+
+        tc.Run("FMAC writes the MAC word CFC2 reads", [](TestCase &t)
+        {
+            uint32_t mac = 0;
+            uint16_t status = 0;
+            const __m128 vadd = PS2_VADD(_mm_set1_ps(-1.0f), _mm_setzero_ps());
+            ps2_vu_mac_apply(mac, status, vadd, 0xF, true);
+            t.Equals(mac, 0x00F0u, "VADD of -1 sets Sx Sy Sz Sw, the sign bits CFC2.MAC returns");
+            t.Equals(static_cast<uint32_t>(status), 0x2u, "VADD of -1 sets the status sign bit only");
+
+            mac = 0x1111u;
+            status = 0;
+            const __m128 opm = _mm_set_ps(5.0f, 0.0f, 0.0f, -2.0f);
+            ps2_vu_mac_apply(mac, status, opm, 0xEu, false);
+            t.IsTrue(mac != 0u, "VOPMSUB of a negative x lane leaves CFC2.MAC nonzero");
+            t.Equals(mac & 0x80u, 0x80u, "VOPMSUB negative x sets Sx");
+            t.Equals(mac & 0x1111u, 0x1111u, "VOPMSUB does not clear the W MAC bits");
+
+            mac = 0xFFFFu;
+            ps2_vu_mac_apply(mac, status, _mm_set1_ps(0.0f), 0x8u, true);
+            t.Equals(mac, 0x8u, "an X-only zero sets Zx and clears the other 16-bit lanes");
+
+            mac = 0;
+            ps2_vu_mac_apply(mac, status, _mm_set_ps(0.0f, 0.0f, 0.0f, -0.0f), 0x8u, true);
+            t.Equals(mac, 0x88u, "-0 sets both Sx and Zx");
+
+            const std::string vaddCode = emitVu(cop2s1(0xF, 3, 2, 1, ps2recomp::VU0_S1_VADD));
+            t.IsTrue(vaddCode.find("ps2_vu_mac_apply(ctx->vu0_mac_flags, ctx->vu0_status, res, 0xF, true)") != std::string::npos,
+                     "VADD should write vu0_mac_flags but got: " + vaddCode);
+            const std::string opmCode = emitVu(cop2s1(0xE, 3, 2, 1, ps2recomp::VU0_S1_VOPMSUB));
+            t.IsTrue(opmCode.find("ps2_vu_mac_apply(ctx->vu0_mac_flags, ctx->vu0_status, res, 0xE, false)") != std::string::npos,
+                     "VOPMSUB should update xyz MAC and keep W but got: " + opmCode);
+            const std::string addx = emitVu(cop2s1(0x8, 3, 2, 1, ps2recomp::VU0_S1_VADDx));
+            t.IsTrue(addx.find("ps2_vu_mac_apply(ctx->vu0_mac_flags, ctx->vu0_status, res, 0x8, true)") != std::string::npos,
+                     "VADDx should flag only the written lane but got: " + addx);
+            const std::string mini = emitVu(cop2s1(0xF, 3, 2, 1, ps2recomp::VU0_S1_VMINI));
+            t.IsTrue(mini.find("ps2_vu_mac_apply") == std::string::npos, "VMINI does not update MAC but got: " + mini);
+            const std::string cfc = emitVu(cfc2(4, ps2recomp::VU0_CR_MAC));
+            t.IsTrue(cfc.find("ctx->vu0_mac_flags") != std::string::npos,
+                     "CFC2 MAC should read vu0_mac_flags but got: " + cfc);
+        });
+
+        tc.Run("VFTOI saturates at 2^31", [](TestCase &t)
+        {
+            const __m128 z = ps2_vftoi(_mm_set_ps(-1.5f, 0.5f, -2147483648.0f, 2147483648.0f), 0);
+            t.Equals(laneU(z, 0), 0x7FFFFFFFu, "VFTOI0 of 2^31 is 0x7fffffff");
+            t.Equals(laneU(z, 1), 0x80000000u, "VFTOI0 of -2^31 is 0x80000000");
+            t.Equals(laneU(z, 2), 0u, "VFTOI0 of +0.5 chops to 0");
+            t.Equals(laneU(z, 3), 0xFFFFFFFFu, "VFTOI0 of -1.5 chops to -1");
+            t.Equals(laneU(ps2_vftoi(_mm_set1_ps(2147483520.0f), 0), 0), 0x7FFFFF80u, "VFTOI0 of the max in-range float keeps 2147483520");
+
+            const __m128 s4 = ps2_vftoi(_mm_set_ps(-1.5f, 1.5f, -134217728.0f, 134217728.0f), 4);
+            t.Equals(laneU(s4, 0), 0x7FFFFFFFu, "VFTOI4 of 2^27 is 0x7fffffff");
+            t.Equals(laneU(s4, 1), 0x80000000u, "VFTOI4 of -2^27 is 0x80000000");
+            t.Equals(laneU(s4, 2), 24u, "VFTOI4 of 1.5 is 24");
+            t.Equals(laneU(s4, 3), 0xFFFFFFE8u, "VFTOI4 of -1.5 is -24");
+
+            const std::string i0 = emitVu(cop2s2(0xF, 1, 2, ps2recomp::VU0_S2_VFTOI0));
+            t.IsTrue(i0.find("ps2_vftoi(ctx->vu0_vf[2], 0)") != std::string::npos, "VFTOI0 should call ps2_vftoi shift 0 but got: " + i0);
+            t.IsTrue(i0.find("_mm_cvttps_epi32") == std::string::npos, "VFTOI0 must not emit a bare cvttps");
+            const std::string i4 = emitVu(cop2s2(0xF, 1, 2, ps2recomp::VU0_S2_VFTOI4));
+            t.IsTrue(i4.find("ps2_vftoi(ctx->vu0_vf[2], 4)") != std::string::npos, "VFTOI4 should call ps2_vftoi shift 4 but got: " + i4);
+            const std::string i12 = emitVu(cop2s2(0xF, 1, 2, ps2recomp::VU0_S2_VFTOI12));
+            t.IsTrue(i12.find("ps2_vftoi(ctx->vu0_vf[2], 12)") != std::string::npos, "VFTOI12 should pass shift 12 but got: " + i12);
+            const std::string i15 = emitVu(cop2s2(0xF, 1, 2, ps2recomp::VU0_S2_VFTOI15));
+            t.IsTrue(i15.find("ps2_vftoi(ctx->vu0_vf[2], 15)") != std::string::npos, "VFTOI15 should pass shift 15 but got: " + i15);
         });
     });
 }
