@@ -134,6 +134,8 @@ namespace ps2_game_overrides
 
         if (descriptors.empty())
         {
+            RUNTIME_LOG("[game_overrides] no overrides registered (override sources must be built into the "
+                        "executable, see ps2xRuntime/src/game_overrides/).");
             return;
         }
 
@@ -175,9 +177,7 @@ namespace ps2_game_overrides
             ++appliedCount;
         }
 
-        if (appliedCount > 0)
-        {
-            RUNTIME_LOG("[game_overrides] applied " << appliedCount << " matching override(s).");
-        }
+        RUNTIME_LOG("[game_overrides] applied " << appliedCount << " matching override(s) of "
+                                                << descriptors.size() << " registered.");
     }
 }

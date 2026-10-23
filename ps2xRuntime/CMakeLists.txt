@@ -441,6 +441,17 @@ file(GLOB RUNNER_SRC_FILES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/runner/*.cpp"
 )
 
+# Game overrides register through static initializers, so they must be linked into the
+# executable: in the ps2_runtime static library nothing references them and the linker drops them.
+file(GLOB GAME_OVERRIDE_SRC_FILES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/game_overrides/*.cpp"
+)
+list(APPEND RUNNER_SRC_FILES ${GAME_OVERRIDE_SRC_FILES})
+# The registration macro names its statics by __LINE__, so two overrides in one unity batch could collide.
+if(GAME_OVERRIDE_SRC_FILES)
+    set_source_files_properties(${GAME_OVERRIDE_SRC_FILES} PROPERTIES SKIP_UNITY_BUILD_INCLUSION TRUE)
+endif()
+
 set(RUNNER_MAIN_CPP "${CMAKE_CURRENT_SOURCE_DIR}/src/runner/main.cpp")
 set(ROOT_MAIN_CPP "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp")
 
