@@ -2,6 +2,7 @@
 #include "ps2recomp/code_generator.h"
 #include "ps2recomp/instructions.h"
 #include "ps2recomp/ps2_recompiler.h"
+#include "ps2recomp/r5900_decoder.h"
 #include "ps2recomp/types.h"
 #include <filesystem>
 #include <fstream>
@@ -1318,6 +1319,32 @@ void register_code_generator_tests()
                 msg << "VU0 S2 0x" << std::hex << value << " should be mapped";
                 t.IsTrue(out.find("Unhandled VU0 Special2") == std::string::npos, msg.str().c_str());
             }
+        });
+
+        tc.Run("VU0 macro FMAC ops set MAC flags and drop writes to VF0", [](TestCase &t) {
+            R5900Decoder decoder;
+            CodeGenerator gen({}, {});
+
+            // vsub.xyz vf0, vf1, vf2: the usual compare idiom, read back with cfc2 MAC.
+            const std::string vsub = gen.translateInstruction(decoder.decodeInstruction(0x1000u, 0x4BC2082Cu));
+            const size_t mac = vsub.find("PS2_VU0_SET_MAC(ctx, ctx->vu0_vf[0], 0xEu)");
+            const size_t restore = vsub.find("ctx->vu0_vf[0] = _mm_setr_ps(0.0f, 0.0f, 0.0f, 1.0f)");
+            t.IsTrue(mac != std::string::npos, "VSUB should set the MAC flags for its dest fields");
+            t.IsTrue(restore != std::string::npos, "a write to VF0 should be undone");
+            t.IsTrue(mac < restore, "the MAC flags must come from the result before VF0 is restored");
+
+            // vmula.xyzw ACC, vf1, vf2 sets the flags from ACC.
+            const std::string vmula = gen.translateInstruction(decoder.decodeInstruction(0x1000u, 0x4BE20ABEu));
+            t.IsTrue(vmula.find("PS2_VU0_SET_MAC(ctx, ctx->vu0_acc, 0xFu)") != std::string::npos,
+                     "VMULA should set the MAC flags from ACC");
+
+            // vmax.xyzw vf3, vf1, vf2 leaves the flags alone.
+            const std::string vmax = gen.translateInstruction(decoder.decodeInstruction(0x1000u, 0x4BE208EBu));
+            t.IsTrue(vmax.find("PS2_VU0_SET_MAC") == std::string::npos, "VMAX should not touch the MAC flags");
+
+            // qmtc2 v0, vf0 is discarded.
+            const std::string qmtc2 = gen.translateInstruction(decoder.decodeInstruction(0x1000u, 0x48A20000u));
+            t.IsTrue(qmtc2.find("vu0_vf[0] =") == std::string::npos, "QMTC2 must not write VF0");
         });
 
         tc.Run("VU0 S1 uses fd/fs/ft fields (sa/rd/rt)", [](TestCase &t) {

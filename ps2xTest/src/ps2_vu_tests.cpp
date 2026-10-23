@@ -81,6 +81,19 @@ void register_ps2_vu_tests()
 {
     MiniTest::Case("PS2VU0Math", [](TestCase &tc)
     {
+        tc.Run("VU0 MAC flags report zero and sign for the dest fields", [](TestCase &t)
+        {
+            R5900Context ctx{};
+            // x = 0, y = -2, z = 3, w = -0; dest = xyz (w not written).
+            PS2_VU0_SET_MAC(&ctx, _mm_setr_ps(0.0f, -2.0f, 3.0f, -0.0f), 0xEu);
+            t.Equals(ctx.vu0_mac_flags, 0x48u, "Zx and Sy should be set, w ignored");
+            t.Equals(static_cast<uint32_t>(ctx.vu0_status & 0xC3u), 0xC3u, "status Z/S and their sticky bits should be set");
+
+            PS2_VU0_SET_MAC(&ctx, _mm_setr_ps(1.0f, 1.0f, 1.0f, 1.0f), 0xFu);
+            t.Equals(ctx.vu0_mac_flags, 0u, "no flags for positive non-zero lanes");
+            t.Equals(static_cast<uint32_t>(ctx.vu0_status & 0xC3u), 0xC0u, "Z/S clear, sticky bits kept");
+        });
+
         tc.Run("MulVector_componentwise", [](TestCase &t)
         {
             VuEnv env;
