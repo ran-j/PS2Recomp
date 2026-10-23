@@ -3527,11 +3527,13 @@ void register_ps2_gs_tests()
                 gs.writeRegister(GS_REG_ST, packSt(0.0f, 0.0f));
                 gs.writeRegister(GS_REG_XYZ2, 0ull);
                 gs.writeRegister(GS_REG_ST, packSt(1.0f, 0.0f));
-                gs.writeRegister(GS_REG_XYZ2, (64ull << 0) | (0ull << 16));
+                gs.writeRegister(GS_REG_XYZ2, (128ull << 0) | (0ull << 16));
                 gs.writeRegister(GS_REG_ST, packSt(0.0f, 0.0f));
                 gs.writeRegister(GS_REG_XYZ2, (0ull << 0) | (64ull << 16));
 
-                return readReferencePSMCT32Pixel(vram, 0u, 1u, 1u, 1u);
+                // Pixels are sampled at their integer corner: (3, 1) interpolates
+                // S = 3/8, i.e. u = 0.75 texels, between texels 0 and 1.
+                return readReferencePSMCT32Pixel(vram, 0u, 1u, 3u, 1u);
             };
 
             constexpr uint64_t kTex1Linear =
@@ -3695,13 +3697,15 @@ void register_ps2_gs_tests()
             gs.writeRegister(GS_REG_XYZ2, 0ull);
             gs.writeRegister(GS_REG_ST, packSt(2.0f, 0.0f));
             gs.writeRegister(GS_REG_RGBAQ, packRgbaq(2.0f));
-            gs.writeRegister(GS_REG_XYZ2, 64ull);
+            gs.writeRegister(GS_REG_XYZ2, 128ull);
             gs.writeRegister(GS_REG_ST, packSt(0.0f, 0.0f));
             gs.writeRegister(GS_REG_RGBAQ, packRgbaq(1.0f));
             gs.writeRegister(GS_REG_XYZ2, (64ull << 16));
 
+            // Sampled at the integer corner (3, 1): S = 0.75 and Q = 1.375, so
+            // S/Q selects texel 2, while affine S/Q interpolation gives texel 1.
             const uint32_t pixel =
-                readReferencePSMCT32Pixel(vram, 0u, 1u, 1u, 1u);
+                readReferencePSMCT32Pixel(vram, 0u, 1u, 3u, 1u);
             t.Equals(pixel, kHomogeneousTexel,
                      "the DDA should interpolate S=0.75 and Q=1.375, selecting texel 2 after S/Q");
         });
@@ -3909,7 +3913,7 @@ void register_ps2_gs_tests()
                 int last = -1;
                 for (uint32_t x = 6u; x <= 26u; ++x)
                 {
-                    const size_t offset = (static_cast<size_t>(y) * 64u + static_cast<size_t>(x)) * 4u;
+                    const uint32_t offset = GSPSMCT32::addrPSMCT32(0u, 1u, x, y);
                     uint32_t pixel = 0u;
                     std::memcpy(&pixel, vram.data() + offset, sizeof(pixel));
                     if ((pixel & 0x00FFFFFFu) != 0u)
@@ -3930,7 +3934,7 @@ void register_ps2_gs_tests()
                 sawFilledRow = true;
                 for (int x = first; x <= last; ++x)
                 {
-                    const size_t offset = (static_cast<size_t>(y) * 64u + static_cast<size_t>(x)) * 4u;
+                    const uint32_t offset = GSPSMCT32::addrPSMCT32(0u, 1u, static_cast<uint32_t>(x), y);
                     uint32_t pixel = 0u;
                     std::memcpy(&pixel, vram.data() + offset, sizeof(pixel));
                     if ((pixel & 0x00FFFFFFu) == 0u)
@@ -3943,6 +3947,82 @@ void register_ps2_gs_tests()
 
             t.IsTrue(sawFilledRow,
                      "triangle fan quad should light at least one framebuffer row");
+        });
+
+        tc.Run("GS triangles sharing an edge draw each pixel once under additive blending", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            constexpr uint64_t kFrame =
+                (1ull << 16) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kZbuf = (1ull << 32);
+            constexpr uint64_t kScissor =
+                (0ull << 0) |
+                (15ull << 16) |
+                (0ull << 32) |
+                (15ull << 48);
+            // Cs * FIX / 128 + Cd with FIX = 0x80: plain additive blending.
+            constexpr uint64_t kAlphaAdd =
+                (0ull << 0) |
+                (2ull << 2) |
+                (2ull << 4) |
+                (1ull << 6) |
+                (0x80ull << 32);
+            constexpr uint64_t kPrim =
+                static_cast<uint64_t>(GS_PRIM_TRIANGLE) |
+                (1ull << 6);
+            constexpr uint64_t kRgbaq =
+                0x20ull |
+                (0x80ull << 24) |
+                (0x3F800000ull << 32); // q = 1.0f
+            auto makeXyz = [](uint16_t x, uint16_t y) -> uint64_t
+            {
+                return static_cast<uint64_t>(x) |
+                       (static_cast<uint64_t>(y) << 16);
+            };
+
+            gs.writeRegister(GS_REG_FRAME_1, kFrame);
+            gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
+            gs.writeRegister(GS_REG_SCISSOR_1, kScissor);
+            gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
+            gs.writeRegister(GS_REG_ALPHA_1, kAlphaAdd);
+            gs.writeRegister(GS_REG_PRIM, kPrim);
+            gs.writeRegister(GS_REG_RGBAQ, kRgbaq);
+
+            // An 8x8 quad split along its diagonal, which passes exactly
+            // through the pixel sample points (k, k).
+            gs.writeRegister(GS_REG_XYZ2, makeXyz(0u, 0u));
+            gs.writeRegister(GS_REG_XYZ2, makeXyz(128u, 0u));
+            gs.writeRegister(GS_REG_XYZ2, makeXyz(128u, 128u));
+            gs.writeRegister(GS_REG_XYZ2, makeXyz(0u, 0u));
+            gs.writeRegister(GS_REG_XYZ2, makeXyz(128u, 128u));
+            gs.writeRegister(GS_REG_XYZ2, makeXyz(0u, 128u));
+
+            int drawnOnce = 0;
+            int drawnTwice = 0;
+            int drawnOutside = 0;
+            for (uint32_t y = 0u; y <= 9u; ++y)
+            {
+                for (uint32_t x = 0u; x <= 9u; ++x)
+                {
+                    const uint32_t red = readReferencePSMCT32Pixel(vram, 0u, 1u, x, y) & 0xFFu;
+                    const bool inside = x < 8u && y < 8u;
+                    if (!inside && red != 0u)
+                        ++drawnOutside;
+                    else if (inside && red == 0x20u)
+                        ++drawnOnce;
+                    else if (inside && red == 0x40u)
+                        ++drawnTwice;
+                }
+            }
+
+            t.Equals(drawnTwice, 0, "no pixel on the shared diagonal should be blended twice");
+            t.Equals(drawnOnce, 64, "every pixel of the 8x8 quad should be drawn exactly once");
+            t.Equals(drawnOutside, 0, "the top-left rule should leave the right and bottom edges undrawn");
         });
 
         tc.Run("sceGsExecLoadImage and sceGsExecStoreImage roundtrip and free guest packets", [](TestCase &t)
