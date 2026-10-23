@@ -2204,6 +2204,16 @@ const EeScheduler &PS2Runtime::eeScheduler() const
     return *m_eeScheduler;
 }
 
+uint32_t PS2Runtime::readCop0Count() const noexcept
+{
+    return cop0CountAt(m_eeScheduler->eeCycle());
+}
+
+void PS2Runtime::writeCop0Count(uint32_t value) noexcept
+{
+    m_cop0CountBias = value - static_cast<uint32_t>(m_eeScheduler->eeCycle());
+}
+
 void PS2Runtime::postEeEvent(EeEvent event)
 {
     m_eeScheduler->postEvent(event);

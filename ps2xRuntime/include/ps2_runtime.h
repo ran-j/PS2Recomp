@@ -394,6 +394,11 @@ public:
     const EeScheduler &eeScheduler() const;
     void postEeEvent(EeEvent event);
     bool eeCheckpointDue(uint32_t cycles = 32u) noexcept;
+    // COP0 Count ticks once per EE cycle; it follows the scheduler's cycle clock.
+    uint32_t readCop0Count() const noexcept;
+    // Count as of a given scheduler cycle, e.g. from an EeKernelSnapshot on the UI thread.
+    uint32_t cop0CountAt(uint64_t eeCycle) const noexcept { return static_cast<uint32_t>(eeCycle) + m_cop0CountBias; }
+    void writeCop0Count(uint32_t value) noexcept;
     [[noreturn]] void eeWaitVSyncTicks(uint32_t ticks, uint32_t resumePc);
 
     struct EeExitHandlerRegistration
@@ -501,6 +506,7 @@ private:
     VU1Interpreter m_vu1{VU1Interpreter::Unit::VU1};
     R5900Context m_cpuContext;
     std::unique_ptr<EeScheduler> m_eeScheduler;
+    uint32_t m_cop0CountBias = 0u;
     mutable std::mutex m_eeKernelStateMutex;
     std::unordered_map<int, std::vector<EeExitHandlerRegistration>> m_eeExitHandlers;
     std::unordered_map<uint32_t, uint32_t> m_eeSyscallOverrides;

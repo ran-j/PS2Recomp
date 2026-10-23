@@ -792,7 +792,7 @@ namespace
                         cpu.cop0_status,
                         cpu.cop0_cause,
                         cpu.cop0_epc,
-                        cpu.cop0_count,
+                        runtime.cop0CountAt(schedulerSnapshot.eeCycle),
                         cpu.cop0_compare,
                         cpu.cop0_badvaddr);
         }
