@@ -79,6 +79,13 @@ if(PS2X_IS_ARM_TARGET)
     endif()
 endif()
 
+# The runtime and recompiler use SSE4.1 intrinsics (e.g. _mm_extract_epi64).
+# MSVC accepts them as is; GCC and Clang need the target enabled, or the build
+# fails with "inlining failed ... target specific option mismatch".
+if(NOT PS2X_IS_ARM_TARGET AND NOT MSVC AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+    add_compile_options(-msse4.1)
+endif()
+
 if(PS2X_BUILD_RECOMP)
     add_subdirectory("ps2xRecomp")
 endif()
