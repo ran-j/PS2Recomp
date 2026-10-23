@@ -1433,6 +1433,10 @@ namespace
         {
             ps2_syscalls::dispatchDmacHandlersForCause(rdram, runtime, completedCause);
         }
+        for (const uint32_t intcCause : mem.consumePendingIntcCauses())
+        {
+            ps2_syscalls::dispatchIntcHandlersForCause(rdram, runtime, intcCause);
+        }
 
         return 0;
     }

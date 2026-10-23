@@ -70,6 +70,11 @@ namespace ps2_syscalls
         runtime->eeScheduler().dispatchIrq(true, cause);
     }
 
+    void dispatchIntcHandlersForCause(uint8_t *, PS2Runtime *runtime, uint32_t cause)
+    {
+        runtime->eeScheduler().dispatchIrq(false, cause);
+    }
+
     uint64_t GetCurrentVSyncTick(PS2Runtime *runtime)
     {
         return runtime->eeScheduler().currentVSyncTick();
