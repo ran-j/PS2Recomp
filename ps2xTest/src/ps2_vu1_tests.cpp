@@ -1090,6 +1090,31 @@ void register_ps2_vu1_tests()
                      "JR immediately after a VI write should branch using the previous VI value");
         });
 
+        tc.Run("a VI write in a taken branch's delay slot is visible to a branch at the target", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+            // Microcode dispatcher pattern: "jr vi1 ; iaddiu vi15, vi00, <return>" into a
+            // handler whose first instruction is "jr vi15".
+            writeVuInstructionPair(fx.code, 0u, makeVuJr(1u), kVuUpperNop);                 // -> handler at 32
+            writeVuInstructionPair(fx.code, 8u, makeVuIaddiu(15u, 0u, 2), kVuUpperNop);     // return address 16
+            writeVuInstructionPair(fx.code, 16u, makeVuIaddiu(5u, 0u, 5), kVuUpperNop | 0x40000000u);
+            writeVuInstructionPair(fx.code, 24u, 0x8000033Cu /* lower NOP */, kVuUpperNop);
+            writeVuInstructionPair(fx.code, 32u, makeVuJr(15u), kVuUpperNop);               // handler: return
+            writeVuInstructionPair(fx.code, 40u, makeVuIaddiu(6u, 6u, 1), kVuUpperNop);     // counts its runs
+
+            VU1Interpreter vu1;
+            vu1.state().vi[1] = 4;
+            vu1.state().vi[15] = 4; // stale value pointing back at the handler
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
+                        fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
+                        0u, 0u, 0u, 1000u);
+
+            t.Equals(vu1.state().vi[6], 1, "the handler's delay slot should run once");
+            t.Equals(vu1.state().vi[5], 5, "the handler should return to the address set in the delay slot");
+        });
+
         tc.Run("MPG upload invalidates cached VU1 decode before MSCAL", [](TestCase &t)
         {
             Vu1Fixture fx;
