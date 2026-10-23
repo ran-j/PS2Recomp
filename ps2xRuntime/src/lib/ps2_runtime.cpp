@@ -91,6 +91,12 @@ namespace
     constexpr uint32_t kGuestHeapDefaultAlignment = 16u;
     constexpr uint32_t kGuestHeapSafetyPad = 0x1000u;
     constexpr uint32_t kGuestHeapHardLimit = 0x01F00000u;
+    // Interrupt/callback (async invocation) stacks normally live between the end of the EE
+    // kernel area and the ELF load address. Games own all RAM from their ELF up to the top of
+    // their own stack, which usually sits at the very top of RAM, and many use it right up to
+    // that stack, so stacks carved from the top of RAM land on live game data.
+    constexpr uint32_t kAsyncCallbackStackTop = 0x000F0000u;
+    constexpr uint32_t kAsyncCallbackStackFloor = 0x00090000u;
 
     constexpr uint32_t COP0_CAUSE_EXCCODE_MASK = 0x0000007Cu;
     constexpr uint32_t COP0_CAUSE_BD = 0x80000000u;
@@ -503,8 +509,10 @@ PS2Runtime::PS2Runtime()
     m_guestHeapLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
     m_guestHeapSuggestedBase = kGuestHeapDefaultBase;
     m_guestHeapConfigured = false;
-    m_asyncCallbackStackFloor = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
-    m_asyncCallbackStackTop = PS2_RAM_SIZE;
+    m_asyncCallbackStackFloor = kAsyncCallbackStackFloor;
+    m_asyncCallbackStackTop = kAsyncCallbackStackTop;
+    m_asyncCallbackFallbackFloor = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
+    m_asyncCallbackFallbackTop = PS2_RAM_SIZE;
 }
 
 void PS2Runtime::setDebugUiCallbacks(DebugUiCallback initCallback,
@@ -972,8 +980,11 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     {
         std::lock_guard<std::mutex> lock(m_asyncCallbackStackMutex);
         const uint32_t hardLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
-        m_asyncCallbackStackFloor = std::min(std::max(hardLimit, suggestedHeapBase), PS2_RAM_SIZE);
-        m_asyncCallbackStackTop = PS2_RAM_SIZE;
+        const bool lowRegionFree = (moduleBase & 0x1FFFFFFFu) >= kAsyncCallbackStackTop;
+        m_asyncCallbackStackFloor = lowRegionFree ? kAsyncCallbackStackFloor : 0u;
+        m_asyncCallbackStackTop = lowRegionFree ? kAsyncCallbackStackTop : 0u;
+        m_asyncCallbackFallbackFloor = std::min(std::max(hardLimit, suggestedHeapBase), PS2_RAM_SIZE);
+        m_asyncCallbackFallbackTop = PS2_RAM_SIZE;
     }
 
     LoadedModule module;
@@ -1990,27 +2001,36 @@ uint32_t PS2Runtime::reserveAsyncCallbackStack(uint32_t size, uint32_t alignment
     }
 
     std::lock_guard<std::mutex> lock(m_asyncCallbackStackMutex);
-    uint32_t top = m_asyncCallbackStackTop;
-    if (top > PS2_RAM_SIZE)
+    const auto carve = [&](uint32_t floor, uint32_t &regionTop) -> uint32_t
     {
-        top = PS2_RAM_SIZE;
-    }
-    top &= ~(kGuestHeapDefaultAlignment - 1u);
+        uint32_t top = regionTop;
+        if (top > PS2_RAM_SIZE)
+        {
+            top = PS2_RAM_SIZE;
+        }
+        top &= ~(kGuestHeapDefaultAlignment - 1u);
 
-    if (top <= allocSize)
+        if (top <= allocSize)
+        {
+            return 0u;
+        }
+
+        uint32_t base = top - allocSize;
+        base &= ~(normalizedAlignment - 1u);
+        if (base < floor || base >= top)
+        {
+            return 0u;
+        }
+
+        regionTop = base;
+        return top - 0x10u;
+    };
+
+    if (const uint32_t top = carve(m_asyncCallbackStackFloor, m_asyncCallbackStackTop))
     {
-        return 0u;
+        return top;
     }
-
-    uint32_t base = top - allocSize;
-    base &= ~(normalizedAlignment - 1u);
-    if (base < m_asyncCallbackStackFloor || base >= top)
-    {
-        return 0u;
-    }
-
-    m_asyncCallbackStackTop = base;
-    return top - 0x10u;
+    return carve(m_asyncCallbackFallbackFloor, m_asyncCallbackFallbackTop);
 }
 
 uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
