@@ -661,7 +661,9 @@ namespace ps2_stubs
 
     void sceCdStatus(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        setReturnS32(ctx, g_cdInitialized ? 6 : 0);
+        // HLE reads complete synchronously (see sceCdSync), so an initialized drive is never
+        // mid-read: report SCECdStatPause (0x0A) like the IOP-side sceCdStatus, not SCECdStatRead (6).
+        setReturnS32(ctx, g_cdInitialized ? 0x0A : 0);
     }
 
     void sceCdStInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

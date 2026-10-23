@@ -707,6 +707,19 @@ void register_ps2_runtime_io_tests()
                      "sceCdSearchFile should assign a pseudo LSN for the resolved host file");
         });
 
+        tc.Run("sceCdStatus reports PAUSE once sceCdInit has run", [](TestCase &t)
+        {
+            TestContext test;
+
+            clearContext(test.ctx);
+            ps2_stubs::sceCdInit(test.rdram.data(), &test.ctx, nullptr);
+
+            clearContext(test.ctx);
+            ps2_stubs::sceCdStatus(test.rdram.data(), &test.ctx, nullptr);
+            t.Equals(getRegS32(&test.ctx, 2), 0x0A,
+                     "sceCdStatus should report SCECdStatPause, since HLE reads complete synchronously");
+        });
+
         tc.Run("sceCdRead reads from explicit cdImage path", [](TestCase &t)
         {
             TestContext test;
