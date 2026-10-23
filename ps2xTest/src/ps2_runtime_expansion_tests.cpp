@@ -166,6 +166,53 @@ namespace
         }
     }
 
+    // Makes the next scheduler checkpoint due, like a timer or vblank event arriving during guest code.
+    void requestSchedulerCheckpoint(PS2Runtime *runtime)
+    {
+        runtime->postEeEvent(EeEvent{EeEventType::ExternalWake, 0u, 0u});
+    }
+
+    // Generated code for a recursive call: the callee (same entry as this function) is dispatched, finds a
+    // checkpoint due, and leaves ctx->pc at its own entry; the caller then returns up the host stack.
+    void testGuestBranchRecursiveYieldHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (!ctx || !runtime)
+        {
+            return;
+        }
+
+        requestSchedulerCheckpoint(runtime);
+        if (!runtime->dispatchGuestBranch(rdram,
+                                          ctx,
+                                          0x3300u,
+                                          0x3304u,
+                                          0x3308u,
+                                          PS2Runtime::GuestBranchKind::DirectCall,
+                                          "test-recursive-call"))
+        {
+            return;
+        }
+        setRegU32(*ctx, 2, 0x00BAD001u);
+    }
+
+    // A function whose first instruction is a loop head: the backward branch finds a checkpoint due, so the
+    // function returns with ctx->pc still equal to its entry.
+    void testGuestBranchEntryLoopYieldHandler(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (!ctx || !runtime)
+        {
+            return;
+        }
+
+        requestSchedulerCheckpoint(runtime);
+        ctx->pc = 0x3400u;
+        if (runtime->eeCheckpointDue())
+        {
+            return;
+        }
+        setRegU32(*ctx, 2, 0x00BAD002u);
+    }
+
     std::atomic<uint32_t> gGuestJumpTargetCount{0u};
 
     void testGuestJumpTargetHandler(uint8_t *, R5900Context *, PS2Runtime *)
@@ -453,6 +500,56 @@ void register_ps2_runtime_expansion_tests()
                       "call-like dispatch should stop caller flow when callee transfers elsewhere");
             t.Equals(ctx.pc, 0x33330000u,
                      "callee transfer PC should be preserved");
+        });
+
+        tc.Run("dispatchGuestBranch does not treat a recursive yield as a return", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            runtime.registerFunction(0x3300u, &testGuestBranchRecursiveYieldHandler);
+
+            R5900Context ctx{};
+            ctx.pc = 0x2000u;
+
+            const bool returnedToFallthrough = runtime.dispatchGuestBranch(
+                nullptr,
+                &ctx,
+                0x3300u,
+                0x2000u,
+                0x2008u,
+                PS2Runtime::GuestBranchKind::DirectCall,
+                "test-yield-outer");
+
+            t.IsFalse(returnedToFallthrough,
+                      "a yield inside a nested call must unwind every caller instead of returning to its fallthrough");
+            t.Equals(ctx.pc, 0x3300u,
+                     "the yielded callee entry should stay in ctx->pc for the scheduler to resume");
+            t.Equals(::getRegU32(&ctx, 2), 0u,
+                     "no caller should continue running after the yield");
+        });
+
+        tc.Run("dispatchGuestBranch does not treat a yield at the callee entry as a return", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            runtime.registerFunction(0x3400u, &testGuestBranchEntryLoopYieldHandler);
+
+            R5900Context ctx{};
+            ctx.pc = 0x2000u;
+
+            const bool returnedToFallthrough = runtime.dispatchGuestBranch(
+                nullptr,
+                &ctx,
+                0x3400u,
+                0x2000u,
+                0x2008u,
+                PS2Runtime::GuestBranchKind::DirectCall,
+                "test-entry-loop-yield");
+
+            t.IsFalse(returnedToFallthrough,
+                      "a checkpoint yield that leaves ctx->pc at the callee entry must not look like a return");
+            t.Equals(ctx.pc, 0x3400u,
+                     "the callee entry should stay in ctx->pc for the scheduler to resume");
+            t.Equals(::getRegU32(&ctx, 2), 0u,
+                     "the callee should not continue past the yield");
         });
 
         tc.Run("dispatchGuestBranch rejects missing exact targets", [](TestCase &t)
