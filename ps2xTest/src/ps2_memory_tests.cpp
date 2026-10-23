@@ -59,6 +59,60 @@ namespace
         std::memcpy(rdram + addr, &value, sizeof(value));
     }
 
+    uint32_t readU32(const uint8_t *rdram, uint32_t addr)
+    {
+        uint32_t value = 0u;
+        std::memcpy(&value, rdram + addr, sizeof(value));
+        return value;
+    }
+
+    void writeU32(uint8_t *rdram, uint32_t addr, uint32_t value)
+    {
+        std::memcpy(rdram + addr, &value, sizeof(value));
+    }
+
+    // Game-side DMA-tag close: pad to a qword, then one whole-word addu of ((cur - tag) >> 4) - 1.
+    void closeOpenDmaTagLikeGame(uint8_t *rdram, uint32_t stateAddr)
+    {
+        uint32_t currentAddr = readU32(rdram, stateAddr);
+        while ((currentAddr & 0xCu) != 0u)
+        {
+            writeU32(rdram, currentAddr, 0u);
+            currentAddr += 4u;
+        }
+
+        const uint32_t tagAddr = readU32(rdram, stateAddr + 8u);
+        if (tagAddr != 0u)
+        {
+            const int32_t qwcAdd = (static_cast<int32_t>(currentAddr - tagAddr) >> 4) - 1;
+            const uint32_t word0 = static_cast<uint32_t>(static_cast<int32_t>(readU32(rdram, tagAddr)) + qwcAdd);
+            writeU32(rdram, tagAddr, word0);
+        }
+
+        writeU32(rdram, stateAddr + 8u, 0u);
+        writeU32(rdram, stateAddr, currentAddr);
+    }
+
+    // Open CNT at base, GIF tag at base+0x10, cur at base+0x20. gifPtrOffset is pk+20 (VIF) or pk+12 (GIF).
+    void plantOpenCntPacket(uint8_t *rdram,
+                            uint32_t stateAddr,
+                            uint32_t baseAddr,
+                            uint32_t gifPtrOffset,
+                            uint32_t word0 = 0x10000000u)
+    {
+        std::memset(rdram + stateAddr, 0, 32u);
+        std::memset(rdram + baseAddr, 0, 0x80u);
+        const uint32_t currentAddr = baseAddr + 0x20u;
+        const uint32_t gifPtr = baseAddr + 0x10u;
+        writeU32(rdram, stateAddr + 0u, currentAddr);
+        writeU32(rdram, stateAddr + 4u, baseAddr);
+        writeU32(rdram, stateAddr + 8u, baseAddr);
+        writeU32(rdram, stateAddr + gifPtrOffset, gifPtr);
+        writeU32(rdram, baseAddr, word0);
+        writeU64(rdram, baseAddr + 0x10u, 0x1000000000008000ull);
+        writeU64(rdram, baseAddr + 0x18u, 0xEull);
+    }
+
     uint64_t makeGifTag(uint16_t nloop, uint8_t flg, uint8_t nreg, bool eop);
 
     uint64_t makeBitbltbuf(uint32_t dbp, uint32_t dbw, uint32_t dpsm)
@@ -1576,7 +1630,7 @@ void register_ps2_memory_tests()
                      "tag high-half VIFcodes must stay hidden when CHCR.TTE is clear");
         });
 
-        tc.Run("VIF1 packet builders keep chain qwc live before terminate", [](TestCase &t)
+        tc.Run("VIF1 packet builders store chain qwc on terminate", [](TestCase &t)
         {
             PS2Memory mem;
             t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
@@ -1619,7 +1673,15 @@ void register_ps2_memory_tests()
 
             uint32_t dmaTagWord = 0u;
             std::memcpy(&dmaTagWord, rdram + kBaseAddr, sizeof(dmaTagWord));
-            t.Equals(dmaTagWord & 0xFFFFu, 1u, "live packet head qwc should reflect one qword before terminate");
+            t.Equals(dmaTagWord & 0xFFFFu, 0u, "open CNT qwc stays 0 until terminate");
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, kStateAddr);
+            ps2_stubs::sceVif1PkTerminate(rdram, &ctx, nullptr);
+
+            std::memcpy(&dmaTagWord, rdram + kBaseAddr, sizeof(dmaTagWord));
+            t.Equals(dmaTagWord & 0xFFFFu, 1u, "terminate addu stores one qword of DIRECT payload");
+            t.Equals(dmaTagWord & 0xFFFF0000u, 0x10000000u, "terminate addu keeps the CNT id");
 
             std::vector<std::vector<uint8_t>> captured;
             mem.setGifPacketCallback([&](const uint8_t *data, uint32_t sizeBytes)
@@ -1634,18 +1696,181 @@ void register_ps2_memory_tests()
             mem.processPendingTransfers();
 
             t.Equals(captured.size(), static_cast<size_t>(1u), "live VIF1 packet should emit one GIF packet");
-            t.Equals(captured[0].size(), static_cast<size_t>(16u), "live VIF1 packet should emit one qword");
-
-            bool payloadOk = true;
-            for (uint32_t i = 0; i < 16u; ++i)
+            if (!captured.empty())
             {
-                if (captured[0][i] != static_cast<uint8_t>(0x30u + i))
+                t.Equals(captured[0].size(), static_cast<size_t>(16u), "live VIF1 packet should emit one qword");
+
+                bool payloadOk = true;
+                for (uint32_t i = 0; i < 16u; ++i)
                 {
-                    payloadOk = false;
-                    break;
+                    if (captured[0][i] != static_cast<uint8_t>(0x30u + i))
+                    {
+                        payloadOk = false;
+                        break;
+                    }
                 }
+                t.IsTrue(payloadOk, "live VIF1 packet payload should reach the GIF callback");
             }
-            t.IsTrue(payloadOk, "live VIF1 packet payload should reach the GIF callback");
+        });
+
+        tc.Run("stub AddGsAD plus a game-side ADD close stores qwc once", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            uint8_t *rdram = mem.getRDRAM();
+
+            constexpr uint32_t kVifState = 0x00028000u;
+            constexpr uint32_t kVifBase = 0x00028100u;
+            plantOpenCntPacket(rdram, kVifState, kVifBase, 20u);
+
+            R5900Context ctx{};
+            setRegU32(ctx, 4, kVifState);
+            setRegU32(ctx, 5, 0x3Fu);
+            ps2_stubs::sceVif1PkAddGsAD(rdram, &ctx, nullptr);
+            t.Equals(readU32(rdram, kVifBase), 0x10000000u, "VIF AddGsAD must not write the DMA tag");
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, kVifState);
+            ps2_stubs::sceVif1PkCloseGifTag(rdram, &ctx, nullptr);
+            t.Equals(readU32(rdram, kVifBase), 0x10000000u, "VIF CloseGifTag must not write the DMA tag");
+
+            closeOpenDmaTagLikeGame(rdram, kVifState);
+            t.Equals(readU32(rdram, kVifBase), 0x10000002u, "game ADD after one VIF A+D stores qwc 2");
+            t.Equals(readU32(rdram, kVifBase + 0x10u), 0x00008001u, "VIF giftag nloop is 1");
+            t.Equals(readU32(rdram, kVifBase + 0x14u), 0x10000000u, "VIF giftag keeps nreg and EOP");
+
+            constexpr uint32_t kGifState = 0x00028200u;
+            constexpr uint32_t kGifBase = 0x00028300u;
+            plantOpenCntPacket(rdram, kGifState, kGifBase, 12u);
+            for (uint32_t i = 0u; i < 4u; ++i)
+            {
+                std::memset(&ctx, 0, sizeof(ctx));
+                setRegU32(ctx, 4, kGifState);
+                setRegU32(ctx, 5, 0x3Fu);
+                ps2_stubs::sceGifPkAddGsAD(rdram, &ctx, nullptr);
+            }
+            t.Equals(readU32(rdram, kGifBase), 0x10000000u, "GIF AddGsAD must not write the DMA tag");
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, kGifState);
+            ps2_stubs::sceGifPkCloseGifTag(rdram, &ctx, nullptr);
+            t.Equals(readU32(rdram, kGifBase), 0x10000000u, "GIF CloseGifTag must not write the DMA tag");
+
+            closeOpenDmaTagLikeGame(rdram, kGifState);
+            t.Equals(readU32(rdram, kGifBase), 0x10000005u, "game ADD after four GIF A+D stores qwc 5");
+            t.Equals(readU32(rdram, kGifBase + 0x10u), 0x00008004u, "GIF giftag nloop is 4");
+            t.Equals(readU32(rdram, kGifBase + 0x14u), 0x10000000u, "GIF giftag keeps nreg and EOP");
+
+            constexpr uint32_t kTermState = 0x00028400u;
+            constexpr uint32_t kTermBase = 0x00028500u;
+            plantOpenCntPacket(rdram, kTermState, kTermBase, 20u);
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, kTermState);
+            setRegU32(ctx, 5, 0x3Fu);
+            ps2_stubs::sceVif1PkAddGsAD(rdram, &ctx, nullptr);
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, kTermState);
+            ps2_stubs::sceVif1PkCloseGifTag(rdram, &ctx, nullptr);
+            t.Equals(readU32(rdram, kTermBase), 0x10000000u, "stubs leave qwc 0 for the stubbed terminate");
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, kTermState);
+            ps2_stubs::sceVif1PkTerminate(rdram, &ctx, nullptr);
+            t.Equals(readU32(rdram, kTermBase), 0x10000002u, "stub terminate stores qwc 2 once");
+            t.Equals(::getRegU32(&ctx, 2), kTermBase + 0x30u, "stub terminate returns cur");
+            t.Equals(readU32(rdram, kTermState + 8u), 0u, "stub terminate clears the open-tag pointer");
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, kTermState);
+            ps2_stubs::sceVif1PkTerminate(rdram, &ctx, nullptr);
+            t.Equals(readU32(rdram, kTermBase), 0x10000002u, "a second terminate does not add again");
+        });
+
+        tc.Run("VIF1 Cnt closed before data keeps qwc at zero", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            uint8_t *rdram = mem.getRDRAM();
+
+            constexpr uint32_t kStateAddr = 0x00028600u;
+            constexpr uint32_t kBaseAddr = 0x00028700u;
+            std::memset(rdram + kStateAddr, 0, 0x200u);
+
+            R5900Context ctx{};
+            setRegU32(ctx, 4, kStateAddr);
+            setRegU32(ctx, 5, kBaseAddr);
+            ps2_stubs::sceVif1PkInit(rdram, &ctx, nullptr);
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, kStateAddr);
+            setRegU32(ctx, 5, 0u);
+            ps2_stubs::sceVif1PkCnt(rdram, &ctx, nullptr);
+
+            t.Equals(readU32(rdram, kStateAddr), kBaseAddr + 8u, "VIF Cnt leaves cur 8 bytes past the tag");
+            t.Equals(readU32(rdram, kStateAddr + 8u), kBaseAddr, "VIF Cnt points pk+8 at the tag");
+            t.Equals(readU32(rdram, kBaseAddr), 0x10000000u, "VIF Cnt opens CNT with qwc 0");
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, kStateAddr);
+            ps2_stubs::sceVif1PkTerminate(rdram, &ctx, nullptr);
+
+            t.Equals(readU32(rdram, kBaseAddr), 0x10000000u,
+                     "pad to the next qword makes the addu 0, not a wrap to 0x0FFFFFFF");
+            t.Equals(::getRegU32(&ctx, 2), kBaseAddr + 16u, "terminate returns the padded cur");
+            t.Equals(readU32(rdram, kStateAddr + 8u), 0u, "terminate clears pk+8");
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, kStateAddr);
+            ps2_stubs::sceVif1PkTerminate(rdram, &ctx, nullptr);
+            t.Equals(readU32(rdram, kBaseAddr), 0x10000000u, "a second terminate leaves the closed tag");
+        });
+
+        tc.Run("terminate addu wraps an empty open tag to 0x0FFFFFFF", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            uint8_t *rdram = mem.getRDRAM();
+
+            constexpr uint32_t kStateAddr = 0x00028800u;
+            constexpr uint32_t kBaseAddr = 0x00028900u;
+            std::memset(rdram + kStateAddr, 0, 32u);
+            std::memset(rdram + kBaseAddr, 0, 16u);
+            writeU32(rdram, kStateAddr, kBaseAddr);
+            writeU32(rdram, kStateAddr + 4u, kBaseAddr);
+            writeU32(rdram, kStateAddr + 8u, kBaseAddr);
+            writeU32(rdram, kBaseAddr, 0x10000000u);
+
+            R5900Context ctx{};
+            setRegU32(ctx, 4, kStateAddr);
+            ps2_stubs::sceVif1PkTerminate(rdram, &ctx, nullptr);
+
+            t.Equals(readU32(rdram, kBaseAddr), 0x0FFFFFFFu,
+                     "cur still on the tag addu's -1 through the whole word");
+            t.Equals(readU32(rdram, kStateAddr + 8u), 0u, "the wrap close still clears pk+8");
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, kStateAddr);
+            ps2_stubs::sceVif1PkTerminate(rdram, &ctx, nullptr);
+            t.Equals(readU32(rdram, kBaseAddr), 0x0FFFFFFFu, "a second terminate does not add again");
+        });
+
+        tc.Run("terminate addu adds to a preloaded qwc", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            uint8_t *rdram = mem.getRDRAM();
+
+            constexpr uint32_t kStateAddr = 0x00028A00u;
+            constexpr uint32_t kBaseAddr = 0x00028B00u;
+            plantOpenCntPacket(rdram, kStateAddr, kBaseAddr, 20u, 0x10000003u);
+
+            R5900Context ctx{};
+            setRegU32(ctx, 4, kStateAddr);
+            ps2_stubs::sceVif1PkTerminate(rdram, &ctx, nullptr);
+
+            t.Equals(readU32(rdram, kBaseAddr), 0x10000004u,
+                     "one qword past the tag adds 1 to the preloaded low half");
         });
 
         tc.Run("VIF1 DMA chain latches terminal tag bits in CHCR", [](TestCase &t)
