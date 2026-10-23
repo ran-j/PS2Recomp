@@ -78,6 +78,7 @@ namespace ps2x::iop::detail
             uint32_t entry = 0;
             uint32_t gp = 0;
             bool resident = false;
+            bool reserved = false;
         };
 
         struct GuestCallback
@@ -127,7 +128,6 @@ namespace ps2x::iop::detail
             pendingDmaInterrupts.clear();
             pendingGuestCallbacks.clear();
             nextModuleId = 1;
-            moduleCursor = kModuleLoadBase;
             totalCycles = 0;
             totalInstructions = 0;
             eeCycleCarry = 0;
@@ -591,8 +591,7 @@ namespace ps2x::iop::detail
         ModuleLoadResult loadImage(std::string path, std::span<const uint8_t> image, const void *arguments, uint32_t argumentSize)
         {
             ModuleLoadResult result{true, -1, -1};
-            const IopImageLoadResult loaded = IopModuleLoader::load(image, memory, moduleCursor);
-            moduleCursor = loaded.nextModuleCursor;
+            const IopImageLoadResult loaded = IopModuleLoader::load(image, memory);
             if (!loaded)
             {
                 if (loaded.error == IopImageLoadError::InvalidElf)
@@ -613,6 +612,7 @@ namespace ps2x::iop::detail
             module.size = loaded.size;
             module.entry = loaded.entry;
             module.gp = loaded.gp;
+            module.reserved = loaded.reserved;
 
             uint32_t args = 0u;
             if (arguments && argumentSize)
@@ -655,8 +655,16 @@ namespace ps2x::iop::detail
         ModuleLoadResult loadModuleBuffer(uint32_t guestAddress, const void *arguments, uint32_t argumentSize)
         {
             std::vector<uint8_t> image;
-            if (!IopModuleLoader::readElfFromGuest(host, guestAddress, image))
+            // sceSifLoadModuleBuffer takes an IOP address the EE filled with sceSifSetDma;
+            // EE memory remains a fallback for hosts that stage the image there.
+            if (!IopModuleLoader::readElfFromIopRam(memory, guestAddress, image) &&
+                !IopModuleLoader::readElfFromGuest(host, guestAddress, image))
+            {
+                std::ostringstream out;
+                out << "[IOP] no ELF image at buffer 0x" << std::hex << guestAddress << " in IOP or EE memory";
+                log(LogLevel::Warning, out.str());
                 return {true, -1, -1};
+            }
             std::ostringstream tag;
             tag << "buffer@0x" << std::hex << guestAddress;
             return loadImage(tag.str(), image, arguments, argumentSize);
@@ -671,6 +679,8 @@ namespace ps2x::iop::detail
             kernel.terminateThreadsInRange(it->second.base, it->second.size);
             rpc.removeServersInRange(it->second.base, it->second.size);
             imports.eraseRange(it->second.base, it->second.size);
+            if (it->second.reserved)
+                (void)memory.freeAllocation(it->second.base);
             modules.erase(it);
             kernel.cleanupDeadThreads();
             if (result)
@@ -698,7 +708,6 @@ namespace ps2x::iop::detail
         std::map<int, uint64_t> pendingDmaInterrupts;
         std::multimap<uint64_t, ScheduledGuestCallback> pendingGuestCallbacks;
         uint32_t nextModuleId = 1;
-        uint32_t moduleCursor = kModuleLoadBase;
         uint64_t totalCycles = 0;
         uint64_t totalInstructions = 0;
         uint64_t eeCycleCarry = 0;
@@ -737,6 +746,17 @@ namespace ps2x::iop::detail
     bool IopEmulator::stopModule(int32_t moduleId, int32_t *result)
     {
         return m_impl->stopModule(moduleId, result);
+    }
+
+    int32_t IopEmulator::findModuleByAddress(uint32_t address) const noexcept
+    {
+        const uint32_t phys = address & 0x1FFFFFFFu;
+        for (const auto &[id, module] : m_impl->modules)
+        {
+            if (phys >= module.base && phys - module.base < module.size)
+                return id;
+        }
+        return -1;
     }
 
     void IopEmulator::runEeCycles(uint64_t eeCycles) noexcept

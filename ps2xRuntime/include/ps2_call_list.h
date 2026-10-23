@@ -298,6 +298,7 @@
     X(sceCdInit)                              \
     X(sceCdInitEeCB)                          \
     X(sceCdIntToPos)                          \
+    X(sceCdLayerSearchFile)                   \
     X(sceCdMmode)                             \
     X(sceCdNcmdDiskReady)                     \
     X(sceCdPause)                             \
@@ -549,6 +550,7 @@
     X(sceSifRemoveRpcQueue)                   \
     X(sceSifResetIop)                         \
     X(sceSifRpcLoop)                          \
+    X(sceSifSearchModuleByAddress)            \
     X(sceSifSetCmdBuffer)                     \
     X(sceSifSetDChain)                        \
     X(sceSifSetDma)                           \
