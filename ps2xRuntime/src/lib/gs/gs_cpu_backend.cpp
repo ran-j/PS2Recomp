@@ -1169,23 +1169,28 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
     int ofx = ctx.xyoffset.ofx >> 4;
     int ofy = ctx.xyoffset.ofy >> 4;
 
-    int x0 = static_cast<int>(v0.x) - ofx;
-    int y0 = static_cast<int>(v0.y) - ofy;
-    int x1 = static_cast<int>(v1.x) - ofx;
-    int y1 = static_cast<int>(v1.y) - ofy;
+    float fx0 = v0.x - static_cast<float>(ofx);
+    float fy0 = v0.y - static_cast<float>(ofy);
+    float fx1 = v1.x - static_cast<float>(ofx);
+    float fy1 = v1.y - static_cast<float>(ofy);
     u32 z1 = static_cast<u32>(v1.z);
 
-    if (x0 > x1)
-        std::swap(x0, x1);
-    if (y0 > y1)
-        std::swap(y0, y1);
+    // Vertices may come in either order; the texture coordinates stay with their vertex (swapped below).
+    const bool flipX = fx0 > fx1;
+    const bool flipY = fy0 > fy1;
+    if (flipX)
+        std::swap(fx0, fx1);
+    if (flipY)
+        std::swap(fy0, fy1);
 
-    const int unclippedX0 = x0;
-    const int unclippedY0 = y0;
-    const int spanX = std::max(1, x1 - x0);
-    const int spanY = std::max(1, y1 - y0);
-    const int unclippedX1 = unclippedX0 + spanX - 1;
-    const int unclippedY1 = unclippedY0 + spanY - 1;
+    // A sprite covers the pixels X0 <= x < X1 (pixel centres at integer positions), so a right edge at 63.5
+    // still draws column 63: games tile the screen with such strips (x 0..63.5, 64..127.5, ...).
+    const int unclippedX0 = static_cast<int>(std::ceil(fx0));
+    const int unclippedY0 = static_cast<int>(std::ceil(fy0));
+    const int unclippedX1 = std::max(unclippedX0, static_cast<int>(std::ceil(fx1)) - 1);
+    const int unclippedY1 = std::max(unclippedY0, static_cast<int>(std::ceil(fy1)) - 1);
+    const float spanXf = std::max(1.0f, fx1 - fx0);
+    const float spanYf = std::max(1.0f, fy1 - fy0);
 
     // If the sprite rectangle is fully outside scissor, nothing should render.
     if (unclippedX1 < ctx.scissor.x0 || unclippedX0 > ctx.scissor.x1 ||
@@ -1212,10 +1217,10 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
         float u0f, v0f, u1f, v1f;
         if (state.prim.fst)
         {
-            u0f = static_cast<float>(v0.u >> 4);
-            v0f = static_cast<float>(v0.v >> 4);
-            u1f = static_cast<float>(v1.u >> 4);
-            v1f = static_cast<float>(v1.v >> 4);
+            u0f = static_cast<float>(v0.u) / 16.0f; // UV is 10.4 fixed point
+            v0f = static_cast<float>(v0.v) / 16.0f;
+            u1f = static_cast<float>(v1.u) / 16.0f;
+            v1f = static_cast<float>(v1.v) / 16.0f;
         }
         else
         {
@@ -1226,22 +1231,20 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
             u1f = (v1.s / q1) * static_cast<float>(texW);
             v1f = (v1.t / q1) * static_cast<float>(texH);
         }
-
-        float spriteW = static_cast<float>(spanX);
-        float spriteH = static_cast<float>(spanY);
-        if (spriteW < 1.0f)
-            spriteW = 1.0f;
-        if (spriteH < 1.0f)
-            spriteH = 1.0f;
+        if (flipX)
+            std::swap(u0f, u1f);
+        if (flipY)
+            std::swap(v0f, v1f);
 
         for (int y = drawY0; y <= drawY1; ++y)
         {
-            float ty = (static_cast<float>(y - unclippedY0) + 0.5f) / spriteH;
+            // The GS evaluates UV at the pixel's own position (pixel centres are integer).
+            float ty = (static_cast<float>(y) - fy0) / spanYf;
             float texVf = v0f + (v1f - v0f) * ty;
 
             for (int x = drawX0; x <= drawX1; ++x)
             {
-                float tx = (static_cast<float>(x - unclippedX0) + 0.5f) / spriteW;
+                float tx = (static_cast<float>(x) - fx0) / spanXf;
                 float texUf = u0f + (u1f - u0f) * tx;
                 uint32_t texel = 0xFFFF00FFu;
                 if (state.prim.fst)

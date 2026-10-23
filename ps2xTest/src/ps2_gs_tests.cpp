@@ -1009,6 +1009,113 @@ void register_ps2_gs_tests()
                      "CT32 primitives should land in the same local-memory layout that later CT32 texture sampling expects");
         });
 
+        tc.Run("sprites with a fractional right edge cover the last pixel before it", [](TestCase &t)
+        {
+            // A sprite covers X0 <= x < X1: strips from 0 to 63.5 and 64 to 127.5 (as games tile a screen copy)
+            // meet without a gap, and a bottom edge at 1.5 still covers row 1.
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GSRegisters regs{};
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), &regs);
+            gs.writeRegister(GS_REG_FRAME_1, (2ull << 16) | (static_cast<uint64_t>(GS_PSM_CT32) << 24));
+            gs.writeRegister(GS_REG_ZBUF_1, 1ull << 32); // no Z writes
+            gs.writeRegister(GS_REG_SCISSOR_1, (127ull << 16) | (31ull << 48));
+            gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
+            constexpr uint32_t kLeft = 0x80112233u;
+            constexpr uint32_t kRight = 0x80445566u;
+            const uint32_t colors[2] = {kLeft, kRight};
+            for (uint32_t i = 0; i < 2u; ++i)
+            {
+                gs.writeRegister(GS_REG_PRIM, static_cast<uint64_t>(GS_PRIM_SPRITE));
+                gs.writeRegister(GS_REG_RGBAQ, colors[i]);
+                gs.writeRegister(GS_REG_XYZ2, static_cast<uint64_t>(i * 64u * 16u));
+                gs.writeRegister(GS_REG_XYZ2, static_cast<uint64_t>(i * 64u * 16u + 63u * 16u + 8u) | (24ull << 16));
+            }
+
+            t.Equals(readReferenceFramePSMCT32Pixel(vram, 0u, 2u, 63u, 0u), kLeft,
+                     "the first strip should draw column 63 (its right edge is 63.5)");
+            t.Equals(readReferenceFramePSMCT32Pixel(vram, 0u, 2u, 64u, 0u), kRight,
+                     "the second strip should start at column 64");
+            t.Equals(readReferenceFramePSMCT32Pixel(vram, 0u, 2u, 127u, 1u), kRight,
+                     "a bottom edge at 1.5 should still cover row 1");
+            t.Equals(readReferenceFramePSMCT32Pixel(vram, 0u, 2u, 0u, 2u), 0u,
+                     "row 2 is below the sprites");
+        });
+
+        tc.Run("a sprite given bottom-right first keeps each vertex's texture coordinates", [](TestCase &t)
+        {
+            // The UV belongs to its vertex: sent as (4,4)/UV(4,4) then (0,0)/UV(0,0), the copy stays upright.
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+            constexpr uint32_t kTexTbp = 64u;
+            constexpr uint32_t kRows[4] = {0x800000FFu, 0x8000FF00u, 0x80FF0000u, 0x80FFFFFFu};
+            for (uint32_t y = 0u; y < 4u; ++y)
+                for (uint32_t x = 0u; x < 4u; ++x)
+                    writeReferencePSMCT32Pixel(vram, kTexTbp, 1u, x, y, kRows[y]);
+
+            gs.writeRegister(GS_REG_FRAME_1, 150ull | (1ull << 16) | (static_cast<uint64_t>(GS_PSM_CT32) << 24));
+            gs.writeRegister(GS_REG_ZBUF_1, 1ull << 32);
+            gs.writeRegister(GS_REG_SCISSOR_1, (3ull << 16) | (3ull << 48));
+            gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
+            gs.writeRegister(GS_REG_ALPHA_1, 0ull);
+            gs.writeRegister(GS_REG_TEX0_1, static_cast<uint64_t>(kTexTbp) | (1ull << 14) |
+                                                (static_cast<uint64_t>(GS_PSM_CT32) << 20) | (2ull << 26) |
+                                                (2ull << 30) | (1ull << 34));
+            gs.writeRegister(GS_REG_TEX1_1, 0ull);
+            gs.writeRegister(GS_REG_PRIM, static_cast<uint64_t>(GS_PRIM_SPRITE) | (1ull << 4) | (1ull << 8));
+            gs.writeRegister(GS_REG_RGBAQ, 0x80808080ull);
+            gs.writeRegister(GS_REG_UV, (64ull << 0) | (64ull << 16));
+            gs.writeRegister(GS_REG_XYZ2, (64ull << 0) | (64ull << 16));
+            gs.writeRegister(GS_REG_UV, 0ull);
+            gs.writeRegister(GS_REG_XYZ2, 0ull);
+
+            bool upright = true;
+            for (uint32_t y = 0u; y < 4u; ++y)
+                upright = upright && readReferenceFramePSMCT32Pixel(vram, 150u, 1u, 1u, y) == kRows[y];
+            t.IsTrue(upright, "row y of the sprite should show texture row y");
+        });
+
+        tc.Run("a half-pixel-offset FST sprite samples texel centres and stays inside its UV range", [](TestCase &t)
+        {
+            // Games draw UI strips from X -0.5 to 63.5 over U 0..64: pixel x samples u = x + 0.5, texel x. Reading
+            // one texel further pulls in whatever lies next to the image in GS memory at its right/bottom edge.
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+            constexpr uint32_t kTexTbp = 64u;
+            for (uint32_t y = 0u; y < 8u; ++y)
+                for (uint32_t x = 0u; x < 8u; ++x)
+                    writeReferencePSMCT32Pixel(vram, kTexTbp, 1u, x, y,
+                                               (x < 4u && y < 4u) ? (0x80000000u | (y << 16) | (x << 8) | 0x40u)
+                                                                  : 0x80FF00FFu); // magenta outside the image
+            gs.writeRegister(GS_REG_FRAME_1, 150ull | (1ull << 16) | (static_cast<uint64_t>(GS_PSM_CT32) << 24));
+            gs.writeRegister(GS_REG_ZBUF_1, 1ull << 32);
+            gs.writeRegister(GS_REG_SCISSOR_1, (7ull << 16) | (7ull << 48));
+            gs.writeRegister(GS_REG_XYOFFSET_1, 16ull | (16ull << 32)); // 1.0: vertices at 0.5 land on -0.5
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
+            gs.writeRegister(GS_REG_ALPHA_1, 0ull);
+            gs.writeRegister(GS_REG_TEX0_1, static_cast<uint64_t>(kTexTbp) | (1ull << 14) |
+                                                (static_cast<uint64_t>(GS_PSM_CT32) << 20) | (3ull << 26) |
+                                                (3ull << 30) | (1ull << 34));
+            gs.writeRegister(GS_REG_TEX1_1, 0ull);
+            gs.writeRegister(GS_REG_PRIM, static_cast<uint64_t>(GS_PRIM_SPRITE) | (1ull << 4) | (1ull << 8));
+            gs.writeRegister(GS_REG_RGBAQ, 0x80808080ull);
+            gs.writeRegister(GS_REG_UV, 0ull);
+            gs.writeRegister(GS_REG_XYZ2, 8ull | (8ull << 16)); // (0.5, 0.5) -> screen (-0.5, -0.5)
+            gs.writeRegister(GS_REG_UV, (64ull << 0) | (64ull << 16));
+            gs.writeRegister(GS_REG_XYZ2, 72ull | (72ull << 16)); // (4.5, 4.5) -> screen (3.5, 3.5)
+
+            bool exact = true;
+            for (uint32_t y = 0u; y < 4u; ++y)
+                for (uint32_t x = 0u; x < 4u; ++x)
+                    exact = exact && readReferenceFramePSMCT32Pixel(vram, 150u, 1u, x, y) ==
+                                         (0x80000000u | (y << 16) | (x << 8) | 0x40u);
+            t.IsTrue(exact, "pixel (x, y) should show texel (x, y), never the magenta outside the image");
+        });
+
         tc.Run("FST sprite 1:1 CT32 copies preserve source texels at the right and bottom edges", [](TestCase &t)
         {
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
