@@ -295,6 +295,47 @@ void PS2Memory::processVIF1Data(uint32_t srcPhys, uint32_t sizeBytes)
     processVIF1Data(m_rdram + srcPhys, sizeBytes);
 }
 
+// Forwards the data of a VIF1 DIRECT/DIRECTHL to GIF PATH2. The GS frontends consume each forwarded packet on its own,
+// starting with a GIFtag, while on hardware PATH2 is one continuous GIF stream: a DIRECT may end with an IMAGE GIFtag
+// whose pixel data arrives in a later DIRECT (typically "MARK; DIRECT n" in the next DMAtag's TTE words). Such
+// continuation data is re-wrapped here in a synthesized IMAGE tag. Only data that really is DIRECT payload is
+// wrapped; the VIFcodes between the DIRECTs are parsed as VIFcodes (they used to be taken as the first 8 bytes of
+// the image, shifting every uploaded texture by two words).
+void PS2Memory::forwardVif1DirectData(const uint8_t *data, uint32_t sizeBytes, bool directHl)
+{
+    while (sizeBytes >= 16u)
+    {
+        if (m_vif1PendingPath2ImageQwc != 0u)
+        {
+            const uint32_t chunkQw = std::min<uint32_t>(m_vif1PendingPath2ImageQwc, sizeBytes / 16u);
+            std::vector<uint8_t> imagePacket(16u + static_cast<size_t>(chunkQw) * 16u, 0u);
+            const uint64_t imageTag =
+                static_cast<uint64_t>(chunkQw & 0x7FFFu) |
+                ((m_vif1PendingPath2ImageQwc == chunkQw) ? (1ull << 15) : 0ull) |
+                (static_cast<uint64_t>(kGifFmtImage) << 58);
+            std::memcpy(imagePacket.data(), &imageTag, sizeof(imageTag));
+            std::memcpy(imagePacket.data() + 16u, data, static_cast<size_t>(chunkQw) * 16u);
+            submitGifPacket(GifPathId::Path2, imagePacket.data(), static_cast<uint32_t>(imagePacket.size()), true,
+                            m_vif1PendingPath2DirectHl);
+            m_vif1PendingPath2ImageQwc -= chunkQw;
+            if (m_vif1PendingPath2ImageQwc == 0u)
+                m_vif1PendingPath2DirectHl = false;
+            data += chunkQw * 16u;
+            sizeBytes -= chunkQw * 16u;
+            continue;
+        }
+
+        submitGifPacket(GifPathId::Path2, data, sizeBytes, true, directHl);
+        const uint32_t pendingImageQw = pendingGifImageQwc(data, sizeBytes);
+        if (pendingImageQw != 0u)
+        {
+            m_vif1PendingPath2ImageQwc = pendingImageQw;
+            m_vif1PendingPath2DirectHl = directHl;
+        }
+        break;
+    }
+}
+
 void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 {
     if (sizeBytes == 0u)
@@ -304,30 +345,19 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 
     while (pos + 4 <= sizeBytes)
     {
-        if (m_vif1PendingPath2ImageQwc != 0u)
+        if (m_vif1PendingDirectQwc != 0u)
         {
+            // Continuation of a DIRECT that was cut off at the end of the previous buffer: raw GIF data, no VIFcodes.
             const uint32_t availableQw = (sizeBytes - pos) / 16u;
             if (availableQw == 0u)
             {
                 break;
             }
 
-            const uint32_t chunkQw = std::min<uint32_t>(m_vif1PendingPath2ImageQwc, availableQw);
-            std::vector<uint8_t> imagePacket(16u + static_cast<size_t>(chunkQw) * 16u, 0u);
-            const uint64_t imageTag =
-                static_cast<uint64_t>(chunkQw & 0x7FFFu) |
-                ((m_vif1PendingPath2ImageQwc == chunkQw) ? (1ull << 15) : 0ull) |
-                (static_cast<uint64_t>(kGifFmtImage) << 58);
-            std::memcpy(imagePacket.data(), &imageTag, sizeof(imageTag));
-            std::memcpy(imagePacket.data() + 16u, data + pos, static_cast<size_t>(chunkQw) * 16u);
-            submitGifPacket(GifPathId::Path2, imagePacket.data(), static_cast<uint32_t>(imagePacket.size()), true, m_vif1PendingPath2DirectHl);
-
+            const uint32_t chunkQw = std::min<uint32_t>(m_vif1PendingDirectQwc, availableQw);
+            forwardVif1DirectData(data + pos, chunkQw * 16u, m_vif1PendingDirectHl);
             pos += chunkQw * 16u;
-            m_vif1PendingPath2ImageQwc -= chunkQw;
-            if (m_vif1PendingPath2ImageQwc == 0u)
-            {
-                m_vif1PendingPath2DirectHl = false;
-            }
+            m_vif1PendingDirectQwc -= chunkQw;
             continue;
         }
 
@@ -490,22 +520,22 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             uint32_t qwCount = imm;
             if (qwCount == 0)
                 qwCount = 65536;
+            const uint32_t requestedQw = qwCount;
             const uint32_t availableQw = (sizeBytes - pos) / 16u;
             const bool truncated = qwCount > availableQw;
             if (qwCount > availableQw)
                 qwCount = availableQw;
 
+            const bool directHl = (opcode == VIF_DIRECTHL);
+            if (truncated)
+            {
+                // The rest of this DIRECT's data starts the next buffer (see m_vif1PendingDirectQwc).
+                m_vif1PendingDirectQwc = requestedQw - qwCount;
+                m_vif1PendingDirectHl = directHl;
+            }
             if (qwCount > 0)
             {
-                const bool directHl = (opcode == VIF_DIRECTHL);
-                submitGifPacket(GifPathId::Path2, data + pos, qwCount * 16, true, directHl);
-
-                const uint32_t pendingImageQw = pendingGifImageQwc(data + pos, qwCount * 16u);
-                if (pendingImageQw != 0u)
-                {
-                    m_vif1PendingPath2ImageQwc = pendingImageQw;
-                    m_vif1PendingPath2DirectHl = directHl;
-                }
+                forwardVif1DirectData(data + pos, qwCount * 16u, directHl);
             }
 
             pos += qwCount * 16;
