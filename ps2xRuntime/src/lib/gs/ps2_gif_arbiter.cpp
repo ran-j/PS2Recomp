@@ -19,10 +19,17 @@ bool GifArbiter::isImagePacket(const uint8_t *data, uint32_t sizeBytes)
     return flg == 2u || flg == 3u;
 }
 
-void GifArbiter::submit(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl)
+void GifArbiter::submit(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl,
+                       bool drainImmediately)
 {
     if (!data || sizeBytes < 16 || !m_processFn)
         return;
+
+    if (drainImmediately && m_queue.empty())
+    {
+        m_processFn(data, sizeBytes);
+        return;
+    }
 
     GifArbiterPacket pkt;
     pkt.pathId = pathId;

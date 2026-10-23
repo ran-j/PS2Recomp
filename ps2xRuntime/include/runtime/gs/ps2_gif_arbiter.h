@@ -30,7 +30,10 @@ public:
 
     void setProcessPacketFn(ProcessPacketFn fn) { m_processFn = std::move(fn); }
 
-    void submit(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl = false);
+    // drainImmediately: the caller drains before another path can queue. An empty queue has nothing to
+    // arbitrate, so the GS sees the caller's bytes with no heap copy. A non-empty queue still copies.
+    void submit(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl = false,
+                bool drainImmediately = false);
 
     void drain();
     bool empty() const { return m_queue.empty(); }

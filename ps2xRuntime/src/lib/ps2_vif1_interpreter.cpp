@@ -575,6 +575,51 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             if (m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes)
             {
                 const uint8_t *srcBase = data + pos;
+                // 32-bit, mask off, mode 0/3, cl>=wl: every write consumes one source vector and adds no ROW.
+                // V4 with cl==wl is one contiguous VU span (wrap once at vector 1024). Narrower formats keep
+                // the unread lanes. destVec&0x3FF stays inside the 16KB VU mem, same as the slow loop.
+                if (vl == 0u && !maskEnable &&
+                    (vif1_regs.mode == 0u || vif1_regs.mode == 3u) && cl >= wl)
+                {
+                    const uint32_t srcStride = static_cast<uint32_t>(components) * 4u;
+                    if (components == 4 && cl == wl)
+                    {
+                        uint32_t remaining = writeVectorCount;
+                        uint32_t srcOff = 0u;
+                        uint32_t dest = vuAddr;
+                        while (remaining > 0u)
+                        {
+                            const uint32_t room = 0x400u - dest;
+                            const uint32_t n = (remaining < room) ? remaining : room;
+                            std::memcpy(m_vu1Data + dest * 16u, srcBase + srcOff, static_cast<size_t>(n) * 16u);
+                            srcOff += n * 16u;
+                            remaining -= n;
+                            dest = 0u;
+                        }
+                    }
+                    else
+                    {
+                        for (uint32_t writeIndex = 0; writeIndex < writeVectorCount; ++writeIndex)
+                        {
+                            const uint32_t cyclePos = writeIndex % wl;
+                            const uint32_t destVec = (vuAddr + (writeIndex / wl) * cl + cyclePos) & 0x3FFu;
+                            const uint8_t *srcVec = srcBase + static_cast<size_t>(writeIndex) * srcStride;
+                            if (components == 1)
+                            {
+                                uint32_t scalar = 0u;
+                                std::memcpy(&scalar, srcVec, 4u);
+                                const uint32_t lanes[4] = {scalar, scalar, scalar, scalar};
+                                std::memcpy(m_vu1Data + destVec * 16u, lanes, 16u);
+                            }
+                            else
+                            {
+                                std::memcpy(m_vu1Data + destVec * 16u, srcVec, srcStride);
+                            }
+                        }
+                    }
+                    pos += totalBytes;
+                    continue;
+                }
                 uint32_t srcIndex = 0u;
                 for (uint32_t writeIndex = 0; writeIndex < writeVectorCount; ++writeIndex)
                 {
