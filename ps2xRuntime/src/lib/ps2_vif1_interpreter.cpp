@@ -700,14 +700,22 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                         // V4-5: packed color-like format in a single 16-bit value.
                         uint16_t packed = 0;
                         std::memcpy(&packed, srcVec, sizeof(packed));
-                        decompressed[0] = packed & 0x1Fu;
-                        decompressed[1] = (packed >> 5) & 0x1Fu;
-                        decompressed[2] = (packed >> 10) & 0x1Fu;
-                        decompressed[3] = (packed >> 15) & 0x01u;
+                        // Each channel is scaled to 8 bits (RGBA5551 -> RGBA8888 with zero low bits).
+                        decompressed[0] = (packed & 0x1Fu) << 3;
+                        decompressed[1] = (packed & 0x3E0u) >> 2;
+                        decompressed[2] = (packed & 0x7C00u) >> 7;
+                        decompressed[3] = (packed & 0x8000u) >> 8;
                     }
                     else
                     {
                         handledFormat = false;
+                    }
+
+                    // V2 fills every lane: the hardware writes x y x y.
+                    if (decoded && handledFormat && components == 2 && vl != 3u)
+                    {
+                        decompressed[2] = decompressed[0];
+                        decompressed[3] = decompressed[1];
                     }
 
                     // Unknown compressed format fallback: preserve legacy raw-copy behavior.
