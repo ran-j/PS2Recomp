@@ -238,6 +238,33 @@ void register_ps2_sif_rpc_tests()
             t.IsTrue(libsdActive, "loading LIBSD should activate its HLE RPC route");
         });
 
+        tc.Run("sceSifSearchModuleByName finds loaded modules without the LOADFILE server", [](TestCase &t)
+        {
+            TestEnv env;
+            constexpr uint32_t kPathAddress = 0x00021000u;
+            const auto writeString = [&](std::string_view text)
+            {
+                std::memcpy(env.rdram.data() + kPathAddress, text.data(), text.size());
+                env.rdram[kPathAddress + text.size()] = 0u;
+                setRegU32(env.ctx, 4, kPathAddress);
+            };
+
+            writeString("rom0:SIO2MAN");
+            setRegU32(env.ctx, 5, 0u);
+            setRegU32(env.ctx, 6, 0u);
+            SifLoadModule(env.rdram.data(), &env.ctx, &env.runtime);
+            const int32_t sio2manId = getRegS32(env.ctx, 2);
+            t.IsTrue(sio2manId > 0, "rom0:SIO2MAN should load as an HLE module");
+
+            writeString("sio2man");
+            ps2_stubs::sceSifSearchModuleByName(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), sio2manId, "a loaded module should be found by name");
+
+            writeString("mcman");
+            ps2_stubs::sceSifSearchModuleByName(env.rdram.data(), &env.ctx, &env.runtime);
+            t.IsTrue(getRegS32(env.ctx, 2) < 0, "a module that was never loaded should not be found");
+        });
+
         tc.Run("emulated RPC bind waits for a registered IOP server", [](TestCase &t)
         {
             TestEnv env;

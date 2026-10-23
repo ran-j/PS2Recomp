@@ -597,6 +597,13 @@ namespace ps2_stubs
         setReturnS32(ctx, 0);
     }
 
+    // The SDK version asks the IOP LOADFILE RPC server, which the runtime does not provide.
+    void sceSifSearchModuleByName(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const std::string name = readPs2CStringBounded(rdram, getRegU32(ctx, 4), 64u);
+        setReturnS32(ctx, runtime && !name.empty() ? runtime->findIopModuleByName(name) : -1);
+    }
+
     void sceSifSetCmdBuffer(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const uint32_t newBuffer = getRegU32(ctx, 4);

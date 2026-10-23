@@ -25,6 +25,8 @@ namespace ps2x::iop
 
         [[nodiscard]] ModuleLoadResult loadModule(std::string_view path, const void *arguments = nullptr, uint32_t argumentSize = 0);
         [[nodiscard]] ModuleLoadResult loadModuleBuffer(uint32_t guestAddress, const void *arguments = nullptr, uint32_t argumentSize = 0);
+        // Resident module by name: a physical IRX by its .iopmod name, else an HLE module, or -1.
+        [[nodiscard]] int32_t findModuleByName(std::string_view name) const;
         [[nodiscard]] bool stopModule(int32_t moduleId, int32_t *result = nullptr);
         void runEeCycles(uint64_t eeCycles) noexcept;
 

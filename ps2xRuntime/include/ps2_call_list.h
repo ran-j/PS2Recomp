@@ -549,6 +549,7 @@
     X(sceSifRemoveRpcQueue)                   \
     X(sceSifResetIop)                         \
     X(sceSifRpcLoop)                          \
+    X(sceSifSearchModuleByName)               \
     X(sceSifSetCmdBuffer)                     \
     X(sceSifSetDChain)                        \
     X(sceSifSetDma)                           \
