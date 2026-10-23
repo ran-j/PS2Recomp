@@ -192,7 +192,12 @@ namespace ps2recomp
             bool needsIndirectFallback = false;
             for (const Instruction *jrInst : indirectJumps)
             {
-                if (jrInst->function == SPECIAL_JALR)
+                // A register call returns to its link address like JAL does. The
+                // resume entry is all the caller needs, so an unknown call target
+                // never promotes the caller's instructions to fallback entries. A
+                // JALR that links into $zero does not return and stays a jump.
+                const bool isRegisterCall = jrInst->function == SPECIAL_JALR && jrInst->rd != 0;
+                if (isRegisterCall)
                 {
                     queueResumeEntryTarget(jrInst->address + 8u);
                 }
@@ -272,6 +277,45 @@ namespace ps2recomp
                                         foundTableAddress = true;
                                         break;
                                     }
+                                }
+                            }
+                        }
+
+                        if (!foundTableAddress && adduIndex != -1 && !m_configJumpTableTargetsByAddress.empty())
+                        {
+                            // The compiler may hoist the table's LUI into a saved register
+                            // far above the switch and form the low half into another
+                            // register (ADDIU rt, rs, %lo). Accept that shape only when it
+                            // names a configured table, so unconfigured code is unaffected.
+                            for (uint32_t reg : {tableBaseReg, indexReg})
+                            {
+                                for (int i = adduIndex - 1; i >= 0 && i >= adduIndex - 8; --i)
+                                {
+                                    const auto &lowInst = instructions[i];
+                                    if (lowInst.opcode != OPCODE_ADDIU || lowInst.rt != reg || lowInst.rs == reg)
+                                    {
+                                        continue;
+                                    }
+                                    for (int j = i - 1; j >= 0; --j)
+                                    {
+                                        const auto &highInst = instructions[j];
+                                        if (highInst.opcode == OPCODE_LUI && highInst.rt == lowInst.rs)
+                                        {
+                                            const uint32_t candidate = (highInst.immediate << 16) +
+                                                                       static_cast<uint32_t>(lowInst.simmediate);
+                                            if (m_configJumpTableTargetsByAddress.contains(candidate + lwOffset))
+                                            {
+                                                tableAddress = candidate;
+                                                foundTableAddress = true;
+                                            }
+                                            break;
+                                        }
+                                    }
+                                    break;
+                                }
+                                if (foundTableAddress)
+                                {
+                                    break;
                                 }
                             }
                         }
@@ -393,7 +437,7 @@ namespace ps2recomp
                         }
                     }
                 }
-                if (!foundTable)
+                if (!foundTable && !isRegisterCall)
                 {
                     needsIndirectFallback = true;
                 }
@@ -407,7 +451,10 @@ namespace ps2recomp
                     jumpAddresses.reserve(indirectJumps.size());
                     for (const Instruction *jrInst : indirectJumps)
                     {
-                        jumpAddresses.push_back(jrInst->address);
+                        if (jrInst->function != SPECIAL_JALR || jrInst->rd == 0)
+                        {
+                            jumpAddresses.push_back(jrInst->address);
+                        }
                     }
                     m_reporter->recordIndirectFallbackPromotion(function.name, jumpAddresses, instructionAddresses.size());
                 }
