@@ -1719,6 +1719,75 @@ void register_code_generator_tests()
             t.IsTrue(generated.find("if (branch_taken_0x1200)") != std::string::npos, "should generate branch_taken variable and if for likely branch");
         });
 
+        tc.Run("BC0 branches treat CPCOND0 as true and nullify the likely delay slot", [](TestCase &t) {
+            struct Case
+            {
+                const char *name;
+                uint8_t cond;
+                bool taken;
+                bool likely;
+            };
+            const Case cases[] = {
+                {"BC0F", COP0_BC_BCF, false, false},
+                {"BC0T", COP0_BC_BCT, true, false},
+                {"BC0FL", COP0_BC_BCFL, false, true},
+                {"BC0TL", COP0_BC_BCTL, true, true},
+            };
+
+            for (const Case &c : cases)
+            {
+                Function func;
+                func.name = "bc0_branch";
+                func.start = 0x1200;
+                func.end = 0x1210;
+                func.isRecompiled = true;
+                func.isStub = false;
+
+                Instruction br{};
+                br.address = 0x1200;
+                br.opcode = OPCODE_COP0;
+                br.rs = COP0_BC;
+                br.rt = c.cond;
+                br.simmediate = 1; // target = 0x1208
+                br.isBranch = true;
+                br.hasDelaySlot = true;
+                br.raw = (OPCODE_COP0 << 26) | (COP0_BC << 21) | (static_cast<uint32_t>(c.cond) << 16) | 1u;
+
+                Instruction delay{};
+                delay.address = 0x1204;
+                delay.opcode = OPCODE_ADDIU;
+                delay.rs = 0;
+                delay.rt = 7;
+                delay.simmediate = 123;
+                delay.raw = 0;
+
+                Instruction target = makeNop(0x1208);
+
+                CodeGenerator gen({}, {});
+                const std::string generated = gen.generateFunction(func, {br, delay, target}, false);
+                printGeneratedCode(std::string(c.name) + " branch", generated);
+
+                const std::string expected = c.taken ? "branch_taken_0x1200 = (true" : "branch_taken_0x1200 = (false";
+                t.IsTrue(generated.find(expected) != std::string::npos,
+                         std::string(c.name) + (c.taken ? " should always be taken" : " should never be taken") +
+                             " while CPCOND0 reads as true");
+
+                const size_t guard = generated.find("if (branch_taken_0x1200) {");
+                const size_t delaySlot = generated.find("SET_GPR_S32(ctx, 7,");
+                t.IsTrue(delaySlot != std::string::npos, std::string(c.name) + " delay slot should be translated");
+                if (c.likely)
+                {
+                    t.IsTrue(guard != std::string::npos && delaySlot > guard,
+                             std::string(c.name) + " is a likely branch: its delay slot must only run when taken");
+                }
+                else
+                {
+                    t.IsTrue(guard != std::string::npos && delaySlot < guard,
+                             std::string(c.name) + " delay slot should run before the taken check");
+                }
+            }
+        });
+
         tc.Run("JR $31 returns through dynamic target without broad local switch", [](TestCase &t) {
             Function func;
             func.name = "jr_ra_return";
