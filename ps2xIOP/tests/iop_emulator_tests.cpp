@@ -6,6 +6,7 @@
 #include <cstring>
 #include <filesystem>
 #include <iostream>
+#include <iterator>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -883,6 +884,52 @@ namespace
         std::memcpy(host.guest.data() + address + codeOffset, segment.data(), segment.size());
     }
 
+    // A one-segment IRX at 0x10000 whose entry point is `code`, with `data` at 0x10040.
+    void writeCodeIrx(TestHost &host,
+                      uint32_t address,
+                      const uint32_t *code,
+                      size_t codeWords,
+                      const uint8_t *data,
+                      size_t dataBytes)
+    {
+        constexpr uint32_t codeOffset = 0x100u;
+        constexpr uint32_t loadAddress = 0x00010000u;
+        constexpr uint32_t dataOffset = 0x40u;
+
+        ElfHeader header{};
+        header.ident[0] = 0x7Fu;
+        header.ident[1] = 'E';
+        header.ident[2] = 'L';
+        header.ident[3] = 'F';
+        header.ident[4] = 1u;
+        header.ident[5] = 1u;
+        header.ident[6] = 1u;
+        header.type = 2u;
+        header.machine = 8u;
+        header.version = 1u;
+        header.entry = loadAddress;
+        header.phoff = sizeof(ElfHeader);
+        header.ehsize = sizeof(ElfHeader);
+        header.phentsize = sizeof(ProgramHeader);
+        header.phnum = 1u;
+
+        ProgramHeader program{};
+        program.type = 1u;
+        program.offset = codeOffset;
+        program.vaddr = loadAddress;
+        program.paddr = loadAddress;
+        program.filesz = dataOffset + static_cast<uint32_t>(dataBytes);
+        program.memsz = program.filesz;
+        program.flags = 7u;
+        program.align = 4u;
+
+        std::fill(host.guest.begin() + address, host.guest.begin() + address + codeOffset + program.filesz, 0u);
+        std::memcpy(host.guest.data() + address, &header, sizeof(header));
+        std::memcpy(host.guest.data() + address + sizeof(header), &program, sizeof(program));
+        std::memcpy(host.guest.data() + address + codeOffset, code, codeWords * sizeof(uint32_t));
+        std::memcpy(host.guest.data() + address + codeOffset + dataOffset, data, dataBytes);
+    }
+
     bool expect(bool value, const char *message)
     {
         if (!value)
@@ -1141,6 +1188,22 @@ int main()
         { return message.find("unhandled import cdvdman:7") != std::string::npos; });
     if (!expect(!emittedUnhandledSeek,
                 "sceCdSeek still emitted an unhandled IOP import")) return 1;
+
+    // An unaligned word read: the LWR must merge with the LWL result still in its load delay slot.
+    iop.reset();
+    const uint32_t unalignedLoad[] = {
+        0x3C090001u, // lui   t1, 1
+        0x35290041u, // ori   t1, t1, 0x41
+        0x89220003u, // lwl   v0, 3(t1)
+        0x99220000u, // lwr   v0, 0(t1)
+        0x03E00008u, // jr    ra
+        0x00000000u, // nop
+    };
+    const uint8_t unalignedData[] = {0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77};
+    writeCodeIrx(host, 0x100u, unalignedLoad, std::size(unalignedLoad), unalignedData, sizeof(unalignedData));
+    const ModuleLoadResult unaligned = iop.loadModuleBuffer(0x100u);
+    if (!expect(unaligned.handled && unaligned.startResult == 0x44332211,
+                "LWL/LWR pair did not forward the pending load")) return 1;
 
     std::cout << "ps2xIOP emulator smoke tests passed\n";
     return 0;
