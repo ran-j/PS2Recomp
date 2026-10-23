@@ -1433,6 +1433,9 @@ namespace
         {
             ps2_syscalls::dispatchDmacHandlersForCause(rdram, runtime, completedCause);
         }
+        // The transfer may also have raised INTC causes (a VIF1 i-bit stall
+        // waits on its handler); don't leave them for the next guest store.
+        runtime->drainCompletedDmacHandlers(rdram);
 
         return 0;
     }

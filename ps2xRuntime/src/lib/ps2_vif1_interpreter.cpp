@@ -300,10 +300,45 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
     if (sizeBytes == 0u)
         return;
 
+    // A VIFcode with the interrupt bit stalls VIF1 after it completes until
+    // the CPU writes FBRST.STC. Keep everything behind the stall (including
+    // later transfers) so it runs, in order, on resume.
+    if (m_vif1Stalled)
+    {
+        // Resumes read the held data in place. Drop the part they consumed
+        // once it is over half the buffer, so the copying stays linear in
+        // the bytes held.
+        if (m_vif1StalledPos > m_vif1StalledData.size() / 2u)
+        {
+            m_vif1StalledData.erase(m_vif1StalledData.begin(),
+                                    m_vif1StalledData.begin() + static_cast<std::ptrdiff_t>(m_vif1StalledPos));
+            m_vif1StalledPos = 0u;
+        }
+        m_vif1StalledData.insert(m_vif1StalledData.end(), data, data + sizeBytes);
+        return;
+    }
+
+    const uint32_t consumed = runVIF1Data(data, sizeBytes);
+    if (consumed < sizeBytes)
+        m_vif1StalledData.insert(m_vif1StalledData.end(), data + consumed, data + sizeBytes);
+}
+
+uint32_t PS2Memory::runVIF1Data(const uint8_t *data, uint32_t sizeBytes)
+{
+    if (sizeBytes == 0u)
+        return 0u;
+
     uint32_t pos = 0;
 
     while (pos + 4 <= sizeBytes)
     {
+        if (m_vif1IrqStallPending)
+        {
+            m_vif1IrqStallPending = false;
+            m_vif1Stalled = true;
+            return pos;
+        }
+
         if (m_vif1PendingPath2ImageQwc != 0u)
         {
             const uint32_t availableQw = (sizeBytes - pos) / 16u;
@@ -343,8 +378,12 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         // Track most-recent command for VIFn_CODE emulation.
         vif1_regs.code = cmd;
         vif1_regs.num = num;
-        if (irq)
-            vif1_regs.stat |= (1u << 11); // INT
+        if (irq && (vif1_regs.err & 0x1u) == 0u) // ERR.MII masks the i-bit
+        {
+            vif1_regs.stat |= (1u << 11) | (1u << 10); // INT, VIS
+            m_vif1IrqStallPending = true;
+            queueIntcCause(5u); // INTC_VIF1
+        }
 
         if (opcode == VIF_NOP)
         {
@@ -779,5 +818,48 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         {
             continue;
         }
+    }
+
+    if (m_vif1IrqStallPending)
+    {
+        m_vif1IrqStallPending = false;
+        m_vif1Stalled = true;
+    }
+    return sizeBytes;
+}
+
+void PS2Memory::resumeVIF1AfterStall()
+{
+    if (!m_vif1Stalled)
+        return;
+    m_vif1Stalled = false;
+    // Run the held data in place, from m_vif1StalledPos. The run owns the
+    // buffer meanwhile, so anything fed to VIF1 during it collects in an
+    // empty m_vif1StalledData, ahead of what the run leaves if it stalls.
+    std::vector<uint8_t> held;
+    held.swap(m_vif1StalledData);
+    const size_t start = m_vif1StalledPos;
+    m_vif1StalledPos = 0u;
+    const size_t end = start + runVIF1Data(held.data() + start, static_cast<uint32_t>(held.size() - start));
+    if (m_vif1StalledData.empty())
+    {
+        // Stalled again: the rest stays where it is and only the position
+        // moves. Drained: empty the buffer but keep its allocation.
+        if (end < held.size())
+            m_vif1StalledPos = end;
+        else
+            held.clear();
+        m_vif1StalledData.swap(held);
+    }
+    else if (end < held.size())
+    {
+        m_vif1StalledData.insert(m_vif1StalledData.end(), held.begin() + static_cast<std::ptrdiff_t>(end), held.end());
+    }
+    if (m_gifArbiter)
+        m_gifArbiter->drain();
+    if (!m_vif1Stalled && m_vif1DmaHeld)
+    {
+        m_vif1DmaHeld = false;
+        completeVif1Dma();
     }
 }

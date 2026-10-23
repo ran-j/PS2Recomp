@@ -345,6 +345,7 @@ public:
     void processVIF1Data(const uint8_t *data, uint32_t sizeBytes);
     void processPendingTransfers();
     std::vector<uint32_t> consumeCompletedDmacCauses();
+    std::vector<uint32_t> consumeCompletedIntcCauses();
 
     int pollDmaRegisters();
 
@@ -423,6 +424,21 @@ public:
     std::vector<PendingTransfer> m_pendingVif1Transfers;
     std::mutex m_completedDmacMutex;
     std::vector<uint32_t> m_completedDmacCauses;
+    std::vector<uint32_t> m_completedIntcCauses;
+    void queueIntcCause(uint32_t cause);
+    void completeVif1Dma();
+    // Runs VIFcodes from data. Returns the bytes consumed, which is less than
+    // sizeBytes only when an i-bit stall left the rest unread.
+    uint32_t runVIF1Data(const uint8_t *data, uint32_t sizeBytes);
+    void resumeVIF1AfterStall();
+    // VIF1 i-bit stall: data behind the stall, and whether the VIF1 DMA
+    // completion is held until the stall is released. A resume reads the
+    // held data in place; its first m_vif1StalledPos bytes are consumed.
+    bool m_vif1IrqStallPending = false;
+    bool m_vif1Stalled = false;
+    bool m_vif1DmaHeld = false;
+    std::vector<uint8_t> m_vif1StalledData;
+    size_t m_vif1StalledPos = 0u;
 
     struct CodeRegion
     {
