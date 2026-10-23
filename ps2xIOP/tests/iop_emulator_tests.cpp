@@ -1142,6 +1142,22 @@ int main()
     if (!expect(!emittedUnhandledSeek,
                 "sceCdSeek still emitted an unhandled IOP import")) return 1;
 
+    // sceSifLoadModuleBuffer takes an IOP address: games SIF-DMA the IRX into IOP RAM first.
+    {
+        TestHost dmaHost(0x20000u);
+        IopSubsystem dmaIop(dmaHost);
+        constexpr uint32_t iopModuleBuffer = 0x001F0000u; // outside the EE test guest range
+        writeMinimalIrx(dmaHost, 0x100u);
+        if (!expect(dmaIop.writeMemory(iopModuleBuffer, dmaHost.guest.data() + 0x100u, 0x400u),
+                    "Could not stage the IRX in IOP RAM")) return 1;
+        const ModuleLoadResult fromIopRam = dmaIop.loadModuleBuffer(iopModuleBuffer);
+        if (!expect(fromIopRam.handled && fromIopRam.moduleId > 0 && fromIopRam.startResult == 7,
+                    "IRX staged in IOP RAM was not loaded")) return 1;
+        // An EE pointer whose low bits land on the same IOP RAM offset must not pick that image up.
+        const ModuleLoadResult fromEeAlias = dmaIop.loadModuleBuffer(0x20000000u | iopModuleBuffer);
+        if (!expect(fromEeAlias.moduleId < 0, "EE address was read as IOP RAM")) return 1;
+    }
+
     std::cout << "ps2xIOP emulator smoke tests passed\n";
     return 0;
 }

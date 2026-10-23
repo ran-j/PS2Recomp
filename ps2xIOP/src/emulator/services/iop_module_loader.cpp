@@ -322,8 +322,28 @@ namespace ps2x::iop::detail
 
     bool IopModuleLoader::readElfFromGuest(IopHost &host, uint32_t guestAddress, std::vector<uint8_t> &bytes)
     {
+        return readElf([&host](uint32_t address, void *destination, size_t size)
+                       { return host.readGuest(address, destination, size); },
+                       guestAddress, bytes);
+    }
+
+    bool IopModuleLoader::readElfFromIop(const IopMemory &memory, uint32_t iopAddress, std::vector<uint8_t> &bytes)
+    {
+        // Only physical, KSEG0 and KSEG1 IOP addresses; readRam alone would also accept EE pointers
+        // whose low bits happen to land in IOP RAM.
+        const uint32_t segment = iopAddress & 0xE0000000u;
+        if ((segment != 0u && segment != 0x80000000u && segment != 0xA0000000u) ||
+            (iopAddress & 0x1FFFFFFFu) >= IopMemory::RamSize)
+            return false;
+        return readElf([&memory](uint32_t address, void *destination, size_t size)
+                       { return memory.readRam(address, destination, size); },
+                       iopAddress, bytes);
+    }
+
+    bool IopModuleLoader::readElf(const ElfReader &read, uint32_t address, std::vector<uint8_t> &bytes)
+    {
         Elf32Ehdr header{};
-        if (!host.readGuest(guestAddress, &header, sizeof(header)) || !validElfHeader(header))
+        if (!read(address, &header, sizeof(header)) || !validElfHeader(header))
             return false;
 
         uint64_t required = sizeof(header);
@@ -334,7 +354,7 @@ namespace ps2x::iop::detail
             return false; // Should we log an error here? TODO check later
 
         bytes.resize(static_cast<size_t>(required));
-        if (!host.readGuest(guestAddress, bytes.data(), bytes.size()))
+        if (!read(address, bytes.data(), bytes.size()))
             return false;
 
         if (header.shnum != 0u && header.shentsize >= sizeof(Elf32Shdr))
@@ -364,7 +384,7 @@ namespace ps2x::iop::detail
             return false;
 
         bytes.resize(static_cast<size_t>(required));
-        return host.readGuest(guestAddress, bytes.data(), bytes.size());
+        return read(address, bytes.data(), bytes.size());
     }
 
     IopImageLoadResult IopModuleLoader::load(std::span<const uint8_t> image, IopMemory &memory, uint32_t moduleCursor)
