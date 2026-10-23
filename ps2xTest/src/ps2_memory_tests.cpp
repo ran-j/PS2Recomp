@@ -159,6 +159,17 @@ void register_ps2_memory_tests()
 {
     MiniTest::Case("PS2Memory", [](TestCase &tc)
     {
+        tc.Run("all four VU memories take the special-address path", [](TestCase &t)
+        {
+            t.IsTrue(PS2Runtime::isSpecialAddress(0x11000000u), "VU0 code memory must not be treated as RAM");
+            t.IsTrue(PS2Runtime::isSpecialAddress(0x11000FF0u), "end of VU0 code memory must not be treated as RAM");
+            t.IsTrue(PS2Runtime::isSpecialAddress(0x11004000u), "VU0 data memory must not be treated as RAM");
+            t.IsTrue(PS2Runtime::isSpecialAddress(0x11008000u), "VU1 code memory must not be treated as RAM");
+            t.IsTrue(PS2Runtime::isSpecialAddress(0x1100C000u), "VU1 data memory must not be treated as RAM");
+            t.IsTrue(PS2Runtime::isSpecialAddress(0x1100FFF0u), "end of VU1 data memory must not be treated as RAM");
+            t.IsFalse(PS2Runtime::isSpecialAddress(0x01000000u), "main RAM at 16 MB is ordinary RAM");
+        });
+
         tc.Run("uncached aliases map to same RDRAM bytes", [](TestCase &t)
         {
             PS2Memory mem;
