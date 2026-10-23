@@ -223,6 +223,11 @@ void register_ps2_float_semantics_tests()
             const std::string rsqrt = gen.translateInstruction(makeCop1S(COP1_S_RSQRT, 2, 3, 4));
             t.IsTrue(rsqrt.find("ctx->f[2] = FPU_RSQRT_S(ctx->f[3], ctx->f[4])") != std::string::npos,
                      "RSQRT.S should compute fs / sqrt(ft) but got: " + rsqrt);
+
+            // EE SQRT.S fd, ft: the radicand is the ft field (fs is 0 in real code; distinct here to catch a mix-up).
+            const std::string sqrt = gen.translateInstruction(makeCop1S(COP1_S_SQRT, 2, 3, 4));
+            t.IsTrue(sqrt.find("ctx->f[2] = FPU_SQRT_S(ctx->f[4])") != std::string::npos,
+                     "SQRT.S should write sqrt(ft) to fd but got: " + sqrt);
         });
     });
 }
