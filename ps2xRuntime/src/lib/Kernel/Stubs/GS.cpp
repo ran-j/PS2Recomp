@@ -347,7 +347,7 @@ namespace ps2_stubs
             {
                 packetQwords >>= 1u;
             }
-            if (flag != 2u)
+            if (flag < 2u) // IMAGE (2) and FLG=3 count qwords directly, not NREG groups.
             {
                 uint32_t nreg = static_cast<uint32_t>((tagValue >> 60u) & 0xFu);
                 if (nreg == 0u)

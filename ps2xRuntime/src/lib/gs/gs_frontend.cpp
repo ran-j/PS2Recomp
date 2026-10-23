@@ -725,8 +725,9 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
             if ((nloop * nreg) & 1)
                 offset += 8;
         }
-        else if (flg == GIF_FMT_IMAGE)
+        else if (flg == GIF_FMT_IMAGE || flg == GIF_FMT_DISABLED)
         {
+            // FLG=3 ("disabled" in the GS manual) behaves exactly like IMAGE: NLOOP qwords of image data.
             uint32_t imageBytes = nloop * 16;
             if (offset + imageBytes > sizeBytes)
                 imageBytes = sizeBytes - offset;

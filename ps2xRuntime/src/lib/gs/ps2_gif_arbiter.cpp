@@ -15,7 +15,8 @@ bool GifArbiter::isImagePacket(const uint8_t *data, uint32_t sizeBytes)
     uint64_t tagLo = 0;
     std::memcpy(&tagLo, data, sizeof(tagLo));
     const uint8_t flg = static_cast<uint8_t>((tagLo >> 58) & 0x3u);
-    return flg == 2u;
+    // FLG=3 ("disabled" in the GS manual) behaves exactly like IMAGE: NLOOP qwords of image data.
+    return flg == 2u || flg == 3u;
 }
 
 void GifArbiter::submit(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl)
