@@ -19,6 +19,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <map>
 #include <optional>
 #include <span>
@@ -129,6 +132,7 @@ namespace ps2x::iop::detail
             nextModuleId = 1;
             moduleCursor = kModuleLoadBase;
             totalCycles = 0;
+            realtimeStarted = false;
             totalInstructions = 0;
             eeCycleCarry = 0;
             activeCpu = nullptr;
@@ -553,6 +557,48 @@ namespace ps2x::iop::detail
             servicingGuestCallbacks = false;
         }
 
+        // IOP time is derived from the EE cycle estimate (EE cycles / 8), and the recompiled EE's
+        // estimate can run far behind real time. Anything on the IOP that has to keep pace with the
+        // host (IOP timers, sound output, drivers that stream against hardware progress) then runs
+        // slow. Top IOP time up to the host clock: at most 50 ms per call, and after a stall of
+        // more than 250 ms (loading, a debugger) rebase instead of fast-forwarding through it.
+        // PS2X_IOP_REALTIME=0 turns this off.
+        uint64_t realtimeCatchUp(uint64_t pendingCycles)
+        {
+            static const bool enabled = []
+            {
+                const char *value = std::getenv("PS2X_IOP_REALTIME");
+                return !value || std::strcmp(value, "0") != 0;
+            }();
+            if (!enabled)
+                return 0u;
+            constexpr uint64_t kIopHz = 36864000u;
+            constexpr uint64_t kMaxCatchUp = kIopHz / 20u; // 50 ms
+            constexpr uint64_t kMaxBehind = kIopHz / 4u;   // 250 ms
+            const auto now = std::chrono::steady_clock::now();
+            const uint64_t current = totalCycles + pendingCycles;
+            if (!realtimeStarted)
+            {
+                realtimeStarted = true;
+                realtimeBase = now;
+                realtimeBaseCycle = current;
+                return 0u;
+            }
+            const uint64_t elapsedUs = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(now - realtimeBase).count());
+            const uint64_t wallCycle = realtimeBaseCycle + elapsedUs * kIopHz / 1000000u;
+            if (wallCycle <= current)
+                return 0u;
+            const uint64_t behind = wallCycle - current;
+            if (behind > kMaxBehind)
+            {
+                realtimeBase = now;
+                realtimeBaseCycle = current;
+                return 0u;
+            }
+            return std::min(behind, kMaxCatchUp);
+        }
+
         void runCycles(uint64_t cycles) noexcept
         {
             try
@@ -700,6 +746,9 @@ namespace ps2x::iop::detail
         uint32_t nextModuleId = 1;
         uint32_t moduleCursor = kModuleLoadBase;
         uint64_t totalCycles = 0;
+        bool realtimeStarted = false;
+        std::chrono::steady_clock::time_point realtimeBase{};
+        uint64_t realtimeBaseCycle = 0;
         uint64_t totalInstructions = 0;
         uint64_t eeCycleCarry = 0;
         CpuState *activeCpu = nullptr;
@@ -742,8 +791,9 @@ namespace ps2x::iop::detail
     void IopEmulator::runEeCycles(uint64_t eeCycles) noexcept
     {
         const uint64_t total = m_impl->eeCycleCarry + eeCycles;
-        const uint64_t iopCycles = total / 8u;
+        uint64_t iopCycles = total / 8u;
         m_impl->eeCycleCarry = total % 8u;
+        iopCycles += m_impl->realtimeCatchUp(iopCycles);
         if (iopCycles)
             m_impl->runCycles(iopCycles);
     }
