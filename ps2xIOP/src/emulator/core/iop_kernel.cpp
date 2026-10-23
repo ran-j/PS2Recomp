@@ -32,6 +32,7 @@ namespace ps2x::iop::detail
         m_nextSemaphoreId = 1;
         m_nextEventFlagId = 1;
         m_currentThread = nullptr;
+        m_outsideSemaphoreWait = 0;
     }
 
     bool IopKernel::dispatchThreadImport(uint16_t ordinal, IopCpuState &cpu, uint64_t currentCycle)
@@ -387,7 +388,16 @@ namespace ps2x::iop::detail
             }
             if (it->second.current < it->second.maximum)
                 ++it->second.current;
-            wakeOneSemaphore(id);
+            if (m_outsideSemaphoreWait == id)
+            {
+                // Code outside any thread is blocked on this semaphore (see setOutsideSemaphoreWait). It stands for
+                // a thread that outranks the signaller: keep the count for it and end the signaller's slice so the
+                // signaller cannot take the semaphore back first.
+                if (m_currentThread != nullptr && &cpu == &m_currentThread->cpu) // not from an interrupt handler
+                    cpu.yielded = true;
+            }
+            else
+                wakeOneSemaphore(id);
             setV0(0);
             return true;
         }
@@ -650,6 +660,12 @@ namespace ps2x::iop::detail
         default:
             return false;
         }
+    }
+
+    int IopKernel::semaphoreCount(int id) const
+    {
+        const auto semaphore = m_semaphores.find(id);
+        return semaphore == m_semaphores.end() ? -1 : semaphore->second.current;
     }
 
     void IopKernel::sleepCurrent(IopCpuState &cpu)
