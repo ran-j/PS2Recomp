@@ -420,6 +420,9 @@ private:
     int m_dmacTailOrder = 1000;
     uint32_t m_enabledIntcMask = 0xFFFFFFFFu;
     uint32_t m_enabledDmacMask = 0xFFFFFFFFu;
+    // Causes raised while masked, delivered on re-enable (INTC_STAT/D_STAT).
+    uint32_t m_pendingIntcMask = 0u;
+    uint32_t m_pendingDmacMask = 0u;
     int m_currentThreadId = 0;
     bool m_rescheduleRequested = false;
     bool m_timeSliceExpired = false;
