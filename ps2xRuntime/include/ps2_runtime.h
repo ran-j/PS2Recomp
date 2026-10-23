@@ -25,6 +25,7 @@
 
 #include "ps2_log.h"
 #include "runtime/ps2_address.h"
+#include "runtime/ps2_guest_code_image.h"
 #include "runtime/gs/ps2_gif_arbiter.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/gs/gs_frontend.h"
@@ -351,6 +352,10 @@ public:
                                uint32_t sourcePc,
                                GuestBranchKind kind,
                                const char *debugName);
+    // Reports, once each, the recompiled code words the guest has rewritten
+    // since the ELF was loaded, and whether recompiled code follows each
+    // rewrite. Returns how many words it reported.
+    size_t auditGuestCode(const uint8_t *rdram, const char *trigger);
     void setMissingFunctionPolicy(MissingFunctionPolicy policy);
     MissingFunctionPolicy missingFunctionPolicy() const;
     void resetMissingFunctionReportOnce();
@@ -476,6 +481,11 @@ private:
     void freeGuestBlockLocked(uint32_t guestAddr);
     void coalesceGuestHeapLocked();
     void HandleIntegerOverflow(R5900Context *ctx);
+    uint32_t resolveRewrittenDirectBranch(uint8_t *rdram,
+                                          uint32_t sourcePc,
+                                          uint32_t elfTarget,
+                                          uint32_t word,
+                                          GuestBranchKind kind);
 
     [[nodiscard]] ps2x::iop::RpcAbi selectIopRpcAbi(const ps2x::iop::RpcAbiRequest &request) const;
     [[nodiscard]] bool canBindIopRpc(uint32_t sid) const noexcept;
@@ -497,6 +507,7 @@ private:
     PSPadBackend m_padBackend;
     PS2RomDevice m_romDevice;
     PS2Vfs m_vfs;
+    GuestCodeImage m_guestCodeImage;
     VU1Interpreter m_vu0{VU1Interpreter::Unit::VU0};
     VU1Interpreter m_vu1{VU1Interpreter::Unit::VU1};
     R5900Context m_cpuContext;

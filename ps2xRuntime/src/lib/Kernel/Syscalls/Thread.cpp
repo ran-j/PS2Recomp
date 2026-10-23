@@ -150,8 +150,16 @@ namespace ps2_syscalls
         }
     }
 
-    void FlushCache(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    void FlushCache(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        // Modes 2 (INVALIDATE_ICACHE) and 3 (INVALIDATE_CACHE) are how a title
+        // makes code it rewrote visible to the EE. Recompiled code runs what
+        // it was generated from, so report what the title changed.
+        const uint32_t mode = getRegU32(ctx, 4);
+        if (runtime && (mode == 2u || mode == 3u))
+        {
+            (void)runtime->auditGuestCode(rdram, "FlushCache");
+        }
         setReturnS32(ctx, KE_OK);
     }
 
