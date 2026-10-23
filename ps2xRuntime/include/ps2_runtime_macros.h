@@ -270,9 +270,12 @@ inline bool ps2_fall_normal(float a, float b, float r)
 
 // The same test on the result alone. An exponent-255 operand always leaves exponent 255 in the host result
 // of an addition, subtraction or multiplication (Inf or NaN), so this finds those operands as well.
+// A zero result stays on the fast path: it needs no operand with exponent 255 (that gives Inf or NaN), and
+// the double path returns the same signed zero, so zeros (common in game maths) skip the out-of-line call.
 inline bool ps2_fnormal(float r)
 {
-    return (std::bit_cast<uint32_t>(r) * 2u + 0x01000000u) >= 0x02000000u;
+    const uint32_t doubled = std::bit_cast<uint32_t>(r) * 2u;
+    return doubled == 0u || (doubled + 0x01000000u) >= 0x02000000u;
 }
 
 inline float ps2_fadd(float a, float b)
