@@ -677,6 +677,12 @@ namespace
             break;
         }
 
+        // BC0/BC1/BC2 share the BC format number and have a delay slot too.
+        if (opcode == OPCODE_COP0 || opcode == OPCODE_COP1 || opcode == OPCODE_COP2)
+        {
+            return RS(raw) == COP0_BC;
+        }
+
         if (opcode != OPCODE_SPECIAL)
         {
             return false;
@@ -1609,11 +1615,15 @@ namespace
     {
         std::unordered_set<uint32_t> starts;
         starts.reserve(4096);
+        // JAL targets and the entry point are real entries even when they sit
+        // in a delay slot; heuristic starts there are not.
+        std::unordered_set<uint32_t> callTargets;
 
         const uint32_t entry = parser->getEntryPoint();
         if (FindCodeSectionByAddress(parser->getSections(), entry))
         {
             starts.insert(entry);
+            callTargets.insert(entry);
         }
 
         const auto &sections = parser->getSections();
@@ -1645,6 +1655,7 @@ namespace
                 if (FindCodeSectionByAddress(sections, target))
                 {
                     starts.insert(target);
+                    callTargets.insert(target);
                 }
             }
         }
@@ -1662,6 +1673,17 @@ namespace
 
             const ps2recomp::Section *sec = FindCodeSectionByAddress(sections, start);
             if (!sec)
+            {
+                continue;
+            }
+
+            // A heuristic start right after a branch or jump is its delay slot.
+            // Splitting there drops the delay instruction from the owner, as at
+            // FIFA Street 2's 0x202020 (the LW feeding JAL 0x431c88's argument).
+            uint32_t predecessorRaw = 0;
+            if (!callTargets.contains(start) && start - sec->address >= MIPS_INSTRUCTION_SIZE &&
+                ReadSectionWord(*sec, start - sec->address - MIPS_INSTRUCTION_SIZE, predecessorRaw) &&
+                IsControlTransfer(predecessorRaw))
             {
                 continue;
             }
