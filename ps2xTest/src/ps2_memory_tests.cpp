@@ -1912,6 +1912,73 @@ void register_ps2_memory_tests()
             }
         });
 
+        tc.Run("DMAC D_ENABLER reads 0x1201 after reset with CPND clear", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kDEnableR = 0x1000F520u;
+            constexpr uint32_t kCpnd = 1u << 16; // DMAC suspended
+
+            // The hardware reports 0x1201 at boot (PCSX2 hwReset, ps2tek); bit 16 is
+            // clear, so the DMAC starts enabled.
+            t.Equals(mem.read32(kDEnableR), 0x1201u, "D_ENABLER should read 0x1201 after reset");
+            t.IsTrue((mem.read32(kDEnableR) & kCpnd) == 0u, "CPND should be clear after reset");
+        });
+
+        tc.Run("DMAC D_ENABLEW writes are visible at D_ENABLER", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kDEnableR = 0x1000F520u;
+            constexpr uint32_t kDEnableW = 0x1000F590u;
+            constexpr uint32_t kCpnd = 1u << 16;
+
+            mem.write32(kDEnableW, kCpnd);
+            t.Equals(mem.read32(kDEnableR), kCpnd, "sw D_ENABLEW should be readable at D_ENABLER");
+
+            mem.write32(kDEnableW, 0u);
+            t.Equals(mem.read32(kDEnableR), 0u, "clearing D_ENABLEW should clear D_ENABLER");
+
+            // Narrow accesses merge into the same 32-bit register: PCSX2 polls the
+            // suspend state with a byte read of D_ENABLER+2.
+            mem.write16(kDEnableW + 2u, 0x1u);
+            t.Equals(mem.read32(kDEnableR), kCpnd, "sh to the upper half of D_ENABLEW should set CPND at D_ENABLER");
+            t.Equals(mem.read8(kDEnableR + 2u), static_cast<uint8_t>(1u), "lb of D_ENABLER byte 2 should expose CPND");
+        });
+
+        tc.Run("DMAC suspend and resume polls through D_ENABLEW and D_ENABLER terminate", [](TestCase &t)
+        {
+            // Ridge Racer V brackets its DMAC interrupt handler and frame kick with
+            //   while ((D_ENABLER & 0x10000) == 0) D_ENABLEW = 0x10000;
+            //   while ((D_ENABLER & 0x10000) != 0) D_ENABLEW = 0;
+            // which spins forever unless the two ports are one register.
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kDEnableR = 0x1000F520u;
+            constexpr uint32_t kDEnableW = 0x1000F590u;
+            constexpr uint32_t kCpnd = 1u << 16;
+            constexpr uint32_t kMaxPolls = 8u;
+
+            uint32_t suspendPolls = 0u;
+            while ((mem.read32(kDEnableR) & kCpnd) == 0u && suspendPolls < kMaxPolls)
+            {
+                mem.write32(kDEnableW, kCpnd);
+                ++suspendPolls;
+            }
+            t.Equals(suspendPolls, 1u, "the suspend request should be visible on the first poll");
+
+            uint32_t resumePolls = 0u;
+            while ((mem.read32(kDEnableR) & kCpnd) != 0u && resumePolls < kMaxPolls)
+            {
+                mem.write32(kDEnableW, 0u);
+                ++resumePolls;
+            }
+            t.Equals(resumePolls, 1u, "the resume request should be visible on the first poll");
+        });
+
         tc.Run("DMAC SPR_FROM copies scratchpad to RDRAM and completes channel 8", [](TestCase &t)
         {
             PS2Memory mem;
