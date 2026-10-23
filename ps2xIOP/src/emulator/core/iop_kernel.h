@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <optional>
 
 namespace ps2x::iop::detail
 {
@@ -41,6 +42,9 @@ namespace ps2x::iop::detail
         uint32_t waitMode = 0;
         uint32_t waitResultAddress = 0;
         int wakeupCount = 0;
+        // The thread's own context, parked in sceSifRpcLoop, while it is lent
+        // to a nested call (an RPC server function).
+        std::optional<IopCpuState> nestedSavedCpu;
     };
 
     class IopKernel
@@ -65,6 +69,13 @@ namespace ps2x::iop::detail
         void endTimeslice(IopThread &thread, uint32_t returnSentinel);
         void cleanupDeadThreads();
         void terminateThreadsInRange(uint32_t base, uint32_t size);
+        // Lends a thread parked in sceSifRpcLoop (blocked in Sleep) to
+        // function(a0, a1, a2) under the normal scheduler; the call returns to
+        // `returnSentinel`. finishNestedCall puts the thread back to sleep with
+        // its own context.
+        [[nodiscard]] bool beginNestedCall(int id, uint32_t function, uint32_t a0, uint32_t a1, uint32_t a2,
+                                           uint32_t gp, uint32_t returnSentinel);
+        void finishNestedCall(IopThread &thread);
 
         [[nodiscard]] size_t threadCount() const noexcept { return m_threads.size(); }
 

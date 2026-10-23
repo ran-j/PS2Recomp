@@ -561,6 +561,175 @@ namespace
         std::memcpy(host.guest.data() + address + codeOffset, segment.data(), segment.size());
     }
 
+    constexpr uint32_t kBlockingRpcSid = 0x5A5A0001u;
+    constexpr uint32_t kBlockingRpcState = 0x00010400u; // reply[2], semaphore id, worker id, request
+
+    // An RPC server that waits for a second IOP thread. The module starts a
+    // worker thread (priority 40) and an RPC thread (priority 50) that
+    // registers kBlockingRpcSid on its queue and parks in sceSifRpcLoop. The
+    // server stores the EE's request word, wakes the worker and blocks in
+    // WaitSema. The worker writes reply[0] = request + 1 and signals the
+    // semaphore; it outranks the server's thread, so it goes on to write
+    // reply[1] = request + 2 before going back to sleep. The server then
+    // returns the reply.
+    void writeBlockingRpcServerIrx(TestHost &host, uint32_t address)
+    {
+        constexpr uint32_t codeOffset = 0x100u;
+        constexpr uint32_t loadAddress = 0x00010000u;
+        constexpr uint32_t rpcThreadAddress = loadAddress + 0x100u;
+        constexpr uint32_t serverAddress = loadAddress + 0x1C0u;
+        constexpr uint32_t workerAddress = loadAddress + 0x240u;
+        constexpr uint32_t thbaseTable = loadAddress + 0x2C0u;
+        constexpr uint32_t createThreadStub = thbaseTable + 20u;
+        constexpr uint32_t startThreadStub = createThreadStub + 8u;
+        constexpr uint32_t getThreadIdStub = startThreadStub + 8u;
+        constexpr uint32_t sleepThreadStub = getThreadIdStub + 8u;
+        constexpr uint32_t wakeupThreadStub = sleepThreadStub + 8u;
+        constexpr uint32_t thsemapTable = loadAddress + 0x310u;
+        constexpr uint32_t createSemaStub = thsemapTable + 20u;
+        constexpr uint32_t signalSemaStub = createSemaStub + 8u;
+        constexpr uint32_t waitSemaStub = signalSemaStub + 8u;
+        constexpr uint32_t sifcmdTable = loadAddress + 0x350u;
+        constexpr uint32_t initRpcStub = sifcmdTable + 20u;
+        constexpr uint32_t registerRpcStub = initRpcStub + 8u;
+        constexpr uint32_t setRpcQueueStub = registerRpcStub + 8u;
+        constexpr uint32_t rpcLoopStub = setRpcQueueStub + 8u;
+        constexpr uint32_t semaphoreDescriptor = loadAddress + 0x390u;
+        constexpr uint32_t workerDescriptor = loadAddress + 0x3A0u;
+        constexpr uint32_t rpcThreadDescriptor = loadAddress + 0x3C0u;
+        constexpr uint32_t serverData = loadAddress + 0x440u;
+        constexpr uint32_t queue = loadAddress + 0x490u;
+        constexpr uint32_t serverBuffer = loadAddress + 0x500u;
+
+        ElfHeader header{};
+        header.ident[0] = 0x7Fu; header.ident[1] = 'E'; header.ident[2] = 'L'; header.ident[3] = 'F';
+        header.ident[4] = 1u; header.ident[5] = 1u; header.ident[6] = 1u;
+        header.type = 2u; header.machine = 8u; header.version = 1u;
+        header.entry = loadAddress; header.phoff = sizeof(ElfHeader);
+        header.ehsize = sizeof(ElfHeader); header.phentsize = sizeof(ProgramHeader); header.phnum = 1u;
+
+        ProgramHeader program{};
+        program.type = 1u; program.offset = codeOffset; program.vaddr = loadAddress; program.paddr = loadAddress;
+        program.filesz = 0x600u; program.memsz = 0x600u; program.flags = 7u; program.align = 4u;
+
+        constexpr uint32_t zero = 0u, v0 = 2u, a0 = 4u, a1 = 5u, a2 = 6u, a3 = 7u, t0 = 8u, t1 = 9u,
+                           s0 = 16u, sp = 29u, ra = 31u;
+        constexpr uint32_t nop = 0u;
+        constexpr uint32_t jrRa = 0x03E00008u;
+        const auto jal = [](uint32_t target) { return 0x0C000000u | ((target >> 2u) & 0x03FFFFFFu); };
+        const auto jump = [](uint32_t target) { return 0x08000000u | ((target >> 2u) & 0x03FFFFFFu); };
+        const auto lui = [](uint32_t rt, uint32_t value) { return 0x3C000000u | (rt << 16u) | (value >> 16u); };
+        const auto ori = [](uint32_t rt, uint32_t rs, uint32_t value)
+        { return 0x34000000u | (rs << 21u) | (rt << 16u) | (value & 0xFFFFu); };
+        const auto addiu = [](uint32_t rt, uint32_t rs, int16_t value)
+        { return 0x24000000u | (rs << 21u) | (rt << 16u) | static_cast<uint16_t>(value); };
+        const auto addu = [](uint32_t rd, uint32_t rs, uint32_t rt)
+        { return (rs << 21u) | (rt << 16u) | (rd << 11u) | 0x21u; };
+        const auto lw = [](uint32_t rt, uint32_t offset, uint32_t base)
+        { return 0x8C000000u | (base << 21u) | (rt << 16u) | offset; };
+        const auto sw = [](uint32_t rt, uint32_t offset, uint32_t base)
+        { return 0xAC000000u | (base << 21u) | (rt << 16u) | offset; };
+
+        const uint32_t entry[] = {
+            addiu(sp, sp, -0x20), sw(ra, 0x1C, sp), sw(s0, 0x18, sp),
+            lui(s0, kBlockingRpcState), ori(s0, s0, kBlockingRpcState),
+            lui(a0, semaphoreDescriptor), ori(a0, a0, semaphoreDescriptor), jal(createSemaStub), nop,
+            sw(v0, 8, s0),
+            lui(a0, workerDescriptor), ori(a0, a0, workerDescriptor), jal(createThreadStub), nop,
+            sw(v0, 12, s0),
+            addu(a0, v0, zero), addu(a1, zero, zero), jal(startThreadStub), nop,
+            lui(a0, rpcThreadDescriptor), ori(a0, a0, rpcThreadDescriptor), jal(createThreadStub), nop,
+            addu(a0, v0, zero), addu(a1, zero, zero), jal(startThreadStub), nop,
+            lw(ra, 0x1C, sp), lw(s0, 0x18, sp), addu(v0, zero, zero),
+            addiu(sp, sp, 0x20), jrRa, nop,
+        };
+        const uint32_t rpcThread[] = {
+            addiu(sp, sp, -0x20), sw(ra, 0x1C, sp),
+            addu(a0, zero, zero), jal(initRpcStub), nop,
+            jal(getThreadIdStub), nop,
+            lui(a0, queue), ori(a0, a0, queue), addu(a1, v0, zero), jal(setRpcQueueStub), nop,
+            lui(a0, serverData), ori(a0, a0, serverData),
+            lui(a1, kBlockingRpcSid), ori(a1, a1, kBlockingRpcSid),
+            lui(a2, serverAddress), ori(a2, a2, serverAddress),
+            lui(a3, serverBuffer), ori(a3, a3, serverBuffer),
+            sw(zero, 0x10, sp), sw(zero, 0x14, sp),
+            lui(t0, queue), ori(t0, t0, queue), sw(t0, 0x18, sp),
+            jal(registerRpcStub), nop,
+            lui(a0, queue), ori(a0, a0, queue), jal(rpcLoopStub), nop,
+            lw(ra, 0x1C, sp), addiu(sp, sp, 0x20), jrRa, nop,
+        };
+        const uint32_t server[] = {
+            addiu(sp, sp, -0x20), sw(ra, 0x1C, sp), sw(s0, 0x18, sp),
+            lui(s0, kBlockingRpcState), ori(s0, s0, kBlockingRpcState),
+            lw(t0, 0, a1), nop, sw(t0, 16, s0),         // request = EE send word
+            lw(a0, 12, s0), jal(wakeupThreadStub), nop, // WakeupThread(worker)
+            lw(a0, 8, s0), jal(waitSemaStub), nop,      // WaitSema(semaphore)
+            addu(v0, s0, zero),                         // return the reply
+            lw(ra, 0x1C, sp), lw(s0, 0x18, sp),
+            addiu(sp, sp, 0x20), jrRa, nop,
+        };
+        const uint32_t worker[] = {
+            jal(sleepThreadStub), nop,
+            lui(t0, kBlockingRpcState), ori(t0, t0, kBlockingRpcState), lw(t1, 16, t0), nop,
+            addiu(t1, t1, 1), sw(t1, 0, t0),             // reply[0] = request + 1
+            lw(a0, 8, t0), jal(signalSemaStub), nop,     // SignalSema(semaphore)
+            lui(t0, kBlockingRpcState), ori(t0, t0, kBlockingRpcState), lw(t1, 16, t0), nop,
+            addiu(t1, t1, 2), sw(t1, 4, t0),             // reply[1] = request + 2
+            jump(workerAddress), nop,
+        };
+        const uint32_t thbaseImports[] = {
+            0x41E00000u, 0u, 0x00000101u,
+            0x61626874u, 0x00006573u, // "thbase"
+            jrRa, 0x24000004u,        // CreateThread
+            jrRa, 0x24000006u,        // StartThread
+            jrRa, 0x24000014u,        // GetThreadId
+            jrRa, 0x24000018u,        // SleepThread
+            jrRa, 0x24000019u,        // WakeupThread
+            0u, 0u,
+        };
+        const uint32_t thsemapImports[] = {
+            0x41E00000u, 0u, 0x00000101u,
+            0x65736874u, 0x0070616Du, // "thsemap"
+            jrRa, 0x24000004u,        // CreateSema
+            jrRa, 0x24000006u,        // SignalSema
+            jrRa, 0x24000008u,        // WaitSema
+            0u, 0u,
+        };
+        const uint32_t sifcmdImports[] = {
+            0x41E00000u, 0u, 0x00000101u,
+            0x63666973u, 0x0000646Du, // "sifcmd"
+            jrRa, 0x2400000Eu,        // sceSifInitRpc
+            jrRa, 0x24000011u,        // sceSifRegisterRpc
+            jrRa, 0x24000013u,        // sceSifSetRpcQueue
+            jrRa, 0x24000016u,        // sceSifRpcLoop
+            0u, 0u,
+        };
+        const uint32_t semaphore[] = {0u, 0u, 0u, 1u};
+        const uint32_t workerThread[] = {0u, 0u, workerAddress, 0x400u, 40u};
+        const uint32_t rpcThreadParameters[] = {0u, 0u, rpcThreadAddress, 0x800u, 50u};
+
+        std::vector<uint8_t> segment(program.filesz, 0u);
+        const auto put = [&](uint32_t at, const void *data, size_t size)
+        {
+            std::memcpy(segment.data() + (at - loadAddress), data, size);
+        };
+        put(loadAddress, entry, sizeof(entry));
+        put(rpcThreadAddress, rpcThread, sizeof(rpcThread));
+        put(serverAddress, server, sizeof(server));
+        put(workerAddress, worker, sizeof(worker));
+        put(thbaseTable, thbaseImports, sizeof(thbaseImports));
+        put(thsemapTable, thsemapImports, sizeof(thsemapImports));
+        put(sifcmdTable, sifcmdImports, sizeof(sifcmdImports));
+        put(semaphoreDescriptor, semaphore, sizeof(semaphore));
+        put(workerDescriptor, workerThread, sizeof(workerThread));
+        put(rpcThreadDescriptor, rpcThreadParameters, sizeof(rpcThreadParameters));
+
+        std::memset(host.guest.data() + address, 0, codeOffset + program.filesz);
+        std::memcpy(host.guest.data() + address, &header, sizeof(header));
+        std::memcpy(host.guest.data() + address + sizeof(header), &program, sizeof(program));
+        std::memcpy(host.guest.data() + address + codeOffset, segment.data(), segment.size());
+    }
+
     void writeSifDmaIrx(TestHost &host, uint32_t address)
     {
         constexpr uint32_t codeOffset = 0x100u;
@@ -1050,6 +1219,62 @@ int main()
                 "Could not read the IOP scheduling marker")) return 1;
     if (!expect(lowPriorityMarker == 1u,
                 "WaitVblankEnd returned immediately and starved a lower-priority IOP thread")) return 1;
+
+    iop.reset();
+    host.logs.clear();
+    writeBlockingRpcServerIrx(host, 0x100u);
+    const ModuleLoadResult blockingRpcModule = iop.loadModuleBuffer(0x100u);
+    if (!expect(blockingRpcModule.handled && blockingRpcModule.startResult == 0,
+                "Synthetic blocking RPC server IRX did not start")) return 1;
+    iop.runEeCycles(8u * 4096u);
+    if (!expect(iop.canBindRpc(kBlockingRpcSid),
+                "The RPC thread did not register its server before parking in sceSifRpcLoop")) return 1;
+
+    uint32_t blockingReply[2]{};
+    const auto callBlockingRpc = [&](uint32_t requestWord)
+    {
+        constexpr uint32_t sendAddress = 0x1000u;
+        constexpr uint32_t receiveAddress = 0x1100u;
+        std::memcpy(host.guest.data() + sendAddress, &requestWord, sizeof(requestWord));
+        std::memset(host.guest.data() + receiveAddress, 0, sizeof(blockingReply));
+        RpcRequest request{};
+        request.sid = kBlockingRpcSid;
+        request.send = {sendAddress, sizeof(requestWord)};
+        request.receive = {receiveAddress, sizeof(blockingReply)};
+        const bool handled = iop.handleRpc(request).handled;
+        std::memcpy(blockingReply, host.guest.data() + receiveAddress, sizeof(blockingReply));
+        return handled;
+    };
+    const uint64_t cyclesBeforeBlockingRpc = iop.debugSnapshot().emulatorCycles;
+    const bool blockingRpcHandled = callBlockingRpc(0x1000u);
+    if (blockingReply[0] != 0x1001u || blockingReply[1] != 0x1002u)
+    {
+        std::cerr << "Blocking RPC reply: 0x" << std::hex << blockingReply[0] << " 0x" << blockingReply[1]
+                  << " (server's: 0x1001 0x1002)" << std::dec << '\n';
+    }
+    if (!expect(blockingRpcHandled && blockingReply[0] == 0x1001u,
+                "The RPC reply was sent before the IOP thread its server waits on had run")) return 1;
+    if (!expect(blockingReply[1] == 0x1002u,
+                "SignalSema switched to the server's lower-priority thread before the signalling thread blocked")) return 1;
+    const uint64_t blockingRpcCycles = iop.debugSnapshot().emulatorCycles - cyclesBeforeBlockingRpc;
+    iop.runEeCycles(8u * blockingRpcCycles);
+    if (!expect(iop.debugSnapshot().emulatorCycles == cyclesBeforeBlockingRpc + blockingRpcCycles,
+                "IOP time run while the EE waited on an RPC was not repaid from later EE cycles")) return 1;
+    if (!expect(callBlockingRpc(0x2000u) && blockingReply[0] == 0x2001u && blockingReply[1] == 0x2002u,
+                "The RPC thread did not go back to sceSifRpcLoop to serve the next request")) return 1;
+
+    // With its worker gone the server never returns; the EE call must still
+    // come back, after two seconds of IOP time.
+    const uint32_t missingWorker = 0x7FFFu;
+    if (!expect(iop.writeMemory(kBlockingRpcState + 12u, &missingWorker, sizeof(missingWorker)),
+                "Could not detach the blocking RPC server's worker")) return 1;
+    host.logs.clear();
+    const bool stuckRpcHandled = callBlockingRpc(0x3000u);
+    const bool reportedStuckRpc = std::any_of(
+        host.logs.begin(), host.logs.end(),
+        [](const std::string &message) { return message.find("[IOP:rpc-stuck]") != std::string::npos; });
+    if (!expect(stuckRpcHandled && reportedStuckRpc,
+                "An RPC server that never returns did not report [IOP:rpc-stuck]")) return 1;
 
     iop.reset();
     host.logs.clear();
