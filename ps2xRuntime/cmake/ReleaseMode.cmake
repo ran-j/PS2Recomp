@@ -19,7 +19,7 @@ function(EnableFastReleaseMode TargetName)
                 /DNDEBUG
                 /arch:AVX2 # Advanced Vector Extensions 2
                 /GS- # Disable Buffer Security Check (faster)
-                /Qspectre- # Disable Spectre mitigations (faster)
+                $<$<CXX_COMPILER_ID:MSVC>:/Qspectre-> # Disable Spectre mitigations (faster), cl.exe only: clang-cl rejects it
             >
         )
 
