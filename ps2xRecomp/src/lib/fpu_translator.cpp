@@ -58,7 +58,8 @@ namespace ps2recomp
                                    "ctx->f[{}] = FPU_DIV_S(ctx->f[{}], ctx->f[{}]); }}",
                                    ft, fd, fs, ft);
             case COP1_S_SQRT:
-                return fmt::format("ctx->f[{}] = FPU_SQRT_S(ctx->f[{}]);", fd, fs);
+                // SQRT.S fd, ft reads the ft field; fs is 0 in the encoding.
+                return fmt::format("ctx->f[{}] = FPU_SQRT_S(ctx->f[{}]);", fd, ft);
             case COP1_S_ABS:
                 return fmt::format("ctx->f[{}] = FPU_ABS_S(ctx->f[{}]);", fd, fs);
             case COP1_S_MOV:
