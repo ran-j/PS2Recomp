@@ -23,6 +23,7 @@
 #include <sstream>
 #include <algorithm>
 #include <cstring>
+#include <cstdio>
 
 namespace
 {
@@ -32,6 +33,39 @@ namespace
                name.rfind("FUN_", 0) == 0 ||
                name.rfind("LAB_", 0) == 0 ||
                name.rfind("DAT_", 0) == 0;
+    }
+
+    // Target of a direct jump, call or branch (J, JAL, the conditional branches and BC0/1/2).
+    bool DirectTransferTarget(uint32_t address, uint32_t word, uint32_t &target)
+    {
+        const uint32_t opcode = word >> 26;
+        if (opcode == 2u || opcode == 3u)
+        {
+            target = ((address + 4u) & 0xF0000000u) | ((word & 0x03FFFFFFu) << 2);
+            return true;
+        }
+        const uint32_t rs = (word >> 21) & 31u;
+        const uint32_t rt = (word >> 16) & 31u;
+        const bool branch = (opcode >= 4u && opcode <= 7u) || (opcode >= 20u && opcode <= 23u) ||
+                            (opcode == 1u && (rt <= 3u || (rt >= 16u && rt <= 19u))) ||
+                            ((opcode >= 16u && opcode <= 18u) && rs == 8u);
+        if (!branch)
+        {
+            return false;
+        }
+        const int32_t offset = static_cast<int32_t>(static_cast<int16_t>(word & 0xFFFFu)) * 4;
+        target = address + 4u + static_cast<uint32_t>(offset);
+        return true;
+    }
+
+    // Labels Ghidra exports next to functions: branch and jump-table targets inside a body.
+    bool IsGhidraLabelName(const std::string &name)
+    {
+        return name.rfind("entry_", 0) == 0 ||
+               name.rfind("caseD_", 0) == 0 ||
+               name.rfind("switchD_", 0) == 0 ||
+               name == "default" ||
+               name.rfind("LAB_", 0) == 0;
     }
 
     void AppendLoadSegmentsAsSections(const ELFIO::elfio &elf, std::vector<ps2recomp::Section> &sections)
@@ -2142,6 +2176,9 @@ namespace ps2recomp
         int skippedNonExecutable = 0;
         int skippedInvalidRange = 0;
         std::unordered_set<uint32_t> mapStarts;
+        // Starts of map functions other than labels, and the rows whose End lies past their Size.
+        std::vector<uint32_t> functionStarts;
+        std::vector<size_t> spanPastSize;
         while (std::getline(file, line))
         {
             if (line.empty())
@@ -2162,6 +2199,15 @@ namespace ps2recomp
             {
                 uint32_t start = std::stoul(startStr, nullptr, 0);
                 uint32_t end = std::stoul(endStr, nullptr, 0);
+                uint32_t size = 0;
+                try
+                {
+                    size = std::stoul(sizeStr, nullptr, 0);
+                }
+                catch (...)
+                {
+                    size = 0; // an unreadable Size keeps the row with its End, as before
+                }
 
                 const Section *section = FindFunctionSectionByAddress(m_sections, start);
                 if (!section)
@@ -2185,6 +2231,14 @@ namespace ps2recomp
                 func.isStub = false;
                 func.isSkipped = false;
 
+                if (!IsGhidraLabelName(name))
+                {
+                    functionStarts.push_back(start);
+                }
+                if (size != 0 && end - start > size)
+                {
+                    spanPastSize.push_back(m_extraFunctions.size());
+                }
                 m_extraFunctions.push_back(std::move(func));
                 mapStarts.insert(start);
                 count++;
@@ -2192,6 +2246,188 @@ namespace ps2recomp
             catch (...)
             {
                 continue;
+            }
+        }
+
+        // End is the highest address of a body, and a body can have a far chunk (e.g. a shared tail
+        // reached by a jump): its span then covers every function in between. A body never runs into
+        // the next function's start, so cut such a span there. Ghidra exports the far chunk's own label,
+        // so the jump out of the shortened body becomes a call. Bodies with only small holes have no
+        // function start inside their span and keep their End.
+        std::sort(functionStarts.begin(), functionStarts.end());
+        struct CutSpan
+        {
+            uint32_t start, cut, end;
+        };
+        std::vector<CutSpan> cutAway;
+        for (const size_t index : spanPastSize)
+        {
+            Function &func = m_extraFunctions[index];
+            const auto next = std::upper_bound(functionStarts.begin(), functionStarts.end(), func.start);
+            if (next != functionStarts.end() && *next < func.end)
+            {
+                cutAway.push_back({func.start, *next, func.end});
+                func.end = *next;
+            }
+        }
+
+        // The cut-away part can hold code that no map entry covers (functions Ghidra missed, often
+        // reached only through pointers). The long span used to recompile it, so keep each such run
+        // of non-zero words as a function of its own.
+        if (!cutAway.empty())
+        {
+            // Address ranges of the map's entries (labels included), merged. Analyzer functions do not
+            // count: the auto-named ones that are not in the map are dropped below.
+            std::vector<std::pair<uint32_t, uint32_t>> covered;
+            covered.reserve(m_extraFunctions.size());
+            for (const Function &func : m_extraFunctions)
+            {
+                if (mapStarts.contains(func.start))
+                {
+                    covered.emplace_back(func.start, func.end);
+                }
+            }
+            std::sort(covered.begin(), covered.end());
+            std::vector<std::pair<uint32_t, uint32_t>> merged;
+            for (const auto &range : covered)
+            {
+                if (!merged.empty() && range.first <= merged.back().second)
+                {
+                    merged.back().second = std::max(merged.back().second, range.second);
+                }
+                else
+                {
+                    merged.push_back(range);
+                }
+            }
+            auto isCovered = [&merged](uint32_t address)
+            {
+                auto it = std::upper_bound(merged.begin(), merged.end(), address,
+                                           [](uint32_t value, const std::pair<uint32_t, uint32_t> &range)
+                                           { return value < range.first; });
+                return it != merged.begin() && address < std::prev(it)->second;
+            };
+
+            std::vector<Function> orphans;
+            for (const CutSpan &span : cutAway)
+            {
+                const uint32_t from = span.cut, to = span.end;
+                // A run starts at its first non-zero word, so leading padding is left out.
+                uint32_t runStart = 0;
+                for (uint32_t address = from; address <= to; address += 4)
+                {
+                    const bool inRun = address < to && !isCovered(address);
+                    if (inRun)
+                    {
+                        if (runStart == 0 && readWord(address) != 0)
+                        {
+                            runStart = address;
+                        }
+                        continue;
+                    }
+                    if (runStart != 0 && !mapStarts.contains(runStart))
+                    {
+                        char orphanName[16];
+                        std::snprintf(orphanName, sizeof(orphanName), "FUN_%08x", runStart);
+                        Function orphan{};
+                        orphan.name = orphanName;
+                        orphan.start = runStart;
+                        orphan.end = address;
+                        orphans.push_back(orphan);
+                        mapStarts.insert(runStart);
+                    }
+                    runStart = 0;
+                }
+            }
+            for (Function &orphan : orphans)
+            {
+                m_extraFunctions.push_back(std::move(orphan));
+            }
+
+            // The long span made every address of it an entry. Once cut, a direct branch, jump or call
+            // from anywhere into the middle of another function there needs an entry of its own.
+            std::vector<std::pair<uint32_t, uint32_t>> owners; // functions and orphans, not labels
+            std::vector<std::pair<uint32_t, uint32_t>> entries; // every map range
+            for (const Function &func : m_extraFunctions)
+            {
+                if (!mapStarts.contains(func.start))
+                {
+                    continue;
+                }
+                entries.emplace_back(func.start, func.end);
+                if (!IsGhidraLabelName(func.name))
+                {
+                    owners.emplace_back(func.start, func.end);
+                }
+            }
+            std::sort(owners.begin(), owners.end());
+            std::sort(entries.begin(), entries.end());
+            // The range with the highest start at or below the address that contains it.
+            auto containing = [](const std::vector<std::pair<uint32_t, uint32_t>> &ranges, uint32_t address)
+                -> const std::pair<uint32_t, uint32_t> *
+            {
+                auto it = std::upper_bound(ranges.begin(), ranges.end(), address,
+                                           [](uint32_t value, const std::pair<uint32_t, uint32_t> &range)
+                                           { return value < range.first; });
+                while (it != ranges.begin())
+                {
+                    --it;
+                    if (address < it->second)
+                    {
+                        return &*it;
+                    }
+                    if (address - it->first > 0x200000u)
+                    {
+                        break;
+                    }
+                }
+                return nullptr;
+            };
+
+            std::vector<std::pair<uint32_t, uint32_t>> spans;
+            for (const CutSpan &span : cutAway)
+            {
+                spans.emplace_back(span.start, span.end);
+            }
+            std::sort(spans.begin(), spans.end());
+            std::vector<Function> crossTargets;
+            for (const Section &section : m_sections)
+            {
+                if (!section.isCode || !section.data)
+                {
+                    continue;
+                }
+                for (uint32_t offset = 0; offset + 4u <= section.size; offset += 4u)
+                {
+                    const uint32_t address = section.address + offset;
+                    uint32_t word = 0;
+                    std::memcpy(&word, section.data + offset, sizeof(word));
+                    uint32_t target = 0;
+                    if (!DirectTransferTarget(address, word, target) || mapStarts.contains(target) ||
+                        !containing(spans, target))
+                    {
+                        continue;
+                    }
+                    const auto *source = containing(owners, address);
+                    if (source && target >= source->first && target < source->second)
+                    {
+                        continue; // a branch inside one function stays a label
+                    }
+                    const auto *host = containing(entries, target);
+                    char entryName[16];
+                    // Named like Ghidra's labels: an auto-generated name inside a labelled range would be dropped.
+                    std::snprintf(entryName, sizeof(entryName), "entry_%08x", target);
+                    Function entry{};
+                    entry.name = entryName;
+                    entry.start = target;
+                    entry.end = host ? host->second : target + 4u;
+                    crossTargets.push_back(entry);
+                    mapStarts.insert(target);
+                }
+            }
+            for (Function &entry : crossTargets)
+            {
+                m_extraFunctions.push_back(std::move(entry));
             }
         }
 

@@ -156,6 +156,51 @@ static bool writeMinimalMipsElfWithJalFallbackTarget(const std::filesystem::path
     return writer.save(elfPath.string());
 }
 
+// A short function whose body ends with a jump to a shared tail further down, past another
+// function. Ghidra exports such a body with End at the end of the far chunk.
+static bool writeMinimalMipsElfWithSharedTail(const std::filesystem::path &elfPath)
+{
+    ELFIO::elfio writer;
+    writer.create(ELFIO::ELFCLASS32, ELFIO::ELFDATA2LSB);
+    writer.set_os_abi(ELFIO::ELFOSABI_NONE);
+    writer.set_type(ELFIO::ET_EXEC);
+    writer.set_machine(ELFIO::EM_MIPS);
+    writer.set_entry(0x00100000u);
+
+    ELFIO::section *text = writer.sections.add(".text");
+    text->set_type(ELFIO::SHT_PROGBITS);
+    text->set_flags(ELFIO::SHF_ALLOC | ELFIO::SHF_EXECINSTR);
+    text->set_addr_align(4);
+    text->set_address(0x00100000u);
+
+    const std::array<uint32_t, 14> textWords = {
+        0x27BDFFF0u, // 0x100000 addiu $sp, $sp, -16
+        0x08040008u, // 0x100004 j 0x00100020 (shared tail)
+        0x00000000u, // 0x100008 nop
+        0x0C040009u, // 0x10000C jal 0x00100024 (into the middle of the shared tail's range)
+        0x00000000u, // 0x100010 nop
+        0x03E00008u, // 0x100014 jr $ra
+        0x00000000u, // 0x100018 padding
+        0x27BDFFF0u, // 0x10001C addiu $sp, $sp, -16 (code Ghidra did not map)
+        0x03E00008u, // 0x100020 jr $ra (shared tail)
+        0x27BD0010u, // 0x100024 addiu $sp, $sp, 16
+        0x0C040004u, // 0x100028 jal 0x00100010 (from outside the span into a function's middle)
+        0x00000000u, // 0x10002C nop
+        0x03E00008u, // 0x100030 jr $ra
+        0x00000000u  // 0x100034 nop
+    };
+    text->set_data(reinterpret_cast<const char *>(textWords.data()),
+                   static_cast<ELFIO::Elf_Word>(textWords.size() * sizeof(uint32_t)));
+
+    ELFIO::segment *textSegment = writer.segments.add();
+    textSegment->set_type(ELFIO::PT_LOAD);
+    textSegment->set_flags(ELFIO::PF_R | ELFIO::PF_X);
+    textSegment->set_align(0x1000);
+    textSegment->add_section_index(text->get_index(), text->get_addr_align());
+
+    return writer.save(elfPath.string());
+}
+
 static bool writeMinimalMipsElfWithVuMicroprogramSection(const std::filesystem::path &elfPath)
 {
     ELFIO::elfio writer;
@@ -1648,6 +1693,76 @@ void register_ps2_recompiler_tests()
                 { return fn.start == 0x00100010u; });
             t.IsFalse(stillHasFallbackOnlyStart,
                       "fallback-only function starts should be removed once ghidra map is loaded");
+
+            std::error_code removeError;
+            std::filesystem::remove(elfPath, removeError);
+            std::filesystem::remove(mapPath, removeError);
+        });
+
+        tc.Run("ghidra map cuts a span with a far chunk at the next function", [](TestCase &t) {
+            const auto uniqueSuffix = std::to_string(
+                static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+            const std::filesystem::path elfPath =
+                std::filesystem::temp_directory_path() / ("ps2recomp-ghidra-size-" + uniqueSuffix + ".elf");
+            const std::filesystem::path mapPath =
+                std::filesystem::temp_directory_path() / ("ps2recomp-ghidra-size-" + uniqueSuffix + ".csv");
+
+            const bool writeOk = writeMinimalMipsElfWithSharedTail(elfPath);
+            t.IsTrue(writeOk, "temporary ELF should be generated");
+            if (!writeOk)
+            {
+                return;
+            }
+
+            ElfParser parser(elfPath.string());
+            const bool parseOk = parser.parse();
+            t.IsTrue(parseOk, "generated ELF should parse");
+
+            std::ofstream mapFile(mapPath);
+            t.IsTrue(static_cast<bool>(mapFile), "ghidra map file should be writable");
+            if (!parseOk || !mapFile)
+            {
+                std::error_code removeError;
+                std::filesystem::remove(elfPath, removeError);
+                std::filesystem::remove(mapPath, removeError);
+                return;
+            }
+            // As exported by Ghidra: End is the highest address of the body, Size counts only its
+            // bytes. FUN_00100000 has 12 local bytes and the far chunk at 0x100020; FUN_0010000c has
+            // a hole of 4 bytes and only a label inside its span; nothing covers 0x100018..0x100020.
+            mapFile << "Name,Start,End,Size\n";
+            mapFile << "FUN_00100000,0x00100000,0x00100028,20\n";
+            mapFile << "FUN_0010000c,0x0010000C,0x00100018,8\n";
+            mapFile << "entry_00100014,0x00100014,0x00100018,4\n";
+            mapFile << "entry_00100020,0x00100020,0x00100028,?\n";
+            mapFile << "FUN_00100028,0x00100028,0x00100038,16\n";
+            mapFile.close();
+
+            t.IsTrue(parser.loadGhidraFunctionMap(mapPath.string()), "ghidra map should load");
+
+            const auto functions = parser.extractFunctions();
+            auto endOf = [&functions](uint32_t start) -> uint32_t
+            {
+                const auto it = std::find_if(functions.begin(), functions.end(),
+                                             [start](const Function &fn)
+                                             { return fn.start == start; });
+                return it == functions.end() ? 0u : it->end;
+            };
+
+            t.Equals(endOf(0x00100000u), 0x0010000Cu,
+                     "a span with a far chunk must end at the next function's start, not at End");
+            t.Equals(endOf(0x0010000Cu), 0x00100018u,
+                     "a body with a hole and no function start inside keeps its End");
+            t.Equals(endOf(0x00100020u), 0x00100028u,
+                     "the shared tail stays a function, and an unreadable size keeps its End");
+            t.Equals(endOf(0x0010001Cu), 0x00100020u,
+                     "code that only the cut span covered stays a function of its own");
+            t.Equals(endOf(0x00100018u), 0u,
+                     "zero padding left by the cut does not become a function");
+            t.Equals(endOf(0x00100024u), 0x00100028u,
+                     "a call from one function into the middle of another inside the cut span gets an entry");
+            t.Equals(endOf(0x00100010u), 0x00100018u,
+                     "so does a call from outside the span into a function's middle there");
 
             std::error_code removeError;
             std::filesystem::remove(elfPath, removeError);
