@@ -37,6 +37,7 @@ namespace ps2x::iop::detail
         constexpr uint32_t kCallStackSize = 0x2000u;
         constexpr uint32_t kCallStackCapacity = (kCallStackLimit - kCallStackBase) / kCallStackSize;
         constexpr uint64_t kCdvdCompletionCycles = 128u;
+        constexpr int kSpu2Irq = 9;
 
         uint32_t physicalAddress(uint32_t address)
         {
@@ -129,6 +130,7 @@ namespace ps2x::iop::detail
             nextModuleId = 1;
             moduleCursor = kModuleLoadBase;
             totalCycles = 0;
+            spuCycle = 0;
             totalInstructions = 0;
             eeCycleCarry = 0;
             activeCpu = nullptr;
@@ -553,6 +555,28 @@ namespace ps2x::iop::detail
             servicingGuestCallbacks = false;
         }
 
+        // Runs the SPU2 up to the current IOP time, hands its output to the host and raises the
+        // SPU2 interrupt when an IRQA address was hit.
+        void advanceSpu()
+        {
+            constexpr uint64_t kCyclesPerSample = IopSpu2::IopCyclesPerSample;
+            constexpr uint32_t kChunkFrames = 256u;
+            IopSpu2 &spu = memory.spu2();
+            while (spuCycle + kCyclesPerSample <= totalCycles)
+            {
+                const uint32_t frames = static_cast<uint32_t>(
+                    std::min<uint64_t>((totalCycles - spuCycle) / kCyclesPerSample, kChunkFrames));
+                spuBuffer.resize(static_cast<size_t>(frames) * 2u);
+                spu.generate(spuBuffer.data(), frames);
+                spuCycle += frames * kCyclesPerSample;
+                host.audioOutput(spuBuffer.data(), frames);
+                if (spu.takeIrq())
+                    pendingDmaInterrupts[kSpu2Irq] = totalCycles;
+            }
+            if (spu.takeIrq())
+                pendingDmaInterrupts[kSpu2Irq] = totalCycles;
+        }
+
         void runCycles(uint64_t cycles) noexcept
         {
             try
@@ -560,6 +584,7 @@ namespace ps2x::iop::detail
                 const uint64_t target = totalCycles + cycles;
                 while (totalCycles < target)
                 {
+                    advanceSpu();
                     servicePendingDmaInterrupts();
                     servicePendingGuestCallbacks();
                     timrman.serviceDue(totalCycles, *this);
@@ -700,6 +725,8 @@ namespace ps2x::iop::detail
         uint32_t nextModuleId = 1;
         uint32_t moduleCursor = kModuleLoadBase;
         uint64_t totalCycles = 0;
+        uint64_t spuCycle = 0;
+        std::vector<int16_t> spuBuffer;
         uint64_t totalInstructions = 0;
         uint64_t eeCycleCarry = 0;
         CpuState *activeCpu = nullptr;

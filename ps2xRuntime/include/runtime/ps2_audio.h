@@ -25,6 +25,9 @@ public:
     void stopAll();
     void setAudioReady(bool ready) { m_audioReady = ready; }
 
+    // Queues 48 kHz interleaved stereo from the emulated SPU2 for playback.
+    void pushPcm(const int16_t *samples, size_t frames);
+
 private:
     struct DecodedSample
     {
@@ -40,6 +43,9 @@ private:
     std::vector<uint32_t> m_loadOrderSampleKeys;
     std::unordered_map<uint32_t, DecodedSample> m_sampleBank;
     std::mutex m_mutex;
+
+    struct PcmStream;
+    std::unique_ptr<PcmStream> m_pcm;
 
     void playDecodedSample(uint32_t sampleKey, DecodedSample &sample, float pitch, float volume,
                           bool isBgm = false);
