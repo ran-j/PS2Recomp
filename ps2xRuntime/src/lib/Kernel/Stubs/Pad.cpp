@@ -94,15 +94,59 @@ namespace ps2_stubs
             return -1;
         }
 
-        void applyGamepadState(PadInputState &state)
+        // -1 asks raylib. Tests set 0..4 so a later port can be empty or connected
+        // without a second physical gamepad. findFirstGamepad ignores this.
+        int g_testHostGamepadCount = -1;
+
+        // nth available host gamepad (0 = the first). No gamepad exists until the
+        // window does: raylib's joystick query is only valid after that.
+        int findNthGamepad(int nth)
         {
+            if (nth < 0)
+            {
+                return -1;
+            }
+            if (g_testHostGamepadCount >= 0)
+            {
+                return (nth < g_testHostGamepadCount) ? nth : -1;
+            }
             if (!IsWindowReady())
             {
-                return;
+                return -1;
             }
 
-            const int gamepad = findFirstGamepad();
-            if (gamepad < 0)
+            int seen = 0;
+            for (int i = 0; i < 4; ++i)
+            {
+                if (IsGamepadAvailable(i))
+                {
+                    if (seen == nth)
+                    {
+                        return i;
+                    }
+                    ++seen;
+                }
+            }
+            return -1;
+        }
+
+        // Port 0 is the keyboard plus the first host gamepad, which is what
+        // scePadRead already fed it. Each later port is the next host gamepad.
+        // scePadPortOpen still succeeds when nothing is plugged in; libpad then
+        // reports that port disconnected (scePadStateDiscon) and scePadRead
+        // returns no packet.
+        bool hostControllerConnected(int port)
+        {
+            if (port == 0)
+            {
+                return true;
+            }
+            return findNthGamepad(port) >= 0;
+        }
+
+        void applyGamepadState(PadInputState &state, int gamepad)
+        {
+            if (!IsWindowReady() || gamepad < 0)
             {
                 return;
             }
@@ -284,6 +328,15 @@ namespace ps2_stubs
                 portState = *sharedPortState;
             }
 
+            // Open, but no controller: libpad's padRead copies 0 bytes and returns 0.
+            // 0xFF is the idle SIO line (no ACK), so a caller that ignores the
+            // return does not see a digital/DualShock id or any button held.
+            if (!hostControllerConnected(port))
+            {
+                std::memset(outData, 0xFF, 32);
+                return false;
+            }
+
             PadInputState state;
             bool useOverride = false;
             {
@@ -298,20 +351,28 @@ namespace ps2_stubs
             bool usedBackend = false;
             if (!useOverride)
             {
-                uint8_t backendData[32]{};
-                if (runtime && runtime->padBackend().readState(port, slot, backendData, sizeof(backendData)))
+                if (port == 0)
                 {
-                    state.buttons = static_cast<uint16_t>(backendData[2] | (backendData[3] << 8));
-                    state.rx = backendData[4];
-                    state.ry = backendData[5];
-                    state.lx = backendData[6];
-                    state.ly = backendData[7];
-                    usedBackend = true;
+                    uint8_t backendData[32]{};
+                    if (runtime && runtime->padBackend().readState(port, slot, backendData, sizeof(backendData)))
+                    {
+                        state.buttons = static_cast<uint16_t>(backendData[2] | (backendData[3] << 8));
+                        state.rx = backendData[4];
+                        state.ry = backendData[5];
+                        state.lx = backendData[6];
+                        state.ly = backendData[7];
+                        usedBackend = true;
+                    }
+                    else
+                    {
+                        applyGamepadState(state, findFirstGamepad());
+                        applyKeyboardState(state, portState.analogMode);
+                    }
                 }
                 else
                 {
-                    applyGamepadState(state);
-                    applyKeyboardState(state, portState.analogMode);
+                    // The shared backend ignores the port and always samples pad 1.
+                    applyGamepadState(state, findNthGamepad(port));
                 }
             }
 
@@ -354,9 +415,14 @@ namespace ps2_stubs
     void scePadEnterPressMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         (void)runtime;
+        const int port = static_cast<int>(getRegU32(ctx, 4));
+        if (!hostControllerConnected(port))
+        {
+            setReturnS32(ctx, 0);
+            return;
+        }
         std::lock_guard<std::mutex> lock(g_padStateMutex);
-        PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
-                                                           static_cast<int>(getRegU32(ctx, 5)));
+        PadPortState *portState = lookupPadPortStateLocked(port, static_cast<int>(getRegU32(ctx, 5)));
         if (!portState || !portState->open)
         {
             setReturnS32(ctx, 0);
@@ -372,9 +438,14 @@ namespace ps2_stubs
     void scePadExitPressMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         (void)runtime;
+        const int port = static_cast<int>(getRegU32(ctx, 4));
+        if (!hostControllerConnected(port))
+        {
+            setReturnS32(ctx, 0);
+            return;
+        }
         std::lock_guard<std::mutex> lock(g_padStateMutex);
-        PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
-                                                           static_cast<int>(getRegU32(ctx, 5)));
+        PadPortState *portState = lookupPadPortStateLocked(port, static_cast<int>(getRegU32(ctx, 5)));
         if (!portState || !portState->open)
         {
             setReturnS32(ctx, 0);
@@ -436,9 +507,16 @@ namespace ps2_stubs
     {
         (void)rdram;
         (void)runtime;
+        const int port = static_cast<int>(getRegU32(ctx, 4));
+        // Nothing to complete on an empty port. Busy would stall a game that
+        // waits for scePadReqStateComplete before it moves on.
+        if (!hostControllerConnected(port))
+        {
+            setReturnS32(ctx, 0);
+            return;
+        }
         std::lock_guard<std::mutex> lock(g_padStateMutex);
-        const PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
-                                                                 static_cast<int>(getRegU32(ctx, 5)));
+        const PadPortState *portState = lookupPadPortStateLocked(port, static_cast<int>(getRegU32(ctx, 5)));
         setReturnS32(ctx, static_cast<int32_t>(portState ? portState->reqState : 0u));
     }
 
@@ -454,11 +532,12 @@ namespace ps2_stubs
     {
         (void)rdram;
         (void)runtime;
+        const int port = static_cast<int>(getRegU32(ctx, 4));
+        const bool connected = hostControllerConnected(port);
         std::lock_guard<std::mutex> lock(g_padStateMutex);
-        PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
-                                                           static_cast<int>(getRegU32(ctx, 5)));
+        PadPortState *portState = lookupPadPortStateLocked(port, static_cast<int>(getRegU32(ctx, 5)));
         int32_t state = kPadStateDisconnected;
-        if (portState && portState->open)
+        if (portState && portState->open && connected)
         {
             if (portState->transientState != 0u)
             {
@@ -475,10 +554,15 @@ namespace ps2_stubs
 
     void scePadInfoAct(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        const int port = static_cast<int>(getRegU32(ctx, 4));
         const int32_t act = static_cast<int32_t>(getRegU32(ctx, 6));
+        if (!hostControllerConnected(port))
+        {
+            setReturnS32(ctx, 0);
+            return;
+        }
         std::lock_guard<std::mutex> lock(g_padStateMutex);
-        const PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
-                                                                 static_cast<int>(getRegU32(ctx, 5)));
+        const PadPortState *portState = lookupPadPortStateLocked(port, static_cast<int>(getRegU32(ctx, 5)));
         if (!portState || !portState->open)
         {
             setReturnS32(ctx, 0);
@@ -506,11 +590,16 @@ namespace ps2_stubs
         (void)rdram;
         (void)runtime;
 
+        const int port = static_cast<int>(getRegU32(ctx, 4));
         const int32_t infoMode = static_cast<int32_t>(getRegU32(ctx, 6)); // a2
         const int32_t index = static_cast<int32_t>(getRegU32(ctx, 7));    // a3
+        if (!hostControllerConnected(port))
+        {
+            setReturnS32(ctx, 0);
+            return;
+        }
         std::lock_guard<std::mutex> lock(g_padStateMutex);
-        const PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
-                                                                 static_cast<int>(getRegU32(ctx, 5)));
+        const PadPortState *portState = lookupPadPortStateLocked(port, static_cast<int>(getRegU32(ctx, 5)));
         if (!portState || !portState->open)
         {
             setReturnS32(ctx, 0);
@@ -553,9 +642,14 @@ namespace ps2_stubs
     {
         (void)rdram;
         (void)runtime;
+        const int port = static_cast<int>(getRegU32(ctx, 4));
+        if (!hostControllerConnected(port))
+        {
+            setReturnS32(ctx, 0);
+            return;
+        }
         std::lock_guard<std::mutex> lock(g_padStateMutex);
-        const PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
-                                                                 static_cast<int>(getRegU32(ctx, 5)));
+        const PadPortState *portState = lookupPadPortStateLocked(port, static_cast<int>(getRegU32(ctx, 5)));
         setReturnS32(ctx, (portState && portState->open) ? 1 : 0);
     }
 
@@ -689,6 +783,11 @@ namespace ps2_stubs
     {
         (void)rdram;
         (void)runtime;
+        if (!hostControllerConnected(static_cast<int>(getRegU32(ctx, 4))))
+        {
+            setReturnS32(ctx, 0);
+            return;
+        }
         setReturnS32(ctx, 1);
     }
 
@@ -696,6 +795,11 @@ namespace ps2_stubs
     {
         (void)rdram;
         (void)runtime;
+        if (!hostControllerConnected(static_cast<int>(getRegU32(ctx, 4))))
+        {
+            setReturnS32(ctx, 0);
+            return;
+        }
         setReturnS32(ctx, 1);
     }
 
@@ -703,9 +807,14 @@ namespace ps2_stubs
     {
         (void)rdram;
         (void)runtime;
+        const int port = static_cast<int>(getRegU32(ctx, 4));
+        if (!hostControllerConnected(port))
+        {
+            setReturnS32(ctx, 0);
+            return;
+        }
         std::lock_guard<std::mutex> lock(g_padStateMutex);
-        PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
-                                                           static_cast<int>(getRegU32(ctx, 5)));
+        PadPortState *portState = lookupPadPortStateLocked(port, static_cast<int>(getRegU32(ctx, 5)));
         if (portState && portState->open)
         {
             portState->buttonMask = static_cast<uint16_t>(getRegU32(ctx, 6));
@@ -719,9 +828,14 @@ namespace ps2_stubs
     {
         (void)rdram;
         (void)runtime;
+        const int port = static_cast<int>(getRegU32(ctx, 4));
+        if (!hostControllerConnected(port))
+        {
+            setReturnS32(ctx, 0);
+            return;
+        }
         std::lock_guard<std::mutex> lock(g_padStateMutex);
-        PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
-                                                           static_cast<int>(getRegU32(ctx, 5)));
+        PadPortState *portState = lookupPadPortStateLocked(port, static_cast<int>(getRegU32(ctx, 5)));
         if (!portState || !portState->open)
         {
             setReturnS32(ctx, 0);
@@ -738,9 +852,14 @@ namespace ps2_stubs
     {
         (void)rdram;
         (void)runtime;
+        const int port = static_cast<int>(getRegU32(ctx, 4));
+        if (!hostControllerConnected(port))
+        {
+            setReturnS32(ctx, 0);
+            return;
+        }
         std::lock_guard<std::mutex> lock(g_padStateMutex);
-        PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
-                                                           static_cast<int>(getRegU32(ctx, 5)));
+        PadPortState *portState = lookupPadPortStateLocked(port, static_cast<int>(getRegU32(ctx, 5)));
         if (portState && portState->open)
         {
             portState->reqState = static_cast<uint32_t>(getRegU32(ctx, 6) ? 1u : 0u);
@@ -753,6 +872,11 @@ namespace ps2_stubs
     {
         (void)rdram;
         (void)runtime;
+        if (!hostControllerConnected(static_cast<int>(getRegU32(ctx, 4))))
+        {
+            setReturnS32(ctx, 0);
+            return;
+        }
         setReturnS32(ctx, 1);
     }
 
@@ -859,5 +983,12 @@ namespace ps2_stubs
         std::lock_guard<std::mutex> lock(g_padOverrideMutex);
         g_padOverrideEnabled = false;
         g_padOverrideState = PadInputState{};
+    }
+
+    // Test hook. -1 restores the raylib query. 0..4 pretends that many host
+    // gamepads exist, in index order. Not declared in Pad.h; tests forward-declare it.
+    void setPadTestHostGamepadCount(int count)
+    {
+        g_testHostGamepadCount = count;
     }
 }

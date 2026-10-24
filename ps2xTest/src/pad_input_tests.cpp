@@ -7,6 +7,11 @@
 #include <cstdint>
 #include <string>
 
+namespace ps2_stubs
+{
+    // Defined in Pad.cpp. -1 restores raylib; 0..4 pretends that many host gamepads.
+    void setPadTestHostGamepadCount(int count);
+}
 
 namespace
 {
@@ -49,13 +54,42 @@ namespace
         ps2_stubs::scePadPortClose(rdram.data(), &ctx, nullptr);
     }
 
-    void runPadRead(R5900Context &ctx, std::vector<uint8_t> &rdram)
+    void runPadRead(R5900Context &ctx, std::vector<uint8_t> &rdram, uint32_t port = 0, uint32_t slot = 0)
     {
-        setRegU32(ctx, 4, 0u);
-        setRegU32(ctx, 5, 0u);
+        setRegU32(ctx, 4, port);
+        setRegU32(ctx, 5, slot);
         setRegU32(ctx, 6, kPadDataAddr); // a2
         ps2_stubs::scePadRead(rdram.data(), &ctx, nullptr);
     }
+
+    void fillPadBuffer(std::vector<uint8_t> &rdram, uint8_t value)
+    {
+        for (uint32_t i = 0; i < 32u; ++i)
+        {
+            rdram[kPadDataAddr + i] = value;
+        }
+    }
+
+    bool padBufferIs(const std::vector<uint8_t> &rdram, uint8_t value)
+    {
+        for (uint32_t i = 0; i < 32u; ++i)
+        {
+            if (rdram[kPadDataAddr + i] != value)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Restores the raylib query when the test returns.
+    struct HostGamepadCount
+    {
+        explicit HostGamepadCount(int count) { ps2_stubs::setPadTestHostGamepadCount(count); }
+        ~HostGamepadCount() { ps2_stubs::setPadTestHostGamepadCount(-1); }
+        HostGamepadCount(const HostGamepadCount &) = delete;
+        HostGamepadCount &operator=(const HostGamepadCount &) = delete;
+    };
 
     uint16_t readButtons(const std::vector<uint8_t> &rdram)
     {
@@ -528,6 +562,167 @@ void register_pad_input_tests()
             ps2_stubs::scePadReqIntToStr(rdram.data(), &ctx, nullptr);
             const char *reqStr = reinterpret_cast<const char *>(rdram.data() + kPadDataAddr + 64);
             t.IsTrue(std::string(reqStr).find("COMPLETE") != std::string::npos, "req string should include COMPLETE");
+        });
+
+        tc.Run("empty open port 1 reads disconnected while port 0 stays stable", [](TestCase &t)
+               {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);
+            R5900Context ctx;
+            // One host gamepad. Port 0 is still the keyboard plus that pad.
+            // Port 1 is the next gamepad, so it stays empty.
+            HostGamepadCount gamepads(1);
+            (void)gamepads;
+
+            ps2_stubs::scePadInit(rdram.data(), &ctx, nullptr);
+            openPadPort(ctx, rdram, 1u);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(1), "scePadPortOpen should succeed on an empty port");
+
+            setRegU32(ctx, 4, 1u);
+            setRegU32(ctx, 5, 0u);
+            ps2_stubs::scePadGetState(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(0), "empty port 1 should report scePadStateDiscon");
+
+            fillPadBuffer(rdram, 0x11);
+            runPadRead(ctx, rdram, 1u);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(0), "scePadRead should return 0 on an empty port");
+            t.IsTrue(padBufferIs(rdram, 0xFF), "empty port read should fill 32 bytes with 0xFF");
+
+            setRegU32(ctx, 4, 1u);
+            setRegU32(ctx, 5, 0u);
+            setRegU32(ctx, 6, 1u);
+            setRegU32(ctx, 7, 0u);
+            ps2_stubs::scePadInfoMode(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(0), "scePadInfoMode should return 0 on an empty port");
+
+            setRegU32(ctx, 4, 1u);
+            setRegU32(ctx, 5, 0u);
+            setRegU32(ctx, 6, static_cast<uint32_t>(-1));
+            ps2_stubs::scePadInfoAct(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(0), "scePadInfoAct should return 0 on an empty port");
+
+            setRegU32(ctx, 4, 1u);
+            setRegU32(ctx, 5, 0u);
+            ps2_stubs::scePadInfoPressMode(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(0), "scePadInfoPressMode should return 0 on an empty port");
+
+            setRegU32(ctx, 4, 1u);
+            setRegU32(ctx, 5, 0u);
+            ps2_stubs::scePadGetReqState(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(0), "scePadGetReqState should return complete on an empty port");
+
+            setRegU32(ctx, 4, 1u);
+            setRegU32(ctx, 5, 0u);
+            setRegU32(ctx, 6, 1u);
+            setRegU32(ctx, 7, 3u);
+            ps2_stubs::scePadSetMainMode(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(0), "scePadSetMainMode should not queue on an empty port");
+
+            setRegU32(ctx, 4, 1u);
+            setRegU32(ctx, 5, 0u);
+            ps2_stubs::scePadGetState(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(0), "empty port should stay disconnected after a rejected mode request");
+
+            openPadPort(ctx, rdram, 0u);
+            setRegU32(ctx, 4, 0u);
+            setRegU32(ctx, 5, 0u);
+            ps2_stubs::scePadGetState(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(6), "port 0 should stay STABLE with one host gamepad");
+
+            fillPadBuffer(rdram, 0x11);
+            runPadRead(ctx, rdram, 0u);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(1), "scePadRead on port 0 should still return 1");
+            const uint8_t *data = rdram.data() + kPadDataAddr;
+            t.Equals(data[0], static_cast<uint8_t>(0x00), "port 0 packet should not be an idle 0xFF line");
+            t.Equals(data[1], static_cast<uint8_t>(0x41), "port 0 should still open digital");
+
+            closePadPort(ctx, rdram, 1u);
+            closePadPort(ctx, rdram, 0u);
+        });
+
+        tc.Run("port 1 with a second host gamepad reads like a connected pad", [](TestCase &t)
+               {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);
+            R5900Context ctx;
+            // Raylib has no virtual gamepad and this suite has no window.
+            // Two pretended host gamepads: port 1 maps to the second one.
+            HostGamepadCount gamepads(2);
+            (void)gamepads;
+
+            ps2_stubs::scePadInit(rdram.data(), &ctx, nullptr);
+            openPadPort(ctx, rdram, 1u);
+            openPadPort(ctx, rdram, 0u);
+
+            setRegU32(ctx, 4, 1u);
+            setRegU32(ctx, 5, 0u);
+            ps2_stubs::scePadGetState(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(6), "port 1 with a second gamepad should report STABLE");
+
+            const uint16_t buttons = static_cast<uint16_t>(0xFFFFu & ~kPadBtnCross & ~kPadBtnStart);
+            ps2_stubs::setPadOverrideState(buttons, 0x00, 0xFF, 0x10, 0xEE);
+
+            runPadRead(ctx, rdram, 1u);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(1), "scePadRead should return 1 for a connected port 1");
+            t.Equals(readButtons(rdram), buttons, "port 1 should return the override buttons");
+            const uint8_t *port1 = rdram.data() + kPadDataAddr;
+            t.Equals(port1[1], static_cast<uint8_t>(0x41), "connected port 1 should report digital mode");
+            t.Equals(port1[4], static_cast<uint8_t>(0x10), "port 1 rx should match override");
+            t.Equals(port1[5], static_cast<uint8_t>(0xEE), "port 1 ry should match override");
+            t.Equals(port1[6], static_cast<uint8_t>(0x00), "port 1 lx should match override");
+            t.Equals(port1[7], static_cast<uint8_t>(0xFF), "port 1 ly should match override");
+
+            runPadRead(ctx, rdram, 0u);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(1), "port 0 read should still succeed");
+            t.Equals(readButtons(rdram), buttons, "port 0 override buttons should match port 1");
+            t.Equals((rdram.data() + kPadDataAddr)[4], static_cast<uint8_t>(0x10), "port 0 rx should match the same override");
+
+            ps2_stubs::clearPadOverrideState();
+            fillPadBuffer(rdram, 0x11);
+            runPadRead(ctx, rdram, 1u);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(1), "connected port 1 should still read without an override");
+            const uint8_t *idle = rdram.data() + kPadDataAddr;
+            t.Equals(idle[0], static_cast<uint8_t>(0x00), "connected port 1 should not fill 0xFF");
+            t.Equals(idle[1], static_cast<uint8_t>(0x41), "connected port 1 idle packet should be digital");
+            t.Equals(idle[2], static_cast<uint8_t>(0xFF), "connected port 1 idle buttons should be released");
+            t.Equals(idle[3], static_cast<uint8_t>(0xFF), "connected port 1 idle buttons high should be released");
+
+            setRegU32(ctx, 4, 1u);
+            setRegU32(ctx, 5, 0u);
+            setRegU32(ctx, 6, 1u);
+            setRegU32(ctx, 7, 0u);
+            ps2_stubs::scePadInfoMode(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(4), "connected port 1 CURID should be digital");
+
+            setRegU32(ctx, 4, 1u);
+            setRegU32(ctx, 5, 0u);
+            ps2_stubs::scePadInfoPressMode(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(1), "connected port 1 should report pressure support");
+
+            setRegU32(ctx, 4, 1u);
+            setRegU32(ctx, 5, 0u);
+            setRegU32(ctx, 6, static_cast<uint32_t>(-1));
+            ps2_stubs::scePadInfoAct(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(2), "connected port 1 should report two actuators");
+
+            setRegU32(ctx, 4, 1u);
+            setRegU32(ctx, 5, 0u);
+            setRegU32(ctx, 6, 1u);
+            setRegU32(ctx, 7, 3u);
+            ps2_stubs::scePadSetMainMode(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(1), "scePadSetMainMode should succeed on a connected port 1");
+
+            setRegU32(ctx, 4, 1u);
+            setRegU32(ctx, 5, 0u);
+            ps2_stubs::scePadGetState(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(5), "connected port 1 should report EXECCMD once after SetMainMode");
+
+            setRegU32(ctx, 4, 1u);
+            setRegU32(ctx, 5, 0u);
+            ps2_stubs::scePadGetState(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<uint32_t>(getRegU32(&ctx, 2)), static_cast<uint32_t>(6), "connected port 1 should return STABLE after EXECCMD");
+
+            ps2_stubs::clearPadOverrideState();
+            closePadPort(ctx, rdram, 1u);
+            closePadPort(ctx, rdram, 0u);
         });
     });
 }
