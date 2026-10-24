@@ -698,6 +698,82 @@ static bool writeMinimalMipsElfWithAddressTakenCallbacks(const std::filesystem::
     return writer.save(elfPath.string());
 }
 
+// A loop closed by `bgez` whose delay slot is followed by the function epilogue,
+// plus a clustered .rodata table where one word happens to equal that delay
+// slot's address (Def Jam: Fight for NY, 0x00100408). The epilogue's `jr ra`
+// is within the callable-entry probe window, so the delay slot looks callable.
+static bool writeMinimalMipsElfWithDelaySlotTablePointer(const std::filesystem::path &elfPath)
+{
+    ELFIO::elfio writer;
+    writer.create(ELFIO::ELFCLASS32, ELFIO::ELFDATA2LSB);
+    writer.set_os_abi(ELFIO::ELFOSABI_NONE);
+    writer.set_type(ELFIO::ET_EXEC);
+    writer.set_machine(ELFIO::EM_MIPS);
+    writer.set_entry(0x00100000u);
+
+    ELFIO::section *text = writer.sections.add(".text");
+    text->set_type(ELFIO::SHT_PROGBITS);
+    text->set_flags(ELFIO::SHF_ALLOC | ELFIO::SHF_EXECINSTR);
+    text->set_addr_align(4);
+    text->set_address(0x00100000u);
+
+    std::array<uint32_t, 32> textWords{};
+    textWords[0] = 0x27BDFFB0u;  // loop owner at 0x00100000: addiu sp,sp,-0x50
+    textWords[1] = 0x7FB00040u;  // sq s0,0x40(sp)
+    textWords[2] = 0xFFBF0000u;  // sd ra,0(sp)
+    textWords[3] = 0x24110003u;  // addiu s1,zero,3
+    textWords[4] = 0x0C040010u;  // loop at 0x00100010: jal 0x00100040
+    textWords[5] = 0x00000000u;  // nop (delay slot)
+    textWords[6] = 0x2631FFFFu;  // addiu s1,s1,-1
+    textWords[7] = 0x0621FFFCu;  // bgez s1,0x00100010
+    textWords[8] = 0x24050001u;  // addiu a1,zero,1 (delay slot at 0x00100020)
+    textWords[9] = 0x7BB00040u;  // lq s0,0x40(sp)
+    textWords[10] = 0xDFBF0000u; // ld ra,0(sp)
+    textWords[11] = 0x03E00008u; // jr ra
+    textWords[12] = 0x27BD0050u; // addiu sp,sp,0x50 (delay slot)
+
+    textWords[16] = 0x27BDFFF0u; // callee at 0x00100040
+    textWords[17] = 0xFFBF0000u;
+    textWords[18] = 0xDFBF0000u;
+    textWords[19] = 0x03E00008u;
+    textWords[20] = 0x27BD0010u;
+
+    textWords[24] = 0x27BDFFF0u; // table method at 0x00100060
+    textWords[25] = 0xFFBF0000u;
+    textWords[26] = 0xDFBF0000u;
+    textWords[27] = 0x03E00008u;
+    textWords[28] = 0x27BD0010u;
+
+    text->set_data(reinterpret_cast<const char *>(textWords.data()),
+                   static_cast<ELFIO::Elf_Word>(textWords.size() * sizeof(uint32_t)));
+
+    ELFIO::section *rodata = writer.sections.add(".rodata");
+    rodata->set_type(ELFIO::SHT_PROGBITS);
+    rodata->set_flags(ELFIO::SHF_ALLOC);
+    rodata->set_addr_align(4);
+    rodata->set_address(0x00200000u);
+
+    std::array<uint32_t, 4> tableWords{};
+    tableWords[0] = 0x00100060u; // ordinary method: a conservative cluster anchor
+    tableWords[1] = 0x00100020u; // the bgez delay slot inside the loop owner
+    rodata->set_data(reinterpret_cast<const char *>(tableWords.data()),
+                     static_cast<ELFIO::Elf_Word>(tableWords.size() * sizeof(uint32_t)));
+
+    ELFIO::segment *textSegment = writer.segments.add();
+    textSegment->set_type(ELFIO::PT_LOAD);
+    textSegment->set_flags(ELFIO::PF_R | ELFIO::PF_X);
+    textSegment->set_align(0x1000);
+    textSegment->add_section_index(text->get_index(), text->get_addr_align());
+
+    ELFIO::segment *dataSegment = writer.segments.add();
+    dataSegment->set_type(ELFIO::PT_LOAD);
+    dataSegment->set_flags(ELFIO::PF_R);
+    dataSegment->set_align(0x1000);
+    dataSegment->add_section_index(rodata->get_index(), rodata->get_addr_align());
+
+    return writer.save(elfPath.string());
+}
+
 static bool writeMinimalMipsElfWithInitializer(const std::filesystem::path &elfPath,
                                                const std::string &functionName,
                                                uint32_t initializerTarget)
@@ -1719,6 +1795,50 @@ void register_ps2_recompiler_tests()
                       "a data pointer must not split a function at a control-transfer delay slot");
             t.IsFalse(hasStart(0x00100300u),
                       "an isolated data pointer or non-callback code materialization must not become a function");
+
+            std::error_code removeError;
+            std::filesystem::remove(elfPath, removeError);
+        });
+
+        tc.Run("elf parser ignores pointer-table words that name a delay slot", [](TestCase &t) {
+            const auto uniqueSuffix = std::to_string(
+                static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+            const std::filesystem::path elfPath =
+                std::filesystem::temp_directory_path() / ("ps2recomp-delay-slot-table-" + uniqueSuffix + ".elf");
+
+            const bool writeOk = writeMinimalMipsElfWithDelaySlotTablePointer(elfPath);
+            t.IsTrue(writeOk, "temporary stripped ELF should be generated");
+            if (!writeOk)
+            {
+                return;
+            }
+
+            ElfParser parser(elfPath.string());
+            const bool parseOk = parser.parse();
+            t.IsTrue(parseOk, "generated ELF should parse");
+            if (parseOk)
+            {
+                const auto functions = parser.extractFunctions();
+                auto findStart = [&functions](uint32_t start)
+                {
+                    return std::find_if(functions.begin(), functions.end(),
+                                        [start](const Function &function)
+                                        { return function.start == start; });
+                };
+
+                t.IsTrue(findStart(0x00100060u) != functions.end(),
+                         "the ordinary table method should still be discovered");
+                t.IsTrue(findStart(0x00100020u) == functions.end(),
+                         "a pointer-table word naming a bgez delay slot must not start a function");
+
+                const auto ownerIt = findStart(0x00100000u);
+                t.IsTrue(ownerIt != functions.end(), "the loop owner should be discovered from the entry point");
+                if (ownerIt != functions.end())
+                {
+                    t.IsTrue(ownerIt->end >= 0x00100034u,
+                             "the loop owner should keep its delay slot and epilogue");
+                }
+            }
 
             std::error_code removeError;
             std::filesystem::remove(elfPath, removeError);

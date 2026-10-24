@@ -686,6 +686,23 @@ namespace
         return function == SPECIAL_JR || function == SPECIAL_JALR;
     }
 
+    // An address immediately after a control transfer is that transfer's delay
+    // slot: it executes as part of the branch and can never start a function.
+    bool IsDelaySlotAddress(const std::vector<ps2recomp::Section> &sections, uint32_t address)
+    {
+        const ps2recomp::Section *section = FindCodeSectionByAddress(sections, address);
+        if (!section)
+        {
+            return false;
+        }
+
+        const uint32_t offset = address - section->address;
+        uint32_t predecessorRaw = 0;
+        return offset >= MIPS_INSTRUCTION_SIZE &&
+               ReadSectionWord(*section, offset - MIPS_INSTRUCTION_SIZE, predecessorRaw) &&
+               IsControlTransfer(predecessorRaw);
+    }
+
     bool IsCallInstruction(uint32_t raw)
     {
         const uint32_t opcode = OPCODE(raw);
@@ -1129,17 +1146,12 @@ namespace
             return false;
         }
 
-        const uint32_t targetOffset = target - targetSection->address;
-        if (targetOffset >= MIPS_INSTRUCTION_SIZE)
+        if (IsDelaySlotAddress(sections, target))
         {
-            uint32_t predecessorRaw = 0;
-            if (ReadSectionWord(*targetSection, targetOffset - MIPS_INSTRUCTION_SIZE, predecessorRaw) && IsControlTransfer(predecessorRaw))
-            {
-                // A loaded code-looking value that lands immediately after a
-                // control transfer names its delay slot. Promoting it would cut
-                // the real owner before the delay instruction, as happened at Silent Hill's 0x325350 (the delay slot of JALR 0x32534c).
-                return false;
-            }
+            // A loaded code-looking value that lands immediately after a
+            // control transfer names its delay slot. Promoting it would cut
+            // the real owner before the delay instruction, as happened at Silent Hill's 0x325350 (the delay slot of JALR 0x32534c).
+            return false;
         }
 
         outTarget = target;
@@ -1412,6 +1424,7 @@ namespace
             uint32_t sourceOffset;
             uint32_t target;
             bool hasConservativeShape;
+            bool namesDelaySlot;
         };
 
         constexpr uint32_t kClusterDistanceBytes = 32;
@@ -1431,7 +1444,10 @@ namespace
                 uint32_t target = 0;
                 if (ReadSectionWord(section, offset, target) && (target % MIPS_INSTRUCTION_SIZE) == 0 && FindCodeSectionByAddress(sections, target))
                 {
-                    candidates.push_back({offset, target, LooksLikeCallableEntry(sections, target, true)});
+                    candidates.push_back({offset,
+                                          target,
+                                          LooksLikeCallableEntry(sections, target, true),
+                                          IsDelaySlotAddress(sections, target)});
                 }
             }
 
@@ -1538,6 +1554,16 @@ namespace
 
             for (size_t index = 0; index < candidates.size(); ++index)
             {
+                // A table word that names a delay slot is data that happens to
+                // look like code (Def Jam: Fight for NY's 0x00100408, the delay
+                // slot of a loop's BGEZ). Splitting there would cut the owner
+                // before its delay instruction and epilogue. The word still
+                // counts as a cluster neighbor, so other entries are unaffected.
+                if (candidates[index].namesDelaySlot)
+                {
+                    continue;
+                }
+
                 if (candidates[index].hasConservativeShape)
                 {
                     const bool clustered = dedicatedPointerSection || hasConservativeNeighborWithin(index, kClusterDistanceBytes);
