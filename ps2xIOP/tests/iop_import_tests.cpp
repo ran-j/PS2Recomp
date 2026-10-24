@@ -5,6 +5,7 @@
 #include "emulator/imports/iop_imports.h"
 #include "emulator/imports/iop_loadcore.h"
 #include "emulator/imports/iop_timrman.h"
+#include "emulator/imports/iop_thfpool.h"
 #include "emulator/services/iop_rpc.h"
 #include "ps2x/iop/iop_host.h"
 
@@ -326,12 +327,76 @@ namespace
                expect(executor.lastGp == 0x89AB0u, "timer callback lost the registering module GP") &&
                expect(timrman.nextEventCycle(1000u) == 300u, "timer callback return did not rearm compare");
     }
+
+    bool testThfpool()
+    {
+        IopMemory memory;
+        IopThfpool thfpool(memory);
+
+        // FpoolParam: attr, option, blockSize = 0x20, blockCount = 3.
+        constexpr uint32_t param = 0x2000u;
+        memory.write32(param + 8u, 0x20u);
+        memory.write32(param + 12u, 3u);
+
+        IopCpuState cpu{};
+        cpu.gpr[4] = param;
+        if (!expect(thfpool.dispatchImport(4u, cpu), "thfpool:4 CreateFpool was not handled") ||
+            !expect(static_cast<int32_t>(cpu.gpr[2]) > 0, "CreateFpool did not return a pool id"))
+            return false;
+        const uint32_t fpoolId = cpu.gpr[2];
+
+        cpu = {};
+        cpu.gpr[4] = fpoolId;
+        if (!expect(thfpool.dispatchImport(6u, cpu), "thfpool:6 AllocateFpl was not handled"))
+            return false;
+        const uint32_t block0 = cpu.gpr[2];
+        if (!expect(block0 != 0u, "AllocateFpl returned null from an empty pool"))
+            return false;
+
+        cpu = {};
+        cpu.gpr[4] = fpoolId;
+        if (!expect(thfpool.dispatchImport(6u, cpu), "thfpool:6 second AllocateFpl was not handled") ||
+            !expect(cpu.gpr[2] == block0 + 0x20u, "AllocateFpl did not advance by the block stride"))
+            return false;
+
+        // Free a misaligned pointer: must be rejected without freeing anything.
+        cpu = {};
+        cpu.gpr[4] = fpoolId;
+        cpu.gpr[5] = block0 + 1u;
+        if (!expect(thfpool.dispatchImport(9u, cpu), "thfpool:9 FreeFpool was not handled") ||
+            !expect(cpu.gpr[2] == 0xFFFFFFFFu, "FreeFpool accepted a misaligned block"))
+            return false;
+
+        cpu = {};
+        cpu.gpr[4] = fpoolId;
+        cpu.gpr[5] = block0;
+        if (!expect(thfpool.dispatchImport(9u, cpu), "thfpool:9 FreeFpool (valid) was not handled") ||
+            !expect(cpu.gpr[2] == 0u, "FreeFpool failed on a valid block"))
+            return false;
+
+        cpu = {};
+        cpu.gpr[4] = fpoolId;
+        if (!expect(thfpool.dispatchImport(6u, cpu), "thfpool:6 reallocate was not handled") ||
+            !expect(cpu.gpr[2] == block0, "a freed block was not reused first-fit"))
+            return false;
+
+        cpu = {};
+        cpu.gpr[4] = fpoolId;
+        if (!expect(thfpool.dispatchImport(5u, cpu), "thfpool:5 DeleteFpool was not handled") ||
+            !expect(cpu.gpr[2] == 0u, "DeleteFpool failed"))
+            return false;
+
+        cpu = {};
+        cpu.gpr[4] = fpoolId;
+        return expect(thfpool.dispatchImport(6u, cpu), "thfpool:6 after delete was not handled") &&
+               expect(cpu.gpr[2] == 0u, "AllocateFpl returned a block from a deleted pool");
+    }
 }
 
 int main()
 {
     if (!testLoadcoreRebootLibraryMode() || !testCdvdSpecialControl() || !testCdvdSearchFile() ||
-        !testTimrmanPeriodicCallback())
+        !testTimrmanPeriodicCallback() || !testThfpool())
         return 1;
     std::cout << "ps2xIOP import tests passed\n";
     return 0;
