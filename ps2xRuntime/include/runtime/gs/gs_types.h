@@ -288,6 +288,7 @@ struct GSPresentationRequest
     GSFrameReg preferredSource{};
     uint32_t preferredDestFbp = 0;
     bool hasPreferredSource = false;
+    int displayField = -1; // CSR.FIELD when the displayed buffer was last drawn into, -1 = not yet
 };
 
 struct PresentationFrame

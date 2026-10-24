@@ -222,6 +222,7 @@ private:
     GSFrameReg m_preferredDisplaySourceFrame{};
     uint32_t m_preferredDisplayDestFbp = 0;
     bool m_hasPreferredDisplaySource = false;
+    int m_displayWriteField = -1;
     std::vector<uint8_t> m_hostPresentationFrame;
     uint32_t m_hostPresentationWidth = 0;
     uint32_t m_hostPresentationHeight = 0;
