@@ -40,8 +40,10 @@ namespace ps2x::iop::detail
             setV0(IopMemory::RamSize);
             return true;
         case 7: // QueryMaxFreeMemSize
-        case 8: // QueryTotalFreeMemSize
             setV0(m_memory.maxFreeMemory());
+            return true;
+        case 8: // QueryTotalFreeMemSize
+            setV0(m_memory.totalFreeMemory());
             return true;
         case 9: // QueryBlockTopAddress
             if (const auto block = m_memory.allocationContaining(a0))
