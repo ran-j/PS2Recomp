@@ -120,10 +120,11 @@ namespace ps2recomp
             return fmt::format("SET_GPR_U64(ctx, {}, ((int64_t)GPR_S64(ctx, {}) < (int64_t)GPR_S64(ctx, {})) ? 1 : 0);", inst.rd, inst.rs, inst.rt);
         case SPECIAL_SLTU:
             return fmt::format("SET_GPR_U64(ctx, {}, ((uint64_t)GPR_U64(ctx, {}) < (uint64_t)GPR_U64(ctx, {})) ? 1 : 0);", inst.rd, inst.rs, inst.rt);
+        // MOVZ/MOVN are 64-bit moves: the upper half of the 128-bit destination is preserved.
         case SPECIAL_MOVZ:
-            return fmt::format("if (GPR_U64(ctx, {}) == 0) SET_GPR_VEC(ctx, {}, GPR_VEC(ctx, {}));", inst.rt, inst.rd, inst.rs);
+            return fmt::format("if (GPR_U64(ctx, {}) == 0) SET_GPR_U64(ctx, {}, GPR_U64(ctx, {}));", inst.rt, inst.rd, inst.rs);
         case SPECIAL_MOVN:
-            return fmt::format("if (GPR_U64(ctx, {}) != 0) SET_GPR_VEC(ctx, {}, GPR_VEC(ctx, {}));", inst.rt, inst.rd, inst.rs);
+            return fmt::format("if (GPR_U64(ctx, {}) != 0) SET_GPR_U64(ctx, {}, GPR_U64(ctx, {}));", inst.rt, inst.rd, inst.rs);
         case SPECIAL_MFSA:
             return fmt::format("SET_GPR_U32(ctx, {}, ctx->sa);", inst.rd);
         case SPECIAL_MTSA:
@@ -132,7 +133,7 @@ namespace ps2recomp
             return fmt::format(
                 "{{ int64_t a = (int64_t)GPR_S64(ctx, {}); "
                 "int64_t b = (int64_t)GPR_S64(ctx, {}); "
-                "int64_t r = a + b; "
+                "int64_t r = (int64_t)((uint64_t)a + (uint64_t)b); "
                 "if (((a ^ b) >= 0) && ((a ^ r) < 0)) runtime->SignalException(ctx, EXCEPTION_INTEGER_OVERFLOW); "
                 "else SET_GPR_S64(ctx, {}, r); }}",
                 inst.rs, inst.rt, inst.rd);
@@ -144,7 +145,7 @@ namespace ps2recomp
             return fmt::format(
                 "{{ int64_t a = (int64_t)GPR_S64(ctx, {}); "
                 "int64_t b = (int64_t)GPR_S64(ctx, {}); "
-                "int64_t r = a - b; "
+                "int64_t r = (int64_t)((uint64_t)a - (uint64_t)b); "
                 "if (((a ^ b) < 0) && ((a ^ r) < 0)) runtime->SignalException(ctx, EXCEPTION_INTEGER_OVERFLOW); "
                 "else SET_GPR_S64(ctx, {}, r); }}",
                 inst.rs, inst.rt, inst.rd);
