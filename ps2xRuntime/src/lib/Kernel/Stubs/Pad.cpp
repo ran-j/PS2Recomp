@@ -13,6 +13,17 @@ namespace ps2_stubs
         constexpr int32_t kPadStateDisconnected = 0;
         constexpr int32_t kPadStateExecCmd = 5;
         constexpr int32_t kPadStateStable = 6;
+        // Request states as the title's own (statically linked, old-API)
+        // libpad defines them: scePadReqStateComplete 0, scePadReqStateFaild
+        // 1, scePadReqStateBusy 2. Stuntman's scePadSetMainMode @0x00244260,
+        // scePadSetActAlign @0x002443D8 and scePadSetButtonInfo @0x00244568
+        // mark an accepted request with scePadSetReqState(port, slot, 2),
+        // and its scePadGetState @0x00243D48 reports EXECCMD (5) while the
+        // pad is STABLE with request byte 2. The pad poll sub_00126110
+        // re-issues a request only on FAILED (1) and waits while BUSY.
+        constexpr uint32_t kPadReqComplete = 0;
+        constexpr uint32_t kPadReqFailed = 1;
+        constexpr uint32_t kPadReqBusy = 2;
         constexpr size_t kPadPortCount = 2;
         constexpr size_t kPadSlotCount = 1;
 
@@ -52,8 +63,17 @@ namespace ps2_stubs
             bool lastReadOk = false;
             uint16_t buttonMask = 0xFFFFu;
             uint32_t dmaAddr = 0u;
-            uint32_t reqState = 0u;
-            uint32_t transientState = 0u;
+            // libpad request state (kPadReq*) as the EE-side DMA buffer
+            // reports it: set BUSY when a request is accepted, refreshed by
+            // padman once per frame (COMPLETE when nothing is in flight).
+            uint32_t reqState = kPadReqComplete;
+            // Frame-progression counters, ticked once per scePadGetState
+            // poll (the guest polls exactly once per frame). Real libpad
+            // does not complete instantly: a freshly opened port reports
+            // FINDPAD while SIO2 detects the pad, and an accepted request
+            // stays BUSY for a few frames before padman reports COMPLETE.
+            uint32_t connectPollsRemaining = 0u;
+            uint32_t reqBusyPollsRemaining = 0u;
             PadInputState lastInput{};
             uint8_t lastData[32]{};
             uint32_t readCount = 0u;
@@ -66,22 +86,8 @@ namespace ps2_stubs
         PadInputState g_padOverrideState{};
         PadPortState g_padPorts[kPadPortCount]{};
         int g_padReadLogCount = 0;
-
-        uint8_t axisToByte(float axis)
-        {
-            axis = std::clamp(axis, -1.0f, 1.0f);
-            const float mapped = (axis + 1.0f) * 127.5f;
-            return static_cast<uint8_t>(std::lround(mapped));
-        }
-
-        void setButton(PadInputState &state, uint16_t mask, bool pressed)
-        {
-            if (pressed)
-            {
-                state.buttons = static_cast<uint16_t>(state.buttons & ~mask);
-            }
-        }
-
+        // Host input lives solely in PSPadBackend (ps2_pad.cpp); this file
+        // only translates it (plus the test override) into guest buffers.
         int findFirstGamepad()
         {
             for (int i = 0; i < 4; ++i)
@@ -92,104 +98,6 @@ namespace ps2_stubs
                 }
             }
             return -1;
-        }
-
-        void applyGamepadState(PadInputState &state)
-        {
-            if (!IsWindowReady())
-            {
-                return;
-            }
-
-            const int gamepad = findFirstGamepad();
-            if (gamepad < 0)
-            {
-                return;
-            }
-
-            // Raylib mapping (PS2 -> raylib buttons/axes):
-            // D-Pad -> LEFT_FACE_*, Cross/Circle/Square/Triangle -> RIGHT_FACE_*
-            // L1/R1 -> TRIGGER_1, L2/R2 -> TRIGGER_2, L3/R3 -> THUMB
-            // Select/Start -> MIDDLE_LEFT/MIDDLE_RIGHT
-            state.lx = axisToByte(GetGamepadAxisMovement(gamepad, GAMEPAD_AXIS_LEFT_X));
-            state.ly = axisToByte(GetGamepadAxisMovement(gamepad, GAMEPAD_AXIS_LEFT_Y));
-            state.rx = axisToByte(GetGamepadAxisMovement(gamepad, GAMEPAD_AXIS_RIGHT_X));
-            state.ry = axisToByte(GetGamepadAxisMovement(gamepad, GAMEPAD_AXIS_RIGHT_Y));
-
-            setButton(state, kPadBtnUp, IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_LEFT_FACE_UP));
-            setButton(state, kPadBtnDown, IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_LEFT_FACE_DOWN));
-            setButton(state, kPadBtnLeft, IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_LEFT_FACE_LEFT));
-            setButton(state, kPadBtnRight, IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_LEFT_FACE_RIGHT));
-
-            setButton(state, kPadBtnCross, IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_RIGHT_FACE_DOWN));
-            setButton(state, kPadBtnCircle, IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT));
-            setButton(state, kPadBtnSquare, IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_RIGHT_FACE_LEFT));
-            setButton(state, kPadBtnTriangle, IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_RIGHT_FACE_UP));
-
-            setButton(state, kPadBtnL1, IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_LEFT_TRIGGER_1));
-            setButton(state, kPadBtnR1, IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_RIGHT_TRIGGER_1));
-            setButton(state, kPadBtnL2, IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_LEFT_TRIGGER_2));
-            setButton(state, kPadBtnR2, IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_RIGHT_TRIGGER_2));
-
-            setButton(state, kPadBtnL3, IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_LEFT_THUMB));
-            setButton(state, kPadBtnR3, IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_RIGHT_THUMB));
-
-            setButton(state, kPadBtnSelect, IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_MIDDLE_LEFT));
-            setButton(state, kPadBtnStart, IsGamepadButtonDown(gamepad, GAMEPAD_BUTTON_MIDDLE_RIGHT));
-        }
-
-        void applyKeyboardState(PadInputState &state, bool allowAnalog)
-        {
-            if (!IsWindowReady())
-            {
-                return;
-            }
-
-            // Keyboard mapping (PS2 -> keys):
-            // D-Pad: arrows, Square/Cross/Circle/Triangle: Z/X/C/V
-            // L1/R1: Q/E, L2/R2: 1/3, Start/Select: Enter/RightShift
-            // L3/R3: LeftCtrl/RightCtrl, Analog left: WASD
-            setButton(state, kPadBtnUp, IsKeyDown(KEY_UP));
-            setButton(state, kPadBtnDown, IsKeyDown(KEY_DOWN));
-            setButton(state, kPadBtnLeft, IsKeyDown(KEY_LEFT));
-            setButton(state, kPadBtnRight, IsKeyDown(KEY_RIGHT));
-
-            setButton(state, kPadBtnSquare, IsKeyDown(KEY_Z));
-            setButton(state, kPadBtnCross, IsKeyDown(KEY_X));
-            setButton(state, kPadBtnCircle, IsKeyDown(KEY_C));
-            setButton(state, kPadBtnTriangle, IsKeyDown(KEY_V));
-
-            setButton(state, kPadBtnL1, IsKeyDown(KEY_Q));
-            setButton(state, kPadBtnR1, IsKeyDown(KEY_E));
-            setButton(state, kPadBtnL2, IsKeyDown(KEY_ONE));
-            setButton(state, kPadBtnR2, IsKeyDown(KEY_THREE));
-
-            setButton(state, kPadBtnStart, IsKeyDown(KEY_ENTER));
-            setButton(state, kPadBtnSelect, IsKeyDown(KEY_RIGHT_SHIFT));
-            setButton(state, kPadBtnL3, IsKeyDown(KEY_LEFT_CONTROL));
-            setButton(state, kPadBtnR3, IsKeyDown(KEY_RIGHT_CONTROL));
-
-            if (!allowAnalog)
-            {
-                return;
-            }
-
-            float ax = 0.0f;
-            float ay = 0.0f;
-            if (IsKeyDown(KEY_D))
-                ax += 1.0f;
-            if (IsKeyDown(KEY_A))
-                ax -= 1.0f;
-            if (IsKeyDown(KEY_S))
-                ay += 1.0f;
-            if (IsKeyDown(KEY_W))
-                ay -= 1.0f;
-
-            if (ax != 0.0f || ay != 0.0f)
-            {
-                state.lx = axisToByte(ax);
-                state.ly = axisToByte(ay);
-            }
         }
 
         void resetPadStateLocked()
@@ -220,13 +128,25 @@ namespace ps2_stubs
             portState.pressureEnabled = false;
             portState.buttonMask = 0xFFFFu;
             portState.dmaAddr = dmaAddr;
-            portState.reqState = 0u;
-            portState.transientState = 0u;
+            portState.reqState = kPadReqComplete;
+            // A real pad is not STABLE the instant the port opens: SIO2
+            // detection takes a few frames (FINDPAD, state 1) first.
+            portState.connectPollsRemaining = 2u;
+            portState.reqBusyPollsRemaining = 0u;
         }
 
-        void queueExecCmdStateLocked(PadPortState &portState)
+        // An accepted libpad request: BUSY from acceptance until padman
+        // completes it `polls` scePadGetState polls (guest frames) later.
+        // The title waits on BUSY without re-issuing, so the window only
+        // sets how many frames the guest's wait states spin; a request
+        // already in flight keeps its window.
+        void beginRequestLocked(PadPortState &portState, uint32_t polls)
         {
-            portState.transientState = static_cast<uint32_t>(kPadStateExecCmd);
+            portState.reqState = kPadReqBusy;
+            if (portState.reqBusyPollsRemaining == 0u)
+            {
+                portState.reqBusyPollsRemaining = polls;
+            }
         }
 
         uint8_t pressureValue(const PadInputState &state, const PadPortState &portState, uint16_t mask)
@@ -260,9 +180,11 @@ namespace ps2_stubs
             data[13] = pressureValue(state, portState, kPadBtnCircle);
             data[14] = pressureValue(state, portState, kPadBtnCross);
             data[15] = pressureValue(state, portState, kPadBtnSquare);
+            // libpad pressure order is L1, R1, L2, R2: Stuntman's
+            // sub_00126560 stores bytes 16-19 as those buttons' analog values.
             data[16] = pressureValue(state, portState, kPadBtnL1);
-            data[17] = pressureValue(state, portState, kPadBtnL2);
-            data[18] = pressureValue(state, portState, kPadBtnR1);
+            data[17] = pressureValue(state, portState, kPadBtnR1);
+            data[18] = pressureValue(state, portState, kPadBtnL2);
             data[19] = pressureValue(state, portState, kPadBtnR2);
         }
 
@@ -308,11 +230,9 @@ namespace ps2_stubs
                     state.ly = backendData[7];
                     usedBackend = true;
                 }
-                else
-                {
-                    applyGamepadState(state);
-                    applyKeyboardState(state, portState.analogMode);
-                }
+                // No backend source (headless / no pad on this port): keep
+                // the default neutral state - connected, nothing pressed,
+                // sticks centred - rather than reporting a disconnect.
             }
 
             fillPadStatus(outData, state, portState);
@@ -363,9 +283,9 @@ namespace ps2_stubs
             return;
         }
 
+        // libpad: scePadEnterPressMode is scePadSetButtonInfo(port, slot, 0xFFF).
         portState->pressureEnabled = true;
-        portState->reqState = 0u;
-        queueExecCmdStateLocked(*portState);
+        beginRequestLocked(*portState, 3u);
         setReturnS32(ctx, 1);
     }
 
@@ -381,9 +301,9 @@ namespace ps2_stubs
             return;
         }
 
+        // libpad: scePadExitPressMode is scePadSetButtonInfo(port, slot, 0).
         portState->pressureEnabled = false;
-        portState->reqState = 0u;
-        queueExecCmdStateLocked(*portState);
+        beginRequestLocked(*portState, 3u);
         setReturnS32(ctx, 1);
     }
 
@@ -439,7 +359,10 @@ namespace ps2_stubs
         std::lock_guard<std::mutex> lock(g_padStateMutex);
         const PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
                                                                  static_cast<int>(getRegU32(ctx, 5)));
-        setReturnS32(ctx, static_cast<int32_t>(portState ? portState->reqState : 0u));
+        // libpad returns the request byte of an open port's DMA buffer
+        // (BUSY 2 / COMPLETE 0 / FAILED 1) and 0 for a closed port.
+        const uint32_t state = (portState && portState->open) ? portState->reqState : kPadReqComplete;
+        setReturnS32(ctx, static_cast<int32_t>(state));
     }
 
     void scePadGetSlotMax(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -460,14 +383,26 @@ namespace ps2_stubs
         int32_t state = kPadStateDisconnected;
         if (portState && portState->open)
         {
-            if (portState->transientState != 0u)
+            // One GetState call == one guest frame, standing in for padman's
+            // per-frame DMA of the pad state into the EE buffer: the request
+            // byte is BUSY while a request is in flight and COMPLETE once it
+            // finishes. (libpad's scePadSetReqState only writes the current
+            // half of that double-buffered area, so a guest-written value
+            // lasts until the next frame's DMA supersedes it.)
+            if (portState->reqBusyPollsRemaining > 0u)
             {
-                state = static_cast<int32_t>(portState->transientState);
-                portState->transientState = 0u;
+                --portState->reqBusyPollsRemaining;
+            }
+            portState->reqState = (portState->reqBusyPollsRemaining > 0u) ? kPadReqBusy : kPadReqComplete;
+            if (portState->connectPollsRemaining > 0u)
+            {
+                --portState->connectPollsRemaining;
+                state = 1; // FINDPAD: pad not yet detected/stable
             }
             else
             {
-                state = kPadStateStable;
+                // libpad's scePadGetState: STABLE with a BUSY request is EXECCMD.
+                state = (portState->reqState == kPadReqBusy) ? kPadStateExecCmd : kPadStateStable;
             }
         }
         setReturnS32(ctx, state);
@@ -518,6 +453,7 @@ namespace ps2_stubs
         }
 
         const int32_t currentId = portState->analogMode ? kPadTypeDualShock : kPadTypeDigital;
+
         switch (infoMode)
         {
         case 1: // PAD_MODECURID
@@ -590,8 +526,9 @@ namespace ps2_stubs
 
         portState->open = false;
         portState->pressureEnabled = false;
-        portState->reqState = 0u;
-        portState->transientState = 0u;
+        portState->reqState = kPadReqComplete;
+        portState->connectPollsRemaining = 0u;
+        portState->reqBusyPollsRemaining = 0u;
         setReturnS32(ctx, 1);
     }
 
@@ -609,13 +546,7 @@ namespace ps2_stubs
             return;
         }
 
-        portState->open = true;
-        portState->analogMode = false;     // real pads open DIGITAL
-        portState->pressureEnabled = false;
-        portState->buttonMask = 0xFFFFu;
-        portState->dmaAddr = dmaAddr;
-        portState->reqState = 0u;
-        portState->transientState = 0u;
+        initializePadPortLocked(*portState, dmaAddr);
         if (dmaStr)
         {
             ps2TraceGuestRangeWrite(rdram, dmaAddr, 32u, "scePadPortOpen", ctx);
@@ -679,7 +610,19 @@ namespace ps2_stubs
             return;
         }
 
-        const char *text = (state == 0) ? "COMPLETE" : "BUSY";
+        const char *text = "UNKNOWN";
+        if (state == kPadReqComplete)
+        {
+            text = "COMPLETE";
+        }
+        else if (state == kPadReqFailed)
+        {
+            text = "FAILED";
+        }
+        else if (state == kPadReqBusy)
+        {
+            text = "BUSY";
+        }
         std::strncpy(buf, text, 31);
         buf[31] = '\0';
         setReturnS32(ctx, 0);
@@ -689,6 +632,15 @@ namespace ps2_stubs
     {
         (void)rdram;
         (void)runtime;
+        std::lock_guard<std::mutex> lock(g_padStateMutex);
+        if (PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
+                                                               static_cast<int>(getRegU32(ctx, 5))))
+        {
+            if (portState->open)
+            {
+                beginRequestLocked(*portState, 2u);
+            }
+        }
         setReturnS32(ctx, 1);
     }
 
@@ -709,8 +661,7 @@ namespace ps2_stubs
         if (portState && portState->open)
         {
             portState->buttonMask = static_cast<uint16_t>(getRegU32(ctx, 6));
-            portState->reqState = 0u;
-            queueExecCmdStateLocked(*portState);
+            beginRequestLocked(*portState, 3u);
         }
         setReturnS32(ctx, 1);
     }
@@ -729,8 +680,7 @@ namespace ps2_stubs
         }
 
         portState->analogMode = (getRegU32(ctx, 6) != 0u);
-        portState->reqState = 0u;
-        queueExecCmdStateLocked(*portState);
+        beginRequestLocked(*portState, 3u);
         setReturnS32(ctx, 1);
     }
 
@@ -741,12 +691,13 @@ namespace ps2_stubs
         std::lock_guard<std::mutex> lock(g_padStateMutex);
         PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
                                                            static_cast<int>(getRegU32(ctx, 5)));
-        if (portState && portState->open)
+        // libpad stores the byte into the open port's DMA buffer (+113).
+        const bool open = portState && portState->open;
+        if (open)
         {
-            portState->reqState = static_cast<uint32_t>(getRegU32(ctx, 6) ? 1u : 0u);
-            queueExecCmdStateLocked(*portState);
+            portState->reqState = getRegU32(ctx, 6) & 0xFFu;
         }
-        setReturnS32(ctx, 1);
+        setReturnS32(ctx, open ? 1 : 0);
     }
 
     void scePadSetVrefParam(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
