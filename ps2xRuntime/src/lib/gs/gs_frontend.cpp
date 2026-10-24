@@ -29,6 +29,54 @@ namespace
         return prim;
     }
 
+    // TEX1.MTBA: a TEX0 write fills MIPTBP1's TBP1-3/TBW1-3, packing each mip
+    // level after the previous one (at least one block apart) at half its
+    // width. The GS derives them from TW alone, for colour formats from 32
+    // texels up to 512 (32-bit storage) or 1024 (PCSX2
+    // GSState::GIFRegHandlerTEX0; libgpu2 TexAttr::MipTbpAuto).
+    uint64_t applyMipTbpAuto(const GSTex0Reg &tex0, uint64_t miptbp1)
+    {
+        uint32_t storageBits = 0u;
+        switch (tex0.psm)
+        {
+        case GS_PSM_CT32:
+        case GS_PSM_CT24:
+        case GS_PSM_T8H:
+        case GS_PSM_T4HL:
+        case GS_PSM_T4HH:
+            storageBits = 32u;
+            break;
+        case GS_PSM_CT16:
+        case GS_PSM_CT16S:
+            storageBits = 16u;
+            break;
+        case GS_PSM_T8:
+            storageBits = 8u;
+            break;
+        case GS_PSM_T4:
+            storageBits = 4u;
+            break;
+        default: // Z formats do not trigger it
+            return miptbp1;
+        }
+        if (tex0.tw < 5u || tex0.tw > (storageBits == 32u ? 9u : 10u))
+            return miptbp1;
+
+        const uint32_t width = 1u << tex0.tw;
+        uint32_t tbp = tex0.tbp0;
+        uint32_t tbw = std::max(width >> 6, 1u);
+        uint32_t levelBlocks = (width * width * storageBits) >> 11; // 256-byte blocks
+        uint64_t result = miptbp1 & ~((1ull << 60) - 1ull);
+        for (uint32_t level = 0u; level < 3u; ++level)
+        {
+            tbp += levelBlocks;
+            tbw = std::max(tbw >> 1, 1u);
+            levelBlocks = std::max(levelBlocks >> 2, 1u);
+            result |= (static_cast<uint64_t>(tbp & 0x3FFFu) | (static_cast<uint64_t>(tbw) << 14)) << (20u * level);
+        }
+        return result;
+    }
+
     static inline uint64_t loadLE64(const uint8_t *p)
     {
         uint64_t v;
@@ -1240,6 +1288,8 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
         t.csm = static_cast<uint8_t>((value >> 55) & 0x1);
         t.csa = static_cast<uint8_t>((value >> 56) & 0x1F);
         t.cld = static_cast<uint8_t>((value >> 61) & 0x7);
+        if (((m_ctx[ci].tex1 >> 9) & 0x1u) != 0u)
+            m_ctx[ci].miptbp1 = applyMipTbpAuto(t, m_ctx[ci].miptbp1);
         m_backend->LoadClut(t, m_texclut);
         break;
     }

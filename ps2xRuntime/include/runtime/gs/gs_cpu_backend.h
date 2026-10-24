@@ -45,7 +45,11 @@ private:
     void DrawTriangle(const GSPrimitiveBatch &batch);
     void DrawLine(const GSPrimitiveBatch &batch);
     void WritePixel(const GSDrawState &state, int x, int y, int z, uint8_t r, uint8_t g, uint8_t b, uint8_t a, uint8_t fog);
-    uint32_t SampleTexture(const GSDrawState &state, float s, float t, float q, uint16_t u, uint16_t v);
+    // lod: the GS level of detail in sixteenths of a level for a primitive
+    // whose TEX1 enables mip levels, or -1 to sample TEX0's texture with the
+    // primitive's TEX1 filter (GSDrawState::linearFilter).
+    uint32_t SampleTexture(const GSDrawState &state, float s, float t, float q, uint16_t u, uint16_t v, int lod);
+    uint32_t SampleTextureLevel(const GSDrawState &state, uint32_t level, float texU, float texV, bool linear);
     uint32_t LookupCLUT(const GSDrawState &state, uint8_t index, uint8_t cpsm, uint8_t csm, uint8_t csa, uint8_t sourcePsm);
 
     void PerformLocalToLocalTransfer();
