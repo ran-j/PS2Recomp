@@ -515,7 +515,6 @@ GSPresentationRequest GS::buildPresentationRequestUnlocked() const
     request.dispfb2 = m_privRegs->dispfb2;
     request.display2 = m_privRegs->display2;
     request.bgcolor = m_privRegs->bgcolor;
-    request.vsyncTick = m_privRegs->vsyncTick.load(std::memory_order_acquire);
     request.contextFrames[0] = m_ctx[0].frame;
     request.contextFrames[1] = m_ctx[1].frame;
     request.preferredSource = m_preferredDisplaySourceFrame;

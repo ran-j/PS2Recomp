@@ -394,20 +394,14 @@ namespace
         return {(smode2 & 0x1ull) != 0ull, ((smode2 >> 1) & 0x1ull) != 0ull};
     }
 
-    void applyFieldPresentation(std::vector<uint8_t> &pixels, uint32_t width, uint32_t height, bool oddField)
+    // Shows buffer line y / 2 on display line y, in place. Going from the
+    // bottom up reads every buffer line before its row is overwritten.
+    void lineDoubleRows(std::vector<uint8_t> &pixels, uint32_t width, uint32_t height)
     {
-        if (pixels.empty() || width == 0u || height < 2u)
-            return;
-        const std::vector<uint8_t> source = pixels;
-        for (uint32_t y = 0; y < height; ++y)
-        {
-            uint32_t sourceY = ((y >> 1u) << 1u) + (oddField ? 1u : 0u);
-            if (sourceY >= height)
-                sourceY = height - 1u;
+        for (uint32_t y = height; y-- > 1u;)
             std::memcpy(pixels.data() + y * kHostFrameWidth * 4u,
-                        source.data() + sourceY * kHostFrameWidth * 4u,
+                        pixels.data() + (y >> 1u) * kHostFrameWidth * 4u,
                         width * 4u);
-        }
     }
 
     void normalizePresentationAlpha(std::vector<uint8_t> &pixels, uint32_t width, uint32_t height)
@@ -1862,8 +1856,13 @@ PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationReque
     PresentationFrame result{};
     const GSPmodeState pmode = decodePmode(request.pmode);
     const GSSmode2State smode2 = decodeSMode2(request.smode2);
-    const bool fieldMode = smode2.interlaced && !smode2.frameMode;
-    const bool oddField = (request.vsyncTick & 1ull) != 0ull;
+    // Interlaced FRAME mode (SMODE2 INT=1, FFMD=1) reads every buffer line in
+    // both fields, so a DISPLAY of DH+1 lines reads half as many buffer lines,
+    // rounded up, and shows each on two display lines (PCSX2
+    // GSPCRTCRegs::SetRects: "Half height read if FFMD + INT enabled").
+    // FIELD mode (FFMD=0) reads every other buffer line per field, so the
+    // buffer holds both fields and is shown whole.
+    const bool frameFields = smode2.interlaced && smode2.frameMode;
     const GSFrameReg displayFrame1 = decodeDisplayFrame(request.dispfb1);
     const GSFrameReg displayFrame2 = decodeDisplayFrame(request.dispfb2);
     const GSDisplayReadOrigin origin1 = decodeDisplayReadOrigin(request.dispfb1);
@@ -1871,6 +1870,8 @@ PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationReque
     uint32_t width1 = 0u, height1 = 0u, width2 = 0u, height2 = 0u;
     decodeDisplaySize(request.display1, width1, height1);
     decodeDisplaySize(request.display2, width2, height2);
+    const uint32_t lines1 = frameFields ? (height1 + 1u) / 2u : height1;
+    const uint32_t lines2 = frameFields ? (height2 + 1u) / 2u : height2;
     const bool valid1 = pmode.enableCrt1 && hasDisplaySetup(request.display1, displayFrame1);
     const bool valid2 = pmode.enableCrt2 && hasDisplaySetup(request.display2, displayFrame2);
     if (!valid1 && !valid2)
@@ -1923,8 +1924,8 @@ PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationReque
         GSFrameReg selected1{}, selected2{};
         std::vector<uint8_t> crt1, crt2;
         bool preferred1 = false, preferred2 = false;
-        if (copySource(displayFrame1, origin1, width1, height1, false, true, selected1, crt1, preferred1) &&
-            copySource(displayFrame2, origin2, width2, height2, false, true, selected2, crt2, preferred2))
+        if (copySource(displayFrame1, origin1, width1, lines1, false, true, selected1, crt1, preferred1) &&
+            copySource(displayFrame2, origin2, width2, lines2, false, true, selected2, crt2, preferred2))
         {
             result.width = std::max(width1, width2);
             result.height = std::max(height1, height2);
@@ -1942,9 +1943,9 @@ PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationReque
                     dst[3] = pmode.alp;
                 }
             if (!pmode.slbg)
-                for (uint32_t y = 0; y < height2; ++y)
+                for (uint32_t y = 0; y < lines2; ++y)
                     std::memcpy(result.pixels.data() + y * kHostFrameWidth * 4u, crt2.data() + y * kHostFrameWidth * 4u, width2 * 4u);
-            for (uint32_t y = 0; y < height1; ++y)
+            for (uint32_t y = 0; y < lines1; ++y)
                 for (uint32_t x = 0; x < width1; ++x)
                 {
                     const uint8_t *src = crt1.data() + (y * kHostFrameWidth + x) * 4u;
@@ -1956,8 +1957,8 @@ PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationReque
                     dst[3] = pmode.amod ? dst[3] : src[3];
                 }
             normalizePresentationAlpha(result.pixels, result.width, result.height);
-            if (fieldMode)
-                applyFieldPresentation(result.pixels, result.width, result.height, oddField);
+            if (frameFields)
+                lineDoubleRows(result.pixels, result.width, result.height);
             result.displayFbp = displayFrame1.fbp;
             result.sourceFbp = selected1.fbp;
             return result;
@@ -1969,10 +1970,10 @@ PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationReque
     result.width = valid1 ? width1 : width2;
     result.height = valid1 ? height1 : height2;
     GSFrameReg selected = displayFrame;
-    if (!copySource(displayFrame, origin, result.width, result.height, true, false, selected, result.pixels, result.usedPreferred))
+    if (!copySource(displayFrame, origin, result.width, valid1 ? lines1 : lines2, true, false, selected, result.pixels, result.usedPreferred))
         return {};
-    if (fieldMode)
-        applyFieldPresentation(result.pixels, result.width, result.height, oddField);
+    if (frameFields)
+        lineDoubleRows(result.pixels, result.width, result.height);
     normalizePresentationAlpha(result.pixels, result.width, result.height);
     result.displayFbp = displayFrame.fbp;
     result.sourceFbp = selected.fbp;
