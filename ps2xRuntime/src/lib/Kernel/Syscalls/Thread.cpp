@@ -180,9 +180,11 @@ namespace ps2_syscalls
         setReturnS32(ctx, KE_OK);
     }
 
-    void InitThread(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    void InitThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        setReturnS32(ctx, EeScheduler::kMainThreadId);
+        EeScheduler &ee = scheduler(rdram, ctx, runtime);
+        setReturnS32(ctx, ee.initThread());
+        ee.transferIfRequested(false);
     }
 
     void CreateThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

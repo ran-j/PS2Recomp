@@ -95,6 +95,7 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_dmacHandlers.clear();
     m_nextThreadId = kFirstThreadId;
     m_nextInvocationThreadId = -1;
+    m_kernelEventThreadId = 0;
     m_nextSemaphoreId = 1;
     m_nextEventFlagId = 1;
     m_nextAlarmId = 1;
@@ -418,6 +419,51 @@ void EeScheduler::setupCurrentThread(uint32_t stack, uint32_t stackSize, uint32_
     target->stackSize = stackSize;
     target->gp = gp;
     publishSnapshot();
+}
+
+int EeScheduler::initThread()
+{
+    assertExecutor();
+    // libkernel's InitThread creates a semaphore and a priority-zero topThread
+    // that waits on it, then lowers its caller to priority one. topThread only
+    // replays requests the libkernel i* wrappers post to it; the runtime's
+    // handlers for those wrappers act on the scheduler directly, so its stand-in
+    // never runs. It still takes the semaphore and thread ids and the waiting
+    // state the real one holds, so later ids and the status and priorities
+    // ReferThreadStatus reports match, and the caller still has to drop
+    // below it: a bootstrap left at priority zero never yields to the
+    // priority-one threads it rotates.
+    if (m_kernelEventThreadId > 0)
+    {
+        return KE_ERROR;
+    }
+
+    const int semaphoreId = createSemaphore(0, 0xFF, 0u, 0u);
+    if (semaphoreId < 0)
+    {
+        return KE_ERROR;
+    }
+    const int id = allocateThreadId();
+    if (id == 0)
+    {
+        deleteSemaphore(semaphoreId, false);
+        return KE_ERROR;
+    }
+
+    GuestThread top{};
+    top.id = id;
+    top.initialPriority = 0;
+    top.currentPriority = 0;
+    top.status = EeThreadStatus::Waiting;
+    top.wait = EeWaitState{EeWaitReason::Semaphore, EeSemaphoreWait{semaphoreId}};
+    m_threads.emplace(id, std::move(top));
+    semaphore(semaphoreId)->waiters.push_back(id);
+    m_kernelEventThreadId = id;
+
+    int oldPriority = 0;
+    changePriority(currentThreadId(), 1, false, oldPriority);
+    publishSnapshot();
+    return id;
 }
 
 int EeScheduler::createThread(const EeThreadCreateParams &params)
