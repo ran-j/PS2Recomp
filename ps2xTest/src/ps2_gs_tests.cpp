@@ -600,7 +600,6 @@ void register_ps2_gs_tests()
             constexpr uint32_t kXyz2BAddrOffset = kClear0Offset + 0x48u;
             constexpr uint32_t kTestBAddrOffset = kClear0Offset + 0x58u;
             constexpr uint32_t kClearColor = 0x80402010u;
-            constexpr uint32_t kStackAddr = 0x900u;
             const uint32_t kZTest = 2u;
             const uint32_t kEnableClear = 1u;
 
@@ -609,10 +608,11 @@ void register_ps2_gs_tests()
             setRegU32(ctx, 5, 0u);
             setRegU32(ctx, 6, 640u);
             setRegU32(ctx, 7, 448u);
-            setRegU32(ctx, 29, kStackAddr);
+            // EE ABI: trailing args arrive in t0-t2, not on the stack.
+            setRegU32(ctx, 8, kZTest);
+            setRegU32(ctx, 9, 0u);
+            setRegU32(ctx, 10, kEnableClear);
             std::memset(rdram.data() + kEnvAddr, 0xCD, kDBuffSize);
-            std::memcpy(rdram.data() + kStackAddr + 16u, &kZTest, sizeof(kZTest));
-            std::memcpy(rdram.data() + kStackAddr + 24u, &kEnableClear, sizeof(kEnableClear));
             std::memset(runtime.memory().getGSVRAM(), 0xAB, 16u);
             ps2_stubs::sceGsSetDefDBuffDc(rdram.data(), &ctx, &runtime);
 
