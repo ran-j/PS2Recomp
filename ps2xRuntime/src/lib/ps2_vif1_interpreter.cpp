@@ -572,7 +572,94 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 
             const bool zeroExtend = (imm & 0x4000u) != 0u;
 
-            if (m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes)
+            // Fast path: no mask, no row add, CL >= WL. Same
+            // results as the general loop below (fields past the unpacked
+            // components keep their old contents).
+            static const bool fastUnpackEnabled = !(std::getenv("PS2X_VIF_FAST_UNPACK") && std::getenv("PS2X_VIF_FAST_UNPACK")[0] == '0');
+            const bool fastUnpack = fastUnpackEnabled && m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes && !maskEnable &&
+                                    (vif1_regs.mode & 3u) == 0u && cl >= wl && (vl != 3u || vn == 3u);
+            if (fastUnpack)
+            {
+                const uint8_t *src = data + pos;
+                uint8_t *vu = m_vu1Data;
+                const uint32_t n = writeVectorCount;
+                // skipping write (CL > WL): WL vectors written, then CL - WL left alone
+                auto dst = [&](uint32_t i) -> uint32_t *
+                {
+                    const uint32_t v = cl == wl ? vuAddr + i : (wl == 1u ? vuAddr + i * cl : vuAddr + (i / wl) * cl + i % wl);
+                    return reinterpret_cast<uint32_t *>(vu + ((v & 0x3FFu) * 16u));
+                };
+                auto ext16 = [zeroExtend](const uint8_t *p) -> uint32_t {
+                    uint16_t r; std::memcpy(&r, p, 2);
+                    return zeroExtend ? r : static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(r)));
+                };
+                auto ext8 = [zeroExtend](uint8_t r) -> uint32_t {
+                    return zeroExtend ? r : static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(r)));
+                };
+                switch ((vn << 2) | vl)
+                {
+                case 0xC: // V4-32
+                    for (uint32_t i = 0; i < n; ++i)
+                        std::memcpy(dst(i), src + i * 16u, 16u);
+                    break;
+                case 0x8: // V3-32
+                    for (uint32_t i = 0; i < n; ++i)
+                        std::memcpy(dst(i), src + i * 12u, 12u);
+                    break;
+                case 0x4: // V2-32
+                    for (uint32_t i = 0; i < n; ++i)
+                        std::memcpy(dst(i), src + i * 8u, 8u);
+                    break;
+                case 0x0: // S-32
+                    for (uint32_t i = 0; i < n; ++i)
+                    {
+                        uint32_t v; std::memcpy(&v, src + i * 4u, 4u);
+                        uint32_t *d = dst(i); d[0] = d[1] = d[2] = d[3] = v;
+                    }
+                    break;
+                case 0xD: case 0x9: case 0x5: // V4/V3/V2-16
+                    for (uint32_t i = 0; i < n; ++i)
+                    {
+                        uint32_t *d = dst(i);
+                        for (int c = 0; c < components; ++c)
+                            d[c] = ext16(src + (i * components + c) * 2u);
+                    }
+                    break;
+                case 0x1: // S-16
+                    for (uint32_t i = 0; i < n; ++i)
+                    {
+                        const uint32_t v = ext16(src + i * 2u);
+                        uint32_t *d = dst(i); d[0] = d[1] = d[2] = d[3] = v;
+                    }
+                    break;
+                case 0xE: case 0xA: case 0x6: // V4/V3/V2-8
+                    for (uint32_t i = 0; i < n; ++i)
+                    {
+                        uint32_t *d = dst(i);
+                        for (int c = 0; c < components; ++c)
+                            d[c] = ext8(src[i * components + c]);
+                    }
+                    break;
+                case 0x2: // S-8
+                    for (uint32_t i = 0; i < n; ++i)
+                    {
+                        const uint32_t v = ext8(src[i]);
+                        uint32_t *d = dst(i); d[0] = d[1] = d[2] = d[3] = v;
+                    }
+                    break;
+                case 0xF: // V4-5
+                    for (uint32_t i = 0; i < n; ++i)
+                    {
+                        uint16_t packed; std::memcpy(&packed, src + i * 2u, 2u);
+                        uint32_t *d = dst(i);
+                        d[0] = packed & 0x1Fu; d[1] = (packed >> 5) & 0x1Fu; d[2] = (packed >> 10) & 0x1Fu; d[3] = (packed >> 15) & 1u;
+                    }
+                    break;
+                default:
+                    break;
+                }
+            }
+            else if (m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes)
             {
                 const uint8_t *srcBase = data + pos;
                 uint32_t srcIndex = 0u;
