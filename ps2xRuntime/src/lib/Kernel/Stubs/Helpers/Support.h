@@ -1863,17 +1863,6 @@ namespace
         return true;
     }
 
-    static bool readGsRegPairs(uint8_t *rdram, uint32_t addr, GsRegPairMem *pairs, size_t pairCount)
-    {
-        if (!pairs || pairCount == 0u)
-            return false;
-        const uint8_t *ptr = getConstMemPtr(rdram, addr);
-        if (!ptr)
-            return false;
-        std::memcpy(pairs, ptr, pairCount * sizeof(GsRegPairMem));
-        return true;
-    }
-
     static void applyGsDispEnv(PS2Runtime *runtime, const GsDispEnvMem &env)
     {
         if (!runtime || !runtime->syncCoreSubsystems())
@@ -1886,16 +1875,6 @@ namespace
         regs.dispfb2 = env.dispfb;
         regs.display2 = env.display;
         regs.bgcolor = env.bgcolor;
-    }
-
-    static void applyGsRegPairs(PS2Runtime *runtime, const GsRegPairMem *pairs, size_t pairCount)
-    {
-        if (!runtime || !pairs || !runtime->syncCoreSubsystems())
-            return;
-        for (size_t i = 0; i < pairCount; ++i)
-        {
-            runtime->gs().writeRegister(static_cast<uint8_t>(pairs[i].reg & 0xFFu), pairs[i].value);
-        }
     }
 
     static void seedGsDrawEnv1(GsDrawEnv1Mem &env,

@@ -600,7 +600,6 @@ void register_ps2_gs_tests()
             constexpr uint32_t kXyz2BAddrOffset = kClear0Offset + 0x48u;
             constexpr uint32_t kTestBAddrOffset = kClear0Offset + 0x58u;
             constexpr uint32_t kClearColor = 0x80402010u;
-            constexpr uint32_t kStackAddr = 0x900u;
             const uint32_t kZTest = 2u;
             const uint32_t kEnableClear = 1u;
 
@@ -609,10 +608,11 @@ void register_ps2_gs_tests()
             setRegU32(ctx, 5, 0u);
             setRegU32(ctx, 6, 640u);
             setRegU32(ctx, 7, 448u);
-            setRegU32(ctx, 29, kStackAddr);
+            // EE ABI: trailing args arrive in t0-t2, not on the stack.
+            setRegU32(ctx, 8, kZTest);
+            setRegU32(ctx, 9, 0u);
+            setRegU32(ctx, 10, kEnableClear);
             std::memset(rdram.data() + kEnvAddr, 0xCD, kDBuffSize);
-            std::memcpy(rdram.data() + kStackAddr + 16u, &kZTest, sizeof(kZTest));
-            std::memcpy(rdram.data() + kStackAddr + 24u, &kEnableClear, sizeof(kEnableClear));
             std::memset(runtime.memory().getGSVRAM(), 0xAB, 16u);
             ps2_stubs::sceGsSetDefDBuffDc(rdram.data(), &ctx, &runtime);
 
@@ -638,6 +638,9 @@ void register_ps2_gs_tests()
 
             uint64_t rgbaq = static_cast<uint64_t>(kClearColor);
             std::memcpy(rdram.data() + kEnvAddr + kRgbaqOffset, &rgbaq, sizeof(rgbaq));
+            // Swap sends the seeded packet on GIF DMA, which reads runtime
+            // memory: put the packet there, as a guest call would.
+            std::memcpy(runtime.memory().getRDRAM() + kEnvAddr, rdram.data() + kEnvAddr, kDBuffSize);
 
             std::memset(&ctx, 0, sizeof(ctx));
             setRegU32(ctx, 4, kEnvAddr);
@@ -693,6 +696,9 @@ void register_ps2_gs_tests()
 
             const uint64_t rgbaq = static_cast<uint64_t>(kClearColor);
             std::memcpy(rdram.data() + kEnvAddr + kRgbaqOffset, &rgbaq, sizeof(rgbaq));
+            // Swap sends the seeded packet on GIF DMA, which reads runtime
+            // memory: put the packet there, as a guest call would.
+            std::memcpy(runtime.memory().getRDRAM() + kEnvAddr, rdram.data() + kEnvAddr, kDBuffSize);
 
             std::memset(&ctx, 0, sizeof(ctx));
             setRegU32(ctx, 4, kEnvAddr);
@@ -4133,6 +4139,134 @@ void register_ps2_gs_tests()
                      "sceGsResetGraph should succeed in reset mode");
             expectGuestHeapReusable(t, runtime,
                                     "sceGsResetGraph should free its temporary GIF packet");
+        });
+
+        tc.Run("sceGsPutDrawEnv sends the whole GIFtag packet on GIF DMA", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+
+            uint8_t *const rdram = runtime.memory().getRDRAM();
+            uint8_t *const vram = runtime.memory().getGSVRAM();
+            constexpr uint32_t kPacketAddr = 0x6000u;
+            constexpr uint32_t kColor = 0x80402010u;
+
+            // A sceGsPutDrawEnv packet: GIFtag (A+D, NLOOP 10), a draw env, then
+            // a 16x16 sprite. The pairs after the eighth only run if the whole
+            // NLOOP is sent.
+            std::vector<uint8_t> packet;
+            appendU64(packet, makeGifTag(10u, 0u, 1u));
+            appendU64(packet, 0xEull);
+            appendGifAd(packet, 1ull << 16, GS_REG_FRAME_1);              // FBP 0, FBW 1, CT32
+            appendGifAd(packet, 100ull | (1ull << 32), GS_REG_ZBUF_1);    // ZMSK
+            appendGifAd(packet, 0ull, GS_REG_XYOFFSET_1);
+            appendGifAd(packet, (63ull << 16) | (63ull << 48), GS_REG_SCISSOR_1);
+            appendGifAd(packet, 1ull, GS_REG_PRMODECONT);
+            appendGifAd(packet, 0x30000ull, GS_REG_TEST_1);               // ZTST=ALWAYS
+            appendGifAd(packet, static_cast<uint64_t>(GS_PRIM_SPRITE), GS_REG_PRIM);
+            appendGifAd(packet, kColor, GS_REG_RGBAQ);
+            appendGifAd(packet, 0ull, GS_REG_XYZ2);
+            appendGifAd(packet, (16ull << 4) | ((16ull << 4) << 16), GS_REG_XYZ2);
+            std::memcpy(rdram + kPacketAddr, packet.data(), packet.size());
+
+            R5900Context ctx{};
+            setRegU32(ctx, 4, kPacketAddr);
+            ps2_stubs::sceGsPutDrawEnv(rdram, &ctx, &runtime);
+
+            t.Equals(static_cast<int32_t>(getRegU32Test(ctx, 2)), 0,
+                     "sceGsPutDrawEnv should return 0 after starting the GIF DMA");
+
+            auto pixel = [&](uint32_t x, uint32_t y)
+            {
+                uint32_t value = 0u;
+                std::memcpy(&value, vram + GSPSMCT32::addrPSMCT32(0u, 1u, x, y), sizeof(value));
+                return value;
+            };
+            t.Equals(pixel(0u, 0u), kColor, "the sprite after the draw env should reach the GS");
+            t.Equals(pixel(15u, 15u), kColor, "the sprite should cover its whole 16x16 rectangle");
+            t.Equals(pixel(16u, 0u), 0u, "the sprite should stop at its right edge");
+        });
+
+        tc.Run("sceGsSwapDBuff sends its GIFtag packet, so the seeded clear runs", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+
+            uint8_t *const rdram = runtime.memory().getRDRAM();
+            uint8_t *const vram = runtime.memory().getGSVRAM();
+            constexpr uint32_t kEnvAddr = 0x7000u;
+            constexpr uint32_t kColor = 0x80123456u;
+            constexpr uint32_t kDirty = 0xABABABABu;
+
+            // libgraph sceGsSetDefDBuff layout with clear enabled: GIFtag NLOOP 14
+            // = 8 draw-env pairs + the 6-pair sceGsSetDefClear packet.
+            GsDBuffMem db{};
+            db.giftag0 = {makeGifTag(14u, 0u, 1u), 0xEull};
+            seedGsDrawEnv1(db.draw0, 640, 448, 0u, 10u, 0u, 140u, 0u, 0u, false);
+            const uint64_t xyz0 = ((0x800ull - 320u) << 4) | (((0x800ull - 224u) << 4) << 16);
+            const uint64_t xyz1 = ((0x800ull + 320u) << 4) | (((0x800ull + 224u) << 4) << 16);
+            db.clear0.testa = {0x30000ull, GS_REG_TEST_1};
+            db.clear0.prim = {static_cast<uint64_t>(GS_PRIM_SPRITE), GS_REG_PRIM};
+            db.clear0.rgbaq = {kColor, GS_REG_RGBAQ};
+            db.clear0.xyz2a = {xyz0, GS_REG_XYZ2};
+            db.clear0.xyz2b = {xyz1, GS_REG_XYZ2};
+            db.clear0.testb = {0x30000ull, GS_REG_TEST_1};
+            std::memcpy(rdram + kEnvAddr, &db, sizeof(db));
+
+            auto pixelAddr = [](uint32_t x, uint32_t y) { return GSPSMCT32::addrPSMCT32(0u, 10u, x, y); };
+            std::memcpy(vram + pixelAddr(0u, 0u), &kDirty, sizeof(kDirty));
+            std::memcpy(vram + pixelAddr(639u, 447u), &kDirty, sizeof(kDirty));
+
+            R5900Context ctx{};
+            setRegU32(ctx, 4, kEnvAddr);
+            setRegU32(ctx, 5, 0u);
+            ps2_stubs::sceGsSwapDBuff(rdram, &ctx, &runtime);
+
+            uint32_t first = 0u;
+            uint32_t last = 0u;
+            std::memcpy(&first, vram + pixelAddr(0u, 0u), sizeof(first));
+            std::memcpy(&last, vram + pixelAddr(639u, 447u), sizeof(last));
+            t.Equals(first, kColor, "the clear pairs inside the GIFtag's NLOOP should clear the draw buffer");
+            t.Equals(last, kColor, "the clear should cover the whole 640x448 draw buffer");
+        });
+
+        tc.Run("sceGsSwapDBuffDc sends only the pairs its GIFtag NLOOP covers", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+
+            uint8_t *const rdram = runtime.memory().getRDRAM();
+            uint8_t *const vram = runtime.memory().getGSVRAM();
+            constexpr uint32_t kEnvAddr = 0x7400u;
+            constexpr uint32_t kDirty = 0xABABABABu;
+
+            R5900Context ctx{};
+            setRegU32(ctx, 4, kEnvAddr);
+            setRegU32(ctx, 5, 0u);
+            setRegU32(ctx, 6, 640u);
+            setRegU32(ctx, 7, 448u);
+            setRegU32(ctx, 8, 0u);  // ztest
+            setRegU32(ctx, 9, 0u);  // zpsm
+            setRegU32(ctx, 10, 1u); // clear
+            ps2_stubs::sceGsSetDefDBuffDc(rdram, &ctx, &runtime);
+
+            // Cut NLOOP back to the 16 draw-env pairs: the seeded clear is still
+            // in memory, but the GIF never reaches it.
+            uint64_t giftag = 0u;
+            std::memcpy(&giftag, rdram + kEnvAddr + offsetof(GsDBuffDcMem, giftag0), sizeof(giftag));
+            t.Equals(giftag & 0x7FFFull, 22ull, "a clearing DBuffDc GIFtag should cover 16 draw + 6 clear pairs");
+            giftag = (giftag & ~0x7FFFull) | 16ull;
+            std::memcpy(rdram + kEnvAddr + offsetof(GsDBuffDcMem, giftag0), &giftag, sizeof(giftag));
+            std::memcpy(vram, &kDirty, sizeof(kDirty));
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, kEnvAddr);
+            setRegU32(ctx, 5, 0u);
+            ps2_stubs::sceGsSwapDBuffDc(rdram, &ctx, &runtime);
+
+            uint32_t pixel = 0u;
+            std::memcpy(&pixel, vram, sizeof(pixel));
+            t.Equals(pixel, kDirty, "pairs past the GIFtag's NLOOP must not reach the GS");
         });
 
         tc.Run("sceGsSyncV resumes through the scheduler with deterministic field parity", [](TestCase &t)
