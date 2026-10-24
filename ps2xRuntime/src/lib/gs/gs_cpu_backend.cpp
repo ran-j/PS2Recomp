@@ -877,7 +877,10 @@ void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uin
         return;
     }
 
-    const uint32_t ztestMethod = static_cast<uint32_t>((ctx.test >> 17) & 3u);
+    // Disabling TEST.ZTE bypasses depth testing and also prevents depth writes.
+    // The stored ZTST value does not apply while the test is disabled.
+    const bool ztestEnabled = ((ctx.test >> 16) & 1u) != 0u;
+    const uint32_t ztestMethod = ztestEnabled ? static_cast<uint32_t>((ctx.test >> 17) & 3u) : 1u;
     const bool alphaBlendEnabled = state.prim.abe;
     const bool preserveDestinationAlpha = writeMask.writeRgb && !writeMask.writeAlpha && fpsm == GS_PSM_CT32;
     const bool destinationAlphaTestNeedsRead = ((ctx.test >> 14) & 0x1u) != 0u && (fpsm == GS_PSM_CT32 || fpsm == GS_PSM_CT16 || fpsm == GS_PSM_CT16S);
@@ -1006,7 +1009,7 @@ void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uin
         WriteVramUnlocked(fpsm, fbp, fbw, x, y, pixel);
     }
 
-    if (writeMask.writeDepth && !ctx.zbuf.zmask)
+    if (ztestEnabled && writeMask.writeDepth && !ctx.zbuf.zmask)
     {
         WriteVramUnlocked(zpsm, zbp, fbw, x, y, z);
     }
