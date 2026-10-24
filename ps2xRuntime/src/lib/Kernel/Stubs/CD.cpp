@@ -31,6 +31,35 @@ namespace ps2_stubs
         uint32_t g_cdStReadTraceCount = 0u;
         CdStreamTimingState g_cdStreamTiming;
 
+        // libcdvd completion callback registered with sceCdCallback.
+        uint32_t g_cdCallback = 0u;
+        uint32_t g_cdCallbackGp = 0u;
+        // libcdvd SCECdFunc* codes, passed to the callback.
+        constexpr uint32_t kCdFuncRead = 1u;
+        constexpr uint32_t kCdFuncGetToc = 3u;
+        constexpr uint32_t kCdFuncSeek = 4u;
+        constexpr uint32_t kCdFuncStandby = 5u;
+        constexpr uint32_t kCdFuncStop = 6u;
+        constexpr uint32_t kCdFuncPause = 7u;
+
+        // Commands complete synchronously here, so the callback runs on the next
+        // scheduling point, like the IOP completion interrupt on hardware.
+        void queueCdCallback(PS2Runtime *runtime, uint32_t function)
+        {
+            if (runtime == nullptr || g_cdCallback == 0u || !runtime->hasFunction(g_cdCallback))
+            {
+                return;
+            }
+            GuestInvocation invocation{};
+            invocation.kind = GuestInvocationKind::CdCallback;
+            invocation.context.pc = g_cdCallback;
+            SET_GPR_U32(&invocation.context, 4, function);
+            SET_GPR_U32(&invocation.context, 28, g_cdCallbackGp);
+            SET_GPR_U32(&invocation.context, 29, 0u);
+            SET_GPR_U32(&invocation.context, 31, 0u);
+            runtime->eeScheduler().queueInvocation(std::move(invocation));
+        }
+
         uint64_t currentCdStreamTick(PS2Runtime *runtime)
         {
             return runtime != nullptr ? runtime->eeScheduler().currentVSyncTick() : 0u;
@@ -317,6 +346,7 @@ namespace ps2_stubs
         {
             g_cdStreamingLbn = selected.lbn + selected.sectors;
             setReturnS32(ctx, 1); // command accepted/success
+            queueCdCallback(runtime, kCdFuncRead);
             return;
         }
 
@@ -355,7 +385,11 @@ namespace ps2_stubs
 
     void sceCdCallback(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        setReturnS32(ctx, 0);
+        // Returns the previous callback, like libcdvd.
+        const uint32_t previous = g_cdCallback;
+        g_cdCallback = getRegU32(ctx, 4);
+        g_cdCallbackGp = getRegU32(ctx, 28);
+        setReturnU32(ctx, previous);
     }
 
     void sceCdChangeThreadPriority(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -392,6 +426,7 @@ namespace ps2_stubs
             std::memset(toc, 0, 1024);
         }
         setReturnS32(ctx, 1);
+        queueCdCallback(runtime, kCdFuncGetToc);
     }
 
     void sceCdInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -445,6 +480,7 @@ namespace ps2_stubs
     void sceCdPause(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 1);
+        queueCdCallback(runtime, kCdFuncPause);
     }
 
     void sceCdPosToInt(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -652,11 +688,13 @@ namespace ps2_stubs
     {
         restartCdStreamAt(getRegU32(ctx, 4), runtime);
         setReturnS32(ctx, 1);
+        queueCdCallback(runtime, kCdFuncSeek);
     }
 
     void sceCdStandby(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 1);
+        queueCdCallback(runtime, kCdFuncStandby);
     }
 
     void sceCdStatus(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -689,6 +727,7 @@ namespace ps2_stubs
     void sceCdStop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 1);
+        queueCdCallback(runtime, kCdFuncStop);
     }
 
     void sceCdStPause(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

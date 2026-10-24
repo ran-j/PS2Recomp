@@ -91,6 +91,7 @@ enum class GuestInvocationKind : uint8_t
     ExitHandler,
     HleCall,
     SifCommand,
+    CdCallback,
 };
 
 struct GuestInvocation
