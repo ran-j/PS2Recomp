@@ -674,11 +674,22 @@ void register_ps2_runtime_kernel_tests()
             EeScheduler &ee = env.runtime.eeScheduler();
             ee.reset(env.rdram.data(), env.ctx);
             ee.bindMainContextForSyscall(env.ctx, env.rdram.data());
+            // StartThread refuses entries that are not recompiled function
+            // starts, so register the thread entry as one.
+            env.runtime.registerFunction(K_SCHED_HIGH, schedulerHigh);
 
             const int id = ee.createThread(EeThreadCreateParams{0u, K_SCHED_HIGH, 0x24000u, 0x800u,
                                                                  0u, 20, 0u});
             t.Equals(ee.startThread(id, 0xCAFEu, env.ctx, false), KE_OK, "StartThread should make a dormant thread ready");
             t.IsTrue(ee.thread(id)->status == EeThreadStatus::Ready, "started thread should be in one ready queue");
+
+            // An entry inside a known function (not its start) must be
+            // refused: the scheduler would otherwise run a function tail on a
+            // foreign register file.
+            const int tailId = ee.createThread(EeThreadCreateParams{0u, K_SCHED_HIGH + 4u, 0x24000u, 0x800u,
+                                                                     0u, 20, 0u});
+            t.Equals(ee.startThread(tailId, 0u, env.ctx, false), KE_ERROR,
+                     "StartThread must refuse a mid-function entry");
             t.Equals(ee.suspendThread(id, false), KE_OK, "first suspend should remove the ready thread");
             t.Equals(ee.suspendThread(id, false), KE_OK, "nested suspend should increment suspendCount");
             t.IsTrue(ee.thread(id)->status == EeThreadStatus::Suspended && ee.thread(id)->suspendCount == 2,
