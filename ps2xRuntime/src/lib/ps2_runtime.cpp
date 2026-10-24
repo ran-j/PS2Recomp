@@ -605,6 +605,12 @@ void PS2Runtime::notifyIopSifTransfer(uint8_t *rdram, const ps2x::iop::SifTransf
     m_iopSubsystem->onSifTransfer(transfer);
 }
 
+bool PS2Runtime::sendIopSifCommand(uint8_t *rdram, uint32_t commandId, const void *packet, size_t packetSize)
+{
+    auto scope = m_iopHost->enterCall(nullptr, rdram);
+    return m_iopSubsystem->receiveSifCommand(commandId, packet, packetSize);
+}
+
 void PS2Runtime::advanceIopEeCycles(uint64_t eeCycles) noexcept
 {
     m_iopSubsystem->runEeCycles(eeCycles);

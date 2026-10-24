@@ -209,6 +209,23 @@ namespace iop_test
         return image;
     }
 
+    // rpcServer whose function stores sceSifGetSreg(reg) (sifcmd#6, second
+    // stub at 0x1007C) in its buffer at 0x10400 and returns that buffer.
+    inline Irx sregReader(uint32_t sid, uint32_t reg)
+    {
+        Irx image = rpcServer(sid, 0u);
+        image.words(0x7Cu, {0x03E00008u, 0x24000006u, 0u, 0u});
+        image.words(0x300u, {
+            0x27BDFFE0u, 0xAFBF001Cu,          // save ra
+            0x0C00401Fu, 0x24040000u | reg,    // jal 0x1007C: sceSifGetSreg(reg)
+            0x3C010001u, 0xAC220400u,          // sw v0, 0x10400
+            0x8FBF001Cu,                       // lw ra; jr ra must not sit in its load delay slot
+            0x3C020001u, 0x34420400u,          // return 0x10400
+            0x03E00008u, 0x27BD0020u,
+        });
+        return image;
+    }
+
     struct Test
     {
         const char *name;

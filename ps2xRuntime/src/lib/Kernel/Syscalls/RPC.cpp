@@ -2,6 +2,10 @@
 #include "RPC.h"
 #include "../../ps2_iop_transport.h"
 
+#include <array>
+#include <atomic>
+#include <cstring>
+
 namespace ps2_syscalls
 {
     namespace
@@ -970,34 +974,62 @@ namespace ps2_syscalls
 
     void sceSifSendCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        uint32_t cid = getRegU32(ctx, 4);
-        uint32_t packetAddr = getRegU32(ctx, 5);
-        uint32_t packetSize = getRegU32(ctx, 6);
-        uint32_t srcExtra = getRegU32(ctx, 7);
+        // sceSifSendCmd(cid, packet, packetSize, srcExtra, destExtra, sizeExtra).
+        // The EE passes the fifth and sixth arguments in t0/t1 (EABI). As in
+        // the SDK, the optional extra block is DMAed to destExtra in IOP RAM
+        // first, then the packet goes to the IOP's command dispatcher with its
+        // header filled in: psize | dsize << 8, dest, cid. Returns a non-zero
+        // DMA id, 0 for a malformed request.
+        constexpr uint32_t kHeaderSize = 16u;
+        constexpr uint32_t kMaxPacketSize = 112u;
+        const uint32_t cid = getRegU32(ctx, 4);
+        const uint32_t packetAddr = getRegU32(ctx, 5);
+        const uint32_t packetSize = getRegU32(ctx, 6);
+        const uint32_t srcExtra = getRegU32(ctx, 7);
+        const int32_t sizeExtraArgument = static_cast<int32_t>(getRegU32(ctx, 9));
 
-        uint32_t sp = getRegU32(ctx, 29);
-        uint32_t destExtra = 0;
-        uint32_t sizeExtra = 0;
-        readStackU32(rdram, sp, 0x10, destExtra);
-        readStackU32(rdram, sp, 0x14, sizeExtra);
-
-        if (sizeExtra > 0 && srcExtra && destExtra)
+        // Host view of a guest range, or null unless it is one contiguous block.
+        const auto eeRange = [rdram](uint32_t address, uint32_t size) -> const uint8_t *
         {
-            rpcCopyToRdram(rdram, destExtra, srcExtra, sizeExtra);
+            const uint8_t *first = getConstMemPtr(rdram, address);
+            const uint8_t *last = getConstMemPtr(rdram, address + size - 1u);
+            return first && last && last >= first && static_cast<size_t>(last - first) == size - 1u ? first : nullptr;
+        };
+
+        const uint8_t *guestPacket = packetSize >= kHeaderSize && packetSize <= kMaxPacketSize
+                                         ? eeRange(packetAddr, packetSize)
+                                         : nullptr;
+        if (!guestPacket || !runtime)
+        {
+            setReturnU32(ctx, 0u);
+            return;
         }
 
-        static int logCount = 0;
-        if (logCount < 5)
+        uint32_t destExtra = 0u;
+        uint32_t sizeExtra = 0u;
+        if (sizeExtraArgument > 0)
         {
-            RUNTIME_LOG("[sceSifSendCmd] cid=0x" << std::hex << cid
-                                                 << " packet=0x" << packetAddr
-                                                 << " psize=0x" << packetSize
-                                                 << " extra=0x" << destExtra << std::dec << std::endl);
-            ++logCount;
+            destExtra = getRegU32(ctx, 8);
+            sizeExtra = static_cast<uint32_t>(sizeExtraArgument);
+            const uint8_t *extra = srcExtra != 0u && destExtra != 0u ? eeRange(srcExtra, sizeExtra) : nullptr;
+            if (!extra || !runtime->writeIopMemory(destExtra, extra, sizeExtra))
+            {
+                setReturnU32(ctx, 0u);
+                return;
+            }
         }
 
-        // Return non-zero on success.
-        setReturnS32(ctx, 1);
+        std::array<uint8_t, kMaxPacketSize> packet{};
+        std::memcpy(packet.data(), guestPacket, packetSize);
+        const uint32_t sizeWord = packetSize | (sizeExtra << 8u);
+        std::memcpy(packet.data() + 0u, &sizeWord, sizeof(sizeWord));
+        std::memcpy(packet.data() + 4u, &destExtra, sizeof(destExtra));
+        std::memcpy(packet.data() + 8u, &cid, sizeof(cid));
+        // A command no IOP module handles is still a completed DMA.
+        (void)PS2IopTransport::sendSifCommand(runtime, rdram, cid, packet.data(), packetSize);
+
+        static std::atomic<uint32_t> s_dmaSequence{0u};
+        setReturnU32(ctx, s_dmaSequence.fetch_add(1u, std::memory_order_relaxed) % 0x7FFFFFFFu + 1u);
     }
 
     void sceRpcGetPacket(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
