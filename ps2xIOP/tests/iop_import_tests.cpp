@@ -4,6 +4,7 @@
 #include "emulator/imports/iop_cdvd.h"
 #include "emulator/imports/iop_imports.h"
 #include "emulator/imports/iop_loadcore.h"
+#include "emulator/imports/iop_sysmem.h"
 #include "emulator/imports/iop_timrman.h"
 #include "emulator/services/iop_rpc.h"
 #include "ps2x/iop/iop_host.h"
@@ -274,6 +275,31 @@ namespace
         return passed;
     }
 
+    bool testSysmemRejectsWrappingAllocations()
+    {
+        NullHost host;
+        IopMemory memory;
+        IopSysmem sysmem(host, memory);
+        const auto allocSysMemory = [&](uint32_t mode, uint32_t size, uint32_t address)
+        {
+            IopCpuState cpu{};
+            cpu.gpr[4] = mode;
+            cpu.gpr[5] = size;
+            cpu.gpr[6] = address;
+            return sysmem.dispatchImport(4u, cpu) ? cpu.gpr[2] : 0xDEADDEADu;
+        };
+
+        // Neither request fits in IOP RAM: the first size rounds up past 4 GiB
+        // to 0 bytes, and the fixed block's end wraps past 4 GiB below HeapLimit.
+        const bool hugeSizeRejected =
+            expect(allocSysMemory(0u, 0xFFFFFFF8u, 0u) == 0u,
+                   "AllocSysMemory returned a block for a size that rounds up past 4 GiB");
+        const bool wrappingBlockRejected =
+            expect(allocSysMemory(2u, 0x20000u, 0xFFFF0000u) == 0u,
+                   "AllocSysMemory(ALLOC_ADDRESS) returned a block whose end wraps past 4 GiB");
+        return hugeSizeRejected && wrappingBlockRejected;
+    }
+
     bool testTimrmanPeriodicCallback()
     {
         IopTimrman timrman;
@@ -330,6 +356,8 @@ namespace
 
 int main()
 {
+    if (!testSysmemRejectsWrappingAllocations())
+        return 1;
     if (!testLoadcoreRebootLibraryMode() || !testCdvdSpecialControl() || !testCdvdSearchFile() ||
         !testTimrmanPeriodicCallback())
         return 1;
