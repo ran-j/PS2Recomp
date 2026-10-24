@@ -705,6 +705,63 @@ void register_ps2_gs_tests()
                      "sceGsSwapDBuffDc should honor a clear packet seeded from register-based trailing args");
         });
 
+        tc.Run("sceGsSetDefClear writes the libgraph six-pair clear packet and returns 6", [](TestCase &t)
+        {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            constexpr uint32_t kClearAddr = 0x5800u;
+            constexpr uint32_t kStackAddr = 0xB00u;
+            constexpr uint32_t kPacketBytes = 0x60u;
+            const uint32_t kB = 0x30u;
+            const uint32_t kA = 0x40u;
+            const uint32_t kZ = 0x1234u;
+
+            R5900Context ctx{};
+            setRegU32(ctx, 4, kClearAddr);
+            setRegU32(ctx, 5, 2u);      // ztest
+            setRegU32(ctx, 6, 0x7C0u);  // x
+            setRegU32(ctx, 7, 0x7F0u);  // y
+            setRegU32(ctx, 8, 128u);    // w
+            setRegU32(ctx, 9, 32u);     // h
+            setRegU32(ctx, 10, 0x10u);  // r
+            setRegU32(ctx, 11, 0x20u);  // g
+            setRegU32(ctx, 29, kStackAddr);
+            std::memcpy(rdram.data() + kStackAddr + 0u, &kB, sizeof(kB));
+            std::memcpy(rdram.data() + kStackAddr + 8u, &kA, sizeof(kA));
+            std::memcpy(rdram.data() + kStackAddr + 16u, &kZ, sizeof(kZ));
+            std::memset(rdram.data() + kClearAddr, 0xCD, kPacketBytes + 16u);
+
+            ps2_stubs::sceGsSetDefClear(rdram.data(), &ctx, nullptr);
+
+            t.Equals(static_cast<int32_t>(getRegU32Test(ctx, 2)), 6,
+                     "sceGsSetDefClear should return the six pairs it wrote");
+
+            const uint64_t expected[12] = {
+                0x30000ull, 0x47ull,                 // TEST_1: ZTE=1, ZTST=ALWAYS
+                0x6ull, 0x00ull,                     // PRIM: SPRITE
+                0x3F80000040302010ull, 0x01ull,      // RGBAQ: r,g,b,a, Q=1.0f
+                0x000012347F007C00ull, 0x05ull,      // XYZ2: (x<<4, y<<4, z)
+                0x0000123481008400ull, 0x05ull,      // XYZ2: ((x+w)<<4, (y+h)<<4, z)
+                0x50000ull, 0x47ull,                 // TEST_1: ZTE=1, ZTST=ztest
+            };
+            for (uint32_t i = 0; i < 12u; ++i)
+            {
+                uint64_t actual = 0u;
+                std::memcpy(&actual, rdram.data() + kClearAddr + i * 8u, sizeof(actual));
+                t.Equals(actual, expected[i], "sceGsSetDefClear packet qword " + std::to_string(i));
+            }
+            uint64_t past = 0u;
+            std::memcpy(&past, rdram.data() + kClearAddr + kPacketBytes, sizeof(past));
+            t.Equals(past, 0xCDCDCDCDCDCDCDCDull, "sceGsSetDefClear should write exactly six pairs");
+
+            setRegU32(ctx, 4, kClearAddr);
+            setRegU32(ctx, 5, 0u);
+            ps2_stubs::sceGsSetDefClear(rdram.data(), &ctx, nullptr);
+            uint64_t restoreTest = 0u;
+            std::memcpy(&restoreTest, rdram.data() + kClearAddr + 0x50u, sizeof(restoreTest));
+            t.Equals(restoreTest, 0x30000ull,
+                     "ztest 0 should restore TEST_1 with ZTST=ALWAYS, as libgraph does");
+        });
+
         tc.Run("clearFramebufferContext clears the requested context even if another context is active", [](TestCase &t)
         {
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);

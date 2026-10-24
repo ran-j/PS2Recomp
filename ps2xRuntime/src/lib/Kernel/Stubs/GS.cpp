@@ -858,12 +858,45 @@ namespace ps2_stubs
         setReturnS32(ctx, 0);
     }
 
+    // libgraph sceGsSetDefClear(sceGsClear *cp, short ztest, short x, short y,
+    // short w, short h, u_char r, u_char g, u_char b, u_char a, u_int z):
+    // writes a six A+D pair clear packet (TEST, PRIM, RGBAQ, XYZ2, XYZ2, TEST)
+    // and returns 6, the number of pairs written. EE ABI: cp/ztest/x/y in
+    // a0-a3, w/h/r/g in t0-t3, and b/a/z in the 8-byte stack slots at
+    // $sp+0/+8/+16 (the function has no frame of its own).
     void sceGsSetDefClear(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        (void)rdram;
-        (void)ctx;
         (void)runtime;
-        setReturnS32(ctx, 0);
+        const uint32_t clearAddr = getRegU32(ctx, 4);
+        const int16_t ztest = static_cast<int16_t>(getRegU32(ctx, 5) & 0xFFFFu);
+        const int32_t x = static_cast<int16_t>(getRegU32(ctx, 6) & 0xFFFFu);
+        const int32_t y = static_cast<int16_t>(getRegU32(ctx, 7) & 0xFFFFu);
+        const int32_t w = static_cast<int16_t>(getRegU32(ctx, 8) & 0xFFFFu);
+        const int32_t h = static_cast<int16_t>(getRegU32(ctx, 9) & 0xFFFFu);
+        const uint64_t r = getRegU32(ctx, 10) & 0xFFu;
+        const uint64_t g = getRegU32(ctx, 11) & 0xFFu;
+        const uint64_t b = readStackU32(rdram, ctx, 0) & 0xFFu;
+        const uint64_t a = readStackU32(rdram, ctx, 8) & 0xFFu;
+        const uint64_t z = readStackU32(rdram, ctx, 16);
+        constexpr uint64_t kQOne = 0x3F800000ULL; // RGBAQ.Q = 1.0f
+        constexpr uint64_t kTestZAlways = 0x30000ULL; // ZTE=1, ZTST=ALWAYS
+
+        GsClearMem clear{};
+        clear.testa = {kTestZAlways, GS_REG_TEST_1};
+        clear.prim = {static_cast<uint64_t>(GS_PRIM_SPRITE), GS_REG_PRIM};
+        clear.rgbaq = {r | (g << 8) | (b << 16) | (a << 24) | (kQOne << 32), GS_REG_RGBAQ};
+        clear.xyz2a = {makeClearXyz(x, y) | (z << 32), GS_REG_XYZ2};
+        clear.xyz2b = {makeClearXyz(x + w, y + h) | (z << 32), GS_REG_XYZ2};
+        clear.testb = {ztest == 0 ? kTestZAlways
+                                  : ((static_cast<uint64_t>(ztest & 0x3) << 17) | 0x10000ULL),
+                       GS_REG_TEST_1};
+
+        uint8_t *const ptr = getMemPtr(rdram, clearAddr);
+        if (ptr)
+        {
+            std::memcpy(ptr, &clear, sizeof(clear));
+        }
+        setReturnS32(ctx, 6);
     }
 
     void sceGsSetDefDBuffDc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
