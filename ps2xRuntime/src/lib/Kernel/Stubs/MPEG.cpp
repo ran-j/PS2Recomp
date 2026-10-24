@@ -2007,6 +2007,9 @@ namespace ps2_stubs
         const uint32_t innerSize = static_cast<uint32_t>(iVar2_signed) - 0x118u;
 
         mpegGuestWrite32(rdram, param_1 + 0x40, uVar3);
+        // sys word 0 is libmpeg's end-of-stream flag: sceMpegIsEnd returns it, and games link their own copy of
+        // that function, so it must start cleared (the work area may hold anything).
+        mpegGuestWrite32(rdram, uVar3 + 0x00, 0u);
 
         const uint32_t a1_init = uVar3 + 0x118u;
         mpegGuestWrite32(rdram, puVar4 + 0x0, a1_init);
