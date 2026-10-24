@@ -158,14 +158,23 @@ namespace
         runtime->requestStop();
     }
 
-    void writeGsImageTest(uint8_t *rdram, uint32_t addr, const GsImageMem &image)
+    // Builds the SDK sceGsLoadImage/sceGsStoreImage packet through the stub, with the canonical
+    // argument order (p, bp, bw, psm, x, y, w, h).
+    void setDefGsImageTest(uint8_t *rdram, PS2Runtime &runtime, uint32_t addr, const GsImageMem &image, bool store)
     {
-        std::memcpy(rdram + addr, &image, sizeof(image));
-    }
-
-    void writeGsImageTest(std::vector<uint8_t> &rdram, uint32_t addr, const GsImageMem &image)
-    {
-        writeGsImageTest(rdram.data(), addr, image);
+        R5900Context ctx{};
+        setRegU32(ctx, 4, addr);
+        setRegU32(ctx, 5, image.vram_addr);
+        setRegU32(ctx, 6, image.vram_width);
+        setRegU32(ctx, 7, image.psm);
+        setRegU32(ctx, 8, image.x);
+        setRegU32(ctx, 9, image.y);
+        setRegU32(ctx, 10, image.width);
+        setRegU32(ctx, 11, image.height);
+        if (store)
+            ps2_stubs::sceGsSetDefStoreImage(rdram, &ctx, &runtime);
+        else
+            ps2_stubs::sceGsSetDefLoadImage(rdram, &ctx, &runtime);
     }
 
     void writePSMT4Texel(std::vector<uint8_t> &vram, uint32_t tbp, uint32_t tbw, uint32_t x, uint32_t y, uint8_t index)
@@ -3951,6 +3960,7 @@ void register_ps2_gs_tests()
             t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
             uint8_t *const rdram = runtime.memory().getRDRAM();
             constexpr uint32_t kImageAddr = 0x4000u;
+            constexpr uint32_t kStoreImageAddr = 0x4800u;
             constexpr uint32_t kSrcAddr = 0x5000u;
             constexpr uint32_t kDstAddr = 0x6000u;
 
@@ -3962,7 +3972,8 @@ void register_ps2_gs_tests()
                 0xD0u, 0xE0u, 0xF0u, 0xFFu,
             };
 
-            writeGsImageTest(rdram, kImageAddr, image);
+            setDefGsImageTest(rdram, runtime, kImageAddr, image, false);
+            setDefGsImageTest(rdram, runtime, kStoreImageAddr, image, true);
             std::memcpy(rdram + kSrcAddr, pixels, sizeof(pixels));
 
             R5900Context loadCtx{};
@@ -3991,7 +4002,7 @@ void register_ps2_gs_tests()
                                     "sceGsExecLoadImage should free its temporary GIF packet");
 
             R5900Context storeCtx{};
-            setRegU32(storeCtx, 4, kImageAddr);
+            setRegU32(storeCtx, 4, kStoreImageAddr);
             setRegU32(storeCtx, 5, kDstAddr);
             ps2_stubs::sceGsExecStoreImage(rdram, &storeCtx, &runtime);
             t.Equals(static_cast<int32_t>(getRegU32Test(storeCtx, 2)), 0,
@@ -4033,6 +4044,62 @@ void register_ps2_gs_tests()
                        ", got " + std::to_string(rdram[kDstAddr + mismatchIndex]) +
                        ", expected " + std::to_string(pixels[mismatchIndex]) + ")");
             }
+        });
+
+        tc.Run("sceGsSetDefLoadImage and sceGsSetDefStoreImage write SDK packet layouts", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+            uint8_t *const rdram = runtime.memory().getRDRAM();
+            constexpr uint32_t kLoadAddr = 0x4000u;
+            constexpr uint32_t kStoreAddr = 0x4800u;
+
+            // bp 0x1A40 (64-word blocks), bw 4, PSMCT16, x 16, y 32, 64x8
+            const GsImageMem image{16u, 32u, 64u, 8u, 0x1A40u, 4u, 2u};
+            setDefGsImageTest(rdram, runtime, kLoadAddr, image, false);
+            setDefGsImageTest(rdram, runtime, kStoreAddr, image, true);
+
+            uint64_t lq[12] = {};
+            std::memcpy(lq, rdram + kLoadAddr, sizeof(lq));
+            t.Equals(lq[0] & 0x7FFFull, 4ull, "load packet A+D GIFtag should have NLOOP 4");
+            t.Equals((lq[0] >> 15) & 1ull, 0ull, "load packet A+D GIFtag must leave EOP clear (IMAGE tag follows)");
+            t.Equals(lq[1], 0xEull, "load packet A+D GIFtag register list should be A+D");
+            t.Equals(lq[3], 0x50ull, "load packet qword 1 should target BITBLTBUF");
+            t.Equals((lq[2] >> 32) & 0x3FFFull, 0x1A40ull, "load BITBLTBUF.DBP should be the dbp argument, unscaled");
+            t.Equals((lq[2] >> 48) & 0x3Full, 4ull, "load BITBLTBUF.DBW should be the dbw argument");
+            t.Equals((lq[2] >> 56) & 0x3Full, 2ull, "load BITBLTBUF.DPSM should be the psm argument");
+            t.Equals(lq[5], 0x51ull, "load packet qword 2 should target TRXPOS");
+            t.Equals((lq[4] >> 32) & 0x7FFull, 16ull, "load TRXPOS.DSAX should be x");
+            t.Equals((lq[4] >> 48) & 0x7FFull, 32ull, "load TRXPOS.DSAY should be y");
+            t.Equals(lq[7], 0x52ull, "load packet qword 3 should target TRXREG");
+            t.Equals(lq[6], (8ull << 32) | 64ull, "load TRXREG should hold width and height");
+            t.Equals(lq[9], 0x53ull, "load packet qword 4 should target TRXDIR");
+            t.Equals(lq[8], 0ull, "load TRXDIR should be host to local");
+            t.Equals(lq[10] & 0x7FFFull, 64ull, "load IMAGE GIFtag NLOOP should be the image size in qwords");
+            t.Equals((lq[10] >> 15) & 1ull, 1ull, "load IMAGE GIFtag should set EOP");
+            t.Equals((lq[10] >> 58) & 3ull, 2ull, "load IMAGE GIFtag should use IMAGE mode");
+
+            uint64_t sq[14] = {};
+            std::memcpy(sq, rdram + kStoreAddr, sizeof(sq));
+            t.Equals(sq[0], 0x5000000613000000ull, "store packet should start with VIF FLUSHA and DIRECT 6");
+            t.Equals(sq[2] & 0x7FFFull, 5ull, "store packet A+D GIFtag should have NLOOP 5");
+            t.Equals(sq[5], 0x50ull, "store packet should target BITBLTBUF at +0x20");
+            t.Equals(sq[4] & 0x3FFFull, 0x1A40ull, "store BITBLTBUF.SBP should be the sbp argument, unscaled");
+            t.Equals(sq[7], 0x51ull, "store packet should target TRXPOS at +0x30");
+            t.Equals(sq[6], (32ull << 16) | 16ull, "store TRXPOS should hold SSAX/SSAY");
+            t.Equals(sq[9], 0x52ull, "store packet should target TRXREG at +0x40");
+            t.Equals(sq[11], 0x61ull, "store packet should emit FINISH");
+            t.Equals(sq[13], 0x53ull, "store packet should end with TRXDIR");
+            t.Equals(sq[12], 1ull, "store TRXDIR should be local to host");
+
+            // Games may patch fields in place before calling sceGsExec*Image; the stubs must read them back.
+            GsImageMem readBack{};
+            t.IsTrue(readGsImage(rdram, kStoreAddr, readBack, true), "readGsImage should decode the store packet");
+            t.Equals(static_cast<uint32_t>(readBack.vram_addr), 0x1A40u, "store packet should decode SBP");
+            t.Equals(static_cast<uint32_t>(readBack.x), 16u, "store packet should decode SSAX");
+            t.Equals(static_cast<uint32_t>(readBack.y), 32u, "store packet should decode SSAY");
+            t.Equals(static_cast<uint32_t>(readBack.width), 64u, "store packet should decode width");
+            t.Equals(static_cast<uint32_t>(readBack.height), 8u, "store packet should decode height");
         });
 
         tc.Run("sceGifPkRefLoadImage seeds A+D GIFtag nloop once (no double-count)", [](TestCase &t)

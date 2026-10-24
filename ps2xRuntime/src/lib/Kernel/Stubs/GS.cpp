@@ -631,7 +631,7 @@ namespace ps2_stubs
             return;
         }
 
-        uint32_t dbp = (static_cast<uint32_t>(img.vram_addr) * 2048u) / 256u;
+        uint32_t dbp = img.vram_addr; // BITBLTBUF.DBP in 64-word blocks (the dbp passed to sceGsSetDefLoadImage)
         uint32_t dsax = static_cast<uint32_t>(img.x);
         uint32_t dsay = static_cast<uint32_t>(img.y);
 
@@ -673,7 +673,7 @@ namespace ps2_stubs
         uint32_t dstAddr = getRegU32(ctx, 5);
 
         GsImageMem img{};
-        if (!runtime || !runtime->syncCoreSubsystems() || !readGsImage(rdram, imgAddr, img))
+        if (!runtime || !runtime->syncCoreSubsystems() || !readGsImage(rdram, imgAddr, img, true))
         {
             setReturnS32(ctx, -1);
             return;
@@ -696,7 +696,7 @@ namespace ps2_stubs
             return;
         }
 
-        uint32_t sbp = (static_cast<uint32_t>(img.vram_addr) * 2048u) / 256u;
+        uint32_t sbp = img.vram_addr; // BITBLTBUF.SBP in 64-word blocks (the sbp passed to sceGsSetDefStoreImage)
         uint64_t bitbltbuf = (static_cast<uint64_t>(sbp & 0x3FFFu) << 0) |
                              (static_cast<uint64_t>(fbw & 0x3Fu) << 16) |
                              (static_cast<uint64_t>(img.psm & 0x3Fu) << 24) |
@@ -1105,7 +1105,7 @@ namespace ps2_stubs
         setReturnS32(ctx, 8);
     }
 
-    void sceGsSetDefLoadImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    static void setDefImage(uint8_t *rdram, R5900Context *ctx, bool store)
     {
         uint32_t imgAddr = getRegU32(ctx, 4);
         const GsSetDefImageArgs args = decodeGsSetDefImageArgs(rdram, ctx);
@@ -1119,13 +1119,18 @@ namespace ps2_stubs
         img.vram_width = static_cast<uint8_t>(args.vramWidth);
         img.psm = static_cast<uint8_t>(args.psm);
 
-        writeGsImage(rdram, imgAddr, img);
+        writeGsImage(rdram, imgAddr, img, store);
         setReturnS32(ctx, 0);
+    }
+
+    void sceGsSetDefLoadImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        setDefImage(rdram, ctx, false);
     }
 
     void sceGsSetDefStoreImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        sceGsSetDefLoadImage(rdram, ctx, runtime);
+        setDefImage(rdram, ctx, true);
     }
 
     void sceGsSwapDBuffDc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

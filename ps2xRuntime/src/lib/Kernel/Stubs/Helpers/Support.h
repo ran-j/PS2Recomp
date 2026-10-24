@@ -1787,21 +1787,77 @@ namespace
         return decoded;
     }
 
-    static bool readGsImage(uint8_t *rdram, uint32_t addr, GsImageMem &out)
+    // sceGsLoadImage / sceGsStoreImage use the libgraph SDK packet layout: games may send the packet themselves over DMA
+    // (e.g. a DMA CALL into the sceGsLoadImage inside a VIF/GIF chain) or patch fields before calling sceGsExec*Image.
+    // vram_addr is the BP in 64-word blocks, exactly as the dbp/sbp argument.
+    //  load (6 qw): GIFtag A+D NLOOP 4 | BITBLTBUF (dest) | TRXPOS (DSAX/DSAY) | TRXREG | TRXDIR 0 | GIFtag IMAGE EOP
+    //  store (7 qw): VIF FLUSHA + DIRECT 6 | GIFtag A+D NLOOP 5 EOP | BITBLTBUF (source) | TRXPOS (SSAX/SSAY) | TRXREG | FINISH | TRXDIR 1
+    static bool readGsImage(uint8_t *rdram, uint32_t addr, GsImageMem &out, bool store = false)
     {
         const uint8_t *ptr = getConstMemPtr(rdram, addr);
         if (!ptr)
             return false;
-        std::memcpy(&out, ptr, sizeof(out));
+        const uint32_t base = store ? 0x20u : 0x10u;
+        uint64_t bitbltbuf, trxpos, trxreg;
+        std::memcpy(&bitbltbuf, ptr + base, 8);
+        std::memcpy(&trxpos, ptr + base + 0x10u, 8);
+        std::memcpy(&trxreg, ptr + base + 0x20u, 8);
+        const uint64_t buf = store ? bitbltbuf : (bitbltbuf >> 32);
+        const uint64_t pos = store ? trxpos : (trxpos >> 32);
+        out.vram_addr = static_cast<uint16_t>(buf & 0x3FFFu);
+        out.vram_width = static_cast<uint8_t>((buf >> 16) & 0x3Fu);
+        out.psm = static_cast<uint8_t>((buf >> 24) & 0x3Fu);
+        out.x = static_cast<uint16_t>(pos & 0x7FFu);
+        out.y = static_cast<uint16_t>((pos >> 16) & 0x7FFu);
+        out.width = static_cast<uint16_t>(trxreg & 0xFFFu);
+        out.height = static_cast<uint16_t>((trxreg >> 32) & 0xFFFu);
         return true;
     }
 
-    static bool writeGsImage(uint8_t *rdram, uint32_t addr, const GsImageMem &img)
+    static bool writeGsImage(uint8_t *rdram, uint32_t addr, const GsImageMem &img, bool store = false)
     {
         uint8_t *ptr = getMemPtr(rdram, addr);
         if (!ptr)
             return false;
-        std::memcpy(ptr, &img, sizeof(img));
+        const uint64_t buf = static_cast<uint64_t>(img.vram_addr & 0x3FFFu) | (static_cast<uint64_t>(img.vram_width & 0x3Fu) << 16) |
+                             (static_cast<uint64_t>(img.psm & 0x3Fu) << 24);
+        const uint64_t pos = static_cast<uint64_t>(img.x & 0x7FFu) | (static_cast<uint64_t>(img.y & 0x7FFu) << 16);
+        const uint64_t reg = static_cast<uint64_t>(img.width & 0xFFFu) | (static_cast<uint64_t>(img.height & 0xFFFu) << 32);
+        uint64_t q[14];
+        if (store)
+        {
+            q[0] = 0x13000000ull | (0x50000006ull << 32);   // FLUSHA, DIRECT 6
+            q[1] = 0;
+            q[2] = makeGiftagAplusD(5u);
+            q[3] = 0xEull;
+            q[4] = buf;
+            q[5] = 0x50ull;   // BITBLTBUF
+            q[6] = pos;
+            q[7] = 0x51ull;   // TRXPOS
+            q[8] = reg;
+            q[9] = 0x52ull;   // TRXREG
+            q[10] = 0;
+            q[11] = 0x61ull;   // FINISH
+            q[12] = 1;
+            q[13] = 0x53ull;   // TRXDIR: local -> host
+        }
+        else
+        {
+            const uint32_t imageQwc = (bytesForPixels(img.psm, static_cast<uint32_t>(img.width)) * img.height + 15u) / 16u;
+            q[0] = makeGiftagAplusDOpen(4u);
+            q[1] = 0xEull;
+            q[2] = buf << 32;
+            q[3] = 0x50ull;
+            q[4] = pos << 32;
+            q[5] = 0x51ull;
+            q[6] = reg;
+            q[7] = 0x52ull;
+            q[8] = 0;
+            q[9] = 0x53ull;   // TRXDIR: host -> local
+            q[10] = static_cast<uint64_t>(imageQwc & 0x7FFFu) | (1ull << 15) | (2ull << 58);   // IMAGE, EOP
+            q[11] = 0;
+        }
+        std::memcpy(ptr, q, store ? 14u * 8u : 12u * 8u);
         return true;
     }
 
