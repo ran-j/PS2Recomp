@@ -753,8 +753,8 @@ namespace ps2_stubs
 
     void sceGsGetGParam(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        uint32_t addr = writeGsGParamToScratch(runtime);
-        setReturnU32(ctx, addr);
+        (void)runtime;
+        setReturnU32(ctx, writeGsGParam(rdram));
     }
 
     void sceGsPutDispEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -801,7 +801,7 @@ namespace ps2_stubs
             g_gparam.interlace = static_cast<uint8_t>(interlace & 0x1);
             g_gparam.omode = static_cast<uint8_t>(omode & 0xFF);
             g_gparam.ffmode = static_cast<uint8_t>(ffmode & 0x1);
-            writeGsGParamToScratch(runtime);
+            writeGsGParam(rdram);
             uint64_t pmode = makePmode(1, 0, 0, 0, 0, 0x80);
             uint64_t smode2 = (interlace & 0x1) | ((ffmode & 0x1) << 1);
             uint64_t dispfb = makeDispFb(0, 10, 0, 0, 0);

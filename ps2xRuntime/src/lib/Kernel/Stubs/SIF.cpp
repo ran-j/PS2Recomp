@@ -6,6 +6,7 @@
 #include "runtime/ee_scheduler.h"
 
 #include <algorithm>
+#include <bitset>
 #include <cstring>
 #include <limits>
 #include <vector>
@@ -218,10 +219,53 @@ namespace ps2_stubs
             }
             return true;
         }
+
+        // SIF command packets handed to EE handlers. On hardware the EE copies
+        // each packet out of the kernel's receive buffer onto the interrupt
+        // handler's stack, so a handler's packet never lives in title memory.
+        // Here each queued handler gets a slot in EE kernel RAM until it
+        // returns.
+        constexpr uint32_t kSifCmdPacketSlotSize = 0x80u;
+        constexpr uint32_t kSifCmdPacketSlotCount = PS2_KERNEL_SIF_CMD_SIZE / kSifCmdPacketSlotSize;
+        constexpr size_t kSifCmdMaxPacketSize = 112u;
+        static_assert(kSifCmdMaxPacketSize <= kSifCmdPacketSlotSize, "a SIF command packet must fit its slot");
+        std::mutex g_sifCmdPacketMutex;
+        std::bitset<kSifCmdPacketSlotCount> g_sifCmdPacketSlotsInUse;
+        bool g_sifCmdPacketsExhaustedReported = false;
+
+        uint32_t acquireSifCmdPacketSlot()
+        {
+            std::lock_guard<std::mutex> lock(g_sifCmdPacketMutex);
+            for (uint32_t slot = 0u; slot < kSifCmdPacketSlotCount; ++slot)
+            {
+                if (!g_sifCmdPacketSlotsInUse.test(slot))
+                {
+                    g_sifCmdPacketSlotsInUse.set(slot);
+                    return PS2_KERNEL_SIF_CMD_BASE + slot * kSifCmdPacketSlotSize;
+                }
+            }
+            if (!g_sifCmdPacketsExhaustedReported)
+            {
+                g_sifCmdPacketsExhaustedReported = true;
+                std::cerr << "[SIF] dropping IOP->EE commands: all " << kSifCmdPacketSlotCount
+                          << " packet slots are waiting for their EE handlers" << std::endl;
+            }
+            return 0u;
+        }
+
+        void releaseSifCmdPacketSlot(uint32_t address)
+        {
+            std::lock_guard<std::mutex> lock(g_sifCmdPacketMutex);
+            g_sifCmdPacketSlotsInUse.reset((address - PS2_KERNEL_SIF_CMD_BASE) / kSifCmdPacketSlotSize);
+        }
     }
 
     void resetSifState()
     {
+        {
+            std::lock_guard<std::mutex> lock(g_sifCmdPacketMutex);
+            g_sifCmdPacketSlotsInUse.reset();
+        }
         std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
         seedDefaultSifRegsLocked();
     }
@@ -232,7 +276,7 @@ namespace ps2_stubs
                             const void *packet,
                             size_t packetSize) noexcept
     {
-        if (!rdram || !runtime || !packet || packetSize < 16u || packetSize > 112u)
+        if (!rdram || !runtime || !packet || packetSize < 16u || packetSize > kSifCmdMaxPacketSize)
             return false;
 
         SifCmdHandler registered{};
@@ -247,15 +291,14 @@ namespace ps2_stubs
         if (!runtime->hasFunction(registered.function))
             return false;
 
-        const uint32_t packetAddress = runtime->guestMalloc(static_cast<uint32_t>(packetSize), 16u);
+        const uint32_t packetAddress = acquireSifCmdPacketSlot();
         if (packetAddress == 0u)
             return false;
 
         uint8_t *const first = getMemPtr(rdram, packetAddress);
-        uint8_t *const last = getMemPtr(rdram, packetAddress + static_cast<uint32_t>(packetSize - 1u));
-        if (!first || !last || last < first || static_cast<size_t>(last - first) != packetSize - 1u)
+        if (!first)
         {
-            runtime->guestFree(packetAddress);
+            releaseSifCmdPacketSlot(packetAddress);
             return false;
         }
 
@@ -275,16 +318,16 @@ namespace ps2_stubs
             SET_GPR_U32(&invocation.context, 7, 0u);
             SET_GPR_U32(&invocation.context, 29, 0u);
             SET_GPR_U32(&invocation.context, 31, 0u);
-            invocation.onComplete = [runtime, packetAddress](const R5900Context &, R5900Context &)
+            invocation.onComplete = [packetAddress](const R5900Context &, R5900Context &)
             {
-                runtime->guestFree(packetAddress);
+                releaseSifCmdPacketSlot(packetAddress);
             };
             runtime->eeScheduler().queueInvocation(std::move(invocation));
             return true;
         }
         catch (...)
         {
-            runtime->guestFree(packetAddress);
+            releaseSifCmdPacketSlot(packetAddress);
             return false;
         }
     }

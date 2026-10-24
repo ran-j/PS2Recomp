@@ -5,6 +5,7 @@
 #include "ps2_stubs.h"
 #include "runtime/ee_scheduler.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -1562,6 +1563,50 @@ void register_ps2_runtime_kernel_tests()
             t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)),
                      kExpectedHandler,
                      "GetEntryAddress should read and return the handler address from the table");
+        });
+
+        tc.Run("records the kernel hands the guest stay out of title memory", [](TestCase &t)
+        {
+            TestEnv env;
+            t.IsTrue(env.runtime.memory().initialize(), "runtime memory initialize should succeed");
+            uint8_t *const scratchpad = env.runtime.memory().getScratchpad();
+
+            // Title data: the top of RAM below the main thread's stack, where the
+            // runtime used to keep TLS blocks and boot mode records, and the
+            // scratchpad, where it kept libgraph's parameter record.
+            constexpr uint32_t kTitleDataBase = 0x01F00000u;
+            constexpr uint32_t kTitleDataEnd = 0x01F40000u;
+            constexpr uint32_t kEeKernelRamEnd = 0x00080000u; // the kernel's RAM, no title's
+            std::memset(env.rdram.data() + kTitleDataBase, 0xA5, kTitleDataEnd - kTitleDataBase);
+            std::memset(scratchpad, 0x5A, PS2_SCRATCHPAD_SIZE);
+            const std::vector<uint8_t> titleRam(env.rdram.begin() + kTitleDataBase, env.rdram.begin() + kTitleDataEnd);
+            const std::vector<uint8_t> titleScratchpad(scratchpad, scratchpad + PS2_SCRATCHPAD_SIZE);
+
+            setRegU32(env.ctx, 4, 3u);
+            QueryBootMode(env.rdram.data(), &env.ctx, &env.runtime);
+            const uint32_t bootMode = ::getRegU32(&env.ctx, 2);
+            t.IsTrue(bootMode != 0u && bootMode < kEeKernelRamEnd,
+                     "QueryBootMode(3) should return a record in EE kernel RAM");
+            t.Equals(readGuestU32(env.rdram.data(), bootMode), (1u << 24) | (3u << 16),
+                     "boot mode 3's record should carry its length and id");
+
+            GetThreadTLS(env.rdram.data(), &env.ctx, &env.runtime);
+            const uint32_t tls = ::getRegU32(&env.ctx, 2);
+            t.IsTrue(tls != 0u && tls + 0x100u <= kEeKernelRamEnd,
+                     "GetThreadTLS should return a block in EE kernel RAM");
+            t.IsTrue(std::all_of(env.rdram.begin() + tls, env.rdram.begin() + tls + 0x100u,
+                                 [](uint8_t byte) { return byte == 0u; }),
+                     "a new TLS block should be zeroed");
+
+            ps2_stubs::sceGsGetGParam(env.rdram.data(), &env.ctx, &env.runtime);
+            const uint32_t gparam = ::getRegU32(&env.ctx, 2);
+            t.IsTrue(gparam != 0u && gparam < kEeKernelRamEnd,
+                     "sceGsGetGParam should return a record in EE kernel RAM");
+
+            t.IsTrue(std::equal(titleRam.begin(), titleRam.end(), env.rdram.begin() + kTitleDataBase),
+                     "kernel records must not be written over title RAM");
+            t.IsTrue(std::equal(titleScratchpad.begin(), titleScratchpad.end(), scratchpad),
+                     "libgraph's parameter record must not be written over the title's scratchpad");
         });
     });
 }

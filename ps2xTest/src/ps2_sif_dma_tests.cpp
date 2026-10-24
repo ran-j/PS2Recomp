@@ -130,6 +130,84 @@ namespace
         ctx->pc = 0u;
         runtime->requestStop();
     }
+
+    constexpr uint32_t kSifCmdDriverPc = 0x00101100u;
+    constexpr uint32_t kSifCmdResumePc = 0x00101110u;
+    constexpr uint32_t kSifCmdHandlerPc = 0x00101120u;
+    constexpr uint32_t kSifCmdId = 0x12u;
+    constexpr uint32_t kSifCmdHandlerArg = 0x00005150u;
+    // More commands than the runtime has packet slots: each slot must come back
+    // when its handler returns.
+    constexpr uint32_t kSifCmdRounds = 80u;
+    constexpr uint32_t kEeKernelRamEnd = 0x00080000u; // the kernel's RAM, no title's
+
+    std::array<uint8_t, 32> g_sifCmdPacket{};
+    uint32_t g_sifCmdRound = 0u;
+    uint32_t g_sifCmdDelivered = 0u;
+    uint32_t g_sifCmdHandled = 0u;
+    uint32_t g_sifCmdPacketsInKernelRam = 0u;
+    uint32_t g_sifCmdPacketsSeen = 0u;
+    uint32_t g_sifCmdHandlerArgs = 0u;
+
+    void sendSifCmd(uint8_t *rdram, PS2Runtime *runtime)
+    {
+        g_sifCmdPacket[16] = static_cast<uint8_t>(g_sifCmdRound);
+        if (ps2_stubs::dispatchSifCommand(rdram, runtime, kSifCmdId, g_sifCmdPacket.data(), g_sifCmdPacket.size()))
+        {
+            ++g_sifCmdDelivered;
+        }
+    }
+
+    void sifCmdDriver(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        setRegU32(*ctx, 4, kSifCmdId);
+        setRegU32(*ctx, 5, kSifCmdHandlerPc);
+        setRegU32(*ctx, 6, kSifCmdHandlerArg);
+        ps2_stubs::sceSifAddCmdHandler(rdram, ctx, runtime);
+        // The title has taken its whole heap, as titles that run their own
+        // allocator over it do.
+        while (runtime->guestMalloc(0x10000u, 16u) != 0u)
+        {
+        }
+        while (runtime->guestMalloc(16u, 16u) != 0u)
+        {
+        }
+        sendSifCmd(rdram, runtime);
+        ctx->pc = kSifCmdResumePc;
+    }
+
+    void sifCmdHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
+    {
+        const uint32_t packet = ::getRegU32(ctx, 4);
+        ++g_sifCmdHandled;
+        if (packet + g_sifCmdPacket.size() <= kEeKernelRamEnd)
+        {
+            ++g_sifCmdPacketsInKernelRam;
+        }
+        if (packet + g_sifCmdPacket.size() <= PS2_RAM_SIZE &&
+            std::memcmp(rdram + packet, g_sifCmdPacket.data(), g_sifCmdPacket.size()) == 0)
+        {
+            ++g_sifCmdPacketsSeen;
+        }
+        if (::getRegU32(ctx, 5) == kSifCmdHandlerArg)
+        {
+            ++g_sifCmdHandlerArgs;
+        }
+        ctx->pc = 0u;
+    }
+
+    // Runs after each command's handler; sends the next one.
+    void sifCmdResume(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (++g_sifCmdRound < kSifCmdRounds)
+        {
+            sendSifCmd(rdram, runtime);
+            ctx->pc = kSifCmdResumePc;
+            return;
+        }
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
 }
 
 void register_ps2_sif_dma_tests()
@@ -482,6 +560,36 @@ void register_ps2_sif_dma_tests()
                      "failed sceSifGetOtherData should not modify destination");
             t.Equals(readGuestU32(env.rdram.data(), kRdAddr + 0x10u), 0x11111111u,
                      "failed sceSifGetOtherData should not overwrite rd metadata");
+        });
+
+        tc.Run("IOP-to-EE SIF commands reach their EE handler when the title's heap is full", [](TestCase &t)
+        {
+            TestEnv env;
+            env.runtime.registerFunction(kSifCmdDriverPc, sifCmdDriver);
+            env.runtime.registerFunction(kSifCmdResumePc, sifCmdResume);
+            env.runtime.registerFunction(kSifCmdHandlerPc, sifCmdHandler);
+            for (size_t i = 0; i < g_sifCmdPacket.size(); ++i)
+            {
+                g_sifCmdPacket[i] = static_cast<uint8_t>(0x30u + i);
+            }
+            g_sifCmdRound = 0u;
+            g_sifCmdDelivered = 0u;
+            g_sifCmdHandled = 0u;
+            g_sifCmdPacketsInKernelRam = 0u;
+            g_sifCmdPacketsSeen = 0u;
+            g_sifCmdHandlerArgs = 0u;
+
+            R5900Context mainContext{};
+            mainContext.pc = kSifCmdDriverPc;
+            env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+            env.runtime.eeScheduler().run();
+
+            t.Equals(g_sifCmdDelivered, kSifCmdRounds,
+                     "every command should be queued for its handler; the packet is kernel memory, not the title's heap");
+            t.Equals(g_sifCmdHandled, kSifCmdRounds, "every queued command should reach its handler");
+            t.Equals(g_sifCmdPacketsInKernelRam, kSifCmdRounds, "each handler's packet should lie in EE kernel RAM");
+            t.Equals(g_sifCmdPacketsSeen, kSifCmdRounds, "each handler should see the packet the IOP sent");
+            t.Equals(g_sifCmdHandlerArgs, kSifCmdRounds, "each handler should get its registered argument");
         });
     });
 }
