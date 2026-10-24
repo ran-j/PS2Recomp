@@ -16,6 +16,9 @@ namespace ps2x::iop::detail
             const uint32_t mask = alignment - 1u;
             return (value + mask) & ~mask;
         }
+
+        // A wait ended by ReleaseWaitThread returns KE_RELEASE_WAIT.
+        constexpr int32_t kKeReleaseWait = -418;
     }
 
     IopKernel::IopKernel(IopMemory &memory) noexcept
@@ -31,6 +34,7 @@ namespace ps2x::iop::detail
         m_nextThreadId = 1;
         m_nextSemaphoreId = 1;
         m_nextEventFlagId = 1;
+        m_nextWaitSequence = 0;
         m_currentThread = nullptr;
     }
 
@@ -164,7 +168,8 @@ namespace ps2x::iop::detail
             if (it->second.state == IopThreadState::Sleep ||
                 it->second.state == IopThreadState::Delay ||
                 it->second.state == IopThreadState::Semaphore ||
-                it->second.state == IopThreadState::EventFlag)
+                it->second.state == IopThreadState::EventFlag ||
+                it->second.state == IopThreadState::FixedPool)
             {
                 it->second.state = IopThreadState::Ready;
             }
@@ -322,6 +327,7 @@ namespace ps2x::iop::detail
         case IopThreadState::Delay:
         case IopThreadState::Semaphore:
         case IopThreadState::EventFlag:
+        case IopThreadState::FixedPool:
             status = 0x04u;
             break;
         case IopThreadState::Suspended:
@@ -344,6 +350,7 @@ namespace ps2x::iop::detail
         m_memory.write32(outputAddress + 36u, thread.state == IopThreadState::Sleep ? 1u : thread.state == IopThreadState::Delay   ? 2u
                                                                                        : thread.state == IopThreadState::Semaphore ? 3u
                                                                                        : thread.state == IopThreadState::EventFlag ? 4u
+                                                                                       : thread.state == IopThreadState::FixedPool ? 7u
                                                                                                                                    : 0u);
         m_memory.write32(outputAddress + 40u, static_cast<uint32_t>(thread.waitId));
         m_memory.write32(outputAddress + 44u, static_cast<uint32_t>(thread.wakeupCount));
@@ -667,6 +674,46 @@ namespace ps2x::iop::detail
         m_currentThread->wakeCycle = wakeCycle;
         m_currentThread->state = IopThreadState::Delay;
         cpu.yielded = true;
+    }
+
+    bool IopKernel::waitCurrentOnFixedPool(int poolId, IopCpuState &cpu)
+    {
+        if (m_currentThread == nullptr || &m_currentThread->cpu != &cpu)
+            return false;
+        m_currentThread->state = IopThreadState::FixedPool;
+        m_currentThread->waitId = poolId;
+        m_currentThread->waitSequence = m_nextWaitSequence++;
+        // FreeFpl and DeleteFpl overwrite this when they end the wait.
+        cpu.gpr[2] = static_cast<uint32_t>(kKeReleaseWait);
+        cpu.yielded = true;
+        return true;
+    }
+
+    IopThread *IopKernel::fixedPoolWaiter(int poolId, bool priorityOrder)
+    {
+        IopThread *next = nullptr;
+        for (auto &[id, thread] : m_threads)
+        {
+            if (thread.state != IopThreadState::FixedPool || thread.waitId != poolId)
+                continue;
+            if (next == nullptr)
+                next = &thread;
+            else if (priorityOrder && thread.priority != next->priority)
+            {
+                if (thread.priority < next->priority)
+                    next = &thread;
+            }
+            else if (thread.waitSequence < next->waitSequence)
+                next = &thread;
+        }
+        return next;
+    }
+
+    void IopKernel::releaseWaiter(IopThread &thread, uint32_t result)
+    {
+        thread.cpu.gpr[2] = result;
+        thread.state = IopThreadState::Ready;
+        thread.waitId = 0;
     }
 
     IopThread *IopKernel::beginNextReady(uint64_t currentCycle)

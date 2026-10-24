@@ -19,6 +19,7 @@ namespace ps2x::iop::detail
         Delay,
         Semaphore,
         EventFlag,
+        FixedPool,
         Suspended,
         Dead,
     };
@@ -40,6 +41,7 @@ namespace ps2x::iop::detail
         uint32_t waitBits = 0;
         uint32_t waitMode = 0;
         uint32_t waitResultAddress = 0;
+        uint64_t waitSequence = 0; // when the current wait began, for FIFO wake order
         int wakeupCount = 0;
     };
 
@@ -59,6 +61,15 @@ namespace ps2x::iop::detail
 
         void sleepCurrent(IopCpuState &cpu);
         void delayCurrentUntil(uint64_t wakeCycle, IopCpuState &cpu);
+        // Blocks the running thread on a thfpool pool (AllocateFpl). False when
+        // `cpu` is not that thread's own context (interrupt handlers, host
+        // calls), which cannot wait.
+        [[nodiscard]] bool waitCurrentOnFixedPool(int poolId, IopCpuState &cpu);
+        // The thread a freed block goes to: the highest priority, then the
+        // longest waiting, for an FA_THPRI pool; the longest waiting otherwise.
+        [[nodiscard]] IopThread *fixedPoolWaiter(int poolId, bool priorityOrder);
+        // Ends a thread's wait: it becomes ready with `result` in $v0.
+        void releaseWaiter(IopThread &thread, uint32_t result);
 
         [[nodiscard]] IopThread *beginNextReady(uint64_t currentCycle);
         [[nodiscard]] uint64_t nextWakeCycle(uint64_t fallback) const;
@@ -98,6 +109,7 @@ namespace ps2x::iop::detail
         uint32_t m_nextThreadId = 1;
         uint32_t m_nextSemaphoreId = 1;
         uint32_t m_nextEventFlagId = 1;
+        uint64_t m_nextWaitSequence = 0;
         IopThread *m_currentThread = nullptr;
     };
 }
