@@ -8,6 +8,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -465,6 +466,76 @@ void register_ps2_sif_rpc_tests()
                 t.Equals(env.rdram[kRecvAddr + index], static_cast<uint8_t>(0xA5),
                          "LIBSD should preserve the backend-owned response buffer");
             }
+        });
+
+        tc.Run("binding and calling an IOP server writes only the caller's client and receive buffer", [](TestCase &t)
+        {
+            TestEnv env;
+            const auto libsdModule = env.runtime.loadIopModule("rom0:LIBSD");
+            t.IsTrue(libsdModule.moduleId > 0, "LIBSD test should load its IOP module first");
+            SifInitRpc(env.rdram.data(), &env.ctx, &env.runtime);
+
+            // Title data near the top of RAM, where a title's heap runs up to its
+            // main thread's stack. The client and its buffers live in it.
+            constexpr uint32_t kTitleDataBase = 0x01F0F000u;
+            constexpr uint32_t kTitleDataEnd = 0x01F12000u;
+            constexpr uint32_t kClientAddr = 0x01F0F400u;
+            constexpr uint32_t kSendAddr = 0x01F0F500u;
+            constexpr uint32_t kRecvAddr = 0x01F0F600u;
+            constexpr uint32_t kRecvSize = 16u;
+            constexpr uint32_t kStackAddr = 0x01F0F800u;
+            constexpr uint32_t kSetVoiceRpc = 0x8010u;
+            std::memset(env.rdram.data() + kTitleDataBase, 0xA5, kTitleDataEnd - kTitleDataBase);
+            std::memset(env.rdram.data() + kClientAddr, 0, sizeof(SifRpcClientData));
+            std::memset(env.rdram.data() + kStackAddr, 0, 0x40u);
+            std::array<uint32_t, 5> command{};
+            command[0] = 3u;          // voice index
+            command[2] = 0x1000u;     // neutral pitch
+            command[3] = 0x00120000u; // plausible sample address
+            writeGuestStruct(env.rdram.data(), kSendAddr, command);
+            const std::vector<uint8_t> before = env.rdram;
+
+            setRegU32(env.ctx, 4, kClientAddr);
+            setRegU32(env.ctx, 5, IOP_SID_LIBSD);
+            setRegU32(env.ctx, 6, 0u);
+            SifBindRpc(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_OK, "SifBindRpc should succeed");
+            t.IsTrue(readGuestStruct<SifRpcClientData>(env.rdram.data(), kClientAddr).server != 0u,
+                     "a ready IOP server should bind the client");
+
+            setRegU32(env.ctx, 4, kClientAddr);
+            setRegU32(env.ctx, 5, kSetVoiceRpc);
+            setRegU32(env.ctx, 6, 0u);
+            setRegU32(env.ctx, 7, kSendAddr);
+            setRegU32(env.ctx, 8, static_cast<uint32_t>(sizeof(command)));
+            setRegU32(env.ctx, 9, kRecvAddr);
+            setRegU32(env.ctx, 10, kRecvSize);
+            setRegU32(env.ctx, 11, 0u);
+            setRegU32(env.ctx, 29, kStackAddr);
+            SifCallRpc(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_OK, "SifCallRpc should succeed");
+
+            uint32_t strayBytes = 0u;
+            uint32_t firstStray = 0u;
+            for (uint32_t address = 0u; address < PS2_RAM_SIZE; ++address)
+            {
+                if (env.rdram[address] == before[address])
+                {
+                    continue;
+                }
+                const bool clientBytes = address >= kClientAddr && address < kClientAddr + sizeof(SifRpcClientData);
+                const bool receiveBytes = address >= kRecvAddr && address < kRecvAddr + kRecvSize;
+                if (!clientBytes && !receiveBytes)
+                {
+                    firstStray = strayBytes == 0u ? address : firstStray;
+                    ++strayBytes;
+                }
+            }
+            char firstStrayText[16];
+            std::snprintf(firstStrayText, sizeof(firstStrayText), "0x%08X", firstStray);
+            t.Equals(strayBytes, 0u,
+                     std::string("bind + call must write EE RAM only in the client and the receive buffer; first stray byte at ") +
+                         firstStrayText);
         });
 
         tc.Run("hybrid bind before register waits then remaps", [](TestCase &t)
