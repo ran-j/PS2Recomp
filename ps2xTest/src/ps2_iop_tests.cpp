@@ -54,6 +54,29 @@ void register_ps2_iop_tests()
                       "stopping LIBSD should deactivate its RPC endpoint");
         });
 
+        tc.Run("IOP heap reuses freed blocks", [](TestCase &t)
+        {
+            iop_test::Host host;
+            ps2x::iop::IopSubsystem subsystem(host);
+
+            const uint32_t a = subsystem.allocateMemory(0x10000u);
+            const uint32_t b = subsystem.allocateMemory(0x10000u);
+            t.IsTrue(a != 0u && b != 0u, "two 64 KB blocks should fit");
+            t.IsTrue(subsystem.freeMemory(a), "freeing the first block should succeed");
+            const uint32_t c = subsystem.allocateMemory(0x8000u);
+            t.IsTrue(c != 0u && c < b, "a smaller block should land in the freed space below the second one");
+
+            // A title that allocates and frees a large buffer over and over
+            // (streaming, level loads) must not run out of heap.
+            bool allFit = true;
+            for (int i = 0; i < 32 && allFit; ++i)
+            {
+                const uint32_t big = subsystem.allocateMemory(0x40000u);
+                allFit = big != 0u && subsystem.freeMemory(big);
+            }
+            t.IsTrue(allFit, "repeated 256 KB alloc/free cycles should keep succeeding");
+        });
+
         tc.Run("unknown SID remains unhandled without a loaded IRX", [](TestCase &t)
         {
             iop_test::Host host;
