@@ -268,6 +268,10 @@ void EeScheduler::run()
 
         if (!m_runtime.hasFunction(context.pc))
         {
+            RUNTIME_LOG("[ee-run] no-function pc=0x" << std::hex << context.pc << std::dec
+                                                     << " tid=" << running->id
+                                                     << " inv=" << running->invocations.size()
+                                                     << "\n");
             if (!running->invocations.empty())
             {
                 context.pc = 0u;

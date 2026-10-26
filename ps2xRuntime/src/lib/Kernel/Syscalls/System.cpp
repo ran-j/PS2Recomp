@@ -496,7 +496,14 @@ namespace ps2_syscalls
                 const uint32_t requestedSize = static_cast<uint32_t>(stackSizeSigned);
                 if (requestedSize < PS2_RAM_SIZE)
                 {
-                    sp = PS2_RAM_SIZE - requestedSize;
+                    // Anchor the initial $sp at the very top of RDRAM. Games link
+                    // static arenas right under their expected stack region (MOH:
+                    // Vanguard's arena ends at 0x1FD81C0); honoring the requested
+                    // size here put the live frames *inside* that arena, so the
+                    // game's zero-fill smashed its own saved $ra and the main
+                    // thread went dormant with pc=0. The requested size is still
+                    // recorded as the thread's stack_size metadata.
+                    sp = PS2_RAM_SIZE - 0x10;
                 }
                 else
                 {
@@ -523,13 +530,26 @@ namespace ps2_syscalls
         sp &= ~0xFu;
         if (stack == 0xFFFFFFFFu)
         {
-            initialStack = sp;
+            // stack=-1 means kernel-managed: the kernel picked the
+            // region and anchored $sp at its TOP. Record the region BASE (the
+            // low edge below the anchor): `stack` is a base everywhere else in
+            // the ABI (CreateThread passes the low address, ReferThreadStatus
+            // reports the allocation's lower bound), and a base above every
+            // real frame is what fed the T12 spy fallback (invocationEntrySp
+            // treated owner.stack as a floor and declined all main $sp).
+            // base + stackSize reconstructs the anchor exactly.
+            initialStack = sp - stackSize;
         }
         else if (stack != 0u)
         {
             initialStack = stack;
         }
 
+        RUNTIME_LOG("[SetupThread] stack=0x" << std::hex << stack
+                                             << " stackSize=0x" << stackSizeSigned
+                                             << " curSp=0x" << currentSp
+                                             << " -> sp=0x" << sp
+                                             << std::dec << "\n");
         scheduler.setupCurrentThread(initialStack, stackSize, getRegU32(ctx, 28));
         setReturnU32(ctx, sp);
     }

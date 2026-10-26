@@ -1358,6 +1358,12 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     // this charge bounds straight-line call chains that have no local loop.
     if (m_eeScheduler && m_eeScheduler->checkpointDue(EeScheduler::kGuestDispatchCycles))
     {
+        RUNTIME_LOG("[dispatch-yield] src=0x" << std::hex << sourcePc
+                                              << " target=0x" << targetPc
+                                              << " kind=" << describeGuestBranchKind(kind)
+                                              << " ra=0x" << static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0))
+                                              << " sp=0x" << static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0))
+                                              << "\n");
         return false;
     }
 
@@ -1400,6 +1406,14 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
 
     if (isStopRequested() || ctx->pc == 0u)
     {
+        RUNTIME_LOG("[dispatch-pc0] src=0x" << std::hex << sourcePc
+                                            << " target=0x" << targetPc
+                                            << " kind=" << describeGuestBranchKind(kind)
+                                            << " ra=0x" << static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0))
+                                            << " sp=0x" << static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0))
+                                            << " v0=0x" << static_cast<uint32_t>(_mm_extract_epi32(ctx->r[2], 0))
+                                            << " a0=0x" << static_cast<uint32_t>(_mm_extract_epi32(ctx->r[4], 0))
+                                            << "\n");
         return false;
     }
 
