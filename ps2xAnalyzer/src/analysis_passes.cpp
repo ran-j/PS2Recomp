@@ -3,6 +3,7 @@
 #include "ps2recomp/instructions.h"
 
 #include <algorithm>
+#include <cstring>
 #include <optional>
 #include <utility>
 
@@ -442,5 +443,286 @@ namespace ps2recomp
         }
 
         return recursive;
+    }
+
+    std::vector<uint32_t> AnalysisPasses::collectDirectBranchTargets(
+        const std::vector<Instruction> &instructions)
+    {
+        std::vector<uint32_t> targets;
+
+        auto branchTarget = [](const Instruction &inst) -> uint32_t
+        {
+            return inst.address + 4u +
+                   (static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(inst.immediate))) << 2);
+        };
+
+        for (const auto &inst : instructions)
+        {
+            switch (inst.opcode)
+            {
+            case OPCODE_J:
+            case OPCODE_JAL:
+                targets.push_back(((inst.address + 4u) & 0xF0000000u) | (inst.target << 2));
+                break;
+            case OPCODE_BEQ:
+            case OPCODE_BNE:
+            case OPCODE_BLEZ:
+            case OPCODE_BGTZ:
+            case OPCODE_BEQL:
+            case OPCODE_BNEL:
+            case OPCODE_BLEZL:
+            case OPCODE_BGTZL:
+                targets.push_back(branchTarget(inst));
+                break;
+            case OPCODE_REGIMM:
+                switch (inst.rt)
+                {
+                case REGIMM_BLTZ:
+                case REGIMM_BGEZ:
+                case REGIMM_BLTZL:
+                case REGIMM_BGEZL:
+                    targets.push_back(branchTarget(inst));
+                    break;
+                default:
+                    break;
+                }
+                break;
+            default:
+                break;
+            }
+        }
+
+        return targets;
+    }
+
+    bool AnalysisPasses::looksLikeFunctionPrologue(uint32_t instructionWord)
+    {
+        switch (instructionWord >> 16)
+        {
+        case 0x27BDu: // addiu $sp, $sp, imm
+        case 0x67BDu: // daddiu $sp, $sp, imm
+        case 0xFFBFu: // sd $ra, imm($sp)
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    namespace
+    {
+        const Section *findSectionWithData(const std::vector<Section> &sections, uint32_t address)
+        {
+            for (const auto &section : sections)
+            {
+                if (section.data == nullptr || section.size < 4u)
+                {
+                    continue;
+                }
+
+                if (address < section.address || address + 4u > section.address + section.size)
+                {
+                    continue;
+                }
+
+                return &section;
+            }
+
+            return nullptr;
+        }
+
+        bool readSectionWord(const std::vector<Section> &sections, uint32_t address, uint32_t &outWord)
+        {
+            const Section *section = findSectionWithData(sections, address);
+            if (section == nullptr)
+            {
+                return false;
+            }
+
+            const size_t offset = static_cast<size_t>(address - section->address);
+            std::memcpy(&outWord, section->data + offset, sizeof(outWord));
+            return true;
+        }
+    }
+
+    std::vector<uint32_t> AnalysisPasses::collectDataReferencedEntryCandidates(
+        const std::vector<Section> &sections,
+        uint32_t textStart,
+        uint32_t textEnd,
+        const std::unordered_set<uint32_t> &knownStarts,
+        const std::unordered_set<uint32_t> &servedTargets)
+    {
+        std::vector<uint32_t> candidates;
+        if (textStart >= textEnd)
+        {
+            return candidates;
+        }
+
+        for (const auto &section : sections)
+        {
+            if (section.data == nullptr || section.isBSS || section.size < 4u)
+            {
+                continue;
+            }
+
+            const size_t wordCount = section.size / 4u;
+            for (size_t index = 0; index < wordCount; ++index)
+            {
+                uint32_t word = 0u;
+                std::memcpy(&word, section.data + index * 4u, sizeof(word));
+
+                // Only pointers into executable text matter; keep them
+                // 4-aligned and skip the ones discovery already covers.
+                if (word < textStart || word >= textEnd || (word & 0x3u) != 0u)
+                {
+                    continue;
+                }
+
+                if (knownStarts.contains(word))
+                {
+                    continue;
+                }
+
+                uint32_t firstInstruction = 0u;
+                if (!readSectionWord(sections, word, firstInstruction))
+                {
+                    continue;
+                }
+
+                if (!looksLikeFunctionPrologue(firstInstruction))
+                {
+                    continue;
+                }
+
+                if (std::find(candidates.begin(), candidates.end(), word) == candidates.end())
+                {
+                    candidates.push_back(word);
+                }
+            }
+        }
+
+        // Second source: pointers formed in code as `lui rd, hi` +
+        // `addiu/daddiu rd, rd, lo` pairs and handed straight to
+        // registration syscalls (SetAlarm's handler argument, thread entry
+        // arguments). These never touch data memory, so the word scan
+        // cannot see them.
+        for (const auto &section : sections)
+        {
+            if (section.data == nullptr || section.isBSS || section.size < 8u)
+            {
+                continue;
+            }
+
+            const size_t wordCount = section.size / 4u;
+            for (size_t index = 0; index + 1u < wordCount; ++index)
+            {
+                uint32_t word = 0u;
+                std::memcpy(&word, section.data + index * 4u, sizeof(word));
+                if ((word >> 26) != 0x0Fu)
+                {
+                    continue; // not lui
+                }
+
+                const uint32_t rd = (word >> 16) & 0x1Fu;
+                const uint32_t hi = word & 0xFFFFu;
+                for (size_t j = index + 1u; j < std::min(index + 13u, wordCount); ++j)
+                {
+                    uint32_t lo = 0u;
+                    std::memcpy(&lo, section.data + j * 4u, sizeof(lo));
+                    const uint32_t loOp = lo >> 26;
+                    if (loOp != 0x09u && loOp != 0x18u)
+                    {
+                        continue; // not addiu/daddiu
+                    }
+                    if (((lo >> 21) & 0x1Fu) != rd || ((lo >> 16) & 0x1Fu) != rd)
+                    {
+                        continue;
+                    }
+
+                    const uint32_t low = lo & 0xFFFFu;
+                    const uint32_t address = ((hi << 16u) + low) & 0xFFFFFFFFu;
+                    if (address < textStart || address >= textEnd || (address & 0x3u) != 0u ||
+                        knownStarts.contains(address))
+                    {
+                        break;
+                    }
+
+                    uint32_t firstInstruction = 0u;
+                    if (readSectionWord(sections, address, firstInstruction) &&
+                        looksLikeFunctionPrologue(firstInstruction))
+                    {
+                        if (std::find(candidates.begin(), candidates.end(), address) == candidates.end())
+                        {
+                            candidates.push_back(address);
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        // Third source: data-table words that point into a code section at
+        // an address the runtime cannot already dispatch to — not a known
+        // start, not a decoded direct branch label. These targets are
+        // prologue-less continuation fragments (module dispatch tables hand
+        // out entries shaped like `lw a0, 0(a1)`), so the prologue-shape
+        // filter must not gate them; an indirect call reaching one without
+        // a compiled entry kills the calling thread. Function spans are not
+        // an oracle here: discovery sweeps them linearly, so a span also
+        // covers holes the compiled dispatch table never fills. Pointer
+        // sources stay restricted to data sections: code words that merely
+        // look like text pointers (every `jr ra` encodes 0x03e00008, which
+        // lands inside text) are not table registrations.
+        auto insideCodeSection = [&sections](uint32_t address) -> bool
+        {
+            for (const auto &section : sections)
+            {
+                if (section.isCode && address >= section.address &&
+                    address < section.address + section.size)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        };
+
+        for (const auto &section : sections)
+        {
+            if (section.data == nullptr || section.isBSS || section.isCode || section.size < 4u)
+            {
+                continue;
+            }
+
+            const size_t wordCount = section.size / 4u;
+            for (size_t index = 0; index < wordCount; ++index)
+            {
+                uint32_t word = 0u;
+                std::memcpy(&word, section.data + index * 4u, sizeof(word));
+                if (word < textStart || word >= textEnd || (word & 0x3u) != 0u)
+                {
+                    continue;
+                }
+
+                if (knownStarts.contains(word) || servedTargets.contains(word) ||
+                    !insideCodeSection(word))
+                {
+                    continue;
+                }
+
+                uint32_t firstInstruction = 0u;
+                if (!readSectionWord(sections, word, firstInstruction))
+                {
+                    continue;
+                }
+
+                if (std::find(candidates.begin(), candidates.end(), word) == candidates.end())
+                {
+                    candidates.push_back(word);
+                }
+            }
+        }
+
+        std::sort(candidates.begin(), candidates.end());
+        return candidates;
     }
 }
