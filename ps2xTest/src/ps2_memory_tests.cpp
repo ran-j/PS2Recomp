@@ -1144,6 +1144,71 @@ void register_ps2_memory_tests()
             t.IsTrue(contentOk, "scratchpad alias chain payload should match scratchpad bytes");
         });
 
+        tc.Run("GIF DMA chain with TIE drains through an IRQ tag to the END-tag readback", [](TestCase &t)
+        {
+            // The game kicks GIF chains with CHCR.TIE=1 and
+            // tags carrying IRQ=1, then polls until CHCR[31:16] shows the
+            // terminal END tag ((CHCR >> 28) & 7 == 7). Suspending the
+            // synchronous transfer at the IRQ tag leaves the readback parked
+            // on the CNT tag (id 1) and the poll spins forever. The chain
+            // must drain through the IRQ tag to its END tag.
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kGifCh = 0x1000A000u;
+            constexpr uint32_t kChain = 0x0002A000u;
+
+            uint8_t *rdram = mem.getRDRAM();
+
+            // Tag 1: CNT (id 1) with IRQ=1, qwc=1 -> one payload qword.
+            writeDmaTag(rdram, kChain, makeDmaTag(1u, 1u, 0u, true));
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                rdram[kChain + 0x10u + i] = static_cast<uint8_t>(0x40u + i);
+            }
+            // Tag 2: END (id 7), qwc=1 -> one payload qword. upper word of
+            // this tag = 0x7000 (id 7 in bits 30:28) -> CHCR TAG readback.
+            writeDmaTag(rdram, kChain + 0x20u, makeDmaTag(1u, 7u, 0u, false));
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                rdram[kChain + 0x30u + i] = static_cast<uint8_t>(0x60u + i);
+            }
+
+            std::vector<std::vector<uint8_t>> captured;
+            mem.setGifPacketCallback([&](const uint8_t *data, uint32_t sizeBytes)
+            {
+                captured.emplace_back(data, data + sizeBytes);
+            });
+
+            // The exact CHCR the game kicks stream uploads with: DIR | TIE | STR.
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x30u, kChain), "write GIF TADR should succeed");
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x00u, 0x184u), "write CHCR DIR|TIE|STR should succeed");
+            mem.processPendingTransfers();
+
+            t.Equals(captured.size(), static_cast<size_t>(1u), "chain should emit one drained packet");
+            t.Equals(captured[0].size(), static_cast<size_t>(32u), "both tags' payload qwords should drain");
+
+            bool contentOk = captured.size() == 1u;
+            if (contentOk)
+            {
+                for (uint32_t i = 0; i < 16u && contentOk; ++i)
+                {
+                    contentOk = captured[0][i] == static_cast<uint8_t>(0x40u + i);
+                }
+                for (uint32_t i = 0; i < 16u && contentOk; ++i)
+                {
+                    contentOk = captured[0][16u + i] == static_cast<uint8_t>(0x60u + i);
+                }
+            }
+            t.IsTrue(contentOk, "IRQ-tag payload and END-tag payload should both reach the GS in order");
+
+            // The Vanguard sync poll condition: ((CHCR >> 28) & 7) == 7.
+            const uint32_t chcrReadback = mem.readIORegister(kGifCh + 0x00u);
+            t.Equals((chcrReadback >> 28) & 7u, 7u,
+                     "completed TIE chain should read back the terminal END tag id");
+            t.IsTrue((chcrReadback & 0x100u) == 0u, "GIF CHCR STR should be cleared after drain");
+        });
+
         tc.Run("native GIF image upload recognizes canonical load-image chain", [](TestCase &t)
         {
             PS2Memory mem;
@@ -1780,8 +1845,14 @@ void register_ps2_memory_tests()
             t.IsTrue(q2, "RET must resume after CALL payload and continue chain");
         });
 
-        tc.Run("GIF DMA chain IRQ stops only when TIE is set", [](TestCase &t)
+        tc.Run("GIF DMA chain IRQ tags drain through to the END tag with and without TIE", [](TestCase &t)
         {
+            // Oracle rework: this runtime completes DMA transfers
+            // synchronously and delivers the channel interrupt once at the
+            // drain, so a TIE suspension at an IRQ tag has no resume path —
+            // it stranded CHCR.TAG on the IRQ tag and deadlocked guests that
+            // poll for the terminal END tag id (Vanguard's GIF sync). Chains
+            // now always drain through IRQ tags to the END tag.
             PS2Memory mem;
             t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
 
@@ -1821,11 +1892,16 @@ void register_ps2_memory_tests()
             std::vector<uint8_t> packetNoTie;
             t.IsTrue(runChain(0x104u, packetNoTie), "chain run without TIE should succeed");
             t.Equals(packetNoTie.size(), static_cast<size_t>(32u), "IRQ tag should not stop chain when TIE is clear");
+            t.Equals((mem.readIORegister(kGifCh + 0x00u) >> 28) & 7u, 7u,
+                     "chain without TIE should read back the END tag id");
 
             std::vector<uint8_t> packetTie;
             // STR + CHAIN + TIE(bit7)
             t.IsTrue(runChain(0x184u, packetTie), "chain run with TIE should succeed");
-            t.Equals(packetTie.size(), static_cast<size_t>(16u), "IRQ tag should stop chain when TIE is set");
+            t.Equals(packetTie.size(), static_cast<size_t>(32u),
+                     "IRQ tag should drain through even when TIE is set");
+            t.Equals((mem.readIORegister(kGifCh + 0x00u) >> 28) & 7u, 7u,
+                     "chain with TIE should read back the END tag id");
         });
 
         tc.Run("DMAC D_STAT toggles masks and clears channel status on write-one", [](TestCase &t)

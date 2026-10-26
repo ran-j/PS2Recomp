@@ -1516,7 +1516,19 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         if (hasPayload)
                             appendData(dataAddr, tagQwc);
                         if (irq && tieEnabled)
-                            endChain = true;
+                        {
+                            // Do NOT suspend the chain here. This runtime
+                            // completes DMA transfers synchronously, so a TIE
+                            // suspension has no resume protocol to ride on:
+                            // the drain cleared STR and QWC while CHCR.TAG
+                            // kept the suspending CNT tag, and guests that
+                            // poll for the terminal END tag id (the canonical
+                            // EE completion check: ((CHCR >> 28) & 7) == 7)
+                            // deadlock. The channel interrupt still fires
+                            // once, at the drain (queueCompletedDmacCause in
+                            // processPendingTransfers), which is where this
+                            // runtime delivers all DMA completions.
+                        }
                         if (endChain)
                             break;
                     }
