@@ -7,10 +7,13 @@
 #include "runtime/ee_scheduler.h"
 
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace ps2_syscalls;
@@ -18,6 +21,7 @@ using namespace ps2_syscalls;
 namespace ps2_stubs
 {
     void resetSifState();
+    void sceSifAddCmdHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
 }
 
 namespace
@@ -149,6 +153,69 @@ namespace
     void writeGuestU32(uint8_t *rdram, uint32_t addr, uint32_t value)
     {
         std::memcpy(rdram + addr, &value, sizeof(value));
+    }
+
+    // Capture area + fake cid-1 completion handler used by the loader
+    // queue test below.
+    constexpr uint32_t K_CID1REPLY_WAIT_PC = 0x00160700u;
+    constexpr uint32_t K_CID1REPLY_RESUME_PC = 0x00160710u;
+    constexpr uint32_t K_CID1REPLY_HANDLER_PC = 0x00160720u;
+    constexpr uint32_t K_CID1REPLY_REPLY_CAPTURE = 0x00026800u;
+    int g_cid1ReplySemaphoreId = 0;
+    uint32_t g_cid1ReplyReplyHandle = 0;
+    uint32_t g_cid1ReplyReplyStatus = 0;
+    uint32_t g_cid1ReplyHandlerArg = 0;
+    uint32_t g_cid1ReplyHandlerRuns = 0;
+
+    void cid1ReplyWaitMain(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        EeScheduler &scheduler = runtime->eeScheduler();
+        g_cid1ReplySemaphoreId = scheduler.createSemaphore(0, 1, 0u, 0u);
+        ctx->pc = K_CID1REPLY_RESUME_PC;
+        scheduler.waitSemaphore(g_cid1ReplySemaphoreId);
+    }
+
+    void cid1ReplyResumeMain(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
+    void cid1ReplyFakeCompletionHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t packetAddress = ::getRegU32(ctx, 4);
+        g_cid1ReplyHandlerArg = ::getRegU32(ctx, 5);
+        if (packetAddress != 0u)
+        {
+            std::memcpy(&g_cid1ReplyReplyHandle, rdram + packetAddress + 0x0Cu, sizeof(uint32_t));
+            std::memcpy(&g_cid1ReplyReplyStatus, rdram + packetAddress + 0x10u, sizeof(uint32_t));
+        }
+        writeGuestU32(rdram, K_CID1REPLY_REPLY_CAPTURE, g_cid1ReplyReplyHandle);
+        ++g_cid1ReplyHandlerRuns;
+        ctx->pc = 0u;
+        runtime->eeScheduler().signalSemaphore(g_cid1ReplySemaphoreId, true);
+    }
+
+    // Runs the scheduler on a worker thread with a hard watchdog so a missing
+    // completion fails the test instead of hanging the suite.
+    bool cid1ReplyRunSchedulerWithWatchdog(TestEnv &env)
+    {
+        std::atomic<bool> finished{false};
+        std::thread runner([&env, &finished]()
+                           {
+                               env.runtime.eeScheduler().run();
+                               finished.store(true, std::memory_order_release);
+                           });
+        for (int i = 0; i < 300 && !finished.load(std::memory_order_acquire); ++i)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        if (!finished.load(std::memory_order_acquire))
+        {
+            env.runtime.requestStop();
+        }
+        runner.join();
+        return finished.load(std::memory_order_acquire);
     }
 
     struct ScopedTempDir
@@ -624,6 +691,152 @@ void register_ps2_sif_rpc_tests()
 
             t.IsTrue(std::memcmp(env.rdram.data() + kRecvAddr, payload.data(), payload.size()) == 0,
                      "recv payload should match stack-selected transfer size");
+        });
+
+        // The glue's unhandled rpc
+        // 0xFF version probe must answer the "2800" tag the EE side accepts
+        // (sub_49F940), not zeros.
+        tc.Run("MOH Vanguard glue: version probe answers 2800", [](TestCase &t)
+        {
+            TestEnv env;
+
+            constexpr uint32_t kGlueClientAddr = 0x65FDC0u;
+            constexpr uint32_t kGlueRecvAddr = 0x00026000u;
+            setRegU32(env.ctx, 4, kGlueClientAddr);
+            setRegU32(env.ctx, 5, 0xFFu);
+            setRegU32(env.ctx, 6, 0u);
+            setRegU32(env.ctx, 7, 0u);
+            setRegU32(env.ctx, 8, 0u);
+            setRegU32(env.ctx, 9, kGlueRecvAddr);
+            setRegU32(env.ctx, 10, 4u);
+            setRegU32(env.ctx, 11, 0u);
+            setRegU32(env.ctx, 29, K_STACK_ADDR);
+            writeGuestU32(env.rdram.data(), K_STACK_ADDR, 0u);
+            SifCallRpc(env.rdram.data(), &env.ctx, &env.runtime);
+
+            const uint8_t expectedTag[4] = {'2', '8', '0', '0'};
+            t.IsTrue(std::memcmp(env.rdram.data() + kGlueRecvAddr, expectedTag, 4) == 0,
+                     "the glue version probe must answer the accepted tag");
+
+            // A different unhandled rpc keeps the zero fallback.
+            TestEnv otherEnv;
+            setRegU32(otherEnv.ctx, 4, kGlueClientAddr);
+            setRegU32(otherEnv.ctx, 5, 0x09u);
+            setRegU32(otherEnv.ctx, 6, 0u);
+            setRegU32(otherEnv.ctx, 7, 0u);
+            setRegU32(otherEnv.ctx, 8, 0u);
+            setRegU32(otherEnv.ctx, 9, kGlueRecvAddr);
+            setRegU32(otherEnv.ctx, 10, 4u);
+            setRegU32(otherEnv.ctx, 11, 0u);
+            setRegU32(otherEnv.ctx, 29, K_STACK_ADDR);
+            writeGuestU32(otherEnv.rdram.data(), K_STACK_ADDR, 0u);
+            SifCallRpc(otherEnv.rdram.data(), &otherEnv.ctx, &otherEnv.runtime);
+
+            const std::array<uint8_t, 4> zeros{};
+            t.IsTrue(std::memcmp(otherEnv.rdram.data() + kGlueRecvAddr, zeros.data(), 4) == 0,
+                     "other unhandled rpcs still fall back to zeros");
+        });
+
+        // The loader queue contract: the consumer thread
+        // (0x36E578) posts a 48-byte request with sceSifSendCmd(cid=0) and the
+        // game completes the request record only from its registered cid=1
+        // SIF-cmd handler (sub_0036C1A8, registered at 0x36CD50 with
+        // sceSifAddCmdHandler). With no IOP module serving cid=0 the runtime
+        // must synthesize that reply: [+0xC] = request handle (the request
+        // packet's +0x14 seq word), [+0x10] = 2 (the "complete the bucket
+        // record" branch of the handler). This is what unlocks the LOADING
+        // poll 0x360620 -> 0x36A3F8 -> 0x36E3E8.
+        tc.Run("MOH Vanguard loader queue: SifSendCmd(0) synthesizes the cid-1 completion reply", [](TestCase &t)
+        {
+            TestEnv env;
+            constexpr uint32_t kPktAddr = 0x656660u;         // the game's request-packet block
+            constexpr uint32_t kRequestHandle = 0x00000001u; // seq 1, bucket slot = handle>>24 = 0
+            constexpr uint32_t kHandlerArg = 0x64D780u;      // the argument sub_0036C7E0 registers
+
+            // The request packet exactly as thread 6 builds it: the record's
+            // seq word lands at +0x14.
+            writeGuestU32(env.rdram.data(), kPktAddr + 0x14u, kRequestHandle);
+
+            // Register the completion handler the way the game does.
+            env.runtime.registerFunction(K_CID1REPLY_WAIT_PC, cid1ReplyWaitMain);
+            env.runtime.registerFunction(K_CID1REPLY_RESUME_PC, cid1ReplyResumeMain);
+            env.runtime.registerFunction(K_CID1REPLY_HANDLER_PC, cid1ReplyFakeCompletionHandler);
+            setRegU32(env.ctx, 4, 1u);
+            setRegU32(env.ctx, 5, K_CID1REPLY_HANDLER_PC);
+            setRegU32(env.ctx, 6, kHandlerArg);
+            ps2_stubs::sceSifAddCmdHandler(env.rdram.data(), &env.ctx, &env.runtime);
+
+            // Reset the scheduler first: reset() clears the pending
+            // invocation queue, so the request must be posted after it.
+            g_cid1ReplySemaphoreId = 0;
+            g_cid1ReplyReplyHandle = 0u;
+            g_cid1ReplyReplyStatus = 0u;
+            g_cid1ReplyHandlerArg = 0u;
+            g_cid1ReplyHandlerRuns = 0u;
+            R5900Context mainContext{};
+            mainContext.pc = K_CID1REPLY_WAIT_PC;
+            env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+
+            // Post the request through the game's SDK surface.
+            setRegU32(env.ctx, 4, 0u);        // cid 0
+            setRegU32(env.ctx, 5, kPktAddr);  // packet
+            setRegU32(env.ctx, 6, 0x30u);     // size
+            setRegU32(env.ctx, 7, 0u);        // no optional source
+            setRegU32(env.ctx, 29, K_STACK_ADDR);
+            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x10u, 0u);
+            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x14u, 0u);
+            sceSifSendCmd(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), 1, "SifSendCmd should still report success");
+
+            // Let the scheduler deliver the queued completion invocation:
+            // main blocks on a semaphore the fake handler signals.
+            const bool finished = cid1ReplyRunSchedulerWithWatchdog(env);
+            t.IsTrue(finished, "the scheduler must unblock: the synthesized completion must reach the handler");
+
+            t.Equals(g_cid1ReplyHandlerRuns, 1u, "the cid-1 completion handler should run exactly once");
+            t.Equals(g_cid1ReplyHandlerArg, kHandlerArg, "the completion handler should receive its registered argument");
+            t.Equals(g_cid1ReplyReplyHandle, kRequestHandle, "the reply must carry the request handle at +0xC");
+            t.Equals(g_cid1ReplyReplyStatus, 2u, "the reply status at +0x10 must be 2 (complete the bucket record)");
+        });
+
+        // The reply direction (cid=1) is the game's own completion traffic:
+        // the runtime must never synthesize a reply for it (no loops).
+        tc.Run("MOH Vanguard loader queue: cid-1 sends are not echoed back", [](TestCase &t)
+        {
+            TestEnv env;
+            constexpr uint32_t kPktAddr = 0x656660u;
+            writeGuestU32(env.rdram.data(), kPktAddr + 0x14u, 0x00000001u);
+
+            env.runtime.registerFunction(K_CID1REPLY_WAIT_PC, cid1ReplyWaitMain);
+            env.runtime.registerFunction(K_CID1REPLY_RESUME_PC, cid1ReplyResumeMain);
+            env.runtime.registerFunction(K_CID1REPLY_HANDLER_PC, cid1ReplyFakeCompletionHandler);
+            setRegU32(env.ctx, 4, 1u);
+            setRegU32(env.ctx, 5, K_CID1REPLY_HANDLER_PC);
+            setRegU32(env.ctx, 6, 0u);
+            ps2_stubs::sceSifAddCmdHandler(env.rdram.data(), &env.ctx, &env.runtime);
+
+            g_cid1ReplySemaphoreId = 0;
+            g_cid1ReplyHandlerRuns = 0u;
+            g_cid1ReplyReplyHandle = 0u;
+            g_cid1ReplyReplyStatus = 0u;
+            R5900Context mainContext{};
+            mainContext.pc = K_CID1REPLY_WAIT_PC;
+            env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+
+            setRegU32(env.ctx, 4, 1u); // cid 1 (reply direction)
+            setRegU32(env.ctx, 5, kPktAddr);
+            setRegU32(env.ctx, 6, 0x30u);
+            setRegU32(env.ctx, 7, 0u);
+            setRegU32(env.ctx, 29, K_STACK_ADDR);
+            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x10u, 0u);
+            writeGuestU32(env.rdram.data(), K_STACK_ADDR + 0x14u, 0u);
+            sceSifSendCmd(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), 1, "SifSendCmd should report success");
+
+            const bool finished = cid1ReplyRunSchedulerWithWatchdog(env);
+            t.IsTrue(finished, "the scheduler run must end (main stays blocked, nothing should wake it)");
+
+            t.Equals(g_cid1ReplyHandlerRuns, 0u, "no synthetic reply may be queued for cid-1 sends");
         });
 
     });

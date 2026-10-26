@@ -483,5 +483,53 @@ void register_ps2_sif_dma_tests()
             t.Equals(readGuestU32(env.rdram.data(), kRdAddr + 0x10u), 0x11111111u,
                      "failed sceSifGetOtherData should not overwrite rd metadata");
         });
+
+        // ---------------------------------------------------------------------------
+        // The game's SDK glue binds temporary IOP
+        // sids (bit31 set) for its module-query channel (e.g. 0x80000006) and
+        // spins on cd->server until the bind completes. A refused bind froze
+        // the boot thread in the 1M-iteration retry (pc 0x49f900) with loading
+        // stuck at 199 CD reads.
+        // ---------------------------------------------------------------------------
+        tc.Run("SifBindRpc allocates a server for temporary IOP sids (bit31 set)", [](TestCase &t)
+        {
+            TestEnv env;
+
+            constexpr uint32_t kClientAddr = 0x00180000u;
+            setRegU32(env.ctx, 4, kClientAddr);
+            setRegU32(env.ctx, 5, 0x80000006u);
+            setRegU32(env.ctx, 6, 0u);
+            ps2_syscalls::SifBindRpc(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_OK, "the dynamic-sid bind should succeed");
+
+            // cd->server (+0x24 in the SIF RPC client data) is the retry latch:
+            // the game polls it until it is non-zero.
+            t.IsTrue(readGuestU32(env.rdram.data(), kClientAddr + 0x24u) != 0u,
+                     "cd->server must be allocated so the SDK bind-retry loop completes");
+
+            // A second bind of the same sid must stay stable.
+            setRegU32(env.ctx, 4, kClientAddr + 0x30u);
+            setRegU32(env.ctx, 5, 0x80000006u);
+            setRegU32(env.ctx, 6, 0u);
+            ps2_syscalls::SifBindRpc(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_OK, "a repeated dynamic-sid bind should succeed");
+            t.Equals(readGuestU32(env.rdram.data(), kClientAddr + 0x30u + 0x24u),
+                     readGuestU32(env.rdram.data(), kClientAddr + 0x24u),
+                     "both clients must resolve to the same server descriptor");
+        });
+
+        tc.Run("SifBindRpc still refuses plain sids no IOP server registered", [](TestCase &t)
+        {
+            TestEnv env;
+
+            constexpr uint32_t kClientAddr = 0x00180100u;
+            setRegU32(env.ctx, 4, kClientAddr);
+            setRegU32(env.ctx, 5, 0x00001234u);
+            setRegU32(env.ctx, 6, 0u);
+            ps2_syscalls::SifBindRpc(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_OK, "the bind call itself should report success");
+            t.Equals(readGuestU32(env.rdram.data(), kClientAddr + 0x24u), 0u,
+                     "a plain unregistered sid must still leave cd->server null");
+        });
     });
 }
