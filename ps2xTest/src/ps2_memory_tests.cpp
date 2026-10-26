@@ -159,6 +159,68 @@ void register_ps2_memory_tests()
 {
     MiniTest::Case("PS2Memory", [](TestCase &tc)
     {
+        tc.Run("EE LQ/SQ (read128/write128) ignore the low 4 bits of the address", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            // Sony's libc memcpy (sub_003553F0 in MOH:Vanguard) loads unaligned
+            // sources with LQ from src+0x00/0x10/0x20/0x30 and repairs the
+            // lanes with QFSRV — that only works because EE LQ/SQ truncate the
+            // effective address to 16-byte alignment instead of faulting.
+            alignas(16) uint8_t pattern[32];
+            for (uint32_t i = 0; i < sizeof(pattern); ++i)
+            {
+                pattern[i] = static_cast<uint8_t>(i);
+            }
+            mem.write128(0x00002000u, _mm_loadu_si128(reinterpret_cast<const __m128i *>(pattern)));
+            mem.write128(0x00002010u, _mm_loadu_si128(reinterpret_cast<const __m128i *>(pattern + 16)));
+
+            __m128i got = mem.read128(0x00002008u);
+            alignas(16) uint8_t gotBytes[16];
+            _mm_storeu_si128(reinterpret_cast<__m128i *>(gotBytes), got);
+            t.IsTrue(std::memcmp(gotBytes, pattern, 16) == 0,
+                     "read128 at +8 should return the 16 bytes at the aligned base (EE LQ ignores addr[3:0])");
+
+            mem.write128(0x00002008u, _mm_setzero_si128());
+            alignas(16) uint8_t after[32];
+            std::memcpy(after, mem.getRDRAM() + 0x2000u, sizeof(after));
+            alignas(16) uint8_t zeros[16] = {};
+            t.IsTrue(std::memcmp(after, zeros, 16) == 0, "write128 at +8 should land on the aligned base");
+            t.IsTrue(std::memcmp(after + 16, pattern + 16, 16) == 0, "write128 at +8 must not touch the next quadword");
+        });
+
+        tc.Run("Ps2FastRead128/Ps2FastWrite128 (gen fast path) truncate to 16-byte alignment", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            uint8_t *rdram = mem.getRDRAM();
+            t.IsTrue(rdram != nullptr, "RDRAM should be allocated");
+
+            alignas(16) uint8_t pattern[32];
+            for (uint32_t i = 0; i < sizeof(pattern); ++i)
+            {
+                pattern[i] = static_cast<uint8_t>(0x40u + i);
+            }
+            std::memcpy(rdram + 0x3000u, pattern, sizeof(pattern));
+
+            // Vanguard regression: LQ $t0, 0($a1) with $a1 = ...8 must read the
+            // aligned quadword below, otherwise the QFSRV repair copies the
+            // stream-manager BRGR blob 8 bytes late and its reload underflows.
+            __m128i got = Ps2FastRead128(rdram, 0x3008u);
+            alignas(16) uint8_t gotBytes[16];
+            _mm_storeu_si128(reinterpret_cast<__m128i *>(gotBytes), got);
+            t.IsTrue(std::memcmp(gotBytes, pattern, 16) == 0,
+                     "fast read128 at +8 should return the aligned base quadword");
+
+            Ps2FastWrite128(rdram, 0x3008u, _mm_setzero_si128());
+            alignas(16) uint8_t after[32];
+            std::memcpy(after, rdram + 0x3000u, sizeof(after));
+            alignas(16) uint8_t zeros[16] = {};
+            t.IsTrue(std::memcmp(after, zeros, 16) == 0, "fast write128 at +8 should land on the aligned base");
+            t.IsTrue(std::memcmp(after + 16, pattern + 16, 16) == 0, "fast write128 at +8 must not touch the next quadword");
+        });
+
         tc.Run("uncached aliases map to same RDRAM bytes", [](TestCase &t)
         {
             PS2Memory mem;
