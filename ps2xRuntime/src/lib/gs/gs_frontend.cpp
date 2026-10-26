@@ -1498,6 +1498,10 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
         }
         break;
     }
+    case 0x58:
+        if (m_privRegs)
+            m_privRegs->pmode = value;
+        break;
     case 0x59:
         if (m_privRegs)
             m_privRegs->dispfb1 = value;

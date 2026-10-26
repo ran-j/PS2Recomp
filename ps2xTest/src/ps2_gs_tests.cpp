@@ -1469,6 +1469,42 @@ void register_ps2_gs_tests()
                      "preferred-source presentation should normalize row 1 alpha for the host frame");
         });
 
+        tc.Run("gif A+D display register writes land in the privileged register file", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GSRegisters regs{};
+
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), &regs);
+
+            // Games that build their display env as GIF packets (libgraph
+            // PutDispEnv-style) configure the output circuit through A+D ids
+            // 0x58-0x5c: PMODE first to enable CRT1, then DISPFB/DISPLAY per
+            // field. PMODE (0x58) has no drawing context, it must reach the
+            // privileged register file like its 0x59-0x5c siblings.
+            gs.writeRegister(0x58, 0x000000000000ff25ull);
+            t.IsTrue((regs.pmode & 0x1ull) != 0ull,
+                     "A+D 0x58 should write PMODE and enable CRT1 in the privileged register file");
+            t.Equals(static_cast<uint32_t>((regs.pmode >> 8) & 0xFFull), 0xFFu,
+                     "A+D 0x58 should preserve the PMODE alpha gain field");
+
+            gs.writeRegister(0x59, 0x148Cull);
+            t.Equals(regs.dispfb1, 0x148Cull,
+                     "A+D 0x59 should write DISPFB1 in the privileged register file");
+
+            gs.writeRegister(0x5a, 0x1BF9FC0183227Cull);
+            t.Equals(regs.display1, 0x1BF9FC0183227Cull,
+                     "A+D 0x5a should write DISPLAY1 in the privileged register file");
+
+            gs.writeRegister(0x5b, 0x148Cull);
+            t.Equals(regs.dispfb2, 0x148Cull,
+                     "A+D 0x5b should write DISPFB2 in the privileged register file");
+
+            gs.writeRegister(0x5c, 0x1BF9FC0183227Cull);
+            t.Equals(regs.display2, 0x1BF9FC0183227Cull,
+                     "A+D 0x5c should write DISPLAY2 in the privileged register file");
+        });
+
         tc.Run("latched host presentation reads direct CT32 display frames with GS swizzle", [](TestCase &t)
         {
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
