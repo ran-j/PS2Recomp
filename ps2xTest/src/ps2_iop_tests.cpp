@@ -54,6 +54,51 @@ void register_ps2_iop_tests()
                       "stopping LIBSD should deactivate its RPC endpoint");
         });
 
+        tc.Run("cdvdman ROM service serves the cdvdfsv RPC family", [](TestCase &t)
+        {
+            iop_test::Host host;
+            ps2x::iop::IopSubsystem subsystem(host);
+
+            // cdvdman/cdvdfsv register their EE-facing RPC servers from the IOP
+            // ROM at boot, so the endpoints are bindable without any module
+            // load. Games bind these in libcdvd's init loop and poll
+            // client->server until a descriptor appears.
+            constexpr uint32_t kCcmdSid = 0x80000592u;    // async command server
+            constexpr uint32_t kScmdSid = 0x80000593u;    // sync command server
+            constexpr uint32_t kStcmdSid = 0x80000595u;   // CD streaming server
+            constexpr uint32_t kSearchSid = 0x8000059Au;  // file search server
+            t.IsTrue(subsystem.canBindRpc(kCcmdSid), "Ccmd must be bindable without loading modules");
+            t.IsTrue(subsystem.canBindRpc(kScmdSid), "Scmd must be bindable without loading modules");
+            t.IsTrue(subsystem.canBindRpc(kStcmdSid), "Stcmd must be bindable without loading modules");
+            t.IsTrue(subsystem.canBindRpc(kSearchSid), "the search server must be bindable without loading modules");
+
+            // SLUS_215.97 (MOH:EA) spins in its libcdvd init until the Scmd
+            // bind reports a server, then issues SifCallRpc(scmd, 0x27, ...) with
+            // a 12-byte receive buffer whose first word must read as success.
+            host.fill(0x800u, 12u, 0xCCu);
+            ps2x::iop::RpcRequest scmdRequest{};
+            scmdRequest.sid = kScmdSid;
+            scmdRequest.function = 0x27u;
+            scmdRequest.receive = {0x800u, 12u};
+            const ps2x::iop::RpcResult scmdResult = subsystem.handleRpc(scmdRequest);
+            t.IsTrue(scmdResult.handled, "Scmd requests must be claimed by the cdvdman HLE");
+            t.Equals(scmdResult.resultAddress, scmdRequest.receive.address,
+                     "the reply must be delivered from the receive buffer");
+            t.Equals(host.word(0x800u), 1u,
+                     "Scmd 0x27 must report success in its first result word: SLUS_215.97's libcdvd "
+                     "polls SifCallRpc(scmd, 0x27) in a loop that only exits on a nonzero first word");
+
+            // Unknown sync commands must still be answered (neutral ready /
+            // no-error state) so boot proceeds, and must be logged for diagnosis.
+            host.fill(0x800u, 16u, 0xCCu);
+            ps2x::iop::RpcRequest unknown = iop_test::request(kScmdSid, 0x42u);
+            const ps2x::iop::RpcResult unknownResult = subsystem.handleRpc(unknown);
+            t.IsTrue(unknownResult.handled, "unknown Scmd commands must still be answered");
+            t.Equals(host.word(0x800u), 0u, "unknown Scmd commands must report a neutral success state");
+            t.Equals(iop_test::metric(subsystem, "cdvdman", "unknown_rpc_logs"), 1u,
+                     "unknown Scmd commands should be logged");
+        });
+
         tc.Run("unknown SID remains unhandled without a loaded IRX", [](TestCase &t)
         {
             iop_test::Host host;

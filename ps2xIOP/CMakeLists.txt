@@ -25,6 +25,7 @@ add_library(ps2_iop STATIC
     src/emulator/imports/iop_sysmem.cpp
     src/emulator/imports/iop_timrman.cpp
     src/emulator/imports/iop_vblank.cpp
+    src/modules/cdvdman.cpp
     src/modules/dbcman.cpp
     src/modules/libsd.cpp
     src/modules/mcserv.cpp
