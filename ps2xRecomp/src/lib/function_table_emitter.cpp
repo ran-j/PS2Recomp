@@ -105,6 +105,16 @@ namespace ps2recomp
             addEntry(address, name);
         }
 
+        // A resume point inside one function must never replace another
+        // function's entry (e.g. a final branch whose delay slot is the first
+        // instruction of the next function). Stubs and library functions are
+        // registered below, after the resume points.
+        std::unordered_set<uint32_t> functionStarts;
+        for (const auto &function : functions)
+        {
+            functionStarts.insert(function.start);
+        }
+
         for (const auto &[ownerStart, targets] : cg.m_resumeEntryTargetsByOwner)
         {
             const std::string ownerName = cg.getFunctionName(ownerStart);
@@ -115,6 +125,10 @@ namespace ps2recomp
 
             for (uint32_t target : targets)
             {
+                if (target != ownerStart && functionStarts.contains(target))
+                {
+                    continue;
+                }
                 addEntry(target, ownerName);
             }
         }

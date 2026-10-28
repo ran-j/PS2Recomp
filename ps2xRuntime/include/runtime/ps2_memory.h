@@ -345,6 +345,8 @@ public:
     void processVIF1Data(const uint8_t *data, uint32_t sizeBytes);
     void processPendingTransfers();
     std::vector<uint32_t> consumeCompletedDmacCauses();
+    // Set on queued causes that are INTC interrupts (e.g. VIF1) rather than DMAC.
+    static constexpr uint32_t kQueuedIntcCauseFlag = 0x100u;
 
     int pollDmaRegisters();
 
@@ -409,6 +411,16 @@ public:
     bool m_path3Masked = false;
     uint32_t m_vif1PendingPath2ImageQwc = 0u;
     bool m_vif1PendingPath2DirectHl = false;
+    // A VIFcode with the interrupt (I) bit stalls VIF1 after it executes: the
+    // rest of the DMA data (from m_vif1StalledOffset on) waits here until
+    // VIF1_FBRST.STC, and the channel's completion is deferred until that data
+    // has been consumed. Resuming processes the buffer in place, so stalling
+    // again inside it (m_vif1ResumeData) only moves the offset.
+    std::vector<uint8_t> m_vif1StalledData;
+    size_t m_vif1StalledOffset = 0;
+    std::vector<uint8_t> *m_vif1ResumeData = nullptr;
+    bool m_vif1Stalled = false;
+    bool m_vif1DmaCompletionDeferred = false;
     std::vector<std::vector<uint8_t>> m_path3MaskedFifo;
 
     struct PendingTransfer
@@ -419,9 +431,13 @@ public:
         std::vector<uint8_t> chainData;
     };
     std::vector<PendingTransfer> m_pendingGifTransfers;
+    // GIF (PATH3) chains started while VIF1 is stalled on a VIFcode interrupt
+    // with data left; see runDeferredGifTransfers().
+    std::vector<PendingTransfer> m_deferredGifTransfers;
     std::vector<PendingTransfer> m_pendingVif0Transfers;
     std::vector<PendingTransfer> m_pendingVif1Transfers;
     std::mutex m_completedDmacMutex;
+    // DMAC channel causes; INTC causes are queued with kQueuedIntcCauseFlag set.
     std::vector<uint32_t> m_completedDmacCauses;
 
     struct CodeRegion
@@ -452,6 +468,8 @@ public:
     bool tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr);
     void completeDmacChannel(uint32_t channelBase, uint32_t cause);
     void queueCompletedDmacCause(uint32_t cause);
+    void resumeStalledVif1();
+    void runDeferredGifTransfers();
 };
 
 #endif // PS2_MEMORY_H

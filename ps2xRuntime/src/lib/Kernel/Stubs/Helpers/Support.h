@@ -1431,7 +1431,7 @@ namespace
 
         for (const uint32_t completedCause : completedCauses)
         {
-            ps2_syscalls::dispatchDmacHandlersForCause(rdram, runtime, completedCause);
+            runtime->dispatchCompletedDmacCause(rdram, completedCause);
         }
 
         return 0;

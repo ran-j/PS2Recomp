@@ -4,6 +4,7 @@
 #include "runtime/ps2_rom_device.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cerrno>
 #include <cstdio>
@@ -149,6 +150,49 @@ namespace
     {
         const auto systemValue = std::chrono::time_point_cast<std::chrono::system_clock::duration>(value - std::filesystem::file_time_type::clock::now() + std::chrono::system_clock::now());
         return std::chrono::system_clock::to_time_t(systemValue);
+    }
+
+    // ISO9660 names are case-insensitive but games spell them freely; on hosts
+    // with case-sensitive filesystems match each component ignoring ASCII case.
+    void resolveCaseInsensitive(const std::filesystem::path &base,
+                                const std::filesystem::path &relative,
+                                std::filesystem::path &result)
+    {
+        std::error_code error;
+        if (std::filesystem::exists(result, error))
+            return;
+
+        auto lower = [](std::string text)
+        {
+            std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch)
+                           { return static_cast<char>(std::tolower(ch)); });
+            return text;
+        };
+
+        std::filesystem::path current = base;
+        for (const auto &component : relative)
+        {
+            const std::filesystem::path direct = current / component;
+            if (std::filesystem::exists(direct, error))
+            {
+                current = direct;
+                continue;
+            }
+            const std::string wanted = lower(component.string());
+            bool matched = false;
+            for (const auto &entry : std::filesystem::directory_iterator(current, error))
+            {
+                if (lower(entry.path().filename().string()) == wanted)
+                {
+                    current = entry.path();
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched)
+                return;
+        }
+        result = current.lexically_normal();
     }
 }
 
@@ -298,6 +342,8 @@ bool PS2Vfs::resolveHostPath(std::string_view path, const PS2VfsMounts &mounts, 
     if (base.empty() || !safeRelativePath(parsed.path, relative))
         return false;
     result = (base / relative).lexically_normal();
+    if (parsed.device == ps2x::iop::Ps2PathDevice::Cdrom)
+        resolveCaseInsensitive(base, relative, result);
     return true;
 }
 

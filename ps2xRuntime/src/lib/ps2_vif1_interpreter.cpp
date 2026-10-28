@@ -1,5 +1,6 @@
 // Based on Blackline Interactive implementation
 #include "runtime/ps2_memory.h"
+#include <algorithm>
 #include <cstring>
 
 enum VIFCmd : uint8_t
@@ -300,10 +301,40 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
     if (sizeBytes == 0u)
         return;
 
+    if (m_vif1Stalled)
+    {
+        // The FIFO is blocked behind an unacknowledged VIFcode interrupt.
+        m_vif1StalledData.insert(m_vif1StalledData.end(), data, data + sizeBytes);
+        return;
+    }
+
     uint32_t pos = 0;
+    bool stallAfterCommand = false;
+    auto stall = [&]()
+    {
+        if (m_vif1ResumeData && data >= m_vif1ResumeData->data() &&
+            data < m_vif1ResumeData->data() + m_vif1ResumeData->size())
+        {
+            // Stalled again inside the data being resumed: keep that buffer.
+            m_vif1StalledOffset = static_cast<size_t>(data - m_vif1ResumeData->data()) + pos;
+            m_vif1StalledData.swap(*m_vif1ResumeData);
+        }
+        else
+        {
+            m_vif1StalledData.assign(data + pos, data + sizeBytes);
+            m_vif1StalledOffset = 0;
+        }
+        m_vif1Stalled = true;
+        queueCompletedDmacCause(kQueuedIntcCauseFlag | 5u); // INTC VIF1
+    };
 
     while (pos + 4 <= sizeBytes)
     {
+        if (stallAfterCommand)
+        {
+            stall();
+            return;
+        }
         if (m_vif1PendingPath2ImageQwc != 0u)
         {
             const uint32_t availableQw = (sizeBytes - pos) / 16u;
@@ -344,7 +375,12 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         vif1_regs.code = cmd;
         vif1_regs.num = num;
         if (irq)
+        {
             vif1_regs.stat |= (1u << 11); // INT
+            // Unless ERR.MII masks it, the VIF stalls once this command is done.
+            if ((vif1_regs.err & 0x1u) == 0u)
+                stallAfterCommand = true;
+        }
 
         if (opcode == VIF_NOP)
         {
@@ -398,6 +434,9 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         }
         else if (opcode == VIF_FLUSHE || opcode == VIF_FLUSH || opcode == VIF_FLUSHA)
         {
+            // FLUSHA waits for PATH3 to finish.
+            if (opcode == VIF_FLUSHA)
+                runDeferredGifTransfers();
             continue;
         }
         else if (opcode == VIF_MSCAL || opcode == VIF_MSCALF)
@@ -779,5 +818,11 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         {
             continue;
         }
+    }
+
+    if (stallAfterCommand)
+    {
+        pos = std::min(pos, sizeBytes);
+        stall();
     }
 }

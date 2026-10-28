@@ -157,6 +157,26 @@ namespace
         }
     }
 
+    // A function at 0x3000 that calls itself; the inner call loops back to
+    // the function's first instruction, which unwinds to the scheduler.
+    int gRecursionDepth = 0;
+    bool gRecursiveCallReturned = false;
+
+    void testRecursiveUnwindHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (gRecursionDepth++ == 0)
+        {
+            gRecursiveCallReturned = runtime->dispatchGuestBranch(
+                rdram, ctx, 0x3000u, 0x3004u, 0x3008u, PS2Runtime::GuestBranchKind::DirectCall, "test-recursive-jal");
+        }
+        else
+        {
+            runtime->dispatchGuestBranch(
+                rdram, ctx, 0x3000u, 0x3010u, 0x3014u, PS2Runtime::GuestBranchKind::DirectJump, "test-loop");
+        }
+        --gRecursionDepth;
+    }
+
     void testGuestBranchTransferHandler(uint8_t *, R5900Context *ctx, PS2Runtime *)
     {
         if (ctx)
@@ -404,6 +424,48 @@ void register_ps2_runtime_expansion_tests()
                      "unchanged callee PC should be converted to call fallthrough");
             t.Equals(::getRegU32(&ctx, 2), 0x00FACE42u,
                      "callee should still execute normally");
+        });
+
+        tc.Run("dispatchGuestBranch keeps unwinding when the resume PC is the callee's entry", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            runtime.registerFunction(0x3000u, &testRecursiveUnwindHandler);
+            gRecursionDepth = 0;
+            gRecursiveCallReturned = true;
+
+            R5900Context ctx{};
+            ctx.pc = 0x3000u;
+            testRecursiveUnwindHandler(nullptr, &ctx, &runtime);
+
+            t.IsTrue(!gRecursiveCallReturned,
+                     "the outer call must unwind too, not treat pc == entry as an implicit return");
+            t.Equals(ctx.pc, 0x3000u, "the scheduler should resume at the inner loop's target");
+        });
+
+        tc.Run("calls into RAM code without a recompiled function run in the EE interpreter", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize should succeed");
+            uint8_t *rdram = runtime.memory().getRDRAM();
+
+            // A routine the game would have loaded or built in RAM at run time.
+            constexpr uint32_t kCode = 0x00200000u;
+            const uint32_t code[] = {
+                0x24020005u, // addiu v0, zero, 5
+                0x24420007u, // addiu v0, v0, 7
+                0x03E00008u, // jr ra
+                0x00000000u, // nop
+            };
+            std::memcpy(rdram + kCode, code, sizeof(code));
+
+            R5900Context ctx{};
+            setRegU32(ctx, 31, 0x2008u);
+            t.IsTrue(runtime.canRunGuestCode(kCode), "user RAM outside the code regions should be runnable");
+            t.IsFalse(runtime.hasFunction(kCode), "hasFunction should still mean a recompiled function");
+            const bool returned = runtime.dispatchGuestBranch(
+                rdram, &ctx, kCode, 0x2000u, 0x2008u, PS2Runtime::GuestBranchKind::DirectCall, "test-jal");
+            t.IsTrue(returned, "the interpreted routine should return to its caller");
+            t.Equals(::getRegU32(&ctx, 2), 12u, "the interpreter should run the routine");
         });
 
         tc.Run("dispatchGuestBranch jump returns to central dispatcher without nesting", [](TestCase &t)

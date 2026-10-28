@@ -3,6 +3,7 @@
 #include "runtime/gs/gs_frontend.h"
 #include "ps2_log.h"
 #include <atomic>
+#include <utility>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -329,6 +330,7 @@ bool PS2Memory::initialize(size_t ramSize)
     m_codeRegions.clear();
     m_path3Masked = false;
     m_path3MaskedFifo.clear();
+    m_deferredGifTransfers.clear();
     m_vif1PendingPath2ImageQwc = 0u;
     m_vif1PendingPath2DirectHl = false;
     resetEeTimers();
@@ -1124,6 +1126,11 @@ void PS2Memory::write128(uint32_t address, __m128i value)
 
 bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 {
+    // A deferred GIF chain waits only for the I/O write that follows its start:
+    // when that write resumes VIF1 (FBRST.STC), VIF1 goes first.
+    if (!m_deferredGifTransfers.empty() && !(address == 0x10003C10u && (value & 0x8u) != 0u))
+        runDeferredGifTransfers();
+
     size_t timerIndex = 0u;
     uint32_t timerOffset = 0u;
     if (decodeEeTimerRegister(address, timerIndex, timerOffset))
@@ -1231,6 +1238,10 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                 std::memset(&vif1_regs, 0, sizeof(vif1_regs));
                 m_vif1PendingPath2ImageQwc = 0u;
                 m_vif1PendingPath2DirectHl = false;
+                m_vif1Stalled = false;
+                m_vif1StalledData.clear();
+                m_vif1StalledOffset = 0;
+                m_vif1DmaCompletionDeferred = false;
                 m_path3Masked = false;
                 if (wasPath3Masked)
                     flushMaskedPath3Packets();
@@ -1238,6 +1249,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
             if (value & 0x8u) // STC
             {
                 vif1_regs.stat &= ~((1u << 8) | (1u << 9) | (1u << 10) | (1u << 11) | (1u << 12) | (1u << 13));
+                resumeStalledVif1();
             }
             break;
         case 0x10003C30u:
@@ -1560,7 +1572,21 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
                 const bool autoProcessTransfers =
                     (channelBase == 0x1000A000u) ? (m_gifPacketCallback || m_gifArbiter != nullptr) : true;
-                if (autoProcessTransfers)
+                if (channelBase == 0x1000A000u && autoProcessTransfers &&
+                    m_vif1Stalled && m_vif1StalledData.size() > m_vif1StalledOffset)
+                {
+                    // PATH3 has the lowest GIF priority. Games that sync PATH2 and
+                    // PATH3 with a VIF1 interrupt resume both from the handler (GIF
+                    // first) and rely on the PATH2 draws that follow the stall
+                    // winning the arbitration: the uploads are for the next batch
+                    // and may reuse VRAM those draws still read. The chain runs at
+                    // the next I/O write (see writeIORegister), after the resumed
+                    // VIF1 data if that write is VIF1_FBRST.STC.
+                    for (auto &transfer : m_pendingGifTransfers)
+                        m_deferredGifTransfers.push_back(std::move(transfer));
+                    m_pendingGifTransfers.clear();
+                }
+                else if (autoProcessTransfers)
                 {
                     processPendingTransfers();
                 }
@@ -1896,13 +1922,53 @@ void PS2Memory::processPendingTransfers()
         m_ioRegisters[VIF0_CHANNEL + 0x00] &= ~0x100u;
         m_ioRegisters[VIF0_CHANNEL + 0x20] = 0;
     }
-    if (hadVif1)
+    if (hadVif1 && m_vif1Stalled)
+    {
+        // VIF1 stopped on a VIFcode interrupt; the channel finishes once the
+        // stalled data has been consumed after VIF1_FBRST.STC.
+        m_vif1DmaCompletionDeferred = true;
+    }
+    else if (hadVif1)
     {
         raiseDStatChannel(1u); // VIF1 channel
         queueCompletedDmacCause(1u);
         m_ioRegisters[VIF1_CHANNEL + 0x00] &= ~0x100u;
         m_ioRegisters[VIF1_CHANNEL + 0x20] = 0;
     }
+}
+
+void PS2Memory::resumeStalledVif1()
+{
+    if (!m_vif1Stalled)
+        return;
+    m_vif1Stalled = false;
+    std::vector<uint8_t> pending;
+    pending.swap(m_vif1StalledData);
+    const size_t offset = std::exchange(m_vif1StalledOffset, size_t{0});
+    if (offset < pending.size())
+    {
+        m_vif1ResumeData = &pending;
+        processVIF1Data(pending.data() + offset, static_cast<uint32_t>(pending.size() - offset));
+        m_vif1ResumeData = nullptr;
+    }
+    runDeferredGifTransfers();
+    if (!m_vif1Stalled && m_vif1DmaCompletionDeferred)
+    {
+        static constexpr uint32_t VIF1_CHANNEL = 0x10009000u;
+        m_vif1DmaCompletionDeferred = false;
+        m_ioRegisters[VIF1_CHANNEL + 0x20] = 0;
+        completeDmacChannel(VIF1_CHANNEL, 1u);
+    }
+}
+
+void PS2Memory::runDeferredGifTransfers()
+{
+    if (m_deferredGifTransfers.empty())
+        return;
+    for (auto &transfer : m_deferredGifTransfers)
+        m_pendingGifTransfers.push_back(std::move(transfer));
+    m_deferredGifTransfers.clear();
+    processPendingTransfers();
 }
 
 void PS2Memory::queueCompletedDmacCause(uint32_t cause)
@@ -2338,6 +2404,9 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
         }
         return val;
     }
+
+    if (address == 0x10003020u || address == 0x1000A000u || address == 0x1000E010u) // GIF_STAT, GIF_CHCR, D_STAT
+        runDeferredGifTransfers();
 
     if (address == 0x10003020u) // GIF_STAT
     {

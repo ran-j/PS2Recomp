@@ -7,6 +7,7 @@ namespace ps2_stubs
     {
         constexpr uint8_t kPadModeDigital = 0x41;
         constexpr uint8_t kPadModeDualShock = 0x73;
+        constexpr uint8_t kPadModeDualShock2Pressure = 0x79;
         constexpr uint8_t kPadAnalogCenter = 0x80;
         constexpr int32_t kPadTypeDigital = 4;
         constexpr int32_t kPadTypeDualShock = 7;
@@ -245,7 +246,11 @@ namespace ps2_stubs
         void fillPadStatus(uint8_t *data, const PadInputState &state, const PadPortState &portState)
         {
             std::memset(data, 0, 32);
-            data[1] = portState.analogMode ? kPadModeDualShock : kPadModeDigital;
+            // Terminal ID (high nibble) and payload length in halfwords: in
+            // pressure mode a DualShock 2 sends 9 halfwords (0x79), so games
+            // that enabled it re-run pad setup if they still see 0x73.
+            data[1] = !portState.analogMode ? kPadModeDigital
+                                            : (portState.pressureEnabled ? kPadModeDualShock2Pressure : kPadModeDualShock);
             data[2] = static_cast<uint8_t>(state.buttons & 0xFFu);
             data[3] = static_cast<uint8_t>((state.buttons >> 8) & 0xFFu);
             data[4] = state.rx;

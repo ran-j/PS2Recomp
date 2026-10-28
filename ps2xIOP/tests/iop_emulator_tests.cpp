@@ -911,6 +911,23 @@ int main()
     if (!expect(stopResult == 0, "Emulated module stop result mismatch")) return 1;
     if (!expect(iop.debugSnapshot().emulatorLoadedModules == 0u, "Module was not released")) return 1;
 
+    // sceSifLoadModuleBuffer takes an IOP address: the EE DMAs the image into
+    // IOP RAM first, so the EE copy may be gone by the time the load runs.
+    {
+        constexpr uint32_t imageBytes = 0x118u; // header, program header, code
+        writeMinimalIrx(host, 0x100u);
+        const std::vector<uint8_t> image(host.guest.begin() + 0x100, host.guest.begin() + 0x100 + imageBytes);
+        std::fill(host.guest.begin() + 0x100, host.guest.begin() + 0x100 + imageBytes, uint8_t{0});
+        const uint32_t iopImage = iop.allocateMemory(imageBytes, 64u);
+        if (!expect(iopImage != 0u && iop.writeMemory(iopImage, image.data(), image.size()),
+                    "Could not stage the IRX image in IOP RAM")) return 1;
+        const ModuleLoadResult fromIop = iop.loadModuleBuffer(iopImage);
+        if (!expect(fromIop.handled && fromIop.moduleId > 0 && fromIop.startResult == 7,
+                    "sceSifLoadModuleBuffer must load an image that lives in IOP RAM")) return 1;
+        if (!expect(iop.stopModule(fromIop.moduleId, &stopResult), "IOP-RAM module stop failed")) return 1;
+        if (!expect(iop.freeMemory(iopImage), "IOP image buffer free failed")) return 1;
+    }
+
     constexpr uint32_t rpcSid = 0xF00DCAFEu;
     writeRpcServerIrx(host, 0x100u);
     const ModuleLoadResult rpcModule = iop.loadModuleBuffer(0x100u);

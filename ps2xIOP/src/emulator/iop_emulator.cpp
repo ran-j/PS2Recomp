@@ -654,8 +654,11 @@ namespace ps2x::iop::detail
 
         ModuleLoadResult loadModuleBuffer(uint32_t guestAddress, const void *arguments, uint32_t argumentSize)
         {
+            // Real sceSifLoadModuleBuffer addresses IOP RAM; keep accepting EE
+            // addresses for callers that hand over an image still in EE RAM.
             std::vector<uint8_t> image;
-            if (!IopModuleLoader::readElfFromGuest(host, guestAddress, image))
+            if (!IopModuleLoader::readElfFromIop(memory, guestAddress, image) &&
+                !IopModuleLoader::readElfFromGuest(host, guestAddress, image))
                 return {true, -1, -1};
             std::ostringstream tag;
             tag << "buffer@0x" << std::hex << guestAddress;

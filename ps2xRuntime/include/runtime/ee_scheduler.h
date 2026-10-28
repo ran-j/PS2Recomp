@@ -334,6 +334,11 @@ public:
     void dispatchIrq(bool dmac, uint32_t cause);
     void setVSyncFlag(uint32_t flagAddress, uint32_t tickAddress);
     [[nodiscard]] uint64_t currentVSyncTick() const noexcept;
+    // Takes effect from the next scheduled VBlank (SetGsCrt picks the mode).
+    void setPalVBlankRate(bool pal) noexcept;
+    [[nodiscard]] std::chrono::microseconds vblankPeriod() const noexcept { return m_vblankPeriod; }
+    // EE cycles of guest time elapsed so far (advances at every checkpoint).
+    [[nodiscard]] uint64_t eeCycle() const noexcept { return m_eeCycle; }
     uint32_t setGsVSyncCallback(uint32_t callback, uint32_t gp, uint32_t sp);
 
     [[noreturn]] void waitVSync(uint64_t afterTick, int fixedResult = -1, std::function<void(R5900Context &)> completion = {});
@@ -442,6 +447,8 @@ private:
     uint64_t m_eventSequence = 0;
     uint64_t m_invocationSequence = 0;
     uint64_t m_vsyncTick = 0;
+    std::chrono::microseconds m_vblankPeriod{16667};
+    uint64_t m_vblankPeriodCycles = (16667ull * kEeClockHz + 999999ull) / 1000000ull;
     uint32_t m_vsyncFlagAddress = 0;
     uint32_t m_vsyncTickAddress = 0;
     uint32_t m_gsVSyncCallback = 0;

@@ -379,6 +379,29 @@ void register_ps2_runtime_interrupt_tests()
 {
     MiniTest::Case("PS2RuntimeInterrupt", [](TestCase &tc)
     {
+        tc.Run("SetGsCrt selects the VBlank rate of the video mode", [](TestCase &t)
+        {
+            TestEnv env;
+            constexpr uint32_t kModeNtsc = 2u;
+            constexpr uint32_t kModePal = 3u;
+            EeScheduler &scheduler = env.runtime.eeScheduler();
+            t.Equals(scheduler.vblankPeriod().count(), static_cast<int64_t>(16667),
+                     "the default VBlank rate should stay NTSC");
+
+            R5900Context ctx{};
+            setRegU32(ctx, 4, 1u);
+            setRegU32(ctx, 5, kModePal);
+            setRegU32(ctx, 6, 0u);
+            GsSetCrt(env.rdram.data(), &ctx, &env.runtime);
+            t.Equals(scheduler.vblankPeriod().count(), static_cast<int64_t>(20000),
+                     "PAL mode should produce 50 Hz VBlanks");
+
+            setRegU32(ctx, 5, kModeNtsc);
+            GsSetCrt(env.rdram.data(), &ctx, &env.runtime);
+            t.Equals(scheduler.vblankPeriod().count(), static_cast<int64_t>(16667),
+                     "NTSC mode should restore 60 Hz VBlanks");
+        });
+
         tc.Run("negative interrupt-safe EE syscall ids dispatch", [](TestCase &t)
         {
             TestEnv env;

@@ -205,6 +205,26 @@ void register_code_generator_tests()
                  "LWU must not sign-extend bit 31 into the allocator bitmap value");
     });
 
+    tc.Run("quadword loads and stores ignore the low four address bits", [](TestCase &t) {
+        CodeGenerator gen({}, {});
+        const std::string lq = gen.translateInstruction(makeIType(0x8F20, OPCODE_LQ, 5, 8, 0x8));
+        const std::string sq = gen.translateInstruction(makeIType(0x8F24, OPCODE_SQ, 4, 8, 0x4));
+        const std::string lqc2 = gen.translateInstruction(makeIType(0x8F28, OPCODE_LQC2, 5, 1, 0x8));
+        const std::string sqc2 = gen.translateInstruction(makeIType(0x8F2C, OPCODE_SQC2, 4, 1, 0x4));
+        const std::string lw = gen.translateInstruction(makeLw(0x8F30, 2, 5, 0x8));
+
+        t.IsTrue(lq.find("(ADD32(GPR_U32(ctx, 5), 8) & ~0xFu)") != std::string::npos,
+                 "LQ must align its effective address down to 16 bytes like the R5900");
+        t.IsTrue(sq.find("(ADD32(GPR_U32(ctx, 4), 4) & ~0xFu)") != std::string::npos,
+                 "SQ must align its effective address down to 16 bytes like the R5900");
+        t.IsTrue(lqc2.find("(ADD32(GPR_U32(ctx, 5), 8) & ~0xFu)") != std::string::npos,
+                 "LQC2 must align its effective address down to 16 bytes like the R5900");
+        t.IsTrue(sqc2.find("(ADD32(GPR_U32(ctx, 4), 4) & ~0xFu)") != std::string::npos,
+                 "SQC2 must align its effective address down to 16 bytes like the R5900");
+        t.IsTrue(lw.find("& ~0xFu") == std::string::npos,
+                 "narrower accesses must keep their exact effective address");
+    });
+
     tc.Run("SYSCALL publishes its continuation before entering the runtime", [](TestCase &t) {
         Function func;
         func.name = "syscall_resume";
@@ -267,6 +287,34 @@ void register_code_generator_tests()
                      "g_ps2RecompiledFunctionTable[1] = syscall_resume_entry_0x9100; // 0x9104") !=
                      std::string::npos,
                  "the syscall continuation must register to the owner wrapper");
+    });
+
+    tc.Run("a resume entry never replaces another function's entry", [](TestCase &t) {
+        // A resume point can land on the first instruction of the next
+        // function (e.g. a final branch whose delay slot is that
+        // instruction). Stubs and library functions are registered after
+        // resume points, so without care the owner would take that address.
+        Function owner;
+        owner.name = "resume_owner";
+        owner.start = 0x9100;
+        owner.end = 0x9108;
+        owner.isRecompiled = true;
+        Function next;
+        next.name = "next_function";
+        next.start = 0x9108;
+        next.end = 0x9110;
+        next.isStub = true;
+
+        CodeGenerator gen({}, {});
+        gen.setRenamedFunctions({{0x9100u, "resume_owner_0x9100"}, {0x9108u, "next_function_0x9108"}});
+        gen.setResumeEntryTargets({{0x9100u, std::vector<uint32_t>{0x9104u, 0x9108u}}});
+        const std::string registration = gen.generateFunctionRegistration({owner, next}, {});
+        t.IsTrue(registration.find("g_ps2RecompiledFunctionTable[1] = resume_owner_0x9100; // 0x9104") != std::string::npos,
+                 "a resume point inside the owner should still register to the owner");
+        t.IsTrue(registration.find("g_ps2RecompiledFunctionTable[2] = next_function_0x9108; // 0x9108") != std::string::npos,
+                 "the next function's entry should stay registered to that function");
+        t.IsTrue(registration.find("resume_owner_0x9100; // 0x9108") == std::string::npos,
+                 "the owner must not take over the next function's entry");
     });
 
     tc.Run("R5900 MULT writes rd when rd is non-zero", [](TestCase &t) {
@@ -476,6 +524,45 @@ void register_code_generator_tests()
         t.IsTrue(generated.find("label_100c:") != std::string::npos, "branch target should emit a label");
         t.IsTrue(generated.find("goto label_100c;") != std::string::npos, "internal branch should jump via goto");
         t.IsTrue(generated.find("label_1008:") == std::string::npos, "delay slot without incoming branch should not get a label");
+    });
+
+    tc.Run("sign-testing branches compare the full 64-bit register", [](TestCase &t) {
+        // EE GPRs are 64 bits wide and BLEZ/BGTZ/BLTZ/BGEZ test bit 63, so a
+        // value like 0x0000000080000000 is positive even though its low word
+        // is negative.
+        Function func;
+        func.name = "test_func";
+        func.start = 0x1000;
+        func.end = 0x1040;
+        func.isRecompiled = true;
+        func.isStub = false;
+
+        const auto signBranch = [](uint32_t address, uint32_t opcode, uint32_t rt)
+        {
+            Instruction inst = makeBranch(address, 1);
+            inst.opcode = opcode;
+            inst.rs = 4;
+            inst.rt = rt;
+            return inst;
+        };
+        std::vector<Instruction> instructions;
+        instructions.push_back(signBranch(0x1000, OPCODE_BLEZ, 0));
+        instructions.push_back(makeNop(0x1004));
+        instructions.push_back(signBranch(0x1008, OPCODE_BGTZ, 0));
+        instructions.push_back(makeNop(0x100c));
+        instructions.push_back(signBranch(0x1010, OPCODE_REGIMM, REGIMM_BLTZ));
+        instructions.push_back(makeNop(0x1014));
+        instructions.push_back(signBranch(0x1018, OPCODE_REGIMM, REGIMM_BGEZ));
+        instructions.push_back(makeNop(0x101c));
+        instructions.push_back(makeNop(0x1020));
+
+        CodeGenerator gen({}, {});
+        const std::string generated = gen.generateFunction(func, instructions, false);
+        printGeneratedCode("sign-testing branches compare the full 64-bit register", generated);
+
+        for (const char *condition : {"GPR_S64(ctx, 4) <= 0", "GPR_S64(ctx, 4) > 0", "GPR_S64(ctx, 4) < 0", "GPR_S64(ctx, 4) >= 0"})
+            t.IsTrue(generated.find(condition) != std::string::npos, std::string("missing branch condition ") + condition);
+        t.IsTrue(generated.find("GPR_S32(ctx, 4)") == std::string::npos, "branch conditions should not truncate to 32 bits");
     });
 
     tc.Run("labels delay slot when it is a branch target", [](TestCase &t) {
@@ -990,6 +1077,16 @@ void register_code_generator_tests()
             t.IsTrue(mtc0Code.find("GPR_U32(ctx, 7)") != std::string::npos, "MTC0 should read from rt");
             t.IsTrue(mtc0Code.find("Unimplemented MTC0") == std::string::npos, "MTC0 should not hit unimplemented path");
             t.IsTrue(mtc0Code.find("Unhandled COP0") == std::string::npos, "MTC0 should not hit unhandled COP0 path");
+
+            // Count runs with the EE clock, so it goes through the runtime.
+            mfc0.rd = COP0_REG_COUNT;
+            const std::string countRead = gen.translateInstruction(mfc0);
+            t.IsTrue(countRead.find("SET_GPR_S32(ctx, 5, (int32_t)runtime->readCop0Count(ctx));") != std::string::npos,
+                     "MFC0 Count should read the runtime's cycle-based Count but got: " + countRead);
+            mtc0.rd = COP0_REG_COUNT;
+            const std::string countWrite = gen.translateInstruction(mtc0);
+            t.IsTrue(countWrite.find("runtime->writeCop0Count(ctx, GPR_U32(ctx, 7));") != std::string::npos,
+                     "MTC0 Count should rebase the runtime's Count but got: " + countWrite);
         });
 
         tc.Run("FCR access uses CFC1/CTC1", [](TestCase &t) {

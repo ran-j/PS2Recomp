@@ -31,7 +31,8 @@ namespace
     constexpr uint32_t WEF_OR = 0x01u;
     constexpr uint32_t WEF_CLEAR = 0x10u;
     constexpr uint32_t WEF_CLEAR_ALL = 0x20u;
-    constexpr auto kVBlankPeriod = std::chrono::microseconds(16667);
+    constexpr uint32_t kNtscVBlankMicroseconds = 16667u; // 60 Hz
+    constexpr uint32_t kPalVBlankMicroseconds = 20000u;  // 50 Hz
     constexpr auto kVBlankDuration = std::chrono::microseconds(500);
     constexpr uint64_t kAlarmTickMicroseconds = 64u;
     constexpr uint32_t kDebugPublishDispatchInterval = 4096u;
@@ -50,7 +51,6 @@ namespace
         return std::chrono::seconds(wholeSeconds) + std::chrono::nanoseconds(remainingNanoseconds);
     }
 
-    constexpr uint64_t kVBlankPeriodCycles = microsecondsToEeCycles(16667u);
     constexpr uint64_t kVBlankDurationCycles = microsecondsToEeCycles(500u);
     constexpr uint64_t kAlarmTickCycles = microsecondsToEeCycles(kAlarmTickMicroseconds);
 
@@ -146,8 +146,8 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     main.status = EeThreadStatus::Ready;
     m_threads.emplace(main.id, std::move(main));
     m_readyQueues[0].push_back(kMainThreadId);
-    scheduleEvent(m_eeCycle + kVBlankPeriodCycles,
-                  std::chrono::steady_clock::now() + kVBlankPeriod,
+    scheduleEvent(m_eeCycle + m_vblankPeriodCycles,
+                  std::chrono::steady_clock::now() + m_vblankPeriod,
                   EeEvent{EeEventType::VBlankStart, 0, 0});
     publishSnapshot();
 }
@@ -266,7 +266,7 @@ void EeScheduler::run()
             continue;
         }
 
-        if (!m_runtime.hasFunction(context.pc))
+        if (!m_runtime.canRunGuestCode(context.pc))
         {
             if (!running->invocations.empty())
             {
@@ -285,6 +285,7 @@ void EeScheduler::run()
             }
             continue;
         }
+        m_runtime.clearGuestUnwind();
         PS2Runtime::RecompiledFunction function = m_runtime.lookupFunction(context.pc);
 
         if (checkpointDue(kGuestDispatchCycles))
@@ -1304,6 +1305,13 @@ void EeScheduler::setVSyncFlag(uint32_t flagAddress, uint32_t tickAddress)
     }
 }
 
+void EeScheduler::setPalVBlankRate(bool pal) noexcept
+{
+    const uint32_t microseconds = pal ? kPalVBlankMicroseconds : kNtscVBlankMicroseconds;
+    m_vblankPeriod = std::chrono::microseconds(microseconds);
+    m_vblankPeriodCycles = microsecondsToEeCycles(microseconds);
+}
+
 uint64_t EeScheduler::currentVSyncTick() const noexcept
 {
     return m_vsyncTick;
@@ -1850,8 +1858,8 @@ void EeScheduler::processDueDeadlines()
                 scheduleEvent(scheduled.deadlineCycle + kVBlankDurationCycles,
                               scheduled.hostDeadline + kVBlankDuration,
                               EeEvent{EeEventType::VBlankEnd, 0, m_vsyncTick + 1u});
-                scheduleEvent(scheduled.deadlineCycle + kVBlankPeriodCycles,
-                              scheduled.hostDeadline + kVBlankPeriod,
+                scheduleEvent(scheduled.deadlineCycle + m_vblankPeriodCycles,
+                              scheduled.hostDeadline + m_vblankPeriod,
                               EeEvent{EeEventType::VBlankStart, 0, 0});
             }
             processEvent(scheduled.event);

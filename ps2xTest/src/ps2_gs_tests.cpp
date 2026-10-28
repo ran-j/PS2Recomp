@@ -4135,6 +4135,28 @@ void register_ps2_gs_tests()
                                     "sceGsResetGraph should free its temporary GIF packet");
         });
 
+        tc.Run("sceGsResetGraph selects the VBlank rate of its video mode", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+
+            R5900Context ctx{};
+            setRegU32(ctx, 4, 0u); // reset
+            setRegU32(ctx, 5, 1u); // interlaced
+            setRegU32(ctx, 6, 3u); // PAL
+            setRegU32(ctx, 7, 1u);
+            ps2_stubs::sceGsResetGraph(rdram.data(), &ctx, &runtime);
+            t.Equals(runtime.eeScheduler().vblankPeriod().count(), static_cast<int64_t>(20000),
+                     "a PAL reset should produce 50 Hz VBlanks");
+
+            setRegU32(ctx, 4, 0u);
+            setRegU32(ctx, 6, 2u); // NTSC
+            ps2_stubs::sceGsResetGraph(rdram.data(), &ctx, &runtime);
+            t.Equals(runtime.eeScheduler().vblankPeriod().count(), static_cast<int64_t>(16667),
+                     "an NTSC reset should restore 60 Hz VBlanks");
+        });
+
         tc.Run("sceGsSyncV resumes through the scheduler with deterministic field parity", [](TestCase &t)
         {
             PS2Runtime runtime;

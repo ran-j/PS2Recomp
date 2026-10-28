@@ -351,6 +351,18 @@ void register_pad_input_tests()
             runPadRead(ctx, rdram);
             t.Equals(data[1], static_cast<uint8_t>(0x73), "mode byte should be 0x73 (analog) after SetMainMode");
 
+            setRegU32(ctx, 4, 0u);
+            setRegU32(ctx, 5, 0u);
+            ps2_stubs::scePadEnterPressMode(rdram.data(), &ctx, nullptr);
+            runPadRead(ctx, rdram);
+            t.Equals(data[1], static_cast<uint8_t>(0x79), "mode byte should be 0x79 (9 halfwords) in pressure mode");
+
+            setRegU32(ctx, 4, 0u);
+            setRegU32(ctx, 5, 0u);
+            ps2_stubs::scePadExitPressMode(rdram.data(), &ctx, nullptr);
+            runPadRead(ctx, rdram);
+            t.Equals(data[1], static_cast<uint8_t>(0x73), "mode byte should return to 0x73 after leaving pressure mode");
+
             closePadPort(ctx, rdram);
         });
 

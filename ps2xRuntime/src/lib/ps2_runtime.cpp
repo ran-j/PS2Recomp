@@ -1,4 +1,5 @@
 #include "ps2_runtime.h"
+#include "runtime/ps2_ee_interpreter.h"
 #include "ps2_log.h"
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
@@ -26,6 +27,7 @@
 #include <thread>
 #include <unordered_map>
 #include <sstream>
+#include <cstdlib>
 
 namespace ps2_stubs
 {
@@ -605,6 +607,20 @@ void PS2Runtime::notifyIopSifTransfer(uint8_t *rdram, const ps2x::iop::SifTransf
     m_iopSubsystem->onSifTransfer(transfer);
 }
 
+uint32_t PS2Runtime::readCop0Count(R5900Context *ctx) noexcept
+{
+    if (m_eeScheduler)
+        ctx->cop0_count = static_cast<uint32_t>(m_eeScheduler->eeCycle()) + m_cop0CountBias;
+    return ctx->cop0_count;
+}
+
+void PS2Runtime::writeCop0Count(R5900Context *ctx, uint32_t value) noexcept
+{
+    ctx->cop0_count = value;
+    if (m_eeScheduler)
+        m_cop0CountBias = value - static_cast<uint32_t>(m_eeScheduler->eeCycle());
+}
+
 void PS2Runtime::advanceIopEeCycles(uint64_t eeCycles) noexcept
 {
     m_iopSubsystem->runEeCycles(eeCycles);
@@ -1065,6 +1081,13 @@ void PS2Runtime::configureIoPathsFromElf(const std::string &elfPath)
         paths.mcRoot = paths.elfDirectory / "mc0";
     }
 
+    // Games with their own ISO9660 reader (e.g. EA titles) issue raw sector
+    // reads, which need the original disc image rather than extracted files.
+    if (const char *image = std::getenv("PS2X_CD_IMAGE"); image && *image)
+    {
+        paths.cdImage = std::filesystem::path(image);
+    }
+
     setIoPaths(paths);
 }
 
@@ -1109,10 +1132,33 @@ bool PS2Runtime::registerFunction(uint32_t address, RecompiledFunction func)
     return replaceFunction(address, func);
 }
 
-bool PS2Runtime::hasFunction(uint32_t address) const
+bool ps2HasRecompiledFunction(uint32_t address)
 {
     uint32_t slot = 0u;
     return generatedFunctionTableSlot(address, slot) && g_ps2RecompiledFunctionTable[slot] != nullptr;
+}
+
+// Code the game places in RAM at run time (e.g. modules linked from data
+// files) has no recompiled function; such addresses run in the interpreter.
+// PS2X_NO_INTERPRETER=1 disables this (missing-function reports instead).
+static bool isInterpretableGuestCode(const PS2Memory &memory, uint32_t address)
+{
+    // User RAM only: below 1 MB is the kernel's, and kernel-segment
+    // addresses are where interrupt handlers return (the scheduler ends an
+    // invocation when it reaches an address without a function).
+    static const bool disabled = std::getenv("PS2X_NO_INTERPRETER") != nullptr;
+    return !disabled && (address & 3u) == 0u && address >= 0x00100000u && address < PS2_RAM_SIZE &&
+           !memory.isCodeAddress(address);
+}
+
+bool PS2Runtime::hasFunction(uint32_t address) const
+{
+    return ps2HasRecompiledFunction(address);
+}
+
+bool PS2Runtime::canRunGuestCode(uint32_t address) const
+{
+    return ps2HasRecompiledFunction(address) || isInterpretableGuestCode(m_memory, address);
 }
 
 const char *describeGuestBranchKind(PS2Runtime::GuestBranchKind kind)
@@ -1146,6 +1192,18 @@ PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
         {
             return fn;
         }
+    }
+
+    if (isInterpretableGuestCode(m_memory, address))
+    {
+        static bool announced = false;
+        if (!announced)
+        {
+            announced = true;
+            std::cerr << "[ee-interp] running guest code at 0x" << std::hex << address << std::dec
+                      << " in the interpreter (no recompiled function)" << std::endl;
+        }
+        return &ps2InterpretGuestCode;
     }
 
     std::cerr << "Error: No exact recompiled function for guest PC 0x" << std::hex << address
@@ -1353,26 +1411,37 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     ctx->pc = targetPc;
     const bool isCall = (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall);
 
+    // Returning false makes the generated caller return at once, and so on up
+    // to the scheduler, which then dispatches ctx->pc. Remember that an unwind
+    // is in progress: an enclosing call must keep unwinding even if ctx->pc
+    // happens to equal its own callee's entry (recursion), instead of taking
+    // that for "callee returned without setting pc".
+    auto unwindToScheduler = [this]()
+    {
+        m_guestUnwinding = true;
+        return false;
+    };
+
     // Every inter-function transfer is also a deterministic EE safe point.
     // Backward edges inside generated functions use eeCheckpointDue(), while
     // this charge bounds straight-line call chains that have no local loop.
     if (m_eeScheduler && m_eeScheduler->checkpointDue(EeScheduler::kGuestDispatchCycles))
     {
-        return false;
+        return unwindToScheduler();
     }
 
     if (!isCall)
     {
-        if (!hasFunction(targetPc))
+        if (!canRunGuestCode(targetPc))
         {
             reportMissingFunction(rdram, ctx, targetPc, sourcePc, kind, debugName);
         }
 
         ctx->pc = targetPc;
-        return false;
+        return unwindToScheduler();
     }
 
-    if (!hasFunction(targetPc))
+    if (!canRunGuestCode(targetPc))
     {
         reportMissingFunction(rdram, ctx, targetPc, sourcePc, kind, debugName);
 
@@ -1388,27 +1457,32 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         {
             ctx->pc = targetPc;
             // if you need the app to keep open to open debug pannel change this to false
-            return false;
+            return unwindToScheduler();
         }
 
-        return false;
+        return unwindToScheduler();
     }
 
     RecompiledFunction targetFn = lookupFunction(targetPc);
     const uint32_t entryPc = ctx->pc;
     targetFn(rdram, ctx, this);
 
-    if (isStopRequested() || ctx->pc == 0u)
+    if (m_guestUnwinding || isStopRequested() || ctx->pc == 0u)
     {
-        return false;
+        return unwindToScheduler();
     }
 
+    // HLE handlers may return without setting ctx->pc.
     if (ctx->pc == entryPc)
     {
         ctx->pc = fallthroughPc;
     }
 
-    return ctx->pc == fallthroughPc;
+    if (ctx->pc != fallthroughPc)
+    {
+        return unwindToScheduler();
+    }
+    return true;
 }
 
 void PS2Runtime::SignalException(R5900Context *ctx, PS2Exception exception)
@@ -1487,8 +1561,18 @@ void PS2Runtime::drainCompletedDmacHandlers(uint8_t *rdram)
 {
     for (uint32_t cause : m_memory.consumeCompletedDmacCauses())
     {
-        ps2_syscalls::dispatchDmacHandlersForCause(rdram, this, cause);
+        dispatchCompletedDmacCause(rdram, cause);
     }
+}
+
+void PS2Runtime::dispatchCompletedDmacCause(uint8_t *rdram, uint32_t cause)
+{
+    if ((cause & PS2Memory::kQueuedIntcCauseFlag) != 0u)
+    {
+        m_eeScheduler->dispatchIrq(false, cause & ~PS2Memory::kQueuedIntcCauseFlag);
+        return;
+    }
+    ps2_syscalls::dispatchDmacHandlersForCause(rdram, this, cause);
 }
 
 void PS2Runtime::handleTrap(uint8_t *rdram, R5900Context *ctx)
@@ -2211,7 +2295,11 @@ void PS2Runtime::postEeEvent(EeEvent event)
 
 bool PS2Runtime::eeCheckpointDue(uint32_t cycles) noexcept
 {
-    return m_eeScheduler->checkpointDue(cycles);
+    // A due checkpoint makes the generated function return to the scheduler.
+    if (!m_eeScheduler->checkpointDue(cycles))
+        return false;
+    m_guestUnwinding = true;
+    return true;
 }
 
 [[noreturn]] void PS2Runtime::eeWaitVSyncTicks(uint32_t ticks, uint32_t resumePc)

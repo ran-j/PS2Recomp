@@ -769,6 +769,26 @@ void register_ps2_memory_tests()
             t.IsTrue((mem.vif1_regs.stat & (1u << 11)) == 0u, "FBRST.STC should clear VIF1 STAT.INT");
         });
 
+        tc.Run("VIF1 stalls after an interrupt command until FBRST.STC", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            const uint32_t words[] = {
+                0x80000000u | makeVifCmd(0x00u, 0x00u, 0x0000u), // NOP with the I bit
+                makeVifCmd(0x07u, 0x00u, 0x1234u),               // MARK 0x1234
+            };
+            mem.processVIF1Data(reinterpret_cast<const uint8_t *>(words), sizeof(words));
+            t.Equals(mem.vif1_regs.mark, 0u, "commands after the interrupt should wait for the CPU");
+
+            const std::vector<uint32_t> causes = mem.consumeCompletedDmacCauses();
+            t.IsTrue(std::find(causes.begin(), causes.end(), PS2Memory::kQueuedIntcCauseFlag | 5u) != causes.end(),
+                     "the interrupt command should raise the INTC VIF1 interrupt");
+
+            t.IsTrue(mem.writeIORegister(0x10003C10u, 0x8u), "FBRST STC write should succeed");
+            t.Equals(mem.vif1_regs.mark, 0x1234u, "FBRST.STC should resume the stalled commands");
+        });
+
         tc.Run("VIF FBRST RST clears VIF1 command state", [](TestCase &t)
         {
             PS2Memory mem;
@@ -954,6 +974,42 @@ void register_ps2_memory_tests()
             }
             t.IsTrue(firstOk, "first queued PATH3 packet should flush in-order");
             t.IsTrue(secondOk, "second queued PATH3 packet should flush in-order");
+        });
+
+        tc.Run("PATH3 started during a VIF1 interrupt stall waits for the resumed PATH2 data", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            std::vector<uint8_t> firstBytes;
+            mem.setGifPacketCallback([&](const uint8_t *data, uint32_t)
+            {
+                firstBytes.push_back(data[0]);
+            });
+
+            // VIF1: NOP with the I bit, then a DIRECT (PATH2) packet.
+            uint32_t vif1[2u + 4u] = {
+                0x80000000u | makeVifCmd(0x00u, 0x00u, 0x0000u),
+                makeVifCmd(0x50u, 0x00u, 0x0001u),
+            };
+            vif1[2] = 0xA2u;
+            mem.processVIF1Data(reinterpret_cast<const uint8_t *>(vif1), sizeof(vif1));
+
+            // The interrupt handler restarts GIF (PATH3) before VIF1.
+            constexpr uint32_t kGifCh = 0x1000A000u;
+            constexpr uint32_t kSrc = 0x00022000u;
+            uint8_t *rdram = mem.getRDRAM();
+            std::memset(rdram + kSrc, 0, 16u);
+            rdram[kSrc] = 0xA3u;
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x10u, kSrc), "write MADR should succeed");
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x20u, 1u), "write QWC should succeed");
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x00u, 0x100u), "write CHCR STR should succeed");
+            t.IsTrue(firstBytes.empty(), "PATH3 should wait while VIF1 holds PATH2 data behind the interrupt");
+
+            t.IsTrue(mem.writeIORegister(0x10003C10u, 0x8u), "FBRST STC write should succeed");
+            t.Equals(firstBytes.size(), static_cast<size_t>(2u), "both paths should run after FBRST.STC");
+            t.IsTrue(firstBytes.size() == 2u && firstBytes[0] == 0xA2u && firstBytes[1] == 0xA3u,
+                     "the resumed PATH2 packet should reach the GS before the PATH3 upload");
         });
 
         tc.Run("GIF arbiter prioritizes PATH1 then PATH2 then PATH3", [](TestCase &t)

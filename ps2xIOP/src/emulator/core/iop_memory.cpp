@@ -269,9 +269,23 @@ namespace ps2x::iop::detail
         const uint32_t wordsPerBlock = std::max<uint32_t>(blockControl & 0xFFFFu, 1u);
         const uint32_t blockCount = std::max<uint32_t>(blockControl >> 16u, 1u);
         const uint64_t transferWords = static_cast<uint64_t>(wordsPerBlock) * blockCount;
+
+        // With auto-DMA (ADMAS at 0x1F9001B0 / 0x1F9005B0) the SPU2 pulls PCM
+        // only as fast as it plays it: 48 kHz stereo 16-bit = 192000 bytes/s,
+        // i.e. 192 IOP cycles per byte. Completing at bus speed instead makes
+        // sceSdBlockTrans streams (software mixers) refill back-to-back and
+        // keeps the IOP 100% busy.
+        const uint32_t admasAddress = secondCore ? 0x1F9005B0u : 0x1F9001B0u;
+        uint32_t admas = 0u;
+        if (const auto current = m_hardware.find(admasAddress); current != m_hardware.end())
+            admas = current->second & 0xFFFFu;
+        constexpr uint64_t kAutoDmaCyclesPerByte = 192u;
+        const uint64_t delayCycles = (admas & 3u) != 0u
+                                         ? transferWords * 4u * kAutoDmaCyclesPerByte
+                                         : std::max<uint64_t>(transferWords * 2u, 64u);
         m_dmaStart = DmaStart{
             secondCore ? kDmaSpu1Irq : kDmaSpu0Irq,
-            std::max<uint64_t>(transferWords * 2u, 64u),
+            delayCycles,
         };
     }
 
