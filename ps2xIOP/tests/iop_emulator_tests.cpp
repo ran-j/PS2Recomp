@@ -1142,6 +1142,25 @@ int main()
     if (!expect(!emittedUnhandledSeek,
                 "sceCdSeek still emitted an unhandled IOP import")) return 1;
 
+    {
+        // Games DMA an embedded IRX into IOP RAM and pass that IOP address to
+        // sceSifLoadModuleBuffer. The EE guest holds nothing at that address.
+        constexpr uint32_t iopBufferAddress = 0x00120000u;
+        constexpr size_t irxBytes = 0x200u;
+        TestHost dmaHost(0x1000u);
+        IopSubsystem dmaIop(dmaHost);
+        writeMinimalIrx(dmaHost, 0x100u);
+        if (!expect(dmaIop.writeMemory(iopBufferAddress, dmaHost.guest.data() + 0x100u, irxBytes),
+                    "Could not copy the IRX into IOP RAM")) return 1;
+        std::fill(dmaHost.guest.begin(), dmaHost.guest.end(), uint8_t{0});
+
+        const ModuleLoadResult iopBufferModule = dmaIop.loadModuleBuffer(iopBufferAddress);
+        if (!expect(iopBufferModule.handled && iopBufferModule.moduleId == 1,
+                    "IRX buffer in IOP RAM was not loaded")) return 1;
+        if (!expect(iopBufferModule.startResult == 7,
+                    "IRX buffer in IOP RAM returned the wrong start result")) return 1;
+    }
+
     std::cout << "ps2xIOP emulator smoke tests passed\n";
     return 0;
 }

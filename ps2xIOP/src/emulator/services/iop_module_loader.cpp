@@ -320,51 +320,70 @@ namespace ps2x::iop::detail
         return ok;
     }
 
-    bool IopModuleLoader::readElfFromGuest(IopHost &host, uint32_t guestAddress, std::vector<uint8_t> &bytes)
+    namespace
     {
-        Elf32Ehdr header{};
-        if (!host.readGuest(guestAddress, &header, sizeof(header)) || !validElfHeader(header))
-            return false;
-
-        uint64_t required = sizeof(header);
-        required = std::max<uint64_t>(required, static_cast<uint64_t>(header.phoff) + static_cast<uint64_t>(header.phentsize) * header.phnum);
-        required = std::max<uint64_t>(required, static_cast<uint64_t>(header.shoff) + static_cast<uint64_t>(header.shentsize) * header.shnum);
-
-        if (required > kMaxImageSize)
-            return false; // Should we log an error here? TODO check later
-
-        bytes.resize(static_cast<size_t>(required));
-        if (!host.readGuest(guestAddress, bytes.data(), bytes.size()))
-            return false;
-
-        if (header.shnum != 0u && header.shentsize >= sizeof(Elf32Shdr))
+        // readImage(destination, size) reads from the start of the image.
+        template <typename ReadImage>
+        bool readElfImage(const ReadImage &readImage, std::vector<uint8_t> &bytes)
         {
-            for (uint16_t i = 0; i < header.shnum; ++i)
+            Elf32Ehdr header{};
+            if (!readImage(&header, sizeof(header)) || !validElfHeader(header))
+                return false;
+
+            uint64_t required = sizeof(header);
+            required = std::max<uint64_t>(required, static_cast<uint64_t>(header.phoff) + static_cast<uint64_t>(header.phentsize) * header.phnum);
+            required = std::max<uint64_t>(required, static_cast<uint64_t>(header.shoff) + static_cast<uint64_t>(header.shentsize) * header.shnum);
+
+            if (required > kMaxImageSize)
+                return false; // Should we log an error here? TODO check later
+
+            bytes.resize(static_cast<size_t>(required));
+            if (!readImage(bytes.data(), bytes.size()))
+                return false;
+
+            if (header.shnum != 0u && header.shentsize >= sizeof(Elf32Shdr))
             {
-                Elf32Shdr section{};
-                const size_t offset = static_cast<size_t>(header.shoff) + static_cast<size_t>(i) * header.shentsize;
-                std::memcpy(&section, bytes.data() + offset, sizeof(section));
-                if (section.type != SHT_NOBITS)
+                for (uint16_t i = 0; i < header.shnum; ++i)
                 {
-                    required = std::max<uint64_t>(required, static_cast<uint64_t>(section.offset) + section.size);
+                    Elf32Shdr section{};
+                    const size_t offset = static_cast<size_t>(header.shoff) + static_cast<size_t>(i) * header.shentsize;
+                    std::memcpy(&section, bytes.data() + offset, sizeof(section));
+                    if (section.type != SHT_NOBITS)
+                    {
+                        required = std::max<uint64_t>(required, static_cast<uint64_t>(section.offset) + section.size);
+                    }
                 }
             }
-        }
-        if (header.phnum != 0u && header.phentsize >= sizeof(Elf32Phdr))
-        {
-            for (uint16_t i = 0; i < header.phnum; ++i)
+            if (header.phnum != 0u && header.phentsize >= sizeof(Elf32Phdr))
             {
-                Elf32Phdr program{};
-                const size_t offset = static_cast<size_t>(header.phoff) + static_cast<size_t>(i) * header.phentsize;
-                std::memcpy(&program, bytes.data() + offset, sizeof(program));
-                required = std::max<uint64_t>(required, static_cast<uint64_t>(program.offset) + program.filesz);
+                for (uint16_t i = 0; i < header.phnum; ++i)
+                {
+                    Elf32Phdr program{};
+                    const size_t offset = static_cast<size_t>(header.phoff) + static_cast<size_t>(i) * header.phentsize;
+                    std::memcpy(&program, bytes.data() + offset, sizeof(program));
+                    required = std::max<uint64_t>(required, static_cast<uint64_t>(program.offset) + program.filesz);
+                }
             }
-        }
-        if (required > kMaxImageSize)
-            return false;
+            if (required > kMaxImageSize)
+                return false;
 
-        bytes.resize(static_cast<size_t>(required));
-        return host.readGuest(guestAddress, bytes.data(), bytes.size());
+            bytes.resize(static_cast<size_t>(required));
+            return readImage(bytes.data(), bytes.size());
+        }
+    }
+
+    bool IopModuleLoader::readElfFromGuest(IopHost &host, uint32_t guestAddress, std::vector<uint8_t> &bytes)
+    {
+        return readElfImage([&](void *destination, size_t size)
+                            { return host.readGuest(guestAddress, destination, size); },
+                            bytes);
+    }
+
+    bool IopModuleLoader::readElfFromIop(const IopMemory &memory, uint32_t iopAddress, std::vector<uint8_t> &bytes)
+    {
+        return readElfImage([&](void *destination, size_t size)
+                            { return memory.readRam(iopAddress, destination, size); },
+                            bytes);
     }
 
     IopImageLoadResult IopModuleLoader::load(std::span<const uint8_t> image, IopMemory &memory, uint32_t moduleCursor)
