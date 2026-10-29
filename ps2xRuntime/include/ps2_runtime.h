@@ -385,6 +385,8 @@ public:
     uint32_t guestHeapEnd() const;
     uint32_t guestHeapLimit() const;
     uint32_t reserveAsyncCallbackStack(uint32_t size, uint32_t alignment = 16u);
+    // Keeps async callback stacks out of [base, end), e.g. a main-thread stack placed at the top of RAM.
+    void excludeAsyncCallbackStackRange(uint32_t base, uint32_t end);
 
     void drainCompletedDmacHandlers(uint8_t *rdram);
 

@@ -2018,6 +2018,23 @@ uint32_t PS2Runtime::reserveAsyncCallbackStack(uint32_t size, uint32_t alignment
     return top - 0x10u;
 }
 
+void PS2Runtime::excludeAsyncCallbackStackRange(uint32_t base, uint32_t end)
+{
+    std::lock_guard<std::mutex> lock(m_asyncCallbackStackMutex);
+    if (end <= m_asyncCallbackStackFloor || base >= m_asyncCallbackStackTop)
+    {
+        return;
+    }
+    if (base < m_asyncCallbackStackFloor)
+    {
+        std::cerr << "[runtime] stack range 0x" << std::hex << base << "-0x" << end
+                  << " covers the async callback stack area starting at 0x" << m_asyncCallbackStackFloor
+                  << std::dec << "; callbacks may corrupt it" << std::endl;
+        return;
+    }
+    m_asyncCallbackStackTop = base & ~(kGuestHeapDefaultAlignment - 1u);
+}
+
 uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
     try

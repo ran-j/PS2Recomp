@@ -727,6 +727,27 @@ void register_ps2_runtime_kernel_tests()
                      "the resumed waiter should re-enter its priority queue once");
         });
 
+        tc.Run("SetupThread keeps async callback stacks out of a top-of-RAM main stack", [](TestCase &t)
+        {
+            TestEnv env;
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.reset(env.rdram.data(), env.ctx);
+            ee.bindMainContextForSyscall(env.ctx, env.rdram.data());
+
+            // Mana Khemia's crt0: SetupThread(gp, 0x01FC0000, 0x40000, ...).
+            constexpr uint32_t kStack = 0x01FC0000u;
+            setRegU32(env.ctx, 4, 0x00BAE3F0u);
+            setRegU32(env.ctx, 5, kStack);
+            setRegU32(env.ctx, 6, 0x40000u);
+            ps2_syscalls::SetupThread(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)), PS2_RAM_SIZE,
+                     "SetupThread should still return the top of the requested stack");
+
+            const uint32_t callbackTop = env.runtime.reserveAsyncCallbackStack(0x4000u, 16u);
+            t.IsTrue(callbackTop != 0u && callbackTop <= kStack,
+                     "callback stacks must be carved below the main thread stack");
+        });
+
         tc.Run("ChangeThreadPriority returns the previous priority", [](TestCase &t)
         {
             TestEnv env;
