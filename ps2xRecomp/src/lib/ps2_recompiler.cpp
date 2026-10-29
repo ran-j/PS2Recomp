@@ -2120,6 +2120,51 @@ namespace ps2recomp
         uint32_t start = function.start;
         uint32_t end = function.end;
 
+        auto decodeInstructionAt = [&](uint32_t address) -> Instruction
+        {
+            uint32_t rawInstruction = m_elfParser->readWord(address);
+            const uint32_t originalInstruction = rawInstruction;
+
+            auto patchIt = m_config.patches.find(address);
+            if (patchIt != m_config.patches.end())
+            {
+                const PatchClass patchClass = classifyPatchedInstruction(originalInstruction);
+                if (shouldApplyConfiguredPatch(patchClass, m_config))
+                {
+                    try
+                    {
+                        rawInstruction = std::stoul(patchIt->second, nullptr, 0);
+                        {
+                            std::ostringstream msg;
+                            msg << "Applied patch at 0x" << std::hex << address;
+                            m_reporter.info("patch", msg.str());
+                        }
+                    }
+                    catch (const std::exception &e)
+                    {
+                        {
+                            std::ostringstream msg;
+                            msg << "Invalid patch value at 0x" << std::hex << address
+                                << " (" << patchIt->second << "): " << e.what()
+                                << ". Using original instruction.";
+                            m_reporter.warningAt("patch", function.name, address, msg.str());
+                        }
+                    }
+                }
+            }
+
+            Instruction inst = m_decoder->decodeInstruction(address, rawInstruction, !m_config.lowMemoryMode);
+
+            auto mmioIt = m_config.mmioByInstructionAddress.find(address);
+            if (mmioIt != m_config.mmioByInstructionAddress.end())
+            {
+                inst.isMmio = true;
+                inst.mmioAddress = mmioIt->second;
+            }
+
+            return inst;
+        };
+
         for (uint32_t address = start; address < end; address += 4)
         {
             try
@@ -2135,47 +2180,7 @@ namespace ps2recomp
                     break;
                 }
 
-                uint32_t rawInstruction = m_elfParser->readWord(address);
-                const uint32_t originalInstruction = rawInstruction;
-
-                auto patchIt = m_config.patches.find(address);
-                if (patchIt != m_config.patches.end())
-                {
-                    const PatchClass patchClass = classifyPatchedInstruction(originalInstruction);
-                    if (shouldApplyConfiguredPatch(patchClass, m_config))
-                    {
-                        try
-                        {
-                            rawInstruction = std::stoul(patchIt->second, nullptr, 0);
-                            {
-                                std::ostringstream msg;
-                                msg << "Applied patch at 0x" << std::hex << address;
-                                m_reporter.info("patch", msg.str());
-                            }
-                        }
-                        catch (const std::exception &e)
-                        {
-                            {
-                                std::ostringstream msg;
-                                msg << "Invalid patch value at 0x" << std::hex << address
-                                    << " (" << patchIt->second << "): " << e.what()
-                                    << ". Using original instruction.";
-                                m_reporter.warningAt("patch", function.name, address, msg.str());
-                            }
-                        }
-                    }
-                }
-
-                Instruction inst = m_decoder->decodeInstruction(address, rawInstruction, !m_config.lowMemoryMode);
-
-                auto mmioIt = m_config.mmioByInstructionAddress.find(address);
-                if (mmioIt != m_config.mmioByInstructionAddress.end())
-                {
-                    inst.isMmio = true;
-                    inst.mmioAddress = mmioIt->second;
-                }
-
-                instructions.push_back(inst);
+                instructions.push_back(decodeInstructionAt(address));
             }
             catch (const std::exception &e)
             {
@@ -2202,6 +2207,27 @@ namespace ps2recomp
         if (truncated)
         {
             function.end = instructions.back().address + 4;
+        }
+
+        // When another function starts at the final branch's delay slot, decode the real slot past
+        // function.end so the branch runs it instead of a synthetic NOP.
+        const bool delaySlotPastEnd = !truncated && instructions.back().hasDelaySlot &&
+                                      instructions.back().address + 4u == function.end &&
+                                      m_elfParser->isValidAddress(function.end);
+        if (delaySlotPastEnd)
+        {
+            try
+            {
+                instructions.push_back(decodeInstructionAt(function.end));
+            }
+            catch (const std::exception &e)
+            {
+                {
+                    std::ostringstream msg;
+                    msg << "Error decoding delay slot past function end: " << e.what() << " (using NOP)";
+                    m_reporter.warningAt("decode", function.name, function.end, msg.str());
+                }
+            }
         }
 
         m_decodedFunctions.insert_or_assign(function.start, std::move(instructions));

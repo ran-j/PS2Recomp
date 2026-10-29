@@ -803,6 +803,150 @@ static bool writeRecompilerTestConfig(const std::filesystem::path &configPath,
     return static_cast<bool>(config);
 }
 
+struct TextFunctionSymbol
+{
+    std::string name;
+    uint32_t address = 0;
+    uint32_t size = 0;
+};
+
+static bool writeMinimalMipsElfWithTextFunctions(const std::filesystem::path &elfPath,
+                                                 const std::vector<uint32_t> &textWords,
+                                                 const std::vector<TextFunctionSymbol> &functionSymbols)
+{
+    ELFIO::elfio writer;
+    writer.create(ELFIO::ELFCLASS32, ELFIO::ELFDATA2LSB);
+    writer.set_os_abi(ELFIO::ELFOSABI_NONE);
+    writer.set_type(ELFIO::ET_EXEC);
+    writer.set_machine(ELFIO::EM_MIPS);
+    writer.set_entry(0x00100000u);
+
+    ELFIO::section *text = writer.sections.add(".text");
+    text->set_type(ELFIO::SHT_PROGBITS);
+    text->set_flags(ELFIO::SHF_ALLOC | ELFIO::SHF_EXECINSTR);
+    text->set_addr_align(4);
+    text->set_address(0x00100000u);
+    text->set_data(reinterpret_cast<const char *>(textWords.data()),
+                   static_cast<ELFIO::Elf_Word>(textWords.size() * sizeof(uint32_t)));
+
+    ELFIO::section *strtab = writer.sections.add(".strtab");
+    strtab->set_type(ELFIO::SHT_STRTAB);
+    strtab->set_addr_align(1);
+
+    ELFIO::section *symtab = writer.sections.add(".symtab");
+    symtab->set_type(ELFIO::SHT_SYMTAB);
+    symtab->set_info(1);
+    symtab->set_link(strtab->get_index());
+    symtab->set_addr_align(4);
+    symtab->set_entry_size(writer.get_default_entry_size(ELFIO::SHT_SYMTAB));
+
+    ELFIO::symbol_section_accessor symbols(writer, symtab);
+    ELFIO::string_section_accessor strings(strtab);
+    symbols.add_symbol(strings, "", 0, 0,
+                       ELFIO::STB_LOCAL, ELFIO::STT_NOTYPE, 0, ELFIO::SHN_UNDEF);
+    for (const auto &symbol : functionSymbols)
+    {
+        symbols.add_symbol(strings, symbol.name.c_str(), symbol.address, symbol.size,
+                           ELFIO::STB_GLOBAL, ELFIO::STT_FUNC, 0, text->get_index());
+    }
+
+    ELFIO::segment *textSegment = writer.segments.add();
+    textSegment->set_type(ELFIO::PT_LOAD);
+    textSegment->set_flags(ELFIO::PF_R | ELFIO::PF_X);
+    textSegment->set_align(0x1000);
+    textSegment->add_section_index(text->get_index(), text->get_addr_align());
+
+    return writer.save(elfPath.string());
+}
+
+struct SingleFileRecompileResult
+{
+    bool ok = false;
+    std::string functions;
+    std::string registration;
+};
+
+// Recompiles a generated ELF into one combined functions file so a test can inspect each function's body.
+static SingleFileRecompileResult recompileTextFunctionsToSingleFile(TestCase &t,
+                                                                    const std::string &label,
+                                                                    const std::vector<uint32_t> &textWords,
+                                                                    const std::vector<TextFunctionSymbol> &functionSymbols,
+                                                                    const std::string &extraConfig = {})
+{
+    SingleFileRecompileResult result{};
+    const std::string uniqueSuffix =
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    const std::filesystem::path tempRoot =
+        std::filesystem::temp_directory_path() / ("ps2recomp-" + label + "-" + uniqueSuffix);
+    const std::filesystem::path elfPath = tempRoot / (label + ".elf");
+    const std::filesystem::path configPath = tempRoot / (label + ".toml");
+    const std::filesystem::path outputPath = tempRoot / "output";
+    std::filesystem::create_directories(tempRoot);
+
+    bool inputsWritten = writeMinimalMipsElfWithTextFunctions(elfPath, textWords, functionSymbols) &&
+                         writeRecompilerTestConfig(configPath, elfPath, outputPath, {});
+    if (inputsWritten)
+    {
+        std::ofstream config(configPath, std::ios::app);
+        config << "single_file_output = true\n";
+        // One output worker keeps the combined file deterministic.
+        config << "output_worker_threads = 1\n";
+        config << extraConfig;
+        inputsWritten = static_cast<bool>(config);
+    }
+    t.IsTrue(inputsWritten, label + ": regression inputs should be generated");
+
+    if (inputsWritten)
+    {
+        PS2Recompiler recompiler(configPath.string());
+        const bool initialized = recompiler.initialize();
+        t.IsTrue(initialized, label + ": config should initialize");
+        const bool recompiled = initialized && recompiler.recompile();
+        t.IsTrue(recompiled, label + ": ELF should recompile");
+        if (recompiled)
+        {
+            recompiler.generateOutput();
+
+            std::ifstream functionsFile(outputPath / "ps2_recompiled_functions.cpp");
+            result.functions.assign(std::istreambuf_iterator<char>(functionsFile),
+                                    std::istreambuf_iterator<char>());
+            std::ifstream registrationFile(outputPath / "register_functions.cpp");
+            result.registration.assign(std::istreambuf_iterator<char>(registrationFile),
+                                       std::istreambuf_iterator<char>());
+            result.ok = !result.functions.empty();
+        }
+    }
+
+    std::error_code removeError;
+    std::filesystem::remove_all(tempRoot, removeError);
+    return result;
+}
+
+static std::string generatedFunctionBody(const std::string &output, const std::string &name)
+{
+    const size_t begin = output.find("// Function: " + name + "\n");
+    if (begin == std::string::npos)
+    {
+        return {};
+    }
+
+    const size_t end = output.find("\n}\n", begin);
+    return output.substr(begin, end == std::string::npos ? std::string::npos : end + 3u - begin);
+}
+
+static bool delaySlotRunsInBody(const std::string &body, const std::string &delaySlotCode)
+{
+    const size_t slotBegin = body.find("ctx->in_delay_slot = true;");
+    if (slotBegin == std::string::npos)
+    {
+        return false;
+    }
+
+    const size_t slotEnd = body.find("ctx->in_delay_slot = false;", slotBegin);
+    const size_t codeAt = body.find(delaySlotCode, slotBegin);
+    return codeAt != std::string::npos && slotEnd != std::string::npos && codeAt < slotEnd;
+}
+
 void register_ps2_recompiler_tests()
 {
     MiniTest::Case("PS2Recompiler", [](TestCase &tc)
@@ -1508,6 +1652,175 @@ void register_ps2_recompiler_tests()
 
             std::error_code removeError;
             std::filesystem::remove_all(tempRoot, removeError);
+        });
+
+        tc.Run("function-final JR $ra decodes its real delay slot across a function boundary", [](TestCase &t) {
+            // delay_successor starts exactly at the delay slot of delay_owner's final JR $ra.
+            const std::vector<uint32_t> textWords = {
+                0x27BDFFE0u, // 0x100000 delay_owner: addiu $sp, $sp, -0x20
+                0x00000000u, // 0x100004 nop
+                0x03E00008u, // 0x100008 jr $ra
+                0x27BD0020u, // 0x10000C delay_successor: addiu $sp, $sp, 0x20 (delay slot of 0x100008)
+                0x03E00008u, // 0x100010 jr $ra
+                0x00000000u  // 0x100014 nop
+            };
+            const SingleFileRecompileResult result = recompileTextFunctionsToSingleFile(
+                t, "delay-slot-jr", textWords,
+                {{"delay_owner", 0x00100000u, 0x0Cu},
+                 {"delay_successor", 0x0010000Cu, 0x0Cu}});
+            if (!result.ok)
+            {
+                t.Fail("delay-slot-jr: combined output should be generated");
+                return;
+            }
+
+            const std::string owner = generatedFunctionBody(result.functions, "delay_owner");
+            const std::string successor = generatedFunctionBody(result.functions, "delay_successor");
+            t.IsFalse(owner.empty(), "delay_owner should be emitted");
+            t.IsFalse(successor.empty(), "delay_successor should be emitted");
+
+            t.IsTrue(owner.find("// Address: 0x100000 - 0x10000c\n") != std::string::npos,
+                     "delay_owner's range should still end at the delay slot address");
+            t.IsTrue(delaySlotRunsInBody(owner, "SET_GPR_S32(ctx, 29, (int32_t)ADD32(GPR_U32(ctx, 29), 32));"),
+                     "delay_owner's final JR $ra should run the real addiu $sp, $sp, 0x20 delay slot, not a NOP");
+            t.IsTrue(owner.find("PS2Runtime::GuestBranchKind::Return") != std::string::npos,
+                     "delay_owner should still return through JR $ra");
+
+            t.IsFalse(owner.find("label_10000c") != std::string::npos,
+                      "the delay slot address must not become a label of delay_owner");
+            t.IsFalse(owner.find("case 0x10000cu") != std::string::npos,
+                      "the delay slot address must not become a resume case of delay_owner");
+            t.IsFalse(owner.find("if (ctx->pc == 0x10000Cu)") != std::string::npos,
+                      "the delay slot address must not become a delay-slot resume entry of delay_owner");
+
+            t.IsTrue(successor.find("// Address: 0x10000c - 0x100018\n") != std::string::npos,
+                     "delay_successor's range should be unchanged");
+            t.IsTrue(successor.find("    ctx->pc = 0x10000cu;\n    SET_GPR_S32(ctx, 29, (int32_t)ADD32(GPR_U32(ctx, 29), 32));") != std::string::npos,
+                     "delay_successor should still begin with its own addiu at its entry");
+            t.IsFalse(successor.find("ctx->in_delay_slot = true;") != std::string::npos,
+                      "delay_successor's own NOP delay slot should stay elided");
+
+            const size_t registrationAt = result.registration.find("// 0x10000c\n");
+            t.IsTrue(registrationAt != std::string::npos,
+                     "delay_successor's start should be registered");
+            if (registrationAt != std::string::npos)
+            {
+                const size_t lineBegin = result.registration.rfind('\n', registrationAt);
+                const std::string line = result.registration.substr(lineBegin + 1u, registrationAt - lineBegin);
+                t.IsTrue(line.find("delay_successor") != std::string::npos,
+                         "the delay slot address should stay registered to delay_successor");
+                t.IsFalse(line.find("delay_owner") != std::string::npos,
+                          "the delay slot address must not be registered to delay_owner");
+            }
+        });
+
+        tc.Run("function-final J, JAL and BNE decode their real delay slots across a function boundary", [](TestCase &t) {
+            const std::vector<uint32_t> textWords = {
+                0x00000000u, // 0x100000 tail_j: nop
+                0x0804000Eu, // 0x100004 j 0x100038
+                0x27BD0020u, // 0x100008 slot_j: addiu $sp, $sp, 0x20 (delay slot of 0x100004)
+                0x03E00008u, // 0x10000C jr $ra
+                0x00000000u, // 0x100010 nop
+                0x0C04000Eu, // 0x100014 tail_jal: jal 0x100038
+                0x27BD0020u, // 0x100018 slot_jal: addiu $sp, $sp, 0x20 (delay slot of 0x100014)
+                0x03E00008u, // 0x10001C jr $ra
+                0x00000000u, // 0x100020 nop
+                0x00000000u, // 0x100024 tail_bne: nop
+                0x1480FFFEu, // 0x100028 bne $a0, $zero, 0x100024
+                0x27BD0020u, // 0x10002C slot_bne: addiu $sp, $sp, 0x20 (delay slot of 0x100028)
+                0x03E00008u, // 0x100030 jr $ra
+                0x00000000u, // 0x100034 nop
+                0x03E00008u, // 0x100038 shared_target: jr $ra
+                0x00000000u  // 0x10003C nop
+            };
+            const SingleFileRecompileResult result = recompileTextFunctionsToSingleFile(
+                t, "delay-slot-branch-kinds", textWords,
+                {{"tail_j", 0x00100000u, 0x08u},
+                 {"slot_j", 0x00100008u, 0x0Cu},
+                 {"tail_jal", 0x00100014u, 0x04u},
+                 {"slot_jal", 0x00100018u, 0x0Cu},
+                 {"tail_bne", 0x00100024u, 0x08u},
+                 {"slot_bne", 0x0010002Cu, 0x0Cu},
+                 {"shared_target", 0x00100038u, 0x08u}});
+            if (!result.ok)
+            {
+                t.Fail("delay-slot-branch-kinds: combined output should be generated");
+                return;
+            }
+
+            struct TailCase
+            {
+                std::string owner;
+                std::string range;
+                std::string slotLabel;
+                std::string slotCase;
+            };
+            const std::vector<TailCase> tailCases = {
+                {"tail_j", "// Address: 0x100000 - 0x100008\n", "label_100008", "case 0x100008u"},
+                {"tail_jal", "// Address: 0x100014 - 0x100018\n", "label_100018", "case 0x100018u"},
+                {"tail_bne", "// Address: 0x100024 - 0x10002c\n", "label_10002c", "case 0x10002cu"}};
+            for (const auto &tailCase : tailCases)
+            {
+                const std::string body = generatedFunctionBody(result.functions, tailCase.owner);
+                t.IsFalse(body.empty(), tailCase.owner + " should be emitted");
+                t.IsTrue(body.find(tailCase.range) != std::string::npos,
+                         tailCase.owner + "'s range should still end at the delay slot address");
+                t.IsTrue(delaySlotRunsInBody(body, "SET_GPR_S32(ctx, 29, (int32_t)ADD32(GPR_U32(ctx, 29), 32));"),
+                         tailCase.owner + "'s final branch should run the real addiu $sp delay slot, not a NOP");
+                t.IsFalse(body.find(tailCase.slotLabel) != std::string::npos,
+                          tailCase.owner + " must not gain a label for its delay slot address");
+                t.IsFalse(body.find(tailCase.slotCase) != std::string::npos,
+                          tailCase.owner + " must not gain a resume case for its delay slot address");
+            }
+        });
+
+        tc.Run("configured patches apply to a delay slot decoded past the function end", [](TestCase &t) {
+            const std::vector<uint32_t> textWords = {
+                0x27BDFFE0u, // 0x100000 patched_owner: addiu $sp, $sp, -0x20
+                0x00000000u, // 0x100004 nop
+                0x03E00008u, // 0x100008 jr $ra
+                0x27BD0020u, // 0x10000C patched_successor: addiu $sp, $sp, 0x20 (patched to 0x40)
+                0x03E00008u, // 0x100010 jr $ra
+                0x00000000u  // 0x100014 nop
+            };
+            const SingleFileRecompileResult result = recompileTextFunctionsToSingleFile(
+                t, "delay-slot-patch", textWords,
+                {{"patched_owner", 0x00100000u, 0x0Cu},
+                 {"patched_successor", 0x0010000Cu, 0x0Cu}},
+                "[patches]\ninstructions = [{ address = \"0x0010000C\", value = \"0x27BD0040\" }]\n");
+            if (!result.ok)
+            {
+                t.Fail("delay-slot-patch: combined output should be generated");
+                return;
+            }
+
+            const std::string owner = generatedFunctionBody(result.functions, "patched_owner");
+            t.IsTrue(delaySlotRunsInBody(owner, "SET_GPR_S32(ctx, 29, (int32_t)ADD32(GPR_U32(ctx, 29), 64));"),
+                     "the configured patch should apply to the delay slot decoded past the function end");
+            t.IsFalse(owner.find("ADD32(GPR_U32(ctx, 29), 32)") != std::string::npos,
+                      "the unpatched delay slot instruction must not be emitted");
+        });
+
+        tc.Run("function-final JR $ra at the end of its section keeps the synthetic NOP delay slot", [](TestCase &t) {
+            const std::vector<uint32_t> textWords = {
+                0x00000000u, // 0x100000 section_tail: nop
+                0x03E00008u  // 0x100004 jr $ra (delay slot 0x100008 lies past the end of .text)
+            };
+            const SingleFileRecompileResult result = recompileTextFunctionsToSingleFile(
+                t, "delay-slot-section-end", textWords,
+                {{"section_tail", 0x00100000u, 0x08u}});
+            if (!result.ok)
+            {
+                t.Fail("delay-slot-section-end: combined output should be generated");
+                return;
+            }
+
+            const std::string body = generatedFunctionBody(result.functions, "section_tail");
+            t.IsFalse(body.empty(), "section_tail should be emitted");
+            t.IsTrue(body.find("PS2Runtime::GuestBranchKind::Return") != std::string::npos,
+                     "a JR $ra whose delay slot is outside every section should still return");
+            t.IsFalse(body.find("ctx->in_delay_slot = true;") != std::string::npos,
+                      "an invalid delay slot address should fall back to the synthetic NOP");
         });
 
         tc.Run("elf parser ignores STT_FUNC symbols in non-executable sections", [](TestCase &t) {
