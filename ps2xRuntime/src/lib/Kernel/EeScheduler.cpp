@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstring>
+#include <iostream>
 #include <limits>
 #include <stdexcept>
 
@@ -246,6 +247,11 @@ void EeScheduler::run()
                 }
                 continue;
             }
+            // Returning from the entry point is a normal exit, but a null call or corrupt $ra lands here too.
+            if (running->id > 0)
+                std::cerr << "[EeScheduler] thread " << running->id << " reached pc=0 from branch_pc=0x" << std::hex
+                      << context.branch_pc << " ra=0x" << getRegU32(&context, 31) << std::dec
+                      << "; treating as thread exit" << std::endl;
             makeDormant(*running);
             m_currentThreadId = 0;
             copyMainContextToRuntime();
