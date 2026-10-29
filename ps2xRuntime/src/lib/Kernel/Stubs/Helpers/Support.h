@@ -1239,6 +1239,10 @@ namespace
 
     uint32_t toDmaPhys(uint32_t addr)
     {
+        if (const uint32_t spr = ps2DmacAddressToEe(addr); spr != addr)
+        {
+            return spr;
+        }
         if ((addr & 0x80000000u) != 0)
         {
             uint32_t lower = addr & 0x7FFFFFFFu;

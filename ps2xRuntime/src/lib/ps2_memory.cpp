@@ -1302,7 +1302,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
             }
 
             const uint32_t channelBase = address & 0xFFFFFF00;
-            const uint32_t madr = m_ioRegisters[channelBase + 0x10];
+            const uint32_t madr = ps2DmacAddressToEe(m_ioRegisters[channelBase + 0x10]);
             const uint32_t qwc = m_ioRegisters[channelBase + 0x20];
             m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
 
@@ -1339,9 +1339,9 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                 }
                 else if (mode == 1)
                 {
-                    uint32_t tagAddr = m_ioRegisters[channelBase + 0x30];
-                    uint32_t asr0 = m_ioRegisters[channelBase + 0x40];
-                    uint32_t asr1 = m_ioRegisters[channelBase + 0x50];
+                    uint32_t tagAddr = ps2DmacAddressToEe(m_ioRegisters[channelBase + 0x30]);
+                    uint32_t asr0 = ps2DmacAddressToEe(m_ioRegisters[channelBase + 0x40]);
+                    uint32_t asr1 = ps2DmacAddressToEe(m_ioRegisters[channelBase + 0x50]);
                     uint32_t asp = (chcr >> 4) & 0x3u;
                     const bool tieEnabled = (chcr & (1u << 7)) != 0u;
                     const int kMaxChainTags = 4096;
@@ -1438,7 +1438,10 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         uint16_t tagQwc = static_cast<uint16_t>(tag & 0xFFFF);
                         uint32_t id = static_cast<uint32_t>((tag >> 28) & 0x7);
                         const bool irq = ((tag >> 31) & 0x1ull) != 0ull;
-                        uint32_t addr = static_cast<uint32_t>((tag >> 32) & 0x7FFFFFFF);
+                        const uint32_t rawAddr = static_cast<uint32_t>(tag >> 32);
+                        uint32_t addr = ps2DmacAddressToEe(rawAddr);
+                        if (addr == rawAddr)
+                            addr &= 0x7FFFFFFFu;
                         lastTagUpper = static_cast<uint32_t>((tag >> 16) & 0xFFFFu);
                         ++tagsProcessed;
 

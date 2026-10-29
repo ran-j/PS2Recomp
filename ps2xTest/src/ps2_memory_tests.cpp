@@ -1144,6 +1144,42 @@ void register_ps2_memory_tests()
             t.IsTrue(contentOk, "scratchpad alias chain payload should match scratchpad bytes");
         });
 
+        tc.Run("GIF DMA chain follows SPR-flagged tag and data addresses into scratchpad", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kGifCh = 0x1000A000u;
+            constexpr uint32_t kSprFlag = 0x80000000u;
+
+            // Hardware form: bit 31 selects scratchpad, low bits are the offset (Mana Khemia builds GIF packets there).
+            uint8_t *scratch = mem.getScratchpad();
+            uint8_t *rdram = mem.getRDRAM();
+            std::memset(rdram, 0, 0x400u);
+            // makeDmaTag masks bit 31, so build the REFE tag (qwc=1, id=0) with the SPR flag directly.
+            const uint64_t refeTag = 1ull | (static_cast<uint64_t>(kSprFlag | 0x200u) << 32);
+            std::memcpy(scratch + 0x100u, &refeTag, sizeof(refeTag));
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                scratch[0x200u + i] = static_cast<uint8_t>(0x90u + i);
+            }
+
+            std::vector<std::vector<uint8_t>> captured;
+            mem.setGifPacketCallback([&](const uint8_t *data, uint32_t sizeBytes)
+            {
+                captured.emplace_back(data, data + sizeBytes);
+            });
+
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x30u, kSprFlag | 0x100u), "write SPR-flagged TADR should succeed");
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x00u, 0x104u), "write CHCR STR|CHAIN should succeed");
+            mem.processPendingTransfers();
+
+            t.Equals(captured.size(), static_cast<size_t>(1u), "SPR-flagged chain should emit one packet");
+            t.IsTrue(!captured.empty() && captured[0].size() == 16u &&
+                         std::memcmp(captured[0].data(), scratch + 0x200u, 16u) == 0,
+                     "SPR-flagged REFE data should come from scratchpad, not RDRAM");
+        });
+
         tc.Run("native GIF image upload recognizes canonical load-image chain", [](TestCase &t)
         {
             PS2Memory mem;

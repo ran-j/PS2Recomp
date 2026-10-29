@@ -103,6 +103,16 @@ inline bool ps2IsScratchpadAddress(uint32_t addr)
     return false;
 }
 
+// DMAC addresses (MADR, TADR, ASR, DMAtag ADDR) select scratchpad with bit 31 and carry its offset in the low bits.
+inline uint32_t ps2DmacAddressToEe(uint32_t addr)
+{
+    if ((addr & 0x80000000u) != 0u && (addr & 0x7FFFFFFFu) < PS2_SCRATCHPAD_SIZE)
+    {
+        return PS2_SCRATCHPAD_BASE + (addr & (PS2_SCRATCHPAD_SIZE - 1u));
+    }
+    return addr;
+}
+
 inline uint32_t ps2ScratchpadOffset(uint32_t addr)
 {
     if (addr >= PS2_SCRATCHPAD_BASE && addr < (PS2_SCRATCHPAD_BASE + PS2_SCRATCHPAD_SIZE))
