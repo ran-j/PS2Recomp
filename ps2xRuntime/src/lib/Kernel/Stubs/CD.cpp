@@ -539,7 +539,23 @@ namespace ps2_stubs
 
     void sceCdReadIOPm(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        sceCdRead(rdram, ctx, runtime);
+        // The buffer is an IOP address; writing it into EE RAM corrupts the EE and leaves the IOP buffer stale.
+        const uint32_t lbn = getRegU32(ctx, 4);
+        const uint32_t sectors = getRegU32(ctx, 5);
+        const uint32_t iopBuffer = getRegU32(ctx, 6);
+        constexpr uint32_t kIopRamSize = 2u * 1024u * 1024u;
+        std::vector<uint8_t> data(static_cast<size_t>(sectors) * kCdSectorSize);
+        const bool ok = runtime && sectors != 0u && sectors <= kIopRamSize / kCdSectorSize &&
+                        readCdSectors(lbn, sectors, data.data(), data.size()) &&
+                        runtime->writeIopMemory(iopBuffer, data.data(), data.size());
+        if (!ok)
+        {
+            std::cerr << "[sceCdReadIOPm] failed lbn=0x" << std::hex << lbn << " sectors=0x" << sectors
+                      << " iopBuffer=0x" << iopBuffer << std::dec << std::endl;
+        }
+        if (ok)
+            g_cdStreamingLbn = lbn + sectors;
+        setReturnS32(ctx, ok ? 1 : 0);
     }
 
     void sceCdSearchFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
