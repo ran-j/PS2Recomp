@@ -727,6 +727,31 @@ void register_ps2_runtime_kernel_tests()
                      "the resumed waiter should re-enter its priority queue once");
         });
 
+        tc.Run("ChangeThreadPriority returns the previous priority", [](TestCase &t)
+        {
+            TestEnv env;
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.reset(env.rdram.data(), env.ctx);
+            ee.bindMainContextForSyscall(env.ctx, env.rdram.data());
+
+            // CRI ADX locks with old = ChangeThreadPriority(self, 1) and unlocks with ChangeThreadPriority(self, old).
+            const int id = ee.createThread(EeThreadCreateParams{0u, K_SCHED_HIGH, 0x24000u, 0x800u, 0u, 20, 0u});
+            ee.startThread(id, 0u, env.ctx, false);
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(id));
+            setRegU32(env.ctx, 5, 30u);
+            ps2_syscalls::ChangeThreadPriority(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), 20, "ChangeThreadPriority should return the priority it replaced");
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(id));
+            setRegU32(env.ctx, 5, 25u);
+            ps2_syscalls::ChangeThreadPriority(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), 30, "a second change should return the first change's priority");
+            t.Equals(ee.thread(id)->currentPriority, 25, "the new priority should still be applied");
+            setRegU32(env.ctx, 4, 0x7FFFu);
+            setRegU32(env.ctx, 5, 25u);
+            ps2_syscalls::ChangeThreadPriority(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_UNKNOWN_THID, "an unknown thread should still return an error code");
+        });
+
         tc.Run("semaphore signal, delete, and release complete blocked contexts with exact results", [](TestCase &t)
         {
             const auto blockMain = [](TestEnv &env, int &semaId)
