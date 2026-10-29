@@ -742,5 +742,23 @@ void register_ps2_runtime_io_tests()
             t.Equals(std::memcmp(test.rdram.data() + bufAddr, "cd-image", 8), 0,
                      "sceCdRead should copy sector data from the configured image");
         });
+
+        tc.Run("configureIoPathsFromElf keeps a cdImage set before the ELF loads", [](TestCase &t)
+        {
+            TestContext test;
+
+            // The runner sets the disc image from argv before loadELF configures paths from the ELF.
+            const std::filesystem::path imagePath = test.paths.base / "disc.iso";
+            PS2Runtime::IoPaths ioPaths;
+            ioPaths.cdImage = imagePath;
+            PS2Runtime::setIoPaths(ioPaths);
+
+            PS2Runtime::configureIoPathsFromElf((test.paths.cdRoot / "GAME.ELF").string());
+
+            t.Equals(PS2Runtime::getIoPaths().cdImage, std::filesystem::absolute(imagePath).lexically_normal(),
+                     "configureIoPathsFromElf should keep the configured cdImage");
+            t.Equals(PS2Runtime::getIoPaths().cdRoot, std::filesystem::absolute(test.paths.cdRoot).lexically_normal(),
+                     "configureIoPathsFromElf should still point cdRoot at the ELF directory");
+        });
     });
 }

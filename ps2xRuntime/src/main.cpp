@@ -162,6 +162,27 @@ namespace
         throw std::runtime_error("Unable to determine executable path. Pass the guest ELF as argv[1] or define PS2X_DEFAULT_BOOT_ELF.");
 #endif
     }
+
+    // Optional argv[2]: a disc image. Games that read raw sectors need the real disc layout.
+    void configureCdImage(int argc, char *argv[])
+    {
+        if (argc < 3 || !argv[2] || argv[2][0] == '\0')
+        {
+            return;
+        }
+
+        const std::filesystem::path imagePath(argv[2]);
+        std::error_code ec;
+        if (!std::filesystem::is_regular_file(imagePath, ec))
+        {
+            throw std::runtime_error("Disc image not found: " + imagePath.string());
+        }
+
+        PS2Runtime::IoPaths paths = PS2Runtime::getIoPaths();
+        paths.cdImage = imagePath;
+        PS2Runtime::setIoPaths(paths);
+        std::cout << "Using disc image " << imagePath.string() << std::endl;
+    }
 }
 
 int main(int argc, char *argv[])
@@ -174,6 +195,7 @@ int main(int argc, char *argv[])
     try
     {
         std::filesystem::path pathObj = getExecutablePath(argc, argv);
+        configureCdImage(argc, argv);
 
         std::string filePathStr = pathObj.string();
         std::string elfName = pathObj.filename().string();
