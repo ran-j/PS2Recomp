@@ -1471,6 +1471,48 @@ void register_ps2_recompiler_tests()
             std::filesystem::remove_all(tempRoot, removeError);
         });
 
+        tc.Run("configured stub at an undiscovered address still gets a registered wrapper", [](TestCase &t) {
+            const std::string uniqueSuffix =
+                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+            const std::filesystem::path tempRoot =
+                std::filesystem::temp_directory_path() / ("ps2recomp-stub-synthesis-" + uniqueSuffix);
+            const std::filesystem::path elfPath = tempRoot / "stub-entry.elf";
+            const std::filesystem::path configPath = tempRoot / "stub-entry.toml";
+            const std::filesystem::path outputPath = tempRoot / "output";
+            std::filesystem::create_directories(tempRoot);
+
+            // Mana Khemia only tail-calls sceDmaSend with J, so discovery never sees its start.
+            const bool elfWritten = writeMinimalMipsElfWithUnmappedEntryHint(elfPath);
+            const bool configWritten = writeRecompilerTestConfig(
+                configPath,
+                elfPath,
+                outputPath,
+                {},
+                {"InitAlarm@0x00100008", "sceDmaSend@0x00100010"});
+            t.IsTrue(elfWritten && configWritten, "stub synthesis regression inputs should be generated");
+
+            if (elfWritten && configWritten)
+            {
+                PS2Recompiler recompiler(configPath.string());
+                t.IsTrue(recompiler.initialize(), "stub synthesis config should initialize");
+                t.IsTrue(recompiler.recompile(), "stub synthesis config should recompile");
+                recompiler.generateOutput();
+
+                const std::filesystem::path registrationPath = outputPath / "register_functions.cpp";
+                std::ifstream registrationFile(registrationPath);
+                const std::string registration{
+                    std::istreambuf_iterator<char>(registrationFile),
+                    std::istreambuf_iterator<char>()};
+                t.IsTrue(registration.find("// 0x100010") != std::string::npos,
+                         "the undiscovered stub address should be registered for guest dispatch");
+                t.IsTrue(recompiler.reportCounters().functionsStubbed >= 1u,
+                         "the synthesized entry should be emitted as a stub");
+            }
+
+            std::error_code removeError;
+            std::filesystem::remove_all(tempRoot, removeError);
+        });
+
         tc.Run("standalone entry_ blocks register resume points for their JAL return addresses", [](TestCase &t) {
             const std::string uniqueSuffix =
                 std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());

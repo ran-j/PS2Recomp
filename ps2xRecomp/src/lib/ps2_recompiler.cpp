@@ -1083,6 +1083,35 @@ namespace ps2recomp
                 }
             }
 
+            // A configured stub whose routine was never discovered (e.g. only reached by a tail-call J)
+            // would otherwise get no wrapper, and any branch to it hits an unregistered address at runtime.
+            for (const auto &[stubStart, handlerName] : m_stubHandlerBindingsByStart)
+            {
+                if (resolveStubTarget(handlerName) == StubTarget::Unknown)
+                {
+                    continue;
+                }
+                // Only recompiled guest code can already reach this address; a stubbed owner emits none.
+                const bool covered = std::any_of(
+                    m_functions.begin(), m_functions.end(),
+                    [&](const Function &function)
+                    {
+                        return stubStart >= function.start &&
+                               stubStart < std::max(function.end, function.start + 4u) &&
+                               (function.start == stubStart || !isStubFunction(function));
+                    });
+                if (covered)
+                {
+                    continue;
+                }
+                Function stubEntry{};
+                stubEntry.name = handlerName;
+                stubEntry.start = stubStart;
+                stubEntry.end = stubStart + 4u;
+                m_functions.push_back(std::move(stubEntry));
+                m_reporter.info("stub", "Synthesized entry for undiscovered stub '" + handlerName + "'");
+            }
+
             for (auto &function : m_functions)
             {
                 m_reporter.recordFunctionProcessed();
