@@ -8,6 +8,9 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <filesystem>
+#include <fstream>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <utility>
@@ -150,6 +153,107 @@ namespace
     void cleanupRuntime(TestEnv &env)
     {
         env.runtime.requestStop();
+    }
+
+    constexpr uint32_t kKernelStackAreaBase = 0x00080000u;
+    constexpr uint32_t kKernelStackAreaEnd = 0x00100000u;
+    constexpr uint32_t kTestInvocationStackSize = 0x4000u;
+
+    struct GuestStackRange
+    {
+        uint32_t base;
+        uint32_t end;
+    };
+
+    // reserveAsyncCallbackStack returns the usable top, 16 bytes below the end of the carved block.
+    GuestStackRange stackRangeFromTop(uint32_t top)
+    {
+        const uint32_t end = top + 0x10u;
+        return GuestStackRange{end - kTestInvocationStackSize, end};
+    }
+
+    void appendLe16(std::vector<uint8_t> &bytes, uint16_t value)
+    {
+        bytes.push_back(static_cast<uint8_t>(value & 0xFFu));
+        bytes.push_back(static_cast<uint8_t>((value >> 8u) & 0xFFu));
+    }
+
+    void appendLe32(std::vector<uint8_t> &bytes, uint32_t value)
+    {
+        appendLe16(bytes, static_cast<uint16_t>(value & 0xFFFFu));
+        appendLe16(bytes, static_cast<uint16_t>((value >> 16u) & 0xFFFFu));
+    }
+
+    // Minimal MIPS ET_EXEC with one RW PT_LOAD segment of 0x100 bytes at loadAddr.
+    std::vector<uint8_t> buildSyntheticElf(uint32_t loadAddr)
+    {
+        constexpr uint32_t kHeaderSize = 52u;
+        constexpr uint32_t kProgramHeaderSize = 32u;
+        constexpr uint32_t kPayloadSize = 0x100u;
+
+        std::vector<uint8_t> bytes{0x7Fu, 'E', 'L', 'F', 1u, 1u, 1u, 0u};
+        bytes.resize(16u, 0u);
+        appendLe16(bytes, 2u);                 // ET_EXEC
+        appendLe16(bytes, 8u);                 // EM_MIPS
+        appendLe32(bytes, 1u);                 // version
+        appendLe32(bytes, loadAddr);           // entry
+        appendLe32(bytes, kHeaderSize);        // phoff
+        appendLe32(bytes, 0u);                 // shoff
+        appendLe32(bytes, 0u);                 // flags
+        appendLe16(bytes, kHeaderSize);        // ehsize
+        appendLe16(bytes, kProgramHeaderSize); // phentsize
+        appendLe16(bytes, 1u);                 // phnum
+        appendLe16(bytes, 0u);                 // shentsize
+        appendLe16(bytes, 0u);                 // shnum
+        appendLe16(bytes, 0u);                 // shstrndx
+
+        appendLe32(bytes, 1u);                                // PT_LOAD
+        appendLe32(bytes, kHeaderSize + kProgramHeaderSize);  // offset
+        appendLe32(bytes, loadAddr);                          // vaddr
+        appendLe32(bytes, loadAddr);                          // paddr
+        appendLe32(bytes, kPayloadSize);                      // filesz
+        appendLe32(bytes, kPayloadSize);                      // memsz
+        appendLe32(bytes, 6u);                                // PF_R | PF_W
+        appendLe32(bytes, 0x10u);                             // align
+
+        bytes.resize(bytes.size() + kPayloadSize, 0u);
+        return bytes;
+    }
+
+    // Loads a synthetic ELF through the real loader, restoring the process-wide IO paths afterwards.
+    bool loadSyntheticElfAt(TestEnv &env, uint32_t loadAddr)
+    {
+        if (!env.runtime.memory().initialize())
+        {
+            return false;
+        }
+
+        const auto uniqueSuffix = std::to_string(
+            static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+        const std::filesystem::path elfPath =
+            std::filesystem::temp_directory_path() / ("ps2x-invocation-stack-" + uniqueSuffix + ".elf");
+        {
+            const std::vector<uint8_t> bytes = buildSyntheticElf(loadAddr);
+            std::ofstream elfFile(elfPath, std::ios::binary);
+            if (!elfFile)
+            {
+                return false;
+            }
+            elfFile.write(reinterpret_cast<const char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        }
+
+        const PS2Runtime::IoPaths savedPaths = PS2Runtime::getIoPaths();
+        const bool loaded = env.runtime.loadELF(elfPath.string());
+        PS2Runtime::setIoPaths(savedPaths);
+
+        std::error_code ec;
+        std::filesystem::remove(elfPath, ec);
+        return loaded;
+    }
+
+    bool stackRangesOverlap(const GuestStackRange &a, const GuestStackRange &b)
+    {
+        return a.base < b.end && b.base < a.end;
     }
 
     void idleVSyncWait(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -600,6 +704,117 @@ void register_ps2_runtime_interrupt_tests()
             t.IsFalse(exhausted, "queued callbacks must not consume one invocation stack per pending item");
             t.Equals(g_invocationQueueRuns, 96u, "every queued callback should execute exactly once");
             t.IsFalse(g_invocationQueueSpChanged, "sequential callbacks should reuse the same stack depth");
+        });
+
+        tc.Run("invocation stacks live in kernel-reserved RAM below a game ELF", [](TestCase &t)
+        {
+            TestEnv env;
+            t.IsTrue(loadSyntheticElfAt(env, 0x00100000u), "synthetic ELF at 0x00100000 should load");
+
+            const uint32_t top = env.runtime.reserveAsyncCallbackStack(kTestInvocationStackSize, 16u);
+            t.IsTrue(top != 0u, "the first invocation stack should be reserved");
+            const GuestStackRange range = stackRangeFromTop(top);
+            t.IsTrue(range.end <= kKernelStackAreaEnd,
+                     "the first invocation stack must end at or below 0x00100000, not in game RAM");
+            t.IsTrue(range.base >= kKernelStackAreaBase,
+                     "the first invocation stack must not reach into the syscall mirror below 0x00080000");
+            t.IsFalse(range.end > kKernelStackAreaEnd && range.base < PS2_RAM_SIZE,
+                      "no invocation stack may overlap [0x00100000, PS2_RAM_SIZE)");
+
+            cleanupRuntime(env);
+        });
+
+        tc.Run("many invocation stacks stay disjoint inside the kernel area", [](TestCase &t)
+        {
+            TestEnv env;
+            t.IsTrue(loadSyntheticElfAt(env, 0x00100000u), "synthetic ELF at 0x00100000 should load");
+
+            constexpr uint32_t kStackCount = 24u;
+            std::vector<GuestStackRange> ranges;
+            for (uint32_t i = 0; i < kStackCount; ++i)
+            {
+                const uint32_t top = env.runtime.reserveAsyncCallbackStack(kTestInvocationStackSize, 16u);
+                t.IsTrue(top != 0u, "every invocation stack should be reserved");
+                ranges.push_back(stackRangeFromTop(top));
+            }
+
+            bool allInside = true;
+            bool anyOverlap = false;
+            for (size_t i = 0; i < ranges.size(); ++i)
+            {
+                allInside = allInside &&
+                            ranges[i].base >= kKernelStackAreaBase &&
+                            ranges[i].end <= kKernelStackAreaEnd;
+                for (size_t j = i + 1u; j < ranges.size(); ++j)
+                {
+                    anyOverlap = anyOverlap || stackRangesOverlap(ranges[i], ranges[j]);
+                }
+            }
+            t.IsTrue(allInside, "all 24 invocation stacks must sit inside [0x00080000, 0x00100000)");
+            t.IsFalse(anyOverlap, "invocation stacks must not overlap each other");
+
+            cleanupRuntime(env);
+        });
+
+        tc.Run("invocation stacks stay below an ELF that loads under 0x00100000", [](TestCase &t)
+        {
+            TestEnv env;
+            constexpr uint32_t kLowElfBase = 0x000C0000u;
+            t.IsTrue(loadSyntheticElfAt(env, kLowElfBase), "synthetic ELF at 0x000C0000 should load");
+
+            constexpr uint32_t kStackCount = (kLowElfBase - kKernelStackAreaBase) / kTestInvocationStackSize;
+            bool allBelowElf = true;
+            for (uint32_t i = 0; i < kStackCount; ++i)
+            {
+                const uint32_t top = env.runtime.reserveAsyncCallbackStack(kTestInvocationStackSize, 16u);
+                t.IsTrue(top != 0u, "every invocation stack should be reserved");
+                const GuestStackRange range = stackRangeFromTop(top);
+                allBelowElf = allBelowElf &&
+                              range.base >= kKernelStackAreaBase &&
+                              range.end <= kLowElfBase;
+            }
+            t.IsTrue(allBelowElf, "invocation stacks must stay inside [0x00080000, ELF base)");
+
+            cleanupRuntime(env);
+        });
+
+        tc.Run("invocation stacks fall back to top of RAM when the kernel area cannot fit", [](TestCase &t)
+        {
+            {
+                TestEnv env;
+                t.IsTrue(loadSyntheticElfAt(env, kKernelStackAreaBase), "synthetic ELF at 0x00080000 should load");
+
+                const uint32_t top = env.runtime.reserveAsyncCallbackStack(kTestInvocationStackSize, 16u);
+                t.IsTrue(top != 0u, "an ELF at the kernel-area floor should still get a stack");
+                const GuestStackRange range = stackRangeFromTop(top);
+                t.Equals(range.end, PS2_RAM_SIZE,
+                         "with no room in the kernel area the stack should come from the top of RAM");
+                cleanupRuntime(env);
+            }
+
+            {
+                TestEnv env;
+                t.IsTrue(loadSyntheticElfAt(env, 0x00100000u), "synthetic ELF at 0x00100000 should load");
+
+                constexpr uint32_t kKernelSlots = (kKernelStackAreaEnd - kKernelStackAreaBase) / kTestInvocationStackSize;
+                bool allInside = true;
+                for (uint32_t i = 0; i < kKernelSlots; ++i)
+                {
+                    const uint32_t top = env.runtime.reserveAsyncCallbackStack(kTestInvocationStackSize, 16u);
+                    const GuestStackRange range = stackRangeFromTop(top);
+                    allInside = allInside && top != 0u &&
+                                range.base >= kKernelStackAreaBase &&
+                                range.end <= kKernelStackAreaEnd;
+                }
+                t.IsTrue(allInside, "the first 32 stacks should fill the kernel area exactly");
+
+                const uint32_t overflowTop = env.runtime.reserveAsyncCallbackStack(kTestInvocationStackSize, 16u);
+                t.IsTrue(overflowTop != 0u, "a stack beyond the kernel area should still be reserved");
+                const GuestStackRange overflow = stackRangeFromTop(overflowTop);
+                t.Equals(overflow.end, PS2_RAM_SIZE,
+                         "once the kernel area is used up the next stack should come from the top of RAM");
+                cleanupRuntime(env);
+            }
         });
 
         tc.Run("iSignalSema defers selection until IRQ return", [](TestCase &t)

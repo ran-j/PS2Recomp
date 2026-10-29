@@ -91,6 +91,10 @@ namespace
     constexpr uint32_t kGuestHeapDefaultAlignment = 16u;
     constexpr uint32_t kGuestHeapSafetyPad = 0x1000u;
     constexpr uint32_t kGuestHeapHardLimit = 0x01F00000u;
+    // Runtime-owned guest stacks live in the EE kernel's reserved RAM (above the syscall mirror,
+    // below the game load address) because games own the top of RAM, e.g. for GS DMA chains.
+    constexpr uint32_t kAsyncCallbackStackLowFloor = 0x00080000u;
+    constexpr uint32_t kAsyncCallbackStackLowCeiling = 0x00100000u;
 
     constexpr uint32_t COP0_CAUSE_EXCCODE_MASK = 0x0000007Cu;
     constexpr uint32_t COP0_CAUSE_BD = 0x80000000u;
@@ -505,6 +509,9 @@ PS2Runtime::PS2Runtime()
     m_guestHeapConfigured = false;
     m_asyncCallbackStackFloor = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
     m_asyncCallbackStackTop = PS2_RAM_SIZE;
+    m_asyncCallbackStackLowFloor = kAsyncCallbackStackLowFloor;
+    m_asyncCallbackStackLowTop = kAsyncCallbackStackLowCeiling;
+    m_asyncCallbackStackFallbackLogged = false;
 }
 
 void PS2Runtime::setDebugUiCallbacks(DebugUiCallback initCallback,
@@ -821,6 +828,7 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     m_debugPc.store(m_cpuContext.pc, std::memory_order_relaxed);
 
     uint32_t maxLoadedRdramEnd = kGuestHeapDefaultBase;
+    uint32_t minLoadedRdramStart = std::numeric_limits<uint32_t>::max();
     uint32_t moduleBase = std::numeric_limits<uint32_t>::max();
     uint32_t moduleEnd = 0u;
     bool loadedAnySegment = false;
@@ -922,6 +930,7 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
         if (!scratch)
         {
             maxLoadedRdramEnd = std::max(maxLoadedRdramEnd, static_cast<uint32_t>(segmentMemEnd));
+            minLoadedRdramStart = std::min(minLoadedRdramStart, physAddr);
         }
 
         if (ph.flags & 0x1u) // PF_X
@@ -974,6 +983,10 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
         const uint32_t hardLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
         m_asyncCallbackStackFloor = std::min(std::max(hardLimit, suggestedHeapBase), PS2_RAM_SIZE);
         m_asyncCallbackStackTop = PS2_RAM_SIZE;
+        m_asyncCallbackStackLowFloor = kAsyncCallbackStackLowFloor;
+        m_asyncCallbackStackLowTop =
+            std::min(kAsyncCallbackStackLowCeiling, minLoadedRdramStart & ~(kGuestHeapDefaultAlignment - 1u));
+        m_asyncCallbackStackFallbackLogged = false;
     }
 
     LoadedModule module;
@@ -1989,28 +2002,47 @@ uint32_t PS2Runtime::reserveAsyncCallbackStack(uint32_t size, uint32_t alignment
         return 0u;
     }
 
+    const auto carve = [&](uint32_t &regionTop, uint32_t regionFloor) -> uint32_t
+    {
+        uint32_t top = regionTop;
+        if (top > PS2_RAM_SIZE)
+        {
+            top = PS2_RAM_SIZE;
+        }
+        top &= ~(kGuestHeapDefaultAlignment - 1u);
+
+        if (top <= allocSize)
+        {
+            return 0u;
+        }
+
+        uint32_t base = top - allocSize;
+        base &= ~(normalizedAlignment - 1u);
+        if (base < regionFloor || base >= top)
+        {
+            return 0u;
+        }
+
+        regionTop = base;
+        return top - 0x10u;
+    };
+
     std::lock_guard<std::mutex> lock(m_asyncCallbackStackMutex);
-    uint32_t top = m_asyncCallbackStackTop;
-    if (top > PS2_RAM_SIZE)
+    const uint32_t lowTop = carve(m_asyncCallbackStackLowTop, m_asyncCallbackStackLowFloor);
+    if (lowTop != 0u)
     {
-        top = PS2_RAM_SIZE;
-    }
-    top &= ~(kGuestHeapDefaultAlignment - 1u);
-
-    if (top <= allocSize)
-    {
-        return 0u;
+        return lowTop;
     }
 
-    uint32_t base = top - allocSize;
-    base &= ~(normalizedAlignment - 1u);
-    if (base < m_asyncCallbackStackFloor || base >= top)
+    const uint32_t highTop = carve(m_asyncCallbackStackTop, m_asyncCallbackStackFloor);
+    if (highTop != 0u && !m_asyncCallbackStackFallbackLogged)
     {
-        return 0u;
+        m_asyncCallbackStackFallbackLogged = true;
+        std::cerr << "[runtime] kernel-reserved RAM has no room for another async callback stack "
+                  << "(floor 0x" << std::hex << m_asyncCallbackStackLowFloor << std::dec
+                  << "); falling back to top-of-RAM stacks" << std::endl;
     }
-
-    m_asyncCallbackStackTop = base;
-    return top - 0x10u;
+    return highTop;
 }
 
 uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)

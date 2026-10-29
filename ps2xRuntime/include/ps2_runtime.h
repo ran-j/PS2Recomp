@@ -515,6 +515,9 @@ private:
     bool m_guestHeapConfigured = false;
     uint32_t m_asyncCallbackStackFloor = 0x01F00000u;
     uint32_t m_asyncCallbackStackTop = PS2_RAM_SIZE;
+    uint32_t m_asyncCallbackStackLowFloor = 0x00080000u;
+    uint32_t m_asyncCallbackStackLowTop = 0x00100000u;
+    bool m_asyncCallbackStackFallbackLogged = false;
 
     std::atomic<uint32_t> m_missingFunctionPolicy{static_cast<uint32_t>(MissingFunctionPolicy::ContinueToTarget)};
     std::atomic<bool> m_missingFunctionReported{false};
