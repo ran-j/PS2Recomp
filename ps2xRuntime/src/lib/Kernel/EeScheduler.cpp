@@ -1127,11 +1127,14 @@ void EeScheduler::queueInvocation(GuestInvocation invocation)
     GuestThread *owner = currentThread();
     assert(owner != nullptr);
     assert(!invocations.empty());
+    // Members run one after another and never nest, so they can all share the
+    // stack for the depth the sequence starts at instead of one stack each.
+    const uint32_t sharedStackTop = invocationStackTop();
     for (auto it = invocations.rbegin(); it != invocations.rend(); ++it)
     {
         if (getRegU32(&it->context, 29) == 0u)
         {
-            SET_GPR_U32(&it->context, 29, invocationStackTop());
+            SET_GPR_U32(&it->context, 29, sharedStackTop);
         }
         it->sequence = ++m_invocationSequence;
         owner->invocations.push_back(std::move(*it));
