@@ -1788,6 +1788,71 @@ void register_ps2_gs_tests()
             t.Equals(regs.display2, display2, "A+D should write GS DISPLAY2");
         });
 
+        tc.Run("GS FINISH raises the interrupt callback only while FINISHMSK is clear", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GSRegisters regs{};
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), &regs);
+            uint32_t interrupts = 0u;
+            gs.setInterruptCallback([&]()
+                                    { ++interrupts; });
+
+            regs.imr = 0xFF00ull & ~(1ull << 9u);
+            gs.writeRegister(GS_REG_FINISH, 0u);
+            t.Equals(interrupts, 1u, "unmasked FINISH should raise the GS interrupt once");
+            t.Equals(regs.csr.load() & 0x2ull, 0x2ull, "unmasked FINISH should set CSR.FINISH");
+
+            regs.csr.store(0u);
+            regs.imr = 0xFF00ull;
+            gs.writeRegister(GS_REG_FINISH, 0u);
+            t.Equals(interrupts, 1u, "FINISHMSK should suppress the GS interrupt");
+            t.Equals(regs.csr.load() & 0x2ull, 0x2ull, "masked FINISH should still set CSR.FINISH");
+
+            regs.imr = 1ull << 8u;
+            std::vector<uint8_t> packet;
+            appendU64(packet, makeGifTag(1u, GIF_FMT_PACKED, 1u, true));
+            appendU64(packet, 0x0Eull); // REGS[0] = A+D
+            appendU64(packet, 0u);
+            appendU64(packet, static_cast<uint64_t>(GS_REG_FINISH));
+            gs.processGIFPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+            t.Equals(interrupts, 2u, "A+D FINISH should raise the GS interrupt when only SIGMSK is set");
+        });
+
+        tc.Run("GS SIGNAL raises the interrupt callback only while SIGMSK is clear", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GSRegisters regs{};
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), &regs);
+            uint32_t interrupts = 0u;
+            gs.setInterruptCallback([&]()
+                                    { ++interrupts; });
+
+            regs.imr = 1ull << 9u;
+            gs.writeRegister(GS_REG_SIGNAL, 0xFFFFFFFF00001234ull);
+            t.Equals(interrupts, 1u, "unmasked SIGNAL should raise the GS interrupt once");
+            t.Equals(regs.csr.load() & 0x1ull, 0x1ull, "unmasked SIGNAL should set CSR.SIGNAL");
+
+            regs.csr.store(0u);
+            regs.imr = 1ull << 8u;
+            gs.writeRegister(GS_REG_SIGNAL, 0xFFFFFFFF00005678ull);
+            t.Equals(interrupts, 1u, "SIGMSK should suppress the GS interrupt");
+            t.Equals(regs.csr.load() & 0x1ull, 0x1ull, "masked SIGNAL should still set CSR.SIGNAL");
+        });
+
+        tc.Run("GS FINISH without an interrupt callback still sets CSR.FINISH", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GSRegisters regs{};
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), &regs);
+
+            regs.imr = 0u;
+            gs.writeRegister(GS_REG_FINISH, 0u);
+            t.Equals(regs.csr.load() & 0x2ull, 0x2ull, "FINISH should set CSR.FINISH with no callback installed");
+        });
+
         tc.Run("reserved PSM 0x3F uses null VRAM handlers", [](TestCase &t)
         {
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0xA5u);

@@ -72,6 +72,12 @@ namespace
     constexpr uint32_t kInvocationQueuePc = 0x00160530u;
     constexpr uint32_t kInvocationQueueResumePc = 0x00160540u;
     constexpr uint32_t kInvocationQueueHandlerPc = 0x00160550u;
+    constexpr uint32_t kGsFinishWaitPc = 0x00160600u;
+    constexpr uint32_t kGsFinishResumePc = 0x00160610u;
+    constexpr uint32_t kGsFinishHandlerPc = 0x00160620u;
+
+    constexpr uint64_t kGsImrAllMasked = 0xFF00ull;
+    constexpr uint64_t kGsImrFinishMsk = 1ull << 9u;
 
     constexpr uint32_t kTimer2Count = 0x10001000u;
     constexpr uint32_t kTimer2Mode = 0x10001010u;
@@ -97,6 +103,10 @@ namespace
     uint32_t g_invocationQueueRuns = 0u;
     uint32_t g_invocationQueueSp = 0u;
     bool g_invocationQueueSpChanged = false;
+    std::atomic<bool> g_gsFinishResumed{false};
+    uint64_t g_gsFinishImr = 0u;
+    uint32_t g_gsFinishHandlerCause = 0xFFFFFFFFu;
+    uint64_t g_gsFinishHandlerCsr = 0u;
 
     void setRegU32(R5900Context &ctx, int reg, uint32_t value)
     {
@@ -335,6 +345,62 @@ namespace
         g_timer2Resumed.store(true, std::memory_order_release);
         ctx->pc = 0u;
         runtime->requestStop();
+    }
+
+    void schedulerGsFinishHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_dispatchTrace.push_back(2);
+        g_gsFinishHandlerCause = getRegU32(ctx, 4);
+        g_gsFinishHandlerCsr = runtime->memory().gs().csr.load(std::memory_order_acquire);
+        setRegU32(*ctx, 4, static_cast<uint32_t>(g_testSemaphoreId));
+        iSignalSema(rdram, ctx, runtime);
+        ctx->pc = 0u;
+    }
+
+    void schedulerGsFinishWait(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_dispatchTrace.push_back(1);
+        g_testSemaphoreId = runtime->eeScheduler().createSemaphore(0, 1, 0u, 0u);
+
+        setRegU32(*ctx, 4, 0u);
+        setRegU32(*ctx, 5, kGsFinishHandlerPc);
+        setRegU32(*ctx, 6, 0u);
+        setRegU32(*ctx, 7, 0u);
+        AddIntcHandler(rdram, ctx, runtime);
+        setRegU32(*ctx, 4, 0u);
+        EnableIntc(rdram, ctx, runtime);
+
+        setRegU32(*ctx, 4, static_cast<uint32_t>(g_gsFinishImr));
+        GsPutIMR(rdram, ctx, runtime);
+
+        ctx->pc = kGsFinishResumePc;
+        setRegU32(*ctx, 4, static_cast<uint32_t>(g_testSemaphoreId));
+        WaitSema(rdram, ctx, runtime);
+    }
+
+    void schedulerGsFinishResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_dispatchTrace.push_back(3);
+        g_resumedResult = getRegS32(*ctx, 2);
+        g_gsFinishResumed.store(true, std::memory_order_release);
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
+    bool waitForSemaphoreWaiter(PS2Runtime &runtime)
+    {
+        return waitUntil([&]()
+        {
+            const EeKernelSnapshot snapshot = runtime.eeScheduler().snapshot();
+            for (const EeThreadSnapshot &thread : snapshot.threads)
+            {
+                if (thread.waitReason == EeWaitReason::Semaphore)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }, std::chrono::milliseconds(150));
     }
 
     void schedulerInvocationQueueHandler(uint8_t *, R5900Context *ctx, PS2Runtime *)
@@ -704,6 +770,118 @@ void register_ps2_runtime_interrupt_tests()
                      "Timer2 flow should run wait, interrupt handler, then the resumed thread");
             t.Equals(g_resumedResult, g_testSemaphoreId,
                      "the Timer2 handler should hand the semaphore directly to the waiter");
+        });
+
+        tc.Run("GS FINISH IRQ wakes a semaphore wait through an INTC cause 0 handler", [](TestCase &t)
+        {
+            TestEnv env;
+            t.IsTrue(env.runtime.memory().initialize(), "runtime memory initialize should succeed");
+            t.IsTrue(env.runtime.syncCoreSubsystems(), "runtime core subsystems should bind");
+            env.runtime.registerFunction(kGsFinishWaitPc, schedulerGsFinishWait);
+            env.runtime.registerFunction(kGsFinishResumePc, schedulerGsFinishResume);
+            env.runtime.registerFunction(kGsFinishHandlerPc, schedulerGsFinishHandler);
+
+            g_dispatchTrace.clear();
+            g_resumedResult = -1;
+            g_gsFinishResumed.store(false, std::memory_order_release);
+            g_gsFinishImr = kGsImrAllMasked & ~kGsImrFinishMsk;
+            g_gsFinishHandlerCause = 0xFFFFFFFFu;
+            g_gsFinishHandlerCsr = 0u;
+            env.runtime.memory().gs().imr = kGsImrAllMasked;
+            env.runtime.memory().gs().csr.store(0u, std::memory_order_release);
+            R5900Context mainContext{};
+            mainContext.pc = kGsFinishWaitPc;
+            std::atomic<bool> schedulerThrew{false};
+            std::thread gameThread([&]()
+            {
+                try
+                {
+                    env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+                    env.runtime.eeScheduler().run();
+                }
+                catch (...)
+                {
+                    schedulerThrew.store(true, std::memory_order_release);
+                }
+            });
+
+            const bool waiting = waitForSemaphoreWaiter(env.runtime);
+            if (waiting)
+            {
+                env.runtime.gs().writeRegister(GS_REG_FINISH, 0u);
+            }
+            const bool resumed = waitUntil([]()
+            {
+                return g_gsFinishResumed.load(std::memory_order_acquire);
+            }, std::chrono::milliseconds(150));
+            if (!resumed)
+            {
+                env.runtime.requestStop();
+            }
+            gameThread.join();
+
+            t.IsTrue(waiting, "the guest thread should block on the semaphore before FINISH");
+            t.IsTrue(resumed, "GS FINISH should dispatch INTC cause 0 and wake the semaphore waiter");
+            t.IsFalse(schedulerThrew.load(std::memory_order_acquire), "GS IRQ path should not throw");
+            const std::vector<int> expected{1, 2, 3};
+            t.IsTrue(g_dispatchTrace == expected,
+                     "GS FINISH flow should run wait, interrupt handler, then the resumed thread");
+            t.Equals(g_gsFinishHandlerCause, 0u, "the handler should receive INTC cause 0");
+            t.Equals(g_gsFinishHandlerCsr & 0x2ull, 0x2ull, "the handler should observe CSR.FINISH");
+            t.Equals(g_resumedResult, g_testSemaphoreId,
+                     "the GS handler should hand the semaphore directly to the waiter");
+        });
+
+        tc.Run("GS FINISH with FINISHMSK set does not run the INTC cause 0 handler", [](TestCase &t)
+        {
+            TestEnv env;
+            t.IsTrue(env.runtime.memory().initialize(), "runtime memory initialize should succeed");
+            t.IsTrue(env.runtime.syncCoreSubsystems(), "runtime core subsystems should bind");
+            env.runtime.registerFunction(kGsFinishWaitPc, schedulerGsFinishWait);
+            env.runtime.registerFunction(kGsFinishResumePc, schedulerGsFinishResume);
+            env.runtime.registerFunction(kGsFinishHandlerPc, schedulerGsFinishHandler);
+
+            g_dispatchTrace.clear();
+            g_resumedResult = -1;
+            g_gsFinishResumed.store(false, std::memory_order_release);
+            g_gsFinishImr = kGsImrAllMasked;
+            env.runtime.memory().gs().imr = kGsImrAllMasked;
+            env.runtime.memory().gs().csr.store(0u, std::memory_order_release);
+            R5900Context mainContext{};
+            mainContext.pc = kGsFinishWaitPc;
+            std::atomic<bool> schedulerThrew{false};
+            std::thread gameThread([&]()
+            {
+                try
+                {
+                    env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+                    env.runtime.eeScheduler().run();
+                }
+                catch (...)
+                {
+                    schedulerThrew.store(true, std::memory_order_release);
+                }
+            });
+
+            const bool waiting = waitForSemaphoreWaiter(env.runtime);
+            if (waiting)
+            {
+                env.runtime.gs().writeRegister(GS_REG_FINISH, 0u);
+            }
+            const bool resumed = waitUntil([]()
+            {
+                return g_gsFinishResumed.load(std::memory_order_acquire);
+            }, std::chrono::milliseconds(100));
+            env.runtime.requestStop();
+            gameThread.join();
+
+            t.IsTrue(waiting, "the guest thread should block on the semaphore before FINISH");
+            t.IsFalse(resumed, "a masked GS FINISH must not wake the semaphore waiter");
+            t.IsFalse(schedulerThrew.load(std::memory_order_acquire), "masked GS FINISH should not throw");
+            const std::vector<int> expected{1};
+            t.IsTrue(g_dispatchTrace == expected, "a masked GS FINISH must not run the INTC cause 0 handler");
+            t.Equals(env.runtime.memory().gs().csr.load(std::memory_order_acquire) & 0x2ull, 0x2ull,
+                     "a masked GS FINISH should still set CSR.FINISH");
         });
 
         tc.Run("scheduler stop wakes an idle VSync wait without a timeout", [](TestCase &t)

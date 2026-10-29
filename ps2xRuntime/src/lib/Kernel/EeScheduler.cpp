@@ -1910,6 +1910,9 @@ void EeScheduler::processEvent(const EeEvent &event)
         break;
     case EeEventType::Dmac:
         break;
+    case EeEventType::GsInterrupt:
+        dispatchIrq(false, 0u);
+        break;
     case EeEventType::Alarm:
     {
         auto it = m_alarms.find(static_cast<int>(event.id));

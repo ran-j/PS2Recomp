@@ -665,6 +665,8 @@ bool PS2Runtime::syncCoreSubsystems()
     }
 
     m_gs.init(gsVram, static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &m_memory.gs());
+    m_gs.setInterruptCallback([this]()
+                              { postEeEvent(EeEvent{EeEventType::GsInterrupt, 0, 0}); });
     m_gifArbiter.setProcessPacketFn([this](const uint8_t *data, uint32_t size)
                                     { m_gs.processGIFPacket(data, size); });
     m_memory.setGifArbiter(&m_gifArbiter);
