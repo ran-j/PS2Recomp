@@ -127,7 +127,6 @@ namespace ps2x::iop::detail
             pendingDmaInterrupts.clear();
             pendingGuestCallbacks.clear();
             nextModuleId = 1;
-            moduleCursor = kModuleLoadBase;
             totalCycles = 0;
             totalInstructions = 0;
             eeCycleCarry = 0;
@@ -591,8 +590,7 @@ namespace ps2x::iop::detail
         ModuleLoadResult loadImage(std::string path, std::span<const uint8_t> image, const void *arguments, uint32_t argumentSize)
         {
             ModuleLoadResult result{true, -1, -1};
-            const IopImageLoadResult loaded = IopModuleLoader::load(image, memory, moduleCursor);
-            moduleCursor = loaded.nextModuleCursor;
+            const IopImageLoadResult loaded = IopModuleLoader::load(image, memory);
             if (!loaded)
             {
                 if (loaded.error == IopImageLoadError::InvalidElf)
@@ -671,6 +669,7 @@ namespace ps2x::iop::detail
             kernel.terminateThreadsInRange(it->second.base, it->second.size);
             rpc.removeServersInRange(it->second.base, it->second.size);
             imports.eraseRange(it->second.base, it->second.size);
+            // Keep the image's block reserved: intrman/timrman handlers may still point into it.
             modules.erase(it);
             kernel.cleanupDeadThreads();
             if (result)
@@ -698,7 +697,6 @@ namespace ps2x::iop::detail
         std::map<int, uint64_t> pendingDmaInterrupts;
         std::multimap<uint64_t, ScheduledGuestCallback> pendingGuestCallbacks;
         uint32_t nextModuleId = 1;
-        uint32_t moduleCursor = kModuleLoadBase;
         uint64_t totalCycles = 0;
         uint64_t totalInstructions = 0;
         uint64_t eeCycleCarry = 0;

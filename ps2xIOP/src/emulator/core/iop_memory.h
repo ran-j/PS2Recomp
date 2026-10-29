@@ -22,7 +22,7 @@ namespace ps2x::iop::detail
         static constexpr uint32_t Spu2End = 0x1FA00000u;
         static constexpr uint32_t SifBase = 0x1D000000u;
         static constexpr uint32_t SifEnd = 0x1D001000u;
-        static constexpr uint32_t HeapBase = 0x00120000u;
+        static constexpr uint32_t HeapBase = 0x00010000u;
         static constexpr uint32_t HeapLimit = 0x001F0000u;
 
         struct Allocation
@@ -82,7 +82,6 @@ namespace ps2x::iop::detail
         std::vector<uint8_t> m_scratch;
         std::unordered_map<uint32_t, uint32_t> m_hardware;
         std::vector<Allocation> m_allocations;
-        uint32_t m_heapCursor = HeapBase;
         uint32_t m_interruptStatus = 0;
         uint32_t m_interruptMask = 0;
         uint32_t m_interruptControl = 1;

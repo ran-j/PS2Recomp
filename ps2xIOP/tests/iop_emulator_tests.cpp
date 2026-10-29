@@ -182,6 +182,76 @@ namespace
         std::memcpy(host.guest.data() + address + codeOffset, code, sizeof(code));
     }
 
+    // Fixed-address IRX whose start result is AllocSysMemory(2, size, fixedAddress).
+    void writeFixedAllocIrx(TestHost &host, uint32_t address, uint32_t loadAddress,
+                            uint32_t size, uint32_t fixedAddress)
+    {
+        constexpr uint32_t codeOffset = 0x100u;
+        constexpr uint32_t importTableOffset = 0x40u;
+        const uint32_t importStubAddress = loadAddress + importTableOffset + 20u;
+
+        ElfHeader header{};
+        header.ident[0] = 0x7Fu;
+        header.ident[1] = 'E';
+        header.ident[2] = 'L';
+        header.ident[3] = 'F';
+        header.ident[4] = 1u;
+        header.ident[5] = 1u;
+        header.ident[6] = 1u;
+        header.type = 2u;
+        header.machine = 8u;
+        header.version = 1u;
+        header.entry = loadAddress;
+        header.phoff = sizeof(ElfHeader);
+        header.ehsize = sizeof(ElfHeader);
+        header.phentsize = sizeof(ProgramHeader);
+        header.phnum = 1u;
+
+        const uint32_t code[] = {
+            0x27BDFFE0u, // addiu sp, sp, -0x20
+            0xAFBF001Cu, // sw    ra, 0x1c(sp)
+            0x24040002u, // addiu a0, zero, 2 (SMEM_Addr)
+            0x3C050000u | (size >> 16u),
+            0x34A50000u | (size & 0xFFFFu),
+            0x3C060000u | (fixedAddress >> 16u),
+            0x34C60000u | (fixedAddress & 0xFFFFu),
+            0x0C000000u | ((importStubAddress >> 2u) & 0x03FFFFFFu), // jal AllocSysMemory
+            0x00000000u, // nop
+            0x8FBF001Cu, // lw    ra, 0x1c(sp)
+            0x27BD0020u, // addiu sp, sp, 0x20
+            0x03E00008u, // jr    ra
+            0x00000000u, // nop
+        };
+        const uint32_t importTable[] = {
+            0x41E00000u,
+            0x00000000u,
+            0x00000101u,
+            0x6D737973u, // "sysm"
+            0x00006D65u, // "em"
+            0x03E00008u,
+            0x24000004u, // AllocSysMemory
+            0x00000000u,
+            0x00000000u,
+        };
+
+        ProgramHeader program{};
+        program.type = 1u;
+        program.offset = codeOffset;
+        program.vaddr = loadAddress;
+        program.paddr = loadAddress;
+        program.filesz = importTableOffset + sizeof(importTable);
+        program.memsz = 0x100u;
+        program.flags = 7u;
+        program.align = 4u;
+
+        std::fill(host.guest.begin() + address, host.guest.begin() + address + codeOffset + 0x100u, 0u);
+        std::memcpy(host.guest.data() + address, &header, sizeof(header));
+        std::memcpy(host.guest.data() + address + sizeof(header), &program, sizeof(program));
+        std::memcpy(host.guest.data() + address + codeOffset, code, sizeof(code));
+        std::memcpy(host.guest.data() + address + codeOffset + importTableOffset,
+                    importTable, sizeof(importTable));
+    }
+
     void writeRpcServerIrx(TestHost &host,
                            uint32_t address,
                            uint32_t sid = 0xF00DCAFEu)
@@ -1141,6 +1211,46 @@ int main()
         { return message.find("unhandled import cdvdman:7") != std::string::npos; });
     if (!expect(!emittedUnhandledSeek,
                 "sceCdSeek still emitted an unhandled IOP import")) return 1;
+
+    // Modules and sysmem blocks share one first-fit pool from 0x10000 up to 0x1F0000.
+    constexpr uint32_t oldHeapSize = 0x001F0000u - 0x00120000u;
+
+    iop.reset();
+    writeMinimalIrx(host, 0x100u);
+    if (!expect(iop.loadModuleBuffer(0x100u).startResult == 7,
+                "Module for the large-heap check did not load")) return 1;
+    if (!expect(iop.allocateMemory(oldHeapSize + 0x1000u) != 0u,
+                "IOP heap cannot use the free RAM below the old heap base")) return 1;
+
+    iop.reset();
+    const uint32_t blockA = iop.allocateMemory(0x1000u);
+    const uint32_t blockB = iop.allocateMemory(0x1000u);
+    if (!expect(blockA != 0u && blockB != 0u && iop.freeMemory(blockA),
+                "Could not set up the IOP block reuse check")) return 1;
+    if (!expect(iop.allocateMemory(0x800u) == blockA,
+                "Freed IOP block was not reused by a smaller allocation")) return 1;
+
+    iop.reset();
+    writeRelocatableRpcServerIrx(host, 0x100u);
+    const ModuleLoadResult stoppedModule = iop.loadModuleBuffer(0x100u);
+    if (!expect(stoppedModule.handled && stoppedModule.startResult == 0,
+                "Relocatable module for the stop check did not start")) return 1;
+    if (!expect(iop.stopModule(stoppedModule.moduleId),
+                "Relocatable module for the stop check did not stop")) return 1;
+    writeFixedAllocIrx(host, 0x1000u, 0x00014000u, 0x100u, 0x00010000u);
+    if (!expect(iop.loadModuleBuffer(0x1000u).startResult == 0,
+                "Stopping a module released its IOP memory while handlers may still point into it")) return 1;
+
+    iop.reset();
+    writeMinimalIrx(host, 0x100u);
+    if (!expect(iop.loadModuleBuffer(0x100u).startResult == 7,
+                "Fixed ET_EXEC module for the reservation check did not load")) return 1;
+    writeFixedAllocIrx(host, 0x1000u, 0x00014000u, 0x10u, 0x00010000u);
+    if (!expect(iop.loadModuleBuffer(0x1000u).startResult == 0,
+                "Fixed allocation landed on a fixed-address ET_EXEC module")) return 1;
+    writeFixedAllocIrx(host, 0x1000u, 0x00015000u, 0x10u, 0x00018000u);
+    if (!expect(iop.loadModuleBuffer(0x1000u).startResult == 0x00018000,
+                "Fixed allocation in free RAM below the old heap base failed")) return 1;
 
     std::cout << "ps2xIOP emulator smoke tests passed\n";
     return 0;

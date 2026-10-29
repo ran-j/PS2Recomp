@@ -32,7 +32,6 @@ namespace ps2x::iop::detail
         std::fill(m_scratch.begin(), m_scratch.end(), uint8_t{0});
         m_hardware.clear();
         m_allocations.clear();
-        m_heapCursor = HeapBase;
         m_interruptStatus = 0;
         m_interruptMask = 0;
         m_interruptControl = 1;
@@ -299,7 +298,7 @@ namespace ps2x::iop::detail
             return address;
         }
 
-        uint32_t candidate = alignUp(m_heapCursor, alignment);
+        uint32_t candidate = alignUp(HeapBase, alignment);
         for (;;)
         {
             bool overlap = false;
@@ -319,7 +318,6 @@ namespace ps2x::iop::detail
             return 0u;
         m_allocations.push_back({candidate, size});
         markOwned(candidate, size);
-        m_heapCursor = std::max(m_heapCursor, candidate + size);
         return candidate;
     }
 
@@ -339,7 +337,19 @@ namespace ps2x::iop::detail
 
     uint32_t IopMemory::maxFreeMemory() const
     {
-        return m_heapCursor < HeapLimit ? HeapLimit - m_heapCursor : 0u;
+        std::vector<Allocation> blocks = m_allocations;
+        std::sort(blocks.begin(), blocks.end(),
+                  [](const Allocation &lhs, const Allocation &rhs)
+                  { return lhs.address < rhs.address; });
+        uint32_t largest = 0u;
+        uint32_t cursor = HeapBase;
+        for (const auto &block : blocks)
+        {
+            if (block.address > cursor)
+                largest = std::max(largest, block.address - cursor);
+            cursor = std::max(cursor, block.address + block.size);
+        }
+        return cursor < HeapLimit ? std::max(largest, HeapLimit - cursor) : largest;
     }
 
     std::optional<IopMemory::Allocation> IopMemory::allocationContaining(uint32_t address) const

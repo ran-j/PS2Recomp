@@ -11,5 +11,4 @@ constexpr uint64_t kVblankPeriodCycles = (kIopClockHz * 1001ull + 30'000ull) / 6
 constexpr uint64_t kVblankEndPhaseCycles = kVblankPeriodCycles / 16ull;
 constexpr uint32_t kDefaultSlice = 256u;
 constexpr uint32_t kMaxCallInstructions = 2'000'000u;
-constexpr uint32_t kModuleLoadBase = 0x00010000u;
 constexpr uint32_t kStackGuardBytes = 64u;
