@@ -309,6 +309,65 @@ namespace
         runtime->requestStop();
     }
 
+    constexpr uint32_t kMpegIsEndHandle = 0x00140000u;
+    constexpr uint32_t kMpegIsEndImage = 0x00141000u;
+    constexpr uint32_t kMpegIsEndPssAddr = 0x00148000u;
+    constexpr uint32_t kMpegIsEndVSyncWaitPc = 0x00125060u;
+    constexpr uint32_t kMpegIsEndVSyncResumePc = 0x00125064u;
+
+    void testMpegIsEndVSyncWait(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        EeScheduler &scheduler = runtime->eeScheduler();
+        ctx->pc = kMpegIsEndVSyncResumePc;
+        // Resumes once the tick passes afterTick, i.e. two VBlanks from now.
+        scheduler.waitVSync(scheduler.currentVSyncTick() + 1u);
+    }
+
+    void testMpegIsEndVSyncResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
+    void prepareMpegIsEndRuntime(PS2Runtime &runtime, std::vector<uint8_t> &rdram)
+    {
+        runtime.registerFunction(kMpegIsEndVSyncWaitPc, testMpegIsEndVSyncWait);
+        runtime.registerFunction(kMpegIsEndVSyncResumePc, testMpegIsEndVSyncResume);
+        R5900Context mainContext{};
+        mainContext.pc = kMpegIsEndVSyncWaitPc;
+        runtime.eeScheduler().reset(rdram.data(), mainContext);
+    }
+
+    int32_t demuxMpegIsEndPss(PS2Runtime &runtime, std::vector<uint8_t> &rdram, const std::vector<uint8_t> &pss)
+    {
+        std::memcpy(rdram.data() + kMpegIsEndPssAddr, pss.data(), pss.size());
+        const uint32_t size = static_cast<uint32_t>(pss.size());
+        R5900Context ctx{};
+        setRegU32(ctx, 4, kMpegIsEndHandle);
+        setRegU32(ctx, 5, kMpegIsEndPssAddr);
+        setRegU32(ctx, 6, size);
+        setRegU32(ctx, 7, kMpegIsEndPssAddr);
+        setRegU32(ctx, 8, size);
+        ps2_stubs::sceMpegDemuxPssRing(rdram.data(), &ctx, &runtime);
+        return getRegS32(ctx, 2);
+    }
+
+    int32_t mpegIsEndFor(PS2Runtime &runtime, std::vector<uint8_t> &rdram)
+    {
+        R5900Context ctx{};
+        setRegU32(ctx, 4, kMpegIsEndHandle);
+        ps2_stubs::sceMpegIsEnd(rdram.data(), &ctx, &runtime);
+        return getRegS32(ctx, 2);
+    }
+
+    void takeMpegIsEndPicture(PS2Runtime &runtime, std::vector<uint8_t> &rdram)
+    {
+        R5900Context ctx{};
+        setRegU32(ctx, 4, kMpegIsEndHandle);
+        setRegU32(ctx, 5, kMpegIsEndImage);
+        ps2_stubs::sceMpegGetPicture(rdram.data(), &ctx, &runtime);
+    }
+
 }
 
 void register_ps2_runtime_expansion_tests()
@@ -809,6 +868,75 @@ void register_ps2_runtime_expansion_tests()
                      "EOF should resume the blocked GetPicture continuation");
             t.Equals(Ps2FastRead32(rdram.data(), kMpegNoDuplicateHandle + 0x08u), 1u,
                      "only the injected decoder frame should be counted as served");
+        });
+
+        tc.Run("sceMpegIsEnd ends on the PSS program end when no sceCdSt stream fed the movie", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            ps2_stubs::resetMpegStubState();
+            prepareMpegIsEndRuntime(runtime, rdram);
+
+            const std::vector<uint8_t> programEnd = {0x00u, 0x00u, 0x01u, 0xB9u};
+            t.Equals(demuxMpegIsEndPss(runtime, rdram, programEnd), static_cast<int32_t>(programEnd.size()),
+                     "sceMpegDemuxPssRing should consume the program end code");
+            ps2_stubs::enqueueMpegDecodedFrameForTesting(kMpegIsEndHandle);
+
+            t.Equals(mpegIsEndFor(runtime, rdram), 0,
+                     "IsEnd should stay 0 while a decoded frame is still queued");
+
+            takeMpegIsEndPicture(runtime, rdram);
+            t.Equals(mpegIsEndFor(runtime, rdram), 0,
+                     "IsEnd should stay 0 until the last picture's presentation interval has passed");
+
+            runtime.eeScheduler().run();
+            t.Equals(mpegIsEndFor(runtime, rdram), 1,
+                     "IsEnd should report the end after the program end once every frame has been shown");
+            runtime.requestStop();
+        });
+
+        tc.Run("sceMpegIsEnd stays 0 without a program end when no sceCdSt stream fed the movie", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            ps2_stubs::resetMpegStubState();
+            prepareMpegIsEndRuntime(runtime, rdram);
+
+            const std::vector<uint8_t> padding = {
+                0x00u, 0x00u, 0x01u, 0xBEu, 0x00u, 0x04u, 0xFFu, 0xFFu, 0xFFu, 0xFFu};
+            t.Equals(demuxMpegIsEndPss(runtime, rdram, padding), static_cast<int32_t>(padding.size()),
+                     "sceMpegDemuxPssRing should consume the padding packet");
+            ps2_stubs::enqueueMpegDecodedFrameForTesting(kMpegIsEndHandle);
+
+            takeMpegIsEndPicture(runtime, rdram);
+            runtime.eeScheduler().run();
+            t.Equals(mpegIsEndFor(runtime, rdram), 0,
+                     "IsEnd should stay 0 after the queue drains when no program end was demuxed");
+            runtime.requestStop();
+        });
+
+        tc.Run("sceMpegIsEnd still waits for sceCdSt EOF when a sceCdSt stream fed the movie", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            ps2_stubs::resetMpegStubState();
+            ps2_stubs::notifyMpegCdStreamStart();
+            prepareMpegIsEndRuntime(runtime, rdram);
+
+            const std::vector<uint8_t> programEnd = {0x00u, 0x00u, 0x01u, 0xB9u};
+            t.Equals(demuxMpegIsEndPss(runtime, rdram, programEnd), static_cast<int32_t>(programEnd.size()),
+                     "sceMpegDemuxPssRing should consume the program end code");
+            ps2_stubs::enqueueMpegDecodedFrameForTesting(kMpegIsEndHandle);
+
+            takeMpegIsEndPicture(runtime, rdram);
+            runtime.eeScheduler().run();
+            t.Equals(mpegIsEndFor(runtime, rdram), 0,
+                     "a program end alone should not end a sceCdSt-fed movie before the stream reaches EOF");
+
+            ps2_stubs::notifyMpegCdStreamEof();
+            t.Equals(mpegIsEndFor(runtime, rdram), 1,
+                     "sceCdSt EOF should still end the movie once every frame has been shown");
+            runtime.requestStop();
         });
 
         tc.Run("sceSdRemote isolates voice transfers from block streaming state", [](TestCase &t)
