@@ -1437,6 +1437,37 @@ namespace
         return 0;
     }
 
+    // Normal-mode receive into memory (DIR=0), e.g. fromSPR; the DMAC model performs the copy when STR is set.
+    int32_t submitDmaRecvNormal(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (!runtime)
+        {
+            return -1;
+        }
+
+        const uint32_t channelBase = resolveDmaChannelBase(rdram, getRegU32(ctx, 4));
+        if (channelBase == 0)
+        {
+            return -1;
+        }
+
+        PS2Memory &mem = runtime->memory();
+        mem.writeIORegister(channelBase + 0x20u, normalizeQwcFromArg(getRegU32(ctx, 6)) & 0xFFFFu);
+        mem.writeIORegister(channelBase + 0x10u, toDmaPhys(getRegU32(ctx, 5)));
+        mem.writeIORegister(channelBase + 0x00u, 0x00000180u); // DIR=0, TIE=1, STR=1 (normal mode).
+        mem.processPendingTransfers();
+
+        {
+            std::lock_guard<std::mutex> lock(g_dmaStubMutex);
+            g_dmaPendingPolls[channelBase] = 1;
+        }
+        for (const uint32_t completedCause : mem.consumeCompletedDmacCauses())
+        {
+            ps2_syscalls::dispatchDmacHandlersForCause(rdram, runtime, completedCause);
+        }
+        return 0;
+    }
+
     int32_t submitDmaSync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         if (!runtime)

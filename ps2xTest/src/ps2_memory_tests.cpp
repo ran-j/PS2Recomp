@@ -2044,6 +2044,41 @@ void register_ps2_memory_tests()
                      "preserved TTE should deliver the tag high-half VIFcode");
         });
 
+        tc.Run("sceDmaRecvN copies scratchpad data back to RDRAM", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kFromSprCh = 0x1000D000u;
+            constexpr uint32_t kDest = 0x00028000u;
+            constexpr uint32_t kScratchOffset = 0x400u;
+            constexpr uint32_t kQwc = 3u;
+
+            PS2Memory &mem = runtime.memory();
+            uint8_t *rdram = mem.getRDRAM();
+            uint8_t *scratch = mem.getScratchpad();
+            for (uint32_t i = 0; i < kQwc * 16u; ++i)
+            {
+                scratch[kScratchOffset + i] = static_cast<uint8_t>(0x30u + i);
+            }
+            std::memset(rdram + kDest, 0, kQwc * 16u + 16u);
+
+            // Mana Khemia sets the channel's SADR, then calls sceDmaRecvN(fromSPR, dest, qwc).
+            t.IsTrue(mem.writeIORegister(kFromSprCh + 0x80u, kScratchOffset), "guest should be able to set SADR");
+            R5900Context ctx{};
+            setRegU32(ctx, 4, kFromSprCh);
+            setRegU32(ctx, 5, kDest);
+            setRegU32(ctx, 6, kQwc);
+            ps2_stubs::sceDmaRecvN(rdram, &ctx, &runtime);
+
+            t.Equals(static_cast<int32_t>(::getRegU32(&ctx, 2)), 0, "sceDmaRecvN should accept the transfer");
+            t.Equals(std::memcmp(rdram + kDest, scratch + kScratchOffset, kQwc * 16u), 0,
+                     "sceDmaRecvN should copy QWC quadwords from SADR into RDRAM");
+            t.Equals(rdram[kDest + kQwc * 16u], static_cast<uint8_t>(0u), "sceDmaRecvN must not copy past QWC");
+            t.IsTrue((mem.readIORegister(kFromSprCh + 0x00u) & 0x100u) == 0u,
+                     "the fromSPR channel should finish (STR cleared)");
+        });
+
         tc.Run("VIF1 DMA DIRECT image packet reaches GS through arbiter", [](TestCase &t)
         {
             PS2Memory mem;
