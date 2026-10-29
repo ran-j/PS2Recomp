@@ -280,6 +280,19 @@ namespace ps2x::iop::detail
                 cpu.gpr[2] = kCdvdReadyComplete;
                 return true;
 
+            case 14: // sceCdTrayReq
+            {
+                // The disc never changes, so the tray reports no change in every mode.
+                const uint32_t trayChanged = 0u;
+                if (a1 != 0u && !memory.writeRam(a1, &trayChanged, sizeof(trayChanged)))
+                {
+                    cpu.gpr[2] = 0u;
+                    return true;
+                }
+                cpu.gpr[2] = 1u;
+                return true;
+            }
+
             case 28: // sceCdStatus
                 cpu.gpr[2] = kCdvdStatusPause;
                 return true;

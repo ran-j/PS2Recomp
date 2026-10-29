@@ -831,6 +831,50 @@ namespace
         std::memcpy(host.guest.data() + address + codeOffset, segment.data(), segment.size());
     }
 
+    void writeCdvdTrayReqIrx(TestHost &host, uint32_t address)
+    {
+        constexpr uint32_t codeOffset = 0x100u;
+        constexpr uint32_t loadAddress = 0x00010000u;
+        constexpr uint32_t importTableAddress = loadAddress + 0x100u;
+        constexpr uint32_t trayReqStub = importTableAddress + 20u;
+        constexpr uint32_t trayCheckAddress = loadAddress + 0x1C0u;
+
+        ElfHeader header{};
+        header.ident[0] = 0x7Fu; header.ident[1] = 'E'; header.ident[2] = 'L'; header.ident[3] = 'F';
+        header.ident[4] = 1u; header.ident[5] = 1u; header.ident[6] = 1u;
+        header.type = 2u; header.machine = 8u; header.version = 1u;
+        header.entry = loadAddress; header.phoff = sizeof(ElfHeader);
+        header.ehsize = sizeof(ElfHeader); header.phentsize = sizeof(ProgramHeader); header.phnum = 1u;
+
+        ProgramHeader program{};
+        program.type = 1u; program.offset = codeOffset; program.vaddr = loadAddress; program.paddr = loadAddress;
+        program.filesz = 0x200u; program.memsz = 0x200u; program.flags = 7u; program.align = 4u;
+
+        const auto jal = [](uint32_t target) { return 0x0C000000u | ((target >> 2u) & 0x03FFFFFFu); };
+        // sceCdTrayReq(SCECdTrayCheck, &traychk), then return its result.
+        const uint32_t entry[] = {
+            0x27BDFFF0u, 0xAFBF000Cu,
+            0x24040002u, 0x3C050001u, 0x34A501C0u, jal(trayReqStub), 0x00000000u,
+            0x8FBF000Cu, 0x27BD0010u, 0x03E00008u, 0x00000000u,
+        };
+        const uint32_t imports[] = {
+            0x41E00000u, 0u, 0x00000101u,
+            0x64766463u, 0x006E616Du, // "cdvdman"
+            0x03E00008u, 0x2400000Eu, // sceCdTrayReq
+            0u, 0u,
+        };
+        const uint32_t staleTrayCheck = 0xFFFFFFFFu;
+
+        std::vector<uint8_t> segment(program.filesz, 0u);
+        std::memcpy(segment.data(), entry, sizeof(entry));
+        std::memcpy(segment.data() + 0x100u, imports, sizeof(imports));
+        std::memcpy(segment.data() + (trayCheckAddress - loadAddress), &staleTrayCheck, sizeof(staleTrayCheck));
+        std::memset(host.guest.data() + address, 0, codeOffset + program.filesz);
+        std::memcpy(host.guest.data() + address, &header, sizeof(header));
+        std::memcpy(host.guest.data() + address + sizeof(header), &program, sizeof(program));
+        std::memcpy(host.guest.data() + address + codeOffset, segment.data(), segment.size());
+    }
+
     void writeCdvdSeekIrx(TestHost &host, uint32_t address)
     {
         constexpr uint32_t codeOffset = 0x100u;
@@ -1141,6 +1185,26 @@ int main()
         { return message.find("unhandled import cdvdman:7") != std::string::npos; });
     if (!expect(!emittedUnhandledSeek,
                 "sceCdSeek still emitted an unhandled IOP import")) return 1;
+
+    {
+        TestHost trayHost(0x1000u);
+        IopSubsystem trayIop(trayHost);
+        writeCdvdTrayReqIrx(trayHost, 0x100u);
+        const ModuleLoadResult trayReq = trayIop.loadModuleBuffer(0x100u);
+        uint32_t trayCheck = 0xFFFFFFFFu;
+        if (!expect(trayIop.readMemory(0x000101C0u, &trayCheck, sizeof(trayCheck)),
+                    "Could not read the sceCdTrayReq tray-check result")) return 1;
+        if (!expect(trayReq.handled && trayReq.startResult == 1,
+                    "sceCdTrayReq did not report success")) return 1;
+        if (!expect(trayCheck == 0u,
+                    "sceCdTrayReq did not report an unchanged tray")) return 1;
+        const bool emittedUnhandledTrayReq = std::any_of(
+            trayHost.logs.begin(), trayHost.logs.end(),
+            [](const std::string &message)
+            { return message.find("unhandled import cdvdman:14") != std::string::npos; });
+        if (!expect(!emittedUnhandledTrayReq,
+                    "sceCdTrayReq still emitted an unhandled IOP import")) return 1;
+    }
 
     std::cout << "ps2xIOP emulator smoke tests passed\n";
     return 0;
