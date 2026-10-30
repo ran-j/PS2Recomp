@@ -158,9 +158,18 @@ namespace
         runtime->requestStop();
     }
 
+    // Encodes the libgraph sceGsLoadImage register fields the runtime stubs decode.
     void writeGsImageTest(uint8_t *rdram, uint32_t addr, const GsImageMem &image)
     {
-        std::memcpy(rdram + addr, &image, sizeof(image));
+        uint64_t q[12] = {};
+        q[2] = (static_cast<uint64_t>(image.vram_addr) << 32) | (static_cast<uint64_t>(image.vram_width) << 48) |
+               (static_cast<uint64_t>(image.psm) << 56);
+        q[3] = 0x50u;
+        q[4] = (static_cast<uint64_t>(image.x) << 32) | (static_cast<uint64_t>(image.y) << 48);
+        q[5] = 0x51u;
+        q[6] = static_cast<uint64_t>(image.width) | (static_cast<uint64_t>(image.height) << 32);
+        q[7] = 0x52u;
+        std::memcpy(rdram + addr, q, sizeof(q));
     }
 
     void writeGsImageTest(std::vector<uint8_t> &rdram, uint32_t addr, const GsImageMem &image)
@@ -3965,6 +3974,67 @@ void register_ps2_gs_tests()
 
             t.IsTrue(sawFilledRow,
                      "triangle fan quad should light at least one framebuffer row");
+        });
+
+        tc.Run("sceGsExecLoadImage passes the libgraph block address through to BITBLTBUF", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize should succeed");
+            uint8_t *rdram = runtime.memory().getRDRAM();
+
+            // Mana Khemia fills sceGsLoadImage once, then patches BITBLTBUF in place before each upload.
+            constexpr uint32_t kImageAddr = 0x4000u;
+            constexpr uint32_t kSrcAddr = 0x5000u;
+            R5900Context defCtx{};
+            setRegU32(defCtx, 4, kImageAddr);
+            setRegU32(defCtx, 5, 0u);     // dbp
+            setRegU32(defCtx, 6, 1u);     // dbw
+            setRegU32(defCtx, 7, 0x02u);  // PSMCT16
+            setRegU32(defCtx, 8, 0u);
+            setRegU32(defCtx, 9, 0u);
+            setRegU32(defCtx, 10, 16u);
+            setRegU32(defCtx, 11, 16u);
+            ps2_stubs::sceGsSetDefLoadImage(rdram, &defCtx, &runtime);
+            uint64_t structBitbltbuf = 0u;
+            std::memcpy(&structBitbltbuf, rdram + kImageAddr + 0x10u, sizeof(structBitbltbuf));
+            t.Equals(structBitbltbuf >> 56u, 0x02ull, "sceGsSetDefLoadImage should store DPSM in the libgraph BITBLTBUF slot");
+            structBitbltbuf = (structBitbltbuf & ~(0x3FFFull << 32u)) | (11202ull << 32u);
+            std::memcpy(rdram + kImageAddr + 0x10u, &structBitbltbuf, sizeof(structBitbltbuf));
+
+            R5900Context loadCtx{};
+            setRegU32(loadCtx, 4, kImageAddr);
+            setRegU32(loadCtx, 5, kSrcAddr);
+            ps2_stubs::sceGsExecLoadImage(rdram, &loadCtx, &runtime);
+
+            uint64_t bitbltbuf = 0u;
+            std::memcpy(&bitbltbuf, rdram + runtime.guestHeapBase() + 16u, sizeof(bitbltbuf));
+            t.Equals(static_cast<uint32_t>((bitbltbuf >> 32u) & 0x3FFFu), 11202u,
+                     "BITBLTBUF.DBP should be the block address the game passed");
+        });
+
+        tc.Run("sceGsExecLoadImage sizes PSMT4HH uploads at four bits per pixel", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize should succeed");
+            uint8_t *rdram = runtime.memory().getRDRAM();
+
+            // Mana Khemia's font sheet is a 512x512 PSMT4HH image; transfers pack it at 4 bpp.
+            constexpr uint32_t kImageAddr = 0x4000u;
+            constexpr uint32_t kSrcAddr = 0x5000u;
+            const GsImageMem image{0u, 0u, 16u, 16u, 0u, 1u, 0x2Cu};
+            writeGsImageTest(rdram, kImageAddr, image);
+            std::memset(rdram + kSrcAddr, 0x31, 16u * 16u / 2u);
+
+            R5900Context loadCtx{};
+            setRegU32(loadCtx, 4, kImageAddr);
+            setRegU32(loadCtx, 5, kSrcAddr);
+            ps2_stubs::sceGsExecLoadImage(rdram, &loadCtx, &runtime);
+
+            uint64_t imageTag = 0u;
+            std::memcpy(&imageTag, rdram + runtime.guestHeapBase() + 5u * 16u, sizeof(imageTag));
+            t.Equals(imageTag & 0x7FFFull, 8ull, "a 16x16 PSMT4HH image is 128 bytes, eight quadwords");
+            t.Equals(runtime.gs().ReadVram(0x2Cu, 0u, 1u, 0u, 0u), 1u, "the first texel should land in the high nibble plane");
+            t.Equals(runtime.gs().ReadVram(0x2Cu, 0u, 1u, 1u, 0u), 3u, "the second texel comes from the upper half of the byte");
         });
 
         tc.Run("sceGsExecLoadImage and sceGsExecStoreImage roundtrip and free guest packets", [](TestCase &t)

@@ -1729,23 +1729,31 @@ namespace
     {
         const uint64_t pixels = static_cast<uint64_t>(pixelCount);
         uint64_t bytes = 0;
+        // Host/local transfer packing, not VRAM storage: the high-bit formats and 24-bit colour
+        // travel packed even though they occupy 32-bit words in local memory.
         switch (psm)
         {
         case 0:  // PSMCT32
-        case 1:  // PSMCT24 (treat as 32)
-        case 27: // PSMT8H (packed in 32-bit lanes)
-        case 36: // PSMT4HL (packed in 32-bit lanes)
-        case 44: // PSMT4HH (packed in 32-bit lanes)
+        case 48: // PSMZ32
             bytes = pixels * 4ull;
+            break;
+        case 1:  // PSMCT24
+        case 49: // PSMZ24
+            bytes = pixels * 3ull;
             break;
         case 2:  // PSMCT16
         case 10: // PSMCT16S
+        case 50: // PSMZ16
+        case 58: // PSMZ16S
             bytes = pixels * 2ull;
             break;
         case 19: // PSMT8
+        case 27: // PSMT8H
             bytes = pixels;
             break;
         case 20: // PSMT4
+        case 36: // PSMT4HL
+        case 44: // PSMT4HH
             bytes = (pixels + 1ull) / 2ull;
             break;
         default:
@@ -1822,21 +1830,62 @@ namespace
         return decoded;
     }
 
-    static bool readGsImage(uint8_t *rdram, uint32_t addr, GsImageMem &out)
+    // sceGsLoadImage/sceGsStoreImage are libgraph's 0x60-byte GIF packets (giftag, BITBLTBUF, TRXPOS,
+    // TRXREG, ... as A+D pairs). Games patch those fields in place, so decode the registers themselves.
+    constexpr uint32_t kGsImageStructBytes = 0x60u;
+
+    static bool readGsImage(uint8_t *rdram, uint32_t addr, GsImageMem &out, bool store = false)
     {
         const uint8_t *ptr = getConstMemPtr(rdram, addr);
         if (!ptr)
             return false;
-        std::memcpy(&out, ptr, sizeof(out));
+        uint64_t bitbltbuf = 0u;
+        uint64_t trxpos = 0u;
+        uint64_t trxreg = 0u;
+        std::memcpy(&bitbltbuf, ptr + 0x10u, sizeof(bitbltbuf));
+        std::memcpy(&trxpos, ptr + 0x20u, sizeof(trxpos));
+        std::memcpy(&trxreg, ptr + 0x30u, sizeof(trxreg));
+        const uint32_t shift = store ? 0u : 32u; // source fields for stores, destination fields for loads
+        out.vram_addr = static_cast<uint16_t>((bitbltbuf >> shift) & 0x3FFFu);
+        out.vram_width = static_cast<uint8_t>((bitbltbuf >> (shift + 16u)) & 0x3Fu);
+        out.psm = static_cast<uint8_t>((bitbltbuf >> (shift + 24u)) & 0x3Fu);
+        out.x = static_cast<uint16_t>((trxpos >> shift) & 0x7FFu);
+        out.y = static_cast<uint16_t>((trxpos >> (shift + 16u)) & 0x7FFu);
+        out.width = static_cast<uint16_t>(trxreg & 0xFFFu);
+        out.height = static_cast<uint16_t>((trxreg >> 32u) & 0xFFFu);
         return true;
     }
 
-    static bool writeGsImage(uint8_t *rdram, uint32_t addr, const GsImageMem &img)
+    static bool writeGsImage(uint8_t *rdram, uint32_t addr, const GsImageMem &img, bool store = false)
     {
         uint8_t *ptr = getMemPtr(rdram, addr);
         if (!ptr)
             return false;
-        std::memcpy(ptr, &img, sizeof(img));
+        const uint32_t shift = store ? 0u : 32u;
+        const uint32_t imageQwc = (bytesForPixels(img.psm, static_cast<uint32_t>(img.width) * img.height) + 15u) / 16u;
+        uint64_t q[kGsImageStructBytes / 8u] = {};
+        q[0] = makeGiftagAplusDOpen(store ? 5u : 4u);
+        q[1] = 0xEull;
+        q[2] = (static_cast<uint64_t>(img.vram_addr & 0x3FFFu) << shift) |
+               (static_cast<uint64_t>(img.vram_width & 0x3Fu) << (shift + 16u)) |
+               (static_cast<uint64_t>(img.psm & 0x3Fu) << (shift + 24u));
+        q[3] = 0x50ull;
+        q[4] = (static_cast<uint64_t>(img.x & 0x7FFu) << shift) | (static_cast<uint64_t>(img.y & 0x7FFu) << (shift + 16u));
+        q[5] = 0x51ull;
+        q[6] = static_cast<uint64_t>(img.width) | (static_cast<uint64_t>(img.height) << 32u);
+        q[7] = 0x52ull;
+        if (store)
+        {
+            q[9] = 0x61ull; // FINISH
+            q[10] = 1ull;   // TRXDIR local -> host
+            q[11] = 0x53ull;
+        }
+        else
+        {
+            q[9] = 0x53ull; // TRXDIR host -> local
+            q[10] = (static_cast<uint64_t>(2u) << 58u) | (1ull << 15u) | (imageQwc & 0x7FFFu);
+        }
+        std::memcpy(ptr, q, sizeof(q));
         return true;
     }
 
