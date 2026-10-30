@@ -1038,6 +1038,50 @@ void register_ps2_runtime_expansion_tests()
             t.Equals(room, 0u, "vfprintf should consume _w");
         });
 
+        tc.Run("PMFHL and PMTHL move 32-bit words between HI/LO pipelines and a GPR", [](TestCase &t)
+        {
+            // MULTU leaves a 64-bit product split across LO/HI; libgcc's soft-double multiply reads it
+            // back with PMFHL.LW, so every word must come from the right pipeline register.
+            R5900Context ctx{};
+            ctx.lo = 0xFFFFFFFF89ABCDEFull; // MULTU sign-extends each 32-bit half into LO/HI
+            ctx.hi = 0x0000000001234567ull;
+            ctx.lo1 = 0x00000000AAAA5555ull;
+            ctx.hi1 = 0xFFFFFFFF80000000ull;
+
+            alignas(16) uint32_t w[4];
+            _mm_store_si128(reinterpret_cast<__m128i *>(w), PS2_PMFHL_LW(&ctx));
+            t.Equals(w[0], 0x89ABCDEFu, "PMFHL.LW word 0 is LO0's low word");
+            t.Equals(w[1], 0x01234567u, "PMFHL.LW word 1 is HI0's low word, completing the 64-bit product");
+            t.Equals(w[2], 0xAAAA5555u, "PMFHL.LW word 2 comes from LO1");
+            t.Equals(w[3], 0x80000000u, "PMFHL.LW word 3 comes from HI1");
+
+            _mm_store_si128(reinterpret_cast<__m128i *>(w), PS2_PMFHL_UW(&ctx));
+            t.Equals(w[0], 0xFFFFFFFFu, "PMFHL.UW word 0 is LO0's high word");
+            t.Equals(w[1], 0x00000000u, "PMFHL.UW word 1 is HI0's high word");
+
+            alignas(16) int64_t d[2];
+            _mm_store_si128(reinterpret_cast<__m128i *>(d), PS2_PMFHL_SLW(&ctx));
+            t.Equals(d[0], static_cast<int64_t>(0x7FFFFFFF), "PMFHL.SLW saturates a large {HI,LO} pair");
+            t.Equals(d[1], static_cast<int64_t>(-0x80000000ll), "PMFHL.SLW saturates negative pipeline-1 values");
+
+            alignas(16) uint16_t h[8];
+            _mm_store_si128(reinterpret_cast<__m128i *>(h), PS2_PMFHL_LH(&ctx));
+            t.Equals(h[0], static_cast<uint16_t>(0xCDEF), "PMFHL.LH takes LO halfword 0");
+            t.Equals(h[1], static_cast<uint16_t>(0xFFFF), "PMFHL.LH takes LO halfword 2");
+            t.Equals(h[2], static_cast<uint16_t>(0x4567), "PMFHL.LH takes HI halfword 0");
+
+            alignas(16) int16_t sh[8];
+            _mm_store_si128(reinterpret_cast<__m128i *>(sh), PS2_PMFHL_SH(&ctx));
+            t.Equals(sh[0], static_cast<int16_t>(-0x8000), "PMFHL.SH saturates negative words");
+            t.Equals(sh[2], static_cast<int16_t>(0x7FFF), "PMFHL.SH saturates positive words");
+
+            PS2_PMTHL_LW(&ctx, _mm_set_epi32(4, 3, 2, 1));
+            t.Equals(ctx.lo, 0xFFFFFFFF00000001ull, "PMTHL.LW replaces only LO0's low word");
+            t.Equals(ctx.hi, 0x0000000000000002ull, "PMTHL.LW replaces only HI0's low word");
+            t.Equals(ctx.lo1, 0x0000000000000003ull, "PMTHL.LW writes LO1");
+            t.Equals(ctx.hi1, 0xFFFFFFFF00000004ull, "PMTHL.LW writes HI1");
+        });
+
         tc.Run("multiply-add matrix writes rd only when R5900 requires it", [](TestCase &t)
         {
             R5900Decoder decoder;
