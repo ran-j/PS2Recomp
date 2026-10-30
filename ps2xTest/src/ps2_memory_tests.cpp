@@ -1780,6 +1780,216 @@ void register_ps2_memory_tests()
             t.IsTrue(q2, "RET must resume after CALL payload and continue chain");
         });
 
+        tc.Run("GIF DMA chain processes more than 4096 CNT tags to END", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kGifCh = 0x1000A000u;
+            constexpr uint32_t kChain = 0x00100000u;
+            constexpr uint32_t kCntTags = 5000u;
+
+            uint8_t *rdram = mem.getRDRAM();
+            uint32_t tag = kChain;
+            for (uint32_t i = 0; i < kCntTags; ++i)
+            {
+                writeDmaTag(rdram, tag, makeDmaTag(1u, 1u, 0u, false)); // CNT qwc=1
+                std::memset(rdram + tag + 16u, 0, 16u);
+                std::memcpy(rdram + tag + 16u, &i, sizeof(i));
+                tag += 32u;
+            }
+            writeDmaTag(rdram, tag, makeDmaTag(1u, 7u, 0u, false)); // END qwc=1
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                rdram[tag + 16u + i] = static_cast<uint8_t>(0xE0u + i);
+            }
+
+            std::vector<uint8_t> delivered;
+            mem.setGifPacketCallback([&](const uint8_t *data, uint32_t sizeBytes)
+            {
+                delivered.insert(delivered.end(), data, data + sizeBytes);
+            });
+
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x30u, kChain), "write TADR should succeed");
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x00u, 0x104u), "write CHCR STR|CHAIN should succeed");
+
+            mem.processPendingTransfers();
+
+            t.Equals(delivered.size(), static_cast<size_t>((kCntTags + 1u) * 16u),
+                     "every CNT payload and the END payload should arrive");
+            if (delivered.size() == static_cast<size_t>((kCntTags + 1u) * 16u))
+            {
+                uint32_t lastIndex = 0;
+                std::memcpy(&lastIndex, delivered.data() + (kCntTags - 1u) * 16u, sizeof(lastIndex));
+                t.Equals(lastIndex, kCntTags - 1u, "last CNT payload should be the final CNT tag's");
+                bool endOk = true;
+                for (uint32_t i = 0; i < 16u; ++i)
+                {
+                    if (delivered[kCntTags * 16u + i] != static_cast<uint8_t>(0xE0u + i))
+                        endOk = false;
+                }
+                t.IsTrue(endOk, "END payload at the far end of the chain should arrive last");
+            }
+            t.Equals(mem.readIORegister(kGifCh + 0x30u), tag, "TADR should stay on the END tag");
+        });
+
+        tc.Run("GIF DMA chain processes more than 4096 nested CALL/RET tags to END", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kGifCh = 0x1000A000u;
+            constexpr uint32_t kMain = 0x00140000u;
+            constexpr uint32_t kSubA = 0x00180000u;
+            constexpr uint32_t kSubB = 0x00180100u;
+            constexpr uint32_t kCalls = 5000u;
+
+            uint8_t *rdram = mem.getRDRAM();
+
+            // Main list: CALL qwc=1 -> A, each returning to the next CALL (5000 calls).
+            uint32_t tag = kMain;
+            for (uint32_t i = 0; i < kCalls; ++i)
+            {
+                writeDmaTag(rdram, tag, makeDmaTag(1u, 5u, kSubA, false));
+                std::memset(rdram + tag + 16u, 0, 16u);
+                std::memcpy(rdram + tag + 16u, &i, sizeof(i));
+                tag += 32u;
+            }
+            const uint32_t kEnd = tag;
+            writeDmaTag(rdram, kEnd, makeDmaTag(1u, 7u, 0u, false)); // END qwc=1
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                rdram[kEnd + 16u + i] = static_cast<uint8_t>(0xE0u + i);
+            }
+
+            // A: CALL qwc=0 -> B, then RET. B: CNT qwc=1 payload, then RET.
+            // B is reached at ASP depth 2 with the same ASR1 every time but a different ASR0.
+            writeDmaTag(rdram, kSubA, makeDmaTag(0u, 5u, kSubB, false));
+            writeDmaTag(rdram, kSubA + 16u, makeDmaTag(0u, 6u, 0u, false));
+            writeDmaTag(rdram, kSubB, makeDmaTag(1u, 1u, 0u, false));
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                rdram[kSubB + 16u + i] = static_cast<uint8_t>(0xB0u + i);
+            }
+            writeDmaTag(rdram, kSubB + 32u, makeDmaTag(0u, 6u, 0u, false));
+
+            std::vector<uint8_t> delivered;
+            mem.setGifPacketCallback([&](const uint8_t *data, uint32_t sizeBytes)
+            {
+                delivered.insert(delivered.end(), data, data + sizeBytes);
+            });
+
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x30u, kMain), "write TADR should succeed");
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x00u, 0x104u), "write CHCR STR|CHAIN should succeed");
+
+            mem.processPendingTransfers();
+
+            const size_t expected = static_cast<size_t>(kCalls) * 32u + 16u;
+            t.Equals(delivered.size(), expected, "every CALL payload, subroutine payload and END payload should arrive");
+            if (delivered.size() == expected)
+            {
+                uint32_t lastIndex = 0;
+                std::memcpy(&lastIndex, delivered.data() + (kCalls - 1u) * 32u, sizeof(lastIndex));
+                t.Equals(lastIndex, kCalls - 1u, "last CALL payload should be the final CALL tag's");
+                bool endOk = true;
+                for (uint32_t i = 0; i < 16u; ++i)
+                {
+                    if (delivered[kCalls * 32u + i] != static_cast<uint8_t>(0xE0u + i))
+                        endOk = false;
+                }
+                t.IsTrue(endOk, "END payload after the last RET should arrive last");
+            }
+            t.Equals(mem.readIORegister(kGifCh + 0x30u), kEnd, "TADR should stay on the END tag");
+            t.Equals((mem.readIORegister(kGifCh + 0x00u) >> 4) & 0x3u, 0u, "ASP should be back at depth 0");
+        });
+
+        tc.Run("GIF DMA chain NEXT self-loop stops and warns", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kGifCh = 0x1000A000u;
+            constexpr uint32_t kTag = 0x00026800u;
+
+            uint8_t *rdram = mem.getRDRAM();
+            writeDmaTag(rdram, kTag, makeDmaTag(1u, 2u, kTag, false)); // NEXT qwc=1 -> itself
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                rdram[kTag + 16u + i] = static_cast<uint8_t>(0x50u + i);
+            }
+
+            std::vector<uint8_t> delivered;
+            mem.setGifPacketCallback([&](const uint8_t *data, uint32_t sizeBytes)
+            {
+                delivered.insert(delivered.end(), data, data + sizeBytes);
+            });
+
+            ps2_log::clear_runtime_log_entries();
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x30u, kTag), "write TADR should succeed");
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x00u, 0x104u), "write CHCR STR|CHAIN should succeed");
+
+            mem.processPendingTransfers();
+
+            t.Equals(delivered.size(), static_cast<size_t>(16u), "self-loop payload should be sent once before the walk stops");
+            t.Equals(mem.readIORegister(kGifCh + 0x30u), kTag, "TADR should stay on the looping NEXT tag");
+
+            bool warned = false;
+            for (const auto &entry : ps2_log::snapshot_runtime_log_entries())
+            {
+                if (entry.text.find("GIF") != std::string::npos &&
+                    entry.text.find("0x26800") != std::string::npos &&
+                    entry.text.find("loop") != std::string::npos)
+                {
+                    warned = true;
+                }
+            }
+            t.IsTrue(warned, "loop guard should log a warning naming the channel and tag");
+        });
+
+        tc.Run("GIF DMA chain CALL/RET cycle stops at the repeated state", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kGifCh = 0x1000A000u;
+            constexpr uint32_t kTagA = 0x00026A00u;
+            constexpr uint32_t kSub = 0x00026B00u;
+
+            uint8_t *rdram = mem.getRDRAM();
+            writeDmaTag(rdram, kTagA, makeDmaTag(0u, 5u, kSub, false));         // CALL -> sub, returns to A+16
+            writeDmaTag(rdram, kTagA + 16u, makeDmaTag(0u, 2u, kTagA, false));  // NEXT -> A
+            writeDmaTag(rdram, kSub, makeDmaTag(1u, 1u, 0u, false));            // CNT qwc=1
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                rdram[kSub + 16u + i] = static_cast<uint8_t>(0x60u + i);
+            }
+            writeDmaTag(rdram, kSub + 32u, makeDmaTag(0u, 6u, 0u, false));     // RET
+
+            std::vector<uint8_t> delivered;
+            mem.setGifPacketCallback([&](const uint8_t *data, uint32_t sizeBytes)
+            {
+                delivered.insert(delivered.end(), data, data + sizeBytes);
+            });
+
+            ps2_log::clear_runtime_log_entries();
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x30u, kTagA), "write TADR should succeed");
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x00u, 0x104u), "write CHCR STR|CHAIN should succeed");
+
+            mem.processPendingTransfers();
+
+            t.Equals(delivered.size(), static_cast<size_t>(16u), "one pass of the cycle should be sent before the walk stops");
+            t.Equals(mem.readIORegister(kGifCh + 0x30u), kTagA, "TADR should stop on the repeated CALL tag");
+            t.Equals((mem.readIORegister(kGifCh + 0x00u) >> 4) & 0x3u, 0u, "ASP should match the repeated state");
+
+            bool warned = false;
+            for (const auto &entry : ps2_log::snapshot_runtime_log_entries())
+            {
+                if (entry.text.find("0x26a00") != std::string::npos && entry.text.find("loop") != std::string::npos)
+                    warned = true;
+            }
+            t.IsTrue(warned, "loop guard should log a warning for the CALL/RET cycle");
+        });
+
         tc.Run("GIF DMA chain IRQ stops only when TIE is set", [](TestCase &t)
         {
             PS2Memory mem;

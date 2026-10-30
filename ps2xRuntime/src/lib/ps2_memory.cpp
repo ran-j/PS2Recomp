@@ -7,7 +7,9 @@
 #include <limits>
 #include <stdexcept>
 #include <algorithm>
+#include <set>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace
@@ -1344,7 +1346,10 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     uint32_t asr1 = m_ioRegisters[channelBase + 0x50];
                     uint32_t asp = (chcr >> 4) & 0x3u;
                     const bool tieEnabled = (chcr & (1u << 7)) != 0u;
-                    const int kMaxChainTags = 4096;
+                    // The DMAC has no tag limit, so these caps sit far above real frames
+                    // (Sly 2 sends ~5k tags / ~5 MB); they only stop a runaway chain.
+                    const int kMaxChainTags = 1 << 20;
+                    const size_t kMaxChainBytes = 64u * 1024u * 1024u;
                     std::vector<uint8_t> chainBuf;
 
                     auto appendData = [&](uint32_t srcAddr, uint32_t qwCount)
@@ -1404,8 +1409,15 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
                     int tagsProcessed = 0;
                     uint32_t lastTagUpper = (chcr >> 16) & 0xFFFFu;
+                    // Guest memory is fixed during the walk, so it is endless exactly when it
+                    // reaches a tag again with the same pending RET addresses. Only NEXT/CALL/RET
+                    // move TADR backwards, so only their states are recorded. Key: tag address,
+                    // ASP, and ASR0/ASR1 where live (ASP >= 1 / ASP == 2).
+                    std::set<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>> seenJumpStates;
+                    const char *guardStop = nullptr;
+                    uint32_t guardTagAddr = 0u;
 
-                    while (tagsProcessed < kMaxChainTags)
+                    while (true)
                     {
                         const uint32_t currentTagAddr = tagAddr;
                         const bool tagInSPR = isScratchpad(tagAddr);
@@ -1439,6 +1451,18 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         uint32_t id = static_cast<uint32_t>((tag >> 28) & 0x7);
                         const bool irq = ((tag >> 31) & 0x1ull) != 0ull;
                         uint32_t addr = static_cast<uint32_t>((tag >> 32) & 0x7FFFFFFF);
+                        if (id == 2u || id == 5u || id == 6u)
+                        {
+                            const auto state = std::make_tuple(currentTagAddr, asp,
+                                                               asp >= 1u ? asr0 : 0u,
+                                                               asp >= 2u ? asr1 : 0u);
+                            if (!seenJumpStates.insert(state).second)
+                            {
+                                guardStop = "tag revisited with the same CALL/RET state (endless loop)";
+                                guardTagAddr = currentTagAddr;
+                                break;
+                            }
+                        }
                         lastTagUpper = static_cast<uint32_t>((tag >> 16) & 0xFFFFu);
                         ++tagsProcessed;
 
@@ -1519,6 +1543,35 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             endChain = true;
                         if (endChain)
                             break;
+                        if (tagsProcessed >= kMaxChainTags || chainBuf.size() >= kMaxChainBytes)
+                        {
+                            guardStop = "safety cap reached";
+                            guardTagAddr = tagAddr;
+                            break;
+                        }
+                    }
+
+                    if (guardStop)
+                    {
+                        static std::atomic<uint32_t> s_chainGuardWarnings[3] = {};
+                        const uint32_t channelIndex =
+                            (channelBase == 0x1000A000u) ? 0u : (channelBase == 0x10009000u ? 1u : 2u);
+                        const char *channelName =
+                            (channelIndex == 0u) ? "GIF" : (channelIndex == 1u ? "VIF1" : "VIF0");
+                        constexpr uint32_t kMaxChainGuardWarnings = 8u;
+                        const uint32_t warningCount =
+                            s_chainGuardWarnings[channelIndex].fetch_add(1u, std::memory_order_relaxed);
+                        if (warningCount < kMaxChainGuardWarnings)
+                        {
+                            RUNTIME_ERROR("[DMA] " << channelName << " chain stopped at tag 0x" << std::hex
+                                                   << guardTagAddr << std::dec << ": " << guardStop
+                                                   << " after " << tagsProcessed << " tags, "
+                                                   << chainBuf.size() << " bytes"
+                                                   << (warningCount + 1u == kMaxChainGuardWarnings
+                                                           ? " (further warnings for this channel suppressed)"
+                                                           : "")
+                                                   << '\n');
+                        }
                     }
 
                     m_ioRegisters[channelBase + 0x30] = tagAddr;
