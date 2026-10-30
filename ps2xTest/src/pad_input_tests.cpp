@@ -3,6 +3,7 @@
 #include "ps2_syscalls.h"
 #include "Stubs/Pad.h"
 
+#include <cstring>
 #include <vector>
 #include <cstdint>
 #include <string>
@@ -91,6 +92,65 @@ void register_pad_input_tests()
 
             ps2_stubs::clearPadOverrideState();
             closePadPort(ctx, rdram);
+        });
+
+        tc.Run("scePad2 sockets read host input in libpad2's headerless layout", [](TestCase &t)
+               {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);
+            R5900Context ctx;
+            constexpr uint32_t kParamAddr = kPadDataAddr + 0x100u;
+            constexpr uint32_t kProfileAddr = kPadDataAddr + 0x140u;
+
+            ps2_stubs::scePad2Init(rdram.data(), &ctx, nullptr);
+
+            const int32_t param[4] = {2, 0, 0, 0}; // option, port, slot, number
+            std::memcpy(rdram.data() + kParamAddr, param, sizeof(param));
+            setRegU32(ctx, 4, kParamAddr);
+            setRegU32(ctx, 5, kPadDataAddr + 0x200u);
+            ps2_stubs::scePad2CreateSocket(rdram.data(), &ctx, nullptr);
+            const int32_t socket = static_cast<int32_t>(getRegU32(&ctx, 2));
+            t.Equals(socket, 0, "first socket should be number 0");
+
+            setRegU32(ctx, 4, static_cast<uint32_t>(socket));
+            ps2_stubs::scePad2GetState(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<int32_t>(getRegU32(&ctx, 2)), 1, "an open socket should report the stable state");
+
+            setRegU32(ctx, 4, static_cast<uint32_t>(socket));
+            setRegU32(ctx, 5, kProfileAddr);
+            ps2_stubs::scePad2GetButtonProfile(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<int32_t>(getRegU32(&ctx, 2)), 4, "a DualShock 2 profile is four bytes");
+            t.Equals(rdram[kProfileAddr + 3], static_cast<uint8_t>(0xFF), "every DualShock 2 input should be present");
+
+            const uint16_t buttons = static_cast<uint16_t>(0xFFFFu & ~kPadBtnCross & ~kPadBtnUp);
+            ps2_stubs::setPadOverrideState(buttons, 0x01, 0x02, 0x03, 0x04);
+            setRegU32(ctx, 4, static_cast<uint32_t>(socket));
+            setRegU32(ctx, 5, kPadDataAddr);
+            ps2_stubs::scePad2Read(rdram.data(), &ctx, nullptr);
+            ps2_stubs::clearPadOverrideState();
+
+            const uint8_t *data = rdram.data() + kPadDataAddr;
+            t.Equals(static_cast<int32_t>(getRegU32(&ctx, 2)), 18, "scePad2Read should report 18 bytes");
+            t.Equals(static_cast<uint16_t>(data[0] | (data[1] << 8)), buttons, "buttons should start at byte 0, active-low");
+            t.Equals(data[2], static_cast<uint8_t>(0x03), "rx follows the buttons");
+            t.Equals(data[5], static_cast<uint8_t>(0x02), "ly is the last stick byte");
+            t.Equals(data[12], static_cast<uint8_t>(0xFF), "cross pressure should be full while held");
+            t.Equals(data[13], static_cast<uint8_t>(0x00), "square pressure should be zero when released");
+
+            setRegU32(ctx, 4, static_cast<uint32_t>(socket));
+            setRegU32(ctx, 5, kProfileAddr);
+            ps2_stubs::sceVibGetProfile(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<int32_t>(getRegU32(&ctx, 2)), 1, "a DualShock 2 vibration profile is one byte; games size actuator data from it");
+            t.Equals(rdram[kProfileAddr], static_cast<uint8_t>(0x03), "both DualShock 2 motors should be reported");
+
+            setRegU32(ctx, 4, static_cast<uint32_t>(socket));
+            ps2_stubs::sceVibSetActParam(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<int32_t>(getRegU32(&ctx, 2)), 1, "actuator updates on an open socket should succeed");
+
+            setRegU32(ctx, 4, static_cast<uint32_t>(socket));
+            ps2_stubs::scePad2DeleteSocket(rdram.data(), &ctx, nullptr);
+            setRegU32(ctx, 4, static_cast<uint32_t>(socket));
+            ps2_stubs::scePad2GetState(rdram.data(), &ctx, nullptr);
+            t.Equals(static_cast<int32_t>(getRegU32(&ctx, 2)), 0, "a deleted socket should report no link");
         });
 
         tc.Run("scePadRead button bits are active-low", [](TestCase &t)
