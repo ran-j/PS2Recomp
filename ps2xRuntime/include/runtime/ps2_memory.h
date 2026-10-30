@@ -12,6 +12,7 @@
 #include <mutex>
 
 #include "gs/ps2_gif_arbiter.h"
+#include "ps2_ipu.h"
 #if defined(_MSC_VER)
 #include <intrin.h>
 #elif defined(USE_SSE2NEON)
@@ -285,6 +286,7 @@ public:
     // Memory access methods
     uint8_t *getRDRAM() { return m_rdram; }
     uint8_t *getScratchpad() { return m_scratchpad; }
+    Ps2Ipu &ipu() { return m_ipu; }
     uint8_t *getIOPRAM() { return iop_ram; }
     uint64_t dmaStartCount() const { return m_dmaStartCount.load(std::memory_order_relaxed); }
     uint64_t gifCopyCount() const { return m_gifCopyCount.load(std::memory_order_relaxed); }
@@ -460,7 +462,11 @@ public:
 
     std::array<EeTimer, 4> m_eeTimers{};
     bool tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr);
+    bool tryStartIpuDma(uint32_t channelBase, uint32_t chcr);
+    void serviceIpuDma();
+    bool appendDmaSource(uint32_t address, uint32_t bytes, std::vector<uint8_t> &out) const;
     void completeDmacChannel(uint32_t channelBase, uint32_t cause);
+    Ps2Ipu m_ipu;
     void queueCompletedDmacCause(uint32_t cause);
 };
 

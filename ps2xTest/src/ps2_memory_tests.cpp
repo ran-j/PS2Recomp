@@ -1180,6 +1180,111 @@ void register_ps2_memory_tests()
                      "SPR-flagged REFE data should come from scratchpad, not RDRAM");
         });
 
+        tc.Run("IPU FDEC peeks and advances the bitstream fed by toIPU DMA", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kToIpu = 0x1000B400u;
+            constexpr uint32_t kSrc = 0x00030000u;
+            uint8_t *rdram = mem.getRDRAM();
+            const uint8_t stream[16] = {0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0};
+            std::memcpy(rdram + kSrc, stream, sizeof(stream));
+
+            mem.writeIORegister(kToIpu + 0x10u, kSrc);
+            mem.writeIORegister(kToIpu + 0x20u, 1u);
+            mem.writeIORegister(kToIpu + 0x00u, 0x101u);
+            t.IsTrue((mem.readIORegister(kToIpu) & 0x100u) == 0u, "toIPU should finish once its data is queued");
+
+            mem.writeIORegister(Ps2Ipu::kRegCmd, 0x40000000u); // FDEC, FB=0
+            t.Equals(mem.readIORegister(Ps2Ipu::kRegCmd), 0x12345678u, "FDEC 0 should peek the first 32 bits");
+            mem.writeIORegister(Ps2Ipu::kRegCmd, 0x40000008u); // FDEC, FB=8
+            t.Equals(mem.readIORegister(Ps2Ipu::kRegCmd), 0x3456789Au, "FDEC 8 should advance one byte before peeking");
+            t.Equals(mem.readIORegister(Ps2Ipu::kRegCmd + 4u) & 0x80000000u, 0u, "FDEC should not stay busy");
+        });
+
+        tc.Run("IPU IDEC decodes an intra macroblock into RGB32 for fromIPU DMA", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            // One intra macroblock with zero DC differentials and immediate end-of-block, then a start code.
+            std::vector<uint8_t> stream;
+            uint32_t accumulator = 0u;
+            uint32_t bits = 0u;
+            auto put = [&](uint32_t value, uint32_t count)
+            {
+                for (uint32_t i = count; i-- > 0u;)
+                {
+                    accumulator = (accumulator << 1u) | ((value >> i) & 1u);
+                    if (++bits == 8u)
+                    {
+                        stream.push_back(static_cast<uint8_t>(accumulator));
+                        accumulator = 0u;
+                        bits = 0u;
+                    }
+                }
+            };
+            put(1u, 1u); // macroblock_type: intra
+            for (int block = 0; block < 4; ++block)
+            {
+                put(0x4u, 3u); // luma dct_dc_size 0
+                put(0x2u, 2u); // end of block (table B.14)
+            }
+            for (int block = 0; block < 2; ++block)
+            {
+                put(0x0u, 2u); // chroma dct_dc_size 0
+                put(0x2u, 2u);
+            }
+            while (bits != 0u)
+                put(0u, 1u);
+            for (uint8_t byte : {0x00, 0x00, 0x01, 0xB0})
+                put(byte, 8u);
+            while (stream.size() % 16u != 0u)
+                stream.push_back(0u);
+
+            constexpr uint32_t kToIpu = 0x1000B400u;
+            constexpr uint32_t kFromIpu = 0x1000B000u;
+            constexpr uint32_t kSrc = 0x00030000u;
+            constexpr uint32_t kDst = 0x00040000u;
+            uint8_t *rdram = mem.getRDRAM();
+            std::memcpy(rdram + kSrc, stream.data(), stream.size());
+            std::memset(rdram + kDst, 0xEE, 1024u + 16u);
+
+            mem.writeIORegister(kToIpu + 0x10u, kSrc);
+            mem.writeIORegister(kToIpu + 0x20u, static_cast<uint32_t>(stream.size() / 16u));
+            mem.writeIORegister(kToIpu + 0x00u, 0x101u);
+            // Mana Khemia arms fromIPU for the whole picture, starts IDEC, then re-arms it per chunk
+            // before the (slow, on hardware) IPU has produced anything; the re-arm must win.
+            mem.writeIORegister(kFromIpu + 0x10u, kDst + 0x2000u);
+            mem.writeIORegister(kFromIpu + 0x20u, 128u);
+            mem.writeIORegister(kFromIpu + 0x00u, 0x100u);
+            mem.writeIORegister(Ps2Ipu::kRegCmd, 0x10010000u); // IDEC, QSC=1, RGB32
+            mem.writeIORegister(kFromIpu + 0x10u, kDst);
+            mem.writeIORegister(kFromIpu + 0x20u, 64u);
+            mem.writeIORegister(kFromIpu + 0x00u, 0x100u);
+            t.IsTrue((mem.readIORegister(kFromIpu) & 0x100u) != 0u, "fromIPU should wait while the IPU is still decoding");
+            mem.advanceEeTimers(Ps2Ipu::kEeCyclesPerMacroblock);
+            const uint32_t ctrl = mem.readIORegister(Ps2Ipu::kRegCtrl);
+            t.Equals(ctrl & (1u << 14), 0u, "IDEC should not report a decode error");
+            t.IsTrue((ctrl & (1u << 15)) != 0u, "IDEC should stop at the start code");
+            t.IsTrue((mem.readIORegister(kFromIpu) & 0x100u) == 0u, "fromIPU should complete with one macroblock");
+
+            bool uniform = true;
+            for (uint32_t i = 0; i < 256u; ++i)
+            {
+                const uint8_t *pixel = rdram + kDst + i * 4u;
+                if (pixel[0] != 130u || pixel[1] != 130u || pixel[2] != 130u || pixel[3] != 0x80u)
+                    uniform = false;
+            }
+            t.IsTrue(uniform, "a flat DC-only macroblock should convert to uniform mid gray with alpha 0x80");
+            t.Equals(rdram[kDst + 1024u], static_cast<uint8_t>(0xEEu), "fromIPU must not write past its QWC");
+            t.Equals(rdram[kDst + 0x2000u], static_cast<uint8_t>(0u), "the superseded fromIPU request must not receive output");
+
+            mem.writeIORegister(Ps2Ipu::kRegCmd, 0x40000000u); // FDEC
+            t.Equals(mem.readIORegister(Ps2Ipu::kRegCmd), 0x000001B0u, "IDEC should leave the start code unconsumed");
+        });
+
         tc.Run("native GIF image upload recognizes canonical load-image chain", [](TestCase &t)
         {
             PS2Memory mem;
