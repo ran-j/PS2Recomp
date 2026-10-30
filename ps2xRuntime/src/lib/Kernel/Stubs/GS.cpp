@@ -903,7 +903,8 @@ namespace ps2_stubs
             zbufAddr = getRegU32(&temp, 2);
         }
 
-        const uint32_t fbp1 = zbufAddr;
+        // sceGszbufaddr places Z after both frame buffers, so the second buffer starts halfway there.
+        const uint32_t fbp1 = zbufAddr / 2u;
         const uint64_t dispfb0 = makeDispFb(fbp1, fbw, psm, 0u, 0u);
         const uint64_t dispfb1 = makeDispFb(0u, fbw, psm, 0u, 0u);
 

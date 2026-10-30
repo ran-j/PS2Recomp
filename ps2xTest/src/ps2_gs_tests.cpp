@@ -583,6 +583,28 @@ void register_ps2_gs_tests()
                      "sceGsSwapDBuffDc should preserve the display width from the seeded env");
         });
 
+        tc.Run("sceGsSetDefDBuffDc keeps the second frame buffer out of the Z buffer", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            constexpr uint32_t kEnvAddr = 0x4000u;
+
+            // 640x448 CT24: 140 pages per buffer, so libgraph puts buffer 1 at page 140 and Z at 280.
+            R5900Context ctx{};
+            setRegU32(ctx, 4, kEnvAddr);
+            setRegU32(ctx, 5, GS_PSM_CT24);
+            setRegU32(ctx, 6, 640u);
+            setRegU32(ctx, 7, 448u);
+            ps2_stubs::sceGsSetDefDBuffDc(rdram.data(), &ctx, &runtime);
+
+            GsDBuffDcMem db{};
+            std::memcpy(&db, rdram.data() + kEnvAddr, sizeof(db));
+            t.Equals(db.draw11.frame1.value & 0x1FFull, 140ull, "the second draw buffer should start after the first");
+            t.Equals(db.draw11.zbuf1.value & 0x1FFull, 280ull, "Z should follow both frame buffers");
+            t.Equals(db.disp[0].dispfb & 0x1FFull, 140ull, "the first display env should show the second buffer");
+        });
+
         tc.Run("sceGsSetDefDBuffDc seeds a clear packet and swap clears the draw buffer", [](TestCase &t)
         {
             PS2Runtime runtime;
