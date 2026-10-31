@@ -773,6 +773,26 @@ void register_ps2_runtime_kernel_tests()
             t.Equals(getRegS32(env.ctx, 2), KE_UNKNOWN_THID, "an unknown thread should still return an error code");
         });
 
+        tc.Run("SuspendThread and ResumeThread return the thread id on success", [](TestCase &t)
+        {
+            TestEnv env;
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.reset(env.rdram.data(), env.ctx);
+            ee.bindMainContextForSyscall(env.ctx, env.rdram.data());
+
+            const int id = ee.createThread(EeThreadCreateParams{0u, K_SCHED_HIGH, 0x24000u, 0x800u, 0u, 40, 0u});
+            ee.startThread(id, 0u, env.ctx, false);
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(id));
+            ps2_syscalls::SuspendThread(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), id, "SuspendThread should return the suspended thread's id");
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(id));
+            ps2_syscalls::ResumeThread(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), id, "ResumeThread should return the resumed thread's id");
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(id));
+            ps2_syscalls::ResumeThread(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), -415, "resuming a running thread should still report KE_NOT_SUSPEND");
+        });
+
         tc.Run("semaphore signal, delete, and release complete blocked contexts with exact results", [](TestCase &t)
         {
             const auto blockMain = [](TestEnv &env, int &semaId)
