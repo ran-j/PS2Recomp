@@ -6,6 +6,7 @@
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
 #include "runtime/gs/gs_frontend.h"
+#include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/ee_scheduler.h"
 #include "runtime/gs/ps2_gs_memory.h"
 #include "runtime/gs/ps2_gs_psmct32.h"
@@ -1123,6 +1124,7 @@ void register_ps2_gs_tests()
             gs.writeRegister(GS_REG_XYZ2, kXyz0);
             gs.writeRegister(GS_REG_UV, kUv1);
             gs.writeRegister(GS_REG_XYZ2, kXyz1);
+            gs.writeRegister(GS_REG_FINISH, 0ull); // drawing may be batched until the GS is synchronized
 
             for (uint32_t y = 0u; y < 4u; ++y)
             {
@@ -1996,6 +1998,7 @@ void register_ps2_gs_tests()
                 gs.writeRegister(GS_REG_XYZ2, (64ull << 0) | (0ull << 16));
                 gs.writeRegister(GS_REG_ST, packSt(s, tVal));
                 gs.writeRegister(GS_REG_XYZ2, (0ull << 0) | (64ull << 16));
+                gs.writeRegister(GS_REG_FINISH, 0ull); // drawing may be batched until the GS is synchronized
 
                 const uint32_t pixel = readReferencePSMCT32Pixel(vram, 0u, 1u, 1u, 1u);
                 t.Equals(pixel, sample.color,
@@ -2835,6 +2838,163 @@ void register_ps2_gs_tests()
             std::memcpy(&pixel, vram.data(), sizeof(pixel));
             t.Equals(pixel, kExpectedColor,
                      "T4 CSM1 lookup should keep the cached palette after its source VRAM is reused");
+        });
+
+        tc.Run("GS row-band parallel rasterization writes the same VRAM as drawing serially", [](TestCase &t)
+        {
+            // A mixed stream: CT32 and T8/CLUT textures, point and bilinear sampling, STQ and UV
+            // coordinates, blending, Z tests, primitives that sample their own target, uploads, TEXFLUSH.
+            auto render = [](uint32_t threads)
+            {
+                std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+                uint32_t seed = 0x1234567u;
+                auto next = [&seed]()
+                {
+                    seed = seed * 1664525u + 1013904223u;
+                    return seed >> 8u;
+                };
+                for (uint8_t &byte : vram)
+                    byte = static_cast<uint8_t>(next());
+
+                GSCpuBackend gs;
+                gs.Initialize(vram.data(), static_cast<uint32_t>(vram.size()));
+                gs.SetRasterThreads(threads);
+
+                GSTex0Reg clutTex{};
+                clutTex.psm = GS_PSM_T8;
+                clutTex.cpsm = GS_PSM_CT32;
+                clutTex.cbp = 12000u;
+                clutTex.cld = 1u;
+                gs.LoadClut(clutTex, GSTexClutReg{});
+
+                for (int i = 0; i < 600; ++i)
+                {
+                    GSPrimitiveBatch batch{};
+                    GSDrawState &state = batch.state;
+                    const bool sprite = (next() % 3u) == 0u;
+                    state.prim.type = sprite ? GS_PRIM_SPRITE : GS_PRIM_TRIANGLE;
+                    state.prim.tme = (next() % 5u) != 0u;
+                    state.prim.abe = (next() % 2u) != 0u;
+                    state.prim.iip = (next() % 2u) != 0u;
+                    state.prim.fst = sprite || (next() % 2u) != 0u;
+                    auto &ctx = state.context;
+                    ctx.frame.fbp = 0u;
+                    ctx.frame.fbw = 10u;
+                    ctx.frame.psm = GS_PSM_CT32;
+                    ctx.zbuf.zbp = 150u;
+                    ctx.zbuf.psm = GS_PSM_Z24;
+                    ctx.zbuf.zmask = (next() % 4u) == 0u;
+                    ctx.scissor = {0u, 639u, 0u, 447u};
+                    ctx.test = (static_cast<uint64_t>(1u + next() % 3u) << 17u) | (1ull << 16u);
+                    ctx.alpha = 0x80ull << 32u | (next() % 2u ? 0x44u : 0x48u);
+                    const bool clut = (next() % 2u) != 0u;
+                    const bool selfSample = (next() % 25u) == 0u;
+                    ctx.tex0.psm = clut ? GS_PSM_T8 : GS_PSM_CT32;
+                    ctx.tex0.tbp0 = selfSample ? 0u : (clut ? 9000u : 10000u) + (next() % 4u) * 32u;
+                    ctx.tex0.tbw = clut ? 4u : 2u;
+                    ctx.tex0.tcc = 1u;
+                    ctx.tex0.tfx = static_cast<uint8_t>(next() % 2u);
+                    ctx.tex0.cpsm = GS_PSM_CT32;
+                    ctx.clamp = next() % 2u;
+                    state.textureWidth = clut ? 256u : 128u;
+                    state.textureHeight = 128u;
+                    state.linearFilter = (next() % 2u) != 0u;
+                    batch.vertexCount = sprite ? 2u : 3u;
+                    for (int v = 0; v < 3; ++v)
+                    {
+                        GSVertex &vertex = batch.vertices[static_cast<size_t>(v)];
+                        vertex.x = static_cast<float>(next() % 700u) - 30.0f;
+                        vertex.y = static_cast<float>(next() % 500u) - 30.0f;
+                        vertex.z = static_cast<double>(next() % 0xFFFFFFu);
+                        vertex.r = static_cast<uint8_t>(next());
+                        vertex.g = static_cast<uint8_t>(next());
+                        vertex.b = static_cast<uint8_t>(next());
+                        vertex.a = static_cast<uint8_t>(next());
+                        vertex.u = static_cast<uint16_t>(next() % (256u * 16u));
+                        vertex.v = static_cast<uint16_t>(next() % (128u * 16u));
+                        vertex.s = static_cast<float>(next() % 1000u) / 500.0f;
+                        vertex.t = static_cast<float>(next() % 1000u) / 500.0f;
+                        vertex.q = 0.5f + static_cast<float>(next() % 100u) / 100.0f;
+                    }
+                    gs.Submit(batch);
+
+                    if (i % 97 == 50)
+                    {
+                        // Rewrite part of a texture without TEXFLUSH, then flush on alternate rounds.
+                        GSTransferCommand upload{};
+                        upload.bitbltbuf.dbp = 10000u;
+                        upload.bitbltbuf.dbw = 2u;
+                        upload.bitbltbuf.dpsm = GS_PSM_CT32;
+                        upload.trxreg.rrw = 32u;
+                        upload.trxreg.rrh = 8u;
+                        upload.direction = 0u;
+                        gs.BeginTransfer(upload);
+                        std::vector<uint8_t> pixels(32u * 8u * 4u);
+                        for (uint8_t &byte : pixels)
+                            byte = static_cast<uint8_t>(next());
+                        gs.UploadImage(pixels.data(), static_cast<uint32_t>(pixels.size()));
+                        if ((i / 97) % 2 == 0)
+                            gs.TextureFlush();
+                    }
+                }
+                std::vector<uint8_t> out;
+                gs.SnapshotVram(out);
+                return out;
+            };
+
+            const std::vector<uint8_t> serial = render(1u);
+            const std::vector<uint8_t> parallel = render(4u);
+            t.IsTrue(serial == parallel, "four row bands must produce byte-identical VRAM to one thread");
+        });
+
+        tc.Run("GS texture page buffer also hides draws into the cached page until TEXFLUSH", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            constexpr uint32_t kTextureTbp = 32u; // Physical GS page 1, which the second pass renders into.
+            constexpr uint64_t kFrameOutput = (2ull << 0) | (1ull << 16) | (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kFrameTexturePage = (1ull << 0) | (1ull << 16) | (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kTex0 =
+                (static_cast<uint64_t>(kTextureTbp) << 0) |
+                (1ull << 14) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 20) |
+                (1ull << 34) |
+                (1ull << 35);
+            constexpr uint32_t kInitialColor = 0x80112233u;
+
+            gs.WriteVram(GS_PSM_CT32, kTextureTbp, 1u, 0u, 0u, kInitialColor);
+            gs.writeRegister(GS_REG_ZBUF_1, 1ull << 32);
+            gs.writeRegister(GS_REG_SCISSOR_1, (3ull << 16) | (3ull << 48));
+            gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
+            gs.writeRegister(GS_REG_ALPHA_1, 0ull);
+            gs.writeRegister(GS_REG_TEX0_1, kTex0);
+
+            const auto drawPixel = [&gs](uint64_t frame, bool textured, uint32_t x)
+            {
+                gs.writeRegister(GS_REG_FRAME_1, frame);
+                gs.writeRegister(GS_REG_PRIM, static_cast<uint64_t>(GS_PRIM_SPRITE) | (textured ? (1ull << 4) : 0ull) | (1ull << 8));
+                gs.writeRegister(GS_REG_RGBAQ, 0x80FFEEDDull);
+                gs.writeRegister(GS_REG_UV, 0ull);
+                gs.writeRegister(GS_REG_XYZ2, static_cast<uint64_t>(x * 16u));
+                gs.writeRegister(GS_REG_UV, 0ull);
+                gs.writeRegister(GS_REG_XYZ2, static_cast<uint64_t>((x + 1u) * 16u) | (16ull << 16u));
+            };
+
+            drawPixel(kFrameOutput, true, 0u);       // loads texture page 1 into the page buffer
+            drawPixel(kFrameTexturePage, false, 0u); // overwrites the texel by rendering into page 1
+            drawPixel(kFrameOutput, true, 1u);       // still served from the buffered page
+            gs.writeRegister(GS_REG_TEXFLUSH, 0ull);
+            drawPixel(kFrameOutput, true, 2u);
+
+            t.Equals(gs.ReadVram(GS_PSM_CT32, 64u, 1u, 0u, 0u), kInitialColor, "the first sample should read the original texel");
+            t.Equals(gs.ReadVram(GS_PSM_CT32, 32u, 1u, 0u, 0u), 0x80FFEEDDu, "the untextured pass should have drawn into page 1");
+            t.Equals(gs.ReadVram(GS_PSM_CT32, 64u, 1u, 1u, 0u), kInitialColor,
+                     "a draw into the cached page must stay hidden from texture reads until TEXFLUSH");
+            t.Equals(gs.ReadVram(GS_PSM_CT32, 64u, 1u, 2u, 0u), 0x80FFEEDDu,
+                     "TEXFLUSH must expose the page the GS rendered into");
         });
 
         tc.Run("GS texture page buffer hides local-memory writes until TEXFLUSH", [](TestCase &t)
