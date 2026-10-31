@@ -81,6 +81,8 @@ namespace ps2x::iop::detail
         // Whether a thread that would run before one of `priority` is ready (lower value = more urgent;
         // without time-slicing an equal-priority thread that already runs keeps the CPU).
         [[nodiscard]] bool hasReadyAtOrAbove(int priority) const noexcept;
+        // Whether the emulator stopped a thread mid-run while it held interrupts off (CpuSuspendIntr).
+        [[nodiscard]] bool hasCriticalSectionInProgress() const noexcept;
         // Whether a WaitEventFlag / WaitSema issued now could return without blocking (unknown IDs count as
         // ready so the regular import reports the error).
         [[nodiscard]] bool eventFlagReady(int id, uint32_t bits, uint32_t mode) const;

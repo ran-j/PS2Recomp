@@ -684,13 +684,14 @@ namespace ps2x::iop::detail
         RpcResult handleRpc(const RpcRequest &request)
         {
             const int priority = rpc.serverPriority(request.sid);
-            if (priority >= 0)
-            {
-                constexpr uint64_t kSliceCycles = 2048u;
-                const uint64_t giveUp = totalCycles + kIopClockHz; // a busy-looping thread must not hang the EE
-                while (kernel.hasReadyAtOrAbove(priority) && totalCycles < giveUp)
-                    runCycles(kSliceCycles);
-            }
+            // The request arrives as a SIF interrupt, so a thread stopped inside CpuSuspendIntr also keeps the
+            // server out until it re-enables interrupts, whatever its priority.
+            const auto mustWait = [&]()
+            { return kernel.hasCriticalSectionInProgress() || (priority >= 0 && kernel.hasReadyAtOrAbove(priority)); };
+            constexpr uint64_t kSliceCycles = 2048u;
+            const uint64_t giveUp = totalCycles + kIopClockHz; // a busy-looping thread must not hang the EE
+            while (mustWait() && totalCycles < giveUp)
+                runCycles(kSliceCycles);
             return rpc.handleRpc(request, *this);
         }
 

@@ -489,6 +489,16 @@ namespace ps2x::iop::detail
         return false;
     }
 
+    bool IopKernel::hasCriticalSectionInProgress() const noexcept
+    {
+        for (const auto &[id, thread] : m_threads)
+        {
+            if (thread.state == IopThreadState::Ready && thread.sliceEndedWithInterruptsOff)
+                return true;
+        }
+        return false;
+    }
+
     bool IopKernel::semaphoreReady(int id) const
     {
         const auto semaphore = m_semaphores.find(id);
