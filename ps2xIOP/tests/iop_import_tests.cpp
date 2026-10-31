@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <chrono>
 #include <cstring>
+#include <ctime>
 #include <iostream>
 #include <fstream>
 #include <filesystem>
@@ -163,6 +164,45 @@ namespace
         cpu.gpr[7] = resultAddress;
         return expect(kernel.dispatchEventImport(11u, cpu), "PollEventFlag was not handled") &&
                expect(static_cast<int32_t>(cpu.gpr[2]) == expected, "PollEventFlag returned an unexpected result");
+    }
+
+    // Memory card drivers stamp saved files with sceCdReadClock; it must report the host time in BCD.
+    bool testCdvdReadClock()
+    {
+        NullHost host;
+        IopMemory memory;
+        IopKernel kernel(memory);
+        kernel.reset();
+        IopCdvd cdvd(host, memory, kernel);
+        cdvd.reset();
+
+        constexpr uint32_t clockAddress = 0x2000u;
+        const uint8_t garbage[8] = {0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5};
+        (void)memory.writeRam(clockAddress, garbage, sizeof(garbage));
+        IopCpuState cpu{};
+        cpu.gpr[4] = clockAddress;
+        const std::time_t before = std::time(nullptr);
+        if (!expect(cdvd.dispatchImport(24u, cpu), "cdvdman:24 (sceCdReadClock) was not handled") ||
+            !expect(cpu.gpr[2] == 1u, "sceCdReadClock should succeed"))
+            return false;
+
+        uint8_t clock[8] = {};
+        (void)memory.readRam(clockAddress, clock, sizeof(clock));
+        const auto fromBcd = [](uint8_t value) { return (value >> 4) * 10 + (value & 0xF); };
+        const auto isBcd = [](uint8_t value) { return (value >> 4) <= 9 && (value & 0xF) <= 9; };
+        for (int i = 1; i < 8; ++i)
+        {
+            if (!expect(isBcd(clock[i]), "sceCdReadClock fields must be BCD"))
+                return false;
+        }
+        std::tm local{};
+        localtime_r(&before, &local);
+        return expect(clock[0] == 0u, "the clock status byte should report success") &&
+               expect(fromBcd(clock[1]) < 60 && fromBcd(clock[2]) < 60 && fromBcd(clock[3]) < 24,
+                      "time of day should be in range") &&
+               expect(fromBcd(clock[6]) >= 1 && fromBcd(clock[6]) <= 12 && fromBcd(clock[5]) >= 1 && fromBcd(clock[5]) <= 31,
+                      "date should be in range") &&
+               expect(fromBcd(clock[7]) == (local.tm_year + 1900) % 100, "the year should be the host's");
     }
 
     bool testCdvdSpecialControl()
@@ -730,7 +770,7 @@ namespace
 
 int main()
 {
-    if (!testLoadcoreRebootLibraryMode() || !testCdvdSpecialControl() || !testCdvdSearchFile() ||
+    if (!testLoadcoreRebootLibraryMode() || !testCdvdSpecialControl() || !testCdvdReadClock() || !testCdvdSearchFile() ||
         !testTimrmanPeriodicCallback() || !testSio2MemoryCard() || !testSliceEndDoesNotHandTheCpuToAnEqualPriorityThread() ||
         !testSliceEndInsideCpuSuspendIntrResumesSameThread() || !testSpu2AutoDmaCompletesAtPlaybackRate() ||
         !testDmacmanDrivesSio2Dma() || !testSio2DualShock2() || !testSifGetOtherData() || !testUnalignedLoadPair() ||
