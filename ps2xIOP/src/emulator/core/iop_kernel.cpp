@@ -473,6 +473,18 @@ namespace ps2x::iop::detail
         }
     }
 
+    bool IopKernel::eventFlagReady(int id, uint32_t bits, uint32_t mode) const
+    {
+        const auto event = m_eventFlags.find(id);
+        return event == m_eventFlags.end() || bits == 0u || eventSatisfied(event->second, bits, mode);
+    }
+
+    bool IopKernel::semaphoreReady(int id) const
+    {
+        const auto semaphore = m_semaphores.find(id);
+        return semaphore == m_semaphores.end() || semaphore->second.current > 0;
+    }
+
     bool IopKernel::eventSatisfied(const EventFlag &event, uint32_t bits, uint32_t mode)
     {
         if (bits == 0u)

@@ -18,6 +18,7 @@
 #include "iop_emulator_const.h"
 
 #include <algorithm>
+#include <functional>
 #include <cctype>
 #include <map>
 #include <optional>
@@ -281,6 +282,9 @@ namespace ps2x::iop::detail
 
             if (iequals(call.library, "loadcore") && loadcore.dispatchImport(call.ordinal, cpu))
                 return ImportDisposition::Handled;
+
+            if (!kernel.inThread() && callDepth > 0u)
+                waitOutsideThread(call.library, call.ordinal, cpu);
 
             if (iequals(call.library, "thbase") || iequals(call.library, "threadman"))
             {
@@ -609,6 +613,38 @@ namespace ps2x::iop::detail
             {
                 // Runtime scheduling must never throw through EeScheduler::accountCycles().
             }
+        }
+
+        // RPC handlers run synchronously, outside any IOP thread, so a blocking wait cannot park them. The
+        // real server thread would sleep while the rest of the IOP keeps running, so do exactly that here:
+        // run other threads, timers and interrupts until the wait can be satisfied.
+        void waitOutsideThread(std::string_view library, uint16_t ordinal, const CpuState &cpu)
+        {
+            constexpr uint64_t kSliceCycles = 2048u;
+            constexpr uint64_t kGiveUpCycles = kIopClockHz; // a second of IOP time; then fall back to not blocking
+            std::function<bool()> ready;
+            uint64_t wakeCycle = 0u;
+            if (iequals(library, "thevent") && ordinal == 10u) // WaitEventFlag
+                ready = [&, id = static_cast<int>(cpu.gpr[4]), bits = cpu.gpr[5], mode = cpu.gpr[6]]()
+                { return kernel.eventFlagReady(id, bits, mode); };
+            else if (iequals(library, "thsemap") && ordinal == 8u) // WaitSema
+                ready = [&, id = static_cast<int>(cpu.gpr[4])]()
+                { return kernel.semaphoreReady(id); };
+            else if ((iequals(library, "thbase") || iequals(library, "threadman")) && ordinal == 33u) // DelayThread
+            {
+                wakeCycle = totalCycles + (static_cast<uint64_t>(cpu.gpr[4]) * kIopClockHz + 999'999ull) / 1'000'000ull;
+                ready = [&]()
+                { return totalCycles >= wakeCycle; };
+            }
+            else
+                return;
+
+            // The waiting handler's instruction budget must not be spent by the code that runs meanwhile.
+            const uint64_t instructionsBefore = totalInstructions;
+            const uint64_t giveUp = totalCycles + kGiveUpCycles;
+            while (!ready() && totalCycles < giveUp)
+                runCycles(wakeCycle != 0u ? std::min(kSliceCycles, std::max<uint64_t>(wakeCycle - totalCycles, 1u)) : kSliceCycles);
+            totalInstructions = instructionsBefore;
         }
 
         // Disc modules are loaded from anonymous buffers; their export table names what they are.

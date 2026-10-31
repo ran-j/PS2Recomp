@@ -184,7 +184,8 @@ namespace
 
     void writeRpcServerIrx(TestHost &host,
                            uint32_t address,
-                           uint32_t sid = 0xF00DCAFEu)
+                           uint32_t sid = 0xF00DCAFEu,
+                           bool importDelayThread = false)
     {
         constexpr uint32_t codeOffset = 0x100u;
         constexpr uint32_t loadAddress = 0x00010000u;
@@ -241,13 +242,25 @@ namespace
             0x00000000u,
             0x00000000u,
         };
+        // Optional second table at +0x90: thbase DelayThread, whose stub lands at 0x100A4.
+        const uint32_t threadImportTable[] = {
+            0x41E00000u,
+            0x00000000u,
+            0x00000101u,
+            0x61626874u, // "thba"
+            0x00006573u, // "se"
+            0x03E00008u, // jr ra
+            0x24000021u, // addiu zero, zero, 33 (DelayThread)
+            0x00000000u,
+            0x00000000u,
+        };
 
         ProgramHeader program{};
         program.type = 1u;
         program.offset = codeOffset;
         program.vaddr = loadAddress;
         program.paddr = loadAddress;
-        program.filesz = 0xA0u;
+        program.filesz = importDelayThread ? 0xC0u : 0xA0u;
         program.memsz = 0x500u;
         program.flags = 7u;
         program.align = 4u;
@@ -258,6 +271,9 @@ namespace
         std::memcpy(host.guest.data() + address + codeOffset, code, sizeof(code));
         std::memcpy(host.guest.data() + address + codeOffset + importTableOffset,
                     importTable, sizeof(importTable));
+        if (importDelayThread)
+            std::memcpy(host.guest.data() + address + codeOffset + 0x90u,
+                        threadImportTable, sizeof(threadImportTable));
     }
 
     void writeRelocatableRpcServerIrx(TestHost &host, uint32_t address)
@@ -991,6 +1007,31 @@ int main()
                 "Physical sound RPC did not return its own payload")) return 1;
     if (!expect(iop.debugSnapshot().emulatorInstructions > soundInstructionsBefore,
                 "Sound RPC did not execute the physical IOP handler")) return 1;
+
+    // RPC handlers run outside any IOP thread; a DelayThread there must still let IOP time pass.
+    iop.reset();
+    writeRpcServerIrx(host, 0x100u, lotrSoundSid, true);
+    if (!expect(iop.loadModuleBuffer(0x100u).startResult == 0, "Delaying RPC server did not start")) return 1;
+    const uint32_t delayingHandler[] = {
+        0x27BDFFE0u, // addiu sp, sp, -0x20
+        0xAFBF001Cu, // sw    ra, 0x1c(sp)
+        0x340403E8u, // ori   a0, zero, 1000 (us)
+        0x0C004029u, // jal   0x100A4 (DelayThread stub)
+        0x00000000u, // nop
+        0x8FBF001Cu, // lw    ra, 0x1c(sp)
+        0x3C020001u, // lui   v0, 1
+        0x34420400u, // ori   v0, v0, 0x400
+        0x03E00008u, // jr    ra
+        0x27BD0020u, // addiu sp, sp, 0x20
+    };
+    if (!expect(iop.writeMemory(0x00010300u, delayingHandler, sizeof(delayingHandler)),
+                "Could not install the delaying RPC handler")) return 1;
+    RpcRequest delayRequest{};
+    delayRequest.sid = lotrSoundSid;
+    const uint64_t cyclesBeforeDelay = iop.debugSnapshot().emulatorCycles;
+    if (!expect(iop.handleRpc(delayRequest).handled, "Delaying RPC was not handled")) return 1;
+    if (!expect(iop.debugSnapshot().emulatorCycles - cyclesBeforeDelay >= 36864u,
+                "DelayThread(1000) in an RPC handler returned before 1 ms of IOP time passed")) return 1;
 
     constexpr uint32_t relocatableRpcSid = 0xA11CE001u;
     writeRelocatableRpcServerIrx(host, 0x100u);

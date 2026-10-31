@@ -72,6 +72,11 @@ namespace ps2x::iop::detail
         void terminateThreadsInRange(uint32_t base, uint32_t size);
 
         [[nodiscard]] size_t threadCount() const noexcept { return m_threads.size(); }
+        [[nodiscard]] bool inThread() const noexcept { return m_currentThread != nullptr; }
+        // Whether a WaitEventFlag / WaitSema issued now could return without blocking (unknown IDs count as
+        // ready so the regular import reports the error).
+        [[nodiscard]] bool eventFlagReady(int id, uint32_t bits, uint32_t mode) const;
+        [[nodiscard]] bool semaphoreReady(int id) const;
 
     private:
         struct Semaphore
