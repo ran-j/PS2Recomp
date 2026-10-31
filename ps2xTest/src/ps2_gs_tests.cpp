@@ -2947,6 +2947,139 @@ void register_ps2_gs_tests()
             t.IsTrue(serial == parallel, "four row bands must produce byte-identical VRAM to one thread");
         });
 
+        tc.Run("GS primitives sampling the top byte of their own RGB24 target draw the same in parallel", [](TestCase &t)
+        {
+            // T8H/T4HL/T4HH textures stored in the unused byte of the RGB24 frame they draw into, each followed
+            // by an RGB24 read of the same texels: that read hits the page the texture buffer ended on, so it
+            // shows whether parallel drawing left the buffer exactly as a serial draw would.
+            auto render = [](uint32_t threads)
+            {
+                std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+                uint32_t seed = 0x2468ACEu;
+                auto next = [&seed]()
+                {
+                    seed = seed * 1664525u + 1013904223u;
+                    return seed >> 8u;
+                };
+                for (uint8_t &byte : vram)
+                    byte = static_cast<uint8_t>(next());
+
+                GSCpuBackend gs;
+                gs.Initialize(vram.data(), static_cast<uint32_t>(vram.size()));
+                gs.SetRasterThreads(threads);
+                GSTex0Reg clutTex{};
+                clutTex.psm = GS_PSM_T8H;
+                clutTex.cpsm = GS_PSM_CT32;
+                clutTex.cbp = 13000u;
+                clutTex.cld = 1u;
+                gs.LoadClut(clutTex, GSTexClutReg{});
+
+                auto baseState = [&](GSPrimitiveBatch &batch)
+                {
+                    GSDrawState &state = batch.state;
+                    auto &ctx = state.context;
+                    ctx.frame.fbp = 0u;
+                    ctx.frame.fbw = 10u;
+                    ctx.frame.psm = GS_PSM_CT24;
+                    ctx.zbuf.zbp = 160u;
+                    ctx.zbuf.psm = GS_PSM_Z24;
+                    ctx.zbuf.zmask = (next() % 3u) == 0u;
+                    ctx.scissor = {0u, 639u, 0u, 447u};
+                    ctx.test = (static_cast<uint64_t>(1u + next() % 3u) << 17u) | (1ull << 16u);
+                    ctx.alpha = 0x80ull << 32u | 0x44u;
+                    ctx.tex0.tbw = 10u;
+                    ctx.tex0.tcc = 1u;
+                    ctx.tex0.cpsm = GS_PSM_CT32;
+                    state.textureWidth = 1024u;
+                    state.textureHeight = 512u;
+                    state.prim.tme = true;
+                };
+
+                for (int i = 0; i < 160; ++i)
+                {
+                    const uint32_t x0 = next() % 500u;
+                    const uint32_t y0 = next() % 380u;
+                    const uint32_t w = 64u + next() % 120u;
+                    const uint32_t h = 64u + next() % 60u;
+                    // Mostly draw over the very texels being sampled, so the buffered page's timing shows.
+                    const bool overlay = (next() % 3u) != 0u;
+                    const uint32_t u0 = overlay ? x0 : next() % 500u;
+                    const uint32_t v0 = overlay ? y0 : next() % 380u;
+                    const uint32_t blockOffset = (next() % 3u) * 32u * 10u;
+
+                    GSPrimitiveBatch alias{};
+                    baseState(alias);
+                    const bool sprite = (next() % 2u) != 0u;
+                    alias.state.prim.type = sprite ? GS_PRIM_SPRITE : GS_PRIM_TRIANGLE;
+                    alias.state.prim.fst = true;
+                    alias.state.prim.abe = (next() % 2u) != 0u;
+                    alias.state.prim.iip = (next() % 2u) != 0u;
+                    alias.state.linearFilter = (next() % 3u) == 0u;
+                    const uint32_t topFormats[3] = {GS_PSM_T8H, GS_PSM_T4HL, GS_PSM_T4HH};
+                    alias.state.context.tex0.psm = static_cast<uint8_t>(topFormats[next() % 3u]);
+                    alias.state.context.tex0.tbp0 = blockOffset;
+                    alias.state.context.tex0.tfx = static_cast<uint8_t>(next() % 2u);
+                    alias.vertexCount = sprite ? 2u : 3u;
+                    const uint32_t xs[3] = {x0, x0 + w, sprite ? 0u : x0};
+                    const uint32_t ys[3] = {y0, y0 + h, sprite ? 0u : y0 + h};
+                    const uint32_t us[3] = {u0, u0 + w, u0};
+                    const uint32_t vs[3] = {v0, v0 + h, v0 + h};
+                    for (int v = 0; v < 3; ++v)
+                    {
+                        GSVertex &vertex = alias.vertices[static_cast<size_t>(v)];
+                        vertex.x = static_cast<float>(sprite || v != 1 ? xs[v] : x0 + w);
+                        vertex.y = static_cast<float>(sprite || v != 1 ? ys[v] : y0);
+                        vertex.z = static_cast<double>(next() % 0xFFFFFFu);
+                        vertex.r = static_cast<uint8_t>(next());
+                        vertex.g = static_cast<uint8_t>(next());
+                        vertex.b = static_cast<uint8_t>(next());
+                        vertex.a = static_cast<uint8_t>(next());
+                        vertex.u = static_cast<uint16_t>(us[v] * 16u);
+                        vertex.v = static_cast<uint16_t>(vs[v] * 16u);
+                    }
+                    gs.Submit(alias);
+
+                    // Read back texels the alias primitive sampled last, and some at random, through RGB24.
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        GSPrimitiveBatch probe{};
+                        baseState(probe);
+                        probe.state.prim.type = GS_PRIM_SPRITE;
+                        probe.state.prim.fst = true;
+                        probe.state.context.tex0.psm = GS_PSM_CT24;
+                        probe.state.context.tex0.tbp0 = blockOffset;
+                        probe.state.context.zbuf.zmask = true;
+                        probe.state.context.test = 0x30000ull;
+                        probe.vertexCount = 2u;
+                        const uint32_t pu = k == 0 ? u0 + w - 1u : u0 + next() % w;
+                        const uint32_t pv = k == 0 ? v0 + h - 1u : v0 + next() % h;
+                        const uint32_t px = 600u + static_cast<uint32_t>(k);
+                        const uint32_t py = static_cast<uint32_t>(i) % 440u;
+                        probe.vertices[0].x = static_cast<float>(px);
+                        probe.vertices[0].y = static_cast<float>(py);
+                        probe.vertices[1].x = static_cast<float>(px + 1u);
+                        probe.vertices[1].y = static_cast<float>(py + 1u);
+                        probe.vertices[1].r = probe.vertices[1].g = probe.vertices[1].b = probe.vertices[1].a = 0x80u;
+                        probe.vertices[0].u = static_cast<uint16_t>(pu * 16u + 8u);
+                        probe.vertices[0].v = static_cast<uint16_t>(pv * 16u + 8u);
+                        probe.vertices[1].u = static_cast<uint16_t>(pu * 16u + 24u);
+                        probe.vertices[1].v = static_cast<uint16_t>(pv * 16u + 24u);
+                        probe.state.context.tex0.tfx = 1u;
+                        gs.Submit(probe);
+                    }
+                    if (i % 37 == 36)
+                        gs.TextureFlush();
+                }
+                std::vector<uint8_t> out;
+                gs.SnapshotVram(out);
+                return out;
+            };
+
+            const std::vector<uint8_t> serial = render(1u);
+            const std::vector<uint8_t> parallel = render(4u);
+            t.IsTrue(serial == parallel, "self-sampling RGB24 draws must leave VRAM and the texture buffer as serially");
+        });
+
         tc.Run("GS texture page buffer also hides draws into the cached page until TEXFLUSH", [](TestCase &t)
         {
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);

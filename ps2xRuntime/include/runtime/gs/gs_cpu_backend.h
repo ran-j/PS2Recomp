@@ -64,10 +64,17 @@ private:
         uint32_t primitive = 0;
         // The palette as it was when a queued primitive was submitted; null uses the current CLUT.
         const uint32_t *clut = nullptr;
+        // Set when the band's cache records read positions (see RasterizeTopByteAliasInParallel).
+        bool trackReads = false;
 
         bool ownsRow(int y) const
         {
             return workers == 1u || ((static_cast<uint32_t>(y) >> 3u) % workers) == index;
+        }
+        void beginSample(int y, int x) const
+        {
+            if (trackReads)
+                cache->BeginPixel(y, x);
         }
         void sampled(int y, int x) const
         {
@@ -88,6 +95,7 @@ private:
     void QueuePrimitive(const GSPrimitiveBatch &batch);
     void FlushPendingUnlocked();
     void RasterizePendingInParallel();
+    bool RasterizeTopByteAliasInParallel(const GSPrimitiveBatch &batch);
     uint32_t RasterParticipants() const;
     void DrawSprite(const GSPrimitiveBatch &batch, const RasterContext &raster);
     void DrawTriangle(const GSPrimitiveBatch &batch, const RasterContext &raster);
@@ -185,4 +193,6 @@ private:
     uint64_t m_pendingPixels = 0;
     std::unique_ptr<RasterWorkers> m_workers;
     uint32_t m_rasterParticipants = 0;
+    // Rebuilds the texture cache's copied page after a parallel draw into the page it holds.
+    std::vector<uint8_t> m_pageRebuildScratch;
 };

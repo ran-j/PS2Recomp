@@ -684,6 +684,21 @@ namespace
     // Below this, waking the workers costs more than drawing the batch on the calling thread.
     constexpr uint64_t kMinParallelPixels = 16384u;
 
+    // T8H/T4HL/T4HH texels are the top byte of 32-bit words, which RGB24/Z24 writes never change, so such a
+    // texture can share pages with a 24-bit colour or depth buffer without depending on what is drawn.
+    bool readsTopByteOnly(uint32_t psm)
+    {
+        return psm == GS_PSM_T8H || psm == GS_PSM_T4HL || psm == GS_PSM_T4HH;
+    }
+
+    bool keepsTopByte(uint32_t psm)
+    {
+        return psm == GS_PSM_CT24 || psm == GS_PSM_Z24;
+    }
+
+    // Below this, a self-sampling primitive is cheaper to draw on the calling thread.
+    constexpr uint64_t kMinParallelAliasPixels = 4096u;
+
     void markPages(std::bitset<512> &pages, const PageSpan &span)
     {
         for (uint32_t i = 0; i < span.count; ++i)
@@ -741,7 +756,11 @@ void GSCpuBackend::QueuePrimitive(const GSPrimitiveBatch &batch)
     if (selfOverlap)
     {
         FlushPendingUnlocked();
-        DrawPrimitive(batch);
+        const bool topByteAlias = !spansOverlap(frameSpan, depthSpan) && readsTopByteOnly(ctx.tex0.psm) &&
+                                  (!spansOverlap(texture, frameSpan) || keepsTopByte(ctx.frame.psm)) &&
+                                  (!spansOverlap(texture, depthSpan) || keepsTopByte(ctx.zbuf.psm));
+        if (!topByteAlias || !RasterizeTopByteAliasInParallel(batch))
+            DrawPrimitive(batch);
         return;
     }
 
@@ -797,6 +816,179 @@ void GSCpuBackend::QueuePrimitive(const GSPrimitiveBatch &batch)
     m_pendingPixels += estimate;
     if (m_pending.size() >= kMaxPendingPrimitives || m_pendingPixels >= kMaxPendingPixels)
         FlushPendingUnlocked();
+}
+
+bool GSCpuBackend::RasterizeTopByteAliasInParallel(const GSPrimitiveBatch &batch)
+{
+    // The primitive samples top bytes of words it rewrites below them, so every pixel comes out the same
+    // drawn in any order. What a sequential draw also leaves behind is the texture cache: it copies each
+    // drawn-over page when loading it, so the page it ends on can hold words as they were mid-primitive.
+    const GSDrawState &state = batch.state;
+    const auto &ctx = state.context;
+    float minX = batch.vertices[0].x, maxX = minX, minY = batch.vertices[0].y, maxY = minY;
+    for (uint32_t i = 1; i < std::min<uint32_t>(batch.vertexCount, 3u); ++i)
+    {
+        minX = std::min(minX, batch.vertices[i].x);
+        maxX = std::max(maxX, batch.vertices[i].x);
+        minY = std::min(minY, batch.vertices[i].y);
+        maxY = std::max(maxY, batch.vertices[i].y);
+    }
+    const double area = (static_cast<double>(maxX) - minX + 1.0) * (static_cast<double>(maxY) - minY + 1.0);
+    if (RasterParticipants() <= 1u || !(area >= static_cast<double>(kMinParallelAliasPixels)))
+        return false;
+    if (!m_texturePageCache.MatchesVram(m_vram))
+        return false;
+
+    const uint32_t scissorX = ctx.scissor.x1;
+    const uint32_t scissorY = ctx.scissor.y1;
+    const uint32_t fbw = std::max<u32>(ctx.frame.fbw, 1u);
+    const uint32_t frameBlock = GSInternal::framePageBaseToBlock(ctx.frame.fbp);
+    const uint32_t depthBlock = GSInternal::framePageBaseToBlock(ctx.zbuf.zbp);
+    const PageSpan frame = pageSpan(frameBlock, fbw, ctx.frame.psm, 0u, 0u, scissorX, scissorY);
+    const PageSpan depth = pageSpan(depthBlock, fbw, ctx.zbuf.psm, 0u, 0u, scissorX, scissorY);
+    const uint32_t extentU = (ctx.clamp & 0x2u) != 0u ? 1024u : std::max<uint32_t>(state.textureWidth, 1u);
+    const uint32_t extentV = ((ctx.clamp >> 2) & 0x2u) != 0u ? 1024u : std::max<uint32_t>(state.textureHeight, 1u);
+    const PageSpan texture = pageSpan(ctx.tex0.tbp0, ctx.tex0.tbw, ctx.tex0.psm, 0u, 0u, extentU - 1u, extentV - 1u);
+
+    // Sequentially, a cached page in place that is about to be drawn over is snapshotted first.
+    uint32_t livePage = 0u;
+    if (m_texturePageCache.LivePage(livePage))
+    {
+        const uint32_t page = livePage / GSMem::TexturePageCache::kPageSize;
+        if (spanHasPage(frame, page) || spanHasPage(depth, page))
+            m_texturePageCache.Snapshot(m_vram);
+    }
+
+    // Keep the pages that are both sampled and drawn, as they were before drawing.
+    std::vector<uint32_t> keptPages;
+    for (uint32_t i = 0; i < texture.count; ++i)
+    {
+        const uint32_t page = (texture.first + i) % kVramPageCount;
+        if (spanHasPage(frame, page) || spanHasPage(depth, page))
+            keptPages.push_back(page);
+    }
+    std::vector<uint8_t> before(keptPages.size() * GSMem::TexturePageCache::kPageSize);
+    for (size_t i = 0; i < keptPages.size(); ++i)
+        std::memcpy(before.data() + i * GSMem::TexturePageCache::kPageSize,
+                    m_vram + keptPages[i] * GSMem::TexturePageCache::kPageSize, GSMem::TexturePageCache::kPageSize);
+
+    if (!m_workers || m_workers->participants() != RasterParticipants())
+        m_workers = std::make_unique<RasterWorkers>(RasterParticipants());
+    const uint32_t participants = m_workers->participants();
+    std::vector<GSMem::TexturePageCache> caches(participants);
+    std::vector<RasterTrace> traces(participants);
+    for (GSMem::TexturePageCache &cache : caches)
+        cache.EnableTracking();
+    const std::function<void(uint32_t)> job = [&](uint32_t index)
+    {
+        RasterContext raster{};
+        raster.workers = participants;
+        raster.index = index;
+        raster.cache = &caches[index];
+        raster.trace = &traces[index];
+        raster.trackReads = true;
+        DrawPrimitiveRows(batch, raster);
+    };
+    m_workers->run(job);
+
+    // The page of the last texel read in raster order is where the sequential cache ends.
+    int lastBand = -1;
+    for (uint32_t i = 0; i < participants; ++i)
+    {
+        const auto &track = caches[i].Track();
+        if (!track.last.valid)
+            continue;
+        if (lastBand < 0)
+        {
+            lastBand = static_cast<int>(i);
+            continue;
+        }
+        const auto &best = caches[static_cast<size_t>(lastBand)].Track().last;
+        if (track.last.y > best.y || (track.last.y == best.y && track.last.x > best.x))
+            lastBand = static_cast<int>(i);
+    }
+    if (lastBand < 0)
+        return true;
+    const uint32_t lastPage = caches[static_cast<size_t>(lastBand)].Track().lastPage;
+    const uint32_t lastPageIndex = lastPage / GSMem::TexturePageCache::kPageSize;
+    const auto kept = std::find(keptPages.begin(), keptPages.end(), lastPageIndex);
+    if (kept == keptPages.end())
+    {
+        // Not drawn over: the sequential cache would read it in place.
+        m_texturePageCache.SetLivePage(lastPage);
+        return true;
+    }
+
+    // The sequential cache copied lastPage after its latest read of any other page. Find that read.
+    GSMem::TexturePageCache::ReadPosition switchRead{};
+    bool switchInsidePixel = false;
+    auto later = [](const GSMem::TexturePageCache::ReadPosition &a, const GSMem::TexturePageCache::ReadPosition &b)
+    {
+        if (!b.valid)
+            return a.valid;
+        if (!a.valid)
+            return false;
+        if (a.y != b.y)
+            return a.y > b.y;
+        if (a.x != b.x)
+            return a.x > b.x;
+        return a.texel > b.texel;
+    };
+    for (uint32_t i = 0; i < participants; ++i)
+    {
+        const auto &track = caches[i].Track();
+        if (!track.last.valid)
+            continue;
+        // A band ending on another page read that page last; one ending on lastPage read others before.
+        const GSMem::TexturePageCache::ReadPosition candidate = track.lastPage != lastPage ? track.last : track.other;
+        const bool inside = track.lastPage != lastPage ? false : track.switchedInsidePixel;
+        if (later(candidate, switchRead))
+        {
+            switchRead = candidate;
+            switchInsidePixel = inside;
+        }
+    }
+
+    // Words drawn by pixels before the copy are as drawn; the rest still hold what they held before.
+    const size_t keptIndex = static_cast<size_t>(kept - keptPages.begin());
+    const uint8_t *beforePage = before.data() + keptIndex * GSMem::TexturePageCache::kPageSize;
+    if (!switchRead.valid)
+    {
+        m_texturePageCache.SetCopy(beforePage, lastPage);
+        return true;
+    }
+    if (m_pageRebuildScratch.size() != m_vramSize)
+        m_pageRebuildScratch.assign(m_vramSize, 0u);
+    std::memcpy(m_pageRebuildScratch.data() + lastPage, beforePage, GSMem::TexturePageCache::kPageSize);
+    auto drawnBeforeCopy = [&](int y, int x)
+    {
+        if (y != switchRead.y)
+            return y < switchRead.y;
+        return switchInsidePixel ? x < switchRead.x : x <= switchRead.x;
+    };
+    auto rebuildFrom = [&](const PageSpan &span, uint32_t baseBlock, uint32_t psm)
+    {
+        if (!spanHasPage(span, lastPageIndex))
+            return;
+        uint32_t widthShift = 6u;
+        uint32_t heightShift = 5u;
+        psmPageShift(psm, widthShift, heightShift);
+        const uint32_t stride = std::max<uint32_t>((fbw * 64u) >> widthShift, 1u);
+        const uint32_t relative = (lastPageIndex + kVramPageCount - (baseBlock / 32u) % kVramPageCount) % kVramPageCount;
+        const int tileX = static_cast<int>((relative % stride) << widthShift);
+        const int tileY = static_cast<int>((relative / stride) << heightShift);
+        for (int y = tileY; y < tileY + (1 << heightShift); ++y)
+            for (int x = tileX; x < tileX + (1 << widthShift); ++x)
+                if (drawnBeforeCopy(y, x))
+                    m_writeVramFuncs[psm & 0x3Fu](m_pageRebuildScratch.data(), baseBlock, fbw, static_cast<uint32_t>(x),
+                                                  static_cast<uint32_t>(y), ReadVramUnlocked(psm, baseBlock, fbw,
+                                                                                             static_cast<uint32_t>(x),
+                                                                                             static_cast<uint32_t>(y)));
+    };
+    rebuildFrom(frame, frameBlock, ctx.frame.psm);
+    rebuildFrom(depth, depthBlock, ctx.zbuf.psm);
+    m_texturePageCache.SetCopy(m_pageRebuildScratch.data() + lastPage, lastPage);
+    return true;
 }
 
 void GSCpuBackend::FlushPendingUnlocked()
@@ -1858,6 +2050,7 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch, const RasterContext
 
             for (int x = drawX0; x <= drawX1; ++x)
             {
+                raster.beginSample(y, x);
                 const uint32_t texel = SampleTextureAxes(sampler, columns[static_cast<size_t>(x - drawX0)], row);
                 raster.sampled(y, x);
 
@@ -1980,6 +2173,7 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch, const RasterConte
                     iv = 0;
                 }
 
+                raster.beginSample(y, x);
                 uint32_t texel = SampleTexture(sampler, is, it, iq, iu, iv);
                 raster.sampled(y, x);
 

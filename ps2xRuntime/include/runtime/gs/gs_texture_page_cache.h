@@ -28,6 +28,8 @@ namespace GSMem
         const uint8_t* Resolve(const uint8_t* vram, uint32_t byteAddress) noexcept
         {
             const uint32_t pageBase = byteAddress & ~(kPageSize - 1u);
+            if (m_tracking)
+                NoteRead(pageBase);
             if (m_pageBase != pageBase)
             {
                 m_pageBase = pageBase;
@@ -89,7 +91,66 @@ namespace GSMem
             m_copyCount[1] = count1;
         }
 
+
+        // Replaces the cached page with a copy, as if it had been loaded when VRAM held these bytes.
+        void SetCopy(const uint8_t* bytes, uint32_t pageBase) noexcept
+        {
+            std::memcpy(m_bytes.data(), bytes, kPageSize);
+            m_pageBase = pageBase;
+            m_hasCopy = true;
+        }
+
+        // Read tracking for a rasterizer band: remembers the page of the latest texel read and the position of
+        // the latest read of any other page, which is where a sequential cache last switched pages.
+        struct ReadPosition
+        {
+            int y = -1;
+            int x = -1;
+            uint32_t texel = 0;
+            bool valid = false;
+        };
+        struct ReadTrack
+        {
+            uint32_t lastPage = UINT32_MAX;
+            ReadPosition last;
+            ReadPosition other;
+            bool switchedInsidePixel = false;
+        };
+
+        void EnableTracking() noexcept
+        {
+            m_tracking = true;
+            m_track = {};
+        }
+
+        void BeginPixel(int y, int x) noexcept
+        {
+            m_tagY = y;
+            m_tagX = x;
+            m_tagTexel = 0u;
+        }
+
+        const ReadTrack& Track() const noexcept
+        {
+            return m_track;
+        }
+
     private:
+        void NoteRead(uint32_t page) noexcept
+        {
+            const ReadPosition position{m_tagY, m_tagX, m_tagTexel++, true};
+            if (page != m_track.lastPage)
+            {
+                if (m_track.lastPage != UINT32_MAX)
+                {
+                    m_track.other = m_track.last;
+                    m_track.switchedInsidePixel = m_track.last.y == m_tagY && m_track.last.x == m_tagX;
+                }
+                m_track.lastPage = page;
+            }
+            m_track.last = position;
+        }
+
         bool CopyRangeHas(uint32_t page) const noexcept
         {
             for (int i = 0; i < 2; ++i)
@@ -102,6 +163,11 @@ namespace GSMem
         uint32_t m_pageBase = UINT32_MAX;
         bool m_hasCopy = false;
         bool m_copyOnMiss = false;
+        bool m_tracking = false;
+        int m_tagY = -1;
+        int m_tagX = -1;
+        uint32_t m_tagTexel = 0u;
+        ReadTrack m_track;
         uint32_t m_copyFirst[2] = {0u, 0u};
         uint32_t m_copyCount[2] = {0u, 0u};
     };
