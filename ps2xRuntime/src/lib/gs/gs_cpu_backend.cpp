@@ -846,13 +846,39 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
     }
 }
 
+struct GSCpuBackend::PixelPipeline
+{
+    const GSDrawState *state = nullptr;
+    bool fge = false;
+    u32 fbp = 0;
+    u32 fbw = 1;
+    u32 fpsm = 0;
+    u32 zbp = 0;
+    u32 zpsm = 0;
+    uint32_t ztestMethod = 0;
+    bool destinationAlphaTestNeedsRead = false;
+    bool framebuffer16 = false;
+    bool fbaSetsAlpha = false;
+    uint8_t asel = 0;
+    uint8_t bsel = 0;
+    uint8_t csel = 0;
+    uint8_t dsel = 0;
+    uint8_t fix = 0;
+};
+
 void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uint8_t r, uint8_t g, uint8_t b, uint8_t a, uint8_t fog)
 {
+    WritePixel(MakePixelPipeline(state), x, y, z, r, g, b, a, fog);
+}
+
+void GSCpuBackend::WritePixel(const PixelPipeline &pipe, int x, int y, int z, uint8_t r, uint8_t g, uint8_t b, uint8_t a, uint8_t fog)
+{
+    const GSDrawState &state = *pipe.state;
     const auto &ctx = state.context;
     if (x < ctx.scissor.x0 || x > ctx.scissor.x1 || y < ctx.scissor.y0 || y > ctx.scissor.y1)
         return;
 
-    if (state.prim.fge)
+    if (pipe.fge)
     {
         const uint32_t inverseFog = 255u - fog;
         auto applyFog = [&](uint8_t input, uint8_t fogColor) -> uint8_t
@@ -865,11 +891,11 @@ void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uin
         b = applyFog(b, state.fogB);
     }
 
-    const u32 fbp = GSInternal::framePageBaseToBlock(ctx.frame.fbp);
-    const u32 fbw = std::max<u32>(ctx.frame.fbw, 1u);
-    const u32 fpsm = ctx.frame.psm;
-    const u32 zbp = GSInternal::framePageBaseToBlock(ctx.zbuf.zbp);
-    const u32 zpsm = ctx.zbuf.psm;
+    const u32 fbp = pipe.fbp;
+    const u32 fbw = pipe.fbw;
+    const u32 fpsm = pipe.fpsm;
+    const u32 zbp = pipe.zbp;
+    const u32 zpsm = pipe.zpsm;
 
     const PixelWriteMask writeMask = classifyAlphaTest(ctx.test, a, static_cast<uint8_t>(fpsm));
     if (!writeMask.writesAnything())
@@ -877,10 +903,10 @@ void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uin
         return;
     }
 
-    const uint32_t ztestMethod = static_cast<uint32_t>((ctx.test >> 17) & 3u);
+    const uint32_t ztestMethod = pipe.ztestMethod;
     const bool alphaBlendEnabled = state.prim.abe;
     const bool preserveDestinationAlpha = writeMask.writeRgb && !writeMask.writeAlpha && fpsm == GS_PSM_CT32;
-    const bool destinationAlphaTestNeedsRead = ((ctx.test >> 14) & 0x1u) != 0u && (fpsm == GS_PSM_CT32 || fpsm == GS_PSM_CT16 || fpsm == GS_PSM_CT16S);
+    const bool destinationAlphaTestNeedsRead = pipe.destinationAlphaTestNeedsRead;
 
     // small optimization, avoid reading the framebuffer for simple draws
     // TODO: only one address lookup for rmw
@@ -893,7 +919,7 @@ void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uin
         rawFramebufferPixel = ReadVramUnlocked(fpsm, fbp, fbw, x, y);
         fbrgba = rawFramebufferPixel;
 
-        if (bitsPerPixel(fpsm) == 16)
+        if (pipe.framebuffer16)
         {
             fbrgba = Rgba5551ToRgba8888(fbrgba);
         }
@@ -950,12 +976,11 @@ void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uin
             // PABE disables alpha blending when the source alpha MSB is clear.
             if (!(state.pabe && (a & 0x80u) == 0u))
             {
-                uint64_t alphaReg = ctx.alpha;
-                uint8_t asel = alphaReg & 3;
-                uint8_t bsel = (alphaReg >> 2) & 3;
-                uint8_t csel = (alphaReg >> 4) & 3;
-                uint8_t dsel = (alphaReg >> 6) & 3;
-                uint8_t fix = static_cast<uint8_t>((alphaReg >> 32) & 0xFF);
+                const uint8_t asel = pipe.asel;
+                const uint8_t bsel = pipe.bsel;
+                const uint8_t csel = pipe.csel;
+                const uint8_t dsel = pipe.dsel;
+                const uint8_t fix = pipe.fix;
 
                 auto pickRGB = [&](uint8_t sel, int cs, int cd) -> int
                 {
@@ -980,7 +1005,7 @@ void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uin
             }
         }
 
-        if (writeMask.writeAlpha && (ctx.fba & 0x1ull) != 0ull && ctx.frame.psm != GS_PSM_CT24)
+        if (writeMask.writeAlpha && pipe.fbaSetsAlpha)
         {
             a = static_cast<uint8_t>(a | 0x80u);
         }
@@ -998,7 +1023,7 @@ void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uin
         }
 
         // format conversion
-        if (bitsPerPixel(fpsm) == 16)
+        if (pipe.framebuffer16)
         {
             pixel = Rgba8888ToRgba5551(pixel);
         }
@@ -1010,6 +1035,31 @@ void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uin
     {
         WriteVramUnlocked(zpsm, zbp, fbw, x, y, z);
     }
+}
+
+GSCpuBackend::PixelPipeline GSCpuBackend::MakePixelPipeline(const GSDrawState &state)
+{
+    const auto &ctx = state.context;
+    PixelPipeline pipe{};
+    pipe.state = &state;
+    pipe.fge = state.prim.fge;
+    pipe.fbp = GSInternal::framePageBaseToBlock(ctx.frame.fbp);
+    pipe.fbw = std::max<u32>(ctx.frame.fbw, 1u);
+    pipe.fpsm = ctx.frame.psm;
+    pipe.zbp = GSInternal::framePageBaseToBlock(ctx.zbuf.zbp);
+    pipe.zpsm = ctx.zbuf.psm;
+    pipe.ztestMethod = static_cast<uint32_t>((ctx.test >> 17) & 3u);
+    pipe.destinationAlphaTestNeedsRead = ((ctx.test >> 14) & 0x1u) != 0u &&
+                                         (pipe.fpsm == GS_PSM_CT32 || pipe.fpsm == GS_PSM_CT16 || pipe.fpsm == GS_PSM_CT16S);
+    pipe.framebuffer16 = bitsPerPixel(pipe.fpsm) == 16;
+    pipe.fbaSetsAlpha = (ctx.fba & 0x1ull) != 0ull && ctx.frame.psm != GS_PSM_CT24;
+    const uint64_t alphaReg = ctx.alpha;
+    pipe.asel = alphaReg & 3;
+    pipe.bsel = (alphaReg >> 2) & 3;
+    pipe.csel = (alphaReg >> 4) & 3;
+    pipe.dsel = (alphaReg >> 6) & 3;
+    pipe.fix = static_cast<uint8_t>((alphaReg >> 32) & 0xFF);
+    return pipe;
 }
 
 uint32_t GSCpuBackend::LookupCLUT(const GSDrawState &state,
@@ -1058,7 +1108,6 @@ uint32_t GSCpuBackend::LookupCLUT(const GSDrawState &state,
 uint32_t GSCpuBackend::SampleTexture(const GSDrawState &state, float s, float t, float q, uint16_t u, uint16_t v)
 {
     const auto &ctx = state.context;
-    const auto &tex = ctx.tex0;
 
     const int texW = state.textureWidth;
     const int texH = state.textureHeight;
@@ -1083,54 +1132,68 @@ uint32_t GSCpuBackend::SampleTexture(const GSDrawState &state, float s, float t,
         texVf = t * invQ * static_cast<float>(texH);
     }
 
-    auto samplePoint = [&](int sampleU, int sampleV) -> uint32_t
+    return SampleTextureAxes(state,
+                             PrepareTextureAxis(texUf, texW, wrapU, minU, maxU, state.linearFilter),
+                             PrepareTextureAxis(texVf, texH, wrapV, minV, maxV, state.linearFilter));
+}
+
+GSCpuBackend::TextureAxis GSCpuBackend::PrepareTextureAxis(float coordinate, int size, uint8_t mode, uint16_t regionMin, uint16_t regionMax, bool linear)
+{
+    TextureAxis axis{};
+    if (!linear)
     {
-        sampleU = wrapTextureCoordinate(sampleU, texW, wrapU, minU, maxU);
-        sampleV = wrapTextureCoordinate(sampleV, texH, wrapV, minV, maxV);
+        axis.c0 = wrapTextureCoordinate(static_cast<int>(coordinate), size, mode, regionMin, regionMax);
+        return axis;
+    }
+    const float sample = coordinate - 0.5f;
+    const int c0 = static_cast<int>(std::floor(sample));
+    axis.frac = sample - static_cast<float>(c0);
+    axis.c0 = wrapTextureCoordinate(c0, size, mode, regionMin, regionMax);
+    axis.c1 = wrapTextureCoordinate(c0 + 1, size, mode, regionMin, regionMax);
+    return axis;
+}
 
-        u32 out = ReadTextureVramUnlocked(tex.psm, tex.tbp0, tex.tbw, sampleU, sampleV);
+uint32_t GSCpuBackend::SampleTexel(const GSDrawState &state, int u, int v)
+{
+    const auto &tex = state.context.tex0;
+    u32 out = ReadTextureVramUnlocked(tex.psm, tex.tbp0, tex.tbw, u, v);
 
-        switch (tex.psm)
-        {
-        case GS_PSM_CT32:
-        case GS_PSM_Z32:
-        case GS_PSM_CT24:
-        case GS_PSM_Z24:
-            return applyTexa(state.texa, tex.psm, out);
-        case GS_PSM_CT16:
-        case GS_PSM_CT16S:
-        case GS_PSM_Z16:
-        case GS_PSM_Z16S:
-            return applyTexa(state.texa, tex.psm, Rgba5551ToRgba8888(out));
-        case GS_PSM_T8:
-        case GS_PSM_T8H:
-        case GS_PSM_T4:
-        case GS_PSM_T4HL:
-        case GS_PSM_T4HH:
-            return LookupCLUT(state, static_cast<u8>(out), tex.cpsm, tex.csm, tex.csa, tex.psm);
-        }
-
-        return 0xFFFF00FFu;
-    };
-
-    if (!state.linearFilter)
+    switch (tex.psm)
     {
-        return samplePoint(static_cast<int>(texUf), static_cast<int>(texVf));
+    case GS_PSM_CT32:
+    case GS_PSM_Z32:
+    case GS_PSM_CT24:
+    case GS_PSM_Z24:
+        return applyTexa(state.texa, tex.psm, out);
+    case GS_PSM_CT16:
+    case GS_PSM_CT16S:
+    case GS_PSM_Z16:
+    case GS_PSM_Z16S:
+        return applyTexa(state.texa, tex.psm, Rgba5551ToRgba8888(out));
+    case GS_PSM_T8:
+    case GS_PSM_T8H:
+    case GS_PSM_T4:
+    case GS_PSM_T4HL:
+    case GS_PSM_T4HH:
+        return LookupCLUT(state, static_cast<u8>(out), tex.cpsm, tex.csm, tex.csa, tex.psm);
     }
 
-    const float sampleU = texUf - 0.5f;
-    const float sampleV = texVf - 0.5f;
-    const int u0 = static_cast<int>(std::floor(sampleU));
-    const int v0 = static_cast<int>(std::floor(sampleV));
-    const int u1 = u0 + 1;
-    const int v1 = v0 + 1;
-    const float fx = sampleU - static_cast<float>(u0);
-    const float fy = sampleV - static_cast<float>(v0);
+    return 0xFFFF00FFu;
+}
 
-    const uint32_t c00 = samplePoint(u0, v0);
-    const uint32_t c10 = samplePoint(u1, v0);
-    const uint32_t c01 = samplePoint(u0, v1);
-    const uint32_t c11 = samplePoint(u1, v1);
+uint32_t GSCpuBackend::SampleTextureAxes(const GSDrawState &state, const TextureAxis &u, const TextureAxis &v)
+{
+    if (!state.linearFilter)
+    {
+        return SampleTexel(state, u.c0, v.c0);
+    }
+
+    const float fx = u.frac;
+    const float fy = v.frac;
+    const uint32_t c00 = SampleTexel(state, u.c0, v.c0);
+    const uint32_t c10 = SampleTexel(state, u.c1, v.c0);
+    const uint32_t c01 = SampleTexel(state, u.c0, v.c1);
+    const uint32_t c11 = SampleTexel(state, u.c1, v.c1);
 
     const uint8_t r = lerpChannel(static_cast<uint8_t>(c00 & 0xFFu),
                                   static_cast<uint8_t>(c10 & 0xFFu),
@@ -1234,28 +1297,48 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
         if (spriteH < 1.0f)
             spriteH = 1.0f;
 
+        // Texel coordinates depend only on the column or the row, so wrap them once per axis
+        // with exactly the arithmetic SampleTexture applies to each pixel.
+        const uint64_t clamp = ctx.clamp;
+        const uint8_t wrapU = static_cast<uint8_t>(clamp & 0x3u);
+        const uint8_t wrapV = static_cast<uint8_t>((clamp >> 2) & 0x3u);
+        const uint16_t minU = static_cast<uint16_t>((clamp >> 4) & 0x3FFu);
+        const uint16_t maxU = static_cast<uint16_t>((clamp >> 14) & 0x3FFu);
+        const uint16_t minV = static_cast<uint16_t>((clamp >> 24) & 0x3FFu);
+        const uint16_t maxV = static_cast<uint16_t>((clamp >> 34) & 0x3FFu);
+        auto axisCoordinate = [&](float texF, int size) -> float
+        {
+            if (state.prim.fst)
+            {
+                const int fixed = static_cast<int>((texF * 16.0f) + 0.5f);
+                const uint16_t sample = static_cast<uint16_t>(clampInt(fixed, 0, 0xFFFF));
+                return static_cast<float>(sample) / 16.0f;
+            }
+            const float normalized = texF / static_cast<float>(size);
+            const float invQ = 1.0f / fabsQ(1.0f);
+            return normalized * invQ * static_cast<float>(size);
+        };
+
+        thread_local std::vector<TextureAxis> columns;
+        columns.resize(static_cast<size_t>(drawX1 - drawX0 + 1));
+        for (int x = drawX0; x <= drawX1; ++x)
+        {
+            float tx = (static_cast<float>(x - unclippedX0) + 0.5f) / spriteW;
+            float texUf = u0f + (u1f - u0f) * tx;
+            columns[static_cast<size_t>(x - drawX0)] =
+                PrepareTextureAxis(axisCoordinate(texUf, texW), texW, wrapU, minU, maxU, state.linearFilter);
+        }
+
+        const PixelPipeline pipe = MakePixelPipeline(state);
         for (int y = drawY0; y <= drawY1; ++y)
         {
             float ty = (static_cast<float>(y - unclippedY0) + 0.5f) / spriteH;
             float texVf = v0f + (v1f - v0f) * ty;
+            const TextureAxis row = PrepareTextureAxis(axisCoordinate(texVf, texH), texH, wrapV, minV, maxV, state.linearFilter);
 
             for (int x = drawX0; x <= drawX1; ++x)
             {
-                float tx = (static_cast<float>(x - unclippedX0) + 0.5f) / spriteW;
-                float texUf = u0f + (u1f - u0f) * tx;
-                uint32_t texel = 0xFFFF00FFu;
-                if (state.prim.fst)
-                {
-                    const int fixedU = static_cast<int>((texUf * 16.0f) + 0.5f);
-                    const int fixedV = static_cast<int>((texVf * 16.0f) + 0.5f);
-                    const uint16_t sampleU = static_cast<uint16_t>(clampInt(fixedU, 0, 0xFFFF));
-                    const uint16_t sampleV = static_cast<uint16_t>(clampInt(fixedV, 0, 0xFFFF));
-                    texel = SampleTexture(state, 0.0f, 0.0f, 1.0f, sampleU, sampleV);
-                }
-                else
-                {
-                    texel = SampleTexture(state, texUf / static_cast<float>(texW), texVf / static_cast<float>(texH), 1.0f, 0u, 0u);
-                }
+                const uint32_t texel = SampleTextureAxes(state, columns[static_cast<size_t>(x - drawX0)], row);
 
                 uint8_t tr = static_cast<uint8_t>(texel & 0xFF);
                 uint8_t tg = static_cast<uint8_t>((texel >> 8) & 0xFF);
@@ -1263,15 +1346,16 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                 uint8_t ta = static_cast<uint8_t>((texel >> 24) & 0xFF);
 
                 const TextureCombineResult color = combineTexture(tex, r, g, b, a, tr, tg, tb, ta);
-                WritePixel(state, x, y, z1, color.r, color.g, color.b, color.a, v1.fog);
+                WritePixel(pipe, x, y, z1, color.r, color.g, color.b, color.a, v1.fog);
             }
         }
     }
     else
     {
+        const PixelPipeline pipe = MakePixelPipeline(state);
         for (int y = drawY0; y <= drawY1; ++y)
             for (int x = drawX0; x <= drawX1; ++x)
-                WritePixel(state, x, y, z1, r, g, b, a, v1.fog);
+                WritePixel(pipe, x, y, z1, r, g, b, a, v1.fog);
     }
 }
 
@@ -1282,6 +1366,7 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch)
     const GSVertex &v1 = batch.vertices[1];
     const GSVertex &v2 = batch.vertices[2];
     const auto &ctx = state.context;
+    const PixelPipeline pipe = MakePixelPipeline(state);
 
     int ofx = ctx.xyoffset.ofx >> 4;
     int ofy = ctx.xyoffset.ofy >> 4;
@@ -1388,7 +1473,7 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch)
             }
 
             const uint8_t fog = clampU8(static_cast<int>(v0.fog * w0 + v1.fog * w1 + v2.fog * w2));
-            WritePixel(state, x, y, static_cast<u32>(z + 0.5), r, g, b, a, fog);
+            WritePixel(pipe, x, y, static_cast<u32>(z + 0.5), r, g, b, a, fog);
         }
     }
 }
@@ -1399,6 +1484,7 @@ void GSCpuBackend::DrawLine(const GSPrimitiveBatch &batch)
     const GSVertex &v0 = batch.vertices[0];
     const GSVertex &v1 = batch.vertices[1];
     const auto &ctx = state.context;
+    const PixelPipeline pipe = MakePixelPipeline(state);
 
     int ofx = ctx.xyoffset.ofx >> 4;
     int ofy = ctx.xyoffset.ofy >> 4;
@@ -1440,7 +1526,7 @@ void GSCpuBackend::DrawLine(const GSPrimitiveBatch &batch)
 
         double z = (v0.z + (v1.z - v0.z) * t);
         const uint8_t fog = clampU8(static_cast<int>(v0.fog + (v1.fog - v0.fog) * t));
-        WritePixel(state, x0, y0, static_cast<u32>(z), r, g, b, a, fog);
+        WritePixel(pipe, x0, y0, static_cast<u32>(z), r, g, b, a, fog);
 
         if (x0 == x1 && y0 == y1)
             break;
@@ -1491,6 +1577,9 @@ void GSCpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
     const uint32_t rrw = m_transfer.trxreg.rrw;
     const uint32_t dsax = m_transfer.trxpos.dsax;
     uint32_t offset = 0u;
+    // Track the column/row of copiedPixels incrementally; a divide per uploaded pixel showed up in movie playback.
+    uint32_t column = m_transferState.copiedPixels % rrw;
+    uint32_t row = m_transferState.copiedPixels / rrw;
 
     auto advancePixel = [&](uint32_t count)
     {
@@ -1505,8 +1594,14 @@ void GSCpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
             return;
         }
 
-        m_transferState.x = dsax + (m_transferState.copiedPixels % rrw);
-        m_transferState.y = m_transfer.trxpos.dsay + (m_transferState.copiedPixels / rrw);
+        column += count;
+        while (column >= rrw)
+        {
+            column -= rrw;
+            ++row;
+        }
+        m_transferState.x = dsax + column;
+        m_transferState.y = m_transfer.trxpos.dsay + row;
     };
 
     while (offset < sizeBytes && m_transferState.direction == 0u)
@@ -1564,15 +1659,15 @@ void GSCpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
             const uint8_t packed = data[offset++];
             const uint32_t firstPixel = m_transferState.copiedPixels;
             WriteVramUnlocked(dpsm, dbp, dbw,
-                              dsax + (firstPixel % rrw),
-                              m_transfer.trxpos.dsay + (firstPixel / rrw),
+                              dsax + column,
+                              m_transfer.trxpos.dsay + row,
                               packed & 0x0Fu);
             if (firstPixel + 1u < m_transferState.totalPixels)
             {
-                const uint32_t secondPixel = firstPixel + 1u;
+                const bool wraps = column + 1u >= rrw;
                 WriteVramUnlocked(dpsm, dbp, dbw,
-                                  dsax + (secondPixel % rrw),
-                                  m_transfer.trxpos.dsay + (secondPixel / rrw),
+                                  dsax + (wraps ? column + 1u - rrw : column + 1u),
+                                  m_transfer.trxpos.dsay + (wraps ? row + 1u : row),
                                   (packed >> 4u) & 0x0Fu);
             }
             advancePixel(std::min<uint32_t>(2u, m_transferState.totalPixels - firstPixel));

@@ -44,8 +44,23 @@ private:
     void DrawSprite(const GSPrimitiveBatch &batch);
     void DrawTriangle(const GSPrimitiveBatch &batch);
     void DrawLine(const GSPrimitiveBatch &batch);
+    // Per-primitive register decoding hoisted out of the per-pixel path.
+    struct PixelPipeline;
+    // A wrapped texel coordinate along one axis (plus its neighbour and weight when filtering).
+    struct TextureAxis
+    {
+        int c0 = 0;
+        int c1 = 0;
+        float frac = 0.0f;
+    };
+
+    static PixelPipeline MakePixelPipeline(const GSDrawState &state);
     void WritePixel(const GSDrawState &state, int x, int y, int z, uint8_t r, uint8_t g, uint8_t b, uint8_t a, uint8_t fog);
+    void WritePixel(const PixelPipeline &pipe, int x, int y, int z, uint8_t r, uint8_t g, uint8_t b, uint8_t a, uint8_t fog);
     uint32_t SampleTexture(const GSDrawState &state, float s, float t, float q, uint16_t u, uint16_t v);
+    static TextureAxis PrepareTextureAxis(float coordinate, int size, uint8_t mode, uint16_t regionMin, uint16_t regionMax, bool linear);
+    uint32_t SampleTexel(const GSDrawState &state, int u, int v);
+    uint32_t SampleTextureAxes(const GSDrawState &state, const TextureAxis &u, const TextureAxis &v);
     uint32_t LookupCLUT(const GSDrawState &state, uint8_t index, uint8_t cpsm, uint8_t csm, uint8_t csa, uint8_t sourcePsm);
 
     void PerformLocalToLocalTransfer();

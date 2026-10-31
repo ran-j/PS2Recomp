@@ -1,4 +1,6 @@
 #include "MiniTest.h"
+#include <algorithm>
+#include <cmath>
 #include "runtime/ps2_memory.h"
 #include "ps2_runtime.h"
 #include "ps2_stubs.h"
@@ -3597,6 +3599,87 @@ void register_ps2_gs_tests()
                      "linear filtering should blend the STQ triangle sample between black and white T4 texels");
             t.Equals(linearA, static_cast<uint8_t>(0x80u),
                      "linear filtering should preserve the shared opaque alpha from the CLUT entries");
+        });
+
+        tc.Run("FST sprite bilinear magnification clamps and blends texels per column and row", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            constexpr uint32_t kTexTbp = 64u;
+            constexpr uint64_t kFrame = (1ull << 16) | (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kZbuf = (1ull << 32);
+            constexpr uint64_t kTex0 =
+                (static_cast<uint64_t>(kTexTbp) << 0) |
+                (1ull << 14) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 20) |
+                (2ull << 26) |
+                (2ull << 30) |
+                (1ull << 34);
+            constexpr uint64_t kPrim = static_cast<uint64_t>(GS_PRIM_SPRITE) | (1ull << 4) | (1ull << 8);
+            uint32_t texels[4][4];
+            for (uint32_t y = 0u; y < 4u; ++y)
+                for (uint32_t x = 0u; x < 4u; ++x)
+                {
+                    texels[y][x] = 0x80000000u | ((x * 70u + y * 9u) & 0xFFu) | (((y * 80u + 5u) & 0xFFu) << 8) |
+                                   (((x * 13u + y * 50u) & 0xFFu) << 16);
+                    writeReferencePSMCT32Pixel(vram, kTexTbp, 1u, x, y, texels[y][x]);
+                }
+
+            gs.writeRegister(GS_REG_FRAME_1, kFrame);
+            gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
+            gs.writeRegister(GS_REG_SCISSOR_1, (7ull << 16) | (7ull << 48));
+            gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
+            gs.writeRegister(GS_REG_ALPHA_1, 0ull);
+            gs.writeRegister(GS_REG_TEX0_1, kTex0 | (1ull << 35)); // DECAL: output the filtered texel
+            gs.writeRegister(GS_REG_TEX1_1, 1ull << 5);            // MMAG linear
+            gs.writeRegister(GS_REG_CLAMP_1, 1ull);                 // CLAMP in U, REPEAT in V
+            gs.writeRegister(GS_REG_PRIM, kPrim);
+            gs.writeRegister(GS_REG_RGBAQ, 0x80808080ull);
+            gs.writeRegister(GS_REG_UV, 0ull);
+            gs.writeRegister(GS_REG_XYZ2, 0ull);
+            gs.writeRegister(GS_REG_UV, (64ull << 0) | (64ull << 16));
+            gs.writeRegister(GS_REG_XYZ2, (static_cast<uint64_t>(8u << 4) << 0) | (static_cast<uint64_t>(8u << 4) << 16));
+
+            // 2x magnification: pixel centres land on quarter texels, so every pixel blends four texels.
+            auto axis = [](int pixel, bool clamp, int &c0, int &c1, float &frac)
+            {
+                const float texF = 0.0f + (4.0f - 0.0f) * ((static_cast<float>(pixel) + 0.5f) / 8.0f);
+                const uint16_t fixed = static_cast<uint16_t>(static_cast<int>((texF * 16.0f) + 0.5f));
+                const float sample = static_cast<float>(fixed) / 16.0f - 0.5f;
+                const int base = static_cast<int>(std::floor(sample));
+                frac = sample - static_cast<float>(base);
+                auto wrap = [&](int c) { return clamp ? std::clamp(c, 0, 3) : (c & 3); };
+                c0 = wrap(base);
+                c1 = wrap(base + 1);
+            };
+            auto lerp = [](uint32_t a, uint32_t b, uint32_t c, uint32_t d, int shift, float fx, float fy)
+            {
+                const float c00 = static_cast<float>((a >> shift) & 0xFFu);
+                const float c10 = static_cast<float>((b >> shift) & 0xFFu);
+                const float c01 = static_cast<float>((c >> shift) & 0xFFu);
+                const float c11 = static_cast<float>((d >> shift) & 0xFFu);
+                const float top = c00 + (c10 - c00) * fx;
+                const float bottom = c01 + (c11 - c01) * fx;
+                return static_cast<uint32_t>(std::clamp(static_cast<int>(std::lround(top + (bottom - top) * fy)), 0, 255)) << shift;
+            };
+            bool matches = true;
+            for (int y = 0; y < 8; ++y)
+                for (int x = 0; x < 8; ++x)
+                {
+                    int u0, u1, v0, v1;
+                    float fx, fy;
+                    axis(x, true, u0, u1, fx);
+                    axis(y, false, v0, v1, fy);
+                    uint32_t expected = 0u;
+                    for (int shift : {0, 8, 16, 24})
+                        expected |= lerp(texels[v0][u0], texels[v0][u1], texels[v1][u0], texels[v1][u1], shift, fx, fy);
+                    if (readReferencePSMCT32Pixel(vram, 0u, 1u, static_cast<uint32_t>(x), static_cast<uint32_t>(y)) != expected)
+                        matches = false;
+                }
+            t.IsTrue(matches, "every sprite pixel should be the bilinear blend of its clamped/repeated texel neighbours");
         });
 
         tc.Run("GS CLAMP modes transform texture coordinates before sampling", [](TestCase &t)
