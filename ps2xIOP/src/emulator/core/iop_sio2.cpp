@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <iostream>
+#include <vector>
 
 namespace ps2x::iop::detail
 {
@@ -13,6 +14,10 @@ namespace ps2x::iop::detail
 
         constexpr uint32_t kRecvConnected = 0x1100u;
         constexpr uint32_t kRecvDisconnected = 0x1D100u;
+        constexpr uint32_t kRecvNoDevicesMissing = 0x1000u;
+        constexpr uint32_t kRecvPort2Missing = 0x2D000u;
+        constexpr uint32_t kRecvOnePortOpen = 0x100u;
+        constexpr uint32_t kRecvTwoPortsOpen = 0x200u;
         constexpr uint32_t kCtrlStart = 0x1u;
         constexpr uint32_t kCtrlResetFifos = 0xCu;
     }
@@ -134,6 +139,7 @@ namespace ps2x::iop::detail
         m_interruptPending = false;
         m_fifoOut.clear();
         m_port = 0;
+        m_pad.reset();
         softReset();
     }
 
@@ -308,14 +314,143 @@ namespace ps2x::iop::detail
             return;
         }
 
-        // Pads, multitaps and infrared are not wired to SIO2 here: answer as an empty port.
-        m_recv1 = mode == kModePad ? (m_recv1 | 0x1000u | (m_port == 0u ? 0x1D000u : 0x2D000u)) : kRecvDisconnected;
+        if (mode == kModePad)
+        {
+            pad();
+            return;
+        }
+
+        // Multitaps and infrared have nothing attached.
+        m_recv1 = kRecvDisconnected;
         m_fifoOut.push_back(0xFFu);
         while (!m_fifoIn.empty())
         {
             m_fifoIn.pop_front();
             m_fifoOut.push_back(0xFFu);
         }
+    }
+
+    void IopSio2::pad()
+    {
+        // RECV1 is rebuilt per packet: bits 8-9 count the pad ports addressed, 0x1000 is always set,
+        // and a missing controller adds 0x1D000 (port 0) or 0x2D000 (port 1).
+        if ((m_recv1 & kRecvOnePortOpen) != 0u)
+            m_recv1 = (m_recv1 & ~kRecvOnePortOpen) | kRecvTwoPortsOpen;
+        else
+            m_recv1 |= kRecvOnePortOpen;
+        m_recv1 |= kRecvNoDevicesMissing;
+        m_fifoOut.push_back(0xFFu);
+        if (m_port == 0u)
+        {
+            m_pad.transfer(m_fifoIn, m_fifoOut);
+            m_fifoIn.clear();
+            return;
+        }
+        m_recv1 |= kRecvPort2Missing;
+        while (!m_fifoIn.empty())
+        {
+            m_fifoIn.pop_front();
+            m_fifoOut.push_back(0xFFu);
+        }
+    }
+
+    void IopDualShock2::reset() noexcept
+    {
+        *this = IopDualShock2{};
+    }
+
+    uint8_t IopDualShock2::modeId() const noexcept
+    {
+        if (m_config)
+            return 0xF3u;
+        if (!m_analog)
+            return 0x41u;
+        return m_pressure ? 0x79u : 0x73u;
+    }
+
+    void IopDualShock2::transfer(const std::deque<uint8_t> &command, std::deque<uint8_t> &reply)
+    {
+        // Replies follow the DualShock 2 protocol: mode id, 0x5A, then command data. Buttons are active low.
+        const auto arg = [&command](size_t index) -> uint8_t
+        { return index < command.size() ? command[index] : 0u; };
+        const uint8_t cmd = arg(0);
+        const uint8_t id = modeId();
+        std::vector<uint8_t> data;
+        const auto pollData = [this]()
+        {
+            std::vector<uint8_t> state = {0xFFu, 0xFFu};
+            if (m_analog || m_config)
+                state.insert(state.end(), {0x7Fu, 0x7Fu, 0x7Fu, 0x7Fu});
+            if (m_pressure && !m_config)
+                state.insert(state.end(), 12u, 0x00u);
+            return state;
+        };
+
+        switch (cmd)
+        {
+        case 0x42: // poll
+            data = pollData();
+            break;
+        case 0x43: // enter or leave config mode
+            data = m_config ? std::vector<uint8_t>(6u, 0x00u) : pollData();
+            m_config = arg(2) == 1u;
+            break;
+        default:
+            if (!m_config)
+            {
+                // Outside config mode only polling is answered; the rest reads like a poll.
+                data = pollData();
+                break;
+            }
+            switch (cmd)
+            {
+            case 0x40:
+                data = {0x00, 0x00, 0x02, 0x00, 0x00, 0x5A};
+                break;
+            case 0x41: // which buttons report pressure
+                data = m_analog ? std::vector<uint8_t>{0xFF, 0xFF, 0x03, 0x00, 0x00, 0x5A} : std::vector<uint8_t>(6u, 0x00u);
+                break;
+            case 0x44: // set analog mode
+                m_analog = arg(2) == 1u;
+                if (!m_analog)
+                    m_pressure = false;
+                data = std::vector<uint8_t>(6u, 0x00u);
+                break;
+            case 0x45: // model and current mode
+                data = {0x03, 0x02, static_cast<uint8_t>(m_analog ? 0x01 : 0x00), 0x02, 0x01, 0x00};
+                break;
+            case 0x46:
+                data = arg(2) == 0u ? std::vector<uint8_t>{0x00, 0x00, 0x01, 0x02, 0x00, 0x0A}
+                                    : std::vector<uint8_t>{0x00, 0x00, 0x01, 0x01, 0x01, 0x14};
+                break;
+            case 0x47:
+                data = {0x00, 0x00, 0x02, 0x00, 0x01, 0x00};
+                break;
+            case 0x4C:
+                data = arg(2) == 0u ? std::vector<uint8_t>{0x00, 0x00, 0x00, 0x04, 0x00, 0x00}
+                                    : std::vector<uint8_t>{0x00, 0x00, 0x00, 0x07, 0x00, 0x00};
+                break;
+            case 0x4D: // vibration motor map: answer with the previous one
+                data.assign(m_vibrationMap.begin(), m_vibrationMap.end());
+                for (size_t i = 0; i < m_vibrationMap.size(); ++i)
+                    m_vibrationMap[i] = arg(2u + i);
+                break;
+            case 0x4F: // enable pressure reporting
+                m_pressure = m_analog;
+                data = {0x00, 0x00, 0x00, 0x00, 0x00, 0x5A};
+                break;
+            default:
+                data = std::vector<uint8_t>(6u, 0x00u);
+                break;
+            }
+            break;
+        }
+
+        // The address byte was answered by the caller; the rest of the reply mirrors the request length.
+        std::vector<uint8_t> bytes = {id, 0x5Au};
+        bytes.insert(bytes.end(), data.begin(), data.end());
+        for (size_t i = 0; i < command.size(); ++i)
+            reply.push_back(i < bytes.size() ? bytes[i] : 0x00u);
     }
 
     void IopSio2::memoryCard()

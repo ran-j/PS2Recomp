@@ -3,6 +3,7 @@
 #include "emulator/iop_emulator_const.h"
 #include "emulator/core/iop_memory.h"
 #include "emulator/imports/iop_cdvd.h"
+#include "emulator/imports/iop_dmacman.h"
 #include "emulator/imports/iop_imports.h"
 #include "emulator/imports/iop_loadcore.h"
 #include "emulator/imports/iop_timrman.h"
@@ -513,13 +514,188 @@ namespace
         return expect(persisted[4] == 0x12, "programmed pages should persist in the image file") &&
                expect(erased[4] == 0xFF && erased[7] == 0xFF, "erasing block 0 should reset page 3 to 0xFF");
     }
+    // Server modules pull EE payloads (memory card writes) with sceSifGetOtherData.
+    bool testSifGetOtherData()
+    {
+        class GuestHost final : public NullHost
+        {
+        public:
+            bool readGuest(uint32_t address, void *destination, size_t size) const override
+            {
+                if (address > guest.size() || size > guest.size() - address)
+                    return false;
+                std::memcpy(destination, guest.data() + address, size);
+                return true;
+            }
+            std::vector<uint8_t> guest = std::vector<uint8_t>(0x1000u, 0u);
+        };
+
+        GuestHost host;
+        IopMemory memory;
+        IopKernel kernel(memory);
+        IopRpcBridge rpc(host, memory, kernel);
+        const uint8_t payload[8] = {'M', 'C', '2', 'S', 'A', 'V', 'E', '!'};
+        std::memcpy(host.guest.data() + 0x400u, payload, sizeof(payload));
+
+        IopCpuState cpu{};
+        cpu.gpr[4] = 0x2000u;   // receive data
+        cpu.gpr[5] = 0x400u;    // EE source
+        cpu.gpr[6] = 0x30000u;  // IOP destination
+        cpu.gpr[7] = sizeof(payload);
+        cpu.gpr[2] = 0xFFFFu;
+        uint8_t copied[8] = {};
+        if (!expect(rpc.dispatchSifCmdImport(23u, cpu), "sceSifGetOtherData was not handled") ||
+            !expect(cpu.gpr[2] == 0u, "sceSifGetOtherData should succeed") ||
+            !expect(memory.readRam(0x30000u, copied, sizeof(copied)) && std::memcmp(copied, payload, sizeof(payload)) == 0,
+                    "sceSifGetOtherData should copy EE memory into IOP RAM"))
+            return false;
+
+        cpu.gpr[5] = 0xFFF0u; // outside EE memory
+        return expect(rpc.dispatchSifCmdImport(23u, cpu) && static_cast<int32_t>(cpu.gpr[2]) < 0,
+                      "sceSifGetOtherData should fail on an unreadable EE source");
+    }
+
+    // mc2_s1 copies card specs with back-to-back lwl/lwr; the second must merge into the first's pending load.
+    bool testUnalignedLoadPair()
+    {
+        IopMemory memory;
+        IopCpuCore core(memory);
+        const uint32_t program[] = {
+            0x88A70003u, // lwl a3, 3(a1)
+            0x98A70000u, // lwr a3, 0(a1)
+            0x00000000u,
+            0x00000000u,
+        };
+        const uint8_t data[8] = {0xAA, 0xAA, 0xAA, 0x11, 0x22, 0x33, 0x44, 0xAA};
+        (void)memory.writeRam(0x1000u, program, sizeof(program));
+        (void)memory.writeRam(0x2000u, data, sizeof(data));
+
+        IopCpuState cpu{};
+        cpu.pc = 0x1000u;
+        cpu.gpr[5] = 0x2003u;
+        cpu.gpr[7] = 0xDEADBEEFu;
+        for (int i = 0; i < 4; ++i)
+            (void)core.executeInstruction(cpu);
+        return expect(cpu.gpr[7] == 0x44332211u, "an lwl/lwr pair should load the unaligned word");
+    }
+
+    // IOP pad drivers (and sio2d's memory card path) expect a controller in port 1 to answer on SIO2.
+    bool testSio2DualShock2()
+    {
+        IopMemory memory;
+        const auto transfer = [&memory](uint32_t port, const std::vector<uint8_t> &command)
+        {
+            memory.write32(0x1F808200u, port | (static_cast<uint32_t>(command.size()) << 8u));
+            memory.write32(0x1F808204u, 0u);
+            for (const uint8_t value : command)
+                memory.write8(0x1F808260u, value);
+            memory.write32(0x1F808268u, 1u);
+            std::vector<uint8_t> reply(command.size());
+            for (uint8_t &value : reply)
+                value = memory.read8(0x1F808264u);
+            memory.write32(0x1F808280u, 1u);
+            return reply;
+        };
+
+        const std::vector<uint8_t> poll = transfer(0u, {0x01, 0x42, 0x00, 0x00, 0x00});
+        if (!expect(poll == std::vector<uint8_t>{0xFF, 0x41, 0x5A, 0xFF, 0xFF}, "port 0 should answer a poll as a digital pad at rest") ||
+            !expect(memory.read32(0x1F80826Cu) == 0x1100u, "RECV1 should report the port 0 controller as connected"))
+            return false;
+
+        const std::vector<uint8_t> empty = transfer(1u, {0x01, 0x42, 0x00, 0x00, 0x00});
+        if (!expect(empty[1] == 0xFF && memory.read32(0x1F80826Cu) == 0x2D100u, "port 1 should read as an empty socket"))
+            return false;
+
+        // Enter config mode, switch to analog, leave: polls then carry the sticks at centre.
+        (void)transfer(0u, {0x01, 0x43, 0x00, 0x01, 0x00});
+        const std::vector<uint8_t> status = transfer(0u, {0x01, 0x45, 0x00, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A});
+        (void)transfer(0u, {0x01, 0x44, 0x00, 0x01, 0x03, 0x00, 0x00, 0x00, 0x00});
+        (void)transfer(0u, {0x01, 0x43, 0x00, 0x00, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A});
+        const std::vector<uint8_t> analog = transfer(0u, {0x01, 0x42, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00});
+        return expect(status[1] == 0xF3 && status[3] == 0x03, "config mode should identify as 0xF3 and report a DualShock 2") &&
+               expect(analog[1] == 0x73 && analog[5] == 0x7F && analog[8] == 0x7F, "analog polls should report centred sticks");
+    }
+
+    // sio2man sends memory card packets by DMA through dmacman, so those calls must drive SIO2.
+    bool testDmacmanDrivesSio2Dma()
+    {
+        const std::filesystem::path image = std::filesystem::temp_directory_path() / "ps2x_dmacman_test_card.ps2";
+        std::error_code ec;
+        std::filesystem::remove(image, ec);
+
+        IopMemory memory;
+        IopDmacman dmacman(memory);
+        memory.attachMemoryCard(0, image.string());
+
+        constexpr uint32_t kStack = 0x1000u;
+        constexpr uint32_t kSendBuffer = 0x17000u;
+        constexpr uint32_t kReplyBuffer = 0x17630u;
+        constexpr uint32_t kChannelSio2In = 11u;
+        constexpr uint32_t kChannelSio2Out = 12u;
+        const auto call = [&](uint16_t ordinal, uint32_t a0, uint32_t a1 = 0u, uint32_t a2 = 0u, uint32_t a3 = 0u)
+        {
+            IopCpuState cpu{};
+            cpu.gpr[4] = a0;
+            cpu.gpr[5] = a1;
+            cpu.gpr[6] = a2;
+            cpu.gpr[7] = a3;
+            cpu.gpr[29] = kStack;
+            const bool handled = dmacman.dispatchImport(ordinal, cpu);
+            return handled ? cpu.gpr[2] : 0xDEADBEEFu;
+        };
+
+        (void)call(33u, kChannelSio2In, 3u);
+        (void)call(34u, kChannelSio2In);
+        (void)call(34u, kChannelSio2Out);
+        if (!expect(memory.read32(0x1F801570u) == 0x008B0000u, "DPCR2 should hold SIO2in priority 3 and both SIO2 enable bits"))
+            return false;
+
+        // One probe packet: port 0, four bytes, sent as one four-byte DMA block each way.
+        memory.write32(0x1F808200u, 4u << 8u);
+        const uint8_t probe[4] = {0x81, 0x11, 0x00, 0x00};
+        (void)memory.writeRam(kSendBuffer, probe, sizeof(probe));
+
+        memory.write32(kStack + 16u, 1u); // direction: from memory
+        if (!expect(call(28u, kChannelSio2In, kSendBuffer, 1u, 1u) == 1u, "sceSetSliceDMA should accept SIO2in"))
+            return false;
+        if (!expect(memory.read32(0x1F801540u) == kSendBuffer && memory.read32(0x1F801544u) == 0x10001u &&
+                        memory.read32(0x1F801548u) == 0x201u,
+                    "sceSetSliceDMA should program MADR, BCR and CHCR without starting the channel") ||
+            !expect(!std::filesystem::exists(image), "no SIO2 byte should move before sceStartDMA"))
+            return false;
+        (void)call(32u, kChannelSio2In);
+
+        memory.write32(kStack + 16u, 0u); // direction: to memory
+        (void)call(28u, kChannelSio2Out, kReplyBuffer, 1u, 1u);
+        (void)call(32u, kChannelSio2Out);
+
+        uint8_t reply[4] = {};
+        (void)memory.readRam(kReplyBuffer, reply, sizeof(reply));
+        bool sio2InIrq = false;
+        bool sio2OutIrq = false;
+        while (const auto start = memory.takeDmaStart())
+        {
+            sio2InIrq = sio2InIrq || start->irq == 0x2C;
+            sio2OutIrq = sio2OutIrq || start->irq == 0x2D;
+        }
+        const bool created = std::filesystem::exists(image);
+        std::filesystem::remove(image, ec);
+        return expect(created, "the DMA-fed probe should reach the memory card") &&
+               expect(reply[2] == 0x2B && reply[3] == 0x55, "the SIO2out DMA should deliver the probe reply to IOP RAM") &&
+               expect((memory.read32(0x1F801548u) & 0x01000000u) == 0u && (memory.read32(0x1F801558u) & 0x01000000u) == 0u,
+                      "finished channels should clear their CHCR start bit") &&
+               expect(sio2InIrq && sio2OutIrq, "both SIO2 DMA channels should raise their completion interrupts") &&
+               expect(call(9u, kChannelSio2Out) == memory.read32(0x1F801558u), "dmac_ch_get_chcr should read the channel register") &&
+               expect(call(28u, 6u, kSendBuffer, 1u, 1u) == 0u, "sceSetSliceDMA must reject the OTC channel");
+    }
 }
 
 int main()
 {
     if (!testLoadcoreRebootLibraryMode() || !testCdvdSpecialControl() || !testCdvdSearchFile() ||
         !testTimrmanPeriodicCallback() || !testSio2MemoryCard() || !testSliceEndDoesNotHandTheCpuToAnEqualPriorityThread() ||
-        !testSliceEndInsideCpuSuspendIntrResumesSameThread() || !testSpu2AutoDmaCompletesAtPlaybackRate())
+        !testSliceEndInsideCpuSuspendIntrResumesSameThread() || !testSpu2AutoDmaCompletesAtPlaybackRate() ||
+        !testDmacmanDrivesSio2Dma() || !testSio2DualShock2() || !testSifGetOtherData() || !testUnalignedLoadPair())
         return 1;
     std::cout << "ps2xIOP import tests passed\n";
     return 0;

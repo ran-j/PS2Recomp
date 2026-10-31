@@ -48,8 +48,26 @@ namespace ps2x::iop::detail
         size_t m_transferAddress = 0;
     };
 
+    // A DualShock 2 at rest. Real input reaches the game through the EE-side pad library, but IOP drivers
+    // such as sio2d judge the bus by the controller in port 1, as on a console where one is always plugged in.
+    class IopDualShock2
+    {
+    public:
+        void reset() noexcept;
+        // Answers one packet (command byte first, after the 0x01 address byte) with a reply of equal length.
+        void transfer(const std::deque<uint8_t> &command, std::deque<uint8_t> &reply);
+
+    private:
+        [[nodiscard]] uint8_t modeId() const noexcept;
+
+        bool m_analog = false;
+        bool m_config = false;
+        bool m_pressure = false;
+        std::array<uint8_t, 6> m_vibrationMap{0x00, 0x01, 0xFF, 0xFF, 0xFF, 0xFF};
+    };
+
     // SIO2 serial controller (0x1F808200-0x1F808280) with DMA channels 11 (in) and 12 (out).
-    // Only memory cards are attached: pads are served at the EE level, so pad traffic reads as disconnected.
+    // Port 0 holds a DualShock 2 and slot 1 a memory card; the second pad port stays empty.
     class IopSio2
     {
     public:
@@ -78,6 +96,7 @@ namespace ps2x::iop::detail
         void softReset();
         void process();
         void memoryCard();
+        void pad();
 
         std::array<uint32_t, 16> m_send3{};
         std::array<uint32_t, 4> m_send1{};
@@ -101,5 +120,6 @@ namespace ps2x::iop::detail
         bool m_queueComplete = false;
 
         std::array<IopMemoryCard, 2> m_cards;
+        IopDualShock2 m_pad;
     };
 }

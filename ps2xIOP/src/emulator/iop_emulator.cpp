@@ -1,5 +1,6 @@
 #include "iop_emulator.h"
 #include "imports/iop_cdvd.h"
+#include "imports/iop_dmacman.h"
 #include "core/iop_cpu.h"
 #include "imports/iop_heaplib.h"
 #include "imports/iop_imports.h"
@@ -38,6 +39,7 @@ namespace ps2x::iop::detail
         constexpr uint32_t kCallStackSize = 0x2000u;
         constexpr uint32_t kCallStackCapacity = (kCallStackLimit - kCallStackBase) / kCallStackSize;
         constexpr uint64_t kCdvdCompletionCycles = 128u;
+        constexpr uint64_t kSifDmaCompletionCycles = 128u;
 
         uint32_t physicalAddress(uint32_t address)
         {
@@ -106,6 +108,7 @@ namespace ps2x::iop::detail
               stdio(host, memory),
               heaplib(memory),
               intrman(memory),
+              dmacman(memory),
               timrman(),
               ioman(memory),
               cpuCore(memory),
@@ -326,6 +329,14 @@ namespace ps2x::iop::detail
                     secrMcDevIdHandler = {a0, cpu.gpr[28]};
                     setV0(0);
                     return ImportDisposition::Handled;
+                case 6: // SecrAuthCard(port, slot, cnum)
+                    // Without the ROM's MagicGate keys the handshake cannot be replayed; the emulated
+                    // card is genuine by construction, so report it authenticated as the BIOS would.
+                    setV0(1);
+                    return ImportDisposition::Handled;
+                case 7: // SecrResetAuthCard
+                    setV0(0);
+                    return ImportDisposition::Handled;
                 default:
                     break;
                 }
@@ -338,6 +349,20 @@ namespace ps2x::iop::detail
             }
             if (iequals(call.library, "ioman") && ioman.dispatchImport(call.ordinal, cpu, *this))
                 return ImportDisposition::Handled;
+            if (iequals(call.library, "sifman") && call.ordinal == 32u)
+            {
+                // sceSifSetDmaIntr(transfers, count, callback, argument): the copy is sceSifSetDma's,
+                // and completion runs the callback as the SIF0 DMA interrupt would.
+                const uint32_t callback = cpu.gpr[6];
+                const uint32_t argument = cpu.gpr[7];
+                (void)rpc.dispatchSifManImport(7u, cpu);
+                if (cpu.gpr[2] != 0u && callback != 0u)
+                {
+                    pendingGuestCallbacks.emplace(totalCycles + kSifDmaCompletionCycles,
+                                                  ScheduledGuestCallback{callback, cpu.gpr[28], argument});
+                }
+                return ImportDisposition::Handled;
+            }
             if (iequals(call.library, "sifman"))
             {
                 return rpc.dispatchSifManImport(call.ordinal, cpu)
@@ -348,9 +373,10 @@ namespace ps2x::iop::detail
                 return ImportDisposition::Handled;
             if (iequals(call.library, "timrman") && timrman.dispatchImport(call.ordinal, cpu, totalCycles))
                 return ImportDisposition::Handled;
-            if (iequals(call.library, "dmacman"))
+            if (iequals(call.library, "dmacman") && dmacman.dispatchImport(call.ordinal, cpu))
             {
-                setV0(0);
+                // A started channel (SIO2, SPU) queues its completion here, before the caller resumes.
+                schedulePendingDma();
                 return ImportDisposition::Handled;
             }
             if (iequals(call.library, "stdio") && stdio.dispatchImport(call.ordinal, cpu))
@@ -807,6 +833,7 @@ namespace ps2x::iop::detail
         IopStdio stdio;
         IopHeaplib heaplib;
         IopIntrman intrman;
+        IopDmacman dmacman;
         IopTimrman timrman;
         IopIoman ioman;
         IopCpuCore cpuCore;

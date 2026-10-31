@@ -244,9 +244,25 @@ namespace ps2x::iop::detail
             m_kernel.sleepCurrent(cpu);
             setV0(0);
             return true;
-        case 23:
+        case 23: // sceSifGetOtherData(receiveData, eeSource, iopDestination, size, mode)
+        {
+            // Servers pull large payloads (e.g. memory card writes) straight from EE memory.
+            const uint32_t source = cpu.gpr[5];
+            const uint32_t destination = cpu.gpr[6];
+            const int32_t size = static_cast<int32_t>(cpu.gpr[7]);
+            if (size > 0)
+            {
+                std::vector<uint8_t> payload(static_cast<size_t>(size));
+                if (!m_host.readGuest(source, payload.data(), payload.size()) ||
+                    !m_memory.writeRam(destination, payload.data(), payload.size()))
+                {
+                    setV0(static_cast<uint32_t>(-1));
+                    return true;
+                }
+            }
             setV0(0);
             return true;
+        }
         case 24: // RemoveRpc
         {
             const uint32_t serverData = cpu.gpr[4];
