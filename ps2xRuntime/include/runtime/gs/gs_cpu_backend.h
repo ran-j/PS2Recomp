@@ -7,6 +7,7 @@
 #include <bitset>
 #include <condition_variable>
 #include <deque>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -98,7 +99,7 @@ private:
     uint32_t ReadTextureVramUnlocked(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y);
     void WriteVramUnlocked(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value);
 
-    // Where a rasterizer pass writes and samples: all rows, or every Nth band of 8 rows on a worker.
+    // Where a rasterizer pass writes and samples: all rows, or one band (a contiguous range of rows).
     struct RasterTrace
     {
         uint32_t primitive = 0;
@@ -106,26 +107,46 @@ private:
         int x = -1;
         bool sampled = false;
     };
+    // A word a tracked batch overwrote in a page it also samples, with the pixel that overwrote it.
+    struct UndoEntry
+    {
+        uint32_t primitive = 0;
+        int y = 0;
+        int x = 0;
+        uint32_t offset = 0;
+        uint32_t old = 0;
+    };
     struct RasterContext
     {
-        uint32_t workers = 1;
-        uint32_t index = 0;
+        int rowBegin = std::numeric_limits<int>::min();
+        int rowEnd = std::numeric_limits<int>::max();
         GSMem::TexturePageCache *cache = nullptr;
         RasterTrace *trace = nullptr;
         uint32_t primitive = 0;
         // The palette as it was when a queued primitive was submitted; null uses the current CLUT.
         const uint32_t *clut = nullptr;
-        // Set when the band's cache records read positions (see RasterizeTopByteAliasInParallel).
+        // Set when the band's cache records read positions (see RasterizeTrackedInParallel).
         bool trackReads = false;
+        // Where a tracked batch logs what it overwrites in undoPages, so a cached copy can be rebuilt.
+        std::vector<UndoEntry> *undo = nullptr;
+        const std::bitset<512> *undoPages = nullptr;
 
         bool ownsRow(int y) const
         {
-            return workers == 1u || ((static_cast<uint32_t>(y) >> 3u) % workers) == index;
+            return y >= rowBegin && y < rowEnd;
+        }
+        int firstRow(int y) const
+        {
+            return y > rowBegin ? y : rowBegin;
+        }
+        int lastRow(int y) const
+        {
+            return y < rowEnd - 1 ? y : rowEnd - 1;
         }
         void beginSample(int y, int x) const
         {
             if (trackReads)
-                cache->BeginPixel(y, x);
+                cache->BeginPixel(primitive, y, x);
         }
         void sampled(int y, int x) const
         {
@@ -139,6 +160,15 @@ private:
         }
     };
     class RasterWorkers;
+    // Estimated pixels per group of 8 rows, which is the unit row ranges are split at.
+    static constexpr uint32_t kRowGroups = 256u;
+    using RowWeights = std::array<uint64_t, kRowGroups>;
+    struct RowRange
+    {
+        int begin = 0;
+        int end = 0;
+    };
+    static void BalanceRows(const RowWeights &weights, uint32_t participants, std::vector<RowRange> &ranges);
 
     void DrawPrimitive(const GSPrimitiveBatch &batch, const uint32_t *clut = nullptr);
     void DrawPrimitiveRows(const GSPrimitiveBatch &batch, const RasterContext &raster);
@@ -146,7 +176,8 @@ private:
     void QueuePrimitive(const GSPrimitiveBatch &batch);
     void FlushPendingUnlocked();
     void RasterizePendingInParallel();
-    bool RasterizeTopByteAliasInParallel(const GSPrimitiveBatch &batch);
+    void RasterizeTrackedInParallel();
+    void ClearPendingUnlocked();
     uint32_t RasterParticipants() const;
     void DrawSprite(const GSPrimitiveBatch &batch, const RasterContext &raster);
     void DrawTriangle(const GSPrimitiveBatch &batch, const RasterContext &raster);
@@ -162,6 +193,8 @@ private:
     };
 
     static PixelPipeline MakePixelPipeline(const GSDrawState &state);
+    static PixelPipeline MakePixelPipeline(const GSDrawState &state, const RasterContext &raster);
+    void RecordUndo(const PixelPipeline &pipe, const uint8_t *pixel, int x, int y);
     void WritePixel(const GSDrawState &state, int x, int y, int z, uint8_t r, uint8_t g, uint8_t b, uint8_t a, uint8_t fog);
     void WritePixel(const PixelPipeline &pipe, int x, int y, int z, uint8_t r, uint8_t g, uint8_t b, uint8_t a, uint8_t fog);
     // Texture registers decoded once per primitive, with the CLUT expanded to RGBA for indexed formats.
@@ -241,8 +274,21 @@ private:
     size_t m_pendingClutReadIndex = 0;
     std::bitset<512> m_pendingWritePages;
     std::bitset<512> m_pendingTexturePages;
+    std::bitset<512> m_pendingFramePages;
+    std::bitset<512> m_pendingDepthPages;
+    // Pages sampled whole (not just the top byte of 32-bit words), and pages written in formats that
+    // change that top byte.
+    std::bitset<512> m_pendingFullTexturePages;
+    std::bitset<512> m_pendingTopWritePages;
+    // A tracked batch samples pages it also draws (top bytes under RGB24/Z24 writes only), so it records
+    // reads and overwritten words to leave the texture page cache exactly as a serial draw would.
+    bool m_pendingTracked = false;
+    // Every queued primitive could join a tracked batch: textured sprites or triangles writing the same pages.
+    bool m_pendingTrackable = true;
+    uint64_t m_pendingSpanKey = 0;
     uint64_t m_pendingTargetKey = 0;
     uint64_t m_pendingPixels = 0;
+    RowWeights m_pendingRowWeights{};
     std::unique_ptr<RasterWorkers> m_workers;
 
     bool m_async = false;
@@ -257,4 +303,5 @@ private:
     uint32_t m_rasterParticipants = 0;
     // Rebuilds the texture cache's copied page after a parallel draw into the page it holds.
     std::vector<uint8_t> m_pageRebuildScratch;
+    std::vector<std::vector<UndoEntry>> m_undoLogs;
 };

@@ -102,12 +102,33 @@ namespace GSMem
 
         // Read tracking for a rasterizer band: remembers the page of the latest texel read and the position of
         // the latest read of any other page, which is where a sequential cache last switched pages.
+        // Positions order as a serial draw reads: by primitive, row, column, then texel within the pixel.
         struct ReadPosition
         {
+            uint32_t primitive = 0;
             int y = -1;
             int x = -1;
             uint32_t texel = 0;
             bool valid = false;
+
+            bool samePixel(const ReadPosition& other) const noexcept
+            {
+                return primitive == other.primitive && y == other.y && x == other.x;
+            }
+            bool after(const ReadPosition& other) const noexcept
+            {
+                if (!other.valid)
+                    return valid;
+                if (!valid)
+                    return false;
+                if (primitive != other.primitive)
+                    return primitive > other.primitive;
+                if (y != other.y)
+                    return y > other.y;
+                if (x != other.x)
+                    return x > other.x;
+                return texel > other.texel;
+            }
         };
         struct ReadTrack
         {
@@ -117,14 +138,18 @@ namespace GSMem
             bool switchedInsidePixel = false;
         };
 
-        void EnableTracking() noexcept
+        // Starts a band's pass with nothing cached, reading in place, and optionally tracking reads.
+        void ResetForBand(bool tracking) noexcept
         {
-            m_tracking = true;
+            Invalidate();
+            m_copyOnMiss = false;
+            m_tracking = tracking;
             m_track = {};
         }
 
-        void BeginPixel(int y, int x) noexcept
+        void BeginPixel(uint32_t primitive, int y, int x) noexcept
         {
+            m_tagPrimitive = primitive;
             m_tagY = y;
             m_tagX = x;
             m_tagTexel = 0u;
@@ -138,13 +163,13 @@ namespace GSMem
     private:
         void NoteRead(uint32_t page) noexcept
         {
-            const ReadPosition position{m_tagY, m_tagX, m_tagTexel++, true};
+            const ReadPosition position{m_tagPrimitive, m_tagY, m_tagX, m_tagTexel++, true};
             if (page != m_track.lastPage)
             {
                 if (m_track.lastPage != UINT32_MAX)
                 {
                     m_track.other = m_track.last;
-                    m_track.switchedInsidePixel = m_track.last.y == m_tagY && m_track.last.x == m_tagX;
+                    m_track.switchedInsidePixel = m_track.last.samePixel(position);
                 }
                 m_track.lastPage = page;
             }
@@ -164,6 +189,7 @@ namespace GSMem
         bool m_hasCopy = false;
         bool m_copyOnMiss = false;
         bool m_tracking = false;
+        uint32_t m_tagPrimitive = 0u;
         int m_tagY = -1;
         int m_tagX = -1;
         uint32_t m_tagTexel = 0u;

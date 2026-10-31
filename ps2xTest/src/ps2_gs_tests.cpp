@@ -2960,6 +2960,78 @@ void register_ps2_gs_tests()
             t.IsTrue(serial == render(4u, true), "a GS thread must produce byte-identical VRAM to drawing in place");
         });
 
+        tc.Run("GS row ranges balanced by pixel count draw the same as one thread", [](TestCase &t)
+        {
+            // Work piled into a few rows (and one primitive spanning all of them) moves the cuts between
+            // workers' row ranges off the even split; every split must still give the serial result.
+            auto render = [](uint32_t threads)
+            {
+                std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+                uint32_t seed = 0x5EEDu;
+                auto next = [&seed]()
+                {
+                    seed = seed * 1664525u + 1013904223u;
+                    return seed >> 8u;
+                };
+                for (uint8_t &byte : vram)
+                    byte = static_cast<uint8_t>(next());
+
+                GSCpuBackend gs;
+                gs.Initialize(vram.data(), static_cast<uint32_t>(vram.size()));
+                gs.SetRasterThreads(threads);
+                for (int i = 0; i < 400; ++i)
+                {
+                    GSPrimitiveBatch batch{};
+                    GSDrawState &state = batch.state;
+                    const bool sprite = (next() % 2u) == 0u;
+                    state.prim.type = sprite ? GS_PRIM_SPRITE : GS_PRIM_TRIANGLE;
+                    state.prim.tme = (next() % 2u) != 0u;
+                    state.prim.abe = true;
+                    state.prim.iip = true;
+                    state.prim.fst = true;
+                    auto &ctx = state.context;
+                    ctx.frame.fbp = 0u;
+                    ctx.frame.fbw = 10u;
+                    ctx.frame.psm = GS_PSM_CT32;
+                    ctx.zbuf.zbp = 150u;
+                    ctx.zbuf.psm = GS_PSM_Z24;
+                    ctx.scissor = {0u, 639u, 0u, 447u};
+                    ctx.test = (2ull << 17u) | (1ull << 16u);
+                    ctx.alpha = 0x80ull << 32u | 0x44u;
+                    ctx.tex0.psm = GS_PSM_CT32;
+                    ctx.tex0.tbp0 = 10000u;
+                    ctx.tex0.tbw = 2u;
+                    ctx.tex0.tcc = 1u;
+                    state.textureWidth = 128u;
+                    state.textureHeight = 128u;
+                    batch.vertexCount = sprite ? 2u : 3u;
+                    const bool tall = i % 50 == 0;
+                    const float band = static_cast<float>(i % 3 == 0 ? 96u : 300u);
+                    for (int v = 0; v < 3; ++v)
+                    {
+                        GSVertex &vertex = batch.vertices[static_cast<size_t>(v)];
+                        vertex.x = static_cast<float>(next() % 640u);
+                        vertex.y = tall ? static_cast<float>(next() % 448u) : band + static_cast<float>(next() % 13u);
+                        vertex.z = static_cast<double>(next() % 0xFFFFFFu);
+                        vertex.r = static_cast<uint8_t>(next());
+                        vertex.g = static_cast<uint8_t>(next());
+                        vertex.b = static_cast<uint8_t>(next());
+                        vertex.a = static_cast<uint8_t>(next());
+                        vertex.u = static_cast<uint16_t>(next() % (128u * 16u));
+                        vertex.v = static_cast<uint16_t>(next() % (128u * 16u));
+                    }
+                    gs.Submit(batch);
+                }
+                std::vector<uint8_t> out;
+                gs.SnapshotVram(out);
+                return out;
+            };
+
+            const std::vector<uint8_t> serial = render(1u);
+            for (uint32_t threads = 2u; threads <= 5u; ++threads)
+                t.IsTrue(serial == render(threads), "every row split must produce byte-identical VRAM to one thread");
+        });
+
         tc.Run("GS direct target addressing matches the generic pixel accessors", [](TestCase &t)
         {
             GSMem::InitLookupTables();
@@ -3146,6 +3218,201 @@ void register_ps2_gs_tests()
             const std::vector<uint8_t> serial = render(1u, false);
             const std::vector<uint8_t> parallel = render(4u, false);
             t.IsTrue(serial == parallel, "self-sampling RGB24 draws must leave VRAM and the texture buffer as serially");
+            t.IsTrue(serial == render(4u, true), "a GS thread must leave VRAM and the texture buffer as serially");
+        });
+
+        tc.Run("GS runs of self-sampling RGB24 primitives batched together draw the same in parallel", [](TestCase &t)
+        {
+            // Runs of overlapping T8H/T4HL/T4HH sprites and triangles that sample the top byte of the RGB24
+            // frame they draw into, mixed with ordinary textured primitives and palette loads from VRAM, and
+            // ended by an RGB24 read of the sampled texels that shows which page the texture buffer holds.
+            auto render = [](uint32_t threads, bool async)
+            {
+                std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+                uint32_t seed = 0x13579BDu;
+                auto next = [&seed]()
+                {
+                    seed = seed * 1664525u + 1013904223u;
+                    return seed >> 8u;
+                };
+                for (uint8_t &byte : vram)
+                    byte = static_cast<uint8_t>(next());
+
+                GSCpuBackend gs;
+                gs.Initialize(vram.data(), static_cast<uint32_t>(vram.size()));
+                gs.SetRasterThreads(threads);
+                gs.SetAsync(async);
+                auto loadClut = [&](uint32_t psm)
+                {
+                    GSTex0Reg clutTex{};
+                    clutTex.psm = static_cast<uint8_t>(psm);
+                    clutTex.cpsm = GS_PSM_CT32;
+                    clutTex.cbp = 13000u + (next() % 4u) * 64u;
+                    clutTex.cld = 1u;
+                    gs.LoadClut(clutTex, GSTexClutReg{});
+                };
+                loadClut(GS_PSM_T8H);
+
+                auto baseState = [&](GSPrimitiveBatch &batch)
+                {
+                    GSDrawState &state = batch.state;
+                    auto &ctx = state.context;
+                    ctx.frame.fbp = 0u;
+                    ctx.frame.fbw = 10u;
+                    ctx.frame.psm = GS_PSM_CT24;
+                    ctx.zbuf.zbp = 160u;
+                    ctx.zbuf.psm = GS_PSM_Z24;
+                    ctx.zbuf.zmask = (next() % 3u) == 0u;
+                    ctx.scissor = {0u, 639u, 0u, 447u};
+                    ctx.test = (static_cast<uint64_t>(1u + next() % 3u) << 17u) | (1ull << 16u);
+                    ctx.alpha = 0x80ull << 32u | 0x44u;
+                    ctx.tex0.tbw = 10u;
+                    ctx.tex0.tcc = 1u;
+                    ctx.tex0.cpsm = GS_PSM_CT32;
+                    state.textureWidth = 1024u;
+                    state.textureHeight = 512u;
+                    state.prim.tme = true;
+                    state.prim.fst = true;
+                };
+                auto setVertices = [&](GSPrimitiveBatch &batch, bool sprite, uint32_t x0, uint32_t y0, uint32_t w, uint32_t h,
+                                       uint32_t u0, uint32_t v0)
+                {
+                    batch.state.prim.type = sprite ? GS_PRIM_SPRITE : GS_PRIM_TRIANGLE;
+                    batch.vertexCount = sprite ? 2u : 3u;
+                    const uint32_t xs[3] = {x0, x0 + w, sprite ? 0u : x0};
+                    const uint32_t ys[3] = {y0, y0 + h, sprite ? 0u : y0 + h};
+                    const uint32_t us[3] = {u0, u0 + w, u0};
+                    const uint32_t vs[3] = {v0, v0 + h, v0 + h};
+                    for (int v = 0; v < 3; ++v)
+                    {
+                        GSVertex &vertex = batch.vertices[static_cast<size_t>(v)];
+                        vertex.x = static_cast<float>(sprite || v != 1 ? xs[v] : x0 + w);
+                        vertex.y = static_cast<float>(sprite || v != 1 ? ys[v] : y0);
+                        vertex.z = static_cast<double>(next() % 0xFFFFFFu);
+                        vertex.r = static_cast<uint8_t>(next());
+                        vertex.g = static_cast<uint8_t>(next());
+                        vertex.b = static_cast<uint8_t>(next());
+                        vertex.a = static_cast<uint8_t>(next());
+                        vertex.u = static_cast<uint16_t>(us[v] * 16u);
+                        vertex.v = static_cast<uint16_t>(vs[v] * 16u);
+                    }
+                };
+
+                for (int round = 0; round < 48; ++round)
+                {
+                    const uint32_t blockOffset = (next() % 3u) * 32u * 10u;
+                    const uint32_t topFormats[3] = {GS_PSM_T8H, GS_PSM_T4HL, GS_PSM_T4HH};
+                    const uint32_t run = 1u + next() % 8u;
+                    // The texel each run samples last, which is on the page the texture buffer ends on.
+                    uint32_t lastU = 0u, lastV = 0u;
+                    auto drawAlias = [&](uint32_t texturePsm, bool sprite, uint32_t x0, uint32_t y0, uint32_t w, uint32_t h,
+                                         uint32_t u0, uint32_t v0, bool linear)
+                    {
+                        GSPrimitiveBatch alias{};
+                        baseState(alias);
+                        alias.state.prim.abe = (next() % 2u) != 0u;
+                        alias.state.prim.iip = (next() % 2u) != 0u;
+                        alias.state.linearFilter = linear;
+                        alias.state.context.tex0.psm = static_cast<uint8_t>(texturePsm);
+                        alias.state.context.tex0.tbp0 = blockOffset;
+                        alias.state.context.tex0.tfx = static_cast<uint8_t>(next() % 2u);
+                        setVertices(alias, sprite, x0, y0, w, h, u0, v0);
+                        gs.Submit(alias);
+                        // Sprites end bottom right; these triangles end on their bottom-left corner.
+                        lastU = sprite ? u0 + w - 1u : u0;
+                        lastV = v0 + h - 1u;
+                    };
+                    uint32_t texturePsm = GS_PSM_T8H;
+                    for (uint32_t k = 0; k < run; ++k)
+                    {
+                        texturePsm = topFormats[next() % 3u];
+                        if ((next() % 3u) == 0u)
+                            loadClut(texturePsm);
+                        if ((next() % 4u) == 0u)
+                        {
+                            // An ordinary primitive sampling a texture far from the frame joins the run.
+                            GSPrimitiveBatch plain{};
+                            baseState(plain);
+                            plain.state.context.tex0.psm = GS_PSM_CT32;
+                            plain.state.context.tex0.tbp0 = 11000u;
+                            plain.state.context.tex0.tbw = 2u;
+                            plain.state.textureWidth = 128u;
+                            plain.state.textureHeight = 128u;
+                            plain.state.prim.abe = true;
+                            setVertices(plain, (next() % 2u) != 0u, next() % 500u, next() % 380u, 64u + next() % 64u,
+                                        64u + next() % 32u, next() % 60u, next() % 60u);
+                            gs.Submit(plain);
+                        }
+                        const uint32_t x0 = next() % 500u;
+                        const uint32_t y0 = next() % 380u;
+                        const uint32_t w = 64u + next() % 120u;
+                        const uint32_t h = 64u + next() % 60u;
+                        const bool overlay = (next() % 3u) != 0u;
+                        drawAlias(texturePsm, (next() % 2u) != 0u, x0, y0, w, h, overlay ? x0 : next() % 500u, overlay ? y0 : next() % 380u,
+                                  (next() % 3u) == 0u);
+                    }
+                    const uint32_t tileX = lastU & ~63u;
+                    const uint32_t tileY = lastV & ~31u;
+                    const uint32_t ending = next() % 3u;
+                    if (ending == 0u)
+                    {
+                        // A palette load, then a sprite that samples only the page the run ended on: the load
+                        // is the cache's last switch away from that page.
+                        loadClut(texturePsm);
+                        drawAlias(texturePsm, true, tileX + 8u, tileY + 4u, 40u, 20u, tileX + 8u, tileY + 4u, false);
+                    }
+                    else if (ending == 1u && tileX >= 64u)
+                    {
+                        // A filtered sprite across the left edge of that page, sampling one texel to the left of
+                        // each pixel: the pixel on the edge reads the page to the left, then this one, and draws
+                        // into this one, so the last switch happens inside a pixel.
+                        drawAlias(texturePsm, true, tileX - 8u, tileY + 4u, 40u, 20u, tileX - 9u, tileY + 4u, true);
+                        lastU = tileX;
+                    }
+
+                    // Copy, through RGB24, the whole page holding the texel the run sampled last (where the
+                    // texture buffer ends) and one at random into a buffer of their own, one row of pages per round.
+                    for (int k = 0; k < 2; ++k)
+                    {
+                        GSPrimitiveBatch probe{};
+                        baseState(probe);
+                        probe.state.prim.type = GS_PRIM_SPRITE;
+                        probe.state.context.frame.fbp = 415u;
+                        probe.state.context.frame.fbw = 2u;
+                        probe.state.context.tex0.psm = GS_PSM_CT24;
+                        probe.state.context.tex0.tbp0 = blockOffset;
+                        probe.state.context.tex0.tfx = 1u;
+                        probe.state.context.zbuf.zmask = true;
+                        probe.state.context.test = 0x30000ull;
+                        probe.state.context.scissor = {0u, 127u, 0u, 1535u};
+                        probe.state.prim.abe = false;
+                        probe.vertexCount = 2u;
+                        const uint32_t pu = (k == 0 ? lastU : next() % 640u) & ~63u;
+                        const uint32_t pv = (k == 0 ? lastV : next() % 448u) & ~31u;
+                        const uint32_t px = static_cast<uint32_t>(k) * 64u;
+                        const uint32_t py = static_cast<uint32_t>(round) * 32u;
+                        probe.vertices[0].x = static_cast<float>(px);
+                        probe.vertices[0].y = static_cast<float>(py);
+                        probe.vertices[1].x = static_cast<float>(px + 64u);
+                        probe.vertices[1].y = static_cast<float>(py + 32u);
+                        probe.vertices[1].r = probe.vertices[1].g = probe.vertices[1].b = probe.vertices[1].a = 0x80u;
+                        probe.vertices[0].u = static_cast<uint16_t>(pu * 16u);
+                        probe.vertices[0].v = static_cast<uint16_t>(pv * 16u);
+                        probe.vertices[1].u = static_cast<uint16_t>((pu + 64u) * 16u);
+                        probe.vertices[1].v = static_cast<uint16_t>((pv + 32u) * 16u);
+                        gs.Submit(probe);
+                    }
+                    if (round % 13 == 12)
+                        gs.TextureFlush();
+                }
+                std::vector<uint8_t> out;
+                gs.SnapshotVram(out);
+                return out;
+            };
+
+            const std::vector<uint8_t> serial = render(1u, false);
+            t.IsTrue(serial == render(4u, false), "batched self-sampling draws must leave VRAM and the texture buffer as serially");
+            t.IsTrue(serial == render(3u, false), "any number of row ranges must leave VRAM and the texture buffer as serially");
             t.IsTrue(serial == render(4u, true), "a GS thread must leave VRAM and the texture buffer as serially");
         });
 

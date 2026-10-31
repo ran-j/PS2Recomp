@@ -615,6 +615,19 @@ public:
 
     uint32_t participants() const { return m_participants; }
 
+    // Runs band(i) for i in [0, bands), each once, with every participant taking the next band as it
+    // finishes one, so a band that was estimated low does not leave the others waiting.
+    void runBands(uint32_t bands, const std::function<void(uint32_t)> &band)
+    {
+        std::atomic<uint32_t> next{0u};
+        const std::function<void(uint32_t)> job = [&](uint32_t)
+        {
+            for (uint32_t i = next.fetch_add(1u, std::memory_order_relaxed); i < bands; i = next.fetch_add(1u, std::memory_order_relaxed))
+                band(i);
+        };
+        run(job);
+    }
+
     // Runs job(i) for every participant; the caller is participant 0.
     void run(const std::function<void(uint32_t)> &job)
     {
@@ -681,6 +694,9 @@ namespace
     }
 
     constexpr size_t kMaxPendingPrimitives = 8192u;
+    // Row ranges per participant: pixel estimates are only bounding boxes, so finer ranges taken on
+    // demand even out what the estimate gets wrong.
+    constexpr uint32_t kBandsPerWorker = 4u;
     constexpr uint64_t kMaxPendingPixels = 1u << 22u;
     // Below this, waking the workers costs more than drawing the batch on the calling thread.
     constexpr uint64_t kMinParallelPixels = 16384u;
@@ -697,9 +713,6 @@ namespace
         return psm == GS_PSM_CT24 || psm == GS_PSM_Z24;
     }
 
-    // Below this, a self-sampling primitive is cheaper to draw on the calling thread.
-    constexpr uint64_t kMinParallelAliasPixels = 4096u;
-
     void markPages(std::bitset<512> &pages, const PageSpan &span)
     {
         for (uint32_t i = 0; i < span.count; ++i)
@@ -713,6 +726,95 @@ namespace
                 return true;
         return false;
     }
+
+    struct PixelBounds
+    {
+        int x0 = 0;
+        int y0 = 0;
+        int x1 = -1;
+        int y1 = -1;
+
+        bool empty() const { return x1 < x0 || y1 < y0; }
+        uint64_t area() const { return empty() ? 0u : static_cast<uint64_t>(x1 - x0 + 1) * static_cast<uint64_t>(y1 - y0 + 1); }
+    };
+
+    // Pixels a primitive can draw: its vertex box (rounded outwards, as every rasterizer stays inside it)
+    // within the scissor.
+    PixelBounds primitiveBounds(const GSPrimitiveBatch &batch)
+    {
+        const auto &ctx = batch.state.context;
+        float minX = batch.vertices[0].x, maxX = minX, minY = batch.vertices[0].y, maxY = minY;
+        for (uint32_t i = 1; i < std::min<uint32_t>(batch.vertexCount, 3u); ++i)
+        {
+            minX = std::min(minX, batch.vertices[i].x);
+            maxX = std::max(maxX, batch.vertices[i].x);
+            minY = std::min(minY, batch.vertices[i].y);
+            maxY = std::max(maxY, batch.vertices[i].y);
+        }
+        auto toPixel = [](double value, int offset, int lo, int hi)
+        {
+            const double pixel = value - static_cast<double>(offset);
+            if (!(pixel >= static_cast<double>(lo)))
+                return lo;
+            if (pixel > static_cast<double>(hi))
+                return hi;
+            return static_cast<int>(pixel);
+        };
+        const int ofx = static_cast<int>(ctx.xyoffset.ofx >> 4);
+        const int ofy = static_cast<int>(ctx.xyoffset.ofy >> 4);
+        const int sx0 = static_cast<int>(ctx.scissor.x0), sx1 = static_cast<int>(ctx.scissor.x1);
+        const int sy0 = static_cast<int>(ctx.scissor.y0), sy1 = static_cast<int>(ctx.scissor.y1);
+        PixelBounds bounds;
+        if (std::isnan(minX) || std::isnan(maxX) || std::isnan(minY) || std::isnan(maxY))
+            return {sx0, sy0, sx1, sy1};
+        if (maxX - ofx < sx0 || minX - ofx > sx1 + 1 || maxY - ofy < sy0 || minY - ofy > sy1 + 1)
+            return bounds;
+        bounds.x0 = toPixel(std::floor(static_cast<double>(minX)), ofx, sx0, sx1);
+        bounds.x1 = toPixel(std::ceil(static_cast<double>(maxX)), ofx, sx0, sx1);
+        bounds.y0 = toPixel(std::floor(static_cast<double>(minY)), ofy, sy0, sy1);
+        bounds.y1 = toPixel(std::ceil(static_cast<double>(maxY)), ofy, sy0, sy1);
+        return bounds;
+    }
+
+    // Each row also costs some setup besides its pixels.
+    constexpr uint64_t kRowCost = 8u;
+
+    void addRowWeights(std::array<uint64_t, 256> &weights, const PixelBounds &bounds)
+    {
+        if (bounds.empty())
+            return;
+        const uint64_t width = static_cast<uint64_t>(bounds.x1 - bounds.x0 + 1) + kRowCost;
+        for (int group = bounds.y0 >> 3; group <= (bounds.y1 >> 3) && group < 256; ++group)
+        {
+            const int rows = std::min(bounds.y1, group * 8 + 7) - std::max(bounds.y0, group * 8) + 1;
+            weights[static_cast<size_t>(group)] += width * static_cast<uint64_t>(rows);
+        }
+    }
+}
+
+void GSCpuBackend::BalanceRows(const RowWeights &weights, uint32_t participants, std::vector<RowRange> &ranges)
+{
+    // Contiguous ranges keep each band's writes together; cuts fall between 8-row groups, which no
+    // swizzled block straddles.
+    ranges.assign(participants, RowRange{});
+    uint64_t total = 0u;
+    for (uint64_t weight : weights)
+        total += weight;
+    uint64_t sum = 0u;
+    uint32_t band = 0u;
+    int begin = std::numeric_limits<int>::min();
+    for (uint32_t group = 0; group < kRowGroups && band + 1u < participants; ++group)
+    {
+        sum += weights[group];
+        while (band + 1u < participants && sum * participants >= total * (band + 1u))
+        {
+            const int end = static_cast<int>((group + 1u) * 8u);
+            ranges[band] = {begin, end};
+            begin = end;
+            ++band;
+        }
+    }
+    ranges[band] = {begin, std::numeric_limits<int>::max()};
 }
 
 GSCpuBackend::~GSCpuBackend()
@@ -740,49 +842,91 @@ void GSCpuBackend::QueuePrimitive(const GSPrimitiveBatch &batch)
     const uint32_t maxX = ctx.scissor.x1;
     const uint32_t maxY = ctx.scissor.y1;
     const uint32_t fbw = std::max<u32>(ctx.frame.fbw, 1u);
-    const PageSpan frameSpan = pageSpan(GSInternal::framePageBaseToBlock(ctx.frame.fbp), fbw, ctx.frame.psm, 0u, 0u, maxX, maxY);
-    const PageSpan depthSpan = pageSpan(GSInternal::framePageBaseToBlock(ctx.zbuf.zbp), fbw, ctx.zbuf.psm, 0u, 0u, maxX, maxY);
-    const PageSpan &frame = frameSpan;
-    const PageSpan &depth = depthSpan;
+    const PageSpan frame = pageSpan(GSInternal::framePageBaseToBlock(ctx.frame.fbp), fbw, ctx.frame.psm, 0u, 0u, maxX, maxY);
+    const PageSpan depth = pageSpan(GSInternal::framePageBaseToBlock(ctx.zbuf.zbp), fbw, ctx.zbuf.psm, 0u, 0u, maxX, maxY);
     PageSpan texture{};
     if (state.prim.tme)
     {
         const auto &tex = ctx.tex0;
         const uint32_t extentU = (ctx.clamp & 0x2u) != 0u ? 1024u : std::max<uint32_t>(state.textureWidth, 1u);
         const uint32_t extentV = ((ctx.clamp >> 2) & 0x2u) != 0u ? 1024u : std::max<uint32_t>(state.textureHeight, 1u);
-        const PageSpan span = pageSpan(tex.tbp0, tex.tbw, tex.psm, 0u, 0u, extentU - 1u, extentV - 1u);
-        texture = span;
+        texture = pageSpan(tex.tbp0, tex.tbw, tex.psm, 0u, 0u, extentU - 1u, extentV - 1u);
     }
+    // T8H/T4HL/T4HH sample only the top byte of 32-bit words, which RGB24/Z24 writes leave alone, so
+    // such reads do not depend on the order of those writes.
+    const bool topReader = texture.count != 0u && readsTopByteOnly(ctx.tex0.psm);
+    const PageSpan frameTop = keepsTopByte(ctx.frame.psm) ? PageSpan{} : frame;
+    const PageSpan depthTop = keepsTopByte(ctx.zbuf.psm) ? PageSpan{} : depth;
+    auto readsChanged = [&](const PageSpan &written, const PageSpan &writtenTop)
+    {
+        return topReader ? spansOverlap(texture, writtenTop) : spansOverlap(texture, written);
+    };
 
-    // Pixels of one primitive map to distinct memory only if colour and depth do not alias each other,
-    // and rows can be split only if the primitive never samples what it draws.
-    const bool selfOverlap = spansOverlap(frameSpan, depthSpan) ||
-                             (texture.count != 0u && (spansOverlap(texture, frameSpan) || spansOverlap(texture, depthSpan)));
-    if (selfOverlap)
+    // A pixel's colour and depth must not share memory, and the primitive must not sample anything its
+    // own writes change; otherwise it is drawn alone, in order.
+    if (spansOverlap(frame, depth) || (texture.count != 0u && (readsChanged(frame, frameTop) || readsChanged(depth, depthTop))))
     {
         FlushPendingUnlocked();
-        const bool topByteAlias = !spansOverlap(frameSpan, depthSpan) && readsTopByteOnly(ctx.tex0.psm) &&
-                                  (!spansOverlap(texture, frameSpan) || keepsTopByte(ctx.frame.psm)) &&
-                                  (!spansOverlap(texture, depthSpan) || keepsTopByte(ctx.zbuf.psm));
-        if (!topByteAlias || !RasterizeTopByteAliasInParallel(batch))
-            DrawPrimitive(batch);
+        DrawPrimitive(batch);
+        return;
+    }
+    const bool selfAlias = texture.count != 0u && (spansOverlap(texture, frame) || spansOverlap(texture, depth));
+    // Tracked batches log overwritten words through direct target addressing, and rely on every
+    // primitive reading a texel before writing a pixel and on all of them writing the same pages.
+    const bool samplesEveryPixel = state.prim.type == GS_PRIM_SPRITE || state.prim.type == GS_PRIM_TRIANGLE ||
+                                   state.prim.type == GS_PRIM_TRISTRIP || state.prim.type == GS_PRIM_TRIFAN;
+    const bool trackable = state.prim.tme && samplesEveryPixel && GSMem::TargetPixelOffset(ctx.frame.psm) && GSMem::TargetPixelOffset(ctx.zbuf.psm);
+    if (selfAlias && !trackable)
+    {
+        FlushPendingUnlocked();
+        DrawPrimitive(batch);
         return;
     }
 
     // Every queued primitive must address colour and depth the same way, so a pixel's bytes stay on the
-    // row band that owns the pixel.
+    // row range that owns the pixel.
     const uint64_t targetKey = (static_cast<uint64_t>(ctx.frame.fbp) << 0u) ^ (static_cast<uint64_t>(fbw) << 12u) ^
                                (static_cast<uint64_t>(ctx.frame.psm) << 20u) ^ (static_cast<uint64_t>(ctx.zbuf.zbp) << 28u) ^
                                (static_cast<uint64_t>(ctx.zbuf.psm) << 40u) ^ (1ull << 63u);
-    if (!m_pending.empty() &&
-        (targetKey != m_pendingTargetKey || anyPage(m_pendingWritePages, texture) ||
-         anyPage(m_pendingTexturePages, frame) || anyPage(m_pendingTexturePages, depth)))
-        FlushPendingUnlocked();
+    const uint64_t spanKey = (static_cast<uint64_t>(frame.first) << 0u) | (static_cast<uint64_t>(frame.count) << 16u) |
+                             (static_cast<uint64_t>(depth.first) << 32u) | (static_cast<uint64_t>(depth.count) << 48u);
+    auto aliasesPending = [&]()
+    {
+        return selfAlias || anyPage(m_pendingWritePages, texture) || anyPage(m_pendingTexturePages, frame) ||
+               anyPage(m_pendingTexturePages, depth);
+    };
+    if (!m_pending.empty())
+    {
+        const bool readsPendingWrites = topReader ? anyPage(m_pendingTopWritePages, texture) : anyPage(m_pendingWritePages, texture);
+        const bool writesPendingReads = anyPage(m_pendingFullTexturePages, frame) || anyPage(m_pendingFullTexturePages, depth) ||
+                                        anyPage(m_pendingTexturePages, frameTop) || anyPage(m_pendingTexturePages, depthTop);
+        const bool tracked = m_pendingTracked || aliasesPending();
+        // An untracked batch that already let a palette load read VRAM cannot become tracked (see LoadClutNow).
+        const bool canTrack = m_pendingTrackable && trackable && spanKey == m_pendingSpanKey &&
+                              (m_pendingTracked || m_pendingClutReadIndex == 0u);
+        if (targetKey != m_pendingTargetKey || anyPage(m_pendingDepthPages, frame) || anyPage(m_pendingFramePages, depth) ||
+            readsPendingWrites || writesPendingReads || (tracked && !canTrack))
+            FlushPendingUnlocked();
+    }
+    if (m_pending.empty())
+    {
+        m_pendingSpanKey = spanKey;
+        m_pendingTrackable = trackable;
+    }
+    m_pendingTrackable = m_pendingTrackable && trackable && spanKey == m_pendingSpanKey;
+    if (aliasesPending())
+        m_pendingTracked = true;
 
     m_pendingTargetKey = targetKey;
     markPages(m_pendingWritePages, frame);
     markPages(m_pendingWritePages, depth);
+    markPages(m_pendingFramePages, frame);
+    markPages(m_pendingDepthPages, depth);
+    markPages(m_pendingTopWritePages, frameTop);
+    markPages(m_pendingTopWritePages, depthTop);
     markPages(m_pendingTexturePages, texture);
+    if (!topReader)
+        markPages(m_pendingFullTexturePages, texture);
     int32_t clutIndex = -1;
     if (state.prim.tme && (isFourBitIndexedPsm(ctx.tex0.psm) || isEightBitIndexedPsm(ctx.tex0.psm)))
     {
@@ -801,199 +945,30 @@ void GSCpuBackend::QueuePrimitive(const GSPrimitiveBatch &batch)
     }
     m_pendingClutIndex.push_back(clutIndex);
     m_pending.push_back(batch);
-    const uint64_t width = static_cast<uint64_t>(maxX >= ctx.scissor.x0 ? maxX - ctx.scissor.x0 + 1u : 1u);
-    const uint64_t height = static_cast<uint64_t>(maxY >= ctx.scissor.y0 ? maxY - ctx.scissor.y0 + 1u : 1u);
-    uint64_t estimate = width * height;
-    if (batch.vertexCount >= 2u)
-    {
-        float minX = batch.vertices[0].x, maxXf = batch.vertices[0].x, minY = batch.vertices[0].y, maxYf = batch.vertices[0].y;
-        for (uint32_t i = 1; i < std::min<uint32_t>(batch.vertexCount, 3u); ++i)
-        {
-            minX = std::min(minX, batch.vertices[i].x);
-            maxXf = std::max(maxXf, batch.vertices[i].x);
-            minY = std::min(minY, batch.vertices[i].y);
-            maxYf = std::max(maxYf, batch.vertices[i].y);
-        }
-        const double area = (static_cast<double>(maxXf) - minX + 1.0) * (static_cast<double>(maxYf) - minY + 1.0);
-        if (area >= 0.0 && area < static_cast<double>(estimate))
-            estimate = static_cast<uint64_t>(area);
-    }
-    m_pendingPixels += estimate;
+    const PixelBounds bounds = primitiveBounds(batch);
+    addRowWeights(m_pendingRowWeights, bounds);
+    m_pendingPixels += bounds.area();
     if (m_pending.size() >= kMaxPendingPrimitives || m_pendingPixels >= kMaxPendingPixels)
         FlushPendingUnlocked();
 }
 
-bool GSCpuBackend::RasterizeTopByteAliasInParallel(const GSPrimitiveBatch &batch)
+void GSCpuBackend::ClearPendingUnlocked()
 {
-    // The primitive samples top bytes of words it rewrites below them, so every pixel comes out the same
-    // drawn in any order. What a sequential draw also leaves behind is the texture cache: it copies each
-    // drawn-over page when loading it, so the page it ends on can hold words as they were mid-primitive.
-    const GSDrawState &state = batch.state;
-    const auto &ctx = state.context;
-    float minX = batch.vertices[0].x, maxX = minX, minY = batch.vertices[0].y, maxY = minY;
-    for (uint32_t i = 1; i < std::min<uint32_t>(batch.vertexCount, 3u); ++i)
-    {
-        minX = std::min(minX, batch.vertices[i].x);
-        maxX = std::max(maxX, batch.vertices[i].x);
-        minY = std::min(minY, batch.vertices[i].y);
-        maxY = std::max(maxY, batch.vertices[i].y);
-    }
-    const double area = (static_cast<double>(maxX) - minX + 1.0) * (static_cast<double>(maxY) - minY + 1.0);
-    if (RasterParticipants() <= 1u || !(area >= static_cast<double>(kMinParallelAliasPixels)))
-        return false;
-    if (!m_texturePageCache.MatchesVram(m_vram))
-        return false;
-
-    const uint32_t scissorX = ctx.scissor.x1;
-    const uint32_t scissorY = ctx.scissor.y1;
-    const uint32_t fbw = std::max<u32>(ctx.frame.fbw, 1u);
-    const uint32_t frameBlock = GSInternal::framePageBaseToBlock(ctx.frame.fbp);
-    const uint32_t depthBlock = GSInternal::framePageBaseToBlock(ctx.zbuf.zbp);
-    const PageSpan frame = pageSpan(frameBlock, fbw, ctx.frame.psm, 0u, 0u, scissorX, scissorY);
-    const PageSpan depth = pageSpan(depthBlock, fbw, ctx.zbuf.psm, 0u, 0u, scissorX, scissorY);
-    const uint32_t extentU = (ctx.clamp & 0x2u) != 0u ? 1024u : std::max<uint32_t>(state.textureWidth, 1u);
-    const uint32_t extentV = ((ctx.clamp >> 2) & 0x2u) != 0u ? 1024u : std::max<uint32_t>(state.textureHeight, 1u);
-    const PageSpan texture = pageSpan(ctx.tex0.tbp0, ctx.tex0.tbw, ctx.tex0.psm, 0u, 0u, extentU - 1u, extentV - 1u);
-
-    // Sequentially, a cached page in place that is about to be drawn over is snapshotted first.
-    uint32_t livePage = 0u;
-    if (m_texturePageCache.LivePage(livePage))
-    {
-        const uint32_t page = livePage / GSMem::TexturePageCache::kPageSize;
-        if (spanHasPage(frame, page) || spanHasPage(depth, page))
-            m_texturePageCache.Snapshot(m_vram);
-    }
-
-    // Keep the pages that are both sampled and drawn, as they were before drawing.
-    std::vector<uint32_t> keptPages;
-    for (uint32_t i = 0; i < texture.count; ++i)
-    {
-        const uint32_t page = (texture.first + i) % kVramPageCount;
-        if (spanHasPage(frame, page) || spanHasPage(depth, page))
-            keptPages.push_back(page);
-    }
-    std::vector<uint8_t> before(keptPages.size() * GSMem::TexturePageCache::kPageSize);
-    for (size_t i = 0; i < keptPages.size(); ++i)
-        std::memcpy(before.data() + i * GSMem::TexturePageCache::kPageSize,
-                    m_vram + keptPages[i] * GSMem::TexturePageCache::kPageSize, GSMem::TexturePageCache::kPageSize);
-
-    if (!m_workers || m_workers->participants() != RasterParticipants())
-        m_workers = std::make_unique<RasterWorkers>(RasterParticipants());
-    const uint32_t participants = m_workers->participants();
-    std::vector<GSMem::TexturePageCache> caches(participants);
-    std::vector<RasterTrace> traces(participants);
-    for (GSMem::TexturePageCache &cache : caches)
-        cache.EnableTracking();
-    const std::function<void(uint32_t)> job = [&](uint32_t index)
-    {
-        RasterContext raster{};
-        raster.workers = participants;
-        raster.index = index;
-        raster.cache = &caches[index];
-        raster.trace = &traces[index];
-        raster.trackReads = true;
-        DrawPrimitiveRows(batch, raster);
-    };
-    m_workers->run(job);
-
-    // The page of the last texel read in raster order is where the sequential cache ends.
-    int lastBand = -1;
-    for (uint32_t i = 0; i < participants; ++i)
-    {
-        const auto &track = caches[i].Track();
-        if (!track.last.valid)
-            continue;
-        if (lastBand < 0)
-        {
-            lastBand = static_cast<int>(i);
-            continue;
-        }
-        const auto &best = caches[static_cast<size_t>(lastBand)].Track().last;
-        if (track.last.y > best.y || (track.last.y == best.y && track.last.x > best.x))
-            lastBand = static_cast<int>(i);
-    }
-    if (lastBand < 0)
-        return true;
-    const uint32_t lastPage = caches[static_cast<size_t>(lastBand)].Track().lastPage;
-    const uint32_t lastPageIndex = lastPage / GSMem::TexturePageCache::kPageSize;
-    const auto kept = std::find(keptPages.begin(), keptPages.end(), lastPageIndex);
-    if (kept == keptPages.end())
-    {
-        // Not drawn over: the sequential cache would read it in place.
-        m_texturePageCache.SetLivePage(lastPage);
-        return true;
-    }
-
-    // The sequential cache copied lastPage after its latest read of any other page. Find that read.
-    GSMem::TexturePageCache::ReadPosition switchRead{};
-    bool switchInsidePixel = false;
-    auto later = [](const GSMem::TexturePageCache::ReadPosition &a, const GSMem::TexturePageCache::ReadPosition &b)
-    {
-        if (!b.valid)
-            return a.valid;
-        if (!a.valid)
-            return false;
-        if (a.y != b.y)
-            return a.y > b.y;
-        if (a.x != b.x)
-            return a.x > b.x;
-        return a.texel > b.texel;
-    };
-    for (uint32_t i = 0; i < participants; ++i)
-    {
-        const auto &track = caches[i].Track();
-        if (!track.last.valid)
-            continue;
-        // A band ending on another page read that page last; one ending on lastPage read others before.
-        const GSMem::TexturePageCache::ReadPosition candidate = track.lastPage != lastPage ? track.last : track.other;
-        const bool inside = track.lastPage != lastPage ? false : track.switchedInsidePixel;
-        if (later(candidate, switchRead))
-        {
-            switchRead = candidate;
-            switchInsidePixel = inside;
-        }
-    }
-
-    // Words drawn by pixels before the copy are as drawn; the rest still hold what they held before.
-    const size_t keptIndex = static_cast<size_t>(kept - keptPages.begin());
-    const uint8_t *beforePage = before.data() + keptIndex * GSMem::TexturePageCache::kPageSize;
-    if (!switchRead.valid)
-    {
-        m_texturePageCache.SetCopy(beforePage, lastPage);
-        return true;
-    }
-    if (m_pageRebuildScratch.size() != m_vramSize)
-        m_pageRebuildScratch.assign(m_vramSize, 0u);
-    std::memcpy(m_pageRebuildScratch.data() + lastPage, beforePage, GSMem::TexturePageCache::kPageSize);
-    auto drawnBeforeCopy = [&](int y, int x)
-    {
-        if (y != switchRead.y)
-            return y < switchRead.y;
-        return switchInsidePixel ? x < switchRead.x : x <= switchRead.x;
-    };
-    auto rebuildFrom = [&](const PageSpan &span, uint32_t baseBlock, uint32_t psm)
-    {
-        if (!spanHasPage(span, lastPageIndex))
-            return;
-        uint32_t widthShift = 6u;
-        uint32_t heightShift = 5u;
-        psmPageShift(psm, widthShift, heightShift);
-        const uint32_t stride = std::max<uint32_t>((fbw * 64u) >> widthShift, 1u);
-        const uint32_t relative = (lastPageIndex + kVramPageCount - (baseBlock / 32u) % kVramPageCount) % kVramPageCount;
-        const int tileX = static_cast<int>((relative % stride) << widthShift);
-        const int tileY = static_cast<int>((relative / stride) << heightShift);
-        for (int y = tileY; y < tileY + (1 << heightShift); ++y)
-            for (int x = tileX; x < tileX + (1 << widthShift); ++x)
-                if (drawnBeforeCopy(y, x))
-                    m_writeVramFuncs[psm & 0x3Fu](m_pageRebuildScratch.data(), baseBlock, fbw, static_cast<uint32_t>(x),
-                                                  static_cast<uint32_t>(y), ReadVramUnlocked(psm, baseBlock, fbw,
-                                                                                             static_cast<uint32_t>(x),
-                                                                                             static_cast<uint32_t>(y)));
-    };
-    rebuildFrom(frame, frameBlock, ctx.frame.psm);
-    rebuildFrom(depth, depthBlock, ctx.zbuf.psm);
-    m_texturePageCache.SetCopy(m_pageRebuildScratch.data() + lastPage, lastPage);
-    return true;
+    m_pending.clear();
+    m_pendingCluts.clear();
+    m_pendingClutIndex.clear();
+    m_pendingClutGeneration = UINT64_MAX;
+    m_pendingClutReadIndex = 0u;
+    m_pendingWritePages.reset();
+    m_pendingTexturePages.reset();
+    m_pendingFramePages.reset();
+    m_pendingDepthPages.reset();
+    m_pendingFullTexturePages.reset();
+    m_pendingTopWritePages.reset();
+    m_pendingTracked = false;
+    m_pendingTrackable = true;
+    m_pendingPixels = 0u;
+    m_pendingRowWeights.fill(0u);
 }
 
 void GSCpuBackend::FlushPendingUnlocked()
@@ -1003,7 +978,12 @@ void GSCpuBackend::FlushPendingUnlocked()
 
     bool parallel = m_pendingPixels >= kMinParallelPixels && RasterParticipants() > 1u;
     uint32_t livePage = 0u;
-    if (parallel && !m_texturePageCache.LivePage(livePage) && m_texturePageCache.CachedPage(livePage))
+    if (parallel && m_pendingTracked)
+    {
+        // Bands read pages in place; the serial cache state is rebuilt afterwards from VRAM.
+        parallel = m_texturePageCache.MatchesVram(m_vram);
+    }
+    else if (parallel && !m_texturePageCache.LivePage(livePage) && m_texturePageCache.CachedPage(livePage))
     {
         // Workers read pages in place, which matches a copied page only if VRAM still holds the same bytes.
         if (!m_texturePageCache.MatchesVram(m_vram))
@@ -1012,7 +992,11 @@ void GSCpuBackend::FlushPendingUnlocked()
             m_texturePageCache.MakeLive();
     }
 
-    if (parallel)
+    if (parallel && m_pendingTracked)
+    {
+        RasterizeTrackedInParallel();
+    }
+    else if (parallel)
     {
         RasterizePendingInParallel();
     }
@@ -1024,14 +1008,125 @@ void GSCpuBackend::FlushPendingUnlocked()
             DrawPrimitive(m_pending[i], clutIndex >= 0 ? m_pendingCluts[static_cast<size_t>(clutIndex)].data() : nullptr);
         }
     }
-    m_pending.clear();
-    m_pendingCluts.clear();
-    m_pendingClutIndex.clear();
-    m_pendingClutGeneration = UINT64_MAX;
-    m_pendingClutReadIndex = 0u;
-    m_pendingWritePages.reset();
-    m_pendingTexturePages.reset();
-    m_pendingPixels = 0u;
+    ClearPendingUnlocked();
+}
+
+void GSCpuBackend::RasterizeTrackedInParallel()
+{
+    // Every primitive samples only top bytes of the pages the batch draws into with RGB24/Z24, so every
+    // pixel comes out the same drawn in any order. What a serial draw also leaves behind is the texture
+    // cache: it copies a drawn-over page when loading it, so the page it ends on can hold words as they
+    // were mid-batch.
+    uint32_t livePage = 0u;
+    if (m_texturePageCache.LivePage(livePage) &&
+        m_pendingWritePages.test((livePage / GSMem::TexturePageCache::kPageSize) % 512u))
+        m_texturePageCache.Snapshot(m_vram);
+    uint32_t cachedBefore = UINT32_MAX;
+    m_texturePageCache.CachedPage(cachedBefore);
+
+    if (!m_workers || m_workers->participants() != RasterParticipants())
+        m_workers = std::make_unique<RasterWorkers>(RasterParticipants());
+    const uint32_t bands = m_workers->participants() * kBandsPerWorker;
+    std::vector<RowRange> rows;
+    BalanceRows(m_pendingRowWeights, bands, rows);
+    const std::bitset<512> kept = m_pendingTexturePages & m_pendingWritePages;
+    std::vector<GSMem::TexturePageCache> caches(bands);
+    m_undoLogs.resize(bands);
+    for (uint32_t i = 0; i < bands; ++i)
+    {
+        caches[i].ResetForBand(true);
+        m_undoLogs[i].clear();
+    }
+    const std::function<void(uint32_t)> band = [&](uint32_t index)
+    {
+        RasterContext raster{};
+        raster.rowBegin = rows[index].begin;
+        raster.rowEnd = rows[index].end;
+        raster.cache = &caches[index];
+        raster.trackReads = true;
+        raster.undo = &m_undoLogs[index];
+        raster.undoPages = &kept;
+        for (size_t i = 0; i < m_pending.size(); ++i)
+        {
+            raster.primitive = static_cast<uint32_t>(i);
+            const int32_t clutIndex = m_pendingClutIndex[i];
+            raster.clut = clutIndex >= 0 ? m_pendingCluts[static_cast<size_t>(clutIndex)].data() : nullptr;
+            DrawPrimitiveRows(m_pending[i], raster);
+        }
+    };
+    m_workers->runBands(bands, band);
+
+    // The page of the last texel read in serial order is where the cache ends.
+    GSMem::TexturePageCache::ReadPosition lastRead{};
+    uint32_t lastPage = UINT32_MAX;
+    for (uint32_t i = 0; i < bands; ++i)
+    {
+        if (caches[i].Track().last.after(lastRead))
+        {
+            lastRead = caches[i].Track().last;
+            lastPage = caches[i].Track().lastPage;
+        }
+    }
+    // A palette load from VRAM between queued primitives also read through the cache (a page the batch
+    // does not write); it ran before the batch was drawn and left the cache where it ends if nothing
+    // after it samples.
+    GSMem::TexturePageCache::ReadPosition clutRead{};
+    if (m_pendingClutReadIndex > 0u)
+        clutRead = {static_cast<uint32_t>(m_pendingClutReadIndex), std::numeric_limits<int>::min(), std::numeric_limits<int>::min(), 0u, true};
+    if (!lastRead.after(clutRead))
+        return;
+    if (!kept.test(lastPage / GSMem::TexturePageCache::kPageSize))
+    {
+        // Not drawn over: the serial cache reads it in place.
+        m_texturePageCache.SetLivePage(lastPage);
+        return;
+    }
+
+    // The serial cache copied lastPage when it read it right after its latest read of any other page.
+    GSMem::TexturePageCache::ReadPosition switchRead{};
+    bool switchInsidePixel = false;
+    for (uint32_t i = 0; i < bands; ++i)
+    {
+        const auto &track = caches[i].Track();
+        if (!track.last.valid)
+            continue;
+        // A band ending on another page read that page last; one ending on lastPage read others before.
+        const GSMem::TexturePageCache::ReadPosition candidate = track.lastPage != lastPage ? track.last : track.other;
+        if (candidate.after(switchRead))
+        {
+            switchRead = candidate;
+            switchInsidePixel = track.lastPage == lastPage && track.switchedInsidePixel;
+        }
+    }
+    if (clutRead.after(switchRead))
+    {
+        switchRead = clutRead;
+        switchInsidePixel = false;
+    }
+    // With no switch in the batch, a cache already holding the page keeps its copy (snapshotted above if
+    // it was read in place); otherwise the page was copied on the batch's first read, before any write.
+    if (!switchRead.valid && cachedBefore == lastPage)
+        return;
+
+    // Take what VRAM holds now and undo, newest first, every write to the page made after the copy. Each
+    // word belongs to one pixel, which one band drew in serial order.
+    auto drawnBeforeCopy = [&](const UndoEntry &entry)
+    {
+        if (!switchRead.valid)
+            return false;
+        if (entry.primitive != switchRead.primitive)
+            return entry.primitive < switchRead.primitive;
+        if (entry.y != switchRead.y)
+            return entry.y < switchRead.y;
+        return switchInsidePixel ? entry.x < switchRead.x : entry.x <= switchRead.x;
+    };
+    m_pageRebuildScratch.resize(GSMem::TexturePageCache::kPageSize);
+    std::memcpy(m_pageRebuildScratch.data(), m_vram + lastPage, GSMem::TexturePageCache::kPageSize);
+    for (const std::vector<UndoEntry> &log : m_undoLogs)
+        for (auto entry = log.rbegin(); entry != log.rend(); ++entry)
+            if (entry->offset - lastPage < GSMem::TexturePageCache::kPageSize && !drawnBeforeCopy(*entry))
+                std::memcpy(m_pageRebuildScratch.data() + (entry->offset - lastPage), &entry->old, sizeof(entry->old));
+    m_texturePageCache.SetCopy(m_pageRebuildScratch.data(), lastPage);
 }
 
 void GSCpuBackend::RasterizePendingInParallel()
@@ -1045,15 +1140,16 @@ void GSCpuBackend::RasterizePendingInParallel()
 
     if (!m_workers || m_workers->participants() != RasterParticipants())
         m_workers = std::make_unique<RasterWorkers>(RasterParticipants());
-    const uint32_t participants = m_workers->participants();
-
-    std::vector<GSMem::TexturePageCache> caches(participants);
-    std::vector<RasterTrace> traces(participants);
-    const std::function<void(uint32_t)> job = [&](uint32_t index)
+    const uint32_t bands = m_workers->participants() * kBandsPerWorker;
+    std::vector<RowRange> rows;
+    BalanceRows(m_pendingRowWeights, bands, rows);
+    std::vector<GSMem::TexturePageCache> caches(bands);
+    std::vector<RasterTrace> traces(bands);
+    const std::function<void(uint32_t)> band = [&](uint32_t index)
     {
         RasterContext raster{};
-        raster.workers = participants;
-        raster.index = index;
+        raster.rowBegin = rows[index].begin;
+        raster.rowEnd = rows[index].end;
         raster.cache = &caches[index];
         raster.trace = &traces[index];
         for (size_t i = 0; i < m_pending.size(); ++i)
@@ -1064,12 +1160,12 @@ void GSCpuBackend::RasterizePendingInParallel()
             DrawPrimitiveRows(m_pending[i], raster);
         }
     };
-    m_workers->run(job);
+    m_workers->runBands(bands, band);
 
     // Sequentially, the cache would end on the page of the last texel read: the last sampled pixel in
     // primitive then raster order, which lies on exactly one band.
     int best = -1;
-    for (uint32_t i = 0; i < participants; ++i)
+    for (uint32_t i = 0; i < bands; ++i)
     {
         const RasterTrace &trace = traces[i];
         if (!trace.sampled)
@@ -1375,14 +1471,7 @@ void GSCpuBackend::InitializeNow(uint8_t *vram, uint32_t vramSize)
 
     std::lock_guard<std::mutex> lock(m_mutex);
     // A new VRAM binding makes queued primitives meaningless; nothing may still refer to the old memory.
-    m_pending.clear();
-    m_pendingCluts.clear();
-    m_pendingClutIndex.clear();
-    m_pendingClutGeneration = UINT64_MAX;
-    m_pendingClutReadIndex = 0u;
-    m_pendingWritePages.reset();
-    m_pendingTexturePages.reset();
-    m_pendingPixels = 0u;
+    ClearPendingUnlocked();
     m_vram = vram;
     m_vramSize = vramSize;
     ResetUnlocked();
@@ -1466,9 +1555,14 @@ void GSCpuBackend::LoadClutNow(const GSTex0Reg &tex0, const GSTexClutReg &texclu
         return;
     }
 
+    // LoadClutUnlocked reads VRAM (moving the texture page cache) only for 16- and 32-bit palettes. A tracked
+    // batch accounts for that read only when it is drawn in parallel, which it will be if it is big enough
+    // already and the cache stays a faithful copy; otherwise it is drawn before the load.
+    const bool readsVram = tex0.cpsm == GS_PSM_CT16 || tex0.cpsm == GS_PSM_CT16S || tex0.cpsm == GS_PSM_CT32 || tex0.cpsm == GS_PSM_CT24;
+    if (readsVram && m_pendingTracked && (m_pendingPixels < kMinParallelPixels || !m_texturePageCache.MatchesVram(m_vram)))
+        FlushPendingUnlocked();
     LoadClutUnlocked(tex0, texclut);
-    // LoadClutUnlocked reads VRAM (moving the texture page cache) only for 16- and 32-bit palettes.
-    if (tex0.cpsm == GS_PSM_CT16 || tex0.cpsm == GS_PSM_CT16S || tex0.cpsm == GS_PSM_CT32 || tex0.cpsm == GS_PSM_CT24)
+    if (readsVram)
         m_pendingClutReadIndex = m_pending.size();
 }
 
@@ -1809,6 +1903,10 @@ struct GSCpuBackend::PixelPipeline
     // Direct addressing for colour and depth; null falls back to the generic VRAM accessors.
     GSMem::PixelOffsetFn frameOffset = nullptr;
     GSMem::PixelOffsetFn depthOffset = nullptr;
+    // Set in tracked batches: words overwritten in undoPages are logged for the pixel being drawn.
+    std::vector<UndoEntry> *undo = nullptr;
+    const std::bitset<512> *undoPages = nullptr;
+    uint32_t primitive = 0;
 };
 
 void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uint8_t r, uint8_t g, uint8_t b, uint8_t a, uint8_t fog)
@@ -1874,6 +1972,21 @@ namespace
             break;
         }
     }
+}
+
+void GSCpuBackend::RecordUndo(const PixelPipeline &pipe, const uint8_t *pixel, int x, int y)
+{
+    // Only RGB24/Z24 targets write tracked pages, so the whole word is the pixel's.
+    const uint32_t offset = static_cast<uint32_t>(pixel - m_vram);
+    if (!pipe.undoPages->test(offset / GSMem::TexturePageCache::kPageSize))
+        return;
+    UndoEntry entry;
+    entry.primitive = pipe.primitive;
+    entry.y = y;
+    entry.x = x;
+    entry.offset = offset;
+    std::memcpy(&entry.old, pixel, sizeof(entry.old));
+    pipe.undo->push_back(entry);
 }
 
 __attribute__((always_inline)) inline void GSCpuBackend::WritePixel(const PixelPipeline &pipe, int x, int y, int z, uint8_t r, uint8_t g, uint8_t b, uint8_t a, uint8_t fog)
@@ -2055,6 +2168,8 @@ __attribute__((always_inline)) inline void GSCpuBackend::WritePixel(const PixelP
         {
             if (!framePixel)
                 framePixel = m_vram + pipe.frameOffset(fbp, fbw, static_cast<u32>(x), static_cast<u32>(y));
+            if (pipe.undo)
+                RecordUndo(pipe, framePixel, x, y);
             writeTarget(fpsm, framePixel, pixel);
         }
         else
@@ -2069,6 +2184,8 @@ __attribute__((always_inline)) inline void GSCpuBackend::WritePixel(const PixelP
         {
             if (!depthPixel)
                 depthPixel = m_vram + pipe.depthOffset(zbp, fbw, static_cast<u32>(x), static_cast<u32>(y));
+            if (pipe.undo)
+                RecordUndo(pipe, depthPixel, x, y);
             writeTarget(zpsm, depthPixel, static_cast<uint32_t>(z));
         }
         else
@@ -2076,6 +2193,15 @@ __attribute__((always_inline)) inline void GSCpuBackend::WritePixel(const PixelP
             m_writeVramFuncs[zpsm & 0x3Fu](m_vram, zbp, fbw, x, y, z);
         }
     }
+}
+
+GSCpuBackend::PixelPipeline GSCpuBackend::MakePixelPipeline(const GSDrawState &state, const RasterContext &raster)
+{
+    PixelPipeline pipe = MakePixelPipeline(state);
+    pipe.undo = raster.undo;
+    pipe.undoPages = raster.undoPages;
+    pipe.primitive = raster.primitive;
+    return pipe;
 }
 
 GSCpuBackend::PixelPipeline GSCpuBackend::MakePixelPipeline(const GSDrawState &state)
@@ -2352,6 +2478,8 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch, const RasterContext
     const int drawY0 = clampInt(unclippedY0, ctx.scissor.y0, ctx.scissor.y1);
     const int drawX1 = clampInt(unclippedX1, ctx.scissor.x0, ctx.scissor.x1);
     const int drawY1 = clampInt(unclippedY1, ctx.scissor.y0, ctx.scissor.y1);
+    if (raster.firstRow(drawY0) > raster.lastRow(drawY1))
+        return;
 
     const uint64_t alphaReg = ctx.alpha;
     const uint8_t alphaMode = static_cast<uint8_t>(alphaReg & 0xFFu);
@@ -2422,12 +2550,10 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch, const RasterContext
                 PrepareTextureAxis(axisCoordinate(texUf, texW), texW, wrapU, minU, maxU, state.linearFilter);
         }
 
-        const PixelPipeline pipe = MakePixelPipeline(state);
+        const PixelPipeline pipe = MakePixelPipeline(state, raster);
         const TextureSampler sampler = MakeTextureSampler(state, *raster.cache, raster.clut);
-        for (int y = drawY0; y <= drawY1; ++y)
+        for (int y = raster.firstRow(drawY0); y <= raster.lastRow(drawY1); ++y)
         {
-            if (!raster.ownsRow(y))
-                continue;
             float ty = (static_cast<float>(y - unclippedY0) + 0.5f) / spriteH;
             float texVf = v0f + (v1f - v0f) * ty;
             const TextureAxis row = PrepareTextureAxis(axisCoordinate(texVf, texH), texH, wrapV, minV, maxV, state.linearFilter);
@@ -2450,11 +2576,9 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch, const RasterContext
     }
     else
     {
-        const PixelPipeline pipe = MakePixelPipeline(state);
-        for (int y = drawY0; y <= drawY1; ++y)
+        const PixelPipeline pipe = MakePixelPipeline(state, raster);
+        for (int y = raster.firstRow(drawY0); y <= raster.lastRow(drawY1); ++y)
         {
-            if (!raster.ownsRow(y))
-                continue;
             for (int x = drawX0; x <= drawX1; ++x)
                 WritePixel(pipe, x, y, z1, r, g, b, a, v1.fog);
         }
@@ -2468,8 +2592,6 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch, const RasterConte
     const GSVertex &v1 = batch.vertices[1];
     const GSVertex &v2 = batch.vertices[2];
     const auto &ctx = state.context;
-    const PixelPipeline pipe = MakePixelPipeline(state);
-    const TextureSampler sampler = state.prim.tme ? MakeTextureSampler(state, *raster.cache, raster.clut) : TextureSampler{};
 
     int ofx = ctx.xyoffset.ofx >> 4;
     int ofy = ctx.xyoffset.ofy >> 4;
@@ -2490,6 +2612,10 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch, const RasterConte
     maxX = clampInt(maxX, ctx.scissor.x0, ctx.scissor.x1);
     minY = clampInt(minY, ctx.scissor.y0, ctx.scissor.y1);
     maxY = clampInt(maxY, ctx.scissor.y0, ctx.scissor.y1);
+    if (raster.firstRow(minY) > raster.lastRow(maxY))
+        return;
+    const PixelPipeline pipe = MakePixelPipeline(state, raster);
+    const TextureSampler sampler = state.prim.tme ? MakeTextureSampler(state, *raster.cache, raster.clut) : TextureSampler{};
 
     float denom = (fy1 - fy2) * (fx0 - fx2) + (fx2 - fx1) * (fy0 - fy2);
     if (std::fabs(denom) < 0.001f)
@@ -2499,10 +2625,8 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch, const RasterConte
     const float invAbsDenom = 1.0f / std::fabs(denom);
     constexpr float kEdgeEpsilon = 1.0e-4f;
 
-    for (int y = minY; y <= maxY; ++y)
+    for (int y = raster.firstRow(minY); y <= raster.lastRow(maxY); ++y)
     {
-        if (!raster.ownsRow(y))
-            continue;
         float py = static_cast<float>(y) + 0.5f;
         for (int x = minX; x <= maxX; ++x)
         {
@@ -2591,7 +2715,7 @@ void GSCpuBackend::DrawLine(const GSPrimitiveBatch &batch, const RasterContext &
     const GSVertex &v0 = batch.vertices[0];
     const GSVertex &v1 = batch.vertices[1];
     const auto &ctx = state.context;
-    const PixelPipeline pipe = MakePixelPipeline(state);
+    const PixelPipeline pipe = MakePixelPipeline(state, raster);
 
     int ofx = ctx.xyoffset.ofx >> 4;
     int ofy = ctx.xyoffset.ofy >> 4;
