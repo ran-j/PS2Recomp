@@ -1,5 +1,6 @@
 #include "emulator/core/iop_cpu.h"
 #include "emulator/core/iop_kernel.h"
+#include "emulator/iop_emulator_const.h"
 #include "emulator/core/iop_memory.h"
 #include "emulator/imports/iop_cdvd.h"
 #include "emulator/imports/iop_imports.h"
@@ -275,6 +276,92 @@ namespace
         return passed;
     }
 
+    int startTestThread(IopKernel &kernel, IopMemory &memory, uint32_t descriptor, uint32_t entry, uint32_t priority)
+    {
+        memory.write32(descriptor + 0u, 0x02000000u); // TH_C
+        memory.write32(descriptor + 4u, 0u);
+        memory.write32(descriptor + 8u, entry);
+        memory.write32(descriptor + 12u, 0x800u);
+        memory.write32(descriptor + 16u, priority);
+        IopCpuState cpu{};
+        cpu.gpr[4] = descriptor;
+        if (!kernel.dispatchThreadImport(4u, cpu, 0u)) // CreateThread
+            return -1;
+        const int id = static_cast<int>(cpu.gpr[2]);
+        cpu = {};
+        cpu.gpr[4] = static_cast<uint32_t>(id);
+        if (!kernel.dispatchThreadImport(6u, cpu, 0u)) // StartThread
+            return -1;
+        return id;
+    }
+
+    bool testSliceEndDoesNotHandTheCpuToAnEqualPriorityThread()
+    {
+        // CRI's ADX driver has a mixer and a command thread at priority 39. The command thread stops a
+        // stream by clearing fields the mixer divides by; if it runs when the emulator ends the mixer's
+        // slice mid-stream, the mixer hits its divide-by-zero break and runs into the exception vector.
+        IopMemory memory;
+        IopKernel kernel(memory);
+        kernel.reset();
+
+        const int stopper = startTestThread(kernel, memory, 0x3000u, 0x10000u, 39u);
+        const int mixer = startTestThread(kernel, memory, 0x3040u, 0x20000u, 39u);
+        if (!expect(stopper > 0 && mixer > stopper, "could not create the two equal-priority threads"))
+            return false;
+
+        IopThread *running = kernel.beginNextReady(0u);
+        if (!expect(running != nullptr && running->id == stopper, "the lower-id thread should run first"))
+            return false;
+        IopCpuState delay{};
+        delay.gpr[4] = 100u; // DelayThread(100 us)
+        if (!expect(kernel.dispatchThreadImport(33u, delay, 0u), "DelayThread was not handled"))
+            return false;
+        running->cpu.yielded = delay.yielded;
+        kernel.endTimeslice(*running, kThreadReturnSentinel);
+
+        running = kernel.beginNextReady(10u);
+        if (!expect(running != nullptr && running->id == mixer, "the mixer should run while the stopper delays"))
+            return false;
+        kernel.endTimeslice(*running, kThreadReturnSentinel); // emulator budget ran out mid-stream
+
+        running = kernel.beginNextReady(1'000'000u); // the stopper's delay has long expired
+        if (!expect(running != nullptr && running->id == mixer,
+                    "an equal-priority thread that became ready must not take over at a slice boundary"))
+            return false;
+
+        // A yield hands the CPU over as usual.
+        running->cpu.yielded = true;
+        kernel.endTimeslice(*running, kThreadReturnSentinel);
+        running = kernel.beginNextReady(1'000'001u);
+        return expect(running != nullptr && running->id == stopper, "after a yield the waiting thread should run");
+    }
+
+    bool testSliceEndInsideCpuSuspendIntrResumesSameThread()
+    {
+        IopMemory memory;
+        IopKernel kernel(memory);
+        kernel.reset();
+
+        const int worker = startTestThread(kernel, memory, 0x3000u, 0x10000u, 39u);
+        IopThread *running = kernel.beginNextReady(0u);
+        if (!expect(running != nullptr && running->id == worker, "the worker should run"))
+            return false;
+        memory.setInterruptControl(0u); // CpuSuspendIntr
+        kernel.endTimeslice(*running, kThreadReturnSentinel);
+
+        const int urgent = startTestThread(kernel, memory, 0x3040u, 0x20000u, 10u);
+        running = kernel.beginNextReady(1u);
+        if (!expect(running != nullptr && running->id == worker,
+                    "nothing may preempt a thread that has interrupts suspended"))
+            return false;
+        memory.setInterruptControl(1u); // CpuResumeIntr
+        kernel.endTimeslice(*running, kThreadReturnSentinel);
+
+        running = kernel.beginNextReady(2u);
+        return expect(running != nullptr && running->id == urgent,
+                      "once interrupts are back on, the higher-priority thread must run");
+    }
+
     uint64_t startSpu2Dma(IopMemory &memory, bool autoDma)
     {
         memory.write16(0x1F9001B0u, static_cast<uint16_t>(autoDma ? 1u : 0u)); // core 0 ADMAS
@@ -422,8 +509,8 @@ namespace
 int main()
 {
     if (!testLoadcoreRebootLibraryMode() || !testCdvdSpecialControl() || !testCdvdSearchFile() ||
-        !testTimrmanPeriodicCallback() || !testSio2MemoryCard() ||
-        !testSpu2AutoDmaCompletesAtPlaybackRate())
+        !testTimrmanPeriodicCallback() || !testSio2MemoryCard() || !testSliceEndDoesNotHandTheCpuToAnEqualPriorityThread() ||
+        !testSliceEndInsideCpuSuspendIntrResumesSameThread() || !testSpu2AutoDmaCompletesAtPlaybackRate())
         return 1;
     std::cout << "ps2xIOP import tests passed\n";
     return 0;

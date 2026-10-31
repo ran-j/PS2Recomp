@@ -674,14 +674,24 @@ namespace ps2x::iop::detail
     IopThread *IopKernel::beginNextReady(uint64_t currentCycle)
     {
         IopThread *next = nullptr;
+        bool resumeCriticalSection = false;
         for (auto &[id, thread] : m_threads)
         {
             if (thread.state == IopThreadState::Delay && thread.wakeCycle <= currentCycle)
                 thread.state = IopThreadState::Ready;
-            if (thread.state != IopThreadState::Ready)
+            if (thread.state != IopThreadState::Ready || resumeCriticalSection)
                 continue;
+            if (thread.sliceEndedWithInterruptsOff)
+            {
+                next = &thread;
+                resumeCriticalSection = true;
+                continue;
+            }
+            // Among equal priorities the interrupted thread goes first; one that merely became ready
+            // (e.g. its DelayThread expired) must not cut into it.
             if (next == nullptr || thread.priority < next->priority ||
-                (thread.priority == next->priority && thread.id < next->id))
+                (thread.priority == next->priority &&
+                 (thread.sliceEnded != next->sliceEnded ? thread.sliceEnded : thread.id < next->id)))
                 next = &thread;
         }
         if (next == nullptr)
@@ -707,10 +717,17 @@ namespace ps2x::iop::detail
 
     void IopKernel::endTimeslice(IopThread &thread, uint32_t returnSentinel)
     {
+        thread.sliceEnded = false;
+        thread.sliceEndedWithInterruptsOff = false;
         if (thread.cpu.pc == returnSentinel || thread.cpu.stopped)
             thread.state = IopThreadState::Dormant;
         else if (thread.state == IopThreadState::Running)
+        {
             thread.state = IopThreadState::Ready;
+            // A yield (e.g. RotateThreadReadyQueue) gives way; running out of emulator budget does not.
+            thread.sliceEnded = !thread.cpu.yielded;
+            thread.sliceEndedWithInterruptsOff = thread.sliceEnded && m_memory.interruptControl() == 0u;
+        }
         m_currentThread = nullptr;
         cleanupDeadThreads();
     }

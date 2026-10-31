@@ -41,6 +41,11 @@ namespace ps2x::iop::detail
         uint32_t waitMode = 0;
         uint32_t waitResultAddress = 0;
         int wakeupCount = 0;
+        // The emulator ended this thread's slice although the thread could still run. The IOP kernel does
+        // not time-slice: such a thread keeps the CPU until it blocks or a higher-priority thread becomes
+        // ready, and with interrupts suspended (CpuSuspendIntr) not even that can preempt it.
+        bool sliceEnded = false;
+        bool sliceEndedWithInterruptsOff = false;
     };
 
     class IopKernel
