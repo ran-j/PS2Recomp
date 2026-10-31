@@ -1719,6 +1719,34 @@ void register_code_generator_tests()
             t.IsTrue(generated.find("if (branch_taken_0x1200)") != std::string::npos, "should generate branch_taken variable and if for likely branch");
         });
 
+        tc.Run("sign branches compare the full 64-bit register", [](TestCase &t) {
+            // libmpeg polls IPU_CMD with ld and bgezl; a 32-bit test reads DATA bit 31 as BUSY.
+            const auto conditionFor = [](uint8_t opcode, uint8_t rt) {
+                Function func;
+                func.name = "sign_branch";
+                func.start = 0x1300;
+                func.end = 0x1310;
+                func.isRecompiled = true;
+                func.isStub = false;
+
+                Instruction br{};
+                br.address = 0x1300;
+                br.opcode = opcode;
+                br.rs = 17;
+                br.rt = rt;
+                br.simmediate = 1;
+                br.isBranch = true;
+                br.hasDelaySlot = true;
+
+                CodeGenerator gen({}, {});
+                return gen.generateFunction(func, {br, makeNop(0x1304), makeNop(0x1308)}, false);
+            };
+            t.IsTrue(conditionFor(OPCODE_REGIMM, REGIMM_BGEZL).find("GPR_S64(ctx, 17) >= 0") != std::string::npos, "bgezl should test 64 bits");
+            t.IsTrue(conditionFor(OPCODE_REGIMM, REGIMM_BLTZ).find("GPR_S64(ctx, 17) < 0") != std::string::npos, "bltz should test 64 bits");
+            t.IsTrue(conditionFor(OPCODE_BLEZ, 0).find("GPR_S64(ctx, 17) <= 0") != std::string::npos, "blez should test 64 bits");
+            t.IsTrue(conditionFor(OPCODE_BGTZ, 0).find("GPR_S64(ctx, 17) > 0") != std::string::npos, "bgtz should test 64 bits");
+        });
+
         tc.Run("JR $31 returns through dynamic target without broad local switch", [](TestCase &t) {
             Function func;
             func.name = "jr_ra_return";
