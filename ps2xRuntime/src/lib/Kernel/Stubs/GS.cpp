@@ -1175,27 +1175,34 @@ namespace ps2_stubs
             });
             ++s_swapDbuffLogCount;
         }
+        // The swap sends NLOOP A+D registers from the buffer's GIF tag: two 8-register draw environments,
+        // then the 6-register clear only when NLOOP reaches it. Games drop the clear by shortening NLOOP
+        // (Mana Khemia does while Sofdec uploads movie frames straight into the framebuffers).
+        const uint32_t nloop = static_cast<uint32_t>((which == 0u ? db.giftag0.lo : db.giftag1.lo) & 0x7FFFu);
+        const bool sendsClear = nloop >= 22u;
         if (which == 0u)
         {
             applyGsRegPairs(runtime, reinterpret_cast<const GsRegPairMem *>(&db.draw01), 8u);
             applyGsRegPairs(runtime, reinterpret_cast<const GsRegPairMem *>(&db.draw02), 8u);
-            if (hasSeededGsClearPacket(db.clear0))
+            if (sendsClear && hasSeededGsClearPacket(db.clear0))
             {
                 const uint32_t clearContext = static_cast<uint32_t>((db.clear0.prim.value >> 9) & 0x1u);
                 runtime->gs().clearFramebufferContext(clearContext, static_cast<uint32_t>(db.clear0.rgbaq.value));
             }
-            applyGsClearPacket(runtime, db.clear0);
+            if (sendsClear)
+                applyGsClearPacket(runtime, db.clear0);
         }
         else
         {
             applyGsRegPairs(runtime, reinterpret_cast<const GsRegPairMem *>(&db.draw11), 8u);
             applyGsRegPairs(runtime, reinterpret_cast<const GsRegPairMem *>(&db.draw12), 8u);
-            if (hasSeededGsClearPacket(db.clear1))
+            if (sendsClear && hasSeededGsClearPacket(db.clear1))
             {
                 const uint32_t clearContext = static_cast<uint32_t>((db.clear1.prim.value >> 9) & 0x1u);
                 runtime->gs().clearFramebufferContext(clearContext, static_cast<uint32_t>(db.clear1.rgbaq.value));
             }
-            applyGsClearPacket(runtime, db.clear1);
+            if (sendsClear)
+                applyGsClearPacket(runtime, db.clear1);
         }
 
         setReturnS32(ctx, static_cast<int32_t>(which ^ 1u));

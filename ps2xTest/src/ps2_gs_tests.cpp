@@ -687,6 +687,22 @@ void register_ps2_gs_tests()
             std::memcpy(&clearedMidPixel, runtime.memory().getGSVRAM() + kMidOffset, sizeof(clearedMidPixel));
             t.Equals(clearedMidPixel, kClearColor,
                      "sceGsSwapDBuffDc should clear the interior of the active draw buffer, not just the first pixel");
+
+            // A GIF tag that stops after the two draw environments (NLOOP 16) sends no clear.
+            constexpr uint32_t kGiftag0Offset = 0x50u;
+            uint64_t giftag = 0u;
+            std::memcpy(&giftag, rdram.data() + kEnvAddr + kGiftag0Offset, sizeof(giftag));
+            t.Equals(giftag & 0x7FFFull, 22ull, "a clearing dbuff should send 22 A+D registers");
+            giftag = (giftag & ~0x7FFFull) | 16ull;
+            std::memcpy(rdram.data() + kEnvAddr + kGiftag0Offset, &giftag, sizeof(giftag));
+            std::memset(runtime.memory().getGSVRAM(), 0x5A, 16u);
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, kEnvAddr);
+            setRegU32(ctx, 5, 0u);
+            ps2_stubs::sceGsSwapDBuffDc(rdram.data(), &ctx, &runtime);
+            uint32_t keptPixel = 0u;
+            std::memcpy(&keptPixel, runtime.memory().getGSVRAM(), sizeof(keptPixel));
+            t.Equals(keptPixel, 0x5A5A5A5Au, "a swap whose GIF tag excludes the clear must leave the draw buffer intact");
         });
 
         tc.Run("sceGsSetDefDBuffDc accepts trailing args from the recompiler register ABI", [](TestCase &t)
