@@ -297,8 +297,14 @@ namespace ps2x::iop::detail
             runSio2Dma(address, value);
             return;
         }
-        if ((address != kDmaSpu0Chcr && address != kDmaSpu1Chcr) || (value & kDmaStart) == 0u)
+        if (address != kDmaSpu0Chcr && address != kDmaSpu1Chcr)
             return;
+        if ((value & kDmaStart) == 0u)
+        {
+            // Clearing STR aborts the channel, which is how a driver stops a looping block transfer.
+            m_spu2.stopAutoDma(address == kDmaSpu1Chcr ? 1u : 0u);
+            return;
+        }
 
         const bool secondCore = address == kDmaSpu1Chcr;
         const uint32_t core = secondCore ? 1u : 0u;

@@ -50,6 +50,7 @@ namespace ps2x::iop::detail
         // Starts DMA channel 4 (core 0) or 7 (core 1). Returns false for AutoDMA, which drains at the
         // playback rate and reports completion through takeEvents().
         bool startDma(uint32_t core, uint32_t madr, uint32_t bytes, bool toSpu);
+        void stopAutoDma(uint32_t core) noexcept { m_cores[core & 1u].adma.active = false; }
         [[nodiscard]] bool autoDmaActive(uint32_t core) const noexcept { return m_cores[core & 1u].adma.active; }
         [[nodiscard]] uint32_t autoDmaAddress(uint32_t core) const noexcept { return m_cores[core & 1u].adma.address; }
 

@@ -230,9 +230,23 @@ namespace
 
         out.clear();
         memory.mixSpu2(256u, out);
-        return expect(std::all_of(out.begin(), out.end(), [](int16_t sample)
+        if (!expect(std::all_of(out.begin(), out.end(), [](int16_t sample)
+                                { return sample == 0; }),
+                    "an idle AutoDMA input plays silence"))
+            return false;
+
+        // Clearing STR mid-stream aborts it: no more blocks are pulled and no completion is raised.
+        memory.write32(0x1F8010C0u, 0x50000u);
+        memory.write32(0x1F8010C4u, (32u << 16u) | 16u);
+        memory.write32(0x1F8010C8u, 0x01000201u);
+        memory.mixSpu2(256u, out);
+        memory.write32(0x1F8010C8u, 0x00000201u);
+        out.clear();
+        memory.mixSpu2(512u, out);
+        return expect(!memory.takeDmaStart().has_value(), "an aborted AutoDMA must not complete") &&
+               expect(std::all_of(out.begin(), out.end(), [](int16_t sample)
                                   { return sample == 0; }),
-                      "an idle AutoDMA input plays silence");
+                      "an aborted AutoDMA must stop feeding the mix");
     }
 }
 

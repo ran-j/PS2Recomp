@@ -330,6 +330,8 @@ namespace ps2x::iop::detail
             break;
         case kRegAdmas:
             core.admas = value;
+            if ((value & (1u << coreIndex)) == 0u)
+                core.adma.active = false;
             break;
         case kRegEndxLo:
         case kRegEndxHi:
