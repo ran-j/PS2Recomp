@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstring>
 #include <iostream>
+#include <iterator>
 
 namespace
 {
@@ -26,7 +27,8 @@ namespace
     constexpr uint32_t kCtrlRst = 1u << 30;
     constexpr uint32_t kCtrlBusy = 1u << 31;
     // IDP, AS, IVF, QST, MP1, PCT and the reset request are software-writable.
-    constexpr uint32_t kCtrlWritable = (3u << 16) | (1u << 20) | (1u << 21) | (1u << 22) | (1u << 23) | (7u << 24) | kCtrlRst;
+    // RST is a write-only strobe: libmpeg read-modify-writes CTRL, so echoing RST would reset the IPU every time.
+    constexpr uint32_t kCtrlWritable = (3u << 16) | (1u << 20) | (1u << 21) | (1u << 22) | (1u << 23) | (7u << 24);
     constexpr size_t kFifoBytes = 8u * 16u;
 
     constexpr uint8_t kZigzag[64] = {
@@ -112,6 +114,35 @@ namespace
         {0x20, 11}, {0x1f, 11}, {0x1e, 11}, {0x1d, 11}, {0x1c, 11}, {0x1b, 11}, {0x1a, 11}, {0x19, 11},
         {0x18, 11}, {0x8, 11}, {0xf, 11}};
 
+    // coded_block_pattern (table B.9), indexed by pattern value, as published in FFmpeg's mpeg12data.c.
+    constexpr uint8_t kCbpCode[64][2] = {
+        {0x1, 9}, {0xb, 5}, {0x9, 5}, {0xd, 6}, {0xd, 4}, {0x17, 7}, {0x13, 7}, {0x1f, 8},
+        {0xc, 4}, {0x16, 7}, {0x12, 7}, {0x1e, 8}, {0x13, 5}, {0x1b, 8}, {0x17, 8}, {0x13, 8},
+        {0xb, 4}, {0x15, 7}, {0x11, 7}, {0x1d, 8}, {0x11, 5}, {0x19, 8}, {0x15, 8}, {0x11, 8},
+        {0xf, 6}, {0xf, 8}, {0xd, 8}, {0x3, 9}, {0xf, 5}, {0xb, 8}, {0x7, 8}, {0x7, 9},
+        {0xa, 4}, {0x14, 7}, {0x10, 7}, {0x1c, 8}, {0xe, 6}, {0xe, 8}, {0xc, 8}, {0x2, 9},
+        {0x10, 5}, {0x18, 8}, {0x14, 8}, {0x10, 8}, {0xe, 5}, {0xa, 8}, {0x6, 8}, {0x6, 9},
+        {0x12, 5}, {0x1a, 8}, {0x16, 8}, {0x12, 8}, {0xd, 5}, {0x9, 8}, {0x5, 8}, {0x5, 9},
+        {0xc, 5}, {0x8, 8}, {0x4, 8}, {0x4, 9}, {0x7, 3}, {0xa, 5}, {0x8, 5}, {0xc, 6}};
+    // motion_code magnitudes 1..16 (table B.10); 0 is the single bit '1'. A sign bit follows non-zero codes.
+    constexpr uint8_t kMotionCode[17][2] = {
+        {0x1, 1}, {0x1, 2}, {0x1, 3}, {0x1, 4}, {0x3, 6}, {0x5, 7}, {0x4, 7}, {0x3, 7}, {0xb, 9},
+        {0xa, 9}, {0x9, 9}, {0x11, 10}, {0x10, 10}, {0xf, 10}, {0xe, 10}, {0xd, 10}, {0xc, 10}};
+    // macroblock_type flags as VDEC reports them: quant 0x10, forward 0x08, backward 0x04, pattern 0x02, intra 0x01.
+    struct MacroblockTypeCode
+    {
+        uint8_t code;
+        uint8_t length;
+        uint8_t flags;
+    };
+    constexpr MacroblockTypeCode kMbTypeI[] = {{0x1, 1, 0x01}, {0x1, 2, 0x11}};
+    constexpr MacroblockTypeCode kMbTypeP[] = {{0x1, 1, 0x0A}, {0x1, 2, 0x02}, {0x1, 3, 0x08}, {0x3, 5, 0x01},
+                                               {0x2, 5, 0x1A}, {0x1, 5, 0x12}, {0x1, 6, 0x11}};
+    constexpr MacroblockTypeCode kMbTypeB[] = {{0x2, 2, 0x0C}, {0x3, 2, 0x0E}, {0x2, 3, 0x04}, {0x3, 3, 0x06},
+                                               {0x2, 4, 0x08}, {0x3, 4, 0x0A}, {0x3, 5, 0x01}, {0x2, 5, 0x1E},
+                                               {0x3, 6, 0x1A}, {0x2, 6, 0x16}, {0x1, 6, 0x11}};
+    constexpr MacroblockTypeCode kMbTypeD[] = {{0x1, 1, 0x01}};
+
     enum class DctKind : uint8_t
     {
         Invalid,
@@ -140,6 +171,9 @@ namespace
         std::array<ShortEntry, 1024> dcLuma{};
         std::array<ShortEntry, 1024> dcChroma{};
         std::array<ShortEntry, 2048> mba{};
+        std::array<ShortEntry, 512> cbp{};
+        std::array<ShortEntry, 1024> motion{};
+        std::array<ShortEntry, 64> mbType[4]{};
         double cosine[8][8]{};
 
         Tables()
@@ -174,6 +208,19 @@ namespace
             {
                 fill(mba, kMbaCode[i][0], kMbaCode[i][1], 11, ShortEntry{kMbaCode[i][1], static_cast<uint8_t>(i + 1u)});
             }
+            for (uint8_t i = 0; i < 64; ++i)
+                fill(cbp, kCbpCode[i][0], kCbpCode[i][1], 9, ShortEntry{kCbpCode[i][1], i});
+            for (uint8_t i = 1; i < 17; ++i)
+                fill(motion, kMotionCode[i][0], kMotionCode[i][1], 10, ShortEntry{kMotionCode[i][1], i});
+            const auto fillTypes = [this](int pictureType, const MacroblockTypeCode *codes, size_t count)
+            {
+                for (size_t i = 0; i < count; ++i)
+                    fill(mbType[pictureType], codes[i].code, codes[i].length, 6, ShortEntry{codes[i].length, codes[i].flags});
+            };
+            fillTypes(0, kMbTypeI, std::size(kMbTypeI));
+            fillTypes(1, kMbTypeP, std::size(kMbTypeP));
+            fillTypes(2, kMbTypeB, std::size(kMbTypeB));
+            fillTypes(3, kMbTypeD, std::size(kMbTypeD));
             for (int x = 0; x < 8; ++x)
             {
                 for (int u = 0; u < 8; ++u)
@@ -239,16 +286,17 @@ void Ps2Ipu::reset()
 uint32_t Ps2Ipu::readRegister(uint32_t address) const
 {
     const uint32_t fifoQw = static_cast<uint32_t>((m_fifo.size() - std::min<size_t>(m_fifo.size(), (m_bitPos / 128u) * 16u)) / 16u);
-    const uint32_t outQw = static_cast<uint32_t>(std::min<size_t>(m_output.size() / 16u, 8u));
+    // OFC must count only readable data: games poll it before reading OUT_FIFO with lq.
+    const uint32_t outQw = static_cast<uint32_t>(std::min<size_t>(outputBytes() / 16u, 8u));
     switch (address & ~3u)
     {
     case kRegCmd:
         return m_cmdData;
     case kRegCmd + 4u:
-        return m_busy ? kCtrlBusy : 0u;
+        return busy() ? kCtrlBusy : 0u;
     case kRegCtrl:
         return (m_ctrl & kCtrlWritable) | (m_commandError ? kCtrlEcd : 0u) | (m_startCodeSeen ? kCtrlScd : 0u) |
-               (std::min(fifoQw, 8u) & 0xFu) | ((outQw & 0xFu) << 4u) | (m_busy ? kCtrlBusy : 0u);
+               (std::min(fifoQw, 8u) & 0xFu) | ((outQw & 0xFu) << 4u) | (busy() ? kCtrlBusy : 0u);
     case kRegBp:
         return (m_bitPos % 128u) | ((std::min(fifoQw, 8u) & 0xFu) << 8u);
     case kRegTop:
@@ -268,7 +316,7 @@ uint32_t Ps2Ipu::readRegister(uint32_t address) const
         return value;
     }
     case kRegTop + 4u:
-        return m_busy ? kCtrlBusy : 0u;
+        return busy() ? kCtrlBusy : 0u;
     default:
         return 0u;
     }
@@ -315,10 +363,13 @@ void Ps2Ipu::advance(uint64_t eeCycles)
         m_releaseCycles = 0;
         return;
     }
+    // Output appears after a short latency and then flows freely: the lag is what games that re-arm
+    // fromIPU rely on, while throttling throughput starves movie players that busy-wait on the drain.
     m_releaseCycles += eeCycles;
-    const uint64_t macroblocks = m_releaseCycles / kEeCyclesPerMacroblock;
-    m_releaseCycles %= kEeCyclesPerMacroblock;
-    m_releasedBytes = static_cast<size_t>(std::min<uint64_t>(m_output.size(), m_releasedBytes + macroblocks * 1024u));
+    if (m_releaseCycles < kEeCyclesPerMacroblock)
+        return;
+    m_releaseCycles = 0;
+    m_releasedBytes = m_output.size();
 }
 
 bool Ps2Ipu::readOutputFifo(uint8_t *quadword)
@@ -340,6 +391,16 @@ void Ps2Ipu::feedDmaInput(const uint8_t *data, size_t size)
         m_dmaCursor = 0;
     }
     m_dmaInput.insert(m_dmaInput.end(), data, data + size);
+    inputAvailable();
+}
+
+void Ps2Ipu::setInputSource(InputSource source)
+{
+    m_inputSource = std::move(source);
+}
+
+void Ps2Ipu::inputAvailable()
+{
     refill();
     if (m_pending)
         runCommand();
@@ -356,14 +417,13 @@ size_t Ps2Ipu::takeOutput(uint8_t *destination, size_t maxBytes)
 
 Ps2Ipu::Snapshot Ps2Ipu::snapshot() const
 {
-    return Snapshot{m_fifo, m_bitPos, m_dmaCursor, m_dcPred, m_quantizerScale, m_output.size()};
+    return Snapshot{m_bitPos, m_dcPred, m_quantizerScale, m_output.size()};
 }
 
 void Ps2Ipu::restore(const Snapshot &state)
 {
-    m_fifo = state.fifo;
+    // FIFO bytes stay: whatever was pulled from DMA meanwhile is still owed to the replay.
     m_bitPos = state.bitPos;
-    m_dmaCursor = state.dmaCursor;
     m_dcPred = state.dcPred;
     m_quantizerScale = state.quantizerScale;
     m_output.resize(state.outputSize);
@@ -378,6 +438,8 @@ void Ps2Ipu::runCommand()
         executeCommand();
         m_pending = false;
         m_busy = false;
+        discardConsumed();
+        refill();
     }
     catch (const NeedInput &)
     {
@@ -395,6 +457,12 @@ void Ps2Ipu::executeCommand()
         break;
     case kCmdIdec:
         commandIdec();
+        break;
+    case kCmdBdec:
+        commandBdec();
+        break;
+    case kCmdVdec:
+        commandVdec();
         break;
     case kCmdFdec:
         commandFdec();
@@ -426,20 +494,37 @@ void Ps2Ipu::executeCommand()
     }
 }
 
-void Ps2Ipu::refill()
+void Ps2Ipu::discardConsumed()
+{
+    const size_t consumed = std::min<size_t>((m_bitPos / 128u) * 16u, m_fifo.size() / 16u * 16u);
+    if (consumed == 0u)
+        return;
+    m_fifo.erase(m_fifo.begin(), m_fifo.begin() + static_cast<std::ptrdiff_t>(consumed));
+    m_bitPos -= static_cast<uint32_t>(consumed * 8u);
+}
+
+size_t Ps2Ipu::liveFifoBytes() const noexcept
 {
     const size_t consumed = (m_bitPos / 128u) * 16u;
-    if (consumed != 0u)
-    {
-        m_fifo.erase(m_fifo.begin(), m_fifo.begin() + static_cast<std::ptrdiff_t>(std::min(consumed, m_fifo.size())));
-        m_bitPos -= static_cast<uint32_t>(consumed * 8u);
-    }
-    while (m_fifo.size() < kFifoBytes && m_dmaCursor + 16u <= m_dmaInput.size())
+    return m_fifo.size() > consumed ? m_fifo.size() - consumed : 0u;
+}
+
+void Ps2Ipu::refill()
+{
+    // Like the hardware FIFO, accept input only while fewer than 8 unread quadwords are queued.
+    // Consumed bytes are kept until the command completes so a rolled-back command can replay them.
+    while (liveFifoBytes() < kFifoBytes && m_dmaCursor + 16u <= m_dmaInput.size())
     {
         m_fifo.insert(m_fifo.end(), m_dmaInput.begin() + static_cast<std::ptrdiff_t>(m_dmaCursor),
                       m_dmaInput.begin() + static_cast<std::ptrdiff_t>(m_dmaCursor + 16u));
         m_dmaCursor += 16u;
     }
+    if (!m_inputSource || liveFifoBytes() >= kFifoBytes)
+        return;
+    const size_t wantQuadwords = (kFifoBytes - liveFifoBytes()) / 16u;
+    uint8_t buffer[kFifoBytes];
+    const size_t got = m_inputSource(buffer, wantQuadwords);
+    m_fifo.insert(m_fifo.end(), buffer, buffer + got * 16u);
 }
 
 bool Ps2Ipu::ensureBits(uint32_t count)
@@ -541,6 +626,219 @@ void Ps2Ipu::commandCsc()
         for (uint8_t &value : cr)
             value = static_cast<uint8_t>(getBits(8));
         emitMacroblock(luma, cb, cr, rgb16, dither);
+    }
+}
+
+void Ps2Ipu::commandVdec()
+{
+    skipBits(m_cmd & 0x3Fu);
+    const Tables &t = tables();
+    const uint32_t start = m_bitPos;
+    int32_t value = 0;
+    bool valid = true;
+    switch ((m_cmd >> 26u) & 3u)
+    {
+    case 0: // macroblock_address_increment; escape and stuffing come back as 0x23 and 0x22
+    {
+        const ShortEntry entry = t.mba[peekBits(11)];
+        const bool mpeg1 = (m_ctrl & (1u << 23)) != 0u;
+        valid = entry.length != 0u && (entry.value != 35u || mpeg1);
+        if (valid)
+        {
+            skipBits(entry.length);
+            value = entry.value == 34u ? 0x23 : (entry.value == 35u ? 0x22 : entry.value);
+        }
+        break;
+    }
+    case 1: // macroblock_type for the picture type in CTRL.PCT
+    {
+        const uint32_t pictureType = (m_ctrl >> 24u) & 7u;
+        const int table = pictureType >= 1u && pictureType <= 4u ? static_cast<int>(pictureType) - 1 : 0;
+        const ShortEntry entry = t.mbType[table][peekBits(6)];
+        valid = entry.length != 0u;
+        if (valid)
+        {
+            skipBits(entry.length);
+            value = entry.value;
+        }
+        break;
+    }
+    case 2: // motion_code
+        if (getBits(1) != 0u)
+            break;
+        {
+            // The leading '0' was consumed above, so the next nine bits complete the 10-bit index.
+            const ShortEntry entry = t.motion[peekBits(9)];
+            valid = entry.length > 1u;
+            if (valid)
+            {
+                skipBits(entry.length - 1u);
+                value = getBits(1) != 0u ? -static_cast<int32_t>(entry.value) : entry.value;
+            }
+        }
+        break;
+    default: // dmvector: '0' 0, '10' +1, '11' -1
+        if (getBits(1) != 0u)
+            value = getBits(1) != 0u ? -1 : 1;
+        break;
+    }
+    // DATA holds the decoded symbol in bits 0-15 and the code length in bits 16-31.
+    const uint32_t length = m_bitPos - start;
+    m_cmdData = valid ? ((static_cast<uint32_t>(value) & 0xFFFFu) | (length << 16u)) : 0u;
+    m_commandError = !valid;
+}
+
+void Ps2Ipu::commandBdec()
+{
+    skipBits(m_cmd & 0x3Fu);
+    m_commandError = false;
+    m_startCodeSeen = false;
+
+    const uint32_t idp = (m_ctrl >> 16u) & 3u;
+    const bool intra = (m_cmd & (1u << 27)) != 0u;
+    const bool dcReset = (m_cmd & (1u << 26)) != 0u;
+    const bool fieldDct = (m_cmd & (1u << 25)) != 0u;
+    const bool nonLinear = (m_ctrl & (1u << 22)) != 0u;
+    const uint32_t code = (m_cmd >> 16u) & 0x1Fu;
+    m_quantizerScale = nonLinear ? static_cast<int32_t>(kNonLinearQuantizer[code]) : static_cast<int32_t>(code << 1u);
+    if (dcReset)
+        m_dcPred.fill(1 << (7 + idp));
+
+    // RAW16 macroblock: 16x16 luma, then 8x8 Cb and Cr, as signed halfwords.
+    int16_t luma[256] = {};
+    int16_t cb[64] = {};
+    int16_t cr[64] = {};
+    const uint32_t pattern = intra ? 0x3Fu : decodeCodedBlockPattern();
+    for (int i = 0; i < 6; ++i)
+    {
+        if ((pattern & (0x20u >> i)) == 0u)
+            continue;
+        int16_t block[64];
+        const bool ok = intra ? decodeIntraBlock(i < 4 ? 0 : i - 3, block) : decodeNonIntraBlock(block);
+        if (!ok)
+        {
+            m_commandError = true;
+            return;
+        }
+        int16_t *destination = i == 4 ? cb : (i == 5 ? cr : nullptr);
+        int stride = 8;
+        if (destination == nullptr)
+        {
+            const int x = (i & 1) * 8;
+            destination = fieldDct ? luma + (i >> 1) * 16 + x : luma + (i >> 1) * 128 + x;
+            stride = fieldDct ? 32 : 16;
+        }
+        inverseDctSigned(block, destination, stride, intra);
+    }
+    for (const int16_t *plane : {static_cast<const int16_t *>(luma), static_cast<const int16_t *>(cb), static_cast<const int16_t *>(cr)})
+    {
+        const size_t count = plane == luma ? 256u : 64u;
+        for (size_t i = 0; i < count; ++i)
+        {
+            m_output.push_back(static_cast<uint8_t>(static_cast<uint16_t>(plane[i]) & 0xFFu));
+            m_output.push_back(static_cast<uint8_t>(static_cast<uint16_t>(plane[i]) >> 8u));
+        }
+    }
+
+    // Zero bits after a macroblock mean the slice ended: stop on the start code (SCD) or flag garbage (ECD).
+    if (peekBits(8) == 0u)
+    {
+        skipBits((8u - (m_bitPos % 8u)) % 8u);
+        for (;;)
+        {
+            const uint32_t next = peekBits(24);
+            if (next != 0u)
+            {
+                if (next == 1u)
+                    m_startCodeSeen = true;
+                else
+                    m_commandError = true;
+                break;
+            }
+            skipBits(8);
+        }
+    }
+}
+
+uint32_t Ps2Ipu::decodeCodedBlockPattern()
+{
+    const ShortEntry entry = tables().cbp[peekBits(9)];
+    if (entry.length == 0u)
+        return 0u;
+    skipBits(entry.length);
+    return entry.value;
+}
+
+bool Ps2Ipu::decodeNonIntraBlock(int16_t *block)
+{
+    const Tables &t = tables();
+    std::fill(block, block + 64, int16_t{0});
+
+    const bool mpeg1 = (m_ctrl & (1u << 23)) != 0u;
+    const bool alternateScan = (m_ctrl & (1u << 20)) != 0u;
+    const uint8_t *scan = alternateScan ? kAlternateScan : kZigzag;
+
+    int32_t sum = 0;
+    int index = -1;
+    for (;;)
+    {
+        int run = 0;
+        int level = 0;
+        if (index < 0 && peekBits(1) != 0u)
+        {
+            // First coefficient of a non-intra block: '1s' is run 0, level 1 (there is no end of block yet).
+            skipBits(1);
+            level = getBits(1) != 0u ? -1 : 1;
+        }
+        else
+        {
+            const DctEntry entry = t.dct[0][peekBits(16)];
+            switch (entry.kind)
+            {
+            case DctKind::EndOfBlock:
+                skipBits(entry.length);
+                if (!mpeg1 && (sum & 1) == 0)
+                    block[63] ^= 1;
+                return true;
+            case DctKind::RunLevel:
+                skipBits(entry.length);
+                run = entry.run;
+                level = getBits(1) != 0u ? -static_cast<int>(entry.level) : entry.level;
+                break;
+            case DctKind::Escape:
+                skipBits(entry.length);
+                run = static_cast<int>(getBits(6));
+                if (mpeg1)
+                {
+                    level = static_cast<int8_t>(getBits(8));
+                    if (level == 0)
+                        level = static_cast<int>(getBits(8));
+                    else if (level == -128)
+                        level = static_cast<int>(getBits(8)) - 256;
+                }
+                else
+                {
+                    level = static_cast<int>(getBits(12));
+                    if (level & 0x800)
+                        level -= 0x1000;
+                }
+                break;
+            default:
+                return false;
+            }
+        }
+
+        index += run + 1;
+        if (index > 63)
+            return false;
+        const int position = scan[index];
+        int32_t magnitude = ((2 * std::abs(level) + 1) * m_quantizerScale * m_nonIntraMatrix[position]) >> 5;
+        if (mpeg1 && magnitude != 0 && (magnitude & 1) == 0)
+            magnitude -= 1; // MPEG-1 oddification
+        int32_t value = level < 0 ? -magnitude : magnitude;
+        value = std::clamp(value, -2048, 2047);
+        block[position] = static_cast<int16_t>(value);
+        sum += value;
     }
 }
 
@@ -720,6 +1018,38 @@ bool Ps2Ipu::decodeIntraBlock(int component, int16_t *block)
         block[position] = static_cast<int16_t>(value);
         sum += value;
     }
+}
+
+void Ps2Ipu::inverseDctSigned(const int16_t *coefficients, int16_t *destination, int stride, bool intra) const
+{
+    // Intra blocks are pixels (0..255); residuals saturate to the 9-bit range motion compensation adds.
+    uint8_t pixels[64];
+    if (intra)
+    {
+        inverseDct(coefficients, pixels, 8);
+        for (int y = 0; y < 8; ++y)
+            for (int x = 0; x < 8; ++x)
+                destination[y * stride + x] = pixels[y * 8 + x];
+        return;
+    }
+    const auto &c = tables().cosine;
+    double rows[8][8];
+    for (int y = 0; y < 8; ++y)
+        for (int x = 0; x < 8; ++x)
+        {
+            double value = 0.0;
+            for (int u = 0; u < 8; ++u)
+                value += c[x][u] * coefficients[y * 8 + u];
+            rows[y][x] = value;
+        }
+    for (int x = 0; x < 8; ++x)
+        for (int y = 0; y < 8; ++y)
+        {
+            double value = 0.0;
+            for (int v = 0; v < 8; ++v)
+                value += c[y][v] * rows[v][x];
+            destination[y * stride + x] = static_cast<int16_t>(std::clamp(static_cast<int>(std::floor(value / 4.0 + 0.5)), -256, 255));
+        }
 }
 
 void Ps2Ipu::inverseDct(const int16_t *coefficients, uint8_t *destination, int stride) const

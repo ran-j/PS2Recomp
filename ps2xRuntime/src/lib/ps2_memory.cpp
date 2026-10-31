@@ -207,7 +207,8 @@ namespace
         out.qwc = static_cast<uint16_t>(tag & 0xFFFFu);
         out.id = static_cast<uint8_t>((tag >> 28u) & 0x7u);
         out.irq = ((tag >> 31u) & 0x1ull) != 0ull;
-        out.addr = static_cast<uint32_t>((tag >> 32u) & 0x7FFFFFFFu);
+        // Bit 31 is the scratchpad select; resolveContiguous maps it.
+        out.addr = static_cast<uint32_t>(tag >> 32u);
         out.upper = static_cast<uint32_t>((tag >> 16u) & 0xFFFFu);
         return out;
     }
@@ -242,6 +243,8 @@ PS2Memory::PS2Memory()
     : m_rdram(nullptr), m_scratchpad(nullptr), iop_ram(nullptr), m_seenGifCopy(false), m_gsVRAM(nullptr)
 {
     ps2SetScratchpadHostPtr(nullptr);
+    m_ipu.setInputSource([this](uint8_t *destination, size_t maxQuadwords)
+                         { return pullToIpu(destination, maxQuadwords); });
 }
 
 PS2Memory::~PS2Memory()
@@ -825,6 +828,14 @@ uint64_t PS2Memory::read64(uint32_t address)
     if (const uint8_t *vuMem = mapVuMemory(physAddr, sizeof(uint64_t), vuOffset, vuLimit))
     {
         return loadScalar<uint64_t>(vuMem, vuOffset, vuLimit, "read64 vu", address);
+    }
+
+    // libmpeg polls IPU_CMD/IPU_TOP with ld: DATA in the low word, BUSY in bit 63.
+    if (address >= Ps2Ipu::kRegCmd && address < Ps2Ipu::kRegTop + 0x10u)
+    {
+        serviceIpuDma();
+        return static_cast<uint64_t>(m_ipu.readRegister(address)) |
+               (static_cast<uint64_t>(m_ipu.readRegister(address + 4u)) << 32);
     }
 
     // 64-bit IO read: compose from the two adjacent 32-bit IO register slots
@@ -1414,6 +1425,9 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
                     int tagsProcessed = 0;
                     uint32_t lastTagUpper = (chcr >> 16) & 0xFFFFu;
+                    bool stalled = false;
+                    if (m_stalledDrainChannel == channelBase)
+                        m_stalledDrainChannel = 0u;
 
                     while (tagsProcessed < kMaxChainTags)
                     {
@@ -1523,6 +1537,14 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             break;
                         }
 
+                        if (id == 4u && hasPayload && dmaStallBlocks(channelBase, dataAddr, tagQwc))
+                        {
+                            // REFS reads past what the stall source has written: park on this tag until D_STADR moves.
+                            tagAddr = currentTagAddr;
+                            stalled = true;
+                            break;
+                        }
+
                         if (transferTagData)
                             appendVifTagData(currentTagAddr);
 
@@ -1534,6 +1556,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             break;
                     }
 
+                    if (stalled)
+                        m_stalledDrainChannel = channelBase;
                     m_ioRegisters[channelBase + 0x30] = tagAddr;
                     m_ioRegisters[channelBase + 0x40] = asr0;
                     m_ioRegisters[channelBase + 0x50] = asr1;
@@ -1605,6 +1629,8 @@ bool PS2Memory::tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr)
         return false;
 
     const uint32_t mode = (chcr >> 2u) & 0x3u;
+    if (mode == 1u && channelBase == kSprToChannel)
+        return processToScratchpadChain(chcr);
     if (mode != 0u)
         return false;
 
@@ -1653,6 +1679,134 @@ bool PS2Memory::tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr)
     m_ioRegisters[channelBase + 0x20u] = 0u;
     m_ioRegisters[channelBase + 0x80u] = (originalSadr + byteCount) & 0x3FF0u;
     completeDmacChannel(channelBase, fromScratchpad ? 8u : 9u);
+    if (fromScratchpad)
+        advanceDmaStallAddress(kStallSourceFromSpr, mainOffset + byteCount);
+    return true;
+}
+
+bool PS2Memory::dmaStallBlocks(uint32_t channelBase, uint32_t dataAddr, uint32_t qwc)
+{
+    // D_CTRL.STD names the drain channel that honours D_STADR; REFS tags on it wait for the source.
+    static constexpr uint32_t kDCtrl = 0x1000E000u;
+    static constexpr uint32_t kDStadr = 0x1000E020u;
+    const uint32_t dctrl = m_ioRegisters.count(kDCtrl) ? m_ioRegisters[kDCtrl] : 0u;
+    const uint32_t drain = (dctrl >> 6u) & 0x3u;
+    const bool isDrain = (drain == 1u && channelBase == 0x10009000u) || (drain == 2u && channelBase == 0x1000A000u) ||
+                         (drain == 3u && channelBase == 0x1000C400u);
+    if (!isDrain || ((dctrl >> 4u) & 0x3u) == 0u || isScratchpad(dataAddr))
+        return false;
+    uint32_t phys = 0u;
+    try
+    {
+        phys = translateAddress(dataAddr);
+    }
+    catch (const std::exception &)
+    {
+        return false;
+    }
+    const uint32_t stadr = (m_ioRegisters.count(kDStadr) ? m_ioRegisters[kDStadr] : 0u) & 0x7FFFFFF0u;
+    return phys + qwc * 16u > stadr;
+}
+
+void PS2Memory::advanceDmaStallAddress(uint32_t sourceChannel, uint32_t physicalEnd)
+{
+    static constexpr uint32_t kDCtrl = 0x1000E000u;
+    static constexpr uint32_t kDStadr = 0x1000E020u;
+    const uint32_t dctrl = m_ioRegisters.count(kDCtrl) ? m_ioRegisters[kDCtrl] : 0u;
+    if (((dctrl >> 4u) & 0x3u) != sourceChannel)
+        return;
+    m_ioRegisters[kDStadr] = physicalEnd & 0x7FFFFFF0u;
+    if (m_stalledDrainChannel == 0u)
+        return;
+    // Re-issue the parked chain from its TADR; it picks up from the REFS tag it stopped on.
+    const uint32_t channel = m_stalledDrainChannel;
+    m_stalledDrainChannel = 0u;
+    if ((m_ioRegisters[channel] & 0x100u) != 0u)
+        writeIORegister(channel, m_ioRegisters[channel]);
+}
+
+bool PS2Memory::processToScratchpadChain(uint32_t chcr)
+{
+    // libmpeg gathers motion-compensation reference blocks with a toSPR source chain, one ref tag per row.
+    static constexpr uint32_t kSprToChannel = 0x1000D400u;
+    uint32_t tadr = m_ioRegisters[kSprToChannel + 0x30u];
+    uint32_t madr = m_ioRegisters[kSprToChannel + 0x10u];
+    uint32_t sadr = m_ioRegisters[kSprToChannel + 0x80u] & 0x3FF0u;
+    uint32_t asr[2] = {m_ioRegisters[kSprToChannel + 0x40u], m_ioRegisters[kSprToChannel + 0x50u]};
+    uint32_t asp = (chcr >> 4u) & 0x3u;
+    const bool tagInterrupts = (chcr & (1u << 7)) != 0u;
+
+    for (int tags = 0; tags < 65536; ++tags)
+    {
+        std::vector<uint8_t> tagBytes;
+        if (!appendDmaSource(tadr, 16u, tagBytes))
+            break;
+        uint64_t tag = 0;
+        std::memcpy(&tag, tagBytes.data(), sizeof(tag));
+        const uint32_t tagQwc = static_cast<uint32_t>(tag & 0xFFFFu);
+        const uint32_t id = static_cast<uint32_t>((tag >> 28u) & 0x7u);
+        const uint32_t addr = static_cast<uint32_t>(tag >> 32u);
+        bool end = false;
+        switch (id)
+        {
+        case 0: // refe
+            madr = addr;
+            tadr += 16u;
+            end = true;
+            break;
+        case 1: // cnt
+            madr = tadr + 16u;
+            tadr = madr + tagQwc * 16u;
+            break;
+        case 2: // next
+            madr = tadr + 16u;
+            tadr = addr;
+            break;
+        case 3: // ref
+        case 4: // refs
+            madr = addr;
+            tadr += 16u;
+            break;
+        case 5: // call
+            madr = tadr + 16u;
+            if (asp < 2u)
+                asr[asp++] = madr + tagQwc * 16u;
+            tadr = addr;
+            break;
+        case 6: // ret
+            madr = tadr + 16u;
+            if (asp > 0u)
+                tadr = asr[--asp];
+            else
+                end = true;
+            break;
+        default: // end
+            madr = tadr + 16u;
+            end = true;
+            break;
+        }
+
+        std::vector<uint8_t> data;
+        if (tagQwc != 0u && !appendDmaSource(madr, tagQwc * 16u, data))
+            break;
+        for (size_t offset = 0; offset < data.size(); offset += 16u)
+        {
+            std::memcpy(m_scratchpad + sadr, data.data() + offset, 16u);
+            sadr = (sadr + 16u) & (PS2_SCRATCHPAD_SIZE - 1u);
+        }
+        madr += tagQwc * 16u;
+        if (end || (tagInterrupts && ((tag >> 31u) & 1u) != 0u))
+            break;
+    }
+
+    m_ioRegisters[kSprToChannel + 0x10u] = madr;
+    m_ioRegisters[kSprToChannel + 0x20u] = 0u;
+    m_ioRegisters[kSprToChannel + 0x30u] = tadr;
+    m_ioRegisters[kSprToChannel + 0x40u] = asr[0];
+    m_ioRegisters[kSprToChannel + 0x50u] = asr[1];
+    m_ioRegisters[kSprToChannel + 0x80u] = sadr;
+    m_ioRegisters[kSprToChannel] = (chcr & ~0x30u) | (asp << 4u);
+    completeDmacChannel(kSprToChannel, 9u);
     return true;
 }
 
@@ -1689,79 +1843,103 @@ bool PS2Memory::tryStartIpuDma(uint32_t channelBase, uint32_t chcr)
     if (channelBase != kToIpu)
         return false;
 
-    // The whole source is copied up front; the IPU still only exposes 8 quadwords of it at a time.
-    std::vector<uint8_t> data;
-    const uint32_t mode = (chcr >> 2u) & 0x3u;
-    uint32_t madr = m_ioRegisters[channelBase + 0x10u];
-    uint32_t qwc = m_ioRegisters[channelBase + 0x20u] & 0xFFFFu;
-    if (mode == 0u)
+    // The channel stays live: the IPU pulls quadwords as its FIFO drains (see pullToIpu).
+    m_toIpuLastTag = false;
+    m_ipu.inputAvailable();
+    return true;
+}
+
+size_t PS2Memory::pullToIpu(uint8_t *destination, size_t maxQuadwords)
+{
+    static constexpr uint32_t kToIpu = 0x1000B400u;
+    size_t moved = 0;
+    for (int guard = 0; moved < maxQuadwords && guard < 4096; ++guard)
     {
-        appendDmaSource(madr, qwc * 16u, data);
-        madr += qwc * 16u;
-        qwc = 0u;
-    }
-    else
-    {
-        uint32_t tadr = m_ioRegisters[channelBase + 0x30u];
-        uint32_t asr[2] = {m_ioRegisters[channelBase + 0x40u], m_ioRegisters[channelBase + 0x50u]};
-        uint32_t asp = (chcr >> 4u) & 0x3u;
-        for (int tags = 0; tags < 4096; ++tags)
+        uint32_t &chcr = m_ioRegisters[kToIpu];
+        if ((chcr & 0x100u) == 0u)
+            break;
+        uint32_t &madr = m_ioRegisters[kToIpu + 0x10u];
+        uint32_t &qwc = m_ioRegisters[kToIpu + 0x20u];
+        uint32_t &tadr = m_ioRegisters[kToIpu + 0x30u];
+        const bool chain = ((chcr >> 2u) & 0x3u) == 1u;
+
+        if ((qwc & 0xFFFFu) == 0u)
         {
+            if (!chain || m_toIpuLastTag)
+            {
+                completeDmacChannel(kToIpu, 4u);
+                break;
+            }
             std::vector<uint8_t> tagBytes;
             if (!appendDmaSource(tadr, 16u, tagBytes))
+            {
+                completeDmacChannel(kToIpu, 4u);
                 break;
+            }
             uint64_t tag = 0;
             std::memcpy(&tag, tagBytes.data(), sizeof(tag));
             const uint32_t tagQwc = static_cast<uint32_t>(tag & 0xFFFFu);
             const uint32_t id = static_cast<uint32_t>((tag >> 28u) & 0x7u);
             const uint32_t addr = static_cast<uint32_t>(tag >> 32u);
-            const bool irq = ((tag >> 31u) & 1u) != 0u;
-            bool end = false;
-            uint32_t dataAddr = tadr + 16u;
+            uint32_t asp = (chcr >> 4u) & 0x3u;
             switch (id)
             {
             case 0: // refe
-                dataAddr = addr;
-                end = true;
+                madr = addr;
+                tadr += 16u;
+                m_toIpuLastTag = true;
                 break;
             case 1: // cnt
-                tadr = dataAddr + tagQwc * 16u;
+                madr = tadr + 16u;
+                tadr = madr + tagQwc * 16u;
                 break;
             case 2: // next
+                madr = tadr + 16u;
                 tadr = addr;
                 break;
             case 3: // ref
             case 4: // refs
-                dataAddr = addr;
+                madr = addr;
                 tadr += 16u;
                 break;
             case 5: // call
+                madr = tadr + 16u;
                 if (asp < 2u)
-                    asr[asp++] = dataAddr + tagQwc * 16u;
+                    m_ioRegisters[kToIpu + 0x40u + asp++ * 0x10u] = madr + tagQwc * 16u;
                 tadr = addr;
                 break;
             case 6: // ret
+                madr = tadr + 16u;
                 if (asp > 0u)
-                    tadr = asr[--asp];
+                    tadr = m_ioRegisters[kToIpu + 0x40u + --asp * 0x10u];
                 else
-                    end = true;
+                    m_toIpuLastTag = true;
                 break;
             default: // end
-                end = true;
+                madr = tadr + 16u;
+                m_toIpuLastTag = true;
                 break;
             }
-            appendDmaSource(dataAddr, tagQwc * 16u, data);
-            if (end || (irq && (chcr & (1u << 7)) != 0u))
-                break;
+            // The tag's upper half lands in CHCR.TAG, as on hardware.
+            chcr = (chcr & 0xFFCFu) | (asp << 4u) | (static_cast<uint32_t>(tag) & 0xFFFF0000u);
+            if (((tag >> 31u) & 1u) != 0u && (chcr & (1u << 7)) != 0u)
+                m_toIpuLastTag = true;
+            qwc = (qwc & 0xFFFF0000u) | tagQwc;
+            continue;
         }
-        m_ioRegisters[channelBase + 0x30u] = tadr;
-        qwc = 0u;
+
+        std::vector<uint8_t> quadword;
+        if (!appendDmaSource(madr, 16u, quadword))
+        {
+            completeDmacChannel(kToIpu, 4u);
+            break;
+        }
+        std::memcpy(destination + moved * 16u, quadword.data(), 16u);
+        ++moved;
+        madr += 16u;
+        qwc = (qwc & 0xFFFF0000u) | ((qwc & 0xFFFFu) - 1u);
     }
-    m_ioRegisters[channelBase + 0x10u] = madr;
-    m_ioRegisters[channelBase + 0x20u] = qwc;
-    m_ipu.feedDmaInput(data.data(), data.size());
-    completeDmacChannel(channelBase, 4u);
-    return true;
+    return moved;
 }
 
 void PS2Memory::serviceIpuDma()
@@ -1773,6 +1951,7 @@ void PS2Memory::serviceIpuDma()
     uint32_t &madr = m_ioRegisters[kFromIpu + 0x10u];
     uint32_t &qwc = m_ioRegisters[kFromIpu + 0x20u];
     // fromIPU stays active until the decoder has produced the requested quadwords.
+    uint32_t drainedTo = 0u;
     while ((qwc & 0xFFFFu) != 0u && m_ipu.outputBytes() >= 16u)
     {
         alignas(16) uint8_t quadword[16];
@@ -1789,7 +1968,11 @@ void PS2Memory::serviceIpuDma()
             markModified(offset, sizeof(quadword));
         madr += 16u;
         qwc = (qwc & 0xFFFF0000u) | ((qwc & 0xFFFFu) - 1u);
+        if (!scratch)
+            drainedTo = offset + 16u;
     }
+    if (drainedTo != 0u)
+        advanceDmaStallAddress(kStallSourceFromIpu, drainedTo);
     if ((qwc & 0xFFFFu) == 0u)
         completeDmacChannel(kFromIpu, 3u);
 }
@@ -2033,7 +2216,7 @@ void PS2Memory::processPendingTransfers()
         m_ioRegisters[D_STAT] = dstat;
     };
 
-    if (hadGif)
+    if (hadGif && m_stalledDrainChannel != GIF_CHANNEL)
     {
         raiseDStatChannel(2u); // GIF channel
         queueCompletedDmacCause(2u);
@@ -2047,7 +2230,7 @@ void PS2Memory::processPendingTransfers()
         m_ioRegisters[VIF0_CHANNEL + 0x00] &= ~0x100u;
         m_ioRegisters[VIF0_CHANNEL + 0x20] = 0;
     }
-    if (hadVif1)
+    if (hadVif1 && m_stalledDrainChannel != VIF1_CHANNEL)
     {
         raiseDStatChannel(1u); // VIF1 channel
         queueCompletedDmacCause(1u);
@@ -2171,10 +2354,12 @@ bool PS2Memory::tryProcessNativeGifImageUploadChain(GS &gs, uint32_t tadr, uint3
     if (dctrlIt != m_ioRegisters.end() && ((dctrlIt->second & 0x1u) == 0u))
         return false;
 
-    auto resolveContiguous = [&](uint32_t guestAddr, uint32_t bytes, const uint8_t *&out) -> bool
+    auto resolveContiguous = [&](uint32_t dmaAddr, uint32_t bytes, const uint8_t *&out) -> bool
     {
         try
         {
+            // Tag addresses come straight from DMA tags, where bit 31 selects scratchpad.
+            const uint32_t guestAddr = ps2DmacAddressToEe(dmaAddr);
             const bool scratch = isScratchpad(guestAddr);
             const uint32_t phys = translateAddress(guestAddr);
             const uint8_t *base = scratch ? m_scratchpad : m_rdram;
@@ -2291,6 +2476,8 @@ bool PS2Memory::tryProcessNativeGifImageUploadChain(GS &gs, uint32_t tadr, uint3
     uint32_t imageDataAddr = 0u;
     uint32_t finalTadr = payloadTagAddr;
     uint32_t lastTagUpper = payloadTag.upper;
+    if (payloadTag.id == 4u && dmaStallBlocks(GIF_CHANNEL, ps2DmacAddressToEe(payloadTag.addr), payloadTag.qwc))
+        return false; // let the general chain walker park on the stall
     if (payloadTag.id == 3u || payloadTag.id == 4u)
     {
         imageDataAddr = payloadTag.addr;
@@ -2363,10 +2550,12 @@ bool PS2Memory::tryProcessNativeGifPackedChain(GS &gs, uint32_t tadr, uint32_t c
     if (dctrlIt != m_ioRegisters.end() && ((dctrlIt->second & 0x1u) == 0u))
         return false;
 
-    auto resolveContiguous = [&](uint32_t guestAddr, uint32_t bytes, const uint8_t *&out) -> bool
+    auto resolveContiguous = [&](uint32_t dmaAddr, uint32_t bytes, const uint8_t *&out) -> bool
     {
         try
         {
+            // Tag addresses come straight from DMA tags, where bit 31 selects scratchpad.
+            const uint32_t guestAddr = ps2DmacAddressToEe(dmaAddr);
             const bool scratch = isScratchpad(guestAddr);
             const uint32_t phys = translateAddress(guestAddr);
             const uint8_t *base = scratch ? m_scratchpad : m_rdram;
@@ -2470,6 +2659,8 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
 
     if (address >= Ps2Ipu::kRegCmd && address < Ps2Ipu::kRegTop + 0x10u)
     {
+        // Pollers wait for BUSY to clear, which needs fromIPU to keep draining output.
+        serviceIpuDma();
         return m_ipu.readRegister(address);
     }
 
@@ -2504,6 +2695,9 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
                 serviceIpuDma();
                 return m_ioRegisters[address];
             }
+            // A drain parked on DMAC stall control is genuinely still running.
+            if (address == m_stalledDrainChannel)
+                return m_ioRegisters[address];
             if ((address & 0xFF) == 0x00)
             {
                 uint32_t channelStatus = m_ioRegisters[address] & ~0x100u;

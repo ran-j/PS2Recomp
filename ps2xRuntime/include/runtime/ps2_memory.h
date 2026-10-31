@@ -466,7 +466,16 @@ public:
     void serviceIpuDma();
     bool appendDmaSource(uint32_t address, uint32_t bytes, std::vector<uint8_t> &out) const;
     void completeDmacChannel(uint32_t channelBase, uint32_t cause);
+    size_t pullToIpu(uint8_t *destination, size_t maxQuadwords);
+    bool processToScratchpadChain(uint32_t chcr);
+    // DMAC stall control (D_CTRL.STS/STD, D_STADR): sources advance D_STADR, drains park on REFS tags beyond it.
+    static constexpr uint32_t kStallSourceFromSpr = 2u;
+    static constexpr uint32_t kStallSourceFromIpu = 3u;
+    bool dmaStallBlocks(uint32_t channelBase, uint32_t dataAddr, uint32_t qwc);
+    void advanceDmaStallAddress(uint32_t sourceChannel, uint32_t physicalEnd);
+    uint32_t m_stalledDrainChannel = 0u;
     Ps2Ipu m_ipu;
+    bool m_toIpuLastTag = false;
     void queueCompletedDmacCause(uint32_t cause);
 };
 
