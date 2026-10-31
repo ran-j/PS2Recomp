@@ -1100,6 +1100,38 @@ void register_ps2_memory_tests()
             t.IsTrue(contentOk, "scratchpad GIF DMA packet bytes should match scratchpad source");
         });
 
+        tc.Run("GIF DMA leaves MADR after the transferred data, as the DMAC does", [](TestCase &t)
+        {
+            // PCSX2 (Gif.cpp, Dmac.cpp hwDmacSrcChain): normal mode advances MADR by QWC*16;
+            // chain mode sets MADR to each tag's data address and advances it over the payload,
+            // so at the END tag it points past the last payload. QWC ends at 0.
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            constexpr uint32_t kGifCh = 0x1000A000u;
+            uint8_t *rdram = mem.getRDRAM();
+            mem.setGifPacketCallback([](const uint8_t *, uint32_t) {});
+
+            // Normal mode: 2 qwords of zeroed (empty) GIFtags at 0x100000.
+            std::memset(rdram + 0x100000u, 0, 32u);
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x10u, 0x100000u), "write MADR");
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x20u, 2u), "write QWC");
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x00u, 0x100u), "write CHCR STR (normal)");
+            mem.processPendingTransfers();
+            t.Equals(mem.readIORegister(kGifCh + 0x10u), 0x100020u, "normal mode: MADR = start + QWC*16");
+            t.Equals(mem.readIORegister(kGifCh + 0x20u), 0u, "normal mode: QWC = 0");
+
+            // Chain: CNT (1 qword) at 0x110000, REF (2 qwords at 0x120000), END (1 qword).
+            writeDmaTag(rdram, 0x110000u, makeDmaTag(1u, 1u, 0u, false));         // CNT
+            writeDmaTag(rdram, 0x110020u, makeDmaTag(2u, 3u, 0x120000u, false));   // REF
+            writeDmaTag(rdram, 0x110030u, makeDmaTag(1u, 7u, 0u, false));         // END
+            std::memset(rdram + 0x120000u, 0, 32u);
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x30u, 0x110000u), "write TADR");
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x00u, 0x104u), "write CHCR STR|CHAIN");
+            mem.processPendingTransfers();
+            t.Equals(mem.readIORegister(kGifCh + 0x10u), 0x110050u, "chain: MADR ends after the END tag's payload");
+            t.Equals(mem.readIORegister(kGifCh + 0x20u), 0u, "chain: QWC = 0");
+        });
+
         tc.Run("GIF DMA chain can source tags and payload from 0xF000 scratchpad alias", [](TestCase &t)
         {
             PS2Memory mem;
