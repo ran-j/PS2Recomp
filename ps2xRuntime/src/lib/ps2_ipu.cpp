@@ -616,16 +616,22 @@ void Ps2Ipu::commandCsc()
     const bool dither = (m_cmd & (1u << 26)) != 0u;
     for (uint32_t mb = 0; mb < count; ++mb)
     {
-        uint8_t luma[256];
-        uint8_t cb[64];
-        uint8_t cr[64];
-        for (uint8_t &value : luma)
-            value = static_cast<uint8_t>(getBits(8));
-        for (uint8_t &value : cb)
-            value = static_cast<uint8_t>(getBits(8));
-        for (uint8_t &value : cr)
-            value = static_cast<uint8_t>(getBits(8));
-        emitMacroblock(luma, cb, cr, rgb16, dither);
+        // RAW8 input is byte-aligned: copy what the FIFO already holds instead of 384 getBits calls.
+        uint8_t raw[384];
+        size_t filled = 0;
+        while (filled < sizeof(raw))
+        {
+            if ((m_bitPos & 7u) == 0u && m_bitPos / 8u < m_fifo.size())
+            {
+                const size_t available = std::min(sizeof(raw) - filled, m_fifo.size() - m_bitPos / 8u);
+                std::memcpy(raw + filled, m_fifo.data() + m_bitPos / 8u, available);
+                filled += available;
+                m_bitPos += static_cast<uint32_t>(available * 8u);
+                continue;
+            }
+            raw[filled++] = static_cast<uint8_t>(getBits(8));
+        }
+        emitMacroblock(raw, raw + 256, raw + 320, rgb16, dither);
     }
 }
 
@@ -730,14 +736,11 @@ void Ps2Ipu::commandBdec()
         }
         inverseDctSigned(block, destination, stride, intra);
     }
+    // Halfwords go out little-endian, which is the host layout on every supported target.
     for (const int16_t *plane : {static_cast<const int16_t *>(luma), static_cast<const int16_t *>(cb), static_cast<const int16_t *>(cr)})
     {
-        const size_t count = plane == luma ? 256u : 64u;
-        for (size_t i = 0; i < count; ++i)
-        {
-            m_output.push_back(static_cast<uint8_t>(static_cast<uint16_t>(plane[i]) & 0xFFu));
-            m_output.push_back(static_cast<uint8_t>(static_cast<uint16_t>(plane[i]) >> 8u));
-        }
+        const auto *bytes = reinterpret_cast<const uint8_t *>(plane);
+        m_output.insert(m_output.end(), bytes, bytes + (plane == luma ? sizeof(luma) : sizeof(cb)));
     }
 
     // Zero bits after a macroblock mean the slice ended: stop on the start code (SCD) or flag garbage (ECD).
@@ -1020,6 +1023,28 @@ bool Ps2Ipu::decodeIntraBlock(int component, int16_t *block)
     }
 }
 
+static int inverseDctRows(const int16_t *coefficients, double (&rows)[8][8], int (&live)[8])
+{
+    // Most coded rows are all zero and contribute exactly nothing, so only the others are transformed and summed.
+    const auto &c = tables().cosine;
+    int count = 0;
+    for (int y = 0; y < 8; ++y)
+    {
+        const int16_t *row = coefficients + y * 8;
+        if ((row[0] | row[1] | row[2] | row[3] | row[4] | row[5] | row[6] | row[7]) == 0)
+            continue;
+        live[count++] = y;
+        for (int x = 0; x < 8; ++x)
+        {
+            double value = 0.0;
+            for (int u = 0; u < 8; ++u)
+                value += c[x][u] * row[u];
+            rows[y][x] = value;
+        }
+    }
+    return count;
+}
+
 void Ps2Ipu::inverseDctSigned(const int16_t *coefficients, int16_t *destination, int stride, bool intra) const
 {
     // Intra blocks are pixels (0..255); residuals saturate to the 9-bit range motion compensation adds.
@@ -1032,47 +1057,34 @@ void Ps2Ipu::inverseDctSigned(const int16_t *coefficients, int16_t *destination,
                 destination[y * stride + x] = pixels[y * 8 + x];
         return;
     }
-    const auto &c = tables().cosine;
     double rows[8][8];
-    for (int y = 0; y < 8; ++y)
-        for (int x = 0; x < 8; ++x)
-        {
-            double value = 0.0;
-            for (int u = 0; u < 8; ++u)
-                value += c[x][u] * coefficients[y * 8 + u];
-            rows[y][x] = value;
-        }
+    int live[8];
+    const int liveRows = inverseDctRows(coefficients, rows, live);
+    const auto &c = tables().cosine;
     for (int x = 0; x < 8; ++x)
         for (int y = 0; y < 8; ++y)
         {
             double value = 0.0;
-            for (int v = 0; v < 8; ++v)
-                value += c[y][v] * rows[v][x];
+            for (int i = 0; i < liveRows; ++i)
+                value += c[y][live[i]] * rows[live[i]][x];
             destination[y * stride + x] = static_cast<int16_t>(std::clamp(static_cast<int>(std::floor(value / 4.0 + 0.5)), -256, 255));
         }
 }
 
+
 void Ps2Ipu::inverseDct(const int16_t *coefficients, uint8_t *destination, int stride) const
 {
-    const auto &c = tables().cosine;
     double rows[8][8];
-    for (int y = 0; y < 8; ++y)
-    {
-        for (int x = 0; x < 8; ++x)
-        {
-            double value = 0.0;
-            for (int u = 0; u < 8; ++u)
-                value += c[x][u] * coefficients[y * 8 + u];
-            rows[y][x] = value;
-        }
-    }
+    int live[8];
+    const int liveRows = inverseDctRows(coefficients, rows, live);
+    const auto &c = tables().cosine;
     for (int x = 0; x < 8; ++x)
     {
         for (int y = 0; y < 8; ++y)
         {
             double value = 0.0;
-            for (int v = 0; v < 8; ++v)
-                value += c[y][v] * rows[v][x];
+            for (int i = 0; i < liveRows; ++i)
+                value += c[y][live[i]] * rows[live[i]][x];
             destination[y * stride + x] = clampByte(static_cast<int>(std::floor(value / 4.0 + 0.5)));
         }
     }
@@ -1081,6 +1093,8 @@ void Ps2Ipu::inverseDct(const int16_t *coefficients, uint8_t *destination, int s
 void Ps2Ipu::emitMacroblock(const uint8_t *luma, const uint8_t *cb, const uint8_t *cr, bool rgb16, bool dither)
 {
     static constexpr int kDither[4][4] = {{-4, 0, -3, 1}, {2, -2, 3, -1}, {-3, 1, -4, 0}, {3, -1, 2, -2}};
+    uint8_t pixels[1024];
+    uint8_t *out = pixels;
     for (int y = 0; y < 16; ++y)
     {
         for (int x = 0; x < 16; ++x)
@@ -1104,10 +1118,10 @@ void Ps2Ipu::emitMacroblock(const uint8_t *luma, const uint8_t *cb, const uint8_
 
             if (!rgb16)
             {
-                m_output.push_back(static_cast<uint8_t>(r));
-                m_output.push_back(static_cast<uint8_t>(g));
-                m_output.push_back(static_cast<uint8_t>(b));
-                m_output.push_back(alpha);
+                *out++ = static_cast<uint8_t>(r);
+                *out++ = static_cast<uint8_t>(g);
+                *out++ = static_cast<uint8_t>(b);
+                *out++ = alpha;
                 continue;
             }
             if (dither)
@@ -1118,8 +1132,9 @@ void Ps2Ipu::emitMacroblock(const uint8_t *luma, const uint8_t *cb, const uint8_
                 b = std::clamp(b + offset, 0, 255);
             }
             const uint16_t packed = static_cast<uint16_t>((r >> 3) | ((g >> 3) << 5) | ((b >> 3) << 10) | (alpha == 0x40 ? 0x8000 : 0));
-            m_output.push_back(static_cast<uint8_t>(packed & 0xFFu));
-            m_output.push_back(static_cast<uint8_t>(packed >> 8u));
+            *out++ = static_cast<uint8_t>(packed & 0xFFu);
+            *out++ = static_cast<uint8_t>(packed >> 8u);
         }
     }
+    m_output.insert(m_output.end(), pixels, out);
 }

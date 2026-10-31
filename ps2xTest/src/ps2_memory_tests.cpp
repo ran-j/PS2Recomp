@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <cmath>
 #include <vector>
 
 namespace
@@ -1440,6 +1441,131 @@ void register_ps2_memory_tests()
             t.IsTrue((ctrl & (1u << 15)) != 0u, "the following start code should set SCD");
             t.Equals(ctrl & (1u << 14), 0u, "a clean slice end should not set ECD");
             t.Equals(ipu.readRegister(Ps2Ipu::kRegTop), 0x000001B3u, "BSTOP should sit on the start code");
+        });
+
+        tc.Run("IPU BDEC inverse DCT matches the reference transform for sparse AC blocks", [](TestCase &t)
+        {
+            static constexpr uint8_t kZigzag[64] = {
+                0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5,
+                12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28,
+                35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51,
+                58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63};
+            // Coefficients spread over several rows and columns, including all-zero rows in between.
+            const std::vector<std::pair<int, int>> coefficients = {{0, 3}, {2, -2}, {9, 5}, {20, -4}, {35, 1}, {44, 7}};
+
+            // coded_block_pattern '1101' codes luma block 3 only; each coefficient uses the MPEG-2 escape code.
+            std::vector<std::pair<uint32_t, uint32_t>> fields = {{0xDu, 4u}};
+            int previous = -1;
+            for (const auto &[index, level] : coefficients)
+            {
+                fields.push_back({0x01u, 6u});
+                fields.push_back({static_cast<uint32_t>(index - previous - 1), 6u});
+                fields.push_back({static_cast<uint32_t>(level) & 0xFFFu, 12u});
+                previous = index;
+            }
+            fields.push_back({0x2u, 2u});
+            fields.push_back({0x0u, 8u});
+            fields.push_back({0x000001B3u, 32u});
+            const std::vector<uint8_t> stream = packIpuBits(fields);
+
+            Ps2Ipu ipu;
+            ipu.feedDmaInput(stream.data(), stream.size());
+            ipu.writeRegister(Ps2Ipu::kRegCmd, 0x20080000u); // BDEC, non-intra, quantiser_scale_code 8
+            ipu.advance(1u << 20);
+            std::vector<uint8_t> out(768);
+            t.Equals(ipu.takeOutput(out.data(), out.size()), static_cast<size_t>(768), "BDEC should output one macroblock");
+
+            // Reference: non-intra dequantisation with the flat default matrix, mismatch control, separable IDCT.
+            int32_t block[64] = {};
+            int32_t sum = 0;
+            for (const auto &[index, level] : coefficients)
+            {
+                const int32_t magnitude = ((2 * std::abs(level) + 1) * 16 * 16) >> 5;
+                block[kZigzag[index]] = level < 0 ? -magnitude : magnitude;
+                sum += block[kZigzag[index]];
+            }
+            if ((sum & 1) == 0)
+                block[63] ^= 1;
+            double cosine[8][8];
+            for (int x = 0; x < 8; ++x)
+                for (int u = 0; u < 8; ++u)
+                    cosine[x][u] = (u == 0 ? std::sqrt(0.5) : 1.0) * std::cos((2.0 * x + 1.0) * u * 3.14159265358979323846 / 16.0);
+            bool matches = true;
+            for (int y = 0; y < 8; ++y)
+                for (int x = 0; x < 8; ++x)
+                {
+                    double value = 0.0;
+                    for (int v = 0; v < 8; ++v)
+                    {
+                        double row = 0.0;
+                        for (int u = 0; u < 8; ++u)
+                            row += cosine[x][u] * block[v * 8 + u];
+                        value += cosine[y][v] * row;
+                    }
+                    const int expected = std::clamp(static_cast<int>(std::floor(value / 4.0 + 0.5)), -256, 255);
+                    const size_t sample = static_cast<size_t>((8 + y) * 16 + 8 + x);
+                    const int actual = static_cast<int16_t>(out[sample * 2] | (out[sample * 2 + 1] << 8));
+                    if (actual != expected)
+                        matches = false;
+                }
+            t.IsTrue(matches, "luma block 3 should equal the reference inverse DCT");
+        });
+
+        tc.Run("IPU CSC output drains through fromIPU across QWC re-arms", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kToIpu = 0x1000B400u;
+            constexpr uint32_t kFromIpu = 0x1000B000u;
+            constexpr uint32_t kSrc = 0x00030000u;
+            constexpr uint32_t kDst = 0x00040000u;
+            constexpr uint32_t kMacroblocks = 3u;
+            uint8_t *rdram = mem.getRDRAM();
+            for (uint32_t mb = 0; mb < kMacroblocks; ++mb)
+                for (uint32_t i = 0; i < 384u; ++i)
+                    rdram[kSrc + mb * 384u + i] = static_cast<uint8_t>(i < 256u ? 16u + ((i * 7u + mb * 31u) % 220u)
+                                                                                  : 128u + static_cast<int>((i + mb) % 9u) - 4);
+            std::memset(rdram + kDst, 0xEE, kMacroblocks * 1024u + 16u);
+
+            mem.writeIORegister(kToIpu + 0x10u, kSrc);
+            mem.writeIORegister(kToIpu + 0x20u, kMacroblocks * 384u / 16u);
+            mem.writeIORegister(kToIpu + 0x00u, 0x101u);
+            mem.writeIORegister(Ps2Ipu::kRegCmd, 0x70000000u | kMacroblocks); // CSC to RGB32
+
+            // Drain in uneven pieces so the copy crosses chunk and QWC boundaries.
+            uint32_t written = 0u;
+            for (uint32_t piece : {100u, 1u, 91u})
+            {
+                mem.writeIORegister(kFromIpu + 0x10u, kDst + written * 16u);
+                mem.writeIORegister(kFromIpu + 0x20u, piece);
+                mem.writeIORegister(kFromIpu + 0x00u, 0x100u);
+                mem.advanceEeTimers(Ps2Ipu::kEeCyclesPerMacroblock);
+                t.IsTrue((mem.readIORegister(kFromIpu) & 0x100u) == 0u, "each fromIPU request should complete");
+                written += piece;
+            }
+            t.Equals(written, kMacroblocks * 64u, "the pieces cover the whole CSC output");
+
+            bool matches = true;
+            for (uint32_t mb = 0; mb < kMacroblocks; ++mb)
+            {
+                const uint8_t *in = rdram + kSrc + mb * 384u;
+                for (int y = 0; y < 16; ++y)
+                    for (int x = 0; x < 16; ++x)
+                    {
+                        const int lum = 0x95 * (in[y * 16 + x] - 16);
+                        const int u = in[256 + (y / 2) * 8 + x / 2] - 128;
+                        const int v = in[320 + (y / 2) * 8 + x / 2] - 128;
+                        const int r = std::clamp((lum + 0xCC * v) >> 7, 0, 255);
+                        const int g = std::clamp((lum - 0x68 * v - 0x32 * u) >> 7, 0, 255);
+                        const int b = std::clamp((lum + 0x102 * u) >> 7, 0, 255);
+                        const uint8_t *pixel = rdram + kDst + mb * 1024u + static_cast<uint32_t>(y * 16 + x) * 4u;
+                        if (pixel[0] != r || pixel[1] != g || pixel[2] != b || pixel[3] != 0x80u)
+                            matches = false;
+                    }
+            }
+            t.IsTrue(matches, "every macroblock should convert in order with no lost or repeated quadwords");
+            t.Equals(rdram[kDst + kMacroblocks * 1024u], static_cast<uint8_t>(0xEEu), "fromIPU must not write past the output");
         });
 
         tc.Run("IPU BDEC decodes intra blocks as pixels and honours DC reset", [](TestCase &t)

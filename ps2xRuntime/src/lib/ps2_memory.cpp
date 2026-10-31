@@ -1853,6 +1853,25 @@ size_t PS2Memory::pullToIpu(uint8_t *destination, size_t maxQuadwords)
 {
     static constexpr uint32_t kToIpu = 0x1000B400u;
     size_t moved = 0;
+    // Same bounds rules as appendDmaSource, without a heap buffer per quadword.
+    auto source = [this](uint32_t address) -> const uint8_t *
+    {
+        const uint32_t eeAddress = ps2DmacAddressToEe(address);
+        const bool scratch = isScratchpad(eeAddress);
+        uint32_t offset = 0u;
+        try
+        {
+            offset = translateAddress(eeAddress);
+        }
+        catch (const std::exception &)
+        {
+            return nullptr;
+        }
+        const uint32_t limit = scratch ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
+        if (offset > limit || 16u > limit - offset)
+            return nullptr;
+        return (scratch ? m_scratchpad : m_rdram) + offset;
+    };
     for (int guard = 0; moved < maxQuadwords && guard < 4096; ++guard)
     {
         uint32_t &chcr = m_ioRegisters[kToIpu];
@@ -1870,14 +1889,14 @@ size_t PS2Memory::pullToIpu(uint8_t *destination, size_t maxQuadwords)
                 completeDmacChannel(kToIpu, 4u);
                 break;
             }
-            std::vector<uint8_t> tagBytes;
-            if (!appendDmaSource(tadr, 16u, tagBytes))
+            const uint8_t *tagBytes = source(tadr);
+            if (!tagBytes)
             {
                 completeDmacChannel(kToIpu, 4u);
                 break;
             }
             uint64_t tag = 0;
-            std::memcpy(&tag, tagBytes.data(), sizeof(tag));
+            std::memcpy(&tag, tagBytes, sizeof(tag));
             const uint32_t tagQwc = static_cast<uint32_t>(tag & 0xFFFFu);
             const uint32_t id = static_cast<uint32_t>((tag >> 28u) & 0x7u);
             const uint32_t addr = static_cast<uint32_t>(tag >> 32u);
@@ -1928,13 +1947,13 @@ size_t PS2Memory::pullToIpu(uint8_t *destination, size_t maxQuadwords)
             continue;
         }
 
-        std::vector<uint8_t> quadword;
-        if (!appendDmaSource(madr, 16u, quadword))
+        const uint8_t *quadword = source(madr);
+        if (!quadword)
         {
             completeDmacChannel(kToIpu, 4u);
             break;
         }
-        std::memcpy(destination + moved * 16u, quadword.data(), 16u);
+        std::memcpy(destination + moved * 16u, quadword, 16u);
         ++moved;
         madr += 16u;
         qwc = (qwc & 0xFFFF0000u) | ((qwc & 0xFFFFu) - 1u);
