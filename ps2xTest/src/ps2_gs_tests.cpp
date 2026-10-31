@@ -4307,6 +4307,99 @@ void register_ps2_gs_tests()
                       "TRXDIR payload must encode dir=0 (host-to-local)");
         });
 
+        tc.Run("sceGifPk HLE stubs leave the open DMA tag QWC to a recompiled Terminate", [](TestCase &t)
+        {
+            // Mana Khemia's movie strip upload builds its chain with recompiled sceGifPkCnt/Terminate
+            // around HLE sceGifPkAddGsAD/CloseGifTag; Terminate adds the QWC, as libpkt does.
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            PS2Runtime runtime;
+            R5900Context ctx{};
+
+            constexpr uint32_t stateAddr = 0x1000u;
+            constexpr uint32_t tagAddr = 0x2000u;
+            auto writeWord = [&](uint32_t addr, uint32_t value)
+            { std::memcpy(rdram.data() + addr, &value, sizeof(value)); };
+            auto readWord = [&](uint32_t addr)
+            {
+                uint32_t value = 0u;
+                std::memcpy(&value, rdram.data() + addr, sizeof(value));
+                return value;
+            };
+
+            // What the recompiled sceGifPkCnt leaves behind: CNT tag with QWC 0, pDmaTag set, pCurrent past it.
+            writeWord(tagAddr, 0x10000000u);
+            writeWord(stateAddr + 0u, tagAddr + 16u);
+            writeWord(stateAddr + 4u, tagAddr);
+            writeWord(stateAddr + 8u, tagAddr);
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, stateAddr);
+            ctx.r[5] = _mm_set_epi64x(0x0Eull, 0x1000000000000000ull); // A+D GIFtag, NLOOP filled on close
+            ps2_stubs::sceGifPkOpenGifTag(rdram.data(), &ctx, &runtime);
+
+            const uint32_t regs[2] = {GS_REG_BITBLTBUF, GS_REG_TRXREG};
+            for (uint32_t reg : regs)
+            {
+                std::memset(&ctx, 0, sizeof(ctx));
+                setRegU32(ctx, 4, stateAddr);
+                setRegU32(ctx, 5, reg);
+                ps2_stubs::sceGifPkAddGsAD(rdram.data(), &ctx, &runtime);
+            }
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, stateAddr);
+            ps2_stubs::sceGifPkCloseGifTag(rdram.data(), &ctx, &runtime);
+
+            t.Equals(readWord(tagAddr), 0x10000000u, "HLE GIF packet stubs must not write the open DMA tag's QWC");
+            t.Equals(readWord(tagAddr + 16u) & 0x7FFFu, 2u, "CloseGifTag should still set the GIFtag NLOOP");
+
+            // The recompiled sceGifPkTerminate: tag.word0 += (pCurrent - pDmaTag) / 16 - 1.
+            const uint32_t current = readWord(stateAddr);
+            writeWord(tagAddr, readWord(tagAddr) + ((current - tagAddr) >> 4u) - 1u);
+            t.Equals(readWord(tagAddr), 0x10000003u, "Terminate should leave QWC 3 (GIFtag + two A+D), not double it");
+        });
+
+        tc.Run("sceGifPk HLE Terminate still sets the QWC of an all-HLE chain", [](TestCase &t)
+        {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            PS2Runtime runtime;
+            R5900Context ctx{};
+
+            constexpr uint32_t stateAddr = 0x1000u;
+            constexpr uint32_t baseAddr = 0x2000u;
+
+            setRegU32(ctx, 4, stateAddr);
+            setRegU32(ctx, 5, baseAddr);
+            ps2_stubs::sceGifPkInit(rdram.data(), &ctx, &runtime);
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, stateAddr);
+            ps2_stubs::sceGifPkCnt(rdram.data(), &ctx, &runtime);
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, stateAddr);
+            ctx.r[5] = _mm_set_epi64x(0x0Eull, 0x1000000000000000ull);
+            ps2_stubs::sceGifPkOpenGifTag(rdram.data(), &ctx, &runtime);
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, stateAddr);
+            setRegU32(ctx, 5, GS_REG_TEXFLUSH);
+            ps2_stubs::sceGifPkAddGsAD(rdram.data(), &ctx, &runtime);
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, stateAddr);
+            ps2_stubs::sceGifPkCloseGifTag(rdram.data(), &ctx, &runtime);
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, stateAddr);
+            ps2_stubs::sceGifPkTerminate(rdram.data(), &ctx, &runtime);
+
+            uint32_t tagWord = 0u;
+            std::memcpy(&tagWord, rdram.data() + baseAddr, sizeof(tagWord));
+            t.Equals(tagWord & 0xFFFFu, 2u, "HLE Terminate should close the CNT tag over GIFtag + one A+D");
+            t.Equals(tagWord >> 28u, 1u, "the chain head should stay a CNT tag");
+        });
+
         tc.Run("sceGsResetGraph frees its temporary GIF packet", [](TestCase &t)
         {
             PS2Runtime runtime;

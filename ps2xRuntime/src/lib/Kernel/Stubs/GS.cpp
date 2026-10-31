@@ -124,6 +124,7 @@ namespace ps2_stubs
 
         void refreshPacketBuilderPendingCount(uint8_t *rdram, PS2Runtime *runtime, uint32_t stateAddr);
         void writePacketBuilderCurrent(uint8_t *rdram, PS2Runtime *runtime, uint32_t stateAddr, uint32_t currentAddr);
+        void advancePacketBuilderCurrent(uint8_t *rdram, PS2Runtime *runtime, uint32_t stateAddr, uint32_t currentAddr);
 
         void initPacketBuilderState(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
@@ -262,6 +263,26 @@ namespace ps2_stubs
             refreshPacketBuilderPendingCount(rdram, runtime, stateAddr);
         }
 
+        // libpkt's sceGifPkAdd*/Open/Close/Reserve only move pCurrent; the open DMA tag's QWC is added by
+        // sceGifPkTerminate (also run by Cnt/Ref/End). Games can mix these HLE stubs with recompiled
+        // Terminate code, so refreshing the QWC here would make that guest Terminate count it twice.
+        void advancePacketBuilderCurrent(uint8_t *rdram, PS2Runtime *runtime, uint32_t stateAddr, uint32_t currentAddr)
+        {
+            writeGuestU32(rdram, runtime, stateAddr, currentAddr);
+        }
+
+        uint32_t advanceGifPacketWords(uint8_t *rdram, PS2Runtime *runtime, uint32_t stateAddr, uint32_t wordCount)
+        {
+            uint32_t currentAddr = 0u;
+            if (!tryReadWordFromGuest(rdram, runtime, stateAddr, currentAddr))
+            {
+                return 0u;
+            }
+
+            advancePacketBuilderCurrent(rdram, runtime, stateAddr, currentAddr + wordCount * 4u);
+            return currentAddr;
+        }
+
         uint32_t reservePacketBuilderWords(uint8_t *rdram, PS2Runtime *runtime, uint32_t stateAddr, uint32_t wordCount)
         {
             uint32_t currentAddr = 0u;
@@ -311,7 +332,8 @@ namespace ps2_stubs
                               R5900Context *ctx,
                               PS2Runtime *runtime,
                               uint32_t stateAddr,
-                              uint32_t openAddrOffset)
+                              uint32_t openAddrOffset,
+                              bool refreshDmaTag)
         {
             uint32_t currentAddr = 0u;
             if (!tryReadWordFromGuest(rdram, runtime, stateAddr, currentAddr))
@@ -320,11 +342,14 @@ namespace ps2_stubs
             }
 
             writeGuestVec128(rdram, runtime, currentAddr, GPR_VEC(ctx, 5));
-            writePacketBuilderCurrent(rdram, runtime, stateAddr, currentAddr + 16u);
+            if (refreshDmaTag)
+                writePacketBuilderCurrent(rdram, runtime, stateAddr, currentAddr + 16u);
+            else
+                advancePacketBuilderCurrent(rdram, runtime, stateAddr, currentAddr + 16u);
             writeGuestU32(rdram, runtime, stateAddr + openAddrOffset, currentAddr);
         }
 
-        void closePacketGifTag(uint8_t *rdram, PS2Runtime *runtime, uint32_t stateAddr, uint32_t openAddrOffset)
+        void closePacketGifTag(uint8_t *rdram, PS2Runtime *runtime, uint32_t stateAddr, uint32_t openAddrOffset, bool refreshDmaTag)
         {
             uint32_t openAddr = 0u;
             uint32_t currentAddr = 0u;
@@ -366,7 +391,10 @@ namespace ps2_stubs
                 writeGuestU32(rdram, runtime, currentAddr, 0u);
                 currentAddr += 4u;
             }
-            writePacketBuilderCurrent(rdram, runtime, stateAddr, currentAddr);
+            if (refreshDmaTag)
+                writePacketBuilderCurrent(rdram, runtime, stateAddr, currentAddr);
+            else
+                advancePacketBuilderCurrent(rdram, runtime, stateAddr, currentAddr);
         }
     }
 
@@ -383,7 +411,7 @@ namespace ps2_stubs
         const uint64_t regValue = static_cast<uint64_t>(getRegU32(ctx, 5));
         writeGuestU64(rdram, runtime, currentAddr, dataValue);
         writeGuestU64(rdram, runtime, currentAddr + 8u, regValue);
-        writePacketBuilderCurrent(rdram, runtime, stateAddr, currentAddr + 16u);
+        advancePacketBuilderCurrent(rdram, runtime, stateAddr, currentAddr + 16u);
     }
 
     void sceGifPkAddGsData(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -396,13 +424,13 @@ namespace ps2_stubs
         }
 
         writeGuestU64(rdram, runtime, currentAddr, GPR_U64(ctx, 5));
-        writePacketBuilderCurrent(rdram, runtime, stateAddr, currentAddr + 8u);
+        advancePacketBuilderCurrent(rdram, runtime, stateAddr, currentAddr + 8u);
     }
 
     void sceGifPkCloseGifTag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         (void)ctx;
-        closePacketGifTag(rdram, runtime, getRegU32(ctx, 4), 12u);
+        closePacketGifTag(rdram, runtime, getRegU32(ctx, 4), 12u, false);
     }
 
     void sceGifPkCnt(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -450,7 +478,7 @@ namespace ps2_stubs
 
     void sceGifPkOpenGifTag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        openPacketGifTag(rdram, ctx, runtime, getRegU32(ctx, 4), 12u);
+        openPacketGifTag(rdram, ctx, runtime, getRegU32(ctx, 4), 12u, false);
     }
 
     void sceGifPkRef(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -535,7 +563,7 @@ namespace ps2_stubs
                 writeGuestU64(rdram, runtime, addr + 8u, static_cast<uint64_t>(GS_REG_TRXDIR));
                 addr += 16u;
                 writePacketBuilderCurrent(rdram, runtime, stateAddr, addr);
-                closePacketGifTag(rdram, runtime, stateAddr, 12u);
+                closePacketGifTag(rdram, runtime, stateAddr, 12u, true);
             }
         }
 
@@ -582,7 +610,7 @@ namespace ps2_stubs
 
     void sceGifPkReserve(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        setReturnU32(ctx, reservePacketBuilderWords(rdram, runtime, getRegU32(ctx, 4), getRegU32(ctx, 5)));
+        setReturnU32(ctx, advanceGifPacketWords(rdram, runtime, getRegU32(ctx, 4), getRegU32(ctx, 5)));
     }
 
     void sceGifPkTerminate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1475,7 +1503,7 @@ namespace ps2_stubs
     void sceVif1PkCloseGifTag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         (void)ctx;
-        closePacketGifTag(rdram, runtime, getRegU32(ctx, 4), 20u);
+        closePacketGifTag(rdram, runtime, getRegU32(ctx, 4), 20u, true);
     }
 
     void sceVif1PkCnt(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1537,7 +1565,7 @@ namespace ps2_stubs
 
     void sceVif1PkOpenGifTag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        openPacketGifTag(rdram, ctx, runtime, getRegU32(ctx, 4), 20u);
+        openPacketGifTag(rdram, ctx, runtime, getRegU32(ctx, 4), 20u, true);
     }
 
     void sceVif1PkReset(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
