@@ -543,6 +543,14 @@ namespace GSMem
     // Shares swizzle, VRAM wrapping, and lane extraction with the direct reads.
     u32 ReadTexture(TexturePageCache& cache, const u8* data, u32 psm, u32 bp, u32 bw, u32 x, u32 y);
 
+    // ReadTexture with the format resolved once, for samplers that fetch many texels of one texture.
+    TextureFetchFn TextureFetcher(u32 psm);
+
+    // Byte offset of a colour or depth pixel, so a read-modify-write addresses it once.
+    // Null for formats that are not drawable targets.
+    using PixelOffsetFn = u32 (*)(u32 bp, u32 bw, u32 x, u32 y);
+    PixelOffsetFn TargetPixelOffset(u32 psm);
+
 	void WriteCT32(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
 	void WriteZ32(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
 

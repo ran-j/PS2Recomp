@@ -171,4 +171,6 @@ namespace GSMem
         uint32_t m_copyFirst[2] = {0u, 0u};
         uint32_t m_copyCount[2] = {0u, 0u};
     };
+
+    using TextureFetchFn = uint32_t (*)(TexturePageCache& cache, const uint8_t* data, uint32_t bp, uint32_t bw, uint32_t x, uint32_t y);
 }

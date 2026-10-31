@@ -122,6 +122,7 @@ private:
         uint32_t tbw = 0;
         const uint32_t *clut = nullptr;
         GSMem::TexturePageCache *cache = nullptr;
+        GSMem::TextureFetchFn fetch = nullptr;
         int texW = 1;
         int texH = 1;
         uint8_t wrapU = 0;

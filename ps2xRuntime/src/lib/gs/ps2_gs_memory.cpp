@@ -255,6 +255,90 @@ namespace GSMem
         }
     }
 
+    namespace
+    {
+        template <PixelStorageMode psm, const auto& table>
+        u32 FetchTexel(TexturePageCache& cache, const u8* data, u32 bp, u32 bw, u32 x, u32 y)
+        {
+            return PixelStorageTraits<psm>::Read(table, data, bp, bw, x, y, &cache);
+        }
+
+        // The address arithmetic of PixelStorageTraits::Read/Write, without the access.
+        template <PixelStorageMode psm, const auto& table>
+        u32 PixelOffset(u32 bp, u32 bw, u32 x, u32 y)
+        {
+            using Traits = PixelStorageTraits<psm>;
+            const u32 pixel_addr = Traits::Address(table, bp, bw, x, y);
+            const u32 bits = pixel_addr * UnpackedBitWidth(psm) + Traits::BitOffset();
+            return (bits / 8) & (MEMORY_SIZE - sizeof(typename Traits::PackedT));
+        }
+
+        u32 FetchNothing(TexturePageCache&, const u8*, u32, u32, u32, u32)
+        {
+            return 0u;
+        }
+    }
+
+    TextureFetchFn TextureFetcher(u32 psm)
+    {
+        switch (static_cast<PixelStorageMode>(psm & 0x3Fu))
+        {
+        case C32:
+            return FetchTexel<C32, PageTableC32>;
+        case C24:
+            return FetchTexel<C24, PageTableC32>;
+        case C16:
+            return FetchTexel<C16, PageTableC16>;
+        case C16S:
+            return FetchTexel<C16S, PageTableC16S>;
+        case P8:
+            return FetchTexel<P8, PageTableP8>;
+        case P4:
+            return FetchTexel<P4, PageTableP4>;
+        case P8H:
+            return FetchTexel<P8H, PageTableC32>;
+        case P4HL:
+            return FetchTexel<P4HL, PageTableC32>;
+        case P4HH:
+            return FetchTexel<P4HH, PageTableC32>;
+        case Z32:
+            return FetchTexel<Z32, PageTableZ32>;
+        case Z24:
+            return FetchTexel<Z24, PageTableZ32>;
+        case Z16:
+            return FetchTexel<Z16, PageTableZ16>;
+        case Z16S:
+            return FetchTexel<Z16S, PageTableZ16S>;
+        default:
+            return FetchNothing;
+        }
+    }
+
+    PixelOffsetFn TargetPixelOffset(u32 psm)
+    {
+        switch (static_cast<PixelStorageMode>(psm & 0x3Fu))
+        {
+        case C32:
+            return PixelOffset<C32, PageTableC32>;
+        case C24:
+            return PixelOffset<C24, PageTableC32>;
+        case C16:
+            return PixelOffset<C16, PageTableC16>;
+        case C16S:
+            return PixelOffset<C16S, PageTableC16S>;
+        case Z32:
+            return PixelOffset<Z32, PageTableZ32>;
+        case Z24:
+            return PixelOffset<Z24, PageTableZ32>;
+        case Z16:
+            return PixelOffset<Z16, PageTableZ16>;
+        case Z16S:
+            return PixelOffset<Z16S, PageTableZ16S>;
+        default:
+            return nullptr;
+        }
+    }
+
     void WriteCT32(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value)
     {
         PixelStorageTraits<C32>::Write(PageTableC32, data, bp, bw, x, y, value);

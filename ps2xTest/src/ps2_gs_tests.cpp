@@ -2947,6 +2947,60 @@ void register_ps2_gs_tests()
             t.IsTrue(serial == parallel, "four row bands must produce byte-identical VRAM to one thread");
         });
 
+        tc.Run("GS direct target addressing matches the generic pixel accessors", [](TestCase &t)
+        {
+            GSMem::InitLookupTables();
+            struct Format
+            {
+                uint32_t psm;
+                void (*write)(uint8_t *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+                uint32_t (*read)(uint8_t *, uint32_t, uint32_t, uint32_t, uint32_t);
+                uint32_t bytes;
+                uint32_t mask;
+            };
+            const Format formats[] = {
+                {GS_PSM_CT32, GSMem::WriteCT32, GSMem::ReadCT32, 4u, 0xFFFFFFFFu},
+                {GS_PSM_CT24, GSMem::WriteCT24, GSMem::ReadCT24, 4u, 0x00FFFFFFu},
+                {GS_PSM_CT16, GSMem::WriteCT16, GSMem::ReadCT16, 2u, 0xFFFFu},
+                {GS_PSM_CT16S, GSMem::WriteCT16S, GSMem::ReadCT16S, 2u, 0xFFFFu},
+                {GS_PSM_Z32, GSMem::WriteZ32, GSMem::ReadZ32, 4u, 0xFFFFFFFFu},
+                {GS_PSM_Z24, GSMem::WriteZ24, GSMem::ReadZ24, 4u, 0x00FFFFFFu},
+                {GS_PSM_Z16, GSMem::WriteZ16, GSMem::ReadZ16, 2u, 0xFFFFu},
+                {GS_PSM_Z16S, GSMem::WriteZ16S, GSMem::ReadZ16S, 2u, 0xFFFFu},
+            };
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            uint32_t seed = 99u;
+            auto next = [&seed]()
+            {
+                seed = seed * 1664525u + 1013904223u;
+                return seed >> 8u;
+            };
+            bool matches = true;
+            for (const Format &format : formats)
+            {
+                const GSMem::PixelOffsetFn offset = GSMem::TargetPixelOffset(format.psm);
+                if (!offset)
+                {
+                    matches = false;
+                    continue;
+                }
+                for (int i = 0; i < 400; ++i)
+                {
+                    const uint32_t bp = next() % 16384u;
+                    const uint32_t bw = 1u + next() % 16u;
+                    const uint32_t x = next() % 1024u;
+                    const uint32_t y = next() % 1024u;
+                    const uint32_t value = next() * 2654435761u;
+                    format.write(vram.data(), bp, bw, x, y, value);
+                    uint32_t stored = 0u;
+                    std::memcpy(&stored, vram.data() + offset(bp, bw, x, y), format.bytes);
+                    if ((stored & format.mask) != (value & format.mask) || format.read(vram.data(), bp, bw, x, y) != (value & format.mask))
+                        matches = false;
+                }
+            }
+            t.IsTrue(matches, "the byte offset of every drawable format must be where the generic writer stores the pixel");
+        });
+
         tc.Run("GS primitives sampling the top byte of their own RGB24 target draw the same in parallel", [](TestCase &t)
         {
             // T8H/T4HL/T4HH textures stored in the unused byte of the RGB24 frame they draw into, each followed

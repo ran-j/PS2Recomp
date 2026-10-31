@@ -1523,6 +1523,9 @@ struct GSCpuBackend::PixelPipeline
     uint8_t csel = 0;
     uint8_t dsel = 0;
     uint8_t fix = 0;
+    // Direct addressing for colour and depth; null falls back to the generic VRAM accessors.
+    GSMem::PixelOffsetFn frameOffset = nullptr;
+    GSMem::PixelOffsetFn depthOffset = nullptr;
 };
 
 void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uint8_t r, uint8_t g, uint8_t b, uint8_t a, uint8_t fog)
@@ -1530,7 +1533,67 @@ void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uin
     WritePixel(MakePixelPipeline(state), x, y, z, r, g, b, a, fog);
 }
 
-void GSCpuBackend::WritePixel(const PixelPipeline &pipe, int x, int y, int z, uint8_t r, uint8_t g, uint8_t b, uint8_t a, uint8_t fog)
+namespace
+{
+    inline uint32_t readTarget(uint32_t psm, const uint8_t *pixel)
+    {
+        switch (psm)
+        {
+        case GS_PSM_CT24:
+        case GS_PSM_Z24:
+        {
+            uint32_t value;
+            std::memcpy(&value, pixel, sizeof(value));
+            return value & 0x00FFFFFFu;
+        }
+        case GS_PSM_CT16:
+        case GS_PSM_CT16S:
+        case GS_PSM_Z16:
+        case GS_PSM_Z16S:
+        {
+            uint16_t value;
+            std::memcpy(&value, pixel, sizeof(value));
+            return value;
+        }
+        default:
+        {
+            uint32_t value;
+            std::memcpy(&value, pixel, sizeof(value));
+            return value;
+        }
+        }
+    }
+
+    inline void writeTarget(uint32_t psm, uint8_t *pixel, uint32_t value)
+    {
+        switch (psm)
+        {
+        case GS_PSM_CT24:
+        case GS_PSM_Z24:
+        {
+            uint32_t old;
+            std::memcpy(&old, pixel, sizeof(old));
+            value = (old & 0xFF000000u) | (value & 0x00FFFFFFu);
+            std::memcpy(pixel, &value, sizeof(value));
+            break;
+        }
+        case GS_PSM_CT16:
+        case GS_PSM_CT16S:
+        case GS_PSM_Z16:
+        case GS_PSM_Z16S:
+        {
+            const uint16_t half = static_cast<uint16_t>(value);
+            std::memcpy(pixel, &half, sizeof(half));
+            break;
+        }
+        default:
+            std::memcpy(pixel, &value, sizeof(value));
+            break;
+        }
+    }
+}
+
+__attribute__((always_inline)) inline void GSCpuBackend::WritePixel(const PixelPipeline &pipe, int x, int y, int z, uint8_t r, uint8_t g, uint8_t b, uint8_t a, uint8_t fog)
 {
     const GSDrawState &state = *pipe.state;
     const auto &ctx = state.context;
@@ -1573,9 +1636,18 @@ void GSCpuBackend::WritePixel(const PixelPipeline &pipe, int x, int y, int z, ui
 
     u32 rawFramebufferPixel = 0;
     u32 fbrgba = 0;
+    uint8_t *framePixel = nullptr;
     if (frmw)
     {
-        rawFramebufferPixel = ReadVramUnlocked(fpsm, fbp, fbw, x, y);
+        if (pipe.frameOffset)
+        {
+            framePixel = m_vram + pipe.frameOffset(fbp, fbw, static_cast<u32>(x), static_cast<u32>(y));
+            rawFramebufferPixel = readTarget(fpsm, framePixel);
+        }
+        else
+        {
+            rawFramebufferPixel = ReadVramUnlocked(fpsm, fbp, fbw, x, y);
+        }
         fbrgba = rawFramebufferPixel;
 
         if (pipe.framebuffer16)
@@ -1596,6 +1668,14 @@ void GSCpuBackend::WritePixel(const PixelPipeline &pipe, int x, int y, int z, ui
 
     bool zpass = false;
     uint32_t storedZ = 0u;
+    uint8_t *depthPixel = nullptr;
+    auto readDepth = [&]() -> uint32_t
+    {
+        if (!pipe.depthOffset)
+            return ReadVramUnlocked(zpsm, zbp, fbw, x, y);
+        depthPixel = m_vram + pipe.depthOffset(zbp, fbw, static_cast<u32>(x), static_cast<u32>(y));
+        return readTarget(zpsm, depthPixel);
+    };
     switch (ztestMethod)
     {
     case 0:
@@ -1605,11 +1685,11 @@ void GSCpuBackend::WritePixel(const PixelPipeline &pipe, int x, int y, int z, ui
         zpass = true;
         break;
     case 2:
-        storedZ = ReadVramUnlocked(zpsm, zbp, fbw, x, y);
+        storedZ = readDepth();
         zpass = static_cast<uint32_t>(z) >= storedZ;
         break;
     case 3:
-        storedZ = ReadVramUnlocked(zpsm, zbp, fbw, x, y);
+        storedZ = readDepth();
         zpass = static_cast<uint32_t>(z) > storedZ;
         break;
     }
@@ -1688,12 +1768,30 @@ void GSCpuBackend::WritePixel(const PixelPipeline &pipe, int x, int y, int z, ui
         }
 
         // PrepareTexturePageCache already made the texture page cache safe for this primitive's writes.
-        m_writeVramFuncs[fpsm & 0x3Fu](m_vram, fbp, fbw, x, y, pixel);
+        if (pipe.frameOffset)
+        {
+            if (!framePixel)
+                framePixel = m_vram + pipe.frameOffset(fbp, fbw, static_cast<u32>(x), static_cast<u32>(y));
+            writeTarget(fpsm, framePixel, pixel);
+        }
+        else
+        {
+            m_writeVramFuncs[fpsm & 0x3Fu](m_vram, fbp, fbw, x, y, pixel);
+        }
     }
 
     if (writeMask.writeDepth && !ctx.zbuf.zmask)
     {
-        m_writeVramFuncs[zpsm & 0x3Fu](m_vram, zbp, fbw, x, y, z);
+        if (pipe.depthOffset)
+        {
+            if (!depthPixel)
+                depthPixel = m_vram + pipe.depthOffset(zbp, fbw, static_cast<u32>(x), static_cast<u32>(y));
+            writeTarget(zpsm, depthPixel, static_cast<uint32_t>(z));
+        }
+        else
+        {
+            m_writeVramFuncs[zpsm & 0x3Fu](m_vram, zbp, fbw, x, y, z);
+        }
     }
 }
 
@@ -1719,6 +1817,8 @@ GSCpuBackend::PixelPipeline GSCpuBackend::MakePixelPipeline(const GSDrawState &s
     pipe.csel = (alphaReg >> 4) & 3;
     pipe.dsel = (alphaReg >> 6) & 3;
     pipe.fix = static_cast<uint8_t>((alphaReg >> 32) & 0xFF);
+    pipe.frameOffset = GSMem::TargetPixelOffset(pipe.fpsm);
+    pipe.depthOffset = GSMem::TargetPixelOffset(pipe.zpsm);
     return pipe;
 }
 
@@ -1792,6 +1892,7 @@ GSCpuBackend::TextureSampler GSCpuBackend::MakeTextureSampler(const GSDrawState 
     sampler.maxV = static_cast<uint16_t>((clamp >> 34) & 0x3FFu);
     sampler.linear = state.linearFilter;
     sampler.cache = &cache;
+    sampler.fetch = GSMem::TextureFetcher(tex.psm);
 
     if (clut && (isFourBitIndexedPsm(tex.psm) || isEightBitIndexedPsm(tex.psm)))
     {
@@ -1867,9 +1968,9 @@ GSCpuBackend::TextureAxis GSCpuBackend::PrepareTextureAxis(float coordinate, int
     return axis;
 }
 
-uint32_t GSCpuBackend::SampleTexel(const TextureSampler &sampler, int u, int v)
+__attribute__((always_inline)) inline uint32_t GSCpuBackend::SampleTexel(const TextureSampler &sampler, int u, int v)
 {
-    const u32 out = GSMem::ReadTexture(*sampler.cache, m_vram, sampler.psm, sampler.tbp0, sampler.tbw, u, v);
+    const u32 out = sampler.fetch(*sampler.cache, m_vram, sampler.tbp0, sampler.tbw, static_cast<u32>(u), static_cast<u32>(v));
     if (sampler.clut)
         return sampler.clut[static_cast<u8>(out)];
 
