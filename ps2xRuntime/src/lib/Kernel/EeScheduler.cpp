@@ -113,6 +113,7 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_insideInterrupt = false;
     m_pendingEeTimerInterrupts = 0u;
     m_eeCycle = 0u;
+    m_iopPendingEeCycles = 0u;
     m_sliceEndCycle = kDefaultTimeSliceCycles;
     m_stopRequested.store(false, std::memory_order_release);
     m_checkpointPending.store(false, std::memory_order_release);
@@ -362,7 +363,11 @@ void EeScheduler::postEvent(EeEvent event)
 
 bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
 {
-    accountCycles(cycles);
+    advanceGuestCycles(cycles);
+    if (m_iopPendingEeCycles >= kIopBatchEeCycles)
+    {
+        flushIopCycles();
+    }
 
     if (m_checkpointPending.load(std::memory_order_acquire) ||
         m_stopRequested.load(std::memory_order_acquire))
@@ -396,14 +401,31 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
 
 void EeScheduler::accountCycles(uint32_t cycles) noexcept
 {
+    advanceGuestCycles(cycles);
+    flushIopCycles();
+}
+
+void EeScheduler::advanceGuestCycles(uint32_t cycles) noexcept
+{
     const uint64_t elapsed = std::max<uint64_t>(1u, cycles);
     m_eeCycle += elapsed;
     m_pendingEeTimerInterrupts |= m_runtime.memory().advanceEeTimers(elapsed);
-    m_runtime.advanceIopEeCycles(elapsed);
+    m_iopPendingEeCycles += elapsed;
     if (m_pendingEeTimerInterrupts != 0u)
     {
         m_checkpointPending.store(true, std::memory_order_release);
     }
+}
+
+void EeScheduler::flushIopCycles() noexcept
+{
+    if (m_iopPendingEeCycles == 0u)
+    {
+        return;
+    }
+    const uint64_t pending = m_iopPendingEeCycles;
+    m_iopPendingEeCycles = 0u;
+    m_runtime.advanceIopEeCycles(pending);
 }
 
 bool EeScheduler::isExecutingGuest() const noexcept
