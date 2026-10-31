@@ -1095,7 +1095,7 @@ void GSCpuBackend::RasterizePendingInParallel()
 namespace
 {
     // Bounds the backlog: the producer waits rather than queueing several frames of geometry.
-    constexpr size_t kMaxQueuedCommands = 8192u;
+    constexpr size_t kMaxQueuedCommands = 2048u;
 }
 
 void GSCpuBackend::SetAsync(bool enabled)
@@ -1282,8 +1282,10 @@ void GSCpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
 
 void GSCpuBackend::Flush()
 {
-    WaitForQueue();
-    FlushNow();
+    // Queued commands are already on their way and the GS thread rasterizes batches when it runs dry;
+    // waiting is left to Sync and to the readers.
+    if (!m_async)
+        FlushNow();
 }
 
 void GSCpuBackend::TextureFlush()
@@ -1300,6 +1302,10 @@ void GSCpuBackend::TextureFlush()
 
 void GSCpuBackend::Sync(GSSyncReason reason)
 {
+    // Presentation shows whatever has been drawn; holding the host thread until the guest's backlog
+    // drains would only stall the window.
+    if (m_async && reason == GSSyncReason::Presentation)
+        return;
     WaitForQueue();
     SyncNow(reason);
 }
@@ -3068,7 +3074,7 @@ PresentationFrame GSCpuBackend::Present(const GSPresentationRequest &request)
     // Snapshot local memory under the backend lock, then perform the expensive
     // display conversion without holding the producer-side raster lock.
     thread_local std::vector<uint8_t> snapshot;
-    SnapshotVram(snapshot);
+    SnapshotVramNow(snapshot);
     if (snapshot.empty())
         return {};
 

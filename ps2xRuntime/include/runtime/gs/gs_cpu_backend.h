@@ -23,7 +23,8 @@ public:
     void SetRasterThreads(uint32_t participants);
 
     // Runs commands that only change local memory on a GS thread, in submission order, while the caller
-    // continues; anything that reads local memory or transfer state first waits for the queue to drain.
+    // continues; anything that reads local memory or transfer state first waits for the queue to drain,
+    // except presentation, which shows what has been drawn so far.
     void SetAsync(bool enabled);
 
     void Initialize(uint8_t *vram, uint32_t vramSize) override;
