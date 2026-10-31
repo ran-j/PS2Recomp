@@ -3032,6 +3032,59 @@ void register_ps2_gs_tests()
                 t.IsTrue(serial == render(threads), "every row split must produce byte-identical VRAM to one thread");
         });
 
+        tc.Run("GS bilinear quad fetch reads and records what four texel fetches do", [](TestCase &t)
+        {
+            GSMem::InitLookupTables();
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            uint32_t seed = 0xBEEFu;
+            auto next = [&seed]()
+            {
+                seed = seed * 1664525u + 1013904223u;
+                return seed >> 8u;
+            };
+            for (uint8_t &byte : vram)
+                byte = static_cast<uint8_t>(next());
+            const uint32_t formats[] = {GS_PSM_CT32, GS_PSM_CT24, GS_PSM_CT16, GS_PSM_CT16S, GS_PSM_T8, GS_PSM_T4, GS_PSM_T8H,
+                                        GS_PSM_T4HL, GS_PSM_T4HH, GS_PSM_Z32, GS_PSM_Z24, GS_PSM_Z16, GS_PSM_Z16S};
+            bool same = true;
+            for (uint32_t psm : formats)
+            {
+                const GSMem::TextureFetchFn fetch = GSMem::TextureFetcher(psm);
+                const GSMem::TextureQuadFetchFn fetchQuad = GSMem::TextureQuadFetcher(psm);
+                GSMem::TexturePageCache single;
+                GSMem::TexturePageCache quad;
+                const bool tracking = psm % 2u == 0u;
+                single.ResetForBand(tracking);
+                quad.ResetForBand(tracking);
+                for (int i = 0; i < 2000; ++i)
+                {
+                    const uint32_t bp = next() % 16384u;
+                    const uint32_t bw = 1u + next() % 10u;
+                    // Mostly neighbours, often across a page edge, sometimes wrapped apart.
+                    const uint32_t u0 = (next() % 4u == 0u) ? (next() % 8u) * 64u + 63u : next() % 1024u;
+                    const uint32_t v0 = (next() % 4u == 0u) ? (next() % 8u) * 32u + 31u : next() % 1024u;
+                    const uint32_t u1 = (next() % 8u == 0u) ? next() % 1024u : u0 + 1u;
+                    const uint32_t v1 = (next() % 8u == 0u) ? next() % 1024u : v0 + 1u;
+                    single.BeginPixel(static_cast<uint32_t>(i), 0, i);
+                    quad.BeginPixel(static_cast<uint32_t>(i), 0, i);
+                    uint32_t expected[4] = {fetch(single, vram.data(), bp, bw, u0, v0), fetch(single, vram.data(), bp, bw, u1, v0),
+                                            fetch(single, vram.data(), bp, bw, u0, v1), fetch(single, vram.data(), bp, bw, u1, v1)};
+                    uint32_t actual[4] = {};
+                    fetchQuad(quad, vram.data(), bp, bw, u0, u1, v0, v1, actual);
+                    uint32_t singlePage = 0u, quadPage = 0u;
+                    single.CachedPage(singlePage);
+                    quad.CachedPage(quadPage);
+                    const auto &a = single.Track();
+                    const auto &b = quad.Track();
+                    if (std::memcmp(expected, actual, sizeof(expected)) != 0 || singlePage != quadPage || a.lastPage != b.lastPage ||
+                        a.last.texel != b.last.texel || a.last.valid != b.last.valid || a.other.texel != b.other.texel ||
+                        a.other.x != b.other.x || a.switchedInsidePixel != b.switchedInsidePixel)
+                        same = false;
+                }
+            }
+            t.IsTrue(same, "a quad fetch must return the texels, cached page and recorded reads of four single fetches");
+        });
+
         tc.Run("GS direct target addressing matches the generic pixel accessors", [](TestCase &t)
         {
             GSMem::InitLookupTables();

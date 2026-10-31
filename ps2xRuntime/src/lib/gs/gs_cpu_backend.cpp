@@ -9,6 +9,9 @@
 #include "ps2_log.h"
 #include <atomic>
 #include <algorithm>
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
 #include <condition_variable>
 #include <functional>
 #include <thread>
@@ -374,6 +377,36 @@ namespace
         const float top = static_cast<float>(c00) + (static_cast<float>(c10) - static_cast<float>(c00)) * fx;
         const float bottom = static_cast<float>(c01) + (static_cast<float>(c11) - static_cast<float>(c01)) * fx;
         return clampU8(static_cast<int>(std::lround(top + (bottom - top) * fy)));
+    }
+
+    // lerpChannel for all four channels at once. Only for weights in [0, 1], where every intermediate stays
+    // within the channels' range and the vector rounding (fused multiply-adds, then round half away from
+    // zero) gives what the scalar code computes.
+    uint32_t lerpTexels(uint32_t c00, uint32_t c10, uint32_t c01, uint32_t c11, float fx, float fy)
+    {
+#if defined(__ARM_NEON)
+        auto channels = [](uint32_t texel)
+        {
+            const uint8x8_t bytes = vreinterpret_u8_u32(vdup_n_u32(texel));
+            return vcvtq_f32_u32(vmovl_u16(vget_low_u16(vmovl_u8(bytes))));
+        };
+        const float32x4_t f00 = channels(c00);
+        const float32x4_t f10 = channels(c10);
+        const float32x4_t f01 = channels(c01);
+        const float32x4_t f11 = channels(c11);
+        const float32x4_t top = vfmaq_n_f32(f00, vsubq_f32(f10, f00), fx);
+        const float32x4_t bottom = vfmaq_n_f32(f01, vsubq_f32(f11, f01), fx);
+        const uint32x4_t rounded = vreinterpretq_u32_s32(vcvtaq_s32_f32(vfmaq_n_f32(top, vsubq_f32(bottom, top), fy)));
+        const uint8x8_t packed = vmovn_u16(vcombine_u16(vmovn_u32(rounded), vdup_n_u16(0)));
+        return vget_lane_u32(vreinterpret_u32_u8(packed), 0);
+#else
+        uint32_t out = 0u;
+        for (uint32_t shift = 0; shift < 32u; shift += 8u)
+            out |= static_cast<uint32_t>(lerpChannel(static_cast<uint8_t>(c00 >> shift), static_cast<uint8_t>(c10 >> shift),
+                                                     static_cast<uint8_t>(c01 >> shift), static_cast<uint8_t>(c11 >> shift), fx, fy))
+                   << shift;
+        return out;
+#endif
     }
 }
 
@@ -2302,6 +2335,7 @@ GSCpuBackend::TextureSampler GSCpuBackend::MakeTextureSampler(const GSDrawState 
     sampler.linear = state.linearFilter;
     sampler.cache = &cache;
     sampler.fetch = GSMem::TextureFetcher(tex.psm);
+    sampler.fetchQuad = GSMem::TextureQuadFetcher(tex.psm);
 
     if (clut && (isFourBitIndexedPsm(tex.psm) || isEightBitIndexedPsm(tex.psm)))
     {
@@ -2379,7 +2413,11 @@ GSCpuBackend::TextureAxis GSCpuBackend::PrepareTextureAxis(float coordinate, int
 
 __attribute__((always_inline)) inline uint32_t GSCpuBackend::SampleTexel(const TextureSampler &sampler, int u, int v)
 {
-    const u32 out = sampler.fetch(*sampler.cache, m_vram, sampler.tbp0, sampler.tbw, static_cast<u32>(u), static_cast<u32>(v));
+    return ConvertTexel(sampler, sampler.fetch(*sampler.cache, m_vram, sampler.tbp0, sampler.tbw, static_cast<u32>(u), static_cast<u32>(v)));
+}
+
+__attribute__((always_inline)) inline uint32_t GSCpuBackend::ConvertTexel(const TextureSampler &sampler, uint32_t out)
+{
     if (sampler.clut)
         return sampler.clut[static_cast<u8>(out)];
 
@@ -2409,10 +2447,15 @@ uint32_t GSCpuBackend::SampleTextureAxes(const TextureSampler &sampler, const Te
 
     const float fx = u.frac;
     const float fy = v.frac;
-    const uint32_t c00 = SampleTexel(sampler, u.c0, v.c0);
-    const uint32_t c10 = SampleTexel(sampler, u.c1, v.c0);
-    const uint32_t c01 = SampleTexel(sampler, u.c0, v.c1);
-    const uint32_t c11 = SampleTexel(sampler, u.c1, v.c1);
+    uint32_t quad[4];
+    sampler.fetchQuad(*sampler.cache, m_vram, sampler.tbp0, sampler.tbw, static_cast<u32>(u.c0), static_cast<u32>(u.c1),
+                      static_cast<u32>(v.c0), static_cast<u32>(v.c1), quad);
+    const uint32_t c00 = ConvertTexel(sampler, quad[0]);
+    const uint32_t c10 = ConvertTexel(sampler, quad[1]);
+    const uint32_t c01 = ConvertTexel(sampler, quad[2]);
+    const uint32_t c11 = ConvertTexel(sampler, quad[3]);
+    if (fx >= 0.0f && fx <= 1.0f && fy >= 0.0f && fy <= 1.0f)
+        return lerpTexels(c00, c10, c01, c11, fx, fy);
 
     const uint8_t r = lerpChannel(static_cast<uint8_t>(c00 & 0xFFu),
                                   static_cast<uint8_t>(c10 & 0xFFu),

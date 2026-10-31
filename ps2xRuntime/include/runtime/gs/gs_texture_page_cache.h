@@ -160,6 +160,14 @@ namespace GSMem
             return m_track;
         }
 
+        // What Resolve does for further reads of the page it just resolved: they hit, and are recorded.
+        void ResolveAgain(uint32_t count) noexcept
+        {
+            if (m_tracking)
+                for (uint32_t i = 0; i < count; ++i)
+                    NoteRead(m_pageBase);
+        }
+
     private:
         void NoteRead(uint32_t page) noexcept
         {
@@ -199,4 +207,7 @@ namespace GSMem
     };
 
     using TextureFetchFn = uint32_t (*)(TexturePageCache& cache, const uint8_t* data, uint32_t bp, uint32_t bw, uint32_t x, uint32_t y);
+    // Reads the 2x2 texels of a bilinear sample in the order (u0,v0) (u1,v0) (u0,v1) (u1,v1).
+    using TextureQuadFetchFn = void (*)(TexturePageCache& cache, const uint8_t* data, uint32_t bp, uint32_t bw, uint32_t u0, uint32_t u1,
+                                        uint32_t v0, uint32_t v1, uint32_t* out);
 }

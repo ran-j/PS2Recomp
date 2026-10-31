@@ -207,6 +207,7 @@ private:
         const uint32_t *clut = nullptr;
         GSMem::TexturePageCache *cache = nullptr;
         GSMem::TextureFetchFn fetch = nullptr;
+        GSMem::TextureQuadFetchFn fetchQuad = nullptr;
         int texW = 1;
         int texH = 1;
         uint8_t wrapU = 0;
@@ -222,6 +223,7 @@ private:
     uint32_t SampleTexture(const TextureSampler &sampler, float s, float t, float q, uint16_t u, uint16_t v);
     static TextureAxis PrepareTextureAxis(float coordinate, int size, uint8_t mode, uint16_t regionMin, uint16_t regionMax, bool linear);
     uint32_t SampleTexel(const TextureSampler &sampler, int u, int v);
+    static uint32_t ConvertTexel(const TextureSampler &sampler, uint32_t raw);
     uint32_t SampleTextureAxes(const TextureSampler &sampler, const TextureAxis &u, const TextureAxis &v);
     uint32_t LookupCLUT(const GSDrawState &state, uint8_t index, uint8_t cpsm, uint8_t csm, uint8_t csa, uint8_t sourcePsm);
 

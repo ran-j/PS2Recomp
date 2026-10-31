@@ -546,6 +546,9 @@ namespace GSMem
     // ReadTexture with the format resolved once, for samplers that fetch many texels of one texture.
     TextureFetchFn TextureFetcher(u32 psm);
 
+    // TextureFetcher for the 2x2 texels of a bilinear sample.
+    TextureQuadFetchFn TextureQuadFetcher(u32 psm);
+
     // Byte offset of a colour or depth pixel, so a read-modify-write addresses it once.
     // Null for formats that are not drawable targets.
     using PixelOffsetFn = u32 (*)(u32 bp, u32 bw, u32 x, u32 y);
