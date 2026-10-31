@@ -9,6 +9,7 @@
 #include <utility>
 #include <vector>
 #include <cstring>
+#include <cstdlib>
 #include <chrono>
 
 using namespace ps2_syscalls;
@@ -168,6 +169,21 @@ void register_ps2_runtime_io_tests()
 {
     MiniTest::Case("PS2RuntimeIO", [](TestCase &tc)
     {
+#if AGRESSIVE_LOGS
+        tc.Run("Generated-function call tracing is opt-in", [](TestCase &t)
+        {
+            if (std::getenv("PS2X_TRACE_CALLS") != nullptr)
+                return;
+            t.IsFalse(ps2_log::trace_calls_enabled(), "call tracing must stay off without PS2X_TRACE_CALLS");
+            const int before = ps2_log::depth();
+            {
+                PS_LOG_ENTRY("trace_probe");
+                t.Equals(ps2_log::depth(), before, "a disabled trace must not track call depth");
+            }
+            t.Equals(ps2_log::depth(), before, "a disabled trace must not unwind call depth");
+        });
+#endif
+
         tc.Run("ROM0 ROMVER is exposed as the 14-byte firmware pseudo-file", [](TestCase &t)
         {
             TestContext test;
