@@ -93,4 +93,8 @@ private:
     GSTransferSnapshot m_transferState{};
     std::vector<uint8_t> m_localToHostBuffer;
     size_t m_localToHostReadPos = 0;
+    // Host->local data is one byte stream across IMAGE packets and HWREG writes; a CT24/CT16 pixel can
+    // straddle two of them, so the leading bytes of a split pixel wait here for the rest.
+    std::array<uint8_t, 4> m_uploadCarry{};
+    uint32_t m_uploadCarryBytes = 0;
 };

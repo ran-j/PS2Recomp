@@ -2430,6 +2430,78 @@ void register_ps2_gs_tests()
             t.Equals(out[5], static_cast<uint8_t>(0x66u), "pixel1 B should roundtrip");
         });
 
+        tc.Run("GS CT24 upload keeps pixels that straddle IMAGE packets", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            const uint64_t bitblt =
+                (static_cast<uint64_t>(1u) << 16) |     // SBW
+                (static_cast<uint64_t>(GS_PSM_CT24) << 24) |
+                (static_cast<uint64_t>(1u) << 48) |     // DBW
+                (static_cast<uint64_t>(GS_PSM_CT24) << 56);
+            gs.writeRegister(GS_REG_BITBLTBUF, bitblt);
+            gs.writeRegister(GS_REG_TRXPOS, 0ull);
+            gs.writeRegister(GS_REG_TRXREG, (16ull << 0) | (1ull << 32)); // 16 pixels = 48 bytes = 3 qwords
+            gs.writeRegister(GS_REG_TRXDIR, 0ull);
+
+            uint8_t rgb[48];
+            for (uint32_t i = 0; i < sizeof(rgb); ++i)
+                rgb[i] = static_cast<uint8_t>(0x10u + i);
+
+            // One qword per IMAGE packet: 16 bytes is 5 pixels plus one byte of the sixth.
+            for (uint32_t qw = 0; qw < 3u; ++qw)
+            {
+                std::vector<uint8_t> packet;
+                appendU64(packet, makeGifTag(1u, GIF_FMT_IMAGE, 0u, true));
+                appendU64(packet, 0ull);
+                packet.insert(packet.end(), rgb + qw * 16u, rgb + qw * 16u + 16u);
+                gs.processGIFPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+            }
+
+            gs.writeRegister(GS_REG_TRXDIR, 1ull);
+            uint8_t out[48] = {};
+            const uint32_t outBytes = gs.consumeLocalToHostBytes(out, sizeof(out));
+            t.Equals(outBytes, 48u, "16 CT24 pixels should read back as 48 bytes");
+            t.IsTrue(std::memcmp(out, rgb, sizeof(rgb)) == 0,
+                     "CT24 pixels split across IMAGE packets should land intact and in order");
+        });
+
+        tc.Run("GS CT24 upload through HWREG assembles pixels across 8-byte writes", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            const uint64_t bitblt =
+                (static_cast<uint64_t>(1u) << 16) |
+                (static_cast<uint64_t>(GS_PSM_CT24) << 24) |
+                (static_cast<uint64_t>(1u) << 48) |
+                (static_cast<uint64_t>(GS_PSM_CT24) << 56);
+            gs.writeRegister(GS_REG_BITBLTBUF, bitblt);
+            gs.writeRegister(GS_REG_TRXPOS, 0ull);
+            gs.writeRegister(GS_REG_TRXREG, (8ull << 0) | (1ull << 32)); // 8 pixels = 24 bytes = 3 HWREG writes
+            gs.writeRegister(GS_REG_TRXDIR, 0ull);
+
+            uint8_t rgb[24];
+            for (uint32_t i = 0; i < sizeof(rgb); ++i)
+                rgb[i] = static_cast<uint8_t>(0xA0u + i);
+            for (uint32_t i = 0; i < 3u; ++i)
+            {
+                uint64_t value = 0;
+                std::memcpy(&value, rgb + i * 8u, sizeof(value));
+                gs.writeRegister(GS_REG_HWREG, value);
+            }
+
+            gs.writeRegister(GS_REG_TRXDIR, 1ull);
+            uint8_t out[24] = {};
+            const uint32_t outBytes = gs.consumeLocalToHostBytes(out, sizeof(out));
+            t.Equals(outBytes, 24u, "8 CT24 pixels should read back as 24 bytes");
+            t.IsTrue(std::memcmp(out, rgb, sizeof(rgb)) == 0,
+                     "CT24 pixels split across HWREG writes should land intact and in order");
+        });
+
         tc.Run("GS PSMT4 host-local-host keeps nibble packing stable", [](TestCase &t)
         {
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);

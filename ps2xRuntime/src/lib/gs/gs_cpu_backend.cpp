@@ -541,6 +541,7 @@ void GSCpuBackend::ResetUnlocked()
     m_transferState.direction = 3u;
     m_localToHostBuffer.clear();
     m_localToHostReadPos = 0u;
+    m_uploadCarryBytes = 0u;
 }
 
 void GSCpuBackend::Submit(const GSPrimitiveBatch &batch)
@@ -1556,6 +1557,7 @@ void GSCpuBackend::BeginTransfer(const GSTransferCommand &command)
     m_transferState.copiedPixels = 0u;
     m_transferState.direction = command.direction;
     m_transferState.localToHostPendingBytes = 0u;
+    m_uploadCarryBytes = 0u;
 
     if (command.direction == 2u)
         PerformLocalToLocalTransfer();
@@ -1604,49 +1606,67 @@ void GSCpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
         m_transferState.y = m_transfer.trxpos.dsay + row;
     };
 
+    uint32_t bytesPerPixel = 0u;
+    switch (dpsm)
+    {
+    case GS_PSM_CT32:
+    case GS_PSM_Z32:
+        bytesPerPixel = 4u;
+        break;
+    case GS_PSM_CT24:
+    case GS_PSM_Z24:
+        bytesPerPixel = 3u;
+        break;
+    case GS_PSM_CT16:
+    case GS_PSM_CT16S:
+    case GS_PSM_Z16:
+    case GS_PSM_Z16S:
+        bytesPerPixel = 2u;
+        break;
+    default:
+        break;
+    }
+
+    if (bytesPerPixel != 0u)
+    {
+        auto writeDirectPixel = [&](const uint8_t *bytes)
+        {
+            uint32_t value = 0u;
+            std::memcpy(&value, bytes, bytesPerPixel);
+            WriteVramUnlocked(dpsm, dbp, dbw, m_transferState.x, m_transferState.y, value);
+            advancePixel(1u);
+        };
+
+        if (m_uploadCarryBytes != 0u)
+        {
+            const uint32_t take = std::min<uint32_t>(bytesPerPixel - m_uploadCarryBytes, sizeBytes);
+            std::memcpy(m_uploadCarry.data() + m_uploadCarryBytes, data, take);
+            m_uploadCarryBytes += take;
+            offset = take;
+            if (m_uploadCarryBytes < bytesPerPixel)
+                return;
+            m_uploadCarryBytes = 0u;
+            writeDirectPixel(m_uploadCarry.data());
+        }
+
+        while (m_transferState.direction == 0u && sizeBytes - offset >= bytesPerPixel)
+        {
+            writeDirectPixel(data + offset);
+            offset += bytesPerPixel;
+        }
+
+        if (m_transferState.direction == 0u && offset < sizeBytes)
+        {
+            m_uploadCarryBytes = sizeBytes - offset;
+            std::memcpy(m_uploadCarry.data(), data + offset, m_uploadCarryBytes);
+        }
+        return;
+    }
+
     while (offset < sizeBytes && m_transferState.direction == 0u)
     {
         switch (dpsm)
         {
-        case GS_PSM_CT32:
-        case GS_PSM_Z32:
-        {
-            if (sizeBytes - offset < 4u)
-                return;
-            uint32_t value = 0u;
-            std::memcpy(&value, data + offset, sizeof(value));
-            WriteVramUnlocked(dpsm, dbp, dbw, m_transferState.x, m_transferState.y, value);
-            offset += 4u;
-            advancePixel(1u);
-            break;
-        }
-        case GS_PSM_CT24:
-        case GS_PSM_Z24:
-        {
-            if (sizeBytes - offset < 3u)
-                return;
-            const uint32_t value = static_cast<uint32_t>(data[offset]) |
-                                   (static_cast<uint32_t>(data[offset + 1u]) << 8u) |
-                                   (static_cast<uint32_t>(data[offset + 2u]) << 16u);
-            WriteVramUnlocked(dpsm, dbp, dbw, m_transferState.x, m_transferState.y, value);
-            offset += 3u;
-            advancePixel(1u);
-            break;
-        }
-        case GS_PSM_CT16:
-        case GS_PSM_CT16S:
-        case GS_PSM_Z16:
-        case GS_PSM_Z16S:
-        {
-            if (sizeBytes - offset < 2u)
-                return;
-            uint16_t value = 0u;
-            std::memcpy(&value, data + offset, sizeof(value));
-            WriteVramUnlocked(dpsm, dbp, dbw, m_transferState.x, m_transferState.y, value);
-            offset += 2u;
-            advancePixel(1u);
-            break;
-        }
         case GS_PSM_T8:
         case GS_PSM_T8H:
             WriteVramUnlocked(dpsm, dbp, dbw, m_transferState.x, m_transferState.y, data[offset++]);
