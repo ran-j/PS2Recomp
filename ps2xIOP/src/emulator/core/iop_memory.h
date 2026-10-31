@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <span>
 #include <string>
@@ -19,6 +20,7 @@ namespace ps2x::iop::detail
     {
     public:
         static constexpr uint32_t RamSize = 2u * 1024u * 1024u;
+        static constexpr uint32_t PhysicalMask = 0x1FFFFFFFu;
         static constexpr uint32_t ScratchBase = 0x1F800000u;
         static constexpr uint32_t ScratchSize = 0x400u;
         static constexpr uint32_t HardwareBase = 0x1F801000u;
@@ -48,12 +50,68 @@ namespace ps2x::iop::detail
 
         void reset();
 
-        [[nodiscard]] uint8_t read8(uint32_t address) const;
-        [[nodiscard]] uint16_t read16(uint32_t address) const;
-        [[nodiscard]] uint32_t read32(uint32_t address) const;
-        void write8(uint32_t address, uint8_t value);
-        void write16(uint32_t address, uint16_t value);
-        void write32(uint32_t address, uint32_t value);
+        // RAM accesses are inlined: the interpreter makes several per instruction and the call overhead dominated.
+        [[nodiscard]] uint8_t read8(uint32_t address) const
+        {
+            const uint32_t phys = address & PhysicalMask;
+            return phys < RamSize ? m_ram[phys] : read8Slow(address);
+        }
+        [[nodiscard]] uint16_t read16(uint32_t address) const
+        {
+            const uint32_t phys = address & PhysicalMask;
+            if (phys + 1u < RamSize)
+            {
+                uint16_t value;
+                std::memcpy(&value, m_ram.data() + phys, sizeof(value));
+                return value;
+            }
+            return read16Slow(address);
+        }
+        [[nodiscard]] uint32_t read32(uint32_t address) const
+        {
+            const uint32_t phys = address & PhysicalMask;
+            if ((phys & 3u) == 0u && phys + 3u < RamSize)
+            {
+                uint32_t value;
+                std::memcpy(&value, m_ram.data() + phys, sizeof(value));
+                return value;
+            }
+            return read32Slow(address);
+        }
+        void write8(uint32_t address, uint8_t value)
+        {
+            const uint32_t phys = address & PhysicalMask;
+            if (phys < RamSize)
+            {
+                m_ram[phys] = value;
+                m_owned[phys] = 1u;
+                return;
+            }
+            write8Slow(address, value);
+        }
+        void write16(uint32_t address, uint16_t value)
+        {
+            const uint32_t phys = address & PhysicalMask;
+            if (phys + 1u < RamSize)
+            {
+                std::memcpy(m_ram.data() + phys, &value, sizeof(value));
+                m_owned[phys] = 1u;
+                m_owned[phys + 1u] = 1u;
+                return;
+            }
+            write16Slow(address, value);
+        }
+        void write32(uint32_t address, uint32_t value)
+        {
+            const uint32_t phys = address & PhysicalMask;
+            if ((phys & 3u) == 0u && phys + 3u < RamSize)
+            {
+                std::memcpy(m_ram.data() + phys, &value, sizeof(value));
+                std::memset(m_owned.data() + phys, 1, sizeof(value));
+                return;
+            }
+            write32Slow(address, value);
+        }
 
         [[nodiscard]] bool readRam(uint32_t address, void *destination, size_t size) const;
         [[nodiscard]] bool writeRam(uint32_t address, const void *source, size_t size);
@@ -75,6 +133,7 @@ namespace ps2x::iop::detail
         void setInterruptControl(uint32_t value) noexcept { m_interruptControl = value & 1u; }
 
         [[nodiscard]] std::optional<DmaStart> takeDmaStart() noexcept;
+        [[nodiscard]] bool hasDmaStart() const noexcept { return !m_dmaStarts.empty(); }
         // Attaches a raw memory card image to a SIO2 port; a missing file is created blank on first access.
         bool attachMemoryCard(size_t port, const std::string &path);
         [[nodiscard]] std::span<const uint8_t> ram() const noexcept { return m_ram; }
@@ -82,6 +141,12 @@ namespace ps2x::iop::detail
         [[nodiscard]] static uint32_t physicalAddress(uint32_t address) noexcept;
 
     private:
+        [[nodiscard]] uint8_t read8Slow(uint32_t address) const;
+        [[nodiscard]] uint16_t read16Slow(uint32_t address) const;
+        [[nodiscard]] uint32_t read32Slow(uint32_t address) const;
+        void write8Slow(uint32_t address, uint8_t value);
+        void write16Slow(uint32_t address, uint16_t value);
+        void write32Slow(uint32_t address, uint32_t value);
         [[nodiscard]] uint32_t readHardware32(uint32_t address) const;
         void writeHardware32(uint32_t address, uint32_t value);
         void markOwned(uint32_t address, size_t size);

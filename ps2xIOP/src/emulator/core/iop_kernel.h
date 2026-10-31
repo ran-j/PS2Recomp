@@ -93,6 +93,8 @@ namespace ps2x::iop::detail
 
         IopMemory &m_memory;
         std::map<int, IopThread> m_threads;
+        // Set whenever a thread may have become Dead; endTimeslice runs every slice and must not walk all threads.
+        bool m_maybeDeadThreads = false;
         std::map<int, Semaphore> m_semaphores;
         std::map<int, EventFlag> m_eventFlags;
         uint32_t m_nextThreadId = 1;

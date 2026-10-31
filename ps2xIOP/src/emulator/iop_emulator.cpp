@@ -127,6 +127,7 @@ namespace ps2x::iop::detail
             timrman.reset();
             ioman.reset();
             pendingDmaInterrupts.clear();
+            earliestDmaInterrupt = UINT64_MAX;
             pendingGuestCallbacks.clear();
             nextModuleId = 1;
             totalCycles = 0;
@@ -186,8 +187,13 @@ namespace ps2x::iop::detail
 
         void schedulePendingDma()
         {
+            if (!memory.hasDmaStart())
+                return;
             while (const auto dma = memory.takeDmaStart())
+            {
                 pendingDmaInterrupts[dma->irq] = totalCycles + dma->delayCycles;
+                earliestDmaInterrupt = std::min(earliestDmaInterrupt, totalCycles + dma->delayCycles);
+            }
         }
 
         bool readRam(uint32_t address, void *destination, size_t size) const
@@ -388,16 +394,21 @@ namespace ps2x::iop::detail
             if (checkInterrupt(cpu))
                 return true;
 
-            if (const auto import = imports.decode(cpu.pc))
+            // Import stubs are 'jr ra' followed by the ordinal; skip the registry for every other instruction.
+            constexpr uint32_t kJrRa = 0x03E00008u;
+            if (memory.read32(cpu.pc) == kJrRa)
             {
-                const ImportDisposition disposition = dispatchImport(*import, cpu);
-                ++totalInstructions;
-                ++totalCycles;
-                if (disposition == ImportDisposition::JumpToGuest)
-                    return true;
-                cpu.pc = cpu.gpr[31];
-                cpu.branchPending = false;
-                return !cpu.stopped;
+                if (const auto import = imports.decode(cpu.pc))
+                {
+                    const ImportDisposition disposition = dispatchImport(*import, cpu);
+                    ++totalInstructions;
+                    ++totalCycles;
+                    if (disposition == ImportDisposition::JumpToGuest)
+                        return true;
+                    cpu.pc = cpu.gpr[31];
+                    cpu.branchPending = false;
+                    return !cpu.stopped;
+                }
             }
 
             const bool running = cpuCore.executeInstruction(cpu);
@@ -416,7 +427,7 @@ namespace ps2x::iop::detail
             {
                 if (!step(cpu))
                     break;
-                if (!servicingDmaInterrupts && !pendingDmaInterrupts.empty())
+                if (!servicingDmaInterrupts && totalCycles >= earliestDmaInterrupt)
                     servicePendingDmaInterrupts();
                 if (!servicingGuestCallbacks && !pendingGuestCallbacks.empty())
                     servicePendingGuestCallbacks();
@@ -499,10 +510,12 @@ namespace ps2x::iop::detail
             servicingDmaInterrupts = true;
 
             std::vector<int> completed;
+            earliestDmaInterrupt = UINT64_MAX;
             for (auto it = pendingDmaInterrupts.begin(); it != pendingDmaInterrupts.end();)
             {
                 if (it->second > totalCycles)
                 {
+                    earliestDmaInterrupt = std::min(earliestDmaInterrupt, it->second);
                     ++it;
                     continue;
                 }
@@ -633,6 +646,7 @@ namespace ps2x::iop::detail
             }
             if (!loaded.relocationsComplete)
                 log(LogLevel::Warning, "[IOP] one or more IRX relocations were unsupported");
+            imports.forgetDecodedStubs();
 
             Module module;
             module.id = nextModuleId++;
@@ -739,6 +753,8 @@ namespace ps2x::iop::detail
         IopLoadcore loadcore;
         std::map<int, Module> modules;
         std::map<int, uint64_t> pendingDmaInterrupts;
+        // Never later than the earliest entry above, so the per-instruction check can skip the map walk.
+        uint64_t earliestDmaInterrupt = UINT64_MAX;
         std::multimap<uint64_t, ScheduledGuestCallback> pendingGuestCallbacks;
         uint32_t nextModuleId = 1;
         uint64_t totalCycles = 0;

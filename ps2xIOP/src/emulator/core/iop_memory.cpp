@@ -49,7 +49,7 @@ namespace ps2x::iop::detail
         return address & 0x1FFFFFFFu;
     }
 
-    uint8_t IopMemory::read8(uint32_t address) const
+    uint8_t IopMemory::read8Slow(uint32_t address) const
     {
         const uint32_t phys = physicalAddress(address);
         if (phys < RamSize)
@@ -62,7 +62,7 @@ namespace ps2x::iop::detail
         return static_cast<uint8_t>(value >> ((phys & 3u) * 8u));
     }
 
-    uint16_t IopMemory::read16(uint32_t address) const
+    uint16_t IopMemory::read16Slow(uint32_t address) const
     {
         const uint32_t phys = physicalAddress(address);
         if (phys + 1u < RamSize)
@@ -74,7 +74,7 @@ namespace ps2x::iop::detail
         return static_cast<uint16_t>(read8(address) | (static_cast<uint16_t>(read8(address + 1u)) << 8u));
     }
 
-    uint32_t IopMemory::read32(uint32_t address) const
+    uint32_t IopMemory::read32Slow(uint32_t address) const
     {
         const uint32_t phys = physicalAddress(address);
         if ((phys & 3u) == 0u && phys + 3u < RamSize)
@@ -98,7 +98,7 @@ namespace ps2x::iop::detail
                (static_cast<uint32_t>(read8(address + 3u)) << 24u);
     }
 
-    void IopMemory::write8(uint32_t address, uint8_t value)
+    void IopMemory::write8Slow(uint32_t address, uint8_t value)
     {
         const uint32_t phys = physicalAddress(address);
         if (phys < RamSize)
@@ -124,7 +124,7 @@ namespace ps2x::iop::detail
         writeHardware32(aligned, current);
     }
 
-    void IopMemory::write16(uint32_t address, uint16_t value)
+    void IopMemory::write16Slow(uint32_t address, uint16_t value)
     {
         const uint32_t phys = physicalAddress(address);
         if (phys + 1u < RamSize)
@@ -137,7 +137,7 @@ namespace ps2x::iop::detail
         write8(address + 1u, static_cast<uint8_t>(value >> 8u));
     }
 
-    void IopMemory::write32(uint32_t address, uint32_t value)
+    void IopMemory::write32Slow(uint32_t address, uint32_t value)
     {
         const uint32_t phys = physicalAddress(address);
         if ((phys & 3u) == 0u && phys + 3u < RamSize)
