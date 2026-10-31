@@ -1,4 +1,5 @@
 #include "runtime/gs/gs_cpu_backend.h"
+#include "ThreadNaming.h"
 #include "runtime/gs/ps2_gs_common.h"
 #include "runtime/gs/ps2_gs_psmct16.h"
 #include "runtime/gs/ps2_gs_psmct32.h"
@@ -714,10 +715,14 @@ namespace
     }
 }
 
-GSCpuBackend::~GSCpuBackend() = default;
+GSCpuBackend::~GSCpuBackend()
+{
+    SetAsync(false);
+}
 
 void GSCpuBackend::SetRasterThreads(uint32_t participants)
 {
+    WaitForQueue();
     std::lock_guard<std::mutex> lock(m_mutex);
     FlushPendingUnlocked();
     m_rasterParticipants = participants;
@@ -1085,7 +1090,279 @@ void GSCpuBackend::RasterizePendingInParallel()
         m_texturePageCache.SetLivePage(lastPage);
 }
 
+// ---- GS thread -------------------------------------------------------------------------------------
+
+namespace
+{
+    // Bounds the backlog: the producer waits rather than queueing several frames of geometry.
+    constexpr size_t kMaxQueuedCommands = 8192u;
+}
+
+void GSCpuBackend::SetAsync(bool enabled)
+{
+    if (enabled == m_async)
+        return;
+    if (enabled)
+    {
+        {
+            std::lock_guard<std::mutex> lock(m_queueMutex);
+            m_queueStop = false;
+        }
+        m_async = true;
+        m_gsThread = std::thread([this]() { RunQueue(); });
+        return;
+    }
+    WaitForQueue();
+    {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+        m_queueStop = true;
+    }
+    m_queueReady.notify_all();
+    m_gsThread.join();
+    m_async = false;
+}
+
+void GSCpuBackend::Enqueue(Command &&command)
+{
+    {
+        std::unique_lock<std::mutex> lock(m_queueMutex);
+        m_queueProgress.wait(lock, [this]() { return m_queue.size() < kMaxQueuedCommands; });
+        m_queue.push_back(std::move(command));
+        ++m_queueSubmitted;
+    }
+    m_queueReady.notify_one();
+}
+
+void GSCpuBackend::WaitForQueue() const
+{
+    if (!m_async)
+        return;
+    std::unique_lock<std::mutex> lock(m_queueMutex);
+    const uint64_t target = m_queueSubmitted;
+    m_queueProgress.wait(lock, [this, target]() { return m_queueCompleted >= target; });
+}
+
+void GSCpuBackend::RunQueue()
+{
+    ThreadNaming::SetCurrentThreadName("GSThread");
+    for (;;)
+    {
+        std::deque<Command> work;
+        {
+            std::unique_lock<std::mutex> lock(m_queueMutex);
+            m_queueReady.wait(lock, [this]() { return m_queueStop || !m_queue.empty(); });
+            if (m_queue.empty())
+                return;
+            work.swap(m_queue);
+        }
+        m_queueProgress.notify_all();
+        for (Command &command : work)
+        {
+            try
+            {
+                Execute(command);
+            }
+            catch (const std::exception &error)
+            {
+                // Nothing on this thread may unwind past the queue, or readers would wait forever.
+                std::cerr << "[GS] command " << static_cast<int>(command.kind) << " failed on the GS thread: " << error.what() << std::endl;
+            }
+            // Readers wait on completed commands, so batches still queued would hold them up needlessly.
+            std::lock_guard<std::mutex> lock(m_queueMutex);
+            ++m_queueCompleted;
+        }
+        bool idle = false;
+        {
+            std::lock_guard<std::mutex> lock(m_queueMutex);
+            idle = m_queue.empty();
+        }
+        m_queueProgress.notify_all();
+        // Nothing else to do: rasterize what is batched now instead of when someone next reads.
+        if (idle)
+            FlushNow();
+    }
+}
+
+void GSCpuBackend::Execute(Command &command)
+{
+    switch (command.kind)
+    {
+    case Command::Kind::Submit:
+        SubmitNow(command.batch);
+        break;
+    case Command::Kind::LoadClut:
+        LoadClutNow(command.tex0, command.texclut);
+        break;
+    case Command::Kind::BeginTransfer:
+        BeginTransferNow(command.transfer);
+        break;
+    case Command::Kind::UploadImage:
+        UploadImageNow(command.data.data(), static_cast<uint32_t>(command.data.size()));
+        break;
+    case Command::Kind::TextureFlush:
+        TextureFlushNow();
+        break;
+    case Command::Kind::ClearFramebuffer:
+        (void)ClearFramebufferNow(command.context, command.args[0]);
+        break;
+    case Command::Kind::WriteVram:
+        WriteVramNow(command.args[0], command.args[1], command.args[2], command.args[3], command.args[4], command.args[5]);
+        break;
+    }
+}
+
 void GSCpuBackend::Initialize(uint8_t *vram, uint32_t vramSize)
+{
+    WaitForQueue();
+    InitializeNow(vram, vramSize);
+}
+
+void GSCpuBackend::Reset()
+{
+    WaitForQueue();
+    ResetNow();
+}
+
+void GSCpuBackend::Submit(const GSPrimitiveBatch &batch)
+{
+    if (!m_async)
+    {
+        SubmitNow(batch);
+        return;
+    }
+    if (batch.vertexCount == 0u)
+        return;
+    Command command;
+    command.kind = Command::Kind::Submit;
+    command.batch = batch;
+    Enqueue(std::move(command));
+}
+
+void GSCpuBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
+{
+    if (!m_async)
+    {
+        LoadClutNow(tex0, texclut);
+        return;
+    }
+    Command command;
+    command.kind = Command::Kind::LoadClut;
+    command.tex0 = tex0;
+    command.texclut = texclut;
+    Enqueue(std::move(command));
+}
+
+void GSCpuBackend::BeginTransfer(const GSTransferCommand &transfer)
+{
+    if (!m_async)
+    {
+        BeginTransferNow(transfer);
+        return;
+    }
+    Command command;
+    command.kind = Command::Kind::BeginTransfer;
+    command.transfer = transfer;
+    Enqueue(std::move(command));
+}
+
+void GSCpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
+{
+    if (!m_async)
+    {
+        UploadImageNow(data, sizeBytes);
+        return;
+    }
+    if (!data || sizeBytes == 0u)
+        return;
+    Command command;
+    command.kind = Command::Kind::UploadImage;
+    command.data.assign(data, data + sizeBytes);
+    Enqueue(std::move(command));
+}
+
+void GSCpuBackend::Flush()
+{
+    WaitForQueue();
+    FlushNow();
+}
+
+void GSCpuBackend::TextureFlush()
+{
+    if (!m_async)
+    {
+        TextureFlushNow();
+        return;
+    }
+    Command command;
+    command.kind = Command::Kind::TextureFlush;
+    Enqueue(std::move(command));
+}
+
+void GSCpuBackend::Sync(GSSyncReason reason)
+{
+    WaitForQueue();
+    SyncNow(reason);
+}
+
+bool GSCpuBackend::ClearFramebuffer(const GSContext &context, uint32_t rgba)
+{
+    if (!m_async)
+        return ClearFramebufferNow(context, rgba);
+    // The result depends only on the target format, so the clear itself can run later.
+    const uint8_t psm = context.frame.psm;
+    const bool clears = m_vram && context.frame.fbw != 0u &&
+                        (psm == GS_PSM_CT32 || psm == GS_PSM_CT24 || psm == GS_PSM_CT16 || psm == GS_PSM_CT16S);
+    Command command;
+    command.kind = Command::Kind::ClearFramebuffer;
+    command.context = context;
+    command.args[0] = rgba;
+    Enqueue(std::move(command));
+    return clears;
+}
+
+uint32_t GSCpuBackend::ConsumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
+{
+    WaitForQueue();
+    return ConsumeLocalToHostBytesNow(dst, maxBytes);
+}
+
+uint32_t GSCpuBackend::ReadVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y) const
+{
+    WaitForQueue();
+    return ReadVramNow(psm, base, bw, x, y);
+}
+
+void GSCpuBackend::WriteVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value)
+{
+    if (!m_async)
+    {
+        WriteVramNow(psm, base, bw, x, y, value);
+        return;
+    }
+    Command command;
+    command.kind = Command::Kind::WriteVram;
+    command.args[0] = psm;
+    command.args[1] = base;
+    command.args[2] = bw;
+    command.args[3] = x;
+    command.args[4] = y;
+    command.args[5] = value;
+    Enqueue(std::move(command));
+}
+
+void GSCpuBackend::SnapshotVram(std::vector<uint8_t> &out) const
+{
+    WaitForQueue();
+    SnapshotVramNow(out);
+}
+
+GSTransferSnapshot GSCpuBackend::GetTransferSnapshot() const
+{
+    WaitForQueue();
+    return GetTransferSnapshotNow();
+}
+
+void GSCpuBackend::InitializeNow(uint8_t *vram, uint32_t vramSize)
 {
     if (vram && vramSize < GSMem::MEMORY_SIZE)
         throw std::invalid_argument("GS CPU backend requires at least 4 MiB of VRAM");
@@ -1105,7 +1382,7 @@ void GSCpuBackend::Initialize(uint8_t *vram, uint32_t vramSize)
     ResetUnlocked();
 }
 
-void GSCpuBackend::Reset()
+void GSCpuBackend::ResetNow()
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     const_cast<GSCpuBackend *>(this)->FlushPendingUnlocked();
@@ -1127,7 +1404,7 @@ void GSCpuBackend::ResetUnlocked()
     m_uploadCarryBytes = 0u;
 }
 
-void GSCpuBackend::Submit(const GSPrimitiveBatch &batch)
+void GSCpuBackend::SubmitNow(const GSPrimitiveBatch &batch)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_vram || batch.vertexCount == 0u)
@@ -1138,7 +1415,7 @@ void GSCpuBackend::Submit(const GSPrimitiveBatch &batch)
         DrawPrimitive(batch);
 }
 
-void GSCpuBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
+void GSCpuBackend::LoadClutNow(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_pending.empty())
@@ -1238,26 +1515,26 @@ void GSCpuBackend::LoadClutUnlocked(const GSTex0Reg &tex0, const GSTexClutReg &t
     }
 }
 
-void GSCpuBackend::Flush()
+void GSCpuBackend::FlushNow()
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     FlushPendingUnlocked();
 }
 
-void GSCpuBackend::TextureFlush()
+void GSCpuBackend::TextureFlushNow()
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     const_cast<GSCpuBackend *>(this)->FlushPendingUnlocked();
     m_texturePageCache.Invalidate();
 }
 
-void GSCpuBackend::Sync(GSSyncReason)
+void GSCpuBackend::SyncNow(GSSyncReason)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     FlushPendingUnlocked();
 }
 
-uint32_t GSCpuBackend::ReadVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y) const
+uint32_t GSCpuBackend::ReadVramNow(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y) const
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     const_cast<GSCpuBackend *>(this)->FlushPendingUnlocked();
@@ -1279,7 +1556,7 @@ uint32_t GSCpuBackend::ReadTextureVramUnlocked(uint32_t psm, uint32_t base, uint
     return GSMem::ReadTexture(m_texturePageCache, m_vram, psm, base, bw, x, y);
 }
 
-void GSCpuBackend::WriteVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value)
+void GSCpuBackend::WriteVramNow(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     const_cast<GSCpuBackend *>(this)->FlushPendingUnlocked();
@@ -1297,7 +1574,7 @@ void GSCpuBackend::WriteVramUnlocked(uint32_t psm, uint32_t base, uint32_t bw, u
     m_writeVramFuncs[psm & 0x3Fu](m_vram, base, bw, x, y, value);
 }
 
-void GSCpuBackend::SnapshotVram(std::vector<uint8_t> &out) const
+void GSCpuBackend::SnapshotVramNow(std::vector<uint8_t> &out) const
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     const_cast<GSCpuBackend *>(this)->FlushPendingUnlocked();
@@ -1310,7 +1587,7 @@ void GSCpuBackend::SnapshotVram(std::vector<uint8_t> &out) const
     std::memcpy(out.data(), m_vram, m_vramSize);
 }
 
-GSTransferSnapshot GSCpuBackend::GetTransferSnapshot() const
+GSTransferSnapshot GSCpuBackend::GetTransferSnapshotNow() const
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     GSTransferSnapshot result = m_transferState;
@@ -2371,7 +2648,7 @@ void GSCpuBackend::DrawLine(const GSPrimitiveBatch &batch, const RasterContext &
     }
 }
 
-void GSCpuBackend::BeginTransfer(const GSTransferCommand &command)
+void GSCpuBackend::BeginTransferNow(const GSTransferCommand &command)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     const_cast<GSCpuBackend *>(this)->FlushPendingUnlocked();
@@ -2390,7 +2667,7 @@ void GSCpuBackend::BeginTransfer(const GSTransferCommand &command)
         PerformLocalToHostTransfer();
 }
 
-void GSCpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
+void GSCpuBackend::UploadImageNow(const uint8_t *data, uint32_t sizeBytes)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     const_cast<GSCpuBackend *>(this)->FlushPendingUnlocked();
@@ -2635,7 +2912,7 @@ void GSCpuBackend::PerformLocalToHostTransfer()
     m_transferState.localToHostPendingBytes = m_localToHostBuffer.size();
 }
 
-uint32_t GSCpuBackend::ConsumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
+uint32_t GSCpuBackend::ConsumeLocalToHostBytesNow(uint8_t *dst, uint32_t maxBytes)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     const_cast<GSCpuBackend *>(this)->FlushPendingUnlocked();
@@ -2648,7 +2925,7 @@ uint32_t GSCpuBackend::ConsumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
     return static_cast<uint32_t>(count);
 }
 
-bool GSCpuBackend::ClearFramebuffer(const GSContext &context, uint32_t rgba)
+bool GSCpuBackend::ClearFramebufferNow(const GSContext &context, uint32_t rgba)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     const_cast<GSCpuBackend *>(this)->FlushPendingUnlocked();

@@ -5,8 +5,11 @@
 
 #include <array>
 #include <bitset>
+#include <condition_variable>
+#include <deque>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 class GSCpuBackend final : public GSRasterBackend
@@ -18,6 +21,10 @@ public:
     // Threads (including the caller) that rasterize batched primitives; 0 picks the default
     // (PS2X_GS_THREADS, else half the cores). 1 draws every primitive immediately.
     void SetRasterThreads(uint32_t participants);
+
+    // Runs commands that only change local memory on a GS thread, in submission order, while the caller
+    // continues; anything that reads local memory or transfer state first waits for the queue to drain.
+    void SetAsync(bool enabled);
 
     void Initialize(uint8_t *vram, uint32_t vramSize) override;
     void Reset() override;
@@ -41,6 +48,49 @@ public:
     GSTransferSnapshot GetTransferSnapshot() const override;
 
 private:
+    struct Command
+    {
+        enum class Kind : uint8_t
+        {
+            Submit,
+            LoadClut,
+            BeginTransfer,
+            UploadImage,
+            TextureFlush,
+            ClearFramebuffer,
+            WriteVram,
+        };
+        Kind kind = Kind::Submit;
+        GSPrimitiveBatch batch{};
+        GSTex0Reg tex0{};
+        GSTexClutReg texclut{};
+        GSTransferCommand transfer{};
+        GSContext context{};
+        uint32_t args[6]{};
+        std::vector<uint8_t> data;
+    };
+
+    void Enqueue(Command &&command);
+    void WaitForQueue() const;
+    void RunQueue();
+    void Execute(Command &command);
+
+    void InitializeNow(uint8_t *vram, uint32_t vramSize);
+    void ResetNow();
+    void SubmitNow(const GSPrimitiveBatch &batch);
+    void LoadClutNow(const GSTex0Reg &tex0, const GSTexClutReg &texclut);
+    void BeginTransferNow(const GSTransferCommand &command);
+    void UploadImageNow(const uint8_t *data, uint32_t sizeBytes);
+    void FlushNow();
+    void TextureFlushNow();
+    void SyncNow(GSSyncReason reason);
+    bool ClearFramebufferNow(const GSContext &context, uint32_t rgba);
+    uint32_t ConsumeLocalToHostBytesNow(uint8_t *dst, uint32_t maxBytes);
+    uint32_t ReadVramNow(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y) const;
+    void WriteVramNow(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value);
+    void SnapshotVramNow(std::vector<uint8_t> &out) const;
+    GSTransferSnapshot GetTransferSnapshotNow() const;
+
     void ResetUnlocked();
     void LoadClutUnlocked(const GSTex0Reg &tex0, const GSTexClutReg &texclut);
     uint32_t ReadVramUnlocked(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y) const;
@@ -193,6 +243,16 @@ private:
     uint64_t m_pendingTargetKey = 0;
     uint64_t m_pendingPixels = 0;
     std::unique_ptr<RasterWorkers> m_workers;
+
+    bool m_async = false;
+    std::thread m_gsThread;
+    mutable std::mutex m_queueMutex;
+    mutable std::condition_variable m_queueReady;
+    mutable std::condition_variable m_queueProgress;
+    std::deque<Command> m_queue;
+    uint64_t m_queueSubmitted = 0;
+    uint64_t m_queueCompleted = 0;
+    bool m_queueStop = false;
     uint32_t m_rasterParticipants = 0;
     // Rebuilds the texture cache's copied page after a parallel draw into the page it holds.
     std::vector<uint8_t> m_pageRebuildScratch;

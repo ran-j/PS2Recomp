@@ -5,6 +5,7 @@
 #include "game_overrides.h"
 #include "ps2_runtime_macros.h"
 #include "runtime/gs/gs_frontend.h"
+#include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/ee_scheduler.h"
 #include "ThreadNaming.h"
 #include "Kernel/Stubs/Audio.h"
@@ -23,6 +24,7 @@
 #include <limits>
 #include <chrono>
 #include <atomic>
+#include <cstdlib>
 #include <thread>
 #include <unordered_map>
 #include <sstream>
@@ -2385,6 +2387,18 @@ void PS2Runtime::run()
     UnloadImage(blank);
 
     std::atomic<bool> gameThreadFinished{false};
+
+    // Rasterize on a GS thread so the EE keeps running while primitives are drawn; PS2X_GS_ASYNC=0 keeps
+    // drawing on the game thread.
+    {
+        const char *asyncSetting = std::getenv("PS2X_GS_ASYNC");
+        if (!asyncSetting || asyncSetting[0] != '0')
+        {
+            auto backend = std::make_unique<GSCpuBackend>();
+            backend->SetAsync(true);
+            m_gs.setRasterBackend(std::move(backend));
+        }
+    }
 
     std::thread gameThread([&]()
                            {

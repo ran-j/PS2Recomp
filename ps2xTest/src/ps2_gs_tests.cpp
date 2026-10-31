@@ -2844,7 +2844,7 @@ void register_ps2_gs_tests()
         {
             // A mixed stream: CT32 and T8/CLUT textures, point and bilinear sampling, STQ and UV
             // coordinates, blending, Z tests, primitives that sample their own target, uploads, TEXFLUSH.
-            auto render = [](uint32_t threads)
+            auto render = [](uint32_t threads, bool async)
             {
                 std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
                 uint32_t seed = 0x1234567u;
@@ -2856,9 +2856,11 @@ void register_ps2_gs_tests()
                 for (uint8_t &byte : vram)
                     byte = static_cast<uint8_t>(next());
 
+                std::vector<uint32_t> readback;
                 GSCpuBackend gs;
                 gs.Initialize(vram.data(), static_cast<uint32_t>(vram.size()));
                 gs.SetRasterThreads(threads);
+                gs.SetAsync(async);
 
                 GSTex0Reg clutTex{};
                 clutTex.psm = GS_PSM_T8;
@@ -2918,6 +2920,14 @@ void register_ps2_gs_tests()
                     }
                     gs.Submit(batch);
 
+                    // Reads in mid-stream must see every earlier draw, even when drawing runs on a GS thread.
+                    if (i % 41 == 7)
+                    {
+                        const uint32_t x = next() % 640u;
+                        const uint32_t y = next() % 448u;
+                        readback.push_back(gs.ReadVram(GS_PSM_CT32, 0u, 10u, x, y));
+                    }
+
                     if (i % 97 == 50)
                     {
                         // Rewrite part of a texture without TEXFLUSH, then flush on alternate rounds.
@@ -2939,12 +2949,15 @@ void register_ps2_gs_tests()
                 }
                 std::vector<uint8_t> out;
                 gs.SnapshotVram(out);
+                for (uint32_t value : readback)
+                    out.insert(out.end(), reinterpret_cast<const uint8_t *>(&value), reinterpret_cast<const uint8_t *>(&value) + 4);
                 return out;
             };
 
-            const std::vector<uint8_t> serial = render(1u);
-            const std::vector<uint8_t> parallel = render(4u);
+            const std::vector<uint8_t> serial = render(1u, false);
+            const std::vector<uint8_t> parallel = render(4u, false);
             t.IsTrue(serial == parallel, "four row bands must produce byte-identical VRAM to one thread");
+            t.IsTrue(serial == render(4u, true), "a GS thread must produce byte-identical VRAM to drawing in place");
         });
 
         tc.Run("GS direct target addressing matches the generic pixel accessors", [](TestCase &t)
@@ -3006,7 +3019,7 @@ void register_ps2_gs_tests()
             // T8H/T4HL/T4HH textures stored in the unused byte of the RGB24 frame they draw into, each followed
             // by an RGB24 read of the same texels: that read hits the page the texture buffer ended on, so it
             // shows whether parallel drawing left the buffer exactly as a serial draw would.
-            auto render = [](uint32_t threads)
+            auto render = [](uint32_t threads, bool async)
             {
                 std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
                 uint32_t seed = 0x2468ACEu;
@@ -3021,6 +3034,7 @@ void register_ps2_gs_tests()
                 GSCpuBackend gs;
                 gs.Initialize(vram.data(), static_cast<uint32_t>(vram.size()));
                 gs.SetRasterThreads(threads);
+                gs.SetAsync(async);
                 GSTex0Reg clutTex{};
                 clutTex.psm = GS_PSM_T8H;
                 clutTex.cpsm = GS_PSM_CT32;
@@ -3129,9 +3143,10 @@ void register_ps2_gs_tests()
                 return out;
             };
 
-            const std::vector<uint8_t> serial = render(1u);
-            const std::vector<uint8_t> parallel = render(4u);
+            const std::vector<uint8_t> serial = render(1u, false);
+            const std::vector<uint8_t> parallel = render(4u, false);
             t.IsTrue(serial == parallel, "self-sampling RGB24 draws must leave VRAM and the texture buffer as serially");
+            t.IsTrue(serial == render(4u, true), "a GS thread must leave VRAM and the texture buffer as serially");
         });
 
         tc.Run("GS texture page buffer also hides draws into the cached page until TEXFLUSH", [](TestCase &t)
