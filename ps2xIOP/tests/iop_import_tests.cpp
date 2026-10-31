@@ -374,12 +374,21 @@ namespace
     bool testSpu2AutoDmaCompletesAtPlaybackRate()
     {
         // ADX streaming waits for this interrupt between PCM blocks; finishing it at bus speed made the
-        // mixer thread spin and starve everything else at its priority.
+        // mixer thread spin and starve everything else at its priority. The SPU2 pulls one 1 KB block
+        // (256 stereo frames) per 256 output frames, and the transfer ends when its last block is pulled.
         IopMemory memory;
-        const uint64_t autoDelay = startSpu2Dma(memory, true);
+        if (!expect(startSpu2Dma(memory, true) == 0u && !memory.takeDmaStart(), "AutoDMA must not complete at bus speed"))
+            return false;
+        std::vector<int16_t> out;
+        memory.mixSpu2(256u, out);
+        if (!expect(!memory.takeDmaStart(), "AutoDMA completed before playback reached its last block"))
+            return false;
+        memory.mixSpu2(1u, out);
+        const auto done = memory.takeDmaStart();
+        if (!expect(done && done->irq == 0x24, "AutoDMA should complete once playback pulls its last block"))
+            return false;
         const uint64_t plainDelay = startSpu2Dma(memory, false);
-        return expect(autoDelay == 0x200u * 768u, "AutoDMA should complete after 512 frames at 48 kHz") &&
-               expect(plainDelay == 0x200u * 2u, "a plain SPU2 DMA should keep its bus-speed delay");
+        return expect(plainDelay == 0x200u * 2u, "a plain SPU2 DMA should keep its bus-speed delay");
     }
 
     bool testTimrmanPeriodicCallback()

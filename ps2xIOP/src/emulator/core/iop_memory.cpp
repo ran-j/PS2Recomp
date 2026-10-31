@@ -17,10 +17,6 @@ namespace ps2x::iop::detail
         constexpr int kDmaSio2InIrq = 0x2C;
         constexpr int kDmaSio2OutIrq = 0x2D;
         constexpr uint64_t kSio2TransferCycles = 64u;
-        constexpr uint32_t kSpu2Core0Admas = 0x1F9001B0u;
-        constexpr uint32_t kSpu2Core1Admas = 0x1F9005B0u;
-        constexpr uint64_t kIopClockHzForSpu2 = 36'864'000ull;
-        constexpr uint64_t kSpu2SampleRate = 48'000ull;
 
         uint32_t alignUp(uint32_t value, uint32_t alignment)
         {
@@ -29,7 +25,7 @@ namespace ps2x::iop::detail
     }
 
     IopMemory::IopMemory()
-        : m_ram(RamSize), m_owned(RamSize), m_scratch(ScratchSize)
+        : m_ram(RamSize), m_owned(RamSize), m_scratch(ScratchSize), m_spu2(m_ram)
     {
         reset();
     }
@@ -46,6 +42,7 @@ namespace ps2x::iop::detail
         m_interruptControl = 1;
         m_dmaStarts.clear();
         m_sio2.reset();
+        m_spu2.reset();
     }
 
     uint32_t IopMemory::physicalAddress(uint32_t address) noexcept
@@ -62,6 +59,8 @@ namespace ps2x::iop::detail
             return m_scratch[phys - ScratchBase];
         if (phys == IopSio2::kDataOut)
             return m_sio2.readData();
+        if (IopSpu2::contains(phys))
+            return static_cast<uint8_t>(m_spu2.read16(phys & ~1u) >> ((phys & 1u) * 8u));
         const uint32_t value = readHardware32(phys & ~3u);
         return static_cast<uint8_t>(value >> ((phys & 3u) * 8u));
     }
@@ -75,6 +74,8 @@ namespace ps2x::iop::detail
             std::memcpy(&value, m_ram.data() + phys, sizeof(value));
             return value;
         }
+        if ((phys & 1u) == 0u && IopSpu2::contains(phys))
+            return m_spu2.read16(phys);
         return static_cast<uint16_t>(read8(address) | (static_cast<uint16_t>(read8(address + 1u)) << 8u));
     }
 
@@ -93,6 +94,8 @@ namespace ps2x::iop::detail
             std::memcpy(&value, m_scratch.data() + (phys - ScratchBase), sizeof(value));
             return value;
         }
+        if ((phys & 3u) == 0u && IopSpu2::contains(phys))
+            return m_spu2.read16(phys) | (static_cast<uint32_t>(m_spu2.read16(phys + 2u)) << 16u);
         if ((phys & 3u) == 0u && isHardwareAddress(phys))
             return readHardware32(phys);
 
@@ -121,6 +124,13 @@ namespace ps2x::iop::detail
             m_sio2.writeData(value);
             return;
         }
+        if (IopSpu2::contains(phys))
+        {
+            const uint32_t shift = (phys & 1u) * 8u;
+            const uint16_t current = m_spu2.read16(phys & ~1u);
+            m_spu2.write16(phys & ~1u, static_cast<uint16_t>((current & ~(0xFFu << shift)) | (static_cast<uint32_t>(value) << shift)));
+            return;
+        }
         const uint32_t aligned = phys & ~3u;
         uint32_t current = readHardware32(aligned);
         const uint32_t shift = (phys & 3u) * 8u;
@@ -135,6 +145,11 @@ namespace ps2x::iop::detail
         {
             std::memcpy(m_ram.data() + phys, &value, sizeof(value));
             markOwned(phys, sizeof(value));
+            return;
+        }
+        if ((phys & 1u) == 0u && IopSpu2::contains(phys))
+        {
+            m_spu2.write16(phys, value);
             return;
         }
         write8(address, static_cast<uint8_t>(value));
@@ -153,6 +168,12 @@ namespace ps2x::iop::detail
         if ((phys & 3u) == 0u && phys >= ScratchBase && phys + 3u < ScratchBase + ScratchSize)
         {
             std::memcpy(m_scratch.data() + (phys - ScratchBase), &value, sizeof(value));
+            return;
+        }
+        if ((phys & 3u) == 0u && IopSpu2::contains(phys))
+        {
+            m_spu2.write16(phys, static_cast<uint16_t>(value));
+            m_spu2.write16(phys + 2u, static_cast<uint16_t>(value >> 16u));
             return;
         }
         if ((phys & 3u) == 0u)
@@ -280,35 +301,51 @@ namespace ps2x::iop::detail
             return;
 
         const bool secondCore = address == kDmaSpu1Chcr;
-        m_hardware[address] = value & ~kDmaStart;
-
-        const uint32_t statusAddress = 0x1F900344u + (secondCore ? 0x400u : 0u);
-        const uint32_t alignedStatus = statusAddress & ~3u;
-        const uint32_t shift = (statusAddress & 2u) * 8u;
-        uint32_t status = 0u;
-        if (const auto current = m_hardware.find(alignedStatus); current != m_hardware.end())
-            status = current->second;
-        status |= 0x80u << shift;
-        m_hardware[alignedStatus] = status;
-
+        const uint32_t core = secondCore ? 1u : 0u;
         const uint32_t blockControlAddress = address - sizeof(uint32_t);
+        const uint32_t madrAddress = address - 2u * sizeof(uint32_t);
         uint32_t blockControl = 0u;
         if (const auto current = m_hardware.find(blockControlAddress); current != m_hardware.end())
             blockControl = current->second;
+        uint32_t madr = 0u;
+        if (const auto current = m_hardware.find(madrAddress); current != m_hardware.end())
+            madr = current->second;
         const uint32_t wordsPerBlock = std::max<uint32_t>(blockControl & 0xFFFFu, 1u);
         const uint32_t blockCount = std::max<uint32_t>(blockControl >> 16u, 1u);
         const uint64_t transferWords = static_cast<uint64_t>(wordsPerBlock) * blockCount;
-        // In AutoDMA (ADMAS set for this core) the SPU2 pulls PCM as it plays it: one 32-bit word is one
-        // 16-bit stereo frame at 48 kHz. Streaming drivers (CRI ADX) wait for this interrupt, so ending it
-        // at bus speed makes their mixer thread spin instead of blocking between blocks.
-        const uint32_t admasAddress = secondCore ? kSpu2Core1Admas : kSpu2Core0Admas;
-        uint32_t admas = 0u;
-        if (const auto current = m_hardware.find(admasAddress & ~3u); current != m_hardware.end())
-            admas = (current->second >> ((admasAddress & 2u) * 8u)) & 0xFFFFu;
-        const bool autoDma = (admas & (secondCore ? 2u : 1u)) != 0u;
-        const uint64_t delayCycles = autoDma ? transferWords * (kIopClockHzForSpu2 / kSpu2SampleRate)
-                                             : std::max<uint64_t>(transferWords * 2u, 64u);
-        queueInterrupt(secondCore ? kDmaSpu1Irq : kDmaSpu0Irq, delayCycles);
+        const bool toSpu = (value & 1u) != 0u;
+        if (!m_spu2.startDma(core, madr, static_cast<uint32_t>(transferWords * 4u), toSpu))
+            return; // AutoDMA keeps CHCR busy until playback has drained it
+
+        m_hardware[address] = value & ~kDmaStart;
+        queueInterrupt(secondCore ? kDmaSpu1Irq : kDmaSpu0Irq, std::max<uint64_t>(transferWords * 2u, 64u));
+    }
+
+    void IopMemory::mixSpu2(uint32_t frames, std::vector<int16_t> &out)
+    {
+        m_spu2.generate(frames, out);
+        for (uint32_t core = 0; core < 2u; ++core)
+        {
+            const uint32_t chcr = core == 0u ? kDmaSpu0Chcr : kDmaSpu1Chcr;
+            const auto control = m_hardware.find(chcr);
+            if (control == m_hardware.end() || (control->second & kDmaStart) == 0u)
+                continue;
+            // libsd reports AutoDMA progress from MADR.
+            m_hardware[chcr - 2u * sizeof(uint32_t)] = m_spu2.autoDmaAddress(core);
+        }
+        const uint32_t events = m_spu2.takeEvents();
+        if ((events & IopSpu2::EventIrq) != 0u)
+            queueInterrupt(IopSpu2::kIrq, 0u);
+        if ((events & IopSpu2::EventDmaDone0) != 0u)
+        {
+            m_hardware[kDmaSpu0Chcr] &= ~kDmaStart;
+            queueInterrupt(kDmaSpu0Irq, 0u);
+        }
+        if ((events & IopSpu2::EventDmaDone1) != 0u)
+        {
+            m_hardware[kDmaSpu1Chcr] &= ~kDmaStart;
+            queueInterrupt(kDmaSpu1Irq, 0u);
+        }
     }
 
     void IopMemory::queueInterrupt(int irq, uint64_t delayCycles)

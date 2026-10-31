@@ -132,6 +132,8 @@ namespace ps2x::iop::detail
             pendingGuestCallbacks.clear();
             nextModuleId = 1;
             totalCycles = 0;
+            spu2Cycle = 0;
+            spu2Output.clear();
             totalInstructions = 0;
             eeCycleCarry = 0;
             activeCpu = nullptr;
@@ -587,6 +589,7 @@ namespace ps2x::iop::detail
                 const uint64_t target = totalCycles + cycles;
                 while (totalCycles < target)
                 {
+                    advanceSpu2();
                     servicePendingDmaInterrupts();
                     servicePendingGuestCallbacks();
                     timrman.serviceDue(totalCycles, *this);
@@ -599,6 +602,8 @@ namespace ps2x::iop::detail
                         if (!pendingGuestCallbacks.empty())
                             nextWake = std::min(nextWake, pendingGuestCallbacks.begin()->first);
                         nextWake = timrman.nextEventCycle(nextWake);
+                        // AutoDMA completions fall on SPU2 block boundaries; sleeping past them starves streams.
+                        nextWake = std::min(nextWake, spu2Cycle + static_cast<uint64_t>(memory.spu2FramesUntilBlock()) * IopSpu2::kCyclesPerSample);
                         totalCycles = std::max(totalCycles + 1u, std::min(target, nextWake));
                         continue;
                     }
@@ -645,6 +650,26 @@ namespace ps2x::iop::detail
             while (!ready() && totalCycles < giveUp)
                 runCycles(wakeCycle != 0u ? std::min(kSliceCycles, std::max<uint64_t>(wakeCycle - totalCycles, 1u)) : kSliceCycles);
             totalInstructions = instructionsBefore;
+        }
+
+        void advanceSpu2()
+        {
+            constexpr size_t kFlushFrames = 512u;
+            while (totalCycles - spu2Cycle >= IopSpu2::kCyclesPerSample)
+            {
+                const uint64_t due = (totalCycles - spu2Cycle) / IopSpu2::kCyclesPerSample;
+                // Stop at each AutoDMA block so a completion IRQ can restart the stream before the next pull.
+                const uint32_t frames = static_cast<uint32_t>(std::min<uint64_t>(due, memory.spu2FramesUntilBlock()));
+                memory.mixSpu2(frames, spu2Output);
+                spu2Cycle += static_cast<uint64_t>(frames) * IopSpu2::kCyclesPerSample;
+                schedulePendingDma();
+                servicePendingDmaInterrupts();
+                if (spu2Output.size() >= kFlushFrames * 2u)
+                {
+                    host.audioOutput(spu2Output.data(), spu2Output.size() / 2u);
+                    spu2Output.clear();
+                }
+            }
         }
 
         // Disc modules are loaded from anonymous buffers; their export table names what they are.
@@ -794,6 +819,8 @@ namespace ps2x::iop::detail
         std::multimap<uint64_t, ScheduledGuestCallback> pendingGuestCallbacks;
         uint32_t nextModuleId = 1;
         uint64_t totalCycles = 0;
+        uint64_t spu2Cycle = 0;
+        std::vector<int16_t> spu2Output;
         uint64_t totalInstructions = 0;
         uint64_t eeCycleCarry = 0;
         CpuState *activeCpu = nullptr;

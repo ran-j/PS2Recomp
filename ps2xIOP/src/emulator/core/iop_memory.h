@@ -1,6 +1,7 @@
 #pragma once
 
 #include "iop_sio2.h"
+#include "iop_spu2.h"
 
 #include <deque>
 #include <string>
@@ -134,6 +135,10 @@ namespace ps2x::iop::detail
 
         [[nodiscard]] std::optional<DmaStart> takeDmaStart() noexcept;
         [[nodiscard]] bool hasDmaStart() const noexcept { return !m_dmaStarts.empty(); }
+        // Mixes SPU2 output in emulated time and queues the IRQs and AutoDMA completions it caused.
+        void mixSpu2(uint32_t frames, std::vector<int16_t> &out);
+        [[nodiscard]] uint32_t spu2FramesUntilBlock() const noexcept { return m_spu2.framesUntilBlock(); }
+        [[nodiscard]] IopSpu2 &spu2() noexcept { return m_spu2; }
         // Attaches a raw memory card image to a SIO2 port; a missing file is created blank on first access.
         bool attachMemoryCard(size_t port, const std::string &path);
         [[nodiscard]] std::span<const uint8_t> ram() const noexcept { return m_ram; }
@@ -165,5 +170,7 @@ namespace ps2x::iop::detail
         std::deque<DmaStart> m_dmaStarts;
         // SIO2 data reads pop its FIFO, so the controller changes even on const reads.
         mutable IopSio2 m_sio2;
+        // IRQINFO and the STD data port change state on read.
+        mutable IopSpu2 m_spu2;
     };
 }

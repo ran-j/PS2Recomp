@@ -62,6 +62,7 @@ namespace iop_test
         uint32_t allocateGuest(uint32_t, uint32_t) override { return 0u; }
         void freeGuest(uint32_t) override {}
         void audioCommand(uint32_t, uint32_t, GuestBuffer, GuestBuffer) override { ++audioCalls; }
+        void audioOutput(const int16_t *, size_t frames) override { audioFrames += frames; }
         std::string hostPath(HostPathKind) const override { return {}; }
         std::string translateGuestPath(std::string_view path) const override { return std::string(path); }
         uint64_t openHostFile(std::string_view) override { return file.empty() ? 0u : 1u; }
@@ -113,6 +114,7 @@ namespace iop_test
         mutable size_t guestReads = 0u;
         size_t guestWrites = 0u;
         size_t audioCalls = 0u;
+        size_t audioFrames = 0u;
         int32_t initResult = 0;
         uint32_t nextHandle = 0x1000u;
     };
